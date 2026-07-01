@@ -451,7 +451,18 @@ def _enqueue_candidate(
 # pain is active duplicate cards); inactive-for-history is a later concern. The
 # NOT(street AND disposition) clause hands the rare disposition-bearing non-apartment
 # to the street pass instead, so the two passes never double-handle a pair.
-_GEO_ELIGIBLE_SQL = """
+#
+# ONE eligibility predicate, shared by the row load AND the window sizer (below), so
+# the window's whole-obec listing counts match exactly what the load will process.
+_GEO_ELIGIBILITY = """
+      l.is_active = true
+      AND l.category_main IN ('dum', 'pozemek', 'komercni', 'ostatni')
+      AND l.geom IS NOT NULL
+      AND l.obec_id IS NOT NULL
+      AND coalesce(l.area_m2, l.estate_area, l.usable_area) IS NOT NULL
+      AND NOT (l.street IS NOT NULL AND l.street <> '' AND l.disposition IS NOT NULL)"""
+
+_GEO_ELIGIBLE_SQL = f"""
     SELECT l.sreality_id, l.property_id, l.source, l.house_number,
            coalesce(l.area_m2, l.estate_area, l.usable_area) AS area,
            left(l.description, 600) AS description,
@@ -459,32 +470,61 @@ _GEO_ELIGIBLE_SQL = """
            ST_Y(l.geom::geometry) AS lat, ST_X(l.geom::geometry) AS lng
     FROM listings l
     JOIN properties p ON p.id = l.property_id AND p.status = 'active'
-    WHERE l.is_active = true
-      AND l.category_main IN ('dum', 'pozemek', 'komercni', 'ostatni')
-      AND l.geom IS NOT NULL
-      AND l.obec_id IS NOT NULL
-      AND coalesce(l.area_m2, l.estate_area, l.usable_area) IS NOT NULL
-      AND NOT (l.street IS NOT NULL AND l.street <> '' AND l.disposition IS NOT NULL)
-      {filter}
+    WHERE {_GEO_ELIGIBILITY}
+      {{filter}}
     ORDER BY l.obec_id, l.category_main, l.category_type
 """
 
+# Progressive discovery window: the largest obec_id > cursor whose cumulative eligible
+# count (whole obce, ascending) stays within `budget`, and how many eligible obce lie
+# beyond the cursor at all. Always include at least the FIRST obec beyond the cursor
+# (rn = 1), so a single oversized obec can't stall progress. Sizing over listings only
+# (no properties JOIN) — a listing always points at an active property once merged, so
+# the count matches the load to within a hair, and the budget is deliberately approximate.
+_GEO_WINDOW_SQL = f"""
+    WITH oc AS (
+        SELECT l.obec_id AS obec_id, count(*) AS n
+        FROM listings l
+        WHERE {_GEO_ELIGIBILITY}
+          AND l.obec_id > %(cursor)s
+        GROUP BY l.obec_id
+    ),
+    ranked AS (
+        SELECT obec_id,
+               sum(n) OVER (ORDER BY obec_id ROWS UNBOUNDED PRECEDING) AS cum,
+               row_number() OVER (ORDER BY obec_id) AS rn
+        FROM oc
+    )
+    SELECT max(obec_id) FILTER (WHERE cum <= %(budget)s OR rn = 1) AS upper,
+           (SELECT count(*) FROM oc) AS ahead
+    FROM ranked
+"""
 
-def _load_geo_eligible(conn: Any,
-                       restrict_property_ids: set[int] | None = None) -> list[ListingKey]:
+
+def _load_geo_eligible(
+    conn: Any,
+    restrict_property_ids: set[int] | None = None,
+    obec_window: tuple[int, int] | None = None,
+) -> list[ListingKey]:
     """One ListingKey per geo-eligible single-dwelling listing, keyed by its geo cell
     (so the existing _group_by_street groups them). Carries lat/lng/price for the geo
     classifier; disposition/floor/street_id are unused on this path.
 
-    `restrict_property_ids` scopes to those properties (the candidate drain), exactly like
-    the street `_load_eligible` — an EMPTY set restricts to nothing (not all)."""
+    Two scoping inputs (mutually exclusive in practice):
+    - `restrict_property_ids` scopes to those properties — the geo candidate drain, exactly
+      like the street `_load_eligible` (an EMPTY set restricts to nothing, not all).
+    - `obec_window` = (lo, hi) loads only `lo < obec_id <= hi` — the progressive discovery
+      window (whole obce, so geo cells stay intact). None on both = the whole market."""
     params: dict[str, Any] = {}
-    flt = ""
+    clauses: list[str] = []
     if restrict_property_ids is not None:
-        flt = "AND l.property_id = ANY(%(pids)s)"
+        clauses.append("AND l.property_id = ANY(%(pids)s)")
         params["pids"] = list(restrict_property_ids)
+    if obec_window is not None:
+        clauses.append("AND l.obec_id > %(obec_lo)s AND l.obec_id <= %(obec_hi)s")
+        params["obec_lo"], params["obec_hi"] = obec_window
     with conn.cursor() as cur:
-        cur.execute(_GEO_ELIGIBLE_SQL.format(filter=flt), params)
+        cur.execute(_GEO_ELIGIBLE_SQL.format(filter=" ".join(clauses)), params)
         rows = cur.fetchall()
     keys: list[ListingKey] = []
     for r in rows:
@@ -505,6 +545,55 @@ def _load_geo_eligible(conn: Any,
             price_czk=int(r[9]) if r[9] is not None else None,
         ))
     return keys
+
+
+# --- progressive geo DISCOVERY cursor (dedup_geo_scan_state, migration 258) ---
+def _read_geo_cursor(conn: Any) -> int:
+    """The highest obec_id fully scanned by the geo discovery pass (0 = start of market)."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT cursor_obec_id FROM dedup_geo_scan_state WHERE id = 1")
+        row = cur.fetchone()
+    return int(row[0]) if row and row[0] is not None else 0
+
+
+def _geo_window_upper(conn: Any, cursor: int, budget: int) -> tuple[int | None, int]:
+    """(upper_inclusive_obec, obce_ahead): the largest obec_id > cursor whose cumulative
+    eligible-listing count (whole obce, ascending) stays within `budget`, always at least
+    the first obec beyond the cursor. `upper` is None / `ahead` is 0 iff no eligible obec
+    lies beyond the cursor (the tail was consumed — the caller wraps)."""
+    with conn.cursor() as cur:
+        cur.execute(_GEO_WINDOW_SQL, {"cursor": cursor, "budget": budget})
+        row = cur.fetchone()
+    upper = int(row[0]) if row and row[0] is not None else None
+    ahead = int(row[1]) if row and row[1] is not None else 0
+    return upper, ahead
+
+
+def _geo_scan_window(conn: Any, cursor: int, budget: int) -> tuple[int, int, bool]:
+    """The obec bounds (lo_exclusive, hi_inclusive) for one discovery window of ~budget
+    listings of WHOLE obce beyond `cursor`, plus whether it WRAPPED. When no eligible obec
+    lies beyond the cursor (tail consumed), wrap to the start (lo = 0) and recompute the
+    first window — so a wrap tick still does work instead of a wasted no-op. An empty
+    market yields (cursor, cursor, False) → the load's `obec_id > cursor AND <= cursor`
+    matches nothing."""
+    upper, ahead = _geo_window_upper(conn, cursor, budget)
+    if ahead == 0:
+        upper, ahead = _geo_window_upper(conn, 0, budget)
+        if ahead == 0 or upper is None:
+            return cursor, cursor, False
+        return 0, upper, True
+    return cursor, upper, False
+
+
+def _advance_geo_cursor(conn: Any, new_cursor: int) -> None:
+    """Persist the discovery cursor after a completed window (called only on a live,
+    non-truncated discovery run — a truncated run keeps its cursor and re-scans)."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE dedup_geo_scan_state SET cursor_obec_id = %s, updated_at = now() "
+            "WHERE id = 1",
+            (new_cursor,),
+        )
 
 
 # The pHash exclusion predicate is shared with the /dedup evidence reader via
@@ -1293,6 +1382,7 @@ def run_engine(
     only_groups_with_property_ids: set[int] | None = None,
     geo: bool = False,
     geo_area_max_pct: float | None = None,
+    geo_obec_window: tuple[int, int] | None = None,
     clip_model: str | None = None,
 ) -> dict[str, int]:
     """Run the full pipeline once. classify_fn/compare_fn are injectable for tests.
@@ -1303,6 +1393,8 @@ def run_engine(
     auto_merge→candidate so the free-first visual flow is the sole merge gate), and the
     queue tier ('geo'). Everything else — pHash → cosine → forensic compare (facade /
     site-plan priority via room_priority_for) → floor/site-plan gate — is shared.
+    `geo_obec_window` = (lo, hi) scopes the geo load to obce lo<obec_id<=hi (the
+    progressive discovery window, migration 258); None loads the whole market.
 
     classify_fn(sreality_id) -> classify_listing_images envelope.
     compare_fn(a, b, room_type, ids_a, ids_b) -> {verdict, rationale} | None.
@@ -1326,7 +1418,8 @@ def run_engine(
     # reconciled + counted street eligibility; a geo run reports its own eligible count and
     # skips the (street-keyed) eligibility scan + the (already-done) reconcile.
     if geo:
-        keys = _load_geo_eligible(conn, restrict_property_ids=restrict_property_ids)
+        keys = _load_geo_eligible(
+            conn, restrict_property_ids=restrict_property_ids, obec_window=geo_obec_window)
         stats = {
             "eligible": len({k.sreality_id for k in keys}),
             "flagged_location": 0, "flagged_disposition": 0,
@@ -1756,6 +1849,19 @@ def main() -> int:
                         help="Run ONLY the geo pass (skip the street engine).")
     parser.add_argument("--geo-max-pairs", type=int, default=20000,
                         help="Max geo candidate pairs examined per run.")
+    parser.add_argument("--geo-scan-budget", type=int, default=None, dest="geo_scan_budget",
+                        help="Progressive geo DISCOVERY window size (whole-obec listing count) "
+                             "beyond the persistent obec cursor (dedup_geo_scan_state). Each "
+                             "discovery run scans one window + advances the cursor (wraps at the "
+                             "market end), so it covers everywhere over time instead of re-scanning "
+                             "the front. Unset = the dedup_geo_scan_budget setting (default 30000); "
+                             "0 = no window (scan the whole market — an ad-hoc full geo scan). "
+                             "Ignored on --candidates (the drain is O(queue), not windowed).")
+    parser.add_argument("--geo-cursor", type=int, default=None, dest="geo_cursor",
+                        help="Override the discovery start cursor for THIS run WITHOUT reading or "
+                             "advancing the persistent state (validation/debug): scan the window "
+                             "beyond this obec_id. Pair with --shadow to preview a specific window "
+                             "(e.g. just below Praha 554782) without disturbing the real cursor.")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -1805,6 +1911,29 @@ def main() -> int:
             LOG.info("GEO-only run but dedup_geo_enabled is off — nothing to do.")
             return 0
         geo_area_max_pct = float(read_setting(conn, "dedup_geo_area_max_pct"))
+
+        # Progressive geo DISCOVERY windowing (migration 258): a DISCOVERY run (geo, NOT the
+        # candidate drain) scans one budget-sized window of whole obce beyond the persistent
+        # cursor and advances it, so it covers the whole market over successive runs instead of
+        # re-scanning the front (obec_id ASC piled every scan onto Olomouc and never reached
+        # Praha). The candidate drain is O(queue) — never windowed. Budget 0 = no window (an
+        # ad-hoc full geo scan). --geo-cursor overrides the start for THIS run without touching
+        # the persistent state (validation). Advance only after a live, non-truncated run.
+        geo_obec_window: tuple[int, int] | None = None
+        geo_persist_cursor = False
+        if run_geo and not args.candidates:
+            geo_budget = (
+                args.geo_scan_budget if args.geo_scan_budget is not None
+                else int(read_setting(conn, "dedup_geo_scan_budget")))
+            if geo_budget > 0:
+                cursor = args.geo_cursor if args.geo_cursor is not None else _read_geo_cursor(conn)
+                lo, hi, wrapped = _geo_scan_window(conn, cursor, geo_budget)
+                geo_obec_window = (lo, hi)
+                geo_persist_cursor = args.geo_cursor is None
+                LOG.info(
+                    "GEO discovery window: obec (%d, %d] budget=%d wrapped=%s persist=%s",
+                    lo, hi, geo_budget, wrapped, geo_persist_cursor,
+                )
 
         # ----- Shared setup (settings + vision fns + caps) — used by BOTH the street and
         # geo passes, so they run the identical free-first flow (only the candidate filter
@@ -2001,10 +2130,19 @@ def main() -> int:
             geo_kw = {**engine_kw, "enqueue_unresolved": True}
             geo_stats = run_engine(
                 conn, audit=geo_audit, max_pairs=args.geo_max_pairs,
-                geo=True, geo_area_max_pct=geo_area_max_pct, **geo_kw,
+                geo=True, geo_area_max_pct=geo_area_max_pct,
+                geo_obec_window=geo_obec_window, **geo_kw,
             )
             if not args.shadow:
                 _write_pair_audit(conn, run_at, geo_audit)
+                # Advance the DISCOVERY cursor only after a window that fully finished
+                # (like the --dirty drain's claim-clear): a truncated run (pair-cap /
+                # deadline) keeps its cursor and re-scans the same window next tick over
+                # a warm cache, so no obec is skipped. Not persisted for a --geo-cursor
+                # override (validation) or a windowless (budget 0) full scan.
+                if geo_persist_cursor and geo_obec_window is not None and not geo_stats.get("truncated"):
+                    _advance_geo_cursor(conn, geo_obec_window[1])
+                    LOG.info("GEO discovery cursor advanced to obec %d", geo_obec_window[1])
             LOG.info(
                 "GEO %s eligible=%d auto_phash=%d auto_visual=%d auto_dismissed=%d "
                 "floor_plan_deferred=%d queued=%d skipped_unresolved=%d rejected=%d "

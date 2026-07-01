@@ -1311,6 +1311,10 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
       {
         "cron": "0 3,9,15,21 * * *",
         "human": "0 3,9,15,21 * * *"
+      },
+      {
+        "cron": "15 5,17 * * *",
+        "human": "15 5,17 * * *"
       }
     ],
     "onPush": false,
@@ -1425,6 +1429,14 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
           "false",
           "true"
         ]
+      },
+      {
+        "name": "geo_scan_budget",
+        "description": "[geo] Progressive discovery window size (whole-obec listing count) beyond the cursor. 0 = whole-market scan. Empty = the dedup_geo_scan_budget setting (default 30000).",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
       },
       {
         "name": "floor_plan_budget",

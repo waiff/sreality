@@ -866,26 +866,39 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     also does NOT apply the **cross-source gate** (`_RunContext.cross_source_only=False`): that gate is
     justified only where rule B auto-merges same-source exact-address relists for free (the street
     path), and geo has no rule B — so a same-portal house re-post still reaches the visual stage.
-    **Geo is its OWN scheduled run** (`dedup_engine.yml` cron `0 3,9,15,21`, `--geo-only`), gated by the
-    `dedup_geo_enabled` master switch. It is **NOT** bolted onto the street full-scan / candidate-drain
-    anymore: doing so produced ZERO geo candidates/merges because it (a) ran AFTER the street pass on the
-    shared `--max-seconds` (deadline-starved by the ~100K-eligible street scan) and (b) on the candidate
-    drain inherited the street pass's APARTMENT `restrict` (`_load_geo_eligible(restrict=apartment
-    candidates)` → no single-dwelling rows). The dedicated geo run is **PAID, not `--free`** (bounded by
-    `--max-vision-calls`): single-dwelling cross-portal pairs have DIFFERENT photos (pHash can't), so the
-    forensic FACADE compare is the only thing that resolves them — it auto-merges the confident ones and
-    enqueues the ambiguous (`tier='geo'`) for review. **Geo ALWAYS enqueues its unresolved pairs** (rule
-    #15 (E): a geo signal never auto-merges on proximity alone, so everything else queues) — the geo pass
-    overrides `--free`'s general enqueue suppression (that suppression is a STREET optimization; geo has no
-    warmer and cross-portal houses share no photos, so the queue is geo's only surfacing mechanism). So the
-    scheduled PAID run auto-merges the confident ones + queues the rest, and an ad-hoc `--geo-only --free`
-    still surfaces the co-located candidates (just without the auto-merge) instead of silently dropping them.
-    `--geo` forces it onto any non-dirty run ad-hoc (ignores the setting); the real-time DIRTY drain never
-    runs geo. The geo pass writes NO separate `dedup_engine_runs` row (the dashboard reads the latest single
-    row); its decisions land in `dedup_pair_audit` + the `tier='geo'` candidate queue. (Follow-up: extend
-    the `dedup_batches` warmer to the geo funnel so geo gets street's 50%-off warm-cache cost model; a geo
-    candidate-drain mode; the cross-portal coord-divergence cell-miss — a same house geocoded ~270m apart on
-    two portals falls in different geo cells.)
+    **Geo has its OWN scheduled runs** (`dedup_engine.yml`), gated by the `dedup_geo_enabled` master switch,
+    and mirrors the street path's proven **free-discovery + bounded-paid-drain** shape — NOT one monolithic
+    paid scan (see below for why). It is **NOT** bolted onto the street full-scan / candidate-drain: doing so
+    produced ZERO geo candidates because it (a) ran AFTER the street pass on the shared `--max-seconds`
+    (deadline-starved) and (b) on the candidate drain inherited the APARTMENT `restrict`. Two dedicated crons:
+    **(1) GEO DISCOVERY** (cron `0 3,9,15,21`, `--geo-only --free`) — the fast, no-vision half that just
+    QUEUES every co-located pair. **Geo ALWAYS enqueues its unresolved pairs** (rule #15 (E): a geo signal
+    never auto-merges on proximity alone) — the geo pass overrides `--free`'s general enqueue suppression
+    (that suppression is a STREET optimization; geo has no warmer and cross-portal houses share no photos, so
+    the queue is geo's only surfacing mechanism). Discovery walks the market in a **persistent obec-cursor
+    WINDOW** (`dedup_geo_scan_state`, migration 258 — `cursor_obec_id`): each run scans one budget-sized
+    window (`dedup_geo_scan_budget`, default 30 000 listings) of WHOLE obce beyond the cursor (whole-obec so
+    geo cells — obec-bounded — stay intact), then ADVANCES the cursor to the window's max obec, wrapping to 0
+    at the market end. This is THE progressive-coverage fix: a single scan re-started from `obec_id` order
+    every run (obec ids are 500011..599999 RÚIAN codes, geographically unordered), so it piled every run onto
+    the FRONT (304 of 363 queued geo candidates were Olomouc, obec 500496) and **never reached Praha** (obec
+    554782, ~16.3K single-dwelling, ~9.7K un-surfaced co-located cross-source pairs — window #3 of ~7 at
+    budget 30 000, so covered day 1). The cursor is advanced only after a window that FINISHED (a truncated
+    run keeps its cursor and re-scans over a warm cache — the `--dirty` drain's claim-clear discipline), so no
+    obec is skipped. **(2) GEO CANDIDATE DRAIN** (cron `15 5,17`, `--geo-only --candidates
+    --max-vision-calls N`) — the PAID half: it re-decides ONLY the still-proposed `tier='geo'` candidates
+    (O(queue), scoped by `_load_geo_eligible(restrict=proposed candidate property ids)`, exactly like the
+    street candidate drain) and runs the forensic FACADE compare — the only thing that resolves cross-portal
+    houses (DIFFERENT photos → pHash can't) — auto-merging the confident ones and auto-dismissing/queuing the
+    rest. Both crons compose the same `resolve_pair` brain; only DISCOVERY windows/advances the cursor (the
+    drain is O(queue), never windowed). `--geo` forces geo onto any non-dirty run ad-hoc; `--geo-cursor C`
+    overrides the discovery start WITHOUT touching the persistent state (pair with `--shadow` to preview a
+    specific window, e.g. just below Praha); `--geo-scan-budget 0` disables windowing for an ad-hoc
+    whole-market scan; the real-time DIRTY drain never runs geo. The geo passes write NO separate
+    `dedup_engine_runs` row (the dashboard reads the latest single row); decisions land in `dedup_pair_audit`
+    + the `tier='geo'` candidate queue. (Follow-ups: a geo DIRTY drain — real-time coverage of NEW
+    single-dwelling listings, the next layer; extend the `dedup_batches` warmer to the geo funnel; the
+    cross-portal coord-divergence cell-miss — a same house geocoded ~270m apart lands in different geo cells.)
     Merges are **reversible**:
     `toolkit/property_identity.py` re-points `listings.property_id` onto the survivor + soft-retires
     the loser (`properties.status='merged_away'`) and logs `property_merge_events` so
@@ -1540,8 +1553,8 @@ locally. The dedup/properties track adds
 singletons + recomputes only changed properties; rule #20),
 `recompute_property_stats.yml` (the **daily full-sweep reconcile** at 04:15 — recomputes every
 property + clears the dirty queue), `dedup_engine.yml` (street+disposition dedup engine +
-auto-merge; rule #15 — THREE scheduled modes, ONE `resolve_pair` decision tree (the brain),
-three work-lists: a **FULL SCAN** every 6h that DISCOVERS new dups across the market; a
+auto-merge; rule #15 — FIVE scheduled modes (three street + two geo), ONE `resolve_pair` decision
+tree (the brain): a **FULL SCAN** every 6h that DISCOVERS new dups across the market; a
 **CANDIDATE DRAIN** every 2h (`--candidates`) that re-decides ONLY the properties in
 still-proposed `/dedup` candidates so the queue **self-clears in O(queue)** regardless of the
 full scan's deadline frontier; and a **DIRTY DRAIN** hourly at :45 (`--dirty`, Wave 4c) that
@@ -1582,7 +1595,12 @@ dirty run records `dedup_engine_runs.dirty_queue_depth` (the backlog at run star
 (deep + draining = transient flood) / red (high + NOT draining across recent runs = the drain is
 failing/out-paced) banner. The shared, unit-tested `assessDirtyQueue` (`frontend/src/lib/dedupQueueHealth.ts`)
 is the single source of that status for both surfaces.
-All three drains compose with `--free` + the floor-plan budget), `dedup_batches.yml` ("Dedup engine (vision batch warm-up)", submit every
+All three street drains compose with `--free` + the floor-plan budget. Plus the **two GEO crons**
+(single-dwelling houses/land/commercial, `dedup_geo_enabled`-gated — rule #15): a **GEO DISCOVERY** at
+`0 3,9,15,21` (`--geo-only --free`) that walks the market in a persistent obec-cursor window
+(`dedup_geo_scan_state`) queuing co-located pairs, and a **GEO CANDIDATE DRAIN** at `15 5,17`
+(`--geo-only --candidates --max-vision-calls N`, PAID) that confirms the queued `tier='geo'` candidates
+via the forensic facade compare), `dedup_batches.yml` ("Dedup engine (vision batch warm-up)", submit every
 6h + ingest hourly — pre-warms the engine's vision caches via the Anthropic Batches API at 50%
 off so the daily engine run merges over warm cache for free; rule #15), and
 `compute_image_phash.yml` (hourly pHash backfill, active-listing images first). Two monitor
