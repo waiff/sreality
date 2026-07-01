@@ -2298,23 +2298,25 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
   },
   {
     "filename": "migrations.yml",
-    "name": "CI: migration smoke-test",
-    "description": "Applies the full migrations/ chain (001 -> latest) to a throwaway Postgres + PostGIS container whenever anything under migrations/ changes, catching a migration that does not apply cleanly before it reaches the production Supabase database (there is no staging DB). It pre-creates the Supabase roles the migrations GRANT to (anon / authenticated / service_role) and the pg_trgm extension migrations 067 / 074 rely on, applies every *.sql in numeric order, then runs a small sanity query. Hermetic: no secrets, never touches production.",
+    "name": "CI: schema replay + SQL correctness",
+    "description": "Two gates on one throwaway Postgres, hermetic (no secrets, never touches prod):",
     "portal": null,
     "manual": true,
     "schedules": [],
     "onPush": true,
     "onPullRequest": true,
     "paths": [
+      "**/*.py",
       ".github/workflows/migrations.yml",
       "migrations/**",
+      "pyproject.toml",
       "scripts/ci_db_bootstrap.sql"
     ],
     "inputs": [],
     "secrets": [],
     "concurrencyGroup": null,
     "cancelInProgress": null,
-    "timeoutMinutes": 10,
+    "timeoutMinutes": 15,
     "permissions": null,
     "runsUrl": "https://github.com/waiff/sreality/actions/workflows/migrations.yml",
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/migrations.yml"
