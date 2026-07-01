@@ -42,18 +42,6 @@ jobs:
   schema-and-sql:
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    services:
-      postgres:
-        image: postgis/postgis:15-3.4
-        env:
-          POSTGRES_PASSWORD: postgres
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
     env:
       PGHOST: localhost
       PGPORT: "5432"
@@ -63,19 +51,33 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Install pgvector into the Postgres service container
-        # The proven postgis image has no pgvector, so migration 226 would skip
-        # the clip/embedding objects (they are guarded on the extension existing)
-        # and the SQL sweep would then false-fail on the ~10 files that reference
-        # them. pgvector is not a preload library, so `create extension vector`
-        # works as soon as the package is present — no restart needed.
+      - name: Build + start Postgres (PostGIS + pgvector)
+        # Build the image so pgvector is installed at BUILD time — the server
+        # binary and every contrib .so (pg_trgm, postgis) then come from one
+        # consistent apt transaction and the container starts fresh on that
+        # binary. (Installing pgvector into an ALREADY-RUNNING container instead
+        # upgrades contrib under the live server -> "undefined symbol" on load.)
+        # pgvector must be present so migration 226's clip/embedding objects —
+        # referenced by ~10 runtime files — actually build, or the sweep false-fails.
         run: |
           set -euo pipefail
-          CID=$(docker ps --filter "ancestor=postgis/postgis:15-3.4" --format '{{.ID}}' | head -n1)
-          if [ -z "$CID" ]; then CID=$(docker ps --format '{{.ID}} {{.Image}}' | awk '$2 ~ /postgis/ {print $1; exit}'); fi
-          test -n "$CID"
-          docker exec -u root "$CID" bash -c \
-            "apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq postgresql-15-pgvector"
+          cat > /tmp/Dockerfile.ci <<'DOCKER'
+          FROM postgis/postgis:15-3.4
+          # Install server + PostGIS + pgvector in ONE apt transaction so the
+          # binary and every contrib .so land at the same (newest) 15.x minor —
+          # a partial upgrade is what triggers "undefined symbol" on load.
+          RUN apt-get update \
+            && apt-get install -y --no-install-recommends \
+                 postgresql-15 postgresql-15-postgis-3 postgresql-15-pgvector \
+            && rm -rf /var/lib/apt/lists/*
+          DOCKER
+          docker build -t ci-postgis-pgvector -f /tmp/Dockerfile.ci /tmp
+          docker run -d --name ci-pg -e POSTGRES_PASSWORD=postgres -p 5432:5432 ci-postgis-pgvector
+          for _ in $(seq 1 45); do
+            if docker exec ci-pg pg_isready -U postgres -h localhost >/dev/null 2>&1; then break; fi
+            sleep 2
+          done
+          docker exec ci-pg pg_isready -U postgres -h localhost
 
       - name: Bootstrap roles + extensions
         run: psql -v ON_ERROR_STOP=1 -f scripts/ci_db_bootstrap.sql
