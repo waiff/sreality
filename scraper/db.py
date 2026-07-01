@@ -1848,7 +1848,26 @@ _BATCH_DIRTY_FROM_SIDS_SQL = """
 # any incompletely-tagged pair (resolve_pair `_clip_incomplete` gate), so this is the trigger
 # half of one invariant: the engine only ever decides a pair when both sides are fully tagged.
 # Same append-and-bump-marked_at discipline as dirty_properties (rule #20).
-_DEDUP_DIRTY_FROM_IMAGE_IDS_SQL = """
+#
+# TWO enqueue gates keep this a REAL-TIME CHANGE signal, not an ENRICHMENT-progress firehose
+# (the flood that stalled the drain twice — the whole market streamed through the tagger and
+# every property landed here, 78.5% of them un-mergeable):
+#   * ELIGIBILITY (property-grain): the property must have >=1 street+disposition listing, so it
+#     can actually join a street group. The street-only --dirty drain never runs geo, so a
+#     property with no eligible listing can NEVER merge here — enqueuing it is pure dead weight.
+#     Property-grain (any listing of P), NOT the tagged listing's own eligibility: the re-tagged
+#     image may belong to a street-less bazos sibling while the property's eligible sreality
+#     listing is what actually merges.
+#   * RECENCY: only a genuinely NEW listing needs the minutes-latency lane. A market-wide CLIP
+#     backfill (or a new portal's back-catalogue) tags OLD listings whose dedup is already the
+#     6h full scan's job; routing them here is what floods the queue. `first_seen_at` on the
+#     TAGGED listing is the "new arrival" signal. Older-but-newly-eligible pairs (a street
+#     backfilled onto an old listing) are the full scan's job today too — no regression.
+# Anything these gates drop is still deduped by the 6h full scan (the correctness backstop);
+# they only keep the real-time lane scoped to work it can act on fast.
+_DEDUP_DIRTY_RECENCY_DAYS = 7
+
+_DEDUP_DIRTY_FROM_IMAGE_IDS_SQL = f"""
     INSERT INTO dedup_dirty_properties (property_id)
     SELECT DISTINCT l.property_id FROM listings l JOIN images i ON i.sreality_id = l.sreality_id
     WHERE i.id = ANY(%s) AND l.property_id IS NOT NULL
@@ -1857,6 +1876,12 @@ _DEDUP_DIRTY_FROM_IMAGE_IDS_SQL = """
         WHERE i2.sreality_id = l.sreality_id
           AND i2.storage_path IS NOT NULL AND i2.clip_tagged_at IS NULL
       )
+      AND EXISTS (
+        SELECT 1 FROM listings le
+        WHERE le.property_id = l.property_id
+          AND le.street IS NOT NULL AND le.street <> '' AND le.disposition IS NOT NULL
+      )
+      AND l.first_seen_at > now() - interval '{_DEDUP_DIRTY_RECENCY_DAYS} days'
     ON CONFLICT (property_id) DO UPDATE SET marked_at = now()
 """
 

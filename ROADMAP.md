@@ -21,6 +21,38 @@ when condition-scoring work was pending (it was quiet, so nothing fired).
   no Anthropic key of its own (queries the DB). Wildcard bound in the value, not the SQL (psycopg
   `%`-safe).
 
+### 2026-07: Dedup real-time drain redesign (the second dirty-queue stall, fixed at the foundation)
+
+The `--dirty` drain stalled again — `dedup_dirty_properties` grew to **201k** and never drained
+(the `/dedup` "Dirty queue stalled" banner) despite the FIFO-bound (#647), stall-metric (#649), and
+scoped-load (#650) patches. Root causes, verified against the live DB + GH logs: (1) the enqueue was
+an ENRICHMENT-progress firehose — the CLIP tag job enqueued every property whose images finished
+tagging, so the market-wide backfill streamed the whole inventory through the real-time lane, **78.5%
+of it un-mergeable** (no street+disposition); (2) each hourly run FIFO-claimed the same June-backfill
+head, couldn't finish its street-group pair-work within the 20-min budget (aggravated by inline
+floor-plan calls downloading R2 plan images then 400-ing on an out-of-credit Anthropic account),
+truncated, and — the clear being gated on a non-truncated run — never advanced the head. The fix
+attacks the FOUNDATION, not the symptom:
+
+- **Enqueue = a real-time CHANGE signal** (`scraper.db._DEDUP_DIRTY_FROM_IMAGE_IDS_SQL`): gated on
+  **eligibility** (property-grain `EXISTS` a street+disposition listing — the street-only drain can
+  never merge one without) + **recency** (`first_seen_at` within `_DEDUP_DIRTY_RECENCY_DAYS=7`, a
+  genuinely NEW arrival, not a backfill of old inventory). Cuts ~78.5% of inflow; the 6h full scan
+  backstops anything dropped.
+- **Claim NEWEST-first + TTL-evicted** (`_claim_dedup_dirty` `ORDER BY marked_at DESC`,
+  `_prune_stale_dedup_dirty` 24h): a latency lane must serve the freshest listing first and can never
+  let an un-drainable tail pin the head or grow unbounded. FIFO was the wrong order for the SLO.
+- **`--floor-plan-budget 0` on the dirty cron** + `--max-dirty 3000`: no inline floor-plan vision on
+  the hot path (deferred to the full scan / batch warmer), and a slice small enough to finish-and-
+  clear within budget. The drain now clears every run.
+- **Observability**: `dedup_engine_runs.dirty_cleared` + `dirty_truncated` (migration 258) — a run
+  that clears 0 while the queue stays high is the silent livelock made visible.
+
+Operator follow-ups: the underlying **Anthropic account was out of credit** (every LLM path down —
+dedup vision, condition scoring, estimations, summaries; the `llm_health` monitor stayed green — see
+the LLM-liveness observability follow-up), and a one-time cleanup of the ~157k ineligible/stale
+`dedup_dirty_properties` rows lets the head jump past the backlog immediately.
+
 ### 2026-06: Dedup geo path — dedicated, paid scheduled run (single-dwelling dedup unblocked)
 
 Houses/land/commercial (no disposition → invisible to the street engine; 229,948 active properties,

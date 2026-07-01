@@ -318,18 +318,26 @@ def _proposed_candidate_property_ids(conn: Any) -> set[int]:
 
 # --- real-time dedup queue drain (dedup_dirty_properties, migration 242; the writer-side
 #     enqueue is scraper.db.mark_properties_dedup_dirty_for_images, mirroring dirty_properties)
-def _claim_dedup_dirty(conn: Any, cutoff: Any, limit: int | None = None) -> set[int]:
-    """Property ids dirtied at/before `cutoff` (claim slice). A row re-dirtied AFTER cutoff
-    (marked_at > cutoff via a writer's ON CONFLICT) is neither claimed nor cleared — it
-    survives to the next pass (race-free + terminating, mirrors recompute's dirty drain).
+# The real-time lane is a LATENCY optimization backstopped by the 6h full scan, so its claim is
+# NEWEST-FIRST + TTL-evicted (not FIFO): a freshly-tagged cross-portal listing must merge in
+# minutes even when a transient backlog (a portal launch) is draining, and a row older than the
+# TTL has already been (or will imminently be) covered by a full scan, so it is dropped rather
+# than pinning the head. Bound + TTL keep the queue O(steady-state inflow); the full scan sweeps
+# anything the lane skips.
+_DEDUP_DIRTY_TTL_HOURS = 24  # >= the daily full-sweep cycle; the full scan re-decides evicted rows
 
-    `limit` bounds the slice to the N OLDEST dirty properties (FIFO). The drain MUST be
-    bounded like every sibling drain: a tagging backlog (a new portal, a retag campaign) can
-    enqueue most of the market at once, and an unbounded claim then resolves O(market) groups
-    per hourly run — it never completes within the time budget, so it never clears, so the queue
-    only grows (and the huge claim + full load can drop the pooled connection mid-run). With a
-    bound each run completes-and-clears its slice and the backlog drains over successive runs."""
-    sql = "SELECT property_id FROM dedup_dirty_properties WHERE marked_at <= %s ORDER BY marked_at"
+
+def _claim_dedup_dirty(conn: Any, cutoff: Any, limit: int | None = None) -> set[int]:
+    """Property ids dirtied at/before `cutoff` (claim slice), NEWEST-FIRST. A row re-dirtied
+    AFTER cutoff (marked_at > cutoff via a writer's ON CONFLICT) is neither claimed nor cleared —
+    it survives to the next pass (race-free + terminating, mirrors recompute's dirty drain).
+
+    `limit` bounds the slice to the N FRESHEST dirty properties. The drain MUST be bounded like
+    every sibling drain (a backlog can spike on a portal launch), and it claims NEWEST-first so
+    the real-time SLO ("a new cross-portal listing merges in minutes") holds even under backlog —
+    the stale tail ages out via `_prune_stale_dedup_dirty` and is swept by the 6h full scan, so it
+    never pins the head the way FIFO did (a June-backfill head that never cleared)."""
+    sql = "SELECT property_id FROM dedup_dirty_properties WHERE marked_at <= %s ORDER BY marked_at DESC"
     params: list[Any] = [cutoff]
     if limit is not None:
         sql += " LIMIT %s"
@@ -337,6 +345,18 @@ def _claim_dedup_dirty(conn: Any, cutoff: Any, limit: int | None = None) -> set[
     with conn.cursor() as cur:
         cur.execute(sql, params)
         return {int(r[0]) for r in cur.fetchall()}
+
+
+def _prune_stale_dedup_dirty(conn: Any, ttl_hours: int = _DEDUP_DIRTY_TTL_HOURS) -> int:
+    """Evict dirty rows older than the TTL — the 6h full scan has already covered them, so they
+    are stale real-time work, not lost work. This BOUNDS the queue by construction (the missing
+    guard that let it grow to 201k) and, with the newest-first claim, guarantees the head can
+    never be pinned by an un-drainable backlog. Returns rows evicted."""
+    with conn.cursor() as cur:
+        cur.execute(
+            f"DELETE FROM dedup_dirty_properties WHERE marked_at < now() - interval '{ttl_hours} hours'"
+        )
+        return cur.rowcount or 0
 
 
 def _should_run_geo(*, geo: bool, geo_only: bool, geo_enabled: bool, dirty: bool) -> bool:
@@ -1345,7 +1365,10 @@ def run_engine(
         "clip_classified": 0, "clip_cosine_calls": 0,
         "routed_haiku": 0, "routed_sonnet": 0,
         # Observability: the --dirty path stamps these post-claim (NULL on other run modes).
+        # dirty_cleared / dirty_truncated expose whether the drain actually advanced the head —
+        # cleared==0 while queue_depth stays high is the silent-livelock the FIFO stall lacked.
         "dirty_queue_depth": None, "dirty_claimed": None,
+        "dirty_cleared": None, "dirty_truncated": None,
     })
 
     if not geo:
@@ -1677,13 +1700,14 @@ def _write_run_row(conn: Any, stats: dict[str, int]) -> None:
                 pairs_considered, rejected, auto_address, auto_phash, auto_visual,
                 queued, vision_calls, auto_dismissed, floor_plan_deferred, clip_deferred,
                 clip_classified, clip_cosine_calls, routed_haiku, routed_sonnet,
-                dirty_queue_depth, dirty_claimed
+                dirty_queue_depth, dirty_claimed, dirty_cleared, dirty_truncated
             ) VALUES (now(), %(eligible)s, %(flagged_location)s, %(flagged_disposition)s,
                 %(pairs_considered)s, %(rejected)s, %(auto_address)s, %(auto_phash)s,
                 %(auto_visual)s, %(queued)s, %(vision_calls)s, %(auto_dismissed)s,
                 %(floor_plan_deferred)s, %(clip_deferred)s,
                 %(clip_classified)s, %(clip_cosine_calls)s, %(routed_haiku)s,
-                %(routed_sonnet)s, %(dirty_queue_depth)s, %(dirty_claimed)s)
+                %(routed_sonnet)s, %(dirty_queue_depth)s, %(dirty_claimed)s,
+                %(dirty_cleared)s, %(dirty_truncated)s)
             """,
             stats,
         )
@@ -1834,11 +1858,19 @@ def main() -> int:
         # Real-time dirty drain: claim the dedup-ready properties at/before a cutoff
         # BEFORE building the (LLM-backed) fns, so an empty queue exits without that work.
         # The clear after the run is gated on a NON-truncated run, so a deadline-cut run
-        # keeps its whole claim (re-drained next pass) and never loses unprocessed work.
+        # keeps its whole claim (re-drained next pass) and never loses unprocessed work; the
+        # NEWEST-first claim + the TTL prune below mean a claim that can't finish never pins the
+        # head (its stale tail ages out, the fresh head is served first, the full scan backstops).
         only_groups = None
         dirty_street_groups: tuple[set[int], set[tuple[int, str]]] | None = None
         dirty_cutoff = None
         if args.dirty:
+            # Evict the stale tail FIRST (rows the 6h full scan has already covered), so the
+            # queue is bounded by construction and the depth metric reflects real real-time work.
+            pruned = _prune_stale_dedup_dirty(conn)
+            if pruned:
+                LOG.info("DIRTY drain: pruned %d stale rows (older than %dh)",
+                         pruned, _DEDUP_DIRTY_TTL_HOURS)
             with conn.cursor() as cur:
                 cur.execute("SELECT now()")
                 dirty_cutoff = cur.fetchone()[0]
@@ -1955,18 +1987,25 @@ def main() -> int:
                 stats["dirty_queue_depth"] = queue_depth
                 stats["dirty_claimed"] = len(only_groups)
             if not args.shadow:
-                _write_run_row(conn, stats)
-                _write_pair_audit(conn, run_at, pair_audit)
                 # Clear the claim ONLY on a run that finished the scan. A truncated run
                 # (deadline / pair-cap) didn't reach every dirty group, so keep the whole
                 # claim — it re-drains next pass; a few already-resolved pairs re-run cheaply
                 # (classify_pair rejects 'already_merged'), but NO unprocessed dirty property
                 # is silently dropped. (Oversized groups are unresolvable everywhere, so a
                 # finished run rightly clears them — the daily full scan handles them if they
-                # shrink below MAX_GROUP_SIZE.)
-                if args.dirty and not stats.get("truncated"):
-                    cleared = _clear_dedup_dirty(conn, only_groups, dirty_cutoff)
-                    LOG.info("DIRTY drain: cleared %d drained properties", cleared)
+                # shrink below MAX_GROUP_SIZE.) The clear happens BEFORE the run row so its
+                # outcome (dirty_cleared / dirty_truncated) is recorded — a chronically
+                # truncating drain (cleared==0 while queue_depth stays high) is then VISIBLE,
+                # the silent-livelock guard the FIFO stall lacked.
+                if args.dirty:
+                    truncated = bool(stats.get("truncated"))
+                    stats["dirty_truncated"] = 1 if truncated else 0
+                    cleared = 0 if truncated else _clear_dedup_dirty(conn, only_groups, dirty_cutoff)
+                    stats["dirty_cleared"] = cleared
+                    LOG.info("DIRTY drain: cleared %d drained properties (truncated=%s)",
+                             cleared, truncated)
+                _write_run_row(conn, stats)
+                _write_pair_audit(conn, run_at, pair_audit)
             LOG.info(
                 "ENGINE %s eligible=%d auto_address=%d auto_phash=%d auto_visual=%d "
                 "auto_dismissed=%d floor_plan_deferred=%d clip_deferred=%d reconciled=%d queued=%d "
