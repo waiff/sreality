@@ -41,7 +41,8 @@ def test_connect_session_uses_session_url_and_allows_prepared_statements(
 def test_connect_session_falls_back_when_session_url_unset(monkeypatch):
     monkeypatch.delenv("SUPABASE_DB_SESSION_URL", raising=False)
     sentinel = object()
-    monkeypatch.setattr(db, "connect", lambda: sentinel)
+    # The fallback forwards its retry budget, so the fake must accept kwargs.
+    monkeypatch.setattr(db, "connect", lambda **kwargs: sentinel)
 
     assert db.connect_session() is sentinel
 

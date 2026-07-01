@@ -254,23 +254,73 @@ _KEEPALIVES: dict[str, int] = {
 }
 
 
-def connect(url: str | None = None) -> psycopg.Connection:
+# Bounded retry for the CONNECT HANDSHAKE itself. run_resilient (below) retries a
+# mid-flight drop on an already-OPEN connection; this covers the distinct case
+# where the Supabase pooler drops the handshake ("server closed the connection
+# unexpectedly") so psycopg.connect raises before any connection exists — the
+# batch entrypoints' single startup connect was a SPOF. Only OperationalError is
+# retried (via is_transient_db_error, single-sourcing the classifier with
+# run_resilient), so a missing/wrong SUPABASE_DB_URL still RuntimeErrors fast out
+# of database_url() and a real bug fails loud instead of spinning ~30s.
+_CONNECT_ATTEMPTS = 3
+_CONNECT_RETRY_DELAY = 10.0
+
+
+def _connect_with_retry(
+    opener: Callable[[], psycopg.Connection],
+    *,
+    attempts: int,
+    delay: float,
+) -> psycopg.Connection:
+    for attempt in range(1, attempts + 1):
+        try:
+            return opener()
+        except Exception as exc:  # noqa: BLE001 - re-raised below unless transient
+            if not is_transient_db_error(exc) or attempt >= attempts:
+                raise
+            LOG.warning(
+                "CONNECT: transient error (attempt %d/%d, retry in %.0fs): %r",
+                attempt, attempts, delay, exc,
+            )
+            time.sleep(delay)
+    raise AssertionError("unreachable")  # pragma: no cover
+
+
+def connect(
+    url: str | None = None,
+    *,
+    attempts: int = _CONNECT_ATTEMPTS,
+    retry_delay: float = _CONNECT_RETRY_DELAY,
+) -> psycopg.Connection:
     """Open an autocommit connection. Callers manage transactions explicitly.
 
     prepare_threshold=None disables psycopg3's automatic prepared-statement
     caching. Required for Supabase's Transaction-mode pooler (PgBouncer),
     which rebinds connections between queries and trips
     DuplicatePreparedStatement otherwise.
+
+    A pooler handshake drop is retried `attempts` times spaced `retry_delay`s
+    apart (see _connect_with_retry). Callers that can't afford the full budget —
+    the synchronous API per-request path — pass a smaller one.
     """
-    return psycopg.connect(
-        url or database_url(),
-        autocommit=True,
-        prepare_threshold=None,
-        **_KEEPALIVES,
+    return _connect_with_retry(
+        lambda: psycopg.connect(
+            url or database_url(),
+            autocommit=True,
+            prepare_threshold=None,
+            **_KEEPALIVES,
+        ),
+        attempts=attempts,
+        delay=retry_delay,
     )
 
 
-def connect_session(url: str | None = None) -> psycopg.Connection:
+def connect_session(
+    url: str | None = None,
+    *,
+    attempts: int = _CONNECT_ATTEMPTS,
+    retry_delay: float = _CONNECT_RETRY_DELAY,
+) -> psycopg.Connection:
     """Open a connection that lets psycopg3 auto-prepare statements.
 
     For the scraper's hot detail-write loop only. Points at SUPABASE_DB_SESSION_URL
@@ -285,8 +335,12 @@ def connect_session(url: str | None = None) -> psycopg.Connection:
     """
     session_url = url or os.environ.get("SUPABASE_DB_SESSION_URL")
     if not session_url:
-        return connect()
-    return psycopg.connect(session_url, autocommit=True, **_KEEPALIVES)
+        return connect(attempts=attempts, retry_delay=retry_delay)
+    return _connect_with_retry(
+        lambda: psycopg.connect(session_url, autocommit=True, **_KEEPALIVES),
+        attempts=attempts,
+        delay=retry_delay,
+    )
 
 
 _T = TypeVar("_T")
