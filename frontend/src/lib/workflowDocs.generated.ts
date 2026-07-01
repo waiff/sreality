@@ -1439,6 +1439,14 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
         "options": null
       },
       {
+        "name": "geo_cursor",
+        "description": "[geo] Preview the discovery window beyond THIS obec_id without reading/advancing the persistent cursor (validation/debug; pair with shadow=true, e.g. 554781 to preview Praha).",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
         "name": "floor_plan_budget",
         "description": "[free] Override the dedup_floor_plan_budget setting for this run: inline cold Sonnet floor-plan checks allowed (0 = cache-only $0). Empty = use the setting (default 10000).",
         "required": false,
