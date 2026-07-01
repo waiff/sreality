@@ -127,8 +127,18 @@ on:
         default: ""
         type: string
 
+# The real-time DIRTY drain (:45) gets its OWN concurrency group so the slow batch runs (full
+# scan 6h / candidate 2h / geo 4x/day) can never starve or cancel it — the "merge in minutes"
+# SLO can't hold if the dirty lane waits behind an 80-min full scan (several dirty runs were
+# cancelled by the shared group before this). Safe to run CONCURRENTLY with a batch run:
+# merge_properties row-locks both properties FOR UPDATE + gates on status='active', so
+# concurrent merges serialize per-property (a redundant re-decide is a cheap no-op via the
+# already_merged reject) — the same row-lock safety that already lets dedup run concurrently
+# with property-maintenance (a separate group). Everything else stays in the one `dedup-engine`
+# group (serialized among the batch runs). workflow_dispatch (empty github.event.schedule)
+# falls to the batch group.
 concurrency:
-  group: dedup-engine
+  group: dedup-engine${{ github.event.schedule == '45 * * * *' && '-dirty' || '' }}
   cancel-in-progress: false
 
 jobs:

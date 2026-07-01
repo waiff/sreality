@@ -6,6 +6,20 @@ source for active rules; ROADMAP is for sequencing.
 
 ## Done
 
+### 2026-07: Dedup dirty lane gets its own concurrency group (real-time SLO no longer starved)
+
+Follow-up to the real-time drain redesign: the `--dirty` lane shared ONE `dedup-engine` concurrency
+group with the slow batch runs (full scan 6h / candidate 2h / geo 4×/day) at `cancel-in-progress:
+false`, so a dirty run queued behind — and was often cancelled by — an 80-min full scan (several
+cancelled dirty runs in the run history). That caps the "merge in minutes" SLO no matter how fast
+the drain itself is. Fix: a dynamic concurrency group — the dirty cron (`45 * * * *`) runs in
+`dedup-engine-dirty`, everything else stays in `dedup-engine`. Safe to run concurrently with a batch
+run because `merge_properties` already row-locks both properties `FOR UPDATE` + gates on
+`status='active'` (the same lock safety that already lets dedup run concurrently with
+property-maintenance, a separate group) — concurrent merges serialize per-property; a redundant
+re-decide is a cheap `already_merged` no-op. No new locking needed. Guard test asserts the dirty
+cron maps to its own group.
+
 ### 2026-07: LLM-liveness observability — record provider FAILURES; alarm on credit exhaustion
 
 The Anthropic account ran out of credit and every paid LLM path (dedup vision, condition scoring,
