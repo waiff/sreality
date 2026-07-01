@@ -21,6 +21,7 @@ const REASON_LABELS: Record<string, string> = {
   visual_different: 'vizuální rozdíl',
   visual_inconclusive: 'vizuálně nejednoznačné',
   site_plan_different_unit: 'plán: jiná jednotka',
+  geo_colocated: 'stejná poloha (geo)',
   floor_plan_different_layout: 'půdorys: jiná dispozice',
   floor_plan_review: 'půdorys: k ruční kontrole',
   no_images: 'bez fotek',

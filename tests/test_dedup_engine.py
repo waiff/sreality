@@ -1558,6 +1558,40 @@ def test_discover_geo_candidates_market_scan_has_no_window() -> None:
     assert "obec_lo" not in (conn.count_params or {})
 
 
+def test_geo_eligibility_includes_inactive_like_street() -> None:
+    """Rule #15: inactive single-dwelling listings MUST participate (a delisted/relisted house
+    still merges into its group; and gating on is_active would permanently strand a proposed geo
+    candidate whose one side later goes inactive). The geo predicate must NOT filter is_active —
+    matching the street path + classify_geo (which has no activity check)."""
+    from scripts.dedup_engine import _GEO_ELIGIBILITY
+
+    assert "is_active" not in _GEO_ELIGIBILITY
+
+
+def test_geo_discovery_and_drain_round_the_cell_identically() -> None:
+    """The set-based DISCOVERY and the per-pair DRAIN loader must round the cell coordinate with
+    the IDENTICAL SQL expression — else Postgres (half-away) vs Python round(float,4) (banker's)
+    disagree at a 4dp half-boundary and a discovery-enqueued pair never re-forms in the drain
+    (stuck 'proposed' forever). Pinned structurally so the two can't drift."""
+    from scripts.dedup_engine import _GEO_DISCOVERY_SQL, _GEO_ELIGIBLE_SQL
+
+    for expr in ("round(ST_Y(l.geom::geometry)::numeric, 4)",
+                 "round(ST_X(l.geom::geometry)::numeric, 4)"):
+        assert expr in _GEO_DISCOVERY_SQL, "discovery must SQL-round the cell coord"
+        assert expr in _GEO_ELIGIBLE_SQL, "the drain loader must SQL-round the cell coord identically"
+
+
+def test_geo_discovery_guards_zero_area_division() -> None:
+    """Eligibility requires area IS NOT NULL, not > 0. A 0-area co-located pair would divide by
+    zero in the self-join and abort the INSERT, rolling back the whole window + stalling the
+    cursor. The denominator must be NULLIF-guarded (+ greatest>0 drops the degenerate pair)."""
+    from scripts.dedup_engine import _GEO_DISCOVERY_SQL
+
+    assert "abs(a.area - b.area) / greatest(a.area, b.area)" not in _GEO_DISCOVERY_SQL
+    assert "NULLIF(greatest(a.area, b.area), 0)" in _GEO_DISCOVERY_SQL
+    assert "greatest(a.area, b.area) > 0" in _GEO_DISCOVERY_SQL
+
+
 def test_dedup_geo_crons_match_their_args_branches() -> None:
     """Both geo crons must map to their intended branch: DISCOVERY is --free (set-based, no paid
     vision fns — it just enqueues the window's co-located pairs); the CANDIDATE DRAIN is paid

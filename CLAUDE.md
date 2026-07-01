@@ -874,7 +874,7 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     **(1) GEO DISCOVERY** (cron `0 3,9,15,21`, `--geo-only --free`) — a **single SET-BASED SQL self-join**
     (`_discover_geo_candidates` / `_GEO_DISCOVERY_INSERT`) that enqueues a window's co-located pairs as
     `tier='geo'` proposed candidates in **~seconds** (validated: a 30 K-listing window ≈ 15 s → ~17.8 K new
-    candidates; the WHOLE market ≈ 9.5 s → ~111 K pairs). It replaces the earlier per-pair discovery LOOP,
+    candidates; the WHOLE market ≈ 9.5 s → ~158 K pairs, active + inactive). It replaces the earlier per-pair discovery LOOP,
     which was throughput-capped at **~2.5 pairs/sec** (sequential DB round-trips at the runner→DB latency) —
     empirically it burned a 1200 s budget resolving only ~3.5 K of a 30 K-listing window's ~18 K pairs, so a
     big obec's window NEVER finished and the cursor NEVER advanced. Discovery applies only the SQL-expressible
@@ -902,7 +902,7 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     through the shared `resolve_pair` brain — pHash → forensic FACADE compare (the only thing that resolves
     cross-portal houses, whose photos DIFFER so pHash can't) → floor/site-plan gate — auto-merging the
     confident, auto-dismissing the confident-different + the deterministic `classify_geo` rejects, and queuing
-    the genuinely-ambiguous for the operator. The market-wide queue is LARGE (~tens of thousands to ~111 K
+    the genuinely-ambiguous for the operator. The market-wide queue is LARGE (~150 K+ market-wide, active + inactive per rule #15
     across the whole market) and drains progressively as the paid drain + auto-merge/auto-dismiss chew through
     it (the accepted self-healing model — same as the street queue; the drain also DEFERS a candidate whose
     listings aren't fully CLIP-tagged yet, so geo resolution ramps with CLIP coverage). Only DISCOVERY

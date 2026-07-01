@@ -156,6 +156,29 @@ def build_audit_breakdown(detail: dict[str, Any] | None) -> list[dict[str, Any]]
             "note": "Plány zvýrazňují různé jednotky téhož projektu — do fronty.",
         })
 
+    # --- Geo co-location (set-based discovery candidate) ---
+    # A tier='geo' candidate the market discovery enqueued on proximity + area alone — a
+    # PERMISSIVE signal, NOT a merge (single-dwelling geo never auto-merges on the geo signal;
+    # the paid drain's forensic FACADE compare is the merge gate). The rung surfaces the two
+    # measured signals discovery recorded so the /dedup card explains why the pair is here.
+    if reason == "geo_colocated":
+        dist = _num(d.get("distance_m"))
+        area_pct = _num(d.get("area_pct"))
+        bits = []
+        if dist is not None:
+            bits.append(f"{dist:.0f} m od sebe")
+        if area_pct is not None:
+            bits.append(f"plocha ±{area_pct * 100:.0f} %")
+        rungs.append({
+            "key": "geo",
+            "label": "Geo shoda polohy",
+            "value": " · ".join(bits) if bits else "stejná poloha",
+            "status": "info",
+            "settings_keys": ["dedup_geo_area_max_pct"],
+            "note": "Stejná poloha (dům/pozemek/komerční) — kandidát z geo-skenu; "
+                    "merge potvrzuje až vizuální porovnání fasády v placeném běhu.",
+        })
+
     return rungs
 
 
@@ -168,6 +191,7 @@ def referenced_settings_keys() -> set[str]:
         {"verdict": "Low", "reason": "visual_different"},
         {"reason": "floor_plan_different_layout"},
         {"reason": "site_plan_different_unit", "verdict": "different_unit"},
+        {"reason": "geo_colocated", "stage": "geo", "distance_m": 4.0, "area_pct": 0.08},
     ):
         for rung in build_audit_breakdown(sample):
             keys.update(rung.get("settings_keys") or [])

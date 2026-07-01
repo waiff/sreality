@@ -448,27 +448,42 @@ def _enqueue_candidate(
 
 # --- geo path (single-dwelling families) ------------------------------------
 # Disposition-less houses/land/commercial that the street pass can't reach. Blocked
-# by geo cell (one obec + a rounded coordinate). ACTIVE only for P1 (the operator's
-# pain is active duplicate cards); inactive-for-history is a later concern. The
-# NOT(street AND disposition) clause hands the rare disposition-bearing non-apartment
-# to the street pass instead, so the two passes never double-handle a pair.
+# by geo cell (one obec + a rounded coordinate). The NOT(street AND disposition) clause
+# hands the rare disposition-bearing non-apartment to the street pass instead, so the two
+# passes never double-handle a pair.
+#
+# INACTIVE listings participate (NO is_active filter) — mirroring the street path
+# (_ELIGIBILITY) and rule #15: a single-dwelling delisted on one portal (or delisted then
+# relisted under a new id) must still merge into its surviving group, else its price/
+# lifecycle history orphans; and gating on is_active would permanently STRAND a proposed
+# geo candidate whose one side later goes inactive (the drain would drop that listing, the
+# pair would never re-form, and _reconcile_stale_candidates — which checks PROPERTY status,
+# active for an inactive listing's singleton — would never clean it). classify_geo_pair has
+# no activity check either, so the SQL must not be stricter than the brain it mirrors. The
+# properties JOIN (status='active') already excludes merged-away groups.
 #
 # ONE eligibility predicate, shared by the row load AND the window sizer (below), so
 # the window's whole-obec listing counts match exactly what the load will process.
 _GEO_ELIGIBILITY = """
-      l.is_active = true
-      AND l.category_main IN ('dum', 'pozemek', 'komercni', 'ostatni')
+      l.category_main IN ('dum', 'pozemek', 'komercni', 'ostatni')
       AND l.geom IS NOT NULL
       AND l.obec_id IS NOT NULL
       AND coalesce(l.area_m2, l.estate_area, l.usable_area) IS NOT NULL
       AND NOT (l.street IS NOT NULL AND l.street <> '' AND l.disposition IS NOT NULL)"""
 
+# latr/lngr are rounded with the IDENTICAL SQL expression `_discover_geo_candidates` uses
+# (`round(ST_Y(geom)::numeric,4)`), so the drain's geo_cell_key blocks a listing into the
+# SAME cell discovery formed it in — a raw Python `round(float,4)` re-round would disagree at
+# 4dp half-boundaries (Postgres rounds half-away, Python banker's) and strand the candidate
+# unresolvable. lat/lng stay the RAW double for classify_geo_pair's precise haversine.
 _GEO_ELIGIBLE_SQL = f"""
     SELECT l.sreality_id, l.property_id, l.source, l.house_number,
            coalesce(l.area_m2, l.estate_area, l.usable_area) AS area,
            left(l.description, 600) AS description,
            l.category_type, l.category_main, l.obec_id, l.price_czk,
-           ST_Y(l.geom::geometry) AS lat, ST_X(l.geom::geometry) AS lng
+           ST_Y(l.geom::geometry) AS lat, ST_X(l.geom::geometry) AS lng,
+           round(ST_Y(l.geom::geometry)::numeric, 4) AS latr,
+           round(ST_X(l.geom::geometry)::numeric, 4) AS lngr
     FROM listings l
     JOIN properties p ON p.id = l.property_id AND p.status = 'active'
     WHERE {_GEO_ELIGIBILITY}
@@ -525,7 +540,12 @@ def _load_geo_eligible(
         lat = float(r[10]) if r[10] is not None else None
         lng = float(r[11]) if r[11] is not None else None
         obec_id = int(r[8]) if r[8] is not None else None
-        cell = geo_cell_key(obec_id, lat, lng, r[7], r[6])
+        # Cell from the SQL-rounded latr/lngr (r[12]/r[13]) so the drain blocks a listing into
+        # the SAME cell the set-based discovery formed it in (identical round(::numeric,4) both
+        # sides); lat/lng stay RAW for classify_geo_pair's haversine.
+        latr = float(r[12]) if r[12] is not None else None
+        lngr = float(r[13]) if r[13] is not None else None
+        cell = geo_cell_key(obec_id, latr, lngr, r[7], r[6])
         if cell is None:
             continue
         keys.append(ListingKey(
@@ -589,7 +609,7 @@ _GEO_DISCOVERY_SQL = f"""
         FROM (
             SELECT least(a.property_id, b.property_id) AS lo,
                    greatest(a.property_id, b.property_id) AS hi,
-                   abs(a.area - b.area) / greatest(a.area, b.area) AS area_pct,
+                   abs(a.area - b.area) / NULLIF(greatest(a.area, b.area), 0) AS area_pct,
                    ST_Distance(a.geom, b.geom) AS dist_m
             FROM sized a
             JOIN sized b
@@ -597,8 +617,9 @@ _GEO_DISCOVERY_SQL = f"""
              AND a.bucket = b.bucket AND a.ct = b.ct
              AND a.property_id < b.property_id
              AND a.cell_n <= %(max_cell)s
+             AND greatest(a.area, b.area) > 0
              AND ST_DWithin(a.geom, b.geom, %(coord_m)s)
-             AND abs(a.area - b.area) / greatest(a.area, b.area) <= %(area_pct)s
+             AND abs(a.area - b.area) / NULLIF(greatest(a.area, b.area), 0) <= %(area_pct)s
         ) x
         ORDER BY lo, hi, dist_m
     )

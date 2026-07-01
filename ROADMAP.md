@@ -19,7 +19,7 @@ pairs). The geo-eligible universe (~194K listings, 5,690 obce) is too big for on
 runs at only ~2.5 pairs/sec (sequential DB round-trips at the runner→DB latency), so a live shadow of a
 30K-listing window burned its 1200s budget resolving ~3.5K of ~18K pairs and NEVER finished — a big obec
 (Praha) would stick the cursor permanently. The fix is a **set-based discovery** (the same window
-computes in ~15s; the whole market in ~9.5s → ~111K co-located pairs):
+computes in ~15s; the whole market in ~9.5s → ~158K co-located pairs, active + inactive per rule #15):
 
 - **GEO DISCOVERY** (`dedup_engine.yml` cron `0 3,9,15,21`, `--geo-only --free`) is now a single
   SQL self-join (`_discover_geo_candidates` / `_GEO_DISCOVERY_INSERT`) that enqueues a window's co-located
@@ -36,13 +36,13 @@ computes in ~15s; the whole market in ~9.5s → ~111K co-located pairs):
   — auto-merging the confident, auto-dismissing the confident-different + the deterministic `classify_geo`
   rejects (house-number / unit-marker contradictions the permissive discovery couldn't express), queuing
   the ambiguous. So discovery over-enqueues permissively and the drain resolves precisely.
-- **Queue volume:** market-wide ~111K co-located pairs → a LARGE `tier='geo'` queue that drains
+- **Queue volume:** market-wide ~158K co-located pairs (active + inactive per rule #15) → a LARGE `tier='geo'` queue that drains
   progressively as the paid drain + auto-merge/auto-dismiss chew through it (the accepted self-healing
   model — same as the street queue; the drain also DEFERS a candidate until its listings are CLIP-tagged,
   so geo resolution ramps with CLIP coverage).
 - `--geo-cursor C` (+ `--shadow`) COUNTS a specific window without touching the state; `--geo-scan-budget 0`
   is an ad-hoc whole-market INSERT. Empirically validated on prod: Praha window ≈ 17.8K new candidates in
-  ~15s; whole market ≈ 111K pairs in ~9.5s. Olomouc's queue is genuine co-location (100% within 15 m, 65%
+  ~15s; whole market ≈ 158K pairs in ~9.5s (active + inactive per rule #15). Olomouc's queue is genuine co-location (100% within 15 m, 65%
   cross-source) — NOT a geocoding artifact, so the fix is right to advance past it, not filter it.
 
 - **Follow-ups:** a geo DIRTY drain (real-time coverage of NEW single-dwelling listings, the next layer —

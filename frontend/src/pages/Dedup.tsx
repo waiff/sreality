@@ -450,6 +450,8 @@ function bucketLabel(
   if (reason === 'image_phash')
     return { label: 'Identical photos', hint: '', tone: 'sage' };
   // Geo path (single-dwelling families: houses / land / commercial).
+  if (reason === 'geo_colocated')
+    return { label: 'Same location', hint: 'co-located + area; visual facade check pending', tone: 'muted' };
   if (reason === 'geo_exact')
     return { label: 'Same location & price', hint: 'coordinate + area + price/№ all match', tone: 'sage' };
   if (reason === 'geo_strong')
