@@ -1604,8 +1604,14 @@ off so the daily engine run merges over warm cache for free; rule #15), and
 workflows watch the rest: `monitor_workflow_failures.yml` ("Monitoring: workflow failures", cron
 `*/30` — records failed / timed-out / startup-failed runs into `workflow_failures` so the Health
 page can list them; GitHub only emails about failed *scheduled* runs) and `llm_health.yml`
-("Monitoring: LLM pipeline liveness", hourly — goes red when `llm_calls` has been idle for hours
-while condition-scoring work is pending, catching the silent dead-key/no-credit mode). Run any
+("Monitoring: LLM pipeline liveness", hourly — goes red on ANY of: recorded `llm_calls` FAILURE
+rows in the window (`error IS NOT NULL`, migration 259 — a credit-balance error alarms
+immediately, `>= --min-failures` generic failures otherwise), OR `llm_calls` idle for hours while
+condition-scoring work is pending, OR the condition batch pipeline stale despite fresh unrelated
+traffic. The failure probe is INDEPENDENT of pending work — it closes the blind spot where a
+credit-exhausted account stayed green for ~8h because condition scoring happened to be quiet.
+`LLMClient` records the failure row on every provider exception; the check needs no Anthropic key
+of its own). Run any
 directly:
 - CLI: `gh workflow run index_walk.yml --ref <branch>` (or `detail_drain.yml`, `-f` for flags).
   Watch with `gh run list --workflow=index_walk.yml` then `gh run watch`.

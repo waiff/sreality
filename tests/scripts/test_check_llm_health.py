@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from scripts.check_llm_health import _pending_unscored, assess
+from scripts.check_llm_health import _pending_unscored, _recent_failures, assess
 
 
 def _stalled(condition_call_age_hours: float | None = 1.0, **kw):
@@ -85,6 +85,37 @@ def test_condition_stall_message_names_the_pipeline():
         max_idle_hours=4.0, condition_max_idle_hours=8.0, min_pending=50,
     )
     assert "score_listing_condition" in msg
+
+
+# ---- provider-outage alarm (independent of pending work) --------------------
+
+
+def test_credit_exhausted_alarms_regardless_of_pending():
+    # The blind spot: an outage must alarm even when there is NO pending condition work
+    # (which is exactly when the pending-gated checks stay silent).
+    stalled, msg = assess(
+        last_call_age_hours=0.1, condition_call_age_hours=0.1, pending=0,
+        max_idle_hours=4.0, condition_max_idle_hours=8.0, min_pending=50,
+        recent_failures=5, credit_exhausted=True,
+    )
+    assert stalled is True
+    assert "credit" in msg.lower() and "out of credit" in msg.lower()
+
+
+def test_recent_failures_alarm_above_floor_regardless_of_pending():
+    assert _stalled(last_call_age_hours=0.1, pending=0, recent_failures=3) is True
+    # Below the floor + no credit error → falls through to the (idle) pending logic → no alarm.
+    assert _stalled(last_call_age_hours=0.1, pending=0, recent_failures=2) is False
+
+
+def test_recent_failures_helper_bound_pattern_and_filter():
+    # count(*) + count FILTER(credit) with the ILIKE wildcard in the BOUND VALUE (no bare %).
+    conn = _ScriptedConn([("fetchone", (7, 2))])
+    total, credit = _recent_failures(conn, hours=4.0)
+    assert total == 7 and credit is True
+    sql, params = conn.cursor_obj.executed[-1]
+    assert "error IS NOT NULL" in sql and "FILTER (WHERE error ILIKE %s)" in sql
+    assert "%credit balance%" in params and 4.0 in params
 
 
 # ---- _pending_unscored: kraj scoping mirrors the scorer ---------------------
