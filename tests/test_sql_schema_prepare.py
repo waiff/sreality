@@ -48,21 +48,41 @@ pytestmark = pytest.mark.skipif(
 # as skipped, not failed — PREPARE only plans a single DML/SELECT statement.
 _PREPARABLE = {"SELECT", "INSERT", "UPDATE", "DELETE", "WITH", "VALUES", "TABLE"}
 
-# 42P18 = "could not determine data type of parameter": a param-inference limit,
-# not a real defect (0 cases in this codebase today). Reported as inconclusive,
-# never a failure — the escape hatch a future untyped-param statement can land in.
-_INDETERMINATE_PARAM = "42P18"
-
 # Statements that legitimately cannot PREPARE in isolation because they depend on
-# session-local state (a TEMP TABLE created earlier in the same script). Keyed by
-# an (origin-substring, sql-substring) pair with a documented reason. Keep tiny.
+# session-local state, or are not Postgres SQL at all. Keyed by an
+# (origin-substring, sql-substring) pair with a documented reason. Keep tiny.
 _ALLOWLIST: list[tuple[str, str, str]] = [
     (
         "load_obec_population",
         "_obec_pop",
         "references a session-local TEMP TABLE created earlier in the same script",
     ),
+    (
+        "fetch_population_wikidata",
+        "wdt:",
+        "a SPARQL query to the Wikidata endpoint, not Postgres SQL",
+    ),
 ]
+
+
+def _is_param_type_artifact(exc) -> bool:
+    """A PREPARE error caused by this sweep's type-less binding, not a real defect.
+
+    The sweep PREPAREs without param VALUES, so Postgres cannot always infer a
+    parameter's type (e.g. a param used as both `IS NULL` and `= ANY(...)`); at
+    execute() time psycopg sends the type from the Python value and the query
+    works. Postgres surfaces this as an indeterminate/ambiguous parameter, or as
+    an ambiguous operator/function whose operand is the `unknown` pseudo-type of
+    an unbound param. All are inconclusive, never failures. A genuine missing
+    column / bad function is a different code (42703 / 42883) and still fails.
+    """
+    state = (exc.sqlstate or "").upper()
+    msg = str(exc).lower()
+    return (
+        state in {"42P18", "42P08"}
+        or "could not determine data type of parameter" in msg
+        or ("is not unique" in msg and "unknown" in msg)
+    )
 
 
 def _allowlisted(item) -> str | None:
@@ -139,7 +159,7 @@ def test_every_sql_statement_prepares_against_the_schema(_conn):
             state = exc.sqlstate or "?????"
             snippet = " ".join(item.sql.split())[:120]
             line = f"  [{state}] {item.origin}\n      {snippet}\n      -> {str(exc).strip().splitlines()[0]}"
-            if state == _INDETERMINATE_PARAM:
+            if _is_param_type_artifact(exc):
                 indeterminate.append(line)
             else:
                 failures.append(line)
