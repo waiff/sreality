@@ -1349,9 +1349,11 @@ def test_dedup_geo_cron_matches_its_args_branch() -> None:
     assert not any("--free" in ln for ln in args), "the geo cron branch must NOT be --free"
 
 
-def test_claim_dedup_dirty_is_bounded_fifo() -> None:
-    """The --dirty claim must be FIFO-bounded when a limit is passed (and unbounded only when
-    not), so a tagging-backlog flood can't make an hourly run claim the whole market."""
+def test_claim_dedup_dirty_is_bounded_newest_first() -> None:
+    """The --dirty claim is NEWEST-first + bounded: a real-time lane must serve the freshest
+    dedup-ready listing first (the "merge in minutes" SLO holds under backlog), and stay bounded
+    so a tagging-backlog spike can't make an hourly run claim the whole market. Unbounded only
+    when no limit is passed (full-sweep / reconcile use)."""
     import scripts.dedup_engine as eng
 
     captured: list[tuple[str, list[Any]]] = []
@@ -1367,13 +1369,65 @@ def test_claim_dedup_dirty_is_bounded_fifo() -> None:
 
     eng._claim_dedup_dirty(_Conn(), "CUTOFF", limit=5000)
     sql, params = captured[-1]
-    assert "ORDER BY marked_at" in sql and "LIMIT %s" in sql
+    assert "ORDER BY marked_at DESC" in sql and "LIMIT %s" in sql
     assert params == ["CUTOFF", 5000]
 
     captured.clear()
     eng._claim_dedup_dirty(_Conn(), "CUTOFF")  # unbounded (full sweep / reconcile use)
     sql, params = captured[-1]
     assert "LIMIT" not in sql and params == ["CUTOFF"]
+
+
+def test_prune_stale_dedup_dirty_evicts_by_ttl() -> None:
+    """The TTL prune bounds the queue by construction (the guard the FIFO stall lacked): rows
+    older than the TTL are deleted (the 6h full scan has already covered them), so an
+    un-drainable backlog can never grow unbounded and the newest-first claim never hits a
+    stale head. Default TTL >= the daily full-sweep cycle."""
+    import scripts.dedup_engine as eng
+
+    captured: list[str] = []
+
+    class _Cur:
+        rowcount = 7
+        def __enter__(self): return self
+        def __exit__(self, *exc): return None
+        def execute(self, sql, params=None): captured.append(sql)
+
+    class _Conn:
+        def cursor(self): return _Cur()
+
+    assert eng._DEDUP_DIRTY_TTL_HOURS >= 24
+    assert eng._prune_stale_dedup_dirty(_Conn()) == 7
+    assert "DELETE FROM dedup_dirty_properties" in captured[-1]
+    assert "now() - interval" in captured[-1] and "hours" in captured[-1]
+
+
+def test_dedup_dirty_enqueue_gates_eligible_and_recent() -> None:
+    """The dedup-ready enqueue SQL keeps the real-time lane a CHANGE signal, not an
+    enrichment-progress firehose: it enqueues a property ONLY when (a) it is fully tagged,
+    (b) it has a street+disposition listing (can join a street group — property-grain EXISTS),
+    and (c) the just-tagged listing is recent (a genuinely NEW arrival). Without these the
+    market-wide CLIP backfill floods the queue (78.5% un-mergeable) and it stalls."""
+    from scraper import db
+
+    sql = db._DEDUP_DIRTY_FROM_IMAGE_IDS_SQL
+    # eligibility: property-grain EXISTS over the property's listings, not the tagged one alone.
+    assert "EXISTS" in sql and "le.property_id = l.property_id" in sql
+    assert "le.street IS NOT NULL" in sql and "le.disposition IS NOT NULL" in sql
+    # recency: the tagged listing's first_seen_at within the window.
+    assert "l.first_seen_at > now() - interval" in sql
+    assert db._DEDUP_DIRTY_RECENCY_DAYS >= 1
+
+
+def test_run_engine_stats_carry_dirty_observability_keys() -> None:
+    """run_engine's stats always carry dirty_cleared / dirty_truncated (NULL on non-dirty runs)
+    so _write_run_row's %(dirty_cleared)s / %(dirty_truncated)s params never KeyError and the
+    silent-livelock guard columns are always populated."""
+    import scripts.dedup_engine as eng
+
+    stats = eng.run_engine(_FakeConn([]), max_vision_calls=0)
+    assert stats["dirty_cleared"] is None and stats["dirty_truncated"] is None
+    assert "dirty_queue_depth" in stats and "dirty_claimed" in stats
 
 
 def test_proposed_candidate_property_ids() -> None:
