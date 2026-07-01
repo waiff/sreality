@@ -1252,6 +1252,20 @@ def resolve_pair(conn: Any, a: ListingKey, b: ListingKey, *, street_key: str,
             stats["queued"] += 1
             return
         if fp == "defer":
+            # A pHash would-merge pair whose floor-plan verdict isn't warmed yet. On the
+            # STREET path, defer + re-try next run is right (the 6h full scan re-scans the
+            # whole market). On the GEO DISCOVERY path the obec cursor advances PAST this
+            # window after the run, so a silent defer would delay the pair a full market
+            # cycle — so ENQUEUE it as a tier='geo' candidate (geo always surfaces, rule
+            # #15 (E)) and let the paid geo candidate drain re-decide it with a fresh
+            # floor-plan budget, independent of cursor position.
+            if ctx.tier == "geo":
+                if not ctx.dry_run:
+                    _enqueue_candidate(conn, a, b, {
+                        **factors, "tier": ctx.tier,
+                        "reason": "floor_plan_pending", "confidence": 0.6})
+                stats["queued"] += 1
+                return
             stats["floor_plan_deferred"] += 1
             return
         mg = None if ctx.dry_run else _merge_pair(
@@ -1847,8 +1861,11 @@ def main() -> int:
                              "includes it whenever that setting is on. Skipped on --dirty.")
     parser.add_argument("--geo-only", action="store_true",
                         help="Run ONLY the geo pass (skip the street engine).")
-    parser.add_argument("--geo-max-pairs", type=int, default=20000,
-                        help="Max geo candidate pairs examined per run.")
+    parser.add_argument("--geo-max-pairs", type=int, default=200000,
+                        help="Max geo candidate pairs examined per run. Default is high (per-cell "
+                             "pair work is bounded by MAX_GEO_GROUP_SIZE) so a dense discovery "
+                             "window finishes in one run and its obec cursor advances — a low cap "
+                             "would truncate the window and silently hold the cursor.")
     parser.add_argument("--geo-scan-budget", type=int, default=None, dest="geo_scan_budget",
                         help="Progressive geo DISCOVERY window size (whole-obec listing count) "
                              "beyond the persistent obec cursor (dedup_geo_scan_state). Each "
@@ -2140,9 +2157,20 @@ def main() -> int:
                 # deadline) keeps its cursor and re-scans the same window next tick over
                 # a warm cache, so no obec is skipped. Not persisted for a --geo-cursor
                 # override (validation) or a windowless (budget 0) full scan.
-                if geo_persist_cursor and geo_obec_window is not None and not geo_stats.get("truncated"):
-                    _advance_geo_cursor(conn, geo_obec_window[1])
-                    LOG.info("GEO discovery cursor advanced to obec %d", geo_obec_window[1])
+                if geo_persist_cursor and geo_obec_window is not None:
+                    if geo_stats.get("truncated"):
+                        # The window didn't finish (pair-cap / --max-seconds), so the cursor is
+                        # HELD and the same window re-scans next tick over a warm cache — no obec
+                        # skipped. WARN so a window that never finishes (a genuinely stuck cursor)
+                        # is visible in the Actions log rather than silently stalling coverage.
+                        LOG.warning(
+                            "GEO discovery window (%d, %d] truncated — cursor HELD at %d "
+                            "(will re-scan). Raise --max-seconds/--geo-max-pairs or lower "
+                            "dedup_geo_scan_budget if this persists.",
+                            geo_obec_window[0], geo_obec_window[1], geo_obec_window[0])
+                    else:
+                        _advance_geo_cursor(conn, geo_obec_window[1])
+                        LOG.info("GEO discovery cursor advanced to obec %d", geo_obec_window[1])
             LOG.info(
                 "GEO %s eligible=%d auto_phash=%d auto_visual=%d auto_dismissed=%d "
                 "floor_plan_deferred=%d queued=%d skipped_unresolved=%d rejected=%d "

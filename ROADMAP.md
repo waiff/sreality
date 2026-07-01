@@ -33,8 +33,11 @@ Fix — mirror the street path's proven **free-discovery + bounded-paid-drain** 
   15 m, 65% cross-source) — NOT a geocoding artifact, so the fix is right to advance past it, not filter it.
 
 - **Follow-ups:** a geo DIRTY drain (real-time coverage of NEW single-dwelling listings, the next layer —
-  as `--dirty` is for street); extend the `dedup_batches` warmer to the geo funnel; the cross-portal
-  coord-divergence cell-miss (a same house geocoded ~270 m apart lands in different geo cells).
+  as `--dirty` is for street); surface geo discovery progress on `/dedup` (`dedup_geo_scan_state` cursor +
+  `updated_at` + the `tier='geo'` proposed count — a stalled cursor is otherwise only visible in Actions
+  logs; the discovery run WARNs on a truncated cursor-held window); extend the `dedup_batches` warmer to
+  the geo funnel; the cross-portal coord-divergence cell-miss (a same house geocoded ~270 m apart lands in
+  different geo cells).
 
 ### 2026-06: Dedup geo path — dedicated, paid scheduled run (single-dwelling dedup unblocked)
 

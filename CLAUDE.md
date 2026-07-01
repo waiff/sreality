@@ -871,8 +871,12 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     paid scan (see below for why). It is **NOT** bolted onto the street full-scan / candidate-drain: doing so
     produced ZERO geo candidates because it (a) ran AFTER the street pass on the shared `--max-seconds`
     (deadline-starved) and (b) on the candidate drain inherited the APARTMENT `restrict`. Two dedicated crons:
-    **(1) GEO DISCOVERY** (cron `0 3,9,15,21`, `--geo-only --free`) — the fast, no-vision half that just
-    QUEUES every co-located pair. **Geo ALWAYS enqueues its unresolved pairs** (rule #15 (E): a geo signal
+    **(1) GEO DISCOVERY** (cron `0 3,9,15,21`, `--geo-only --free`) — the fast, no-all-rooms-compare half
+    that just QUEUES every co-located pair (its only paid call is the bounded floor-plan gate,
+    `--floor-plan-budget 300`, on pHash would-merge pairs — the same "ONE paid call on a free run" as the
+    street free run). A geo pHash would-merge pair whose floor-plan verdict isn't warmed is ENQUEUED as a
+    `tier='geo'` candidate (not silently deferred — the cursor advances past its window, so the paid geo
+    candidate drain must be able to pick it up). **Geo ALWAYS enqueues its unresolved pairs** (rule #15 (E): a geo signal
     never auto-merges on proximity alone) — the geo pass overrides `--free`'s general enqueue suppression
     (that suppression is a STREET optimization; geo has no warmer and cross-portal houses share no photos, so
     the queue is geo's only surfacing mechanism). Discovery walks the market in a **persistent obec-cursor
@@ -897,8 +901,11 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     whole-market scan; the real-time DIRTY drain never runs geo. The geo passes write NO separate
     `dedup_engine_runs` row (the dashboard reads the latest single row); decisions land in `dedup_pair_audit`
     + the `tier='geo'` candidate queue. (Follow-ups: a geo DIRTY drain — real-time coverage of NEW
-    single-dwelling listings, the next layer; extend the `dedup_batches` warmer to the geo funnel; the
-    cross-portal coord-divergence cell-miss — a same house geocoded ~270m apart lands in different geo cells.)
+    single-dwelling listings, the next layer; **surface geo discovery progress** on `/dedup`
+    (`dedup_geo_scan_state.cursor_obec_id` + `updated_at` + the `tier='geo'` proposed count — a stalled
+    cursor is otherwise only visible in Actions logs; the discovery run also WARNs on a truncated,
+    cursor-held window); extend the `dedup_batches` warmer to the geo funnel; the cross-portal
+    coord-divergence cell-miss — a same house geocoded ~270m apart lands in different geo cells.)
     Merges are **reversible**:
     `toolkit/property_identity.py` re-points `listings.property_id` onto the survivor + soft-retires
     the loser (`properties.status='merged_away'`) and logs `property_merge_events` so

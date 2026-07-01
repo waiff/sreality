@@ -760,6 +760,49 @@ def test_run_engine_geo_skips_oversized_cell(monkeypatch: Any) -> None:
     assert stats["pairs_considered"] == 0
 
 
+def test_run_engine_geo_phash_floor_plan_defer_enqueues(monkeypatch: Any) -> None:
+    """A pHash would-merge GEO pair whose floor-plan verdict isn't warmed must be ENQUEUED
+    as a tier='geo' candidate (geo always surfaces), NOT silently deferred: the discovery
+    cursor advances past its window, so the paid geo candidate drain must be able to pick
+    it up. (On the STREET path the same defer stays a defer — the 6h full scan re-tries.)"""
+    import scripts.dedup_engine as eng
+    monkeypatch.setattr(eng, "_load_geo_eligible", lambda conn, **k: [
+        _gk(1, 101, source="sreality"), _gk(2, 102, source="idnes"),
+    ])
+    monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 3)  # would merge
+    monkeypatch.setattr(eng, "_both_have_site_plan", lambda *a, **k: False)
+    monkeypatch.setattr(eng, "_floor_plan_image_ids", lambda conn, sid: [1])  # BOTH have a plan
+    monkeypatch.setattr(eng, "merge_properties",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("defer must not merge")))
+    enq: list[dict[str, Any]] = []
+    monkeypatch.setattr(eng, "_enqueue_candidate",
+                        lambda conn, x, y, markers, **kw: enq.append(markers))
+    # floor_plan_fn=None (default) -> the gate returns 'defer' (both plans, no verdict fn).
+    stats = eng.run_engine(_FakeConn([]), classify_fn=None, compare_fn=None,
+                           max_vision_calls=10, geo=True, geo_area_max_pct=0.20)
+    assert stats["queued"] == 1
+    assert stats["floor_plan_deferred"] == 0           # enqueued, not silently deferred
+    assert stats["auto_phash"] == 0
+    assert enq and enq[0]["tier"] == "geo" and enq[0]["reason"] == "floor_plan_pending"
+
+
+def test_run_engine_street_phash_floor_plan_defer_stays_deferred(monkeypatch: Any) -> None:
+    """The mirror of the above for STREET: a would-merge street pair with an unwarmed
+    floor-plan verdict DEFERS (re-tried by the next 6h full scan), it is NOT enqueued —
+    the geo-only enqueue must not leak into the street path."""
+    import scripts.dedup_engine as eng
+    monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 3)
+    monkeypatch.setattr(eng, "_both_have_site_plan", lambda *a, **k: False)
+    monkeypatch.setattr(eng, "_floor_plan_image_ids", lambda conn, sid: [1])  # both plans
+    monkeypatch.setattr(eng, "_enqueue_candidate",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("street defer must not enqueue")))
+    conn = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None)])
+    stats = eng.run_engine(conn, max_vision_calls=10)  # floor_plan_fn=None -> defer
+    assert stats["floor_plan_deferred"] == 1
+    assert stats["queued"] == 0
+    assert stats["auto_phash"] == 0
+
+
 # --- rule D helpers ---------------------------------------------------------
 
 def test_phash_fastpath_needs_two_identical_pairs() -> None:
