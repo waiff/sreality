@@ -1603,6 +1603,14 @@ runs (full scan / candidate / geo, all in `dedup-engine`) can never starve or ca
 run concurrently because `merge_properties` row-locks both properties `FOR UPDATE` + gates on
 `status='active'` (the same lock safety that lets dedup run concurrently with property-maintenance),
 so concurrent merges serialize per-property and a redundant re-decide is an `already_merged` no-op.
+**The claim clears INCREMENTALLY, per completed street group** (`run_engine`'s
+`resolved_property_ids` out-collector): a claimed property clears once EVERY group containing it
+(a listing dual-keys into 'id:' + 'name:' groups) was fully scanned — so a deadline/pair-cap-
+truncated run still clears the slice it finished and only the unprocessed remainder re-drains.
+(The original all-or-nothing clear kept the ENTIRE claim on truncation; prod data showed 4/5
+dirty runs truncating on pure per-pair DB cost — ~0.5-0.75 s/pair × >1,600 pairs vs the 1200 s
+budget — so the same slice re-processed hourly and `dirty_cleared` pinned at 0. Per-group clear
+makes progress monotonic regardless of budget: correctness-by-construction, not cap tuning.)
 **Each dirty run
 records `dedup_engine_runs.dirty_queue_depth` (backlog at run start) + `dirty_claimed` (its slice)**
 (migration 255) **plus `dirty_cleared` + `dirty_truncated`** (migration 258, NULL on other run

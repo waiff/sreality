@@ -1315,6 +1315,7 @@ def run_engine(
     restrict_property_ids: set[int] | None = None,
     restrict_street_groups: tuple[set[int], set[tuple[int, str]]] | None = None,
     only_groups_with_property_ids: set[int] | None = None,
+    resolved_property_ids: set[int] | None = None,
     geo: bool = False,
     geo_area_max_pct: float | None = None,
     clip_model: str | None = None,
@@ -1380,6 +1381,37 @@ def run_engine(
 
     groups = _group_by_street(keys)
     max_group_size = MAX_GEO_GROUP_SIZE if geo else MAX_GROUP_SIZE
+
+    # Per-group progress for the --dirty drain's INCREMENTAL clear (`resolved_property_ids`
+    # out-collector): a property is RESOLVED once EVERY group containing it has been scanned —
+    # a listing dual-keys into its 'id:' and 'name:' groups, so one completed group is not
+    # enough. Zero-group claimed properties (no eligible listing anymore) resolve immediately.
+    # Skipped groups count as scanned: an oversized group is unresolvable everywhere (the full
+    # scan's job if it shrinks), and a dirty-filter-skipped group contains no claimed property
+    # by construction. This is what lets a deadline-truncated run CLEAR the slice it finished
+    # instead of keeping its whole claim — monotonic progress, no re-processing livelock.
+    remaining_groups: dict[int, int] | None = None
+    if resolved_property_ids is not None:
+        remaining_groups = {}
+        for members in groups.values():
+            for m in members:
+                remaining_groups[m.property_id] = remaining_groups.get(m.property_id, 0) + 1
+        if only_groups_with_property_ids is not None:
+            resolved_property_ids.update(
+                pid for pid in only_groups_with_property_ids if pid not in remaining_groups)
+
+    def _group_scanned(members: list[Any]) -> None:
+        if remaining_groups is None:
+            return
+        for m in members:
+            left = remaining_groups.get(m.property_id)
+            if left is None:
+                continue
+            if left <= 1:
+                del remaining_groups[m.property_id]
+                resolved_property_ids.add(m.property_id)  # type: ignore[union-attr]
+            else:
+                remaining_groups[m.property_id] = left - 1
     # The candidate FILTER + queue tier are the geo path's only divergence; the geo classify
     # maps auto_merge → candidate so a deterministic geo signal never merges on its own — the
     # shared free-first visual flow is the sole merge gate.
@@ -1410,6 +1442,7 @@ def run_engine(
     for street_key, members in groups.items():
         if len(members) > max_group_size:
             LOG.info("SKIP large group key=%s size=%d", street_key, len(members))
+            _group_scanned(members)
             continue
         # Real-time (dirty) drain: the load is SCOPED to the dirty properties' street
         # groups (restrict_street_groups), so it carries each dirty property's existing
@@ -1420,6 +1453,7 @@ def run_engine(
         if only_groups_with_property_ids is not None and not any(
             m.property_id in only_groups_with_property_ids for m in members
         ):
+            _group_scanned(members)
             continue
         for i in range(len(members)):
             if ctx.pairs_left <= 0:
@@ -1428,7 +1462,7 @@ def run_engine(
             for j in range(i + 1, len(members)):
                 if ctx.pairs_left <= 0:
                     LOG.info("PAIR cap reached; deferring remainder to next run")
-                    stats["truncated"] = 1  # scan did NOT finish — dirty drain keeps its claim
+                    stats["truncated"] = 1  # scan did NOT finish; completed groups still clear
                     return finalize()
                 # Wall-clock budget: per-pair cold vision can outrun the job timeout,
                 # which SIGKILLs the run before it writes results. Stop cleanly so the run
@@ -1439,9 +1473,13 @@ def run_engine(
                         "TIME budget reached; finalizing cleanly at pairs_considered=%d",
                         stats["pairs_considered"],
                     )
-                    stats["truncated"] = 1  # scan did NOT finish — dirty drain keeps its claim
+                    stats["truncated"] = 1  # scan did NOT finish; completed groups still clear
                     return finalize()
                 resolve_pair(conn, members[i], members[j], street_key=street_key, ctx=ctx)
+        else:
+            # The for-else fires only when the group's pair scan COMPLETED (no break) —
+            # the deadline/pair-cap returns above exit before reaching it.
+            _group_scanned(members)
 
     return finalize()
 
@@ -1861,10 +1899,11 @@ def main() -> int:
 
         # Real-time dirty drain: claim the dedup-ready properties at/before a cutoff
         # BEFORE building the (LLM-backed) fns, so an empty queue exits without that work.
-        # The clear after the run is gated on a NON-truncated run, so a deadline-cut run
-        # keeps its whole claim (re-drained next pass) and never loses unprocessed work; the
-        # NEWEST-first claim + the TTL prune below mean a claim that can't finish never pins the
-        # head (its stale tail ages out, the fresh head is served first, the full scan backstops).
+        # The clear after the run is INCREMENTAL (per completed street group, see the clear
+        # block below): a deadline-cut run clears what it finished and keeps only the
+        # unprocessed remainder (re-drained next pass) — never loses work, always progresses;
+        # the NEWEST-first claim + the TTL prune below mean even a pathological claim never
+        # pins the head (stale tail ages out, fresh head served first, full scan backstops).
         only_groups = None
         dirty_street_groups: tuple[set[int], set[tuple[int, str]]] | None = None
         dirty_cutoff = None
@@ -1978,10 +2017,13 @@ def main() -> int:
 
         if not args.geo_only:
             pair_audit: list[dict[str, Any]] = []
+            dirty_resolved: set[int] = set()
             stats = run_engine(
                 conn, audit=pair_audit, max_pairs=args.max_pairs,
                 only_groups_with_property_ids=only_groups,
-                restrict_street_groups=dirty_street_groups, **engine_kw,
+                restrict_street_groups=dirty_street_groups,
+                resolved_property_ids=(dirty_resolved if args.dirty else None),
+                **engine_kw,
             )
             stats["clip_classified"] = clip_counter[0]
             if args.dirty:
@@ -1991,23 +2033,24 @@ def main() -> int:
                 stats["dirty_queue_depth"] = queue_depth
                 stats["dirty_claimed"] = len(only_groups)
             if not args.shadow:
-                # Clear the claim ONLY on a run that finished the scan. A truncated run
-                # (deadline / pair-cap) didn't reach every dirty group, so keep the whole
-                # claim — it re-drains next pass; a few already-resolved pairs re-run cheaply
-                # (classify_pair rejects 'already_merged'), but NO unprocessed dirty property
-                # is silently dropped. (Oversized groups are unresolvable everywhere, so a
-                # finished run rightly clears them — the daily full scan handles them if they
-                # shrink below MAX_GROUP_SIZE.) The clear happens BEFORE the run row so its
-                # outcome (dirty_cleared / dirty_truncated) is recorded — a chronically
-                # truncating drain (cleared==0 while queue_depth stays high) is then VISIBLE,
-                # the silent-livelock guard the FIFO stall lacked.
+                # INCREMENTAL clear: drop exactly the claimed properties whose EVERY street
+                # group was fully scanned this run (`dirty_resolved`, tracked per-group in
+                # run_engine). A deadline/pair-cap-truncated run thus still clears the slice
+                # it finished — monotonic progress every run — while unfinished properties
+                # keep their claim and re-drain next pass. (The previous all-or-nothing clear
+                # kept the ENTIRE claim on truncation, and prod data showed 4/5 dirty runs
+                # truncating on pure per-pair DB cost → the same slice re-processed hourly and
+                # dirty_cleared pinned at 0. Oversized groups count as scanned: unresolvable
+                # everywhere, the full scan's job if they shrink.) The clear happens BEFORE
+                # the run row so dirty_cleared / dirty_truncated record the real outcome.
                 if args.dirty:
                     truncated = bool(stats.get("truncated"))
                     stats["dirty_truncated"] = 1 if truncated else 0
-                    cleared = 0 if truncated else _clear_dedup_dirty(conn, only_groups, dirty_cutoff)
+                    to_clear = only_groups & dirty_resolved
+                    cleared = _clear_dedup_dirty(conn, to_clear, dirty_cutoff)
                     stats["dirty_cleared"] = cleared
-                    LOG.info("DIRTY drain: cleared %d drained properties (truncated=%s)",
-                             cleared, truncated)
+                    LOG.info("DIRTY drain: cleared %d/%d claimed (resolved groups; truncated=%s)",
+                             cleared, len(only_groups), truncated)
                 _write_run_row(conn, stats)
                 _write_pair_audit(conn, run_at, pair_audit)
             LOG.info(

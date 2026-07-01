@@ -6,6 +6,25 @@ source for active rules; ROADMAP is for sequencing.
 
 ## Done
 
+### 2026-07: Dedup dirty drain — per-group incremental clear (monotonic progress under any budget)
+
+Post-redesign audit found the dirty drain STILL truncating 4/5 runs with `dirty_cleared=0`: a
+3,000-property claim generates >1,600 pairs at ~0.5–0.75 s/pair (per-pair DB round-trips — pHash,
+clip-completeness, plan-image lookups), which doesn't fit the 1200 s budget, and the all-or-nothing
+clear kept the ENTIRE claim on truncation — so the same slice re-processed hourly (merges happened,
+work repeated, queue drained only via TTL). This was the "clear per-group" defense-in-depth the
+redesign deferred; the data proved it necessary.
+
+Fix: `run_engine` gains a `resolved_property_ids` out-collector — a claimed property is RESOLVED
+once EVERY street group containing it (a listing dual-keys into 'id:' + 'name:' groups) was fully
+scanned this run (`for…else` completion detection; skipped oversized / filter-skipped groups count
+as scanned; zero-group claimed properties resolve immediately). The dirty drain then clears
+`claimed ∩ resolved` EVERY run — a truncated run clears what it finished, only the remainder
+re-drains. Progress is monotonic by construction, immune to per-pair cost drift — no cap tuning.
+Tests cover full-run resolve, truncated partial resolve, and the dual-key guard (one of two groups
+scanned ≠ resolved). Follow-up (perf, separate): batch the per-pair DB probes set-based per group
+to cut the ~0.5 s/pair floor.
+
 ### 2026-07: Floor-plan gate → contradiction veto (stop queuing ~600 obvious merges over 3D-render "plans")
 
 Cross-portal apartment groups with 6–7 identical interior photos (pHash) were stuck in manual review
