@@ -163,8 +163,19 @@ jobs:
             # SCHEDULED DIRTY DRAIN (free, real-time): re-decide ONLY the street groups
             # touching a just-dedup-ready property (dedup_dirty_properties, filled by the
             # hourly CLIP tag job), so a new cross-portal listing merges within ~minutes of
-            # being tagged. Empty queue -> fast no-op. Bounded floor-plan vision (300).
-            ARGS="--free --dirty --max-pairs 200000 --max-seconds 1200 --floor-plan-budget 300"
+            # being tagged. Empty queue -> fast no-op.
+            #   * --floor-plan-budget 0: the real-time lane pays NO inline floor-plan vision
+            #     (a cold call downloads the plan images from R2 + Sonnet ~15s each; 300 of
+            #     them blew the 20-min budget -> the run truncated -> never cleared -> livelock).
+            #     It consumes only warm verdicts (cache-only) and DEFERS the rest; would-merge
+            #     both-plan pairs are validated by the 6h full scan (budget 300) or the batch
+            #     warmer. Keeps the hot path fast so it always finishes-and-clears.
+            #   * --max-dirty 3000: a slice small enough that its street-group pair-work fits
+            #     the 20-min budget even on a portal-launch spike (the enqueue eligibility+
+            #     recency gates keep the steady-state queue far below this). Newest-first claim
+            #     + the 24h TTL prune mean the stale tail ages out to the full scan, never pins
+            #     the head.
+            ARGS="--free --dirty --max-pairs 200000 --max-seconds 1200 --floor-plan-budget 0 --max-dirty 3000"
           elif [ "${{ github.event.schedule }}" = "30 */2 * * *" ]; then
             # SCHEDULED CANDIDATE DRAIN (free): re-decide ONLY the properties in the
             # still-proposed /dedup queue (O(queue), not a market scan), so the queue

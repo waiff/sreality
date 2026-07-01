@@ -1546,9 +1546,16 @@ three work-lists: a **FULL SCAN** every 6h that DISCOVERS new dups across the ma
 still-proposed `/dedup` candidates so the queue **self-clears in O(queue)** regardless of the
 full scan's deadline frontier; and a **DIRTY DRAIN** hourly at :45 (`--dirty`, Wave 4c) that
 re-decides ONLY the street groups touching a just-dedup-ready property
-(`dedup_dirty_properties`, migration 242 — enqueued by the hourly CLIP tag job when a listing's
-images get tagged, i.e. pHash+CLIP done) so a **new cross-portal listing merges within ~minutes**
-instead of waiting hours (the watchdog-grain goal). The dirty drain's eligible LOAD is **SCOPED to
+(`dedup_dirty_properties`, migration 242) so a **new cross-portal listing merges within ~minutes**
+instead of waiting hours (the watchdog-grain goal). **The enqueue is a real-time CHANGE signal,
+NOT enrichment progress** (`scraper.db.mark_properties_dedup_dirty_for_images`, called by the CLIP
+tag job): a property lands here only when a just-tagged listing is (a) now FULLY tagged, (b) its
+property has a street+disposition listing (**eligibility** — the street-only dirty drain can never
+merge one without, geo is skipped on `--dirty`), AND (c) the tagged listing is **recent**
+(`first_seen_at` within `_DEDUP_DIRTY_RECENCY_DAYS`, a genuinely NEW arrival). Without (b)+(c) the
+market-wide CLIP backfill / a new portal's back-catalogue floods the queue with un-mergeable /
+already-full-scanned rows — the flood that stalled it twice (201k, 78.5% ineligible); anything the
+gates drop is still deduped by the 6h full scan. The dirty drain's eligible LOAD is **SCOPED to
 the claimed properties' street groups** (`restrict_street_groups`) — not a full-market scan — via the
 **stored `listings.street_name_key`** (migration 256): `_claimed_street_groups` reads the dirty
 properties' `street_id` + `(coalesce(obec_id,-1), street_name_key)`, and the load (`_ELIGIBLE_SCOPED_SQL`)
@@ -1570,18 +1577,26 @@ resolver), out of the content hash, backfilled by `scripts.backfill_street_name_
 regression test pins the function and a write-path test asserts every backfill's UPDATE stamps the
 column; the ultimate drift guard is that the 6h full scan recomputes the key LIVE from `street` (never
 reads the stored column), so a stale/missed stored key only delays a dirty-drain merge to the next full
-scan (latency, never a wrong or lost merge). The claim is **FIFO-BOUNDED** (`--max-dirty`,
-default 10000): like every sibling drain it must cap its per-run work, because a tagging backlog
-(a new portal, a retag campaign) can enqueue most of the market at once — an unbounded claim then
-resolves O(market) groups per hourly run, never completes within the time budget, never clears, and
-the queue only grows (the huge claim + full load can also drop the pooled connection mid-run). Each
-bounded run completes-and-clears its oldest-N slice, so a flood drains over successive runs. **Each
-dirty run records `dedup_engine_runs.dirty_queue_depth` (the backlog at run start) + `dirty_claimed`
-(its slice)** (migration 255, NULL on other run modes) so a non-draining queue is VISIBLE — the
-`/dedup` dashboard shows a "Dirty queue" stat + a stall banner, and the Health page raises an amber
-(deep + draining = transient flood) / red (high + NOT draining across recent runs = the drain is
-failing/out-paced) banner. The shared, unit-tested `assessDirtyQueue` (`frontend/src/lib/dedupQueueHealth.ts`)
-is the single source of that status for both surfaces.
+scan (latency, never a wrong or lost merge). The claim is **NEWEST-FIRST + bounded** (`--max-dirty`,
+3000 on the cron) and the queue is **TTL-bounded** (`_prune_stale_dedup_dirty`, 24h): the real-time
+lane is a LATENCY optimization backstopped by the full scan, so it serves the FRESHEST dedup-ready
+listing first (the "merge in minutes" SLO holds even under a transient backlog) and evicts rows
+older than the TTL (the full scan has already covered them) — so an un-drainable backlog can never
+pin the head or grow unbounded. (This replaced the original **FIFO** claim, which — with the clear
+gated on a non-truncated run — let a June-backfill head that never finished within the 20-min budget
+be re-claimed every hour forever: the queue grew to 201k and never drained. FIFO is the wrong order
+for a latency SLO; the full scan is the tail's backstop.) The **dirty cron runs
+`--floor-plan-budget 0`**: the real-time lane pays NO inline floor-plan vision (a cold call
+downloads plan images from R2 + Sonnet ~15s each; a batch of them blew the wall-clock budget →
+truncate → never clear), consuming only warm verdicts and DEFERRING the rest to the 6h full scan /
+the batch warmer — keeping the hot path fast so it always finishes-and-clears. **Each dirty run
+records `dedup_engine_runs.dirty_queue_depth` (backlog at run start) + `dirty_claimed` (its slice)**
+(migration 255) **plus `dirty_cleared` + `dirty_truncated`** (migration 258, NULL on other run
+modes) — `cleared==0` while `dirty_queue_depth` stays high across runs is the silent-livelock guard
+the FIFO stall lacked. The `/dedup` dashboard shows a "Dirty queue" stat + a stall banner, and the
+Health page raises an amber (deep + draining = transient flood) / red (high + NOT draining across
+recent runs = the drain is failing/out-paced) banner. The shared, unit-tested `assessDirtyQueue`
+(`frontend/src/lib/dedupQueueHealth.ts`) is the single source of that status for both surfaces.
 All three drains compose with `--free` + the floor-plan budget), `dedup_batches.yml` ("Dedup engine (vision batch warm-up)", submit every
 6h + ingest hourly — pre-warms the engine's vision caches via the Anthropic Batches API at 50%
 off so the daily engine run merges over warm cache for free; rule #15), and
