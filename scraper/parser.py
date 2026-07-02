@@ -15,6 +15,7 @@ import re
 from typing import Any
 from unicodedata import combining, normalize
 
+from scraper.published import iso_date
 from scraper.street import street_from_locality
 
 CATEGORY_MAIN: dict[int, str] = {
@@ -250,6 +251,10 @@ def parse_listing(raw: dict[str, Any]) -> dict[str, Any]:
         "house_number": _loc_str(loc, "housenumber") or _loc_str(loc, "streetnumber"),
         "zip": _loc_str(loc, "zip"),
         "street_id": _id_or_none(loc.get("street_id")),
+        # sreality exposes no publish date — `edited` (day-granular last-edit,
+        # present on ~40% of rows) is the weak fallback bound for publish-to-
+        # ingest SLO math, not first publication.
+        "published_at": iso_date(raw.get("edited")),
     }
 
 

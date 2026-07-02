@@ -102,6 +102,9 @@ LISTING_COLUMNS: tuple[str, ...] = (
     # the content hash (the hash covers raw_json, not derived columns), so
     # populating it never churns a snapshot.
     "street_name_key",
+    # Portal-declared publication/last-bump timestamp (migration 266). Out of
+    # every content hash (bazos re-stamps it per bump; backfills stay free).
+    "published_at",
 )
 
 # Postgres type for each LISTING_COLUMN, used to build the jsonb_to_recordset
@@ -147,6 +150,7 @@ _LISTING_COLUMN_PGTYPE: dict[str, str] = {
     "zip": "text",
     "street_id": "integer",
     "street_name_key": "text",
+    "published_at": "timestamptz",
 }
 assert set(_LISTING_COLUMN_PGTYPE) == set(LISTING_COLUMNS), (
     "_LISTING_COLUMN_PGTYPE drifted from LISTING_COLUMNS"
@@ -161,7 +165,12 @@ assert set(_LISTING_COLUMN_PGTYPE) == set(LISTING_COLUMNS), (
 # the trio is OUT of the content hash (no snapshot churn), a wrong-street risk is guarded
 # upstream (street.reject_as_town) and downstream (the admin-geo trigger NULLs a
 # resolver-sourced street when the listing's coordinates change — migration 262).
-_PRESERVE_IF_NULL_COLUMNS = frozenset({"street", "house_number"})
+# published_at joins the set (migration 266): the signal is intermittent at the source
+# (sreality's `edited` exists on ~40% of rows; a portal can stop rendering its date), so a
+# fetch that yields no date must not erase what an earlier fetch or a raw_json backfill
+# recorded — a fresher portal date still wins. Same rails: out of the content hash,
+# informational only.
+_PRESERVE_IF_NULL_COLUMNS = frozenset({"street", "house_number", "published_at"})
 
 # street_name_key is NOT independently preserve-if-null: it is a pure function of
 # street, so it must follow the STREET's preserve decision — preserved exactly when

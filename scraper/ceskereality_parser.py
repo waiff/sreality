@@ -34,6 +34,7 @@ from selectolax.parser import HTMLParser, Node
 
 from scraper import street
 from scraper.geocoding import GeocodeResult, GeocodingError
+from scraper.published import czech_date
 from scraper.scraped_listing import ScrapedListing
 
 Geocoder = Callable[[str], GeocodeResult]
@@ -586,5 +587,8 @@ def parse_detail(
         estate_area=_parse_area(params.get("plocha pozemku")),
         garden_area=_parse_area(params.get("plocha zahrady")),
         description=description,
+        # "Datum vložení" — the portal's own insertion date ("10. února 2026"),
+        # the cleanest publish signal any HTML portal exposes.
+        published_at=czech_date(params.get("datum vložení")),
         raw=raw,
     )

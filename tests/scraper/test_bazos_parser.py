@@ -226,6 +226,27 @@ def test_parse_detail_full():
     ]
 
 
+def test_parse_detail_published_at_from_bracketed_date():
+    # span.velikost10 "[12.5. 2026]" — bazos's posting date. It re-stamps on
+    # every bump / TOP renewal (a last-bump date), but it's the tightest
+    # publish bound the portal exposes.
+    from datetime import date
+
+    url = "https://reality.bazos.cz/inzerat/219122924/prodam-byt-2-kk-letovice.php"
+    listing = parse_detail(
+        DETAIL_HTML, source_url=url, category_main="byt", category_type="prodej"
+    )
+    assert listing.published_at == date(2026, 5, 12)
+
+
+def test_parse_detail_published_at_none_when_no_date_span():
+    listing = parse_detail(
+        DOHODOU_DETAIL_HTML, source_url="https://reality.bazos.cz/inzerat/1/x.php",
+        category_main="byt", category_type="pronajem",
+    )
+    assert listing.published_at is None
+
+
 def test_parse_detail_extracts_floor_from_description():
     # parse_detail feeds the title+description haystack to the shared floor miner;
     # an explicit unit-floor cue lands as a ground=0 integer (the fixture above has

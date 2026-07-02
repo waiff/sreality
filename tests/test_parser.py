@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import math
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -347,6 +348,21 @@ def test_description_missing_is_none():
 
 def test_description_empty_value_is_none():
     assert parse_listing(_estate(advert_description="   "))["description"] is None
+
+
+def test_published_at_from_edited(sample):
+    # `edited` is sreality's day-granular last-edit date (~40% of rows) — the
+    # weak publish-bound fallback mapped onto published_at.
+    assert parse_listing(sample)["published_at"] == date(2026, 5, 26)
+
+
+def test_published_at_missing_is_none():
+    assert parse_listing(_estate())["published_at"] is None
+
+
+def test_published_at_malformed_is_none():
+    assert parse_listing(_estate(edited="not a date"))["published_at"] is None
+    assert parse_listing(_estate(edited=20260526))["published_at"] is None
 
 
 def test_missing_id_raises():
