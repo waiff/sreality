@@ -198,6 +198,38 @@ def test_parse_detail_full():
     assert listing.raw["coords"]["source"] == "page"
 
 
+PUBLISHED_HTML = """
+<!DOCTYPE html><html><body>
+<h1>Prodej bytu 2+kk 48 m²</h1>
+<input data-coord-lat="50.08110" data-coord-lng="14.42030">
+<dl class="g-info">
+  <div class="i-info"><span class="i-info__title">Datum vložení</span><span class="i-info__value"> 10. února 2020 </span></div>
+  <div class="i-info"><span class="i-info__title">Plocha užitná</span><span class="i-info__value">48 m²</span></div>
+</dl>
+</body></html>
+"""
+
+
+def test_parse_detail_published_at_from_datum_vlozeni():
+    # "Datum vložení" is ceskereality's insertion date, Czech long-form
+    # month name ("10. února 2020").
+    from datetime import date
+
+    listing = parse_detail(
+        PUBLISHED_HTML, source_url=_DETAIL_URL,
+        category_main="byt", category_type="prodej",
+    )
+    assert listing.published_at == date(2020, 2, 10)
+
+
+def test_parse_detail_published_at_none_when_absent():
+    # DETAIL_HTML carries no "Datum vložení" row.
+    listing = parse_detail(
+        DETAIL_HTML, source_url=_DETAIL_URL, category_main="byt", category_type="prodej",
+    )
+    assert listing.published_at is None
+
+
 def test_parse_detail_street_from_slug_when_no_jsonld_address():
     listing = parse_detail(
         SLUG_STREET_HTML, source_url=SLUG_STREET_URL,

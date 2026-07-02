@@ -175,6 +175,20 @@ def test_commercial_and_land_category_mapping():
     assert parse_advert(_advert(estateType="GARAZ")).category_main == "ostatni"
 
 
+def test_published_at_from_time_activated_when_present():
+    # The anon API returns timeActivated NULL today (so published_at is None on
+    # the base advert), but the mapping is wired for the day access appears —
+    # the one portal that would carry a real timestamp, not just a day.
+    from datetime import timezone
+
+    assert parse_advert(_advert()).published_at is None
+    listing = parse_advert(_advert(timeActivated="2024-05-06T10:39:22+02:00"))
+    assert listing.published_at is not None
+    assert listing.published_at.astimezone(timezone.utc).isoformat() == (
+        "2024-05-06T08:39:22+00:00"
+    )
+
+
 @pytest.mark.parametrize("enum,expected", [
     ("DISP_1_KK", "1+kk"),
     ("DISP_2_1", "2+1"),

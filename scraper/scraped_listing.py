@@ -15,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass, field
+from datetime import date, datetime
 from typing import Any
 
 # Fields whose change should append a listing_snapshots row. Mirrors the
@@ -26,7 +27,10 @@ from typing import Any
 # street / house_number / zip are likewise NOT hashed — they are
 # extracted/derived (regex over the title+description for bazos, a comma-split
 # of the locality for idnes/maxima/remax), so backfilling or refining them must
-# never churn snapshots.
+# never churn snapshots. published_at is NOT hashed either: it is portal
+# lifecycle metadata, not listing content — bazos re-stamps it on every bump /
+# TOP renewal, so hashing it would append a snapshot per seller promotion, and
+# backfills from already-stored raw must stay snapshot-free.
 _HASH_FIELDS: tuple[str, ...] = (
     "category_main", "category_type", "price_czk", "price_unit", "area_m2",
     "disposition", "locality", "district", "floor",
@@ -45,7 +49,7 @@ _LISTING_FIELDS: tuple[str, ...] = (
     "has_balcony", "has_parking", "has_lift", "building_type", "condition",
     "energy_rating", "estate_area", "usable_area", "garden_area",
     "category_sub_cb", "subtype", "furnished", "terrace", "cellar", "garage",
-    "parking_lots", "ownership", "description",
+    "parking_lots", "ownership", "description", "published_at",
 )
 
 
@@ -93,6 +97,11 @@ class ScrapedListing:
     parking_lots: int | None = None
     ownership: str | None = None
     description: str | None = None
+    # Portal-declared publication/last-bump timestamp (migration 266). A date
+    # for the day-granular portals (bazos, ceskereality — stored as midnight
+    # UTC in the timestamptz column), a full datetime where the portal exposes
+    # one (bezrealitky's timeActivated). Out of the content hash (see above).
+    published_at: datetime | date | None = None
     # The source's own payload, stored verbatim in listings.raw_json.
     raw: dict[str, Any] = field(default_factory=dict)
 
