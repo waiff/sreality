@@ -2586,11 +2586,12 @@ def main() -> int:
         if run_geo:
             # Same free-first flow over geo-keyed single-dwelling families; geo=True swaps
             # the loader + candidate filter (classify_geo_pair, ±area tolerance) + queue
-            # tier. NO separate dedup_engine_runs row — the dashboard reads the latest single
-            # row (ORDER BY started_at DESC LIMIT 1); a geo row (small geo eligible,
-            # auto_address=0) would hide the street pass's headline. Geo decisions still land
-            # in dedup_pair_audit (decision history) + the tier='geo' candidate queue.
+            # tier. Geo decisions land in dedup_pair_audit (decision history), the
+            # tier='geo' candidate queue, and (since migration 265) the lane's OWN
+            # run_kind='geo' run row — see the _write_run_row call below.
             geo_audit: list[dict[str, Any]] = []
+            geo_started_at = datetime.now(timezone.utc)
+            geo_clip_base = clip_counter[0]
             # Geo ALWAYS enqueues its unresolved pairs (rule #15 (E): single-dwelling geo signals
             # never auto-merge on proximity alone, so "everything else queues for review"),
             # independent of --free. The street path's --free enqueue suppression (don't inflate
@@ -2604,12 +2605,15 @@ def main() -> int:
                 conn, audit=geo_audit, max_pairs=args.geo_max_pairs,
                 geo=True, geo_area_max_pct=geo_area_max_pct, **geo_kw,
             )
+            geo_stats["clip_classified"] = clip_counter[0] - geo_clip_base
             if not args.shadow:
                 # The geo lane writes its OWN run row (run_kind='geo', migration 262/265) —
                 # it previously wrote none, so a chronically truncating geo scan was
                 # invisible. Its `eligible` is the GEO lane's count; the street gauge
                 # pickers exclude it by run_kind, so it never pollutes the /dedup gauges.
-                _write_run_row(conn, geo_stats, run_kind="geo", started_at=run_at)
+                # started_at is the GEO pass's own start (on a combined run, run_at would
+                # bill the whole street pass to the geo row's duration).
+                _write_run_row(conn, geo_stats, run_kind="geo", started_at=geo_started_at)
                 _write_pair_audit(conn, run_at, geo_audit)
             LOG.info(
                 "GEO %s eligible=%d auto_phash=%d auto_visual=%d auto_dismissed=%d "

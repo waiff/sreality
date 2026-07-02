@@ -118,7 +118,10 @@ export default function Dedup() {
 
   const engineRunsQ = useQuery<DedupEngineRun[], Error>({
     queryKey: dedupKeys.engineRuns(14),
-    queryFn: () => fetchDedupEngineRuns(14),
+    // 40, not 14: gauges come from the latest FULL-scan row, and with hourly dirty +
+    // 2-hourly candidate + geo rows a 14-row window has ~3 rows of slack around the
+    // 6h full scan — one missed/failed full scan would push it out (gauges -> em dash).
+    queryFn: () => fetchDedupEngineRuns(40),
     placeholderData: keepPreviousData,
   });
 
@@ -338,9 +341,9 @@ function AutomationDashboard({
             </div>
           ) : null}
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-            <Stat label="Eligible" value={gauges?.eligible ?? 0} hint="street + disposition" />
-            <Stat label="Loc. unclear" value={gauges?.flagged_location ?? 0} hint="no street" muted />
-            <Stat label="Disp. unclear" value={gauges?.flagged_disposition ?? 0} hint="no disposition" muted />
+            <Stat label="Eligible" value={gauges?.eligible ?? '—'} hint="street + disposition" />
+            <Stat label="Loc. unclear" value={gauges?.flagged_location ?? '—'} hint="no street" muted />
+            <Stat label="Disp. unclear" value={gauges?.flagged_disposition ?? '—'} hint="no disposition" muted />
             <Stat label="Auto-merged" value={autoTotal} hint="this run" accent />
           </div>
           <div className="mt-2 grid grid-cols-2 sm:grid-cols-7 gap-2">
@@ -386,7 +389,7 @@ function Stat({
   small,
 }: {
   label: string;
-  value: number;
+  value: number | string;
   hint?: string;
   accent?: boolean;
   muted?: boolean;
@@ -400,7 +403,7 @@ function Stat({
   return (
     <div className="rounded-[var(--radius-sm)] border border-[var(--color-rule-soft)] bg-[var(--color-paper-2)] px-3 py-2">
       <div className={`font-mono tabular-nums ${small ? 'text-base' : 'text-xl'} ${valueColor}`}>
-        {fmtCount(value)}
+        {typeof value === 'number' ? fmtCount(value) : value}
       </div>
       <div className="text-[0.62rem] tracking-[0.1em] uppercase text-[var(--color-ink-3)]">{label}</div>
       {hint ? <div className="text-[0.62rem] text-[var(--color-ink-4)]">{hint}</div> : null}
