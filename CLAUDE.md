@@ -111,9 +111,11 @@ the Health dashboard's iDNES card shows BOTH a scraper and an on-demand-parser b
 
 **Data source (mmreality.cz).** A crawler (`scraper/mmreality_client.py`,
 `mmreality_parser.py`, `mmreality_main.py`, workflow `scrape_mmreality.yml` — pilot,
-**dispatch-only**: Cloudflare 403-blocks GitHub-hosted runner IPs, so the cron was removed
-while every scheduled run produced zero listings; re-enable only with non-datacenter
-egress) tagged `source='mmreality'`. M&M Reality is server-rendered HTML
+cron `50 */6` — **every request rides the residential proxy** (`SCRAPER_PROXY_URL`,
+`USE_PROXY=True`): Cloudflare hard-403s datacenter IPs (the first 101 direct scheduled runs
+ingested zero listings), so the proxy is mandatory from ANY datacenter egress, GitHub or
+Railway alike; the cron is offset from ceskereality's `25 */6` so the two proxied portals
+don't hammer the shared proxy at the same minute) tagged `source='mmreality'`. M&M Reality is server-rendered HTML
 but **every detail page embeds a COMPLETE structured estate object** as a Vue
 `:property` prop (HTML-entity-encoded JSON), so `mmreality_parser.parse_detail` decodes
 that JSON rather than scraping markup: precise per-listing coordinates (`point`), typed
@@ -593,8 +595,9 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     SOFT cross-portal signal — idnes counts the ground floor as 0 (patro), sreality as 1 (NP), so the
     same flat reads one floor apart on the two portals, and sreality is itself lister-inconsistent;
     a gap of exactly 1 is convention noise that falls through to the visual layer, only a gap of 2+
-    is a hard reject. Rule B's exact auto-merge still requires floor *equality*, so an off-by-one
-    never auto-merges without photo confirmation.)
+    is a hard reject. Since rule B's retirement no path
+    auto-merges on address+floor alone, so an off-by-one never auto-merges without photo
+    confirmation.)
     Two development guards keep near-identical units of one project from auto-merging:
     a TEXT one (rule C `unit_marker_contradiction` — the descriptions name the same
     keyword with different unit tokens: `pozemek č.3` vs `č.4`, `dům 3A` vs `5C`,
@@ -1528,9 +1531,9 @@ mark_inactive + enqueue) feeds `bazos_detail_drain.yml` ("Scraping: Bazos detail
 both index walk + detail drain in one job via `bezrealitky_main`). The maxima scrape is
 `scrape_maxima.yml` ("Scraping: Maxima Reality scraper (pilot)", every 6h + dispatch; the
 ~220-listing catalogue fits both phases in one job via `maxima_main`). The mmreality scrape is
-`scrape_mmreality.yml` ("Scraping: M&M Reality scraper (pilot)", **dispatch-only** — Cloudflare
-403-blocks GitHub-hosted runner IPs, so its cron was removed; runs both phases in one job via
-`mmreality_main`, bounded by `--max-pages`/`--max-detail`). The remax
+`scrape_mmreality.yml` ("Scraping: M&M Reality scraper (pilot)", cron `50 */6` + dispatch —
+every request via the residential `SCRAPER_PROXY_URL` (Cloudflare 403-blocks datacenter IPs);
+runs both phases in one job via `mmreality_main`, bounded by `--max-pages`/`--max-detail`). The remax
 scrape is `scrape_remax.yml` ("Scraping: RE/MAX scraper (pilot)", every 6h + dispatch; runs both
 phases in one job via `remax_main`, bounded by `--max-detail` + a `--max-seconds` budget so the
 ~7,900-listing backlog drains over several ticks). The idnes scrape is
