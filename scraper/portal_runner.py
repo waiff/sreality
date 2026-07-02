@@ -264,7 +264,7 @@ def _drain_mark_gone(portal: Portal, conn: Any, native_id: str, reconnect: Any) 
             portal.mark_gone(c, native_id)
         except Exception as exc:  # noqa: BLE001 - bookkeeping; tolerated like before
             LOG.warning("could not mark id=%s inactive: %s", native_id, exc)
-        db.complete_detail(c, portal.source, [native_id])
+        db.complete_detail(c, portal.source, [native_id], outcome="gone")
 
     _, conn = db.run_resilient(conn, _op, reconnect=reconnect, label="drain.gone")
     return conn
