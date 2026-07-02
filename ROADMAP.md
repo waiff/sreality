@@ -6,6 +6,29 @@ source for active rules; ROADMAP is for sequencing.
 
 ## Done
 
+### 2026-07: Dedup run observability — run_kind/truncated + cleared-based queue health (audit PR-A)
+
+Observability slice of the 2026-07 dedup-lane audit program (lands after PR-C below — the
+program's slices merged out of order as parallel sessions picked them up):
+- **Run rows tell the truth** (migration 262): every `dedup_engine_runs` row now records
+  `run_kind` ('full' | 'candidates' | 'dirty'), the run-level `truncated`, and a REAL
+  `started_at` (previously stamped at INSERT — equal to `ended_at`, so durations were
+  unrecorded). A deadline-cut FULL SCAN is now a queryable fact — the measure that proves
+  PR-C's cursor is delivering whole-market cycles (and alarms if it regresses). "Latest run"
+  readers order by `ended_at` (insert-order semantics preserved — a long scan's row must not
+  sort below dirty runs that started after it).
+- **Queue health keys on real progress, not depth**: `assessDirtyQueue` now reads
+  `dirty_cleared`/`dirty_truncated` (migration 258 — written since #666 but consumed by
+  nothing) — "draining" means cleared>0 in the window, and a truncated streak with zero
+  cleared is a red LIVELOCK regardless of depth. The 24h TTL prune (cycle-gated since PR-C)
+  shrinks depth whether or not the drain works, so the old depth-trend heuristic mislabeled
+  pure eviction as "draining" (the exact 2026-07 production state). Pre-258 rows fall back
+  to the depth trend.
+- Drift batch: `--max-dirty` help said "N OLDEST (FIFO)" (the opposite of the #666
+  newest-first claim); the module docstring still described the Wave-3-removed cross-source
+  gate and the retired rule-B auto-merge; a manual `dirty=true` dispatch fell to the CLI's
+  10000 claim with no `max_dirty` input (dispatch now defaults to the scheduled run's 3000).
+
 ### 2026-07: Dedup full-scan cursor — whole-market coverage + honest TTL eviction (audit PR-C)
 
 The deep dedup-lane audit measured the 6h street full scan hitting its 4800 s deadline at ~64k of

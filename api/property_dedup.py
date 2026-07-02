@@ -606,7 +606,10 @@ def pipeline_overview(conn: psycopg.Connection) -> dict[str, Any]:
             "SELECT started_at, eligible, flagged_location, flagged_disposition, "
             "auto_address, auto_phash, auto_visual, auto_dismissed, queued, "
             "clip_classified, routed_haiku, routed_sonnet, vision_calls "
-            "FROM dedup_engine_runs ORDER BY started_at DESC LIMIT 1"
+            # id (insert order), NOT started_at: since migration 262 started_at is the
+            # REAL run start, so a long full scan would sort below dirty runs that
+            # started after it and this headline would never show a completed scan.
+            "FROM dedup_engine_runs ORDER BY id DESC LIMIT 1"
         )
         r = cur.fetchone()
     eligible = flagged_loc = flagged_disp = 0
