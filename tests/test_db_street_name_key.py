@@ -57,6 +57,9 @@ def test_every_bulk_street_write_path_stamps_the_key() -> None:
     assert "street_name_key" in backfill_bazos_street_locality._UPDATE_SQL
     assert "street_name_key" in backfill_address_point_streets._UPDATE_SQL
     assert "street_name_key" in backfill_street_name_key._UPDATE_SQL
+    # The re-key backfill must skip already-correct rows: an "identical" UPDATE still
+    # writes a dead tuple under MVCC, so a full --all pass would bloat for zero effect.
+    assert "IS DISTINCT FROM" in backfill_street_name_key._UPDATE_SQL
 
 
 # ---- resolver street lifecycle (migration 262) -------------------------------

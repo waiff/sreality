@@ -1581,11 +1581,15 @@ THE single source `scraper.street.street_name_key` (also what the engine groups 
 `street_group_keys`), stamped at every `listings.street` write path via that ONE function
 (`scraper.db._set_street_name_key` at ingest + ALL the bulk street backfills: `backfill_portal_streets`
 / `backfill_bazos_street_locality` / `backfill_address_point_streets` — the weekly coord→street
-resolver), out of the content hash, backfilled by `scripts.backfill_street_name_key`. A golden-case
-regression test pins the function and a write-path test asserts every backfill's UPDATE stamps the
-column; the ultimate drift guard is that the 6h full scan recomputes the key LIVE from `street` (never
-reads the stored column), so a stale/missed stored key only delays a dirty-drain merge to the next full
-scan (latency, never a wrong or lost merge). The claim is **NEWEST-FIRST + bounded** (`--max-dirty`,
+resolver), out of the content hash, backfilled by `scripts.backfill_street_name_key`. Four guards hold stored == function:
+golden-case tests pin the normalization, a write-path test asserts every backfill's UPDATE stamps the
+column, the migration-264 presence CHECK (`listings_street_key_presence`) fails a keyless street write
+LOUDLY at write time, and the weekly sampled-parity job (`street_key_parity.yml` →
+`scripts/check_street_key_parity.py`) alerts via the workflow-failure monitor on any stored key
+drifting from the function (a normalizer edit requires the `backfill_street_name_key.yml all=true`
+re-key; the parity failure is the alarm for forgetting it). The ultimate backstop remains that the 6h
+full scan recomputes the key LIVE (never reads the column), so any drift is latency-only, never a
+wrong or lost merge. The claim is **NEWEST-FIRST + bounded** (`--max-dirty`,
 3000 on the cron) and the queue is **TTL-bounded** (`_prune_stale_dedup_dirty`, 24h): the real-time
 lane is a LATENCY optimization backstopped by the full scan, so it serves the FRESHEST dedup-ready
 listing first (the "merge in minutes" SLO holds even under a transient backlog) and evicts rows

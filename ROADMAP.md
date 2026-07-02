@@ -6,6 +6,29 @@ source for active rules; ROADMAP is for sequencing.
 
 ## Done
 
+### 2026-07: street_name_key guards — presence CHECK + weekly sampled parity (audit PR-E)
+
+The write-path invariant "every listings.street write stamps street_name_key" was
+enumeration-guarded only, and the enumerated class already failed once (the coord→street
+resolver). Now four guards, each covering a distinct failure class:
+- **Presence CHECK** (migration 264, `listings_street_key_presence`, NOT VALID→VALIDATE,
+  0 violations pre-validated): a street containing any alphanumeric char must carry its
+  key — the forgot-to-stamp write now fails LOUDLY at write time. Alnum-gated so it is
+  exactly as strong as the Python function's own guarantee (a whitespace-only street
+  legitimately keys to NULL; btrim can't see unicode whitespace, [[:alnum:]] can't
+  false-fire).
+- **Weekly sampled parity** (`street_key_parity.yml` → `scripts/check_street_key_parity.py`,
+  2,500 newest + 2,500 block-random rows): stored key recomputed against the ONE Python
+  normalizer; any drift fails the run → workflow-failure monitor → Health page. This makes
+  migration 256's "parity test" claim TRUE (the audit found it referenced a test that
+  didn't exist). First manual run: 0/1,200 mismatches.
+- **Normalizer-edit protocol** documented at the edit site (scraper/street.py): editing the
+  normalization requires the `backfill_street_name_key.yml all=true` re-key; the parity
+  failure is the alarm for forgetting it. The --all re-key now skips already-correct rows
+  (`IS DISTINCT FROM` — an "identical" UPDATE still writes a dead tuple under MVCC).
+- Migration 264's comment corrects the record on migration 256's two overstated claims
+  (append-only forbids editing 256 itself).
+
 ### 2026-07: Dedup dirty-lane throughput — probe memoization + batched pHash + dismissal consult (audit PR-B)
 
 The audit's cost-floor fix: resolve_pair paid 2-3 SEQUENTIAL DB round-trips per candidate
