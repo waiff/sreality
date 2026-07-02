@@ -29,6 +29,7 @@ from selectolax.parser import HTMLParser, Node
 
 from scraper.floor import floor_from_text
 from scraper.geocoding import GeocodeResult, GeocodingError
+from scraper.published import bazos_posted_date
 from scraper.scraped_listing import ScrapedListing
 from scraper.street import clean_street
 
@@ -569,6 +570,8 @@ def parse_detail(
             seen.add(full)
             image_urls.append(full)
 
+    posted_text = _text(tree.css_first("span.velikost10"))
+
     raw = {
         "id": source_id,
         "title": title,
@@ -576,7 +579,7 @@ def parse_detail(
         "locality_text": _text(lok_cell),
         "psc": psc,
         "views": _text(table.get("vidělo")) or _text(table.get("videlo")),
-        "posted_date": _text(tree.css_first("span.velikost10")),
+        "posted_date": posted_text,
         "image_urls": image_urls,
         "coords": coord_provenance,
     }
@@ -603,5 +606,10 @@ def parse_detail(
         lat=lat,
         lon=lon,
         description=description,
+        # Bazos re-stamps this date on every bump / TOP renewal — a LAST-BUMP
+        # date, not first publication — but it is the only publish signal the
+        # portal exposes (and it is out of the content hash, so a bump never
+        # churns a snapshot).
+        published_at=bazos_posted_date(posted_text),
         raw=raw,
     )

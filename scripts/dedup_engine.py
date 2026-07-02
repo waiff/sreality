@@ -1767,21 +1767,29 @@ def run_engine(
     # Geo runs in the same main() invocation AFTER the street pass, which already
     # reconciled + counted street eligibility; a geo run reports its own eligible count and
     # skips the (street-keyed) eligibility scan + the (already-done) reconcile.
+    # A SCOPED run's work-list is explicit (dirty groups / candidate properties);
+    # only the unscoped full scan measures the market.
+    scoped = (restrict_property_ids is not None or restrict_street_groups is not None
+              or only_groups_with_property_ids is not None)
     if geo:
         keys = _load_geo_eligible(conn, restrict_property_ids=restrict_property_ids)
         stats = {
             "eligible": len({k.sreality_id for k in keys}),
-            "flagged_location": 0, "flagged_disposition": 0,
+            "flagged_location": None, "flagged_disposition": None,
         }
     else:
         keys = _load_eligible(
             conn, restrict_property_ids=restrict_property_ids,
             restrict_street_groups=restrict_street_groups)
-        stats = _eligibility_counts(conn)
+        # The market gauges cost a ~9s full-table aggregate — pointless on the hourly
+        # dirty / 2-hourly candidate drains whose own work takes milliseconds. NULL =
+        # "not measured" (migration 265); dashboards read gauges from full-scan rows.
+        stats = (_eligibility_counts(conn) if not scoped else
+                 {"eligible": None, "flagged_location": None, "flagged_disposition": None})
     stats.update({
         "pairs_considered": 0, "rejected": 0,
         "auto_address": 0, "auto_phash": 0, "auto_visual": 0,
-        "queued": 0, "vision_calls": 0, "skipped_same_source": 0,
+        "queued": 0, "vision_calls": 0,
         "auto_dismissed": 0, "reconciled": 0, "skipped_unresolved": 0,
         "floor_plan_deferred": 0, "clip_deferred": 0, "truncated": 0,
         "clip_classified": 0, "clip_cosine_calls": 0,
@@ -1838,8 +1846,6 @@ def run_engine(
     # Prior-dismissal consult, SCOPED runs only (dirty / candidate drains re-form the
     # same pairs every pass; the full scan is cursor-rotated — one re-decision per cycle
     # is its designed refresh, and its property set is the whole market, too big to load).
-    scoped = (restrict_property_ids is not None or restrict_street_groups is not None
-              or only_groups_with_property_ids is not None)
     dismissed_prior = (
         _load_prior_dismissed(conn, {k.property_id for k in keys if k.property_id is not None})
         if scoped and not geo else None)
@@ -2563,10 +2569,10 @@ def main() -> int:
                 _write_run_row(conn, stats, run_kind=run_kind, started_at=run_at)
                 _write_pair_audit(conn, run_at, pair_audit)
             LOG.info(
-                "ENGINE %s eligible=%d auto_address=%d auto_phash=%d auto_visual=%d "
+                "ENGINE %s eligible=%s auto_address=%d auto_phash=%d auto_visual=%d "
                 "auto_dismissed=%d floor_plan_deferred=%d clip_deferred=%d reconciled=%d queued=%d "
                 "skipped_unresolved=%d rejected=%d prior_dismissed_skips=%d "
-                "skipped_same_source=%d pairs=%d vision_calls=%d",
+                "pairs=%d vision_calls=%d",
                 "shadow" if args.shadow else "done",
                 stats["eligible"], stats["auto_address"], stats["auto_phash"],
                 stats["auto_visual"], stats["auto_dismissed"],
@@ -2574,18 +2580,18 @@ def main() -> int:
                 stats["reconciled"],
                 stats["queued"], stats["skipped_unresolved"], stats["rejected"],
                 stats.get("skipped_prior_dismissed", 0),
-                stats.get("skipped_same_source", 0),
                 stats["pairs_considered"], stats["vision_calls"],
             )
 
         if run_geo:
             # Same free-first flow over geo-keyed single-dwelling families; geo=True swaps
             # the loader + candidate filter (classify_geo_pair, ±area tolerance) + queue
-            # tier. NO separate dedup_engine_runs row — the dashboard reads the latest single
-            # row (ORDER BY started_at DESC LIMIT 1); a geo row (small geo eligible,
-            # auto_address=0) would hide the street pass's headline. Geo decisions still land
-            # in dedup_pair_audit (decision history) + the tier='geo' candidate queue.
+            # tier. Geo decisions land in dedup_pair_audit (decision history), the
+            # tier='geo' candidate queue, and (since migration 265) the lane's OWN
+            # run_kind='geo' run row — see the _write_run_row call below.
             geo_audit: list[dict[str, Any]] = []
+            geo_started_at = datetime.now(timezone.utc)
+            geo_clip_base = clip_counter[0]
             # Geo ALWAYS enqueues its unresolved pairs (rule #15 (E): single-dwelling geo signals
             # never auto-merge on proximity alone, so "everything else queues for review"),
             # independent of --free. The street path's --free enqueue suppression (don't inflate
@@ -2599,7 +2605,15 @@ def main() -> int:
                 conn, audit=geo_audit, max_pairs=args.geo_max_pairs,
                 geo=True, geo_area_max_pct=geo_area_max_pct, **geo_kw,
             )
+            geo_stats["clip_classified"] = clip_counter[0] - geo_clip_base
             if not args.shadow:
+                # The geo lane writes its OWN run row (run_kind='geo', migration 262/265) —
+                # it previously wrote none, so a chronically truncating geo scan was
+                # invisible. Its `eligible` is the GEO lane's count; the street gauge
+                # pickers exclude it by run_kind, so it never pollutes the /dedup gauges.
+                # started_at is the GEO pass's own start (on a combined run, run_at would
+                # bill the whole street pass to the geo row's duration).
+                _write_run_row(conn, geo_stats, run_kind="geo", started_at=geo_started_at)
                 _write_pair_audit(conn, run_at, geo_audit)
             LOG.info(
                 "GEO %s eligible=%d auto_phash=%d auto_visual=%d auto_dismissed=%d "

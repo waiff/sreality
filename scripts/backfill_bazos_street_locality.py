@@ -95,7 +95,8 @@ _UPDATE_SQL = """
     UPDATE listings
     SET locality = COALESCE(%(locality)s, locality),
         street = COALESCE(%(street)s, street),
-        street_name_key = COALESCE(%(street_name_key)s, street_name_key),
+        street_name_key = CASE WHEN %(street)s::text IS NULL
+                               THEN street_name_key ELSE %(street_name_key)s END,
         district = COALESCE(%(district)s, district),
         raw_json = raw_json || '{"street_locality_backfill": true}'::jsonb
     WHERE sreality_id = %(id)s

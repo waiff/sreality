@@ -11,7 +11,7 @@ function run(
   return {
     id: 1, started_at: startedAt, ended_at: startedAt, eligible: 0, flagged_location: 0,
     flagged_disposition: 0, pairs_considered: 0, rejected: 0, auto_address: 0, auto_phash: 0,
-    auto_visual: 0, queued: 0, vision_calls: 0, cost_usd: 0, auto_dismissed: 0,
+    auto_visual: 0, queued: 0, vision_calls: 0, auto_dismissed: 0,
     floor_plan_deferred: 0, clip_deferred: 0,
     dirty_queue_depth: depth, dirty_claimed: depth == null ? null : 3000,
     dirty_cleared: depth == null ? null : cleared,

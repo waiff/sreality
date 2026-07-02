@@ -246,7 +246,7 @@ def test_index_walk_all_categories_failed_returns_nonzero_rc():
 
 
 def _patch_queue(monkeypatch, claim_batches):
-    cap = {"complete": [], "fail": [], "claim_n": [], "reclaim": 0}
+    cap = {"complete": [], "complete_outcomes": [], "fail": [], "claim_n": [], "reclaim": 0}
     it = iter(list(claim_batches) + [[]])
     monkeypatch.setattr(
         portal_runner.db, "reclaim_stale_claims",
@@ -258,10 +258,12 @@ def _patch_queue(monkeypatch, claim_batches):
         return next(it, [])
 
     monkeypatch.setattr(portal_runner.db, "claim_detail_batch", _claim)
-    monkeypatch.setattr(
-        portal_runner.db, "complete_detail",
-        lambda _c, _src, ids: cap["complete"].append(sorted(ids)),
-    )
+
+    def _complete(_c, _src, ids, outcome="written"):
+        cap["complete"].append(sorted(ids))
+        cap["complete_outcomes"].append(outcome)
+
+    monkeypatch.setattr(portal_runner.db, "complete_detail", _complete)
     monkeypatch.setattr(
         portal_runner.db, "fail_detail",
         lambda _c, _src, ids, msg, **k: cap["fail"].append(sorted(ids)),
@@ -288,6 +290,9 @@ def test_detail_drain_routes_gone_and_error(monkeypatch):
     assert p.calls["failure"] == ["12"]
     assert cap["fail"] == [["12"]]
     assert sorted(x for b in p.calls["write"] for x in b) == ["10"]
+    completions = list(zip(cap["complete"], cap["complete_outcomes"]))
+    assert (["11"], "gone") in completions
+    assert (["10"], "written") in completions
     assert sorted(x for b in cap["complete"] for x in b) == ["10", "11"]
     assert agg["errors"] == 1 and agg["listings_inactive"] == 1
 
@@ -451,7 +456,7 @@ def test_detail_drain_gone_path_survives_transient_drop(monkeypatch):
     monkeypatch.setattr(
         portal_runner.db, "claim_detail_batch", lambda *a, **k: next(batches, []))
 
-    def _complete(_c, _src, ids):
+    def _complete(_c, _src, ids, outcome="written"):
         cap["calls"] += 1
         if cap["calls"] == 1:
             _c.broken = True

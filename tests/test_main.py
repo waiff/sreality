@@ -966,7 +966,7 @@ def _drain_patches(monkeypatch, claim_batches, fetch_kind):
     monkeypatch.setattr(scraper_main.db, "write_detail_batch", _write)
     monkeypatch.setattr(
         scraper_main.db, "complete_detail",
-        lambda _c, _src, ids: captured["complete"].append(sorted(ids)),
+        lambda _c, _src, ids, outcome="written": captured["complete"].append(sorted(ids)),
     )
     monkeypatch.setattr(
         scraper_main.db, "fail_detail",
