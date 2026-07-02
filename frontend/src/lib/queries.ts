@@ -1731,9 +1731,19 @@ export interface DedupEngineRun {
   floor_plan_deferred: number;
   clip_deferred: number;
   /* --dirty runs only (NULL on full scan / candidate / geo): the dedup-ready queue depth
-   * at run start + how many this run claimed. Lets the dashboards see the backlog drain. */
+   * at run start, how many this run claimed, how many it actually CLEARED (per-group
+   * incremental clear), and whether it hit its budget. cleared==0 across truncated runs
+   * is the livelock signature migration 258 exposes — assessDirtyQueue keys on it. */
   dirty_queue_depth: number | null;
   dirty_claimed: number | null;
+  dirty_cleared: number | null;
+  dirty_truncated: number | null;
+  /* Every run (migration 262; null on pre-262 rows): the lane that wrote the row
+   * ('full' | 'candidates' | 'dirty') + whether the run stopped on its wall-clock /
+   * pair budget before finishing its scan. truncated on run_kind='full' is the
+   * full-scan coverage-gap signal (the TTL backstop is only as good as scan coverage). */
+  run_kind: string | null;
+  truncated: number | null;
 }
 
 /* Recent dedup-engine runs for the /dedup automation dashboard. Reads the anon
@@ -1748,9 +1758,12 @@ export const fetchDedupEngineRuns = async (
       'id,started_at,ended_at,eligible,flagged_location,flagged_disposition,' +
         'pairs_considered,rejected,auto_address,auto_phash,auto_visual,queued,' +
         'vision_calls,cost_usd,auto_dismissed,floor_plan_deferred,clip_deferred,' +
-        'dirty_queue_depth,dirty_claimed',
+        'dirty_queue_depth,dirty_claimed,dirty_cleared,dirty_truncated,run_kind,truncated',
     )
-    .order('started_at', { ascending: false })
+    // Insert order (id), NOT started_at: started_at is now the REAL run start (migration
+    // 262), so an 80-min full scan's row would sort below dirty runs that STARTED after it
+    // and the completed scan would never headline. id preserves the pre-262 semantics.
+    .order('id', { ascending: false })
     .limit(limit);
   if (error) throw error;
   return (data ?? []) as unknown as DedupEngineRun[];

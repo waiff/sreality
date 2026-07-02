@@ -1623,10 +1623,20 @@ makes progress monotonic regardless of budget: correctness-by-construction, not 
 records `dedup_engine_runs.dirty_queue_depth` (backlog at run start) + `dirty_claimed` (its slice)**
 (migration 255) **plus `dirty_cleared` + `dirty_truncated`** (migration 258, NULL on other run
 modes) — `cleared==0` while `dirty_queue_depth` stays high across runs is the silent-livelock guard
-the FIFO stall lacked. The `/dedup` dashboard shows a "Dirty queue" stat + a stall banner, and the
-Health page raises an amber (deep + draining = transient flood) / red (high + NOT draining across
-recent runs = the drain is failing/out-paced) banner. The shared, unit-tested `assessDirtyQueue`
-(`frontend/src/lib/dedupQueueHealth.ts`) is the single source of that status for both surfaces.
+the FIFO stall lacked. **EVERY run row additionally records `run_kind` ('full' | 'candidates' |
+'dirty') + the run-level `truncated` + a real `started_at`** (migration 262): a chronically
+deadline-cut FULL SCAN is the signal that matters most — TTL eviction hands work to the full scan,
+so eviction is only safe while scans actually cover the market (the 2026-07 audit found the
+pre-cursor scans silently truncating at ~9% of it; the migration-261 cursor + cycle-gated TTL fix
+the coverage, and `truncated` on `run_kind='full'` rows is the alarm if it regresses). "Latest
+run" readers order by `id`/`ended_at` (insert order) — NOT `started_at`, which would sort a long
+scan's row below dirty runs that started after it. The `/dedup`
+dashboard shows a "Dirty queue" stat + a stall banner, and the Health page raises an amber/red
+banner. The shared, unit-tested `assessDirtyQueue` (`frontend/src/lib/dedupQueueHealth.ts`) is the
+single source of that status for both surfaces, and it keys on **`dirty_cleared`, not depth**:
+"draining" means cleared>0 in the recent window (the 24h TTL prune shrinks depth whether or not
+the drain works, so a falling depth alone proves nothing), and a truncated streak with zero
+cleared is a red LIVELOCK regardless of depth (pre-258 rows fall back to the depth trend).
 All three drains compose with `--free` + the floor-plan budget), `dedup_batches.yml` ("Dedup engine (vision batch warm-up)", submit every
 6h + ingest hourly — pre-warms the engine's vision caches via the Anthropic Batches API at 50%
 off so the daily engine run merges over warm cache for free; rule #15), and

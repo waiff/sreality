@@ -696,10 +696,7 @@ function DedupQueueBanner() {
       <span className="text-[0.7rem] tracking-[0.18em] uppercase font-medium">dedup queue</span>
       <span>
         <span className="font-mono tabular-nums">{(dq.depth ?? 0).toLocaleString()}</span>{' '}
-        dedup-ready properties waiting.{' '}
-        {fail
-          ? 'The real-time --dirty drain is not draining across recent runs — check the dedup_engine.yml runs.'
-          : 'A tagging flood is draining through the bounded drain (transient).'}
+        dedup-ready properties waiting. {dq.reason}
       </span>
     </div>
   );

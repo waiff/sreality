@@ -12,16 +12,19 @@ Pipeline (rules A-E; see toolkit.dedup_engine for the rule text):
      dual-keyed into their 'id:' and 'name:' groups. Eligibility is computed
      inline (rule A; a partial index backs the scan — see migration 127).
   1. Within each (street_key) group, classify every cross-property pair
-     (classify_pair). Rule B exact-address pairs auto-merge immediately
-     (5% area guard); rule C contradictions are rejected; the rest are candidates.
+     (classify_pair). Rule C contradictions are rejected; the rest are
+     candidates. (Rule B's exact-address AUTO-MERGE was retired — 6.7% of those
+     merges were later unmerged — so an exact address is now a strong candidate
+     that still needs the photo evidence below.)
   2. For each candidate pair:
        a. pHash fast-path (FREE, no LLM, runs FIRST, all sources) — >=2
           near-identical image pairs (any image) -> auto-merge. Catches
           identical-photo re-posts before paying for any classify/compare.
-       b. cross-source gate — same-source pairs that pHash didn't resolve are
-          skipped (the paid visual layer only pays off cross-portal).
-       c. layered visual confirmation (rule D), cross-source only: classify ->
+       b. layered visual confirmation (rule D), ALL sources: classify ->
           room-aware forensic comparison in priority order, stop at first High.
+          (The old cross-source gate was removed in Wave 3: it cut ~36% of pairs
+          off the paid stage but cost ~1.4% recall — same-portal relists with
+          changed photos never got compared.)
      A High verdict (or the pHash fast-path) merges; everything else queues
      (rule E).
 
@@ -321,10 +324,14 @@ def _proposed_candidate_property_ids(conn: Any) -> set[int]:
 # The real-time lane is a LATENCY optimization backstopped by the 6h full scan, so its claim is
 # NEWEST-FIRST + TTL-evicted (not FIFO): a freshly-tagged cross-portal listing must merge in
 # minutes even when a transient backlog (a portal launch) is draining, and a row older than the
-# TTL has already been (or will imminently be) covered by a full scan, so it is dropped rather
-# than pinning the head. Bound + TTL keep the queue O(steady-state inflow); the full scan sweeps
-# anything the lane skips.
-_DEDUP_DIRTY_TTL_HOURS = 24  # >= the daily full-sweep cycle; the full scan re-decides evicted rows
+# TTL is dropped rather than pinning the head. Bound + TTL keep the queue O(steady-state inflow).
+# The backstop is only as good as full-scan COVERAGE (the 2026-07 audit caught the pre-cursor
+# scans chronically deadline-cut at ~9% of the market, so the then-unconditional TTL silently
+# discarded uncovered work). Two rails now hold the handoff honest: eviction is CYCLE-GATED
+# (_prune_stale_dedup_dirty only drops rows a COMPLETED full-scan cycle provably covered —
+# migration 261's cursor), and every run row records run_kind + truncated (migration 262) so a
+# stalling cursor is a queryable fact rather than silent loss.
+_DEDUP_DIRTY_TTL_HOURS = 24  # the eviction horizon; evicted rows fall to the full scan's frontier
 
 
 def _claim_dedup_dirty(conn: Any, cutoff: Any, limit: int | None = None) -> set[int]:
@@ -1172,11 +1179,13 @@ def resolve_pair(conn: Any, a: ListingKey, b: ListingKey, *, street_key: str,
     # queue, so the floor-plan gate would mis-read 'one-sided' (a pending plan looks absent — the
     # false floor_plan_review queue) and the visual flow would under-pair rooms. DEFER (no
     # re-queue needed: a pending image already has clip_tagged_at IS NULL, so `clip_tag.yml` will
-    # tag it — re-queuing here would only cycle a terminally-undecodable image). The clip_tag job
-    # enqueues the property into dedup_dirty_properties once its LAST image is tagged, so the
-    # hourly --dirty drain re-decides it within minutes — then both sides are complete and a real
-    # two-sided floor-plan compare merges on matching plans. Always on whenever CLIP is the tagger
-    # (clip_model set) — there is no opt-out (it replaced the retired dedup_clip_only setting).
+    # tag it — re-queuing here would only cycle a terminally-undecodable image). Once the LAST
+    # image is tagged, the clip_tag job enqueues the property into dedup_dirty_properties IF it
+    # passes the writer-side gate (eligible + first_seen within the recency window, #666) — a
+    # RECENT listing then re-decides within minutes via the hourly --dirty drain; an old/regated
+    # one falls to the next scan that loads its group (candidate drain or full scan). Always on
+    # whenever CLIP is the tagger (clip_model set) — there is no opt-out (it replaced the retired
+    # dedup_clip_only setting).
     if ctx.clip_model and _clip_incomplete(conn, [a.sreality_id, b.sreality_id], ctx.clip_model):
         stats["clip_deferred"] += 1
         return
@@ -1190,9 +1199,8 @@ def resolve_pair(conn: Any, a: ListingKey, b: ListingKey, *, street_key: str,
     # pHash fast-path (FREE, BEFORE classify, ALL sources). A strong raw photo match
     # (>= PHASH_MIN_IDENTICAL_PAIRS near-identical pairs over the listings' images) is a
     # same-property signal that needs no LLM. The pair already passed rule C, so a match
-    # here auto-merges. Runs before the cross-source gate so identical-photo re-posts
-    # (incl. same-source, which the gate would otherwise drop) merge for free — and
-    # cross-posted cross-source pairs skip classify AND compare. For byt, known-exterior/
+    # here auto-merges. Runs before classify, so identical-photo re-posts (same-source
+    # relists included) merge for free and never pay for classify OR compare. For byt, known-exterior/
     # shared images are excluded from the count so a development's reused renders can't
     # reach the >=2 threshold; other categories count any image. A single near-identical
     # KITCHEN/BATHROOM match also qualifies (distinctive override) — but ONLY for byt: a
@@ -1396,7 +1404,7 @@ def run_engine(
 
     Self-healing: each run also RESOLVES stale proposed candidates rather than
     letting them pile up in the operator queue — it dismisses a pair the current
-    rules reject (deterministic non-match), one the cross-source gate skips, or a
+    rules reject (deterministic non-match), or a
     confident visual "different" (autodismiss); merges the now-mergeable; and
     reconciles candidates pointing to a merged-away property.
 
@@ -1822,17 +1830,27 @@ def _clip_settings(conn: Any) -> dict[str, Any]:
     }
 
 
-def _write_run_row(conn: Any, stats: dict[str, int]) -> None:
+def _write_run_row(conn: Any, stats: dict[str, int], *, run_kind: str,
+                   started_at: Any) -> None:
+    """One run row at end of run. `run_kind` ('full' | 'candidates' | 'dirty') and the
+    run-level `truncated` (stats['truncated'], stamped on EVERY row — migration 262) are
+    what make a chronically deadline-cut FULL SCAN visible: the 2026-07 audit found every
+    6h scan silently covering ~9% of the market with nothing recording it. `started_at`
+    is the real run start (the column default otherwise equals ended_at — no durations)."""
+    params = {**stats, "run_kind": run_kind, "started_at": started_at,
+              "truncated": int(stats.get("truncated", 0) or 0)}
     with conn.cursor() as cur:
         cur.execute(
             """
             INSERT INTO dedup_engine_runs (
-                ended_at, eligible, flagged_location, flagged_disposition,
+                started_at, ended_at, run_kind, truncated,
+                eligible, flagged_location, flagged_disposition,
                 pairs_considered, rejected, auto_address, auto_phash, auto_visual,
                 queued, vision_calls, auto_dismissed, floor_plan_deferred, clip_deferred,
                 clip_classified, clip_cosine_calls, routed_haiku, routed_sonnet,
                 dirty_queue_depth, dirty_claimed, dirty_cleared, dirty_truncated
-            ) VALUES (now(), %(eligible)s, %(flagged_location)s, %(flagged_disposition)s,
+            ) VALUES (%(started_at)s, now(), %(run_kind)s, %(truncated)s,
+                %(eligible)s, %(flagged_location)s, %(flagged_disposition)s,
                 %(pairs_considered)s, %(rejected)s, %(auto_address)s, %(auto_phash)s,
                 %(auto_visual)s, %(queued)s, %(vision_calls)s, %(auto_dismissed)s,
                 %(floor_plan_deferred)s, %(clip_deferred)s,
@@ -1840,7 +1858,7 @@ def _write_run_row(conn: Any, stats: dict[str, int]) -> None:
                 %(routed_sonnet)s, %(dirty_queue_depth)s, %(dirty_claimed)s,
                 %(dirty_cleared)s, %(dirty_truncated)s)
             """,
-            stats,
+            params,
         )
 
 
@@ -1869,9 +1887,9 @@ def main() -> int:
                              "applies cached merge/dismiss results the batch lane paid for; "
                              "un-warmed pairs stay queued. The cost-efficient drain half.")
     parser.add_argument("--free", action="store_true",
-                        help="FREE mode: pHash + exact-address merges + reconcile + reject/gate "
+                        help="FREE mode: pHash merges + reconcile + reject/gate "
                              "dismissals, NO paid all-rooms classify/compare. Un-vision'd "
-                             "cross-source pairs are skipped (NOT queued as placeholders), so the "
+                             "candidate pairs are skipped (NOT queued as placeholders), so the "
                              "review queue doesn't inflate. The ONE bounded exception is the "
                              "floor-plan validation gate (see --floor-plan-budget) — a "
                              "targeted safety check on the small set of would-merge both-plan pairs.")
@@ -1888,11 +1906,12 @@ def main() -> int:
                              "within minutes. Scoped load (peers present) + O(dirty) pair-work; "
                              "race-free claim/clear. Composes with --free / the floor-plan budget.")
     parser.add_argument("--max-dirty", type=int, default=10000, dest="max_dirty",
-                        help="Bound the --dirty claim to the N OLDEST dedup-ready properties (FIFO). "
-                             "Keeps each hourly run complete-and-clearing so a tagging backlog (new "
-                             "portal / retag campaign) that enqueues most of the market drains over "
-                             "successive runs instead of an unbounded claim that never completes. "
-                             "Raise it for a one-off backlog blitz dispatch.")
+                        help="Bound the --dirty claim to the N NEWEST dedup-ready properties "
+                             "(newest-first — the real-time SLO serves the freshest listings even "
+                             "under a backlog; the stale tail TTL-evicts to the full scan, and the "
+                             "per-group incremental clear advances whatever slice fits the budget). "
+                             "The scheduled hourly run passes 3000; raise it for a one-off backlog "
+                             "blitz dispatch.")
     parser.add_argument("--floor-plan-budget", type=int, default=None, dest="floor_plan_budget",
                         help="Override app_settings.dedup_floor_plan_budget for this run: the cap on "
                              "inline cold Sonnet floor-plan checks (the only paid call on a free run; "
@@ -1925,6 +1944,12 @@ def main() -> int:
         return 2
 
     import psycopg
+
+    from datetime import datetime, timezone
+    # Real run start — passed as the run row's started_at (the column's default-now()
+    # otherwise stamps it at INSERT time, i.e. equal to ended_at, losing durations) and
+    # as the pair audit's run_at. Captured before any DB work so setup/claim time counts.
+    run_at = datetime.now(timezone.utc)
 
     with psycopg.connect(db_url, autocommit=True, prepare_threshold=None) as conn:
         if args.dry_run:
@@ -2081,8 +2106,6 @@ def main() -> int:
             max_vision_calls=args.max_vision_calls)
         eff_max_rooms = 99 if args.cache_only else args.max_room_attempts
 
-        from datetime import datetime, timezone
-        run_at = datetime.now(timezone.utc)
         # Candidate-priority drain: scope the scan to the properties in still-proposed
         # /dedup candidates so the queue self-clears in O(queue), not O(market). An
         # EMPTY set (no candidates) loads nothing — a clean no-op, NOT a full scan.
@@ -2168,7 +2191,10 @@ def main() -> int:
                     LOG.info("CURSOR saved: %s",
                              "cycle COMPLETED (TTL eviction re-armed)" if reached_end
                              else f"frontier at {new_cursor!r}")
-                _write_run_row(conn, stats)
+                # run_kind mirrors #672's full_scan derivation exactly (full_scan ≡ 'full').
+                run_kind = ("dirty" if args.dirty
+                            else "candidates" if args.candidates else "full")
+                _write_run_row(conn, stats, run_kind=run_kind, started_at=run_at)
                 _write_pair_audit(conn, run_at, pair_audit)
             LOG.info(
                 "ENGINE %s eligible=%d auto_address=%d auto_phash=%d auto_visual=%d "

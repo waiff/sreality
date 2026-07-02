@@ -1406,7 +1406,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
       },
       {
         "name": "dirty",
-        "description": "Real-time dirty drain — re-decide ONLY street groups touching a just-dedup-ready property",
+        "description": "Real-time dirty drain — re-decide ONLY street groups touching a just-dedup-ready property (typically pair with free=true, like the scheduled run)",
         "required": false,
         "type": "choice",
         "default": "false",
@@ -1414,6 +1414,14 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
           "false",
           "true"
         ]
+      },
+      {
+        "name": "max_dirty",
+        "description": "[dirty] Bound the claim to the N NEWEST dedup-ready properties — parity with the scheduled run's 3000 (a bare dirty dispatch previously fell to the CLI's 10000). Raise for a one-off backlog blitz.",
+        "required": false,
+        "type": "string",
+        "default": "3000",
+        "options": null
       },
       {
         "name": "geo_only",

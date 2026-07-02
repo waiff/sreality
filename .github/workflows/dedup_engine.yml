@@ -13,9 +13,9 @@ name: Dedup engine (street + disposition)
 # Every auto-merge is reversible (property_merge_events ledger + one-click Undo).
 # A per-run dedup_engine_runs row powers the /dedup automation dashboard.
 #
-# Cadence: every 6h. The SCHEDULED run is FREE-mostly (--free): pHash +
-# exact-address merges + reconcile + reject/gate dismissals; un-vision'd
-# cross-source pairs are skipped (not queued as placeholders). It captures every
+# Cadence: every 6h. The SCHEDULED run is FREE-mostly (--free): pHash merges +
+# reconcile + reject/gate dismissals; un-vision'd candidate pairs are skipped
+# (not queued as placeholders). It captures every
 # dup that SHARES a photo (pHash, whose coverage keeps growing) plus all free
 # cleanup. The ONE bounded paid call is the floor-plan validation gate, capped by
 # app_settings.dedup_floor_plan_budget (default 10000): a single Sonnet floor-plan
@@ -106,13 +106,18 @@ on:
           - "false"
           - "true"
       dirty:
-        description: Real-time dirty drain — re-decide ONLY street groups touching a just-dedup-ready property
+        description: Real-time dirty drain — re-decide ONLY street groups touching a just-dedup-ready property (typically pair with free=true, like the scheduled run)
         required: false
         default: "false"
         type: choice
         options:
           - "false"
           - "true"
+      max_dirty:
+        description: "[dirty] Bound the claim to the N NEWEST dedup-ready properties — parity with the scheduled run's 3000 (a bare dirty dispatch previously fell to the CLI's 10000). Raise for a one-off backlog blitz."
+        required: false
+        default: "3000"
+        type: string
       geo_only:
         description: GEO scan — single-dwelling (house/land/commercial) only, the geo-proximity path (pair with shadow=true for a volume preview)
         required: false
@@ -221,7 +226,7 @@ jobs:
             if [ "${{ inputs.cache_only }}" = "true" ]; then ARGS="$ARGS --cache-only"; fi
             if [ "${{ inputs.free }}" = "true" ]; then ARGS="$ARGS --free"; fi
             if [ "${{ inputs.candidates }}" = "true" ]; then ARGS="$ARGS --candidates"; fi
-            if [ "${{ inputs.dirty }}" = "true" ]; then ARGS="$ARGS --dirty"; fi
+            if [ "${{ inputs.dirty }}" = "true" ]; then ARGS="$ARGS --dirty --max-dirty ${{ inputs.max_dirty || '3000' }}"; fi
             if [ "${{ inputs.geo_only }}" = "true" ]; then ARGS="$ARGS --geo-only"; fi
           fi
           echo "python -m scripts.dedup_engine $ARGS"

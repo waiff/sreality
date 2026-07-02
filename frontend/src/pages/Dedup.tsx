@@ -328,12 +328,9 @@ function AutomationDashboard({
               }`}
             >
               <strong className="font-medium">
-                Dirty queue {dq.status === 'fail' ? 'stalled' : 'deep'}:
+                Dirty queue {dq.status === 'fail' ? (dq.livelocked ? 'livelocked' : 'stalled') : 'deep'}:
               </strong>{' '}
-              {fmtCount(dq.depth)} dedup-ready properties waiting.{' '}
-              {dq.draining === false
-                ? 'Not draining across recent runs — the --dirty drain may be failing or out-paced; check the dedup_engine.yml runs.'
-                : 'Draining through the bounded drain (a transient tagging flood).'}
+              {fmtCount(dq.depth)} dedup-ready properties waiting. {dq.reason}
             </div>
           ) : null}
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
@@ -347,7 +344,15 @@ function AutomationDashboard({
               label="Dirty queue"
               value={dq.depth ?? 0}
               small
-              hint={dq.depth == null ? 'no dirty run' : dq.draining === false ? 'not draining' : dq.draining ? 'draining' : 'backlog'}
+              hint={
+                dq.depth == null ? 'no dirty run'
+                : dq.livelocked ? 'livelocked'
+                : dq.draining === false ? 'not draining'
+                : dq.draining
+                  ? (dq.clearedInWindow != null
+                      ? `draining (${fmtCount(dq.clearedInWindow)} cleared)` : 'draining')
+                  : 'backlog'
+              }
             />
             <Stat label="By photos" value={latest.auto_phash} small />
             <Stat label="By visual" value={latest.auto_visual} small />

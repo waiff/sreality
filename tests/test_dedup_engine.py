@@ -1447,6 +1447,41 @@ def test_run_engine_stats_carry_dirty_observability_keys() -> None:
     assert "dirty_queue_depth" in stats and "dirty_claimed" in stats
 
 
+def test_write_run_row_stamps_kind_truncated_started_at() -> None:
+    """The run row records run_kind + the run-level truncated + the REAL started_at
+    (migration 262). truncated defaults to 0 when the stats lack it; a truncated full
+    scan writes 1 — the full-scan coverage-gap signal the 2026-07 audit found missing
+    (every 6h scan silently deadline-cut at a fraction of the market)."""
+    import scripts.dedup_engine as eng
+
+    captured: dict[str, Any] = {}
+
+    class _C:
+        def __enter__(self): return self
+        def __exit__(self, *a): return None
+        def execute(self, sql, params=None):
+            captured["sql"] = " ".join(sql.split()); captured["params"] = params
+
+    class _Conn:
+        def cursor(self): return _C()
+
+    base: dict[str, Any] = {k: None for k in (
+        "eligible", "flagged_location", "flagged_disposition", "pairs_considered",
+        "rejected", "auto_address", "auto_phash", "auto_visual", "queued",
+        "vision_calls", "auto_dismissed", "floor_plan_deferred", "clip_deferred",
+        "clip_classified", "clip_cosine_calls", "routed_haiku", "routed_sonnet",
+        "dirty_queue_depth", "dirty_claimed", "dirty_cleared", "dirty_truncated",
+    )}
+    eng._write_run_row(_Conn(), {**base, "truncated": 1}, run_kind="full", started_at="T0")
+    sql, params = captured["sql"], captured["params"]
+    assert "started_at, ended_at, run_kind, truncated" in sql
+    assert params["run_kind"] == "full" and params["truncated"] == 1
+    assert params["started_at"] == "T0"
+
+    eng._write_run_row(_Conn(), dict(base), run_kind="dirty", started_at="T0")
+    assert captured["params"]["truncated"] == 0  # absent -> completed run
+
+
 def _stub_resolve_pair(conn: Any, a: Any, b: Any, *, street_key: str, ctx: Any) -> None:
     # Mirrors only resolve_pair's budget accounting — the per-group clear tracks group
     # completion, not pair outcomes, so a decide-nothing stub is enough.
