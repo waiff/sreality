@@ -1589,8 +1589,16 @@ scan (latency, never a wrong or lost merge). The claim is **NEWEST-FIRST + bound
 3000 on the cron) and the queue is **TTL-bounded** (`_prune_stale_dedup_dirty`, 24h): the real-time
 lane is a LATENCY optimization backstopped by the full scan, so it serves the FRESHEST dedup-ready
 listing first (the "merge in minutes" SLO holds even under a transient backlog) and evicts rows
-older than the TTL (the full scan has already covered them) — so an un-drainable backlog can never
-pin the head or grow unbounded. (This replaced the original **FIFO** claim, which — with the clear
+older than the TTL **that a COMPLETED full-scan cycle has provably covered** (`marked_at <
+dedup_scan_state.last_cycle_started_at`, migration 261 — no completed cycle yet → evict NOTHING;
+the original unconditional TTL claimed "the full scan has already covered them", which was FALSE
+while the full scan head-restarted at ~9% coverage — eviction was silent work loss) — so an
+un-drainable backlog can never pin the head, and eviction never discards uncovered work. **The 6h
+full scan itself is CURSOR-ROTATED** (migration 261, `dedup_scan_state`): groups iterate in sorted
+key order resuming after `cursor_key`, each run advances the frontier, reaching the end of the
+list completes the CYCLE (stamps `last_cycle_*`, resets the cursor) — so the WHOLE market is
+covered every ~2–3 days instead of the head ~9% being re-scanned forever (the tail structurally
+never reached). The dirty/candidate drains have their own work-lists and stay cursor-free. (This replaced the original **FIFO** claim, which — with the clear
 gated on a non-truncated run — let a June-backfill head that never finished within the 20-min budget
 be re-claimed every hour forever: the queue grew to 201k and never drained. FIFO is the wrong order
 for a latency SLO; the full scan is the tail's backstop.) The **dirty cron runs
