@@ -440,6 +440,7 @@ def main(argv: list[str] | None = None) -> int:
         geocoder=_build_geocoder(),
     )
     portal.index_rate = limits.index_rate
+    portal.shared_rate_limiter = limits.shared_rate_limiter
     # The DB column is the source of truth for delisting (consistent with the
     # derived Health posture badge); the class default True is the safe fallback.
     portal.supports_complete_walk = config.supports_complete_walk

@@ -29,6 +29,14 @@ def _as_opt_int(v: Any) -> int | None:
     return None if v is None else int(v)
 
 
+def _as_bool(v: Any) -> bool:
+    # Strict: bool() never raises, so a mistyped leaf ("true", 1) would
+    # silently flip a politeness knob; only a real JSON boolean is accepted.
+    if isinstance(v, bool):
+        return v
+    raise TypeError(f"expected bool, got {type(v).__name__}")
+
+
 # Operational-limit field name -> coercer. The coercer is applied to any value
 # coming from JSONB (operator-edited), so a bad-typed leaf is caught per-field.
 _LIMIT_COERCERS: dict[str, Any] = {
@@ -43,6 +51,7 @@ _LIMIT_COERCERS: dict[str, Any] = {
     "suspicious_stop_window": int,
     "suspicious_stop_threshold": float,
     "price_change_min_pct": float,
+    "shared_rate_limiter": _as_bool,
 }
 
 
@@ -77,6 +86,12 @@ class PortalLimits:
     # compare enqueues tens of thousands of phantom "price changed" refetches
     # per walk; genuine cuts are >= ~1% so a small tolerance loses nothing.
     price_change_min_pct: float = 0.0
+    # Share the request budget across runtimes via the portal_rate_state ledger
+    # (migration 268, scraper/rate_ledger.py) instead of the per-process
+    # RateLimiter. OFF everywhere by default = zero behavior change; flip per
+    # portal (operational_limits) or globally (scraper_limits_global) once the
+    # Railway worker lane runs beside the Actions walks.
+    shared_rate_limiter: bool = False
 
     def merged(self, overrides: Any) -> "PortalLimits":
         """Return a copy with each present key from `overrides` (a dict, or None)

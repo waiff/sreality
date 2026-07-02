@@ -85,3 +85,27 @@ def test_penalize_is_capped(monkeypatch):
     for _ in range(20):
         lim.penalize()
     assert lim.interval == pytest.approx(8.0)  # base 1.0s * 8
+
+
+def test_reschedule_adopts_leased_window(monkeypatch):
+    clock = _Clock()
+    sleeps = _patch_time(monkeypatch, clock)
+    lim = RateLimiter(rate_per_s=2.0)  # base interval 0.5s
+    lim.reschedule(2.0, clock.now + 3.0)
+    lim.acquire()
+    # First slot no earlier than not_before; then leased spacing, and the
+    # per-acquire decay can't undercut it (reschedule pins the base too).
+    assert sleeps == [3.0]
+    lim.acquire()
+    assert sleeps == [3.0, 5.0]
+    assert lim.interval == pytest.approx(2.0)
+
+
+def test_reschedule_never_moves_next_slot_earlier(monkeypatch):
+    clock = _Clock()
+    sleeps = _patch_time(monkeypatch, clock)
+    lim = RateLimiter(rate_per_s=1.0)
+    lim.acquire()  # schedules the next slot at now + 1.0
+    lim.reschedule(1.0, clock.now + 0.2)  # earlier not_before must not win
+    lim.acquire()
+    assert sleeps == [1.0]

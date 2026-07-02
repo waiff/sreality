@@ -107,6 +107,7 @@ class CeskerealityPortal:
         # When set, the walk is partial so mark_inactive is suppressed.
         self._regions = regions
         self.index_rate = config.limits.index_rate
+        self.shared_rate_limiter = config.limits.shared_rate_limiter
         self._price_change_min_pct = config.limits.price_change_min_pct
         # per-(cm, ct) union of complete slices' seen ids + completed-slice
         # counts — the cross-slice delisting sweep buffer (see mark_inactive).

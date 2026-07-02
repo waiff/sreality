@@ -850,6 +850,7 @@ class SrealityPortal:
     source = "sreality"
     supports_complete_walk = True
     index_rate = DEFAULT_DETAIL_RATE  # baked floor; instance reads from config
+    shared_rate_limiter = False  # instance reads from config (sreality_main)
 
     def __init__(self, index_rate: float = DEFAULT_DETAIL_RATE) -> None:
         self.index_rate = index_rate

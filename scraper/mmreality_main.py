@@ -57,6 +57,7 @@ class MmRealityPortal:
         self._categories = config.categories or [{"index": "nemovitosti"}]
         self._max_pages = max_pages
         self.index_rate = config.limits.index_rate
+        self.shared_rate_limiter = config.limits.shared_rate_limiter
         self._price_change_min_pct = config.limits.price_change_min_pct
 
     # --- index-walk seams ---

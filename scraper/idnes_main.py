@@ -127,6 +127,7 @@ class IdnesPortal:
         self._categories = config.categories
         self._max_pages = max_pages
         self.index_rate = config.limits.index_rate
+        self.shared_rate_limiter = config.limits.shared_rate_limiter
         # CLI override > per-portal config (the standard limits chain). Absorbs
         # the daily FX re-display drift of idnes's foreign inventory so the
         # walk doesn't enqueue phantom "price changed" refetches (see

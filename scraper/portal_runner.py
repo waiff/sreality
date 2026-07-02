@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from scraper import db
+from scraper.rate_ledger import build_rate_limiter
 from scraper.rate_limit import RateLimiter
 
 LOG = logging.getLogger("scraper.portal_runner")
@@ -55,6 +56,10 @@ class Portal(Protocol):
     source: str
     supports_complete_walk: bool
     index_rate: float
+    # Optional (read via getattr, default False): when on, the runner paces via
+    # the cross-runtime portal_rate_state ledger instead of a process-local
+    # limiter. Resolved from PortalLimits.shared_rate_limiter by each portal.
+    shared_rate_limiter: bool
 
     # --- index-walk seams ---
     def categories(self) -> list[Any]: ...
@@ -98,7 +103,8 @@ def run_index_walk(
     total_enqueued = 0
     failed_categories = 0
     category_aggregates: list[dict[str, Any]] = []
-    limiter = RateLimiter(portal.index_rate)
+    limiter = build_rate_limiter(
+        portal.source, portal.index_rate, getattr(portal, "shared_rate_limiter", False))
     conn = None if dry_run else portal.connect_index()
 
     try:
@@ -323,7 +329,8 @@ def run_detail_drain(
         "new": 0, "updated": 0, "unchanged": 0, "gone": 0, "errors": 0,
         "images_discovered": 0,
     }
-    limiter = RateLimiter(detail_rate)
+    limiter = build_rate_limiter(
+        portal.source, detail_rate, getattr(portal, "shared_rate_limiter", False))
     client = portal.make_client(limiter)
 
     if dry_run:
