@@ -433,3 +433,31 @@ def test_norm_ownership_canonical_only():
     assert _norm_ownership("Jiné") is None
     assert _norm_ownership("s.r.o.") is None
     assert _norm_ownership("Podílové") is None
+
+
+def test_parse_detail_strips_mortgage_cta_from_raw_price_fields():
+    # Live pages carry a "Spočítat hypotéku" link inside both the price element
+    # and the "Cena" dl row; UI chrome must not land in raw_json. Raw is not in
+    # the typed content hash, so the cleanup never churns snapshots.
+    html = """
+    <html><body>
+    <h1>Prodej bytu 3+1 69 m²</h1>
+    <p class="b-detail__price">23&zwj;&nbsp;710&zwj;&nbsp;239 Kč <a>Spočítat hypotéku</a></p>
+    <dl><dt>Cena</dt><dd>23&zwj;&nbsp;710&zwj;&nbsp;239 Kč <a>Spočítat hypotéku</a></dd></dl>
+    </body></html>
+    """
+    listing = parse_detail(
+        html, source_url=_DETAIL_URL, category_main="byt", category_type="prodej",
+    )
+    assert listing.price_czk == 23_710_239
+    # _text collapses the &nbsp; separators to plain spaces; the &zwj; stays
+    clean = "23\u200d 710\u200d 239 Kč"
+    assert listing.raw["price_text"] == clean
+    assert listing.raw["params"]["cena"] == clean
+
+
+def test_parse_detail_full_fixture_price_row_stays_clean():
+    listing = parse_detail(
+        DETAIL_HTML, source_url=_DETAIL_URL, category_main="byt", category_type="prodej",
+    )
+    assert "hypoték" not in (listing.raw["price_text"] or "")
