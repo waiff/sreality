@@ -1,0 +1,57 @@
+name: "Monitoring: street_name_key parity"
+
+# Weekly sampled drift check: stored listings.street_name_key == the Python normalizer
+# (scraper.street.street_name_key). Guards the STALE-key class the migration-264 presence
+# CHECK cannot see — a normalizer edit without the required backfill_street_name_key.yml
+# all=true re-key, or a writer stamping a wrong value. Silent drift costs dedup recall
+# (the --dirty scoped load matches peers by the STORED key). A mismatch FAILS the run,
+# which monitor_workflow_failures records and the Health page lists — zero new alerting
+# plumbing. NOT a portal ingest workflow, so no `# portal:` tag.
+#
+# Required GitHub secret: SUPABASE_DB_URL.
+
+on:
+  schedule:
+    - cron: "40 4 * * 3"   # weekly, Wednesday 04:40 UTC (off the busy hourly ticks)
+  workflow_dispatch:
+    inputs:
+      recent:
+        description: Newest street-bearing rows to check
+        required: false
+        default: "2500"
+        type: string
+      random:
+        description: Block-random street-bearing rows to check
+        required: false
+        default: "2500"
+        type: string
+
+concurrency:
+  group: street-key-parity
+  cancel-in-progress: false
+
+jobs:
+  parity:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: pip install -e .
+
+      - name: Check parity
+        run: |
+          python -m scripts.check_street_key_parity \
+            --recent "${{ inputs.recent || '2500' }}" \
+            --random "${{ inputs.random || '2500' }}"

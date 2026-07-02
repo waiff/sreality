@@ -20,8 +20,11 @@ it); `street_name_key` (below) is the SEPARATE match-time grouping key — the b
 diacritics-folded, decoration-stripped form the dedup engine groups on. It lives
 here, the single home for all street string logic, and is imported by both the
 write path (`scraper.db` stores it on `listings.street_name_key`) and the matcher
-(`toolkit.dedup_engine.street_group_keys`), so the stored column can never drift
-from what the engine computes (a parity test guards it).
+(`toolkit.dedup_engine.street_group_keys`). Four guards hold stored == function:
+golden-case tests pin the normalization, a write-path test asserts every backfill
+stamps the column, the migration-264 presence CHECK fails a keyless street write
+loudly, and the weekly sampled-parity job (scripts/check_street_key_parity.py)
+alerts on any stored key drifting from this function.
 """
 
 from __future__ import annotations
@@ -162,8 +165,11 @@ def street_name_key(street: str | None) -> str | None:
 
     THE single source of the dedup street-group name key: stored on
     `listings.street_name_key` at write time (scraper.db) and consumed live by
-    `toolkit.dedup_engine.street_group_keys` — so the stored column and the
-    engine's grouping never diverge (a parity test asserts it)."""
+    `toolkit.dedup_engine.street_group_keys`. EDITING THIS NORMALIZATION requires
+    a full re-key of the stored column — dispatch backfill_street_name_key.yml
+    with all=true — or every not-yet-rewritten row silently drops out of the
+    dedup --dirty scoped load (the weekly street_key_parity job will fail until
+    the re-key completes; that failure is the alarm, not an error in the job)."""
     collapsed = _fold(street)  # NFKD + diacritics-strip + lowercase + whitespace-collapse
     if not collapsed:
         return None

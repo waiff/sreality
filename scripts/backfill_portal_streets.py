@@ -96,7 +96,12 @@ _CURSOR_MIN = -(10 ** 18)
 _UPDATE_SQL = """
     UPDATE listings l
     SET street          = COALESCE(d.street, l.street),
-        street_name_key = COALESCE(d.street_name_key, l.street_name_key),
+        -- the key FOLLOWS the street's preserve decision (it is a pure function of it):
+        -- preserved only when the street is preserved, else written as derived — even a
+        -- derived NULL (a non-NULL street can fold to a NULL key; keeping the old key
+        -- under a new street would be phantom drift to the weekly parity job)
+        street_name_key = CASE WHEN d.street IS NULL
+                               THEN l.street_name_key ELSE d.street_name_key END,
         house_number    = COALESCE(d.house_number, l.house_number),
         zip             = COALESCE(d.zip, l.zip),
         raw_json        = l.raw_json || '{"portal_street_backfill": true}'::jsonb
