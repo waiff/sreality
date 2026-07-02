@@ -1619,6 +1619,16 @@ truncated run still clears the slice it finished and only the unprocessed remain
 dirty runs truncating on pure per-pair DB cost — ~0.5-0.75 s/pair × >1,600 pairs vs the 1200 s
 budget — so the same slice re-processed hourly and `dirty_cleared` pinned at 0. Per-group clear
 makes progress monotonic regardless of budget: correctness-by-construction, not cap tuning.)
+**The per-pair cost floor itself is fixed by the run-scoped `_ProbeCache` + group-batched pHash**:
+CLIP-completeness / floor-plan ids / site-plan presence are per-LISTING facts memoized for the run
+(O(n) probes per group, not O(n²)), and `_phash_group_counts` computes a whole street group's pair
+counts in ONE round trip per exclusion-profile (`resolve_pair(group_sids=…)`; per-pair fallback
+without it). **Scoped runs also consult PRIOR verdict-backed dismissals** (`dismissed_prior` +
+`_record_auto_dismissed` markers): a pair the engine already confidently dismissed is skipped
+unless either side gained photo evidence since (`images.clip_tagged_at` > `reviewed_at`), and
+`_write_pair_audit` refuses records identical to one logged within 7 days — the audit table logs
+decisions, not run cadence (pre-fix: ~5.8x duplicate dismissal rows). Full scans never consult
+(cursor-rotated: one re-decision per cycle is the designed refresh).
 **Each dirty run
 records `dedup_engine_runs.dirty_queue_depth` (backlog at run start) + `dirty_claimed` (its slice)**
 (migration 255) **plus `dirty_cleared` + `dirty_truncated`** (migration 258, NULL on other run
