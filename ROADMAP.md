@@ -6,6 +6,48 @@ source for active rules; ROADMAP is for sequencing.
 
 ## Done
 
+### 2026-07: Real-time program Wave A+B — scraper correctness + SLO instrumentation
+
+The fix-first wave of the real-time scraper program (design:
+`docs/design/realtime-scrapers.md`), from a 19-agent investigation of main + prod.
+Correctness bugs a faster pipeline would have amplified, plus the measurement substrate:
+- **Cross-slice delisting flap killed** (#678): realitymix + ceskereality index slices
+  collapsing onto one (cm, ct) (domy+chaty → dum) swept each other's rows inactive every
+  6h walk (~11.5k false flips/walk; ~9k rows falsely inactive most of each day). Sweeps
+  now buffer per-(cm, ct) and fire once with the union on the group's last complete
+  slice; both portals gained the explicit 24h min_unseen rail their comments falsely
+  claimed existed. Failure direction: over-retention, never false delisting.
+- **remax rent 0% coverage fixed** (#682): queue starvation, not parsing — priceless
+  index cards ("Dohodou") re-enqueued as "changed" at high priority every walk, and
+  enqueue's ON CONFLICT re-stamped enqueued_at, starving the rent tail forever. None
+  price = no change signal now; re-enqueue keeps the original enqueued_at (honest FIFO +
+  honest queue-age metrics); drain budget 1500→2100 s.
+- **idnes FX price-jitter churn killed** (#683): foreign (EUR/USD) inventory re-displays
+  at a daily FX rate (94.8% of the ≥4-snapshots/week cohort), producing 47% of ALL
+  snapshot rows + ~20k phantom "price changed" refetches per walk. New shared
+  `price_changed()` predicate + per-portal `price_change_min_pct` limit (baked 0
+  everywhere = bit-for-bit unchanged; idnes 0.005 — calibrated: 99.5% of its moves are
+  <0.5%, genuine cuts ≥1%). Mortgage-CTA text stripped from stored price fields.
+- **sreality snapshot-churn hash flaps stripped** (#680): quantified on a 300-pair prod
+  sample — 57.3% of consecutive snapshot pairs were portal-side noise (firmy.cz
+  review_count 46%, wholesale sdn.cz URL re-signs, `edited` bumps, advert_images `kind`
+  flaps). Hashing now normalizes advert_images to (id, alt, order), reduces sdn_*
+  attachment URLs to presence, strips premise counters/logo; image add/remove/reorder
+  still snapshot.
+- **Enqueue→detail-write latency ledger** (#679, migration 265): completions INSERT
+  into `detail_queue_completions` in the same transaction as the queue DELETE (written/
+  gone/given_up), 7-day self-pruning, + `detail_latency_recent` p50/p90 view — the
+  first-hop SLI that was unmeasurable (queue rows died on completion).
+- **published_at** (#685, migration 266): portal publish dates promoted to a column
+  (bazos bump-date, ceskereality "Datum vložení", bezrealitky timeActivated when the
+  API ever exposes it, sreality `edited` fallback) — timestamptz, hash-excluded,
+  preserve-if-null. The publish→ingest latency ground truth.
+- **idnes area truncation fixed** (#686): the briefed "per-m² land prices stored as
+  absolute" premise was DISPROVEN against every affected staged page (stored prices
+  match the portal's own absolute amounts; the sub-100k plots are genuinely cheap).
+  The real defect was next door: spaced-thousands area parsing ("2 403 m²" → stored
+  403) on ~8.4k active rows — parser fixed + a Kč/m² drift rail added + a
+  reparse-from-staged-HTML backfill script (run post-merge).
 ### 2026-07: Dedup metrics hygiene — gauges decoupled from runs, geo run rows (audit PR-F)
 
 Final slice of the 2026-07 audit program:
@@ -1801,6 +1843,21 @@ PR #59. Full description under "Building decomposition track" below.
   components yet — those ship with B1.
 
 ## Next
+
+### Real-time program Wave C: the always-on hot lane (greenlit 2026-07-02)
+
+Design: `docs/design/realtime-scrapers.md`. One small always-on worker (second Railway
+service, SAME Docker image) replaces cron ticks with continuous loops for the
+latency-critical path: newest-first delta probes per portal (2-5 min; live-verified
+capability per portal, sreality via count-delta probes pending a BFF sort spike) →
+continuous detail drain → per-listing images-first processing (download + INLINE pHash +
+warm-CLIP tag; a listing is not published/notified before its first image is stored —
+operator decision) → dedup dirty enqueue → matcher wake. Prerequisite: a DB-backed shared
+politeness ledger (RateLimiter is per-process today; two runtimes must share one budget
+per portal). GH Actions keeps the free heavy lanes (full reconcile walks, backfills, batch
+scans, monitors). Then Wave D (dedup real-time completion: dirty-lane floor-plan budget,
+batch-warmer revival, geo dirty-drain, street coverage) and Wave E (SLO-scaled health +
+push alerting + silent-green closures).
 
 ### Phase B1: Building decomposition — URL ingest + unit extractor + confirmation UI (active)
 

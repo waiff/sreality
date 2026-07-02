@@ -1,4 +1,4 @@
--- 265_detail_queue_completions.sql
+-- 267_detail_queue_completions.sql (renumbered from 265 — collision with 265_dedup_engine_runs_nullable_gauges, the #675 precedent; both were applied to prod under their own names)
 --
 -- Ledger of listing_detail_queue completions. The queue row is DELETEd when the
 -- drain resolves it (detail written / listing gone) and first_seen_at is stamped
