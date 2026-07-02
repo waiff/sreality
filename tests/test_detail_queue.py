@@ -381,28 +381,54 @@ def test_fail_detail_gives_up_at_threshold():
     conn = _FakeConn([(lambda s: "UPDATE listing_detail_queue" in s, [])])
     db.fail_detail(conn, "sreality", ["7", "8"], "boom")
     sql, params = conn.executed[0]
-    assert "attempts = attempts + 1" in sql
-    assert "given_up = (attempts + 1) >= %s" in sql
+    assert "attempts = q.attempts + 1" in sql
+    assert "given_up = (q.attempts + 1) >= %(max)s" in sql
     assert "claimed_at = NULL" in sql
-    assert "source = %s AND native_id = ANY(%s)" in sql
-    assert params[0] == db.FAILURE_GIVE_UP_THRESHOLD
-    assert params[2] == "sreality"
-    assert params[3] == ["7", "8"]
+    assert "q.source = %(source)s AND q.native_id = ANY(%(ids)s)" in sql
+    assert params["max"] == db.FAILURE_GIVE_UP_THRESHOLD
+    assert params["source"] == "sreality"
+    assert params["ids"] == ["7", "8"]
 
 
-def test_complete_detail_deletes_by_native_id():
+def test_fail_detail_logs_give_up_transition_to_completion_ledger():
+    conn = _FakeConn([(lambda s: "UPDATE listing_detail_queue" in s, [])])
+    db.fail_detail(conn, "sreality", ["7"], "boom")
+    sql, _ = conn.executed[0]
+    assert "INSERT INTO detail_queue_completions" in sql
+    assert "'given_up'" in sql
+    # Only the flip edge logs: an already-given-up row replayed by a resilient
+    # retry must not produce a second ledger row.
+    assert "WHERE given_up AND NOT was_given_up" in sql
+    # The ledger keeps the failed attempt's claim time, which the SET nulls.
+    assert "old.claimed_at AS old_claimed_at" in sql
+
+
+def test_complete_detail_deletes_and_logs_completion():
     conn = _FakeConn([(lambda s: "DELETE FROM listing_detail_queue" in s, [])])
     db.complete_detail(conn, "sreality", ["1", "2", "3"])
     sql, params = conn.executed[0]
-    assert "DELETE FROM listing_detail_queue WHERE source = %s AND native_id = ANY(%s)" in sql
-    assert params == ("sreality", ["1", "2", "3"])
+    assert "DELETE FROM listing_detail_queue WHERE source = %(source)s AND native_id = ANY(%(ids)s)" in sql
+    assert "INSERT INTO detail_queue_completions" in sql
+    assert "SELECT source, native_id, priority, attempts, enqueued_at, claimed_at, %(outcome)s" in sql
+    assert params == {"source": "sreality", "ids": ["1", "2", "3"], "outcome": "written"}
 
 
-def test_reclaim_stale_claims_releases_old_claims():
+def test_complete_detail_gone_outcome():
+    conn = _FakeConn([(lambda s: "DELETE FROM listing_detail_queue" in s, [])])
+    db.complete_detail(conn, "bazos", ["9"], outcome="gone")
+    _, params = conn.executed[0]
+    assert params["outcome"] == "gone"
+
+
+def test_reclaim_stale_claims_releases_old_claims_and_prunes_ledger():
     conn = _FakeConn([(lambda s: "UPDATE listing_detail_queue" in s, [("1",), ("2",)])])
     n = db.reclaim_stale_claims(conn, "sreality", older_than_minutes=30)
     assert n == 2
-    sql, params = conn.executed[0]
+    prune_sql, prune_params = conn.executed[0]
+    assert "DELETE FROM detail_queue_completions" in prune_sql
+    assert "completed_at < now() - make_interval(days => %s)" in prune_sql
+    assert prune_params == ("sreality", db.COMPLETION_RETENTION_DAYS)
+    sql, params = conn.executed[1]
     assert "SET claimed_at = NULL" in sql
     assert "claimed_at < now() - make_interval(mins => %s)" in sql
     assert params == ("sreality", 30)
