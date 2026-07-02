@@ -8,17 +8,26 @@
 -- adversarial review caught it. This CHECK makes the forgot-to-stamp class fail LOUDLY at
 -- write time instead of silently under-loading the dedup --dirty lane.
 --
--- The alnum gate makes the constraint EXACTLY as strong as the Python function's own
--- guarantee: scraper.street.street_name_key returns a non-NULL key for any street
--- containing an alphanumeric character (the fold/strip loop always falls back to the
--- collapsed form rather than going empty), while a whitespace-only/exotic-whitespace
--- street legitimately keys to NULL — btrim() can't see unicode whitespace the Python
--- .split() collapses, so gating on [[:alnum:]] (not btrim) avoids ever rejecting a write
--- the function itself would produce. Validated against prod pre-apply: 0 violations on
--- ~211k street-bearing rows.
+-- THE GATE IS ASCII-ALNUM, DELIBERATELY NOT [[:alnum:]]: the constraint may only demand a
+-- key where the Python function GUARANTEES one, or it can reject a legitimate write — and
+-- the blast radius of one rejected row is the whole ~100-listing drain batch (sreality) or
+-- a claimed-row crash loop (per-item portals). Any ASCII letter/digit survives
+-- scraper.street.street_name_key's fold (NFKD keeps it, it is not a combining mark, not
+-- whitespace), so `street ~ '[a-zA-Z0-9]'` implies key IS NOT NULL, always. [[:alnum:]]
+-- does NOT have that property on this database (PG 17, ICU): Letter-category codepoints
+-- that NFKD-decompose to whitespace+combining marks — U+037A GREEK YPOGEGRAMMENI,
+-- U+FF9E/FF9F halfwidth katakana voiced marks, Arabic presentation forms U+FE70.. — are
+-- alnum to Postgres yet fold to EMPTY in Python (key NULL): a street of only such chars
+-- would violate the wider gate. Verified on prod. The narrower gate stays effective for
+-- the class it exists to catch: every realistic Czech street contains an ASCII letter or
+-- digit, and a pure-diacritic edge case merely goes unenforced (the function still
+-- produces its key; the weekly parity job still checks it).
 --
--- NOT VALID + VALIDATE: the ADD takes only a brief lock and doesn't scan; the VALIDATE
--- scans without blocking writes (SHARE UPDATE EXCLUSIVE) — the standard low-lock pattern.
+-- LOCK NOTE: NOT VALID + VALIDATE in ONE migration (as applied via MCP, one transaction)
+-- does NOT get the two-transaction low-lock benefit — the ADD's ACCESS EXCLUSIVE is held
+-- through the validation scan. At the current table size that scan is ~1-2s, an accepted
+-- brief write-pause; a much larger table should split the VALIDATE into its own
+-- transaction.
 --
 -- RECORD CORRECTION for migration 256's comments (append-only forbids editing them):
 -- (1) 256 claims the normalizer is "not faithfully reproducible in SQL without drift" —
@@ -30,16 +39,22 @@
 -- sampled-parity job (scripts/check_street_key_parity.py + street_key_parity.yml), which
 -- alerts through the workflow-failure monitor when any stored key drifts from the
 -- function (the stale-key class this CHECK cannot see).
+--
+-- (Prod history: the constraint was first applied with the [[:alnum:]] gate, then
+-- corrected to this ASCII gate before this file merged — the DB and this file agree on
+-- the final form.)
 
 alter table listings
   add constraint listings_street_key_presence
-  check (street is null or street !~ '[[:alnum:]]' or street_name_key is not null)
+  check (street is null or street !~ '[a-zA-Z0-9]' or street_name_key is not null)
   not valid;
 
 alter table listings validate constraint listings_street_key_presence;
 
 comment on constraint listings_street_key_presence on listings is
-  'A street containing any alphanumeric char must carry its derived street_name_key '
+  'A street containing any ASCII letter/digit must carry its derived street_name_key '
   '(scraper.street.street_name_key stamps it at every write path; migration 256/264). '
-  'Fails the forgot-to-stamp write loudly; the weekly street_key_parity job guards the '
-  'stale-key class.';
+  'ASCII gate: the Python fold guarantees a key exactly for these; wider [[:alnum:]] '
+  'classes include codepoints that fold to empty (U+037A et al.) and would reject '
+  'legitimate writes. Fails the forgot-to-stamp write loudly; the weekly '
+  'street_key_parity job guards the stale-key class.';

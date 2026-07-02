@@ -44,12 +44,15 @@ _RECENT_SQL = """
     LIMIT %(n)s
 """
 
-# Block-sampling (TABLESAMPLE SYSTEM) is cheap and unbiased enough for a drift check —
-# ~2% of blocks yields thousands of street-bearing rows on the current table; LIMIT
-# trims to the requested sample. A fully uniform ORDER BY random() would seq-scan.
+# Block-sampling (TABLESAMPLE SYSTEM) is cheap and unbiased enough for a drift check;
+# LIMIT trims to the requested sample. A fully uniform ORDER BY random() would seq-scan.
+# The sampled block percentage SCALES with the requested size (~2k street-bearing rows
+# per percent at current table size) so a larger --random dispatch actually fills — a
+# fixed 2% capped the yield at ~4k rows and silently under-sampled bigger requests
+# (which the minimum-sample floor would then flag as a false alarm).
 _RANDOM_SQL = """
     SELECT sreality_id, street, street_name_key
-    FROM listings TABLESAMPLE SYSTEM (2)
+    FROM listings TABLESAMPLE SYSTEM (%(pct)s)
     WHERE street IS NOT NULL AND street <> ''
     LIMIT %(n)s
 """
@@ -89,7 +92,8 @@ def main() -> int:
         with conn.cursor() as cur:
             cur.execute(_RECENT_SQL, {"n": args.recent})
             rows = list(cur.fetchall())
-            cur.execute(_RANDOM_SQL, {"n": args.random_n})
+            pct = max(2, min(50, -(-args.random_n // 2000)))  # ceil, clamped 2..50
+            cur.execute(_RANDOM_SQL, {"n": args.random_n, "pct": pct})
             rows += list(cur.fetchall())
 
     mismatches = find_mismatches(rows)

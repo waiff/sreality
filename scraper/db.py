@@ -161,7 +161,17 @@ assert set(_LISTING_COLUMN_PGTYPE) == set(LISTING_COLUMNS), (
 # the trio is OUT of the content hash (no snapshot churn), a wrong-street risk is guarded
 # upstream (street.reject_as_town) and downstream (the admin-geo trigger NULLs a
 # resolver-sourced street when the listing's coordinates change — migration 262).
-_PRESERVE_IF_NULL_COLUMNS = frozenset({"street", "street_name_key", "house_number"})
+_PRESERVE_IF_NULL_COLUMNS = frozenset({"street", "house_number"})
+
+# street_name_key is NOT independently preserve-if-null: it is a pure function of
+# street, so it must follow the STREET's preserve decision — preserved exactly when
+# the street is preserved, else written as stamped (even when that stamp is NULL: a
+# non-NULL street can legitimately fold to a NULL key, and keeping the OLD key under
+# a NEW street would store a pair the weekly parity job rightly flags as drift).
+_STREET_NAME_KEY_UPDATE_SQL = (
+    "street_name_key = CASE WHEN EXCLUDED.street IS NULL "
+    "THEN listings.street_name_key ELSE EXCLUDED.street_name_key END"
+)
 
 # street_source provenance ('parser' | 'resolver', migration 262): a page-parsed street
 # marks 'parser'; a preserved (incoming-NULL) value keeps whatever provenance it had; the
@@ -176,7 +186,8 @@ def _listing_update_set_sql() -> str:
     """The ONE ON CONFLICT SET builder shared by upsert_listing and the batched drain
     upsert, so preserve-if-null semantics can never drift between the two write paths."""
     return ",\n          ".join(
-        (f"{c} = COALESCE(EXCLUDED.{c}, listings.{c})" if c in _PRESERVE_IF_NULL_COLUMNS
+        (_STREET_NAME_KEY_UPDATE_SQL if c == "street_name_key"
+         else f"{c} = COALESCE(EXCLUDED.{c}, listings.{c})" if c in _PRESERVE_IF_NULL_COLUMNS
          else f"{c} = EXCLUDED.{c}")
         for c in LISTING_COLUMNS
     )
