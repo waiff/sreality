@@ -507,6 +507,51 @@ def _resolve_candidates(conn: Any, pairs: set[tuple[int, int]], new_status: str)
         return cur.rowcount or 0
 
 
+def _record_auto_dismissed(conn: Any, pairs: set[tuple[int, int]], tier: str) -> int:
+    """Insert-if-absent a status='dismissed' candidate row for each pair the engine
+    auto-dismissed on a VERDICT this run (floor-plan different_layout / confident visual
+    "different") — the durable negative decision the prior-dismissal consult reads. Only
+    verdict-backed dismissals land here (rule-C rejects are deterministic re-computations,
+    not worth a row); an already-existing row was flipped by _resolve_candidates and the
+    ON CONFLICT leaves it alone. The full decision detail lives in dedup_pair_audit; this
+    row is the cheap indexed "already decided" marker. Returns rows inserted."""
+    if not pairs:
+        return 0
+    los = [p[0] for p in pairs]
+    his = [p[1] for p in pairs]
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO property_identity_candidates "
+            "  (left_property_id, right_property_id, tier, status, reviewed_at) "
+            "SELECT p.lo, p.hi, %s, 'dismissed', now() "
+            "FROM unnest(%s::bigint[], %s::bigint[]) AS p(lo, hi) "
+            "ON CONFLICT (left_property_id, right_property_id) DO NOTHING",
+            (tier, los, his),
+        )
+        return cur.rowcount or 0
+
+
+def _load_prior_dismissed(
+    conn: Any, property_ids: set[int],
+) -> dict[tuple[int, int], Any]:
+    """{(lo, hi): reviewed_at} for every DISMISSED candidate pair among these properties —
+    the prior-decision map the scoped drains consult so a settled pair isn't re-probed
+    every hour (the audit's 5.8x dismissal treadmill). Loaded ONCE per scoped run
+    (O(scope) ids — the dirty/candidate work-lists are small by construction; full scans
+    pass nothing and never consult)."""
+    if not property_ids:
+        return {}
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT left_property_id, right_property_id, reviewed_at "
+            "FROM property_identity_candidates "
+            "WHERE status = 'dismissed' AND left_property_id = ANY(%(pids)s) "
+            "AND right_property_id = ANY(%(pids)s)",
+            {"pids": list(property_ids)},
+        )
+        return {(int(r[0]), int(r[1])): r[2] for r in cur.fetchall()}
+
+
 def _enqueue_candidate(
     conn: Any, a: ListingKey, b: ListingKey, markers: dict[str, Any],
     *, tier: str = "street_disposition",
@@ -656,6 +701,65 @@ def _phash_distinctive_match(
         return bool(cur.fetchone()[0])
 
 
+def _phash_group_counts(
+    conn: Any, sreality_ids: list[int], excluded_tags: tuple[str, ...] = (),
+    render_exclude_min: float | None = None,
+) -> dict[tuple[int, int], int]:
+    """_phash_identical_pairs for EVERY cross-listing pair of a street group in ONE round
+    trip: {(lo_sid, hi_sid): count}, pairs with no near-identical match absent (= 0). The
+    2026-07 audit measured per-pair sequential round-trips as the dirty lane's cost floor
+    (~0.5-0.75 s/pair from a GitHub runner to the EU pooler ≈ the whole 1200 s budget), so
+    the group batch turns O(pairs) pHash trips into O(groups). Exclusion predicates are the
+    SAME `render_exclusion_clause` fragments as the per-pair query — one source, no drift."""
+    sql = (
+        "SELECT least(ia.sreality_id, ib.sreality_id), "
+        "       greatest(ia.sreality_id, ib.sreality_id), count(*) "
+        "FROM images ia JOIN images ib ON ia.sreality_id < ib.sreality_id "
+        "WHERE ia.sreality_id = ANY(%(ids)s) AND ib.sreality_id = ANY(%(ids)s) "
+        "AND ia.phash IS NOT NULL AND ib.phash IS NOT NULL "
+        "AND bit_count((ia.phash # ib.phash)::bit(64)) <= %(max)s"
+    )
+    params: dict[str, Any] = {"ids": list(sreality_ids), "max": PHASH_IDENTICAL_MAX}
+    sql += _render_exclusion_predicate(params, "ia", excluded_tags, render_exclude_min)
+    sql += _render_exclusion_predicate(params, "ib", excluded_tags, render_exclude_min)
+    sql += " GROUP BY 1, 2"
+    with conn.cursor() as cur:
+        cur.execute(sql, params)
+        return {(int(r[0]), int(r[1])): int(r[2]) for r in cur.fetchall()}
+
+
+def _phash_group_distinctive(
+    conn: Any, sreality_ids: list[int],
+    rooms: tuple[str, ...] | frozenset[str] = DISTINCTIVE_ROOMS,
+    render_exclude_min: float | None = None,
+) -> set[tuple[int, int]]:
+    """_phash_distinctive_match for every cross-listing pair of a group in one round trip:
+    the (lo_sid, hi_sid) pairs sharing >=1 near-identical DISTINCTIVE-room (kitchen/
+    bathroom) image pair. Same predicates as the per-pair query, batched."""
+    rfilter = ""
+    params: dict[str, Any] = {
+        "ids": list(sreality_ids), "rooms": list(rooms), "max": PHASH_IDENTICAL_MAX}
+    if render_exclude_min is not None:
+        rfilter = " AND coalesce({t}.render_score, 0) < %(rmin)s"
+        params["rmin"] = render_exclude_min
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT DISTINCT least(ia.sreality_id, ib.sreality_id),"
+            "       greatest(ia.sreality_id, ib.sreality_id)"
+            " FROM images ia"
+            "  JOIN image_clip_tags ta ON ta.image_id = ia.id AND ta.logical_tag = ANY(%(rooms)s)"
+            + rfilter.format(t="ta") +
+            "  JOIN images ib ON ib.sreality_id = ANY(%(ids)s) AND ib.phash IS NOT NULL"
+            "   AND ia.sreality_id < ib.sreality_id"
+            "  JOIN image_clip_tags tb ON tb.image_id = ib.id AND tb.logical_tag = ANY(%(rooms)s)"
+            + rfilter.format(t="tb") +
+            " WHERE ia.sreality_id = ANY(%(ids)s) AND ia.phash IS NOT NULL"
+            "   AND bit_count((ia.phash # ib.phash)::bit(64)) <= %(max)s",
+            params,
+        )
+        return {(int(r[0]), int(r[1])) for r in cur.fetchall()}
+
+
 def _high_render_image_ids(conn: Any, a_id: int, b_id: int, threshold: float) -> set[int]:
     """image_ids of the two listings whose CLIP render_score >= threshold — shared
     development RENDERS excluded from the forensic compare (migration 239)."""
@@ -740,7 +844,7 @@ def _trigger_clip_tagging(conn: Any, sreality_ids: list[int], model: str) -> Non
 
 def _floor_plan_gate(
     conn: Any, a_id: int, b_id: int, *, floor_plan_fn: Any, vision_budget: list[int],
-    inconclusive_to_review: bool = True,
+    inconclusive_to_review: bool = True, cache: "_ProbeCache | None" = None,
 ) -> str:
     """The floor-plan validation on a pair the engine WOULD merge (pHash or visual).
     Returns 'merge' | 'dismiss' | 'queue' | 'defer'. It is a CONTRADICTION VETO layered on a
@@ -763,8 +867,8 @@ def _floor_plan_gate(
       * exactly ONE side / neither side has a plan-tagged image -> 'merge' (no plan-to-plan
         compare is possible, so the gate learned nothing — the primary signal stands).
     """
-    ids_a = _floor_plan_image_ids(conn, a_id)
-    ids_b = _floor_plan_image_ids(conn, b_id)
+    ids_a = _floor_plan_ids_cached(conn, a_id, cache)
+    ids_b = _floor_plan_ids_cached(conn, b_id, cache)
     if ids_a and ids_b:
         if floor_plan_fn is None or vision_budget[0] <= 0:
             return "defer"
@@ -784,10 +888,13 @@ def _floor_plan_gate(
     return "merge"
 
 
-def _both_have_site_plan(conn: Any, a_id: int, b_id: int) -> bool:
+def _both_have_site_plan(
+    conn: Any, a_id: int, b_id: int, cache: "_ProbeCache | None" = None,
+) -> bool:
     """True if BOTH listings carry a site/situation plan (CLIP tag OR LLM
     classification), so the pHash fast-path defers to the site-plan development
-    guard instead of auto-merging two units of one development.
+    guard instead of auto-merging two units of one development. `cache` memoizes
+    per canonical pair for the run (the probe re-ran on every re-formed pair).
 
     Prefers the full-inventory CLIP image_clip_tags, falling back to the LLM
     image_room_classifications cache — mirroring _floor_plan_image_ids. The LLM
@@ -795,6 +902,9 @@ def _both_have_site_plan(conn: Any, a_id: int, b_id: int) -> bool:
     CLIP is what lets this guard fire on house/land developments (where shared
     masterplans drive most false merges), not just the ~1% of classified flats.
     """
+    key = (min(a_id, b_id), max(a_id, b_id))
+    if cache is not None and key in cache.site_plan_pair:
+        return cache.site_plan_pair[key]
     with conn.cursor() as cur:
         cur.execute(
             "SELECT count(*) FILTER (WHERE i.sreality_id = %(a)s) > 0 "
@@ -807,7 +917,10 @@ def _both_have_site_plan(conn: Any, a_id: int, b_id: int) -> bool:
             "             WHERE c.image_id = i.id AND c.room_type = %(sp)s))",
             {"a": a_id, "b": b_id, "sp": SITE_PLAN_ROOM_TYPE},
         )
-        return bool(cur.fetchone()[0])
+        result = bool(cur.fetchone()[0])
+    if cache is not None:
+        cache.site_plan_pair[key] = result
+    return result
 
 
 def _classify_or_none(classify_fn: Any, sreality_id: int) -> list[dict[str, Any]] | None:
@@ -842,6 +955,7 @@ def _resolve_visual(
     inconclusive_to_review: bool = True,
     tag_overrides: dict[str, list[str]] | None = None,
     stats: dict[str, int] | None = None,
+    probe_cache: "_ProbeCache | None" = None,
 ) -> dict[str, Any]:
     """Rule D for one candidate pair. Returns a dict describing the outcome.
 
@@ -947,7 +1061,7 @@ def _resolve_visual(
             fp = _floor_plan_gate(
                 conn, a.sreality_id, b.sreality_id,
                 floor_plan_fn=floor_plan_fn, vision_budget=vision_budget,
-                inconclusive_to_review=inconclusive_to_review)
+                inconclusive_to_review=inconclusive_to_review, cache=probe_cache)
             base = {
                 "room_type": room, "verdict": last_verdict,
                 "rationale": last_rationale, "cosine": cos,
@@ -1074,12 +1188,51 @@ def _audit(
     })
 
 
+# A dismissal identical to one already logged within this window is run cadence, not a
+# new decision — don't re-append it (measured: 3,621 'dismissed' audit rows for 620
+# distinct pairs in 7 days, ~5.8x inflation of the /dedup decision stats). Merges are
+# naturally unique (a merged pair re-runs as an 'already_merged' reject), so the dedup
+# effectively bites on the dismiss treadmill only.
+_AUDIT_DEDUPE_DAYS = 7
+
+
 def _write_pair_audit(
     conn: Any, run_at: Any, records: list[dict[str, Any]],
 ) -> None:
+    """Append the run's terminal per-pair decisions, SKIPPING records identical to one
+    already logged in the last _AUDIT_DEDUPE_DAYS (same pair + stage + outcome + source)
+    — the audit is a log of DECISIONS, not of run cadence. One set-based existence probe
+    + one executemany for the novel rows (never a per-record round trip)."""
     if not records:
         return
     import json
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT DISTINCT d.left_sreality_id, d.right_sreality_id, d.stage, "
+            "       d.outcome, d.source "
+            "FROM dedup_pair_audit d "
+            "JOIN unnest(%(ls)s::bigint[], %(rs)s::bigint[], %(st)s::text[], "
+            "            %(oc)s::text[], %(so)s::text[]) AS u(l, r, st, oc, so) "
+            "  ON d.left_sreality_id = u.l AND d.right_sreality_id = u.r "
+            " AND d.stage = u.st AND d.outcome = u.oc AND d.source = u.so "
+            "WHERE d.run_at > now() - make_interval(days => %(days)s)",
+            {
+                "ls": [r["left_sreality_id"] for r in records],
+                "rs": [r["right_sreality_id"] for r in records],
+                "st": [r["stage"] for r in records],
+                "oc": [r["outcome"] for r in records],
+                "so": [r.get("source", "engine") for r in records],
+                "days": _AUDIT_DEDUPE_DAYS,
+            },
+        )
+        seen = {(int(r[0]), int(r[1]), r[2], r[3], r[4]) for r in cur.fetchall()}
+    novel = [
+        r for r in records
+        if (r["left_sreality_id"], r["right_sreality_id"], r["stage"], r["outcome"],
+            r.get("source", "engine")) not in seen
+    ]
+    if not novel:
+        return
     with conn.cursor() as cur:
         cur.executemany(
             "INSERT INTO dedup_pair_audit (run_at, left_sreality_id, "
@@ -1091,9 +1244,125 @@ def _write_pair_audit(
                  r["left_property_id"], r["right_property_id"], r["category_main"],
                  r["stage"], r["outcome"], r.get("source", "engine"),
                  r.get("merge_group_id"), json.dumps(r["detail"]))
-                for r in records
+                for r in novel
             ],
         )
+
+
+@dataclass
+class _ProbeCache:
+    """Per-run memo of the pair-stage DB probes. resolve_pair used to pay 2-3 SEQUENTIAL
+    round-trips PER CANDIDATE PAIR re-querying facts that are per-LISTING (CLIP
+    completeness, floor-plan ids, site-plan presence) or batchable per-GROUP (pHash) —
+    the 2026-07 audit measured that as the dirty lane's cost floor (~0.5-0.75 s/pair from
+    a GitHub runner to the EU pooler ≈ the whole 1200 s budget, hence the chronic
+    truncation). Memoized, a group of n listings costs O(n) listing probes + O(1) pHash
+    batches instead of O(n²) trips. Facts are stable within a run (minutes) — a
+    mid-run tag/image change is picked up next run, the same staleness window every
+    lane already accepts."""
+    clip_incomplete: dict[int, bool] = field(default_factory=dict)
+    floor_plan_ids: dict[int, list[int]] = field(default_factory=dict)
+    site_plan_pair: dict[tuple[int, int], bool] = field(default_factory=dict)
+    # pHash batches are keyed by (lo_sid, hi_sid, profile) — the exclusion profile
+    # (excluded_tags, render_min) differs by category family (byt excludes exteriors +
+    # renders), so a mixed-family group batches once per profile actually used.
+    phash_counts: dict[tuple[int, int, tuple], int] = field(default_factory=dict)
+    phash_batched: set[tuple[tuple[int, ...], tuple]] = field(default_factory=set)
+    phash_distinctive: dict[tuple[int, int, tuple], bool] = field(default_factory=dict)
+    distinctive_batched: set[tuple[tuple[int, ...], tuple]] = field(default_factory=set)
+    # max(images.clip_tagged_at) per listing — the "new evidence since?" timestamp the
+    # prior-dismissal consult compares against reviewed_at.
+    evidence_at: dict[int, Any] = field(default_factory=dict)
+
+
+def _clip_incomplete_any(
+    conn: Any, sreality_ids: list[int], model: str, cache: _ProbeCache | None = None,
+) -> bool:
+    """Memoized any-incomplete check over `_clip_incomplete` (a per-LISTING fact queried
+    per PAIR before — a group of n re-checked each listing n-1 times). Only the not-yet-
+    cached ids hit the DB; no cache -> the plain one-shot query (tests, standalone use)."""
+    if cache is None:
+        return bool(_clip_incomplete(conn, sreality_ids, model))
+    unknown = [s for s in sreality_ids if s not in cache.clip_incomplete]
+    if unknown:
+        incomplete = set(_clip_incomplete(conn, unknown, model))
+        for s in unknown:
+            cache.clip_incomplete[s] = s in incomplete
+    return any(cache.clip_incomplete[s] for s in sreality_ids)
+
+
+def _floor_plan_ids_cached(
+    conn: Any, sreality_id: int, cache: _ProbeCache | None = None,
+) -> list[int]:
+    """Memoized `_floor_plan_image_ids` (per-listing; the floor-plan gate queries both
+    sides of every would-merge pair). Resolved via the module attribute so tests that
+    monkeypatch `_floor_plan_image_ids` keep working."""
+    if cache is None:
+        return _floor_plan_image_ids(conn, sreality_id)
+    if sreality_id not in cache.floor_plan_ids:
+        cache.floor_plan_ids[sreality_id] = _floor_plan_image_ids(conn, sreality_id)
+    return cache.floor_plan_ids[sreality_id]
+
+
+def _phash_pairs_cached(
+    conn: Any, a_id: int, b_id: int, excluded_tags: tuple[str, ...],
+    render_exclude_min: float | None, cache: _ProbeCache | None = None,
+    group_sids: tuple[int, ...] | None = None,
+) -> int:
+    """`_phash_identical_pairs` served from the per-group batch: on the first lookup for a
+    (group, exclusion-profile) the whole group's pair counts land in one round trip; later
+    pairs of the group are cache hits. No cache/group -> the per-pair query, unchanged."""
+    if cache is None or group_sids is None or len(group_sids) < 3:
+        # A 2-member group is a single pair — the batch saves nothing over the per-pair
+        # query, so keep the simpler (and independently testable) path for it.
+        return _phash_identical_pairs(
+            conn, a_id, b_id, excluded_tags, render_exclude_min=render_exclude_min)
+    profile = (tuple(excluded_tags), render_exclude_min)
+    gkey = (group_sids, profile)
+    if gkey not in cache.phash_batched:
+        counts = _phash_group_counts(
+            conn, list(group_sids), excluded_tags, render_exclude_min=render_exclude_min)
+        for (lo, hi), n in counts.items():
+            cache.phash_counts[(lo, hi, profile)] = n
+        cache.phash_batched.add(gkey)
+    lo, hi = min(a_id, b_id), max(a_id, b_id)
+    return cache.phash_counts.get((lo, hi, profile), 0)
+
+
+def _phash_distinctive_cached(
+    conn: Any, a_id: int, b_id: int, rooms: tuple[str, ...] | frozenset[str],
+    render_exclude_min: float | None, cache: _ProbeCache | None = None,
+    group_sids: tuple[int, ...] | None = None,
+) -> bool:
+    """`_phash_distinctive_match` served from the per-group batch (lazy: only byt pairs
+    whose generic count fell short ever need it, so the batch runs on first demand)."""
+    if cache is None or group_sids is None or len(group_sids) < 3:
+        return _phash_distinctive_match(
+            conn, a_id, b_id, rooms=rooms, render_exclude_min=render_exclude_min)
+    profile = (tuple(sorted(rooms)), render_exclude_min)
+    gkey = (group_sids, profile)
+    if gkey not in cache.distinctive_batched:
+        matches = _phash_group_distinctive(
+            conn, list(group_sids), rooms=rooms, render_exclude_min=render_exclude_min)
+        for lo, hi in matches:
+            cache.phash_distinctive[(lo, hi, profile)] = True
+        cache.distinctive_batched.add(gkey)
+    lo, hi = min(a_id, b_id), max(a_id, b_id)
+    return cache.phash_distinctive.get((lo, hi, profile), False)
+
+
+def _last_evidence_at(conn: Any, sreality_id: int, cache: _ProbeCache) -> Any:
+    """max(images.clip_tagged_at) for a listing — "when did its photo evidence last
+    change" for the prior-dismissal consult. Memoized; None = no tagged images."""
+    if sreality_id not in cache.evidence_at:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT max(clip_tagged_at) FROM images WHERE sreality_id = %s",
+                (sreality_id,),
+            )
+            row = cur.fetchone()
+        cache.evidence_at[sreality_id] = row[0] if row else None
+    return cache.evidence_at[sreality_id]
 
 
 @dataclass
@@ -1131,24 +1400,38 @@ class _RunContext:
     render_min: float = RENDER_SCORE_EXCLUDE_MIN
     inconclusive_to_review: bool = True
     max_room_attempts: int = 4
+    # Prior engine dismissals among the loaded properties ({(lo,hi): reviewed_at}) —
+    # loaded once per SCOPED run (dirty/candidates). resolve_pair skips a pair already
+    # dismissed with NO new photo evidence since, instead of re-running the whole probe
+    # + verdict chain every hour (the audit's 5.8x dismissal treadmill). None = consult
+    # off (full scans: cursor-rotated, each pair re-decided once per cycle by design).
+    dismissed_prior: dict[tuple[int, int], Any] | None = None
     # mutable run state
     stats: dict[str, int] = field(default_factory=dict)
     vision_budget: list[int] = field(default_factory=lambda: [0])
     audit: list[dict[str, Any]] | None = None
+    probes: _ProbeCache = field(default_factory=_ProbeCache)
     seen_listing_pairs: set[tuple[int, int]] = field(default_factory=set)
     seen_property_pairs: set[tuple[int, int]] = field(default_factory=set)
     merged_pairs: set[tuple[int, int]] = field(default_factory=set)
     dismissed_pairs: set[tuple[int, int]] = field(default_factory=set)
+    # The subset of dismissed_pairs that were AUTO-DISMISSED by a verdict this run
+    # (floor-plan different_layout / confident visual "different") — NOT the rule-C
+    # rejects. finalize() upserts these as status='dismissed' candidate rows so future
+    # scoped runs can consult them (66% of treadmill pairs had NO candidate row at all).
+    auto_dismissed_pairs: set[tuple[int, int]] = field(default_factory=set)
     pairs_left: int = 10 ** 9
 
 
 def resolve_pair(conn: Any, a: ListingKey, b: ListingKey, *, street_key: str,
-                 ctx: _RunContext) -> None:
+                 ctx: _RunContext, group_sids: tuple[int, ...] | None = None) -> None:
     """Decide ONE eligible same-street pair and apply the outcome (merge / dismiss /
     queue / defer / skip), mutating `ctx`. The single source of truth for the dedup
-    decision tree — rule A/B/C, the pHash fast-path + floor-plan gate, the cross-source
-    gate, and rule-D forensic visual — shared by every driver. Returns nothing; its
-    effects are the DB writes (merge/enqueue) plus ctx mutations the caller persists."""
+    decision tree — rule A/B/C, the pHash fast-path + floor-plan gate, and rule-D
+    forensic visual — shared by every driver. Returns nothing; its effects are the DB
+    writes (merge/enqueue) plus ctx mutations the caller persists. `group_sids` (the
+    street group's listing ids, passed by run_engine's loop) lets the pHash probes batch
+    per GROUP instead of per pair; absent -> per-pair queries, identical results."""
     stats = ctx.stats
     # Dual-keyed listings appear in their 'id:' AND 'name:' groups; classify each
     # listing pair once (first group wins).
@@ -1174,6 +1457,24 @@ def resolve_pair(conn: Any, a: ListingKey, b: ListingKey, *, street_key: str,
         return
     ctx.seen_property_pairs.add(cp)
 
+    # Prior-dismissal consult (scoped runs): a pair the engine already CONFIDENTLY
+    # dismissed (floor-plan different_layout / visual "different") re-forms every time
+    # its group re-drains, and without this check it re-ran the whole probe + verdict
+    # chain hourly (measured: 3,621 audit rows for 620 distinct pairs in 7 days). Skip it
+    # UNLESS either side gained photo evidence since the dismissal (new images tagged
+    # after reviewed_at) — new photos can legitimately flip a verdict, so recall
+    # survives. Full scans don't consult (cursor-rotated: one re-decision per cycle is
+    # the designed refresh).
+    if ctx.dismissed_prior is not None and cp in ctx.dismissed_prior:
+        reviewed_at = ctx.dismissed_prior[cp]
+        ev_a = _last_evidence_at(conn, a.sreality_id, ctx.probes)
+        ev_b = _last_evidence_at(conn, b.sreality_id, ctx.probes)
+        fresh = any(ev is not None and reviewed_at is not None and ev > reviewed_at
+                    for ev in (ev_a, ev_b))
+        if not fresh:
+            stats["skipped_prior_dismissed"] = stats.get("skipped_prior_dismissed", 0) + 1
+            return
+
     # Tagging-readiness gate: a listing must be FULLY CLIP-tagged before the engine decides on
     # it. An incompletely-tagged listing's floor-plan / room images may still be in the tag
     # queue, so the floor-plan gate would mis-read 'one-sided' (a pending plan looks absent — the
@@ -1186,7 +1487,8 @@ def resolve_pair(conn: Any, a: ListingKey, b: ListingKey, *, street_key: str,
     # one falls to the next scan that loads its group (candidate drain or full scan). Always on
     # whenever CLIP is the tagger (clip_model set) — there is no opt-out (it replaced the retired
     # dedup_clip_only setting).
-    if ctx.clip_model and _clip_incomplete(conn, [a.sreality_id, b.sreality_id], ctx.clip_model):
+    if ctx.clip_model and _clip_incomplete_any(
+            conn, [a.sreality_id, b.sreality_id], ctx.clip_model, ctx.probes):
         stats["clip_deferred"] += 1
         return
 
@@ -1207,18 +1509,19 @@ def resolve_pair(conn: Any, a: ListingKey, b: ListingKey, *, street_key: str,
     # house's facade/garden is shared across a development's units, so distinctive_rooms_for
     # returns an empty set for non-byt families and the override is skipped (require >=2).
     _rmin = phash_render_exclude_for(a.category_main, ctx.render_min)
-    phash_pairs = _phash_identical_pairs(
+    phash_pairs = _phash_pairs_cached(
         conn, a.sreality_id, b.sreality_id,
-        phash_excluded_tags_for(a.category_main), render_exclude_min=_rmin)
+        phash_excluded_tags_for(a.category_main), _rmin,
+        cache=ctx.probes, group_sids=group_sids)
     _distinctive_rooms = distinctive_rooms_for(a.category_main)
     distinctive = (
         bool(_distinctive_rooms)
         and phash_pairs < PHASH_MIN_IDENTICAL_PAIRS
-        and _phash_distinctive_match(
-            conn, a.sreality_id, b.sreality_id,
-            rooms=_distinctive_rooms, render_exclude_min=_rmin))
+        and _phash_distinctive_cached(
+            conn, a.sreality_id, b.sreality_id, _distinctive_rooms, _rmin,
+            cache=ctx.probes, group_sids=group_sids))
     if decide_phash_fastpath(phash_pairs, distinctive) and not _both_have_site_plan(
-        conn, a.sreality_id, b.sreality_id
+        conn, a.sreality_id, b.sreality_id, ctx.probes
     ):
         factors = _factors("phash", reason="image_phash",
                            street_key=street_key, phash_pairs=phash_pairs,
@@ -1237,10 +1540,11 @@ def resolve_pair(conn: Any, a: ListingKey, b: ListingKey, *, street_key: str,
         fp = _floor_plan_gate(
             conn, a.sreality_id, b.sreality_id,
             floor_plan_fn=ctx.floor_plan_fn, vision_budget=ctx.vision_budget,
-            inconclusive_to_review=ctx.inconclusive_to_review)
+            inconclusive_to_review=ctx.inconclusive_to_review, cache=ctx.probes)
         if fp == "dismiss":
             stats["auto_dismissed"] += 1
             ctx.dismissed_pairs.add(cp)
+            ctx.auto_dismissed_pairs.add(cp)
             _audit(ctx.audit, a, b, "phash", "dismissed",
                    {**factors, "reason": "floor_plan_different_layout"},
                    source="engine")
@@ -1297,7 +1601,7 @@ def resolve_pair(conn: Any, a: ListingKey, b: ListingKey, *, street_key: str,
         cosine_fn=ctx.cosine_fn, bands=ctx.bands, model_for=ctx.model_for,
         render_min=ctx.render_min, inconclusive_to_review=ctx.inconclusive_to_review,
         tag_overrides=ctx.tag_overrides,
-        stats=stats,
+        stats=stats, probe_cache=ctx.probes,
     )
     # ONE factor set per pair — fed to BOTH the terminal audit `detail` (merged/dismissed)
     # AND, when queued, the candidate `markers_matched`, so Decision history and
@@ -1323,6 +1627,7 @@ def resolve_pair(conn: Any, a: ListingKey, b: ListingKey, *, street_key: str,
     elif outcome["action"] == "dismiss":
         stats["auto_dismissed"] += 1
         ctx.dismissed_pairs.add(cp)
+        ctx.auto_dismissed_pairs.add(cp)
         _audit(ctx.audit, a, b, "visual", "dismissed", factors, source="engine")
     elif outcome["action"] == "defer":
         # Floor-plan verdict not warmed yet -> skip, re-try next run (the batch lane
@@ -1486,7 +1791,16 @@ def run_engine(
     classify = _make_geo_classify(geo_area_max_pct) if geo else classify_pair
     from toolkit.dedup_priorities import load_tag_priority_overrides
     tag_overrides = load_tag_priority_overrides(conn)
+    # Prior-dismissal consult, SCOPED runs only (dirty / candidate drains re-form the
+    # same pairs every pass; the full scan is cursor-rotated — one re-decision per cycle
+    # is its designed refresh, and its property set is the whole market, too big to load).
+    scoped = (restrict_property_ids is not None or restrict_street_groups is not None
+              or only_groups_with_property_ids is not None)
+    dismissed_prior = (
+        _load_prior_dismissed(conn, {k.property_id for k in keys if k.property_id is not None})
+        if scoped and not geo else None)
     ctx = _RunContext(
+        dismissed_prior=dismissed_prior,
         classify=classify, tier=("geo" if geo else "street_disposition"),
         tag_overrides=tag_overrides, clip_model=clip_model,
         classify_fn=classify_fn, compare_fn=compare_fn, site_plan_fn=site_plan_fn,
@@ -1523,6 +1837,10 @@ def run_engine(
         if not dry_run:
             _resolve_candidates(conn, ctx.merged_pairs, "merged")
             _resolve_candidates(conn, ctx.dismissed_pairs, "dismissed")
+            # Record this run's VERDICT-BACKED dismissals as status='dismissed' candidate
+            # rows (insert-if-absent — 66% of the measured treadmill pairs had NO row for
+            # the consult to find; an existing row was just updated above).
+            _record_auto_dismissed(conn, ctx.auto_dismissed_pairs, ctx.tier)
         if cursor_out is not None:
             cursor_out["last_key"] = scan_frontier["last_key"]
             # The cycle completed only if the scan reached the end of the ordered list
@@ -1551,6 +1869,9 @@ def run_engine(
             _group_scanned(members)
             scan_frontier["last_key"] = street_key
             continue
+        # The group's listing ids let the pHash probes batch ONE round trip per
+        # (group, exclusion-profile) instead of one per pair (_phash_pairs_cached).
+        group_sids = tuple(sorted({m.sreality_id for m in members}))
         for i in range(len(members)):
             if ctx.pairs_left <= 0:
                 stats["truncated"] = 1  # pair cap exhausted between groups — also truncation
@@ -1571,7 +1892,8 @@ def run_engine(
                     )
                     stats["truncated"] = 1  # scan did NOT finish; completed groups still clear
                     return finalize()
-                resolve_pair(conn, members[i], members[j], street_key=street_key, ctx=ctx)
+                resolve_pair(conn, members[i], members[j], street_key=street_key,
+                             ctx=ctx, group_sids=group_sids)
         else:
             # The for-else fires only when the group's pair scan COMPLETED (no break) —
             # the deadline/pair-cap returns above exit before reaching it.
@@ -2199,7 +2521,7 @@ def main() -> int:
             LOG.info(
                 "ENGINE %s eligible=%d auto_address=%d auto_phash=%d auto_visual=%d "
                 "auto_dismissed=%d floor_plan_deferred=%d clip_deferred=%d reconciled=%d queued=%d "
-                "skipped_unresolved=%d rejected=%d "
+                "skipped_unresolved=%d rejected=%d prior_dismissed_skips=%d "
                 "skipped_same_source=%d pairs=%d vision_calls=%d",
                 "shadow" if args.shadow else "done",
                 stats["eligible"], stats["auto_address"], stats["auto_phash"],
@@ -2207,6 +2529,7 @@ def main() -> int:
                 stats.get("floor_plan_deferred", 0), stats.get("clip_deferred", 0),
                 stats["reconciled"],
                 stats["queued"], stats["skipped_unresolved"], stats["rejected"],
+                stats.get("skipped_prior_dismissed", 0),
                 stats.get("skipped_same_source", 0),
                 stats["pairs_considered"], stats["vision_calls"],
             )

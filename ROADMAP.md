@@ -6,6 +6,26 @@ source for active rules; ROADMAP is for sequencing.
 
 ## Done
 
+### 2026-07: Dedup dirty-lane throughput — probe memoization + batched pHash + dismissal consult (audit PR-B)
+
+The audit's cost-floor fix: resolve_pair paid 2-3 SEQUENTIAL DB round-trips per candidate
+pair (~0.5-0.75 s/pair from a GitHub runner to the EU pooler ≈ the whole 1200 s dirty
+budget — the chronic-truncation root cause #670's per-group clear worked around).
+- **`_ProbeCache` on `_RunContext`**: CLIP-completeness, floor-plan ids, and site-plan
+  presence are per-LISTING facts now queried once per run instead of once per pair — a
+  group of n listings costs O(n) probes, not O(n²).
+- **Group-batched pHash**: `_phash_group_counts`/`_phash_group_distinctive` compute every
+  cross-listing pair of a street group in ONE round trip (per exclusion-profile — byt
+  excludes exteriors/renders); `run_engine` hands the group's ids to `resolve_pair`, and
+  per-pair fallbacks keep standalone callers identical.
+- **Dismissal treadmill fixed** (measured: 3,621 audit rows for 620 distinct pairs in 7
+  days, ~5.8x): scoped runs (dirty/candidates) consult prior verdict-backed dismissals and
+  SKIP a pair unless either side gained photo evidence since (`images.clip_tagged_at` >
+  `reviewed_at` — recall survives new photos); engine auto-dismissals now insert a durable
+  `status='dismissed'` candidate marker (66% of treadmill pairs had NO row to consult);
+  `_write_pair_audit` drops records identical to one logged within 7 days (the audit logs
+  decisions, not run cadence). Full scans never consult (cursor-rotated by design).
+
 ### 2026-07: Resolver streets survive refetches — preserve-if-null + provenance + geom guard (audit PR-D)
 
 The RÚIAN coord→street resolver's fills were clobbered back to NULL by the row's next detail

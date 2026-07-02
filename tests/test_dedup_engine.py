@@ -892,6 +892,8 @@ class _Cur:
             self._rows = [(self._conn.stale_count,)]  # _reconcile_stale_candidates count
         elif "EXISTS (SELECT 1 FROM images ia" in s:
             self._rows = [(False,)]  # _phash_distinctive_match default (monkeypatch for a match)
+        elif "GROUP BY 1, 2" in s and "FROM images ia JOIN images ib" in s:
+            self._rows = []  # _phash_group_counts default: no near-identical pairs anywhere
         elif "FROM images ia JOIN images ib" in s:
             self._rows = [(0,)]  # _phash_identical_pairs default (tests monkeypatch when needed)
         elif "FROM images i WHERE i.sreality_id" in s and "storage_path IS NOT NULL" in s:
@@ -900,6 +902,9 @@ class _Cur:
             self._rows = [(False,)]  # _both_have_site_plan default (CLIP-OR-LLM query)
         elif "UPDATE property_identity_candidates" in s:
             self._conn.resolved.append((s, params))  # reconcile / _resolve_candidates
+            self._rows = []
+        elif "INSERT INTO property_identity_candidates" in s and "'dismissed'" in s:
+            self._conn.dismiss_recorded.append(params)  # _record_auto_dismissed markers
             self._rows = []
         elif "INSERT INTO property_identity_candidates" in s:
             self._conn.enqueued.append(params)
@@ -920,6 +925,7 @@ class _FakeConn:
         self.stale_count = stale_count
         self.executed: list[str] = []
         self.enqueued: list[Any] = []
+        self.dismiss_recorded: list[Any] = []  # _record_auto_dismissed marker INSERTs
         self.resolved: list[tuple[str, Any]] = []  # reconcile + _resolve_candidates UPDATEs
 
     def cursor(self) -> _Cur:
@@ -1482,7 +1488,8 @@ def test_write_run_row_stamps_kind_truncated_started_at() -> None:
     assert captured["params"]["truncated"] == 0  # absent -> completed run
 
 
-def _stub_resolve_pair(conn: Any, a: Any, b: Any, *, street_key: str, ctx: Any) -> None:
+def _stub_resolve_pair(conn: Any, a: Any, b: Any, *, street_key: str, ctx: Any,
+                       group_sids: Any = None) -> None:
     # Mirrors only resolve_pair's budget accounting — the per-group clear tracks group
     # completion, not pair outcomes, so a decide-nothing stub is enough.
     ctx.pairs_left -= 1
@@ -2546,3 +2553,177 @@ def test_pair_audit_is_opt_in_no_records_when_none() -> None:
     conn = _FakeConn([_row(1, 101), _row(2, 102, source="bazos")])
     # Should not raise even though no audit sink is provided.
     eng.run_engine(conn, max_vision_calls=0)
+
+
+# --- PR-B: probe memoization, group-batched pHash, dismissal treadmill -------
+
+def test_probe_cache_clip_incomplete_queries_each_listing_once() -> None:
+    """_clip_incomplete_any memoizes per LISTING: across a group's pairs, each listing
+    hits the DB once (the audit measured per-pair re-probing as the dirty lane's cost
+    floor). Only not-yet-cached ids are queried."""
+    import scripts.dedup_engine as eng
+
+    calls: list[list[int]] = []
+
+    class _C:
+        def __enter__(self): return self
+        def __exit__(self, *a): return None
+        def execute(self, sql, params=None): calls.append(list(params[0]))
+        def fetchall(self): return [(s,) for s in calls[-1] if s == 2]  # sid 2 incomplete
+
+    class _Conn:
+        def cursor(self): return _C()
+
+    cache = eng._ProbeCache()
+    assert eng._clip_incomplete_any(_Conn(), [1, 2], "m", cache) is True
+    assert eng._clip_incomplete_any(_Conn(), [1, 3], "m", cache) is False
+    assert eng._clip_incomplete_any(_Conn(), [2, 3], "m", cache) is True  # pure cache hit
+    # sid 1,2 queried in call one; only sid 3 in call two; call three hit the cache.
+    assert calls == [[1, 2], [3]]
+
+
+def test_phash_pairs_cached_batches_group_once() -> None:
+    """First lookup for a (group, profile) batches the WHOLE group's counts in one round
+    trip; later pairs are cache hits; absent pairs read 0."""
+    import scripts.dedup_engine as eng
+
+    executed: list[str] = []
+
+    class _C:
+        def __enter__(self): return self
+        def __exit__(self, *a): return None
+        def execute(self, sql, params=None): executed.append(" ".join(sql.split()))
+        def fetchall(self): return [(10, 20, 3)]  # only pair (10,20) has matches
+
+    class _Conn:
+        def cursor(self): return _C()
+
+    cache = eng._ProbeCache()
+    group = (10, 20, 30)
+    assert eng._phash_pairs_cached(_Conn(), 10, 20, (), None,
+                                   cache=cache, group_sids=group) == 3
+    assert eng._phash_pairs_cached(_Conn(), 20, 30, (), None,
+                                   cache=cache, group_sids=group) == 0  # absent -> 0
+    assert eng._phash_pairs_cached(_Conn(), 30, 10, (), None,
+                                   cache=cache, group_sids=group) == 0
+    assert len(executed) == 1 and "GROUP BY 1, 2" in executed[0]
+    # A DIFFERENT exclusion profile re-batches (byt excludes exteriors/renders).
+    eng._phash_pairs_cached(_Conn(), 10, 20, ("garden",), 0.95,
+                            cache=cache, group_sids=group)
+    assert len(executed) == 2
+
+
+def test_phash_pairs_cached_falls_back_per_pair_without_group() -> None:
+    """No group context (tests / standalone callers) -> the per-pair query, unchanged."""
+    import scripts.dedup_engine as eng
+
+    executed: list[str] = []
+
+    class _C:
+        def __enter__(self): return self
+        def __exit__(self, *a): return None
+        def execute(self, sql, params=None): executed.append(" ".join(sql.split()))
+        def fetchone(self): return (2,)
+
+    class _Conn:
+        def cursor(self): return _C()
+
+    assert eng._phash_pairs_cached(_Conn(), 1, 2, (), None,
+                                   cache=eng._ProbeCache(), group_sids=None) == 2
+    assert "GROUP BY" not in executed[0]
+
+
+def test_resolve_pair_skips_prior_dismissed_without_new_evidence() -> None:
+    """A pair the engine already dismissed is SKIPPED on scoped runs unless either side
+    gained photo evidence since — the 5.8x dismissal-treadmill fix, recall-preserving."""
+    import scripts.dedup_engine as eng
+
+    class _C:
+        def __enter__(self): return self
+        def __exit__(self, *a): return None
+        def execute(self, sql, params=None):
+            s = " ".join(sql.split())
+            if "max(clip_tagged_at)" in s:
+                self._one = ("2026-07-01",)  # each listing's latest photo evidence
+            elif "EXISTS" in s:
+                self._one = (False,)
+            else:
+                self._one = (0,)  # pHash count / site-plan flags
+        def fetchone(self): return self._one
+        def fetchall(self): return []
+
+    class _Conn:
+        def cursor(self): return _C()
+
+    a = _key(1, pid=101)
+    b = _key(2, pid=102)
+    # Dismissed AFTER the evidence timestamp -> no new evidence -> skip.
+    ctx = eng._RunContext(stats={"rejected": 0},
+                          dismissed_prior={(101, 102): "2026-07-02"})
+    eng.resolve_pair(_Conn(), a, b, street_key="id:42", ctx=ctx)
+    assert ctx.stats.get("skipped_prior_dismissed") == 1
+    assert ctx.stats.get("clip_deferred") is None  # exited before the probe chain
+
+    # Evidence NEWER than the dismissal -> the pair is re-decided (falls through to the
+    # visual stage and counts as considered; free-mode skip keeps the fake conn write-free).
+    ctx2 = eng._RunContext(stats={"rejected": 0, "pairs_considered": 0, "queued": 0,
+                                  "auto_dismissed": 0, "floor_plan_deferred": 0,
+                                  "skipped_unresolved": 0},
+                           dismissed_prior={(101, 102): "2026-06-30"},
+                           enqueue_unresolved=False)
+    eng.resolve_pair(_Conn(), a, b, street_key="id:42", ctx=ctx2)
+    assert ctx2.stats.get("skipped_prior_dismissed") is None
+    assert ctx2.stats["pairs_considered"] == 1
+
+
+def test_record_auto_dismissed_inserts_markers() -> None:
+    """finalize()'s _record_auto_dismissed writes insert-if-absent dismissed candidate
+    rows for verdict-backed dismissals only (the consult's durable negative decision)."""
+    import scripts.dedup_engine as eng
+
+    captured: dict[str, Any] = {}
+
+    class _C:
+        def __enter__(self): return self
+        def __exit__(self, *a): return None
+        def execute(self, sql, params=None):
+            captured["sql"] = " ".join(sql.split()); captured["params"] = params
+        @property
+        def rowcount(self): return 2
+
+    class _Conn:
+        def cursor(self): return _C()
+
+    n = eng._record_auto_dismissed(_Conn(), {(1, 2), (3, 4)}, "street_disposition")
+    assert n == 2
+    assert "ON CONFLICT (left_property_id, right_property_id) DO NOTHING" in captured["sql"]
+    assert "'dismissed'" in captured["sql"]
+    assert eng._record_auto_dismissed(_Conn(), set(), "street_disposition") == 0
+
+
+def test_write_pair_audit_dedupes_recent_identical_records() -> None:
+    """A dismissal identical to one logged within the window is NOT re-appended (the
+    audit logs decisions, not run cadence); novel records still insert."""
+    import scripts.dedup_engine as eng
+
+    inserted: list[Any] = []
+
+    class _C:
+        def __enter__(self): return self
+        def __exit__(self, *a): return None
+        def execute(self, sql, params=None): self._sql = " ".join(sql.split())
+        def executemany(self, sql, rows): inserted.extend(rows)
+        def fetchall(self):  # pair (1,2) phash/dismissed/engine already logged
+            return [(1, 2, "phash", "dismissed", "engine")]
+
+    class _Conn:
+        def cursor(self): return _C()
+
+    rec = {
+        "left_sreality_id": 1, "right_sreality_id": 2, "left_property_id": 101,
+        "right_property_id": 102, "category_main": "byt", "stage": "phash",
+        "outcome": "dismissed", "source": "engine", "detail": {},
+    }
+    novel = {**rec, "left_sreality_id": 5, "right_sreality_id": 6}
+    eng._write_pair_audit(_Conn(), "RUN_AT", [rec, novel])
+    assert len(inserted) == 1 and inserted[0][1] == 5  # only the novel record landed
