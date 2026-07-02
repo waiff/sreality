@@ -1,0 +1,472 @@
+"""Always-on realtime supervisor (realtime-scrapers Wave C-3).
+
+A SECOND Railway service from the same Docker image (start command
+`python -m scraper.realtime_worker`) that replaces cron quantization for the
+latency-critical path. Three settings-paced asyncio lanes (the proven
+matcher/outbox pattern from api/notifications + api/notification_outbox):
+
+- probe:     every `realtime_probe_interval_seconds` (default 180), run the
+             newest-first delta probe (portal_runner.run_index_probe, Wave C-2)
+             sequentially over the probe-capable portals — diff + enqueue only,
+             never mark_inactive.
+- drain:     every `realtime_drain_interval_seconds` (default 30), claim a
+             bounded slice of the shared listing_detail_queue per source that
+             has claimable rows. SKIP LOCKED makes this safe beside the GitHub
+             Actions drains by construction.
+- heartbeat: every 30s, upsert this worker's beat + per-lane counters into
+             worker_heartbeats (migration 269) — the Health-page liveness hook
+             and where future lanes (images, dedup wake) will report.
+
+SHIPS DARK: the process exits immediately unless env REALTIME_WORKER_ENABLED=1,
+so merging changes nothing until the operator creates the Railway service.
+Setting any lane's interval <= 0 idles that lane (kill-switch without redeploy).
+
+sreality and mmreality are deliberately OUT of the registry: sreality's v1 API
+ignores every sort param (no probe capability; its own */15 Actions split
+already covers it) and mmreality is proxied low-frequency by design. Adding a
+portal later is one registry line.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import importlib
+import logging
+import os
+import signal
+from collections.abc import Awaitable, Callable
+from datetime import datetime, timezone
+from typing import Any
+
+from psycopg.types.json import Jsonb
+
+from scraper import db, portal_runner
+from scraper.portal import PortalConfig, default_config, load_portal_config
+
+LOG = logging.getLogger("scraper.realtime_worker")
+
+ENABLE_ENV = "REALTIME_WORKER_ENABLED"
+WORKER_NAME = "realtime-worker"
+
+PROBE_PAGES = 1
+PROBE_INTERVAL_DEFAULT = 180
+DRAIN_INTERVAL_DEFAULT = 30
+DRAIN_SLICE_DEFAULT = 200
+DRAIN_MAX_SECONDS = 120.0
+HEARTBEAT_INTERVAL_SECONDS = 30.0
+IDLE_WAIT_SECONDS = 60.0
+LANE_RESTART_SECONDS = 30.0
+
+# The probe-capable portals (design doc: newest-first index order, or a bespoke
+# probe_category). Stable order = polite, predictable per-pass sequencing. Also
+# the set the drain lane serves — the worker only drains portals it knows how
+# to build.
+REALTIME_SOURCES: tuple[str, ...] = (
+    "bazos", "bezrealitky", "ceskereality", "idnes",
+    "maxima", "realitymix", "remax",
+)
+
+_PORTAL_CLASSES: dict[str, tuple[str, str]] = {
+    "bezrealitky": ("scraper.bezrealitky_main", "BezrealitkyPortal"),
+    "ceskereality": ("scraper.ceskereality_main", "CeskerealityPortal"),
+    "idnes": ("scraper.idnes_main", "IdnesPortal"),
+    "maxima": ("scraper.maxima_main", "MaximaPortal"),
+    "realitymix": ("scraper.realitymix_main", "RealitymixPortal"),
+    "remax": ("scraper.remax_main", "RemaxPortal"),
+}
+
+_CLIENT_CLASSES: dict[str, tuple[str, str]] = {
+    "bazos": ("scraper.bazos_client", "BazosClient"),
+    "bezrealitky": ("scraper.bezrealitky_client", "BezrealitkyClient"),
+    "ceskereality": ("scraper.ceskereality_client", "CeskerealityClient"),
+    "idnes": ("scraper.idnes_client", "IdnesClient"),
+    "maxima": ("scraper.maxima_client", "MaximaClient"),
+    "realitymix": ("scraper.realitymix_client", "RealitymixClient"),
+    "remax": ("scraper.remax_client", "RemaxClient"),
+}
+
+# log-once-per-process guard for proxied portals skipped without SCRAPER_PROXY_URL.
+_PROXY_WARNED: set[str] = set()
+
+
+# --- settings (read per pass so operator edits take effect without restart) ---
+
+
+def _read_setting(key: str) -> Any:
+    conn = db.connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT value FROM app_settings WHERE key = %s", (key,))
+            row = cur.fetchone()
+        return None if row is None else row[0]
+    finally:
+        with contextlib.suppress(Exception):
+            conn.close()
+
+
+def _read_int(key: str, default: int) -> int:
+    value = _read_setting(key)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _read_probe_interval() -> int:
+    return _read_int("realtime_probe_interval_seconds", PROBE_INTERVAL_DEFAULT)
+
+
+def _read_drain_interval() -> int:
+    return _read_int("realtime_drain_interval_seconds", DRAIN_INTERVAL_DEFAULT)
+
+
+def _read_drain_slice() -> int:
+    return _read_int("realtime_drain_slice", DRAIN_SLICE_DEFAULT)
+
+
+def _read_disabled_sources() -> set[str]:
+    value = _read_setting("realtime_probe_disabled_sources")
+    if not isinstance(value, list):
+        return set()
+    return {str(v) for v in value}
+
+
+# --- portal construction ----------------------------------------------------
+
+
+def _load_config(source: str) -> PortalConfig:
+    try:
+        with db.connect() as conn:
+            return load_portal_config(conn, source)
+    except Exception as exc:  # noqa: BLE001 - registry hiccup must not break a pass
+        LOG.warning(
+            "load_portal_config failed source=%s: %s; using baked-in default",
+            source, exc,
+        )
+        return default_config(source)
+
+
+def _build_portal(source: str, config: PortalConfig) -> Any:
+    if source == "bazos":
+        # Bazos predates the config-taking constructor: it takes scopes +
+        # geocoder and reads its limits off attributes (the bazos_main.main
+        # wiring, reproduced here).
+        from scraper import bazos_main
+
+        scopes = [
+            c for c in config.categories
+            if bazos_main.SALE_TYPE.get(c.get("sale_type"))
+            and bazos_main.CATEGORY_MAIN.get(c.get("category"))
+        ]
+        portal = bazos_main.BazosPortal(
+            categories=scopes, geocoder=bazos_main._build_geocoder(),
+        )
+        portal.index_rate = config.limits.index_rate
+        portal.shared_rate_limiter = config.limits.shared_rate_limiter
+        portal.supports_complete_walk = config.supports_complete_walk
+        return portal
+    mod_name, cls_name = _PORTAL_CLASSES[source]
+    cls = getattr(importlib.import_module(mod_name), cls_name)
+    return cls(config)
+
+
+def _skip_for_proxy(source: str) -> bool:
+    """True when the portal's client rides the residential proxy (USE_PROXY)
+    and the proxy env is unset — a direct request would only burn a WAF 403."""
+    mod_name, cls_name = _CLIENT_CLASSES[source]
+    cls = getattr(importlib.import_module(mod_name), cls_name)
+    if not getattr(cls, "USE_PROXY", False):
+        return False
+    env = getattr(cls, "PROXY_ENV", "SCRAPER_PROXY_URL")
+    if os.environ.get(env):
+        return False
+    if source not in _PROXY_WARNED:
+        _PROXY_WARNED.add(source)
+        LOG.warning("%s unset; skipping proxied portal %s", env, source)
+    return True
+
+
+# --- lane passes (sync halves run in a thread) --------------------------------
+
+
+def _run_probe_sync(source: str) -> dict[str, Any]:
+    config = _load_config(source)
+    portal = _build_portal(source, config)
+    rc, agg = portal_runner.run_index_probe(
+        portal, dry_run=False, probe_pages=PROBE_PAGES,
+    )
+    agg["rc"] = rc
+    return agg
+
+
+def _run_drain_sync(source: str, max_claims: int) -> dict[str, Any]:
+    config = _load_config(source)
+    portal = _build_portal(source, config)
+    # run_id=None: no scrape_runs row per pass — a 30s cadence would write
+    # thousands of bookkeeping rows/day (the images-only precedent: liveness
+    # noise). Worker observability lives in worker_heartbeats; the listing
+    # writes themselves feed Health identically (first_seen_at, queue age).
+    rc, agg = portal_runner.run_detail_drain(
+        portal,
+        max_claims=max_claims,
+        dry_run=False,
+        detail_workers=config.limits.detail_workers,
+        detail_rate=config.limits.detail_rate,
+        max_seconds=DRAIN_MAX_SECONDS,
+    )
+    agg["rc"] = rc
+    return agg
+
+
+def _claimable_by_source() -> dict[str, int]:
+    conn = db.connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT source, count(*) FROM listing_detail_queue "
+                "WHERE claimed_at IS NULL AND given_up = false "
+                "GROUP BY source"
+            )
+            return {source: int(n) for source, n in cur.fetchall()}
+    finally:
+        with contextlib.suppress(Exception):
+            conn.close()
+
+
+def _record_pass(state: dict[str, Any], lane: str, last: dict[str, Any]) -> None:
+    prev = state["lanes"].get(lane, {})
+    state["lanes"][lane] = {
+        "last_pass_at": datetime.now(timezone.utc).isoformat(),
+        "passes": int(prev.get("passes", 0)) + 1,
+        "last": last,
+    }
+
+
+async def _probe_pass(stop_event: asyncio.Event, state: dict[str, Any]) -> None:
+    disabled: set[str] = set()
+    try:
+        disabled = await asyncio.to_thread(_read_disabled_sources)
+    except Exception as exc:  # noqa: BLE001
+        LOG.warning("probe lane: failed to read disabled sources: %s", exc)
+    totals = {"portals": 0, "new": 0, "enqueued": 0, "errors": 0, "skipped": 0}
+    for source in REALTIME_SOURCES:
+        if stop_event.is_set():
+            break
+        if source in disabled or _skip_for_proxy(source):
+            totals["skipped"] += 1
+            continue
+        try:
+            agg = await asyncio.to_thread(_run_probe_sync, source)
+        except Exception:  # noqa: BLE001 - one portal must not end the pass
+            LOG.exception("PROBE lane source=%s failed", source)
+            totals["errors"] += 1
+            continue
+        totals["portals"] += 1
+        totals["new"] += agg.get("listings_found_new", 0)
+        totals["enqueued"] += agg.get("listings_enqueued", 0)
+        totals["errors"] += agg.get("errors", 0)
+        LOG.info(
+            "PROBE lane source=%s pages=%d new=%d enqueued=%d "
+            "early_stopped=%d errors=%d",
+            source, agg.get("index_pages", 0), agg.get("listings_found_new", 0),
+            agg.get("listings_enqueued", 0), agg.get("early_stopped", 0),
+            agg.get("errors", 0),
+        )
+    _record_pass(state, "probe", totals)
+
+
+async def _drain_pass(stop_event: asyncio.Event, state: dict[str, Any]) -> None:
+    slice_ = DRAIN_SLICE_DEFAULT
+    try:
+        slice_ = await asyncio.to_thread(_read_drain_slice)
+    except Exception as exc:  # noqa: BLE001
+        LOG.warning("drain lane: failed to read slice: %s", exc)
+    if slice_ <= 0:
+        LOG.debug("drain lane: slice<=0; skipping pass")
+        return
+    counts = await asyncio.to_thread(_claimable_by_source)
+    totals = {"sources": 0, "new": 0, "updated": 0, "gone": 0, "errors": 0}
+    for source in REALTIME_SOURCES:
+        if stop_event.is_set():
+            break
+        claimable = counts.get(source, 0)
+        if claimable <= 0 or _skip_for_proxy(source):
+            continue
+        try:
+            agg = await asyncio.to_thread(_run_drain_sync, source, slice_)
+        except Exception:  # noqa: BLE001 - one portal must not end the pass
+            LOG.exception("DRAIN lane source=%s failed", source)
+            totals["errors"] += 1
+            continue
+        totals["sources"] += 1
+        totals["new"] += agg.get("listings_scraped_new", 0)
+        totals["updated"] += agg.get("listings_updated", 0)
+        totals["gone"] += agg.get("listings_inactive", 0)
+        totals["errors"] += agg.get("errors", 0)
+        LOG.info(
+            "DRAIN lane source=%s claimable=%d new=%d updated=%d gone=%d errors=%d",
+            source, claimable, agg.get("listings_scraped_new", 0),
+            agg.get("listings_updated", 0), agg.get("listings_inactive", 0),
+            agg.get("errors", 0),
+        )
+    _record_pass(state, "drain", totals)
+
+
+_HEARTBEAT_SQL = """
+    INSERT INTO worker_heartbeats (worker, beat_at, started_at, details)
+    VALUES (%(worker)s, now(), %(started_at)s, %(details)s)
+    ON CONFLICT (worker) DO UPDATE SET
+        beat_at    = now(),
+        started_at = EXCLUDED.started_at,
+        details    = EXCLUDED.details
+"""
+
+
+def _beat_sync(state: dict[str, Any]) -> None:
+    conn = db.connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(_HEARTBEAT_SQL, {
+                "worker": WORKER_NAME,
+                "started_at": state["started_at"],
+                "details": Jsonb(state["lanes"]),
+            })
+    finally:
+        with contextlib.suppress(Exception):
+            conn.close()
+
+
+async def _heartbeat_pass(state: dict[str, Any]) -> None:
+    await asyncio.to_thread(_beat_sync, state)
+
+
+# --- the supervisor -----------------------------------------------------------
+
+
+async def _lane_loop(
+    name: str,
+    stop_event: asyncio.Event,
+    read_interval: Callable[[], float],
+    run_pass: Callable[[], Awaitable[None]],
+    *,
+    default_interval: float,
+    idle_seconds: float = IDLE_WAIT_SECONDS,
+) -> None:
+    """One forever-lane: re-read the interval each pass (live app_settings
+    edits apply on the next wake), interval<=0 = idle-not-dead, per-pass
+    try/except, clean stop_event exit. Mirrors notifications.matcher_loop."""
+    LOG.info("%s lane starting", name)
+    while not stop_event.is_set():
+        interval = default_interval
+        try:
+            interval = float(await asyncio.to_thread(read_interval))
+        except Exception as exc:  # noqa: BLE001
+            LOG.warning("%s lane: failed to read interval: %s", name, exc)
+
+        if interval <= 0:
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=idle_seconds)
+            except asyncio.TimeoutError:
+                continue
+            else:
+                break
+
+        try:
+            await run_pass()
+        except Exception:  # noqa: BLE001 - a pass failure never kills the lane
+            LOG.exception("%s lane pass failed", name)
+
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=interval)
+        except asyncio.TimeoutError:
+            continue
+        else:
+            break
+    LOG.info("%s lane stopped", name)
+
+
+async def _supervised(
+    name: str,
+    lane: Callable[[], Awaitable[None]],
+    stop_event: asyncio.Event,
+) -> None:
+    """Belt on top of the per-pass try/except: a lane-loop bug restarts the
+    lane after a pause instead of leaving it silently dead until redeploy."""
+    while True:
+        try:
+            await lane()
+            return
+        except Exception:  # noqa: BLE001 - a lane crash never kills the process
+            LOG.exception(
+                "%s lane crashed; restarting in %ss", name, LANE_RESTART_SECONDS,
+            )
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=LANE_RESTART_SECONDS)
+            return
+        except asyncio.TimeoutError:
+            continue
+
+
+def _new_state() -> dict[str, Any]:
+    return {"started_at": datetime.now(timezone.utc), "lanes": {}}
+
+
+async def _amain() -> int:
+    stop_event = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        # Railway sends SIGTERM on redeploy; finish the current pass, then exit.
+        with contextlib.suppress(NotImplementedError):
+            loop.add_signal_handler(sig, stop_event.set)
+
+    state = _new_state()
+    LOG.info(
+        "realtime worker starting sources=%s probe_pages=%d",
+        ",".join(REALTIME_SOURCES), PROBE_PAGES,
+    )
+    lanes: list[tuple[str, Callable[[], Awaitable[None]]]] = [
+        ("probe", lambda: _lane_loop(
+            "probe", stop_event, _read_probe_interval,
+            lambda: _probe_pass(stop_event, state),
+            default_interval=PROBE_INTERVAL_DEFAULT)),
+        ("drain", lambda: _lane_loop(
+            "drain", stop_event, _read_drain_interval,
+            lambda: _drain_pass(stop_event, state),
+            default_interval=DRAIN_INTERVAL_DEFAULT)),
+        ("heartbeat", lambda: _lane_loop(
+            "heartbeat", stop_event, lambda: HEARTBEAT_INTERVAL_SECONDS,
+            lambda: _heartbeat_pass(state),
+            default_interval=HEARTBEAT_INTERVAL_SECONDS)),
+    ]
+    tasks = [
+        asyncio.create_task(_supervised(name, fn, stop_event), name=f"realtime-{name}")
+        for name, fn in lanes
+    ]
+    await asyncio.gather(*tasks)
+    LOG.info("realtime worker stopped")
+    return 0
+
+
+def _enabled() -> bool:
+    return os.environ.get(ENABLE_ENV, "").strip().lower() in {"1", "true", "yes"}
+
+
+def main() -> int:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
+    if not _enabled():
+        LOG.info(
+            "realtime worker disabled (%s != 1); exiting — set the env var on "
+            "the Railway service to enable", ENABLE_ENV,
+        )
+        return 0
+    return asyncio.run(_amain())
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

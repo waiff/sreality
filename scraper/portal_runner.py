@@ -37,6 +37,11 @@ LOG = logging.getLogger("scraper.portal_runner")
 DETAIL_BATCH_SIZE = 100
 DRAIN_CLAIM_CHUNK = 500
 
+# Probes are low-volume (a page or three per category), so when the shared
+# politeness ledger is on they lease small batches — a DEFAULT_LEASE_N lease
+# would hold ~20 slots a probe never uses, starving the concurrent walk lane.
+PROBE_LEASE_N = 5
+
 
 @dataclass
 class DrainItem:
@@ -271,7 +276,10 @@ def run_index_probe(
             f"portal {portal.source!r} implements neither probe_category nor "
             "set_index_page_cap; it cannot run the delta probe"
         )
-    limiter = RateLimiter(portal.index_rate)
+    limiter = build_rate_limiter(
+        portal.source, portal.index_rate,
+        getattr(portal, "shared_rate_limiter", False), lease_n=PROBE_LEASE_N,
+    )
     conn = None if dry_run else portal.connect_index()
     total_pages = 0
     total_new = 0
