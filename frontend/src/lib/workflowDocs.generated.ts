@@ -189,6 +189,55 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/backfill_bazos_street_locality.yml"
   },
   {
+    "filename": "backfill_idnes_areas.yml",
+    "name": "Backfill idnes areas (spaced-thousands truncation)",
+    "description": "One-off, dispatch-only backfill for PR #686's parser fix: idnes titles render land area with a Czech spaced-thousands group (\"2 403 m²\") and the old _AREA_RE matched from inside the number, storing area_m2=403 for a 2,403 m² plot (~8.4k active rows). Re-parses each affected listing from its already-staged detail HTML (portal_raw_pages, NO re-fetch of idnes) and heals the area columns in place; only NULLs a price on a genuine per-m² masquerade (zero found in prod). Idempotent + resumable; rerun until \"pending=0\". NOT a portal ingest workflow, so it carries no `# portal:` tag.",
+    "portal": null,
+    "manual": true,
+    "schedules": [],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "limit",
+        "description": "Max listings processed per run",
+        "required": false,
+        "type": "string",
+        "default": "40000",
+        "options": null
+      },
+      {
+        "name": "max_seconds",
+        "description": "Wall-clock budget in seconds (blank = no budget)",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "dry_run",
+        "description": "Report the pending count and exit without writing",
+        "required": false,
+        "type": "choice",
+        "default": "false",
+        "options": [
+          "false",
+          "true"
+        ]
+      }
+    ],
+    "secrets": [
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "backfill-idnes-areas",
+    "cancelInProgress": false,
+    "timeoutMinutes": 90,
+    "permissions": "contents: read",
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/backfill_idnes_areas.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/backfill_idnes_areas.yml"
+  },
+  {
     "filename": "backfill_idnes_brokers.yml",
     "name": "Data: backfill idnes broker blocks",
     "description": "One-shot backfill: reparse the staged idnes detail HTML (portal_raw_pages) into listings.raw_json.broker via scraper.broker_idnes.parse_idnes_broker. raw_json.broker is OUT of the content hash (_HASH_FIELDS is typed columns only), so this never churns snapshots. The broker resolver then attributes idnes brokers from raw_json.broker like sreality's raw_json.user. No re-fetch, no LLM, no new secrets.",
