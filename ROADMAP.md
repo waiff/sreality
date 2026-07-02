@@ -6,6 +6,32 @@ source for active rules; ROADMAP is for sequencing.
 
 ## Done
 
+### 2026-07: Resolver streets survive refetches — preserve-if-null + provenance + geom guard (audit PR-D)
+
+The RÚIAN coord→street resolver's fills were clobbered back to NULL by the row's next detail
+refetch (`street = EXCLUDED.street`; the portal page has no street by definition of the fill).
+Measured: 40% of a resolver cohort lost in 2.5 days; only ~455 of ~4.9k ever-filled still held
+streets; ~4.6k active rows uniquely resolvable but streetless — direct dedup-eligibility + Browse
+loss. The resolver's provenance was a raw_json marker the same refetch destroyed.
+
+Fix (migration 262 + `scraper/db.py`):
+- **One shared SET builder** (`_listing_update_set_sql`) for BOTH ingest upserts —
+  `street`/`street_name_key`/`house_number` become preserve-if-null (`COALESCE(EXCLUDED.c, l.c)`);
+  a page-parsed street still wins; write-path semantics can never drift between the two paths.
+- **`listings.street_source`** ('parser' | 'resolver' | NULL): durable provenance. Ingest stamps
+  'parser' when the page yields a street, else preserves; the resolver stamps 'resolver'. Only the
+  'resolver' rows are backfilled (via the surviving raw_json marker, narrowed by
+  `coord_street_attempt_version` so the jsonb probe stays tiny) — the correctness-critical
+  distinction is 'resolver' vs everything-else, so legacy parser rows are deliberately left NULL
+  (defined as parser-equivalent on the column comment); a bulk 210k 'parser' UPDATE deadlocked
+  against the live detail drains for zero semantic gain, and organic refetches stamp 'parser' as
+  pages re-yield streets.
+- **Geom-change guard** in `listings_set_admin_geo` (reproduced from the LIVE definition — the
+  repo's mig-222 copy predated the streetless-coord-change block): coordinates changed + source
+  'resolver' → NULL the trio + provenance; the trigger's tail block then re-opens the resolver at
+  the new coords. Parser streets untouched.
+- Post-deploy: a `--force-rescan` resolver dispatch recovers the ~4.6k currently-resolvable rows.
+
 ### 2026-07: Dedup full-scan cursor — whole-market coverage + honest TTL eviction (audit PR-C)
 
 The deep dedup-lane audit measured the 6h street full scan hitting its 4800 s deadline at ~64k of

@@ -1863,3 +1863,17 @@ it rather than duplicating a list here.
   `recompute_property_stats` — so a multi-portal property matches a street even when its representative
   listing lacks one. (The old expand-normalizer `toolkit/addresses.py` that turned `ul.`→`ulice` was
   dead code and was removed.)
+- **Street lifecycle: resolver fills survive refetches (migration 262).** The RÚIAN coord→street
+  resolver fills `street`/`street_name_key`/`house_number` on rows whose portal page has no street —
+  so the row's next detail refetch re-parses NULL, and a plain `street = EXCLUDED.street` used to
+  CLOBBER the fill (measured: 40% of a resolver cohort lost in 2.5 days). Three rails now:
+  (1) both ingest upserts (`upsert_listing` + `_BATCH_UPSERT_SQL`) build their SET from the ONE
+  `_listing_update_set_sql()` builder, which makes the trio **preserve-if-null**
+  (`COALESCE(EXCLUDED.c, listings.c)`) — an incoming NULL never erases a stored value, a page-parsed
+  street still wins; (2) **`listings.street_source`** ('parser' | 'resolver') is durable provenance
+  (replacing the resolver's raw_json marker, which the refetch destroyed) — ingest stamps 'parser'
+  when the page yields a street, else preserves it, the resolver stamps 'resolver';
+  (3) the admin-geo trigger drops a **'resolver'** street when the listing's COORDINATES change
+  (derived from the old point → may be wrong → "wrong street worse than NULL"), and its existing
+  tail block then re-opens the resolver for the new coords. Parser streets are untouched by the
+  guard (the page re-derives them every fetch).
