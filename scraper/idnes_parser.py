@@ -129,7 +129,17 @@ _CZ_LON_MIN, _CZ_LON_MAX = 12.0, 19.0
 
 # The detail-URL hash is the source_id_native (24 hex chars today; >=16 to be safe).
 _ID_RE = re.compile(r"/detail/[^?#]*?/([0-9a-f]{16,})/?(?:[?#]|$)")
-_AREA_RE = re.compile(r"(\d+(?:[.,]\d+)?)\s*m(?:2|²|\s*2)\b", re.IGNORECASE)
+# An area token before "m²". The first alternative accepts the Czech spaced
+# thousands format idnes titles render ("Prodej pole 2 403 m²") — without it
+# the match started INSIDE the number and truncated 2403 -> 403 (8k+ corrupted
+# area_m2 rows in production, every Kč/m² figure computed from them wrong).
+# The lookbehind keeps the grouped form from swallowing a preceding digit
+# ("3+1 174 m²" stays 174, never 1174).
+_AREA_SEPS = "\u0020\u00a0\u200b\u200c\u200d\u2060"
+_AREA_RE = re.compile(
+    rf"(?<![\d+.,])(\d{{1,3}}(?:[{_AREA_SEPS}]\d{{3}})+(?:[.,]\d+)?|\d+(?:[.,]\d+)?)\s*m(?:2|²|\s*2)\b",
+    re.IGNORECASE,
+)
 _DISPOSITION_RE = re.compile(r"\b(\d)\s*\+\s*(kk|\d)\b", re.IGNORECASE)
 _INT_RE = re.compile(r"(\d+)")
 _ENERGY_RE = re.compile(r"\b([A-G])\b")
@@ -139,6 +149,13 @@ _DETAIL_PATH_RE = re.compile(r"/detail/([^/?#]+)/([^/?#]+)/")
 # zero-width spaces (the Czech "9 790 000" thousands format idnes renders with
 # &nbsp;/&zwj; between groups). Stops at the first non-space, non-digit char.
 _PRICE_RUN_RE = re.compile(r"\d[\d\s\u00a0\u200b\u200c\u200d\u2060]*")
+# A unit-price marker directly after the amount ("18 500 Kč/m²", "Kč za m²",
+# "Kč/m²/rok"). A per-m² figure must NEVER be stored as the absolute price —
+# today idnes shows per-m² only in a grey note span the parser doesn't read
+# (verified on 5,773 staged pozemek pages), so this is a drift rail for the day
+# a page's main price element becomes unit-priced. Deliberately does NOT match
+# "Kč/měsíc" (the m needs ²/2 right after).
+_PRICE_PER_M2_RE = re.compile(r"^\s*Kč\s*(?:/\s*|za\s+)m(?:²|2)(?!\w)", re.IGNORECASE)
 _PRICE_MAX = 2_147_483_647  # listings.price_czk is a Postgres integer
 # Column maxes for the numeric area fields. A parsed area larger than its column
 # can hold (a million-m\u00b2 title-number garble, a developer-project "1234567 m\u00b2"
@@ -238,6 +255,8 @@ def _parse_price(text: str | None, category_type: str | None) -> tuple[int | Non
     m = _PRICE_RUN_RE.search(text)
     if not m:
         return None, unit
+    if _PRICE_PER_M2_RE.match(text[m.end():]):
+        return None, unit
     digits = re.sub(r"\D", "", m.group(0))
     if not digits:
         return None, unit
@@ -260,7 +279,10 @@ def _parse_area(text: str | None) -> float | None:
     m = _AREA_RE.search(text)
     if not m:
         return None
-    return float(m.group(1).replace(",", "."))
+    token = m.group(1)
+    for sep in _AREA_SEPS:
+        token = token.replace(sep, "")
+    return float(token.replace(",", "."))
 
 
 def _clamp(value: float | None, ceiling: float) -> float | None:
@@ -476,7 +498,14 @@ def parse_detail(
 
     # The <strong> holds just the amount; the surrounding .b-detail__price also
     # carries the "Chci spočítat hypotéku" CTA / price note (extra digits).
-    price_node = tree.css_first(".b-detail__price strong") or tree.css_first(".b-detail__price")
+    price_node = tree.css_first(".b-detail__price strong")
+    if price_node is None:
+        price_node = tree.css_first(".b-detail__price")
+        if price_node is not None:
+            # A discounted page leads with the struck original in <del> — the
+            # first price run of the flattened element would be the OLD price.
+            for struck in price_node.css("del"):
+                struck.decompose()
     price_text = _text(price_node) or _text(params.get("cena"))
     price_czk, price_unit = _parse_price(price_text, category_type)
 

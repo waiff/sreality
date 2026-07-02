@@ -301,7 +301,11 @@ def test_image_changes_appear_in_what_changed(monkeypatch):
     images = new_raw.get("advert_images") or []
     if not images:
         pytest.skip("fixture has no images to mutate")
-    images[0]["url"] = images[0]["url"] + "?changed"
+    added = copy.deepcopy(images[0])
+    added["id"] = 999999999
+    added["url"] = "//d18-a.sdn.cz/d_18/c_img_qB_D/newUpload/abcd.jpeg"
+    added["order"] = len(images) + 1
+    images.append(added)
 
     prev = {
         "id": 7,
@@ -316,3 +320,26 @@ def test_image_changes_appear_in_what_changed(monkeypatch):
 
     assert res["outcome"] == "updated"
     assert "images" in res["what_changed"]
+
+
+def test_resigned_image_url_is_unchanged(monkeypatch):
+    # a re-signed sdn.cz image URL (same image id) is CDN churn, not content
+    prev_raw = _load_raw()
+    new_raw = copy.deepcopy(prev_raw)
+    images = new_raw.get("advert_images") or []
+    if not images:
+        pytest.skip("fixture has no images to mutate")
+    images[0]["url"] = images[0]["url"] + "?changed"
+
+    prev = {
+        "id": 7,
+        "content_hash": hashing.content_hash(prev_raw),
+        "raw_json": prev_raw,
+    }
+    _patch_db(monkeypatch, prev)
+
+    client = _StubClient(raw=new_raw)
+    conn = _FakeConn()
+    res = freshness.freshness_check(conn, client, sreality_id=2836292428)
+
+    assert res["outcome"] == "unchanged"

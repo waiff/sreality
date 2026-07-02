@@ -170,8 +170,16 @@ assert set(_LISTING_COLUMN_PGTYPE) == set(LISTING_COLUMNS), (
 # fetch that yields no date must not erase what an earlier fetch or a raw_json backfill
 # recorded — a fresher portal date still wins. Same rails: out of the content hash,
 # informational only.
-_PRESERVE_IF_NULL_COLUMNS = frozenset(
-    {"street", "street_name_key", "house_number", "published_at"}
+_PRESERVE_IF_NULL_COLUMNS = frozenset({"street", "house_number", "published_at"})
+
+# street_name_key is NOT independently preserve-if-null: it is a pure function of
+# street, so it must follow the STREET's preserve decision — preserved exactly when
+# the street is preserved, else written as stamped (even when that stamp is NULL: a
+# non-NULL street can legitimately fold to a NULL key, and keeping the OLD key under
+# a NEW street would store a pair the weekly parity job rightly flags as drift).
+_STREET_NAME_KEY_UPDATE_SQL = (
+    "street_name_key = CASE WHEN EXCLUDED.street IS NULL "
+    "THEN listings.street_name_key ELSE EXCLUDED.street_name_key END"
 )
 
 # street_source provenance ('parser' | 'resolver', migration 262): a page-parsed street
@@ -187,7 +195,8 @@ def _listing_update_set_sql() -> str:
     """The ONE ON CONFLICT SET builder shared by upsert_listing and the batched drain
     upsert, so preserve-if-null semantics can never drift between the two write paths."""
     return ",\n          ".join(
-        (f"{c} = COALESCE(EXCLUDED.{c}, listings.{c})" if c in _PRESERVE_IF_NULL_COLUMNS
+        (_STREET_NAME_KEY_UPDATE_SQL if c == "street_name_key"
+         else f"{c} = COALESCE(EXCLUDED.{c}, listings.{c})" if c in _PRESERVE_IF_NULL_COLUMNS
          else f"{c} = EXCLUDED.{c}")
         for c in LISTING_COLUMNS
     )
@@ -2078,7 +2087,13 @@ def enqueue_detail(
 
     Idempotent on (source, native_id): re-seeing an id refreshes its observed
     price + detail_ref and raises its priority (GREATEST), but never disturbs a
-    row a drain has already claimed. Chunked to stay under the pooler timeout.
+    row a drain has already claimed. The original enqueued_at is deliberately
+    KEPT on re-enqueue: the claim order is (priority DESC, enqueued_at ASC), so
+    re-stamping now() pushed every still-queued row behind the walk's fresh
+    inserts each run — a backlog bigger than one drain's budget then starved its
+    tail forever (remax rent listings cycled unfetched for weeks) and the Health
+    queue-age metrics under-reported the wait. Chunked to stay under the pooler
+    timeout.
     """
     rows = list(entries)
     if not rows:
@@ -2106,8 +2121,7 @@ def enqueue_detail(
                 ON CONFLICT (source, native_id) DO UPDATE SET
                     detail_ref      = EXCLUDED.detail_ref,
                     index_price_czk = EXCLUDED.index_price_czk,
-                    priority = GREATEST(listing_detail_queue.priority, EXCLUDED.priority),
-                    enqueued_at     = now()
+                    priority = GREATEST(listing_detail_queue.priority, EXCLUDED.priority)
                 WHERE listing_detail_queue.claimed_at IS NULL
                 """,
                 {"source": source, "nids": native_ids, "refs": refs,
@@ -2154,16 +2168,31 @@ def complete_detail(
     conn: psycopg.Connection,
     source: str,
     native_ids: Iterable[str],
+    outcome: str = "written",
 ) -> int:
-    """Remove drained rows from the queue (success or confirmed-gone)."""
+    """Remove drained rows from the queue (success or confirmed-gone), logging
+    each into detail_queue_completions (migration 265) in the same transaction
+    so the enqueue->detail-write latency survives the row's deletion."""
     ids = [str(n) for n in native_ids]
     if not ids:
         return 0
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(
-            "DELETE FROM listing_detail_queue "
-            "WHERE source = %s AND native_id = ANY(%s)",
-            (source, ids),
+            """
+            WITH del AS (
+                DELETE FROM listing_detail_queue
+                WHERE source = %(source)s AND native_id = ANY(%(ids)s)
+                RETURNING source, native_id, priority, attempts,
+                          enqueued_at, claimed_at
+            )
+            INSERT INTO detail_queue_completions
+                (source, native_id, priority, attempts, enqueued_at,
+                 claimed_at, outcome)
+            SELECT source, native_id, priority, attempts, enqueued_at,
+                   claimed_at, %(outcome)s
+            FROM del
+            """,
+            {"source": source, "ids": ids, "outcome": outcome},
         )
         return cur.rowcount or 0
 
@@ -2176,7 +2205,13 @@ def fail_detail(
     max_attempts: int = FAILURE_GIVE_UP_THRESHOLD,
 ) -> None:
     """Release a failed claim back to the queue, bumping attempts; give up at
-    max_attempts so a permanently-broken listing stops re-claiming."""
+    max_attempts so a permanently-broken listing stops re-claiming.
+
+    A row crossing the give-up threshold is a terminal outcome, so it is logged
+    to detail_queue_completions in the same transaction. The `old` self-join
+    captures the pre-update claimed_at (nulled by the SET) and the give-up
+    transition edge (was_given_up), so a resilient-retry replay that bumps an
+    already-given-up row never logs a duplicate."""
     ids = [str(n) for n in native_ids]
     if not ids:
         return
@@ -2184,15 +2219,31 @@ def fail_detail(
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(
             """
-            UPDATE listing_detail_queue SET
-                attempts   = attempts + 1,
-                given_up   = (attempts + 1) >= %s,
-                claimed_at = NULL,
-                last_error = %s
-            WHERE source = %s AND native_id = ANY(%s)
+            WITH upd AS (
+                UPDATE listing_detail_queue q SET
+                    attempts   = q.attempts + 1,
+                    given_up   = (q.attempts + 1) >= %(max)s,
+                    claimed_at = NULL,
+                    last_error = %(err)s
+                FROM listing_detail_queue old
+                WHERE q.source = %(source)s AND q.native_id = ANY(%(ids)s)
+                  AND old.source = q.source AND old.native_id = q.native_id
+                RETURNING q.source, q.native_id, q.priority, q.attempts,
+                          q.enqueued_at, old.claimed_at AS old_claimed_at,
+                          q.given_up, old.given_up AS was_given_up
+            )
+            INSERT INTO detail_queue_completions
+                (source, native_id, priority, attempts, enqueued_at,
+                 claimed_at, outcome)
+            SELECT source, native_id, priority, attempts, enqueued_at,
+                   old_claimed_at, 'given_up'
+            FROM upd WHERE given_up AND NOT was_given_up
             """,
-            (max_attempts, truncated, source, ids),
+            {"max": max_attempts, "err": truncated, "source": source, "ids": ids},
         )
+
+
+COMPLETION_RETENTION_DAYS = 7
 
 
 def reclaim_stale_claims(
@@ -2202,8 +2253,16 @@ def reclaim_stale_claims(
 ) -> int:
     """Release `source` claims older than the cutoff (a drain SIGKILLed
     mid-flight), so its rows become claimable again. Mirrors
-    sweep_stuck_scrape_runs."""
+    sweep_stuck_scrape_runs. Also prunes this source's expired
+    detail_queue_completions rows (7-day ephemeral ledger, the rule-#9
+    posture) — running it here, at every drain start, keeps the ledger
+    bounded without pg_cron."""
     with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            "DELETE FROM detail_queue_completions "
+            "WHERE source = %s AND completed_at < now() - make_interval(days => %s)",
+            (source, COMPLETION_RETENTION_DAYS),
+        )
         cur.execute(
             """
             UPDATE listing_detail_queue SET claimed_at = NULL

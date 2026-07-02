@@ -187,7 +187,13 @@ class RemaxPortal:
             prev = existing.get(nid)
             if prev is None:
                 continue
-            if walk.price_map.get(nid) is not None and prev["price_czk"] == walk.price_map[nid]:
+            idx_price = walk.price_map.get(nid)
+            # A price-less card ("Dohodou" / "Info o ceně v RK") carries NO
+            # change signal — classifying it as changed put ~1,100 such
+            # listings on a permanent CHANGED-priority refetch treadmill every
+            # walk, eating the whole drain budget ahead of the NEW rows (rent
+            # listings never got claimed). Touch it and move on.
+            if idx_price is None or prev["price_czk"] == idx_price:
                 unchanged_pks.append(prev["sreality_id"])
             else:
                 changed.append(nid)

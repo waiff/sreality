@@ -141,6 +141,52 @@ def test_full_walk_visits_all_seven_regions(monkeypatch):
         assert any(host in u for u in fake.urls), f"{host} not walked"
 
 
+# --- cross-slice delisting sweep ('rodinne-domy' + 'chaty-chalupy' -> dum) ---
+
+def _sweep_portal(monkeypatch):
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        m.db, "mark_inactive_native",
+        lambda _c, src, cm, ct, seen, *, min_unseen_hours: calls.append(
+            {"src": src, "cm": cm, "ct": ct, "seen": set(seen),
+             "min_unseen_hours": min_unseen_hours}) or len(seen),
+    )
+    return m.CeskerealityPortal(default_config("ceskereality")), calls
+
+
+def test_mark_inactive_sweeps_collapsing_group_once_with_union(monkeypatch):
+    portal, calls = _sweep_portal(monkeypatch)
+    # First dum slice buffers only — a sweep here would flip every chaty-chalupy
+    # row (same (dum, pronajem), never in the rodinne-domy slice's seen set).
+    assert portal.mark_inactive(
+        object(), {"sale_type": "pronajem", "category": "rodinne-domy"},
+        {"r1", "r2"}) == 0
+    assert calls == []
+    # The group's last complete slice sweeps with the UNION + the 24h rail.
+    n = portal.mark_inactive(
+        object(), {"sale_type": "pronajem", "category": "chaty-chalupy"}, {"c1"})
+    assert n == 3
+    assert calls == [{"src": "ceskereality", "cm": "dum", "ct": "pronajem",
+                      "seen": {"r1", "r2", "c1"}, "min_unseen_hours": 24}]
+
+
+def test_mark_inactive_missing_sibling_slice_suppresses_sweep(monkeypatch):
+    # The runner only calls mark_inactive for COMPLETE slices; if rodinne-domy
+    # walked incomplete/failed, chaty-chalupy alone must not sweep (dum, prodej).
+    portal, calls = _sweep_portal(monkeypatch)
+    assert portal.mark_inactive(
+        object(), {"sale_type": "prodej", "category": "chaty-chalupy"}, {"c1"}) == 0
+    assert calls == []
+
+
+def test_mark_inactive_single_slice_group_sweeps_immediately(monkeypatch):
+    portal, calls = _sweep_portal(monkeypatch)
+    assert portal.mark_inactive(
+        object(), {"sale_type": "prodej", "category": "byty"}, {"b1"}) == 1
+    assert calls == [{"src": "ceskereality", "cm": "byt", "ct": "prodej",
+                      "seen": {"b1"}, "min_unseen_hours": 24}]
+
+
 def test_client_routes_through_proxy_when_env_set(monkeypatch):
     monkeypatch.setenv("SCRAPER_PROXY_URL", "http://u:p@gw.example.com:823")
     c = CeskerealityClient()

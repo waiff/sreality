@@ -602,8 +602,20 @@ def pipeline_overview(conn: psycopg.Connection) -> dict[str, Any]:
             "FROM dedup_pair_audit"
         )
         merged_total, dismissed_total, dec_24h = cur.fetchone()
+        # Gauges and activity decoupled (migration 265): scoped runs write NULL market
+        # gauges (the ~9s full-table aggregate only runs on full scans), so the gauges
+        # come from the latest FULL-scan row (run_kind='full'; run_kind IS NULL covers
+        # pre-262 rows, which always carried market-wide values). Activity stays the
+        # latest run of ANY lane, labeled by run_kind.
         cur.execute(
-            "SELECT started_at, eligible, flagged_location, flagged_disposition, "
+            "SELECT eligible, flagged_location, flagged_disposition "
+            "FROM dedup_engine_runs "
+            "WHERE eligible IS NOT NULL AND (run_kind = 'full' OR run_kind IS NULL) "
+            "ORDER BY id DESC LIMIT 1"
+        )
+        g = cur.fetchone()
+        cur.execute(
+            "SELECT started_at, run_kind, "
             "auto_address, auto_phash, auto_visual, auto_dismissed, queued, "
             "clip_classified, routed_haiku, routed_sonnet, vision_calls "
             # id (insert order), NOT started_at: since migration 262 started_at is the
@@ -613,18 +625,20 @@ def pipeline_overview(conn: psycopg.Connection) -> dict[str, Any]:
         )
         r = cur.fetchone()
     eligible = flagged_loc = flagged_disp = 0
+    if g is not None:
+        eligible, flagged_loc, flagged_disp = int(g[0]), int(g[1]), int(g[2])
     last_run: dict[str, Any] | None = None
     if r is not None:
-        eligible, flagged_loc, flagged_disp = int(r[1]), int(r[2]), int(r[3])
         last_run = {
             "started_at": r[0],
-            "auto_merged": int(r[4]) + int(r[5]) + int(r[6]),
-            "auto_dismissed": int(r[7]),
-            "queued": int(r[8]),
-            "clip_classified": int(r[9]),
-            "routed_haiku": int(r[10]),
-            "routed_sonnet": int(r[11]),
-            "vision_calls": int(r[12]),
+            "run_kind": r[1],
+            "auto_merged": int(r[2]) + int(r[3]) + int(r[4]),
+            "auto_dismissed": int(r[5]),
+            "queued": int(r[6]),
+            "clip_classified": int(r[7]),
+            "routed_haiku": int(r[8]),
+            "routed_sonnet": int(r[9]),
+            "vision_calls": int(r[10]),
         }
     return {
         "data": {

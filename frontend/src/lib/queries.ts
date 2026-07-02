@@ -1716,9 +1716,12 @@ export interface DedupEngineRun {
   id: number;
   started_at: string;
   ended_at: string | null;
-  eligible: number;
-  flagged_location: number;
-  flagged_disposition: number;
+  /* Market gauges — NULL on scoped runs (dirty/candidates; not measured, migration 265)
+   * and geo-lane-scoped on run_kind='geo' rows. Read them from the latest FULL-scan row
+   * (run_kind='full', or legacy null run_kind), not from runs[0]. */
+  eligible: number | null;
+  flagged_location: number | null;
+  flagged_disposition: number | null;
   pairs_considered: number;
   rejected: number;
   auto_address: number;
@@ -1726,7 +1729,6 @@ export interface DedupEngineRun {
   auto_visual: number;
   queued: number;
   vision_calls: number;
-  cost_usd: number;
   auto_dismissed: number;
   floor_plan_deferred: number;
   clip_deferred: number;
@@ -1757,7 +1759,7 @@ export const fetchDedupEngineRuns = async (
     .select(
       'id,started_at,ended_at,eligible,flagged_location,flagged_disposition,' +
         'pairs_considered,rejected,auto_address,auto_phash,auto_visual,queued,' +
-        'vision_calls,cost_usd,auto_dismissed,floor_plan_deferred,clip_deferred,' +
+        'vision_calls,auto_dismissed,floor_plan_deferred,clip_deferred,' +
         'dirty_queue_depth,dirty_claimed,dirty_cleared,dirty_truncated,run_kind,truncated',
     )
     // Insert order (id), NOT started_at: started_at is now the REAL run start (migration
