@@ -73,6 +73,7 @@ class UpdatePortalLimitsIn(BaseModel):
     max_image_downloads: int | None = None
     suspicious_stop_window: int | None = None
     suspicious_stop_threshold: float | None = None
+    shared_rate_limiter: bool | None = None
 
 
 class UpdateConditionRegionsIn(BaseModel):
@@ -742,6 +743,11 @@ def _validate_portal_limits(patch: dict[str, Any]) -> None:
         elif k in fractions:
             if not _is_num(v) or not (0 < v <= 1):
                 raise ValueError(f"{k} must be a number in (0, 1]")
+        elif k == "shared_rate_limiter":
+            # The scrape-time coercer (scraper.portal._as_bool) skips non-bools,
+            # so reject them here where the operator gets a visible 400.
+            if not isinstance(v, bool):
+                raise ValueError(f"{k} must be a boolean")
 
 
 def _skill_to_dict(skill: Any) -> dict[str, Any]:

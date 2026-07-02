@@ -124,6 +124,7 @@ class RealitymixPortal:
         self._categories = config.categories
         self._max_pages = max_pages
         self.index_rate = config.limits.index_rate
+        self.shared_rate_limiter = config.limits.shared_rate_limiter
         self._price_change_min_pct = config.limits.price_change_min_pct
         # stored (lat, lon) per native id at drain start; a refetch whose page
         # carries no coords gets them carried forward instead of re-geocoded — geom

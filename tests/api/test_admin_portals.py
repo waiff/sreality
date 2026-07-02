@@ -155,6 +155,7 @@ def test_put_portal_limits_no_fields_400(client):
     {"detail_rate": 0},             # must be > 0
     {"suspicious_stop_threshold": 1.5},  # must be in (0, 1]
     {"max_detail_per_run": 0},      # must be >= 1 or null
+    {"shared_rate_limiter": None},  # must be a real boolean
 ])
 def test_put_portal_limits_bad_value_400(client, payload):
     res = client.put("/admin/portals/sreality/limits", json=payload)
@@ -165,3 +166,10 @@ def test_put_portal_limits_null_cap_means_unlimited(client):
     res = client.put("/admin/portals/sreality/limits", json={"max_detail_per_run": None})
     assert res.status_code == 200
     assert res.json()["overrides"]["max_detail_per_run"] is None
+
+
+def test_put_portal_limits_shared_rate_limiter_bool(client):
+    res = client.put(
+        "/admin/portals/sreality/limits", json={"shared_rate_limiter": True})
+    assert res.status_code == 200
+    assert res.json()["overrides"]["shared_rate_limiter"] is True

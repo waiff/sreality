@@ -206,6 +206,40 @@ def test_global_read_swallows_db_error():
     assert _read_global_limits(_RaisingConn()) is None
 
 
+# --- shared_rate_limiter (migration 268 politeness ledger gate) ---
+
+def test_shared_rate_limiter_defaults_off_everywhere():
+    assert PortalLimits().shared_rate_limiter is False
+    for source in ("sreality", "bazos", "idnes", "bezrealitky", "maxima",
+                   "mmreality", "remax", "ceskereality", "realitymix"):
+        assert default_config(source).limits.shared_rate_limiter is False
+
+
+def test_shared_rate_limiter_per_portal_override():
+    row = (True, [{"x": 1}], None, {"shared_rate_limiter": True})
+    cfg = load_portal_config(_Conn(row), "idnes")
+    assert cfg.limits.shared_rate_limiter is True
+
+
+def test_shared_rate_limiter_global_underlay():
+    portal_row = (True, [{"x": 1}], None, None)
+    global_row = ({"shared_rate_limiter": True},)
+    cfg = load_portal_config(_Conn(portal_row, global_row), "idnes")
+    assert cfg.limits.shared_rate_limiter is True
+    # ... and the per-portal layer can still force it off.
+    portal_row = (True, [{"x": 1}], None, {"shared_rate_limiter": False})
+    cfg = load_portal_config(_Conn(portal_row, global_row), "idnes")
+    assert cfg.limits.shared_rate_limiter is False
+
+
+def test_shared_rate_limiter_rejects_non_bool_leaf():
+    # bool("false") would be True — a politeness knob must not flip on a
+    # mistyped dashboard edit, so only a real JSON boolean is applied.
+    row = (True, [{"x": 1}], None, {"shared_rate_limiter": "true"})
+    cfg = load_portal_config(_Conn(row), "idnes")
+    assert cfg.limits.shared_rate_limiter is False
+
+
 # --- price_changed (index-walk price-diff jitter tolerance) ---
 
 def test_price_changed_exact_compare_by_default():

@@ -110,6 +110,7 @@ def main(argv: list[str] | None = None) -> int:
     # with the derived Health posture badge); the class default is the safe
     # fallback for the legacy main._run_full path that doesn't load config.
     portal.supports_complete_walk = config.supports_complete_walk
+    portal.shared_rate_limiter = config.limits.shared_rate_limiter
 
     # Resolve operational limits: CLI override > per-portal DB config > default.
     workers = args.workers if args.workers is not None else config.limits.detail_workers
