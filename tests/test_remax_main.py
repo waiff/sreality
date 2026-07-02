@@ -90,6 +90,53 @@ def test_mark_inactive_is_agenda_grain(monkeypatch):
     assert len(captured) == 1
 
 
+def test_walk_priceless_card_is_unchanged_not_changed(monkeypatch):
+    """A card without a parseable price ("Dohodou") carries no change signal.
+    Classifying it as changed put ~1,100 remax listings on a permanent
+    CHANGED-priority refetch treadmill that starved the NEW rows (rent never
+    drained) — it must be touched, never enqueued."""
+    portal = _portal()
+    base = "https://www.remax-czech.cz/reality/detail/"
+    items = [
+        SimpleNamespace(source_id_native="r1", detail_path=f"{base}r1/",
+                        price_text="5 000 000 Kč", title="Prodej bytu 2+kk"),   # price match
+        SimpleNamespace(source_id_native="r2", detail_path=f"{base}r2/",
+                        price_text="Dohodou", title="Prodej bytu 1+1"),         # no card price
+        SimpleNamespace(source_id_native="r3", detail_path=f"{base}r3/",
+                        price_text="6 000 000 Kč", title="Prodej bytu 3+kk"),   # price changed
+        SimpleNamespace(source_id_native="r4", detail_path=f"{base}r4/",
+                        price_text="4 000 000 Kč", title="Prodej bytu 2+1"),    # brand new
+    ]
+    page1 = SimpleNamespace(total=4, next_offset=None, items=items)
+    empty = SimpleNamespace(total=4, next_offset=None, items=[])
+    seq = iter([page1, empty, empty])
+    monkeypatch.setattr(remax_main, "parse_index", lambda _h: next(seq))
+    monkeypatch.setattr(remax_main, "RemaxClient", _IdxClient)
+    monkeypatch.setattr(
+        remax_main.db, "index_summary_native",
+        lambda *a, **k: {
+            "r1": {"sreality_id": -1, "price_czk": 5_000_000},
+            "r2": {"sreality_id": -2, "price_czk": None},
+            "r3": {"sreality_id": -3, "price_czk": 5_500_000},
+        },
+    )
+    touched: list[list[int]] = []
+    enqueued: list[tuple[str, int]] = []
+    monkeypatch.setattr(
+        remax_main.db, "touch_listings", lambda _c, pks: touched.append(list(pks)))
+    monkeypatch.setattr(
+        remax_main.db, "enqueue_detail",
+        lambda _c, _s, entries: enqueued.extend((n, prio) for n, _r, _p, prio in entries) or len(entries),
+    )
+    _seen, counts, *_ = portal.walk_category(_CATEGORIES[0], object(), False, _Limiter())
+    assert touched == [[-1, -2]]
+    assert enqueued == [
+        ("r3", remax_main.db.QUEUE_PRIORITY_CHANGED),
+        ("r4", remax_main.db.QUEUE_PRIORITY_NEW),
+    ]
+    assert counts == {"found_new": 1, "enqueued": 2}
+
+
 def test_mark_inactive_skips_incomplete_agenda(monkeypatch):
     portal = _portal()
     # total=10 but only 2 collected -> walk.complete False -> no index-absence delist.

@@ -3374,7 +3374,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
         "description": "wall-clock budget for the detail drain (seconds)",
         "required": false,
         "type": "string",
-        "default": "1500",
+        "default": "2100",
         "options": null
       },
       {
@@ -3399,7 +3399,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     ],
     "concurrencyGroup": "remax-scrape",
     "cancelInProgress": false,
-    "timeoutMinutes": 50,
+    "timeoutMinutes": 60,
     "permissions": null,
     "runsUrl": "https://github.com/waiff/sreality/actions/workflows/scrape_remax.yml",
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/scrape_remax.yml"
@@ -3566,6 +3566,49 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "permissions": "contents: read",
     "runsUrl": "https://github.com/waiff/sreality/actions/workflows/smoke_agent.yml",
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/smoke_agent.yml"
+  },
+  {
+    "filename": "street_key_parity.yml",
+    "name": "Monitoring: street_name_key parity",
+    "description": "Weekly sampled drift check: stored listings.street_name_key == the Python normalizer (scraper.street.street_name_key). Guards the STALE-key class the migration-264 presence CHECK cannot see — a normalizer edit without the required backfill_street_name_key.yml all=true re-key, or a writer stamping a wrong value. Silent drift costs dedup recall (the --dirty scoped load matches peers by the STORED key). A mismatch FAILS the run, which monitor_workflow_failures records and the Health page lists — zero new alerting plumbing. NOT a portal ingest workflow, so no `# portal:` tag.",
+    "portal": null,
+    "manual": true,
+    "schedules": [
+      {
+        "cron": "40 4 * * 3",
+        "human": "40 4 * * 3"
+      }
+    ],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "recent",
+        "description": "Newest street-bearing rows to check",
+        "required": false,
+        "type": "string",
+        "default": "2500",
+        "options": null
+      },
+      {
+        "name": "random",
+        "description": "Block-random street-bearing rows to check",
+        "required": false,
+        "type": "string",
+        "default": "2500",
+        "options": null
+      }
+    ],
+    "secrets": [
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "street-key-parity",
+    "cancelInProgress": false,
+    "timeoutMinutes": 15,
+    "permissions": "contents: read",
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/street_key_parity.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/street_key_parity.yml"
   },
   {
     "filename": "test.yml",

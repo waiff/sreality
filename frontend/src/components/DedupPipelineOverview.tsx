@@ -127,7 +127,7 @@ export default function DedupPipelineOverview() {
         </p>
         {d?.last_run && (
           <p className="text-[0.7rem] text-[var(--color-ink-4)] tabular-nums">
-            last run {fmtRelative(d.last_run.started_at)}
+            last run{d.last_run.run_kind ? ` (${d.last_run.run_kind})` : ''} {fmtRelative(d.last_run.started_at)}
           </p>
         )}
       </div>

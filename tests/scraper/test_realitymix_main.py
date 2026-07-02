@@ -123,6 +123,62 @@ def test_category_labels():
     assert portal.category_labels({"sale_type": "prodej", "category": "chaty"}) == ("dum", "prodej")
 
 
+# --- cross-slice delisting sweep ('domy' + 'chaty' both collapse onto dum) ---
+
+def _sweep_portal(monkeypatch):
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        realitymix_main.db, "mark_inactive_native",
+        lambda _c, src, cm, ct, seen, *, min_unseen_hours: calls.append(
+            {"src": src, "cm": cm, "ct": ct, "seen": set(seen),
+             "min_unseen_hours": min_unseen_hours}) or len(seen),
+    )
+    return RealitymixPortal(default_config("realitymix")), calls
+
+
+def test_mark_inactive_sweeps_collapsing_group_once_with_union(monkeypatch):
+    portal, calls = _sweep_portal(monkeypatch)
+    # First dum slice buffers only — a sweep here would flip every chaty row
+    # (they share (dum, prodej) but are never in the domy slice's seen set).
+    assert portal.mark_inactive(
+        object(), {"sale_type": "prodej", "category": "domy"}, {"d1", "d2"}) == 0
+    assert calls == []
+    # The group's last complete slice sweeps with the UNION + the 24h rail.
+    n = portal.mark_inactive(
+        object(), {"sale_type": "prodej", "category": "chaty"}, {"c1"})
+    assert n == 3
+    assert calls == [{"src": "realitymix", "cm": "dum", "ct": "prodej",
+                      "seen": {"d1", "d2", "c1"}, "min_unseen_hours": 24}]
+
+
+def test_mark_inactive_missing_sibling_slice_suppresses_sweep(monkeypatch):
+    # The runner only calls mark_inactive for COMPLETE slices; if the domy walk
+    # was incomplete/failed, the chaty slice alone must not sweep (dum, prodej).
+    portal, calls = _sweep_portal(monkeypatch)
+    assert portal.mark_inactive(
+        object(), {"sale_type": "prodej", "category": "chaty"}, {"c1"}) == 0
+    assert calls == []
+
+
+def test_mark_inactive_groups_are_sale_type_scoped(monkeypatch):
+    # domy/prodej + chaty/pronajem are DIFFERENT (cm, ct) groups — neither
+    # completes its own group, so neither sweeps.
+    portal, calls = _sweep_portal(monkeypatch)
+    assert portal.mark_inactive(
+        object(), {"sale_type": "prodej", "category": "domy"}, {"d1"}) == 0
+    assert portal.mark_inactive(
+        object(), {"sale_type": "pronajem", "category": "chaty"}, {"c1"}) == 0
+    assert calls == []
+
+
+def test_mark_inactive_single_slice_group_sweeps_immediately(monkeypatch):
+    portal, calls = _sweep_portal(monkeypatch)
+    assert portal.mark_inactive(
+        object(), {"sale_type": "prodej", "category": "byty"}, {"b1"}) == 1
+    assert calls == [{"src": "realitymix", "cm": "byt", "ct": "prodej",
+                      "seen": {"b1"}, "min_unseen_hours": 24}]
+
+
 # --- geocoding fallback + the carry-forward guard (the Mapy-footgun gate) ---
 
 def test_geocode_fallback_fills_mapless_and_stamps_provenance(monkeypatch):

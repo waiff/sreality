@@ -731,7 +731,7 @@ def test_run_engine_geo_does_not_skip_same_source(monkeypatch: Any) -> None:
     monkeypatch.setattr(eng, "merge_properties", lambda *a, **k: {"data": {"merge_group_id": "g"}})
     stats = eng.run_engine(_FakeConn([]), classify_fn=None, compare_fn=None,
                            max_vision_calls=10, geo=True, geo_area_max_pct=0.20)
-    assert stats["skipped_same_source"] == 0
+    assert "skipped_same_source" not in stats  # counter retired (PR-F)
     assert stats["pairs_considered"] == 1
 
 
@@ -988,7 +988,7 @@ def test_run_engine_now_visually_compares_same_source(monkeypatch: Any) -> None:
     ])
     stats = eng.run_engine(conn, classify_fn=None, compare_fn=None, max_vision_calls=10)
 
-    assert stats["skipped_same_source"] == 0   # the gate is gone
+    assert "skipped_same_source" not in stats  # counter retired with the gate (PR-F)
     assert stats["pairs_considered"] == 1      # reached the visual stage
 
 
@@ -1081,7 +1081,7 @@ def test_run_engine_does_not_skip_cross_source(monkeypatch: Any) -> None:
     # No classify_fn -> _resolve_visual returns queue('no_images'); the point is it was REACHED.
     stats = eng.run_engine(conn, classify_fn=None, compare_fn=None, max_vision_calls=10)
 
-    assert stats["skipped_same_source"] == 0
+    assert "skipped_same_source" not in stats  # counter retired (PR-F)
     assert stats["pairs_considered"] == 1
 
 
@@ -1245,7 +1245,7 @@ def test_run_engine_phash_fastpath_merges_same_source(monkeypatch: Any) -> None:
     stats = eng.run_engine(conn, classify_fn=None, compare_fn=None, max_vision_calls=10)
 
     assert stats["auto_phash"] == 1
-    assert stats["skipped_same_source"] == 0  # pHash resolved it before the gate
+    assert "skipped_same_source" not in stats  # counter retired with the gate (PR-F)
     assert merges == ["image_phash"]
 
 
@@ -2765,3 +2765,21 @@ def test_enqueue_candidate_reopen_valve() -> None:
     assert "reviewed_action IS DISTINCT FROM 'operator'" in captured[-1]
     eng._enqueue_candidate(_Conn(), a, b, {"tier": "street_disposition"})
     assert "DO NOTHING" in captured[-1]
+
+
+def test_scoped_runs_skip_the_market_gauge_scan() -> None:
+    """Scoped runs (dirty/candidates) must NOT pay the ~9s full-table eligibility
+    aggregate — they write NULL gauges (migration 265); only the unscoped full scan
+    measures the market. Dashboards read gauges from full-scan rows."""
+    import scripts.dedup_engine as eng
+
+    conn = _FakeConn([])
+    stats = eng.run_engine(conn, max_vision_calls=0,
+                           only_groups_with_property_ids=set())
+    assert stats["eligible"] is None and stats["flagged_location"] is None
+    assert not any("count(*) FILTER" in s for s in conn.executed)
+
+    conn2 = _FakeConn([])
+    stats2 = eng.run_engine(conn2, max_vision_calls=0)  # unscoped full scan
+    assert stats2["eligible"] == 4  # the fake's gauge row
+    assert any("count(*) FILTER" in s for s in conn2.executed)

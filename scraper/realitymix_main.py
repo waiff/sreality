@@ -60,8 +60,17 @@ PER_PAGE = 20  # realitymix renders 20 results per ?stranka page
 
 # An index walk that collected at least this fraction of the page-reported total
 # is treated as complete enough to drive mark_inactive (the framework standard,
-# rule #3); the 24h min_unseen_hours rail in db.mark_inactive is the real safety.
+# rule #3); the INACTIVE_MIN_UNSEEN_HOURS staleness rail below is the second,
+# stronger guard. Not operator-tunable. Mirrors bazos_main / idnes_main.
 INDEX_MIN_COMPLETENESS = 0.995
+
+# Only flip rows unseen for 24h+ — several full walk cadences. last_seen_at is
+# bumped for unchanged rows each walk (touch_listings) and for changed rows on
+# a successful drain fetch — so a churn-missed live row is protected unless its
+# detail fetches have ALSO failed for 24h+; even then the flip self-heals on
+# the next index sighting (touch_listings reactivates). Passed EXPLICITLY on
+# every sweep: db.mark_inactive_native applies NO rail by default.
+INACTIVE_MIN_UNSEEN_HOURS = 24
 
 
 def _walk_complete(collected: int, total: int | None) -> bool:
@@ -120,6 +129,10 @@ class RealitymixPortal:
         # carries no coords gets them carried forward instead of re-geocoded — geom
         # is never wiped and a Mapy credit is only ever spent once per listing.
         self._have_geom: dict[str, tuple[float, float]] | None = None
+        # per-(cm, ct) union of complete slices' seen ids + completed-slice
+        # counts — the cross-slice delisting sweep buffer (see mark_inactive).
+        self._sweep_seen: dict[tuple[str, str], set[str]] = {}
+        self._sweep_done: dict[tuple[str, str], int] = {}
 
     # --- index-walk seams ---
     def categories(self) -> list[dict[str, Any]]:
@@ -263,9 +276,25 @@ class RealitymixPortal:
         cm, ct = self.category_labels(category)
         if cm is None or ct is None:
             return 0
-        existing = db.index_summary_native(conn, SOURCE, list(seen))
-        pks = {v["sreality_id"] for v in existing.values()}
-        return db.mark_inactive(conn, cm, ct, pks, source=SOURCE)
+        # Several index slices collapse onto one (cm, ct) — 'domy' and 'chaty'
+        # both -> dum — and this runner-gated call sees only ONE slice's ids, so
+        # a per-slice sweep flipped the sibling slice's listings inactive every
+        # walk (each dum slice marked the other's ~9k rows). Buffer each complete
+        # slice's ids and sweep once, on the group's LAST complete slice, with
+        # the union. An incomplete/failed sibling never reaches this call, so its
+        # group stays below the expected slice count and the sweep is suppressed
+        # this walk (over-retention only; the next walk retries).
+        key = (cm, ct)
+        group = self._sweep_seen.setdefault(key, set())
+        group.update(seen)
+        self._sweep_done[key] = self._sweep_done.get(key, 0) + 1
+        expected = sum(1 for c in self._categories if self.category_labels(c) == key)
+        if self._sweep_done[key] < expected:
+            return 0
+        return db.mark_inactive_native(
+            conn, SOURCE, cm, ct, group,
+            min_unseen_hours=INACTIVE_MIN_UNSEEN_HOURS,
+        )
 
     def active_count(self, conn: Any, category: dict[str, Any]) -> int | None:
         cm, ct = self.category_labels(category)
