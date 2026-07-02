@@ -521,11 +521,17 @@ def _record_auto_dismissed(conn: Any, pairs: set[tuple[int, int]], tier: str) ->
     his = [p[1] for p in pairs]
     with conn.cursor() as cur:
         cur.execute(
+            # Re-dismissal refreshes reviewed_at: a pair re-opened on fresh evidence and
+            # re-DISMISSED must move its settled timestamp forward, or it reads as
+            # perpetually "fresh" and re-runs every scoped pass (the treadmill again).
+            # Guarded to dismissed rows only — proposed/merged rows are never touched.
             "INSERT INTO property_identity_candidates "
             "  (left_property_id, right_property_id, tier, status, reviewed_at) "
             "SELECT p.lo, p.hi, %s, 'dismissed', now() "
             "FROM unnest(%s::bigint[], %s::bigint[]) AS p(lo, hi) "
-            "ON CONFLICT (left_property_id, right_property_id) DO NOTHING",
+            "ON CONFLICT (left_property_id, right_property_id) DO UPDATE "
+            "  SET reviewed_at = now() "
+            "  WHERE property_identity_candidates.status = 'dismissed'",
             (tier, los, his),
         )
         return cur.rowcount or 0
@@ -554,22 +560,42 @@ def _load_prior_dismissed(
 
 def _enqueue_candidate(
     conn: Any, a: ListingKey, b: ListingKey, markers: dict[str, Any],
-    *, tier: str = "street_disposition",
+    *, tier: str = "street_disposition", reopen: bool = False,
 ) -> None:
     # `markers["tier"]` is the source of truth for the COLUMN (resolve_pair sets it to
     # ctx.tier — 'street_disposition' or 'geo'); the `tier` kwarg is only the fallback for
     # the rare markers dict that omits it (the street-only rule-B auto_merge_off path).
+    #
+    # `reopen` (set ONLY when the prior-dismissal consult re-decided this pair on FRESH
+    # photo evidence): a queue outcome must then RE-PROPOSE an engine-dismissed row —
+    # otherwise the recall valve is one-way (the re-decision lands on ON CONFLICT DO
+    # NOTHING against the recorded dismissal and the operator never sees the pair; the
+    # review caught this). Operator dismissals (reviewed_action='operator') stay
+    # respected; the default DO NOTHING path is unchanged for every other caller, so a
+    # mass re-decide (a full scan, an auto-merge-off dispatch) can never bulk-reopen
+    # settled dismissals.
     from psycopg.types.json import Jsonb
     if a.property_id is None or b.property_id is None or a.property_id == b.property_id:
         return
     lo, hi = sorted((a.property_id, b.property_id))
+    conflict = (
+        """ON CONFLICT (left_property_id, right_property_id) DO UPDATE
+                SET status = 'proposed', reviewed_at = NULL,
+                    confidence = EXCLUDED.confidence,
+                    markers_matched = EXCLUDED.markers_matched
+                WHERE property_identity_candidates.status = 'dismissed'
+                  AND property_identity_candidates.reviewed_action
+                      IS DISTINCT FROM 'operator'"""
+        if reopen else
+        "ON CONFLICT (left_property_id, right_property_id) DO NOTHING"
+    )
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(
-            """
+            f"""
             INSERT INTO property_identity_candidates
                 (left_property_id, right_property_id, tier, confidence, markers_matched)
             VALUES (%s, %s, %s, %s, %s)
-            ON CONFLICT (left_property_id, right_property_id) DO NOTHING
+            {conflict}
             """,
             (lo, hi, markers.get("tier", tier), markers.get("confidence"), Jsonb(markers)),
         )
@@ -1188,47 +1214,54 @@ def _audit(
     })
 
 
-# A dismissal identical to one already logged within this window is run cadence, not a
+# A DISMISSAL identical to one already logged within this window is run cadence, not a
 # new decision — don't re-append it (measured: 3,621 'dismissed' audit rows for 620
-# distinct pairs in 7 days, ~5.8x inflation of the /dedup decision stats). Merges are
-# naturally unique (a merged pair re-runs as an 'already_merged' reject), so the dedup
-# effectively bites on the dismiss treadmill only.
+# distinct pairs in 7 days, ~5.8x inflation of the /dedup decision stats). ONLY
+# dismissals dedupe: a merged record must ALWAYS land — after an operator unmerge the
+# engine can legitimately re-merge the same pair within the window, and that fresh
+# audit row carries the NEW merge_group_id (the operator's only undo handle; the
+# review caught the unrestricted dedupe silently swallowing it).
 _AUDIT_DEDUPE_DAYS = 7
 
 
 def _write_pair_audit(
     conn: Any, run_at: Any, records: list[dict[str, Any]],
 ) -> None:
-    """Append the run's terminal per-pair decisions, SKIPPING records identical to one
-    already logged in the last _AUDIT_DEDUPE_DAYS (same pair + stage + outcome + source)
-    — the audit is a log of DECISIONS, not of run cadence. One set-based existence probe
-    + one executemany for the novel rows (never a per-record round trip)."""
+    """Append the run's terminal per-pair decisions, SKIPPING dismissal records identical
+    to one already logged in the last _AUDIT_DEDUPE_DAYS (same pair + stage + source) —
+    the audit is a log of DECISIONS, not of run cadence. Merged records are exempt (each
+    carries a unique merge_group_id undo handle). One set-based existence probe + one
+    executemany for the novel rows (never a per-record round trip)."""
     if not records:
         return
     import json
-    with conn.cursor() as cur:
-        cur.execute(
-            "SELECT DISTINCT d.left_sreality_id, d.right_sreality_id, d.stage, "
-            "       d.outcome, d.source "
-            "FROM dedup_pair_audit d "
-            "JOIN unnest(%(ls)s::bigint[], %(rs)s::bigint[], %(st)s::text[], "
-            "            %(oc)s::text[], %(so)s::text[]) AS u(l, r, st, oc, so) "
-            "  ON d.left_sreality_id = u.l AND d.right_sreality_id = u.r "
-            " AND d.stage = u.st AND d.outcome = u.oc AND d.source = u.so "
-            "WHERE d.run_at > now() - make_interval(days => %(days)s)",
-            {
-                "ls": [r["left_sreality_id"] for r in records],
-                "rs": [r["right_sreality_id"] for r in records],
-                "st": [r["stage"] for r in records],
-                "oc": [r["outcome"] for r in records],
-                "so": [r.get("source", "engine") for r in records],
-                "days": _AUDIT_DEDUPE_DAYS,
-            },
-        )
-        seen = {(int(r[0]), int(r[1]), r[2], r[3], r[4]) for r in cur.fetchall()}
+    dismissals = [r for r in records if r["outcome"] == "dismissed"]
+    seen: set[tuple[Any, ...]] = set()
+    if dismissals:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT DISTINCT d.left_sreality_id, d.right_sreality_id, d.stage, "
+                "       d.source "
+                "FROM dedup_pair_audit d "
+                "JOIN unnest(%(ls)s::bigint[], %(rs)s::bigint[], %(st)s::text[], "
+                "            %(so)s::text[]) AS u(l, r, st, so) "
+                "  ON d.left_sreality_id = u.l AND d.right_sreality_id = u.r "
+                " AND d.stage = u.st AND d.source = u.so "
+                "WHERE d.outcome = 'dismissed' "
+                "  AND d.run_at > now() - make_interval(days => %(days)s)",
+                {
+                    "ls": [r["left_sreality_id"] for r in dismissals],
+                    "rs": [r["right_sreality_id"] for r in dismissals],
+                    "st": [r["stage"] for r in dismissals],
+                    "so": [r.get("source", "engine") for r in dismissals],
+                    "days": _AUDIT_DEDUPE_DAYS,
+                },
+            )
+            seen = {(int(r[0]), int(r[1]), r[2], r[3]) for r in cur.fetchall()}
     novel = [
         r for r in records
-        if (r["left_sreality_id"], r["right_sreality_id"], r["stage"], r["outcome"],
+        if r["outcome"] != "dismissed"
+        or (r["left_sreality_id"], r["right_sreality_id"], r["stage"],
             r.get("source", "engine")) not in seen
     ]
     if not novel:
@@ -1467,13 +1500,22 @@ def resolve_pair(conn: Any, a: ListingKey, b: ListingKey, *, street_key: str,
     # the designed refresh).
     if ctx.dismissed_prior is not None and cp in ctx.dismissed_prior:
         reviewed_at = ctx.dismissed_prior[cp]
-        ev_a = _last_evidence_at(conn, a.sreality_id, ctx.probes)
-        ev_b = _last_evidence_at(conn, b.sreality_id, ctx.probes)
-        fresh = any(ev is not None and reviewed_at is not None and ev > reviewed_at
-                    for ev in (ev_a, ev_b))
-        if not fresh:
-            stats["skipped_prior_dismissed"] = stats.get("skipped_prior_dismissed", 0) + 1
-            return
+        if reviewed_at is None:
+            # Unknown dismissal time -> can't prove staleness -> re-decide (recall-safe;
+            # prod has 0 such rows today, this is a guard against future writers).
+            pass
+        else:
+            ev_a = _last_evidence_at(conn, a.sreality_id, ctx.probes)
+            ev_b = _last_evidence_at(conn, b.sreality_id, ctx.probes)
+            fresh = any(ev is not None and ev > reviewed_at for ev in (ev_a, ev_b))
+            if not fresh:
+                stats["skipped_prior_dismissed"] = (
+                    stats.get("skipped_prior_dismissed", 0) + 1)
+                return
+
+    # True only when the consult above re-opened this pair on fresh evidence — a queue
+    # outcome below must then re-propose the recorded dismissal (see _enqueue_candidate).
+    reopened = ctx.dismissed_prior is not None and cp in ctx.dismissed_prior
 
     # Tagging-readiness gate: a listing must be FULLY CLIP-tagged before the engine decides on
     # it. An incompletely-tagged listing's floor-plan / room images may still be in the tag
@@ -1530,7 +1572,8 @@ def resolve_pair(conn: Any, a: ListingKey, b: ListingKey, *, street_key: str,
             if not ctx.dry_run:
                 _enqueue_candidate(conn, a, b, {
                     **factors, "tier": ctx.tier,
-                    "reason": "auto_merge_off:image_phash", "confidence": 0.97})
+                    "reason": "auto_merge_off:image_phash", "confidence": 0.97},
+                    reopen=reopened)
             stats["queued"] += 1
             return
         # Floor-plan validation gate (migration 234): a different 2D floor plan DISMISSES, a
@@ -1553,7 +1596,8 @@ def resolve_pair(conn: Any, a: ListingKey, b: ListingKey, *, street_key: str,
             if not ctx.dry_run:
                 _enqueue_candidate(conn, a, b, {
                     **factors, "tier": ctx.tier,
-                    "reason": "floor_plan_review", "confidence": 0.6})
+                    "reason": "floor_plan_review", "confidence": 0.6},
+                    reopen=reopened)
             stats["queued"] += 1
             return
         if fp == "defer":
@@ -1588,7 +1632,7 @@ def resolve_pair(conn: Any, a: ListingKey, b: ListingKey, *, street_key: str,
                 **_factors("candidate", reason="auto_merge_off",
                            street_key=street_key, phash_pairs=phash_pairs),
                 "tier": ctx.tier, "confidence": 0.6,
-            })
+            }, reopen=reopened)
         stats["queued"] += 1
         return
     # (Tagging readiness is enforced once, up front — see the _clip_incomplete gate at the top
@@ -1635,7 +1679,7 @@ def resolve_pair(conn: Any, a: ListingKey, b: ListingKey, *, street_key: str,
         stats["floor_plan_deferred"] += 1
     elif ctx.enqueue_unresolved:
         if not ctx.dry_run:
-            _enqueue_candidate(conn, a, b, markers)
+            _enqueue_candidate(conn, a, b, markers, reopen=reopened)
         stats["queued"] += 1
         # NOT audited — a queued pair IS the candidate; its factor detail lives in
         # markers_matched (Needs-review reads it). Auditing queued re-logged the same

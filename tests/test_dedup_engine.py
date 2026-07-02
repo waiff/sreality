@@ -903,6 +903,9 @@ class _Cur:
         elif "UPDATE property_identity_candidates" in s:
             self._conn.resolved.append((s, params))  # reconcile / _resolve_candidates
             self._rows = []
+        elif "INSERT INTO property_identity_candidates" in s and "SET status = 'proposed'" in s:
+            self._conn.enqueued.append(params)  # reopen-variant enqueue (consult recall valve)
+            self._rows = []
         elif "INSERT INTO property_identity_candidates" in s and "'dismissed'" in s:
             self._conn.dismiss_recorded.append(params)  # _record_auto_dismissed markers
             self._rows = []
@@ -2696,8 +2699,10 @@ def test_record_auto_dismissed_inserts_markers() -> None:
 
     n = eng._record_auto_dismissed(_Conn(), {(1, 2), (3, 4)}, "street_disposition")
     assert n == 2
-    assert "ON CONFLICT (left_property_id, right_property_id) DO NOTHING" in captured["sql"]
-    assert "'dismissed'" in captured["sql"]
+    # Re-dismissal refreshes the settled timestamp (guarded to dismissed rows), so a
+    # once-reopened pair doesn't read as perpetually "fresh" and treadmill again.
+    assert "DO UPDATE SET reviewed_at = now()" in captured["sql"]
+    assert "status = 'dismissed'" in captured["sql"]
     assert eng._record_auto_dismissed(_Conn(), set(), "street_disposition") == 0
 
 
@@ -2713,8 +2718,8 @@ def test_write_pair_audit_dedupes_recent_identical_records() -> None:
         def __exit__(self, *a): return None
         def execute(self, sql, params=None): self._sql = " ".join(sql.split())
         def executemany(self, sql, rows): inserted.extend(rows)
-        def fetchall(self):  # pair (1,2) phash/dismissed/engine already logged
-            return [(1, 2, "phash", "dismissed", "engine")]
+        def fetchall(self):  # pair (1,2) phash/engine dismissal already logged
+            return [(1, 2, "phash", "engine")]
 
     class _Conn:
         def cursor(self): return _C()
@@ -2725,5 +2730,38 @@ def test_write_pair_audit_dedupes_recent_identical_records() -> None:
         "outcome": "dismissed", "source": "engine", "detail": {},
     }
     novel = {**rec, "left_sreality_id": 5, "right_sreality_id": 6}
-    eng._write_pair_audit(_Conn(), "RUN_AT", [rec, novel])
-    assert len(inserted) == 1 and inserted[0][1] == 5  # only the novel record landed
+    # A re-MERGE of the same pair must ALWAYS land (its fresh merge_group_id is the
+    # operator's only undo handle after an unmerge) — only dismissals dedupe.
+    remerge = {**rec, "outcome": "merged", "merge_group_id": "G2"}
+    eng._write_pair_audit(_Conn(), "RUN_AT", [rec, novel, remerge])
+    assert len(inserted) == 2
+    assert {r[1] for r in inserted} == {5, 1}          # novel dismissal + the re-merge
+    assert any(r[7] == "merged" for r in inserted)     # the merged record landed
+
+
+def test_enqueue_candidate_reopen_valve() -> None:
+    """reopen=True (consult re-decided on fresh evidence) re-proposes an engine-dismissed
+    row so a queue outcome reaches the operator; operator dismissals stay respected; the
+    default path keeps DO NOTHING so mass re-decides can't bulk-reopen settled pairs."""
+    import scripts.dedup_engine as eng
+
+    captured: list[str] = []
+
+    class _Ctx:
+        def __enter__(self): return self
+        def __exit__(self, *a): return None
+
+    class _C(_Ctx):
+        def execute(self, sql, params=None): captured.append(" ".join(sql.split()))
+
+    class _Conn:
+        def cursor(self): return _C()
+        def transaction(self): return _Ctx()
+
+    a = _key(1, pid=101)
+    b = _key(2, pid=102)
+    eng._enqueue_candidate(_Conn(), a, b, {"tier": "street_disposition"}, reopen=True)
+    assert "SET status = 'proposed', reviewed_at = NULL" in captured[-1]
+    assert "reviewed_action IS DISTINCT FROM 'operator'" in captured[-1]
+    eng._enqueue_candidate(_Conn(), a, b, {"tier": "street_disposition"})
+    assert "DO NOTHING" in captured[-1]
