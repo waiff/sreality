@@ -31,11 +31,16 @@ from scraper.street import street_name_key
 
 LOG = logging.getLogger("check_street_key_parity")
 
+# Recency = last_seen_at, NOT sreality_id: non-sreality portals draw NEGATIVE synthetic
+# PKs, so an id-ordered "newest" sample would be sreality-only — silently excluding the
+# HTML portals whose rows the resolver/backfills write (exactly where a stamping bug
+# would appear first). last_seen_at also covers UPDATED rows (a refetch that rewrites
+# street), which row-creation recency would miss.
 _RECENT_SQL = """
     SELECT sreality_id, street, street_name_key
     FROM listings
     WHERE street IS NOT NULL AND street <> ''
-    ORDER BY sreality_id DESC
+    ORDER BY last_seen_at DESC
     LIMIT %(n)s
 """
 
@@ -89,6 +94,12 @@ def main() -> int:
 
     mismatches = find_mismatches(rows)
     LOG.info("PARITY checked=%d mismatches=%d", len(rows), len(mismatches))
+    # A near-empty sample means the queries broke (or the table emptied) — fail loudly
+    # rather than green-lighting a guard that checked nothing. //4 tolerates block-sample
+    # variance and table shrinkage without false alarms.
+    if len(rows) < (args.recent + args.random_n) // 4:
+        LOG.error("PARITY sample too small (%d rows) — check the sampling queries", len(rows))
+        return 1
     if not mismatches:
         return 0
     for sid, street, stored, expected in mismatches[:20]:
