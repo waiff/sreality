@@ -199,6 +199,26 @@ def test_probe_dry_run_uses_no_connection():
     assert not p.conn.closed                    # never opened
 
 
+def test_probe_builds_limiter_through_factory(monkeypatch):
+    # The realtime worker probes beside the Actions walks, so the probe's
+    # limiter must go through build_rate_limiter: flipping a portal's
+    # shared_rate_limiter engages the DB politeness ledger for probes too.
+    seen: dict[str, Any] = {}
+
+    def fake_build(source, rate, shared, *, lease_n=0):
+        seen.update(source=source, rate=rate, shared=shared, lease_n=lease_n)
+        return portal_runner.RateLimiter(rate)
+
+    monkeypatch.setattr(portal_runner, "build_rate_limiter", fake_build)
+    p = _ProbePortal()
+    p.shared_rate_limiter = True
+    portal_runner.run_index_probe(p, dry_run=True)
+    assert seen == {
+        "source": "fake", "rate": 100.0, "shared": True,
+        "lease_n": portal_runner.PROBE_LEASE_N,
+    }
+
+
 # --- agenda-cached portals: cap change must drop the cached walk -------------
 
 
