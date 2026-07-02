@@ -6,6 +6,22 @@ source for active rules; ROADMAP is for sequencing.
 
 ## Done
 
+### 2026-07: Dedup metrics hygiene — gauges decoupled from runs, geo run rows (audit PR-F)
+
+Final slice of the 2026-07 audit program:
+- **The ~9s market-gauge scan runs only where it means something** (migration 265):
+  `eligible`/`flagged_*` are properties of the whole table, yet every street-pass run paid
+  the full-table aggregate — including the hourly dirty drain whose own work takes
+  milliseconds. Scoped runs now write NULL ("not measured"); the /dedup gauges and the
+  pipeline overview read the latest FULL-scan row (`run_kind='full'`, legacy NULL-kind
+  rows included), while activity stays the latest run of any lane, labeled by lane.
+- **The geo lane writes run rows** (`run_kind='geo'`): it previously wrote none, so a
+  chronically truncating geo scan was invisible. Its `eligible` is the geo lane's own
+  count, excluded from street gauge pickers by run_kind.
+- Dead-counter cleanup: `skipped_same_source` (always 0 since the Wave-3 gate removal)
+  dropped from stats + logs; `cost_usd` (never written by the engine) dropped from the
+  dashboard select/type — columns stay (historical rows).
+
 ### 2026-07: street_name_key guards — presence CHECK + weekly sampled parity (audit PR-E)
 
 The write-path invariant "every listings.street write stamps street_name_key" was
