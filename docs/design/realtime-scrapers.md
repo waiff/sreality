@@ -99,7 +99,7 @@ is the defensible posture the operator accepted.
 
 Wave A+B (2026-07, shipped as PRs #678–#683 + published_at/pozemek follow-ups): correctness
 fixes real-time would amplify (cross-slice delisting flap, remax rent starvation, idnes FX
-churn, sreality hash flaps, idnes land prices) + the measurement substrate. Wave C: the
+churn, sreality hash flaps, idnes area truncation) + the measurement substrate. Wave C: the
 worker + shared politeness ledger + probe lanes + images-first gate. Wave D: dedup
 real-time completion (dirty-lane floor-plan budget, batch-warmer revival, geo dirty-drain,
 street coverage — the true merge-coverage ceiling: only ~61%/51% of idnes/bazos byt is

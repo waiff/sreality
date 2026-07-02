@@ -38,8 +38,16 @@ Correctness bugs a faster pipeline would have amplified, plus the measurement su
   into `detail_queue_completions` in the same transaction as the queue DELETE (written/
   gone/given_up), 7-day self-pruning, + `detail_latency_recent` p50/p90 view — the
   first-hop SLI that was unmeasurable (queue rows died on completion).
-- **published_at** (migration 266) + **idnes pozemek per-m² price fix** ride as
-  follow-up PRs in the same wave.
+- **published_at** (#685, migration 266): portal publish dates promoted to a column
+  (bazos bump-date, ceskereality "Datum vložení", bezrealitky timeActivated when the
+  API ever exposes it, sreality `edited` fallback) — timestamptz, hash-excluded,
+  preserve-if-null. The publish→ingest latency ground truth.
+- **idnes area truncation fixed** (#686): the briefed "per-m² land prices stored as
+  absolute" premise was DISPROVEN against every affected staged page (stored prices
+  match the portal's own absolute amounts; the sub-100k plots are genuinely cheap).
+  The real defect was next door: spaced-thousands area parsing ("2 403 m²" → stored
+  403) on ~8.4k active rows — parser fixed + a Kč/m² drift rail added + a
+  reparse-from-staged-HTML backfill script (run post-merge).
 
 ### 2026-07: Dedup dirty-lane throughput — probe memoization + batched pHash + dismissal consult (audit PR-B)
 
