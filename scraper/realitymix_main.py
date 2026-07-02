@@ -135,6 +135,11 @@ class RealitymixPortal:
         self._sweep_done: dict[tuple[str, str], int] = {}
 
     # --- index-walk seams ---
+    def set_index_page_cap(self, pages: int | None) -> None:
+        # Probe seam (portal_runner.run_index_probe): realitymix's default index
+        # order is newest-first, so a page-capped walk IS the delta probe.
+        self._max_pages = pages
+
     def categories(self) -> list[dict[str, Any]]:
         return list(self._categories)
 
@@ -434,6 +439,13 @@ def main(argv: list[str] | None = None) -> int:
         else config.limits.max_detail_per_run
     )
 
+    # Newest-first delta probe (Wave C-2): diff + enqueue off the first index
+    # page(s) only. No mark_inactive, no drain, no scrape_runs row.
+    if args.probe:
+        rc, _ = portal_runner.run_index_probe(
+            portal, dry_run=args.dry_run, probe_pages=args.probe_pages)
+        return rc
+
     # realitymix is large (~48k), so production runs the cadence split via the
     # workflows (--index-only feeds --drain-only). A bare combined run (omit both
     # flags) still works for ad-hoc/local use; the split flags are the norm.
@@ -483,6 +495,16 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     p.add_argument(
         "--drain-only", action="store_true",
         help="drain the detail queue only (no index walk)",
+    )
+    p.add_argument(
+        "--probe", action="store_true",
+        help="newest-first delta probe: diff + enqueue off the first "
+             "--probe-pages index page(s) per category, then exit — never "
+             "mark_inactive, no detail drain, no scrape_runs row",
+    )
+    p.add_argument(
+        "--probe-pages", type=int, default=1,
+        help="index pages per category for --probe (default 1)",
     )
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--verbose", action="store_true")

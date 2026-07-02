@@ -78,6 +78,13 @@ INACTIVE_MIN_UNSEEN_HOURS = 24
 _CAP_PAGES = 12
 _PER_PAGE = 20
 
+# ceskereality's default index order is NOT newest-first, but every category page
+# links a newest-first sort variant at /{sale}/{category}/nejnovejsi/ (live-verified
+# 2026-07-02: 200 on www, standard i-estate cards + "Máme tady N" total + ?strana
+# paging) — it fits search_url's sub_slug slot, so the delta probe reads it on the
+# nationwide www host instead of enumerating the region×facet slices.
+_PROBE_SUB_SLUG = "nejnovejsi"
+
 
 def _walk_complete(collected: int, total: int | None) -> bool:
     if not total or total <= 0:
@@ -282,6 +289,78 @@ class CeskerealityPortal:
         )
         return seen, {"found_new": len(new_ids), "enqueued": enqueued}, total, pages, complete
 
+    def probe_category(
+        self, category: dict[str, Any], conn: Any, dry_run: bool,
+        limiter: RateLimiter, probe_pages: int,
+    ) -> tuple[set[str], dict[str, int], int | None, int, bool]:
+        """Newest-first delta probe (portal_runner.run_index_probe). The generic
+        walk-under-page-cap fallback is useless here: walk_category enumerates
+        region×facet slices even under --max-pages AND the default order is not
+        newest — so the probe reads the /nejnovejsi/ sort slug on the www host
+        (through the same proxied client), page by page with an early stop on
+        the first all-known page. Diff + enqueue only; always complete=False so
+        the caller can never be tempted into a delisting sweep (rule #3)."""
+        sale_type, cat = category["sale_type"], category["category"]
+        client = CeskerealityClient(limiter=limiter)
+        seen: set[str] = set()
+        total: int | None = None
+        pages = 0
+        found_new = 0
+        enqueued = 0
+        for page in range(1, min(max(1, probe_pages), _CAP_PAGES) + 1):
+            url = search_url(
+                sale_type, cat, sub_slug=_PROBE_SUB_SLUG,
+                page=page if page > 1 else None,
+            )
+            try:
+                html, _ = client.fetch_search(url)
+            except ListingGoneError:
+                break
+            parsed = parse_index(html)
+            pages += 1
+            if parsed.total is not None:
+                total = parsed.total
+            if not parsed.items:
+                break
+            rows = [
+                (it.source_id_native, detail_url(it.detail_path),
+                 index_price(it.price_text))
+                for it in parsed.items if it.source_id_native not in seen
+            ]
+            seen.update(nid for nid, _, _ in rows)
+            existing = (
+                db.index_summary_native(conn, SOURCE, [nid for nid, _, _ in rows])
+                if conn is not None else {}
+            )
+            new_entries: list[tuple[str, str, int | None, int]] = []
+            changed_entries: list[tuple[str, str, int | None, int]] = []
+            unchanged_pks: list[int] = []
+            for nid, ref, price in rows:
+                prev = existing.get(nid)
+                if prev is None:
+                    new_entries.append((nid, ref, price, db.QUEUE_PRIORITY_NEW))
+                elif price is None or price_changed(
+                    prev["price_czk"], price, self._price_change_min_pct,
+                ):
+                    changed_entries.append(
+                        (nid, ref, price, db.QUEUE_PRIORITY_CHANGED))
+                else:
+                    unchanged_pks.append(prev["sreality_id"])
+            if conn is not None and unchanged_pks:
+                db.touch_listings(conn, unchanged_pks)
+            entries = changed_entries + new_entries
+            if conn is not None and entries:
+                enqueued += db.enqueue_detail(conn, SOURCE, entries)
+            found_new += len(new_entries)
+            LOG.info(
+                "PROBE page cm=%s ct=%s page=%d new=%d changed=%d unchanged=%d",
+                cat, sale_type, page, len(new_entries), len(changed_entries),
+                len(unchanged_pks),
+            )
+            if not new_entries or parsed.next_offset is None:
+                break
+        return seen, {"found_new": found_new, "enqueued": enqueued}, total, pages, False
+
     def mark_inactive(self, conn: Any, category: dict[str, Any], seen: set[str]) -> int:
         cm, ct = self.category_labels(category)
         if cm is None or ct is None:
@@ -446,6 +525,13 @@ def main(argv: list[str] | None = None) -> int:
         else config.limits.max_detail_per_run
     )
 
+    # Newest-first delta probe (Wave C-2): the /nejnovejsi/ sort slug on the www
+    # host, diff + enqueue only. No mark_inactive, no drain, no scrape_runs row.
+    if args.probe:
+        rc, _ = portal_runner.run_index_probe(
+            portal, dry_run=args.dry_run, probe_pages=args.probe_pages)
+        return rc
+
     # ceskereality is mid-sized (~26k listings), so a combined run (omit both
     # --index-only / --drain-only) does the full index walk + a bounded drain in
     # one job. The split flags exist for parity / tuning if it ever outgrows that.
@@ -498,6 +584,16 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         help="limit the index walk to this region subdomain (repeatable; e.g. "
              "stredo.ceskereality.cz) for a one-region proxy test. Suppresses "
              "mark_inactive. Omit = all 7 regions.",
+    )
+    p.add_argument(
+        "--probe", action="store_true",
+        help="newest-first delta probe: diff + enqueue off the first "
+             "--probe-pages page(s) of the www /nejnovejsi/ sort per category, "
+             "then exit — never mark_inactive, no detail drain, no scrape_runs row",
+    )
+    p.add_argument(
+        "--probe-pages", type=int, default=1,
+        help="index pages per category for --probe (default 1)",
     )
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--verbose", action="store_true")
