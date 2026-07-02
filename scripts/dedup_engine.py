@@ -1312,7 +1312,9 @@ def _phash_pairs_cached(
     """`_phash_identical_pairs` served from the per-group batch: on the first lookup for a
     (group, exclusion-profile) the whole group's pair counts land in one round trip; later
     pairs of the group are cache hits. No cache/group -> the per-pair query, unchanged."""
-    if cache is None or group_sids is None or len(group_sids) < 2:
+    if cache is None or group_sids is None or len(group_sids) < 3:
+        # A 2-member group is a single pair — the batch saves nothing over the per-pair
+        # query, so keep the simpler (and independently testable) path for it.
         return _phash_identical_pairs(
             conn, a_id, b_id, excluded_tags, render_exclude_min=render_exclude_min)
     profile = (tuple(excluded_tags), render_exclude_min)
@@ -1334,7 +1336,7 @@ def _phash_distinctive_cached(
 ) -> bool:
     """`_phash_distinctive_match` served from the per-group batch (lazy: only byt pairs
     whose generic count fell short ever need it, so the batch runs on first demand)."""
-    if cache is None or group_sids is None or len(group_sids) < 2:
+    if cache is None or group_sids is None or len(group_sids) < 3:
         return _phash_distinctive_match(
             conn, a_id, b_id, rooms=rooms, render_exclude_min=render_exclude_min)
     profile = (tuple(sorted(rooms)), render_exclude_min)

@@ -1488,7 +1488,8 @@ def test_write_run_row_stamps_kind_truncated_started_at() -> None:
     assert captured["params"]["truncated"] == 0  # absent -> completed run
 
 
-def _stub_resolve_pair(conn: Any, a: Any, b: Any, *, street_key: str, ctx: Any) -> None:
+def _stub_resolve_pair(conn: Any, a: Any, b: Any, *, street_key: str, ctx: Any,
+                       group_sids: Any = None) -> None:
     # Mirrors only resolve_pair's budget accounting — the per-group clear tracks group
     # completion, not pair outcomes, so a decide-nothing stub is enough.
     ctx.pairs_left -= 1
