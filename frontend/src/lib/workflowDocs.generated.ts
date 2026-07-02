@@ -3374,7 +3374,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
         "description": "wall-clock budget for the detail drain (seconds)",
         "required": false,
         "type": "string",
-        "default": "1500",
+        "default": "2100",
         "options": null
       },
       {
@@ -3399,7 +3399,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     ],
     "concurrencyGroup": "remax-scrape",
     "cancelInProgress": false,
-    "timeoutMinutes": 50,
+    "timeoutMinutes": 60,
     "permissions": null,
     "runsUrl": "https://github.com/waiff/sreality/actions/workflows/scrape_remax.yml",
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/scrape_remax.yml"

@@ -326,6 +326,12 @@ def test_enqueue_detail_idempotent_greatest_priority():
     assert "ON CONFLICT (source, native_id) DO UPDATE" in sql
     assert "GREATEST(listing_detail_queue.priority, EXCLUDED.priority)" in sql
     assert "WHERE listing_detail_queue.claimed_at IS NULL" in sql
+    # Re-enqueue must KEEP the original enqueued_at: the claim order is
+    # (priority DESC, enqueued_at ASC), so re-stamping now() pushed every
+    # still-queued row behind the walk's fresh inserts each run — a backlog
+    # bigger than one drain budget then starved its tail forever (the remax
+    # rent-coverage bug).
+    assert "enqueued_at" not in sql
     # sreality sets the bigint sreality_id from the numeric native_id.
     assert "THEN u.nid::bigint ELSE NULL END" in sql
     assert params["source"] == "sreality"
