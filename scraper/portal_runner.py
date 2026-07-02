@@ -13,6 +13,9 @@ district-split lives inside its `walk_category`, not here — justified in revie
 - run_detail_drain: claim a bounded slice of the queue for this source, fetch on a
   rate-limited pool, write in batches via the portal's writer, route gone→inactive
   and error→failure. Records run_type='detail'.
+- run_index_probe: the newest-first delta probe (Wave C-2 of the real-time
+  program) — first index page(s) only, diff + enqueue, NEVER mark_inactive,
+  NO scrape_runs row.
 """
 
 from __future__ import annotations
@@ -70,6 +73,18 @@ class Portal(Protocol):
     ) -> tuple[set[Any], dict[str, int], int | None, int, bool]: ...
     def mark_inactive(self, conn: Any, category: Any, seen: set[Any]) -> int: ...
     def active_count(self, conn: Any, category: Any) -> int | None: ...
+
+    # --- probe seams (optional; duck-typed by run_index_probe) ---
+    # set_index_page_cap(pages: int | None): re-cap the walk's index page budget
+    #   between probe steps (peek page 1, then deepen to probe_pages). Every
+    #   newest-first-ordered portal implements it; the agenda-cached portals
+    #   (remax/maxima) also clear their cache on a cap change so a deepened
+    #   probe never replays a shallower cached walk.
+    # probe_category(category, conn, dry_run, limiter, probe_pages): bespoke
+    #   probe for a portal whose DEFAULT index order is NOT newest-first
+    #   (ceskereality's /nejnovejsi/ sort slug). Same return shape as
+    #   walk_category. When present it takes precedence over the generic
+    #   walk-under-page-cap fallback.
 
     # --- detail-drain seams ---
     def connect_drain(self) -> Any: ...
@@ -215,6 +230,130 @@ def run_index_walk(
             failed_categories, len(category_aggregates),
         )
     return (rc, scrape_agg)
+
+
+def run_index_probe(
+    portal: Portal,
+    dry_run: bool,
+    probe_pages: int = 1,
+) -> tuple[int, dict[str, Any]]:
+    """Newest-first delta probe: the cheap "what's new" pass the always-on
+    worker runs every 2-5 min per portal (docs/design/realtime-scrapers.md).
+
+    Discovery ONLY. Per category: fetch the first `probe_pages` index page(s)
+    through the portal's own walk machinery under its page cap, diff against
+    the DB and enqueue new/price-changed ids (the index_summary/touch/enqueue
+    path inside walk_category), and stop the category early when page 1 yields
+    zero unknown ids — the index is newest-first, so an all-known first page
+    proves nothing new sits deeper. The generic path peeks at page 1 then
+    re-walks at probe_pages only when the peek found something (one page of
+    overlap; enqueue_detail is idempotent on (source, native_id)); a portal
+    whose default order is NOT newest-first overrides probe_category instead.
+
+    NEVER calls mark_inactive: a page-capped walk cannot prove a delisting
+    (rule #3) — and the cap also makes every walk report complete=False, the
+    same second rail the --max-pages gate uses.
+
+    Writes NO scrape_runs row (the images-only precedent): Health liveness AND
+    the index-completeness reconciliation select scrape_runs rows by
+    `index_pages > 0` with no run_type filter (migrations 105/214), so a probe
+    row carrying its page count would masquerade as an index walk — greening a
+    dead full-walk lane and swapping the reconciliation's by_category for a
+    one-page walk's. run_type='probe' is also outside the CHECK (migration
+    105). Probe discovery stays observable through listing_detail_queue (the
+    Health backlog/lag checks) and the drain's own scrape_runs rows.
+    """
+    probe_pages = max(1, int(probe_pages))
+    prober = getattr(portal, "probe_category", None)
+    capper = getattr(portal, "set_index_page_cap", None)
+    if prober is None and capper is None:
+        raise TypeError(
+            f"portal {portal.source!r} implements neither probe_category nor "
+            "set_index_page_cap; it cannot run the delta probe"
+        )
+    limiter = RateLimiter(portal.index_rate)
+    conn = None if dry_run else portal.connect_index()
+    total_pages = 0
+    total_new = 0
+    total_enqueued = 0
+    early_stopped = 0
+    failed_categories = 0
+    walked = 0
+    by_category: list[dict[str, Any]] = []
+
+    try:
+        LOG.info(
+            "PROBE starting source=%s probe_pages=%d bespoke=%s",
+            portal.source, probe_pages, prober is not None,
+        )
+        for category in portal.categories():
+            cm_text, ct_text = portal.category_labels(category)
+            walked += 1
+            try:
+                if prober is not None:
+                    seen, counts, total, pages, _complete = prober(
+                        category, conn, dry_run, limiter, probe_pages)
+                else:
+                    capper(1)
+                    seen, counts, total, pages, _complete = portal.walk_category(
+                        category, conn, dry_run, limiter)
+                    if counts.get("found_new", 0) > 0 and probe_pages > 1:
+                        # Page 1 had unknown ids -> deepen. The re-walk's diff
+                        # covers pages 1..probe_pages (page-1 news are still
+                        # absent from listings), so its counts REPLACE the
+                        # peek's; only `pages` sums (honest fetch accounting).
+                        capper(probe_pages)
+                        seen, counts, total, deep_pages, _complete = (
+                            portal.walk_category(category, conn, dry_run, limiter))
+                        pages += deep_pages
+            except Exception as exc:
+                LOG.exception(
+                    "PROBE category failed cm=%s ct=%s: %s", cm_text, ct_text, exc)
+                failed_categories += 1
+                continue
+            stopped = pages < probe_pages
+            total_pages += pages
+            total_new += counts.get("found_new", 0)
+            total_enqueued += counts.get("enqueued", 0)
+            early_stopped += 1 if stopped else 0
+            LOG.info(
+                "PROBE cm=%s ct=%s pages=%d seen=%d new=%d enqueued=%d "
+                "total=%s early_stop=%s",
+                cm_text, ct_text, pages, len(seen), counts.get("found_new", 0),
+                counts.get("enqueued", 0), total, stopped,
+            )
+            by_category.append({
+                "category_main": cm_text,
+                "category_type": ct_text,
+                "pages": pages,
+                "listings_found_new": counts.get("found_new", 0),
+                "listings_enqueued": counts.get("enqueued", 0),
+                "early_stopped": stopped,
+            })
+    finally:
+        if conn is not None:
+            conn.close()
+
+    LOG.info(
+        "PROBE done pages=%d new=%d enqueued=%d early_stopped=%d errors=%d",
+        total_pages, total_new, total_enqueued, early_stopped, failed_categories,
+    )
+    rc = 1 if walked and failed_categories == walked else 0
+    if rc != 0:
+        LOG.error(
+            "PROBE every category failed (%d/%d); failing the run",
+            failed_categories, walked,
+        )
+    agg: dict[str, Any] = {
+        "probe_pages": probe_pages,
+        "index_pages": total_pages,
+        "listings_found_new": total_new,
+        "listings_enqueued": total_enqueued,
+        "early_stopped": early_stopped,
+        "errors": failed_categories,
+        "by_category": by_category,
+    }
+    return (rc, agg)
 
 
 def _flush_drain_batch(

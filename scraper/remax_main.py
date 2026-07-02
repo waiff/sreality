@@ -95,6 +95,16 @@ class RemaxPortal:
         self._swept_agendas: set[int] = set()  # delist each agenda once per run
 
     # --- index-walk seams ---
+    def set_index_page_cap(self, pages: int | None) -> None:
+        # Probe seam (portal_runner.run_index_probe): remax's default index
+        # order is newest-first, so a page-capped agenda walk IS the delta
+        # probe. The agenda cache holds a walk taken at the OLD cap, so a cap
+        # change must drop it — otherwise a deepened probe would replay the
+        # shallower cached agenda.
+        if pages != self._max_pages:
+            self._agenda_cache.clear()
+        self._max_pages = pages
+
     def categories(self) -> list[dict[str, Any]]:
         return list(self._categories)
 
@@ -389,6 +399,13 @@ def main(argv: list[str] | None = None) -> int:
         else config.limits.max_detail_per_run
     )
 
+    # Newest-first delta probe (Wave C-2): diff + enqueue off the first index
+    # page(s) only. No mark_inactive, no drain, no scrape_runs row.
+    if args.probe:
+        rc, _ = portal_runner.run_index_probe(
+            portal, dry_run=args.dry_run, probe_pages=args.probe_pages)
+        return rc
+
     # Omitting both flags runs the index walk then the detail drain in one job,
     # bounded by --max-pages / --max-detail (+ --max-seconds). The split flags
     # exist so a large backfill can be cadence-split like sreality/idnes.
@@ -434,6 +451,16 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     p.add_argument(
         "--drain-only", action="store_true",
         help="drain the detail queue only (no index walk)",
+    )
+    p.add_argument(
+        "--probe", action="store_true",
+        help="newest-first delta probe: diff + enqueue off the first "
+             "--probe-pages index page(s) per agenda, then exit — never "
+             "mark_inactive, no detail drain, no scrape_runs row",
+    )
+    p.add_argument(
+        "--probe-pages", type=int, default=1,
+        help="index pages per agenda for --probe (default 1)",
     )
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--verbose", action="store_true")
