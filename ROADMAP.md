@@ -14,7 +14,7 @@ Measured: 40% of a resolver cohort lost in 2.5 days; only ~455 of ~4.9k ever-fil
 streets; ~4.6k active rows uniquely resolvable but streetless — direct dedup-eligibility + Browse
 loss. The resolver's provenance was a raw_json marker the same refetch destroyed.
 
-Fix (migration 262 + `scraper/db.py`):
+Fix (migration 263 + `scraper/db.py`):
 - **One shared SET builder** (`_listing_update_set_sql`) for BOTH ingest upserts —
   `street`/`street_name_key`/`house_number` become preserve-if-null (`COALESCE(EXCLUDED.c, l.c)`);
   a page-parsed street still wins; write-path semantics can never drift between the two paths.
