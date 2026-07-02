@@ -348,15 +348,73 @@ def _claim_dedup_dirty(conn: Any, cutoff: Any, limit: int | None = None) -> set[
 
 
 def _prune_stale_dedup_dirty(conn: Any, ttl_hours: int = _DEDUP_DIRTY_TTL_HOURS) -> int:
-    """Evict dirty rows older than the TTL — the 6h full scan has already covered them, so they
-    are stale real-time work, not lost work. This BOUNDS the queue by construction (the missing
-    guard that let it grow to 201k) and, with the newest-first claim, guarantees the head can
-    never be pinned by an un-drainable backlog. Returns rows evicted."""
+    """Evict dirty rows older than the TTL AND provably covered by a COMPLETED full-scan cycle
+    (`marked_at < dedup_scan_state.last_cycle_started_at`: every street group was scanned at some
+    point during that cycle, i.e. AFTER the row was enqueued — eviction hands work to a backstop
+    that actually covered it, never silent loss). Before the cursor (migration 261) the full scan
+    head-restarted every run and covered ~9% of the market, so the old unconditional TTL was
+    discarding uncovered work. No completed cycle yet -> the NULL comparison evicts NOTHING (safe
+    default); the queue then only grows if BOTH the dirty drain and full cycles stall — which the
+    depth metric + stall banner make loud, the honest failure mode. Still bounds the queue in
+    steady state (cycles complete every ~2-3 days) and, with the newest-first claim + per-group
+    clear, the head is never pinned. Returns rows evicted."""
     with conn.cursor() as cur:
         cur.execute(
-            f"DELETE FROM dedup_dirty_properties WHERE marked_at < now() - interval '{ttl_hours} hours'"
+            f"DELETE FROM dedup_dirty_properties "
+            f"WHERE marked_at < now() - interval '{ttl_hours} hours' "
+            f"  AND marked_at < (SELECT last_cycle_started_at FROM dedup_scan_state "
+            f"                   WHERE lane = 'street')"
         )
         return cur.rowcount or 0
+
+
+def _load_scan_state(conn: Any, lane: str = "street") -> dict[str, Any]:
+    """The lane's scan frontier (migration 261). Missing row == a fresh lane: cursor at the
+    top, no cycle ever completed."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT cursor_key, cycle_started_at FROM dedup_scan_state WHERE lane = %s",
+            (lane,),
+        )
+        row = cur.fetchone()
+    if row is None:
+        return {"cursor_key": None, "cycle_started_at": None}
+    return {"cursor_key": row[0], "cycle_started_at": row[1]}
+
+
+def _save_scan_state(
+    conn: Any, lane: str, *, cursor_key: str | None,
+    cycle_started_at: Any, completed: bool,
+) -> None:
+    """Persist the frontier after a full-scan run. `completed` == the run reached the end of
+    the ordered group list: stamp the finished cycle (what gates the dirty-queue TTL eviction)
+    and reset the cursor so the next run starts a new cycle from the top."""
+    with conn.cursor() as cur:
+        if completed:
+            cur.execute(
+                """
+                INSERT INTO dedup_scan_state
+                  (lane, cursor_key, cycle_started_at, last_cycle_started_at,
+                   last_cycle_completed_at, updated_at)
+                VALUES (%s, NULL, NULL, %s, now(), now())
+                ON CONFLICT (lane) DO UPDATE SET
+                  cursor_key = NULL, cycle_started_at = NULL,
+                  last_cycle_started_at = EXCLUDED.last_cycle_started_at,
+                  last_cycle_completed_at = now(), updated_at = now()
+                """,
+                (lane, cycle_started_at),
+            )
+        else:
+            cur.execute(
+                """
+                INSERT INTO dedup_scan_state (lane, cursor_key, cycle_started_at, updated_at)
+                VALUES (%s, %s, %s, now())
+                ON CONFLICT (lane) DO UPDATE SET
+                  cursor_key = EXCLUDED.cursor_key,
+                  cycle_started_at = EXCLUDED.cycle_started_at, updated_at = now()
+                """,
+                (lane, cursor_key, cycle_started_at),
+            )
 
 
 def _should_run_geo(*, geo: bool, geo_only: bool, geo_enabled: bool, dirty: bool) -> bool:
@@ -1316,6 +1374,8 @@ def run_engine(
     restrict_street_groups: tuple[set[int], set[tuple[int, str]]] | None = None,
     only_groups_with_property_ids: set[int] | None = None,
     resolved_property_ids: set[int] | None = None,
+    scan_cursor: str | None = None,
+    cursor_out: dict[str, Any] | None = None,
     geo: bool = False,
     geo_area_max_pct: float | None = None,
     clip_model: str | None = None,
@@ -1429,20 +1489,47 @@ def run_engine(
         stats=stats, vision_budget=[max_vision_calls], audit=audit, pairs_left=max_pairs,
     )
 
+    # Full-scan CURSOR (migration 261): iterate groups in a stable sorted order and resume
+    # AFTER `scan_cursor`, so successive deadline-bounded runs advance a frontier over the
+    # whole market instead of head-restarting (the old behavior covered ~9% of pair slots
+    # per run and structurally never re-scanned the tail). `cursor_out` reports the last
+    # fully-scanned/skipped key + whether the run reached the end of the list (= the cycle
+    # completed — what re-arms the dirty-queue TTL eviction). Enabled only when the caller
+    # passes cursor_out (the plain scheduled full scan); scoped runs keep insertion order.
+    scan_frontier: dict[str, Any] = {"last_key": None}
+    if cursor_out is not None:
+        ordered_keys = sorted(groups)
+        if scan_cursor:
+            after = [k for k in ordered_keys if k > scan_cursor]
+            skipped_behind = len(ordered_keys) - len(after)
+            if skipped_behind:
+                LOG.info("CURSOR resuming after %r (skipping %d already-scanned groups)",
+                         scan_cursor, skipped_behind)
+            ordered_keys = after
+    else:
+        ordered_keys = list(groups)
+
     def finalize() -> dict[str, int]:
         # Resolve every candidate the engine acted on this run (no-op for pairs
         # without a proposed row); a no-op set-based UPDATE when nothing collected.
         if not dry_run:
             _resolve_candidates(conn, ctx.merged_pairs, "merged")
             _resolve_candidates(conn, ctx.dismissed_pairs, "dismissed")
+        if cursor_out is not None:
+            cursor_out["last_key"] = scan_frontier["last_key"]
+            # The cycle completed only if the scan reached the end of the ordered list
+            # without truncation — a truncated run's frontier resumes next run.
+            cursor_out["reached_end"] = not stats["truncated"]
         return _finish(stats, ctx.vision_budget, max_vision_calls)
 
     # The decision tree per pair lives in resolve_pair (shared by the candidate-priority
     # drain + the real-time path); this is just the full-scan driver over street groups.
-    for street_key, members in groups.items():
+    for street_key in ordered_keys:
+        members = groups[street_key]
         if len(members) > max_group_size:
             LOG.info("SKIP large group key=%s size=%d", street_key, len(members))
             _group_scanned(members)
+            scan_frontier["last_key"] = street_key
             continue
         # Real-time (dirty) drain: the load is SCOPED to the dirty properties' street
         # groups (restrict_street_groups), so it carries each dirty property's existing
@@ -1454,6 +1541,7 @@ def run_engine(
             m.property_id in only_groups_with_property_ids for m in members
         ):
             _group_scanned(members)
+            scan_frontier["last_key"] = street_key
             continue
         for i in range(len(members)):
             if ctx.pairs_left <= 0:
@@ -1480,6 +1568,7 @@ def run_engine(
             # The for-else fires only when the group's pair scan COMPLETED (no break) —
             # the deadline/pair-cap returns above exit before reaching it.
             _group_scanned(members)
+            scan_frontier["last_key"] = street_key
 
     return finalize()
 
@@ -2018,11 +2107,27 @@ def main() -> int:
         if not args.geo_only:
             pair_audit: list[dict[str, Any]] = []
             dirty_resolved: set[int] = set()
+            # Full-scan CURSOR: only the plain scheduled full scan rotates a persistent
+            # frontier over the market (migration 261) — the dirty/candidate drains have
+            # their own work-lists and stay cursor-free. cycle_started_at falls back to
+            # this run's start when a fresh cycle begins; on a crash nothing is persisted,
+            # which only makes the cycle stamp LATER (prune less) — conservative-safe.
+            full_scan = not args.dirty and not args.candidates and restrict is None
+            cursor_out: dict[str, Any] | None = None
+            scan_state: dict[str, Any] = {"cursor_key": None, "cycle_started_at": None}
+            cycle_started_at: Any = None
+            if full_scan:
+                scan_state = _load_scan_state(conn)
+                cycle_started_at = scan_state["cycle_started_at"] or run_at
+                cursor_out = {}
+                LOG.info("CURSOR full scan resuming after %r (cycle started %s)",
+                         scan_state["cursor_key"], cycle_started_at)
             stats = run_engine(
                 conn, audit=pair_audit, max_pairs=args.max_pairs,
                 only_groups_with_property_ids=only_groups,
                 restrict_street_groups=dirty_street_groups,
                 resolved_property_ids=(dirty_resolved if args.dirty else None),
+                scan_cursor=scan_state["cursor_key"], cursor_out=cursor_out,
                 **engine_kw,
             )
             stats["clip_classified"] = clip_counter[0]
@@ -2051,6 +2156,18 @@ def main() -> int:
                     stats["dirty_cleared"] = cleared
                     LOG.info("DIRTY drain: cleared %d/%d claimed (resolved groups; truncated=%s)",
                              cleared, len(only_groups), truncated)
+                if full_scan and cursor_out is not None:
+                    reached_end = bool(cursor_out.get("reached_end"))
+                    # A truncated run that scanned nothing keeps the previous frontier
+                    # (never regress the cursor to the top on a degenerate run).
+                    new_cursor = (None if reached_end
+                                  else (cursor_out.get("last_key") or scan_state["cursor_key"]))
+                    _save_scan_state(
+                        conn, "street", cursor_key=new_cursor,
+                        cycle_started_at=cycle_started_at, completed=reached_end)
+                    LOG.info("CURSOR saved: %s",
+                             "cycle COMPLETED (TTL eviction re-armed)" if reached_end
+                             else f"frontier at {new_cursor!r}")
                 _write_run_row(conn, stats)
                 _write_pair_audit(conn, run_at, pair_audit)
             LOG.info(

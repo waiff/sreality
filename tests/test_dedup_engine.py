@@ -1529,6 +1529,99 @@ def test_run_engine_incremental_resolve_dual_key_guard(monkeypatch: Any) -> None
     assert resolved2 >= claimed  # both groups scanned -> resolved
 
 
+def _three_group_rows() -> list[tuple[Any, ...]]:
+    # Three single-key name groups, sorted alfa < beta < gama (street_id=None -> no id: group).
+    return [
+        _row(1, 101, street="Alfa", street_id=None, hn=None),
+        _row(2, 102, street="Alfa", street_id=None, hn=None, source="bazos"),
+        _row(3, 103, street="Beta", street_id=None, hn=None),
+        _row(4, 104, street="Beta", street_id=None, hn=None, source="bazos"),
+        _row(5, 105, street="Gama", street_id=None, hn=None),
+        _row(6, 106, street="Gama", street_id=None, hn=None, source="bazos"),
+    ]
+
+
+def test_run_engine_cursor_resumes_after_key(monkeypatch: Any) -> None:
+    """With cursor_out enabled the full scan iterates groups in SORTED order and resumes
+    strictly AFTER scan_cursor — the frontier that lets successive deadline-bounded runs
+    cover the whole market instead of head-restarting (the ~9%-coverage pathology)."""
+    import scripts.dedup_engine as eng
+
+    monkeypatch.setattr(eng, "resolve_pair", _stub_resolve_pair)
+    cursor_out: dict[str, Any] = {}
+    stats = eng.run_engine(
+        _FakeConn(_three_group_rows()),
+        scan_cursor="name:5001:alfa", cursor_out=cursor_out,
+        max_pairs=100, max_vision_calls=0)
+    assert stats["pairs_considered"] == 2  # beta + gama only; alfa skipped (behind cursor)
+    assert cursor_out["last_key"].endswith(":gama")
+    assert cursor_out["reached_end"] is True  # end of list -> cycle completes
+
+
+def test_run_engine_cursor_truncation_reports_frontier(monkeypatch: Any) -> None:
+    """A truncated cursor run reports the last fully-scanned group as the frontier and
+    reached_end=False — the next run resumes there; the cycle does NOT complete."""
+    import scripts.dedup_engine as eng
+
+    monkeypatch.setattr(eng, "resolve_pair", _stub_resolve_pair)
+    cursor_out: dict[str, Any] = {}
+    stats = eng.run_engine(
+        _FakeConn(_three_group_rows()),
+        scan_cursor=None, cursor_out=cursor_out,
+        max_pairs=2, max_vision_calls=0)  # budget dies at beta's boundary -> only alfa completes
+    assert stats["truncated"] == 1
+    assert cursor_out["last_key"].endswith(":alfa")
+    assert cursor_out["reached_end"] is False
+
+
+def test_prune_stale_dedup_dirty_is_cycle_gated() -> None:
+    """TTL eviction must ALSO require coverage by a completed full-scan cycle
+    (marked_at < dedup_scan_state.last_cycle_started_at) — with no completed cycle the NULL
+    comparison evicts nothing, so eviction can never silently discard uncovered work."""
+    import scripts.dedup_engine as eng
+
+    captured: list[str] = []
+
+    class _Cur:
+        rowcount = 0
+        def __enter__(self): return self
+        def __exit__(self, *exc): return None
+        def execute(self, sql, params=None): captured.append(sql)
+
+    class _Conn:
+        def cursor(self): return _Cur()
+
+    eng._prune_stale_dedup_dirty(_Conn())
+    sql = captured[-1]
+    assert "last_cycle_started_at" in sql and "dedup_scan_state" in sql
+    assert "lane = 'street'" in sql
+
+
+def test_save_scan_state_shapes() -> None:
+    """completed=True stamps the finished cycle + resets the cursor; completed=False only
+    advances the frontier."""
+    import scripts.dedup_engine as eng
+
+    captured: list[tuple[str, Any]] = []
+
+    class _Cur:
+        def __enter__(self): return self
+        def __exit__(self, *exc): return None
+        def execute(self, sql, params=None): captured.append((sql, params))
+
+    class _Conn:
+        def cursor(self): return _Cur()
+
+    eng._save_scan_state(_Conn(), "street", cursor_key="k", cycle_started_at="T", completed=False)
+    sql, params = captured[-1]
+    assert "cursor_key = EXCLUDED.cursor_key" in sql and params == ("street", "k", "T")
+
+    eng._save_scan_state(_Conn(), "street", cursor_key=None, cycle_started_at="T", completed=True)
+    sql, params = captured[-1]
+    assert "last_cycle_started_at = EXCLUDED.last_cycle_started_at" in sql
+    assert "cursor_key = NULL" in sql and params == ("street", "T")
+
+
 def test_proposed_candidate_property_ids() -> None:
     """The candidate-drain work-list = every property in a still-proposed candidate
     (both sides, NULLs skipped, deduped)."""

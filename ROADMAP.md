@@ -6,6 +6,25 @@ source for active rules; ROADMAP is for sequencing.
 
 ## Done
 
+### 2026-07: Dedup full-scan cursor — whole-market coverage + honest TTL eviction (audit PR-C)
+
+The deep dedup-lane audit measured the 6h street full scan hitting its 4800 s deadline at ~64k of
+~688k pair slots in a DETERMINISTIC order with no cursor — a head-restart every run, so ~91% of the
+market's street groups were **structurally never re-scanned**, and the dirty queue's 24h TTL
+eviction ("the full scan has already covered them") was **silently discarding uncovered work**.
+
+Fix (migration 261, `dedup_scan_state` — lane-keyed so the geo lane can unify onto it):
+- **Cursor rotation:** with `cursor_out` enabled (the plain scheduled full scan only), `run_engine`
+  iterates groups in sorted key order resuming after `cursor_key`; each run advances the frontier;
+  reaching the end of the list completes the CYCLE (stamps `last_cycle_started/completed_at`,
+  resets the cursor). Whole-market coverage every ~2–3 days at current throughput. A truncated run
+  that scanned nothing keeps the previous frontier (never regresses to the top).
+- **Cycle-gated TTL:** `_prune_stale_dedup_dirty` additionally requires
+  `marked_at < last_cycle_started_at` — a row enqueued before a completed cycle began is
+  guaranteed to have had its groups scanned during that cycle. No completed cycle → evict nothing
+  (safe default); the failure mode becomes VISIBLE queue growth, never silent loss.
+- Dirty/candidate drains keep their own work-lists (cursor-free); shadow runs never persist state.
+
 ### 2026-07: Dedup dirty drain — per-group incremental clear (monotonic progress under any budget)
 
 Post-redesign audit found the dirty drain STILL truncating 4/5 runs with `dirty_cleared=0`: a
