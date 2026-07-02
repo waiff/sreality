@@ -152,6 +152,10 @@ _CENTER_RE = re.compile(r'"center"\s*:\s*\[\s*(-?\d+\.\d+)\s*,\s*(-?\d+\.\d+)\s*
 _FLOOR_PATRO_RE = re.compile(r"(-?\d+)\.\s*patro")
 _FLOOR_NP_RE = re.compile(r"(\d+)\.\s*np")
 _FLOOR_PP_RE = re.compile(r"(\d+)\.\s*pp")
+# The price cell's inline mortgage-calculator link ("Spočítat hypotéku" /
+# "Chci spočítat hypotéku") — UI chrome, not price data; stripped before the
+# text lands in raw_json. Safe: raw is not part of the typed content hash.
+_MORTGAGE_CTA_RE = re.compile(r"\s*(?:chci\s+)?spočítat\s+hypotéku\s*", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -179,6 +183,13 @@ def _text(node: Node | None) -> str | None:
         return None
     txt = re.sub(r"\s+", " ", node.text(separator=" ", strip=False)).strip()
     return txt or None
+
+
+def _strip_mortgage_cta(text: str | None) -> str | None:
+    if not text:
+        return text
+    out = _MORTGAGE_CTA_RE.sub(" ", text).strip()
+    return out or None
 
 
 def _page_text(tree: HTMLParser) -> str:
@@ -477,7 +488,7 @@ def parse_detail(
     # The <strong> holds just the amount; the surrounding .b-detail__price also
     # carries the "Chci spočítat hypotéku" CTA / price note (extra digits).
     price_node = tree.css_first(".b-detail__price strong") or tree.css_first(".b-detail__price")
-    price_text = _text(price_node) or _text(params.get("cena"))
+    price_text = _strip_mortgage_cta(_text(price_node) or _text(params.get("cena")))
     price_czk, price_unit = _parse_price(price_text, category_type)
 
     locality = _text(tree.css_first(".b-detail__info"))
@@ -519,6 +530,10 @@ def parse_detail(
             seen_img.add(href)
             image_urls.append(href)
 
+    params_text = {k: _text(v) for k, v in params.items()}
+    if params_text.get("cena"):
+        params_text["cena"] = _strip_mortgage_cta(params_text["cena"])
+
     raw: dict[str, Any] = {
         "id": source_id,
         "title": title,
@@ -527,7 +542,7 @@ def parse_detail(
         "idnes_ref": _text(params.get("číslo zakázky")),
         "image_urls": image_urls,
         "coords": coord_provenance,
-        "params": {k: _text(v) for k, v in params.items()},
+        "params": params_text,
         # Broker/agency block for broker intelligence (resolver reads raw_json.broker).
         # Out of the content hash (_HASH_FIELDS is typed columns only), so it never
         # churns snapshots.

@@ -23,7 +23,7 @@ def _portal(have_geom=None):
     cfg = SimpleNamespace(
         supports_complete_walk=True,
         categories=[],
-        limits=SimpleNamespace(index_rate=3.0),
+        limits=SimpleNamespace(index_rate=3.0, price_change_min_pct=0.005),
     )
     portal = idnes_main.IdnesPortal(cfg)
     portal._have_geom = have_geom

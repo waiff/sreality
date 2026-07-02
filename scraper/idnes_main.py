@@ -42,7 +42,12 @@ from scraper.idnes_parser import (
     parse_detail,
     parse_index,
 )
-from scraper.portal import PortalConfig, default_config, load_portal_config
+from scraper.portal import (
+    PortalConfig,
+    default_config,
+    load_portal_config,
+    price_changed,
+)
 from scraper.portal_base import ListingGoneError
 from scraper.portal_runner import DrainItem
 from scraper.rate_limit import RateLimiter
@@ -111,11 +116,25 @@ class IdnesPortal:
     # The class value is the baked floor; the instance reads it from config.
     index_rate = 3.0
 
-    def __init__(self, config: PortalConfig, *, max_pages: int | None = None) -> None:
+    def __init__(
+        self,
+        config: PortalConfig,
+        *,
+        max_pages: int | None = None,
+        price_change_min_pct: float | None = None,
+    ) -> None:
         self.supports_complete_walk = config.supports_complete_walk
         self._categories = config.categories
         self._max_pages = max_pages
         self.index_rate = config.limits.index_rate
+        # CLI override > per-portal config (the standard limits chain). Absorbs
+        # the daily FX re-display drift of idnes's foreign inventory so the
+        # walk doesn't enqueue phantom "price changed" refetches (see
+        # PortalLimits.price_change_min_pct).
+        self._price_change_min_pct = (
+            price_change_min_pct if price_change_min_pct is not None
+            else config.limits.price_change_min_pct
+        )
         # stored (lat, lon) per native id at drain start; a refetch whose page
         # carries no coords gets them carried forward instead of re-geocoded —
         # geom is never wiped and a Mapy credit is only ever spent once.
@@ -215,7 +234,9 @@ class IdnesPortal:
             prev = existing.get(nid)
             if prev is None:
                 continue
-            if price_map.get(nid) is not None and prev["price_czk"] == price_map[nid]:
+            if price_map.get(nid) is not None and not price_changed(
+                prev["price_czk"], price_map[nid], self._price_change_min_pct,
+            ):
                 unchanged_pks.append(prev["sreality_id"])
             else:
                 changed.append(nid)
@@ -381,7 +402,11 @@ def main(argv: list[str] | None = None) -> int:
     _configure_logging(args.verbose)
 
     config = _load_config(args.dry_run)
-    portal = IdnesPortal(config, max_pages=args.max_pages)
+    portal = IdnesPortal(
+        config,
+        max_pages=args.max_pages,
+        price_change_min_pct=args.price_change_min_pct,
+    )
 
     # Resolve operational limits: CLI override > per-portal DB config > default.
     workers = args.workers if args.workers is not None else config.limits.detail_workers
@@ -430,6 +455,12 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     p.add_argument(
         "--rate", type=float, default=None,
         help="detail-fetch requests/second ceiling (default: per-portal config)",
+    )
+    p.add_argument(
+        "--price-change-min-pct", type=float, default=None,
+        help="relative index-price move below which a listing reads as "
+             "unchanged in the walk diff (default: per-portal config; "
+             "0 = exact compare)",
     )
     p.add_argument(
         "--max-seconds", type=float, default=None,

@@ -33,7 +33,12 @@ from scraper.bezrealitky_parser import (
     SOURCE,
     parse_advert,
 )
-from scraper.portal import PortalConfig, default_config, load_portal_config
+from scraper.portal import (
+    PortalConfig,
+    default_config,
+    load_portal_config,
+    price_changed,
+)
 from scraper.portal_base import ListingGoneError
 from scraper.portal_runner import DrainItem
 from scraper.rate_limit import RateLimiter
@@ -79,6 +84,7 @@ class BezrealitkyPortal:
         self._categories = config.categories
         self._max_pages = max_pages
         self.index_rate = config.limits.index_rate
+        self._price_change_min_pct = config.limits.price_change_min_pct
 
     # --- index-walk seams ---
     def categories(self) -> list[dict[str, Any]]:
@@ -153,7 +159,9 @@ class BezrealitkyPortal:
             prev = existing.get(nid)
             if prev is None:
                 continue
-            if price_map.get(nid) is not None and prev["price_czk"] == price_map[nid]:
+            if price_map.get(nid) is not None and not price_changed(
+                prev["price_czk"], price_map[nid], self._price_change_min_pct,
+            ):
                 unchanged_pks.append(prev["sreality_id"])
             else:
                 changed.append(nid)

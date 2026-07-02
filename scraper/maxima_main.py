@@ -38,7 +38,12 @@ from typing import Any
 from scraper import db, portal_runner
 from scraper.maxima_client import MaximaClient, detail_url
 from scraper.maxima_parser import category_of, index_price, parse_detail, parse_index
-from scraper.portal import PortalConfig, default_config, load_portal_config
+from scraper.portal import (
+    PortalConfig,
+    default_config,
+    load_portal_config,
+    price_changed,
+)
 from scraper.portal_base import ListingGoneError
 from scraper.portal_runner import DrainItem
 from scraper.rate_limit import RateLimiter
@@ -89,6 +94,7 @@ class MaximaPortal:
         self._categories = config.categories
         self._max_pages = max_pages
         self.index_rate = config.limits.index_rate
+        self._price_change_min_pct = config.limits.price_change_min_pct
         self._agenda_cache: dict[int, _AgendaWalk] = {}
         self._swept_agendas: set[int] = set()  # delist each agenda once per run
 
@@ -193,7 +199,9 @@ class MaximaPortal:
             prev = existing.get(nid)
             if prev is None:
                 continue
-            if walk.price_map.get(nid) is not None and prev["price_czk"] == walk.price_map[nid]:
+            if walk.price_map.get(nid) is not None and not price_changed(
+                prev["price_czk"], walk.price_map[nid], self._price_change_min_pct,
+            ):
                 unchanged_pks.append(prev["sreality_id"])
             else:
                 changed.append(nid)

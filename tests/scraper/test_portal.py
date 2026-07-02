@@ -12,6 +12,7 @@ from scraper.portal import (
     _read_global_limits,
     default_config,
     load_portal_config,
+    price_changed,
 )
 
 
@@ -203,3 +204,59 @@ def test_limits_merged_present_null_means_unlimited():
 
 def test_global_read_swallows_db_error():
     assert _read_global_limits(_RaisingConn()) is None
+
+
+# --- price_changed (index-walk price-diff jitter tolerance) ---
+
+def test_price_changed_exact_compare_by_default():
+    assert price_changed(100, 100) is False
+    assert price_changed(100, 101) is True          # any move counts at 0
+    assert price_changed(100, 99) is True
+
+
+def test_price_changed_tolerance_absorbs_jitter_both_directions():
+    # idnes FX drift signature: ~0.04-0.08% daily moves on foreign listings
+    assert price_changed(23_692_431, 23_710_239, 0.005) is False  # +0.075%
+    assert price_changed(23_710_239, 23_692_431, 0.005) is False  # -0.075%
+    assert price_changed(10_000_000, 9_900_000, 0.005) is True    # -1% genuine cut
+    assert price_changed(10_000_000, 10_100_000, 0.005) is True   # +1% rise
+
+
+def test_price_changed_exactly_at_threshold_is_changed():
+    assert price_changed(10_000, 10_050, 0.005) is True    # == 0.5% -> changed
+    assert price_changed(10_000, 10_049, 0.005) is False   # just below
+    assert price_changed(10_000, 9_950, 0.005) is True     # == 0.5% down
+    assert price_changed(10_000, 9_951, 0.005) is False
+
+
+def test_price_changed_null_value_transitions_always_change():
+    assert price_changed(None, 100, 0.5) is True
+    assert price_changed(100, None, 0.5) is True
+    assert price_changed(None, None, 0.5) is False  # no difference to report
+
+
+def test_price_changed_zero_and_huge_prices():
+    assert price_changed(0, 5, 0.005) is True                # no ratio on 0
+    assert price_changed(2_000_000_000, 2_001_000_000, 0.005) is False  # 0.05%
+    assert price_changed(2_000_000_000, 2_001_000_000, 0.0) is True
+
+
+def test_price_change_min_pct_defaults():
+    assert default_config("idnes").limits.price_change_min_pct == 0.005
+    assert default_config("sreality").limits.price_change_min_pct == 0.0
+    assert default_config("realitymix").limits.price_change_min_pct == 0.0
+
+
+def test_price_change_min_pct_resolves_through_limit_chain():
+    row = (True, [{"x": 1}], None, {"price_change_min_pct": 0.01})
+    cfg = load_portal_config(_Conn(row), "idnes")
+    assert cfg.limits.price_change_min_pct == 0.01
+    # global layer applies when the per-portal row omits it
+    global_row = ({"price_change_min_pct": 0.002},)
+    cfg = load_portal_config(_Conn((True, [{"x": 1}], None, None), global_row), "realitymix")
+    assert cfg.limits.price_change_min_pct == 0.002
+    # a bad-typed leaf keeps the baked default
+    cfg = load_portal_config(
+        _Conn((True, [{"x": 1}], None, {"price_change_min_pct": "lots"})), "idnes"
+    )
+    assert cfg.limits.price_change_min_pct == 0.005
