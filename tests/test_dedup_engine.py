@@ -731,7 +731,7 @@ def test_run_engine_geo_does_not_skip_same_source(monkeypatch: Any) -> None:
     monkeypatch.setattr(eng, "merge_properties", lambda *a, **k: {"data": {"merge_group_id": "g"}})
     stats = eng.run_engine(_FakeConn([]), classify_fn=None, compare_fn=None,
                            max_vision_calls=10, geo=True, geo_area_max_pct=0.20)
-    assert stats["skipped_same_source"] == 0
+    assert "skipped_same_source" not in stats  # counter retired (PR-F)
     assert stats["pairs_considered"] == 1
 
 
@@ -988,7 +988,7 @@ def test_run_engine_now_visually_compares_same_source(monkeypatch: Any) -> None:
     ])
     stats = eng.run_engine(conn, classify_fn=None, compare_fn=None, max_vision_calls=10)
 
-    assert stats["skipped_same_source"] == 0   # the gate is gone
+    assert "skipped_same_source" not in stats  # counter retired with the gate (PR-F)
     assert stats["pairs_considered"] == 1      # reached the visual stage
 
 
@@ -1081,7 +1081,7 @@ def test_run_engine_does_not_skip_cross_source(monkeypatch: Any) -> None:
     # No classify_fn -> _resolve_visual returns queue('no_images'); the point is it was REACHED.
     stats = eng.run_engine(conn, classify_fn=None, compare_fn=None, max_vision_calls=10)
 
-    assert stats["skipped_same_source"] == 0
+    assert "skipped_same_source" not in stats  # counter retired (PR-F)
     assert stats["pairs_considered"] == 1
 
 
@@ -1245,7 +1245,7 @@ def test_run_engine_phash_fastpath_merges_same_source(monkeypatch: Any) -> None:
     stats = eng.run_engine(conn, classify_fn=None, compare_fn=None, max_vision_calls=10)
 
     assert stats["auto_phash"] == 1
-    assert stats["skipped_same_source"] == 0  # pHash resolved it before the gate
+    assert "skipped_same_source" not in stats  # counter retired with the gate (PR-F)
     assert merges == ["image_phash"]
 
 
