@@ -1647,7 +1647,11 @@ run" readers order by `id`/`ended_at` (insert order) — NOT `started_at`, which
 scan's row below dirty runs that started after it. The `/dedup`
 dashboard shows a "Dirty queue" stat + a stall banner, and the Health page raises an amber/red
 banner. The shared, unit-tested `assessDirtyQueue` (`frontend/src/lib/dedupQueueHealth.ts`) is the
-single source of that status for both surfaces, and it keys on **`dirty_cleared`, not depth**:
+single source of that status for both surfaces, and it keys on **`dirty_cleared`, not depth**.
+**Market gauges are decoupled from run activity** (migration 265): `eligible`/`flagged_*` are NULL on
+scoped runs (the ~9s full-table aggregate only runs on full scans) — dashboards read gauges from the
+latest `run_kind='full'` row and activity from the latest row of any lane; the geo pass writes its own
+`run_kind='geo'` rows (its `eligible` is the geo lane's count, excluded from street gauges). Health keys:
 "draining" means cleared>0 in the recent window (the 24h TTL prune shrinks depth whether or not
 the drain works, so a falling depth alone proves nothing), and a truncated streak with zero
 cleared is a red LIVELOCK regardless of depth (pre-258 rows fall back to the depth trend).

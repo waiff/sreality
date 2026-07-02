@@ -309,6 +309,10 @@ function AutomationDashboard({
   loading: boolean;
 }) {
   const latest = runs[0] ?? null;
+  // Market gauges come from the latest FULL-scan row — scoped runs (dirty/candidates)
+  // write NULL gauges since migration 265, and geo rows carry the geo lane's count.
+  const gauges =
+    runs.find((r) => (r.run_kind === 'full' || r.run_kind == null) && r.eligible != null) ?? null;
   const autoTotal = latest ? latest.auto_phash + latest.auto_visual : 0;
   const dq = assessDirtyQueue(runs);
   return (
@@ -334,9 +338,9 @@ function AutomationDashboard({
             </div>
           ) : null}
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-            <Stat label="Eligible" value={latest.eligible} hint="street + disposition" />
-            <Stat label="Loc. unclear" value={latest.flagged_location} hint="no street" muted />
-            <Stat label="Disp. unclear" value={latest.flagged_disposition} hint="no disposition" muted />
+            <Stat label="Eligible" value={gauges?.eligible ?? 0} hint="street + disposition" />
+            <Stat label="Loc. unclear" value={gauges?.flagged_location ?? 0} hint="no street" muted />
+            <Stat label="Disp. unclear" value={gauges?.flagged_disposition ?? 0} hint="no disposition" muted />
             <Stat label="Auto-merged" value={autoTotal} hint="this run" accent />
           </div>
           <div className="mt-2 grid grid-cols-2 sm:grid-cols-7 gap-2">
@@ -363,7 +367,8 @@ function AutomationDashboard({
           </div>
           {runs.length > 1 ? <RunTrend runs={runs} /> : null}
           <p className="mt-2 text-[0.7rem] text-[var(--color-ink-4)]">
-            Last run {fmtRelative(latest.started_at)} · {fmtCount(latest.pairs_considered)} pairs examined ·
+            Last run{latest.run_kind ? ` (${latest.run_kind})` : ''} {fmtRelative(latest.started_at)} ·
+            {' '}{fmtCount(latest.pairs_considered)} pairs examined ·
             {' '}{fmtCount(latest.vision_calls)} vision calls
           </p>
         </>

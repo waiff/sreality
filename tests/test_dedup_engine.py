@@ -2765,3 +2765,21 @@ def test_enqueue_candidate_reopen_valve() -> None:
     assert "reviewed_action IS DISTINCT FROM 'operator'" in captured[-1]
     eng._enqueue_candidate(_Conn(), a, b, {"tier": "street_disposition"})
     assert "DO NOTHING" in captured[-1]
+
+
+def test_scoped_runs_skip_the_market_gauge_scan() -> None:
+    """Scoped runs (dirty/candidates) must NOT pay the ~9s full-table eligibility
+    aggregate — they write NULL gauges (migration 265); only the unscoped full scan
+    measures the market. Dashboards read gauges from full-scan rows."""
+    import scripts.dedup_engine as eng
+
+    conn = _FakeConn([])
+    stats = eng.run_engine(conn, max_vision_calls=0,
+                           only_groups_with_property_ids=set())
+    assert stats["eligible"] is None and stats["flagged_location"] is None
+    assert not any("count(*) FILTER" in s for s in conn.executed)
+
+    conn2 = _FakeConn([])
+    stats2 = eng.run_engine(conn2, max_vision_calls=0)  # unscoped full scan
+    assert stats2["eligible"] == 4  # the fake's gauge row
+    assert any("count(*) FILTER" in s for s in conn2.executed)

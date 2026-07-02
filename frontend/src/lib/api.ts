@@ -826,6 +826,8 @@ export type DedupPipelineOverview = {
   decisions: { total: number; delta_24h: number; merged: number; dismissed: number };
   last_run: {
     started_at: string;
+    /* which lane wrote the row ('full' | 'candidates' | 'dirty' | 'geo'; null pre-262) */
+    run_kind: string | null;
     auto_merged: number;
     auto_dismissed: number;
     queued: number;
