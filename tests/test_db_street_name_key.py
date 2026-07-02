@@ -57,3 +57,37 @@ def test_every_bulk_street_write_path_stamps_the_key() -> None:
     assert "street_name_key" in backfill_bazos_street_locality._UPDATE_SQL
     assert "street_name_key" in backfill_address_point_streets._UPDATE_SQL
     assert "street_name_key" in backfill_street_name_key._UPDATE_SQL
+
+
+# ---- resolver street lifecycle (migration 262) -------------------------------
+
+
+def test_update_set_preserves_resolver_trio_if_incoming_null() -> None:
+    """The ingest ON CONFLICT SET must carry street/street_name_key/house_number forward when
+    the incoming value is NULL (COALESCE), or every detail refetch clobbers the RÚIAN
+    resolver's fill back to NULL (measured: 40% of a resolver cohort lost in 2.5 days).
+    Every other column stays plain last-wins."""
+    sql = db._listing_update_set_sql()
+    for col in db._PRESERVE_IF_NULL_COLUMNS:
+        assert f"{col} = COALESCE(EXCLUDED.{col}, listings.{col})" in sql
+    assert "price_czk = EXCLUDED.price_czk" in sql  # non-trio stays last-wins
+    for col in db.LISTING_COLUMNS:  # every column present exactly once
+        assert f"{col} = " in sql
+
+
+def test_batch_upsert_carries_preserve_and_provenance() -> None:
+    """The batched drain upsert shares the SAME builder (no drift between write paths) and
+    stamps street_source: 'parser' when the page yields a street, else the stored provenance
+    is preserved."""
+    assert "street = COALESCE(EXCLUDED.street, listings.street)" in db._BATCH_UPSERT_SQL
+    assert "CASE WHEN j.street IS NOT NULL THEN 'parser' END" in db._BATCH_UPSERT_SQL
+    assert db._STREET_SOURCE_UPDATE_SQL in db._BATCH_UPSERT_SQL
+
+
+def test_resolver_update_stamps_provenance() -> None:
+    """The RÚIAN resolver marks its fills 'resolver' — the durable provenance (the old
+    raw_json marker was destroyed by the next refetch) that the geom-change trigger guard
+    keys off (a moved listing drops a resolver street, never a parser one)."""
+    from scripts import backfill_address_point_streets
+
+    assert "street_source = 'resolver'" in backfill_address_point_streets._UPDATE_SQL

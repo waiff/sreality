@@ -152,6 +152,35 @@ assert set(_LISTING_COLUMN_PGTYPE) == set(LISTING_COLUMNS), (
     "_LISTING_COLUMN_PGTYPE drifted from LISTING_COLUMNS"
 )
 
+# The RÚIAN coord→street resolver (resolve_coord_streets.yml) fills these on rows whose
+# PORTAL page carries no street — so the row's next detail refetch (correctly) re-parses
+# NULL, and a plain `street = EXCLUDED.street` CLOBBERS the resolver's fill back to NULL
+# (measured: 40% of a resolver cohort lost in 2.5 days). These columns carry forward when
+# the incoming value is NULL: a parser that DOES produce a street still wins (fresher,
+# page-sourced), but an incoming NULL never erases a stored value. Safe precisely because
+# the trio is OUT of the content hash (no snapshot churn), a wrong-street risk is guarded
+# upstream (street.reject_as_town) and downstream (the admin-geo trigger NULLs a
+# resolver-sourced street when the listing's coordinates change — migration 262).
+_PRESERVE_IF_NULL_COLUMNS = frozenset({"street", "street_name_key", "house_number"})
+
+# street_source provenance ('parser' | 'resolver', migration 262): a page-parsed street
+# marks 'parser'; a preserved (incoming-NULL) value keeps whatever provenance it had; the
+# resolver stamps 'resolver' in its own UPDATE. The geom-change guard keys off it.
+_STREET_SOURCE_UPDATE_SQL = (
+    "street_source = CASE WHEN EXCLUDED.street IS NOT NULL THEN 'parser' "
+    "ELSE listings.street_source END"
+)
+
+
+def _listing_update_set_sql() -> str:
+    """The ONE ON CONFLICT SET builder shared by upsert_listing and the batched drain
+    upsert, so preserve-if-null semantics can never drift between the two write paths."""
+    return ",\n          ".join(
+        (f"{c} = COALESCE(EXCLUDED.{c}, listings.{c})" if c in _PRESERVE_IF_NULL_COLUMNS
+         else f"{c} = EXCLUDED.{c}")
+        for c in LISTING_COLUMNS
+    )
+
 
 def _set_street_name_key(d: dict[str, Any]) -> None:
     """Derive `street_name_key` from the row's `street`, in place. The single
@@ -413,19 +442,18 @@ def upsert_listing(
     raw_jsonb = Jsonb(raw_json)
     column_list = ", ".join(LISTING_COLUMNS)
     placeholders = ", ".join(f"%({c})s" for c in LISTING_COLUMNS)
-    update_set = ",\n          ".join(
-        f"{c} = EXCLUDED.{c}" for c in LISTING_COLUMNS
-    )
+    update_set = _listing_update_set_sql()
 
     upsert_sql = f"""
         INSERT INTO listings (
             sreality_id, last_seen_at, is_active,
             {column_list},
-            geom, raw_json
+            street_source, geom, raw_json
         )
         VALUES (
             %(sreality_id)s, now(), true,
             {placeholders},
+            CASE WHEN %(street)s::text IS NOT NULL THEN 'parser' END,
             CASE
               -- Cast to double precision so a NULL lon/lat (common for bazos and
               -- other portals; rare for sreality) carries a concrete type. Without
@@ -447,6 +475,7 @@ def upsert_listing(
           is_active = true,
           inactive_at = NULL,
           {update_set},
+          {_STREET_SOURCE_UPDATE_SQL},
           geom = EXCLUDED.geom,
           raw_json = EXCLUDED.raw_json
         RETURNING xmax = 0 AS inserted
@@ -1775,19 +1804,20 @@ _BATCH_RECORD_SPEC = ", ".join(
     f"{c} {_LISTING_COLUMN_PGTYPE[c]}" for c in LISTING_COLUMNS
 )
 _BATCH_SELECT_COLS = ", ".join(f"j.{c}" for c in LISTING_COLUMNS)
-_BATCH_UPDATE_SET = ",\n          ".join(
-    f"{c} = EXCLUDED.{c}" for c in LISTING_COLUMNS
-)
+# One shared builder with upsert_listing — preserve-if-null for the resolver street trio
+# (see _PRESERVE_IF_NULL_COLUMNS) applies identically to both write paths.
+_BATCH_UPDATE_SET = _listing_update_set_sql()
 
 _BATCH_UPSERT_SQL = f"""
     INSERT INTO listings (
         sreality_id, last_seen_at, is_active,
         {", ".join(LISTING_COLUMNS)},
-        geom, raw_json
+        street_source, geom, raw_json
     )
     SELECT
         j.sreality_id, now(), true,
         {_BATCH_SELECT_COLS},
+        CASE WHEN j.street IS NOT NULL THEN 'parser' END,
         CASE
           WHEN j.lon IS NOT NULL AND j.lat IS NOT NULL
           THEN ST_SetSRID(ST_MakePoint(j.lon, j.lat), 4326)::geography
@@ -1803,6 +1833,7 @@ _BATCH_UPSERT_SQL = f"""
       is_active = true,
       inactive_at = NULL,
       {_BATCH_UPDATE_SET},
+      {_STREET_SOURCE_UPDATE_SQL},
       geom = EXCLUDED.geom,
       raw_json = EXCLUDED.raw_json
     RETURNING (xmax = 0) AS inserted

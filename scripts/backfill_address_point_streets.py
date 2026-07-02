@@ -144,6 +144,7 @@ _UPDATE_SQL = """
     SET street = d.street,
         street_name_key = d.street_name_key,
         house_number = COALESCE(l.house_number, d.house_number),
+        street_source = 'resolver',
         coord_street_attempt_version = %(version)s,
         raw_json = l.raw_json || '{"coord_street_resolved": true}'::jsonb
     FROM (SELECT * FROM unnest(%(ids)s::bigint[], %(streets)s::text[],
