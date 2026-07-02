@@ -2067,7 +2067,13 @@ def enqueue_detail(
 
     Idempotent on (source, native_id): re-seeing an id refreshes its observed
     price + detail_ref and raises its priority (GREATEST), but never disturbs a
-    row a drain has already claimed. Chunked to stay under the pooler timeout.
+    row a drain has already claimed. The original enqueued_at is deliberately
+    KEPT on re-enqueue: the claim order is (priority DESC, enqueued_at ASC), so
+    re-stamping now() pushed every still-queued row behind the walk's fresh
+    inserts each run — a backlog bigger than one drain's budget then starved its
+    tail forever (remax rent listings cycled unfetched for weeks) and the Health
+    queue-age metrics under-reported the wait. Chunked to stay under the pooler
+    timeout.
     """
     rows = list(entries)
     if not rows:
@@ -2095,8 +2101,7 @@ def enqueue_detail(
                 ON CONFLICT (source, native_id) DO UPDATE SET
                     detail_ref      = EXCLUDED.detail_ref,
                     index_price_czk = EXCLUDED.index_price_czk,
-                    priority = GREATEST(listing_detail_queue.priority, EXCLUDED.priority),
-                    enqueued_at     = now()
+                    priority = GREATEST(listing_detail_queue.priority, EXCLUDED.priority)
                 WHERE listing_detail_queue.claimed_at IS NULL
                 """,
                 {"source": source, "nids": native_ids, "refs": refs,
