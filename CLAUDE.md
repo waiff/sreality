@@ -1873,7 +1873,7 @@ it rather than duplicating a list here.
   `recompute_property_stats` — so a multi-portal property matches a street even when its representative
   listing lacks one. (The old expand-normalizer `toolkit/addresses.py` that turned `ul.`→`ulice` was
   dead code and was removed.)
-- **Street lifecycle: resolver fills survive refetches (migration 262).** The RÚIAN coord→street
+- **Street lifecycle: resolver fills survive refetches (migration 263).** The RÚIAN coord→street
   resolver fills `street`/`street_name_key`/`house_number` on rows whose portal page has no street —
   so the row's next detail refetch re-parses NULL, and a plain `street = EXCLUDED.street` used to
   CLOBBER the fill (measured: 40% of a resolver cohort lost in 2.5 days). Three rails now:
