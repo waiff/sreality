@@ -2850,6 +2850,17 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
           "false",
           "true"
         ]
+      },
+      {
+        "name": "force_rescan",
+        "description": "Re-attempt rows already stamped at the current revision (recovery pass)",
+        "required": false,
+        "type": "choice",
+        "default": "false",
+        "options": [
+          "false",
+          "true"
+        ]
       }
     ],
     "secrets": [
