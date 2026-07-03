@@ -1615,11 +1615,11 @@ def _run_image_downloads(
                     image_id = future_to_id[future]
                     sid = sid_by_image[image_id]
                     host = host_by_image[image_id]
-                    key, error = future.result()
+                    key, phash, error = future.result()
                     counts["attempted"] += 1
 
                     if error is None:
-                        db.mark_image_stored(conn, image_id, key)
+                        db.mark_image_stored(conn, image_id, key, phash=phash)
                         counts["downloaded"] += 1
                         host_windows[host].append("ok")
                         cat_key = cat_lookup.get(image_id, (None, None))
@@ -1821,14 +1821,32 @@ def client_freshness_check(conn: Any, client: "Any", sreality_id: int) -> str:
     return result["outcome"]
 
 
+def _phash_or_none(data: bytes) -> int | None:
+    """Best-effort inline dHash of bytes already in hand (realtime Wave C-4).
+
+    Computing here deletes the hourly re-download hop for the common case; the
+    guard is absolute — undecodable bytes (or a missing Pillow) return None so
+    the store still succeeds with phash NULL, and scripts/compute_image_phash
+    remains the backfill/backstop. Lazy import: Pillow is a scraper-runtime
+    dependency, not an import-time requirement of this module.
+    """
+    try:
+        from scraper.image_phash import compute_dhash, to_signed64
+
+        return to_signed64(compute_dhash(data))
+    except Exception:  # noqa: BLE001 - a pHash failure must never fail the store
+        return None
+
+
 def _fetch_one_image(
     sreality_id: int,
     sequence: int | None,
     url: str,
     r2: image_storage.R2Client,
     semaphore: "threading.BoundedSemaphore | None" = None,
-) -> tuple[str, Exception | None]:
-    """Worker: download from the portal CDN, validate, upload to R2. Returns (key, error).
+) -> tuple[str, int | None, Exception | None]:
+    """Worker: download from the portal CDN, validate, upload to R2.
+    Returns (key, phash, error).
 
     The byte-level guard (after the URL-level filter at ingest) is what keeps a
     non-image — a video served under an image URL, an HTML error page — from being
@@ -1853,9 +1871,9 @@ def _fetch_one_image(
                 f"downloaded {len(data)} bytes are not a recognised image"
             )
         r2.upload_bytes(key, data, content_type=content_type)
-        return (key, None)
+        return (key, _phash_or_none(data), None)
     except Exception as exc:
-        return (key, exc)
+        return (key, None, exc)
 
 
 def _run_condition_scoring(max_scores: int) -> None:
