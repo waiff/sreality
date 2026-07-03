@@ -564,7 +564,7 @@ def test_match_once_uses_per_subscription_cursor() -> None:
     upper_ts = datetime(2026, 5, 15, 21, 0, 0, tzinfo=timezone.utc)
 
     script: list[tuple[Any, list[tuple[Any, ...]], int]] = [
-        # app_settings reads for interval / window — default both.
+        # app_settings reads for interval / window / image gate — default all.
         (lambda s: "FROM app_settings" in s, [], 0),
         # Active subscriptions query
         (
@@ -574,7 +574,14 @@ def test_match_once_uses_per_subscription_cursor() -> None:
         ),
         # Window upper-bound query
         (lambda s: "SELECT max(first_seen_at), count(*) FROM" in s, [(upper_ts, 5)], 0),
-        # INSERT dispatches — return rowcount 3 (idempotent dedup)
+        # Gate-pending lookback INSERT (default-on gate) — nothing released.
+        (
+            lambda s: "INSERT INTO notification_dispatches" in s
+            and "image_lookback_minutes" in s,
+            [],
+            0,
+        ),
+        # Window INSERT dispatches — return rowcount 3 (idempotent dedup)
         (lambda s: "INSERT INTO notification_dispatches" in s, [], 3),
         # Cursor advance UPDATE — rowcount 1
         (lambda s: "UPDATE notification_subscriptions SET last_matched_first_seen_at" in s, [], 1),
@@ -586,6 +593,7 @@ def test_match_once_uses_per_subscription_cursor() -> None:
     assert stats == {
         "subscriptions_evaluated": 1,
         "matches_inserted": 3,
+        "gate_lookback_inserted": 0,
         "listings_in_window": 5,
         "cursors_advanced": 1,
     }
@@ -752,12 +760,16 @@ def test_mark_all_seen_scoped_filters_by_source() -> None:
 def test_match_once_skips_subscription_with_no_listings() -> None:
     """An empty window (no listings past the cursor) is the steady
     state. The matcher should record zero dispatches and zero cursor
-    advances rather than blow up trying to UPDATE with a NULL value."""
+    advances rather than blow up trying to UPDATE with a NULL value.
+    (Image gate scripted OFF — the gate's empty-window lookback re-scan
+    has its own test below.)"""
     sub_id = UUID("00000000-0000-0000-0000-000000000001")
     cursor_ts = datetime(2030, 1, 1, tzinfo=timezone.utc)
 
     script: list[tuple[Any, list[tuple[Any, ...]], int]] = [
-        (lambda s: "FROM app_settings" in s, [], 0),
+        # Every app_settings read returns false-y: interval/window fall back to
+        # their floors and the image-gate flag reads False (gate off).
+        (lambda s: "FROM app_settings" in s, [(False,)], 0),
         (
             lambda s: "FROM notification_subscriptions WHERE is_active" in s,
             [(sub_id, {}, cursor_ts, [])],
@@ -801,6 +813,12 @@ def test_match_once_skips_invalid_filter_spec() -> None:
             2,
         ),
         (lambda s: "SELECT max(first_seen_at), count(*) FROM" in s, [(upper_ts, 1)], 0),
+        (
+            lambda s: "INSERT INTO notification_dispatches" in s
+            and "image_lookback_minutes" in s,
+            [],
+            0,
+        ),
         (lambda s: "INSERT INTO notification_dispatches" in s, [], 1),
         (lambda s: "UPDATE notification_subscriptions SET last_matched_first_seen_at" in s, [], 1),
     ]
@@ -812,6 +830,185 @@ def test_match_once_skips_invalid_filter_spec() -> None:
     # and skipped, but the surviving one fired one dispatch.
     assert stats["subscriptions_evaluated"] == 2
     assert stats["matches_inserted"] == 1
+
+
+# --- images-first publication gate (Wave C-4) ----------------------------
+
+
+from api.notifications import (
+    IMAGE_GATE_ZERO_ROWS_FLOOR_MINUTES,
+    ImageGateSettings,
+    _read_bool_setting,
+)
+
+
+def _gate_script(
+    sub_id: UUID, cursor_ts: datetime, upper: tuple[Any, Any],
+) -> list[tuple[Any, list[tuple[Any, ...]], int]]:
+    return [
+        # app_settings all default → gate ON (default true), timeout 30.
+        (lambda s: "FROM app_settings" in s, [], 0),
+        (
+            lambda s: "FROM notification_subscriptions WHERE is_active" in s,
+            [(sub_id, {}, cursor_ts, [])],
+            1,
+        ),
+        (lambda s: "SELECT max(first_seen_at), count(*) FROM" in s, [upper], 0),
+        (
+            lambda s: "INSERT INTO notification_dispatches" in s
+            and "image_lookback_minutes" in s,
+            [],
+            1,
+        ),
+        (lambda s: "INSERT INTO notification_dispatches" in s, [], 0),
+        (lambda s: "UPDATE notification_subscriptions SET last_matched_first_seen_at" in s, [], 1),
+    ]
+
+
+def test_match_once_image_gate_holds_new_properties_without_losing_them() -> None:
+    """Default-on gate: the window INSERT requires a stored image (or a release
+    arm), the CURSOR still advances past held properties (the window/upper query
+    carries NO gate — one photoless CDN can't stall the feed), and the
+    gate-pending lookback re-scan re-considers already-passed properties so a
+    held property is dispatched once released — never lost."""
+    sub_id = UUID("00000000-0000-0000-0000-00000000000a")
+    cursor_ts = datetime(2026, 7, 1, tzinfo=timezone.utc)
+    upper_ts = datetime(2026, 7, 2, tzinfo=timezone.utc)
+
+    conn = _FakeConn(_gate_script(sub_id, cursor_ts, (upper_ts, 2)))
+    stats = match_once(conn)  # type: ignore[arg-type]
+
+    # Phase 1 (window upper / cursor advance) is gate-free by design.
+    window_sql, _ = next(
+        (sql, p) for sql, p in conn.executed
+        if "max(first_seen_at), count(*)" in sql
+    )
+    assert "storage_path" not in window_sql
+
+    inserts = [
+        (sql, p) for sql, p in conn.executed
+        if "INSERT INTO notification_dispatches" in sql
+    ]
+    assert len(inserts) == 2  # window insert + lookback re-scan
+
+    window_insert_sql, window_params = inserts[0]
+    assert "image_lookback_minutes" not in window_insert_sql
+    # The three release arms, set-based inside the INSERT's WHERE:
+    assert "gi.storage_path IS NOT NULL" in window_insert_sql            # (a)
+    assert (
+        "make_interval(mins => %(image_timeout_minutes)s)"
+        in window_insert_sql
+    )                                                                     # (b)
+    assert "make_interval(mins => %(image_zero_rows_floor_minutes)s)" in window_insert_sql
+    assert "AND NOT EXISTS" in window_insert_sql                          # (c)
+    assert window_params["image_timeout_minutes"] == 30
+    assert (
+        window_params["image_zero_rows_floor_minutes"]
+        == IMAGE_GATE_ZERO_ROWS_FLOOR_MINUTES
+    )
+
+    lookback_sql, lookback_params = inserts[1]
+    # Re-scan targets properties the cursor already passed, bounded by the
+    # lookback window, under the same gate; dedupe_key keeps it idempotent.
+    assert "l.first_seen_at <= %(cursor)s" in lookback_sql
+    assert "make_interval(mins => %(image_lookback_minutes)s)" in lookback_sql
+    assert "gi.storage_path IS NOT NULL" in lookback_sql
+    assert "ON CONFLICT (dedupe_key) DO NOTHING" in lookback_sql
+    assert lookback_params["image_lookback_minutes"] == 60  # max(60, 2×30)
+
+    # Cursor advanced past the (possibly held) window — the lookback re-scan is
+    # what keeps held properties reachable, not a stalled cursor.
+    assert any(
+        "UPDATE notification_subscriptions SET last_matched_first_seen_at" in sql
+        for sql, _ in conn.executed
+    )
+    assert stats["cursors_advanced"] == 1
+    assert stats["matches_inserted"] == 1       # the released lookback property
+    assert stats["gate_lookback_inserted"] == 1
+
+
+def test_match_once_gate_lookback_runs_even_when_window_is_empty() -> None:
+    """A held property must not be stranded waiting for unrelated new
+    inventory: with NO fresh listings past the cursor (upper NULL) the
+    gate-pending lookback INSERT still runs — that's how a gated property gets
+    dispatched after its images land even on a quiet market."""
+    sub_id = UUID("00000000-0000-0000-0000-00000000000b")
+    cursor_ts = datetime(2026, 7, 1, tzinfo=timezone.utc)
+
+    conn = _FakeConn(_gate_script(sub_id, cursor_ts, (None, 0)))
+    stats = match_once(conn)  # type: ignore[arg-type]
+
+    inserts = [
+        sql for sql, _ in conn.executed
+        if "INSERT INTO notification_dispatches" in sql
+    ]
+    assert len(inserts) == 1
+    assert "image_lookback_minutes" in inserts[0]
+    # No window → no cursor advance (unchanged), but the release still fired.
+    assert not any(
+        "UPDATE notification_subscriptions" in sql for sql, _ in conn.executed
+    )
+    assert stats["cursors_advanced"] == 0
+    assert stats["matches_inserted"] == 1
+    assert stats["gate_lookback_inserted"] == 1
+
+
+def test_match_once_gate_flag_off_restores_old_behavior() -> None:
+    """`notifications_new_requires_image` = false → exactly one ungated window
+    INSERT, no lookback re-scan, no gate SQL anywhere."""
+    sub_id = UUID("00000000-0000-0000-0000-00000000000c")
+    cursor_ts = datetime(2026, 7, 1, tzinfo=timezone.utc)
+    upper_ts = datetime(2026, 7, 2, tzinfo=timezone.utc)
+
+    script: list[tuple[Any, list[tuple[Any, ...]], int]] = [
+        # Every app_settings read returns false-y → the gate flag reads False.
+        (lambda s: "FROM app_settings" in s, [(False,)], 0),
+        (
+            lambda s: "FROM notification_subscriptions WHERE is_active" in s,
+            [(sub_id, {}, cursor_ts, [])],
+            1,
+        ),
+        (lambda s: "SELECT max(first_seen_at), count(*) FROM" in s, [(upper_ts, 2)], 0),
+        (lambda s: "INSERT INTO notification_dispatches" in s, [], 2),
+        (lambda s: "UPDATE notification_subscriptions SET last_matched_first_seen_at" in s, [], 1),
+    ]
+    conn = _FakeConn(script)
+    stats = match_once(conn)  # type: ignore[arg-type]
+
+    inserts = [
+        sql for sql, _ in conn.executed
+        if "INSERT INTO notification_dispatches" in sql
+    ]
+    assert len(inserts) == 1
+    assert "storage_path" not in inserts[0]
+    assert "image_lookback_minutes" not in inserts[0]
+    assert stats["matches_inserted"] == 2
+    assert stats["gate_lookback_inserted"] == 0
+    assert stats["cursors_advanced"] == 1
+
+
+def test_image_gate_lookback_always_covers_the_timeout() -> None:
+    """The re-scan window must exceed the longest possible hold, or a property
+    gated the whole way would leave the lookback before its release."""
+    assert ImageGateSettings(True, 30).lookback_minutes == 60
+    assert ImageGateSettings(True, 45).lookback_minutes == 90
+    assert ImageGateSettings(True, 120).lookback_minutes == 240
+    assert ImageGateSettings(True, 5).lookback_minutes == 60  # floor
+
+
+def test_read_bool_setting_parses_jsonb_shapes() -> None:
+    def read(rows: list[tuple[Any, ...]], default: bool = True) -> bool:
+        conn = _FakeConn([(lambda s: "FROM app_settings" in s, rows, 0)])
+        return _read_bool_setting(conn, "k", default=default)  # type: ignore[arg-type]
+
+    assert read([], default=True) is True         # absent → default
+    assert read([], default=False) is False
+    assert read([(True,)]) is True
+    assert read([(False,)]) is False
+    assert read([("false",)]) is False
+    assert read([("TRUE",)]) is True
+    assert read([(0,)]) is False
+    assert read([(1,)]) is True
 
 
 # --- match_changes_once (the property-change matcher, Slice 2b) ----------

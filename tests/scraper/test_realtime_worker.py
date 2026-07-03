@@ -261,6 +261,80 @@ def test_drain_pass_slice_zero_skips_entirely(monkeypatch):
     assert "drain" not in state["lanes"]
 
 
+# --- images pass -----------------------------------------------------------------
+
+
+def _images_agg(**over: Any) -> dict[str, Any]:
+    agg = {"images_stored": 4, "by_category": {}, "stopped_suspicious": False}
+    agg.update(over)
+    return agg
+
+
+def test_images_pass_runs_capped_active_only_download(monkeypatch):
+    monkeypatch.setattr(rw, "_read_images_slice", lambda: 123)
+    monkeypatch.setattr(rw.image_storage, "is_configured", lambda: True)
+    ran: list[int] = []
+    monkeypatch.setattr(
+        rw, "_run_images_sync", lambda cap: ran.append(cap) or _images_agg())
+    state = rw._new_state()
+    asyncio.run(rw._images_pass(asyncio.Event(), state))
+    assert ran == [123]
+    images = state["lanes"]["images"]
+    assert images["passes"] == 1
+    assert images["last"] == {
+        "downloaded": 4, "stopped_suspicious": False, "cap": 123,
+    }
+
+
+def test_images_pass_slice_zero_skips_entirely(monkeypatch):
+    monkeypatch.setattr(rw, "_read_images_slice", lambda: 0)
+    monkeypatch.setattr(rw.image_storage, "is_configured", lambda: pytest.fail(
+        "slice<=0 must skip the pass before touching R2 config"))
+    state = rw._new_state()
+    asyncio.run(rw._images_pass(asyncio.Event(), state))
+    assert "images" not in state["lanes"]
+
+
+def test_images_pass_without_r2_logs_once_and_idles(monkeypatch, caplog):
+    """No R2 env vars → the lane idles (never calls the downloader), records a
+    skipped heartbeat pass, and warns exactly once per process — the proxy-skip
+    posture."""
+    monkeypatch.setattr(rw, "_read_images_slice", lambda: 500)
+    monkeypatch.setattr(rw.image_storage, "is_configured", lambda: False)
+    monkeypatch.setattr(rw, "_R2_WARNED", set())
+    monkeypatch.setattr(rw, "_run_images_sync", lambda cap: pytest.fail(
+        "downloader must not run without R2 config"))
+    state = rw._new_state()
+
+    with caplog.at_level("WARNING", logger="scraper.realtime_worker"):
+        asyncio.run(rw._images_pass(asyncio.Event(), state))
+        asyncio.run(rw._images_pass(asyncio.Event(), state))
+
+    images = state["lanes"]["images"]
+    assert images["passes"] == 2
+    assert images["last"] == {"downloaded": 0, "skipped_no_r2": True}
+    warnings = [r for r in caplog.records if "R2 env vars unset" in r.message]
+    assert len(warnings) == 1
+
+
+def test_run_images_sync_reuses_main_machinery_active_only(monkeypatch):
+    from scraper import main as scraper_main
+
+    seen: dict[str, Any] = {}
+
+    def fake_run(max_downloads, workers, active_only=False, **kw):
+        seen.update(
+            max_downloads=max_downloads, workers=workers, active_only=active_only,
+        )
+        return _images_agg()
+
+    monkeypatch.setattr(scraper_main, "_run_image_downloads", fake_run)
+    assert rw._run_images_sync(250)["images_stored"] == 4
+    assert seen == {
+        "max_downloads": 250, "workers": rw.IMAGES_WORKERS, "active_only": True,
+    }
+
+
 # --- heartbeat -----------------------------------------------------------------
 
 

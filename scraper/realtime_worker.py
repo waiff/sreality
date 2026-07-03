@@ -2,7 +2,7 @@
 
 A SECOND Railway service from the same Docker image (start command
 `python -m scraper.realtime_worker`) that replaces cron quantization for the
-latency-critical path. Three settings-paced asyncio lanes (the proven
+latency-critical path. Four settings-paced asyncio lanes (the proven
 matcher/outbox pattern from api/notifications + api/notification_outbox):
 
 - probe:     every `realtime_probe_interval_seconds` (default 180), run the
@@ -13,9 +13,18 @@ matcher/outbox pattern from api/notifications + api/notification_outbox):
              bounded slice of the shared listing_detail_queue per source that
              has claimable rows. SKIP LOCKED makes this safe beside the GitHub
              Actions drains by construction.
+- images:    every `realtime_images_interval_seconds` (default 60), drain a
+             `realtime_images_slice`-capped slice (default 500) of pending
+             image downloads via the one existing machinery
+             (scraper.main._run_image_downloads: per-host semaphore + breaker,
+             active-only newest-first) — the latency lever that feeds the
+             images-first publication gate in api/notifications. Coexists with
+             images_fresh.yml (idempotent storage_path-IS-NULL selection);
+             without R2 env vars the lane logs once and idles (the proxy-skip
+             posture).
 - heartbeat: every 30s, upsert this worker's beat + per-lane counters into
              worker_heartbeats (migration 269) — the Health-page liveness hook
-             and where future lanes (images, dedup wake) will report.
+             and where future lanes (dedup wake) will report.
 
 SHIPS DARK: the process exits immediately unless env REALTIME_WORKER_ENABLED=1,
 so merging changes nothing until the operator creates the Railway service.
@@ -41,7 +50,7 @@ from typing import Any
 
 from psycopg.types.json import Jsonb
 
-from scraper import db, portal_runner
+from scraper import db, image_storage, portal_runner
 from scraper.portal import PortalConfig, default_config, load_portal_config
 
 LOG = logging.getLogger("scraper.realtime_worker")
@@ -54,6 +63,11 @@ PROBE_INTERVAL_DEFAULT = 180
 DRAIN_INTERVAL_DEFAULT = 30
 DRAIN_SLICE_DEFAULT = 200
 DRAIN_MAX_SECONDS = 120.0
+IMAGES_INTERVAL_DEFAULT = 60
+IMAGES_SLICE_DEFAULT = 500
+# Modest beside the Actions lanes' 32: the worker slice is small and the lane
+# shares the CDNs with images_fresh.yml.
+IMAGES_WORKERS = 8
 HEARTBEAT_INTERVAL_SECONDS = 30.0
 IDLE_WAIT_SECONDS = 60.0
 LANE_RESTART_SECONDS = 30.0
@@ -88,6 +102,9 @@ _CLIENT_CLASSES: dict[str, tuple[str, str]] = {
 
 # log-once-per-process guard for proxied portals skipped without SCRAPER_PROXY_URL.
 _PROXY_WARNED: set[str] = set()
+
+# log-once-per-process guard when R2 env vars are absent on the worker.
+_R2_WARNED: set[str] = set()
 
 
 # --- settings (read per pass so operator edits take effect without restart) ---
@@ -125,6 +142,14 @@ def _read_drain_interval() -> int:
 
 def _read_drain_slice() -> int:
     return _read_int("realtime_drain_slice", DRAIN_SLICE_DEFAULT)
+
+
+def _read_images_interval() -> int:
+    return _read_int("realtime_images_interval_seconds", IMAGES_INTERVAL_DEFAULT)
+
+
+def _read_images_slice() -> int:
+    return _read_int("realtime_images_slice", IMAGES_SLICE_DEFAULT)
 
 
 def _read_disabled_sources() -> set[str]:
@@ -315,6 +340,47 @@ async def _drain_pass(stop_event: asyncio.Event, state: dict[str, Any]) -> None:
     _record_pass(state, "drain", totals)
 
 
+def _run_images_sync(max_downloads: int) -> dict[str, Any]:
+    # Reuse THE image machinery (per-host semaphore, breaker, active-only +
+    # newest-first via db.pending_image_downloads) — never fork it. Lazy import
+    # keeps scraper.main off the worker's startup path.
+    from scraper.main import _run_image_downloads
+
+    return _run_image_downloads(max_downloads, IMAGES_WORKERS, active_only=True)
+
+
+async def _images_pass(stop_event: asyncio.Event, state: dict[str, Any]) -> None:
+    slice_ = IMAGES_SLICE_DEFAULT
+    try:
+        slice_ = await asyncio.to_thread(_read_images_slice)
+    except Exception as exc:  # noqa: BLE001
+        LOG.warning("images lane: failed to read slice: %s", exc)
+    if slice_ <= 0:
+        LOG.debug("images lane: slice<=0; skipping pass")
+        return
+    if not image_storage.is_configured():
+        # Same posture as the proxy skip: log once and idle. The Actions image
+        # lanes keep draining; setting the R2 vars enables this lane live.
+        if "r2" not in _R2_WARNED:
+            _R2_WARNED.add("r2")
+            LOG.warning("R2 env vars unset; images lane idling")
+        _record_pass(state, "images", {"downloaded": 0, "skipped_no_r2": True})
+        return
+    if stop_event.is_set():
+        return
+    agg = await asyncio.to_thread(_run_images_sync, slice_)
+    totals = {
+        "downloaded": agg.get("images_stored", 0),
+        "stopped_suspicious": bool(agg.get("stopped_suspicious", False)),
+        "cap": slice_,
+    }
+    LOG.info(
+        "IMAGES lane downloaded=%d cap=%d stopped_suspicious=%s",
+        totals["downloaded"], slice_, totals["stopped_suspicious"],
+    )
+    _record_pass(state, "images", totals)
+
+
 _HEARTBEAT_SQL = """
     INSERT INTO worker_heartbeats (worker, beat_at, started_at, details)
     VALUES (%(worker)s, now(), %(started_at)s, %(details)s)
@@ -436,6 +502,10 @@ async def _amain() -> int:
             "drain", stop_event, _read_drain_interval,
             lambda: _drain_pass(stop_event, state),
             default_interval=DRAIN_INTERVAL_DEFAULT)),
+        ("images", lambda: _lane_loop(
+            "images", stop_event, _read_images_interval,
+            lambda: _images_pass(stop_event, state),
+            default_interval=IMAGES_INTERVAL_DEFAULT)),
         ("heartbeat", lambda: _lane_loop(
             "heartbeat", stop_event, lambda: HEARTBEAT_INTERVAL_SECONDS,
             lambda: _heartbeat_pass(state),

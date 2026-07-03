@@ -1446,17 +1446,22 @@ def mark_image_stored(
     conn: psycopg.Connection,
     image_id: int,
     storage_path: str,
+    phash: int | None = None,
 ) -> None:
+    """`phash` rides the same statement as `storage_path` (computed inline on
+    the bytes already in hand — Wave C-4); None preserves any existing hash so
+    the hourly compute_image_phash backfill stays the backstop."""
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(
             """
             UPDATE images
             SET storage_path = %s,
+                phash = COALESCE(%s, phash),
                 last_download_attempt_at = now(),
                 download_attempts = download_attempts + 1
             WHERE id = %s
             """,
-            (storage_path, image_id),
+            (storage_path, phash, image_id),
         )
 
 
