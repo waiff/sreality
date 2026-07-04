@@ -1,1910 +1,254 @@
 # CLAUDE.md
 
-The project brain: standing context for any Claude Code session that touches this
-repo. Read it before changing anything. When a rule here keeps getting broken, the
-fix is to update this file — not to repeat the correction by hand.
+**The project brain** — standing context for any session that touches this repo. This file
+holds the hard rules only; the WHY (full rationale, edge cases, incident history) lives in
+`docs/architecture.md`, and operational how-tos live in on-demand skills under
+`.claude/skills/`. Read the relevant one before changing code it governs. When a rule here
+keeps getting broken, fix it here — don't repeat the correction by hand.
 
 ## What this project is
 
-A **market-wide real-estate intelligence platform** for the Czech market. It began
-as an hourly sreality.cz scraper and has grown into a system that collects, enriches,
-and reasons over property data from multiple portals. The store of record is a
-Postgres database (Supabase, Frankfurt region, PostGIS enabled) with full listing
-history.
+A **market-wide real-estate intelligence platform** for the Czech market. It began as an
+hourly sreality.cz scraper and now collects, enriches, and reasons over property data from
+**seven portals**. Store of record: Postgres (Supabase, Frankfurt, PostGIS) with full
+listing history.
 
-It works with several kinds of data, layered together:
-- **Scraped listings** from a growing set of portals. sreality.cz (public JSON v1 API)
-  is the steady hourly ingest; bazos.cz (HTML crawler) and bezrealitky.cz (public GraphQL
-  API) are scheduled 6-hourly pilots, with more portals rolling out per
-  `docs/design/multi-portal-dedup.md`.
-- **Geo data** — coordinates, districts, ČÚZK/RÚIAN admin boundaries, transit-route
-  geometry, OSM amenities.
-- **Operator-supplied data** — curated city-quality indexes, collections, building
-  unit decompositions, estimation inputs.
-- **Derived / computed data** — condition scores, time-on-market velocity,
-  statistics, and LLM-produced summaries, image comparisons, and value estimates.
+Data layered together:
+- **Scraped listings** from seven portals — **sreality** (JSON v1 API, the steady hourly
+  ingest), **bazos** (HTML crawler), **bezrealitky** (GraphQL API), **idnes** (structured
+  HTML), **mmreality** (Vue-embedded JSON, proxied), **remax** (structured HTML), and
+  **ceskereality** (structured HTML) — landing in one `listings`/`listing_snapshots`
+  contract with one canonical vocabulary. Per-portal ingest detail: `docs/architecture.md`
+  § Data sources.
+- **Geo data** — coordinates, districts, ČÚZK/RÚIAN admin boundaries, transit geometry, OSM amenities.
+- **Operator-supplied** — curated city-quality indexes, collections, building decompositions, estimation inputs.
+- **Derived** — condition scores, velocity, statistics, LLM summaries / comparisons / value estimates.
 
-Two goals sit on top of that data:
-1. **Robust, polite scraping** that preserves history — latest-wins current state plus
-   append-only snapshots; nothing is ever deleted.
-2. **Letting the user *and* autonomous AI agents work with the data many ways** —
-   filter through a large filter set or on a map, layer different views on the map,
-   see statistics for regions / properties / property types, estimate sale and rental
-   values, browse, run watchdog alerts on any saved filter, and more. The list keeps
-   developing — ROADMAP.md is the sequencing source of truth for what's next.
+Two goals: (1) **robust, polite scraping** that preserves history (latest-wins current state
++ append-only snapshots; nothing is ever deleted); (2) **let the operator and AI agents work
+the data many ways** — filter through a large filter set or on a map, layer map views, see
+region/property/type statistics, estimate sale & rental value, browse, run watchdog alerts on
+any saved filter, and more (ROADMAP.md is the sequencing source of truth).
 
-Surfaces over this data: an analytical **toolkit + FastAPI service** (Railway), a
-**React browser UI** (Railway, separate service — reads public data directly and
-routes every write through the API), and a **Chrome extension** that overlays
-estimates on portal listing pages. Multi-portal rows land behind a thin `properties`
-parent (migration 091) so the same real-world property seen on several portals can be
-grouped.
-
-**Data source (sreality v1 API).** In 2026 sreality rebuilt their site on Next.js and
-removed the old `/api/cs/v2/estates` API the scraper was born on. The scraper now
-reads the public JSON v1 API: `GET /api/v1/estates/search` (filters `category_main_cb`
-/ `category_type_cb` / `locality_country_id=112`, **offset/limit** paging,
-`pagination.total` for completeness) for the index, and `GET /api/v1/estates/{id}` for
-detail (a `{categoryMainCb, locality, params{…}, images, price…}` object; `params`
-holds the typed attributes). No cookies needed. The deep-pagination cap still applies
-(HTTP 422 past the window), so large categories are walked per-district
-(`SPLIT_THRESHOLD` / `DISTRICT_IDS`). `parser.parse_listing` maps that object to the
-row contract; `scraper/hashing.py` strips the volatile fields (`params.stats` view
-counter, `note`/`rus`/`rusReply`).
-
-**Data source (bazos.cz).** A separate HTML crawler (`scraper/bazos_client.py`,
-`bazos_parser.py`, `bazos_main.py`) lands bazos listings into the same
-`listings`/`listing_snapshots` contract, tagged `source='bazos'`. It walks 14 nationwide
-scopes (byt/dum/chata/restaurace/kancelar/prostory/sklad × prodam/pronajmu), so — like
-sreality/idnes (rule #19) — it is **cadence-split**: `bazos_index_walk.yml` (every 6h, full
-walk + mark_inactive + enqueue) feeds the bounded `bazos_detail_drain.yml` (hourly,
-`--max-seconds` budget). A combined run can't do both inside one job (~1500 index pages ≈
-50 min eats the window, starving the drain); narrow ad-hoc runs go through the split
-workflows' dispatch inputs (`-f sale_type=… -f category=…`, or locality + radius) or
-`scraper.bazos_main` locally. **Detail-page** raw HTML is staged in `portal_raw_pages`
-(migration 099) before parsing (the parsed-state ledger + reparse-without-refetch capability); INDEX/search-page
-HTML is NOT staged — it was write-only dead weight (nothing reads `page_kind='index'`) and the per-page TOAST
-write was the dominant cost on slow HTML index walks, so all HTML portals (bazos/idnes/mmreality/remax/maxima)
-skip it. Coordinates come from the detail page's embedded Google-Maps/Mapy.cz link
-(page-wide, CZ-bbox-guarded); they are what lets cross-source dedup match bazos against
-sreality.
-
-**Data source (bezrealitky.cz).** A scheduled scraper (`scraper/bezrealitky_client.py`,
-`bezrealitky_parser.py`, `bezrealitky_main.py`, workflow `scrape_bezrealitky.yml` — pilot,
-every 6h) tagged `source='bezrealitky'`. Bezrealitky is a JSON-API portal like sreality
-(not an HTML crawler): it reads the public GraphQL API at `api.bezrealitky.cz/graphql/`
-(`listAdverts` for the index — offset/limit paging, `totalCount` for completeness,
-`includeImports:false` to scope to bezrealitky's OWN private-seller inventory — and
-`advert(id)` for detail). The API requires browser-like `Origin`/`Referer` headers; no
-cookies. `bezrealitky_parser.parse_advert` maps the advert object onto the shared
-`ScrapedListing` contract, translating bezrealitky's enums into the SAME canonical label
-strings sreality stores (`po_rekonstrukci`, `cihla`, `celkem`/`měsíc`, `2+kk`, …) so
-cross-source filtering/dedup/condition-scoring see one vocabulary. Coordinates come from
-the API's `gps` field (precise, per-listing — no geocoding step). Because the detail JSON
-carries `offerType`/`estateType`, the drain derives each listing's category from the
-response, so one config walks many categories (no per-category queue encoding).
-`listAdverts` has a `totalCount` and no deep-pagination cap, so a per-category walk is
-provable-complete: unlike bazos, bezrealitky is complete-walk capable and the runner marks
-delisted listings inactive under the completeness guard (source-scoped). NOTE: bezrealitky
-also has an on-demand URL parser (`scraper/source_parsers/bezrealitky.py`, LLM) used by the
-estimation preview — a separate entry point that is unchanged by the scheduled scraper.
-
-**Data source (reality.idnes.cz).** A scheduled scraper (`scraper/idnes_client.py`,
-`idnes_parser.py`, `idnes_main.py` — **cadence-split** like sreality/bazos:
-`idnes_index_walk.yml` every 6h feeds the hourly bounded `idnes_detail_drain.yml`) tagged
-`source='idnes'`. iDNES is an HTML portal (like bazos, not a JSON API) but a STRUCTURED one:
-`idnes_parser` reads the `<dl>` spec table, a clean price element, and **precise per-listing
-coordinates from the page's embedded map config** (`"center":[lon,lat]`), so there is no
-geocoding step. Typed fields are normalised to the SAME canonical labels sreality stores
-(`panelová→panel`, `velmi dobrý stav→velmi_dobry`, `osobní→osobni`) for one cross-source
-vocabulary. Search pages carry a result total and have **no deep-pagination cap**, so a
-per-category walk is provable-complete: unlike bazos, idnes is **complete-walk capable**
-(`supports_complete_walk=true`) and the runner marks delisted listings inactive under the
-completeness guard, source-scoped (rules #3/#15). The detail URL carries the category
-(`/detail/{sale}/{cat}/…`), so the drain derives each listing's category from its own URL —
-one config (the `portals` row, migrations 110/111) walks many categories (byty + domy ×
-prodej + pronájem today). Image-URL rows are recorded by the drain; the shared `images.yml`
-job downloads the bytes to R2 (source-agnostic). NOTE: iDNES also has an on-demand URL parser
-(`scraper/source_parsers/idnes_reality.py`, LLM, `source_kind='idnes_reality'`) used by the
-estimation preview — a separate entry point unchanged by the scheduled scraper, which is why
-the Health dashboard's iDNES card shows BOTH a scraper and an on-demand-parser badge.
-
-**Data source (mmreality.cz).** A crawler (`scraper/mmreality_client.py`,
-`mmreality_parser.py`, `mmreality_main.py`, workflow `scrape_mmreality.yml` — pilot,
-cron `50 */6` — **every request rides the residential proxy** (`SCRAPER_PROXY_URL`,
-`USE_PROXY=True`): Cloudflare hard-403s datacenter IPs (the first 101 direct scheduled runs
-ingested zero listings), so the proxy is mandatory from ANY datacenter egress, GitHub or
-Railway alike; the cron is offset from ceskereality's `25 */6` so the two proxied portals
-don't hammer the shared proxy at the same minute) tagged `source='mmreality'`. M&M Reality is server-rendered HTML
-but **every detail page embeds a COMPLETE structured estate object** as a Vue
-`:property` prop (HTML-entity-encoded JSON), so `mmreality_parser.parse_detail` decodes
-that JSON rather than scraping markup: precise per-listing coordinates (`point`), typed
-condition/construction/ownership/energy, area, floors, and images all from one object —
-no `<dl>` table, no geocoding step. Typed fields are normalised to the SAME canonical
-labels sreality/idnes emit (`smíšená→smisena`, `velmi dobrý→velmi_dobry`,
-`Družstevní→druzstevni`, `2+1`). The index is a SINGLE MIXED-category feed
-(`/nemovitosti/?page=N`, no per-category slice); each listing's category is read from
-its own detail JSON, so one config descriptor walks everything. Because a single mixed
-walk can't be gated per-(category_main, category_type) the way the source-scoped
-`mark_inactive` requires, mmreality is `supports_complete_walk=false` (the bazos posture,
-rule #21): the runner never flips its listings inactive from index absence (rule #3) —
-delistings surface via a gone detail fetch (immediate per-listing flip via
-`mark_listing_inactive_native`) + the toolkit's "active = seen within 7 days" rule.
-Registered as a scraper portal (migration 117, sort 35).
-
-**Data source (remax-czech.cz).** A scheduled scraper (`scraper/remax_client.py`,
-`remax_parser.py`, `remax_main.py`, workflow `scrape_remax.yml` — pilot, every 6h +
-dispatch) tagged `source='remax'`. RE/MAX is a national franchise catalogue (~7,900
-listings) served as STRUCTURED server-rendered HTML (no JSON API), so
-`remax_parser` is deterministic: the search cards are `<div class="pl-items__item"
-data-url=… data-price=… data-gps=… data-title=…>` (price, coordinates and title
-straight off the card), and the detail page is a `pd-detail-info__row` →
-`__label`/`__value` spec block + a clean integer `data-advert-price` + per-listing
-coordinates in `data-gps` (DMS, e.g. `50°05'26.1"N,14°29'33.4"E` — parsed to
-decimal, CZ-bbox-guarded, no geocoding step) + a `mlsf.remax-czech.cz/data//zs/{id}/`
-gallery (the `_th350` thumbnail strips to the full-resolution original). Typed
-fields are normalised to the SAME canonical labels sreality/idnes emit
-(`Cihlová→cihla`, `Velmi dobrý→velmi_dobry`, `Osobní→osobni`, `2+kk`). Like maxima,
-the index is TWO mixed indexes — sale (`?sale=1` prodej) and rent (`?sale=2`
-pronájem), `?stranka=N` paging (21/page) — with no per-category URL; each config
-descriptor pairs a category with its offer-type flag and `walk_category` walks (or
-reuses, via the agenda cache) that agenda once and keeps the title-derived slice for
-its category (giving the runner real (cm, ct) Health-reconciliation labels). The
-drain re-derives each listing's category from the detail page ("Typ nemovitosti" +
-title verb). A PILOT: `supports_complete_walk=false` (remax reports a per-AGENDA
-total and the per-category slice is title-derived — not a portal-reported per-(cm,ct)
-total — so a safe per-category completeness check isn't available; the runner never
-flips listings inactive from index absence, rule #3); a gone detail (404/410 or a
-redirect off the detail path) still flips that one listing inactive. Registered as a
-scraper portal by CONVERTING the existing on-demand-parser row (migration 135). NOTE:
-remax ALSO has an on-demand URL parser (`scraper/source_parsers/remax.py`, LLM,
-`source_kind='remax'`) used by the estimation preview — a separate entry point
-unchanged by the scheduled scraper, routed by domain in `source_dispatcher`
-independent of the `portals` row's `kind`.
-
-**Data source (ceskereality.cz).** A scheduled scraper (`scraper/ceskereality_client.py`,
-`ceskereality_parser.py`, `ceskereality_main.py`) tagged `source='ceskereality'`. It is large
-(~49k listings), so — like sreality/idnes — it is **cadence-split**: `ceskereality_index_walk.yml`
-(every 6h, full complete-walk + mark_inactive + enqueue) feeds the hourly bounded
-`ceskereality_detail_drain.yml` (`--max-seconds` budget). ceskereality is a STRUCTURED HTML portal
-like idnes: each detail page carries a `schema.org` `individualProduct` JSON-LD block (clean price +
-broker), an `i-info` spec list, **precise per-listing coordinates** in `data-coord-lat/lng` (and a
-Google-Maps `?q=` link) so there is **no geocoding step**, and an `img.ceskereality.cz/foto/` gallery.
-Typed fields are normalised to the SAME canonical labels sreality emits (verified against the live
-sreality vocabulary: `Zděná→cihla`, `Bezvadný→velmi_dobry`, `K rekonstrukci→pred_rekonstrukci`,
-`soukromé→osobni`). **Street** is taken from the JSON-LD `streetAddress` when present, else mined from
-the SEO detail-URL slug (`…-{street}-{id}.html`) — the broker's `offeredby.address` (the agency office)
-is deliberately never used; both route through the shared `scraper/street.py` guard. **Broker** carries
-a stable identity — the `/realitni-makleri/{slug}-{id}/` profile id — stored idnes-shaped in
-`raw["broker"]`, so ceskereality is in `BROKER_ATTRIBUTED_SOURCES` and `resolve_brokers` has a
-per-source attribution block (phone-only; no email → no firm). Per-category search pages carry a result
-total ("Máme tady N…") with no deep-pagination cap, so a per-category walk is provable-complete
-(`supports_complete_walk=true`; the runner marks delistings inactive under the completeness guard,
-source-scoped). The detail URL carries the category, so the drain derives each listing's category from
-its own URL — one config (the `portals` row, migration 249) walks all 12 (cm × offer-type) descriptors.
-The client uses an honest identifying `User-Agent` at a polite rate (the site disallows generic bots in
-robots.txt — an operator-owned posture). NOTE: ceskereality ALSO has an on-demand URL parser
-(`scraper/source_parsers/ceskereality.py`, LLM, `source_kind='ceskereality'`) used by the estimation
-preview — a separate entry point unchanged by the scheduled scraper.
+Surfaces: an analytical **toolkit + FastAPI service** (Railway), a **React SPA** (Railway,
+reads public data directly and routes every write through the API), and a **Chrome extension**
+that overlays estimates on portal pages. Multi-portal rows sit behind a thin `properties`
+parent (migration 091) so one real-world property seen on several portals can be grouped.
 
 ## Territories
 
-The repo is split into **three** top-level territories with deliberately different
-rules. Identify which one a task belongs to before you start.
+Three top-level territories with deliberately different rules — identify which one a task is
+in before starting. Deep per-territory rationale: `docs/architecture.md` § Territories.
 
-**Backend territory** (`scraper/`, `toolkit/`, `api/`, `migrations/`, `tests/`,
-`.github/workflows/`):
-- Python 3.12, stdlib-first, `psycopg` direct to Postgres.
-- Service-role database access. Reads and writes anything.
-- Runs in GitHub Actions (scrapers + scheduled jobs) or Railway (FastAPI).
-- All rules below apply: append-only migrations, snapshot-on-change, no deletes, no
-  `supabase-py`, etc.
+- **Backend** (`scraper/`, `toolkit/`, `api/`, `migrations/`, `tests/`, `.github/workflows/`)
+  — Python 3.12, stdlib-first, `psycopg` direct to Postgres, service-role (reads + writes
+  anything). Runs in GitHub Actions + Railway. All architectural rules below apply.
+- **Frontend** (`frontend/`) — Vite + React 18 + TypeScript + Tailwind v4 SPA on Railway.
+  **anon key only** (never a secret in browser code); reads `*_public` views + `SECURITY
+  INVOKER` RPCs; **no write path from the browser** — writes go through the bearer-gated API.
+  Design tokens in `globals.css` `@theme` — never change without operator approval. Backend
+  rules below don't apply here.
+- **Chrome extension** (`chrome-extension/`) — Manifest v3, **vanilla TS only** (no React /
+  Tailwind), closed shadow-root panel. Every network call goes through the background worker
+  (`chrome.runtime.sendMessage`), never a direct `fetch`. Build-time `VITE_API_*` inlined
+  (Path 1; ship `dist/` to trusted operators only). Backend + SPA rules don't apply here.
 
-**Frontend territory** (`frontend/`):
-- Browser code. Vite + React 18 + TypeScript + Tailwind v4 SPA, served by Caddy from a
-  two-stage Docker build (see `frontend/Dockerfile`). Deployed to Railway as a separate
-  service alongside the API.
-- The current page set lives in `frontend/src/routes.tsx` (consult it rather than
-  trusting a list here, which rots). Today it spans **Browse** (filters → Map / Table /
-  Stats), **Listing Detail** (with the snapshot-timeline strip — the product's
-  signature visual element), **Region**, **Health** (operator dashboard),
-  **Estimations** + **Estimation Detail**, **Building Detail**, **Collections** +
-  **Collection Detail**, **Watchdog** (in-app notification feed) + its manage/edit
-  routes, and **Settings**. The `Timeline` component dispatches on `step.kind` so it
-  renders today's deterministic traces and the agent's longer traces without rework.
-  Extend this SPA; do not fork a separate frontend tree.
-- Connects with the **publishable (`anon`) key only**. Never embed the service-role
-  key, the `SUPABASE_DB_URL`, or any other secret in browser-shipped code.
-- Reads exclusively from the `*_public` views and the page-specific RPCs (e.g.
-  `listings_public` / `properties_public`, `browse_stats`, `region_stats`,
-  `health_summary`, `listings_with_city_quality`). All RPCs are `SECURITY INVOKER` and
-  rely on anon's existing SELECT grant on the public views — they don't escalate. New
-  public-data RPCs follow the same pattern; new private RPCs go through the FastAPI
-  service.
-- **No write path from the browser.** Any UI action that needs a write goes through the
-  bearer-token-gated FastAPI service, not direct Postgres. The toolkit's write-allowed
-  exceptions (see Toolkit rule #5) are reachable only via the API.
-- **`Mapy.cz`-powered location search.** The Region/Browse pages call `GET /maps/suggest`
-  and `POST /maps/resolve` on the FastAPI service for autocomplete + admin-unit
-  resolution. The `MAPY_CZ_API_KEY` is server-side only — never inlined into the browser
-  bundle. When the API returns 503 (key unset), the search box renders a graceful
-  fallback hint and auto-opens the Advanced disclosure with the legacy district / radius
-  pickers.
-- Frontend conventions live in `frontend/README.md`. Design tokens are in
-  `frontend/src/styles/globals.css` under a single `@theme` block; **never tweak these
-  tokens without operator approval** — they encode the agreed visual direction
-  (civic-archive feel, oxidised-copper accent, borders-only depth, tabular numerals,
-  Czech locale formatting). Add new tokens only at the bottom of the file with a clear
-  domain-name.
-- Backend rules below (psycopg, no `supabase-py`, stdlib-first, etc.) do not apply
-  inside `frontend/`.
-
-**Chrome-extension territory** (`chrome-extension/`):
-- Manifest v3 browser extension that overlays MF rent/yield + an estimate panel on portal
-  listing pages. The content script matches **every scraped portal's host** (sreality,
-  bazos, bezrealitky, idnes, maxima, remax, mmreality, ceskereality, realitymix) — widen
-  BOTH `manifest.json` `content_scripts.matches` (so the script INJECTS there — a registry
-  entry without a match is dead) AND the registry in `src/portals.ts` (host→portal +
-  detail-URL→native-id) as new portals come online; `host_permissions` stays broad
-  `https://*/*` for the background fetch. Match patterns are exact-host, so an apex-canonical
-  portal (e.g. `realitymix.cz`) needs its apex pattern, not just `www.`. **Detail pages** get a floating
-  panel (closed shadow root). For ANY listing we have it shows a **"Přidat do pipeline"**
-  deal-pipeline control (bookmark; once in, change stage via a native `<select>` + remove)
-  + a monitoring/collection toggle (rule #18) + **operator notes** (list existing + add a new
-  one via `GET`/`POST /properties/{id}/notes`, property-grain, the viewed advert recorded as
-  the note's `origin_listing_id`) + an "Otevřít v aplikaci" deep-link to the SPA page
-  (`{VITE_APP_BASE_URL}/listing/{sreality_id}` — the app-wide identity every SPA surface
-  uses, negative for non-sreality portals) + subject facts; for sale apartments it ALSO
-  shows the precomputed `mf_reference_rent_czk` + `mf_gross_yield_pct` ("Výnos MF") with
-  the comparables estimation as the deeper tool/fallback (MF + estimation gated to
-  byt+prodej, the bookmark + link + facts are not). The estimation's editable **net-yield
-  calculator** (rent / fond oprav+SVJ / cena / **rekonstrukce**, with the renovation joining
-  the price as the acquisition-cost denominator — migration 213) mirrors the SPA's `YieldBlock`
-  by value: the yield % is **computed-on-read client-side in BOTH** `computeYield` (extension)
-  and `YieldBlock` (SPA) — there is no server-side yield (the scenario inputs are the single
-  stored truth, `estimation_runs.scenario` + `ScenarioUpdateIn`). The two clients are separate
-  build territories that can't share a runtime module, so the formula is duplicated by value
-  (like `normalizeBaseUrl` / `<FunnelIcon>`): **a yield-formula change must touch both
-  `computeYield` and `YieldBlock` in the same PR** (the field hints — fond/měs + the acquisition
-  denominator — are mirrored too). The bookmark is property-grain
-  (rule #22): `POST /listings/lookup` returns the listing's `property_id` + pipeline
-  membership, and the toggle writes through the SAME bearer-gated
-  `POST/DELETE /pipeline/cards` the SPA's `PipelineToggle` uses — one write path, one
-  `<FunnelIcon>` glyph everywhere. Reachable from index/search pages too: the per-card
-  badge opens this same panel. The panel can be **minimized** (a `−` in the header) to a
-  tiny one-line bar showing only the two yield figures (MF + comparables estimate); the
-  preference persists across listings via `chrome.storage.local` (`panelMinimized`, the
-  "storage" permission) so it stays tucked away while browsing, and `openPanel` awaits it
-  before first paint (no flash).
-  **Index/search pages** get per-card badges via anchor-href scanning (no per-portal card
-  selectors — robust to markup changes). The default display is a **read** through
-  `POST /listings/lookup`, which maps a card's on-page `(source, native id)` to our row +
-  MF figures + `sreality_id` (the public views don't expose `source_id_native`, so the
-  browser can't resolve non-sreality listings directly). `src/portals.ts` is the single
-  source of truth for host→portal + detail-URL→native-id. Two-entry Vite build (`content.js` +
-  `background.js`, with `index_overlay.ts` bundled into `content.js`) plus a copied-over
-  `manifest.json` and `icon-128.png`; output lands in `chrome-extension/dist/`.
-- **Vanilla TypeScript only — no React, no Tailwind.** The panel lives inside a closed
-  shadow root with its own scoped CSS in `src/styles.css?inline`. Palette mirrors the
-  SPA's civic-archive tokens by hand-coded values (no `@theme` import). Keep the bundle
-  small.
-- Every network call goes through the background service worker via
-  `chrome.runtime.sendMessage` so `host_permissions` covers the API origin and the fetch
-  isn't subject to the portal's CORS posture. The content script never calls `fetch`
-  directly.
-- Build-time secrets: `VITE_API_BASE_URL` + `VITE_API_TOKEN` are inlined into `dist/` —
-  same Path 1 security posture as the SPA. Ship `dist/` only to trusted operators; never
-  upload to the public Chrome Web Store. `chrome-extension/README.md` documents Path 3
-  (no embedded token, writes bounced through the SPA) for when a publicly-shareable build
-  is needed.
-- The extension's origin (`chrome-extension://<id>`) must be added to the FastAPI
-  service's `CORS_ALLOW_ORIGINS` env var. Install unpacked first, copy the assigned ID
-  from `chrome://extensions`, then update the Railway env var.
-- Backend rules (psycopg, stdlib-first, etc.) and SPA conventions (React, Tailwind,
-  design tokens) do NOT apply inside `chrome-extension/`.
-
-When in doubt about which territory a task belongs to, ask. Don't import frontend deps
-into the Python tree or vice versa.
+When in doubt which territory a task is in, ask. Don't import frontend deps into the Python tree or vice versa.
 
 ## Working with the operator
 
-The owner of this repo works locally in **VS Code on WSL2 Ubuntu**, connected to GitHub.
-They have a full terminal, local Git, local Python, and the GitHub CLI (`gh`, already
-authenticated). So you can — and should — suggest and run local commands: run tests
-locally, run Git, drive workflows with `gh`, debug interactively.
-
-- **Production execution still runs in the cloud**: scrapers + scheduled jobs in GitHub
-  Actions, the FastAPI service + frontend on Railway. Local execution is for development,
-  testing, and debugging — not a replacement for the deployed runtime.
-- The operator is **non-technical by training but learns fast**. Explain the *why*, not
-  just the *what*, and define jargon the first time it appears ("upsert," "JWT," "RLS,"
-  "draft PR," etc.). Teaching is welcome — a one-line "here's what this command does and
-  why" beats silent execution.
-- For tasks that genuinely need a browser (Supabase SQL editor, GitHub Settings pages),
-  give click-by-click instructions: which page, which menu, which button.
+The owner works locally in **VS Code on WSL2 Ubuntu** with a full terminal, local Git/Python,
+and authenticated `gh` — so suggest and run local commands (tests, git, `gh`, debugging).
+Production still runs in the cloud (Actions + Railway); local is for dev/test/debug. The
+operator is **non-technical by training but learns fast** — explain the *why*, define jargon
+on first use ("upsert", "JWT", "RLS", "draft PR"), and give click-by-click steps for browser
+tasks (Supabase SQL editor, GitHub settings pages).
 
 ## Git workflow and pull requests
 
-Work on short-lived branches and merge via pull request. **Never push directly to `main`.**
-Railway auto-deploys from `main`, so a merged PR *is* the deploy — the PR + branch
-protection + CI is the gate that protects production.
-
-- **Branch naming:** `feature/<short-name>` (new code), `fix/<short-name>` (bug fixes),
-  `cleanup/<short-name>` or `roadmap/<short-name>` (repo hygiene & docs).
-- **Start a piece of work** with: `git checkout main && git pull && git checkout -b <branch>`.
-- **One PR = one purpose.** Don't mix a feature with an unrelated docs/ROADMAP rewrite —
-  split them so reviews stay simple and conflicts stay small. (Exception: the small
-  ROADMAP phase-entry bookkeeping that records the work you just shipped rides in that
-  same PR; a *large* ROADMAP restructure is its own PR.)
-- **End** by pushing the branch and opening a PR. Return the PR URL.
+Short-lived branches, merge via PR. **Never push directly to `main`** — Railway auto-deploys
+from `main`, so a merged PR *is* the deploy; PR + branch protection + CI is the production gate.
+- **Branch naming:** `feature/<name>`, `fix/<name>`, `cleanup/<name>` or `roadmap/<name>` (docs/hygiene).
+- **Start:** `git checkout main && git pull && git checkout -b <branch>`.
+- **One PR = one purpose.** Don't mix a feature with an unrelated docs/ROADMAP rewrite (a
+  *large* ROADMAP restructure is its own PR; small phase-entry bookkeeping rides with the work).
+- **End** by pushing the branch + opening a PR; return the URL. Commit messages / PR bodies
+  follow the harness footer convention.
 
 ## Autonomy and the safety net
 
-The operator wants to describe features and have you run with them. Default to **full
-autopilot**: at the start of a task, create the branch, push early, open a **draft PR**
-(so the operator can watch without interrupting), and work to completion.
-
-- **Stop and surface** — don't paper over — a merge conflict, a failing test, or genuine
-  ambiguity. Report what you found before continuing.
-- **The safety net that makes autonomy safe:** CI (`.github/workflows/test.yml`) runs on
-  every push, and branch protection guards `main`, so broken code can't reach production.
-  Lean on it; keep tests green.
-- **Mode guidance:** use plan mode for large or unfamiliar work; default mode for routine
-  work; reach for autopilot on patterns already validated together.
-- **Database changes** have their own gate — see "Database access" below (additive
-  migrations are autonomous; destructive ones pause for confirmation).
+Default to **full autopilot**: create the branch, push early, open a **draft PR** so the
+operator can watch, and work to completion.
+- **Stop and surface** — don't paper over — a merge conflict, a failing test, or genuine ambiguity.
+- The safety net: CI (`.github/workflows/test.yml`) runs on every push + branch protection guards
+  `main`, so broken code can't reach production. Lean on it; keep tests green.
+- **Database changes** have their own gate (the `database` skill: additive migrations are
+  autonomous; destructive ones pause for confirmation + a backup).
 
 ## Fetching live state (fetch, don't ask)
 
-Dynamic state lives outside Git, not in tracked files. Don't ask the operator for context
-you can fetch in one command — just fetch it:
-- Recent activity → `git log --oneline -10`
-- Current branch / working tree → `git branch --show-current`, `git status`
-- Migrations on disk → `ls migrations/ | tail -5`
-- Database counts, freshness, schema → the Supabase MCP tools
-- GitHub Actions runs → `gh run list --limit 10`
-
-## Database access
-
-We connect directly to Supabase Postgres with `psycopg` v3 (not the Supabase REST
-client), for two reasons:
-- **PostGIS support:** inserting `geography(point, 4326)` is one line of SQL with
-  `ST_SetSRID(ST_MakePoint(lon, lat), 4326)`. The PostgREST equivalent needs a stored
-  procedure or fragile GeoJSON casting.
-- **Atomic transactions:** writing `listings`, `listing_snapshots`, and `images` for one
-  listing happens inside a single transaction. The REST client cannot span tables
-  atomically.
-
-Do not introduce `supabase-py` without an explicit reason and a discussion.
-
-**Two connection modes.** `scraper/db.py` exposes two factories:
-- `connect()` — the **default for everything** (scrape_run bookkeeping, bazos, images,
-  recompute, API, scripts). Points at `SUPABASE_DB_URL` (the **Transaction-mode pooler**,
-  port 6543) with `prepare_threshold=None`. Disabling auto-prepare is **required** there:
-  PgBouncer rebinds connections between queries, so a cached prepared statement would trip
-  `DuplicatePreparedStatement`.
-- `connect_session()` — **only** for the scraper's hot detail-write loop (the long-lived
-  connection in `scraper/main.py:_run_full`). Points at `SUPABASE_DB_SESSION_URL` (the
-  **Session-mode pooler**, port 5432) and leaves `prepare_threshold` at psycopg3's default,
-  so the repeated upsert + spatial SQL gets server-side **prepared once and reused** across
-  every listing in the run (the plan isn't re-derived per call). The session pooler gives
-  each client a dedicated backend, so prepared statements are safe there. If
-  `SUPABASE_DB_SESSION_URL` is unset, `connect_session()` **falls back to `connect()`**, so
-  nothing breaks where the secret isn't configured.
-
-**Supabase MCP.** Claude Code has direct read/write access to the production Supabase
-project via the MCP integration. Use it for: inspecting the live schema, running SELECT
-queries to verify data state, applying migrations, running backfill UPDATEs, and
-confirming changes succeeded. The MCP connection points at **production** — there is no
-separate dev/staging database. Treat every operation accordingly.
-
-**`migrations/` is the source of truth for schema.** MCP is the *execution* mechanism,
-not a replacement for tracked migrations. Applying a schema change without committing the
-corresponding migration file silently breaks the codebase — future sessions or fresh
-rebuilds will be missing the change. "Append-only" means **never rewrite migration
-history** (never edit an existing numbered file); it does **not** trap us into keeping
-dead schema — prune an unused table/column by writing a *new* forward migration that
-drops it (a destructive change — see the policy below).
-
-**Migration safety policy (under autopilot):**
-- **Additive migrations** (new tables / columns / indexes / RPCs) — write the new
-  numbered file, commit it, apply via MCP, verify with a SELECT, and report. No approval
-  gate; CI + the tracked file are the net.
-- **Destructive migrations** (`DROP TABLE`/`COLUMN`, type-changing `ALTER`, `DELETE`
-  without `WHERE`, `TRUNCATE`) — **pause for explicit operator OK** ("yes, apply it") and
-  take a `pg_dump` backup of the affected tables *first*. There's no staging DB, so these
-  are largely irreversible.
-- Read-only inspection (counts, sample rows, schema introspection, verifying backfills)
-  needs no confirmation — just do it and report.
-
-Correct flow for any schema change: (1) write the new numbered migration file in
-`migrations/`; (2) for destructive changes, get explicit approval + back up first;
-(3) apply via MCP (`apply_migration`), verify with a SELECT; (4) commit the migration
-file in the same change; (5) report what was applied and verified.
+Dynamic state lives outside Git — don't ask, fetch it:
+- Recent activity → `git log --oneline -10`; branch / tree → `git status`, `git branch --show-current`.
+- Migrations on disk → `ls migrations/ | tail -5`; Actions runs → `gh run list --limit 10`.
+- **DB reads (counts, freshness, schema, verification SELECTs) → `psql "$SUPABASE_DB_URL" -c "…" | head`**,
+  NOT the Supabase MCP (its verbose output persists in context). Ready-made commands + the
+  reserved-for-migrations MCP policy are in the `database` skill: after a heavy MCP phase run
+  `/compact`; disable the server with `/mcp` in sessions that don't touch the DB.
 
 ## Roadmap maintenance
 
-`ROADMAP.md` is the manual sequencing source of truth — narrative phase entries, no
-generated content. (Live status is fetched on demand per "Fetching live state"; nothing
-dynamic is committed into tracked files, which is why the old auto-status block was
-removed — it caused repeated cross-session merge conflicts.)
+`ROADMAP.md` is a **<120-line index**; phase content lives in `roadmap/<track>.md` and completed
+work in `roadmap/archive.md`. After shipping meaningful work, in the SAME PR update **only** the
+relevant `roadmap/<track>.md` (move a bullet to done, add new "next" items) + the index's status
+cell if the track's status changed — **never open all track files to make one edit**. A large
+restructure is its own PR.
 
-After shipping meaningful work (a merged PR that completes a phase bullet, a new
-migration, a new toolkit function, a new UI page), update the relevant phase entry in the
-same PR as the work: move bullets from `## Next` to `## Done`, add new "next" items if
-scope changed, update the map / scraper / UI tracks. Don't defer roadmap updates to a
-follow-up commit. (A large ROADMAP restructure is its own PR — see the Git workflow.)
+## Context discipline
+
+- Prefer `grep` / targeted line-range reads over whole-file reads for files >500 lines (this file,
+  most `toolkit/` / `api/` / `scraper/` modules, any `roadmap/` track).
+- Read the `ROADMAP.md` index only; open a `roadmap/<track>.md` only when editing that track.
+- Summarize tool output instead of quoting it back; delegate verbose searches to subagents so their
+  output stays out of the main context.
+- Load a skill (`database`, `toolkit-api`, `llm-pipelines`, `scraper-ops`) when its trigger fits,
+  rather than re-deriving from memory.
 
 ## Architectural rules (do not violate without asking)
 
-1. **The schema in `migrations/` is append-only.** Never modify an existing migration.
-   Schema changes go in a new numbered file (`002_*.sql`, `003_*.sql`...) and are applied
-   via the Supabase MCP. See "Database access" for the full flow and the
-   additive-vs-destructive policy.
-2. **Snapshots on content change only.** Never insert into `listings` without computing
-   the content hash and inserting into `listing_snapshots` if it differs from the most
-   recent snapshot for that listing.
-3. **Never delete listings.** Listings that disappear get `is_active=false`. History is
-   sacred. The `is_active=false` inference is only valid after a **~complete index walk** —
-   a partial walk (`--limit N`, `--detail-only`, `--max-pages`) cannot determine which
-   listings are gone. The scraper enforces this: `mark_inactive` is skipped when `--limit`
-   is set, and `--detail-only` never reaches the index phase. "Complete" is ≥99.5%
-   (`INDEX_MIN_COMPLETENESS = 0.995`) for the framework portals, NOT 100% — portal counts
-   jitter mid-walk, and a strict 1.0 gate proved statistically unreachable for large bazos
-   categories (delistings then accumulated for 11 days). The second rail: framework sweeps
-   only flip rows additionally unseen for 24h+ (`min_unseen_hours` on `db.mark_inactive` /
-   `mark_inactive_native`), so a tolerated walk-miss can never flip a freshly-seen listing,
-   and a false flip self-heals on the next index sighting (`touch_listings` reactivates).
-   Every flip stamps `listings.inactive_at` (cleared on reactivation) — the delisting-latency
-   health check reads it.
-4. **`last_seen_at` is driven by index sightings and successful detail fetches; failed
-   fetches never touch it.** Every existing listing whose id appears in the run's index
-   gets its `last_seen_at` bumped before any detail fetches happen. A successful detail
-   fetch (cron or on-demand via `freshness_check`) also bumps `last_seen_at` as a side
-   effect of `db.upsert_listing` — that's real evidence the listing is alive. A *failed*
-   detail fetch must not affect `last_seen_at`, otherwise repeated failures would falsely
-   flip a still-live listing to `is_active=false`. The `unchanged` path of
-   `freshness_check` deliberately does NOT bump `last_seen_at` either — for that case the
-   "I confirmed it" signal lives in `listing_freshness_checks.checked_at` instead. See
-   architectural rule #9.
-5. **Failed detail fetches are tracked, not silently dropped.** When a detail fetch (HTTP,
-   parse, or DB write) fails, we record it in `listing_fetch_failures(sreality_id,
-   attempts, last_error, given_up)`. Next run, listings with an active failure row jump to
-   the front of `to_refetch` so the per-run cap can't keep deferring them. After 5 attempts
-   a row's `given_up` flips to true and it falls out of the active retry queue (manual SQL
-   un-flip required to retry). On successful fetch the failure row is deleted. Inspect with
-   `SELECT * FROM listing_fetch_failures ORDER BY attempts DESC`.
-6. **Images are downloaded to Cloudflare R2.** v1 only stored URLs; v1.5 downloads the
-   bytes to an R2 bucket (S3-compatible) so the data survives the CDN expiring listing
-   photos. The `images` table tracks per-image download state via `storage_path`,
-   `download_attempts`, and `last_download_attempt_at`. Image-download is a separate phase
-   after the scrape phase; it's a no-op if R2 env vars are missing, so a partial deploy
-   never breaks the scrape.
-7. **No new dependencies without justification.** Each entry in `pyproject.toml` should
-   have a clear reason. Prefer the stdlib.
-8. **Latest-wins data model with snapshot history.** The `listings` table always reflects
-   the most recent state. Every meaningful change appends a row to `listing_snapshots`.
-   Analytical queries default to current state for relevance. Estimates that need
-   retrospective auditability record the `snapshot_id` of each comparable they used — that
-   resolves to the exact JSON the estimate relied on, even if the listing has since been
-   updated or marked inactive. Avoid building "as-of" semantics into live queries; capture
-   snapshot IDs in the estimate response instead.
-9. **`listing_freshness_checks` is append-only and ephemeral.** Rows older than 30 days are
-   safe to delete. No automated pruning is built; manual SQL when the table gets large. The
-   table records every on-demand verification triggered by `verify_listing_freshness` — its
-   primary purpose is observability and per-listing throttling, not history. The primary
-   history table is `listing_snapshots`.
-10. **`amenities` + `amenity_fetches` are a local OSM mirror, not a history table.**
-    Populated by `find_anchor_amenities` on cache miss via Overpass. Cache key is
-    `(category, radius_m, exact center, fetched_at within TTL)`. POIs accumulate; no
-    automated deletion of POIs that have disappeared from OSM (out of scope). Manual SQL
-    pruning when the audit table gets large. Categories are determined by the *query* that
-    fetched a POI, not the OSM tags themselves — `ON CONFLICT (source, source_id)`
-    overwrites on subsequent fetches under different categories. The canonical category
-    taxonomy lives in `toolkit/amenities.CATEGORY_TAGS`; add new categories there.
-11. **`transit_lines` + `transit_line_fetches` are a parallel OSM mirror for route geometry
-    (migration 028).** Populated by `find_comparables_along_axis` on cache miss via
-    Overpass. One row per (relation, member way) pair — `source_id` is
-    `"relation/R/way/W"` — so a single relation produces N rows of clean polylines and a
-    way shared by two relations occupies two rows. Avoids the merge ambiguity that bites
-    when a route has branches or loops. Cache key is sha256 of the canonicalised
-    `(bbox, transport_types)` pair; bbox values are rounded inside `_bbox_around` so
-    identical anchor + radius callers share the same cache row. TTL default 30 days,
-    matching the amenity TTL. Same accumulate-and-prune discipline as amenities; allowed
-    transport types are tram / subway / bus.
-12. **`estimation_runs` is the single source of truth for every estimation.** Every
-    UI/API/ClickUp/agent invocation lands here. Synchronous deterministic mode INSERTs once
-    with a terminal `status` (`'success'` or `'failed'`); the schema reserves
-    `'pending'`/`'running'` for the async agent without forcing today's code to write twice.
-    Failed runs still persist a row — the row IS the audit trail; the endpoint returns HTTP
-    200 with `status='failed'` and `error_message` set. Re-runs INSERT a new row with
-    `parent_run_id` set; the original is immutable. Legal `source` values today: `'ui'`,
-    `'api'`, `'clickup'` (CHECK constraint, not enum — adding more is a single ALTER).
-13. **`building_runs` is the parent grouping for the paste-a-building workflow.** One row
-    per pasted house listing (typically `category_main='dum'`). Children are normal
-    `estimation_runs` rows linked back via `building_run_id` (FK, `ON DELETE SET NULL` so
-    child estimations survive parent cleanup) + `building_unit_id` (stable string ID
-    matching an entry in the parent's `units` JSONB). The unit list lives as JSONB on the
-    parent — operator-curated, ~5-10 entries, not an analytical object. Status flow:
-    `pending` → `extracting` → `awaiting_input` → `estimating` → `success` | `failed`. The
-    `awaiting_input` pause is the human-in-the-loop gate where the operator confirms / edits
-    the agent's tentative unit decomposition before per-unit estimates fan out — the
-    explicit departure from the `estimation_runs` single-shot flow. `units_proposal` (agent
-    output, append-only after extraction) and `units` (operator-confirmed) are kept separate
-    so the extractor's original guess is auditable. The business-case overlay lives in
-    `business_case jsonb` on this same row.
-14. **Condition scoring is two-axis (building + apartment).** `listings.condition` (the raw
-    sreality "Stav objektu" enum, ~11 Czech text values) stays as the source field — it's
-    what `listings_public` exposes and what the legacy filter binds against. The two derived
-    columns `listings.building_condition_level` and `apartment_condition_level` (integers
-    1..5, NULL if not yet scored) live alongside it, computed by
-    `toolkit.condition_scoring.score_listing_condition`. The score cache lives in
-    `listing_condition_scores`, keyed on `(sreality_id, snapshot_id)` — same
-    auto-invalidation pattern as `listing_summaries` / `listing_marker_extractions`. The
-    scorer writes the cache row AND updates the two `listings` columns in one transaction
-    with a latest-wins guard so a stale-snapshot scorer can't overwrite a fresher score. The
-    coarse `condition_assessment` produced by `summarize_listing` is for cohort skimming,
-    not authoritative filtering — use the new columns for that. The 5-level rubric lives in
-    `data/condition_rubric_v1.json` (committed) and is loaded into
-    `app_settings.llm_condition_rubric` by `scripts/seed_condition_settings.py`; the curated
-    marker dictionary follows the same pattern via `data/condition_markers_curated.json` →
-    `app_settings.llm_condition_marker_dictionary`.
-15. **Multi-portal listings sit behind a thin `properties` parent (migration 091).** Each
-    `listings` row carries `(source, source_id_native)` (unique together) plus `source_url`,
-    and an FK `property_id` to a `properties` row that groups observations of the same
-    real-world property across portals. `properties` holds a representative display row plus
-    derived rollups (`source_count`, price-change aggregates, lifecycle `is_active` /
-    `first/last_seen_at`), maintained by an **async property-maintenance job**, never inline in
-    the scrape (see rule #20 for the dirty-set incremental cadence). `is_active` /
-    `last_seen_at` are **per-source** on the `listings` row; the property-level rollup is
-    derived, not authoritative per source. `db.mark_inactive` / `db.active_count` are
-    **source-scoped** to enforce this — a portal's index walk only flips its own rows.
-    (Originally `mark_inactive` scoped by `(category_main, category_type)` alone, so every
-    sreality walk swept bazos rows — same canon categories, never in sreality's `seen_ids` —
-    to `is_active=false`; migration 109 era fixed it.) **New listings get a singleton property
-    at insert time — there is no insert-time matching.** All grouping is done out-of-band by the
-    **street + disposition dedup engine** (see below), so neither `scraper/db.py` nor the
-    maintenance job's straggler-attach does any spatial/geo probe anymore.
-    Today sreality + bazos ingest; further portals follow the design in
-    `docs/design/multi-portal-dedup.md`. Frontend Browse reads `properties_public`.
-    **Dedup engine (street + disposition keyed).** `toolkit/dedup_engine.py` (pure rules) +
-    `scripts/dedup_engine.py` (orchestrator, `dedup_engine.yml`, daily) replaced the old
-    geo-proximity matcher. Rules: **(A)** only listings with BOTH a `street` and a `disposition`
-    are eligible (computed inline; a partial index backs the scan, migration 127); the rest are
-    `location_unclear` / `disposition_unclear` and never matched. **Inactive listings are
-    eligible too** (the scan does NOT gate on `is_active`): a property's price/lifecycle history
-    is only complete if a listing taken down on one portal — or delisted then relisted under a
-    new id — can still merge into the surviving group. The merge chokepoint gates on the
-    *property* `status='active'` and an inactive listing keeps its own active singleton property,
-    so it stays matchable; gating the scan on `is_active` would orphan that history. **(B) RETIRED
-    (2026-06): exact address (street + house_number + disposition + floor) is no longer an
-    auto-merge.** It was the ONLY merge path that produced false merges — 6.7% of `address_exact`
-    merges were later unmerged (two DIFFERENT units at the same address+floor) vs **0%** for pHash
-    (0/23.6k) and visual (0/753), because address alone is not unit-conclusive. `classify_pair` now
-    returns an exact-address pair as a normal rule-C **candidate** (the `address_exact` reason is kept
-    for provenance), so it flows through the pHash fast-path → forensic visual → floor-plan gate (the
-    0%-reversal paths) like any street+disposition pair. The rare same-address-different-photos-no-
-    matching-room pair queues for the operator instead of auto-merging. **(C)** same street + disposition → visual candidate unless
-    an **area-gap** / house-number / **floor-gap-≥2** contradiction rejects it; nothing is ever compared
-    that doesn't share street + disposition, AND no **same-development guard** fires. The area-gap
-    reject is **unified at 10%** for every category (`MatchProfile.candidate_area_max_pct`). It is
-    the "Rezidence Na Bradle" / "Budovatelů" fix — units one area-band apart (73→87 = 16%, 87→99 =
-    12%; or 59/62/74 m² bridged by a NULL-floor listing) used to each slip under the old 20% gate and
-    then chain-merge via transitivity once pHash matched their shared renders; the 10% reject now
-    hard-stops them *before* the pHash fast-path. (Floor is a
-    SOFT cross-portal signal — idnes counts the ground floor as 0 (patro), sreality as 1 (NP), so the
-    same flat reads one floor apart on the two portals, and sreality is itself lister-inconsistent;
-    a gap of exactly 1 is convention noise that falls through to the visual layer, only a gap of 2+
-    is a hard reject. Since rule B's retirement no path
-    auto-merges on address+floor alone, so an off-by-one never auto-merges without photo
-    confirmation.)
-    Two development guards keep near-identical units of one project from auto-merging:
-    a TEXT one (rule C `unit_marker_contradiction` — the descriptions name the same
-    keyword with different unit tokens: `pozemek č.3` vs `č.4`, `dům 3A` vs `5C`,
-    `byt 42` vs `45`, and container/letter labels `budova/blok/vchod/sekce/etapa/objekt`
-    `A` vs `B`; letter labels matched case-sensitively so the Czech conjunction "a" isn't
-    one) → hard reject; and a VISUAL one (the `site_plan` image category, migration 171):
-    when both listings carry a site/situation plan, `compare_listing_site_plans` checks
-    whether they highlight the SAME unit — a `different_unit` verdict **queues** the pair
-    for the operator (never auto-merges, never auto-rejects — the conservative choice).
-    **pHash fast-path (FREE, runs FIRST — before classify, all sources).** `_phash_identical_pairs`:
-    ≥2 near-identical image pairs (`PHASH_MIN_IDENTICAL_PAIRS`, Hamming ≤6) → auto-merge
-    with NO LLM. Identical-photo re-posts (same- OR cross-source) merge for free here, skipping
-    classify AND compare. The **count** is the
-    safety bar (a development sharing one stock facade/plan gives 1 match; an actual re-post shares
-    many) — validated: only 0.34% of operator-dismissed pairs reach ≥2. **A single near-identical
-    DISTINCTIVE-room match overrides the count** (`_phash_distinctive_match` →
-    `decide_phash_fastpath(count, distinctive)`): one Hamming-≤6 kitchen/bathroom pair
-    (`DISTINCTIVE_ROOMS`, CLIP-tagged) is enough, since wet rooms are unit-specific not shared
-    marketing (operator policy; the distinctive query only runs when the generic count fell short).
-    **For byt the count excludes
-    KNOWN-exterior / shared-marketing images** (`phash_excluded_tags_for` → `NON_INTERIOR_TAGS`:
-    exterior_facade / balcony_terrace / garden / site_plan / floor_plan, sourced from CLIP
-    `image_clip_tags`) — a development reuses the same facade/plan/render across its units, so those
-    images carry no unit identity and must not feed the byt fast-path; other categories count any
-    image (exterior IS a house/plot's identity). Untagged images still count, so byt recall holds for
-    the not-yet-CLIP-tagged majority and tightens toward interior-only as coverage fills in (the count
-    bar + the 10% area reject above are the other two rails). To preserve the site-plan development
-    guard (which is post-classify), the fast-path **defers** (falls through to the visual
-    stage) when both listings already carry a classified `site_plan` (`_both_have_site_plan`). NOTE: pHash only catches
-    listings that SHARE photos — most cross-source dups have DIFFERENT photos (different portals), so
-    pHash resolves a minority; the forensic compare below is still needed for the rest. (pHash
-    coverage on the `images` table must keep up — `compute_image_phash.yml` — or the fast-path
-    under-fires.)
-    **Cross-source gate — REMOVED in Wave 3 (recall).** It previously ran the paid visual layer (D)
-    only on CROSS-source pairs, skipping same-portal non-exact pairs (73/74 historical visual
-    auto-merges were cross-source) — which cut ~36% of pairs off the LLM stage but cost ~1.4% recall
-    (a same-portal relist with changed photos, or two cross-posts on one portal, were dropped). Now
-    ALL rule-C candidates reach the visual stage; the forensic **High** verdict + the floor/site-plan
-    gates remain the precision guards, so recall rises without false merges (pHash still auto-merges
-    identical-photo same-source relists for free, above). The trade-off is more pairs at the (paid)
-    visual stage — the per-run vision budget + the batch warmer (which now warms same-source pairs too)
-    bound the cost.
-    **(D)** forensic visual confirmation (the pair reached here only because pHash did
-    NOT resolve it): classify both listings, run the site-plan development guard, then a room-aware
-    forensic comparison (operator prompt, `app_settings.llm_visual_match_prompt`) on like rooms in
-    priority order (`rooms_in_priority(common, category_main)` → `room_priority_for`), stop at the
-    first **High** verdict → auto-merge. The compare order is **per-family** (`room_priority_for`):
-    **byt** compares INTERIOR rooms only (`BYT_ROOM_PRIORITY`: kitchen, bathroom, toilet, living_room,
-    bedroom, hallway) — exterior_facade / balcony_terrace / garden are dropped (a shared facade render
-    can't produce the auto-merging High verdict), and the CLIP cosine tier below is interior-only too;
-    **dum / komercni / ostatni** lead with the **FACADE** (`HOUSE_PRIORITY` — the building's identity)
-    then interiors; **pozemek** leads with the **SITE PLAN** (`LAND_PRIORITY` — the plot's identity).
-    The byt-only **distinctive single-match override** (one near-identical kitchen/bathroom pHash =
-    merge, `distinctive_rooms_for`) is empty for non-byt: a facade/site-plan is development-shared, so
-    they always need the ≥2-match count. These per-family orders are **operator-editable** (Stage 2):
-    `default_priority_for_family` is the coded default + the valid tag set, and the Settings page's
-    "Dedup comparison priority" draggable lists reorder them per family into
-    `app_settings.dedup_tag_priorities` (JSON). `toolkit/dedup_priorities` loads + validates the blob
-    (`normalize_priority` completes any omission from the default, so a list never silently drops a
-    room); the engine threads it via `_RunContext.tag_overrides` → `rooms_in_priority`, and the batch
-    warmer (`submit_dedup_batch`) loads the same overrides so both lanes order rooms identically.
-    Absent / partial → the coded default, so a fresh deploy is unchanged. **(E)** everything else queues
-    on the operator's `/dedup` review page.
-    **Floor-plan validation gate (migration 234).** Whenever the engine WOULD merge a pair — via the
-    pHash fast-path OR a visual High — `_floor_plan_gate` runs a Sonnet floor-plan check (the
-    `DOCUMENT_MAX_EDGE=1568` tier; pHash conflates line-art plans and CLIP cosine can't read layout,
-    so vision is the only tool). It ONLY adds conservatism: BOTH sides carry a floor plan (a CLIP tag
-    **at or above `FLOOR_PLAN_MIN_CONFIDENCE = 0.50`** OR an LLM classifier room_type — the floor is
-    CLIP-only because only `image_clip_tags.confidence` is numeric; the LLM `image_room_classifications`
-    confidence is a coarse high/medium/low enum, left unfiltered. A low-confidence CLIP floor_plan tag
-    is a likely false positive, e.g. an idnes location map mis-tagged at 0.36, and 95% of real CLIP plan
-    tags score ≥ 0.52, so the floor drops the phantom-plan "one-sided" read while keeping genuine plans)
-    → `compare_listing_floor_plans` (operator prompt
-    `app_settings.llm_floor_plan_match_prompt`, cache `listing_floor_plan_matches`, write-allowed rule
-    #5; verdict same_layout / different_layout / inconclusive / no_2d_plan (migration 260) + per-plan
-    OCR in `extracted`, used plan-to-plan only never to overwrite listing data) → `different_layout`
-    is the **only new auto-dismiss** (the visual model stays the sole thing that can dismiss);
-    same_layout / no_2d_plan → the merge proceeds. **N×N over multiple plans (migration 243):** a listing can carry several
-    floor/site plans (a multi-unit building, a multi-floor home); the one vision call sends EVERY
-    labelled plan of both listings and the prompt matches the cross-product — `same_layout` if ANY
-    A-plan matches ANY B-plan, `different_layout` only if NONE do (and `compare_listing_site_plans`
-    the same: `same_unit` if any pair shares a unit). So a matching plan among several is never missed
-    into a wrong dismiss. No schema / cost change — one call, the model reasons over all pairs; the
-    payload labels each plan ("Listing A plan 2") so the rationale can cite the matching pair. The
-    prompt update is `updated_by`-guarded so an operator-customised prompt is never clobbered.
-    **2D-plan-aware dismiss (migration 245).** The gate was wrongly dismissing legit same-property
-    pairs whose "floor plans" are 3D perspective RENDERS (a 3+1 flat misread as a "two-level duplex").
-    `render_score` can't separate a 2D plan from a 3D render (its anchors are about *interiors*, so a
-    drawing's score is noise — empirically a flat 0..1 spread), so the distinction is made by the
-    **vision model that sees the images**: the prompt judges layout ONLY from flat 2D floor plans and
-    treats 3D renders as unreliable. Migration 245 also SWEPT the cache (deleted every `different_layout`
-    verdict, ~242) so the stale pre-N×N + the 3D-render misreads re-evaluate under the 2D-aware prompt.
-    **Contradiction-veto + the `no_2d_plan` verdict (migration 260).** Migration 245 returned
-    `inconclusive` for "no usable 2D plan (only 3D renders)" and routed it to the manual queue — which
-    VETOED ~600 obvious pHash/visual merges (cross-portal re-posts whose "plans" are 3D renders) over an
-    un-readable image. The gate is now a pure **contradiction veto**: the ONLY things it may do beyond
-    letting the merge proceed are DISMISS on a proven `different_layout`, or QUEUE the one genuinely-human
-    case. To separate them the compare gained a 4th verdict: **`no_2d_plan`** = ≥1 side has no usable 2D
-    plan (only 3D renders / illegible) → a 2D compare is impossible → **merge** (trust the primary pHash/
-    visual signal); **`inconclusive`** now means BOTH sides HAVE usable 2D plans but the model still can't
-    decide → **queue** (operator-gated by `dedup_floor_plan_inconclusive_to_review`, default on — the
-    operator's carve-out: a real both-2D ambiguity is a human call). Migration 260 rewrote the prompt to
-    emit the split (`updated_by`-guarded) and SWEPT the stale `inconclusive` cache so old render-verdicts
-    re-run and reclassify. The gate distinguishes **"a human must decide" (queue: both-2D inconclusive)**
-    from **"validate it later" (defer)**: a both-plan pair whose Sonnet verdict isn't available this run
-    (budget exhausted / cache-miss) → **`defer`** — re-try next run, never the manual queue (automatable);
-    and **exactly ONE side / neither side has a plan → `merge`** (no plan-to-plan compare possible → the
-    gate can't contradict, so the primary signal stands — no more one-sided queue). It applies
-    to pHash + visual merges, NOT rule-B exact-address. **The floor-plan check runs autonomously on the
-    SCHEDULED free run (the operator-chosen posture, Option C):** even though the free run skips the
-    expensive all-rooms classify/compare, it gets the LIVE `_build_floor_plan_fn` with a bounded budget
-    `app_settings.dedup_floor_plan_budget` (registry default 10000; `--floor-plan-budget` overrides for an
-    ad-hoc run) — the ONE paid call on a free run, firing only on the SMALL set of would-merge both-plan
-    pairs, so they auto-confirm / auto-dismiss inline instead of piling onto the manual queue. (The budget
-    is the count of PAID calls — "free" is the run MODE, not the cost.) An **`inconclusive`** floor-plan
-    verdict routes to manual review when `dedup_floor_plan_inconclusive_to_review` (default on); off →
-    treat as `same_layout` and merge. Beyond the budget, pairs DEFER to the next run; budget 0 is a $0
-    escape hatch (`_build_cache_only_floor_plan_fn` — consume only warmed verdicts, defer the rest). The
-    cap is wired through the pure `_effective_vision_cap` (free → the floor-plan budget; cache-only →
-    unthrottled; else → `max_vision_calls`). The cache-only fn AND the live fn resolve the model via the
-    SAME `LLMClient.resolve_model("llm_floor_plan_match_model")` the batch warm-up uses, so the model-keyed
-    verdict cache never silently misses. A raised `floor_plan_budget` on a `free=true` dispatch is a
-    **compare-free floor-plan sweep** (floor-plan checks only, no all-rooms compare spend) — how the
-    initial 379-pair backlog was cleared. The per-run `dedup_engine_runs.floor_plan_deferred` counter
-    (migration 241, on the `/dedup` dashboard's stat grid) is the silent-stall guard: it should trend to
-    ~0; a persistently high value means the free run's floor-plan budget is too small for the inflow (or,
-    if budget 0, that the disabled `dedup_batches` warmer isn't filling the cache). (`dedup_batches`'s
-    `_warm_floor_plan` → `floor_plan` request kind still warms the cache when that lane is enabled; it is
-    `disabled_manually` today, which is why the free run pays inline rather than consuming warm verdicts.)
-    **Self-hosted CLIP tier (v2, migrations 225/226 — settings-gated, default OFF).** A free
-    zero-shot CLIP model (`scraper/clip_tagger.py`, ViT-B/32, run on GitHub Actions by
-    `clip_tag.yml`/`scripts/clip_tag_backfill.py`) tags every image — room/plot type into
-    `image_clip_tags.logical_tag` (the same `ROOM_TYPES` space the LLM classifier emits, via a
-    coherent-anchor→collapse taxonomy in `data/clip_taxonomy.json`) + a 512-d vector into
-    `image_clip_embeddings` (active-listing images only; pgvector, NO ANN index — dedup does exact
-    pairwise cosine). It does TWO jobs the LLM classifier can't afford at full-inventory scale: (1)
-    `dedup_prefer_clip_tags` makes the engine source like-room pairing from CLIP tags for FREE
-    (replacing the paid Haiku classify on the hot path) — and, decisively, it is the FIRST tagger for
-    `dum`/`pozemek`/`komercni` (which had zero classified images), unblocking their visual dedup; (2)
-    `dedup_clip_cosine_enabled` adds a cosine recall tier (`toolkit/clip_dedup.room_pair_cosine`) that
-    routes each room's forensic compare to a model by the same-room cosine band
-    (`toolkit.dedup_engine.route_by_cosine`/`CosineBands`: ≥`haiku_min`→Haiku, ≥`sonnet_min`→Sonnet,
-    below→skip the LLM for that room). The cosine tier NEVER auto-merges or auto-dismisses on cosine
-    alone — a too-low room is skipped (the pair still queues, protecting same-property reshoots whose
-    photos differ), and the forensic **High** verdict remains the only auto-merge gate. Validated
-    (PRs around the trial): pozemek 77% → plot/site family, coarse room agreement 87%, same-property
-    tag consistency 86%, cosine AUC 0.80. Both knobs ship OFF; flip via `app_settings` after a
-    `--shadow` merge-diff confirms merges hold. Run counters: `dedup_engine_runs.clip_classified` /
-    `clip_cosine_calls` / `routed_haiku` / `routed_sonnet`. (3) **Tagging-readiness gate (2026-06,
-    DEFAULT whenever CLIP is the tagger).** A pair is DEFERRED — before pHash, the floor-plan gate, or
-    visual — if EITHER listing has any stored image still pending the tagger
-    (`resolve_pair._clip_incomplete`: a `storage_path` image with `clip_tagged_at IS NULL`; a
-    processed-but-untaggable image is terminal so it never blocks forever). Reason: an
-    incompletely-tagged listing's floor-plan / room images may still be in the tag queue, so the
-    floor-plan gate would mis-read a pending plan as ABSENT (the false `floor_plan_review` "one-sided"
-    queue — 77% of the old review backlog) and the visual flow would under-pair rooms. The engine never
-    decides on partial tag data: it DEFERS and waits — no re-queue (a pending image already has
-    `clip_tagged_at IS NULL`, so `clip_tag.yml` will tag it; re-queuing would only cycle a
-    terminally-undecodable image — the `_trigger_clip_tagging` call was removed for that reason). The
-    **trigger half** of the same invariant: `scraper.db.mark_properties_dedup_dirty_for_images` (called
-    by `clip_tag.yml` after each tag batch) enqueues a property into `dedup_dirty_properties` ONLY when
-    the just-tagged listing is now FULLY tagged (`NOT EXISTS` a pending image) — NOT on a partial batch
-    (the old bug that shoved a 1-of-N-tagged listing into the `--dirty` drain). So the hourly `--dirty`
-    drain re-decides a pair only once BOTH sides are complete → a real two-sided floor-plan compare
-    merges on MATCHING plans (the correct, transparent path). The readiness gate is **always on** when
-    CLIP is the tagger (the old `dedup_clip_only` opt-in setting + its dead plumbing were REMOVED — every
-    pair reaching the visual stage is fully CLIP-tagged, so the Haiku fallback is never needed).
-    `clip_deferred` counts deferrals per run.
-    **Render detection (migration 239).** The CLIP tagger ALSO scores an orthogonal
-    render-vs-photo axis per image — `image_clip_tags.render_score` (0..1), softmax over the
-    `render_anchors` / `photo_anchors` in `data/clip_taxonomy.json` (a render IS a kitchen-render,
-    so it is NOT part of the room argmax). **The axis is only meaningful for ROOM/photo images** —
-    its anchors are about *interiors*, so it scores a DRAWING (floor/site plan) or DOCUMENT arbitrarily
-    (a flat 0..1 spread). So `render_score` is **left NULL for the plan/document logical tags**
-    (`floor_plan` / `site_plan` / `property_document` — `clip_tagger._DRAWING_LOGICAL_TAGS`, kept ==
-    the `plan` family; the backfill skips them; migration 246 NULLed the ~445k existing). The UI render
-    badge self-hides on a NULL score, so "RENDER" no longer appears on a `půdorys`. The new
-    **`property_document`** logical tag (energy certificates, contracts, spec tables) is added to the
-    taxonomy + `ROOM_TYPES` + the room-classifier CHECK (migration 246). Two **`staircase_interior` /
-    `staircase_exterior`** tags (migration 247) sit in a new **`common`** family — a shared building
-    stairwell is the same for every unit, so like the exterior/plan families it's excluded from the byt
-    unit-match signal (`NON_INTERIOR_TAGS` = exterior + common + plan). The `toilet` (WC) anchor was
-    sharpened to exclude shower/bathtub so CLIP stops confusing it with `bathroom`. **Applying a taxonomy
-    change to the back catalogue** is `scripts/retag_from_embeddings` + `clip_retag.yml`: it re-runs the
-    zero-shot over each image's STORED embedding (no R2 download / re-inference — text-anchor dot
-    products), driven by `app_settings.clip_taxonomy_retag_after` (set it to `now()` to start a campaign;
-    re-tagged rows stamp `tagged_at=now()` and self-drain; once caught up the scheduled run pre-checks and
-    no-ops). New / not-yet-tagged images go through `clip_tag.yml`, which loads the live taxonomy. For **byt**, an image scoring >=
-    `app_settings.dedup_render_exclude_min` (registry default **0.95**; `RENDER_SCORE_EXCLUDE_MIN` is the
-    code fallback) is a shared development RENDER and is dropped from the pHash
-    count, the distinctive single-match override, AND the forensic room compare
-    (`phash_render_exclude_for` / `_render_exclusion_predicate` / `_high_render_image_ids`) — closing
-    the same-area dev-unit case area + room-type couldn't (Na Bradle's two 99 m² units share a kitchen
-    render). The "vizualizace" caption is NOT used (verified absent on those units) — the IMAGE is the
-    signal. Validated (`scripts/validate_render_detection.py`): Na Bradle renders 0.55-0.99 vs a bazos
-    amateur-photo control 0.05-0.20. Exposed on `images_public.clip_render_score`; the listing-detail
-    gallery + carousels show a Render/Foto badge with the score (`ImageRenderBadge`) so the operator
-    can eyeball the detector. Untagged/not-yet-scored images are never excluded (recall holds as the
-    CLIP backfill ramps). **One-shot `render_score` backfill (migration 240 + `backfill_render_score.yml`):**
-    `clip_tag_backfill` SKIPS already-tagged images (`clip_tagged_at IS NOT NULL`), so every image tagged
-    BEFORE the render axis shipped has `render_score` NULL — the badge stays hidden and the byt exclusion
-    is inert on it. `scripts/backfill_render_score.py` re-scores the render axis from each image's STORED
-    CLIP embedding (`image_clip_embeddings` — NO R2 download, NO re-inference; just the
-    `Tagger.render_scores_from_emb` text-anchor dot product), so it is fast and resumable (a partial
-    index on `render_score IS NULL`, migration 240, self-empties as it completes). Dispatch-only, sharded
-    4× (`image_id %% 4`), `SUPABASE_DB_URL` only.
-    **Self-healing queue (migration 198):** the engine doesn't only ADD to the review queue — each
-    run it RESOLVES stale proposed candidates so they don't pile up. Recall-neutral dismissals: a
-    pair the current rules now hard-reject, one the cross-source gate skips, or a candidate pointing
-    to a merged-away property (`_reconcile_stale_candidates`) is auto-dismissed; the now-mergeable
-    (e.g. exact-address pairs queued while the toggle was off) auto-merge. The one calibration-gated
-    dismissal: a confident visual **"different"** — `decide_visual_dismiss` auto-dismisses when NO
-    room reached High and a DISTINCTIVE room (kitchen/bathroom) is Low (operator toggle
-    `app_settings.dedup_forensics_autodismiss_enabled`, default on; `--no-autodismiss` /
-    `--shadow` CLI overrides). Calibrated safe: the verdict is ~binary (High/Low), the High OR-gate
-    already rescues any same-property pair with one matching room, and 0/273 operator-merged pairs
-    carried a Low. Per-run counts land in `dedup_engine_runs.auto_dismissed`. The visual layer's cached
-    LLM tools — `classify_listing_images` (migration 128), `compare_listings_visually`
-    (migration 129), and `compare_listing_site_plans` (migration 171,
-    `listing_site_plan_matches`) — are write-allowed exceptions (toolkit rule #5). A
-    `dedup_engine_runs` row (migration 130) per run powers the `/dedup` automation dashboard.
-    **Decision feedback + auditability (migration 248).** Every decision is FULLY auditable from
-    the `/dedup` Decision-history feed AND the Needs-review queue, and the operator can FLAG a
-    wrong one: `dedup_decision_feedback` is a **PROPERTY-pair-keyed** ("this merge/dismissal was
-    wrong" + `expected_outcome` should_merge/should_dismiss/unsure + free note) operator-state
-    table — keyed on the canonical `(left_property_id < right_property_id)` pair, NOT an audit-row id
-    and NOT the listing pair, so ONE flag attaches to whichever surface shows that pair and persists
-    across the pair's lifecycle (a queued candidate flagged "should dismiss" stays flagged once it
-    becomes a terminal decision — the merge/dismiss audit row carries the SAME two property_ids).
-    **Property-grain, not the listing (sreality) pair, is deliberate:** a property's representative
-    listing (`repr_listing_id`) DRIFTS when `recompute_property_stats` re-picks it, so a listing-pair
-    key would silently orphan the flag off the Needs-review card after a recompute; the audit row
-    SNAPSHOTS its `left/right_property_id` at decision time (immutable) and a candidate's property
-    pair is stable while pending, so the property pair is the stable identity on BOTH surfaces.
-    It is a labelled corpus for improving the engine; the feed filters to flagged-only. Writes via
-    the bearer-gated `POST/DELETE /dedup/feedback`; anon never reads it. **Auditability is computed,
-    not stored:** `toolkit/dedup_audit.build_audit_breakdown(detail)` is a PURE function turning a
-    decision's stored factor `detail` into rungs (each signal — pHash / cosine / forensic verdict /
-    floor-plan / address — with its measured value vs the bar it was judged on, met/unmet/info, and
-    the app_settings key(s) that govern it), so it renders identically on the history feed
-    (`list_pair_audit`) and the queue (`list_candidates`) and works on every historical row. The
-    rungs deep-link to the exact Settings knob via `settingAnchorId` (the Settings rows carry stable
-    `id="setting-<key>"` anchors + a hash-scroll/force-open). The SPECIFIC pictures a decision turned
-    on are resolved at READ time by `decision_evidence` (the pHash near-identical PAIRS recomputed
-    from stored phashes with the engine's category exclusions, the compared plans, or the deciding
-    room) — no decision-time `detail` bloat, faithful for any old row.
-    **Vision is batch-pre-warmed (cost):** `dedup_batches.yml` (migration 197 — `dedup_batches`
-    / `dedup_batch_requests`) runs the engine's FREE funnel and submits the surviving cross-source
-    pairs' classify/compare/site_plan vision through the Anthropic Message Batches API (50% off,
-    recall-identical), writing the SAME caches the sync tools write
-    (`scripts/submit_dedup_batch.py` + `ingest_dedup_batch.py`). The daily engine run then REPLAYS
-    unchanged over the warm caches → identical merges for free (a cache miss falls back to a sync
-    call). The lane NEVER merges; merging stays the engine's job.
-    **Category compatibility** is enforced at every classify site AND the `merge_properties`
-    chokepoint via the single `room_taxonomy.category_main_compatible` helper: a sale ≠ a rental
-    (`category_type`), and a flat ≠ a house — **except** the ONE sanctioned cross-type **dum ↔
-    komercni** (the same building listed as a house on one portal, commercial on another, is one
-    real-world property — irrespective of sub-type). A cross-type pair takes the FIRST listing's
-    `MatchProfile` / priority order (no special-case logic). **The geo strong-signal auto-merge gates
-    on BOTH families** (`profile.geo_auto_merge_allowed and profile_for(b).geo_auto_merge_allowed`), so
-    a cross-type pair never geo-auto-merges on a weak proximity signal alone (komercni isn't
-    geo-auto-merge-validated) — it queues, symmetrically regardless of order, and still merges via the
-    exact-address / pHash / visual paths or operator review. This is distinct from the **asset-link**
-    grain (migration 224), which links genuinely *different* units in one building (a `byt` + its
-    ground-floor `komercni`, a `dum` + its `pozemek`) WITHOUT collapsing them.
-    **Geo path (single-dwelling: house / land / commercial), default OFF.** Apartments key on
-    street + disposition; houses/land/commercial have no usable disposition, so they are matched by
-    **geo-proximity** instead — but through the EXACT SAME `resolve_pair` brain (pHash → CLIP cosine
-    → forensic compare → floor/site-plan gate), not a separate deterministic path. `run_engine(geo=True)`
-    swaps only: the loader (`_load_geo_eligible`), the candidate FILTER (`classify_geo_pair`, keyed on
-    `geo_cell_key` = obec + rounded coord + category bucket + offering; `geo_category_bucket` collapses
-    dum+komercni into one cell so the cross-type co-locates), the area tolerance
-    (`dedup_geo_area_max_pct`, default ±20% — wider than the street 10% because the visual flow still
-    confirms), and the queue tier (`'geo'`). The geo classify maps its deterministic `auto_merge` →
-    `candidate`, so a geo signal NEVER merges on its own — the free-first visual flow (with FACADE /
-    SITE-PLAN priority via `room_priority_for`, rule #15 PR-1) is the sole merge gate. The geo path
-    also does NOT apply the **cross-source gate** (`_RunContext.cross_source_only=False`): that gate is
-    justified only where rule B auto-merges same-source exact-address relists for free (the street
-    path), and geo has no rule B — so a same-portal house re-post still reaches the visual stage.
-    **Geo is its OWN scheduled run** (`dedup_engine.yml` cron `0 3,9,15,21`, `--geo-only`), gated by the
-    `dedup_geo_enabled` master switch. It is **NOT** bolted onto the street full-scan / candidate-drain
-    anymore: doing so produced ZERO geo candidates/merges because it (a) ran AFTER the street pass on the
-    shared `--max-seconds` (deadline-starved by the ~100K-eligible street scan) and (b) on the candidate
-    drain inherited the street pass's APARTMENT `restrict` (`_load_geo_eligible(restrict=apartment
-    candidates)` → no single-dwelling rows). The dedicated geo run is **PAID, not `--free`** (bounded by
-    `--max-vision-calls`): single-dwelling cross-portal pairs have DIFFERENT photos (pHash can't), so the
-    forensic FACADE compare is the only thing that resolves them — it auto-merges the confident ones and
-    enqueues the ambiguous (`tier='geo'`) for review. **Geo ALWAYS enqueues its unresolved pairs** (rule
-    #15 (E): a geo signal never auto-merges on proximity alone, so everything else queues) — the geo pass
-    overrides `--free`'s general enqueue suppression (that suppression is a STREET optimization; geo has no
-    warmer and cross-portal houses share no photos, so the queue is geo's only surfacing mechanism). So the
-    scheduled PAID run auto-merges the confident ones + queues the rest, and an ad-hoc `--geo-only --free`
-    still surfaces the co-located candidates (just without the auto-merge) instead of silently dropping them.
-    `--geo` forces it onto any non-dirty run ad-hoc (ignores the setting); the real-time DIRTY drain never
-    runs geo. The geo pass writes NO separate `dedup_engine_runs` row (the dashboard reads the latest single
-    row); its decisions land in `dedup_pair_audit` + the `tier='geo'` candidate queue. (Follow-up: extend
-    the `dedup_batches` warmer to the geo funnel so geo gets street's 50%-off warm-cache cost model; a geo
-    candidate-drain mode; the cross-portal coord-divergence cell-miss — a same house geocoded ~270m apart on
-    two portals falls in different geo cells.)
-    Merges are **reversible**:
-    `toolkit/property_identity.py` re-points `listings.property_id` onto the survivor + soft-retires
-    the loser (`properties.status='merged_away'`) and logs `property_merge_events` so
-    `unmerge_group` is a deterministic replay. Because matching keys on street, a listing needs a
-    parsed street to participate (sreality detail rows carry one; other portals as their parsers
-    improve). Region stats also read the property grain (migration 103).
-16. **Watchdog and Browse share one definition of "matches."** Saved watchdog filters live
-    in `notification_subscriptions` (migration 056); the background matcher in
-    `api/notifications.py` builds its WHERE clauses from the **same** logic Browse uses
-    (`toolkit/comparables._shared_filter_where` + the shared `_city_quality_clauses`
-    helper), so the two surfaces can never disagree on what a filter means.
-    `notification_dispatches` is the **unified notification event table** (migration 206 —
-    physical name kept; conceptually "notifications"): one source-generic, **property-grain**,
-    append-only event row per `(source_kind ∈ {watchdog, collection_monitor}, subject, change_kind)`,
-    deduped by a single per-event **`dedupe_key`** (`wd:{sub}:new:{property_id}` once-ever;
-    `wd:{sub}:price_drop:{snapshot_id}` **per-snapshot**, so a property that keeps dropping fires
-    once per real cut — and so does the collection-monitor producer). Each row carries provenance
-    (`trigger_price_czk` / `prev_price_czk` / `trigger_snapshot_id`) and producer-stamped
-    `target_channels` (the delivery-layer contract, see `docs/design/notifications-unified.md`).
-    Rows are re-pointed onto the survivor on a property merge by the operator-state reconciler
-    (rule #18, `toolkit/operator_state.py`, collapse key `(subscription_id, collection_id,
-    change_kind, trigger_snapshot_id)`, NULL-safe) so they never orphan onto a `merged_away`
-    property. **Delivery and detection are SEPARATE:** in-app delivery is the event row itself
-    (`channel='in_app'`); external channels (email/Telegram, Sprint N) deliver via a dedicated
-    `channel_sends` ledger draining `target_channels` — NOT a `channel`-column widen. (The old
-    migration-057 comment claiming a new channel was "a one-line ALTER" was **false**: migration
-    096 dropped `channel` from the dedup key, so the grain could never carry a second channel —
-    which is why delivery gets its own ledger.) **A SECOND producer is live (Sprint C):
-    `match_monitored_collections_once` (api/notifications.py, own daily cadence
-    `notifications_monitor_interval_seconds` + window `notifications_monitor_window_days`) emits
-    `source_kind='collection_monitor'` dispatches for every property in a `monitoring_enabled`
-    collection — `price_drop`/`price_rise` (per-snapshot), `inactive`/`reactivated` (lifecycle;
-    `reactivated` reads the prior `inactive` dispatch as the durable "was dead" marker since
-    `listings.inactive_at` is cleared on reactivation), and `new_source` (a sibling listing on a
-    new portal). It is set-based (one `INSERT…SELECT` per kind across all monitored collections),
-    collection-scoped dedupe (`cm:{collection}:{kind}:{discriminator}`), `target_channels` stamped
-    from the collection's `notify_channels`. Every detector is **anchored on `monitor_since`**
-    (= `greatest(collection_properties.added_at, collections.monitoring_enabled_at)`, migration 230)
-    so it fires only for changes observed AFTER the operator started watching that property — a
-    price drop / delisting / new source that PREDATES membership never notifies (the false-positive
-    the anchor closes). `monitoring_enabled_at` is stamped by a trigger on every false→true
-    monitoring transition, so the anchor is correct across all write paths.
-    `broker_change` is in the `change_kind` CHECK
-    (migration 209) but NOT yet emitted — `listing_broker_public` is current-state-only with no
-    change signal; the kind is reserved for when one exists. The unified in-app **Notifications**
-    page (`/notifications`) reads BOTH producers off one LEFT-join feed (the watchdog-only INNER
-    join became a LEFT join + a `collections` join so monitor rows aren't dropped), and a red nav
-    unread badge polls `GET /notifications/unread-count`; `POST /notifications/mark-all-seen`
-    clears it.)
-17. **City-quality indexes are a normalized, operator-curated time series.** `curated_cities`
-    + `city_index_revisions` + `city_index_values` + `city_index_definitions` +
-    `city_population` (migration 078 onward) store per-city indexes long-form, so a new index
-    on next upload needs no migration; each upload appends a `source_revision` and the latest
-    is the default query target. Filtering goes through the shared `_city_quality_clauses`
-    helper and the `listings_with_city_quality` RPC, and the filters are **agenda-gated to
-    BROWSE + WATCHDOG only** (`toolkit/filter_registry.py`) — the estimation agent
-    deliberately never sees them, preserving deterministic estimate semantics.
-18. **Operator curation is PROPERTY-grain and dedup-stable** (`collections` +
-    `collection_properties(collection_id, property_id)`, `tags` + `property_tags(property_id,
-    tag_id)`, `property_notes(property_id, body, origin_listing_id)`, migration 202 — was
-    listing-grain on `sreality_id` pre-202). A tag, collection membership, or note is a fact
-    about the real-world property, not one portal's advert, so it is keyed on `property_id`
-    and **follows the property across merge/unmerge/split**. `toolkit/operator_state.py`
-    (`carry_operator_state_on_merge` + `OPERATOR_STATE_TABLES`, the single registry of every
-    property-anchored operator-state table — collections, tags, notes, AND `notification_dispatches`)
-    re-points that state onto the survivor inside the `merge_properties` transaction (SET tables
-    union with collision-collapse; APPEND tables move every row), so no operator-state row can
-    ever orphan onto a `merged_away` property — the invariant holds by construction. Adding a
-    new property-anchored operator-state table = one registry line. Unmerge/split are deliberately
-    **best-effort**: state stays on the surviving/anchor property and the reactivated/detached
-    side starts clean (the operator re-curates — nothing is destroyed, it is on the survivor).
-    Notes carry `origin_listing_id` as display provenance only ("written while viewing this
-    advert"), never as a grouping key. The Browse tag filter resolves through
-    `properties_with_tags(tag_ids)` at property grain — a property matches if ANY of its
-    listings' property carries the tags, fixing the pre-202 bug where only the representative
-    listing's tags were matched. Writes flow through the FastAPI service (property-grain routes
-    `/collections/{id}/properties`, `/properties/{id}/tags`, `/properties/{id}/notes`); the
-    browser never writes directly. **Collections carry monitoring (Sprint C, migration 211):
-    `monitoring_enabled` opts a collection into change alerts (the collection-monitor producer,
-    rule #16) and `notify_channels` is its delivery-channel pick (folded into the dispatch's
-    `target_channels`); a protected default "monitoring" collection (`is_system=true`, can't be
-    renamed or deleted) ships monitoring on. The "add to collection" affordance lives on the
-    Browse card (a layers control ADJACENT to the pipeline funnel — rule #22 keeps the funnel the
-    sole pipeline affordance), the listing-detail `CurationBlock`, and the Chrome-extension panel.**
-    **Adding notes is reachable from the Chrome-extension panel too** — it lists the property's
-    existing notes + an add box, writing through the SAME `POST /properties/{id}/notes` the
-    `CurationBlock` uses (the viewed advert's `sreality_id` as `origin_listing_id`); notes are
-    NOT batched into `POST /listings/lookup` (too heavy per index card) — the panel fetches them
-    lazily via `GET /properties/{id}/notes` on open. Tags are the one curation surface the
-    extension does not yet expose.
-    Same no-hard-delete spirit as the rest of the data model.
-19. **The sreality scrape is split by cadence (Phase 2): a fast index-walk feeds an async
-    batched detail-drain through `listing_detail_queue` (migration 105).** `index_walk.yml`
-    (`scraper.main --index-only`, `run_type='index'`) walks the full index, `touch_listings` +
-    `mark_inactive` (under the completeness guard, rule #3), and **enqueues** new/price-changed
-    ids with a priority. `detail_drain.yml` (`--drain-only`, `run_type='detail'`) claims a
-    bounded slice (`FOR UPDATE SKIP LOCKED`), fetches, and writes **batched** via
-    `db.write_detail_batch` (set-based `jsonb_to_recordset`; one transaction per ~100 listings;
-    snapshot-on-change preserved via an `IS DISTINCT FROM` anti-join). The index-walk uses the
-    transaction pooler; the drain uses the session pooler (`connect_session()`) for prepared
-    statements. The **Tier-1 property matcher is deferred off the hot write path** — the drain
-    inserts with `property_id` NULL and `recompute_property_stats`'s straggler-attach runs the
-    same spatial match set-based (rule #15 still governs the grouping). `scrape.yml`'s combined
-    `_run_full` is retained as the **dispatch-only revert fallback** (re-add its cron to roll
-    back, no code change). The queue is the needs-detail signal; `listing_fetch_failures` stays
-    the Health-visible give-up ledger. As of Phase 4 both phases run through the **shared
-    `portal_runner`** (rule #21) and the queue is **source-generic** (`(source, native_id)`,
-    migration 108), so this same split is how every portal scrapes — sreality is just one
-    `Portal`.
-20. **Property maintenance is dirty-set incremental (Phase 3), not a full-table recompute.**
-    The writers that change a property's children — `write_detail_batch` (a content change →
-    new snapshot), `mark_inactive` / `mark_listing_inactive` (delisting), `touch_listings`
-    (re-sighting reactivation) — enqueue the affected `property_id` into `dirty_properties`
-    (migration 106) with a cheap set-based `INSERT ... ON CONFLICT DO UPDATE SET marked_at`.
-    `property_maintenance.yml` (`recompute_property_stats --incremental`, cron `*/5`) attaches
-    new stragglers (singletons only — the old geo Tier-1 matcher was removed; grouping is the
-    dedup engine's job, rule #15) and recomputes **only the queued properties** (the full
-    recompute SQL scoped to
-    `id = ANY(...)`), so a new/edited/delisted listing reaches `properties` + Browse within ~5
-    min and the job is **O(changes)**, not O(all properties). The drain is race-free +
-    terminating: it claims rows dirtied at/before a run cutoff and deletes only those untouched
-    since (a mid-run re-dirty bumps `marked_at` past the cutoff → survives to the next pass).
-    New listings (`property_id` NULL) are resolved by straggler-attach, not the queue. The
-    **daily full sweep** (`recompute_property_stats.yml`, no `--incremental`, 04:15 UTC) is the
-    reconcile backstop — it recomputes every property and clears the queue, so a missed enqueue
-    self-heals within 24h. The street+disposition dedup engine (`dedup_engine.py`, daily) runs
-    separately (rule #15). Both
-    maintenance jobs share the `sreality-property-maintenance` concurrency group so they never
-    mutate `properties` concurrently. Inline merge/unmerge still call `recompute_one` directly
-    (they keep the survivor current without waiting for the cron). One accepted lag: a
-    byte-identical reactivation (a delisted listing reappears with no content change) produces
-    no snapshot, so it waits for the daily sweep — rare, documented.
-21. **Every portal runs through ONE shared framework (Phase 4); per-portal code is a fetcher +
-    a parser + a config row — no per-portal branches in shared code.** The pieces:
-    `scraper/portal_base.py` (`BasePortalClient` — the shared HTTP session/headers, `RateLimiter`
-    pacing + 429/403 penalize, retry/backoff, `ListingGoneError` on 404/410); `scraper/portal.py`
-    (`PortalConfig` + `load_portal_config`, backed by the operational columns on the `portals`
-    registry — `supports_complete_walk`, `categories`, `split_threshold` — migration 107); and
-    `scraper/portal_runner.py` (the one `run_index_walk` + `run_detail_drain`, parameterized by a
-    `Portal` object). sreality (`SrealityPortal` in `scraper/main.py`), bazos (`BazosPortal` in
-    `scraper/bazos_main.py`), and bezrealitky (`BezrealitkyPortal` in `scraper/bezrealitky_main.py`)
-    all implement the `Portal` protocol; `_run_index_walk` / `_run_detail_drain`, `bazos_main.main`,
-    and `bezrealitky_main.main` are thin delegators to the runner. The **only**
-    per-portal code is the fetcher (a `BasePortalClient` subclass — its `_request` does GET for
-    sreality/bazos and POST for bezrealitky's GraphQL), the parser strategy, and the
-    config — everything else (queue claim/complete/fail, the fetch pool, batched writes,
-    completeness-gated `mark_inactive`, `scrape_runs`) is shared. A genuine per-portal need is an
-    explicit method on the `Portal` protocol, justified in review — **sreality's district-split
-    (the deep-pagination-cap workaround) inside its `walk_category` is the one sanctioned hook**.
-    The needs-detail queue is **source-generic** (`listing_detail_queue` keyed on
-    `(source, native_id)` + `detail_ref`, migration 108) so every portal shares the one queue and
-    the one drain. A portal that cannot prove a near-complete walk sets
-    `supports_complete_walk=false` and the runner never marks its listings inactive (rule #3) —
-    bazos (partial single-category walks) is such a portal; bezrealitky is NOT (its GraphQL
-    `totalCount` + uncapped paging make a per-category walk provable-complete, so it sets
-    `supports_complete_walk=true` and marks delistings inactive, source-scoped).
-22. **The deal pipeline is single-valued, property-grain operator state (migration 205).**
-    `property_pipeline` holds at most ONE card per property (PK on `property_id`) at one
-    `stage_id` (`pipeline_stages`, a TABLE not an enum so the operator can rename/reorder/add
-    columns with no migration — the curated-index precedent). **A "bookmark / interested" is
-    just the entry stage** (`pipeline_stages.is_entry`), not a separate flag: presence of a
-    `property_pipeline` row == the property is in the pipeline. Single-valued-ness is why it
-    can't live at advert grain (unlike the m2m curation of rule #18) — so it gets its OWN
-    merge reconciler, `toolkit/pipeline_identity.reconcile_pipeline_on_merge`, called in the
-    `merge_properties` transaction alongside the curation carry: it snapshots BOTH sides'
-    pre-merge cards to the append-only `property_pipeline_events` ledger, then keeps the
-    most-advanced stage on the survivor — **TERMINAL-AWARE**: a live (non-terminal) stage
-    always beats a closed/terminal one, so a merge never buries a live deal under `lost`/`won`;
-    within the same terminality the higher `position` wins (tie → later `updated_at`).
-    `reconcile_pipeline_on_unmerge` restores the reactivated retired property's card from that
-    snapshot (**lossless**: the reactivated property gets its pre-merge stage back, and in the
-    move-if-empty case the survivor's absorbed card is dropped so it isn't duplicated); the
-    survivor's own stage is left as-is — a chained-merge-safe best-effort, so a survivor that
-    absorbed the retired's stage keeps it until the operator adjusts. Split stays best-effort
-    (the card rides the anchor property). Writes go through the bearer-gated API (`POST/DELETE /pipeline/cards` to
-    bookmark/un-bookmark, `PATCH /pipeline/cards/{id}` to move stage — a stage change stamps
-    `entered_stage_at` and logs a `moved` event, a pure within-stage reorder logs nothing;
-    `GET /pipeline/stages`). **The "Přidat do pipeline" affordance is the shared `<FunnelIcon>`
-    (a funnel with three arrows, filled body = in-pipeline) used on EVERY pipeline
-    surface — the listing-detail header (`PipelineToggle`, in the top action bar next to "New
-    estimation", NOT buried in CurationBlock), every Browse card (`BookmarkButton`), the
-    stage-manager's entry-stage indicator (`is_entry` — filled = the entry stage), AND the
-    Chrome-extension panel (the glyph reproduced by value in vanilla TS — separate territory,
-    no React import) — so the "into the pipeline" concept reads as one icon everywhere.** The
-    extension bookmarks AND changes stage property-grain like every other surface: it reads
-    `property_id` + membership (incl. `stage_id`) off the batched `POST /listings/lookup` (and
-    `GET /pipeline/stages` for the select options) and writes through these same
-    `POST/DELETE /pipeline/cards` (bookmark/remove) + `PATCH /pipeline/cards/{id}` (move) routes —
-    no extension-specific write path, no second secret. The `/pipeline` kanban board reads
-    `property_pipeline_public` + `pipeline_stages_public` hydrated against `properties_public`
-    (street + `mf_gross_yield_pct` from the view; one thumbnail per card via the shared
-    `fetchImagesByListingIds` + `imageSrc()` Browse helpers; the **canonical broker** per card via
-    two batched anon reads — `fetchListingBrokersByIds` (`listing_broker_public`) + `fetchBrokersByIds`
-    (`brokers_public` contact), NOT the raw drift-prone `properties_public.broker_*` — the name links
-    to `/brokers/{id}`, contact in a native-title hover). The board offers basic **property-type
-    filtering** — multi-select `category_main` chips (Byty / Domy / Komerční / …) whose labels come
-    from the SAME generated filter registry as Browse's TYPE tabs (`FILTER_REGISTRY`, never a parallel
-    hardcode); only the types actually present in the pipeline get a chip, and the filter is
-    client-side (the board is small). **On the kanban board** stage moves are
-    **drag-and-drop ONLY** (`@dnd-kit`, `Pipeline.tsx`: each column a `useDroppable`, each card a
-    `useDraggable` with a grip handle; one optimistic move mutation; keyboard moves via the
-    `KeyboardSensor`). The drag→move resolution is the pure, unit-tested `planMove(activeId,
-    overId, cards)` (same column / dropped-outside / unknown card → no-op). The per-card stage
-    `<select>` was **removed** there (the card instead carries a trash → inline two-step confirm →
-    optimistic remove-from-pipeline, the app's destructive-action pattern). `<DragOverlay
-    dropAnimation={null}>` so the released card doesn't fly back to origin before the optimistic
-    move lands it in the target column. **On the listing-detail header** (a record page, no board
-    to drag onto) `PipelineToggle` changes the stage with a native `<select>` (the app's
-    single-choice control) tinted the stage colour + a remove `✕`, and the not-yet-in-pipeline
-    state is the funnel "Přidat do pipeline". The **Chrome-extension panel** mirrors this exactly
-    (a native `<select>` + remove `✕` in a soft-tinted pill, vanilla TS). All three surfaces
-    (kanban drag, listing-detail select, extension select) call the SAME `movePipelineCard` PATCH
-    (stamps `entered_stage_at`, logs the `moved` event) with the same optimistic-update shape — one
-    audited write, never a second-grade path. `PipelineCard` (`property_pipeline_public`) exposes
-    `stage_id` for the select's value.
-    **Stages are operator-curated from the board's "Spravovat fáze" panel** (`POST
-    /pipeline/stages` create — the `key` slug is derived server-side from the label; `PATCH
-    /pipeline/stages/{id}` rename/recolor/retag/crown-entry; `POST /pipeline/stages/reorder`
-    rewrite left-to-right order; `DELETE /pipeline/stages/{id}` soft-archive via `archived_at`).
-    Two invariants the API enforces (not just the DB): a stage can't be **both** the entry and
-    terminal, and `is_entry` may only be **set** (you re-home the single-entry crown by crowning
-    another stage, never by un-crowning the only one — the partial unique index needs exactly one).
-    Archive is refused (409) for the entry stage or any stage still holding cards — the FK is
-    `ON DELETE RESTRICT`, so cards must be moved off a stage before it retires; archived stages
-    drop out of `pipeline_stages_public` but their `property_pipeline_events` history survives.
-    Stage colour uses the shared **`<TagColorPicker>`** swatch grid (the one component behind the
-    filter-preset save modal, the tag pickers, and this stage editor — the single colour-picking
-    control app-wide; don't re-inline a swatch grid), and the entry-star / "konec" (terminal)
-    controls carry `<InfoIcon>` (i) hints (native `title=`, the codebase's tooltip convention).
+**Numbers are cited by code/tests/design-docs — never renumber.** Full rationale, edge cases, and
+incident history: `docs/architecture.md` § Architectural rules.
 
-## Toolkit and API rules
+1. **Migrations are append-only.** Never edit an existing numbered file; schema changes go in a new
+   `NNN_*.sql`, applied via the Supabase MCP. Additive = autonomous; destructive = pause for OK +
+   pg_dump. Prune dead schema with a new forward migration, not by editing history. (see `database` skill)
+2. **Snapshots on content change only.** Never write `listings` without computing the content hash and
+   appending a `listing_snapshots` row when it differs from that listing's latest snapshot. Every write
+   path into `listings`.
+3. **Never delete; delist via `is_active=false`.** History is sacred. Infer inactive ONLY after a
+   ~complete index walk (≥99.5%, `INDEX_MIN_COMPLETENESS`) AND only for rows additionally unseen 24h+
+   (`min_unseen_hours`); partial walks (`--limit` / `--detail-only` / `--max-pages`) must never flip
+   rows; a false flip self-heals on next sighting (`touch_listings`); a gone detail fetch (404/410 →
+   `ListingGoneError`) flips that one listing immediately. Every flip stamps `inactive_at`.
+4. **`last_seen_at` is driven by index sightings + successful detail fetches only; failed fetches never
+   touch it** (else repeated failures would falsely delist a live listing). The `unchanged` freshness
+   path also doesn't bump it — its signal is `listing_freshness_checks.checked_at`.
+5. **Failed detail fetches are tracked, not dropped** — `listing_fetch_failures(sreality_id, attempts,
+   last_error, given_up)`; failures jump to the front of the refetch queue; `given_up` after 5 attempts;
+   the row is deleted on success.
+6. **Images download to Cloudflare R2** (bytes, not just URLs). `images` tracks per-image state
+   (`storage_path`, `download_attempts`); a separate phase after the scrape, no-op without R2 env vars.
+7. **No new dependencies without justification.** Prefer the stdlib; each `pyproject.toml` entry needs a reason.
+8. **Latest-wins + snapshot history.** `listings` is current state; every meaningful change appends a
+   `listing_snapshots` row. Estimates capture the `snapshot_id` of each comparable (retrospective audit)
+   — don't build as-of semantics into live queries.
+9. **`listing_freshness_checks` is append-only + ephemeral** (rows >30d safe to delete; no auto-prune).
+   It's observability + throttling, not history — the history table is `listing_snapshots`.
+10. **`amenities` + `amenity_fetches` are an OSM mirror, not history** — written by `find_anchor_amenities`
+    on cache miss; a POI's category is set by the *query*, not OSM tags; taxonomy in `toolkit/amenities.CATEGORY_TAGS`.
+11. **`transit_lines` + `transit_line_fetches` are a parallel OSM mirror** for route geometry (migration
+    028) — written by `find_comparables_along_axis`; one row per (relation, member way); tram/subway/bus; 30-day TTL.
+12. **`estimation_runs` is the single source of truth for every estimation** (UI / API / ClickUp / agent).
+    Sync mode INSERTs once with a terminal `status`; failed runs still persist a row (HTTP 200 +
+    `status='failed'`); re-runs INSERT with `parent_run_id`; originals are immutable. Sources: `ui`/`api`/`clickup`.
+13. **`building_runs` is the paste-a-building parent.** Children are `estimation_runs` linked via
+    `building_run_id` + `building_unit_id`; the unit list is operator-curated JSONB. Status:
+    `pending → extracting → awaiting_input → estimating → success|failed`; `awaiting_input` is the
+    human-in-the-loop gate; `units_proposal` (agent) vs `units` (confirmed) are kept separate.
+14. **Condition scoring is two-axis (building + apartment).** Raw `listings.condition` stays the source;
+    the two derived `listings.{building,apartment}_condition_level` (1..5, NULL unscored) + the
+    `listing_condition_scores` cache (keyed `(sreality_id, snapshot_id)`) are written together by
+    `score_listing_condition` in one latest-wins transaction. Filter on the derived columns, not the
+    coarse `condition_assessment`.
+15. **Multi-portal listings sit behind a thin `properties` parent (migration 091); grouping is out-of-band,
+    never inline at insert (new rows get a singleton property).** Two eligibility paths feed **one**
+    `resolve_pair` decision tree (pHash fast-path → CLIP cosine tier → forensic visual compare →
+    floor/site-plan gate): **apartments** key on **street + disposition**; **single-dwelling house / land /
+    commercial** key on **geo-proximity** (its OWN scheduled run, `dedup_geo_enabled`). A geo/visual signal
+    never auto-merges on proximity alone — the forensic **High** verdict is the sole auto-merge gate; the
+    floor-plan gate only ever adds conservatism (`different_layout` dismiss; both-2D `inconclusive` queues;
+    `no_2d_plan` / one-sided → proceed). `db.mark_inactive` / `active_count` are source-scoped; category
+    compatibility is enforced at merge (sale≠rent, flat≠house — except the one sanctioned **dům↔komerční**
+    cross-type); merges are reversible (`property_merge_events` / `unmerge_group`). Applies to anything
+    touching `listings.property_id`, the dedup engine, or `properties` rollups. Full engine spec:
+    `docs/architecture.md` § rule 15 (+ `docs/design/multi-portal-dedup.md`, `dedup-byt-precision.md`, `clip-visual-embeddings.md`).
+16. **Watchdog + Browse share one definition of "matches"** (`_shared_filter_where` + `_city_quality_clauses`).
+    `notification_dispatches` is the unified, property-grain, append-only event table with **two producers**
+    (`watchdog` + `collection_monitor`), a per-event `dedupe_key` (`:new:` once-ever, `:price_drop:{snapshot_id}`
+    per-snapshot), producer-stamped `target_channels`, and a `monitor_since` anchor so a change predating
+    membership never fires. **Delivery is separate from detection**: in-app = the row itself; external channels
+    drain via a `channel_sends` ledger, not a `channel`-column widen. Merges re-point rows (rule #18).
+17. **City-quality indexes are a normalized, operator-curated time series** (`curated_cities` + `city_index_*`
+    + `city_population`) — a new index needs no migration; latest revision wins; agenda-gated to **Browse +
+    Watchdog only** (the estimation agent never sees them, preserving deterministic estimates).
+18. **Operator curation is PROPERTY-grain and dedup-stable** (`collections`, `tags`, `property_notes`, all
+    keyed on `property_id`; migration 202). `toolkit/operator_state.py` (`OPERATOR_STATE_TABLES` registry —
+    including `notification_dispatches`) re-points state onto the survivor inside the `merge_properties`
+    transaction, so no row orphans onto a `merged_away` property; unmerge/split are best-effort. Collections
+    carry monitoring (`monitoring_enabled` + `notify_channels`). Writes go through the API; a new
+    property-anchored table = one registry line.
+19. **The scrape is cadence-split: a fast index-walk feeds an async batched detail-drain via
+    `listing_detail_queue`** (migration 105). Index-walk (`--index-only`) walks the full index,
+    `touch_listings` + completeness-gated `mark_inactive`, and enqueues; detail-drain (`--drain-only`) claims
+    a bounded slice (`FOR UPDATE SKIP LOCKED`) and writes batched via `write_detail_batch`. New rows land
+    `property_id` NULL (grouping deferred, rule #15). Every portal runs this same split through the shared
+    `portal_runner` on the source-generic queue.
+20. **Property maintenance is dirty-set incremental, not full-table.** Child-changing writers enqueue
+    `property_id` into `dirty_properties` (migration 106); `property_maintenance.yml` (`--incremental`, `*/5`)
+    attaches new singletons + recomputes only queued properties (O(changes)); the daily full sweep (04:15) is
+    the reconcile backstop. Both share the `sreality-property-maintenance` concurrency group.
+21. **Every portal runs through ONE shared framework (Phase 4); per-portal code is a fetcher + parser +
+    config row — no per-portal branches in shared code.** `portal_base` / `portal` / `portal_runner`; one
+    source-generic `listing_detail_queue`. A portal that can't prove a near-complete walk sets
+    `supports_complete_walk=false` and is never marked inactive from index absence (rule #3). The one
+    sanctioned per-portal hook is sreality's district-split.
+22. **The deal pipeline is single-valued, property-grain operator state** (migration 205): `property_pipeline`
+    holds ≤1 card per property at one `pipeline_stages` stage (a TABLE, not an enum); "bookmark" == presence of
+    a row at the entry stage. It has its OWN merge reconciler (`reconcile_pipeline_on_merge`, TERMINAL-AWARE — a
+    live stage always beats a closed one; snapshots to `property_pipeline_events`) + lossless unmerge. Writes
+    through the bearer-gated API. The affordance is the shared `<FunnelIcon>` on EVERY surface (Browse card,
+    listing header, kanban, Chrome extension); kanban moves are drag-and-drop only; stages are operator-curated
+    (entry/terminal invariants API-enforced).
 
-These rules govern the analytical toolkit (`toolkit/`) and the FastAPI service that exposes
-it (`api/`). They do not apply to the scraper.
-
-1. **Tools return facts, not opinions.** No "recommended price", no "this looks like a good
-   deal." Tools return data + provenance. Reasoning happens at the agent layer.
-2. **Standard envelope on every tool's return value:**
-   ```python
-   {
-     "data": ...,
-     "metadata": {
-       "tool": "tool_name",
-       "filters_used": {...},      # echo of actual params after defaults applied
-       "result_count": int,
-       "queried_at": iso8601,
-       "data_freshness": iso8601,  # max(last_seen_at) of considered listings, or null
-     }
-   }
-   ```
-3. **Every tool excludes `given_up = true` listings** from `listing_fetch_failures` by
-   default. An `include_unreliable: bool = False` parameter overrides.
-4. **"Active" filter is `is_active = true AND last_seen_at > now() - interval 'X days'`
-   (default 7).** Don't trust `is_active` alone — a listing not seen for 30 days is
-   functionally inactive.
-5. **No writes from the toolkit, with ten explicit exceptions.** Read-only by default. The
-   exceptions are:
-   - `verify_listing_freshness` (and `scraper.freshness.freshness_check` that it wraps), so
-     an agent can confirm a comparable is still valid before relying on it. Every call logs
-     to `listing_freshness_checks` and may also write a new `listing_snapshots` row, flip
-     `listings.is_active`, or both.
-   - `find_anchor_amenities`, which writes the OSM-mirror tables `amenities` /
-     `amenity_fetches` on a cache miss.
-   - `find_comparables_along_axis`, which writes the OSM-mirror tables `transit_lines` /
-     `transit_line_fetches` (migration 028) on a cache miss.
-   - `summarize_listing`, which writes a structured Claude summary to `listing_summaries`
-     (keyed on `(sreality_id, snapshot_id)`) on cache miss.
-   - `compare_listing_images`, which writes the pairwise visual comparison to
-     `listing_image_comparisons` (canonical-ordered pair) on cache miss.
-   - `extract_building_units`, which writes the structural unit decomposition to
-     `building_unit_extractions` (keyed on `(sreality_id, snapshot_id)`) on cache miss —
-     the vision extractor behind the building-paste flow.
-   - `read_floor_plan`, which writes a structured Claude-vision analysis of one
-     operator-supplied attachment to `building_attachment_analyses` (keyed on
-     `(attachment_id, model)`) on cache miss. Only callable inside the building flow; the
-     agent handler in `api/agent.py` enforces that the `attachment_id` belongs to the run's
-     `building_run_id`.
-   - `discover_condition_markers`, which writes a structured list of Czech "condition
-     markers" to `listing_marker_extractions` (keyed on `(sreality_id, snapshot_id)`) on
-     cache miss — feeds the condition-scoring marker dictionary.
-   - `score_listing_condition`, which writes per-listing building/apartment condition levels
-     (1..5) + matched marker_ids + per-axis confidence to `listing_condition_scores` (keyed
-     on `(sreality_id, snapshot_id)`) AND updates the two derived columns on `listings`
-     (`building_condition_level`, `apartment_condition_level`) in one transaction, guarded by
-     a latest-wins subquery.
-   - `summarize_region_dispositions`, which writes the per-disposition box-plot annotations
-     for a Browse > Stats cohort to `region_disposition_annotations` (migration 104, keyed on
-     `(region_hash, day)`) on cache miss. Unlike the snapshot-keyed caches above this one
-     invalidates by **calendar day**: a region's annotations are generated once per day so
-     repeat browser sessions don't re-bill. `region_hash` is the sha256 of the caller's
-     deterministic serialization of the active filter set.
-   Every write-allowed exception caches an expensive external/LLM fact locally and
-   auto-invalidates (a new snapshot, a model bump, or the calendar day rolling over yields a
-   fresh key); the LLM/OSM source is the truth, the table is a mirror. No other toolkit
-   function may write. The API service should still connect with a read-only role if Postgres
-   permits; these ten paths then need a separately-elevated route. For now we ship with one
-   role and discipline.
-6. **Spatial queries use `geography(point, 4326)`.** Always `ST_DWithin(geom, target_geom,
-   radius_m)`. Never compute distance in Python.
-7. **psycopg directly, not supabase-py.** Same reasoning as the scraper.
-   `prepare_threshold=None` for pgbouncer-mode pooler.
-8. **API auth gated by `API_TOKEN`.** When the env var is set, every endpoint except
-   `/health` requires `Authorization: Bearer <token>`. When unset (local development) the
-   gate is a no-op. `/health` stays open so Railway healthchecks keep working. `/admin/*`
-   (Settings-page surface: skills, `app_settings`, agent tool inventory) is **bearer-gated
-   like every other write surface** — its router carries `Depends(require_token)`. (It was
-   historically exempt on the theory that the private Railway URL was the perimeter, but that
-   URL ships inside the public SPA bundle, so the exemption gave no real protection; the SPA's
-   Settings page already sends the token on every `/admin` call, so gating it is transparent.)
-   Every route except `/health` requires the token; *no* write path bypasses the FastAPI
-   service. The token is shared with every caller (including the Chrome extension and any
-   ClickUp caller); no per-user identity layer.
-9. **Trace format on `estimation_runs.trace` is versioned.** `TRACE_SCHEMA_VERSION` lives in
-   `api/estimation_runs.py`; every row's `trace.version` matches that constant at write time.
-   Shape: `{version, summary, steps: [{n, kind, started_at, duration_ms, output_summary,
-   ...}]}`. Step `kind` ∈ `'tool_call' | 'computation' | 'reasoning'`. The reasoning kind is
-   emitted per LLM turn by the agent loop. Steps NEVER store full tool outputs — only
-   `output_summary`; the full data lives in dedicated columns (`comparables_used` for the
-   cohort, etc.). This caps row size at single-digit kilobytes regardless of cohort size.
-   Bumping the version is a deliberate change; future readers must handle older versions.
-   Full per-step tool outputs that the operator may want to drill into later live in a
-   separate side-table `estimation_trace_payloads` (migration 043), keyed on
-   `(estimation_run_id, step_n)`. Populated only for `tool_call` steps that opt in via
-   `StepHandle.set_full_output(...)`. Reachable through
-   `GET /estimations/{id}/trace/{n}/payload`. Same retention discipline as
-   `listing_freshness_checks`: rows older than 30 days are safe to delete; no automated
-   pruner.
-10. **Agent skills live in the `skills` table; the on-disk `skills/<name>/SKILL.md` file is
-    the canonical seed.** Each skill is a bundle of (system prompt + allowed tool whitelist +
-    per-provider preferred model + loop limits). Migration 029's seed `INSERT` is the importer
-    of the markdown file's content; at runtime the DB row is the source of truth. Operators
-    edit via `/settings` (UI) or `PUT /admin/skills/{name}` (API). Every update writes a
-    `skills_history` row via trigger — same pattern as `app_settings_history` (migration 020).
-    When adding a new skill: commit a new `skills/<name>/SKILL.md`, write the corresponding
-    seed `INSERT` in a new migration, apply.
-11. **LLM provider is pluggable; `llm_calls.provider` records which backend served each call.**
-    `api/providers/` defines a `CompletionProvider` Protocol with neutral message / tool /
-    completion types; today `anthropic` and `gemini` are wired up (default `anthropic`).
-    Adding a third provider is a new file implementing the same Protocol, registered in
-    `api/dependencies.py:_build_providers`. `LLMClient` is the audit orchestrator — every call
-    writes one row to `llm_calls` with provider, model, tokens, USD cost, and a `called_for`
-    tag.
-
-## Auth and secrets
-
-All secrets are GitHub Actions secrets and/or Railway env vars in production. Backend code
-references them by name; never write a value into a committed file (`.env` is gitignored).
-API keys are **backend-only** — never `VITE_*`-prefix a backend secret; the `frontend/` build
-must not see them.
-
-Database:
-- `SUPABASE_DB_URL` — Postgres connection string (Supabase → Database → Connection string →
-  Transaction pooler, port 6543; password embedded). **The one the scraper / API / scripts
-  actually use.** Required.
-- `SUPABASE_DB_SESSION_URL` — Session-mode pooler connection string (Supabase → Database →
-  Connection string → Session pooler, port 5432; same host/user as `SUPABASE_DB_URL`, just
-  port 5432 not 6543). **Optional**; used only by the scraper's hot detail-write loop
-  (`connect_session()`, i.e. the Phase-2 detail-drain's batched writes) so its repeated SQL
-  gets prepared statements. Unset → falls back to `SUPABASE_DB_URL`. Set it as an Actions
-  secret on `detail_drain.yml` (and the Railway env var only if the API ever calls
-  `connect_session()`).
-- `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` — set as Actions secrets for forward
-  compatibility; the v1 scraper connects to Postgres directly and does not need them.
-  (`SUPABASE_SERVICE_ROLE_KEY` is the 2025 `sb_secret_...` token, **not** a JWT.)
-
-Image storage (Cloudflare R2, S3-compatible):
-- `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET_NAME` (usually
-  `sreality-images`).
-- **TWO runtimes need these, set them on BOTH:** (1) the **scraper** (GitHub Actions secrets)
-  to *download* image bytes — optional there, a missing var just logs a skip and exits zero;
-  (2) the **FastAPI service** (Railway env vars) to *serve* them, since `GET /images/{key}`
-  presigns R2 (the frontend's image path since PR #255). If the **API** service is missing
-  them, every listing photo 503s and the UI looks imageless even though the DB reports the
-  bytes "stored" — the API logs a boot WARNING and `GET /health` reports
-  `image_storage: "unconfigured"` in that case.
-
-LLM + maps (FastAPI service + scoring jobs):
-- `ANTHROPIC_API_KEY` — required for the URL parser, summarize/vision tools, condition
-  scoring, and the agent under `provider='anthropic'`.
-- `GEMINI_API_KEY` — Google AI Studio key; required for the agent under `provider='gemini'`.
-  A request selecting an unconfigured provider returns 502; missing at boot is not fatal.
-- `MAPY_CZ_API_KEY` — Mapy.cz REST key; geocodes locality strings and powers `/maps/*`.
-- `MAPY2_CZ_API_KEY` (optional backup) — a second Mapy.cz key. `scraper.geocoding` and the
-  `/maps/suggest` proxy fail over to it automatically **only** when the primary is rejected
-  (401/403) or rate-limited (429); a Mapy outage (5xx) does not trigger failover. Set it in
-  **both runtimes** that geocode — the GitHub Actions secret (already injected into the bazos /
-  idnes detail drains + the seed/backfill jobs) and the **Railway API service env var** (powers
-  `/maps/suggest` + URL-parse geocoding). Unset → no-op, primary behaviour unchanged.
-- `LLM_DAILY_COST_WARN_USD` (optional, default `5.0`) — soft cross-provider warning
-  threshold; `LLMClient` logs one WARNING per day when the `llm_calls.cost_usd` sum first
-  crosses it. Each provider's own console spend cap is the hard guard.
-
-API service:
-- `API_TOKEN` — bearer-token gate (no-op when unset, for local dev). See Toolkit rule #8.
-- `CORS_ALLOW_ORIGINS` — CSV of allowed origins; must include the Chrome extension's
-  `chrome-extension://<id>` origin and the SPA origin.
-- `STUCK_ROW_SWEEP_DISABLED`, `NOTIFICATIONS_MATCHER_DISABLED` (optional flags) — disable the
-  startup sweep of stuck estimation/building runs, and the background watchdog matcher loop,
-  respectively. Default: both enabled.
-
-Notification delivery (Sprint N — `channel_sends` ledger + `api/transports/` + the outbox loop,
-rule #16; all OPTIONAL, dark until set):
-- `RESEND_API_KEY` + `EMAIL_FROM` — the Resend email transport (`api/transports/email_resend.py`).
-  Both required for `is_configured()`; transactional/self-notification scope only (Resend AUP
-  forbids cold outreach — outreach gets a separate EU vendor). Railway API env.
-- `TELEGRAM_BOT_TOKEN` — the Telegram Bot API transport (`api/transports/telegram.py`). Railway
-  API env. The recipient `chat_id` lives in `app_settings.notification_telegram_chat_id`.
-- `SPA_BASE_URL` — SPA origin for notification deep links (`{SPA_BASE_URL}/listing/{id}`).
-- `OUTBOX_DRAIN_DISABLED` (flag) — force-off the delivery outbox loop. The loop ALSO only starts
-  when ≥1 transport `is_configured()`, so it's a true no-op until a key above is set + redeploy.
-- Operator destinations are `app_settings` rows (operator-editable, history-tracked):
-  `notification_email_to`, `notification_telegram_chat_id` (empty = that channel skipped);
-  `notifications_outbox_interval_seconds` paces the loop. A watchdog opts in via
-  `notification_subscriptions.channels`, a collection via `collections.notify_channels`.
-
-Scraper orchestration:
-- `SREALITY_COUNTRY_ID` (optional, default `112` = Czech Republic).
-- `SCRAPE_CHAIN_TOKEN` (optional fine-grained PAT: this repo, Actions read+write) — lets the
-  scrape workflow re-dispatch itself for tighter-than-cron cadence; no-op without it.
-- `GITHUB_ACTOR` — CI context, used for curated-cities upload attribution.
-
-Frontend / extension (build-time only, inlined into the browser bundle — *not* backend
-runtime): `VITE_SUPABASE_URL` + `VITE_SUPABASE_ANON_KEY` (the publishable anon key, safe in
-the browser), and `VITE_API_BASE_URL` / `VITE_API_TOKEN` (and the extension's
-`EXT_API_BASE_URL` / `EXT_API_TOKEN` that map to them). These follow the Path 1 posture: the
-token is embedded in a build shipped only to trusted operators.
-
-## LLM-backed parsing
-
-`scraper.source_dispatcher.parse_listing_url` is the single entry point for any listing URL
-(sreality or otherwise). It classifies the URL by domain and routes to either the
-deterministic sreality flow (`scraper.url_parser`, unchanged) or an LLM-driven per-source
-parser under `scraper/source_parsers/`. Today's allowlist is `bezrealitky`, `idnes_reality`
-(reality.idnes.cz), and `remax` (remax-czech.cz); everything else falls through to a
-best-effort generic parser that always reports `parse_confidence='best_effort'`. (Note: bazos
-is ingested by its own crawler into `listings`, not through this on-demand URL parser.)
-
-The LLM path:
-1. Cache check against `parsed_url_cache`. Key is sha256 of the canonicalised URL (lowercase
-   scheme/host, no query, no trailing slash). Hit → return cached spec, no LLM, no cost.
-2. Fetch HTML, send to Claude with the system prompt from `app_settings.llm_parse_system_prompt`
-   and the per-source user prompt from `scraper.source_parsers.<source>`. The model is
-   `app_settings.llm_parse_model` (default `claude-sonnet-4-5`, from `api/llm_client.py`).
-3. The LLM is required to invoke `record_listing` exactly once with every field in a
-   `{value, confidence}` envelope. Any deviation raises `ParseError` and surfaces as a 502
-   from `/estimations/preview` or a `failed` row from `POST /estimations`.
-4. If the page didn't yield lat/lng, geocode the locality string via Mapy.cz
-   (`scraper.geocoding`). The geocode confidence rolls into
-   `parse_confidence_per_field['lat'/'lng']`.
-5. Store the full extraction + spec + warnings in `parsed_url_cache` with a 7-day TTL.
-
-Operator-tunable parser behaviour lives in `app_settings` (system prompt, model name) — edits
-take effect on the next preview/estimation, no deploy. Every prior value is preserved in
-`app_settings_history` (migration 020 trigger). Every call is recorded in `llm_calls` with
-token counts (incl. cache-read/write splits), USD cost, duration, and the optional
-`estimation_run_id`; `called_for='parse_url'`.
-
-## LLM-backed analysis
-
-Several analytical toolkit functions reach for Claude. Each caches its result locally and
-auto-invalidates, logs to `llm_calls` under a distinct `called_for`, and is a write-allowed
-exception per Toolkit rule #5. System prompts and model IDs are operator-tunable via
-`app_settings` (model defaults `claude-sonnet-4-5`).
-
-- `summarize_listing` (`toolkit/summaries.py`, migration 027, cache `listing_summaries`) —
-  structured Czech summary of one snapshot: `headline`, `key_highlights`, `concerns`,
-  `condition_assessment`, `target_audience`, plus location/building/apartment summaries.
-- `compare_listing_images` (`toolkit/image_similarity.py`, migration 027, cache
-  `listing_image_comparisons`) — Claude-vision pairwise comparison across six fixed dimensions
-  (`exterior`, `kitchen`, `windows_and_light`, `floor_finish`, `lighting`, `styling`) plus an
-  `overall_similarity`. Image bytes pulled from R2 server-side via boto3 and base64-encoded.
-  Vision is materially more expensive than text (~$0.05/pair) — the cache matters most here.
-- `extract_building_units` (`toolkit/building_extraction.py`, migration 036, cache
-  `building_unit_extractions`) — structural decomposition of a multi-unit building into a unit
-  proposal; the vision extractor behind the building-paste flow.
-- `read_floor_plan` (`toolkit/floor_plan.py`, migration 044, cache
-  `building_attachment_analyses`, keyed on `(attachment_id, model)`) — vision analysis of one
-  operator-supplied attachment (floor plan, drawing, photo).
-- `discover_condition_markers` (`toolkit/condition_markers.py`, migration 064, cache
-  `listing_marker_extractions`) — mines Czech technical-state phrases ("zateplená budova", "po
-  kompletní rekonstrukci") to feed the condition-scoring marker dictionary.
-- `score_listing_condition` (`toolkit/condition_scoring.py`, migration 072, cache
-  `listing_condition_scores`) — two-axis building/apartment condition levels (1..5) from the
-  curated rubric + marker dictionary. See architectural rule #14.
-- `summarize_region_dispositions` (`toolkit/region_annotations.py`, migration 104, cache
-  `region_disposition_annotations`) — a one-to-two-sentence factual annotation per
-  per-disposition Kč/m² box plot in Browse > Stats, from the same `ppm2_box` payload that
-  drives the chart. Cached per `(region_hash, day)` — invalidates by calendar day, not by
-  snapshot. Powers the `summarize-1` annotated-charts feature; FACTS not opinions (toolkit
-  rule #1) — it describes the distribution, never recommends a price.
-
-**Vision image downscaling is unified in `toolkit/vision_images.py` — one helper, two
-tiers.** Every image→LLM call routes R2 bytes through `image_block(r2, key, max_edge)`
-(download → Pillow downscale → base64) rather than hand-rolling base64 per call. Two
-semantic constants pick the tier: `COMPARISON_MAX_EDGE = 768` for photo comparison /
-classification (`classify_listing_images`, `compare_listings_visually`,
-`compare_listing_images`) — sub-megapixel is ample and, crucially, *below* Anthropic's
-~1.15 MP resize cap, so it actually cuts vision tokens to ~⅓ (the cost lever); and
-`DOCUMENT_MAX_EDGE = 1568` for reads where fine text/markers matter (site-plan compare,
-condition scoring/markers, building-extraction listing photos) — that *is* Anthropic's own
-cap, so the model sees the same pixels it would have anyway (quality-neutral; just less
-upload + no 200k prompt-assembly blowups). Anthropic bills tokens on the post-resize size,
-so anything ≥ the cap costs the *same* tokens — the saving only appears below it. **Operator
-attachments (`read_floor_plan`, building-extraction custom attachments) are deliberately
-NOT routed through this** — they carry arbitrary mime (PDF/PNG line-art) where the JPEG
-re-encode would corrupt PDFs and degrade crisp text; they keep their full-fidelity base64
-path. The forensic `compare_listings_visually` is the one call whose verdict auto-merges, so
-its tier is gated: `scripts/validate_vision_models.py` (workflow
-`validate_vision_models.yml`) A/Bs a candidate `(model, max_edge)` against every historical
-`High` verdict and only a green run authorizes flipping its model to Haiku / its edge to 768.
-
-## Secondary rent reference (MF Cenová mapa nájemného)
-
-Every **rental** estimate carries a second, independent reference figure from the Czech
-Ministry of Finance's quarterly *Cenová mapa nájemného* (a hedonic-model reference rent per
-territory), shown ALONGSIDE the comparables-based primary estimate — it never overrides it.
-Stored on `estimation_runs.reference_rent jsonb` (migration 131; NULL = sale run / territory
-miss / no revision ingested yet). Surfaced on Estimation Detail, the Chrome-extension panel,
-the `/estimations` + `/estimate_yield` API payloads, and as a Browse map choropleth layer
-(VK1–VK4 selectable, optional Kraje overlay — reproduces the official MF map).
-
-- **Source store (migration 132, history-tracked):** `rent_map_revisions` (one row per ingested
-  XLSX; `file_sha256` UNIQUE so re-fetching an unchanged file no-ops) + long-form
-  `rent_map_values` (per RÚIAN territory × VK1–4, standard + novostavba rent) +
-  `rent_map_adjustments` (per-VK amenity Kč/m², older + novostavba tables). The `*_public` views
-  are latest-revision-wins (the curated-cities pattern, rule #17). The Browse map reads the
-  materialized `rent_map_choropleth` (polygons + the four VK rents, REFRESHed on each ingest) so
-  the anon read is a precomputed scan under the 3 s statement timeout.
-- **The join:** the spreadsheet's `Kód obce` IS the ČÚZK/RÚIAN code = `admin_boundaries.id`
-  (verified: all 7,630 codes match — 1,582 `ku` + 6,048 `obec` — with zero id-space collision).
-  The calc resolves the subject's lat/lng to its containing `ku`/`obec` polygon (PIP, same
-  pattern as `toolkit/comparables`) and looks up the rent by that code.
-- **The calc:** `toolkit.rent_map.compute_reference_rent` is **READ-ONLY — NOT a new toolkit
-  write exception (rule #5)**: base reference rent (VK from the disposition's leading room count:
-  1→VK1 … ≥4→VK4) + per-amenity adjustments (balkón/terasa/vybavenost/garáž/výtah, + *jiný
-  konstrukční materiál* for new builds), × area. New builds (`condition='novostavba'`) use the
-  novostavba reference column + novostavba adjustment table; everything else uses the older-flat
-  column + older adjustments. Best-effort: any miss → NULL, never fails an estimation run. It
-  reproduces the MF sheet's own worked example exactly (Litoměřice older 3+1, 68 m², +výtah
-  +balkon +garáž → 291 Kč/m² → 19 788 Kč).
-- **Ingest (write path, out of the read-only toolkit):** `api.rent_map.ingest_bytes` →
-  `insert_revision` (parse → revision INSERT → COPY values/adjustments → REFRESH the matview).
-  Refreshed two ways: the monthly `fetch_rent_map.yml` workflow (`scripts.fetch_rent_map`, scrapes
-  the current XLSX off the MF *infografika* page — MF updates 4×/year) AND a manual `.xlsx` upload
-  / "Fetch latest now" from the Settings page (`POST /admin/rent-map/*`). The XLSX is parsed with
-  stdlib `zipfile`+`xml.etree` (no `openpyxl`). No new secrets — uses `SUPABASE_DB_URL`.
-- **MF gross yield Browse filter (migration 133).** Every **sale apartment** carries a derived
-  `listings.mf_gross_yield_pct` (= MF reference monthly rent × 12 / asking price × 100) +
-  `mf_reference_rent_czk`, computed set-based by the `recompute_mf_gross_yields()` SQL function
-  (PIP-resolve territory → rent-map join → ÷ price). NULL where not computable (non-apartment,
-  rental, no territory) **and** where the asking price is implausible for a sale (`< 100 000` CZK —
-  excludes "cena v RK"/placeholder + rent-magnitude prices mis-tagged `prodej`, which would
-  otherwise yield absurd %; genuine high-yield deals are preserved). The function runs **hourly**
-  (`recompute_mf_yields.yml` → `scripts.recompute_mf_yields`) and **after each rent-map ingest**
-  (inside `scripts.fetch_rent_map`); cheap + idempotent (`is distinct from` guard). Exposed on
-  `listings_public` / `properties_public` and filterable in Browse **and** Watchdog via the
-  `min/max_mf_gross_yield_pct` registry filter (`_UI_AGENDAS`, float range slider) — Map/Table
-  auto-dispatch `.gte/.lte` on `properties_public`, the Stats RPC `browse_stats_properties` gained
-  two params, and the Watchdog matcher + `_shared_filter_where`/`ComparableFilters` carry it for
-  saved alerts. Real-data distribution sanity: median ~3.5%, p99 ~10%. The same recompute pass also
-  stores the full formula **breakdown** as `listings.mf_reference_rent jsonb` (migration 134: territory,
-  VK, novostavba flag, `base_per_m2`, per-amenity `adjustments[]`, `total_per_m2`, area,
-  `monthly_rent_czk`) — exposed on `listings_public` and rendered on the sale **listing-detail header**
-  so the operator sees the exact numbers behind the stored rent/yield (always consistent — one pass
-  writes all three columns).
+Full rationale, edge cases, and incident history: read `docs/architecture.md` before modifying anything
+these rules touch.
 
 ## Coding conventions
 
-- Python 3.12. Type hints on every function signature.
-- Prefer the stdlib. Reach for a dependency only when stdlib is awkward.
-- No comments unless the WHY is non-obvious. Don't narrate WHAT the code does.
-- No multi-paragraph docstrings. One-line docstrings are fine for module heads.
-- `requests` for HTTP, `psycopg` for DB. Don't add `httpx`, `aiohttp`, `sqlalchemy`, or
-  `supabase-py` without a strong reason.
-- Keep files small and single-purpose: `sreality_client.py` is HTTP only, `parser.py` is
-  JSON-to-row mapping only, `db.py` is database I/O only.
-
-## Adding a new scraper field without breaking existing data
-
-1. Add the column with a new numbered migration (`alter table listings add column ...`). Never
-   touch `001_initial.sql`.
-2. Update the parser in `scraper/parser.py` to extract the field.
-3. Update the upsert in `scraper/db.py` to include the new column.
-4. Backfill old rows: either leave them NULL (acceptable if the column is nullable) or run a
-   one-off SQL update from the `raw_json` column, which already contains the full source
-   record.
+- Python 3.12, type hints on every signature. Prefer the stdlib; justify each dependency.
+- No comments unless the WHY is non-obvious; no multi-paragraph docstrings (one-liners fine).
+- `requests` for HTTP, `psycopg` for DB — don't add `httpx` / `aiohttp` / `sqlalchemy` / `supabase-py` lightly.
+- Small single-purpose files: `sreality_client.py` = HTTP only, `parser.py` = JSON→row only, `db.py` = DB I/O only.
 
 ## How to test changes
 
-- **Locally:** one-time setup `pip install -e ".[dev,api,geo]"`, then `pytest -q` (or
-  `pytest tests/path -q` for a subset). The interpreter is `python3` (there's no bare
-  `python` on PATH). This mirrors exactly what CI runs.
-- **In CI:** every push runs `.github/workflows/test.yml` (`gh run watch` to tail it). CI +
-  branch protection on `main` is the gate that makes autopilot safe — it's the reliable
-  test signal if local Python deps aren't installed.
-- End-to-end without polluting the DB: `--dry-run` (logs what would be written, writes
-  nothing).
-- Single listing: `--detail-only <sreality_id>`. Small live run: `--limit 10`.
+- **Locally:** one-time `pip install -e ".[dev,api,geo]"`, then `pytest -q` (or `pytest tests/path -q`).
+  Interpreter is `python3`. `scripts/test-summary.sh` runs quiet pytest + prints only failures. Mirrors CI.
+- **CI:** every push runs `.github/workflows/test.yml` (`gh run watch`, or `scripts/logs.sh <run-id> [pattern]`
+  to fetch pre-filtered logs) — CI + branch protection is the autopilot safety net.
+- No-DB end-to-end: `--dry-run`. Single listing: `--detail-only <id>`. Small live run: `--limit 10`.
 
-## Refreshing per-source HTML fixtures
+## Secrets
 
-The LLM-driven parsers (`scraper/source_parsers/`) are tested against saved listing HTML in
-`tests/fixtures/source_html/`. Real listings get taken down or change layout, so every few
-months the fixtures need a refresh. Don't fetch live in tests — that would burn LLM credit and
-break offline runs.
-
-Refresh (CLI, fastest): `gh workflow run fetch-fixtures.yml --ref <branch>` (add `-f`
-inputs to override URLs). Or via the browser: GitHub repo → **Actions** → **Fetch + anonymize
-source HTML fixtures** → **Run workflow** → pick branch / optional URLs → **Run workflow**. It
-fetches each URL, runs the anonymization in `scripts/fetch_and_anonymize_fixtures.py`, and
-commits the resulting `*_sample.html` files back to the same branch. The skipif tests in
-`tests/scraper/test_source_parsers/test_real_fixtures.py` light up automatically once the files
-exist.
-
-Anonymization scope: phones → `+420 XXX XXX XXX`, emails → `agent@example.cz`, street numbers
-(`123/45`) → `XXX/YY`. Listing prices and the surrounding HTML structure are preserved — public
-data the parsers need. Agent names are too varied to scrub by regex; if a fixture leaks one,
-hand-edit the file.
-
-## How to manually trigger the scrapers
-
-The sreality pipeline is **split by cadence (Phase 2)**: `index_walk.yml` ("Scraping: Sreality
-index walk", cron `*/15`) feeds `detail_drain.yml` ("Scraping: Sreality detail drain", cron
-`*/15`). `scrape.yml` ("Scraping: Sreality combined walk") is the **dispatch-only fallback** —
-the proven combined index+detail `_run_full`, kept for instant revert (re-add its `schedule:`
-cron, disable the two new ones) and ad-hoc full walks. The bazos crawl is **cadence-split**
-like sreality (bazos walks 14 nationwide scopes, ~1500 index pages — a combined run starves the
-drain): `bazos_index_walk.yml` ("Scraping: Bazos index walk", cron `0 */6`, full walk +
-mark_inactive + enqueue) feeds `bazos_detail_drain.yml` ("Scraping: Bazos detail drain", cron
-`45 * * * *`, bounded `--max-seconds`). The bezrealitky scrape is
-`scrape_bezrealitky.yml` ("Scraping: Bezrealitky scraper (pilot)", every 6h + dispatch; runs
-both index walk + detail drain in one job via `bezrealitky_main`). The maxima scrape is
-`scrape_maxima.yml` ("Scraping: Maxima Reality scraper (pilot)", every 6h + dispatch; the
-~220-listing catalogue fits both phases in one job via `maxima_main`). The mmreality scrape is
-`scrape_mmreality.yml` ("Scraping: M&M Reality scraper (pilot)", cron `50 */6` + dispatch —
-every request via the residential `SCRAPER_PROXY_URL` (Cloudflare 403-blocks datacenter IPs);
-runs both phases in one job via `mmreality_main`, bounded by `--max-pages`/`--max-detail`). The remax
-scrape is `scrape_remax.yml` ("Scraping: RE/MAX scraper (pilot)", every 6h + dispatch; runs both
-phases in one job via `remax_main`, bounded by `--max-detail` + a `--max-seconds` budget so the
-~7,900-listing backlog drains over several ticks). The idnes scrape is
-**cadence-split** like sreality (iDNES is large — ~2400 index pages, ~60k listings — so a
-combined run's full index starves the drain): `idnes_index_walk.yml` ("Scraping: iDNES Reality
-index walk", `idnes_main --index-only`, cron `15 */6`, full complete-walk + mark_inactive +
-enqueue) feeds `idnes_detail_drain.yml` ("Scraping: iDNES Reality detail drain", `--drain-only`,
-hourly cron `30 * * * *`, bounded by a `--max-seconds` wall-clock budget; with
-`SCRAPE_CHAIN_TOKEN` it re-dispatches itself while the queue has work, for near-continuous
-backlog drains). There is no combined bazos/idnes fallback workflow anymore — sreality's
-`scrape.yml` is the only retained combined fallback (its `_run_full` is the instant revert for
-the split); for the other portals an ad-hoc combined run is `python -m scraper.<portal>_main`
-locally. The dedup/properties track adds
-`property_maintenance.yml` (**dirty-set incremental, cron `*/5`** — attaches new stragglers as
-singletons + recomputes only changed properties; rule #20),
-`recompute_property_stats.yml` (the **daily full-sweep reconcile** at 04:15 — recomputes every
-property + clears the dirty queue), `dedup_engine.yml` (street+disposition dedup engine +
-auto-merge; rule #15 — THREE scheduled modes, ONE `resolve_pair` decision tree (the brain),
-three work-lists: a **FULL SCAN** every 6h that DISCOVERS new dups across the market; a
-**CANDIDATE DRAIN** every 2h (`--candidates`) that re-decides ONLY the properties in
-still-proposed `/dedup` candidates so the queue **self-clears in O(queue)** regardless of the
-full scan's deadline frontier; and a **DIRTY DRAIN** hourly at :45 (`--dirty`, Wave 4c) that
-re-decides ONLY the street groups touching a just-dedup-ready property
-(`dedup_dirty_properties`, migration 242) so a **new cross-portal listing merges within ~minutes**
-instead of waiting hours (the watchdog-grain goal). **The enqueue is a real-time CHANGE signal,
-NOT enrichment progress** (`scraper.db.mark_properties_dedup_dirty_for_images`, called by the CLIP
-tag job): a property lands here only when a just-tagged listing is (a) now FULLY tagged, (b) its
-property has a street+disposition listing (**eligibility** — the street-only dirty drain can never
-merge one without, geo is skipped on `--dirty`), AND (c) the tagged listing is **recent**
-(`first_seen_at` within `_DEDUP_DIRTY_RECENCY_DAYS`, a genuinely NEW arrival). Without (b)+(c) the
-market-wide CLIP backfill / a new portal's back-catalogue floods the queue with un-mergeable /
-already-full-scanned rows — the flood that stalled it twice (201k, 78.5% ineligible); anything the
-gates drop is still deduped by the 6h full scan. The dirty drain's eligible LOAD is **SCOPED to
-the claimed properties' street groups** (`restrict_street_groups`) — not a full-market scan — via the
-**stored `listings.street_name_key`** (migration 256): `_claimed_street_groups` reads the dirty
-properties' `street_id` + `(coalesce(obec_id,-1), street_name_key)`, and the load (`_ELIGIBLE_SCOPED_SQL`)
-UNION-joins those claimed keys against `listings` as **unnest-JOINs the planner index-seeks PER claimed
-key** (the street_id arm via migration 127's index, the name-key arm via 256's
-`(coalesce(obec_id,-1), street_name_key)` partial expression index) — NOT an `OR` (validated to collapse
-to one full-eligible bitmap scan). Street groups are obec-bounded (the name key is obec-scoped; a
-`street_id` is one physical street), so the scoped load is **complete** — it carries each dirty
-property's existing peers, so a dirty property still
-re-decides against its whole group, while staying **O(dirty)** in BOTH load and pair-work. The
-`only_groups_with_property_ids` filter still gates the RESOLVE to dirty-containing groups, so the
-scoped load is a pure perf optimization layered under that correctness gate (no fragile SQL
-street-key replay); race-free claim/clear like `dirty_properties` (rule #20). `street_name_key` is
-THE single source `scraper.street.street_name_key` (also what the engine groups on live via
-`street_group_keys`), stamped at every `listings.street` write path via that ONE function
-(`scraper.db._set_street_name_key` at ingest + ALL the bulk street backfills: `backfill_portal_streets`
-/ `backfill_bazos_street_locality` / `backfill_address_point_streets` — the weekly coord→street
-resolver), out of the content hash, backfilled by `scripts.backfill_street_name_key`. Four guards hold stored == function:
-golden-case tests pin the normalization, a write-path test asserts every backfill's UPDATE stamps the
-column, the migration-264 presence CHECK (`listings_street_key_presence`) fails a keyless street write
-LOUDLY at write time, and the weekly sampled-parity job (`street_key_parity.yml` →
-`scripts/check_street_key_parity.py`) alerts via the workflow-failure monitor on any stored key
-drifting from the function (a normalizer edit requires the `backfill_street_name_key.yml all=true`
-re-key; the parity failure is the alarm for forgetting it). The ultimate backstop remains that the 6h
-full scan recomputes the key LIVE (never reads the column), so any drift is latency-only, never a
-wrong or lost merge. The claim is **NEWEST-FIRST + bounded** (`--max-dirty`,
-3000 on the cron) and the queue is **TTL-bounded** (`_prune_stale_dedup_dirty`, 24h): the real-time
-lane is a LATENCY optimization backstopped by the full scan, so it serves the FRESHEST dedup-ready
-listing first (the "merge in minutes" SLO holds even under a transient backlog) and evicts rows
-older than the TTL **that a COMPLETED full-scan cycle has provably covered** (`marked_at <
-dedup_scan_state.last_cycle_started_at`, migration 261 — no completed cycle yet → evict NOTHING;
-the original unconditional TTL claimed "the full scan has already covered them", which was FALSE
-while the full scan head-restarted at ~9% coverage — eviction was silent work loss) — so an
-un-drainable backlog can never pin the head, and eviction never discards uncovered work. **The 6h
-full scan itself is CURSOR-ROTATED** (migration 261, `dedup_scan_state`): groups iterate in sorted
-key order resuming after `cursor_key`, each run advances the frontier, reaching the end of the
-list completes the CYCLE (stamps `last_cycle_*`, resets the cursor) — so the WHOLE market is
-covered every ~2–3 days instead of the head ~9% being re-scanned forever (the tail structurally
-never reached). The dirty/candidate drains have their own work-lists and stay cursor-free. (This replaced the original **FIFO** claim, which — with the clear
-gated on a non-truncated run — let a June-backfill head that never finished within the 20-min budget
-be re-claimed every hour forever: the queue grew to 201k and never drained. FIFO is the wrong order
-for a latency SLO; the full scan is the tail's backstop.) The **dirty cron runs
-`--floor-plan-budget 0`**: the real-time lane pays NO inline floor-plan vision (a cold call
-downloads plan images from R2 + Sonnet ~15s each; a batch of them blew the wall-clock budget →
-truncate → never clear), consuming only warm verdicts and DEFERRING the rest to the 6h full scan /
-the batch warmer — keeping the hot path fast so it always finishes-and-clears. **The dirty cron
-runs in its OWN concurrency group** (`group: dedup-engine${{ ... '-dirty' }}`) so the slow batch
-runs (full scan / candidate / geo, all in `dedup-engine`) can never starve or cancel it; safe to
-run concurrently because `merge_properties` row-locks both properties `FOR UPDATE` + gates on
-`status='active'` (the same lock safety that lets dedup run concurrently with property-maintenance),
-so concurrent merges serialize per-property and a redundant re-decide is an `already_merged` no-op.
-**The claim clears INCREMENTALLY, per completed street group** (`run_engine`'s
-`resolved_property_ids` out-collector): a claimed property clears once EVERY group containing it
-(a listing dual-keys into 'id:' + 'name:' groups) was fully scanned — so a deadline/pair-cap-
-truncated run still clears the slice it finished and only the unprocessed remainder re-drains.
-(The original all-or-nothing clear kept the ENTIRE claim on truncation; prod data showed 4/5
-dirty runs truncating on pure per-pair DB cost — ~0.5-0.75 s/pair × >1,600 pairs vs the 1200 s
-budget — so the same slice re-processed hourly and `dirty_cleared` pinned at 0. Per-group clear
-makes progress monotonic regardless of budget: correctness-by-construction, not cap tuning.)
-**The per-pair cost floor itself is fixed by the run-scoped `_ProbeCache` + group-batched pHash**:
-CLIP-completeness / floor-plan ids / site-plan presence are per-LISTING facts memoized for the run
-(O(n) probes per group, not O(n²)), and `_phash_group_counts` computes a whole street group's pair
-counts in ONE round trip per exclusion-profile (`resolve_pair(group_sids=…)`; per-pair fallback
-without it). **Scoped runs also consult PRIOR verdict-backed dismissals** (`dismissed_prior` +
-`_record_auto_dismissed` markers): a pair the engine already confidently dismissed is skipped
-unless either side gained photo evidence since (`images.clip_tagged_at` > `reviewed_at`), and
-`_write_pair_audit` refuses records identical to one logged within 7 days — the audit table logs
-decisions, not run cadence (pre-fix: ~5.8x duplicate dismissal rows). Full scans never consult
-(cursor-rotated: one re-decision per cycle is the designed refresh).
-**Each dirty run
-records `dedup_engine_runs.dirty_queue_depth` (backlog at run start) + `dirty_claimed` (its slice)**
-(migration 255) **plus `dirty_cleared` + `dirty_truncated`** (migration 258, NULL on other run
-modes) — `cleared==0` while `dirty_queue_depth` stays high across runs is the silent-livelock guard
-the FIFO stall lacked. **EVERY run row additionally records `run_kind` ('full' | 'candidates' |
-'dirty') + the run-level `truncated` + a real `started_at`** (migration 262): a chronically
-deadline-cut FULL SCAN is the signal that matters most — TTL eviction hands work to the full scan,
-so eviction is only safe while scans actually cover the market (the 2026-07 audit found the
-pre-cursor scans silently truncating at ~9% of it; the migration-261 cursor + cycle-gated TTL fix
-the coverage, and `truncated` on `run_kind='full'` rows is the alarm if it regresses). "Latest
-run" readers order by `id`/`ended_at` (insert order) — NOT `started_at`, which would sort a long
-scan's row below dirty runs that started after it. The `/dedup`
-dashboard shows a "Dirty queue" stat + a stall banner, and the Health page raises an amber/red
-banner. The shared, unit-tested `assessDirtyQueue` (`frontend/src/lib/dedupQueueHealth.ts`) is the
-single source of that status for both surfaces, and it keys on **`dirty_cleared`, not depth**.
-**Market gauges are decoupled from run activity** (migration 265): `eligible`/`flagged_*` are NULL on
-scoped runs (the ~9s full-table aggregate only runs on full scans) — dashboards read gauges from the
-latest `run_kind='full'` row and activity from the latest row of any lane; the geo pass writes its own
-`run_kind='geo'` rows (its `eligible` is the geo lane's count, excluded from street gauges). Health keys:
-"draining" means cleared>0 in the recent window (the 24h TTL prune shrinks depth whether or not
-the drain works, so a falling depth alone proves nothing), and a truncated streak with zero
-cleared is a red LIVELOCK regardless of depth (pre-258 rows fall back to the depth trend).
-All three drains compose with `--free` + the floor-plan budget), `dedup_batches.yml` ("Dedup engine (vision batch warm-up)", submit every
-6h + ingest hourly — pre-warms the engine's vision caches via the Anthropic Batches API at 50%
-off so the daily engine run merges over warm cache for free; rule #15), and
-`compute_image_phash.yml` (hourly pHash backfill, active-listing images first). Two monitor
-workflows watch the rest: `monitor_workflow_failures.yml` ("Monitoring: workflow failures", cron
-`*/30` — records failed / timed-out / startup-failed runs into `workflow_failures` so the Health
-page can list them; GitHub only emails about failed *scheduled* runs) and `llm_health.yml`
-("Monitoring: LLM pipeline liveness", hourly — goes red on ANY of: recorded `llm_calls` FAILURE
-rows in the window (`error IS NOT NULL`, migration 259 — a credit-balance error alarms
-immediately, `>= --min-failures` generic failures otherwise), OR `llm_calls` idle for hours while
-condition-scoring work is pending, OR the condition batch pipeline stale despite fresh unrelated
-traffic. The failure probe is INDEPENDENT of pending work — it closes the blind spot where a
-credit-exhausted account stayed green for ~8h because condition scoring happened to be quiet.
-`LLMClient` records the failure row on every provider exception; the check needs no Anthropic key
-of its own). Run any
-directly:
-- CLI: `gh workflow run index_walk.yml --ref <branch>` (or `detail_drain.yml`, `-f` for flags).
-  Watch with `gh run list --workflow=index_walk.yml` then `gh run watch`.
-- Browser: GitHub repo → **Actions** → the workflow → **Run workflow** → pick branch + optional
-  flags → **Run workflow**. (All sreality scraping workflows are prefixed `Scraping:`.)
-
-**Each scrape workflow self-declares its portal with a `# portal: <source>` tag.** A one-line
-comment near the top of a portal's index/drain/combined workflow (`<source>` = the
-`portals.source` key, e.g. `# portal: idnes`) is parsed by `scripts/generate_workflow_docs.py`
-into `WorkflowDoc.portal`, which is what the Health dashboard's per-portal "Pipeline schedule"
-panel groups on — so a new portal's cron lines surface there automatically, with **no hardcoded
-frontend map to keep in sync**. Tag only the actual ingest workflows (index walk / detail drain /
-combined fallback); shared, source-agnostic jobs (`images.yml`, `condition_scores.yml`,
-`recompute_property_stats.yml`, `dedup_engine.yml`, …) stay **untagged** (`portal: null`) and
-appear in the full Settings → Workflows list rather than any single portal's schedule. As with any
-workflow edit, regenerate `frontend/src/lib/workflowDocs.generated.ts` in the same commit
-(`python scripts/generate_workflow_docs.py`; CI's `--check` guards drift).
-
-**The split (architectural rule #19).** The cheap "which ads still exist" check is decoupled
-from the slow "download each ad" write:
-- **`index_walk.yml` (fast, frequent).** Walks the **entire** index of every category pair (no
-  `--limit`), `touch_listings` bumps `last_seen_at` on still-listed ids, `mark_inactive` flips
-  delisted ones (under the completeness guard), and new + price-changed ids are **enqueued** into
-  `listing_detail_queue` with a priority (failure-retry > price-changed > new). No detail fetch,
-  so delistings surface within minutes. Records `run_type='index'`, `index_pages>0` (what Health
-  liveness keys off). Uses the **transaction pooler** (`connect()`) — bulk set-based statements,
-  no per-listing loop.
-- **`detail_drain.yml` (slow, async, bounded).** Claims a bounded slice of the queue
-  (`--max-detail-refetches`, the workflow passes 12000), fetches details on a rate-limited pool, and writes
-  them **batched** via `db.write_detail_batch` (set-based `jsonb_to_recordset`, one transaction
-  per ~100 listings, ~0.1–0.2 s/listing). Uses the **session pooler** (`connect_session()`) for
-  prepared statements. New listings land with `property_id` NULL and become **singletons** via
-  `recompute_property_stats`'s straggler-attach (the hot write path carries no matching at all;
-  grouping is the dedup engine's job, rule #15). A gone fetch flips that listing inactive +
-  dequeues it; a transient error bumps
-  the queue row's `attempts` (given up after 5) and stays queued. Records `run_type='detail'`,
-  `index_pages=0`. The queue persists across runs, so a bounded run never loses work; a
-  SIGKILLed claim is recovered by the next run's `reclaim_stale_claims`.
-
-`mark_inactive` runs every index walk. Two safety rails make the flip safe (architectural rule
-#3): (1) each per-category flip is gated on **walk completeness** — `_walk_complete` compares the
-collected count against the API's `result_size` and skips the flip (logging `INACTIVE skipped`)
-when the walk looks truncated; (2) a gone detail fetch (HTTP 404/410 or sreality's "tato stránka
-neexistuje" body, `ListingGoneError`) flips that single listing immediately. The drain's
-failure-priority replaces the old per-walk priority retry: a failed fetch keeps its queue row at
-elevated priority.
-
-**Condition scoring** stays decoupled and is **batch-driven**: `condition_score_batches.yml`
-is the scheduled steady-state driver (Anthropic Message Batches API, 50% cost) — `submit`
-every 3h (`5 */3 * * *`) puts the next slice of unscored listings in a batch, `ingest` hourly
-(`35 * * * *`) polls + persists; one workflow, mode chosen by `github.event.schedule`. The
-synchronous `condition_scores.yml` is now a **dispatch-only fallback** (its `30 * * * *` cron
-was removed) — don't schedule both, they select the same pending listings and the sync scorer
-doesn't skip in-flight batch rows. The scoring model is `app_settings.llm_condition_model`
-(Haiku today), so batch+Haiku ≈ 25% of the original Sonnet-sync cost. Both scrape workflows
-still pass `--no-condition-scoring`. Scoring is **kraj-scoped and reuse-first** (migration 174):
-the selector targets only listings whose geo-derived `region_id` is in
-`app_settings.condition_scoring_enabled_region_ids` (operator-edited via the Settings page
-"Hodnocení stavu — kraje" toggles; empty = paused; `region_id` NULL = parked), and
-`propagate_condition_levels` copies a property's genuine score to its cross-portal siblings
-(`listings.condition_levels_propagated_from` records provenance) before every submit/backfill,
-so a duplicate never re-bills the LLM. `check_llm_health` mirrors the same scope.
-
-**Images** stay decoupled across three workflows (both halves of the scrape split pass
-`--no-image-downloads`; the drain's write phase only records image-URL rows — bytes land in R2
-via these jobs):
-- `images.yml` ("Scraping: image backlog drain (sharded)", 2-hourly) — THE deep backlog drain
-  across ALL portals, horizontally **sharded into 4 parallel jobs** (each owns the
-  `image_id mod 4 == shard` slice via `--image-shard k/4`), each with its own per-shard cap,
-  suspicious-stop circuit-breaker, and runner IP.
-- `images_fresh.yml` ("Scraping: fresh-listing image fast lane", cron `*/15` + self-chaining via
-  `SCRAPE_CHAIN_TOKEN` while work remains) — drains the newest ACTIVE listings' photos first so
-  a freshly-scraped card renders an image within minutes instead of waiting for the 2-hourly
-  drain.
-- `refresh_stale_images.yml` ("Jobs: refresh stale image URLs", every 6h) — re-enqueues active
-  listings whose un-downloaded image URLs have rotated/gone stale into `listing_detail_queue`
-  (low priority) so the detail drain repoints the URLs and the backfill can then store the
-  bytes.
-
-**Cadence:** `*/15` for each half, deliberately — frequent index walks surface delistings fast,
-while the bounded drain keeps a steady, polite fetch volume. GitHub throttles scheduled
-workflows, so effective cadence is slower; Health liveness/freshness thresholds are **per-portal
-cadence-aware** (`portals.scrape_cadence_minutes`, migration 114): `scraper_health_checks` scales
-liveness warn at 1.5× / fail at 3× the portal's cadence, and freshness warn at 1× / fail at 3×.
-sreality's cadence (60 min, ~hourly real cadence) reproduces the original 90/180 + 60/180; the 6h
-pilots (bazos/bezrealitky/idnes, cadence 360) get proportional thresholds so they aren't falsely
-red between runs. Concurrency: each workflow has its own group with `cancel-in-progress: false` — a long
-run is never killed mid-batch; the next tick queues behind it. Per-category mark_inactive commits
-immediately after each category's walk, so even a timed-out index walk leaves a consistent
-partial result.
-
-The detail-drain writes `scrape_runs` rows too (`run_type='detail'`), but only the **index
-walk** sets `index_pages>0` — so "last scrape", the liveness check, and reconciliation track
-the index walk specifically, while the 24h new/updated/error counters sum across the drain's
-`index_pages=0` rows too (see `scraper_health_checks()`, migration 105). The image backfill
-(`--images-only`) deliberately writes NO `scrape_runs` row — recording it once polluted
-liveness/reconciliation with `index_pages=0` noise.
-
-## Reading the logs
-
-The scheduled pipeline logs in two halves; the shared `portal_runner` emits the same line
-shapes for every portal (with its own `source=`), so this reads the same for bazos/idnes/etc.
-
-**Index walk** (`index_walk.yml` and the per-portal walks):
-- `CATEGORY start cm=... ct=...` per category pair
-- `INDEX offset=N estates=M total=K` per search page (offset/limit paging; sreality)
-- `SPLIT cm=... ct=... result_size=N > T: walking D districts` when a sreality category exceeds
-  the deep-pagination window and is walked per-district
-- `PLAN unchanged=N refetch=M` per category walk (per district when split) after diffing index
-  prices against the DB; `PLAN priority_retry=N` if any listings have prior failure rows
-  (sreality — the other portals go straight to ENQUEUE)
-- `ENQUEUE enqueued=N new=... changed=... priority=...` per category — the ids handed to the
-  drain via `listing_detail_queue`
-- `INACTIVE cm=... ct=... marked=N collected=M result_size=K` per category after a
-  completeness-checked mark_inactive
-- `INACTIVE skipped cm=... ct=...` per category whose walk looked truncated (flip suppressed)
-- `RECONCILE cm=... ct=... sreality=... collected=... active=...` — portal-reported total vs
-  collected vs our active DB count (drift feeds the Health page)
-- `INDEX total=N pages=M enqueued=K` once at end of the walk
-- `RUN done pages=N enqueued=M inactive=K errors=E`
-
-**Detail drain** (`detail_drain.yml` and the per-portal drains):
-- `DRAIN reclaimed stale claims=N` when a prior SIGKILLed run left claims behind
-- `DRAIN starting source=... max_claims=... workers=W batch=B budget=Ss` once
-- `DETAIL id=... gone (is_active=false)` / `DETAIL id=... error: ...` per non-ok listing
-- `DRAIN flush size=N new=... updated=... unchanged=... images=...` per batched write
-  (one transaction per ~100 listings)
-- `DRAIN progress claimed=N new=... updated=... unchanged=... gone=... errors=... buffered=...`
-  per claim chunk
-- `DRAIN time budget Ss reached at claimed=N; finalizing cleanly` when `--max-seconds` stops
-  the run before the job timeout
-- `RATE penalize status=429|403 url=...` when the portal throttles us and the limiter widens its
-  interval (auto-recovers on subsequent healthy fetches)
-- `RUN done pages=0 new=... updated=... unchanged=... gone=... errors=... claimed=...`
-
-**Image workflows** (`images.yml` / `images_fresh.yml`, `--images-only`):
-- `IMAGES start cap=... workers=... active_only=... shard=... sources=...` once
-- `IMAGES progress=N downloaded=... errors=... taken_down=... source_unavailable=...` every 50
-- `IMAGE listing_taken_down sid=... marked=N` / `IMAGE source_unavailable id=...` per classified
-  failure (an inline freshness check flips a taken-down listing inactive + bulk-marks its images)
-- `IMAGES STOP suspicious ...` when the transient-failure circuit-breaker trips (exits 75; the
-  next cron tick retries)
-- `IMAGES done downloaded=... errors=... taken_down=... source_unavailable=... attempted=...`
-
-The dispatch-only `scrape.yml` fallback additionally emits the legacy coupled-path lines
-(`PLAN cap=N deferred=M`, `DETAIL starting refetch=N workers=W`, `DETAIL progress=N/M ...`,
-`DETAIL id=... new|updated|unchanged`, `IMAGE id=... inserted=N`).
-
-A run ending with `errors > 0` is not necessarily a failure (single-listing fetch errors are
-tolerated). A run that did not emit a `RUN done` line is a real failure — check the GitHub
-Actions log for a stack trace.
+Never commit secrets (`.env` is gitignored). API keys are **backend-only** — never `VITE_*`-prefix a backend
+secret (the frontend build must not see it). **Full env-var / secrets reference** (DB, R2, LLM, maps, API,
+notifications, scraper orchestration, frontend build-time): the `toolkit-api` skill.
 
 ## What is explicitly out of scope right now
 
-- **Authentication / user management.** Single-operator platform; one shared API token, no
-  per-user identity.
-- **A public read API.** The bearer-gated FastAPI service is private (the Railway URL is the
-  perimeter); we don't expose a documented public API for third parties.
+- **Auth / user management** — single-operator platform, one shared API token, no per-user identity.
+- **A public read API** — the bearer-gated FastAPI service is private (the Railway URL is the perimeter).
 
-(ClickUp is *not* out of scope — it's a supported API consumer: ClickUp can call the FastAPI
-service for a rental-price estimate, and `'clickup'` is a reserved `estimation_runs.source`
-value. A free email notification channel is planned — tracked in ROADMAP.md, not here.)
+ClickUp is *not* out of scope (a supported API consumer; `'clickup'` is a reserved `estimation_runs.source`).
+A free email/Telegram notification channel is planned (tracked in ROADMAP, not here). Don't start anything
+out of scope without explicit direction in a new session.
 
-Do not start anything still out of scope without explicit user direction in a new session.
+## Where the detail lives
 
-## Follow-ups (deferred)
-
-Deferred and sequenced work lives in **ROADMAP.md** (the sequencing source of truth) — consult
-it rather than duplicating a list here.
-
-## Schema conventions
-
-- Sreality enum codes that we promote to typed columns are stored as Czech text labels without
-  diacritics, mirroring the existing treatment of `category_main` / `category_type`. Source maps
-  live next to the parser: `parser.CATEGORY_MAIN`, `parser.CATEGORY_TYPE`, `parser.FURNISHED`,
-  `parser.OWNERSHIP`. Unknown source codes (including sreality's `0` "not specified") return
-  `None`, never raise — same forgiving pattern that lets the parser tolerate sreality adding a
-  new code (as it did for `category_type_cb=4` / `'podil'`).
-- `has_balcony` / `has_parking` are LEGACY combined booleans. They conflate
-  balcony+terrace+loggia and parking+garage respectively. The granular columns added in
-  migration 022 (`terrace`, `garage`, `parking_lots`) are the correct fields for new analytical
-  work. The legacy columns stay populated for backward compatibility with existing queries /
-  RPCs.
-- The Czech admin hierarchy on a listing is **derived from `geom`, not parsed from the address**
-  (migration 140). `listings.obec` / `okres` / `region` (municipality / district / kraj) are set
-  by a BEFORE INSERT/UPDATE-OF-geom trigger (`listings_set_admin_geo`) that PIPs the coordinate
-  into `admin_boundaries` and walks `parent_id` — so they're populated **instantly at scrape time**
-  and **uniform across every source** (only ~5% of listings, foreign points, lack a CZ match). The
-  trustworthy anchor is the coordinate (~95% coverage, straight from each portal's map/GPS data);
-  the free-text `locality` is portal-specific display text and unreliable for grouping. The legacy
-  display `district` text column is filled from okres (or obec for Prague) only when NULL, so
-  sreality's richer "City - Quarter" labels are preserved. Don't re-derive hierarchy from `locality`;
-  read the normalized columns.
-- `listings.street` is **portal-uniform via one shared extractor, `scraper/street.py`** (migration
-  122 added the column). sreality + bezrealitky read a structured street (bezrealitky also fills
-  `house_number` / `zip`); the HTML portals mine it from a free-text locality (`street_from_locality`:
-  first segment for idnes/remax, last for maxima) or clean a regex capture (`clean_street` for bazos).
-  The ONE don't-fabricate guard (`reject_as_town`) lives here so it isn't reimplemented per portal —
-  it rejects foreign coords/countries, "Town - Quarter" forms, "okres X" qualifiers, and any candidate
-  equal to the row's own geo-derived obec/okres/region; a wrong street is worse than NULL (it poisons
-  the dedup street-key and Browse). Stored values are bare/human-readable for display; the SEPARATE
-  match-time grouping NAME key is **`scraper.street.street_name_key`** (the single home for street
-  string logic; consumed live by `toolkit.dedup_engine.street_group_keys` AND stored on
-  `listings.street_name_key`, migration 256 — don't confuse the human-readable `street` with the key):
-  a row dual-keys into `id:<street_id>` (sreality/bezrealitky) AND `name:<obec_id>:<street_name_key>`.
-  The NAME key is **obec-scoped** — a common name like "Žižkova" has 100+ active listings across dozens
-  of towns; one nationwide group blows `MAX_GROUP_SIZE=40` and gets the whole group SKIPPED, so the
-  cross-portal pairs there (HTML portals have no street_id → name group is the only place they meet a
-  sreality row) were never compared. obec-scoping keeps each town's street its own small group AND
-  blocks cross-town false merges (classify_pair has no geo check). The STORED `street_name_key` (stamped
-  at EVERY `listings.street` write path via the one function, out of the content hash like `street`) is
-  what lets the dedup `--dirty` drain scope its eligible load to the dirty street groups in SQL (rule
-  #19); the 6h full scan recomputes it live, so a stale stored key only delays, never breaks, a merge.
-  `street` / `house_number` / `zip` / `street_name_key` are OUT of the content hash, so backfilling
-  them never churns snapshots (`scripts/backfill_portal_streets.py` +
-  `scripts/backfill_street_name_key.py` re-derive from already-stored data — no re-fetch). Browse
-  street picks ILIKE `properties_public.place_search_text`, which is a **group-best** street
-  (`coalesce(p.street, l.street)`, migration 183) denormalized onto `properties` by
-  `recompute_property_stats` — so a multi-portal property matches a street even when its representative
-  listing lacks one. (The old expand-normalizer `toolkit/addresses.py` that turned `ul.`→`ulice` was
-  dead code and was removed.)
-- **Street lifecycle: resolver fills survive refetches (migration 263).** The RÚIAN coord→street
-  resolver fills `street`/`street_name_key`/`house_number` on rows whose portal page has no street —
-  so the row's next detail refetch re-parses NULL, and a plain `street = EXCLUDED.street` used to
-  CLOBBER the fill (measured: 40% of a resolver cohort lost in 2.5 days). Three rails now:
-  (1) both ingest upserts (`upsert_listing` + `_BATCH_UPSERT_SQL`) build their SET from the ONE
-  `_listing_update_set_sql()` builder, which makes the trio **preserve-if-null**
-  (`COALESCE(EXCLUDED.c, listings.c)`) — an incoming NULL never erases a stored value, a page-parsed
-  street still wins; (2) **`listings.street_source`** ('parser' | 'resolver') is durable provenance
-  (replacing the resolver's raw_json marker, which the refetch destroyed) — ingest stamps 'parser'
-  when the page yields a street, else preserves it, the resolver stamps 'resolver';
-  (3) the admin-geo trigger drops a **'resolver'** street when the listing's COORDINATES change
-  (derived from the old point → may be wrong → "wrong street worse than NULL"), and its existing
-  tail block then re-opens the resolver for the new coords. Parser streets are untouched by the
-  guard (the page re-derives them every fetch).
+| Need | Load |
+| --- | --- |
+| SQL, migrations, connection modes, Supabase MCP, schema conventions | `.claude/skills/database` |
+| Toolkit tools, FastAPI, auth, versioned trace, env-vars & secrets | `.claude/skills/toolkit-api` |
+| LLM URL parsing, cached vision/text tools, vision tiers, MF rent map | `.claude/skills/llm-pipelines` |
+| Running / debugging scrapers, adding a field, fixtures, reading logs | `.claude/skills/scraper-ops` |
+| Full rule rationale, per-portal data sources, territory deep-dives | `docs/architecture.md` |
+| Sequencing / what's next | `ROADMAP.md` → `roadmap/<track>.md` |
