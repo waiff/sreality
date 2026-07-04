@@ -418,3 +418,191 @@ def test_build_portal_from_baked_config(source):
     portal = rw._build_portal(source, default_config(source))
     assert portal.source == source
     assert hasattr(portal, "shared_rate_limiter")
+
+
+# --- count-probe lane (sreality) -----------------------------------------------
+
+
+class _CountCur:
+    def __init__(self, rows: list[Any]) -> None:
+        self._rows = rows
+
+    def __enter__(self) -> "_CountCur":
+        return self
+
+    def __exit__(self, *a: Any) -> None:
+        return None
+
+    def execute(self, sql: str, params: Any = None) -> None:
+        return None
+
+    def fetchall(self) -> list[Any]:
+        return self._rows
+
+
+class _CountConn:
+    def __init__(self, rows: list[Any]) -> None:
+        self._rows = rows
+
+    def cursor(self) -> _CountCur:
+        return _CountCur(self._rows)
+
+    def close(self) -> None:
+        return None
+
+
+def test_count_probe_sync_flags_changes_beyond_jitter(monkeypatch):
+    from scraper import main as scraper_main
+
+    monkeypatch.setattr(scraper_main, "CATEGORIES", ((1, 1), (2, 1), (3, 1)))
+    totals = {(1, 1): 105, (2, 1): 51, (3, 1): 200}
+
+    class _Client:
+        def __init__(self, cm: int, ct: int) -> None:
+            self.cm, self.ct = cm, ct
+
+        def probe_result_size(self) -> int:
+            return totals[(self.cm, self.ct)]
+
+    monkeypatch.setattr(
+        scraper_main, "_build_client", lambda cm, ct, limiter=None: _Client(cm, ct))
+    # prior: (1,1)=100 -> +5 beyond jitter=changed; (2,1)=50 -> +1 within jitter=NOT;
+    # (3,1) absent -> first sighting, recorded but never flagged.
+    monkeypatch.setattr(rw.db, "connect", lambda: _CountConn([(1, 1, 100), (2, 1, 50)]))
+    captured: list[Any] = []
+    monkeypatch.setattr(rw, "_upsert_count_state", lambda rows: captured.append(rows))
+
+    agg = rw._count_probe_sync()
+    assert agg["pairs"] == 3
+    assert agg["errors"] == 0
+    assert [(c["cm"], c["ct"], c["old"], c["new"]) for c in agg["changed"]] == [
+        (1, 1, 100, 105)]
+    assert captured == [[(1, 1, 105, True), (2, 1, 51, False), (3, 1, 200, False)]]
+
+
+def test_count_probe_sync_counts_errors_and_none_totals(monkeypatch):
+    from scraper import main as scraper_main
+
+    monkeypatch.setattr(scraper_main, "CATEGORIES", ((1, 1), (2, 1), (3, 1)))
+
+    class _Client:
+        def __init__(self, cm: int, ct: int) -> None:
+            self.cm = cm
+
+        def probe_result_size(self):
+            if self.cm == 2:
+                raise RuntimeError("http 500")
+            if self.cm == 3:
+                return None  # API withheld the total
+            return 100
+
+    monkeypatch.setattr(
+        scraper_main, "_build_client", lambda cm, ct, limiter=None: _Client(cm, ct))
+    monkeypatch.setattr(rw.db, "connect", lambda: _CountConn([]))
+    monkeypatch.setattr(rw, "_upsert_count_state", lambda rows: None)
+
+    agg = rw._count_probe_sync()
+    # (1,1) recorded (first sighting, not flagged); (2,1) raised; (3,1) None -> both errors
+    assert agg["pairs"] == 1
+    assert agg["errors"] == 2
+    assert agg["changed"] == []
+
+
+def test_maybe_dispatch_no_change_short_circuits(monkeypatch):
+    monkeypatch.setattr(rw, "_read_count_dispatch_enabled", lambda: pytest.fail(
+        "must short-circuit before reading the enabled flag on no change"))
+    assert rw._maybe_dispatch_index_walk([], 600) == {
+        "dispatched": False, "reason": "no_change"}
+
+
+def test_maybe_dispatch_disabled_records_only(monkeypatch):
+    monkeypatch.setattr(rw, "_read_count_dispatch_enabled", lambda: False)
+    monkeypatch.setattr(rw, "_post_workflow_dispatch", lambda t: pytest.fail(
+        "disabled must not POST"))
+    assert rw._maybe_dispatch_index_walk([{"cm": 1, "ct": 1}], 600) == {
+        "dispatched": False, "reason": "disabled"}
+
+
+def test_maybe_dispatch_no_token_warns_once(monkeypatch, caplog):
+    monkeypatch.setattr(rw, "_read_count_dispatch_enabled", lambda: True)
+    monkeypatch.setattr(rw, "_dispatch_token", lambda: None)
+    monkeypatch.setattr(rw, "_DISPATCH_WARNED", set())
+    with caplog.at_level("WARNING", logger="scraper.realtime_worker"):
+        rw._maybe_dispatch_index_walk([{"cm": 1, "ct": 1}], 600)
+        out = rw._maybe_dispatch_index_walk([{"cm": 1, "ct": 1}], 600)
+    assert out["reason"] == "no_token" and out["dispatched"] is False
+    assert len([r for r in caplog.records if "no token env" in r.message]) == 1
+
+
+def test_maybe_dispatch_skips_fresh_walk(monkeypatch):
+    monkeypatch.setattr(rw, "_read_count_dispatch_enabled", lambda: True)
+    monkeypatch.setattr(rw, "_dispatch_token", lambda: "tok")
+    monkeypatch.setattr(rw, "_seconds_since_last_sreality_index_walk", lambda: 120.0)
+    monkeypatch.setattr(rw, "_post_workflow_dispatch", lambda t: pytest.fail(
+        "a fresh walk must not re-dispatch"))
+    out = rw._maybe_dispatch_index_walk([{"cm": 1, "ct": 1}], 600)
+    assert out["dispatched"] is False and out["reason"] == "fresh_walk"
+
+
+def test_maybe_dispatch_triggers_when_stale_and_enabled(monkeypatch):
+    monkeypatch.setattr(rw, "_read_count_dispatch_enabled", lambda: True)
+    monkeypatch.setattr(rw, "_dispatch_token", lambda: "tok")
+    monkeypatch.setattr(rw, "_seconds_since_last_sreality_index_walk", lambda: 5000.0)
+    posted: list[str] = []
+    monkeypatch.setattr(rw, "_post_workflow_dispatch", lambda t: posted.append(t) or True)
+    out = rw._maybe_dispatch_index_walk([{"cm": 1, "ct": 1}], 600)
+    assert out == {"dispatched": True, "reason": "triggered"}
+    assert posted == ["tok"]
+
+
+def test_maybe_dispatch_triggers_when_no_prior_walk(monkeypatch):
+    # age None (no sreality index walk ever) -> not fresh -> dispatch
+    monkeypatch.setattr(rw, "_read_count_dispatch_enabled", lambda: True)
+    monkeypatch.setattr(rw, "_dispatch_token", lambda: "tok")
+    monkeypatch.setattr(rw, "_seconds_since_last_sreality_index_walk", lambda: None)
+    monkeypatch.setattr(rw, "_post_workflow_dispatch", lambda t: True)
+    assert rw._maybe_dispatch_index_walk([{"cm": 1, "ct": 1}], 600)["dispatched"] is True
+
+
+def test_post_workflow_dispatch_204_true_else_false(monkeypatch):
+    import requests
+
+    class _Resp:
+        def __init__(self, code: int) -> None:
+            self.status_code = code
+            self.text = "body"
+
+    calls: list[Any] = []
+    monkeypatch.setattr(
+        requests, "post", lambda url, **kw: calls.append((url, kw)) or _Resp(204))
+    assert rw._post_workflow_dispatch("tok") is True
+    assert f"{rw.DISPATCH_WORKFLOW}/dispatches" in calls[0][0]
+    assert calls[0][1]["json"] == {"ref": rw.DISPATCH_REF}
+    assert calls[0][1]["headers"]["Authorization"] == "Bearer tok"
+
+    monkeypatch.setattr(requests, "post", lambda url, **kw: _Resp(422))
+    assert rw._post_workflow_dispatch("tok") is False
+
+
+def test_count_probe_pass_records_and_reports_dispatch(monkeypatch):
+    monkeypatch.setattr(rw, "_count_probe_sync", lambda: {
+        "pairs": 3, "changed": [{"cm": 1, "ct": 1, "old": 100, "new": 110}], "errors": 0})
+    monkeypatch.setattr(rw, "_read_count_probe_interval", lambda: 600)
+    monkeypatch.setattr(rw, "_maybe_dispatch_index_walk", lambda changed, cooldown: {
+        "dispatched": True, "reason": "triggered"})
+    state = rw._new_state()
+    asyncio.run(rw._count_probe_pass(asyncio.Event(), state))
+    cp = state["lanes"]["count_probe"]
+    assert cp["passes"] == 1
+    assert cp["last"] == {"pairs": 3, "changed": 1, "errors": 0, "dispatched": True}
+
+
+def test_count_probe_pass_no_change_skips_dispatch(monkeypatch):
+    monkeypatch.setattr(rw, "_count_probe_sync", lambda: {
+        "pairs": 3, "changed": [], "errors": 0})
+    monkeypatch.setattr(rw, "_maybe_dispatch_index_walk", lambda *a, **k: pytest.fail(
+        "no change -> the dispatch decision must be skipped entirely"))
+    state = rw._new_state()
+    asyncio.run(rw._count_probe_pass(asyncio.Event(), state))
+    assert state["lanes"]["count_probe"]["last"] == {
+        "pairs": 3, "changed": 0, "errors": 0, "dispatched": False}
