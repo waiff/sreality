@@ -504,8 +504,8 @@ renumber.** Navigate by area:
     ALL rule-C candidates reach the visual stage; the forensic **High** verdict + the floor/site-plan
     gates remain the precision guards, so recall rises without false merges (pHash still auto-merges
     identical-photo same-source relists for free, above). The trade-off is more pairs at the (paid)
-    visual stage — the per-run vision budget + the batch warmer (which now warms same-source pairs too)
-    bound the cost.
+    visual stage — the per-lane `--compare-budget` (pay-at-decision-time, cosine-routed) bounds the cost
+    (the batch warmer that used to pre-buy this is retired — see the vision cost model below).
     **(D)** forensic visual confirmation (the pair reached here only because pHash did
     NOT resolve it): classify both listings, run the site-plan development guard, then a room-aware
     forensic comparison (operator prompt, `app_settings.llm_visual_match_prompt`) on like rooms in
@@ -589,10 +589,10 @@ renumber.** Navigate by area:
     **compare-free floor-plan sweep** (floor-plan checks only, no all-rooms compare spend) — how the
     initial 379-pair backlog was cleared. The per-run `dedup_engine_runs.floor_plan_deferred` counter
     (migration 241, on the `/dedup` dashboard's stat grid) is the silent-stall guard: it should trend to
-    ~0; a persistently high value means the free run's floor-plan budget is too small for the inflow (or,
-    if budget 0, that the disabled `dedup_batches` warmer isn't filling the cache). (`dedup_batches`'s
-    `_warm_floor_plan` → `floor_plan` request kind still warms the cache when that lane is enabled; it is
-    `disabled_manually` today, which is why the free run pays inline rather than consuming warm verdicts.)
+    ~0; a persistently high value means the free run's floor-plan budget is too small for the inflow. With
+    the batch warmer retired (W2), the free run ALWAYS pays its floor-plan checks inline within its own
+    budget (dirty 25, candidates/full via `dedup_floor_plan_budget`) rather than consuming warm verdicts —
+    `dedup_batches.yml` is dispatch-only; budget 0 would defer forever, which is why the dirty lane pays 25.
     **Self-hosted CLIP tier (v2, migrations 225/226 — settings-gated, default OFF).** A free
     zero-shot CLIP model (`scraper/clip_tagger.py`, ViT-B/32, run on GitHub Actions by
     `clip_tag.yml`/`scripts/clip_tag_backfill.py`) tags every image — room/plot type into
@@ -710,13 +710,23 @@ renumber.** Navigate by area:
     on are resolved at READ time by `decision_evidence` (the pHash near-identical PAIRS recomputed
     from stored phashes with the engine's category exclusions, the compared plans, or the deciding
     room) — no decision-time `detail` bloat, faithful for any old row.
-    **Vision is batch-pre-warmed (cost):** `dedup_batches.yml` (migration 197 — `dedup_batches`
-    / `dedup_batch_requests`) runs the engine's FREE funnel and submits the surviving cross-source
-    pairs' classify/compare/site_plan vision through the Anthropic Message Batches API (50% off,
-    recall-identical), writing the SAME caches the sync tools write
-    (`scripts/submit_dedup_batch.py` + `ingest_dedup_batch.py`). The daily engine run then REPLAYS
-    unchanged over the warm caches → identical merges for free (a cache miss falls back to a sync
-    call). The lane NEVER merges; merging stays the engine's job.
+    **Vision cost model — pay-at-decision-time, NO batch warmer (operator decision 2026-07-04, W2).**
+    The dedup flow is **pHash → CLIP cosine → vision forensics only on the images that need it**,
+    paid at decision time. The scheduled `--free` lanes buy their forensic compares LIVE, capped
+    per lane by `--compare-budget` (dirty 40 / candidates 100 / full 300 PAID calls; cache hits are
+    free, cosine-routed via `CosineBands`), with the floor-plan validation gate on its OWN separate
+    budget (`--floor-plan-budget`; dirty 25, candidates/full via `dedup_floor_plan_budget`). Before
+    W2 the `--free` lanes built `compare_fn=None`, so different-photo cross-portal apartments — the
+    ones pHash can't catch — never auto-merged on any scheduled run (`auto_visual=0` for days); the
+    compare budget closes that gap. The old **batch warmer** (`dedup_batches.yml`, migration 197 —
+    `dedup_batches` / `dedup_batch_requests` / `scripts/submit_dedup_batch.py` +
+    `ingest_dedup_batch.py`) pre-bought all-rooms classify/compare/site_plan vision through the
+    Anthropic Message Batches API at 50% off; it is **retired** — an all-rooms pre-buy is
+    structurally wasteful for a stop-at-first-High flow. `dedup_batch_warmer_enabled` is `false`
+    (the registry default) and the workflow is **dispatch-only** (both crons removed; scripts kept
+    for a one-off warm/ingest). Any warm verdicts already in the caches are still consumed for free
+    by the live compare fn (a cache hit costs $0 and doesn't count against the budget). Merging stays
+    the engine's job; the batch lane never merged.
     **Category compatibility** is enforced at every classify site AND the `merge_properties`
     chokepoint via the single `room_taxonomy.category_main_compatible` helper: a sale ≠ a rental
     (`category_type`), and a flat ≠ a house — **except** the ONE sanctioned cross-type **dum ↔
@@ -759,10 +769,11 @@ renumber.** Navigate by area:
     still surfaces the co-located candidates (just without the auto-merge) instead of silently dropping them.
     `--geo` forces it onto any non-dirty run ad-hoc (ignores the setting); the real-time DIRTY drain never
     runs geo. The geo pass writes NO separate `dedup_engine_runs` row (the dashboard reads the latest single
-    row); its decisions land in `dedup_pair_audit` + the `tier='geo'` candidate queue. (Follow-up: extend
-    the `dedup_batches` warmer to the geo funnel so geo gets street's 50%-off warm-cache cost model; a geo
+    row); its decisions land in `dedup_pair_audit` + the `tier='geo'` candidate queue. (Follow-up: a geo
     candidate-drain mode; the cross-portal coord-divergence cell-miss — a same house geocoded ~270m apart on
-    two portals falls in different geo cells.)
+    two portals falls in different geo cells. NB the batch warmer is retired — the whole engine now pays
+    vision at decision time (pHash → cosine → bounded live forensics), so geo already matches street's cost
+    model without a warmer.)
     Merges are **reversible**:
     `toolkit/property_identity.py` re-points `listings.property_id` onto the survivor + soft-retires
     the loser (`properties.status='merged_away'`) and logs `property_merge_events` so

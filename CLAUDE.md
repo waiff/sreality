@@ -35,6 +35,12 @@ reads public data directly and routes every write through the API), and a **Chro
 that overlays estimates on portal pages. Multi-portal rows sit behind a thin `properties`
 parent (migration 091) so one real-world property seen on several portals can be grouped.
 
+A **dark-by-default always-on worker** (`scraper/realtime_worker.py`, a 2nd Railway service from
+the SAME image, gated by `REALTIME_WORKER_ENABLED`) runs the latency-critical loops — newest-first
+probes, a bounded detail drain (skips sources in `realtime_drain_disabled_sources`), images-first
+downloads, a sreality count-probe, heartbeats to `worker_heartbeats` — replacing cron quantization
+for the real-time program (design + shipped waves: `docs/design/realtime-scrapers.md`).
+
 ## Territories
 
 Three top-level territories with deliberately different rules — identify which one a task is
@@ -125,10 +131,12 @@ incident history: `docs/architecture.md` § Architectural rules.
    appending a `listing_snapshots` row when it differs from that listing's latest snapshot. Every write
    path into `listings`.
 3. **Never delete; delist via `is_active=false`.** History is sacred. Infer inactive ONLY after a
-   ~complete index walk (≥99.5%, `INDEX_MIN_COMPLETENESS`) AND only for rows additionally unseen 24h+
-   (`min_unseen_hours`); partial walks (`--limit` / `--detail-only` / `--max-pages`) must never flip
-   rows; a false flip self-heals on next sighting (`touch_listings`); a gone detail fetch (404/410 →
-   `ListingGoneError`) flips that one listing immediately. Every flip stamps `inactive_at`.
+   ~complete index walk (≥99.5%, `INDEX_MIN_COMPLETENESS` — sreality included since W5a) AND only for
+   rows additionally unseen for a cadence-scaled staleness window (`min_unseen_hours`: 12h on the 6h
+   portals, 3h on sreality) — the two rails together, so a single truncated walk can't false-delist;
+   partial walks (`--limit` / `--detail-only` / `--max-pages`) must never flip rows; a false flip
+   self-heals on next sighting (`touch_listings`); a gone detail fetch (404/410 → `ListingGoneError`)
+   flips that one listing immediately (never slowed by the rail). Every flip stamps `inactive_at`.
 4. **`last_seen_at` is driven by index sightings + successful detail fetches only; failed fetches never
    touch it** (else repeated failures would falsely delist a live listing). The `unchanged` freshness
    path also doesn't bump it — its signal is `listing_freshness_checks.checked_at`.
