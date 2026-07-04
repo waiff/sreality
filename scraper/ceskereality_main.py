@@ -63,13 +63,14 @@ SOURCE = "ceskereality"
 # staleness rail below is the second, stronger guard.
 INDEX_MIN_COMPLETENESS = 0.995
 
-# Only flip rows unseen for 24h+ — several full walk cadences. last_seen_at is
-# bumped for unchanged rows each walk (touch_listings) and for changed rows on
-# a successful drain fetch — so a churn-missed live row is protected unless its
-# detail fetches have ALSO failed for 24h+; even then the flip self-heals on
-# the next index sighting (touch_listings reactivates). Passed EXPLICITLY on
-# every sweep: db.mark_inactive_native applies NO rail by default.
-INACTIVE_MIN_UNSEEN_HOURS = 24
+# Only flip rows unseen for 12h+ — ~2 full walk cadences at the 6h schedule.
+# last_seen_at is bumped for unchanged rows each walk (touch_listings) and for
+# changed rows on a successful drain fetch — so a churn-missed live row is
+# protected unless its detail fetches have ALSO failed for 12h+; even then the
+# flip self-heals on the next index sighting (touch_listings reactivates). Passed
+# EXPLICITLY on every sweep: db.mark_inactive_native applies NO rail by default.
+# Tightened 24->12h for the real-time delisting SLO.
+INACTIVE_MIN_UNSEEN_HOURS = 12
 
 # Anonymous search hard-caps at 12 pages (~240 results); ?strana=13 returns 404.
 # So the walk NEVER requests page 13 — it slices each category by REGION SUBDOMAIN

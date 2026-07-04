@@ -148,7 +148,7 @@ def test_mark_inactive_sweeps_collapsing_group_once_with_union(monkeypatch):
         object(), {"sale_type": "prodej", "category": "chaty"}, {"c1"})
     assert n == 3
     assert calls == [{"src": "realitymix", "cm": "dum", "ct": "prodej",
-                      "seen": {"d1", "d2", "c1"}, "min_unseen_hours": 24}]
+                      "seen": {"d1", "d2", "c1"}, "min_unseen_hours": 12}]
 
 
 def test_mark_inactive_missing_sibling_slice_suppresses_sweep(monkeypatch):
@@ -176,7 +176,7 @@ def test_mark_inactive_single_slice_group_sweeps_immediately(monkeypatch):
     assert portal.mark_inactive(
         object(), {"sale_type": "prodej", "category": "byty"}, {"b1"}) == 1
     assert calls == [{"src": "realitymix", "cm": "byt", "ct": "prodej",
-                      "seen": {"b1"}, "min_unseen_hours": 24}]
+                      "seen": {"b1"}, "min_unseen_hours": 12}]
 
 
 # --- geocoding fallback + the carry-forward guard (the Mapy-footgun gate) ---

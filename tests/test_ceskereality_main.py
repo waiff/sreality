@@ -167,7 +167,7 @@ def test_mark_inactive_sweeps_collapsing_group_once_with_union(monkeypatch):
         object(), {"sale_type": "pronajem", "category": "chaty-chalupy"}, {"c1"})
     assert n == 3
     assert calls == [{"src": "ceskereality", "cm": "dum", "ct": "pronajem",
-                      "seen": {"r1", "r2", "c1"}, "min_unseen_hours": 24}]
+                      "seen": {"r1", "r2", "c1"}, "min_unseen_hours": 12}]
 
 
 def test_mark_inactive_missing_sibling_slice_suppresses_sweep(monkeypatch):
@@ -184,7 +184,7 @@ def test_mark_inactive_single_slice_group_sweeps_immediately(monkeypatch):
     assert portal.mark_inactive(
         object(), {"sale_type": "prodej", "category": "byty"}, {"b1"}) == 1
     assert calls == [{"src": "ceskereality", "cm": "byt", "ct": "prodej",
-                      "seen": {"b1"}, "min_unseen_hours": 24}]
+                      "seen": {"b1"}, "min_unseen_hours": 12}]
 
 
 # --- newest-first delta probe (/nejnovejsi/ on the www host) -----------------

@@ -60,14 +60,26 @@ DEFAULT_IMAGE_WORKERS = 32
 DEFAULT_DETAIL_WORKERS = 4
 DEFAULT_DETAIL_RATE = 2.0  # requests/sec, global across all workers
 
-# A walk must collect the FULL API-reported total (result_size) before its
-# absence sweep is trusted to mark listings inactive — anything short of 100%
-# means the walk truncated, and flipping unseen listings inactive would falsely
-# delist live ones, so we skip. Deliberately NOT operator-tunable (a partial
-# walk must never be allowed to delist). When result_size is unavailable we fall
-# back to trusting the walk (see _walk_complete) rather than silently disabling
-# delisting detection.
-INDEX_MIN_COMPLETENESS = 1.0
+# A walk must collect ~the FULL API-reported total (result_size) before its
+# absence sweep is trusted to mark listings inactive. Set to 0.995 (not 1.0):
+# sreality's result_size jitters mid-walk, so a strict 100% gate suppressed the
+# sweep on nearly every walk and delistings accumulated until a perfect one — the
+# same statistical trap that pushed the framework portals to 0.995 (rule #3). The
+# second rail (INACTIVE_MIN_UNSEEN_HOURS) is what makes relaxing this safe: even
+# under a 0.5%-short walk, a listing only flips if it has ALSO been unseen across
+# several consecutive walks, so a single walk-miss can never false-delist a live
+# listing. When result_size is unavailable we fall back to trusting the walk
+# (see _walk_complete) rather than silently disabling delisting detection.
+INDEX_MIN_COMPLETENESS = 0.995
+
+# Staleness rail on the index-absence sweep (rule #3, the second rail): a listing
+# is flipped inactive only if it was ALSO unseen for at least this many hours, so
+# relaxing the completeness gate above can't false-delist on one truncated walk.
+# Short for sreality — its ~hourly cadence makes 3h ~3 consecutive walk-misses —
+# and it never slows the FAST delisting path (a gone detail fetch flips a listing
+# immediately via ListingGoneError; this rail only governs the index-absence
+# backstop for listings whose detail we don't re-fetch).
+INACTIVE_MIN_UNSEEN_HOURS = 3
 
 # How many of the most recent download outcomes the suspicious-stop
 # heuristic considers. 100 is small enough to react within a minute or
@@ -744,7 +756,8 @@ def _run_full(
             if conn is not None and limit is None:
                 if complete:
                     inactive = db.mark_inactive(
-                        conn, cm_text, ct_text, seen_ids, source="sreality"
+                        conn, cm_text, ct_text, seen_ids, source="sreality",
+                        min_unseen_hours=INACTIVE_MIN_UNSEEN_HOURS,
                     )
                     LOG.info(
                         "INACTIVE cm=%s ct=%s marked=%d collected=%d result_size=%s",
@@ -883,7 +896,7 @@ class SrealityPortal:
         cm, ct = category
         return db.mark_inactive(
             conn, parser.CATEGORY_MAIN[cm], parser.CATEGORY_TYPE[ct], seen,
-            source=self.source,
+            source=self.source, min_unseen_hours=INACTIVE_MIN_UNSEEN_HOURS,
         )
 
     def active_count(self, conn: Any, category: tuple[int, int]) -> int | None:
@@ -951,8 +964,9 @@ def _run_detail_drain(
 
 
 def _walk_complete(collected: int, result_size: int | None) -> bool:
-    """Whether an index walk covered the FULL API-reported total, so it can
-    safely drive mark_inactive (a 100% walk — see INDEX_MIN_COMPLETENESS).
+    """Whether an index walk covered ~the FULL API-reported total, so it can
+    safely drive mark_inactive (a >=99.5% walk — see INDEX_MIN_COMPLETENESS; the
+    INACTIVE_MIN_UNSEEN_HOURS rail is the second guard on the relaxed gate).
 
     Only a *positive* signal of incompleteness suppresses the flip: if the
     API didn't report result_size (or reported <= 0) we fall back to
