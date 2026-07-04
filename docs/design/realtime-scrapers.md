@@ -99,9 +99,36 @@ is the defensible posture the operator accepted.
 
 Wave A+B (2026-07, shipped as PRs #678–#683 + published_at/pozemek follow-ups): correctness
 fixes real-time would amplify (cross-slice delisting flap, remax rent starvation, idnes FX
-churn, sreality hash flaps, idnes area truncation) + the measurement substrate. Wave C: the
-worker + shared politeness ledger + probe lanes + images-first gate. Wave D: dedup
-real-time completion (dirty-lane floor-plan budget, batch-warmer revival, geo dirty-drain,
-street coverage — the true merge-coverage ceiling: only ~61%/51% of idnes/bazos byt is
-street+disposition-eligible vs 86% sreality). Wave E: health/SLO re-derivation + push
-alerting + silent-green closures (image pipeline has zero checks today).
+churn, sreality hash flaps, idnes area truncation) + the measurement substrate. Wave C
+(#688–#692, shipped): the always-on worker (`scraper/realtime_worker.py`, ships dark behind
+`REALTIME_WORKER_ENABLED`) + `LedgerRateLimiter` + probe lanes + images-first gate.
+
+**Waves W1–W5 (shipped 2026-07-04):**
+- **W1** (#694) — per-source drain-disable knob (`realtime_drain_disabled_sources`), the
+  proxy-outage lesson: freeze a portal's queue instead of burning it to `given_up`.
+- **W2** (#695) — bounded live forensics on the `--free` lanes (`--compare-budget`, dirty 40 /
+  candidates 100 / full 300), so different-photo cross-portal apartments auto-merge on the
+  scheduled run (`auto_visual` was 0 for days). **DECISION: NO batch warmer** — the dedup cost
+  posture is pay-at-decision-time (pHash → CLIP cosine → bounded live forensics), NOT the
+  all-rooms pre-buy (structurally wasteful for a stop-at-first-High flow). `dedup_batches.yml`
+  is dispatch-only; the floor-plan gate rides its OWN separate budget. (Replaces the
+  now-abandoned "batch-warmer revival" this doc once listed.)
+- **W3** (#696, migration 270) — sreality count-probe lane: sreality's sort-blind v1 API gets
+  `pagination.total` count-delta probes that (opt-in, token+setting gated) trigger a targeted
+  `index_walk`.
+- **W4** — idnes/bazos street coverage: the RÚIAN resolver lever is **exhausted** at the 15 m
+  tolerance (idnes coords are >15 m from address points → 0 net resolutions; bazos coords are
+  the page-wide-link shared pins the resolver correctly rejects — it's excluded from the
+  script's `_SOURCES`). The idnes/bazos 61%/51% ceiling is a COORD-PRECISION problem, not a
+  resolver-hasn't-run gap; a real fix needs better per-listing coord extraction (out of scope).
+- **W5a** (#697) — delisting rails: sreality `INDEX_MIN_COMPLETENESS` 1.0→0.995 + a new 3h
+  `min_unseen_hours` rail; the 6 h portals 24h→12h.
+
+**Deferred — W5b (health/SLO re-derivation):** cadence-scale the fixed thresholds
+(`detail_queue_backlog` by oldest-row AGE not count — matview line ~301; `delisting_spike` as
+% of portal size — line ~264), close silent-greens (image-pipeline liveness, dedup
+dirty-banner staleness, drift no-baseline→warn, monitor-of-monitors on
+`health_mv_refresh_stamp`), surface `worker_liveness` on the Health page, and push health reds
+through the notification outbox. It's an intricate rewrite of the 396-line `scraper_health_checks`
+matview (migration 214 — byte-for-byte jsonb contract) + frontend + outbox, so it needs its own
+focused session, not a rushed one-shot.

@@ -13,9 +13,29 @@ warm-CLIP tag; a listing is not published/notified before its first image is sto
 operator decision) → dedup dirty enqueue → matcher wake. Prerequisite: a DB-backed shared
 politeness ledger (RateLimiter is per-process today; two runtimes must share one budget
 per portal). GH Actions keeps the free heavy lanes (full reconcile walks, backfills, batch
-scans, monitors). Then Wave D (dedup real-time completion: dirty-lane floor-plan budget,
-batch-warmer revival, geo dirty-drain, street coverage) and Wave E (SLO-scaled health +
-push alerting + silent-green closures).
+scans, monitors).
+
+**Done (2026-07-04, PRs #694–#697):**
+- **W1 (#694)** — per-source drain-disable knob (`realtime_drain_disabled_sources`): freeze a
+  portal's queue during a proxy outage instead of burning it to `given_up`.
+- **W2 (#695)** — bounded live forensics on the `--free` dedup lanes (`--compare-budget` dirty
+  40 / candidates 100 / full 300), closing the steady-state `auto_visual=0` gap so different-photo
+  cross-portal apartments auto-merge on the scheduled run (verified: `auto_visual=29` on the first
+  post-merge candidate run). **DECISION (operator 2026-07-04): NO batch warmer** — dedup cost is
+  pay-at-decision-time (pHash → CLIP cosine → bounded live forensics), the floor-plan gate on its
+  OWN budget; `dedup_batches.yml` is dispatch-only. (Supersedes the old "batch-warmer revival".)
+- **W3 (#696, migration 270)** — sreality count-probe lane (`pagination.total` deltas → opt-in
+  targeted `index_walk`; sreality's v1 API is sort-blind so it can't do a newest-first probe).
+- **W4** — idnes/bazos street-coverage measurement: the RÚIAN resolver lever is **exhausted** (coord
+  precision ceiling — idnes coords >15 m from address points, bazos coords are shared page-link
+  pins); the 61%/51% eligibility is not resolver-fixable without better coord extraction.
+- **W5a (#697)** — delisting rails: sreality `INDEX_MIN_COMPLETENESS` 1.0→0.995 + a 3h
+  `min_unseen_hours`; the 6 h portals 24h→12h.
+
+**Still open:** the Wave C worker prerequisites (create the Railway service, flip
+`shared_rate_limiter` on, images-first inline pHash + warm-CLIP + matcher wake); **W5b** (SLO-scaled
+health + push alerting + silent-green closures — deferred, see `realtime-scrapers.md` § Sequencing);
+geo dirty-drain; the sreality BFF sort HAR spike.
 
 ### Phase B1: Building decomposition — URL ingest + unit extractor + confirmation UI (active)
 
