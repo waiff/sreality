@@ -12,7 +12,10 @@ matcher/outbox pattern from api/notifications + api/notification_outbox):
 - drain:     every `realtime_drain_interval_seconds` (default 30), claim a
              bounded slice of the shared listing_detail_queue per source that
              has claimable rows. SKIP LOCKED makes this safe beside the GitHub
-             Actions drains by construction.
+             Actions drains by construction. Sources listed in
+             `realtime_drain_disabled_sources` are skipped — a per-source
+             kill-switch (e.g. to freeze a portal's queue at low attempts
+             during a proxy outage instead of burning them to given_up).
 - images:    every `realtime_images_interval_seconds` (default 60), drain a
              `realtime_images_slice`-capped slice (default 500) of pending
              image downloads via the one existing machinery
@@ -152,11 +155,19 @@ def _read_images_slice() -> int:
     return _read_int("realtime_images_slice", IMAGES_SLICE_DEFAULT)
 
 
-def _read_disabled_sources() -> set[str]:
-    value = _read_setting("realtime_probe_disabled_sources")
+def _read_source_set(key: str) -> set[str]:
+    value = _read_setting(key)
     if not isinstance(value, list):
         return set()
     return {str(v) for v in value}
+
+
+def _read_disabled_sources() -> set[str]:
+    return _read_source_set("realtime_probe_disabled_sources")
+
+
+def _read_drain_disabled_sources() -> set[str]:
+    return _read_source_set("realtime_drain_disabled_sources")
 
 
 # --- portal construction ----------------------------------------------------
@@ -312,13 +323,23 @@ async def _drain_pass(stop_event: asyncio.Event, state: dict[str, Any]) -> None:
     if slice_ <= 0:
         LOG.debug("drain lane: slice<=0; skipping pass")
         return
+    disabled: set[str] = set()
+    try:
+        disabled = await asyncio.to_thread(_read_drain_disabled_sources)
+    except Exception as exc:  # noqa: BLE001
+        LOG.warning("drain lane: failed to read disabled sources: %s", exc)
     counts = await asyncio.to_thread(_claimable_by_source)
-    totals = {"sources": 0, "new": 0, "updated": 0, "gone": 0, "errors": 0}
+    totals = {
+        "sources": 0, "new": 0, "updated": 0, "gone": 0, "errors": 0, "skipped": 0,
+    }
     for source in REALTIME_SOURCES:
         if stop_event.is_set():
             break
         claimable = counts.get(source, 0)
-        if claimable <= 0 or _skip_for_proxy(source):
+        if claimable <= 0:
+            continue
+        if source in disabled or _skip_for_proxy(source):
+            totals["skipped"] += 1
             continue
         try:
             agg = await asyncio.to_thread(_run_drain_sync, source, slice_)
