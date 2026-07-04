@@ -4,8 +4,8 @@ name: "Dedup engine (vision batch warm-up)"
 # synchronous dedup engine's per-call vision, recall-identical). PRE-WARMS the
 # engine's classify/compare/site_plan caches; the daily "Dedup engine
 # (street + disposition)" run then REPLAYS unchanged over the warm caches and
-# produces the identical merges for free. Two modes, selected by which cron fired
-# (or the `mode` dispatch input):
+# produces the identical merges for free. Two modes, selected by the `mode`
+# dispatch input:
 #
 #   submit  — run the engine's FREE funnel (rules A/B/C + pHash + cross-source
 #             gate) and enqueue the cross-source pairs' classify/compare/site_plan
@@ -20,13 +20,19 @@ name: "Dedup engine (vision batch warm-up)"
 # untagged (no `# portal:` line) so it appears in Settings > Workflows, not any
 # one portal's pipeline panel.
 #
+# DISPATCH-ONLY (W2, 2026-07): the operator retired the batch warmer — the dedup
+# cost posture is now pay-at-decision-time (pHash -> CLIP cosine -> bounded live
+# forensics via the dedup engine's --compare-budget lanes), not an all-rooms
+# pre-buy that a stop-at-first-High flow mostly wastes. The gate
+# dedup_batch_warmer_enabled is false, so scheduled runs were already no-ops;
+# removing the crons stops the empty churn. Kept as workflow_dispatch (the
+# scrape.yml-fallback pattern) so a one-off warm/ingest is still one click, and
+# the scripts are untouched. Re-enabling = re-add the two crons + flip the setting.
+#
 # Required GitHub secrets: SUPABASE_DB_URL, ANTHROPIC_API_KEY, and R2_* (submit
 # downloads image bytes to build the vision requests).
 
 on:
-  schedule:
-    - cron: "0 */6 * * *"   # submit: enqueue the next slice of vision requests
-    - cron: "30 * * * *"    # ingest: poll + persist completed batches
   workflow_dispatch:
     inputs:
       mode:
