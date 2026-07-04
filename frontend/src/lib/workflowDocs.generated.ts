@@ -1259,19 +1259,10 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
   {
     "filename": "dedup_batches.yml",
     "name": "Dedup engine (vision batch warm-up)",
-    "description": "Async dedup-vision via the Anthropic Message Batches API (50% cheaper than the synchronous dedup engine's per-call vision, recall-identical). PRE-WARMS the engine's classify/compare/site_plan caches; the daily \"Dedup engine (street + disposition)\" run then REPLAYS unchanged over the warm caches and produces the identical merges for free. Two modes, selected by which cron fired (or the `mode` dispatch input):",
+    "description": "Async dedup-vision via the Anthropic Message Batches API (50% cheaper than the synchronous dedup engine's per-call vision, recall-identical). PRE-WARMS the engine's classify/compare/site_plan caches; the daily \"Dedup engine (street + disposition)\" run then REPLAYS unchanged over the warm caches and produces the identical merges for free. Two modes, selected by the `mode` dispatch input:",
     "portal": null,
     "manual": true,
-    "schedules": [
-      {
-        "cron": "0 */6 * * *",
-        "human": "Every 6 hours"
-      },
-      {
-        "cron": "30 * * * *",
-        "human": "Every hour at :30"
-      }
-    ],
+    "schedules": [],
     "onPush": false,
     "onPullRequest": false,
     "paths": null,
@@ -1486,6 +1477,14 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
       {
         "name": "floor_plan_budget",
         "description": "[free] Override the dedup_floor_plan_budget setting for this run: inline cold Sonnet floor-plan checks allowed (0 = cache-only $0). Empty = use the setting (default 10000).",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "compare_budget",
+        "description": "[free] PAID forensic room/site-plan compares allowed this run (cache hits don't count), cosine-routed. 0 = pHash-only free run. Separate budget from floor_plan_budget.",
         "required": false,
         "type": "string",
         "default": "",

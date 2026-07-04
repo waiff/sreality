@@ -972,6 +972,7 @@ def _resolve_visual(
     site_plan_fn: Any,
     floor_plan_fn: Any = None,
     vision_budget: list[int],
+    floor_plan_budget: list[int] | None = None,
     max_room_attempts: int,
     autodismiss: bool = True,
     cosine_fn: Any = None,
@@ -1086,7 +1087,9 @@ def _resolve_visual(
             # auto-merge stands (the gate can't contradict, so it doesn't block).
             fp = _floor_plan_gate(
                 conn, a.sreality_id, b.sreality_id,
-                floor_plan_fn=floor_plan_fn, vision_budget=vision_budget,
+                floor_plan_fn=floor_plan_fn,
+                vision_budget=(floor_plan_budget if floor_plan_budget is not None
+                               else vision_budget),
                 inconclusive_to_review=inconclusive_to_review, cache=probe_cache)
             base = {
                 "room_type": room, "verdict": last_verdict,
@@ -1442,6 +1445,13 @@ class _RunContext:
     # mutable run state
     stats: dict[str, int] = field(default_factory=dict)
     vision_budget: list[int] = field(default_factory=lambda: [0])
+    # The floor-plan validation gate's OWN budget, kept SEPARATE from vision_budget in
+    # --free bounded-forensics mode (W2): compares/site-plan draw vision_budget, the plan
+    # gate draws floor_plan_budget, so a capped compare budget can't starve the plan gate
+    # (or vice-versa) on lanes where dedup_floor_plan_budget is large. run_engine ALIASES it
+    # to the SAME list as vision_budget in every non-free mode (floor_plan_calls=None) → the
+    # historical single shared pool, byte-identical. Default matches vision_budget's [0].
+    floor_plan_budget: list[int] = field(default_factory=lambda: [0])
     audit: list[dict[str, Any]] | None = None
     probes: _ProbeCache = field(default_factory=_ProbeCache)
     seen_listing_pairs: set[tuple[int, int]] = field(default_factory=set)
@@ -1582,7 +1592,7 @@ def resolve_pair(conn: Any, a: ListingKey, b: ListingKey, *, street_key: str,
         # (renders) / one-sided / same_layout verdict lets the pHash merge proceed.
         fp = _floor_plan_gate(
             conn, a.sreality_id, b.sreality_id,
-            floor_plan_fn=ctx.floor_plan_fn, vision_budget=ctx.vision_budget,
+            floor_plan_fn=ctx.floor_plan_fn, vision_budget=ctx.floor_plan_budget,
             inconclusive_to_review=ctx.inconclusive_to_review, cache=ctx.probes)
         if fp == "dismiss":
             stats["auto_dismissed"] += 1
@@ -1640,7 +1650,8 @@ def resolve_pair(conn: Any, a: ListingKey, b: ListingKey, *, street_key: str,
     outcome = _resolve_visual(
         conn, a, b, classify_fn=ctx.classify_fn, compare_fn=ctx.compare_fn,
         site_plan_fn=ctx.site_plan_fn, floor_plan_fn=ctx.floor_plan_fn,
-        vision_budget=ctx.vision_budget, max_room_attempts=ctx.max_room_attempts,
+        vision_budget=ctx.vision_budget, floor_plan_budget=ctx.floor_plan_budget,
+        max_room_attempts=ctx.max_room_attempts,
         autodismiss=ctx.autodismiss,
         cosine_fn=ctx.cosine_fn, bands=ctx.bands, model_for=ctx.model_for,
         render_min=ctx.render_min, inconclusive_to_review=ctx.inconclusive_to_review,
@@ -1721,6 +1732,7 @@ def run_engine(
     audit: list[dict[str, Any]] | None = None,
     max_pairs: int = 2000,
     max_vision_calls: int = 200,
+    floor_plan_calls: int | None = None,
     max_room_attempts: int = 4,
     auto_merge_enabled: bool = True,
     autodismiss: bool = True,
@@ -1849,6 +1861,7 @@ def run_engine(
     dismissed_prior = (
         _load_prior_dismissed(conn, {k.property_id for k in keys if k.property_id is not None})
         if scoped and not geo else None)
+    _vision_budget = [max_vision_calls]
     ctx = _RunContext(
         dismissed_prior=dismissed_prior,
         classify=classify, tier=("geo" if geo else "street_disposition"),
@@ -1858,7 +1871,12 @@ def run_engine(
         auto_merge_enabled=auto_merge_enabled, autodismiss=autodismiss,
         enqueue_unresolved=enqueue_unresolved, dry_run=dry_run, render_min=render_min,
         inconclusive_to_review=inconclusive_to_review, max_room_attempts=max_room_attempts,
-        stats=stats, vision_budget=[max_vision_calls], audit=audit, pairs_left=max_pairs,
+        stats=stats, vision_budget=_vision_budget,
+        # floor_plan_calls None (every non-free mode) ALIASES the plan gate to the SAME
+        # pool as compares → historical shared-budget behaviour; a value (free mode) gives
+        # the gate its own separate counter.
+        floor_plan_budget=(_vision_budget if floor_plan_calls is None else [floor_plan_calls]),
+        audit=audit, pairs_left=max_pairs,
     )
 
     # Full-scan CURSOR (migration 261): iterate groups in a stable sorted order and resume
@@ -1896,7 +1914,9 @@ def run_engine(
             # The cycle completed only if the scan reached the end of the ordered list
             # without truncation — a truncated run's frontier resumes next run.
             cursor_out["reached_end"] = not stats["truncated"]
-        return _finish(stats, ctx.vision_budget, max_vision_calls)
+        return _finish(stats, ctx.vision_budget, max_vision_calls,
+                       floor_plan_budget=ctx.floor_plan_budget,
+                       floor_plan_calls=floor_plan_calls)
 
     # The decision tree per pair lives in resolve_pair (shared by the candidate-priority
     # drain + the real-time path); this is just the full-scan driver over street groups.
@@ -1953,8 +1973,18 @@ def run_engine(
     return finalize()
 
 
-def _finish(stats: dict[str, int], vision_budget: list[int], max_vision_calls: int) -> dict[str, int]:
-    stats["vision_calls"] = max_vision_calls - vision_budget[0]
+def _finish(stats: dict[str, int], vision_budget: list[int], max_vision_calls: int,
+            *, floor_plan_budget: list[int] | None = None,
+            floor_plan_calls: int | None = None) -> dict[str, int]:
+    used = max_vision_calls - vision_budget[0]
+    # When the floor-plan gate ran on its OWN budget (free mode: floor_plan_calls set and the
+    # counter is a DISTINCT list) add its spend so vision_calls stays the TOTAL paid vision
+    # count. When aliased (non-free: floor_plan_budget IS vision_budget) its calls are already
+    # counted above — the `is not` identity check prevents double-counting.
+    if (floor_plan_calls is not None and floor_plan_budget is not None
+            and floor_plan_budget is not vision_budget):
+        used += floor_plan_calls - floor_plan_budget[0]
+    stats["vision_calls"] = used
     return stats
 
 
@@ -2062,18 +2092,20 @@ def _build_cache_only_floor_plan_fn(conn: Any) -> Any:
     return _fn
 
 
-def _effective_vision_cap(*, free: bool, cache_only: bool, floor_plan_budget: int,
+def _effective_vision_cap(*, free: bool, cache_only: bool, compare_budget: int,
                           max_vision_calls: int) -> int:
-    """The vision-budget cap handed to run_engine, by mode. Cache-only reads are free, so a
-    large cap keeps the budget from throttling them. In --free mode the ONLY vision consumer
-    is the floor-plan validation gate: a positive floor_plan_budget caps its inline COLD
-    floor-plan checks; 0 selects the cache-only floor_plan_fn (which never makes a cold
-    call) -> a large cap so a zero budget can't pre-empt the gate before it reads the warm
-    cache (the gate defers when vision_budget<=0)."""
+    """The COMPARE/site-plan vision-budget cap handed to run_engine, by mode. Cache-only
+    reads are free, so a large cap keeps the budget from throttling them. In --free mode the
+    forensic room/site-plan compares consume THIS pool, capped by --compare-budget
+    (0 = pHash-only free run, no forensic compares — the historical --free behaviour); the
+    floor-plan validation gate runs on its OWN separate budget (run_engine's floor_plan_calls
+    = the dedup_floor_plan_budget), so a small compare cap can't starve the plan gate and a
+    large plan budget can't inflate the compare spend. Non-free modes keep the shared
+    max_vision_calls pool (the gate aliases into it, as before)."""
     if cache_only:
         return 10_000_000
     if free:
-        return floor_plan_budget if floor_plan_budget > 0 else 10_000_000
+        return compare_budget
     return max_vision_calls
 
 
@@ -2286,12 +2318,22 @@ def main() -> int:
                              "blitz dispatch.")
     parser.add_argument("--floor-plan-budget", type=int, default=None, dest="floor_plan_budget",
                         help="Override app_settings.dedup_floor_plan_budget for this run: the cap on "
-                             "inline cold Sonnet floor-plan checks (the only paid call on a free run; "
+                             "inline cold Sonnet floor-plan checks (a paid call on a free run; "
                              "it fires solely on pairs the engine WOULD merge — pHash matches / "
-                             "visual Highs). Beyond the cap, both-plan pairs DEFER to the next run. "
-                             "0 = cache-only ($0): consume only warmed verdicts. Unset = use the "
-                             "setting (default 10000). NB the budget is the count of PAID calls — "
-                             "it is not 'free', the run mode is.")
+                             "visual Highs). Its OWN budget, separate from --compare-budget. Beyond "
+                             "the cap, both-plan pairs DEFER to the next run. 0 = cache-only ($0): "
+                             "consume only warmed verdicts. Unset = use the setting (default 10000). "
+                             "NB the budget is the count of PAID calls — it is not 'free', the run "
+                             "mode is.")
+    parser.add_argument("--compare-budget", type=int, default=0, dest="compare_budget",
+                        help="FREE mode only: cap on PAID forensic room/site-plan compares "
+                             "(cache hits don't count) so a --free scheduled run auto-merges the "
+                             "different-photo cross-portal pairs the pHash fast-path can't reach — "
+                             "closing the auto_visual=0 gap (--free left compare_fn=None). 0 "
+                             "(default) = today's pHash-only free run. Compares are CLIP-cosine-routed "
+                             "(Haiku / Sonnet / skip via CosineBands) and enqueue_unresolved stays "
+                             "off, so the /dedup manual queue never inflates. Separate from "
+                             "--floor-plan-budget. Ignored outside --free.")
     parser.add_argument("--geo", action="store_true",
                         help="ALSO run the geo pass for single-dwelling families "
                              "(dum/pozemek/komercni/ostatni) the street+disposition engine "
@@ -2427,13 +2469,22 @@ def main() -> int:
         site_plan_fn = None
         floor_plan_fn = None
         if args.free:
-            # FREE mode: no PAID all-rooms classify/compare -> pHash / rule-B /
-            # reconcile / reject-gate only. The ONE bounded paid exception is the
-            # floor-plan validation gate: with a positive floor-plan budget it
-            # gets the LIVE fn and pays its single Sonnet check inline for the small set
-            # of would-merge both-plan pairs (auto-confirm / auto-dismiss, Option C),
-            # capped by the budget (beyond it, pairs DEFER to the next run). Budget 0 =
-            # the $0 cache-only fn: consume only batch-warmed verdicts, defer the rest.
+            # FREE mode: no PAID all-rooms classify/compare by default -> pHash / rule-B /
+            # reconcile / reject-gate only. TWO bounded paid exceptions, each on its OWN budget:
+            #  (1) --compare-budget > 0 (W2): build the LIVE classify/compare/site-plan fns so
+            #      the different-photo cross-portal pairs the pHash fast-path can't reach get a
+            #      forensic room compare and auto-merge on a High — capped at compare_budget PAID
+            #      calls (cache hits free), CLIP-cosine-routed, deadline-bounded. classify stays
+            #      ~free via CLIP tags (dedup_prefer_clip_tags). enqueue_unresolved stays off
+            #      (below), so the /dedup manual queue never inflates. This closes the steady-state
+            #      auto_visual=0 gap: --free previously left compare_fn=None on EVERY scheduled run.
+            #  (2) the floor-plan validation gate: a positive floor-plan budget gives it the LIVE
+            #      fn (its single Sonnet check on would-merge both-plan pairs, Option C); budget 0
+            #      = the $0 cache-only fn (consume warmed verdicts, defer the rest).
+            if auto_merge_enabled and args.compare_budget > 0:
+                classify_fn = _build_classify_fn(conn, **ck)
+                compare_fn = _build_compare_fn(conn)
+                site_plan_fn = _build_site_plan_fn(conn)
             floor_plan_fn = (
                 _build_floor_plan_fn(conn) if floor_plan_budget > 0
                 else _build_cache_only_floor_plan_fn(conn)
@@ -2469,12 +2520,13 @@ def main() -> int:
                 return room_pair_cosine(
                     conn, image_ids_a=ids_a, image_ids_b=ids_b, model=_cm)
 
-        # Cache-only calls are free, so don't let the vision budget / room cap
-        # throttle consumption — try every warmed room of every warmed pair. In --free
-        # mode the cap bounds the inline floor-plan checks (see _effective_vision_cap).
+        # Cache-only calls are free, so don't let the vision budget / room cap throttle
+        # consumption — try every warmed room of every warmed pair. In --free mode this pool
+        # bounds the forensic compares (--compare-budget); the floor-plan gate has its OWN
+        # budget (floor_plan_calls below), so the two never starve each other.
         eff_max_vision = _effective_vision_cap(
             free=args.free, cache_only=args.cache_only,
-            floor_plan_budget=floor_plan_budget,
+            compare_budget=args.compare_budget,
             max_vision_calls=args.max_vision_calls)
         eff_max_rooms = 99 if args.cache_only else args.max_room_attempts
 
@@ -2487,12 +2539,16 @@ def main() -> int:
                      len(restrict or set()))
 
         # Shared kwargs every pass passes to run_engine — the free-first flow itself.
+        # floor_plan_calls: a value ONLY in --free mode gives the plan gate its own separate
+        # budget (so --compare-budget bounds compares independently); None everywhere else
+        # aliases the gate back onto the shared vision pool (byte-identical to pre-W2).
         engine_kw: dict[str, Any] = dict(
             classify_fn=classify_fn, compare_fn=compare_fn, site_plan_fn=site_plan_fn,
             floor_plan_fn=floor_plan_fn, cosine_fn=cosine_fn, bands=bands,
             model_for=model_for, render_min=clip["render_min"],
             inconclusive_to_review=inconclusive_to_review,
             max_vision_calls=eff_max_vision, max_room_attempts=eff_max_rooms,
+            floor_plan_calls=(floor_plan_budget if args.free else None),
             auto_merge_enabled=auto_merge_enabled, autodismiss=autodismiss,
             enqueue_unresolved=not args.free, dry_run=args.shadow, deadline=deadline,
             restrict_property_ids=restrict,

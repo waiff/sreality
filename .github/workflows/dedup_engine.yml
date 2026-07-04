@@ -131,6 +131,11 @@ on:
         required: false
         default: ""
         type: string
+      compare_budget:
+        description: "[free] PAID forensic room/site-plan compares allowed this run (cache hits don't count), cosine-routed. 0 = pHash-only free run. Separate budget from floor_plan_budget."
+        required: false
+        default: ""
+        type: string
 
 # The real-time DIRTY drain (:45) gets its OWN concurrency group so the slow batch runs (full
 # scan 6h / candidate 2h / geo 4x/day) can never starve or cancel it — the "merge in minutes"
@@ -179,24 +184,29 @@ jobs:
             # touching a just-dedup-ready property (dedup_dirty_properties, filled by the
             # hourly CLIP tag job), so a new cross-portal listing merges within ~minutes of
             # being tagged. Empty queue -> fast no-op.
-            #   * --floor-plan-budget 0: the real-time lane pays NO inline floor-plan vision
-            #     (a cold call downloads the plan images from R2 + Sonnet ~15s each; 300 of
-            #     them blew the 20-min budget -> the run truncated -> never cleared -> livelock).
-            #     It consumes only warm verdicts (cache-only) and DEFERS the rest; would-merge
-            #     both-plan pairs are validated by the 6h full scan (budget 300) or the batch
-            #     warmer. Keeps the hot path fast so it always finishes-and-clears.
+            #   * --compare-budget 40 (W2): pay-at-decision-time forensic compares so the
+            #     real-time lane auto-merges the different-photo cross-portal pairs pHash can't
+            #     — capped at 40 PAID (cache-free) calls, cosine-routed (most rooms Haiku/skip),
+            #     deadline-bounded. No batch warmer exists anymore, so the compares must run live
+            #     here or the SLO's photo-sharing merges never happen on the hot path.
+            #   * --floor-plan-budget 25 (was 0): with no warmer to consume from, a cache-only
+            #     gate would DEFER every would-merge both-plan pair forever, so the lane pays a
+            #     small live floor-plan budget (its OWN, separate from compares — W2). 25 is well
+            #     under the ~300 that once blew the 20-min budget; the deadline is the hard stop.
             #   * --max-dirty 3000: a slice small enough that its street-group pair-work fits
             #     the 20-min budget even on a portal-launch spike (the enqueue eligibility+
             #     recency gates keep the steady-state queue far below this). Newest-first claim
             #     + the 24h TTL prune mean the stale tail ages out to the full scan, never pins
             #     the head.
-            ARGS="--free --dirty --max-pairs 200000 --max-seconds 1200 --floor-plan-budget 0 --max-dirty 3000"
+            ARGS="--free --dirty --max-pairs 200000 --max-seconds 1200 --compare-budget 40 --floor-plan-budget 25 --max-dirty 3000"
           elif [ "${{ github.event.schedule }}" = "30 */2 * * *" ]; then
             # SCHEDULED CANDIDATE DRAIN (free): re-decide ONLY the properties in the
             # still-proposed /dedup queue (O(queue), not a market scan), so the queue
-            # self-clears regardless of where the 6h full scan's deadline falls. Bounded
-            # floor-plan vision (300 cold checks); warm verdicts replay free.
-            ARGS="--free --candidates --max-pairs 200000 --max-seconds 2400 --floor-plan-budget 300"
+            # self-clears regardless of where the 6h full scan's deadline falls.
+            #   * --compare-budget 100 (W2): live forensic compares so a queued different-photo
+            #     pair auto-merges instead of waiting for an operator; 100 PAID calls, cosine-routed.
+            #   * --floor-plan-budget 300: bounded live floor-plan validation (its own budget).
+            ARGS="--free --candidates --max-pairs 200000 --max-seconds 2400 --compare-budget 100 --floor-plan-budget 300"
           elif [ "${{ github.event.schedule }}" = "0 3,9,15,21 * * *" ]; then
             # SCHEDULED GEO SCAN (paid, bounded): single-dwelling families (house / land /
             # commercial) have NO disposition, so the street+disposition engine can't touch them
@@ -209,11 +219,15 @@ jobs:
             ARGS="--geo-only --max-pairs 200000 --geo-max-pairs 20000"
             ARGS="$ARGS --max-vision-calls 300 --max-room-attempts 4 --max-seconds 4800 --floor-plan-budget 300"
           elif [ "${{ github.event_name }}" = "schedule" ]; then
-            # SCHEDULED FULL SCAN = FREE: pHash + rule merges + reconcile, NO paid all-rooms
-            # compare/classify, no placeholders. The ONE bounded paid exception is the
-            # floor-plan validation gate, capped by app_settings.dedup_floor_plan_budget
-            # (default 10000) — a targeted Sonnet check only on would-merge both-plan pairs.
-            ARGS="--free --max-pairs 200000 --max-seconds 4800"
+            # SCHEDULED FULL SCAN = FREE: pHash + rule merges + reconcile + market discovery.
+            #   * --compare-budget 300 (W2): live forensic compares on the new different-photo
+            #     cross-portal candidates the scan discovers, capped at 300 PAID (cache-free)
+            #     calls, cosine-routed — the pay-at-decision-time replacement for the retired
+            #     batch warmer. Its own pool, independent of the floor-plan budget below.
+            #   * floor-plan validation gate: capped by app_settings.dedup_floor_plan_budget
+            #     (default 10000) on its OWN separate budget — a targeted Sonnet check only on
+            #     would-merge both-plan pairs (so a large plan budget can't inflate compare spend).
+            ARGS="--free --max-pairs 200000 --max-seconds 4800 --compare-budget 300"
           else
             # Dispatch: paid vision / cache-only / free / shadow / candidates per inputs.
             ARGS="--max-pairs ${{ inputs.max_pairs || '20000' }}"
@@ -221,6 +235,7 @@ jobs:
             ARGS="$ARGS --max-room-attempts ${{ inputs.max_room_attempts || '4' }}"
             ARGS="$ARGS --max-seconds ${{ inputs.max_seconds || '4800' }}"
             if [ -n "${{ inputs.floor_plan_budget }}" ]; then ARGS="$ARGS --floor-plan-budget ${{ inputs.floor_plan_budget }}"; fi
+            if [ -n "${{ inputs.compare_budget }}" ]; then ARGS="$ARGS --compare-budget ${{ inputs.compare_budget }}"; fi
             if [ "${{ inputs.dry_run }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
             if [ "${{ inputs.shadow }}" = "true" ]; then ARGS="$ARGS --shadow"; fi
             if [ "${{ inputs.cache_only }}" = "true" ]; then ARGS="$ARGS --cache-only"; fi

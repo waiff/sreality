@@ -1256,19 +1256,18 @@ def test_effective_vision_cap() -> None:
 
     # cache-only: never throttle warm reads
     assert eng._effective_vision_cap(
-        free=False, cache_only=True, floor_plan_budget=0, max_vision_calls=300) == 10_000_000
-    # free + a positive floor-plan budget -> the cap IS that budget (bounds inline
-    # cold floor-plan checks; nothing else consumes vision in free mode)
+        free=False, cache_only=True, compare_budget=0, max_vision_calls=300) == 10_000_000
+    # free (W2): the pool is the COMPARE budget — the forensic compares consume it; the
+    # floor-plan gate runs on its OWN separate budget (run_engine.floor_plan_calls).
     assert eng._effective_vision_cap(
-        free=True, cache_only=False, floor_plan_budget=120, max_vision_calls=300) == 120
-    # free + budget 0 -> cache-only floor_plan_fn: a large cap so a zero budget can't
-    # pre-empt the gate before it reads the warm cache (the cache-only fn never makes a
-    # cold call, so it can't overspend)
+        free=True, cache_only=False, compare_budget=40, max_vision_calls=300) == 40
+    # free + compare_budget 0 -> pHash-only free run: no forensic compares (the historical
+    # --free behaviour). The floor-plan gate is unaffected — it has its own budget.
     assert eng._effective_vision_cap(
-        free=True, cache_only=False, floor_plan_budget=0, max_vision_calls=300) == 10_000_000
-    # live dispatch: the plain vision budget
+        free=True, cache_only=False, compare_budget=0, max_vision_calls=300) == 0
+    # live (non-free) dispatch: the plain shared vision budget (the gate aliases into it)
     assert eng._effective_vision_cap(
-        free=False, cache_only=False, floor_plan_budget=120, max_vision_calls=300) == 300
+        free=False, cache_only=False, compare_budget=40, max_vision_calls=300) == 300
 
 
 def test_run_engine_only_groups_skips_untouched(monkeypatch: Any) -> None:
@@ -1859,6 +1858,47 @@ def test_run_engine_phash_floor_plan_same_merges(monkeypatch: Any) -> None:
 
     assert stats["auto_phash"] == 1
     assert merges == ["image_phash"]
+
+
+def test_run_engine_floor_plan_budget_separate_from_compare(monkeypatch: Any) -> None:
+    """W2: the floor-plan gate runs on its OWN budget (run_engine.floor_plan_calls), so a
+    zero COMPARE pool (max_vision_calls=0) can't starve it — the gate still fires its cold
+    check on a would-merge pHash pair, and the call is counted in vision_calls. With the
+    budget ALIASED (floor_plan_calls=None) the same zero pool DEFERS instead — the historical
+    shared-pool behaviour, unchanged."""
+    import scripts.dedup_engine as eng
+
+    monkeypatch.setattr(
+        eng, "merge_properties",
+        lambda conn, *, survivor_id, retired_id, reason, **kw: {"data": {"merge_group_id": "g"}},
+    )
+    monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 3)
+    monkeypatch.setattr(eng, "_both_have_site_plan", lambda *a, **k: False)
+    monkeypatch.setattr(eng, "_floor_plan_image_ids", lambda conn, sid: [sid])
+    calls: list[int] = []
+
+    def fp(a, b, ia, ib):
+        calls.append(1)
+        return {"verdict": "different_layout"}
+
+    # Separate budget: compare pool 0, floor-plan budget 5 -> the gate STILL runs (dismiss).
+    conn = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None, source="bazos")])
+    stats = eng.run_engine(conn, classify_fn=None, compare_fn=None, floor_plan_fn=fp,
+                           max_vision_calls=0, floor_plan_calls=5)
+    assert stats["auto_dismissed"] == 1
+    assert stats["auto_phash"] == 0
+    assert stats["vision_calls"] == 1  # the one cold floor-plan check, counted
+    assert calls == [1]
+
+    # Aliased (floor_plan_calls=None): the same zero pool starves the gate -> DEFER, no verdict.
+    calls.clear()
+    conn2 = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None, source="bazos")])
+    stats2 = eng.run_engine(conn2, classify_fn=None, compare_fn=None, floor_plan_fn=fp,
+                            max_vision_calls=0)
+    assert stats2["auto_dismissed"] == 0
+    assert stats2["floor_plan_deferred"] == 1
+    assert stats2["vision_calls"] == 0
+    assert calls == []  # gate never called the fn (budget 0, aliased)
 
 
 def test_run_engine_phash_floor_plan_one_sided_merges(monkeypatch: Any) -> None:
