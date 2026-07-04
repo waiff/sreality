@@ -218,6 +218,7 @@ def test_probe_pass_portal_error_never_ends_the_pass(monkeypatch):
 def test_drain_pass_serves_only_claimable_registry_sources(monkeypatch):
     monkeypatch.setenv("SCRAPER_PROXY_URL", "http://proxy.example:1080")
     monkeypatch.setattr(rw, "_read_drain_slice", lambda: 200)
+    monkeypatch.setattr(rw, "_read_drain_disabled_sources", lambda: set())
     monkeypatch.setattr(rw, "_claimable_by_source", lambda: {
         "idnes": 5, "sreality": 5000, "bazos": 0, "ceskereality": 7,
     })
@@ -242,6 +243,7 @@ def test_drain_pass_skips_proxied_source_without_env(monkeypatch):
     monkeypatch.delenv("SCRAPER_PROXY_URL", raising=False)
     monkeypatch.setattr(rw, "_PROXY_WARNED", set())
     monkeypatch.setattr(rw, "_read_drain_slice", lambda: 50)
+    monkeypatch.setattr(rw, "_read_drain_disabled_sources", lambda: set())
     monkeypatch.setattr(
         rw, "_claimable_by_source", lambda: {"ceskereality": 7, "remax": 3})
     ran: list[tuple[str, int]] = []
@@ -250,6 +252,27 @@ def test_drain_pass_skips_proxied_source_without_env(monkeypatch):
         lambda s, n: ran.append((s, n)) or _drain_agg())
     asyncio.run(rw._drain_pass(asyncio.Event(), rw._new_state()))
     assert ran == [("remax", 50)]
+
+
+def test_drain_pass_filters_drain_disabled_source(monkeypatch):
+    """The per-source drain kill-switch skips a source with claimable rows,
+    counting it under `skipped` (the proxy-outage freeze-the-queue lever)."""
+    monkeypatch.setenv("SCRAPER_PROXY_URL", "http://proxy.example:1080")
+    monkeypatch.setattr(rw, "_read_drain_slice", lambda: 100)
+    monkeypatch.setattr(
+        rw, "_read_drain_disabled_sources", lambda: {"ceskereality"})
+    monkeypatch.setattr(rw, "_claimable_by_source", lambda: {
+        "ceskereality": 9, "idnes": 5, "remax": 3,
+    })
+    ran: list[tuple[str, int]] = []
+    monkeypatch.setattr(
+        rw, "_run_drain_sync",
+        lambda s, n: ran.append((s, n)) or _drain_agg())
+    state = rw._new_state()
+    asyncio.run(rw._drain_pass(asyncio.Event(), state))
+    assert ran == [("idnes", 100), ("remax", 100)]
+    assert state["lanes"]["drain"]["last"]["skipped"] == 1
+    assert state["lanes"]["drain"]["last"]["sources"] == 2
 
 
 def test_drain_pass_slice_zero_skips_entirely(monkeypatch):
