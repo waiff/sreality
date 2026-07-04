@@ -21,7 +21,7 @@ def test_walk_complete_requires_near_full_walk():
 
 
 def test_mark_inactive_passes_staleness_rail(monkeypatch):
-    # The rail (min_unseen_hours=24) must ride on every sweep — a regression
+    # The rail (min_unseen_hours=12) must ride on every sweep — a regression
     # dropping it would silently re-expose churn-missed live rows to flips.
     monkeypatch.setattr(
         bezrealitky_main.db, "index_summary_native",
@@ -46,4 +46,4 @@ def test_mark_inactive_passes_staleness_rail(monkeypatch):
     assert n == 5
     assert captured["cm"] == "byt" and captured["ct"] == "prodej"
     assert captured["source"] == "bezrealitky"
-    assert captured["min_unseen_hours"] == 24
+    assert captured["min_unseen_hours"] == 12

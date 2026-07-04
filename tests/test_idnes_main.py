@@ -240,7 +240,7 @@ def test_mark_inactive_source_scoped(monkeypatch):
     assert n == 7
     assert captured["cm"] == "byt" and captured["ct"] == "prodej"
     assert captured["source"] == "idnes"
-    assert captured["min_unseen_hours"] == 24   # staleness rail rides on every sweep
+    assert captured["min_unseen_hours"] == 12   # staleness rail rides on every sweep
 
 
 def test_active_count_source_scoped(monkeypatch):

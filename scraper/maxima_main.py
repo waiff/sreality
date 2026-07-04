@@ -256,8 +256,10 @@ class MaximaPortal:
         if walk is None or not walk.complete:
             return 0
         self._swept_agendas.add(af)
+        # 12h staleness rail (~2 walk cadences at 6h): tightened 24->12h for the
+        # real-time delisting SLO; 2 walk-misses is still robust to single-walk jitter.
         flipped = db.mark_inactive_agenda(
-            conn, SOURCE, ct, set(walk.native_ids), min_unseen_hours=24,
+            conn, SOURCE, ct, set(walk.native_ids), min_unseen_hours=12,
         )
         LOG.info(
             "INACTIVE agenda af=%d ct=%s marked=%d collected=%d total=%s",

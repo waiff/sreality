@@ -123,7 +123,7 @@ def test_mark_inactive_runs_native_sweep_with_staleness_rail(monkeypatch):
     # consecutive walks can flip; there is no sweep-window throttle anymore.
     assert swept == {"src": "bazos", "cm": "byt", "ct": "pronajem",
                      "seen": {"a", "b"}, "subtype": None, "scope_subtype": True,
-                     "min_unseen_hours": 24}
+                     "min_unseen_hours": 12}
 
 
 def test_mark_inactive_scopes_fine_section_to_its_subtype(monkeypatch):
@@ -138,7 +138,7 @@ def test_mark_inactive_scopes_fine_section_to_its_subtype(monkeypatch):
     # chata collapses onto category_main=dum but is scoped to subtype=chata, so it
     # never sweeps the generic-dum (subtype NULL) section's rows.
     assert swept == {"cm": "dum", "subtype": "chata", "scope_subtype": True,
-                     "min_unseen_hours": 24}
+                     "min_unseen_hours": 12}
 
 
 def test_mark_inactive_sweeps_every_category_every_run(monkeypatch):

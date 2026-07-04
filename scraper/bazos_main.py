@@ -64,11 +64,12 @@ SOURCE = "bazos"
 # the second, stronger guard. Not operator-tunable.
 INDEX_MIN_COMPLETENESS = 0.995
 
-# Only flip rows unseen for 24h+ — ~3.5x the 6-7h walk cadence. Combined with
+# Only flip rows unseen for 12h+ — ~2x the 6-7h walk cadence. Combined with
 # touch_listings bumping last_seen_at for every index-seen row BEFORE the sweep,
 # a live row inside the 0.5% tolerance window cannot be flipped — only rows
-# missed by 4+ consecutive walks can.
-INACTIVE_MIN_UNSEEN_HOURS = 24
+# missed by 2+ consecutive walks can. Tightened 24->12h for the real-time
+# delisting SLO (2 walk-misses is still robust against single-walk jitter).
+INACTIVE_MIN_UNSEEN_HOURS = 12
 
 
 class _CachingGeocoder:
