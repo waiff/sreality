@@ -1309,6 +1309,51 @@ export const fetchScraperHealthChecks = async (
   return data as ScraperHealthChecks;
 };
 
+/* Migration 273 — the dedup-aware publication gate. New properties are hidden
+ * from Browse until dedup evaluates them; this single-row aggregate exposes the
+ * backlog (`unpublished`), its age, and the active baseline. The gate has no
+ * auto-publish timeout, so a rising `unpublished` is the dedup-stall signal. */
+export interface PublicationGateRow {
+  unpublished: number;
+  oldest_unpublished_at: string | null;
+  active_total: number;
+}
+
+export const fetchPublicationGateHealth = async (): Promise<PublicationGateRow> => {
+  const { data, error } = await supabase
+    .from('publication_gate_health_public')
+    .select('unpublished,oldest_unpublished_at,active_total')
+    .maybeSingle();
+  if (error) throw error;
+  return (
+    (data as PublicationGateRow | null) ?? {
+      unpublished: 0,
+      oldest_unpublished_at: null,
+      active_total: 0,
+    }
+  );
+};
+
+/* Migration 274 — dedup pipeline verification checks (latest row per check_key).
+ * The DB stamps the ok/warn/fail status + a `value` whose unit is check-specific
+ * (suspect-pair counts for street/geo debt, ratios/minutes elsewhere). */
+export interface PipelineCheckRow {
+  check_key: string;
+  status: string;
+  value: number | null;
+  details: Record<string, unknown> | null;
+  run_at: string | null;
+}
+
+export const fetchPipelineChecks = async (): Promise<PipelineCheckRow[]> => {
+  const { data, error } = await supabase
+    .from('pipeline_checks_public')
+    .select('check_key,status,value,details,run_at')
+    .order('check_key', { ascending: true });
+  if (error) throw error;
+  return (data ?? []) as PipelineCheckRow[];
+};
+
 /* Migration 178 — failed GitHub Actions runs recorded by the 30-min poller
  * (monitor_workflow_failures.yml). */
 export interface WorkflowFailureRow {

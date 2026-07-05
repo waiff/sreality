@@ -1309,7 +1309,12 @@ export interface FilterPreset {
   color: TagColor | null;
 }
 
-export type NotificationSourceKind = 'watchdog' | 'collection_monitor';
+export type NotificationSourceKind =
+  | 'watchdog'
+  | 'collection_monitor'
+  /* System-health alerts (migration 273/274 producer): pipeline stalls, credit
+   * outages, etc. No listing subject — the payload is the `message` text. */
+  | 'system_health';
 
 export interface WatchdogDispatch {
   id: string;
@@ -1327,6 +1332,10 @@ export interface WatchdogDispatch {
    * property's representative listing (what the feed links to). */
   property_id: number | null;
   change_kind: string;
+  /* Free-text body for source_kind='system_health' rows (change_kind=
+   * 'system_alert'); null on watchdog / collection_monitor rows, which describe
+   * a listing subject instead. */
+  message: string | null;
   dispatched_at: string;
   seen_at: string | null;
   /* Change provenance — collection-monitor price events carry these so "why was
@@ -1387,6 +1396,9 @@ export interface WatchdogDispatchesResponse {
 export interface NotificationUnreadCount {
   watchdog: number;
   collection_monitor: number;
+  system_health: number;
+  /* `total` sums EVERY source_kind (incl. system_health); the nav bell badge
+   * reads `unread_count` (= total when unscoped), so system alerts count too. */
   total: number;
   unread_count: number;
 }
