@@ -572,8 +572,8 @@ def test_match_once_uses_per_subscription_cursor() -> None:
             [(sub_id, {"category_main": "byt", "category_type": "pronajem", "districts": ["Praha"]}, cursor_ts, ["email", "in_app"])],
             1,
         ),
-        # Window upper-bound query
-        (lambda s: "SELECT max(first_seen_at), count(*) FROM" in s, [(upper_ts, 5)], 0),
+        # Window upper-bound query (published_at-keyed since migration 273's gate)
+        (lambda s: "SELECT max(published_at), count(*) FROM" in s, [(upper_ts, 5)], 0),
         # Gate-pending lookback INSERT (default-on gate) — nothing released.
         (
             lambda s: "INSERT INTO notification_dispatches" in s
@@ -601,10 +601,12 @@ def test_match_once_uses_per_subscription_cursor() -> None:
     # Verify the WHERE clause references the per-subscription cursor
     # parameter, not a global watermark.
     window_query = next(
-        (sql, p) for sql, p in conn.executed if "max(first_seen_at), count(*)" in sql
+        (sql, p) for sql, p in conn.executed if "max(published_at), count(*)" in sql
     )
     sql, params = window_query
-    assert "l.first_seen_at > %(cursor)s" in sql
+    # New-dispatch detection keys on published_at (migration 273), not first_seen_at;
+    # the cursor column keeps its name but now holds a published_at watermark.
+    assert "l.published_at > %(cursor)s" in sql
     assert isinstance(params, dict) and params["cursor"] == cursor_ts
 
     # And that the filter spec made it through too. The district chip

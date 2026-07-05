@@ -404,6 +404,32 @@ def _stamp_engine_looked(conn: Any, looked: dict[tuple[int, int], str]) -> None:
         )
 
 
+# Publication gate (migration 273): a property is visible in Browse / map / Stats / to
+# agents / in watchdog only once the dedup engine has evaluated it. finalize() stamps every
+# property whose street/geo group this run scanned; the ineligible sweep + merge/split paths
+# publish the rest. Only NULL -> now(), so a re-scan never overwrites a stamped reason.
+_PUBLICATION_STAMP_CHUNK = 5000
+
+
+def _stamp_publication_checked(conn: Any, property_ids: set[int]) -> int:
+    """Publish the properties the engine dedup-evaluated this run (reason 'dedup_checked').
+    Set-based, chunked, unpublished-only — idempotent across runs."""
+    if not property_ids:
+        return 0
+    ids = sorted(property_ids)
+    total = 0
+    with conn.cursor() as cur:
+        for i in range(0, len(ids), _PUBLICATION_STAMP_CHUNK):
+            cur.execute(
+                "UPDATE properties SET published_at = now(), "
+                "publish_reason = 'dedup_checked' "
+                "WHERE id = ANY(%(ids)s) AND published_at IS NULL",
+                {"ids": ids[i:i + _PUBLICATION_STAMP_CHUNK]},
+            )
+            total += cur.rowcount or 0
+    return total
+
+
 # --- real-time dedup queue drain (dedup_dirty_properties, migration 242; the writer-side
 #     enqueue is scraper.db.mark_properties_dedup_dirty_for_images, mirroring dirty_properties)
 # The real-time lane is a LATENCY optimization backstopped by the 6h full scan, so its claim is
@@ -1950,6 +1976,12 @@ def run_engine(
     # scan's job if it shrinks), and a dirty-filter-skipped group contains no claimed property
     # by construction. This is what lets a deadline-truncated run CLEAR the slice it finished
     # instead of keeping its whole claim — monotonic progress, no re-processing livelock.
+    # Publication gate (migration 273): collect every property the engine scans this run
+    # (ANY street/geo group of it processed == the engine evaluated it) so finalize() can
+    # stamp it visible. Populated on ALL non-dry run modes — full scan, candidate drain,
+    # dirty drain, geo — INDEPENDENT of the dirty out-param's stricter all-groups-scanned
+    # accounting below (which must stay unchanged to keep the dirty clear correct).
+    publication_checked: set[int] = set()
     remaining_groups: dict[int, int] | None = None
     if resolved_property_ids is not None:
         remaining_groups = {}
@@ -1961,6 +1993,9 @@ def run_engine(
                 pid for pid in only_groups_with_property_ids if pid not in remaining_groups)
 
     def _group_scanned(members: list[Any]) -> None:
+        for m in members:
+            if m.property_id is not None:
+                publication_checked.add(m.property_id)
         if remaining_groups is None:
             return
         for m in members:
@@ -2043,6 +2078,10 @@ def run_engine(
             # Stamp every pair the engine evaluated but left proposed (migration 272) —
             # the candidate drain's due-filter keys on this to stop the re-chew treadmill.
             _stamp_engine_looked(conn, ctx.engine_looked)
+            # Publication gate (migration 273): publish every property this run
+            # dedup-evaluated. Unpublished-only, so a re-scan is a no-op — this is the
+            # writer side of the properties_public / properties_map_mv gate.
+            _stamp_publication_checked(conn, publication_checked)
         if cursor_out is not None:
             cursor_out["last_key"] = scan_frontier["last_key"]
             # The cycle completed only if the scan reached the end of the ordered list

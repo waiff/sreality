@@ -919,6 +919,9 @@ class _Cur:
         elif "INSERT INTO property_identity_candidates" in s:
             self._conn.enqueued.append(params)
             self._rows = []
+        elif "UPDATE properties" in s and "published_at" in s:
+            self._conn.publication_stamped.append(params)  # migration 273 publish gate
+            self._rows = []
         else:
             self._rows = []
 
@@ -937,6 +940,7 @@ class _FakeConn:
         self.enqueued: list[Any] = []
         self.dismiss_recorded: list[Any] = []  # _record_auto_dismissed marker INSERTs
         self.resolved: list[tuple[str, Any]] = []  # reconcile + _resolve_candidates UPDATEs
+        self.publication_stamped: list[Any] = []  # _stamp_publication_checked UPDATEs (mig 273)
 
     def cursor(self) -> _Cur:
         return _Cur(self)
@@ -1582,6 +1586,40 @@ def test_run_engine_incremental_resolve_dual_key_guard(monkeypatch: Any) -> None
         max_pairs=100, max_vision_calls=0)
     assert stats2["truncated"] == 0
     assert resolved2 >= claimed  # both groups scanned -> resolved
+
+
+def test_run_engine_stamps_publication_checked(monkeypatch: Any) -> None:
+    # Publication gate (migration 273): a non-dry run publishes every property whose
+    # street group it scanned — the writer side of the properties_public gate. Fires on a
+    # plain full scan (no resolved_property_ids), not just the dirty out-param path.
+    import scripts.dedup_engine as eng
+
+    monkeypatch.setattr(eng, "resolve_pair", _stub_resolve_pair)
+    conn = _FakeConn([
+        _row(1, 101, street="Alfa", street_id=None, hn=None),
+        _row(2, 102, street="Alfa", street_id=None, hn=None, source="bazos"),
+        _row(3, 103, street="Beta", street_id=None, hn=None),
+        _row(4, 104, street="Beta", street_id=None, hn=None, source="bazos"),
+    ])
+    eng.run_engine(conn, max_pairs=100, max_vision_calls=0)
+
+    stamped = sorted(pid for e in conn.publication_stamped for pid in e["ids"])
+    assert stamped == [101, 102, 103, 104]
+
+
+def test_run_engine_dry_run_does_not_stamp_publication(monkeypatch: Any) -> None:
+    # A shadow/dry run computes actions but writes nothing — no publish stamp (the gate
+    # writer is guarded by `if not dry_run` in finalize()).
+    import scripts.dedup_engine as eng
+
+    monkeypatch.setattr(eng, "resolve_pair", _stub_resolve_pair)
+    conn = _FakeConn([
+        _row(1, 101, street="Alfa", street_id=None, hn=None),
+        _row(2, 102, street="Alfa", street_id=None, hn=None, source="bazos"),
+    ])
+    eng.run_engine(conn, dry_run=True, max_pairs=100, max_vision_calls=0)
+
+    assert conn.publication_stamped == []
 
 
 def _three_group_rows() -> list[tuple[Any, ...]]:

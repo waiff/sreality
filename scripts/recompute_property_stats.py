@@ -61,6 +61,8 @@ import time
 from collections.abc import Iterator
 from typing import Any
 
+from toolkit.publication import GEO_ELIGIBLE_PREDICATE, STREET_ELIGIBLE_PREDICATE
+
 LOG = logging.getLogger("recompute_property_stats")
 
 
@@ -468,6 +470,33 @@ def _attach_stragglers(conn: Any, *, skip_native_backfill: bool = False) -> int:
     return inserted
 
 
+# Publication gate (migration 273): publish the properties the dedup engine can NEVER
+# evaluate — repr listing eligible for NEITHER the street pass (STREET_ELIGIBLE_PREDICATE)
+# NOR the geo pass (GEO_ELIGIBLE_PREDICATE) — so the hard gate doesn't hide them forever.
+# `IS NOT TRUE` (not `NOT (...)`) so a NULL-column listing counts as ineligible under SQL
+# three-valued logic. The predicates are imported from toolkit.publication (single source,
+# parity-tested against the engine SQL). There is deliberately NO timeout sweep: a
+# dedup-CHECKABLE-but-unchecked property stays hidden until the engine stamps it.
+_PUBLISH_INELIGIBLE_SQL = f"""
+    UPDATE properties p
+    SET published_at = now(), publish_reason = 'ineligible'
+    FROM listings l
+    WHERE p.published_at IS NULL
+      AND p.status = 'active'
+      AND l.sreality_id = p.repr_listing_id
+      AND ({STREET_ELIGIBLE_PREDICATE}) IS NOT TRUE
+      AND ({GEO_ELIGIBLE_PREDICATE}) IS NOT TRUE
+"""
+
+
+def _publish_sweep(conn: Any) -> int:
+    """Publish (reason 'ineligible') unpublished active properties the engine can never
+    dedup-check. Partial-index-backed (properties_unpublished_idx); no-op once caught up."""
+    with conn.cursor() as cur:
+        cur.execute(_PUBLISH_INELIGIBLE_SQL)
+        return cur.rowcount or 0
+
+
 def _drain_dirty(conn: Any, batch_size: int, cutoff: Any) -> int:
     """Recompute every property queued at/before `cutoff`, scoped + batched.
 
@@ -564,10 +593,12 @@ def main() -> int:
         if args.incremental:
             attached = _attach_stragglers(conn, skip_native_backfill=True)
             recomputed = _drain_dirty(conn, args.batch_size, cutoff)
+            published = _publish_sweep(conn)
             elapsed = time.monotonic() - started_at
             LOG.info(
-                "RECOMPUTE incremental done attached=%d recomputed=%d elapsed=%.1fs",
-                attached, recomputed, elapsed,
+                "RECOMPUTE incremental done attached=%d recomputed=%d "
+                "published_ineligible=%d elapsed=%.1fs",
+                attached, recomputed, published, elapsed,
             )
             return 0
 

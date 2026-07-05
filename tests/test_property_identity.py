@@ -12,7 +12,12 @@ from typing import Any
 
 import pytest
 
-from toolkit.property_identity import MergeError, merge_properties, unmerge_group
+from toolkit.property_identity import (
+    MergeError,
+    merge_properties,
+    split_property_to_singletons,
+    unmerge_group,
+)
 
 
 class _Ctx:
@@ -209,6 +214,64 @@ def test_merge_carries_operator_state_to_survivor():
         i for i, e in enumerate(conn.executed) if "status = 'merged_away'" in e[0]
     )
     assert idx_carry < idx_retire
+
+
+def test_merge_stamps_survivor_published():
+    # Publication gate (migration 273): a merge IS a dedup verdict, so the survivor must
+    # be published — a pHash merge of two brand-new unchecked singletons would otherwise
+    # stay hidden. COALESCE keeps an already-published survivor's timestamp/reason. The
+    # stamp runs inside the txn, before the inline recompute.
+    conn = _FakeConn([
+        (lambda s: "SELECT id, status, category_type, category_main FROM properties WHERE id IN" in s,
+         [(10, "active", "prodej", "byt"), (20, "active", "prodej", "byt")]),
+        (lambda s: "INSERT INTO property_merge_events" in s, [(1,)]),
+    ])
+
+    merge_properties(
+        conn, survivor_id=10, retired_id=20, reason="image_phash", source="auto",
+    )
+
+    stamp = _find(conn.executed, "publish_reason = COALESCE(publish_reason, 'merge_survivor')")
+    assert stamp is not None and stamp[1] == (10,)
+    idx_stamp = next(i for i, e in enumerate(conn.executed) if "'merge_survivor'" in e[0])
+    idx_recompute = next(i for i, e in enumerate(conn.executed) if "WITH batch AS" in e[0])
+    assert idx_stamp < idx_recompute
+
+
+def test_split_stamps_detached_singletons_published():
+    # Publication gate (migration 273): the detached singleton is freshly inserted with
+    # published_at NULL (= hidden); the split must publish it so a previously-visible unit
+    # is not hidden by being split out.
+    conn = _FakeConn([
+        (lambda s: "SELECT id, status FROM properties WHERE id = %s FOR UPDATE" in s,
+         [(100, "active")]),
+        (lambda s: "SELECT sreality_id FROM listings WHERE property_id" in s,
+         [(1,), (2,)]),  # anchor=1 stays, detach=[2] -> one new singleton
+        (lambda s: "INSERT INTO properties (" in s, [(999,)]),  # RETURNING the new id
+    ])
+
+    result = split_property_to_singletons(conn, property_id=100)
+
+    assert result["data"]["new_property_ids"] == [999]
+    stamp = _find(conn.executed, "publish_reason = 'split'")
+    assert stamp is not None and stamp[1] == ([999],)
+
+
+def test_unmerge_stamps_reactivated_published():
+    # Publication gate (migration 273): a reactivated property is a previously-visible
+    # unit — COALESCE ensures it is published even in the edge where a never-published
+    # singleton was merged away before any dedup stamp landed.
+    conn = _FakeConn([
+        (lambda s: "FROM property_merge_events WHERE merge_group_id" in s,
+         [(10, 20, 1001)]),
+        (lambda s: "UPDATE listings SET property_id = %s WHERE sreality_id" in s,
+         [(1,)]),
+    ])
+
+    unmerge_group(conn, merge_group_id="grp", undone_by="operator")
+
+    stamp = _find(conn.executed, "publish_reason = COALESCE(publish_reason, 'split')")
+    assert stamp is not None and stamp[1] == ([20],)
 
 
 def test_merge_reconciles_pipeline_stage():
