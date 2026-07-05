@@ -2565,6 +2565,88 @@ def run_dirty_pass(
     return stats
 
 
+# A real-time dirty pass claims a small newest-first slice; the pair cap is a runaway
+# backstop only (the deadline + slice are the real bounds), so the scheduled 200000 fits.
+_REALTIME_MAX_PAIRS = 200000
+
+
+def build_free_engine_kw(
+    conn: Any, *, compare_budget: int, floor_plan_budget: int,
+    max_room_attempts: int = 4, deadline: float | None = None,
+    clip_counter: list[int] | None = None, vision_errors: list[int] | None = None,
+) -> dict[str, Any]:
+    """Assemble run_engine's --free configuration (the exact fn/budget wiring main()'s
+    free branch builds): pHash-first, bounded live forensics capped at compare_budget
+    PAID calls, the floor-plan gate on its own budget, CLIP-cosine routing when enabled,
+    enqueue_unresolved off. Shared by the CLI --free path (via main) and the realtime
+    worker's dedup lane so the two can't drift. clip_counter / vision_errors are the
+    shared observability counters the caller folds into the run row."""
+    from toolkit.dedup_settings import read_setting
+    auto_merge_enabled = _auto_merge_enabled(conn)
+    autodismiss = _visual_autodismiss_enabled(conn)
+    clip = _clip_settings(conn)
+    inconclusive_to_review = bool(
+        read_setting(conn, "dedup_floor_plan_inconclusive_to_review"))
+    ck = {"prefer_clip": clip["prefer_clip"], "clip_model": clip["clip_model"],
+          "clip_counter": clip_counter, "error_count": vision_errors}
+
+    classify_fn = compare_fn = site_plan_fn = floor_plan_fn = None
+    if auto_merge_enabled and compare_budget > 0:
+        classify_fn = _build_classify_fn(conn, **ck)
+        compare_fn = _build_compare_fn(conn, error_count=vision_errors)
+        site_plan_fn = _build_site_plan_fn(conn, error_count=vision_errors)
+    if auto_merge_enabled:
+        floor_plan_fn = (
+            _build_floor_plan_fn(conn, error_count=vision_errors) if floor_plan_budget > 0
+            else _build_cache_only_floor_plan_fn(conn))
+
+    cosine_fn = None
+    bands = None
+    model_for = None
+    if clip["cosine_enabled"] and compare_fn is not None:
+        from toolkit.clip_dedup import room_pair_cosine
+        bands = clip["bands"]
+        model_for = {"haiku": clip["haiku_model"], "sonnet": None}
+        _cm = clip["clip_model"]
+
+        def cosine_fn(ids_a: list[int], ids_b: list[int]) -> float | None:
+            return room_pair_cosine(conn, image_ids_a=ids_a, image_ids_b=ids_b, model=_cm)
+
+    return dict(
+        classify_fn=classify_fn, compare_fn=compare_fn, site_plan_fn=site_plan_fn,
+        floor_plan_fn=floor_plan_fn, cosine_fn=cosine_fn, bands=bands,
+        model_for=model_for, render_min=clip["render_min"],
+        inconclusive_to_review=inconclusive_to_review,
+        max_vision_calls=compare_budget, max_room_attempts=max_room_attempts,
+        floor_plan_calls=floor_plan_budget,
+        auto_merge_enabled=auto_merge_enabled, autodismiss=autodismiss,
+        enqueue_unresolved=False, deadline=deadline,
+        clip_model=clip["clip_model"],
+    )
+
+
+def run_realtime_dirty_pass(
+    conn: Any, *, max_dirty: int, compare_budget: int, floor_plan_budget: int,
+    max_seconds: float, runner: str = "worker",
+) -> dict[str, int] | None:
+    """One free-mode real-time dirty pass for the always-on worker: assemble the --free
+    engine config, then delegate to run_dirty_pass (prune → newest-first claim → scoped
+    resolve in claim order → incremental clear → run row tagged `runner`). Returns None
+    on an empty queue (no run row). The single call the worker's dedup lane makes."""
+    clip_counter = [0]
+    vision_errors = [0]
+    deadline = time.monotonic() + max_seconds if max_seconds > 0 else None
+    engine_kw = build_free_engine_kw(
+        conn, compare_budget=compare_budget, floor_plan_budget=floor_plan_budget,
+        deadline=deadline, clip_counter=clip_counter, vision_errors=vision_errors)
+    return run_dirty_pass(
+        conn, max_dirty=max_dirty, max_pairs=_REALTIME_MAX_PAIRS, engine_kw=engine_kw,
+        runner=runner,
+        stamp_stats=lambda s: s.update({
+            "clip_classified": clip_counter[0], "vision_errors": vision_errors[0]}),
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--max-pairs", type=int, default=2000,

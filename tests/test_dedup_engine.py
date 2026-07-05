@@ -1920,6 +1920,31 @@ def test_run_dirty_pass_contract(monkeypatch: Any) -> None:
     assert "run_kind" not in calls
 
 
+def test_run_realtime_dirty_pass_delegates_free_mode(monkeypatch: Any) -> None:
+    # The worker's single entry point: assemble the --free engine_kw and delegate to
+    # run_dirty_pass with runner='worker' and a deadline from max_seconds.
+    import scripts.dedup_engine as eng
+
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(eng, "build_free_engine_kw",
+                        lambda conn, **kw: {"_kw": kw, "enqueue_unresolved": False})
+
+    def _fake_dirty(conn, *, max_dirty, max_pairs, engine_kw, runner, stamp_stats=None):
+        captured.update(max_dirty=max_dirty, max_pairs=max_pairs,
+                        engine_kw=engine_kw, runner=runner)
+        return {"dirty_claimed": 1}
+    monkeypatch.setattr(eng, "run_dirty_pass", _fake_dirty)
+
+    out = eng.run_realtime_dirty_pass(
+        object(), max_dirty=200, compare_budget=4, floor_plan_budget=4, max_seconds=120)
+    assert out == {"dirty_claimed": 1}
+    assert captured["runner"] == "worker"
+    assert captured["max_dirty"] == 200
+    assert captured["engine_kw"]["_kw"]["compare_budget"] == 4
+    assert captured["engine_kw"]["_kw"]["floor_plan_budget"] == 4
+    assert captured["engine_kw"]["_kw"]["deadline"] is not None  # max_seconds>0 -> a deadline
+
+
 def test_vision_error_breaker_helpers() -> None:
     # After VISION_ERROR_BREAKER errors the paid fns stop calling out (cache reads only) —
     # a dead key / exhausted credit degrades instead of burning the run budget on errors.
