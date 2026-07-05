@@ -1,0 +1,62 @@
+name: "Monitoring: pipeline verification"
+
+# Computes pipeline-health metrics — street/geo dedup debt, the per-source
+# eligibility funnel, merge latency, dedup-engine cycle health, and the LLM
+# error rate — into `pipeline_check_results`, and rings the in-app notification
+# bell (a `system_health` notification_dispatches row) for every `fail`. Born
+# from the 2026-07 incident where the pipeline stalled silently for two days
+# (Anthropic credit exhaustion) with no in-app signal and ~39k suspect unmerged
+# byt pairs sat invisible. On Mondays it also records a random merge-precision
+# sample for operator spot-review.
+#
+# Read-mostly (writes only its own result + alert rows); needs ONLY
+# SUPABASE_DB_URL. Each check is isolated — one failing check writes a `fail`
+# row, never aborts the run.
+#
+# Required GitHub secret: SUPABASE_DB_URL.
+
+on:
+  schedule:
+    - cron: "20 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Compute + log only; write no result rows and send no alerts"
+        type: boolean
+        default: false
+
+concurrency:
+  group: pipeline-verification
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install runtime deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+
+      - name: Run pipeline verification
+        run: |
+          ARGS=""
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            ARGS="$ARGS --dry-run"
+          fi
+          if [ "$(date +%u)" = "1" ]; then
+            ARGS="$ARGS --weekly"
+          fi
+          echo "verify_pipeline args:${ARGS}"
+          python -m scripts.verify_pipeline $ARGS

@@ -3804,5 +3804,40 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "permissions": "contents: read",
     "runsUrl": "https://github.com/waiff/sreality/actions/workflows/validate_vision_models.yml",
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/validate_vision_models.yml"
+  },
+  {
+    "filename": "verify_pipeline.yml",
+    "name": "Monitoring: pipeline verification",
+    "description": "Computes pipeline-health metrics — street/geo dedup debt, the per-source eligibility funnel, merge latency, dedup-engine cycle health, and the LLM error rate — into `pipeline_check_results`, and rings the in-app notification bell (a `system_health` notification_dispatches row) for every `fail`. Born from the 2026-07 incident where the pipeline stalled silently for two days (Anthropic credit exhaustion) with no in-app signal and ~39k suspect unmerged byt pairs sat invisible. On Mondays it also records a random merge-precision sample for operator spot-review.",
+    "portal": null,
+    "manual": true,
+    "schedules": [
+      {
+        "cron": "20 */6 * * *",
+        "human": "Every 6 hours at :20"
+      }
+    ],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "dry_run",
+        "description": "Compute + log only; write no result rows and send no alerts",
+        "required": false,
+        "type": "boolean",
+        "default": "false",
+        "options": null
+      }
+    ],
+    "secrets": [
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "pipeline-verification",
+    "cancelInProgress": false,
+    "timeoutMinutes": 30,
+    "permissions": "contents: read",
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/verify_pipeline.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/verify_pipeline.yml"
   }
 ];

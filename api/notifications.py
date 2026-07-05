@@ -692,7 +692,7 @@ _DISPATCH_SELECT = (
     "d.id, d.source_kind, "
     "d.subscription_id, s.name AS subscription_name, "
     "d.collection_id, c.name AS collection_name, "
-    "d.sreality_id, d.property_id, d.change_kind, "
+    "d.sreality_id, d.property_id, d.change_kind, d.message, "
     "d.dispatched_at, d.seen_at, "
     "d.trigger_price_czk, d.prev_price_czk, d.trigger_snapshot_id, "
     "d.target_channels, "
@@ -719,7 +719,7 @@ def list_dispatches(
     *,
     subscription_id: str | None = None,
     collection_id: int | None = None,
-    source_kind: Literal["watchdog", "collection_monitor", "all"] = "all",
+    source_kind: Literal["watchdog", "collection_monitor", "system_health", "all"] = "all",
     seen: Literal["all", "seen", "unseen"] = "all",
     limit: int = 50,
     offset: int = 0,
@@ -858,7 +858,7 @@ def _fetch_dispatch(
 def get_unread_count(
     conn: "psycopg.Connection",
     *,
-    source_kind: Literal["watchdog", "collection_monitor", "all"] = "all",
+    source_kind: Literal["watchdog", "collection_monitor", "system_health", "all"] = "all",
 ) -> dict[str, int]:
     """Unseen dispatch counts — drives the nav unread badge.
 
@@ -872,12 +872,14 @@ def get_unread_count(
             "WHERE seen_at IS NULL GROUP BY source_kind"
         )
         counts = {r[0]: int(r[1]) for r in cur.fetchall()}
-    watchdog = counts.get("watchdog", 0)
-    monitor = counts.get("collection_monitor", 0)
-    total = watchdog + monitor
+    # total sums EVERY source_kind (incl. system_health + any future kind), not a
+    # hardcoded watchdog+collection_monitor — the earlier hardcode silently dropped
+    # system_health alerts from the badge.
+    total = sum(counts.values())
     return {
-        "watchdog": watchdog,
-        "collection_monitor": monitor,
+        "watchdog": counts.get("watchdog", 0),
+        "collection_monitor": counts.get("collection_monitor", 0),
+        "system_health": counts.get("system_health", 0),
         "total": total,
         "unread_count": total if source_kind == "all" else counts.get(source_kind, 0),
     }
@@ -886,7 +888,7 @@ def get_unread_count(
 def mark_all_seen(
     conn: "psycopg.Connection",
     *,
-    source_kind: Literal["watchdog", "collection_monitor", "all"] = "all",
+    source_kind: Literal["watchdog", "collection_monitor", "system_health", "all"] = "all",
 ) -> int:
     """Mark every unseen dispatch (optionally scoped to a source) as seen."""
     with conn.cursor() as cur:
