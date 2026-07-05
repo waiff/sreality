@@ -1710,6 +1710,7 @@ export const dedupKeys = {
   detail: (srealityIds: ReadonlyArray<number>) =>
     ['dedup', 'detail', sortedIds(srealityIds)] as const,
   engineRuns: (limit: number) => ['dedup', 'engine-runs', limit] as const,
+  scanState: ['dedup', 'scan-state'] as const,
 };
 
 export interface DedupEngineRun {
@@ -1746,6 +1747,28 @@ export interface DedupEngineRun {
    * full-scan coverage-gap signal (the TTL backstop is only as good as scan coverage). */
   run_kind: string | null;
   truncated: number | null;
+  /* Migration 271 observability — the stall tripwires that were previously invisible
+   * (null on pre-271 rows / lanes that don't measure a given gauge):
+   *  - skipped_oversized / oversized_groups: street groups over MAX_GROUP_SIZE the scan
+   *    skipped whole (a coverage hole — those listings are never compared).
+   *  - skipped_unresolved: pairs the free funnel reached but left undecided this run.
+   *  - vision_errors: failed vision calls this run — the credit-outage tripwire (nonzero
+   *    means the LLM lane is erroring, e.g. out-of-credit).
+   *  - truncated_cause: WHY a truncated run stopped ('deadline' wall-clock | 'pair_cap').
+   *  - scan_groups_total / scan_groups_scanned: full-scan cursor coverage this cycle.
+   *  - dirty_age_p95_seconds: p95 wait of the dedup-ready queue — the real-time SLO gauge.
+   *  - dirty_pruned: dedup-ready rows TTL-evicted (not merged) this run.
+   *  - runner: which executor wrote the row ('actions' cron | 'worker' always-on). */
+  skipped_unresolved: number | null;
+  skipped_oversized: number | null;
+  oversized_groups: number | null;
+  vision_errors: number | null;
+  truncated_cause: 'deadline' | 'pair_cap' | null;
+  scan_groups_total: number | null;
+  scan_groups_scanned: number | null;
+  dirty_age_p95_seconds: number | null;
+  dirty_pruned: number | null;
+  runner: 'actions' | 'worker' | null;
 }
 
 /* Recent dedup-engine runs for the /dedup automation dashboard. Reads the anon
@@ -1760,7 +1783,9 @@ export const fetchDedupEngineRuns = async (
       'id,started_at,ended_at,eligible,flagged_location,flagged_disposition,' +
         'pairs_considered,rejected,auto_address,auto_phash,auto_visual,queued,' +
         'vision_calls,auto_dismissed,floor_plan_deferred,clip_deferred,' +
-        'dirty_queue_depth,dirty_claimed,dirty_cleared,dirty_truncated,run_kind,truncated',
+        'dirty_queue_depth,dirty_claimed,dirty_cleared,dirty_truncated,run_kind,truncated,' +
+        'skipped_unresolved,skipped_oversized,oversized_groups,vision_errors,truncated_cause,' +
+        'scan_groups_total,scan_groups_scanned,dirty_age_p95_seconds,dirty_pruned,runner',
     )
     // Insert order (id), NOT started_at: started_at is now the REAL run start (migration
     // 262), so an 80-min full scan's row would sort below dirty runs that STARTED after it
@@ -1769,6 +1794,34 @@ export const fetchDedupEngineRuns = async (
     .limit(limit);
   if (error) throw error;
   return (data ?? []) as unknown as DedupEngineRun[];
+};
+
+/* Full-scan cursor + cycle state per dedup lane (dedup_scan_state_public, migration
+ * 271). One row per lane; the 'street' lane is the apartment full scan whose cycle
+ * completion is the dashboard's cursor-stall signal. */
+export interface DedupScanState {
+  lane: string;
+  mid_cycle: boolean;
+  cycle_started_at: string | null;
+  last_cycle_started_at: string | null;
+  last_cycle_completed_at: string | null;
+  updated_at: string;
+}
+
+/* Latest scan-cycle state, preferring the 'street' (apartment) lane, else the most
+ * recently updated lane. Small view — one row per lane — a cheap anon read well under
+ * the 3 s statement timeout. */
+export const fetchDedupScanState = async (): Promise<DedupScanState | null> => {
+  const { data, error } = await supabase
+    .from('dedup_scan_state_public')
+    .select(
+      'lane,mid_cycle,cycle_started_at,last_cycle_started_at,' +
+        'last_cycle_completed_at,updated_at',
+    )
+    .order('updated_at', { ascending: false });
+  if (error) throw error;
+  const rows = (data ?? []) as unknown as DedupScanState[];
+  return rows.find((r) => r.lane === 'street') ?? rows[0] ?? null;
 };
 
 export const curationKeys = {

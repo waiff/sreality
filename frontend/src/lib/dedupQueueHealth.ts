@@ -19,6 +19,11 @@ export type DirtyQueueStatus = 'ok' | 'warn' | 'fail' | 'idle';
 export const DIRTY_QUEUE_WARN_DEPTH = 20_000;
 // How many recent dirty runs to judge the trend over.
 export const DIRTY_QUEUE_TREND_WINDOW = 4;
+/* The dedup-ready --dirty lane is a "merge within minutes" real-time queue; migration 271
+ * gauges its p95 wait. A p95 past this (24h) means dedup-ready properties are rotting for
+ * over a day — the drain is STARVING (the old tail isn't being served) regardless of depth,
+ * so it's a fail even when depth looks fine and recent runs cleared something. */
+export const DIRTY_QUEUE_STARVE_AGE_SECONDS = 86_400; // 24h
 
 export interface DirtyQueueHealth {
   status: DirtyQueueStatus;
@@ -30,6 +35,12 @@ export interface DirtyQueueHealth {
   clearedInWindow: number | null;
   /* every run in the window truncated with zero cleared — the livelock signature. */
   livelocked: boolean;
+  /* latest dirty run's p95 wait of the dedup-ready queue, in seconds (migration 271;
+   * null on pre-271 rows that don't carry the gauge). The real-time-lane SLO reading. */
+  agePctl95Seconds: number | null;
+  /* p95 wait exceeds DIRTY_QUEUE_STARVE_AGE_SECONDS — dedup-ready properties are rotting
+   * for >24h, so the real-time drain is starving even if depth looks fine. */
+  starving: boolean;
   /* operator-facing one-liner explaining the status, ready for the banner. */
   reason: string | null;
   recentDepths: number[]; // oldest -> newest, for a sparkline
@@ -42,8 +53,8 @@ export function assessDirtyQueue(runs: DedupEngineRun[]): DirtyQueueHealth {
   if (dirty.length === 0) {
     return {
       status: 'idle', depth: null, claimed: null, draining: null,
-      clearedInWindow: null, livelocked: false, reason: null,
-      recentDepths: [], lastDirtyAt: null,
+      clearedInWindow: null, livelocked: false, agePctl95Seconds: null,
+      starving: false, reason: null, recentDepths: [], lastDirtyAt: null,
     };
   }
   const latest = dirty[0];
@@ -75,6 +86,14 @@ export function assessDirtyQueue(runs: DedupEngineRun[]): DirtyQueueHealth {
     clearedInWindow === 0 &&
     window.every((r) => r.dirty_truncated === 1);
 
+  // Starvation is orthogonal to depth: the p95 wait of the dedup-ready queue past 24h means
+  // the OLD tail isn't being served (the "merge within minutes" SLO is broken), so it's a
+  // fail even at low depth and even when recent runs cleared something. Null on pre-271 rows
+  // -> starving=false, so the check is a no-op on legacy data (backward compatible).
+  const agePctl95Seconds = latest.dirty_age_p95_seconds ?? null;
+  const starving =
+    agePctl95Seconds != null && agePctl95Seconds > DIRTY_QUEUE_STARVE_AGE_SECONDS;
+
   let status: DirtyQueueStatus = 'ok';
   let reason: string | null = null;
   if (livelocked) {
@@ -82,6 +101,12 @@ export function assessDirtyQueue(runs: DedupEngineRun[]): DirtyQueueHealth {
     reason =
       'Every recent dirty run hit its budget with zero properties cleared — the drain is ' +
       'livelocked and the queue is only shrinking by TTL eviction. Check dedup_engine.yml runs.';
+  } else if (starving) {
+    status = 'fail';
+    reason =
+      `Oldest dedup-ready properties have waited ~${Math.round(agePctl95Seconds / 3600)} h ` +
+      '(p95) — past the 24h SLO. The real-time --dirty drain is starving; new cross-portal ' +
+      'listings aren’t merging within minutes. Check the dedup_engine.yml dirty runs.';
   } else if (depth >= DIRTY_QUEUE_WARN_DEPTH) {
     status = draining === false ? 'fail' : 'warn';
     // Only claim "draining" when it is PROVEN by cleared>0 — the depth-trend fallback
@@ -97,6 +122,7 @@ export function assessDirtyQueue(runs: DedupEngineRun[]): DirtyQueueHealth {
   }
   return {
     status, depth, claimed: latest.dirty_claimed ?? null, draining,
-    clearedInWindow, livelocked, reason, recentDepths, lastDirtyAt: latest.started_at,
+    clearedInWindow, livelocked, agePctl95Seconds, starving, reason,
+    recentDepths, lastDirtyAt: latest.started_at,
   };
 }
