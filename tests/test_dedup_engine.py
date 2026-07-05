@@ -25,8 +25,10 @@ from toolkit.dedup_engine import (
     classify_pair,
     decide_phash_fastpath,
     decide_visual_dismiss,
+    disposition_class,
     disposition_compatible,
     distinctive_rooms_for,
+    prioritized_group_pairs,
     geo_category_bucket,
     geo_cell_key,
     normalize_street,
@@ -749,15 +751,20 @@ def test_enqueue_candidate_tier_column_from_markers() -> None:
     assert conn2.enqueued[0][2] == "street_disposition"
 
 
-def test_run_engine_geo_skips_oversized_cell(monkeypatch: Any) -> None:
+def test_run_engine_geo_oversized_cell_processes_bounded(monkeypatch: Any) -> None:
+    # An oversized geo cell is no longer skipped whole (the silent recall hole): it is
+    # processed BOUNDED — best MAX_GROUP_PAIRS pairs in value order — and counted.
     import scripts.dedup_engine as eng
-    members = [_gk(i, 100 + i) for i in range(1, eng.MAX_GEO_GROUP_SIZE + 3)]  # one oversized cell
+    n = eng.MAX_GEO_GROUP_SIZE + 2
+    members = [_gk(i, 100 + i) for i in range(1, n + 1)]  # one oversized cell
     monkeypatch.setattr(eng, "_load_geo_eligible", lambda conn, **k: members)
-    monkeypatch.setattr(eng, "_enqueue_candidate",
-                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("oversized cell must skip")))
+    monkeypatch.setattr(eng, "resolve_pair", _stub_resolve_pair)
     stats = eng.run_engine(_FakeConn([]), classify_fn=None, compare_fn=None,
                            max_vision_calls=0, geo=True)
-    assert stats["pairs_considered"] == 0
+    total = n * (n - 1) // 2
+    assert stats["oversized_groups"] == 1
+    assert stats["pairs_considered"] == min(total, eng.MAX_GROUP_PAIRS)
+    assert stats["skipped_oversized"] == max(0, total - eng.MAX_GROUP_PAIRS)
 
 
 # --- rule D helpers ---------------------------------------------------------
@@ -951,12 +958,13 @@ def _row(sid: int, pid: int, *, street: str = "Nádražní",
          hn: str | None = "10", floor: int | None = 3, area: float | None = 60.0,
          source: str = "sreality", description: str | None = None,
          category_type: str | None = "prodej", category_main: str | None = "byt",
-         obec_id: int | None = 5001) -> tuple[Any, ...]:
+         obec_id: int | None = 5001, price: int | None = None) -> tuple[Any, ...]:
     # matches _ELIGIBLE_SQL column order:
     # sreality_id, property_id, source, street, street_id, disposition,
-    # house_number, floor, area_m2, description, category_type, category_main, obec_id
+    # house_number, floor, area_m2, description, category_type, category_main,
+    # obec_id, price_czk
     return (sid, pid, source, street, street_id, disp, hn, floor, area,
-            description, category_type, category_main, obec_id)
+            description, category_type, category_main, obec_id, price)
 
 
 def test_run_engine_exact_address_no_longer_auto_merges(monkeypatch: Any) -> None:
@@ -1479,6 +1487,9 @@ def test_write_run_row_stamps_kind_truncated_started_at() -> None:
         "vision_calls", "auto_dismissed", "floor_plan_deferred", "clip_deferred",
         "clip_classified", "clip_cosine_calls", "routed_haiku", "routed_sonnet",
         "dirty_queue_depth", "dirty_claimed", "dirty_cleared", "dirty_truncated",
+        "skipped_unresolved", "skipped_oversized", "oversized_groups", "vision_errors",
+        "truncated_cause", "scan_groups_total", "scan_groups_scanned",
+        "dirty_age_p95_seconds", "dirty_pruned",
     )}
     eng._write_run_row(_Conn(), {**base, "truncated": 1}, run_kind="full", started_at="T0")
     sql, params = captured["sql"], captured["params"]
@@ -1595,11 +1606,12 @@ def test_run_engine_cursor_resumes_after_key(monkeypatch: Any) -> None:
     cursor_out: dict[str, Any] = {}
     stats = eng.run_engine(
         _FakeConn(_three_group_rows()),
-        scan_cursor="name:5001:alfa", cursor_out=cursor_out,
+        scan_cursor="name:5001:alfa|d:2+1", cursor_out=cursor_out,
         max_pairs=100, max_vision_calls=0)
     assert stats["pairs_considered"] == 2  # beta + gama only; alfa skipped (behind cursor)
-    assert cursor_out["last_key"].endswith(":gama")
+    assert cursor_out["last_key"].startswith("name:5001:gama")
     assert cursor_out["reached_end"] is True  # end of list -> cycle completes
+    assert stats["scan_groups_total"] == 2 and stats["scan_groups_scanned"] == 2
 
 
 def test_run_engine_cursor_truncation_reports_frontier(monkeypatch: Any) -> None:
@@ -1614,8 +1626,135 @@ def test_run_engine_cursor_truncation_reports_frontier(monkeypatch: Any) -> None
         scan_cursor=None, cursor_out=cursor_out,
         max_pairs=2, max_vision_calls=0)  # budget dies at beta's boundary -> only alfa completes
     assert stats["truncated"] == 1
-    assert cursor_out["last_key"].endswith(":alfa")
+    assert stats["truncated_cause"] == "pair_cap"
+    assert cursor_out["last_key"].startswith("name:5001:alfa")
     assert cursor_out["reached_end"] is False
+
+
+# --- oversized groups: disposition-class sharding + bounded processing -------
+
+def test_disposition_class_loose_equivalence() -> None:
+    # N+kk and N+1 share a class (classify_pair treats them compatible); unmapped
+    # values are their own class. Sharding street groups by the class is loss-free.
+    assert disposition_class("2+kk") == disposition_class("2+1")
+    assert disposition_class("3+kk") == disposition_class("3+1")
+    assert disposition_class("2+kk") != disposition_class("3+kk")
+    assert disposition_class("atypicky") == "atypicky"
+    assert disposition_class("6+kk") == "6+kk"
+    assert disposition_class(None) == ""
+
+
+def test_sharding_is_loss_free_for_compatible_pairs() -> None:
+    # Any pair classify_pair would NOT reject on disposition shares a shard.
+    for a, b in [("2+kk", "2+1"), ("2+1", "2+kk"), ("5+kk", "5+1"), ("atypicky", "atypicky")]:
+        assert disposition_compatible(a, b)
+        assert disposition_class(a) == disposition_class(b)
+
+
+def test_load_eligible_shards_street_groups_by_disposition_class() -> None:
+    # One street, two disposition classes -> TWO groups; loose pair (2+kk/2+1) stays together.
+    import scripts.dedup_engine as eng
+
+    conn = _FakeConn([
+        _row(1, 101, street_id=None, disp="2+kk", hn=None),
+        _row(2, 102, street_id=None, disp="2+1", hn=None, source="bazos"),
+        _row(3, 103, street_id=None, disp="3+kk", hn=None),
+    ])
+    keys = eng._load_eligible(conn)
+    groups = eng._group_by_street(keys)
+    assert len(groups) == 2
+    sizes = sorted(len(v) for v in groups.values())
+    assert sizes == [1, 2]
+    for key in groups:
+        assert "|d:" in key
+
+
+def _pk(sid: int, pid: int, source: str, price: int | None,
+        area: float = 60.0) -> ListingKey:
+    return ListingKey(
+        sreality_id=sid, property_id=pid, source=source,
+        street_key="name:5001:alfa|d:2+1", disposition="2+kk", house_number=None,
+        floor=None, area_m2=area, category_type="prodej", category_main="byt",
+        price_czk=price)
+
+
+def test_prioritized_group_pairs_orders_and_caps() -> None:
+    # Rejects dropped up front; dirty-touching pairs first, then cross-source,
+    # then smaller price gap; cap respected.
+    a = _pk(1, 101, "sreality", 5_000_000)
+    b = _pk(2, 102, "bazos", 5_000_000)      # cross-source, exact price match with a
+    c = _pk(3, 103, "sreality", 5_400_000)   # same-source vs a; cross vs b
+    rejected = _pk(4, 104, "idnes", 5_000_000, area=120.0)  # >10% area gap -> rule-C reject
+
+    pairs = prioritized_group_pairs([a, b, c, rejected], cap=100)
+    flat = [(x.sreality_id, y.sreality_id) for x, y in pairs]
+    assert all(4 not in p for p in flat)          # rejected pair never surfaces
+    assert flat[0] == (1, 2)                      # cross-source + 0% price gap first
+    assert set(flat) == {(1, 2), (2, 3), (1, 3)}
+
+    dirty_first = prioritized_group_pairs([a, b, c], cap=100,
+                                          priority_property_ids={103})
+    flat2 = [(x.sreality_id, y.sreality_id) for x, y in dirty_first]
+    assert 3 in flat2[0]                          # dirty-touching pair jumps the line
+
+    capped = prioritized_group_pairs([a, b, c], cap=1)
+    assert len(capped) == 1
+
+
+def test_run_engine_oversized_street_group_processes_bounded(monkeypatch: Any) -> None:
+    # 41 same-class members (> MAX_GROUP_SIZE=40): the group is processed bounded —
+    # counted, best pairs first — instead of the historical silent whole-group skip.
+    import scripts.dedup_engine as eng
+
+    monkeypatch.setattr(eng, "resolve_pair", _stub_resolve_pair)
+    n = eng.MAX_GROUP_SIZE + 1
+    conn = _FakeConn([
+        _row(i, 100 + i, street="Laurinova", street_id=None, hn=None, floor=None,
+             source=("sreality" if i % 2 else "bazos"))
+        for i in range(1, n + 1)
+    ])
+    stats = eng.run_engine(conn, classify_fn=None, compare_fn=None, max_vision_calls=0)
+    total = n * (n - 1) // 2  # 820
+    assert stats["oversized_groups"] == 1
+    assert stats["pairs_considered"] == eng.MAX_GROUP_PAIRS
+    assert stats["skipped_oversized"] == total - eng.MAX_GROUP_PAIRS
+
+
+def test_run_engine_dirty_oversized_group_is_processed_not_poisoned(monkeypatch: Any) -> None:
+    # The dirty-clear poisoning fix: an oversized group containing a claimed dirty
+    # property is PROCESSED (bounded) before its members resolve — previously it was
+    # skipped whole yet its dirty rows were cleared as if handled.
+    import scripts.dedup_engine as eng
+
+    monkeypatch.setattr(eng, "resolve_pair", _stub_resolve_pair)
+    n = eng.MAX_GROUP_SIZE + 1
+    conn = _FakeConn([
+        _row(i, 100 + i, street="Laurinova", street_id=None, hn=None, floor=None)
+        for i in range(1, n + 1)
+    ])
+    claimed = {101}
+    resolved: set[int] = set()
+    stats = eng.run_engine(conn, only_groups_with_property_ids=claimed,
+                           resolved_property_ids=resolved,
+                           classify_fn=None, compare_fn=None, max_vision_calls=0)
+    assert stats["pairs_considered"] > 0          # real pair work happened
+    assert stats["oversized_groups"] == 1
+    assert resolved >= claimed                    # cleared AFTER processing, not instead of
+
+
+def test_vision_error_breaker_helpers() -> None:
+    # After VISION_ERROR_BREAKER errors the paid fns stop calling out (cache reads only) —
+    # a dead key / exhausted credit degrades instead of burning the run budget on errors.
+    import scripts.dedup_engine as eng
+
+    err = [0]
+    assert eng._breaker_open(err) is False
+    assert eng._breaker_open(None) is False
+    for _ in range(eng.VISION_ERROR_BREAKER):
+        eng._count_vision_error(err)
+    assert err[0] == eng.VISION_ERROR_BREAKER
+    assert eng._breaker_open(err) is True
+    eng._count_vision_error(None)  # no counter wired -> no-op
 
 
 def test_prune_stale_dedup_dirty_is_cycle_gated() -> None:
@@ -1711,9 +1850,9 @@ def test_load_eligible_street_group_scope() -> None:
         def __exit__(self, *a): return None
         def execute(self, sql, params=None):
             captured["sql"] = " ".join(sql.split()); captured["params"] = params
-        def fetchall(self):  # one eligible row (13 cols) -> exercises ListingKey build
+        def fetchall(self):  # one eligible row (14 cols) -> exercises ListingKey build
             return [(1, 101, "sreality", "Hlavní", None, "2+kk", "10", 3, 60.0,
-                     "desc", "prodej", "byt", 42)]
+                     "desc", "prodej", "byt", 42, 4_990_000)]
 
     class _Conn:
         def cursor(self): return _C()

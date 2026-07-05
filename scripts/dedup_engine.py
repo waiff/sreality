@@ -59,9 +59,11 @@ from toolkit.dedup_engine import (
     distinctive_rooms_for,
     decide_phash_fastpath,
     decide_visual_dismiss,
+    disposition_class,
     geo_cell_key,
     phash_excluded_tags_for,
     phash_render_exclude_for,
+    prioritized_group_pairs,
     profile_for,
     render_exclusion_clause,
     RENDER_SCORE_EXCLUDE_MIN,
@@ -86,6 +88,27 @@ MAX_GROUP_SIZE = 40
 # O(n^2) and low-value. Skip + log (mirrors MAX_GROUP_SIZE for the street path).
 MAX_GEO_GROUP_SIZE = 25
 
+# An OVERSIZED group (still > MAX_GROUP_SIZE after disposition-class sharding — a
+# same-disposition development or a geo pileup) is processed BOUNDED instead of
+# skipped: its best MAX_GROUP_PAIRS pairs in value order (prioritized_group_pairs).
+# The historical whole-group skip was a silent recall hole — 342 street groups
+# holding 18.7% of the eligible market (2026-07 audit), invisible in run rows, and
+# a dirty run CLEARED those properties' queue rows as if handled. The cap equals a
+# full 40-group's pair count, so an oversized group costs at most what the biggest
+# normal group already costs.
+MAX_GROUP_PAIRS = MAX_GROUP_SIZE * (MAX_GROUP_SIZE - 1) // 2
+
+# Above this many members the group-level pHash batch probe is skipped (its IN-list
+# and result set scale with members^2); resolve_pair falls back to per-pair probes,
+# bounded by MAX_GROUP_PAIRS.
+PHASH_BATCH_MAX_MEMBERS = 150
+
+# After this many vision/LLM ERRORS in one run the paid fns stop calling out and
+# serve warm-cache reads only. A dead key / exhausted credit otherwise burns the
+# whole wall-clock budget on doomed calls: the 2026-07 credit outage produced 38k+
+# failed calls and auto_visual=0 for days with nothing recording why.
+VISION_ERROR_BREAKER = 10
+
 
 # Eligible listings that can still be matched, with everything the rules need.
 # Rule A eligibility (street + disposition both present) is computed inline — see
@@ -101,7 +124,7 @@ _ELIGIBLE_COLS = """
       l.sreality_id, l.property_id, l.source,
       l.street, l.street_id, l.disposition, l.house_number, l.floor, l.area_m2,
       left(l.description, 600) AS description,
-      l.category_type, l.category_main, l.obec_id"""
+      l.category_type, l.category_main, l.obec_id, l.price_czk"""
 _ELIGIBILITY = "l.street IS NOT NULL AND l.street <> '' AND l.disposition IS NOT NULL"
 _ELIGIBLE_ORDER = (
     "ORDER BY l.obec_id NULLS LAST, l.street_id NULLS LAST, lower(l.street), l.disposition"
@@ -189,12 +212,17 @@ def _load_eligible(
         raw_street_id = int(r[4]) if r[4] is not None else None
         street_id = raw_street_id if raw_street_id is not None and raw_street_id > 0 else None
         obec_id = int(r[12]) if r[12] is not None else None
+        # Groups are SHARDED by the disposition's loose-equivalence class: every
+        # classify_pair-compatible pair shares a class (loss-free), and a busy street
+        # splits into per-disposition shards that mostly fit MAX_GROUP_SIZE — the 40+
+        # groups the engine used to skip whole were 18.7% of the eligible market.
+        shard = disposition_class(r[5])
         for street_key in street_group_keys(r[3], raw_street_id, obec_id):
             keys.append(ListingKey(
                 sreality_id=int(r[0]),
                 property_id=int(r[1]) if r[1] is not None else None,
                 source=r[2],
-                street_key=street_key,
+                street_key=f"{street_key}|d:{shard}",
                 disposition=r[5],
                 house_number=r[6],
                 floor=int(r[7]) if r[7] is not None else None,
@@ -203,6 +231,7 @@ def _load_eligible(
                 category_type=r[10],
                 category_main=r[11],
                 street_id=street_id,
+                price_czk=int(r[13]) if r[13] is not None else None,
             ))
     return keys
 
@@ -1806,11 +1835,18 @@ def run_engine(
         "floor_plan_deferred": 0, "clip_deferred": 0, "truncated": 0,
         "clip_classified": 0, "clip_cosine_calls": 0,
         "routed_haiku": 0, "routed_sonnet": 0,
+        # Migration 271 observability: why a run stopped, what oversized groups cost,
+        # and whether the paid fns were erroring (vision_errors is stamped by main()
+        # from the shared breaker counter — the credit-outage tripwire).
+        "oversized_groups": 0, "skipped_oversized": 0,
+        "truncated_cause": None, "vision_errors": 0,
+        "scan_groups_total": None, "scan_groups_scanned": None,
         # Observability: the --dirty path stamps these post-claim (NULL on other run modes).
         # dirty_cleared / dirty_truncated expose whether the drain actually advanced the head —
         # cleared==0 while queue_depth stays high is the silent-livelock the FIFO stall lacked.
         "dirty_queue_depth": None, "dirty_claimed": None,
         "dirty_cleared": None, "dirty_truncated": None,
+        "dirty_age_p95_seconds": None, "dirty_pruned": None,
     })
 
     if not geo:
@@ -1920,13 +1956,18 @@ def run_engine(
 
     # The decision tree per pair lives in resolve_pair (shared by the candidate-priority
     # drain + the real-time path); this is just the full-scan driver over street groups.
+    if cursor_out is not None:
+        stats["scan_groups_total"] = len(ordered_keys)
+        stats["scan_groups_scanned"] = 0
+
+    def _advance(members: list[Any], street_key: str) -> None:
+        _group_scanned(members)
+        scan_frontier["last_key"] = street_key
+        if cursor_out is not None:
+            stats["scan_groups_scanned"] += 1
+
     for street_key in ordered_keys:
         members = groups[street_key]
-        if len(members) > max_group_size:
-            LOG.info("SKIP large group key=%s size=%d", street_key, len(members))
-            _group_scanned(members)
-            scan_frontier["last_key"] = street_key
-            continue
         # Real-time (dirty) drain: the load is SCOPED to the dirty properties' street
         # groups (restrict_street_groups), so it carries each dirty property's existing
         # PEERS while staying O(dirty); this filter then resolves only groups that
@@ -1936,39 +1977,63 @@ def run_engine(
         if only_groups_with_property_ids is not None and not any(
             m.property_id in only_groups_with_property_ids for m in members
         ):
-            _group_scanned(members)
-            scan_frontier["last_key"] = street_key
+            _advance(members, street_key)
             continue
+        pair_iter: Any
+        if len(members) > max_group_size:
+            # OVERSIZED group: bounded value-ordered processing (best MAX_GROUP_PAIRS
+            # pairs, dirty/cross-source/price-similar first) instead of the historical
+            # whole-group skip — which silently dropped every pair on busy streets AND
+            # (on dirty runs) cleared those properties' queue rows as if handled.
+            total_pairs = len(members) * (len(members) - 1) // 2
+            pairs = prioritized_group_pairs(
+                members, cap=MAX_GROUP_PAIRS, classify=ctx.classify,
+                priority_property_ids=only_groups_with_property_ids)
+            stats["oversized_groups"] += 1
+            stats["skipped_oversized"] += max(0, total_pairs - len(pairs))
+            LOG.info("OVERSIZED group key=%s size=%d: processing %d of %d pairs",
+                     street_key, len(members), len(pairs), total_pairs)
+            pair_iter = pairs
+        else:
+            pair_iter = ((members[i], members[j])
+                         for i in range(len(members))
+                         for j in range(i + 1, len(members)))
         # The group's listing ids let the pHash probes batch ONE round trip per
         # (group, exclusion-profile) instead of one per pair (_phash_pairs_cached).
-        group_sids = tuple(sorted({m.sreality_id for m in members}))
-        for i in range(len(members)):
+        # Above PHASH_BATCH_MAX_MEMBERS the batch itself is the hazard (members^2
+        # IN-list) — fall back to per-pair probes, bounded by MAX_GROUP_PAIRS.
+        group_sids = (tuple(sorted({m.sreality_id for m in members}))
+                      if len(members) <= PHASH_BATCH_MAX_MEMBERS else None)
+        for a, b in pair_iter:
             if ctx.pairs_left <= 0:
-                stats["truncated"] = 1  # pair cap exhausted between groups — also truncation
-                break
-            for j in range(i + 1, len(members)):
-                if ctx.pairs_left <= 0:
-                    LOG.info("PAIR cap reached; deferring remainder to next run")
-                    stats["truncated"] = 1  # scan did NOT finish; completed groups still clear
-                    return finalize()
-                # Wall-clock budget: per-pair cold vision can outrun the job timeout,
-                # which SIGKILLs the run before it writes results. Stop cleanly so the run
-                # row + inline-committed merges persist and the next run resumes with a
-                # warm cache (mirrors the detail drain's --max-seconds).
-                if deadline is not None and time.monotonic() >= deadline:
-                    LOG.info(
-                        "TIME budget reached; finalizing cleanly at pairs_considered=%d",
-                        stats["pairs_considered"],
-                    )
-                    stats["truncated"] = 1  # scan did NOT finish; completed groups still clear
-                    return finalize()
-                resolve_pair(conn, members[i], members[j], street_key=street_key,
-                             ctx=ctx, group_sids=group_sids)
-        else:
-            # The for-else fires only when the group's pair scan COMPLETED (no break) —
-            # the deadline/pair-cap returns above exit before reaching it.
-            _group_scanned(members)
-            scan_frontier["last_key"] = street_key
+                LOG.info("PAIR cap reached; deferring remainder to next run")
+                stats["truncated"] = 1  # scan did NOT finish; completed groups still clear
+                stats["truncated_cause"] = "pair_cap"
+                return finalize()
+            # Wall-clock budget: per-pair cold vision can outrun the job timeout,
+            # which SIGKILLs the run before it writes results. Stop cleanly so the run
+            # row + inline-committed merges persist and the next run resumes with a
+            # warm cache (mirrors the detail drain's --max-seconds).
+            if deadline is not None and time.monotonic() >= deadline:
+                LOG.info(
+                    "TIME budget reached; finalizing cleanly at pairs_considered=%d",
+                    stats["pairs_considered"],
+                )
+                stats["truncated"] = 1  # scan did NOT finish; completed groups still clear
+                stats["truncated_cause"] = "deadline"
+                return finalize()
+            resolve_pair(conn, a, b, street_key=street_key, ctx=ctx, group_sids=group_sids)
+        if ctx.pairs_left <= 0:
+            # Budget died ON this group's final pair: conservative boundary — the group
+            # does NOT count as scanned (re-decided next run) and the run is truncated,
+            # exactly like the historical i-loop cap check.
+            stats["truncated"] = 1
+            stats["truncated_cause"] = "pair_cap"
+            return finalize()
+        # Reached only when the group's pair scan COMPLETED with budget to spare — the
+        # deadline/pair-cap returns above exit before advancing the frontier past a
+        # half-scanned group.
+        _advance(members, street_key)
 
     return finalize()
 
@@ -1988,17 +2053,35 @@ def _finish(stats: dict[str, int], vision_budget: list[int], max_vision_calls: i
     return stats
 
 
+def _breaker_open(error_count: list[int] | None) -> bool:
+    """True once this run has seen VISION_ERROR_BREAKER paid-call failures — the
+    builders then stop calling out (each doomed call costs seconds of wall-clock)
+    and serve warm-cache reads only, so a dead key / exhausted credit degrades to
+    cache-only instead of burning the whole run budget on errors."""
+    return error_count is not None and error_count[0] >= VISION_ERROR_BREAKER
+
+
+def _count_vision_error(error_count: list[int] | None) -> None:
+    if error_count is None:
+        return
+    error_count[0] += 1
+    if error_count[0] == VISION_ERROR_BREAKER:
+        LOG.warning("VISION breaker OPEN after %d errors: paid calls disabled for the "
+                    "rest of the run (cache reads still served)", VISION_ERROR_BREAKER)
+
+
 def _build_classify_fn(
     conn: Any, *, prefer_clip: bool = False, clip_model: str | None = None,
-    clip_counter: list[int] | None = None,
+    clip_counter: list[int] | None = None, error_count: list[int] | None = None,
 ) -> Any:
     from api.dependencies import get_providers
     from api.llm_client import LLMClient
     from toolkit.clip_dedup import clip_room_grouping
-    from toolkit.image_classification import classify_listing_images
+    from toolkit.image_classification import cached_classification, classify_listing_images
     llm = LLMClient(conn, providers=get_providers())
+    classify_model = llm.resolve_model("llm_room_classify_model")
 
-    def _fn(sreality_id: int) -> dict[str, Any]:
+    def _fn(sreality_id: int) -> dict[str, Any] | None:
         # Prefer the FREE CLIP room tags; fall back to the paid LLM classify only
         # for a listing CLIP hasn't tagged yet (during the backfill ramp).
         if prefer_clip and clip_model:
@@ -2010,18 +2093,38 @@ def _build_classify_fn(
                     {"image_id": iid, "room_type": rt}
                     for rt, ids in grouping.items() for iid in ids
                 ]}}
-        return classify_listing_images(conn, llm, sreality_id=sreality_id)
+        if _breaker_open(error_count):
+            state, rooms = cached_classification(
+                conn, sreality_id=sreality_id, model=classify_model)
+            if state != "classified" or rooms is None:
+                return None
+            return {"data": {"images": [
+                {"image_id": iid, "room_type": rt}
+                for rt, ids in rooms.items() for iid in ids
+            ]}}
+        try:
+            return classify_listing_images(conn, llm, sreality_id=sreality_id)
+        except Exception as exc:  # noqa: BLE001 - one bad listing must not kill the run
+            _count_vision_error(error_count)
+            LOG.warning("classify %s failed: %s", sreality_id, exc)
+            return None
     return _fn
 
 
-def _build_compare_fn(conn: Any) -> Any:
+def _build_compare_fn(conn: Any, *, error_count: list[int] | None = None) -> Any:
     from api.dependencies import get_providers
     from api.llm_client import LLMClient
-    from toolkit.visual_match import compare_listings_visually
+    from toolkit.visual_match import cached_visual_verdict, compare_listings_visually
     llm = LLMClient(conn, providers=get_providers())
+    default_model = llm.resolve_model("llm_visual_match_model")
 
     def _fn(a: int, b: int, room_type: str, ids_a: list[int], ids_b: list[int],
             model: str | None = None) -> dict[str, Any] | None:
+        if _breaker_open(error_count):
+            v = cached_visual_verdict(
+                conn, sreality_id_a=a, sreality_id_b=b, room_type=room_type,
+                model=model or default_model)
+            return {"verdict": v, "rationale": None, "cache_hit": True} if v is not None else None
         try:
             res = compare_listings_visually(
                 conn, llm, sreality_id_a=a, sreality_id_b=b,
@@ -2030,18 +2133,24 @@ def _build_compare_fn(conn: Any) -> Any:
             )
             return res["data"]
         except Exception as exc:  # noqa: BLE001 - one bad pair must not kill the run
+            _count_vision_error(error_count)
             LOG.warning("visual compare %s/%s room=%s failed: %s", a, b, room_type, exc)
             return None
     return _fn
 
 
-def _build_site_plan_fn(conn: Any) -> Any:
+def _build_site_plan_fn(conn: Any, *, error_count: list[int] | None = None) -> Any:
     from api.dependencies import get_providers
     from api.llm_client import LLMClient
-    from toolkit.visual_match import compare_listing_site_plans
+    from toolkit.visual_match import cached_site_plan_verdict, compare_listing_site_plans
     llm = LLMClient(conn, providers=get_providers())
+    site_plan_model = llm.resolve_model("llm_site_plan_match_model")
 
     def _fn(a: int, b: int, ids_a: list[int], ids_b: list[int]) -> dict[str, Any] | None:
+        if _breaker_open(error_count):
+            v = cached_site_plan_verdict(
+                conn, sreality_id_a=a, sreality_id_b=b, model=site_plan_model)
+            return {"verdict": v, "rationale": None, "cache_hit": True} if v is not None else None
         try:
             res = compare_listing_site_plans(
                 conn, llm, sreality_id_a=a, sreality_id_b=b,
@@ -2049,18 +2158,24 @@ def _build_site_plan_fn(conn: Any) -> Any:
             )
             return res["data"]
         except Exception as exc:  # noqa: BLE001 - one bad pair must not kill the run
+            _count_vision_error(error_count)
             LOG.warning("site-plan compare %s/%s failed: %s", a, b, exc)
             return None
     return _fn
 
 
-def _build_floor_plan_fn(conn: Any) -> Any:
+def _build_floor_plan_fn(conn: Any, *, error_count: list[int] | None = None) -> Any:
     from api.dependencies import get_providers
     from api.llm_client import LLMClient
-    from toolkit.visual_match import compare_listing_floor_plans
+    from toolkit.visual_match import cached_floor_plan_verdict, compare_listing_floor_plans
     llm = LLMClient(conn, providers=get_providers())
+    floor_plan_model = llm.resolve_model("llm_floor_plan_match_model")
 
     def _fn(a: int, b: int, ids_a: list[int], ids_b: list[int]) -> dict[str, Any] | None:
+        if _breaker_open(error_count):
+            v = cached_floor_plan_verdict(
+                conn, sreality_id_a=a, sreality_id_b=b, model=floor_plan_model)
+            return {"verdict": v, "rationale": None, "cache_hit": True} if v is not None else None
         try:
             res = compare_listing_floor_plans(
                 conn, llm, sreality_id_a=a, sreality_id_b=b,
@@ -2068,6 +2183,7 @@ def _build_floor_plan_fn(conn: Any) -> Any:
             )
             return res["data"]
         except Exception as exc:  # noqa: BLE001 - one bad pair must not kill the run
+            _count_vision_error(error_count)
             LOG.warning("floor-plan compare %s/%s failed: %s", a, b, exc)
             return None
     return _fn
@@ -2252,7 +2368,10 @@ def _write_run_row(conn: Any, stats: dict[str, int], *, run_kind: str,
                 pairs_considered, rejected, auto_address, auto_phash, auto_visual,
                 queued, vision_calls, auto_dismissed, floor_plan_deferred, clip_deferred,
                 clip_classified, clip_cosine_calls, routed_haiku, routed_sonnet,
-                dirty_queue_depth, dirty_claimed, dirty_cleared, dirty_truncated
+                dirty_queue_depth, dirty_claimed, dirty_cleared, dirty_truncated,
+                skipped_unresolved, skipped_oversized, oversized_groups, vision_errors,
+                truncated_cause, scan_groups_total, scan_groups_scanned,
+                dirty_age_p95_seconds, dirty_pruned
             ) VALUES (%(started_at)s, now(), %(run_kind)s, %(truncated)s,
                 %(eligible)s, %(flagged_location)s, %(flagged_disposition)s,
                 %(pairs_considered)s, %(rejected)s, %(auto_address)s, %(auto_phash)s,
@@ -2260,7 +2379,10 @@ def _write_run_row(conn: Any, stats: dict[str, int], *, run_kind: str,
                 %(floor_plan_deferred)s, %(clip_deferred)s,
                 %(clip_classified)s, %(clip_cosine_calls)s, %(routed_haiku)s,
                 %(routed_sonnet)s, %(dirty_queue_depth)s, %(dirty_claimed)s,
-                %(dirty_cleared)s, %(dirty_truncated)s)
+                %(dirty_cleared)s, %(dirty_truncated)s,
+                %(skipped_unresolved)s, %(skipped_oversized)s, %(oversized_groups)s,
+                %(vision_errors)s, %(truncated_cause)s, %(scan_groups_total)s,
+                %(scan_groups_scanned)s, %(dirty_age_p95_seconds)s, %(dirty_pruned)s)
             """,
             params,
         )
@@ -2414,10 +2536,14 @@ def main() -> int:
         inconclusive_to_review = bool(
             read_setting(conn, "dedup_floor_plan_inconclusive_to_review"))
         clip_counter = [0]
+        # Shared across all four paid-fn builders (street + geo passes): total vision/LLM
+        # ERRORS this run. Trips the breaker at VISION_ERROR_BREAKER; persisted per run
+        # row as vision_errors (migration 271) — the credit-outage tripwire.
+        vision_errors = [0]
         # Free CLIP room tags (preferred when on); the counter tracks how many
         # listings were served from CLIP rather than the paid LLM classify.
         ck = {"prefer_clip": clip["prefer_clip"], "clip_model": clip["clip_model"],
-              "clip_counter": clip_counter}
+              "clip_counter": clip_counter, "error_count": vision_errors}
         LOG.info(
             "ENGINE auto_merge_enabled=%s autodismiss=%s prefer_clip=%s cosine=%s "
             "shadow=%s cache_only=%s free=%s geo=%s",
@@ -2483,10 +2609,10 @@ def main() -> int:
             #      = the $0 cache-only fn (consume warmed verdicts, defer the rest).
             if auto_merge_enabled and args.compare_budget > 0:
                 classify_fn = _build_classify_fn(conn, **ck)
-                compare_fn = _build_compare_fn(conn)
-                site_plan_fn = _build_site_plan_fn(conn)
+                compare_fn = _build_compare_fn(conn, error_count=vision_errors)
+                site_plan_fn = _build_site_plan_fn(conn, error_count=vision_errors)
             floor_plan_fn = (
-                _build_floor_plan_fn(conn) if floor_plan_budget > 0
+                _build_floor_plan_fn(conn, error_count=vision_errors) if floor_plan_budget > 0
                 else _build_cache_only_floor_plan_fn(conn)
             )
         elif auto_merge_enabled and args.cache_only:
@@ -2495,9 +2621,9 @@ def main() -> int:
                 conn, **ck)
         elif auto_merge_enabled and args.max_vision_calls > 0:
             classify_fn = _build_classify_fn(conn, **ck)
-            compare_fn = _build_compare_fn(conn)
-            site_plan_fn = _build_site_plan_fn(conn)
-            floor_plan_fn = _build_floor_plan_fn(conn)
+            compare_fn = _build_compare_fn(conn, error_count=vision_errors)
+            site_plan_fn = _build_site_plan_fn(conn, error_count=vision_errors)
+            floor_plan_fn = _build_floor_plan_fn(conn, error_count=vision_errors)
         elif auto_merge_enabled:
             # pHash fast-path still needs room labels to gate on interior shots.
             classify_fn = _build_classify_fn(conn, **ck)
@@ -2582,6 +2708,7 @@ def main() -> int:
                 **engine_kw,
             )
             stats["clip_classified"] = clip_counter[0]
+            stats["vision_errors"] = vision_errors[0]
             if args.dirty:
                 # Record the queue depth at run start + this run's slice, so the /dedup +
                 # Health dashboards can see whether the backlog is draining (a stall that
@@ -2648,6 +2775,7 @@ def main() -> int:
             geo_audit: list[dict[str, Any]] = []
             geo_started_at = datetime.now(timezone.utc)
             geo_clip_base = clip_counter[0]
+            geo_err_base = vision_errors[0]
             # Geo ALWAYS enqueues its unresolved pairs (rule #15 (E): single-dwelling geo signals
             # never auto-merge on proximity alone, so "everything else queues for review"),
             # independent of --free. The street path's --free enqueue suppression (don't inflate
@@ -2662,6 +2790,7 @@ def main() -> int:
                 geo=True, geo_area_max_pct=geo_area_max_pct, **geo_kw,
             )
             geo_stats["clip_classified"] = clip_counter[0] - geo_clip_base
+            geo_stats["vision_errors"] = vision_errors[0] - geo_err_base
             if not args.shadow:
                 # The geo lane writes its OWN run row (run_kind='geo', migration 262/265) —
                 # it previously wrote none, so a chronically truncating geo scan was
