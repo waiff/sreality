@@ -329,15 +329,45 @@ def _reconcile_stale_candidates(conn: Any, *, dry_run: bool) -> int:
     return n
 
 
-def _proposed_candidate_property_ids(conn: Any) -> set[int]:
-    """Every property that appears in a still-`proposed` /dedup candidate — the work-list
-    for the candidate-priority drain. The two properties of a candidate share a street +
-    disposition, so scoping `_load_eligible` to this set re-forms exactly those pairs in
-    their street group and re-decides them via resolve_pair, without a full market scan."""
+def _proposed_candidate_property_ids(
+    conn: Any, redecide_hours: float | None = None,
+) -> set[int]:
+    """Every property that appears in a DUE still-`proposed` /dedup candidate — the
+    work-list for the candidate-priority drain. The two properties of a candidate share
+    a street + disposition, so scoping `_load_eligible` to this set re-forms exactly
+    those pairs in their street group and re-decides them via resolve_pair, without a
+    full market scan.
+
+    DUE (migration 272 — the treadmill fix): never engine-evaluated, evaluated longer
+    than `redecide_hours` ago (backoff), or carrying FRESH photo evidence (an image
+    CLIP-tagged after the stamp — the same signal the prior-dismissal consult trusts).
+    Everything else was already looked at with the same inputs; re-deciding it every
+    2h re-chewed ~296 cached-inconclusive pairs per run for nothing. `redecide_hours`
+    None = no due-filter (every proposed candidate, the historical behavior)."""
+    if redecide_hours is None:
+        sql = ("SELECT left_property_id, right_property_id "
+               "FROM property_identity_candidates WHERE status = 'proposed'")
+        params: dict[str, Any] = {}
+    else:
+        sql = """
+            SELECT c.left_property_id, c.right_property_id
+            FROM property_identity_candidates c
+            WHERE c.status = 'proposed'
+              AND (
+                c.last_engine_decision_at IS NULL
+                OR c.last_engine_decision_at
+                     < now() - make_interval(hours => %(backoff_h)s)
+                OR EXISTS (
+                    SELECT 1
+                    FROM listings l
+                    JOIN images i ON i.sreality_id = l.sreality_id
+                    WHERE l.property_id IN (c.left_property_id, c.right_property_id)
+                      AND i.clip_tagged_at > c.last_engine_decision_at)
+              )
+        """
+        params = {"backoff_h": float(redecide_hours)}
     with conn.cursor() as cur:
-        cur.execute(
-            "SELECT left_property_id, right_property_id FROM property_identity_candidates "
-            "WHERE status = 'proposed'")
+        cur.execute(sql, params)
         rows = cur.fetchall()
     out: set[int] = set()
     for left, right in rows:
@@ -346,6 +376,32 @@ def _proposed_candidate_property_ids(conn: Any) -> set[int]:
         if right is not None:
             out.add(int(right))
     return out
+
+
+def _stamp_engine_looked(conn: Any, looked: dict[tuple[int, int], str]) -> None:
+    """Record 'the engine evaluated this proposed pair and left it proposed' — the
+    stamp the candidate drain's due-filter keys on. Set-based, proposed rows only;
+    terminal outcomes (merged / dismissed) change status elsewhere and never need it."""
+    if not looked:
+        return
+    items = list(looked.items())
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE property_identity_candidates c
+            SET last_engine_decision_at = now(), engine_decision = v.reason
+            FROM (SELECT unnest(%(los)s::bigint[]) AS lo,
+                         unnest(%(his)s::bigint[]) AS hi,
+                         unnest(%(reasons)s::text[]) AS reason) v
+            WHERE c.left_property_id = v.lo AND c.right_property_id = v.hi
+              AND c.status = 'proposed'
+            """,
+            {
+                "los": [lo for (lo, _hi), _r in items],
+                "his": [hi for (_lo, hi), _r in items],
+                "reasons": [r for _pair, r in items],
+            },
+        )
 
 
 # --- real-time dedup queue drain (dedup_dirty_properties, migration 242; the writer-side
@@ -1507,6 +1563,10 @@ class _RunContext:
     seen_property_pairs: set[tuple[int, int]] = field(default_factory=set)
     merged_pairs: set[tuple[int, int]] = field(default_factory=set)
     dismissed_pairs: set[tuple[int, int]] = field(default_factory=set)
+    # Pairs the engine EVALUATED this run but left proposed (queue outcome / free-mode
+    # skip / tagging defer) → stamped set-based in finalize (migration 272); the
+    # candidate drain's due-filter then skips them until backoff or fresh evidence.
+    engine_looked: dict[tuple[int, int], str] = field(default_factory=dict)
     # The subset of dismissed_pairs that were AUTO-DISMISSED by a verdict this run
     # (floor-plan different_layout / confident visual "different") — NOT the rule-C
     # rejects. finalize() upserts these as status='dismissed' candidate rows so future
@@ -1591,6 +1651,7 @@ def resolve_pair(conn: Any, a: ListingKey, b: ListingKey, *, street_key: str,
     if ctx.clip_model and _clip_incomplete_any(
             conn, [a.sreality_id, b.sreality_id], ctx.clip_model, ctx.probes):
         stats["clip_deferred"] += 1
+        ctx.engine_looked[cp] = "clip_deferred"  # fresh clip_tagged_at re-opens the pair
         return
 
     # Rule B (exact address) is RETIRED (2026-06): it was the only auto-merge path with false
@@ -1634,6 +1695,7 @@ def resolve_pair(conn: Any, a: ListingKey, b: ListingKey, *, street_key: str,
                     "reason": "auto_merge_off:image_phash", "confidence": 0.97},
                     reopen=reopened)
             stats["queued"] += 1
+            ctx.engine_looked[cp] = "auto_merge_off:image_phash"
             return
         # Floor-plan validation gate (migration 234): a different 2D floor plan DISMISSES, a
         # both-2D INCONCLUSIVE verdict goes to MANUAL queue, an unwarmed both-plan verdict DEFERS
@@ -1658,6 +1720,7 @@ def resolve_pair(conn: Any, a: ListingKey, b: ListingKey, *, street_key: str,
                     "reason": "floor_plan_review", "confidence": 0.6},
                     reopen=reopened)
             stats["queued"] += 1
+            ctx.engine_looked[cp] = "floor_plan_review"
             return
         if fp == "defer":
             stats["floor_plan_deferred"] += 1
@@ -1693,6 +1756,7 @@ def resolve_pair(conn: Any, a: ListingKey, b: ListingKey, *, street_key: str,
                 "tier": ctx.tier, "confidence": 0.6,
             }, reopen=reopened)
         stats["queued"] += 1
+        ctx.engine_looked[cp] = "auto_merge_off"
         return
     # (Tagging readiness is enforced once, up front — see the _clip_incomplete gate at the top
     # of resolve_pair — so every pair reaching the visual stage is fully CLIP-tagged.)
@@ -1741,6 +1805,7 @@ def resolve_pair(conn: Any, a: ListingKey, b: ListingKey, *, street_key: str,
         if not ctx.dry_run:
             _enqueue_candidate(conn, a, b, markers, reopen=reopened)
         stats["queued"] += 1
+        ctx.engine_looked[cp] = str(outcome.get("reason") or "queued")
         # NOT audited — a queued pair IS the candidate; its factor detail lives in
         # markers_matched (Needs-review reads it). Auditing queued re-logged the same
         # pair every run (the duplicate-row bug).
@@ -1750,6 +1815,7 @@ def resolve_pair(conn: Any, a: ListingKey, b: ListingKey, *, street_key: str,
         # pair is left for a future run (free pHash as coverage grows, or vision if
         # re-enabled).
         stats["skipped_unresolved"] += 1
+        ctx.engine_looked[cp] = str(outcome.get("reason") or "skipped_unresolved")
 
 
 def _make_geo_classify(area_max_pct: float | None) -> Any:
@@ -1974,6 +2040,9 @@ def run_engine(
             # rows (insert-if-absent — 66% of the measured treadmill pairs had NO row for
             # the consult to find; an existing row was just updated above).
             _record_auto_dismissed(conn, ctx.auto_dismissed_pairs, ctx.tier)
+            # Stamp every pair the engine evaluated but left proposed (migration 272) —
+            # the candidate drain's due-filter keys on this to stop the re-chew treadmill.
+            _stamp_engine_looked(conn, ctx.engine_looked)
         if cursor_out is not None:
             cursor_out["last_key"] = scan_frontier["last_key"]
             # The cycle completed only if the scan reached the end of the ordered list
@@ -2729,12 +2798,17 @@ def main() -> int:
             max_vision_calls=args.max_vision_calls)
         eff_max_rooms = 99 if args.cache_only else args.max_room_attempts
 
-        # Candidate-priority drain: scope the scan to the properties in still-proposed
-        # /dedup candidates so the queue self-clears in O(queue), not O(market). An
-        # EMPTY set (no candidates) loads nothing — a clean no-op, NOT a full scan.
-        restrict = (_proposed_candidate_property_ids(conn) if args.candidates else None)
+        # Candidate-priority drain: scope the scan to the properties in DUE still-proposed
+        # /dedup candidates (never looked at / backoff elapsed / fresh CLIP evidence —
+        # migration 272) so the queue self-clears in O(due), not O(queue) re-chewed every
+        # pass. An EMPTY set (nothing due) loads nothing — a clean no-op, NOT a full scan.
+        restrict = (
+            _proposed_candidate_property_ids(
+                conn, redecide_hours=float(
+                    read_setting(conn, "dedup_candidate_redecide_hours")))
+            if args.candidates else None)
         if args.candidates:
-            LOG.info("CANDIDATE drain: %d properties across the proposed queue",
+            LOG.info("CANDIDATE drain: %d properties across the DUE proposed queue",
                      len(restrict or set()))
 
         # Shared kwargs every pass passes to run_engine — the free-first flow itself.

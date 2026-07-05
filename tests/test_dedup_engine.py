@@ -1742,6 +1742,81 @@ def test_run_engine_dirty_oversized_group_is_processed_not_poisoned(monkeypatch:
     assert resolved >= claimed                    # cleared AFTER processing, not instead of
 
 
+# --- candidates lifecycle: due-filter + engine-looked stamp (migration 272) ---
+
+def test_proposed_candidate_property_ids_due_filter_sql() -> None:
+    # With a backoff the drain loads only DUE candidates: never-stamped, backoff-elapsed,
+    # or fresh CLIP evidence. Without one (None) the historical load-everything SQL runs.
+    import scripts.dedup_engine as eng
+
+    captured: dict[str, Any] = {}
+
+    class _Cur:
+        def __enter__(self): return self
+        def __exit__(self, *a): return None
+        def execute(self, sql, params=None):
+            captured["sql"] = " ".join(sql.split()); captured["params"] = params
+        def fetchall(self):
+            return [(11, 22)]
+
+    class _Conn:
+        def cursor(self): return _Cur()
+
+    out = eng._proposed_candidate_property_ids(_Conn(), redecide_hours=24)
+    sql = captured["sql"]
+    assert "last_engine_decision_at IS NULL" in sql
+    assert "make_interval(hours => %(backoff_h)s)" in sql
+    assert "i.clip_tagged_at > c.last_engine_decision_at" in sql
+    assert captured["params"]["backoff_h"] == 24.0
+    assert out == {11, 22}
+
+    eng._proposed_candidate_property_ids(_Conn(), redecide_hours=None)
+    assert "last_engine_decision_at" not in captured["sql"]  # historical full load
+
+
+def test_stamp_engine_looked_set_based_update() -> None:
+    import scripts.dedup_engine as eng
+
+    captured: list[tuple[str, Any]] = []
+
+    class _Cur:
+        def __enter__(self): return self
+        def __exit__(self, *a): return None
+        def execute(self, sql, params=None):
+            captured.append((" ".join(sql.split()), params))
+
+    class _Conn:
+        def cursor(self): return _Cur()
+
+    eng._stamp_engine_looked(_Conn(), {})
+    assert captured == []                       # empty -> no round trip
+
+    eng._stamp_engine_looked(_Conn(), {(5, 9): "visual_inconclusive", (2, 3): "clip_deferred"})
+    sql, params = captured[-1]
+    assert "SET last_engine_decision_at = now(), engine_decision = v.reason" in sql
+    assert "c.status = 'proposed'" in sql
+    pairs = dict(zip(zip(params["los"], params["his"]), params["reasons"]))
+    assert pairs == {(5, 9): "visual_inconclusive", (2, 3): "clip_deferred"}
+
+
+def test_run_engine_free_skip_stamps_engine_looked() -> None:
+    # A free-mode pair that ends skipped_unresolved is STAMPED (the treadmill fix): the
+    # candidate drain's due-filter will skip it until backoff or fresh CLIP evidence.
+    import scripts.dedup_engine as eng
+
+    conn = _FakeConn([
+        _row(1, 101, hn=None, source="sreality"),
+        _row(2, 102, hn=None, source="bazos"),
+    ])
+    stats = eng.run_engine(conn, classify_fn=None, compare_fn=None, max_vision_calls=10,
+                           enqueue_unresolved=False)
+    assert stats["skipped_unresolved"] == 1
+    stamps = [(s, p) for s, p in conn.resolved if "last_engine_decision_at = now()" in s]
+    assert len(stamps) == 1
+    _sql, params = stamps[0]
+    assert params["los"] == [101] and params["his"] == [102]
+
+
 # --- dirty lane: ordered claim + claim-order processing + run_dirty_pass -----
 
 def test_claim_dedup_dirty_returns_newest_first_list() -> None:

@@ -59,6 +59,15 @@ REGISTRY: tuple[DedupSetting, ...] = (
         "as 'same layout' and merge.",
     ),
     DedupSetting(
+        "dedup_candidate_redecide_hours", "float", 24,
+        "Candidate re-decide backoff (hours)", "Engine",
+        "How long the candidate drain leaves an already-evaluated proposed pair alone "
+        "before re-deciding it. New CLIP-tagged photo evidence re-opens a pair "
+        "immediately regardless of the backoff. Stops the drain from re-chewing the "
+        "same inconclusive pairs every 2 hours.",
+        1, 720,
+    ),
+    DedupSetting(
         "dedup_batch_warmer_enabled", "bool", False,
         "Batch vision warmer", "Engine",
         "Pre-warm the vision caches via Anthropic's Message Batches API (50% cheaper, "
