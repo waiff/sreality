@@ -7,6 +7,7 @@ run_index_probe / run_detail_drain / db.connect are monkeypatched.
 from __future__ import annotations
 
 import asyncio
+import inspect
 from typing import Any
 
 import pytest
@@ -316,6 +317,68 @@ def test_images_pass_slice_zero_skips_entirely(monkeypatch):
     state = rw._new_state()
     asyncio.run(rw._images_pass(asyncio.Event(), state))
     assert "images" not in state["lanes"]
+
+
+# --- dedup pass ------------------------------------------------------------------
+
+
+def test_dedup_lane_registered_and_dark_by_default():
+    # Ships DARK: the interval default is 0, so the lane idles until the operator flips
+    # realtime_dedup_interval_seconds. The lane must be registered in _amain's list.
+    assert rw.DEDUP_INTERVAL_DEFAULT == 0
+    src = inspect.getsource(rw._amain)
+    assert '("dedup"' in src
+
+
+def test_dedup_pass_records_merge_counters(monkeypatch):
+    def fake_sync() -> dict[str, Any]:
+        return {"dirty_claimed": 5, "dirty_cleared": 3, "auto_phash": 2,
+                "auto_visual": 1, "queued": 0, "truncated": 0, "vision_errors": 0}
+
+    monkeypatch.setattr(rw, "_dedup_sync", fake_sync)
+    state = rw._new_state()
+    asyncio.run(rw._dedup_pass(asyncio.Event(), state))
+    dedup = state["lanes"]["dedup"]
+    assert dedup["passes"] == 1
+    assert dedup["last"] == {
+        "claimed": 5, "cleared": 3, "auto_phash": 2, "auto_visual": 1,
+        "queued": 0, "truncated": 0, "vision_errors": 0,
+    }
+
+
+def test_dedup_pass_empty_queue_records_zero(monkeypatch):
+    # run_realtime_dirty_pass returns None on an empty queue -> the lane records a
+    # zero-claim pass (heartbeat visibility) without a run row.
+    monkeypatch.setattr(rw, "_dedup_sync", lambda: None)
+    state = rw._new_state()
+    asyncio.run(rw._dedup_pass(asyncio.Event(), state))
+    assert state["lanes"]["dedup"]["last"] == {"claimed": 0, "empty": True}
+
+
+def test_dedup_sync_max_seconds_from_interval(monkeypatch):
+    # max_seconds = min(cap, max(60, interval*2)); the pass delegates to the engine's
+    # run_realtime_dirty_pass with the worker-configured budgets and runner='worker'.
+    monkeypatch.setattr(rw, "_read_dedup_interval", lambda: 90)
+    monkeypatch.setattr(rw, "_read_dedup_budgets", lambda: (150, 6, 3))
+    monkeypatch.setattr(rw.db, "connect", lambda: _FakeConn())
+    captured: dict[str, Any] = {}
+
+    import scripts.dedup_engine as eng
+
+    def fake_pass(conn, *, max_dirty, compare_budget, floor_plan_budget,
+                  max_seconds, runner="worker"):
+        captured.update(max_dirty=max_dirty, compare_budget=compare_budget,
+                        floor_plan_budget=floor_plan_budget, max_seconds=max_seconds,
+                        runner=runner)
+        return {"dirty_claimed": 0}
+
+    monkeypatch.setattr(eng, "run_realtime_dirty_pass", fake_pass)
+    rw._dedup_sync()
+    assert captured["max_dirty"] == 150
+    assert captured["compare_budget"] == 6
+    assert captured["floor_plan_budget"] == 3
+    assert captured["max_seconds"] == 180.0   # interval 90 * 2, under the 240 cap
+    assert captured["runner"] == "worker"
 
 
 def test_images_pass_without_r2_logs_once_and_idles(monkeypatch, caplog):

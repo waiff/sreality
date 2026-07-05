@@ -34,9 +34,18 @@ matcher/outbox pattern from api/notifications + api/notification_outbox):
              realtime_sreality_count_dispatch_enabled setting) it triggers a
              targeted index_walk sooner than the */15 cron. Always records
              per-pair totals to sreality_count_probe_state (migration 270).
+- dedup:     every `realtime_dedup_interval_seconds` (DEFAULT 0 = idle/dark),
+             one free-mode micro-drain of dedup_dirty_properties via the engine's
+             run_realtime_dirty_pass (never forks the decision tree) — a new
+             cross-portal listing merges within minutes of CLIP tagging instead
+             of waiting for the :45 Actions dirty cron. Tiny budgets
+             (realtime_dedup_max_dirty 200 / compare 4 / floor-plan 4); safe
+             beside the cron (merge row-locks + cutoff-guarded clears +
+             cache-keyed verdicts). The operator flips the interval to 60-120s
+             once #700's ordering fix is verified.
 - heartbeat: every 30s, upsert this worker's beat + per-lane counters into
-             worker_heartbeats (migration 269) — the Health-page liveness hook
-             and where future lanes (dedup wake) will report.
+             worker_heartbeats (migration 269) — the Health-page liveness hook,
+             now including the dedup lane's claimed/cleared/merge counters.
 
 SHIPS DARK: the process exits immediately unless env REALTIME_WORKER_ENABLED=1,
 so merging changes nothing until the operator creates the Railway service.
@@ -83,6 +92,19 @@ IMAGES_WORKERS = 8
 HEARTBEAT_INTERVAL_SECONDS = 30.0
 IDLE_WAIT_SECONDS = 60.0
 LANE_RESTART_SECONDS = 30.0
+
+# dedup lane: a continuous micro-drain of dedup_dirty_properties (the queue the hourly
+# CLIP tag job fills once a listing's images are pHash'd + tagged), so a new cross-portal
+# listing MERGES within minutes of tagging instead of waiting for the :45 Actions dirty
+# cron. Ships DARK (interval default 0) — the operator flips realtime_dedup_interval_seconds
+# to 60-120 after the GH cron's ordering fix (#700) is verified; concurrent with the cron is
+# safe (merge row-locks + cutoff-guarded clears + cache-keyed verdicts). Budgets are tiny:
+# the pass is meant to fire often on a small claim, not to sweep.
+DEDUP_INTERVAL_DEFAULT = 0
+DEDUP_MAX_DIRTY_DEFAULT = 200
+DEDUP_COMPARE_BUDGET_DEFAULT = 4
+DEDUP_FLOOR_PLAN_BUDGET_DEFAULT = 4
+DEDUP_MAX_SECONDS_CAP = 240.0
 
 # sreality count-probe lane (W3): sreality's v1 search API ignores every sort
 # param, so the newest-first delta probe the other portals use is impossible for
@@ -202,6 +224,10 @@ def _read_drain_disabled_sources() -> set[str]:
 def _read_count_probe_interval() -> int:
     return _read_int(
         "realtime_sreality_count_interval_seconds", COUNT_PROBE_INTERVAL_DEFAULT)
+
+
+def _read_dedup_interval() -> int:
+    return _read_int("realtime_dedup_interval_seconds", DEDUP_INTERVAL_DEFAULT)
 
 
 def _read_flag(key: str) -> bool:
@@ -632,6 +658,60 @@ _HEARTBEAT_SQL = """
 """
 
 
+def _read_dedup_budgets() -> tuple[int, int, int]:
+    return (
+        _read_int("realtime_dedup_max_dirty", DEDUP_MAX_DIRTY_DEFAULT),
+        _read_int("realtime_dedup_compare_budget", DEDUP_COMPARE_BUDGET_DEFAULT),
+        _read_int("realtime_dedup_floor_plan_budget", DEDUP_FLOOR_PLAN_BUDGET_DEFAULT),
+    )
+
+
+def _dedup_sync() -> dict[str, Any] | None:
+    """One free-mode real-time dirty pass on the worker's own connection. Reuses THE
+    engine's run_realtime_dirty_pass (never forks the decision tree): prune → newest-first
+    claim → scoped resolve in claim order → incremental clear → run row tagged
+    runner='worker'. Returns None on an empty queue. Lazy import keeps scripts.dedup_engine
+    (and its api.* imports) off the worker's startup path."""
+    from scripts.dedup_engine import run_realtime_dirty_pass
+
+    max_dirty, compare_budget, floor_plan_budget = _read_dedup_budgets()
+    interval = _read_dedup_interval()
+    max_seconds = min(DEDUP_MAX_SECONDS_CAP, max(60.0, interval * 2.0))
+    conn = db.connect()
+    try:
+        return run_realtime_dirty_pass(
+            conn, max_dirty=max_dirty, compare_budget=compare_budget,
+            floor_plan_budget=floor_plan_budget, max_seconds=max_seconds, runner="worker")
+    finally:
+        with contextlib.suppress(Exception):
+            conn.close()
+
+
+async def _dedup_pass(stop_event: asyncio.Event, state: dict[str, Any]) -> None:
+    if stop_event.is_set():
+        return
+    stats = await asyncio.to_thread(_dedup_sync)
+    if stats is None:
+        _record_pass(state, "dedup", {"claimed": 0, "empty": True})
+        return
+    last = {
+        "claimed": stats.get("dirty_claimed", 0),
+        "cleared": stats.get("dirty_cleared", 0),
+        "auto_phash": stats.get("auto_phash", 0),
+        "auto_visual": stats.get("auto_visual", 0),
+        "queued": stats.get("queued", 0),
+        "truncated": int(stats.get("truncated", 0) or 0),
+        "vision_errors": stats.get("vision_errors", 0),
+    }
+    LOG.info(
+        "DEDUP lane claimed=%d cleared=%d auto_phash=%d auto_visual=%d queued=%d "
+        "truncated=%d vision_errors=%d",
+        last["claimed"], last["cleared"], last["auto_phash"], last["auto_visual"],
+        last["queued"], last["truncated"], last["vision_errors"],
+    )
+    _record_pass(state, "dedup", last)
+
+
 def _beat_sync(state: dict[str, Any]) -> None:
     conn = db.connect()
     try:
@@ -751,6 +831,10 @@ async def _amain() -> int:
             "count_probe", stop_event, _read_count_probe_interval,
             lambda: _count_probe_pass(stop_event, state),
             default_interval=COUNT_PROBE_INTERVAL_DEFAULT)),
+        ("dedup", lambda: _lane_loop(
+            "dedup", stop_event, _read_dedup_interval,
+            lambda: _dedup_pass(stop_event, state),
+            default_interval=DEDUP_INTERVAL_DEFAULT)),
         ("heartbeat", lambda: _lane_loop(
             "heartbeat", stop_event, lambda: HEARTBEAT_INTERVAL_SECONDS,
             lambda: _heartbeat_pass(state),
