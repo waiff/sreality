@@ -1742,6 +1742,109 @@ def test_run_engine_dirty_oversized_group_is_processed_not_poisoned(monkeypatch:
     assert resolved >= claimed                    # cleared AFTER processing, not instead of
 
 
+# --- dirty lane: ordered claim + claim-order processing + run_dirty_pass -----
+
+def test_claim_dedup_dirty_returns_newest_first_list() -> None:
+    # The claim is an ORDERED list (newest-first) — returning a set discarded the
+    # ORDER BY and let load-order (obec-ASC) head-of-line groups starve the queue head.
+    import scripts.dedup_engine as eng
+
+    class _Cur:
+        def __enter__(self): return self
+        def __exit__(self, *a): return None
+        def execute(self, sql, params=None):
+            assert "ORDER BY marked_at DESC" in sql
+        def fetchall(self):
+            return [(7,), (5,), (9,)]
+
+    class _Conn:
+        def cursor(self): return _Cur()
+
+    claimed = eng._claim_dedup_dirty(_Conn(), "T0", limit=10)
+    assert claimed == [7, 5, 9]          # order preserved, not a set
+
+
+def test_run_engine_processes_groups_in_claim_order(monkeypatch: Any) -> None:
+    # priority_property_order ranks the scoped scan: the NEWEST claimed property's group
+    # is processed first, so a budget-cut run spends its budget on the queue head.
+    import scripts.dedup_engine as eng
+
+    monkeypatch.setattr(eng, "resolve_pair", _stub_resolve_pair)
+    conn = _FakeConn([
+        _row(1, 101, street="Alfa", street_id=None, hn=None),
+        _row(2, 102, street="Alfa", street_id=None, hn=None, source="bazos"),
+        _row(3, 201, street="Zeta", street_id=None, hn=None),
+        _row(4, 202, street="Zeta", street_id=None, hn=None, source="bazos"),
+    ])
+    claimed_order = [201, 101]           # Zeta's property is the newest claim
+    resolved: set[int] = set()
+    stats = eng.run_engine(
+        conn, only_groups_with_property_ids=set(claimed_order),
+        resolved_property_ids=resolved, priority_property_order=claimed_order,
+        max_pairs=2, max_vision_calls=0)  # budget covers Zeta fully, dies at Alfa's boundary
+    assert stats["truncated"] == 1
+    assert 201 in resolved and 202 in resolved   # newest group processed + cleared
+    assert 101 not in resolved                   # older group keeps its claim
+
+
+def test_run_dirty_pass_contract(monkeypatch: Any) -> None:
+    # prune -> ordered claim -> scoped run (claim order threaded) -> incremental clear ->
+    # run row with run_kind='dirty' + runner; empty queue returns None with NO run row.
+    import scripts.dedup_engine as eng
+
+    calls: dict[str, Any] = {}
+
+    class _Cur:
+        def __enter__(self): return self
+        def __exit__(self, *a): return None
+        def execute(self, sql, params=None): self._sql = sql
+        def fetchone(self):
+            return ("CUTOFF",) if "SELECT now()" in self._sql else (42,)
+
+    class _Conn:
+        def cursor(self): return _Cur()
+
+    monkeypatch.setattr(eng, "_prune_stale_dedup_dirty", lambda conn: 3)
+    monkeypatch.setattr(eng, "_claim_dedup_dirty",
+                        lambda conn, cutoff, limit=None: [9, 5])
+    monkeypatch.setattr(eng, "_dirty_queue_age_p95_seconds",
+                        lambda conn, cutoff: 1234)
+    monkeypatch.setattr(eng, "_claimed_street_groups",
+                        lambda conn, pids: (set(), set()))
+
+    def _fake_run_engine(conn, **kw):
+        calls["priority_property_order"] = kw["priority_property_order"]
+        kw["resolved_property_ids"].update({9})
+        return {"truncated": 0, "pairs_considered": 1}
+    monkeypatch.setattr(eng, "run_engine", _fake_run_engine)
+
+    def _fake_clear(conn, pids, cutoff):
+        calls["cleared"] = sorted(pids)
+        return 1
+    monkeypatch.setattr(eng, "_clear_dedup_dirty", _fake_clear)
+    monkeypatch.setattr(eng, "_write_run_row",
+                        lambda conn, stats, *, run_kind, started_at, runner="actions":
+                        calls.update(run_kind=run_kind, runner=runner, stats=dict(stats)))
+    monkeypatch.setattr(eng, "_write_pair_audit", lambda conn, at, audit: None)
+
+    stats = eng.run_dirty_pass(_Conn(), max_dirty=10, max_pairs=100, engine_kw={},
+                               runner="worker", started_at="T0")
+    assert stats is not None
+    assert calls["priority_property_order"] == [9, 5]
+    assert calls["cleared"] == [9]                      # only the resolved claim cleared
+    assert calls["run_kind"] == "dirty" and calls["runner"] == "worker"
+    assert calls["stats"]["dirty_claimed"] == 2
+    assert calls["stats"]["dirty_age_p95_seconds"] == 1234
+    assert calls["stats"]["dirty_pruned"] == 3
+    assert calls["stats"]["dirty_cleared"] == 1
+
+    # Empty queue: None, and no run row written.
+    calls.clear()
+    monkeypatch.setattr(eng, "_claim_dedup_dirty", lambda conn, cutoff, limit=None: [])
+    assert eng.run_dirty_pass(_Conn(), max_dirty=10, max_pairs=100, engine_kw={}) is None
+    assert "run_kind" not in calls
+
+
 def test_vision_error_breaker_helpers() -> None:
     # After VISION_ERROR_BREAKER errors the paid fns stop calling out (cache reads only) —
     # a dead key / exhausted credit degrades instead of burning the run budget on errors.
