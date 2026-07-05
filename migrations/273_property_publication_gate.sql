@@ -174,6 +174,7 @@ CREATE OR REPLACE VIEW properties_public AS
     p.total_price_change_pct,
     concat_ws(', '::text, p.street, p.locality) AS place_search_text,
     p.asset_id,
+    p.mf_reference_rent,
     p.published_at
    FROM properties p
      LEFT JOIN listings l ON l.sreality_id = p.repr_listing_id
