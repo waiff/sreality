@@ -738,10 +738,37 @@ def test_get_unread_count_breaks_down_by_source() -> None:
     conn = _FakeConn(script)
     out = get_unread_count(conn)  # type: ignore[arg-type]
     assert out == {
-        "watchdog": 4, "collection_monitor": 3, "total": 7, "unread_count": 7,
+        "watchdog": 4, "collection_monitor": 3, "system_health": 0,
+        "total": 7, "unread_count": 7,
     }
     scoped = get_unread_count(conn, source_kind="collection_monitor")  # type: ignore[arg-type]
     assert scoped["unread_count"] == 3
+
+
+def test_get_unread_count_sums_system_health_into_total() -> None:
+    # total sums EVERY kind, not a hardcoded watchdog+collection_monitor — the bug
+    # that previously dropped system_health alerts from the nav badge.
+    script: list[tuple[Any, list[tuple[Any, ...]], int]] = [
+        (
+            lambda s: "GROUP BY source_kind" in s,
+            [("watchdog", 4), ("collection_monitor", 3), ("system_health", 2)],
+            0,
+        ),
+    ]
+    conn = _FakeConn(script)
+    out = get_unread_count(conn)  # type: ignore[arg-type]
+    assert out["system_health"] == 2
+    assert out["total"] == 9
+    assert out["unread_count"] == 9
+    scoped = get_unread_count(conn, source_kind="system_health")  # type: ignore[arg-type]
+    assert scoped["unread_count"] == 2
+
+
+def test_dispatch_select_projects_message() -> None:
+    # The feed row carries d.message so system_health alerts render their verbatim text.
+    from api.notifications import _DISPATCH_SELECT
+
+    assert "d.message" in _DISPATCH_SELECT
 
 
 def test_mark_all_seen_scoped_filters_by_source() -> None:

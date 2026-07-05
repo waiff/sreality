@@ -69,6 +69,15 @@ def compose_message(row: dict[str, Any]) -> RenderedMessage:
 
     Pure read over already-joined columns; each transport renders the slice it
     needs (email → subject + text; telegram → text + deep_link)."""
+    if row.get("source_kind") == "system_health":
+        # A system alert is about the pipeline, not a listing — deliver its stored
+        # message verbatim (no listing join fields; sreality_id is NULL).
+        text = row.get("message") or "Systémové upozornění"
+        return RenderedMessage(
+            subject="Systémové upozornění",
+            body_text=text,
+            deep_link=f"{_spa_base()}/notifications" if _spa_base() else "",
+        )
     kind = row.get("change_kind") or "new"
     disposition = row.get("disposition") or ""
     locality = row.get("locality") or f"id {row.get('sreality_id')}"
@@ -110,14 +119,14 @@ _NEW_COLS = (
     "d.id::text, d.source_kind, d.change_kind, d.sreality_id, "
     "d.subscription_id::text, d.collection_id, "
     "d.trigger_price_czk, d.prev_price_czk, "
-    "l.locality, l.disposition, l.price_czk, l.price_unit, l.category_main, ch"
+    "l.locality, l.disposition, l.price_czk, l.price_unit, l.category_main, d.message, ch"
 )
 
 _RETRY_COLS = (
     "cs.id, cs.channel, cs.recipient, cs.consumer, "
     "d.source_kind, d.change_kind, d.sreality_id, "
     "d.trigger_price_czk, d.prev_price_czk, "
-    "l.locality, l.disposition, l.price_czk, l.price_unit, l.category_main"
+    "l.locality, l.disposition, l.price_czk, l.price_unit, l.category_main, d.message"
 )
 
 
@@ -157,12 +166,13 @@ def drain_once(
     for r in new_rows:
         (dispatch_id, source_kind, change_kind, sreality_id, subscription_id,
          collection_id, trigger_price_czk, prev_price_czk, locality, disposition,
-         price_czk, price_unit, _category_main, ch) = r
+         price_czk, price_unit, _category_main, message, ch) = r
         recipient = recipients.get(ch)
         if not recipient:
             skipped += 1
             continue
         msg = compose_message({
+            "source_kind": source_kind, "message": message,
             "change_kind": change_kind, "sreality_id": sreality_id,
             "locality": locality, "disposition": disposition,
             "price_czk": price_czk, "price_unit": price_unit,
@@ -202,12 +212,13 @@ def drain_once(
         retry_rows = cur.fetchall()
 
     for r in retry_rows:
-        (send_id, ch, recipient, _consumer, _source_kind, change_kind, sreality_id,
+        (send_id, ch, recipient, _consumer, source_kind, change_kind, sreality_id,
          trigger_price_czk, prev_price_czk, locality, disposition,
-         price_czk, price_unit, _category_main) = r
+         price_czk, price_unit, _category_main, message) = r
         if not recipient:
             continue
         msg = compose_message({
+            "source_kind": source_kind, "message": message,
             "change_kind": change_kind, "sreality_id": sreality_id,
             "locality": locality, "disposition": disposition,
             "price_czk": price_czk, "price_unit": price_unit,

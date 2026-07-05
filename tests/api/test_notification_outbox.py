@@ -29,6 +29,17 @@ def test_compose_new_subject_and_deep_link(monkeypatch: Any) -> None:
     assert "6 900 000 Kč" in msg.body_text
 
 
+def test_compose_system_health_uses_verbatim_message(monkeypatch: Any) -> None:
+    monkeypatch.setenv("SPA_BASE_URL", "https://app.example")
+    msg = ob.compose_message({
+        "source_kind": "system_health", "message": "Pipeline verification is stale",
+        "change_kind": "system_alert", "sreality_id": None,
+    })
+    assert msg.subject == "Systémové upozornění"
+    assert msg.body_text == "Pipeline verification is stale"
+    assert msg.deep_link == "https://app.example/notifications"
+
+
 def test_compose_price_drop_shows_prev_to_new(monkeypatch: Any) -> None:
     monkeypatch.setenv("SPA_BASE_URL", "https://app.example")
     msg = ob.compose_message({
@@ -103,9 +114,9 @@ class _FakeClient:
 def _new_row(ch: str = "email") -> tuple:
     # (dispatch_id, source_kind, change_kind, sreality_id, subscription_id,
     #  collection_id, trigger_price, prev_price, locality, disposition,
-    #  price_czk, price_unit, category_main, ch)
+    #  price_czk, price_unit, category_main, message, ch)
     return ("dab-1", "watchdog", "new", 123, "sub-1", None,
-            None, None, "Praha 2", "2+kk", 6_900_000, None, "byt", ch)
+            None, None, "Praha 2", "2+kk", 6_900_000, None, "byt", None, ch)
 
 
 def test_drain_noop_without_configured_channels() -> None:
@@ -143,7 +154,7 @@ def test_drain_skips_when_recipient_unset() -> None:
 def test_drain_collection_monitor_routes_collection_id_as_source() -> None:
     client = _FakeClient(configured={"email"})
     row = ("dab-2", "collection_monitor", "price_drop", 55, None, 7,
-           4_000_000, 4_500_000, "Plzeň", "1+kk", 4_000_000, None, "byt", "email")
+           4_000_000, 4_500_000, "Plzeň", "1+kk", 4_000_000, None, "byt", None, "email")
     conn = _Conn(recipient="op@example.cz", new_rows=[row], retry_rows=[])
     ob.drain_once(conn, client)  # type: ignore[arg-type]
     call = client.sends[0]
@@ -154,9 +165,10 @@ def test_drain_collection_monitor_routes_collection_id_as_source() -> None:
 def test_drain_retries_failed_due_rows() -> None:
     client = _FakeClient(configured={"email"})
     # (send_id, channel, recipient, consumer, source_kind, change_kind, sreality_id,
-    #  trigger_price, prev_price, locality, disposition, price_czk, price_unit, category_main)
+    #  trigger_price, prev_price, locality, disposition, price_czk, price_unit,
+    #  category_main, message)
     retry_row = (42, "email", "op@example.cz", "watchdog", "watchdog", "new", 5,
-                 None, None, "Ostrava", "2+1", 3_000_000, None, "byt")
+                 None, None, "Ostrava", "2+1", 3_000_000, None, "byt", None)
     conn = _Conn(recipient="op@example.cz", new_rows=[], retry_rows=[retry_row])
     stats = ob.drain_once(conn, client)  # type: ignore[arg-type]
     assert stats["retried"] == 1

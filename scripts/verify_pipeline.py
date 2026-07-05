@@ -1,0 +1,658 @@
+"""verify_pipeline.py — scheduled pipeline-health harness.
+
+Computes a fixed set of pipeline-health metrics (dedup debt, eligibility funnel,
+merge latency, engine cycle health, LLM error rate, a weekly precision sample),
+writes one `pipeline_check_results` row per check, and rings the in-app bell
+(toolkit.system_alerts.emit_system_alert) for every `fail`.
+
+Born from the 2026-07 incident: the dedup/scrape pipeline stalled silently for two
+days (Anthropic credit exhaustion; 38k+ failed LLM calls) with no in-app signal,
+while ~39,376 suspect unmerged byt pairs of "dedup debt" sat invisible. This job
+makes both loud and durable.
+
+Each check is isolated (one failing check writes a `fail` row with the error in
+`details`, never kills the run). Thresholds live in
+`app_settings.pipeline_check_thresholds` with the code defaults below as fallbacks.
+
+    python -m scripts.verify_pipeline            # compute + write + alert
+    python -m scripts.verify_pipeline --dry-run  # compute + log only, no writes
+    python -m scripts.verify_pipeline --weekly   # also emit the precision sample
+
+Needs only SUPABASE_DB_URL.
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime as _dt
+import json
+import logging
+import os
+import sys
+from typing import Any, Callable
+
+from scraper.db import connect
+from toolkit.system_alerts import emit_system_alert
+
+LOG = logging.getLogger("verify_pipeline")
+
+# Code fallbacks — mirror migration 274's pipeline_check_thresholds seed exactly.
+DEFAULT_THRESHOLDS: dict[str, float] = {
+    "street_debt_price_pct": 1.0,
+    "street_debt_warn": 30000,
+    "street_debt_fail": 45000,
+    "geo_debt_area_pct": 20,
+    "geo_debt_price_pct": 5,
+    "merge_p95_warn_hours": 24,
+    "unpublished_overdue_fail": 1,
+    "cycle_age_fail_hours": 30,
+    "dirty_age_p95_warn_hours": 6,
+    "candidate_age_p95_warn_days": 14,
+    "llm_error_rate_warn": 0.2,
+    "verification_stale_hours": 24,
+    "precision_sample_n": 15,
+}
+
+_NONBYT = ("dum", "pozemek", "komercni", "ostatni")
+
+
+# --- pure status derivation (unit-tested without a DB) ---------------------
+
+
+def _worst(statuses: list[str]) -> str:
+    for s in ("fail", "warn", "ok"):
+        if s in statuses:
+            return s
+    return "ok"
+
+
+def _status_for_street_debt(count: int, thresholds: dict[str, Any]) -> str:
+    if count > thresholds["street_debt_fail"]:
+        return "fail"
+    if count > thresholds["street_debt_warn"]:
+        return "warn"
+    return "ok"
+
+
+def _status_for_merge_latency(
+    p95_hours: float | None, thresholds: dict[str, Any],
+) -> str:
+    if p95_hours is not None and p95_hours > thresholds["merge_p95_warn_hours"]:
+        return "warn"
+    return "ok"
+
+
+def _status_for_cycle(
+    *,
+    has_row: bool,
+    completed_age_hours: float | None,
+    started_age_hours: float | None,
+    thresholds: dict[str, Any],
+) -> str:
+    fail_h = thresholds["cycle_age_fail_hours"]
+    if not has_row:
+        return "warn"  # engine has never established a scan cycle
+    if completed_age_hours is not None:
+        return "fail" if completed_age_hours > fail_h else "ok"
+    # never completed a cycle: fail only if the current cycle started long ago.
+    if started_age_hours is not None and started_age_hours > fail_h:
+        return "fail"
+    return "ok"
+
+
+def _status_for_dirty(p95_hours: float | None, thresholds: dict[str, Any]) -> str:
+    if p95_hours is not None and p95_hours > thresholds["dirty_age_p95_warn_hours"]:
+        return "warn"
+    return "ok"
+
+
+def _status_for_candidates(p95_days: float | None, thresholds: dict[str, Any]) -> str:
+    if p95_days is not None and p95_days > thresholds["candidate_age_p95_warn_days"]:
+        return "warn"
+    return "ok"
+
+
+def _status_for_llm_errors(
+    per_called_for: list[dict[str, Any]],
+    credit_balance_errors: int,
+    thresholds: dict[str, Any],
+) -> tuple[str, list[str]]:
+    """Return (status, offending called_for keys). Fail on a credit-balance error
+    OR any called_for whose error rate exceeds the threshold with >= 20 calls."""
+    if credit_balance_errors > 0:
+        return "fail", []
+    warn_rate = thresholds["llm_error_rate_warn"]
+    offenders = [
+        c["called_for"]
+        for c in per_called_for
+        if c["total"] >= 20 and c["total"] > 0 and c["errors"] / c["total"] > warn_rate
+    ]
+    return ("fail" if offenders else "ok"), offenders
+
+
+# --- thresholds ------------------------------------------------------------
+
+
+def load_thresholds(conn: Any) -> dict[str, Any]:
+    """app_settings.pipeline_check_thresholds merged over the code defaults, so a
+    missing key (or a whole missing row) always resolves to the seeded default."""
+    merged = dict(DEFAULT_THRESHOLDS)
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT value FROM app_settings WHERE key = 'pipeline_check_thresholds'"
+        )
+        row = cur.fetchone()
+    raw = row[0] if row and row[0] is not None else None
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (TypeError, ValueError):
+            raw = None
+    if isinstance(raw, dict):
+        for k, v in raw.items():
+            if isinstance(v, (int, float)):
+                merged[k] = v
+    return merged
+
+
+def _fetchone(conn: Any, sql: str, params: Any = None) -> tuple[Any, ...] | None:
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute("SET LOCAL statement_timeout = '10min'")
+        cur.execute(sql, params or ())
+        return cur.fetchone()
+
+
+def _fetchall(conn: Any, sql: str, params: Any = None) -> list[tuple[Any, ...]]:
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute("SET LOCAL statement_timeout = '10min'")
+        cur.execute(sql, params or ())
+        return cur.fetchall()
+
+
+# --- checks ----------------------------------------------------------------
+
+# A pair of cross-source LISTINGS is suspect dedup debt when it shares the dedup
+# key, is price-comparable, isn't contradicted, and its two properties aren't
+# already merged or operator-dismissed. Counted at the PROPERTY-pair grain.
+_STREET_DEBT_SQL = """
+with pairs as (
+  select l1.property_id as pa, l2.property_id as pb,
+         l1.sreality_id as sa, l2.sreality_id as sb
+  from listings l1
+  join listings l2
+    on l1.obec_id = l2.obec_id
+   and l1.street_name_key = l2.street_name_key
+   and l1.disposition = l2.disposition
+   and l1.source <> l2.source
+   and l1.property_id < l2.property_id
+  where l1.is_active and l2.is_active
+    and l1.street is not null and l1.street <> '' and l1.disposition is not null
+    and l2.street is not null and l2.street <> ''
+    and l1.obec_id is not null and l1.street_name_key is not null
+    and l1.price_czk is not null and l2.price_czk is not null
+    and abs(l1.price_czk - l2.price_czk)
+        <= (%(price_pct)s / 100.0) * greatest(l1.price_czk, l2.price_czk)
+    and not (l1.house_number is not null and l2.house_number is not null
+             and lower(trim(l1.house_number)) <> lower(trim(l2.house_number)))
+    and not (l1.floor is not null and l2.floor is not null
+             and abs(l1.floor - l2.floor) >= 2)
+),
+filtered as (
+  select pr.pa, pr.pb, min(pr.sa) as sa, min(pr.sb) as sb
+  from pairs pr
+  join properties p1 on p1.id = pr.pa and p1.status = 'active'
+  join properties p2 on p2.id = pr.pb and p2.status = 'active'
+  where not exists (
+    select 1 from property_identity_candidates c
+    where c.left_property_id = least(pr.pa, pr.pb)
+      and c.right_property_id = greatest(pr.pa, pr.pb)
+      and c.status = 'dismissed'
+  )
+  group by pr.pa, pr.pb
+)
+select
+  (select count(*) from filtered) as cnt,
+  coalesce((
+    select jsonb_agg(jsonb_build_object(
+             'property_a', pa, 'property_b', pb,
+             'sreality_a', sa, 'sreality_b', sb))
+    from (select * from filtered order by pa, pb limit 20) s
+  ), '[]'::jsonb) as samples
+"""
+
+
+def check_street_debt(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]:
+    row = _fetchone(conn, _STREET_DEBT_SQL, {"price_pct": thresholds["street_debt_price_pct"]})
+    count = int(row[0]) if row and row[0] is not None else 0
+    samples = row[1] if row and row[1] is not None else []
+    status = _status_for_street_debt(count, thresholds)
+    return {
+        "check_key": "street_debt",
+        "status": status,
+        "value": count,
+        "details": {
+            "suspect_pairs": count,
+            "price_pct": thresholds["street_debt_price_pct"],
+            "warn_at": thresholds["street_debt_warn"],
+            "fail_at": thresholds["street_debt_fail"],
+            "samples": samples,
+        },
+        "message": (
+            f"Street-keyed dedup debt is {count:,} suspect cross-source byt/property "
+            f"pairs (> fail threshold {int(thresholds['street_debt_fail']):,}). The dedup "
+            f"engine is falling behind the market inflow."
+        ),
+    }
+
+
+_GEO_DEBT_SQL = """
+with pairs as (
+  select l1.property_id as pa, l2.property_id as pb,
+         l1.sreality_id as sa, l2.sreality_id as sb
+  from listings l1
+  join listings l2
+    on l1.obec_id = l2.obec_id
+   and round(st_y(l1.geom::geometry)::numeric, 4) = round(st_y(l2.geom::geometry)::numeric, 4)
+   and round(st_x(l1.geom::geometry)::numeric, 4) = round(st_x(l2.geom::geometry)::numeric, 4)
+   and l1.category_type = l2.category_type
+   and l1.source <> l2.source
+   and l1.property_id < l2.property_id
+  where l1.is_active and l2.is_active
+    and l1.category_main = any(%(nonbyt)s) and l2.category_main = any(%(nonbyt)s)
+    and l1.geom is not null and l2.geom is not null and l1.obec_id is not null
+    and l1.price_czk is not null and l2.price_czk is not null
+    and abs(l1.price_czk - l2.price_czk)
+        <= (%(price_pct)s / 100.0) * greatest(l1.price_czk, l2.price_czk)
+    and coalesce(l1.area_m2, l1.estate_area, l1.usable_area) is not null
+    and coalesce(l2.area_m2, l2.estate_area, l2.usable_area) is not null
+    and abs(coalesce(l1.area_m2, l1.estate_area, l1.usable_area)
+            - coalesce(l2.area_m2, l2.estate_area, l2.usable_area))
+        <= (%(area_pct)s / 100.0) * greatest(
+             coalesce(l1.area_m2, l1.estate_area, l1.usable_area),
+             coalesce(l2.area_m2, l2.estate_area, l2.usable_area))
+),
+filtered as (
+  select pr.pa, pr.pb, min(pr.sa) as sa, min(pr.sb) as sb
+  from pairs pr
+  join properties p1 on p1.id = pr.pa and p1.status = 'active'
+  join properties p2 on p2.id = pr.pb and p2.status = 'active'
+  where not exists (
+    select 1 from property_identity_candidates c
+    where c.left_property_id = least(pr.pa, pr.pb)
+      and c.right_property_id = greatest(pr.pa, pr.pb)
+      and c.status = 'dismissed'
+  )
+  group by pr.pa, pr.pb
+)
+select
+  (select count(*) from filtered) as cnt,
+  coalesce((
+    select jsonb_agg(jsonb_build_object(
+             'property_a', pa, 'property_b', pb,
+             'sreality_a', sa, 'sreality_b', sb))
+    from (select * from filtered order by pa, pb limit 20) s
+  ), '[]'::jsonb) as samples
+"""
+
+
+def check_geo_debt(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]:
+    row = _fetchone(conn, _GEO_DEBT_SQL, {
+        "nonbyt": list(_NONBYT),
+        "price_pct": thresholds["geo_debt_price_pct"],
+        "area_pct": thresholds["geo_debt_area_pct"],
+    })
+    count = int(row[0]) if row and row[0] is not None else 0
+    samples = row[1] if row and row[1] is not None else []
+    # value-only: a trend baseline (warn/fail on a rising count) needs history this
+    # check does not yet have, so the status stays 'ok' and the number is recorded
+    # for the /health sparkline until a threshold is calibrated.
+    return {
+        "check_key": "geo_debt",
+        "status": "ok",
+        "value": count,
+        "details": {
+            "suspect_pairs": count,
+            "area_pct": thresholds["geo_debt_area_pct"],
+            "price_pct": thresholds["geo_debt_price_pct"],
+            "note": "value-only; trend-based thresholds are future work",
+            "samples": samples,
+        },
+    }
+
+
+_FUNNEL_SQL = """
+select
+  l.source,
+  count(*) as total_active,
+  count(*) filter (where l.street is not null and l.street <> '') as with_street,
+  count(*) filter (where l.disposition is not null) as with_disposition,
+  count(*) filter (where l.geom is not null) as with_geom,
+  count(*) filter (where l.obec_id is not null) as with_obec,
+  count(*) filter (where l.street is not null and l.street <> ''
+                     and l.disposition is not null) as street_eligible,
+  count(*) filter (where l.geom is not null
+                     and l.category_main = any(%(nonbyt)s)) as geo_eligible
+from listings l
+where l.is_active = true
+group by l.source
+order by total_active desc
+"""
+
+
+def _pct(num: int, den: int) -> float:
+    return round(100.0 * num / den, 2) if den else 0.0
+
+
+def check_eligibility_funnel(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]:
+    rows = _fetchall(conn, _FUNNEL_SQL, {"nonbyt": list(_NONBYT)})
+    per_source: list[dict[str, Any]] = []
+    tot_active = tot_street_elig = 0
+    for (source, total, w_street, w_disp, w_geom, w_obec, street_elig, geo_elig) in rows:
+        total = int(total)
+        tot_active += total
+        tot_street_elig += int(street_elig)
+        per_source.append({
+            "source": source,
+            "total_active": total,
+            "pct_street": _pct(int(w_street), total),
+            "pct_disposition": _pct(int(w_disp), total),
+            "pct_geom": _pct(int(w_geom), total),
+            "pct_obec": _pct(int(w_obec), total),
+            "pct_street_eligible": _pct(int(street_elig), total),
+            "pct_geo_eligible": _pct(int(geo_elig), total),
+        })
+    overall = _pct(tot_street_elig, tot_active)
+    return {
+        "check_key": "eligibility_funnel",
+        "status": "ok",
+        "value": overall,
+        "details": {"overall_street_eligible_pct": overall,
+                    "total_active": tot_active, "per_source": per_source},
+    }
+
+
+_MERGE_LATENCY_SQL = """
+select
+  percentile_cont(0.5)  within group (order by hrs) as p50,
+  percentile_cont(0.95) within group (order by hrs) as p95,
+  count(*) as n
+from (
+  select extract(epoch from (d.run_at - least(l1.first_seen_at, l2.first_seen_at))) / 3600.0 as hrs
+  from dedup_pair_audit d
+  join listings l1 on l1.sreality_id = d.left_sreality_id
+  join listings l2 on l2.sreality_id = d.right_sreality_id
+  where d.outcome = 'merged' and d.source = 'engine'
+    and d.run_at > now() - interval '7 days'
+    and d.left_sreality_id is not null and d.right_sreality_id is not null
+) t
+where hrs is not null and hrs >= 0
+"""
+
+
+def check_merge_latency(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]:
+    row = _fetchone(conn, _MERGE_LATENCY_SQL)
+    p50 = float(row[0]) if row and row[0] is not None else None
+    p95 = float(row[1]) if row and row[1] is not None else None
+    n = int(row[2]) if row and row[2] is not None else 0
+    status = _status_for_merge_latency(p95, thresholds)
+    return {
+        "check_key": "merge_latency",
+        "status": status,
+        "value": round(p95, 2) if p95 is not None else None,
+        "details": {
+            "p50_hours": round(p50, 2) if p50 is not None else None,
+            "p95_hours": round(p95, 2) if p95 is not None else None,
+            "merges_7d": n,
+            "warn_at_hours": thresholds["merge_p95_warn_hours"],
+        },
+    }
+
+
+_ENGINE_HEALTH_SQL = """
+select
+  (select last_cycle_completed_at from dedup_scan_state where lane = 'street') as last_completed,
+  (select cycle_started_at        from dedup_scan_state where lane = 'street') as cycle_started,
+  (select (count(*) > 0) from dedup_scan_state where lane = 'street') as has_row,
+  (select percentile_cont(0.95) within group (order by extract(epoch from (now() - marked_at)) / 3600.0)
+     from dedup_dirty_properties) as dirty_p95_hours,
+  (select percentile_cont(0.95) within group (order by extract(epoch from (now() - created_at)) / 86400.0)
+     from property_identity_candidates where status = 'proposed') as cand_p95_days,
+  (select count(*) from dedup_dirty_properties) as dirty_n,
+  (select count(*) from property_identity_candidates where status = 'proposed') as proposed_n
+"""
+
+
+def _age_hours(ts: Any) -> float | None:
+    if ts is None:
+        return None
+    now = _dt.datetime.now(_dt.timezone.utc)
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=_dt.timezone.utc)
+    return (now - ts).total_seconds() / 3600.0
+
+
+def check_engine_health(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]:
+    row = _fetchone(conn, _ENGINE_HEALTH_SQL)
+    last_completed, cycle_started, has_row, dirty_p95, cand_p95, dirty_n, proposed_n = (
+        row if row else (None, None, False, None, None, 0, 0)
+    )
+    completed_age = _age_hours(last_completed)
+    started_age = _age_hours(cycle_started)
+    cycle_status = _status_for_cycle(
+        has_row=bool(has_row), completed_age_hours=completed_age,
+        started_age_hours=started_age, thresholds=thresholds,
+    )
+    dirty_p95_h = float(dirty_p95) if dirty_p95 is not None else None
+    cand_p95_d = float(cand_p95) if cand_p95 is not None else None
+    dirty_status = _status_for_dirty(dirty_p95_h, thresholds)
+    cand_status = _status_for_candidates(cand_p95_d, thresholds)
+    status = _worst([cycle_status, dirty_status, cand_status])
+    return {
+        "check_key": "engine_health",
+        "status": status,
+        "value": round(completed_age, 2) if completed_age is not None else None,
+        "details": {
+            "cycle_status": cycle_status,
+            "last_cycle_completed_at": last_completed.isoformat() if last_completed else None,
+            "cycle_completed_age_hours": round(completed_age, 2) if completed_age is not None else None,
+            "cycle_started_age_hours": round(started_age, 2) if started_age is not None else None,
+            "cycle_age_fail_hours": thresholds["cycle_age_fail_hours"],
+            "dirty_status": dirty_status,
+            "dirty_queue_n": int(dirty_n or 0),
+            "dirty_age_p95_hours": round(dirty_p95_h, 2) if dirty_p95_h is not None else None,
+            "dirty_age_p95_warn_hours": thresholds["dirty_age_p95_warn_hours"],
+            "candidate_status": cand_status,
+            "proposed_candidates_n": int(proposed_n or 0),
+            "candidate_age_p95_days": round(cand_p95_d, 2) if cand_p95_d is not None else None,
+            "candidate_age_p95_warn_days": thresholds["candidate_age_p95_warn_days"],
+        },
+        "message": (
+            "Dedup engine health is failing: the street full-scan cycle has not "
+            f"completed within {thresholds['cycle_age_fail_hours']}h "
+            f"(cycle_status={cycle_status}). New cross-portal listings are not being "
+            "de-duplicated on time."
+        ),
+    }
+
+
+_LLM_ERRORS_SQL = """
+select called_for,
+       count(*) as total,
+       count(*) filter (where error is not null) as errors
+from llm_calls
+where called_at > now() - interval '24 hours'
+group by called_for
+order by total desc
+"""
+
+_LLM_CREDIT_SQL = """
+select count(*) from llm_calls
+where called_at > now() - interval '24 hours' and error ilike %s
+"""
+
+
+def check_llm_errors(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]:
+    rows = _fetchall(conn, _LLM_ERRORS_SQL)
+    credit_row = _fetchone(conn, _LLM_CREDIT_SQL, ("%credit balance%",))
+    credit_errors = int(credit_row[0]) if credit_row and credit_row[0] is not None else 0
+
+    per_called_for: list[dict[str, Any]] = []
+    tot = err = 0
+    for (called_for, total, errors) in rows:
+        total, errors = int(total), int(errors)
+        tot += total
+        err += errors
+        per_called_for.append({
+            "called_for": called_for, "total": total, "errors": errors,
+            "rate": round(errors / total, 4) if total else 0.0,
+        })
+    overall_rate = round(err / tot, 4) if tot else 0.0
+    status, offenders = _status_for_llm_errors(per_called_for, credit_errors, thresholds)
+
+    if credit_errors > 0:
+        message = (
+            f"LLM calls are failing with credit-balance errors ({credit_errors} in 24h) — "
+            "the Anthropic account is out of credit. Every paid LLM path (dedup vision, "
+            "estimations, summaries, condition scoring) is down."
+        )
+    else:
+        message = (
+            f"LLM error rate exceeded {thresholds['llm_error_rate_warn']:.0%} for: "
+            f"{', '.join(offenders)} (24h window, >= 20 calls) — the provider is erroring."
+        )
+    return {
+        "check_key": "llm_errors",
+        "status": status,
+        "value": overall_rate,
+        "details": {
+            "overall_rate": overall_rate,
+            "credit_balance_errors": credit_errors,
+            "warn_rate": thresholds["llm_error_rate_warn"],
+            "offending_called_for": offenders,
+            "per_called_for": per_called_for,
+        },
+        "message": message,
+    }
+
+
+_PRECISION_SAMPLE_SQL = """
+select id, run_at, left_sreality_id, right_sreality_id,
+       left_property_id, right_property_id, category_main, stage, detail
+from dedup_pair_audit
+where source = 'engine' and outcome = 'merged'
+  and run_at > now() - interval '7 days'
+order by random()
+limit %(n)s
+"""
+
+
+def check_merge_precision_sample(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]:
+    n = int(thresholds["precision_sample_n"])
+    rows = _fetchall(conn, _PRECISION_SAMPLE_SQL, {"n": n})
+    samples = [{
+        "audit_id": int(r[0]),
+        "run_at": r[1].isoformat() if r[1] else None,
+        "sreality_a": r[2], "sreality_b": r[3],
+        "property_a": r[4], "property_b": r[5],
+        "category_main": r[6], "stage": r[7], "detail": r[8],
+    } for r in rows]
+    return {
+        "check_key": "merge_precision_sample",
+        "status": "ok",
+        "value": len(samples),
+        "details": {"sampled": len(samples), "requested": n, "samples": samples},
+    }
+
+
+_CHECKS: list[tuple[str, Callable[[Any, dict[str, Any]], dict[str, Any]]]] = [
+    ("street_debt", check_street_debt),
+    ("geo_debt", check_geo_debt),
+    ("eligibility_funnel", check_eligibility_funnel),
+    ("merge_latency", check_merge_latency),
+    ("engine_health", check_engine_health),
+    ("llm_errors", check_llm_errors),
+]
+
+_WEEKLY_CHECKS: list[tuple[str, Callable[[Any, dict[str, Any]], dict[str, Any]]]] = [
+    ("merge_precision_sample", check_merge_precision_sample),
+]
+
+
+def run_checks(
+    conn: Any, thresholds: dict[str, Any], *, weekly: bool = False,
+) -> list[dict[str, Any]]:
+    """Run every check in isolation — a raising check becomes a `fail` row carrying
+    the error, so one broken check never aborts the run."""
+    results: list[dict[str, Any]] = []
+    checks = list(_CHECKS) + (list(_WEEKLY_CHECKS) if weekly else [])
+    for key, fn in checks:
+        try:
+            results.append(fn(conn, thresholds))
+        except Exception as exc:  # noqa: BLE001
+            LOG.exception("check %s errored", key)
+            results.append({
+                "check_key": key,
+                "status": "fail",
+                "value": None,
+                "details": {"error": str(exc)},
+                "message": f"Pipeline verification check '{key}' errored: {exc}",
+            })
+    return results
+
+
+def write_results(
+    conn: Any, results: list[dict[str, Any]], run_at: _dt.datetime,
+) -> int:
+    """Persist one row per check and ring the bell for each `fail`. Returns the
+    number of alerts emitted."""
+    alerts = 0
+    with conn.cursor() as cur:
+        for r in results:
+            cur.execute(
+                "INSERT INTO pipeline_check_results (run_at, check_key, status, value, details) "
+                "VALUES (%s, %s, %s, %s, %s::jsonb)",
+                (run_at, r["check_key"], r["status"],
+                 r.get("value"), json.dumps(r.get("details") or {})),
+            )
+    for r in results:
+        if r["status"] == "fail":
+            msg = r.get("message") or f"Pipeline check '{r['check_key']}' failed."
+            if emit_system_alert(conn, r["check_key"], msg):
+                alerts += 1
+    return alerts
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Compute + log, write nothing (no result rows, no alerts).")
+    parser.add_argument("--weekly", action="store_true",
+                        help="Also emit the weekly merge-precision sample.")
+    parser.add_argument("--verbose", action="store_true")
+    args = parser.parse_args()
+
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
+
+    if not os.environ.get("SUPABASE_DB_URL"):
+        print("ERROR: SUPABASE_DB_URL is not set.", file=sys.stderr)
+        return 2
+
+    run_at = _dt.datetime.now(_dt.timezone.utc)
+    with connect() as conn:
+        thresholds = load_thresholds(conn)
+        results = run_checks(conn, thresholds, weekly=args.weekly)
+        for r in results:
+            LOG.info("CHECK %s status=%s value=%s", r["check_key"], r["status"], r.get("value"))
+        if args.dry_run:
+            LOG.info("dry-run: %d checks computed, no rows written", len(results))
+            return 0
+        alerts = write_results(conn, results, run_at)
+    LOG.info("verify_pipeline wrote %d rows, emitted %d alerts", len(results), alerts)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

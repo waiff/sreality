@@ -139,6 +139,11 @@ def main() -> int:
              "FAILED within --max-idle-hours (default 3) — a provider outage. A single "
              "credit-balance error alarms immediately regardless of this floor.",
     )
+    parser.add_argument(
+        "--notify", action="store_true",
+        help="On a STALLED assessment, also ring the in-app bell "
+             "(emit_system_alert 'llm_health') before exiting non-zero.",
+    )
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -177,9 +182,25 @@ def main() -> int:
     )
     if stalled:
         LOG.error("LLM_HEALTH %s", message)
+        if args.notify:
+            _notify_stalled(db_url, message)
         return 1
     LOG.info("LLM_HEALTH %s", message)
     return 0
+
+
+def _notify_stalled(db_url: str, message: str) -> None:
+    """Ring the in-app bell for a stalled pipeline. Best-effort — a notify failure
+    must never mask the exit-1 signal that GitHub already surfaces."""
+    import psycopg
+
+    from toolkit.system_alerts import emit_system_alert
+
+    try:
+        with psycopg.connect(db_url, autocommit=True, prepare_threshold=None) as conn:
+            emit_system_alert(conn, "llm_health", message)
+    except Exception as exc:  # noqa: BLE001
+        LOG.warning("LLM_HEALTH notify failed: %s", exc)
 
 
 def _recent_failures(conn: Any, *, hours: float) -> tuple[int, bool]:
