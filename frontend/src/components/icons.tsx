@@ -62,6 +62,27 @@ export function TrashIcon({ className = 'h-4 w-4', strokeWidth = 1.6 }: IconProp
   );
 }
 
+/* Triangle-exclamation — a system/health alert (the Notifications feed's
+ * system_health rows). Decorative; the surrounding row carries the label. */
+export function AlertIcon({ className = 'h-4 w-4', strokeWidth = 1.75 }: IconProps) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      className={className}
+      aria-hidden
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={strokeWidth}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M10.3 3.2 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.2a2 2 0 0 0-3.4 0Z" />
+      <line x1="12" y1="9.5" x2="12" y2="14" />
+      <circle cx="12" cy="17.2" r="0.6" fill="currentColor" stroke="none" />
+    </svg>
+  );
+}
+
 export function InfoIcon({ className = 'h-3.5 w-3.5', strokeWidth = 1.75 }: IconProps) {
   return (
     <svg

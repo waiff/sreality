@@ -24,6 +24,7 @@ import { listingPath } from '@/lib/listingUrl';
 import { usePageTitle } from '@/lib/pageTitle';
 import { fmtAbsolute, fmtCount, fmtCzk, fmtRelative } from '@/lib/format';
 import { listingKindLabel } from '@/lib/enums';
+import { AlertIcon } from '@/components/icons';
 import type {
   NotificationSourceKind,
   WatchdogDispatch,
@@ -44,12 +45,14 @@ const CHANGE_META: Record<string, { label: string; dot: string }> = {
   reactivated:   { label: 'Relisted',      dot: 'var(--color-copper)' },
   new_source:    { label: 'New source',    dot: 'var(--color-copper)' },
   broker_change: { label: 'Broker change', dot: 'var(--color-ink-3)' },
+  system_alert:  { label: 'System alert',  dot: 'var(--color-brick)' },
 };
 
 const SOURCE_TABS: ReadonlyArray<{ key: SourceFilter; label: string }> = [
   { key: 'all', label: 'All' },
   { key: 'collection_monitor', label: 'Monitoring' },
   { key: 'watchdog', label: 'Watchdogs' },
+  { key: 'system_health', label: 'System' },
 ];
 
 const SEEN_TABS: ReadonlyArray<{ key: WatchdogSeenFilter; label: string }> = [
@@ -207,7 +210,19 @@ function Tabs<T extends string>({
   );
 }
 
+/* One feed row. system_health alerts have no listing subject, so they render as
+ * a text/alert row (SystemNotificationRow); watchdog + collection_monitor rows
+ * render the listing card. Split into two components so each calls its hooks
+ * unconditionally (rules-of-hooks) — the dispatcher itself uses none. */
 function NotificationRow({ dispatch: d }: { dispatch: WatchdogDispatch }) {
+  return d.source_kind === 'system_health' ? (
+    <SystemNotificationRow dispatch={d} />
+  ) : (
+    <StandardNotificationRow dispatch={d} />
+  );
+}
+
+function StandardNotificationRow({ dispatch: d }: { dispatch: WatchdogDispatch }) {
   const qc = useQueryClient();
   const unread = d.seen_at == null;
   const meta = CHANGE_META[d.change_kind] ?? {
@@ -285,6 +300,60 @@ function NotificationRow({ dispatch: d }: { dispatch: WatchdogDispatch }) {
         {fmtRelative(d.dispatched_at)}
       </span>
     </Link>
+  );
+}
+
+/* system_health alert: no listing subject or deep-link — the payload is the
+ * `message` text (change_kind='system_alert'). Rendered as a full-width button
+ * so clicking the row acknowledges it (marks seen), mirroring how the listing
+ * rows mark seen on click-through. Red dot + AlertIcon signal severity. */
+function SystemNotificationRow({ dispatch: d }: { dispatch: WatchdogDispatch }) {
+  const qc = useQueryClient();
+  const unread = d.seen_at == null;
+
+  const markSeen = useMutation({
+    mutationFn: () => markWatchdogDispatchSeen(d.id),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: notificationKeys.all });
+    },
+  });
+
+  return (
+    <button
+      type="button"
+      onClick={() => {
+        if (unread) markSeen.mutate();
+      }}
+      className="w-full text-left flex items-start gap-3 py-3.5"
+    >
+      {/* unread dot — brick for a system alert */}
+      <span className="mt-1.5 w-1.5 shrink-0">
+        {unread && (
+          <span
+            className="block w-1.5 h-1.5 rounded-full"
+            style={{ background: 'var(--color-brick)' }}
+            aria-label="unread"
+          />
+        )}
+      </span>
+
+      {/* system chip */}
+      <span className="mt-0.5 inline-flex items-center gap-1.5 shrink-0 px-2 py-0.5 text-[0.7rem] rounded-[var(--radius-sm)] border border-[var(--color-brick)]/30 bg-[var(--color-brick-soft)] text-[var(--color-brick)]">
+        <AlertIcon className="h-3 w-3" />
+        System
+      </span>
+
+      <p className="min-w-0 flex-1 text-sm text-[var(--color-ink)] whitespace-pre-line break-words">
+        {d.message ?? 'System alert'}
+      </p>
+
+      <span
+        className="shrink-0 text-[0.7rem] tracking-wide text-[var(--color-ink-4)] cursor-help mt-0.5"
+        title={fmtAbsolute(d.dispatched_at)}
+      >
+        {fmtRelative(d.dispatched_at)}
+      </span>
+    </button>
   );
 }
 

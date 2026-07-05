@@ -21,10 +21,26 @@ import {
   fetchWorkflowFailureSummary,
   fetchScraperHealthChecks,
   fetchDedupEngineRuns,
+  fetchPublicationGateHealth,
+  fetchPipelineChecks,
   type DedupEngineRun,
   type WorkflowFailureSummaryRow,
+  type PublicationGateRow,
+  type PipelineCheckRow,
 } from '@/lib/queries';
 import { assessDirtyQueue } from '@/lib/dedupQueueHealth';
+import {
+  assessPublicationGate,
+  type PublicationGateStatus,
+} from '@/lib/publicationHealth';
+import {
+  normalizePipelineStatus,
+  pipelineCheckLabel,
+  pipelineCheckValueLabel,
+  sortPipelineChecks,
+  summarizePipelineChecks,
+  type PipelineCheckStatus,
+} from '@/lib/pipelineChecks';
 import { categoryMainLabelPlural, categoryTypeLabel } from '@/lib/enums';
 import GrainToggle from '@/components/GrainToggle';
 import type {
@@ -132,6 +148,8 @@ function Body({ data }: { data: HealthSummary }) {
 
   return (
     <div className="mt-5 space-y-6">
+      <PublicationPipelineSection />
+
       <PortalLedger />
 
       <section>
@@ -703,6 +721,216 @@ function DedupQueueBanner() {
 }
 
 /* -------------------------------------------------------------------------- */
+/* Scrape → publish: the dedup-aware publication gate (migration 273) + the     */
+/* dedup pipeline verification checks (migration 274).                          */
+/*                                                                            */
+/* The publication gate is the operator's headline "is new inventory reaching  */
+/* Browse" signal: new properties stay hidden until dedup evaluates them, and   */
+/* the gate has NO auto-publish timeout — so a rising unpublished backlog is    */
+/* the ONLY surface for a dedup stall. Placed first, above Data sources.        */
+/* -------------------------------------------------------------------------- */
+
+const PUB_STATUS: Record<
+  PublicationGateStatus,
+  { dot: string; pill: string; label: string }
+> = {
+  ok: { dot: 'var(--color-sage)', pill: 'bg-[var(--color-sage-soft)] text-[var(--color-sage)]', label: 'OK' },
+  warn: { dot: 'var(--color-ochre)', pill: 'bg-[var(--color-ochre-soft)] text-[var(--color-ochre)]', label: 'Watch' },
+  danger: { dot: 'var(--color-brick)', pill: 'bg-[var(--color-brick-soft)] text-[var(--color-brick)]', label: 'Problem' },
+};
+
+const PIPELINE_DOT: Record<PipelineCheckStatus, string> = {
+  ok: 'var(--color-sage)',
+  warn: 'var(--color-ochre)',
+  fail: 'var(--color-brick)',
+};
+
+function PublicationPipelineSection() {
+  const checksQuery = useQuery<PipelineCheckRow[], Error>({
+    queryKey: ['pipeline-checks'],
+    queryFn: fetchPipelineChecks,
+    refetchInterval: 60_000,
+    staleTime: 30_000,
+  });
+  const checks = checksQuery.data ?? [];
+  const summary = summarizePipelineChecks(checks);
+
+  return (
+    <section>
+      <SectionHeading>Scrape → publish</SectionHeading>
+      <div className="mt-3 grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <Card label="Publikace · publication gate">
+          <PublicationGatePanel />
+        </Card>
+        <Card
+          label="Kontroly pipeline"
+          accessory={
+            <PipelineChecksBadge
+              fail={summary.fail}
+              warn={summary.warn}
+              hasData={checks.length > 0}
+            />
+          }
+        >
+          <PipelineChecksPanel
+            rows={checksQuery.data}
+            isLoading={checksQuery.isLoading}
+            error={checksQuery.error}
+          />
+        </Card>
+      </div>
+    </section>
+  );
+}
+
+function PublicationGatePanel() {
+  const q = useQuery<PublicationGateRow, Error>({
+    queryKey: ['publication-gate-health'],
+    queryFn: fetchPublicationGateHealth,
+    refetchInterval: 60_000,
+    staleTime: 30_000,
+  });
+  if (q.error) {
+    return (
+      <p className="text-sm text-[var(--color-brick)]">
+        publication_gate_health failed: {q.error.message}
+      </p>
+    );
+  }
+  if (q.isLoading && !q.data) {
+    return <p className="text-sm text-[var(--color-ink-4)]">Loading…</p>;
+  }
+  if (!q.data) return null;
+
+  const h = assessPublicationGate(q.data);
+  const s = PUB_STATUS[h.status];
+  const ratioText =
+    h.ratioPct == null ? '—' : `${h.ratioPct.toFixed(h.ratioPct < 1 ? 2 : 1)}%`;
+
+  return (
+    <div>
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <p
+            className="font-mono tabular-nums text-[2rem] leading-none tracking-tight"
+            style={{ color: h.status === 'ok' ? 'var(--color-ink)' : s.dot }}
+          >
+            {fmtCount(h.unpublished)}
+          </p>
+          <p className="mt-1 text-[0.6rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)]">
+            unpublished
+          </p>
+        </div>
+        <span
+          className={
+            'inline-flex items-center gap-1.5 px-1.5 py-0.5 rounded-[var(--radius-xs)] text-[0.6rem] uppercase tracking-wide font-medium ' +
+            s.pill
+          }
+        >
+          <span className="h-1.5 w-1.5 rounded-full" style={{ backgroundColor: s.dot }} />
+          {s.label}
+        </span>
+      </div>
+
+      <div className="mt-4 flex items-baseline gap-x-8 gap-y-2 flex-wrap">
+        <PortalStat label="podíl z aktivních" value={ratioText} />
+        <PortalStat
+          label="nejstarší"
+          value={h.oldestUnpublishedAt ? fmtRelative(h.oldestUnpublishedAt) : '—'}
+          title={h.oldestUnpublishedAt ? fmtAbsolute(h.oldestUnpublishedAt) : undefined}
+        />
+        <PortalStat label="active total" value={fmtCount(h.activeTotal)} />
+      </div>
+
+      <p className="mt-4 text-xs text-[var(--color-ink-3)] leading-snug">
+        New listings publish to Browse only after the dedup engine evaluates
+        them; a rising count means a dedup stall (the gate has no auto-publish
+        timeout).
+      </p>
+    </div>
+  );
+}
+
+function PipelineChecksBadge({
+  fail,
+  warn,
+  hasData,
+}: {
+  fail: number;
+  warn: number;
+  hasData: boolean;
+}) {
+  if (!hasData) return null;
+  const base =
+    'inline-flex items-center px-1.5 py-0.5 rounded-[var(--radius-xs)] text-[0.6rem] uppercase tracking-wide font-medium ';
+  if (fail > 0) {
+    return <span className={base + 'bg-[var(--color-brick-soft)] text-[var(--color-brick)]'}>{fail} fail</span>;
+  }
+  if (warn > 0) {
+    return <span className={base + 'bg-[var(--color-ochre-soft)] text-[var(--color-ochre)]'}>{warn} watch</span>;
+  }
+  return <span className={base + 'bg-[var(--color-sage-soft)] text-[var(--color-sage)]'}>OK</span>;
+}
+
+function PipelineChecksPanel({
+  rows,
+  isLoading,
+  error,
+}: {
+  rows: PipelineCheckRow[] | undefined;
+  isLoading: boolean;
+  error: Error | null;
+}) {
+  if (error) {
+    return (
+      <p className="text-sm text-[var(--color-brick)]">
+        pipeline_checks failed: {error.message}
+      </p>
+    );
+  }
+  if (isLoading && !rows) {
+    return <p className="text-sm text-[var(--color-ink-4)]">Loading…</p>;
+  }
+  if (!rows || rows.length === 0) {
+    return (
+      <p className="text-sm text-[var(--color-ink-4)]">
+        No pipeline checks recorded yet.
+      </p>
+    );
+  }
+
+  const sorted = sortPipelineChecks(rows);
+  return (
+    <ul className="space-y-1.5">
+      {sorted.map((c) => {
+        const st = normalizePipelineStatus(c.status);
+        return (
+          <li key={c.check_key} className="flex items-center gap-3 text-sm">
+            <span
+              className="h-2 w-2 rounded-full shrink-0"
+              style={{ backgroundColor: PIPELINE_DOT[st] }}
+              title={st}
+            />
+            <span className="text-[var(--color-ink)] flex-1 truncate" title={c.check_key}>
+              {pipelineCheckLabel(c.check_key)}
+            </span>
+            <span className="font-mono tabular-nums text-[var(--color-ink-2)] whitespace-nowrap">
+              {pipelineCheckValueLabel(c.check_key, c.value)}
+            </span>
+            <span
+              className="shrink-0 tabular-nums text-[0.7rem] text-[var(--color-ink-4)] w-16 text-right cursor-help"
+              title={c.run_at ? fmtAbsolute(c.run_at) : undefined}
+            >
+              {c.run_at ? fmtRelative(c.run_at) : '—'}
+            </span>
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
 /* Per-category table + reconciliation (one row per category)                 */
 /*                                                                            */
 /* Folds the old 6-tile grid and the separate Count-Reconciliation table into */
@@ -1046,16 +1274,21 @@ function TrendChart({
 
 function Card({
   label,
+  accessory,
   children,
 }: {
   label: string;
+  accessory?: ReactNode;
   children: ReactNode;
 }) {
   return (
     <section className="rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] px-5 py-4">
-      <h3 className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)] font-medium">
-        {label}
-      </h3>
+      <div className="flex items-baseline justify-between gap-3">
+        <h3 className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)] font-medium">
+          {label}
+        </h3>
+        {accessory}
+      </div>
       <div className="mt-3">{children}</div>
     </section>
   );
