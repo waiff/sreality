@@ -363,10 +363,16 @@ def _proposed_candidate_property_ids(conn: Any) -> set[int]:
 _DEDUP_DIRTY_TTL_HOURS = 24  # the eviction horizon; evicted rows fall to the full scan's frontier
 
 
-def _claim_dedup_dirty(conn: Any, cutoff: Any, limit: int | None = None) -> set[int]:
-    """Property ids dirtied at/before `cutoff` (claim slice), NEWEST-FIRST. A row re-dirtied
-    AFTER cutoff (marked_at > cutoff via a writer's ON CONFLICT) is neither claimed nor cleared —
-    it survives to the next pass (race-free + terminating, mirrors recompute's dirty drain).
+def _claim_dedup_dirty(conn: Any, cutoff: Any, limit: int | None = None) -> list[int]:
+    """Property ids dirtied at/before `cutoff` (claim slice), NEWEST-FIRST — an ORDERED
+    list, and the order is load-bearing: run_engine processes the claimed groups in this
+    rank (priority_property_order), so the queue head actually advances every run. (The
+    claim was historically returned as a set, which discarded the ORDER BY — groups then
+    processed in load order, i.e. obec-ASC, and the same head-of-list groups cleared every
+    run while the claimed-newest starved: claimed ~600 / cleared ~40, hourly, for days.)
+    A row re-dirtied AFTER cutoff (marked_at > cutoff via a writer's ON CONFLICT) is
+    neither claimed nor cleared — it survives to the next pass (race-free + terminating,
+    mirrors recompute's dirty drain).
 
     `limit` bounds the slice to the N FRESHEST dirty properties. The drain MUST be bounded like
     every sibling drain (a backlog can spike on a portal launch), and it claims NEWEST-first so
@@ -380,7 +386,21 @@ def _claim_dedup_dirty(conn: Any, cutoff: Any, limit: int | None = None) -> set[
         params.append(limit)
     with conn.cursor() as cur:
         cur.execute(sql, params)
-        return {int(r[0]) for r in cur.fetchall()}
+        return [int(r[0]) for r in cur.fetchall()]
+
+
+def _dirty_queue_age_p95_seconds(conn: Any, cutoff: Any) -> int | None:
+    """p95 age of the WHOLE dirty queue at claim time — the starvation gauge (a rising
+    p95 with dirty_pruned=0 means the drain+full-scan handoff is falling behind)."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT percentile_cont(0.95) WITHIN GROUP "
+            "(ORDER BY extract(epoch FROM (now() - marked_at))) "
+            "FROM dedup_dirty_properties WHERE marked_at <= %s",
+            (cutoff,),
+        )
+        row = cur.fetchone()
+    return int(row[0]) if row and row[0] is not None else None
 
 
 def _prune_stale_dedup_dirty(conn: Any, ttl_hours: int = _DEDUP_DIRTY_TTL_HOURS) -> int:
@@ -1772,6 +1792,7 @@ def run_engine(
     restrict_street_groups: tuple[set[int], set[tuple[int, str]]] | None = None,
     only_groups_with_property_ids: set[int] | None = None,
     resolved_property_ids: set[int] | None = None,
+    priority_property_order: list[int] | None = None,
     scan_cursor: str | None = None,
     cursor_out: dict[str, Any] | None = None,
     geo: bool = False,
@@ -1934,6 +1955,14 @@ def run_engine(
             ordered_keys = after
     else:
         ordered_keys = list(groups)
+        if priority_property_order is not None:
+            # Dirty drain: process groups in CLAIM order (newest dirty property first),
+            # so a deadline-cut run spends its budget on the queue head — the real-time
+            # SLO pairs — instead of whatever fell first in load (obec-ASC) order.
+            rank = {pid: i for i, pid in enumerate(priority_property_order)}
+            worst = len(rank)
+            ordered_keys.sort(key=lambda k: min(
+                (rank.get(m.property_id, worst) for m in groups[k]), default=worst))
 
     def finalize() -> dict[str, int]:
         # Resolve every candidate the engine acted on this run (no-op for pairs
@@ -2351,13 +2380,14 @@ def _clip_settings(conn: Any) -> dict[str, Any]:
 
 
 def _write_run_row(conn: Any, stats: dict[str, int], *, run_kind: str,
-                   started_at: Any) -> None:
+                   started_at: Any, runner: str = "actions") -> None:
     """One run row at end of run. `run_kind` ('full' | 'candidates' | 'dirty') and the
     run-level `truncated` (stats['truncated'], stamped on EVERY row — migration 262) are
     what make a chronically deadline-cut FULL SCAN visible: the 2026-07 audit found every
     6h scan silently covering ~9% of the market with nothing recording it. `started_at`
-    is the real run start (the column default otherwise equals ended_at — no durations)."""
-    params = {**stats, "run_kind": run_kind, "started_at": started_at,
+    is the real run start (the column default otherwise equals ended_at — no durations).
+    `runner` distinguishes GH Actions runs from the realtime worker's dedup lane."""
+    params = {**stats, "run_kind": run_kind, "started_at": started_at, "runner": runner,
               "truncated": int(stats.get("truncated", 0) or 0)}
     with conn.cursor() as cur:
         cur.execute(
@@ -2371,7 +2401,7 @@ def _write_run_row(conn: Any, stats: dict[str, int], *, run_kind: str,
                 dirty_queue_depth, dirty_claimed, dirty_cleared, dirty_truncated,
                 skipped_unresolved, skipped_oversized, oversized_groups, vision_errors,
                 truncated_cause, scan_groups_total, scan_groups_scanned,
-                dirty_age_p95_seconds, dirty_pruned
+                dirty_age_p95_seconds, dirty_pruned, runner
             ) VALUES (%(started_at)s, now(), %(run_kind)s, %(truncated)s,
                 %(eligible)s, %(flagged_location)s, %(flagged_disposition)s,
                 %(pairs_considered)s, %(rejected)s, %(auto_address)s, %(auto_phash)s,
@@ -2382,10 +2412,88 @@ def _write_run_row(conn: Any, stats: dict[str, int], *, run_kind: str,
                 %(dirty_cleared)s, %(dirty_truncated)s,
                 %(skipped_unresolved)s, %(skipped_oversized)s, %(oversized_groups)s,
                 %(vision_errors)s, %(truncated_cause)s, %(scan_groups_total)s,
-                %(scan_groups_scanned)s, %(dirty_age_p95_seconds)s, %(dirty_pruned)s)
+                %(scan_groups_scanned)s, %(dirty_age_p95_seconds)s, %(dirty_pruned)s,
+                %(runner)s)
             """,
             params,
         )
+
+
+def run_dirty_pass(
+    conn: Any, *, max_dirty: int, max_pairs: int, engine_kw: dict[str, Any],
+    runner: str = "actions", shadow: bool = False, started_at: Any = None,
+    stamp_stats: Any = None,
+) -> dict[str, int] | None:
+    """One bounded real-time dirty pass: prune → claim (newest-first) → scoped load →
+    resolve in CLAIM order → incremental clear → run row. The reusable core shared by
+    the GH Actions --dirty cron and the realtime worker's dedup lane (`runner` tags the
+    row). Returns the run stats, or None when the queue was empty — no run row is
+    written then, so a worker polling every minute never spams dedup_engine_runs.
+
+    `engine_kw` is the shared run_engine configuration (vision fns, budgets, flags) the
+    caller assembled; `stamp_stats` lets the caller fold its own counters (clip
+    classifications, vision errors) into the stats before the row is written."""
+    from datetime import datetime, timezone
+
+    pruned = _prune_stale_dedup_dirty(conn)
+    if pruned:
+        LOG.info("DIRTY drain: pruned %d stale rows (older than %dh)",
+                 pruned, _DEDUP_DIRTY_TTL_HOURS)
+    with conn.cursor() as cur:
+        cur.execute("SELECT now()")
+        cutoff = cur.fetchone()[0]
+    claimed = _claim_dedup_dirty(conn, cutoff, limit=max_dirty)
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM dedup_dirty_properties")
+        queue_depth = int(cur.fetchone()[0])
+    LOG.info("DIRTY drain: %d claimed (cap=%d, queue depth=%d)",
+             len(claimed), max_dirty, queue_depth)
+    if not claimed:
+        return None
+    age_p95 = _dirty_queue_age_p95_seconds(conn, cutoff)
+    only_groups = set(claimed)
+    # Scope the eligible LOAD to the claimed properties' street groups (O(dirty), not
+    # O(market)) via the STORED street_name_key. The peers in those groups are loaded
+    # too, so a dirty property still re-decides against its whole group; only_groups
+    # keeps the RESOLVE filtered to dirty-containing groups — the correctness gate the
+    # scoped load is layered under.
+    dirty_street_groups = _claimed_street_groups(conn, only_groups)
+    LOG.info("DIRTY drain: scoped load to %d street-id + %d name groups",
+             len(dirty_street_groups[0]), len(dirty_street_groups[1]))
+    pair_audit: list[dict[str, Any]] = []
+    dirty_resolved: set[int] = set()
+    stats = run_engine(
+        conn, audit=pair_audit, max_pairs=max_pairs,
+        only_groups_with_property_ids=only_groups,
+        restrict_street_groups=dirty_street_groups,
+        resolved_property_ids=dirty_resolved,
+        priority_property_order=claimed,
+        **engine_kw,
+    )
+    if stamp_stats is not None:
+        stamp_stats(stats)
+    # Queue-health gauges (migrations 255/258/271): depth + slice at run start, whole-queue
+    # age p95 (the starvation signal), and rows the TTL prune evicted this pass.
+    stats["dirty_queue_depth"] = queue_depth
+    stats["dirty_claimed"] = len(claimed)
+    stats["dirty_age_p95_seconds"] = age_p95
+    stats["dirty_pruned"] = pruned
+    if not shadow:
+        # INCREMENTAL clear: drop exactly the claimed properties whose EVERY street
+        # group was fully scanned this run (`dirty_resolved`, tracked per-group in
+        # run_engine). A deadline/pair-cap-truncated run thus still clears the slice
+        # it finished — monotonic progress every run — while unfinished properties
+        # keep their claim and re-drain next pass, newest-first.
+        truncated = bool(stats.get("truncated"))
+        stats["dirty_truncated"] = 1 if truncated else 0
+        cleared = _clear_dedup_dirty(conn, only_groups & dirty_resolved, cutoff)
+        stats["dirty_cleared"] = cleared
+        LOG.info("DIRTY drain: cleared %d/%d claimed (resolved groups; truncated=%s)",
+                 cleared, len(claimed), truncated)
+        started = started_at or datetime.now(timezone.utc)
+        _write_run_row(conn, stats, run_kind="dirty", started_at=started, runner=runner)
+        _write_pair_audit(conn, started, pair_audit)
+    return stats
 
 
 def main() -> int:
@@ -2551,45 +2659,10 @@ def main() -> int:
             clip["cosine_enabled"], args.shadow, args.cache_only, args.free, run_geo,
         )
 
-        # Real-time dirty drain: claim the dedup-ready properties at/before a cutoff
-        # BEFORE building the (LLM-backed) fns, so an empty queue exits without that work.
-        # The clear after the run is INCREMENTAL (per completed street group, see the clear
-        # block below): a deadline-cut run clears what it finished and keeps only the
-        # unprocessed remainder (re-drained next pass) — never loses work, always progresses;
-        # the NEWEST-first claim + the TTL prune below mean even a pathological claim never
-        # pins the head (stale tail ages out, fresh head served first, full scan backstops).
-        only_groups = None
-        dirty_street_groups: tuple[set[int], set[tuple[int, str]]] | None = None
-        dirty_cutoff = None
-        if args.dirty:
-            # Evict the stale tail FIRST (rows the 6h full scan has already covered), so the
-            # queue is bounded by construction and the depth metric reflects real real-time work.
-            pruned = _prune_stale_dedup_dirty(conn)
-            if pruned:
-                LOG.info("DIRTY drain: pruned %d stale rows (older than %dh)",
-                         pruned, _DEDUP_DIRTY_TTL_HOURS)
-            with conn.cursor() as cur:
-                cur.execute("SELECT now()")
-                dirty_cutoff = cur.fetchone()[0]
-            only_groups = _claim_dedup_dirty(conn, dirty_cutoff, limit=args.max_dirty)
-            with conn.cursor() as cur:
-                cur.execute("SELECT count(*) FROM dedup_dirty_properties")
-                queue_depth = int(cur.fetchone()[0])
-            LOG.info("DIRTY drain: %d claimed (cap=%d, queue depth=%d)",
-                     len(only_groups), args.max_dirty, queue_depth)
-            if not only_groups:
-                LOG.info("DIRTY drain: queue empty; nothing to do")
-                return 0
-            # Scope the eligible LOAD to the claimed properties' street groups
-            # (O(dirty), not O(market)) via the STORED street_name_key. The peers in
-            # those groups are loaded too, so a dirty property still re-decides
-            # against its existing group; only_groups (below) keeps the RESOLVE
-            # filtered to dirty-containing groups, so the scoped load is a pure perf
-            # optimization layered under that correctness gate.
-            dirty_street_groups = _claimed_street_groups(conn, only_groups)
-            LOG.info("DIRTY drain: scoped load to %d street-id + %d name groups",
-                     len(dirty_street_groups[0]), len(dirty_street_groups[1]))
-
+        # Real-time dirty drain: the claim/scoped-load/clear/run-row cycle lives in
+        # run_dirty_pass (shared with the realtime worker's dedup lane) and runs after
+        # the shared fn/engine_kw assembly below. An empty queue returns None there —
+        # building the fns first costs a handful of resolve_model SELECTs, nothing more.
         classify_fn = None
         compare_fn = None
         site_plan_fn = None
@@ -2682,75 +2755,59 @@ def main() -> int:
         )
 
         if not args.geo_only:
-            pair_audit: list[dict[str, Any]] = []
-            dirty_resolved: set[int] = set()
-            # Full-scan CURSOR: only the plain scheduled full scan rotates a persistent
-            # frontier over the market (migration 261) — the dirty/candidate drains have
-            # their own work-lists and stay cursor-free. cycle_started_at falls back to
-            # this run's start when a fresh cycle begins; on a crash nothing is persisted,
-            # which only makes the cycle stamp LATER (prune less) — conservative-safe.
-            full_scan = not args.dirty and not args.candidates and restrict is None
-            cursor_out: dict[str, Any] | None = None
-            scan_state: dict[str, Any] = {"cursor_key": None, "cycle_started_at": None}
-            cycle_started_at: Any = None
-            if full_scan:
-                scan_state = _load_scan_state(conn)
-                cycle_started_at = scan_state["cycle_started_at"] or run_at
-                cursor_out = {}
-                LOG.info("CURSOR full scan resuming after %r (cycle started %s)",
-                         scan_state["cursor_key"], cycle_started_at)
-            stats = run_engine(
-                conn, audit=pair_audit, max_pairs=args.max_pairs,
-                only_groups_with_property_ids=only_groups,
-                restrict_street_groups=dirty_street_groups,
-                resolved_property_ids=(dirty_resolved if args.dirty else None),
-                scan_cursor=scan_state["cursor_key"], cursor_out=cursor_out,
-                **engine_kw,
-            )
-            stats["clip_classified"] = clip_counter[0]
-            stats["vision_errors"] = vision_errors[0]
             if args.dirty:
-                # Record the queue depth at run start + this run's slice, so the /dedup +
-                # Health dashboards can see whether the backlog is draining (a stall that
-                # otherwise stays invisible — see migration 255).
-                stats["dirty_queue_depth"] = queue_depth
-                stats["dirty_claimed"] = len(only_groups)
-            if not args.shadow:
-                # INCREMENTAL clear: drop exactly the claimed properties whose EVERY street
-                # group was fully scanned this run (`dirty_resolved`, tracked per-group in
-                # run_engine). A deadline/pair-cap-truncated run thus still clears the slice
-                # it finished — monotonic progress every run — while unfinished properties
-                # keep their claim and re-drain next pass. (The previous all-or-nothing clear
-                # kept the ENTIRE claim on truncation, and prod data showed 4/5 dirty runs
-                # truncating on pure per-pair DB cost → the same slice re-processed hourly and
-                # dirty_cleared pinned at 0. Oversized groups count as scanned: unresolvable
-                # everywhere, the full scan's job if they shrink.) The clear happens BEFORE
-                # the run row so dirty_cleared / dirty_truncated record the real outcome.
-                if args.dirty:
-                    truncated = bool(stats.get("truncated"))
-                    stats["dirty_truncated"] = 1 if truncated else 0
-                    to_clear = only_groups & dirty_resolved
-                    cleared = _clear_dedup_dirty(conn, to_clear, dirty_cutoff)
-                    stats["dirty_cleared"] = cleared
-                    LOG.info("DIRTY drain: cleared %d/%d claimed (resolved groups; truncated=%s)",
-                             cleared, len(only_groups), truncated)
-                if full_scan and cursor_out is not None:
-                    reached_end = bool(cursor_out.get("reached_end"))
-                    # A truncated run that scanned nothing keeps the previous frontier
-                    # (never regress the cursor to the top on a degenerate run).
-                    new_cursor = (None if reached_end
-                                  else (cursor_out.get("last_key") or scan_state["cursor_key"]))
-                    _save_scan_state(
-                        conn, "street", cursor_key=new_cursor,
-                        cycle_started_at=cycle_started_at, completed=reached_end)
-                    LOG.info("CURSOR saved: %s",
-                             "cycle COMPLETED (TTL eviction re-armed)" if reached_end
-                             else f"frontier at {new_cursor!r}")
-                # run_kind mirrors #672's full_scan derivation exactly (full_scan ≡ 'full').
-                run_kind = ("dirty" if args.dirty
-                            else "candidates" if args.candidates else "full")
-                _write_run_row(conn, stats, run_kind=run_kind, started_at=run_at)
-                _write_pair_audit(conn, run_at, pair_audit)
+                stats = run_dirty_pass(
+                    conn, max_dirty=args.max_dirty, max_pairs=args.max_pairs,
+                    engine_kw=engine_kw, runner="actions", shadow=args.shadow,
+                    started_at=run_at,
+                    stamp_stats=lambda s: s.update({
+                        "clip_classified": clip_counter[0],
+                        "vision_errors": vision_errors[0],
+                    }),
+                )
+                if stats is None:
+                    LOG.info("DIRTY drain: queue empty; nothing to do")
+                    return 0
+            else:
+                pair_audit: list[dict[str, Any]] = []
+                # Full-scan CURSOR: only the plain scheduled full scan rotates a persistent
+                # frontier over the market (migration 261) — the dirty/candidate drains have
+                # their own work-lists and stay cursor-free. cycle_started_at falls back to
+                # this run's start when a fresh cycle begins; on a crash nothing is persisted,
+                # which only makes the cycle stamp LATER (prune less) — conservative-safe.
+                full_scan = not args.candidates and restrict is None
+                cursor_out: dict[str, Any] | None = None
+                scan_state: dict[str, Any] = {"cursor_key": None, "cycle_started_at": None}
+                cycle_started_at: Any = None
+                if full_scan:
+                    scan_state = _load_scan_state(conn)
+                    cycle_started_at = scan_state["cycle_started_at"] or run_at
+                    cursor_out = {}
+                    LOG.info("CURSOR full scan resuming after %r (cycle started %s)",
+                             scan_state["cursor_key"], cycle_started_at)
+                stats = run_engine(
+                    conn, audit=pair_audit, max_pairs=args.max_pairs,
+                    scan_cursor=scan_state["cursor_key"], cursor_out=cursor_out,
+                    **engine_kw,
+                )
+                stats["clip_classified"] = clip_counter[0]
+                stats["vision_errors"] = vision_errors[0]
+                if not args.shadow:
+                    if full_scan and cursor_out is not None:
+                        reached_end = bool(cursor_out.get("reached_end"))
+                        # A truncated run that scanned nothing keeps the previous frontier
+                        # (never regress the cursor to the top on a degenerate run).
+                        new_cursor = (None if reached_end
+                                      else (cursor_out.get("last_key") or scan_state["cursor_key"]))
+                        _save_scan_state(
+                            conn, "street", cursor_key=new_cursor,
+                            cycle_started_at=cycle_started_at, completed=reached_end)
+                        LOG.info("CURSOR saved: %s",
+                                 "cycle COMPLETED (TTL eviction re-armed)" if reached_end
+                                 else f"frontier at {new_cursor!r}")
+                    run_kind = "candidates" if args.candidates else "full"
+                    _write_run_row(conn, stats, run_kind=run_kind, started_at=run_at)
+                    _write_pair_audit(conn, run_at, pair_audit)
             LOG.info(
                 "ENGINE %s eligible=%s auto_address=%d auto_phash=%d auto_visual=%d "
                 "auto_dismissed=%d floor_plan_deferred=%d clip_deferred=%d reconciled=%d queued=%d "
