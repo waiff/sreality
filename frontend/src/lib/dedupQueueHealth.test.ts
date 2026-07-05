@@ -1,13 +1,24 @@
 import { describe, expect, it } from 'vitest';
-import { assessDirtyQueue, DIRTY_QUEUE_WARN_DEPTH } from './dedupQueueHealth';
+import {
+  assessDirtyQueue,
+  DIRTY_QUEUE_WARN_DEPTH,
+  DIRTY_QUEUE_STARVE_AGE_SECONDS,
+} from './dedupQueueHealth';
 import type { DedupEngineRun } from './queries';
 
 // Minimal run row — only the fields assessDirtyQueue reads matter; the rest are filler.
 function run(
   depth: number | null,
-  opts: { cleared?: number | null; truncated?: number | null; startedAt?: string } = {},
+  opts: {
+    cleared?: number | null;
+    truncated?: number | null;
+    startedAt?: string;
+    ageP95?: number | null;
+  } = {},
 ): DedupEngineRun {
-  const { cleared = null, truncated = null, startedAt = '2026-06-28T00:00:00Z' } = opts;
+  const {
+    cleared = null, truncated = null, startedAt = '2026-06-28T00:00:00Z', ageP95 = null,
+  } = opts;
   return {
     id: 1, started_at: startedAt, ended_at: startedAt, eligible: 0, flagged_location: 0,
     flagged_disposition: 0, pairs_considered: 0, rejected: 0, auto_address: 0, auto_phash: 0,
@@ -17,6 +28,9 @@ function run(
     dirty_cleared: depth == null ? null : cleared,
     dirty_truncated: depth == null ? null : truncated,
     run_kind: depth == null ? 'full' : 'dirty', truncated: truncated ?? 0,
+    skipped_unresolved: null, skipped_oversized: null, oversized_groups: null,
+    vision_errors: null, truncated_cause: null, scan_groups_total: null,
+    scan_groups_scanned: null, dirty_age_p95_seconds: ageP95, dirty_pruned: null, runner: null,
   };
 }
 
@@ -110,5 +124,46 @@ describe('assessDirtyQueue', () => {
     const h = assessDirtyQueue([run(null), run(800, { cleared: 100, truncated: 0 })]);
     expect(h.depth).toBe(800);
     expect(h.status).toBe('ok');
+  });
+
+  it('STARVING: p95 wait past 24h is a fail even at low depth with runs clearing', () => {
+    // Migration 271: the real-time "merge within minutes" lane. A day-old p95 means the old
+    // tail isn't served — a fail regardless of a low, draining depth.
+    const h = assessDirtyQueue([
+      run(500, { cleared: 300, truncated: 0, ageP95: DIRTY_QUEUE_STARVE_AGE_SECONDS + 3_600 }),
+      run(600, { cleared: 300, truncated: 0, ageP95: 80_000 }),
+    ]);
+    expect(h.agePctl95Seconds).toBe(DIRTY_QUEUE_STARVE_AGE_SECONDS + 3_600);
+    expect(h.starving).toBe(true);
+    expect(h.status).toBe('fail');
+    expect(h.reason).toMatch(/starving/);
+  });
+
+  it('does NOT flag starving when the p95 wait is under 24h', () => {
+    const h = assessDirtyQueue([
+      run(500, { cleared: 300, truncated: 0, ageP95: 3_600 }),
+      run(600, { cleared: 300, truncated: 0, ageP95: 3_000 }),
+    ]);
+    expect(h.starving).toBe(false);
+    expect(h.status).toBe('ok');
+  });
+
+  it('starving is null-safe on pre-271 rows lacking the age gauge', () => {
+    const h = assessDirtyQueue([run(500, { cleared: 300 }), run(600, { cleared: 200 })]);
+    expect(h.agePctl95Seconds).toBeNull();
+    expect(h.starving).toBe(false);
+    expect(h.status).toBe('ok');
+  });
+
+  it('livelock takes precedence over starving in the reason', () => {
+    // Both conditions true -> livelock is the root cause and owns the message.
+    const h = assessDirtyQueue([
+      run(15_000, { cleared: 0, truncated: 1, ageP95: 200_000 }),
+      run(18_000, { cleared: 0, truncated: 1, ageP95: 200_000 }),
+    ]);
+    expect(h.livelocked).toBe(true);
+    expect(h.starving).toBe(true);
+    expect(h.status).toBe('fail');
+    expect(h.reason).toMatch(/livelocked/);
   });
 });
