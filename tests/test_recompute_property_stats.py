@@ -16,6 +16,7 @@ from scripts.recompute_property_stats import (
     _attach_stragglers,
     _batch_ranges,
     _drain_dirty,
+    _publish_sweep,
 )
 
 
@@ -179,6 +180,44 @@ def test_drain_dirty_empty_queue_is_noop():
     assert _drain_dirty(conn, 100, "C") == 0
     assert conn.recomputed == []
     assert conn.deleted == []
+
+
+def test_publish_sweep_only_touches_unpublished_ineligible():
+    """The ineligible publish sweep (migration 273) publishes ONLY unpublished, active
+    properties whose repr listing is eligible for NEITHER dedup pass — an
+    eligible-but-unchecked property stays NULL (the engine stamps that one), and an
+    already-published row is never touched. Row-level semantics run in the DB; here we
+    pin the SQL shape that guarantees them + the returned rowcount."""
+    from toolkit.publication import GEO_ELIGIBLE_PREDICATE, STREET_ELIGIBLE_PREDICATE
+
+    conn = _FakeConn([
+        (lambda s: "publish_reason = 'ineligible'" in s, [(1,), (2,)]),  # 2 rows published
+    ])
+    assert _publish_sweep(conn) == 2
+
+    sweep = _find(conn, "publish_reason = 'ineligible'")
+    assert sweep is not None
+    sql = " ".join(sweep[0].split())
+    assert "p.published_at IS NULL" in sql          # never re-publishes a stamped row
+    assert "p.status = 'active'" in sql
+    # BOTH eligibility predicates, wrapped IS NOT TRUE (NULL-safe ineligibility) so an
+    # eligible repr listing keeps the property NULL for the engine to stamp.
+    assert " ".join(STREET_ELIGIBLE_PREDICATE.split()) in sql
+    assert " ".join(GEO_ELIGIBLE_PREDICATE.split()) in sql
+    assert "IS NOT TRUE" in sql
+
+
+def test_publication_predicates_parity_with_engine():
+    """toolkit.publication mirrors the engine's eligibility VERBATIM (single source), so
+    the ineligible sweep can never publish a property the engine WOULD dedup-check. A
+    drift in either predicate fails here."""
+    import scripts.dedup_engine as eng
+
+    from toolkit.publication import GEO_ELIGIBLE_PREDICATE, STREET_ELIGIBLE_PREDICATE
+
+    assert STREET_ELIGIBLE_PREDICATE == eng._ELIGIBILITY
+    assert STREET_ELIGIBLE_PREDICATE in eng._ELIGIBLE_SQL
+    assert GEO_ELIGIBLE_PREDICATE in eng._GEO_ELIGIBLE_SQL
 
 
 def test_every_resolved_sql_constant_has_valid_placeholders():

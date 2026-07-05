@@ -65,6 +65,7 @@ select
   p.asset_id
 from properties p
 where p.status = 'active' and p.lat is not null and p.lng is not null
+  and (not publication_gate_enabled() or p.published_at is not null)
 order by p.category_main, p.category_type, p.lat, p.lng
 """
 

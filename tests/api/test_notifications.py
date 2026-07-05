@@ -572,8 +572,8 @@ def test_match_once_uses_per_subscription_cursor() -> None:
             [(sub_id, {"category_main": "byt", "category_type": "pronajem", "districts": ["Praha"]}, cursor_ts, ["email", "in_app"])],
             1,
         ),
-        # Window upper-bound query
-        (lambda s: "SELECT max(first_seen_at), count(*) FROM" in s, [(upper_ts, 5)], 0),
+        # Window upper-bound query (published_at-keyed since migration 273's gate)
+        (lambda s: "SELECT max(published_at), count(*) FROM" in s, [(upper_ts, 5)], 0),
         # Gate-pending lookback INSERT (default-on gate) — nothing released.
         (
             lambda s: "INSERT INTO notification_dispatches" in s
@@ -601,10 +601,12 @@ def test_match_once_uses_per_subscription_cursor() -> None:
     # Verify the WHERE clause references the per-subscription cursor
     # parameter, not a global watermark.
     window_query = next(
-        (sql, p) for sql, p in conn.executed if "max(first_seen_at), count(*)" in sql
+        (sql, p) for sql, p in conn.executed if "max(published_at), count(*)" in sql
     )
     sql, params = window_query
-    assert "l.first_seen_at > %(cursor)s" in sql
+    # New-dispatch detection keys on published_at (migration 273), not first_seen_at;
+    # the cursor column keeps its name but now holds a published_at watermark.
+    assert "l.published_at > %(cursor)s" in sql
     assert isinstance(params, dict) and params["cursor"] == cursor_ts
 
     # And that the filter spec made it through too. The district chip
@@ -803,7 +805,7 @@ def test_match_once_skips_subscription_with_no_listings() -> None:
             1,
         ),
         # Window query returns (NULL, 0) — no fresh listings.
-        (lambda s: "SELECT max(first_seen_at), count(*) FROM" in s, [(None, 0)], 0),
+        (lambda s: "SELECT max(published_at), count(*) FROM" in s, [(None, 0)], 0),
     ]
     conn = _FakeConn(script)
 
@@ -839,7 +841,7 @@ def test_match_once_skips_invalid_filter_spec() -> None:
             ],
             2,
         ),
-        (lambda s: "SELECT max(first_seen_at), count(*) FROM" in s, [(upper_ts, 1)], 0),
+        (lambda s: "SELECT max(published_at), count(*) FROM" in s, [(upper_ts, 1)], 0),
         (
             lambda s: "INSERT INTO notification_dispatches" in s
             and "image_lookback_minutes" in s,
@@ -880,7 +882,7 @@ def _gate_script(
             [(sub_id, {}, cursor_ts, [])],
             1,
         ),
-        (lambda s: "SELECT max(first_seen_at), count(*) FROM" in s, [upper], 0),
+        (lambda s: "SELECT max(published_at), count(*) FROM" in s, [upper], 0),
         (
             lambda s: "INSERT INTO notification_dispatches" in s
             and "image_lookback_minutes" in s,
@@ -908,7 +910,7 @@ def test_match_once_image_gate_holds_new_properties_without_losing_them() -> Non
     # Phase 1 (window upper / cursor advance) is gate-free by design.
     window_sql, _ = next(
         (sql, p) for sql, p in conn.executed
-        if "max(first_seen_at), count(*)" in sql
+        if "max(published_at), count(*)" in sql
     )
     assert "storage_path" not in window_sql
 
@@ -937,7 +939,7 @@ def test_match_once_image_gate_holds_new_properties_without_losing_them() -> Non
     lookback_sql, lookback_params = inserts[1]
     # Re-scan targets properties the cursor already passed, bounded by the
     # lookback window, under the same gate; dedupe_key keeps it idempotent.
-    assert "l.first_seen_at <= %(cursor)s" in lookback_sql
+    assert "l.published_at <= %(cursor)s" in lookback_sql
     assert "make_interval(mins => %(image_lookback_minutes)s)" in lookback_sql
     assert "gi.storage_path IS NOT NULL" in lookback_sql
     assert "ON CONFLICT (dedupe_key) DO NOTHING" in lookback_sql
@@ -995,7 +997,7 @@ def test_match_once_gate_flag_off_restores_old_behavior() -> None:
             [(sub_id, {}, cursor_ts, [])],
             1,
         ),
-        (lambda s: "SELECT max(first_seen_at), count(*) FROM" in s, [(upper_ts, 2)], 0),
+        (lambda s: "SELECT max(published_at), count(*) FROM" in s, [(upper_ts, 2)], 0),
         (lambda s: "INSERT INTO notification_dispatches" in s, [], 2),
         (lambda s: "UPDATE notification_subscriptions SET last_matched_first_seen_at" in s, [], 1),
     ]
