@@ -38,15 +38,23 @@ def _strip_comments(src: str) -> str:
 
 def _assert_gate_wrapped(raw: str, where: str) -> None:
     """Every `publication_gate_enabled()` call in executable `raw` (comments
-    stripped) must be immediately preceded (ignoring whitespace) by `select` —
-    i.e. `(select ...)`."""
+    stripped) must be a scalar SUBQUERY — `(select publication_gate_enabled())`.
+    Requiring the open paren before `select` rejects both the bare WHERE form
+    (`not publication_gate_enabled()`) AND a bare projection form
+    (`select publication_gate_enabled() as g from …`), which is also per-row."""
     sql = _strip_comments(raw)
     for m in GATE_CALL.finditer(sql):
         preceding = sql[: m.start()].rstrip().lower()
-        assert preceding.endswith("select"), (
-            f"{where}: publication_gate_enabled() is called BARE — it must be "
-            f"wrapped as `(select publication_gate_enabled())` so the planner "
-            f"evaluates it ONCE (InitPlan), not once per row. Context: "
+        # strip the trailing `select`, then any ws, then require an open paren:
+        # only `(select …)` — a scalar subquery — passes.
+        wrapped = (
+            preceding.endswith("select")
+            and preceding[: -len("select")].rstrip().endswith("(")
+        )
+        assert wrapped, (
+            f"{where}: publication_gate_enabled() is not a scalar subquery — it "
+            f"must be wrapped as `(select publication_gate_enabled())` so the "
+            f"planner evaluates it ONCE (InitPlan), not once per row. Context: "
             f"...{sql[max(0, m.start() - 40):m.end() + 5]!r}"
         )
 
@@ -76,13 +84,24 @@ def test_guardrail_detects_a_bare_call() -> None:
     """The check itself must fail on a bare call (so it can't silently pass)."""
     import pytest
 
+    # bare WHERE form
     with pytest.raises(AssertionError):
         _assert_gate_wrapped(
             "create view v as select 1 where not publication_gate_enabled();",
             "synthetic",
         )
-    # ...and accept the wrapped form.
+    # bare projection form (also per-row) — must be caught too
+    with pytest.raises(AssertionError):
+        _assert_gate_wrapped(
+            "create view v as select publication_gate_enabled() as g from t;",
+            "synthetic",
+        )
+    # ...and accept the scalar-subquery form (incl. inner whitespace).
     _assert_gate_wrapped(
         "create view v as select 1 where not (select publication_gate_enabled());",
+        "synthetic",
+    )
+    _assert_gate_wrapped(
+        "create view v as select 1 where not ( select publication_gate_enabled() );",
         "synthetic",
     )

@@ -163,3 +163,17 @@ CREATE INDEX IF NOT EXISTS properties_cat_last_seen_keyset_idx
 CREATE INDEX IF NOT EXISTS properties_cat_first_seen_keyset_idx
   ON properties (category_main, category_type, first_seen_at DESC, id DESC)
   WHERE status = 'active';
+
+-- GATE-ON PRE-FLIP NOTE. These composites do NOT contain published_at. While the
+-- gate is OFF (today) the InitPlan folds to TRUE, so the residual filter is a
+-- no-op and the index scan is optimal. When the operator flips
+-- dedup_publication_gate_enabled ON, the residual becomes `published_at IS NOT
+-- NULL`, applied as a heap Filter after the index scan — so a cohort with MANY
+-- unpublished-but-active rows would scan deep before filling LIMIT 24. Today
+-- that is a non-issue (only ~290 unpublished rows exist market-wide; the gate-ON
+-- plan measures ~18ms, 6 rows filtered) and the unpublished count is watched by
+-- the publication-gate health panel (PR #706). BEFORE flipping the gate on:
+-- (a) confirm the unpublished count is small, and (b) if a dedup stall has let it
+-- grow, add a partial `... WHERE status='active' AND published_at IS NOT NULL`
+-- companion index for the gate-ON shape. Tracked in
+-- docs/design/browse-read-model.md.

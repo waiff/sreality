@@ -10,8 +10,22 @@
  * `properties_public` view, `OFFSET 50000` also takes ~3.7s, exceeding the
  * anon 3s statement timeout — exactly where infinite scroll drives the
  * user. Keyset anchors each page to the concrete `(sort value, property_id)`
- * of the last row, so it is correct under mutation and FLAT in latency
- * regardless of depth (measured ~120ms at any depth).
+ * of the last row, so it is correct under mutation and fast for the way
+ * infinite scroll actually pages: each page's cursor is the PREVIOUS page's
+ * boundary, so consecutive scrolling stays ~ms (measured page 2 ~8ms, page
+ * ~200 ~520ms on the byt cohort).
+ *
+ * CAVEAT — latency is NOT flat to arbitrary absolute depth. PostgREST/
+ * supabase-js can only emit the cursor predicate in OR form
+ * (`col.lt.v,and(col.eq.v,id.lt.c)`), which the planner applies as a Filter,
+ * NOT an index range bound — so a page N scan discards the N preceding rows
+ * before filling the window (cost ∝ absolute depth). Realistic scroll never
+ * reaches a problem depth (a user filters long before scrolling ~55k rows),
+ * but a cursor jumped far from any page boundary (or a giant single-category
+ * cohort scrolled to the very end) degrades and can time out. The real fix is
+ * a row-comparison cursor `(col, id) < (v, c)` that Postgres converts to an
+ * index seek — blocked on PostgREST not emitting row comparisons; tracked in
+ * docs/design/browse-read-model.md.
  *
  * The tiebreaker is `property_id` (= `properties.id`): immutable, unique,
  * never null — the only safe choice (`sreality_id` is nullable and can be
