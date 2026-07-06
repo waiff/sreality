@@ -16,7 +16,8 @@ property-maintenance, and `last_seen_at` bumped for *every* active row each
 scrape cycle) through the `properties_public` view. Only the **map** reads a
 purpose-built read model, `properties_map_mv` (migration 254): a compact
 projection, physically **clustered by `(category_main, category_type, lat, lng)`**
-and refreshed blue-green every 5 min, precisely because the live table can't stay
+and refreshed blue-green on the refresh_map_mv cadence (currently every 30 min),
+precisely because the live table can't stay
 cached (512 MB `shared_buffers` for a 41 GB DB) and a scattered scan is cold-slow.
 
 The map is the surface that has *not* had reliability problems. The list, table,
@@ -56,7 +57,7 @@ reading `properties` / `properties_public` live (unchanged).
 Why this is the clean architecture and not more patchwork:
 
 - It **ends the index treadmill on the hot table.** The recency/category/filter
-  indexes move onto a matview that is *rebuilt wholesale* every 5 min, so they
+  indexes move onto a matview that is *rebuilt wholesale* each refresh, so they
   carry **zero per-row write amplification** — the exact opposite of P0c's
   live-table composite.
 - **Keyset pagination becomes correct-by-construction**: a matview is a *stable
@@ -112,9 +113,9 @@ recency-sorted list can't share (a table has one physical order).
   shares the projection/gate.
 
 Both matviews refresh from the same blue-green job (extend `refresh_map_mv.py` into
-a `refresh_browse_mvs.py`, or run two swaps in one job) on the existing ~5 min
+a `refresh_browse_mvs.py`, or run two swaps in one job) on the existing refresh
 cadence. `properties_public` **stays** for detail pages, the watchdog/collection
-matchers, and any write-adjacent read (those need live data, not a 5-min snapshot).
+matchers, and any write-adjacent read (those need live data, not a ~30-min snapshot).
 
 ### Open sub-decisions (for the review)
 
@@ -126,7 +127,8 @@ matchers, and any write-adjacent read (those need live data, not a 5-min snapsho
    meaningful). On a snapshot matview the churn argument disappears either way, so
    this is purely a product/UX call — but it also removes the last remaining
    write-amplification motivation. *Operator decision.*
-2. **Staleness.** The list would go 5-min-stale like the map. Acceptable for a
+2. **Staleness.** The list would go stale by up to the refresh interval (~30 min
+   today) like the map. Acceptable for a
    browse workload (asking prices don't move by the second), and the realtime
    publication gate is orthogonal. If a fresher list is ever wanted, the refresh
    cadence is one number.
@@ -137,6 +139,31 @@ matchers, and any write-adjacent read (those need live data, not a 5-min snapsho
    table has one physical order. So two matviews (one clustered for recency, one for
    geo), one shared projection, is the recommendation. Revisit if `shared_buffers`
    ever grows enough that clustering stops mattering.
+
+## Two read-path follow-ups surfaced by the P0 review
+
+Both are pre-existing (not P0 regressions) and low-urgency, captured here so they
+aren't lost:
+
+1. **Keyset deep-pagination is O(depth), not flat.** PostgREST/supabase-js can
+   only emit the cursor predicate in OR form (`col.lt.v,and(col.eq.v,id.lt.c)`),
+   which the planner applies as a **Filter, not an index range bound** — so page N
+   discards the N preceding rows before filling the window. Realistic consecutive
+   scroll is fine (each cursor is the previous page's boundary → ~ms; measured page
+   2 ~8 ms), but a cursor far from any boundary, or scrolling a giant single-category
+   cohort to its tail, degrades and can time out. The unified read model doesn't fix
+   this by itself; the real fix is emitting a **row-comparison cursor** `(col, id) <
+   (v, c)` that Postgres converts to an index seek — which needs a mechanism
+   PostgREST can express (a keyset RPC, or a computed composite sort key). Fold into
+   the `browse_list_mv` reader work.
+2. **Gate-ON companion index.** When `dedup_publication_gate_enabled` is flipped on,
+   the residual filter is `published_at IS NOT NULL` (not in the recency composites),
+   so a large unpublished-active backlog would scan deep. A no-op today (~290
+   unpublished rows, ~18 ms) and watched by the PR-#706 health panel, but the
+   read model should either **bake the gate into the matview WHERE** (rows are
+   pre-filtered at refresh, so the reader never pays it — the natural outcome of
+   `browse_projection`) or carry a `published_at`-aware index. This removes the
+   concern entirely.
 
 ## The proper CI guardrail (what P0 deferred)
 
@@ -179,7 +206,7 @@ the class of bug that has recurred across migrations 247/253/275.
 
 - **A matview is stale by up to the refresh interval.** Mitigation: it already is,
   for the map; detail pages stay live; the realtime gate is separate. A brand-new
-  listing appears within one refresh (~5 min), same as the map today.
+  listing appears within one refresh (~30 min today), same as the map today.
 - **Two matviews double the refresh cost.** Both are compact projections; the map
   rebuild is already ~12 s. Run them in one job on the existing cadence; measure
   before/after.
