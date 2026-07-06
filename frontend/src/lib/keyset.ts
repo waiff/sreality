@@ -86,8 +86,28 @@ export function applyKeyset<T extends KeysetBuilder>(
   cursor: KeysetCursor | null,
 ): T {
   const asc = sort.direction === 'asc';
+  /* NULLS placement must match the serving `(col, id)` btree, or the planner
+   * can't use it and falls back to a full-cohort Bitmap Heap Scan + top-N sort
+   * (measured: ~33k scattered heap pages for byt+pronájem, 8.9s cold — over the
+   * anon 3s budget — vs ~230 buffers / index-scan when it matches).
+   *
+   * The keyset indexes are ASC `(col, id)` btrees (NULLS LAST, the ASC default).
+   * Scanning one BACKWARD yields `col DESC NULLS FIRST, id DESC`; FORWARD yields
+   * `col ASC NULLS LAST, id ASC`. So for the NOT-NULL sort columns we must emit
+   * the btree-DEFAULT nulls placement (omit nullsFirst → DESC gets NULLS FIRST,
+   * ASC gets NULLS LAST) so the ORDER BY pathkey matches a scan direction. These
+   * columns have no NULLs, so placement is a pure planner-matching concern and
+   * the two-phase cursor below is unaffected (it already skips the NULL tail for
+   * them — see NON_NULL_SORT_FIELDS).
+   *
+   * NULLABLE sort columns keep the explicit `nullsFirst: false` (NULLS LAST):
+   * the two-phase cursor logic below REQUIRES nulls last, and matching those to
+   * an index is a separate follow-up (a `(col DESC NULLS LAST, id)` index). */
+  const nullsLast = NON_NULL_SORT_FIELDS.has(sort.field)
+    ? undefined
+    : false;
   const ordered = query
-    .order(sort.field, { ascending: asc, nullsFirst: false })
+    .order(sort.field, { ascending: asc, nullsFirst: nullsLast })
     .order('property_id', { ascending: asc }) as T;
 
   if (!cursor) return ordered;

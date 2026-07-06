@@ -72,7 +72,9 @@ describe('applyKeyset — ORDER BY', () => {
     const r = new Recorder();
     applyKeyset(r, sort('last_seen_at', 'desc'), null);
     expect(r.calls).toEqual([
-      { m: 'order', column: 'last_seen_at', ascending: false, nullsFirst: false },
+      // last_seen_at is NOT NULL — no nulls clause, so DESC gets the btree
+      // default (NULLS FIRST) that a backward index scan produces.
+      { m: 'order', column: 'last_seen_at', ascending: false },
       { m: 'order', column: 'property_id', ascending: false },
     ]);
   });
@@ -85,6 +87,40 @@ describe('applyKeyset — ORDER BY', () => {
       { m: 'order', column: 'property_id', ascending: true },
     ]);
   });
+});
+
+/* The index-matching contract (the fix for the market-wide Browse timeout): a
+ * DESC sort on a NOT-NULL keyset column must NOT emit `nullslast`, or the
+ * planner can't use the `(col, id)` btree and falls back to a full-cohort scan
+ * + sort (8.9s cold vs ~ms indexed). Nullable columns keep `nullslast` because
+ * the two-phase cursor requires it. These assertions are the frontend guard;
+ * the DB-plan guard lives in tests/test_browse_read_path_guardrail.py. */
+describe('applyKeyset — nulls placement matches the serving btree', () => {
+  const nullsFirstOf = (calls: Call[], column: string) => {
+    const c = calls.find((x) => x.m === 'order' && x.column === column);
+    return c && c.m === 'order' ? c.nullsFirst : 'MISSING';
+  };
+
+  it.each(['last_seen_at', 'first_seen_at'])(
+    'NOT-NULL column %s omits the nulls clause (both directions)',
+    (field) => {
+      for (const dir of ['desc', 'asc'] as const) {
+        const r = new Recorder();
+        applyKeyset(r, sort(field, dir), null);
+        // undefined => postgrest-js appends no `.nullsfirst`/`.nullslast`.
+        expect(nullsFirstOf(r.calls, field)).toBeUndefined();
+      }
+    },
+  );
+
+  it.each(['price_czk', 'area_m2', 'district'])(
+    'NULLABLE column %s keeps NULLS LAST (two-phase cursor needs it)',
+    (field) => {
+      const r = new Recorder();
+      applyKeyset(r, sort(field, 'desc'), null);
+      expect(nullsFirstOf(r.calls, field)).toBe(false);
+    },
+  );
 });
 
 describe('applyKeyset — DESC non-null cursor', () => {

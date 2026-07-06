@@ -51,6 +51,11 @@ interface Props {
   totalApprox?: boolean;
   sort: SortSpec;
   isLoading: boolean;
+  /* The list query errored (e.g. a statement timeout). Suppresses the
+   * "no results — clear filters" empty state, which otherwise renders on an
+   * empty error result and misreads a failure as "nothing matched". The page
+   * ErrorBanner is the surface that explains + offers retry. */
+  isError?: boolean;
   /* Infinite scroll: the next page is in flight, there are more pages, and
    * the trigger to load them. The cohort total above drives the progress
    * label; these drive the bottom sentinel. */
@@ -100,6 +105,7 @@ export default function ListingCards({
   totalApprox = false,
   sort,
   isLoading,
+  isError = false,
   isFetchingNextPage,
   hasNextPage,
   onReachEnd,
@@ -120,7 +126,7 @@ export default function ListingCards({
   onEstimate,
 }: Props) {
   const showSkeleton = isLoading && rows == null;
-  const isEmpty = !showSkeleton && rows != null && rows.length === 0;
+  const isEmpty = !showSkeleton && !isError && rows != null && rows.length === 0;
 
   /* The card column is an independently-scrolling fixed-height element
    * (overflow-y-auto below); the infinite sentinel observes it as its root
