@@ -243,10 +243,14 @@ def test_enqueue_imageless_routes_to_dedup_dirty_lane():
 
 
 class _MainConn(_FakeConn):
-    """Context-manager conn for driving main(): serves the cutoff SELECT, records the rest."""
+    """Context-manager conn for driving main(): serves the cutoff SELECT and
+    the maintenance advisory try-lock (acquired), records the rest."""
 
     def __init__(self) -> None:
-        super().__init__([(lambda s: s == "SELECT now()", [("CUTOFF",)])])
+        super().__init__([
+            (lambda s: s == "SELECT now()", [("CUTOFF",)]),
+            (lambda s: "pg_try_advisory_lock" in s, [(True,)]),
+        ])
 
     def __enter__(self) -> "_MainConn":
         return self
@@ -326,3 +330,70 @@ def test_every_resolved_sql_constant_has_valid_placeholders():
     assert {"_RECOMPUTE_BATCH_SQL", "_RECOMPUTE_ONE_SQL", "_RECOMPUTE_SCOPED_SQL"} <= set(names)
     for name in names:
         split(getattr(rps, name).encode())  # raises ProgrammingError on a bad `%`
+
+
+# --- run_incremental_pass (the shared GH-cron / worker-lane implementation) ----
+
+
+def _lock_script(acquired: bool):
+    """FakeConn script: answer the advisory try-lock, the cutoff now(), and the
+    dirty claim (empty queue) so a pass runs end-to-end without a database."""
+    return [
+        (lambda s: "pg_try_advisory_lock" in s, [(acquired,)]),
+        (lambda s: s == "SELECT now()", [("2026-07-08T00:00:00+00:00",)]),
+        (lambda s: "FROM dirty_properties" in s and "SELECT" in s, []),
+    ]
+
+
+def test_run_incremental_pass_runs_all_phases_and_unlocks():
+    from scripts.recompute_property_stats import run_incremental_pass
+
+    conn = _FakeConn(script=_lock_script(acquired=True))
+    stats = run_incremental_pass(conn, batch_size=500)
+    assert stats["skipped"] is False
+    sqls = _sqls(conn)
+    # every phase of the incremental pass ran...
+    assert _find(conn, "INSERT INTO properties")  # straggler attach
+    assert not any("source_id_native = sreality_id" in s for s in sqls)  # skip legacy backfill
+    assert _find(conn, "published_at")  # publish sweep
+    assert _find(conn, "dedup_dirty_properties")  # imageless enqueue
+    # ...and the lock was released even on the happy path.
+    assert _find(conn, "pg_advisory_unlock")
+
+
+def test_run_incremental_pass_skips_when_lock_held():
+    from scripts.recompute_property_stats import run_incremental_pass
+
+    conn = _FakeConn(script=_lock_script(acquired=False))
+    stats = run_incremental_pass(conn, batch_size=500)
+    assert stats == {
+        "skipped": True, "attached": 0, "recomputed": 0,
+        "published": 0, "imageless": 0,
+    }
+    # NOTHING ran: no attach, no recompute, no publish — and no unlock either
+    # (we never held the lock; unlocking would release someone else's).
+    sqls = _sqls(conn)
+    assert not any("INSERT INTO properties" in s for s in sqls)
+    assert not any("pg_advisory_unlock" in s for s in sqls)
+
+
+def test_run_incremental_pass_unlocks_on_failure():
+    from scripts.recompute_property_stats import run_incremental_pass
+
+    class _Boom(_FakeConn):
+        def cursor(self):
+            cur = super().cursor()
+            orig = cur.execute
+
+            def execute(sql, params=None):
+                if "INSERT INTO properties" in sql:
+                    raise RuntimeError("boom")
+                return orig(sql, params)
+
+            cur.execute = execute  # type: ignore[method-assign]
+            return cur
+
+    conn = _Boom(script=_lock_script(acquired=True))
+    with pytest.raises(RuntimeError):
+        run_incremental_pass(conn, batch_size=500)
+    assert _find(conn, "pg_advisory_unlock")

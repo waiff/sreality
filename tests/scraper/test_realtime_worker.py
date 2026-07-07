@@ -669,3 +669,43 @@ def test_count_probe_pass_no_change_skips_dispatch(monkeypatch):
     asyncio.run(rw._count_probe_pass(asyncio.Event(), state))
     assert state["lanes"]["count_probe"]["last"] == {
         "pairs": 3, "changed": 0, "errors": 0, "dispatched": False}
+
+
+# --- maintenance pass --------------------------------------------------------------
+
+
+def test_maintenance_lane_registered_and_live_by_default():
+    # Ships LIVE (unlike dedup): the lane exists precisely because GH throttles
+    # property_maintenance.yml's */5 to a measured ~2h median, so merging must
+    # activate the fix. Interval <= 0 remains the kill-switch.
+    assert rw.MAINTENANCE_INTERVAL_DEFAULT == 120
+    src = inspect.getsource(rw._amain)
+    assert '("maintenance"' in src
+
+
+def test_maintenance_pass_records_counters(monkeypatch):
+    def fake_sync() -> dict[str, Any]:
+        return {"skipped": False, "attached": 7, "recomputed": 12,
+                "published": 3, "imageless": 2}
+
+    monkeypatch.setattr(rw, "_maintenance_sync", fake_sync)
+    state = rw._new_state()
+    asyncio.run(rw._maintenance_pass(asyncio.Event(), state))
+    lane = state["lanes"]["maintenance"]
+    assert lane["passes"] == 1
+    assert lane["last"] == {
+        "skipped": False, "attached": 7, "recomputed": 12,
+        "published": 3, "imageless": 2,
+    }
+
+
+def test_maintenance_pass_records_lock_skip(monkeypatch):
+    # run_incremental_pass returns skipped=True when the GH cron or the daily
+    # sweep holds the advisory lock — the lane records the skip and moves on.
+    monkeypatch.setattr(
+        rw, "_maintenance_sync",
+        lambda: {"skipped": True, "attached": 0, "recomputed": 0,
+                 "published": 0, "imageless": 0})
+    state = rw._new_state()
+    asyncio.run(rw._maintenance_pass(asyncio.Event(), state))
+    assert state["lanes"]["maintenance"]["last"]["skipped"] is True
