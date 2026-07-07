@@ -43,6 +43,20 @@ export const fmtCountCompact = (n: number | null | undefined): string =>
 export const fmtCzk = (n: number | null | undefined): string =>
   n == null ? '—' : `${czNumber.format(n)}${NBSP}Kč`;
 
+/* LLM spend is billed and stored in USD (llm_calls.cost_usd) — shown as
+ * dollars, never converted. Sub-cent per-call averages need 4 decimals. */
+const usdCurrency = new Intl.NumberFormat('en-US', {
+  style: 'currency',
+  currency: 'USD',
+  maximumFractionDigits: 2,
+});
+
+export const fmtUsd = (n: number | null | undefined): string =>
+  n == null ? '—' : usdCurrency.format(n);
+
+export const fmtUsdPerCall = (n: number | null | undefined): string =>
+  n == null ? '—' : n >= 0.1 ? usdCurrency.format(n) : `$${n.toFixed(4)}`;
+
 export const fmtArea = (n: number | null | undefined): string =>
   n == null ? '—' : `${czNumber.format(Math.round(n))}${NBSP}m²`;
 
