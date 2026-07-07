@@ -610,7 +610,13 @@ def geo_cell_key(
     by (category bucket, category_type) keeps a sale flat and a rental house out of one
     cell — while dum and komercni share a bucket (geo_category_bucket) so the one
     sanctioned cross-type can pair. None when the coordinate / municipality is missing
-    (the row can't geo-block)."""
+    (the row can't geo-block).
+
+    AUTHORITATIVE DEFINITION MOVED TO SQL: the stored, trigger-maintained
+    listings.geo_cell_key (public.listing_geo_cell_key, migration 276) is what the
+    engine's geo loader groups on now. This function is retained as the format's
+    executable documentation (and for tests); its rendering may differ from SQL's in
+    trailing zeros / exact-tie rounding, which is fine — nothing compares the two."""
     if obec_id is None or lat is None or lng is None:
         return None
     bucket = geo_category_bucket(category_main)

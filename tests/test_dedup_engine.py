@@ -767,6 +767,76 @@ def test_run_engine_geo_oversized_cell_processes_bounded(monkeypatch: Any) -> No
     assert stats["skipped_oversized"] == max(0, total - eng.MAX_GROUP_PAIRS)
 
 
+# --- geo loader: the STORED listings.geo_cell_key is the blocking cell -------
+
+def _geo_row(sid: int, pid: int, *, source: str = "sreality",
+             hn: str | None = None, area: float | None = 120.0,
+             description: str | None = None, ct: str | None = "prodej",
+             cat: str | None = "dum", price: int | None = 5_950_000,
+             lat: float | None = 50.10064, lng: float | None = 14.53742,
+             cell: str | None = "geo:5001:50.1006:14.5374:dum|komercni:prodej",
+             ) -> tuple[Any, ...]:
+    # matches _GEO_ELIGIBLE_SQL column order:
+    # sreality_id, property_id, source, house_number, area, description,
+    # category_type, category_main, price_czk, lat, lng, geo_cell_key
+    return (sid, pid, source, hn, area, description, ct, cat, price, lat, lng, cell)
+
+
+def test_load_geo_eligible_uses_stored_cell_key_verbatim() -> None:
+    # Migration 276: the loader takes listings.geo_cell_key from the SELECT — it must
+    # NOT recompute the cell from lat/lng in Python. A stored key whose rendering
+    # differs from the retired Python f-string (SQL trim_scale drops trailing zeros)
+    # is taken as-is: SQL is the single definition of the blocking cell.
+    import scripts.dedup_engine as eng
+
+    stored = "geo:5001:50.1:14.5:dum|komercni:prodej"
+    conn = _FakeConn([], geo_rows=[
+        _geo_row(1, 101, cell=stored),
+        _geo_row(2, 102, cell=stored),
+    ])
+    keys = eng._load_geo_eligible(conn)
+    assert [k.street_key for k in keys] == [stored, stored]
+    # lat/lng still ride along for the geo classifier's coordinate guard.
+    assert keys[0].lat == pytest.approx(50.10064)
+    assert keys[0].lng == pytest.approx(14.53742)
+    assert keys[0].price_czk == 5_950_000 and keys[0].area_m2 == 120.0
+
+
+def test_load_geo_eligible_skips_null_stored_key() -> None:
+    # A pre-backfill row (key not yet stamped) is skipped — it waits for the next
+    # run after the backfill/trigger stamps it, and is never mis-grouped.
+    import scripts.dedup_engine as eng
+
+    conn = _FakeConn([], geo_rows=[
+        _geo_row(1, 101, cell=None),
+        _geo_row(2, 102),
+    ])
+    keys = eng._load_geo_eligible(conn)
+    assert [k.sreality_id for k in keys] == [2]
+
+
+def test_run_engine_geo_groups_by_stored_cell_key(monkeypatch: Any) -> None:
+    # End-to-end over the fake conn (no loader monkeypatch): run_engine(geo=True)
+    # loads through _GEO_ELIGIBLE_SQL and groups on the SELECTed stored cell key —
+    # the same-cell cross-source pair reaches the visual stage; the different-cell
+    # row pairs with nothing; the deterministic geo signal still never merges.
+    import scripts.dedup_engine as eng
+
+    monkeypatch.setattr(
+        eng, "merge_properties",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("geo signal must not merge")))
+    conn = _FakeConn([], geo_rows=[
+        _geo_row(1, 101, source="sreality"),
+        _geo_row(2, 102, source="idnes"),
+        _geo_row(3, 103, source="idnes", cat="pozemek",
+                 cell="geo:5002:50.2:14.6:pozemek:prodej"),
+    ])
+    stats = eng.run_engine(conn, classify_fn=None, compare_fn=None,
+                           max_vision_calls=10, geo=True)
+    assert stats["pairs_considered"] == 1
+    assert stats["queued"] == 1
+
+
 # --- rule D helpers ---------------------------------------------------------
 
 def test_phash_fastpath_needs_two_identical_pairs() -> None:
@@ -893,6 +963,10 @@ class _Cur:
         self._conn.executed.append(s)
         if "count(*) FILTER" in s and "FROM listings" in s:
             self._rows = [(4, 100, 5)]  # eligible, flagged_location, flagged_disposition
+        elif "l.geo_cell_key" in s and "FROM listings l" in s:
+            # _GEO_ELIGIBLE_SQL (checked BEFORE the street branch — the geo SQL's
+            # NOT-street-eligible clause also contains "l.street IS NOT NULL").
+            self._rows = list(self._conn.geo_rows)
         elif "FROM listings l" in s and "l.street IS NOT NULL" in s:
             self._rows = list(self._conn.eligible_rows)
         elif "count(*)" in s and "JOIN properties pl" in s:
@@ -933,8 +1007,10 @@ class _Cur:
 
 
 class _FakeConn:
-    def __init__(self, eligible_rows: list[tuple[Any, ...]], stale_count: int = 0) -> None:
+    def __init__(self, eligible_rows: list[tuple[Any, ...]], stale_count: int = 0,
+                 geo_rows: list[tuple[Any, ...]] | None = None) -> None:
         self.eligible_rows = eligible_rows
+        self.geo_rows = geo_rows or []
         self.stale_count = stale_count
         self.executed: list[str] = []
         self.enqueued: list[Any] = []

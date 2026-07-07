@@ -60,7 +60,6 @@ from toolkit.dedup_engine import (
     decide_phash_fastpath,
     decide_visual_dismiss,
     disposition_class,
-    geo_cell_key,
     phash_excluded_tags_for,
     phash_render_exclude_for,
     prioritized_group_pairs,
@@ -742,8 +741,9 @@ _GEO_ELIGIBLE_SQL = """
     SELECT l.sreality_id, l.property_id, l.source, l.house_number,
            coalesce(l.area_m2, l.estate_area, l.usable_area) AS area,
            left(l.description, 600) AS description,
-           l.category_type, l.category_main, l.obec_id, l.price_czk,
-           ST_Y(l.geom::geometry) AS lat, ST_X(l.geom::geometry) AS lng
+           l.category_type, l.category_main, l.price_czk,
+           ST_Y(l.geom::geometry) AS lat, ST_X(l.geom::geometry) AS lng,
+           l.geo_cell_key
     FROM listings l
     JOIN properties p ON p.id = l.property_id AND p.status = 'active'
     WHERE l.is_active = true
@@ -759,9 +759,12 @@ _GEO_ELIGIBLE_SQL = """
 
 def _load_geo_eligible(conn: Any,
                        restrict_property_ids: set[int] | None = None) -> list[ListingKey]:
-    """One ListingKey per geo-eligible single-dwelling listing, keyed by its geo cell
-    (so the existing _group_by_street groups them). Carries lat/lng/price for the geo
-    classifier; disposition/floor/street_id are unused on this path.
+    """One ListingKey per geo-eligible single-dwelling listing, keyed by the STORED
+    listings.geo_cell_key (migration 276 trigger — the single SQL definition of the
+    blocking cell; no Python recompute) so the existing _group_by_street groups them.
+    Carries lat/lng/price for the geo classifier; disposition/floor/street_id are
+    unused on this path. Rows whose stored key is still NULL (pre-backfill / trigger
+    not yet fired) are skipped — they merely wait for the next run, never mis-group.
 
     `restrict_property_ids` scopes to those properties (the candidate drain), exactly like
     the street `_load_eligible` — an EMPTY set restricts to nothing (not all)."""
@@ -775,10 +778,7 @@ def _load_geo_eligible(conn: Any,
         rows = cur.fetchall()
     keys: list[ListingKey] = []
     for r in rows:
-        lat = float(r[10]) if r[10] is not None else None
-        lng = float(r[11]) if r[11] is not None else None
-        obec_id = int(r[8]) if r[8] is not None else None
-        cell = geo_cell_key(obec_id, lat, lng, r[7], r[6])
+        cell = r[11]
         if cell is None:
             continue
         keys.append(ListingKey(
@@ -788,8 +788,10 @@ def _load_geo_eligible(conn: Any,
             house_number=r[3], floor=None,
             area_m2=float(r[4]) if r[4] is not None else None,
             description=r[5], category_type=r[6], category_main=r[7],
-            street_id=None, lat=lat, lng=lng,
-            price_czk=int(r[9]) if r[9] is not None else None,
+            street_id=None,
+            lat=float(r[9]) if r[9] is not None else None,
+            lng=float(r[10]) if r[10] is not None else None,
+            price_czk=int(r[8]) if r[8] is not None else None,
         ))
     return keys
 
