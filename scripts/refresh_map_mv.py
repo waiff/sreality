@@ -65,9 +65,14 @@ select
   p.asset_id
 from properties p
 where p.status = 'active' and p.lat is not null and p.lng is not null
-  and (not publication_gate_enabled() or p.published_at is not null)
+  and (not (select publication_gate_enabled()) or p.published_at is not null)
 order by p.category_main, p.category_type, p.lat, p.lng
 """
+# The publication gate (migration 273) is wrapped in a scalar subquery so it
+# evaluates ONCE per rebuild (an InitPlan) instead of once per row — the same
+# fix migration 275 applies to properties_public's WHERE. Both anon-hot read
+# surfaces must wrap the SECURITY DEFINER gate call, never call it bare (a bare
+# SECURITY DEFINER qual can't be inlined -> per-row evaluation).
 
 
 def refresh(conn) -> None:

@@ -601,6 +601,11 @@ export default function BrowseExperience({
     tab === 'table' ? table.error :
     tab === 'stats' ? statsQuery.error :
     null;
+  const retryActive = () => {
+    if (tab === 'map') cards.refetch();
+    else if (tab === 'table') table.refetch();
+    else if (tab === 'stats') void statsQuery.refetch();
+  };
   const mapError = mapVisible ? mapQuery.error : null;
 
   return (
@@ -709,6 +714,7 @@ export default function BrowseExperience({
                 totalApprox={cohortTotalApprox}
                 sort={sort}
                 isLoading={cards.isLoading}
+                isError={cards.isError}
                 isFetchingNextPage={cards.isFetchingNextPage}
                 hasNextPage={cards.hasNextPage}
                 onReachEnd={cards.fetchNextPage}
@@ -809,6 +815,7 @@ export default function BrowseExperience({
                 totalApprox={cohortTotalApprox}
                 sort={sort}
                 isLoading={table.isLoading}
+                isError={table.isError}
                 isFetchingNextPage={table.isFetchingNextPage}
                 hasNextPage={table.hasNextPage}
                 onReachEnd={table.fetchNextPage}
@@ -833,7 +840,7 @@ export default function BrowseExperience({
 
         {activeError && (
           <div className="px-6 pb-6">
-            <ErrorBanner error={activeError} />
+            <ErrorBanner error={activeError} onRetry={retryActive} />
           </div>
         )}
       </div>
@@ -1150,24 +1157,36 @@ function MapErrorOverlay({ error }: { error: Error }) {
   );
 }
 
-function ErrorBanner({ error }: { error: Error }) {
-  /* A statement-timeout means the current cohort was too broad to page under
-   * the anon 3s budget (e.g. a country-wide map area combined with a sort that
-   * has no serving index, such as price/m²). The data-model fixes (migrations
-   * 250-254) make this rare, but the guard keeps the failure graceful — actionable
-   * guidance instead of the raw Postgres error. */
+function ErrorBanner({ error, onRetry }: { error: Error; onRetry?: () => void }) {
+  /* A statement-timeout means the list query didn't finish under the anon 3s
+   * budget. This is a transient/performance failure (often cold cache on this
+   * instance), NOT necessarily a too-broad cohort — so the copy offers a retry
+   * rather than telling the operator to narrow a cohort that may already be
+   * small. The read-path fixes (migrations 250-254, 275 + the keyset index fix)
+   * make it rare; the banner keeps the failure honest and actionable. */
   const isTimeout = /statement timeout|57014/i.test(error.message);
   return (
-    <div className="mt-4 p-3 rounded-[var(--radius-sm)] border border-[var(--color-brick)]/30 bg-[var(--color-brick-soft)] text-sm text-[var(--color-brick)]">
-      {isTimeout ? (
-        <>
-          <strong className="font-medium">This area is too broad to list.</strong>{' '}
-          Zoom the map in or add a filter to narrow the results.
-        </>
-      ) : (
-        <>
-          <strong className="font-medium">Query failed:</strong> {error.message}
-        </>
+    <div className="mt-4 p-3 rounded-[var(--radius-sm)] border border-[var(--color-brick)]/30 bg-[var(--color-brick-soft)] text-sm text-[var(--color-brick)] flex items-center justify-between gap-3">
+      <span>
+        {isTimeout ? (
+          <>
+            <strong className="font-medium">The list took too long to load.</strong>{' '}
+            This is usually transient — try again, or narrow the filters if it persists.
+          </>
+        ) : (
+          <>
+            <strong className="font-medium">Query failed:</strong> {error.message}
+          </>
+        )}
+      </span>
+      {onRetry && (
+        <button
+          type="button"
+          onClick={onRetry}
+          className="shrink-0 px-2 py-0.5 text-[0.75rem] tracking-wide rounded-[var(--radius-sm)] border border-[var(--color-brick)]/40 hover:bg-[var(--color-brick)]/10 transition-colors"
+        >
+          Retry
+        </button>
       )}
     </div>
   );

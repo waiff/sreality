@@ -43,6 +43,9 @@ interface Props {
   totalApprox?: boolean;
   sort: SortSpec;
   isLoading: boolean;
+  /* Suppresses the "no results" empty row when the query errored — the page
+   * ErrorBanner explains the failure instead. Mirrors ListingCards. */
+  isError?: boolean;
   isFetchingNextPage: boolean;
   hasNextPage: boolean;
   onReachEnd: () => void;
@@ -59,6 +62,7 @@ export default function ListingTable({
   totalApprox = false,
   sort,
   isLoading,
+  isError = false,
   isFetchingNextPage,
   hasNextPage,
   onReachEnd,
@@ -69,7 +73,7 @@ export default function ListingTable({
   onClearFilters,
 }: Props) {
   const showSkeleton = isLoading && rows == null;
-  const isEmpty = !showSkeleton && rows != null && rows.length === 0;
+  const isEmpty = !showSkeleton && !isError && rows != null && rows.length === 0;
   const loaded = rows?.length ?? 0;
 
   return (
