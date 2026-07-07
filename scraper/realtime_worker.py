@@ -51,8 +51,10 @@ matcher/outbox pattern from api/notifications + api/notification_outbox):
              (nominal */5) to a measured 2h median / 4.1h worst — this lane is
              what actually delivers "a new/changed listing reaches properties
              (and the Browse read model) within minutes". Safe beside the GH
-             cron + daily sweep: all callers serialize on a pg advisory lock
-             inside the pass (concurrent caller skips).
+             cron + daily sweep: all callers serialize on the maintenance
+             lease row (migration 279 — pooler-proof CAS; a session advisory
+             lock strands over the transaction pooler) — a concurrent caller
+             skips.
 - heartbeat: every 30s, upsert this worker's beat + per-lane counters into
              worker_heartbeats (migration 269) — the Health-page liveness hook,
              now including the dedup lane's claimed/cleared/merge counters.
@@ -124,8 +126,8 @@ DEDUP_MAX_SECONDS_CAP = 240.0
 # measured a 2h MEDIAN / 4.1h worst gap (2026-07-07 audit), so "a new listing
 # reaches properties/Browse within ~5 min" was off by ~24x. Ships LIVE (the
 # fix is the point); interval <= 0 idles it. Safe beside the GH cron + daily
-# sweep by construction: all three serialize on the pg advisory lock inside
-# run_incremental_pass (a concurrent caller skips, it never queues up).
+# sweep by construction: all three serialize on the maintenance lease row
+# (migration 279) inside run_incremental_pass (a concurrent caller skips).
 MAINTENANCE_INTERVAL_DEFAULT = 120
 MAINTENANCE_BATCH_SIZE_DEFAULT = 2000
 
@@ -747,8 +749,8 @@ async def _dedup_pass(stop_event: asyncio.Event, state: dict[str, Any]) -> None:
 
 def _maintenance_sync() -> dict[str, Any]:
     """One incremental property-maintenance pass on the worker's own
-    connection. Reuses THE script implementation (never forks it); the advisory
-    lock inside run_incremental_pass makes this safe beside the GH cron and the
+    connection. Reuses THE script implementation (never forks it); the lease
+    row inside run_incremental_pass makes this safe beside the GH cron and the
     daily full sweep — a concurrent caller returns skipped. Lazy import keeps
     scripts.recompute_property_stats off the worker's startup path."""
     from scripts.recompute_property_stats import run_incremental_pass
@@ -774,7 +776,7 @@ async def _maintenance_pass(stop_event: asyncio.Event, state: dict[str, Any]) ->
         "imageless": stats.get("imageless", 0),
     }
     if last["skipped"]:
-        LOG.info("MAINTENANCE lane skipped (lock held by cron or daily sweep)")
+        LOG.info("MAINTENANCE lane skipped (lease held by cron or daily sweep)")
     else:
         LOG.info(
             "MAINTENANCE lane attached=%d recomputed=%d published=%d imageless=%d",
