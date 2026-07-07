@@ -27,6 +27,7 @@ from psycopg.types.json import Jsonb, set_json_dumps
 from scraper import media
 from scraper.scraped_listing import ScrapedListing
 from scraper.street import street_name_key
+from toolkit.publication import eligible_predicate
 
 LOG = logging.getLogger(__name__)
 
@@ -1908,19 +1909,22 @@ _BATCH_DIRTY_FROM_SIDS_SQL = """
 # TWO enqueue gates keep this a REAL-TIME CHANGE signal, not an ENRICHMENT-progress firehose
 # (the flood that stalled the drain twice — the whole market streamed through the tagger and
 # every property landed here, 78.5% of them un-mergeable):
-#   * ELIGIBILITY (property-grain): the property must have >=1 street+disposition listing, so it
-#     can actually join a street group. The street-only --dirty drain never runs geo, so a
-#     property with no eligible listing can NEVER merge here — enqueuing it is pure dead weight.
-#     Property-grain (any listing of P), NOT the tagged listing's own eligibility: the re-tagged
-#     image may belong to a street-less bazos sibling while the property's eligible sreality
-#     listing is what actually merges.
+#   * ELIGIBILITY (property-grain): the property must have >=1 listing the dedup engine can
+#     actually reach — street+disposition (the street pass) OR a geo-eligible single-dwelling
+#     row (the geo pass; run_dirty_pass runs a geo sub-pass over the claimed properties'
+#     stored geo_cell_key cells, so geo-family properties merge on this lane too — the gate
+#     was street-only while the drain was). The predicate is
+#     toolkit.publication.eligible_predicate rendered for the subquery alias, never a hand
+#     copy. Property-grain (any listing of P), NOT the tagged listing's own eligibility: the
+#     re-tagged image may belong to an ineligible sibling (a street-less bazos byt, a
+#     geom-less re-post) while the property's eligible listing is what actually merges.
 #   * RECENCY: only a genuinely NEW listing needs the minutes-latency lane. A market-wide CLIP
 #     backfill (or a new portal's back-catalogue) tags OLD listings whose dedup is already the
 #     6h full scan's job; routing them here is what floods the queue. `first_seen_at` on the
 #     TAGGED listing is the "new arrival" signal. Older-but-newly-eligible pairs (a street
 #     backfilled onto an old listing) are the full scan's job today too — no regression.
-# Anything these gates drop is still deduped by the 6h full scan (the correctness backstop);
-# they only keep the real-time lane scoped to work it can act on fast.
+# Anything these gates drop is still deduped by the scheduled full scans (the correctness
+# backstop); they only keep the real-time lane scoped to work it can act on fast.
 _DEDUP_DIRTY_RECENCY_DAYS = 7
 
 _DEDUP_DIRTY_FROM_IMAGE_IDS_SQL = f"""
@@ -1935,7 +1939,7 @@ _DEDUP_DIRTY_FROM_IMAGE_IDS_SQL = f"""
       AND EXISTS (
         SELECT 1 FROM listings le
         WHERE le.property_id = l.property_id
-          AND le.street IS NOT NULL AND le.street <> '' AND le.disposition IS NOT NULL
+          AND ({eligible_predicate("le")})
       )
       AND l.first_seen_at > now() - interval '{_DEDUP_DIRTY_RECENCY_DAYS} days'
     ON CONFLICT (property_id) DO UPDATE SET marked_at = now()
