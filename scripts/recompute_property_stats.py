@@ -588,32 +588,57 @@ def _max_property_id(conn: Any) -> int:
         return int(cur.fetchone()[0])
 
 
-# One session-level advisory lock serializes EVERY property-maintenance writer:
-# the GH incremental cron, the daily full sweep, AND the realtime worker's
-# maintenance lane. Before the worker lane existed, the GH concurrency group
-# (`sreality-property-maintenance`) was the only serialization — sufficient
-# while GH Actions was the only caller, useless once a second runtime joined.
-# Incremental callers TRY the lock and skip (the next tick is seconds away);
-# the daily full sweep WAITS (it is the backstop and must not be skipped).
-_MAINTENANCE_LOCK = "property-maintenance"
+# A single-row LEASE serializes EVERY property-maintenance writer: the GH
+# incremental cron, the daily full sweep, AND the realtime worker's maintenance
+# lane (property_maintenance_lease, migration 279). Claimed by ONE atomic
+# UPDATE ... RETURNING, so it is sound over the transaction-mode pooler —
+# unlike a session advisory lock, whose lock/unlock statements can land on
+# DIFFERENT pooled backends (the #716 defect: the unlock silently no-ops and
+# the lock strands, skipping every future pass). Expiry self-heals a crashed
+# holder. Incremental callers TRY the lease and skip when held (the next tick
+# is seconds away); the daily full sweep RETRIES until it holds it (the
+# backstop must not be skipped) and takes a sweep-length lease.
+_INCREMENTAL_LEASE = "15 minutes"
+_FULL_SWEEP_LEASE = "3 hours"
+_LEASE_RETRY_SECONDS = 10.0
+
+_TRY_LEASE_SQL = """
+    UPDATE property_maintenance_lease
+       SET holder = %(holder)s, expires_at = now() + %(lease)s::interval
+     WHERE id = 1
+       AND (holder IS NULL OR expires_at < now() OR holder = %(holder)s)
+    RETURNING 1
+"""
+
+_RELEASE_LEASE_SQL = """
+    UPDATE property_maintenance_lease
+       SET holder = NULL, expires_at = NULL
+     WHERE id = 1 AND holder = %(holder)s
+"""
 
 
-def _try_maintenance_lock(conn: Any) -> bool:
+def _new_holder(kind: str) -> str:
+    import uuid
+
+    return f"{kind}:{uuid.uuid4()}"
+
+
+def _try_lease(conn: Any, holder: str, lease: str) -> bool:
     with conn.cursor() as cur:
-        cur.execute("SELECT pg_try_advisory_lock(hashtext(%s))", (_MAINTENANCE_LOCK,))
-        return bool(cur.fetchone()[0])
+        cur.execute(_TRY_LEASE_SQL, {"holder": holder, "lease": lease})
+        return cur.fetchone() is not None
 
 
-def _wait_maintenance_lock(conn: Any) -> None:
+def _wait_lease(conn: Any, holder: str, lease: str) -> None:
+    while not _try_lease(conn, holder, lease):
+        LOG.info("MAINTENANCE lease held by another writer; retrying in %.0fs",
+                 _LEASE_RETRY_SECONDS)
+        time.sleep(_LEASE_RETRY_SECONDS)
+
+
+def _release_lease(conn: Any, holder: str) -> None:
     with conn.cursor() as cur:
-        cur.execute("SELECT pg_advisory_lock(hashtext(%s))", (_MAINTENANCE_LOCK,))
-        cur.fetchone()
-
-
-def _unlock_maintenance(conn: Any) -> None:
-    with conn.cursor() as cur:
-        cur.execute("SELECT pg_advisory_unlock(hashtext(%s))", (_MAINTENANCE_LOCK,))
-        cur.fetchone()
+        cur.execute(_RELEASE_LEASE_SQL, {"holder": holder})
 
 
 def run_incremental_pass(conn: Any, batch_size: int = 2000) -> dict[str, Any]:
@@ -621,11 +646,14 @@ def run_incremental_pass(conn: Any, batch_size: int = 2000) -> dict[str, Any]:
     behind the GH cron (property_maintenance.yml) and the realtime worker's
     maintenance lane: attach new stragglers (skip the legacy native-id
     backfill), recompute the dirty set, publish ineligible properties, enqueue
-    imageless for dedup. Serialized by the advisory lock; a caller that finds
-    the lock held returns {"skipped": True} — the concurrent pass is doing the
-    same work, and the next tick is seconds away.
+    imageless for dedup. Serialized by the maintenance lease; a caller that
+    finds the lease held returns {"skipped": True} — the concurrent pass is
+    doing the same work, and the next tick is seconds away. A pass normally
+    runs seconds; the 15-minute lease is a wide margin, and its expiry
+    self-heals a crashed holder.
     """
-    if not _try_maintenance_lock(conn):
+    holder = _new_holder("incremental")
+    if not _try_lease(conn, holder, _INCREMENTAL_LEASE):
         return {"skipped": True, "attached": 0, "recomputed": 0,
                 "published": 0, "imageless": 0}
     try:
@@ -639,7 +667,7 @@ def run_incremental_pass(conn: Any, batch_size: int = 2000) -> dict[str, Any]:
         return {"skipped": False, "attached": attached, "recomputed": recomputed,
                 "published": published, "imageless": imageless}
     finally:
-        _unlock_maintenance(conn)
+        _release_lease(conn, holder)
 
 
 def main() -> int:
@@ -723,9 +751,11 @@ def main() -> int:
             )
             return 0
 
-        # The full sweep WAITS for the lock (it is the daily backstop and must
-        # not be skipped); incremental passes elsewhere skip while it runs.
-        _wait_maintenance_lock(conn)
+        # The full sweep RETRIES for the lease (it is the daily backstop and
+        # must not be skipped); incremental passes elsewhere skip while it
+        # runs. Worst-case wait = one incremental lease (15 min).
+        holder = _new_holder("full")
+        _wait_lease(conn, holder, _FULL_SWEEP_LEASE)
         try:
             attached = _attach_stragglers(conn)
             LOG.info("RECOMPUTE stragglers attached=%d", attached)
@@ -751,7 +781,7 @@ def main() -> int:
             with conn.cursor() as cur:
                 cur.execute(_CLEAR_DIRTY_SQL, {"cutoff": cutoff})
         finally:
-            _unlock_maintenance(conn)
+            _release_lease(conn, holder)
 
     elapsed = time.monotonic() - started_at
     LOG.info(

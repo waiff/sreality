@@ -34,7 +34,7 @@ name: "Jobs: property maintenance (incremental)"
 #
 # Concurrency: shares the `sreality-property-maintenance` group with the daily
 # full sweep so two GH runs never overlap; the realtime worker's lane is
-# serialized against BOTH by the pg advisory lock inside run_incremental_pass
+# serialized against BOTH by the maintenance lease inside run_incremental_pass
 # (a concurrent caller skips its tick); cancel-in-progress=false so a pass is
 # never killed mid-recompute.
 #
