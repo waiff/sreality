@@ -61,7 +61,11 @@ import time
 from collections.abc import Iterator
 from typing import Any
 
-from toolkit.publication import GEO_ELIGIBLE_PREDICATE, STREET_ELIGIBLE_PREDICATE
+from toolkit.publication import (
+    GEO_ELIGIBLE_PREDICATE,
+    STREET_ELIGIBLE_PREDICATE,
+    eligible_predicate,
+)
 
 LOG = logging.getLogger("recompute_property_stats")
 
@@ -497,6 +501,63 @@ def _publish_sweep(conn: Any) -> int:
         return cur.rowcount or 0
 
 
+# The CLIP-tag event fires only when a listing's STORED images finish tagging, so it is
+# the real-time dedup enqueue trigger for photo-carrying listings only. Images usually
+# land in R2 within minutes of a scrape; a property still image-less after this window
+# is a genuinely photo-less ad that will never tag and never enqueue.
+IMAGELESS_EVAL_MINUTES = 30
+
+# Already-queued properties are EXCLUDED outright (NOT bumped via ON CONFLICT ... DO
+# UPDATE): this sweep runs every 5 minutes, and re-bumping marked_at on the same
+# still-queued rows would keep resetting their position in the --dirty drain's
+# newest-first claim — making stale imageless rows perpetually "fresh" and starving the
+# genuinely new ones the real-time lane exists for. The residual ON CONFLICT DO NOTHING
+# only guards the race with a concurrent tag-event enqueue between the anti-join and the
+# INSERT.
+_ENQUEUE_IMAGELESS_SQL = f"""
+    INSERT INTO dedup_dirty_properties (property_id)
+    SELECT p.id
+    FROM properties p
+    WHERE p.published_at IS NULL
+      AND p.status = 'active'
+      AND p.first_seen_at < now() - interval '{IMAGELESS_EVAL_MINUTES} minutes'
+      AND EXISTS (
+        SELECT 1 FROM listings le
+        WHERE le.property_id = p.id
+          AND ({eligible_predicate("le")})
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM listings li
+        JOIN images i ON i.sreality_id = li.sreality_id
+        WHERE li.property_id = p.id
+          AND i.storage_path IS NOT NULL
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM dedup_dirty_properties d WHERE d.property_id = p.id
+      )
+    ON CONFLICT (property_id) DO NOTHING
+"""
+
+
+def _enqueue_imageless_for_dedup(conn: Any) -> int:
+    """Route unpublished, dedup-ELIGIBLE properties with zero stored images into the
+    real-time dedup_dirty_properties lane so the engine EVALUATES them.
+
+    WHY: the CLIP-tag event is the only real-time enqueue trigger, and a photo-less
+    listing never tags — so an eligible imageless property would otherwise sit
+    unpublished until a slow full scan reached its group. This is an EVALUATION
+    trigger, NOT a publish-timeout: the property publishes only after the engine
+    actually decides its groups (rule B/C or the geo classify — both deterministic;
+    the visual layer no-ops without photos) and stamps it dedup-checked, exactly like
+    every other property. (The operator explicitly rejected publish-on-timer.)
+
+    A property that later GETS images re-enqueues via the tag event naturally;
+    re-evaluation is idempotent."""
+    with conn.cursor() as cur:
+        cur.execute(_ENQUEUE_IMAGELESS_SQL)
+        return cur.rowcount or 0
+
+
 def _drain_dirty(conn: Any, batch_size: int, cutoff: Any) -> int:
     """Recompute every property queued at/before `cutoff`, scoped + batched.
 
@@ -594,11 +655,12 @@ def main() -> int:
             attached = _attach_stragglers(conn, skip_native_backfill=True)
             recomputed = _drain_dirty(conn, args.batch_size, cutoff)
             published = _publish_sweep(conn)
+            imageless = _enqueue_imageless_for_dedup(conn)
             elapsed = time.monotonic() - started_at
             LOG.info(
                 "RECOMPUTE incremental done attached=%d recomputed=%d "
-                "published_ineligible=%d elapsed=%.1fs",
-                attached, recomputed, published, elapsed,
+                "published_ineligible=%d imageless_enqueued=%d elapsed=%.1fs",
+                attached, recomputed, published, imageless, elapsed,
             )
             return 0
 

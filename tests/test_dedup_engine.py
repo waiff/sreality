@@ -1824,6 +1824,185 @@ def test_run_engine_cursor_truncation_reports_frontier(monkeypatch: Any) -> None
     assert cursor_out["reached_end"] is False
 
 
+# --- geo scan lane (PR-C): the same cursor machinery over geo cell keys ------
+
+_GEO_CELL_A = "geo:5001:50.1:14.5:dum|komercni:prodej"
+_GEO_CELL_B = "geo:5002:50.2:14.6:dum|komercni:prodej"
+_GEO_CELL_C = "geo:5003:50.3:14.7:dum|komercni:prodej"
+
+
+def _three_cell_geo_rows() -> list[tuple[Any, ...]]:
+    # Three geo cells of two cross-source members each; the stored cell keys sort
+    # lexically A < B < C (run_engine's cursor branch is key-agnostic).
+    return [
+        _geo_row(1, 101, cell=_GEO_CELL_A),
+        _geo_row(2, 102, cell=_GEO_CELL_A, source="idnes"),
+        _geo_row(3, 103, cell=_GEO_CELL_B),
+        _geo_row(4, 104, cell=_GEO_CELL_B, source="idnes"),
+        _geo_row(5, 105, cell=_GEO_CELL_C),
+        _geo_row(6, 106, cell=_GEO_CELL_C, source="idnes"),
+    ]
+
+
+def test_run_engine_geo_cursor_resumes_after_cell_key(monkeypatch: Any) -> None:
+    """The geo pass rides run_engine's existing cursor branch unchanged: with cursor_out
+    enabled it iterates geo cells in SORTED stored-key order and resumes strictly AFTER
+    scan_cursor — the lane='geo' frontier that stops the scheduled geo backstop from
+    head-restarting at the top every run (the pre-mig-261 street pathology)."""
+    import scripts.dedup_engine as eng
+
+    monkeypatch.setattr(eng, "resolve_pair", _stub_resolve_pair)
+    cursor_out: dict[str, Any] = {}
+    stats = eng.run_engine(
+        _FakeConn([], geo_rows=_three_cell_geo_rows()),
+        geo=True, scan_cursor=_GEO_CELL_A, cursor_out=cursor_out,
+        max_pairs=100, max_vision_calls=0)
+    assert stats["pairs_considered"] == 2  # cells B + C only; A skipped (behind cursor)
+    assert cursor_out["last_key"] == _GEO_CELL_C
+    assert cursor_out["reached_end"] is True  # end of list -> cycle completes
+    # The coverage gauges populate for geo runs too now that the caller passes cursor_out.
+    assert stats["scan_groups_total"] == 2 and stats["scan_groups_scanned"] == 2
+
+
+def test_run_engine_geo_cursor_truncation_reports_frontier(monkeypatch: Any) -> None:
+    """A truncated geo cursor run reports the last fully-scanned CELL as the frontier and
+    reached_end=False — the next scheduled run resumes there instead of the head."""
+    import scripts.dedup_engine as eng
+
+    monkeypatch.setattr(eng, "resolve_pair", _stub_resolve_pair)
+    cursor_out: dict[str, Any] = {}
+    stats = eng.run_engine(
+        _FakeConn([], geo_rows=_three_cell_geo_rows()),
+        geo=True, scan_cursor=None, cursor_out=cursor_out,
+        max_pairs=2, max_vision_calls=0)  # budget dies at cell B's boundary
+    assert stats["truncated"] == 1
+    assert stats["truncated_cause"] == "pair_cap"
+    assert cursor_out["last_key"] == _GEO_CELL_A
+    assert cursor_out["reached_end"] is False
+
+
+def _run_geo_only_main(monkeypatch: Any, *, reached_end: bool, last_key: str | None,
+                       loaded_state: dict[str, Any] | None = None,
+                       extra_argv: tuple[str, ...] = ()) -> dict[str, Any]:
+    """Drive main() end-to-end for a --geo-only run with the DB + settings + engine
+    faked, capturing the scan-state lane traffic (load/save lane, run_engine kwargs)."""
+    import sys
+    import types
+
+    import scripts.dedup_engine as eng
+    import toolkit.dedup_settings as ds
+
+    calls: dict[str, Any] = {"load": [], "save": [], "run_rows": [], "engine": []}
+
+    class _Conn:
+        def __enter__(self) -> "_Conn":
+            return self
+
+        def __exit__(self, *exc: Any) -> bool:
+            return False
+
+        def cursor(self) -> Any:
+            raise AssertionError("unexpected direct DB access in this main() path")
+
+    monkeypatch.setenv("SUPABASE_DB_URL", "postgres://test")
+    monkeypatch.setattr(sys, "argv", ["dedup_engine", "--geo-only", *extra_argv])
+    monkeypatch.setitem(
+        sys.modules, "psycopg",
+        types.SimpleNamespace(connect=lambda *a, **k: _Conn()))
+
+    settings = {
+        "dedup_geo_enabled": True,
+        "dedup_geo_area_max_pct": 0.20,
+        "dedup_floor_plan_budget": 0,
+        "dedup_floor_plan_inconclusive_to_review": False,
+    }
+    monkeypatch.setattr(ds, "read_setting", lambda conn, key: settings[key])
+    monkeypatch.setattr(eng, "_auto_merge_enabled", lambda conn: False)
+    monkeypatch.setattr(eng, "_visual_autodismiss_enabled", lambda conn: True)
+    monkeypatch.setattr(eng, "_clip_settings", lambda conn: {
+        "prefer_clip": False, "clip_model": None, "cosine_enabled": False,
+        "bands": None, "haiku_model": None, "render_min": 0.95,
+    })
+
+    state = loaded_state or {"cursor_key": None, "cycle_started_at": None}
+
+    def _load(conn: Any, lane: str = "street") -> dict[str, Any]:
+        calls["load"].append(lane)
+        return dict(state)
+
+    def _save(conn: Any, lane: str, *, cursor_key: str | None,
+              cycle_started_at: Any, completed: bool) -> None:
+        calls["save"].append({"lane": lane, "cursor_key": cursor_key,
+                              "cycle_started_at": cycle_started_at,
+                              "completed": completed})
+
+    def _fake_run_engine(conn: Any, **kw: Any) -> dict[str, Any]:
+        calls["engine"].append(kw)
+        if kw.get("cursor_out") is not None:
+            kw["cursor_out"]["last_key"] = last_key
+            kw["cursor_out"]["reached_end"] = reached_end
+        return {
+            "eligible": 5, "auto_phash": 0, "auto_visual": 0, "auto_dismissed": 0,
+            "floor_plan_deferred": 0, "queued": 1, "skipped_unresolved": 0,
+            "rejected": 0, "pairs_considered": 3, "vision_calls": 0,
+            "truncated": 0 if reached_end else 1,
+        }
+
+    monkeypatch.setattr(eng, "_load_scan_state", _load)
+    monkeypatch.setattr(eng, "_save_scan_state", _save)
+    monkeypatch.setattr(eng, "run_engine", _fake_run_engine)
+    monkeypatch.setattr(
+        eng, "_write_run_row",
+        lambda conn, stats, **kw: calls["run_rows"].append({"stats": stats, **kw}))
+    monkeypatch.setattr(eng, "_write_pair_audit", lambda *a, **k: None)
+
+    assert eng.main() == 0
+    return calls
+
+
+def test_main_geo_only_truncated_run_advances_geo_lane_frontier(monkeypatch: Any) -> None:
+    """main()'s geo branch mirrors the street full-scan branch: it loads lane='geo' scan
+    state, threads the loaded cursor + a cursor_out into run_engine(geo=True), and saves
+    the frontier (completed=False) when the run truncated mid-market."""
+    calls = _run_geo_only_main(
+        monkeypatch, reached_end=False, last_key=_GEO_CELL_B,
+        loaded_state={"cursor_key": _GEO_CELL_A, "cycle_started_at": "T0"})
+
+    assert calls["load"] == ["geo"]
+    (engine_kw,) = calls["engine"]
+    assert engine_kw["geo"] is True
+    assert engine_kw["scan_cursor"] == _GEO_CELL_A       # resumes from the loaded frontier
+    assert isinstance(engine_kw["cursor_out"], dict)     # gauges populate for geo runs
+    (save,) = calls["save"]
+    assert save == {"lane": "geo", "cursor_key": _GEO_CELL_B,
+                    "cycle_started_at": "T0", "completed": False}
+    assert calls["run_rows"] and calls["run_rows"][0]["run_kind"] == "geo"
+
+
+def test_main_geo_only_completed_run_resets_geo_lane_cursor(monkeypatch: Any) -> None:
+    """Reaching the end of the sorted cell list completes the lane='geo' CYCLE: the saved
+    state resets the cursor (completed=True), so the next run starts a fresh cycle."""
+    calls = _run_geo_only_main(monkeypatch, reached_end=True, last_key=_GEO_CELL_C)
+
+    (save,) = calls["save"]
+    assert save["lane"] == "geo"
+    assert save["completed"] is True
+    assert save["cursor_key"] is None
+    # Fresh lane (no cycle_started_at loaded) -> the cycle stamp falls back to run start.
+    assert save["cycle_started_at"] is not None
+
+
+def test_main_geo_only_shadow_never_saves_scan_state(monkeypatch: Any) -> None:
+    """--shadow writes nothing — the geo lane's frontier included (mirrors the street
+    branch's not-args.shadow guard)."""
+    calls = _run_geo_only_main(
+        monkeypatch, reached_end=True, last_key=_GEO_CELL_C, extra_argv=("--shadow",))
+
+    assert calls["load"] == ["geo"]  # still resumes from the frontier (read-only)
+    assert calls["save"] == []
+    assert calls["run_rows"] == []
+
+
 # --- oversized groups: disposition-class sharding + bounded processing -------
 
 def test_disposition_class_loose_equivalence() -> None:

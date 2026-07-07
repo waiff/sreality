@@ -3212,13 +3212,48 @@ def main() -> int:
             # geo dup. The scheduled run is paid (auto-merges the confident ones via the facade
             # compare first); an ad-hoc --geo-only --free still surfaces the co-located candidates.
             geo_kw = {**engine_kw, "enqueue_unresolved": True}
+            # Geo full-scan CURSOR (lane='geo', migration 261 — the table is lane-keyed for
+            # exactly this): the scheduled geo backstop FULL-LOADS the market each run, so
+            # without a frontier it head-restarted at the top every run and the tail was
+            # structurally never reached (the pre-cursor street pathology). Geo groups key
+            # on the stored listings.geo_cell_key — plain strings that sort lexically like
+            # street keys, so run_engine's key-agnostic cursor branch applies unchanged.
+            # Mirrors the street full-scan branch above: scoped runs (--candidates + --geo)
+            # keep insertion order and no state is persisted; a crash persists nothing,
+            # which only makes the cycle stamp LATER — conservative-safe.
+            geo_full_scan = not args.candidates and restrict is None
+            geo_cursor_out: dict[str, Any] | None = None
+            geo_scan_state: dict[str, Any] = {"cursor_key": None, "cycle_started_at": None}
+            geo_cycle_started_at: Any = None
+            if geo_full_scan:
+                geo_scan_state = _load_scan_state(conn, "geo")
+                geo_cycle_started_at = geo_scan_state["cycle_started_at"] or geo_started_at
+                geo_cursor_out = {}
+                LOG.info("CURSOR geo scan resuming after %r (cycle started %s)",
+                         geo_scan_state["cursor_key"], geo_cycle_started_at)
             geo_stats = run_engine(
                 conn, audit=geo_audit, max_pairs=args.geo_max_pairs,
-                geo=True, geo_area_max_pct=geo_area_max_pct, **geo_kw,
+                geo=True, geo_area_max_pct=geo_area_max_pct,
+                scan_cursor=geo_scan_state["cursor_key"], cursor_out=geo_cursor_out,
+                **geo_kw,
             )
             geo_stats["clip_classified"] = clip_counter[0] - geo_clip_base
             geo_stats["vision_errors"] = vision_errors[0] - geo_err_base
             if not args.shadow:
+                if geo_full_scan and geo_cursor_out is not None:
+                    geo_reached_end = bool(geo_cursor_out.get("reached_end"))
+                    # A truncated run that scanned nothing keeps the previous frontier
+                    # (never regress the cursor to the top on a degenerate run).
+                    geo_new_cursor = (
+                        None if geo_reached_end
+                        else (geo_cursor_out.get("last_key")
+                              or geo_scan_state["cursor_key"]))
+                    _save_scan_state(
+                        conn, "geo", cursor_key=geo_new_cursor,
+                        cycle_started_at=geo_cycle_started_at, completed=geo_reached_end)
+                    LOG.info("CURSOR geo saved: %s",
+                             "cycle COMPLETED" if geo_reached_end
+                             else f"frontier at {geo_new_cursor!r}")
                 # The geo lane writes its OWN run row (run_kind='geo', migration 262/265) —
                 # it previously wrote none, so a chronically truncating geo scan was
                 # invisible. Its `eligible` is the GEO lane's count; the street gauge

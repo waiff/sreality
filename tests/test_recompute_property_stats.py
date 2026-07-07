@@ -207,6 +207,93 @@ def test_publish_sweep_only_touches_unpublished_ineligible():
     assert "IS NOT TRUE" in sql
 
 
+def test_enqueue_imageless_routes_to_dedup_dirty_lane():
+    """The zero-image EVALUATION sweep routes unpublished, dedup-ELIGIBLE, imageless
+    properties into dedup_dirty_properties — an evaluation trigger (the engine still
+    decides + stamps them), never a publish-timeout. Pins the SQL shape: age gate,
+    the shared street-OR-geo predicate, the zero-stored-images anti-join, and the
+    exclude-already-queued guard (no marked_at bump — newest-first priority intact)."""
+    from scripts.recompute_property_stats import (
+        IMAGELESS_EVAL_MINUTES,
+        _enqueue_imageless_for_dedup,
+    )
+    from toolkit.publication import eligible_predicate
+
+    conn = _FakeConn([
+        (lambda s: "INSERT INTO dedup_dirty_properties" in s, [(1,)]),
+    ])
+    assert _enqueue_imageless_for_dedup(conn) == 1
+
+    entry = _find(conn, "INSERT INTO dedup_dirty_properties")
+    assert entry is not None
+    sql = " ".join(entry[0].split())
+    assert "p.published_at IS NULL" in sql
+    assert "p.status = 'active'" in sql
+    assert f"interval '{IMAGELESS_EVAL_MINUTES} minutes'" in sql
+    # dedup-eligible via the SHARED street-OR-geo predicate, property-grain EXISTS.
+    assert " ".join(eligible_predicate("le").split()) in sql
+    assert "le.property_id = p.id" in sql
+    # zero STORED images across ALL the property's listings.
+    assert "i.storage_path IS NOT NULL" in sql
+    # already-queued rows are EXCLUDED, not bumped (bumping resets newest-first order).
+    assert "FROM dedup_dirty_properties d WHERE d.property_id = p.id" in sql
+    assert "DO NOTHING" in sql and "DO UPDATE" not in sql
+    # never writes published_at itself — publishing stays the engine's stamp.
+    assert "published_at = " not in sql
+
+
+class _MainConn(_FakeConn):
+    """Context-manager conn for driving main(): serves the cutoff SELECT, records the rest."""
+
+    def __init__(self) -> None:
+        super().__init__([(lambda s: s == "SELECT now()", [("CUTOFF",)])])
+
+    def __enter__(self) -> "_MainConn":
+        return self
+
+    def __exit__(self, *exc: Any) -> bool:
+        return False
+
+
+def _run_main(monkeypatch: Any, argv: list[str]) -> list[str]:
+    import sys
+    import types
+
+    import scripts.recompute_property_stats as rps
+
+    calls: list[str] = []
+    monkeypatch.setenv("SUPABASE_DB_URL", "postgres://test")
+    monkeypatch.setattr(sys, "argv", ["recompute_property_stats", *argv])
+    monkeypatch.setitem(
+        sys.modules, "psycopg",
+        types.SimpleNamespace(connect=lambda *a, **k: _MainConn()))
+    monkeypatch.setattr(
+        rps, "_attach_stragglers", lambda c, **k: calls.append("attach") or 0)
+    monkeypatch.setattr(
+        rps, "_drain_dirty", lambda c, bs, cutoff: calls.append("drain") or 0)
+    monkeypatch.setattr(rps, "_publish_sweep", lambda c: calls.append("publish") or 0)
+    monkeypatch.setattr(
+        rps, "_enqueue_imageless_for_dedup", lambda c: calls.append("imageless") or 0)
+    monkeypatch.setattr(rps, "_reconcile_childless", lambda c: 0)
+    monkeypatch.setattr(rps, "_max_property_id", lambda c: 0)
+    assert rps.main() == 0
+    return calls
+
+
+def test_incremental_runs_imageless_sweep_after_publish(monkeypatch: Any) -> None:
+    """--incremental (the */5 cron) runs the imageless evaluation sweep right after the
+    ineligible publish sweep — same placement pattern, O(new unpublished) each pass."""
+    assert _run_main(monkeypatch, ["--incremental"]) == [
+        "attach", "drain", "publish", "imageless"]
+
+
+def test_full_mode_skips_publish_and_imageless_sweeps(monkeypatch: Any) -> None:
+    """The daily full sweep matches _publish_sweep's placement: neither publish nor the
+    imageless enqueue runs there (both are the incremental pass's job)."""
+    calls = _run_main(monkeypatch, [])
+    assert calls == ["attach"]
+
+
 def test_publication_predicates_parity_with_engine():
     """toolkit.publication mirrors the engine's eligibility VERBATIM (single source), so
     the ineligible sweep can never publish a property the engine WOULD dedup-check. A
