@@ -1,6 +1,6 @@
 # Unified Browse read model
 
-> **Status: DESIGN, NOT YET BUILT (2026-07-07).** Proposed follow-up to the
+> **Status: BUILT (2026-07-07/08) — see the implementation addendum at the bottom.** Proposed follow-up to the
 > P0 hotfix in PR #707 (`fix/browse-read-path`), which restored Browse but left
 > the underlying structural debt in place. This doc is for operator review
 > before any schema lands. Nothing here is applied. See ROADMAP.md for
@@ -226,3 +226,43 @@ the class of bug that has recurred across migrations 247/253/275.
   case; a tiny sparse bbox with a recency sort is a separate, rare shape.
 - Changing the write model, `listings`/`properties` split, or the dedup/publication
   pipelines. This is purely a read-path concern.
+
+
+## Implementation addendum (2026-07-08, as built)
+
+Shipped as migrations 276–278 + the reader-swap PR. Four deliberate deviations
+from the design above, each an improvement discovered during build-time
+validation — recorded here so the doc matches reality:
+
+1. **`browse_list` is an UNLOGGED TABLE, not a matview.** A 5-min blue-green
+   matview rebuild writes the full heap + indexes through WAL 288×/day
+   (~75–100 GB/day) into an already I/O-saturated instance. UNLOGGED skips WAL
+   for exactly this disposable derived data; crash recovery truncates it and
+   the next 5-min tick rebuilds. (The 30-min map stays a matview — accepted
+   status quo.)
+2. **pg_cron, not GH Actions.** Both rebuilds are SECURITY DEFINER SQL
+   functions (`rebuild_browse_list`, `rebuild_properties_map_mv`) scheduled
+   in-DB (`*/5` / `7,37 * * * *`) — the `refresh_health_matviews` precedent.
+   GH Actions cron is throttled/jittered (~2× measured); a pure-DB rebuild has
+   no business on an external runner. `scripts/refresh_map_mv.py` + its
+   workflow are retired; rebuild stamps live in `browse_read_model_state`.
+3. **Lean 5-index set instead of replicating the live table's index zoo.** The
+   snapshot is physically ordered `(category_main, category_type,
+   first_seen_at)`, so any within-category query reads a contiguous band —
+   secondary sort lanes (last_seen, area, price/m², yield…) are band-scan +
+   top-N sort, well under the anon budget, with NO dedicated indexes. Only the
+   default keyset lane and the three district+price lanes (the migration-253
+   lesson: district rows are not contiguous in a category ordering) get
+   indexes, plus the PK.
+4. **`street` is bare `p.street`, and the ~4.2k-row COALESCE gap was fixed
+   upstream** (enqueued into `dirty_properties` → the golden-record recompute),
+   instead of carrying a 450k-row listings join in every rebuild. The
+   "identical column contract" claim in the rollout section was measured
+   ~0.95% wrong before this fix; after it, bare `p.street` is the contract.
+
+Also implemented from the follow-ups section: exact-first counting (measured
+201 ms fully cold, index-only, for the broadest cohort — "~N" is now the rare
+fallback), and the default sort switched to `first_seen_at DESC` (operator
+decision). Still open: live-table index retirement (≥7-day
+`pg_stat_user_indexes` observation window, then a forward migration with
+operator OK) and the row-comparison keyset cursor (blocked on PostgREST).

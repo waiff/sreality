@@ -232,6 +232,30 @@ End-to-end browser flow over the U1b backend.
   `FreshnessBlock` component test (the full live e2e needs production
   secrets).
 
+### Phase U-RM: Unified Browse read model (done)
+- Implements `docs/design/browse-read-model.md` (PRs #707/#708 aftermath;
+  operator decisions 2026-07-07: default sort → `first_seen_at DESC`,
+  list freshness 5 min).
+- `browse_projection` (migration 276) — the ONE place the Browse column
+  contract + publication-gate predicate live. `browse_list` (UNLOGGED
+  snapshot, every active property incl. coordinate-less; lean 5-index
+  set) + `properties_map_mv` both rebuild FROM it via SECURITY DEFINER
+  functions on pg_cron (`*/5` list, `7,37` map — migration 277);
+  `scripts/refresh_map_mv.py` + its workflow retired. Rebuild stamps in
+  `browse_read_model_state(_public)`.
+- Frontend cards/table/count/no-price re-pointed to `browse_list`;
+  `fetchBrowseCount` flipped to EXACT-FIRST (index-only ~200 ms cold
+  market-wide; `count=planned` is the fallback, "~N" now rare);
+  `DEFAULT_SORT` → `first_seen_at DESC`. Stats RPC re-pointed
+  (migration 278, body-only) — cards/table/count/stats read ONE
+  snapshot and cannot disagree.
+- Guardrails: gate-wrap pinned on `browse_projection`; rebuild
+  invariants (ANALYZE-before-swap, pg_notify); read-contract test
+  (registry + CARD/TABLE/MAP_COLS + SORTABLE_FIELDS ⊆ projection).
+- Deferred: live-table index retirement after a ≥7-day
+  pg_stat_user_indexes observation window (operator OK required);
+  row-comparison keyset cursor (PostgREST can't emit it yet).
+
 ### Phase U-Nav: Unified browse → detail navigation (next)
 
 Today the top nav exposes `Listing` and (historically) `Estimate` as
