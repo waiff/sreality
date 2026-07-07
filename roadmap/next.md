@@ -31,11 +31,18 @@ scans, monitors).
   pins); the 61%/51% eligibility is not resolver-fixable without better coord extraction.
 - **W5a (#697)** — delisting rails: sreality `INDEX_MIN_COMPLETENESS` 1.0→0.995 + a 3h
   `min_unseen_hours`; the 6 h portals 24h→12h.
+- **Geo real-time + scan hygiene (#710, #713, #715)** — stored `listings.geo_cell_key`
+  (migration 276); the real-time dirty drain enqueues street-OR-geo and runs a geo sub-pass
+  over the claimed cells; the scheduled geo backstop advances a `lane='geo'` cursor in
+  `dedup_scan_state` (whole-market cycles instead of head-restarts, on the existing
+  wall-clock budget); photo-less eligible properties route to the dirty lane via an
+  imageless EVALUATION sweep in the */5 maintenance pass (the engine still decides +
+  stamps them — an evaluation trigger, not a publish-timeout).
 
 **Still open:** the Wave C worker prerequisites (create the Railway service, flip
 `shared_rate_limiter` on, images-first inline pHash + warm-CLIP + matcher wake); **W5b** (SLO-scaled
 health + push alerting + silent-green closures — deferred, see `realtime-scrapers.md` § Sequencing);
-geo dirty-drain; the sreality BFF sort HAR spike.
+the sreality BFF sort HAR spike.
 
 ### Phase B1: Building decomposition — URL ingest + unit extractor + confirmation UI (active)
 
