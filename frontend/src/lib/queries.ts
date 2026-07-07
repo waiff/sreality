@@ -103,7 +103,12 @@ export interface SortSpec {
   direction: SortDirection;
 }
 
-export const DEFAULT_SORT: SortSpec = { field: 'last_seen_at', direction: 'desc' };
+/* first_seen_at DESC = "newest listings first" (operator decision 2026-07-07,
+ * with the browse_list read model): meaningful (genuinely new listings, not
+ * "whichever portal the scraper touched last" — touch_listings bumps
+ * last_seen_at market-wide every cycle) and IMMUTABLE, so keyset cursors stay
+ * valid across snapshot rebuilds. last_seen_at remains a selectable option. */
+export const DEFAULT_SORT: SortSpec = { field: 'first_seen_at', direction: 'desc' };
 
 const SORTABLE_FIELDS: ReadonlyArray<SortField> = [
   'sreality_id', 'district', 'disposition',
@@ -577,7 +582,7 @@ export const fetchNoPriceCount = async (f: ListingFilters): Promise<number> => {
   const pre = await resolveBrowsePrefilters(f);
   if (pre.empty) return 0;
   const base = supabase
-    .from('properties_public')
+    .from('browse_list')
     .select('property_id', { count: 'exact', head: true });
   // Strip the price bound (and the toggle) so the count is purely "no-price
   // rows in the rest of the cohort", then restrict to NULL price.
@@ -615,7 +620,9 @@ export const fetchListingsForMap = async (
    * all-visible, cached copy of the same columns, so the identical scan stays
    * robust cold (~200ms). It carries properties_public's full FILTERABLE surface,
    * so applyFilters / applyPrefilters are a drop-in (only the source differs).
-   * The matview is map-fresh within the refresh_map_mv cadence (~15 min). */
+   * Rebuilt from browse_projection by rebuild_properties_map_mv() (pg_cron,
+   * every 30 min — migration 277); freshness readable off
+   * browse_read_model_state_public. */
   const base = supabase
     .from('properties_map_mv')
     .select(MAP_COLS)
@@ -679,8 +686,11 @@ export const fetchListingsForTable = async (
 ): Promise<TableResult> => {
   const pre = await resolveBrowsePrefilters(f);
   if (pre.empty) return { rows: [], nextCursor: null };
+  /* browse_list (migration 276): the compact snapshot read model — a STABLE
+   * relation under the scroll (the live table mutates last_seen_at every
+   * scrape cycle), rebuilt every 5 min from browse_projection. */
   const base = supabase
-    .from('properties_public')
+    .from('browse_list')
     .select(withKeysetColumns(TABLE_COLS, sort));
   const scoped = applyPrefilters(applyFilters(base, f), pre);
   const keyed = applyKeyset(
@@ -707,27 +717,19 @@ export interface CohortCount {
 }
 
 /* The ONE cohort total — header, tab badge, and the infinite-scroll progress
- * labels. PLANNER-ESTIMATE FIRST, then confirm exact only when affordable: the
- * planner estimate (`count=planned`) is O(1) — it reads NO rows, so it never
- * times out and never contends with the list/map queries. An exact count, by
- * contrast, must heap-scan every matching row of the (churned, cache-cold on
- * this instance) properties table; for a broad cohort that scan can't finish
- * under the anon 3s budget AND it saturates I/O, pushing the parallel list+map
- * queries over the limit too. So we take the estimate first and only run an
- * exact count when the estimate is small enough that the scan is cheap. Result:
- * exact for small/filtered cohorts (where a precise number matters and is
- * affordable), an honest "~N" for broad ones, NEVER a wasted big scan — the
- * industry-standard hybrid. (`count=estimated` is NOT used: Supabase's threshold
- * still runs an exact count for mid-size cohorts, so it times out cold like
- * `exact`.) Shares the exact filter chain (resolveBrowsePrefilters +
- * applyFilters) with the Map/Table/Cards fetchers, so the total can never
- * disagree with the listed rows. */
+ * labels. EXACT FIRST on the compact browse_list read model: on the snapshot,
+ * a market-wide exact count is an index-only scan (measured 201 ms fully cold
+ * for the broadest single cohort — 68k rows, zero heap fetches), so precision
+ * is the norm, not the exception. The pre-read-model planner-estimate-first
+ * hybrid existed because an exact count on the churned live table could not
+ * finish under the anon 3s budget; that constraint is gone. `count=planned`
+ * stays as the graceful FALLBACK when the exact count exceeds the abort budget
+ * (a pathological filter combination or a saturated instance) — rendered as
+ * "~N". The planned estimate depends on the rebuild's ANALYZE-before-swap
+ * (pinned by tests/test_browse_read_path_guardrail.py). Shares the exact
+ * filter chain (resolveBrowsePrefilters + applyFilters) with the Table/Cards
+ * fetchers, so the total can never disagree with the listed rows. */
 const EXACT_COUNT_BUDGET_MS = 2500;
-/* Above this planner estimate an exact count is skipped: the scan would be too
- * heavy to finish under budget on this cache-constrained instance, and "~N" is
- * the honest answer for a broad cohort anyway. Below it the scan is cheap, so we
- * confirm the precise figure. */
-const EXACT_COUNT_MAX = 5_000;
 export const fetchBrowseCount = async (
   f: ListingFilters,
 ): Promise<CohortCount> => {
@@ -741,36 +743,31 @@ export const fetchBrowseCount = async (
     applyPrefilters(
       applyFilters(
         supabase
-          .from('properties_public')
+          .from('browse_list')
           .select('property_id', { count: mode, head: true }),
         f,
       ),
       pre,
     ) as unknown as CountQuery;
-  // Estimate first — instant, no scan, no contention.
+  try {
+    const { count, error } = await build('exact').abortSignal(
+      AbortSignal.timeout(EXACT_COUNT_BUDGET_MS),
+    );
+    if (error) throw error;
+    if (count != null) return { value: count, precise: true };
+  } catch {
+    // Exact didn't finish under budget — fall through to the estimate.
+  }
   const planned = await build('planned');
   if (planned.error) throw planned.error;
   const estimate = planned.count ?? 0;
-  // Confirm the precise count only for small cohorts where the scan is cheap.
-  if (estimate > 0 && estimate <= EXACT_COUNT_MAX) {
-    try {
-      const { count, error } = await build('exact').abortSignal(
-        AbortSignal.timeout(EXACT_COUNT_BUDGET_MS),
-      );
-      if (error) throw error;
-      return { value: count ?? estimate, precise: true };
-    } catch {
-      // Estimate was off / the scan didn't finish — fall back to the estimate.
-    }
-  }
-  // estimate === 0 is treated as a settled "0"; any other estimate is "~N".
   return { value: estimate, precise: estimate === 0 };
 };
 
 /* -------------------------------------------------------------------------- */
 /* Cards (sreality-style image-first list). Same filter chain as table, plus  */
 /* a batched image lookup for the first photo per visible listing. Sorted by  */
-/* last_seen_at desc — the cards lane is for "what's new", not for arbitrary  */
+/* first_seen_at desc — the cards lane is for "what's new", not for arbitrary */
 /* re-sorting (that's the Table tab's job).                                   */
 /* -------------------------------------------------------------------------- */
 
@@ -819,7 +816,7 @@ export const fetchListingsForCards = async (
   const pre = await resolveBrowsePrefilters(f);
   if (pre.empty) return { rows: [], nextCursor: null };
   const base = supabase
-    .from('properties_public')
+    .from('browse_list')
     .select(withKeysetColumns(CARD_COLS, sort));
   const scoped = applyPrefilters(applyFilters(base, f), pre);
   const keyed = applyKeyset(
