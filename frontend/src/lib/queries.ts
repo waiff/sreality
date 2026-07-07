@@ -3,6 +3,7 @@ import { imageSrc } from './imageUrl';
 import { type TaggedImageUrl } from './imageTags';
 import { fetchListingBrokersByIds, fetchBrokersByIds } from './brokers';
 import type { ListingDetailLite } from './dedupDiff';
+import type { LlmCostDailyRow } from './llmCosts';
 import {
   type CenterRadius,
   type DistrictChip,
@@ -2010,4 +2011,33 @@ export const fetchPipelineBoard = async (): Promise<PipelineBoardCard[]> => {
         : null,
     };
   });
+};
+
+/* ---- LLM cost dashboard (/costs) -------------------------------------- */
+
+/* Daily × feature × model spend aggregates from `llm_cost_daily_public`
+ * (migration 280). numeric/bigint arrive as strings from PostgREST in
+ * some paths — coerce every measure to a number once, here. */
+export const fetchLlmCostDaily = async (days: number): Promise<LlmCostDailyRow[]> => {
+  const from = new Date();
+  from.setUTCDate(from.getUTCDate() - days);
+  const { data, error } = await supabase
+    .from('llm_cost_daily_public')
+    .select('*')
+    .gte('day', from.toISOString().slice(0, 10))
+    .order('day', { ascending: true });
+  if (error) throw error;
+  return (data ?? []).map((r: Record<string, unknown>) => ({
+    day: String(r.day),
+    called_for: String(r.called_for),
+    provider: String(r.provider),
+    model: String(r.model),
+    calls: Number(r.calls ?? 0),
+    error_calls: Number(r.error_calls ?? 0),
+    cost_usd: Number(r.cost_usd ?? 0),
+    input_tokens: Number(r.input_tokens ?? 0),
+    output_tokens: Number(r.output_tokens ?? 0),
+    cache_read_tokens: Number(r.cache_read_tokens ?? 0),
+    cache_write_tokens: Number(r.cache_write_tokens ?? 0),
+  }));
 };

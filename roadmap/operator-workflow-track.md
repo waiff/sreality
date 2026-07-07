@@ -475,3 +475,14 @@ starts)**
 - Re-notification on snapshot change (price drop, status change).
   Listed as a "next" follow-up once new-listing alerts ship.
 
+
+### Phase U-COSTS: LLM spend dashboard (done)
+
+- `/costs` operator page (nav: Settings cluster): KPI tiles (today / 7 d /
+  30 d / projected month / calls / **errors**), a stacked daily-spend chart
+  by feature (entity-stable civic-archive tag colors), a per-feature 7 d/30 d
+  breakdown table (calls, errors, avg per call, share), and a per-model split.
+- Backed by `llm_cost_daily_public` (migration 280) — per-day × called_for ×
+  provider × model aggregates over the `llm_calls` audit table; anon reads
+  the aggregate only. Error counts surface failed (unbilled) calls, the
+  credit-outage / vision-error tripwire at spend grain.

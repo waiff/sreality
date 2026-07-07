@@ -29,6 +29,7 @@ const navItems: ReadonlyArray<NavItem> = [
   { kind: 'section', label: 'Settings' },
   { kind: 'link', to: '/dedup',       label: 'Dedup' },
   { kind: 'link', to: '/health',      label: 'Health' },
+  { kind: 'link', to: '/costs',       label: 'LLM Costs' },
   { kind: 'link', to: '/scrapers',    label: 'Scrapers' },
   { kind: 'link', to: '/settings',    label: 'General Settings' },
 ];

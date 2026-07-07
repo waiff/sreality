@@ -22,6 +22,7 @@ import WatchdogManage from './pages/WatchdogManage';
 import WatchdogEdit from './pages/WatchdogEdit';
 import Notifications from './pages/Notifications';
 import Dedup from './pages/Dedup';
+import Costs from './pages/Costs';
 // TODO(estimation-5 Part C1): remove DevConfidencePreview + its route
 // once design is approved and the indicator is in real use.
 import DevConfidencePreview from './pages/DevConfidencePreview';
@@ -43,6 +44,7 @@ export const routes: RouteObject[] = [
       { path: 'listing', element: <ListingDetail />, handle: { title: 'Listing' } },
       { path: 'listing/:sreality_id', element: <ListingDetail />, handle: { title: 'Listing' } },
       { path: 'health', element: <Health />, handle: { title: 'Health' } },
+      { path: 'costs', element: <Costs />, handle: { title: 'LLM costs' } },
       { path: 'estimate', element: <Navigate to="/estimations" replace /> },
       { path: 'estimations', element: <EstimationList />, handle: { title: 'Estimations' } },
       { path: 'estimation/:id', element: <EstimationDetail />, handle: { title: 'Estimation' } },
