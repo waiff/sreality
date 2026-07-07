@@ -2,7 +2,7 @@
 
 A SECOND Railway service from the same Docker image (start command
 `python -m scraper.realtime_worker`) that replaces cron quantization for the
-latency-critical path. Five settings-paced asyncio lanes (the proven
+latency-critical path. Six settings-paced asyncio lanes (the proven
 matcher/outbox pattern from api/notifications + api/notification_outbox):
 
 - probe:     every `realtime_probe_interval_seconds` (default 180), run the
@@ -43,6 +43,16 @@ matcher/outbox pattern from api/notifications + api/notification_outbox):
              beside the cron (merge row-locks + cutoff-guarded clears +
              cache-keyed verdicts). The operator flips the interval to 60-120s
              once #700's ordering fix is verified.
+- maintenance: every `realtime_maintenance_interval_seconds` (default 120), one
+             incremental property-maintenance pass — straggler attach + dirty-set
+             recompute + publish sweep, via scripts.recompute_property_stats.
+             run_incremental_pass (THE same implementation the GH cron runs;
+             never forked). Exists because GH throttles property_maintenance.yml
+             (nominal */5) to a measured 2h median / 4.1h worst — this lane is
+             what actually delivers "a new/changed listing reaches properties
+             (and the Browse read model) within minutes". Safe beside the GH
+             cron + daily sweep: all callers serialize on a pg advisory lock
+             inside the pass (concurrent caller skips).
 - heartbeat: every 30s, upsert this worker's beat + per-lane counters into
              worker_heartbeats (migration 269) — the Health-page liveness hook,
              now including the dedup lane's claimed/cleared/merge counters.
@@ -105,6 +115,19 @@ DEDUP_MAX_DIRTY_DEFAULT = 200
 DEDUP_COMPARE_BUDGET_DEFAULT = 4
 DEDUP_FLOOR_PLAN_BUDGET_DEFAULT = 4
 DEDUP_MAX_SECONDS_CAP = 240.0
+
+# maintenance lane: the incremental property-maintenance pass (straggler attach
+# + dirty-set recompute + publish sweep — scripts.recompute_property_stats.
+# run_incremental_pass, THE same implementation the GH cron runs), every
+# MAINTENANCE_INTERVAL_DEFAULT seconds. Exists because GH Actions throttles this
+# repo's schedules to ~hourly at best — property_maintenance.yml (nominal */5)
+# measured a 2h MEDIAN / 4.1h worst gap (2026-07-07 audit), so "a new listing
+# reaches properties/Browse within ~5 min" was off by ~24x. Ships LIVE (the
+# fix is the point); interval <= 0 idles it. Safe beside the GH cron + daily
+# sweep by construction: all three serialize on the pg advisory lock inside
+# run_incremental_pass (a concurrent caller skips, it never queues up).
+MAINTENANCE_INTERVAL_DEFAULT = 120
+MAINTENANCE_BATCH_SIZE_DEFAULT = 2000
 
 # sreality count-probe lane (W3): sreality's v1 search API ignores every sort
 # param, so the newest-first delta probe the other portals use is impossible for
@@ -228,6 +251,16 @@ def _read_count_probe_interval() -> int:
 
 def _read_dedup_interval() -> int:
     return _read_int("realtime_dedup_interval_seconds", DEDUP_INTERVAL_DEFAULT)
+
+
+def _read_maintenance_interval() -> int:
+    return _read_int(
+        "realtime_maintenance_interval_seconds", MAINTENANCE_INTERVAL_DEFAULT)
+
+
+def _read_maintenance_batch_size() -> int:
+    return _read_int(
+        "realtime_maintenance_batch_size", MAINTENANCE_BATCH_SIZE_DEFAULT)
 
 
 def _read_flag(key: str) -> bool:
@@ -712,6 +745,45 @@ async def _dedup_pass(stop_event: asyncio.Event, state: dict[str, Any]) -> None:
     _record_pass(state, "dedup", last)
 
 
+def _maintenance_sync() -> dict[str, Any]:
+    """One incremental property-maintenance pass on the worker's own
+    connection. Reuses THE script implementation (never forks it); the advisory
+    lock inside run_incremental_pass makes this safe beside the GH cron and the
+    daily full sweep — a concurrent caller returns skipped. Lazy import keeps
+    scripts.recompute_property_stats off the worker's startup path."""
+    from scripts.recompute_property_stats import run_incremental_pass
+
+    batch_size = _read_maintenance_batch_size()
+    conn = db.connect()
+    try:
+        return run_incremental_pass(conn, batch_size)
+    finally:
+        with contextlib.suppress(Exception):
+            conn.close()
+
+
+async def _maintenance_pass(stop_event: asyncio.Event, state: dict[str, Any]) -> None:
+    if stop_event.is_set():
+        return
+    stats = await asyncio.to_thread(_maintenance_sync)
+    last = {
+        "skipped": bool(stats.get("skipped")),
+        "attached": stats.get("attached", 0),
+        "recomputed": stats.get("recomputed", 0),
+        "published": stats.get("published", 0),
+        "imageless": stats.get("imageless", 0),
+    }
+    if last["skipped"]:
+        LOG.info("MAINTENANCE lane skipped (lock held by cron or daily sweep)")
+    else:
+        LOG.info(
+            "MAINTENANCE lane attached=%d recomputed=%d published=%d imageless=%d",
+            last["attached"], last["recomputed"],
+            last["published"], last["imageless"],
+        )
+    _record_pass(state, "maintenance", last)
+
+
 def _beat_sync(state: dict[str, Any]) -> None:
     conn = db.connect()
     try:
@@ -835,6 +907,10 @@ async def _amain() -> int:
             "dedup", stop_event, _read_dedup_interval,
             lambda: _dedup_pass(stop_event, state),
             default_interval=DEDUP_INTERVAL_DEFAULT)),
+        ("maintenance", lambda: _lane_loop(
+            "maintenance", stop_event, _read_maintenance_interval,
+            lambda: _maintenance_pass(stop_event, state),
+            default_interval=MAINTENANCE_INTERVAL_DEFAULT)),
         ("heartbeat", lambda: _lane_loop(
             "heartbeat", stop_event, lambda: HEARTBEAT_INTERVAL_SECONDS,
             lambda: _heartbeat_pass(state),

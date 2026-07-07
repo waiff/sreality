@@ -588,6 +588,60 @@ def _max_property_id(conn: Any) -> int:
         return int(cur.fetchone()[0])
 
 
+# One session-level advisory lock serializes EVERY property-maintenance writer:
+# the GH incremental cron, the daily full sweep, AND the realtime worker's
+# maintenance lane. Before the worker lane existed, the GH concurrency group
+# (`sreality-property-maintenance`) was the only serialization — sufficient
+# while GH Actions was the only caller, useless once a second runtime joined.
+# Incremental callers TRY the lock and skip (the next tick is seconds away);
+# the daily full sweep WAITS (it is the backstop and must not be skipped).
+_MAINTENANCE_LOCK = "property-maintenance"
+
+
+def _try_maintenance_lock(conn: Any) -> bool:
+    with conn.cursor() as cur:
+        cur.execute("SELECT pg_try_advisory_lock(hashtext(%s))", (_MAINTENANCE_LOCK,))
+        return bool(cur.fetchone()[0])
+
+
+def _wait_maintenance_lock(conn: Any) -> None:
+    with conn.cursor() as cur:
+        cur.execute("SELECT pg_advisory_lock(hashtext(%s))", (_MAINTENANCE_LOCK,))
+        cur.fetchone()
+
+
+def _unlock_maintenance(conn: Any) -> None:
+    with conn.cursor() as cur:
+        cur.execute("SELECT pg_advisory_unlock(hashtext(%s))", (_MAINTENANCE_LOCK,))
+        cur.fetchone()
+
+
+def run_incremental_pass(conn: Any, batch_size: int = 2000) -> dict[str, Any]:
+    """ONE incremental property-maintenance pass — THE shared implementation
+    behind the GH cron (property_maintenance.yml) and the realtime worker's
+    maintenance lane: attach new stragglers (skip the legacy native-id
+    backfill), recompute the dirty set, publish ineligible properties, enqueue
+    imageless for dedup. Serialized by the advisory lock; a caller that finds
+    the lock held returns {"skipped": True} — the concurrent pass is doing the
+    same work, and the next tick is seconds away.
+    """
+    if not _try_maintenance_lock(conn):
+        return {"skipped": True, "attached": 0, "recomputed": 0,
+                "published": 0, "imageless": 0}
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT now()")
+            cutoff = cur.fetchone()[0]
+        attached = _attach_stragglers(conn, skip_native_backfill=True)
+        recomputed = _drain_dirty(conn, batch_size, cutoff)
+        published = _publish_sweep(conn)
+        imageless = _enqueue_imageless_for_dedup(conn)
+        return {"skipped": False, "attached": attached, "recomputed": recomputed,
+                "published": published, "imageless": imageless}
+    finally:
+        _unlock_maintenance(conn)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -651,41 +705,53 @@ def main() -> int:
 
         # Incremental: attach new stragglers, then recompute only the queued
         # (dirty) properties. The full-table sweep is the daily reconcile.
+        # Shared implementation with the realtime worker's maintenance lane.
         if args.incremental:
-            attached = _attach_stragglers(conn, skip_native_backfill=True)
-            recomputed = _drain_dirty(conn, args.batch_size, cutoff)
-            published = _publish_sweep(conn)
-            imageless = _enqueue_imageless_for_dedup(conn)
+            stats = run_incremental_pass(conn, args.batch_size)
             elapsed = time.monotonic() - started_at
+            if stats["skipped"]:
+                LOG.info(
+                    "RECOMPUTE incremental skipped: another maintenance pass "
+                    "holds the lock (worker lane or daily sweep)",
+                )
+                return 0
             LOG.info(
                 "RECOMPUTE incremental done attached=%d recomputed=%d "
                 "published_ineligible=%d imageless_enqueued=%d elapsed=%.1fs",
-                attached, recomputed, published, imageless, elapsed,
+                stats["attached"], stats["recomputed"],
+                stats["published"], stats["imageless"], elapsed,
             )
             return 0
 
-        attached = _attach_stragglers(conn)
-        LOG.info("RECOMPUTE stragglers attached=%d", attached)
+        # The full sweep WAITS for the lock (it is the daily backstop and must
+        # not be skipped); incremental passes elsewhere skip while it runs.
+        _wait_maintenance_lock(conn)
+        try:
+            attached = _attach_stragglers(conn)
+            LOG.info("RECOMPUTE stragglers attached=%d", attached)
 
-        max_id = _max_property_id(conn)
-        batches = 0
-        for lo, hi in _batch_ranges(max_id, args.batch_size):
+            max_id = _max_property_id(conn)
+            batches = 0
+            for lo, hi in _batch_ranges(max_id, args.batch_size):
+                with conn.cursor() as cur:
+                    cur.execute(_RECOMPUTE_BATCH_SQL, {"lo": lo, "hi": hi})
+                batches += 1
+                LOG.debug("RECOMPUTE batch=%d-%d done", lo, hi)
+
+            reconciled = _reconcile_childless(conn)
+            if reconciled:
+                LOG.info(
+                    "RECOMPUTE reconciled childless=%d (set is_active=false)",
+                    reconciled,
+                )
+
+            # The full sweep recomputed every property, so clear the dirt that
+            # existed at its start; anything dirtied mid-sweep survives for the
+            # next incremental pass.
             with conn.cursor() as cur:
-                cur.execute(_RECOMPUTE_BATCH_SQL, {"lo": lo, "hi": hi})
-            batches += 1
-            LOG.debug("RECOMPUTE batch=%d-%d done", lo, hi)
-
-        reconciled = _reconcile_childless(conn)
-        if reconciled:
-            LOG.info(
-                "RECOMPUTE reconciled childless=%d (set is_active=false)", reconciled,
-            )
-
-        # The full sweep recomputed every property, so clear the dirt that
-        # existed at its start; anything dirtied mid-sweep survives for the next
-        # incremental pass.
-        with conn.cursor() as cur:
-            cur.execute(_CLEAR_DIRTY_SQL, {"cutoff": cutoff})
+                cur.execute(_CLEAR_DIRTY_SQL, {"cutoff": cutoff})
+        finally:
+            _unlock_maintenance(conn)
 
     elapsed = time.monotonic() - started_at
     LOG.info(
