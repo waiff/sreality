@@ -10,7 +10,7 @@ export type FunnelKind = 'free' | 'paid' | 'manual';
 export interface FunnelStepDef {
   id: string;
   /* dedup_pair_audit.stage this step resolves under, if it resolves pairs */
-  auditStage?: 'address' | 'phash' | 'visual' | 'operator';
+  auditStage?: 'address' | 'phash' | 'attr' | 'visual' | 'operator';
   label: string;
   kind: FunnelKind;
   /* llm_calls.called_for tags whose spend belongs to this step */
@@ -59,6 +59,18 @@ export const DEDUP_FUNNEL_STEPS: readonly FunnelStepDef[] = [
     anchor: 'funnel-phash',
     description:
       'Near-identical photo hashes (≥2 pairs, or one distinctive room) resolve with no LLM.',
+  },
+  {
+    id: 'attr',
+    auditStage: 'attr',
+    label: 'Area + exact price (houses / land)',
+    kind: 'free',
+    calledFor: [],
+    anchor: 'funnel-attr',
+    description:
+      'Non-apartment candidates whose areas match within 2% and asking prices are identical ' +
+      'auto-merge through the floor-plan gate with no paid room compare. Validated 99.6% vs the ' +
+      'forensic verdict. No LLM.',
   },
   {
     id: 'clip',

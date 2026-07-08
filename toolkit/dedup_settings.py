@@ -74,6 +74,18 @@ REGISTRY: tuple[DedupSetting, ...] = (
         "async) so the engine merges over warm cache for free. Off = pay cold vision "
         "inline. The dedup_batches workflow no-ops while this is off.",
     ),
+    DedupSetting(
+        "dedup_nonbyt_attr_merge_enabled", "bool", False,
+        "Attribute auto-merge (houses / land / commercial)", "Engine",
+        "For non-apartment families, auto-merge a co-located candidate whose areas match "
+        "within 2% AND whose asking prices are identical — WITHOUT paying for the forensic "
+        "room compare. The floor-plan gate is still applied (a different 2D layout dismisses) "
+        "and any pair where BOTH sides carry a site plan still pays the development guard, so "
+        "the two conservative vetoes are unchanged. Validated 99.6% vs the vision verdict on "
+        "574 decided house/land/commercial pairs (the 2 misses were floor-plan dismissals the "
+        "retained gate still catches); merges are reversible. Off = every non-byt candidate "
+        "pays forensic vision as before.",
+    ),
     # --- CLIP (free tagging + the cosine recall tier) ---
     DedupSetting(
         "dedup_prefer_clip_tags", "bool", False,

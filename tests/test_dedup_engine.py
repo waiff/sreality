@@ -737,6 +737,81 @@ def test_run_engine_geo_does_not_skip_same_source(monkeypatch: Any) -> None:
     assert stats["pairs_considered"] == 1
 
 
+# --- non-byt attribute fast-path (dedup_nonbyt_attr_merge_enabled) ----------
+
+def test_attr_exact_nonbyt_fires_on_area_within_2pct_and_exact_price() -> None:
+    import scripts.dedup_engine as eng
+    a = _gk(1, 101, area=120.0, price=5_950_000)
+    b = _gk(2, 102, area=121.5, price=5_950_000)  # 1.5/121.5 = 1.23% area diff
+    assert eng._attr_exact_nonbyt(a, b) is True
+
+
+def test_attr_exact_nonbyt_rejects_area_over_2pct() -> None:
+    import scripts.dedup_engine as eng
+    a = _gk(1, 101, area=120.0, price=5_950_000)
+    b = _gk(2, 102, area=123.5, price=5_950_000)  # 3.5/123.5 = 2.83% > 2%
+    assert eng._attr_exact_nonbyt(a, b) is False
+
+
+def test_attr_exact_nonbyt_rejects_non_exact_price() -> None:
+    import scripts.dedup_engine as eng
+    a = _gk(1, 101, area=120.0, price=5_950_000)
+    b = _gk(2, 102, area=120.0, price=5_960_000)  # identical area, price off by 10k
+    assert eng._attr_exact_nonbyt(a, b) is False
+
+
+def test_attr_exact_nonbyt_rejects_null_area_or_price() -> None:
+    import scripts.dedup_engine as eng
+    assert eng._attr_exact_nonbyt(_gk(1, 101, area=None), _gk(2, 102)) is False
+    assert eng._attr_exact_nonbyt(_gk(1, 101, price=None), _gk(2, 102)) is False
+
+
+def test_run_engine_geo_attr_arm_merges_on_area_price_exact(monkeypatch: Any) -> None:
+    # Flag ON: an area-within-2% + exact-price house pair auto-merges via the FREE attribute
+    # arm — it never reaches the paid visual stage (pairs_considered stays 0).
+    import scripts.dedup_engine as eng
+    monkeypatch.setattr(eng, "_load_geo_eligible", lambda conn, **k: [
+        _gk(1, 101, source="sreality", area=120.0, price=5_950_000),
+        _gk(2, 102, source="idnes", area=121.0, price=5_950_000),  # 0.83% area, exact price
+    ])
+    monkeypatch.setattr(eng, "merge_properties", lambda *a, **k: {"data": {"merge_group_id": "g"}})
+    stats = eng.run_engine(_FakeConn([]), classify_fn=None, compare_fn=None,
+                           max_vision_calls=10, geo=True, geo_area_max_pct=0.20,
+                           nonbyt_attr_merge=True)
+    assert stats.get("auto_attr") == 1
+    assert stats.get("pairs_considered", 0) == 0  # skipped the paid visual stage
+
+
+def test_run_engine_geo_attr_arm_off_by_default_reaches_visual(monkeypatch: Any) -> None:
+    # Flag OFF (default): the same pair falls through to the visual stage as before — no free
+    # attr merge. Guards against the arm firing when the operator hasn't enabled it.
+    import scripts.dedup_engine as eng
+    monkeypatch.setattr(eng, "_load_geo_eligible", lambda conn, **k: [
+        _gk(1, 101, area=120.0, price=5_950_000),
+        _gk(2, 102, area=121.0, price=5_950_000),
+    ])
+    monkeypatch.setattr(eng, "merge_properties", lambda *a, **k: {"data": {"merge_group_id": "g"}})
+    stats = eng.run_engine(_FakeConn([]), classify_fn=None, compare_fn=None,
+                           max_vision_calls=10, geo=True, geo_area_max_pct=0.20)
+    assert stats.get("auto_attr", 0) == 0
+    assert stats["pairs_considered"] == 1
+
+
+def test_run_engine_byt_never_takes_attr_arm(monkeypatch: Any) -> None:
+    # The arm is non-byt only (byt's area+price collide across a development's identical
+    # units — the retired rule-B trap). A byt pair with the flag ON must NOT attr-merge.
+    import scripts.dedup_engine as eng
+    monkeypatch.setattr(eng, "_load_geo_eligible", lambda conn, **k: [
+        _gk(1, 101, cat="byt", area=75.0, price=4_200_000),
+        _gk(2, 102, cat="byt", area=75.0, price=4_200_000),
+    ])
+    monkeypatch.setattr(eng, "merge_properties", lambda *a, **k: {"data": {"merge_group_id": "g"}})
+    stats = eng.run_engine(_FakeConn([]), classify_fn=None, compare_fn=None,
+                           max_vision_calls=10, geo=True, geo_area_max_pct=0.20,
+                           nonbyt_attr_merge=True)
+    assert stats.get("auto_attr", 0) == 0
+
+
 def test_enqueue_candidate_tier_column_from_markers() -> None:
     # Regression: the tier COLUMN must reflect markers['tier'] (= ctx.tier), not the kwarg
     # default — else a geo candidate lands as 'street_disposition' and vanishes from the
@@ -1915,6 +1990,7 @@ def _run_geo_only_main(monkeypatch: Any, *, reached_end: bool, last_key: str | N
         "dedup_geo_area_max_pct": 0.20,
         "dedup_floor_plan_budget": 0,
         "dedup_floor_plan_inconclusive_to_review": False,
+        "dedup_nonbyt_attr_merge_enabled": False,
     }
     monkeypatch.setattr(ds, "read_setting", lambda conn, key: settings[key])
     monkeypatch.setattr(eng, "_auto_merge_enabled", lambda conn: False)

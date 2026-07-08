@@ -1641,6 +1641,10 @@ class _RunContext:
     render_min: float = RENDER_SCORE_EXCLUDE_MIN
     inconclusive_to_review: bool = True
     max_room_attempts: int = 4
+    # Non-byt attribute fast-path: when set, a house/land/commercial candidate with
+    # area-within-2% + identical price auto-merges through the floor-plan gate WITHOUT the
+    # paid room compare (dedup_nonbyt_attr_merge_enabled). Off = every non-byt pair pays vision.
+    nonbyt_attr_merge: bool = False
     # Prior engine dismissals among the loaded properties ({(lo,hi): reviewed_at}) —
     # loaded once per SCOPED run (dirty/candidates). resolve_pair skips a pair already
     # dismissed with NO new photo evidence since, instead of re-running the whole probe
@@ -1673,6 +1677,27 @@ class _RunContext:
     # scoped runs can consult them (66% of treadmill pairs had NO candidate row at all).
     auto_dismissed_pairs: set[tuple[int, int]] = field(default_factory=set)
     pairs_left: int = 10 ** 9
+
+
+# Non-apartment attribute fast-path tolerance: areas within this fraction (coalesced
+# area_m2/estate_area/usable_area, loaded on the geo path) count as "same area". Paired
+# with an EXACT price match it is a same-property signal at 99.6% agreement with the
+# forensic verdict on 574 decided house/land/commercial pairs (validated 2026-07). The
+# retained floor-plan gate + site-plan fall-through keep the two conservative vetoes.
+NONBYT_ATTR_AREA_MAX_PCT = 0.02
+
+
+def _attr_exact_nonbyt(a: ListingKey, b: ListingKey,
+                       area_max_pct: float = NONBYT_ATTR_AREA_MAX_PCT) -> bool:
+    """The non-byt attribute fast-path predicate: coalesced areas within `area_max_pct`
+    AND identical asking price (both non-null). Pure. Mirrors the validated SQL exactly
+    (max-denominator area diff, exact price)."""
+    if a.area_m2 is None or b.area_m2 is None or a.price_czk is None or b.price_czk is None:
+        return False
+    hi = max(a.area_m2, b.area_m2)
+    if hi <= 0:
+        return False
+    return abs(a.area_m2 - b.area_m2) / hi <= area_max_pct and a.price_czk == b.price_czk
 
 
 def resolve_pair(conn: Any, a: ListingKey, b: ListingKey, *, street_key: str,
@@ -1835,6 +1860,64 @@ def resolve_pair(conn: Any, a: ListingKey, b: ListingKey, *, street_key: str,
                    source="engine", merge_group_id=mg)
         return
 
+    # Non-byt attribute fast-path (FREE, houses / land / commercial). A co-located candidate
+    # whose coalesced areas match within 2% AND whose asking prices are IDENTICAL is the same
+    # property at 99.6% agreement with the forensic verdict — merge without the paid room
+    # compare. Mirrors the pHash fast-path exactly: it still runs the floor-plan gate (a proven
+    # different_layout DISMISSES; both-plan-unwarmed DEFERS; inconclusive QUEUES), and — like
+    # pHash — it steps aside whenever BOTH sides carry a site plan, so a development's near-
+    # identical units still pay the site-plan same-unit guard on the forensic path. Off by
+    # default (dedup_nonbyt_attr_merge_enabled); byt is excluded (its area+price collide across
+    # a development's identical units — the retired rule-B trap). phash_pairs (0/1 here — the
+    # fast-path didn't fire) rides along as the "photos differ, decided on attributes" signal.
+    if (ctx.nonbyt_attr_merge and a.category_main and a.category_main != "byt"
+            and _attr_exact_nonbyt(a, b)
+            and not _both_have_site_plan(conn, a.sreality_id, b.sreality_id, ctx.probes)):
+        factors = _factors("attr", reason="attr_exact", street_key=street_key,
+                           phash_pairs=phash_pairs)
+        if not ctx.auto_merge_enabled:
+            if not ctx.dry_run:
+                _enqueue_candidate(conn, a, b, {
+                    **factors, "tier": ctx.tier,
+                    "reason": "auto_merge_off:attr_exact", "confidence": 0.97},
+                    reopen=reopened)
+            stats["queued"] += 1
+            ctx.engine_looked[cp] = "auto_merge_off:attr_exact"
+            return
+        fp = _floor_plan_gate(
+            conn, a.sreality_id, b.sreality_id,
+            floor_plan_fn=ctx.floor_plan_fn, vision_budget=ctx.floor_plan_budget,
+            inconclusive_to_review=ctx.inconclusive_to_review, cache=ctx.probes)
+        if fp == "dismiss":
+            stats["auto_dismissed"] += 1
+            ctx.dismissed_pairs.add(cp)
+            ctx.auto_dismissed_pairs.add(cp)
+            _audit(ctx.audit, a, b, "attr", "dismissed",
+                   {**factors, "reason": "floor_plan_different_layout"},
+                   source="engine")
+            return
+        if fp == "queue":
+            if not ctx.dry_run:
+                _enqueue_candidate(conn, a, b, {
+                    **factors, "tier": ctx.tier,
+                    "reason": "floor_plan_review", "confidence": 0.6},
+                    reopen=reopened)
+            stats["queued"] += 1
+            ctx.engine_looked[cp] = "floor_plan_review"
+            return
+        if fp == "defer":
+            stats["floor_plan_deferred"] += 1
+            return
+        mg = None if ctx.dry_run else _merge_pair(
+            conn, a, b, "attr_exact",
+            {**factors, "tier": ctx.tier, "confidence": 0.97})
+        if ctx.dry_run or mg:
+            stats["auto_attr"] += 1
+            ctx.merged_pairs.add(cp)
+            _audit(ctx.audit, a, b, "attr", "merged", factors,
+                   source="engine", merge_group_id=mg)
+        return
+
     # Wave 3 removed the cross-source gate: the engine no longer skips same-source non-exact
     # pairs. The gate cut ~36% of pairs off the (paid) visual stage but cost ~1.4% recall —
     # a same-portal relist with changed photos, or two cross-posts on one portal, were dropped.
@@ -1964,6 +2047,7 @@ def run_engine(
     cursor_out: dict[str, Any] | None = None,
     geo: bool = False,
     geo_area_max_pct: float | None = None,
+    nonbyt_attr_merge: bool = False,
     clip_model: str | None = None,
 ) -> dict[str, int]:
     """Run the full pipeline once. classify_fn/compare_fn are injectable for tests.
@@ -2024,7 +2108,7 @@ def run_engine(
                  {"eligible": None, "flagged_location": None, "flagged_disposition": None})
     stats.update({
         "pairs_considered": 0, "rejected": 0,
-        "auto_address": 0, "auto_phash": 0, "auto_visual": 0,
+        "auto_address": 0, "auto_phash": 0, "auto_visual": 0, "auto_attr": 0,
         "queued": 0, "vision_calls": 0,
         "auto_dismissed": 0, "reconciled": 0, "skipped_unresolved": 0,
         "floor_plan_deferred": 0, "clip_deferred": 0, "truncated": 0,
@@ -2111,6 +2195,7 @@ def run_engine(
         auto_merge_enabled=auto_merge_enabled, autodismiss=autodismiss,
         enqueue_unresolved=enqueue_unresolved, dry_run=dry_run, render_min=render_min,
         inconclusive_to_review=inconclusive_to_review, max_room_attempts=max_room_attempts,
+        nonbyt_attr_merge=nonbyt_attr_merge,
         stats=stats, vision_budget=_vision_budget,
         # floor_plan_calls None (every non-free mode) ALIASES the plan gate to the SAME
         # pool as compares → historical shared-budget behaviour; a value (free mode) gives
@@ -2831,6 +2916,7 @@ def build_free_engine_kw(
         floor_plan_calls=floor_plan_budget,
         auto_merge_enabled=auto_merge_enabled, autodismiss=autodismiss,
         enqueue_unresolved=enqueue_unresolved, deadline=deadline,
+        nonbyt_attr_merge=bool(read_setting(conn, "dedup_nonbyt_attr_merge_enabled")),
         clip_model=clip["clip_model"],
     )
 
@@ -3121,6 +3207,7 @@ def main() -> int:
             auto_merge_enabled=auto_merge_enabled, autodismiss=autodismiss,
             enqueue_unresolved=not args.free, dry_run=args.shadow, deadline=deadline,
             restrict_property_ids=restrict,
+            nonbyt_attr_merge=bool(read_setting(conn, "dedup_nonbyt_attr_merge_enabled")),
             clip_model=clip["clip_model"],
         )
 
