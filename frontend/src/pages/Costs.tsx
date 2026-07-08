@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import {
   ResponsiveContainer,
@@ -9,9 +9,10 @@ import {
   CartesianGrid,
   Tooltip,
 } from 'recharts';
-import { fetchLlmCostDaily } from '@/lib/queries';
+import { fetchLlmCostDaily, fetchLlmCostHourly } from '@/lib/queries';
 import {
   buildDailySeries,
+  buildHourlySeries,
   colorTokenFor,
   computeKpis,
   featureLabel,
@@ -21,11 +22,14 @@ import {
 } from '@/lib/llmCosts';
 import { fmtCount, fmtRelative, fmtUsd, fmtUsdPerCall } from '@/lib/format';
 import { useTokenColors } from '@/lib/useTokenColors';
+import GrainToggle, { type Grain } from '@/components/GrainToggle';
 
 /* Operator dashboard for LLM spend — aggregates of the `llm_calls` audit
- * table via `llm_cost_daily_public` (migration 280). Read-only, anon. */
+ * table via `llm_cost_daily_public` (migration 280) and its hour-grain
+ * twin `llm_cost_hourly_public` (migration 281). Read-only, anon. */
 
 const CHART_DAYS = 30;
+const CHART_HOURS = 48;
 
 const TOKEN_KEYS = [
   '--color-ink-3',
@@ -48,6 +52,16 @@ const fmtChartDay = (day: string): string => {
   const d = new Date(`${day}T00:00:00Z`);
   return d.toLocaleDateString('cs-CZ', { day: 'numeric', month: 'numeric' });
 };
+
+// Hour buckets are full ISO timestamps; terse ticks, full tooltip — the
+// same convention as DedupPipelineTimeline's hour grain.
+const fmtChartHour = (iso: string): string =>
+  new Date(iso).toLocaleTimeString('cs-CZ', { hour: '2-digit', minute: '2-digit' });
+
+const fmtChartHourFull = (iso: string): string =>
+  new Date(iso).toLocaleString('cs-CZ', {
+    day: 'numeric', month: 'numeric', hour: '2-digit', minute: '2-digit',
+  });
 
 export default function Costs() {
   const { data, isLoading, error, dataUpdatedAt } = useQuery({
@@ -81,10 +95,23 @@ export default function Costs() {
 
 function Body({ rows }: { rows: LlmCostDailyRow[] }) {
   const now = useMemo(() => new Date(), []);
+  const [grain, setGrain] = useState<Grain>('day');
   const kpis = useMemo(() => computeKpis(rows, now), [rows, now]);
-  const series = useMemo(() => buildDailySeries(rows, now, CHART_DAYS), [rows, now]);
+  const daily = useMemo(() => buildDailySeries(rows, now, CHART_DAYS), [rows, now]);
   const features = useMemo(() => summarizeByFeature(rows, now), [rows, now]);
   const models = useMemo(() => summarizeByModel(rows, now), [rows, now]);
+
+  // Hour grain is fetched lazily, only once the operator flips the toggle.
+  const hourlyQuery = useQuery({
+    queryKey: ['llm-cost-hourly'],
+    queryFn: () => fetchLlmCostHourly(CHART_HOURS + 1),
+    enabled: grain === 'hour',
+    refetchInterval: 5 * 60_000,
+  });
+  const hourly = useMemo(
+    () => (hourlyQuery.data ? buildHourlySeries(hourlyQuery.data, now, CHART_HOURS) : null),
+    [hourlyQuery.data, now],
+  );
 
   return (
     <div className="mt-4 space-y-4">
@@ -107,8 +134,27 @@ function Body({ rows }: { rows: LlmCostDailyRow[] }) {
         />
       </div>
 
-      <Card title={`Daily spend · last ${CHART_DAYS} d · by feature`}>
-        <DailyCostChart series={series} />
+      <Card
+        title={
+          grain === 'hour'
+            ? `Hourly spend · last ${CHART_HOURS} h · by feature`
+            : `Daily spend · last ${CHART_DAYS} d · by feature`
+        }
+        accessory={<GrainToggle grain={grain} onChange={setGrain} />}
+      >
+        {grain === 'hour' ? (
+          hourlyQuery.error ? (
+            <p className="text-sm text-[var(--color-brick)]">
+              Failed to load hourly data: {(hourlyQuery.error as Error).message}
+            </p>
+          ) : !hourly ? (
+            <p className="text-sm text-[var(--color-ink-3)]">Loading hourly spend…</p>
+          ) : (
+            <CostChart series={hourly} grain="hour" />
+          )
+        ) : (
+          <CostChart series={daily} grain="day" />
+        )}
       </Card>
 
       <Card title="By feature · 7 d / 30 d">
@@ -122,15 +168,20 @@ function Body({ rows }: { rows: LlmCostDailyRow[] }) {
   );
 }
 
-function DailyCostChart({
+function CostChart({
   series,
+  grain,
 }: {
   series: ReturnType<typeof buildDailySeries>;
+  grain: Grain;
 }) {
   const colors = useTokenColors(TOKEN_KEYS);
   const axis = colors['--color-ink-3'] || '#7a7d86';
   const grid = colors['--color-rule'] || 'rgba(26,28,34,0.08)';
   const gap = colors['--color-paper-2'] || '#fbf9f3';
+  const xKey = grain === 'hour' ? 'bucket' : 'day';
+  const fmtTick = grain === 'hour' ? fmtChartHour : fmtChartDay;
+  const fmtTooltipLabel = grain === 'hour' ? fmtChartHourFull : fmtChartDay;
 
   return (
     <div>
@@ -139,8 +190,8 @@ function DailyCostChart({
           <BarChart data={series.data} margin={{ top: 8, right: 8, bottom: 0, left: 0 }}>
             <CartesianGrid stroke={grid} vertical={false} />
             <XAxis
-              dataKey="day"
-              tickFormatter={fmtChartDay}
+              dataKey={xKey}
+              tickFormatter={fmtTick}
               tick={{ fill: axis, fontSize: 11 }}
               stroke={axis}
               minTickGap={24}
@@ -160,7 +211,7 @@ function DailyCostChart({
                 const total = visible.reduce((s, p) => s + (p.value as number), 0);
                 return (
                   <div className="rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] px-2.5 py-1.5 text-[0.72rem] shadow-sm">
-                    <div className="text-[var(--color-ink-3)]">{fmtChartDay(String(label))}</div>
+                    <div className="text-[var(--color-ink-3)]">{fmtTooltipLabel(String(label))}</div>
                     {visible.map((p) => (
                       <div key={String(p.dataKey)} className="mt-0.5 flex items-center gap-2 tabular-nums">
                         <span
@@ -309,12 +360,23 @@ function ModelTable({ models }: { models: ReturnType<typeof summarizeByModel> })
   );
 }
 
-function Card({ title, children }: { title: string; children: React.ReactNode }) {
+function Card({
+  title,
+  accessory,
+  children,
+}: {
+  title: string;
+  accessory?: React.ReactNode;
+  children: React.ReactNode;
+}) {
   return (
     <section className="rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] px-5 py-4">
-      <h3 className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)] font-medium">
-        {title}
-      </h3>
+      <div className="flex items-center justify-between gap-3">
+        <h3 className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)] font-medium">
+          {title}
+        </h3>
+        {accessory ?? null}
+      </div>
       <div className="mt-3">{children}</div>
     </section>
   );

@@ -123,6 +123,24 @@ export interface DailySeries {
   features: string[];
 }
 
+/* Fixed stack order: canonical order first, then any top features the
+ * canon doesn't know (alphabetical for determinism), then 'other'. */
+function orderTopFeatures(
+  totals: Map<string, number>,
+  maxFeatures: number,
+): { features: string[]; top: Set<string> } {
+  const top = new Set(
+    [...totals.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, maxFeatures)
+      .map(([name]) => name),
+  );
+  const canonical = FEATURE_COLOR_TOKENS.map(([name]) => name).filter((n) => top.has(n));
+  const extras = [...top].filter((n) => !canonical.includes(n)).sort();
+  const hasOther = [...totals.keys()].some((n) => !top.has(n));
+  return { features: [...canonical, ...extras, ...(hasOther ? [OTHER_KEY] : [])], top };
+}
+
 export function buildDailySeries(
   rows: LlmCostDailyRow[],
   now: Date,
@@ -136,19 +154,7 @@ export function buildDailySeries(
   for (const r of inWindow) {
     totals.set(r.called_for, (totals.get(r.called_for) ?? 0) + r.cost_usd);
   }
-  const top = new Set(
-    [...totals.entries()]
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, maxFeatures)
-      .map(([name]) => name),
-  );
-
-  // Fixed stack order: canonical order first, then any top features the
-  // canon doesn't know (alphabetical for determinism), then 'other'.
-  const canonical = FEATURE_COLOR_TOKENS.map(([name]) => name).filter((n) => top.has(n));
-  const extras = [...top].filter((n) => !canonical.includes(n)).sort();
-  const hasOther = [...totals.keys()].some((n) => !top.has(n));
-  const features = [...canonical, ...extras, ...(hasOther ? [OTHER_KEY] : [])];
+  const { features, top } = orderTopFeatures(totals, maxFeatures);
 
   const byDay = new Map<string, Record<string, string | number>>();
   for (let i = windowDays - 1; i >= 0; i--) {
@@ -164,6 +170,55 @@ export function buildDailySeries(
     rec[key] = ((rec[key] as number) ?? 0) + r.cost_usd;
   }
   return { data: [...byDay.values()], features };
+}
+
+/* Hour-grain twin of the daily row, from `llm_cost_hourly_public`
+ * (migration 281). `bucket` is the normalized ISO of the UTC hour start. */
+export interface LlmCostHourlyRow extends Omit<LlmCostDailyRow, 'day'> {
+  bucket: string;
+}
+
+const hourStart = (d: Date): Date => {
+  const h = new Date(d);
+  h.setUTCMinutes(0, 0, 0);
+  return h;
+};
+
+const hoursAgoIso = (now: Date, n: number): string => {
+  const d = hourStart(now);
+  d.setUTCHours(d.getUTCHours() - n);
+  return d.toISOString();
+};
+
+export function buildHourlySeries(
+  rows: LlmCostHourlyRow[],
+  now: Date,
+  windowHours: number,
+  maxFeatures = 6,
+): DailySeries {
+  const from = hoursAgoIso(now, windowHours - 1);
+  const inWindow = rows.filter((r) => r.bucket >= from);
+
+  const totals = new Map<string, number>();
+  for (const r of inWindow) {
+    totals.set(r.called_for, (totals.get(r.called_for) ?? 0) + r.cost_usd);
+  }
+  const { features, top } = orderTopFeatures(totals, maxFeatures);
+
+  const byHour = new Map<string, Record<string, string | number>>();
+  for (let i = windowHours - 1; i >= 0; i--) {
+    const bucket = hoursAgoIso(now, i);
+    const blank: Record<string, string | number> = { bucket };
+    for (const f of features) blank[f] = 0;
+    byHour.set(bucket, blank);
+  }
+  for (const r of inWindow) {
+    const rec = byHour.get(r.bucket);
+    if (!rec) continue;
+    const key = top.has(r.called_for) ? r.called_for : OTHER_KEY;
+    rec[key] = ((rec[key] as number) ?? 0) + r.cost_usd;
+  }
+  return { data: [...byHour.values()], features };
 }
 
 export interface FeatureSummary {

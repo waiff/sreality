@@ -3,7 +3,7 @@ import { imageSrc } from './imageUrl';
 import { type TaggedImageUrl } from './imageTags';
 import { fetchListingBrokersByIds, fetchBrokersByIds } from './brokers';
 import type { ListingDetailLite } from './dedupDiff';
-import type { LlmCostDailyRow } from './llmCosts';
+import type { LlmCostDailyRow, LlmCostHourlyRow } from './llmCosts';
 import {
   type CenterRadius,
   type DistrictChip,
@@ -2029,6 +2029,34 @@ export const fetchLlmCostDaily = async (days: number): Promise<LlmCostDailyRow[]
   if (error) throw error;
   return (data ?? []).map((r: Record<string, unknown>) => ({
     day: String(r.day),
+    called_for: String(r.called_for),
+    provider: String(r.provider),
+    model: String(r.model),
+    calls: Number(r.calls ?? 0),
+    error_calls: Number(r.error_calls ?? 0),
+    cost_usd: Number(r.cost_usd ?? 0),
+    input_tokens: Number(r.input_tokens ?? 0),
+    output_tokens: Number(r.output_tokens ?? 0),
+    cache_read_tokens: Number(r.cache_read_tokens ?? 0),
+    cache_write_tokens: Number(r.cache_write_tokens ?? 0),
+  }));
+};
+
+/* Hour-grain twin from `llm_cost_hourly_public` (migration 281); the
+ * bucket timestamptz is normalized to a canonical ISO so client-side
+ * zero-filling can key on exact string equality. */
+export const fetchLlmCostHourly = async (hours: number): Promise<LlmCostHourlyRow[]> => {
+  const from = new Date();
+  from.setUTCMinutes(0, 0, 0);
+  from.setUTCHours(from.getUTCHours() - hours);
+  const { data, error } = await supabase
+    .from('llm_cost_hourly_public')
+    .select('*')
+    .gte('bucket', from.toISOString())
+    .order('bucket', { ascending: true });
+  if (error) throw error;
+  return (data ?? []).map((r: Record<string, unknown>) => ({
+    bucket: new Date(String(r.bucket)).toISOString(),
     called_for: String(r.called_for),
     provider: String(r.provider),
     model: String(r.model),
