@@ -6,13 +6,22 @@ import {
   deleteDecisionFeedback,
   type DecisionFeedbackInput,
 } from '@/lib/api';
+import {
+  cancelDedupFeedback,
+  invalidateDedupFeedback,
+  reflectDecisionFeedback,
+} from '@/lib/dedupFeedbackCache';
 import type { DecisionFeedback } from '@/lib/types';
 
 /* The "this dedup decision was wrong" control — one shared component on BOTH the Decision
  * history feed and the Needs-review queue (the operator's ask: flag + note, filterable,
  * a labelled corpus for improving the flow). PROPERTY-pair-keyed (left/right property_id),
  * so the flag follows the pair across both surfaces and never orphans on a recompute.
- * Civic-archive: brick = "wrong", a native <select> for the single-choice direction. */
+ * Civic-archive: brick = "wrong", a native <select> for the single-choice direction.
+ *
+ * The save/remove mutations reflect the flag into the caches synchronously
+ * (`reflectDecisionFeedback`) so it shows the instant the write returns, then reconcile —
+ * see `lib/dedupFeedbackCache` for why the background refetch alone wasn't enough. */
 
 type Direction = '' | 'should_merge' | 'should_dismiss' | 'unsure';
 
@@ -55,16 +64,29 @@ export default function DecisionFeedbackControl({
 
   const save = useMutation({
     mutationFn: (body: DecisionFeedbackInput) => setDecisionFeedback(body),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['dedup'] });
+    // `body` (not a closure) is the authoritative saved shape — reflect it into the
+    // caches at once so the button flips immediately, then reconcile.
+    onSuccess: async (_res, body) => {
+      await cancelDedupFeedback(qc);
+      reflectDecisionFeedback(qc, body.left_property_id, body.right_property_id, {
+        is_incorrect: body.is_incorrect ?? true,
+        expected_outcome: body.expected_outcome ?? null,
+        note: body.note ?? null,
+        updated_at: null,
+      });
+      invalidateDedupFeedback(qc);
       setOpen(false);
     },
   });
   const remove = useMutation({
     mutationFn: () =>
       deleteDecisionFeedback(leftPropertyId as number, rightPropertyId as number),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['dedup'] });
+    onSuccess: async () => {
+      await cancelDedupFeedback(qc);
+      reflectDecisionFeedback(
+        qc, leftPropertyId as number, rightPropertyId as number, null,
+      );
+      invalidateDedupFeedback(qc);
       setOpen(false);
     },
   });
