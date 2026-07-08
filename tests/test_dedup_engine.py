@@ -812,6 +812,59 @@ def test_run_engine_byt_never_takes_attr_arm(monkeypatch: Any) -> None:
     assert stats.get("auto_attr", 0) == 0
 
 
+# --- download-completeness readiness (dedup_defer_incomplete_downloads) ------
+
+def test_run_engine_defers_pair_while_image_downloading(monkeypatch: Any) -> None:
+    # Flag ON + a side has an image pending download → the pair DEFERS: it never reaches the
+    # attr arm or the paid visual stage, and re-decides for free once downloads/tags finish.
+    import scripts.dedup_engine as eng
+    monkeypatch.setattr(eng, "_load_geo_eligible", lambda conn, **k: [
+        _gk(1, 101, area=120.0, price=5_950_000),
+        _gk(2, 102, area=120.0, price=5_950_000),
+    ])
+    monkeypatch.setattr(eng, "_downloads_incomplete", lambda conn, sids: [s for s in sids if s == 1])
+    monkeypatch.setattr(eng, "merge_properties", lambda *a, **k: {"data": {"merge_group_id": "g"}})
+    stats = eng.run_engine(_FakeConn([]), classify_fn=None, compare_fn=None,
+                           max_vision_calls=10, geo=True, geo_area_max_pct=0.20,
+                           defer_incomplete_downloads=True)
+    assert stats.get("download_deferred") == 1
+    assert stats.get("pairs_considered", 0) == 0  # never reached the visual stage
+    assert stats.get("auto_attr", 0) == 0          # never reached the attr arm
+
+
+def test_download_defer_off_by_default_ignores_pending_downloads(monkeypatch: Any) -> None:
+    # Flag OFF (default): even with both sides mid-download the pair proceeds as today.
+    import scripts.dedup_engine as eng
+    monkeypatch.setattr(eng, "_load_geo_eligible", lambda conn, **k: [
+        _gk(1, 101, area=120.0, price=5_950_000),
+        _gk(2, 102, area=120.0, price=5_950_000),
+    ])
+    monkeypatch.setattr(eng, "_downloads_incomplete", lambda conn, sids: list(sids))
+    monkeypatch.setattr(eng, "merge_properties", lambda *a, **k: {"data": {"merge_group_id": "g"}})
+    stats = eng.run_engine(_FakeConn([]), classify_fn=None, compare_fn=None,
+                           max_vision_calls=10, geo=True, geo_area_max_pct=0.20)
+    assert stats.get("download_deferred", 0) == 0
+    assert stats["pairs_considered"] == 1
+
+
+def test_downloads_incomplete_any_memoizes_per_listing(monkeypatch: Any) -> None:
+    # The cached wrapper queries each listing once per run (O(n)-per-group, like clip readiness).
+    import scripts.dedup_engine as eng
+    calls: list[list[int]] = []
+
+    def _fake(conn: Any, sids: list[int]) -> list[int]:
+        calls.append(list(sids))
+        return [s for s in sids if s == 7]  # 7 is mid-download
+
+    monkeypatch.setattr(eng, "_downloads_incomplete", _fake)
+    cache = eng._ProbeCache()
+    conn = _FakeConn([])
+    assert eng._downloads_incomplete_any(conn, [7, 8], cache) is True
+    assert eng._downloads_incomplete_any(conn, [8], cache) is False   # cached complete, no re-query
+    assert eng._downloads_incomplete_any(conn, [7], cache) is True    # cached incomplete
+    assert calls == [[7, 8]]  # only the first call hit the DB; the rest are memoized
+
+
 def test_enqueue_candidate_tier_column_from_markers() -> None:
     # Regression: the tier COLUMN must reflect markers['tier'] (= ctx.tier), not the kwarg
     # default — else a geo candidate lands as 'street_disposition' and vanishes from the
@@ -1991,6 +2044,7 @@ def _run_geo_only_main(monkeypatch: Any, *, reached_end: bool, last_key: str | N
         "dedup_floor_plan_budget": 0,
         "dedup_floor_plan_inconclusive_to_review": False,
         "dedup_nonbyt_attr_merge_enabled": False,
+        "dedup_defer_incomplete_downloads": False,
     }
     monkeypatch.setattr(ds, "read_setting", lambda conn, key: settings[key])
     monkeypatch.setattr(eng, "_auto_merge_enabled", lambda conn: False)

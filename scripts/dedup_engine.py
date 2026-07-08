@@ -1056,6 +1056,26 @@ def _clip_incomplete(conn: Any, sreality_ids: list[int], model: str) -> list[int
         return [int(r[0]) for r in cur.fetchall()]
 
 
+def _downloads_incomplete(conn: Any, sreality_ids: list[int]) -> list[int]:
+    """Which of these listings still have an image PENDING DOWNLOAD — a row with
+    `storage_path IS NULL AND download_attempts < 5` (an image queued for R2 that hasn't
+    landed yet; migration 002: `< 5` is still-retrying, `>= 5` is exhausted/terminal).
+    The completeness half of the readiness gate: the tagging gate (`_clip_incomplete`)
+    only waits for already-DOWNLOADED images to finish CLIP-tagging, so a pair whose photo
+    set is still arriving can be decided — and pay for forensic vision — on a partial set,
+    when the free pHash signal that would merge it lands minutes later. Deferring such a
+    pair lets it re-decide for FREE once the last image downloads + tags. Bounded: an image
+    that exhausts its 5 attempts stops counting, so this never blocks a listing forever."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT s.sid FROM unnest(%s::bigint[]) AS s(sid) "
+            "WHERE EXISTS (SELECT 1 FROM images i WHERE i.sreality_id = s.sid "
+            "              AND i.storage_path IS NULL AND i.download_attempts < 5)",
+            (sreality_ids,),
+        )
+        return [int(r[0]) for r in cur.fetchall()]
+
+
 def _trigger_clip_tagging(conn: Any, sreality_ids: list[int], model: str) -> None:
     """Re-queue a CLIP-untagged listing's images for the tagger (clip_tag.yml drains
     `clip_tagged_at IS NULL`): reset the marker on every stored image of these listings that
@@ -1502,6 +1522,7 @@ class _ProbeCache:
     mid-run tag/image change is picked up next run, the same staleness window every
     lane already accepts."""
     clip_incomplete: dict[int, bool] = field(default_factory=dict)
+    download_incomplete: dict[int, bool] = field(default_factory=dict)
     floor_plan_ids: dict[int, list[int]] = field(default_factory=dict)
     site_plan_pair: dict[tuple[int, int], bool] = field(default_factory=dict)
     # pHash batches are keyed by (lo_sid, hi_sid, profile) — the exclusion profile
@@ -1530,6 +1551,21 @@ def _clip_incomplete_any(
         for s in unknown:
             cache.clip_incomplete[s] = s in incomplete
     return any(cache.clip_incomplete[s] for s in sreality_ids)
+
+
+def _downloads_incomplete_any(
+    conn: Any, sreality_ids: list[int], cache: _ProbeCache | None = None,
+) -> bool:
+    """Memoized any-pending-download check over `_downloads_incomplete` (per-listing fact;
+    same O(n)-per-group memoization as `_clip_incomplete_any`)."""
+    if cache is None:
+        return bool(_downloads_incomplete(conn, sreality_ids))
+    unknown = [s for s in sreality_ids if s not in cache.download_incomplete]
+    if unknown:
+        incomplete = set(_downloads_incomplete(conn, unknown))
+        for s in unknown:
+            cache.download_incomplete[s] = s in incomplete
+    return any(cache.download_incomplete[s] for s in sreality_ids)
 
 
 def _floor_plan_ids_cached(
@@ -1645,6 +1681,10 @@ class _RunContext:
     # area-within-2% + identical price auto-merges through the floor-plan gate WITHOUT the
     # paid room compare (dedup_nonbyt_attr_merge_enabled). Off = every non-byt pair pays vision.
     nonbyt_attr_merge: bool = False
+    # Download-completeness readiness: when set, a pair DEFERS while either side still has an
+    # image pending download (dedup_defer_incomplete_downloads) — so it isn't decided (or paid
+    # for) on a partial photo set. Off = decide on whatever images have arrived.
+    defer_incomplete_downloads: bool = False
     # Prior engine dismissals among the loaded properties ({(lo,hi): reviewed_at}) —
     # loaded once per SCOPED run (dirty/candidates). resolve_pair skips a pair already
     # dismissed with NO new photo evidence since, instead of re-running the whole probe
@@ -1777,6 +1817,19 @@ def resolve_pair(conn: Any, a: ListingKey, b: ListingKey, *, street_key: str,
             conn, [a.sreality_id, b.sreality_id], ctx.clip_model, ctx.probes):
         stats["clip_deferred"] += 1
         ctx.engine_looked[cp] = "clip_deferred"  # fresh clip_tagged_at re-opens the pair
+        return
+
+    # Download-completeness half of the readiness gate (dedup_defer_incomplete_downloads):
+    # the tagging gate above only waits for already-DOWNLOADED images to be tagged, so a pair
+    # whose photo set is still landing can pay for forensic vision on a partial set — and the
+    # free pHash match that would merge it arrives minutes later. DEFER while either side has an
+    # image pending download; the last image's download → tag re-opens the pair (fresh
+    # clip_tagged_at), which then decides for FREE. Bounded by the 5-attempt give-up, so it never
+    # blocks a listing whose images can't download.
+    if ctx.defer_incomplete_downloads and _downloads_incomplete_any(
+            conn, [a.sreality_id, b.sreality_id], ctx.probes):
+        stats["download_deferred"] += 1
+        ctx.engine_looked[cp] = "download_deferred"
         return
 
     # Rule B (exact address) is RETIRED (2026-06): it was the only auto-merge path with false
@@ -2048,6 +2101,7 @@ def run_engine(
     geo: bool = False,
     geo_area_max_pct: float | None = None,
     nonbyt_attr_merge: bool = False,
+    defer_incomplete_downloads: bool = False,
     clip_model: str | None = None,
 ) -> dict[str, int]:
     """Run the full pipeline once. classify_fn/compare_fn are injectable for tests.
@@ -2111,7 +2165,7 @@ def run_engine(
         "auto_address": 0, "auto_phash": 0, "auto_visual": 0, "auto_attr": 0,
         "queued": 0, "vision_calls": 0,
         "auto_dismissed": 0, "reconciled": 0, "skipped_unresolved": 0,
-        "floor_plan_deferred": 0, "clip_deferred": 0, "truncated": 0,
+        "floor_plan_deferred": 0, "clip_deferred": 0, "download_deferred": 0, "truncated": 0,
         "clip_classified": 0, "clip_cosine_calls": 0,
         "routed_haiku": 0, "routed_sonnet": 0,
         # Migration 271 observability: why a run stopped, what oversized groups cost,
@@ -2196,6 +2250,7 @@ def run_engine(
         enqueue_unresolved=enqueue_unresolved, dry_run=dry_run, render_min=render_min,
         inconclusive_to_review=inconclusive_to_review, max_room_attempts=max_room_attempts,
         nonbyt_attr_merge=nonbyt_attr_merge,
+        defer_incomplete_downloads=defer_incomplete_downloads,
         stats=stats, vision_budget=_vision_budget,
         # floor_plan_calls None (every non-free mode) ALIASES the plan gate to the SAME
         # pool as compares → historical shared-budget behaviour; a value (free mode) gives
@@ -2917,6 +2972,8 @@ def build_free_engine_kw(
         auto_merge_enabled=auto_merge_enabled, autodismiss=autodismiss,
         enqueue_unresolved=enqueue_unresolved, deadline=deadline,
         nonbyt_attr_merge=bool(read_setting(conn, "dedup_nonbyt_attr_merge_enabled")),
+        defer_incomplete_downloads=bool(
+            read_setting(conn, "dedup_defer_incomplete_downloads")),
         clip_model=clip["clip_model"],
     )
 
@@ -3208,6 +3265,8 @@ def main() -> int:
             enqueue_unresolved=not args.free, dry_run=args.shadow, deadline=deadline,
             restrict_property_ids=restrict,
             nonbyt_attr_merge=bool(read_setting(conn, "dedup_nonbyt_attr_merge_enabled")),
+            defer_incomplete_downloads=bool(
+                read_setting(conn, "dedup_defer_incomplete_downloads")),
             clip_model=clip["clip_model"],
         )
 
