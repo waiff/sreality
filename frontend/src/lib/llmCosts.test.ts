@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildDailySeries,
+  buildHourlySeries,
   colorTokenFor,
   computeKpis,
   summarizeByFeature,
@@ -108,5 +109,41 @@ describe('summarizeByFeature / summarizeByModel', () => {
     expect(models[0].model).toBe('m1');
     expect(models[0].cost30).toBe(90);
     expect(models[0].share30).toBeCloseTo(0.9);
+  });
+});
+
+describe('buildHourlySeries', () => {
+  const hrow = (bucket: string, called_for: string, cost_usd: number) => ({
+    ...row({ called_for, cost_usd }),
+    bucket,
+  });
+
+  it('zero-fills a continuous hour window keyed on UTC hour starts', () => {
+    const rows = [
+      hrow('2026-07-07T11:00:00.000Z', 'a', 5),
+      hrow('2026-07-07T09:00:00.000Z', 'a', 2),
+    ];
+    const s = buildHourlySeries(rows, NOW, 6);
+    expect(s.data).toHaveLength(6);
+    expect(s.data[0].bucket).toBe('2026-07-07T07:00:00.000Z');
+    expect(s.data[5].bucket).toBe('2026-07-07T12:00:00.000Z');
+    const h11 = s.data.find((d) => d.bucket === '2026-07-07T11:00:00.000Z')!;
+    expect(h11.a).toBe(5);
+    const h10 = s.data.find((d) => d.bucket === '2026-07-07T10:00:00.000Z')!;
+    expect(h10.a).toBe(0);
+  });
+
+  it('drops rows outside the window and folds beyond-top features into other', () => {
+    const rows = [
+      hrow('2026-07-07T12:00:00.000Z', 'a', 9),
+      hrow('2026-07-07T12:00:00.000Z', 'b', 8),
+      hrow('2026-07-07T12:00:00.000Z', 'c', 1),
+      hrow('2026-07-01T12:00:00.000Z', 'a', 999), // outside 6h window
+    ];
+    const s = buildHourlySeries(rows, NOW, 6, 2);
+    expect(s.features).toEqual(['a', 'b', 'other']);
+    const h12 = s.data.find((d) => d.bucket === '2026-07-07T12:00:00.000Z')!;
+    expect(h12.a).toBe(9);
+    expect(h12.other).toBe(1);
   });
 });
