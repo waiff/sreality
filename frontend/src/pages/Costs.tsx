@@ -9,15 +9,27 @@ import {
   CartesianGrid,
   Tooltip,
 } from 'recharts';
-import { fetchLlmCostDaily, fetchLlmCostHourly } from '@/lib/queries';
+import { Link } from 'react-router-dom';
+import { fetchDedupCostByCategory, fetchLlmCostDaily, fetchLlmCostHourly } from '@/lib/queries';
+import {
+  CATEGORY_MAIN_LABELS,
+  CATEGORY_MAIN_ORDER,
+  CATEGORY_TYPE_LABELS,
+  CATEGORY_TYPE_ORDER,
+  DEDUP_CALLED_FOR_STEP,
+  pivotCostMatrix,
+  type DedupCostByCategoryRow,
+} from '@/lib/dedupFunnel';
 import {
   buildDailySeries,
   buildHourlySeries,
   colorTokenFor,
   computeKpis,
   featureLabel,
+  splitDedupFeatures,
   summarizeByFeature,
   summarizeByModel,
+  type FeatureSummary,
   type LlmCostDailyRow,
 } from '@/lib/llmCosts';
 import { fmtCount, fmtRelative, fmtUsd, fmtUsdPerCall } from '@/lib/format';
@@ -113,6 +125,14 @@ function Body({ rows }: { rows: LlmCostDailyRow[] }) {
     [hourlyQuery.data, now],
   );
 
+  // Dedup spend by property category — the SAME view the /dedup funnel's
+  // paid steps read, so the two tabs always agree.
+  const dedupByCat = useQuery({
+    queryKey: ['dedup-cost-by-category'],
+    queryFn: fetchDedupCostByCategory,
+    staleTime: 5 * 60_000,
+  });
+
   return (
     <div className="mt-4 space-y-4">
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
@@ -159,6 +179,28 @@ function Body({ rows }: { rows: LlmCostDailyRow[] }) {
 
       <Card title="By feature · 7 d / 30 d">
         <FeatureTable features={features} />
+      </Card>
+
+      <Card
+        title="Dedup spend by category · rolling 30 d"
+        accessory={
+          <Link
+            to="/dedup#funnel"
+            className="text-[0.68rem] text-[var(--color-copper-2)] hover:underline underline-offset-2"
+          >
+            Funnel on /dedup ↗
+          </Link>
+        }
+      >
+        {dedupByCat.error ? (
+          <p className="text-sm text-[var(--color-brick)]">
+            Failed to load: {(dedupByCat.error as Error).message}
+          </p>
+        ) : !dedupByCat.data ? (
+          <p className="text-sm text-[var(--color-ink-3)]">Loading…</p>
+        ) : (
+          <DedupCategoryCard rows={dedupByCat.data} />
+        )}
       </Card>
 
       <Card title="By model · last 30 d">
@@ -264,11 +306,51 @@ function CostChart({
   );
 }
 
+function FeatureCells({ f }: { f: FeatureSummary }) {
+  return (
+    <>
+      <td className="py-1.5 pr-3 font-mono text-[0.72rem] text-[var(--color-ink-2)]">
+        {f.models.join(', ')}
+      </td>
+      <td className="py-1.5 pr-3 text-right font-mono tabular-nums">{fmtCount(f.calls7)}</td>
+      <td
+        className={`py-1.5 pr-3 text-right font-mono tabular-nums ${
+          f.errors7 > 0 ? 'text-[var(--color-brick)]' : 'text-[var(--color-ink-4)]'
+        }`}
+      >
+        {fmtCount(f.errors7)}
+      </td>
+      <td className="py-1.5 pr-3 text-right font-mono tabular-nums">{fmtUsd(f.cost7)}</td>
+      <td className="py-1.5 pr-3 text-right font-mono tabular-nums text-[var(--color-ink-2)]">
+        {fmtUsdPerCall(f.avgPerCall7)}
+      </td>
+      <td className="py-1.5 pr-3 text-right font-mono tabular-nums">{fmtUsd(f.cost30)}</td>
+      <td className="py-1.5 text-right font-mono tabular-nums text-[var(--color-ink-2)]">
+        {(f.share30 * 100).toFixed(1)} %
+      </td>
+    </>
+  );
+}
+
 function FeatureTable({ features }: { features: ReturnType<typeof summarizeByFeature> }) {
   const colors = useTokenColors(TOKEN_KEYS);
+  const [dedupOpen, setDedupOpen] = useState(false);
+  const { dedup, other } = useMemo(() => splitDedupFeatures(features), [features]);
+
   if (!features.length) {
     return <p className="text-sm text-[var(--color-ink-3)]">No LLM calls in the last 30 days.</p>;
   }
+
+  // One sorted stream: the dedup GROUP competes by its combined cost.
+  const rows: Array<{ kind: 'feature'; f: FeatureSummary } | { kind: 'group' }> = [
+    ...other.map((f) => ({ kind: 'feature' as const, f })),
+    ...(dedup ? [{ kind: 'group' as const }] : []),
+  ].sort((a, b) => {
+    const ca = a.kind === 'group' ? dedup!.totals.cost30 : a.f.cost30;
+    const cb = b.kind === 'group' ? dedup!.totals.cost30 : b.f.cost30;
+    return cb - ca;
+  });
+
   return (
     <div className="overflow-x-auto">
       <table className="w-full text-sm">
@@ -285,43 +367,152 @@ function FeatureTable({ features }: { features: ReturnType<typeof summarizeByFea
           </tr>
         </thead>
         <tbody>
-          {features.map((f) => (
-            <tr key={f.feature} className="border-t border-[var(--color-rule-soft)]">
-              <td className="py-1.5 pr-3">
-                <span className="inline-flex items-center gap-2">
-                  <span
-                    className="inline-block w-2.5 h-2.5 rounded-[2px] shrink-0"
-                    style={{ background: colors[colorTokenFor(f.feature)] || '#9c8c5e' }}
-                  />
-                  {featureLabel(f.feature)}
-                </span>
-                <span className="block pl-[18px] font-mono text-[0.68rem] text-[var(--color-ink-4)]">
-                  {f.feature}
-                </span>
-              </td>
-              <td className="py-1.5 pr-3 font-mono text-[0.72rem] text-[var(--color-ink-2)]">
-                {f.models.join(', ')}
-              </td>
-              <td className="py-1.5 pr-3 text-right font-mono tabular-nums">{fmtCount(f.calls7)}</td>
-              <td
-                className={`py-1.5 pr-3 text-right font-mono tabular-nums ${
-                  f.errors7 > 0 ? 'text-[var(--color-brick)]' : 'text-[var(--color-ink-4)]'
-                }`}
-              >
-                {fmtCount(f.errors7)}
-              </td>
-              <td className="py-1.5 pr-3 text-right font-mono tabular-nums">{fmtUsd(f.cost7)}</td>
-              <td className="py-1.5 pr-3 text-right font-mono tabular-nums text-[var(--color-ink-2)]">
-                {fmtUsdPerCall(f.avgPerCall7)}
-              </td>
-              <td className="py-1.5 pr-3 text-right font-mono tabular-nums">{fmtUsd(f.cost30)}</td>
-              <td className="py-1.5 text-right font-mono tabular-nums text-[var(--color-ink-2)]">
-                {(f.share30 * 100).toFixed(1)} %
-              </td>
-            </tr>
-          ))}
+          {rows.map((row) =>
+            row.kind === 'feature' ? (
+              <tr key={row.f.feature} className="border-t border-[var(--color-rule-soft)]">
+                <td className="py-1.5 pr-3">
+                  <span className="inline-flex items-center gap-2">
+                    <span
+                      className="inline-block w-2.5 h-2.5 rounded-[2px] shrink-0"
+                      style={{ background: colors[colorTokenFor(row.f.feature)] || '#9c8c5e' }}
+                    />
+                    {featureLabel(row.f.feature)}
+                  </span>
+                  <span className="block pl-[18px] font-mono text-[0.68rem] text-[var(--color-ink-4)]">
+                    {row.f.feature}
+                  </span>
+                </td>
+                <FeatureCells f={row.f} />
+              </tr>
+            ) : (
+              [
+                <tr key="dedup-group" className="border-t border-[var(--color-rule-soft)]">
+                  <td className="py-1.5 pr-3">
+                    <button
+                      type="button"
+                      onClick={() => setDedupOpen((o) => !o)}
+                      aria-expanded={dedupOpen}
+                      className="inline-flex items-center gap-2 text-left hover:text-[var(--color-copper-2)]"
+                    >
+                      <span className="w-2.5 text-[var(--color-ink-3)]">{dedupOpen ? '▾' : '▸'}</span>
+                      <span className="font-medium">Dedup pipeline (vision)</span>
+                      <span className="font-mono text-[0.68rem] text-[var(--color-ink-4)]">
+                        {dedup!.children.length} features
+                      </span>
+                    </button>
+                    <span className="block pl-[18px] text-[0.68rem] text-[var(--color-ink-4)]">
+                      paid steps of the{' '}
+                      <Link
+                        to="/dedup#funnel"
+                        className="text-[var(--color-copper-2)] hover:underline underline-offset-2"
+                      >
+                        dedup funnel ↗
+                      </Link>
+                    </span>
+                  </td>
+                  <FeatureCells f={dedup!.totals} />
+                </tr>,
+                ...(dedupOpen
+                  ? dedup!.children.map((f) => (
+                      <tr key={f.feature} className="border-t border-[var(--color-rule-soft)] bg-[var(--color-paper)]">
+                        <td className="py-1.5 pr-3 pl-5">
+                          <span className="inline-flex items-center gap-2">
+                            <span
+                              className="inline-block w-2.5 h-2.5 rounded-[2px] shrink-0"
+                              style={{ background: colors[colorTokenFor(f.feature)] || '#9c8c5e' }}
+                            />
+                            {featureLabel(f.feature)}
+                            <Link
+                              to={`/dedup#${DEDUP_CALLED_FOR_STEP[f.feature]?.anchor ?? 'funnel'}`}
+                              className="text-[0.66rem] text-[var(--color-copper-2)] hover:underline underline-offset-2"
+                              title={`Funnel step: ${DEDUP_CALLED_FOR_STEP[f.feature]?.label ?? ''}`}
+                            >
+                              {DEDUP_CALLED_FOR_STEP[f.feature]?.label ?? 'funnel'} ↗
+                            </Link>
+                          </span>
+                          <span className="block pl-[18px] font-mono text-[0.68rem] text-[var(--color-ink-4)]">
+                            {f.feature}
+                          </span>
+                        </td>
+                        <FeatureCells f={f} />
+                      </tr>
+                    ))
+                  : []),
+              ]
+            ),
+          )}
         </tbody>
       </table>
+    </div>
+  );
+}
+
+function DedupCategoryCard({ rows }: { rows: DedupCostByCategoryRow[] }) {
+  const { matrix, total } = useMemo(() => pivotCostMatrix(rows, 30), [rows]);
+  if (!(total.calls ?? 0)) {
+    return <p className="text-sm text-[var(--color-ink-3)]">No dedup vision calls in the last 30 days.</p>;
+  }
+  return (
+    <div>
+      <div className="overflow-x-auto">
+        <table className="text-sm font-mono tabular-nums">
+          <thead>
+            <tr className="text-left text-[0.65rem] tracking-[0.1em] uppercase text-[var(--color-ink-3)] font-sans">
+              <th className="py-1.5 pr-5 font-medium">Kategorie</th>
+              {CATEGORY_TYPE_ORDER.map((ct) => (
+                <th key={ct} className="py-1.5 pr-5 font-medium text-right">
+                  {CATEGORY_TYPE_LABELS[ct]}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {CATEGORY_MAIN_ORDER.map((cm) => {
+              const r = matrix[cm];
+              const empty = !Object.values(r).some((c) => (c.calls ?? 0) > 0);
+              if (empty) return null;
+              return (
+                <tr key={cm} className="border-t border-[var(--color-rule-soft)]">
+                  <td className="py-1.5 pr-5 font-sans text-[var(--color-ink-2)]">
+                    {CATEGORY_MAIN_LABELS[cm]}
+                  </td>
+                  {CATEGORY_TYPE_ORDER.map((ct) => {
+                    const c = r[ct] ?? {};
+                    return (
+                      <td key={ct} className="py-1.5 pr-5 text-right">
+                        {(c.calls ?? 0) > 0 ? (
+                          <>
+                            {fmtUsd(c.cost ?? 0)}
+                            <span className="block text-[0.68rem] text-[var(--color-ink-4)]">
+                              {fmtCount(c.calls ?? 0)} calls · {fmtCount(c.listings ?? 0)} listings
+                            </span>
+                          </>
+                        ) : (
+                          <span className="text-[var(--color-ink-4)]">—</span>
+                        )}
+                      </td>
+                    );
+                  })}
+                </tr>
+              );
+            })}
+            <tr className="border-t border-[var(--color-rule)]">
+              <td className="py-1.5 pr-5 font-sans text-[var(--color-ink)]">Total</td>
+              <td className="py-1.5 pr-5 text-right" colSpan={CATEGORY_TYPE_ORDER.length}>
+                {fmtUsd(total.cost ?? 0)}
+                <span className="text-[0.68rem] text-[var(--color-ink-4)]">
+                  {' '}· {fmtCount(total.calls ?? 0)} calls · {fmtCount(total.listings ?? 0)} listings
+                </span>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p className="mt-2 text-[0.68rem] text-[var(--color-ink-4)] leading-snug">
+        Attributed via the dedup vision caches — the same source as the /dedup funnel's paid
+        steps, refreshed ≤ 15 min (rolling 30 d). The feature table above uses calendar days,
+        so a small window drift between the two is expected.
+      </p>
     </div>
   );
 }
