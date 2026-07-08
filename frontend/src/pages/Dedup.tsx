@@ -47,6 +47,7 @@ import DedupCandidateReset from '@/components/DedupCandidateReset';
 import DedupFactors from '@/components/DedupFactors';
 import DecisionFeedbackControl from '@/components/DecisionFeedbackControl';
 import DedupPipelineOverview from '@/components/DedupPipelineOverview';
+import DedupFunnel from '@/components/DedupFunnel';
 import { listingPath } from '@/lib/listingUrl';
 import type {
   DedupCandidatesResponse,
@@ -218,6 +219,8 @@ export default function Dedup() {
       <AutoDedupToggle />
 
       <DedupPipelineOverview />
+
+      <DedupFunnel />
 
       <CollapsibleSection id="clip" eyebrow="Backfill" title="CLIP backfill">
         <DedupBackfillProgress />

@@ -2,6 +2,8 @@
  * deterministic math over `llm_cost_daily_public` rows so it can be
  * unit-tested without the DB or React. */
 
+import { isDedupCalledFor } from './dedupFunnel';
+
 export interface LlmCostDailyRow {
   day: string; // 'YYYY-MM-DD'
   called_for: string;
@@ -293,4 +295,36 @@ export function summarizeByModel(rows: LlmCostDailyRow[], now: Date): ModelSumma
   return [...acc.values()]
     .map((s) => ({ ...s, share30: total > 0 ? s.cost30 / total : 0 }))
     .sort((a, b) => b.cost30 - a.cost30);
+}
+
+/* ---- Dedup grouping for the /costs feature table ------------------------ */
+/* The dedup called_for set comes from the shared funnel registry
+ * (lib/dedupFunnel), so /costs and /dedup can never disagree about which
+ * features belong to the dedup pipeline. */
+
+
+export interface DedupFeatureGroup {
+  children: FeatureSummary[];
+  totals: FeatureSummary;
+}
+
+export function splitDedupFeatures(features: FeatureSummary[]): {
+  dedup: DedupFeatureGroup | null;
+  other: FeatureSummary[];
+} {
+  const children = features.filter((f) => isDedupCalledFor(f.feature));
+  const other = features.filter((f) => !isDedupCalledFor(f.feature));
+  if (!children.length) return { dedup: null, other };
+  const totals: FeatureSummary = {
+    feature: 'dedup_pipeline',
+    models: [...new Set(children.flatMap((c) => c.models))].sort(),
+    calls7: children.reduce((s, c) => s + c.calls7, 0),
+    errors7: children.reduce((s, c) => s + c.errors7, 0),
+    cost7: children.reduce((s, c) => s + c.cost7, 0),
+    avgPerCall7: null,
+    cost30: children.reduce((s, c) => s + c.cost30, 0),
+    share30: children.reduce((s, c) => s + c.share30, 0),
+  };
+  totals.avgPerCall7 = totals.calls7 > 0 ? totals.cost7 / totals.calls7 : null;
+  return { dedup: { children, totals }, other };
 }

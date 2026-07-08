@@ -476,6 +476,24 @@ starts)**
   Listed as a "next" follow-up once new-listing alerts ship.
 
 
+### Phase U-COSTS 2: dedup funnel + cost grouping (done)
+
+- /dedup gains the full **free-vs-paid funnel** (`DedupFunnel`, anchored `#funnel`):
+  every resolve_pair step in engine order with pairs/properties/listings resolved
+  (audit-log matview), work counters labeled *evaluations* (engine-run sums —
+  re-scans repeat, deliberately distinct from distinct pairs), paid-step $ from
+  the same category view /costs reads, a free/paid/manual capture strip, and
+  per-step expandable byty/domy/komerční/pozemky/ostatní × prodej/pronájem
+  breakdowns. 7d/30d switch.
+- /costs feature table groups the four dedup vision features under an expandable
+  **Dedup pipeline** row; child rows deep-link to their funnel step anchor. New
+  "Dedup spend by category" card (rolling 30 d, matview) — same source as the
+  funnel's paid steps, so the two tabs agree by construction.
+- Shared step registry `lib/dedupFunnel.ts` (free/paid kinds, called_for→step,
+  anchors) is the single taxonomy both pages consume. Migration 282: two
+  matviews (pg_cron 15-min refresh; live joins were ~24 s > anon 3 s) + live
+  flow/queue views.
+
 ### Phase U-COSTS: LLM spend dashboard (done)
 
 - `/costs` operator page (nav: Settings cluster): KPI tiles (today / 7 d /
