@@ -204,16 +204,23 @@ grant select on dedup_llm_cost_by_category_public to anon, authenticated;
 -- pg_cron refresh every 15 min (the health-matview cadence family). The
 -- first refresh after this migration must be non-concurrent (matviews are
 -- created WITH NO DATA); done by the migration runner right after apply.
-do $$
+-- Guarded like migration 136 so the CI migration-replay container (no
+-- pg_cron) still applies this file — it logs a notice and skips the job.
+do $cron$
 begin
-  perform cron.unschedule('dedup-funnel-mv-refresh');
+  create extension if not exists pg_cron;
+  begin
+    perform cron.unschedule('dedup-funnel-mv-refresh');
+  exception when others then
+    null;
+  end;
+  perform cron.schedule(
+    'dedup-funnel-mv-refresh',
+    '*/15 * * * *',
+    $$refresh materialized view concurrently dedup_funnel_resolutions_mv;
+      refresh materialized view concurrently dedup_llm_cost_by_category_mv;$$
+  );
 exception when others then
-  null;
-end $$;
-
-select cron.schedule(
-  'dedup-funnel-mv-refresh',
-  '*/15 * * * *',
-  $$refresh materialized view concurrently dedup_funnel_resolutions_mv;
-    refresh materialized view concurrently dedup_llm_cost_by_category_mv;$$
-);
+  raise notice 'pg_cron unavailable; dedup funnel matview refresh not scheduled (%). Refresh both *_mv on another scheduler.', sqlerrm;
+end
+$cron$;
