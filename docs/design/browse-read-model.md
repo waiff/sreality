@@ -246,14 +246,24 @@ validation — recorded here so the doc matches reality:
    GH Actions cron is throttled/jittered (~2× measured); a pure-DB rebuild has
    no business on an external runner. `scripts/refresh_map_mv.py` + its
    workflow are retired; rebuild stamps live in `browse_read_model_state`.
-3. **Lean 5-index set instead of replicating the live table's index zoo.** The
+3. **Lean index set instead of replicating the live table's index zoo.** The
    snapshot is physically ordered `(category_main, category_type,
    first_seen_at)`, so any within-category query reads a contiguous band —
    secondary sort lanes (last_seen, area, price/m², yield…) are band-scan +
    top-N sort, well under the anon budget, with NO dedicated indexes. Only the
-   default keyset lane and the three district+price lanes (the migration-253
-   lesson: district rows are not contiguous in a category ordering) get
-   indexes, plus the PK.
+   default keyset lane and the three district+price lanes get indexes, plus
+   the PK. **Correction (2026-07-09, migration 283):** the district+price trio
+   must carry migration 253's FULL mechanism — trailing btree KEY columns
+   (property_id tiebreak + category_main, subtype, disposition, area_m2,
+   is_active) so predicates evaluate on index tuples. The first cut kept only
+   the key prefix; the price-ordered hunt then heap-fetched every candidate
+   (measured: "Domy – Praha" preset, 12.6k rows removed by heap filter,
+   18.9 s) — and the band-scan argument does NOT rescue district lanes,
+   because district rows are scattered in a category-ordered heap AND the
+   5-minute blue-green rebuild resets the cache (new relfilenode), making
+   these lanes permanently cold. Rule of thumb: any index on this snapshot
+   that serves an ORDER BY hunt must let the hunt's filters run on index
+   tuples; heap access is for result rows only.
 4. **`street` is bare `p.street`, and the ~4.2k-row COALESCE gap was fixed
    upstream** (enqueued into `dirty_properties` → the golden-record recompute),
    instead of carrying a 450k-row listings join in every rebuild. The
