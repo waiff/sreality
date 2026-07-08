@@ -1,10 +1,21 @@
 # Dedup LLM cost reduction — execution plan
 
-**Status: EXECUTING (2026-07-08).** Shipped: none merged yet. In flight: **Phase 2.2**
-(non-byt attribute auto-merge) — code behind `dedup_nonbyt_attr_merge_enabled` (default off),
-re-validated 99.6% on current data (572/574; the 2 misses are floor-plan dismissals the
-retained gate still catches). Enable via app_settings after merge + a clean funnel observation.
-Update this line as phases ship.
+**Status: EXECUTING (2026-07-08).**
+- **Phase 2.2 (non-byt attribute auto-merge): SHIPPED (#722) + ENABLED.** Re-validated 99.6%
+  on current data (572/574; the 2 misses are floor-plan dismissals the retained gate still
+  catches). `dedup_nonbyt_attr_merge_enabled=true` live; watch `/dedup#funnel` "Area + exact
+  price".
+- **Phase 3.3 (floor-plan gate scope-down): DROPPED.** Live data refuted the premise — the
+  ≥4-pHash-identical stratum still gets 4.08% (1,343/30d) `different_layout` dismissals, i.e.
+  the development shared-photo false-merge guard, not waste. The fid1 dismissal-memory piece
+  already exists (the prior-dismissal consult).
+- **Phase 2.1 (completeness-timing readiness): in flight** — defer a pair while either side
+  has an image pending download (`storage_path NULL, download_attempts < 5`; bounded by the
+  5-attempt give-up). Behind `dedup_defer_incomplete_downloads` (default off).
+- **Model flips (4.3) / 768px (3.1):** blocked on a GREEN `validate_vision_models` run — a
+  billed workflow the operator triggers; the flips are gated production changes.
+
+Update this list as phases ship.
 Written for an autonomous executor session (Opus, max reasoning) with no access to the
 investigation conversation — everything needed is in this file. The investigation behind it:
 five parallel read-only replays of free signals (pHash, CLIP cosine, attributes, CLIP tags,
