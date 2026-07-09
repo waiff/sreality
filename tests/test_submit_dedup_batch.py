@@ -101,7 +101,8 @@ def _run(monkeypatch: Any, *, keys: list[ListingKey], classifications: dict[int,
          both_site_plan: bool = False, floor_plan: bool = False,
          floor_plan_cached: Any = None, render_ids: set[int] | None = None,
          in_flight: set[str] | None = None,
-         max_requests: int = 100, max_room_attempts: int = 4) -> _FakeConn:
+         max_requests: int = 100, max_room_attempts: int = 4,
+         warm_rooms: int = 1) -> _FakeConn:
     """Drive collect() over `keys` with all I/O monkeypatched; return the conn so
     the test can inspect the enqueued dedup_batch_requests rows."""
     monkeypatch.setattr(sub, "_load_eligible", lambda conn: list(keys))
@@ -162,7 +163,7 @@ def _run(monkeypatch: Any, *, keys: list[ListingKey], classifications: dict[int,
     conn = _FakeConn()
     submitter = sub._Submitter(conn, _FakeProvider(), max_requests=max_requests, dry_run=False)
     sub.collect(conn, _FakeLLM(), submitter, max_pairs=4000,
-                max_room_attempts=max_room_attempts, n_images=12)
+                max_room_attempts=max_room_attempts, n_images=12, warm_rooms=warm_rooms)
     submitter.flush()
     return conn
 
@@ -190,6 +191,7 @@ def test_enqueued_compare_rooms_match_engine_walk(monkeypatch: Any) -> None:
         monkeypatch,
         keys=[_key(1, 101, source="sreality"), _key(2, 102, source="bazos")],
         classifications={1: ("classified", rooms_a), 2: ("classified", rooms_b)},
+        warm_rooms=4,  # full-prefix mode: warm every room the replay could stop at
     )
     by_kind = _rows_by_kind(conn)
     enqueued_rooms = [r[6] for r in by_kind.get("compare", [])]
@@ -200,6 +202,24 @@ def test_enqueued_compare_rooms_match_engine_walk(monkeypatch: Any) -> None:
     # canonical pair on every row
     for r in by_kind["compare"]:
         assert (r[4], r[5]) == (1, 2)
+
+
+def test_warm_rooms_default_warms_only_first_priority_room(monkeypatch: Any) -> None:
+    """The default (warm_rooms=1) warms ONLY the first-priority room — the one the engine
+    tries first and stops at on a merge. This drops the tail-room over-buy (rooms 2..N the
+    stop-at-first-High replay usually never reaches) that made the all-rooms warmer wasteful.
+    A pair needing a later room still resolves via the engine's synchronous fallback."""
+    rooms = {"kitchen": [11], "bathroom": [12], "living_room": [13], "bedroom": [14]}
+    common = set(rooms)
+    conn = _run(
+        monkeypatch,
+        keys=[_key(1, 101, source="sreality"), _key(2, 102, source="bazos")],
+        classifications={1: ("classified", rooms), 2: ("classified", rooms)},
+        # warm_rooms defaults to 1
+    )
+    enqueued = [r[6] for r in _rows_by_kind(conn).get("compare", [])]
+    assert enqueued == rooms_in_priority(common)[:1]  # exactly the first-priority room
+    assert len(enqueued) == 1
 
 
 def test_render_images_excluded_from_compare_warmup(monkeypatch: Any) -> None:
@@ -229,7 +249,7 @@ def test_room_attempts_cap_limits_enqueued_compares(monkeypatch: Any) -> None:
         monkeypatch,
         keys=[_key(1, 101, source="sreality"), _key(2, 102, source="bazos")],
         classifications={1: ("classified", rooms), 2: ("classified", rooms)},
-        max_room_attempts=2,
+        max_room_attempts=2, warm_rooms=4,  # warm-rooms is clamped down to the engine cap
     )
     enqueued = [r[6] for r in _rows_by_kind(conn).get("compare", [])]
     assert enqueued == rooms_in_priority(set(rooms))[:2]
@@ -402,7 +422,7 @@ def test_in_flight_request_is_skipped(monkeypatch: Any) -> None:
         monkeypatch,
         keys=[_key(1, 101, source="sreality"), _key(2, 102, source="bazos")],
         classifications={1: ("classified", rooms), 2: ("classified", rooms)},
-        in_flight={"cmp-1-2-kitchen"},
+        in_flight={"cmp-1-2-kitchen"}, warm_rooms=4,
     )
     enqueued = [r[6] for r in _rows_by_kind(conn).get("compare", [])]
     assert "kitchen" not in enqueued

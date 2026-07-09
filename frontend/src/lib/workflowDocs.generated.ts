@@ -1262,7 +1262,16 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "description": "Async dedup-vision via the Anthropic Message Batches API (50% cheaper than the synchronous dedup engine's per-call vision, recall-identical). PRE-WARMS the engine's classify/compare/site_plan caches; the daily \"Dedup engine (street + disposition)\" run then REPLAYS unchanged over the warm caches and produces the identical merges for free. Two modes, selected by the `mode` dispatch input:",
     "portal": null,
     "manual": true,
-    "schedules": [],
+    "schedules": [
+      {
+        "cron": "0 */6 * * *",
+        "human": "Every 6 hours"
+      },
+      {
+        "cron": "30 * * * *",
+        "human": "Every hour at :30"
+      }
+    ],
     "onPush": false,
     "onPullRequest": false,
     "paths": null,
@@ -1296,10 +1305,18 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
       },
       {
         "name": "max_room_attempts",
-        "description": "[submit] Max like-room compare requests enqueued per pair",
+        "description": "[submit] The engine's per-pair room cap (upper bound on warm-rooms)",
         "required": false,
         "type": "string",
         "default": "4",
+        "options": null
+      },
+      {
+        "name": "warm_rooms",
+        "description": "[submit] Like-room compares warmed per pair (1 = first-priority room only)",
+        "required": false,
+        "type": "string",
+        "default": "1",
         "options": null
       },
       {
