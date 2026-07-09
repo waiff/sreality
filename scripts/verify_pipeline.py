@@ -697,10 +697,16 @@ def check_db_saturation(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]
         (j["failed"] / (j["ok"] + j["failed"]) for j in jobs if j["ok"] + j["failed"] > 0),
         default=0.0,
     )
-    if offenders:
+    if len(offenders) >= 2:
         message = (
-            f"pg_cron jobs are failing over the last 6h (> {fail_rate:.0%}): {', '.join(offenders)} "
-            "— the database is likely saturated (statement timeouts); scheduled jobs fail en masse."
+            f"{len(offenders)} pg_cron jobs failing over the last 6h (> {fail_rate:.0%}): "
+            f"{', '.join(offenders)} — the database is likely saturated (statement timeouts hitting "
+            "multiple jobs at once)."
+        )
+    elif offenders:
+        message = (
+            f"pg_cron job failing over the last 6h (> {fail_rate:.0%}): {offenders[0]} — that job "
+            "(or a query it runs) is over the statement-timeout ceiling."
         )
     else:
         message = f"pg_cron healthy (worst job failure rate {worst_rate:.0%} over 6h)."
