@@ -15,9 +15,11 @@ from scripts.verify_pipeline import (
     _status_for_candidates,
     _status_for_cycle,
     _status_for_dirty,
+    _status_for_cron,
     _status_for_llm_errors,
     _status_for_llm_silence,
     _status_for_merge_latency,
+    _status_for_worker,
     _status_for_street_debt,
     _worst,
     load_thresholds,
@@ -143,6 +145,33 @@ def test_llm_silence_fails_when_stale_or_absent() -> None:
     assert _status_for_llm_silence(fail_h, fail_h) == "ok"    # exactly at threshold, not over
     assert _status_for_llm_silence(fail_h + 0.1, fail_h) == "fail"  # silent past threshold
     assert _status_for_llm_silence(None, fail_h) == "fail"    # no calls on record at all
+
+
+# --- db_saturation / worker_liveness (new blind-spot detectors) ------------
+
+
+def test_cron_flags_only_jobs_over_rate_with_enough_runs() -> None:
+    jobs = [
+        {"jobname": "refresh-health-dashboard", "ok": 14, "failed": 22},  # 61% of 36 → offender
+        {"jobname": "browse-list-rebuild", "ok": 71, "failed": 1},        # 1.4% → fine
+        {"jobname": "flaky-but-rare", "ok": 1, "failed": 1},              # 50% but only 2 runs → ignored
+    ]
+    status, offenders = _status_for_cron(jobs, fail_rate=0.5)
+    assert status == "fail"
+    assert offenders == ["refresh-health-dashboard 22/36"]
+
+
+def test_cron_all_healthy_is_ok() -> None:
+    jobs = [{"jobname": "browse-list-rebuild", "ok": 71, "failed": 1}]
+    assert _status_for_cron(jobs, 0.5) == ("ok", [])
+    assert _status_for_cron([], 0.5) == ("ok", [])  # no jobs in window → ok
+
+
+def test_worker_liveness_fails_only_when_stale() -> None:
+    assert _status_for_worker([("realtime-worker", 0.2)], stale_minutes=5) == ("ok", [])
+    assert _status_for_worker([], 5) == ("ok", [])  # no worker deployed → not this check's job
+    status, stale = _status_for_worker([("realtime-worker", 42.0)], 5)
+    assert status == "fail" and stale == ["realtime-worker (42m)"]
 
 
 # --- thresholds ------------------------------------------------------------

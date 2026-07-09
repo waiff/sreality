@@ -1,15 +1,18 @@
-name: "Monitoring: LLM pipeline liveness"
+name: "Monitoring: acute health (hourly)"
 
-# The hourly LLM lane of verify_pipeline: runs ONLY the two llm_* checks
-# (llm_errors + llm_liveness) at a fast cadence, and exits non-zero when either is
-# `fail` so GitHub emails the operator on a red scheduled run. This is the
-# belt-and-braces channel for when the in-app bell path itself is down; the bell
-# itself is rung (edge-triggered) by the checks via emit_transition_alerts, so a
-# credit/silence incident alerts once — not per run — and clears on recovery.
+# The fast lane of verify_pipeline: runs the ACUTE checks — LLM errors, LLM silence,
+# DB saturation (pg_cron failure rate) and realtime-worker liveness — hourly, and exits
+# non-zero when any is `fail` so GitHub emails the operator on a red scheduled run. This
+# is the belt-and-braces channel for when the in-app bell path itself is down; the bell
+# is rung (edge-triggered) by the checks via emit_transition_alerts, so an incident
+# alerts once — not per run — and clears on recovery. The 6h full verify_pipeline run
+# additionally covers these (shared emitter keys → no double-alert) plus the slower
+# structural checks (dedup debt, latency, engine cycle).
 #
 # Replaces the standalone scripts/check_llm_health.py (WS4 alerting rebuild): one
-# detection codepath, two cadences (this hourly lane + the 6h full verify run),
-# one bell namespace — no more duplicate llm_health vs llm_errors alerts.
+# detection codepath, one bell namespace — no more duplicate llm_health vs llm_errors.
+# The worker + DB checks close the two blind spots the 2026-07 incident exposed
+# (a dead worker and DB saturation each produced zero alerts).
 #
 # Read-only; needs ONLY SUPABASE_DB_URL — deliberately not the Anthropic key, so it
 # keeps working when the API is the thing that's down.
@@ -45,5 +48,5 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e .
 
-      - name: Check LLM pipeline liveness (errors + silence)
-        run: python -m scripts.verify_pipeline --only llm_errors,llm_liveness --exit-nonzero-on-fail
+      - name: Check acute health (LLM errors + silence, DB saturation, worker liveness)
+        run: python -m scripts.verify_pipeline --only llm_errors,llm_liveness,db_saturation,worker_liveness --exit-nonzero-on-fail

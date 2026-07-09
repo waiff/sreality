@@ -54,6 +54,8 @@ DEFAULT_THRESHOLDS: dict[str, float] = {
     "candidate_age_p95_warn_days": 14,
     "llm_error_rate_warn": 0.2,
     "llm_silence_fail_hours": 4,
+    "db_cron_fail_rate_fail": 0.5,
+    "worker_stale_fail_minutes": 5,
     "verification_stale_hours": 24,
     "precision_sample_n": 15,
 }
@@ -150,6 +152,37 @@ def _status_for_llm_silence(hours: float | None, fail_hours: float) -> str:
     if hours is None or hours > fail_hours:
         return "fail"
     return "ok"
+
+
+_MIN_CRON_RUNS = 3  # ignore jobs with too few finished runs to judge a rate
+
+
+def _status_for_cron(
+    jobs: list[dict[str, Any]], fail_rate: float,
+) -> tuple[str, list[str]]:
+    """Fail (naming the offenders) when any pg_cron job's failure rate over the window
+    exceeds `fail_rate` with >= _MIN_CRON_RUNS finished runs. This is the DB-saturation
+    signal: the fleet's heaviest jobs (health-matview refresh, browse-list rebuild) tip
+    over the pooler statement_timeout en masse when the DB is overloaded, and nothing
+    watched them (the 2026-07 incident surfaced as ~8 unrelated red workflows instead)."""
+    offenders = []
+    for j in jobs:
+        finished = j["ok"] + j["failed"]
+        if finished >= _MIN_CRON_RUNS and j["failed"] / finished > fail_rate:
+            offenders.append(f"{j['jobname']} {j['failed']}/{finished}")
+    return ("fail" if offenders else "ok"), offenders
+
+
+def _status_for_worker(
+    ages: list[tuple[str, float]], stale_minutes: float,
+) -> tuple[str, list[str]]:
+    """Fail when any heartbeating worker's last beat is older than `stale_minutes`. An
+    EMPTY list is ok (no worker deployed — not this check's job to demand one); the
+    realtime worker beats ~every 30s, so 5 min = 10 missed beats = down. `worker_heartbeats`
+    is written every 30s and, until now, read by nothing — a dead worker (it owns the
+    latency-critical loops) produced no signal at all."""
+    stale = [f"{w} ({age:.0f}m)" for (w, age) in ages if age > stale_minutes]
+    return ("fail" if stale else "ok"), stale
 
 
 # --- thresholds ------------------------------------------------------------
@@ -630,6 +663,91 @@ def check_llm_liveness(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+_DB_CRON_SQL = """
+select j.jobname,
+       count(*) filter (where d.status = 'succeeded') as ok,
+       count(*) filter (where d.status = 'failed')    as failed
+from cron.job_run_details d
+join cron.job j using (jobid)
+where d.start_time > now() - interval '6 hours'
+group by j.jobname
+"""
+
+
+def check_db_saturation(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]:
+    """Watch pg_cron's own run ledger for the DB-saturation signature. Skips cleanly if
+    the cron schema isn't visible (e.g. a branch DB without pg_cron) rather than false-fail."""
+    fail_rate = float(thresholds["db_cron_fail_rate_fail"])
+    try:
+        rows = _fetchall(conn, _DB_CRON_SQL)
+    except Exception as exc:  # noqa: BLE001 — cron schema not readable → warn (visible), never false-fail
+        # verify connects via SUPABASE_DB_URL (postgres role, which has cron access); this
+        # path only trips if that changes to a role lacking USAGE on schema cron. warn (not
+        # ok) so the /health page shows the check is INERT rather than silently green.
+        return {
+            "check_key": "db_saturation", "status": "warn", "value": None,
+            "details": {"skipped": f"cron.job_run_details unreadable: {exc}",
+                        "fix": "GRANT USAGE ON SCHEMA cron TO service_role;"},
+            "message": ("DB-saturation check is inert — can't read pg_cron's ledger. "
+                        "Fix: GRANT USAGE ON SCHEMA cron TO service_role;"),
+        }
+    jobs = [{"jobname": jn, "ok": int(ok), "failed": int(fl)} for (jn, ok, fl) in rows]
+    status, offenders = _status_for_cron(jobs, fail_rate)
+    worst_rate = max(
+        (j["failed"] / (j["ok"] + j["failed"]) for j in jobs if j["ok"] + j["failed"] > 0),
+        default=0.0,
+    )
+    if offenders:
+        message = (
+            f"pg_cron jobs are failing over the last 6h (> {fail_rate:.0%}): {', '.join(offenders)} "
+            "— the database is likely saturated (statement timeouts); scheduled jobs fail en masse."
+        )
+    else:
+        message = f"pg_cron healthy (worst job failure rate {worst_rate:.0%} over 6h)."
+    return {
+        "check_key": "db_saturation",
+        "status": status,
+        "value": round(worst_rate, 3),
+        "details": {"offenders": offenders, "fail_rate": fail_rate,
+                    "jobs": {j["jobname"]: {"ok": j["ok"], "failed": j["failed"]} for j in jobs}},
+        "message": message,
+    }
+
+
+_WORKER_LIVENESS_SQL = """
+select worker, extract(epoch from (now() - max(beat_at))) / 60.0 as age_min
+from worker_heartbeats
+group by worker
+"""
+
+
+def check_worker_liveness(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]:
+    """Watch the realtime worker's heartbeat — it owns the latency-critical loops but
+    worker_heartbeats had no reader, so a dead worker was invisible."""
+    stale_minutes = float(thresholds["worker_stale_fail_minutes"])
+    rows = _fetchall(conn, _WORKER_LIVENESS_SQL)
+    ages = [(str(w), float(age)) for (w, age) in rows if age is not None]
+    status, stale = _status_for_worker(ages, stale_minutes)
+    oldest = max((age for _, age in ages), default=0.0)
+    if stale:
+        message = (
+            f"Realtime worker heartbeat is stale (> {stale_minutes:.0f}m): {', '.join(stale)} "
+            "— the worker owns newest-first probes, the detail drain and real-time dedup; those loops are down."
+        )
+    elif not ages:
+        message = "No worker heartbeats on record (worker not deployed) — nothing to watch."
+    else:
+        message = f"Realtime worker alive (last beat {oldest:.1f}m ago)."
+    return {
+        "check_key": "worker_liveness",
+        "status": status,
+        "value": round(oldest, 2),
+        "details": {"stale_minutes": stale_minutes,
+                    "workers": {w: round(age, 2) for (w, age) in ages}},
+        "message": message,
+    }
+
+
 _PRECISION_SAMPLE_SQL = """
 select id, run_at, left_sreality_id, right_sreality_id,
        left_property_id, right_property_id, category_main, stage, detail
@@ -667,6 +785,8 @@ _CHECKS: list[tuple[str, Callable[[Any, dict[str, Any]], dict[str, Any]]]] = [
     ("engine_health", check_engine_health),
     ("llm_errors", check_llm_errors),
     ("llm_liveness", check_llm_liveness),
+    ("db_saturation", check_db_saturation),
+    ("worker_liveness", check_worker_liveness),
 ]
 
 _WEEKLY_CHECKS: list[tuple[str, Callable[[Any, dict[str, Any]], dict[str, Any]]]] = [
