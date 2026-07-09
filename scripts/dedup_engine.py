@@ -356,7 +356,7 @@ def _proposed_candidate_property_ids(
               AND (
                 c.last_engine_decision_at IS NULL
                 OR c.last_engine_decision_at
-                     < now() - make_interval(hours => %(backoff_h)s)
+                     < now() - (%(backoff_h)s * interval '1 hour')
                 OR EXISTS (
                     SELECT 1
                     FROM listings l

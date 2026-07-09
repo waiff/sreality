@@ -2267,7 +2267,12 @@ def test_proposed_candidate_property_ids_due_filter_sql() -> None:
     out = eng._proposed_candidate_property_ids(_Conn(), redecide_hours=24)
     sql = captured["sql"]
     assert "last_engine_decision_at IS NULL" in sql
-    assert "make_interval(hours => %(backoff_h)s)" in sql
+    # Express hours as float * interval, NOT make_interval(hours=>): `backoff_h` is a
+    # float and make_interval's `hours` arg is integer-typed, so a float bind raises
+    # UndefinedFunction at runtime — which crashed every --candidates run 2026-07-05→09
+    # (the _FakeConn here can't execute SQL, so this string guard stands in for it).
+    assert "%(backoff_h)s * interval '1 hour'" in sql
+    assert "make_interval(hours" not in sql
     assert "i.clip_tagged_at > c.last_engine_decision_at" in sql
     assert captured["params"]["backoff_h"] == 24.0
     assert out == {11, 22}
