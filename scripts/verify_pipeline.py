@@ -37,7 +37,10 @@ from toolkit.system_alerts import emit_transition_alerts, latest_statuses
 
 LOG = logging.getLogger("verify_pipeline")
 
-# Code fallbacks — mirror migration 274's pipeline_check_thresholds seed exactly.
+# Code fallbacks. The pipeline_check_thresholds seed (migration 274) is merged OVER
+# these in load_thresholds, so a key present here but not in the DB seed (e.g.
+# llm_silence_fail_hours, added with the WS4 alerting rebuild) is served from this
+# default until a future seed migration includes it.
 DEFAULT_THRESHOLDS: dict[str, float] = {
     "street_debt_price_pct": 1.0,
     "street_debt_warn": 30000,
@@ -50,6 +53,7 @@ DEFAULT_THRESHOLDS: dict[str, float] = {
     "dirty_age_p95_warn_hours": 6,
     "candidate_age_p95_warn_days": 14,
     "llm_error_rate_warn": 0.2,
+    "llm_silence_fail_hours": 4,
     "verification_stale_hours": 24,
     "precision_sample_n": 15,
 }
@@ -139,6 +143,13 @@ def _status_for_llm_errors(
         if c["total"] >= 20 and c["total"] > 0 and c["errors"] / c["total"] > warn_rate
     ]
     return ("fail" if offenders else "ok"), offenders
+
+
+def _status_for_llm_silence(hours: float | None, fail_hours: float) -> str:
+    """Fail when the newest llm_call is older than `fail_hours` (or there are none at all)."""
+    if hours is None or hours > fail_hours:
+        return "fail"
+    return "ok"
 
 
 # --- thresholds ------------------------------------------------------------
@@ -583,6 +594,42 @@ def check_llm_errors(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+_LLM_SILENCE_SQL = """
+select extract(epoch from (now() - max(called_at))) / 3600.0 as hours_since_last
+from llm_calls
+"""
+
+
+def check_llm_liveness(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]:
+    """Total-silence guard: the platform runs paid LLM traffic continuously (dedup vision
+    on the always-on worker), so a stretch with ZERO llm_calls means the pipeline is dead —
+    worker down, key unset, or an outage so hard nothing is even attempted. This is the
+    failure mode error-rate checks are structurally blind to (no calls → no errors → false
+    green). p99 inter-call gap is ~1 min, so the 4h default never trips in normal operation.
+    Folds in the unique liveness intent of the retired check_llm_health.py, but UNGATED — the
+    old probe hid behind a condition-scoring `pending` gate that is dead while scoring is paused."""
+    fail_hours = float(thresholds["llm_silence_fail_hours"])
+    row = _fetchone(conn, _LLM_SILENCE_SQL)
+    hours = float(row[0]) if row and row[0] is not None else None
+    status = _status_for_llm_silence(hours, fail_hours)
+    if hours is None:
+        message = f"No LLM calls on record at all — the LLM pipeline looks dead (threshold {fail_hours:.0f}h)."
+    elif status == "fail":
+        message = (
+            f"No LLM calls in {hours:.1f}h (> {fail_hours:.0f}h) — the LLM pipeline is silent "
+            "(worker down / key unset / hard outage). No paid path is running."
+        )
+    else:
+        message = f"LLM pipeline live (last call {hours:.2f}h ago)."
+    return {
+        "check_key": "llm_liveness",
+        "status": status,
+        "value": round(hours, 3) if hours is not None else None,
+        "details": {"hours_since_last_call": hours, "fail_hours": fail_hours},
+        "message": message,
+    }
+
+
 _PRECISION_SAMPLE_SQL = """
 select id, run_at, left_sreality_id, right_sreality_id,
        left_property_id, right_property_id, category_main, stage, detail
@@ -619,6 +666,7 @@ _CHECKS: list[tuple[str, Callable[[Any, dict[str, Any]], dict[str, Any]]]] = [
     ("merge_latency", check_merge_latency),
     ("engine_health", check_engine_health),
     ("llm_errors", check_llm_errors),
+    ("llm_liveness", check_llm_liveness),
 ]
 
 _WEEKLY_CHECKS: list[tuple[str, Callable[[Any, dict[str, Any]], dict[str, Any]]]] = [
@@ -628,11 +676,15 @@ _WEEKLY_CHECKS: list[tuple[str, Callable[[Any, dict[str, Any]], dict[str, Any]]]
 
 def run_checks(
     conn: Any, thresholds: dict[str, Any], *, weekly: bool = False,
+    only: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Run every check in isolation — a raising check becomes a `fail` row carrying
-    the error, so one broken check never aborts the run."""
+    the error, so one broken check never aborts the run. `only` restricts to the named
+    check keys (the hourly LLM-liveness lane runs just the two llm_* checks)."""
     results: list[dict[str, Any]] = []
     checks = list(_CHECKS) + (list(_WEEKLY_CHECKS) if weekly else [])
+    if only:
+        checks = [(k, fn) for (k, fn) in checks if k in only]
     for key, fn in checks:
         try:
             results.append(fn(conn, thresholds))
@@ -674,6 +726,13 @@ def main() -> int:
                         help="Compute + log, write nothing (no result rows, no alerts).")
     parser.add_argument("--weekly", action="store_true",
                         help="Also emit the weekly merge-precision sample.")
+    parser.add_argument("--only", default="",
+                        help="Comma-separated check keys to run (e.g. 'llm_errors,llm_liveness' "
+                             "for the hourly LLM lane). Empty = all checks.")
+    parser.add_argument("--exit-nonzero-on-fail", action="store_true",
+                        help="Exit 1 if any run check is 'fail' — so the hourly LLM lane's "
+                             "GitHub run goes red and emails the operator (belt-and-braces "
+                             "for when the in-app bell path itself is down).")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -686,10 +745,11 @@ def main() -> int:
         print("ERROR: SUPABASE_DB_URL is not set.", file=sys.stderr)
         return 2
 
+    only = {k.strip() for k in args.only.split(",") if k.strip()} or None
     run_at = _dt.datetime.now(_dt.timezone.utc)
     with connect() as conn:
         thresholds = load_thresholds(conn)
-        results = run_checks(conn, thresholds, weekly=args.weekly)
+        results = run_checks(conn, thresholds, weekly=args.weekly, only=only)
         for r in results:
             LOG.info("CHECK %s status=%s value=%s", r["check_key"], r["status"], r.get("value"))
         if args.dry_run:
@@ -700,6 +760,8 @@ def main() -> int:
         "verify_pipeline wrote %d rows, emitted %d onset + %d recovery alerts",
         len(results), counts["onset"], counts["recovery"],
     )
+    if args.exit_nonzero_on_fail and any(r["status"] == "fail" for r in results):
+        return 1
     return 0
 
 

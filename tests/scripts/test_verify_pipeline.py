@@ -16,6 +16,7 @@ from scripts.verify_pipeline import (
     _status_for_cycle,
     _status_for_dirty,
     _status_for_llm_errors,
+    _status_for_llm_silence,
     _status_for_merge_latency,
     _status_for_street_debt,
     _worst,
@@ -134,6 +135,14 @@ def test_llm_errors_rate_only_fails_while_live() -> None:
 def test_llm_errors_clean_is_ok() -> None:
     clean = [{"called_for": "parse_url", "total": 100, "errors": 1}]
     assert _status_for_llm_errors(clean, False, True, T) == ("ok", [])
+
+
+def test_llm_silence_fails_when_stale_or_absent() -> None:
+    fail_h = T["llm_silence_fail_hours"]
+    assert _status_for_llm_silence(0.02, fail_h) == "ok"      # ~1 min ago (normal)
+    assert _status_for_llm_silence(fail_h, fail_h) == "ok"    # exactly at threshold, not over
+    assert _status_for_llm_silence(fail_h + 0.1, fail_h) == "fail"  # silent past threshold
+    assert _status_for_llm_silence(None, fail_h) == "fail"    # no calls on record at all
 
 
 # --- thresholds ------------------------------------------------------------

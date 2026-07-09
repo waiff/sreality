@@ -1,16 +1,18 @@
 name: "Monitoring: LLM pipeline liveness"
 
-# Goes red (→ GitHub notifies the operator on a failed scheduled run) when the
-# LLM pipeline looks dead: no `llm_calls` rows for several hours while there is
-# pending condition-scoring work. Catches the silent failure mode where the
-# Anthropic account runs out of credits / the key breaks and the scorers
-# swallow per-listing errors, staying green while scoring nothing (this went
-# unnoticed for ~8h on 2026-06-04).
+# The hourly LLM lane of verify_pipeline: runs ONLY the two llm_* checks
+# (llm_errors + llm_liveness) at a fast cadence, and exits non-zero when either is
+# `fail` so GitHub emails the operator on a red scheduled run. This is the
+# belt-and-braces channel for when the in-app bell path itself is down; the bell
+# itself is rung (edge-triggered) by the checks via emit_transition_alerts, so a
+# credit/silence incident alerts once — not per run — and clears on recovery.
 #
-# Read-only; needs ONLY SUPABASE_DB_URL — deliberately not the Anthropic key,
-# so it keeps working when the API is the thing that's down. Tunable via
-# LLM_HEALTH_MAX_IDLE_HOURS (default 4) / LLM_HEALTH_MIN_PENDING (default 50) /
-# LLM_HEALTH_CONDITION_MAX_IDLE_HOURS (default 8, condition-scoring liveness).
+# Replaces the standalone scripts/check_llm_health.py (WS4 alerting rebuild): one
+# detection codepath, two cadences (this hourly lane + the 6h full verify run),
+# one bell namespace — no more duplicate llm_health vs llm_errors alerts.
+#
+# Read-only; needs ONLY SUPABASE_DB_URL — deliberately not the Anthropic key, so it
+# keeps working when the API is the thing that's down.
 #
 # Required GitHub secret: SUPABASE_DB_URL.
 
@@ -43,5 +45,5 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e .
 
-      - name: Check LLM pipeline liveness
-        run: python -m scripts.check_llm_health --notify
+      - name: Check LLM pipeline liveness (errors + silence)
+        run: python -m scripts.verify_pipeline --only llm_errors,llm_liveness --exit-nonzero-on-fail
