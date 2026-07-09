@@ -9,11 +9,23 @@
   ≥4-pHash-identical stratum still gets 4.08% (1,343/30d) `different_layout` dismissals, i.e.
   the development shared-photo false-merge guard, not waste. The fid1 dismissal-memory piece
   already exists (the prior-dismissal consult).
-- **Phase 2.1 (completeness-timing readiness): in flight** — defer a pair while either side
-  has an image pending download (`storage_path NULL, download_attempts < 5`; bounded by the
-  5-attempt give-up). Behind `dedup_defer_incomplete_downloads` (default off).
-- **Model flips (4.3) / 768px (3.1):** blocked on a GREEN `validate_vision_models` run — a
-  billed workflow the operator triggers; the flips are gated production changes.
+- **Phase 2.1 (completeness-timing readiness): SHIPPED (#723) + ENABLED.** Defers a pair while
+  either side has an image pending download (`storage_path NULL, download_attempts < 5`;
+  bounded by the 5-attempt give-up). `dedup_defer_incomplete_downloads=true` live.
+- **Phase 2.4 (shared-render blacklist): DECLINED.** Redundant where it matters — the
+  `render_score >= 0.95` exclusion already targets "a development reusing renders across
+  units" (its own code comment), so for byt it adds nothing; for non-byt it's modest precision
+  only; the merge record is spotless (0/49k unmerged) so it prevents ≈0 real false merges; and
+  it would move development pairs from the cheap gate-dismissal to the pricier visual path
+  (cost-neutral-to-negative). Not worth a change to the load-bearing pHash query.
+- **Phase 4.1 (targeted batch lane): in flight** — `submit_dedup_batch` now warms only the
+  first-priority room per pair (`--warm-rooms 1`) instead of the ~4-room superset (79-93% of
+  which the stop-at-first-High replay never reached). Crons restored, gated by
+  `dedup_batch_warmer_enabled` (default off). ~50% off the decisive-room compares when enabled.
+- **Phase 4.2 (harness): triggered** a `validate_vision_models` run (Haiku @ 768px, compare-
+  recall gate) — its result gates the model flips.
+- **Model flips (4.3) / 768px (3.1):** blocked on a GREEN harness run; the flips are gated
+  production changes the operator approves.
 
 Update this list as phases ship.
 Written for an autonomous executor session (Opus, max reasoning) with no access to the
