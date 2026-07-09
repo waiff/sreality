@@ -31,7 +31,12 @@ name: "Scraping: Bazos description enrichment (LLM, every 6h + manual)"
 
 on:
   schedule:
-    - cron: "20 */6 * * *"
+    # Every 3h (was 6h) to drain the standing enrichment backlog (~16k pending): each run
+    # is wall-clock-bounded (~50min) far below the $20 cost cap, so throughput is
+    # runs-per-day-limited, not cost-limited. 8 runs/day ≈ doubles coverage, netting the
+    # backlog down in ~2-3 days while keeping up with ~2k new/day; steady-state keeps
+    # bazos attributes fresher. Revert to */6 if it ever over-serves.
+    - cron: "20 */3 * * *"
   workflow_dispatch:
     inputs:
       source:
