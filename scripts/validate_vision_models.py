@@ -58,15 +58,23 @@ class _InfraAbort(RuntimeError):
 def _room_images(
     conn: Any, sreality_id: int, room_type: str, prod_model: str, limit: int,
 ) -> list[str]:
-    """Storage paths of one listing's images classified as room_type (prod model)."""
+    """Storage paths of one listing's images in `room_type`, sourced the way the engine
+    groups rooms: the free CLIP tag (`image_clip_tags.logical_tag`, ~100% coverage and the
+    engine's default grouping) OR any LLM room classification (`image_room_classifications`,
+    MODEL-AGNOSTIC — the room label is stored under the classify model (Haiku), never the
+    compare model, so filtering by `prod_model` here found nothing and every pair skipped as
+    'images gone'). `prod_model` is unused now (kept for call-site symmetry)."""
+    del prod_model
     with conn.cursor() as cur:
         cur.execute(
             "SELECT i.storage_path FROM images i "
-            "JOIN image_room_classifications c ON c.image_id = i.id "
-            "WHERE i.sreality_id = %s AND i.storage_path IS NOT NULL "
-            "  AND c.model = %s AND c.room_type = %s "
+            "WHERE i.sreality_id = %s AND i.storage_path IS NOT NULL AND ("
+            "  EXISTS (SELECT 1 FROM image_clip_tags t "
+            "          WHERE t.image_id = i.id AND t.logical_tag = %s) "
+            "  OR EXISTS (SELECT 1 FROM image_room_classifications c "
+            "             WHERE c.image_id = i.id AND c.room_type = %s)) "
             "ORDER BY i.sequence ASC NULLS LAST, i.id ASC LIMIT %s",
-            (sreality_id, prod_model, room_type, limit),
+            (sreality_id, room_type, room_type, limit),
         )
         return [r[0] for r in cur.fetchall()]
 
