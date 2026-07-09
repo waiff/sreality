@@ -232,7 +232,14 @@ def collect(
     from toolkit.dedup_priorities import load_tag_priority_overrides
     tag_overrides = load_tag_priority_overrides(conn)
 
-    keys = _load_eligible(conn)
+    # _load_eligible is the one FULL-MARKET statement (the warmer passes no restrict scope).
+    # As inventory grew since the warmer was retired it began exceeding the 2-min OLTP pooler
+    # statement_timeout and the whole run died before enqueuing anything. Run just this bulk
+    # read under a batch timeout (SET LOCAL in a txn — the clip_tag_backfill pattern); the
+    # per-pair probes below are short and stay on the OLTP default.
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute("SET LOCAL statement_timeout = '10min'")
+        keys = _load_eligible(conn)
     groups = _group_by_street(keys)
 
     funnel = {"visual_candidates": 0, "pairs_deferred_classify": 0, "floor_plan_warmed": 0}
