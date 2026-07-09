@@ -100,10 +100,21 @@ def run_compare_ab(
 ) -> tuple[int, int, list[str]]:
     """Re-run historical High verdicts; return (still_high, evaluated, misses)."""
     with conn.cursor() as cur:
+        # Sample the MOST RECENT High verdicts whose images still exist on BOTH sides.
+        # The old ORDER BY sreality_id put the negative (foreign-portal) ids first — mostly
+        # long-delisted listings whose R2 images are purged — so every sampled pair hit
+        # "room images gone" and the run concluded INCONCLUSIVE (why the gate never produced
+        # a real verdict). Recency + an images-present guard makes the corpus evaluable.
         cur.execute(
-            "SELECT DISTINCT sreality_id_a, sreality_id_b, room_type "
-            "FROM listing_visual_matches WHERE verdict = 'High' AND model = %s "
-            "ORDER BY 1, 2, 3 LIMIT %s",
+            "SELECT sreality_id_a, sreality_id_b, room_type "
+            "FROM listing_visual_matches v "
+            "WHERE v.verdict = 'High' AND v.model = %s "
+            "  AND EXISTS (SELECT 1 FROM images i "
+            "              WHERE i.sreality_id = v.sreality_id_a AND i.storage_path IS NOT NULL) "
+            "  AND EXISTS (SELECT 1 FROM images i "
+            "              WHERE i.sreality_id = v.sreality_id_b AND i.storage_path IS NOT NULL) "
+            "GROUP BY sreality_id_a, sreality_id_b, room_type "
+            "ORDER BY max(v.created_at) DESC LIMIT %s",
             (prod_model, limit),
         )
         rows = cur.fetchall()
