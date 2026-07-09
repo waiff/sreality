@@ -1,33 +1,27 @@
-"""App-wide guard: every SQL string constant must have valid %-placeholders.
+"""Offline guard: every SQL string constant has valid `%`-placeholders.
 
-psycopg scans the ENTIRE query string for `%` placeholders on every
-parameterized `execute(sql, params)` — comments and string literals included.
-A bare `%` that is not part of a valid placeholder (`%s`, `%b`, `%t`,
-`%(name)s`, or an escaped `%%`) raises `ProgrammingError: incomplete
-placeholder` at runtime. CI's fake DB connections never run this parser, so the
-bug ships green — exactly how a prose `~2%` in a SQL comment took down property
-maintenance + the dedup engine (PR #653). This test closes that gap for the
-whole repo.
+psycopg scans the ENTIRE query string for `%` placeholders on every parameterized
+`execute(sql, params)` — comments and string literals included. A bare `%` that
+is not a valid placeholder (`%s`, `%b`, `%t`, `%(name)s`, or an escaped `%%`)
+raises `ProgrammingError: incomplete placeholder` at runtime. CI's fake DB
+connections never run this parser, so the bug ships green — exactly how a prose
+`~2%` in a SQL comment took down property maintenance + the dedup engine (PR
+#653).
 
-It is AST-based on purpose: it never imports the modules (no import-time side
-effects, no optional-dep fragility), it auto-discovers constants (zero per-file
-upkeep), and it validates with psycopg's own placeholder tokenizer (the exact
-runtime check). Constants derived via `.replace()` (e.g. `_RECOMPUTE_ONE_SQL`)
-are not separately evaluable statically, but they share the body of the base
-`*_SQL` constant they are derived from, so validating the base covers the family.
+This is the FAST, OFFLINE floor: no database, no imports, so it runs in the
+normal `pytest` job and gives instant feedback. Discovery is shared with the
+schema-aware sweep via `tests/sql_corpus.py` (this test takes only module-level
+constants — the parameterized-query convention — to stay free of false positives
+on param-less literal `%`, e.g. an inline `LIKE '%x%'`). The schema-aware
+counterpart (`test_sql_schema_prepare.py`) then PREPAREs the wider corpus against
+the real schema in CI.
 """
 
 from __future__ import annotations
 
-import ast
 import re
-from pathlib import Path
 
-_ROOT = Path(__file__).resolve().parent.parent
-_EXCLUDED_DIRS = {
-    "tests", ".claude", ".git", "node_modules", "__pycache__",
-    ".venv", "venv", "build", "dist", "frontend",
-}
+from tests.sql_corpus import discover
 
 
 def _invalid_placeholder(sql: str) -> str | None:
@@ -52,39 +46,17 @@ def _invalid_placeholder(sql: str) -> str | None:
     return "bare '%' is not a valid placeholder" if "%" in leftover else None
 
 
-def _iter_sql_constants():
-    """Yield (relpath, lineno, name, sql) for every `*_SQL` / `*_QUERY` string."""
-    for path in sorted(_ROOT.rglob("*.py")):
-        rel = path.relative_to(_ROOT)
-        if any(part in _EXCLUDED_DIRS for part in rel.parts):
-            continue
-        try:
-            tree = ast.parse(path.read_text(encoding="utf-8"), str(rel))
-        except (SyntaxError, UnicodeDecodeError):
-            continue
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Assign):
-                continue
-            value = node.value
-            if not (isinstance(value, ast.Constant) and isinstance(value.value, str)):
-                continue
-            for target in node.targets:
-                name = getattr(target, "id", "")
-                if name.endswith("_SQL") or name.endswith("_QUERY"):
-                    yield rel, node.lineno, name, value.value
-
-
 def test_sql_constants_have_valid_placeholders():
-    constants = list(_iter_sql_constants())
+    constants = discover(include_inline=False, resolve_imports=False)
     # Tripwire: a guard that silently scans nothing is worthless. The repo has
     # dozens of `*_SQL` constants; if this drops to ~0 the scan/exclusions broke.
     assert len(constants) >= 20, (
         f"only {len(constants)} SQL constants discovered — the scan is likely broken"
     )
     offenders = [
-        f"  {rel}:{lineno} {name}: {err}"
-        for rel, lineno, name, sql in constants
-        if (err := _invalid_placeholder(sql)) is not None
+        f"  {item.origin} {item.name}: {err}"
+        for item in constants
+        if (err := _invalid_placeholder(item.sql)) is not None
     ]
     assert not offenders, (
         "SQL string constants with an invalid `%` placeholder (psycopg will raise "
