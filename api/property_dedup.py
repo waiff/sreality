@@ -790,17 +790,27 @@ def archive_reset_candidates(
     """Snapshot the PROPOSED candidate queue to the archive, then clear it so the
     engine regenerates fresh ("disregard candidates, keep a backup, redo all").
     Merges/dismissals are untouched (they live in property_merge_events + the
-    property rows). The archive is the backup; the positional INSERT relies on the
-    archive's column order being (candidate cols…, archived_at, archive_batch),
-    guaranteed by migration 228 (LIKE then ALTER ADD)."""
+    property rows). Columns are listed EXPLICITLY (not `SELECT c.*`): the archive is
+    `LIKE candidates` + archived_at/archive_batch (migration 228), but a new source
+    column lands mid-list on the source and appended on the archive, so a positional
+    copy drifts (it did — migration 272's engine_decision/last_engine_decision_at,
+    fixed by migration 284). Naming every column keeps the copy correct regardless of
+    physical order; a future source column just needs adding here + on the archive."""
     from datetime import datetime, timezone
 
     label = batch or datetime.now(timezone.utc).strftime("reset-%Y%m%d-%H%M%S")
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(
             "INSERT INTO property_identity_candidates_archive "
-            "SELECT c.*, now(), %s FROM property_identity_candidates c "
-            "WHERE c.status = 'proposed'",
+            "  (id, left_property_id, right_property_id, confidence, markers_matched, "
+            "   tier, status, created_at, reviewed_at, reviewed_action, auto_merged, "
+            "   merge_group_id, engine_decision, last_engine_decision_at, "
+            "   archived_at, archive_batch) "
+            "SELECT c.id, c.left_property_id, c.right_property_id, c.confidence, "
+            "  c.markers_matched, c.tier, c.status, c.created_at, c.reviewed_at, "
+            "  c.reviewed_action, c.auto_merged, c.merge_group_id, c.engine_decision, "
+            "  c.last_engine_decision_at, now(), %s "
+            "FROM property_identity_candidates c WHERE c.status = 'proposed'",
             (label,),
         )
         archived = cur.rowcount
