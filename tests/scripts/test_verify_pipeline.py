@@ -103,25 +103,37 @@ def test_dirty_and_candidate_warn_bands() -> None:
 # --- llm_errors ------------------------------------------------------------
 
 
-def test_llm_errors_credit_balance_forces_fail() -> None:
-    status, offenders = _status_for_llm_errors([], credit_balance_errors=1, thresholds=T)
+def test_llm_errors_credit_live_forces_fail() -> None:
+    status, offenders = _status_for_llm_errors(
+        [], credit_live=True, currently_failing=True, thresholds=T,
+    )
     assert status == "fail" and offenders == []
 
 
-def test_llm_errors_rate_needs_min_calls() -> None:
-    # 3/5 = 60% but only 5 calls (< 20) → not counted.
-    low_volume = [{"called_for": "parse_url", "total": 5, "errors": 3}]
-    assert _status_for_llm_errors(low_volume, 0, T)[0] == "ok"
-    # 6/20 = 30% > 20% with >= 20 calls → fail, and it's named.
-    status, offenders = _status_for_llm_errors(
-        [{"called_for": "score_listing_condition", "total": 20, "errors": 6}], 0, T,
-    )
+def test_llm_errors_recovered_credit_window_is_ok() -> None:
+    # The 2026-07-09 stale-alarm regression: credit errors sit in the 24h window but a
+    # success has flowed since, so it's NOT live — must be ok, not "everything is down".
+    assert _status_for_llm_errors(
+        [{"called_for": "compare_listings_visually", "total": 40, "errors": 30}],
+        credit_live=False, currently_failing=False, thresholds=T,
+    ) == ("ok", [])
+
+
+def test_llm_errors_rate_only_fails_while_live() -> None:
+    offender = [{"called_for": "score_listing_condition", "total": 20, "errors": 6}]  # 30% > 20%, >= 20
+    # Live → fail, named.
+    status, offenders = _status_for_llm_errors(offender, False, True, T)
     assert status == "fail" and offenders == ["score_listing_condition"]
+    # Same window but recovered (not live) → ok. This is the trailing-window fix.
+    assert _status_for_llm_errors(offender, False, False, T) == ("ok", [])
+    # Live but only 5 calls (< 20) → too little signal → ok.
+    low_volume = [{"called_for": "parse_url", "total": 5, "errors": 3}]
+    assert _status_for_llm_errors(low_volume, False, True, T)[0] == "ok"
 
 
 def test_llm_errors_clean_is_ok() -> None:
     clean = [{"called_for": "parse_url", "total": 100, "errors": 1}]
-    assert _status_for_llm_errors(clean, 0, T) == ("ok", [])
+    assert _status_for_llm_errors(clean, False, True, T) == ("ok", [])
 
 
 # --- thresholds ------------------------------------------------------------

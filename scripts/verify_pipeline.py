@@ -2,8 +2,9 @@
 
 Computes a fixed set of pipeline-health metrics (dedup debt, eligibility funnel,
 merge latency, engine cycle health, LLM error rate, a weekly precision sample),
-writes one `pipeline_check_results` row per check, and rings the in-app bell
-(toolkit.system_alerts.emit_system_alert) for every `fail`.
+writes one `pipeline_check_results` row per check, and rings the in-app bell on
+STATE TRANSITIONS only (toolkit.system_alerts.emit_transition_alerts): once when a
+check goes red, once when it recovers — not on every red run.
 
 Born from the 2026-07 incident: the dedup/scrape pipeline stalled silently for two
 days (Anthropic credit exhaustion; 38k+ failed LLM calls) with no in-app signal,
@@ -32,7 +33,7 @@ import sys
 from typing import Any, Callable
 
 from scraper.db import connect
-from toolkit.system_alerts import emit_system_alert
+from toolkit.system_alerts import emit_transition_alerts, latest_statuses
 
 LOG = logging.getLogger("verify_pipeline")
 
@@ -114,13 +115,23 @@ def _status_for_candidates(p95_days: float | None, thresholds: dict[str, Any]) -
 
 def _status_for_llm_errors(
     per_called_for: list[dict[str, Any]],
-    credit_balance_errors: int,
+    credit_live: bool,
+    currently_failing: bool,
     thresholds: dict[str, Any],
 ) -> tuple[str, list[str]]:
-    """Return (status, offending called_for keys). Fail on a credit-balance error
-    OR any called_for whose error rate exceeds the threshold with >= 20 calls."""
-    if credit_balance_errors > 0:
+    """Return (status, offending called_for keys), gated on LIVE state.
+
+    The old check failed on ANY credit-balance error in a trailing 24h window, so it kept
+    screaming "everything is down" for up to a day after the account was topped up (it fired
+    ~22h post-recovery on 2026-07-09). Now a red state requires the outage to be LIVE —
+    `currently_failing` = the most recent llm_call is a failure (healthy traffic since the
+    last error clears it within minutes). Credit exhaustion (`credit_live`) is the
+    unconditional fail; otherwise a called_for erroring >warn_rate over >=20 calls fails only
+    while still live."""
+    if credit_live:
         return "fail", []
+    if not currently_failing:
+        return "ok", []
     warn_rate = thresholds["llm_error_rate_warn"]
     offenders = [
         c["called_for"]
@@ -490,11 +501,40 @@ select count(*) from llm_calls
 where called_at > now() - interval '24 hours' and error ilike %s
 """
 
+# Liveness: is the provider failing RIGHT NOW? Compares the newest failure vs the newest
+# success (a success after the last error means recovered). `min_ok_at` bounds staleness so
+# a lone error hours ago with no traffic since doesn't read as a live outage.
+_LLM_LIVENESS_SQL = """
+select
+  max(called_at) filter (where error is not null) as last_err_at,
+  max(called_at) filter (where error is null) as last_ok_at,
+  max(called_at) filter (where error ilike %s) as last_credit_err_at,
+  now() - interval '90 minutes' as min_live_at
+from llm_calls
+where called_at > now() - interval '24 hours'
+"""
+
 
 def check_llm_errors(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]:
     rows = _fetchall(conn, _LLM_ERRORS_SQL)
     credit_row = _fetchone(conn, _LLM_CREDIT_SQL, ("%credit balance%",))
     credit_errors = int(credit_row[0]) if credit_row and credit_row[0] is not None else 0
+
+    live = _fetchone(conn, _LLM_LIVENESS_SQL, ("%credit balance%",))
+    last_err_at, last_ok_at, last_credit_err_at, min_live_at = (
+        (live[0], live[1], live[2], live[3]) if live else (None, None, None, None)
+    )
+    # Currently failing = newest call is a failure AND that failure is recent (not stale).
+    currently_failing = bool(
+        last_err_at is not None
+        and (last_ok_at is None or last_err_at > last_ok_at)
+        and (min_live_at is None or last_err_at > min_live_at)
+    )
+    credit_live = bool(
+        currently_failing
+        and last_credit_err_at is not None
+        and (last_ok_at is None or last_credit_err_at > last_ok_at)
+    )
 
     per_called_for: list[dict[str, Any]] = []
     tot = err = 0
@@ -507,19 +547,23 @@ def check_llm_errors(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]:
             "rate": round(errors / total, 4) if total else 0.0,
         })
     overall_rate = round(err / tot, 4) if tot else 0.0
-    status, offenders = _status_for_llm_errors(per_called_for, credit_errors, thresholds)
+    status, offenders = _status_for_llm_errors(
+        per_called_for, credit_live, currently_failing, thresholds,
+    )
 
-    if credit_errors > 0:
+    if credit_live:
         message = (
-            f"LLM calls are failing with credit-balance errors ({credit_errors} in 24h) — "
-            "the Anthropic account is out of credit. Every paid LLM path (dedup vision, "
-            "estimations, summaries, condition scoring) is down."
+            "LLM calls are failing with credit-balance errors right now — the Anthropic "
+            "account is out of credit. Every paid LLM path (dedup vision, estimations, "
+            f"summaries, condition scoring) is down ({credit_errors} credit errors in 24h)."
+        )
+    elif offenders:
+        message = (
+            f"LLM error rate exceeded {thresholds['llm_error_rate_warn']:.0%} and is still "
+            f"live for: {', '.join(offenders)} (24h window, >= 20 calls) — the provider is erroring."
         )
     else:
-        message = (
-            f"LLM error rate exceeded {thresholds['llm_error_rate_warn']:.0%} for: "
-            f"{', '.join(offenders)} (24h window, >= 20 calls) — the provider is erroring."
-        )
+        message = f"LLM calls healthy ({overall_rate:.1%} error rate over 24h)."
     return {
         "check_key": "llm_errors",
         "status": status,
@@ -527,6 +571,10 @@ def check_llm_errors(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]:
         "details": {
             "overall_rate": overall_rate,
             "credit_balance_errors": credit_errors,
+            "currently_failing": currently_failing,
+            "credit_live": credit_live,
+            "last_error_at": str(last_err_at) if last_err_at else None,
+            "last_success_at": str(last_ok_at) if last_ok_at else None,
             "warn_rate": thresholds["llm_error_rate_warn"],
             "offending_called_for": offenders,
             "per_called_for": per_called_for,
@@ -602,10 +650,13 @@ def run_checks(
 
 def write_results(
     conn: Any, results: list[dict[str, Any]], run_at: _dt.datetime,
-) -> int:
-    """Persist one row per check and ring the bell for each `fail`. Returns the
-    number of alerts emitted."""
-    alerts = 0
+) -> dict[str, int]:
+    """Persist one row per check, then ring the bell on TRANSITIONS only (onset /
+    recovery), not on every red run. Returns {onset, recovery} counts.
+
+    The previous stored status is read BEFORE this run's rows are inserted, so the
+    baseline is the prior run — see toolkit.system_alerts.emit_transition_alerts."""
+    prev = latest_statuses(conn)
     with conn.cursor() as cur:
         for r in results:
             cur.execute(
@@ -614,12 +665,7 @@ def write_results(
                 (run_at, r["check_key"], r["status"],
                  r.get("value"), json.dumps(r.get("details") or {})),
             )
-    for r in results:
-        if r["status"] == "fail":
-            msg = r.get("message") or f"Pipeline check '{r['check_key']}' failed."
-            if emit_system_alert(conn, r["check_key"], msg):
-                alerts += 1
-    return alerts
+    return emit_transition_alerts(conn, results, prev, run_at)
 
 
 def main() -> int:
@@ -649,8 +695,11 @@ def main() -> int:
         if args.dry_run:
             LOG.info("dry-run: %d checks computed, no rows written", len(results))
             return 0
-        alerts = write_results(conn, results, run_at)
-    LOG.info("verify_pipeline wrote %d rows, emitted %d alerts", len(results), alerts)
+        counts = write_results(conn, results, run_at)
+    LOG.info(
+        "verify_pipeline wrote %d rows, emitted %d onset + %d recovery alerts",
+        len(results), counts["onset"], counts["recovery"],
+    )
     return 0
 
 
