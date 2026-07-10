@@ -16,6 +16,8 @@ from __future__ import annotations
 import logging
 import sys
 
+from psycopg import errors
+
 from scraper.db import connect
 
 LOG = logging.getLogger("recompute_mf_yields")
@@ -33,10 +35,23 @@ def recompute(conn) -> int:
     return int(n)
 
 
+def recompute_with_retry(conn) -> int:
+    """One retry on deadlock: the bulk listings UPDATE can lose a lock-order race
+    against a concurrent bulk writer (first seen 2026-07-10, vs the every-2-min
+    worker maintenance lane). The victim's transaction is rolled back and the
+    function is idempotent (is-distinct-from write guard), so a single rerun on a
+    settled snapshot is safe and almost always clean."""
+    try:
+        return recompute(conn)
+    except errors.DeadlockDetected:
+        LOG.warning("MF yields recompute deadlocked (concurrent bulk writer); retrying once")
+        return recompute(conn)
+
+
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     with connect() as conn:
-        n = recompute(conn)
+        n = recompute_with_retry(conn)
     LOG.info("MF yields recomputed: %d rows changed", n)
     return 0
 
