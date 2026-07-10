@@ -27,6 +27,7 @@ from psycopg.types.json import Jsonb, set_json_dumps
 from scraper import media
 from scraper.scraped_listing import ScrapedListing
 from scraper.street import street_name_key
+from toolkit.publication import eligible_predicate
 
 LOG = logging.getLogger(__name__)
 
@@ -102,6 +103,9 @@ LISTING_COLUMNS: tuple[str, ...] = (
     # the content hash (the hash covers raw_json, not derived columns), so
     # populating it never churns a snapshot.
     "street_name_key",
+    # Portal-declared publication/last-bump timestamp (migration 266). Out of
+    # every content hash (bazos re-stamps it per bump; backfills stay free).
+    "published_at",
 )
 
 # Postgres type for each LISTING_COLUMN, used to build the jsonb_to_recordset
@@ -147,10 +151,56 @@ _LISTING_COLUMN_PGTYPE: dict[str, str] = {
     "zip": "text",
     "street_id": "integer",
     "street_name_key": "text",
+    "published_at": "timestamptz",
 }
 assert set(_LISTING_COLUMN_PGTYPE) == set(LISTING_COLUMNS), (
     "_LISTING_COLUMN_PGTYPE drifted from LISTING_COLUMNS"
 )
+
+# The RÚIAN coord→street resolver (resolve_coord_streets.yml) fills these on rows whose
+# PORTAL page carries no street — so the row's next detail refetch (correctly) re-parses
+# NULL, and a plain `street = EXCLUDED.street` CLOBBERS the resolver's fill back to NULL
+# (measured: 40% of a resolver cohort lost in 2.5 days). These columns carry forward when
+# the incoming value is NULL: a parser that DOES produce a street still wins (fresher,
+# page-sourced), but an incoming NULL never erases a stored value. Safe precisely because
+# the trio is OUT of the content hash (no snapshot churn), a wrong-street risk is guarded
+# upstream (street.reject_as_town) and downstream (the admin-geo trigger NULLs a
+# resolver-sourced street when the listing's coordinates change — migration 262).
+# published_at joins the set (migration 266): the signal is intermittent at the source
+# (sreality's `edited` exists on ~40% of rows; a portal can stop rendering its date), so a
+# fetch that yields no date must not erase what an earlier fetch or a raw_json backfill
+# recorded — a fresher portal date still wins. Same rails: out of the content hash,
+# informational only.
+_PRESERVE_IF_NULL_COLUMNS = frozenset({"street", "house_number", "published_at"})
+
+# street_name_key is NOT independently preserve-if-null: it is a pure function of
+# street, so it must follow the STREET's preserve decision — preserved exactly when
+# the street is preserved, else written as stamped (even when that stamp is NULL: a
+# non-NULL street can legitimately fold to a NULL key, and keeping the OLD key under
+# a NEW street would store a pair the weekly parity job rightly flags as drift).
+_STREET_NAME_KEY_UPDATE_SQL = (
+    "street_name_key = CASE WHEN EXCLUDED.street IS NULL "
+    "THEN listings.street_name_key ELSE EXCLUDED.street_name_key END"
+)
+
+# street_source provenance ('parser' | 'resolver', migration 262): a page-parsed street
+# marks 'parser'; a preserved (incoming-NULL) value keeps whatever provenance it had; the
+# resolver stamps 'resolver' in its own UPDATE. The geom-change guard keys off it.
+_STREET_SOURCE_UPDATE_SQL = (
+    "street_source = CASE WHEN EXCLUDED.street IS NOT NULL THEN 'parser' "
+    "ELSE listings.street_source END"
+)
+
+
+def _listing_update_set_sql() -> str:
+    """The ONE ON CONFLICT SET builder shared by upsert_listing and the batched drain
+    upsert, so preserve-if-null semantics can never drift between the two write paths."""
+    return ",\n          ".join(
+        (_STREET_NAME_KEY_UPDATE_SQL if c == "street_name_key"
+         else f"{c} = COALESCE(EXCLUDED.{c}, listings.{c})" if c in _PRESERVE_IF_NULL_COLUMNS
+         else f"{c} = EXCLUDED.{c}")
+        for c in LISTING_COLUMNS
+    )
 
 
 def _set_street_name_key(d: dict[str, Any]) -> None:
@@ -467,19 +517,18 @@ def upsert_listing(
     raw_jsonb = Jsonb(raw_json)
     column_list = ", ".join(LISTING_COLUMNS)
     placeholders = ", ".join(f"%({c})s" for c in LISTING_COLUMNS)
-    update_set = ",\n          ".join(
-        f"{c} = EXCLUDED.{c}" for c in LISTING_COLUMNS
-    )
+    update_set = _listing_update_set_sql()
 
     upsert_sql = f"""
         INSERT INTO listings (
             sreality_id, last_seen_at, is_active,
             {column_list},
-            geom, raw_json
+            street_source, geom, raw_json
         )
         VALUES (
             %(sreality_id)s, now(), true,
             {placeholders},
+            CASE WHEN %(street)s::text IS NOT NULL THEN 'parser' END,
             CASE
               -- Cast to double precision so a NULL lon/lat (common for bazos and
               -- other portals; rare for sreality) carries a concrete type. Without
@@ -501,6 +550,7 @@ def upsert_listing(
           is_active = true,
           inactive_at = NULL,
           {update_set},
+          {_STREET_SOURCE_UPDATE_SQL},
           geom = EXCLUDED.geom,
           raw_json = EXCLUDED.raw_json
         RETURNING xmax = 0 AS inserted
@@ -1451,17 +1501,22 @@ def mark_image_stored(
     conn: psycopg.Connection,
     image_id: int,
     storage_path: str,
+    phash: int | None = None,
 ) -> None:
+    """`phash` rides the same statement as `storage_path` (computed inline on
+    the bytes already in hand — Wave C-4); None preserves any existing hash so
+    the hourly compute_image_phash backfill stays the backstop."""
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(
             """
             UPDATE images
             SET storage_path = %s,
+                phash = COALESCE(%s, phash),
                 last_download_attempt_at = now(),
                 download_attempts = download_attempts + 1
             WHERE id = %s
             """,
-            (storage_path, image_id),
+            (storage_path, phash, image_id),
         )
 
 
@@ -1829,19 +1884,20 @@ _BATCH_RECORD_SPEC = ", ".join(
     f"{c} {_LISTING_COLUMN_PGTYPE[c]}" for c in LISTING_COLUMNS
 )
 _BATCH_SELECT_COLS = ", ".join(f"j.{c}" for c in LISTING_COLUMNS)
-_BATCH_UPDATE_SET = ",\n          ".join(
-    f"{c} = EXCLUDED.{c}" for c in LISTING_COLUMNS
-)
+# One shared builder with upsert_listing — preserve-if-null for the resolver street trio
+# (see _PRESERVE_IF_NULL_COLUMNS) applies identically to both write paths.
+_BATCH_UPDATE_SET = _listing_update_set_sql()
 
 _BATCH_UPSERT_SQL = f"""
     INSERT INTO listings (
         sreality_id, last_seen_at, is_active,
         {", ".join(LISTING_COLUMNS)},
-        geom, raw_json
+        street_source, geom, raw_json
     )
     SELECT
         j.sreality_id, now(), true,
         {_BATCH_SELECT_COLS},
+        CASE WHEN j.street IS NOT NULL THEN 'parser' END,
         CASE
           WHEN j.lon IS NOT NULL AND j.lat IS NOT NULL
           THEN ST_SetSRID(ST_MakePoint(j.lon, j.lat), 4326)::geography
@@ -1857,6 +1913,7 @@ _BATCH_UPSERT_SQL = f"""
       is_active = true,
       inactive_at = NULL,
       {_BATCH_UPDATE_SET},
+      {_STREET_SOURCE_UPDATE_SQL},
       geom = EXCLUDED.geom,
       raw_json = EXCLUDED.raw_json
     RETURNING (xmax = 0) AS inserted
@@ -1902,7 +1959,29 @@ _BATCH_DIRTY_FROM_SIDS_SQL = """
 # any incompletely-tagged pair (resolve_pair `_clip_incomplete` gate), so this is the trigger
 # half of one invariant: the engine only ever decides a pair when both sides are fully tagged.
 # Same append-and-bump-marked_at discipline as dirty_properties (rule #20).
-_DEDUP_DIRTY_FROM_IMAGE_IDS_SQL = """
+#
+# TWO enqueue gates keep this a REAL-TIME CHANGE signal, not an ENRICHMENT-progress firehose
+# (the flood that stalled the drain twice — the whole market streamed through the tagger and
+# every property landed here, 78.5% of them un-mergeable):
+#   * ELIGIBILITY (property-grain): the property must have >=1 listing the dedup engine can
+#     actually reach — street+disposition (the street pass) OR a geo-eligible single-dwelling
+#     row (the geo pass; run_dirty_pass runs a geo sub-pass over the claimed properties'
+#     stored geo_cell_key cells, so geo-family properties merge on this lane too — the gate
+#     was street-only while the drain was). The predicate is
+#     toolkit.publication.eligible_predicate rendered for the subquery alias, never a hand
+#     copy. Property-grain (any listing of P), NOT the tagged listing's own eligibility: the
+#     re-tagged image may belong to an ineligible sibling (a street-less bazos byt, a
+#     geom-less re-post) while the property's eligible listing is what actually merges.
+#   * RECENCY: only a genuinely NEW listing needs the minutes-latency lane. A market-wide CLIP
+#     backfill (or a new portal's back-catalogue) tags OLD listings whose dedup is already the
+#     6h full scan's job; routing them here is what floods the queue. `first_seen_at` on the
+#     TAGGED listing is the "new arrival" signal. Older-but-newly-eligible pairs (a street
+#     backfilled onto an old listing) are the full scan's job today too — no regression.
+# Anything these gates drop is still deduped by the scheduled full scans (the correctness
+# backstop); they only keep the real-time lane scoped to work it can act on fast.
+_DEDUP_DIRTY_RECENCY_DAYS = 7
+
+_DEDUP_DIRTY_FROM_IMAGE_IDS_SQL = f"""
     INSERT INTO dedup_dirty_properties (property_id)
     SELECT DISTINCT l.property_id FROM listings l JOIN images i ON i.sreality_id = l.sreality_id
     WHERE i.id = ANY(%s) AND l.property_id IS NOT NULL
@@ -1911,6 +1990,12 @@ _DEDUP_DIRTY_FROM_IMAGE_IDS_SQL = """
         WHERE i2.sreality_id = l.sreality_id
           AND i2.storage_path IS NOT NULL AND i2.clip_tagged_at IS NULL
       )
+      AND EXISTS (
+        SELECT 1 FROM listings le
+        WHERE le.property_id = l.property_id
+          AND ({eligible_predicate("le")})
+      )
+      AND l.first_seen_at > now() - interval '{_DEDUP_DIRTY_RECENCY_DAYS} days'
     ON CONFLICT (property_id) DO UPDATE SET marked_at = now()
 """
 
@@ -2065,7 +2150,13 @@ def enqueue_detail(
 
     Idempotent on (source, native_id): re-seeing an id refreshes its observed
     price + detail_ref and raises its priority (GREATEST), but never disturbs a
-    row a drain has already claimed. Chunked to stay under the pooler timeout.
+    row a drain has already claimed. The original enqueued_at is deliberately
+    KEPT on re-enqueue: the claim order is (priority DESC, enqueued_at ASC), so
+    re-stamping now() pushed every still-queued row behind the walk's fresh
+    inserts each run — a backlog bigger than one drain's budget then starved its
+    tail forever (remax rent listings cycled unfetched for weeks) and the Health
+    queue-age metrics under-reported the wait. Chunked to stay under the pooler
+    timeout.
     """
     rows = list(entries)
     if not rows:
@@ -2093,8 +2184,7 @@ def enqueue_detail(
                 ON CONFLICT (source, native_id) DO UPDATE SET
                     detail_ref      = EXCLUDED.detail_ref,
                     index_price_czk = EXCLUDED.index_price_czk,
-                    priority = GREATEST(listing_detail_queue.priority, EXCLUDED.priority),
-                    enqueued_at     = now()
+                    priority = GREATEST(listing_detail_queue.priority, EXCLUDED.priority)
                 WHERE listing_detail_queue.claimed_at IS NULL
                 """,
                 {"source": source, "nids": native_ids, "refs": refs,
@@ -2141,16 +2231,31 @@ def complete_detail(
     conn: psycopg.Connection,
     source: str,
     native_ids: Iterable[str],
+    outcome: str = "written",
 ) -> int:
-    """Remove drained rows from the queue (success or confirmed-gone)."""
+    """Remove drained rows from the queue (success or confirmed-gone), logging
+    each into detail_queue_completions (migration 265) in the same transaction
+    so the enqueue->detail-write latency survives the row's deletion."""
     ids = [str(n) for n in native_ids]
     if not ids:
         return 0
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(
-            "DELETE FROM listing_detail_queue "
-            "WHERE source = %s AND native_id = ANY(%s)",
-            (source, ids),
+            """
+            WITH del AS (
+                DELETE FROM listing_detail_queue
+                WHERE source = %(source)s AND native_id = ANY(%(ids)s)
+                RETURNING source, native_id, priority, attempts,
+                          enqueued_at, claimed_at
+            )
+            INSERT INTO detail_queue_completions
+                (source, native_id, priority, attempts, enqueued_at,
+                 claimed_at, outcome)
+            SELECT source, native_id, priority, attempts, enqueued_at,
+                   claimed_at, %(outcome)s
+            FROM del
+            """,
+            {"source": source, "ids": ids, "outcome": outcome},
         )
         return cur.rowcount or 0
 
@@ -2163,7 +2268,13 @@ def fail_detail(
     max_attempts: int = FAILURE_GIVE_UP_THRESHOLD,
 ) -> None:
     """Release a failed claim back to the queue, bumping attempts; give up at
-    max_attempts so a permanently-broken listing stops re-claiming."""
+    max_attempts so a permanently-broken listing stops re-claiming.
+
+    A row crossing the give-up threshold is a terminal outcome, so it is logged
+    to detail_queue_completions in the same transaction. The `old` self-join
+    captures the pre-update claimed_at (nulled by the SET) and the give-up
+    transition edge (was_given_up), so a resilient-retry replay that bumps an
+    already-given-up row never logs a duplicate."""
     ids = [str(n) for n in native_ids]
     if not ids:
         return
@@ -2171,15 +2282,31 @@ def fail_detail(
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(
             """
-            UPDATE listing_detail_queue SET
-                attempts   = attempts + 1,
-                given_up   = (attempts + 1) >= %s,
-                claimed_at = NULL,
-                last_error = %s
-            WHERE source = %s AND native_id = ANY(%s)
+            WITH upd AS (
+                UPDATE listing_detail_queue q SET
+                    attempts   = q.attempts + 1,
+                    given_up   = (q.attempts + 1) >= %(max)s,
+                    claimed_at = NULL,
+                    last_error = %(err)s
+                FROM listing_detail_queue old
+                WHERE q.source = %(source)s AND q.native_id = ANY(%(ids)s)
+                  AND old.source = q.source AND old.native_id = q.native_id
+                RETURNING q.source, q.native_id, q.priority, q.attempts,
+                          q.enqueued_at, old.claimed_at AS old_claimed_at,
+                          q.given_up, old.given_up AS was_given_up
+            )
+            INSERT INTO detail_queue_completions
+                (source, native_id, priority, attempts, enqueued_at,
+                 claimed_at, outcome)
+            SELECT source, native_id, priority, attempts, enqueued_at,
+                   old_claimed_at, 'given_up'
+            FROM upd WHERE given_up AND NOT was_given_up
             """,
-            (max_attempts, truncated, source, ids),
+            {"max": max_attempts, "err": truncated, "source": source, "ids": ids},
         )
+
+
+COMPLETION_RETENTION_DAYS = 7
 
 
 def reclaim_stale_claims(
@@ -2189,8 +2316,16 @@ def reclaim_stale_claims(
 ) -> int:
     """Release `source` claims older than the cutoff (a drain SIGKILLed
     mid-flight), so its rows become claimable again. Mirrors
-    sweep_stuck_scrape_runs."""
+    sweep_stuck_scrape_runs. Also prunes this source's expired
+    detail_queue_completions rows (7-day ephemeral ledger, the rule-#9
+    posture) — running it here, at every drain start, keeps the ledger
+    bounded without pg_cron."""
     with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            "DELETE FROM detail_queue_completions "
+            "WHERE source = %s AND completed_at < now() - make_interval(days => %s)",
+            (source, COMPLETION_RETENTION_DAYS),
+        )
         cur.execute(
             """
             UPDATE listing_detail_queue SET claimed_at = NULL

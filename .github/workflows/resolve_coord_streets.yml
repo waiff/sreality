@@ -49,6 +49,14 @@ on:
         options:
           - "false"
           - "true"
+      force_rescan:
+        description: Re-attempt rows already stamped at the current revision (recovery pass)
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
   schedule:
     - cron: "0 5 * * 1"   # weekly Mon 05:00 UTC — catch newer trustworthy-coord rows
 
@@ -79,4 +87,5 @@ jobs:
           if [ "${{ inputs.calibrate }}" = "true" ]; then ARGS="$ARGS --calibrate"; fi
           if [ -n "${{ inputs.source }}" ]; then ARGS="$ARGS --source ${{ inputs.source }}"; fi
           if [ "${{ inputs.dry_run }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
+          if [ "${{ inputs.force_rescan }}" = "true" ]; then ARGS="$ARGS --force-rescan"; fi
           python -m scripts.backfill_address_point_streets $ARGS

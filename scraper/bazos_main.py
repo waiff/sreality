@@ -64,11 +64,12 @@ SOURCE = "bazos"
 # the second, stronger guard. Not operator-tunable.
 INDEX_MIN_COMPLETENESS = 0.995
 
-# Only flip rows unseen for 24h+ — ~3.5x the 6-7h walk cadence. Combined with
+# Only flip rows unseen for 12h+ — ~2x the 6-7h walk cadence. Combined with
 # touch_listings bumping last_seen_at for every index-seen row BEFORE the sweep,
 # a live row inside the 0.5% tolerance window cannot be flipped — only rows
-# missed by 4+ consecutive walks can.
-INACTIVE_MIN_UNSEEN_HOURS = 24
+# missed by 2+ consecutive walks can. Tightened 24->12h for the real-time
+# delisting SLO (2 walk-misses is still robust against single-walk jitter).
+INACTIVE_MIN_UNSEEN_HOURS = 12
 
 
 class _CachingGeocoder:
@@ -143,6 +144,11 @@ class BazosPortal:
         self._max_pages = max_pages
 
     # --- index-walk seams ---
+    def set_index_page_cap(self, pages: int | None) -> None:
+        # Probe seam (portal_runner.run_index_probe): bazos's default index
+        # order is newest-first, so a page-capped walk IS the delta probe.
+        self._max_pages = pages
+
     def categories(self) -> list[dict[str, str]]:
         return list(self._scopes)
 
@@ -440,6 +446,7 @@ def main(argv: list[str] | None = None) -> int:
         geocoder=_build_geocoder(),
     )
     portal.index_rate = limits.index_rate
+    portal.shared_rate_limiter = limits.shared_rate_limiter
     # The DB column is the source of truth for delisting (consistent with the
     # derived Health posture badge); the class default True is the safe fallback.
     portal.supports_complete_walk = config.supports_complete_walk
@@ -450,6 +457,13 @@ def main(argv: list[str] | None = None) -> int:
     max_detail = (
         args.max_detail if args.max_detail is not None else limits.max_detail_per_run
     )
+
+    # Newest-first delta probe (Wave C-2): diff + enqueue off the first index
+    # page(s) only. No mark_inactive, no drain, no scrape_runs row.
+    if args.probe:
+        rc, _ = portal_runner.run_index_probe(
+            portal, dry_run=args.dry_run, probe_pages=args.probe_pages)
+        return rc
 
     # Cadence split, like sreality/idnes (rule #19): --index-only walks +
     # enqueues (and marks inactive under the completeness guard); --drain-only
@@ -510,6 +524,16 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     p.add_argument(
         "--drain-only", action="store_true",
         help="drain the detail queue only (no index walk)",
+    )
+    p.add_argument(
+        "--probe", action="store_true",
+        help="newest-first delta probe: diff + enqueue off the first "
+             "--probe-pages index page(s) per scope, then exit — never "
+             "mark_inactive, no detail drain, no scrape_runs row",
+    )
+    p.add_argument(
+        "--probe-pages", type=int, default=1,
+        help="index pages per scope for --probe (default 1)",
     )
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--verbose", action="store_true")

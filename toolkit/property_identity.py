@@ -155,6 +155,19 @@ def merge_properties(
                 """,
                 (source, source == "auto", group, lo, hi),
             )
+            # Publication gate (migration 273): a merge IS a dedup verdict, so the
+            # survivor must be visible — a pHash merge of two brand-new unchecked
+            # singletons would otherwise stay hidden. COALESCE keeps an already-published
+            # survivor's timestamp/reason.
+            cur.execute(
+                """
+                UPDATE properties
+                SET published_at = COALESCE(published_at, now()),
+                    publish_reason = COALESCE(publish_reason, 'merge_survivor')
+                WHERE id = %s
+                """,
+                (survivor_id,),
+            )
 
         recompute_one(conn, survivor_id)
         recompute_mf_one(conn, survivor_id)
@@ -272,6 +285,16 @@ def split_property_to_singletons(
                 )
                 new_ids.append(new_id)
 
+            # Publication gate (migration 273): a split is an explicit dedup decision. The
+            # detached singletons are freshly inserted (published_at NULL = hidden), so
+            # publish them — a previously-visible unit must not be hidden by being split out.
+            if new_ids:
+                cur.execute(
+                    "UPDATE properties SET published_at = now(), publish_reason = 'split' "
+                    "WHERE id = ANY(%s)",
+                    (new_ids,),
+                )
+
         recompute_one(conn, property_id)
         recompute_mf_one(conn, property_id)
         for nid in new_ids:
@@ -342,6 +365,19 @@ def unmerge_group(
                 """
                 UPDATE properties
                 SET status = 'active', merged_into = NULL, merged_at = NULL
+                WHERE id = ANY(%s)
+                """,
+                (list(retired_ids),),
+            )
+            # Publication gate (migration 273): a reactivated property is a previously-
+            # visible unit — don't hide it. COALESCE preserves its pre-merge publication;
+            # the now() branch only fires for the edge where a never-published singleton
+            # was merged away before any dedup stamp landed.
+            cur.execute(
+                """
+                UPDATE properties
+                SET published_at = COALESCE(published_at, now()),
+                    publish_reason = COALESCE(publish_reason, 'split')
                 WHERE id = ANY(%s)
                 """,
                 (list(retired_ids),),

@@ -208,8 +208,18 @@ def collect(
     max_pairs: int,
     max_room_attempts: int,
     n_images: int,
+    warm_rooms: int = 1,
 ) -> dict[str, int]:
     """Walk the engine's free funnel and enqueue the visual requests it implies.
+
+    `warm_rooms` bounds how many priority-ordered like-room compares are warmed PER PAIR
+    (default 1). The engine walks rooms in priority order and stops at the first High, so
+    warming just the first-priority room discounts the decisive room of every merge while
+    dropping the tail-room over-buy that made the all-rooms warmer wasteful (79-93% of its
+    compare requests never drove a decision). A pair that needs a later room still resolves
+    — the engine falls back to a synchronous compare for the cache-miss room (correct, just
+    that room undiscounted). Raising warm_rooms trades more discount coverage for more
+    speculative spend.
 
     Returns funnel stats merged with the submitter's request counters.
     """
@@ -222,7 +232,14 @@ def collect(
     from toolkit.dedup_priorities import load_tag_priority_overrides
     tag_overrides = load_tag_priority_overrides(conn)
 
-    keys = _load_eligible(conn)
+    # _load_eligible is the one FULL-MARKET statement (the warmer passes no restrict scope).
+    # As inventory grew since the warmer was retired it began exceeding the 2-min OLTP pooler
+    # statement_timeout and the whole run died before enqueuing anything. Run just this bulk
+    # read under a batch timeout (SET LOCAL in a txn — the clip_tag_backfill pattern); the
+    # per-pair probes below are short and stay on the OLTP default.
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute("SET LOCAL statement_timeout = '10min'")
+        keys = _load_eligible(conn)
     groups = _group_by_street(keys)
 
     funnel = {"visual_candidates": 0, "pairs_deferred_classify": 0, "floor_plan_warmed": 0}
@@ -291,8 +308,8 @@ def collect(
                     conn, llm_client, submitter, a, b,
                     classify_model=classify_model, compare_model=compare_model,
                     site_plan_model=site_plan_model, n_images=n_images,
-                    max_room_attempts=max_room_attempts, funnel=funnel,
-                    tag_overrides=tag_overrides,
+                    max_room_attempts=max_room_attempts, warm_rooms=warm_rooms,
+                    funnel=funnel, tag_overrides=tag_overrides,
                 )
 
     return {**funnel, **submitter.stats}
@@ -339,6 +356,7 @@ def _collect_visual(
     site_plan_model: str,
     n_images: int,
     max_room_attempts: int,
+    warm_rooms: int = 1,
     funnel: dict[str, int],
     tag_overrides: dict[str, list[str]] | None = None,
 ) -> None:
@@ -402,11 +420,17 @@ def _collect_visual(
             rooms_b = {r: f for r, ids in rooms_b.items()
                        if (f := [i for i in ids if i not in render_ids])}
 
-    # Forensic compare: common rooms in priority order, capped — the replay stops
-    # at the first High, so warming this priority-ordered prefix is the recall-safe
-    # superset (whatever room replay stops at is among these and is warm).
+    # Forensic compare: the first `warm_rooms` common rooms in priority order (default 1),
+    # never more than the engine's per-pair room cap. The replay walks rooms in this same
+    # priority order and stops at the first High, so warming the first-priority room discounts
+    # the decisive room of every merge; a pair needing a later room resolves via a synchronous
+    # fallback compare for the cache-miss room (recall-safe, just undiscounted). Warming the
+    # whole prefix (the old default) speculatively bought rooms the stop-at-first-High replay
+    # never reached — 79-93% of those compare requests never drove a decision.
     common = set(rooms_a) & set(rooms_b)
-    for room in rooms_in_priority(common, a.category_main, tag_overrides)[:max_room_attempts]:
+    warm_prefix = rooms_in_priority(common, a.category_main, tag_overrides)[
+        :max(1, min(warm_rooms, max_room_attempts))]
+    for room in warm_prefix:
         if s.exhausted:
             break
         if cached_visual_verdict(
@@ -461,8 +485,11 @@ def main() -> int:
     parser.add_argument("--max-requests", type=int, default=1500,
                         help="Cap total vision requests enqueued per run.")
     parser.add_argument("--max-room-attempts", type=int, default=4,
-                        help="Max like-room compare requests enqueued per pair "
-                             "(matches the engine's per-pair room cap).")
+                        help="The engine's per-pair room cap — an upper bound on warm-rooms.")
+    parser.add_argument("--warm-rooms", type=int, default=1,
+                        help="Like-room compares warmed per pair (default 1 = the first-priority "
+                             "room the engine tries first). Higher = more discount coverage for "
+                             "more speculative spend. Cannot exceed --max-room-attempts.")
     parser.add_argument("--n-images", type=int, default=DEFAULT_CLASSIFY_N_IMAGES)
     parser.add_argument("--dry-run", action="store_true",
                         help="Report what would be enqueued without building or submitting.")
@@ -493,9 +520,9 @@ def main() -> int:
 
     provider = AnthropicProvider()
     LOG.info(
-        "BATCH submit config max_pairs=%d max_requests=%d max_room_attempts=%d "
+        "BATCH submit config max_pairs=%d max_requests=%d max_room_attempts=%d warm_rooms=%d "
         "n_images=%d dry_run=%s",
-        args.max_pairs, args.max_requests, args.max_room_attempts,
+        args.max_pairs, args.max_requests, args.max_room_attempts, args.warm_rooms,
         args.n_images, args.dry_run,
     )
 
@@ -509,7 +536,7 @@ def main() -> int:
         stats = collect(
             conn, llm_client, submitter,
             max_pairs=args.max_pairs, max_room_attempts=args.max_room_attempts,
-            n_images=args.n_images,
+            n_images=args.n_images, warm_rooms=args.warm_rooms,
         )
         if not args.dry_run:
             submitter.flush()

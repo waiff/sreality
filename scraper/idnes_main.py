@@ -42,7 +42,12 @@ from scraper.idnes_parser import (
     parse_detail,
     parse_index,
 )
-from scraper.portal import PortalConfig, default_config, load_portal_config
+from scraper.portal import (
+    PortalConfig,
+    default_config,
+    load_portal_config,
+    price_changed,
+)
 from scraper.portal_base import ListingGoneError
 from scraper.portal_runner import DrainItem
 from scraper.rate_limit import RateLimiter
@@ -85,12 +90,13 @@ def _geocode_fallback(listing: Any) -> Any:
 # Not operator-tunable. Mirrors bazos_main / bezrealitky_main.
 INDEX_MIN_COMPLETENESS = 0.995
 
-# Only flip rows unseen for 24h+ — several full walk cadences. last_seen_at is
-# bumped for unchanged rows each walk (touch_listings) and for changed rows on
-# a successful drain fetch — so a churn-missed live row is protected unless its
-# detail fetches have ALSO failed for 24h+; even then the flip self-heals on
-# the next index sighting (touch_listings reactivates).
-INACTIVE_MIN_UNSEEN_HOURS = 24
+# Only flip rows unseen for 12h+ — ~2 full walk cadences at the 6h schedule.
+# last_seen_at is bumped for unchanged rows each walk (touch_listings) and for
+# changed rows on a successful drain fetch — so a churn-missed live row is
+# protected unless its detail fetches have ALSO failed for 12h+; even then the
+# flip self-heals on the next index sighting (touch_listings reactivates).
+# Tightened 24->12h for the real-time delisting SLO.
+INACTIVE_MIN_UNSEEN_HOURS = 12
 
 
 def _walk_complete(collected: int, total: int | None) -> bool:
@@ -111,17 +117,37 @@ class IdnesPortal:
     # The class value is the baked floor; the instance reads it from config.
     index_rate = 3.0
 
-    def __init__(self, config: PortalConfig, *, max_pages: int | None = None) -> None:
+    def __init__(
+        self,
+        config: PortalConfig,
+        *,
+        max_pages: int | None = None,
+        price_change_min_pct: float | None = None,
+    ) -> None:
         self.supports_complete_walk = config.supports_complete_walk
         self._categories = config.categories
         self._max_pages = max_pages
         self.index_rate = config.limits.index_rate
+        self.shared_rate_limiter = config.limits.shared_rate_limiter
+        # CLI override > per-portal config (the standard limits chain). Absorbs
+        # the daily FX re-display drift of idnes's foreign inventory so the
+        # walk doesn't enqueue phantom "price changed" refetches (see
+        # PortalLimits.price_change_min_pct).
+        self._price_change_min_pct = (
+            price_change_min_pct if price_change_min_pct is not None
+            else config.limits.price_change_min_pct
+        )
         # stored (lat, lon) per native id at drain start; a refetch whose page
         # carries no coords gets them carried forward instead of re-geocoded —
         # geom is never wiped and a Mapy credit is only ever spent once.
         self._have_geom: dict[str, tuple[float, float]] | None = None
 
     # --- index-walk seams ---
+    def set_index_page_cap(self, pages: int | None) -> None:
+        # Probe seam (portal_runner.run_index_probe): idnes's default index
+        # order is newest-first, so a page-capped walk IS the delta probe.
+        self._max_pages = pages
+
     def categories(self) -> list[dict[str, Any]]:
         return list(self._categories)
 
@@ -215,7 +241,9 @@ class IdnesPortal:
             prev = existing.get(nid)
             if prev is None:
                 continue
-            if price_map.get(nid) is not None and prev["price_czk"] == price_map[nid]:
+            if price_map.get(nid) is not None and not price_changed(
+                prev["price_czk"], price_map[nid], self._price_change_min_pct,
+            ):
                 unchanged_pks.append(prev["sreality_id"])
             else:
                 changed.append(nid)
@@ -381,7 +409,11 @@ def main(argv: list[str] | None = None) -> int:
     _configure_logging(args.verbose)
 
     config = _load_config(args.dry_run)
-    portal = IdnesPortal(config, max_pages=args.max_pages)
+    portal = IdnesPortal(
+        config,
+        max_pages=args.max_pages,
+        price_change_min_pct=args.price_change_min_pct,
+    )
 
     # Resolve operational limits: CLI override > per-portal DB config > default.
     workers = args.workers if args.workers is not None else config.limits.detail_workers
@@ -390,6 +422,13 @@ def main(argv: list[str] | None = None) -> int:
         args.max_detail if args.max_detail is not None
         else config.limits.max_detail_per_run
     )
+
+    # Newest-first delta probe (Wave C-2): diff + enqueue off the first index
+    # page(s) only. No mark_inactive, no drain, no scrape_runs row.
+    if args.probe:
+        rc, _ = portal_runner.run_index_probe(
+            portal, dry_run=args.dry_run, probe_pages=args.probe_pages)
+        return rc
 
     # Cadence split, like sreality (rule #19): --index-only walks + enqueues
     # (and marks inactive under the completeness guard); --drain-only fetches +
@@ -432,6 +471,12 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         help="detail-fetch requests/second ceiling (default: per-portal config)",
     )
     p.add_argument(
+        "--price-change-min-pct", type=float, default=None,
+        help="relative index-price move below which a listing reads as "
+             "unchanged in the walk diff (default: per-portal config; "
+             "0 = exact compare)",
+    )
+    p.add_argument(
         "--max-seconds", type=float, default=None,
         help="wall-clock budget for the detail drain; it stops claiming + "
              "finalizes cleanly before the job timeout (no 'stuck' run)",
@@ -443,6 +488,16 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     p.add_argument(
         "--drain-only", action="store_true",
         help="drain the detail queue only (no index walk)",
+    )
+    p.add_argument(
+        "--probe", action="store_true",
+        help="newest-first delta probe: diff + enqueue off the first "
+             "--probe-pages index page(s) per category, then exit — never "
+             "mark_inactive, no detail drain, no scrape_runs row",
+    )
+    p.add_argument(
+        "--probe-pages", type=int, default=1,
+        help="index pages per category for --probe (default 1)",
     )
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--verbose", action="store_true")

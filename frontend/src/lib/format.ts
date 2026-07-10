@@ -43,6 +43,20 @@ export const fmtCountCompact = (n: number | null | undefined): string =>
 export const fmtCzk = (n: number | null | undefined): string =>
   n == null ? '—' : `${czNumber.format(n)}${NBSP}Kč`;
 
+/* LLM spend is billed and stored in USD (llm_calls.cost_usd) — shown as
+ * dollars, never converted. Sub-cent per-call averages need 4 decimals. */
+const usdCurrency = new Intl.NumberFormat('en-US', {
+  style: 'currency',
+  currency: 'USD',
+  maximumFractionDigits: 2,
+});
+
+export const fmtUsd = (n: number | null | undefined): string =>
+  n == null ? '—' : usdCurrency.format(n);
+
+export const fmtUsdPerCall = (n: number | null | undefined): string =>
+  n == null ? '—' : n >= 0.1 ? usdCurrency.format(n) : `$${n.toFixed(4)}`;
+
 export const fmtArea = (n: number | null | undefined): string =>
   n == null ? '—' : `${czNumber.format(Math.round(n))}${NBSP}m²`;
 
@@ -69,6 +83,24 @@ export const fmtRelative = (iso: string | null | undefined): string => {
   if (days < 60) return `${Math.round(days / 7)}${THIN_SPACE}weeks ago`;
   if (days < 365) return `${Math.round(days / 30)}${THIN_SPACE}months ago`;
   return `${Math.round(days / 365)}${THIN_SPACE}yr ago`;
+};
+
+/* Human-readable elapsed duration from a raw seconds count — "45 s", "12 min",
+ * "3 h 20 min", "2 d 4 h". For queue-age / latency gauges (not a wall-clock).
+ * Null / negative / non-finite -> "—". */
+export const fmtDurationSecs = (secs: number | null | undefined): string => {
+  if (secs == null || !Number.isFinite(secs) || secs < 0) return '—';
+  const s = Math.round(secs);
+  if (s < MIN) return `${s}${THIN_SPACE}s`;
+  if (s < HOUR) return `${Math.round(s / MIN)}${THIN_SPACE}min`;
+  if (s < DAY) {
+    const h = Math.floor(s / HOUR);
+    const m = Math.round((s % HOUR) / MIN);
+    return m > 0 ? `${h}${THIN_SPACE}h ${m}${THIN_SPACE}min` : `${h}${THIN_SPACE}h`;
+  }
+  const d = Math.floor(s / DAY);
+  const h = Math.round((s % DAY) / HOUR);
+  return h > 0 ? `${d}${THIN_SPACE}d ${h}${THIN_SPACE}h` : `${d}${THIN_SPACE}d`;
 };
 
 /* Migration 022 fields. The slug→Czech-label mapping lives in

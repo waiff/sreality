@@ -35,7 +35,12 @@ from typing import Any
 
 from scraper import db, portal_runner
 from scraper.geocoding import geocode
-from scraper.portal import PortalConfig, default_config, load_portal_config
+from scraper.portal import (
+    PortalConfig,
+    default_config,
+    load_portal_config,
+    price_changed,
+)
 from scraper.portal_base import ListingGoneError
 from scraper.portal_runner import DrainItem
 from scraper.rate_limit import RateLimiter
@@ -55,8 +60,18 @@ PER_PAGE = 20  # realitymix renders 20 results per ?stranka page
 
 # An index walk that collected at least this fraction of the page-reported total
 # is treated as complete enough to drive mark_inactive (the framework standard,
-# rule #3); the 24h min_unseen_hours rail in db.mark_inactive is the real safety.
+# rule #3); the INACTIVE_MIN_UNSEEN_HOURS staleness rail below is the second,
+# stronger guard. Not operator-tunable. Mirrors bazos_main / idnes_main.
 INDEX_MIN_COMPLETENESS = 0.995
+
+# Only flip rows unseen for 12h+ — ~2 full walk cadences at the 6h schedule.
+# last_seen_at is bumped for unchanged rows each walk (touch_listings) and for
+# changed rows on a successful drain fetch — so a churn-missed live row is
+# protected unless its detail fetches have ALSO failed for 12h+; even then the
+# flip self-heals on the next index sighting (touch_listings reactivates). Passed
+# EXPLICITLY on every sweep: db.mark_inactive_native applies NO rail by default.
+# Tightened 24->12h for the real-time delisting SLO.
+INACTIVE_MIN_UNSEEN_HOURS = 12
 
 
 def _walk_complete(collected: int, total: int | None) -> bool:
@@ -110,12 +125,23 @@ class RealitymixPortal:
         self._categories = config.categories
         self._max_pages = max_pages
         self.index_rate = config.limits.index_rate
+        self.shared_rate_limiter = config.limits.shared_rate_limiter
+        self._price_change_min_pct = config.limits.price_change_min_pct
         # stored (lat, lon) per native id at drain start; a refetch whose page
         # carries no coords gets them carried forward instead of re-geocoded — geom
         # is never wiped and a Mapy credit is only ever spent once per listing.
         self._have_geom: dict[str, tuple[float, float]] | None = None
+        # per-(cm, ct) union of complete slices' seen ids + completed-slice
+        # counts — the cross-slice delisting sweep buffer (see mark_inactive).
+        self._sweep_seen: dict[tuple[str, str], set[str]] = {}
+        self._sweep_done: dict[tuple[str, str], int] = {}
 
     # --- index-walk seams ---
+    def set_index_page_cap(self, pages: int | None) -> None:
+        # Probe seam (portal_runner.run_index_probe): realitymix's default index
+        # order is newest-first, so a page-capped walk IS the delta probe.
+        self._max_pages = pages
+
     def categories(self) -> list[dict[str, Any]]:
         return list(self._categories)
 
@@ -228,7 +254,9 @@ class RealitymixPortal:
             prev = existing.get(nid)
             if prev is None:
                 continue
-            if price_map.get(nid) is not None and prev["price_czk"] == price_map[nid]:
+            if price_map.get(nid) is not None and not price_changed(
+                prev["price_czk"], price_map[nid], self._price_change_min_pct,
+            ):
                 unchanged_pks.append(prev["sreality_id"])
             else:
                 changed.append(nid)
@@ -255,9 +283,25 @@ class RealitymixPortal:
         cm, ct = self.category_labels(category)
         if cm is None or ct is None:
             return 0
-        existing = db.index_summary_native(conn, SOURCE, list(seen))
-        pks = {v["sreality_id"] for v in existing.values()}
-        return db.mark_inactive(conn, cm, ct, pks, source=SOURCE)
+        # Several index slices collapse onto one (cm, ct) — 'domy' and 'chaty'
+        # both -> dum — and this runner-gated call sees only ONE slice's ids, so
+        # a per-slice sweep flipped the sibling slice's listings inactive every
+        # walk (each dum slice marked the other's ~9k rows). Buffer each complete
+        # slice's ids and sweep once, on the group's LAST complete slice, with
+        # the union. An incomplete/failed sibling never reaches this call, so its
+        # group stays below the expected slice count and the sweep is suppressed
+        # this walk (over-retention only; the next walk retries).
+        key = (cm, ct)
+        group = self._sweep_seen.setdefault(key, set())
+        group.update(seen)
+        self._sweep_done[key] = self._sweep_done.get(key, 0) + 1
+        expected = sum(1 for c in self._categories if self.category_labels(c) == key)
+        if self._sweep_done[key] < expected:
+            return 0
+        return db.mark_inactive_native(
+            conn, SOURCE, cm, ct, group,
+            min_unseen_hours=INACTIVE_MIN_UNSEEN_HOURS,
+        )
 
     def active_count(self, conn: Any, category: dict[str, Any]) -> int | None:
         cm, ct = self.category_labels(category)
@@ -397,6 +441,13 @@ def main(argv: list[str] | None = None) -> int:
         else config.limits.max_detail_per_run
     )
 
+    # Newest-first delta probe (Wave C-2): diff + enqueue off the first index
+    # page(s) only. No mark_inactive, no drain, no scrape_runs row.
+    if args.probe:
+        rc, _ = portal_runner.run_index_probe(
+            portal, dry_run=args.dry_run, probe_pages=args.probe_pages)
+        return rc
+
     # realitymix is large (~48k), so production runs the cadence split via the
     # workflows (--index-only feeds --drain-only). A bare combined run (omit both
     # flags) still works for ad-hoc/local use; the split flags are the norm.
@@ -446,6 +497,16 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     p.add_argument(
         "--drain-only", action="store_true",
         help="drain the detail queue only (no index walk)",
+    )
+    p.add_argument(
+        "--probe", action="store_true",
+        help="newest-first delta probe: diff + enqueue off the first "
+             "--probe-pages index page(s) per category, then exit — never "
+             "mark_inactive, no detail drain, no scrape_runs row",
+    )
+    p.add_argument(
+        "--probe-pages", type=int, default=1,
+        help="index pages per category for --probe (default 1)",
     )
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--verbose", action="store_true")

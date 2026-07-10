@@ -3,6 +3,13 @@ import { imageSrc } from './imageUrl';
 import { type TaggedImageUrl } from './imageTags';
 import { fetchListingBrokersByIds, fetchBrokersByIds } from './brokers';
 import type { ListingDetailLite } from './dedupDiff';
+import type { LlmCostDailyRow, LlmCostHourlyRow } from './llmCosts';
+import type {
+  DedupCostByCategoryRow,
+  DedupEngineFlowRow,
+  DedupQueueRow,
+  DedupResolutionRow,
+} from './dedupFunnel';
 import {
   type CenterRadius,
   type DistrictChip,
@@ -103,7 +110,12 @@ export interface SortSpec {
   direction: SortDirection;
 }
 
-export const DEFAULT_SORT: SortSpec = { field: 'last_seen_at', direction: 'desc' };
+/* first_seen_at DESC = "newest listings first" (operator decision 2026-07-07,
+ * with the browse_list read model): meaningful (genuinely new listings, not
+ * "whichever portal the scraper touched last" — touch_listings bumps
+ * last_seen_at market-wide every cycle) and IMMUTABLE, so keyset cursors stay
+ * valid across snapshot rebuilds. last_seen_at remains a selectable option. */
+export const DEFAULT_SORT: SortSpec = { field: 'first_seen_at', direction: 'desc' };
 
 const SORTABLE_FIELDS: ReadonlyArray<SortField> = [
   'sreality_id', 'district', 'disposition',
@@ -577,7 +589,7 @@ export const fetchNoPriceCount = async (f: ListingFilters): Promise<number> => {
   const pre = await resolveBrowsePrefilters(f);
   if (pre.empty) return 0;
   const base = supabase
-    .from('properties_public')
+    .from('browse_list')
     .select('property_id', { count: 'exact', head: true });
   // Strip the price bound (and the toggle) so the count is purely "no-price
   // rows in the rest of the cohort", then restrict to NULL price.
@@ -615,7 +627,9 @@ export const fetchListingsForMap = async (
    * all-visible, cached copy of the same columns, so the identical scan stays
    * robust cold (~200ms). It carries properties_public's full FILTERABLE surface,
    * so applyFilters / applyPrefilters are a drop-in (only the source differs).
-   * The matview is map-fresh within the refresh_map_mv cadence (~15 min). */
+   * Rebuilt from browse_projection by rebuild_properties_map_mv() (pg_cron,
+   * every 30 min — migration 277); freshness readable off
+   * browse_read_model_state_public. */
   const base = supabase
     .from('properties_map_mv')
     .select(MAP_COLS)
@@ -679,8 +693,11 @@ export const fetchListingsForTable = async (
 ): Promise<TableResult> => {
   const pre = await resolveBrowsePrefilters(f);
   if (pre.empty) return { rows: [], nextCursor: null };
+  /* browse_list (migration 276): the compact snapshot read model — a STABLE
+   * relation under the scroll (the live table mutates last_seen_at every
+   * scrape cycle), rebuilt every 5 min from browse_projection. */
   const base = supabase
-    .from('properties_public')
+    .from('browse_list')
     .select(withKeysetColumns(TABLE_COLS, sort));
   const scoped = applyPrefilters(applyFilters(base, f), pre);
   const keyed = applyKeyset(
@@ -707,27 +724,19 @@ export interface CohortCount {
 }
 
 /* The ONE cohort total — header, tab badge, and the infinite-scroll progress
- * labels. PLANNER-ESTIMATE FIRST, then confirm exact only when affordable: the
- * planner estimate (`count=planned`) is O(1) — it reads NO rows, so it never
- * times out and never contends with the list/map queries. An exact count, by
- * contrast, must heap-scan every matching row of the (churned, cache-cold on
- * this instance) properties table; for a broad cohort that scan can't finish
- * under the anon 3s budget AND it saturates I/O, pushing the parallel list+map
- * queries over the limit too. So we take the estimate first and only run an
- * exact count when the estimate is small enough that the scan is cheap. Result:
- * exact for small/filtered cohorts (where a precise number matters and is
- * affordable), an honest "~N" for broad ones, NEVER a wasted big scan — the
- * industry-standard hybrid. (`count=estimated` is NOT used: Supabase's threshold
- * still runs an exact count for mid-size cohorts, so it times out cold like
- * `exact`.) Shares the exact filter chain (resolveBrowsePrefilters +
- * applyFilters) with the Map/Table/Cards fetchers, so the total can never
- * disagree with the listed rows. */
+ * labels. EXACT FIRST on the compact browse_list read model: on the snapshot,
+ * a market-wide exact count is an index-only scan (measured 201 ms fully cold
+ * for the broadest single cohort — 68k rows, zero heap fetches), so precision
+ * is the norm, not the exception. The pre-read-model planner-estimate-first
+ * hybrid existed because an exact count on the churned live table could not
+ * finish under the anon 3s budget; that constraint is gone. `count=planned`
+ * stays as the graceful FALLBACK when the exact count exceeds the abort budget
+ * (a pathological filter combination or a saturated instance) — rendered as
+ * "~N". The planned estimate depends on the rebuild's ANALYZE-before-swap
+ * (pinned by tests/test_browse_read_path_guardrail.py). Shares the exact
+ * filter chain (resolveBrowsePrefilters + applyFilters) with the Table/Cards
+ * fetchers, so the total can never disagree with the listed rows. */
 const EXACT_COUNT_BUDGET_MS = 2500;
-/* Above this planner estimate an exact count is skipped: the scan would be too
- * heavy to finish under budget on this cache-constrained instance, and "~N" is
- * the honest answer for a broad cohort anyway. Below it the scan is cheap, so we
- * confirm the precise figure. */
-const EXACT_COUNT_MAX = 5_000;
 export const fetchBrowseCount = async (
   f: ListingFilters,
 ): Promise<CohortCount> => {
@@ -741,36 +750,31 @@ export const fetchBrowseCount = async (
     applyPrefilters(
       applyFilters(
         supabase
-          .from('properties_public')
+          .from('browse_list')
           .select('property_id', { count: mode, head: true }),
         f,
       ),
       pre,
     ) as unknown as CountQuery;
-  // Estimate first — instant, no scan, no contention.
+  try {
+    const { count, error } = await build('exact').abortSignal(
+      AbortSignal.timeout(EXACT_COUNT_BUDGET_MS),
+    );
+    if (error) throw error;
+    if (count != null) return { value: count, precise: true };
+  } catch {
+    // Exact didn't finish under budget — fall through to the estimate.
+  }
   const planned = await build('planned');
   if (planned.error) throw planned.error;
   const estimate = planned.count ?? 0;
-  // Confirm the precise count only for small cohorts where the scan is cheap.
-  if (estimate > 0 && estimate <= EXACT_COUNT_MAX) {
-    try {
-      const { count, error } = await build('exact').abortSignal(
-        AbortSignal.timeout(EXACT_COUNT_BUDGET_MS),
-      );
-      if (error) throw error;
-      return { value: count ?? estimate, precise: true };
-    } catch {
-      // Estimate was off / the scan didn't finish — fall back to the estimate.
-    }
-  }
-  // estimate === 0 is treated as a settled "0"; any other estimate is "~N".
   return { value: estimate, precise: estimate === 0 };
 };
 
 /* -------------------------------------------------------------------------- */
 /* Cards (sreality-style image-first list). Same filter chain as table, plus  */
 /* a batched image lookup for the first photo per visible listing. Sorted by  */
-/* last_seen_at desc — the cards lane is for "what's new", not for arbitrary  */
+/* first_seen_at desc — the cards lane is for "what's new", not for arbitrary */
 /* re-sorting (that's the Table tab's job).                                   */
 /* -------------------------------------------------------------------------- */
 
@@ -819,7 +823,7 @@ export const fetchListingsForCards = async (
   const pre = await resolveBrowsePrefilters(f);
   if (pre.empty) return { rows: [], nextCursor: null };
   const base = supabase
-    .from('properties_public')
+    .from('browse_list')
     .select(withKeysetColumns(CARD_COLS, sort));
   const scoped = applyPrefilters(applyFilters(base, f), pre);
   const keyed = applyKeyset(
@@ -1309,6 +1313,51 @@ export const fetchScraperHealthChecks = async (
   return data as ScraperHealthChecks;
 };
 
+/* Migration 273 — the dedup-aware publication gate. New properties are hidden
+ * from Browse until dedup evaluates them; this single-row aggregate exposes the
+ * backlog (`unpublished`), its age, and the active baseline. The gate has no
+ * auto-publish timeout, so a rising `unpublished` is the dedup-stall signal. */
+export interface PublicationGateRow {
+  unpublished: number;
+  oldest_unpublished_at: string | null;
+  active_total: number;
+}
+
+export const fetchPublicationGateHealth = async (): Promise<PublicationGateRow> => {
+  const { data, error } = await supabase
+    .from('publication_gate_health_public')
+    .select('unpublished,oldest_unpublished_at,active_total')
+    .maybeSingle();
+  if (error) throw error;
+  return (
+    (data as PublicationGateRow | null) ?? {
+      unpublished: 0,
+      oldest_unpublished_at: null,
+      active_total: 0,
+    }
+  );
+};
+
+/* Migration 274 — dedup pipeline verification checks (latest row per check_key).
+ * The DB stamps the ok/warn/fail status + a `value` whose unit is check-specific
+ * (suspect-pair counts for street/geo debt, ratios/minutes elsewhere). */
+export interface PipelineCheckRow {
+  check_key: string;
+  status: string;
+  value: number | null;
+  details: Record<string, unknown> | null;
+  run_at: string | null;
+}
+
+export const fetchPipelineChecks = async (): Promise<PipelineCheckRow[]> => {
+  const { data, error } = await supabase
+    .from('pipeline_checks_public')
+    .select('check_key,status,value,details,run_at')
+    .order('check_key', { ascending: true });
+  if (error) throw error;
+  return (data ?? []) as PipelineCheckRow[];
+};
+
 /* Migration 178 — failed GitHub Actions runs recorded by the 30-min poller
  * (monitor_workflow_failures.yml). */
 export interface WorkflowFailureRow {
@@ -1710,15 +1759,19 @@ export const dedupKeys = {
   detail: (srealityIds: ReadonlyArray<number>) =>
     ['dedup', 'detail', sortedIds(srealityIds)] as const,
   engineRuns: (limit: number) => ['dedup', 'engine-runs', limit] as const,
+  scanState: ['dedup', 'scan-state'] as const,
 };
 
 export interface DedupEngineRun {
   id: number;
   started_at: string;
   ended_at: string | null;
-  eligible: number;
-  flagged_location: number;
-  flagged_disposition: number;
+  /* Market gauges — NULL on scoped runs (dirty/candidates; not measured, migration 265)
+   * and geo-lane-scoped on run_kind='geo' rows. Read them from the latest FULL-scan row
+   * (run_kind='full', or legacy null run_kind), not from runs[0]. */
+  eligible: number | null;
+  flagged_location: number | null;
+  flagged_disposition: number | null;
   pairs_considered: number;
   rejected: number;
   auto_address: number;
@@ -1726,14 +1779,45 @@ export interface DedupEngineRun {
   auto_visual: number;
   queued: number;
   vision_calls: number;
-  cost_usd: number;
   auto_dismissed: number;
   floor_plan_deferred: number;
   clip_deferred: number;
   /* --dirty runs only (NULL on full scan / candidate / geo): the dedup-ready queue depth
-   * at run start + how many this run claimed. Lets the dashboards see the backlog drain. */
+   * at run start, how many this run claimed, how many it actually CLEARED (per-group
+   * incremental clear), and whether it hit its budget. cleared==0 across truncated runs
+   * is the livelock signature migration 258 exposes — assessDirtyQueue keys on it. */
   dirty_queue_depth: number | null;
   dirty_claimed: number | null;
+  dirty_cleared: number | null;
+  dirty_truncated: number | null;
+  /* Every run (migration 262; null on pre-262 rows): the lane that wrote the row
+   * ('full' | 'candidates' | 'dirty') + whether the run stopped on its wall-clock /
+   * pair budget before finishing its scan. truncated on run_kind='full' is the
+   * full-scan coverage-gap signal (the TTL backstop is only as good as scan coverage). */
+  run_kind: string | null;
+  truncated: number | null;
+  /* Migration 271 observability — the stall tripwires that were previously invisible
+   * (null on pre-271 rows / lanes that don't measure a given gauge):
+   *  - skipped_oversized / oversized_groups: street groups over MAX_GROUP_SIZE the scan
+   *    skipped whole (a coverage hole — those listings are never compared).
+   *  - skipped_unresolved: pairs the free funnel reached but left undecided this run.
+   *  - vision_errors: failed vision calls this run — the credit-outage tripwire (nonzero
+   *    means the LLM lane is erroring, e.g. out-of-credit).
+   *  - truncated_cause: WHY a truncated run stopped ('deadline' wall-clock | 'pair_cap').
+   *  - scan_groups_total / scan_groups_scanned: full-scan cursor coverage this cycle.
+   *  - dirty_age_p95_seconds: p95 wait of the dedup-ready queue — the real-time SLO gauge.
+   *  - dirty_pruned: dedup-ready rows TTL-evicted (not merged) this run.
+   *  - runner: which executor wrote the row ('actions' cron | 'worker' always-on). */
+  skipped_unresolved: number | null;
+  skipped_oversized: number | null;
+  oversized_groups: number | null;
+  vision_errors: number | null;
+  truncated_cause: 'deadline' | 'pair_cap' | null;
+  scan_groups_total: number | null;
+  scan_groups_scanned: number | null;
+  dirty_age_p95_seconds: number | null;
+  dirty_pruned: number | null;
+  runner: 'actions' | 'worker' | null;
 }
 
 /* Recent dedup-engine runs for the /dedup automation dashboard. Reads the anon
@@ -1747,13 +1831,46 @@ export const fetchDedupEngineRuns = async (
     .select(
       'id,started_at,ended_at,eligible,flagged_location,flagged_disposition,' +
         'pairs_considered,rejected,auto_address,auto_phash,auto_visual,queued,' +
-        'vision_calls,cost_usd,auto_dismissed,floor_plan_deferred,clip_deferred,' +
-        'dirty_queue_depth,dirty_claimed',
+        'vision_calls,auto_dismissed,floor_plan_deferred,clip_deferred,' +
+        'dirty_queue_depth,dirty_claimed,dirty_cleared,dirty_truncated,run_kind,truncated,' +
+        'skipped_unresolved,skipped_oversized,oversized_groups,vision_errors,truncated_cause,' +
+        'scan_groups_total,scan_groups_scanned,dirty_age_p95_seconds,dirty_pruned,runner',
     )
-    .order('started_at', { ascending: false })
+    // Insert order (id), NOT started_at: started_at is now the REAL run start (migration
+    // 262), so an 80-min full scan's row would sort below dirty runs that STARTED after it
+    // and the completed scan would never headline. id preserves the pre-262 semantics.
+    .order('id', { ascending: false })
     .limit(limit);
   if (error) throw error;
   return (data ?? []) as unknown as DedupEngineRun[];
+};
+
+/* Full-scan cursor + cycle state per dedup lane (dedup_scan_state_public, migration
+ * 271). One row per lane; the 'street' lane is the apartment full scan whose cycle
+ * completion is the dashboard's cursor-stall signal. */
+export interface DedupScanState {
+  lane: string;
+  mid_cycle: boolean;
+  cycle_started_at: string | null;
+  last_cycle_started_at: string | null;
+  last_cycle_completed_at: string | null;
+  updated_at: string;
+}
+
+/* Latest scan-cycle state, preferring the 'street' (apartment) lane, else the most
+ * recently updated lane. Small view — one row per lane — a cheap anon read well under
+ * the 3 s statement timeout. */
+export const fetchDedupScanState = async (): Promise<DedupScanState | null> => {
+  const { data, error } = await supabase
+    .from('dedup_scan_state_public')
+    .select(
+      'lane,mid_cycle,cycle_started_at,last_cycle_started_at,' +
+        'last_cycle_completed_at,updated_at',
+    )
+    .order('updated_at', { ascending: false });
+  if (error) throw error;
+  const rows = (data ?? []) as unknown as DedupScanState[];
+  return rows.find((r) => r.lane === 'street') ?? rows[0] ?? null;
 };
 
 export const curationKeys = {
@@ -1900,4 +2017,129 @@ export const fetchPipelineBoard = async (): Promise<PipelineBoardCard[]> => {
         : null,
     };
   });
+};
+
+/* ---- LLM cost dashboard (/costs) -------------------------------------- */
+
+/* Daily × feature × model spend aggregates from `llm_cost_daily_public`
+ * (migration 280). numeric/bigint arrive as strings from PostgREST in
+ * some paths — coerce every measure to a number once, here. */
+export const fetchLlmCostDaily = async (days: number): Promise<LlmCostDailyRow[]> => {
+  const from = new Date();
+  from.setUTCDate(from.getUTCDate() - days);
+  const { data, error } = await supabase
+    .from('llm_cost_daily_public')
+    .select('*')
+    .gte('day', from.toISOString().slice(0, 10))
+    .order('day', { ascending: true });
+  if (error) throw error;
+  return (data ?? []).map((r: Record<string, unknown>) => ({
+    day: String(r.day),
+    called_for: String(r.called_for),
+    provider: String(r.provider),
+    model: String(r.model),
+    calls: Number(r.calls ?? 0),
+    error_calls: Number(r.error_calls ?? 0),
+    cost_usd: Number(r.cost_usd ?? 0),
+    input_tokens: Number(r.input_tokens ?? 0),
+    output_tokens: Number(r.output_tokens ?? 0),
+    cache_read_tokens: Number(r.cache_read_tokens ?? 0),
+    cache_write_tokens: Number(r.cache_write_tokens ?? 0),
+  }));
+};
+
+/* Hour-grain twin from `llm_cost_hourly_public` (migration 281); the
+ * bucket timestamptz is normalized to a canonical ISO so client-side
+ * zero-filling can key on exact string equality. */
+export const fetchLlmCostHourly = async (hours: number): Promise<LlmCostHourlyRow[]> => {
+  const from = new Date();
+  from.setUTCMinutes(0, 0, 0);
+  from.setUTCHours(from.getUTCHours() - hours);
+  const { data, error } = await supabase
+    .from('llm_cost_hourly_public')
+    .select('*')
+    .gte('bucket', from.toISOString())
+    .order('bucket', { ascending: true });
+  if (error) throw error;
+  return (data ?? []).map((r: Record<string, unknown>) => ({
+    bucket: new Date(String(r.bucket)).toISOString(),
+    called_for: String(r.called_for),
+    provider: String(r.provider),
+    model: String(r.model),
+    calls: Number(r.calls ?? 0),
+    error_calls: Number(r.error_calls ?? 0),
+    cost_usd: Number(r.cost_usd ?? 0),
+    input_tokens: Number(r.input_tokens ?? 0),
+    output_tokens: Number(r.output_tokens ?? 0),
+    cache_read_tokens: Number(r.cache_read_tokens ?? 0),
+    cache_write_tokens: Number(r.cache_write_tokens ?? 0),
+  }));
+};
+
+/* ---- Dedup funnel (/dedup) + dedup cost breakdown (/costs) ------------- */
+/* Views from migration 282. The two heavy aggregates are matviews refreshed
+ * every 15 min by pg_cron; flow + queue are live. All numerics coerced once
+ * here (PostgREST serializes numeric as string on some paths). */
+
+const num = (v: unknown): number => Number(v ?? 0);
+
+export const fetchDedupFunnelResolutions = async (): Promise<DedupResolutionRow[]> => {
+  const { data, error } = await supabase.from('dedup_funnel_resolutions_public').select('*');
+  if (error) throw error;
+  return (data ?? []).map((r: Record<string, unknown>) => ({
+    source: String(r.source),
+    stage: String(r.stage),
+    outcome: String(r.outcome),
+    category_main: String(r.category_main),
+    category_type: String(r.category_type),
+    pairs_7d: num(r.pairs_7d), pairs_30d: num(r.pairs_30d),
+    properties_7d: num(r.properties_7d), properties_30d: num(r.properties_30d),
+    listings_7d: num(r.listings_7d), listings_30d: num(r.listings_30d),
+  }));
+};
+
+export const fetchDedupEngineFlow = async (): Promise<DedupEngineFlowRow | null> => {
+  const { data, error } = await supabase
+    .from('dedup_engine_flow_public').select('*').maybeSingle();
+  if (error) throw error;
+  if (!data) return null;
+  const r = data as Record<string, unknown>;
+  const out: Record<string, number | null> = {
+    eligible_market: r.eligible_market == null ? null : num(r.eligible_market),
+    flagged_location_market: r.flagged_location_market == null ? null : num(r.flagged_location_market),
+    flagged_disposition_market: r.flagged_disposition_market == null ? null : num(r.flagged_disposition_market),
+  };
+  for (const base of [
+    'runs', 'pairs_considered', 'rejected', 'queued', 'clip_cosine_calls',
+    'routed_haiku', 'routed_sonnet', 'floor_plan_deferred', 'clip_deferred',
+    'skipped_unresolved', 'vision_calls', 'vision_errors',
+  ]) {
+    out[`${base}_7d`] = num(r[`${base}_7d`]);
+    out[`${base}_30d`] = num(r[`${base}_30d`]);
+  }
+  return out as unknown as DedupEngineFlowRow;
+};
+
+export const fetchDedupQueueSnapshot = async (): Promise<DedupQueueRow[]> => {
+  const { data, error } = await supabase.from('dedup_queue_snapshot_public').select('*');
+  if (error) throw error;
+  return (data ?? []).map((r: Record<string, unknown>) => ({
+    tier: String(r.tier ?? ''),
+    category_main: String(r.category_main),
+    category_type: String(r.category_type),
+    pairs: num(r.pairs),
+  }));
+};
+
+export const fetchDedupCostByCategory = async (): Promise<DedupCostByCategoryRow[]> => {
+  const { data, error } = await supabase.from('dedup_llm_cost_by_category_public').select('*');
+  if (error) throw error;
+  return (data ?? []).map((r: Record<string, unknown>) => ({
+    called_for: String(r.called_for),
+    category_main: String(r.category_main),
+    category_type: String(r.category_type),
+    calls_7d: num(r.calls_7d), calls_30d: num(r.calls_30d),
+    cost_7d: num(r.cost_7d), cost_30d: num(r.cost_30d),
+    listings_7d: num(r.listings_7d), listings_30d: num(r.listings_30d),
+  }));
 };

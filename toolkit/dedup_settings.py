@@ -59,11 +59,44 @@ REGISTRY: tuple[DedupSetting, ...] = (
         "as 'same layout' and merge.",
     ),
     DedupSetting(
+        "dedup_candidate_redecide_hours", "float", 24,
+        "Candidate re-decide backoff (hours)", "Engine",
+        "How long the candidate drain leaves an already-evaluated proposed pair alone "
+        "before re-deciding it. New CLIP-tagged photo evidence re-opens a pair "
+        "immediately regardless of the backoff. Stops the drain from re-chewing the "
+        "same inconclusive pairs every 2 hours.",
+        1, 720,
+    ),
+    DedupSetting(
         "dedup_batch_warmer_enabled", "bool", False,
         "Batch vision warmer", "Engine",
         "Pre-warm the vision caches via Anthropic's Message Batches API (50% cheaper, "
         "async) so the engine merges over warm cache for free. Off = pay cold vision "
         "inline. The dedup_batches workflow no-ops while this is off.",
+    ),
+    DedupSetting(
+        "dedup_defer_incomplete_downloads", "bool", False,
+        "Defer pairs while images are still downloading", "Engine",
+        "Extends the tagging-readiness gate: a pair also DEFERS (never merges/dismisses/pays "
+        "vision) while either listing still has an image pending download "
+        "(storage_path NULL, download_attempts < 5). Today the gate only waits for already-"
+        "downloaded images to be CLIP-tagged, so a pair can pay for forensic vision before its "
+        "full photo set has landed — and the free pHash signal that would have merged it for "
+        "free arrives minutes later. Bounded + self-healing: an image that exhausts its 5 "
+        "download attempts stops blocking; the pair re-decides for free once the last image "
+        "downloads + tags. Off = decide on whatever images have arrived (today's behaviour).",
+    ),
+    DedupSetting(
+        "dedup_nonbyt_attr_merge_enabled", "bool", False,
+        "Attribute auto-merge (houses / land / commercial)", "Engine",
+        "For non-apartment families, auto-merge a co-located candidate whose areas match "
+        "within 2% AND whose asking prices are identical — WITHOUT paying for the forensic "
+        "room compare. The floor-plan gate is still applied (a different 2D layout dismisses) "
+        "and any pair where BOTH sides carry a site plan still pays the development guard, so "
+        "the two conservative vetoes are unchanged. Validated 99.6% vs the vision verdict on "
+        "574 decided house/land/commercial pairs (the 2 misses were floor-plan dismissals the "
+        "retained gate still catches); merges are reversible. Off = every non-byt candidate "
+        "pays forensic vision as before.",
     ),
     # --- CLIP (free tagging + the cosine recall tier) ---
     DedupSetting(

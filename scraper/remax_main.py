@@ -37,7 +37,12 @@ import logging
 from typing import Any
 
 from scraper import db, portal_runner
-from scraper.portal import PortalConfig, default_config, load_portal_config
+from scraper.portal import (
+    PortalConfig,
+    default_config,
+    load_portal_config,
+    price_changed,
+)
 from scraper.portal_base import ListingGoneError
 from scraper.portal_runner import DrainItem
 from scraper.rate_limit import RateLimiter
@@ -84,10 +89,22 @@ class RemaxPortal:
         self._categories = config.categories
         self._max_pages = max_pages
         self.index_rate = config.limits.index_rate
+        self.shared_rate_limiter = config.limits.shared_rate_limiter
+        self._price_change_min_pct = config.limits.price_change_min_pct
         self._agenda_cache: dict[int, _AgendaWalk] = {}
         self._swept_agendas: set[int] = set()  # delist each agenda once per run
 
     # --- index-walk seams ---
+    def set_index_page_cap(self, pages: int | None) -> None:
+        # Probe seam (portal_runner.run_index_probe): remax's default index
+        # order is newest-first, so a page-capped agenda walk IS the delta
+        # probe. The agenda cache holds a walk taken at the OLD cap, so a cap
+        # change must drop it — otherwise a deepened probe would replay the
+        # shallower cached agenda.
+        if pages != self._max_pages:
+            self._agenda_cache.clear()
+        self._max_pages = pages
+
     def categories(self) -> list[dict[str, Any]]:
         return list(self._categories)
 
@@ -187,7 +204,15 @@ class RemaxPortal:
             prev = existing.get(nid)
             if prev is None:
                 continue
-            if walk.price_map.get(nid) is not None and prev["price_czk"] == walk.price_map[nid]:
+            idx_price = walk.price_map.get(nid)
+            # A price-less card ("Dohodou" / "Info o ceně v RK") carries NO
+            # change signal — classifying it as changed put ~1,100 such
+            # listings on a permanent CHANGED-priority refetch treadmill every
+            # walk, eating the whole drain budget ahead of the NEW rows (rent
+            # listings never got claimed). Touch it and move on.
+            if idx_price is None or not price_changed(
+                prev["price_czk"], idx_price, self._price_change_min_pct,
+            ):
                 unchanged_pks.append(prev["sreality_id"])
             else:
                 changed.append(nid)
@@ -231,8 +256,10 @@ class RemaxPortal:
         if walk is None or not walk.complete:
             return 0
         self._swept_agendas.add(sale)
+        # 12h staleness rail (~2 walk cadences at 6h): tightened 24->12h for the
+        # real-time delisting SLO; 2 walk-misses is still robust to single-walk jitter.
         flipped = db.mark_inactive_agenda(
-            conn, SOURCE, ct, set(walk.native_ids), min_unseen_hours=24,
+            conn, SOURCE, ct, set(walk.native_ids), min_unseen_hours=12,
         )
         LOG.info(
             "INACTIVE agenda sale=%d ct=%s marked=%d collected=%d total=%s",
@@ -374,6 +401,13 @@ def main(argv: list[str] | None = None) -> int:
         else config.limits.max_detail_per_run
     )
 
+    # Newest-first delta probe (Wave C-2): diff + enqueue off the first index
+    # page(s) only. No mark_inactive, no drain, no scrape_runs row.
+    if args.probe:
+        rc, _ = portal_runner.run_index_probe(
+            portal, dry_run=args.dry_run, probe_pages=args.probe_pages)
+        return rc
+
     # Omitting both flags runs the index walk then the detail drain in one job,
     # bounded by --max-pages / --max-detail (+ --max-seconds). The split flags
     # exist so a large backfill can be cadence-split like sreality/idnes.
@@ -419,6 +453,16 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     p.add_argument(
         "--drain-only", action="store_true",
         help="drain the detail queue only (no index walk)",
+    )
+    p.add_argument(
+        "--probe", action="store_true",
+        help="newest-first delta probe: diff + enqueue off the first "
+             "--probe-pages index page(s) per agenda, then exit — never "
+             "mark_inactive, no detail drain, no scrape_runs row",
+    )
+    p.add_argument(
+        "--probe-pages", type=int, default=1,
+        help="index pages per agenda for --probe (default 1)",
     )
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--verbose", action="store_true")

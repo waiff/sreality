@@ -33,7 +33,12 @@ from scraper.bezrealitky_parser import (
     SOURCE,
     parse_advert,
 )
-from scraper.portal import PortalConfig, default_config, load_portal_config
+from scraper.portal import (
+    PortalConfig,
+    default_config,
+    load_portal_config,
+    price_changed,
+)
 from scraper.portal_base import ListingGoneError
 from scraper.portal_runner import DrainItem
 from scraper.rate_limit import RateLimiter
@@ -52,12 +57,13 @@ INDEX_PAGE_SIZE = 100
 # Not operator-tunable. Mirrors bazos_main / idnes_main.
 INDEX_MIN_COMPLETENESS = 0.995
 
-# Only flip rows unseen for 24h+ — several full walk cadences. last_seen_at is
-# bumped for unchanged rows each walk (touch_listings) and for changed rows on
-# a successful drain fetch — so a churn-missed live row is protected unless its
-# detail fetches have ALSO failed for 24h+; even then the flip self-heals on
-# the next index sighting (touch_listings reactivates).
-INACTIVE_MIN_UNSEEN_HOURS = 24
+# Only flip rows unseen for 12h+ — ~2 full walk cadences at the 6h schedule.
+# last_seen_at is bumped for unchanged rows each walk (touch_listings) and for
+# changed rows on a successful drain fetch — so a churn-missed live row is
+# protected unless its detail fetches have ALSO failed for 12h+; even then the
+# flip self-heals on the next index sighting (touch_listings reactivates).
+# Tightened 24->12h for the real-time delisting SLO.
+INACTIVE_MIN_UNSEEN_HOURS = 12
 
 
 def _walk_complete(collected: int, total: int | None) -> bool:
@@ -79,8 +85,15 @@ class BezrealitkyPortal:
         self._categories = config.categories
         self._max_pages = max_pages
         self.index_rate = config.limits.index_rate
+        self.shared_rate_limiter = config.limits.shared_rate_limiter
+        self._price_change_min_pct = config.limits.price_change_min_pct
 
     # --- index-walk seams ---
+    def set_index_page_cap(self, pages: int | None) -> None:
+        # Probe seam (portal_runner.run_index_probe): the GraphQL search already
+        # orders TIMEORDER_DESC, so a page-capped walk IS the delta probe.
+        self._max_pages = pages
+
     def categories(self) -> list[dict[str, Any]]:
         return list(self._categories)
 
@@ -153,7 +166,9 @@ class BezrealitkyPortal:
             prev = existing.get(nid)
             if prev is None:
                 continue
-            if price_map.get(nid) is not None and prev["price_czk"] == price_map[nid]:
+            if price_map.get(nid) is not None and not price_changed(
+                prev["price_czk"], price_map[nid], self._price_change_min_pct,
+            ):
                 unchanged_pks.append(prev["sreality_id"])
             else:
                 changed.append(nid)
@@ -315,6 +330,13 @@ def main(argv: list[str] | None = None) -> int:
         else config.limits.max_detail_per_run
     )
 
+    # Newest-first delta probe (Wave C-2): diff + enqueue off the first index
+    # page(s) only. No mark_inactive, no drain, no scrape_runs row.
+    if args.probe:
+        rc, _ = portal_runner.run_index_probe(
+            portal, dry_run=args.dry_run, probe_pages=args.probe_pages)
+        return rc
+
     # Index-walk (enqueue) then detail-drain (fetch + ingest), through the one
     # shared runner. Two scrape_runs rows ('index' + 'detail'), like sreality.
     rc = _run_phase(portal, "index", portal_runner.run_index_walk, args.dry_run)
@@ -346,6 +368,17 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     p.add_argument(
         "--rate", type=float, default=None,
         help="detail-fetch requests/second ceiling (default: per-portal config)",
+    )
+    p.add_argument(
+        "--probe", action="store_true",
+        help="newest-first delta probe: diff + enqueue off the first "
+             "--probe-pages index page(s) per category, then exit — never "
+             "mark_inactive, no detail drain, no scrape_runs row",
+    )
+    p.add_argument(
+        "--probe-pages", type=int, default=1,
+        help="index pages per category for --probe (default 1; a page is "
+             f"{INDEX_PAGE_SIZE} adverts)",
     )
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--verbose", action="store_true")

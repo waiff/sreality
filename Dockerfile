@@ -15,6 +15,10 @@ COPY scraper/ ./scraper/
 COPY toolkit/ ./toolkit/
 COPY api/ ./api/
 COPY scripts/ ./scripts/
+# data/ carries runtime-read files (clip_taxonomy.json for the dedup engine's CLIP
+# settings, condition rubrics/markers). load_taxonomy() reads data/clip_taxonomy.json
+# from the image root, so the realtime-worker dedup lane FileNotFoundError'd without it.
+COPY data/ ./data/
 
 RUN pip install --upgrade pip && pip install ".[api]"
 

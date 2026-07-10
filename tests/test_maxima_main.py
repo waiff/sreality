@@ -190,7 +190,7 @@ def test_mark_inactive_is_agenda_grain(monkeypatch):
     # First prodej descriptor (byt) triggers the agenda sweep.
     assert portal.mark_inactive(object(), _CATEGORIES[0], {"b1", "b2"}) == 7
     source, ct, seen, hrs = captured[0]
-    assert source == "maxima" and ct == "prodej" and hrs == 24
+    assert source == "maxima" and ct == "prodej" and hrs == 12
     assert seen == {"b1", "b2", "d1", "o1"}        # the FULL agenda, not the byt slice
     # A second prodej descriptor (dum) must NOT re-sweep the same agenda.
     assert portal.mark_inactive(object(), _CATEGORIES[1], {"d1"}) == 0

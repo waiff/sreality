@@ -13,9 +13,9 @@ name: Dedup engine (street + disposition)
 # Every auto-merge is reversible (property_merge_events ledger + one-click Undo).
 # A per-run dedup_engine_runs row powers the /dedup automation dashboard.
 #
-# Cadence: every 6h. The SCHEDULED run is FREE-mostly (--free): pHash +
-# exact-address merges + reconcile + reject/gate dismissals; un-vision'd
-# cross-source pairs are skipped (not queued as placeholders). It captures every
+# Cadence: every 6h. The SCHEDULED run is FREE-mostly (--free): pHash merges +
+# reconcile + reject/gate dismissals; un-vision'd candidate pairs are skipped
+# (not queued as placeholders). It captures every
 # dup that SHARES a photo (pHash, whose coverage keeps growing) plus all free
 # cleanup. The ONE bounded paid call is the floor-plan validation gate, capped by
 # app_settings.dedup_floor_plan_budget (default 10000): a single Sonnet floor-plan
@@ -106,13 +106,18 @@ on:
           - "false"
           - "true"
       dirty:
-        description: Real-time dirty drain — re-decide ONLY street groups touching a just-dedup-ready property
+        description: Real-time dirty drain — re-decide ONLY street groups touching a just-dedup-ready property (typically pair with free=true, like the scheduled run)
         required: false
         default: "false"
         type: choice
         options:
           - "false"
           - "true"
+      max_dirty:
+        description: "[dirty] Bound the claim to the N NEWEST dedup-ready properties — parity with the scheduled run's 3000 (a bare dirty dispatch previously fell to the CLI's 10000). Raise for a one-off backlog blitz."
+        required: false
+        default: "3000"
+        type: string
       geo_only:
         description: GEO scan — single-dwelling (house/land/commercial) only, the geo-proximity path (pair with shadow=true for a volume preview)
         required: false
@@ -126,9 +131,24 @@ on:
         required: false
         default: ""
         type: string
+      compare_budget:
+        description: "[free] PAID forensic room/site-plan compares allowed this run (cache hits don't count), cosine-routed. 0 = pHash-only free run. Separate budget from floor_plan_budget."
+        required: false
+        default: ""
+        type: string
 
+# The real-time DIRTY drain (:45) gets its OWN concurrency group so the slow batch runs (full
+# scan 6h / candidate 2h / geo 4x/day) can never starve or cancel it — the "merge in minutes"
+# SLO can't hold if the dirty lane waits behind an 80-min full scan (several dirty runs were
+# cancelled by the shared group before this). Safe to run CONCURRENTLY with a batch run:
+# merge_properties row-locks both properties FOR UPDATE + gates on status='active', so
+# concurrent merges serialize per-property (a redundant re-decide is a cheap no-op via the
+# already_merged reject) — the same row-lock safety that already lets dedup run concurrently
+# with property-maintenance (a separate group). Everything else stays in the one `dedup-engine`
+# group (serialized among the batch runs). workflow_dispatch (empty github.event.schedule)
+# falls to the batch group.
 concurrency:
-  group: dedup-engine
+  group: dedup-engine${{ github.event.schedule == '45 * * * *' && '-dirty' || '' }}
   cancel-in-progress: false
 
 jobs:
@@ -163,14 +183,30 @@ jobs:
             # SCHEDULED DIRTY DRAIN (free, real-time): re-decide ONLY the street groups
             # touching a just-dedup-ready property (dedup_dirty_properties, filled by the
             # hourly CLIP tag job), so a new cross-portal listing merges within ~minutes of
-            # being tagged. Empty queue -> fast no-op. Bounded floor-plan vision (300).
-            ARGS="--free --dirty --max-pairs 200000 --max-seconds 1200 --floor-plan-budget 300"
+            # being tagged. Empty queue -> fast no-op.
+            #   * --compare-budget 40 (W2): pay-at-decision-time forensic compares so the
+            #     real-time lane auto-merges the different-photo cross-portal pairs pHash can't
+            #     — capped at 40 PAID (cache-free) calls, cosine-routed (most rooms Haiku/skip),
+            #     deadline-bounded. No batch warmer exists anymore, so the compares must run live
+            #     here or the SLO's photo-sharing merges never happen on the hot path.
+            #   * --floor-plan-budget 25 (was 0): with no warmer to consume from, a cache-only
+            #     gate would DEFER every would-merge both-plan pair forever, so the lane pays a
+            #     small live floor-plan budget (its OWN, separate from compares — W2). 25 is well
+            #     under the ~300 that once blew the 20-min budget; the deadline is the hard stop.
+            #   * --max-dirty 3000: a slice small enough that its street-group pair-work fits
+            #     the 20-min budget even on a portal-launch spike (the enqueue eligibility+
+            #     recency gates keep the steady-state queue far below this). Newest-first claim
+            #     + the 24h TTL prune mean the stale tail ages out to the full scan, never pins
+            #     the head.
+            ARGS="--free --dirty --max-pairs 200000 --max-seconds 1200 --compare-budget 40 --floor-plan-budget 25 --max-dirty 3000"
           elif [ "${{ github.event.schedule }}" = "30 */2 * * *" ]; then
             # SCHEDULED CANDIDATE DRAIN (free): re-decide ONLY the properties in the
             # still-proposed /dedup queue (O(queue), not a market scan), so the queue
-            # self-clears regardless of where the 6h full scan's deadline falls. Bounded
-            # floor-plan vision (300 cold checks); warm verdicts replay free.
-            ARGS="--free --candidates --max-pairs 200000 --max-seconds 2400 --floor-plan-budget 300"
+            # self-clears regardless of where the 6h full scan's deadline falls.
+            #   * --compare-budget 100 (W2): live forensic compares so a queued different-photo
+            #     pair auto-merges instead of waiting for an operator; 100 PAID calls, cosine-routed.
+            #   * --floor-plan-budget 300: bounded live floor-plan validation (its own budget).
+            ARGS="--free --candidates --max-pairs 200000 --max-seconds 2400 --compare-budget 100 --floor-plan-budget 300"
           elif [ "${{ github.event.schedule }}" = "0 3,9,15,21 * * *" ]; then
             # SCHEDULED GEO SCAN (paid, bounded): single-dwelling families (house / land /
             # commercial) have NO disposition, so the street+disposition engine can't touch them
@@ -183,11 +219,15 @@ jobs:
             ARGS="--geo-only --max-pairs 200000 --geo-max-pairs 20000"
             ARGS="$ARGS --max-vision-calls 300 --max-room-attempts 4 --max-seconds 4800 --floor-plan-budget 300"
           elif [ "${{ github.event_name }}" = "schedule" ]; then
-            # SCHEDULED FULL SCAN = FREE: pHash + rule merges + reconcile, NO paid all-rooms
-            # compare/classify, no placeholders. The ONE bounded paid exception is the
-            # floor-plan validation gate, capped by app_settings.dedup_floor_plan_budget
-            # (default 10000) — a targeted Sonnet check only on would-merge both-plan pairs.
-            ARGS="--free --max-pairs 200000 --max-seconds 4800"
+            # SCHEDULED FULL SCAN = FREE: pHash + rule merges + reconcile + market discovery.
+            #   * --compare-budget 300 (W2): live forensic compares on the new different-photo
+            #     cross-portal candidates the scan discovers, capped at 300 PAID (cache-free)
+            #     calls, cosine-routed — the pay-at-decision-time replacement for the retired
+            #     batch warmer. Its own pool, independent of the floor-plan budget below.
+            #   * floor-plan validation gate: capped by app_settings.dedup_floor_plan_budget
+            #     (default 10000) on its OWN separate budget — a targeted Sonnet check only on
+            #     would-merge both-plan pairs (so a large plan budget can't inflate compare spend).
+            ARGS="--free --max-pairs 200000 --max-seconds 4800 --compare-budget 300"
           else
             # Dispatch: paid vision / cache-only / free / shadow / candidates per inputs.
             ARGS="--max-pairs ${{ inputs.max_pairs || '20000' }}"
@@ -195,12 +235,13 @@ jobs:
             ARGS="$ARGS --max-room-attempts ${{ inputs.max_room_attempts || '4' }}"
             ARGS="$ARGS --max-seconds ${{ inputs.max_seconds || '4800' }}"
             if [ -n "${{ inputs.floor_plan_budget }}" ]; then ARGS="$ARGS --floor-plan-budget ${{ inputs.floor_plan_budget }}"; fi
+            if [ -n "${{ inputs.compare_budget }}" ]; then ARGS="$ARGS --compare-budget ${{ inputs.compare_budget }}"; fi
             if [ "${{ inputs.dry_run }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
             if [ "${{ inputs.shadow }}" = "true" ]; then ARGS="$ARGS --shadow"; fi
             if [ "${{ inputs.cache_only }}" = "true" ]; then ARGS="$ARGS --cache-only"; fi
             if [ "${{ inputs.free }}" = "true" ]; then ARGS="$ARGS --free"; fi
             if [ "${{ inputs.candidates }}" = "true" ]; then ARGS="$ARGS --candidates"; fi
-            if [ "${{ inputs.dirty }}" = "true" ]; then ARGS="$ARGS --dirty"; fi
+            if [ "${{ inputs.dirty }}" = "true" ]; then ARGS="$ARGS --dirty --max-dirty ${{ inputs.max_dirty || '3000' }}"; fi
             if [ "${{ inputs.geo_only }}" = "true" ]; then ARGS="$ARGS --geo-only"; fi
           fi
           echo "python -m scripts.dedup_engine $ARGS"

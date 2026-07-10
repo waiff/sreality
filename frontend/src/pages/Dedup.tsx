@@ -21,10 +21,12 @@ import {
 import {
   dedupKeys,
   fetchDedupEngineRuns,
+  fetchDedupScanState,
   fetchImagesByListingIds,
   fetchListingDetailByIds,
   fetchPropertySourcesByPropertyIds,
   type DedupEngineRun,
+  type DedupScanState,
 } from '@/lib/queries';
 import {
   clusterCandidates,
@@ -37,7 +39,7 @@ import { imageSrc } from '@/lib/imageUrl';
 import { assessDirtyQueue } from '@/lib/dedupQueueHealth';
 import { type TaggedImageUrl } from '@/lib/imageTags';
 import { portalListingUrl, portalShort } from '@/lib/portals';
-import { fmtArea, fmtCount, fmtCzk, fmtRelative } from '@/lib/format';
+import { fmtArea, fmtCount, fmtCzk, fmtDurationSecs, fmtRelative } from '@/lib/format';
 import ImageCarousel from '@/components/ImageCarousel';
 import DedupAuditHistory from '@/components/DedupAuditHistory';
 import DedupBackfillProgress from '@/components/DedupBackfillProgress';
@@ -45,6 +47,7 @@ import DedupCandidateReset from '@/components/DedupCandidateReset';
 import DedupFactors from '@/components/DedupFactors';
 import DecisionFeedbackControl from '@/components/DecisionFeedbackControl';
 import DedupPipelineOverview from '@/components/DedupPipelineOverview';
+import DedupFunnel from '@/components/DedupFunnel';
 import { listingPath } from '@/lib/listingUrl';
 import type {
   DedupCandidatesResponse,
@@ -118,7 +121,16 @@ export default function Dedup() {
 
   const engineRunsQ = useQuery<DedupEngineRun[], Error>({
     queryKey: dedupKeys.engineRuns(14),
-    queryFn: () => fetchDedupEngineRuns(14),
+    // 40, not 14: gauges come from the latest FULL-scan row, and with hourly dirty +
+    // 2-hourly candidate + geo rows a 14-row window has ~3 rows of slack around the
+    // 6h full scan — one missed/failed full scan would push it out (gauges -> em dash).
+    queryFn: () => fetchDedupEngineRuns(40),
+    placeholderData: keepPreviousData,
+  });
+
+  const scanStateQ = useQuery<DedupScanState | null, Error>({
+    queryKey: dedupKeys.scanState,
+    queryFn: fetchDedupScanState,
     placeholderData: keepPreviousData,
   });
 
@@ -208,11 +220,17 @@ export default function Dedup() {
 
       <DedupPipelineOverview />
 
+      <DedupFunnel />
+
       <CollapsibleSection id="clip" eyebrow="Backfill" title="CLIP backfill">
         <DedupBackfillProgress />
       </CollapsibleSection>
 
-      <AutomationDashboard runs={engineRunsQ.data ?? []} loading={engineRunsQ.isLoading} />
+      <AutomationDashboard
+        runs={engineRunsQ.data ?? []}
+        loading={engineRunsQ.isLoading}
+        scanState={scanStateQ.data ?? null}
+      />
 
       <CollapsibleSection
         id="history"
@@ -304,13 +322,20 @@ export default function Dedup() {
 function AutomationDashboard({
   runs,
   loading,
+  scanState,
 }: {
   runs: DedupEngineRun[];
   loading: boolean;
+  scanState: DedupScanState | null;
 }) {
   const latest = runs[0] ?? null;
+  // Market gauges come from the latest FULL-scan row — scoped runs (dirty/candidates)
+  // write NULL gauges since migration 265, and geo rows carry the geo lane's count.
+  const gauges =
+    runs.find((r) => (r.run_kind === 'full' || r.run_kind == null) && r.eligible != null) ?? null;
   const autoTotal = latest ? latest.auto_phash + latest.auto_visual : 0;
   const dq = assessDirtyQueue(runs);
+  const visionErrors = latest?.vision_errors ?? 0;
   return (
     <CollapsibleSection id="automation" eyebrow="Automation" title="Engine activity">
       {latest == null ? (
@@ -328,18 +353,26 @@ function AutomationDashboard({
               }`}
             >
               <strong className="font-medium">
-                Dirty queue {dq.status === 'fail' ? 'stalled' : 'deep'}:
+                Dirty queue {dq.status === 'fail' ? (dq.livelocked ? 'livelocked' : dq.starving ? 'starving' : 'stalled') : 'deep'}:
               </strong>{' '}
-              {fmtCount(dq.depth)} dedup-ready properties waiting.{' '}
-              {dq.draining === false
-                ? 'Not draining across recent runs — the --dirty drain may be failing or out-paced; check the dedup_engine.yml runs.'
-                : 'Draining through the bounded drain (a transient tagging flood).'}
+              {fmtCount(dq.depth)} dedup-ready properties waiting
+              {dq.agePctl95Seconds != null ? ` (p95 wait ${fmtDurationSecs(dq.agePctl95Seconds)})` : ''}. {dq.reason}
+            </div>
+          ) : null}
+          {visionErrors > 0 ? (
+            // The credit-outage tripwire — a nonzero vision-error count means the LLM lane is
+            // erroring (out of credit / dead key), which silently starves auto-merge. Loud banner.
+            <div className="mb-3 rounded-[var(--radius-md)] border border-[var(--color-brick)]/40 bg-[var(--color-brick-soft)] px-3 py-2 text-sm text-[var(--color-brick)]">
+              <strong className="font-medium">Vision errors:</strong>{' '}
+              {fmtCount(visionErrors)} failed vision {visionErrors === 1 ? 'call' : 'calls'} on the
+              last run — the forensic LLM lane is erroring (check Anthropic credit / the API key).
+              Auto-merge by visual verdict is degraded until it clears.
             </div>
           ) : null}
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-            <Stat label="Eligible" value={latest.eligible} hint="street + disposition" />
-            <Stat label="Loc. unclear" value={latest.flagged_location} hint="no street" muted />
-            <Stat label="Disp. unclear" value={latest.flagged_disposition} hint="no disposition" muted />
+            <Stat label="Eligible" value={gauges?.eligible ?? '—'} hint="street + disposition" />
+            <Stat label="Loc. unclear" value={gauges?.flagged_location ?? '—'} hint="no street" muted />
+            <Stat label="Disp. unclear" value={gauges?.flagged_disposition ?? '—'} hint="no disposition" muted />
             <Stat label="Auto-merged" value={autoTotal} hint="this run" accent />
           </div>
           <div className="mt-2 grid grid-cols-2 sm:grid-cols-7 gap-2">
@@ -347,7 +380,15 @@ function AutomationDashboard({
               label="Dirty queue"
               value={dq.depth ?? 0}
               small
-              hint={dq.depth == null ? 'no dirty run' : dq.draining === false ? 'not draining' : dq.draining ? 'draining' : 'backlog'}
+              hint={
+                dq.depth == null ? 'no dirty run'
+                : dq.livelocked ? 'livelocked'
+                : dq.draining === false ? 'not draining'
+                : dq.draining
+                  ? (dq.clearedInWindow != null
+                      ? `draining (${fmtCount(dq.clearedInWindow)} cleared)` : 'draining')
+                  : 'backlog'
+              }
             />
             <Stat label="By photos" value={latest.auto_phash} small />
             <Stat label="By visual" value={latest.auto_visual} small />
@@ -356,14 +397,104 @@ function AutomationDashboard({
             <Stat label="CLIP deferred" value={latest.clip_deferred ?? 0} small />
             <Stat label="Queued" value={latest.queued} small />
           </div>
-          {runs.length > 1 ? <RunTrend runs={runs} /> : null}
-          <p className="mt-2 text-[0.7rem] text-[var(--color-ink-4)]">
-            Last run {fmtRelative(latest.started_at)} · {fmtCount(latest.pairs_considered)} pairs examined ·
-            {' '}{fmtCount(latest.vision_calls)} vision calls
+          {/* Migration 271 stall tripwires — previously invisible. Queue-age p95 is the
+              real-time-lane SLO; oversized skips are coverage holes; unresolved is the free
+              funnel's undecided remainder; vision errors is the credit-outage tripwire. */}
+          <p className="mt-3 mb-1.5 text-[0.62rem] tracking-[0.14em] uppercase text-[var(--color-ink-3)]">
+            Stall signals
           </p>
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+            <Stat
+              label="Queue age p95"
+              value={fmtDurationSecs(dq.agePctl95Seconds)}
+              small
+              hint="dedup-ready wait"
+              danger={dq.starving}
+            />
+            <Stat
+              label="Oversized skipped"
+              value={latest.skipped_oversized ?? '—'}
+              small
+              hint={
+                latest.oversized_groups != null
+                  ? `${fmtCount(latest.oversized_groups)} groups`
+                  : 'groups over cap'
+              }
+              muted={(latest.skipped_oversized ?? 0) === 0}
+            />
+            <Stat
+              label="Unresolved (free)"
+              value={latest.skipped_unresolved ?? '—'}
+              small
+              hint="free funnel"
+              muted={(latest.skipped_unresolved ?? 0) === 0}
+            />
+            <Stat
+              label="Vision errors"
+              value={visionErrors}
+              small
+              hint={visionErrors > 0 ? 'LLM lane erroring' : 'LLM calls ok'}
+              danger={visionErrors > 0}
+              muted={visionErrors === 0}
+            />
+          </div>
+          {runs.length > 1 ? <RunTrend runs={runs} /> : null}
+          <p className="mt-2 flex flex-wrap items-center gap-x-1.5 gap-y-1 text-[0.7rem] text-[var(--color-ink-4)]">
+            <RunnerBadge runner={latest.runner} />
+            <span>
+              Last run{latest.run_kind ? ` (${latest.run_kind})` : ''} {fmtRelative(latest.started_at)} ·
+              {' '}{fmtCount(latest.pairs_considered)} pairs examined ·
+              {' '}{fmtCount(latest.vision_calls)} vision calls
+              {latest.truncated ? (
+                <span className="text-[var(--color-ochre)]">
+                  {' '}· truncated{latest.truncated_cause ? ` (${latest.truncated_cause})` : ''}
+                </span>
+              ) : null}
+            </span>
+          </p>
+          <CycleCaption state={scanState} />
         </>
       )}
     </CollapsibleSection>
+  );
+}
+
+/* Which executor wrote the latest run — the always-on realtime worker or the GitHub
+ * Actions cron (migration 271). A small civic-archive pill; null on pre-271 rows. */
+function RunnerBadge({ runner }: { runner: 'actions' | 'worker' | null }) {
+  if (!runner) return null;
+  return (
+    <span
+      title={
+        runner === 'worker'
+          ? 'Written by the always-on realtime worker'
+          : 'Written by the GitHub Actions cron'
+      }
+      className="inline-flex items-center rounded-[var(--radius-xs)] border border-[var(--color-rule)] bg-[var(--color-paper-3)] px-1.5 py-0.5 text-[0.6rem] tracking-[0.1em] uppercase text-[var(--color-ink-3)]"
+    >
+      {runner}
+    </span>
+  );
+}
+
+/* A full-market scan spans many 6h runs as the cursor advances, so a cycle legitimately
+ * takes the better part of a day-plus — this bar is generous. A never-completed (null) or
+ * long-stale last completion is the cursor-stall signal migration 271 exposes. */
+const FULL_SCAN_STALE_SECONDS = 172_800; // 48h
+
+function CycleCaption({ state }: { state: DedupScanState | null }) {
+  if (state == null) return null;
+  const startedAt = state.cycle_started_at ?? state.last_cycle_started_at;
+  const completedAt = state.last_cycle_completed_at;
+  const stale =
+    completedAt == null ||
+    Date.now() - new Date(completedAt).getTime() > FULL_SCAN_STALE_SECONDS * 1000;
+  return (
+    <p className={`mt-1 text-[0.7rem] ${stale ? 'text-[var(--color-brick)]' : 'text-[var(--color-ink-4)]'}`}>
+      Full-scan cycle {state.mid_cycle ? 'running' : 'idle'} · started {fmtRelative(startedAt)} ·
+      {' '}last completed {completedAt ? fmtRelative(completedAt) : '—'}
+      {stale ? ' · cursor may be stalled' : ''}
+    </p>
   );
 }
 
@@ -372,25 +503,29 @@ function Stat({
   value,
   hint,
   accent,
+  danger,
   muted,
   small,
 }: {
   label: string;
-  value: number;
+  value: number | string;
   hint?: string;
   accent?: boolean;
+  danger?: boolean;
   muted?: boolean;
   small?: boolean;
 }) {
-  const valueColor = accent
-    ? 'text-[var(--color-copper-2)]'
-    : muted
-      ? 'text-[var(--color-ink-3)]'
-      : 'text-[var(--color-ink)]';
+  const valueColor = danger
+    ? 'text-[var(--color-brick)]'
+    : accent
+      ? 'text-[var(--color-copper-2)]'
+      : muted
+        ? 'text-[var(--color-ink-3)]'
+        : 'text-[var(--color-ink)]';
   return (
     <div className="rounded-[var(--radius-sm)] border border-[var(--color-rule-soft)] bg-[var(--color-paper-2)] px-3 py-2">
       <div className={`font-mono tabular-nums ${small ? 'text-base' : 'text-xl'} ${valueColor}`}>
-        {fmtCount(value)}
+        {typeof value === 'number' ? fmtCount(value) : value}
       </div>
       <div className="text-[0.62rem] tracking-[0.1em] uppercase text-[var(--color-ink-3)]">{label}</div>
       {hint ? <div className="text-[0.62rem] text-[var(--color-ink-4)]">{hint}</div> : null}
@@ -407,12 +542,16 @@ function RunTrend({ runs }: { runs: DedupEngineRun[] }) {
       {ordered.map((r) => {
         const total = r.auto_phash + r.auto_visual;
         const h = Math.round((total / max) * 100);
+        const tip =
+          `${total} auto-merged` +
+          (r.runner ? ` · ${r.runner}` : '') +
+          (r.truncated ? ` · truncated${r.truncated_cause ? ` (${r.truncated_cause})` : ''}` : '');
         return (
           <div
             key={r.id}
             className="flex-1 bg-[var(--color-copper)]/70 rounded-t-[var(--radius-xs)] min-h-[2px]"
             style={{ height: `${Math.max(h, 3)}%` }}
-            title={`${total} auto-merged`}
+            title={tip}
           />
         );
       })}

@@ -44,4 +44,4 @@ jobs:
           pip install -e .
 
       - name: Check LLM pipeline liveness
-        run: python -m scripts.check_llm_health
+        run: python -m scripts.check_llm_health --notify

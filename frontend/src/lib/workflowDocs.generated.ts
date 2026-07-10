@@ -189,6 +189,55 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/backfill_bazos_street_locality.yml"
   },
   {
+    "filename": "backfill_idnes_areas.yml",
+    "name": "Backfill idnes areas (spaced-thousands truncation)",
+    "description": "One-off, dispatch-only backfill for PR #686's parser fix: idnes titles render land area with a Czech spaced-thousands group (\"2 403 m²\") and the old _AREA_RE matched from inside the number, storing area_m2=403 for a 2,403 m² plot (~8.4k active rows). Re-parses each affected listing from its already-staged detail HTML (portal_raw_pages, NO re-fetch of idnes) and heals the area columns in place; only NULLs a price on a genuine per-m² masquerade (zero found in prod). Idempotent + resumable; rerun until \"pending=0\". NOT a portal ingest workflow, so it carries no `# portal:` tag.",
+    "portal": null,
+    "manual": true,
+    "schedules": [],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "limit",
+        "description": "Max listings processed per run",
+        "required": false,
+        "type": "string",
+        "default": "40000",
+        "options": null
+      },
+      {
+        "name": "max_seconds",
+        "description": "Wall-clock budget in seconds (blank = no budget)",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "dry_run",
+        "description": "Report the pending count and exit without writing",
+        "required": false,
+        "type": "choice",
+        "default": "false",
+        "options": [
+          "false",
+          "true"
+        ]
+      }
+    ],
+    "secrets": [
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "backfill-idnes-areas",
+    "cancelInProgress": false,
+    "timeoutMinutes": 90,
+    "permissions": "contents: read",
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/backfill_idnes_areas.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/backfill_idnes_areas.yml"
+  },
+  {
     "filename": "backfill_idnes_brokers.yml",
     "name": "Data: backfill idnes broker blocks",
     "description": "One-shot backfill: reparse the staged idnes detail HTML (portal_raw_pages) into listings.raw_json.broker via scraper.broker_idnes.parse_idnes_broker. raw_json.broker is OUT of the content hash (_HASH_FIELDS is typed columns only), so this never churns snapshots. The broker resolver then attributes idnes brokers from raw_json.broker like sreality's raw_json.user. No re-fetch, no LLM, no new secrets.",
@@ -1210,7 +1259,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
   {
     "filename": "dedup_batches.yml",
     "name": "Dedup engine (vision batch warm-up)",
-    "description": "Async dedup-vision via the Anthropic Message Batches API (50% cheaper than the synchronous dedup engine's per-call vision, recall-identical). PRE-WARMS the engine's classify/compare/site_plan caches; the daily \"Dedup engine (street + disposition)\" run then REPLAYS unchanged over the warm caches and produces the identical merges for free. Two modes, selected by which cron fired (or the `mode` dispatch input):",
+    "description": "Async dedup-vision via the Anthropic Message Batches API (50% cheaper than the synchronous dedup engine's per-call vision, recall-identical). PRE-WARMS the engine's classify/compare/site_plan caches; the daily \"Dedup engine (street + disposition)\" run then REPLAYS unchanged over the warm caches and produces the identical merges for free. Two modes, selected by the `mode` dispatch input:",
     "portal": null,
     "manual": true,
     "schedules": [
@@ -1256,10 +1305,18 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
       },
       {
         "name": "max_room_attempts",
-        "description": "[submit] Max like-room compare requests enqueued per pair",
+        "description": "[submit] The engine's per-pair room cap (upper bound on warm-rooms)",
         "required": false,
         "type": "string",
         "default": "4",
+        "options": null
+      },
+      {
+        "name": "warm_rooms",
+        "description": "[submit] Like-room compares warmed per pair (1 = first-priority room only)",
+        "required": false,
+        "type": "string",
+        "default": "1",
         "options": null
       },
       {
@@ -1406,7 +1463,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
       },
       {
         "name": "dirty",
-        "description": "Real-time dirty drain — re-decide ONLY street groups touching a just-dedup-ready property",
+        "description": "Real-time dirty drain — re-decide ONLY street groups touching a just-dedup-ready property (typically pair with free=true, like the scheduled run)",
         "required": false,
         "type": "choice",
         "default": "false",
@@ -1414,6 +1471,14 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
           "false",
           "true"
         ]
+      },
+      {
+        "name": "max_dirty",
+        "description": "[dirty] Bound the claim to the N NEWEST dedup-ready properties — parity with the scheduled run's 3000 (a bare dirty dispatch previously fell to the CLI's 10000). Raise for a one-off backlog blitz.",
+        "required": false,
+        "type": "string",
+        "default": "3000",
+        "options": null
       },
       {
         "name": "geo_only",
@@ -1433,6 +1498,14 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
         "type": "string",
         "default": "",
         "options": null
+      },
+      {
+        "name": "compare_budget",
+        "description": "[free] PAID forensic room/site-plan compares allowed this run (cache hits don't count), cosine-routed. 0 = pHash-only free run. Separate budget from floor_plan_budget.",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
       }
     ],
     "secrets": [
@@ -1444,7 +1517,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
       "R2_SECRET_ACCESS_KEY",
       "SUPABASE_DB_URL"
     ],
-    "concurrencyGroup": "dedup-engine",
+    "concurrencyGroup": "dedup-engine${{ github.event.schedule == '45 * * * *' && '-dirty' || '' }}",
     "cancelInProgress": false,
     "timeoutMinutes": 90,
     "permissions": "contents: read",
@@ -2298,23 +2371,25 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
   },
   {
     "filename": "migrations.yml",
-    "name": "CI: migration smoke-test",
-    "description": "Applies the full migrations/ chain (001 -> latest) to a throwaway Postgres + PostGIS container whenever anything under migrations/ changes, catching a migration that does not apply cleanly before it reaches the production Supabase database (there is no staging DB). It pre-creates the Supabase roles the migrations GRANT to (anon / authenticated / service_role) and the pg_trgm extension migrations 067 / 074 rely on, applies every *.sql in numeric order, then runs a small sanity query. Hermetic: no secrets, never touches production.",
+    "name": "CI: schema replay + SQL correctness",
+    "description": "Two gates on one throwaway Postgres, hermetic (no secrets, never touches prod):",
     "portal": null,
     "manual": true,
     "schedules": [],
     "onPush": true,
     "onPullRequest": true,
     "paths": [
+      "**/*.py",
       ".github/workflows/migrations.yml",
       "migrations/**",
+      "pyproject.toml",
       "scripts/ci_db_bootstrap.sql"
     ],
     "inputs": [],
     "secrets": [],
     "concurrencyGroup": null,
     "cancelInProgress": null,
-    "timeoutMinutes": 10,
+    "timeoutMinutes": 15,
     "permissions": null,
     "runsUrl": "https://github.com/waiff/sreality/actions/workflows/migrations.yml",
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/migrations.yml"
@@ -2605,32 +2680,6 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/recompute_property_stats.yml"
   },
   {
-    "filename": "refresh_map_mv.yml",
-    "name": "Jobs: refresh Browse map view",
-    "description": "Refresh properties_map_mv (migration 254) -- the cold-robust materialized source for the Browse map feed. The map ships up to 50k points for client-side clustering; reading that off the churned live `properties` table tripped the anon 3s statement_timeout cold, so the map reads this clean, all-visible copy instead. It only reflects new/changed/delisted listings when refreshed, so a scheduled rebuild keeps the map fresh. The rebuild is BLUE-GREEN + CLUSTERED (build a fresh clustered copy off to the side, atomic-swap) because on this cache-constrained instance the map source must stay physically clustered to read fast cold -- see scripts/refresh_map_mv.py. A full clustered rebuild is heavier than a concurrent refresh, so it runs every 30 min (the map can be a few minutes stale). Source-agnostic maintenance job (no portal tag).",
-    "portal": null,
-    "manual": true,
-    "schedules": [
-      {
-        "cron": "*/30 * * * *",
-        "human": "Every 30 minutes"
-      }
-    ],
-    "onPush": false,
-    "onPullRequest": false,
-    "paths": null,
-    "inputs": [],
-    "secrets": [
-      "SUPABASE_DB_URL"
-    ],
-    "concurrencyGroup": "refresh-map-mv",
-    "cancelInProgress": false,
-    "timeoutMinutes": 15,
-    "permissions": "contents: read",
-    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/refresh_map_mv.yml",
-    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/refresh_map_mv.yml"
-  },
-  {
     "filename": "refresh_population.yml",
     "name": "Data: refresh city populations (Wikidata)",
     "description": "FALLBACK SOURCE. The preferred population source is now the official ČSÚ DataStat export \"Počet obyvatel v obcích k 1. 1.\" — download the JSON from https://data.csu.gov.cz/datastat/data/VYBER/OBY02AT02, commit it to data/csu_population.json, and run \"Data: seed curated cities\" (which ingests the JSON directly). Use this Wikidata fetcher only when you can't get the official file.",
@@ -2835,6 +2884,17 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
       {
         "name": "dry_run",
         "description": "Match but write nothing",
+        "required": false,
+        "type": "choice",
+        "default": "false",
+        "options": [
+          "false",
+          "true"
+        ]
+      },
+      {
+        "name": "force_rescan",
+        "description": "Re-attempt rows already stamped at the current revision (recovery pass)",
         "required": false,
         "type": "choice",
         "default": "false",
@@ -3355,7 +3415,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
         "description": "wall-clock budget for the detail drain (seconds)",
         "required": false,
         "type": "string",
-        "default": "1500",
+        "default": "2100",
         "options": null
       },
       {
@@ -3380,7 +3440,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     ],
     "concurrencyGroup": "remax-scrape",
     "cancelInProgress": false,
-    "timeoutMinutes": 50,
+    "timeoutMinutes": 60,
     "permissions": null,
     "runsUrl": "https://github.com/waiff/sreality/actions/workflows/scrape_remax.yml",
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/scrape_remax.yml"
@@ -3549,6 +3609,49 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/smoke_agent.yml"
   },
   {
+    "filename": "street_key_parity.yml",
+    "name": "Monitoring: street_name_key parity",
+    "description": "Weekly sampled drift check: stored listings.street_name_key == the Python normalizer (scraper.street.street_name_key). Guards the STALE-key class the migration-264 presence CHECK cannot see — a normalizer edit without the required backfill_street_name_key.yml all=true re-key, or a writer stamping a wrong value. Silent drift costs dedup recall (the --dirty scoped load matches peers by the STORED key). A mismatch FAILS the run, which monitor_workflow_failures records and the Health page lists — zero new alerting plumbing. NOT a portal ingest workflow, so no `# portal:` tag.",
+    "portal": null,
+    "manual": true,
+    "schedules": [
+      {
+        "cron": "40 4 * * 3",
+        "human": "40 4 * * 3"
+      }
+    ],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "recent",
+        "description": "Newest street-bearing rows to check",
+        "required": false,
+        "type": "string",
+        "default": "2500",
+        "options": null
+      },
+      {
+        "name": "random",
+        "description": "Block-random street-bearing rows to check",
+        "required": false,
+        "type": "string",
+        "default": "2500",
+        "options": null
+      }
+    ],
+    "secrets": [
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "street-key-parity",
+    "cancelInProgress": false,
+    "timeoutMinutes": 15,
+    "permissions": "contents: read",
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/street_key_parity.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/street_key_parity.yml"
+  },
+  {
     "filename": "test.yml",
     "name": "CI: tests",
     "description": "CI test suite, runs on every push and pull request. Two parallel jobs: a Python job (verifies the filter-registry and workflow-docs codegen are fresh, then runs pytest) and a frontend job (TypeScript type-check + vitest pure-function tests). This is the build gate for every branch.",
@@ -3694,5 +3797,40 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "permissions": "contents: read",
     "runsUrl": "https://github.com/waiff/sreality/actions/workflows/validate_vision_models.yml",
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/validate_vision_models.yml"
+  },
+  {
+    "filename": "verify_pipeline.yml",
+    "name": "Monitoring: pipeline verification",
+    "description": "Computes pipeline-health metrics — street/geo dedup debt, the per-source eligibility funnel, merge latency, dedup-engine cycle health, and the LLM error rate — into `pipeline_check_results`, and rings the in-app notification bell (a `system_health` notification_dispatches row) for every `fail`. Born from the 2026-07 incident where the pipeline stalled silently for two days (Anthropic credit exhaustion) with no in-app signal and ~39k suspect unmerged byt pairs sat invisible. On Mondays it also records a random merge-precision sample for operator spot-review.",
+    "portal": null,
+    "manual": true,
+    "schedules": [
+      {
+        "cron": "20 */6 * * *",
+        "human": "Every 6 hours at :20"
+      }
+    ],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "dry_run",
+        "description": "Compute + log only; write no result rows and send no alerts",
+        "required": false,
+        "type": "boolean",
+        "default": "false",
+        "options": null
+      }
+    ],
+    "secrets": [
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "pipeline-verification",
+    "cancelInProgress": false,
+    "timeoutMinutes": 30,
+    "permissions": "contents: read",
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/verify_pipeline.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/verify_pipeline.yml"
   }
 ];

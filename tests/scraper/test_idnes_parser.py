@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from scraper.idnes_parser import (
     _norm_ownership,
+    _parse_area,
     category_from_url,
     index_price,
     parse_detail,
@@ -345,6 +346,86 @@ def test_parse_detail_house_labels_and_amenities():
     assert listing.estate_area == 1033.0
 
 
+# Mirrors the live pozemek detail markup verified against 5,773 staged pages
+# (2026-07): a struck <del> original, the <strong> ABSOLUTE price, a grey
+# per-m² NOTE span the parser must ignore, and the mortgage CTA whose URL
+# carries the price again. The title renders the area with a spaced thousands
+# group ("1 074 m²") while the <dl> value is unspaced.
+LAND_DETAIL_HTML = """
+<!DOCTYPE html><html><body>
+<h1>Prodej pole 1&nbsp;074 m²</h1>
+<p class="b-detail__price">
+  <del class="block">103&zwj;&nbsp;086&zwj;&nbsp;Kč</del>
+  <strong>85&zwj;&nbsp;905&zwj;&nbsp;Kč</strong>
+  <span class="font-sm font-regular text-nowrap color-grey">(80&zwj;&nbsp;Kč/m²)</span>
+  <a href="https://www.example.com/hypoteka?realty_value=85905">Chci spočítat hypotéku</a>
+</p>
+<p class="b-detail__info">Bzenec, okres Hodonín</p>
+<dl>
+  <dt>Plocha pozemku</dt><dd>1074 m<sup>2</sup></dd>
+</dl>
+</body></html>
+"""
+
+
+def test_parse_detail_land_total_price_and_spaced_area():
+    listing = parse_detail(
+        LAND_DETAIL_HTML,
+        source_url="https://reality.idnes.cz/detail/prodej/pozemek/bzenec/6a18deadbeefdeadbeef0020/",
+        category_main="pozemek", category_type="prodej",
+    )
+    # The <strong> total — never the <del> struck price, never the per-m² note.
+    assert listing.price_czk == 85_905
+    assert listing.price_unit == "za nemovitost"
+    # The spaced thousands group in the title must not truncate (was 74).
+    assert listing.area_m2 == 1074.0
+    assert listing.estate_area == 1074.0
+
+
+def test_parse_detail_del_only_price_falls_back_to_current():
+    # No <strong>: the flattened element's FIRST price run used to be the
+    # struck <del> original; the fallback now strips <del> first.
+    html = """
+<!DOCTYPE html><html><body>
+<h1>Prodej pozemku 500 m²</h1>
+<p class="b-detail__price"><del class="block">1&zwj;&nbsp;200&zwj;&nbsp;000 Kč</del> 990&zwj;&nbsp;000 Kč</p>
+<p class="b-detail__info">Brno</p>
+</body></html>
+"""
+    listing = parse_detail(
+        html,
+        source_url="https://reality.idnes.cz/detail/prodej/pozemek/brno/6a18deadbeefdeadbeef0021/",
+        category_main="pozemek", category_type="prodej",
+    )
+    assert listing.price_czk == 990_000
+
+
+def test_price_per_m2_never_masquerades_as_absolute():
+    # A unit price directly after the amount must never land in price_czk.
+    assert index_price("18 500 Kč/m²") is None
+    assert index_price("18 500 Kč / m²") is None
+    assert index_price("2 500 Kč za m²") is None
+    assert index_price("1 200 Kč/m²/rok") is None
+    assert index_price("150 Kč/m2/měsíc") is None
+    # Monthly rent and a trailing per-m² NOTE are not unit prices.
+    assert index_price("14 160 Kč/měsíc") == 14_160
+    assert index_price("4 990 000 Kč (4 008 Kč/m² )") == 4_990_000
+
+
+def test_parse_area_spaced_thousands():
+    assert _parse_area("Prodej pole 2 403 m²") == 2403.0
+    assert _parse_area("Prodej pozemku 10 000 m²") == 10_000.0
+    assert _parse_area("Prodej louky 1 074,5 m²") == 1074.5
+    assert _parse_area("Prodej stavební parcely 720 m2") == 720.0
+    assert _parse_area("48,5 m²") == 48.5
+    # The dl text variant "m 2" (from "m<sup>2</sup>") still parses.
+    assert _parse_area("1074 m 2") == 1074.0
+    # A disposition digit must not be swallowed into the thousands group.
+    assert _parse_area("Prodej bytu 3+1 174 m²") == 174.0
+    # Two areas: the first complete token wins, not a mid-number fragment.
+    assert _parse_area("pozemky 350 a 1 200 m²") == 1200.0
+
+
 def test_norm_ownership_canonical_only():
     assert _norm_ownership("Osobní") == "osobni"
     assert _norm_ownership("Družstevní") == "druzstevni"
@@ -352,3 +433,31 @@ def test_norm_ownership_canonical_only():
     assert _norm_ownership("Jiné") is None
     assert _norm_ownership("s.r.o.") is None
     assert _norm_ownership("Podílové") is None
+
+
+def test_parse_detail_strips_mortgage_cta_from_raw_price_fields():
+    # Live pages carry a "Spočítat hypotéku" link inside both the price element
+    # and the "Cena" dl row; UI chrome must not land in raw_json. Raw is not in
+    # the typed content hash, so the cleanup never churns snapshots.
+    html = """
+    <html><body>
+    <h1>Prodej bytu 3+1 69 m²</h1>
+    <p class="b-detail__price">23&zwj;&nbsp;710&zwj;&nbsp;239 Kč <a>Spočítat hypotéku</a></p>
+    <dl><dt>Cena</dt><dd>23&zwj;&nbsp;710&zwj;&nbsp;239 Kč <a>Spočítat hypotéku</a></dd></dl>
+    </body></html>
+    """
+    listing = parse_detail(
+        html, source_url=_DETAIL_URL, category_main="byt", category_type="prodej",
+    )
+    assert listing.price_czk == 23_710_239
+    # _text collapses the &nbsp; separators to plain spaces; the &zwj; stays
+    clean = "23\u200d 710\u200d 239 Kč"
+    assert listing.raw["price_text"] == clean
+    assert listing.raw["params"]["cena"] == clean
+
+
+def test_parse_detail_full_fixture_price_row_stays_clean():
+    listing = parse_detail(
+        DETAIL_HTML, source_url=_DETAIL_URL, category_main="byt", category_type="prodej",
+    )
+    assert "hypoték" not in (listing.raw["price_text"] or "")

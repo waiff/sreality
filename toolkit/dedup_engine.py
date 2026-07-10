@@ -408,6 +408,19 @@ def disposition_compatible(a: str | None, b: str | None) -> bool:
     return a == b or b in _DISPOSITION_LOOSE.get(a, ())
 
 
+def disposition_class(disposition: str | None) -> str:
+    """Canonical representative of a disposition's loose-equivalence class.
+
+    _DISPOSITION_LOOSE links only same-room-count labels (N+kk <-> N+1), so a street
+    group sharded on this class keeps every classify_pair-compatible pair together —
+    the shard is loss-free by construction. Unmapped values (atypicky, 6+kk, ...)
+    are their own class (their compatibility is exact equality)."""
+    if disposition is None:
+        return ""
+    group = _DISPOSITION_LOOSE.get(disposition)
+    return min(group) if group else disposition
+
+
 def _area_pct_diff(a: float | None, b: float | None) -> float | None:
     if a is None or b is None or max(a, b) == 0:
         return None
@@ -517,6 +530,49 @@ def classify_pair(a: ListingKey, b: ListingKey) -> PairDecision:
     return PairDecision("candidate", None)
 
 
+def prioritized_group_pairs(
+    members: list[ListingKey], *, cap: int,
+    classify: Any = None,
+    priority_property_ids: set[int] | None = None,
+) -> list[tuple[ListingKey, ListingKey]]:
+    """Bounded, value-ordered pair list for an OVERSIZED group.
+
+    Replaces the historical whole-group skip, which silently dropped EVERY pair on
+    busy streets — 342 groups holding 18.7% of the eligible market in the 2026-07
+    audit. Deterministic rejects are dropped up front (classify is pure and cheap),
+    then the highest-value pairs come first so a bounded scan spends its budget
+    where merges live:
+      1. pairs touching a claimed dirty property (the real-time SLO pairs),
+      2. cross-source pairs (dedup's payoff),
+      3. smaller price gap, then smaller area gap (unknown gaps sort last).
+    Capped at `cap`, so an oversized group costs at most a fixed pair budget."""
+    decide = classify or classify_pair
+    pri = priority_property_ids or set()
+    scored: list[tuple[tuple[int, int, float, float], tuple[ListingKey, ListingKey]]] = []
+    for i in range(len(members)):
+        a = members[i]
+        for j in range(i + 1, len(members)):
+            b = members[j]
+            if decide(a, b).action == "reject":
+                continue
+            if a.price_czk and b.price_czk:
+                price_gap = abs(a.price_czk - b.price_czk) / max(a.price_czk, b.price_czk)
+            else:
+                price_gap = math.inf
+            area_gap = _area_pct_diff(a.area_m2, b.area_m2)
+            scored.append((
+                (
+                    0 if (a.property_id in pri or b.property_id in pri) else 1,
+                    0 if a.source != b.source else 1,
+                    price_gap,
+                    area_gap if area_gap is not None else math.inf,
+                ),
+                (a, b),
+            ))
+    scored.sort(key=lambda t: t[0])
+    return [pair for _, pair in scored[:cap]]
+
+
 # --- geo path: single-dwelling families (dum/pozemek/komercni/ostatni) -------
 # These have no usable disposition, so the matcher keys on the COORDINATE instead.
 # The orchestrator blocks pairs into a small geo cell (one obec + a rounded coord),
@@ -554,7 +610,13 @@ def geo_cell_key(
     by (category bucket, category_type) keeps a sale flat and a rental house out of one
     cell — while dum and komercni share a bucket (geo_category_bucket) so the one
     sanctioned cross-type can pair. None when the coordinate / municipality is missing
-    (the row can't geo-block)."""
+    (the row can't geo-block).
+
+    AUTHORITATIVE DEFINITION MOVED TO SQL: the stored, trigger-maintained
+    listings.geo_cell_key (public.listing_geo_cell_key, migration 276) is what the
+    engine's geo loader groups on now. This function is retained as the format's
+    executable documentation (and for tests); its rendering may differ from SQL's in
+    trailing zeros / exact-tie rounding, which is fine — nothing compares the two."""
     if obec_id is None or lat is None or lng is None:
         return None
     bucket = geo_category_bucket(category_main)

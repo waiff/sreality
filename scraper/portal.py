@@ -29,6 +29,14 @@ def _as_opt_int(v: Any) -> int | None:
     return None if v is None else int(v)
 
 
+def _as_bool(v: Any) -> bool:
+    # Strict: bool() never raises, so a mistyped leaf ("true", 1) would
+    # silently flip a politeness knob; only a real JSON boolean is accepted.
+    if isinstance(v, bool):
+        return v
+    raise TypeError(f"expected bool, got {type(v).__name__}")
+
+
 # Operational-limit field name -> coercer. The coercer is applied to any value
 # coming from JSONB (operator-edited), so a bad-typed leaf is caught per-field.
 _LIMIT_COERCERS: dict[str, Any] = {
@@ -42,6 +50,8 @@ _LIMIT_COERCERS: dict[str, Any] = {
     "image_max_concurrency_per_host": int,
     "suspicious_stop_window": int,
     "suspicious_stop_threshold": float,
+    "price_change_min_pct": float,
+    "shared_rate_limiter": _as_bool,
 }
 
 
@@ -68,6 +78,20 @@ class PortalLimits:
     image_max_concurrency_per_host: int = 8
     suspicious_stop_window: int = 100
     suspicious_stop_threshold: float = 0.30
+    # Index-walk price-diff jitter tolerance (consumed via `price_changed`): a
+    # relative index-vs-stored price move strictly below this fraction reads
+    # as unchanged (no detail refetch, no snapshot churn). 0 = exact compare.
+    # For a portal that re-displays FX-converted prices (idnes's foreign
+    # inventory drifts ~0.04-0.08% daily with the exchange rate) an exact
+    # compare enqueues tens of thousands of phantom "price changed" refetches
+    # per walk; genuine cuts are >= ~1% so a small tolerance loses nothing.
+    price_change_min_pct: float = 0.0
+    # Share the request budget across runtimes via the portal_rate_state ledger
+    # (migration 268, scraper/rate_ledger.py) instead of the per-process
+    # RateLimiter. OFF everywhere by default = zero behavior change; flip per
+    # portal (operational_limits) or globally (scraper_limits_global) once the
+    # Railway worker lane runs beside the Actions walks.
+    shared_rate_limiter: bool = False
 
     def merged(self, overrides: Any) -> "PortalLimits":
         """Return a copy with each present key from `overrides` (a dict, or None)
@@ -87,6 +111,24 @@ class PortalLimits:
                     key, overrides[key], getattr(self, key),
                 )
         return replace(self, **changes) if changes else self
+
+
+def price_changed(
+    prev: int | None, new: int | None, min_change_pct: float = 0.0,
+) -> bool:
+    """Whether an index-vs-stored price difference warrants a detail refetch.
+
+    `min_change_pct` (PortalLimits.price_change_min_pct) absorbs display-price
+    jitter: a relative move strictly below it reads as unchanged, at or above
+    it as changed (both directions). 0 = exact compare. A NULL<->value
+    transition is always a change — a price appearing or disappearing is real
+    news, never jitter.
+    """
+    if prev == new:
+        return False
+    if prev is None or new is None or prev <= 0 or min_change_pct <= 0:
+        return True
+    return abs(new - prev) / prev >= min_change_pct
 
 
 # The generic baseline (a portal with no specific tuning). Per-portal baked
@@ -190,8 +232,15 @@ _DEFAULTS: dict[str, PortalConfig] = {
             {"sale_type": "pronajem", "category": "male-objekty-garaze"},
         ],
         split_threshold=None,
+        # price_change_min_pct 0.5%: idnes converts its large foreign (EUR/USD-
+        # priced) inventory to CZK at a daily rate, so the displayed price of
+        # ~19k listings drifts ~0.04-0.08% every day. An exact index diff read
+        # each drift as a price change (~20k phantom refetches per 6h walk,
+        # ~85k snapshot rows/week — 47% of ALL snapshots); 99.5% of observed
+        # moves sit under 0.5% while genuine cuts are >= ~1%.
         limits=PortalLimits(
             index_rate=3.0, detail_workers=4, detail_rate=3.0,
+            price_change_min_pct=0.005,
         ),
     ),
     "mmreality": PortalConfig(

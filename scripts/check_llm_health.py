@@ -19,6 +19,15 @@ With pending work, no `called_for='score_listing_condition'` row within
 `--condition-max-idle-hours` (default 8 — the 3h submit cadence plus batch
 turnaround) is stalled regardless of other traffic.
 
+A THIRD probe — independent of pending work — catches the outage the first two
+missed: recorded `llm_calls` FAILURE rows (`error IS NOT NULL`, migration 259).
+When condition scoring is quiet the pending-gated checks never fire, so an
+exhausted-credit / dead-key outage stayed GREEN for ~8h (2026-07-01) even though
+every paid path — dedup vision, estimations, summaries — was 400-ing. Now a
+credit-balance error alarms immediately, and >= `--min-failures` generic
+failures in the window alarms too. LLMClient records the failure row on every
+provider exception; this check keys off it with no Anthropic key of its own.
+
 Needs only SUPABASE_DB_URL — deliberately NOT the Anthropic key, so it keeps
 working precisely when the API is the thing that's down.
 
@@ -44,15 +53,34 @@ def assess(
     max_idle_hours: float,
     condition_max_idle_hours: float,
     min_pending: int,
+    recent_failures: int = 0,
+    credit_exhausted: bool = False,
+    min_failures: int = 3,
 ) -> tuple[bool, str]:
     """Return (stalled, message). stalled=True means raise the alarm (exit 1).
 
-    No alarm when there's nothing to score (pending below the floor) — a
-    quiet pipeline with no backlog is legitimately idle. Otherwise alarm if
-    there have been no calls at all, none within the idle window, or — even
-    with fresh unrelated traffic — no condition-scoring call within its own
-    (wider) idle window.
+    A provider OUTAGE (exhausted credit / dead key / 5xx) is checked FIRST and is
+    INDEPENDENT of pending work — the blind spot that let an 8h credit outage stay green
+    (condition scoring was quiet, so the pending-gated checks never fired even though every
+    LLM call was 400-ing). Recorded llm_calls failure rows (migration 259) make it visible.
+
+    Otherwise: no alarm when there's nothing to score (pending below the floor) — a quiet
+    pipeline with no backlog is legitimately idle — else alarm if there have been no calls at
+    all, none within the idle window, or (even with fresh unrelated traffic) no condition
+    call within its own wider window.
     """
+    if credit_exhausted:
+        return True, (
+            f"STALLED: LLM calls failing with credit-balance errors "
+            f"({recent_failures} failures in the last {max_idle_hours:.0f}h) — the Anthropic "
+            f"account is out of credit (Plans & Billing). Every paid LLM path is down."
+        )
+    if recent_failures >= min_failures:
+        return True, (
+            f"STALLED: {recent_failures} LLM calls failed in the last {max_idle_hours:.0f}h "
+            f"(>= {min_failures}) — the LLM provider is erroring / down (check the key + "
+            f"credit balance + provider status)."
+        )
     if pending < min_pending:
         return False, f"OK idle: pending={pending} < min_pending={min_pending}"
     if last_call_age_hours is None:
@@ -104,6 +132,18 @@ def main() -> int:
         help="Only alert when at least this many active listings are unscored "
              "(default 50) — avoids false alarms when there's nothing to do.",
     )
+    parser.add_argument(
+        "--min-failures", type=int,
+        default=int(os.environ.get("LLM_HEALTH_MIN_FAILURES", "3")),
+        help="Alert (independent of pending work) when at least this many llm_calls have "
+             "FAILED within --max-idle-hours (default 3) — a provider outage. A single "
+             "credit-balance error alarms immediately regardless of this floor.",
+    )
+    parser.add_argument(
+        "--notify", action="store_true",
+        help="On a STALLED assessment, also ring the in-app bell "
+             "(emit_system_alert 'llm_health') before exiting non-zero.",
+    )
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -125,6 +165,9 @@ def main() -> int:
             conn, called_for="score_listing_condition",
         )
         pending = _pending_unscored(conn)
+        recent_failures, credit_exhausted = _recent_failures(
+            conn, hours=args.max_idle_hours,
+        )
 
     stalled, message = assess(
         last_call_age_hours=last_call_age_hours,
@@ -133,12 +176,52 @@ def main() -> int:
         max_idle_hours=args.max_idle_hours,
         condition_max_idle_hours=args.condition_max_idle_hours,
         min_pending=args.min_pending,
+        recent_failures=recent_failures,
+        credit_exhausted=credit_exhausted,
+        min_failures=args.min_failures,
     )
     if stalled:
         LOG.error("LLM_HEALTH %s", message)
+        if args.notify:
+            _notify_stalled(db_url, message)
         return 1
     LOG.info("LLM_HEALTH %s", message)
     return 0
+
+
+def _notify_stalled(db_url: str, message: str) -> None:
+    """Ring the in-app bell for a stalled pipeline. Best-effort — a notify failure
+    must never mask the exit-1 signal that GitHub already surfaces."""
+    import psycopg
+
+    from toolkit.system_alerts import emit_system_alert
+
+    try:
+        with psycopg.connect(db_url, autocommit=True, prepare_threshold=None) as conn:
+            emit_system_alert(conn, "llm_health", message)
+    except Exception as exc:  # noqa: BLE001
+        LOG.warning("LLM_HEALTH notify failed: %s", exc)
+
+
+def _recent_failures(conn: Any, *, hours: float) -> tuple[int, bool]:
+    """(count of FAILED llm_calls within `hours`, whether any is a credit-balance error).
+
+    Failures = rows with `error IS NOT NULL` (migration 259). A provider outage is thus visible
+    without the Anthropic key — the health check keeps working precisely when the API is down.
+    The ILIKE wildcard lives in the BOUND VALUE, never in the SQL string, so no bare `%` sits
+    next to a `%s` param (the psycopg format-char trap).
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*), count(*) FILTER (WHERE error ILIKE %s) "
+            "FROM llm_calls "
+            "WHERE error IS NOT NULL AND called_at > now() - (interval '1 hour' * %s)",
+            ("%credit balance%", hours),
+        )
+        row = cur.fetchone()
+    total = int(row[0]) if row and row[0] is not None else 0
+    credit = bool(row[1]) if row and row[1] is not None else False
+    return total, credit
 
 
 def _last_call_age_hours(conn: Any, *, called_for: str | None = None) -> float | None:

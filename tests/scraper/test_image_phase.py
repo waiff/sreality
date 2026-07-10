@@ -432,20 +432,23 @@ def test_image_host_parses_cdn_hostname(url, expected):
 
 def test_fetch_one_image_success_with_semaphore(monkeypatch):
     """A download wrapped in a per-host semaphore stores normally and releases
-    the slot afterwards."""
+    the slot afterwards — and the inline pHash of the downloaded bytes rides
+    the return value."""
     sem = threading.BoundedSemaphore(1)
     monkeypatch.setattr(
         scraper_main.image_storage, "download_image", lambda url, **kw: b"\xff\xd8\xff"
     )
     monkeypatch.setattr(scraper_main.media, "is_image_bytes", lambda data: "image/jpeg")
+    monkeypatch.setattr(scraper_main, "_phash_or_none", lambda data: 42)
 
     class _R2:
         def upload_bytes(self, key, data, content_type="image/jpeg"):
             return None
 
-    key, err = scraper_main._fetch_one_image(7, 0, "https://h/x.jpg", _R2(), sem)
+    key, phash, err = scraper_main._fetch_one_image(7, 0, "https://h/x.jpg", _R2(), sem)
     assert err is None
     assert key == scraper_main.image_storage.image_key(7, 0)
+    assert phash == 42
     assert sem.acquire(blocking=False)  # slot was released
     sem.release()
 
@@ -459,8 +462,9 @@ def test_fetch_one_image_releases_semaphore_on_error(monkeypatch):
         raise requests.ConnectionError("read timed out")
 
     monkeypatch.setattr(scraper_main.image_storage, "download_image", _boom)
-    key, err = scraper_main._fetch_one_image(7, 0, "https://h/x.jpg", object(), sem)
+    key, phash, err = scraper_main._fetch_one_image(7, 0, "https://h/x.jpg", object(), sem)
     assert err is not None
+    assert phash is None
     # Both slots are free again (none leaked).
     assert sem.acquire(blocking=False) and sem.acquire(blocking=False)
     sem.release()
@@ -473,13 +477,137 @@ def test_fetch_one_image_works_without_semaphore(monkeypatch):
         scraper_main.image_storage, "download_image", lambda url, **kw: b"\xff\xd8\xff"
     )
     monkeypatch.setattr(scraper_main.media, "is_image_bytes", lambda data: "image/jpeg")
+    monkeypatch.setattr(scraper_main, "_phash_or_none", lambda data: None)
 
     class _R2:
         def upload_bytes(self, key, data, content_type="image/jpeg"):
             return None
 
-    key, err = scraper_main._fetch_one_image(7, 0, "https://h/x.jpg", _R2(), None)
+    key, phash, err = scraper_main._fetch_one_image(7, 0, "https://h/x.jpg", _R2(), None)
     assert err is None
+
+
+# ---- inline pHash (Wave C-4) ------------------------------------------------
+
+
+def _fake_phash_module(compute=None, signer=None):
+    """Stand-in for scraper.image_phash: the real module imports Pillow at the
+    top, which this sandbox lacks — CI covers the real-import path."""
+    import types
+
+    mod = types.ModuleType("scraper.image_phash")
+    mod.compute_dhash = compute or (lambda data: 7)
+    mod.to_signed64 = signer or (lambda value: value)
+    return mod
+
+
+def test_phash_or_none_threads_bytes_through_dhash_and_signer(monkeypatch):
+    import sys
+
+    seen: dict[str, object] = {}
+
+    def compute(data):
+        seen["data"] = data
+        return 99
+
+    def signer(value):
+        seen["signed"] = value
+        return -99
+
+    monkeypatch.setitem(
+        sys.modules, "scraper.image_phash", _fake_phash_module(compute, signer)
+    )
+    assert scraper_main._phash_or_none(b"bytes-in-hand") == -99
+    assert seen == {"data": b"bytes-in-hand", "signed": 99}
+
+
+def test_phash_or_none_swallows_dhash_failure(monkeypatch):
+    import sys
+
+    def compute(data):
+        raise ValueError("cannot identify image file")
+
+    monkeypatch.setitem(
+        sys.modules, "scraper.image_phash", _fake_phash_module(compute)
+    )
+    assert scraper_main._phash_or_none(b"\x00garbage") is None
+
+
+def test_phash_failure_never_fails_the_store(monkeypatch):
+    """Undecodable bytes store with phash NULL — the fetch still returns the
+    key with no error, and the hourly backfill remains the backstop."""
+    import sys
+
+    def compute(data):
+        raise OSError("truncated image")
+
+    monkeypatch.setitem(
+        sys.modules, "scraper.image_phash", _fake_phash_module(compute)
+    )
+    monkeypatch.setattr(
+        scraper_main.image_storage, "download_image", lambda url, **kw: b"\xff\xd8\xff"
+    )
+    monkeypatch.setattr(scraper_main.media, "is_image_bytes", lambda data: "image/jpeg")
+
+    class _R2:
+        def upload_bytes(self, key, data, content_type="image/jpeg"):
+            return None
+
+    key, phash, err = scraper_main._fetch_one_image(7, 0, "https://h/x.jpg", _R2(), None)
+    assert err is None
+    assert phash is None
+    assert key == scraper_main.image_storage.image_key(7, 0)
+
+
+class _RecordingConn:
+    """Fake psycopg conn capturing executed SQL (the test_db_inactive_at shape)."""
+
+    class _Ctx:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return None
+
+    class _Cur:
+        def __init__(self, conn):
+            self._conn = conn
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return None
+
+        def execute(self, sql, params=None):
+            self._conn.executed.append((" ".join(sql.split()), params))
+
+    def __init__(self):
+        self.executed = []
+
+    def transaction(self):
+        return self._Ctx()
+
+    def cursor(self):
+        return self._Cur(self)
+
+
+def test_mark_image_stored_writes_phash_in_the_same_statement():
+    conn = _RecordingConn()
+    scraper_db.mark_image_stored(conn, 5, "7/0000.jpg", phash=-123)
+    sql, params = conn.executed[0]
+    assert "SET storage_path = %s" in sql
+    assert "phash = COALESCE(%s, phash)" in sql
+    assert params == ("7/0000.jpg", -123, 5)
+    assert len(conn.executed) == 1  # one statement, not a follow-up UPDATE
+
+
+def test_mark_image_stored_null_phash_preserves_existing():
+    conn = _RecordingConn()
+    scraper_db.mark_image_stored(conn, 5, "7/0000.jpg")
+    sql, params = conn.executed[0]
+    assert "phash = COALESCE(%s, phash)" in sql  # NULL input keeps a prior hash
+    assert params == ("7/0000.jpg", None, 5)
 
 
 # ---- _run_image_downloads per-host quarantine (loop integration) -----------
@@ -511,10 +639,13 @@ def _drive_image_loop(monkeypatch, batches, fetch_result):
         return script.pop(0) if script else []
 
     stored: list[int] = []
+    stored_phashes: list[int | None] = []
     monkeypatch.setattr(scraper_main.db, "pending_image_downloads", _fake_pending)
     monkeypatch.setattr(
         scraper_main.db, "mark_image_stored",
-        lambda conn, iid, key: stored.append(iid),
+        lambda conn, iid, key, phash=None: (
+            stored.append(iid), stored_phashes.append(phash),
+        ),
     )
     monkeypatch.setattr(
         scraper_main.db, "mark_image_attempt", lambda conn, iid, error=None: None
@@ -527,11 +658,14 @@ def _drive_image_loop(monkeypatch, batches, fetch_result):
     )
 
     def _fake_fetch(sid, seq, url, r2, semaphore=None):
-        return (scraper_main.image_storage.image_key(sid, seq), fetch_result(url))
+        err = fetch_result(url)
+        phash = None if err is not None else 777
+        return (scraper_main.image_storage.image_key(sid, seq), phash, err)
 
     monkeypatch.setattr(scraper_main, "_fetch_one_image", _fake_fetch)
 
     out = scraper_main._run_image_downloads(max_downloads=0, workers=4)
+    out["_stored_phashes"] = stored_phashes
     return out, stored
 
 
@@ -560,6 +694,9 @@ def test_quarantine_localizes_one_host_run_stays_green(monkeypatch):
     assert len(stored) == 8  # every good image stored; no bad image stored
     assert all(iid >= 100 for iid in stored)  # the bad-host ids (0..3) never stored
     assert out["stopped_suspicious"] is False  # green — one bad host doesn't fail the run
+    # The inline pHash computed by the fetch worker is forwarded into the same
+    # store call — no separate re-download hop.
+    assert out["_stored_phashes"] == [777] * 8
 
 
 def test_run_stops_suspicious_when_only_quarantined_host_remains(monkeypatch):

@@ -154,13 +154,26 @@ class LLMClient:
         neutral_tools = [_to_neutral_tool(t) for t in (tools or [])]
 
         mono_start = time.monotonic()
-        completion = prov.complete(
-            system=system or "",
-            messages=neutral_messages,
-            tools=neutral_tools,
-            model=resolved_model,
-            max_tokens=max_tokens,
-        )
+        try:
+            completion = prov.complete(
+                system=system or "",
+                messages=neutral_messages,
+                tools=neutral_tools,
+                model=resolved_model,
+                max_tokens=max_tokens,
+            )
+        except Exception as exc:
+            # Record the FAILURE so a provider outage is VISIBLE in the audit trail. On success
+            # we write an llm_calls row; on failure the old code wrote nothing, so an exhausted
+            # credit balance / dead key left zero trace and the liveness monitor stayed green
+            # (it keyed off "no rows"). Best-effort: never let the bookkeeping mask the real
+            # error — the original exception always re-raises unchanged.
+            self._record_failure(
+                called_for=called_for, provider=provider, model=resolved_model,
+                duration_ms=int((time.monotonic() - mono_start) * 1000),
+                estimation_run_id=estimation_run_id, error=str(exc),
+            )
+            raise
         duration_ms = int((time.monotonic() - mono_start) * 1000)
 
         cost = compute_cost_usd(
@@ -288,13 +301,14 @@ class LLMClient:
         cost_usd: float,
         duration_ms: int,
         estimation_run_id: int | None,
+        error: str | None = None,
     ) -> int:
         sql = (
             "INSERT INTO llm_calls "
             "(called_for, provider, model, input_tokens, output_tokens, "
             "cache_read_tokens, cache_write_tokens, cost_usd, "
-            "duration_ms, estimation_run_id) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+            "duration_ms, estimation_run_id, error) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
             "RETURNING id"
         )
         with self._conn.transaction(), self._conn.cursor() as cur:
@@ -311,12 +325,34 @@ class LLMClient:
                     cost_usd,
                     duration_ms,
                     estimation_run_id,
+                    error,
                 ),
             )
             row = cur.fetchone()
             if row is None:
                 raise RuntimeError("INSERT into llm_calls returned no id")
             return int(row[0])
+
+    def _record_failure(
+        self,
+        *,
+        called_for: CalledFor,
+        provider: str,
+        model: str,
+        duration_ms: int,
+        estimation_run_id: int | None,
+        error: str,
+    ) -> None:
+        """Best-effort failure row (zero usage/cost, `error` set) so a provider outage is
+        auditable. NEVER raises — a bookkeeping failure must not mask the original error."""
+        try:
+            self._record_call(
+                called_for=called_for, provider=provider, model=model,
+                usage=Usage(), cost_usd=0.0, duration_ms=duration_ms,
+                estimation_run_id=estimation_run_id, error=error[:2000],
+            )
+        except Exception as rec_exc:  # noqa: BLE001 — audit is best-effort
+            LOG.warning("failed to record llm_calls failure row: %s", rec_exc)
 
 
 def _resolve_threshold() -> float:

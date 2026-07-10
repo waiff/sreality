@@ -692,7 +692,7 @@ _DISPATCH_SELECT = (
     "d.id, d.source_kind, "
     "d.subscription_id, s.name AS subscription_name, "
     "d.collection_id, c.name AS collection_name, "
-    "d.sreality_id, d.property_id, d.change_kind, "
+    "d.sreality_id, d.property_id, d.change_kind, d.message, "
     "d.dispatched_at, d.seen_at, "
     "d.trigger_price_czk, d.prev_price_czk, d.trigger_snapshot_id, "
     "d.target_channels, "
@@ -719,7 +719,7 @@ def list_dispatches(
     *,
     subscription_id: str | None = None,
     collection_id: int | None = None,
-    source_kind: Literal["watchdog", "collection_monitor", "all"] = "all",
+    source_kind: Literal["watchdog", "collection_monitor", "system_health", "all"] = "all",
     seen: Literal["all", "seen", "unseen"] = "all",
     limit: int = 50,
     offset: int = 0,
@@ -858,7 +858,7 @@ def _fetch_dispatch(
 def get_unread_count(
     conn: "psycopg.Connection",
     *,
-    source_kind: Literal["watchdog", "collection_monitor", "all"] = "all",
+    source_kind: Literal["watchdog", "collection_monitor", "system_health", "all"] = "all",
 ) -> dict[str, int]:
     """Unseen dispatch counts — drives the nav unread badge.
 
@@ -872,12 +872,14 @@ def get_unread_count(
             "WHERE seen_at IS NULL GROUP BY source_kind"
         )
         counts = {r[0]: int(r[1]) for r in cur.fetchall()}
-    watchdog = counts.get("watchdog", 0)
-    monitor = counts.get("collection_monitor", 0)
-    total = watchdog + monitor
+    # total sums EVERY source_kind (incl. system_health + any future kind), not a
+    # hardcoded watchdog+collection_monitor — the earlier hardcode silently dropped
+    # system_health alerts from the badge.
+    total = sum(counts.values())
     return {
-        "watchdog": watchdog,
-        "collection_monitor": monitor,
+        "watchdog": counts.get("watchdog", 0),
+        "collection_monitor": counts.get("collection_monitor", 0),
+        "system_health": counts.get("system_health", 0),
         "total": total,
         "unread_count": total if source_kind == "all" else counts.get(source_kind, 0),
     }
@@ -886,7 +888,7 @@ def get_unread_count(
 def mark_all_seen(
     conn: "psycopg.Connection",
     *,
-    source_kind: Literal["watchdog", "collection_monitor", "all"] = "all",
+    source_kind: Literal["watchdog", "collection_monitor", "system_health", "all"] = "all",
 ) -> int:
     """Mark every unseen dispatch (optionally scoped to a source) as seen."""
     with conn.cursor() as cur:
@@ -1227,6 +1229,102 @@ def _read_int_setting(
         return default
 
 
+def _read_bool_setting(
+    conn: "psycopg.Connection", key: str, *, default: bool,
+) -> bool:
+    with conn.cursor() as cur:
+        cur.execute("SELECT value FROM app_settings WHERE key = %s", (key,))
+        row = cur.fetchone()
+    if row is None or row[0] is None:
+        return default
+    value = row[0]
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return default
+
+
+# --- images-first publication gate (operator decision 2026-07-02) ----------
+#
+# Never surface a NEW listing before its first image is stored. A candidate
+# property is dispatchable only when (a) any of its listings has a stored
+# image, OR (b) it is older than the timeout (portals with slow CDNs / genuinely
+# photoless listings must not be silenced forever), OR (c) it has ZERO image
+# rows at all AND is past a short floor — image rows appear at detail write, so
+# zero rows after the floor ≈ no photos at source.
+
+IMAGE_GATE_ZERO_ROWS_FLOOR_MINUTES = 5
+
+_IMAGE_GATE_SQL = (
+    "( EXISTS ("
+    "    SELECT 1 FROM listings gl"
+    "    JOIN images gi ON gi.sreality_id = gl.sreality_id"
+    "    WHERE gl.property_id = l.property_id"
+    "      AND gi.storage_path IS NOT NULL"
+    "  )"
+    "  OR l.first_seen_at < now() - make_interval(mins => %(image_timeout_minutes)s)"
+    "  OR ("
+    "    l.first_seen_at < now()"
+    "      - make_interval(mins => %(image_zero_rows_floor_minutes)s)"
+    "    AND NOT EXISTS ("
+    "      SELECT 1 FROM listings gl"
+    "      JOIN images gi ON gi.sreality_id = gl.sreality_id"
+    "      WHERE gl.property_id = l.property_id"
+    "    )"
+    "  )"
+    ")"
+)
+
+
+@dataclass
+class ImageGateSettings:
+    enabled: bool
+    timeout_minutes: int
+
+    @property
+    def lookback_minutes(self) -> int:
+        # The re-scan window must exceed the longest possible hold (the
+        # timeout), or a property gated the whole way would leave the lookback
+        # before its release and be lost.
+        return max(60, self.timeout_minutes * 2)
+
+
+def _load_image_gate_settings(conn: "psycopg.Connection") -> ImageGateSettings:
+    enabled = _read_bool_setting(
+        conn, "notifications_new_requires_image", default=True,
+    )
+    timeout = _read_int_setting(
+        conn, "notifications_new_requires_image_timeout_minutes", default=30,
+    )
+    return ImageGateSettings(enabled=enabled, timeout_minutes=max(1, timeout))
+
+
+def _insert_new_dispatches(
+    conn: "psycopg.Connection", where: list[str], params: dict[str, Any],
+) -> int:
+    """One set-based 'new' dispatch INSERT; ON CONFLICT (dedupe_key) makes any
+    re-consideration of the same property idempotent."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO notification_dispatches "
+            "  (subscription_id, source_kind, property_id, sreality_id, "
+            "   change_kind, status, channel, trigger_price_czk, "
+            "   target_channels, dedupe_key) "
+            "SELECT %(subscription_id)s, 'watchdog', l.property_id, l.sreality_id, "
+            "       'new', 'sent', 'in_app', l.price_czk, "
+            "       %(target_channels)s::text[], "
+            "       'wd:' || %(subscription_id)s || ':new:' || l.property_id::text "
+            "FROM properties_public l "
+            f"WHERE {' AND '.join(where)} "
+            "ON CONFLICT (dedupe_key) DO NOTHING",
+            params,
+        )
+        return cur.rowcount or 0
+
+
 def match_once(conn: "psycopg.Connection") -> dict[str, int]:
     """One pass of the matcher. Returns counters useful for logging.
 
@@ -1247,8 +1345,22 @@ def match_once(conn: "psycopg.Connection") -> dict[str, int]:
     window. New watchdogs default the cursor to `now() - 24h` so the
     feed shows immediate backfill matches rather than sitting empty
     until the next scrape lands.
+
+    Images-first gate (`notifications_new_requires_image`, default on): the
+    dispatch INSERTs additionally require `_IMAGE_GATE_SQL`, so a brand-new
+    property with pending image downloads is HELD, not dispatched. The cursor
+    deliberately advances past held properties (the window query carries NO
+    gate — one photoless CDN must never stall the whole feed); instead every
+    pass re-scans a lookback window of already-passed properties
+    (`first_seen_at <= cursor AND > now() - lookback`) under the same gate, so
+    a held property is dispatched on the first pass after its images land (or
+    its timeout expires) — the dedupe_key makes that re-scan idempotent. The
+    lookback exceeds the timeout by construction, so a release can't slip out
+    of the window; it also runs when the forward window is empty, so a held
+    property is never stranded waiting for unrelated new inventory.
     """
     settings = _load_matcher_settings(conn)
+    gate = _load_image_gate_settings(conn)
 
     with conn.cursor() as cur:
         cur.execute(
@@ -1259,6 +1371,7 @@ def match_once(conn: "psycopg.Connection") -> dict[str, int]:
         sub_rows = cur.fetchall()
 
     total_inserted = 0
+    total_lookback_inserted = 0
     total_listings_in_window = 0
     cursors_advanced = 0
 
@@ -1280,22 +1393,33 @@ def match_once(conn: "psycopg.Connection") -> dict[str, int]:
         # subscription and the others still match.
         try:
             where, params = _build_match_clauses(spec)
-            where.append("l.first_seen_at > %(cursor)s")
+            # Publication gate (migration 273): key NEW-dispatch detection on
+            # published_at, NOT first_seen_at. With a hard gate, publication can lag
+            # arrival arbitrarily, so a property published long after first_seen would
+            # fall outside a first_seen window and never notify. published_at is also
+            # semantically the "appears" moment (properties_public only exposes published
+            # rows while the gate is on). The per-subscription cursor column keeps its
+            # name (last_matched_first_seen_at) but now holds a published_at watermark.
+            # The images-first gate below stays keyed on first_seen_at (a separate layer).
+            window_where = [*where, "l.published_at > %(cursor)s"]
             params["cursor"] = cursor_ts
-            joined_where = " AND ".join(where)
+            joined_where = " AND ".join(window_where)
 
             # Phase 1: find the window upper bound (max first_seen_at of
             # the next batch of matching listings, capped at the operator
             # knob). Reading the max separately means we can advance the
             # cursor past listings even when the dedup constraint blocked
             # the dispatch insert (re-running the matcher won't re-evaluate
-            # the same listings forever).
+            # the same listings forever). NO image gate here: the cursor
+            # must advance past held properties (the lookback re-scan below
+            # re-considers them), or one photoless property would stall the
+            # whole subscription.
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT max(first_seen_at), count(*) FROM ("
-                    "  SELECT l.first_seen_at FROM properties_public l "
+                    "SELECT max(published_at), count(*) FROM ("
+                    "  SELECT l.published_at FROM properties_public l "
                     f"  WHERE {joined_where} "
-                    "  ORDER BY l.first_seen_at ASC "
+                    "  ORDER BY l.published_at ASC "
                     "  LIMIT %(window_size)s"
                     ") sub",
                     {**params, "window_size": settings.window_listings},
@@ -1305,49 +1429,69 @@ def match_once(conn: "psycopg.Connection") -> dict[str, int]:
             listings_in_window = int(row[1]) if row and row[1] is not None else 0
             total_listings_in_window += listings_in_window
 
-            if upper is None:
-                continue
+            gate_where: list[str] = []
+            if gate.enabled:
+                gate_where = [_IMAGE_GATE_SQL]
+                params["image_timeout_minutes"] = gate.timeout_minutes
+                params["image_zero_rows_floor_minutes"] = (
+                    IMAGE_GATE_ZERO_ROWS_FLOOR_MINUTES
+                )
 
-            # Phase 2: insert dispatches for matches in the window.
-            insert_where = where + ["l.first_seen_at <= %(upper)s"]
             insert_params = {
                 **params,
-                "upper": upper,
                 "subscription_id": str(sub_id),
                 # Delivery routing stamped on the event for the outbox; in_app is
                 # implicit (the feed reads the row), so it's never in target_channels.
                 "target_channels": [c for c in (channels or []) if c != "in_app"],
             }
-            with conn.cursor() as cur:
-                cur.execute(
-                    "INSERT INTO notification_dispatches "
-                    "  (subscription_id, source_kind, property_id, sreality_id, "
-                    "   change_kind, status, channel, trigger_price_czk, "
-                    "   target_channels, dedupe_key) "
-                    "SELECT %(subscription_id)s, 'watchdog', l.property_id, l.sreality_id, "
-                    "       'new', 'sent', 'in_app', l.price_czk, "
-                    "       %(target_channels)s::text[], "
-                    "       'wd:' || %(subscription_id)s || ':new:' || l.property_id::text "
-                    "FROM properties_public l "
-                    f"WHERE {' AND '.join(insert_where)} "
-                    "ON CONFLICT (dedupe_key) DO NOTHING",
-                    insert_params,
-                )
-                total_inserted += cur.rowcount or 0
 
-            # Phase 3: advance the cursor for this subscription. Done in a
-            # separate UPDATE so a crash between INSERT and UPDATE only
-            # costs us a re-scan of the same window on the next pass —
-            # ON CONFLICT means no duplicate dispatches.
-            with conn.cursor() as cur:
-                cur.execute(
-                    "UPDATE notification_subscriptions "
-                    "SET last_matched_first_seen_at = %s "
-                    "WHERE id = %s AND last_matched_first_seen_at < %s",
-                    (upper, sub_id, upper),
+            if upper is not None:
+                # Phase 2: insert dispatches for matches in the window (held
+                # back by the image gate when it is enabled).
+                insert_where = [
+                    *window_where, "l.published_at <= %(upper)s", *gate_where,
+                ]
+                total_inserted += _insert_new_dispatches(
+                    conn, insert_where, {**insert_params, "upper": upper},
                 )
-                if cur.rowcount:
-                    cursors_advanced += 1
+
+                # Phase 3: advance the cursor for this subscription. Done in a
+                # separate UPDATE so a crash between INSERT and UPDATE only
+                # costs us a re-scan of the same window on the next pass —
+                # ON CONFLICT means no duplicate dispatches.
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE notification_subscriptions "
+                        "SET last_matched_first_seen_at = %s "
+                        "WHERE id = %s AND last_matched_first_seen_at < %s",
+                        (upper, sub_id, upper),
+                    )
+                    if cur.rowcount:
+                        cursors_advanced += 1
+
+            if gate.enabled:
+                # Phase 4: gate-pending re-scan. Properties the cursor already
+                # passed while they were held re-enter here until released
+                # (image stored / timeout / zero-rows floor); runs even on an
+                # empty forward window so a held property is never stranded.
+                # Already-dispatched properties in the lookback are no-ops via
+                # the dedupe_key conflict.
+                lookback_where = [
+                    *where,
+                    "l.published_at <= %(cursor)s",
+                    "l.published_at > now()"
+                    " - make_interval(mins => %(image_lookback_minutes)s)",
+                    *gate_where,
+                ]
+                inserted = _insert_new_dispatches(
+                    conn, lookback_where,
+                    {
+                        **insert_params,
+                        "image_lookback_minutes": gate.lookback_minutes,
+                    },
+                )
+                total_inserted += inserted
+                total_lookback_inserted += inserted
         except Exception as exc:  # noqa: BLE001 — isolate one sub, keep loop alive
             LOG.exception(
                 "matcher: subscription %s failed, skipping: %s", sub_id, exc,
@@ -1357,6 +1501,7 @@ def match_once(conn: "psycopg.Connection") -> dict[str, int]:
     return {
         "subscriptions_evaluated": len(sub_rows),
         "matches_inserted": total_inserted,
+        "gate_lookback_inserted": total_lookback_inserted,
         "listings_in_window": total_listings_in_window,
         "cursors_advanced": cursors_advanced,
     }

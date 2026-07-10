@@ -17,19 +17,26 @@ name: "Jobs: property maintenance (incremental)"
 # So a new / edited / delisted listing is reflected in `properties` (and Browse)
 # within one interval (~5 min) instead of waiting up to a full hourly recompute.
 #
+# POSTURE (2026-07-08): this cron is the BACKSTOP, not the cadence. GitHub
+# throttles this repo's schedules to ~hourly at best — this workflow's nominal
+# */5 measured a 2h MEDIAN / 4.1h worst gap (fleet audit, 2026-07-07). The
+# actual "reflected within minutes" cadence is the realtime worker's
+# MAINTENANCE lane (scraper/realtime_worker.py, every
+# realtime_maintenance_interval_seconds, default 120), which calls the SAME
+# scripts.recompute_property_stats.run_incremental_pass. This cron stays as the
+# worker-outage backstop (deploy restarts, the env kill-switch) — whenever GH
+# gets around to firing it.
+#
 # The DAILY FULL sweep (recompute_property_stats.yml, no --incremental) stays the
 # reconcile backstop: it recomputes every property and clears the queue, so a
 # missed enqueue self-heals within 24h. The street+disposition dedup engine
 # (dedup_engine) runs separately and owns all cross-listing grouping.
 #
-# Cadence: every 5 min. GitHub throttles scheduled workflows, so the effective
-# cadence can be slightly slower — fine for a property-aggregation surface. The
-# incremental pass is cheap (NULL-property attach + a bounded dirty drain), so it
-# finishes in seconds.
-#
 # Concurrency: shares the `sreality-property-maintenance` group with the daily
-# full sweep so the two never mutate `properties` / `dirty_properties`
-# concurrently; cancel-in-progress=false so a pass is never killed mid-recompute.
+# full sweep so two GH runs never overlap; the realtime worker's lane is
+# serialized against BOTH by the maintenance lease inside run_incremental_pass
+# (a concurrent caller skips its tick); cancel-in-progress=false so a pass is
+# never killed mid-recompute.
 #
 # Required GitHub secret:
 #   SUPABASE_DB_URL  -- same one used by every other workflow.

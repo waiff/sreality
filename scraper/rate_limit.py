@@ -55,6 +55,18 @@ class RateLimiter:
                 self._max_interval, self._interval * self._penalty_factor
             )
 
+    def reschedule(self, interval_s: float, not_before: float | None = None) -> None:
+        """Adopt an externally-leased pacing window (the shared rate ledger,
+        scraper/rate_ledger.py): subsequent acquires space by `interval_s`, the
+        first no earlier than `not_before` (a time.monotonic() timestamp). Sets
+        the base too, so the per-acquire decay can't undercut a leased spacing
+        that already carries the shared penalty."""
+        with self._lock:
+            self._base_interval = interval_s
+            self._interval = interval_s
+            if not_before is not None and not_before > self._next_at:
+                self._next_at = not_before
+
     @property
     def interval(self) -> float:
         with self._lock:

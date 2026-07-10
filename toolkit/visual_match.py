@@ -39,7 +39,7 @@ _SITE_PLAN_VERDICTS = ("same_unit", "different_unit", "inconclusive")
 _FLOOR_PLAN_PROMPT_KEY = "llm_floor_plan_match_prompt"
 _FLOOR_PLAN_MODEL_KEY = "llm_floor_plan_match_model"
 _FLOOR_PLAN_CALLED_FOR = "compare_listing_floor_plans"
-_FLOOR_PLAN_VERDICTS = ("same_layout", "different_layout", "inconclusive")
+_FLOOR_PLAN_VERDICTS = ("same_layout", "different_layout", "inconclusive", "no_2d_plan")
 
 # N×N plan gate: cap plans per side sent to one vision call. Real listings carry 1-3 plans;
 # this only guards a pathological count from blowing the token limit (20 downscaled plans ≈
@@ -636,10 +636,13 @@ RECORD_FLOOR_PLAN_MATCH_TOOL: dict[str, Any] = {
                 "type": "string",
                 "enum": list(_FLOOR_PLAN_VERDICTS),
                 "description": (
-                    "same_layout = same wall arrangement + room positions + no "
-                    "contradicting label; different_layout = different arrangement / "
-                    "room count / positions OR a contradicting unit-number / floor / "
-                    "area label; inconclusive = illegible or insufficient."
+                    "same_layout = >=1 2D plan of A matches >=1 2D plan of B (arrangement + "
+                    "room positions + no contradicting label); different_layout = BOTH sides "
+                    "have usable 2D plans and NONE match (arrangement / room-count / positions "
+                    "differ OR a unit-number / floor / area label contradicts); no_2d_plan = "
+                    ">=1 side has NO usable 2D plan (only 3D renders / illegible) so a reliable "
+                    "2D-to-2D compare is impossible; inconclusive = BOTH sides have usable 2D "
+                    "plans but you still cannot decide."
                 ),
             },
             "rationale": {

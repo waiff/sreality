@@ -49,7 +49,7 @@ on:
       max_seconds:
         description: wall-clock budget for the detail drain (seconds)
         required: false
-        default: "1500"
+        default: "2100"
         type: string
       rate:
         description: detail-fetch requests/second ceiling
@@ -69,12 +69,15 @@ concurrency:
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    # 30 min could NEVER fit: ~7 min index walk (392 pages @ 1/s) + the drain's
-    # own 25-min --max-seconds budget + setup. Every run was SIGKILLed mid-drain:
-    # finalize never ran (scrape_runs rows stuck open until the API-boot sweep
-    # stamped them hours later -> phantom 722-min "durations"), and in-flight
-    # queue claims stranded for the 60-min reclaim window of the NEXT run.
-    timeout-minutes: 50
+    # The timeout must FIT the whole run: ~7 min index walk (392 pages @ 1/s) +
+    # the drain's own 35-min --max-seconds budget + setup. A too-small timeout
+    # SIGKILLs mid-drain: finalize never runs (scrape_runs rows stuck open until
+    # the API-boot sweep stamps them hours later -> phantom 722-min "durations"),
+    # and in-flight queue claims strand for the 60-min reclaim window of the NEXT
+    # run. The drain budget is 2100s (was 1500): measured throughput is ~0.7
+    # listings/s (fetch + per-item ingest), so 1500s truncated at ~1,100-1,400
+    # claims per 6h — below the walk's inflow, which starved the queue tail.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v6
 
@@ -92,7 +95,7 @@ jobs:
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
           MAX_PAGES: ${{ inputs.max_pages }}
           MAX_DETAIL: ${{ inputs.max_detail }}
-          MAX_SECONDS: ${{ inputs.max_seconds || '1500' }}
+          MAX_SECONDS: ${{ inputs.max_seconds || '2100' }}
           RATE: ${{ inputs.rate || '2.0' }}
           WORKERS: ${{ inputs.workers || '4' }}
         run: |

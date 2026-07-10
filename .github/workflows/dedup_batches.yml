@@ -4,8 +4,8 @@ name: "Dedup engine (vision batch warm-up)"
 # synchronous dedup engine's per-call vision, recall-identical). PRE-WARMS the
 # engine's classify/compare/site_plan caches; the daily "Dedup engine
 # (street + disposition)" run then REPLAYS unchanged over the warm caches and
-# produces the identical merges for free. Two modes, selected by which cron fired
-# (or the `mode` dispatch input):
+# produces the identical merges for free. Two modes, selected by the `mode`
+# dispatch input:
 #
 #   submit  — run the engine's FREE funnel (rules A/B/C + pHash + cross-source
 #             gate) and enqueue the cross-source pairs' classify/compare/site_plan
@@ -20,12 +20,22 @@ name: "Dedup engine (vision batch warm-up)"
 # untagged (no `# portal:` line) so it appears in Settings > Workflows, not any
 # one portal's pipeline panel.
 #
+# TARGETED re-enable (Phase 4.1, 2026-07): the first warmer was retired because an
+# all-rooms pre-buy is mostly wasted by a stop-at-first-High replay (79-93% of its
+# compare requests never drove a decision). The submit lane now warms only the
+# FIRST-PRIORITY room per pair (--warm-rooms 1) — the room the engine tries first
+# and stops at on a merge — plus the would-merge floor plan, dropping the tail-room
+# over-buy while still discounting the decisive room at 50%. The crons are restored
+# but the master gate dedup_batch_warmer_enabled is STILL false by default, so
+# scheduled runs stay no-ops until the operator flips it; a one-off warm/ingest is
+# also one click via workflow_dispatch.
+#
 # Required GitHub secrets: SUPABASE_DB_URL, ANTHROPIC_API_KEY, and R2_* (submit
 # downloads image bytes to build the vision requests).
 
 on:
   schedule:
-    - cron: "0 */6 * * *"   # submit: enqueue the next slice of vision requests
+    - cron: "0 */6 * * *"   # submit: enqueue the next slice of first-priority-room warm-ups
     - cron: "30 * * * *"    # ingest: poll + persist completed batches
   workflow_dispatch:
     inputs:
@@ -48,9 +58,14 @@ on:
         default: "1500"
         type: string
       max_room_attempts:
-        description: "[submit] Max like-room compare requests enqueued per pair"
+        description: "[submit] The engine's per-pair room cap (upper bound on warm-rooms)"
         required: false
         default: "4"
+        type: string
+      warm_rooms:
+        description: "[submit] Like-room compares warmed per pair (1 = first-priority room only)"
+        required: false
+        default: "1"
         type: string
       dry_run:
         description: "[submit] Report what would be enqueued without submitting"
@@ -106,6 +121,7 @@ jobs:
             ARGS="--max-pairs ${{ inputs.max_pairs || '4000' }}"
             ARGS="$ARGS --max-requests ${{ inputs.max_requests || '1500' }}"
             ARGS="$ARGS --max-room-attempts ${{ inputs.max_room_attempts || '4' }}"
+            ARGS="$ARGS --warm-rooms ${{ inputs.warm_rooms || '1' }}"
             if [ "${{ inputs.dry_run }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
             echo "submit with: $ARGS"
             python -m scripts.submit_dedup_batch $ARGS

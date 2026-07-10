@@ -53,14 +53,16 @@ _SELECT_SQL = """
 
 # Set-based: one UPDATE per chunk (unnest join on the PK), never a per-row round-trip
 # over the pooler. street_name_key is out of the content hash and geom is untouched, so
-# no snapshot and no admin-geo re-derive. In --all mode a recomputed key that equals the
-# stored one is written back identically (a harmless no-op write); the NULL-only default
-# only touches rows that were missing a key.
+# no snapshot and no admin-geo re-derive. IS DISTINCT FROM skips rows whose stored key
+# already equals the recomputed one — under MVCC an "identical" UPDATE still writes a
+# dead tuple (and fires triggers), so a full --all re-key over ~200k mostly-unchanged
+# rows would otherwise bloat the table for zero effect.
 _UPDATE_SQL = """
     UPDATE listings l
     SET street_name_key = d.key
     FROM unnest(%(ids)s::bigint[], %(keys)s::text[]) AS d(id, key)
     WHERE l.sreality_id = d.id
+      AND l.street_name_key IS DISTINCT FROM d.key
 """
 
 _CHUNK = 5000

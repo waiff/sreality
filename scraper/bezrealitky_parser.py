@@ -14,6 +14,7 @@ import re
 from typing import Any
 
 from scraper.bezrealitky_client import detail_url
+from scraper.published import iso_datetime
 from scraper.scraped_listing import ScrapedListing
 from scraper.street import clean_street
 
@@ -208,5 +209,9 @@ def parse_advert(advert: dict[str, Any]) -> ScrapedListing:
         parking_lots=None,
         ownership=OWNERSHIP.get(advert.get("ownership")),
         description=(advert.get("description") or "").strip() or None,
+        # The detail query requests timeActivated but the anon API returns it
+        # NULL today — the mapping is free if access ever appears (the one
+        # portal that would carry a REAL timestamp, not a day).
+        published_at=iso_datetime(advert.get("timeActivated")),
         raw=raw,
     )

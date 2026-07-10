@@ -161,7 +161,7 @@ def patched_db(monkeypatch):
     )
     monkeypatch.setattr(
         scraper_main.db, "mark_inactive",
-        lambda _conn, cm, ct, ids, *, source="sreality": (
+        lambda _conn, cm, ct, ids, *, source="sreality", min_unseen_hours=None: (
             calls["mark_inactive"].append((cm, ct, set(ids))) or 0
         ),
     )
@@ -219,6 +219,30 @@ def test_run_full_skips_mark_inactive_when_limit_zero(patched_db):
     rc, _agg = scraper_main._run_full(limit=0, dry_run=False)
     assert rc == 0
     assert patched_db["mark_inactive"] == []
+
+
+def test_sreality_mark_inactive_carries_unseen_rail(monkeypatch):
+    """SrealityPortal.mark_inactive (the framework index-walk path) rides the
+    INACTIVE_MIN_UNSEEN_HOURS staleness rail on every sweep — the second guard that
+    keeps the relaxed 0.995 completeness gate from false-delisting a live listing."""
+    captured: dict = {}
+    monkeypatch.setattr(
+        scraper_main.db, "mark_inactive",
+        lambda _conn, cm, ct, ids, *, source, min_unseen_hours=None: captured.update(
+            cm=cm, ct=ct, source=source, min_unseen_hours=min_unseen_hours) or 0,
+    )
+    scraper_main.SrealityPortal().mark_inactive(object(), (1, 2), {1, 2, 3})
+    assert captured["source"] == "sreality"
+    assert captured["min_unseen_hours"] == scraper_main.INACTIVE_MIN_UNSEEN_HOURS == 3
+
+
+def test_walk_complete_tolerates_half_percent_short_walk():
+    """0.995 gate (relaxed from 1.0): a 99.6% walk is complete (mid-walk jitter
+    tolerated — the flip would have been suppressed at the old 1.0 gate); 99.4% is
+    not. result_size unknown -> trust the walk (unchanged fallback)."""
+    assert scraper_main._walk_complete(996, 1000) is True
+    assert scraper_main._walk_complete(994, 1000) is False
+    assert scraper_main._walk_complete(10, None) is True
 
 
 def test_dry_run_never_calls_mark_inactive(patched_db, monkeypatch):
@@ -966,7 +990,7 @@ def _drain_patches(monkeypatch, claim_batches, fetch_kind):
     monkeypatch.setattr(scraper_main.db, "write_detail_batch", _write)
     monkeypatch.setattr(
         scraper_main.db, "complete_detail",
-        lambda _c, _src, ids: captured["complete"].append(sorted(ids)),
+        lambda _c, _src, ids, outcome="written": captured["complete"].append(sorted(ids)),
     )
     monkeypatch.setattr(
         scraper_main.db, "fail_detail",

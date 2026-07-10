@@ -25,8 +25,10 @@ from toolkit.dedup_engine import (
     classify_pair,
     decide_phash_fastpath,
     decide_visual_dismiss,
+    disposition_class,
     disposition_compatible,
     distinctive_rooms_for,
+    prioritized_group_pairs,
     geo_category_bucket,
     geo_cell_key,
     normalize_street,
@@ -731,8 +733,136 @@ def test_run_engine_geo_does_not_skip_same_source(monkeypatch: Any) -> None:
     monkeypatch.setattr(eng, "merge_properties", lambda *a, **k: {"data": {"merge_group_id": "g"}})
     stats = eng.run_engine(_FakeConn([]), classify_fn=None, compare_fn=None,
                            max_vision_calls=10, geo=True, geo_area_max_pct=0.20)
-    assert stats["skipped_same_source"] == 0
+    assert "skipped_same_source" not in stats  # counter retired (PR-F)
     assert stats["pairs_considered"] == 1
+
+
+# --- non-byt attribute fast-path (dedup_nonbyt_attr_merge_enabled) ----------
+
+def test_attr_exact_nonbyt_fires_on_area_within_2pct_and_exact_price() -> None:
+    import scripts.dedup_engine as eng
+    a = _gk(1, 101, area=120.0, price=5_950_000)
+    b = _gk(2, 102, area=121.5, price=5_950_000)  # 1.5/121.5 = 1.23% area diff
+    assert eng._attr_exact_nonbyt(a, b) is True
+
+
+def test_attr_exact_nonbyt_rejects_area_over_2pct() -> None:
+    import scripts.dedup_engine as eng
+    a = _gk(1, 101, area=120.0, price=5_950_000)
+    b = _gk(2, 102, area=123.5, price=5_950_000)  # 3.5/123.5 = 2.83% > 2%
+    assert eng._attr_exact_nonbyt(a, b) is False
+
+
+def test_attr_exact_nonbyt_rejects_non_exact_price() -> None:
+    import scripts.dedup_engine as eng
+    a = _gk(1, 101, area=120.0, price=5_950_000)
+    b = _gk(2, 102, area=120.0, price=5_960_000)  # identical area, price off by 10k
+    assert eng._attr_exact_nonbyt(a, b) is False
+
+
+def test_attr_exact_nonbyt_rejects_null_area_or_price() -> None:
+    import scripts.dedup_engine as eng
+    assert eng._attr_exact_nonbyt(_gk(1, 101, area=None), _gk(2, 102)) is False
+    assert eng._attr_exact_nonbyt(_gk(1, 101, price=None), _gk(2, 102)) is False
+
+
+def test_run_engine_geo_attr_arm_merges_on_area_price_exact(monkeypatch: Any) -> None:
+    # Flag ON: an area-within-2% + exact-price house pair auto-merges via the FREE attribute
+    # arm — it never reaches the paid visual stage (pairs_considered stays 0).
+    import scripts.dedup_engine as eng
+    monkeypatch.setattr(eng, "_load_geo_eligible", lambda conn, **k: [
+        _gk(1, 101, source="sreality", area=120.0, price=5_950_000),
+        _gk(2, 102, source="idnes", area=121.0, price=5_950_000),  # 0.83% area, exact price
+    ])
+    monkeypatch.setattr(eng, "merge_properties", lambda *a, **k: {"data": {"merge_group_id": "g"}})
+    stats = eng.run_engine(_FakeConn([]), classify_fn=None, compare_fn=None,
+                           max_vision_calls=10, geo=True, geo_area_max_pct=0.20,
+                           nonbyt_attr_merge=True)
+    assert stats.get("auto_attr") == 1
+    assert stats.get("pairs_considered", 0) == 0  # skipped the paid visual stage
+
+
+def test_run_engine_geo_attr_arm_off_by_default_reaches_visual(monkeypatch: Any) -> None:
+    # Flag OFF (default): the same pair falls through to the visual stage as before — no free
+    # attr merge. Guards against the arm firing when the operator hasn't enabled it.
+    import scripts.dedup_engine as eng
+    monkeypatch.setattr(eng, "_load_geo_eligible", lambda conn, **k: [
+        _gk(1, 101, area=120.0, price=5_950_000),
+        _gk(2, 102, area=121.0, price=5_950_000),
+    ])
+    monkeypatch.setattr(eng, "merge_properties", lambda *a, **k: {"data": {"merge_group_id": "g"}})
+    stats = eng.run_engine(_FakeConn([]), classify_fn=None, compare_fn=None,
+                           max_vision_calls=10, geo=True, geo_area_max_pct=0.20)
+    assert stats.get("auto_attr", 0) == 0
+    assert stats["pairs_considered"] == 1
+
+
+def test_run_engine_byt_never_takes_attr_arm(monkeypatch: Any) -> None:
+    # The arm is non-byt only (byt's area+price collide across a development's identical
+    # units — the retired rule-B trap). A byt pair with the flag ON must NOT attr-merge.
+    import scripts.dedup_engine as eng
+    monkeypatch.setattr(eng, "_load_geo_eligible", lambda conn, **k: [
+        _gk(1, 101, cat="byt", area=75.0, price=4_200_000),
+        _gk(2, 102, cat="byt", area=75.0, price=4_200_000),
+    ])
+    monkeypatch.setattr(eng, "merge_properties", lambda *a, **k: {"data": {"merge_group_id": "g"}})
+    stats = eng.run_engine(_FakeConn([]), classify_fn=None, compare_fn=None,
+                           max_vision_calls=10, geo=True, geo_area_max_pct=0.20,
+                           nonbyt_attr_merge=True)
+    assert stats.get("auto_attr", 0) == 0
+
+
+# --- download-completeness readiness (dedup_defer_incomplete_downloads) ------
+
+def test_run_engine_defers_pair_while_image_downloading(monkeypatch: Any) -> None:
+    # Flag ON + a side has an image pending download → the pair DEFERS: it never reaches the
+    # attr arm or the paid visual stage, and re-decides for free once downloads/tags finish.
+    import scripts.dedup_engine as eng
+    monkeypatch.setattr(eng, "_load_geo_eligible", lambda conn, **k: [
+        _gk(1, 101, area=120.0, price=5_950_000),
+        _gk(2, 102, area=120.0, price=5_950_000),
+    ])
+    monkeypatch.setattr(eng, "_downloads_incomplete", lambda conn, sids: [s for s in sids if s == 1])
+    monkeypatch.setattr(eng, "merge_properties", lambda *a, **k: {"data": {"merge_group_id": "g"}})
+    stats = eng.run_engine(_FakeConn([]), classify_fn=None, compare_fn=None,
+                           max_vision_calls=10, geo=True, geo_area_max_pct=0.20,
+                           defer_incomplete_downloads=True)
+    assert stats.get("download_deferred") == 1
+    assert stats.get("pairs_considered", 0) == 0  # never reached the visual stage
+    assert stats.get("auto_attr", 0) == 0          # never reached the attr arm
+
+
+def test_download_defer_off_by_default_ignores_pending_downloads(monkeypatch: Any) -> None:
+    # Flag OFF (default): even with both sides mid-download the pair proceeds as today.
+    import scripts.dedup_engine as eng
+    monkeypatch.setattr(eng, "_load_geo_eligible", lambda conn, **k: [
+        _gk(1, 101, area=120.0, price=5_950_000),
+        _gk(2, 102, area=120.0, price=5_950_000),
+    ])
+    monkeypatch.setattr(eng, "_downloads_incomplete", lambda conn, sids: list(sids))
+    monkeypatch.setattr(eng, "merge_properties", lambda *a, **k: {"data": {"merge_group_id": "g"}})
+    stats = eng.run_engine(_FakeConn([]), classify_fn=None, compare_fn=None,
+                           max_vision_calls=10, geo=True, geo_area_max_pct=0.20)
+    assert stats.get("download_deferred", 0) == 0
+    assert stats["pairs_considered"] == 1
+
+
+def test_downloads_incomplete_any_memoizes_per_listing(monkeypatch: Any) -> None:
+    # The cached wrapper queries each listing once per run (O(n)-per-group, like clip readiness).
+    import scripts.dedup_engine as eng
+    calls: list[list[int]] = []
+
+    def _fake(conn: Any, sids: list[int]) -> list[int]:
+        calls.append(list(sids))
+        return [s for s in sids if s == 7]  # 7 is mid-download
+
+    monkeypatch.setattr(eng, "_downloads_incomplete", _fake)
+    cache = eng._ProbeCache()
+    conn = _FakeConn([])
+    assert eng._downloads_incomplete_any(conn, [7, 8], cache) is True
+    assert eng._downloads_incomplete_any(conn, [8], cache) is False   # cached complete, no re-query
+    assert eng._downloads_incomplete_any(conn, [7], cache) is True    # cached incomplete
+    assert calls == [[7, 8]]  # only the first call hit the DB; the rest are memoized
 
 
 def test_enqueue_candidate_tier_column_from_markers() -> None:
@@ -749,15 +879,141 @@ def test_enqueue_candidate_tier_column_from_markers() -> None:
     assert conn2.enqueued[0][2] == "street_disposition"
 
 
-def test_run_engine_geo_skips_oversized_cell(monkeypatch: Any) -> None:
+def test_run_engine_geo_oversized_cell_processes_bounded(monkeypatch: Any) -> None:
+    # An oversized geo cell is no longer skipped whole (the silent recall hole): it is
+    # processed BOUNDED — best MAX_GROUP_PAIRS pairs in value order — and counted.
     import scripts.dedup_engine as eng
-    members = [_gk(i, 100 + i) for i in range(1, eng.MAX_GEO_GROUP_SIZE + 3)]  # one oversized cell
+    n = eng.MAX_GEO_GROUP_SIZE + 2
+    members = [_gk(i, 100 + i) for i in range(1, n + 1)]  # one oversized cell
     monkeypatch.setattr(eng, "_load_geo_eligible", lambda conn, **k: members)
-    monkeypatch.setattr(eng, "_enqueue_candidate",
-                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("oversized cell must skip")))
+    monkeypatch.setattr(eng, "resolve_pair", _stub_resolve_pair)
     stats = eng.run_engine(_FakeConn([]), classify_fn=None, compare_fn=None,
                            max_vision_calls=0, geo=True)
-    assert stats["pairs_considered"] == 0
+    total = n * (n - 1) // 2
+    assert stats["oversized_groups"] == 1
+    assert stats["pairs_considered"] == min(total, eng.MAX_GROUP_PAIRS)
+    assert stats["skipped_oversized"] == max(0, total - eng.MAX_GROUP_PAIRS)
+
+
+# --- geo loader: the STORED listings.geo_cell_key is the blocking cell -------
+
+def _geo_row(sid: int, pid: int, *, source: str = "sreality",
+             hn: str | None = None, area: float | None = 120.0,
+             description: str | None = None, ct: str | None = "prodej",
+             cat: str | None = "dum", price: int | None = 5_950_000,
+             lat: float | None = 50.10064, lng: float | None = 14.53742,
+             cell: str | None = "geo:5001:50.1006:14.5374:dum|komercni:prodej",
+             ) -> tuple[Any, ...]:
+    # matches _GEO_ELIGIBLE_SQL column order:
+    # sreality_id, property_id, source, house_number, area, description,
+    # category_type, category_main, price_czk, lat, lng, geo_cell_key
+    return (sid, pid, source, hn, area, description, ct, cat, price, lat, lng, cell)
+
+
+def test_load_geo_eligible_uses_stored_cell_key_verbatim() -> None:
+    # Migration 276: the loader takes listings.geo_cell_key from the SELECT — it must
+    # NOT recompute the cell from lat/lng in Python. A stored key whose rendering
+    # differs from the retired Python f-string (SQL trim_scale drops trailing zeros)
+    # is taken as-is: SQL is the single definition of the blocking cell.
+    import scripts.dedup_engine as eng
+
+    stored = "geo:5001:50.1:14.5:dum|komercni:prodej"
+    conn = _FakeConn([], geo_rows=[
+        _geo_row(1, 101, cell=stored),
+        _geo_row(2, 102, cell=stored),
+    ])
+    keys = eng._load_geo_eligible(conn)
+    assert [k.street_key for k in keys] == [stored, stored]
+    # lat/lng still ride along for the geo classifier's coordinate guard.
+    assert keys[0].lat == pytest.approx(50.10064)
+    assert keys[0].lng == pytest.approx(14.53742)
+    assert keys[0].price_czk == 5_950_000 and keys[0].area_m2 == 120.0
+
+
+def test_load_geo_eligible_skips_null_stored_key() -> None:
+    # A pre-backfill row (key not yet stamped) is skipped — it waits for the next
+    # run after the backfill/trigger stamps it, and is never mis-grouped.
+    import scripts.dedup_engine as eng
+
+    conn = _FakeConn([], geo_rows=[
+        _geo_row(1, 101, cell=None),
+        _geo_row(2, 102),
+    ])
+    keys = eng._load_geo_eligible(conn)
+    assert [k.sreality_id for k in keys] == [2]
+
+
+def test_load_geo_eligible_restrict_cells_scope() -> None:
+    """The --dirty geo sub-pass's scoped load: `restrict_cells` filters by the stored
+    cell key (`= ANY`, an index seek on listings_geo_cell_key_idx) so the claimed
+    properties' cells load WITH PEERS. An EMPTY set restricts to nothing (not all);
+    mutually exclusive with restrict_property_ids."""
+    import scripts.dedup_engine as eng
+
+    captured: dict[str, Any] = {}
+    cell = "geo:5001:50.1006:14.5374:dum|komercni:prodej"
+
+    class _C:
+        def __enter__(self): return self
+        def __exit__(self, *a): return None
+        def execute(self, sql, params=None):
+            captured["sql"] = " ".join(sql.split()); captured["params"] = params
+        def fetchall(self):
+            return [_geo_row(1, 101, cell=cell)]
+
+    class _Conn:
+        def cursor(self): return _C()
+
+    keys = eng._load_geo_eligible(_Conn(), restrict_cells={cell})
+    assert "AND l.geo_cell_key = ANY(%(cells)s)" in captured["sql"]
+    assert captured["params"]["cells"] == [cell]
+    assert keys and keys[0].sreality_id == 1 and keys[0].street_key == cell
+
+    captured.clear()
+    eng._load_geo_eligible(_Conn(), restrict_cells=set())   # empty != None
+    assert captured["params"]["cells"] == []
+
+    with pytest.raises(ValueError):
+        eng._load_geo_eligible(_Conn(), restrict_property_ids={1}, restrict_cells={cell})
+
+
+def test_run_engine_threads_restrict_geo_cells_to_loader(monkeypatch: Any) -> None:
+    # run_engine(geo=True, restrict_geo_cells=...) hands the cell scope to
+    # _load_geo_eligible — the seam the dirty geo sub-pass rides.
+    import scripts.dedup_engine as eng
+
+    seen: dict[str, Any] = {}
+
+    def _fake_load(conn, restrict_property_ids=None, restrict_cells=None):
+        seen["cells"] = restrict_cells
+        seen["pids"] = restrict_property_ids
+        return []
+    monkeypatch.setattr(eng, "_load_geo_eligible", _fake_load)
+    eng.run_engine(_FakeConn([]), max_vision_calls=0, geo=True,
+                   restrict_geo_cells={"cellA"})
+    assert seen["cells"] == {"cellA"} and seen["pids"] is None
+
+
+def test_run_engine_geo_groups_by_stored_cell_key(monkeypatch: Any) -> None:
+    # End-to-end over the fake conn (no loader monkeypatch): run_engine(geo=True)
+    # loads through _GEO_ELIGIBLE_SQL and groups on the SELECTed stored cell key —
+    # the same-cell cross-source pair reaches the visual stage; the different-cell
+    # row pairs with nothing; the deterministic geo signal still never merges.
+    import scripts.dedup_engine as eng
+
+    monkeypatch.setattr(
+        eng, "merge_properties",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("geo signal must not merge")))
+    conn = _FakeConn([], geo_rows=[
+        _geo_row(1, 101, source="sreality"),
+        _geo_row(2, 102, source="idnes"),
+        _geo_row(3, 103, source="idnes", cat="pozemek",
+                 cell="geo:5002:50.2:14.6:pozemek:prodej"),
+    ])
+    stats = eng.run_engine(conn, classify_fn=None, compare_fn=None,
+                           max_vision_calls=10, geo=True)
+    assert stats["pairs_considered"] == 1
+    assert stats["queued"] == 1
 
 
 # --- rule D helpers ---------------------------------------------------------
@@ -886,12 +1142,18 @@ class _Cur:
         self._conn.executed.append(s)
         if "count(*) FILTER" in s and "FROM listings" in s:
             self._rows = [(4, 100, 5)]  # eligible, flagged_location, flagged_disposition
+        elif "l.geo_cell_key" in s and "FROM listings l" in s:
+            # _GEO_ELIGIBLE_SQL (checked BEFORE the street branch — the geo SQL's
+            # NOT-street-eligible clause also contains "l.street IS NOT NULL").
+            self._rows = list(self._conn.geo_rows)
         elif "FROM listings l" in s and "l.street IS NOT NULL" in s:
             self._rows = list(self._conn.eligible_rows)
         elif "count(*)" in s and "JOIN properties pl" in s:
             self._rows = [(self._conn.stale_count,)]  # _reconcile_stale_candidates count
         elif "EXISTS (SELECT 1 FROM images ia" in s:
             self._rows = [(False,)]  # _phash_distinctive_match default (monkeypatch for a match)
+        elif "GROUP BY 1, 2" in s and "FROM images ia JOIN images ib" in s:
+            self._rows = []  # _phash_group_counts default: no near-identical pairs anywhere
         elif "FROM images ia JOIN images ib" in s:
             self._rows = [(0,)]  # _phash_identical_pairs default (tests monkeypatch when needed)
         elif "FROM images i WHERE i.sreality_id" in s and "storage_path IS NOT NULL" in s:
@@ -901,8 +1163,17 @@ class _Cur:
         elif "UPDATE property_identity_candidates" in s:
             self._conn.resolved.append((s, params))  # reconcile / _resolve_candidates
             self._rows = []
+        elif "INSERT INTO property_identity_candidates" in s and "SET status = 'proposed'" in s:
+            self._conn.enqueued.append(params)  # reopen-variant enqueue (consult recall valve)
+            self._rows = []
+        elif "INSERT INTO property_identity_candidates" in s and "'dismissed'" in s:
+            self._conn.dismiss_recorded.append(params)  # _record_auto_dismissed markers
+            self._rows = []
         elif "INSERT INTO property_identity_candidates" in s:
             self._conn.enqueued.append(params)
+            self._rows = []
+        elif "UPDATE properties" in s and "published_at" in s:
+            self._conn.publication_stamped.append(params)  # migration 273 publish gate
             self._rows = []
         else:
             self._rows = []
@@ -915,12 +1186,16 @@ class _Cur:
 
 
 class _FakeConn:
-    def __init__(self, eligible_rows: list[tuple[Any, ...]], stale_count: int = 0) -> None:
+    def __init__(self, eligible_rows: list[tuple[Any, ...]], stale_count: int = 0,
+                 geo_rows: list[tuple[Any, ...]] | None = None) -> None:
         self.eligible_rows = eligible_rows
+        self.geo_rows = geo_rows or []
         self.stale_count = stale_count
         self.executed: list[str] = []
         self.enqueued: list[Any] = []
+        self.dismiss_recorded: list[Any] = []  # _record_auto_dismissed marker INSERTs
         self.resolved: list[tuple[str, Any]] = []  # reconcile + _resolve_candidates UPDATEs
+        self.publication_stamped: list[Any] = []  # _stamp_publication_checked UPDATEs (mig 273)
 
     def cursor(self) -> _Cur:
         return _Cur(self)
@@ -942,12 +1217,13 @@ def _row(sid: int, pid: int, *, street: str = "Nádražní",
          hn: str | None = "10", floor: int | None = 3, area: float | None = 60.0,
          source: str = "sreality", description: str | None = None,
          category_type: str | None = "prodej", category_main: str | None = "byt",
-         obec_id: int | None = 5001) -> tuple[Any, ...]:
+         obec_id: int | None = 5001, price: int | None = None) -> tuple[Any, ...]:
     # matches _ELIGIBLE_SQL column order:
     # sreality_id, property_id, source, street, street_id, disposition,
-    # house_number, floor, area_m2, description, category_type, category_main, obec_id
+    # house_number, floor, area_m2, description, category_type, category_main,
+    # obec_id, price_czk
     return (sid, pid, source, street, street_id, disp, hn, floor, area,
-            description, category_type, category_main, obec_id)
+            description, category_type, category_main, obec_id, price)
 
 
 def test_run_engine_exact_address_no_longer_auto_merges(monkeypatch: Any) -> None:
@@ -979,7 +1255,7 @@ def test_run_engine_now_visually_compares_same_source(monkeypatch: Any) -> None:
     ])
     stats = eng.run_engine(conn, classify_fn=None, compare_fn=None, max_vision_calls=10)
 
-    assert stats["skipped_same_source"] == 0   # the gate is gone
+    assert "skipped_same_source" not in stats  # counter retired with the gate (PR-F)
     assert stats["pairs_considered"] == 1      # reached the visual stage
 
 
@@ -1072,7 +1348,7 @@ def test_run_engine_does_not_skip_cross_source(monkeypatch: Any) -> None:
     # No classify_fn -> _resolve_visual returns queue('no_images'); the point is it was REACHED.
     stats = eng.run_engine(conn, classify_fn=None, compare_fn=None, max_vision_calls=10)
 
-    assert stats["skipped_same_source"] == 0
+    assert "skipped_same_source" not in stats  # counter retired (PR-F)
     assert stats["pairs_considered"] == 1
 
 
@@ -1236,7 +1512,7 @@ def test_run_engine_phash_fastpath_merges_same_source(monkeypatch: Any) -> None:
     stats = eng.run_engine(conn, classify_fn=None, compare_fn=None, max_vision_calls=10)
 
     assert stats["auto_phash"] == 1
-    assert stats["skipped_same_source"] == 0  # pHash resolved it before the gate
+    assert "skipped_same_source" not in stats  # counter retired with the gate (PR-F)
     assert merges == ["image_phash"]
 
 
@@ -1247,19 +1523,18 @@ def test_effective_vision_cap() -> None:
 
     # cache-only: never throttle warm reads
     assert eng._effective_vision_cap(
-        free=False, cache_only=True, floor_plan_budget=0, max_vision_calls=300) == 10_000_000
-    # free + a positive floor-plan budget -> the cap IS that budget (bounds inline
-    # cold floor-plan checks; nothing else consumes vision in free mode)
+        free=False, cache_only=True, compare_budget=0, max_vision_calls=300) == 10_000_000
+    # free (W2): the pool is the COMPARE budget — the forensic compares consume it; the
+    # floor-plan gate runs on its OWN separate budget (run_engine.floor_plan_calls).
     assert eng._effective_vision_cap(
-        free=True, cache_only=False, floor_plan_budget=120, max_vision_calls=300) == 120
-    # free + budget 0 -> cache-only floor_plan_fn: a large cap so a zero budget can't
-    # pre-empt the gate before it reads the warm cache (the cache-only fn never makes a
-    # cold call, so it can't overspend)
+        free=True, cache_only=False, compare_budget=40, max_vision_calls=300) == 40
+    # free + compare_budget 0 -> pHash-only free run: no forensic compares (the historical
+    # --free behaviour). The floor-plan gate is unaffected — it has its own budget.
     assert eng._effective_vision_cap(
-        free=True, cache_only=False, floor_plan_budget=0, max_vision_calls=300) == 10_000_000
-    # live dispatch: the plain vision budget
+        free=True, cache_only=False, compare_budget=0, max_vision_calls=300) == 0
+    # live (non-free) dispatch: the plain shared vision budget (the gate aliases into it)
     assert eng._effective_vision_cap(
-        free=False, cache_only=False, floor_plan_budget=120, max_vision_calls=300) == 300
+        free=False, cache_only=False, compare_budget=40, max_vision_calls=300) == 300
 
 
 def test_run_engine_only_groups_skips_untouched(monkeypatch: Any) -> None:
@@ -1349,9 +1624,28 @@ def test_dedup_geo_cron_matches_its_args_branch() -> None:
     assert not any("--free" in ln for ln in args), "the geo cron branch must NOT be --free"
 
 
-def test_claim_dedup_dirty_is_bounded_fifo() -> None:
-    """The --dirty claim must be FIFO-bounded when a limit is passed (and unbounded only when
-    not), so a tagging-backlog flood can't make an hourly run claim the whole market."""
+def test_dirty_cron_gets_its_own_concurrency_group() -> None:
+    """The real-time DIRTY drain (:45) must run in a SEPARATE concurrency group from the slow
+    batch runs, or the shared group starves/cancels it (killing the 'merge in minutes' SLO).
+    The group expression keys off the SAME dirty cron string the run-step branch matches."""
+    import pathlib
+
+    wf = pathlib.Path(__file__).resolve().parents[1] / ".github" / "workflows" / "dedup_engine.yml"
+    text = wf.read_text()
+    dirty_cron = "45 * * * *"
+    group_line = next(
+        (ln for ln in text.splitlines() if ln.strip().startswith("group:") and "dedup-engine" in ln),
+        "",
+    )
+    assert dirty_cron in group_line, "the concurrency group must branch on the dirty cron string"
+    assert "-dirty" in group_line, "the dirty run must get its own '-dirty' concurrency group"
+
+
+def test_claim_dedup_dirty_is_bounded_newest_first() -> None:
+    """The --dirty claim is NEWEST-first + bounded: a real-time lane must serve the freshest
+    dedup-ready listing first (the "merge in minutes" SLO holds under backlog), and stay bounded
+    so a tagging-backlog spike can't make an hourly run claim the whole market. Unbounded only
+    when no limit is passed (full-sweep / reconcile use)."""
     import scripts.dedup_engine as eng
 
     captured: list[tuple[str, list[Any]]] = []
@@ -1367,13 +1661,1062 @@ def test_claim_dedup_dirty_is_bounded_fifo() -> None:
 
     eng._claim_dedup_dirty(_Conn(), "CUTOFF", limit=5000)
     sql, params = captured[-1]
-    assert "ORDER BY marked_at" in sql and "LIMIT %s" in sql
+    assert "ORDER BY marked_at DESC" in sql and "LIMIT %s" in sql
     assert params == ["CUTOFF", 5000]
 
     captured.clear()
     eng._claim_dedup_dirty(_Conn(), "CUTOFF")  # unbounded (full sweep / reconcile use)
     sql, params = captured[-1]
     assert "LIMIT" not in sql and params == ["CUTOFF"]
+
+
+def test_prune_stale_dedup_dirty_evicts_by_ttl() -> None:
+    """The TTL prune bounds the queue by construction (the guard the FIFO stall lacked): rows
+    older than the TTL are deleted (the 6h full scan has already covered them), so an
+    un-drainable backlog can never grow unbounded and the newest-first claim never hits a
+    stale head. Default TTL >= the daily full-sweep cycle."""
+    import scripts.dedup_engine as eng
+
+    captured: list[str] = []
+
+    class _Cur:
+        rowcount = 7
+        def __enter__(self): return self
+        def __exit__(self, *exc): return None
+        def execute(self, sql, params=None): captured.append(sql)
+
+    class _Conn:
+        def cursor(self): return _Cur()
+
+    assert eng._DEDUP_DIRTY_TTL_HOURS >= 24
+    assert eng._prune_stale_dedup_dirty(_Conn()) == 7
+    assert "DELETE FROM dedup_dirty_properties" in captured[-1]
+    assert "now() - interval" in captured[-1] and "hours" in captured[-1]
+
+
+def test_dedup_dirty_enqueue_gates_eligible_and_recent() -> None:
+    """The dedup-ready enqueue SQL keeps the real-time lane a CHANGE signal, not an
+    enrichment-progress firehose: it enqueues a property ONLY when (a) it is fully tagged,
+    (b) it has a listing the engine can REACH — street+disposition OR a geo-eligible
+    single-dwelling row (property-grain EXISTS; the dirty pass resolves both families),
+    and (c) the just-tagged listing is recent (a genuinely NEW arrival). Without these the
+    market-wide CLIP backfill floods the queue (78.5% un-mergeable) and it stalls."""
+    from scraper import db
+    from toolkit.publication import eligible_predicate
+
+    sql = db._DEDUP_DIRTY_FROM_IMAGE_IDS_SQL
+    # eligibility: property-grain EXISTS over the property's listings, not the tagged one alone.
+    assert "EXISTS" in sql and "le.property_id = l.property_id" in sql
+    # the gate IS the shared street-OR-geo predicate rendered for the subquery alias —
+    # single-sourced from toolkit.publication, never a hand copy.
+    assert eligible_predicate("le") in sql
+    # street arm: a street+disposition listing still qualifies.
+    assert "le.street IS NOT NULL" in sql and "le.disposition IS NOT NULL" in sql
+    # geo arm: a street-less dum/pozemek/komercni/ostatni listing with geom+obec+area
+    # NOW enqueues too (the dirty pass grew a geo sub-pass)...
+    assert "le.category_main IN ('dum', 'pozemek', 'komercni', 'ostatni')" in sql
+    assert "le.geom IS NOT NULL" in sql and "le.obec_id IS NOT NULL" in sql
+    # ...while a street-less byt matches NEITHER arm (not street-eligible, not a
+    # single-dwelling category) and still never enqueues.
+    assert "'byt'" not in eligible_predicate("le")
+    # recency: the tagged listing's first_seen_at within the window.
+    assert "l.first_seen_at > now() - interval" in sql
+    assert db._DEDUP_DIRTY_RECENCY_DAYS >= 1
+
+
+def test_eligible_predicate_single_sources_the_parity_constants() -> None:
+    """toolkit.publication.eligible_predicate is DERIVED from the same templates as the
+    engine-verbatim parity constants — one text, three consumers (engine SQL, publish
+    sweep, enqueue gate). Rendering another alias changes ONLY the alias."""
+    from toolkit.publication import (
+        GEO_ELIGIBLE_PREDICATE,
+        STREET_ELIGIBLE_PREDICATE,
+        eligible_predicate,
+    )
+
+    assert eligible_predicate("l") == (
+        f"({STREET_ELIGIBLE_PREDICATE}) OR ({GEO_ELIGIBLE_PREDICATE})")
+    assert eligible_predicate("le") == eligible_predicate("l").replace("l.", "le.")
+
+
+def test_run_engine_stats_carry_dirty_observability_keys() -> None:
+    """run_engine's stats always carry dirty_cleared / dirty_truncated (NULL on non-dirty runs)
+    so _write_run_row's %(dirty_cleared)s / %(dirty_truncated)s params never KeyError and the
+    silent-livelock guard columns are always populated."""
+    import scripts.dedup_engine as eng
+
+    stats = eng.run_engine(_FakeConn([]), max_vision_calls=0)
+    assert stats["dirty_cleared"] is None and stats["dirty_truncated"] is None
+    assert "dirty_queue_depth" in stats and "dirty_claimed" in stats
+
+
+def test_write_run_row_stamps_kind_truncated_started_at() -> None:
+    """The run row records run_kind + the run-level truncated + the REAL started_at
+    (migration 262). truncated defaults to 0 when the stats lack it; a truncated full
+    scan writes 1 — the full-scan coverage-gap signal the 2026-07 audit found missing
+    (every 6h scan silently deadline-cut at a fraction of the market)."""
+    import scripts.dedup_engine as eng
+
+    captured: dict[str, Any] = {}
+
+    class _C:
+        def __enter__(self): return self
+        def __exit__(self, *a): return None
+        def execute(self, sql, params=None):
+            captured["sql"] = " ".join(sql.split()); captured["params"] = params
+
+    class _Conn:
+        def cursor(self): return _C()
+
+    base: dict[str, Any] = {k: None for k in (
+        "eligible", "flagged_location", "flagged_disposition", "pairs_considered",
+        "rejected", "auto_address", "auto_phash", "auto_visual", "queued",
+        "vision_calls", "auto_dismissed", "floor_plan_deferred", "clip_deferred",
+        "clip_classified", "clip_cosine_calls", "routed_haiku", "routed_sonnet",
+        "dirty_queue_depth", "dirty_claimed", "dirty_cleared", "dirty_truncated",
+        "skipped_unresolved", "skipped_oversized", "oversized_groups", "vision_errors",
+        "truncated_cause", "scan_groups_total", "scan_groups_scanned",
+        "dirty_age_p95_seconds", "dirty_pruned",
+    )}
+    eng._write_run_row(_Conn(), {**base, "truncated": 1}, run_kind="full", started_at="T0")
+    sql, params = captured["sql"], captured["params"]
+    assert "started_at, ended_at, run_kind, truncated" in sql
+    assert params["run_kind"] == "full" and params["truncated"] == 1
+    assert params["started_at"] == "T0"
+
+    eng._write_run_row(_Conn(), dict(base), run_kind="dirty", started_at="T0")
+    assert captured["params"]["truncated"] == 0  # absent -> completed run
+
+
+def _stub_resolve_pair(conn: Any, a: Any, b: Any, *, street_key: str, ctx: Any,
+                       group_sids: Any = None) -> None:
+    # Mirrors only resolve_pair's budget accounting — the per-group clear tracks group
+    # completion, not pair outcomes, so a decide-nothing stub is enough.
+    ctx.pairs_left -= 1
+    ctx.stats["pairs_considered"] += 1
+
+
+def test_run_engine_incremental_resolve_full_run(monkeypatch: Any) -> None:
+    """A run that scans every group resolves ALL claimed properties — including a claimed
+    property with NO eligible listing left (zero groups), which resolves immediately."""
+    import scripts.dedup_engine as eng
+
+    monkeypatch.setattr(eng, "resolve_pair", _stub_resolve_pair)
+    conn = _FakeConn([
+        _row(1, 101, street="Alfa", street_id=None, hn=None),
+        _row(2, 102, street="Alfa", street_id=None, hn=None, source="bazos"),
+        _row(3, 103, street="Beta", street_id=None, hn=None),
+        _row(4, 104, street="Beta", street_id=None, hn=None, source="bazos"),
+    ])
+    claimed = {101, 102, 103, 104, 999}  # 999 = enqueued but no eligible listing anymore
+    resolved: set[int] = set()
+    stats = eng.run_engine(
+        conn, only_groups_with_property_ids=claimed, resolved_property_ids=resolved,
+        max_pairs=100, max_vision_calls=0)
+    assert stats["truncated"] == 0
+    assert resolved >= claimed
+
+
+def test_run_engine_incremental_resolve_truncated_partial(monkeypatch: Any) -> None:
+    """A pair-cap/deadline-truncated run resolves EXACTLY the fully-scanned groups'
+    properties — the incremental clear's contract: monotonic progress, unfinished groups
+    keep their claim. (Budget 2 over two 1-pair groups: group Alfa completes; the budget
+    hits zero at Beta's boundary, so Beta counts as unfinished — conservative by design.)"""
+    import scripts.dedup_engine as eng
+
+    monkeypatch.setattr(eng, "resolve_pair", _stub_resolve_pair)
+    conn = _FakeConn([
+        _row(1, 101, street="Alfa", street_id=None, hn=None),
+        _row(2, 102, street="Alfa", street_id=None, hn=None, source="bazos"),
+        _row(3, 103, street="Beta", street_id=None, hn=None),
+        _row(4, 104, street="Beta", street_id=None, hn=None, source="bazos"),
+    ])
+    claimed = {101, 102, 103, 104}
+    resolved: set[int] = set()
+    stats = eng.run_engine(
+        conn, only_groups_with_property_ids=claimed, resolved_property_ids=resolved,
+        max_pairs=2, max_vision_calls=0)
+    assert stats["truncated"] == 1
+    assert resolved == {101, 102}
+
+
+def test_run_engine_incremental_resolve_dual_key_guard(monkeypatch: Any) -> None:
+    """A property dual-keys into its 'id:' AND 'name:' street groups; it must resolve only
+    when BOTH are scanned. Truncating after the id-group leaves it unresolved (its name-group
+    pairs were never re-decided), so its claim survives to the next run."""
+    import scripts.dedup_engine as eng
+
+    monkeypatch.setattr(eng, "resolve_pair", _stub_resolve_pair)
+    conn = _FakeConn([
+        _row(1, 201, street="Gama", street_id=77, hn=None),
+        _row(2, 202, street="Gama", street_id=77, hn=None, source="bazos"),
+    ])
+    claimed = {201, 202}
+    resolved: set[int] = set()
+    stats = eng.run_engine(
+        conn, only_groups_with_property_ids=claimed, resolved_property_ids=resolved,
+        max_pairs=2, max_vision_calls=0)  # id-group's pair exhausts the budget at the boundary
+    assert stats["truncated"] == 1
+    assert resolved == set()  # id-group alone is NOT enough
+
+    resolved2: set[int] = set()
+    stats2 = eng.run_engine(
+        _FakeConn([
+            _row(1, 201, street="Gama", street_id=77, hn=None),
+            _row(2, 202, street="Gama", street_id=77, hn=None, source="bazos"),
+        ]),
+        only_groups_with_property_ids=claimed, resolved_property_ids=resolved2,
+        max_pairs=100, max_vision_calls=0)
+    assert stats2["truncated"] == 0
+    assert resolved2 >= claimed  # both groups scanned -> resolved
+
+
+def test_run_engine_stamps_publication_checked(monkeypatch: Any) -> None:
+    # Publication gate (migration 273): a non-dry run publishes every property whose
+    # street group it scanned — the writer side of the properties_public gate. Fires on a
+    # plain full scan (no resolved_property_ids), not just the dirty out-param path.
+    import scripts.dedup_engine as eng
+
+    monkeypatch.setattr(eng, "resolve_pair", _stub_resolve_pair)
+    conn = _FakeConn([
+        _row(1, 101, street="Alfa", street_id=None, hn=None),
+        _row(2, 102, street="Alfa", street_id=None, hn=None, source="bazos"),
+        _row(3, 103, street="Beta", street_id=None, hn=None),
+        _row(4, 104, street="Beta", street_id=None, hn=None, source="bazos"),
+    ])
+    eng.run_engine(conn, max_pairs=100, max_vision_calls=0)
+
+    stamped = sorted(pid for e in conn.publication_stamped for pid in e["ids"])
+    assert stamped == [101, 102, 103, 104]
+
+
+def test_run_engine_dry_run_does_not_stamp_publication(monkeypatch: Any) -> None:
+    # A shadow/dry run computes actions but writes nothing — no publish stamp (the gate
+    # writer is guarded by `if not dry_run` in finalize()).
+    import scripts.dedup_engine as eng
+
+    monkeypatch.setattr(eng, "resolve_pair", _stub_resolve_pair)
+    conn = _FakeConn([
+        _row(1, 101, street="Alfa", street_id=None, hn=None),
+        _row(2, 102, street="Alfa", street_id=None, hn=None, source="bazos"),
+    ])
+    eng.run_engine(conn, dry_run=True, max_pairs=100, max_vision_calls=0)
+
+    assert conn.publication_stamped == []
+
+
+def _three_group_rows() -> list[tuple[Any, ...]]:
+    # Three single-key name groups, sorted alfa < beta < gama (street_id=None -> no id: group).
+    return [
+        _row(1, 101, street="Alfa", street_id=None, hn=None),
+        _row(2, 102, street="Alfa", street_id=None, hn=None, source="bazos"),
+        _row(3, 103, street="Beta", street_id=None, hn=None),
+        _row(4, 104, street="Beta", street_id=None, hn=None, source="bazos"),
+        _row(5, 105, street="Gama", street_id=None, hn=None),
+        _row(6, 106, street="Gama", street_id=None, hn=None, source="bazos"),
+    ]
+
+
+def test_run_engine_cursor_resumes_after_key(monkeypatch: Any) -> None:
+    """With cursor_out enabled the full scan iterates groups in SORTED order and resumes
+    strictly AFTER scan_cursor — the frontier that lets successive deadline-bounded runs
+    cover the whole market instead of head-restarting (the ~9%-coverage pathology)."""
+    import scripts.dedup_engine as eng
+
+    monkeypatch.setattr(eng, "resolve_pair", _stub_resolve_pair)
+    cursor_out: dict[str, Any] = {}
+    stats = eng.run_engine(
+        _FakeConn(_three_group_rows()),
+        scan_cursor="name:5001:alfa|d:2+1", cursor_out=cursor_out,
+        max_pairs=100, max_vision_calls=0)
+    assert stats["pairs_considered"] == 2  # beta + gama only; alfa skipped (behind cursor)
+    assert cursor_out["last_key"].startswith("name:5001:gama")
+    assert cursor_out["reached_end"] is True  # end of list -> cycle completes
+    assert stats["scan_groups_total"] == 2 and stats["scan_groups_scanned"] == 2
+
+
+def test_run_engine_cursor_truncation_reports_frontier(monkeypatch: Any) -> None:
+    """A truncated cursor run reports the last fully-scanned group as the frontier and
+    reached_end=False — the next run resumes there; the cycle does NOT complete."""
+    import scripts.dedup_engine as eng
+
+    monkeypatch.setattr(eng, "resolve_pair", _stub_resolve_pair)
+    cursor_out: dict[str, Any] = {}
+    stats = eng.run_engine(
+        _FakeConn(_three_group_rows()),
+        scan_cursor=None, cursor_out=cursor_out,
+        max_pairs=2, max_vision_calls=0)  # budget dies at beta's boundary -> only alfa completes
+    assert stats["truncated"] == 1
+    assert stats["truncated_cause"] == "pair_cap"
+    assert cursor_out["last_key"].startswith("name:5001:alfa")
+    assert cursor_out["reached_end"] is False
+
+
+# --- geo scan lane (PR-C): the same cursor machinery over geo cell keys ------
+
+_GEO_CELL_A = "geo:5001:50.1:14.5:dum|komercni:prodej"
+_GEO_CELL_B = "geo:5002:50.2:14.6:dum|komercni:prodej"
+_GEO_CELL_C = "geo:5003:50.3:14.7:dum|komercni:prodej"
+
+
+def _three_cell_geo_rows() -> list[tuple[Any, ...]]:
+    # Three geo cells of two cross-source members each; the stored cell keys sort
+    # lexically A < B < C (run_engine's cursor branch is key-agnostic).
+    return [
+        _geo_row(1, 101, cell=_GEO_CELL_A),
+        _geo_row(2, 102, cell=_GEO_CELL_A, source="idnes"),
+        _geo_row(3, 103, cell=_GEO_CELL_B),
+        _geo_row(4, 104, cell=_GEO_CELL_B, source="idnes"),
+        _geo_row(5, 105, cell=_GEO_CELL_C),
+        _geo_row(6, 106, cell=_GEO_CELL_C, source="idnes"),
+    ]
+
+
+def test_run_engine_geo_cursor_resumes_after_cell_key(monkeypatch: Any) -> None:
+    """The geo pass rides run_engine's existing cursor branch unchanged: with cursor_out
+    enabled it iterates geo cells in SORTED stored-key order and resumes strictly AFTER
+    scan_cursor — the lane='geo' frontier that stops the scheduled geo backstop from
+    head-restarting at the top every run (the pre-mig-261 street pathology)."""
+    import scripts.dedup_engine as eng
+
+    monkeypatch.setattr(eng, "resolve_pair", _stub_resolve_pair)
+    cursor_out: dict[str, Any] = {}
+    stats = eng.run_engine(
+        _FakeConn([], geo_rows=_three_cell_geo_rows()),
+        geo=True, scan_cursor=_GEO_CELL_A, cursor_out=cursor_out,
+        max_pairs=100, max_vision_calls=0)
+    assert stats["pairs_considered"] == 2  # cells B + C only; A skipped (behind cursor)
+    assert cursor_out["last_key"] == _GEO_CELL_C
+    assert cursor_out["reached_end"] is True  # end of list -> cycle completes
+    # The coverage gauges populate for geo runs too now that the caller passes cursor_out.
+    assert stats["scan_groups_total"] == 2 and stats["scan_groups_scanned"] == 2
+
+
+def test_run_engine_geo_cursor_truncation_reports_frontier(monkeypatch: Any) -> None:
+    """A truncated geo cursor run reports the last fully-scanned CELL as the frontier and
+    reached_end=False — the next scheduled run resumes there instead of the head."""
+    import scripts.dedup_engine as eng
+
+    monkeypatch.setattr(eng, "resolve_pair", _stub_resolve_pair)
+    cursor_out: dict[str, Any] = {}
+    stats = eng.run_engine(
+        _FakeConn([], geo_rows=_three_cell_geo_rows()),
+        geo=True, scan_cursor=None, cursor_out=cursor_out,
+        max_pairs=2, max_vision_calls=0)  # budget dies at cell B's boundary
+    assert stats["truncated"] == 1
+    assert stats["truncated_cause"] == "pair_cap"
+    assert cursor_out["last_key"] == _GEO_CELL_A
+    assert cursor_out["reached_end"] is False
+
+
+def _run_geo_only_main(monkeypatch: Any, *, reached_end: bool, last_key: str | None,
+                       loaded_state: dict[str, Any] | None = None,
+                       extra_argv: tuple[str, ...] = ()) -> dict[str, Any]:
+    """Drive main() end-to-end for a --geo-only run with the DB + settings + engine
+    faked, capturing the scan-state lane traffic (load/save lane, run_engine kwargs)."""
+    import sys
+    import types
+
+    import scripts.dedup_engine as eng
+    import toolkit.dedup_settings as ds
+
+    calls: dict[str, Any] = {"load": [], "save": [], "run_rows": [], "engine": []}
+
+    class _Conn:
+        def __enter__(self) -> "_Conn":
+            return self
+
+        def __exit__(self, *exc: Any) -> bool:
+            return False
+
+        def cursor(self) -> Any:
+            raise AssertionError("unexpected direct DB access in this main() path")
+
+    monkeypatch.setenv("SUPABASE_DB_URL", "postgres://test")
+    monkeypatch.setattr(sys, "argv", ["dedup_engine", "--geo-only", *extra_argv])
+    monkeypatch.setitem(
+        sys.modules, "psycopg",
+        types.SimpleNamespace(connect=lambda *a, **k: _Conn()))
+
+    settings = {
+        "dedup_geo_enabled": True,
+        "dedup_geo_area_max_pct": 0.20,
+        "dedup_floor_plan_budget": 0,
+        "dedup_floor_plan_inconclusive_to_review": False,
+        "dedup_nonbyt_attr_merge_enabled": False,
+        "dedup_defer_incomplete_downloads": False,
+    }
+    monkeypatch.setattr(ds, "read_setting", lambda conn, key: settings[key])
+    monkeypatch.setattr(eng, "_auto_merge_enabled", lambda conn: False)
+    monkeypatch.setattr(eng, "_visual_autodismiss_enabled", lambda conn: True)
+    monkeypatch.setattr(eng, "_clip_settings", lambda conn: {
+        "prefer_clip": False, "clip_model": None, "cosine_enabled": False,
+        "bands": None, "haiku_model": None, "render_min": 0.95,
+    })
+
+    state = loaded_state or {"cursor_key": None, "cycle_started_at": None}
+
+    def _load(conn: Any, lane: str = "street") -> dict[str, Any]:
+        calls["load"].append(lane)
+        return dict(state)
+
+    def _save(conn: Any, lane: str, *, cursor_key: str | None,
+              cycle_started_at: Any, completed: bool) -> None:
+        calls["save"].append({"lane": lane, "cursor_key": cursor_key,
+                              "cycle_started_at": cycle_started_at,
+                              "completed": completed})
+
+    def _fake_run_engine(conn: Any, **kw: Any) -> dict[str, Any]:
+        calls["engine"].append(kw)
+        if kw.get("cursor_out") is not None:
+            kw["cursor_out"]["last_key"] = last_key
+            kw["cursor_out"]["reached_end"] = reached_end
+        return {
+            "eligible": 5, "auto_phash": 0, "auto_visual": 0, "auto_dismissed": 0,
+            "floor_plan_deferred": 0, "queued": 1, "skipped_unresolved": 0,
+            "rejected": 0, "pairs_considered": 3, "vision_calls": 0,
+            "truncated": 0 if reached_end else 1,
+        }
+
+    monkeypatch.setattr(eng, "_load_scan_state", _load)
+    monkeypatch.setattr(eng, "_save_scan_state", _save)
+    monkeypatch.setattr(eng, "run_engine", _fake_run_engine)
+    monkeypatch.setattr(
+        eng, "_write_run_row",
+        lambda conn, stats, **kw: calls["run_rows"].append({"stats": stats, **kw}))
+    monkeypatch.setattr(eng, "_write_pair_audit", lambda *a, **k: None)
+
+    assert eng.main() == 0
+    return calls
+
+
+def test_main_geo_only_truncated_run_advances_geo_lane_frontier(monkeypatch: Any) -> None:
+    """main()'s geo branch mirrors the street full-scan branch: it loads lane='geo' scan
+    state, threads the loaded cursor + a cursor_out into run_engine(geo=True), and saves
+    the frontier (completed=False) when the run truncated mid-market."""
+    calls = _run_geo_only_main(
+        monkeypatch, reached_end=False, last_key=_GEO_CELL_B,
+        loaded_state={"cursor_key": _GEO_CELL_A, "cycle_started_at": "T0"})
+
+    assert calls["load"] == ["geo"]
+    (engine_kw,) = calls["engine"]
+    assert engine_kw["geo"] is True
+    assert engine_kw["scan_cursor"] == _GEO_CELL_A       # resumes from the loaded frontier
+    assert isinstance(engine_kw["cursor_out"], dict)     # gauges populate for geo runs
+    (save,) = calls["save"]
+    assert save == {"lane": "geo", "cursor_key": _GEO_CELL_B,
+                    "cycle_started_at": "T0", "completed": False}
+    assert calls["run_rows"] and calls["run_rows"][0]["run_kind"] == "geo"
+
+
+def test_main_geo_only_completed_run_resets_geo_lane_cursor(monkeypatch: Any) -> None:
+    """Reaching the end of the sorted cell list completes the lane='geo' CYCLE: the saved
+    state resets the cursor (completed=True), so the next run starts a fresh cycle."""
+    calls = _run_geo_only_main(monkeypatch, reached_end=True, last_key=_GEO_CELL_C)
+
+    (save,) = calls["save"]
+    assert save["lane"] == "geo"
+    assert save["completed"] is True
+    assert save["cursor_key"] is None
+    # Fresh lane (no cycle_started_at loaded) -> the cycle stamp falls back to run start.
+    assert save["cycle_started_at"] is not None
+
+
+def test_main_geo_only_shadow_never_saves_scan_state(monkeypatch: Any) -> None:
+    """--shadow writes nothing — the geo lane's frontier included (mirrors the street
+    branch's not-args.shadow guard)."""
+    calls = _run_geo_only_main(
+        monkeypatch, reached_end=True, last_key=_GEO_CELL_C, extra_argv=("--shadow",))
+
+    assert calls["load"] == ["geo"]  # still resumes from the frontier (read-only)
+    assert calls["save"] == []
+    assert calls["run_rows"] == []
+
+
+# --- oversized groups: disposition-class sharding + bounded processing -------
+
+def test_disposition_class_loose_equivalence() -> None:
+    # N+kk and N+1 share a class (classify_pair treats them compatible); unmapped
+    # values are their own class. Sharding street groups by the class is loss-free.
+    assert disposition_class("2+kk") == disposition_class("2+1")
+    assert disposition_class("3+kk") == disposition_class("3+1")
+    assert disposition_class("2+kk") != disposition_class("3+kk")
+    assert disposition_class("atypicky") == "atypicky"
+    assert disposition_class("6+kk") == "6+kk"
+    assert disposition_class(None) == ""
+
+
+def test_sharding_is_loss_free_for_compatible_pairs() -> None:
+    # Any pair classify_pair would NOT reject on disposition shares a shard.
+    for a, b in [("2+kk", "2+1"), ("2+1", "2+kk"), ("5+kk", "5+1"), ("atypicky", "atypicky")]:
+        assert disposition_compatible(a, b)
+        assert disposition_class(a) == disposition_class(b)
+
+
+def test_load_eligible_shards_street_groups_by_disposition_class() -> None:
+    # One street, two disposition classes -> TWO groups; loose pair (2+kk/2+1) stays together.
+    import scripts.dedup_engine as eng
+
+    conn = _FakeConn([
+        _row(1, 101, street_id=None, disp="2+kk", hn=None),
+        _row(2, 102, street_id=None, disp="2+1", hn=None, source="bazos"),
+        _row(3, 103, street_id=None, disp="3+kk", hn=None),
+    ])
+    keys = eng._load_eligible(conn)
+    groups = eng._group_by_street(keys)
+    assert len(groups) == 2
+    sizes = sorted(len(v) for v in groups.values())
+    assert sizes == [1, 2]
+    for key in groups:
+        assert "|d:" in key
+
+
+def _pk(sid: int, pid: int, source: str, price: int | None,
+        area: float = 60.0) -> ListingKey:
+    return ListingKey(
+        sreality_id=sid, property_id=pid, source=source,
+        street_key="name:5001:alfa|d:2+1", disposition="2+kk", house_number=None,
+        floor=None, area_m2=area, category_type="prodej", category_main="byt",
+        price_czk=price)
+
+
+def test_prioritized_group_pairs_orders_and_caps() -> None:
+    # Rejects dropped up front; dirty-touching pairs first, then cross-source,
+    # then smaller price gap; cap respected.
+    a = _pk(1, 101, "sreality", 5_000_000)
+    b = _pk(2, 102, "bazos", 5_000_000)      # cross-source, exact price match with a
+    c = _pk(3, 103, "sreality", 5_400_000)   # same-source vs a; cross vs b
+    rejected = _pk(4, 104, "idnes", 5_000_000, area=120.0)  # >10% area gap -> rule-C reject
+
+    pairs = prioritized_group_pairs([a, b, c, rejected], cap=100)
+    flat = [(x.sreality_id, y.sreality_id) for x, y in pairs]
+    assert all(4 not in p for p in flat)          # rejected pair never surfaces
+    assert flat[0] == (1, 2)                      # cross-source + 0% price gap first
+    assert set(flat) == {(1, 2), (2, 3), (1, 3)}
+
+    dirty_first = prioritized_group_pairs([a, b, c], cap=100,
+                                          priority_property_ids={103})
+    flat2 = [(x.sreality_id, y.sreality_id) for x, y in dirty_first]
+    assert 3 in flat2[0]                          # dirty-touching pair jumps the line
+
+    capped = prioritized_group_pairs([a, b, c], cap=1)
+    assert len(capped) == 1
+
+
+def test_run_engine_oversized_street_group_processes_bounded(monkeypatch: Any) -> None:
+    # 41 same-class members (> MAX_GROUP_SIZE=40): the group is processed bounded —
+    # counted, best pairs first — instead of the historical silent whole-group skip.
+    import scripts.dedup_engine as eng
+
+    monkeypatch.setattr(eng, "resolve_pair", _stub_resolve_pair)
+    n = eng.MAX_GROUP_SIZE + 1
+    conn = _FakeConn([
+        _row(i, 100 + i, street="Laurinova", street_id=None, hn=None, floor=None,
+             source=("sreality" if i % 2 else "bazos"))
+        for i in range(1, n + 1)
+    ])
+    stats = eng.run_engine(conn, classify_fn=None, compare_fn=None, max_vision_calls=0)
+    total = n * (n - 1) // 2  # 820
+    assert stats["oversized_groups"] == 1
+    assert stats["pairs_considered"] == eng.MAX_GROUP_PAIRS
+    assert stats["skipped_oversized"] == total - eng.MAX_GROUP_PAIRS
+
+
+def test_run_engine_dirty_oversized_group_is_processed_not_poisoned(monkeypatch: Any) -> None:
+    # The dirty-clear poisoning fix: an oversized group containing a claimed dirty
+    # property is PROCESSED (bounded) before its members resolve — previously it was
+    # skipped whole yet its dirty rows were cleared as if handled.
+    import scripts.dedup_engine as eng
+
+    monkeypatch.setattr(eng, "resolve_pair", _stub_resolve_pair)
+    n = eng.MAX_GROUP_SIZE + 1
+    conn = _FakeConn([
+        _row(i, 100 + i, street="Laurinova", street_id=None, hn=None, floor=None)
+        for i in range(1, n + 1)
+    ])
+    claimed = {101}
+    resolved: set[int] = set()
+    stats = eng.run_engine(conn, only_groups_with_property_ids=claimed,
+                           resolved_property_ids=resolved,
+                           classify_fn=None, compare_fn=None, max_vision_calls=0)
+    assert stats["pairs_considered"] > 0          # real pair work happened
+    assert stats["oversized_groups"] == 1
+    assert resolved >= claimed                    # cleared AFTER processing, not instead of
+
+
+# --- candidates lifecycle: due-filter + engine-looked stamp (migration 272) ---
+
+def test_proposed_candidate_property_ids_due_filter_sql() -> None:
+    # With a backoff the drain loads only DUE candidates: never-stamped, backoff-elapsed,
+    # or fresh CLIP evidence. Without one (None) the historical load-everything SQL runs.
+    import scripts.dedup_engine as eng
+
+    captured: dict[str, Any] = {}
+
+    class _Cur:
+        def __enter__(self): return self
+        def __exit__(self, *a): return None
+        def execute(self, sql, params=None):
+            captured["sql"] = " ".join(sql.split()); captured["params"] = params
+        def fetchall(self):
+            return [(11, 22)]
+
+    class _Conn:
+        def cursor(self): return _Cur()
+
+    out = eng._proposed_candidate_property_ids(_Conn(), redecide_hours=24)
+    sql = captured["sql"]
+    assert "last_engine_decision_at IS NULL" in sql
+    assert "< now() - (%(backoff_h)s * interval '1 hour')" in sql  # float-safe form
+    assert "i.clip_tagged_at > c.last_engine_decision_at" in sql
+    assert captured["params"]["backoff_h"] == 24.0
+    assert out == {11, 22}
+
+    eng._proposed_candidate_property_ids(_Conn(), redecide_hours=None)
+    assert "last_engine_decision_at" not in captured["sql"]  # historical full load
+
+
+def test_stamp_engine_looked_set_based_update() -> None:
+    import scripts.dedup_engine as eng
+
+    captured: list[tuple[str, Any]] = []
+
+    class _Cur:
+        def __enter__(self): return self
+        def __exit__(self, *a): return None
+        def execute(self, sql, params=None):
+            captured.append((" ".join(sql.split()), params))
+
+    class _Conn:
+        def cursor(self): return _Cur()
+
+    eng._stamp_engine_looked(_Conn(), {})
+    assert captured == []                       # empty -> no round trip
+
+    eng._stamp_engine_looked(_Conn(), {(5, 9): "visual_inconclusive", (2, 3): "clip_deferred"})
+    sql, params = captured[-1]
+    assert "SET last_engine_decision_at = now(), engine_decision = v.reason" in sql
+    assert "c.status = 'proposed'" in sql
+    pairs = dict(zip(zip(params["los"], params["his"]), params["reasons"]))
+    assert pairs == {(5, 9): "visual_inconclusive", (2, 3): "clip_deferred"}
+
+
+def test_run_engine_free_skip_stamps_engine_looked() -> None:
+    # A free-mode pair that ends skipped_unresolved is STAMPED (the treadmill fix): the
+    # candidate drain's due-filter will skip it until backoff or fresh CLIP evidence.
+    import scripts.dedup_engine as eng
+
+    conn = _FakeConn([
+        _row(1, 101, hn=None, source="sreality"),
+        _row(2, 102, hn=None, source="bazos"),
+    ])
+    stats = eng.run_engine(conn, classify_fn=None, compare_fn=None, max_vision_calls=10,
+                           enqueue_unresolved=False)
+    assert stats["skipped_unresolved"] == 1
+    stamps = [(s, p) for s, p in conn.resolved if "last_engine_decision_at = now()" in s]
+    assert len(stamps) == 1
+    _sql, params = stamps[0]
+    assert params["los"] == [101] and params["his"] == [102]
+
+
+# --- dirty lane: ordered claim + claim-order processing + run_dirty_pass -----
+
+def test_claim_dedup_dirty_returns_newest_first_list() -> None:
+    # The claim is an ORDERED list (newest-first) — returning a set discarded the
+    # ORDER BY and let load-order (obec-ASC) head-of-line groups starve the queue head.
+    import scripts.dedup_engine as eng
+
+    class _Cur:
+        def __enter__(self): return self
+        def __exit__(self, *a): return None
+        def execute(self, sql, params=None):
+            assert "ORDER BY marked_at DESC" in sql
+        def fetchall(self):
+            return [(7,), (5,), (9,)]
+
+    class _Conn:
+        def cursor(self): return _Cur()
+
+    claimed = eng._claim_dedup_dirty(_Conn(), "T0", limit=10)
+    assert claimed == [7, 5, 9]          # order preserved, not a set
+
+
+def test_run_engine_processes_groups_in_claim_order(monkeypatch: Any) -> None:
+    # priority_property_order ranks the scoped scan: the NEWEST claimed property's group
+    # is processed first, so a budget-cut run spends its budget on the queue head.
+    import scripts.dedup_engine as eng
+
+    monkeypatch.setattr(eng, "resolve_pair", _stub_resolve_pair)
+    conn = _FakeConn([
+        _row(1, 101, street="Alfa", street_id=None, hn=None),
+        _row(2, 102, street="Alfa", street_id=None, hn=None, source="bazos"),
+        _row(3, 201, street="Zeta", street_id=None, hn=None),
+        _row(4, 202, street="Zeta", street_id=None, hn=None, source="bazos"),
+    ])
+    claimed_order = [201, 101]           # Zeta's property is the newest claim
+    resolved: set[int] = set()
+    stats = eng.run_engine(
+        conn, only_groups_with_property_ids=set(claimed_order),
+        resolved_property_ids=resolved, priority_property_order=claimed_order,
+        max_pairs=2, max_vision_calls=0)  # budget covers Zeta fully, dies at Alfa's boundary
+    assert stats["truncated"] == 1
+    assert 201 in resolved and 202 in resolved   # newest group processed + cleared
+    assert 101 not in resolved                   # older group keeps its claim
+
+
+def test_run_dirty_pass_contract(monkeypatch: Any) -> None:
+    # prune -> ordered claim -> scoped run (claim order threaded) -> incremental clear ->
+    # run row with run_kind='dirty' + runner; empty queue returns None with NO run row.
+    import scripts.dedup_engine as eng
+
+    calls: dict[str, Any] = {}
+
+    class _Cur:
+        def __enter__(self): return self
+        def __exit__(self, *a): return None
+        def execute(self, sql, params=None): self._sql = sql
+        def fetchone(self):
+            return ("CUTOFF",) if "SELECT now()" in self._sql else (42,)
+
+    class _Conn:
+        def cursor(self): return _Cur()
+
+    monkeypatch.setattr(eng, "_prune_stale_dedup_dirty", lambda conn: 3)
+    monkeypatch.setattr(eng, "_claim_dedup_dirty",
+                        lambda conn, cutoff, limit=None: [9, 5])
+    monkeypatch.setattr(eng, "_dirty_queue_age_p95_seconds",
+                        lambda conn, cutoff: 1234)
+    monkeypatch.setattr(eng, "_claimed_street_groups",
+                        lambda conn, pids: (set(), set()))
+    monkeypatch.setattr(eng, "_claimed_family_eligibility",
+                        lambda conn, pids: {9: (True, False), 5: (True, False)})
+    monkeypatch.setattr(eng, "_claimed_geo_cells", lambda conn, pids: set())
+
+    def _fake_run_engine(conn, **kw):
+        calls["priority_property_order"] = kw["priority_property_order"]
+        kw["resolved_property_ids"].update({9})
+        return {"truncated": 0, "pairs_considered": 1}
+    monkeypatch.setattr(eng, "run_engine", _fake_run_engine)
+
+    def _fake_clear(conn, pids, cutoff):
+        calls["cleared"] = sorted(pids)
+        return 1
+    monkeypatch.setattr(eng, "_clear_dedup_dirty", _fake_clear)
+    monkeypatch.setattr(eng, "_write_run_row",
+                        lambda conn, stats, *, run_kind, started_at, runner="actions":
+                        calls.update(run_kind=run_kind, runner=runner, stats=dict(stats)))
+    monkeypatch.setattr(eng, "_write_pair_audit", lambda conn, at, audit: None)
+
+    stats = eng.run_dirty_pass(_Conn(), max_dirty=10, max_pairs=100, engine_kw={},
+                               runner="worker", started_at="T0")
+    assert stats is not None
+    assert calls["priority_property_order"] == [9, 5]
+    assert calls["cleared"] == [9]                      # only the resolved claim cleared
+    assert calls["run_kind"] == "dirty" and calls["runner"] == "worker"
+    assert calls["stats"]["dirty_claimed"] == 2
+    assert calls["stats"]["dirty_age_p95_seconds"] == 1234
+    assert calls["stats"]["dirty_pruned"] == 3
+    assert calls["stats"]["dirty_cleared"] == 1
+
+    # Empty queue: None, and no run row written.
+    calls.clear()
+    monkeypatch.setattr(eng, "_claim_dedup_dirty", lambda conn, cutoff, limit=None: [])
+    assert eng.run_dirty_pass(_Conn(), max_dirty=10, max_pairs=100, engine_kw={}) is None
+    assert "run_kind" not in calls
+
+
+# --- dirty lane geo sub-pass (PR-B): both families, one queue, one brain -----
+
+def _dirty_pass_harness(
+    monkeypatch: Any, *,
+    claimed: list[int],
+    family: dict[int, tuple[bool, bool]],
+    geo_cells: set[str] = frozenset(),
+    street_resolves: set[int] = frozenset(),
+    geo_resolves: set[int] = frozenset(),
+    street_stats: dict[str, Any] | None = None,
+    geo_stats: dict[str, Any] | None = None,
+) -> tuple[Any, Any, dict[str, Any]]:
+    """Fake out run_dirty_pass's collaborators so the street/geo sub-pass orchestration
+    (deadline handoff, kwargs derivation, per-family clear, single run row) is testable
+    without a DB. `calls['engine']` records each run_engine invocation's kwargs."""
+    import scripts.dedup_engine as eng
+
+    calls: dict[str, Any] = {"engine": [], "cleared": None, "rows": []}
+
+    class _Cur:
+        def __enter__(self): return self
+        def __exit__(self, *a): return None
+        def execute(self, sql, params=None): self._sql = sql
+        def fetchone(self):
+            return ("CUTOFF",) if "SELECT now()" in self._sql else (42,)
+
+    class _Conn:
+        def cursor(self): return _Cur()
+
+    monkeypatch.setattr(eng, "_prune_stale_dedup_dirty", lambda conn: 0)
+    monkeypatch.setattr(eng, "_claim_dedup_dirty",
+                        lambda conn, cutoff, limit=None: list(claimed))
+    monkeypatch.setattr(eng, "_dirty_queue_age_p95_seconds", lambda conn, cutoff: None)
+    monkeypatch.setattr(eng, "_claimed_street_groups", lambda conn, pids: (set(), set()))
+    monkeypatch.setattr(eng, "_claimed_family_eligibility",
+                        lambda conn, pids: dict(family))
+    monkeypatch.setattr(eng, "_claimed_geo_cells", lambda conn, pids: set(geo_cells))
+    import toolkit.dedup_settings as ds
+    monkeypatch.setattr(ds, "read_setting", lambda conn, key: 0.2)
+
+    def _fake_run_engine(conn, **kw):
+        calls["engine"].append(kw)
+        if kw.get("geo"):
+            kw["resolved_property_ids"].update(geo_resolves)
+            return dict(geo_stats or {"truncated": 0, "pairs_considered": 2, "queued": 1})
+        kw["resolved_property_ids"].update(street_resolves)
+        return dict(street_stats or {"truncated": 0, "pairs_considered": 1, "queued": 0})
+    monkeypatch.setattr(eng, "run_engine", _fake_run_engine)
+
+    def _fake_clear(conn, pids, cutoff):
+        calls["cleared"] = sorted(pids)
+        return len(pids)
+    monkeypatch.setattr(eng, "_clear_dedup_dirty", _fake_clear)
+    monkeypatch.setattr(eng, "_write_run_row",
+                        lambda conn, stats, *, run_kind, started_at, runner="actions":
+                        calls["rows"].append((run_kind, dict(stats))))
+    monkeypatch.setattr(eng, "_write_pair_audit", lambda conn, at, audit: None)
+    return eng, _Conn(), calls
+
+
+def test_run_dirty_pass_street_only_claim_skips_geo(monkeypatch: Any) -> None:
+    # (a) a street-only claim never touches the geo sub-pass (no geo cells), and clears
+    # on the street resolve alone.
+    eng, conn, calls = _dirty_pass_harness(
+        monkeypatch, claimed=[9], family={9: (True, False)},
+        geo_cells=set(), street_resolves={9})
+    stats = eng.run_dirty_pass(conn, max_dirty=10, max_pairs=100, engine_kw={})
+    assert stats is not None
+    assert len(calls["engine"]) == 1 and not calls["engine"][0].get("geo")
+    assert calls["cleared"] == [9]
+
+
+def test_run_dirty_pass_geo_only_claim_runs_geo_subpass(monkeypatch: Any) -> None:
+    # (b) a geo-only claim gets the SECOND run_engine(geo=True) over its stored cells —
+    # enqueue_unresolved forced ON (tier-'geo' queue is geo's only surfacing mechanism),
+    # scoped by restrict_geo_cells, same claim order — and clears on the GEO resolve
+    # (the street sub-pass resolving it vacuously is not enough: se=False short-circuits,
+    # ge=True requires dirty_resolved_geo).
+    eng, conn, calls = _dirty_pass_harness(
+        monkeypatch, claimed=[7], family={7: (False, True)},
+        geo_cells={"geo:5001:50.1:14.5:dum|komercni:prodej"}, geo_resolves={7})
+    stats = eng.run_dirty_pass(
+        conn, max_dirty=10, max_pairs=100,
+        engine_kw={"enqueue_unresolved": False, "restrict_property_ids": None})
+    assert stats is not None
+    assert len(calls["engine"]) == 2
+    street_kw, geo_kw = calls["engine"]
+    assert not street_kw.get("geo")
+    assert street_kw["enqueue_unresolved"] is False      # street posture untouched
+    assert geo_kw["geo"] is True
+    assert geo_kw["enqueue_unresolved"] is True          # geo forces the queue valve open
+    assert geo_kw["restrict_geo_cells"] == {"geo:5001:50.1:14.5:dum|komercni:prodej"}
+    assert geo_kw["restrict_property_ids"] is None       # cell scope, not property scope
+    assert geo_kw["geo_area_max_pct"] == 0.2             # from dedup_geo_area_max_pct
+    assert geo_kw["only_groups_with_property_ids"] == {7}
+    assert geo_kw["priority_property_order"] == [7]
+    assert calls["cleared"] == [7]
+
+
+def test_run_dirty_pass_mixed_claim_clears_per_family(monkeypatch: Any) -> None:
+    # (c) mixed claim: both sub-passes run; the street-only pid clears on the street
+    # resolve while the geo-eligible pid — vacuously "resolved" by the street pass (it
+    # has no street groups) — stays claimed until the GEO family resolves it.
+    eng, conn, calls = _dirty_pass_harness(
+        monkeypatch, claimed=[9, 7], family={9: (True, False), 7: (False, True)},
+        geo_cells={"cellA"}, street_resolves={9, 7}, geo_resolves=set())
+    stats = eng.run_dirty_pass(conn, max_dirty=10, max_pairs=100, engine_kw={})
+    assert stats is not None
+    assert len(calls["engine"]) == 2
+    assert calls["cleared"] == [9]
+
+    # and once the geo family resolves too, both clear; a neither-eligible pid clears
+    # immediately (queue hygiene — the publish sweep owns its publication).
+    eng, conn, calls = _dirty_pass_harness(
+        monkeypatch, claimed=[9, 7, 3],
+        family={9: (True, False), 7: (False, True)},   # 3 absent = (False, False)
+        geo_cells={"cellA"}, street_resolves={9, 7, 3}, geo_resolves={9, 7, 3})
+    eng.run_dirty_pass(conn, max_dirty=10, max_pairs=100, engine_kw={})
+    assert calls["cleared"] == [3, 7, 9]
+
+
+def test_run_dirty_pass_deadline_skips_geo_keeps_claims(monkeypatch: Any) -> None:
+    # (d) the street sub-pass exhausting the SHARED wall-clock budget defers the geo
+    # sub-pass whole: no second run_engine call, geo-only pids NOT cleared (they keep
+    # their claim for the next pass), and the run row is marked truncated.
+    import time as _time
+
+    eng, conn, calls = _dirty_pass_harness(
+        monkeypatch, claimed=[7, 9], family={7: (False, True), 9: (True, False)},
+        geo_cells={"cellA"}, street_resolves={7, 9}, geo_resolves={7})
+    stats = eng.run_dirty_pass(
+        conn, max_dirty=10, max_pairs=100,
+        engine_kw={"deadline": _time.monotonic() - 1.0})
+    assert stats is not None
+    assert len(calls["engine"]) == 1                     # geo sub-pass skipped
+    assert calls["cleared"] == [9]                       # street-only pid still clears
+    assert stats["truncated"] == 1
+    assert stats["truncated_cause"] == "deadline"
+    assert stats["dirty_truncated"] == 1
+
+
+def test_run_dirty_pass_aggregates_both_families_into_one_run_row(monkeypatch: Any) -> None:
+    # (e) ONE run row per pass (run_kind='dirty'): the pair/merge/queue counters are
+    # BOTH-family totals, truncated is OR'd, and the market gauges stay NULL (scoped
+    # runs don't measure the market — the geo sub-pass's scoped eligible count must
+    # not masquerade as one).
+    eng, conn, calls = _dirty_pass_harness(
+        monkeypatch, claimed=[9, 7], family={9: (True, False), 7: (False, True)},
+        geo_cells={"cellA"}, street_resolves={9, 7}, geo_resolves={9, 7},
+        street_stats={"eligible": None, "truncated": 0, "truncated_cause": None,
+                      "pairs_considered": 3, "queued": 1, "auto_phash": 1,
+                      "auto_visual": 0, "vision_calls": 2},
+        geo_stats={"eligible": 12, "truncated": 1, "truncated_cause": "pair_cap",
+                   "pairs_considered": 2, "queued": 2, "auto_phash": 0,
+                   "auto_visual": 1, "vision_calls": 3})
+    stats = eng.run_dirty_pass(conn, max_dirty=10, max_pairs=100, engine_kw={})
+    assert stats is not None
+    assert len(calls["rows"]) == 1
+    kind, row = calls["rows"][0]
+    assert kind == "dirty"
+    assert row["pairs_considered"] == 5 and row["queued"] == 3
+    assert row["auto_phash"] == 1 and row["auto_visual"] == 1
+    assert row["vision_calls"] == 5
+    assert row["eligible"] is None                       # gauge NOT summed
+    assert row["truncated"] == 1 and row["truncated_cause"] == "pair_cap"
+    assert row["dirty_claimed"] == 2 and row["dirty_cleared"] == 2
+
+
+def test_merge_dirty_stats_shapes() -> None:
+    # truncated ORs (never sums to 2); street cause wins when both truncated; a geo-only
+    # counter fills a street None; gauges never fold across families.
+    import scripts.dedup_engine as eng
+
+    merged = eng._merge_dirty_stats(
+        {"truncated": 1, "truncated_cause": "deadline", "pairs_considered": 1,
+         "eligible": None, "clip_deferred": None},
+        {"truncated": 1, "truncated_cause": "pair_cap", "pairs_considered": 2,
+         "eligible": 10, "clip_deferred": 4})
+    assert merged["truncated"] == 1
+    assert merged["truncated_cause"] == "deadline"
+    assert merged["pairs_considered"] == 3
+    assert merged["eligible"] is None
+    assert merged["clip_deferred"] == 4                  # None + int -> the int
+
+
+def test_build_free_engine_kw_enqueue_unresolved_param(monkeypatch: Any) -> None:
+    # Default False keeps the street --free posture (the /dedup queue never inflates
+    # with un-vision'd street pairs); the geo sub-pass derives an enqueue-ON variant.
+    import scripts.dedup_engine as eng
+    import toolkit.dedup_settings as ds
+
+    monkeypatch.setattr(eng, "_auto_merge_enabled", lambda conn: True)
+    monkeypatch.setattr(eng, "_visual_autodismiss_enabled", lambda conn: True)
+    monkeypatch.setattr(eng, "_clip_settings", lambda conn: {
+        "prefer_clip": False, "clip_model": None, "cosine_enabled": False,
+        "bands": None, "haiku_model": None, "render_min": 0.95})
+    monkeypatch.setattr(ds, "read_setting", lambda conn, key: True)
+    monkeypatch.setattr(eng, "_build_floor_plan_fn", lambda conn, **k: "fp")
+
+    kw = eng.build_free_engine_kw(object(), compare_budget=0, floor_plan_budget=1)
+    assert kw["enqueue_unresolved"] is False
+    kw2 = eng.build_free_engine_kw(object(), compare_budget=0, floor_plan_budget=1,
+                                   enqueue_unresolved=True)
+    assert kw2["enqueue_unresolved"] is True
+
+
+def test_run_realtime_dirty_pass_delegates_free_mode(monkeypatch: Any) -> None:
+    # The worker's single entry point: assemble the --free engine_kw and delegate to
+    # run_dirty_pass with runner='worker' and a deadline from max_seconds.
+    import scripts.dedup_engine as eng
+
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(eng, "build_free_engine_kw",
+                        lambda conn, **kw: {"_kw": kw, "enqueue_unresolved": False})
+
+    def _fake_dirty(conn, *, max_dirty, max_pairs, engine_kw, runner, stamp_stats=None):
+        captured.update(max_dirty=max_dirty, max_pairs=max_pairs,
+                        engine_kw=engine_kw, runner=runner)
+        return {"dirty_claimed": 1}
+    monkeypatch.setattr(eng, "run_dirty_pass", _fake_dirty)
+
+    out = eng.run_realtime_dirty_pass(
+        object(), max_dirty=200, compare_budget=4, floor_plan_budget=4, max_seconds=120)
+    assert out == {"dirty_claimed": 1}
+    assert captured["runner"] == "worker"
+    assert captured["max_dirty"] == 200
+    assert captured["engine_kw"]["_kw"]["compare_budget"] == 4
+    assert captured["engine_kw"]["_kw"]["floor_plan_budget"] == 4
+    assert captured["engine_kw"]["_kw"]["deadline"] is not None  # max_seconds>0 -> a deadline
+
+
+def test_vision_error_breaker_helpers() -> None:
+    # After VISION_ERROR_BREAKER errors the paid fns stop calling out (cache reads only) —
+    # a dead key / exhausted credit degrades instead of burning the run budget on errors.
+    import scripts.dedup_engine as eng
+
+    err = [0]
+    assert eng._breaker_open(err) is False
+    assert eng._breaker_open(None) is False
+    for _ in range(eng.VISION_ERROR_BREAKER):
+        eng._count_vision_error(err)
+    assert err[0] == eng.VISION_ERROR_BREAKER
+    assert eng._breaker_open(err) is True
+    eng._count_vision_error(None)  # no counter wired -> no-op
+
+
+def test_prune_stale_dedup_dirty_is_cycle_gated() -> None:
+    """TTL eviction must ALSO require coverage by a completed full-scan cycle
+    (marked_at < dedup_scan_state.last_cycle_started_at) — with no completed cycle the NULL
+    comparison evicts nothing, so eviction can never silently discard uncovered work."""
+    import scripts.dedup_engine as eng
+
+    captured: list[str] = []
+
+    class _Cur:
+        rowcount = 0
+        def __enter__(self): return self
+        def __exit__(self, *exc): return None
+        def execute(self, sql, params=None): captured.append(sql)
+
+    class _Conn:
+        def cursor(self): return _Cur()
+
+    eng._prune_stale_dedup_dirty(_Conn())
+    sql = captured[-1]
+    assert "last_cycle_started_at" in sql and "dedup_scan_state" in sql
+    assert "lane = 'street'" in sql
+
+
+def test_save_scan_state_shapes() -> None:
+    """completed=True stamps the finished cycle + resets the cursor; completed=False only
+    advances the frontier."""
+    import scripts.dedup_engine as eng
+
+    captured: list[tuple[str, Any]] = []
+
+    class _Cur:
+        def __enter__(self): return self
+        def __exit__(self, *exc): return None
+        def execute(self, sql, params=None): captured.append((sql, params))
+
+    class _Conn:
+        def cursor(self): return _Cur()
+
+    eng._save_scan_state(_Conn(), "street", cursor_key="k", cycle_started_at="T", completed=False)
+    sql, params = captured[-1]
+    assert "cursor_key = EXCLUDED.cursor_key" in sql and params == ("street", "k", "T")
+
+    eng._save_scan_state(_Conn(), "street", cursor_key=None, cycle_started_at="T", completed=True)
+    sql, params = captured[-1]
+    assert "last_cycle_started_at = EXCLUDED.last_cycle_started_at" in sql
+    assert "cursor_key = NULL" in sql and params == ("street", "T")
 
 
 def test_proposed_candidate_property_ids() -> None:
@@ -1421,9 +2764,9 @@ def test_load_eligible_street_group_scope() -> None:
         def __exit__(self, *a): return None
         def execute(self, sql, params=None):
             captured["sql"] = " ".join(sql.split()); captured["params"] = params
-        def fetchall(self):  # one eligible row (13 cols) -> exercises ListingKey build
+        def fetchall(self):  # one eligible row (14 cols) -> exercises ListingKey build
             return [(1, 101, "sreality", "Hlavní", None, "2+kk", "10", 3, 60.0,
-                     "desc", "prodej", "byt", 42)]
+                     "desc", "prodej", "byt", 42, 4_990_000)]
 
     class _Conn:
         def cursor(self): return _C()
@@ -1467,6 +2810,80 @@ def test_claimed_street_groups() -> None:
     assert eng._claimed_street_groups(_Conn(), set()) == (set(), set())
 
 
+def test_claimed_geo_cells_sql_shape() -> None:
+    """The geo work-list: DISTINCT stored geo_cell_key of the claimed properties'
+    geo-ELIGIBLE listings — mirrors _GEO_ELIGIBLE_SQL's WHERE (active single-dwelling
+    with an area, NOT street-eligible) minus the properties join, cell required. Empty
+    claim short-circuits without touching the DB."""
+    import scripts.dedup_engine as eng
+
+    captured: dict[str, Any] = {}
+
+    class _C:
+        def __enter__(self): return self
+        def __exit__(self, *a): return None
+        def execute(self, sql, params=None):
+            captured["sql"] = " ".join(sql.split()); captured["params"] = params
+        def fetchall(self):
+            return [("geo:5001:50.1:14.5:dum|komercni:prodej",)]
+
+    class _Conn:
+        def cursor(self): return _C()
+
+    cells = eng._claimed_geo_cells(_Conn(), {101, 102})
+    assert cells == {"geo:5001:50.1:14.5:dum|komercni:prodej"}
+    sql = captured["sql"]
+    assert "SELECT DISTINCT l.geo_cell_key" in sql
+    assert "l.property_id = ANY(%s)" in sql
+    assert "l.geo_cell_key IS NOT NULL" in sql
+    # the geo pass eligibility, single-sourced from toolkit.publication:
+    assert "l.is_active = true" in sql
+    assert "l.category_main IN ('dum', 'pozemek', 'komercni', 'ostatni')" in sql
+    assert "coalesce(l.area_m2, l.estate_area, l.usable_area) IS NOT NULL" in sql
+    # ...and NOT street-eligible (those rows are the street sub-pass's work).
+    assert "NOT (l.street IS NOT NULL AND l.street <> '' AND l.disposition IS NOT NULL)" in sql
+    assert sorted(captured["params"][0]) == [101, 102]
+
+    class _NoDB:
+        def cursor(self): raise AssertionError("must not query for an empty claim")
+
+    assert eng._claimed_geo_cells(_NoDB(), set()) == set()
+
+
+def test_claimed_family_eligibility_sql_shape() -> None:
+    """Per-pid (street, geo) eligibility in ONE grouped query — the per-family clear's
+    key. The geo arm requires the stored cell (== 'the geo sub-pass can load it');
+    missing pids read (False, False); empty claim short-circuits."""
+    import scripts.dedup_engine as eng
+
+    captured: dict[str, Any] = {}
+
+    class _C:
+        def __enter__(self): return self
+        def __exit__(self, *a): return None
+        def execute(self, sql, params=None):
+            captured["sql"] = " ".join(sql.split()); captured["params"] = params
+        def fetchall(self):
+            return [(9, True, False), (7, False, True), (3, None, None)]
+
+    class _Conn:
+        def cursor(self): return _C()
+
+    fam = eng._claimed_family_eligibility(_Conn(), {9, 7, 3})
+    assert fam == {9: (True, False), 7: (False, True), 3: (False, False)}
+    sql = captured["sql"]
+    assert "SELECT l.property_id" in sql and "GROUP BY 1" in sql
+    assert sql.count("bool_or(") == 2
+    assert "l.property_id = ANY(%s)" in sql
+    assert "l.geo_cell_key IS NOT NULL" in sql           # geo arm == loadable by the sub-pass
+    assert "l.street IS NOT NULL AND l.street <> '' AND l.disposition IS NOT NULL" in sql
+
+    class _NoDB:
+        def cursor(self): raise AssertionError("must not query for an empty claim")
+
+    assert eng._claimed_family_eligibility(_NoDB(), set()) == {}
+
+
 def test_resolve_pair_seam_standalone() -> None:
     """resolve_pair is callable standalone with a hand-built _RunContext — the exact seam
     the candidate-priority drain + the real-time per-listing path reuse (one decision tree,
@@ -1490,9 +2907,10 @@ def test_floor_plan_gate_branches(monkeypatch: Any) -> None:
     monkeypatch.setattr(eng, "_floor_plan_image_ids", lambda conn, sid: [])
     assert eng._floor_plan_gate(None, 1, 2, floor_plan_fn=None, vision_budget=[5]) == "merge"
 
-    # exactly one side has a plan -> queue (can't compare plan-to-plan)
+    # exactly one side has a plan -> MERGE (contradiction-veto: no plan-to-plan compare is
+    # possible, so the gate can't contradict the primary pHash/visual signal — it never queues).
     monkeypatch.setattr(eng, "_floor_plan_image_ids", lambda conn, sid: [9] if sid == 1 else [])
-    assert eng._floor_plan_gate(None, 1, 2, floor_plan_fn=None, vision_budget=[5]) == "queue"
+    assert eng._floor_plan_gate(None, 1, 2, floor_plan_fn=None, vision_budget=[5]) == "merge"
 
     # both have plans + a verdict available -> confirm/dismiss
     monkeypatch.setattr(eng, "_floor_plan_image_ids", lambda conn, sid: [9])
@@ -1500,9 +2918,15 @@ def test_floor_plan_gate_branches(monkeypatch: Any) -> None:
     same = lambda a, b, ia, ib: {"verdict": "same_layout"}       # noqa: E731
     none = lambda a, b, ia, ib: None                             # noqa: E731 (unwarmed)
     inconc = lambda a, b, ia, ib: {"verdict": "inconclusive"}    # noqa: E731
+    no2d = lambda a, b, ia, ib: {"verdict": "no_2d_plan"}        # noqa: E731 (only 3D renders)
     assert eng._floor_plan_gate(None, 1, 2, floor_plan_fn=diff, vision_budget=[5]) == "dismiss"
     assert eng._floor_plan_gate(None, 1, 2, floor_plan_fn=same, vision_budget=[5]) == "merge"
-    # 'inconclusive' -> manual review by default (toggle on); off -> treat as same -> merge
+    # 'no_2d_plan' (>=1 side only 3D renders / illegible) -> MERGE, NEVER queue, regardless of the
+    # inconclusive toggle: the plan check is moot, so the primary signal stands (the 3D-render fix).
+    assert eng._floor_plan_gate(
+        None, 1, 2, floor_plan_fn=no2d, vision_budget=[5], inconclusive_to_review=True) == "merge"
+    # 'inconclusive' (BOTH sides HAVE usable 2D plans, still ambiguous) -> manual review by default
+    # (toggle on); off -> treat as no-contradiction -> merge.
     assert eng._floor_plan_gate(
         None, 1, 2, floor_plan_fn=inconc, vision_budget=[5],
         inconclusive_to_review=True) == "queue"
@@ -1563,10 +2987,58 @@ def test_run_engine_phash_floor_plan_same_merges(monkeypatch: Any) -> None:
     assert merges == ["image_phash"]
 
 
-def test_run_engine_phash_floor_plan_one_sided_queues(monkeypatch: Any) -> None:
-    # pHash would merge, but only ONE side has a floor plan -> operator queue.
+def test_run_engine_floor_plan_budget_separate_from_compare(monkeypatch: Any) -> None:
+    """W2: the floor-plan gate runs on its OWN budget (run_engine.floor_plan_calls), so a
+    zero COMPARE pool (max_vision_calls=0) can't starve it — the gate still fires its cold
+    check on a would-merge pHash pair, and the call is counted in vision_calls. With the
+    budget ALIASED (floor_plan_calls=None) the same zero pool DEFERS instead — the historical
+    shared-pool behaviour, unchanged."""
     import scripts.dedup_engine as eng
 
+    monkeypatch.setattr(
+        eng, "merge_properties",
+        lambda conn, *, survivor_id, retired_id, reason, **kw: {"data": {"merge_group_id": "g"}},
+    )
+    monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 3)
+    monkeypatch.setattr(eng, "_both_have_site_plan", lambda *a, **k: False)
+    monkeypatch.setattr(eng, "_floor_plan_image_ids", lambda conn, sid: [sid])
+    calls: list[int] = []
+
+    def fp(a, b, ia, ib):
+        calls.append(1)
+        return {"verdict": "different_layout"}
+
+    # Separate budget: compare pool 0, floor-plan budget 5 -> the gate STILL runs (dismiss).
+    conn = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None, source="bazos")])
+    stats = eng.run_engine(conn, classify_fn=None, compare_fn=None, floor_plan_fn=fp,
+                           max_vision_calls=0, floor_plan_calls=5)
+    assert stats["auto_dismissed"] == 1
+    assert stats["auto_phash"] == 0
+    assert stats["vision_calls"] == 1  # the one cold floor-plan check, counted
+    assert calls == [1]
+
+    # Aliased (floor_plan_calls=None): the same zero pool starves the gate -> DEFER, no verdict.
+    calls.clear()
+    conn2 = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None, source="bazos")])
+    stats2 = eng.run_engine(conn2, classify_fn=None, compare_fn=None, floor_plan_fn=fp,
+                            max_vision_calls=0)
+    assert stats2["auto_dismissed"] == 0
+    assert stats2["floor_plan_deferred"] == 1
+    assert stats2["vision_calls"] == 0
+    assert calls == []  # gate never called the fn (budget 0, aliased)
+
+
+def test_run_engine_phash_floor_plan_one_sided_merges(monkeypatch: Any) -> None:
+    # pHash would merge and only ONE side has a floor plan -> the gate can't do a plan-to-plan
+    # compare, so it doesn't contradict: the pHash merge PROCEEDS (contradiction-veto, migration
+    # 260; was a manual queue before, which vetoed obvious cross-portal re-posts).
+    import scripts.dedup_engine as eng
+
+    merges: list[str] = []
+    monkeypatch.setattr(
+        eng, "merge_properties",
+        lambda conn, *, survivor_id, retired_id, reason, **kw: merges.append(reason) or {"data": {"merge_group_id": "g"}},
+    )
     monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 3)
     monkeypatch.setattr(eng, "_both_have_site_plan", lambda *a, **k: False)
     monkeypatch.setattr(eng, "_floor_plan_image_ids", lambda conn, sid: [sid] if sid == 1 else [])
@@ -1574,8 +3046,32 @@ def test_run_engine_phash_floor_plan_one_sided_queues(monkeypatch: Any) -> None:
     conn = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None, source="bazos")])
     stats = eng.run_engine(conn, classify_fn=None, compare_fn=None, floor_plan_fn=None, max_vision_calls=10)
 
-    assert stats["auto_phash"] == 0
-    assert stats["queued"] >= 1
+    assert stats["auto_phash"] == 1
+    assert stats["queued"] == 0
+    assert merges == ["image_phash"]
+
+
+def test_run_engine_phash_floor_plan_no_2d_plan_merges(monkeypatch: Any) -> None:
+    # Both sides carry a plan-tagged image, but the compare says no_2d_plan (only 3D renders /
+    # illegible) -> the check is moot, so the pHash merge PROCEEDS (the 3D-render fix, migration 260).
+    import scripts.dedup_engine as eng
+
+    merges: list[str] = []
+    monkeypatch.setattr(
+        eng, "merge_properties",
+        lambda conn, *, survivor_id, retired_id, reason, **kw: merges.append(reason) or {"data": {"merge_group_id": "g"}},
+    )
+    monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 3)
+    monkeypatch.setattr(eng, "_both_have_site_plan", lambda *a, **k: False)
+    monkeypatch.setattr(eng, "_floor_plan_image_ids", lambda conn, sid: [sid])  # both have a plan-tag
+    fp = lambda a, b, ia, ib: {"verdict": "no_2d_plan"}  # noqa: E731
+
+    conn = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None, source="bazos")])
+    stats = eng.run_engine(conn, classify_fn=None, compare_fn=None, floor_plan_fn=fp, max_vision_calls=10)
+
+    assert stats["auto_phash"] == 1
+    assert stats["queued"] == 0
+    assert merges == ["image_phash"]
 
 
 def test_run_engine_phash_floor_plan_unwarmed_defers(monkeypatch: Any) -> None:
@@ -2227,3 +3723,230 @@ def test_pair_audit_is_opt_in_no_records_when_none() -> None:
     conn = _FakeConn([_row(1, 101), _row(2, 102, source="bazos")])
     # Should not raise even though no audit sink is provided.
     eng.run_engine(conn, max_vision_calls=0)
+
+
+# --- PR-B: probe memoization, group-batched pHash, dismissal treadmill -------
+
+def test_probe_cache_clip_incomplete_queries_each_listing_once() -> None:
+    """_clip_incomplete_any memoizes per LISTING: across a group's pairs, each listing
+    hits the DB once (the audit measured per-pair re-probing as the dirty lane's cost
+    floor). Only not-yet-cached ids are queried."""
+    import scripts.dedup_engine as eng
+
+    calls: list[list[int]] = []
+
+    class _C:
+        def __enter__(self): return self
+        def __exit__(self, *a): return None
+        def execute(self, sql, params=None): calls.append(list(params[0]))
+        def fetchall(self): return [(s,) for s in calls[-1] if s == 2]  # sid 2 incomplete
+
+    class _Conn:
+        def cursor(self): return _C()
+
+    cache = eng._ProbeCache()
+    assert eng._clip_incomplete_any(_Conn(), [1, 2], "m", cache) is True
+    assert eng._clip_incomplete_any(_Conn(), [1, 3], "m", cache) is False
+    assert eng._clip_incomplete_any(_Conn(), [2, 3], "m", cache) is True  # pure cache hit
+    # sid 1,2 queried in call one; only sid 3 in call two; call three hit the cache.
+    assert calls == [[1, 2], [3]]
+
+
+def test_phash_pairs_cached_batches_group_once() -> None:
+    """First lookup for a (group, profile) batches the WHOLE group's counts in one round
+    trip; later pairs are cache hits; absent pairs read 0."""
+    import scripts.dedup_engine as eng
+
+    executed: list[str] = []
+
+    class _C:
+        def __enter__(self): return self
+        def __exit__(self, *a): return None
+        def execute(self, sql, params=None): executed.append(" ".join(sql.split()))
+        def fetchall(self): return [(10, 20, 3)]  # only pair (10,20) has matches
+
+    class _Conn:
+        def cursor(self): return _C()
+
+    cache = eng._ProbeCache()
+    group = (10, 20, 30)
+    assert eng._phash_pairs_cached(_Conn(), 10, 20, (), None,
+                                   cache=cache, group_sids=group) == 3
+    assert eng._phash_pairs_cached(_Conn(), 20, 30, (), None,
+                                   cache=cache, group_sids=group) == 0  # absent -> 0
+    assert eng._phash_pairs_cached(_Conn(), 30, 10, (), None,
+                                   cache=cache, group_sids=group) == 0
+    assert len(executed) == 1 and "GROUP BY 1, 2" in executed[0]
+    # A DIFFERENT exclusion profile re-batches (byt excludes exteriors/renders).
+    eng._phash_pairs_cached(_Conn(), 10, 20, ("garden",), 0.95,
+                            cache=cache, group_sids=group)
+    assert len(executed) == 2
+
+
+def test_phash_pairs_cached_falls_back_per_pair_without_group() -> None:
+    """No group context (tests / standalone callers) -> the per-pair query, unchanged."""
+    import scripts.dedup_engine as eng
+
+    executed: list[str] = []
+
+    class _C:
+        def __enter__(self): return self
+        def __exit__(self, *a): return None
+        def execute(self, sql, params=None): executed.append(" ".join(sql.split()))
+        def fetchone(self): return (2,)
+
+    class _Conn:
+        def cursor(self): return _C()
+
+    assert eng._phash_pairs_cached(_Conn(), 1, 2, (), None,
+                                   cache=eng._ProbeCache(), group_sids=None) == 2
+    assert "GROUP BY" not in executed[0]
+
+
+def test_resolve_pair_skips_prior_dismissed_without_new_evidence() -> None:
+    """A pair the engine already dismissed is SKIPPED on scoped runs unless either side
+    gained photo evidence since — the 5.8x dismissal-treadmill fix, recall-preserving."""
+    import scripts.dedup_engine as eng
+
+    class _C:
+        def __enter__(self): return self
+        def __exit__(self, *a): return None
+        def execute(self, sql, params=None):
+            s = " ".join(sql.split())
+            if "max(clip_tagged_at)" in s:
+                self._one = ("2026-07-01",)  # each listing's latest photo evidence
+            elif "EXISTS" in s:
+                self._one = (False,)
+            else:
+                self._one = (0,)  # pHash count / site-plan flags
+        def fetchone(self): return self._one
+        def fetchall(self): return []
+
+    class _Conn:
+        def cursor(self): return _C()
+
+    a = _key(1, pid=101)
+    b = _key(2, pid=102)
+    # Dismissed AFTER the evidence timestamp -> no new evidence -> skip.
+    ctx = eng._RunContext(stats={"rejected": 0},
+                          dismissed_prior={(101, 102): "2026-07-02"})
+    eng.resolve_pair(_Conn(), a, b, street_key="id:42", ctx=ctx)
+    assert ctx.stats.get("skipped_prior_dismissed") == 1
+    assert ctx.stats.get("clip_deferred") is None  # exited before the probe chain
+
+    # Evidence NEWER than the dismissal -> the pair is re-decided (falls through to the
+    # visual stage and counts as considered; free-mode skip keeps the fake conn write-free).
+    ctx2 = eng._RunContext(stats={"rejected": 0, "pairs_considered": 0, "queued": 0,
+                                  "auto_dismissed": 0, "floor_plan_deferred": 0,
+                                  "skipped_unresolved": 0},
+                           dismissed_prior={(101, 102): "2026-06-30"},
+                           enqueue_unresolved=False)
+    eng.resolve_pair(_Conn(), a, b, street_key="id:42", ctx=ctx2)
+    assert ctx2.stats.get("skipped_prior_dismissed") is None
+    assert ctx2.stats["pairs_considered"] == 1
+
+
+def test_record_auto_dismissed_inserts_markers() -> None:
+    """finalize()'s _record_auto_dismissed writes insert-if-absent dismissed candidate
+    rows for verdict-backed dismissals only (the consult's durable negative decision)."""
+    import scripts.dedup_engine as eng
+
+    captured: dict[str, Any] = {}
+
+    class _C:
+        def __enter__(self): return self
+        def __exit__(self, *a): return None
+        def execute(self, sql, params=None):
+            captured["sql"] = " ".join(sql.split()); captured["params"] = params
+        @property
+        def rowcount(self): return 2
+
+    class _Conn:
+        def cursor(self): return _C()
+
+    n = eng._record_auto_dismissed(_Conn(), {(1, 2), (3, 4)}, "street_disposition")
+    assert n == 2
+    # Re-dismissal refreshes the settled timestamp (guarded to dismissed rows), so a
+    # once-reopened pair doesn't read as perpetually "fresh" and treadmill again.
+    assert "DO UPDATE SET reviewed_at = now()" in captured["sql"]
+    assert "status = 'dismissed'" in captured["sql"]
+    assert eng._record_auto_dismissed(_Conn(), set(), "street_disposition") == 0
+
+
+def test_write_pair_audit_dedupes_recent_identical_records() -> None:
+    """A dismissal identical to one logged within the window is NOT re-appended (the
+    audit logs decisions, not run cadence); novel records still insert."""
+    import scripts.dedup_engine as eng
+
+    inserted: list[Any] = []
+
+    class _C:
+        def __enter__(self): return self
+        def __exit__(self, *a): return None
+        def execute(self, sql, params=None): self._sql = " ".join(sql.split())
+        def executemany(self, sql, rows): inserted.extend(rows)
+        def fetchall(self):  # pair (1,2) phash/engine dismissal already logged
+            return [(1, 2, "phash", "engine")]
+
+    class _Conn:
+        def cursor(self): return _C()
+
+    rec = {
+        "left_sreality_id": 1, "right_sreality_id": 2, "left_property_id": 101,
+        "right_property_id": 102, "category_main": "byt", "stage": "phash",
+        "outcome": "dismissed", "source": "engine", "detail": {},
+    }
+    novel = {**rec, "left_sreality_id": 5, "right_sreality_id": 6}
+    # A re-MERGE of the same pair must ALWAYS land (its fresh merge_group_id is the
+    # operator's only undo handle after an unmerge) — only dismissals dedupe.
+    remerge = {**rec, "outcome": "merged", "merge_group_id": "G2"}
+    eng._write_pair_audit(_Conn(), "RUN_AT", [rec, novel, remerge])
+    assert len(inserted) == 2
+    assert {r[1] for r in inserted} == {5, 1}          # novel dismissal + the re-merge
+    assert any(r[7] == "merged" for r in inserted)     # the merged record landed
+
+
+def test_enqueue_candidate_reopen_valve() -> None:
+    """reopen=True (consult re-decided on fresh evidence) re-proposes an engine-dismissed
+    row so a queue outcome reaches the operator; operator dismissals stay respected; the
+    default path keeps DO NOTHING so mass re-decides can't bulk-reopen settled pairs."""
+    import scripts.dedup_engine as eng
+
+    captured: list[str] = []
+
+    class _Ctx:
+        def __enter__(self): return self
+        def __exit__(self, *a): return None
+
+    class _C(_Ctx):
+        def execute(self, sql, params=None): captured.append(" ".join(sql.split()))
+
+    class _Conn:
+        def cursor(self): return _C()
+        def transaction(self): return _Ctx()
+
+    a = _key(1, pid=101)
+    b = _key(2, pid=102)
+    eng._enqueue_candidate(_Conn(), a, b, {"tier": "street_disposition"}, reopen=True)
+    assert "SET status = 'proposed', reviewed_at = NULL" in captured[-1]
+    assert "reviewed_action IS DISTINCT FROM 'operator'" in captured[-1]
+    eng._enqueue_candidate(_Conn(), a, b, {"tier": "street_disposition"})
+    assert "DO NOTHING" in captured[-1]
+
+
+def test_scoped_runs_skip_the_market_gauge_scan() -> None:
+    """Scoped runs (dirty/candidates) must NOT pay the ~9s full-table eligibility
+    aggregate — they write NULL gauges (migration 265); only the unscoped full scan
+    measures the market. Dashboards read gauges from full-scan rows."""
+    import scripts.dedup_engine as eng
+
+    conn = _FakeConn([])
+    stats = eng.run_engine(conn, max_vision_calls=0,
+                           only_groups_with_property_ids=set())
+    assert stats["eligible"] is None and stats["flagged_location"] is None
+    assert not any("count(*) FILTER" in s for s in conn.executed)
+
+    conn2 = _FakeConn([])
+    stats2 = eng.run_engine(conn2, max_vision_calls=0)  # unscoped full scan
+    assert stats2["eligible"] == 4  # the fake's gauge row
+    assert any("count(*) FILTER" in s for s in conn2.executed)

@@ -61,6 +61,12 @@ import time
 from collections.abc import Iterator
 from typing import Any
 
+from toolkit.publication import (
+    GEO_ELIGIBLE_PREDICATE,
+    STREET_ELIGIBLE_PREDICATE,
+    eligible_predicate,
+)
+
 LOG = logging.getLogger("recompute_property_stats")
 
 
@@ -468,6 +474,90 @@ def _attach_stragglers(conn: Any, *, skip_native_backfill: bool = False) -> int:
     return inserted
 
 
+# Publication gate (migration 273): publish the properties the dedup engine can NEVER
+# evaluate — repr listing eligible for NEITHER the street pass (STREET_ELIGIBLE_PREDICATE)
+# NOR the geo pass (GEO_ELIGIBLE_PREDICATE) — so the hard gate doesn't hide them forever.
+# `IS NOT TRUE` (not `NOT (...)`) so a NULL-column listing counts as ineligible under SQL
+# three-valued logic. The predicates are imported from toolkit.publication (single source,
+# parity-tested against the engine SQL). There is deliberately NO timeout sweep: a
+# dedup-CHECKABLE-but-unchecked property stays hidden until the engine stamps it.
+_PUBLISH_INELIGIBLE_SQL = f"""
+    UPDATE properties p
+    SET published_at = now(), publish_reason = 'ineligible'
+    FROM listings l
+    WHERE p.published_at IS NULL
+      AND p.status = 'active'
+      AND l.sreality_id = p.repr_listing_id
+      AND ({STREET_ELIGIBLE_PREDICATE}) IS NOT TRUE
+      AND ({GEO_ELIGIBLE_PREDICATE}) IS NOT TRUE
+"""
+
+
+def _publish_sweep(conn: Any) -> int:
+    """Publish (reason 'ineligible') unpublished active properties the engine can never
+    dedup-check. Partial-index-backed (properties_unpublished_idx); no-op once caught up."""
+    with conn.cursor() as cur:
+        cur.execute(_PUBLISH_INELIGIBLE_SQL)
+        return cur.rowcount or 0
+
+
+# The CLIP-tag event fires only when a listing's STORED images finish tagging, so it is
+# the real-time dedup enqueue trigger for photo-carrying listings only. Images usually
+# land in R2 within minutes of a scrape; a property still image-less after this window
+# is a genuinely photo-less ad that will never tag and never enqueue.
+IMAGELESS_EVAL_MINUTES = 30
+
+# Already-queued properties are EXCLUDED outright (NOT bumped via ON CONFLICT ... DO
+# UPDATE): this sweep runs every 5 minutes, and re-bumping marked_at on the same
+# still-queued rows would keep resetting their position in the --dirty drain's
+# newest-first claim — making stale imageless rows perpetually "fresh" and starving the
+# genuinely new ones the real-time lane exists for. The residual ON CONFLICT DO NOTHING
+# only guards the race with a concurrent tag-event enqueue between the anti-join and the
+# INSERT.
+_ENQUEUE_IMAGELESS_SQL = f"""
+    INSERT INTO dedup_dirty_properties (property_id)
+    SELECT p.id
+    FROM properties p
+    WHERE p.published_at IS NULL
+      AND p.status = 'active'
+      AND p.first_seen_at < now() - interval '{IMAGELESS_EVAL_MINUTES} minutes'
+      AND EXISTS (
+        SELECT 1 FROM listings le
+        WHERE le.property_id = p.id
+          AND ({eligible_predicate("le")})
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM listings li
+        JOIN images i ON i.sreality_id = li.sreality_id
+        WHERE li.property_id = p.id
+          AND i.storage_path IS NOT NULL
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM dedup_dirty_properties d WHERE d.property_id = p.id
+      )
+    ON CONFLICT (property_id) DO NOTHING
+"""
+
+
+def _enqueue_imageless_for_dedup(conn: Any) -> int:
+    """Route unpublished, dedup-ELIGIBLE properties with zero stored images into the
+    real-time dedup_dirty_properties lane so the engine EVALUATES them.
+
+    WHY: the CLIP-tag event is the only real-time enqueue trigger, and a photo-less
+    listing never tags — so an eligible imageless property would otherwise sit
+    unpublished until a slow full scan reached its group. This is an EVALUATION
+    trigger, NOT a publish-timeout: the property publishes only after the engine
+    actually decides its groups (rule B/C or the geo classify — both deterministic;
+    the visual layer no-ops without photos) and stamps it dedup-checked, exactly like
+    every other property. (The operator explicitly rejected publish-on-timer.)
+
+    A property that later GETS images re-enqueues via the tag event naturally;
+    re-evaluation is idempotent."""
+    with conn.cursor() as cur:
+        cur.execute(_ENQUEUE_IMAGELESS_SQL)
+        return cur.rowcount or 0
+
+
 def _drain_dirty(conn: Any, batch_size: int, cutoff: Any) -> int:
     """Recompute every property queued at/before `cutoff`, scoped + batched.
 
@@ -496,6 +586,88 @@ def _max_property_id(conn: Any) -> int:
     with conn.cursor() as cur:
         cur.execute("SELECT coalesce(max(id), 0) FROM properties")
         return int(cur.fetchone()[0])
+
+
+# A single-row LEASE serializes EVERY property-maintenance writer: the GH
+# incremental cron, the daily full sweep, AND the realtime worker's maintenance
+# lane (property_maintenance_lease, migration 279). Claimed by ONE atomic
+# UPDATE ... RETURNING, so it is sound over the transaction-mode pooler —
+# unlike a session advisory lock, whose lock/unlock statements can land on
+# DIFFERENT pooled backends (the #716 defect: the unlock silently no-ops and
+# the lock strands, skipping every future pass). Expiry self-heals a crashed
+# holder. Incremental callers TRY the lease and skip when held (the next tick
+# is seconds away); the daily full sweep RETRIES until it holds it (the
+# backstop must not be skipped) and takes a sweep-length lease.
+_INCREMENTAL_LEASE = "15 minutes"
+_FULL_SWEEP_LEASE = "3 hours"
+_LEASE_RETRY_SECONDS = 10.0
+
+_TRY_LEASE_SQL = """
+    UPDATE property_maintenance_lease
+       SET holder = %(holder)s, expires_at = now() + %(lease)s::interval
+     WHERE id = 1
+       AND (holder IS NULL OR expires_at < now() OR holder = %(holder)s)
+    RETURNING 1
+"""
+
+_RELEASE_LEASE_SQL = """
+    UPDATE property_maintenance_lease
+       SET holder = NULL, expires_at = NULL
+     WHERE id = 1 AND holder = %(holder)s
+"""
+
+
+def _new_holder(kind: str) -> str:
+    import uuid
+
+    return f"{kind}:{uuid.uuid4()}"
+
+
+def _try_lease(conn: Any, holder: str, lease: str) -> bool:
+    with conn.cursor() as cur:
+        cur.execute(_TRY_LEASE_SQL, {"holder": holder, "lease": lease})
+        return cur.fetchone() is not None
+
+
+def _wait_lease(conn: Any, holder: str, lease: str) -> None:
+    while not _try_lease(conn, holder, lease):
+        LOG.info("MAINTENANCE lease held by another writer; retrying in %.0fs",
+                 _LEASE_RETRY_SECONDS)
+        time.sleep(_LEASE_RETRY_SECONDS)
+
+
+def _release_lease(conn: Any, holder: str) -> None:
+    with conn.cursor() as cur:
+        cur.execute(_RELEASE_LEASE_SQL, {"holder": holder})
+
+
+def run_incremental_pass(conn: Any, batch_size: int = 2000) -> dict[str, Any]:
+    """ONE incremental property-maintenance pass — THE shared implementation
+    behind the GH cron (property_maintenance.yml) and the realtime worker's
+    maintenance lane: attach new stragglers (skip the legacy native-id
+    backfill), recompute the dirty set, publish ineligible properties, enqueue
+    imageless for dedup. Serialized by the maintenance lease; a caller that
+    finds the lease held returns {"skipped": True} — the concurrent pass is
+    doing the same work, and the next tick is seconds away. A pass normally
+    runs seconds; the 15-minute lease is a wide margin, and its expiry
+    self-heals a crashed holder.
+    """
+    holder = _new_holder("incremental")
+    if not _try_lease(conn, holder, _INCREMENTAL_LEASE):
+        return {"skipped": True, "attached": 0, "recomputed": 0,
+                "published": 0, "imageless": 0}
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT now()")
+            cutoff = cur.fetchone()[0]
+        attached = _attach_stragglers(conn, skip_native_backfill=True)
+        recomputed = _drain_dirty(conn, batch_size, cutoff)
+        published = _publish_sweep(conn)
+        imageless = _enqueue_imageless_for_dedup(conn)
+        return {"skipped": False, "attached": attached, "recomputed": recomputed,
+                "published": published, "imageless": imageless}
+    finally:
+        _release_lease(conn, holder)
 
 
 def main() -> int:
@@ -561,38 +733,55 @@ def main() -> int:
 
         # Incremental: attach new stragglers, then recompute only the queued
         # (dirty) properties. The full-table sweep is the daily reconcile.
+        # Shared implementation with the realtime worker's maintenance lane.
         if args.incremental:
-            attached = _attach_stragglers(conn, skip_native_backfill=True)
-            recomputed = _drain_dirty(conn, args.batch_size, cutoff)
+            stats = run_incremental_pass(conn, args.batch_size)
             elapsed = time.monotonic() - started_at
+            if stats["skipped"]:
+                LOG.info(
+                    "RECOMPUTE incremental skipped: another maintenance pass "
+                    "holds the lock (worker lane or daily sweep)",
+                )
+                return 0
             LOG.info(
-                "RECOMPUTE incremental done attached=%d recomputed=%d elapsed=%.1fs",
-                attached, recomputed, elapsed,
+                "RECOMPUTE incremental done attached=%d recomputed=%d "
+                "published_ineligible=%d imageless_enqueued=%d elapsed=%.1fs",
+                stats["attached"], stats["recomputed"],
+                stats["published"], stats["imageless"], elapsed,
             )
             return 0
 
-        attached = _attach_stragglers(conn)
-        LOG.info("RECOMPUTE stragglers attached=%d", attached)
+        # The full sweep RETRIES for the lease (it is the daily backstop and
+        # must not be skipped); incremental passes elsewhere skip while it
+        # runs. Worst-case wait = one incremental lease (15 min).
+        holder = _new_holder("full")
+        _wait_lease(conn, holder, _FULL_SWEEP_LEASE)
+        try:
+            attached = _attach_stragglers(conn)
+            LOG.info("RECOMPUTE stragglers attached=%d", attached)
 
-        max_id = _max_property_id(conn)
-        batches = 0
-        for lo, hi in _batch_ranges(max_id, args.batch_size):
+            max_id = _max_property_id(conn)
+            batches = 0
+            for lo, hi in _batch_ranges(max_id, args.batch_size):
+                with conn.cursor() as cur:
+                    cur.execute(_RECOMPUTE_BATCH_SQL, {"lo": lo, "hi": hi})
+                batches += 1
+                LOG.debug("RECOMPUTE batch=%d-%d done", lo, hi)
+
+            reconciled = _reconcile_childless(conn)
+            if reconciled:
+                LOG.info(
+                    "RECOMPUTE reconciled childless=%d (set is_active=false)",
+                    reconciled,
+                )
+
+            # The full sweep recomputed every property, so clear the dirt that
+            # existed at its start; anything dirtied mid-sweep survives for the
+            # next incremental pass.
             with conn.cursor() as cur:
-                cur.execute(_RECOMPUTE_BATCH_SQL, {"lo": lo, "hi": hi})
-            batches += 1
-            LOG.debug("RECOMPUTE batch=%d-%d done", lo, hi)
-
-        reconciled = _reconcile_childless(conn)
-        if reconciled:
-            LOG.info(
-                "RECOMPUTE reconciled childless=%d (set is_active=false)", reconciled,
-            )
-
-        # The full sweep recomputed every property, so clear the dirt that
-        # existed at its start; anything dirtied mid-sweep survives for the next
-        # incremental pass.
-        with conn.cursor() as cur:
-            cur.execute(_CLEAR_DIRTY_SQL, {"cutoff": cutoff})
+                cur.execute(_CLEAR_DIRTY_SQL, {"cutoff": cutoff})
+        finally:
+            _release_lease(conn, holder)
 
     elapsed = time.monotonic() - started_at
     LOG.info(
