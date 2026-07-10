@@ -16,6 +16,7 @@ from scripts.verify_pipeline import (
     _status_for_cycle,
     _status_for_dirty,
     _status_for_cron,
+    _status_for_burn,
     _status_for_llm_errors,
     _status_for_llm_silence,
     _status_for_merge_latency,
@@ -134,6 +135,15 @@ def test_llm_silence_fails_when_stale_or_absent() -> None:
     assert _status_for_llm_silence(fail_h, fail_h) == "ok"    # exactly at threshold, not over
     assert _status_for_llm_silence(fail_h + 0.1, fail_h) == "fail"  # silent past threshold
     assert _status_for_llm_silence(None, fail_h) == "fail"    # no calls on record at all
+
+
+def test_burn_rate_thresholds() -> None:
+    warn, fail = T["llm_spend_24h_warn_usd"], T["llm_spend_24h_fail_usd"]
+    assert _status_for_burn(10.0, warn, fail) == "ok"          # normal daily burn
+    assert _status_for_burn(warn, warn, fail) == "ok"          # at warn boundary, not over
+    assert _status_for_burn(warn + 1, warn, fail) == "warn"    # top-up cadence risk (no bell/email)
+    assert _status_for_burn(fail, warn, fail) == "warn"        # at fail boundary, not over
+    assert _status_for_burn(fail + 1, warn, fail) == "fail"    # runaway burn -> email
 
 
 # --- db_saturation / worker_liveness (new blind-spot detectors) ------------

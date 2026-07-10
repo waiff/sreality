@@ -54,6 +54,8 @@ DEFAULT_THRESHOLDS: dict[str, float] = {
     "candidate_age_p95_warn_days": 14,
     "llm_error_rate_warn": 0.2,
     "llm_silence_fail_hours": 4,
+    "llm_spend_24h_warn_usd": 90,
+    "llm_spend_24h_fail_usd": 150,
     "db_cron_fail_rate_fail": 0.5,
     "worker_stale_fail_minutes": 5,
     "verification_stale_hours": 24,
@@ -151,6 +153,19 @@ def _status_for_llm_silence(hours: float | None, fail_hours: float) -> str:
     """Fail when the newest llm_call is older than `fail_hours` (or there are none at all)."""
     if hours is None or hours > fail_hours:
         return "fail"
+    return "ok"
+
+
+def _status_for_burn(spend_24h: float, warn_usd: float, fail_usd: float) -> str:
+    """Credit-depletion early warning: the account has run dry four times in a week
+    (Jul 3-10) because paid dedup-vision burn (~$75-100/day, cost-mix-driven — Jul 9 had
+    FEWER calls than Jul 8 yet 40% higher cost) silently outpaces manual top-ups. Balance
+    isn't queryable via API, so trailing-24h SPEND is the runway proxy: warn = top-up
+    cadence risk, fail = runaway burn worth an email before the hard gate hits."""
+    if spend_24h > fail_usd:
+        return "fail"
+    if spend_24h > warn_usd:
+        return "warn"
     return "ok"
 
 
@@ -686,6 +701,51 @@ def check_llm_liveness(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+_LLM_BURN_SQL = """
+select coalesce(sum(cost_usd), 0) as spend_24h
+from llm_calls where called_at > now() - interval '24 hours'
+"""
+
+_LLM_BURN_TOP_SQL = """
+select called_for, round(sum(cost_usd)::numeric, 2) as spend
+from llm_calls
+where called_at > now() - interval '24 hours' and cost_usd > 0
+group by called_for order by spend desc limit 3
+"""
+
+
+def check_llm_burn_rate(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]:
+    """Spend-based credit-runway guard (see _status_for_burn). Names the top spenders so
+    the alert says what to throttle, not just that money is burning."""
+    warn_usd = float(thresholds["llm_spend_24h_warn_usd"])
+    fail_usd = float(thresholds["llm_spend_24h_fail_usd"])
+    row = _fetchone(conn, _LLM_BURN_SQL)
+    spend = float(row[0]) if row and row[0] is not None else 0.0
+    top = [(str(cf), float(s)) for (cf, s) in _fetchall(conn, _LLM_BURN_TOP_SQL)]
+    status = _status_for_burn(spend, warn_usd, fail_usd)
+    top_str = ", ".join(f"{cf} ${s:.2f}" for cf, s in top) or "none"
+    if status == "fail":
+        message = (
+            f"LLM spend is ${spend:.2f} in 24h (> ${fail_usd:.0f}) — at this burn the credit "
+            f"balance drains in days; check Plans & Billing / top up or throttle. Top spenders: {top_str}."
+        )
+    elif status == "warn":
+        message = (
+            f"LLM spend is ${spend:.2f} in 24h (> ${warn_usd:.0f}) — top-up cadence risk. "
+            f"Top spenders: {top_str}."
+        )
+    else:
+        message = f"LLM spend ${spend:.2f} in 24h (top: {top_str})."
+    return {
+        "check_key": "llm_burn_rate",
+        "status": status,
+        "value": round(spend, 2),
+        "details": {"spend_24h_usd": round(spend, 2), "warn_usd": warn_usd,
+                    "fail_usd": fail_usd, "top_spenders": dict(top)},
+        "message": message,
+    }
+
+
 _DB_CRON_SQL = """
 select j.jobname,
        count(*) filter (where d.status = 'succeeded') as ok,
@@ -814,6 +874,7 @@ _CHECKS: list[tuple[str, Callable[[Any, dict[str, Any]], dict[str, Any]]]] = [
     ("engine_health", check_engine_health),
     ("llm_errors", check_llm_errors),
     ("llm_liveness", check_llm_liveness),
+    ("llm_burn_rate", check_llm_burn_rate),
     ("db_saturation", check_db_saturation),
     ("worker_liveness", check_worker_liveness),
 ]
