@@ -2267,7 +2267,7 @@ def test_proposed_candidate_property_ids_due_filter_sql() -> None:
     out = eng._proposed_candidate_property_ids(_Conn(), redecide_hours=24)
     sql = captured["sql"]
     assert "last_engine_decision_at IS NULL" in sql
-    assert "make_interval(hours => %(backoff_h)s)" in sql
+    assert "< now() - (%(backoff_h)s * interval '1 hour')" in sql  # float-safe form
     assert "i.clip_tagged_at > c.last_engine_decision_at" in sql
     assert captured["params"]["backoff_h"] == 24.0
     assert out == {11, 22}
