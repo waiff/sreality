@@ -102,7 +102,7 @@ def _run(monkeypatch: Any, *, keys: list[ListingKey], classifications: dict[int,
          floor_plan_cached: Any = None, render_ids: set[int] | None = None,
          in_flight: set[str] | None = None,
          max_requests: int = 100, max_room_attempts: int = 4,
-         warm_rooms: int = 1) -> _FakeConn:
+         warm_rooms: int = 1, max_seconds: int = 0) -> _FakeConn:
     """Drive collect() over `keys` with all I/O monkeypatched; return the conn so
     the test can inspect the enqueued dedup_batch_requests rows."""
     monkeypatch.setattr(sub, "_load_eligible", lambda conn: list(keys))
@@ -163,7 +163,8 @@ def _run(monkeypatch: Any, *, keys: list[ListingKey], classifications: dict[int,
     conn = _FakeConn()
     submitter = sub._Submitter(conn, _FakeProvider(), max_requests=max_requests, dry_run=False)
     sub.collect(conn, _FakeLLM(), submitter, max_pairs=4000,
-                max_room_attempts=max_room_attempts, n_images=12, warm_rooms=warm_rooms)
+                max_room_attempts=max_room_attempts, n_images=12, warm_rooms=warm_rooms,
+                max_seconds=max_seconds)
     submitter.flush()
     return conn
 
@@ -177,6 +178,23 @@ def _rows_by_kind(conn: _FakeConn) -> dict[str, list[tuple[Any, ...]]]:
 
 
 # --- recall-guard golden test -----------------------------------------------
+
+def test_time_budget_stops_enqueuing_cleanly(monkeypatch: Any) -> None:
+    """With the wall-clock budget already expired, collect() enqueues NOTHING and
+    finalizes cleanly (timed_out stat) instead of being killed mid-submit by the
+    workflow's timeout-minutes (which strands the run as 'cancelled' — 3 of 8 runs
+    on 2026-07-10). Everything flushed before the deadline is still submitted."""
+    rooms = {"kitchen": [11], "bathroom": [12]}
+    clock = iter([0.0] + [10_000.0] * 50)  # deadline computed at 0; every check sees expiry
+    monkeypatch.setattr(sub.time, "monotonic", lambda: next(clock))
+    conn = _run(
+        monkeypatch,
+        keys=[_key(1, 101, source="sreality"), _key(2, 102, source="bazos")],
+        classifications={1: ("classified", rooms), 2: ("classified", rooms)},
+        max_seconds=60,
+    )
+    assert conn.inserted_requests == []  # nothing enqueued past the deadline
+
 
 def test_enqueued_compare_rooms_match_engine_walk(monkeypatch: Any) -> None:
     """The compare requests enqueued for a both-classified cross-source pair are
