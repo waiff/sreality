@@ -37,6 +37,7 @@ import json
 import logging
 import os
 import sys
+import time
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -209,6 +210,7 @@ def collect(
     max_room_attempts: int,
     n_images: int,
     warm_rooms: int = 1,
+    max_seconds: int = 0,
 ) -> dict[str, int]:
     """Walk the engine's free funnel and enqueue the visual requests it implies.
 
@@ -246,17 +248,31 @@ def collect(
     seen_listing_pairs: set[tuple[int, int]] = set()
     seen_property_pairs: set[tuple[int, int]] = set()
     pairs_left = max_pairs
+    # Wall-clock budget: enqueuing walks R2 image fetches pair-by-pair, so a big
+    # cache-cold funnel can outlast the workflow's timeout-minutes — which kills the
+    # run as 'cancelled' mid-submit (3 of 8 runs on 2026-07-10). Stop enqueuing at
+    # the deadline instead and finalize cleanly: everything flushed so far is
+    # submitted, the rest is picked up by the next 6h slot.
+    deadline = time.monotonic() + max_seconds if max_seconds > 0 else None
+
+    def _out_of_time() -> bool:
+        if deadline is not None and time.monotonic() >= deadline:
+            if not funnel.get("timed_out"):
+                funnel["timed_out"] = 1
+                LOG.info("BATCH time budget %ds reached; finalizing cleanly", max_seconds)
+            return True
+        return False
 
     for members in groups.values():
-        if submitter.exhausted or pairs_left <= 0:
+        if submitter.exhausted or pairs_left <= 0 or _out_of_time():
             break
         if len(members) > MAX_GROUP_SIZE:
             continue
         for i in range(len(members)):
-            if submitter.exhausted or pairs_left <= 0:
+            if submitter.exhausted or pairs_left <= 0 or _out_of_time():
                 break
             for j in range(i + 1, len(members)):
-                if submitter.exhausted or pairs_left <= 0:
+                if submitter.exhausted or pairs_left <= 0 or _out_of_time():
                     break
                 a, b = members[i], members[j]
                 lpair = (min(a.sreality_id, b.sreality_id), max(a.sreality_id, b.sreality_id))
@@ -491,6 +507,10 @@ def main() -> int:
                              "room the engine tries first). Higher = more discount coverage for "
                              "more speculative spend. Cannot exceed --max-room-attempts.")
     parser.add_argument("--n-images", type=int, default=DEFAULT_CLASSIFY_N_IMAGES)
+    parser.add_argument("--max-seconds", type=int, default=3000,
+                        help="Wall-clock budget; stop enqueuing and finalize cleanly when reached "
+                             "(0 = no budget). Default 50min — below the workflow's 60-min kill, "
+                             "which stranded runs mid-submit as 'cancelled'.")
     parser.add_argument("--dry-run", action="store_true",
                         help="Report what would be enqueued without building or submitting.")
     parser.add_argument("--verbose", action="store_true")
@@ -521,9 +541,9 @@ def main() -> int:
     provider = AnthropicProvider()
     LOG.info(
         "BATCH submit config max_pairs=%d max_requests=%d max_room_attempts=%d warm_rooms=%d "
-        "n_images=%d dry_run=%s",
+        "n_images=%d max_seconds=%d dry_run=%s",
         args.max_pairs, args.max_requests, args.max_room_attempts, args.warm_rooms,
-        args.n_images, args.dry_run,
+        args.n_images, args.max_seconds, args.dry_run,
     )
 
     with psycopg.connect(db_url, autocommit=True, prepare_threshold=None) as conn:
@@ -537,6 +557,7 @@ def main() -> int:
             conn, llm_client, submitter,
             max_pairs=args.max_pairs, max_room_attempts=args.max_room_attempts,
             n_images=args.n_images, warm_rooms=args.warm_rooms,
+            max_seconds=args.max_seconds,
         )
         if not args.dry_run:
             submitter.flush()
