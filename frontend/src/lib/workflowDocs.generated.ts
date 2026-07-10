@@ -2324,8 +2324,8 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
   },
   {
     "filename": "llm_health.yml",
-    "name": "Monitoring: LLM pipeline liveness",
-    "description": "Goes red (→ GitHub notifies the operator on a failed scheduled run) when the LLM pipeline looks dead: no `llm_calls` rows for several hours while there is pending condition-scoring work. Catches the silent failure mode where the Anthropic account runs out of credits / the key breaks and the scorers swallow per-listing errors, staying green while scoring nothing (this went unnoticed for ~8h on 2026-06-04).",
+    "name": "Monitoring: acute health (hourly)",
+    "description": "The fast lane of verify_pipeline: runs the ACUTE checks — LLM errors, LLM silence, DB saturation (pg_cron failure rate) and realtime-worker liveness — hourly, and exits non-zero when any is `fail` so GitHub emails the operator on a red scheduled run. This is the belt-and-braces channel for when the in-app bell path itself is down; the bell is rung (edge-triggered) by the checks via emit_transition_alerts, so an incident alerts once — not per run — and clears on recovery. The 6h full verify_pipeline run additionally covers these (shared emitter keys → no double-alert) plus the slower structural checks (dedup debt, latency, engine cycle).",
     "portal": null,
     "manual": true,
     "schedules": [
