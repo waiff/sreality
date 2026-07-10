@@ -704,15 +704,19 @@ class VisualOutcome:
 
 
 def decide_phash_fastpath(
-    identical_image_pairs: int, distinctive_match: bool = False
+    identical_image_pairs: int, distinctive_match: bool = False,
+    min_identical_pairs: int = PHASH_MIN_IDENTICAL_PAIRS,
 ) -> bool:
-    """pHash fast-path: >=2 near-identical generic image pairs OR a single near-identical
-    DISTINCTIVE-room (kitchen/bathroom) pair => same property. The distinctive override
-    (operator policy) reflects that wet rooms are unit-specific, not shared marketing, so
-    one identical match there is conclusive. For byt the generic count excludes
-    known-exterior images upstream (phash_excluded_tags_for); other categories count any
-    image. The distinctive match is always kitchen/bathroom-tagged (DISTINCTIVE_ROOMS)."""
-    return identical_image_pairs >= PHASH_MIN_IDENTICAL_PAIRS or distinctive_match
+    """pHash fast-path: >=`min_identical_pairs` near-identical generic image pairs OR a
+    single near-identical DISTINCTIVE-room (kitchen/bathroom) pair => same property. The
+    distinctive override (operator policy) reflects that wet rooms are unit-specific, not
+    shared marketing, so one identical match there is conclusive. For byt the generic count
+    excludes known-exterior images upstream (phash_excluded_tags_for); other categories
+    count any image. `min_identical_pairs` defaults to the classic 2; the non-byt
+    phash-single arm (cost plan §2.2a, dedup_nonbyt_phash_single_enabled) lowers it to 1
+    for houses/land/commercial, where photo sets are property-unique (99%+ replay
+    precision) rather than development-shared like byt marketing renders."""
+    return identical_image_pairs >= min_identical_pairs or distinctive_match
 
 
 def rooms_in_priority(

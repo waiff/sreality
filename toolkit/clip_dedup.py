@@ -33,6 +33,28 @@ def clip_room_grouping(
     return out
 
 
+def pair_max_cosine(
+    conn: Any, *, sreality_id_a: int, sreality_id_b: int, model: str,
+) -> float | None:
+    """Best (max) cosine similarity between ANY image of listing A and ANY image of
+    listing B, from stored CLIP embeddings — the §2.2b free-merge signal ("pair
+    max-cosine"), matching the replay corpus definition (max over the full image
+    cross-product, any room). None when either side has no stored vector; callers must
+    treat None as "signal unavailable", never as low similarity."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT max(1 - (ea.embedding <=> eb.embedding)) "
+            "FROM image_clip_embeddings ea "
+            "JOIN images ia ON ia.id = ea.image_id AND ia.sreality_id = %s "
+            "JOIN images ib ON ib.sreality_id = %s "
+            "JOIN image_clip_embeddings eb ON eb.image_id = ib.id AND eb.model = %s "
+            "WHERE ea.model = %s",
+            (sreality_id_a, sreality_id_b, model, model),
+        )
+        row = cur.fetchone()
+    return float(row[0]) if row and row[0] is not None else None
+
+
 def room_pair_cosine(
     conn: Any, *, image_ids_a: list[int], image_ids_b: list[int], model: str,
 ) -> float | None:

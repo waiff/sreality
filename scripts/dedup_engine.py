@@ -1538,6 +1538,8 @@ class _ProbeCache:
     # max(images.clip_tagged_at) per listing — the "new evidence since?" timestamp the
     # prior-dismissal consult compares against reviewed_at.
     evidence_at: dict[int, Any] = field(default_factory=dict)
+    # pair max-cosine (§2.2 arm b) per canonical pair — one pgvector query per pair per run.
+    pair_cosine: dict[tuple[int, int], float | None] = field(default_factory=dict)
 
 
 def _clip_incomplete_any(
@@ -1684,6 +1686,14 @@ class _RunContext:
     # area-within-2% + identical price auto-merges through the floor-plan gate WITHOUT the
     # paid room compare (dedup_nonbyt_attr_merge_enabled). Off = every non-byt pair pays vision.
     nonbyt_attr_merge: bool = False
+    # §2.2 arm (a): for non-byt, ONE pHash-identical image pair suffices for the pHash
+    # fast-path (threshold 2→1; dedup_nonbyt_phash_single_enabled). Photo sets of
+    # houses/land are property-unique, unlike byt development renders. Off = classic 2.
+    nonbyt_phash_single: bool = False
+    # §2.2 arm (b): for non-byt, pair max CLIP cosine >= this ⇒ free auto-merge through
+    # the same gates (dedup_nonbyt_cosine_merge_min; 0 = off, plan default 0.98). Both
+    # sides must have stored embeddings; None cosine never fires the arm.
+    nonbyt_cosine_merge_min: float = 0.0
     # Download-completeness readiness: when set, a pair DEFERS while either side still has an
     # image pending download (dedup_defer_incomplete_downloads) — so it isn't decided (or paid
     # for) on a partial photo set. Off = decide on whatever images have arrived.
@@ -1863,20 +1873,32 @@ def resolve_pair(conn: Any, a: ListingKey, b: ListingKey, *, street_key: str,
         and _phash_distinctive_cached(
             conn, a.sreality_id, b.sreality_id, _distinctive_rooms, _rmin,
             cache=ctx.probes, group_sids=group_sids))
-    if decide_phash_fastpath(phash_pairs, distinctive) and not _both_have_site_plan(
+    # §2.2 arm (a): non-byt photo sets are property-unique (not development-shared renders
+    # like byt), so ONE pHash-identical pair is conclusive there — 99%+ on the replay corpus.
+    _phash_min = (
+        1 if (ctx.nonbyt_phash_single and a.category_main and a.category_main != "byt")
+        else PHASH_MIN_IDENTICAL_PAIRS)
+    # Distinct reason when the merge exists ONLY because of the lowered threshold, so the
+    # funnel + any unmerge can attribute it to the arm (ground rule: distinct reason per arm).
+    _phash_single_fired = (
+        _phash_min == 1 and 0 < phash_pairs < PHASH_MIN_IDENTICAL_PAIRS and not distinctive)
+    if decide_phash_fastpath(
+        phash_pairs, distinctive, min_identical_pairs=_phash_min,
+    ) and not _both_have_site_plan(
         conn, a.sreality_id, b.sreality_id, ctx.probes
     ):
-        factors = _factors("phash", reason="image_phash",
+        _phash_reason = "phash_single" if _phash_single_fired else "image_phash"
+        factors = _factors("phash", reason=_phash_reason,
                            street_key=street_key, phash_pairs=phash_pairs,
                            phash_distinctive=distinctive)
         if not ctx.auto_merge_enabled:
             if not ctx.dry_run:
                 _enqueue_candidate(conn, a, b, {
                     **factors, "tier": ctx.tier,
-                    "reason": "auto_merge_off:image_phash", "confidence": 0.97},
+                    "reason": f"auto_merge_off:{_phash_reason}", "confidence": 0.97},
                     reopen=reopened)
             stats["queued"] += 1
-            ctx.engine_looked[cp] = "auto_merge_off:image_phash"
+            ctx.engine_looked[cp] = f"auto_merge_off:{_phash_reason}"
             return
         # Floor-plan validation gate (migration 234): a different 2D floor plan DISMISSES, a
         # both-2D INCONCLUSIVE verdict goes to MANUAL queue, an unwarmed both-plan verdict DEFERS
@@ -1907,10 +1929,10 @@ def resolve_pair(conn: Any, a: ListingKey, b: ListingKey, *, street_key: str,
             stats["floor_plan_deferred"] += 1
             return
         mg = None if ctx.dry_run else _merge_pair(
-            conn, a, b, "image_phash",
+            conn, a, b, _phash_reason,
             {**factors, "tier": ctx.tier, "confidence": 0.97})
         if ctx.dry_run or mg:
-            stats["auto_phash"] += 1
+            stats["auto_phash_single" if _phash_single_fired else "auto_phash"] += 1
             ctx.merged_pairs.add(cp)
             _audit(ctx.audit, a, b, "phash", "merged", factors,
                    source="engine", merge_group_id=mg)
@@ -1973,6 +1995,71 @@ def resolve_pair(conn: Any, a: ListingKey, b: ListingKey, *, street_key: str,
             _audit(ctx.audit, a, b, "attr", "merged", factors,
                    source="engine", merge_group_id=mg)
         return
+
+    # §2.2 arm (b) — non-byt pair-max-cosine fast-path (FREE: one pgvector query, no LLM).
+    # Two non-apartment listings whose best any-image cosine reaches the threshold share an
+    # actual photo (or a near-crop of one) — 99.57% agreement with the forensic verdict on
+    # the decided-pair replay. Same conservative posture as pHash/attr: both-site-plan pairs
+    # step aside to the forensic same-unit guard, the floor-plan gate still runs, and a None
+    # cosine (either side missing embeddings) NEVER fires the arm. byt is excluded — its
+    # development renders collide across identical units (the shared-render ceiling, §2.4).
+    if (ctx.nonbyt_cosine_merge_min > 0 and ctx.clip_model
+            and a.category_main and a.category_main != "byt"
+            and cp not in ctx.merged_pairs):
+        if cp in ctx.probes.pair_cosine:
+            pair_cos = ctx.probes.pair_cosine[cp]
+        else:
+            from toolkit.clip_dedup import pair_max_cosine
+            pair_cos = pair_max_cosine(
+                conn, sreality_id_a=a.sreality_id, sreality_id_b=b.sreality_id,
+                model=ctx.clip_model)
+            ctx.probes.pair_cosine[cp] = pair_cos
+        if (pair_cos is not None and pair_cos >= ctx.nonbyt_cosine_merge_min
+                and not _both_have_site_plan(conn, a.sreality_id, b.sreality_id, ctx.probes)):
+            factors = _factors("cosine", reason="cosine_high", street_key=street_key,
+                               phash_pairs=phash_pairs, cosine=pair_cos)
+            if not ctx.auto_merge_enabled:
+                if not ctx.dry_run:
+                    _enqueue_candidate(conn, a, b, {
+                        **factors, "tier": ctx.tier,
+                        "reason": "auto_merge_off:cosine_high", "confidence": 0.97},
+                        reopen=reopened)
+                stats["queued"] += 1
+                ctx.engine_looked[cp] = "auto_merge_off:cosine_high"
+                return
+            fp = _floor_plan_gate(
+                conn, a.sreality_id, b.sreality_id,
+                floor_plan_fn=ctx.floor_plan_fn, vision_budget=ctx.floor_plan_budget,
+                inconclusive_to_review=ctx.inconclusive_to_review, cache=ctx.probes)
+            if fp == "dismiss":
+                stats["auto_dismissed"] += 1
+                ctx.dismissed_pairs.add(cp)
+                ctx.auto_dismissed_pairs.add(cp)
+                _audit(ctx.audit, a, b, "cosine", "dismissed",
+                       {**factors, "reason": "floor_plan_different_layout"},
+                       source="engine")
+                return
+            if fp == "queue":
+                if not ctx.dry_run:
+                    _enqueue_candidate(conn, a, b, {
+                        **factors, "tier": ctx.tier,
+                        "reason": "floor_plan_review", "confidence": 0.6},
+                        reopen=reopened)
+                stats["queued"] += 1
+                ctx.engine_looked[cp] = "floor_plan_review"
+                return
+            if fp == "defer":
+                stats["floor_plan_deferred"] += 1
+                return
+            mg = None if ctx.dry_run else _merge_pair(
+                conn, a, b, "cosine_high",
+                {**factors, "tier": ctx.tier, "confidence": 0.97})
+            if ctx.dry_run or mg:
+                stats["auto_cosine"] += 1
+                ctx.merged_pairs.add(cp)
+                _audit(ctx.audit, a, b, "cosine", "merged", factors,
+                       source="engine", merge_group_id=mg)
+            return
 
     # Wave 3 removed the cross-source gate: the engine no longer skips same-source non-exact
     # pairs. The gate cut ~36% of pairs off the (paid) visual stage but cost ~1.4% recall —
@@ -2104,6 +2191,8 @@ def run_engine(
     geo: bool = False,
     geo_area_max_pct: float | None = None,
     nonbyt_attr_merge: bool = False,
+    nonbyt_phash_single: bool = False,
+    nonbyt_cosine_merge_min: float = 0.0,
     defer_incomplete_downloads: bool = False,
     clip_model: str | None = None,
 ) -> dict[str, int]:
@@ -2165,7 +2254,7 @@ def run_engine(
                  {"eligible": None, "flagged_location": None, "flagged_disposition": None})
     stats.update({
         "pairs_considered": 0, "rejected": 0,
-        "auto_address": 0, "auto_phash": 0, "auto_visual": 0, "auto_attr": 0,
+        "auto_address": 0, "auto_phash": 0, "auto_phash_single": 0, "auto_visual": 0, "auto_attr": 0, "auto_cosine": 0,
         "queued": 0, "vision_calls": 0,
         "auto_dismissed": 0, "reconciled": 0, "skipped_unresolved": 0,
         "floor_plan_deferred": 0, "clip_deferred": 0, "download_deferred": 0, "truncated": 0,
@@ -2253,6 +2342,8 @@ def run_engine(
         enqueue_unresolved=enqueue_unresolved, dry_run=dry_run, render_min=render_min,
         inconclusive_to_review=inconclusive_to_review, max_room_attempts=max_room_attempts,
         nonbyt_attr_merge=nonbyt_attr_merge,
+        nonbyt_phash_single=nonbyt_phash_single,
+        nonbyt_cosine_merge_min=nonbyt_cosine_merge_min,
         defer_incomplete_downloads=defer_incomplete_downloads,
         stats=stats, vision_budget=_vision_budget,
         # floor_plan_calls None (every non-free mode) ALIASES the plan gate to the SAME
@@ -2975,6 +3066,8 @@ def build_free_engine_kw(
         auto_merge_enabled=auto_merge_enabled, autodismiss=autodismiss,
         enqueue_unresolved=enqueue_unresolved, deadline=deadline,
         nonbyt_attr_merge=bool(read_setting(conn, "dedup_nonbyt_attr_merge_enabled")),
+        nonbyt_phash_single=bool(read_setting(conn, "dedup_nonbyt_phash_single_enabled")),
+        nonbyt_cosine_merge_min=float(read_setting(conn, "dedup_nonbyt_cosine_merge_min") or 0.0),
         defer_incomplete_downloads=bool(
             read_setting(conn, "dedup_defer_incomplete_downloads")),
         clip_model=clip["clip_model"],
@@ -3268,6 +3361,8 @@ def main() -> int:
             enqueue_unresolved=not args.free, dry_run=args.shadow, deadline=deadline,
             restrict_property_ids=restrict,
             nonbyt_attr_merge=bool(read_setting(conn, "dedup_nonbyt_attr_merge_enabled")),
+            nonbyt_phash_single=bool(read_setting(conn, "dedup_nonbyt_phash_single_enabled")),
+            nonbyt_cosine_merge_min=float(read_setting(conn, "dedup_nonbyt_cosine_merge_min") or 0.0),
             defer_incomplete_downloads=bool(
                 read_setting(conn, "dedup_defer_incomplete_downloads")),
             clip_model=clip["clip_model"],
