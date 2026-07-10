@@ -13,7 +13,7 @@ from __future__ import annotations
 from typing import Any
 
 import scripts.submit_dedup_batch as sub
-from toolkit.dedup_engine import ListingKey, rooms_in_priority
+from toolkit.dedup_engine import ListingKey, PairDecision, rooms_in_priority
 
 
 # --- minimal fakes ----------------------------------------------------------
@@ -102,10 +102,19 @@ def _run(monkeypatch: Any, *, keys: list[ListingKey], classifications: dict[int,
          floor_plan_cached: Any = None, render_ids: set[int] | None = None,
          in_flight: set[str] | None = None,
          max_requests: int = 100, max_room_attempts: int = 4,
-         warm_rooms: int = 1, max_seconds: int = 0) -> _FakeConn:
+         warm_rooms: int = 1, max_seconds: int = 0,
+         lane: str = "street", geo_keys: list[ListingKey] | None = None,
+         candidate_pids: set[int] | None = None, geo_classify: Any = None,
+         clip_model: str | None = None,
+         clip_rooms: dict[int, dict[str, list[int]]] | None = None) -> _FakeConn:
     """Drive collect() over `keys` with all I/O monkeypatched; return the conn so
     the test can inspect the enqueued dedup_batch_requests rows."""
-    monkeypatch.setattr(sub, "_load_eligible", lambda conn: list(keys))
+    monkeypatch.setattr(sub, "_load_eligible", lambda conn, **k: list(keys))
+    monkeypatch.setattr(sub, "_load_geo_eligible", lambda conn, **k: list(geo_keys or []))
+    monkeypatch.setattr(sub, "_proposed_candidate_property_ids",
+                        lambda conn, redecide_hours=None: set(candidate_pids or set()))
+    monkeypatch.setattr(sub, "clip_room_grouping",
+                        lambda conn, *, sreality_id, model: (clip_rooms or {}).get(sreality_id))
     monkeypatch.setattr(
         sub, "_phash_identical_pairs",
         lambda conn, a, b, excluded_tags=(), render_exclude_min=None: phash)
@@ -164,7 +173,8 @@ def _run(monkeypatch: Any, *, keys: list[ListingKey], classifications: dict[int,
     submitter = sub._Submitter(conn, _FakeProvider(), max_requests=max_requests, dry_run=False)
     sub.collect(conn, _FakeLLM(), submitter, max_pairs=4000,
                 max_room_attempts=max_room_attempts, n_images=12, warm_rooms=warm_rooms,
-                max_seconds=max_seconds)
+                max_seconds=max_seconds, lane=lane, geo_classify=geo_classify,
+                clip_model=clip_model)
     submitter.flush()
     return conn
 
@@ -178,6 +188,89 @@ def _rows_by_kind(conn: _FakeConn) -> dict[str, list[tuple[Any, ...]]]:
 
 
 # --- recall-guard golden test -----------------------------------------------
+
+def _geo_key(sid: int, pid: int, *, source: str = "sreality",
+             cat: str = "dum") -> ListingKey:
+    return ListingKey(
+        sreality_id=sid, property_id=pid, source=source,
+        street_key="geo:5001:50.1006:14.5374:dum|komercni:prodej",
+        disposition="", house_number=None, floor=None, area_m2=800.0,
+        description=None, category_type="prodej", category_main=cat, street_id=None,
+    )
+
+
+def _accept_all_geo(a: ListingKey, b: ListingKey) -> PairDecision:
+    return PairDecision("candidate", None, "geo_stub")
+
+
+def test_candidates_lane_warms_both_tiers(monkeypatch: Any) -> None:
+    """lane='candidates' loads the proposed queue population from BOTH loaders
+    (street + geo, restricted to the candidate property ids) and warms each pair:
+    street pairs via classify_pair, geo pairs via the provided geo classifier."""
+    rooms = {"kitchen": [11], "bathroom": [12]}
+    conn = _run(
+        monkeypatch,
+        keys=[_key(1, 101, source="sreality"), _key(2, 102, source="bazos")],
+        geo_keys=[_geo_key(3, 103), _geo_key(4, 104, source="idnes")],
+        candidate_pids={101, 102, 103, 104},
+        classifications={1: ("classified", rooms), 2: ("classified", rooms),
+                         3: ("classified", rooms), 4: ("classified", rooms)},
+        lane="candidates", geo_classify=_accept_all_geo,
+    )
+    by_kind = _rows_by_kind(conn)
+    compared = {(r[4], r[5]) for r in by_kind.get("compare", [])}
+    assert (1, 2) in compared    # street pair warmed
+    assert (3, 4) in compared    # geo pair warmed via the geo classifier
+
+
+def test_geo_pairs_skipped_without_geo_classifier(monkeypatch: Any) -> None:
+    """A geo-keyed pair in a run with no geo classifier is out of scope — never judged by
+    classify_pair (which reads street/disposition fields geo keys don't carry)."""
+    rooms = {"kitchen": [11]}
+    conn = _run(
+        monkeypatch,
+        keys=[],
+        geo_keys=[_geo_key(3, 103), _geo_key(4, 104, source="idnes")],
+        candidate_pids={103, 104},
+        classifications={3: ("classified", rooms), 4: ("classified", rooms)},
+        lane="candidates", geo_classify=None,
+    )
+    assert conn.inserted_requests == []
+
+
+def test_clip_first_grouping_skips_llm_classify(monkeypatch: Any) -> None:
+    """With clip_model set and CLIP tags present on both sides, the warm uses CLIP room
+    grouping — no classify request is enqueued and the compare rooms are the CLIP rooms
+    (the same grouping the prefer-CLIP engine replays with)."""
+    clip_rooms = {
+        1: {"kitchen": [11], "bathroom": [12]},
+        2: {"kitchen": [21], "bathroom": [22]},
+    }
+    conn = _run(
+        monkeypatch,
+        keys=[_key(1, 101, source="sreality"), _key(2, 102, source="bazos")],
+        classifications={1: ("need_classify", None), 2: ("need_classify", None)},
+        clip_model="clip-m", clip_rooms=clip_rooms,
+    )
+    by_kind = _rows_by_kind(conn)
+    assert "classify" not in by_kind          # CLIP grouping made classify unnecessary
+    assert len(by_kind.get("compare", [])) >= 1
+
+
+def test_clip_missing_side_falls_back_to_llm_classify(monkeypatch: Any) -> None:
+    """A side with no CLIP tags falls back to the LLM classify cache — and enqueues the
+    classify exactly as before (the engine falls back the same way)."""
+    conn = _run(
+        monkeypatch,
+        keys=[_key(1, 101, source="sreality"), _key(2, 102, source="bazos")],
+        classifications={1: ("need_classify", None), 2: ("need_classify", None)},
+        clip_model="clip-m",
+        clip_rooms={1: {"kitchen": [11]}},    # side 2 has no CLIP tags
+    )
+    by_kind = _rows_by_kind(conn)
+    classify_targets = {r[4] for r in by_kind.get("classify", [])}
+    assert classify_targets == {2}            # only the CLIP-less side buys a classify
+
 
 def test_time_budget_stops_enqueuing_cleanly(monkeypatch: Any) -> None:
     """With the wall-clock budget already expired, collect() enqueues NOTHING and
