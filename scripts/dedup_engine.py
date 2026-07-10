@@ -355,8 +355,11 @@ def _proposed_candidate_property_ids(
             WHERE c.status = 'proposed'
               AND (
                 c.last_engine_decision_at IS NULL
+                -- float-safe: make_interval(hours =>) only takes int, and the
+                -- setting is a float — this crashed EVERY candidates drain 07-05
+                -- to 07-09 (UndefinedFunction; _FakeConn can't catch SQL types).
                 OR c.last_engine_decision_at
-                     < now() - make_interval(hours => %(backoff_h)s)
+                     < now() - (%(backoff_h)s * interval '1 hour')
                 OR EXISTS (
                     SELECT 1
                     FROM listings l
