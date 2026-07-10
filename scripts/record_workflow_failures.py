@@ -1,12 +1,24 @@
 """record_workflow_failures.py — poll the Actions API, persist failed runs.
 
-GitHub only emails the operator about failed SCHEDULED runs, so push-triggered
-and dispatch-triggered failures stay invisible unless someone opens the
-Actions tab. This poller (monitor_workflow_failures.yml, every 30 min) lists
-recently completed runs, keeps the failed-ish ones, and inserts them into
-`workflow_failures` (migration 178) — idempotent via ON CONFLICT (run_id) DO
-NOTHING, so the 40-min lookback overlapping the 30-min cadence is harmless.
-The Health page surfaces the table through `recent_workflow_failures()`.
+GitHub only emails the operator about failed SCHEDULED runs, so push- and
+dispatch-triggered failures stay invisible unless someone opens the Actions
+tab. This poller (monitor_workflow_failures.yml) lists recently completed runs,
+keeps the failed-ish ones, and inserts them into `workflow_failures` (migration
+178) — idempotent via ON CONFLICT (run_id) DO NOTHING. The Health page surfaces
+the table.
+
+Windowing is a HIGH-WATER-MARK CURSOR (`app_settings.workflow_failures_cursor`),
+not a fixed lookback. The monitor's cron is `*/30` but the GitHub Actions throttle
+runs it 80–256 min apart, so the old fixed 40-min lookback silently dropped every
+red run that completed in the uncovered gap (13 liveness reds → only 2 recorded).
+The cursor advances to the newest run seen each poll and pages back until it
+reaches the previous cursor, so no completed run is skipped.
+
+`cancelled` is recorded ONLY when the run ran at least
+`CANCELLED_MIN_DURATION_MINUTES`: a `timeout-minutes` kill (which GitHub reports as
+`cancelled`) runs to its budget, whereas a `cancel-in-progress` supersession is
+killed in seconds. Without this gate, enabling cancel-in-progress anywhere would
+flood the table with superseded runs.
 
 Needs GITHUB_REPOSITORY + GITHUB_TOKEN (the default Actions token with
 `actions: read`) + SUPABASE_DB_URL.
@@ -28,10 +40,14 @@ LOG = logging.getLogger("record_workflow_failures")
 # or one red poll would keep re-alarming the surface it feeds.
 MONITOR_WORKFLOW_NAME = "Monitoring: workflow failures"
 
+# Always-record conclusions. `cancelled` is handled conditionally (duration gate).
 ALERT_CONCLUSIONS = frozenset({"failure", "timed_out", "startup_failure"})
-LOOKBACK_MINUTES = 40
+CANCELLED_MIN_DURATION_MINUTES = 8   # >= this ⇒ a timeout-minutes kill, not a supersession
+BOOTSTRAP_MINUTES = 120              # first-ever run: how far back to seed the cursor
+CURSOR_OVERLAP_MINUTES = 5           # re-scan slightly before the cursor (ON CONFLICT makes it safe)
 PER_PAGE = 100
-MAX_PAGES = 2
+MAX_PAGES = 5                        # 500 runs — ample for the real 80–256-min gap; crawls if exceeded
+CURSOR_KEY = "workflow_failures_cursor"
 
 API_TIMEOUT_S = 30
 
@@ -45,33 +61,51 @@ def parse_ts(value: str | None) -> datetime | None:
         return None
 
 
+def _duration_minutes(run: dict[str, Any]) -> float | None:
+    """Run wall-clock, using `updated_at` as the completion proxy (the list endpoint
+    has no completed-at field)."""
+    started = parse_ts(run.get("run_started_at"))
+    completed = parse_ts(run.get("updated_at"))
+    if started is None or completed is None:
+        return None
+    return (completed - started).total_seconds() / 60.0
+
+
 def select_failed_runs(
     runs: list[dict[str, Any]],
     *,
     since: datetime,
     exclude_name: str = MONITOR_WORKFLOW_NAME,
+    cancelled_min_duration: float = CANCELLED_MIN_DURATION_MINUTES,
 ) -> list[dict[str, Any]]:
     """Pure filter over parsed `/actions/runs` JSON (no network, testable).
 
-    Keeps runs with an alerting conclusion that completed at/after `since`
-    (completion time approximated by `updated_at` — the list endpoint has no
-    completed-at field), excluding the monitor workflow itself.
+    Keeps runs completed at/after `since` (completion ≈ `updated_at`) with an alerting
+    conclusion, excluding the monitor workflow. `cancelled` is kept only when the run ran
+    >= `cancelled_min_duration` minutes — a timeout-minutes kill, not a quick supersession.
     """
     out: list[dict[str, Any]] = []
     for run in runs:
-        if run.get("conclusion") not in ALERT_CONCLUSIONS:
-            continue
         if run.get("name") == exclude_name:
             continue
         completed_at = parse_ts(run.get("updated_at"))
         if completed_at is None or completed_at < since:
+            continue
+        conclusion = run.get("conclusion")
+        if conclusion in ALERT_CONCLUSIONS:
+            pass
+        elif conclusion == "cancelled":
+            dur = _duration_minutes(run)
+            if dur is None or dur < cancelled_min_duration:
+                continue  # supersession / quick cancel — not a real failure
+        else:
             continue
         out.append(
             {
                 "run_id": int(run["id"]),
                 "workflow_name": run.get("name") or "(unnamed)",
                 "workflow_path": run.get("path"),
-                "conclusion": run["conclusion"],
+                "conclusion": conclusion,
                 "run_started_at": parse_ts(run.get("run_started_at")),
                 "html_url": run.get("html_url"),
             }
@@ -125,6 +159,46 @@ def _fetch_runs_page(repo: str, token: str, page: int) -> list[dict[str, Any]]:
     return payload.get("workflow_runs", []) or []
 
 
+def _read_cursor(conn: Any) -> datetime | None:
+    with conn.cursor() as cur:
+        cur.execute("SELECT value #>> '{}' FROM app_settings WHERE key = %s", (CURSOR_KEY,))
+        row = cur.fetchone()
+    return parse_ts(row[0]) if row and row[0] else None
+
+
+def _write_cursor(conn: Any, ts: datetime) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO app_settings (key, value, updated_at) "
+            "VALUES (%s, to_jsonb(%s::text), now()) "
+            "ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = now()",
+            (CURSOR_KEY, ts.isoformat()),
+        )
+
+
+def _fetch_since_cursor(
+    repo: str, token: str, since: datetime,
+) -> tuple[list[dict[str, Any]], bool]:
+    """Page newest-first until a page reaches older than `since` (full coverage) or the
+    page cap. Returns (runs, reached_since)."""
+    runs: list[dict[str, Any]] = []
+    reached_since = False
+    for page in range(1, MAX_PAGES + 1):
+        batch = _fetch_runs_page(repo, token, page)
+        if not batch:
+            reached_since = True
+            break
+        runs.extend(batch)
+        page_oldest = min(
+            (parse_ts(r.get("updated_at")) for r in batch if parse_ts(r.get("updated_at"))),
+            default=None,
+        )
+        if len(batch) < PER_PAGE or (page_oldest is not None and page_oldest < since):
+            reached_since = True
+            break
+    return runs, reached_since
+
+
 def main() -> int:
     logging.basicConfig(
         level=logging.INFO,
@@ -141,23 +215,21 @@ def main() -> int:
         )
         return 2
 
-    since = datetime.now(timezone.utc) - timedelta(minutes=LOOKBACK_MINUTES)
-    runs: list[dict[str, Any]] = []
-    for page in range(1, MAX_PAGES + 1):
-        batch = _fetch_runs_page(repo, token, page)
-        runs.extend(batch)
-        if len(batch) < PER_PAGE:
-            break
-    failed = select_failed_runs(runs, since=since)
-    # Successes are NOT windowed: the latest success anywhere in the page resets
-    # the streak. workflow_run_health is one upserted row per workflow, so a stale
-    # page-success can never regress last_success_at (greatest() guard below).
-    successes = select_latest_successes(runs)
-
     import psycopg
 
     inserted = 0
     with psycopg.connect(db_url, autocommit=True, prepare_threshold=None) as conn:
+        now = datetime.now(timezone.utc)
+        cursor_ts = _read_cursor(conn) or (now - timedelta(minutes=BOOTSTRAP_MINUTES))
+        since = cursor_ts - timedelta(minutes=CURSOR_OVERLAP_MINUTES)
+
+        runs, reached_since = _fetch_since_cursor(repo, token, since)
+        failed = select_failed_runs(runs, since=since)
+        # Successes are NOT windowed: the latest success anywhere in the pages resets the
+        # streak. workflow_run_health is one upserted row per workflow, so a stale
+        # page-success can never regress last_success_at (greatest() guard below).
+        successes = select_latest_successes(runs)
+
         with conn.cursor() as cur:
             for s in successes:
                 cur.execute(
@@ -200,9 +272,21 @@ def main() -> int:
                 )
                 inserted += cur.rowcount
 
+        # Advance the cursor. Full coverage → jump to the newest completion; if the page cap
+        # was hit first, crawl to the oldest seen so the uncovered gap is picked up next poll.
+        completions = [c for c in (parse_ts(r.get("updated_at")) for r in runs) if c is not None]
+        if completions:
+            new_cursor = max(completions) if reached_since else min(completions)
+            if not reached_since:
+                LOG.warning(
+                    "WORKFLOW_FAILURES page cap (%d) hit before reaching the cursor; "
+                    "crawling to oldest-seen %s", MAX_PAGES, new_cursor,
+                )
+            _write_cursor(conn, new_cursor)
+
     LOG.info(
-        "WORKFLOW_FAILURES scanned=%d failed=%d inserted=%d successes_tracked=%d",
-        len(runs), len(failed), inserted, len(successes),
+        "WORKFLOW_FAILURES scanned=%d failed=%d inserted=%d successes_tracked=%d reached_since=%s",
+        len(runs), len(failed), inserted, len(successes), reached_since,
     )
     return 0
 
