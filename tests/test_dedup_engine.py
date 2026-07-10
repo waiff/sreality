@@ -2200,6 +2200,7 @@ def _run_geo_only_main(monkeypatch: Any, *, reached_end: bool, last_key: str | N
         "dedup_nonbyt_attr_merge_enabled": False,
         "dedup_nonbyt_phash_single_enabled": False,
         "dedup_nonbyt_cosine_merge_min": 0,
+        "dedup_facade_dismiss_enabled": False,
         "dedup_defer_incomplete_downloads": False,
     }
     monkeypatch.setattr(ds, "read_setting", lambda conn, key: settings[key])
@@ -3492,6 +3493,29 @@ def test_decide_visual_dismiss_blocks_on_distinctive_hedge() -> None:
     # a Medium hedge on a distinctive room -> not confident; keep for review
     assert not decide_visual_dismiss({"kitchen": "Medium"})
     assert not decide_visual_dismiss({"kitchen": "Low", "bathroom": "Medium"})
+
+
+def test_facade_dismiss_off_by_default_and_byt_never_qualifies() -> None:
+    # Default OFF: a facade Low alone never dismisses (the pre-§5.2 behavior).
+    assert not decide_visual_dismiss({"exterior_facade": "Low"})
+    assert not decide_visual_dismiss({"exterior_facade": "Low"}, "dum")
+    # Flag ON but byt: the development shared-shell trap — facade never qualifies.
+    assert not decide_visual_dismiss({"exterior_facade": "Low"}, "byt", facade_dismiss=True)
+    assert not decide_visual_dismiss({"exterior_facade": "Low"}, None, facade_dismiss=True)
+
+
+def test_facade_dismiss_on_for_nonbyt_families() -> None:
+    for cat in ("dum", "pozemek", "komercni", "ostatni"):
+        assert decide_visual_dismiss({"exterior_facade": "Low"}, cat, facade_dismiss=True)
+    # conservatism unchanged: High still blocks, a facade Medium still queues
+    assert not decide_visual_dismiss(
+        {"exterior_facade": "Low", "garden": "High"}, "dum", facade_dismiss=True)
+    assert not decide_visual_dismiss({"exterior_facade": "Medium"}, "dum", facade_dismiss=True)
+    # a facade Low alongside a kitchen Medium is still a hedge on a qualifying room
+    assert not decide_visual_dismiss(
+        {"exterior_facade": "Low", "kitchen": "Medium"}, "dum", facade_dismiss=True)
+    # generic-only rooms still never dismiss even with the flag on
+    assert not decide_visual_dismiss({"garden": "Low"}, "pozemek", facade_dismiss=True)
 
 
 # --- run_engine: self-healing (reconcile / dismiss / dry-run) ---------------

@@ -743,24 +743,37 @@ def verdict_is_merge(verdict: str | None) -> bool:
 DISTINCTIVE_DISMISS_ROOMS: frozenset[str] = frozenset({"kitchen", "bathroom"})
 
 
-def decide_visual_dismiss(room_verdicts: dict[str, str]) -> bool:
+def decide_visual_dismiss(
+    room_verdicts: dict[str, str], category_main: str | None = None,
+    facade_dismiss: bool = False,
+) -> bool:
     """True iff the forensic room verdicts confidently say "different property".
 
     Auto-dismiss (don't queue for the operator) only when:
       * no room reached High (the merge OR-gate already fired otherwise), AND
-      * a DISTINCTIVE room (kitchen/bathroom) was compared and returned Low, AND
-      * no distinctive room is non-Low (no Medium/ambiguous hedge on kitchen/bath).
-    Everything else (a distinctive Medium, or only generic rooms compared) stays
+      * a dismissal-qualifying room was compared and returned Low, AND
+      * no dismissal-qualifying room is non-Low (no Medium/ambiguous hedge).
+    Dismissal-qualifying rooms are the DISTINCTIVE wet rooms (kitchen/bathroom — the
+    #506 byt-era calibration, unchanged), plus `exterior_facade` for NON-byt families
+    when `facade_dismiss` is on (cost plan §5.2, fid5 operator-requested option,
+    dedup_facade_dismiss_enabled, default OFF): for houses/land/commercial the facade
+    IS the identity-bearing surface (#619 made the merge side family-aware; this is
+    the dismiss-side counterpart), while byt facades stay non-qualifying — a
+    development's shared building shell says nothing about which unit is listed.
+    Everything else (a qualifying Medium, or only generic rooms compared) stays
     queued for a human. room_verdicts maps room_type -> 'High'|'Medium'|'Low'.
     """
     if not room_verdicts:
         return False
     if any(v == "High" for v in room_verdicts.values()):
         return False
-    distinctive = [v for r, v in room_verdicts.items() if r in DISTINCTIVE_DISMISS_ROOMS]
-    if not distinctive:
+    qualifying = set(DISTINCTIVE_DISMISS_ROOMS)
+    if facade_dismiss and category_main and category_main != "byt":
+        qualifying.add("exterior_facade")
+    relevant = [v for r, v in room_verdicts.items() if r in qualifying]
+    if not relevant:
         return False
-    return all(v == "Low" for v in distinctive)
+    return all(v == "Low" for v in relevant)
 
 
 # Stage 4b: the CLIP cosine recall tier picks WHICH forensic model judges a room

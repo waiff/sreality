@@ -36,6 +36,12 @@
   engine uses), and geo-keyed pairs go through `_make_geo_classify` with the operator's area
   tolerance. Batch create retries transient 5xx/429/connection errors (the Jul-4 502 killed a
   whole run).
+- **Phase 4 item 2 (facade-as-dismisser, fid5): SHIPPED (2026-07-10), default OFF.**
+  `dedup_facade_dismiss_enabled`: a confident facade Low qualifies for auto-dismiss on non-byt
+  (byt never; all other conservatism unchanged — all-rooms-verdicted, High merges, Medium
+  queues). Replay on decided pairs: facade-Low+no-High agreed with the final outcome 15/15
+  (0 conflicts); 0 of 79 operator-approved non-byt merges carry a facade Low. Enabling is the
+  operator's flip.
 - **Phase 4.2 (harness): triggered** a `validate_vision_models` run (Haiku @ 768px, compare-
   recall gate) — its result gates the model flips.
 - **Model flips (4.3) / 768px (3.1):** blocked on a GREEN harness run; the flips are gated

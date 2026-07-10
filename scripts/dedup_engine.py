@@ -1211,6 +1211,7 @@ def _resolve_visual(
     tag_overrides: dict[str, list[str]] | None = None,
     stats: dict[str, int] | None = None,
     probe_cache: "_ProbeCache | None" = None,
+    facade_dismiss: bool = False,
 ) -> dict[str, Any]:
     """Rule D for one candidate pair. Returns a dict describing the outcome.
 
@@ -1339,7 +1340,8 @@ def _resolve_visual(
     # on a confident distinctive-room Low (decide_visual_dismiss); calibrated: 0/273
     # operator merges were Low. Otherwise queue.
     all_rooms_verdicted = len(room_verdicts) == len(priority)
-    if autodismiss and all_rooms_verdicted and decide_visual_dismiss(room_verdicts):
+    if autodismiss and all_rooms_verdicted and decide_visual_dismiss(
+            room_verdicts, a.category_main, facade_dismiss):
         room = next(
             (r for r in rooms_in_priority(set(room_verdicts), a.category_main, tag_overrides)
              if room_verdicts[r] == "Low"),
@@ -1694,6 +1696,9 @@ class _RunContext:
     # the same gates (dedup_nonbyt_cosine_merge_min; 0 = off, plan default 0.98). Both
     # sides must have stored embeddings; None cosine never fires the arm.
     nonbyt_cosine_merge_min: float = 0.0
+    # §5.2 (fid5, operator-requested option): a confident facade Low DISMISSES for non-byt
+    # families (dedup_facade_dismiss_enabled, default OFF) — see decide_visual_dismiss.
+    facade_dismiss: bool = False
     # Download-completeness readiness: when set, a pair DEFERS while either side still has an
     # image pending download (dedup_defer_incomplete_downloads) — so it isn't decided (or paid
     # for) on a partial photo set. Off = decide on whatever images have arrived.
@@ -2095,7 +2100,7 @@ def resolve_pair(conn: Any, a: ListingKey, b: ListingKey, *, street_key: str,
         cosine_fn=ctx.cosine_fn, bands=ctx.bands, model_for=ctx.model_for,
         render_min=ctx.render_min, inconclusive_to_review=ctx.inconclusive_to_review,
         tag_overrides=ctx.tag_overrides,
-        stats=stats, probe_cache=ctx.probes,
+        stats=stats, probe_cache=ctx.probes, facade_dismiss=ctx.facade_dismiss,
     )
     # ONE factor set per pair — fed to BOTH the terminal audit `detail` (merged/dismissed)
     # AND, when queued, the candidate `markers_matched`, so Decision history and
@@ -2193,6 +2198,7 @@ def run_engine(
     nonbyt_attr_merge: bool = False,
     nonbyt_phash_single: bool = False,
     nonbyt_cosine_merge_min: float = 0.0,
+    facade_dismiss: bool = False,
     defer_incomplete_downloads: bool = False,
     clip_model: str | None = None,
 ) -> dict[str, int]:
@@ -2344,6 +2350,7 @@ def run_engine(
         nonbyt_attr_merge=nonbyt_attr_merge,
         nonbyt_phash_single=nonbyt_phash_single,
         nonbyt_cosine_merge_min=nonbyt_cosine_merge_min,
+        facade_dismiss=facade_dismiss,
         defer_incomplete_downloads=defer_incomplete_downloads,
         stats=stats, vision_budget=_vision_budget,
         # floor_plan_calls None (every non-free mode) ALIASES the plan gate to the SAME
@@ -3068,6 +3075,7 @@ def build_free_engine_kw(
         nonbyt_attr_merge=bool(read_setting(conn, "dedup_nonbyt_attr_merge_enabled")),
         nonbyt_phash_single=bool(read_setting(conn, "dedup_nonbyt_phash_single_enabled")),
         nonbyt_cosine_merge_min=float(read_setting(conn, "dedup_nonbyt_cosine_merge_min") or 0.0),
+        facade_dismiss=bool(read_setting(conn, "dedup_facade_dismiss_enabled")),
         defer_incomplete_downloads=bool(
             read_setting(conn, "dedup_defer_incomplete_downloads")),
         clip_model=clip["clip_model"],
@@ -3363,6 +3371,7 @@ def main() -> int:
             nonbyt_attr_merge=bool(read_setting(conn, "dedup_nonbyt_attr_merge_enabled")),
             nonbyt_phash_single=bool(read_setting(conn, "dedup_nonbyt_phash_single_enabled")),
             nonbyt_cosine_merge_min=float(read_setting(conn, "dedup_nonbyt_cosine_merge_min") or 0.0),
+            facade_dismiss=bool(read_setting(conn, "dedup_facade_dismiss_enabled")),
             defer_incomplete_downloads=bool(
                 read_setting(conn, "dedup_defer_incomplete_downloads")),
             clip_model=clip["clip_model"],
