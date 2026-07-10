@@ -16,8 +16,19 @@ if TYPE_CHECKING:
     import psycopg
 
 
+# The API opens a DB connection PER REQUEST, so the full batch-side handshake
+# retry (3x10s) would hang request threads ~30s during a pooler outage. A quick
+# single retry rides out a brief pooler blip without holding a thread through a
+# sustained outage (the DB is down then anyway, so failing fast is correct). See
+# scraper.db.connect's `attempts`/`retry_delay`.
+_API_CONNECT_ATTEMPTS = 2
+_API_CONNECT_RETRY_DELAY = 1.0
+
+
 def get_db_conn() -> "Iterator[psycopg.Connection]":
-    conn = db.connect()
+    conn = db.connect(
+        attempts=_API_CONNECT_ATTEMPTS, retry_delay=_API_CONNECT_RETRY_DELAY
+    )
     try:
         yield conn
     finally:
@@ -32,7 +43,9 @@ def open_background_conn() -> "Iterator[psycopg.Connection]":
     response is sent, so background work that runs after the response
     must open its own.
     """
-    conn = db.connect()
+    conn = db.connect(
+        attempts=_API_CONNECT_ATTEMPTS, retry_delay=_API_CONNECT_RETRY_DELAY
+    )
     try:
         yield conn
     finally:
