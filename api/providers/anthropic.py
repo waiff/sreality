@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import time
 from typing import Any
 
 from collections.abc import Iterator
@@ -120,7 +121,12 @@ class AnthropicProvider:
         )
 
     def submit_batch(self, items: list[tuple[str, dict[str, Any]]]) -> str:
-        """Create a Message Batch. `items` is [(custom_id, params), ...]."""
+        """Create a Message Batch. `items` is [(custom_id, params), ...].
+
+        Bounded retry on TRANSIENT create failures (5xx/429/529/connection): a single
+        upstream 502 used to kill the whole warm-up run after all the build work
+        (2026-07-04, run 28693584770) — batch create is idempotent-safe to retry
+        because nothing is recorded until it returns an id."""
         if not items:
             raise ProviderError("submit_batch called with no requests")
         client = self._sdk_client()
@@ -128,11 +134,23 @@ class AnthropicProvider:
             {"custom_id": custom_id, "params": params}
             for custom_id, params in items
         ]
-        try:
-            batch = client.messages.batches.create(requests=requests)
-        except Exception as exc:
-            raise ProviderError(f"anthropic batch create failed: {exc}") from exc
-        return str(batch.id)
+        last_exc: Exception | None = None
+        for attempt in range(3):
+            try:
+                batch = client.messages.batches.create(requests=requests)
+                return str(batch.id)
+            except Exception as exc:  # noqa: BLE001 — SDK raises many types; filter below
+                last_exc = exc
+                status = getattr(exc, "status_code", None)
+                transient = (status in (429, 500, 502, 503, 504, 529)
+                             or type(exc).__name__ in ("APIConnectionError", "APITimeoutError"))
+                if not transient or attempt == 2:
+                    raise ProviderError(f"anthropic batch create failed: {exc}") from exc
+                wait = 2.0 * (2 ** attempt)
+                LOG.warning("batch create transient failure (%s); retry %d/2 in %.0fs",
+                            exc, attempt + 1, wait)
+                time.sleep(wait)
+        raise ProviderError(f"anthropic batch create failed: {last_exc}") from last_exc
 
     def poll_batch(self, provider_batch_id: str) -> BatchStatus:
         client = self._sdk_client()

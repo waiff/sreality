@@ -48,14 +48,19 @@ from typing import Any, Callable
 from scripts.dedup_engine import (
     MAX_GROUP_SIZE,
     _both_have_site_plan,
+    _clip_settings,
     _floor_plan_image_ids,
     _group_by_street,
     _high_render_image_ids,
     _load_eligible,
+    _load_geo_eligible,
+    _make_geo_classify,
     _phash_distinctive_match,
     _phash_identical_pairs,
+    _proposed_candidate_property_ids,
 )
 from scripts.submit_condition_batch import should_flush
+from toolkit.clip_dedup import clip_room_grouping
 from toolkit.dedup_engine import (
     PHASH_MIN_IDENTICAL_PAIRS,
     classify_pair,
@@ -211,6 +216,9 @@ def collect(
     n_images: int,
     warm_rooms: int = 1,
     max_seconds: int = 0,
+    lane: str = "street",
+    geo_classify: Any = None,
+    clip_model: str | None = None,
 ) -> dict[str, int]:
     """Walk the engine's free funnel and enqueue the visual requests it implies.
 
@@ -241,7 +249,18 @@ def collect(
     # per-pair probes below are short and stay on the OLTP default.
     with conn.transaction(), conn.cursor() as cur:
         cur.execute("SET LOCAL statement_timeout = '10min'")
-        keys = _load_eligible(conn)
+        # Lane = which population to warm (§4.1 names street/geo/candidates). 'candidates'
+        # is the review-queue blitz population: exactly the proposed pairs' own listings,
+        # both tiers, so the drain's re-decides replay over warm caches. Geo keys carry
+        # their cell in street_key, so _group_by_street groups all three lanes correctly.
+        if lane == "geo":
+            keys = _load_geo_eligible(conn)
+        elif lane == "candidates":
+            pids = _proposed_candidate_property_ids(conn, redecide_hours=None)
+            keys = _load_eligible(conn, restrict_property_ids=pids)
+            keys = keys + _load_geo_eligible(conn, restrict_property_ids=pids)
+        else:
+            keys = _load_eligible(conn)
     groups = _group_by_street(keys)
 
     funnel = {"visual_candidates": 0, "pairs_deferred_classify": 0, "floor_plan_warmed": 0}
@@ -280,7 +299,14 @@ def collect(
                     continue
                 seen_listing_pairs.add(lpair)
 
-                decision = classify_pair(a, b)
+                # Geo-keyed pairs (street_key 'geo:…') must use the geo candidate filter —
+                # classify_pair would judge them on street/disposition fields they don't carry.
+                if (a.street_key or "").startswith("geo:"):
+                    if geo_classify is None:
+                        continue  # geo pair in a street-only run: out of scope
+                    decision = geo_classify(a, b)
+                else:
+                    decision = classify_pair(a, b)
                 if decision.action == "reject":
                     continue
                 if a.property_id is None or b.property_id is None:
@@ -325,7 +351,7 @@ def collect(
                     classify_model=classify_model, compare_model=compare_model,
                     site_plan_model=site_plan_model, n_images=n_images,
                     max_room_attempts=max_room_attempts, warm_rooms=warm_rooms,
-                    funnel=funnel, tag_overrides=tag_overrides,
+                    funnel=funnel, tag_overrides=tag_overrides, clip_model=clip_model,
                 )
 
     return {**funnel, **submitter.stats}
@@ -375,13 +401,27 @@ def _collect_visual(
     warm_rooms: int = 1,
     funnel: dict[str, int],
     tag_overrides: dict[str, list[str]] | None = None,
+    clip_model: str | None = None,
 ) -> None:
     """Mirror of run_engine._resolve_visual, but it ENQUEUES batch requests for
-    the LLM calls the synchronous resolver would make, instead of making them."""
-    state_a, rooms_a = cached_classification(
-        conn, sreality_id=a.sreality_id, model=classify_model, n_images=n_images)
-    state_b, rooms_b = cached_classification(
-        conn, sreality_id=b.sreality_id, model=classify_model, n_images=n_images)
+    the LLM calls the synchronous resolver would make, instead of making them.
+
+    Room grouping is CLIP-FIRST when `clip_model` is set — the SAME source the
+    prefer-CLIP engine replays with, so the warmed (a, b, room, model) cache keys are
+    the ones the replay looks up. The LLM classify cache (and a classify enqueue) is
+    only the fallback for sides with no CLIP tags, mirroring the engine's own fallback —
+    and avoiding a paid classify wave for listings the engine would never read it for."""
+
+    def _grouping(sid: int) -> tuple[str, dict[str, list[int]] | None]:
+        if clip_model:
+            g = clip_room_grouping(conn, sreality_id=sid, model=clip_model)
+            if g:
+                return "classified", g
+        return cached_classification(
+            conn, sreality_id=sid, model=classify_model, n_images=n_images)
+
+    state_a, rooms_a = _grouping(a.sreality_id)
+    state_b, rooms_b = _grouping(b.sreality_id)
 
     # Wave 1: any side not yet classified -> enqueue its classify; compare/site_plan
     # need BOTH classified, so defer them (next run, after these ingest).
@@ -507,6 +547,10 @@ def main() -> int:
                              "room the engine tries first). Higher = more discount coverage for "
                              "more speculative spend. Cannot exceed --max-room-attempts.")
     parser.add_argument("--n-images", type=int, default=DEFAULT_CLASSIFY_N_IMAGES)
+    parser.add_argument("--lane", choices=("street", "geo", "candidates"), default="street",
+                        help="Population to warm: the street funnel (default), the geo "
+                             "funnel, or 'candidates' = exactly the proposed review-queue "
+                             "pairs (both tiers) — the queue-blitz population.")
     parser.add_argument("--max-seconds", type=int, default=3000,
                         help="Wall-clock budget; stop enqueuing and finalize cleanly when reached "
                              "(0 = no budget). Default 50min — below the workflow's 60-min kill, "
@@ -540,10 +584,10 @@ def main() -> int:
 
     provider = AnthropicProvider()
     LOG.info(
-        "BATCH submit config max_pairs=%d max_requests=%d max_room_attempts=%d warm_rooms=%d "
-        "n_images=%d max_seconds=%d dry_run=%s",
-        args.max_pairs, args.max_requests, args.max_room_attempts, args.warm_rooms,
-        args.n_images, args.max_seconds, args.dry_run,
+        "BATCH submit config lane=%s max_pairs=%d max_requests=%d max_room_attempts=%d "
+        "warm_rooms=%d n_images=%d max_seconds=%d dry_run=%s",
+        args.lane, args.max_pairs, args.max_requests, args.max_room_attempts,
+        args.warm_rooms, args.n_images, args.max_seconds, args.dry_run,
     )
 
     with psycopg.connect(db_url, autocommit=True, prepare_threshold=None) as conn:
@@ -553,11 +597,21 @@ def main() -> int:
             return 0
         llm_client = LLMClient(conn, providers={"anthropic": provider})
         submitter = _Submitter(conn, provider, max_requests=args.max_requests, dry_run=args.dry_run)
+        # Mirror the engine's own knobs so the warm keys match the replay: CLIP-first room
+        # grouping when the engine prefers CLIP tags, and the geo candidate filter with the
+        # operator's area tolerance for geo-keyed pairs.
+        cs = _clip_settings(conn)
+        clip_model = cs.get("clip_model") if cs.get("prefer_clip") else None
+        geo_classify = None
+        if args.lane in ("geo", "candidates"):
+            geo_classify = _make_geo_classify(
+                float(read_setting(conn, "dedup_geo_area_max_pct")))
         stats = collect(
             conn, llm_client, submitter,
             max_pairs=args.max_pairs, max_room_attempts=args.max_room_attempts,
             n_images=args.n_images, warm_rooms=args.warm_rooms,
             max_seconds=args.max_seconds,
+            lane=args.lane, geo_classify=geo_classify, clip_model=clip_model,
         )
         if not args.dry_run:
             submitter.flush()

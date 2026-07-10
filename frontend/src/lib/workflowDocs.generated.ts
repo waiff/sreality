@@ -1311,6 +1311,18 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
         "options": null
       },
       {
+        "name": "lane",
+        "description": "[submit] Population to warm: street funnel, geo funnel, or 'candidates' (the proposed review-queue pairs — the blitz population)",
+        "required": false,
+        "type": "choice",
+        "default": "street",
+        "options": [
+          "street",
+          "geo",
+          "candidates"
+        ]
+      },
+      {
         "name": "dry_run",
         "description": "[submit] Report what would be enqueued without submitting",
         "required": false,
