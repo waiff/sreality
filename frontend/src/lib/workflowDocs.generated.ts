@@ -1109,16 +1109,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "description": "Phase 1.8b — async condition scoring via the Anthropic Message Batches API (50% cheaper than the synchronous condition_scores.yml job). Two modes, selected by the `mode` input:",
     "portal": null,
     "manual": true,
-    "schedules": [
-      {
-        "cron": "5 */3 * * *",
-        "human": "Every 3 hours at :05"
-      },
-      {
-        "cron": "35 * * * *",
-        "human": "Every hour at :35"
-      }
-    ],
+    "schedules": [],
     "onPush": false,
     "onPullRequest": false,
     "paths": null,
@@ -1720,8 +1711,8 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "manual": true,
     "schedules": [
       {
-        "cron": "20 */6 * * *",
-        "human": "Every 6 hours at :20"
+        "cron": "20 */3 * * *",
+        "human": "Every 3 hours at :20"
       }
     ],
     "onPush": false,
@@ -2324,8 +2315,8 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
   },
   {
     "filename": "llm_health.yml",
-    "name": "Monitoring: LLM pipeline liveness",
-    "description": "Goes red (→ GitHub notifies the operator on a failed scheduled run) when the LLM pipeline looks dead: no `llm_calls` rows for several hours while there is pending condition-scoring work. Catches the silent failure mode where the Anthropic account runs out of credits / the key breaks and the scorers swallow per-listing errors, staying green while scoring nothing (this went unnoticed for ~8h on 2026-06-04).",
+    "name": "Monitoring: acute health (hourly)",
+    "description": "The fast lane of verify_pipeline: runs the ACUTE checks — LLM errors, LLM silence, DB saturation (pg_cron failure rate) and realtime-worker liveness — hourly, and exits non-zero when any is `fail` so GitHub emails the operator on a red scheduled run. This is the belt-and-braces channel for when the in-app bell path itself is down; the bell is rung (edge-triggered) by the checks via emit_transition_alerts, so an incident alerts once — not per run — and clears on recovery. The 6h full verify_pipeline run additionally covers these (shared emitter keys → no double-alert) plus the slower structural checks (dedup debt, latency, engine cycle).",
     "portal": null,
     "manual": true,
     "schedules": [
@@ -3792,8 +3783,8 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
       "SUPABASE_DB_URL"
     ],
     "concurrencyGroup": "validate-vision-models",
-    "cancelInProgress": false,
-    "timeoutMinutes": 30,
+    "cancelInProgress": true,
+    "timeoutMinutes": 90,
     "permissions": "contents: read",
     "runsUrl": "https://github.com/waiff/sreality/actions/workflows/validate_vision_models.yml",
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/validate_vision_models.yml"

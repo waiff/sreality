@@ -50,12 +50,12 @@ on:
 
 concurrency:
   group: validate-vision-models
-  cancel-in-progress: false
+  cancel-in-progress: true   # dispatches arrive in pairs; keep only the newest, don't burn a runner
 
 jobs:
   validate:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 90   # the default 200-pair sample needs >30m; 30 killed runs mid-measure
     permissions:
       contents: read
     env:

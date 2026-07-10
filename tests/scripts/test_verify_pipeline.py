@@ -15,8 +15,11 @@ from scripts.verify_pipeline import (
     _status_for_candidates,
     _status_for_cycle,
     _status_for_dirty,
+    _status_for_cron,
     _status_for_llm_errors,
+    _status_for_llm_silence,
     _status_for_merge_latency,
+    _status_for_worker,
     _status_for_street_debt,
     _worst,
     load_thresholds,
@@ -61,32 +64,21 @@ def test_merge_latency_status() -> None:
 # --- cycle -----------------------------------------------------------------
 
 
-def test_cycle_no_row_is_warn() -> None:
-    assert _status_for_cycle(
-        has_row=False, completed_age_hours=None, started_age_hours=None, thresholds=T,
-    ) == "warn"
+def test_cycle_no_row_or_no_progress_is_warn() -> None:
+    assert _status_for_cycle(has_row=False, updated_age_hours=None, thresholds=T) == "warn"
+    assert _status_for_cycle(has_row=True, updated_age_hours=None, thresholds=T) == "warn"
 
 
-def test_cycle_recent_completion_ok_old_fail() -> None:
-    assert _status_for_cycle(
-        has_row=True, completed_age_hours=1.0, started_age_hours=2.0, thresholds=T,
-    ) == "ok"
-    assert _status_for_cycle(
-        has_row=True, completed_age_hours=T["cycle_age_fail_hours"] + 1,
-        started_age_hours=None, thresholds=T,
-    ) == "fail"
+def test_cycle_progressing_is_ok_even_if_never_completes() -> None:
+    # The street cycle takes ~2 weeks and never "completes" — a recently-advanced cursor is
+    # healthy, NOT a failure (the old age-based check was structurally always-red here).
+    assert _status_for_cycle(has_row=True, updated_age_hours=4.0, thresholds=T) == "ok"
 
 
-def test_cycle_never_completed_gates_on_start_age() -> None:
-    # In-progress first cycle that started recently: not yet a failure.
-    assert _status_for_cycle(
-        has_row=True, completed_age_hours=None, started_age_hours=2.0, thresholds=T,
-    ) == "ok"
-    # A cycle that started long ago and never completed: failure.
-    assert _status_for_cycle(
-        has_row=True, completed_age_hours=None,
-        started_age_hours=T["cycle_age_fail_hours"] + 1, thresholds=T,
-    ) == "fail"
+def test_cycle_stalled_cursor_fails() -> None:
+    stall = T["cycle_stall_fail_hours"]
+    assert _status_for_cycle(has_row=True, updated_age_hours=stall, thresholds=T) == "ok"
+    assert _status_for_cycle(has_row=True, updated_age_hours=stall + 0.1, thresholds=T) == "fail"
 
 
 # --- dirty / candidates ----------------------------------------------------
@@ -103,25 +95,72 @@ def test_dirty_and_candidate_warn_bands() -> None:
 # --- llm_errors ------------------------------------------------------------
 
 
-def test_llm_errors_credit_balance_forces_fail() -> None:
-    status, offenders = _status_for_llm_errors([], credit_balance_errors=1, thresholds=T)
+def test_llm_errors_credit_live_forces_fail() -> None:
+    status, offenders = _status_for_llm_errors(
+        [], credit_live=True, currently_failing=True, thresholds=T,
+    )
     assert status == "fail" and offenders == []
 
 
-def test_llm_errors_rate_needs_min_calls() -> None:
-    # 3/5 = 60% but only 5 calls (< 20) → not counted.
-    low_volume = [{"called_for": "parse_url", "total": 5, "errors": 3}]
-    assert _status_for_llm_errors(low_volume, 0, T)[0] == "ok"
-    # 6/20 = 30% > 20% with >= 20 calls → fail, and it's named.
-    status, offenders = _status_for_llm_errors(
-        [{"called_for": "score_listing_condition", "total": 20, "errors": 6}], 0, T,
-    )
+def test_llm_errors_recovered_credit_window_is_ok() -> None:
+    # The 2026-07-09 stale-alarm regression: credit errors sit in the 24h window but a
+    # success has flowed since, so it's NOT live — must be ok, not "everything is down".
+    assert _status_for_llm_errors(
+        [{"called_for": "compare_listings_visually", "total": 40, "errors": 30}],
+        credit_live=False, currently_failing=False, thresholds=T,
+    ) == ("ok", [])
+
+
+def test_llm_errors_rate_only_fails_while_live() -> None:
+    offender = [{"called_for": "score_listing_condition", "total": 20, "errors": 6}]  # 30% > 20%, >= 20
+    # Live → fail, named.
+    status, offenders = _status_for_llm_errors(offender, False, True, T)
     assert status == "fail" and offenders == ["score_listing_condition"]
+    # Same window but recovered (not live) → ok. This is the trailing-window fix.
+    assert _status_for_llm_errors(offender, False, False, T) == ("ok", [])
+    # Live but only 5 calls (< 20) → too little signal → ok.
+    low_volume = [{"called_for": "parse_url", "total": 5, "errors": 3}]
+    assert _status_for_llm_errors(low_volume, False, True, T)[0] == "ok"
 
 
 def test_llm_errors_clean_is_ok() -> None:
     clean = [{"called_for": "parse_url", "total": 100, "errors": 1}]
-    assert _status_for_llm_errors(clean, 0, T) == ("ok", [])
+    assert _status_for_llm_errors(clean, False, True, T) == ("ok", [])
+
+
+def test_llm_silence_fails_when_stale_or_absent() -> None:
+    fail_h = T["llm_silence_fail_hours"]
+    assert _status_for_llm_silence(0.02, fail_h) == "ok"      # ~1 min ago (normal)
+    assert _status_for_llm_silence(fail_h, fail_h) == "ok"    # exactly at threshold, not over
+    assert _status_for_llm_silence(fail_h + 0.1, fail_h) == "fail"  # silent past threshold
+    assert _status_for_llm_silence(None, fail_h) == "fail"    # no calls on record at all
+
+
+# --- db_saturation / worker_liveness (new blind-spot detectors) ------------
+
+
+def test_cron_flags_only_jobs_over_rate_with_enough_runs() -> None:
+    jobs = [
+        {"jobname": "refresh-health-dashboard", "ok": 14, "failed": 22},  # 61% of 36 → offender
+        {"jobname": "browse-list-rebuild", "ok": 71, "failed": 1},        # 1.4% → fine
+        {"jobname": "flaky-but-rare", "ok": 1, "failed": 1},              # 50% but only 2 runs → ignored
+    ]
+    status, offenders = _status_for_cron(jobs, fail_rate=0.5)
+    assert status == "fail"
+    assert offenders == ["refresh-health-dashboard 22/36"]
+
+
+def test_cron_all_healthy_is_ok() -> None:
+    jobs = [{"jobname": "browse-list-rebuild", "ok": 71, "failed": 1}]
+    assert _status_for_cron(jobs, 0.5) == ("ok", [])
+    assert _status_for_cron([], 0.5) == ("ok", [])  # no jobs in window → ok
+
+
+def test_worker_liveness_fails_only_when_stale() -> None:
+    assert _status_for_worker([("realtime-worker", 0.2)], stale_minutes=5) == ("ok", [])
+    assert _status_for_worker([], 5) == ("ok", [])  # no worker deployed → not this check's job
+    status, stale = _status_for_worker([("realtime-worker", 42.0)], 5)
+    assert status == "fail" and stale == ["realtime-worker (42m)"]
 
 
 # --- thresholds ------------------------------------------------------------
