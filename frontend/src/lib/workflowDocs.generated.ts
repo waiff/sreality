@@ -1109,16 +1109,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "description": "Phase 1.8b — async condition scoring via the Anthropic Message Batches API (50% cheaper than the synchronous condition_scores.yml job). Two modes, selected by the `mode` input:",
     "portal": null,
     "manual": true,
-    "schedules": [
-      {
-        "cron": "5 */3 * * *",
-        "human": "Every 3 hours at :05"
-      },
-      {
-        "cron": "35 * * * *",
-        "human": "Every hour at :35"
-      }
-    ],
+    "schedules": [],
     "onPush": false,
     "onPullRequest": false,
     "paths": null,

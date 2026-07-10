@@ -18,9 +18,9 @@ name: "Scraping: Sreality condition scoring (batch API)"
 # then `ingest` runs poll until every batch flips to `ingested` (Anthropic
 # batches usually finish within an hour, 24h max).
 #
-# SCHEDULED steady-state condition-scoring driver — replaces the synchronous
-# condition_scores.yml cron (now dispatch-only). Two crons, told apart by
-# github.event.schedule in the run step:
+# Condition-scoring driver (PAUSED 2026-07-09 — see the `on:` block). When scheduled it
+# replaces the synchronous condition_scores.yml cron (now dispatch-only) via two crons,
+# told apart by github.event.schedule in the run step:
 #   * submit every 3h — put the next slice of unscored listings in a batch.
 #   * ingest hourly   — poll in-flight batches and persist completed results.
 # Batch billing is 50% of synchronous, and submit resolves the model from
@@ -30,9 +30,16 @@ name: "Scraping: Sreality condition scoring (batch API)"
 # Required GitHub secrets: SUPABASE_DB_URL, ANTHROPIC_API_KEY.
 
 on:
-  schedule:
-    - cron: "5 */3 * * *"   # submit: next slice of unscored listings
-    - cron: "35 * * * *"    # ingest: poll + persist completed batches
+  # PAUSED 2026-07-09 (intentional — operator decision). Condition scoring is off:
+  # app_settings.condition_scoring_enabled_region_ids is [], so `submit` selects nothing
+  # and `ingest` has no in-flight batches — every scheduled run was a no-op that only
+  # spent CI minutes and reddened under DB saturation (a silent-green monitoring smell).
+  # Both crons are disabled; workflow_dispatch still works for ad-hoc runs.
+  # To resume: re-enable regions on the Settings page (or pass region_ids) AND restore
+  # the two cron lines below.
+  #   schedule:
+  #     - cron: "5 */3 * * *"   # submit: next slice of unscored listings
+  #     - cron: "35 * * * *"    # ingest: poll + persist completed batches
   workflow_dispatch:
     inputs:
       mode:
