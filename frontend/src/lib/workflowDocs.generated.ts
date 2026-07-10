@@ -2388,7 +2388,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
   {
     "filename": "monitor_workflow_failures.yml",
     "name": "Monitoring: workflow failures",
-    "description": "Polls the GitHub Actions API every 30 minutes and records failed runs (failure / timed_out / startup_failure, last ~40 min, excluding itself) into `workflow_failures`, so the Health page can list them — GitHub only emails about failed SCHEDULED runs, leaving every other red run invisible unless the operator opens the Actions tab.",
+    "description": "Polls the GitHub Actions API on a `*/30` cron (the Actions throttle actually runs it 80–256 min apart) and records failed runs (failure / timed_out / startup_failure, plus `cancelled` that ran long enough to be a timeout-kill rather than a supersession) into `workflow_failures`, so the Health page can list them — GitHub only emails about failed SCHEDULED runs, leaving every other red run invisible unless the operator opens the Actions tab. Coverage is a high-water-mark cursor (app_settings.workflow_failures_cursor), not a fixed lookback, so no red run is dropped in the throttle gap.",
     "portal": null,
     "manual": true,
     "schedules": [
