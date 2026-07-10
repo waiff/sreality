@@ -1720,8 +1720,8 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "manual": true,
     "schedules": [
       {
-        "cron": "20 */6 * * *",
-        "human": "Every 6 hours at :20"
+        "cron": "20 */3 * * *",
+        "human": "Every 3 hours at :20"
       }
     ],
     "onPush": false,
