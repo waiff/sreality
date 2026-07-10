@@ -790,17 +790,24 @@ def archive_reset_candidates(
     """Snapshot the PROPOSED candidate queue to the archive, then clear it so the
     engine regenerates fresh ("disregard candidates, keep a backup, redo all").
     Merges/dismissals are untouched (they live in property_merge_events + the
-    property rows). The archive is the backup; the positional INSERT relies on the
-    archive's column order being (candidate cols…, archived_at, archive_batch),
-    guaranteed by migration 228 (LIKE then ALTER ADD)."""
+    property rows). EXPLICIT column lists on both sides: the archive's physical
+    order permanently diverged from the source's when migration 272 widened the
+    candidates table and 277 appended the mirrors AFTER archived_at/archive_batch
+    (Postgres can only append) — the old positional `SELECT c.*` 42601'd from
+    2026-07-05 until 277. Widening the candidates table again means extending BOTH
+    the migration-277 mirror and this list; the schema-aware SQL gate enforces it."""
     from datetime import datetime, timezone
 
     label = batch or datetime.now(timezone.utc).strftime("reset-%Y%m%d-%H%M%S")
+    cols = ("id, left_property_id, right_property_id, confidence, markers_matched, "
+            "tier, status, created_at, reviewed_at, reviewed_action, auto_merged, "
+            "merge_group_id, engine_decision, last_engine_decision_at")
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(
-            "INSERT INTO property_identity_candidates_archive "
-            "SELECT c.*, now(), %s FROM property_identity_candidates c "
-            "WHERE c.status = 'proposed'",
+            f"INSERT INTO property_identity_candidates_archive "
+            f"({cols}, archived_at, archive_batch) "
+            f"SELECT {cols}, now(), %s FROM property_identity_candidates c "
+            f"WHERE c.status = 'proposed'",
             (label,),
         )
         archived = cur.rowcount
