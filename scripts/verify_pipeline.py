@@ -2,8 +2,9 @@
 
 Computes a fixed set of pipeline-health metrics (dedup debt, eligibility funnel,
 merge latency, engine cycle health, LLM error rate, a weekly precision sample),
-writes one `pipeline_check_results` row per check, and rings the in-app bell
-(toolkit.system_alerts.emit_system_alert) for every `fail`.
+writes one `pipeline_check_results` row per check, and rings the in-app bell on
+STATE TRANSITIONS only (toolkit.system_alerts.emit_transition_alerts): once when a
+check goes red, once when it recovers — not on every red run.
 
 Born from the 2026-07 incident: the dedup/scrape pipeline stalled silently for two
 days (Anthropic credit exhaustion; 38k+ failed LLM calls) with no in-app signal,
@@ -32,11 +33,14 @@ import sys
 from typing import Any, Callable
 
 from scraper.db import connect
-from toolkit.system_alerts import emit_system_alert
+from toolkit.system_alerts import emit_transition_alerts, latest_statuses
 
 LOG = logging.getLogger("verify_pipeline")
 
-# Code fallbacks — mirror migration 274's pipeline_check_thresholds seed exactly.
+# Code fallbacks. The pipeline_check_thresholds seed (migration 274) is merged OVER
+# these in load_thresholds, so a key present here but not in the DB seed (e.g.
+# llm_silence_fail_hours, added with the WS4 alerting rebuild) is served from this
+# default until a future seed migration includes it.
 DEFAULT_THRESHOLDS: dict[str, float] = {
     "street_debt_price_pct": 1.0,
     "street_debt_warn": 30000,
@@ -45,10 +49,13 @@ DEFAULT_THRESHOLDS: dict[str, float] = {
     "geo_debt_price_pct": 5,
     "merge_p95_warn_hours": 24,
     "unpublished_overdue_fail": 1,
-    "cycle_age_fail_hours": 30,
+    "cycle_stall_fail_hours": 12,
     "dirty_age_p95_warn_hours": 6,
     "candidate_age_p95_warn_days": 14,
     "llm_error_rate_warn": 0.2,
+    "llm_silence_fail_hours": 4,
+    "db_cron_fail_rate_fail": 0.5,
+    "worker_stale_fail_minutes": 5,
     "verification_stale_hours": 24,
     "precision_sample_n": 15,
 }
@@ -83,20 +90,20 @@ def _status_for_merge_latency(
 
 
 def _status_for_cycle(
-    *,
-    has_row: bool,
-    completed_age_hours: float | None,
-    started_age_hours: float | None,
-    thresholds: dict[str, Any],
+    *, has_row: bool, updated_age_hours: float | None, thresholds: dict[str, Any],
 ) -> str:
-    fail_h = thresholds["cycle_age_fail_hours"]
+    """Fail on a STALLED cursor, not a slow one. The street backstop scan never completes a
+    full-market cycle (~2 weeks at throughput) — that's the expected steady state for a large
+    market, so alarming on cycle AGE was structurally-always-red and unactionable. What IS
+    actionable is the cursor going idle: dedup_scan_state.updated_at advances on every run, so a
+    long gap means the lane stopped running. Cycle age is reported as a gauge, not a fail driver
+    (raising throughput is a capacity decision, not an incident)."""
     if not has_row:
         return "warn"  # engine has never established a scan cycle
-    if completed_age_hours is not None:
-        return "fail" if completed_age_hours > fail_h else "ok"
-    # never completed a cycle: fail only if the current cycle started long ago.
-    if started_age_hours is not None and started_age_hours > fail_h:
-        return "fail"
+    if updated_age_hours is None:
+        return "warn"  # row exists but no progress timestamp
+    if updated_age_hours > thresholds["cycle_stall_fail_hours"]:
+        return "fail"  # cursor idle → the backstop scan is stalled
     return "ok"
 
 
@@ -114,13 +121,23 @@ def _status_for_candidates(p95_days: float | None, thresholds: dict[str, Any]) -
 
 def _status_for_llm_errors(
     per_called_for: list[dict[str, Any]],
-    credit_balance_errors: int,
+    credit_live: bool,
+    currently_failing: bool,
     thresholds: dict[str, Any],
 ) -> tuple[str, list[str]]:
-    """Return (status, offending called_for keys). Fail on a credit-balance error
-    OR any called_for whose error rate exceeds the threshold with >= 20 calls."""
-    if credit_balance_errors > 0:
+    """Return (status, offending called_for keys), gated on LIVE state.
+
+    The old check failed on ANY credit-balance error in a trailing 24h window, so it kept
+    screaming "everything is down" for up to a day after the account was topped up (it fired
+    ~22h post-recovery on 2026-07-09). Now a red state requires the outage to be LIVE —
+    `currently_failing` = the most recent llm_call is a failure (healthy traffic since the
+    last error clears it within minutes). Credit exhaustion (`credit_live`) is the
+    unconditional fail; otherwise a called_for erroring >warn_rate over >=20 calls fails only
+    while still live."""
+    if credit_live:
         return "fail", []
+    if not currently_failing:
+        return "ok", []
     warn_rate = thresholds["llm_error_rate_warn"]
     offenders = [
         c["called_for"]
@@ -128,6 +145,44 @@ def _status_for_llm_errors(
         if c["total"] >= 20 and c["total"] > 0 and c["errors"] / c["total"] > warn_rate
     ]
     return ("fail" if offenders else "ok"), offenders
+
+
+def _status_for_llm_silence(hours: float | None, fail_hours: float) -> str:
+    """Fail when the newest llm_call is older than `fail_hours` (or there are none at all)."""
+    if hours is None or hours > fail_hours:
+        return "fail"
+    return "ok"
+
+
+_MIN_CRON_RUNS = 3  # ignore jobs with too few finished runs to judge a rate
+
+
+def _status_for_cron(
+    jobs: list[dict[str, Any]], fail_rate: float,
+) -> tuple[str, list[str]]:
+    """Fail (naming the offenders) when any pg_cron job's failure rate over the window
+    exceeds `fail_rate` with >= _MIN_CRON_RUNS finished runs. This is the DB-saturation
+    signal: the fleet's heaviest jobs (health-matview refresh, browse-list rebuild) tip
+    over the pooler statement_timeout en masse when the DB is overloaded, and nothing
+    watched them (the 2026-07 incident surfaced as ~8 unrelated red workflows instead)."""
+    offenders = []
+    for j in jobs:
+        finished = j["ok"] + j["failed"]
+        if finished >= _MIN_CRON_RUNS and j["failed"] / finished > fail_rate:
+            offenders.append(f"{j['jobname']} {j['failed']}/{finished}")
+    return ("fail" if offenders else "ok"), offenders
+
+
+def _status_for_worker(
+    ages: list[tuple[str, float]], stale_minutes: float,
+) -> tuple[str, list[str]]:
+    """Fail when any heartbeating worker's last beat is older than `stale_minutes`. An
+    EMPTY list is ok (no worker deployed — not this check's job to demand one); the
+    realtime worker beats ~every 30s, so 5 min = 10 missed beats = down. `worker_heartbeats`
+    is written every 30s and, until now, read by nothing — a dead worker (it owns the
+    latency-critical loops) produced no signal at all."""
+    stale = [f"{w} ({age:.0f}m)" for (w, age) in ages if age > stale_minutes]
+    return ("fail" if stale else "ok"), stale
 
 
 # --- thresholds ------------------------------------------------------------
@@ -412,6 +467,7 @@ _ENGINE_HEALTH_SQL = """
 select
   (select last_cycle_completed_at from dedup_scan_state where lane = 'street') as last_completed,
   (select cycle_started_at        from dedup_scan_state where lane = 'street') as cycle_started,
+  (select updated_at              from dedup_scan_state where lane = 'street') as street_updated,
   (select (count(*) > 0) from dedup_scan_state where lane = 'street') as has_row,
   (select percentile_cont(0.95) within group (order by extract(epoch from (now() - marked_at)) / 3600.0)
      from dedup_dirty_properties) as dirty_p95_hours,
@@ -433,30 +489,57 @@ def _age_hours(ts: Any) -> float | None:
 
 def check_engine_health(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]:
     row = _fetchone(conn, _ENGINE_HEALTH_SQL)
-    last_completed, cycle_started, has_row, dirty_p95, cand_p95, dirty_n, proposed_n = (
-        row if row else (None, None, False, None, None, 0, 0)
+    (last_completed, cycle_started, street_updated, has_row,
+     dirty_p95, cand_p95, dirty_n, proposed_n) = (
+        row if row else (None, None, None, False, None, None, 0, 0)
     )
     completed_age = _age_hours(last_completed)
     started_age = _age_hours(cycle_started)
+    updated_age = _age_hours(street_updated)
     cycle_status = _status_for_cycle(
-        has_row=bool(has_row), completed_age_hours=completed_age,
-        started_age_hours=started_age, thresholds=thresholds,
+        has_row=bool(has_row), updated_age_hours=updated_age, thresholds=thresholds,
     )
     dirty_p95_h = float(dirty_p95) if dirty_p95 is not None else None
     cand_p95_d = float(cand_p95) if cand_p95 is not None else None
     dirty_status = _status_for_dirty(dirty_p95_h, thresholds)
     cand_status = _status_for_candidates(cand_p95_d, thresholds)
     status = _worst([cycle_status, dirty_status, cand_status])
+
+    # Name only the component(s) actually degraded; keep the real-time-vs-backstop distinction
+    # explicit so a stalled backstop scan is never read as "new listings aren't being deduped".
+    issues: list[str] = []
+    if cycle_status == "fail":
+        issues.append(
+            f"the street backstop scan is STALLED — its cursor hasn't advanced in "
+            f"{updated_age:.1f}h (real-time cross-portal merges still flow via the worker; "
+            "this is the market-wide catch-up scan that's stuck)"
+            if updated_age is not None else "the street backstop scan has no progress signal"
+        )
+    elif cycle_status == "warn":
+        issues.append("the dedup engine has not yet established a scan cycle")
+    if dirty_status == "warn":
+        issues.append(f"the dirty queue is aging (p95 {dirty_p95_h:.1f}h > "
+                      f"{thresholds['dirty_age_p95_warn_hours']}h)")
+    if cand_status == "warn":
+        issues.append(f"the /dedup review queue is aging (p95 {cand_p95_d:.1f}d > "
+                      f"{thresholds['candidate_age_p95_warn_days']}d)")
+    if status == "ok":
+        message = (
+            f"Dedup engine healthy (street cursor advanced "
+            f"{updated_age:.1f}h ago" + (f", dirty p95 {dirty_p95_h:.1f}h" if dirty_p95_h is not None else "") + ")."
+        )
+    else:
+        message = "Dedup engine: " + "; ".join(issues) + "."
     return {
         "check_key": "engine_health",
         "status": status,
-        "value": round(completed_age, 2) if completed_age is not None else None,
+        "value": round(updated_age, 2) if updated_age is not None else None,
         "details": {
             "cycle_status": cycle_status,
+            "street_cursor_updated_age_hours": round(updated_age, 2) if updated_age is not None else None,
+            "cycle_stall_fail_hours": thresholds["cycle_stall_fail_hours"],
             "last_cycle_completed_at": last_completed.isoformat() if last_completed else None,
-            "cycle_completed_age_hours": round(completed_age, 2) if completed_age is not None else None,
             "cycle_started_age_hours": round(started_age, 2) if started_age is not None else None,
-            "cycle_age_fail_hours": thresholds["cycle_age_fail_hours"],
             "dirty_status": dirty_status,
             "dirty_queue_n": int(dirty_n or 0),
             "dirty_age_p95_hours": round(dirty_p95_h, 2) if dirty_p95_h is not None else None,
@@ -466,12 +549,7 @@ def check_engine_health(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]
             "candidate_age_p95_days": round(cand_p95_d, 2) if cand_p95_d is not None else None,
             "candidate_age_p95_warn_days": thresholds["candidate_age_p95_warn_days"],
         },
-        "message": (
-            "Dedup engine health is failing: the street full-scan cycle has not "
-            f"completed within {thresholds['cycle_age_fail_hours']}h "
-            f"(cycle_status={cycle_status}). New cross-portal listings are not being "
-            "de-duplicated on time."
-        ),
+        "message": message,
     }
 
 
@@ -490,11 +568,40 @@ select count(*) from llm_calls
 where called_at > now() - interval '24 hours' and error ilike %s
 """
 
+# Liveness: is the provider failing RIGHT NOW? Compares the newest failure vs the newest
+# success (a success after the last error means recovered). `min_ok_at` bounds staleness so
+# a lone error hours ago with no traffic since doesn't read as a live outage.
+_LLM_LIVENESS_SQL = """
+select
+  max(called_at) filter (where error is not null) as last_err_at,
+  max(called_at) filter (where error is null) as last_ok_at,
+  max(called_at) filter (where error ilike %s) as last_credit_err_at,
+  now() - interval '90 minutes' as min_live_at
+from llm_calls
+where called_at > now() - interval '24 hours'
+"""
+
 
 def check_llm_errors(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]:
     rows = _fetchall(conn, _LLM_ERRORS_SQL)
     credit_row = _fetchone(conn, _LLM_CREDIT_SQL, ("%credit balance%",))
     credit_errors = int(credit_row[0]) if credit_row and credit_row[0] is not None else 0
+
+    live = _fetchone(conn, _LLM_LIVENESS_SQL, ("%credit balance%",))
+    last_err_at, last_ok_at, last_credit_err_at, min_live_at = (
+        (live[0], live[1], live[2], live[3]) if live else (None, None, None, None)
+    )
+    # Currently failing = newest call is a failure AND that failure is recent (not stale).
+    currently_failing = bool(
+        last_err_at is not None
+        and (last_ok_at is None or last_err_at > last_ok_at)
+        and (min_live_at is None or last_err_at > min_live_at)
+    )
+    credit_live = bool(
+        currently_failing
+        and last_credit_err_at is not None
+        and (last_ok_at is None or last_credit_err_at > last_ok_at)
+    )
 
     per_called_for: list[dict[str, Any]] = []
     tot = err = 0
@@ -507,19 +614,23 @@ def check_llm_errors(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]:
             "rate": round(errors / total, 4) if total else 0.0,
         })
     overall_rate = round(err / tot, 4) if tot else 0.0
-    status, offenders = _status_for_llm_errors(per_called_for, credit_errors, thresholds)
+    status, offenders = _status_for_llm_errors(
+        per_called_for, credit_live, currently_failing, thresholds,
+    )
 
-    if credit_errors > 0:
+    if credit_live:
         message = (
-            f"LLM calls are failing with credit-balance errors ({credit_errors} in 24h) — "
-            "the Anthropic account is out of credit. Every paid LLM path (dedup vision, "
-            "estimations, summaries, condition scoring) is down."
+            "LLM calls are failing with credit-balance errors right now — the Anthropic "
+            "account is out of credit. Every paid LLM path (dedup vision, estimations, "
+            f"summaries, condition scoring) is down ({credit_errors} credit errors in 24h)."
+        )
+    elif offenders:
+        message = (
+            f"LLM error rate exceeded {thresholds['llm_error_rate_warn']:.0%} and is still "
+            f"live for: {', '.join(offenders)} (24h window, >= 20 calls) — the provider is erroring."
         )
     else:
-        message = (
-            f"LLM error rate exceeded {thresholds['llm_error_rate_warn']:.0%} for: "
-            f"{', '.join(offenders)} (24h window, >= 20 calls) — the provider is erroring."
-        )
+        message = f"LLM calls healthy ({overall_rate:.1%} error rate over 24h)."
     return {
         "check_key": "llm_errors",
         "status": status,
@@ -527,10 +638,141 @@ def check_llm_errors(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]:
         "details": {
             "overall_rate": overall_rate,
             "credit_balance_errors": credit_errors,
+            "currently_failing": currently_failing,
+            "credit_live": credit_live,
+            "last_error_at": str(last_err_at) if last_err_at else None,
+            "last_success_at": str(last_ok_at) if last_ok_at else None,
             "warn_rate": thresholds["llm_error_rate_warn"],
             "offending_called_for": offenders,
             "per_called_for": per_called_for,
         },
+        "message": message,
+    }
+
+
+_LLM_SILENCE_SQL = """
+select extract(epoch from (now() - max(called_at))) / 3600.0 as hours_since_last
+from llm_calls
+"""
+
+
+def check_llm_liveness(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]:
+    """Total-silence guard: the platform runs paid LLM traffic continuously (dedup vision
+    on the always-on worker), so a stretch with ZERO llm_calls means the pipeline is dead —
+    worker down, key unset, or an outage so hard nothing is even attempted. This is the
+    failure mode error-rate checks are structurally blind to (no calls → no errors → false
+    green). p99 inter-call gap is ~1 min, so the 4h default never trips in normal operation.
+    Folds in the unique liveness intent of the retired check_llm_health.py, but UNGATED — the
+    old probe hid behind a condition-scoring `pending` gate that is dead while scoring is paused."""
+    fail_hours = float(thresholds["llm_silence_fail_hours"])
+    row = _fetchone(conn, _LLM_SILENCE_SQL)
+    hours = float(row[0]) if row and row[0] is not None else None
+    status = _status_for_llm_silence(hours, fail_hours)
+    if hours is None:
+        message = f"No LLM calls on record at all — the LLM pipeline looks dead (threshold {fail_hours:.0f}h)."
+    elif status == "fail":
+        message = (
+            f"No LLM calls in {hours:.1f}h (> {fail_hours:.0f}h) — the LLM pipeline is silent "
+            "(worker down / key unset / hard outage). No paid path is running."
+        )
+    else:
+        message = f"LLM pipeline live (last call {hours:.2f}h ago)."
+    return {
+        "check_key": "llm_liveness",
+        "status": status,
+        "value": round(hours, 3) if hours is not None else None,
+        "details": {"hours_since_last_call": hours, "fail_hours": fail_hours},
+        "message": message,
+    }
+
+
+_DB_CRON_SQL = """
+select j.jobname,
+       count(*) filter (where d.status = 'succeeded') as ok,
+       count(*) filter (where d.status = 'failed')    as failed
+from cron.job_run_details d
+join cron.job j using (jobid)
+where d.start_time > now() - interval '6 hours'
+group by j.jobname
+"""
+
+
+def check_db_saturation(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]:
+    """Watch pg_cron's own run ledger for the DB-saturation signature. Skips cleanly if
+    the cron schema isn't visible (e.g. a branch DB without pg_cron) rather than false-fail."""
+    fail_rate = float(thresholds["db_cron_fail_rate_fail"])
+    try:
+        rows = _fetchall(conn, _DB_CRON_SQL)
+    except Exception as exc:  # noqa: BLE001 — cron schema not readable → warn (visible), never false-fail
+        # verify connects via SUPABASE_DB_URL (postgres role, which has cron access); this
+        # path only trips if that changes to a role lacking USAGE on schema cron. warn (not
+        # ok) so the /health page shows the check is INERT rather than silently green.
+        return {
+            "check_key": "db_saturation", "status": "warn", "value": None,
+            "details": {"skipped": f"cron.job_run_details unreadable: {exc}",
+                        "fix": "GRANT USAGE ON SCHEMA cron TO service_role;"},
+            "message": ("DB-saturation check is inert — can't read pg_cron's ledger. "
+                        "Fix: GRANT USAGE ON SCHEMA cron TO service_role;"),
+        }
+    jobs = [{"jobname": jn, "ok": int(ok), "failed": int(fl)} for (jn, ok, fl) in rows]
+    status, offenders = _status_for_cron(jobs, fail_rate)
+    worst_rate = max(
+        (j["failed"] / (j["ok"] + j["failed"]) for j in jobs if j["ok"] + j["failed"] > 0),
+        default=0.0,
+    )
+    if len(offenders) >= 2:
+        message = (
+            f"{len(offenders)} pg_cron jobs failing over the last 6h (> {fail_rate:.0%}): "
+            f"{', '.join(offenders)} — the database is likely saturated (statement timeouts hitting "
+            "multiple jobs at once)."
+        )
+    elif offenders:
+        message = (
+            f"pg_cron job failing over the last 6h (> {fail_rate:.0%}): {offenders[0]} — that job "
+            "(or a query it runs) is over the statement-timeout ceiling."
+        )
+    else:
+        message = f"pg_cron healthy (worst job failure rate {worst_rate:.0%} over 6h)."
+    return {
+        "check_key": "db_saturation",
+        "status": status,
+        "value": round(worst_rate, 3),
+        "details": {"offenders": offenders, "fail_rate": fail_rate,
+                    "jobs": {j["jobname"]: {"ok": j["ok"], "failed": j["failed"]} for j in jobs}},
+        "message": message,
+    }
+
+
+_WORKER_LIVENESS_SQL = """
+select worker, extract(epoch from (now() - max(beat_at))) / 60.0 as age_min
+from worker_heartbeats
+group by worker
+"""
+
+
+def check_worker_liveness(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]:
+    """Watch the realtime worker's heartbeat — it owns the latency-critical loops but
+    worker_heartbeats had no reader, so a dead worker was invisible."""
+    stale_minutes = float(thresholds["worker_stale_fail_minutes"])
+    rows = _fetchall(conn, _WORKER_LIVENESS_SQL)
+    ages = [(str(w), float(age)) for (w, age) in rows if age is not None]
+    status, stale = _status_for_worker(ages, stale_minutes)
+    oldest = max((age for _, age in ages), default=0.0)
+    if stale:
+        message = (
+            f"Realtime worker heartbeat is stale (> {stale_minutes:.0f}m): {', '.join(stale)} "
+            "— the worker owns newest-first probes, the detail drain and real-time dedup; those loops are down."
+        )
+    elif not ages:
+        message = "No worker heartbeats on record (worker not deployed) — nothing to watch."
+    else:
+        message = f"Realtime worker alive (last beat {oldest:.1f}m ago)."
+    return {
+        "check_key": "worker_liveness",
+        "status": status,
+        "value": round(oldest, 2),
+        "details": {"stale_minutes": stale_minutes,
+                    "workers": {w: round(age, 2) for (w, age) in ages}},
         "message": message,
     }
 
@@ -571,6 +813,9 @@ _CHECKS: list[tuple[str, Callable[[Any, dict[str, Any]], dict[str, Any]]]] = [
     ("merge_latency", check_merge_latency),
     ("engine_health", check_engine_health),
     ("llm_errors", check_llm_errors),
+    ("llm_liveness", check_llm_liveness),
+    ("db_saturation", check_db_saturation),
+    ("worker_liveness", check_worker_liveness),
 ]
 
 _WEEKLY_CHECKS: list[tuple[str, Callable[[Any, dict[str, Any]], dict[str, Any]]]] = [
@@ -580,11 +825,15 @@ _WEEKLY_CHECKS: list[tuple[str, Callable[[Any, dict[str, Any]], dict[str, Any]]]
 
 def run_checks(
     conn: Any, thresholds: dict[str, Any], *, weekly: bool = False,
+    only: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Run every check in isolation — a raising check becomes a `fail` row carrying
-    the error, so one broken check never aborts the run."""
+    the error, so one broken check never aborts the run. `only` restricts to the named
+    check keys (the hourly LLM-liveness lane runs just the two llm_* checks)."""
     results: list[dict[str, Any]] = []
     checks = list(_CHECKS) + (list(_WEEKLY_CHECKS) if weekly else [])
+    if only:
+        checks = [(k, fn) for (k, fn) in checks if k in only]
     for key, fn in checks:
         try:
             results.append(fn(conn, thresholds))
@@ -602,10 +851,13 @@ def run_checks(
 
 def write_results(
     conn: Any, results: list[dict[str, Any]], run_at: _dt.datetime,
-) -> int:
-    """Persist one row per check and ring the bell for each `fail`. Returns the
-    number of alerts emitted."""
-    alerts = 0
+) -> dict[str, int]:
+    """Persist one row per check, then ring the bell on TRANSITIONS only (onset /
+    recovery), not on every red run. Returns {onset, recovery} counts.
+
+    The previous stored status is read BEFORE this run's rows are inserted, so the
+    baseline is the prior run — see toolkit.system_alerts.emit_transition_alerts."""
+    prev = latest_statuses(conn)
     with conn.cursor() as cur:
         for r in results:
             cur.execute(
@@ -614,12 +866,7 @@ def write_results(
                 (run_at, r["check_key"], r["status"],
                  r.get("value"), json.dumps(r.get("details") or {})),
             )
-    for r in results:
-        if r["status"] == "fail":
-            msg = r.get("message") or f"Pipeline check '{r['check_key']}' failed."
-            if emit_system_alert(conn, r["check_key"], msg):
-                alerts += 1
-    return alerts
+    return emit_transition_alerts(conn, results, prev, run_at)
 
 
 def main() -> int:
@@ -628,6 +875,13 @@ def main() -> int:
                         help="Compute + log, write nothing (no result rows, no alerts).")
     parser.add_argument("--weekly", action="store_true",
                         help="Also emit the weekly merge-precision sample.")
+    parser.add_argument("--only", default="",
+                        help="Comma-separated check keys to run (e.g. 'llm_errors,llm_liveness' "
+                             "for the hourly LLM lane). Empty = all checks.")
+    parser.add_argument("--exit-nonzero-on-fail", action="store_true",
+                        help="Exit 1 if any run check is 'fail' — so the hourly LLM lane's "
+                             "GitHub run goes red and emails the operator (belt-and-braces "
+                             "for when the in-app bell path itself is down).")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -640,17 +894,23 @@ def main() -> int:
         print("ERROR: SUPABASE_DB_URL is not set.", file=sys.stderr)
         return 2
 
+    only = {k.strip() for k in args.only.split(",") if k.strip()} or None
     run_at = _dt.datetime.now(_dt.timezone.utc)
     with connect() as conn:
         thresholds = load_thresholds(conn)
-        results = run_checks(conn, thresholds, weekly=args.weekly)
+        results = run_checks(conn, thresholds, weekly=args.weekly, only=only)
         for r in results:
             LOG.info("CHECK %s status=%s value=%s", r["check_key"], r["status"], r.get("value"))
         if args.dry_run:
             LOG.info("dry-run: %d checks computed, no rows written", len(results))
             return 0
-        alerts = write_results(conn, results, run_at)
-    LOG.info("verify_pipeline wrote %d rows, emitted %d alerts", len(results), alerts)
+        counts = write_results(conn, results, run_at)
+    LOG.info(
+        "verify_pipeline wrote %d rows, emitted %d onset + %d recovery alerts",
+        len(results), counts["onset"], counts["recovery"],
+    )
+    if args.exit_nonzero_on_fail and any(r["status"] == "fail" for r in results):
+        return 1
     return 0
 
 

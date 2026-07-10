@@ -62,6 +62,13 @@ _ALLOWLIST: list[tuple[str, str, str]] = [
         "wdt:",
         "a SPARQL query to the Wikidata endpoint, not Postgres SQL",
     ),
+    (
+        "verify_pipeline.py",
+        "cron.job_run_details",
+        "pg_cron's run-history lives in the extension-managed `cron` schema, not "
+        "in migrations, so the replayed schema can't see it; check_db_saturation "
+        "reads it defensively and warns if unreadable",
+    ),
 ]
 
 
