@@ -29,6 +29,12 @@
   first-priority room per pair (`--warm-rooms 1`) instead of the ~4-room superset (79-93% of
   which the stop-at-first-High replay never reached). Crons restored, gated by
   `dedup_batch_warmer_enabled` (default off). ~50% off the decisive-room compares when enabled.
+- **Phase 4 item 2 (facade-as-dismisser, fid5): SHIPPED (2026-07-10), default OFF.**
+  `dedup_facade_dismiss_enabled`: a confident facade Low qualifies for auto-dismiss on non-byt
+  (byt never; all other conservatism unchanged — all-rooms-verdicted, High merges, Medium
+  queues). Replay on decided pairs: facade-Low+no-High agreed with the final outcome 15/15
+  (0 conflicts); 0 of 79 operator-approved non-byt merges carry a facade Low. Enabling is the
+  operator's flip.
 - **Phase 4.2 (harness): triggered** a `validate_vision_models` run (Haiku @ 768px, compare-
   recall gate) — its result gates the model flips.
 - **Model flips (4.3) / 768px (3.1):** blocked on a GREEN harness run; the flips are gated

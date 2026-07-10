@@ -120,6 +120,18 @@ REGISTRY: tuple[DedupSetting, ...] = (
         "unchanged; merges are reversible and carry the distinct reason 'cosine_high'. "
         "Cost plan §2.2 arm (b).",
     ),
+    DedupSetting(
+        "dedup_facade_dismiss_enabled", "bool", False,
+        "Facade Low auto-dismiss (houses / land / commercial)", "Engine",
+        "For non-apartment families, a confident forensic LOW verdict on the exterior_facade "
+        "room qualifies for auto-dismiss, exactly like the kitchen/bathroom wet rooms do for "
+        "apartments — the facade is the identity-bearing surface for houses and land. All "
+        "other dismissal conservatism is unchanged: every common room must be verdicted, any "
+        "High still merges, any Medium on a qualifying room still queues for review. byt "
+        "facades never qualify (a development's shared shell says nothing about the unit). "
+        "Cost plan Phase 4 item 2 (operator-requested); replay evidence in the shipping PR. "
+        "Off = kitchen/bathroom-only dismissal as before.",
+    ),
     # --- CLIP (free tagging + the cosine recall tier) ---
     DedupSetting(
         "dedup_prefer_clip_tags", "bool", False,
