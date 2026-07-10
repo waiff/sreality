@@ -137,3 +137,55 @@ def require_token(authorization: str | None = Header(default=None)) -> None:
         return
     if authorization != f"Bearer {expected}":
         raise HTTPException(status_code=401, detail="Invalid or missing token")
+
+
+# Fixed system account id (mirrors migrations/286_accounts_foundation.sql). Legacy
+# static-token callers (the operator's current SPA/extension during the dual-auth
+# window) resolve to this until they re-auth with a Supabase JWT.
+SYSTEM_ACCOUNT_ID = "00000000-0000-0000-0000-000000000000"
+
+
+def verify_jwt(authorization: str | None = Header(default=None)) -> dict:
+    """Phase 1 auth: verify a Supabase user JWT and return its claims.
+
+    Dual-auth window: also accepts the legacy static API_TOKEN so the operator's
+    current SPA/extension keep working mid-migration (Phase 1 §2). Legacy callers
+    get a synthetic operator/admin identity. Retire the legacy branch once the
+    last old client is gone.
+
+    Verifies HS256 against SUPABASE_JWT_SECRET (the project's JWT secret). If the
+    project moves to asymmetric signing keys, swap in JWKS verification here —
+    this is the single choke-point.
+    """
+    import hmac
+
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing bearer token")
+    token = authorization[len("Bearer "):]
+
+    legacy = os.environ.get("API_TOKEN")
+    if legacy and hmac.compare_digest(token, legacy):
+        return {"sub": None, "role": "operator", "is_admin": True, "legacy": True}
+
+    secret = os.environ.get("SUPABASE_JWT_SECRET")
+    if not secret:
+        # Fail closed: an unconfigured auth backend must never authenticate anyone.
+        raise HTTPException(status_code=503, detail="Auth is not configured")
+    import jwt  # PyJWT (api extra); imported lazily to keep boot light
+
+    try:
+        claims = jwt.decode(
+            token, secret, algorithms=["HS256"], audience="authenticated"
+        )
+    except jwt.PyJWTError as exc:
+        raise HTTPException(status_code=401, detail="Invalid token") from exc
+    return claims
+
+
+def require_admin(claims: dict = Depends(verify_jwt)) -> dict:
+    """Gate admin-only routes on the is_admin claim (stamped from the admins
+    table via a Supabase access-token hook). The legacy operator token passes."""
+    meta = claims.get("app_metadata") or {}
+    if claims.get("is_admin") is not True and meta.get("is_admin") is not True:
+        raise HTTPException(status_code=403, detail="Admin only")
+    return claims

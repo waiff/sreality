@@ -36,6 +36,9 @@ api = [
   # Required by FastAPI's UploadFile / File() — used by the
   # /buildings/{id}/attachments endpoint for operator-supplied images.
   "python-multipart>=0.0.9",
+  # Verify Supabase Auth user JWTs (api/dependencies.py verify_jwt). Stdlib has
+  # no JWT primitive; PyJWT is the minimal, standard choice (Phase 1 auth).
+  "pyjwt>=2.8",
 ]
 # Used only by scripts/ingest_boundaries.py; kept out of the default
 # install so the scraper / API images stay slim. Pure-Python combo
