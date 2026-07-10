@@ -3792,8 +3792,8 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
       "SUPABASE_DB_URL"
     ],
     "concurrencyGroup": "validate-vision-models",
-    "cancelInProgress": false,
-    "timeoutMinutes": 30,
+    "cancelInProgress": true,
+    "timeoutMinutes": 90,
     "permissions": "contents: read",
     "runsUrl": "https://github.com/waiff/sreality/actions/workflows/validate_vision_models.yml",
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/validate_vision_models.yml"
