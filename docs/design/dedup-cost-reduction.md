@@ -29,6 +29,13 @@
   first-priority room per pair (`--warm-rooms 1`) instead of the ~4-room superset (79-93% of
   which the stop-at-first-High replay never reached). Crons restored, gated by
   `dedup_batch_warmer_enabled` (default off). ~50% off the decisive-room compares when enabled.
+- **Phase 4.1 lane coverage (2026-07-10): SHIPPED** — `--lane street|geo|candidates` closes the
+  street-only gap vs §4.1's lane list. `candidates` = exactly the proposed review-queue pairs
+  (both tiers) — the queue-blitz population. Room grouping is now CLIP-FIRST when the engine
+  prefers CLIP tags (warm keys match the replay; LLM classify only as the same fallback the
+  engine uses), and geo-keyed pairs go through `_make_geo_classify` with the operator's area
+  tolerance. Batch create retries transient 5xx/429/connection errors (the Jul-4 502 killed a
+  whole run).
 - **Phase 4.2 (harness): triggered** a `validate_vision_models` run (Haiku @ 768px, compare-
   recall gate) — its result gates the model flips.
 - **Model flips (4.3) / 768px (3.1):** blocked on a GREEN harness run; the flips are gated

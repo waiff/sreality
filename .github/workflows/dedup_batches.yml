@@ -67,6 +67,15 @@ on:
         required: false
         default: "1"
         type: string
+      lane:
+        description: "[submit] Population to warm: street funnel, geo funnel, or 'candidates' (the proposed review-queue pairs — the blitz population)"
+        required: false
+        default: "street"
+        type: choice
+        options:
+          - "street"
+          - "geo"
+          - "candidates"
       dry_run:
         description: "[submit] Report what would be enqueued without submitting"
         required: false
@@ -122,6 +131,7 @@ jobs:
             ARGS="$ARGS --max-requests ${{ inputs.max_requests || '1500' }}"
             ARGS="$ARGS --max-room-attempts ${{ inputs.max_room_attempts || '4' }}"
             ARGS="$ARGS --warm-rooms ${{ inputs.warm_rooms || '1' }}"
+            ARGS="$ARGS --lane ${{ inputs.lane || 'street' }}"
             if [ "${{ inputs.dry_run }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
             echo "submit with: $ARGS"
             python -m scripts.submit_dedup_batch $ARGS
