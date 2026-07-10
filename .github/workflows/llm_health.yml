@@ -48,5 +48,5 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e .
 
-      - name: Check acute health (LLM errors + silence, DB saturation, worker liveness)
-        run: python -m scripts.verify_pipeline --only llm_errors,llm_liveness,db_saturation,worker_liveness --exit-nonzero-on-fail
+      - name: Check acute health (LLM errors + silence + burn rate, DB saturation, worker liveness)
+        run: python -m scripts.verify_pipeline --only llm_errors,llm_liveness,llm_burn_rate,db_saturation,worker_liveness --exit-nonzero-on-fail
