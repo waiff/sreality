@@ -49,7 +49,7 @@ DEFAULT_THRESHOLDS: dict[str, float] = {
     "geo_debt_price_pct": 5,
     "merge_p95_warn_hours": 24,
     "unpublished_overdue_fail": 1,
-    "cycle_age_fail_hours": 30,
+    "cycle_stall_fail_hours": 12,
     "dirty_age_p95_warn_hours": 6,
     "candidate_age_p95_warn_days": 14,
     "llm_error_rate_warn": 0.2,
@@ -90,20 +90,20 @@ def _status_for_merge_latency(
 
 
 def _status_for_cycle(
-    *,
-    has_row: bool,
-    completed_age_hours: float | None,
-    started_age_hours: float | None,
-    thresholds: dict[str, Any],
+    *, has_row: bool, updated_age_hours: float | None, thresholds: dict[str, Any],
 ) -> str:
-    fail_h = thresholds["cycle_age_fail_hours"]
+    """Fail on a STALLED cursor, not a slow one. The street backstop scan never completes a
+    full-market cycle (~2 weeks at throughput) — that's the expected steady state for a large
+    market, so alarming on cycle AGE was structurally-always-red and unactionable. What IS
+    actionable is the cursor going idle: dedup_scan_state.updated_at advances on every run, so a
+    long gap means the lane stopped running. Cycle age is reported as a gauge, not a fail driver
+    (raising throughput is a capacity decision, not an incident)."""
     if not has_row:
         return "warn"  # engine has never established a scan cycle
-    if completed_age_hours is not None:
-        return "fail" if completed_age_hours > fail_h else "ok"
-    # never completed a cycle: fail only if the current cycle started long ago.
-    if started_age_hours is not None and started_age_hours > fail_h:
-        return "fail"
+    if updated_age_hours is None:
+        return "warn"  # row exists but no progress timestamp
+    if updated_age_hours > thresholds["cycle_stall_fail_hours"]:
+        return "fail"  # cursor idle → the backstop scan is stalled
     return "ok"
 
 
@@ -467,6 +467,7 @@ _ENGINE_HEALTH_SQL = """
 select
   (select last_cycle_completed_at from dedup_scan_state where lane = 'street') as last_completed,
   (select cycle_started_at        from dedup_scan_state where lane = 'street') as cycle_started,
+  (select updated_at              from dedup_scan_state where lane = 'street') as street_updated,
   (select (count(*) > 0) from dedup_scan_state where lane = 'street') as has_row,
   (select percentile_cont(0.95) within group (order by extract(epoch from (now() - marked_at)) / 3600.0)
      from dedup_dirty_properties) as dirty_p95_hours,
@@ -488,30 +489,57 @@ def _age_hours(ts: Any) -> float | None:
 
 def check_engine_health(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]:
     row = _fetchone(conn, _ENGINE_HEALTH_SQL)
-    last_completed, cycle_started, has_row, dirty_p95, cand_p95, dirty_n, proposed_n = (
-        row if row else (None, None, False, None, None, 0, 0)
+    (last_completed, cycle_started, street_updated, has_row,
+     dirty_p95, cand_p95, dirty_n, proposed_n) = (
+        row if row else (None, None, None, False, None, None, 0, 0)
     )
     completed_age = _age_hours(last_completed)
     started_age = _age_hours(cycle_started)
+    updated_age = _age_hours(street_updated)
     cycle_status = _status_for_cycle(
-        has_row=bool(has_row), completed_age_hours=completed_age,
-        started_age_hours=started_age, thresholds=thresholds,
+        has_row=bool(has_row), updated_age_hours=updated_age, thresholds=thresholds,
     )
     dirty_p95_h = float(dirty_p95) if dirty_p95 is not None else None
     cand_p95_d = float(cand_p95) if cand_p95 is not None else None
     dirty_status = _status_for_dirty(dirty_p95_h, thresholds)
     cand_status = _status_for_candidates(cand_p95_d, thresholds)
     status = _worst([cycle_status, dirty_status, cand_status])
+
+    # Name only the component(s) actually degraded; keep the real-time-vs-backstop distinction
+    # explicit so a stalled backstop scan is never read as "new listings aren't being deduped".
+    issues: list[str] = []
+    if cycle_status == "fail":
+        issues.append(
+            f"the street backstop scan is STALLED — its cursor hasn't advanced in "
+            f"{updated_age:.1f}h (real-time cross-portal merges still flow via the worker; "
+            "this is the market-wide catch-up scan that's stuck)"
+            if updated_age is not None else "the street backstop scan has no progress signal"
+        )
+    elif cycle_status == "warn":
+        issues.append("the dedup engine has not yet established a scan cycle")
+    if dirty_status == "warn":
+        issues.append(f"the dirty queue is aging (p95 {dirty_p95_h:.1f}h > "
+                      f"{thresholds['dirty_age_p95_warn_hours']}h)")
+    if cand_status == "warn":
+        issues.append(f"the /dedup review queue is aging (p95 {cand_p95_d:.1f}d > "
+                      f"{thresholds['candidate_age_p95_warn_days']}d)")
+    if status == "ok":
+        message = (
+            f"Dedup engine healthy (street cursor advanced "
+            f"{updated_age:.1f}h ago" + (f", dirty p95 {dirty_p95_h:.1f}h" if dirty_p95_h is not None else "") + ")."
+        )
+    else:
+        message = "Dedup engine: " + "; ".join(issues) + "."
     return {
         "check_key": "engine_health",
         "status": status,
-        "value": round(completed_age, 2) if completed_age is not None else None,
+        "value": round(updated_age, 2) if updated_age is not None else None,
         "details": {
             "cycle_status": cycle_status,
+            "street_cursor_updated_age_hours": round(updated_age, 2) if updated_age is not None else None,
+            "cycle_stall_fail_hours": thresholds["cycle_stall_fail_hours"],
             "last_cycle_completed_at": last_completed.isoformat() if last_completed else None,
-            "cycle_completed_age_hours": round(completed_age, 2) if completed_age is not None else None,
             "cycle_started_age_hours": round(started_age, 2) if started_age is not None else None,
-            "cycle_age_fail_hours": thresholds["cycle_age_fail_hours"],
             "dirty_status": dirty_status,
             "dirty_queue_n": int(dirty_n or 0),
             "dirty_age_p95_hours": round(dirty_p95_h, 2) if dirty_p95_h is not None else None,
@@ -521,12 +549,7 @@ def check_engine_health(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]
             "candidate_age_p95_days": round(cand_p95_d, 2) if cand_p95_d is not None else None,
             "candidate_age_p95_warn_days": thresholds["candidate_age_p95_warn_days"],
         },
-        "message": (
-            "Dedup engine health is failing: the street full-scan cycle has not "
-            f"completed within {thresholds['cycle_age_fail_hours']}h "
-            f"(cycle_status={cycle_status}). New cross-portal listings are not being "
-            "de-duplicated on time."
-        ),
+        "message": message,
     }
 
 

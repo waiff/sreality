@@ -64,32 +64,21 @@ def test_merge_latency_status() -> None:
 # --- cycle -----------------------------------------------------------------
 
 
-def test_cycle_no_row_is_warn() -> None:
-    assert _status_for_cycle(
-        has_row=False, completed_age_hours=None, started_age_hours=None, thresholds=T,
-    ) == "warn"
+def test_cycle_no_row_or_no_progress_is_warn() -> None:
+    assert _status_for_cycle(has_row=False, updated_age_hours=None, thresholds=T) == "warn"
+    assert _status_for_cycle(has_row=True, updated_age_hours=None, thresholds=T) == "warn"
 
 
-def test_cycle_recent_completion_ok_old_fail() -> None:
-    assert _status_for_cycle(
-        has_row=True, completed_age_hours=1.0, started_age_hours=2.0, thresholds=T,
-    ) == "ok"
-    assert _status_for_cycle(
-        has_row=True, completed_age_hours=T["cycle_age_fail_hours"] + 1,
-        started_age_hours=None, thresholds=T,
-    ) == "fail"
+def test_cycle_progressing_is_ok_even_if_never_completes() -> None:
+    # The street cycle takes ~2 weeks and never "completes" — a recently-advanced cursor is
+    # healthy, NOT a failure (the old age-based check was structurally always-red here).
+    assert _status_for_cycle(has_row=True, updated_age_hours=4.0, thresholds=T) == "ok"
 
 
-def test_cycle_never_completed_gates_on_start_age() -> None:
-    # In-progress first cycle that started recently: not yet a failure.
-    assert _status_for_cycle(
-        has_row=True, completed_age_hours=None, started_age_hours=2.0, thresholds=T,
-    ) == "ok"
-    # A cycle that started long ago and never completed: failure.
-    assert _status_for_cycle(
-        has_row=True, completed_age_hours=None,
-        started_age_hours=T["cycle_age_fail_hours"] + 1, thresholds=T,
-    ) == "fail"
+def test_cycle_stalled_cursor_fails() -> None:
+    stall = T["cycle_stall_fail_hours"]
+    assert _status_for_cycle(has_row=True, updated_age_hours=stall, thresholds=T) == "ok"
+    assert _status_for_cycle(has_row=True, updated_age_hours=stall + 0.1, thresholds=T) == "fail"
 
 
 # --- dirty / candidates ----------------------------------------------------
