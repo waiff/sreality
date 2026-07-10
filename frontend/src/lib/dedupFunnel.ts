@@ -10,7 +10,7 @@ export type FunnelKind = 'free' | 'paid' | 'manual';
 export interface FunnelStepDef {
   id: string;
   /* dedup_pair_audit.stage this step resolves under, if it resolves pairs */
-  auditStage?: 'address' | 'phash' | 'attr' | 'visual' | 'operator';
+  auditStage?: 'address' | 'phash' | 'attr' | 'cosine' | 'visual' | 'operator';
   label: string;
   kind: FunnelKind;
   /* llm_calls.called_for tags whose spend belongs to this step */
@@ -71,6 +71,18 @@ export const DEDUP_FUNNEL_STEPS: readonly FunnelStepDef[] = [
       'Non-apartment candidates whose areas match within 2% and asking prices are identical ' +
       'auto-merge through the floor-plan gate with no paid room compare. Validated 99.6% vs the ' +
       'forensic verdict. No LLM.',
+  },
+  {
+    id: 'cosine',
+    auditStage: 'cosine',
+    label: 'Pair max-cosine (houses / land)',
+    kind: 'free',
+    calledFor: [],
+    anchor: 'funnel-cosine',
+    description:
+      'Non-apartment candidates whose best any-image CLIP cosine reaches the configured ' +
+      'threshold (default off; validated operating point 0.98 = 99.57% vs the forensic ' +
+      'verdict) auto-merge through the floor-plan gate. One pgvector lookup, no LLM.',
   },
   {
     id: 'clip',

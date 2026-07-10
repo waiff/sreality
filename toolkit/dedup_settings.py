@@ -98,6 +98,28 @@ REGISTRY: tuple[DedupSetting, ...] = (
         "retained gate still catches); merges are reversible. Off = every non-byt candidate "
         "pays forensic vision as before.",
     ),
+    DedupSetting(
+        "dedup_nonbyt_phash_single_enabled", "bool", False,
+        "pHash single-pair auto-merge (houses / land / commercial)", "Engine",
+        "For non-apartment families, ONE near-identical image pair (Hamming <= 6) suffices "
+        "for the pHash fast-path merge (classic threshold is 2). House/land photo sets are "
+        "property-unique — unlike apartment development renders, which stay on the 2-pair "
+        "rule. The floor-plan gate and the both-site-plan development guard are unchanged; "
+        "merges are reversible and carry the distinct reason 'phash_single'. Cost plan "
+        "§2.2 arm (a); replay precision in the shipping PR. Off = classic 2-pair rule "
+        "for every family.",
+    ),
+    DedupSetting(
+        "dedup_nonbyt_cosine_merge_min", "float", 0,
+        "Pair max-cosine auto-merge threshold (houses / land / commercial)", "Engine",
+        "For non-apartment families, auto-merge when the best CLIP cosine between ANY image "
+        "of one listing and ANY image of the other reaches this value — a free pgvector "
+        "lookup, no LLM. 0 disables; the validated operating point is 0.98 (99.57% agreement "
+        "with the forensic verdict on decided pairs). A pair where either side has no stored "
+        "embeddings never fires. Floor-plan gate + both-site-plan development guard "
+        "unchanged; merges are reversible and carry the distinct reason 'cosine_high'. "
+        "Cost plan §2.2 arm (b).",
+    ),
     # --- CLIP (free tagging + the cosine recall tier) ---
     DedupSetting(
         "dedup_prefer_clip_tags", "bool", False,

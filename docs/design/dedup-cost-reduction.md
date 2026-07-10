@@ -5,6 +5,13 @@
   on current data (572/574; the 2 misses are floor-plan dismissals the retained gate still
   catches). `dedup_nonbyt_attr_merge_enabled=true` live; watch `/dedup#funnel` "Area + exact
   price".
+- **Phase 2.2 arms (a)+(b) (non-byt pHash single-pair + pair max-cosine): SHIPPED (2026-07-10),
+  default OFF pending operator flip.** Re-validated on the then-current 1,283-pair non-byt
+  decided corpus: pHash ≥1 pair 99.41% (1,017/1,023, 79.7% coverage); pair max-cosine ≥0.98
+  99.71% (1,018/1,021, 79.6% coverage). Settings `dedup_nonbyt_phash_single_enabled` (bool) +
+  `dedup_nonbyt_cosine_merge_min` (0=off; validated operating point 0.98). Distinct reasons
+  `phash_single` / `cosine_high`; funnel node "Pair max-cosine". Both arms keep the floor-plan
+  gate + both-site-plan step-aside unchanged.
 - **Phase 3.3 (floor-plan gate scope-down): DROPPED.** Live data refuted the premise — the
   ≥4-pHash-identical stratum still gets 4.08% (1,343/30d) `different_layout` dismissals, i.e.
   the development shared-photo false-merge guard, not waste. The fid1 dismissal-memory piece

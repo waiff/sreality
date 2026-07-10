@@ -812,6 +812,160 @@ def test_run_engine_byt_never_takes_attr_arm(monkeypatch: Any) -> None:
     assert stats.get("auto_attr", 0) == 0
 
 
+# --- §2.2 free arms: non-byt pHash single-pair + pair max-cosine ------------
+
+def test_phash_fastpath_min_pairs_param() -> None:
+    # Classic rule: 2 pairs (or a distinctive match). Arm (a) lowers min to 1 for non-byt.
+    assert decide_phash_fastpath(1, False) is False                       # classic: 1 < 2
+    assert decide_phash_fastpath(1, False, min_identical_pairs=1) is True  # arm (a)
+    assert decide_phash_fastpath(0, False, min_identical_pairs=1) is False  # zero never fires
+    assert decide_phash_fastpath(2, False) is True                        # classic unchanged
+    assert decide_phash_fastpath(0, True, min_identical_pairs=1) is True  # distinctive unchanged
+
+
+def test_run_engine_geo_phash_single_arm_merges_one_pair(monkeypatch: Any) -> None:
+    # Flag ON: ONE pHash-identical pair merges a house pair via the fast-path, carrying the
+    # DISTINCT reason 'phash_single' (funnel/unmerge attribution) and its own stats counter.
+    import scripts.dedup_engine as eng
+    merges: list[tuple[int, int, str]] = []
+    monkeypatch.setattr(eng, "_load_geo_eligible", lambda conn, **k: [
+        _gk(1, 101, source="sreality", price=5_950_000),
+        _gk(2, 102, source="idnes", price=6_100_000),  # attr arm can't fire (price differs)
+    ])
+    monkeypatch.setattr(
+        eng, "merge_properties",
+        lambda conn, *, survivor_id, retired_id, reason, **kw: merges.append(
+            (survivor_id, retired_id, reason)) or {"data": {"merge_group_id": "g"}})
+    monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 1)
+    monkeypatch.setattr(eng, "_phash_distinctive_match", lambda *a, **k: False)
+    monkeypatch.setattr(eng, "_both_have_site_plan", lambda *a, **k: False)
+    monkeypatch.setattr(eng, "_floor_plan_image_ids", lambda conn, sid: [])
+    stats = eng.run_engine(_FakeConn([]), classify_fn=None, compare_fn=None,
+                           max_vision_calls=10, geo=True, geo_area_max_pct=0.20,
+                           nonbyt_phash_single=True)
+    assert stats["auto_phash_single"] == 1
+    assert stats.get("auto_phash", 0) == 0            # classic counter untouched
+    assert stats.get("pairs_considered", 0) == 0      # never reached the paid stage
+    assert merges == [(101, 102, "phash_single")]
+
+
+def test_run_engine_geo_phash_single_off_keeps_two_pair_rule(monkeypatch: Any) -> None:
+    # Flag OFF (default): one identical pair is NOT enough — the pair falls through to the
+    # paid visual stage exactly as before.
+    import scripts.dedup_engine as eng
+    monkeypatch.setattr(eng, "_load_geo_eligible", lambda conn, **k: [
+        _gk(1, 101, price=5_950_000),
+        _gk(2, 102, price=6_100_000),
+    ])
+    monkeypatch.setattr(eng, "merge_properties", lambda *a, **k: {"data": {"merge_group_id": "g"}})
+    monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 1)
+    monkeypatch.setattr(eng, "_phash_distinctive_match", lambda *a, **k: False)
+    monkeypatch.setattr(eng, "_both_have_site_plan", lambda *a, **k: False)
+    monkeypatch.setattr(eng, "_floor_plan_image_ids", lambda conn, sid: [])
+    stats = eng.run_engine(_FakeConn([]), classify_fn=None, compare_fn=None,
+                           max_vision_calls=10, geo=True, geo_area_max_pct=0.20)
+    assert stats.get("auto_phash_single", 0) == 0
+    assert stats["pairs_considered"] == 1
+
+
+def test_run_engine_byt_never_takes_phash_single(monkeypatch: Any) -> None:
+    # Non-byt only: byt development renders collide across identical units, so byt keeps the
+    # classic 2-pair rule even with the flag ON.
+    import scripts.dedup_engine as eng
+    monkeypatch.setattr(eng, "_load_geo_eligible", lambda conn, **k: [
+        _gk(1, 101, cat="byt", price=5_950_000),
+        _gk(2, 102, cat="byt", price=6_100_000),
+    ])
+    monkeypatch.setattr(eng, "merge_properties", lambda *a, **k: {"data": {"merge_group_id": "g"}})
+    monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 1)
+    monkeypatch.setattr(eng, "_phash_distinctive_match", lambda *a, **k: False)
+    monkeypatch.setattr(eng, "_both_have_site_plan", lambda *a, **k: False)
+    monkeypatch.setattr(eng, "_floor_plan_image_ids", lambda conn, sid: [])
+    stats = eng.run_engine(_FakeConn([]), classify_fn=None, compare_fn=None,
+                           max_vision_calls=10, geo=True, geo_area_max_pct=0.20,
+                           nonbyt_phash_single=True)
+    assert stats.get("auto_phash_single", 0) == 0
+
+
+def test_run_engine_geo_cosine_arm_merges_at_threshold(monkeypatch: Any) -> None:
+    # Threshold set + both sides embedded + cosine above it → free merge with the DISTINCT
+    # reason 'cosine_high'; the paid visual stage is never reached.
+    import scripts.dedup_engine as eng
+    import toolkit.clip_dedup as clip
+    merges: list[tuple[int, int, str]] = []
+    monkeypatch.setattr(eng, "_load_geo_eligible", lambda conn, **k: [
+        _gk(1, 101, source="sreality", price=5_950_000),
+        _gk(2, 102, source="idnes", price=6_100_000),
+    ])
+    monkeypatch.setattr(
+        eng, "merge_properties",
+        lambda conn, *, survivor_id, retired_id, reason, **kw: merges.append(
+            (survivor_id, retired_id, reason)) or {"data": {"merge_group_id": "g"}})
+    monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 0)
+    monkeypatch.setattr(eng, "_phash_distinctive_match", lambda *a, **k: False)
+    monkeypatch.setattr(eng, "_both_have_site_plan", lambda *a, **k: False)
+    monkeypatch.setattr(eng, "_floor_plan_image_ids", lambda conn, sid: [])
+    monkeypatch.setattr(eng, "_clip_incomplete_any", lambda *a, **k: False)
+    monkeypatch.setattr(clip, "pair_max_cosine", lambda *a, **k: 0.985)
+    stats = eng.run_engine(_FakeConn([]), classify_fn=None, compare_fn=None,
+                           max_vision_calls=10, geo=True, geo_area_max_pct=0.20,
+                           clip_model="m", nonbyt_cosine_merge_min=0.98)
+    assert stats["auto_cosine"] == 1
+    assert stats.get("pairs_considered", 0) == 0
+    assert merges == [(101, 102, "cosine_high")]
+
+
+def test_run_engine_geo_cosine_below_threshold_or_missing_never_fires(monkeypatch: Any) -> None:
+    # Below-threshold cosine and None (either side missing embeddings) both fall through to
+    # the paid stage — None is "signal unavailable", never treated as a decision.
+    import scripts.dedup_engine as eng
+    import toolkit.clip_dedup as clip
+
+    def _run(cos: Any) -> dict:
+        monkeypatch.setattr(eng, "_load_geo_eligible", lambda conn, **k: [
+            _gk(1, 101, price=5_950_000),
+            _gk(2, 102, price=6_100_000),
+        ])
+        monkeypatch.setattr(eng, "merge_properties", lambda *a, **k: {"data": {"merge_group_id": "g"}})
+        monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 0)
+        monkeypatch.setattr(eng, "_phash_distinctive_match", lambda *a, **k: False)
+        monkeypatch.setattr(eng, "_both_have_site_plan", lambda *a, **k: False)
+        monkeypatch.setattr(eng, "_floor_plan_image_ids", lambda conn, sid: [])
+        monkeypatch.setattr(eng, "_clip_incomplete_any", lambda *a, **k: False)
+        monkeypatch.setattr(clip, "pair_max_cosine", lambda *a, **k: cos)
+        return eng.run_engine(_FakeConn([]), classify_fn=None, compare_fn=None,
+                              max_vision_calls=10, geo=True, geo_area_max_pct=0.20,
+                              clip_model="m", nonbyt_cosine_merge_min=0.98)
+
+    for cos in (0.97, None):
+        stats = _run(cos)
+        assert stats.get("auto_cosine", 0) == 0
+        assert stats["pairs_considered"] == 1
+
+
+def test_run_engine_geo_cosine_steps_aside_for_both_site_plans(monkeypatch: Any) -> None:
+    # The development guard is unchanged: a both-site-plan pair skips the cosine arm and pays
+    # the forensic same-unit path, exactly like pHash/attr.
+    import scripts.dedup_engine as eng
+    import toolkit.clip_dedup as clip
+    monkeypatch.setattr(eng, "_load_geo_eligible", lambda conn, **k: [
+        _gk(1, 101, price=5_950_000),
+        _gk(2, 102, price=6_100_000),
+    ])
+    monkeypatch.setattr(eng, "merge_properties", lambda *a, **k: {"data": {"merge_group_id": "g"}})
+    monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 0)
+    monkeypatch.setattr(eng, "_phash_distinctive_match", lambda *a, **k: False)
+    monkeypatch.setattr(eng, "_both_have_site_plan", lambda *a, **k: True)
+    monkeypatch.setattr(eng, "_floor_plan_image_ids", lambda conn, sid: [])
+    monkeypatch.setattr(eng, "_clip_incomplete_any", lambda *a, **k: False)
+    monkeypatch.setattr(clip, "pair_max_cosine", lambda *a, **k: 0.999)
+    stats = eng.run_engine(_FakeConn([]), classify_fn=None, compare_fn=None,
+                           max_vision_calls=10, geo=True, geo_area_max_pct=0.20,
+                           clip_model="m", nonbyt_cosine_merge_min=0.98)
+    assert stats.get("auto_cosine", 0) == 0
+    assert stats["pairs_considered"] == 1
+
+
 # --- download-completeness readiness (dedup_defer_incomplete_downloads) ------
 
 def test_run_engine_defers_pair_while_image_downloading(monkeypatch: Any) -> None:
@@ -2044,6 +2198,8 @@ def _run_geo_only_main(monkeypatch: Any, *, reached_end: bool, last_key: str | N
         "dedup_floor_plan_budget": 0,
         "dedup_floor_plan_inconclusive_to_review": False,
         "dedup_nonbyt_attr_merge_enabled": False,
+        "dedup_nonbyt_phash_single_enabled": False,
+        "dedup_nonbyt_cosine_merge_min": 0,
         "dedup_defer_incomplete_downloads": False,
     }
     monkeypatch.setattr(ds, "read_setting", lambda conn, key: settings[key])
