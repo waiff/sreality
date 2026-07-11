@@ -21,6 +21,7 @@ from api import dependencies as deps
 from api import main as api_main
 from api import portal_lookup as pl
 from api import schemas as s
+from api import tenant_pool
 
 
 # ----------------------------------------------------------------------
@@ -183,7 +184,11 @@ def test_lookup_preserves_request_order_even_if_db_reorders() -> None:
 
 @pytest.fixture()
 def client() -> Any:
+    # The route runs on the tenant pool since Phase 1 — stub the whole
+    # tenant_conn chain (auth included) for delegation/validation tests; the
+    # auth gate itself is exercised by test_route_fails_closed_without_token.
     api_main.app.dependency_overrides[deps.get_db_conn] = lambda: object()
+    api_main.app.dependency_overrides[tenant_pool.tenant_conn] = lambda: object()
     yield TestClient(api_main.app)
     api_main.app.dependency_overrides.clear()
 
@@ -216,10 +221,16 @@ def test_route_rejects_over_50_items(client) -> None:
     assert res.status_code == 422
 
 
-def test_route_requires_token_when_set(client, monkeypatch) -> None:
-    monkeypatch.setenv("API_TOKEN", "secret")
-    res = client.post(
-        "/listings/lookup",
-        json={"items": [{"source": "sreality", "source_id": "1"}]},
-    )
-    assert res.status_code == 401
+def test_route_fails_closed_without_token(monkeypatch) -> None:
+    """No tenant_conn override here — the real verify_jwt chain must 401 a
+    missing bearer (fail-closed, Phase 1), even with API_TOKEN unset."""
+    monkeypatch.delenv("API_TOKEN", raising=False)
+    api_main.app.dependency_overrides[deps.get_db_conn] = lambda: object()
+    try:
+        res = TestClient(api_main.app).post(
+            "/listings/lookup",
+            json={"items": [{"source": "sreality", "source_id": "1"}]},
+        )
+        assert res.status_code == 401
+    finally:
+        api_main.app.dependency_overrides.clear()
