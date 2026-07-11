@@ -184,11 +184,15 @@ def test_drain_dirty_empty_queue_is_noop():
 
 def test_publish_sweep_only_touches_unpublished_ineligible():
     """The ineligible publish sweep (migration 273) publishes ONLY unpublished, active
-    properties whose repr listing is eligible for NEITHER dedup pass — an
+    properties whose repr listing is eligible for NONE of the three dedup passes — an
     eligible-but-unchecked property stays NULL (the engine stamps that one), and an
     already-published row is never touched. Row-level semantics run in the DB; here we
     pin the SQL shape that guarantees them + the returned rowcount."""
-    from toolkit.publication import GEO_ELIGIBLE_PREDICATE, STREET_ELIGIBLE_PREDICATE
+    from toolkit.publication import (
+        BYT_GEO_ELIGIBLE_PREDICATE,
+        GEO_ELIGIBLE_PREDICATE,
+        STREET_ELIGIBLE_PREDICATE,
+    )
 
     conn = _FakeConn([
         (lambda s: "publish_reason = 'ineligible'" in s, [(1,), (2,)]),  # 2 rows published
@@ -200,11 +204,12 @@ def test_publish_sweep_only_touches_unpublished_ineligible():
     sql = " ".join(sweep[0].split())
     assert "p.published_at IS NULL" in sql          # never re-publishes a stamped row
     assert "p.status = 'active'" in sql
-    # BOTH eligibility predicates, wrapped IS NOT TRUE (NULL-safe ineligibility) so an
-    # eligible repr listing keeps the property NULL for the engine to stamp.
-    assert " ".join(STREET_ELIGIBLE_PREDICATE.split()) in sql
-    assert " ".join(GEO_ELIGIBLE_PREDICATE.split()) in sql
-    assert "IS NOT TRUE" in sql
+    # ALL THREE eligibility predicates, each wrapped IS NOT TRUE (NULL-safe
+    # ineligibility) so an eligible repr listing keeps the property NULL for the
+    # engine to stamp.
+    for pred in (STREET_ELIGIBLE_PREDICATE, GEO_ELIGIBLE_PREDICATE,
+                 BYT_GEO_ELIGIBLE_PREDICATE):
+        assert f"({' '.join(pred.split())}) IS NOT TRUE" in sql
 
 
 def test_enqueue_imageless_routes_to_dedup_dirty_lane():
@@ -301,12 +306,16 @@ def test_full_mode_skips_publish_and_imageless_sweeps(monkeypatch: Any) -> None:
 def test_publication_predicates_parity_with_engine():
     """toolkit.publication mirrors the engine's eligibility VERBATIM (single source), so
     the ineligible sweep can never publish a property the engine WOULD dedup-check. A
-    drift in either predicate fails here. Covers EVERY engine SQL constant that embeds
+    drift in any predicate fails here. Covers EVERY engine SQL constant that embeds
     an eligibility predicate — including the dirty-drain claim scopers, which once
     hand-inlined the street predicate (an untested drift risk)."""
     import scripts.dedup_engine as eng
 
-    from toolkit.publication import GEO_ELIGIBLE_PREDICATE, STREET_ELIGIBLE_PREDICATE
+    from toolkit.publication import (
+        BYT_GEO_ELIGIBLE_PREDICATE,
+        GEO_ELIGIBLE_PREDICATE,
+        STREET_ELIGIBLE_PREDICATE,
+    )
 
     assert STREET_ELIGIBLE_PREDICATE == eng._ELIGIBILITY
     assert STREET_ELIGIBLE_PREDICATE in eng._ELIGIBLE_SQL
@@ -315,35 +324,74 @@ def test_publication_predicates_parity_with_engine():
     assert GEO_ELIGIBLE_PREDICATE in eng._GEO_ELIGIBLE_SQL
     assert GEO_ELIGIBLE_PREDICATE in eng._CLAIMED_GEO_CELLS_SQL
     assert GEO_ELIGIBLE_PREDICATE in eng._CLAIMED_FAMILY_ELIGIBILITY_SQL
-    # Cross-pass visibility: the geo surfaces must NOT re-grow the AND-NOT-street
-    # exclusion (street-eligible geo-family rows participate in the geo pass; only the
-    # both-street-eligible PAIR is skipped, in resolve_pair).
-    for sql in (eng._GEO_ELIGIBLE_SQL, eng._CLAIMED_GEO_CELLS_SQL,
+    assert BYT_GEO_ELIGIBLE_PREDICATE in eng._BYT_GEO_ELIGIBLE_SQL
+    assert BYT_GEO_ELIGIBLE_PREDICATE in eng._CLAIMED_BYT_GEO_CELLS_SQL
+    assert BYT_GEO_ELIGIBLE_PREDICATE in eng._CLAIMED_FAMILY_ELIGIBILITY_SQL
+    # Cross-pass visibility: the cell surfaces must NOT re-grow the AND-NOT-street
+    # exclusion (street-eligible cell-family rows participate in the cell passes; only
+    # the both-street-eligible PAIR is skipped, in resolve_pair).
+    for sql in (eng._GEO_ELIGIBLE_SQL, eng._BYT_GEO_ELIGIBLE_SQL,
+                eng._CLAIMED_GEO_CELLS_SQL, eng._CLAIMED_BYT_GEO_CELLS_SQL,
                 eng._CLAIMED_FAMILY_ELIGIBILITY_SQL):
         assert f"NOT ({eng._ELIGIBILITY})" not in sql
 
 
-def test_geo_families_pin_migration_276_sql_twin():
-    """publication.GEO_FAMILIES is the single PYTHON source of the geo category list;
-    migration 276's listing_geo_cell_key() carries the SQL twin (SQL can't import
-    Python). This pins the two: the function body's category list must be EXACTLY
-    GEO_FAMILIES, and the rendered predicate IN-list must be built from it."""
+def _migration_cell_key_lists(filename: str) -> list[tuple[str, ...]]:
+    """Every NOT IN category list inside a migration's listing_geo_cell_key() body."""
     import re
     from pathlib import Path
 
+    text = (Path(__file__).resolve().parents[1] / "migrations" / filename).read_text()
+    start = text.index("CREATE OR REPLACE FUNCTION public.listing_geo_cell_key")
+    body = text[start:text.index("$$;", start)]
+    return [tuple(re.findall(r"'([^']*)'", found))
+            for found in re.findall(r"NOT IN \(([^)]*)\)", body)]
+
+
+def test_geo_families_pin_migration_276_sql_twin():
+    """publication.GEO_FAMILIES is the single PYTHON source of the geo category list;
+    HISTORICAL migration 276's listing_geo_cell_key() carried the four-family SQL twin
+    (SQL can't import Python). The 276 file is frozen (rule #1) and must keep matching
+    GEO_FAMILIES exactly; the LIVE function is migration 290's (pinned to CELL_FAMILIES
+    below). The rendered geo predicate IN-list must still be built from GEO_FAMILIES."""
     from toolkit.publication import GEO_ELIGIBLE_PREDICATE, GEO_FAMILIES
 
     rendered = "(" + ", ".join(f"'{f}'" for f in GEO_FAMILIES) + ")"
     assert f"category_main IN {rendered}" in GEO_ELIGIBLE_PREDICATE
 
-    text = (Path(__file__).resolve().parents[1]
-            / "migrations" / "276_listings_geo_cell_key.sql").read_text()
-    start = text.index("CREATE OR REPLACE FUNCTION public.listing_geo_cell_key")
-    body = text[start:text.index("$$;", start)]
-    lists = re.findall(r"NOT IN \(([^)]*)\)", body)
+    lists = _migration_cell_key_lists("276_listings_geo_cell_key.sql")
     assert lists, "migration 276 function body lost its category list"
     for found in lists:
-        assert tuple(re.findall(r"'([^']*)'", found)) == GEO_FAMILIES
+        assert found == GEO_FAMILIES
+
+
+def test_cell_families_pin_migration_290_sql_twin():
+    """publication.CELL_FAMILIES (= GEO_FAMILIES + byt) is the single PYTHON source of
+    the CELL-STAMPED category list; migration 290's redefined listing_geo_cell_key()
+    — the LIVE function — carries the SQL twin. This pins the two, exactly like the
+    276/GEO_FAMILIES pin: the function body's NOT IN list must be EXACTLY
+    CELL_FAMILIES, and byt must stay OUT of the dum|komercni collapse (its own
+    bucket)."""
+    from pathlib import Path
+
+    from toolkit.publication import BYT_GEO_ELIGIBLE_PREDICATE, CELL_FAMILIES, GEO_FAMILIES
+
+    assert CELL_FAMILIES == GEO_FAMILIES + ("byt",)
+    assert "l.category_main = 'byt'" in BYT_GEO_ELIGIBLE_PREDICATE
+    assert "l.disposition IS NOT NULL" in BYT_GEO_ELIGIBLE_PREDICATE
+
+    lists = _migration_cell_key_lists("290_byt_geo_cell_key.sql")
+    assert lists, "migration 290 function body lost its category list"
+    for found in lists:
+        assert found == CELL_FAMILIES
+
+    # byt buckets to ITSELF: the collapse branch must still name only dum+komercni.
+    text = (Path(__file__).resolve().parents[1]
+            / "migrations" / "290_byt_geo_cell_key.sql").read_text()
+    start = text.index("CREATE OR REPLACE FUNCTION public.listing_geo_cell_key")
+    body = text[start:text.index("$$;", start)]
+    assert "IN ('dum', 'komercni')" in body
+    assert "'dum|komercni'" in body
 
 
 def test_every_resolved_sql_constant_has_valid_placeholders():

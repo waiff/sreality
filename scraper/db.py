@@ -1970,14 +1970,15 @@ _BATCH_DIRTY_FROM_SIDS_SQL = """
 # (the flood that stalled the drain twice — the whole market streamed through the tagger and
 # every property landed here, 78.5% of them un-mergeable):
 #   * ELIGIBILITY (property-grain): the property must have >=1 listing the dedup engine can
-#     actually reach — street+disposition (the street pass) OR a geo-eligible single-dwelling
-#     row (the geo pass; run_dirty_pass runs a geo sub-pass over the claimed properties'
-#     stored geo_cell_key cells, so geo-family properties merge on this lane too — the gate
-#     was street-only while the drain was). The predicate is
+#     actually reach — street+disposition (the street pass), OR a geo-eligible single-dwelling
+#     row (the geo pass), OR a byt-geo-eligible street-less apartment (the byt geo rung);
+#     run_dirty_pass runs cell sub-passes over the claimed properties' stored geo_cell_key
+#     cells, so cell-family properties merge on this lane too — the gate was street-only
+#     while the drain was. The predicate is
 #     toolkit.publication.eligible_predicate rendered for the subquery alias, never a hand
 #     copy. Property-grain (any listing of P), NOT the tagged listing's own eligibility: the
-#     re-tagged image may belong to an ineligible sibling (a street-less bazos byt, a
-#     geom-less re-post) while the property's eligible listing is what actually merges.
+#     re-tagged image may belong to an ineligible sibling (a geom-less re-post) while the
+#     property's eligible listing is what actually merges.
 #   * RECENCY: only a genuinely NEW listing needs the minutes-latency lane. A market-wide CLIP
 #     backfill (or a new portal's back-catalogue) tags OLD listings whose dedup is already the
 #     6h full scan's job; routing them here is what floods the queue. `first_seen_at` on the

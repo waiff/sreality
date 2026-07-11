@@ -192,6 +192,18 @@ REGISTRY: tuple[DedupSetting, ...] = (
         "this controls RECALL into that flow, not the merge itself.",
         0.0, 1.0,
     ),
+    DedupSetting(
+        "dedup_byt_geo_enabled", "bool", False,
+        "Byt geo rung (street-less apartments)", "Geo",
+        "Master switch for the SCHEDULED byt geo-cell rung: a street-less apartment "
+        "(invisible to the street pass) blocks on its geo cell + disposition instead. "
+        "CANDIDATE-GENERATION ONLY — the cell+disposition signal never auto-merges; "
+        "pHash / forensic High stay the sole merge gates, and centroid-pinned mega-"
+        "cells ride the bounded oversized-group path. Gates the dedicated "
+        "--byt-geo-only cron; the real-time dirty drain's byt sub-pass runs regardless "
+        "(the same posture as the geo sub-pass vs dedup_geo_enabled). Off by default "
+        "until the operator flips it after the migration-290 backfill.",
+    ),
     # --- Vision models ---
     DedupSetting(
         "llm_visual_match_model", "model", "claude-sonnet-4-5",

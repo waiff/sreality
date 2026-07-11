@@ -21,6 +21,7 @@ from toolkit.dedup_engine import (
     ListingKey,
     MatchProfile,
     category_main_compatible,
+    classify_byt_geo_pair,
     classify_geo_pair,
     classify_pair,
     decide_phash_fastpath,
@@ -785,6 +786,213 @@ def test_run_engine_geo_does_not_skip_same_source(monkeypatch: Any) -> None:
     assert stats["pairs_considered"] == 1
 
 
+# --- byt geo rung B: street-less apartments, cell + disposition -------------
+
+def _bgk(
+    sid: int, pid: int, *, source: str = "sreality", ct: str = "prodej",
+    disp: str = "2+kk", floor: int | None = 3, area: float | None = 60.0,
+    price: int | None = 5_950_000, hn: str | None = None,
+    lat: float = 50.10064, lng: float = 14.53742, desc: str | None = None,
+    street_eligible: bool = False, cat: str = "byt",
+) -> ListingKey:
+    return ListingKey(
+        sreality_id=sid, property_id=pid, source=source,
+        street_key="geo:5001:50.1006:14.5374:byt:prodej|d:2+kk",
+        disposition=disp, house_number=hn, floor=floor, area_m2=area,
+        description=desc, category_type=ct, category_main=cat, street_id=None,
+        lat=lat, lng=lng, price_czk=price, street_eligible=street_eligible,
+    )
+
+
+def test_classify_byt_geo_survivor_is_candidate_with_byt_geo_reason() -> None:
+    d = classify_byt_geo_pair(
+        _bgk(1, 101, source="sreality"), _bgk(2, 102, source="idnes"),
+        profile_for("byt"))
+    assert d.action == "candidate" and d.reason == "byt_geo"
+
+
+def test_classify_byt_geo_never_auto_merges_even_on_strong_signals() -> None:
+    # Identical coord + area + price + house number — the strongest attribute signal
+    # the geo path would auto-merge for a dum. For byt there is NO auto_merge path at
+    # all: one building stacks many identical-attribute units on one point.
+    d = classify_byt_geo_pair(
+        _bgk(1, 101, hn="12", area=60.0, price=5_000_000),
+        _bgk(2, 102, hn="12", area=60.0, price=5_000_000),
+        profile_for("byt"))
+    assert d.action == "candidate" and d.reason == "byt_geo"
+
+
+def test_classify_byt_geo_floor_any_known_difference_rejects() -> None:
+    # Floors disambiguate units inside one building: ANY known difference rejects —
+    # deliberately STRICTER than the street path's ±1 convention tolerance (a false
+    # reject on a candidate-only rung costs recall, never a merge).
+    d = classify_byt_geo_pair(
+        _bgk(1, 101, floor=3), _bgk(2, 102, floor=4), profile_for("byt"))
+    assert d.action == "reject" and d.detail == "floor_contradiction"
+
+
+def test_classify_byt_geo_unknown_floor_side_is_candidate() -> None:
+    d = classify_byt_geo_pair(
+        _bgk(1, 101, floor=3), _bgk(2, 102, floor=None), profile_for("byt"))
+    assert d.action == "candidate"
+
+
+def test_classify_byt_geo_area_over_byt_10pct_rejects() -> None:
+    # The byt profile's unified 10% gate — NOT the operator's wider geo tolerance
+    # (stacked units differ mainly in area; the chain-merge hazard the 10% exists for).
+    d = classify_byt_geo_pair(
+        _bgk(1, 101, area=60.0), _bgk(2, 102, area=70.0), profile_for("byt"))
+    assert d.action == "reject" and d.detail == "area_contradiction"
+    ok = classify_byt_geo_pair(
+        _bgk(1, 101, area=60.0), _bgk(2, 102, area=64.0), profile_for("byt"))
+    assert ok.action == "candidate"
+
+
+def test_classify_byt_geo_house_number_contradiction_rejects() -> None:
+    d = classify_byt_geo_pair(
+        _bgk(1, 101, hn="10"), _bgk(2, 102, hn="12"), profile_for("byt"))
+    assert d.action == "reject" and d.detail == "house_number_contradiction"
+
+
+def test_classify_byt_geo_coord_too_far_rejects() -> None:
+    d = classify_byt_geo_pair(
+        _bgk(1, 101, lat=50.10, lng=14.50), _bgk(2, 102, lat=50.20, lng=14.60),
+        profile_for("byt"))
+    assert d.action == "reject" and d.detail == "coord_too_far"
+
+
+def test_classify_byt_geo_unit_marker_contradiction_rejects() -> None:
+    d = classify_byt_geo_pair(
+        _bgk(1, 101, desc="byt 42 v novostavbě"),
+        _bgk(2, 102, desc="byt 45 v novostavbě"),
+        profile_for("byt"))
+    assert d.action == "reject" and d.detail == "unit_marker_contradiction"
+
+
+def test_classify_byt_geo_category_type_contradiction_rejects() -> None:
+    d = classify_byt_geo_pair(
+        _bgk(1, 101, ct="prodej"), _bgk(2, 102, ct="pronajem"), profile_for("byt"))
+    assert d.action == "reject" and d.detail == "category_type_contradiction"
+
+
+def test_classify_byt_geo_category_main_contradiction_rejects() -> None:
+    # Can't happen from the loader (byt buckets to its own cell) — the standalone
+    # assertion still holds.
+    d = classify_byt_geo_pair(
+        _bgk(1, 101), _bgk(2, 102, cat="dum"), profile_for("byt"))
+    assert d.action == "reject" and d.detail == "category_main_contradiction"
+
+
+def test_classify_byt_geo_disposition_loose_compat_asserted() -> None:
+    # The shard guarantees compatibility, but the classifier re-asserts it standalone:
+    # 2+kk vs 2+1 are loose-compatible (candidate); 2+kk vs 3+kk reject.
+    ok = classify_byt_geo_pair(
+        _bgk(1, 101, disp="2+kk"), _bgk(2, 102, disp="2+1"), profile_for("byt"))
+    assert ok.action == "candidate"
+    d = classify_byt_geo_pair(
+        _bgk(1, 101, disp="2+kk"), _bgk(2, 102, disp="3+kk"), profile_for("byt"))
+    assert d.action == "reject" and d.detail == "disposition_mismatch"
+
+
+def test_classify_byt_geo_same_listing_and_already_merged_reject() -> None:
+    assert classify_byt_geo_pair(
+        _bgk(1, 101), _bgk(1, 101), profile_for("byt")).detail == "same_listing"
+    assert classify_byt_geo_pair(
+        _bgk(1, 101), _bgk(2, 101), profile_for("byt")).detail == "already_merged"
+
+
+def test_make_byt_geo_classify_candidate_and_reject_passthrough() -> None:
+    import scripts.dedup_engine as eng
+    fn = eng._make_byt_geo_classify()
+    d = fn(_bgk(1, 101), _bgk(2, 102, source="idnes"))
+    assert d.action == "candidate" and d.reason == "byt_geo"
+    assert fn(_bgk(1, 101, floor=2), _bgk(2, 102, floor=5)).action == "reject"
+
+
+def test_run_engine_byt_geo_routes_through_resolve_pair_with_byt_geo_tier(
+        monkeypatch: Any) -> None:
+    # The byt rung drives the SAME resolve_pair brain: the pair reaches the visual
+    # stage, queues under the 'byt_geo' tier, and NEVER merges on the deterministic
+    # cell signal alone.
+    import scripts.dedup_engine as eng
+    monkeypatch.setattr(eng, "_load_geo_eligible", lambda conn, **k: [
+        _bgk(1, 101, source="sreality"), _bgk(2, 102, source="idnes"),
+    ])
+    monkeypatch.setattr(
+        eng, "merge_properties",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("byt cell signal must not merge")))
+    enq: list[dict[str, Any]] = []
+    monkeypatch.setattr(eng, "_enqueue_candidate",
+                        lambda conn, x, y, markers, **kw: enq.append(markers))
+    conn = _FakeConn([])
+    stats = eng.run_engine(conn, classify_fn=None, compare_fn=None,
+                           max_vision_calls=10, byt_geo=True)
+    assert stats["pairs_considered"] == 1
+    assert stats["queued"] == 1
+    assert enq and enq[0]["tier"] == "byt_geo"
+
+
+def test_run_engine_byt_geo_skips_pair_when_both_sides_street_eligible(
+        monkeypatch: Any) -> None:
+    # The #761 cross-pass skip is generalized to ALL non-street tiers: a byt_geo pair
+    # whose BOTH sides are street-eligible belongs to the street pass — skipped before
+    # any probe/budget spend, recording nothing.
+    import scripts.dedup_engine as eng
+    monkeypatch.setattr(eng, "_load_geo_eligible", lambda conn, **k: [
+        _bgk(1, 101, street_eligible=True),
+        _bgk(2, 102, source="idnes", street_eligible=True),
+    ])
+    enq: list[dict[str, Any]] = []
+    monkeypatch.setattr(eng, "_enqueue_candidate",
+                        lambda conn, x, y, markers, **kw: enq.append(markers))
+    conn = _FakeConn([])
+    stats = eng.run_engine(conn, classify_fn=None, compare_fn=None,
+                           max_vision_calls=10, byt_geo=True)
+    assert stats["pairs_considered"] == 0
+    assert stats["rejected"] == 0 and stats["queued"] == 0
+    assert not enq
+    assert _dismissed_pairs(conn) == set()
+
+
+def test_run_engine_byt_geo_mixed_street_eligibility_pair_still_decided(
+        monkeypatch: Any) -> None:
+    import scripts.dedup_engine as eng
+    monkeypatch.setattr(eng, "_load_geo_eligible", lambda conn, **k: [
+        _bgk(1, 101, street_eligible=True),
+        _bgk(2, 102, source="idnes", street_eligible=False),
+    ])
+    enq: list[dict[str, Any]] = []
+    monkeypatch.setattr(eng, "_enqueue_candidate",
+                        lambda conn, x, y, markers, **kw: enq.append(markers))
+    stats = eng.run_engine(_FakeConn([]), classify_fn=None, compare_fn=None,
+                           max_vision_calls=10, byt_geo=True)
+    assert stats["pairs_considered"] == 1 and stats["queued"] == 1
+    assert enq and enq[0]["tier"] == "byt_geo"
+
+
+def test_run_engine_geo_and_byt_geo_flags_are_mutually_exclusive() -> None:
+    import scripts.dedup_engine as eng
+    with pytest.raises(ValueError):
+        eng.run_engine(_FakeConn([]), geo=True, byt_geo=True)
+
+
+def test_run_engine_byt_geo_oversized_cell_processes_bounded(monkeypatch: Any) -> None:
+    # Centroid-pinned byt cells reach 60-112 same-disposition members: they must ride
+    # the SAME bounded value-ordered path as street/geo oversized groups, never a
+    # whole-group skip (and never an unbounded O(n^2)).
+    import scripts.dedup_engine as eng
+    n = eng.MAX_GEO_GROUP_SIZE + 2
+    members = [_bgk(i, 100 + i) for i in range(1, n + 1)]
+    monkeypatch.setattr(eng, "_load_geo_eligible", lambda conn, **k: members)
+    monkeypatch.setattr(eng, "resolve_pair", _stub_resolve_pair)
+    stats = eng.run_engine(_FakeConn([]), classify_fn=None, compare_fn=None,
+                           max_vision_calls=0, byt_geo=True)
+    total = n * (n - 1) // 2
+    assert stats["oversized_groups"] == 1
+    assert stats["pairs_considered"] == min(total, eng.MAX_GROUP_PAIRS)
+    assert stats["skipped_oversized"] == max(0, total - eng.MAX_GROUP_PAIRS)
+
+
 # --- non-byt attribute fast-path (dedup_nonbyt_attr_merge_enabled) ----------
 
 def test_attr_exact_nonbyt_fires_on_area_within_2pct_and_exact_price() -> None:
@@ -1106,12 +1314,14 @@ def _geo_row(sid: int, pid: int, *, source: str = "sreality",
              lat: float | None = 50.10064, lng: float | None = 14.53742,
              cell: str | None = "geo:5001:50.1006:14.5374:dum|komercni:prodej",
              street_eligible: bool = False,
+             disp: str | None = None, floor: int | None = None,
              ) -> tuple[Any, ...]:
-    # matches _GEO_ELIGIBLE_SQL column order:
+    # matches the _cell_eligible_sql column order (geo + byt_geo rungs):
     # sreality_id, property_id, source, house_number, area, description,
-    # category_type, category_main, price_czk, lat, lng, geo_cell_key, street_eligible
+    # category_type, category_main, price_czk, lat, lng, geo_cell_key,
+    # street_eligible, disposition, floor
     return (sid, pid, source, hn, area, description, ct, cat, price, lat, lng, cell,
-            street_eligible)
+            street_eligible, disp, floor)
 
 
 def test_load_geo_eligible_uses_stored_cell_key_verbatim() -> None:
@@ -1197,21 +1407,72 @@ def test_load_geo_eligible_restrict_cells_scope() -> None:
         eng._load_geo_eligible(_Conn(), restrict_property_ids={1}, restrict_cells={cell})
 
 
+def test_load_byt_geo_eligible_shards_cells_by_disposition_class() -> None:
+    """The byt rung's load: WHERE = BYT_GEO_ELIGIBLE_PREDICATE (disposition required),
+    group key = stored cell + the street loader's `|d:{class}` shard suffix (2+kk and
+    2+1 land in ONE shard — loss-free), and the ListingKey carries disposition + floor
+    + street_eligible for classify_byt_geo_pair / the cross-pass skip."""
+    import scripts.dedup_engine as eng
+    from toolkit.publication import BYT_GEO_ELIGIBLE_PREDICATE
+
+    assert BYT_GEO_ELIGIBLE_PREDICATE in eng._BYT_GEO_ELIGIBLE_SQL
+    assert "l.disposition, l.floor" in eng._BYT_GEO_ELIGIBLE_SQL
+
+    captured: dict[str, Any] = {}
+    cell = "geo:5001:50.1006:14.5374:byt:prodej"
+
+    class _C:
+        def __enter__(self): return self
+        def __exit__(self, *a): return None
+        def execute(self, sql, params=None):
+            captured["sql"] = " ".join(sql.split())
+        def fetchall(self):
+            return [
+                _geo_row(1, 101, cat="byt", cell=cell, disp="2+kk", floor=3,
+                         street_eligible=True),
+                _geo_row(2, 102, cat="byt", cell=cell, disp="2+1", floor=None),
+                _geo_row(3, 103, cat="byt", cell=cell, disp="3+kk", floor=2),
+                _geo_row(4, 104, cat="byt", cell=None, disp="2+kk", floor=1),
+            ]
+
+    class _Conn:
+        def cursor(self): return _C()
+
+    keys = eng._load_geo_eligible(_Conn(), rung="byt_geo")
+    assert "l.disposition IS NOT NULL" in captured["sql"]
+    assert "category_main = 'byt'" in captured["sql"]
+    assert [k.sreality_id for k in keys] == [1, 2, 3]        # NULL-cell row skipped
+    # 2+kk and 2+1 share a shard (disposition_class); 3+kk is its own shard.
+    assert keys[0].street_key == keys[1].street_key
+    assert keys[0].street_key.startswith(cell + "|d:")
+    assert keys[2].street_key != keys[0].street_key
+    assert keys[0].disposition == "2+kk" and keys[0].floor == 3
+    assert keys[1].floor is None
+    assert keys[0].street_eligible is True and keys[1].street_eligible is False
+
+
 def test_run_engine_threads_restrict_geo_cells_to_loader(monkeypatch: Any) -> None:
-    # run_engine(geo=True, restrict_geo_cells=...) hands the cell scope to
-    # _load_geo_eligible — the seam the dirty geo sub-pass rides.
+    # run_engine(geo=True, restrict_geo_cells=...) hands the cell scope AND the rung to
+    # _load_geo_eligible — the seam the dirty cell sub-passes ride.
     import scripts.dedup_engine as eng
 
     seen: dict[str, Any] = {}
 
-    def _fake_load(conn, restrict_property_ids=None, restrict_cells=None):
+    def _fake_load(conn, restrict_property_ids=None, restrict_cells=None, rung="geo"):
         seen["cells"] = restrict_cells
         seen["pids"] = restrict_property_ids
+        seen["rung"] = rung
         return []
     monkeypatch.setattr(eng, "_load_geo_eligible", _fake_load)
     eng.run_engine(_FakeConn([]), max_vision_calls=0, geo=True,
                    restrict_geo_cells={"cellA"})
     assert seen["cells"] == {"cellA"} and seen["pids"] is None
+    assert seen["rung"] == "geo"
+
+    seen.clear()
+    eng.run_engine(_FakeConn([]), max_vision_calls=0, byt_geo=True,
+                   restrict_geo_cells={"cellB"})
+    assert seen["cells"] == {"cellB"} and seen["rung"] == "byt_geo"
 
 
 def test_run_engine_geo_groups_by_stored_cell_key(monkeypatch: Any) -> None:
@@ -1828,6 +2089,41 @@ def test_should_run_geo_only_on_explicit_flag() -> None:
     assert _should_run_geo(geo=True, geo_only=True, geo_enabled=True, dirty=True) is False
 
 
+def test_should_run_byt_geo_gated_by_master_switch() -> None:
+    """The byt geo rung's _should_run_geo mirror: ONLY the dedicated --byt-geo-only run,
+    gated by dedup_byt_geo_enabled (registry default OFF), never on the dirty drain."""
+    from scripts.dedup_engine import _should_run_byt_geo
+
+    assert _should_run_byt_geo(byt_geo_only=True, enabled=True, dirty=False) is True
+    assert _should_run_byt_geo(byt_geo_only=True, enabled=False, dirty=False) is False
+    assert _should_run_byt_geo(byt_geo_only=False, enabled=True, dirty=False) is False
+    assert _should_run_byt_geo(byt_geo_only=True, enabled=True, dirty=True) is False
+
+
+def test_dedup_byt_geo_enabled_registry_default_off() -> None:
+    """The rung ships OFF: the operator flips it after the migration-290 backfill."""
+    from toolkit.dedup_settings import REGISTRY_BY_KEY, default_for
+
+    assert default_for("dedup_byt_geo_enabled") is False
+    assert REGISTRY_BY_KEY["dedup_byt_geo_enabled"].kind == "bool"
+
+
+def test_dedup_byt_geo_cron_matches_its_args_branch() -> None:
+    """The byt-geo cron string must be IDENTICAL in the schedule list AND the run-step
+    match that selects --byt-geo-only — a drift would silently fall through to the
+    catch-all free full-scan (the geo lane's historical bug)."""
+    import pathlib
+
+    wf = pathlib.Path(__file__).resolve().parents[1] / ".github" / "workflows" / "dedup_engine.yml"
+    text = wf.read_text()
+    cron = "0 1,7,13,19 * * *"
+    assert text.count(cron) >= 2, "byt-geo cron must appear in the schedule list AND the run-step match"
+    branch = text.split(f'"{cron}" ]', 1)[1].split("elif", 1)[0]
+    args = [ln for ln in branch.splitlines() if "ARGS=" in ln]
+    assert any("--byt-geo-only" in ln for ln in args), "the byt-geo cron branch must set --byt-geo-only"
+    assert not any("--free" in ln for ln in args), "the byt-geo cron branch must NOT be --free"
+
+
 def test_dedup_geo_cron_matches_its_args_branch() -> None:
     """The geo cron string must be IDENTICAL in the schedule list AND the run-step match that
     selects --geo-only. If they drift, the cron fires but the elif chain falls through to the
@@ -1936,9 +2232,10 @@ def test_dedup_dirty_enqueue_gates_eligible_and_recent() -> None:
     # NOW enqueues too (the dirty pass grew a geo sub-pass)...
     assert "le.category_main IN ('dum', 'pozemek', 'komercni', 'ostatni')" in sql
     assert "le.geom IS NOT NULL" in sql and "le.obec_id IS NOT NULL" in sql
-    # ...while a street-less byt matches NEITHER arm (not street-eligible, not a
-    # single-dwelling category) and still never enqueues.
-    assert "'byt'" not in eligible_predicate("le")
+    # ...and the byt-geo arm: a street-less byt with geom+obec+area+DISPOSITION rides
+    # the real-time lane too (the dirty pass grew a byt-geo sub-pass, rung B).
+    assert "le.category_main = 'byt'" in sql
+    assert "le.category_main = 'byt'" in eligible_predicate("le")
     # recency: the tagged listing's first_seen_at within the window.
     assert "l.first_seen_at > now() - interval" in sql
     assert db._DEDUP_DIRTY_RECENCY_DAYS >= 1
@@ -1949,13 +2246,15 @@ def test_eligible_predicate_single_sources_the_parity_constants() -> None:
     engine-verbatim parity constants — one text, three consumers (engine SQL, publish
     sweep, enqueue gate). Rendering another alias changes ONLY the alias."""
     from toolkit.publication import (
+        BYT_GEO_ELIGIBLE_PREDICATE,
         GEO_ELIGIBLE_PREDICATE,
         STREET_ELIGIBLE_PREDICATE,
         eligible_predicate,
     )
 
     assert eligible_predicate("l") == (
-        f"({STREET_ELIGIBLE_PREDICATE}) OR ({GEO_ELIGIBLE_PREDICATE})")
+        f"({STREET_ELIGIBLE_PREDICATE}) OR ({GEO_ELIGIBLE_PREDICATE}) OR "
+        f"({BYT_GEO_ELIGIBLE_PREDICATE})")
     assert eligible_predicate("le") == eligible_predicate("l").replace("l.", "le.")
 
 
@@ -2231,9 +2530,12 @@ def test_run_engine_geo_cursor_truncation_reports_frontier(monkeypatch: Any) -> 
 
 def _run_geo_only_main(monkeypatch: Any, *, reached_end: bool, last_key: str | None,
                        loaded_state: dict[str, Any] | None = None,
-                       extra_argv: tuple[str, ...] = ()) -> dict[str, Any]:
-    """Drive main() end-to-end for a --geo-only run with the DB + settings + engine
-    faked, capturing the scan-state lane traffic (load/save lane, run_engine kwargs)."""
+                       extra_argv: tuple[str, ...] = (),
+                       flag: str = "--geo-only",
+                       byt_geo_enabled: bool = False) -> dict[str, Any]:
+    """Drive main() end-to-end for a --geo-only / --byt-geo-only run with the DB +
+    settings + engine faked, capturing the scan-state lane traffic (load/save lane,
+    run_engine kwargs)."""
     import sys
     import types
 
@@ -2253,13 +2555,14 @@ def _run_geo_only_main(monkeypatch: Any, *, reached_end: bool, last_key: str | N
             raise AssertionError("unexpected direct DB access in this main() path")
 
     monkeypatch.setenv("SUPABASE_DB_URL", "postgres://test")
-    monkeypatch.setattr(sys, "argv", ["dedup_engine", "--geo-only", *extra_argv])
+    monkeypatch.setattr(sys, "argv", ["dedup_engine", flag, *extra_argv])
     monkeypatch.setitem(
         sys.modules, "psycopg",
         types.SimpleNamespace(connect=lambda *a, **k: _Conn()))
 
     settings = {
         "dedup_geo_enabled": True,
+        "dedup_byt_geo_enabled": byt_geo_enabled,
         "dedup_geo_area_max_pct": 0.20,
         "dedup_floor_plan_budget": 0,
         "dedup_floor_plan_inconclusive_to_review": False,
@@ -2352,6 +2655,53 @@ def test_main_geo_only_shadow_never_saves_scan_state(monkeypatch: Any) -> None:
         monkeypatch, reached_end=True, last_key=_GEO_CELL_C, extra_argv=("--shadow",))
 
     assert calls["load"] == ["geo"]  # still resumes from the frontier (read-only)
+    assert calls["save"] == []
+    assert calls["run_rows"] == []
+
+
+def test_main_byt_geo_only_exits_when_setting_off(monkeypatch: Any) -> None:
+    """--byt-geo-only is gated by the dedup_byt_geo_enabled master switch (registry
+    default OFF): the run exits cleanly with NO engine work, no scan-state traffic,
+    no run row — the scheduled cron is a no-op until the operator flips it."""
+    calls = _run_geo_only_main(
+        monkeypatch, reached_end=True, last_key=None,
+        flag="--byt-geo-only", byt_geo_enabled=False)
+
+    assert calls["engine"] == []
+    assert calls["load"] == [] and calls["save"] == []
+    assert calls["run_rows"] == []
+
+
+def test_main_byt_geo_only_runs_own_lane_and_run_kind(monkeypatch: Any) -> None:
+    """The enabled --byt-geo-only run mirrors the geo lane: lane='byt_geo' scan state,
+    run_engine(byt_geo=True) with the loaded cursor + cursor_out, enqueue forced ON,
+    its OWN run_kind='byt_geo' row, and a saved frontier on truncation."""
+    calls = _run_geo_only_main(
+        monkeypatch, reached_end=False, last_key="geo:1:50.1:14.5:byt:prodej|d:2+kk",
+        loaded_state={"cursor_key": "geo:1:50.0:14.4:byt:prodej|d:1+kk",
+                      "cycle_started_at": "T0"},
+        flag="--byt-geo-only", byt_geo_enabled=True)
+
+    assert calls["load"] == ["byt_geo"]
+    (engine_kw,) = calls["engine"]
+    assert engine_kw["byt_geo"] is True
+    assert "geo" not in engine_kw or engine_kw.get("geo") is not True
+    assert engine_kw["enqueue_unresolved"] is True
+    assert engine_kw["scan_cursor"] == "geo:1:50.0:14.4:byt:prodej|d:1+kk"
+    assert isinstance(engine_kw["cursor_out"], dict)
+    (save,) = calls["save"]
+    assert save == {"lane": "byt_geo",
+                    "cursor_key": "geo:1:50.1:14.5:byt:prodej|d:2+kk",
+                    "cycle_started_at": "T0", "completed": False}
+    assert calls["run_rows"] and calls["run_rows"][0]["run_kind"] == "byt_geo"
+
+
+def test_main_byt_geo_only_shadow_never_saves_scan_state(monkeypatch: Any) -> None:
+    calls = _run_geo_only_main(
+        monkeypatch, reached_end=True, last_key="k",
+        flag="--byt-geo-only", byt_geo_enabled=True, extra_argv=("--shadow",))
+
+    assert calls["load"] == ["byt_geo"]
     assert calls["save"] == []
     assert calls["run_rows"] == []
 
@@ -2612,8 +2962,8 @@ def test_run_dirty_pass_contract(monkeypatch: Any) -> None:
     monkeypatch.setattr(eng, "_claimed_street_groups",
                         lambda conn, pids: (set(), set()))
     monkeypatch.setattr(eng, "_claimed_family_eligibility",
-                        lambda conn, pids: {9: (True, False), 5: (True, False)})
-    monkeypatch.setattr(eng, "_claimed_geo_cells", lambda conn, pids: set())
+                        lambda conn, pids: {9: (True, False, False), 5: (True, False, False)})
+    monkeypatch.setattr(eng, "_claimed_geo_cells", lambda conn, pids, rung="geo": set())
 
     def _fake_run_engine(conn, **kw):
         calls["priority_property_order"] = kw["priority_property_order"]
@@ -2648,21 +2998,25 @@ def test_run_dirty_pass_contract(monkeypatch: Any) -> None:
     assert "run_kind" not in calls
 
 
-# --- dirty lane geo sub-pass (PR-B): both families, one queue, one brain -----
+# --- dirty lane cell sub-passes (PR-B + byt rung): all families, one queue, one brain
 
 def _dirty_pass_harness(
     monkeypatch: Any, *,
     claimed: list[int],
-    family: dict[int, tuple[bool, bool]],
+    family: dict[int, tuple[bool, bool, bool]],
     geo_cells: set[str] = frozenset(),
+    byt_geo_cells: set[str] = frozenset(),
     street_resolves: set[int] = frozenset(),
     geo_resolves: set[int] = frozenset(),
+    byt_geo_resolves: set[int] = frozenset(),
     street_stats: dict[str, Any] | None = None,
     geo_stats: dict[str, Any] | None = None,
+    byt_geo_stats: dict[str, Any] | None = None,
 ) -> tuple[Any, Any, dict[str, Any]]:
-    """Fake out run_dirty_pass's collaborators so the street/geo sub-pass orchestration
-    (deadline handoff, kwargs derivation, per-family clear, single run row) is testable
-    without a DB. `calls['engine']` records each run_engine invocation's kwargs."""
+    """Fake out run_dirty_pass's collaborators so the street/geo/byt-geo sub-pass
+    orchestration (deadline handoff, kwargs derivation, per-family clear, single run
+    row) is testable without a DB. `calls['engine']` records each run_engine
+    invocation's kwargs."""
     import scripts.dedup_engine as eng
 
     calls: dict[str, Any] = {"engine": [], "cleared": None, "rows": []}
@@ -2684,12 +3038,17 @@ def _dirty_pass_harness(
     monkeypatch.setattr(eng, "_claimed_street_groups", lambda conn, pids: (set(), set()))
     monkeypatch.setattr(eng, "_claimed_family_eligibility",
                         lambda conn, pids: dict(family))
-    monkeypatch.setattr(eng, "_claimed_geo_cells", lambda conn, pids: set(geo_cells))
+    monkeypatch.setattr(
+        eng, "_claimed_geo_cells",
+        lambda conn, pids, rung="geo": set(byt_geo_cells if rung == "byt_geo" else geo_cells))
     import toolkit.dedup_settings as ds
     monkeypatch.setattr(ds, "read_setting", lambda conn, key: 0.2)
 
     def _fake_run_engine(conn, **kw):
         calls["engine"].append(kw)
+        if kw.get("byt_geo"):
+            kw["resolved_property_ids"].update(byt_geo_resolves)
+            return dict(byt_geo_stats or {"truncated": 0, "pairs_considered": 1, "queued": 1})
         if kw.get("geo"):
             kw["resolved_property_ids"].update(geo_resolves)
             return dict(geo_stats or {"truncated": 0, "pairs_considered": 2, "queued": 1})
@@ -2712,7 +3071,7 @@ def test_run_dirty_pass_street_only_claim_skips_geo(monkeypatch: Any) -> None:
     # (a) a street-only claim never touches the geo sub-pass (no geo cells), and clears
     # on the street resolve alone.
     eng, conn, calls = _dirty_pass_harness(
-        monkeypatch, claimed=[9], family={9: (True, False)},
+        monkeypatch, claimed=[9], family={9: (True, False, False)},
         geo_cells=set(), street_resolves={9})
     stats = eng.run_dirty_pass(conn, max_dirty=10, max_pairs=100, engine_kw={})
     assert stats is not None
@@ -2727,7 +3086,7 @@ def test_run_dirty_pass_geo_only_claim_runs_geo_subpass(monkeypatch: Any) -> Non
     # (the street sub-pass resolving it vacuously is not enough: se=False short-circuits,
     # ge=True requires dirty_resolved_geo).
     eng, conn, calls = _dirty_pass_harness(
-        monkeypatch, claimed=[7], family={7: (False, True)},
+        monkeypatch, claimed=[7], family={7: (False, True, False)},
         geo_cells={"geo:5001:50.1:14.5:dum|komercni:prodej"}, geo_resolves={7})
     stats = eng.run_dirty_pass(
         conn, max_dirty=10, max_pairs=100,
@@ -2752,7 +3111,7 @@ def test_run_dirty_pass_mixed_claim_clears_per_family(monkeypatch: Any) -> None:
     # resolve while the geo-eligible pid — vacuously "resolved" by the street pass (it
     # has no street groups) — stays claimed until the GEO family resolves it.
     eng, conn, calls = _dirty_pass_harness(
-        monkeypatch, claimed=[9, 7], family={9: (True, False), 7: (False, True)},
+        monkeypatch, claimed=[9, 7], family={9: (True, False, False), 7: (False, True, False)},
         geo_cells={"cellA"}, street_resolves={9, 7}, geo_resolves=set())
     stats = eng.run_dirty_pass(conn, max_dirty=10, max_pairs=100, engine_kw={})
     assert stats is not None
@@ -2763,7 +3122,7 @@ def test_run_dirty_pass_mixed_claim_clears_per_family(monkeypatch: Any) -> None:
     # immediately (queue hygiene — the publish sweep owns its publication).
     eng, conn, calls = _dirty_pass_harness(
         monkeypatch, claimed=[9, 7, 3],
-        family={9: (True, False), 7: (False, True)},   # 3 absent = (False, False)
+        family={9: (True, False, False), 7: (False, True, False)},   # 3 absent = all-False
         geo_cells={"cellA"}, street_resolves={9, 7, 3}, geo_resolves={9, 7, 3})
     eng.run_dirty_pass(conn, max_dirty=10, max_pairs=100, engine_kw={})
     assert calls["cleared"] == [3, 7, 9]
@@ -2776,7 +3135,7 @@ def test_run_dirty_pass_deadline_skips_geo_keeps_claims(monkeypatch: Any) -> Non
     import time as _time
 
     eng, conn, calls = _dirty_pass_harness(
-        monkeypatch, claimed=[7, 9], family={7: (False, True), 9: (True, False)},
+        monkeypatch, claimed=[7, 9], family={7: (False, True, False), 9: (True, False, False)},
         geo_cells={"cellA"}, street_resolves={7, 9}, geo_resolves={7})
     stats = eng.run_dirty_pass(
         conn, max_dirty=10, max_pairs=100,
@@ -2789,13 +3148,97 @@ def test_run_dirty_pass_deadline_skips_geo_keeps_claims(monkeypatch: Any) -> Non
     assert stats["dirty_truncated"] == 1
 
 
+def test_run_dirty_pass_byt_only_claim_runs_byt_subpass(monkeypatch: Any) -> None:
+    # A byt-geo-only claim gets a THIRD run_engine(byt_geo=True) over its stored byt
+    # cells — enqueue forced ON (tier-'byt_geo' queue is the rung's surfacing
+    # mechanism), cell-scoped, same claim order — and clears on the BYT resolve (the
+    # street sub-pass resolving it vacuously is not enough).
+    cell = "geo:5001:50.1006:14.5374:byt:prodej"
+    eng, conn, calls = _dirty_pass_harness(
+        monkeypatch, claimed=[8], family={8: (False, False, True)},
+        byt_geo_cells={cell}, byt_geo_resolves={8})
+    stats = eng.run_dirty_pass(
+        conn, max_dirty=10, max_pairs=100,
+        engine_kw={"enqueue_unresolved": False, "restrict_property_ids": None})
+    assert stats is not None
+    assert len(calls["engine"]) == 2                     # street + byt (no geo cells)
+    street_kw, byt_kw = calls["engine"]
+    assert not street_kw.get("byt_geo") and not street_kw.get("geo")
+    assert byt_kw["byt_geo"] is True and not byt_kw.get("geo")
+    assert byt_kw["enqueue_unresolved"] is True
+    assert byt_kw["restrict_geo_cells"] == {cell}
+    assert byt_kw["restrict_property_ids"] is None       # cell scope, not property scope
+    assert byt_kw["only_groups_with_property_ids"] == {8}
+    assert byt_kw["priority_property_order"] == [8]
+    assert calls["cleared"] == [8]
+
+
+def test_run_dirty_pass_byt_family_gates_the_clear(monkeypatch: Any) -> None:
+    # A byt-eligible pid vacuously "resolved" by the street pass stays claimed until
+    # the BYT family resolves it — the third arm of the per-family clear.
+    eng, conn, calls = _dirty_pass_harness(
+        monkeypatch, claimed=[9, 8],
+        family={9: (True, False, False), 8: (False, False, True)},
+        byt_geo_cells={"cellB"}, street_resolves={9, 8}, byt_geo_resolves=set())
+    eng.run_dirty_pass(conn, max_dirty=10, max_pairs=100, engine_kw={})
+    assert calls["cleared"] == [9]
+
+    eng, conn, calls = _dirty_pass_harness(
+        monkeypatch, claimed=[9, 8],
+        family={9: (True, False, False), 8: (False, False, True)},
+        byt_geo_cells={"cellB"}, street_resolves={9, 8}, byt_geo_resolves={8})
+    eng.run_dirty_pass(conn, max_dirty=10, max_pairs=100, engine_kw={})
+    assert calls["cleared"] == [8, 9]
+
+
+def test_run_dirty_pass_deadline_defers_byt_subpass_keeps_claims(monkeypatch: Any) -> None:
+    # An exhausted wall-clock budget defers the byt sub-pass whole, exactly like geo:
+    # no byt run_engine call, the byt-only pid keeps its claim, run marked truncated.
+    import time as _time
+
+    eng, conn, calls = _dirty_pass_harness(
+        monkeypatch, claimed=[8, 9],
+        family={8: (False, False, True), 9: (True, False, False)},
+        byt_geo_cells={"cellB"}, street_resolves={8, 9}, byt_geo_resolves={8})
+    stats = eng.run_dirty_pass(
+        conn, max_dirty=10, max_pairs=100,
+        engine_kw={"deadline": _time.monotonic() - 1.0})
+    assert stats is not None
+    assert len(calls["engine"]) == 1                     # byt sub-pass skipped
+    assert calls["cleared"] == [9]                       # street-only pid still clears
+    assert stats["truncated"] == 1 and stats["truncated_cause"] == "deadline"
+
+
+def test_run_dirty_pass_byt_subpass_is_ungated_by_master_switch(monkeypatch: Any) -> None:
+    # Geo posture, mirrored: dedup_byt_geo_enabled gates ONLY the scheduled full rung
+    # (--byt-geo-only); the dirty sub-pass runs regardless — it never even READS the
+    # setting. This is what evaluates + publishes a new street-less byt in real time
+    # while the scheduled rung is off.
+    import toolkit.dedup_settings as ds
+
+    eng, conn, calls = _dirty_pass_harness(
+        monkeypatch, claimed=[8], family={8: (False, False, True)},
+        byt_geo_cells={"cellB"}, byt_geo_resolves={8})
+    read_keys: list[str] = []
+
+    def _recording(conn, key):
+        read_keys.append(key)
+        return 0.2  # the harness stub value (any setting the pass legitimately reads)
+    monkeypatch.setattr(ds, "read_setting", _recording)
+
+    eng.run_dirty_pass(conn, max_dirty=10, max_pairs=100, engine_kw={})
+    assert any(kw.get("byt_geo") for kw in calls["engine"])
+    assert "dedup_byt_geo_enabled" not in read_keys
+    assert calls["cleared"] == [8]
+
+
 def test_run_dirty_pass_aggregates_both_families_into_one_run_row(monkeypatch: Any) -> None:
     # (e) ONE run row per pass (run_kind='dirty'): the pair/merge/queue counters are
     # BOTH-family totals, truncated is OR'd, and the market gauges stay NULL (scoped
     # runs don't measure the market — the geo sub-pass's scoped eligible count must
     # not masquerade as one).
     eng, conn, calls = _dirty_pass_harness(
-        monkeypatch, claimed=[9, 7], family={9: (True, False), 7: (False, True)},
+        monkeypatch, claimed=[9, 7], family={9: (True, False, False), 7: (False, True, False)},
         geo_cells={"cellA"}, street_resolves={9, 7}, geo_resolves={9, 7},
         street_stats={"eligible": None, "truncated": 0, "truncated_cause": None,
                       "pairs_considered": 3, "queued": 1, "auto_phash": 1,
@@ -3069,16 +3512,27 @@ def test_claimed_geo_cells_sql_shape() -> None:
     assert "NOT (l.street IS NOT NULL" not in sql
     assert sorted(captured["params"][0]) == [101, 102]
 
+    # The byt rung swaps ONLY the eligibility predicate — same DISTINCT-cell shape.
+    captured.clear()
+    eng._claimed_geo_cells(_Conn(), {101}, rung="byt_geo")
+    byt_sql = captured["sql"]
+    assert "SELECT DISTINCT l.geo_cell_key" in byt_sql
+    assert "l.geo_cell_key IS NOT NULL" in byt_sql
+    assert "l.category_main = 'byt'" in byt_sql
+    assert "l.disposition IS NOT NULL" in byt_sql
+    assert "NOT (l.street IS NOT NULL" not in byt_sql
+
     class _NoDB:
         def cursor(self): raise AssertionError("must not query for an empty claim")
 
     assert eng._claimed_geo_cells(_NoDB(), set()) == set()
+    assert eng._claimed_geo_cells(_NoDB(), set(), rung="byt_geo") == set()
 
 
 def test_claimed_family_eligibility_sql_shape() -> None:
-    """Per-pid (street, geo) eligibility in ONE grouped query — the per-family clear's
-    key. The geo arm requires the stored cell (== 'the geo sub-pass can load it');
-    missing pids read (False, False); empty claim short-circuits."""
+    """Per-pid (street, geo, byt_geo) eligibility in ONE grouped query — the per-family
+    clear's key. Each cell arm requires the stored cell (== 'that sub-pass can load
+    it'); missing pids read all-False; empty claim short-circuits."""
     import scripts.dedup_engine as eng
 
     captured: dict[str, Any] = {}
@@ -3089,19 +3543,23 @@ def test_claimed_family_eligibility_sql_shape() -> None:
         def execute(self, sql, params=None):
             captured["sql"] = " ".join(sql.split()); captured["params"] = params
         def fetchall(self):
-            return [(9, True, False), (7, False, True), (3, None, None)]
+            return [(9, True, False, False), (7, False, True, False),
+                    (8, False, False, True), (3, None, None, None)]
 
     class _Conn:
         def cursor(self): return _C()
 
-    fam = eng._claimed_family_eligibility(_Conn(), {9, 7, 3})
-    assert fam == {9: (True, False), 7: (False, True), 3: (False, False)}
+    fam = eng._claimed_family_eligibility(_Conn(), {9, 7, 8, 3})
+    assert fam == {9: (True, False, False), 7: (False, True, False),
+                   8: (False, False, True), 3: (False, False, False)}
     sql = captured["sql"]
     assert "SELECT l.property_id" in sql and "GROUP BY 1" in sql
-    assert sql.count("bool_or(") == 2
+    assert sql.count("bool_or(") == 3
     assert "l.property_id = ANY(%s)" in sql
-    assert "l.geo_cell_key IS NOT NULL" in sql           # geo arm == loadable by the sub-pass
+    # BOTH cell arms require the stored cell (== loadable by their sub-pass).
+    assert sql.count("l.geo_cell_key IS NOT NULL") == 2
     assert "l.street IS NOT NULL AND l.street <> '' AND l.disposition IS NOT NULL" in sql
+    assert "l.category_main = 'byt'" in sql
 
     class _NoDB:
         def cursor(self): raise AssertionError("must not query for an empty claim")

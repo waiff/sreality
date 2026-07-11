@@ -1390,6 +1390,10 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
       {
         "cron": "0 3,9,15,21 * * *",
         "human": "0 3,9,15,21 * * *"
+      },
+      {
+        "cron": "0 1,7,13,19 * * *",
+        "human": "0 1,7,13,19 * * *"
       }
     ],
     "onPush": false,
@@ -1505,6 +1509,17 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
       {
         "name": "geo_only",
         "description": "GEO scan — single-dwelling (house/land/commercial) only, the geo-proximity path (pair with shadow=true for a volume preview)",
+        "required": false,
+        "type": "choice",
+        "default": "false",
+        "options": [
+          "false",
+          "true"
+        ]
+      },
+      {
+        "name": "byt_geo_only",
+        "description": "BYT-GEO scan — street-less apartments only (geo cell + disposition, candidate-generation; gated by dedup_byt_geo_enabled)",
         "required": false,
         "type": "choice",
         "default": "false",
