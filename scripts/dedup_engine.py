@@ -581,6 +581,17 @@ def _clear_dedup_dirty(conn: Any, property_ids: set[int], cutoff: Any) -> int:
         return cur.rowcount or 0
 
 
+# Embeds _ELIGIBILITY (never hand-inline it — the publication parity test pins this
+# constant so the enqueue gate / publish sweep can't drift from the engine).
+_CLAIMED_STREET_GROUPS_SQL = f"""
+    SELECT DISTINCT l.street_id, coalesce(l.obec_id, -1) AS obec,
+                    l.street_name_key
+    FROM listings l
+    WHERE l.property_id = ANY(%s)
+      AND {_ELIGIBILITY}
+"""
+
+
 def _claimed_street_groups(
     conn: Any, property_ids: set[int]
 ) -> tuple[set[int], set[tuple[int, str]]]:
@@ -601,16 +612,7 @@ def _claimed_street_groups(
     if not property_ids:
         return set(), set()
     with conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT DISTINCT l.street_id, coalesce(l.obec_id, -1) AS obec,
-                            l.street_name_key
-            FROM listings l
-            WHERE l.property_id = ANY(%s)
-              AND l.street IS NOT NULL AND l.street <> '' AND l.disposition IS NOT NULL
-            """,
-            (list(property_ids),),
-        )
+        cur.execute(_CLAIMED_STREET_GROUPS_SQL, (list(property_ids),))
         rows = cur.fetchall()
     street_ids: set[int] = set()
     name_keys: set[tuple[int, str]] = set()
@@ -626,17 +628,19 @@ def _claimed_street_groups(
 # lets the dirty geo sub-pass be a cheap SQL filter (an index seek per cell via
 # listings_geo_cell_key_idx) rather than a Python recompute over the market. The
 # eligibility mirrors _GEO_ELIGIBLE_SQL's WHERE minus the properties join (the scoped
-# load re-applies it): active single-dwelling rows with an area that are NOT
-# street-eligible (those are the street sub-pass's work). A NULL stored cell can't be
-# grouped (_load_geo_eligible skips it), so it is excluded here AND treated as
-# not-geo-eligible by _claimed_family_eligibility — the two stay coherent.
+# load re-applies it): active single-dwelling rows with an area. A street-eligible
+# geo-family row counts for BOTH families (cross-pass visibility: a street-eligible dum
+# must still meet the street-less geo rows sharing its cell); resolve_pair skips the
+# pairs where BOTH sides are street-eligible, so the street pass keeps sole ownership
+# of those. A NULL stored cell can't be grouped (_load_geo_eligible skips it), so it is
+# excluded here AND treated as not-geo-eligible by _claimed_family_eligibility — the
+# two stay coherent.
 _CLAIMED_GEO_CELLS_SQL = f"""
     SELECT DISTINCT l.geo_cell_key
     FROM listings l
     WHERE l.property_id = ANY(%s)
       AND l.geo_cell_key IS NOT NULL
       AND {GEO_ELIGIBLE_PREDICATE}
-      AND NOT ({_ELIGIBILITY})
 """
 
 
@@ -653,7 +657,8 @@ def _claimed_geo_cells(conn: Any, property_ids: set[int]) -> set[str]:
 
 
 # Per-family eligibility of each claimed property — what the dirty pass's PER-FAMILY
-# clear keys on. The geo arm mirrors _CLAIMED_GEO_CELLS_SQL (stored cell required), so
+# clear keys on. The geo arm mirrors _CLAIMED_GEO_CELLS_SQL (stored cell required, no
+# street exclusion — a street-eligible geo-family row counts for BOTH families), so
 # "geo-eligible" here == "the geo sub-pass can actually load it"; a geo-family row
 # whose cell isn't stamped yet resolves as not-geo-eligible and falls to the scheduled
 # geo scan instead of pinning its queue row forever.
@@ -661,7 +666,6 @@ _CLAIMED_FAMILY_ELIGIBILITY_SQL = f"""
     SELECT l.property_id,
            bool_or({_ELIGIBILITY}) AS street_eligible,
            bool_or({GEO_ELIGIBLE_PREDICATE}
-                   AND NOT ({_ELIGIBILITY})
                    AND l.geo_cell_key IS NOT NULL) AS geo_eligible
     FROM listings l
     WHERE l.property_id = ANY(%s)
@@ -800,22 +804,25 @@ def _enqueue_candidate(
 
 
 # --- geo path (single-dwelling families) ------------------------------------
-# Disposition-less houses/land/commercial that the street pass can't reach. Blocked
-# by geo cell (one obec + a rounded coordinate). ACTIVE only for P1 (the operator's
-# pain is active duplicate cards); inactive-for-history is a later concern. The
-# NOT(street AND disposition) clause hands the rare disposition-bearing non-apartment
-# to the street pass instead, so the two passes never double-handle a pair.
+# Houses/land/commercial blocked by geo cell (one obec + a rounded coordinate). ACTIVE
+# only for P1 (the operator's pain is active duplicate cards); inactive-for-history is
+# a later concern. Street-eligible geo-family rows are INCLUDED (they used to be
+# excluded, which made a street-eligible dum and a street-less dum of the same house
+# mutually invisible — real missed pairs); the per-row street_eligible flag lets
+# resolve_pair skip the pairs where BOTH sides are street-eligible, so the street pass
+# (different classifier rules) keeps sole ownership of those and candidates never
+# flip-flop between passes.
 _GEO_ELIGIBLE_SQL = f"""
     SELECT l.sreality_id, l.property_id, l.source, l.house_number,
            coalesce(l.area_m2, l.estate_area, l.usable_area) AS area,
            left(l.description, 600) AS description,
            l.category_type, l.category_main, l.price_czk,
            ST_Y(l.geom::geometry) AS lat, ST_X(l.geom::geometry) AS lng,
-           l.geo_cell_key
+           l.geo_cell_key,
+           ({_ELIGIBILITY}) AS street_eligible
     FROM listings l
     JOIN properties p ON p.id = l.property_id AND p.status = 'active'
     WHERE {GEO_ELIGIBLE_PREDICATE}
-      AND NOT ({_ELIGIBILITY})
       {{filter}}
     ORDER BY l.obec_id, l.category_main, l.category_type
 """
@@ -867,6 +874,7 @@ def _load_geo_eligible(conn: Any,
             lat=float(r[9]) if r[9] is not None else None,
             lng=float(r[10]) if r[10] is not None else None,
             price_czk=int(r[8]) if r[8] is not None else None,
+            street_eligible=bool(r[12]),
         ))
     return keys
 
@@ -1768,6 +1776,14 @@ def resolve_pair(conn: Any, a: ListingKey, b: ListingKey, *, street_key: str,
     street group's listing ids, passed by run_engine's loop) lets the pHash probes batch
     per GROUP instead of per pair; absent -> per-pair queries, identical results."""
     stats = ctx.stats
+    # Cross-pass ownership (geo path only): the geo load includes street-eligible
+    # geo-family rows so they can meet their street-less cell peers, but a pair with
+    # BOTH sides street-eligible belongs to the street pass — its classifier rules
+    # differ, and deciding the pair on both passes would flip-flop candidates (the
+    # dismissal-treadmill failure class). Skip BEFORE any probe/budget spend and
+    # record NOTHING (not a dismissal — the street pass owns the pair).
+    if ctx.tier == "geo" and a.street_eligible and b.street_eligible:
+        return
     # Dual-keyed listings appear in their 'id:' AND 'name:' groups; classify each
     # listing pair once (first group wins).
     lpair = (min(a.sreality_id, b.sreality_id), max(a.sreality_id, b.sreality_id))

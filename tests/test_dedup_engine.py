@@ -445,15 +445,24 @@ def test_single_dwelling_profiles_drop_disposition_and_geo_block() -> None:
         assert p.geo_blocked is True, fam
 
 
-def test_only_houses_geo_auto_merge_and_always_behind_dev_guard() -> None:
-    # Operator policy: houses may auto-merge (coord+area+price, validated 83.5%
-    # same-price) but ONLY with the same-development guard; land/commercial/other
-    # are queue-only (weaker signal) until a human confirms.
-    dum = profile_for("dum")
-    assert dum.geo_auto_merge_allowed is True
-    assert dum.requires_development_guard is True
+def test_only_houses_geo_auto_merge() -> None:
+    # Operator policy: only dum carries the geo-auto-merge flag (coord+area+price,
+    # validated 83.5% same-price); land/commercial/other are queue-only (weaker
+    # signal). NOTE the orchestrator maps the geo auto_merge → candidate, so today
+    # the flag only differentiates the queued reason tag (see MatchProfile docstring).
+    assert profile_for("dum").geo_auto_merge_allowed is True
     for fam in ("pozemek", "komercni", "ostatni"):
         assert profile_for(fam).geo_auto_merge_allowed is False, fam
+
+
+def test_geo_blocked_is_derived_from_publication_geo_families() -> None:
+    # Single-sourcing: the qualification layer's category list (publication.GEO_FAMILIES)
+    # IS what makes a profile geo-blocked — no hand-kept boolean to drift.
+    from toolkit.publication import GEO_FAMILIES
+
+    assert GEO_FAMILIES == ("dum", "pozemek", "komercni", "ostatni")
+    for fam in ("byt", *GEO_FAMILIES):
+        assert profile_for(fam).geo_blocked is (fam in GEO_FAMILIES), fam
 
 
 def test_match_profile_is_frozen() -> None:
@@ -549,13 +558,13 @@ def _gk(
     sid: int, pid: int, *, source: str = "sreality", cat: str = "dum",
     ct: str = "prodej", area: float | None = 120.0, price: int | None = 5_950_000,
     hn: str | None = None, lat: float = 50.10064, lng: float = 14.53742,
-    desc: str | None = None,
+    desc: str | None = None, street_eligible: bool = False,
 ) -> ListingKey:
     return ListingKey(
         sreality_id=sid, property_id=pid, source=source, street_key="geo:cell",
         disposition="", house_number=hn, floor=None, area_m2=area, description=desc,
         category_type=ct, category_main=cat, street_id=None, lat=lat, lng=lng,
-        price_czk=price,
+        price_czk=price, street_eligible=street_eligible,
     )
 
 
@@ -721,6 +730,45 @@ def test_run_engine_geo_routes_through_resolve_pair_with_geo_tier(monkeypatch: A
     assert stats["pairs_considered"] == 1      # reached the visual stage
     assert stats["queued"] == 1
     assert enq and enq[0]["tier"] == "geo"     # queued under the geo tier, not street
+
+
+def test_run_engine_geo_skips_pair_when_both_sides_street_eligible(monkeypatch: Any) -> None:
+    # Cross-pass ownership: a geo pair whose BOTH sides are street-eligible belongs to
+    # the street pass — the geo pass skips it BEFORE any probe/budget spend and records
+    # NOTHING (no reject, no dismissal, no queue row).
+    import scripts.dedup_engine as eng
+    monkeypatch.setattr(eng, "_load_geo_eligible", lambda conn, **k: [
+        _gk(1, 101, source="sreality", street_eligible=True),
+        _gk(2, 102, source="idnes", street_eligible=True),
+    ])
+    enq: list[dict[str, Any]] = []
+    monkeypatch.setattr(eng, "_enqueue_candidate",
+                        lambda conn, x, y, markers, **kw: enq.append(markers))
+    conn = _FakeConn([])
+    stats = eng.run_engine(conn, classify_fn=None, compare_fn=None,
+                           max_vision_calls=10, geo=True, geo_area_max_pct=0.20)
+    assert stats["pairs_considered"] == 0
+    assert stats["rejected"] == 0 and stats["queued"] == 0
+    assert not enq
+    assert _dismissed_pairs(conn) == set()
+
+
+def test_run_engine_geo_classifies_mixed_street_eligibility_pair(monkeypatch: Any) -> None:
+    # The point of the relaxed geo load: a street-eligible dum row and a street-less dum
+    # row of the same house CAN now pair — only the both-eligible case is skipped.
+    import scripts.dedup_engine as eng
+    monkeypatch.setattr(eng, "_load_geo_eligible", lambda conn, **k: [
+        _gk(1, 101, source="sreality", street_eligible=True),
+        _gk(2, 102, source="idnes", street_eligible=False),
+    ])
+    enq: list[dict[str, Any]] = []
+    monkeypatch.setattr(eng, "_enqueue_candidate",
+                        lambda conn, x, y, markers, **kw: enq.append(markers))
+    stats = eng.run_engine(_FakeConn([]), classify_fn=None, compare_fn=None,
+                           max_vision_calls=10, geo=True, geo_area_max_pct=0.20)
+    assert stats["pairs_considered"] == 1
+    assert stats["queued"] == 1
+    assert enq and enq[0]["tier"] == "geo"
 
 
 def test_run_engine_geo_does_not_skip_same_source(monkeypatch: Any) -> None:
@@ -1057,11 +1105,13 @@ def _geo_row(sid: int, pid: int, *, source: str = "sreality",
              cat: str | None = "dum", price: int | None = 5_950_000,
              lat: float | None = 50.10064, lng: float | None = 14.53742,
              cell: str | None = "geo:5001:50.1006:14.5374:dum|komercni:prodej",
+             street_eligible: bool = False,
              ) -> tuple[Any, ...]:
     # matches _GEO_ELIGIBLE_SQL column order:
     # sreality_id, property_id, source, house_number, area, description,
-    # category_type, category_main, price_czk, lat, lng, geo_cell_key
-    return (sid, pid, source, hn, area, description, ct, cat, price, lat, lng, cell)
+    # category_type, category_main, price_czk, lat, lng, geo_cell_key, street_eligible
+    return (sid, pid, source, hn, area, description, ct, cat, price, lat, lng, cell,
+            street_eligible)
 
 
 def test_load_geo_eligible_uses_stored_cell_key_verbatim() -> None:
@@ -1082,6 +1132,22 @@ def test_load_geo_eligible_uses_stored_cell_key_verbatim() -> None:
     assert keys[0].lat == pytest.approx(50.10064)
     assert keys[0].lng == pytest.approx(14.53742)
     assert keys[0].price_czk == 5_950_000 and keys[0].area_m2 == 120.0
+
+
+def test_load_geo_eligible_carries_street_eligibility_and_drops_the_not_clause() -> None:
+    # Cross-pass visibility: the geo load no longer excludes street-eligible rows —
+    # it SELECTs the street predicate per row instead, and the loader stamps it on
+    # ListingKey.street_eligible for resolve_pair's both-eligible skip.
+    import scripts.dedup_engine as eng
+
+    assert f"NOT ({eng._ELIGIBILITY})" not in eng._GEO_ELIGIBLE_SQL
+    assert f"({eng._ELIGIBILITY}) AS street_eligible" in eng._GEO_ELIGIBLE_SQL
+    conn = _FakeConn([], geo_rows=[
+        _geo_row(1, 101, street_eligible=True),
+        _geo_row(2, 102),
+    ])
+    keys = eng._load_geo_eligible(conn)
+    assert [k.street_eligible for k in keys] == [True, False]
 
 
 def test_load_geo_eligible_skips_null_stored_key() -> None:
@@ -2970,8 +3036,9 @@ def test_claimed_street_groups() -> None:
 def test_claimed_geo_cells_sql_shape() -> None:
     """The geo work-list: DISTINCT stored geo_cell_key of the claimed properties'
     geo-ELIGIBLE listings — mirrors _GEO_ELIGIBLE_SQL's WHERE (active single-dwelling
-    with an area, NOT street-eligible) minus the properties join, cell required. Empty
-    claim short-circuits without touching the DB."""
+    with an area; street-eligible rows INCLUDED for cross-pass visibility) minus the
+    properties join, cell required. Empty claim short-circuits without touching the
+    DB."""
     import scripts.dedup_engine as eng
 
     captured: dict[str, Any] = {}
@@ -2997,8 +3064,9 @@ def test_claimed_geo_cells_sql_shape() -> None:
     assert "l.is_active = true" in sql
     assert "l.category_main IN ('dum', 'pozemek', 'komercni', 'ostatni')" in sql
     assert "coalesce(l.area_m2, l.estate_area, l.usable_area) IS NOT NULL" in sql
-    # ...and NOT street-eligible (those rows are the street sub-pass's work).
-    assert "NOT (l.street IS NOT NULL AND l.street <> '' AND l.disposition IS NOT NULL)" in sql
+    # Street-eligible geo-family rows count for BOTH families now — the AND-NOT-street
+    # exclusion must not re-grow here (resolve_pair skips both-eligible PAIRS instead).
+    assert "NOT (l.street IS NOT NULL" not in sql
     assert sorted(captured["params"][0]) == [101, 102]
 
     class _NoDB:

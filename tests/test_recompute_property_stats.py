@@ -301,14 +301,49 @@ def test_full_mode_skips_publish_and_imageless_sweeps(monkeypatch: Any) -> None:
 def test_publication_predicates_parity_with_engine():
     """toolkit.publication mirrors the engine's eligibility VERBATIM (single source), so
     the ineligible sweep can never publish a property the engine WOULD dedup-check. A
-    drift in either predicate fails here."""
+    drift in either predicate fails here. Covers EVERY engine SQL constant that embeds
+    an eligibility predicate — including the dirty-drain claim scopers, which once
+    hand-inlined the street predicate (an untested drift risk)."""
     import scripts.dedup_engine as eng
 
     from toolkit.publication import GEO_ELIGIBLE_PREDICATE, STREET_ELIGIBLE_PREDICATE
 
     assert STREET_ELIGIBLE_PREDICATE == eng._ELIGIBILITY
     assert STREET_ELIGIBLE_PREDICATE in eng._ELIGIBLE_SQL
+    assert STREET_ELIGIBLE_PREDICATE in eng._CLAIMED_STREET_GROUPS_SQL
+    assert STREET_ELIGIBLE_PREDICATE in eng._CLAIMED_FAMILY_ELIGIBILITY_SQL
     assert GEO_ELIGIBLE_PREDICATE in eng._GEO_ELIGIBLE_SQL
+    assert GEO_ELIGIBLE_PREDICATE in eng._CLAIMED_GEO_CELLS_SQL
+    assert GEO_ELIGIBLE_PREDICATE in eng._CLAIMED_FAMILY_ELIGIBILITY_SQL
+    # Cross-pass visibility: the geo surfaces must NOT re-grow the AND-NOT-street
+    # exclusion (street-eligible geo-family rows participate in the geo pass; only the
+    # both-street-eligible PAIR is skipped, in resolve_pair).
+    for sql in (eng._GEO_ELIGIBLE_SQL, eng._CLAIMED_GEO_CELLS_SQL,
+                eng._CLAIMED_FAMILY_ELIGIBILITY_SQL):
+        assert f"NOT ({eng._ELIGIBILITY})" not in sql
+
+
+def test_geo_families_pin_migration_276_sql_twin():
+    """publication.GEO_FAMILIES is the single PYTHON source of the geo category list;
+    migration 276's listing_geo_cell_key() carries the SQL twin (SQL can't import
+    Python). This pins the two: the function body's category list must be EXACTLY
+    GEO_FAMILIES, and the rendered predicate IN-list must be built from it."""
+    import re
+    from pathlib import Path
+
+    from toolkit.publication import GEO_ELIGIBLE_PREDICATE, GEO_FAMILIES
+
+    rendered = "(" + ", ".join(f"'{f}'" for f in GEO_FAMILIES) + ")"
+    assert f"category_main IN {rendered}" in GEO_ELIGIBLE_PREDICATE
+
+    text = (Path(__file__).resolve().parents[1]
+            / "migrations" / "276_listings_geo_cell_key.sql").read_text()
+    start = text.index("CREATE OR REPLACE FUNCTION public.listing_geo_cell_key")
+    body = text[start:text.index("$$;", start)]
+    lists = re.findall(r"NOT IN \(([^)]*)\)", body)
+    assert lists, "migration 276 function body lost its category list"
+    for found in lists:
+        assert tuple(re.findall(r"'([^']*)'", found)) == GEO_FAMILIES
 
 
 def test_every_resolved_sql_constant_has_valid_placeholders():

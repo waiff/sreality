@@ -345,6 +345,8 @@ def collect(
                 if (a.street_key or "").startswith("geo:"):
                     if geo_classify is None:
                         continue  # geo pair in a street-only run: out of scope
+                    if a.street_eligible and b.street_eligible:
+                        continue  # street pass owns the pair; the engine skips it too
                     decision = geo_classify(a, b)
                 else:
                     decision = classify_pair(a, b)

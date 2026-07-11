@@ -35,6 +35,8 @@ from typing import Any
 
 from scraper.street import street_name_key as _street_name_key
 from toolkit.comparables import _DISPOSITION_LOOSE
+# Dependency-free module — the single Python source of the geo-pass category list.
+from toolkit.publication import GEO_FAMILIES
 # Single-source image-tag taxonomy + family grouping (interior / exterior / plan) and the
 # comparison priority orders. See toolkit/room_taxonomy.py — one place defines which tag
 # is interior vs exterior and in what order rooms are compared.
@@ -79,17 +81,27 @@ class MatchProfile:
     family, so a category's policy is a profile row, never an `if category ==` branch.
 
     `classify_pair` (pure, street-path) consumes `disposition_required` + the two area
-    guards. The orchestrator (P1) consumes `geo_blocked` (block by geo cell vs street),
-    `geo_auto_merge_allowed` (may a coord+area(+price) match auto-merge this family), and
-    `requires_development_guard` (such an auto-merge needs the same-development guard).
+    guards. `geo_blocked` (does the geo pass cover this family) is DERIVED from
+    publication.GEO_FAMILIES — the single Python source of the geo category list, whose
+    SQL twin is migration 276's listing_geo_cell_key() (pinned by test). Reality check on
+    `geo_auto_merge_allowed`: classify_geo_pair consumes it to pick auto_merge over
+    candidate, but the orchestrator maps that auto_merge → candidate at its seam
+    (scripts._make_geo_classify), so TODAY the flag only differentiates the queued
+    candidate's reason tag (geo_exact vs geo_strong/geo_weak) — the auto-merge action is
+    deliberately disabled; the free-first visual flow is the sole merge gate. The
+    same-development (site-plan) guard is NOT profile-gated — resolve_pair runs it
+    unconditionally.
     """
     family: str
     disposition_required: bool
     address_area_guard_pct: float
     candidate_area_max_pct: float
-    geo_blocked: bool
     geo_auto_merge_allowed: bool
-    requires_development_guard: bool
+
+    @property
+    def geo_blocked(self) -> bool:
+        """True iff the geo pass covers this family (blocked by geo cell, not street)."""
+        return self.family in GEO_FAMILIES
 
 
 # Apartments: disposition is the mandatory disambiguator (one building stacks many
@@ -99,16 +111,16 @@ _BYT_PROFILE = MatchProfile(
     family="byt", disposition_required=True,
     address_area_guard_pct=ADDRESS_AREA_GUARD_PCT,
     candidate_area_max_pct=CANDIDATE_AREA_MAX_PCT,
-    geo_blocked=False, geo_auto_merge_allowed=False, requires_development_guard=False,
+    geo_auto_merge_allowed=False,
 )
 # Houses: one dwelling per address, so coord + area (+ house number / price) identifies
-# the property; disposition is dropped. May geo-auto-merge — but only behind the
-# same-development guard (a new estate of near-identical houses must not collapse).
+# the property; disposition is dropped. The flag would let a strong geo signal
+# auto-merge, but the orchestrator neutralizes it (see the class docstring).
 _DUM_PROFILE = MatchProfile(
     family="dum", disposition_required=False,
     address_area_guard_pct=ADDRESS_AREA_GUARD_PCT,
     candidate_area_max_pct=CANDIDATE_AREA_MAX_PCT,
-    geo_blocked=True, geo_auto_merge_allowed=True, requires_development_guard=True,
+    geo_auto_merge_allowed=True,
 )
 # Land / commercial / other: coord+area is a weaker same-property signal (land shares
 # an exact price only ~58% of the time), so these are QUEUE-ONLY — geo blocking finds
@@ -117,19 +129,19 @@ _POZEMEK_PROFILE = MatchProfile(
     family="pozemek", disposition_required=False,
     address_area_guard_pct=ADDRESS_AREA_GUARD_PCT,
     candidate_area_max_pct=CANDIDATE_AREA_MAX_PCT,
-    geo_blocked=True, geo_auto_merge_allowed=False, requires_development_guard=True,
+    geo_auto_merge_allowed=False,
 )
 _KOMERCNI_PROFILE = MatchProfile(
     family="komercni", disposition_required=False,
     address_area_guard_pct=ADDRESS_AREA_GUARD_PCT,
     candidate_area_max_pct=CANDIDATE_AREA_MAX_PCT,
-    geo_blocked=True, geo_auto_merge_allowed=False, requires_development_guard=True,
+    geo_auto_merge_allowed=False,
 )
 _OSTATNI_PROFILE = MatchProfile(
     family="ostatni", disposition_required=False,
     address_area_guard_pct=ADDRESS_AREA_GUARD_PCT,
     candidate_area_max_pct=CANDIDATE_AREA_MAX_PCT,
-    geo_blocked=True, geo_auto_merge_allowed=False, requires_development_guard=True,
+    geo_auto_merge_allowed=False,
 )
 
 _PROFILES: dict[str, MatchProfile] = {
@@ -275,6 +287,12 @@ class ListingKey:
     lat: float | None = None
     lng: float | None = None
     price_czk: int | None = None
+    # Geo-pass loads stamp whether the row ALSO qualifies for the street pass. A geo
+    # pair with BOTH sides street-eligible is the street pass's work and is skipped
+    # there (different classifier rules would flip-flop candidates — the dismissal
+    # treadmill); a mixed pair is exactly the cross-pass blindness the geo pass now
+    # covers. Street-pass loads leave the default (they never read it).
+    street_eligible: bool = False
 
 
 # Unit markers in the description that identify a SPECIFIC unit within one
