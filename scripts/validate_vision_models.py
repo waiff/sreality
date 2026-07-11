@@ -47,8 +47,18 @@ def _is_infra_error(exc: Exception) -> bool:
         k in s for k in (
             "credit balance", "quota", "rate_limit", "rate limit", "429",
             "overloaded", "529", "authentication", "x-api-key", "permission",
+            # Gemini-side account/infra signatures (google-genai surfaces these
+            # inside ProviderError text): quota/billing/auth/unavailable.
+            "resource_exhausted", "unauthenticated", "billing", "api key",
+            "unavailable", "503",
         )
     )
+
+
+def _provider_for(model: str) -> str:
+    """Provider name for a candidate model id — the harness is provider-agnostic;
+    LLMClient routes by this name (both providers are registered in main)."""
+    return "gemini" if model.startswith("gemini") else "anthropic"
 
 
 class _InfraAbort(RuntimeError):
@@ -156,6 +166,7 @@ def run_compare_ab(
                 system=llm.resolve_system_prompt(vm._PROMPT_KEY),
                 tools=[vm.RECORD_VISUAL_MATCH_TOOL],
                 model=candidate_model,
+                provider=_provider_for(candidate_model),
             )
             verdict, _ = vm._extract(resp.tool_calls)
         except Exception as exc:  # noqa: BLE001
@@ -207,6 +218,7 @@ def run_classify_ab(
                 system=llm.resolve_system_prompt(ic._PROMPT_KEY),
                 tools=[ic.RECORD_ROOM_TYPES_TOOL],
                 model=candidate_model,
+                provider=_provider_for(candidate_model),
             )
             rooms = ic._extract_rooms(resp.tool_calls)
         except Exception as exc:  # noqa: BLE001
@@ -243,6 +255,7 @@ def main() -> int:
     # scripts.backfill_condition_scores so the harness runs under the minimal scoring deps.
     from api.llm_client import LLMClient
     from api.providers.anthropic import AnthropicProvider
+    from api.providers.gemini import GeminiProvider
 
     if not image_storage.is_configured():
         LOG.error("R2 is not configured; cannot fetch image bytes. Aborting.")
@@ -251,7 +264,10 @@ def main() -> int:
     conn = db.connect()
     try:
         r2 = image_storage.R2Client.from_env()
-        llm = LLMClient(conn, providers={"anthropic": AnthropicProvider()})
+        llm = LLMClient(conn, providers={
+            "anthropic": AnthropicProvider(),
+            "gemini": GeminiProvider(),
+        })
         prod_compare_model = llm.resolve_model(vm._MODEL_KEY)
         prod_classify_model = llm.resolve_model(ic._MODEL_KEY)
 
