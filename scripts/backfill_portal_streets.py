@@ -81,7 +81,7 @@ _SELECT_SQL = """
     WHERE l.source = %(source)s AND (l.is_active OR %(include_inactive)s)
       AND l.raw_json->>'portal_street_backfill' IS NULL
       AND ({predicate})
-      AND l.sreality_id > %(cursor)s
+      AND l.sreality_id > %(cursor)s AND l.sreality_id <= %(cursor_hi)s
     ORDER BY l.sreality_id
     LIMIT %(chunk)s
 """
@@ -91,6 +91,18 @@ _SELECT_SQL = """
 # table (sreality has ~140k large-jsonb rows). No COUNT — the loop runs until a
 # chunk comes back empty.
 _CURSOR_MIN = -(10 ** 18)
+
+# Each chunk query is additionally bounded to a fixed ID WINDOW, so its scan cost
+# is capped by the street-NULL rows inside the window — NOT by how many stamped
+# rows it must skip to fill the LIMIT. Without the bound, an --include-inactive
+# run wading through the dense stamped regions of the historical active passes
+# blew the transaction-pooler's 2-minute statement timeout on a single chunk
+# (run 29154800991). Empty windows cost one cheap index range probe (mig 184).
+_SCAN_SPAN = 1_000_000
+
+_ID_RANGE_SQL = """
+    SELECT min(sreality_id), max(sreality_id) FROM listings WHERE source = %(source)s
+"""
 
 # COALESCE(new, existing): a derived value overrides only when present, so a
 # town-only row (street -> NULL) keeps NULL and a re-clean never nulls out a
@@ -171,20 +183,30 @@ _COLS = ("sreality_id", "property_id", "locality", "district", "street",
 def process_source(conn: Any, source: str, limit: int, deadline: float | None,
                    include_inactive: bool = False) -> dict[str, int]:
     sql = _SELECT_SQL.format(predicate=_INPUT_PREDICATE[source])
-    cursor = _CURSOR_MIN
+    with conn.cursor() as cur:
+        cur.execute(_ID_RANGE_SQL, {"source": source})
+        id_lo, id_hi = cur.fetchone() or (None, None)
+    if id_lo is None:
+        LOG.info("BACKFILL source=%s done (no rows)", source)
+        return {"updated": 0, "skipped": 0, "processed": 0}
+    cursor = id_lo - 1
     updated = skipped = processed = 0
-    while processed < limit:
+    while processed < limit and cursor < id_hi:
         if deadline is not None and time.monotonic() > deadline:
             LOG.info("BACKFILL source=%s stopping: --max-seconds reached", source)
             break
         chunk_size = min(_CHUNK, limit - processed)
+        cursor_hi = min(cursor + _SCAN_SPAN, id_hi)
         with conn.cursor() as cur:
-            cur.execute(sql, {"source": source, "cursor": cursor, "chunk": chunk_size,
-                              "include_inactive": include_inactive})
+            cur.execute(sql, {"source": source, "cursor": cursor, "cursor_hi": cursor_hi,
+                              "chunk": chunk_size, "include_inactive": include_inactive})
             rows = [dict(zip(_COLS, r)) for r in cur.fetchall()]
         if not rows:
-            break
-        cursor = rows[-1]["sreality_id"]
+            cursor = cursor_hi          # empty window -> hop to the next one
+            continue
+        # A full chunk may have stopped mid-window (LIMIT hit): resume INSIDE the
+        # window from the last row; a short chunk exhausted the window.
+        cursor = rows[-1]["sreality_id"] if len(rows) == chunk_size else cursor_hi
         ids: list[int] = []
         streets: list[str | None] = []
         name_keys: list[str | None] = []
@@ -256,7 +278,8 @@ def main() -> int:
             for source in sources:
                 with conn.cursor() as cur:
                     cur.execute(_SELECT_SQL.format(predicate=_INPUT_PREDICATE[source]),
-                                {"source": source, "cursor": _CURSOR_MIN, "chunk": 1,
+                                {"source": source, "cursor": _CURSOR_MIN,
+                                 "cursor_hi": 10 ** 18, "chunk": 1,
                                  "include_inactive": args.include_inactive})
                     has = cur.fetchone() is not None
                 LOG.info("BACKFILL source=%s pending=%s", source, "yes" if has else "none")
