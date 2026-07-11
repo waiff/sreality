@@ -61,9 +61,12 @@ declare
   seq text;
 begin
   foreach t in array array['estimation_runs','building_runs'] loop
-    seq := pg_get_serial_sequence(t, 'id');
-    if seq is not null then
-      execute format('grant usage on sequence %s to authenticated', seq);
+    if exists (select 1 from information_schema.columns
+               where table_schema = 'public' and table_name = t and column_name = 'id') then
+      seq := pg_get_serial_sequence(t, 'id');
+      if seq is not null then
+        execute format('grant usage on sequence %s to authenticated', seq);
+      end if;
     end if;
   end loop;
 end $$;
