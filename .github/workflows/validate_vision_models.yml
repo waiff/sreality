@@ -61,6 +61,9 @@ jobs:
     env:
       SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      # Non-Anthropic candidates: a model id starting "gemini" routes through
+      # api/providers/gemini.py (same neutral blocks; 2.5 Pro needs the paid tier).
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
       R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
       R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
       R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
