@@ -2,14 +2,23 @@
 
 Phase 0 = the bookmark surface: a property is "bookmarked / interested" iff it
 has a property_pipeline row, which starts at the entry stage. Stage moves (the
-kanban) come in a later phase. Single-valued (one row per property); writes go
-through the bearer-gated API, reads (membership) via property_pipeline_public.
+kanban) come in a later phase. Single-valued (one row per property per account);
+writes go through the bearer-gated API, reads (membership) via
+property_pipeline_public.
+
+Account scoping (Phase 1, migrations 294/295): every public function takes the
+caller's account_id and predicates with `account_id IS NOT DISTINCT FROM %s` —
+explicit even under RLS, because the legacy service-role branch bypasses RLS;
+NULL-safe because pre-backfill legacy rows carry account_id NULL. The card
+INSERT's ON CONFLICT stays bare (no inference target) so it works against both
+the (property_id) PK and the (account_id, property_id) PK migration 295 swaps in.
 """
 
 from __future__ import annotations
 
 import re
 import unicodedata
+import uuid
 from datetime import datetime
 from typing import Any
 
@@ -19,38 +28,48 @@ from fastapi import HTTPException
 from api import schemas as s
 
 
-def list_stages(conn: "psycopg.Connection") -> dict[str, Any]:
+def list_stages(
+    conn: "psycopg.Connection", *, account_id: uuid.UUID | None,
+) -> dict[str, Any]:
     sql = (
         "SELECT id, key, label, position, color, is_terminal, is_entry "
-        "FROM pipeline_stages WHERE archived_at IS NULL ORDER BY position"
+        "FROM pipeline_stages WHERE archived_at IS NULL "
+        "AND account_id IS NOT DISTINCT FROM %s ORDER BY position"
     )
     with conn.cursor() as cur:
-        cur.execute(sql)
+        cur.execute(sql, (account_id,))
         rows = cur.fetchall()
     return {"data": [_to_stage(r) for r in rows]}
 
 
 def create_stage(
-    conn: "psycopg.Connection", body: s.CreateStageIn,
+    conn: "psycopg.Connection", body: s.CreateStageIn, *,
+    account_id: uuid.UUID | None,
 ) -> dict[str, Any]:
     """Append a new column to the right. New stages are never the entry stage."""
     _validate_color(body.color)
     with conn.transaction(), conn.cursor() as cur:
-        key = _unique_key(cur, body.label)
-        cur.execute("SELECT coalesce(max(position), 0) + 1 FROM pipeline_stages")
+        key = _unique_key(cur, body.label, account_id)
+        cur.execute(
+            "SELECT coalesce(max(position), 0) + 1 FROM pipeline_stages "
+            "WHERE account_id IS NOT DISTINCT FROM %s",
+            (account_id,),
+        )
         position = int(cur.fetchone()[0])
         cur.execute(
-            "INSERT INTO pipeline_stages (key, label, position, color, is_terminal) "
-            "VALUES (%s, %s, %s, %s, %s) "
+            "INSERT INTO pipeline_stages "
+            "  (key, label, position, color, is_terminal, account_id) "
+            "VALUES (%s, %s, %s, %s, %s, %s) "
             "RETURNING id, key, label, position, color, is_terminal, is_entry",
-            (key, body.label, position, body.color, body.is_terminal),
+            (key, body.label, position, body.color, body.is_terminal, account_id),
         )
         row = cur.fetchone()
     return _to_stage(row)
 
 
 def update_stage(
-    conn: "psycopg.Connection", stage_id: int, body: s.UpdateStageIn,
+    conn: "psycopg.Connection", stage_id: int, body: s.UpdateStageIn, *,
+    account_id: uuid.UUID | None,
 ) -> dict[str, Any]:
     """Rename / recolor / retag a stage, or move the entry crown onto it."""
     _validate_color(body.color)
@@ -76,10 +95,13 @@ def update_stage(
             raise HTTPException(422, "the entry stage cannot also be terminal")
 
         if body.is_entry:  # move the single-entry crown onto this stage
+            # account-scoped: a legacy service-role call must never un-crown
+            # another tenant's entry stage (RLS doesn't apply on that branch).
             cur.execute(
                 "UPDATE pipeline_stages SET is_entry = false, updated_at = now() "
-                "WHERE is_entry AND id <> %s",
-                (stage_id,),
+                "WHERE is_entry AND id <> %s "
+                "AND account_id IS NOT DISTINCT FROM %s",
+                (stage_id, account_id),
             )
 
         sets: list[str] = []
@@ -116,12 +138,15 @@ def update_stage(
 
 
 def reorder_stages(
-    conn: "psycopg.Connection", body: s.ReorderStagesIn,
+    conn: "psycopg.Connection", body: s.ReorderStagesIn, *,
+    account_id: uuid.UUID | None,
 ) -> dict[str, Any]:
     """Rewrite left-to-right order. `ordered_ids` must be exactly the live set."""
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(
-            "SELECT id FROM pipeline_stages WHERE archived_at IS NULL",
+            "SELECT id FROM pipeline_stages WHERE archived_at IS NULL "
+            "AND account_id IS NOT DISTINCT FROM %s",
+            (account_id,),
         )
         live = {int(r[0]) for r in cur.fetchall()}
         if set(body.ordered_ids) != live or len(body.ordered_ids) != len(live):
@@ -134,11 +159,12 @@ def reorder_stages(
                 "WHERE id = %s",
                 (pos, sid),
             )
-    return list_stages(conn)
+    return list_stages(conn, account_id=account_id)
 
 
 def archive_stage(
-    conn: "psycopg.Connection", stage_id: int,
+    conn: "psycopg.Connection", stage_id: int, *,
+    account_id: uuid.UUID | None,
 ) -> dict[str, Any]:
     """Soft-retire a stage. Refused if it is the entry stage or still holds cards."""
     with conn.transaction(), conn.cursor() as cur:
@@ -167,13 +193,16 @@ def archive_stage(
 
 
 def add_card(
-    conn: "psycopg.Connection", body: s.AddPipelineCardIn,
+    conn: "psycopg.Connection", body: s.AddPipelineCardIn, *,
+    account_id: uuid.UUID | None,
 ) -> dict[str, Any]:
     """Bookmark a property: insert a card at the entry stage. Idempotent."""
     try:
         with conn.transaction(), conn.cursor() as cur:
             cur.execute(
-                "SELECT id FROM pipeline_stages WHERE is_entry LIMIT 1",
+                "SELECT id FROM pipeline_stages "
+                "WHERE is_entry AND account_id IS NOT DISTINCT FROM %s LIMIT 1",
+                (account_id,),
             )
             row = cur.fetchone()
             if row is None:
@@ -186,52 +215,60 @@ def add_card(
             )
             next_pos = cur.fetchone()[0]
             cur.execute(
-                "INSERT INTO property_pipeline (property_id, stage_id, board_position) "
-                "VALUES (%s, %s, %s) ON CONFLICT (property_id) DO NOTHING "
+                "INSERT INTO property_pipeline "
+                "  (property_id, stage_id, board_position, account_id) "
+                "VALUES (%s, %s, %s, %s) ON CONFLICT DO NOTHING "
                 "RETURNING property_id",
-                (body.property_id, entry_stage_id, next_pos),
+                (body.property_id, entry_stage_id, next_pos, account_id),
             )
             added = cur.fetchone() is not None
             if added:
                 cur.execute(
                     "INSERT INTO property_pipeline_events "
-                    "  (property_id, to_stage_id, reason) VALUES (%s, %s, 'operator')",
-                    (body.property_id, entry_stage_id),
+                    "  (property_id, to_stage_id, reason, account_id) "
+                    "VALUES (%s, %s, 'operator', %s)",
+                    (body.property_id, entry_stage_id, account_id),
                 )
     except psycopg.errors.ForeignKeyViolation:
         raise HTTPException(422, "property not found")
-    card = _fetch_card(conn, body.property_id)
+    card = _fetch_card(conn, body.property_id, account_id)
     if card is None:
         raise RuntimeError("pipeline card vanished after insert")
     return {**card, "added": added}
 
 
 def remove_card(
-    conn: "psycopg.Connection", property_id: int,
+    conn: "psycopg.Connection", property_id: int, *,
+    account_id: uuid.UUID | None,
 ) -> dict[str, Any]:
     """Un-bookmark: drop the card, logging its prior stage to the ledger."""
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(
-            "SELECT stage_id FROM property_pipeline WHERE property_id = %s",
-            (property_id,),
+            "SELECT stage_id FROM property_pipeline "
+            "WHERE property_id = %s AND account_id IS NOT DISTINCT FROM %s",
+            (property_id, account_id),
         )
         row = cur.fetchone()
         if row is None:
             return {"removed": False}
         from_stage_id = int(row[0])
         cur.execute(
-            "DELETE FROM property_pipeline WHERE property_id = %s", (property_id,),
+            "DELETE FROM property_pipeline "
+            "WHERE property_id = %s AND account_id IS NOT DISTINCT FROM %s",
+            (property_id, account_id),
         )
         cur.execute(
             "INSERT INTO property_pipeline_events "
-            "  (property_id, from_stage_id, reason) VALUES (%s, %s, 'operator')",
-            (property_id, from_stage_id),
+            "  (property_id, from_stage_id, reason, account_id) "
+            "VALUES (%s, %s, 'operator', %s)",
+            (property_id, from_stage_id, account_id),
         )
     return {"removed": True}
 
 
 def move_card(
-    conn: "psycopg.Connection", property_id: int, body: s.MoveCardIn,
+    conn: "psycopg.Connection", property_id: int, body: s.MoveCardIn, *,
+    account_id: uuid.UUID | None,
 ) -> dict[str, Any]:
     """Move a card to another stage and/or reorder it within a stage.
 
@@ -241,8 +278,9 @@ def move_card(
     """
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(
-            "SELECT stage_id FROM property_pipeline WHERE property_id = %s FOR UPDATE",
-            (property_id,),
+            "SELECT stage_id FROM property_pipeline WHERE property_id = %s "
+            "AND account_id IS NOT DISTINCT FROM %s FOR UPDATE",
+            (property_id, account_id),
         )
         row = cur.fetchone()
         if row is None:
@@ -262,11 +300,11 @@ def move_card(
             params.append(body.board_position)
         if sets:
             sets.append("updated_at = now()")
-            params.append(property_id)
+            params += [property_id, account_id]
             try:
                 cur.execute(
                     f"UPDATE property_pipeline SET {', '.join(sets)} "
-                    "WHERE property_id = %s",
+                    "WHERE property_id = %s AND account_id IS NOT DISTINCT FROM %s",
                     params,
                 )
             except psycopg.errors.ForeignKeyViolation:
@@ -274,11 +312,11 @@ def move_card(
             if stage_changed:
                 cur.execute(
                     "INSERT INTO property_pipeline_events "
-                    "  (property_id, from_stage_id, to_stage_id, reason) "
-                    "VALUES (%s, %s, %s, 'operator')",
-                    (property_id, from_stage_id, body.stage_id),
+                    "  (property_id, from_stage_id, to_stage_id, reason, account_id) "
+                    "VALUES (%s, %s, %s, 'operator', %s)",
+                    (property_id, from_stage_id, body.stage_id, account_id),
                 )
-    card = _fetch_card(conn, property_id)
+    card = _fetch_card(conn, property_id, account_id)
     assert card is not None
     return card
 
@@ -297,9 +335,15 @@ def _slugify(label: str) -> str:
     return slug or "stage"
 
 
-def _unique_key(cur: "psycopg.Cursor", label: str) -> str:
+def _unique_key(
+    cur: "psycopg.Cursor", label: str, account_id: uuid.UUID | None,
+) -> str:
     base = _slugify(label)
-    cur.execute("SELECT lower(key) FROM pipeline_stages")
+    cur.execute(
+        "SELECT lower(key) FROM pipeline_stages "
+        "WHERE account_id IS NOT DISTINCT FROM %s",
+        (account_id,),
+    )
     taken = {r[0] for r in cur.fetchall()}
     if base not in taken:
         return base
@@ -310,16 +354,16 @@ def _unique_key(cur: "psycopg.Cursor", label: str) -> str:
 
 
 def _fetch_card(
-    conn: "psycopg.Connection", property_id: int,
+    conn: "psycopg.Connection", property_id: int, account_id: uuid.UUID | None,
 ) -> dict[str, Any] | None:
     sql = (
         "SELECT pp.property_id, pp.stage_id, ps.key, ps.label, pp.board_position, "
         "       pp.note, pp.entered_stage_at, pp.added_at "
         "FROM property_pipeline pp JOIN pipeline_stages ps ON ps.id = pp.stage_id "
-        "WHERE pp.property_id = %s"
+        "WHERE pp.property_id = %s AND pp.account_id IS NOT DISTINCT FROM %s"
     )
     with conn.cursor() as cur:
-        cur.execute(sql, (property_id,))
+        cur.execute(sql, (property_id, account_id))
         row = cur.fetchone()
     if row is None:
         return None
