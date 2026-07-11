@@ -42,3 +42,27 @@ def test_mixed_batch_splits_and_preserves_order():
     assert updates == [(1, "A", "1"), (4, "D", "4")]
     assert other == [2, 3]
     assert counts == {"matched": 2, "ambiguous": 1, "nomatch": 1}
+
+
+# --- portal coverage + the geocode-provenance gate (location-resolution wave) ---
+
+def test_sources_cover_all_precise_coord_portals():
+    from scripts.backfill_address_point_streets import _SOURCES
+
+    # bazos stays out (town-center link pins); pozemek is excluded by category in
+    # the SQL, not by source. The three 2026-07 additions must never regress out.
+    assert set(_SOURCES) == {
+        "sreality", "idnes", "remax", "bezrealitky", "maxima",
+        "mmreality", "ceskereality", "realitymix",
+    }
+    assert "bazos" not in _SOURCES
+
+
+def test_candidate_sql_gates_geocoded_coords_to_address_grade():
+    from scripts.backfill_address_point_streets import _CANDIDATE_SQL
+
+    # A geocode-provenanced coordinate (scraper.location stamp) is only a
+    # trustworthy building coordinate at matched_type='regional.address' — a
+    # street/municipality centroid must never resolve a street.
+    assert "coords'->>'source' IS DISTINCT FROM 'geocode'" in _CANDIDATE_SQL
+    assert "matched_type' = 'regional.address'" in _CANDIDATE_SQL
