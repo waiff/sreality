@@ -43,7 +43,9 @@ from scraper.street import clean_street, street_from_locality, street_name_key
 
 LOG = logging.getLogger("backfill_portal_streets")
 
-_SOURCES: tuple[str, ...] = ("sreality", "idnes", "maxima", "remax", "bezrealitky", "bazos")
+_SOURCES: tuple[str, ...] = (
+    "sreality", "idnes", "maxima", "remax", "bezrealitky", "bazos", "realitymix",
+)
 
 # Rows with the input we need that haven't been processed this pass. obec IS NOT
 # NULL (CZ-resolved coordinate, migration 140) excludes foreign listings — the
@@ -58,6 +60,12 @@ _INPUT_PREDICATE: dict[str, str] = {
     "remax":       "l.raw_json->>'address' IS NOT NULL AND l.obec IS NOT NULL AND l.street IS NULL",
     "bezrealitky": "l.raw_json->>'street' IS NOT NULL AND l.street IS NULL",
     "bazos":       "l.street IS NOT NULL",
+    # realitymix index-card text ("Street, Town" / "Town" / a town chain) for rows
+    # where BOTH detail paths (data-address + slug) yielded nothing. Guarded like
+    # the parser's own data-address path: realitymix's first segment can be a
+    # místní část, so morphology is REQUIRED (see realitymix_parser._street_fields).
+    "realitymix":  ("l.street IS NULL AND l.obec IS NOT NULL "
+                    "AND l.raw_json->>'locality_text' IS NOT NULL"),
 }
 
 _SELECT_SQL = """
@@ -67,7 +75,8 @@ _SELECT_SQL = """
            l.raw_json->>'street' AS adv_street,
            l.raw_json->>'houseNumber' AS adv_house_number,
            l.raw_json->>'zip' AS adv_zip,
-           l.raw_json->'locality'->>'value' AS loc_value
+           l.raw_json->'locality'->>'value' AS loc_value,
+           l.raw_json->>'locality_text' AS loc_text
     FROM listings l
     WHERE l.source = %(source)s AND l.is_active
       AND l.raw_json->>'portal_street_backfill' IS NULL
@@ -143,12 +152,20 @@ def derive(source: str, row: dict[str, Any]) -> tuple[str | None, str | None, st
     if source == "bazos":
         s = clean_street(row["street"])
         return s, None, None, (s is not None and s != row["street"])
+    if source == "realitymix":
+        # First segment of the index-card text, morphology-REQUIRED: realitymix's
+        # leading segment can be a místní část ("Jindřichov"), which reject_as_town
+        # can't catch — the same gate its parser applies to data-address.
+        s = street_from_locality(
+            row["loc_text"], position="first", require_morphology=True, geo_names=geo,
+        )
+        return s, None, None, s is not None
     raise ValueError(f"unknown source {source!r}")
 
 
 _COLS = ("sreality_id", "property_id", "locality", "district", "street",
          "obec", "okres", "region", "address", "adv_street",
-         "adv_house_number", "adv_zip", "loc_value")
+         "adv_house_number", "adv_zip", "loc_value", "loc_text")
 
 
 def process_source(conn: Any, source: str, limit: int, deadline: float | None) -> dict[str, int]:
