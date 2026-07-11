@@ -38,7 +38,7 @@ scans, monitors).
   wall-clock budget); photo-less eligible properties route to the dirty lane via an
   imageless EVALUATION sweep in the */5 maintenance pass (the engine still decides +
   stamps them — an evaluation trigger, not a publish-timeout).
-- **Dedup qualification hygiene (2026-07-11)** — `publication.GEO_FAMILIES` is the single
+- **Dedup qualification hygiene (#761, 2026-07-11)** — `publication.GEO_FAMILIES` is the single
   Python source of the geo category list (MatchProfile derives `geo_blocked`; migration
   276's SQL twin is test-pinned); dead `requires_development_guard` flag deleted; the
   dirty-drain claim scoper embeds `_ELIGIBILITY` (parity-tested, no more hand-inlined
