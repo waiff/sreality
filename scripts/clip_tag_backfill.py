@@ -59,6 +59,25 @@ _SELECT_GLOBAL = """
     LIMIT %(limit)s
 """
 
+# REPAIR phase (2026-07): tagged images that never got an embedding persisted — the
+# active-only era's hole (~1.45M). Runs only on a run's SPARE capacity (after all
+# untagged work), so fresh inflow always wins; drains to zero over ~a week and then
+# never matches again. The image_clip_tags JOIN requires a prior successful decode
+# (a terminally-undecodable image was marked tagged WITHOUT a tag row — without the
+# join it would be re-selected forever). Re-tagging alongside the re-embed is
+# harmless (same model, same output) and keeps the persist path uniform.
+_SELECT_REPAIR = """
+    SELECT i.id, i.storage_path, (l.is_active IS TRUE) AS is_active
+    FROM images i
+    JOIN image_clip_tags t ON t.image_id = i.id
+    LEFT JOIN listings l ON l.sreality_id = i.sreality_id
+    WHERE i.storage_path IS NOT NULL
+      AND NOT EXISTS (SELECT 1 FROM image_clip_embeddings e WHERE e.image_id = i.id)
+      AND (%(shards)s = 1 OR i.id %% %(shards)s = %(shard)s)
+    ORDER BY i.id DESC
+    LIMIT %(limit)s
+"""
+
 # Bridges the initial bulk-backfill scan; once coverage is high the marker partial index
 # makes the SELECT sub-second and this margin is never approached. Well under the 55-min job.
 SELECT_TIMEOUT_MS = 300_000
@@ -179,6 +198,21 @@ def _select_pending(conn, *, limit: int, shards: int, shard: int,
             if got:
                 rows += got
                 phases.append(f"global:{len(got)}")
+    if len(rows) < limit:
+        # Spare capacity only: re-embed the tagged-but-vectorless backlog. OWN
+        # transaction + guard: as the backlog drains, the anti-join degrades into a
+        # long empty-result walk — a timeout here must skip repair, never abort the
+        # fresh work selected above. Delete this phase once the backlog reads zero.
+        try:
+            with conn.transaction(), conn.cursor() as cur:
+                cur.execute(f"SET LOCAL statement_timeout = {int(SELECT_TIMEOUT_MS)}")
+                cur.execute(_SELECT_REPAIR, {**base, "limit": limit - len(rows)})
+                got = [(r[0], r[1], r[2]) for r in cur.fetchall()]
+                if got:
+                    rows += got
+                    phases.append(f"repair:{len(got)}")
+        except Exception as exc:  # noqa: BLE001 — repair is best-effort spare work
+            LOG.warning("CLIP_TAG repair-phase select skipped: %s", exc)
     # The global fallback has no region exclusion, so a just-returned priority-region
     # image can reappear there — de-dup by image_id (keep first) so it isn't downloaded
     # + CLIP-encoded twice in one run.
