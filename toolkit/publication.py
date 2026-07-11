@@ -24,13 +24,21 @@ _STREET_TEMPLATE = (
     "{a}.street IS NOT NULL AND {a}.street <> '' AND {a}.disposition IS NOT NULL"
 )
 
+# The geo-pass category families — the single PYTHON source for "which categories the
+# geo pass covers". MatchProfile derives geo_blocked from membership here; the SQL twin
+# lives in migration 276's listing_geo_cell_key() (SQL can't import Python — a unit test
+# pins the two lists to each other).
+GEO_FAMILIES: tuple[str, ...] = ("dum", "pozemek", "komercni", "ostatni")
+
+_GEO_IN_LIST = ", ".join(f"'{f}'" for f in GEO_FAMILIES)
+
 # The eligibility conjunction inside scripts.dedup_engine._GEO_ELIGIBLE_SQL (the
 # geo-proximity pass for single-dwelling house/land/commercial). Rendered with the
 # engine's exact whitespace so the parity test's substring check holds; the newlines
 # are harmless wherever it is embedded.
 _GEO_TEMPLATE = (
     "{a}.is_active = true\n"
-    "      AND {a}.category_main IN ('dum', 'pozemek', 'komercni', 'ostatni')\n"
+    "      AND {a}.category_main IN (" + _GEO_IN_LIST + ")\n"
     "      AND {a}.geom IS NOT NULL\n"
     "      AND {a}.obec_id IS NOT NULL\n"
     "      AND coalesce({a}.area_m2, {a}.estate_area, {a}.usable_area) IS NOT NULL"

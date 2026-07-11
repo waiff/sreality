@@ -190,12 +190,13 @@ def _rows_by_kind(conn: _FakeConn) -> dict[str, list[tuple[Any, ...]]]:
 # --- recall-guard golden test -----------------------------------------------
 
 def _geo_key(sid: int, pid: int, *, source: str = "sreality",
-             cat: str = "dum") -> ListingKey:
+             cat: str = "dum", street_eligible: bool = False) -> ListingKey:
     return ListingKey(
         sreality_id=sid, property_id=pid, source=source,
         street_key="geo:5001:50.1006:14.5374:dum|komercni:prodej",
         disposition="", house_number=None, floor=None, area_m2=800.0,
         description=None, category_type="prodej", category_main=cat, street_id=None,
+        street_eligible=street_eligible,
     )
 
 
@@ -236,6 +237,27 @@ def test_geo_pairs_skipped_without_geo_classifier(monkeypatch: Any) -> None:
         lane="candidates", geo_classify=None,
     )
     assert conn.inserted_requests == []
+
+
+def test_geo_pair_with_both_sides_street_eligible_not_warmed(monkeypatch: Any) -> None:
+    """The warmer mirrors resolve_pair's cross-pass skip: a geo pair whose BOTH sides are
+    street-eligible belongs to the street pass — warming it would pay for verdicts the
+    engine never reads. A MIXED pair (one street-eligible side) is still warmed."""
+    rooms = {"kitchen": [11], "bathroom": [12]}
+    conn = _run(
+        monkeypatch,
+        keys=[],
+        geo_keys=[_geo_key(3, 103, street_eligible=True),
+                  _geo_key(4, 104, source="idnes", street_eligible=True),
+                  _geo_key(5, 105, source="bazos")],
+        candidate_pids={103, 104, 105},
+        classifications={3: ("classified", rooms), 4: ("classified", rooms),
+                         5: ("classified", rooms)},
+        lane="candidates", geo_classify=_accept_all_geo,
+    )
+    compared = {(r[4], r[5]) for r in _rows_by_kind(conn).get("compare", [])}
+    assert (3, 4) not in compared            # both street-eligible: street pass owns it
+    assert (3, 5) in compared and (4, 5) in compared   # mixed pairs still warm
 
 
 def test_clip_first_grouping_skips_llm_classify(monkeypatch: Any) -> None:

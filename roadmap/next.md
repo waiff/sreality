@@ -38,6 +38,14 @@ scans, monitors).
   wall-clock budget); photo-less eligible properties route to the dirty lane via an
   imageless EVALUATION sweep in the */5 maintenance pass (the engine still decides +
   stamps them — an evaluation trigger, not a publish-timeout).
+- **Dedup qualification hygiene (#761, 2026-07-11)** — `publication.GEO_FAMILIES` is the single
+  Python source of the geo category list (MatchProfile derives `geo_blocked`; migration
+  276's SQL twin is test-pinned); dead `requires_development_guard` flag deleted; the
+  dirty-drain claim scoper embeds `_ELIGIBILITY` (parity-tested, no more hand-inlined
+  predicate); cross-pass visibility — street-eligible geo-family rows now participate in
+  the geo pass (a street-eligible dům can meet its street-less cell peers, ~841 active
+  listings were mutually invisible), with both-street-eligible PAIRS skipped so the
+  street pass keeps sole ownership.
 
 **Still open:** the Wave C worker prerequisites (create the Railway service, flip
 `shared_rate_limiter` on, images-first inline pHash + warm-CLIP + matcher wake); **W5b** (SLO-scaled

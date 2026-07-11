@@ -767,9 +767,10 @@ renumber.** Navigate by area:
     warmer and cross-portal houses share no photos, so the queue is geo's only surfacing mechanism). So the
     scheduled PAID run auto-merges the confident ones + queues the rest, and an ad-hoc `--geo-only --free`
     still surfaces the co-located candidates (just without the auto-merge) instead of silently dropping them.
-    `--geo` forces it onto any non-dirty run ad-hoc (ignores the setting); the real-time DIRTY drain never
-    runs geo. The geo pass writes NO separate `dedup_engine_runs` row (the dashboard reads the latest single
-    row); its decisions land in `dedup_pair_audit` + the `tier='geo'` candidate queue. (Follow-up: a geo
+    `--geo` forces it onto any non-dirty run ad-hoc (ignores the setting); the real-time DIRTY drain runs
+    its own geo sub-pass scoped to the claimed properties' cells (`run_dirty_pass`). The scheduled geo pass
+    writes its OWN `dedup_engine_runs` row (`run_kind='geo'`, migrations 262/265 — the street gauge pickers
+    exclude it by run_kind); its decisions land in `dedup_pair_audit` + the `tier='geo'` candidate queue. (Follow-up: a geo
     candidate-drain mode; the cross-portal coord-divergence cell-miss — a same house geocoded ~270m apart on
     two portals falls in different geo cells. NB the batch warmer is retired — the whole engine now pays
     vision at decision time (pHash → cosine → bounded live forensics), so geo already matches street's cost
