@@ -19,6 +19,7 @@ from api import dependencies as deps
 from api import main as api_main
 from api import maps as api_maps
 from api import pipeline as api_pipeline
+from api import tenant_pool
 from scraper import url_parser as scraper_url_parser
 
 
@@ -27,6 +28,12 @@ def client(monkeypatch):
     api_main.app.dependency_overrides[deps.get_db_conn] = lambda: object()
     api_main.app.dependency_overrides[deps.get_sreality_client] = lambda: object()
     api_main.app.dependency_overrides[deps.get_llm_client] = lambda: object()
+    # tenant-pool routes: the connection is stubbed but the route-level
+    # verify_jwt is left REAL — that's the auth gate under test.
+    api_main.app.dependency_overrides[tenant_pool.tenant_conn] = lambda: object()
+    monkeypatch.setattr(
+        tenant_pool, "resolve_account_id", lambda conn, claims: None,
+    )
 
     def fake_find(conn, target, filters):
         return {"data": {"listings": []}, "metadata": {"tool": "find_comparables"}}
@@ -162,18 +169,24 @@ def client(monkeypatch):
         lambda conn, sid, tid: {"detached": True},
     )
     monkeypatch.setattr(
-        api_pipeline, "list_stages", lambda conn: {"data": []},
+        api_pipeline, "list_stages",
+        lambda conn, *, account_id=None: {"data": []},
     )
     monkeypatch.setattr(
         api_pipeline, "add_card",
-        lambda conn, body: {"property_id": body.property_id, "added": True},
+        lambda conn, body, *, account_id=None: {
+            "property_id": body.property_id, "added": True,
+        },
     )
     monkeypatch.setattr(
-        api_pipeline, "remove_card", lambda conn, pid: {"removed": True},
+        api_pipeline, "remove_card",
+        lambda conn, pid, *, account_id=None: {"removed": True},
     )
     monkeypatch.setattr(
         api_pipeline, "move_card",
-        lambda conn, pid, body: {"property_id": pid, "stage_id": body.stage_id},
+        lambda conn, pid, body, *, account_id=None: {
+            "property_id": pid, "stage_id": body.stage_id,
+        },
     )
 
     monkeypatch.setattr(api_maps, "suggest", lambda *a, **kw: {"items": []})
@@ -251,6 +264,13 @@ def _gated_calls(client) -> list:
         ("DELETE", "/tags/1", None),
         ("POST",   "/properties/1/tags", _ATTACH_TAG_BODY),
         ("DELETE", "/properties/1/tags/1", None),
+    ]
+
+
+def _jwt_gated_calls() -> list:
+    """Routes on verify_jwt (Phase 1): fail CLOSED when auth is unconfigured,
+    unlike require_token's open-when-unset behavior."""
+    return [
         ("GET",    "/pipeline/stages", None),
         ("POST",   "/pipeline/cards", _PIPELINE_CARD_BODY),
         ("PATCH",  "/pipeline/cards/1", {"stage_id": 1}),
@@ -320,3 +340,34 @@ def test_malformed_authorization_header_rejected(client, monkeypatch):
 
     res = client.post("/tools/find_comparables", json=_FIND_BODY, headers=headers)
     assert res.status_code == 401
+
+
+# --- verify_jwt-gated routes (Phase 1 tenant pool) --------------------------
+
+
+def test_jwt_routes_fail_closed_without_token(client, monkeypatch):
+    monkeypatch.delenv("API_TOKEN", raising=False)
+
+    for method, path, body in _jwt_gated_calls():
+        res = _call(client, method, path, body)
+        assert res.status_code == 401, f"{path} must fail closed with no bearer"
+
+
+def test_jwt_routes_reject_wrong_token(client, monkeypatch):
+    monkeypatch.setenv("API_TOKEN", "secret-token-xyz")
+    monkeypatch.delenv("SUPABASE_URL", raising=False)
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-hs256-secret")
+    headers = {"Authorization": "Bearer wrong-token"}
+
+    for method, path, body in _jwt_gated_calls():
+        res = _call(client, method, path, body, headers=headers)
+        assert res.status_code == 401, f"{path} should reject a non-legacy non-JWT token"
+
+
+def test_jwt_routes_accept_legacy_token(client, monkeypatch):
+    monkeypatch.setenv("API_TOKEN", "secret-token-xyz")
+    headers = {"Authorization": "Bearer secret-token-xyz"}
+
+    for method, path, body in _jwt_gated_calls():
+        res = _call(client, method, path, body, headers=headers)
+        assert res.status_code == 200, f"{path} should pass on the legacy dual-auth branch"

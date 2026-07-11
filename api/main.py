@@ -23,6 +23,7 @@ from api import price_stats as price_stats_module
 from api import manual_estimates as me
 from api import dependencies as deps
 from api import maps
+from api import tenant_pool
 from api import schemas as s
 from api import skills as skills_module
 from api.agent import AGENT_TOOLS
@@ -899,8 +900,7 @@ def list_estimations(
 @app.post("/listings/lookup")
 def post_listings_lookup(
     body: s.PortalLookupIn,
-    conn: Any = Depends(deps.get_db_conn),
-    _: None = Depends(deps.require_token),
+    conn: Any = Depends(tenant_pool.tenant_conn),
 ) -> dict[str, Any]:
     """Batch (source, native id) → MF rent/yield + latest estimate, for the
     Chrome extension's detail panel + index-card overlay across all portals."""
@@ -1367,81 +1367,92 @@ def delete_property_tag(
     return curation.detach_tag(conn, property_id, tag_id)
 
 
-# --- deal pipeline (migration 205) ----------------------------------------
+# --- deal pipeline (migration 205; account-scoped since 294) ---------------
 # Phase 0: bookmark a property into the pipeline (entry stage) / remove it.
 # Membership reads go through property_pipeline_public via the anon key.
+# tenant_conn replaces get_db_conn + require_token: its verify_jwt fails
+# closed, and non-legacy callers get an RLS-scoped one-transaction connection.
+# The route-level Depends(verify_jwt) is cached by FastAPI — no double verify.
 
 @app.get("/pipeline/stages")
 def get_pipeline_stages(
-    conn: Any = Depends(deps.get_db_conn),
-    _: None = Depends(deps.require_token),
+    conn: Any = Depends(tenant_pool.tenant_conn),
+    claims: dict = Depends(deps.verify_jwt),
 ) -> dict[str, Any]:
-    return pipeline_module.list_stages(conn)
+    account_id = tenant_pool.resolve_account_id(conn, claims)
+    return pipeline_module.list_stages(conn, account_id=account_id)
 
 
 @app.post("/pipeline/stages")
 def post_pipeline_stage(
     body: s.CreateStageIn,
-    conn: Any = Depends(deps.get_db_conn),
-    _: None = Depends(deps.require_token),
+    conn: Any = Depends(tenant_pool.tenant_conn),
+    claims: dict = Depends(deps.verify_jwt),
 ) -> dict[str, Any]:
-    return pipeline_module.create_stage(conn, body)
+    account_id = tenant_pool.resolve_account_id(conn, claims)
+    return pipeline_module.create_stage(conn, body, account_id=account_id)
 
 
 @app.post("/pipeline/stages/reorder")
 def post_pipeline_stages_reorder(
     body: s.ReorderStagesIn,
-    conn: Any = Depends(deps.get_db_conn),
-    _: None = Depends(deps.require_token),
+    conn: Any = Depends(tenant_pool.tenant_conn),
+    claims: dict = Depends(deps.verify_jwt),
 ) -> dict[str, Any]:
-    return pipeline_module.reorder_stages(conn, body)
+    account_id = tenant_pool.resolve_account_id(conn, claims)
+    return pipeline_module.reorder_stages(conn, body, account_id=account_id)
 
 
 @app.patch("/pipeline/stages/{stage_id}")
 def patch_pipeline_stage(
     stage_id: int,
     body: s.UpdateStageIn,
-    conn: Any = Depends(deps.get_db_conn),
-    _: None = Depends(deps.require_token),
+    conn: Any = Depends(tenant_pool.tenant_conn),
+    claims: dict = Depends(deps.verify_jwt),
 ) -> dict[str, Any]:
-    return pipeline_module.update_stage(conn, stage_id, body)
+    account_id = tenant_pool.resolve_account_id(conn, claims)
+    return pipeline_module.update_stage(conn, stage_id, body, account_id=account_id)
 
 
 @app.delete("/pipeline/stages/{stage_id}")
 def delete_pipeline_stage(
     stage_id: int,
-    conn: Any = Depends(deps.get_db_conn),
-    _: None = Depends(deps.require_token),
+    conn: Any = Depends(tenant_pool.tenant_conn),
+    claims: dict = Depends(deps.verify_jwt),
 ) -> dict[str, Any]:
-    return pipeline_module.archive_stage(conn, stage_id)
+    account_id = tenant_pool.resolve_account_id(conn, claims)
+    return pipeline_module.archive_stage(conn, stage_id, account_id=account_id)
 
 
 @app.post("/pipeline/cards")
 def post_pipeline_card(
     body: s.AddPipelineCardIn,
-    conn: Any = Depends(deps.get_db_conn),
-    _: None = Depends(deps.require_token),
+    conn: Any = Depends(tenant_pool.tenant_conn),
+    claims: dict = Depends(deps.verify_jwt),
 ) -> dict[str, Any]:
-    return pipeline_module.add_card(conn, body)
+    account_id = tenant_pool.resolve_account_id(conn, claims)
+    return pipeline_module.add_card(conn, body, account_id=account_id)
 
 
 @app.patch("/pipeline/cards/{property_id}")
 def patch_pipeline_card(
     property_id: int,
     body: s.MoveCardIn,
-    conn: Any = Depends(deps.get_db_conn),
-    _: None = Depends(deps.require_token),
+    conn: Any = Depends(tenant_pool.tenant_conn),
+    claims: dict = Depends(deps.verify_jwt),
 ) -> dict[str, Any]:
-    return pipeline_module.move_card(conn, property_id, body)
+    account_id = tenant_pool.resolve_account_id(conn, claims)
+    return pipeline_module.move_card(conn, property_id, body, account_id=account_id)
 
 
 @app.delete("/pipeline/cards/{property_id}")
 def delete_pipeline_card(
     property_id: int,
-    conn: Any = Depends(deps.get_db_conn),
-    _: None = Depends(deps.require_token),
+    conn: Any = Depends(tenant_pool.tenant_conn),
+    claims: dict = Depends(deps.verify_jwt),
 ) -> dict[str, Any]:
-    return pipeline_module.remove_card(conn, property_id)
+    account_id = tenant_pool.resolve_account_id(conn, claims)
+    return pipeline_module.remove_card(conn, property_id, account_id=account_id)
 
 
 # --- Skill refinements (Phase AI slice C) ---------------------------------

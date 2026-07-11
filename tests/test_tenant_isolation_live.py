@@ -1,0 +1,238 @@
+"""Live tenant-isolation checks against the replayed schema (Phase 1 tenancy).
+
+Gated on TEST_DATABASE_URL exactly like tests/test_sql_schema_prepare.py: with
+no database configured (normal local `pytest`) the whole module skips; CI's
+schema-replay job sets it and runs this against the freshly-rebuilt schema.
+
+The TEST_DATABASE_URL login is the table OWNER (RLS never applies to it), so
+every isolation assertion runs under an explicit `SET LOCAL ROLE authenticated`
+— the same switch api.tenant_pool.tenant_conn issues per request — which is
+what makes RLS bind, both here and in production.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import json
+import os
+import uuid
+from collections.abc import Iterator
+from typing import Any
+
+import pytest
+
+_DB_URL = os.environ.get("TEST_DATABASE_URL")
+
+pytestmark = pytest.mark.skipif(
+    not _DB_URL,
+    reason="TEST_DATABASE_URL not set — live tenant-isolation checks run only in the CI DB job",
+)
+
+# The 18 user-state tables migrations 290-294 scope per account.
+_TENANT_TABLES: list[str] = [
+    "collections",
+    "tags",
+    "property_notes",
+    "filter_presets",
+    "notification_subscriptions",
+    "manual_rental_estimates",
+    "collection_properties",
+    "property_tags",
+    "notification_dispatches",
+    "estimation_cohort_entries",
+    "estimation_trace_payloads",
+    "estimation_feedback",
+    "building_run_attachments",
+    "estimation_runs",
+    "building_runs",
+    "property_pipeline",
+    "pipeline_stages",
+    "property_pipeline_events",
+]
+
+
+@pytest.fixture(scope="module")
+def svc() -> "Iterator[Any]":
+    import psycopg
+
+    conn = psycopg.connect(_DB_URL, autocommit=True)
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
+@pytest.fixture(scope="module")
+def tenants(svc: Any) -> "Iterator[dict[str, uuid.UUID]]":
+    """Two accounts + two auth users + memberships, via direct service-role
+    inserts. The on-signup trigger (migration 294) would mint its own accounts
+    and race for the legacy-backfill claim, so it is disabled around the
+    auth.users inserts to keep the fixture deterministic."""
+    a_user, b_user = uuid.uuid4(), uuid.uuid4()
+    with svc.cursor() as cur:
+        cur.execute(
+            "INSERT INTO accounts (kind, name) VALUES ('personal', %s) RETURNING id",
+            (f"iso-a-{a_user.hex[:8]}",),
+        )
+        a_acc = cur.fetchone()[0]
+        cur.execute(
+            "INSERT INTO accounts (kind, name) VALUES ('personal', %s) RETURNING id",
+            (f"iso-b-{b_user.hex[:8]}",),
+        )
+        b_acc = cur.fetchone()[0]
+        cur.execute("ALTER TABLE auth.users DISABLE TRIGGER USER")
+        try:
+            cur.execute(
+                "INSERT INTO auth.users (id, email) VALUES (%s, %s), (%s, %s)",
+                (
+                    a_user, f"iso-a-{a_user.hex[:8]}@test.local",
+                    b_user, f"iso-b-{b_user.hex[:8]}@test.local",
+                ),
+            )
+        finally:
+            cur.execute("ALTER TABLE auth.users ENABLE TRIGGER USER")
+        cur.execute(
+            "INSERT INTO account_members (account_id, user_id, role) "
+            "VALUES (%s, %s, 'owner'), (%s, %s, 'owner')",
+            (a_acc, a_user, b_acc, b_user),
+        )
+    try:
+        yield {"a_user": a_user, "b_user": b_user, "a_acc": a_acc, "b_acc": b_acc}
+    finally:
+        with svc.cursor() as cur:
+            cur.execute(
+                "DELETE FROM legacy_backfill_claim WHERE account_id IN (%s, %s)",
+                (a_acc, b_acc),
+            )
+            cur.execute("DELETE FROM accounts WHERE id IN (%s, %s)", (a_acc, b_acc))
+            cur.execute("DELETE FROM auth.users WHERE id IN (%s, %s)", (a_user, b_user))
+
+
+@contextlib.contextmanager
+def _scoped(sub: uuid.UUID) -> "Iterator[Any]":
+    """One transaction scoped the way tenant_conn scopes: SET LOCAL ROLE
+    authenticated + the caller's JWT claims, evaporating at transaction end."""
+    import psycopg
+
+    conn = psycopg.connect(_DB_URL, autocommit=False)
+    try:
+        with conn.transaction():
+            with conn.cursor() as cur:
+                cur.execute("SET LOCAL ROLE authenticated")
+                cur.execute(
+                    "SELECT set_config('request.jwt.claims', %s, true)",
+                    (json.dumps({"sub": str(sub), "role": "authenticated"}),),
+                )
+            yield conn
+    finally:
+        conn.close()
+
+
+def test_cross_tenant_denial(svc: Any, tenants: dict[str, uuid.UUID]) -> None:
+    name = f"iso-{uuid.uuid4().hex}"
+    with svc.cursor() as cur:
+        cur.execute(
+            "INSERT INTO collections (account_id, name) VALUES (%s, %s) RETURNING id",
+            (tenants["a_acc"], name),
+        )
+        coll_id = cur.fetchone()[0]
+    try:
+        with _scoped(tenants["b_user"]) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM collections WHERE name = %s", (name,))
+                assert cur.fetchall() == [], "tenant B must not see tenant A's collection"
+                cur.execute(
+                    "UPDATE collections SET description = 'stolen' WHERE id = %s",
+                    (coll_id,),
+                )
+                assert cur.rowcount == 0, "tenant B must not update tenant A's collection"
+                cur.execute("DELETE FROM collections WHERE id = %s", (coll_id,))
+                assert cur.rowcount == 0, "tenant B must not delete tenant A's collection"
+        with _scoped(tenants["a_user"]) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM collections WHERE name = %s", (name,))
+                assert len(cur.fetchall()) == 1, "tenant A must see their own collection"
+    finally:
+        with svc.cursor() as cur:
+            cur.execute("DELETE FROM collections WHERE id = %s", (coll_id,))
+
+
+def test_no_anon_write_grants(svc: Any) -> None:
+    with svc.cursor() as cur:
+        cur.execute(
+            "SELECT table_name, privilege_type "
+            "FROM information_schema.role_table_grants "
+            "WHERE grantee = 'anon' AND table_schema = 'public' "
+            "AND table_name = ANY(%s)",
+            (_TENANT_TABLES,),
+        )
+        anon_grants = cur.fetchall()
+        cur.execute(
+            "SELECT table_name, privilege_type "
+            "FROM information_schema.role_table_grants "
+            "WHERE grantee = 'authenticated' AND table_schema = 'public' "
+            "AND privilege_type IN ('TRUNCATE', 'REFERENCES', 'TRIGGER') "
+            "AND table_name = ANY(%s)",
+            (_TENANT_TABLES,),
+        )
+        auth_extra = cur.fetchall()
+    assert anon_grants == [], f"anon must hold NO privileges on user-state tables: {anon_grants}"
+    assert auth_extra == [], (
+        f"authenticated must never hold TRUNCATE/REFERENCES/TRIGGER: {auth_extra}"
+    )
+
+
+def test_user_state_tables_have_account_id_and_policy(svc: Any) -> None:
+    with svc.cursor() as cur:
+        cur.execute(
+            "SELECT table_name FROM information_schema.columns "
+            "WHERE table_schema = 'public' AND column_name = 'account_id' "
+            "AND table_name = ANY(%s)",
+            (_TENANT_TABLES,),
+        )
+        with_column = {r[0] for r in cur.fetchall()}
+        cur.execute(
+            "SELECT DISTINCT tablename FROM pg_policies "
+            "WHERE schemaname = 'public' AND tablename = ANY(%s)",
+            (_TENANT_TABLES,),
+        )
+        with_policy = {r[0] for r in cur.fetchall()}
+    missing_column = sorted(set(_TENANT_TABLES) - with_column)
+    missing_policy = sorted(set(_TENANT_TABLES) - with_policy)
+    assert not missing_column, f"tables missing account_id: {missing_column}"
+    assert not missing_policy, f"tables missing an RLS policy: {missing_policy}"
+
+
+def test_write_then_read_back_one_transaction(
+    svc: Any, tenants: dict[str, uuid.UUID], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Proves tenant_conn's ONE-transaction contract (write + read-back share the
+    SET LOCAL scope) — RLS binds via its role switch, not via the owner login."""
+    from api import tenant_pool
+
+    monkeypatch.setenv("TENANT_POOL_DB_URL", _DB_URL)
+    name = f"iso-rw-{uuid.uuid4().hex}"
+    claims = {"sub": str(tenants["a_user"]), "role": "authenticated"}
+    try:
+        gen = tenant_pool.tenant_conn(claims)
+        conn = next(gen)
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO collections (account_id, name) VALUES (%s, %s)",
+                (tenants["a_acc"], name),
+            )
+            cur.execute("SELECT count(*) FROM collections WHERE name = %s", (name,))
+            assert cur.fetchone()[0] == 1, "row must be visible INSIDE the same transaction"
+        next(gen, None)  # resume past the yield -> clean commit + close
+
+        with _scoped(tenants["a_user"]) as conn_a:
+            with conn_a.cursor() as cur:
+                cur.execute("SELECT count(*) FROM collections WHERE name = %s", (name,))
+                assert cur.fetchone()[0] == 1, "committed row must be visible to tenant A"
+        with _scoped(tenants["b_user"]) as conn_b:
+            with conn_b.cursor() as cur:
+                cur.execute("SELECT count(*) FROM collections WHERE name = %s", (name,))
+                assert cur.fetchone()[0] == 0, "committed row must be invisible to tenant B"
+    finally:
+        with svc.cursor() as cur:
+            cur.execute("DELETE FROM collections WHERE name = %s", (name,))
