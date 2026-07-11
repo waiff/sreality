@@ -213,7 +213,7 @@ def test_fetch_detail_ok_passes_source_url(monkeypatch):
 
     def fake_parse(html, *, source_url):
         captured["url"] = source_url
-        return SimpleNamespace(raw={})
+        return SimpleNamespace(raw={}, lat=50.0, lon=14.0)
 
     monkeypatch.setattr(mmreality_main, "parse_detail", fake_parse)
     ref = "https://www.mmreality.cz/nemovitosti/944445/"

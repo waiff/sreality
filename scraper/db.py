@@ -551,7 +551,13 @@ def upsert_listing(
           inactive_at = NULL,
           {update_set},
           {_STREET_SOURCE_UPDATE_SQL},
-          geom = EXCLUDED.geom,
+          -- Preserve-if-null (mig-263 rail, extended to geom): an incoming NULL
+          -- means "the page carried no coords", never "coords removed" — a bare
+          -- EXCLUDED.geom silently wiped geocoded/backfilled coordinates on the
+          -- next coords-less refetch (and with them the admin hierarchy's
+          -- freshness and the geo_cell_key). Real moves still win: a non-NULL
+          -- incoming geom replaces the stored one.
+          geom = COALESCE(EXCLUDED.geom, listings.geom),
           raw_json = EXCLUDED.raw_json
         RETURNING xmax = 0 AS inserted
     """
@@ -1914,7 +1920,7 @@ _BATCH_UPSERT_SQL = f"""
       inactive_at = NULL,
       {_BATCH_UPDATE_SET},
       {_STREET_SOURCE_UPDATE_SQL},
-      geom = EXCLUDED.geom,
+      geom = COALESCE(EXCLUDED.geom, listings.geom),
       raw_json = EXCLUDED.raw_json
     RETURNING (xmax = 0) AS inserted
 """

@@ -8,11 +8,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any
 
-import pytest
-
 from scraper import bazos_main
 from scraper.bazos_main import BazosPortal
-from scraper.geocoding import GeocodeResult, GeocodingError
 from scraper.portal_base import ListingGoneError
 from scraper.portal_runner import DrainItem
 
@@ -411,41 +408,9 @@ def test_write_details_ingests_and_counts(monkeypatch):
 
 
 # --- geocoder wiring (text-first coordinate resolution) ---------------------
-
-
-def test_build_geocoder_none_without_key(monkeypatch):
-    monkeypatch.delenv("MAPY_CZ_API_KEY", raising=False)
-    monkeypatch.delenv("MAPY2_CZ_API_KEY", raising=False)
-    assert bazos_main._build_geocoder() is None
-
-
-def test_build_geocoder_cached_with_key(monkeypatch):
-    monkeypatch.setenv("MAPY_CZ_API_KEY", "test-key")
-    geocoder = bazos_main._build_geocoder()
-    assert isinstance(geocoder, bazos_main._CachingGeocoder)
-
-
-def test_caching_geocoder_memoises_hits_and_misses():
-    calls = {"n": 0}
-
-    def fn(query: str) -> GeocodeResult:
-        calls["n"] += 1
-        if "bad" in query:
-            raise GeocodingError("no result")
-        return GeocodeResult(
-            lat=50.0, lng=14.0, confidence="high", matched_address="a",
-            matched_type="regional.address", bbox=None, raw={},
-        )
-
-    geocoder = bazos_main._CachingGeocoder(fn)
-    assert geocoder("Praha").lat == 50.0
-    assert geocoder("  praha ").lat == 50.0     # normalized key -> cache hit
-    assert calls["n"] == 1
-    with pytest.raises(GeocodingError):
-        geocoder("bad street")
-    with pytest.raises(GeocodingError):
-        geocoder("bad street")                  # cached miss, not re-queried
-    assert calls["n"] == 2
+# The builder + memo cache now live in scraper.location (shared across portals);
+# their behavior is tested in tests/scraper/test_location.py. Here we only pin
+# bazos's wiring: the parser receives the geocoder.
 
 
 def test_fetch_detail_passes_geocoder_to_parser(monkeypatch):

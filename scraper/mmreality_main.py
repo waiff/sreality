@@ -18,7 +18,8 @@ category_type) the way the source-scoped `mark_inactive` requires, mmreality is
 listings inactive from index-absence, so a partial/rate-limited walk can never
 falsely delist (architectural rule #3). Delisted ads still drop out via a gone
 detail fetch (immediate per-listing flip) and the toolkit's "active = seen within
-7 days" rule. Coordinates come straight from the estate JSON — no geocoding.
+7 days" rule. Coordinates come from the estate JSON; a coords-less row falls back
+to carry-forward + locality geocoding via the shared scraper.location resolver.
 """
 
 from __future__ import annotations
@@ -28,6 +29,7 @@ import logging
 from typing import Any
 
 from scraper import db, portal_runner
+from scraper.location import CoordResolver
 from scraper.mmreality_client import MmRealityClient, detail_url
 from scraper.mmreality_parser import index_price, parse_detail, parse_index
 from scraper.portal import (
@@ -59,6 +61,9 @@ class MmRealityPortal:
         self.index_rate = config.limits.index_rate
         self.shared_rate_limiter = config.limits.shared_rate_limiter
         self._price_change_min_pct = config.limits.price_change_min_pct
+        # page > carry-forward > geocode (an estate-JSON row without coords had
+        # NO coords path until now).
+        self._coords = CoordResolver(SOURCE)
 
     # --- index-walk seams ---
     def categories(self) -> list[dict[str, Any]]:
@@ -75,7 +80,9 @@ class MmRealityPortal:
     def connect_drain(self) -> Any:
         # Single-row ingest (ingest_scraped_listing), not batched prepared writes,
         # so the transaction pooler is fine — no session pooler needed.
-        return db.connect()
+        conn = db.connect()
+        self._coords.preload(conn)
+        return conn
 
     def walk_category(
         self, category: dict[str, Any], conn: Any, dry_run: bool, limiter: RateLimiter,
@@ -183,6 +190,9 @@ class MmRealityPortal:
             listing = parse_detail(html, source_url=url)
         except Exception as exc:  # noqa: BLE001
             return DrainItem(native_id=native_id, kind="error", error=str(exc))
+        # Page coords win -> carry a stored geom forward -> geocode the locality
+        # (never fails the fetch; scraper.location).
+        listing = self._coords.fill(native_id, listing)
         return DrainItem(
             native_id=native_id, kind="ok",
             payload={"listing": listing, "html": html, "status": status, "url": url},

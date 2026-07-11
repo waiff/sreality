@@ -74,6 +74,8 @@ jobs:
       - name: Run maxima scrape
         env:
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          MAPY_CZ_API_KEY: ${{ secrets.MAPY_CZ_API_KEY }}
+          MAPY2_CZ_API_KEY: ${{ secrets.MAPY2_CZ_API_KEY }}
           MAX_PAGES: ${{ inputs.max_pages }}
           MAX_DETAIL: ${{ inputs.max_detail }}
           RATE: ${{ inputs.rate || '1.0' }}

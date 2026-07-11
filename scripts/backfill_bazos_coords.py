@@ -35,7 +35,7 @@ import sys
 import time
 
 from scraper import db
-from scraper.bazos_main import _build_geocoder
+from scraper.location import build_geocoder
 from scraper.bazos_parser import parse_detail
 
 LOG = logging.getLogger("backfill_bazos_coords")
@@ -129,7 +129,7 @@ def main() -> int:
         print("ERROR: SUPABASE_DB_URL is not set.", file=sys.stderr)
         return 2
 
-    geocoder = _build_geocoder()
+    geocoder = build_geocoder()
     if geocoder is None:
         LOG.info("BACKFILL skip: no Mapy.cz API key set; nothing to re-place")
         return 0

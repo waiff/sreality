@@ -189,6 +189,62 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/backfill_bazos_street_locality.yml"
   },
   {
+    "filename": "backfill_geocode.yml",
+    "name": "Jobs: backfill geocode coordinates (any portal, from stored locality)",
+    "description": "DISPATCH-ONLY backfill for the standing no-coords stock of any portal (default: idnes, realitymix, maxima, remax, mmreality, ceskereality — bazos is excluded, its coords need the link-corroborating tree in backfill_bazos_coords). Geocodes each row's STORED locality via the persistent geocode_cache (migration 288) and stamps listings.geocode_attempted_at on every processed row (placed or not), so the pool self-empties and re-runs are cheap — re-dispatch until pending=0. Writes geom only (triggers derive hierarchy + dedup cell); no snapshots. Supersedes the completed one-off backfill_realitymix_coords.",
+    "portal": null,
+    "manual": true,
+    "schedules": [],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "source",
+        "description": "single portal source to process (blank = all default sources)",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "limit",
+        "description": "max listings processed this run (blank = 20000)",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "max_seconds",
+        "description": "wall-clock budget; stops claiming + exits cleanly (blank = none)",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "dry_run",
+        "description": "report the pending count and exit without writing",
+        "required": false,
+        "type": "boolean",
+        "default": "false",
+        "options": null
+      }
+    ],
+    "secrets": [
+      "MAPY2_CZ_API_KEY",
+      "MAPY_CZ_API_KEY",
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "geocode-coords-backfill",
+    "cancelInProgress": false,
+    "timeoutMinutes": 60,
+    "permissions": null,
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/backfill_geocode.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/backfill_geocode.yml"
+  },
+  {
     "filename": "backfill_idnes_areas.yml",
     "name": "Backfill idnes areas (spaced-thousands truncation)",
     "description": "One-off, dispatch-only backfill for PR #686's parser fix: idnes titles render land area with a Czech spaced-thousands group (\"2 403 m²\") and the old _AREA_RE matched from inside the number, storing area_m2=403 for a 2,403 m² plot (~8.4k active rows). Re-parses each affected listing from its already-staged detail HTML (portal_raw_pages, NO re-fetch of idnes) and heals the area columns in place; only NULLs a price on a genuine per-m² masquerade (zero found in prod). Idempotent + resumable; rerun until \"pending=0\". NOT a portal ingest workflow, so it carries no `# portal:` tag.",
@@ -342,54 +398,6 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "permissions": "contents: read",
     "runsUrl": "https://github.com/waiff/sreality/actions/workflows/backfill_portal_streets.yml",
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/backfill_portal_streets.yml"
-  },
-  {
-    "filename": "backfill_realitymix_coords.yml",
-    "name": "Jobs: backfill RealityMix coordinates (geocode the map-less tail)",
-    "description": "One-off, DISPATCH-ONLY backfill. ~28% of realitymix listings render without a #print-map and landed with geom=NULL; the detail-drain now geocodes such rows going forward, but an already-stored row only re-geocodes on its next refetch (maybe never). This re-places the existing backlog from STORED data (source_url town + slug street — NO page re-fetch) via a cached Mapy.cz, updating geom + locality in place (no snapshot: both are out of the content hash). Idempotent + resumable (each row is stamped); re-run until pending=0. Run only AFTER the carry-forward fix is deployed, else the next drain refetch wipes the backfilled geom.",
-    "portal": "realitymix",
-    "manual": true,
-    "schedules": [],
-    "onPush": false,
-    "onPullRequest": false,
-    "paths": null,
-    "inputs": [
-      {
-        "name": "limit",
-        "description": "max listings processed this run (blank = 20000)",
-        "required": false,
-        "type": "string",
-        "default": "",
-        "options": null
-      },
-      {
-        "name": "max_seconds",
-        "description": "wall-clock budget; stops claiming + exits cleanly (blank = none)",
-        "required": false,
-        "type": "string",
-        "default": "",
-        "options": null
-      },
-      {
-        "name": "dry_run",
-        "description": "report the pending count and exit without writing",
-        "required": false,
-        "type": "boolean",
-        "default": "false",
-        "options": null
-      }
-    ],
-    "secrets": [
-      "MAPY2_CZ_API_KEY",
-      "MAPY_CZ_API_KEY",
-      "SUPABASE_DB_URL"
-    ],
-    "concurrencyGroup": "realitymix-coords-backfill",
-    "cancelInProgress": false,
-    "timeoutMinutes": 60,
-    "permissions": null,
-    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/backfill_realitymix_coords.yml",
-    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/backfill_realitymix_coords.yml"
   },
   {
     "filename": "backfill_render_score.yml",
@@ -733,6 +741,8 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
       }
     ],
     "secrets": [
+      "MAPY2_CZ_API_KEY",
+      "MAPY_CZ_API_KEY",
       "SCRAPER_PROXY_URL",
       "SUPABASE_DB_URL"
     ],
@@ -3226,6 +3236,8 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
       }
     ],
     "secrets": [
+      "MAPY2_CZ_API_KEY",
+      "MAPY_CZ_API_KEY",
       "SUPABASE_DB_URL"
     ],
     "concurrencyGroup": "maxima-scrape",
@@ -3293,6 +3305,8 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
       }
     ],
     "secrets": [
+      "MAPY2_CZ_API_KEY",
+      "MAPY_CZ_API_KEY",
       "SCRAPER_PROXY_URL",
       "SUPABASE_DB_URL"
     ],
@@ -3439,6 +3453,8 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
       }
     ],
     "secrets": [
+      "MAPY2_CZ_API_KEY",
+      "MAPY_CZ_API_KEY",
       "SUPABASE_DB_URL"
     ],
     "concurrencyGroup": "remax-scrape",

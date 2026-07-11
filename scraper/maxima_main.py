@@ -36,6 +36,7 @@ import logging
 from typing import Any
 
 from scraper import db, portal_runner
+from scraper.location import CoordResolver
 from scraper.maxima_client import MaximaClient, detail_url
 from scraper.maxima_parser import category_of, index_price, parse_detail, parse_index
 from scraper.portal import (
@@ -98,6 +99,9 @@ class MaximaPortal:
         self._price_change_min_pct = config.limits.price_change_min_pct
         self._agenda_cache: dict[int, _AgendaWalk] = {}
         self._swept_agendas: set[int] = set()  # delist each agenda once per run
+        # page > carry-forward > geocode (maxima's OpenLayers map config is often
+        # absent, and until now those rows had NO coords path at all).
+        self._coords = CoordResolver(SOURCE)
 
     # --- index-walk seams ---
     def set_index_page_cap(self, pages: int | None) -> None:
@@ -122,7 +126,9 @@ class MaximaPortal:
     def connect_drain(self) -> Any:
         # Single-row ingest (ingest_scraped_listing), not batched prepared writes,
         # so the transaction pooler is fine — no session pooler needed.
-        return db.connect()
+        conn = db.connect()
+        self._coords.preload(conn)
+        return conn
 
     def _walk_agenda(
         self, af: int, conn: Any, limiter: RateLimiter,
@@ -291,6 +297,9 @@ class MaximaPortal:
             listing = parse_detail(html, source_url=url)
         except Exception as exc:  # noqa: BLE001
             return DrainItem(native_id=native_id, kind="error", error=str(exc))
+        # Page coords win -> carry a stored geom forward -> geocode the locality
+        # (never fails the fetch; scraper.location).
+        listing = self._coords.fill(native_id, listing)
         return DrainItem(
             native_id=native_id, kind="ok",
             payload={"listing": listing, "html": html, "status": status, "url": url},

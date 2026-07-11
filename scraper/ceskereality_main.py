@@ -28,6 +28,7 @@ import logging
 from typing import Any
 
 from scraper import db, portal_runner
+from scraper.location import CoordResolver
 from scraper.ceskereality_client import (
     REGION_HOSTS,
     CeskerealityClient,
@@ -121,6 +122,10 @@ class CeskerealityPortal:
         # counts — the cross-slice delisting sweep buffer (see mark_inactive).
         self._sweep_seen: dict[tuple[str, str], set[str]] = {}
         self._sweep_done: dict[tuple[str, str], int] = {}
+        # page > carry-forward > geocode. Replaces the parser's never-wired
+        # geocoder plumbing: resolution now happens uniformly AFTER parse, same
+        # as every other portal (scraper.location).
+        self._coords = CoordResolver(SOURCE)
 
     # --- index-walk seams ---
     def categories(self) -> list[dict[str, Any]]:
@@ -136,7 +141,9 @@ class CeskerealityPortal:
         return db.connect()
 
     def connect_drain(self) -> Any:
-        return db.connect()
+        conn = db.connect()
+        self._coords.preload(conn)
+        return conn
 
     def _walk_slice(
         self, client: CeskerealityClient, host: str, sale_type: str, cat: str,
@@ -414,6 +421,9 @@ class CeskerealityPortal:
             )
         except Exception as exc:  # noqa: BLE001
             return DrainItem(native_id=native_id, kind="error", error=str(exc))
+        # Page coords win -> carry a stored geom forward -> geocode the locality
+        # (never fails the fetch; scraper.location).
+        listing = self._coords.fill(native_id, listing)
         return DrainItem(
             native_id=native_id, kind="ok",
             payload={"listing": listing, "html": html, "status": status, "url": url},
