@@ -39,6 +39,11 @@ on:
         required: false
         default: ""
         type: string
+      include_inactive:
+        description: "process INACTIVE rows too (the dedup street pass includes them)"
+        required: false
+        default: false
+        type: boolean
       dry_run:
         description: Report the pending counts and exit without writing
         required: false
@@ -78,4 +83,5 @@ jobs:
           if [ -n "${{ inputs.source }}" ]; then ARGS="$ARGS --source ${{ inputs.source }}"; fi
           if [ -n "${{ inputs.max_seconds }}" ]; then ARGS="$ARGS --max-seconds ${{ inputs.max_seconds }}"; fi
           if [ "${{ inputs.dry_run }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
+          if [ "${{ inputs.include_inactive }}" = "true" ]; then ARGS="$ARGS --include-inactive"; fi
           python -m scripts.backfill_portal_streets $ARGS

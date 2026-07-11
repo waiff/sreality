@@ -78,7 +78,7 @@ _SELECT_SQL = """
            l.raw_json->'locality'->>'value' AS loc_value,
            l.raw_json->>'locality_text' AS loc_text
     FROM listings l
-    WHERE l.source = %(source)s AND l.is_active
+    WHERE l.source = %(source)s AND (l.is_active OR %(include_inactive)s)
       AND l.raw_json->>'portal_street_backfill' IS NULL
       AND ({predicate})
       AND l.sreality_id > %(cursor)s
@@ -168,7 +168,8 @@ _COLS = ("sreality_id", "property_id", "locality", "district", "street",
          "adv_house_number", "adv_zip", "loc_value", "loc_text")
 
 
-def process_source(conn: Any, source: str, limit: int, deadline: float | None) -> dict[str, int]:
+def process_source(conn: Any, source: str, limit: int, deadline: float | None,
+                   include_inactive: bool = False) -> dict[str, int]:
     sql = _SELECT_SQL.format(predicate=_INPUT_PREDICATE[source])
     cursor = _CURSOR_MIN
     updated = skipped = processed = 0
@@ -178,7 +179,8 @@ def process_source(conn: Any, source: str, limit: int, deadline: float | None) -
             break
         chunk_size = min(_CHUNK, limit - processed)
         with conn.cursor() as cur:
-            cur.execute(sql, {"source": source, "cursor": cursor, "chunk": chunk_size})
+            cur.execute(sql, {"source": source, "cursor": cursor, "chunk": chunk_size,
+                              "include_inactive": include_inactive})
             rows = [dict(zip(_COLS, r)) for r in cur.fetchall()]
         if not rows:
             break
@@ -227,6 +229,12 @@ def main() -> int:
                         help="Wall-clock budget; stop claiming and exit cleanly.")
     parser.add_argument("--dry-run", action="store_true",
                         help="Report the pending counts and exit without writing.")
+    parser.add_argument("--include-inactive", action="store_true",
+                        help="Process INACTIVE rows too. The dedup street pass deliberately "
+                             "includes inactive listings (a delisted row must still merge so "
+                             "price history survives), so filling their streets from stored "
+                             "data has real dedup value — the audit's 11.4k sreality "
+                             "locality.value gap is ~99%% inactive history.")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -248,7 +256,8 @@ def main() -> int:
             for source in sources:
                 with conn.cursor() as cur:
                     cur.execute(_SELECT_SQL.format(predicate=_INPUT_PREDICATE[source]),
-                                {"source": source, "cursor": _CURSOR_MIN, "chunk": 1})
+                                {"source": source, "cursor": _CURSOR_MIN, "chunk": 1,
+                                 "include_inactive": args.include_inactive})
                     has = cur.fetchone() is not None
                 LOG.info("BACKFILL source=%s pending=%s", source, "yes" if has else "none")
             return 0
@@ -258,7 +267,8 @@ def main() -> int:
             if deadline is not None and time.monotonic() > deadline:
                 LOG.info("BACKFILL stopping before source=%s: --max-seconds reached", source)
                 break
-            res = process_source(conn, source, args.limit, deadline)
+            res = process_source(conn, source, args.limit, deadline,
+                                 include_inactive=args.include_inactive)
             for k in totals:
                 totals[k] += res[k]
 
