@@ -42,10 +42,20 @@
   queues). Replay on decided pairs: facade-Low+no-High agreed with the final outcome 15/15
   (0 conflicts); 0 of 79 operator-approved non-byt merges carry a facade Low. Enabling is the
   operator's flip.
-- **Phase 4.2 (harness): triggered** a `validate_vision_models` run (Haiku @ 768px, compare-
-  recall gate) — its result gates the model flips.
-- **Model flips (4.3) / 768px (3.1):** blocked on a GREEN harness run; the flips are gated
-  production changes the operator approves.
+- **Phase 4.2 (harness): WORKING** after two fixes (#726 corpus, #727 room-source) + Gemini
+  capability (#754 provider routing, #755 tool-schema strip, #760 3.x prices).
+- **Model flips (4.3) / cheaper VLMs: CLOSED 2026-07-11, harness-measured.** Compare recall
+  vs the 88.3% Sonnet self-baseline: Haiku@768 = 20%, Haiku@1568 = 30%, **Gemini 3.1 Pro
+  @1568 = 72%** at $0.0159/call measured vs Sonnet ~$0.0184 (~14% cheaper for ~18% relative
+  recall loss — no flip, no cascade). gemini-2.5-pro is retired for new projects; Google
+  raised 3.1 Pro to $2/$12 on Jul-2. **Sonnet stays on all forensic lanes**; the compare-lane
+  cost path is the shipped free-first arms + batch discount + embedding coverage.
+- **Encoder upgrades (operator idea, evaluated 2026-07-11): CLOSED.** The June-26 DINOv2
+  A/B (results were buried in workflow logs) showed WORSE pair separation than CLIP B/32
+  (-0.0014 vs -0.0044) with hard negatives at cosine 1.0000 — identical marketing renders
+  defeat any encoder; the render-score exclusion is the real mitigation. ViT-L/14 rejected
+  (10-15x CPU for ~$2-3/day); DINOv3 re-run timed out and was not pursued.
+- **768px (3.1):** still open — needs a Sonnet@768 recall run (~$2) whenever desired.
 
 Update this list as phases ship.
 Written for an autonomous executor session (Opus, max reasoning) with no access to the
