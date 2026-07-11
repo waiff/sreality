@@ -40,12 +40,17 @@ from api.providers.base import (
 LOG = logging.getLogger(__name__)
 
 
-# Source: ai.google.dev/pricing. Gemini 2.5 Pro: $1.25 in / $10 out
-# (<=200K context). Cached content reads at $0.31/MTok.
-# Gemini 2.5 Flash: $0.30 in / $2.50 out, cached at $0.075.
+# Source: ai.google.dev/gemini-api/docs/pricing (verified 2026-07-11). Prices are the
+# <=200K-context tier; >200K bills higher (our vision payloads never approach 200K).
+# The 2.5 series is documented but CLOSED TO NEW PROJECTS — the API returns 404
+# "no longer available to new users" (measured on the freshly-billed sreality key),
+# so current work targets the 3.x ids. Any model an app_settings row or harness
+# dispatch names MUST be here or its llm_calls rows record cost_usd=0.
 PRICES: dict[str, ModelPrice] = {
-    "gemini-2.5-pro":   ModelPrice(1.25, 10.0, 0.31, 0.0),
-    "gemini-2.5-flash": ModelPrice(0.30, 2.5,  0.075, 0.0),
+    "gemini-3.1-pro-preview": ModelPrice(2.00, 12.0, 0.20, 0.0),
+    "gemini-3.5-flash":       ModelPrice(1.50, 9.0,  0.15, 0.0),
+    "gemini-2.5-pro":         ModelPrice(1.25, 10.0, 0.31, 0.0),
+    "gemini-2.5-flash":       ModelPrice(0.30, 2.5,  0.075, 0.0),
 }
 
 
