@@ -1,5 +1,8 @@
 import { Navigate, type RouteObject } from 'react-router-dom';
 import Shell from './components/Shell';
+import Login from './pages/Login';
+import ForgotPassword from './pages/ForgotPassword';
+import UpdatePassword from './pages/UpdatePassword';
 import Browse from './pages/Browse';
 import ListingDetail from './pages/ListingDetail';
 import Health from './pages/Health';
@@ -28,6 +31,12 @@ import Costs from './pages/Costs';
 import DevConfidencePreview from './pages/DevConfidencePreview';
 
 export const routes: RouteObject[] = [
+  // Full-page auth screens (outside the app Shell). Additive — these do not
+  // gate the rest of the app yet; the login gate is flipped in a later Phase 1
+  // increment once shared-market views are re-granted to `authenticated`.
+  { path: '/login', element: <Login />, handle: { title: 'Sign in' } },
+  { path: '/forgot-password', element: <ForgotPassword />, handle: { title: 'Reset password' } },
+  { path: '/reset-password', element: <UpdatePassword />, handle: { title: 'New password' } },
   {
     path: '/',
     element: <Shell />,

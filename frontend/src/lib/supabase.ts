@@ -9,8 +9,16 @@ if (!url || !key) {
   );
 }
 
+// Phase 1 auth: persist + auto-refresh the user session, and detect the session
+// in the URL (OAuth callback + password-reset links). When no user is signed in
+// the client falls back to the anon key exactly as before, so anonymous reads are
+// unchanged — this is additive.
 export const supabase = createClient(url, key, {
-  auth: { persistSession: false },
+  auth: {
+    persistSession: true,
+    autoRefreshToken: true,
+    detectSessionInUrl: true,
+  },
   db: { schema: 'public' },
 });
 
