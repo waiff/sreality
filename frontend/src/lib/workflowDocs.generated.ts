@@ -358,7 +358,8 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
           "maxima",
           "remax",
           "bezrealitky",
-          "bazos"
+          "bazos",
+          "realitymix"
         ]
       },
       {

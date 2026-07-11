@@ -28,6 +28,7 @@ on:
           - remax
           - bezrealitky
           - bazos
+          - realitymix
       limit:
         description: Max listings processed per source per run
         required: false
