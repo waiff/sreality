@@ -38,14 +38,15 @@ not-yet-started bodies of work (design in `docs/design/multi-portal-dedup.md`).
 | Building decomposition | 🟢 mostly done | Paste-a-building unit extraction + fan-out; B3 business-case tab proposed | [roadmap/building-decomposition-track.md](roadmap/building-decomposition-track.md) |
 | Skill refinement | 🟡 active | Phase AI — feedback-driven estimation-skill refinement | [roadmap/skill-refinement-track.md](roadmap/skill-refinement-track.md) |
 | Summarize | ✅ done | Annotated distribution charts (summarize-1) | [roadmap/summarize-track.md](roadmap/summarize-track.md) |
+| Public release | 🟡 active | Accounts, multi-tenancy (RLS), admin gating, Stripe — see `docs/design/public-release-program.md` | [roadmap/public-release-track.md](roadmap/public-release-track.md) |
 | Archive | ✅ 80 entries | All completed phases (dated) | [roadmap/archive.md](roadmap/archive.md) |
 
 ## Out of scope until explicitly opened
 - ClickUp integration.
 - MCP server wrapping the toolkit (for ad-hoc chat with the data).
 - Public read API beyond the bearer-token gate.
-- Per-user identity / accounts in the UI (the `anon` key is shared and
-  read-only; the FastAPI token is shared and gated).
+
+Per-user identity / accounts is no longer out of scope — see the Public release track above.
 
 ## Data preconditions
 - Velocity tools (Phase 3b) work today (1 snapshot per listing is enough
