@@ -6,6 +6,7 @@ import { notificationKeys } from '@/lib/queries';
 import { NewEstimationProvider } from './NewEstimationModal';
 import { ExploreAreaProvider } from './ExploreAreaModal';
 import ToastViewport from './ToastViewport';
+import AccountMenu from './AccountMenu';
 import { APP_NAME } from '@/lib/brand';
 
 type NavItem =
@@ -126,6 +127,9 @@ function TopBar() {
             );
           })}
         </nav>
+        <div className="ml-auto">
+          <AccountMenu />
+        </div>
       </div>
     </header>
   );
