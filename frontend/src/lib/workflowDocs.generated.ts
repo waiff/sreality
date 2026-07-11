@@ -1363,7 +1363,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     ],
     "concurrencyGroup": "dedup-batches",
     "cancelInProgress": false,
-    "timeoutMinutes": 60,
+    "timeoutMinutes": 75,
     "permissions": "contents: read",
     "runsUrl": "https://github.com/waiff/sreality/actions/workflows/dedup_batches.yml",
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/dedup_batches.yml"
