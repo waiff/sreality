@@ -76,9 +76,14 @@ _UPSERT_SQL = """
           tagged_at = now()
 """
 
-# Embeddings (for the cosine recall tier) stored ACTIVE-listing-only — that bounds
-# the footprint to the dedup-relevant set (the cosine tier never scores inactive
-# pairs). pgvector parses the text '[f,f,...]' form.
+# Embeddings (for the cosine recall tier) stored for EVERY tagged image. They were
+# active-listing-only until 2026-07: a listing tagged while delisted got tags but no
+# vector, and on reactivation (touch_listings self-heal) its pairs carried no cosine —
+# which routes the forensic compare to Sonnet BY DESIGN (route_by_cosine: None ->
+# sonnet). Measured: ~19% of tagged images lacked vectors, and >=22% of Sonnet routes
+# were these no-cosine defaults (~$30-45/mo overpay). Storing every tagged image costs
+# ~2KB/row (~+4GB total) and closes the hole for good; nothing deletes vectors, so a
+# vector outlives delist/reactivate cycles. pgvector parses the text '[f,f,...]' form.
 _UPSERT_EMB_SQL = """
     INSERT INTO image_clip_embeddings (image_id, model, embedding)
     VALUES (%s, %s, %s::vector)
@@ -227,7 +232,6 @@ def main() -> int:
         rows, phase = _select_pending(
             conn, limit=args.limit, shards=args.shards, shard=args.shard,
             priority_regions=priority)
-        active = {r[0]: r[2] for r in rows}  # store embeddings for active only
         LOG.info("CLIP_TAG pending=%d phase=%s shard=%d/%d model=%s dry_run=%s",
                  len(rows), phase, args.shard, args.shards, model, args.dry_run)
         if args.dry_run or not rows:
@@ -258,7 +262,7 @@ def main() -> int:
                 ]
                 emb_params = [
                     (image_id, model, _vec_str(emb[i]))
-                    for i, image_id in enumerate(ids) if active.get(image_id)
+                    for i, image_id in enumerate(ids)
                 ]
             with conn.cursor() as cur:
                 if tag_params:
