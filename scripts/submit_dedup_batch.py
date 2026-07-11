@@ -187,7 +187,17 @@ class _Submitter:
             return
         items = [(r.custom_id, r.params) for r in self._chunk]
         mb = self._chunk_bytes / (1024 * 1024)
-        provider_batch_id = self._provider.submit_batch(items)
+        provider_batch_id = self._submit_with_retry(items)
+        if provider_batch_id is None:
+            # A provider failure that outlived the retries: DROP this chunk and keep
+            # collecting. Nothing was inserted, so the pairs are not in-flight and the
+            # next scheduled submit re-collects them. Losing one chunk beats the
+            # pre-retry behaviour, where a single Anthropic 5xx crashed the whole run
+            # and forfeited the 6h submit window (2026-07-09 19:47, run 29045617232).
+            self.stats["submit_failures"] = self.stats.get("submit_failures", 0) + 1
+            self._chunk = []
+            self._chunk_bytes = 0
+            return
         batch_id = _insert_batch(self._conn, provider_batch_id, self._chunk)
         LOG.info(
             "BATCH submitted provider_batch_id=%s requests=%d serialized=%.1fMB "
@@ -197,6 +207,37 @@ class _Submitter:
         self.stats["batches"] += 1
         self._chunk = []
         self._chunk_bytes = 0
+
+    # Anthropic's Batches endpoint throws occasional transient 5xx/529s; one such
+    # error must cost at most one backoff, never the submit window.
+    _SUBMIT_ATTEMPTS = 3
+    _SUBMIT_BACKOFF_S = (10, 30)
+
+    def _submit_with_retry(self, items: list[tuple[str, dict[str, Any]]]) -> str | None:
+        """provider.submit_batch with bounded retries; None when all attempts fail."""
+        last: Exception | None = None
+        for attempt in range(self._SUBMIT_ATTEMPTS):
+            try:
+                return self._provider.submit_batch(items)
+            except Exception as exc:  # noqa: BLE001 — classified below, never crashes the run
+                last = exc
+                msg = str(exc).lower()
+                transient = any(k in msg for k in (
+                    "500", "502", "503", "529", "internal", "overloaded",
+                    "unavailable", "timeout", "connection",
+                ))
+                if not transient:
+                    # Auth / invalid-request / credit errors won't heal on retry.
+                    LOG.error("BATCH submit non-transient failure (chunk dropped): %s", exc)
+                    return None
+                if attempt < self._SUBMIT_ATTEMPTS - 1:
+                    wait = self._SUBMIT_BACKOFF_S[min(attempt, len(self._SUBMIT_BACKOFF_S) - 1)]
+                    LOG.warning("BATCH submit transient failure (attempt %d/%d, retry in %ds): %s",
+                                attempt + 1, self._SUBMIT_ATTEMPTS, wait, exc)
+                    time.sleep(wait)
+        LOG.error("BATCH submit failed after %d attempts (chunk dropped): %s",
+                  self._SUBMIT_ATTEMPTS, last)
+        return None
 
 
 def _kind_counts(chunk: list[_Req]) -> dict[str, int]:
@@ -617,15 +658,22 @@ def main() -> int:
             submitter.flush()
             stats["batches"] = submitter.stats["batches"]
 
+    submit_failures = submitter.stats.get("submit_failures", 0)
     LOG.info(
         "BATCH done visual_candidates=%d want_classify=%d want_compare=%d "
         "want_site_plan=%d want_floor_plan=%d floor_plan_warmed=%d skipped_in_flight=%d "
-        "deferred_classify=%d batches=%d dry_run=%s",
+        "deferred_classify=%d batches=%d submit_failures=%d dry_run=%s",
         stats["visual_candidates"], stats["want_classify"], stats["want_compare"],
         stats["want_site_plan"], stats.get("want_floor_plan", 0),
         stats.get("floor_plan_warmed", 0), stats["skipped_in_flight"],
-        stats["pairs_deferred_classify"], stats["batches"], args.dry_run,
+        stats["pairs_deferred_classify"], stats["batches"], submit_failures, args.dry_run,
     )
+    if submit_failures and not stats["batches"]:
+        # Every flush failed (dead key / provider outage / bad config): a red run is
+        # the only signal — with retries swallowing per-chunk errors, exit 0 here
+        # would disguise a fully-dead submit lane as a quiet no-op.
+        LOG.error("BATCH submit lane produced 0 batches with %d failed flushes", submit_failures)
+        return 1
     return 0
 
 

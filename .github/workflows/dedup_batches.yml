@@ -92,7 +92,9 @@ concurrency:
 jobs:
   batch:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # 75 = the collect() time budget (max-seconds 3000 = 50 min) + pip/setup +
+    # the flush/submit tail. At 60, 3 of 6 Jul-10 submits were killed mid-run.
+    timeout-minutes: 75
     permissions:
       contents: read
     env:

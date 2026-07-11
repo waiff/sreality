@@ -538,3 +538,70 @@ def test_in_flight_request_is_skipped(monkeypatch: Any) -> None:
     enqueued = [r[6] for r in _rows_by_kind(conn).get("compare", [])]
     assert "kitchen" not in enqueued
     assert "bathroom" in enqueued
+
+
+# --- submit retry (a transient 5xx must cost a backoff, never the window) -----
+
+def _req(cid: str = "cmp-1-2-kitchen") -> "sub._Req":
+    return sub._Req(custom_id=cid, kind="compare", model="claude-sonnet-4-5",
+                    sreality_id_a=1, sreality_id_b=2, room_type="kitchen",
+                    image_ids=None, params={"model": "claude-sonnet-4-5"})
+
+
+def test_flush_retries_transient_5xx_then_succeeds(monkeypatch: Any) -> None:
+    calls = {"n": 0}
+
+    class _Flaky(_FakeProvider):
+        def submit_batch(self, items: list[Any]) -> str:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("Internal server error (500) — overloaded")
+            return "batch_ok"
+
+    monkeypatch.setattr(sub.time, "sleep", lambda s: None)
+    conn = _FakeConn()
+    s = sub._Submitter(conn, _Flaky(), max_requests=10, dry_run=False)
+    s._chunk.append(_req())
+    s._chunk_bytes = 10
+    s.flush()
+    assert calls["n"] == 2                       # one retry
+    assert s.stats["batches"] == 1               # the chunk was submitted
+    assert s.stats.get("submit_failures", 0) == 0
+    assert conn.inserted_requests                # bookkeeping row written
+
+
+def test_flush_drops_chunk_after_exhausted_retries(monkeypatch: Any) -> None:
+    class _Dead(_FakeProvider):
+        def submit_batch(self, items: list[Any]) -> str:
+            raise RuntimeError("503 Service Unavailable")
+
+    monkeypatch.setattr(sub.time, "sleep", lambda s: None)
+    conn = _FakeConn()
+    s = sub._Submitter(conn, _Dead(), max_requests=10, dry_run=False)
+    s._chunk.append(_req())
+    s._chunk_bytes = 10
+    s.flush()                                    # must NOT raise
+    assert s.stats.get("batches", 0) == 0
+    assert s.stats["submit_failures"] == 1
+    assert not conn.inserted_requests            # nothing half-recorded
+    assert s._chunk == []                        # chunk dropped, run continues
+
+
+def test_flush_non_transient_error_drops_without_retry(monkeypatch: Any) -> None:
+    calls = {"n": 0}
+
+    class _AuthDead(_FakeProvider):
+        def submit_batch(self, items: list[Any]) -> str:
+            calls["n"] += 1
+            raise RuntimeError("401 authentication_error: invalid x-api-key")
+
+    slept = []
+    monkeypatch.setattr(sub.time, "sleep", lambda s: slept.append(s))
+    conn = _FakeConn()
+    s = sub._Submitter(conn, _AuthDead(), max_requests=10, dry_run=False)
+    s._chunk.append(_req())
+    s._chunk_bytes = 10
+    s.flush()
+    assert calls["n"] == 1                       # no pointless retries on auth errors
+    assert slept == []
+    assert s.stats["submit_failures"] == 1
