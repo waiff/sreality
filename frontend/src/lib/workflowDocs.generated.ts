@@ -379,6 +379,14 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
         "options": null
       },
       {
+        "name": "include_inactive",
+        "description": "process INACTIVE rows too (the dedup street pass includes them)",
+        "required": false,
+        "type": "boolean",
+        "default": "false",
+        "options": null
+      },
+      {
         "name": "dry_run",
         "description": "Report the pending counts and exit without writing",
         "required": false,
