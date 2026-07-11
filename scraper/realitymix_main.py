@@ -29,12 +29,11 @@ from __future__ import annotations
 
 import argparse
 import logging
-from dataclasses import replace
 from math import ceil
 from typing import Any
 
 from scraper import db, portal_runner
-from scraper.geocoding import geocode
+from scraper.location import CoordResolver
 from scraper.portal import (
     PortalConfig,
     default_config,
@@ -48,7 +47,6 @@ from scraper.realitymix_client import RealitymixClient, detail_url
 from scraper.realitymix_parser import (
     CATEGORY_MAIN,
     SALE_TYPE,
-    _in_cz_bbox,
     index_price,
     parse_detail,
     parse_index,
@@ -80,38 +78,6 @@ def _walk_complete(collected: int, total: int | None) -> bool:
     return collected >= total * INDEX_MIN_COMPLETENESS
 
 
-# Geocode tiers too coarse to store: a region/country centroid drops the pin in
-# the middle of the country, worse than NULL for map + radius filter. A
-# municipality (town) centroid is KEPT — it recovers the admin hierarchy
-# (obec/okres/region, derived from geom by the listings trigger) and a rough map
-# placement, the same posture as idnes. Mirrors idnes_main._GEOCODE_SKIP_TYPES.
-_GEOCODE_SKIP_TYPES = frozenset({"regional.region", "regional.country"})
-
-
-def _geocode_fallback(listing: Any) -> Any:
-    """Fill lat/lon by geocoding the listing's locality when the page carried no
-    #print-map (the ~28% map-less case). No-op when coords are already present,
-    the locality is missing, MAPY_CZ_API_KEY is unset, the match is too coarse, or
-    Mapy.cz fails — geocoding must never break a detail fetch. Stamps
-    raw['coords']={'source':'geocode',...} so the Mapy-sourced rows are auditable."""
-    if listing.lat is not None and listing.lon is not None:
-        return listing
-    if not listing.locality:
-        return listing
-    try:
-        result = geocode(listing.locality, timeout_s=5.0, max_retries=1)
-    except Exception:  # noqa: BLE001 - geocoding (incl. unset key) must never fail the fetch
-        return listing
-    # Too coarse (region/country centroid) or outside the CZ bbox (a foreign
-    # mis-match for an ambiguous locality) -> worse than NULL. The bbox guard
-    # matches the backfill so the drain and the one-off pass agree.
-    if result.matched_type in _GEOCODE_SKIP_TYPES or not _in_cz_bbox(result.lat, result.lng):
-        return listing
-    raw = {**listing.raw, "coords": {"source": "geocode", "confidence": result.confidence,
-                                     "matched_type": result.matched_type}}
-    return replace(listing, lat=result.lat, lon=result.lng, raw=raw)
-
-
 class RealitymixPortal:
     """realitymix.cz as a Portal: the seams the generic runner needs, wrapping the
     realitymix client + parser. Operational scope (categories, complete-walk
@@ -127,10 +93,9 @@ class RealitymixPortal:
         self.index_rate = config.limits.index_rate
         self.shared_rate_limiter = config.limits.shared_rate_limiter
         self._price_change_min_pct = config.limits.price_change_min_pct
-        # stored (lat, lon) per native id at drain start; a refetch whose page
-        # carries no coords gets them carried forward instead of re-geocoded — geom
-        # is never wiped and a Mapy credit is only ever spent once per listing.
-        self._have_geom: dict[str, tuple[float, float]] | None = None
+        # page > carry-forward > geocode; preloaded once in connect_drain (the
+        # 2026-06 Mapy-credit incident guard — see scraper.location).
+        self._coords = CoordResolver(SOURCE)
         # per-(cm, ct) union of complete slices' seen ids + completed-slice
         # counts — the cross-slice delisting sweep buffer (see mark_inactive).
         self._sweep_seen: dict[tuple[str, str], set[str]] = {}
@@ -156,37 +121,12 @@ class RealitymixPortal:
 
     def connect_drain(self) -> Any:
         conn = db.connect()
-        # Preload (once, on the main thread) the stored coords of already-placed
-        # rows so the worker-pool fetch_detail carries them forward instead of
-        # re-geocoding a map-less page. Without this, every coords-less realitymix
-        # page (the ~28%) would re-geocode on EVERY refetch — the runaway that
-        # exhausted the Mapy key on idnes (2026-06). A bare skip isn't enough
-        # either: ingesting lat=None wipes the stored geom ("geom = EXCLUDED.geom")
-        # and flips the content hash, oscillating snapshots. New/still-missing rows
-        # still geocode (once).
-        if self._have_geom is None:
-            self._have_geom = db.native_ids_with_geom(conn, SOURCE)
-            LOG.info(
-                "GEOCODE preload have_geom=%d (carry stored coords forward on refetch)",
-                len(self._have_geom),
-            )
+        # Preload (once, on the main thread) the stored coords so the worker-pool
+        # fetch_detail carries them forward instead of re-geocoding a map-less
+        # page — the ~28% of realitymix (the 2026-06 Mapy-credit incident guard;
+        # rationale in scraper.location).
+        self._coords.preload(conn)
         return conn
-
-    def _fill_coords(self, native_id: str, listing: Any) -> Any:
-        """Page-provided coords win; else carry the stored coordinate forward;
-        geocode only when neither the page nor the DB has one. A None have-geom map
-        (never preloaded) falls every coords-less listing through to the geocoder."""
-        if listing.lat is not None and listing.lon is not None:
-            return listing
-        stored = (self._have_geom or {}).get(native_id)
-        if stored is not None:
-            # Mark the carried coord so provenance is stable across refetches (a
-            # geocoded row's raw.coords would otherwise flip back to {source:None}
-            # on the next map-less refetch). Stable 'carry_forward' keeps the
-            # geocode/Mapy-sourced rows attributable (source != 'page').
-            raw = {**listing.raw, "coords": {"source": "carry_forward"}}
-            return replace(listing, lat=stored[0], lon=stored[1], raw=raw)
-        return _geocode_fallback(listing)
 
     def walk_category(
         self, category: dict[str, Any], conn: Any, dry_run: bool, limiter: RateLimiter,
@@ -329,7 +269,7 @@ class RealitymixPortal:
             return DrainItem(native_id=native_id, kind="error", error=str(exc))
         # Page coords win -> carry a stored geom forward -> geocode the locality
         # (map-less listings), at most once per listing.
-        listing = self._fill_coords(native_id, listing)
+        listing = self._coords.fill(native_id, listing)
         return DrainItem(
             native_id=native_id, kind="ok",
             payload={"listing": listing, "html": html, "status": status, "url": url},

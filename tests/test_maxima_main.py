@@ -329,7 +329,9 @@ def test_fetch_detail_ok_derives_category(monkeypatch):
 
     def _fake_parse(html, *, source_url):
         captured["url"] = source_url
-        return SimpleNamespace(raw={"image_urls": ["a.jpg"]})
+        # lat/lon present like every real ScrapedListing — the drain routes
+        # parsed listings through CoordResolver.fill (page coords short-circuit).
+        return SimpleNamespace(raw={"image_urls": ["a.jpg"]}, lat=50.0, lon=14.0)
 
     monkeypatch.setattr(maxima_main, "parse_detail", _fake_parse)
     item = _portal().fetch_detail(

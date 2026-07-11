@@ -10,7 +10,7 @@ from dataclasses import dataclass
 
 from scraper import realitymix_main
 from scraper.portal import default_config
-from scraper.realitymix_main import RealitymixPortal, _geocode_fallback
+from scraper.realitymix_main import RealitymixPortal
 from scraper.scraped_listing import ScrapedListing
 
 
@@ -179,73 +179,31 @@ def test_mark_inactive_single_slice_group_sweeps_immediately(monkeypatch):
                       "seen": {"b1"}, "min_unseen_hours": 12}]
 
 
-# --- geocoding fallback + the carry-forward guard (the Mapy-footgun gate) ---
+# --- shared-resolver wiring (behavior unit-tested in test_location.py) ------
 
-def test_geocode_fallback_fills_mapless_and_stamps_provenance(monkeypatch):
-    monkeypatch.setattr(realitymix_main, "geocode",
-                        lambda q, **k: FakeGeo(50.1, 14.4, "high", "regional.address"))
-    out = _geocode_fallback(_listing(locality="Lidicka, Ostrava"))
-    assert (out.lat, out.lon) == (50.1, 14.4)
-    assert out.raw["coords"] == {"source": "geocode", "confidence": "high",
-                                 "matched_type": "regional.address"}
-
-
-def test_geocode_fallback_skips_when_page_has_coords(monkeypatch):
-    calls: list[str] = []
-    monkeypatch.setattr(realitymix_main, "geocode",
-                        lambda q, **k: calls.append(q) or FakeGeo(0, 0, "low", "x"))
-    page = _listing(locality="Ostrava", lat=49.0, lon=14.0)
-    assert _geocode_fallback(page) is page   # unchanged
-    assert calls == []                        # never geocoded
-
-
-def test_geocode_fallback_skips_no_locality(monkeypatch):
-    monkeypatch.setattr(realitymix_main, "geocode",
-                        lambda q, **k: (_ for _ in ()).throw(AssertionError("must not call")))
-    assert _geocode_fallback(_listing(locality=None)).lat is None
-
-
-def test_geocode_fallback_rejects_coarse_centroid(monkeypatch):
-    monkeypatch.setattr(realitymix_main, "geocode",
-                        lambda q, **k: FakeGeo(49.8, 15.4, "low", "regional.country"))
-    out = _geocode_fallback(_listing(locality="Ostrava"))
-    assert out.lat is None                    # a country centroid is worse than NULL
-
-
-def test_geocode_fallback_rejects_outside_cz_bbox(monkeypatch):
-    # A foreign mis-match for an ambiguous locality (Spain) -> rejected, like the backfill.
-    monkeypatch.setattr(realitymix_main, "geocode",
-                        lambda q, **k: FakeGeo(40.4, 3.7, "high", "regional.address"))
-    out = _geocode_fallback(_listing(locality="Madrid"))
-    assert out.lat is None and out.lon is None
-
-
-def test_geocode_fallback_swallows_errors(monkeypatch):
-    def boom(q, **k):
-        raise RuntimeError("no MAPY key / Mapy down")
-    monkeypatch.setattr(realitymix_main, "geocode", boom)
-    assert _geocode_fallback(_listing(locality="Ostrava")).lat is None   # never breaks the fetch
-
-
-def test_fill_coords_page_wins_then_carry_forward_then_geocode(monkeypatch):
+def test_fill_coords_page_wins_then_carry_forward_then_geocode():
     geo_calls: list[str] = []
-    monkeypatch.setattr(realitymix_main, "geocode",
-                        lambda q, **k: geo_calls.append(q) or FakeGeo(50.0, 14.0, "medium", "regional.street"))
+
+    def geocoder(q):
+        geo_calls.append(q)
+        return FakeGeo(50.0, 14.0, "medium", "regional.street")
+
     portal = RealitymixPortal(default_config("realitymix"))
-    portal._have_geom = {"77": (48.5, 16.2)}
+    portal._coords._geocoder = geocoder
+    portal._coords._have_geom = {"77": (48.5, 16.2)}
 
     # 1. page coords win — untouched, no geocode
     page = _listing(source_id_native="1", lat=49.9, lon=14.1, locality="X")
-    assert portal._fill_coords("1", page) is page
+    assert portal._coords.fill("1", page) is page
 
     # 2. carry-forward — stored geom used, NO geocode (the footgun gate), and the
     #    provenance is stamped 'carry_forward' (stable across refetches, not None).
-    carried = portal._fill_coords("77", _listing(source_id_native="77", locality="X"))
+    carried = portal._coords.fill("77", _listing(source_id_native="77", locality="X"))
     assert (carried.lat, carried.lon) == (48.5, 16.2)
     assert carried.raw["coords"] == {"source": "carry_forward"}
     assert geo_calls == []
 
     # 3. genuinely new + map-less — geocode once
-    fresh = portal._fill_coords("99", _listing(source_id_native="99", locality="Lidicka, Ostrava"))
+    fresh = portal._coords.fill("99", _listing(source_id_native="99", locality="Lidicka, Ostrava"))
     assert (fresh.lat, fresh.lon) == (50.0, 14.0)
     assert geo_calls == ["Lidicka, Ostrava"]

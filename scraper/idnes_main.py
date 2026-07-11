@@ -20,19 +20,18 @@ the queue-encodes-category limitation that constrains bazos. Coordinates come
 straight from the page's embedded map config when present; when the page omits
 it (~a third of listings) the drain carries an already-stored coordinate
 forward, and only a never-placed listing falls back to geocoding the locality
-via Mapy.cz (`_geocode_fallback`) so those listings still appear on the map and
-in radius/location filters instead of being silently dropped.
+via Mapy.cz (the shared `scraper.location.CoordResolver`) so those listings
+still appear on the map and in radius/location filters instead of being
+silently dropped.
 """
 
 from __future__ import annotations
 
 import argparse
 import logging
-from dataclasses import replace
 from typing import Any
 
 from scraper import db, portal_runner
-from scraper.geocoding import geocode
 from scraper.idnes_client import IdnesClient, detail_url
 from scraper.idnes_parser import (
     CATEGORY_MAIN,
@@ -50,35 +49,11 @@ from scraper.portal import (
 )
 from scraper.portal_base import ListingGoneError
 from scraper.portal_runner import DrainItem
+from scraper.location import CoordResolver
 from scraper.rate_limit import RateLimiter
 
 LOG = logging.getLogger(__name__)
 SOURCE = "idnes"
-
-# Geocode tiers too coarse to be worth a coordinate: a region/country centroid
-# would drop the pin in the middle of the country, which is worse than NULL for
-# both map display and the radius filter. City / district / street are kept.
-_GEOCODE_SKIP_TYPES = frozenset({"regional.region", "regional.country"})
-
-
-def _geocode_fallback(listing: Any) -> Any:
-    """Fill lat/lon by geocoding the locality when the page carried no map config.
-
-    No-op (returns the listing unchanged) when coords are already present, the
-    locality is missing, MAPY_CZ_API_KEY is unset, or Mapy.cz fails — geocoding
-    must never break a detail fetch. Bounded latency for the hot drain path.
-    """
-    if listing.lat is not None and listing.lon is not None:
-        return listing
-    if not listing.locality:
-        return listing
-    try:
-        result = geocode(listing.locality, timeout_s=5.0, max_retries=1)
-    except Exception:  # noqa: BLE001 - geocoding (incl. unset key) must never fail the fetch
-        return listing
-    if result.matched_type in _GEOCODE_SKIP_TYPES:
-        return listing
-    return replace(listing, lat=result.lat, lon=result.lng)
 
 # An index walk must collect ~the FULL page-reported total before it drives
 # mark_inactive (rule #3). 100% is statistically unreachable on large
@@ -137,10 +112,9 @@ class IdnesPortal:
             price_change_min_pct if price_change_min_pct is not None
             else config.limits.price_change_min_pct
         )
-        # stored (lat, lon) per native id at drain start; a refetch whose page
-        # carries no coords gets them carried forward instead of re-geocoded —
-        # geom is never wiped and a Mapy credit is only ever spent once.
-        self._have_geom: dict[str, tuple[float, float]] | None = None
+        # page > carry-forward > geocode; preloaded once in connect_drain (the
+        # 2026-06 Mapy-credit incident guard — see scraper.location).
+        self._coords = CoordResolver(SOURCE)
 
     # --- index-walk seams ---
     def set_index_page_cap(self, pages: int | None) -> None:
@@ -164,33 +138,11 @@ class IdnesPortal:
         # Single-row ingest (ingest_scraped_listing), not batched prepared writes,
         # so the transaction pooler is fine — no session pooler needed.
         conn = db.connect()
-        # Preload (once, on the main thread) the stored coords of already-placed
-        # rows, so the worker-pool fetch_detail can carry them forward instead of
-        # re-geocoding. Without this, every coords-less iDNES page re-geocodes on
-        # EVERY refetch — the runaway that exhausted the Mapy key (2026-06). A
-        # bare skip isn't enough either: ingesting lat=None wipes the stored geom
-        # ("geom = EXCLUDED.geom") and flips the content hash, so each refetch
-        # oscillated between the geocoded and the wiped state, churning snapshots.
-        # Genuinely-new and still-missing rows still geocode.
-        if self._have_geom is None:
-            self._have_geom = db.native_ids_with_geom(conn, SOURCE)
-            LOG.info(
-                "GEOCODE preload have_geom=%d (carry stored coords forward on refetch)",
-                len(self._have_geom),
-            )
+        # Preload (once, on the main thread) the stored coords so the worker-pool
+        # fetch_detail carries them forward instead of re-geocoding (the 2026-06
+        # Mapy-credit incident guard — rationale in scraper.location).
+        self._coords.preload(conn)
         return conn
-
-    def _fill_coords(self, native_id: str, listing: Any) -> Any:
-        """Page-provided coords win; else carry the stored coordinate forward;
-        geocode only when neither the page nor the DB has one. When the
-        have-geom map was never preloaded (None), every coords-less listing
-        falls through to the geocoder — the old always-geocode behaviour."""
-        if listing.lat is not None and listing.lon is not None:
-            return listing
-        stored = (self._have_geom or {}).get(native_id)
-        if stored is not None:
-            return replace(listing, lat=stored[0], lon=stored[1])
-        return _geocode_fallback(listing)
 
     def walk_category(
         self, category: dict[str, Any], conn: Any, dry_run: bool, limiter: RateLimiter,
@@ -304,7 +256,7 @@ class IdnesPortal:
             )
         except Exception as exc:  # noqa: BLE001
             return DrainItem(native_id=native_id, kind="error", error=str(exc))
-        listing = self._fill_coords(native_id, listing)
+        listing = self._coords.fill(native_id, listing)
         return DrainItem(
             native_id=native_id, kind="ok",
             payload={"listing": listing, "html": html, "status": status, "url": url},

@@ -298,7 +298,7 @@ def _build_portal(source: str, config: PortalConfig) -> Any:
         # Bazos predates the config-taking constructor: it takes scopes +
         # geocoder and reads its limits off attributes (the bazos_main.main
         # wiring, reproduced here).
-        from scraper import bazos_main
+        from scraper import bazos_main, location
 
         scopes = [
             c for c in config.categories
@@ -306,7 +306,7 @@ def _build_portal(source: str, config: PortalConfig) -> Any:
             and bazos_main.CATEGORY_MAIN.get(c.get("category"))
         ]
         portal = bazos_main.BazosPortal(
-            categories=scopes, geocoder=bazos_main._build_geocoder(),
+            categories=scopes, geocoder=location.build_geocoder(),
         )
         portal.index_rate = config.limits.index_rate
         portal.shared_rate_limiter = config.limits.shared_rate_limiter

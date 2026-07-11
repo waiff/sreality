@@ -27,17 +27,14 @@ import json
 import re
 from dataclasses import dataclass, field
 from html import unescape
-from typing import Any, Callable
+from typing import Any
 from unicodedata import combining, normalize
 
 from selectolax.parser import HTMLParser, Node
 
 from scraper import street
-from scraper.geocoding import GeocodeResult, GeocodingError
 from scraper.published import czech_date
 from scraper.scraped_listing import ScrapedListing
-
-Geocoder = Callable[[str], GeocodeResult]
 
 # ceskereality URL segments -> our canonical labels (mirrors parser.CATEGORY_*).
 # Both the search and the detail URL use the SAME plural segment
@@ -421,9 +418,11 @@ def _street_fields(
     return cleaned, house
 
 
-def _resolve_coords(
-    html: str, locality: str | None, geocoder: Geocoder | None
-) -> tuple[float | None, float | None, dict[str, Any]]:
+def _resolve_coords(html: str) -> tuple[float | None, float | None, dict[str, Any]]:
+    """Page-embedded coords only. Geocoding is NOT a parser concern: the drain
+    resolves coords-less listings after parse via scraper.location.CoordResolver
+    (carry-forward first, then a guarded Mapy fallback) — the parser's old
+    `geocoder` param was plumbing that no caller ever wired."""
     lat_m, lng_m = _COORD_LAT_RE.search(html), _COORD_LNG_RE.search(html)
     if lat_m and lng_m:
         lat, lon = float(lat_m.group(1)), float(lng_m.group(1))
@@ -434,13 +433,6 @@ def _resolve_coords(
         lat, lon = float(q.group(1)), float(q.group(2))
         if _in_cz_bbox(lat, lon):
             return lat, lon, {"source": "page"}
-    if geocoder is not None and locality:
-        try:
-            g = geocoder(locality)
-        except GeocodingError:
-            g = None
-        if g is not None and _in_cz_bbox(g.lat, g.lng):
-            return g.lat, g.lng, {"source": "geocode", "confidence": g.confidence}
     return None, None, {"source": None}
 
 
@@ -492,7 +484,6 @@ def parse_detail(
     source_url: str,
     category_main: str | None,
     category_type: str | None,
-    geocoder: Geocoder | None = None,
 ) -> ScrapedListing:
     tree = HTMLParser(html)
     source_id = _id_from_href(source_url) or ""
@@ -519,7 +510,7 @@ def parse_detail(
     locality = ", ".join(
         p for p in (address.get("streetAddress"), address.get("addressLocality")) if p
     ) or _text(tree.css_first(".i-estate-detail__locality"))
-    lat, lon, coord_provenance = _resolve_coords(html, locality, geocoder)
+    lat, lon, coord_provenance = _resolve_coords(html)
     street_name, house_number = _street_fields(
         address, source_url, geo_names=[address.get("addressLocality")], lat=lat, lon=lon,
     )
