@@ -1,4 +1,4 @@
--- 290_byt_geo_cell_key.sql
+-- 296_byt_geo_cell_key.sql
 -- Byt geo rung B: extend the stored dedup blocking-cell key (migration 276) to
 -- APARTMENTS, so street-less byt stop being structurally invisible to dedup.
 --
@@ -79,7 +79,7 @@ $$;
 COMMENT ON COLUMN listings.geo_cell_key IS
   'Trigger-maintained dedup blocking cell (public.listing_geo_cell_key: obec + '
   '4dp-rounded coordinate + category bucket + offering); the single definition of '
-  'the cell-blocked families'' key (migrations 276 + 290). Stamped for the four geo '
+  'the cell-blocked families'' key (migrations 276 + 296). Stamped for the four geo '
   'families AND byt (own ''byt'' bucket — the byt geo rung shards it by disposition '
   'at load). NULL outside those categories or without obec_id/geom. Derived — never '
   'in the content hash.';

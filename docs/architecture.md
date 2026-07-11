@@ -778,7 +778,7 @@ renumber.** Navigate by area:
     **Byt geo rung B (street-less apartments), default OFF.** A street-less byt is invisible to the
     street pass (rule A needs street + disposition) and deliberately EXCLUDED from the geo families
     (one building stacks many units on one coordinate) — ~19.3k active byt were reachable by NEITHER
-    pass (2026-07-11 audit; 89% of them carry a disposition). The rung: migration 290 extends the
+    pass (2026-07-11 audit; 89% of them carry a disposition). The rung: migration 296 extends the
     stored `listings.geo_cell_key` to byt (its OWN `'byt'` bucket — never co-celled with
     `dum|komercni`; `publication.CELL_FAMILIES = GEO_FAMILIES + ('byt',)` is the pinned Python twin),
     and the loader (`_load_geo_eligible(rung='byt_geo')`, `BYT_GEO_ELIGIBLE_PREDICATE`: active byt +
@@ -796,7 +796,7 @@ renumber.** Navigate by area:
     whole-cell O(n²) free-for-all. Scheduling mirrors geo wholesale: its OWN cron (`--byt-geo-only`,
     hours 1/7/13/19 offset from geo, `run_kind='byt_geo'`, `lane='byt_geo'` cursor in
     `dedup_scan_state`), gated by the `dedup_byt_geo_enabled` master switch (registry default
-    **OFF** until the operator flips it after the migration-290 backfill). The real-time dirty drain
+    **OFF** until the operator flips it after the migration-296 backfill). The real-time dirty drain
     runs a THIRD sub-pass over the claimed properties' byt cells UNGATED — the exact posture of the
     geo sub-pass vs `dedup_geo_enabled` (the switch gates only the scheduled backstop) — which is
     also what keeps the three-arm `eligible_predicate` publication gate coherent: a new street-less

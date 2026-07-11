@@ -46,7 +46,7 @@ scans, monitors).
   the geo pass (a street-eligible dům can meet its street-less cell peers, ~841 active
   listings were mutually invisible), with both-street-eligible PAIRS skipped so the
   street pass keeps sole ownership.
-- **Byt geo rung B (migration 290, 2026-07-11)** — street-less apartments (~19.3k active byt
+- **Byt geo rung B (migration 296, 2026-07-11)** — street-less apartments (~19.3k active byt
   reachable by neither pass) get a geo-cell+disposition CANDIDATE rung: byt stamps its own
   `geo_cell_key` bucket, the loader shards cells by disposition class, and
   `classify_byt_geo_pair` queues survivors as `tier='byt_geo'` — candidate-generation only,
@@ -55,7 +55,7 @@ scans, monitors).
   `run_kind='byt_geo'`, `lane='byt_geo'` cursor, cron 1/7/13/19) gated **OFF** by
   `dedup_byt_geo_enabled`; the dirty drain grew a third sub-pass over claimed byt cells
   (ungated — geo posture); warmer `byt_geo` lane mirrors the engine. **After merge:** apply
-  migration 290, run the batched byt backfill (mig-276 pattern), then flip the setting.
+  migration 296, run the batched byt backfill (mig-276 pattern), then flip the setting.
 
 **Still open:** the Wave C worker prerequisites (create the Railway service, flip
 `shared_rate_limiter` on, images-first inline pHash + warm-CLIP + matcher wake); **W5b** (SLO-scaled

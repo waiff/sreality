@@ -352,7 +352,7 @@ def test_geo_families_pin_migration_276_sql_twin():
     """publication.GEO_FAMILIES is the single PYTHON source of the geo category list;
     HISTORICAL migration 276's listing_geo_cell_key() carried the four-family SQL twin
     (SQL can't import Python). The 276 file is frozen (rule #1) and must keep matching
-    GEO_FAMILIES exactly; the LIVE function is migration 290's (pinned to CELL_FAMILIES
+    GEO_FAMILIES exactly; the LIVE function is migration 296's (pinned to CELL_FAMILIES
     below). The rendered geo predicate IN-list must still be built from GEO_FAMILIES."""
     from toolkit.publication import GEO_ELIGIBLE_PREDICATE, GEO_FAMILIES
 
@@ -365,9 +365,9 @@ def test_geo_families_pin_migration_276_sql_twin():
         assert found == GEO_FAMILIES
 
 
-def test_cell_families_pin_migration_290_sql_twin():
+def test_cell_families_pin_migration_296_sql_twin():
     """publication.CELL_FAMILIES (= GEO_FAMILIES + byt) is the single PYTHON source of
-    the CELL-STAMPED category list; migration 290's redefined listing_geo_cell_key()
+    the CELL-STAMPED category list; migration 296's redefined listing_geo_cell_key()
     — the LIVE function — carries the SQL twin. This pins the two, exactly like the
     276/GEO_FAMILIES pin: the function body's NOT IN list must be EXACTLY
     CELL_FAMILIES, and byt must stay OUT of the dum|komercni collapse (its own
@@ -380,14 +380,14 @@ def test_cell_families_pin_migration_290_sql_twin():
     assert "l.category_main = 'byt'" in BYT_GEO_ELIGIBLE_PREDICATE
     assert "l.disposition IS NOT NULL" in BYT_GEO_ELIGIBLE_PREDICATE
 
-    lists = _migration_cell_key_lists("290_byt_geo_cell_key.sql")
-    assert lists, "migration 290 function body lost its category list"
+    lists = _migration_cell_key_lists("296_byt_geo_cell_key.sql")
+    assert lists, "migration 296 function body lost its category list"
     for found in lists:
         assert found == CELL_FAMILIES
 
     # byt buckets to ITSELF: the collapse branch must still name only dum+komercni.
     text = (Path(__file__).resolve().parents[1]
-            / "migrations" / "290_byt_geo_cell_key.sql").read_text()
+            / "migrations" / "296_byt_geo_cell_key.sql").read_text()
     start = text.index("CREATE OR REPLACE FUNCTION public.listing_geo_cell_key")
     body = text[start:text.index("$$;", start)]
     assert "IN ('dum', 'komercni')" in body
