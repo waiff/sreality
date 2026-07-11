@@ -13,6 +13,11 @@ The no-estimates discipline (the four design guards):
       listings of the same source on the exact rounded coordinate (a real
       building coordinate is ~unique; a town/quarter geocode is shared by many);
     * sreality: reject `locality.accuracy = 'not_address'` (municipality-level);
+    * geocode-PROVENANCED coords (raw coords.source='geocode', stamped by
+      scraper.location / the coords backfills) are eligible only at
+      matched_type='regional.address' — a street/town centroid is not a
+      building coordinate. Carried-forward rows whose stamp was replaced fall
+      back to the shared-pin + exact-match rails (the accepted idnes posture);
     * bazoš EXCLUDED entirely (its detail-link coordinate is one pin per town);
     * `pozemek` (land) EXCLUDED — a parcel has no building street; the nearest
       address point would be a neighbour's, not the parcel's.
@@ -66,8 +71,15 @@ from scraper.street import street_name_key
 
 LOG = logging.getLogger("backfill_address_point_streets")
 
-# bazoš excluded (town-center link pins).
-_SOURCES: tuple[str, ...] = ("sreality", "idnes", "remax", "bezrealitky", "maxima")
+# bazoš excluded (town-center link pins). mmreality (estate-JSON coords),
+# ceskereality (data-coord attrs) and realitymix (data-gps; its geocoded tail is
+# gated by the coords-provenance arm in _CANDIDATE_SQL + the shared-pin reject)
+# joined with the location-resolution layer (2026-07) — they previously never
+# ran through the resolver at all.
+_SOURCES: tuple[str, ...] = (
+    "sreality", "idnes", "remax", "bezrealitky", "maxima",
+    "mmreality", "ceskereality", "realitymix",
+)
 _CHUNK = 500
 _CURSOR_MIN = -(10 ** 18)
 _CALIBRATED_TOLERANCE = 15.0
@@ -105,6 +117,8 @@ _CANDIDATE_SQL = """
       AND st_x(l.geom::geometry) BETWEEN 12.0 AND 19.0
       AND (%(source)s <> 'sreality'
            OR l.raw_json->'locality'->>'accuracy' IS DISTINCT FROM 'not_address')
+      AND (l.raw_json->'coords'->>'source' IS DISTINCT FROM 'geocode'
+           OR l.raw_json->'coords'->>'matched_type' = 'regional.address')
       AND (%(force)s
            OR l.coord_street_attempt_version IS NULL
            OR l.coord_street_attempt_version <> %(version)s)

@@ -41,6 +41,9 @@ on:
           - remax
           - bezrealitky
           - maxima
+          - mmreality
+          - ceskereality
+          - realitymix
       dry_run:
         description: Match but write nothing
         required: false
