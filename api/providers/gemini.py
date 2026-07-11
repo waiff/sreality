@@ -162,15 +162,39 @@ def _msg_to_gemini(msg: Message, types: Any) -> Any:
     return types.Content(role=role, parts=parts)
 
 
+# JSON-Schema keys Gemini's FunctionDeclaration.parameters rejects with a 400
+# INVALID_ARGUMENT ("Unknown name additional_properties ... Cannot find field").
+# Our Anthropic-shaped tool schemas set additionalProperties: false throughout;
+# Gemini's OpenAPI-subset schema has no such field, so it is dropped (Gemini is
+# lenient about extra keys in tool ARGUMENTS anyway — the extractors ignore
+# unknown keys). Found by the first live Gemini harness smoke run (2026-07-11:
+# every call 400'd before the model was ever reached).
+_GEMINI_UNSUPPORTED_SCHEMA_KEYS = frozenset({"additionalProperties", "$schema"})
+
+
+def _schema_for_gemini(node: Any) -> Any:
+    """Recursively strip JSON-Schema keys Gemini's schema parser rejects."""
+    if isinstance(node, dict):
+        return {
+            k: _schema_for_gemini(v)
+            for k, v in node.items()
+            if k not in _GEMINI_UNSUPPORTED_SCHEMA_KEYS
+        }
+    if isinstance(node, list):
+        return [_schema_for_gemini(x) for x in node]
+    return node
+
+
 def _tool_to_gemini(tool: ToolSchema) -> Any:
     # google.genai.types.FunctionDeclaration accepts a JSON Schema dict
-    # via `parameters` — same shape Anthropic uses as `input_schema`.
+    # via `parameters` — same shape Anthropic uses as `input_schema`, minus
+    # the keys Gemini's OpenAPI subset rejects (_schema_for_gemini).
     # Late import to avoid module-level dependency.
     from google.genai import types
     return types.FunctionDeclaration(
         name=tool.name,
         description=tool.description,
-        parameters=tool.input_schema,
+        parameters=_schema_for_gemini(tool.input_schema),
     )
 
 

@@ -243,3 +243,36 @@ def test_missing_api_key_raises():
                 Message(role="user", content=[TextBlock(text="x")]),
             ], tools=[], model="gemini-2.5-pro",
         )
+
+
+def test_schema_for_gemini_strips_additional_properties_recursively():
+    # Gemini's FunctionDeclaration.parameters 400s on additionalProperties
+    # ("Unknown name additional_properties ... Cannot find field") — every
+    # Anthropic-shaped tool schema in this repo sets it, at multiple depths.
+    from api.providers.gemini import _schema_for_gemini
+
+    dirty = {
+        "type": "object",
+        "additionalProperties": False,
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+            "rooms": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {"index": {"type": "integer"}},
+                },
+            },
+        },
+        "required": ["rooms"],
+    }
+    clean = _schema_for_gemini(dirty)
+    assert "additionalProperties" not in clean
+    assert "$schema" not in clean
+    assert "additionalProperties" not in clean["properties"]["rooms"]["items"]
+    # everything else survives untouched
+    assert clean["required"] == ["rooms"]
+    assert clean["properties"]["rooms"]["items"]["properties"]["index"] == {"type": "integer"}
+    # the original is not mutated (pure)
+    assert dirty["additionalProperties"] is False
