@@ -50,6 +50,19 @@ create policy property_pipeline_events_tenant_rw on property_pipeline_events
   using (account_id in (select current_account_ids()))
   with check (account_id in (select current_account_ids()));
 
+do $$
+declare
+  t text;
+  seq text;
+begin
+  foreach t in array array['pipeline_stages','property_pipeline_events'] loop
+    seq := pg_get_serial_sequence(t, 'id');
+    if seq is not null then
+      execute format('grant usage on sequence %s to authenticated', seq);
+    end if;
+  end loop;
+end $$;
+
 -- ── seed_default_pipeline(account_id): the default board, per account ──────
 -- Stage keys/labels mirror the operator's live board so a post-backfill
 -- re-seed no-ops on the per-account unique.

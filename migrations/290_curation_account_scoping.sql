@@ -104,4 +104,20 @@ create policy manual_rental_estimates_admin_update on manual_rental_estimates
   using (is_platform_admin())
   with check (is_platform_admin());
 
+-- INSERT grants are useless without USAGE on the id sequences (nextval runs
+-- as the inserting role) — the tenant-isolation CI lane caught this live.
+do $$
+declare
+  t text;
+  seq text;
+begin
+  foreach t in array array['collections','tags','property_notes','filter_presets',
+                           'notification_subscriptions','manual_rental_estimates'] loop
+    seq := pg_get_serial_sequence(t, 'id');
+    if seq is not null then
+      execute format('grant usage on sequence %s to authenticated', seq);
+    end if;
+  end loop;
+end $$;
+
 commit;

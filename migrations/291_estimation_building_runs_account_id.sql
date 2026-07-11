@@ -55,4 +55,17 @@ create policy building_runs_tenant_update on building_runs
   using (account_id in (select current_account_ids()))
   with check (account_id in (select current_account_ids()));
 
+do $$
+declare
+  t text;
+  seq text;
+begin
+  foreach t in array array['estimation_runs','building_runs'] loop
+    seq := pg_get_serial_sequence(t, 'id');
+    if seq is not null then
+      execute format('grant usage on sequence %s to authenticated', seq);
+    end if;
+  end loop;
+end $$;
+
 commit;

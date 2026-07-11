@@ -210,4 +210,19 @@ update estimation_feedback ef set account_id = er.account_id
 update building_run_attachments bra set account_id = br.account_id
   from building_runs br where br.id = bra.building_run_id and bra.account_id is distinct from br.account_id;
 
+do $$
+declare
+  t text;
+  seq text;
+begin
+  foreach t in array array['collection_properties','property_tags',
+                           'estimation_cohort_entries','estimation_trace_payloads',
+                           'estimation_feedback','building_run_attachments'] loop
+    seq := pg_get_serial_sequence(t, 'id');
+    if seq is not null then
+      execute format('grant usage on sequence %s to authenticated', seq);
+    end if;
+  end loop;
+end $$;
+
 commit;
