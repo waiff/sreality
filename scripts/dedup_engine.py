@@ -53,6 +53,7 @@ from toolkit.dedup_engine import (
     CosineBands,
     ListingKey,
     PairDecision,
+    classify_byt_geo_pair,
     classify_geo_pair,
     classify_pair,
     DISTINCTIVE_ROOMS,
@@ -73,7 +74,7 @@ from toolkit.dedup_engine import (
 )
 from toolkit.image_classification import SITE_PLAN_ROOM_TYPE
 from toolkit.property_identity import MergeError, merge_properties
-from toolkit.publication import GEO_ELIGIBLE_PREDICATE
+from toolkit.publication import BYT_GEO_ELIGIBLE_PREDICATE, GEO_ELIGIBLE_PREDICATE
 from toolkit.room_taxonomy import FLOOR_PLAN_ROOM_TYPE
 
 LOG = logging.getLogger("dedup_engine")
@@ -571,6 +572,15 @@ def _should_run_geo(*, geo: bool, geo_only: bool, geo_enabled: bool, dirty: bool
     return (geo or (geo_only and geo_enabled)) and not dirty
 
 
+def _should_run_byt_geo(*, byt_geo_only: bool, enabled: bool, dirty: bool) -> bool:
+    """Whether MAIN should run the FULL byt geo rung — the _should_run_geo mirror.
+    Only the dedicated `--byt-geo-only` scheduled cron runs it, gated by the
+    `dedup_byt_geo_enabled` master switch (registry default OFF); never auto-bolted
+    onto the street/candidate runs, and never on the dirty drain (run_dirty_pass runs
+    its own byt sub-pass scoped to the claimed cells)."""
+    return byt_geo_only and enabled and not dirty
+
+
 def _clear_dedup_dirty(conn: Any, property_ids: set[int], cutoff: Any) -> int:
     """Delete the claimed ids that have NOT been re-dirtied since the cutoff."""
     if not property_ids:
@@ -643,30 +653,47 @@ _CLAIMED_GEO_CELLS_SQL = f"""
       AND {GEO_ELIGIBLE_PREDICATE}
 """
 
+# The byt rung's twin: same DISTINCT-stored-cell shape, byt eligibility. The cell
+# populations are disjoint by construction (byt keys carry the 'byt' bucket; geo keys
+# 'dum|komercni'/'pozemek'/'ostatni'), so the two claims never overlap.
+_CLAIMED_BYT_GEO_CELLS_SQL = f"""
+    SELECT DISTINCT l.geo_cell_key
+    FROM listings l
+    WHERE l.property_id = ANY(%s)
+      AND l.geo_cell_key IS NOT NULL
+      AND {BYT_GEO_ELIGIBLE_PREDICATE}
+"""
 
-def _claimed_geo_cells(conn: Any, property_ids: set[int]) -> set[str]:
-    """The geo blocking CELLS the claimed dirty properties' geo-eligible listings
-    occupy — the work-list the --dirty geo sub-pass expands into full cells (peers
-    included) via _load_geo_eligible(restrict_cells=...). Empty claim / no
-    geo-family listings => empty set (the sub-pass is skipped, never a full scan)."""
+
+def _claimed_geo_cells(
+    conn: Any, property_ids: set[int], rung: str = "geo"
+) -> set[str]:
+    """The blocking CELLS the claimed dirty properties' cell-eligible listings occupy
+    for `rung` ('geo' | 'byt_geo') — the work-list the --dirty cell sub-passes expand
+    into full cells (peers included) via _load_geo_eligible(restrict_cells=...). Empty
+    claim / no matching listings => empty set (the sub-pass is skipped, never a full
+    scan)."""
     if not property_ids:
         return set()
+    sql = _CLAIMED_BYT_GEO_CELLS_SQL if rung == "byt_geo" else _CLAIMED_GEO_CELLS_SQL
     with conn.cursor() as cur:
-        cur.execute(_CLAIMED_GEO_CELLS_SQL, (list(property_ids),))
+        cur.execute(sql, (list(property_ids),))
         return {r[0] for r in cur.fetchall() if r[0] is not None}
 
 
 # Per-family eligibility of each claimed property — what the dirty pass's PER-FAMILY
-# clear keys on. The geo arm mirrors _CLAIMED_GEO_CELLS_SQL (stored cell required, no
-# street exclusion — a street-eligible geo-family row counts for BOTH families), so
-# "geo-eligible" here == "the geo sub-pass can actually load it"; a geo-family row
-# whose cell isn't stamped yet resolves as not-geo-eligible and falls to the scheduled
-# geo scan instead of pinning its queue row forever.
+# clear keys on. The geo + byt-geo arms mirror their _CLAIMED_*_CELLS_SQL (stored cell
+# required, no street exclusion — a street-eligible cell-family row counts for BOTH
+# families), so "cell-eligible" here == "that sub-pass can actually load it"; a row
+# whose cell isn't stamped yet (pre-backfill) resolves as not-eligible for its cell
+# rung and falls to the scheduled scan instead of pinning its queue row forever.
 _CLAIMED_FAMILY_ELIGIBILITY_SQL = f"""
     SELECT l.property_id,
            bool_or({_ELIGIBILITY}) AS street_eligible,
            bool_or({GEO_ELIGIBLE_PREDICATE}
-                   AND l.geo_cell_key IS NOT NULL) AS geo_eligible
+                   AND l.geo_cell_key IS NOT NULL) AS geo_eligible,
+           bool_or({BYT_GEO_ELIGIBLE_PREDICATE}
+                   AND l.geo_cell_key IS NOT NULL) AS byt_geo_eligible
     FROM listings l
     WHERE l.property_id = ANY(%s)
     GROUP BY 1
@@ -675,17 +702,19 @@ _CLAIMED_FAMILY_ELIGIBILITY_SQL = f"""
 
 def _claimed_family_eligibility(
     conn: Any, property_ids: set[int]
-) -> dict[int, tuple[bool, bool]]:
-    """property_id -> (street_eligible, geo_eligible) over ANY of its listings. A pid
-    clears from dedup_dirty_properties only when every family it is eligible for was
-    resolved this pass; a pid eligible for NEITHER clears immediately (queue hygiene —
-    the ineligible publish sweep owns its publication). Missing pids (no listings)
-    read as (False, False)."""
+) -> dict[int, tuple[bool, bool, bool]]:
+    """property_id -> (street_eligible, geo_eligible, byt_geo_eligible) over ANY of its
+    listings. A pid clears from dedup_dirty_properties only when every family it is
+    eligible for was resolved this pass; a pid eligible for NONE clears immediately
+    (queue hygiene — the ineligible publish sweep owns its publication). Missing pids
+    (no listings) read as (False, False, False)."""
     if not property_ids:
         return {}
     with conn.cursor() as cur:
         cur.execute(_CLAIMED_FAMILY_ELIGIBILITY_SQL, (list(property_ids),))
-        return {int(r[0]): (bool(r[1]), bool(r[2])) for r in cur.fetchall()}
+        return {
+            int(r[0]): (bool(r[1]), bool(r[2]), bool(r[3])) for r in cur.fetchall()
+        }
 
 
 def _resolve_candidates(conn: Any, pairs: set[tuple[int, int]], new_status: str) -> int:
@@ -803,48 +832,62 @@ def _enqueue_candidate(
         )
 
 
-# --- geo path (single-dwelling families) ------------------------------------
-# Houses/land/commercial blocked by geo cell (one obec + a rounded coordinate). ACTIVE
+# --- cell paths: geo (single-dwelling families) + byt geo rung ---------------
+# Blocked by geo cell (one obec + a rounded coordinate + category bucket). ACTIVE
 # only for P1 (the operator's pain is active duplicate cards); inactive-for-history is
-# a later concern. Street-eligible geo-family rows are INCLUDED (they used to be
+# a later concern. Street-eligible cell-family rows are INCLUDED (they used to be
 # excluded, which made a street-eligible dum and a street-less dum of the same house
 # mutually invisible — real missed pairs); the per-row street_eligible flag lets
 # resolve_pair skip the pairs where BOTH sides are street-eligible, so the street pass
 # (different classifier rules) keeps sole ownership of those and candidates never
-# flip-flop between passes.
-_GEO_ELIGIBLE_SQL = f"""
+# flip-flop between passes. ONE column shape for both rungs (disposition + floor ride
+# along; the geo rung ignores them, the byt rung shards + floor-guards on them).
+def _cell_eligible_sql(predicate: str) -> str:
+    return f"""
     SELECT l.sreality_id, l.property_id, l.source, l.house_number,
            coalesce(l.area_m2, l.estate_area, l.usable_area) AS area,
            left(l.description, 600) AS description,
            l.category_type, l.category_main, l.price_czk,
            ST_Y(l.geom::geometry) AS lat, ST_X(l.geom::geometry) AS lng,
            l.geo_cell_key,
-           ({_ELIGIBILITY}) AS street_eligible
+           ({_ELIGIBILITY}) AS street_eligible,
+           l.disposition, l.floor
     FROM listings l
     JOIN properties p ON p.id = l.property_id AND p.status = 'active'
-    WHERE {GEO_ELIGIBLE_PREDICATE}
+    WHERE {predicate}
       {{filter}}
     ORDER BY l.obec_id, l.category_main, l.category_type
 """
 
 
+_GEO_ELIGIBLE_SQL = _cell_eligible_sql(GEO_ELIGIBLE_PREDICATE)
+_BYT_GEO_ELIGIBLE_SQL = _cell_eligible_sql(BYT_GEO_ELIGIBLE_PREDICATE)
+
+
 def _load_geo_eligible(conn: Any,
                        restrict_property_ids: set[int] | None = None,
-                       restrict_cells: set[str] | None = None) -> list[ListingKey]:
-    """One ListingKey per geo-eligible single-dwelling listing, keyed by the STORED
-    listings.geo_cell_key (migration 276 trigger — the single SQL definition of the
-    blocking cell; no Python recompute) so the existing _group_by_street groups them.
-    Carries lat/lng/price for the geo classifier; disposition/floor/street_id are
-    unused on this path. Rows whose stored key is still NULL (pre-backfill / trigger
-    not yet fired) are skipped — they merely wait for the next run, never mis-group.
+                       restrict_cells: set[str] | None = None,
+                       rung: str = "geo") -> list[ListingKey]:
+    """One ListingKey per cell-eligible listing of `rung` ('geo' single-dwelling |
+    'byt_geo' street-less apartments), keyed by the STORED listings.geo_cell_key
+    (migrations 276/290 trigger — the single SQL definition of the blocking cell; no
+    Python recompute) so the existing _group_by_street groups them. Carries
+    lat/lng/price for the cell classifiers. Rows whose stored key is still NULL
+    (pre-backfill / trigger not yet fired) are skipped — they merely wait for the next
+    run, never mis-group.
+
+    The byt rung appends the SAME `|d:{disposition_class}` shard suffix the street
+    loader uses (loss-free by construction), so one 4dp cell splits into per-
+    disposition groups and carries disposition + floor for classify_byt_geo_pair; the
+    geo rung keeps the bare cell (no usable disposition on those families).
 
     Two MUTUALLY-EXCLUSIVE scoping modes (mirrors _load_eligible); an EMPTY set on
     either restricts to nothing (not all):
     - `restrict_property_ids` scopes to those properties' OWN listings (the candidate
       drain).
-    - `restrict_cells` loads every geo-eligible listing in those CELLS — peers
-      included, an index seek on listings_geo_cell_key_idx — the --dirty geo
-      sub-pass: a dirty property re-decides against its whole cell, O(dirty)."""
+    - `restrict_cells` loads every cell-eligible listing in those CELLS — peers
+      included, an index seek on listings_geo_cell_key_idx — the --dirty cell
+      sub-passes: a dirty property re-decides against its whole cell, O(dirty)."""
     if restrict_property_ids is not None and restrict_cells is not None:
         raise ValueError("restrict_property_ids and restrict_cells are mutually exclusive")
     params: dict[str, Any] = {}
@@ -855,9 +898,11 @@ def _load_geo_eligible(conn: Any,
     elif restrict_property_ids is not None:
         flt = "AND l.property_id = ANY(%(pids)s)"
         params["pids"] = list(restrict_property_ids)
+    sql = _BYT_GEO_ELIGIBLE_SQL if rung == "byt_geo" else _GEO_ELIGIBLE_SQL
     with conn.cursor() as cur:
-        cur.execute(_GEO_ELIGIBLE_SQL.format(filter=flt), params)
+        cur.execute(sql.format(filter=flt), params)
         rows = cur.fetchall()
+    byt = rung == "byt_geo"
     keys: list[ListingKey] = []
     for r in rows:
         cell = r[11]
@@ -866,8 +911,11 @@ def _load_geo_eligible(conn: Any,
         keys.append(ListingKey(
             sreality_id=int(r[0]),
             property_id=int(r[1]) if r[1] is not None else None,
-            source=r[2], street_key=cell, disposition="",
-            house_number=r[3], floor=None,
+            source=r[2],
+            street_key=f"{cell}|d:{disposition_class(r[13])}" if byt else cell,
+            disposition=(r[13] if byt else ""),
+            house_number=r[3],
+            floor=(int(r[14]) if byt and r[14] is not None else None),
             area_m2=float(r[4]) if r[4] is not None else None,
             description=r[5], category_type=r[6], category_main=r[7],
             street_id=None,
@@ -1776,13 +1824,14 @@ def resolve_pair(conn: Any, a: ListingKey, b: ListingKey, *, street_key: str,
     street group's listing ids, passed by run_engine's loop) lets the pHash probes batch
     per GROUP instead of per pair; absent -> per-pair queries, identical results."""
     stats = ctx.stats
-    # Cross-pass ownership (geo path only): the geo load includes street-eligible
-    # geo-family rows so they can meet their street-less cell peers, but a pair with
-    # BOTH sides street-eligible belongs to the street pass — its classifier rules
-    # differ, and deciding the pair on both passes would flip-flop candidates (the
-    # dismissal-treadmill failure class). Skip BEFORE any probe/budget spend and
-    # record NOTHING (not a dismissal — the street pass owns the pair).
-    if ctx.tier == "geo" and a.street_eligible and b.street_eligible:
+    # Cross-pass ownership (EVERY non-street tier — geo and byt_geo): the cell loads
+    # include street-eligible rows so they can meet their street-less cell peers, but
+    # a pair with BOTH sides street-eligible belongs to the street pass — its
+    # classifier rules differ, and deciding the pair on both passes would flip-flop
+    # candidates (the dismissal-treadmill failure class). Skip BEFORE any probe/budget
+    # spend and record NOTHING (not a dismissal — the street pass owns the pair),
+    # regardless of which cell lane surfaced it.
+    if ctx.tier != "street_disposition" and a.street_eligible and b.street_eligible:
         return
     # Dual-keyed listings appear in their 'id:' AND 'name:' groups; classify each
     # listing pair once (first group wins).
@@ -2179,6 +2228,17 @@ def _make_geo_classify(area_max_pct: float | None) -> Any:
     return _fn
 
 
+def _make_byt_geo_classify() -> Any:
+    """The byt geo rung's candidate filter for resolve_pair: classify_byt_geo_pair on
+    the byt profile (its own 10% area gate — NOT the operator's wider geo tolerance;
+    stacked units differ mainly in area, the exact chain-merge hazard the unified 10%
+    exists for). The classifier has NO auto_merge path to map away — every survivor is
+    already a candidate; pHash / forensic High stay the only merge gates."""
+    def _fn(a: ListingKey, b: ListingKey) -> PairDecision:
+        return classify_byt_geo_pair(a, b, profile_for(a.category_main))
+    return _fn
+
+
 def run_engine(
     conn: Any,
     *,
@@ -2211,6 +2271,7 @@ def run_engine(
     cursor_out: dict[str, Any] | None = None,
     geo: bool = False,
     geo_area_max_pct: float | None = None,
+    byt_geo: bool = False,
     nonbyt_attr_merge: bool = False,
     nonbyt_phash_single: bool = False,
     nonbyt_cosine_merge_min: float = 0.0,
@@ -2228,6 +2289,12 @@ def run_engine(
     the sole merge gate), and the queue tier ('geo'). Everything else — pHash → cosine
     → forensic compare (facade / site-plan priority via room_priority_for) →
     floor/site-plan gate — is shared.
+
+    byt_geo=True is the byt geo rung (rung B): the same cell machinery over
+    STREET-LESS APARTMENTS — loader rung='byt_geo' (stored cell + the street loader's
+    disposition-class shard suffix), candidate filter classify_byt_geo_pair
+    (CANDIDATE-only, no auto_merge path at all), queue tier 'byt_geo'. Mutually
+    exclusive with geo=True.
 
     classify_fn(sreality_id) -> classify_listing_images envelope.
     compare_fn(a, b, room_type, ids_a, ids_b) -> {verdict, rationale} | None.
@@ -2255,12 +2322,15 @@ def run_engine(
     scoped = (restrict_property_ids is not None or restrict_street_groups is not None
               or restrict_geo_cells is not None
               or only_groups_with_property_ids is not None)
-    if geo:
-        # restrict_geo_cells is the --dirty geo sub-pass's scope (the claimed
-        # properties' stored cells, peers included) — the geo analogue of the street
+    if geo and byt_geo:
+        raise ValueError("geo and byt_geo are mutually exclusive run modes")
+    cell_rung = "byt_geo" if byt_geo else ("geo" if geo else None)
+    if cell_rung is not None:
+        # restrict_geo_cells is the --dirty cell sub-passes' scope (the claimed
+        # properties' stored cells, peers included) — the cell analogue of the street
         # path's restrict_street_groups.
         keys = _load_geo_eligible(conn, restrict_property_ids=restrict_property_ids,
-                                  restrict_cells=restrict_geo_cells)
+                                  restrict_cells=restrict_geo_cells, rung=cell_rung)
         stats = {
             "eligible": len({k.sreality_id for k in keys}),
             "flagged_location": None, "flagged_disposition": None,
@@ -2296,11 +2366,11 @@ def run_engine(
         "dirty_age_p95_seconds": None, "dirty_pruned": None,
     })
 
-    if not geo:
+    if cell_rung is None:
         stats["reconciled"] = _reconcile_stale_candidates(conn, dry_run=dry_run)
 
     groups = _group_by_street(keys)
-    max_group_size = MAX_GEO_GROUP_SIZE if geo else MAX_GROUP_SIZE
+    max_group_size = MAX_GEO_GROUP_SIZE if cell_rung is not None else MAX_GROUP_SIZE
 
     # Per-group progress for the --dirty drain's INCREMENTAL clear (`resolved_property_ids`
     # out-collector): a property is RESOLVED once EVERY group containing it has been scanned —
@@ -2341,22 +2411,28 @@ def run_engine(
                 resolved_property_ids.add(m.property_id)  # type: ignore[union-attr]
             else:
                 remaining_groups[m.property_id] = left - 1
-    # The candidate FILTER + queue tier are the geo path's only divergence; the geo classify
-    # maps auto_merge → candidate so a deterministic geo signal never merges on its own — the
-    # shared free-first visual flow is the sole merge gate.
-    classify = _make_geo_classify(geo_area_max_pct) if geo else classify_pair
+    # The candidate FILTER + queue tier are the cell paths' only divergence; the geo classify
+    # maps auto_merge → candidate (and the byt-geo classify HAS no auto_merge) so a
+    # deterministic cell signal never merges on its own — the shared free-first visual flow
+    # is the sole merge gate.
+    if byt_geo:
+        classify = _make_byt_geo_classify()
+    elif geo:
+        classify = _make_geo_classify(geo_area_max_pct)
+    else:
+        classify = classify_pair
     from toolkit.dedup_priorities import load_tag_priority_overrides
     tag_overrides = load_tag_priority_overrides(conn)
-    # Prior-dismissal consult, SCOPED runs only (dirty / candidate drains re-form the
+    # Prior-dismissal consult, SCOPED street runs only (dirty / candidate drains re-form the
     # same pairs every pass; the full scan is cursor-rotated — one re-decision per cycle
     # is its designed refresh, and its property set is the whole market, too big to load).
     dismissed_prior = (
         _load_prior_dismissed(conn, {k.property_id for k in keys if k.property_id is not None})
-        if scoped and not geo else None)
+        if scoped and cell_rung is None else None)
     _vision_budget = [max_vision_calls]
     ctx = _RunContext(
         dismissed_prior=dismissed_prior,
-        classify=classify, tier=("geo" if geo else "street_disposition"),
+        classify=classify, tier=(cell_rung or "street_disposition"),
         tag_overrides=tag_overrides, clip_model=clip_model,
         classify_fn=classify_fn, compare_fn=compare_fn, site_plan_fn=site_plan_fn,
         floor_plan_fn=floor_plan_fn, cosine_fn=cosine_fn, bands=bands, model_for=model_for,
@@ -2901,20 +2977,25 @@ def run_dirty_pass(
     stamp_stats: Any = None,
 ) -> dict[str, int] | None:
     """One bounded real-time dirty pass: prune → claim (newest-first) → per-FAMILY
-    scoped resolve (the street groups first, then the claimed properties' geo CELLS —
-    both through the one resolve_pair brain) → per-family incremental clear → ONE run
-    row (run_kind='dirty'; its pair/merge counters cover BOTH families). The reusable
-    core shared by the GH Actions --dirty cron and the realtime worker's dedup lane
-    (`runner` tags the row). Returns the run stats, or None when the queue was empty —
-    no run row is written then, so a worker polling every minute never spams
-    dedup_engine_runs.
+    scoped resolve (the street groups first, then the claimed properties' geo CELLS,
+    then their BYT-GEO cells — all through the one resolve_pair brain) → per-family
+    incremental clear → ONE run row (run_kind='dirty'; its pair/merge counters cover
+    ALL families). The reusable core shared by the GH Actions --dirty cron and the
+    realtime worker's dedup lane (`runner` tags the row). Returns the run stats, or
+    None when the queue was empty — no run row is written then, so a worker polling
+    every minute never spams dedup_engine_runs.
 
     `engine_kw` is the shared run_engine configuration (vision fns, budgets, flags) the
-    caller assembled; the geo sub-pass derives its kwargs from the SAME dict (same fns,
-    same shared wall-clock deadline — street runs first, geo gets the remainder) with
-    enqueue_unresolved forced ON (geo has no rule-B and its pairs never merge on the
-    deterministic geo signal, so the tier-'geo' /dedup queue is its only surfacing
-    mechanism). `stamp_stats` lets the caller fold its own counters (clip
+    caller assembled; the cell sub-passes derive their kwargs from the SAME dict (same
+    fns, same shared wall-clock deadline — street runs first, the cells get the
+    remainder) with enqueue_unresolved forced ON (the cell rungs have no rule-B and
+    their pairs never merge on the deterministic cell signal, so the tier-'geo' /
+    tier-'byt_geo' /dedup queue is their only surfacing mechanism). Like the geo
+    sub-pass, the byt sub-pass is NOT gated by its master switch
+    (dedup_byt_geo_enabled gates only the scheduled full rung, exactly as
+    dedup_geo_enabled gates only --geo-only) — the ungated dirty arm is what evaluates
+    + publishes a new street-less byt in real time instead of stranding it
+    unpublished. `stamp_stats` lets the caller fold its own counters (clip
     classifications, vision errors) into the stats before the row is written."""
     from datetime import datetime, timezone
 
@@ -2993,6 +3074,37 @@ def run_dirty_pass(
                 **geo_kw,
             )
             stats = _merge_dirty_stats(stats, geo_stats)
+    # BYT-GEO sub-pass: the claim's street-less-apartment work — the claimed
+    # properties' stored byt cells, loaded WITH PEERS (disposition-sharded) and
+    # resolved through the same resolve_pair brain (classify_byt_geo_pair is
+    # candidate-only, so pHash / forensic-High stay the only merge gates). Runs LAST
+    # on the shared deadline; deferred whole when the earlier sub-passes exhausted it
+    # (its pids keep their claim — the per-family clear never drops un-run work).
+    dirty_resolved_byt_geo: set[int] = set()
+    byt_geo_cells = _claimed_geo_cells(conn, only_groups, rung="byt_geo")
+    if byt_geo_cells:
+        deadline = engine_kw.get("deadline")
+        if deadline is not None and time.monotonic() >= deadline:
+            LOG.info("DIRTY drain: wall-clock budget exhausted before the byt-geo "
+                     "sub-pass; %d byt cells deferred (their claims stay)",
+                     len(byt_geo_cells))
+            stats["truncated"] = 1
+            if not stats.get("truncated_cause"):
+                stats["truncated_cause"] = "deadline"
+        else:
+            byt_kw = {**engine_kw, "enqueue_unresolved": True,
+                      "restrict_property_ids": None}
+            LOG.info("DIRTY drain: byt-geo sub-pass over %d cells", len(byt_geo_cells))
+            byt_stats = run_engine(
+                conn, audit=pair_audit, max_pairs=max_pairs,
+                byt_geo=True,
+                restrict_geo_cells=byt_geo_cells,
+                only_groups_with_property_ids=only_groups,
+                resolved_property_ids=dirty_resolved_byt_geo,
+                priority_property_order=claimed,
+                **byt_kw,
+            )
+            stats = _merge_dirty_stats(stats, byt_stats)
     if stamp_stats is not None:
         stamp_stats(stats)
     # Queue-health gauges (migrations 255/258/271): depth + slice at run start, whole-queue
@@ -3004,19 +3116,22 @@ def run_dirty_pass(
     if not shadow:
         # PER-FAMILY incremental clear: a claimed property clears only when EVERY
         # family it is eligible for was resolved this run (`dirty_resolved_street` /
-        # `dirty_resolved_geo`, tracked per-group in run_engine) — a street-only pid
-        # clears on the street resolve alone, a geo-only pid on the geo resolve, a
-        # both-family pid needs both, and a neither-eligible pid clears immediately
-        # (queue hygiene; the ineligible publish sweep owns its publication). A
-        # deadline/pair-cap-truncated (or deadline-skipped geo) run thus still clears
-        # the slice it finished — monotonic progress every run — while unfinished
-        # properties keep their claim and re-drain next pass, newest-first.
+        # `dirty_resolved_geo` / `dirty_resolved_byt_geo`, tracked per-group in
+        # run_engine) — a street-only pid clears on the street resolve alone, a
+        # cell-only pid on its cell resolve, a multi-family pid needs each of its
+        # families, and a nowhere-eligible pid clears immediately (queue hygiene; the
+        # ineligible publish sweep owns its publication). A deadline/pair-cap-truncated
+        # (or deadline-skipped cell sub-pass) run thus still clears the slice it
+        # finished — monotonic progress every run — while unfinished properties keep
+        # their claim and re-drain next pass, newest-first.
         truncated = bool(stats.get("truncated"))
         stats["dirty_truncated"] = 1 if truncated else 0
+        _none = (False, False, False)
         clearable = {
             pid for pid in only_groups
-            if (not family.get(pid, (False, False))[0] or pid in dirty_resolved_street)
-            and (not family.get(pid, (False, False))[1] or pid in dirty_resolved_geo)
+            if (not family.get(pid, _none)[0] or pid in dirty_resolved_street)
+            and (not family.get(pid, _none)[1] or pid in dirty_resolved_geo)
+            and (not family.get(pid, _none)[2] or pid in dirty_resolved_byt_geo)
         }
         cleared = _clear_dedup_dirty(conn, clearable, cutoff)
         stats["dirty_cleared"] = cleared
@@ -3199,8 +3314,14 @@ def main() -> int:
                              "which runs its own geo sub-pass scoped to the claimed cells.")
     parser.add_argument("--geo-only", action="store_true",
                         help="Run ONLY the geo pass (skip the street engine).")
+    parser.add_argument("--byt-geo-only", action="store_true",
+                        help="Run ONLY the byt geo rung (street-less apartments blocked "
+                             "on geo cell + disposition; candidate-generation only). The "
+                             "dedicated scheduled cron — gated by the dedup_byt_geo_enabled "
+                             "master switch (default OFF).")
     parser.add_argument("--geo-max-pairs", type=int, default=20000,
-                        help="Max geo candidate pairs examined per run.")
+                        help="Max cell-lane candidate pairs examined per run (the geo "
+                             "AND byt-geo passes).")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -3255,6 +3376,14 @@ def main() -> int:
             geo=args.geo, geo_only=args.geo_only, geo_enabled=geo_enabled, dirty=args.dirty)
         if args.geo_only and not run_geo:
             LOG.info("GEO-only run but dedup_geo_enabled is off — nothing to do.")
+            return 0
+        # Byt geo rung: the same dedicated-cron posture as geo (own budget, own lane),
+        # gated by its OWN master switch. The dirty drain runs its own byt sub-pass.
+        byt_geo_enabled = bool(read_setting(conn, "dedup_byt_geo_enabled"))
+        run_byt_geo = _should_run_byt_geo(
+            byt_geo_only=args.byt_geo_only, enabled=byt_geo_enabled, dirty=args.dirty)
+        if args.byt_geo_only and not run_byt_geo:
+            LOG.info("BYT-GEO-only run but dedup_byt_geo_enabled is off — nothing to do.")
             return 0
         geo_area_max_pct = float(read_setting(conn, "dedup_geo_area_max_pct"))
 
@@ -3393,7 +3522,7 @@ def main() -> int:
             clip_model=clip["clip_model"],
         )
 
-        if not args.geo_only:
+        if not args.geo_only and not args.byt_geo_only:
             if args.dirty:
                 stats = run_dirty_pass(
                     conn, max_dirty=args.max_dirty, max_pairs=args.max_pairs,
@@ -3540,6 +3669,67 @@ def main() -> int:
                 geo_stats["auto_dismissed"], geo_stats.get("floor_plan_deferred", 0),
                 geo_stats["queued"], geo_stats["skipped_unresolved"], geo_stats["rejected"],
                 geo_stats["pairs_considered"], geo_stats["vision_calls"], geo_area_max_pct,
+            )
+
+        if run_byt_geo:
+            # The byt geo rung mirrors the geo lane wholesale: same free-first flow,
+            # byt_geo=True swaps the loader rung (cell + disposition shard) + the
+            # candidate filter (classify_byt_geo_pair — CANDIDATE-only, no auto_merge
+            # to map) + the queue tier ('byt_geo'). Its decisions land in
+            # dedup_pair_audit, the tier='byt_geo' candidate queue, and its OWN
+            # run_kind='byt_geo' run row; the full scan advances a lane='byt_geo'
+            # cursor in dedup_scan_state. enqueue_unresolved is forced ON exactly like
+            # geo: the rung never merges on its deterministic signal, so the queue is
+            # its surfacing mechanism (pHash / forensic High still auto-merge the
+            # photo-sharing cross-portal pairs downstream).
+            byt_audit: list[dict[str, Any]] = []
+            byt_started_at = datetime.now(timezone.utc)
+            byt_clip_base = clip_counter[0]
+            byt_err_base = vision_errors[0]
+            byt_kw = {**engine_kw, "enqueue_unresolved": True}
+            byt_full_scan = not args.candidates and restrict is None
+            byt_cursor_out: dict[str, Any] | None = None
+            byt_scan_state: dict[str, Any] = {"cursor_key": None, "cycle_started_at": None}
+            byt_cycle_started_at: Any = None
+            if byt_full_scan:
+                byt_scan_state = _load_scan_state(conn, "byt_geo")
+                byt_cycle_started_at = byt_scan_state["cycle_started_at"] or byt_started_at
+                byt_cursor_out = {}
+                LOG.info("CURSOR byt-geo scan resuming after %r (cycle started %s)",
+                         byt_scan_state["cursor_key"], byt_cycle_started_at)
+            byt_stats = run_engine(
+                conn, audit=byt_audit, max_pairs=args.geo_max_pairs,
+                byt_geo=True,
+                scan_cursor=byt_scan_state["cursor_key"], cursor_out=byt_cursor_out,
+                **byt_kw,
+            )
+            byt_stats["clip_classified"] = clip_counter[0] - byt_clip_base
+            byt_stats["vision_errors"] = vision_errors[0] - byt_err_base
+            if not args.shadow:
+                if byt_full_scan and byt_cursor_out is not None:
+                    byt_reached_end = bool(byt_cursor_out.get("reached_end"))
+                    byt_new_cursor = (
+                        None if byt_reached_end
+                        else (byt_cursor_out.get("last_key")
+                              or byt_scan_state["cursor_key"]))
+                    _save_scan_state(
+                        conn, "byt_geo", cursor_key=byt_new_cursor,
+                        cycle_started_at=byt_cycle_started_at, completed=byt_reached_end)
+                    LOG.info("CURSOR byt-geo saved: %s",
+                             "cycle COMPLETED" if byt_reached_end
+                             else f"frontier at {byt_new_cursor!r}")
+                _write_run_row(conn, byt_stats, run_kind="byt_geo",
+                               started_at=byt_started_at)
+                _write_pair_audit(conn, run_at, byt_audit)
+            LOG.info(
+                "BYT-GEO %s eligible=%d auto_phash=%d auto_visual=%d auto_dismissed=%d "
+                "floor_plan_deferred=%d queued=%d skipped_unresolved=%d rejected=%d "
+                "pairs=%d vision_calls=%d",
+                "shadow" if args.shadow else "done",
+                byt_stats["eligible"], byt_stats["auto_phash"], byt_stats["auto_visual"],
+                byt_stats["auto_dismissed"], byt_stats.get("floor_plan_deferred", 0),
+                byt_stats["queued"], byt_stats["skipped_unresolved"], byt_stats["rejected"],
+                byt_stats["pairs_considered"], byt_stats["vision_calls"],
             )
     return 0
 

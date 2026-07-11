@@ -43,6 +43,7 @@ on:
     - cron: "30 */2 * * *"   # CANDIDATE DRAIN (free) — re-decide only the queued candidates
     - cron: "45 * * * *"     # DIRTY DRAIN (free) — real-time, just after the hourly CLIP tag job
     - cron: "0 3,9,15,21 * * *"  # GEO SCAN — single-dwelling (houses/land/commercial), own budget
+    - cron: "0 1,7,13,19 * * *"  # BYT-GEO SCAN — street-less apartments (cell+disposition), gated OFF by default
   workflow_dispatch:
     inputs:
       max_pairs:
@@ -120,6 +121,14 @@ on:
         type: string
       geo_only:
         description: GEO scan — single-dwelling (house/land/commercial) only, the geo-proximity path (pair with shadow=true for a volume preview)
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+      byt_geo_only:
+        description: BYT-GEO scan — street-less apartments only (geo cell + disposition, candidate-generation; gated by dedup_byt_geo_enabled)
         required: false
         default: "false"
         type: choice
@@ -218,6 +227,19 @@ jobs:
             # review, bounded by --max-vision-calls. Gated by the dedup_geo_enabled master switch.
             ARGS="--geo-only --max-pairs 200000 --geo-max-pairs 20000"
             ARGS="$ARGS --max-vision-calls 300 --max-room-attempts 4 --max-seconds 4800 --floor-plan-budget 300"
+          elif [ "${{ github.event.schedule }}" = "0 1,7,13,19 * * *" ]; then
+            # SCHEDULED BYT-GEO SCAN (paid, bounded): street-less apartments blocked on geo
+            # cell + disposition — the rung that makes ~19.3k byt reachable that neither the
+            # street pass (no street) nor the geo pass (byt excluded by design) can touch.
+            # CANDIDATE-GENERATION ONLY: classify_byt_geo_pair never auto-merges; pHash (with
+            # byt render-exclusion) / forensic High are the only merge gates, so the bounded
+            # vision budget below is what auto-resolves the photo-sharing cross-portal pairs
+            # and the rest queue as tier='byt_geo'. Offset from the geo run's hours; serialized
+            # with the other batch runs by the shared concurrency group. Gated by the
+            # dedup_byt_geo_enabled master switch (registry default OFF — the run exits
+            # immediately until the operator flips it after the migration-290 backfill).
+            ARGS="--byt-geo-only --max-pairs 200000 --geo-max-pairs 20000"
+            ARGS="$ARGS --max-vision-calls 300 --max-room-attempts 4 --max-seconds 4800 --floor-plan-budget 300"
           elif [ "${{ github.event_name }}" = "schedule" ]; then
             # SCHEDULED FULL SCAN = FREE: pHash + rule merges + reconcile + market discovery.
             #   * --compare-budget 300 (W2): live forensic compares on the new different-photo
@@ -243,6 +265,7 @@ jobs:
             if [ "${{ inputs.candidates }}" = "true" ]; then ARGS="$ARGS --candidates"; fi
             if [ "${{ inputs.dirty }}" = "true" ]; then ARGS="$ARGS --dirty --max-dirty ${{ inputs.max_dirty || '3000' }}"; fi
             if [ "${{ inputs.geo_only }}" = "true" ]; then ARGS="$ARGS --geo-only"; fi
+            if [ "${{ inputs.byt_geo_only }}" = "true" ]; then ARGS="$ARGS --byt-geo-only"; fi
           fi
           echo "python -m scripts.dedup_engine $ARGS"
           python -m scripts.dedup_engine $ARGS

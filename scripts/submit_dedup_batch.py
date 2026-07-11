@@ -54,6 +54,7 @@ from scripts.dedup_engine import (
     _high_render_image_ids,
     _load_eligible,
     _load_geo_eligible,
+    _make_byt_geo_classify,
     _make_geo_classify,
     _phash_distinctive_match,
     _phash_identical_pairs,
@@ -259,6 +260,7 @@ def collect(
     max_seconds: int = 0,
     lane: str = "street",
     geo_classify: Any = None,
+    byt_geo_classify: Any = None,
     clip_model: str | None = None,
 ) -> dict[str, int]:
     """Walk the engine's free funnel and enqueue the visual requests it implies.
@@ -290,16 +292,21 @@ def collect(
     # per-pair probes below are short and stay on the OLTP default.
     with conn.transaction(), conn.cursor() as cur:
         cur.execute("SET LOCAL statement_timeout = '10min'")
-        # Lane = which population to warm (§4.1 names street/geo/candidates). 'candidates'
-        # is the review-queue blitz population: exactly the proposed pairs' own listings,
-        # both tiers, so the drain's re-decides replay over warm caches. Geo keys carry
-        # their cell in street_key, so _group_by_street groups all three lanes correctly.
+        # Lane = which population to warm (§4.1 names street/geo/candidates; byt_geo is
+        # the street-less-apartment cell rung). 'candidates' is the review-queue blitz
+        # population: exactly the proposed pairs' own listings, all tiers, so the
+        # drain's re-decides replay over warm caches. Cell keys carry their cell in
+        # street_key, so _group_by_street groups every lane correctly.
         if lane == "geo":
             keys = _load_geo_eligible(conn)
+        elif lane == "byt_geo":
+            keys = _load_geo_eligible(conn, rung="byt_geo")
         elif lane == "candidates":
             pids = _proposed_candidate_property_ids(conn, redecide_hours=None)
             keys = _load_eligible(conn, restrict_property_ids=pids)
             keys = keys + _load_geo_eligible(conn, restrict_property_ids=pids)
+            keys = keys + _load_geo_eligible(
+                conn, restrict_property_ids=pids, rung="byt_geo")
         else:
             keys = _load_eligible(conn)
     groups = _group_by_street(keys)
@@ -340,14 +347,19 @@ def collect(
                     continue
                 seen_listing_pairs.add(lpair)
 
-                # Geo-keyed pairs (street_key 'geo:…') must use the geo candidate filter —
-                # classify_pair would judge them on street/disposition fields they don't carry.
+                # Cell-keyed pairs (street_key 'geo:…') must use their rung's candidate
+                # filter — classify_pair would judge them on street fields cell keys
+                # don't carry. Byt cells (their own 'byt' bucket; a cell group is
+                # category-homogeneous) route to the byt-geo classifier; the geo
+                # families to the geo one — mirroring the engine's classify seam.
                 if (a.street_key or "").startswith("geo:"):
-                    if geo_classify is None:
-                        continue  # geo pair in a street-only run: out of scope
+                    cell_classify = (
+                        byt_geo_classify if a.category_main == "byt" else geo_classify)
+                    if cell_classify is None:
+                        continue  # cell pair in a run without its classifier: out of scope
                     if a.street_eligible and b.street_eligible:
                         continue  # street pass owns the pair; the engine skips it too
-                    decision = geo_classify(a, b)
+                    decision = cell_classify(a, b)
                 else:
                     decision = classify_pair(a, b)
                 if decision.action == "reject":
@@ -590,10 +602,12 @@ def main() -> int:
                              "room the engine tries first). Higher = more discount coverage for "
                              "more speculative spend. Cannot exceed --max-room-attempts.")
     parser.add_argument("--n-images", type=int, default=DEFAULT_CLASSIFY_N_IMAGES)
-    parser.add_argument("--lane", choices=("street", "geo", "candidates"), default="street",
+    parser.add_argument("--lane", choices=("street", "geo", "byt_geo", "candidates"),
+                        default="street",
                         help="Population to warm: the street funnel (default), the geo "
-                             "funnel, or 'candidates' = exactly the proposed review-queue "
-                             "pairs (both tiers) — the queue-blitz population.")
+                             "funnel, the byt_geo funnel (street-less apartments, "
+                             "cell+disposition), or 'candidates' = exactly the proposed "
+                             "review-queue pairs (all tiers) — the queue-blitz population.")
     parser.add_argument("--max-seconds", type=int, default=3000,
                         help="Wall-clock budget; stop enqueuing and finalize cleanly when reached "
                              "(0 = no budget). Default 50min — below the workflow's 60-min kill, "
@@ -649,12 +663,16 @@ def main() -> int:
         if args.lane in ("geo", "candidates"):
             geo_classify = _make_geo_classify(
                 float(read_setting(conn, "dedup_geo_area_max_pct")))
+        byt_geo_classify = None
+        if args.lane in ("byt_geo", "candidates"):
+            byt_geo_classify = _make_byt_geo_classify()
         stats = collect(
             conn, llm_client, submitter,
             max_pairs=args.max_pairs, max_room_attempts=args.max_room_attempts,
             n_images=args.n_images, warm_rooms=args.warm_rooms,
             max_seconds=args.max_seconds,
-            lane=args.lane, geo_classify=geo_classify, clip_model=clip_model,
+            lane=args.lane, geo_classify=geo_classify,
+            byt_geo_classify=byt_geo_classify, clip_model=clip_model,
         )
         if not args.dry_run:
             submitter.flush()

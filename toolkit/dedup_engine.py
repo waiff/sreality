@@ -709,6 +709,54 @@ def classify_geo_pair(
     return PairDecision("candidate", "geo_strong" if strong else "geo_weak")
 
 
+def classify_byt_geo_pair(
+    a: ListingKey, b: ListingKey, profile: MatchProfile, *,
+    max_coord_m: float = GEO_MAX_COORD_M,
+) -> PairDecision:
+    """Decide two co-located street-less apartments (same byt geo cell + disposition
+    shard — rung B). Pure, no images. CANDIDATE-GENERATION ONLY: there is NO
+    attribute-based auto_merge path whatsoever — a cell+disposition match is a plausible
+    same-unit signal, never proof (66.5% of geo-located byt share a 4dp cell even after
+    disposition sharding; portal city-centroid pins stack 60+ listings on one point).
+    Every survivor is a 'candidate' (reason 'byt_geo') for the shared visual flow, where
+    pHash (byt render-exclusion intact) / forensic High remain the only merge gates.
+
+    Hard rejects mirror the street rule-C contradictions, with ONE deliberate
+    divergence: floors reject on ANY known difference (not the street path's ±1
+    convention tolerance) — inside one building the floor is the unit disambiguator,
+    and on a candidate-only rung a false reject only costs recall, never a merge."""
+    if a.sreality_id == b.sreality_id:
+        return PairDecision("reject", None, "same_listing")
+    if a.property_id is not None and a.property_id == b.property_id:
+        return PairDecision("reject", None, "already_merged")
+    if (
+        a.category_type is not None and b.category_type is not None
+        and a.category_type != b.category_type
+    ):
+        return PairDecision("reject", None, "category_type_contradiction")
+    if not category_main_compatible(a.category_main, b.category_main):
+        return PairDecision("reject", None, "category_main_contradiction")
+    if (
+        a.lat is not None and a.lng is not None and b.lat is not None and b.lng is not None
+        and _haversine_m(a.lat, a.lng, b.lat, b.lng) > max_coord_m
+    ):
+        return PairDecision("reject", None, "coord_too_far")
+    # The shard already guarantees loose compatibility (disposition_class is the shard
+    # key), but the assertion is cheap and keeps the classifier safe standalone.
+    if not disposition_compatible(a.disposition, b.disposition):
+        return PairDecision("reject", None, "disposition_mismatch")
+    if a.floor is not None and b.floor is not None and a.floor != b.floor:
+        return PairDecision("reject", None, "floor_contradiction")
+    if _house_numbers_contradict(a.house_number, b.house_number):
+        return PairDecision("reject", None, "house_number_contradiction")
+    area_diff = _area_pct_diff(a.area_m2, b.area_m2)
+    if area_diff is not None and area_diff > profile.candidate_area_max_pct:
+        return PairDecision("reject", None, "area_contradiction")
+    if _unit_markers_contradict(a.description, b.description):
+        return PairDecision("reject", None, "unit_marker_contradiction")
+    return PairDecision("candidate", "byt_geo")
+
+
 @dataclass
 class VisualOutcome:
     """The result of the visual layer for one candidate pair."""

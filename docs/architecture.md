@@ -775,6 +775,35 @@ renumber.** Navigate by area:
     two portals falls in different geo cells. NB the batch warmer is retired — the whole engine now pays
     vision at decision time (pHash → cosine → bounded live forensics), so geo already matches street's cost
     model without a warmer.)
+    **Byt geo rung B (street-less apartments), default OFF.** A street-less byt is invisible to the
+    street pass (rule A needs street + disposition) and deliberately EXCLUDED from the geo families
+    (one building stacks many units on one coordinate) — ~19.3k active byt were reachable by NEITHER
+    pass (2026-07-11 audit; 89% of them carry a disposition). The rung: migration 296 extends the
+    stored `listings.geo_cell_key` to byt (its OWN `'byt'` bucket — never co-celled with
+    `dum|komercni`; `publication.CELL_FAMILIES = GEO_FAMILIES + ('byt',)` is the pinned Python twin),
+    and the loader (`_load_geo_eligible(rung='byt_geo')`, `BYT_GEO_ELIGIBLE_PREDICATE`: active byt +
+    geom + obec + area + **disposition**) shards each cell by `disposition_class` — the same
+    loss-free shard the street pass uses. It is **CANDIDATE-GENERATION ONLY**:
+    `classify_byt_geo_pair` hard-rejects contradictions (ANY known-floor difference — inside one
+    building the floor is the unit disambiguator, deliberately stricter than the street path's ±1
+    convention tolerance; house number; area > byt's unified 10%; unit markers; coord > 35 m;
+    category/disposition) and maps every survivor to a `tier='byt_geo'` candidate — there is NO
+    attribute-based auto-merge path at all; pHash (byt render-exclusion + distinctive wet rooms
+    intact) / forensic High remain the sole merge gates. The measured risk that mandates this: 66.5%
+    of geo-located byt sit in multi-member 4dp cells even after disposition sharding, and portal
+    city-centroid pins create same-disposition cells of 60–112 members — those ride the bounded
+    oversized-group path (`prioritized_group_pairs`, best `MAX_GROUP_PAIRS` in value order), never a
+    whole-cell O(n²) free-for-all. Scheduling mirrors geo wholesale: its OWN cron (`--byt-geo-only`,
+    hours 1/7/13/19 offset from geo, `run_kind='byt_geo'`, `lane='byt_geo'` cursor in
+    `dedup_scan_state`), gated by the `dedup_byt_geo_enabled` master switch (registry default
+    **OFF** until the operator flips it after the migration-296 backfill). The real-time dirty drain
+    runs a THIRD sub-pass over the claimed properties' byt cells UNGATED — the exact posture of the
+    geo sub-pass vs `dedup_geo_enabled` (the switch gates only the scheduled backstop) — which is
+    also what keeps the three-arm `eligible_predicate` publication gate coherent: a new street-less
+    byt is dedup-evaluated + published by the dirty lane instead of stranding unpublished behind an
+    OFF scheduled rung. Both-street-eligible pairs are skipped on EVERY non-street tier (the #761
+    cross-pass rule, generalized), and the warmer's `byt_geo` lane mirrors the engine's classify
+    seam.
     Merges are **reversible**:
     `toolkit/property_identity.py` re-points `listings.property_id` onto the survivor + soft-retires
     the loser (`properties.status='merged_away'`) and logs `property_merge_events` so

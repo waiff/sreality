@@ -104,13 +104,18 @@ def _run(monkeypatch: Any, *, keys: list[ListingKey], classifications: dict[int,
          max_requests: int = 100, max_room_attempts: int = 4,
          warm_rooms: int = 1, max_seconds: int = 0,
          lane: str = "street", geo_keys: list[ListingKey] | None = None,
+         byt_geo_keys: list[ListingKey] | None = None,
          candidate_pids: set[int] | None = None, geo_classify: Any = None,
+         byt_geo_classify: Any = None,
          clip_model: str | None = None,
          clip_rooms: dict[int, dict[str, list[int]]] | None = None) -> _FakeConn:
     """Drive collect() over `keys` with all I/O monkeypatched; return the conn so
     the test can inspect the enqueued dedup_batch_requests rows."""
     monkeypatch.setattr(sub, "_load_eligible", lambda conn, **k: list(keys))
-    monkeypatch.setattr(sub, "_load_geo_eligible", lambda conn, **k: list(geo_keys or []))
+    monkeypatch.setattr(
+        sub, "_load_geo_eligible",
+        lambda conn, rung="geo", **k: list(
+            (byt_geo_keys if rung == "byt_geo" else geo_keys) or []))
     monkeypatch.setattr(sub, "_proposed_candidate_property_ids",
                         lambda conn, redecide_hours=None: set(candidate_pids or set()))
     monkeypatch.setattr(sub, "clip_room_grouping",
@@ -174,7 +179,7 @@ def _run(monkeypatch: Any, *, keys: list[ListingKey], classifications: dict[int,
     sub.collect(conn, _FakeLLM(), submitter, max_pairs=4000,
                 max_room_attempts=max_room_attempts, n_images=12, warm_rooms=warm_rooms,
                 max_seconds=max_seconds, lane=lane, geo_classify=geo_classify,
-                clip_model=clip_model)
+                byt_geo_classify=byt_geo_classify, clip_model=clip_model)
     submitter.flush()
     return conn
 
@@ -237,6 +242,85 @@ def test_geo_pairs_skipped_without_geo_classifier(monkeypatch: Any) -> None:
         lane="candidates", geo_classify=None,
     )
     assert conn.inserted_requests == []
+
+
+def _byt_geo_key(sid: int, pid: int, *, source: str = "sreality",
+                 disp: str = "2+kk", floor: int | None = 3,
+                 street_eligible: bool = False) -> ListingKey:
+    return ListingKey(
+        sreality_id=sid, property_id=pid, source=source,
+        street_key="geo:5001:50.1006:14.5374:byt:prodej|d:2+kk",
+        disposition=disp, house_number=None, floor=floor, area_m2=60.0,
+        description=None, category_type="prodej", category_main="byt", street_id=None,
+        lat=50.10064, lng=14.53742, street_eligible=street_eligible,
+    )
+
+
+def test_byt_geo_lane_warms_via_engine_classifier(monkeypatch: Any) -> None:
+    """lane='byt_geo' loads the byt rung population and warms pairs through the SAME
+    classifier the engine uses (_make_byt_geo_classify — candidate-only), so the warm
+    keys match the replay; a floor contradiction is never warmed."""
+    rooms = {"kitchen": [11], "bathroom": [12]}
+    conn = _run(
+        monkeypatch,
+        keys=[],
+        byt_geo_keys=[_byt_geo_key(5, 105), _byt_geo_key(6, 106, source="idnes"),
+                      _byt_geo_key(7, 107, source="bazos", floor=8)],
+        classifications={5: ("classified", rooms), 6: ("classified", rooms),
+                         7: ("classified", rooms)},
+        lane="byt_geo", byt_geo_classify=sub._make_byt_geo_classify(),
+    )
+    compared = {(r[4], r[5]) for r in _rows_by_kind(conn).get("compare", [])}
+    assert (5, 6) in compared                 # same floor: candidate, warmed
+    assert (5, 7) not in compared and (6, 7) not in compared  # floor contradiction
+
+
+def test_byt_geo_pair_with_both_sides_street_eligible_not_warmed(monkeypatch: Any) -> None:
+    """The cross-pass skip applies to the byt rung too: a both-street-eligible byt
+    cell pair belongs to the street pass — never warmed here."""
+    rooms = {"kitchen": [11]}
+    conn = _run(
+        monkeypatch,
+        keys=[],
+        byt_geo_keys=[_byt_geo_key(5, 105, street_eligible=True),
+                      _byt_geo_key(6, 106, source="idnes", street_eligible=True)],
+        classifications={5: ("classified", rooms), 6: ("classified", rooms)},
+        lane="byt_geo", byt_geo_classify=sub._make_byt_geo_classify(),
+    )
+    assert conn.inserted_requests == []
+
+
+def test_byt_geo_pairs_skipped_without_byt_classifier(monkeypatch: Any) -> None:
+    """A byt cell pair in a run without the byt classifier is out of scope — never
+    judged by classify_pair OR the geo classifier (byt cells route by category)."""
+    rooms = {"kitchen": [11]}
+    conn = _run(
+        monkeypatch,
+        keys=[],
+        byt_geo_keys=[_byt_geo_key(5, 105), _byt_geo_key(6, 106, source="idnes")],
+        candidate_pids={105, 106},
+        classifications={5: ("classified", rooms), 6: ("classified", rooms)},
+        lane="candidates", geo_classify=_accept_all_geo, byt_geo_classify=None,
+    )
+    assert conn.inserted_requests == []
+
+
+def test_candidates_lane_warms_byt_geo_tier_too(monkeypatch: Any) -> None:
+    """lane='candidates' loads the byt rung population as well (third loader call,
+    rung='byt_geo') and warms its pairs via the byt classifier."""
+    rooms = {"kitchen": [11], "bathroom": [12]}
+    conn = _run(
+        monkeypatch,
+        keys=[_key(1, 101, source="sreality"), _key(2, 102, source="bazos")],
+        byt_geo_keys=[_byt_geo_key(5, 105), _byt_geo_key(6, 106, source="idnes")],
+        candidate_pids={101, 102, 105, 106},
+        classifications={1: ("classified", rooms), 2: ("classified", rooms),
+                         5: ("classified", rooms), 6: ("classified", rooms)},
+        lane="candidates", byt_geo_classify=sub._make_byt_geo_classify(),
+    )
+    compared = {(r[4], r[5]) for r in _rows_by_kind(conn).get("compare", [])}
+    assert (1, 2) in compared    # street pair warmed
+    assert (5, 6) in compared    # byt cell pair warmed via the byt classifier
 
 
 def test_geo_pair_with_both_sides_street_eligible_not_warmed(monkeypatch: Any) -> None:

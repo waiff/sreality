@@ -170,7 +170,9 @@ incident history: `docs/architecture.md` § Architectural rules.
 15. **Multi-portal listings sit behind a thin `properties` parent (migration 091); grouping is out-of-band,
     never inline at insert (new rows get a singleton property).** Two eligibility paths feed **one**
     `resolve_pair` decision tree (pHash fast-path → CLIP cosine tier → forensic visual compare →
-    floor/site-plan gate): **apartments** key on **street + disposition**; **single-dwelling house / land /
+    floor/site-plan gate): **apartments** key on **street + disposition**, plus an operator-gated
+    geo-cell+disposition candidate rung for street-less byt (`dedup_byt_geo_enabled`, OFF by default);
+    **single-dwelling house / land /
     commercial** key on **geo-proximity** (its OWN scheduled run, `dedup_geo_enabled`). A geo/visual signal
     never auto-merges on proximity alone — the forensic **High** verdict is the sole auto-merge gate; the
     floor-plan gate only ever adds conservatism (`different_layout` dismiss; both-2D `inconclusive` queues;

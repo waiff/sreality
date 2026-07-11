@@ -62,6 +62,7 @@ from collections.abc import Iterator
 from typing import Any
 
 from toolkit.publication import (
+    BYT_GEO_ELIGIBLE_PREDICATE,
     GEO_ELIGIBLE_PREDICATE,
     STREET_ELIGIBLE_PREDICATE,
     eligible_predicate,
@@ -475,12 +476,15 @@ def _attach_stragglers(conn: Any, *, skip_native_backfill: bool = False) -> int:
 
 
 # Publication gate (migration 273): publish the properties the dedup engine can NEVER
-# evaluate — repr listing eligible for NEITHER the street pass (STREET_ELIGIBLE_PREDICATE)
-# NOR the geo pass (GEO_ELIGIBLE_PREDICATE) — so the hard gate doesn't hide them forever.
+# evaluate — repr listing eligible for NONE of the street pass (STREET_ELIGIBLE_PREDICATE),
+# the geo pass (GEO_ELIGIBLE_PREDICATE), or the byt geo rung (BYT_GEO_ELIGIBLE_PREDICATE)
+# — so the hard gate doesn't hide them forever.
 # `IS NOT TRUE` (not `NOT (...)`) so a NULL-column listing counts as ineligible under SQL
 # three-valued logic. The predicates are imported from toolkit.publication (single source,
 # parity-tested against the engine SQL). There is deliberately NO timeout sweep: a
-# dedup-CHECKABLE-but-unchecked property stays hidden until the engine stamps it.
+# dedup-CHECKABLE-but-unchecked property stays hidden until the engine stamps it (for the
+# byt rung, the dirty drain's UNGATED byt sub-pass is what evaluates + publishes new
+# street-less byt even while the scheduled rung's master switch is off).
 _PUBLISH_INELIGIBLE_SQL = f"""
     UPDATE properties p
     SET published_at = now(), publish_reason = 'ineligible'
@@ -490,6 +494,7 @@ _PUBLISH_INELIGIBLE_SQL = f"""
       AND l.sreality_id = p.repr_listing_id
       AND ({STREET_ELIGIBLE_PREDICATE}) IS NOT TRUE
       AND ({GEO_ELIGIBLE_PREDICATE}) IS NOT TRUE
+      AND ({BYT_GEO_ELIGIBLE_PREDICATE}) IS NOT TRUE
 """
 
 
