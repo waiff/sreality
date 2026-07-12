@@ -1,7 +1,7 @@
 """Tests for /admin/portals — per-portal operational limits (migration 114).
 
-The /admin prefix is bearer-gated (CLAUDE.md rule #8), but these tests leave
-API_TOKEN unset so the gate no-ops (the dedicated gate assertions live in
+The /admin prefix is admin-gated (require_admin, fail-closed); these tests
+override it with synthetic admin claims (the dedicated gate assertions live in
 test_admin_routes.py). We monkeypatch the config readers (load_portal_config /
 default_config) so the fake conn only has to serve the portal-list SELECT and
 the PUT select/update.
@@ -112,6 +112,9 @@ def client(monkeypatch):
 
     conn = _Conn(_seed_portals())
     api_main.app.dependency_overrides[deps.get_db_conn] = lambda: conn
+    api_main.app.dependency_overrides[deps.require_admin] = (
+        lambda: {"is_admin": True, "legacy": True}
+    )
     c = TestClient(api_main.app)
     c._conn = conn  # type: ignore[attr-defined]
     yield c
@@ -120,7 +123,7 @@ def client(monkeypatch):
 
 def test_get_portals_lists_all_with_effective_and_baked(client):
     res = client.get("/admin/portals")
-    assert res.status_code == 200  # API_TOKEN unset -> gate no-ops
+    assert res.status_code == 200  # require_admin overridden in the fixture
     data = {p["source"]: p for p in res.json()["data"]}
     assert set(data) == {"sreality", "remax"}
     assert data["sreality"]["overrides"] == {"detail_workers": 8, "detail_rate": 6.0}

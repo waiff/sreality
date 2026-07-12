@@ -1,20 +1,25 @@
 import { useState, type FormEvent, type ReactNode } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, Navigate, useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../lib/auth';
 
 /**
  * Phase 1 auth — sign-in screen (email/password + Google). Full-page, outside
- * the app Shell. Does not gate the rest of the app yet.
+ * the app Shell; every Shell page sits behind <RequireAuth>, which redirects
+ * here with the original location in `state.from`.
  */
 export default function Login() {
-  const { signInWithPassword, signUpWithPassword, signInWithGoogle, user, signOut } = useAuth();
+  const { signInWithPassword, signUpWithPassword, signInWithGoogle, session, loading } = useAuth();
   const navigate = useNavigate();
+  const location = useLocation();
   const [mode, setMode] = useState<'signin' | 'signup'>('signin');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+
+  const from =
+    (location.state as { from?: { pathname?: string } } | null)?.from?.pathname ?? '/browse';
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
@@ -24,7 +29,7 @@ export default function Login() {
     try {
       if (mode === 'signin') {
         await signInWithPassword(email, password);
-        navigate('/browse');
+        navigate(from, { replace: true });
       } else {
         await signUpWithPassword(email, password);
         setNotice('Check your email to confirm your account, then sign in.');
@@ -36,16 +41,9 @@ export default function Login() {
     }
   }
 
-  if (user) {
-    return (
-      <AuthShell>
-        <p className="text-sm text-neutral-600 dark:text-neutral-300">
-          Signed in as {user.email}
-        </p>
-        <button className={btn} onClick={() => void signOut()}>Sign out</button>
-        <Link className={link} to="/browse">Go to the app</Link>
-      </AuthShell>
-    );
+  // Already signed in (e.g. deep-linked to /login) — straight into the app.
+  if (!loading && session) {
+    return <Navigate to={from} replace />;
   }
 
   return (

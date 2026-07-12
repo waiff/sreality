@@ -16,6 +16,9 @@ from api.routes import outreach as outreach_routes
 def client():
     api_main.app.dependency_overrides[deps.get_db_conn] = lambda: object()
     api_main.app.dependency_overrides[deps.get_llm_client] = lambda: object()
+    api_main.app.dependency_overrides[deps.require_admin] = (
+        lambda: {"is_admin": True, "legacy": True}
+    )
     yield TestClient(api_main.app)
     api_main.app.dependency_overrides.clear()
 

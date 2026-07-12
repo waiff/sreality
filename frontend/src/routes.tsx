@@ -1,45 +1,61 @@
+import { Suspense, lazy, type ReactNode } from 'react';
 import { Navigate, type RouteObject } from 'react-router-dom';
 import Shell from './components/Shell';
+import { RequireAdmin, RequireAuth } from './components/guards';
 import Login from './pages/Login';
 import ForgotPassword from './pages/ForgotPassword';
 import UpdatePassword from './pages/UpdatePassword';
 import Browse from './pages/Browse';
 import ListingDetail from './pages/ListingDetail';
-import Health from './pages/Health';
 import BuildingDetail from './pages/BuildingDetail';
 import EstimationDetail from './pages/EstimationDetail';
 import EstimationList from './pages/EstimationList';
 import Brokers from './pages/Brokers';
 import BrokerDetail from './pages/BrokerDetail';
-import BrokerReview from './pages/BrokerReview';
-import Outreach from './pages/Outreach';
-import OutreachDetail from './pages/OutreachDetail';
 import Collections from './pages/Collections';
 import CollectionDetail from './pages/CollectionDetail';
 import Pipeline from './pages/Pipeline';
-import Datasets from './pages/Datasets';
-import Settings from './pages/Settings';
-import Scrapers from './pages/Scrapers';
 import Watchdog from './pages/Watchdog';
 import WatchdogManage from './pages/WatchdogManage';
 import WatchdogEdit from './pages/WatchdogEdit';
 import Notifications from './pages/Notifications';
-import Dedup from './pages/Dedup';
-import Costs from './pages/Costs';
+
+// Admin-only pages are code-split out of the default bundle — a non-admin
+// session never downloads them.
+const Health = lazy(() => import('./pages/Health'));
+const Costs = lazy(() => import('./pages/Costs'));
+const Dedup = lazy(() => import('./pages/Dedup'));
+const Scrapers = lazy(() => import('./pages/Scrapers'));
+const Settings = lazy(() => import('./pages/Settings'));
+const Datasets = lazy(() => import('./pages/Datasets'));
+const Outreach = lazy(() => import('./pages/Outreach'));
+const OutreachDetail = lazy(() => import('./pages/OutreachDetail'));
+const BrokerReview = lazy(() => import('./pages/BrokerReview'));
 // TODO(estimation-5 Part C1): remove DevConfidencePreview + its route
 // once design is approved and the indicator is in real use.
-import DevConfidencePreview from './pages/DevConfidencePreview';
+const DevConfidencePreview = lazy(() => import('./pages/DevConfidencePreview'));
+
+function AdminPage({ children }: { children: ReactNode }) {
+  return (
+    <RequireAdmin>
+      <Suspense fallback={null}>{children}</Suspense>
+    </RequireAdmin>
+  );
+}
 
 export const routes: RouteObject[] = [
-  // Full-page auth screens (outside the app Shell). Additive — these do not
-  // gate the rest of the app yet; the login gate is flipped in a later Phase 1
-  // increment once shared-market views are re-granted to `authenticated`.
+  // Full-page auth screens (outside the app Shell, so they stay reachable
+  // while logged out — everything under the Shell requires a session).
   { path: '/login', element: <Login />, handle: { title: 'Sign in' } },
   { path: '/forgot-password', element: <ForgotPassword />, handle: { title: 'Reset password' } },
   { path: '/reset-password', element: <UpdatePassword />, handle: { title: 'New password' } },
   {
     path: '/',
-    element: <Shell />,
+    element: (
+      <RequireAuth>
+        <Shell />
+      </RequireAuth>
+    ),
     children: [
       // `handle.title` is the static browser-tab title for each route (the
       // single source of truth, read by TitleController via matchRoutes).
@@ -52,29 +68,29 @@ export const routes: RouteObject[] = [
       // property's representative listing and redirects to /listing/:id.
       { path: 'listing', element: <ListingDetail />, handle: { title: 'Listing' } },
       { path: 'listing/:sreality_id', element: <ListingDetail />, handle: { title: 'Listing' } },
-      { path: 'health', element: <Health />, handle: { title: 'Health' } },
-      { path: 'costs', element: <Costs />, handle: { title: 'LLM costs' } },
+      { path: 'health', element: <AdminPage><Health /></AdminPage>, handle: { title: 'Health' } },
+      { path: 'costs', element: <AdminPage><Costs /></AdminPage>, handle: { title: 'LLM costs' } },
       { path: 'estimate', element: <Navigate to="/estimations" replace /> },
       { path: 'estimations', element: <EstimationList />, handle: { title: 'Estimations' } },
       { path: 'estimation/:id', element: <EstimationDetail />, handle: { title: 'Estimation' } },
       { path: 'brokers', element: <Brokers />, handle: { title: 'Brokers' } },
-      { path: 'brokers/review', element: <BrokerReview />, handle: { title: 'Brokers · Review' } },
+      { path: 'brokers/review', element: <AdminPage><BrokerReview /></AdminPage>, handle: { title: 'Brokers · Review' } },
       { path: 'brokers/:id', element: <BrokerDetail />, handle: { title: 'Broker' } },
-      { path: 'outreach', element: <Outreach />, handle: { title: 'Outreach' } },
-      { path: 'outreach/:id', element: <OutreachDetail />, handle: { title: 'Campaign' } },
+      { path: 'outreach', element: <AdminPage><Outreach /></AdminPage>, handle: { title: 'Outreach' } },
+      { path: 'outreach/:id', element: <AdminPage><OutreachDetail /></AdminPage>, handle: { title: 'Campaign' } },
       { path: 'building/:id', element: <BuildingDetail />, handle: { title: 'Building' } },
       { path: 'collections', element: <Collections />, handle: { title: 'Collections' } },
       { path: 'collection/:id', element: <CollectionDetail />, handle: { title: 'Collection' } },
       { path: 'pipeline', element: <Pipeline />, handle: { title: 'Pipeline' } },
-      { path: 'datasets', element: <Datasets />, handle: { title: 'Datasets' } },
+      { path: 'datasets', element: <AdminPage><Datasets /></AdminPage>, handle: { title: 'Datasets' } },
       { path: 'watchdog', element: <Watchdog />, handle: { title: 'Watchdogs' } },
       { path: 'watchdog/manage', element: <WatchdogManage />, handle: { title: 'Watchdogs · Manage' } },
       { path: 'watchdog/:id/edit', element: <WatchdogEdit />, handle: { title: 'Edit watchdog' } },
       { path: 'notifications', element: <Notifications />, handle: { title: 'Notifications' } },
-      { path: 'dedup', element: <Dedup />, handle: { title: 'Dedup' } },
-      { path: 'settings', element: <Settings />, handle: { title: 'Settings' } },
-      { path: 'scrapers', element: <Scrapers />, handle: { title: 'Scrapers' } },
-      { path: 'dev/confidence-indicator', element: <DevConfidencePreview />, handle: { title: 'Confidence indicator (dev)' } },
+      { path: 'dedup', element: <AdminPage><Dedup /></AdminPage>, handle: { title: 'Dedup' } },
+      { path: 'settings', element: <AdminPage><Settings /></AdminPage>, handle: { title: 'Settings' } },
+      { path: 'scrapers', element: <AdminPage><Scrapers /></AdminPage>, handle: { title: 'Scrapers' } },
+      { path: 'dev/confidence-indicator', element: <AdminPage><DevConfidencePreview /></AdminPage>, handle: { title: 'Confidence indicator (dev)' } },
       { path: '*', element: <NotFound />, handle: { title: 'Not found' } },
     ],
   },

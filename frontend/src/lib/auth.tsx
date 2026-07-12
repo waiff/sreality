@@ -11,14 +11,15 @@ import { supabase } from './supabase';
 
 /**
  * Phase 1 auth context. Tracks the Supabase session and exposes sign-in/out.
- * Additive: the app does NOT yet require a session (no route guard is wired),
- * so anonymous use is unchanged until the login gate is flipped in a later
- * increment (Phase 1 rollout §11).
+ * The login gate is wired via <RequireAuth> / <RequireAdmin> (components/guards);
+ * `isAdmin` mirrors the JWT's app_metadata.is_admin claim (stamped server-side
+ * from the admins table — never client-writable).
  */
 type AuthState = {
   session: Session | null;
   user: User | null;
   loading: boolean;
+  isAdmin: boolean;
   signInWithPassword: (email: string, password: string) => Promise<void>;
   signUpWithPassword: (email: string, password: string) => Promise<void>;
   signInWithGoogle: () => Promise<void>;
@@ -49,6 +50,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       session,
       user: session?.user ?? null,
       loading,
+      isAdmin: session?.user?.app_metadata?.is_admin === true,
       async signInWithPassword(email, password) {
         const { error } = await supabase.auth.signInWithPassword({ email, password });
         if (error) throw error;
