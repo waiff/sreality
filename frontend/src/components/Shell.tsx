@@ -11,21 +11,22 @@ import ToastViewport from './ToastViewport';
 import AccountMenu from './AccountMenu';
 import { APP_NAME } from '@/lib/brand';
 
-type NavItem = { to: string; label: string; disabled?: boolean; title?: string; admin?: boolean };
+type NavItem = { to: string; label: string; disabled?: boolean; title?: string; admin?: boolean; agenda?: string };
 
-// `admin: true` entries only render for admin sessions (the routes themselves
-// are wrapped in <RequireAdmin>, so hiding here is UX, not the security gate).
+// `admin: true` entries only render for admin sessions; `agenda` keys tie a
+// link to the session plan's agenda-visibility map (Settings › Tiers). Both
+// are UX — the routes themselves carry the security gates.
 const navItems: ReadonlyArray<NavItem> = [
-  { to: '/browse',      label: 'Browse' },
-  { to: '/pipeline',    label: 'Pipeline' },
-  { to: '/estimations', label: 'Estimations' },
-  { to: '/watchdog',    label: 'Watchdogs' },
-  { to: '/notifications', label: 'Notifications' },
-  { to: '/brokers',     label: 'Brokers' },
+  { to: '/browse',      label: 'Browse', agenda: 'browse' },
+  { to: '/pipeline',    label: 'Pipeline', agenda: 'pipeline' },
+  { to: '/estimations', label: 'Estimations', agenda: 'estimations' },
+  { to: '/watchdog',    label: 'Watchdogs', agenda: 'watchdogs' },
+  { to: '/notifications', label: 'Notifications', agenda: 'notifications' },
+  { to: '/brokers',     label: 'Brokers', agenda: 'brokers' },
   { to: '/datasets',    label: 'Datasets', admin: true },
   { to: '/outreach',    label: 'Outreach', disabled: true, admin: true,
     title: 'Outreach is paused — not available yet.' },
-  { to: '/collections', label: 'Collections' },
+  { to: '/collections', label: 'Collections', agenda: 'collections' },
 ];
 
 // Grouped under the "Settings" dropdown trigger — all admin-only, so the
@@ -60,7 +61,7 @@ export default function Shell() {
 }
 
 function TopBar() {
-  const { isAdmin } = useAuth();
+  const { isAdmin, agendas } = useAuth();
   const location = useLocation();
   const unreadQ = useQuery({
     queryKey: notificationKeys.unreadCount,
@@ -72,7 +73,16 @@ function TopBar() {
   // Unconfigured local dev has no session (so no is_admin claim) — show the
   // full nav there, mirroring the guards' allow-through posture.
   const showAdmin = isAdmin || !isSupabaseConfigured();
-  const items = navItems.filter((item) => showAdmin || !item.admin);
+  const items = navItems.filter((item) => {
+    if (item.admin && !showAdmin) return false;
+    // Plan agenda gating (non-admins only). agendas === null means the
+    // billing read hasn't resolved / failed — show everything rather than
+    // blank the nav over a read hiccup; admins always bypass.
+    if (!showAdmin && agendas !== null && item.agenda && agendas[item.agenda] !== true) {
+      return false;
+    }
+    return true;
+  });
   const settingsActive = settingsItems.some((s) => isPathActive(location.pathname, s.to));
   return (
     <header className="border-b border-[var(--color-rule)] bg-[var(--color-paper)] sticky top-0 z-30">

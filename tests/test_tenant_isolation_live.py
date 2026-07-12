@@ -28,7 +28,7 @@ pytestmark = pytest.mark.skipif(
     reason="TEST_DATABASE_URL not set — live tenant-isolation checks run only in the CI DB job",
 )
 
-# The 18 user-state tables migrations 290-294 scope per account.
+# The 19 user-state tables migrations 290-294 (+ entitlements, 298) scope per account.
 _TENANT_TABLES: list[str] = [
     "collections",
     "tags",
@@ -48,6 +48,7 @@ _TENANT_TABLES: list[str] = [
     "property_pipeline",
     "pipeline_stages",
     "property_pipeline_events",
+    "entitlements",
 ]
 
 

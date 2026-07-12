@@ -55,6 +55,7 @@ from api.estimation_runs import (
 from api import notifications as nf_module
 from api.portal_lookup import lookup_portal_listings
 from api.routes.admin import router as admin_router
+from api.routes.billing import router as billing_router
 from api.routes.brokers import router as brokers_router
 from api.routes.broker_review import router as broker_review_router
 from api.routes.dedup import router as dedup_router
@@ -213,6 +214,10 @@ skills_module.PROVIDER_NAMES = set(deps.get_providers().keys())
 # the perimeter" exemption gave no real protection: that URL ships inside
 # the public SPA bundle.
 app.include_router(admin_router)
+# /billing/* — the Stripe webhook is its OWN auth class (HMAC signature over the
+# raw body vs STRIPE_WEBHOOK_SECRET), distinct from bearer/JWT and token-exempt;
+# GET /billing/me rides verify_jwt + the tenant pool like any per-account read.
+app.include_router(billing_router)
 # /notifications/* (Watchdog feed + subscription CRUD) goes through
 # the standard bearer gate — operator content, not configuration.
 app.include_router(notifications_router)

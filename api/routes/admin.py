@@ -1,4 +1,4 @@
-"""Admin endpoints: skills + app_settings + agent tool inventory.
+"""Admin endpoints: skills + app_settings + agent tool inventory + billing tiers.
 
 Routes under the `/admin/*` prefix. Admin-gated — the router carries
 `Depends(require_admin)`, so each call needs either a Supabase JWT whose
@@ -11,7 +11,8 @@ frontend never touches Postgres directly for these tables.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+import uuid
+from typing import TYPE_CHECKING, Any, Literal
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel, Field
@@ -86,6 +87,25 @@ class UpdateTagPriorityIn(BaseModel):
     # The largest family has 9 tags; cap well above that (defense-in-depth — normalize_priority
     # drops anything unknown anyway, but reject an oversized payload before deserializing it).
     order: list[str] = Field(default_factory=list, max_length=100)
+
+
+class CreatePlanIn(BaseModel):
+    key: str = Field(pattern=r"^[a-z0-9_]{1,40}$")
+    name: str = Field(min_length=1, max_length=80)
+    position: int = 0
+    agendas: dict[str, bool] = Field(default_factory=dict)
+
+
+class UpdatePlanIn(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=80)
+    position: int | None = None
+    agendas: dict[str, bool] | None = None
+    is_default: bool | None = None
+
+
+class SetEntitlementIn(BaseModel):
+    plan: str
+    status: Literal["active", "trialing", "past_due", "canceled"] = "active"
 
 
 # --- skills ---------------------------------------------------------------
@@ -702,6 +722,201 @@ def _clip_regions_payload(conn: "psycopg.Connection") -> dict[str, Any]:
         "parked_no_geo": counts.get(None, 0),
         "priority_region_ids": priority_ids,
     }
+
+
+# --- plans + entitlements (billing skeleton, migration 298) -----------------
+
+@router.get("/plans")
+def get_plans(conn: Any = Depends(deps.get_db_conn)) -> dict[str, Any]:
+    """Every tier with its agenda-visibility map, in display order."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT key, name, position, agendas, is_default, updated_at "
+            "FROM plans ORDER BY position, key"
+        )
+        rows = cur.fetchall()
+    return {"data": [_plan_to_dict(r) for r in rows]}
+
+
+@router.post("/plans")
+def post_plan(
+    body: CreatePlanIn,
+    conn: Any = Depends(deps.get_db_conn),
+) -> dict[str, Any]:
+    import json
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO plans (key, name, position, agendas) "
+            "VALUES (%s, %s, %s, %s::jsonb) "
+            "ON CONFLICT (key) DO NOTHING RETURNING key",
+            (body.key, body.name, body.position, json.dumps(body.agendas)),
+        )
+        if cur.fetchone() is None:
+            raise HTTPException(
+                status_code=409, detail=f"plan {body.key!r} already exists"
+            )
+    return _fetch_plan(conn, body.key)
+
+
+@router.patch("/plans/{key}")
+def patch_plan(
+    key: str,
+    body: UpdatePlanIn,
+    conn: Any = Depends(deps.get_db_conn),
+) -> dict[str, Any]:
+    import json
+    patch = body.model_dump(exclude_unset=True)
+    if not patch:
+        raise HTTPException(status_code=400, detail="no plan fields provided")
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute("SELECT is_default FROM plans WHERE key = %s FOR UPDATE", (key,))
+        row = cur.fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail=f"plan {key!r} not found")
+        if patch.get("is_default") is False and row[0]:
+            # Mirrors the pipeline entry-stage idiom: there must always be a default.
+            raise HTTPException(
+                status_code=422,
+                detail="cannot unset the default plan — crown another plan instead",
+            )
+        if patch.get("is_default") is True:
+            # Clear the old default FIRST so the partial unique index
+            # (plans_one_default) never sees two defaults mid-transaction.
+            cur.execute(
+                "UPDATE plans SET is_default = false, updated_at = now() "
+                "WHERE is_default AND key <> %s",
+                (key,),
+            )
+        sets: list[str] = []
+        params: list[Any] = []
+        for col in ("name", "position"):
+            if col in patch:
+                sets.append(f"{col} = %s")
+                params.append(patch[col])
+        if "agendas" in patch:
+            sets.append("agendas = %s::jsonb")
+            params.append(json.dumps(patch["agendas"]))
+        if "is_default" in patch:
+            sets.append("is_default = %s")
+            params.append(patch["is_default"])
+        cur.execute(
+            f"UPDATE plans SET {', '.join(sets)}, updated_at = now() WHERE key = %s",
+            (*params, key),
+        )
+    return _fetch_plan(conn, key)
+
+
+@router.delete("/plans/{key}")
+def delete_plan(
+    key: str,
+    conn: Any = Depends(deps.get_db_conn),
+) -> dict[str, Any]:
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute("SELECT is_default FROM plans WHERE key = %s FOR UPDATE", (key,))
+        row = cur.fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail=f"plan {key!r} not found")
+        if row[0]:
+            raise HTTPException(
+                status_code=409,
+                detail="cannot delete the default plan — crown another plan first",
+            )
+        cur.execute("SELECT 1 FROM entitlements WHERE plan = %s LIMIT 1", (key,))
+        if cur.fetchone() is not None:
+            raise HTTPException(
+                status_code=409,
+                detail=f"plan {key!r} is referenced by entitlements",
+            )
+        cur.execute("DELETE FROM plans WHERE key = %s", (key,))
+    return {"deleted": True, "key": key}
+
+
+@router.get("/entitlements")
+def get_entitlements(conn: Any = Depends(deps.get_db_conn)) -> dict[str, Any]:
+    """Every personal account with its effective plan (explicit row or the
+    default) — the admin tier-assignment table."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT a.id, coalesce(u.email, a.name), "
+            "  coalesce(e.plan, (SELECT key FROM plans WHERE is_default LIMIT 1)), "
+            "  coalesce(e.status, 'active'), e.current_period_end, "
+            "  (e.account_id IS NOT NULL) "
+            "FROM accounts a "
+            "LEFT JOIN entitlements e ON e.account_id = a.id "
+            "LEFT JOIN account_members m ON m.account_id = a.id "
+            "LEFT JOIN auth.users u ON u.id = m.user_id "
+            "WHERE a.kind = 'personal' "
+            "ORDER BY coalesce(u.email, a.name)"
+        )
+        rows = cur.fetchall()
+    return {
+        "data": [
+            {
+                "account_id": str(r[0]),
+                "email": r[1],
+                "plan": r[2],
+                "status": r[3],
+                "current_period_end": _iso(r[4]),
+                "is_explicit": r[5],
+            }
+            for r in rows
+        ]
+    }
+
+
+@router.put("/entitlements/{account_id}")
+def put_entitlement(
+    account_id: uuid.UUID,
+    body: SetEntitlementIn,
+    conn: Any = Depends(deps.get_db_conn),
+) -> dict[str, Any]:
+    """Manual comp: pin an account to a plan (upsert; Stripe events may later
+    overwrite it — the webhook is the automated writer of the same row)."""
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute("SELECT 1 FROM plans WHERE key = %s", (body.plan,))
+        if cur.fetchone() is None:
+            raise HTTPException(status_code=422, detail=f"unknown plan {body.plan!r}")
+        cur.execute("SELECT 1 FROM accounts WHERE id = %s", (account_id,))
+        if cur.fetchone() is None:
+            raise HTTPException(
+                status_code=404, detail=f"account {account_id} not found"
+            )
+        cur.execute(
+            "INSERT INTO entitlements (account_id, plan, status) "
+            "VALUES (%s, %s, %s) "
+            "ON CONFLICT (account_id) DO UPDATE SET "
+            "  plan = excluded.plan, status = excluded.status, updated_at = now()",
+            (account_id, body.plan, body.status),
+        )
+    return {
+        "account_id": str(account_id),
+        "plan": body.plan,
+        "status": body.status,
+        "is_explicit": True,
+    }
+
+
+def _plan_to_dict(row: tuple[Any, ...]) -> dict[str, Any]:
+    return {
+        "key": row[0],
+        "name": row[1],
+        "position": row[2],
+        "agendas": row[3] or {},
+        "is_default": row[4],
+        "updated_at": _iso(row[5]),
+    }
+
+
+def _fetch_plan(conn: "psycopg.Connection", key: str) -> dict[str, Any]:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT key, name, position, agendas, is_default, updated_at "
+            "FROM plans WHERE key = %s",
+            (key,),
+        )
+        row = cur.fetchone()
+    assert row is not None
+    return _plan_to_dict(row)
 
 
 # --- helpers --------------------------------------------------------------

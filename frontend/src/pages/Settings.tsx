@@ -49,6 +49,7 @@ import { useTheme, type ThemeMode } from '@/lib/theme';
 import { PickButton } from '@/components/controls';
 import DedupEngineSection from '@/components/DedupEngineSection';
 import DedupTagPrioritiesSection from '@/components/DedupTagPrioritiesSection';
+import TiersSection from '@/components/TiersSection';
 import { hashTargetsSetting } from '@/lib/settingsAnchor';
 import { WORKFLOW_DOCS, type WorkflowDoc } from '@/lib/workflowDocs.generated';
 
@@ -102,6 +103,15 @@ export default function Settings() {
           request — no redeploy. Every change is preserved in history.
         </p>
       </header>
+
+      <CollapsibleSection
+        id="tiers"
+        eyebrow="Billing"
+        title="Tiers &amp; agenda visibility"
+        description="Which agendas each plan can see, and which plan each account is on. Accounts without an explicit assignment get the default tier."
+      >
+        <TiersSection />
+      </CollapsibleSection>
 
       <CollapsibleSection id="skills" eyebrow="Agent" title="Skills">
         <SkillsSection />
