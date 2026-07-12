@@ -216,30 +216,49 @@ _TARGET_COLS = (
 )
 
 
-def enrich_listing_description(
-    conn: "psycopg.Connection",
-    llm_client: "LLMClient",
-    sreality_id: int,
-    *,
-    model: str | None = None,
-) -> dict[str, Any]:
-    """Extract typed attributes from one listing's description and fill gaps.
+def resolve_current(
+    conn: "psycopg.Connection", sreality_id: int, snapshot_id: int,
+) -> dict[str, Any] | None:
+    """Fetch this listing's CURRENT (ingest-time-fresh) gap columns, but only
+    when `snapshot_id` still matches its latest snapshot.
 
-    Returns a status dict. No-op (no LLM cost) when the listing has no
-    description or its latest snapshot is already enriched by this `model`
-    (the cache is keyed `(sreality_id, snapshot_id, model)`, migration 249, so a
-    model upgrade re-attempts every listing rather than reusing an older miss).
+    Public alias for `scripts.ingest_enrich_batch`, which resolves state
+    fresh — not the possibly-hours-stale `current` captured at submit time —
+    right before writing. An intervening scrape may have replaced the
+    description a batch result was extracted from (a new latest snapshot) or
+    already filled a gap column deterministically; either way the extraction
+    is stale and the caller should skip persisting it. Mirrors
+    `toolkit.condition_scoring.resolve_snapshot`'s same-purpose guard.
     """
-    model = model or DEFAULT_MODEL
+    with conn.cursor() as cur:
+        cur.execute(_SELECT_TARGET, (sreality_id, sreality_id))
+        row = cur.fetchone()
+    if row is None or int(row[0]) != snapshot_id:
+        return None
+    return dict(zip(_TARGET_COLS, row[2:]))
+
+
+def _select_and_check(
+    conn: "psycopg.Connection", sreality_id: int, *, model: str,
+) -> tuple[str | None, dict[str, Any] | None]:
+    """Select the target row and check the cache — the single place that
+    runs `_SELECT_TARGET` + the cache lookup, shared by `build_enrich_request`
+    (batch path) and `enrich_listing_description` (sync path) so neither
+    duplicates the SQL.
+
+    Returns `(skip_status, None)` when there's nothing to enrich (row
+    missing / no description / already cached for this model), or
+    `(None, request)` when the caller should make the LLM call.
+    """
     with conn.cursor() as cur:
         cur.execute(_SELECT_TARGET, (sreality_id, sreality_id))
         row = cur.fetchone()
     if row is None:
-        return {"status": "not_found", "sreality_id": sreality_id}
+        return "not_found", None
     snapshot_id, description = row[0], row[1]
     current = dict(zip(_TARGET_COLS, row[2:]))
     if not description or not description.strip():
-        return {"status": "no_description", "sreality_id": sreality_id}
+        return "no_description", None
 
     with conn.cursor() as cur:
         cur.execute(
@@ -248,21 +267,57 @@ def enrich_listing_description(
             (sreality_id, snapshot_id, model),
         )
         if cur.fetchone() is not None:
-            return {"status": "cached", "sreality_id": sreality_id}
+            return "cached", None
 
-    resp = llm_client.call(
-        called_for=CALLED_FOR,
-        system=_SYSTEM,
-        messages=[{"role": "user", "content": description[:8000]}],
-        tools=[ENRICH_LISTING_TOOL],
-        tool_choice="record_listing",
-        model=model,
-        max_tokens=512,
-    )
-    extraction = next(
-        (tc["input"] for tc in resp.tool_calls if tc.get("name") == "record_listing"),
-        None,
-    )
+    return None, {
+        "system": _SYSTEM,
+        "messages": [{"role": "user", "content": description[:8000]}],
+        "tools": [ENRICH_LISTING_TOOL],
+        "tool_choice": "record_listing",
+        "model": model,
+        "max_tokens": 512,
+        "snapshot_id": snapshot_id,
+        "current": current,
+    }
+
+
+def build_enrich_request(
+    conn: "psycopg.Connection", sreality_id: int, *, model: str,
+) -> dict[str, Any] | None:
+    """Select + cache-check for one listing — the pure-ish request builder
+    the sync path and `scripts.submit_enrich_batch` both call, so the two
+    paths never diverge (mirrors `toolkit.condition_scoring.build_scoring_request`).
+
+    Returns `None` when there's nothing to enrich (not found / no
+    description / already cached for this model) — the caller just skips.
+    No LLM call happens here; the returned dict carries `system` /
+    `messages` / `tools` / `tool_choice` / `model` / `max_tokens` for the
+    call plus `snapshot_id` / `current` for `persist_enrich_result`.
+    """
+    _, req = _select_and_check(conn, sreality_id, model=model)
+    return req
+
+
+def persist_enrich_result(
+    conn: "psycopg.Connection",
+    *,
+    sreality_id: int,
+    snapshot_id: int,
+    current: dict[str, Any],
+    extraction: Any,
+    model: str,
+    llm_call_id: int,
+    cost_usd: float,
+) -> dict[str, Any]:
+    """Write path shared by the sync scorer and the batch ingester.
+
+    `extraction` is whatever the caller pulled off the `record_listing`
+    tool call's `input` (or `None`/non-dict when the model didn't produce
+    one). A non-dict extraction negative-caches the miss so the selector
+    (keyed on row existence) doesn't re-bill this listing forever; a dict
+    extraction fills the listings gap columns + caches it. Returns the
+    same status dict shape `enrich_listing_description` has always returned.
+    """
     if not isinstance(extraction, dict):
         # Negative-cache the miss: the selector keys on row existence, so
         # without a row this listing would re-bill on every run forever.
@@ -275,11 +330,11 @@ def enrich_listing_description(
                 "VALUES (%s, %s, %s, %s, %s, %s, %s) "
                 "ON CONFLICT DO NOTHING",
                 (sreality_id, snapshot_id, json.dumps({"no_extraction": True}),
-                 json.dumps({}), model, resp.llm_call_id, resp.cost_usd),
+                 json.dumps({}), model, llm_call_id, cost_usd),
             )
         conn.commit()
         return {"status": "no_extraction", "sreality_id": sreality_id,
-                "llm_call_id": resp.llm_call_id}
+                "llm_call_id": llm_call_id}
 
     columns = columns_from_extraction(extraction, current)
     with conn.cursor() as cur:
@@ -293,7 +348,7 @@ def enrich_listing_description(
             # apply-vs-deploy order — no fragile lockstep.
             "ON CONFLICT DO NOTHING",
             (sreality_id, snapshot_id, json.dumps(extraction), json.dumps(columns),
-             model, resp.llm_call_id, resp.cost_usd),
+             model, llm_call_id, cost_usd),
         )
         if columns:
             sets = ", ".join(f"{col} = %s" for col in columns)
@@ -306,6 +361,55 @@ def enrich_listing_description(
         "status": "ok",
         "sreality_id": sreality_id,
         "filled": sorted(columns),
-        "cost_usd": resp.cost_usd,
-        "llm_call_id": resp.llm_call_id,
+        "cost_usd": cost_usd,
+        "llm_call_id": llm_call_id,
     }
+
+
+def enrich_listing_description(
+    conn: "psycopg.Connection",
+    llm_client: "LLMClient",
+    sreality_id: int,
+    *,
+    model: str | None = None,
+) -> dict[str, Any]:
+    """Extract typed attributes from one listing's description and fill gaps.
+
+    Returns a status dict. No-op (no LLM cost) when the listing has no
+    description or its latest snapshot is already enriched by this `model`
+    (the cache is keyed `(sreality_id, snapshot_id, model)`, migration 249, so a
+    model upgrade re-attempts every listing rather than reusing an older miss).
+
+    Thin orchestration over `build_enrich_request` (select + cache gate) and
+    `persist_enrich_result` (the write path) — the same two functions
+    `scripts.submit_enrich_batch` / `scripts.ingest_enrich_batch` call, so
+    the sync and batch paths share every line of selection/write logic.
+    """
+    model = model or DEFAULT_MODEL
+    skip_status, req = _select_and_check(conn, sreality_id, model=model)
+    if req is None:
+        return {"status": skip_status, "sreality_id": sreality_id}
+
+    resp = llm_client.call(
+        called_for=CALLED_FOR,
+        system=req["system"],
+        messages=req["messages"],
+        tools=req["tools"],
+        tool_choice=req["tool_choice"],
+        model=req["model"],
+        max_tokens=req["max_tokens"],
+    )
+    extraction = next(
+        (tc["input"] for tc in resp.tool_calls if tc.get("name") == "record_listing"),
+        None,
+    )
+    return persist_enrich_result(
+        conn,
+        sreality_id=sreality_id,
+        snapshot_id=req["snapshot_id"],
+        current=req["current"],
+        extraction=extraction,
+        model=model,
+        llm_call_id=resp.llm_call_id,
+        cost_usd=resp.cost_usd,
+    )
