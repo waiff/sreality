@@ -22,6 +22,7 @@ import psycopg
 from psycopg.types.json import Jsonb
 
 from scripts.recompute_property_stats import recompute_mf_one, recompute_one
+from toolkit.browse_read_model import sync_browse_list
 from toolkit.operator_state import carry_operator_state_on_merge
 from toolkit.pipeline_identity import (
     reconcile_pipeline_on_merge,
@@ -171,6 +172,10 @@ def merge_properties(
 
         recompute_one(conn, survivor_id)
         recompute_mf_one(conn, survivor_id)
+        # Patch the Browse read model in the same txn so the merge is visible
+        # before the next 5-min rebuild (the survivor updates, the retired row
+        # drops out — it no longer matches browse_projection's active filter).
+        sync_browse_list(conn, [survivor_id, retired_id])
 
     return {
         "data": {
@@ -299,6 +304,9 @@ def split_property_to_singletons(
         recompute_mf_one(conn, property_id)
         for nid in new_ids:
             recompute_mf_one(conn, nid)
+        # The kept property plus every detached singleton are all newly active
+        # rows Browse must show — patch them into the read model in the same txn.
+        sync_browse_list(conn, [property_id, *new_ids])
 
     return {
         "data": {
@@ -411,6 +419,10 @@ def unmerge_group(
         for rid in retired_ids:
             recompute_one(conn, rid)
             recompute_mf_one(conn, rid)
+        # The survivor plus every reactivated retired property are all active
+        # again — patch them into the read model in the same txn so the unmerge
+        # is visible before the next rebuild.
+        sync_browse_list(conn, [survivor_id, *retired_ids])
 
     return {
         "data": {

@@ -101,9 +101,12 @@ def test_split_detaches_all_but_anchor_and_recomputes():
     assert len(_find_all(conn.executed, "INSERT INTO properties")) == 2
     repoints = _find_all(conn.executed, "UPDATE listings SET property_id =")
     assert [e[1] for e in repoints] == [(9001, 1002), (9002, 1003)]
-    # survivor recomputed inline; nothing ever deleted
+    # survivor recomputed inline; no DURABLE row is ever deleted (rule #3 —
+    # history is sacred). The only DELETE is the disposable browse_list read-model
+    # cache patch (toolkit.browse_read_model), rebuilt wholesale every 5 min.
     assert _find(conn.executed, "WITH batch AS") is not None
-    assert _find(conn.executed, "DELETE FROM") is None
+    assert _find(conn.executed, "DELETE FROM properties") is None
+    assert _find(conn.executed, "DELETE FROM listings") is None
 
 
 def test_split_is_noop_for_single_child():
