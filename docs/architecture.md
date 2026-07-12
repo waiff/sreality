@@ -817,7 +817,8 @@ renumber.** Navigate by area:
     helper), so the two surfaces can never disagree on what a filter means.
     `notification_dispatches` is the **unified notification event table** (migration 206 —
     physical name kept; conceptually "notifications"): one source-generic, **property-grain**,
-    append-only event row per `(source_kind ∈ {watchdog, collection_monitor}, subject, change_kind)`,
+    append-only event row per `(source_kind ∈ {watchdog, collection_monitor, system_health},
+    subject, change_kind)`,
     deduped by a single per-event **`dedupe_key`** (`wd:{sub}:new:{property_id}` once-ever;
     `wd:{sub}:price_drop:{snapshot_id}` **per-snapshot**, so a property that keeps dropping fires
     once per real cut — and so does the collection-monitor producer). Each row carries provenance
@@ -848,11 +849,20 @@ renumber.** Navigate by area:
     monitoring transition, so the anchor is correct across all write paths.
     `broker_change` is in the `change_kind` CHECK
     (migration 209) but NOT yet emitted — `listing_broker_public` is current-state-only with no
-    change signal; the kind is reserved for when one exists. The unified in-app **Notifications**
-    page (`/notifications`) reads BOTH producers off one LEFT-join feed (the watchdog-only INNER
-    join became a LEFT join + a `collections` join so monitor rows aren't dropped), and a red nav
-    unread badge polls `GET /notifications/unread-count`; `POST /notifications/mark-all-seen`
-    clears it.)
+    change signal; the kind is reserved for when one exists. **A THIRD producer is live
+    (migration 274, `scripts/verify_pipeline.py`):** an hourly pipeline-verification job writes
+    `pipeline_check_results` rows (`ok`/`warn`/`fail` per health metric, read via the anon
+    `pipeline_checks_public` / `pipeline_check_history_public` views) and a `fail` status emits
+    a `source_kind='system_health'` dispatch — `subscription_id` and `collection_id` both NULL
+    (widened `notification_dispatches_source_ck`), `sreality_id` now nullable since the alert
+    isn't about any one listing, verbatim text in a new `message` column, `change_kind =
+    'system_alert'`. It rings the same in-app bell the SPA nav badge already polls; a
+    SECURITY DEFINER dead-man-switch function (the migration-136 exception-guarded pg_cron
+    pattern) fires if the hourly job itself stops running. The unified in-app **Notifications**
+    page (`/notifications`) reads all THREE producers off one LEFT-join feed (the watchdog-only
+    INNER join became a LEFT join + a `collections` join so monitor and system_health rows
+    aren't dropped), and a red nav unread badge polls `GET /notifications/unread-count`;
+    `POST /notifications/mark-all-seen` clears it.)
 17. **City-quality indexes are a normalized, operator-curated time series.** `curated_cities`
     + `city_index_revisions` + `city_index_values` + `city_index_definitions` +
     `city_population` (migration 078 onward) store per-city indexes long-form, so a new index

@@ -1,0 +1,28 @@
+name: Docs budget
+
+on:
+  pull_request:
+    paths:
+      - 'CLAUDE.md'
+      - 'ROADMAP.md'
+      - '.claude/**'
+      - 'roadmap/**'
+      - 'migrations/**'
+      - 'toolkit/**'
+      - 'api/**'
+      - 'scraper/**'
+      - 'frontend/**'
+
+jobs:
+  docs-budget:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Enforce context budgets (blocking)
+        run: .github/scripts/docs-budget-check.sh
+
+      - name: Skill-staleness nudge (non-blocking)
+        run: .github/scripts/docs-staleness-check.sh "origin/${{ github.base_ref }}" "${{ github.sha }}"
