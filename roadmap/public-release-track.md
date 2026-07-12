@@ -17,15 +17,22 @@ common to all. Full plan, sequencing, and gates: `docs/design/public-release-pro
     286+287, PR #747). Google OAuth + Railway `SUPABASE_URL` configured by the operator.
   - Increment 2 ✅ — login made visible: account menu (sign-in / signed-in-as / logout)
     in the app Shell. Purely additive, no route gated yet.
-  - Increment 3 🟡 — the tenant DB pool + `account_id`/RLS across the ~18 user-state
+  - Increment 3 ✅ — the tenant DB pool + `account_id`/RLS across the 18 user-state
     tables + the pipeline PK rewrite (property_pipeline → `(account_id, property_id)`) +
-    a real-Postgres CI lane proving cross-tenant denial. Security-critical; verified against
-    the live DB with two accounts before anything nears prod.
-  - Increments 4–5 (admin gating, Stripe + entitlements + tier-visibility settings) — not started.
+    the real-Postgres CI isolation lane (migrations 290–295, PR #763). Verified live:
+    two-account denial, lossless operator backfill, fail-closed cross-account writes.
+  - Increment 4 ✅ — login gate (logged-out → /login), admin-gated nav + 10 admin pages
+    code-split behind the is_admin claim, require_admin on the admin-class API routes
+    (PR #765).
+  - Increment 5 ✅ — billing skeleton: plans/entitlements/webhook-idempotency tables
+    (migration 298), signature-verified Stripe webhook (stdlib HMAC, no SDK),
+    `require_entitlement` gate, admin Tiers & agenda-visibility screen in Settings,
+    plan-driven tenant nav. Stripe products/checkout flow still to come with Wave 1
+    metering; `STRIPE_WEBHOOK_SECRET` on the API service arms the webhook.
 - **Waves 1–4 (public features)** — not started; gated on Phase 1's exit (RLS lane green +
   external re-audit + 2-account pen-test).
 
 ## Next
 
-- Finish increment 3 (see design doc §"Workstream sequencing"), then increments 4–5.
+- Phase 1 exit gate (external re-audit + 2-account pen-test), then Wave 1 (extension + agent estimations: quotas, async job model, Stripe checkout + metering).
 - Apply Phase 0 before any wave that widens the anon/authenticated surface further.

@@ -12,23 +12,24 @@ import AccountMenu from './AccountMenu';
 import { APP_NAME } from '@/lib/brand';
 
 type NavItem =
-  | { kind: 'link'; to: string; label: string; disabled?: boolean; title?: string; admin?: boolean }
+  | { kind: 'link'; to: string; label: string; disabled?: boolean; title?: string; admin?: boolean; agenda?: string }
   | { kind: 'divider'; admin?: boolean }
   | { kind: 'section'; label: string; admin?: boolean };
 
-// `admin: true` entries only render for admin sessions (the routes themselves
-// are wrapped in <RequireAdmin>, so hiding here is UX, not the security gate).
+// `admin: true` entries only render for admin sessions; `agenda` keys tie a
+// link to the session plan's agenda-visibility map (Settings › Tiers). Both
+// are UX — the routes themselves carry the security gates.
 const navItems: ReadonlyArray<NavItem> = [
-  { kind: 'link', to: '/browse',      label: 'Browse' },
-  { kind: 'link', to: '/pipeline',    label: 'Pipeline' },
-  { kind: 'link', to: '/estimations', label: 'Estimations' },
-  { kind: 'link', to: '/watchdog',    label: 'Watchdogs' },
-  { kind: 'link', to: '/notifications', label: 'Notifications' },
-  { kind: 'link', to: '/brokers',     label: 'Brokers' },
+  { kind: 'link', to: '/browse',      label: 'Browse', agenda: 'browse' },
+  { kind: 'link', to: '/pipeline',    label: 'Pipeline', agenda: 'pipeline' },
+  { kind: 'link', to: '/estimations', label: 'Estimations', agenda: 'estimations' },
+  { kind: 'link', to: '/watchdog',    label: 'Watchdogs', agenda: 'watchdogs' },
+  { kind: 'link', to: '/notifications', label: 'Notifications', agenda: 'notifications' },
+  { kind: 'link', to: '/brokers',     label: 'Brokers', agenda: 'brokers' },
   { kind: 'link', to: '/datasets',    label: 'Datasets', admin: true },
   { kind: 'link', to: '/outreach',    label: 'Outreach', disabled: true, admin: true,
     title: 'Outreach is paused — not available yet.' },
-  { kind: 'link', to: '/collections', label: 'Collections' },
+  { kind: 'link', to: '/collections', label: 'Collections', agenda: 'collections' },
   { kind: 'divider', admin: true },
   // Everything past this divider lives under Settings.
   { kind: 'section', label: 'Settings', admin: true },
@@ -57,7 +58,7 @@ export default function Shell() {
 }
 
 function TopBar() {
-  const { isAdmin } = useAuth();
+  const { isAdmin, agendas } = useAuth();
   const unreadQ = useQuery({
     queryKey: notificationKeys.unreadCount,
     queryFn: () => getNotificationUnreadCount(),
@@ -68,7 +69,22 @@ function TopBar() {
   // Unconfigured local dev has no session (so no is_admin claim) — show the
   // full nav there, mirroring the guards' allow-through posture.
   const showAdmin = isAdmin || !isSupabaseConfigured();
-  const items = navItems.filter((item) => showAdmin || !item.admin);
+  const items = navItems.filter((item) => {
+    if (item.admin && !showAdmin) return false;
+    // Plan agenda gating (non-admins only). agendas === null means the
+    // billing read hasn't resolved / failed — show everything rather than
+    // blank the nav over a read hiccup; admins always bypass.
+    if (
+      !showAdmin
+      && agendas !== null
+      && item.kind === 'link'
+      && item.agenda
+      && agendas[item.agenda] !== true
+    ) {
+      return false;
+    }
+    return true;
+  });
   return (
     <header className="border-b border-[var(--color-rule)] bg-[var(--color-paper)] sticky top-0 z-30">
       <div className="px-6 h-14 flex items-center gap-8">
