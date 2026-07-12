@@ -140,18 +140,25 @@ class LLMClient:
         max_tokens: int = 4096,
         estimation_run_id: int | None = None,
         provider: str = "anthropic",
+        tool_choice: str | None = None,
     ) -> LLMResponse:
         """Single API used by every LLM caller in the codebase.
 
         Accepts either the legacy dict shapes (used by the URL parser
         and the summary/vision tools) or the neutral Message /
         ToolSchema types (used by the agent loop). Translates dicts
-        to neutral types before dispatch.
+        to neutral types before dispatch. `tool_choice` forces the named
+        tool; it is forwarded only when set, so providers (and test
+        fakes) that predate the parameter keep working for callers that
+        don't use it.
         """
         resolved_model = model or self.resolve_model()
         prov = self.provider(provider)
         neutral_messages = [_to_neutral_message(m) for m in messages]
         neutral_tools = [_to_neutral_tool(t) for t in (tools or [])]
+        extra_kwargs: dict[str, Any] = {}
+        if tool_choice:
+            extra_kwargs["tool_choice"] = tool_choice
 
         mono_start = time.monotonic()
         try:
@@ -161,6 +168,7 @@ class LLMClient:
                 tools=neutral_tools,
                 model=resolved_model,
                 max_tokens=max_tokens,
+                **extra_kwargs,
             )
         except Exception as exc:
             # Record the FAILURE so a provider outage is VISIBLE in the audit trail. On success

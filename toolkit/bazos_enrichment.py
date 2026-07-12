@@ -2,11 +2,15 @@
 
 Description-only portals (bazos today) carry no structured floor / amenities /
 condition / building_type / energy — only price, area, disposition, coords, and
-the seller's text. This reuses the per-source-parser `RECORD_LISTING_TOOL` to
-extract those typed fields from the description with a cheap model (Haiku),
-caches the extraction in `listing_description_enrichments` (keyed
-`(sreality_id, snapshot_id, model)` so a new snapshot OR a model upgrade
-auto-invalidates), and fills ONLY
+the seller's text. A slim 8-field variant of the per-source-parser
+`record_listing` tool (ONLY the gap fields `_FIELD_MAP` consumes — the full
+RECORD_LISTING_TOOL forced a verbatim description echo plus 10 unconsumed
+fields, ~2.5x the output tokens and routine truncation) extracts those typed
+fields from the description with a cheap model (Haiku, tool call FORCED via
+tool_choice so a prose answer can't burn the call), caches the extraction in
+`listing_description_enrichments` (keyed `(sreality_id, snapshot_id, model)`
+so a new snapshot OR a model upgrade auto-invalidates; a no-extraction miss is
+cached too, else it re-bills every run forever), and fills ONLY
 the listings columns that are currently NULL — the deterministic HTML-parsed
 fields (price / area / disposition) are authoritative and never overwritten.
 
@@ -23,7 +27,6 @@ from typing import TYPE_CHECKING, Any, Callable
 from unicodedata import combining, normalize
 
 from scraper.floor import is_plausible_floor
-from scraper.source_parsers.common import RECORD_LISTING_TOOL
 
 if TYPE_CHECKING:  # pragma: no cover
     import psycopg
@@ -87,6 +90,63 @@ def _norm_energy(value: Any) -> str | None:
         return None
     m = re.match(r"\s*([A-Ga-g])\b", value)
     return m.group(1).upper() if m else None
+
+
+def _envelope(value_type: list[str], description: str) -> dict[str, Any]:
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "value": {"type": value_type, "description": description},
+            "confidence": {
+                "type": "string",
+                "enum": ["high", "medium", "low"],
+            },
+        },
+        "required": ["value", "confidence"],
+    }
+
+
+# Slim extraction tool: ONLY the 8 gap fields _FIELD_MAP consumes, same
+# {value, confidence} envelopes and field semantics as the full
+# RECORD_LISTING_TOOL (scraper/source_parsers/common.py) minus the verbatim
+# description echo and the deterministic-from-HTML fields the enricher drops.
+ENRICH_LISTING_TOOL: dict[str, Any] = {
+    "name": "record_listing",
+    "description": (
+        "Record the structured attributes extracted from the listing "
+        "description. Call exactly once. Every field uses the "
+        "{value, confidence} envelope; use null for value when the text "
+        "does not state it."
+    ),
+    "input_schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "floor": _envelope(["integer", "null"],
+                "Floor number, ground = 0, suterén = -1."),
+            "total_floors": _envelope(["integer", "null"],
+                "Total floors in the building."),
+            "has_balcony": _envelope(["boolean", "null"],
+                "True if balcony, loggia, or terrace mentioned."),
+            "has_lift": _envelope(["boolean", "null"], "Elevator / výtah."),
+            "has_parking": _envelope(["boolean", "null"],
+                "Garage, parking lot, or parkovací stání."),
+            "building_type": _envelope(["string", "null"],
+                "cihla | panel | smisena | skelet | drevo | kamen | "
+                "montovana | nizkoenergeticka."),
+            "condition": _envelope(["string", "null"],
+                "novostavba | po rekonstrukci | velmi dobrý stav | "
+                "dobrý stav | před rekonstrukcí | ve výstavbě | k demolici."),
+            "energy_rating": _envelope(["string", "null"],
+                "Single capital letter A through G."),
+        },
+        "required": [
+            "floor", "total_floors", "has_balcony", "has_lift",
+            "has_parking", "building_type", "condition", "energy_rating",
+        ],
+    },
+}
 
 
 # record_listing field -> (listings column, transform). ONLY the gap fields a
@@ -194,15 +254,30 @@ def enrich_listing_description(
         called_for=CALLED_FOR,
         system=_SYSTEM,
         messages=[{"role": "user", "content": description[:8000]}],
-        tools=[RECORD_LISTING_TOOL],
+        tools=[ENRICH_LISTING_TOOL],
+        tool_choice="record_listing",
         model=model,
-        max_tokens=1024,
+        max_tokens=512,
     )
     extraction = next(
         (tc["input"] for tc in resp.tool_calls if tc.get("name") == "record_listing"),
         None,
     )
     if not isinstance(extraction, dict):
+        # Negative-cache the miss: the selector keys on row existence, so
+        # without a row this listing would re-bill on every run forever.
+        # tool_choice makes a prose answer near-impossible, but a truncated
+        # response must still not become a permanent re-bill loop.
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO listing_description_enrichments "
+                "(sreality_id, snapshot_id, extracted, filled, model, llm_call_id, cost_usd) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s) "
+                "ON CONFLICT DO NOTHING",
+                (sreality_id, snapshot_id, json.dumps({"no_extraction": True}),
+                 json.dumps({}), model, resp.llm_call_id, resp.cost_usd),
+            )
+        conn.commit()
         return {"status": "no_extraction", "sreality_id": sreality_id,
                 "llm_call_id": resp.llm_call_id}
 

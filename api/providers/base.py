@@ -174,7 +174,8 @@ class CompletionProvider(Protocol):
 
     Implementations are stateless aside from a constructed SDK client.
     `complete()` is called once per agent turn; the agent loop owns
-    the message history.
+    the message history. `tool_choice` names a declared tool the model
+    MUST call (None = the model decides).
     """
 
     name: str
@@ -187,6 +188,7 @@ class CompletionProvider(Protocol):
         tools: list[ToolSchema],
         model: str,
         max_tokens: int = 4096,
+        tool_choice: str | None = None,
     ) -> Completion: ...
 
     def price_for(self, model: str) -> ModelPrice | None: ...
@@ -208,6 +210,7 @@ class BatchCapableProvider(CompletionProvider, Protocol):
         tools: list[dict[str, Any]],
         model: str,
         max_tokens: int = 4096,
+        tool_choice: str | None = None,
     ) -> dict[str, Any]: ...
 
     def submit_batch(self, items: list[tuple[str, dict[str, Any]]]) -> str: ...

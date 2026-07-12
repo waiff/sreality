@@ -245,6 +245,37 @@ def test_missing_api_key_raises():
         )
 
 
+def test_tool_choice_maps_to_function_calling_config(patch_gemini):
+    client = patch_gemini(_tool_call_response("record_listing", {}))
+    p = GeminiProvider()
+    p.complete(
+        system="",
+        messages=[Message(role="user", content=[TextBlock(text="x")])],
+        tools=[ToolSchema(name="record_listing", description="d", input_schema={})],
+        model="gemini-3.5-flash",
+        tool_choice="record_listing",
+    )
+    cfg = client.models.calls[0]["config"].kwargs
+    assert cfg["tool_config"] == {
+        "function_calling_config": {
+            "mode": "ANY",
+            "allowed_function_names": ["record_listing"],
+        }
+    }
+
+
+def test_no_tool_config_when_tool_choice_unset(patch_gemini):
+    client = patch_gemini(_tool_call_response("record_listing", {}))
+    p = GeminiProvider()
+    p.complete(
+        system="",
+        messages=[Message(role="user", content=[TextBlock(text="x")])],
+        tools=[ToolSchema(name="record_listing", description="d", input_schema={})],
+        model="gemini-3.5-flash",
+    )
+    assert "tool_config" not in client.models.calls[0]["config"].kwargs
+
+
 def test_schema_for_gemini_strips_additional_properties_recursively():
     # Gemini's FunctionDeclaration.parameters 400s on additionalProperties
     # ("Unknown name additional_properties ... Cannot find field") — every

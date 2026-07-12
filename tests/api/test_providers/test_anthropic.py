@@ -247,6 +247,44 @@ def test_empty_system_is_not_sent(patch_anthropic):
     assert "system" not in sdk.calls[0]
 
 
+def test_tool_choice_forces_named_tool(patch_anthropic):
+    sdk = patch_anthropic(_RawResponse(text="ok"))
+    p = AnthropicProvider()
+    p.complete(
+        system="",
+        messages=[Message(role="user", content=[TextBlock(text="x")])],
+        tools=[ToolSchema(name="record_listing", description="d", input_schema={})],
+        model="claude-haiku-4-5",
+        tool_choice="record_listing",
+    )
+    assert sdk.calls[0]["tool_choice"] == {"type": "tool", "name": "record_listing"}
+
+
+def test_no_tool_choice_key_when_unset(patch_anthropic):
+    sdk = patch_anthropic(_RawResponse(text="ok"))
+    p = AnthropicProvider()
+    p.complete(
+        system="",
+        messages=[Message(role="user", content=[TextBlock(text="x")])],
+        tools=[ToolSchema(name="t", description="d", input_schema={})],
+        model="claude-haiku-4-5",
+    )
+    assert "tool_choice" not in sdk.calls[0]
+
+
+def test_batch_params_carry_tool_choice(patch_anthropic):
+    patch_anthropic(_RawResponse(text="ok"))
+    p = AnthropicProvider()
+    params = p.build_batch_request_params(
+        system="s",
+        messages=[{"role": "user", "content": "x"}],
+        tools=[{"name": "record_listing", "description": "d", "input_schema": {}}],
+        model="claude-haiku-4-5",
+        tool_choice="record_listing",
+    )
+    assert params["tool_choice"] == {"type": "tool", "name": "record_listing"}
+
+
 def test_missing_api_key_raises():
     p = AnthropicProvider(api_key=None)
     with pytest.raises(Exception, match="ANTHROPIC_API_KEY"):

@@ -163,6 +163,47 @@ def test_call_uses_explicit_provider_kwarg():
     assert conn.llm_calls_rows[0]["params"][1] == "gemini"
 
 
+def test_call_forwards_tool_choice_when_set():
+    conn = _FakeConn(app_settings={"llm_parse_model": "claude-sonnet-4-5"})
+    prov = _ScriptedProvider("anthropic", [_completion(text="ok")])
+    client = _client_with(prov, conn)
+    client.call(
+        called_for="enrich_listing_description",
+        messages=[{"role": "user", "content": "x"}],
+        tools=[{"name": "record_listing", "description": "", "input_schema": {}}],
+        tool_choice="record_listing",
+    )
+    assert prov.calls[0]["tool_choice"] == "record_listing"
+
+
+def test_call_omits_tool_choice_for_providers_without_support():
+    """A provider (or fake) whose complete() predates the tool_choice
+    parameter must keep working for callers that don't use it — the
+    kwarg is only forwarded when set."""
+    from api.providers import Usage
+
+    class _Legacy:
+        name = "legacy"
+
+        def complete(self, *, system, messages, tools, model, max_tokens=4096):
+            return Completion(
+                text_blocks=["ok"], tool_calls=[], stop_reason="end_turn",
+                usage=Usage(input_tokens=1, output_tokens=1), model=model,
+            )
+
+        def price_for(self, model):
+            return None
+
+    conn = _FakeConn(app_settings={"llm_parse_model": "claude-sonnet-4-5"})
+    client = lc.LLMClient(conn, providers={"legacy": _Legacy()})
+    resp = client.call(
+        called_for="parse_url",
+        messages=[{"role": "user", "content": "x"}],
+        provider="legacy",
+    )
+    assert resp.text == "ok"
+
+
 def test_call_raises_on_unknown_provider():
     from api.providers import ProviderError
     conn = _FakeConn(app_settings={"llm_parse_model": "claude-sonnet-4-5"})
