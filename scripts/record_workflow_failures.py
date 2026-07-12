@@ -77,12 +77,20 @@ def select_failed_runs(
     since: datetime,
     exclude_name: str = MONITOR_WORKFLOW_NAME,
     cancelled_min_duration: float = CANCELLED_MIN_DURATION_MINUTES,
+    started_check: Any = None,
 ) -> list[dict[str, Any]]:
     """Pure filter over parsed `/actions/runs` JSON (no network, testable).
 
     Keeps runs completed at/after `since` (completion ≈ `updated_at`) with an alerting
     conclusion, excluding the monitor workflow. `cancelled` is kept only when the run ran
     >= `cancelled_min_duration` minutes — a timeout-minutes kill, not a quick supersession.
+
+    `started_check(run_id) -> bool` closes the duration gate's blind spot: a superseded run
+    that sat QUEUED >= 8 min before cancel-in-progress killed it never ran at all, yet its
+    run_started_at (= queue entry) makes the duration look like a timeout kill (8 of 10
+    RealityMix/iDNES drain cancels on 2026-07-11 were falsely recorded this way). When
+    provided, a long-looking cancelled run is kept only if at least one JOB actually
+    started; None (e.g. in pure tests) keeps the duration-only behavior.
     """
     out: list[dict[str, Any]] = []
     for run in runs:
@@ -98,6 +106,8 @@ def select_failed_runs(
             dur = _duration_minutes(run)
             if dur is None or dur < cancelled_min_duration:
                 continue  # supersession / quick cancel — not a real failure
+            if started_check is not None and not started_check(int(run["id"])):
+                continue  # never-started queued run superseded — not a failure
         else:
             continue
         out.append(
@@ -157,6 +167,31 @@ def _fetch_runs_page(repo: str, token: str, page: int) -> list[dict[str, Any]]:
     with urllib.request.urlopen(req, timeout=API_TIMEOUT_S) as resp:
         payload = json.load(resp)
     return payload.get("workflow_runs", []) or []
+
+
+def _run_started_any_job(repo: str, token: str, run_id: int) -> bool:
+    """Did any job of this run actually START? A cancel-in-progress supersession of a
+    still-QUEUED run has an empty jobs list (or jobs with no started_at) — only called for
+    the rare cancelled-and-long candidates, so the extra API cost is a handful per poll.
+    On API failure, err on the side of recording (True) — a dropped real timeout-kill is
+    worse than one noisy row."""
+    url = f"https://api.github.com/repos/{repo}/actions/runs/{run_id}/jobs?per_page=50"
+    req = urllib.request.Request(
+        url,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=API_TIMEOUT_S) as resp:
+            payload = json.load(resp)
+    except Exception as exc:  # noqa: BLE001 — network flake must not drop a real failure
+        LOG.warning("jobs fetch failed for run %d (%s); recording anyway", run_id, exc)
+        return True
+    jobs = payload.get("jobs", []) or []
+    return any(j.get("started_at") for j in jobs)
 
 
 def _read_cursor(conn: Any) -> datetime | None:
@@ -224,7 +259,9 @@ def main() -> int:
         since = cursor_ts - timedelta(minutes=CURSOR_OVERLAP_MINUTES)
 
         runs, reached_since = _fetch_since_cursor(repo, token, since)
-        failed = select_failed_runs(runs, since=since)
+        failed = select_failed_runs(
+            runs, since=since,
+            started_check=lambda run_id: _run_started_any_job(repo, token, run_id))
         # Successes are NOT windowed: the latest success anywhere in the pages resets the
         # streak. workflow_run_health is one upserted row per workflow, so a stale
         # page-success can never regress last_success_at (greatest() guard below).

@@ -51,6 +51,29 @@ def test_keeps_only_alerting_conclusions():
     assert [r["run_id"] for r in kept] == [2, 4, 5]
 
 
+def test_cancelled_long_but_never_started_is_skipped():
+    """A superseded run that sat QUEUED >= 8 min looks like a timeout kill by duration
+    (run_started_at = queue entry), but its jobs never started — with started_check
+    provided, it must be skipped; a genuinely started long cancel is kept. Without
+    started_check (None), duration-only behavior is preserved."""
+    long_cancel = _run(id=1, conclusion="cancelled",
+                       run_started_at="2026-06-11T12:00:00Z",
+                       updated_at="2026-06-11T12:20:00Z")
+    # never started -> skipped
+    assert select_failed_runs([long_cancel], since=SINCE,
+                              started_check=lambda rid: False) == []
+    # actually ran -> kept
+    assert [r["run_id"] for r in select_failed_runs(
+        [long_cancel], since=SINCE, started_check=lambda rid: True)] == [1]
+    # no checker (pure mode) -> kept, as before
+    assert [r["run_id"] for r in select_failed_runs([long_cancel], since=SINCE)] == [1]
+    # the checker is NOT consulted for plain failures (would raise if called)
+    def _boom(rid):
+        raise AssertionError("started_check must not run for conclusion=failure")
+    assert [r["run_id"] for r in select_failed_runs(
+        [_run(id=2, conclusion="failure")], since=SINCE, started_check=_boom)] == [2]
+
+
 def test_cancelled_kept_only_when_it_ran_long_enough():
     long_min = CANCELLED_MIN_DURATION_MINUTES + 5
     runs = [
