@@ -1829,6 +1829,72 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/enrich_bazos.yml"
   },
   {
+    "filename": "enrich_bazos_batch.yml",
+    "name": "Scraping: Bazos description enrichment (batch API)",
+    "description": "Enrichment PR B — async bazos description enrichment via the Anthropic Message Batches API (50% cheaper than the synchronous enrich_bazos.yml job). Mirrors .github/workflows/condition_score_batches.yml's dual-mode structure exactly. Two modes, selected by the `mode` input:",
+    "portal": null,
+    "manual": true,
+    "schedules": [],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "mode",
+        "description": "submit a new batch, or ingest completed ones",
+        "required": true,
+        "type": "choice",
+        "default": "ingest",
+        "options": [
+          "ingest",
+          "submit"
+        ]
+      },
+      {
+        "name": "source",
+        "description": "[submit] Portal source to enrich (description-only portals)",
+        "required": false,
+        "type": "string",
+        "default": "bazos",
+        "options": null
+      },
+      {
+        "name": "limit",
+        "description": "[submit] Max listings to put in the batch",
+        "required": false,
+        "type": "string",
+        "default": "2000",
+        "options": null
+      },
+      {
+        "name": "max_age_days",
+        "description": "[submit] Only listings seen within this many days (0 = no filter)",
+        "required": false,
+        "type": "string",
+        "default": "0",
+        "options": null
+      },
+      {
+        "name": "model",
+        "description": "[submit] Anthropic model id (blank = claude-haiku-4-5)",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      }
+    ],
+    "secrets": [
+      "ANTHROPIC_API_KEY",
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "enrich-bazos-batch",
+    "cancelInProgress": false,
+    "timeoutMinutes": 60,
+    "permissions": "contents: read",
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/enrich_bazos_batch.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/enrich_bazos_batch.yml"
+  },
+  {
     "filename": "fetch-fixtures.yml",
     "name": "Fixtures: source HTML (anonymized)",
     "description": "Manual trigger only. Fetches each listing URL, runs the anonymization in scripts/fetch_and_anonymize_fixtures.py, and commits the resulting fixtures to the current branch. Operator runs this once per source refresh; tests then read the saved files instead of hitting the internet.",
