@@ -1,6 +1,6 @@
 ---
 name: llm-pipelines
-description: Use when working on any LLM-backed path — the on-demand URL parser (source_dispatcher + per-source parsers), the cached analytical vision/text tools (summarize_listing, compare_listing_images, classify/compare for dedup, score_listing_condition, extract_building_units, read_floor_plan, discover_condition_markers, summarize_region_dispositions), the unified vision downscaling tiers, or the MF Cenová mapa nájemného reference-rent calc/ingest and gross-yield filter. Triggers on: parse_url, source_parsers, app_settings prompt/model, llm_calls, vision, max_edge downscale, reference_rent, rent map, mf_gross_yield.
+description: Use when working on any LLM-backed path — the on-demand URL parser (source_dispatcher + per-source parsers), the cached analytical vision/text tools (summarize_listing, compare_listing_images, classify/compare for dedup, score_listing_condition, extract_building_units, read_floor_plan, discover_condition_markers, summarize_region_dispositions), the unified vision downscaling tiers, the forensic vision-model A/B harness (Anthropic + Gemini candidates), or the MF Cenová mapa nájemného reference-rent calc/ingest and gross-yield filter. Triggers on: parse_url, source_parsers, app_settings prompt/model, llm_calls, vision, max_edge downscale, reference_rent, rent map, mf_gross_yield, Gemini, provider, tool schema, additionalProperties, validate_vision_models.
 ---
 
 # LLM pipelines
@@ -93,6 +93,13 @@ path. The forensic `compare_listings_visually` is the one call whose verdict aut
 its tier is gated: `scripts/validate_vision_models.py` (workflow
 `validate_vision_models.yml`) A/Bs a candidate `(model, max_edge)` against every historical
 `High` verdict and only a green run authorizes flipping its model to Haiku / its edge to 768.
+The harness is no longer Anthropic-only — it can A/B a Gemini candidate model too (PR #754),
+routed through the same `additionalProperties`/pricing quirks documented in the `toolkit-api`
+skill's provider rule. It's the **sole admissible evidence** for any model flip, so a harness
+bug is a correctness bug: past ones include a wrong-model room-image lookup (PR #727) and
+sampling delisted pairs that always returned `INCONCLUSIVE` (PR #726) — verify the sampling
++ image-fetch logic, not just the verdict comparison, when touching this script. It also has
+a 90-minute per-run timeout that cancels stale dispatches (PR #731).
 
 ## Secondary rent reference (MF Cenová mapa nájemného)
 
@@ -137,7 +144,8 @@ the `/estimations` + `/estimate_yield` API payloads, and as a Browse map choropl
   excludes "cena v RK"/placeholder + rent-magnitude prices mis-tagged `prodej`, which would
   otherwise yield absurd %; genuine high-yield deals are preserved). The function runs **hourly**
   (`recompute_mf_yields.yml` → `scripts.recompute_mf_yields`) and **after each rent-map ingest**
-  (inside `scripts.fetch_rent_map`); cheap + idempotent (`is distinct from` guard). Exposed on
+  (inside `scripts.fetch_rent_map`); cheap + idempotent (`is distinct from` guard), and retries
+  once on a Postgres deadlock (PR #740, set-based UPDATE vs concurrent writers). Exposed on
   `listings_public` / `properties_public` and filterable in Browse **and** Watchdog via the
   `min/max_mf_gross_yield_pct` registry filter (`_UI_AGENDAS`, float range slider) — Map/Table
   auto-dispatch `.gte/.lte` on `properties_public`, the Stats RPC `browse_stats_properties` gained

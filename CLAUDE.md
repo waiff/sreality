@@ -50,10 +50,14 @@ in before starting. Deep per-territory rationale: `docs/architecture.md` § Terr
   — Python 3.12, stdlib-first, `psycopg` direct to Postgres, service-role (reads + writes
   anything). Runs in GitHub Actions + Railway. All architectural rules below apply.
 - **Frontend** (`frontend/`) — Vite + React 18 + TypeScript + Tailwind v4 SPA on Railway.
-  **anon key only** (never a secret in browser code); reads `*_public` views + `SECURITY
-  INVOKER` RPCs; **no write path from the browser** — writes go through the bearer-gated API.
-  Design tokens in `globals.css` `@theme` — never change without operator approval. Backend
-  rules below don't apply here.
+  **Never a secret in browser code** — the anon key + (once logged in) a Supabase Auth user
+  JWT are the only credentials it holds; reads `*_public` views + `SECURITY INVOKER` RPCs.
+  App-data writes still go through the bearer-gated API by convention, not because the anon
+  key forbids them: migrations 290/292/294 grant `authenticated` direct RLS-scoped table
+  writes (curation + pipeline tables), so a logged-in session's JWT *could* write directly —
+  the frontend code simply doesn't use those grants yet (see the `database` skill's
+  Multi-tenancy section). Design tokens in `globals.css` `@theme` — never change without
+  operator approval. Backend rules below don't apply here.
 - **Chrome extension** (`chrome-extension/`) — Manifest v3, **vanilla TS only** (no React /
   Tailwind), closed shadow-root panel. Every network call goes through the background worker
   (`chrome.runtime.sendMessage`), never a direct `fetch`. Build-time `VITE_API_*` inlined
@@ -80,6 +84,9 @@ from `main`, so a merged PR *is* the deploy; PR + branch protection + CI is the 
   *large* ROADMAP restructure is its own PR; small phase-entry bookkeeping rides with the work).
 - **End** by pushing the branch + opening a PR; return the URL. Commit messages / PR bodies
   follow the harness footer convention.
+- **If a PR changes behavior that a skill or `docs/architecture.md` documents, update that
+  document in the same PR.** A stale skill is worse than a missing one — sessions trust it
+  and load it by default. CI warns (non-blocking) when this is skipped for a mapped path.
 
 ## Autonomy and the safety net
 
@@ -260,5 +267,6 @@ out of scope without explicit direction in a new session.
 | Toolkit tools, FastAPI, auth, versioned trace, env-vars & secrets | `.claude/skills/toolkit-api` |
 | LLM URL parsing, cached vision/text tools, vision tiers, MF rent map | `.claude/skills/llm-pipelines` |
 | Running / debugging scrapers, adding a field, fixtures, reading logs | `.claude/skills/scraper-ops` |
+| Dashboards, admin panels, apps, tools — interface/UI design craft | `.claude/skills/interface-design` |
 | Full rule rationale, per-portal data sources, territory deep-dives | `docs/architecture.md` |
 | Sequencing / what's next | `ROADMAP.md` → `roadmap/<track>.md` |

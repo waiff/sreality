@@ -1,6 +1,6 @@
 ---
 name: scraper-ops
-description: Use when running, debugging, or extending the scrapers — triggering the per-portal index-walk/detail-drain workflows, adding a new scraper field without breaking data, refreshing per-source HTML fixtures, or reading the pipeline logs (INDEX/ENQUEUE/INACTIVE/DRAIN/IMAGES line shapes). Also covers condition-scoring and image-download workflow cadence. Triggers on: index_walk, detail_drain, gh workflow run, mark_inactive, scrape_runs, fixtures, RUN done, a new listings column, onboarding a portal, reading a scrape log.
+description: Use when running, debugging, or extending the scrapers — triggering the per-portal index-walk/detail-drain workflows, adding a new scraper field without breaking data, refreshing per-source HTML fixtures, reading the pipeline logs (INDEX/ENQUEUE/INACTIVE/DRAIN/IMAGES line shapes), the always-on real-time worker (count-probe, live forensics, property-maintenance/dedup/geo lanes), the dedup-aware publication gate, or the pipeline verification/alerting harness. Also covers condition-scoring (currently unscheduled) and image-download workflow cadence. Triggers on: index_walk, detail_drain, gh workflow run, mark_inactive, scrape_runs, fixtures, RUN done, a new listings column, onboarding a portal, reading a scrape log, realtime_worker, publication gate, verify_pipeline, llm_burn_rate.
 ---
 
 # Scraper operations
@@ -50,7 +50,14 @@ cron, disable the two new ones) and ad-hoc full walks. The bazos crawl is **cade
 like sreality (bazos walks 14 nationwide scopes, ~1500 index pages — a combined run starves the
 drain): `bazos_index_walk.yml` ("Scraping: Bazos index walk", cron `0 */6`, full walk +
 mark_inactive + enqueue) feeds `bazos_detail_drain.yml` ("Scraping: Bazos detail drain", cron
-`45 * * * *`, bounded `--max-seconds`). The bezrealitky scrape is
+`45 * * * *`, bounded `--max-seconds`); a third job, `bazos_description_enrichment.yml`, backfills
+free-text description enrichment every 3h (PR #733) — bazos's ad text needs a separate enrichment
+pass the other portals' structured pages don't. Its tool (`toolkit/bazos_enrichment.py`) was
+slimmed to the 8 fields it actually consumes with the LLM call's `tool_choice` FORCED (PR #768) —
+the prior full-schema tool let ~27% of calls return prose instead of a tool call, which wrote no
+cache row and re-billed forever; a `no_extraction` result now also caches, and the driving script
+aborts (exit 1, red workflow) after 5 consecutive provider errors instead of finishing green on a
+dead API key. The bezrealitky scrape is
 `scrape_bezrealitky.yml` ("Scraping: Bezrealitky scraper (pilot)", every 6h + dispatch; runs
 both index walk + detail drain in one job via `bezrealitky_main`). The maxima scrape is
 `scrape_maxima.yml` ("Scraping: Maxima Reality scraper (pilot)", every 6h + dispatch; the
@@ -79,7 +86,11 @@ auto-merge; rule #15 — THREE scheduled modes, ONE `resolve_pair` decision tree
 three work-lists: a **FULL SCAN** every 6h that DISCOVERS new dups across the market; a
 **CANDIDATE DRAIN** every 2h (`--candidates`) that re-decides ONLY the properties in
 still-proposed `/dedup` candidates so the queue **self-clears in O(queue)** regardless of the
-full scan's deadline frontier; and a **DIRTY DRAIN** hourly at :45 (`--dirty`, Wave 4c) that
+full scan's deadline frontier — a re-decide backoff (`engine_decision`/
+`last_engine_decision_at`, migration 272, PR #701) skips a candidate whose last decision is
+recent and not stale/superseded by fresh CLIP evidence, fixing a prior infinite-treadmill bug
+where the same undecided pairs re-ran every cycle for no new evidence; and a **DIRTY DRAIN**
+hourly at :45 (`--dirty`, Wave 4c) that
 re-decides ONLY the street groups touching a just-dedup-ready property
 (`dedup_dirty_properties`, migration 242) so a **new cross-portal listing merges within ~minutes**
 instead of waiting hours (the watchdog-grain goal). **The enqueue is a real-time CHANGE signal,
@@ -129,10 +140,9 @@ full scan itself is CURSOR-ROTATED** (migration 261, `dedup_scan_state`): groups
 key order resuming after `cursor_key`, each run advances the frontier, reaching the end of the
 list completes the CYCLE (stamps `last_cycle_*`, resets the cursor) — so the WHOLE market is
 covered every ~2–3 days instead of the head ~9% being re-scanned forever (the tail structurally
-never reached). The dirty/candidate drains have their own work-lists and stay cursor-free. (This replaced the original **FIFO** claim, which — with the clear
-gated on a non-truncated run — let a June-backfill head that never finished within the 20-min budget
-be re-claimed every hour forever: the queue grew to 201k and never drained. FIFO is the wrong order
-for a latency SLO; the full scan is the tail's backstop.) The **dirty cron runs
+never reached). The dirty/candidate drains have their own work-lists and stay cursor-free. (Replaced
+a **FIFO** claim that let an unfinished head be re-claimed forever — FIFO is the wrong order for a
+latency SLO; the full scan is the tail's backstop.) The **dirty cron runs
 `--floor-plan-budget 0`**: the real-time lane pays NO inline floor-plan vision (a cold call
 downloads plan images from R2 + Sonnet ~15s each; a batch of them blew the wall-clock budget →
 truncate → never clear), consuming only warm verdicts and DEFERRING the rest to the 6h full scan /
@@ -145,11 +155,9 @@ so concurrent merges serialize per-property and a redundant re-decide is an `alr
 **The claim clears INCREMENTALLY, per completed street group** (`run_engine`'s
 `resolved_property_ids` out-collector): a claimed property clears once EVERY group containing it
 (a listing dual-keys into 'id:' + 'name:' groups) was fully scanned — so a deadline/pair-cap-
-truncated run still clears the slice it finished and only the unprocessed remainder re-drains.
-(The original all-or-nothing clear kept the ENTIRE claim on truncation; prod data showed 4/5
-dirty runs truncating on pure per-pair DB cost — ~0.5-0.75 s/pair × >1,600 pairs vs the 1200 s
-budget — so the same slice re-processed hourly and `dirty_cleared` pinned at 0. Per-group clear
-makes progress monotonic regardless of budget: correctness-by-construction, not cap tuning.)
+truncated run still clears the slice it finished and only the unprocessed remainder re-drains
+(replaced an all-or-nothing clear that pinned `dirty_cleared` at 0 whenever a run truncated —
+per-group clear makes progress monotonic regardless of budget).
 **The per-pair cost floor itself is fixed by the run-scoped `_ProbeCache` + group-batched pHash**:
 CLIP-completeness / floor-plan ids / site-plan presence are per-LISTING facts memoized for the run
 (O(n) probes per group, not O(n²)), and `_phash_group_counts` computes a whole street group's pair
@@ -184,20 +192,44 @@ the drain works, so a falling depth alone proves nothing), and a truncated strea
 cleared is a red LIVELOCK regardless of depth (pre-258 rows fall back to the depth trend).
 All three drains compose with `--free` + the floor-plan budget), `dedup_batches.yml` ("Dedup engine (vision batch warm-up)", submit every
 6h + ingest hourly — pre-warms the engine's vision caches via the Anthropic Batches API at 50%
-off so the daily engine run merges over warm cache for free; rule #15), and
-`compute_image_phash.yml` (hourly pHash backfill, active-listing images first). Two monitor
-workflows watch the rest: `monitor_workflow_failures.yml` ("Monitoring: workflow failures", cron
-`*/30` — records failed / timed-out / startup-failed runs into `workflow_failures` so the Health
-page can list them; GitHub only emails about failed *scheduled* runs) and `llm_health.yml`
-("Monitoring: LLM pipeline liveness", hourly — goes red on ANY of: recorded `llm_calls` FAILURE
-rows in the window (`error IS NOT NULL`, migration 259 — a credit-balance error alarms
-immediately, `>= --min-failures` generic failures otherwise), OR `llm_calls` idle for hours while
-condition-scoring work is pending, OR the condition batch pipeline stale despite fresh unrelated
-traffic. The failure probe is INDEPENDENT of pending work — it closes the blind spot where a
-credit-exhausted account stayed green for ~8h because condition scoring happened to be quiet.
-`LLMClient` records the failure row on every provider exception; the check needs no Anthropic key
-of its own). Run any
-directly:
+off so the daily engine run merges over warm cache for free; rule #15; the warmer submits by
+`--lane street|geo|candidates`, has a wall-clock submit budget, and retries transient provider
+errors within its ~75-min job window), and
+`compute_image_phash.yml` (hourly pHash backfill, active-listing images first).
+
+**CLIP tagging (`toolkit/image_tagging.py`) now persists an embedding for every TAGGED
+image, not just active-listing ones** (PR #748) — closed a ~19% coverage gap that was
+forcing unnecessary Sonnet vision fallback in the dedup engine; a spare-capacity repair
+phase (PR #751) backfills the pre-existing tagged-but-vectorless backlog. Byt (apartment)
+candidate generation gained a **geo rung** (migration 296, PR #764) — extends the
+`geo_cell_key` blocking key (migration 276, see the `database` skill) to the `byt` family,
+so street-less apartments (~19.3k) are now reachable via a geo-cell + disposition candidate
+lane, generation-only (doesn't change the auto-merge gate, rule #15).
+
+A unified `CoordResolver` (`scraper/location.py`, migration 288, PR #749) now backs
+idnes/realitymix/maxima/remax/mmreality/ceskereality — four of those had no geocode path at
+all before. See the `database` skill's "Location/geocode lifecycle" and "Street lifecycle"
+entries for the caching/provenance detail; this is the portal-wiring side of the same change.
+
+Monitor/alerting workflows watch the rest: `monitor_workflow_failures.yml` ("Monitoring: workflow
+failures", cron `*/30` — records failed / timed-out / startup-failed runs into `workflow_failures`
+so the Health page can list them; GitHub only emails about failed *scheduled* runs; it now
+distinguishes a never-started supersession cancel from a genuine failure so cancelled-by-newer-run
+doesn't inflate the failure count, and captures the run's cursor + whether it was killed by
+timeout, PR #767/#738) and `llm_health.yml` ("Monitoring: LLM pipeline liveness", hourly — goes red
+on ANY of: recorded `llm_calls` FAILURE rows in the window (`error IS NOT NULL`, migration 259 — a
+credit-balance error alarms immediately, `>= --min-failures` generic failures otherwise), OR
+`llm_calls` idle for hours while condition-scoring work is pending, OR the condition batch pipeline
+stale despite fresh unrelated traffic. The failure probe is INDEPENDENT of pending work — it closes
+the blind spot where a credit-exhausted account stayed green for ~8h because condition scoring
+happened to be quiet. `LLMClient` records the failure row on every provider exception; the check
+needs no Anthropic key of its own). Two more alerting layers were added on top: `llm_burn_rate`
+(PR #739, warn threshold operator-tuned via `pipeline_check_thresholds`, currently 130 — PR #766)
+watches daily LLM spend for the recurring credit-depletion pattern (see the
+`llm-credit-outage-health-gap` memory if you need the incident history) — its rows land in the
+same `pipeline_check_results` table the verification harness below writes to; and a broader
+edge-triggered-alerts / blind-spot-detector rework (PR #732, WS4 tracks A/B/C) consolidates related
+LLM alerts instead of firing one per symptom. Run any directly:
 - CLI: `gh workflow run index_walk.yml --ref <branch>` (or `detail_drain.yml`, `-f` for flags).
   Watch with `gh run list --workflow=index_walk.yml` then `gh run watch`.
 - Browser: GitHub repo → **Actions** → the workflow → **Run workflow** → pick branch + optional
@@ -244,15 +276,18 @@ neexistuje" body, `ListingGoneError`) flips that single listing immediately. The
 failure-priority replaces the old per-walk priority retry: a failed fetch keeps its queue row at
 elevated priority.
 
-**Condition scoring** stays decoupled and is **batch-driven**: `condition_score_batches.yml`
-is the scheduled steady-state driver (Anthropic Message Batches API, 50% cost) — `submit`
-every 3h (`5 */3 * * *`) puts the next slice of unscored listings in a batch, `ingest` hourly
-(`35 * * * *`) polls + persists; one workflow, mode chosen by `github.event.schedule`. The
-synchronous `condition_scores.yml` is now a **dispatch-only fallback** (its `30 * * * *` cron
-was removed) — don't schedule both, they select the same pending listings and the sync scorer
-doesn't skip in-flight batch rows. The scoring model is `app_settings.llm_condition_model`
-(Haiku today), so batch+Haiku ≈ 25% of the original Sonnet-sync cost. Both scrape workflows
-still pass `--no-condition-scoring`. Scoring is **kraj-scoped and reuse-first** (migration 174):
+**Condition scoring is currently UNSCHEDULED — an intentional pause, not a bug** (PR #730,
+confirmed operator-intentional 2026-07-09; ~56k byt rows unscored is accepted). Don't
+re-enable or backfill without explicit direction. The machinery is otherwise unchanged and
+**batch-driven** when it does run: `condition_score_batches.yml` is the driver (Anthropic
+Message Batches API, 50% cost) — `submit` (previously every 3h) puts the next slice of
+unscored listings in a batch, `ingest` hourly (`35 * * * *`, still live for any in-flight
+batch) polls + persists; one workflow, mode chosen by `github.event.schedule`. The
+synchronous `condition_scores.yml` is a **dispatch-only fallback** — don't schedule both,
+they select the same pending listings and the sync scorer doesn't skip in-flight batch rows.
+The scoring model is `app_settings.llm_condition_model` (Haiku today), so batch+Haiku ≈ 25%
+of the original Sonnet-sync cost. Both scrape workflows still pass `--no-condition-scoring`.
+Scoring is **kraj-scoped and reuse-first** (migration 174):
 the selector targets only listings whose geo-derived `region_id` is in
 `app_settings.condition_scoring_enabled_region_ids` (operator-edited via the Settings page
 "Hodnocení stavu — kraje" toggles; empty = paused; `region_id` NULL = parked), and
@@ -294,6 +329,59 @@ the index walk specifically, while the 24h new/updated/error counters sum across
 `index_pages=0` rows too (see `scraper_health_checks()`, migration 105). The image backfill
 (`--images-only`) deliberately writes NO `scrape_runs` row — recording it once polluted
 liveness/reconciliation with `index_pages=0` noise.
+
+## The real-time worker (`scraper/realtime_worker.py`)
+
+A dark-by-default, always-on Railway service (a 2nd process from the SAME image, gated by
+`REALTIME_WORKER_ENABLED`) that replaces cron quantization for the latency-critical parts of
+the pipeline — the GH Actions crons above are still the throughput/completeness backbone; the
+worker is the latency layer on top. Design + shipped waves: `docs/design/realtime-scrapers.md`.
+Lanes shipped so far:
+- **Per-source drain-disable knob** (`realtime_drain_disabled_sources`, PR #694) — the bounded
+  detail drain skips sources listed here, letting a portal be pulled from the real-time lane
+  without touching its GH Actions cadence.
+- **Bounded live forensics** (`--compare-budget`, PR #695) — the worker can run a small,
+  wall-clock-bounded slice of the forensic visual-compare step inline instead of waiting for
+  the batch warmer; the warmer itself was NOT retired despite an earlier commit's title —
+  PRs #725/#728/#735/#741/#757/#762 continued actively building it well after.
+- **sreality count-probe lane** (migration 270, PR #696) — a lightweight per-`(category_main,
+  category_type)` count check that detects a market-wide count swing faster than a full index
+  walk would, feeding the completeness/delisting rails.
+- **Tightened delisting rails for sreality** (PR #697) — sreality's completeness gate moved
+  1.0→0.995 and its unseen-staleness window to 3h (vs 12h on the 6h-cadence portals), matching
+  rule #3's two-rail design to sreality's faster real cadence.
+- **Property-maintenance lane**, every 2 min (PR #716) — runs `run_incremental_pass` against
+  `dirty_properties` (rule #20) far more often than the 5-min GH Actions cron. Its first cut
+  serialized against the GH cron + daily sweep with a SESSION advisory lock, which is unsound
+  over the transaction pooler and stranded within minutes of deploy (PR #717 fixed it with the
+  lease-row CAS pattern — see the `database` skill's connection-modes section; don't reintroduce
+  a session advisory lock on any pooled connection).
+- **Real-time dedup lane** (PR #702) — lets a cross-portal merge complete within minutes of both
+  sides landing, rather than waiting for the hourly dirty-drain cron.
+- **Geo scan-state lane** (PR #715) — a geo-dedup analogue of the street dirty path, plus a geo
+  cron budget and an imageless-candidate eval sweep.
+- **Unified real-time geo+street dirty path** (PR #713) — the street dirty-drain and the geo
+  scan-state lane were merged into one queue / one decision brain rather than two parallel dirty
+  paths.
+
+## Publication gate and pipeline verification (migrations 273–274)
+
+**A new property is hidden from Browse, the map, Stats, the agent, and Watchdog until it has
+been dedup-evaluated** — `properties.published_at` (migration 273), gated by
+`dedup_publication_gate_enabled` (seeded `false`; flip only with the operator's sign-off, since
+it changes what's visible market-wide). `publication_gate_enabled()` is `SECURITY DEFINER`; if
+you're referencing it (or any future gate function) from a view's `WHERE`, wrap it in a scalar
+subquery, not a bare call — see the `database` skill's InitPlan gotcha, migration 275, which
+fixed exactly this on `properties_public` and broke Browse market-wide until it did.
+
+**Pipeline verification harness** (`scripts/verify_pipeline.py`, migration 274, PR #703) — a
+scheduled job that writes one `pipeline_check_results` row per health metric (`ok`/`warn`/`fail`)
+and is the origin of the notification system's third producer, `system_health` (see
+`docs/architecture.md` rule #16) — a `fail` status rings the same in-app bell the SPA nav badge
+polls. A `SECURITY DEFINER` dead-man-switch pg_cron function fires if the hourly job itself stops
+running (the migration-136 exception-guarded pg_cron pattern). This exists because the pipeline
+stalled silently for two days in 2026-07 (Anthropic credit exhaustion, 38k+ failed LLM calls) and
+the only alarm was a failing GH Actions cron the operator happened to miss.
 
 ## Reading the logs
 

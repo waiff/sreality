@@ -1,0 +1,36 @@
+name: Docs budget
+
+# Enforces the always-loaded context budgets from CLAUDE.md's Context-discipline rule
+# (line caps on CLAUDE.md/ROADMAP.md/skill bodies, a word cap on skill frontmatter
+# descriptions, and routing completeness — every .claude/skills/ dir must appear in
+# CLAUDE.md's "Where the detail lives" table) on any PR touching those paths, and warns
+# (non-blocking) when a PR changes code a skill documents without touching that skill.
+#
+# No secrets required.
+
+on:
+  pull_request:
+    paths:
+      - 'CLAUDE.md'
+      - 'ROADMAP.md'
+      - '.claude/**'
+      - 'roadmap/**'
+      - 'migrations/**'
+      - 'toolkit/**'
+      - 'api/**'
+      - 'scraper/**'
+      - 'frontend/**'
+
+jobs:
+  docs-budget:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Enforce context budgets (blocking)
+        run: .github/scripts/docs-budget-check.sh
+
+      - name: Skill-staleness nudge (non-blocking)
+        run: .github/scripts/docs-staleness-check.sh "origin/${{ github.base_ref }}" "${{ github.sha }}"
