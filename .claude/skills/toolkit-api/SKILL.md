@@ -1,6 +1,6 @@
 ---
 name: toolkit-api
-description: Use when writing or changing analytical toolkit functions (toolkit/) or the FastAPI service (api/) — the facts-not-opinions rule, the standard tool return envelope, the read-only-with-write-exceptions rule, bearer-token auth, the versioned estimation trace, provider pluggability, or the full env-var/secrets reference (Postgres, R2 images, LLM+maps keys, API service, notification delivery, scraper orchestration, frontend/extension build-time). Triggers on: new toolkit tool, /admin route, API_TOKEN, write exception, estimation_runs.trace, llm_calls, provider, env var, secret, R2/ANTHROPIC/MAPY/RESEND/TELEGRAM keys, CORS.
+description: Use when writing or changing analytical toolkit functions (toolkit/) or the FastAPI service (api/) — the facts-not-opinions rule, the standard tool return envelope, the read-only-with-write-exceptions rule, dual-mode auth (legacy bearer token + Supabase JWT / login / admin gating / identity), the versioned estimation trace, provider pluggability (Anthropic + Gemini), or the full env-var/secrets reference (Postgres, tenant pool, R2 images, LLM+maps keys, API service, notification delivery, scraper orchestration, frontend/extension build-time). Triggers on: new toolkit tool, /admin route, API_TOKEN, login, admin gating, identity, account menu, write exception, estimation_runs.trace, llm_calls, provider, env var, secret, R2/ANTHROPIC/GEMINI/MAPY/RESEND/TELEGRAM keys, CORS.
 ---
 
 # Toolkit & API
@@ -80,17 +80,21 @@ it (`api/`). They do not apply to the scraper.
    radius_m)`. Never compute distance in Python.
 7. **psycopg directly, not supabase-py.** Same reasoning as the scraper.
    `prepare_threshold=None` for pgbouncer-mode pooler.
-8. **API auth gated by `API_TOKEN`.** When the env var is set, every endpoint except
-   `/health` requires `Authorization: Bearer <token>`. When unset (local development) the
-   gate is a no-op. `/health` stays open so Railway healthchecks keep working. `/admin/*`
-   (Settings-page surface: skills, `app_settings`, agent tool inventory) is **bearer-gated
-   like every other write surface** — its router carries `Depends(require_token)`. (It was
-   historically exempt on the theory that the private Railway URL was the perimeter, but that
-   URL ships inside the public SPA bundle, so the exemption gave no real protection; the SPA's
-   Settings page already sends the token on every `/admin` call, so gating it is transparent.)
-   Every route except `/health` requires the token; *no* write path bypasses the FastAPI
-   service. The token is shared with every caller (including the Chrome extension and any
-   ClickUp caller); no per-user identity layer.
+8. **Dual-auth window: a legacy bearer token AND Supabase-JWT auth coexist.** Baseline:
+   every endpoint except `/health` requires `Authorization: Bearer <token>` when
+   `API_TOKEN` is set (no-op when unset, for local dev); `/health` stays open for Railway
+   healthchecks. `/admin/*` (Settings-page surface: skills, `app_settings`, agent tool
+   inventory) is bearer-gated like every other write surface — it was historically exempt
+   on the theory that the private Railway URL was the perimeter, but that URL ships
+   inside the public SPA bundle, so the exemption gave no real protection.
+   **Phase 1 (increments 1–4, #747/#753/#763/#765) layered identity on top**, not instead
+   of the token: `/admin/*`, `/dedup/*`, `/outreach/*`, `/broker-review/*`,
+   `/skill-refinements/*`, and dataset-write/dispatch routes on price-stats now use
+   `require_admin` (JWT-gated, see below) instead of plain `require_token`; every other
+   route is still bearer-only. The legacy static token still passes `require_admin` too
+   (see below) — this is a coexistence window, not a hard cutover, and no route currently
+   requires a JWT with no token fallback.
+   See "Identity, login, and admin gating" for the JWT mechanics.
 9. **Trace format on `estimation_runs.trace` is versioned.** `TRACE_SCHEMA_VERSION` lives in
    `api/estimation_runs.py`; every row's `trace.version` matches that constant at write time.
    Shape: `{version, summary, steps: [{n, kind, started_at, duration_ms, output_summary,
@@ -120,7 +124,45 @@ it (`api/`). They do not apply to the scraper.
     Adding a third provider is a new file implementing the same Protocol, registered in
     `api/dependencies.py:_build_providers`. `LLMClient` is the audit orchestrator — every call
     writes one row to `llm_calls` with provider, model, tokens, USD cost, and a `called_for`
-    tag.
+    tag. An unmapped model id records `cost_usd=0` rather than raising — silent, not loud;
+    check `api/providers/gemini.py`'s `_PRICES` table after any Gemini model bump.
+    **Gemini quirks** (`api/providers/gemini.py`): (1) pricing table needs live maintenance
+    across generations — 2.5 closed to new projects, PR #760 moved the default price entries
+    to the 3.x generation (`gemini-3.1-pro-preview`, `gemini-3.5-flash`); (2) our
+    Anthropic-shaped tool schemas set `additionalProperties: false` and sometimes carry
+    `$schema` — Gemini's function-calling API 400s on both, so they're recursively stripped
+    before every call (`_GEMINI_UNSUPPORTED_SCHEMA_KEYS`, PR #755) — a new tool schema key
+    Gemini rejects needs adding to that frozenset, not a per-call workaround.
+
+## Identity, login, and admin gating (Phase 1, `api/dependencies.py`)
+
+Three auth primitives now coexist in `api/dependencies.py`:
+- `require_token` — the original bearer-token gate (rule #8's baseline), unchanged.
+- `verify_jwt` — verifies a Supabase user JWT and returns its claims. Preferred path:
+  asymmetric JWKS (`SUPABASE_URL` → `/auth/v1/.well-known/jwks.json`, ES256/RS256, cached
+  via `PyJWKClient`, no shared secret). Falls back to a shared HS256 secret
+  (`SUPABASE_JWT_SECRET`) if that's all that's configured. **Dual-auth branch:** the
+  legacy static `API_TOKEN` bearer is checked FIRST and, if it matches, returns a
+  synthetic claims dict `{"sub": None, "role": "operator", "is_admin": True,
+  "legacy": True}` — so a route behind `verify_jwt`/`require_admin` still accepts the
+  operator's existing token. Fails closed with `503` if neither JWKS nor the HS256
+  secret is configured (an unconfigured auth backend must never authenticate anyone).
+- `require_admin` (`Depends(verify_jwt)`) — gates on `claims["is_admin"]` or
+  `claims["app_metadata"]["is_admin"]`; `403` otherwise. The legacy synthetic claims
+  dict always has `is_admin: True`, so the operator token passes this too.
+
+`SYSTEM_ACCOUNT_ID = "00000000-0000-0000-0000-000000000000"` mirrors migration 286's
+fixed system account — legacy callers (no Supabase `sub`) resolve to it until they
+re-auth with a real JWT.
+
+For routes that need per-account **data isolation** (not just an admin/non-admin split),
+use `api/tenant_pool.py`'s `tenant_conn` dependency instead of the service-role
+`get_db_conn` — it opens an RLS-scoped transaction under the `tenant_pool` role. See the
+`database` skill's connection-modes + Multi-tenancy sections for the mechanics;
+`verify_jwt` is authentication, `tenant_conn` (via RLS) is authorization. Its
+`resolve_account_id(conn, claims)` helper picks the caller's own account, or — for the
+legacy operator — whichever account claimed the legacy backfill (`None` until that
+happens).
 
 ## Auth and secrets
 
@@ -142,7 +184,14 @@ Database:
   `connect_session()`).
 - `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` — set as Actions secrets for forward
   compatibility; the v1 scraper connects to Postgres directly and does not need them.
-  (`SUPABASE_SERVICE_ROLE_KEY` is the 2025 `sb_secret_...` token, **not** a JWT.)
+  (`SUPABASE_SERVICE_ROLE_KEY` is the 2025 `sb_secret_...` token, **not** a JWT.) **On the
+  Railway API service, `SUPABASE_URL` is now load-bearing**, not just forward-compatible:
+  `verify_jwt` builds the JWKS URL from it to verify Supabase user JWTs.
+- `SUPABASE_JWT_SECRET` (Railway API, optional) — HS256 fallback for `verify_jwt` when
+  JWKS/`SUPABASE_URL` isn't set. Prefer JWKS; this exists for environments without it.
+- `TENANT_POOL_DB_URL` (Railway API only) — connection string for the `tenant_pool` role
+  (migration 293), used by `api/tenant_pool.py`'s `tenant_conn` for RLS-scoped per-account
+  writes. Distinct from `SUPABASE_DB_URL` (service-role, unscoped, bypasses RLS).
 
 Image storage (Cloudflare R2, S3-compatible):
 - `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET_NAME` (usually

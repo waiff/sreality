@@ -1,14 +1,14 @@
 ---
 name: database
-description: Use when working with this project's Postgres/Supabase database — reading data cheaply (psql vs the Supabase MCP), the two connection modes (connect vs connect_session, transaction- vs session-mode pooler, prepare_threshold), migrations as the source of truth, the additive-vs-destructive migration safety gate, or schema/column conventions (typed enum labels, geom-derived admin hierarchy, the shared street extractor, legacy booleans). Triggers on: migration, apply_migration, ALTER/CREATE TABLE, psycopg, pooler, backfill, PostGIS, RLS, connection mode, verifying data with a SELECT, schema or column change.
+description: Use when working with this project's Postgres/Supabase database — reading data cheaply (psql vs the Supabase MCP), the three connection modes (connect vs connect_session vs the tenant pool, transaction- vs session-mode pooler, prepare_threshold), migrations as the source of truth, the additive-vs-destructive migration safety gate, multi-tenancy (account_id scoping, RLS, tenant role, tenant pool, composite PKs), pooler-safe locking (advisory locks vs lease-row CAS), or schema/column conventions (typed enum labels, geom-derived admin hierarchy, the shared street extractor, stored blocking keys, legacy booleans). Triggers on: migration, apply_migration, ALTER/CREATE TABLE, psycopg, pooler, backfill, PostGIS, RLS, account_id, tenant, tenant pool, advisory lock, connection mode, verifying data with a SELECT, schema or column change.
 ---
 
 # Database
 
 Everything for working with the Supabase Postgres store of record: reading cheaply, the
-two connection modes, migrations as the source of truth, the migration safety gate, and
-schema conventions. Full architectural rationale for the data model is in
-`docs/architecture.md`.
+three connection modes, migrations as the source of truth, the migration safety gate,
+multi-tenancy, and schema conventions. Full architectural rationale for the data model is
+in `docs/architecture.md`.
 
 ## Reads: prefer psql over the Supabase MCP (cost)
 
@@ -44,20 +44,54 @@ client), for two reasons:
 
 Do not introduce `supabase-py` without an explicit reason and a discussion.
 
-**Two connection modes.** `scraper/db.py` exposes two factories:
-- `connect()` — the **default for everything** (scrape_run bookkeeping, bazos, images,
-  recompute, API, scripts). Points at `SUPABASE_DB_URL` (the **Transaction-mode pooler**,
-  port 6543) with `prepare_threshold=None`. Disabling auto-prepare is **required** there:
-  PgBouncer rebinds connections between queries, so a cached prepared statement would trip
-  `DuplicatePreparedStatement`.
+**Three connection modes** now exist — pick by who's calling and whether the call is
+tenant-scoped:
+- `connect()` (`scraper/db.py`) — the **default for everything service-role** (scrape_run
+  bookkeeping, bazos, images, recompute, most of the API, scripts). Points at
+  `SUPABASE_DB_URL` (the **Transaction-mode pooler**, port 6543) with
+  `prepare_threshold=None`. Disabling auto-prepare is **required** there: PgBouncer/
+  Supavisor rebinds connections between queries, so a cached prepared statement would trip
+  `DuplicatePreparedStatement`. Takes `attempts`/`retry_delay` for bounded retry on a flaky
+  connect handshake (PR #663).
 - `connect_session()` — **only** for the scraper's hot detail-write loop (the long-lived
   connection in `scraper/main.py:_run_full`). Points at `SUPABASE_DB_SESSION_URL` (the
   **Session-mode pooler**, port 5432) and leaves `prepare_threshold` at psycopg3's default,
   so the repeated upsert + spatial SQL gets server-side **prepared once and reused** across
-  every listing in the run (the plan isn't re-derived per call). The session pooler gives
-  each client a dedicated backend, so prepared statements are safe there. If
-  `SUPABASE_DB_SESSION_URL` is unset, `connect_session()` **falls back to `connect()`**, so
-  nothing breaks where the secret isn't configured.
+  every listing in the run. The session pooler gives each client a dedicated backend, so
+  prepared statements are safe there. Falls back to `connect()` if
+  `SUPABASE_DB_SESSION_URL` is unset.
+- `tenant_conn` (`api/tenant_pool.py`, FastAPI dependency, Phase 1 increment 3, migration
+  293) — the RLS-scoped path for per-account API routes. Connects to
+  `TENANT_POOL_DB_URL` as the `tenant_pool` role (`LOGIN NOINHERIT`, zero data access on
+  its own), `autocommit=False`, `prepare_threshold=None`. Inside **one transaction per
+  request** it runs `SET LOCAL ROLE authenticated` then
+  `SELECT set_config('request.jwt.claims', %s, true)` (bind param — `SET` only takes a
+  literal, so a bare `SET LOCAL ... = <claims>` would be both a syntax error and an
+  injection surface for attacker-shaped JWT claims) before yielding the connection for
+  BOTH the route's reads and writes — a `SET LOCAL` evaporates at transaction end, so a
+  post-commit read-back on a fresh transaction would run claims-less and RLS would hide
+  the row just written. `verify_jwt` is authentication; `tenant_conn` (via RLS) is
+  authorization — a route needing per-account isolation must use it, not `get_db_conn`. A
+  **legacy** caller (static `API_TOKEN` bearer, no Supabase `sub`) has no account
+  membership and would see zero rows under RLS, so it's routed to the unscoped
+  service-role connection instead (today's behavior, unchanged) until it re-auths with a
+  real JWT.
+
+**Pooler-safe mutual exclusion: lease-row CAS, not session advisory locks (migration
+279, PR #717).** `pg_advisory_lock`/`unlock` are **session-scoped** — sound only on a
+direct or session-pooled connection. Every service-role Python path uses the
+**transaction-mode** pooler (`SUPABASE_DB_URL`, port 6543); under autocommit each
+statement is its own transaction and can land on a *different* physical backend, so a
+lock taken on backend X and released on backend Y silently fails to release — the lock
+strands (caught live: PR #716's property-maintenance serialization stranded within
+minutes, the "holder" pid was mid-way through an unrelated statement on another backend).
+The pooler-proof primitive is a **single-row lease** claimed by one atomic
+`UPDATE ... RETURNING` compare-and-set — atomic on whatever backend it lands on, no
+session state, with an expiry that self-heals a crashed holder
+(`property_maintenance_lease`, `scripts/recompute_property_stats.py`). pg_cron functions
+(migration 277's Browse-rebuild included) are the one exception: each pg_cron call is a
+single local session, so a session advisory lock there is sound — don't generalize the
+lease-row fix to code that never sees the pooler.
 
 **Supabase MCP.** Claude Code has direct read/write access to the production Supabase
 project via the MCP integration. Use it for: inspecting the live schema, running SELECT
@@ -71,9 +105,23 @@ corresponding migration file silently breaks the codebase — future sessions or
 rebuilds will be missing the change. "Append-only" means **never rewrite migration
 history** (never edit an existing numbered file); it does **not** trap us into keeping
 dead schema — prune an unused table/column by writing a *new* forward migration that
-drops it (a destructive change — see the policy below).
+drops it (a destructive change — see the policy below). **Confirm the next free number at
+apply time** — parallel branches carry in-flight migrations; two genuine collisions
+already exist on disk (`276_browse_read_model.sql` / `276_listings_geo_cell_key.sql`,
+`277_browse_read_model_refresh.sql` / `277_candidates_archive_engine_columns.sql`) —
+both pairs coexist harmlessly because the runner orders by filename, not the numeric
+prefix alone, but don't count on that.
 
-**Migration safety policy (under autopilot):**
+**This Supabase project's default privileges auto-GRANT, not just on tables.** New
+tables get `anon`/`authenticated` grants by default (the Phase-0 hardening's root
+cause); migration 287 found the **same default ACL applies to new functions** — a
+freshly created `SECURITY DEFINER` function is directly callable by `anon` via PostgREST
+RPC until explicitly revoked (`revoke execute on function ... from anon, authenticated`),
+even though `revoke ... from public` is a no-op against an explicit ACL entry. Revoke
+explicitly on every new function; grant back only the roles that need it.
+
+## Migration safety policy (under autopilot)
+
 - **Additive migrations** (new tables / columns / indexes / RPCs) — write the new
   numbered file, commit it, apply via MCP, verify with a SELECT, and report. No approval
   gate; CI + the tracked file are the net.
@@ -88,6 +136,85 @@ Correct flow for any schema change: (1) write the new numbered migration file in
 `migrations/`; (2) for destructive changes, get explicit approval + back up first;
 (3) apply via MCP (`apply_migration`), verify with a SELECT; (4) commit the migration
 file in the same change; (5) report what was applied and verified.
+
+## Multi-tenancy and RLS (Phase 1, migrations 286–295)
+
+RLS is enabled **per-table, not project-wide** — check whether a table you're touching
+has a policy before assuming service-role-only access still applies everywhere. The
+model: `accounts` (`kind ∈ {personal,team,system}`, one fixed SYSTEM account
+`00000000-0000-0000-0000-000000000000`) + `account_members(account_id, user_id, role)`
++ a separate `admins(user_id)` platform-admin allowlist (migration 286). Two SECURITY
+DEFINER helpers, `current_account_ids()` and `is_platform_admin()` (keyed off the JWT
+`sub` claim via `account_members`/`admins`), are the **sole** definition point for every
+per-account RLS policy since — don't hand-roll a second way to check tenancy.
+
+Per-table RLS pattern, repeated across migrations 290 (6 curation tables: `collections`,
+`tags`, `property_notes`, `filter_presets`, `notification_subscriptions`,
+`manual_rental_estimates`), 291 (`estimation_runs`/`building_runs`, `account_id`
+NULLABLE, defaults to SYSTEM), 292 (6 child-grain tables incl. `notification_dispatches`,
+`account_id` **trigger-derived** from the parent row, not caller-supplied), and 294
+(pipeline tables): `revoke all ... from anon, authenticated` → `grant
+select/insert/update/delete ... to authenticated` → a `for all using/with check
+(account_id in (select current_account_ids()))` policy. **Grant the id sequence's
+`USAGE` too** — `GRANT INSERT` on the table does not cover it, and a table with a
+`bigserial`/`serial` PK will fail every `authenticated` insert until the sequence grant
+is added (a real bug the tenant-isolation CI lane caught before deploy).
+
+`property_pipeline` gets a **composite PK swap**, `(property_id)` → `(account_id,
+property_id)`, migration 295 — the one table where the PK itself changed, not just an
+added column. This migration is **explicitly gated**: it `raise exception`s if any NULL
+`account_id` rows remain, and its own header states it must ship in the same deploy
+window as `api/pipeline.py`'s matching `ON CONFLICT (account_id, property_id)` rewrite.
+Don't assume every table with `account_id` also got a composite PK — check the specific
+migration.
+
+**Tenant DB role and pool**: `tenant_pool` (migration 293, `LOGIN NOINHERIT`, zero access
+until an explicit `SET LOCAL ROLE authenticated`, fail-closed by construction) +
+`api/tenant_pool.py`'s `tenant_conn` — see the connection-modes section above for the
+runtime mechanics.
+
+**First-signup backfill race**: the on-signup trigger (migration 294) does an atomic
+INSERT-with-`ON CONFLICT` CAS into `legacy_backfill_claim` (mirrors the lease-row CAS
+pattern above) — whoever signs up first wins and claims every pre-tenancy NULL-
+`account_id` row via `backfill_legacy_account_id`; every later signup instead gets
+`seed_default_pipeline`/`seed_default_collections`. The migration comment flags this as
+unsafe once public (non-operator) signup ships — revisit before then.
+
+Full table-by-table migration list, RLS policy text, and the composite-FK detail on
+`property_pipeline`: `.claude/skills/database/references/tenancy.md`.
+
+## Read-model patterns
+
+**Browse read model** (migrations 275–278, 283; PRs #705/#707/#711/#714/#724): a
+`properties_public`-style view is fed from `browse_projection` (the column contract +
+the dedup-aware publication gate, defined once) into `browse_list` — an **UNLOGGED
+table**, blue-green rebuilt every 5 minutes by a `SECURITY DEFINER` pg_cron function
+(`rebuild_browse_list()`, `pg_try_advisory_lock` guards overlapping runs, `ANALYZE`
+*before* the swap is mandatory or the planner uses stale stats on the fresh table).
+`properties_map_mv` stays a real `MATERIALIZED VIEW` (30-min cadence) fed from the same
+projection. This retired the old `scripts/refresh_map_mv.py` GH Actions cron entirely —
+pg_cron runs on-the-minute where GH Actions cron was measured ~2× jittered (see
+`gh-actions-cron-throttle-fleet` if you need the numbers).
+
+**A bare `SECURITY DEFINER` function call in a view's WHERE is NOT inlined by the
+planner and runs once per candidate row, not once per query** (migration 275, PR #707).
+Migration 273 added `properties.published_at`'s gate as a bare
+`(NOT publication_gate_enabled() OR published_at IS NOT NULL)`; measured live, that's
+~87k calls for one cohort, shared buffers 33.5k→172k, warm latency 146ms→914ms, and it
+timed out cold under the anon 3s statement budget (this is what broke Browse
+market-wide). Wrapping the call as a scalar subquery,
+`(NOT (SELECT publication_gate_enabled()) OR ...)`, folds it to a one-time `InitPlan`
+(confirmed via `EXPLAIN ANALYZE`: 211 buffers instead of 172k) — same result, O(1)
+instead of O(rows). Apply this to any future gate/flag function referenced from a view
+WHERE.
+
+**Stored blocking keys**: `listings.street_name_key` (migration 256) and
+`listings.geo_cell_key` (migration 276, trigger-maintained, extended to the `byt` family
+by migration 296) follow the same shape — a single SQL/function definition, stamped at
+every write path, stored so the dirty-drain can scope its load in SQL instead of
+recomputing live for every row (rule #19). See the street-lifecycle entry below for
+`street_name_key`'s own history; `geo_cell_key` is its geo-blocking twin for families
+that don't key on street.
 
 ## Schema conventions
 
@@ -106,9 +233,11 @@ file in the same change; (5) report what was applied and verified.
   (migration 140). `listings.obec` / `okres` / `region` (municipality / district / kraj) are set
   by a BEFORE INSERT/UPDATE-OF-geom trigger (`listings_set_admin_geo`) that PIPs the coordinate
   into `admin_boundaries` and walks `parent_id` — so they're populated **instantly at scrape time**
-  and **uniform across every source** (only ~5% of listings, foreign points, lack a CZ match). The
-  trustworthy anchor is the coordinate (~95% coverage, straight from each portal's map/GPS data);
-  the free-text `locality` is portal-specific display text and unreliable for grouping. The legacy
+  and **uniform across every source**. Rows near a boundary that miss every polygon by a sliver
+  now fall back to the **nearest obec/ku within 250m** (migration 289, PR #752) rather than
+  going unresolved — only truly-foreign points (~5%) still lack a CZ match. The trustworthy
+  anchor is the coordinate (~95% coverage, straight from each portal's map/GPS data); the
+  free-text `locality` is portal-specific display text and unreliable for grouping. The legacy
   display `district` text column is filled from okres (or obec for Prague) only when NULL, so
   sreality's richer "City - Quarter" labels are preserved. Don't re-derive hierarchy from `locality`;
   read the normalized columns.
@@ -124,22 +253,27 @@ file in the same change; (5) report what was applied and verified.
   string logic; consumed live by `toolkit.dedup_engine.street_group_keys` AND stored on
   `listings.street_name_key`, migration 256 — don't confuse the human-readable `street` with the key):
   a row dual-keys into `id:<street_id>` (sreality/bezrealitky) AND `name:<obec_id>:<street_name_key>`.
-  The NAME key is **obec-scoped** — a common name like "Žižkova" has 100+ active listings across dozens
-  of towns; one nationwide group blows `MAX_GROUP_SIZE=40` and gets the whole group SKIPPED, so the
-  cross-portal pairs there (HTML portals have no street_id → name group is the only place they meet a
-  sreality row) were never compared. obec-scoping keeps each town's street its own small group AND
-  blocks cross-town false merges (classify_pair has no geo check). The STORED `street_name_key` (stamped
-  at EVERY `listings.street` write path via the one function, out of the content hash like `street`) is
-  what lets the dedup `--dirty` drain scope its eligible load to the dirty street groups in SQL (rule
-  #19); the 6h full scan recomputes it live, so a stale stored key only delays, never breaks, a merge.
-  `street` / `house_number` / `zip` / `street_name_key` are OUT of the content hash, so backfilling
-  them never churns snapshots (`scripts/backfill_portal_streets.py` +
-  `scripts/backfill_street_name_key.py` re-derive from already-stored data — no re-fetch). Browse
-  street picks ILIKE `properties_public.place_search_text`, which is a **group-best** street
-  (`coalesce(p.street, l.street)`, migration 183) denormalized onto `properties` by
-  `recompute_property_stats` — so a multi-portal property matches a street even when its representative
-  listing lacks one. (The old expand-normalizer `toolkit/addresses.py` that turned `ul.`→`ulice` was
-  dead code and was removed.)
+  The NAME key is **obec-scoped** to keep each town's street its own small group and block
+  cross-town false merges (classify_pair has no geo check). An oversized nationwide group (a
+  common name like "Žižkova" across 100+ towns) is no longer skipped whole — migration 271 (PR
+  #699) processes it **bounded**, prioritizing the best candidate pairs up to a cap and
+  recording `dedup_engine_runs.oversized_groups`/`skipped_oversized` for observability, so
+  cross-portal pairs in an oversized group are still found, just not exhaustively.
+- **RÚIAN address-point resolver** now covers mmreality, ceskereality, and realitymix (PR #750)
+  in addition to its original portals, gated by `matched_type='regional.address'` — a
+  geocoded street/town *centroid* match must never resolve a street, only an exact address
+  point. realitymix additionally gained a `locality_text`-derived arm (PR #756, its index
+  cards carry no structured address). Backfill (`scripts/backfill_portal_streets.py`) gained
+  `--include-inactive` (PR #758, dedup needs delisted streets too) and now bounds its chunk
+  scans to fixed ID windows (PR #759, avoiding pooler-timeout scans on the full table).
+- **Location/geocode lifecycle** (migration 288, PR #749): a unified `CoordResolver`
+  (`scraper/location.py`) now backs idnes/realitymix/maxima/remax/mmreality/ceskereality —
+  four of which had no geocode path before. `geocode_cache` persists negative results (don't
+  re-query a coordinate known to fail) and `listings.geocode_attempted_at` is a row-grain
+  attempt-ledger **column**, not a `raw_json` marker (the same lesson migration 263 already
+  learned for the street resolver: a marker in `raw_json` gets clobbered by the next refetch).
+  Both ingest upserts extend `COALESCE(EXCLUDED.geom, listings.geom)` preserve-if-null to
+  coordinates, mirroring the street-lifecycle rails below.
 - **Street lifecycle: resolver fills survive refetches (migration 263).** The RÚIAN coord→street
   resolver fills `street`/`street_name_key`/`house_number` on rows whose portal page has no street —
   so the row's next detail refetch re-parses NULL, and a plain `street = EXCLUDED.street` used to
@@ -154,3 +288,8 @@ file in the same change; (5) report what was applied and verified.
   (derived from the old point → may be wrong → "wrong street worse than NULL"), and its existing
   tail block then re-opens the resolver for the new coords. Parser streets are untouched by the
   guard (the page re-derives them every fetch).
+
+## See also
+
+- `.claude/skills/database/references/tenancy.md` — full table-by-table RLS migration list,
+  policy text, and the `property_pipeline` composite-FK detail.
