@@ -42,11 +42,16 @@ export default function AccountMenu() {
         onClick={() => setOpen((v) => !v)}
         aria-haspopup="menu"
         aria-expanded={open}
+        aria-label={label}
         title={label}
-        className="flex items-center gap-1.5 px-2 py-1.5 rounded-[var(--radius-xs)] text-sm text-[var(--color-ink-2)] hover:text-[var(--color-ink)] hover:bg-[var(--color-paper-2)]"
+        className={[
+          'flex items-center justify-center w-8 h-8 rounded-full transition-colors',
+          open
+            ? 'bg-[var(--color-copper)] text-white'
+            : 'bg-[var(--color-copper-soft)] text-[var(--color-copper)] hover:bg-[var(--color-copper)] hover:text-white',
+        ].join(' ')}
       >
         <UserIcon />
-        <span className="max-w-[10rem] truncate">{label}</span>
       </button>
       {open ? (
         <div
@@ -76,7 +81,7 @@ export default function AccountMenu() {
 
 function UserIcon() {
   return (
-    <svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor" aria-hidden>
+    <svg width="16" height="16" viewBox="0 0 14 14" fill="currentColor" aria-hidden>
       <circle cx="7" cy="4.2" r="2.6" />
       <path d="M1 13c0-3 2.7-5 6-5s6 2 6 5" />
     </svg>

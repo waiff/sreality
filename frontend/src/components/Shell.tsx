@@ -1,5 +1,5 @@
-import { NavLink, Outlet } from 'react-router-dom';
-import type { ReactNode } from 'react';
+import { NavLink, Outlet, useLocation } from 'react-router-dom';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { getNotificationUnreadCount } from '@/lib/api';
 import { notificationKeys } from '@/lib/queries';
@@ -11,34 +11,37 @@ import ToastViewport from './ToastViewport';
 import AccountMenu from './AccountMenu';
 import { APP_NAME } from '@/lib/brand';
 
-type NavItem =
-  | { kind: 'link'; to: string; label: string; disabled?: boolean; title?: string; admin?: boolean; agenda?: string }
-  | { kind: 'divider'; admin?: boolean }
-  | { kind: 'section'; label: string; admin?: boolean };
+type NavItem = { to: string; label: string; disabled?: boolean; title?: string; admin?: boolean; agenda?: string };
 
 // `admin: true` entries only render for admin sessions; `agenda` keys tie a
 // link to the session plan's agenda-visibility map (Settings › Tiers). Both
 // are UX — the routes themselves carry the security gates.
 const navItems: ReadonlyArray<NavItem> = [
-  { kind: 'link', to: '/browse',      label: 'Browse', agenda: 'browse' },
-  { kind: 'link', to: '/pipeline',    label: 'Pipeline', agenda: 'pipeline' },
-  { kind: 'link', to: '/estimations', label: 'Estimations', agenda: 'estimations' },
-  { kind: 'link', to: '/watchdog',    label: 'Watchdogs', agenda: 'watchdogs' },
-  { kind: 'link', to: '/notifications', label: 'Notifications', agenda: 'notifications' },
-  { kind: 'link', to: '/brokers',     label: 'Brokers', agenda: 'brokers' },
-  { kind: 'link', to: '/datasets',    label: 'Datasets', admin: true },
-  { kind: 'link', to: '/outreach',    label: 'Outreach', disabled: true, admin: true,
+  { to: '/browse',      label: 'Browse', agenda: 'browse' },
+  { to: '/pipeline',    label: 'Pipeline', agenda: 'pipeline' },
+  { to: '/estimations', label: 'Estimations', agenda: 'estimations' },
+  { to: '/watchdog',    label: 'Watchdogs', agenda: 'watchdogs' },
+  { to: '/notifications', label: 'Notifications', agenda: 'notifications' },
+  { to: '/brokers',     label: 'Brokers', agenda: 'brokers' },
+  { to: '/datasets',    label: 'Datasets', admin: true },
+  { to: '/outreach',    label: 'Outreach', disabled: true, admin: true,
     title: 'Outreach is paused — not available yet.' },
-  { kind: 'link', to: '/collections', label: 'Collections', agenda: 'collections' },
-  { kind: 'divider', admin: true },
-  // Everything past this divider lives under Settings.
-  { kind: 'section', label: 'Settings', admin: true },
-  { kind: 'link', to: '/dedup',       label: 'Dedup', admin: true },
-  { kind: 'link', to: '/health',      label: 'Health', admin: true },
-  { kind: 'link', to: '/costs',       label: 'LLM Costs', admin: true },
-  { kind: 'link', to: '/scrapers',    label: 'Scrapers', admin: true },
-  { kind: 'link', to: '/settings',    label: 'General Settings', admin: true },
+  { to: '/collections', label: 'Collections', agenda: 'collections' },
 ];
+
+// Grouped under the "Settings" dropdown trigger — all admin-only, so the
+// whole group renders (or not) alongside the other admin-gated nav items.
+const settingsItems: ReadonlyArray<{ to: string; label: string }> = [
+  { to: '/dedup',    label: 'Dedup' },
+  { to: '/health',   label: 'Health' },
+  { to: '/costs',    label: 'LLM Costs' },
+  { to: '/scrapers', label: 'Scrapers' },
+  { to: '/settings', label: 'General Settings' },
+];
+
+function isPathActive(pathname: string, to: string): boolean {
+  return pathname === to || pathname.startsWith(`${to}/`);
+}
 
 export default function Shell() {
   return (
@@ -59,6 +62,7 @@ export default function Shell() {
 
 function TopBar() {
   const { isAdmin, agendas } = useAuth();
+  const location = useLocation();
   const unreadQ = useQuery({
     queryKey: notificationKeys.unreadCount,
     queryFn: () => getNotificationUnreadCount(),
@@ -74,42 +78,18 @@ function TopBar() {
     // Plan agenda gating (non-admins only). agendas === null means the
     // billing read hasn't resolved / failed — show everything rather than
     // blank the nav over a read hiccup; admins always bypass.
-    if (
-      !showAdmin
-      && agendas !== null
-      && item.kind === 'link'
-      && item.agenda
-      && agendas[item.agenda] !== true
-    ) {
+    if (!showAdmin && agendas !== null && item.agenda && agendas[item.agenda] !== true) {
       return false;
     }
     return true;
   });
+  const settingsActive = settingsItems.some((s) => isPathActive(location.pathname, s.to));
   return (
     <header className="border-b border-[var(--color-rule)] bg-[var(--color-paper)] sticky top-0 z-30">
       <div className="px-6 h-14 flex items-center gap-8">
         <BrandMark />
         <nav className="flex items-center gap-1">
-          {items.map((item, i) => {
-            if (item.kind === 'divider') {
-              return (
-                <span
-                  key={`divider-${i}`}
-                  className="mx-2 h-4 w-px bg-[var(--color-rule)]"
-                  aria-hidden
-                />
-              );
-            }
-            if (item.kind === 'section') {
-              return (
-                <span
-                  key={`section-${i}`}
-                  className="mr-1 pl-1 text-[0.6rem] tracking-[0.18em] uppercase text-[var(--color-ink-4)] select-none"
-                >
-                  {item.label}
-                </span>
-              );
-            }
+          {items.map((item) => {
             if (item.disabled) {
               return (
                 <span
@@ -151,12 +131,97 @@ function TopBar() {
               </NavLink>
             );
           })}
+          {showAdmin && (
+            <>
+              <span className="mx-2 h-4 w-px bg-[var(--color-rule)]" aria-hidden />
+              <SettingsMenu items={settingsItems} active={settingsActive} />
+            </>
+          )}
         </nav>
         <div className="ml-auto">
           <AccountMenu />
         </div>
       </div>
     </header>
+  );
+}
+
+function SettingsMenu({
+  items,
+  active,
+}: {
+  items: ReadonlyArray<{ to: string; label: string }>;
+  active: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener('mousedown', onDown);
+    return () => document.removeEventListener('mousedown', onDown);
+  }, [open]);
+
+  return (
+    <div ref={ref} className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        className={[
+          'relative px-3 py-1.5 text-sm tracking-wide rounded-[var(--radius-xs)] transition-colors',
+          active ? 'text-[var(--color-ink)]' : 'text-[var(--color-ink-3)] hover:text-[var(--color-ink-2)]',
+        ].join(' ')}
+      >
+        <NavLabel active={active}>
+          Settings
+          <CaretIcon spin={open} />
+        </NavLabel>
+      </button>
+      {open ? (
+        <div
+          role="menu"
+          className="absolute right-0 top-[calc(100%+4px)] z-30 min-w-[11rem] rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper)] py-1 shadow-lg"
+        >
+          {items.map((item) => (
+            <NavLink
+              key={item.to}
+              to={item.to}
+              role="menuitem"
+              onClick={() => setOpen(false)}
+              className={({ isActive }) =>
+                [
+                  'block px-3 py-1.5 text-[0.8rem]',
+                  isActive
+                    ? 'text-[var(--color-ink)] bg-[var(--color-paper-2)]'
+                    : 'text-[var(--color-ink-2)] hover:bg-[var(--color-paper-2)] hover:text-[var(--color-ink)]',
+                ].join(' ')
+              }
+            >
+              {item.label}
+            </NavLink>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function CaretIcon({ spin }: { spin?: boolean }) {
+  return (
+    <svg
+      width="8"
+      height="8"
+      viewBox="0 0 8 8"
+      className={`ml-1 inline-block transition-transform ${spin ? 'rotate-180' : ''}`}
+      aria-hidden
+    >
+      <path d="M1.5 3 L6.5 3 L4 6.5 Z" fill="currentColor" />
+    </svg>
   );
 }
 
