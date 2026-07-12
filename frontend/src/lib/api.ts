@@ -1906,3 +1906,54 @@ export const unmergeBrokers = (
   request('/broker-review/merges/' + encodeURIComponent(mergeGroupId) + '/unmerge', {
     method: 'POST',
   });
+
+/* ----- billing: tiers + agenda visibility (admin) ------------------------- */
+
+export type Plan = {
+  key: string;
+  name: string;
+  position: number;
+  agendas: Record<string, boolean>;
+  is_default: boolean;
+  updated_at: string | null;
+};
+
+export type EntitlementRow = {
+  account_id: string;
+  email: string | null;
+  plan: string;
+  status: string;
+  current_period_end: string | null;
+  is_explicit: boolean;
+};
+
+export const adminListPlans = (): Promise<{ data: Plan[] }> =>
+  request('/admin/plans');
+
+export const adminCreatePlan = (body: {
+  key: string;
+  name: string;
+  position?: number;
+  agendas?: Record<string, boolean>;
+}): Promise<Plan> => request('/admin/plans', { method: 'POST', json: body });
+
+export const adminUpdatePlan = (
+  key: string,
+  body: Partial<Pick<Plan, 'name' | 'position' | 'agendas' | 'is_default'>>,
+): Promise<Plan> =>
+  request(`/admin/plans/${encodeURIComponent(key)}`, { method: 'PATCH', json: body });
+
+export const adminDeletePlan = (key: string): Promise<{ deleted: boolean }> =>
+  request(`/admin/plans/${encodeURIComponent(key)}`, { method: 'DELETE' });
+
+export const adminListEntitlements = (): Promise<{ data: EntitlementRow[] }> =>
+  request('/admin/entitlements');
+
+export const adminSetEntitlement = (
+  accountId: string,
+  body: { plan: string; status?: string },
+): Promise<EntitlementRow> =>
+  request(`/admin/entitlements/${encodeURIComponent(accountId)}`, {
+    method: 'PUT',
+    json: body,
+  });

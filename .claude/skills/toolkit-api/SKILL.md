@@ -187,6 +187,9 @@ rule #16; all OPTIONAL, dark until set):
 - `TELEGRAM_BOT_TOKEN` — the Telegram Bot API transport (`api/transports/telegram.py`). Railway
   API env. The recipient `chat_id` lives in `app_settings.notification_telegram_chat_id`.
 - `SPA_BASE_URL` — SPA origin for notification deep links (`{SPA_BASE_URL}/listing/{id}`).
+- `STRIPE_WEBHOOK_SECRET` — Stripe webhook signing secret (Dashboard → Developers →
+  Webhooks). Railway API env. Unset = `POST /billing/webhook` 503s (fail closed); the
+  handler verifies the `Stripe-Signature` HMAC with the stdlib (no stripe SDK).
 - `OUTBOX_DRAIN_DISABLED` (flag) — force-off the delivery outbox loop. The loop ALSO only starts
   when ≥1 transport `is_configured()`, so it's a true no-op until a key above is set + redeploy.
 - Operator destinations are `app_settings` rows (operator-editable, history-tracked):
