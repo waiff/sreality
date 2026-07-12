@@ -72,6 +72,7 @@ class AnthropicProvider:
         tools: list[ToolSchema],
         model: str,
         max_tokens: int = 4096,
+        tool_choice: str | None = None,
     ) -> Completion:
         client = self._sdk_client()
         kwargs = self._request_kwargs(
@@ -80,6 +81,7 @@ class AnthropicProvider:
             tools=[_tool_to_anthropic(t) for t in tools],
             model=model,
             max_tokens=max_tokens,
+            tool_choice=tool_choice,
         )
         try:
             raw = client.messages.create(**kwargs)
@@ -103,6 +105,7 @@ class AnthropicProvider:
         tools: list[dict[str, Any]],
         model: str,
         max_tokens: int = 4096,
+        tool_choice: str | None = None,
     ) -> dict[str, Any]:
         """Build one batch request's `params` from Anthropic-shaped dicts.
 
@@ -118,6 +121,7 @@ class AnthropicProvider:
             tools=tools,
             model=model,
             max_tokens=max_tokens,
+            tool_choice=tool_choice,
         )
 
     def submit_batch(self, items: list[tuple[str, dict[str, Any]]]) -> str:
@@ -214,12 +218,17 @@ class AnthropicProvider:
         tools: list[dict[str, Any]],
         model: str,
         max_tokens: int,
+        tool_choice: str | None = None,
     ) -> dict[str, Any]:
         kwargs: dict[str, Any] = {
             "model": model,
             "max_tokens": max_tokens,
             "messages": messages,
         }
+        if tool_choice:
+            # Force the named tool: guarantees a tool_use block instead of a
+            # prose answer the caller can't parse (and can't cache against).
+            kwargs["tool_choice"] = {"type": "tool", "name": tool_choice}
         if system:
             # Wrap as a list-of-blocks with cache_control so the system
             # prompt becomes part of Anthropic's cached prefix. String

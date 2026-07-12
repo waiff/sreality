@@ -70,6 +70,7 @@ class GeminiProvider:
         tools: list[ToolSchema],
         model: str,
         max_tokens: int = 4096,
+        tool_choice: str | None = None,
     ) -> Completion:
         if not self._api_key:
             raise ProviderError(
@@ -93,6 +94,15 @@ class GeminiProvider:
                     function_declarations=[_tool_to_gemini(t) for t in tools]
                 )
             ]
+        if tool_choice and tools:
+            # Force the named function: "ANY" mode restricted to one name.
+            # Plain dict — GenerateContentConfig coerces it to ToolConfig.
+            cfg_kwargs["tool_config"] = {
+                "function_calling_config": {
+                    "mode": "ANY",
+                    "allowed_function_names": [tool_choice],
+                }
+            }
 
         try:
             raw = client.models.generate_content(

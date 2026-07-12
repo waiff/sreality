@@ -149,6 +149,7 @@ class _ScriptedProvider:
         tools: list[ToolSchema],
         model: str,
         max_tokens: int = 4096,
+        tool_choice: str | None = None,
     ) -> Completion:
         self.calls.append({
             "system": system,
@@ -156,6 +157,7 @@ class _ScriptedProvider:
             "tools": list(tools),
             "model": model,
             "max_tokens": max_tokens,
+            "tool_choice": tool_choice,
         })
         if not self._queue:
             raise RuntimeError(

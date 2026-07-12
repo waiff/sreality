@@ -4,7 +4,9 @@ For each active listing of --source that has a description and whose latest
 snapshot isn't yet enriched, extract floor / amenities / condition /
 building_type / energy from the free text and fill the currently-NULL listings
 columns. Resumable (enriched snapshots drop out of the next selection), bounded
-by --limit and --max-cost-usd. Typically run via .github/workflows/enrich_bazos.yml.
+by --limit and --max-cost-usd. Exits 1 after a run of consecutive per-listing
+errors (provider outage) so the workflow goes red. Typically run via
+.github/workflows/enrich_bazos.yml.
 
     python -m scripts.enrich_listing_descriptions \\
         --source bazos --limit 500 --max-cost-usd 10
@@ -67,6 +69,77 @@ def _select_pending(
         return [int(r[0]) for r in cur.fetchall()]
 
 
+# A provider outage (dead key, exhausted credit, sustained 5xx) fails EVERY
+# call; without an abort the loop burns the whole wall-clock budget logging
+# per-listing errors. Skips/successes reset the streak.
+_MAX_CONSECUTIVE_ERRORS = 5
+
+
+def _enrich_loop(
+    conn: Any,
+    llm_client: Any,
+    ids: list[int],
+    *,
+    model: str,
+    max_cost_usd: float,
+    max_seconds: int,
+    enrich: Any,
+) -> tuple[dict[str, Any], bool]:
+    """Run the per-listing enrichment loop. Returns (stats, aborted).
+
+    aborted=True means _MAX_CONSECUTIVE_ERRORS in a row — a provider outage,
+    not per-listing flakiness — and the caller should exit non-zero so the
+    workflow run goes red instead of silently green-but-useless.
+    """
+    start = time.monotonic()
+    stats: dict[str, Any] = {"ok": 0, "filled": 0, "skipped": 0, "errors": 0, "spent": 0.0}
+    consecutive_errors = 0
+    for i, sid in enumerate(ids, 1):
+        if stats["spent"] >= max_cost_usd:
+            LOG.info(
+                "ENRICH cost cap reached spent=%.2f cap=%.2f at %d/%d",
+                stats["spent"], max_cost_usd, i - 1, len(ids),
+            )
+            break
+        if max_seconds > 0 and time.monotonic() - start >= max_seconds:
+            LOG.info(
+                "ENRICH time budget %ds reached at %d/%d; finalizing cleanly",
+                max_seconds, i - 1, len(ids),
+            )
+            break
+        try:
+            res = enrich(conn, llm_client, sid, model=model)
+        except Exception as exc:  # noqa: BLE001 - one listing must not kill the run
+            stats["errors"] += 1
+            consecutive_errors += 1
+            LOG.warning("ENRICH id=%s error=%s", sid, exc)
+            try:
+                conn.rollback()
+            except Exception:  # noqa: BLE001
+                pass
+            if consecutive_errors >= _MAX_CONSECUTIVE_ERRORS:
+                LOG.error(
+                    "ENRICH aborting: %d consecutive errors (provider outage?) at %d/%d",
+                    consecutive_errors, i, len(ids),
+                )
+                return stats, True
+            continue
+        consecutive_errors = 0
+        if res.get("status") == "ok":
+            stats["ok"] += 1
+            stats["spent"] += float(res.get("cost_usd") or 0.0)
+            stats["filled"] += len(res.get("filled") or [])
+        else:
+            stats["skipped"] += 1
+        if i % 50 == 0:
+            LOG.info(
+                "ENRICH progress=%d/%d ok=%d filled=%d skipped=%d errors=%d spent=%.2f",
+                i, len(ids), stats["ok"], stats["filled"], stats["skipped"],
+                stats["errors"], stats["spent"],
+            )
+    return stats, False
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--source", default="bazos")
@@ -112,48 +185,17 @@ def main() -> int:
             return 0
 
         llm_client = LLMClient(conn, providers={"anthropic": AnthropicProvider()})
-        start = time.monotonic()
-        spent = 0.0
-        ok = filled_total = skipped = errors = 0
-        for i, sid in enumerate(ids, 1):
-            if spent >= args.max_cost_usd:
-                LOG.info(
-                    "ENRICH cost cap reached spent=%.2f cap=%.2f at %d/%d",
-                    spent, args.max_cost_usd, i - 1, len(ids),
-                )
-                break
-            if args.max_seconds > 0 and time.monotonic() - start >= args.max_seconds:
-                LOG.info(
-                    "ENRICH time budget %ds reached at %d/%d; finalizing cleanly",
-                    args.max_seconds, i - 1, len(ids),
-                )
-                break
-            try:
-                res = enrich_listing_description(conn, llm_client, sid, model=model)
-            except Exception as exc:  # noqa: BLE001 - one listing must not kill the run
-                errors += 1
-                LOG.warning("ENRICH id=%s error=%s", sid, exc)
-                try:
-                    conn.rollback()
-                except Exception:  # noqa: BLE001
-                    pass
-                continue
-            if res.get("status") == "ok":
-                ok += 1
-                spent += float(res.get("cost_usd") or 0.0)
-                filled_total += len(res.get("filled") or [])
-            else:
-                skipped += 1
-            if i % 50 == 0:
-                LOG.info(
-                    "ENRICH progress=%d/%d ok=%d filled=%d skipped=%d errors=%d spent=%.2f",
-                    i, len(ids), ok, filled_total, skipped, errors, spent,
-                )
-        LOG.info(
-            "ENRICH done ok=%d filled_fields=%d skipped=%d errors=%d spent_usd=%.2f",
-            ok, filled_total, skipped, errors, spent,
+        stats, aborted = _enrich_loop(
+            conn, llm_client, ids,
+            model=model, max_cost_usd=args.max_cost_usd,
+            max_seconds=args.max_seconds, enrich=enrich_listing_description,
         )
-    return 0
+        LOG.info(
+            "ENRICH done ok=%d filled_fields=%d skipped=%d errors=%d spent_usd=%.2f aborted=%s",
+            stats["ok"], stats["filled"], stats["skipped"], stats["errors"],
+            stats["spent"], aborted,
+        )
+    return 1 if aborted else 0
 
 
 if __name__ == "__main__":
