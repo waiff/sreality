@@ -55,6 +55,7 @@ import {
   mergeDedupPropertySet,
 } from '@/lib/api';
 import { pushToast } from '@/lib/toast';
+import { invalidateBrowseQueries } from '@/lib/browseInvalidation';
 import {
   fetchCityIndexDefinitions,
   fetchCityIndexValues,
@@ -174,10 +175,15 @@ export default function BrowseExperience({
   }, []);
   const mergeMut = useMutation({
     mutationFn: (propertyIds: number[]) => mergeDedupPropertySet(propertyIds),
-    onSuccess: () => {
-      for (const key of ['cards', 'map', 'table', 'stats']) {
-        queryClient.invalidateQueries({ queryKey: [key] });
-      }
+    onSuccess: (res) => {
+      /* The server has already patched the browse_list read model in the merge
+       * txn (toolkit.browse_read_model.sync_browse_list), so this refetch serves
+       * the post-merge state — the retired cards drop out immediately instead of
+       * lingering until the next 5-min rebuild. Success is toasted (the toolbar
+       * closing was the only prior signal); errors surface via the global
+       * MutationCache. `browse-count` is included so the header total decrements. */
+      pushToast('ok', `Merged ${res.retired_ids.length + 1} listings into one property.`);
+      invalidateBrowseQueries(queryClient);
       exitMergeMode();
     },
   });
@@ -191,9 +197,7 @@ export default function BrowseExperience({
     onSuccess: (res) => {
       const n = res.data.member_property_ids.length;
       pushToast('ok', `Linked ${n} listings as the same building.`);
-      for (const key of ['cards', 'map', 'table', 'stats']) {
-        queryClient.invalidateQueries({ queryKey: [key] });
-      }
+      invalidateBrowseQueries(queryClient);
       exitMergeMode();
     },
   });

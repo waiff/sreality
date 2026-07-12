@@ -36,6 +36,7 @@ import {
   type ListingDetailLite,
 } from '@/lib/dedupDiff';
 import { imageSrc } from '@/lib/imageUrl';
+import { invalidateBrowseQueries } from '@/lib/browseInvalidation';
 import { assessDirtyQueue } from '@/lib/dedupQueueHealth';
 import { type TaggedImageUrl } from '@/lib/imageTags';
 import { portalListingUrl, portalShort } from '@/lib/portals';
@@ -184,10 +185,17 @@ export default function Dedup() {
   const detailMap = detailQ.data ?? new Map();
 
   const invalidate = () => qc.invalidateQueries({ queryKey: dedupKeys.all });
-  const mergeMut = useMutation({ mutationFn: mergeDedupCluster, onSuccess: invalidate });
-  const mergeSetMut = useMutation({ mutationFn: mergeDedupPropertySet, onSuccess: invalidate });
+  /* A merge collapses properties, so every Browse surface must refresh too — the
+   * server has already patched browse_list, this drops the stale duplicate from
+   * any open Browse view. Dismiss changes no properties, so it stays dedup-only. */
+  const invalidateAfterMerge = () => {
+    invalidate();
+    invalidateBrowseQueries(qc);
+  };
+  const mergeMut = useMutation({ mutationFn: mergeDedupCluster, onSuccess: invalidateAfterMerge });
+  const mergeSetMut = useMutation({ mutationFn: mergeDedupPropertySet, onSuccess: invalidateAfterMerge });
   const dismissMut = useMutation({ mutationFn: dismissDedupCluster, onSuccess: invalidate });
-  const bulkMut = useMutation({ mutationFn: bulkMergeDedupCandidates, onSuccess: invalidate });
+  const bulkMut = useMutation({ mutationFn: bulkMergeDedupCandidates, onSuccess: invalidateAfterMerge });
 
   // The loaded STRONG geo candidates (same coord + area + price/№) — the scoped
   // bulk-approve target. Gated to Houses in the render (the approved auto-merge family).
