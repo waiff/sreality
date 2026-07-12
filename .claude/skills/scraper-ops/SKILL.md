@@ -52,7 +52,12 @@ drain): `bazos_index_walk.yml` ("Scraping: Bazos index walk", cron `0 */6`, full
 mark_inactive + enqueue) feeds `bazos_detail_drain.yml` ("Scraping: Bazos detail drain", cron
 `45 * * * *`, bounded `--max-seconds`); a third job, `bazos_description_enrichment.yml`, backfills
 free-text description enrichment every 3h (PR #733) — bazos's ad text needs a separate enrichment
-pass the other portals' structured pages don't. The bezrealitky scrape is
+pass the other portals' structured pages don't. Its tool (`toolkit/bazos_enrichment.py`) was
+slimmed to the 8 fields it actually consumes with the LLM call's `tool_choice` FORCED (PR #768) —
+the prior full-schema tool let ~27% of calls return prose instead of a tool call, which wrote no
+cache row and re-billed forever; a `no_extraction` result now also caches, and the driving script
+aborts (exit 1, red workflow) after 5 consecutive provider errors instead of finishing green on a
+dead API key. The bezrealitky scrape is
 `scrape_bezrealitky.yml` ("Scraping: Bezrealitky scraper (pilot)", every 6h + dispatch; runs
 both index walk + detail drain in one job via `bezrealitky_main`). The maxima scrape is
 `scrape_maxima.yml` ("Scraping: Maxima Reality scraper (pilot)", every 6h + dispatch; the

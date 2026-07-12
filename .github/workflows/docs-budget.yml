@@ -1,5 +1,13 @@
 name: Docs budget
 
+# Enforces the always-loaded context budgets from CLAUDE.md's Context-discipline rule
+# (line caps on CLAUDE.md/ROADMAP.md/skill bodies, a word cap on skill frontmatter
+# descriptions, and routing completeness — every .claude/skills/ dir must appear in
+# CLAUDE.md's "Where the detail lives" table) on any PR touching those paths, and warns
+# (non-blocking) when a PR changes code a skill documents without touching that skill.
+#
+# No secrets required.
+
 on:
   pull_request:
     paths:

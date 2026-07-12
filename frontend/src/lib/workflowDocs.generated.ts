@@ -1700,6 +1700,35 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/discover_condition_markers.yml"
   },
   {
+    "filename": "docs-budget.yml",
+    "name": "Docs budget",
+    "description": "Enforces the always-loaded context budgets from CLAUDE.md's Context-discipline rule (line caps on CLAUDE.md/ROADMAP.md/skill bodies, a word cap on skill frontmatter descriptions, and routing completeness — every .claude/skills/ dir must appear in CLAUDE.md's \"Where the detail lives\" table) on any PR touching those paths, and warns (non-blocking) when a PR changes code a skill documents without touching that skill.",
+    "portal": null,
+    "manual": false,
+    "schedules": [],
+    "onPush": false,
+    "onPullRequest": true,
+    "paths": [
+      ".claude/**",
+      "CLAUDE.md",
+      "ROADMAP.md",
+      "api/**",
+      "frontend/**",
+      "migrations/**",
+      "roadmap/**",
+      "scraper/**",
+      "toolkit/**"
+    ],
+    "inputs": [],
+    "secrets": [],
+    "concurrencyGroup": null,
+    "cancelInProgress": null,
+    "timeoutMinutes": null,
+    "permissions": null,
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/docs-budget.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/docs-budget.yml"
+  },
+  {
     "filename": "embedding_ab.yml",
     "name": "Dedup — embedding A/B (DINOv2 vs CLIP)",
     "description": "One-shot OFFLINE analysis (read-only, no merges/writes): does a candidate instance-biased embedding (DINOv2) separate same-property from different-unit-same-development where CLIP's semantic embedding collapsed (negatives cosine >= positives)? Reports max same-room cosine percentiles by is_same for DINOv2 vs the stored CLIP, on the labelled same-disposition set (floor-plan-confirmed different units as negatives). The gate before any re-embed commitment. Dispatch-only. Secrets: SUPABASE_DB_URL + R2_* (downloads image bytes). NOT a portal ingest.",

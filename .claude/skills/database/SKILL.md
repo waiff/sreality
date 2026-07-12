@@ -137,6 +137,15 @@ Correct flow for any schema change: (1) write the new numbered migration file in
 (3) apply via MCP (`apply_migration`), verify with a SELECT; (4) commit the migration
 file in the same change; (5) report what was applied and verified.
 
+**Billing (migration 298, PR #769 — Phase 1 increment 5)** extends the same RLS pattern:
+`plans` (operator-curated tiers, `agendas jsonb` visibility map, one row `is_default`,
+world-readable to `authenticated` — plan definitions aren't secret), `entitlements`
+(≤1 row per account, `entitlements_read_own` policy, **service-role writes only** — no
+`authenticated` insert/update policy at all, since only the Stripe webhook or the admin
+comp screen may change a plan), `stripe_webhook_events` (idempotency ledger, service-role
+only, no `authenticated` grant). See the "Identity, login, and admin gating" section of the
+`toolkit-api` skill for `require_entitlement` and the webhook auth class.
+
 ## Multi-tenancy and RLS (Phase 1, migrations 286–295)
 
 RLS is enabled **per-table, not project-wide** — check whether a table you're touching

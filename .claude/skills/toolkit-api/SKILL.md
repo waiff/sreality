@@ -1,6 +1,6 @@
 ---
 name: toolkit-api
-description: Use when writing or changing analytical toolkit functions (toolkit/) or the FastAPI service (api/) — the facts-not-opinions rule, the standard tool return envelope, the read-only-with-write-exceptions rule, dual-mode auth (legacy bearer token + Supabase JWT / login / admin gating / identity), the versioned estimation trace, provider pluggability (Anthropic + Gemini), or the full env-var/secrets reference (Postgres, tenant pool, R2 images, LLM+maps keys, API service, notification delivery, scraper orchestration, frontend/extension build-time). Triggers on: new toolkit tool, /admin route, API_TOKEN, login, admin gating, identity, account menu, write exception, estimation_runs.trace, llm_calls, provider, env var, secret, R2/ANTHROPIC/GEMINI/MAPY/RESEND/TELEGRAM keys, CORS.
+description: Use when writing or changing analytical toolkit functions (toolkit/) or the FastAPI service (api/) — the facts-not-opinions rule, the standard tool return envelope, the read-only-with-write-exceptions rule, dual-mode auth (legacy bearer token + Supabase JWT / login / admin gating / identity), the billing/entitlements skeleton (Stripe webhook, plans, agenda gating), the versioned estimation trace, provider pluggability (Anthropic + Gemini), or the full env-var/secrets reference (Postgres, tenant pool, R2 images, LLM+maps keys, API service, notification delivery, scraper orchestration, frontend/extension build-time). Triggers on: new toolkit tool, /admin route, API_TOKEN, login, admin gating, identity, account menu, billing, Stripe, entitlement, plan, agenda gating, write exception, estimation_runs.trace, llm_calls, provider, env var, secret, R2/ANTHROPIC/GEMINI/MAPY/RESEND/TELEGRAM/STRIPE keys, CORS.
 ---
 
 # Toolkit & API
@@ -132,7 +132,12 @@ it (`api/`). They do not apply to the scraper.
     Anthropic-shaped tool schemas set `additionalProperties: false` and sometimes carry
     `$schema` — Gemini's function-calling API 400s on both, so they're recursively stripped
     before every call (`_GEMINI_UNSUPPORTED_SCHEMA_KEYS`, PR #755) — a new tool schema key
-    Gemini rejects needs adding to that frozenset, not a per-call workaround.
+    Gemini rejects needs adding to that frozenset, not a per-call workaround. The
+    `CompletionProvider` Protocol also gained `tool_choice` (force-tool-by-name — Anthropic's
+    `{"type": "tool", "name": ...}`, Gemini's `FunctionCallingConfig mode=ANY`, PR #768) so a
+    caller that needs a guaranteed structured response (no prose fallback) can force it; pass
+    it through `LLMClient.call(..., tool_choice=...)` — omitted, providers/fakes without the
+    param keep working.
 
 ## Identity, login, and admin gating (Phase 1, `api/dependencies.py`)
 
@@ -163,6 +168,24 @@ use `api/tenant_pool.py`'s `tenant_conn` dependency instead of the service-role
 `resolve_account_id(conn, claims)` helper picks the caller's own account, or — for the
 legacy operator — whichever account claimed the legacy backfill (`None` until that
 happens).
+
+**Billing skeleton** (`api/routes/billing.py`, migration 298, PR #769 — Phase 1 increment
+5) adds a **fourth** auth class alongside the three above: `POST /billing/webhook` verifies
+the `Stripe-Signature` header as an HMAC over the raw request body using the stdlib (no
+Stripe SDK), rejects payloads outside a 300s replay window, and fails closed with no
+`STRIPE_WEBHOOK_SECRET` configured — it does NOT use `require_token`/`verify_jwt` at all.
+One DB transaction covers both the `stripe_webhook_events` idempotency INSERT (`ON CONFLICT
+DO NOTHING` on the Stripe event id — atomic already-processed check, never check-then-act)
+and the event handler, so a mid-handler crash lets Stripe's own retry reprocess safely.
+`checkout.session.completed` anchors the Stripe customer id to an account (never re-points
+an already-bound one); `customer.subscription.*` upserts plan/status/period guarded by
+`last_event_created` (Stripe doesn't guarantee delivery order). `GET /billing/me` rides
+`tenant_conn` (RLS) and returns the caller's plan + agenda visibility.
+`require_entitlement(agenda)` is a dependency **factory** (not a single dependency like
+`require_admin`) — call it as `Depends(require_entitlement("watchdogs"))` to 403 unless the
+caller's plan has that agenda's visibility flag on; admin + legacy claims always pass (the
+operator is never billing-gated). **Not wired to any route yet** — a future wave attaches it
+per-agenda; don't assume any endpoint is currently billing-gated.
 
 ## Auth and secrets
 
@@ -227,6 +250,9 @@ API service:
 - `STUCK_ROW_SWEEP_DISABLED`, `NOTIFICATIONS_MATCHER_DISABLED` (optional flags) — disable the
   startup sweep of stuck estimation/building runs, and the background watchdog matcher loop,
   respectively. Default: both enabled.
+- `STRIPE_WEBHOOK_SECRET` (Railway API) — HMAC secret verifying `Stripe-Signature` on
+  `POST /billing/webhook`. Unset → the webhook fails closed (rejects every request), not a
+  silent no-op — billing writes never happen without explicit signature verification.
 
 Notification delivery (Sprint N — `channel_sends` ledger + `api/transports/` + the outbox loop,
 rule #16; all OPTIONAL, dark until set):
