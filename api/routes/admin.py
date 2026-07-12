@@ -1,14 +1,12 @@
 """Admin endpoints: skills + app_settings + agent tool inventory.
 
-Routes under the `/admin/*` prefix. Bearer-gated like every other write
-surface — the router carries `Depends(require_token)`, so when `API_TOKEN`
-is set each call needs the `Authorization: Bearer` header (no-op in local
-dev when unset). The SPA's Settings page already sends the token, so the
-gate is transparent there. (Historically exempted on the theory that the
-private Railway URL was the perimeter — but that URL ships in the public
-SPA bundle, so the exemption gave no real protection.) Writes go through a
-service-role psycopg connection; the frontend never touches Postgres
-directly for these tables.
+Routes under the `/admin/*` prefix. Admin-gated — the router carries
+`Depends(require_admin)`, so each call needs either a Supabase JWT whose
+claims carry `is_admin` (top-level or `app_metadata`) or, during the
+dual-auth window, the legacy static `API_TOKEN` bearer (which maps to
+synthetic admin claims). Fails closed (401/503) when neither is
+configured. Writes go through a service-role psycopg connection; the
+frontend never touches Postgres directly for these tables.
 """
 
 from __future__ import annotations
@@ -37,7 +35,7 @@ if TYPE_CHECKING:
 router = APIRouter(
     prefix="/admin",
     tags=["admin"],
-    dependencies=[Depends(deps.require_token)],
+    dependencies=[Depends(deps.require_admin)],
 )
 
 

@@ -3,6 +3,8 @@ import type { ReactNode } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { getNotificationUnreadCount } from '@/lib/api';
 import { notificationKeys } from '@/lib/queries';
+import { useAuth } from '@/lib/auth';
+import { isSupabaseConfigured } from '@/lib/supabase';
 import { NewEstimationProvider } from './NewEstimationModal';
 import { ExploreAreaProvider } from './ExploreAreaModal';
 import ToastViewport from './ToastViewport';
@@ -10,10 +12,12 @@ import AccountMenu from './AccountMenu';
 import { APP_NAME } from '@/lib/brand';
 
 type NavItem =
-  | { kind: 'link'; to: string; label: string; disabled?: boolean; title?: string }
-  | { kind: 'divider' }
-  | { kind: 'section'; label: string };
+  | { kind: 'link'; to: string; label: string; disabled?: boolean; title?: string; admin?: boolean }
+  | { kind: 'divider'; admin?: boolean }
+  | { kind: 'section'; label: string; admin?: boolean };
 
+// `admin: true` entries only render for admin sessions (the routes themselves
+// are wrapped in <RequireAdmin>, so hiding here is UX, not the security gate).
 const navItems: ReadonlyArray<NavItem> = [
   { kind: 'link', to: '/browse',      label: 'Browse' },
   { kind: 'link', to: '/pipeline',    label: 'Pipeline' },
@@ -21,18 +25,18 @@ const navItems: ReadonlyArray<NavItem> = [
   { kind: 'link', to: '/watchdog',    label: 'Watchdogs' },
   { kind: 'link', to: '/notifications', label: 'Notifications' },
   { kind: 'link', to: '/brokers',     label: 'Brokers' },
-  { kind: 'link', to: '/datasets',    label: 'Datasets' },
-  { kind: 'link', to: '/outreach',    label: 'Outreach', disabled: true,
+  { kind: 'link', to: '/datasets',    label: 'Datasets', admin: true },
+  { kind: 'link', to: '/outreach',    label: 'Outreach', disabled: true, admin: true,
     title: 'Outreach is paused — not available yet.' },
   { kind: 'link', to: '/collections', label: 'Collections' },
-  { kind: 'divider' },
+  { kind: 'divider', admin: true },
   // Everything past this divider lives under Settings.
-  { kind: 'section', label: 'Settings' },
-  { kind: 'link', to: '/dedup',       label: 'Dedup' },
-  { kind: 'link', to: '/health',      label: 'Health' },
-  { kind: 'link', to: '/costs',       label: 'LLM Costs' },
-  { kind: 'link', to: '/scrapers',    label: 'Scrapers' },
-  { kind: 'link', to: '/settings',    label: 'General Settings' },
+  { kind: 'section', label: 'Settings', admin: true },
+  { kind: 'link', to: '/dedup',       label: 'Dedup', admin: true },
+  { kind: 'link', to: '/health',      label: 'Health', admin: true },
+  { kind: 'link', to: '/costs',       label: 'LLM Costs', admin: true },
+  { kind: 'link', to: '/scrapers',    label: 'Scrapers', admin: true },
+  { kind: 'link', to: '/settings',    label: 'General Settings', admin: true },
 ];
 
 export default function Shell() {
@@ -53,6 +57,7 @@ export default function Shell() {
 }
 
 function TopBar() {
+  const { isAdmin } = useAuth();
   const unreadQ = useQuery({
     queryKey: notificationKeys.unreadCount,
     queryFn: () => getNotificationUnreadCount(),
@@ -60,12 +65,16 @@ function TopBar() {
     refetchInterval: 30_000,
   });
   const unread = unreadQ.data?.unread_count ?? 0;
+  // Unconfigured local dev has no session (so no is_admin claim) — show the
+  // full nav there, mirroring the guards' allow-through posture.
+  const showAdmin = isAdmin || !isSupabaseConfigured();
+  const items = navItems.filter((item) => showAdmin || !item.admin);
   return (
     <header className="border-b border-[var(--color-rule)] bg-[var(--color-paper)] sticky top-0 z-30">
       <div className="px-6 h-14 flex items-center gap-8">
         <BrandMark />
         <nav className="flex items-center gap-1">
-          {navItems.map((item, i) => {
+          {items.map((item, i) => {
             if (item.kind === 'divider') {
               return (
                 <span

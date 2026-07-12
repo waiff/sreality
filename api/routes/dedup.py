@@ -1,7 +1,8 @@
 """FastAPI routes for the cross-source dedup review surface.
 
-Mounted under `/dedup/*`, bearer-gated by the standard `require_token`
-dependency — these are mutating operator actions (merge / dismiss / unmerge).
+Mounted under `/dedup/*`, admin-gated by `require_admin` (is_admin claim;
+the legacy operator token passes during the dual-auth window) — these are
+mutating operator actions (merge / dismiss / unmerge).
 
 The transaction mechanics live in `toolkit.property_identity`; this router is a
 thin HTTP layer over `api.property_dedup`.
@@ -57,7 +58,7 @@ class DecisionFeedbackAction(BaseModel):
 def get_summary(
     status: str = "proposed",
     conn: Any = Depends(deps.get_db_conn),
-    _: None = Depends(deps.require_token),
+    _: dict = Depends(deps.require_admin),
 ) -> dict[str, Any]:
     """Cumulative review backlog + breakdown by reason (drives the dashboard)."""
     return dedup.summary(conn, status=status)
@@ -66,7 +67,7 @@ def get_summary(
 @router.get("/clip-coverage")
 def get_clip_coverage(
     conn: Any = Depends(deps.get_db_conn),
-    _: None = Depends(deps.require_token),
+    _: dict = Depends(deps.require_admin),
 ) -> dict[str, Any]:
     """CLIP backfill progress (totals + priority tiers) for the /dedup tracker."""
     return dedup.clip_coverage(conn)
@@ -75,7 +76,7 @@ def get_clip_coverage(
 @router.get("/pipeline-overview")
 def get_pipeline_overview(
     conn: Any = Depends(deps.get_db_conn),
-    _: None = Depends(deps.require_token),
+    _: dict = Depends(deps.require_admin),
 ) -> dict[str, Any]:
     """The top-of-page dedup funnel: per-stage count + last-24h movement."""
     return dedup.pipeline_overview(conn)
@@ -86,7 +87,7 @@ def get_pipeline_timeline(
     bucket: str = Query(default="day", pattern="^(hour|day)$"),
     points: int | None = Query(default=None, ge=1, le=168),
     conn: Any = Depends(deps.get_db_conn),
-    _: None = Depends(deps.require_token),
+    _: dict = Depends(deps.require_admin),
 ) -> dict[str, Any]:
     """Dedup-funnel throughput (tagged / candidates / merged / dismissed) per `bucket`
     ('hour' over ~2 days, or 'day' over ~2 weeks)."""
@@ -108,7 +109,7 @@ def get_pair_audit(
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     conn: Any = Depends(deps.get_db_conn),
-    _: None = Depends(deps.require_token),
+    _: dict = Depends(deps.require_admin),
 ) -> dict[str, Any]:
     """The unified Decision history feed (merged / dismissed, engine + operator).
     Filterable by property type, outcome, source, stage, the decision FACTOR
@@ -133,7 +134,7 @@ def get_decision_evidence(
     category_main: str | None = None,
     per_side: int = Query(default=4, ge=1, le=8),
     conn: Any = Depends(deps.get_db_conn),
-    _: None = Depends(deps.require_token),
+    _: dict = Depends(deps.require_admin),
 ) -> dict[str, Any]:
     """The SPECIFIC pictures behind a decision: the pHash matched pairs, the compared
     plans, or the deciding room — resolved at read time so it works on every historical
@@ -148,7 +149,7 @@ def get_decision_evidence(
 def post_decision_feedback(
     body: DecisionFeedbackAction,
     conn: Any = Depends(deps.get_db_conn),
-    _: None = Depends(deps.require_token),
+    _: dict = Depends(deps.require_admin),
 ) -> dict[str, Any]:
     """Flag a dedup decision/candidate pair as INCORRECT (with a note + the expected
     correct outcome). Property-pair-keyed, so it attaches on both the history feed and
@@ -169,7 +170,7 @@ def delete_decision_feedback(
     a: int,
     b: int,
     conn: Any = Depends(deps.get_db_conn),
-    _: None = Depends(deps.require_token),
+    _: dict = Depends(deps.require_admin),
 ) -> dict[str, Any]:
     """Un-flag a pair (remove its incorrect-decision flag). `a`/`b` are the two
     property_ids of the pair."""
@@ -185,7 +186,7 @@ def get_candidates(
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     conn: Any = Depends(deps.get_db_conn),
-    _: None = Depends(deps.require_token),
+    _: dict = Depends(deps.require_admin),
 ) -> dict[str, Any]:
     return dedup.list_candidates(
         conn, status=status, tier=tier, reason=reason, verdict=verdict,
@@ -197,7 +198,7 @@ def get_candidates(
 def post_merge_candidate(
     candidate_id: int,
     conn: Any = Depends(deps.get_db_conn),
-    _: None = Depends(deps.require_token),
+    _: dict = Depends(deps.require_admin),
 ) -> dict[str, Any]:
     try:
         result = dedup.merge_candidate(conn, candidate_id)
@@ -212,7 +213,7 @@ def post_merge_candidate(
 def post_bulk_merge_candidates(
     body: ClusterAction,
     conn: Any = Depends(deps.get_db_conn),
-    _: None = Depends(deps.require_token),
+    _: dict = Depends(deps.require_admin),
 ) -> dict[str, Any]:
     """Scoped bulk-approve: merge each given candidate as its own reversible pair.
 
@@ -225,7 +226,7 @@ def post_bulk_merge_candidates(
 @router.post("/candidates/archive-reset")
 def post_archive_reset_candidates(
     conn: Any = Depends(deps.get_db_conn),
-    _: None = Depends(deps.require_token),
+    _: dict = Depends(deps.require_admin),
 ) -> dict[str, Any]:
     """Archive the proposed candidate queue to a backup table + clear it, so the
     engine regenerates fresh. Merges/dismissals are untouched."""
@@ -236,7 +237,7 @@ def post_archive_reset_candidates(
 def post_dismiss_candidate(
     candidate_id: int,
     conn: Any = Depends(deps.get_db_conn),
-    _: None = Depends(deps.require_token),
+    _: dict = Depends(deps.require_admin),
 ) -> dict[str, Any]:
     result = dedup.dismiss_candidate(conn, candidate_id)
     if result is None:
@@ -250,7 +251,7 @@ def post_dismiss_candidate(
 def post_merge_cluster(
     body: ClusterAction,
     conn: Any = Depends(deps.get_db_conn),
-    _: None = Depends(deps.require_token),
+    _: dict = Depends(deps.require_admin),
 ) -> dict[str, Any]:
     """Merge a cluster of candidates into one property under one reversible group."""
     try:
@@ -266,7 +267,7 @@ def post_merge_cluster(
 def post_merge_property_set(
     body: PropertySetAction,
     conn: Any = Depends(deps.get_db_conn),
-    _: None = Depends(deps.require_token),
+    _: dict = Depends(deps.require_admin),
 ) -> dict[str, Any]:
     """Merge an explicit operator-chosen set of properties into one (subset merge)."""
     try:
@@ -282,7 +283,7 @@ def post_merge_property_set(
 def post_dismiss_cluster(
     body: ClusterAction,
     conn: Any = Depends(deps.get_db_conn),
-    _: None = Depends(deps.require_token),
+    _: dict = Depends(deps.require_admin),
 ) -> dict[str, Any]:
     result = dedup.dismiss_cluster(conn, body.candidate_ids)
     if result is None:
@@ -297,7 +298,7 @@ def get_merges(
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     conn: Any = Depends(deps.get_db_conn),
-    _: None = Depends(deps.require_token),
+    _: dict = Depends(deps.require_admin),
 ) -> dict[str, Any]:
     return dedup.list_merges(conn, limit=limit, offset=offset)
 
@@ -306,7 +307,7 @@ def get_merges(
 def post_unmerge(
     merge_group_id: str,
     conn: Any = Depends(deps.get_db_conn),
-    _: None = Depends(deps.require_token),
+    _: dict = Depends(deps.require_admin),
 ) -> dict[str, Any]:
     try:
         return dedup.unmerge(conn, merge_group_id, undone_by="operator")
@@ -323,7 +324,7 @@ def post_unmerge(
 def post_asset_link(
     body: AssetLinkAction,
     conn: Any = Depends(deps.get_db_conn),
-    _: None = Depends(deps.require_token),
+    _: dict = Depends(deps.require_admin),
 ) -> dict[str, Any]:
     """Link the chosen properties into one asset (same building)."""
     try:
@@ -339,7 +340,7 @@ def post_asset_link(
 def post_asset_unlink(
     body: AssetUnlinkAction,
     conn: Any = Depends(deps.get_db_conn),
-    _: None = Depends(deps.require_token),
+    _: dict = Depends(deps.require_admin),
 ) -> dict[str, Any]:
     """Remove one property from its asset (dissolves the asset if <2 remain)."""
     try:
@@ -355,7 +356,7 @@ def post_asset_unlink(
 def get_asset_route(
     asset_id: int,
     conn: Any = Depends(deps.get_db_conn),
-    _: None = Depends(deps.require_token),
+    _: dict = Depends(deps.require_admin),
 ) -> dict[str, Any]:
     result = get_asset(conn, asset_id)
     if result is None:

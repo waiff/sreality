@@ -15,6 +15,9 @@ from api.routes import broker_review as routes
 @pytest.fixture()
 def client():
     api_main.app.dependency_overrides[deps.get_db_conn] = lambda: object()
+    api_main.app.dependency_overrides[deps.require_admin] = (
+        lambda: {"is_admin": True, "legacy": True}
+    )
     yield TestClient(api_main.app)
     api_main.app.dependency_overrides.clear()
 

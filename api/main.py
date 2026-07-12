@@ -207,26 +207,26 @@ async def _unhandled_exception_handler(request: "Request", exc: Exception) -> "J
 skills_module.AGENT_TOOL_NAMES = set(AGENT_TOOLS.keys())
 skills_module.PROVIDER_NAMES = set(deps.get_providers().keys())
 
-# /admin/* is bearer-gated like every other write surface — the router
-# itself carries Depends(require_token) (see api/routes/admin.py). The old
-# "private Railway URL is the perimeter" exemption gave no real protection:
-# that URL ships inside the public SPA bundle. The Settings page already
-# sends the token on every /admin call, so the gate is transparent there.
+# /admin/* is admin-gated — the router itself carries Depends(require_admin)
+# (see api/routes/admin.py): is_admin claim required; the legacy operator
+# token passes during the dual-auth window. The old "private Railway URL is
+# the perimeter" exemption gave no real protection: that URL ships inside
+# the public SPA bundle.
 app.include_router(admin_router)
 # /notifications/* (Watchdog feed + subscription CRUD) goes through
 # the standard bearer gate — operator content, not configuration.
 app.include_router(notifications_router)
 # /dedup/* (cross-source merge review: list candidates, merge/dismiss/unmerge)
-# — mutating operator actions, standard bearer gate.
+# — mutating operator actions, admin-gated (require_admin).
 app.include_router(dedup_router)
 # /brokers/* (broker intelligence reads: leaderboard, detail, listings, contacts)
 # — standard bearer gate; contacts are PII not exposed by the anon public views.
 app.include_router(brokers_router)
 # /outreach/* (broker outreach CRM: campaigns, LLM-drafted messages, suppression)
-# — operator write actions over PII, standard bearer gate. Human-in-the-loop send.
+# — operator write actions over PII, admin-gated (require_admin). Human-in-the-loop send.
 app.include_router(outreach_router)
 # /broker-review/* (operator merge-review queue: merge/dismiss/unmerge brokers the
-# auto-merge guard left apart) — mutating operator actions, standard bearer gate.
+# auto-merge guard left apart) — mutating operator actions, admin-gated (require_admin).
 app.include_router(broker_review_router)
 # /filter-presets/* (named Browse filter presets: CRUD) — operator content,
 # standard bearer gate. Decoupled from /notifications (a preset never fires).
@@ -1220,7 +1220,7 @@ def delete_collection_property(
 def post_price_stat_dataset(
     body: s.PriceStatDatasetIn,
     conn: Any = Depends(deps.get_db_conn),
-    _: None = Depends(deps.require_token),
+    _: dict = Depends(deps.require_admin),
 ) -> dict[str, Any]:
     return price_stats_module.create_dataset(conn, body)
 
@@ -1239,7 +1239,7 @@ def patch_price_stat_dataset(
     dataset_id: int,
     body: s.PriceStatDatasetUpdateIn,
     conn: Any = Depends(deps.get_db_conn),
-    _: None = Depends(deps.require_token),
+    _: dict = Depends(deps.require_admin),
 ) -> dict[str, Any]:
     return price_stats_module.update_dataset(conn, dataset_id, body)
 
@@ -1248,7 +1248,7 @@ def patch_price_stat_dataset(
 def delete_price_stat_dataset(
     dataset_id: int,
     conn: Any = Depends(deps.get_db_conn),
-    _: None = Depends(deps.require_token),
+    _: dict = Depends(deps.require_admin),
 ) -> dict[str, Any]:
     return price_stats_module.deactivate_dataset(conn, dataset_id)
 
@@ -1257,7 +1257,7 @@ def delete_price_stat_dataset(
 def post_price_stat_run(
     dataset_id: int,
     conn: Any = Depends(deps.get_db_conn),
-    _: None = Depends(deps.require_token),
+    _: dict = Depends(deps.require_admin),
 ) -> dict[str, Any]:
     return price_stats_module.run_dataset_now(conn, dataset_id)
 
@@ -1461,7 +1461,7 @@ def delete_pipeline_card(
 def get_skill_refinement(
     refinement_id: int,
     conn: Any = Depends(deps.get_db_conn),
-    _: None = Depends(deps.require_token),
+    _: dict = Depends(deps.require_admin),
 ) -> dict[str, Any]:
     row = refiner_module.get_refinement(conn, refinement_id)
     if row is None:
@@ -1476,7 +1476,7 @@ def decide_skill_refinement(
     refinement_id: int,
     body: s.RefinementDecisionIn,
     conn: Any = Depends(deps.get_db_conn),
-    _: None = Depends(deps.require_token),
+    _: dict = Depends(deps.require_admin),
 ) -> dict[str, Any]:
     """Apply or dismiss a proposed refinement.
 

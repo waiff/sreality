@@ -1,7 +1,7 @@
 """Tests for /admin/condition-scoring/regions — per-kraj scoring toggles.
 
-The /admin prefix is bearer-gated (CLAUDE.md rule #8), but these tests leave
-API_TOKEN unset so the gate no-ops (the dedicated gate assertions live in
+The /admin prefix is admin-gated (require_admin, fail-closed); these tests
+override it with synthetic admin claims (the dedicated gate assertions live in
 test_admin_routes.py). The fake conn serves the kraj SELECT, the app_settings
 key read, the unscored GROUP BY, and the PUT's INSERT ... ON CONFLICT.
 """
@@ -98,6 +98,9 @@ class _Conn:
 
 def _make_client(conn: _Conn) -> Any:
     api_main.app.dependency_overrides[deps.get_db_conn] = lambda: conn
+    api_main.app.dependency_overrides[deps.require_admin] = (
+        lambda: {"is_admin": True, "legacy": True}
+    )
     return TestClient(api_main.app)
 
 

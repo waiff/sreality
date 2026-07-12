@@ -1,7 +1,8 @@
 """FastAPI routes for the broker outreach CRM (Phase 4).
 
-Mounted under `/outreach/*`, bearer-gated — these are operator write actions over
-PII (broker contacts + drafted messages). Thin HTTP layer over `api.outreach`.
+Mounted under `/outreach/*`, admin-gated via `require_admin` — these are
+operator write actions over PII (broker contacts + drafted messages).
+Thin HTTP layer over `api.outreach`.
 Sending is human-in-the-loop: the UI marks a message 'sent' after the operator
 sends it manually (mailto/copy); there is no automated email send in v1.
 """
@@ -50,7 +51,7 @@ class SuppressionCreate(BaseModel):
 def create_campaign(
     body: CampaignCreate,
     conn: Any = Depends(deps.get_db_conn),
-    _: None = Depends(deps.require_token),
+    _: dict = Depends(deps.require_admin),
 ) -> dict[str, Any]:
     return outreach.create_campaign(
         conn, name=body.name, goal=body.goal, guidance=body.guidance, target=body.target)
@@ -59,7 +60,7 @@ def create_campaign(
 @router.get("/campaigns")
 def list_campaigns(
     conn: Any = Depends(deps.get_db_conn),
-    _: None = Depends(deps.require_token),
+    _: dict = Depends(deps.require_admin),
 ) -> dict[str, Any]:
     return {"campaigns": outreach.list_campaigns(conn)}
 
@@ -68,7 +69,7 @@ def list_campaigns(
 def get_campaign(
     campaign_id: int,
     conn: Any = Depends(deps.get_db_conn),
-    _: None = Depends(deps.require_token),
+    _: dict = Depends(deps.require_admin),
 ) -> dict[str, Any]:
     result = outreach.get_campaign(conn, campaign_id)
     if result is None:
@@ -81,7 +82,7 @@ def update_campaign(
     campaign_id: int,
     body: CampaignUpdate,
     conn: Any = Depends(deps.get_db_conn),
-    _: None = Depends(deps.require_token),
+    _: dict = Depends(deps.require_admin),
 ) -> dict[str, Any]:
     result = outreach.update_campaign(
         conn, campaign_id, name=body.name, goal=body.goal, guidance=body.guidance,
@@ -96,7 +97,7 @@ def preview_targets(
     campaign_id: int,
     limit: int = Query(default=50, ge=1, le=500),
     conn: Any = Depends(deps.get_db_conn),
-    _: None = Depends(deps.require_token),
+    _: dict = Depends(deps.require_admin),
 ) -> dict[str, Any]:
     campaign = outreach.get_campaign(conn, campaign_id)
     if campaign is None:
@@ -112,7 +113,7 @@ def generate_drafts(
     limit: int = Query(default=25, ge=1, le=200),
     conn: Any = Depends(deps.get_db_conn),
     llm_client: Any = Depends(deps.get_llm_client),
-    _: None = Depends(deps.require_token),
+    _: dict = Depends(deps.require_admin),
 ) -> dict[str, Any]:
     result = outreach.generate_drafts(conn, llm_client, campaign_id, limit=limit)
     if result is None:
@@ -125,7 +126,7 @@ def list_messages(
     campaign_id: int,
     status: str | None = None,
     conn: Any = Depends(deps.get_db_conn),
-    _: None = Depends(deps.require_token),
+    _: dict = Depends(deps.require_admin),
 ) -> dict[str, Any]:
     return {"messages": outreach.list_messages(conn, campaign_id, status=status)}
 
@@ -135,7 +136,7 @@ def update_message(
     message_id: int,
     body: MessageUpdate,
     conn: Any = Depends(deps.get_db_conn),
-    _: None = Depends(deps.require_token),
+    _: dict = Depends(deps.require_admin),
 ) -> dict[str, Any]:
     result = outreach.update_message(
         conn, message_id, status=body.status, subject=body.subject,
@@ -150,7 +151,7 @@ def regenerate_message(
     message_id: int,
     conn: Any = Depends(deps.get_db_conn),
     llm_client: Any = Depends(deps.get_llm_client),
-    _: None = Depends(deps.require_token),
+    _: dict = Depends(deps.require_admin),
 ) -> dict[str, Any]:
     result = outreach.regenerate_message(conn, llm_client, message_id)
     if result is None:
@@ -161,7 +162,7 @@ def regenerate_message(
 @router.get("/suppressions")
 def list_suppressions(
     conn: Any = Depends(deps.get_db_conn),
-    _: None = Depends(deps.require_token),
+    _: dict = Depends(deps.require_admin),
 ) -> dict[str, Any]:
     return {"suppressions": outreach.list_suppressions(conn)}
 
@@ -170,7 +171,7 @@ def list_suppressions(
 def add_suppression(
     body: SuppressionCreate,
     conn: Any = Depends(deps.get_db_conn),
-    _: None = Depends(deps.require_token),
+    _: dict = Depends(deps.require_admin),
 ) -> dict[str, Any]:
     return outreach.suppress_broker(conn, body.broker_id, reason=body.reason)
 
@@ -179,7 +180,7 @@ def add_suppression(
 def remove_suppression(
     broker_id: int,
     conn: Any = Depends(deps.get_db_conn),
-    _: None = Depends(deps.require_token),
+    _: dict = Depends(deps.require_admin),
 ) -> dict[str, Any]:
     if not outreach.unsuppress_broker(conn, broker_id):
         raise HTTPException(status_code=404, detail="suppression not found")

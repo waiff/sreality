@@ -1,10 +1,10 @@
 """Tests for /admin/* — skills + app_settings + tools endpoints.
 
-The whole prefix is bearer-gated like every other write surface per
-CLAUDE.md rule #8. We confirm that gate here (missing/wrong token ->
-401, correct token -> 200), plus the happy-path read / update flows.
-The happy-path tests leave API_TOKEN unset so the gate no-ops, exactly
-as in local dev.
+The whole prefix is admin-gated (require_admin: is_admin claim, or the
+legacy API_TOKEN during the dual-auth window) and FAILS CLOSED when
+nothing is configured. We confirm that gate here (missing/wrong token ->
+401, legacy token -> 200), plus the happy-path read / update flows.
+The happy-path tests override require_admin with synthetic admin claims.
 """
 
 from __future__ import annotations
@@ -187,6 +187,9 @@ def client(monkeypatch, store):
             return super().execute(sql, params)
     _AppSettingsConn.cursor = filter_aware_cursor
     api_main.app.dependency_overrides[deps.get_db_conn] = lambda: fake_conn
+    api_main.app.dependency_overrides[deps.require_admin] = (
+        lambda: {"is_admin": True, "legacy": True}
+    )
     yield TestClient(api_main.app)
     api_main.app.dependency_overrides.clear()
     _AppSettingsConn.cursor = orig_cursor
@@ -253,9 +256,17 @@ def test_admin_tools_lists_agent_registry(client):
     assert "record_estimate" in names
 
 
-def test_admin_routes_require_bearer_token(client, monkeypatch):
-    """With API_TOKEN set, /admin/* rejects a missing/wrong token and accepts the right one."""
+def test_admin_routes_require_admin(client, monkeypatch):
+    """/admin/* rejects a missing/wrong token and accepts the legacy operator token."""
+    # Drop the happy-path override so the real require_admin gate is under test.
+    api_main.app.dependency_overrides.pop(deps.require_admin, None)
+    # Phase 1: admin routes fail closed
+    monkeypatch.delenv("API_TOKEN", raising=False)
+    assert client.get("/admin/skills").status_code == 401
     monkeypatch.setenv("API_TOKEN", "secret-xyz")
+    # HS256 secret set (and JWKS unset) so a garbage token deterministically 401s.
+    monkeypatch.delenv("SUPABASE_URL", raising=False)
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-hs256-secret")
     assert client.get("/admin/skills").status_code == 401
     assert client.get("/admin/tools").status_code == 401
     assert client.get(
@@ -327,9 +338,15 @@ def test_put_filter_visibility_rejects_undeclared_pairing(client):
     assert res.status_code == 400
 
 
-def test_filter_schema_requires_bearer_token(client, monkeypatch):
+def test_filter_schema_requires_admin(client, monkeypatch):
+    api_main.app.dependency_overrides.pop(deps.require_admin, None)
     monkeypatch.setenv("API_TOKEN", "secret-xyz")
+    monkeypatch.delenv("SUPABASE_URL", raising=False)
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-hs256-secret")
     assert client.get("/admin/filter-schema").status_code == 401
+    assert client.get(
+        "/admin/filter-schema", headers={"Authorization": "Bearer wrong"}
+    ).status_code == 401
     res = client.get(
         "/admin/filter-schema", headers={"Authorization": "Bearer secret-xyz"}
     )

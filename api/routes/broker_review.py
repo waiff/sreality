@@ -1,9 +1,9 @@
 """FastAPI routes for the broker merge-review queue (Phase 5).
 
 Mounted under `/broker-review/*` (own prefix so it never collides with the
-`/brokers/{broker_id}` read routes), bearer-gated — mutating operator actions
-(merge / dismiss / unmerge). Thin HTTP layer over `api.broker_review`. Reversible:
-every merge logs to broker_merge_events.
+`/brokers/{broker_id}` read routes), admin-gated via `require_admin` — mutating
+operator actions (merge / dismiss / unmerge). Thin HTTP layer over
+`api.broker_review`. Reversible: every merge logs to broker_merge_events.
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ def get_candidates(
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     conn: Any = Depends(deps.get_db_conn),
-    _: None = Depends(deps.require_token),
+    _: dict = Depends(deps.require_admin),
 ) -> dict[str, Any]:
     return review.list_candidates(conn, status=status, limit=limit, offset=offset)
 
@@ -43,7 +43,7 @@ def merge_candidate(
     candidate_id: int,
     body: MergeCandidateIn,
     conn: Any = Depends(deps.get_db_conn),
-    _: None = Depends(deps.require_token),
+    _: dict = Depends(deps.require_admin),
 ) -> dict[str, Any]:
     try:
         result = review.merge_candidate(conn, candidate_id, broker_ids=body.broker_ids)
@@ -58,7 +58,7 @@ def merge_candidate(
 def dismiss_candidate(
     candidate_id: int,
     conn: Any = Depends(deps.get_db_conn),
-    _: None = Depends(deps.require_token),
+    _: dict = Depends(deps.require_admin),
 ) -> dict[str, Any]:
     result = review.dismiss_candidate(conn, candidate_id)
     if result is None:
@@ -70,7 +70,7 @@ def dismiss_candidate(
 def merge_brokers(
     body: MergeBrokersIn,
     conn: Any = Depends(deps.get_db_conn),
-    _: None = Depends(deps.require_token),
+    _: dict = Depends(deps.require_admin),
 ) -> dict[str, Any]:
     try:
         return review.merge_brokers(conn, body.broker_ids)
@@ -82,7 +82,7 @@ def merge_brokers(
 def list_merges(
     limit: int = Query(default=50, ge=1, le=200),
     conn: Any = Depends(deps.get_db_conn),
-    _: None = Depends(deps.require_token),
+    _: dict = Depends(deps.require_admin),
 ) -> dict[str, Any]:
     return review.list_recent_merges(conn, limit=limit)
 
@@ -91,7 +91,7 @@ def list_merges(
 def unmerge(
     merge_group_id: str,
     conn: Any = Depends(deps.get_db_conn),
-    _: None = Depends(deps.require_token),
+    _: dict = Depends(deps.require_admin),
 ) -> dict[str, Any]:
     result = review.unmerge_group(conn, merge_group_id)
     if result is None:
