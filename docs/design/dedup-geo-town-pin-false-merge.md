@@ -221,18 +221,48 @@ kills the 77 — most of them reach forensic, return inconclusive, and are
 correctly approved). Only *contradiction* discriminates, which is why A1 is
 narrow.
 
-### Defect B — fix the audit self-pairing at the chokepoint, then constrain
+### Defect B — resolve listing identity from the ledger, not the drifting repr
 
-**B1 — write the audit "merged" row from inside `merge_properties`, sourced from
-the `FOR UPDATE` lock it already holds before mutating** (`toolkit/property_identity.py:69-74`),
-instead of re-querying `repr_listing_id` post-commit in three separate callers.
-One tested chokepoint, immune to the recompute drift, fixes both the operator
-path and the engine path. Delete the now-redundant `_record_operator_decision(...,
-"merged", ...)` calls and the engine's pre-merge `_audit(..., "merged", ...)`
-calls; keep the *dismissed*-outcome writers untouched (no mutation, no bug, 0%
-corrupted historically).
+**Unifying principle (SHIPPED, PR #778):** the true "other listing" of any merge
+is derivable from `property_merge_events` — the reversibility ledger, the source
+of truth for *what merged with what*. The audit's stored `sreality_id` columns
+were a lossy denormalization of `properties.repr_listing_id`, which drifts onto
+the just-absorbed listing after the survivor's recompute and collapses both sides
+to one id. So resolve each side from the ledger instead: survivor side → a listing
+on it that did **not** move in this group; retired side → the (min) listing that
+moved from it. A shared SQL helper (`_ledger_side_sql`, `api/property_dedup.py`)
+does this in two places:
 
-**B2 — distinctness CHECK constraints (defense in depth; exact DDL verified
+- **Read path (`list_pair_audit`)** — for a legacy self-paired row
+  (`left_sreality_id = right_sreality_id`, `merge_group_id` present), a
+  `CASE`-guarded override recovers the true pair from the ledger. Verified live
+  against all 4,539 existing rows: **0 ever resolve back to an equal pair**; 3,222
+  resolve to distinct ids (every recent operator row the operator sees), and the
+  older re-merged tail (1,320) resolves to one real id + an honest "—" (never a
+  false pair). This fixes the *display* of every existing row without a data write.
+- **Write path (`_record_operator_decision`)** — a *merged* operator decision now
+  resolves its two listing ids from the just-committed ledger instead of the
+  post-merge `repr_listing_id`, so **new** operator merges store distinct ids. A
+  *dismissal* (no merge, no group) keeps `repr_listing_id` (correct — no drift).
+
+Why not "write the row inside `merge_properties` from its `FOR UPDATE` lock" (the
+earlier sketch): the audit row's `stage` + factor `detail` live at the per-signal
+`_audit`/`_record_operator_decision` call sites, not at the chokepoint — plumbing
+them down to `merge_properties` for every caller is a larger, riskier refactor for
+no extra correctness. The ledger is already the authoritative source and needs no
+plumbing.
+
+**Deferred (follow-up PR):** the **engine** write path (`scripts/dedup_engine.py`
+`_audit`/`_write_pair_audit`) still stores self-paired rows for ~7.7% of pHash
+merges (a distinct, un-traced mechanism); the read-path fallback already corrects
+their *display*, so this is stored-data hygiene, not user-visible. **The
+distinctness CHECK constraints (B-constraints, below) MUST wait until that engine
+write path is fixed** — a `CHECK (left_sreality_id <> right_sreality_id)` added now
+would make the engine's next self-paired INSERT *raise*, breaking live merges. This
+sequencing was validated against the data (the engine path is an active writer of
+equal ids), not assumed.
+
+**B-constraints (deferred until the engine write path is fixed; DDL verified
 against live data).** Ordering (`left < right`) is **wrong** for these tables
 (20 `property_merge_events` and 43,615 `dedup_pair_audit` rows legitimately have
 left/survivor > right/retired) — the correct minimal invariant is *inequality*:

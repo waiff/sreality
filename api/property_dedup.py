@@ -111,6 +111,36 @@ def delete_decision_feedback(
     return {"data": {"deleted": bool(deleted)}}
 
 
+def _ledger_side_sql(pid_expr: str, grp_expr: str) -> str:
+    """Scalar SQL for the representative listing id of property `pid_expr` on one
+    side of merge group `grp_expr`, resolved from the `property_merge_events`
+    LEDGER — the source of truth for what merged with what.
+
+    A merge re-points the retired property's listings onto the survivor and
+    recomputes ONLY the survivor's `repr_listing_id`; if the just-absorbed listing
+    wins that recompute, both properties' `repr_listing_id` end up the SAME id, so
+    reading `repr_listing_id` for the audit label collapses both sides to one id
+    (the reported bug). The ledger doesn't drift: survivor side -> a listing on it
+    that did NOT move in this group; retired side -> the (min) listing that moved
+    from it. Returns NULL for the survivor side only when the survivor was itself
+    later merged away (its listings moved on) — an honest "—", never a false pair.
+    """
+    return f"""(
+      SELECT CASE WHEN {pid_expr} = _ev.survivor_property_id THEN (
+               SELECT min(_l.sreality_id) FROM listings _l
+                WHERE _l.property_id = {pid_expr}
+                  AND NOT (_l.sreality_id = ANY(_ev.moved)))
+             ELSE (
+               SELECT min(_pme.listing_id) FROM property_merge_events _pme
+                WHERE _pme.merge_group_id = {grp_expr}
+                  AND _pme.retired_property_id = {pid_expr}) END
+      FROM (SELECT survivor_property_id, array_agg(listing_id) AS moved
+            FROM property_merge_events
+            WHERE merge_group_id = {grp_expr}
+            GROUP BY survivor_property_id LIMIT 1) _ev
+    )"""
+
+
 def _record_operator_decision(
     conn: psycopg.Connection,
     *,
@@ -139,6 +169,21 @@ def _record_operator_decision(
             info = {int(r[0]): (r[1], r[2]) for r in cur.fetchall()}
             ls, lc = info.get(int(left_property_id), (None, None))
             rs, rc = info.get(int(right_property_id), (None, None))
+            if merge_group_id is not None:
+                # A MERGE just re-pointed listings + recomputed the survivor's
+                # repr_listing_id, so the repr read above can be the SAME id on
+                # both sides. Resolve each side's listing from the merge ledger
+                # instead (source of truth) — the merge already committed its
+                # property_merge_events rows in the same connection.
+                cur.execute(
+                    f"SELECT {_ledger_side_sql('%(lp)s', '%(g)s::uuid')}, "
+                    f"       {_ledger_side_sql('%(rp)s', '%(g)s::uuid')}",
+                    {"lp": int(left_property_id), "rp": int(right_property_id),
+                     "g": str(merge_group_id)},
+                )
+                led = cur.fetchone()
+                if led is not None and led[0] is not None and led[0] != led[1]:
+                    ls, rs = led[0], led[1]
             cur.execute(
                 "INSERT INTO dedup_pair_audit (run_at, left_sreality_id, "
                 "right_sreality_id, left_property_id, right_property_id, "
@@ -431,7 +476,15 @@ def list_pair_audit(
         total = int(cur.fetchone()[0])
         cur.execute(
             f"""
-            SELECT a.id, a.run_at, a.left_sreality_id, a.right_sreality_id,
+            SELECT a.id, a.run_at,
+                   CASE WHEN a.left_sreality_id = a.right_sreality_id
+                             AND a.merge_group_id IS NOT NULL
+                        THEN {_ledger_side_sql("a.left_property_id", "a.merge_group_id::uuid")}
+                        ELSE a.left_sreality_id END AS left_sreality_id,
+                   CASE WHEN a.left_sreality_id = a.right_sreality_id
+                             AND a.merge_group_id IS NOT NULL
+                        THEN {_ledger_side_sql("a.right_property_id", "a.merge_group_id::uuid")}
+                        ELSE a.right_sreality_id END AS right_sreality_id,
                    a.left_property_id, a.right_property_id, a.category_main,
                    a.stage, a.outcome, a.source, a.merge_group_id, a.detail,
                    m.fully_undone,
