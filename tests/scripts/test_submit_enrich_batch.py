@@ -82,6 +82,7 @@ class _FakeConn:
 
 class _FakeProvider:
     def __init__(self) -> None:
+        self.name = "anthropic"  # real providers carry .name (stamped into the batch row)
         self.build_calls: list[dict[str, Any]] = []
         self.submitted: list[list[Any]] = []
 
@@ -188,3 +189,34 @@ def test_no_candidates_is_a_clean_noop(monkeypatch: Any) -> None:
     )
     assert conn.inserted_requests == []
     assert provider.submitted == []
+
+
+def test_resolve_enrichment_model_setting_and_fallback() -> None:
+    from toolkit.bazos_enrichment import DEFAULT_MODEL, resolve_enrichment_model
+
+    class _Cur:
+        def __init__(self, row: Any) -> None:
+            self._row = row
+
+        def execute(self, sql: str, params: Any) -> None:
+            return None
+
+        def fetchone(self) -> Any:
+            return self._row
+
+        def __enter__(self) -> "_Cur":
+            return self
+
+        def __exit__(self, *exc: Any) -> None:
+            return None
+
+    class _Conn:
+        def __init__(self, row: Any) -> None:
+            self._row = row
+
+        def cursor(self) -> "_Cur":
+            return _Cur(self._row)
+
+    # app_settings.enrichment_model set -> that model; absent -> Haiku default.
+    assert resolve_enrichment_model(_Conn(("gpt-5-mini",))) == "gpt-5-mini"
+    assert resolve_enrichment_model(_Conn(None)) == DEFAULT_MODEL

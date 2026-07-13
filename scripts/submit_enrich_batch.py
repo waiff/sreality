@@ -65,23 +65,31 @@ def main() -> int:
 
     import psycopg
 
+    from api.llm_client import provider_for_model
     from api.providers.anthropic import AnthropicProvider
+    from api.providers.openai import OpenAIProvider
     from scripts.enrich_listing_descriptions import _select_pending
     from scripts.submit_condition_batch import (
         MAX_BATCH_BYTES,
         MAX_BATCH_REQUESTS,
         should_flush,
     )
-    from toolkit.bazos_enrichment import DEFAULT_MODEL, build_enrich_request
+    from toolkit.bazos_enrichment import build_enrich_request, resolve_enrichment_model
 
-    model = args.model or DEFAULT_MODEL
-    LOG.info(
-        "BATCH submit config source=%s model=%s limit=%d max_age_days=%d dry_run=%s",
-        args.source, model, args.limit, args.max_age_days, args.dry_run,
-    )
-
-    provider = AnthropicProvider()
+    provider_map = {"anthropic": AnthropicProvider(), "openai": OpenAIProvider()}
     with psycopg.connect(db_url, autocommit=True, prepare_threshold=None) as conn:
+        # --model wins; else the operator's enrichment_model setting (Haiku default).
+        # The provider is derived from the id — a gpt-* model routes to OpenAI's batch.
+        model = args.model or resolve_enrichment_model(conn)
+        pname = provider_for_model(model)
+        provider = provider_map.get(pname)
+        if provider is None:
+            LOG.error("BATCH no batch provider %r for enrichment model %s", pname, model)
+            return 2
+        LOG.info(
+            "BATCH submit config source=%s model=%s provider=%s limit=%d max_age_days=%d dry_run=%s",
+            args.source, model, pname, args.limit, args.max_age_days, args.dry_run,
+        )
         pending = _select_pending(
             conn, source=args.source, model=model,
             max_age_days=args.max_age_days, limit=args.limit,
@@ -173,7 +181,8 @@ def _submit_chunk(
         return
     provider_batch_id = provider.submit_batch(items)
     batch_id = _insert_batch(
-        conn, provider_batch_id=provider_batch_id, model=model, mapping=mapping,
+        conn, provider=provider.name, provider_batch_id=provider_batch_id,
+        model=model, mapping=mapping,
     )
     LOG.info(
         "BATCH submitted provider_batch_id=%s requests=%d serialized=%.1fMB "
@@ -197,6 +206,7 @@ def _in_flight_sreality_ids(conn: Any) -> set[int]:
 def _insert_batch(
     conn: Any,
     *,
+    provider: str,
     provider_batch_id: str,
     model: str,
     mapping: list[tuple[str, int, int]],
@@ -205,8 +215,8 @@ def _insert_batch(
         cur.execute(
             "INSERT INTO listing_description_enrichment_batches "
             "(provider, provider_batch_id, model, request_count, status) "
-            "VALUES ('anthropic', %s, %s, %s, 'submitted') RETURNING id",
-            (provider_batch_id, model, len(mapping)),
+            "VALUES (%s, %s, %s, %s, 'submitted') RETURNING id",
+            (provider, provider_batch_id, model, len(mapping)),
         )
         row = cur.fetchone()
         if row is None:
