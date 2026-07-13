@@ -144,7 +144,12 @@ def require_token(authorization: str | None = Header(default=None)) -> None:
             status_code=503,
             detail="API auth is not configured (set API_TOKEN, or API_AUTH_OPTIONAL=1 for local dev)",
         )
-    if not authorization or not hmac.compare_digest(authorization, f"Bearer {expected}"):
+    # Compare as bytes: hmac.compare_digest on two str raises TypeError for a
+    # non-ASCII Authorization header (Starlette decodes headers as latin-1), which
+    # would surface as a 500 instead of a clean 401.
+    if not authorization or not hmac.compare_digest(
+        authorization.encode("utf-8", "ignore"), f"Bearer {expected}".encode("utf-8")
+    ):
         raise HTTPException(status_code=401, detail="Invalid or missing token")
 
 

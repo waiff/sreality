@@ -34,7 +34,10 @@ MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "migrations"
 MIN_ENFORCED = 299
 
 _WRITE_PRIVS = {"insert", "update", "delete", "truncate", "all", "all privileges"}
-_ROLES = ("anon", "authenticated")
+# `public` is included because anon/authenticated INHERIT every grant made to PUBLIC
+# (the exact vector Phase 0 closed on functions) — a `grant insert ... to public`
+# would hand anon write access while naming neither browser role.
+_ROLES = ("anon", "authenticated", "public")
 
 # Mirrors tests/test_tenant_isolation_live.py::_TENANT_TABLES — the user-state
 # tables whose per-account `authenticated` DML is intentional and RLS-guarded.
@@ -110,6 +113,8 @@ def _offending_write_grants(sql: str) -> list[str]:
         collapsed = re.sub(r"\s+", " ", stmt.strip())
         if "anon" in roles:
             out.append(f"WRITE to anon: {collapsed}")
+        if "public" in roles:
+            out.append(f"WRITE to public (anon/authenticated inherit it): {collapsed}")
         if "authenticated" in roles:
             # allowed only on the tenant registry (and only when EVERY target is
             # a registry table — a mixed grant is rejected to force an explicit split)
