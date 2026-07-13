@@ -77,8 +77,12 @@ on:
         type: string
 
 concurrency:
-  group: validate-vision-models
-  cancel-in-progress: false   # Session-3 bake-off dispatches one candidate model per run; don't cancel a sibling mid-measure
+  # Key on the candidate model so DIFFERENT models run in PARALLEL (they use different API keys /
+  # providers and never contend) — a bake-off of N models finishes in one run's wall-clock, not N.
+  # Two dispatches of the SAME model still serialize (same group). cancel-in-progress:false so a
+  # re-dispatch queues behind an in-flight measure of that model instead of killing it mid-run.
+  group: validate-vision-models-${{ github.event.inputs.candidate_model || 'default' }}
+  cancel-in-progress: false
 
 jobs:
   validate:
