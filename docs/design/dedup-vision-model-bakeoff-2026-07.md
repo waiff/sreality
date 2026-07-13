@@ -1,6 +1,8 @@
 # Dedup vision-model bake-off — 2026-07 (Session 3)
 
-**Status: RESULTS PENDING (harness runs in flight).** This doc reports the cost×ability
+**Status: RESULTS IN. The "Sonnet stays" recommendation was OVERRIDDEN by the operator —
+see "Operator decision — 2026-07-13" below (flip to gpt-5-mini via an OpenAI batch lane,
+PR #787).** This doc reports the cost×ability
 bake-off of candidate vision models against the frozen `dedup_golden_sets` snapshot
 `2026-07-13-session3-baseline`, across the three forensic dedup lanes. It extends
 `docs/design/dedup-cost-reduction.md` §4.3 (the "model flips CLOSED 2026-07-11" bullet, which
@@ -176,6 +178,34 @@ Only two framings could change this verdict, and both need new evidence, not a r
    already hits 100% recall) — plausible only if a reworked prompt lifts its 58% site precision past
    99% on this frozen set. That is a prompt-engineering research task with a clear, cheap harness now
    in place (`--golden-set-name 2026-07-13-session3-baseline`), not a flip.
+
+## Operator decision — 2026-07-13: flip to gpt-5-mini (override), built right
+
+The operator reviewed these numbers and **chose to move the forensic vision lanes to
+gpt-5-mini anyway**, overriding the "Sonnet stays" recommendation above. Context beyond raw
+precision: **provider diversification off Anthropic**, whose credit depletes ~daily (a
+standing reliability problem — see the llm-credit-outage memory). On the numbers, the switch
+is defensible on 2 of 3 lanes (compare/floor precision are Sonnet-comparable within noise on
+these small negative samples; only **site_plan degrades 86%→52%**), and gpt-5-mini is
+*cheaper* per call than Sonnet even at batch prices — so cost is not the driver, throughput is.
+
+gpt-5-mini cannot use the Anthropic Batches API the dedup/enrich throughput runs on, so
+"build it right" = **a parallel OpenAI Batch API lane** (OpenAI's own −50% batch tier), NOT a
+sync cutover that would forfeit bulk throughput. Shipped in PR #787:
+- `OpenAIProvider` implements the `BatchCapableProvider` surface (two-phase files+batches API).
+- `llm_client.provider_for_model` maps a lane's model id → backend; `call()` derives the
+  provider when one isn't passed. OpenAI provider registered in production `get_providers()`.
+- The dedup batch **submitter partitions by provider** — one run yields an Anthropic batch
+  (classify/Sonnet) *and* an OpenAI batch (compare/floor/site) — stamping `dedup_batches.provider`;
+  ingest polls each batch with its stored provider. Same for the enrichment batch + a new
+  published `enrichment_model` setting.
+
+**Not yet flipped.** Go-live: (1) `OPENAI_API_KEY` on Railway + confirmed GH secret; (2) deploy;
+(3) a live-batch smoke (OpenAI batch's ≤24h turnaround is the only true e2e test); (4) flip
+`llm_visual_match_model` / `llm_floor_plan_match_model` / `llm_site_plan_match_model` (+
+`enrichment_model`) to `gpt-5-mini`. **Recommend keeping Sonnet on `llm_site_plan_match_model`**
+unless the 86→52 precision drop on the load-bearing unit-number guard is explicitly accepted.
+One-edit reversible per lane.
 
 ## Reproduce
 

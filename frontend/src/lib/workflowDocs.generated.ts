@@ -1355,6 +1355,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     ],
     "secrets": [
       "ANTHROPIC_API_KEY",
+      "OPENAI_API_KEY",
       "R2_ACCESS_KEY_ID",
       "R2_ACCOUNT_ID",
       "R2_BUCKET_NAME",
@@ -1548,6 +1549,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "secrets": [
       "ANTHROPIC_API_KEY",
       "GEMINI_API_KEY",
+      "OPENAI_API_KEY",
       "R2_ACCESS_KEY_ID",
       "R2_ACCOUNT_ID",
       "R2_BUCKET_NAME",
@@ -1902,6 +1904,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     ],
     "secrets": [
       "ANTHROPIC_API_KEY",
+      "OPENAI_API_KEY",
       "SUPABASE_DB_URL"
     ],
     "concurrencyGroup": "bazos-enrichment",
@@ -1968,6 +1971,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     ],
     "secrets": [
       "ANTHROPIC_API_KEY",
+      "OPENAI_API_KEY",
       "SUPABASE_DB_URL"
     ],
     "concurrencyGroup": "enrich-bazos-batch",
