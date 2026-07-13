@@ -22,8 +22,8 @@ Map, Operator-workflow, Building-decomposition, Skill-refinement, and Summarize 
 in parallel and are independent within a track. The current front line is in
 `roadmap/next.md` — the real-time hot lane (Wave C, greenlit 2026-07-02), building
 decomposition (Phase B1), and Phase QUAL (qualitative city data) are the live items.
-Multi-portal ingestion (Scraper Phase 2) and the Dedup D1/D2 track are the larger
-not-yet-started bodies of work (design in `docs/design/multi-portal-dedup.md`).
+Multi-portal ingestion (Scraper Phase 2) is the larger not-yet-started body of work (design in
+`docs/design/multi-portal-dedup.md`); Dedup is active (see the table below).
 
 ## Tracks
 
@@ -33,7 +33,7 @@ not-yet-started bodies of work (design in `docs/design/multi-portal-dedup.md`).
 | UI | 🟢 mostly done | Browse / estimation / detail SPA; U-Nav next, U3 later | [roadmap/ui-track.md](roadmap/ui-track.md) |
 | Map | 🟡 mixed | Typed locality IDs + map layers (map-1) | [roadmap/map-track.md](roadmap/map-track.md) |
 | Scraper | 🟢 mostly done | Cadence-split, portal framework, prepared stmts; Phase 2 multi-portal (larger, later) | [roadmap/scraper-track.md](roadmap/scraper-track.md) |
-| Dedup + canonical listing | ⚪ not started | Cross-source dedup D1/D2 (superseded by design doc) | [roadmap/dedup-track.md](roadmap/dedup-track.md) |
+| Dedup + canonical listing | 🟡 active | LLM-cost + free-signal-precision program (Session 2/5); see `docs/design/dedup-vision-and-backlog-overhaul.md` | [roadmap/dedup-track.md](roadmap/dedup-track.md) |
 | Operator workflow | 🟢 mostly done | Collections / tags / notes, deal pipeline; U-ME (manual rental estimates) next | [roadmap/operator-workflow-track.md](roadmap/operator-workflow-track.md) |
 | Building decomposition | 🟢 mostly done | Paste-a-building unit extraction + fan-out; B3 business-case tab proposed | [roadmap/building-decomposition-track.md](roadmap/building-decomposition-track.md) |
 | Skill refinement | 🟡 active | Phase AI — feedback-driven estimation-skill refinement | [roadmap/skill-refinement-track.md](roadmap/skill-refinement-track.md) |

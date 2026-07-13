@@ -4552,6 +4552,91 @@ def test_resolve_pair_skips_prior_dismissed_without_new_evidence() -> None:
     assert ctx2.stats["pairs_considered"] == 1
 
 
+def test_resolve_retired_follows_chain_within_one_run() -> None:
+    """A property_id an EARLIER merge in this same run already retired resolves through
+    ctx.retired_to_survivor — including a multi-hop chain (A retired into B, B itself later
+    retired into C, all within one run) — the same-run re-probe race fix."""
+    import scripts.dedup_engine as eng
+
+    ctx = eng._RunContext(stats={})
+    ctx.retired_to_survivor[101] = 102
+    ctx.retired_to_survivor[102] = 103  # a second, later merge this run retired 102 too
+
+    a = _key(1, pid=101)
+    resolved = eng._resolve_retired(a, ctx)
+    assert resolved.property_id == 103
+    assert resolved.sreality_id == 1  # every other field is untouched
+
+    # Not in the chain -> returned unchanged.
+    b = _key(2, pid=999)
+    assert eng._resolve_retired(b, ctx).property_id == 999
+
+    # No property_id at all -> returned as-is (no-op).
+    c = ListingKey(sreality_id=3, property_id=None, source="sreality",
+                   street_key="id:42", disposition="2+kk", house_number="10",
+                   floor=3, area_m2=60.0)
+    assert eng._resolve_retired(c, ctx) is c
+
+
+def test_merge_pair_records_retired_to_survivor_on_ctx(monkeypatch: Any) -> None:
+    """A successful _merge_pair, given a ctx, records retired->survivor on it — the
+    bookkeeping a LATER pair in the same run resolves through (see _resolve_retired).
+    A skipped (MergeError) merge records nothing."""
+    import scripts.dedup_engine as eng
+
+    monkeypatch.setattr(eng, "merge_properties",
+                         lambda *a, **k: {"data": {"merge_group_id": "g1"}})
+    a = _key(1, pid=101)
+    b = _key(2, pid=102)
+    ctx = eng._RunContext(stats={})
+    mg = eng._merge_pair(None, a, b, "phash_single", {"confidence": 0.97}, ctx=ctx)
+    assert mg == "g1"
+    assert ctx.retired_to_survivor == {102: 101}  # survivor = the smaller (older) id
+
+    def _raise(*_a: Any, **_k: Any) -> Any:
+        raise eng.MergeError("already merged")
+
+    monkeypatch.setattr(eng, "merge_properties", _raise)
+    ctx2 = eng._RunContext(stats={})
+    assert eng._merge_pair(None, a, b, "phash_single", {"confidence": 0.97}, ctx=ctx2) is None
+    assert ctx2.retired_to_survivor == {}
+
+    # No ctx passed (existing callers, e.g. scripts/submit_dedup_batch.py) -> unchanged behavior.
+    monkeypatch.setattr(eng, "merge_properties",
+                         lambda *a, **k: {"data": {"merge_group_id": "g2"}})
+    assert eng._merge_pair(None, a, b, "phash_single", {"confidence": 0.97}) == "g2"
+
+
+def test_seen_property_pairs_discarded_on_defer_allows_retry() -> None:
+    """A property pair whose FIRST-tried listing-pair representative DEFERS (e.g. one side's
+    CLIP tagging is still pending) is NOT permanently blocked for the rest of the run — a
+    SECOND listing pair representing the SAME property pair (a multi-portal cluster where
+    several duplicates already share a property) gets a fresh chance. Before the fix,
+    ctx.seen_property_pairs marked the property pair 'seen' unconditionally, so the second
+    representative silently never reached the clip-readiness check at all."""
+    import scripts.dedup_engine as eng
+
+    class _C:
+        def __enter__(self): return self
+        def __exit__(self, *a): return None
+        def execute(self, sql, params=None): self._ids = params[0]
+        def fetchall(self): return [(sid,) for sid in self._ids]  # every id incomplete
+
+    class _Conn:
+        def cursor(self): return _C()
+
+    ctx = eng._RunContext(stats={"clip_deferred": 0}, clip_model="ViT-B/32")
+    a1, b1 = _key(1, pid=101), _key(2, pid=102)
+    a2, b2 = _key(3, pid=101), _key(4, pid=102)  # a different pair, same property ids
+
+    eng.resolve_pair(_Conn(), a1, b1, street_key="id:42", ctx=ctx)
+    assert ctx.stats["clip_deferred"] == 1
+    assert (101, 102) not in ctx.seen_property_pairs  # discarded, not left "seen"
+
+    eng.resolve_pair(_Conn(), a2, b2, street_key="id:42", ctx=ctx)
+    assert ctx.stats["clip_deferred"] == 2  # the second representative was actually tried
+
+
 def test_record_auto_dismissed_inserts_markers() -> None:
     """finalize()'s _record_auto_dismissed writes insert-if-absent dismissed candidate
     rows for verdict-backed dismissals only (the consult's durable negative decision)."""

@@ -1,5 +1,21 @@
 > Track file — part of [ROADMAP.md](../ROADMAP.md). After shipping, edit only this file + its index row.
 
+> **STALE BELOW (D1/D2 planning from the pre-`properties`-parent era) — this file predates the
+> shipped architecture and is not the current source of truth.** The dedup engine has been under
+> active development for many PRs; the governing plans are
+> [`docs/design/dedup-cost-reduction.md`](../docs/design/dedup-cost-reduction.md) (the executing
+> LLM-cost plan) and [`docs/design/dedup-vision-and-backlog-overhaul.md`](../docs/design/dedup-vision-and-backlog-overhaul.md)
+> (the free-signal-precision → vision-bake-off → batch-lane → recency program, Sessions 1-5).
+> **Session 2 (2026-07-13)** shipped the golden-set foundation (`dedup_label_events` view +
+> `dedup_golden_sets` table, migration 300) and validated — then RETRACTED — the §2.1 proposed
+> fix for the `_both_have_site_plan` step-aside: replaying "count non-drawing images" against the
+> `site_plan_different_unit` forensic-negative population showed ~67-75% precision (developers
+> routinely reuse an entire photo set, drawings included, across distinct parcels/units in one
+> subdivision), nowhere near the ≥99% bar. The step-aside stays as designed; see
+> `docs/design/dedup-vision-and-backlog-overhaul.md` §2.1a for the full replay. This whole
+> track file is a candidate for a future restructure (its own PR) to replace the stale D1/D2 body
+> below with a pointer-only index, per CLAUDE.md's roadmap-maintenance rule.
+
 ## Dedup + canonical listing track (parallel)
 
 Today the `listings` table is effectively a mirror of sreality.cz
@@ -77,6 +93,17 @@ shape (see D1 below).
 > geo-based, so it lights up as bazos coordinates accumulate; the sweep already
 > produces real bazos↔sreality candidate pairs. Next portals (bezrealitky / idnes)
 > reuse the same `ScrapedListing` → `ingest_scraped_listing` framework.
+
+> **Active program (2026-07): dedup vision cost + backlog quality.** The executing
+> cost plan is [`docs/design/dedup-cost-reduction.md`](../docs/design/dedup-cost-reduction.md);
+> the 2026-07-12 investigation is
+> [`docs/design/dedup-vision-and-backlog-overhaul.md`](../docs/design/dedup-vision-and-backlog-overhaul.md)
+> (validated the batch warmer draws a near-disjoint pair set from the live engine —
+> ~1% overlap, ~0.5%-consumed — and that a single `_both_have_site_plan` step-aside
+> vetoed the free arms on 98.6% of a 142-pair operator merge burst). Program order
+> (operator-approved 2026-07-13): free-signal precision → vision-model bake-off →
+> engine-side §4.1 batch rebuild → recency-first compare ordering. Each phase is its
+> own PR + operator flip.
 
 ### Phase D1: Strict cross-source dedup (proposed — superseded by the design doc above)
 

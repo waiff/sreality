@@ -4,22 +4,26 @@ import { useCallback, useRef, useState } from 'react';
  * filter sidebar (column 1) and, on the Listings/map tab, the cards list
  * (column 2) and the map (column 3). The operator can drag the two dividers
  * between them, and collapse the map away entirely; we remember the result
- * per-browser in localStorage so the layout survives a reload.
+ * per-browser in localStorage so the layout survives a reload. The card
+ * image size (small/large) is the same kind of per-browser display
+ * preference — not a column, but sharing the boolean-flag machinery below —
+ * so it lives here too rather than starting a second persistence module.
  *
  * These are workspace preferences, NOT part of the shareable view (the URL).
  * A `/browse?…` link carries the cohort + overlays; the recipient still sees
- * their OWN sidebar width / map split / map-collapsed state.
+ * their OWN sidebar width / map split / map-collapsed / image-size state.
  *
  * The sidebar is stored as a pixel width (sidebars are conventionally
  * fixed-width). The cards|map split is stored as the map column's
  * fraction of the inner area, so it stays proportional when the window
  * resizes. Both values are clamped on read AND on write so a hand-edited
  * or stale storage value can never push a column off-screen. The
- * map-collapsed flag is a plain boolean. */
+ * map-collapsed and card-image-size flags are plain booleans. */
 
 const SIDEBAR_KEY = 'sreality.browse.sidebarWidth';
 const MAP_SPLIT_KEY = 'sreality.browse.mapSplitFraction';
 const MAP_COLLAPSED_KEY = 'sreality.browse.mapCollapsed';
+const CARD_IMAGE_LARGE_KEY = 'sreality.browse.cardImageLarge';
 
 export const SIDEBAR_DEFAULT = 320;
 export const SIDEBAR_MIN = 240;
@@ -156,3 +160,11 @@ function usePersistedFlag(key: string, fallback: boolean): PersistedFlag {
  * giving the cards the full width. Default false (the map shows). */
 export const useMapCollapsed = (): PersistedFlag =>
   usePersistedFlag(MAP_COLLAPSED_KEY, false);
+
+/* Whether Browse card photos (and therefore the cards themselves — see
+ * ListingCards' --card-min) render at the large size. One flag read by
+ * both the Split and Cards (map-collapsed) layouts, since both render the
+ * same <ListingCards> grid — so "small"/"large" can never mean something
+ * different in one view than the other. Default false (today's size). */
+export const useCardImageLarge = (): PersistedFlag =>
+  usePersistedFlag(CARD_IMAGE_LARGE_KEY, false);

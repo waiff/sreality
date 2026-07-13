@@ -23,6 +23,8 @@ from typing import Any
 
 import psycopg
 
+from toolkit.browse_read_model import sync_browse_list
+
 MEMBERSHIP_SOURCE = ("operator", "auto")
 
 
@@ -149,6 +151,11 @@ def link_properties(
             )
             members = [int(r[0]) for r in cur.fetchall()]
 
+        # asset_id is a browse_projection column, so a link changes the read model
+        # for every member — patch them in the same txn (latent today: no Browse
+        # surface renders asset_id yet, but the contract stays consistent).
+        sync_browse_list(conn, members)
+
     return {
         "data": {
             "asset_id": survivor,
@@ -208,6 +215,7 @@ def unlink_property(
                 (asset_id,),
             )
             remaining = [int(r[0]) for r in cur.fetchall()]
+            affected = [property_id]  # every property whose asset_id this clears
             dissolved = False
             if len(remaining) < 2:
                 for pid in remaining:
@@ -219,6 +227,7 @@ def unlink_property(
                         source=source, reason="asset_dissolved",
                         confidence=None, created_by=created_by,
                     )
+                    affected.append(pid)
                 cur.execute(
                     "UPDATE assets SET status = 'dissolved', dissolved_at = now() "
                     "WHERE id = %s",
@@ -226,6 +235,10 @@ def unlink_property(
                 )
                 dissolved = True
                 remaining = []
+
+        # Patch the read model for every property whose asset_id changed (see
+        # link_properties — latent today, kept for read-model contract parity).
+        sync_browse_list(conn, affected)
 
     return {
         "data": {

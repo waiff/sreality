@@ -344,3 +344,53 @@ def test_unmerge_raises_when_no_active_events():
     conn = _FakeConn([])
     with pytest.raises(MergeError):
         unmerge_group(conn, merge_group_id="grp", undone_by="operator")
+
+
+# --- browse_list read-model patch (docs/design/browse-merge-consistency.md) ---
+
+
+def test_merge_patches_browse_read_model():
+    # Read-your-writes: the merge patches browse_list in the SAME txn, AFTER the
+    # inline recompute (so browse_projection sees the merged state), for both the
+    # survivor and the now-retired id — Browse reflects it immediately instead of
+    # on the next 5-min rebuild.
+    conn = _FakeConn([
+        (lambda s: "SELECT id, status, category_type, category_main FROM properties WHERE id IN" in s,
+         [(10, "active", "prodej", "byt"), (20, "active", "prodej", "byt")]),
+        (lambda s: "INSERT INTO property_merge_events" in s, [(1,)]),
+    ])
+    merge_properties(
+        conn, survivor_id=10, retired_id=20, reason="manual", source="operator",
+    )
+    delete = _find(conn.executed, "DELETE FROM browse_list")
+    insert = _find(conn.executed, "INSERT INTO browse_list SELECT * FROM browse_projection")
+    assert delete is not None and delete[1] == ([10, 20],)
+    assert insert is not None and insert[1] == ([10, 20],)
+    idx_recompute = next(i for i, e in enumerate(conn.executed) if "WITH batch AS" in e[0])
+    idx_patch = next(i for i, e in enumerate(conn.executed) if "DELETE FROM browse_list" in e[0])
+    assert idx_recompute < idx_patch
+
+
+def test_split_patches_browse_read_model():
+    conn = _FakeConn([
+        (lambda s: "SELECT id, status FROM properties WHERE id = %s FOR UPDATE" in s,
+         [(100, "active")]),
+        (lambda s: "SELECT sreality_id FROM listings WHERE property_id" in s,
+         [(1,), (2,)]),
+        (lambda s: "INSERT INTO properties (" in s, [(999,)]),
+    ])
+    split_property_to_singletons(conn, property_id=100)
+    insert = _find(conn.executed, "INSERT INTO browse_list SELECT * FROM browse_projection")
+    assert insert is not None and insert[1] == ([100, 999],)
+
+
+def test_unmerge_patches_browse_read_model():
+    conn = _FakeConn([
+        (lambda s: "FROM property_merge_events WHERE merge_group_id" in s,
+         [(10, 20, 1001)]),
+        (lambda s: "UPDATE listings SET property_id = %s WHERE sreality_id" in s,
+         [(1,)]),
+    ])
+    unmerge_group(conn, merge_group_id="grp", undone_by="operator")
+    insert = _find(conn.executed, "INSERT INTO browse_list SELECT * FROM browse_projection")
+    assert insert is not None and insert[1] == ([10, 20],)

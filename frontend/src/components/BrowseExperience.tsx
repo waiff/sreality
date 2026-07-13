@@ -21,7 +21,12 @@ import {
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import Tabs, { type Tab } from '@/components/Tabs';
 import ResizeHandle from '@/components/ResizeHandle';
-import { useSidebarWidth, useMapSplitFraction, useMapCollapsed } from '@/lib/browseLayout';
+import {
+  useSidebarWidth,
+  useMapSplitFraction,
+  useMapCollapsed,
+  useCardImageLarge,
+} from '@/lib/browseLayout';
 import { FilterSidebar } from '@/components/Filters';
 import ListingTable from '@/components/ListingTable';
 import ListingCards from '@/components/ListingCards';
@@ -55,6 +60,7 @@ import {
   mergeDedupPropertySet,
 } from '@/lib/api';
 import { pushToast } from '@/lib/toast';
+import { invalidateBrowseQueries } from '@/lib/browseInvalidation';
 import {
   fetchCityIndexDefinitions,
   fetchCityIndexValues,
@@ -174,10 +180,15 @@ export default function BrowseExperience({
   }, []);
   const mergeMut = useMutation({
     mutationFn: (propertyIds: number[]) => mergeDedupPropertySet(propertyIds),
-    onSuccess: () => {
-      for (const key of ['cards', 'map', 'table', 'stats']) {
-        queryClient.invalidateQueries({ queryKey: [key] });
-      }
+    onSuccess: (res) => {
+      /* The server has already patched the browse_list read model in the merge
+       * txn (toolkit.browse_read_model.sync_browse_list), so this refetch serves
+       * the post-merge state — the retired cards drop out immediately instead of
+       * lingering until the next 5-min rebuild. Success is toasted (the toolbar
+       * closing was the only prior signal); errors surface via the global
+       * MutationCache. `browse-count` is included so the header total decrements. */
+      pushToast('ok', `Merged ${res.retired_ids.length + 1} listings into one property.`);
+      invalidateBrowseQueries(queryClient);
       exitMergeMode();
     },
   });
@@ -191,9 +202,7 @@ export default function BrowseExperience({
     onSuccess: (res) => {
       const n = res.data.member_property_ids.length;
       pushToast('ok', `Linked ${n} listings as the same building.`);
-      for (const key of ['cards', 'map', 'table', 'stats']) {
-        queryClient.invalidateQueries({ queryKey: [key] });
-      }
+      invalidateBrowseQueries(queryClient);
       exitMergeMode();
     },
   });
@@ -248,6 +257,7 @@ export default function BrowseExperience({
   const sidebar = useSidebarWidth();
   const mapSplit = useMapSplitFraction();
   const mapCollapsed = useMapCollapsed();
+  const cardImageLarge = useCardImageLarge();
   /* The map is only present on the Listings tab AND only when not collapsed —
    * the single source of truth the data-fetch gates and the layout both read,
    * so they can never disagree. */
@@ -676,6 +686,10 @@ export default function BrowseExperience({
                   collapsed={mapCollapsed.value}
                   onChange={mapCollapsed.set}
                 />
+                <ImageSizeToggle
+                  large={cardImageLarge.value}
+                  onChange={cardImageLarge.set}
+                />
                 {f.mergeMode && (
                   <MergeModeBar
                     active={mergeMode}
@@ -719,6 +733,7 @@ export default function BrowseExperience({
                 hasNextPage={cards.hasNextPage}
                 onReachEnd={cards.fetchNextPage}
                 restorationKey={cardsRestorationKey}
+                imageLarge={cardImageLarge.value}
                 hasFilters={!isDefault(filters)}
                 hasBounds={filters.bounds != null}
                 hoveredIds={hoveredIds}
@@ -1066,6 +1081,101 @@ function CardsGlyph() {
       <rect x="9" y="2.5" width="4.5" height="4.5" rx="1" />
       <rect x="2.5" y="9" width="4.5" height="4.5" rx="1" />
       <rect x="9" y="9" width="4.5" height="4.5" rx="1" />
+    </svg>
+  );
+}
+
+/* Card photo size switch (small/large): doubles ListingCards' --card-min,
+ * scaling the photo — and with it the whole card's width — while the
+ * fixed-rem price/title/badge text stays put. One flag (useCardImageLarge),
+ * read by both the Split and Cards (map-collapsed) layouts since both render
+ * the same <ListingCards> grid, so "small"/"large" can never drift between
+ * them. Same segmented-control idiom as MapViewToggle, right beside it. */
+function ImageSizeToggle({
+  large,
+  onChange,
+}: {
+  large: boolean;
+  onChange: (large: boolean) => void;
+}) {
+  const seg = (active: boolean) =>
+    [
+      'inline-flex items-center gap-1.5 px-2.5 py-1 text-[0.7rem] rounded-[var(--radius-xs)] transition-colors',
+      active
+        ? 'bg-[var(--color-copper)] text-white'
+        : 'text-[var(--color-ink-3)] hover:text-[var(--color-ink-2)]',
+    ].join(' ');
+  return (
+    <div
+      role="group"
+      aria-label="Card image size"
+      className="inline-flex items-center gap-0.5 p-0.5 rounded-[var(--radius-sm)] bg-[var(--color-paper-2)] border border-[var(--color-rule)]"
+    >
+      <button
+        type="button"
+        onClick={() => onChange(false)}
+        aria-pressed={!large}
+        title="Smaller photos, more columns"
+        className={seg(!large)}
+      >
+        <SmallImageGlyph />
+        Small
+      </button>
+      <button
+        type="button"
+        onClick={() => onChange(true)}
+        aria-pressed={large}
+        title="Bigger photos, fewer columns"
+        className={seg(large)}
+      >
+        <LargeImageGlyph />
+        Large
+      </button>
+    </div>
+  );
+}
+
+/* Many small photo frames — the "small" choice. */
+function SmallImageGlyph() {
+  return (
+    <svg
+      width="13"
+      height="13"
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.3"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <rect x="1.5" y="2" width="3.5" height="2.8" rx="0.6" />
+      <rect x="6.5" y="2" width="3.5" height="2.8" rx="0.6" />
+      <rect x="11.5" y="2" width="3" height="2.8" rx="0.6" />
+      <rect x="1.5" y="6.4" width="3.5" height="2.8" rx="0.6" />
+      <rect x="6.5" y="6.4" width="3.5" height="2.8" rx="0.6" />
+      <rect x="11.5" y="6.4" width="3" height="2.8" rx="0.6" />
+      <rect x="1.5" y="10.8" width="3.5" height="2.8" rx="0.6" />
+      <rect x="6.5" y="10.8" width="3.5" height="2.8" rx="0.6" />
+      <rect x="11.5" y="10.8" width="3" height="2.8" rx="0.6" />
+    </svg>
+  );
+}
+
+/* One big photo frame — the "large" choice. */
+function LargeImageGlyph() {
+  return (
+    <svg
+      width="13"
+      height="13"
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.3"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <rect x="1.5" y="2.5" width="13" height="8.5" rx="1.2" />
+      <path d="M1.5 8.5 L5.5 5.5 L8.5 8 L11 6 L14.5 9" />
     </svg>
   );
 }

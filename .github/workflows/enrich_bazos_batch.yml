@@ -1,0 +1,118 @@
+name: "Scraping: Bazos description enrichment (batch API)"
+
+# Enrichment PR B — async bazos description enrichment via the Anthropic
+# Message Batches API (50% cheaper than the synchronous enrich_bazos.yml
+# job). Mirrors .github/workflows/condition_score_batches.yml's dual-mode
+# structure exactly. Two modes, selected by the `mode` input:
+#
+#   submit  — select pending listings and submit them as one or more
+#             size-bounded batches (scripts.submit_enrich_batch keeps each
+#             chunk under the Batches API's request-size cap). Records every
+#             batch + its custom_id map in
+#             listing_description_enrichment_batches /
+#             listing_description_enrichment_batch_requests.
+#   ingest  — poll in-flight batches; on completion, write each result
+#             through persist_enrich_result + one llm_calls row at the 50%
+#             batch-discounted cost (scripts.ingest_enrich_batch).
+#             Idempotent and resumable.
+#
+# NEW LANE — dispatch-only for now. This does NOT replace enrich_bazos.yml
+# (the synchronous cron) in this PR; that workflow keeps running unchanged.
+# The operator should review a few workflow_dispatch batch runs first, THEN
+# restore the two schedule crons below AND disable/retire enrich_bazos.yml's
+# cron — that's a deliberate follow-up decision, not automatic here.
+#
+# Required GitHub secrets: SUPABASE_DB_URL, ANTHROPIC_API_KEY.
+
+on:
+  # Commented out until the operator has reviewed dispatch-mode batch runs
+  # (see the note above). To resume: uncomment both lines below AND stop
+  # scheduling enrich_bazos.yml's sync cron so the two lanes don't double-bill.
+  #   schedule:
+  #     - cron: "10 */3 * * *"  # submit: next slice of pending listings
+  #     - cron: "40 * * * *"    # ingest: poll + persist completed batches
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "submit a new batch, or ingest completed ones"
+        required: true
+        default: "ingest"
+        type: choice
+        options:
+          - "ingest"
+          - "submit"
+      source:
+        description: "[submit] Portal source to enrich (description-only portals)"
+        required: false
+        default: "bazos"
+        type: string
+      limit:
+        description: "[submit] Max listings to put in the batch"
+        required: false
+        default: "2000"
+        type: string
+      max_age_days:
+        description: "[submit] Only listings seen within this many days (0 = no filter)"
+        required: false
+        default: "0"
+        type: string
+      model:
+        description: "[submit] Anthropic model id (blank = claude-haiku-4-5)"
+        required: false
+        default: ""
+        type: string
+
+concurrency:
+  group: enrich-bazos-batch
+  cancel-in-progress: false
+
+jobs:
+  batch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install runtime deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[api]"
+
+      - name: Run batch step
+        run: |
+          # Scheduled triggers pass no inputs; pick mode from which cron fired
+          # (the crons are commented out today, so this only matters once
+          # they're restored — see the note at the top of this file).
+          MODE="${{ inputs.mode }}"
+          if [ -z "$MODE" ]; then
+            if [ "${{ github.event.schedule }}" = "10 */3 * * *" ]; then
+              MODE="submit"
+            else
+              MODE="ingest"
+            fi
+          fi
+
+          if [ "$MODE" = "submit" ]; then
+            SOURCE='${{ inputs.source }}'
+            if [ -z "$SOURCE" ]; then SOURCE="bazos"; fi
+            LIMIT='${{ inputs.limit }}'
+            if [ -z "$LIMIT" ]; then LIMIT="2000"; fi
+            AGE='${{ inputs.max_age_days }}'
+            if [ -z "$AGE" ]; then AGE="0"; fi
+            ARGS="--source $SOURCE --limit $LIMIT --max-age-days $AGE"
+            if [ -n "${{ inputs.model }}" ]; then ARGS="$ARGS --model ${{ inputs.model }}"; fi
+            echo "submit with: $ARGS"
+            eval python -m scripts.submit_enrich_batch $ARGS
+          else
+            echo "ingest in-flight batches"
+            python -m scripts.ingest_enrich_batch
+          fi
