@@ -152,8 +152,12 @@ declare
     'property_identity_candidates_archive','workflow_failures','workflow_run_health'];
 begin
   foreach t in array rls_off_tables loop
-    execute format('alter table public.%I enable row level security', t);
-    execute format('revoke all on public.%I from anon, authenticated', t);
+    -- to_regclass guard: the ad-hoc backup tables were created outside the migration
+    -- history, so they are absent on the CI schema-replay DB (portability).
+    if to_regclass('public.' || quote_ident(t)) is not null then
+      execute format('alter table public.%I enable row level security', t);
+      execute format('revoke all on public.%I from anon, authenticated', t);
+    end if;
   end loop;
 end $$;
 
@@ -168,9 +172,19 @@ end $$;
 -- browse_list keeps the Supabase rls_disabled_in_public advisor (cosmetic — writes
 -- are locked every cycle; RLS on a table dropped/renamed every 5 min is moot).
 -- ============================================================================
-revoke all on public.browse_list from anon;
-revoke insert, update, delete, truncate on public.browse_list from authenticated;
-revoke all on public.properties_map_mv from anon;
+-- browse_list + properties_map_mv are created by their rebuild functions (called by
+-- pg_cron), so they may not exist on the CI schema-replay DB — guard the direct revokes.
+-- The next rebuild re-locks them regardless via the function bodies below.
+do $$
+begin
+  if to_regclass('public.browse_list') is not null then
+    execute 'revoke all on public.browse_list from anon';
+    execute 'revoke insert, update, delete, truncate on public.browse_list from authenticated';
+  end if;
+  if to_regclass('public.properties_map_mv') is not null then
+    execute 'revoke all on public.properties_map_mv from anon';
+  end if;
+end $$;
 
 -- rebuild_browse_list(): migration 283's body verbatim, with the anon SELECT grant
 -- narrowed to authenticated and a write-revoke added right after it.
@@ -319,15 +333,25 @@ end $$;
 --  The per-listing advertised agent contact on listings_public/properties_public is
 --  a distinct, lesser exposure handled holistically by the Wave-4 DPIA — NOT here.)
 -- ============================================================================
-revoke all on public.brokers_public                 from anon, authenticated;
-revoke all on public.broker_firm_memberships_public from anon, authenticated;
-revoke all on public.broker_listings_public         from anon, authenticated;
-revoke all on public.listing_broker_public          from anon, authenticated;
-revoke all on public.broker_geo_options             from anon, authenticated;
-revoke all on public.broker_resolution_runs_public  from anon, authenticated;
-revoke all on public.broker_region_type_stats       from anon, authenticated;   -- matview
-revoke all on function public.broker_leaderboard(bigint[],bigint[],bigint[],text,text,text,integer)
-  from public, anon, authenticated;   -- PUBLIC too, else roles inherit EXECUTE
+do $$
+declare
+  r text;
+  broker_rels text[] := array[
+    'brokers_public','broker_firm_memberships_public','broker_listings_public',
+    'listing_broker_public','broker_geo_options','broker_resolution_runs_public',
+    'broker_region_type_stats'];   -- last is a matview
+begin
+  foreach r in array broker_rels loop
+    if to_regclass('public.' || quote_ident(r)) is not null then
+      execute format('revoke all on public.%I from anon, authenticated', r);
+    end if;
+  end loop;
+  -- broker_leaderboard: revoke PUBLIC too, else roles inherit EXECUTE
+  if exists (select 1 from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+             where n.nspname = 'public' and p.proname = 'broker_leaderboard') then
+    execute 'revoke all on function public.broker_leaderboard(bigint[],bigint[],bigint[],text,text,text,integer) from public, anon, authenticated';
+  end if;
+end $$;
 
 -- ============================================================================
 -- PART G — embedded post-conditions: fail (and roll back) the whole migration if
@@ -335,6 +359,17 @@ revoke all on function public.broker_leaderboard(bigint[],bigint[],bigint[],text
 -- ============================================================================
 do $$
 begin
+  -- These assert the LIVE Supabase grant posture (anon/authenticated started with the
+  -- default-ACL baseline). The vanilla CI schema-replay DB has no such baseline (roles
+  -- hold no grants; functions only carry the built-in PUBLIC grant), so the positive
+  -- "authenticated still has X" checks are meaningless there — skip the block unless the
+  -- Supabase control-plane role is present. The offline grant-drift gate + the live
+  -- tenant-isolation lane cover CI; these are the live apply's own safety net.
+  if not exists (select 1 from pg_roles where rolname = 'supabase_admin') then
+    raise notice '299: non-Supabase env (no supabase_admin) — skipping live-grant post-conditions';
+    return;
+  end if;
+
   -- anon is dark everywhere
   assert not has_table_privilege('anon','public.address_points','SELECT'),
          'anon still SELECTs address_points — PART B1 did not take';
