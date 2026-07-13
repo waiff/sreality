@@ -139,6 +139,66 @@ def test_call_extracts_tool_use_blocks():
     assert resp.tool_calls[0]["input"] == {"area_m2": 65}
 
 
+# ----------------------------------------------------------------------
+# provider_for_model + provider derivation in call()
+# ----------------------------------------------------------------------
+
+@pytest.mark.parametrize("model,expected", [
+    ("gpt-5-mini", "openai"),
+    ("gpt-5.4-mini", "openai"),
+    ("o3", "openai"),
+    ("o4-mini", "openai"),
+    ("qwen3-vl-235b-a22b-instruct", "qwen"),
+    ("gemini-3.1-flash-lite", "gemini"),
+    ("claude-sonnet-4-5", "anthropic"),
+    ("claude-haiku-4-5", "anthropic"),
+    ("", "anthropic"),
+])
+def test_provider_for_model(model, expected):
+    assert lc.provider_for_model(model) == expected
+
+
+def test_call_derives_openai_provider_from_gpt_model():
+    """A caller that passes only a gpt-* model (a dedup lane reading its
+    app_settings value) is routed to OpenAI without threading a provider arg."""
+    conn = _FakeConn(app_settings={})
+    prov_a = _ScriptedProvider(
+        "anthropic", [_completion(text="A")],
+        prices={"claude-sonnet-4-5": ModelPrice(3.0, 15.0)},
+    )
+    prov_o = _ScriptedProvider(
+        "openai", [_completion(text="O", model="gpt-5-mini")],
+        prices={"gpt-5-mini": ModelPrice(0.25, 2.0)},
+    )
+    client = lc.LLMClient(conn, providers={"anthropic": prov_a, "openai": prov_o})
+
+    resp = client.call(
+        called_for="compare_listings_visually",
+        messages=[{"role": "user", "content": "x"}],
+        model="gpt-5-mini",
+    )
+    assert resp.provider == "openai"
+    assert resp.text == "O"
+    assert conn.llm_calls_rows[0]["params"][1] == "openai"
+
+
+def test_call_explicit_provider_overrides_derivation():
+    """An explicit provider wins over the model-id heuristic."""
+    conn = _FakeConn(app_settings={})
+    prov_a = _ScriptedProvider(
+        "anthropic", [_completion(text="A", model="gpt-5-mini")],
+        prices={"gpt-5-mini": ModelPrice(3.0, 15.0)},
+    )
+    client = lc.LLMClient(conn, providers={"anthropic": prov_a})
+    resp = client.call(
+        called_for="parse_url",
+        messages=[{"role": "user", "content": "x"}],
+        model="gpt-5-mini",
+        provider="anthropic",
+    )
+    assert resp.provider == "anthropic"
+
+
 def test_call_propagates_estimation_run_id():
     conn = _FakeConn(app_settings={"llm_parse_model": "claude-sonnet-4-5"})
     prov = _ScriptedProvider("anthropic", [_completion(text="ok", input_tokens=1, output_tokens=1)])

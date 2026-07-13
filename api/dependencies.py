@@ -73,9 +73,14 @@ def _build_providers() -> dict[str, Any]:
     """
     from api.providers.anthropic import AnthropicProvider
     from api.providers.gemini import GeminiProvider
+    from api.providers.openai import OpenAIProvider
     return {
         "anthropic": AnthropicProvider(),
         "gemini":    GeminiProvider(),
+        # Session-3 bake-off provider, promoted to production so a lane whose
+        # app_settings model is a gpt-* id resolves (llm_client.provider_for_model).
+        # Lazy key (OPENAI_API_KEY) — absent, it fails only at the call that uses it.
+        "openai":    OpenAIProvider(),
     }
 
 
