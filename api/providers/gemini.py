@@ -46,11 +46,18 @@ LOG = logging.getLogger(__name__)
 # "no longer available to new users" (measured on the freshly-billed sreality key),
 # so current work targets the 3.x ids. Any model an app_settings row or harness
 # dispatch names MUST be here or its llm_calls rows record cost_usd=0.
+# gemini-3.1-flash-lite / gemini-2.5-flash-lite added 2026-07-13 (Session 3 vision
+# bake-off candidates) — same source, re-verified that day. 2.5-flash-lite is part
+# of the "documented but closed to new projects" 2.5 series above; kept in the
+# bake-off anyway per the task brief, flagged as likely-404 in the harness report
+# rather than skipped silently (only a live call proves it either way).
 PRICES: dict[str, ModelPrice] = {
     "gemini-3.1-pro-preview": ModelPrice(2.00, 12.0, 0.20, 0.0),
     "gemini-3.5-flash":       ModelPrice(1.50, 9.0,  0.15, 0.0),
+    "gemini-3.1-flash-lite":  ModelPrice(0.25, 1.50, 0.025, 0.0),
     "gemini-2.5-pro":         ModelPrice(1.25, 10.0, 0.31, 0.0),
     "gemini-2.5-flash":       ModelPrice(0.30, 2.5,  0.075, 0.0),
+    "gemini-2.5-flash-lite":  ModelPrice(0.10, 0.40, 0.01, 0.0),
 }
 
 

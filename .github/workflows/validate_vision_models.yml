@@ -1,69 +1,95 @@
 name: "Jobs: validate vision model/resolution A/B"
 
-# Read-only A/B gate for a dedup-vision (model, max_edge) change. Re-runs the
-# forensic compare on every historical 'High' verdict and re-classifies a sample,
-# then reports whether the candidate (default Haiku @ 768px) reproduces the
-# ground-truth recall. Writes NO cache / app_settings — only the standard llm_calls
-# audit rows. Exits non-zero (red run) when a gate is missed, so the model flip is
-# only made after a green run. See scripts/validate_vision_models.py.
+# Read-only A/B gate for a dedup-vision (model, max_edge) change, across all three
+# forensic lanes (compare / floor_plan / site_plan): RECALL replays historical
+# decisive verdicts (does the candidate reproduce them?); PRECISION replays a
+# frozen dedup_golden_sets snapshot of confirmed-DIFFERENT pairs (does the
+# candidate avoid the lane's dangerous verdict?) when golden_set_name is set.
+# Writes NO cache / app_settings — only the standard llm_calls audit rows. Exits
+# non-zero (red run) when a configured gate is missed — for a real proposed flip
+# that means "don't ship it"; for an exploratory multi-candidate bake-off (the
+# Session-3 use of this workflow) a red run on a cheap candidate is an expected,
+# informative RESULT — read the printed per-lane numbers in the log, not just the
+# run's pass/fail color. See scripts/validate_vision_models.py.
 #
-# Dispatch-only. Required GitHub secrets:
-#   SUPABASE_DB_URL, ANTHROPIC_API_KEY, R2_ACCOUNT_ID, R2_ACCESS_KEY_ID,
-#   R2_SECRET_ACCESS_KEY, R2_BUCKET_NAME
+# Dispatch-only. Required GitHub secrets (OPENAI_API_KEY / QWEN_API_KEY only
+# needed for gpt-* / qwen* candidates — the run fails loud via ProviderError if
+# missing, not silently):
+#   SUPABASE_DB_URL, ANTHROPIC_API_KEY, GEMINI_API_KEY, OPENAI_API_KEY,
+#   QWEN_API_KEY, R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY,
+#   R2_BUCKET_NAME
 
 on:
   workflow_dispatch:
     inputs:
       candidate_model:
-        description: Candidate model id to A/B (e.g. claude-haiku-4-5)
+        description: "Candidate model id (e.g. gemini-3.1-flash-lite, gpt-5-mini, qwen3-vl-30b-a3b-instruct)"
         required: true
         default: "claude-haiku-4-5"
         type: string
-      max_edge:
-        description: Candidate image long-edge px (768 = comparison tier)
+      lanes:
+        description: Comma-separated compare,floor_plan,site_plan (or 'all')
         required: true
-        default: "768"
+        default: "compare,floor_plan,site_plan"
+        type: string
+      golden_set_name:
+        description: "Frozen dedup_golden_sets snapshot for precision checks (blank = skip precision, recall-only)"
+        required: false
+        default: ""
+        type: string
+      max_edge:
+        description: Compare-lane image long-edge px (768 = comparison tier, 1568 = document tier)
+        required: true
+        default: "1568"
+        type: string
+      plan_max_edge:
+        description: Floor/site-plan image long-edge px (legibility-sensitive; 1568 = production tier)
+        required: true
+        default: "1568"
         type: string
       compare_limit:
-        description: Max historical High verdicts to re-run
+        description: Max historical compare verdicts to re-run
         required: true
-        default: "200"
+        default: "100"
         type: string
-      classify_sample:
-        description: Listings to re-classify for label agreement
+      plan_limit:
+        description: Max historical verdicts to re-run PER plan lane (floor_plan and site_plan each)
         required: true
-        default: "40"
+        default: "60"
         type: string
-      min_compare_recall:
-        description: Gate — fraction of historical Highs that must stay High (1.0 = every one)
+      precision_limit:
+        description: Max golden-negative pairs to re-run PER lane (only used when golden_set_name is set)
         required: true
-        default: "1.0"
+        default: "50"
         type: string
       skip_classify:
-        description: Only run the compare-recall gate
+        description: Skip the classify-agreement check (compare/floor_plan/site_plan are this session's scope)
         required: false
-        default: "false"
+        default: "true"
         type: choice
         options:
-          - "false"
           - "true"
+          - "false"
 
 concurrency:
   group: validate-vision-models
-  cancel-in-progress: true   # dispatches arrive in pairs; keep only the newest, don't burn a runner
+  cancel-in-progress: false   # Session-3 bake-off dispatches one candidate model per run; don't cancel a sibling mid-measure
 
 jobs:
   validate:
     runs-on: ubuntu-latest
-    timeout-minutes: 90   # the default 200-pair sample needs >30m; 30 killed runs mid-measure
+    timeout-minutes: 90   # a 100-pair compare sample alone needs >30m; 30 killed runs mid-measure
     permissions:
       contents: read
     env:
       SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-      # Non-Anthropic candidates: a model id starting "gemini" routes through
-      # api/providers/gemini.py (same neutral blocks; 2.5 Pro needs the paid tier).
+      # Non-Anthropic candidates route by model-id prefix (scripts.validate_vision_models._provider_for):
+      # "gemini*" -> api/providers/gemini.py, "gpt-*"/"o1"/"o3"/"o4" -> api/providers/openai.py,
+      # "qwen*" -> api/providers/qwen.py (both openai/qwen share api/providers/openai_compatible.py).
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      QWEN_API_KEY: ${{ secrets.QWEN_API_KEY }}
       R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
       R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
       R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
@@ -83,10 +109,16 @@ jobs:
       - name: Run vision A/B
         run: |
           ARGS="--candidate-model '${{ inputs.candidate_model }}'"
+          ARGS="$ARGS --lanes '${{ inputs.lanes }}'"
           ARGS="$ARGS --max-edge ${{ inputs.max_edge }}"
+          ARGS="$ARGS --plan-max-edge ${{ inputs.plan_max_edge }}"
           ARGS="$ARGS --compare-limit ${{ inputs.compare_limit }}"
-          ARGS="$ARGS --classify-sample ${{ inputs.classify_sample }}"
-          ARGS="$ARGS --min-compare-recall ${{ inputs.min_compare_recall }}"
+          ARGS="$ARGS --floor-plan-limit ${{ inputs.plan_limit }}"
+          ARGS="$ARGS --site-plan-limit ${{ inputs.plan_limit }}"
+          ARGS="$ARGS --precision-limit ${{ inputs.precision_limit }}"
+          if [ -n "${{ inputs.golden_set_name }}" ]; then
+            ARGS="$ARGS --golden-set-name '${{ inputs.golden_set_name }}'"
+          fi
           if [ "${{ inputs.skip_classify }}" = "true" ]; then
             ARGS="$ARGS --skip-classify"
           fi

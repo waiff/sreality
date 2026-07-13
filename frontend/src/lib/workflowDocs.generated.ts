@@ -3864,7 +3864,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
   {
     "filename": "validate_vision_models.yml",
     "name": "Jobs: validate vision model/resolution A/B",
-    "description": "Read-only A/B gate for a dedup-vision (model, max_edge) change. Re-runs the forensic compare on every historical 'High' verdict and re-classifies a sample, then reports whether the candidate (default Haiku @ 768px) reproduces the ground-truth recall. Writes NO cache / app_settings — only the standard llm_calls audit rows. Exits non-zero (red run) when a gate is missed, so the model flip is only made after a green run. See scripts/validate_vision_models.py.",
+    "description": "Read-only A/B gate for a dedup-vision (model, max_edge) change, across all three forensic lanes (compare / floor_plan / site_plan): RECALL replays historical decisive verdicts (does the candidate reproduce them?); PRECISION replays a frozen dedup_golden_sets snapshot of confirmed-DIFFERENT pairs (does the candidate avoid the lane's dangerous verdict?) when golden_set_name is set. Writes NO cache / app_settings — only the standard llm_calls audit rows. Exits non-zero (red run) when a configured gate is missed — for a real proposed flip that means \"don't ship it\"; for an exploratory multi-candidate bake-off (the Session-3 use of this workflow) a red run on a cheap candidate is an expected, informative RESULT — read the printed per-lane numbers in the log, not just the run's pass/fail color. See scripts/validate_vision_models.py.",
     "portal": null,
     "manual": true,
     "schedules": [],
@@ -3874,59 +3874,85 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "inputs": [
       {
         "name": "candidate_model",
-        "description": "Candidate model id to A/B (e.g. claude-haiku-4-5)",
+        "description": "Candidate model id (e.g. gemini-3.1-flash-lite, gpt-5-mini, qwen3-vl-30b-a3b-instruct)",
         "required": true,
         "type": "string",
         "default": "claude-haiku-4-5",
         "options": null
       },
       {
-        "name": "max_edge",
-        "description": "Candidate image long-edge px (768 = comparison tier)",
+        "name": "lanes",
+        "description": "Comma-separated compare,floor_plan,site_plan (or 'all')",
         "required": true,
         "type": "string",
-        "default": "768",
+        "default": "compare,floor_plan,site_plan",
+        "options": null
+      },
+      {
+        "name": "golden_set_name",
+        "description": "Frozen dedup_golden_sets snapshot for precision checks (blank = skip precision, recall-only)",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "max_edge",
+        "description": "Compare-lane image long-edge px (768 = comparison tier, 1568 = document tier)",
+        "required": true,
+        "type": "string",
+        "default": "1568",
+        "options": null
+      },
+      {
+        "name": "plan_max_edge",
+        "description": "Floor/site-plan image long-edge px (legibility-sensitive; 1568 = production tier)",
+        "required": true,
+        "type": "string",
+        "default": "1568",
         "options": null
       },
       {
         "name": "compare_limit",
-        "description": "Max historical High verdicts to re-run",
+        "description": "Max historical compare verdicts to re-run",
         "required": true,
         "type": "string",
-        "default": "200",
+        "default": "100",
         "options": null
       },
       {
-        "name": "classify_sample",
-        "description": "Listings to re-classify for label agreement",
+        "name": "plan_limit",
+        "description": "Max historical verdicts to re-run PER plan lane (floor_plan and site_plan each)",
         "required": true,
         "type": "string",
-        "default": "40",
+        "default": "60",
         "options": null
       },
       {
-        "name": "min_compare_recall",
-        "description": "Gate — fraction of historical Highs that must stay High (1.0 = every one)",
+        "name": "precision_limit",
+        "description": "Max golden-negative pairs to re-run PER lane (only used when golden_set_name is set)",
         "required": true,
         "type": "string",
-        "default": "1.0",
+        "default": "50",
         "options": null
       },
       {
         "name": "skip_classify",
-        "description": "Only run the compare-recall gate",
+        "description": "Skip the classify-agreement check (compare/floor_plan/site_plan are this session's scope)",
         "required": false,
         "type": "choice",
-        "default": "false",
+        "default": "true",
         "options": [
-          "false",
-          "true"
+          "true",
+          "false"
         ]
       }
     ],
     "secrets": [
       "ANTHROPIC_API_KEY",
       "GEMINI_API_KEY",
+      "OPENAI_API_KEY",
+      "QWEN_API_KEY",
       "R2_ACCESS_KEY_ID",
       "R2_ACCOUNT_ID",
       "R2_BUCKET_NAME",
@@ -3934,7 +3960,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
       "SUPABASE_DB_URL"
     ],
     "concurrencyGroup": "validate-vision-models",
-    "cancelInProgress": true,
+    "cancelInProgress": false,
     "timeoutMinutes": 90,
     "permissions": "contents: read",
     "runsUrl": "https://github.com/waiff/sreality/actions/workflows/validate_vision_models.yml",
