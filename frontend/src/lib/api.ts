@@ -873,6 +873,24 @@ export const archiveResetDedupCandidates = (): Promise<{
     { method: 'POST' },
   );
 
+/* POST /dedup/model-compare — convene every connected vision model on undecided pairs
+ * (decision support). candidate_ids omitted = the oldest-undecided top-`limit`; a list =
+ * exactly those proposed candidates (the per-card button). Verdicts land on /model-testing
+ * under the returned run_label. */
+export interface ModelCompareResponse {
+  dispatched: boolean;
+  run_label: string;
+  pair_count: number;
+  models: string[];
+  model_testing_url: string;
+  run_url: string;
+}
+
+export const requestModelCompare = (
+  body: { candidate_ids?: number[]; limit?: number },
+): Promise<ModelCompareResponse> =>
+  request<ModelCompareResponse>('/dedup/model-compare', { method: 'POST', json: body });
+
 export const listAgentTools = (): Promise<{ data: AgentTool[] }> =>
   request<{ data: AgentTool[] }>('/admin/tools');
 

@@ -1562,6 +1562,60 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/dedup_engine.yml"
   },
   {
+    "filename": "dedup_model_compare.yml",
+    "name": "Jobs: dedup model comparison (review-queue decision support)",
+    "description": "One candidate model's pass over a /dedup \"compare all models\" snapshot. The API (POST /dedup/model-compare) snapshots the undecided pair(s) into dedup_model_compare_sets under run_label, then dispatches THIS workflow once per connected model — they run in PARALLEL (concurrency keyed on candidate_model). Each writes check_type='review' rows to dedup_vision_bakeoff_results (no ground truth — just the model's would-merge vote), which the operator reads side-by-side on /model-testing. Read-only apart from those benchmark rows.",
+    "portal": null,
+    "manual": true,
+    "schedules": [],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "candidate_model",
+        "description": "Candidate model id (claude-sonnet-4-5, gpt-5-mini, qwen3-vl-235b-a22b-instruct, ...)",
+        "required": true,
+        "type": "string",
+        "default": null,
+        "options": null
+      },
+      {
+        "name": "run_label",
+        "description": "The dedup_model_compare_sets snapshot label to score (also the /model-testing run label)",
+        "required": true,
+        "type": "string",
+        "default": null,
+        "options": null
+      },
+      {
+        "name": "review_limit",
+        "description": "Max snapshot pairs to score",
+        "required": false,
+        "type": "string",
+        "default": "200",
+        "options": null
+      }
+    ],
+    "secrets": [
+      "ANTHROPIC_API_KEY",
+      "GEMINI_API_KEY",
+      "OPENAI_API_KEY",
+      "QWEN_API_KEY",
+      "R2_ACCESS_KEY_ID",
+      "R2_ACCOUNT_ID",
+      "R2_BUCKET_NAME",
+      "R2_SECRET_ACCESS_KEY",
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "dedup-model-compare-${{ github.event.inputs.candidate_model }}-${{ github.event.inputs.run_label }}",
+    "cancelInProgress": false,
+    "timeoutMinutes": 90,
+    "permissions": "contents: read",
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/dedup_model_compare.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/dedup_model_compare.yml"
+  },
+  {
     "filename": "detail_drain.yml",
     "name": "Scraping: Sreality detail drain (Phase 2)",
     "description": "The slow half of the Phase-2 cadence split, now on the shared portal framework: `scraper.sreality_main --drain-only` drives SrealityPortal through the one generic portal_runner. Claims a bounded slice of listing_detail_queue (source='sreality', enqueued by index_walk.yml), fetches each listing's detail on a rate-limited worker pool (429/403 auto-penalize), and writes them in batches via the set-based write_detail_batch (one transaction per ~100 listings) on the Session-mode pooler — the Phase-1 prepared-statement win. New listings land with property_id NULL; the Tier-1 matcher is deferred to the recompute_property_stats straggler-attach phase.",
