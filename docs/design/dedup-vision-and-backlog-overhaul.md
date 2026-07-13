@@ -1,7 +1,7 @@
 # Dedup vision + backlog overhaul — validated findings and program plan
 
 **Status: INVESTIGATION COMPLETE (2026-07-12). This doc is the Session-1 deliverable of the
-LLM-cost-reduction + dedup-quality program and re-sequences its Sessions 2–5.**
+LLM-cost-reduction + dedup-quality program; §6 is the operator-set sequence for Sessions 2–5.**
 It extends — does not replace — `docs/design/dedup-cost-reduction.md` (the executing cost plan):
 that doc's shipped-phase status list stays authoritative for what already shipped; THIS doc
 governs the batch lane's future (§4.1 there, re-decided here), the free-signal precision work,
@@ -283,40 +283,51 @@ relaxation ships default-OFF behind a setting with a golden-set replay + operato
 
 ---
 
-## 6. Re-sequenced program (Session 1 output)
+## 6. Program sequence (operator-set 2026-07-13)
 
-The handover's original order was 1-bake-off → 4-free-signals → 3-warmer → 2-priority.
-The data says fix the free tier first (it shrinks the paid denominator every later session
-prices against), then batch what remains, then choose models for the residue:
+Session 1 recommended reordering to fix the free tier first (it shrinks the paid denominator
+every later session prices against). **The operator elected to keep the original order** —
+bake-off → free-signals → warmer → priority — so that's the plan of record below. The free-first
+consideration is preserved for context but does not govern; the two orderings differ only in
+which of Sessions 2/3 lands first, and the golden-set foundation (§4) is a shared prerequisite
+that **whichever session goes first must build** — i.e. the bake-off (Session 2) now ships it.
 
-- **Session 2 — free-signal precision (was point 4A).** Non-drawing pHash/cosine counting to
-  replace the blanket step-aside (default-OFF + golden replay + operator gate); per-family
-  dismissal rooms (same protocol); cadastral-vs-masterplan fine-tag split; cluster-complete
-  enqueue; same-run re-probe. Ships the golden-set migration (§4). Then a candidates
-  re-decide sweep to drain the backlog free; re-size any residual paid blitz after.
-  Dependencies: none. This is also where the queue growth stops mattering.
-- **Session 3 — batch lane rebuild (was point 3).** Flip warmer OFF (operator, can happen
-  today); implement §4.1 engine-side deferred batching for sweep lanes; delete the
-  speculative funnel walk. Dependency: none technically, but sizing is cleaner after
-  Session 2 shrinks paid volume. Measure with the `duration_ms=0` attribution + pair overlap
-  (must go ~1% → ~100% by construction).
-- **Session 4 — vision-model bake-off (was point 1).** Scope NARROWED by the 07-11 harness
-  results (already closed: Haiku@768 20% / Haiku@1568 30% / Gemini-3.1-Pro@1568 72% recall vs
-  Sonnet's 88.3% self-baseline — Sonnet stays on forensic lanes; no cascade). Still open:
-  GPT-5-mini, Qwen3-VL-235B/30B, Gemini-3.1-flash-lite & 2.5-flash-lite @1568, all through the
-  now-working harness + the §4 golden set (precision AND recall, per lane incl. site/floor
-  plan), $/call on sync AND batch/caching terms (be honest about which providers actually
-  offer batch discounts). New providers land as `api/providers/<name>.py` behind flags.
-  **Blocker to clear first: `QWEN_API_KEY`/`OPENAI_API_KEY` exist only on the Railway api
-  service — Actions harness runs and local scripts need them as GH secrets / local env.**
-- **Session 5 — recency-first compare ordering (point 2, unchanged).** One shared priority
-  function (newest listings first) across candidate drain + sweep compare budgets, so 1d/3d/1w
-  Browse filters never show unmerged dups. The dirty lane already covers the first hours;
-  this fixes the tail. Depends on Session 2 (most fresh pairs should conclude free).
-- **Vector-DB question (was 4B, folded into Session 2 as an assessment):** pgvector already
-  serves the pairwise tier server-side; the only case for ANN indexes is market-wide
-  visual candidate *generation*. Assess pgvector-HNSW-on-a-scoped-subset vs external service
-  against rule #7 there; do not adopt a dependency before that memo.
+- **Session 2 — vision-model bake-off (point 1).** Benchmark GPT-5-mini, Qwen3-VL-235B-A22B,
+  Qwen3-VL-30B-A3B, Gemini-3.1-flash-lite @1568, Gemini-2.5-flash-lite @1568, and current Sonnet
+  on the three dedup vision tasks (compare_listings_visually, floor-plan, site-plan) against the
+  §4 golden set — precision/recall on the merge decision, latency, $/call on BOTH a normal and a
+  batch/prompt-cache basis (be honest about which providers actually support each). Context from
+  the already-closed 07-11 harness run: Haiku@768 20% / Haiku@1568 30% / Gemini-3.1-Pro@1568 72%
+  recall vs Sonnet's 88.3% self-baseline (Sonnet stayed on forensic lanes; no cascade) — the new
+  models are the open question. New providers land as `api/providers/<name>.py` implementing the
+  `CompletionProvider` protocol, behind flags, NOT flipped on in prod. Deliverable = a cost×ability
+  recommendation. **Ships the golden-set foundation (§4) as its evaluation substrate.**
+  **Blocker to clear first: `QWEN_API_KEY`/`OPENAI_API_KEY` exist only on the Railway api service
+  — the Actions harness + local benchmark scripts need them as GH secrets / local env too.**
+- **Session 3 — free-signal precision (point 4A).** Non-drawing pHash/cosine counting to replace
+  the blanket `_both_have_site_plan` step-aside (§2.1; default-OFF + golden replay + operator
+  gate); cadastral-vs-masterplan fine-tag split; per-family dismissal rooms (same protocol);
+  cluster-complete enqueue; same-run re-probe. Then a candidates re-decide sweep drains the
+  backlog FREE. This is where queue growth stops mattering. Plus §6-B: assess moving embeddings
+  to a vector DB (below).
+- **Session 4 — batch lane rebuild for the backlog (point 3).** GOAL unchanged (warmed verdicts
+  actually consumed; the ~$1.6–2k/mo target). **MECHANISM corrected by Finding I-1 (§1.2): do NOT
+  "reconcile the warmer's selection query with the engine's"** — a second process re-deriving the
+  work-list can only approximate it (six divergences). Instead retire the speculative pre-warmer
+  (flip `dedup_batch_warmer_enabled=false`, which the operator can do any time) and build §4.1 as
+  specced: the ENGINE defers its own already-routed cold vision calls into `dedup_batches` (sweep
+  lanes only; dirty stays sync) so selection identity holds by construction. Measure via the
+  `duration_ms=0 AND error IS NULL` batch attribution + pair overlap (must go ~1% → ~100%). What
+  spend CANNOT fix: pozemek/komerční are structurally undismissable (no per-family dismissal
+  rooms) — that's Session 3's dismissal-side work, don't paper over it here.
+- **Session 5 — recency-first compare ordering (point 2).** One shared priority function (newest
+  listings first) across candidate drain + sweep compare budgets, so 1d/3d/1w Browse filters
+  never show unmerged dups in ANY category. The dirty lane already covers the first hours; this
+  fixes the tail. Cleaner after Session 3 (most fresh pairs should then conclude free).
+- **Vector-DB question (point 4B, assessed in Session 3):** pgvector already serves the pairwise
+  cosine tier server-side; the only case for an ANN index is market-wide visual candidate
+  *generation*. Assess pgvector-HNSW-on-a-scoped-subset vs an external service against rule #7;
+  no dependency before that memo lands.
 
 ## 7. What spend cannot fix (unchanged, restated so nobody re-learns it)
 

@@ -80,13 +80,14 @@ shape (see D1 below).
 
 > **Active program (2026-07): dedup vision cost + backlog quality.** The executing
 > cost plan is [`docs/design/dedup-cost-reduction.md`](../docs/design/dedup-cost-reduction.md);
-> the 2026-07-12 investigation + re-sequencing is
+> the 2026-07-12 investigation is
 > [`docs/design/dedup-vision-and-backlog-overhaul.md`](../docs/design/dedup-vision-and-backlog-overhaul.md)
 > (validated the batch warmer draws a near-disjoint pair set from the live engine —
 > ~1% overlap, ~0.5%-consumed — and that a single `_both_have_site_plan` step-aside
-> vetoed the free arms on 98.6% of a 142-pair operator merge burst). Program order:
-> free-signal precision → engine-side §4.1 batching → vision-model bake-off →
-> recency-first compare ordering. Each phase is its own PR + operator flip.
+> vetoed the free arms on 98.6% of a 142-pair operator merge burst). Program order
+> (operator-set 2026-07-13): vision-model bake-off → free-signal precision →
+> engine-side §4.1 batch rebuild → recency-first compare ordering. Each phase is its
+> own PR + operator flip.
 
 ### Phase D1: Strict cross-source dedup (proposed — superseded by the design doc above)
 
