@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import hmac
 import os
 from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any
@@ -131,11 +132,19 @@ def get_channel_client(conn: Any = Depends(get_db_conn)) -> Any:
 
 
 def require_token(authorization: str | None = Header(default=None)) -> None:
-    """Bearer-token gate. No-op if API_TOKEN env var is unset (local dev)."""
+    """Bearer-token gate. Fails CLOSED: with API_TOKEN unset the API refuses every
+    request (503) UNLESS the operator explicitly opts out for local dev with
+    API_AUTH_OPTIONAL=1. A forgotten prod secret can therefore never silently
+    disable auth (the old behaviour was fail-open). The compare is timing-safe."""
     expected = os.environ.get("API_TOKEN")
     if not expected:
-        return
-    if authorization != f"Bearer {expected}":
+        if os.environ.get("API_AUTH_OPTIONAL") == "1":
+            return
+        raise HTTPException(
+            status_code=503,
+            detail="API auth is not configured (set API_TOKEN, or API_AUTH_OPTIONAL=1 for local dev)",
+        )
+    if not authorization or not hmac.compare_digest(authorization, f"Bearer {expected}"):
         raise HTTPException(status_code=401, detail="Invalid or missing token")
 
 
@@ -170,8 +179,6 @@ def verify_jwt(authorization: str | None = Header(default=None)) -> dict:
     get a synthetic operator/admin identity. Retire that branch once the last old
     client is gone. Fails closed when nothing is configured.
     """
-    import hmac
-
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing bearer token")
     token = authorization[len("Bearer "):]

@@ -171,7 +171,18 @@ async def _lifespan(_app: FastAPI) -> "AsyncIterator[None]":
                     await asyncio.wait_for(t, timeout=10.0)
 
 
-app = FastAPI(title="sreality toolkit API", version="0.3.0", lifespan=_lifespan)
+# Hide the interactive docs + machine-readable schema in prod (openapi_url=None
+# disables Swagger/ReDoc too) so the ~169-route inventory isn't publicly
+# enumerable. Opt back in with API_DOCS_ENABLED=1 for local exploration.
+_docs_enabled = os.environ.get("API_DOCS_ENABLED") == "1"
+app = FastAPI(
+    title="sreality toolkit API",
+    version="0.3.0",
+    lifespan=_lifespan,
+    docs_url="/docs" if _docs_enabled else None,
+    redoc_url="/redoc" if _docs_enabled else None,
+    openapi_url="/openapi.json" if _docs_enabled else None,
+)
 
 _cors_origins = [
     o.strip()

@@ -1,8 +1,11 @@
 """Tests for the API_TOKEN bearer-token gate.
 
-When API_TOKEN is unset, every endpoint works without auth (local dev).
-When API_TOKEN is set, every endpoint EXCEPT /health requires the
-matching Authorization: Bearer <token> header.
+require_token fails CLOSED (Phase 0): with API_TOKEN unset every gated endpoint
+returns 503 UNLESS API_AUTH_OPTIONAL=1 is set (the explicit local-dev opt-out),
+so a forgotten prod secret can never silently disable auth. With API_TOKEN set,
+every endpoint EXCEPT /health requires the matching Authorization: Bearer <token>
+header. (conftest sets API_AUTH_OPTIONAL=1 for the suite; the fail-closed test
+below deletes it to prove the 503 path.)
 """
 
 from __future__ import annotations
@@ -288,15 +291,30 @@ def _call(client, method: str, path: str, body, headers=None):
     return client.get(path, headers=headers or {})
 
 
-def test_token_unset_all_endpoints_open(client, monkeypatch):
+def test_token_unset_with_optout_all_endpoints_open(client, monkeypatch):
+    """Local-dev opt-out: API_TOKEN unset + API_AUTH_OPTIONAL=1 → open."""
     monkeypatch.delenv("API_TOKEN", raising=False)
+    monkeypatch.setenv("API_AUTH_OPTIONAL", "1")
 
     res = client.get("/health")
     assert res.status_code == 200
 
     for method, path, body in _gated_calls(client):
         res = _call(client, method, path, body)
-        assert res.status_code == 200, f"{path} should be open without token"
+        assert res.status_code == 200, f"{path} should be open with the opt-out"
+
+
+def test_token_unset_without_optout_fails_closed(client, monkeypatch):
+    """No API_TOKEN and no opt-out → every gated route 503 (never fail-open).
+    /health stays open (it carries no require_token gate)."""
+    monkeypatch.delenv("API_TOKEN", raising=False)
+    monkeypatch.delenv("API_AUTH_OPTIONAL", raising=False)
+
+    assert client.get("/health").status_code == 200
+
+    for method, path, body in _gated_calls(client):
+        res = _call(client, method, path, body)
+        assert res.status_code == 503, f"{path} must fail closed when auth is unconfigured"
 
 
 def test_token_set_missing_header_rejects(client, monkeypatch):
