@@ -44,7 +44,7 @@ import logging
 import os
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from toolkit.dedup_engine import (
@@ -272,7 +272,10 @@ def _eligibility_counts(conn: Any) -> dict[str, int]:
     }
 
 
-def _merge_pair(conn: Any, a: ListingKey, b: ListingKey, reason: str, markers: dict[str, Any]) -> str | None:
+def _merge_pair(
+    conn: Any, a: ListingKey, b: ListingKey, reason: str, markers: dict[str, Any],
+    ctx: _RunContext | None = None,
+) -> str | None:
     """Merge the two listings' properties (older survives). Returns the
     merge_group_id (the undo handle, recorded in the decision audit) on success,
     or None on skip.
@@ -282,6 +285,10 @@ def _merge_pair(conn: Any, a: ListingKey, b: ListingKey, reason: str, markers: d
     MergeError on a non-active survivor/retired, which we catch and skip — the
     daily re-run sees the settled state and completes the chain. The job is
     idempotent and converges over runs, so a deferred chain merge is harmless.
+    When `ctx` is given, a SUCCESSFUL merge also records retired->survivor on it
+    (`_RunContext.retired_to_survivor`) so a LATER pair in this same run that still
+    names the now-retired property resolves through the chain instead of computing
+    a stale canonical pair (see `_resolve_retired`, called at the top of resolve_pair).
     """
     if a.property_id is None or b.property_id is None or a.property_id == b.property_id:
         return None
@@ -293,6 +300,8 @@ def _merge_pair(conn: Any, a: ListingKey, b: ListingKey, reason: str, markers: d
             reason=reason, source="auto", confidence=markers.get("confidence"),
             markers=markers,
         )
+        if ctx is not None:
+            ctx.retired_to_survivor[retired] = survivor
         return res["data"]["merge_group_id"]
     except MergeError as exc:
         LOG.warning("merge %s<-%s skipped: %s", survivor, retired, exc)
@@ -304,6 +313,25 @@ def _canon_pair(a: ListingKey, b: ListingKey) -> tuple[int, int] | None:
     if a.property_id is None or b.property_id is None or a.property_id == b.property_id:
         return None
     return (min(a.property_id, b.property_id), max(a.property_id, b.property_id))
+
+
+def _resolve_retired(key: ListingKey, ctx: _RunContext) -> ListingKey:
+    """Follow `ctx.retired_to_survivor` to the current property id for `key`, returning an
+    updated ListingKey if a merge EARLIER in this same run retired its run-start property
+    (the same-run re-probe race: a stale property id would compute a canonical pair, and
+    hence a phash/verdict marker, that no longer reflects reality). A bounded walk (not a
+    single lookup) because a chain can be more than one hop deep within one run (A merges
+    into B, B itself merges into C later in the same run)."""
+    pid = key.property_id
+    if pid is None:
+        return key
+    seen: set[int] = set()
+    while pid in ctx.retired_to_survivor and pid not in seen:
+        seen.add(pid)
+        pid = ctx.retired_to_survivor[pid]
+    if pid == key.property_id:
+        return key
+    return replace(key, property_id=pid)
 
 
 def _reconcile_stale_candidates(conn: Any, *, dry_run: bool) -> int:
@@ -1778,8 +1806,23 @@ class _RunContext:
     audit: list[dict[str, Any]] | None = None
     probes: _ProbeCache = field(default_factory=_ProbeCache)
     seen_listing_pairs: set[tuple[int, int]] = field(default_factory=set)
+    # A property pair stays in here only while it has a TERMINAL outcome this run (merge,
+    # dismiss, enqueue, reject). A DEFER outcome (clip/download readiness, floor-plan not
+    # warmed yet) discards it immediately, so a DIFFERENT listing-pair representative of the
+    # SAME property pair (e.g. one N-way cluster has several cross-portal duplicates already
+    # sharing a property) gets a chance later in this same run instead of the property pair
+    # being silently skipped for the rest of the run once its first-tried representative
+    # deferred. See resolve_pair's defer branches (each discards cp before returning).
     seen_property_pairs: set[tuple[int, int]] = field(default_factory=set)
     merged_pairs: set[tuple[int, int]] = field(default_factory=set)
+    # retired_property_id -> survivor_property_id for every merge THIS run (populated by
+    # _merge_pair on success). A ListingKey's property_id is a run-start snapshot; if an
+    # earlier pair in the same run retires one side's property, a later pair naming that
+    # same (now-stale) property id must resolve through this chain before computing its
+    # canonical property pair or calling _merge_pair again — otherwise its verdict/markers
+    # attach to an already-obsolete pairing (the same-run re-probe race). See
+    # _resolve_retired, called at the top of resolve_pair.
+    retired_to_survivor: dict[int, int] = field(default_factory=dict)
     dismissed_pairs: set[tuple[int, int]] = field(default_factory=set)
     # Pairs the engine EVALUATED this run but left proposed (queue outcome / free-mode
     # skip / tagging defer) → stamped set-based in finalize (migration 272); the
@@ -1839,6 +1882,11 @@ def resolve_pair(conn: Any, a: ListingKey, b: ListingKey, *, street_key: str,
     if lpair in ctx.seen_listing_pairs:
         return
     ctx.seen_listing_pairs.add(lpair)
+    # Resolve a run-start property_id that an EARLIER merge THIS run already retired
+    # (the same-run re-probe race) before computing the canonical property pair — a and
+    # b's other fields (street_key/disposition/house_number/sreality_id) are unaffected.
+    a = _resolve_retired(a, ctx)
+    b = _resolve_retired(b, ctx)
     decision = ctx.classify(a, b)
     cp = _canon_pair(a, b)
     if decision.action == "reject":
@@ -1900,6 +1948,7 @@ def resolve_pair(conn: Any, a: ListingKey, b: ListingKey, *, street_key: str,
             conn, [a.sreality_id, b.sreality_id], ctx.clip_model, ctx.probes):
         stats["clip_deferred"] += 1
         ctx.engine_looked[cp] = "clip_deferred"  # fresh clip_tagged_at re-opens the pair
+        ctx.seen_property_pairs.discard(cp)  # let another representative retry this run
         return
 
     # Download-completeness half of the readiness gate (dedup_defer_incomplete_downloads):
@@ -1913,6 +1962,7 @@ def resolve_pair(conn: Any, a: ListingKey, b: ListingKey, *, street_key: str,
             conn, [a.sreality_id, b.sreality_id], ctx.probes):
         stats["download_deferred"] += 1
         ctx.engine_looked[cp] = "download_deferred"
+        ctx.seen_property_pairs.discard(cp)  # let another representative retry this run
         return
 
     # Rule B (exact address) is RETIRED (2026-06): it was the only auto-merge path with false
@@ -1997,10 +2047,11 @@ def resolve_pair(conn: Any, a: ListingKey, b: ListingKey, *, street_key: str,
             return
         if fp == "defer":
             stats["floor_plan_deferred"] += 1
+            ctx.seen_property_pairs.discard(cp)  # let another representative retry this run
             return
         mg = None if ctx.dry_run else _merge_pair(
             conn, a, b, _phash_reason,
-            {**factors, "tier": ctx.tier, "confidence": 0.97})
+            {**factors, "tier": ctx.tier, "confidence": 0.97}, ctx=ctx)
         if ctx.dry_run or mg:
             stats["auto_phash_single" if _phash_single_fired else "auto_phash"] += 1
             ctx.merged_pairs.add(cp)
@@ -2055,10 +2106,11 @@ def resolve_pair(conn: Any, a: ListingKey, b: ListingKey, *, street_key: str,
             return
         if fp == "defer":
             stats["floor_plan_deferred"] += 1
+            ctx.seen_property_pairs.discard(cp)  # let another representative retry this run
             return
         mg = None if ctx.dry_run else _merge_pair(
             conn, a, b, "attr_exact",
-            {**factors, "tier": ctx.tier, "confidence": 0.97})
+            {**factors, "tier": ctx.tier, "confidence": 0.97}, ctx=ctx)
         if ctx.dry_run or mg:
             stats["auto_attr"] += 1
             ctx.merged_pairs.add(cp)
@@ -2120,10 +2172,11 @@ def resolve_pair(conn: Any, a: ListingKey, b: ListingKey, *, street_key: str,
                 return
             if fp == "defer":
                 stats["floor_plan_deferred"] += 1
+                ctx.seen_property_pairs.discard(cp)  # let another representative retry this run
                 return
             mg = None if ctx.dry_run else _merge_pair(
                 conn, a, b, "cosine_high",
-                {**factors, "tier": ctx.tier, "confidence": 0.97})
+                {**factors, "tier": ctx.tier, "confidence": 0.97}, ctx=ctx)
             if ctx.dry_run or mg:
                 stats["auto_cosine"] += 1
                 ctx.merged_pairs.add(cp)
@@ -2182,7 +2235,7 @@ def resolve_pair(conn: Any, a: ListingKey, b: ListingKey, *, street_key: str,
     # pHash already ran (pre-classify); the visual stage only auto-merges via a High
     # forensic verdict, and auto-dismisses on a confident "different".
     if outcome["action"] == "auto_merge":
-        mg = None if ctx.dry_run else _merge_pair(conn, a, b, outcome["reason"], markers)
+        mg = None if ctx.dry_run else _merge_pair(conn, a, b, outcome["reason"], markers, ctx=ctx)
         if ctx.dry_run or mg:
             stats["auto_visual"] += 1
             ctx.merged_pairs.add(cp)
@@ -2197,6 +2250,7 @@ def resolve_pair(conn: Any, a: ListingKey, b: ListingKey, *, street_key: str,
         # Floor-plan verdict not warmed yet -> skip, re-try next run (the batch lane
         # warms it). NOT the manual queue.
         stats["floor_plan_deferred"] += 1
+        ctx.seen_property_pairs.discard(cp)  # let another representative retry this run
     elif ctx.enqueue_unresolved:
         if not ctx.dry_run:
             _enqueue_candidate(conn, a, b, markers, reopen=reopened)

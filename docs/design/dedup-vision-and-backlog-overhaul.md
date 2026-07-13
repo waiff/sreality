@@ -195,6 +195,100 @@ merge-supporting evidence for pozemek) from `situation_plan` (development master
 step-aside-worthy); the fine tags are already stored per image, the engine just never reads
 them (`image_clip_tags.fine_tag`, only surfaced for frontend display today).
 
+### 2.1a Session 2 correction (2026-07-13): the naive fix FAILS the precision bar — DO NOT SHIP
+
+Session 2 ran the "known precision risk" validation this doc called for (replay against every
+labeled negative) *before* writing any code, using the negative population that already existed
+in the DB: `property_identity_candidates` rows whose forensic site-plan compare recorded
+`markers_matched->>'reason' = 'site_plan_different_unit'` — i.e. Sonnet read the actual
+parcel/unit labels on the drawing and confirmed two listings are DIFFERENT real-world units
+within one shared development. 141 such pairs exist; 131 reconstruct to an active, listable pair
+(now a first-class stratum in `dedup_label_events`, `label_source='engine_site_plan_verdict'`,
+migration 300).
+
+**Result: the fix is unsafe at any threshold.** Recomputing "non-drawing pHash-identical count"
+(excluding `site_plan`/`floor_plan`/`property_document`) on this confirmed-different population:
+
+| category | negatives (n) | fire at count≥1 | fire at count≥2 | fire at count≥8 |
+|---|---|---|---|---|
+| dům | 48 | 24 (50%) | 23 (48%) | 15 (31%) |
+| pozemek | 79 | 17 (22%) | 13 (16%) | 0 (0%) |
+| komerční | 5 | 3 (60%) | 2 (40%) | 1 (20%) |
+
+Combined with the true-positive rate on the 142-pair burst (dům 46/47, pozemek 40/72, komerční
+3/3 fire at count≥1), **precision ≈ 67% at count≥1, ≈67% at count≥2, ≈75% even at count≥8** — a
+whole order of magnitude below the ≥99% bar every auto-decide rule in this program requires. This
+is not a threshold-tuning problem: several confirmed-different pairs share **38–46 non-drawing
+image matches at Hamming=0** (a full staged photoshoot — facade, garden, interior, *and* the site
+plan — reused byte-for-byte across distinct parcels of one subdivision, e.g. properties
+368615/368616/368618/370197-9), which is MORE matching evidence than most true positives carry.
+Tightening the Hamming bar (≤6 → 0) does not help either (still 15/24 dům, 11/17 pozemek fire on
+exact-duplicate-only matches). A per-image "shared across many properties" pre-filter (the §2.4
+shared-render-blacklist idea, extended to non-byt) also does not generalize: at least one
+confirmed false-positive pair's driving image is shared across exactly 2 properties — indistinguishable
+from a genuine repost by any population-frequency signal.
+
+**Root cause:** real-estate developers/agents routinely reuse one staged photo set — sometimes the
+*entire* set, drawings included — across every parcel/unit in a subdivision or a "build this house
+model" catalog listing. Only reading the parcel/unit label ON the drawing (a vision-dependent,
+text-reading task) discriminates these from a genuine repost; no perceptual-hash or embedding
+signal over the photos themselves can, because the photos are often literally identical files by
+design, not just similar.
+
+**Consequence for the program:** the step-aside is not a coarse guard hiding free evidence — for
+dům/pozemek/komerční it is protecting against a real, high-volume failure mode, and it should
+**stay as designed**. This PR does NOT ship the non-drawing-count relaxation for the pHash/cosine
+arms (§2.2 fields `dedup_nonbyt_phash_single_enabled`/`dedup_nonbyt_cosine_merge_min` keep their
+existing `_both_have_site_plan` step-aside, unchanged). The queue-exit problem (§3) is therefore
+**not** solved by a free-signal relaxation this session; it still needs either (a) a cheaper/faster
+paid forensic path (Session 3's model bake-off, Session 4's batch-lane rebuild), or (b) narrowing
+what counts as a candidate in the first place. The "$600–1,000 paid blitz is obsolete" claim in §3
+is **retracted** — the blitz (rebuilt per Session 4's §4.1 engine-side batching, not the old
+warmer) is still the live lever for this backlog.
+
+**The cadastral-vs-masterplan fine-tag split (secondary fix (c) above) does NOT rescue this
+either.** Spot-checked directly on a confirmed different_unit pair (properties 388399/398398,
+parcels 2699/37 vs 2699/36): the two matching drawing images carry fine_tag `aerial_plot` AND
+`cadastral_map` respectively — BOTH already collapse to `logical_tag='site_plan'` per
+`data/clip_taxonomy.json`, and BOTH are the literal same development-overview page (pHash
+Hamming 0/2) with only the highlighted parcel differing, which pHash cannot see. A cadastral map
+in this corpus is not a per-parcel document; it is the same shared development-overview drawing
+every listing in the subdivision reuses. Distinguishing the fine tags would not have changed the
+count either way. Not shipped; not planned further without a different signal (e.g. OCR the
+parcel label itself — out of scope here).
+
+What DOES still ship this session: the golden-set foundation (§4, now including this new negative
+stratum — the exact counter-evidence any future proposal on this guard must replay against first),
+the cluster-complete-enqueue and same-run re-probe correctness fixes (unaffected by this finding,
+narrow and independently safe), and the §6-B vector-DB memo.
+
+**The two secondary correctness fixes, root-caused precisely:**
+
+1. **Cluster-complete enqueue.** `property_identity_candidates` is keyed at the PROPERTY grain
+   (`ON CONFLICT (left_property_id, right_property_id)`), but `resolve_pair` marked a property
+   pair "seen" (`ctx.seen_property_pairs.add(cp)`, `scripts/dedup_engine.py`) unconditionally as
+   soon as its canonical pair was computed — including on a DEFER outcome (clip/download
+   readiness not warmed, floor-plan verdict not warmed). In an N-way cluster where several
+   listing pairs collapse onto the same property pair (a multi-portal cluster with cross-portal
+   duplicates already sharing a property), if the FIRST-tried listing-pair representative
+   deferred, no OTHER representative — possibly the one with the decisive photo evidence — got a
+   second look this run. Fixed: the property pair is discarded from `seen_property_pairs` on every
+   DEFER branch (6 sites), so a later listing-pair representative gets a fresh chance within the
+   same run; a TERMINAL outcome (merge/dismiss/enqueue/reject) still blocks re-evaluation as
+   before. Covered by `tests/test_dedup_engine.py::test_seen_property_pairs_discarded_on_defer_allows_retry`.
+2. **Same-run re-probe / property-id staleness.** A `ListingKey.property_id` is a run-start
+   snapshot; when an earlier merge THIS run retires one side's property, `_merge_pair` already
+   caught the resulting `MergeError` and skipped (converging on the NEXT run) — but a pair
+   evaluated in between still computed its canonical property pair against the now-stale id, so
+   its recorded verdict/markers (e.g. a race-condition `phash_pairs: 0`) attached to an already-
+   obsolete pairing. Fixed: `_RunContext.retired_to_survivor` records every successful merge's
+   retired→survivor mapping; `resolve_pair` resolves both `ListingKey`s through the (possibly
+   multi-hop) chain via `_resolve_retired` before computing anything property-id-dependent. The
+   pHash/floor-plan probe caches themselves stay correct unchanged (keyed by `sreality_id`, not
+   `property_id`) — only the property-pair resolution needed to become merge-aware mid-run.
+   Covered by `test_resolve_retired_follows_chain_within_one_run` +
+   `test_merge_pair_records_retired_to_survivor_on_ctx`.
+
 ---
 
 ## 3. The review queue: what actually blocks the exits
@@ -342,6 +436,39 @@ is its own PR + operator flip.
   cosine tier server-side; the only case for an ANN index is market-wide visual candidate
   *generation*. Assess pgvector-HNSW-on-a-scoped-subset vs an external service against rule #7;
   no dependency before that memo lands.
+
+## 6-B. Vector-DB assessment memo (Session 2, delivered — defer, no dependency added)
+
+`image_clip_embeddings` is now **7.7M rows** (`vector(512)`, one model), past the "5M-row" scale
+the original CLIP build spec flagged as a future concern — not from runaway growth but because
+this branch's own "embed every tagged image, not active-only" fix widened the embedded set from
+active-only to ~the whole tagged corpus (98.7% of 7.8M tagged images now embedded). Marginal
+growth post-backfill looks like ~50k/day (ordinary ingest), not the ~640k/day the one-time
+backfill briefly produced.
+
+No ANN index exists today (`pg_indexes` shows only the `(image_id, model)` primary key — pgvector
+0.8.0 is installed, so adding one is a config/index decision, not a new dependency per rule #7).
+No consumer needs one either: every `<=>` call site (`toolkit/clip_dedup.py`'s `pair_max_cosine`/
+`room_pair_cosine`, `scripts/embedding_ab.py`'s golden-set A/B) is scoped to a specific listing's
+image set — a handful of rows, never `ORDER BY embedding <=> :vec LIMIT k` over the full table.
+Migration 226's own comment already states this as deliberate design ("no ANN index... never a
+global nearest-neighbour search"); nothing in ROADMAP.md proposes a market-wide visual-similarity
+feature.
+
+**Cost if built anyway:** `image_clip_embeddings` is already ~21GB (mostly TOASTed vector data);
+HNSW's well-known ~1.5–2x raw-vector RAM/disk overhead would add another ~30–40GB, i.e. a ~50–60GB
+working set against a 1GB `shared_buffers`/3GB `effective_cache_size` instance that can't even
+cache the raw vectors today. That's a real infrastructure cost (bigger instance + tuning + build
+time), not a free flip.
+
+**Recommendation: defer.** No code path or roadmap item creates a present-day use case for
+market-wide nearest-neighbor search; building HNSW now would be speculative infrastructure against
+a feature nobody has asked for. If/when a "find visually similar listings" feature is proposed,
+prefer **pgvector HNSW on a scoped subset** (one canonical embedding per active listing, not all
+7.7M raw images) over an external vector service — the vectors already sit beside the price/geo/
+category metadata any candidate-generation query must join against, and the table is already
+RLS-locked-down (migration 237); an external service would need its own sync pipeline, auth
+perimeter, and cost line for no matching benefit.
 
 ## 7. What spend cannot fix (unchanged, restated so nobody re-learns it)
 
