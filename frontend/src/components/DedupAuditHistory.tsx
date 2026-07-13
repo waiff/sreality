@@ -6,6 +6,8 @@ import { getDedupAudit, unmergeMergeGroup, type DedupAuditRow } from '@/lib/api'
 import { FILTER_REGISTRY } from '@/lib/filterRegistry.generated';
 import { fmtRelative } from '@/lib/format';
 import { listingPath } from '@/lib/listingUrl';
+import type { DistrictChip } from '@/lib/filters';
+import { LocationTypeahead } from '@/components/filter-controls/LocationTypeahead';
 import DedupFactors from '@/components/DedupFactors';
 import DecisionFeedbackControl from '@/components/DecisionFeedbackControl';
 
@@ -13,7 +15,9 @@ import DecisionFeedbackControl from '@/components/DecisionFeedbackControl';
  * engine AND operator, with the evidence + inline undo. Replaces the old separate
  * "Recent merges" panel: a merge here carries its undo handle, so the operator
  * reverses a bad merge from the same place they read it. Filter by property type
- * (the Browse/Pipeline TYPE chips), outcome, and source. Civic-archive: copper =
+ * (the Browse/Pipeline TYPE chips), outcome, source, and location (matches if
+ * EITHER side of the decision's pair touches the picked place — the same
+ * LocationTypeahead widget Browse/Watchdog/Pipeline use). Civic-archive: copper =
  * merged, brick = dismissed. */
 
 const OUTCOMES = [
@@ -105,6 +109,9 @@ export default function DedupAuditHistory({
   const [verdict, setVerdict] = useState('');
   const [maxText, setMaxText] = useState(''); // raw threshold buffer (un-committed)
   const [factorMax, setFactorMax] = useState<number | null>(null); // committed
+  // Location narrow — matches a decision if EITHER side of its pair touches
+  // the picked place, so the operator can prioritise auditing by area.
+  const [districts, setDistricts] = useState<DistrictChip[]>([]);
   // Broadcast "expand/collapse all photos" to every row's DedupFactors; bump seq each
   // click so a row re-applies it even after individual toggling.
   const [batchPhotos, setBatchPhotos] =
@@ -129,7 +136,7 @@ export default function DedupAuditHistory({
   const q = useQuery({
     queryKey: [
       'dedup', 'audit', outcome, type, source, onlyFlagged, factor, factorMax, verdict,
-      scopeProperty ?? null,
+      scopeProperty ?? null, districts,
     ],
     queryFn: () =>
       getDedupAudit({
@@ -141,6 +148,7 @@ export default function DedupAuditHistory({
         factor_max: numericFactor && factorMax != null ? factorMax : undefined,
         verdict: factor === 'visual' && verdict ? verdict : undefined,
         property_id: scopeProperty ?? undefined,
+        districts: districts.length ? districts : undefined,
         limit: 150,
       }),
   });
@@ -232,6 +240,17 @@ export default function DedupAuditHistory({
               </button>
             </span>
           )}
+        </div>
+        <div className="flex items-start gap-2">
+          <span className="mt-1.5 shrink-0 text-[0.62rem] uppercase tracking-[0.1em] text-[var(--color-ink-4)]">
+            Lokalita
+          </span>
+          <div className="min-w-0 flex-1 max-w-xl">
+            <LocationTypeahead
+              value={districts}
+              onChange={(n) => setDistricts(n ?? [])}
+            />
+          </div>
         </div>
         <div className="flex flex-wrap items-center gap-1.5">
           <span className="text-[0.62rem] uppercase tracking-[0.1em] text-[var(--color-ink-4)] mr-1">

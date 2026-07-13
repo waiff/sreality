@@ -17,6 +17,7 @@ from pydantic import BaseModel
 
 from api import dependencies as deps
 from api import property_dedup as dedup
+from api.location_filter import parse_district_chips_csv
 from toolkit.asset_identity import (
     AssetError,
     get_asset,
@@ -106,6 +107,11 @@ def get_pair_audit(
     verdict: str | None = Query(default=None, pattern="^(High|Medium|Low)$"),
     property_id: int | None = None,
     flagged: bool | None = None,
+    districts: str | None = None,
+    districts_ctx: str | None = None,
+    districts_excl: str | None = None,
+    districts_lvl: str | None = None,
+    districts_id: str | None = None,
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     conn: Any = Depends(deps.get_db_conn),
@@ -115,11 +121,17 @@ def get_pair_audit(
     Filterable by property type, outcome, source, stage, the decision FACTOR
     (`factor` + numeric `factor_min`/`factor_max`, or `verdict` for visual),
     `property_id` (the decisions that built one property — the listing-detail link),
-    and `flagged` (only decisions the operator flagged as incorrect)."""
+    `flagged` (only decisions the operator flagged as incorrect), and `districts`
+    (the same `districts`/`districts_ctx`/`districts_excl`/`districts_lvl`/
+    `districts_id` CSV shape Browse's URL uses — matches if EITHER side of the
+    decision's pair touches the picked place)."""
     return dedup.list_pair_audit(
         conn, outcome=outcome, category_main=category_main, source=source,
         stage=stage, factor=factor, factor_min=factor_min, factor_max=factor_max,
         verdict=verdict, property_id=property_id, flagged=flagged,
+        districts=parse_district_chips_csv(
+            districts, districts_ctx, districts_excl, districts_lvl, districts_id,
+        ),
         limit=limit, offset=offset,
     )
 
@@ -183,13 +195,25 @@ def get_candidates(
     tier: str | None = None,
     reason: str | None = None,
     verdict: str | None = None,
+    districts: str | None = None,
+    districts_ctx: str | None = None,
+    districts_excl: str | None = None,
+    districts_lvl: str | None = None,
+    districts_id: str | None = None,
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     conn: Any = Depends(deps.get_db_conn),
     _: dict = Depends(deps.require_admin),
 ) -> dict[str, Any]:
+    """`districts` narrows to pairs where EITHER candidate property touches the
+    picked place (the same `districts`/`districts_ctx`/`districts_excl`/
+    `districts_lvl`/`districts_id` CSV shape Browse's URL uses) — lets the
+    operator prioritise the manual review backlog by location."""
     return dedup.list_candidates(
         conn, status=status, tier=tier, reason=reason, verdict=verdict,
+        districts=parse_district_chips_csv(
+            districts, districts_ctx, districts_excl, districts_lvl, districts_id,
+        ),
         limit=limit, offset=offset,
     )
 

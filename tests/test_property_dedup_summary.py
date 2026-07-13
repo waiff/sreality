@@ -8,6 +8,7 @@ from __future__ import annotations
 from typing import Any
 
 import api.property_dedup as dedup
+from api.location_filter import DistrictChip
 from api.property_dedup import LEGACY_REASON, NULL_VERDICT, _candidate_filters
 
 
@@ -36,6 +37,26 @@ def test_filters_concrete_verdict_binds() -> None:
     where, params = _candidate_filters("proposed", None, "visual_inconclusive", "Low")
     assert "c.markers_matched->>'verdict' = %(verdict)s" in where
     assert params["verdict"] == "Low"
+
+
+def test_filters_districts_matches_either_side_of_pair() -> None:
+    # A pair matches on EITHER candidate property (l/r) touching the place --
+    # the operator is prioritising review by location, not asserting the
+    # engine already agrees the pair is in one place.
+    where, params = _candidate_filters(
+        "proposed", None, None, None,
+        districts=[DistrictChip(name="Jihlava", level="obec", id=586846)],
+    )
+    assert "l.obec_id = %(district_id_l_0)s" in where
+    assert "r.obec_id = %(district_id_r_0)s" in where
+    assert params["district_id_l_0"] == 586846
+    assert params["district_id_r_0"] == 586846
+
+
+def test_filters_no_districts_omits_location_clause() -> None:
+    where, params = _candidate_filters("proposed", None, None, None, districts=None)
+    assert "obec_id" not in where
+    assert not any(k.startswith("district_") for k in params)
 
 
 # --- fake conn --------------------------------------------------------------

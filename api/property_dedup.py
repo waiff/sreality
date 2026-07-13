@@ -14,6 +14,7 @@ from typing import Any
 
 import psycopg
 
+from api.location_filter import DistrictChip, district_where
 from toolkit.dedup_audit import build_audit_breakdown
 from toolkit.dedup_engine import (
     PHASH_IDENTICAL_MAX,
@@ -238,7 +239,11 @@ NULL_VERDICT = "(none)"
 
 
 def _candidate_filters(
-    status: str | None, tier: str | None, reason: str | None, verdict: str | None,
+    status: str | None,
+    tier: str | None,
+    reason: str | None,
+    verdict: str | None,
+    districts: list[DistrictChip] | None = None,
 ) -> tuple[str, dict[str, Any]]:
     """Shared WHERE for list_candidates + its COUNT (so the page total is real)."""
     clauses: list[str] = []
@@ -259,6 +264,13 @@ def _candidate_filters(
     elif verdict is not None:
         clauses.append("c.markers_matched->>'verdict' = %(verdict)s")
         params["verdict"] = verdict
+    if districts:
+        # A pair matches if EITHER property in it touches the picked place —
+        # the operator is prioritising review work by location, not asserting
+        # both sides already agree on one (that's exactly what review decides).
+        d_where, d_params = district_where(districts, aliases=["l", "r"])
+        clauses.extend(d_where)
+        params.update(d_params)
     where_sql = ("WHERE " + " AND ".join(clauses)) if clauses else ""
     return where_sql, params
 
@@ -270,10 +282,11 @@ def list_candidates(
     tier: str | None = None,
     reason: str | None = None,
     verdict: str | None = None,
+    districts: list[DistrictChip] | None = None,
     limit: int = 50,
     offset: int = 0,
 ) -> dict[str, Any]:
-    where_sql, params = _candidate_filters(status, tier, reason, verdict)
+    where_sql, params = _candidate_filters(status, tier, reason, verdict, districts)
 
     with conn.cursor() as cur:
         # Real total for THIS filter (the page is capped at `limit`), so the UI
@@ -409,6 +422,7 @@ def list_pair_audit(
     verdict: str | None = None,
     property_id: int | None = None,
     flagged: bool | None = None,
+    districts: list[DistrictChip] | None = None,
     limit: int = 100,
     offset: int = 0,
 ) -> dict[str, Any]:
@@ -421,7 +435,10 @@ def list_pair_audit(
     that touch one property's child listings (the listing-detail "merge decisions" link) —
     keyed on the stable `sreality_id` since `property_id` re-points on every merge.
     `merge_group_id` is the inline-undo handle; `undone` is DERIVED by joining the merge
-    ledger (the single source of truth)."""
+    ledger (the single source of truth). `districts` matches a decision if EITHER side's
+    (merged-away-surviving, rule #18) `properties` row touches the picked place — the
+    property row's location columns aren't cleared on merge, so even a since-retired
+    property still filters correctly."""
     clauses: list[str] = []
     params: dict[str, Any] = {}
     if outcome is not None:
@@ -458,6 +475,14 @@ def list_pair_audit(
         params["audit_pid"] = property_id
     if flagged:
         clauses.append("f.is_incorrect IS TRUE")
+    if districts:
+        # A decision matches if EITHER property it touched is in the picked
+        # place. `dedup_pair_audit` has no location columns of its own — join
+        # the (nullable) property ids to `properties` for its retained
+        # (merge-survivng, rule #18) location columns.
+        d_where, d_params = district_where(districts, aliases=["pl", "pr"])
+        clauses.extend(d_where)
+        params.update(d_params)
     where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
     # The pair-keyed feedback flag (Decision history + Needs-review share one store):
     # join on the canonical (low, high) PROPERTY pair the audit row SNAPSHOTTED at
@@ -469,9 +494,19 @@ def list_pair_audit(
         " AND f.left_property_id = least(a.left_property_id, a.right_property_id) "
         " AND f.right_property_id = greatest(a.left_property_id, a.right_property_id) "
     )
+    # properties joins for the location filter only — LEFT (not INNER) so a
+    # NULL property_id (pre-migration-091 rows) still surfaces when no
+    # location filter is applied; `districts` above simply can't match a NULL
+    # join, which correctly drops those rows once a location filter is set.
+    location_join = (
+        "LEFT JOIN properties pl ON pl.id = a.left_property_id "
+        "LEFT JOIN properties pr ON pr.id = a.right_property_id "
+    ) if districts else ""
     with conn.cursor() as cur:
         cur.execute(
-            f"SELECT count(*) FROM dedup_pair_audit a {feedback_join} {where}", params,
+            f"SELECT count(*) FROM dedup_pair_audit a {feedback_join} "
+            f"{location_join}{where}",
+            params,
         )
         total = int(cur.fetchone()[0])
         cur.execute(
@@ -491,6 +526,7 @@ def list_pair_audit(
                    f.is_incorrect, f.expected_outcome, f.note, f.updated_at
             FROM dedup_pair_audit a
             {feedback_join}
+            {location_join}
             LEFT JOIN LATERAL (
               SELECT bool_and(e.undone_at IS NOT NULL) AS fully_undone
               FROM property_merge_events e

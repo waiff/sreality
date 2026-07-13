@@ -43,6 +43,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from pydantic import BaseModel, field_validator, model_validator
 
 from api.cursor import decode_cursor, encode_cursor
+from api.location_filter import DistrictChip, district_where
 from scraper import db as scraper_db
 
 if TYPE_CHECKING:
@@ -52,30 +53,6 @@ LOG = logging.getLogger(__name__)
 
 
 # --- filter spec ----------------------------------------------------------
-
-
-class DistrictChip(BaseModel):
-    """One entry in `WatchdogFilterSpec.districts`.
-
-    Mirrors the frontend's `DistrictChip` (`frontend/src/lib/filters.ts`). A
-    resolved pick carries `level` ('obec' | 'okres' | 'kraj' | 'locality') and
-    the admin `id` (admin_boundaries.id for an admin level, or the containing
-    obec_id for a 'locality' chip) and is matched by STABLE ID -- so an obec
-    pick can't collide with its same-named okres. Free-text place matching
-    (the 'locality' street-pick branch and the no-level legacy fallback) goes
-    through `place_search_text` (street + locality, migration 182) so portals
-    that store the street outside `locality` (bazos) match too. A chip with no
-    level/id (a legacy saved filter) falls back to ILIKE-by-name across
-    `district` / `place_search_text` / `okres` / `region`. `context` is the
-    parent municipality (display + legacy narrow); `excluded` flips the chip
-    from an INCLUDE to an EXCLUDE filter (NOT-ed in the matcher WHERE).
-    """
-
-    name: str
-    context: str | None = None
-    excluded: bool = False
-    level: str | None = None
-    id: int | None = None
 
 
 class WatchdogFilterSpec(BaseModel):
@@ -323,64 +300,14 @@ def _build_match_clauses(
         where.append("l.locality_region_id = %(locality_region_id)s")
         params["locality_region_id"] = spec.locality_region_id
     if spec.districts:
-        # Per-chip predicate kept in lockstep with browse_stats (migration 182)
-        # and Browse (queries.ts districtsFilterClause): a resolved pick matches
-        # by STABLE ADMIN ID at its level (obec_id / okres_id / region_id) so an
-        # obec pick can't collide with its same-named okres; a 'locality' pick
-        # narrows to its containing obec + a place-text match; a legacy chip
-        # with no level/id falls back to the name ILIKE across
-        # district/place_search_text/okres/region. Free-text matching uses
-        # place_search_text (street + locality, migration 182), never bare
-        # locality — bazos stores the street outside locality.
-        # INCLUDE chips are OR'd (match any); EXCLUDE chips are NOT-ed (subtract).
-        _ID_COL = {"obec": "obec_id", "okres": "okres_id", "kraj": "region_id"}
-        inc_clauses: list[str] = []
-        exc_clauses: list[str] = []
-        for i, chip in enumerate(spec.districts):
-            if chip.level in _ID_COL and chip.id is not None:
-                id_key = f"district_id_{i}"
-                params[id_key] = chip.id
-                clause = f"l.{_ID_COL[chip.level]} = %({id_key})s"
-            elif chip.level == "locality":
-                # Wildcards live in the parameter VALUE, not as inline SQL '%'
-                # literals (psycopg treats a bare '%' as a malformed placeholder).
-                n_key = f"district_name_{i}"
-                params[n_key] = f"%{chip.name}%"
-                place_match = f"l.place_search_text ILIKE %({n_key})s"
-                if chip.id is not None:
-                    id_key = f"district_id_{i}"
-                    params[id_key] = chip.id
-                    clause = f"(l.obec_id = %({id_key})s AND {place_match})"
-                else:
-                    clause = place_match
-            else:
-                # Legacy / unresolved chip: name ILIKE across all name columns,
-                # AND'd with an optional parent-municipality context narrow.
-                n_key = f"district_name_{i}"
-                params[n_key] = f"%{chip.name}%"
-                name_half = (
-                    f"(l.district ILIKE %({n_key})s "
-                    f"OR l.place_search_text ILIKE %({n_key})s "
-                    f"OR l.okres ILIKE %({n_key})s "
-                    f"OR l.region ILIKE %({n_key})s)"
-                )
-                if chip.context:
-                    c_key = f"district_ctx_{i}"
-                    params[c_key] = f"%{chip.context}%"
-                    ctx_half = (
-                        f"(l.district ILIKE %({c_key})s "
-                        f"OR l.place_search_text ILIKE %({c_key})s "
-                        f"OR l.okres ILIKE %({c_key})s "
-                        f"OR l.region ILIKE %({c_key})s)"
-                    )
-                    clause = f"({name_half} AND {ctx_half})"
-                else:
-                    clause = name_half
-            (exc_clauses if chip.excluded else inc_clauses).append(clause)
-        if inc_clauses:
-            where.append("(" + " OR ".join(inc_clauses) + ")")
-        if exc_clauses:
-            where.append("NOT (" + " OR ".join(exc_clauses) + ")")
+        # Delegates to the shared builder (`api.location_filter`) so Browse,
+        # Watchdog, and the dedup Decision history / Queue filters can never
+        # disagree on what a district chip means. Single-alias here (`l`),
+        # so the emitted SQL/params are byte-identical to this matcher's
+        # previous inline implementation.
+        d_where, d_params = district_where(spec.districts, aliases=["l"])
+        where.extend(d_where)
+        params.update(d_params)
 
     # Price bound. With include_no_price, NULL-price listings survive the bound
     # (mirrors browse_stats_properties + queries.ts:applyFilters). Scope is
