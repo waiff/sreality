@@ -113,15 +113,18 @@ class _Submitter:
     payloads are large) so a big run never balloons memory.
     """
 
-    def __init__(self, conn: Any, provider: Any, *, max_requests: int, dry_run: bool) -> None:
+    def __init__(self, conn: Any, providers: dict[str, Any], *, max_requests: int, dry_run: bool) -> None:
         self._conn = conn
-        self._provider = provider
+        self._providers = providers
         self._dry_run = dry_run
         self.requests_left = max_requests
         self._in_flight = _in_flight_custom_ids(conn)
         self._collected: set[str] = set()
-        self._chunk: list[_Req] = []
-        self._chunk_bytes = 0
+        # One chunk buffer per provider — a batch is single-provider, but compare/
+        # floor/site may resolve to OpenAI while classify stays Anthropic, so requests
+        # are partitioned by provider_for_model(model) and each buffer flushes alone.
+        self._chunks: dict[str, list[_Req]] = {}
+        self._chunk_bytes: dict[str, int] = {}
         self.stats: dict[str, int] = {
             "want_classify": 0, "want_compare": 0, "want_site_plan": 0,
             "want_floor_plan": 0, "skipped_in_flight": 0, "batches": 0,
@@ -162,33 +165,45 @@ class _Submitter:
         except Exception as exc:  # noqa: BLE001 - one bad listing must not kill the run
             LOG.warning("BATCH build %s failed: %s", custom_id, exc)
             return
-        params = self._provider.build_batch_request_params(
+        from api.llm_client import provider_for_model
+        pname = provider_for_model(built["model"])
+        provider = self._providers.get(pname)
+        if provider is None:
+            # A model whose provider isn't batch-wired here (e.g. gemini/qwen): don't
+            # batch it — the sync engine resolves those pairs. Count nothing.
+            LOG.warning("BATCH no batch provider %r for model %s; skipped %s",
+                        pname, built["model"], custom_id)
+            return
+        params = provider.build_batch_request_params(
             system=built["system"], messages=built["messages"],
             tools=built["tools"], model=built["model"],
         )
         item_bytes = len(json.dumps(params, separators=(",", ":")))
+        chunk = self._chunks.setdefault(pname, [])
         if should_flush(
-            n_items=len(self._chunk), chunk_bytes=self._chunk_bytes,
+            n_items=len(chunk), chunk_bytes=self._chunk_bytes.get(pname, 0),
             next_item_bytes=item_bytes,
         ):
-            self.flush()
-        self._chunk.append(_Req(
+            self.flush(pname)
+            chunk = self._chunks.setdefault(pname, [])
+        chunk.append(_Req(
             custom_id=custom_id, kind=kind, model=model,
             sreality_id_a=a, sreality_id_b=b, room_type=room_type,
             image_ids=built.get("image_ids"), params=params,
         ))
-        self._chunk_bytes += item_bytes
+        self._chunk_bytes[pname] = self._chunk_bytes.get(pname, 0) + item_bytes
         self._collected.add(custom_id)
         self.requests_left -= 1
         self.stats[f"want_{kind}"] += 1
 
-    def flush(self) -> None:
-        if not self._chunk:
-            self._chunk_bytes = 0
+    def flush(self, pname: str) -> None:
+        chunk = self._chunks.get(pname) or []
+        if not chunk:
+            self._chunk_bytes[pname] = 0
             return
-        items = [(r.custom_id, r.params) for r in self._chunk]
-        mb = self._chunk_bytes / (1024 * 1024)
-        provider_batch_id = self._submit_with_retry(items)
+        items = [(r.custom_id, r.params) for r in chunk]
+        mb = self._chunk_bytes.get(pname, 0) / (1024 * 1024)
+        provider_batch_id = self._submit_with_retry(self._providers[pname], items)
         if provider_batch_id is None:
             # A provider failure that outlived the retries: DROP this chunk and keep
             # collecting. Nothing was inserted, so the pairs are not in-flight and the
@@ -196,30 +211,37 @@ class _Submitter:
             # pre-retry behaviour, where a single Anthropic 5xx crashed the whole run
             # and forfeited the 6h submit window (2026-07-09 19:47, run 29045617232).
             self.stats["submit_failures"] = self.stats.get("submit_failures", 0) + 1
-            self._chunk = []
-            self._chunk_bytes = 0
+            self._chunks[pname] = []
+            self._chunk_bytes[pname] = 0
             return
-        batch_id = _insert_batch(self._conn, provider_batch_id, self._chunk)
+        batch_id = _insert_batch(self._conn, provider_batch_id, chunk, pname)
         LOG.info(
-            "BATCH submitted provider_batch_id=%s requests=%d serialized=%.1fMB "
+            "BATCH submitted provider=%s provider_batch_id=%s requests=%d serialized=%.1fMB "
             "batch_id=%d kinds=%s",
-            provider_batch_id, len(self._chunk), mb, batch_id, _kind_counts(self._chunk),
+            pname, provider_batch_id, len(chunk), mb, batch_id, _kind_counts(chunk),
         )
         self.stats["batches"] += 1
-        self._chunk = []
-        self._chunk_bytes = 0
+        self._chunks[pname] = []
+        self._chunk_bytes[pname] = 0
+
+    def flush_all(self) -> None:
+        """Submit every provider's residual buffer (end-of-run)."""
+        for pname in list(self._chunks.keys()):
+            self.flush(pname)
 
     # Anthropic's Batches endpoint throws occasional transient 5xx/529s; one such
     # error must cost at most one backoff, never the submit window.
     _SUBMIT_ATTEMPTS = 3
     _SUBMIT_BACKOFF_S = (10, 30)
 
-    def _submit_with_retry(self, items: list[tuple[str, dict[str, Any]]]) -> str | None:
+    def _submit_with_retry(
+        self, provider: Any, items: list[tuple[str, dict[str, Any]]]
+    ) -> str | None:
         """provider.submit_batch with bounded retries; None when all attempts fail."""
         last: Exception | None = None
         for attempt in range(self._SUBMIT_ATTEMPTS):
             try:
-                return self._provider.submit_batch(items)
+                return provider.submit_batch(items)
             except Exception as exc:  # noqa: BLE001 — classified below, never crashes the run
                 last = exc
                 msg = str(exc).lower()
@@ -568,12 +590,12 @@ def _in_flight_custom_ids(conn: Any) -> set[str]:
         return {row[0] for row in cur.fetchall()}
 
 
-def _insert_batch(conn: Any, provider_batch_id: str, chunk: list[_Req]) -> int:
+def _insert_batch(conn: Any, provider_batch_id: str, chunk: list[_Req], provider: str) -> int:
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(
             "INSERT INTO dedup_batches (provider, provider_batch_id, request_count, status) "
-            "VALUES ('anthropic', %s, %s, 'submitted') RETURNING id",
-            (provider_batch_id, len(chunk)),
+            "VALUES (%s, %s, %s, 'submitted') RETURNING id",
+            (provider, provider_batch_id, len(chunk)),
         )
         row = cur.fetchone()
         if row is None:
@@ -634,12 +656,17 @@ def main() -> int:
 
     from api.llm_client import LLMClient
     from api.providers.anthropic import AnthropicProvider
+    from api.providers.openai import OpenAIProvider
     from scraper import image_storage
 
     if not args.dry_run and not image_storage.is_configured():
         LOG.warning("R2 is not configured; no vision requests can be built this run.")
 
-    provider = AnthropicProvider()
+    # Batch-capable providers, keyed by name. Each request routes to the provider its
+    # model resolves to (llm_client.provider_for_model): classify/Sonnet stay Anthropic;
+    # a lane flipped to gpt-5-mini goes through OpenAI's own batch tier. Keys are lazy,
+    # so an unused provider's missing secret costs nothing until a request needs it.
+    providers = {"anthropic": AnthropicProvider(), "openai": OpenAIProvider()}
     LOG.info(
         "BATCH submit config lane=%s max_pairs=%d max_requests=%d max_room_attempts=%d "
         "warm_rooms=%d n_images=%d max_seconds=%d dry_run=%s",
@@ -652,8 +679,8 @@ def main() -> int:
         if not read_setting(conn, "dedup_batch_warmer_enabled"):
             LOG.info("WARMER disabled (dedup_batch_warmer_enabled=false); nothing to submit")
             return 0
-        llm_client = LLMClient(conn, providers={"anthropic": provider})
-        submitter = _Submitter(conn, provider, max_requests=args.max_requests, dry_run=args.dry_run)
+        llm_client = LLMClient(conn, providers=providers)
+        submitter = _Submitter(conn, providers, max_requests=args.max_requests, dry_run=args.dry_run)
         # Mirror the engine's own knobs so the warm keys match the replay: CLIP-first room
         # grouping when the engine prefers CLIP tags, and the geo candidate filter with the
         # operator's area tolerance for geo-keyed pairs.
@@ -675,7 +702,7 @@ def main() -> int:
             byt_geo_classify=byt_geo_classify, clip_model=clip_model,
         )
         if not args.dry_run:
-            submitter.flush()
+            submitter.flush_all()
             stats["batches"] = submitter.stats["batches"]
 
     submit_failures = submitter.stats.get("submit_failures", 0)

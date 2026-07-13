@@ -241,7 +241,7 @@ def test_process_batch_ended_ingests_mixed_results(monkeypatch: Any) -> None:
     monkeypatch.setattr(providers_mod, "compute_cost_usd", _fake_compute_cost_usd)
 
     scored = ing._process_batch(
-        conn, _FakeProvider(), llm,
+        conn, {"anthropic": _FakeProvider()}, llm,
         {"id": 1, "provider_batch_id": "batch_1", "model": "claude-haiku-4-5"},
     )
 

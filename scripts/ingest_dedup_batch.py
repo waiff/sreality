@@ -71,37 +71,50 @@ def main() -> int:
 
     from api.llm_client import LLMClient
     from api.providers.anthropic import AnthropicProvider
+    from api.providers.openai import OpenAIProvider
 
-    provider = AnthropicProvider()
+    # Poll each batch with the provider it was submitted to (dedup_batches.provider).
+    providers = {"anthropic": AnthropicProvider(), "openai": OpenAIProvider()}
     with psycopg.connect(db_url, autocommit=True, prepare_threshold=None) as conn:
-        llm_client = LLMClient(conn, providers={"anthropic": provider})
+        llm_client = LLMClient(conn, providers=providers)
         batches = _in_flight_batches(conn, limit=args.max_batches)
         LOG.info("INGEST in_flight_batches=%d", len(batches))
         if not batches:
             LOG.info("INGEST nothing to do; done")
             return 0
         for batch in batches:
-            _process_batch(conn, provider, llm_client, batch)
+            try:
+                _process_batch(conn, providers, llm_client, batch)
+            except Exception as exc:  # noqa: BLE001 — one batch's provider hiccup mustn't stall the rest
+                LOG.error("INGEST batch_id=%s failed: %s", batch.get("id"), exc)
     return 0
 
 
 def _in_flight_batches(conn: Any, *, limit: int) -> list[dict[str, Any]]:
     sql = (
-        "SELECT id, provider_batch_id FROM dedup_batches "
+        "SELECT id, provider_batch_id, provider FROM dedup_batches "
         "WHERE status IN ('submitted', 'ended') "
         "ORDER BY submitted_at ASC LIMIT %s"
     )
     with conn.cursor() as cur:
         cur.execute(sql, (limit,))
-        return [{"id": int(r[0]), "provider_batch_id": r[1]} for r in cur.fetchall()]
+        return [
+            {"id": int(r[0]), "provider_batch_id": r[1], "provider": r[2] or "anthropic"}
+            for r in cur.fetchall()
+        ]
 
 
-def _process_batch(conn: Any, provider: Any, llm_client: Any, batch: dict[str, Any]) -> int:
+def _process_batch(conn: Any, providers: dict[str, Any], llm_client: Any, batch: dict[str, Any]) -> int:
     """Returns the number of cache rows persisted from this batch."""
     from api.providers import compute_cost_usd
 
     batch_id = batch["id"]
     provider_batch_id = batch["provider_batch_id"]
+    pname = batch.get("provider") or "anthropic"
+    provider = providers.get(pname)
+    if provider is None:
+        LOG.error("INGEST batch_id=%d unknown provider %r; skipping", batch_id, pname)
+        return 0
 
     status = provider.poll_batch(provider_batch_id)
     LOG.info(
@@ -141,6 +154,7 @@ def _process_batch(conn: Any, provider: Any, llm_client: Any, batch: dict[str, A
         )
         outcome, spent = _ingest_one(
             conn, llm_client, req, completion=item.completion, model=model, cost=cost,
+            provider=pname,
         )
         cost_total += spent
         if outcome == "done":
@@ -164,6 +178,7 @@ def _ingest_one(
     completion: Any,
     model: str,
     cost: float,
+    provider: str = "anthropic",
 ) -> tuple[str, float]:
     """Record the (paid) llm_calls row and persist one result to its cache.
 
@@ -185,7 +200,7 @@ def _ingest_one(
     ]
     llm_call_id = llm_client.record_external_call(
         called_for=_CALLED_FOR[kind],
-        provider="anthropic",
+        provider=provider,
         model=model,
         usage=completion.usage,
         cost_usd=cost,

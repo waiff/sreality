@@ -88,18 +88,10 @@ class OpenAICompatibleProvider:
             raise ProviderError(
                 f"{self._api_key_env} is not set; cannot call {self.name}"
             )
-        body: dict[str, Any] = {
-            "model": model,
-            "messages": _messages_to_openai(system, messages),
-            self._max_tokens_param: max_tokens,
-        }
-        if tools:
-            body["tools"] = [_tool_to_openai(t) for t in tools]
-            if tool_choice:
-                body["tool_choice"] = {
-                    "type": "function",
-                    "function": {"name": tool_choice},
-                }
+        body = self._chat_body(
+            system=system, messages=messages, tools=tools,
+            model=model, max_tokens=max_tokens, tool_choice=tool_choice,
+        )
 
         try:
             resp = self._session.post(
@@ -123,6 +115,33 @@ class OpenAICompatibleProvider:
                 f"{self.name} call failed: HTTP {resp.status_code} {resp.text[:500]}"
             )
         return _completion_from_raw(resp.json(), model=model)
+
+    def _chat_body(
+        self,
+        *,
+        system: str,
+        messages: list[Message],
+        tools: list[ToolSchema],
+        model: str,
+        max_tokens: int = 4096,
+        tool_choice: str | None = None,
+    ) -> dict[str, Any]:
+        """The `/v1/chat/completions` request body. Shared by `complete()` (sync)
+        and the batch lane's `build_batch_request_params`, so a request serializes
+        byte-identically whichever path submits it."""
+        body: dict[str, Any] = {
+            "model": model,
+            "messages": _messages_to_openai(system, messages),
+            self._max_tokens_param: max_tokens,
+        }
+        if tools:
+            body["tools"] = [_tool_to_openai(t) for t in tools]
+            if tool_choice:
+                body["tool_choice"] = {
+                    "type": "function",
+                    "function": {"name": tool_choice},
+                }
+        return body
 
     def price_for(self, model: str) -> ModelPrice | None:
         return self._prices.get(model)

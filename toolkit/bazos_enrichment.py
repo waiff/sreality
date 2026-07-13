@@ -35,6 +35,21 @@ if TYPE_CHECKING:  # pragma: no cover
 
 CALLED_FOR = "enrich_listing_description"
 DEFAULT_MODEL = "claude-haiku-4-5"
+ENRICHMENT_MODEL_KEY = "enrichment_model"
+
+
+def resolve_enrichment_model(conn: "psycopg.Connection") -> str:
+    """The operator-set enrichment model (app_settings.enrichment_model), else the
+    Haiku default. A published setting: absent -> Haiku (today's behaviour); set it
+    to e.g. gpt-5-mini and the provider is derived from the id at call/submit time."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT value FROM app_settings WHERE key = %s", (ENRICHMENT_MODEL_KEY,)
+        )
+        row = cur.fetchone()
+    if row and isinstance(row[0], str):
+        return row[0]
+    return DEFAULT_MODEL
 _ACCEPT_CONFIDENCE = frozenset({"high", "medium"})
 
 _SYSTEM = (

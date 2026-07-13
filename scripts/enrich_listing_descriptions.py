@@ -165,16 +165,18 @@ def main() -> int:
 
     from api.llm_client import LLMClient
     from api.providers.anthropic import AnthropicProvider
+    from api.providers.openai import OpenAIProvider
     from scraper import db
-    from toolkit.bazos_enrichment import DEFAULT_MODEL, enrich_listing_description
-
-    model = args.model or DEFAULT_MODEL
-    LOG.info(
-        "ENRICH config source=%s limit=%d max_cost=%.2f max_seconds=%d model=%s dry_run=%s",
-        args.source, args.limit, args.max_cost_usd, args.max_seconds, model, args.dry_run,
-    )
+    from toolkit.bazos_enrichment import enrich_listing_description, resolve_enrichment_model
 
     with db.connect() as conn:
+        # --model wins; else the operator's enrichment_model setting (Haiku default).
+        # LLMClient.call derives the backend from the id, so gpt-5-mini routes to OpenAI.
+        model = args.model or resolve_enrichment_model(conn)
+        LOG.info(
+            "ENRICH config source=%s limit=%d max_cost=%.2f max_seconds=%d model=%s dry_run=%s",
+            args.source, args.limit, args.max_cost_usd, args.max_seconds, model, args.dry_run,
+        )
         ids = _select_pending(
             conn, source=args.source, model=model,
             max_age_days=args.max_age_days, limit=args.limit,
@@ -184,7 +186,9 @@ def main() -> int:
             LOG.info("ENRICH dry-run: would enrich %d listings", len(ids))
             return 0
 
-        llm_client = LLMClient(conn, providers={"anthropic": AnthropicProvider()})
+        llm_client = LLMClient(conn, providers={
+            "anthropic": AnthropicProvider(), "openai": OpenAIProvider(),
+        })
         stats, aborted = _enrich_loop(
             conn, llm_client, ids,
             model=model, max_cost_usd=args.max_cost_usd,
