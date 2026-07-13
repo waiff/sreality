@@ -203,9 +203,9 @@ sync cutover that would forfeit bulk throughput. Shipped in PR #787:
 **Not yet flipped.** Go-live: (1) `OPENAI_API_KEY` on Railway + confirmed GH secret; (2) deploy;
 (3) a live-batch smoke (OpenAI batch's ≤24h turnaround is the only true e2e test); (4) flip
 `llm_visual_match_model` / `llm_floor_plan_match_model` / `llm_site_plan_match_model` (+
-`enrichment_model`) to `gpt-5-mini`. **Recommend keeping Sonnet on `llm_site_plan_match_model`**
-unless the 86→52 precision drop on the load-bearing unit-number guard is explicitly accepted.
-One-edit reversible per lane.
+`enrichment_model`) to `gpt-5-mini`. I recommended keeping Sonnet on `llm_site_plan_match_model`,
+but the **operator explicitly accepted the 86→52 site_plan drop (2026-07-14) — all three lanes flip
+to gpt-5-mini, none stays on Sonnet.** One-edit reversible per lane.
 
 ## Reproduce
 
