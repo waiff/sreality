@@ -72,6 +72,30 @@ describe('groupPairs', () => {
     expect(g.hasDisagreement).toBe(true); // qwen vs sonnet differ on site_plan
   });
 
+  it('anyDangerous ignores a merge verdict on a SAME-property pair (compare recall reproducing High)', () => {
+    // is_same=true, candidate High == danger verdict, but this is a CORRECT recall reproduction,
+    // not a false merge — must not flag the pair dangerous.
+    const rows = [
+      row({
+        check_type: 'recall',
+        lane: 'compare',
+        is_same: true,
+        candidate_verdict: 'High',
+        danger_verdict: 'High',
+        is_dangerous: true,
+        is_correct: true,
+      }),
+    ];
+    expect(groupPairs(rows)[0].anyDangerous).toBe(false);
+  });
+
+  it('anyDangerous flags a merge verdict on a DIFFERENT pair', () => {
+    const rows = [
+      row({ is_same: false, candidate_verdict: 'same_unit', is_dangerous: true, is_correct: false }),
+    ];
+    expect(groupPairs(rows)[0].anyDangerous).toBe(true);
+  });
+
   it('marks no disagreement when all models agree on every lane', () => {
     const rows = [
       row({ model: 'qwen', lane: 'site_plan', candidate_verdict: 'different_unit' }),

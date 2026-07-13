@@ -142,7 +142,9 @@ export interface PairGroup {
   byModelLane: Map<string, BakeoffRow>;
   /** true if the models disagree with each other on any lane (interesting to review). */
   hasDisagreement: boolean;
-  /** true if ANY model emitted the dangerous verdict on this pair. */
+  /** true if ANY model emitted a MERGE verdict on a pair whose ground truth is DIFFERENT
+   * (is_same === false) — an actual false merge. A merge verdict on a same-property pair (e.g.
+   * reproducing High on a compare recall pair) is correct, not dangerous, so it does NOT count. */
   anyDangerous: boolean;
 }
 
@@ -167,7 +169,7 @@ export const groupPairs = (rows: readonly BakeoffRow[]): PairGroup[] => {
       map.set(key, g);
     }
     g.byModelLane.set(`${r.model}|${r.lane}`, r);
-    if (r.is_dangerous) g.anyDangerous = true;
+    if (r.is_dangerous && r.is_same === false) g.anyDangerous = true;
     // precision pairs carry the ground truth; prefer their metadata if a recall row set it null
     if (g.category_main == null && r.category_main != null) g.category_main = r.category_main;
     if (g.label_source == null && r.label_source != null) g.label_source = r.label_source;
