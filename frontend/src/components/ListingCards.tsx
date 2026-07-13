@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import ImageCarousel from '@/components/ImageCarousel';
@@ -38,11 +38,25 @@ import { listingPath } from '@/lib/listingUrl';
  * wide. So the cards never crush to unreadable when the map panel is open (the
  * column is only ~half the viewport) or on a smaller screen — and they reflow
  * to more columns automatically when the map is collapsed away and the column
- * spans the full width. One tuning knob: the 11.5rem minimum card width
- * (auto-fill keeps trailing empty tracks, so a short final row keeps the same
- * card size instead of stretching). Shared by the live grid and the skeleton
- * so the two can never drift. */
-const CARD_GRID_CLASS = 'grid gap-2 grid-cols-[repeat(auto-fill,minmax(11.5rem,1fr))]';
+ * spans the full width. One tuning knob: the --card-min custom property, set
+ * from the imageLarge prop on the wrapping div below (CARD_IMAGE_MIN.sm/lg) —
+ * the ImageSizeToggle's small/large choice is the ONLY place that value is
+ * defined, and the live grid + the skeleton inherit it identically (custom
+ * properties cascade), so they can never drift. auto-fill (not auto-fit)
+ * keeps trailing empty tracks, so a short final row keeps the same card size
+ * instead of stretching. The min() wrapper caps the track floor at the
+ * column's own width: at "large" (23rem) a narrow Split column — the map
+ * dragged toward MAP_SPLIT_MAX — would otherwise be narrower than the floor
+ * and force a horizontal scrollbar; capped, it instead falls back to one
+ * full-width card per row, same as any responsive auto-fill grid. */
+const CARD_GRID_CLASS = 'grid gap-2 grid-cols-[repeat(auto-fill,minmax(min(var(--card-min),100%),1fr))]';
+
+/* The two --card-min values a card image can be — "large" is exactly double
+ * "small". The image keeps its aspect-[5/4] frame (ImageCarousel's default,
+ * untouched), so doubling the width doubles the height too; card width
+ * follows via the grid track above, while the fixed-rem title/price/badge
+ * text in the body does not change. */
+const CARD_IMAGE_MIN = { sm: '11.5rem', lg: '23rem' } as const;
 
 interface Props {
   rows: CardRow[] | null;
@@ -50,6 +64,11 @@ interface Props {
   /* `total` is an approximate (planner-estimate) cohort size — render "~N". */
   totalApprox?: boolean;
   sort: SortSpec;
+  /* Card image size: "large" doubles the grid's --card-min (and therefore
+   * the photo + card width); everything else in the card body is fixed-size
+   * and untouched. Shared identically by the Split and Cards (map-collapsed)
+   * layouts, since both render this one grid — see ImageSizeToggle. */
+  imageLarge: boolean;
   isLoading: boolean;
   /* The list query errored (e.g. a statement timeout). Suppresses the
    * "no results — clear filters" empty state, which otherwise renders on an
@@ -104,6 +123,7 @@ export default function ListingCards({
   total,
   totalApprox = false,
   sort,
+  imageLarge,
   isLoading,
   isError = false,
   isFetchingNextPage,
@@ -152,7 +172,10 @@ export default function ListingCards({
   const loaded = rows?.length ?? 0;
 
   return (
-    <div className="flex flex-col h-full min-h-0">
+    <div
+      className="flex flex-col h-full min-h-0"
+      style={{ '--card-min': CARD_IMAGE_MIN[imageLarge ? 'lg' : 'sm'] } as CSSProperties}
+    >
       <div className="flex items-center justify-between px-1 pb-3 text-[0.75rem] text-[var(--color-ink-3)] tabular-nums gap-3">
         <span className="min-w-0 truncate">
           {showSkeleton
