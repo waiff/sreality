@@ -3,13 +3,14 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 
 import { getDedupAudit, unmergeMergeGroup, type DedupAuditRow } from '@/lib/api';
-import { FILTER_REGISTRY } from '@/lib/filterRegistry.generated';
+import { CATEGORY_MAIN_TABS } from '@/lib/categoryMainTabs';
 import { fmtRelative } from '@/lib/format';
 import { listingPath } from '@/lib/listingUrl';
 import type { DistrictChip } from '@/lib/filters';
 import { LocationTypeahead } from '@/components/filter-controls/LocationTypeahead';
 import DedupFactors from '@/components/DedupFactors';
 import DecisionFeedbackControl from '@/components/DecisionFeedbackControl';
+import FilterChip from '@/components/FilterChip';
 
 /* The unified decision ledger — every terminal dedup decision (merged / dismissed),
  * engine AND operator, with the evidence + inline undo. Replaces the old separate
@@ -30,14 +31,6 @@ const SOURCES = [
   { id: '', label: 'Vše' },
   { id: 'engine', label: 'Engine' },
   { id: 'operator', label: 'Operátor' },
-];
-
-// Property-type chips from the SAME generated registry as Browse's TYPE tabs.
-const CATEGORY_MAIN_ENUM =
-  FILTER_REGISTRY.filters.find((f) => f.id === 'category_main')?.enum_values ?? [];
-const TYPES = [
-  { id: '', label: 'Vše' },
-  ...CATEGORY_MAIN_ENUM.map((o) => ({ id: String(o.value), label: o.label_cs })),
 ];
 
 // The decision-factor (signal) a decision turned on. phash/cosine carry a numeric
@@ -66,31 +59,6 @@ const OUTCOME_LABEL: Record<string, string> = {
   merged: 'sloučeno',
   dismissed: 'zamítnuto',
 };
-
-function Chip({
-  on,
-  label,
-  onClick,
-}: {
-  on: boolean;
-  label: string;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={[
-        'px-2.5 py-1 rounded-[var(--radius-sm)] border text-[0.78rem] transition-colors',
-        on
-          ? 'border-[var(--color-copper)] bg-[var(--color-copper-soft)] text-[var(--color-copper)]'
-          : 'border-[var(--color-rule)] text-[var(--color-ink-3)] hover:text-[var(--color-ink-2)] hover:border-[var(--color-rule-strong)]',
-      ].join(' ')}
-    >
-      {label}
-    </button>
-  );
-}
 
 export default function DedupAuditHistory({
   scopeProperty,
@@ -173,7 +141,7 @@ export default function DedupAuditHistory({
       <div className="flex flex-col gap-2">
         <div className="flex flex-wrap items-center gap-1.5">
           {OUTCOMES.map((o) => (
-            <Chip
+            <FilterChip
               key={o.id}
               on={outcome === o.id}
               label={o.label}
@@ -182,7 +150,7 @@ export default function DedupAuditHistory({
           ))}
           <span className="mx-1 h-4 w-px bg-[var(--color-rule)]" />
           {SOURCES.map((s) => (
-            <Chip
+            <FilterChip
               key={s.id}
               on={source === s.id}
               label={s.label}
@@ -211,8 +179,8 @@ export default function DedupAuditHistory({
           )}
         </div>
         <div className="flex flex-wrap items-center gap-1.5">
-          {TYPES.map((t) => (
-            <Chip
+          {CATEGORY_MAIN_TABS.map((t) => (
+            <FilterChip
               key={t.id}
               on={type === t.id}
               label={t.label}
@@ -257,7 +225,7 @@ export default function DedupAuditHistory({
             Faktor
           </span>
           {FACTORS.map((f) => (
-            <Chip
+            <FilterChip
               key={f.id}
               on={factor === f.id}
               label={f.label}
@@ -286,7 +254,7 @@ export default function DedupAuditHistory({
           )}
           {factor === 'visual' &&
             VERDICTS.map((v) => (
-              <Chip
+              <FilterChip
                 key={v.id}
                 on={verdict === v.id}
                 label={v.label}

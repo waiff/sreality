@@ -154,6 +154,44 @@ def test_no_districts_omits_the_properties_join() -> None:
         assert not any(k.startswith("district_") for k in (params or {}))
 
 
+def test_category_main_matches_either_side_not_the_stamped_column() -> None:
+    # dedup_pair_audit.category_main is the ENGINE's single stamped classification
+    # for the whole pair (falls back to whichever side is non-NULL) — a sanctioned
+    # dům<->komercni cross-type merge can be stamped with only ONE of the two
+    # types. Filtering the pair's own two `properties` rows instead (not `a.category_main`)
+    # is what lets it surface under both type tabs.
+    conn = _FakeConn(total=0, page_rows=[])
+    dedup.list_pair_audit(conn, category_main="komercni")
+    for s, params in conn.executed:
+        assert "a.category_main = %(category_main)s" not in s
+        assert "LEFT JOIN properties pl ON pl.id = a.left_property_id" in s
+        assert "LEFT JOIN properties pr ON pr.id = a.right_property_id" in s
+        assert "(pl.category_main = %(category_main)s OR pr.category_main = %(category_main)s)" in s
+        assert params["category_main"] == "komercni"
+
+
+def test_category_main_and_districts_share_one_properties_join() -> None:
+    # Both per-side filters need the same pl/pr join — it must appear exactly
+    # once even when both filters are set together.
+    conn = _FakeConn(total=0, page_rows=[])
+    dedup.list_pair_audit(
+        conn, category_main="dum",
+        districts=[DistrictChip(name="Jihlava", level="obec", id=586846)],
+    )
+    for s, _ in conn.executed:
+        assert s.count("LEFT JOIN properties pl ON pl.id = a.left_property_id") == 1
+        assert s.count("LEFT JOIN properties pr ON pr.id = a.right_property_id") == 1
+
+
+def test_no_category_main_or_districts_omits_the_properties_join() -> None:
+    conn = _FakeConn(total=0, page_rows=[])
+    dedup.list_pair_audit(conn, category_main=None, districts=None)
+    for s, params in conn.executed:
+        assert "LEFT JOIN properties pl" not in s
+        assert "LEFT JOIN properties pr" not in s
+        assert "category_main" not in (params or {})
+
+
 def test_read_path_resolves_self_paired_rows_from_the_merge_ledger() -> None:
     # A legacy self-paired row (left_sreality_id == right_sreality_id, the display
     # bug) must be repaired at read time from the property_merge_events ledger, not

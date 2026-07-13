@@ -238,12 +238,43 @@ LEGACY_REASON = "(legacy)"
 NULL_VERDICT = "(none)"
 
 
+def _either_side_eq(
+    column: str, value: Any, aliases: tuple[str, str], param_key: str,
+) -> tuple[str, dict[str, Any]]:
+    """A pair matches if EITHER side's `column` equals `value` — the same
+    "which half of the pair matched" latitude `district_where` gives a
+    location chip, for a plain scalar equality instead. A pair CAN
+    legitimately span two categories (the sanctioned dům↔komerční cross-type
+    merge, rule #15), so a single-column equality (`a.category_main = ...`)
+    silently drops half of those pairs from both of the type tabs they
+    actually belong in."""
+    l, r = aliases
+    return (
+        f"({l}.{column} = %({param_key})s OR {r}.{column} = %({param_key})s)",
+        {param_key: value},
+    )
+
+
+# The `property_identity_candidates` <-> `properties` join every list_candidates
+# query needs, factored out so its COUNT and its page SELECT can never disagree
+# about which tables the shared WHERE clause can reference — an inconsistency
+# here is exactly the bug that broke the location filter (a COUNT missing the
+# `l`/`r` join while its WHERE referenced `l.obec_id`/`r.obec_id`). Both sides
+# always exist (NOT NULL FKs), so the INNER JOIN never drops a candidate row.
+_CANDIDATES_FROM = (
+    "FROM property_identity_candidates c "
+    "JOIN properties l ON l.id = c.left_property_id "
+    "JOIN properties r ON r.id = c.right_property_id"
+)
+
+
 def _candidate_filters(
     status: str | None,
     tier: str | None,
     reason: str | None,
     verdict: str | None,
     districts: list[DistrictChip] | None = None,
+    category_main: str | None = None,
 ) -> tuple[str, dict[str, Any]]:
     """Shared WHERE for list_candidates + its COUNT (so the page total is real)."""
     clauses: list[str] = []
@@ -264,6 +295,14 @@ def _candidate_filters(
     elif verdict is not None:
         clauses.append("c.markers_matched->>'verdict' = %(verdict)s")
         params["verdict"] = verdict
+    if category_main is not None:
+        # Same either-side latitude as `districts` below — a Type tab picks a
+        # property type, not a claim that both sides of the pair already agree.
+        cat_where, cat_params = _either_side_eq(
+            "category_main", category_main, ("l", "r"), "category_main",
+        )
+        clauses.append(cat_where)
+        params.update(cat_params)
     if districts:
         # A pair matches if EITHER property in it touches the picked place —
         # the operator is prioritising review work by location, not asserting
@@ -283,17 +322,19 @@ def list_candidates(
     reason: str | None = None,
     verdict: str | None = None,
     districts: list[DistrictChip] | None = None,
+    category_main: str | None = None,
     limit: int = 50,
     offset: int = 0,
 ) -> dict[str, Any]:
-    where_sql, params = _candidate_filters(status, tier, reason, verdict, districts)
+    where_sql, params = _candidate_filters(
+        status, tier, reason, verdict, districts, category_main,
+    )
 
     with conn.cursor() as cur:
         # Real total for THIS filter (the page is capped at `limit`), so the UI
         # can show the full backlog size + paginate — not just the page count.
-        cur.execute(
-            f"SELECT count(*) FROM property_identity_candidates c {where_sql}", params,
-        )
+        # Shares `_CANDIDATES_FROM` with the page SELECT below (see its comment).
+        cur.execute(f"SELECT count(*) {_CANDIDATES_FROM} {where_sql}", params)
         total = int(cur.fetchone()[0])
 
         cur.execute(
@@ -304,9 +345,7 @@ def list_candidates(
               {_PROP_SIDE_SQL.format(p="l", rl="ll")} AS left_property,
               {_PROP_SIDE_SQL.format(p="r", rl="rl")} AS right_property,
               f.is_incorrect, f.expected_outcome, f.note, f.updated_at
-            FROM property_identity_candidates c
-            JOIN properties l ON l.id = c.left_property_id
-            JOIN properties r ON r.id = c.right_property_id
+            {_CANDIDATES_FROM}
             LEFT JOIN listings ll ON ll.sreality_id = l.repr_listing_id
             LEFT JOIN listings rl ON rl.sreality_id = r.repr_listing_id
             LEFT JOIN dedup_decision_feedback f
@@ -435,18 +474,25 @@ def list_pair_audit(
     that touch one property's child listings (the listing-detail "merge decisions" link) —
     keyed on the stable `sreality_id` since `property_id` re-points on every merge.
     `merge_group_id` is the inline-undo handle; `undone` is DERIVED by joining the merge
-    ledger (the single source of truth). `districts` matches a decision if EITHER side's
-    (merged-away-surviving, rule #18) `properties` row touches the picked place — the
-    property row's location columns aren't cleared on merge, so even a since-retired
-    property still filters correctly."""
+    ledger (the single source of truth). `category_main` and `districts` both match a
+    decision if EITHER side's (merged-away-surviving, rule #18) `properties` row
+    satisfies it — `dedup_pair_audit.category_main` is the engine's single stamped
+    classification for the whole pair (falls back to whichever side was non-NULL), so
+    a sanctioned dům↔komerční cross-type merge can be stamped with only ONE of the two
+    types; filtering the pair's OWN two `properties` rows instead of that stamped column
+    is what lets it surface under both type tabs. The property row's location columns
+    aren't cleared on merge, so even a since-retired property still filters correctly."""
     clauses: list[str] = []
     params: dict[str, Any] = {}
     if outcome is not None:
         clauses.append("a.outcome = %(outcome)s")
         params["outcome"] = outcome
     if category_main is not None:
-        clauses.append("a.category_main = %(category_main)s")
-        params["category_main"] = category_main
+        cat_where, cat_params = _either_side_eq(
+            "category_main", category_main, ("pl", "pr"), "category_main",
+        )
+        clauses.append(cat_where)
+        params.update(cat_params)
     if source is not None:
         clauses.append("a.source = %(source)s")
         params["source"] = source
@@ -494,18 +540,21 @@ def list_pair_audit(
         " AND f.left_property_id = least(a.left_property_id, a.right_property_id) "
         " AND f.right_property_id = greatest(a.left_property_id, a.right_property_id) "
     )
-    # properties joins for the location filter only — LEFT (not INNER) so a
-    # NULL property_id (pre-migration-091 rows) still surfaces when no
-    # location filter is applied; `districts` above simply can't match a NULL
-    # join, which correctly drops those rows once a location filter is set.
-    location_join = (
+    # properties joins for the per-side filters (location, category_main) only —
+    # LEFT (not INNER) so a NULL property_id (pre-migration-091 rows) still
+    # surfaces when neither filter is applied; `category_main`/`districts`
+    # above simply can't match a NULL join, which correctly drops those rows
+    # once either filter is set. Shared by BOTH filters (not two separate
+    # joins) so the COUNT and the page SELECT below can't disagree about which
+    # tables the WHERE clause references.
+    side_join = (
         "LEFT JOIN properties pl ON pl.id = a.left_property_id "
         "LEFT JOIN properties pr ON pr.id = a.right_property_id "
-    ) if districts else ""
+    ) if (districts or category_main is not None) else ""
     with conn.cursor() as cur:
         cur.execute(
             f"SELECT count(*) FROM dedup_pair_audit a {feedback_join} "
-            f"{location_join}{where}",
+            f"{side_join}{where}",
             params,
         )
         total = int(cur.fetchone()[0])
@@ -526,7 +575,7 @@ def list_pair_audit(
                    f.is_incorrect, f.expected_outcome, f.note, f.updated_at
             FROM dedup_pair_audit a
             {feedback_join}
-            {location_join}
+            {side_join}
             LEFT JOIN LATERAL (
               SELECT bool_and(e.undone_at IS NOT NULL) AS fully_undone
               FROM property_merge_events e

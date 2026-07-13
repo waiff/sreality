@@ -42,7 +42,9 @@ import { type TaggedImageUrl } from '@/lib/imageTags';
 import { portalListingUrl, portalShort } from '@/lib/portals';
 import { fmtArea, fmtCount, fmtCzk, fmtDurationSecs, fmtRelative } from '@/lib/format';
 import type { DistrictChip } from '@/lib/filters';
+import { CATEGORY_MAIN_TABS } from '@/lib/categoryMainTabs';
 import { LocationTypeahead } from '@/components/filter-controls/LocationTypeahead';
+import FilterChip from '@/components/FilterChip';
 import ImageCarousel from '@/components/ImageCarousel';
 import DedupAuditHistory from '@/components/DedupAuditHistory';
 import DedupBackfillProgress from '@/components/DedupBackfillProgress';
@@ -95,6 +97,11 @@ export default function Dedup() {
   const [bucket, setBucket] = useState<Bucket | null>(null);
   // Which category (tier) the operator is focused on (null = every family).
   const [tier, setTier] = useState<string | null>(null);
+  // Property-type narrow (the same Vše/Byty/Domy/Komerční/Pozemky/Ostatní tabs
+  // Decision history uses) — matches a pair if EITHER candidate property is that
+  // type, since a pair can legitimately span two types (the sanctioned
+  // dům↔komerční cross-type merge).
+  const [categoryMain, setCategoryMain] = useState('');
   // Location narrow — matches a pair if EITHER candidate property touches the
   // picked place, so the operator can prioritise the review backlog by area.
   const [districts, setDistricts] = useState<DistrictChip[]>([]);
@@ -112,6 +119,7 @@ export default function Dedup() {
       tier: tier ?? null,
       reason: bucket?.reason ?? null,
       verdict: bucket ? bucket.verdict ?? NULL_VERDICT : null,
+      categoryMain: categoryMain || null,
       districts,
     }),
     queryFn: () => listDedupCandidates({
@@ -121,6 +129,7 @@ export default function Dedup() {
       ...(bucket
         ? { reason: bucket.reason, verdict: bucket.verdict ?? NULL_VERDICT }
         : {}),
+      ...(categoryMain ? { category_main: categoryMain } : {}),
       ...(districts.length ? { districts } : {}),
     }),
     placeholderData: keepPreviousData,
@@ -268,6 +277,22 @@ export default function Dedup() {
         selected={tier}
         onSelect={setTier}
       />
+
+      <div className="mt-3 flex items-start gap-2">
+        <span className="mt-1.5 shrink-0 text-[0.65rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)]">
+          Type
+        </span>
+        <div className="flex flex-wrap gap-1.5">
+          {CATEGORY_MAIN_TABS.map((t) => (
+            <FilterChip
+              key={t.id}
+              on={categoryMain === t.id}
+              label={t.label}
+              onClick={() => setCategoryMain(t.id)}
+            />
+          ))}
+        </div>
+      </div>
 
       <div className="mt-3 flex items-start gap-2">
         <span className="mt-1.5 shrink-0 text-[0.65rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)]">
