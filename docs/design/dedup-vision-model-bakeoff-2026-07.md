@@ -86,7 +86,7 @@ flip = **≥99% precision AND recall at/near Sonnet's self-ceiling**.
 | gpt-5-mini | | | | | | | |
 | qwen3-vl-235b-a22b-instruct | | | | | | | |
 | gpt-5-mini | 88.3% (60) | **56.4% (39)** | 97.5% (40) | **63.6% (11)** | 100.0% (40) | **58.3% (48)** | 0.872 |
-| qwen3-vl-235b-a22b-instruct | | | | | | | |
+| qwen3-vl-235b-a22b-instruct | 73.3% (60) | **64.1% (39)** | 92.5% (40) | **36.4% (11)** | 97.5% (40) | **58.3% (48)** | 0.762 |
 | qwen3-vl-30b-a3b-instruct | 70.0% (60) | **64.1% (39)** | 97.5% (40) | **36.4% (11)** | 85.0% (40) | **66.0% (47)** | 0.375 |
 | gemini-3.1-flash-lite | 86.7% (60) | **48.7% (39)** | 95.0% (40) | **45.5% (11)** | 90.0% (40) | **68.8% (48)** | 0.518 |
 | gemini-2.5-flash-lite | — UNAVAILABLE (404: "no longer available to new users") — | | | | | | |
@@ -97,6 +97,12 @@ slowest + priciest: **63 minutes wall-clock** for ~320 calls (~12s/call — reas
 $0.872/run. Even a careful reasoning model is an eager merger here. Operationally disqualified twice
 over: precision AND throughput (the compare lane alone is ~30k calls/mo — a 12s/call model can't serve
 that on a 6h sweep cadence).
+
+**qwen3-vl-235b-a22b vs -30b (the size test):** the 10× parameter jump (235B/A22B vs 30B/A3B) moved
+precision **essentially not at all** — compare 64.1% (identical), floor 36.4% (identical), site 58.3%
+vs 66.0% (within noise). Recall barely differs (compare 73% vs 70%, site 98% vs 85%). Scaling the same
+model family does not buy precision here; the failure is in how these VLMs judge "same property", not a
+capacity limit — which is why a bigger or newer cheap VLM is not a promising next try.
 
 **Numbers above are the preview runs (n as shown). The canonical, per-pair-persisted batch
 (`run_label='2026-07-13-session3'`, feeding the /model-testing explorer) reproduces them within

@@ -32,12 +32,15 @@ import type { ImagePublic } from '@/lib/types';
 
 const pct = (v: number | null): string => (v == null ? '—' : `${(100 * v).toFixed(0)}%`);
 
-/* A cell's colour reflects SAFETY, not raw correctness: a dangerous verdict is red no matter what,
- * a correct/safe verdict green, anything else (a non-dangerous miss, e.g. different_unit→inconclusive)
- * amber. */
+/* A cell's colour reflects SAFETY: red = the model emitted a MERGE verdict (High / same_layout /
+ * same_unit) on a pair whose ground truth is DIFFERENT (is_same === false) — the actual false-merge.
+ * A merge verdict on a same-property pair is CORRECT, not dangerous, so it must NOT be red: on a
+ * compare recall pair the expected verdict literally IS "High" (the danger verdict), and reproducing
+ * it is the goal. Green = correct; amber = a non-dangerous miss (e.g. different_unit→inconclusive). */
 function verdictClasses(row: BakeoffRow | undefined): string {
   if (!row) return 'text-[var(--color-ink-3)]';
-  if (row.is_dangerous) return 'bg-[var(--color-brick-soft)] text-[var(--color-brick)] font-medium';
+  if (row.is_dangerous && row.is_same === false)
+    return 'bg-[var(--color-brick-soft)] text-[var(--color-brick)] font-medium';
   if (row.is_correct) return 'bg-[var(--color-sage-soft)] text-[var(--color-sage)]';
   return 'bg-[var(--color-ochre-soft)] text-[var(--color-ochre)]';
 }
