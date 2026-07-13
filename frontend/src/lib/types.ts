@@ -1495,6 +1495,17 @@ export interface DedupPropertySide {
   first_seen_at: string | null;
   lat: number | null;
   lng: number | null;
+  // Disambiguating fields for a town-pin review (added with the review-card
+  // hardening). Optional so older cached payloads / test fixtures still type.
+  // `street` null on both sides of a geo pair ⇒ the match rests on an
+  // approximate town-level coordinate, not a precise address.
+  estate_area?: number | null;
+  street?: string | null;
+  building_type?: string | null;
+  condition?: string | null;
+  source?: string | null;
+  source_url?: string | null;
+  description?: string | null;
 }
 
 // Operator "this decision was wrong" flag — pair-keyed, shared by the Decision history

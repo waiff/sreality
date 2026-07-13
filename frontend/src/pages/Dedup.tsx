@@ -1145,6 +1145,21 @@ function ClusterCard({
           </button>
         </div>
       </div>
+      {/* Approximate-location advisory: when a member has no street, the match
+          rests on an obec-level coordinate (many street-less listings share one
+          town pin), not a precise address — proximity here is NOT evidence.
+          Advisory, not a block: most such pairs are genuine cross-portal
+          matches; this only tells the operator to confirm via content. */}
+      {members.some((m) => !m.street) ? (
+        <div className="mb-3 flex items-start gap-2 rounded-[var(--radius-sm)] border border-[var(--color-brick)]/30 bg-[var(--color-brick-soft)] p-2.5 text-[0.75rem] leading-snug text-[var(--color-brick)]">
+          <span aria-hidden className="mt-px">⚠</span>
+          <span>
+            Přibližná poloha — u některého inzerátu chybí ulice, takže se shoda
+            opírá jen o obecní souřadnici, ne o přesnou adresu. Ověřte podle
+            popisu, fotek a odkazů na inzeráty, než sloučíte.
+          </span>
+        </div>
+      ) : null}
       {/* Images and the comparison rows share ONE table + colgroup, so each
           member column lines up exactly under its photo. Fixed ~13rem member
           columns keep the photos Browse-sized; the table left-aligns and a big
@@ -1283,6 +1298,30 @@ function PropertyPanel({
       <div className="mt-0.5 text-[0.8rem] text-[var(--color-ink-3)] truncate">
         {side.district ?? '—'}
       </div>
+      {/* Structured attributes the comparison table intentionally omits:
+          building_type / condition are noisy cross-portal (taxonomy drift), so
+          they are shown as info here, not as a ✓/✗ verdict that would cry wolf
+          on legitimate cross-portal merges. */}
+      {side.building_type || side.condition || side.estate_area != null ? (
+        <div className="mt-0.5 text-[0.72rem] text-[var(--color-ink-4)] truncate">
+          {[
+            side.building_type,
+            side.condition,
+            side.estate_area != null ? `pozemek ${fmtArea(side.estate_area)}` : null,
+          ]
+            .filter(Boolean)
+            .join(' · ')}
+        </div>
+      ) : null}
+      {/* Free-text snippet — the strongest tell for a town-pin non-match: two
+          houses in different villages sharing one town coordinate name those
+          villages here (the reported -238768 case: "Horní Bousov" vs "Vlčí
+          Pole"). */}
+      {side.description ? (
+        <p className="mt-1 text-[0.72rem] leading-snug text-[var(--color-ink-3)] line-clamp-3">
+          {side.description}
+        </p>
+      ) : null}
       <PortalChips sources={sources} detailMap={detailMap} />
       {/* Secondary link to the listing's detail page in our own DB. */}
       {side.sreality_id != null ? (
