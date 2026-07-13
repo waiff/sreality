@@ -363,18 +363,57 @@ def _golden_negative_cases(
 
 # --- lane runners ------------------------------------------------------------
 
+def _recall_is_same(lane: str, expected: str) -> bool | None:
+    """Ground-truth PROXY for a recall pair, derived from the PROD-MODEL cached verdict (NOT
+    operator-confirmed): compare High => same; plan same_* => same, different_* => different.
+    Used only to colour the explorer page; recall pairs are labeled by check_type='recall' so
+    the page never presents this as gold."""
+    del lane
+    if expected in ("High", "same_layout", "same_unit"):
+        return True
+    if expected in ("different_layout", "different_unit"):
+        return False
+    return None
+
+
+def _make_persister(conn: Any, *, run_label: str, set_name: str, model: str) -> Any:
+    """Best-effort writer of one dedup_vision_bakeoff_results row per (pair, lane) evaluation
+    (migration 303) — the per-pair matrix behind /model-testing. conn is autocommit, so each
+    row commits immediately (crash-resilient); a persist failure logs and is swallowed so it
+    never fails the benchmark (mirrors the llm_calls best-effort recording pattern)."""
+    def _persist(**row: Any) -> None:
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO dedup_vision_bakeoff_results "
+                    "(run_label, set_name, check_type, lane, model, sreality_id_a, sreality_id_b, "
+                    " room_type, is_same, label_source, category_main, expected_verdict, "
+                    " danger_verdict, candidate_verdict, is_correct, is_dangerous, cost_usd) "
+                    "VALUES (%(run_label)s, %(set_name)s, %(check_type)s, %(lane)s, %(model)s, "
+                    " %(a)s, %(b)s, %(room_type)s, %(is_same)s, %(label_source)s, %(category_main)s, "
+                    " %(expected_verdict)s, %(danger_verdict)s, %(candidate_verdict)s, "
+                    " %(is_correct)s, %(is_dangerous)s, %(cost_usd)s)",
+                    {"run_label": run_label, "set_name": set_name, "model": model, **row},
+                )
+        except Exception as exc:  # noqa: BLE001 - persistence is best-effort
+            LOG.warning("persist failed (%s pair %s/%s): %s",
+                        row.get("lane"), row.get("a"), row.get("b"), exc)
+    return _persist
+
+
 def run_lane_recall_ab(
     conn: Any, llm: Any, r2: Any, *, lane: str, candidate_model: str, max_edge: int,
-    prod_model: str, limit: int,
+    prod_model: str, limit: int, persist: Any = None,
 ) -> tuple[int, int, float, list[str]]:
     """Replay historical decisive verdicts; return (still_matching, evaluated, cost_usd, misses)."""
+    cfg = _LANES[lane]
     cases = _RECALL_CASE_FNS[lane](conn, prod_model=prod_model, limit=limit)
     ok = evaluated = 0
     cost_total = 0.0
     misses: list[str] = []
     for a, b, room_type, expected in cases:
-        paths_a = _room_images(conn, a, room_type, _LANES[lane].limit_per_side)
-        paths_b = _room_images(conn, b, room_type, _LANES[lane].limit_per_side)
+        paths_a = _room_images(conn, a, room_type, cfg.limit_per_side)
+        paths_b = _room_images(conn, b, room_type, cfg.limit_per_side)
         if not paths_a or not paths_b:
             LOG.info("%s recall skip a=%s b=%s room=%s (images gone)", lane, a, b, room_type)
             continue
@@ -394,12 +433,20 @@ def run_lane_recall_ab(
             ok += 1
         else:
             misses.append(f"{a}/{b} room={room_type}: {expected} -> {verdict}")
+        if persist is not None:
+            persist(
+                check_type="recall", lane=lane, a=a, b=b, room_type=room_type,
+                is_same=_recall_is_same(lane, expected), label_source=None, category_main=None,
+                expected_verdict=expected, danger_verdict=cfg.danger_verdict,
+                candidate_verdict=verdict, is_correct=(verdict == expected),
+                is_dangerous=(verdict == cfg.danger_verdict), cost_usd=round(cost, 6),
+            )
     return ok, evaluated, cost_total, misses
 
 
 def run_lane_precision_ab(
     conn: Any, llm: Any, r2: Any, *, lane: str, candidate_model: str, max_edge: int,
-    golden_set_name: str, limit: int,
+    golden_set_name: str, limit: int, persist: Any = None,
 ) -> tuple[int, int, float, list[str]]:
     """Replay confirmed-DIFFERENT golden pairs; return (safe, evaluated, cost_usd, unsafe).
 
@@ -408,7 +455,8 @@ def run_lane_precision_ab(
     like the engine's real stop-at-first-High OR-gate: if room 1 is safe but room 3 would
     fire High, production reaches room 3 and merges, so a precision check that quit after
     room 1 would UNDERSTATE risk. `evaluated`/`safe` are PAIR-level (one outcome per golden
-    pair, not per room attempt); cost accumulates every room call actually made.
+    pair, not per room attempt); cost accumulates every room call actually made. Persists ONE
+    decisive row per pair (the danger room if any fired, else the last room evaluated).
     """
     cfg = _LANES[lane]
     cases = _golden_negative_cases(conn, set_name=golden_set_name, limit=limit)
@@ -426,6 +474,9 @@ def run_lane_precision_ab(
             continue
         pair_evaluated = False
         pair_unsafe_detail: str | None = None
+        pair_cost = 0.0
+        decisive_room: str | None = None
+        decisive_verdict: str | None = None
         for room_type, paths_a, paths_b in candidates:
             try:
                 verdict, cost = _call_lane(
@@ -442,6 +493,8 @@ def run_lane_precision_ab(
                 continue
             pair_evaluated = True
             cost_total += cost
+            pair_cost += cost
+            decisive_room, decisive_verdict = room_type, verdict
             if verdict == cfg.danger_verdict:
                 pair_unsafe_detail = (
                     f"{a}/{b} room={room_type} src={case['label_source']}: "
@@ -451,10 +504,19 @@ def run_lane_precision_ab(
         if not pair_evaluated:
             continue
         evaluated += 1
-        if pair_unsafe_detail is not None:
-            unsafe.append(pair_unsafe_detail)
+        is_dangerous = pair_unsafe_detail is not None
+        if is_dangerous:
+            unsafe.append(pair_unsafe_detail)  # type: ignore[arg-type]
         else:
             safe += 1
+        if persist is not None:
+            persist(
+                check_type="precision", lane=lane, a=a, b=b, room_type=decisive_room,
+                is_same=False, label_source=case["label_source"], category_main=case["category_main"],
+                expected_verdict=None, danger_verdict=cfg.danger_verdict,
+                candidate_verdict=decisive_verdict, is_correct=(not is_dangerous),
+                is_dangerous=is_dangerous, cost_usd=round(pair_cost, 6),
+            )
     return safe, evaluated, cost_total, unsafe
 
 
@@ -541,7 +603,21 @@ def main() -> int:
     ap.add_argument("--min-precision", type=float, default=1.0, help="Applies to every lane that ran a precision check.")
     ap.add_argument("--min-classify-agreement", type=float, default=0.85)
     ap.add_argument("--skip-classify", action="store_true")
+    ap.add_argument(
+        "--persist-results", action="store_true",
+        help="Write one dedup_vision_bakeoff_results row per (pair, lane) evaluation (migration 303), "
+             "for the /model-testing explorer. Requires --run-label.",
+    )
+    ap.add_argument(
+        "--run-label", default=None,
+        help="Groups this run's persisted rows on the explorer (e.g. '2026-07-13-session3'). "
+             "Required with --persist-results; re-using a label appends (delete old rows first to replace).",
+    )
     args = ap.parse_args()
+
+    if args.persist_results and not args.run_label:
+        LOG.error("--persist-results requires --run-label.")
+        return 2
 
     lanes = list(_LANES) if args.lanes == "all" else [s.strip() for s in args.lanes.split(",") if s.strip()]
     unknown = [lane for lane in lanes if lane not in _LANES]
@@ -609,6 +685,15 @@ def main() -> int:
             prod_site_plan_model, prod_classify_model,
         )
 
+        persist = None
+        if args.persist_results:
+            persist = _make_persister(
+                conn, run_label=args.run_label,
+                set_name=args.golden_set_name or "recall_only",
+                model=args.candidate_model,
+            )
+            LOG.info("persisting per-pair results to dedup_vision_bakeoff_results run_label=%s", args.run_label)
+
         total_cost = 0.0
         lane_results: dict[str, dict[str, Any]] = {}
         try:
@@ -616,7 +701,7 @@ def main() -> int:
                 recall_ok, recall_n, recall_cost, misses = run_lane_recall_ab(
                     conn, llm, r2, lane=lane, candidate_model=args.candidate_model,
                     max_edge=max_edge_for[lane], prod_model=prod_model_for[lane],
-                    limit=recall_limit_for[lane],
+                    limit=recall_limit_for[lane], persist=persist,
                 )
                 total_cost += recall_cost
                 recall = (recall_ok / recall_n) if recall_n else None
@@ -635,7 +720,7 @@ def main() -> int:
                     precision_ok, precision_n, prec_cost, unsafe = run_lane_precision_ab(
                         conn, llm, r2, lane=lane, candidate_model=args.candidate_model,
                         max_edge=max_edge_for[lane], golden_set_name=args.golden_set_name,
-                        limit=args.precision_limit,
+                        limit=args.precision_limit, persist=persist,
                     )
                     total_cost += prec_cost
                     precision = (precision_ok / precision_n) if precision_n else None

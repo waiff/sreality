@@ -15,7 +15,9 @@ from scripts.validate_vision_models import (
     _LANES,
     _candidate_rooms,
     _is_infra_error,
+    _make_persister,
     _provider_for,
+    _recall_is_same,
 )
 from toolkit import visual_match as vm
 from toolkit.room_taxonomy import FULL_PRIORITY
@@ -164,3 +166,79 @@ def test_candidate_rooms_compare_lane_stops_at_max_attempts():
 def test_candidate_rooms_compare_lane_empty_when_no_room_is_shared():
     conn = _FakeConn({(1, "kitchen"): ["a.jpg"], (2, "bathroom"): ["b.jpg"]})
     assert _candidate_rooms(conn, "compare", 1, 2) == []
+
+
+# --- _recall_is_same ----------------------------------------------------------
+
+def test_recall_is_same_maps_same_verdicts_to_true():
+    assert _recall_is_same("compare", "High") is True
+    assert _recall_is_same("floor_plan", "same_layout") is True
+    assert _recall_is_same("site_plan", "same_unit") is True
+
+
+def test_recall_is_same_maps_different_verdicts_to_false():
+    assert _recall_is_same("floor_plan", "different_layout") is False
+    assert _recall_is_same("site_plan", "different_unit") is False
+
+
+def test_recall_is_same_none_for_ambiguous():
+    assert _recall_is_same("site_plan", "inconclusive") is None
+    assert _recall_is_same("floor_plan", "no_2d_plan") is None
+
+
+# --- _make_persister ----------------------------------------------------------
+
+class _RecordingCursor:
+    def __init__(self, sink: list[dict[str, Any]]) -> None:
+        self._sink = sink
+
+    def execute(self, sql: str, params: dict[str, Any]) -> None:
+        self._sink.append(params)
+
+    def __enter__(self) -> "_RecordingCursor":
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        return None
+
+
+class _RecordingConn:
+    def __init__(self) -> None:
+        self.rows: list[dict[str, Any]] = []
+
+    def cursor(self) -> _RecordingCursor:
+        return _RecordingCursor(self.rows)
+
+
+def test_persister_writes_row_with_run_label_set_name_and_model():
+    conn = _RecordingConn()
+    persist = _make_persister(conn, run_label="rl", set_name="gs", model="qwen3-vl-30b-a3b-instruct")
+    persist(
+        check_type="precision", lane="site_plan", a=1, b=2, room_type="site_plan",
+        is_same=False, label_source="engine_site_plan_verdict", category_main="pozemek",
+        expected_verdict=None, danger_verdict="same_unit", candidate_verdict="same_unit",
+        is_correct=False, is_dangerous=True, cost_usd=0.01,
+    )
+    assert len(conn.rows) == 1
+    row = conn.rows[0]
+    assert row["run_label"] == "rl"
+    assert row["set_name"] == "gs"
+    assert row["model"] == "qwen3-vl-30b-a3b-instruct"
+    assert row["lane"] == "site_plan"
+    assert row["is_dangerous"] is True
+    assert row["candidate_verdict"] == "same_unit"
+
+
+def test_persister_swallows_db_errors_so_it_never_kills_the_benchmark():
+    class _BoomConn:
+        def cursor(self):  # noqa: ANN202
+            raise RuntimeError("db down")
+
+    persist = _make_persister(_BoomConn(), run_label="rl", set_name="gs", model="m")
+    # Must NOT raise — persistence is best-effort.
+    persist(
+        check_type="recall", lane="compare", a=1, b=2, room_type="kitchen",
+        is_same=True, label_source=None, category_main=None, expected_verdict="High",
+        danger_verdict="High", candidate_verdict="High", is_correct=True,
+        is_dangerous=True, cost_usd=0.0,
+    )
