@@ -223,7 +223,7 @@ narrow.
 
 ### Defect B — resolve listing identity from the ledger, not the drifting repr
 
-**Unifying principle (SHIPPED, PR #777):** the true "other listing" of any merge
+**Unifying principle (SHIPPED, PR #778):** the true "other listing" of any merge
 is derivable from `property_merge_events` — the reversibility ledger, the source
 of truth for *what merged with what*. The audit's stored `sreality_id` columns
 were a lossy denormalization of `properties.repr_listing_id`, which drifts onto
