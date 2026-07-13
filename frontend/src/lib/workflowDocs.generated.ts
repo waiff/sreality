@@ -3946,6 +3946,14 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
           "true",
           "false"
         ]
+      },
+      {
+        "name": "run_label",
+        "description": "Non-empty = PERSIST per-pair results under this label for /model-testing (e.g. 2026-07-13-session3); blank = don't persist",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
       }
     ],
     "secrets": [

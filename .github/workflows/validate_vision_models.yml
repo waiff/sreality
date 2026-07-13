@@ -70,6 +70,11 @@ on:
         options:
           - "true"
           - "false"
+      run_label:
+        description: "Non-empty = PERSIST per-pair results under this label for /model-testing (e.g. 2026-07-13-session3); blank = don't persist"
+        required: false
+        default: ""
+        type: string
 
 concurrency:
   group: validate-vision-models
@@ -121,6 +126,9 @@ jobs:
           fi
           if [ "${{ inputs.skip_classify }}" = "true" ]; then
             ARGS="$ARGS --skip-classify"
+          fi
+          if [ -n "${{ inputs.run_label }}" ]; then
+            ARGS="$ARGS --persist-results --run-label '${{ inputs.run_label }}'"
           fi
           echo "Running with: $ARGS"
           eval python -m scripts.validate_vision_models $ARGS
