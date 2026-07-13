@@ -178,7 +178,7 @@ def _ingest_one(
     completion: Any,
     model: str,
     cost: float,
-    provider: str,
+    provider: str = "anthropic",
 ) -> tuple[str, float]:
     """Record the (paid) llm_calls row and persist one result to its cache.
 

@@ -182,7 +182,7 @@ def _ingest_one(
     *,
     completion: Any,
     model: str,
-    provider: str,
+    provider: str = "anthropic",
     sreality_id: int,
     snapshot_id: int,
     request_id: int,

@@ -175,12 +175,13 @@ def _run(monkeypatch: Any, *, keys: list[ListingKey], classifications: dict[int,
     )
 
     conn = _FakeConn()
-    submitter = sub._Submitter(conn, _FakeProvider(), max_requests=max_requests, dry_run=False)
+    submitter = sub._Submitter(
+        conn, {"anthropic": _FakeProvider()}, max_requests=max_requests, dry_run=False)
     sub.collect(conn, _FakeLLM(), submitter, max_pairs=4000,
                 max_room_attempts=max_room_attempts, n_images=12, warm_rooms=warm_rooms,
                 max_seconds=max_seconds, lane=lane, geo_classify=geo_classify,
                 byt_geo_classify=byt_geo_classify, clip_model=clip_model)
-    submitter.flush()
+    submitter.flush_all()
     return conn
 
 
@@ -666,10 +667,10 @@ def test_flush_retries_transient_5xx_then_succeeds(monkeypatch: Any) -> None:
 
     monkeypatch.setattr(sub.time, "sleep", lambda s: None)
     conn = _FakeConn()
-    s = sub._Submitter(conn, _Flaky(), max_requests=10, dry_run=False)
-    s._chunk.append(_req())
-    s._chunk_bytes = 10
-    s.flush()
+    s = sub._Submitter(conn, {"anthropic": _Flaky()}, max_requests=10, dry_run=False)
+    s._chunks["anthropic"] = [_req()]
+    s._chunk_bytes["anthropic"] = 10
+    s.flush("anthropic")
     assert calls["n"] == 2                       # one retry
     assert s.stats["batches"] == 1               # the chunk was submitted
     assert s.stats.get("submit_failures", 0) == 0
@@ -683,14 +684,14 @@ def test_flush_drops_chunk_after_exhausted_retries(monkeypatch: Any) -> None:
 
     monkeypatch.setattr(sub.time, "sleep", lambda s: None)
     conn = _FakeConn()
-    s = sub._Submitter(conn, _Dead(), max_requests=10, dry_run=False)
-    s._chunk.append(_req())
-    s._chunk_bytes = 10
-    s.flush()                                    # must NOT raise
+    s = sub._Submitter(conn, {"anthropic": _Dead()}, max_requests=10, dry_run=False)
+    s._chunks["anthropic"] = [_req()]
+    s._chunk_bytes["anthropic"] = 10
+    s.flush("anthropic")                         # must NOT raise
     assert s.stats.get("batches", 0) == 0
     assert s.stats["submit_failures"] == 1
     assert not conn.inserted_requests            # nothing half-recorded
-    assert s._chunk == []                        # chunk dropped, run continues
+    assert s._chunks.get("anthropic", []) == []  # chunk dropped, run continues
 
 
 def test_flush_non_transient_error_drops_without_retry(monkeypatch: Any) -> None:
@@ -704,10 +705,10 @@ def test_flush_non_transient_error_drops_without_retry(monkeypatch: Any) -> None
     slept = []
     monkeypatch.setattr(sub.time, "sleep", lambda s: slept.append(s))
     conn = _FakeConn()
-    s = sub._Submitter(conn, _AuthDead(), max_requests=10, dry_run=False)
-    s._chunk.append(_req())
-    s._chunk_bytes = 10
-    s.flush()
+    s = sub._Submitter(conn, {"anthropic": _AuthDead()}, max_requests=10, dry_run=False)
+    s._chunks["anthropic"] = [_req()]
+    s._chunk_bytes["anthropic"] = 10
+    s.flush("anthropic")
     assert calls["n"] == 1                       # no pointless retries on auth errors
     assert slept == []
     assert s.stats["submit_failures"] == 1
