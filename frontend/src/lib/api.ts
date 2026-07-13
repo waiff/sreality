@@ -50,7 +50,8 @@ import type {
   DecisionFeedback,
   AuditRung,
 } from './types';
-import type { PresetSpec } from './filters';
+import type { DistrictChip, PresetSpec } from './filters';
+import { districtChipsToCsvParams } from './filters';
 
 /* Sources the backend allowlists for high-confidence parsing.
  * Anything else falls through to a best-effort parse. The order is
@@ -707,6 +708,10 @@ export const getDedupAudit = (
     verdict?: string; // High | Medium | Low
     property_id?: number; // scope to one property's merge decisions
     flagged?: boolean; // only decisions the operator flagged as incorrect
+    // Matches a decision if EITHER side of its pair touches the picked place —
+    // the same `DistrictChip[]` widget Browse/Watchdog use (LocationTypeahead),
+    // serialised via the shared `districtChipsToCsvParams` wire format.
+    districts?: ReadonlyArray<DistrictChip> | null;
     limit?: number;
     offset?: number;
   } = {},
@@ -722,6 +727,9 @@ export const getDedupAudit = (
   if (params.verdict) q.set('verdict', params.verdict);
   if (params.property_id != null) q.set('property_id', String(params.property_id));
   if (params.flagged) q.set('flagged', 'true');
+  for (const [k, v] of Object.entries(districtChipsToCsvParams(params.districts ?? []))) {
+    q.set(k, v);
+  }
   q.set('limit', String(params.limit ?? 100));
   if (params.offset) q.set('offset', String(params.offset));
   return request<{ data: DedupAuditRow[]; total: number; returned: number }>(
@@ -1483,6 +1491,9 @@ export interface ListDedupCandidatesParams {
   tier?: string;
   reason?: string;
   verdict?: string;
+  // Matches a pair if EITHER candidate property touches the picked place —
+  // lets the operator prioritise the manual review backlog by location.
+  districts?: ReadonlyArray<DistrictChip> | null;
   limit?: number;
   offset?: number;
 }
@@ -1508,10 +1519,15 @@ export interface UnmergeResult {
 
 export const listDedupCandidates = (
   params: ListDedupCandidatesParams = {},
-): Promise<DedupCandidatesResponse> =>
-  request<DedupCandidatesResponse>('/dedup/candidates', {
-    query: params as Record<string, QueryValue>,
+): Promise<DedupCandidatesResponse> => {
+  const { districts, ...rest } = params;
+  return request<DedupCandidatesResponse>('/dedup/candidates', {
+    query: {
+      ...(rest as Record<string, QueryValue>),
+      ...districtChipsToCsvParams(districts ?? []),
+    },
   });
+};
 
 export const getDedupSummary = (
   status = 'proposed',

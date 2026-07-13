@@ -41,6 +41,8 @@ import { assessDirtyQueue } from '@/lib/dedupQueueHealth';
 import { type TaggedImageUrl } from '@/lib/imageTags';
 import { portalListingUrl, portalShort } from '@/lib/portals';
 import { fmtArea, fmtCount, fmtCzk, fmtDurationSecs, fmtRelative } from '@/lib/format';
+import type { DistrictChip } from '@/lib/filters';
+import { LocationTypeahead } from '@/components/filter-controls/LocationTypeahead';
 import ImageCarousel from '@/components/ImageCarousel';
 import DedupAuditHistory from '@/components/DedupAuditHistory';
 import DedupBackfillProgress from '@/components/DedupBackfillProgress';
@@ -93,6 +95,9 @@ export default function Dedup() {
   const [bucket, setBucket] = useState<Bucket | null>(null);
   // Which category (tier) the operator is focused on (null = every family).
   const [tier, setTier] = useState<string | null>(null);
+  // Location narrow — matches a pair if EITHER candidate property touches the
+  // picked place, so the operator can prioritise the review backlog by area.
+  const [districts, setDistricts] = useState<DistrictChip[]>([]);
 
   const summaryQ = useQuery<DedupSummaryResponse, Error>({
     queryKey: dedupKeys.summary('proposed'),
@@ -107,6 +112,7 @@ export default function Dedup() {
       tier: tier ?? null,
       reason: bucket?.reason ?? null,
       verdict: bucket ? bucket.verdict ?? NULL_VERDICT : null,
+      districts,
     }),
     queryFn: () => listDedupCandidates({
       status: 'proposed',
@@ -115,6 +121,7 @@ export default function Dedup() {
       ...(bucket
         ? { reason: bucket.reason, verdict: bucket.verdict ?? NULL_VERDICT }
         : {}),
+      ...(districts.length ? { districts } : {}),
     }),
     placeholderData: keepPreviousData,
     refetchInterval: POLL_MS,
@@ -261,6 +268,18 @@ export default function Dedup() {
         selected={tier}
         onSelect={setTier}
       />
+
+      <div className="mt-3 flex items-start gap-2">
+        <span className="mt-1.5 shrink-0 text-[0.65rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)]">
+          Location
+        </span>
+        <div className="min-w-0 flex-1 max-w-xl">
+          <LocationTypeahead
+            value={districts}
+            onChange={(n) => setDistricts(n ?? [])}
+          />
+        </div>
+      </div>
 
       {tier === 'geo_dum' ? (
         <BulkApproveBar

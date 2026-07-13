@@ -8,6 +8,7 @@ from __future__ import annotations
 from typing import Any
 
 import api.property_dedup as dedup
+from api.location_filter import DistrictChip
 
 
 class _Cur:
@@ -128,6 +129,29 @@ def test_flagged_filter_adds_the_is_incorrect_clause() -> None:
     dedup.list_pair_audit(conn2, flagged=None)
     for s, _ in conn2.executed:
         assert "f.is_incorrect IS TRUE" not in s
+
+
+def test_districts_join_properties_and_match_either_side() -> None:
+    conn = _FakeConn(total=0, page_rows=[])
+    dedup.list_pair_audit(
+        conn, districts=[DistrictChip(name="Jihlava", level="obec", id=586846)],
+    )
+    for s, params in conn.executed:
+        assert "LEFT JOIN properties pl ON pl.id = a.left_property_id" in s
+        assert "LEFT JOIN properties pr ON pr.id = a.right_property_id" in s
+        assert "pl.obec_id = %(district_id_pl_0)s" in s
+        assert "pr.obec_id = %(district_id_pr_0)s" in s
+        assert params["district_id_pl_0"] == 586846
+        assert params["district_id_pr_0"] == 586846
+
+
+def test_no_districts_omits_the_properties_join() -> None:
+    conn = _FakeConn(total=0, page_rows=[])
+    dedup.list_pair_audit(conn)
+    for s, params in conn.executed:
+        assert "LEFT JOIN properties pl" not in s
+        assert "LEFT JOIN properties pr" not in s
+        assert not any(k.startswith("district_") for k in (params or {}))
 
 
 def test_read_path_resolves_self_paired_rows_from_the_merge_ledger() -> None:
