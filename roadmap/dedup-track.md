@@ -12,7 +12,14 @@
 > `site_plan_different_unit` forensic-negative population showed ~67-75% precision (developers
 > routinely reuse an entire photo set, drawings included, across distinct parcels/units in one
 > subdivision), nowhere near the ≥99% bar. The step-aside stays as designed; see
-> `docs/design/dedup-vision-and-backlog-overhaul.md` §2.1a for the full replay. This whole
+> `docs/design/dedup-vision-and-backlog-overhaul.md` §2.1a for the full replay.
+> **Session 3 (2026-07-13)** ran the vision-model bake-off (`docs/design/dedup-vision-model-bakeoff-2026-07.md`):
+> GPT-5-mini, Qwen3-VL-235B/30B, Gemini-3.1-flash-lite benchmarked on all 3 forensic lanes ×
+> recall AND precision vs the frozen golden set. **Every cheap VLM has good recall but 36-66%
+> precision on confirmed-different pairs — Sonnet stays on all forensic lanes; the cost lever is
+> batch (Session 4), not a model swap.** Shipped 4 providers, migration 302 (`llm_calls.provider`
+> widened), migration 303 (`dedup_vision_bakeoff_results`), and a `/model-testing` explorer page.
+> **Session 4 (next)** = engine-side batch-lane rebuild (§6 Session-4 bullet). This whole
 > track file is a candidate for a future restructure (its own PR) to replace the stale D1/D2 body
 > below with a pointer-only index, per CLAUDE.md's roadmap-maintenance rule.
 
