@@ -182,18 +182,32 @@ def test_no_write_grants_to_browser_roles():
 
 
 def test_new_base_tables_enable_rls():
-    offenders: list[str] = []
+    # Cross-file (not per-file): a table must be RLS-enabled by SOME enforced
+    # migration, not necessarily the one that creates it. Concurrent lanes routinely
+    # split create (migration N) from a hardening ALTER (N+1) — a per-file rule would
+    # false-flag N forever since N is append-only. Still catches a table that is
+    # never RLS-enabled anywhere in the enforced range. Which migration each table was
+    # created in is tracked for the error message.
+    created: dict[str, str] = {}
+    rls_on: set[str] = set()
+    exempt: set[str] = set()
     for p in _enforced_migrations():
         sql = p.read_text(encoding="utf-8")
-        rls_on, exempt = _rls_enabled_tables(sql), _rls_exempt_tables(sql)
         for tbl in _created_base_tables(sql):
-            if tbl not in rls_on and tbl not in exempt:
-                offenders.append(f"  {p.name}: table '{tbl}' created without RLS")
+            created.setdefault(tbl, p.name)
+        rls_on |= _rls_enabled_tables(sql)
+        exempt |= _rls_exempt_tables(sql)
+    offenders = sorted(
+        f"  {origin}: table '{tbl}' never gets `enable row level security`"
+        for tbl, origin in created.items()
+        if tbl not in rls_on and tbl not in exempt
+    )
     assert not offenders, (
-        "New base table(s) created without `enable row level security` in the same "
-        "migration (Supabase's default ACL makes an RLS-off public table reachable). "
-        "Enable RLS (+ a policy / explicit grant if a role needs it), or annotate "
-        "`-- ci-allow-no-rls: <table> <reason>`:\n" + "\n".join(offenders)
+        "New base table(s) created without `enable row level security` in any enforced "
+        "migration (Supabase's default ACL makes an RLS-off public table reachable if it "
+        "is ever granted). Add `alter table <t> enable row level security;` in this or a "
+        "follow-up migration, or annotate `-- ci-allow-no-rls: <table> <reason>`:\n"
+        + "\n".join(offenders)
     )
 
 
