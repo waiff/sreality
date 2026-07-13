@@ -520,6 +520,74 @@ def run_lane_precision_ab(
     return safe, evaluated, cost_total, unsafe
 
 
+def _review_cases(conn: Any, set_name: str, limit: int) -> list[dict[str, Any]]:
+    """Pairs for one /dedup 'compare all models' snapshot (dedup_model_compare_sets, migration 304)."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT sreality_id_a, sreality_id_b, category_main FROM dedup_model_compare_sets "
+            "WHERE run_label = %s ORDER BY id LIMIT %s",
+            (set_name, limit),
+        )
+        return [{"a": int(r[0]), "b": int(r[1]), "category_main": r[2]} for r in cur.fetchall()]
+
+
+def run_review_set(
+    conn: Any, llm: Any, r2: Any, *, lanes: list[str], candidate_model: str,
+    max_edge_for: dict[str, int], set_name: str, persist: Any, limit: int,
+) -> tuple[int, float]:
+    """Score one candidate model on every snapshot pair × lane and persist check_type='review' rows —
+    the operator's decision-support 'jury poll'. UNLIKE recall/precision there is NO ground truth:
+    each row just records the model's verdict + whether it VOTED TO MERGE (is_dangerous). Walks rooms
+    stop-at-first-merge exactly like the engine's OR-gate (compare); one plan set for floor/site.
+    Returns (pairs_with_any_lane_evaluated, cost_usd)."""
+    cases = _review_cases(conn, set_name, limit)
+    total_cost = 0.0
+    evaluated_pairs = 0
+    for case in cases:
+        a, b = case["a"], case["b"]
+        any_lane = False
+        for lane in lanes:
+            cfg = _LANES[lane]
+            candidates = _candidate_rooms(conn, lane, a, b)
+            if not candidates:
+                continue
+            decisive_room: str | None = None
+            decisive_verdict: str | None = None
+            merged = False
+            lane_cost = 0.0
+            for room_type, paths_a, paths_b in candidates:
+                try:
+                    verdict, cost = _call_lane(
+                        conn, llm, r2, lane=lane, candidate_model=candidate_model,
+                        max_edge=max_edge_for[lane], paths_a=paths_a, paths_b=paths_b,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    if _is_infra_error(exc):
+                        raise _InfraAbort(f"review {lane} a={a} b={b} room={room_type}: {exc}") from exc
+                    LOG.warning("review %s a=%s b=%s room=%s failed (next room): %s", lane, a, b, room_type, exc)
+                    continue
+                total_cost += cost
+                lane_cost += cost
+                decisive_room, decisive_verdict = room_type, verdict
+                if verdict == cfg.danger_verdict:
+                    merged = True
+                    break
+            if decisive_verdict is None:
+                continue
+            any_lane = True
+            if persist is not None:
+                persist(
+                    check_type="review", lane=lane, a=a, b=b, room_type=decisive_room,
+                    is_same=None, label_source="review", category_main=case["category_main"],
+                    expected_verdict=None, danger_verdict=cfg.danger_verdict,
+                    candidate_verdict=decisive_verdict, is_correct=None,
+                    is_dangerous=merged, cost_usd=round(lane_cost, 6),
+                )
+        if any_lane:
+            evaluated_pairs += 1
+    return evaluated_pairs, total_cost
+
+
 def run_classify_ab(
     conn: Any, llm: Any, r2: Any, *,
     candidate_model: str, max_edge: int, prod_model: str, sample: int,
@@ -613,8 +681,20 @@ def main() -> int:
         help="Groups this run's persisted rows on the explorer (e.g. '2026-07-13-session3'). "
              "Required with --persist-results; re-using a label appends (delete old rows first to replace).",
     )
+    ap.add_argument(
+        "--review-set-name", default=None,
+        help="REVIEW MODE (decision support): score the candidate model on the pair snapshot in "
+             "dedup_model_compare_sets under this label and persist check_type='review' rows (no "
+             "ground truth — just each model's would-merge vote). Implies --persist-results with "
+             "--run-label defaulting to this name. Skips the golden-set recall/precision flow.",
+    )
+    ap.add_argument("--review-limit", type=int, default=200, help="Max snapshot pairs to score in review mode.")
     args = ap.parse_args()
 
+    if args.review_set_name:
+        # Review mode always persists (that IS its output) under the set name unless a run_label overrides.
+        args.persist_results = True
+        args.run_label = args.run_label or args.review_set_name
     if args.persist_results and not args.run_label:
         LOG.error("--persist-results requires --run-label.")
         return 2
@@ -678,6 +758,38 @@ def main() -> int:
             "floor_plan": args.plan_max_edge,
             "site_plan": args.plan_max_edge,
         }
+
+        # --- REVIEW MODE (decision support) — a distinct, early-return path ---
+        # Score this one model on a /dedup 'compare all models' snapshot; no golden set, no
+        # recall/precision, no classify. The verdict grid on /model-testing is the deliverable.
+        if args.review_set_name:
+            review_persist = _make_persister(
+                conn, run_label=args.run_label, set_name=args.review_set_name,
+                model=args.candidate_model,
+            )
+            LOG.info(
+                "REVIEW candidate=%s lanes=%s set=%s (persist run_label=%s)",
+                args.candidate_model, lanes, args.review_set_name, args.run_label,
+            )
+            try:
+                pairs_n, cost = run_review_set(
+                    conn, llm, r2, lanes=lanes, candidate_model=args.candidate_model,
+                    max_edge_for=max_edge_for, set_name=args.review_set_name,
+                    persist=review_persist, limit=args.review_limit,
+                )
+            except _InfraAbort as exc:
+                print(
+                    f"\n=== MODEL REVIEW RESULT ===\ncandidate: {args.candidate_model}\n"
+                    f"verdict: INCONCLUSIVE — API/account error: {exc}\n"
+                )
+                return 3
+            print(
+                f"\n=== MODEL REVIEW RESULT ===\n"
+                f"candidate: {args.candidate_model}  set: {args.review_set_name}\n"
+                f"pairs scored: {pairs_n}   cost: ${cost:.4f}\n"
+                f"Persisted as check_type='review' — see /model-testing run '{args.run_label}'.\n"
+            )
+            return 0
 
         LOG.info(
             "A/B candidate model=%s lanes=%s vs prod compare=%s floor_plan=%s site_plan=%s classify=%s",

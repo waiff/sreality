@@ -1,0 +1,73 @@
+name: "Jobs: dedup model comparison (review-queue decision support)"
+
+# One candidate model's pass over a /dedup "compare all models" snapshot. The API
+# (POST /dedup/model-compare) snapshots the undecided pair(s) into dedup_model_compare_sets
+# under run_label, then dispatches THIS workflow once per connected model — they run in
+# PARALLEL (concurrency keyed on candidate_model). Each writes check_type='review' rows to
+# dedup_vision_bakeoff_results (no ground truth — just the model's would-merge vote), which
+# the operator reads side-by-side on /model-testing. Read-only apart from those benchmark rows.
+#
+# Dispatch-only (normally via the API, not by hand). Required GitHub secrets:
+#   SUPABASE_DB_URL, ANTHROPIC_API_KEY, GEMINI_API_KEY, OPENAI_API_KEY, QWEN_API_KEY,
+#   R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET_NAME
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_model:
+        description: "Candidate model id (claude-sonnet-4-5, gpt-5-mini, qwen3-vl-235b-a22b-instruct, ...)"
+        required: true
+        type: string
+      run_label:
+        description: "The dedup_model_compare_sets snapshot label to score (also the /model-testing run label)"
+        required: true
+        type: string
+      review_limit:
+        description: Max snapshot pairs to score
+        required: false
+        default: "200"
+        type: string
+
+concurrency:
+  # Different models run in parallel (they never contend); a re-dispatch of the same model
+  # for the same snapshot queues behind the in-flight one.
+  group: dedup-model-compare-${{ github.event.inputs.candidate_model }}-${{ github.event.inputs.run_label }}
+  cancel-in-progress: false
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      QWEN_API_KEY: ${{ secrets.QWEN_API_KEY }}
+      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install runtime deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[api]"
+
+      - name: Score the snapshot with one model
+        run: |
+          python -m scripts.validate_vision_models \
+            --candidate-model '${{ inputs.candidate_model }}' \
+            --lanes compare,floor_plan,site_plan \
+            --max-edge 1568 --plan-max-edge 1568 \
+            --review-set-name '${{ inputs.run_label }}' \
+            --review-limit ${{ inputs.review_limit }} \
+            --skip-classify

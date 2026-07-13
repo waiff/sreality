@@ -49,6 +49,7 @@ import ImageCarousel from '@/components/ImageCarousel';
 import DedupAuditHistory from '@/components/DedupAuditHistory';
 import DedupBackfillProgress from '@/components/DedupBackfillProgress';
 import DedupCandidateReset from '@/components/DedupCandidateReset';
+import { ModelCompareButton } from '@/components/ModelCompareButton';
 import DedupFactors from '@/components/DedupFactors';
 import DecisionFeedbackControl from '@/components/DecisionFeedbackControl';
 import DedupPipelineOverview from '@/components/DedupPipelineOverview';
@@ -333,11 +334,16 @@ export default function Dedup() {
                 : 'Nothing awaiting review. The engine queues a pair here only when two listings share a street and disposition but it can’t confidently confirm they’re the same property by photos.'
         }
       >
+        {candidates.length > 0 ? (
+          <ModelCompareButton tone="bar" limit={25} label="Compare next 25 undecided" />
+        ) : null}
+
         <div className="space-y-3">
           {clusters.map((cl) => (
             <ClusterCard
               key={cl.key}
               cluster={cl}
+              candidateIds={cl.candidateIds}
               imagesMap={imagesMap}
               sourcesMap={sourcesMap}
               detailMap={detailMap}
@@ -1117,6 +1123,7 @@ function imagesFor(side: DedupPropertySide, imagesMap: ImagesMap): TaggedImageUr
  * stay Browse-sized; the table scrolls horizontally for a large cluster. */
 function ClusterCard({
   cluster,
+  candidateIds,
   imagesMap,
   sourcesMap,
   detailMap,
@@ -1126,6 +1133,7 @@ function ClusterCard({
   busy,
 }: {
   cluster: DedupCluster;
+  candidateIds: number[];
   imagesMap: ImagesMap;
   sourcesMap: SourcesMap;
   detailMap: DetailMap;
@@ -1171,6 +1179,7 @@ function ClusterCard({
           ) : null}
         </div>
         <div className="flex items-center gap-2">
+          <ModelCompareButton tone="chip" candidateIds={candidateIds} label="Ask the models" />
           <button
             type="button"
             onClick={onDismiss}

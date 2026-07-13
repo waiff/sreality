@@ -10,7 +10,7 @@
 import { supabase } from './supabase';
 
 export type Lane = 'compare' | 'floor_plan' | 'site_plan';
-export type CheckType = 'recall' | 'precision';
+export type CheckType = 'recall' | 'precision' | 'review';
 
 export const LANES: readonly Lane[] = ['compare', 'floor_plan', 'site_plan'];
 export const LANE_LABEL: Record<Lane, string> = {
@@ -42,7 +42,7 @@ export interface BakeoffRow {
   expected_verdict: string | null;
   danger_verdict: string;
   candidate_verdict: string;
-  is_correct: boolean;
+  is_correct: boolean | null; // null for review rows (no ground truth)
   is_dangerous: boolean;
   cost_usd: number | null;
   created_at: string;
@@ -93,37 +93,67 @@ export interface CellStat {
   pct: number | null; // correct / n, null when n === 0
 }
 
+export interface ReviewStat {
+  n: number;
+  mergeVotes: number; // rows where the model emitted a MERGE verdict (is_dangerous)
+  pct: number | null; // mergeVotes / n — the would-merge rate on undecided pairs
+}
+
 export interface LaneStat {
   recall: CellStat;
   precision: CellStat;
+  review: ReviewStat;
 }
 
-/** Summary matrix cell for one (model, lane): recall = share reproducing the cached verdict;
- * precision = share AVOIDING the dangerous verdict on a confirmed-different pair. */
-export const summarize = (rows: readonly BakeoffRow[]): Map<string, Record<Lane, LaneStat>> => {
-  const out = new Map<string, Record<Lane, LaneStat>>();
-  const blank = (): Record<Lane, LaneStat> => ({
-    compare: emptyLane(),
-    floor_plan: emptyLane(),
-    site_plan: emptyLane(),
-  });
+export interface ModelStat {
+  lanes: Record<Lane, LaneStat>;
+  totalCostUsd: number;
+  callCount: number; // rows carrying a cost — the denominator for $/call
+}
+
+/** Summary matrix per model: recall (reproduce the cached verdict), precision (avoid the dangerous
+ * verdict on a confirmed-different pair), review (would-merge rate on undecided pairs), and cost
+ * (total $ + $/call across the run). */
+export const summarize = (rows: readonly BakeoffRow[]): Map<string, ModelStat> => {
+  const out = new Map<string, ModelStat>();
   for (const r of rows) {
     let m = out.get(r.model);
     if (!m) {
-      m = blank();
+      m = { lanes: { compare: emptyLane(), floor_plan: emptyLane(), site_plan: emptyLane() }, totalCostUsd: 0, callCount: 0 };
       out.set(r.model, m);
     }
-    const cell = r.check_type === 'recall' ? m[r.lane].recall : m[r.lane].precision;
-    cell.n += 1;
-    if (r.is_correct) cell.correct += 1;
-    cell.pct = cell.correct / cell.n;
+    if (r.cost_usd != null) {
+      m.totalCostUsd += r.cost_usd;
+      m.callCount += 1;
+    }
+    const lane = m.lanes[r.lane];
+    if (r.check_type === 'review') {
+      lane.review.n += 1;
+      if (r.is_dangerous) lane.review.mergeVotes += 1;
+      lane.review.pct = lane.review.mergeVotes / lane.review.n;
+    } else {
+      const cell = r.check_type === 'recall' ? lane.recall : lane.precision;
+      cell.n += 1;
+      if (r.is_correct) cell.correct += 1;
+      cell.pct = cell.correct / cell.n;
+    }
   }
   return out;
 };
 
+/** $/call for the run, or null when the model made no costed calls. */
+export const costPerCall = (m: ModelStat | undefined): number | null =>
+  m && m.callCount > 0 ? m.totalCostUsd / m.callCount : null;
+
+/** True when this run is a decision-support "review" set (no ground truth) rather than a golden
+ * benchmark — the summary then shows would-merge votes instead of recall/precision. */
+export const isReviewRun = (rows: readonly BakeoffRow[]): boolean =>
+  rows.length > 0 && rows.every((r) => r.check_type === 'review');
+
 const emptyLane = (): LaneStat => ({
   recall: { n: 0, correct: 0, pct: null },
   precision: { n: 0, correct: 0, pct: null },
+  review: { n: 0, mergeVotes: 0, pct: null },
 });
 
 export interface PairKey {

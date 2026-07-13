@@ -2,10 +2,12 @@ import { describe, expect, it } from 'vitest';
 
 import {
   type BakeoffRow,
+  costPerCall,
   distinctCategories,
   distinctModels,
   filterPairs,
   groupPairs,
+  isReviewRun,
   summarize,
 } from './bakeoff';
 
@@ -41,19 +43,51 @@ describe('summarize', () => {
       row({ model: 'qwen', lane: 'site_plan', check_type: 'precision', is_correct: false, sreality_id_a: 3 }),
       row({ model: 'qwen', lane: 'site_plan', check_type: 'recall', is_correct: true, sreality_id_a: 4 }),
     ];
-    const m = summarize(rows);
-    const q = m.get('qwen')!;
-    expect(q.site_plan.precision.n).toBe(2);
-    expect(q.site_plan.precision.correct).toBe(1);
-    expect(q.site_plan.precision.pct).toBe(0.5);
-    expect(q.site_plan.recall.n).toBe(1);
-    expect(q.site_plan.recall.pct).toBe(1);
+    const q = summarize(rows).get('qwen')!;
+    expect(q.lanes.site_plan.precision.n).toBe(2);
+    expect(q.lanes.site_plan.precision.correct).toBe(1);
+    expect(q.lanes.site_plan.precision.pct).toBe(0.5);
+    expect(q.lanes.site_plan.recall.n).toBe(1);
+    expect(q.lanes.site_plan.recall.pct).toBe(1);
   });
 
   it('leaves an unevaluated cell at n=0 / pct=null', () => {
-    const m = summarize([row({ model: 'sonnet', lane: 'compare', check_type: 'recall' })]);
-    expect(m.get('sonnet')!.floor_plan.precision.n).toBe(0);
-    expect(m.get('sonnet')!.floor_plan.precision.pct).toBeNull();
+    const s = summarize([row({ model: 'sonnet', lane: 'compare', check_type: 'recall' })]).get('sonnet')!;
+    expect(s.lanes.floor_plan.precision.n).toBe(0);
+    expect(s.lanes.floor_plan.precision.pct).toBeNull();
+  });
+
+  it('accumulates per-model cost and reports $/call', () => {
+    const rows = [
+      row({ model: 'qwen', cost_usd: 0.02, check_type: 'recall' }),
+      row({ model: 'qwen', cost_usd: 0.04, check_type: 'recall', sreality_id_a: 7 }),
+      row({ model: 'qwen', cost_usd: null, check_type: 'recall', sreality_id_a: 8 }),
+    ];
+    const q = summarize(rows).get('qwen')!;
+    expect(q.totalCostUsd).toBeCloseTo(0.06);
+    expect(q.callCount).toBe(2); // the null-cost row doesn't count toward $/call
+    expect(costPerCall(q)).toBeCloseTo(0.03);
+  });
+
+  it('tallies would-merge votes for review rows (no correctness)', () => {
+    const rows = [
+      row({ model: 'qwen', lane: 'site_plan', check_type: 'review', is_same: null, is_correct: null, is_dangerous: true }),
+      row({ model: 'qwen', lane: 'site_plan', check_type: 'review', is_same: null, is_correct: null, is_dangerous: false, sreality_id_a: 3 }),
+    ];
+    const q = summarize(rows).get('qwen')!;
+    expect(q.lanes.site_plan.review.n).toBe(2);
+    expect(q.lanes.site_plan.review.mergeVotes).toBe(1);
+    expect(q.lanes.site_plan.review.pct).toBe(0.5);
+    // review rows don't inflate recall/precision
+    expect(q.lanes.site_plan.precision.n).toBe(0);
+  });
+});
+
+describe('isReviewRun', () => {
+  it('true only when every row is a review row', () => {
+    expect(isReviewRun([row({ check_type: 'review' })])).toBe(true);
+    expect(isReviewRun([row({ check_type: 'review' }), row({ check_type: 'precision', sreality_id_a: 3 })])).toBe(false);
+    expect(isReviewRun([])).toBe(false);
   });
 });
 

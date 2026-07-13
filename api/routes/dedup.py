@@ -16,6 +16,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from api import dependencies as deps
+from api import model_compare
 from api import property_dedup as dedup
 from api.location_filter import parse_district_chips_csv
 from toolkit.asset_identity import (
@@ -35,6 +36,13 @@ class ClusterAction(BaseModel):
 
 class PropertySetAction(BaseModel):
     property_ids: list[int]
+
+
+class ModelCompareAction(BaseModel):
+    # None/omitted => the oldest-undecided top-`limit` (queue-level button);
+    # a list => exactly those proposed candidates (per-card button).
+    candidate_ids: list[int] | None = None
+    limit: int = 25
 
 
 class AssetLinkAction(BaseModel):
@@ -258,6 +266,20 @@ def post_archive_reset_candidates(
     """Archive the proposed candidate queue to a backup table + clear it, so the
     engine regenerates fresh. Merges/dismissals are untouched."""
     return dedup.archive_reset_candidates(conn)
+
+
+@router.post("/model-compare")
+def post_model_compare(
+    body: ModelCompareAction,
+    conn: Any = Depends(deps.get_db_conn),
+    _: dict = Depends(deps.require_admin),
+) -> dict[str, Any]:
+    """Convene all connected vision models on undecided pairs (decision support): snapshot the
+    pair(s) + dispatch every model against them; verdicts land on /model-testing. `candidate_ids`
+    None = the oldest-undecided top-`limit`; a list = exactly those proposed candidates."""
+    return model_compare.compare_models(
+        conn, candidate_ids=body.candidate_ids, limit=body.limit,
+    )
 
 
 @router.post("/candidates/{candidate_id}/dismiss")

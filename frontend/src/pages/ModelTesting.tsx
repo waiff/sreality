@@ -1,6 +1,6 @@
 import { Fragment, type ReactNode, useEffect, useMemo, useState } from 'react';
 import { useQuery, keepPreviousData } from '@tanstack/react-query';
-import { Link } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import {
   DANGER_VERDICT,
   LANE_LABEL,
@@ -10,12 +10,14 @@ import {
   type Lane,
   type PairFilter,
   type PairGroup,
+  costPerCall,
   distinctCategories,
   distinctModels,
   fetchBakeoffRows,
   fetchBakeoffRunLabels,
   filterPairs,
   groupPairs,
+  isReviewRun,
   summarize,
 } from '@/lib/bakeoff';
 import { fetchImagesByListingIds } from '@/lib/queries';
@@ -32,13 +34,19 @@ import type { ImagePublic } from '@/lib/types';
 
 const pct = (v: number | null): string => (v == null ? '—' : `${(100 * v).toFixed(0)}%`);
 
-/* A cell's colour reflects SAFETY: red = the model emitted a MERGE verdict (High / same_layout /
- * same_unit) on a pair whose ground truth is DIFFERENT (is_same === false) — the actual false-merge.
- * A merge verdict on a same-property pair is CORRECT, not dangerous, so it must NOT be red: on a
- * compare recall pair the expected verdict literally IS "High" (the danger verdict), and reproducing
- * it is the goal. Green = correct; amber = a non-dangerous miss (e.g. different_unit→inconclusive). */
+/* A cell's colour reflects SAFETY. On a REVIEW set (undecided pairs, no ground truth) there is no
+ * right answer, so a merge vote is simply highlighted (copper) and a keep-apart vote left neutral —
+ * the operator reads the split. On a golden set: red = the model emitted a MERGE verdict (High /
+ * same_layout / same_unit) on a pair whose ground truth is DIFFERENT (is_same === false) — the
+ * actual false-merge. A merge verdict on a same-property pair is CORRECT, not dangerous, so it must
+ * NOT be red (on a compare recall pair the expected verdict literally IS "High"). Green = correct;
+ * amber = a non-dangerous miss (e.g. different_unit→inconclusive). */
 function verdictClasses(row: BakeoffRow | undefined): string {
   if (!row) return 'text-[var(--color-ink-3)]';
+  if (row.check_type === 'review')
+    return row.is_dangerous
+      ? 'bg-[var(--color-copper-soft)] text-[var(--color-copper)] font-medium'
+      : 'text-[var(--color-ink-2)]';
   if (row.is_dangerous && row.is_same === false)
     return 'bg-[var(--color-brick-soft)] text-[var(--color-brick)] font-medium';
   if (row.is_correct) return 'bg-[var(--color-sage-soft)] text-[var(--color-sage)]';
@@ -62,9 +70,37 @@ function StatCell({ pctVal, n }: { pctVal: number | null; n: number }) {
   );
 }
 
+// Review runs have no ground truth, so this is a NEUTRAL vote count (not good/bad): how often the
+// model voted to merge these undecided pairs. Copper when it voted merge on any, muted at zero.
+function MergeVoteCell({ pctVal, votes, n }: { pctVal: number | null; votes: number; n: number }) {
+  if (n === 0) return <span className="text-[var(--color-ink-3)]">—</span>;
+  return (
+    <span className={votes > 0 ? 'text-[var(--color-copper)]' : 'text-[var(--color-ink-2)]'}>
+      {votes}/{n}
+      <span className="text-[var(--color-ink-3)] text-xs"> ({pct(pctVal)})</span>
+    </span>
+  );
+}
+
+const fmtUsd = (v: number): string => (v >= 1 ? `$${v.toFixed(2)}` : `$${v.toFixed(4)}`);
+
+function CostCell({ perCall, total }: { perCall: number | null; total: number }) {
+  if (perCall == null) return <span className="text-[var(--color-ink-3)]">—</span>;
+  return (
+    <span className="tabular-nums text-[var(--color-ink-2)]">
+      {fmtUsd(perCall)}
+      <span className="text-[var(--color-ink-3)] text-xs"> · {fmtUsd(total)}</span>
+    </span>
+  );
+}
+
 export default function ModelTesting() {
   const labelsQ = useQuery({ queryKey: ['bakeoff', 'labels'], queryFn: fetchBakeoffRunLabels });
-  const [runLabel, setRunLabel] = useState<string | null>(null);
+  // Deep link: /model-testing?run=<label> (the /dedup "compare models" button lands here). Falls
+  // back to the newest run when the param is absent or not yet in the label list.
+  const [searchParams] = useSearchParams();
+  const runParam = searchParams.get('run');
+  const [runLabel, setRunLabel] = useState<string | null>(runParam);
   useEffect(() => {
     if (runLabel == null && labelsQ.data && labelsQ.data.length > 0) setRunLabel(labelsQ.data[0]);
   }, [labelsQ.data, runLabel]);
@@ -79,6 +115,7 @@ export default function ModelTesting() {
   const rows = useMemo(() => rowsQ.data ?? [], [rowsQ.data]);
   const models = useMemo(() => distinctModels(rows), [rows]);
   const matrix = useMemo(() => summarize(rows), [rows]);
+  const review = useMemo(() => isReviewRun(rows), [rows]);
   const allPairs = useMemo(() => groupPairs(rows), [rows]);
   const categories = useMemo(() => distinctCategories(allPairs), [allPairs]);
 
@@ -117,7 +154,11 @@ export default function ModelTesting() {
             value={runLabel ?? ''}
             onChange={(e) => setRunLabel(e.target.value)}
           >
-            {(labelsQ.data ?? []).map((l) => (
+            {/* Include a just-dispatched deep-linked run even before its first result lands. */}
+            {(runLabel && !(labelsQ.data ?? []).includes(runLabel)
+              ? [runLabel, ...(labelsQ.data ?? [])]
+              : (labelsQ.data ?? [])
+            ).map((l) => (
               <option key={l} value={l}>
                 {l}
               </option>
@@ -140,7 +181,7 @@ export default function ModelTesting() {
           {/* summary matrix */}
           <section className="mt-6">
             <h2 className="text-sm uppercase tracking-[0.18em] text-[var(--color-ink-3)] mb-2">
-              Recall / precision by model × lane
+              {review ? 'Would-merge votes by model × lane · cost' : 'Recall / precision by model × lane · cost'}
             </h2>
             <div className="overflow-x-auto">
               <table className="min-w-full text-sm border border-[var(--color-rule)] rounded-[var(--radius-sm)]">
@@ -148,19 +189,25 @@ export default function ModelTesting() {
                   <tr className="bg-[var(--color-inset)] text-left">
                     <th className="px-3 py-2 font-medium">Model</th>
                     {LANES.map((lane) => (
-                      <th key={lane} className="px-3 py-2 font-medium" colSpan={2}>
+                      <th key={lane} className="px-3 py-2 font-medium" colSpan={review ? 1 : 2}>
                         {LANE_LABEL[lane]}
                       </th>
                     ))}
+                    <th className="px-3 py-2 font-medium">Cost</th>
                   </tr>
                   <tr className="bg-[var(--color-inset)] text-left text-xs text-[var(--color-ink-3)]">
                     <th className="px-3 py-1" />
-                    {LANES.map((lane) => (
-                      <Fragment key={lane}>
-                        <th className="px-3 py-1 font-normal">recall</th>
-                        <th className="px-3 py-1 font-normal">precision</th>
-                      </Fragment>
-                    ))}
+                    {LANES.map((lane) =>
+                      review ? (
+                        <th key={lane} className="px-3 py-1 font-normal">would-merge</th>
+                      ) : (
+                        <Fragment key={lane}>
+                          <th className="px-3 py-1 font-normal">recall</th>
+                          <th className="px-3 py-1 font-normal">precision</th>
+                        </Fragment>
+                      ),
+                    )}
+                    <th className="px-3 py-1 font-normal">$/call · total</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -169,19 +216,32 @@ export default function ModelTesting() {
                     return (
                       <tr key={model} className="border-t border-[var(--color-rule)]">
                         <td className="px-3 py-2 font-mono text-xs">{model}</td>
-                        {LANES.map((lane) => (
-                          <Fragment key={lane}>
-                            <td className="px-3 py-2">
-                              <StatCell pctVal={m?.[lane].recall.pct ?? null} n={m?.[lane].recall.n ?? 0} />
-                            </td>
-                            <td className="px-3 py-2">
-                              <StatCell
-                                pctVal={m?.[lane].precision.pct ?? null}
-                                n={m?.[lane].precision.n ?? 0}
+                        {LANES.map((lane) =>
+                          review ? (
+                            <td key={lane} className="px-3 py-2">
+                              <MergeVoteCell
+                                pctVal={m?.lanes[lane].review.pct ?? null}
+                                votes={m?.lanes[lane].review.mergeVotes ?? 0}
+                                n={m?.lanes[lane].review.n ?? 0}
                               />
                             </td>
-                          </Fragment>
-                        ))}
+                          ) : (
+                            <Fragment key={lane}>
+                              <td className="px-3 py-2">
+                                <StatCell pctVal={m?.lanes[lane].recall.pct ?? null} n={m?.lanes[lane].recall.n ?? 0} />
+                              </td>
+                              <td className="px-3 py-2">
+                                <StatCell
+                                  pctVal={m?.lanes[lane].precision.pct ?? null}
+                                  n={m?.lanes[lane].precision.n ?? 0}
+                                />
+                              </td>
+                            </Fragment>
+                          ),
+                        )}
+                        <td className="px-3 py-2 whitespace-nowrap">
+                          <CostCell perCall={costPerCall(m)} total={m?.totalCostUsd ?? 0} />
+                        </td>
                       </tr>
                     );
                   })}
@@ -189,9 +249,16 @@ export default function ModelTesting() {
               </table>
             </div>
             <p className="text-xs text-[var(--color-ink-3)] mt-1">
-              precision = share of confirmed-different pairs the model did NOT wrongly merge (higher
-              = safer). Green ≥ 99%, amber ≥ 85%, red below. Read recall relative to the Sonnet
-              baseline row (forensic verdicts are ~5% non-deterministic).
+              {review ? (
+                <>would-merge = share of these undecided pairs the model voted to MERGE (emitted the
+                  lane's merge verdict). No ground truth — compare the split across models; the Sonnet
+                  row is the most trustworthy vote. Cost is what this run actually spent.</>
+              ) : (
+                <>precision = share of confirmed-different pairs the model did NOT wrongly merge (higher
+                  = safer). Green ≥ 99%, amber ≥ 85%, red below. Read recall relative to the Sonnet
+                  baseline row (forensic verdicts are ~5% non-deterministic). Cost is measured $/call
+                  and total for this run.</>
+              )}
             </p>
           </section>
 
