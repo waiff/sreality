@@ -9,13 +9,12 @@ sibling A/B-harness script).
 
 from __future__ import annotations
 
-from contextlib import contextmanager
 from typing import Any
 
 from scripts.validate_vision_models import (
     _LANES,
+    _candidate_rooms,
     _is_infra_error,
-    _pick_images,
     _provider_for,
 )
 from toolkit import visual_match as vm
@@ -97,7 +96,7 @@ def test_compare_lane_resolves_room_per_case():
     assert _LANES["compare"].fixed_room_type is None
 
 
-# --- _pick_images --------------------------------------------------------------
+# --- _candidate_rooms --------------------------------------------------------------
 
 class _FakeCursor:
     def __init__(self, images: dict[tuple[int, str], list[str]]) -> None:
@@ -128,31 +127,40 @@ class _FakeConn:
         return _FakeCursor(self._images)
 
 
-def test_pick_images_fixed_room_type_for_floor_plan():
+def test_candidate_rooms_fixed_room_type_for_floor_plan():
     conn = _FakeConn({(1, "floor_plan"): ["a.jpg"], (2, "floor_plan"): ["b.jpg"]})
-    picked = _pick_images(conn, "floor_plan", 1, 2)
-    assert picked == ("floor_plan", ["a.jpg"], ["b.jpg"])
+    assert _candidate_rooms(conn, "floor_plan", 1, 2) == [("floor_plan", ["a.jpg"], ["b.jpg"])]
 
 
-def test_pick_images_fixed_room_type_returns_none_when_one_side_empty():
+def test_candidate_rooms_fixed_room_type_empty_when_one_side_empty():
     conn = _FakeConn({(1, "site_plan"): ["a.jpg"]})  # side 2 has nothing
-    assert _pick_images(conn, "site_plan", 1, 2) is None
+    assert _candidate_rooms(conn, "site_plan", 1, 2) == []
 
 
-def test_pick_images_compare_lane_walks_full_priority_in_order():
+def test_candidate_rooms_compare_lane_walks_full_priority_in_order():
     # Neither side has the FIRST-priority room (kitchen); both have the SECOND
-    # (bathroom) — the walk must land on bathroom, not skip straight to a later
-    # room that also matches, and must not silently prefer an out-of-order tag.
+    # (bathroom) and the SIXTH (living_room) — results must come back in
+    # FULL_PRIORITY order (bathroom before living_room), not discovery order.
     assert FULL_PRIORITY[0] == "kitchen"
     assert FULL_PRIORITY[1] == "bathroom"
     conn = _FakeConn({
         (1, "bathroom"): ["a1.jpg"], (2, "bathroom"): ["b1.jpg"],
         (1, "living_room"): ["a2.jpg"], (2, "living_room"): ["b2.jpg"],
     })
-    picked = _pick_images(conn, "compare", 1, 2)
-    assert picked == ("bathroom", ["a1.jpg"], ["b1.jpg"])
+    rooms = _candidate_rooms(conn, "compare", 1, 2)
+    assert rooms == [
+        ("bathroom", ["a1.jpg"], ["b1.jpg"]),
+        ("living_room", ["a2.jpg"], ["b2.jpg"]),
+    ]
 
 
-def test_pick_images_compare_lane_returns_none_when_no_room_is_shared():
+def test_candidate_rooms_compare_lane_stops_at_max_attempts():
+    all_rooms = FULL_PRIORITY[:5]
+    conn = _FakeConn({(sid, room): [f"{sid}.jpg"] for sid in (1, 2) for room in all_rooms})
+    rooms = _candidate_rooms(conn, "compare", 1, 2, max_attempts=2)
+    assert [r[0] for r in rooms] == list(all_rooms[:2])
+
+
+def test_candidate_rooms_compare_lane_empty_when_no_room_is_shared():
     conn = _FakeConn({(1, "kitchen"): ["a.jpg"], (2, "bathroom"): ["b.jpg"]})
-    assert _pick_images(conn, "compare", 1, 2) is None
+    assert _candidate_rooms(conn, "compare", 1, 2) == []

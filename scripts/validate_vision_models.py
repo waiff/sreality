@@ -233,21 +233,36 @@ def _call_lane(
     return cfg.extract(resp.tool_calls), float(resp.cost_usd or 0.0)
 
 
-def _pick_images(conn: Any, lane: str, a: int, b: int) -> tuple[str, list[str], list[str]] | None:
-    """Images for one pair in this lane: the fixed plan tag for floor/site_plan, or the
-    first room (FULL_PRIORITY order — the same order the engine walks) both sides have
-    an image for, for compare. None if no comparable images exist on both sides."""
+_MAX_ROOM_ATTEMPTS = 4  # mirrors scripts.dedup_engine's max_room_attempts default
+
+
+def _candidate_rooms(
+    conn: Any, lane: str, a: int, b: int, max_attempts: int = _MAX_ROOM_ATTEMPTS,
+) -> list[tuple[str, list[str], list[str]]]:
+    """Rooms to try for one pair in this lane, in the SAME priority order and up to the
+    SAME cap the engine uses: the fixed plan tag for floor/site_plan (at most one entry —
+    there's no per-room OR-gate there, the N×N compare already happens inside one call),
+    or up to `max_attempts` FULL_PRIORITY rooms both sides have images for, for compare.
+
+    The compare lane's merge decision is an OR-gate across rooms (ANY room High merges —
+    stop-at-first-High, `scripts.dedup_engine._resolve_visual`), so a precision check that
+    only tried the FIRST shared room would understate real risk: a room later in priority
+    order could still fire the dangerous verdict in production. Empty list if no
+    comparable images exist on either side for any candidate room."""
     cfg = _LANES[lane]
     if cfg.fixed_room_type is not None:
         pa = _room_images(conn, a, cfg.fixed_room_type, cfg.limit_per_side)
         pb = _room_images(conn, b, cfg.fixed_room_type, cfg.limit_per_side)
-        return (cfg.fixed_room_type, pa, pb) if pa and pb else None
+        return [(cfg.fixed_room_type, pa, pb)] if pa and pb else []
+    out: list[tuple[str, list[str], list[str]]] = []
     for room in FULL_PRIORITY:
+        if len(out) >= max_attempts:
+            break
         pa = _room_images(conn, a, room, cfg.limit_per_side)
         pb = _room_images(conn, b, room, cfg.limit_per_side)
         if pa and pb:
-            return room, pa, pb
-    return None
+            out.append((room, pa, pb))
+    return out
 
 
 # --- historical (recall) case sourcing --------------------------------------
@@ -386,7 +401,15 @@ def run_lane_precision_ab(
     conn: Any, llm: Any, r2: Any, *, lane: str, candidate_model: str, max_edge: int,
     golden_set_name: str, limit: int,
 ) -> tuple[int, int, float, list[str]]:
-    """Replay confirmed-DIFFERENT golden pairs; return (safe, evaluated, cost_usd, unsafe)."""
+    """Replay confirmed-DIFFERENT golden pairs; return (safe, evaluated, cost_usd, unsafe).
+
+    Walks up to `_MAX_ROOM_ATTEMPTS` candidate rooms per pair (compare lane only — floor/
+    site_plan have exactly one candidate), stopping at the FIRST dangerous verdict, exactly
+    like the engine's real stop-at-first-High OR-gate: if room 1 is safe but room 3 would
+    fire High, production reaches room 3 and merges, so a precision check that quit after
+    room 1 would UNDERSTATE risk. `evaluated`/`safe` are PAIR-level (one outcome per golden
+    pair, not per room attempt); cost accumulates every room call actually made.
+    """
     cfg = _LANES[lane]
     cases = _golden_negative_cases(conn, set_name=golden_set_name, limit=limit)
     safe = evaluated = 0
@@ -394,31 +417,42 @@ def run_lane_precision_ab(
     unsafe: list[str] = []
     for case in cases:
         a, b = case["a"], case["b"]
-        picked = _pick_images(conn, lane, a, b)
-        if picked is None:
+        candidates = _candidate_rooms(conn, lane, a, b)
+        if not candidates:
             LOG.info(
                 "%s precision skip a=%s b=%s src=%s (no %s images on both sides)",
                 lane, a, b, case["label_source"], cfg.unit,
             )
             continue
-        room_type, paths_a, paths_b = picked
-        try:
-            verdict, cost = _call_lane(
-                conn, llm, r2, lane=lane, candidate_model=candidate_model,
-                max_edge=max_edge, paths_a=paths_a, paths_b=paths_b,
-            )
-        except Exception as exc:  # noqa: BLE001
-            if _is_infra_error(exc):
-                raise _InfraAbort(f"{lane} precision a={a} b={b}: {exc}") from exc
-            LOG.warning("%s precision a=%s b=%s failed (counted neither): %s", lane, a, b, exc)
+        pair_evaluated = False
+        pair_unsafe_detail: str | None = None
+        for room_type, paths_a, paths_b in candidates:
+            try:
+                verdict, cost = _call_lane(
+                    conn, llm, r2, lane=lane, candidate_model=candidate_model,
+                    max_edge=max_edge, paths_a=paths_a, paths_b=paths_b,
+                )
+            except Exception as exc:  # noqa: BLE001
+                if _is_infra_error(exc):
+                    raise _InfraAbort(f"{lane} precision a={a} b={b} room={room_type}: {exc}") from exc
+                LOG.warning(
+                    "%s precision a=%s b=%s room=%s failed (trying next candidate room): %s",
+                    lane, a, b, room_type, exc,
+                )
+                continue
+            pair_evaluated = True
+            cost_total += cost
+            if verdict == cfg.danger_verdict:
+                pair_unsafe_detail = (
+                    f"{a}/{b} room={room_type} src={case['label_source']}: "
+                    f"{verdict} (DANGEROUS on a confirmed-different pair, reason={case['label_source']})"
+                )
+                break  # stop-at-first-danger, mirrors the engine's stop-at-first-High
+        if not pair_evaluated:
             continue
         evaluated += 1
-        cost_total += cost
-        if verdict == cfg.danger_verdict:
-            unsafe.append(
-                f"{a}/{b} room={room_type} src={case['label_source']}: "
-                f"{verdict} (DANGEROUS on a confirmed-different pair, reason={case['label_source']})"
-            )
+        if pair_unsafe_detail is not None:
+            unsafe.append(pair_unsafe_detail)
         else:
             safe += 1
     return safe, evaluated, cost_total, unsafe
