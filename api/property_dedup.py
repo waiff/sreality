@@ -152,7 +152,11 @@ def _record_operator_decision(
         LOG.warning("operator decision audit failed (non-fatal)", exc_info=True)
 
 # A property side rendered on a review card. Built in SQL so geom -> lat/lng and
-# the display fields come straight off the canonical row.
+# the display fields come straight off the canonical row. `{p}` is the properties
+# alias; `{rl}` is its representative listing (joined in list_candidates) — the
+# source of the disambiguating free-text (`description`) + portal `source_url`
+# that only live on the listing row and are the strongest tell for a town-pin
+# non-match (two houses in different villages sharing one town coordinate).
 _PROP_SIDE_SQL = """
   jsonb_build_object(
     'property_id',         {p}.id,
@@ -160,15 +164,22 @@ _PROP_SIDE_SQL = """
     'sreality_id',         {p}.repr_listing_id,
     'price_czk',           {p}.current_price_czk,
     'area_m2',             {p}.area_m2,
+    'estate_area',         {p}.estate_area,
     'disposition',         {p}.disposition,
     'district',            {p}.district,
+    'street',              {p}.street,
     'category_main',       {p}.category_main,
     'category_type',       {p}.category_type,
+    'building_type',       {p}.building_type,
+    'condition',           {p}.condition,
     'source_count',        {p}.source_count,
     'distinct_site_count', {p}.distinct_site_count,
     'first_seen_at',       {p}.first_seen_at,
     'lat',                 ST_Y({p}.geom::geometry),
-    'lng',                 ST_X({p}.geom::geometry)
+    'lng',                 ST_X({p}.geom::geometry),
+    'source',              {rl}.source,
+    'source_url',          {rl}.source_url,
+    'description',         left({rl}.description, 240)
   )
 """
 
@@ -232,12 +243,14 @@ def list_candidates(
             SELECT
               c.id, c.tier, c.status, c.confidence, c.markers_matched,
               c.auto_merged, c.merge_group_id::text, c.created_at, c.reviewed_at,
-              {_PROP_SIDE_SQL.format(p="l")} AS left_property,
-              {_PROP_SIDE_SQL.format(p="r")} AS right_property,
+              {_PROP_SIDE_SQL.format(p="l", rl="ll")} AS left_property,
+              {_PROP_SIDE_SQL.format(p="r", rl="rl")} AS right_property,
               f.is_incorrect, f.expected_outcome, f.note, f.updated_at
             FROM property_identity_candidates c
             JOIN properties l ON l.id = c.left_property_id
             JOIN properties r ON r.id = c.right_property_id
+            LEFT JOIN listings ll ON ll.sreality_id = l.repr_listing_id
+            LEFT JOIN listings rl ON rl.sreality_id = r.repr_listing_id
             LEFT JOIN dedup_decision_feedback f
               ON f.left_property_id = least(c.left_property_id, c.right_property_id)
              AND f.right_property_id = greatest(c.left_property_id, c.right_property_id)
