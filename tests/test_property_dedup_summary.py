@@ -59,6 +59,23 @@ def test_filters_no_districts_omits_location_clause() -> None:
     assert not any(k.startswith("district_") for k in params)
 
 
+def test_filters_category_main_matches_either_side_of_pair() -> None:
+    # A pair CAN legitimately span two types (the sanctioned dům<->komercni
+    # cross-type merge, rule #15) — the Type tab must match if EITHER side is
+    # the picked category, not assert both sides already agree.
+    where, params = _candidate_filters(
+        "proposed", None, None, None, category_main="komercni",
+    )
+    assert "(l.category_main = %(category_main)s OR r.category_main = %(category_main)s)" in where
+    assert params["category_main"] == "komercni"
+
+
+def test_filters_no_category_main_omits_the_clause() -> None:
+    where, params = _candidate_filters("proposed", None, None, None, category_main=None)
+    assert "category_main" not in where
+    assert "category_main" not in params
+
+
 # --- fake conn --------------------------------------------------------------
 
 class _Cur:
@@ -126,6 +143,35 @@ def test_list_candidates_applies_reason_filter() -> None:
     sqls = [s for s, _ in conn.executed]
     assert any("count(*)" in s and "reason" in s and "verdict" in s for s in sqls)
     assert any("ORDER BY c.created_at DESC" in s and "verdict" in s for s in sqls)
+
+
+def test_list_candidates_count_and_page_share_the_same_properties_join() -> None:
+    # Regression: the COUNT query used to omit the `l`/`r` properties join the
+    # page SELECT has, so a filter referencing `l.`/`r.` (districts, category_main)
+    # raised `UndefinedTable: missing FROM-clause entry for table "l"` on the COUNT
+    # only. Both queries now share one `_CANDIDATES_FROM` — assert they can never
+    # diverge again, with EVERY filter that touches l/r active at once.
+    conn = _FakeConn(total=3, page_rows=[_candidate_row(1)])
+    dedup.list_candidates(
+        conn, status="proposed", category_main="komercni",
+        districts=[DistrictChip(name="Jihlava", level="obec", id=586846)],
+    )
+    sqls = [s for s, _ in conn.executed]
+    assert len(sqls) == 2
+    for s in sqls:
+        assert "JOIN properties l ON l.id = c.left_property_id" in s
+        assert "JOIN properties r ON r.id = c.right_property_id" in s
+        assert "l.category_main = %(category_main)s OR r.category_main = %(category_main)s" in s
+        assert "l.obec_id = %(district_id_l_0)s" in s
+        assert "r.obec_id = %(district_id_r_0)s" in s
+
+
+def test_list_candidates_applies_category_main_filter() -> None:
+    conn = _FakeConn(total=4, page_rows=[_candidate_row(1)])
+    dedup.list_candidates(conn, status="proposed", category_main="byt")
+    sqls = [s for s, _ in conn.executed]
+    assert all("category_main" in s for s in sqls)
+    assert all(p["category_main"] == "byt" for _, p in conn.executed)
 
 
 def test_summary_buckets_and_total() -> None:

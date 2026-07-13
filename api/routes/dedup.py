@@ -195,6 +195,7 @@ def get_candidates(
     tier: str | None = None,
     reason: str | None = None,
     verdict: str | None = None,
+    category_main: str | None = None,
     districts: str | None = None,
     districts_ctx: str | None = None,
     districts_excl: str | None = None,
@@ -205,12 +206,14 @@ def get_candidates(
     conn: Any = Depends(deps.get_db_conn),
     _: dict = Depends(deps.require_admin),
 ) -> dict[str, Any]:
-    """`districts` narrows to pairs where EITHER candidate property touches the
-    picked place (the same `districts`/`districts_ctx`/`districts_excl`/
-    `districts_lvl`/`districts_id` CSV shape Browse's URL uses) — lets the
-    operator prioritise the manual review backlog by location."""
+    """`category_main` and `districts` both narrow to pairs where EITHER candidate
+    property matches (the same property-type tabs Decision history uses, and the
+    same `districts`/`districts_ctx`/`districts_excl`/`districts_lvl`/`districts_id`
+    CSV shape Browse's URL uses) — lets the operator prioritise the manual review
+    backlog by property type or location."""
     return dedup.list_candidates(
         conn, status=status, tier=tier, reason=reason, verdict=verdict,
+        category_main=category_main,
         districts=parse_district_chips_csv(
             districts, districts_ctx, districts_excl, districts_lvl, districts_id,
         ),

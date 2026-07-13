@@ -1491,6 +1491,10 @@ export interface ListDedupCandidatesParams {
   tier?: string;
   reason?: string;
   verdict?: string;
+  // Matches a pair if EITHER candidate property is that type — the same
+  // property-type tabs Decision history uses (a pair can legitimately span
+  // two types, e.g. the sanctioned dům↔komerční cross-type merge).
+  category_main?: string;
   // Matches a pair if EITHER candidate property touches the picked place —
   // lets the operator prioritise the manual review backlog by location.
   districts?: ReadonlyArray<DistrictChip> | null;
