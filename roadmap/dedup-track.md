@@ -85,7 +85,7 @@ shape (see D1 below).
 > (validated the batch warmer draws a near-disjoint pair set from the live engine —
 > ~1% overlap, ~0.5%-consumed — and that a single `_both_have_site_plan` step-aside
 > vetoed the free arms on 98.6% of a 142-pair operator merge burst). Program order
-> (operator-set 2026-07-13): vision-model bake-off → free-signal precision →
+> (operator-approved 2026-07-13): free-signal precision → vision-model bake-off →
 > engine-side §4.1 batch rebuild → recency-first compare ordering. Each phase is its
 > own PR + operator flip.
 

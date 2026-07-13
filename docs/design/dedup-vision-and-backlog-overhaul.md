@@ -1,7 +1,8 @@
 # Dedup vision + backlog overhaul — validated findings and program plan
 
 **Status: INVESTIGATION COMPLETE (2026-07-12). This doc is the Session-1 deliverable of the
-LLM-cost-reduction + dedup-quality program; §6 is the operator-set sequence for Sessions 2–5.**
+LLM-cost-reduction + dedup-quality program; §6 is the operator-approved sequence for Sessions 2–5
+(free-signal precision first).**
 It extends — does not replace — `docs/design/dedup-cost-reduction.md` (the executing cost plan):
 that doc's shipped-phase status list stays authoritative for what already shipped; THIS doc
 governs the batch lane's future (§4.1 there, re-decided here), the free-signal precision work,
@@ -174,6 +175,19 @@ validation is the golden set (§4): replay the modified rule against every label
 dismissals) and report precision per family. Ship default-OFF behind a setting; the flip is
 the operator's, with the replay table in hand (same protocol as the §2.2 arms).
 
+Interlock with the geo town-pin false-merge finding (`docs/design/dedup-geo-town-pin-false-merge.md`,
+2026-07-13): street-less HTML-portal listings inherit a single **town-level** coordinate for the
+whole obec, so a shared pin is NOT evidence of the same property — two genuinely different houses
+were queued (and one operator-approved) purely on a coincident town pin. Consequence for THIS fix:
+coordinate proximity can never be a positive discriminator on the geo tiers; only a *contradiction*
+signal (a different village token, or a large price/area divergence) is trustworthy, and it must
+**defer, never dismiss** (killing eligibility would drop the ~77 legit cross-portal merges). So the
+non-drawing photo evidence must stand on its own — do not let a shared town pin substitute for it —
+and the replay must include the geo town-pin negatives once that design's `coord_precision`
+substrate exists. That doc's parallel `dedup_pair_audit` self-paired-id fix (4,539 rows where
+`left_sreality_id = right_sreality_id`) also means any golden-set extraction keying on audit
+listing ids must resolve through `property_merge_events`, not trust the audit row's listing pair.
+
 Secondary fixes riding along: (a) transitive/cluster-complete enqueue for N-way groups;
 (b) re-probe free arms when a same-run merge changes survivor membership (the race);
 (c) split the plan taxonomy so the engine can distinguish `cadastral_map` (parcel identity —
@@ -283,16 +297,22 @@ relaxation ships default-OFF behind a setting with a golden-set replay + operato
 
 ---
 
-## 6. Program sequence (operator-set 2026-07-13)
+## 6. Program sequence (operator-approved 2026-07-13)
 
-Session 1 recommended reordering to fix the free tier first (it shrinks the paid denominator
-every later session prices against). **The operator elected to keep the original order** —
-bake-off → free-signals → warmer → priority — so that's the plan of record below. The free-first
-consideration is preserved for context but does not govern; the two orderings differ only in
-which of Sessions 2/3 lands first, and the golden-set foundation (§4) is a shared prerequisite
-that **whichever session goes first must build** — i.e. the bake-off (Session 2) now ships it.
+Order the data argues for, confirmed by the operator: fix the free tier first — it shrinks the
+paid denominator every later session prices against, and it's what stops the queue from growing —
+then batch what remains, then choose models for the residue, then order by recency. Each session
+is its own PR + operator flip.
 
-- **Session 2 — vision-model bake-off (point 1).** Benchmark GPT-5-mini, Qwen3-VL-235B-A22B,
+- **Session 2 — free-signal precision (point 4A) + the golden-set foundation.** Ships the §4
+  golden set first (it's this session's validation substrate AND every later session reuses it).
+  Then: non-drawing pHash/cosine counting to replace the blanket `_both_have_site_plan` step-aside
+  (§2.1; default-OFF + golden replay + operator gate); cadastral-vs-masterplan fine-tag split;
+  per-family dismissal rooms (same protocol); cluster-complete enqueue; same-run re-probe. Then a
+  candidates re-decide sweep drains the backlog FREE (evidence already in the DB) — the old
+  $600–1k paid blitz is obsolete; re-size any residue after. This is where queue growth stops
+  mattering. Includes the §6-B vector-DB assessment (below). Dependencies: none.
+- **Session 3 — vision-model bake-off (point 1).** Benchmark GPT-5-mini, Qwen3-VL-235B-A22B,
   Qwen3-VL-30B-A3B, Gemini-3.1-flash-lite @1568, Gemini-2.5-flash-lite @1568, and current Sonnet
   on the three dedup vision tasks (compare_listings_visually, floor-plan, site-plan) against the
   §4 golden set — precision/recall on the merge decision, latency, $/call on BOTH a normal and a
@@ -301,15 +321,9 @@ that **whichever session goes first must build** — i.e. the bake-off (Session 
   recall vs Sonnet's 88.3% self-baseline (Sonnet stayed on forensic lanes; no cascade) — the new
   models are the open question. New providers land as `api/providers/<name>.py` implementing the
   `CompletionProvider` protocol, behind flags, NOT flipped on in prod. Deliverable = a cost×ability
-  recommendation. **Ships the golden-set foundation (§4) as its evaluation substrate.**
+  recommendation. Cleaner after Session 2 shrinks the paid volume the residue models must cover.
   **Blocker to clear first: `QWEN_API_KEY`/`OPENAI_API_KEY` exist only on the Railway api service
   — the Actions harness + local benchmark scripts need them as GH secrets / local env too.**
-- **Session 3 — free-signal precision (point 4A).** Non-drawing pHash/cosine counting to replace
-  the blanket `_both_have_site_plan` step-aside (§2.1; default-OFF + golden replay + operator
-  gate); cadastral-vs-masterplan fine-tag split; per-family dismissal rooms (same protocol);
-  cluster-complete enqueue; same-run re-probe. Then a candidates re-decide sweep drains the
-  backlog FREE. This is where queue growth stops mattering. Plus §6-B: assess moving embeddings
-  to a vector DB (below).
 - **Session 4 — batch lane rebuild for the backlog (point 3).** GOAL unchanged (warmed verdicts
   actually consumed; the ~$1.6–2k/mo target). **MECHANISM corrected by Finding I-1 (§1.2): do NOT
   "reconcile the warmer's selection query with the engine's"** — a second process re-deriving the
@@ -319,12 +333,12 @@ that **whichever session goes first must build** — i.e. the bake-off (Session 
   lanes only; dirty stays sync) so selection identity holds by construction. Measure via the
   `duration_ms=0 AND error IS NULL` batch attribution + pair overlap (must go ~1% → ~100%). What
   spend CANNOT fix: pozemek/komerční are structurally undismissable (no per-family dismissal
-  rooms) — that's Session 3's dismissal-side work, don't paper over it here.
+  rooms) — that's Session 2's dismissal-side work, don't paper over it here.
 - **Session 5 — recency-first compare ordering (point 2).** One shared priority function (newest
   listings first) across candidate drain + sweep compare budgets, so 1d/3d/1w Browse filters
   never show unmerged dups in ANY category. The dirty lane already covers the first hours; this
-  fixes the tail. Cleaner after Session 3 (most fresh pairs should then conclude free).
-- **Vector-DB question (point 4B, assessed in Session 3):** pgvector already serves the pairwise
+  fixes the tail. Cleaner after Session 2 (most fresh pairs should then conclude free).
+- **Vector-DB question (point 4B, assessed in Session 2):** pgvector already serves the pairwise
   cosine tier server-side; the only case for an ANN index is market-wide visual candidate
   *generation*. Assess pgvector-HNSW-on-a-scoped-subset vs an external service against rule #7;
   no dependency before that memo lands.
