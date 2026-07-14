@@ -26,8 +26,9 @@ Usage (typically via .github/workflows/dedup_batches.yml):
 
     python -m scripts.submit_dedup_batch --max-pairs 4000 --max-requests 1500
 
-Required env: SUPABASE_DB_URL, ANTHROPIC_API_KEY (the latter only when not
---dry-run), R2_* (to fetch image bytes for the requests; --dry-run needs neither).
+Required env: SUPABASE_DB_URL + at least one provider key (ANTHROPIC_API_KEY
+and/or OPENAI_API_KEY) when not --dry-run — whichever the enqueued lanes' models
+resolve to; R2_* (to fetch image bytes for the requests; --dry-run needs neither).
 """
 
 from __future__ import annotations
@@ -648,8 +649,13 @@ def main() -> int:
     if not db_url:
         print("ERROR: SUPABASE_DB_URL is not set.", file=sys.stderr)
         return 2
-    if not args.dry_run and not os.environ.get("ANTHROPIC_API_KEY"):
-        print("ERROR: ANTHROPIC_API_KEY is not set.", file=sys.stderr)
+    if not args.dry_run and not (
+        os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("OPENAI_API_KEY")
+    ):
+        print(
+            "ERROR: no provider key set; need ANTHROPIC_API_KEY and/or OPENAI_API_KEY.",
+            file=sys.stderr,
+        )
         return 2
 
     import psycopg

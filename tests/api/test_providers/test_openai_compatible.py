@@ -255,7 +255,10 @@ def test_default_max_tokens_param_is_max_completion_tokens():
     assert "max_tokens" not in body
 
 
-def test_cached_tokens_extracted_from_prompt_tokens_details():
+def test_cached_tokens_extracted_disjoint_from_input_tokens():
+    # OpenAI's prompt_tokens (100) INCLUDES the 40 cached ones. The neutral Usage
+    # contract keeps input_tokens and cache_read_tokens disjoint, so input_tokens
+    # must be the fresh 60 — otherwise compute_cost_usd bills the cached 40 twice.
     session = FakeSession([FakeResponse({
         "model": "test-model",
         "choices": [{"message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
@@ -270,6 +273,47 @@ def test_cached_tokens_extracted_from_prompt_tokens_details():
         system="", messages=[Message(role="user", content=[TextBlock(text="x")])],
         tools=[], model="test-model",
     )
+    assert out.usage.cache_read_tokens == 40
+    assert out.usage.input_tokens == 60
+
+
+def test_cached_fraction_not_double_billed_in_cost():
+    from api.providers.base import ModelPrice, compute_cost_usd
+
+    session = FakeSession([FakeResponse({
+        "model": "test-model",
+        "choices": [{"message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
+        "usage": {
+            "prompt_tokens": 1_000_000,
+            "completion_tokens": 0,
+            "prompt_tokens_details": {"cached_tokens": 1_000_000},
+        },
+    })])
+    out = _provider(session).complete(
+        system="", messages=[Message(role="user", content=[TextBlock(text="x")])],
+        tools=[], model="test-model",
+    )
+    # A fully-cached 1M-token prompt should cost the cache_read rate ($0.025), not
+    # input+cache_read ($0.275) — the ~11x over-bill this fix removes.
+    price = ModelPrice(0.25, 2.00, 0.025, 0.0)
+    assert compute_cost_usd(price=price, model="test-model", usage=out.usage) == 0.025
+
+
+def test_cached_tokens_clamped_when_exceeding_prompt_tokens():
+    session = FakeSession([FakeResponse({
+        "model": "test-model",
+        "choices": [{"message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
+        "usage": {
+            "prompt_tokens": 30,
+            "completion_tokens": 1,
+            "prompt_tokens_details": {"cached_tokens": 40},
+        },
+    })])
+    out = _provider(session).complete(
+        system="", messages=[Message(role="user", content=[TextBlock(text="x")])],
+        tools=[], model="test-model",
+    )
+    assert out.usage.input_tokens == 0
     assert out.usage.cache_read_tokens == 40
 
 

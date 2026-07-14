@@ -40,15 +40,12 @@ _TERMINAL_BATCH_STATUSES = frozenset(
     {"completed", "failed", "expired", "cancelled", "canceled"}
 )
 
-# Source: developers.openai.com/api/docs/pricing, cross-checked against 3
-# independent aggregators (openrouter.ai, devtk.ai, pricepertoken.com) 2026-07-13.
-# NOT read directly off OpenAI's current pricing table — that page no longer lists
-# gpt-5-mini as a row (it shows the later 5.4/5.5/5.6 snapshots only), even though
-# gpt-5-mini is still a live, callable model id. Re-verify before any spend beyond
-# the bake-off sample. cache_read is a same-generation estimate (gpt-5.4-mini's
-# published $0.075 cached rate, scaled by gpt-5-mini's input:cached-input ratio
-# elsewhere in the 5.x line), NOT a confirmed gpt-5-mini figure — bake-off payloads
-# are mostly-unique image pairs, so cache hits should be rare here regardless.
+# gpt-5-mini: $0.25 input / $2.00 output per 1M tokens; cached input $0.025 (the
+# standard OpenAI 90%-off cached rate = 10% of input). Re-verified 2026-07-14
+# against openrouter.ai ($0.25 / $2.00, matching) — OpenAI's own pricing page
+# (developers.openai.com/api/docs/pricing) still lists only gpt-5.4-mini, not
+# gpt-5-mini, though gpt-5-mini remains a live, callable model id. The definitive
+# post-hoc check is the OpenAI billing dashboard vs recorded llm_calls.cost_usd.
 PRICES: dict[str, ModelPrice] = {
     "gpt-5-mini": ModelPrice(0.25, 2.00, 0.025, 0.0),
 }
@@ -152,7 +149,16 @@ class OpenAIProvider(OpenAICompatibleProvider):
         raw = self._batch_get(f"/batches/{provider_batch_id}")
         status = str(raw.get("status") or "")
         rc = raw.get("request_counts") or {}
-        counts = {k: int(rc.get(k) or 0) for k in ("total", "completed", "failed")}
+        # Normalize to the neutral BatchStatus.counts vocabulary the Anthropic
+        # provider established (succeeded/errored) — OpenAI names them
+        # completed/failed. scripts/ingest_dedup_batch reads counts["succeeded"] /
+        # counts["errored"] regardless of provider; without this mapping an OpenAI
+        # batch NULLs dedup_batches.{succeeded,errored}_count.
+        counts = {
+            "total": int(rc.get("total") or 0),
+            "succeeded": int(rc.get("completed") or 0),
+            "errored": int(rc.get("failed") or 0),
+        }
         return BatchStatus(
             provider_batch_id=provider_batch_id,
             ended=status in _TERMINAL_BATCH_STATUSES,

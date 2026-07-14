@@ -80,6 +80,16 @@ class ToolCall:
 
 @dataclass(frozen=True)
 class Usage:
+    """Token counts for one completion, normalized across providers.
+
+    INVARIANT — the prompt-side fields are DISJOINT: input_tokens counts only
+    fresh (uncached) prompt tokens, cache_read_tokens the cache hits,
+    cache_write_tokens the cache writes. compute_cost_usd sums the three at their
+    own rates, so a provider whose native prompt-token count INCLUDES cached
+    tokens (OpenAI / DashScope: prompt_tokens ⊇ cached_tokens) MUST subtract them
+    at the boundary or the cached fraction is billed twice. Anthropic already
+    reports the three disjoint.
+    """
     input_tokens: int = 0
     output_tokens: int = 0
     cache_read_tokens: int = 0
