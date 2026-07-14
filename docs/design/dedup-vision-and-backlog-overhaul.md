@@ -102,6 +102,13 @@ already-routed vision calls into batches**, so selection identity holds by const
   `dedup_batch_warmer_enabled=false`. It stops ~$23/day of ~0.5%-consumed spend the moment
   it's flipped, and nothing regresses (the engine never depended on the warm cache — that is
   precisely the problem). Recommend flipping today; the crons then no-op.
+  - **SUPERSEDED (operator decision 2026-07-14): the warmer STAYS ON.** After the gpt-5-mini flip
+    (PR #787), the warmer became the live proof of the OpenAI Batch round-trip — it submitted 12
+    gpt-5-mini batches ($1.17, 11 ingested clean, correct 50% batch pricing) that validated the
+    provider path end-to-end. The operator kept it running for that reason. The §4.1 engine-fed
+    rebuild below still replaces the warmer's *guessed* work-list (that argument is unchanged) — it
+    is a Session 4 build now, not an immediate flip-off. (PR A additionally fixed the OpenAI batch
+    poll-counts key mismatch that had been NULLing `dedup_batches.{succeeded,errored}_count`.)
 
 Honest saving estimate (replaces the prior "$1.6–2k/mo recoverable by fixing targeting"):
 stop-warmer ≈ **$690/mo** immediately; §4.1 batching ≈ 50% off the sweep-lane share of the
