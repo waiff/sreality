@@ -50,3 +50,67 @@ def test_reexports_match_single_source() -> None:
     assert de.ROOM_PRIORITY == rt.FULL_PRIORITY
     assert de.NON_INTERIOR_TAGS == rt.NON_INTERIOR_TAGS
     assert de.DISTINCTIVE_ROOMS == rt.DISTINCTIVE_ROOMS
+
+
+# --- IMAGE_ROLE_REGISTRY (Session 5b): the per-family, per-tag role declaration that
+# INTERIOR_PRIORITY/HOUSE_PRIORITY/LAND_PRIORITY/NON_INTERIOR_TAGS/DISTINCTIVE_ROOMS are
+# now DERIVED from — these tests pin that the derivation is faithful and stays that way.
+
+def test_registry_covers_every_family_and_every_tag() -> None:
+    assert set(rt.IMAGE_ROLE_REGISTRY) == {"byt", "dum", "komercni", "ostatni", "pozemek"}
+    for family, roles in rt.IMAGE_ROLE_REGISTRY.items():
+        assert set(roles) == set(rt.ROOM_TYPES), family
+
+
+def test_registry_house_families_share_one_object() -> None:
+    # dum/komercni/ostatni are the SAME shape today (HOUSE_PRIORITY) — one shared dict,
+    # not three independently hand-maintained copies that could silently drift apart.
+    reg = rt.IMAGE_ROLE_REGISTRY
+    assert reg["dum"] is reg["komercni"] is reg["ostatni"]
+    assert reg["byt"] is not reg["dum"]
+    assert reg["pozemek"] is not reg["dum"]
+
+
+def test_priority_order_derives_from_registry_forensic_order() -> None:
+    assert rt._priority_order(rt.IMAGE_ROLE_REGISTRY["byt"]) == rt.INTERIOR_PRIORITY
+    assert rt._priority_order(rt.IMAGE_ROLE_REGISTRY["dum"]) == rt.HOUSE_PRIORITY
+    assert rt._priority_order(rt.IMAGE_ROLE_REGISTRY["pozemek"]) == rt.LAND_PRIORITY
+
+
+def test_gate_tags_are_floor_plan_and_site_plan_in_every_family() -> None:
+    # Plan tags GATE (veto a would-merge) in every family; they never vote/dismiss on
+    # their own — a structurally separate role from pHash/forensic evidence.
+    for family, roles in rt.IMAGE_ROLE_REGISTRY.items():
+        gated = {tag for tag, role in roles.items() if role.gate}
+        assert gated == {"floor_plan", "site_plan"}, family
+
+
+def test_dismiss_qualifying_tags_facade_flag_is_non_byt_only() -> None:
+    byt = rt.IMAGE_ROLE_REGISTRY["byt"]
+    dum = rt.IMAGE_ROLE_REGISTRY["dum"]
+    pozemek = rt.IMAGE_ROLE_REGISTRY["pozemek"]
+
+    # Unconditional dismiss set (flag off) == the historical DISTINCTIVE_DISMISS_ROOMS,
+    # for every family — the flag only ever ADDS exterior_facade, never removes kitchen/bathroom.
+    assert rt.dismiss_qualifying_tags(byt, facade_dismiss=False) == {"kitchen", "bathroom"}
+    assert rt.dismiss_qualifying_tags(dum, facade_dismiss=False) == {"kitchen", "bathroom"}
+    assert rt.dismiss_qualifying_tags(pozemek, facade_dismiss=False) == {"kitchen", "bathroom"}
+
+    # Flag on: byt NEVER gains facade (a development's shared shell says nothing about
+    # which unit); non-byt families do.
+    assert rt.dismiss_qualifying_tags(byt, facade_dismiss=True) == {"kitchen", "bathroom"}
+    assert rt.dismiss_qualifying_tags(dum, facade_dismiss=True) == {
+        "kitchen", "bathroom", "exterior_facade"}
+    assert rt.dismiss_qualifying_tags(pozemek, facade_dismiss=True) == {
+        "kitchen", "bathroom", "exterior_facade"}
+
+
+def test_phash_vote_matches_non_interior_tags_for_byt_only() -> None:
+    # byt is the only family with any non-voting tags (NON_INTERIOR_TAGS); every other
+    # family votes every tag in the pHash/cosine count (non-byt excludes nothing).
+    for family, roles in rt.IMAGE_ROLE_REGISTRY.items():
+        non_voting = {tag for tag, role in roles.items() if not role.phash_vote}
+        if family == "byt":
+            assert non_voting == set(rt.NON_INTERIOR_TAGS)
+        else:
+            assert non_voting == set()

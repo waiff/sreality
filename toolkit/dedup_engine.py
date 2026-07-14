@@ -41,13 +41,15 @@ from toolkit.publication import GEO_FAMILIES
 # comparison priority orders. See toolkit/room_taxonomy.py — one place defines which tag
 # is interior vs exterior and in what order rooms are compared.
 from toolkit.room_taxonomy import (
-    DISTINCTIVE_ROOMS,
+    DISTINCTIVE_ROOMS,  # re-exported: scripts/dedup_engine.py's pHash distinctive-match default
     FULL_PRIORITY as ROOM_PRIORITY,
     HOUSE_PRIORITY,
+    IMAGE_ROLE_REGISTRY,
     INTERIOR_PRIORITY as BYT_ROOM_PRIORITY,
     LAND_PRIORITY,
-    NON_INTERIOR_TAGS,
+    NON_INTERIOR_TAGS,  # re-exported: toolkit/test_room_taxonomy.py single-source cross-check
     category_main_compatible,
+    dismiss_qualifying_tags,
 )
 
 # Rule B: exact-address merge is blocked when areas disagree by more than this.
@@ -205,17 +207,22 @@ def room_priority_for(
 
 def distinctive_rooms_for(category_main: str | None) -> frozenset[str]:
     """The tags where a SINGLE near-identical pHash match auto-merges (the count-of-1
-    override). byt → kitchen/bathroom (wet rooms are unit-specific). Non-apartments →
-    EMPTY: a facade / site plan is shared across a development's units (like a render), so
-    one match there is NOT conclusive — they require the >=2-match count instead."""
-    return DISTINCTIVE_ROOMS if profile_for(category_main).family == "byt" else frozenset()
+    override) — read directly from this family's IMAGE_ROLE_REGISTRY entry. Today only
+    byt's kitchen/bathroom are marked distinctive (wet rooms are unit-specific); every
+    other family is EMPTY: a facade / site plan is shared across a development's units
+    (like a render), so one match there is NOT conclusive — they require the >=2-match
+    count instead."""
+    roles = IMAGE_ROLE_REGISTRY[profile_for(category_main).family]
+    return frozenset(tag for tag, role in roles.items() if role.distinctive)
 
 
 def phash_excluded_tags_for(category_main: str | None) -> tuple[str, ...]:
-    """Image tags that disqualify a pHash pair for this category. Apartments exclude
-    KNOWN-exterior / shared-marketing images (NON_INTERIOR_TAGS); other categories
-    exclude nothing (any image can carry a house/plot's identity)."""
-    return NON_INTERIOR_TAGS if profile_for(category_main).family == "byt" else ()
+    """Image tags that disqualify a pHash pair for this category — read directly from
+    this family's IMAGE_ROLE_REGISTRY entry. Today only byt excludes KNOWN-exterior /
+    shared-marketing images; every other family excludes nothing (any image can carry a
+    house/plot's identity)."""
+    roles = IMAGE_ROLE_REGISTRY[profile_for(category_main).family]
+    return tuple(tag for tag, role in roles.items() if not role.phash_vote)
 
 
 # A byt image scoring >= this on the CLIP render axis (image_clip_tags.render_score,
@@ -800,15 +807,6 @@ def verdict_is_merge(verdict: str | None) -> bool:
     return verdict == "High"
 
 
-# The most identifying interior rooms — a confident "different" on one of these
-# is the auto-DISMISS signal (operator policy: "kitchen/bathroom clearly differ").
-# Calibrated: 0 of 273 operator-merged pairs carried a Low verdict, and a same
-# property whose kitchen merely changed is rescued by the High OR-gate on another
-# room (so reaching auto-dismiss means NO room matched). Bedroom/exterior/etc. are
-# too generic to dismiss on alone.
-DISTINCTIVE_DISMISS_ROOMS: frozenset[str] = frozenset({"kitchen", "bathroom"})
-
-
 def decide_visual_dismiss(
     room_verdicts: dict[str, str], category_main: str | None = None,
     facade_dismiss: bool = False,
@@ -819,23 +817,23 @@ def decide_visual_dismiss(
       * no room reached High (the merge OR-gate already fired otherwise), AND
       * a dismissal-qualifying room was compared and returned Low, AND
       * no dismissal-qualifying room is non-Low (no Medium/ambiguous hedge).
-    Dismissal-qualifying rooms are the DISTINCTIVE wet rooms (kitchen/bathroom — the
-    #506 byt-era calibration, unchanged), plus `exterior_facade` for NON-byt families
-    when `facade_dismiss` is on (cost plan §5.2, fid5 operator-requested option,
-    dedup_facade_dismiss_enabled, default OFF): for houses/land/commercial the facade
-    IS the identity-bearing surface (#619 made the merge side family-aware; this is
-    the dismiss-side counterpart), while byt facades stay non-qualifying — a
-    development's shared building shell says nothing about which unit is listed.
-    Everything else (a qualifying Medium, or only generic rooms compared) stays
-    queued for a human. room_verdicts maps room_type -> 'High'|'Medium'|'Low'.
+    Dismissal-qualifying rooms are read from this family's IMAGE_ROLE_REGISTRY entry
+    (`dismiss_qualifying_tags`, toolkit/room_taxonomy.py): the DISTINCTIVE wet rooms
+    (kitchen/bathroom — the #506 byt-era calibration, unchanged) for every family, plus
+    `exterior_facade` for NON-byt families when `facade_dismiss` is on (cost plan §5.2,
+    fid5 operator-requested option, dedup_facade_dismiss_enabled, default OFF): for
+    houses/land/commercial the facade IS the identity-bearing surface (#619 made the
+    merge side family-aware; this is the dismiss-side counterpart), while byt facades
+    stay non-qualifying — a development's shared building shell says nothing about
+    which unit is listed. Everything else (a qualifying Medium, or only generic rooms
+    compared) stays queued for a human. room_verdicts maps room_type -> 'High'|'Medium'|'Low'.
     """
     if not room_verdicts:
         return False
     if any(v == "High" for v in room_verdicts.values()):
         return False
-    qualifying = set(DISTINCTIVE_DISMISS_ROOMS)
-    if facade_dismiss and category_main and category_main != "byt":
-        qualifying.add("exterior_facade")
+    roles = IMAGE_ROLE_REGISTRY[profile_for(category_main).family]
+    qualifying = dismiss_qualifying_tags(roles, facade_dismiss=facade_dismiss)
     relevant = [v for r, v in room_verdicts.items() if r in qualifying]
     if not relevant:
         return False

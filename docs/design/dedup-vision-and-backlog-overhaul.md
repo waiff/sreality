@@ -464,6 +464,59 @@ is its own PR + operator flip.
   The dirty lane already covers the first hours; this fixes the tail. Not yet measured for
   actual acceptance-metric movement (needs a few scheduled cycles to run against the new
   ordering) — that's the next session's first check.
+- **Session 5b — DISTINCTIVE_IMAGES unification + pozemek dismissal design (2026-07-14).**
+  Two parts, only the first SHIPPED:
+  - **Registry unification: SHIPPED.** `toolkit/room_taxonomy.IMAGE_ROLE_REGISTRY` (one
+    `ImageRole` per (family, tag): `phash_vote` / `forensic_order` / `distinctive` / `dismiss`
+    / `dismiss_needs_facade_flag` / `gate`) replaces three independently hand-maintained
+    mechanisms — the byt-only pHash exclusion + single-match override, each family's
+    `INTERIOR_PRIORITY`/`HOUSE_PRIORITY`/`LAND_PRIORITY` forensic-compare order, and
+    `DISTINCTIVE_DISMISS_ROOMS` + the facade-flag conditional union inside
+    `decide_visual_dismiss` — with ONE declaration per family that
+    `distinctive_rooms_for`/`phash_excluded_tags_for`/`decide_visual_dismiss` now read
+    uniformly (no more `if family == "byt"` special-casing at each call site). Pure
+    refactor: every legacy constant (`INTERIOR_PRIORITY`, `HOUSE_PRIORITY`, `LAND_PRIORITY`,
+    `NON_INTERIOR_TAGS`, `DISTINCTIVE_ROOMS`) is now DERIVED from the registry and verified
+    value-identical to its old hand-maintained form; the full existing test suite (2694
+    tests) passed unchanged, plus 6 new registry-specific tests. No app_settings flip, no
+    migration — zero behavior change today, only where the next behavior change would be
+    written (one dict entry, not new dispatch code).
+  - **Pozemek dismissal shapes (i)/(ii)/(iii): DESIGNED + REPLAYED, NOT SHIPPED — needs a
+    model fix first, then operator sign-off.** The golden set (`2026-07-13-session3-baseline`)
+    has 111 pozemek `operator_merge` positives and 87 negatives (75 `engine_site_plan_verdict`
+    + 9 `operator_dismissal` + 3 `decision_feedback`).
+    - **Shape (ii)** (auto-dismiss on a `site_plan_different_unit` verdict) replay: joining the
+      111 positive property pairs against CURRENT `property_identity_candidates.markers_matched`
+      found ZERO pairs that were ever confirmed-different by the engine and later merged anyway
+      — i.e. no observed conflict between the label this shape would act on and a known true
+      merge. Promising, but not conclusive proof of the VERDICT's own reliability (see below).
+    - **NEW BLOCKING FINDING, not previously surfaced this precisely:** the vision-model
+      bake-off (`dedup_vision_bakeoff_results`, migration 303) scored the site-plan lane's
+      CURRENT LIVE model — `llm_site_plan_match_model = gpt-5-mini` (confirmed live) — at only
+      **50.0% correct on pozemek (12/24), with 12/24 (50%) flagged dangerous**, vs.
+      claude-sonnet-4-5's 92.9% (13/14) and gemini-3.1-flash-lite / qwen3-vl-30b's 79.2%
+      (19/24, 5 dangerous each). The golden set's 75 `engine_site_plan_verdict` negatives were
+      labeled when Sonnet drove this lane (design doc §2.1a); TODAY's verdicts come from a
+      model the bake-off shows is close to a coin-flip on this exact family, with half its
+      calls dangerous. This means: **neither shape (i) ("cadastral reading vetoes a merge")
+      nor shape (ii) ("different_unit auto-dismisses") can safely ship against the CURRENT
+      site-plan model** — both would be gating/dismissing on a coin-flip. The shape (ii)
+      replay above is a necessary but not sufficient check; it validates the LABEL's
+      structure, not gpt-5-mini's live accuracy at producing that label.
+    - **Recommendation, in order:** (1) route `llm_site_plan_match_model` to a
+      stronger model for the pozemek family specifically (Sonnet ≈93% correct / Gemini-3.1-
+      flash-lite or Qwen3-VL-30B ≈79% correct, both far above gpt-5-mini's 50%) — a
+      per-family model override, not a blanket lane flip, so byt/dum/komercni's already-
+      acceptable-cost gpt-5-mini routing is undisturbed; (2) re-run this exact replay against
+      a sample of the UPGRADED model's live different_unit verdicts (not the Sonnet-era
+      golden-set labels) before trusting shape (ii)'s precision number; (3) THEN present
+      shape (i) vs (ii) vs "leave as designed" to the operator with real numbers, per rule 15's
+      amendment protocol (golden-set replay + explicit sign-off before any auto-dismiss/gate
+      relaxation). Shape (iii) (parcel-label OCR as a per-parcel identity signal) remains
+      out of scope, unbuilt, as originally noted — no new evidence changes that.
+    - Nothing shipped or flipped for this half: `IMAGE_ROLE_REGISTRY`'s `dismiss_needs_facade_flag`
+      field is the only "flag-gated dismiss" mechanism live today (facade, non-byt, mig 285);
+      no new pozemek dismiss field was added, since shape (ii) isn't ready to gate anything yet.
 - **Vector-DB question (point 4B, assessed in Session 2):** pgvector already serves the pairwise
   cosine tier server-side; the only case for an ANN index is market-wide visual candidate
   *generation*. Assess pgvector-HNSW-on-a-scoped-subset vs an external service against rule #7;

@@ -60,11 +60,17 @@
 > first engine look" separately from `last_engine_decision_at` (which re-decisions overwrite).
 > Baseline backlog re-verified live 2026-07-14: geo tier carries ~85% of the unresolved-and-fresh
 > backlog (700/<1d, 1391/<3d, 5521/<7d of 39,983 total proposed) — the geo lane's head matters
-> most in practice. **Session 5b (next)** = the DISTINCTIVE_IMAGES / per-family dismissal design
-> (byt/non-byt image-role registry unification + pozemek dismissal shapes, golden-set replay,
-> operator sign-off required before any flip). This whole track file is a candidate for a future
-> restructure (its own PR) to replace the stale D1/D2 body below with a pointer-only index, per
-> CLAUDE.md's roadmap-maintenance rule.
+> most in practice. **Session 5b (2026-07-14): the image-role REGISTRY unification shipped**
+> (`toolkit/room_taxonomy.IMAGE_ROLE_REGISTRY` — one per-family/per-tag declaration replacing
+> three hand-maintained mechanisms; pure refactor, zero behavior change, full suite green).
+> **The pozemek dismissal shapes did NOT ship** — replay surfaced a BLOCKING finding: the
+> site-plan lane's live model (gpt-5-mini) scores only 50% correct / 50% dangerous on pozemek
+> per the vision bake-off (vs Sonnet 92.9%), so neither shape can safely gate/dismiss until
+> that model is upgraded for pozemek and re-replayed; see
+> `docs/design/dedup-vision-and-backlog-overhaul.md` §6 Session 5b for the full finding +
+> recommended order (model fix → re-replay → operator sign-off). This whole track file is a
+> candidate for a future restructure (its own PR) to replace the stale D1/D2 body below with a
+> pointer-only index, per CLAUDE.md's roadmap-maintenance rule.
 
 ## Dedup + canonical listing track (parallel)
 
