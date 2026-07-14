@@ -3,7 +3,9 @@ import { useQuery, keepPreviousData } from '@tanstack/react-query';
 import { Link, useSearchParams } from 'react-router-dom';
 import {
   DANGER_VERDICT,
+  LANE_KEEP_GLOSS,
   LANE_LABEL,
+  LANE_MERGE_GLOSS,
   LANES,
   type BakeoffRow,
   type CheckType,
@@ -19,6 +21,7 @@ import {
   groupPairs,
   isReviewRun,
   summarize,
+  verdictGloss,
 } from '@/lib/bakeoff';
 import { fetchImagesByListingIds } from '@/lib/queries';
 import { imageSrc } from '@/lib/imageUrl';
@@ -94,6 +97,118 @@ function CostCell({ perCall, total }: { perCall: number | null; total: number })
   );
 }
 
+/* ── the colour key + verdict glossary — answers "what do these labels mean, what's good/bad?" ── */
+const SWATCH: Record<'sage' | 'brick' | 'ochre' | 'copper', string> = {
+  sage: 'bg-[var(--color-sage-soft)] border-[var(--color-sage)]',
+  brick: 'bg-[var(--color-brick-soft)] border-[var(--color-brick)]',
+  ochre: 'bg-[var(--color-ochre-soft)] border-[var(--color-ochre)]',
+  copper: 'bg-[var(--color-copper-soft)] border-[var(--color-copper)]',
+};
+
+function Swatch({ tone, children }: { tone: keyof typeof SWATCH; children: ReactNode }) {
+  return (
+    <span className="inline-flex items-center gap-1.5">
+      <span className={`inline-block h-3 w-3 shrink-0 rounded-[var(--radius-xs)] border ${SWATCH[tone]}`} />
+      <span className="text-[var(--color-ink-2)]">{children}</span>
+    </span>
+  );
+}
+
+function Legend() {
+  return (
+    <details
+      open
+      className="mt-4 rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-inset)] px-4 py-3"
+    >
+      <summary className="cursor-pointer select-none text-sm font-medium text-[var(--color-ink-2)]">
+        How to read the verdicts
+      </summary>
+      <div className="mt-3 space-y-3 text-sm">
+        <p className="max-w-3xl text-[var(--color-ink-2)]">
+          On each lane a model casts one vote: either <strong>“merge”</strong> (it believes the two
+          listings are the <em>same</em> real-world property) or <strong>“keep apart.”</strong> Whether
+          a merge vote is right depends on the pair — the colour tells you which:
+        </p>
+
+        <div className="flex flex-wrap gap-x-5 gap-y-2 text-xs">
+          <Swatch tone="sage">correct for this pair</Swatch>
+          <Swatch tone="brick">false merge — combined two DIFFERENT properties (the costly error)</Swatch>
+          <Swatch tone="ochre">miss — didn’t merge a real duplicate (harmless)</Swatch>
+          <Swatch tone="copper">merge vote on an undecided pair (no right answer yet)</Swatch>
+          <span className="inline-flex items-center gap-1.5 text-[var(--color-ink-3)]">
+            <span className="inline-block w-3 text-center">—</span>
+            no verdict for that lane
+          </span>
+        </div>
+
+        <div className="overflow-x-auto">
+          <table className="text-xs border border-[var(--color-rule)] rounded-[var(--radius-xs)]">
+            <thead className="text-left text-[var(--color-ink-3)]">
+              <tr>
+                <th className="px-2.5 py-1.5 font-normal">Lane</th>
+                <th className="px-2.5 py-1.5 font-normal">Votes “merge” when it sees…</th>
+                <th className="px-2.5 py-1.5 font-normal">…otherwise “keep apart”</th>
+              </tr>
+            </thead>
+            <tbody>
+              {LANES.map((lane) => (
+                <tr key={lane} className="border-t border-[var(--color-rule)]">
+                  <td className="px-2.5 py-1.5 whitespace-nowrap text-[var(--color-ink-2)]">
+                    {LANE_LABEL[lane]}
+                  </td>
+                  <td className="px-2.5 py-1.5">
+                    <code className="text-[var(--color-copper)]">{DANGER_VERDICT[lane]}</code>
+                    <span className="text-[var(--color-ink-3)]"> — {LANE_MERGE_GLOSS[lane]}</span>
+                  </td>
+                  <td className="px-2.5 py-1.5">
+                    <code className="text-[var(--color-ink-2)]">{LANE_KEEP_GLOSS[lane]}</code>
+                    <span className="text-[var(--color-ink-3)]"> (or —)</span>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        <p className="max-w-3xl text-xs text-[var(--color-ink-3)]">
+          The same vote flips meaning with the pair:{' '}
+          <code className="text-[var(--color-ink-2)]">same_unit</code> is{' '}
+          <span className="text-[var(--color-sage)]">correct</span> on a same-property pair
+          (“recall reference”) but a <span className="text-[var(--color-brick)]">false merge</span> on a
+          different-property pair (“confirmed different”). Always read the pair's label first.
+        </p>
+      </div>
+    </details>
+  );
+}
+
+/* The plain "what's the right answer for THIS pair" line, above the per-pair verdict grid. */
+function GroundTruthNote({ pair }: { pair: PairGroup }) {
+  if (pair.check_type === 'review')
+    return (
+      <p className="text-xs text-[var(--color-ink-2)]">
+        <strong>Undecided pair</strong> — no ground truth. A merge vote (
+        <span className="text-[var(--color-copper)]">copper</span>) is just that model's opinion; read
+        the split across models to decide.
+      </p>
+    );
+  if (pair.check_type === 'precision')
+    return (
+      <p className="text-xs text-[var(--color-ink-2)]">
+        Ground truth: <strong>DIFFERENT properties</strong> → the right call is{' '}
+        <strong>keep apart</strong>. A merge vote here (
+        <span className="text-[var(--color-brick)]">red</span>) is a false merge — the costly error.
+      </p>
+    );
+  return (
+    <p className="text-xs text-[var(--color-ink-2)]">
+      Ground truth: the <strong>SAME property</strong> → the right call is <strong>merge</strong>. A
+      merge vote here (<span className="text-[var(--color-sage)]">green</span>) is correct; a keep-apart
+      vote (<span className="text-[var(--color-ochre)]">amber</span>) is a missed duplicate.
+    </p>
+  );
+}
+
 export default function ModelTesting() {
   const labelsQ = useQuery({ queryKey: ['bakeoff', 'labels'], queryFn: fetchBakeoffRunLabels });
   // Deep link: /model-testing?run=<label> (the /dedup "compare models" button lands here). Falls
@@ -138,13 +253,9 @@ export default function ModelTesting() {
         <div>
           <h1 className="text-2xl tracking-tight">Model testing</h1>
           <p className="text-sm text-[var(--color-ink-3)] mt-1 max-w-2xl">
-            Dedup vision bake-off: every candidate model's verdict on each golden pair, side by side.
-            A red cell = the model emitted the <em>dangerous</em> verdict (would wrongly merge /
-            fail the guard) on a confirmed-different pair. See{' '}
-            <span className="text-[var(--color-ink-2)]">
-              docs/design/dedup-vision-model-bakeoff-2026-07.md
-            </span>
-            .
+            Dedup vision bake-off: every candidate model's verdict on each pair, side by side — so you
+            can see where a model would wrongly merge two different properties. New here? Open{' '}
+            <em>“How to read the verdicts”</em> below for the colour + label key.
           </p>
         </div>
         <label className="text-sm text-[var(--color-ink-2)]">
@@ -294,6 +405,9 @@ export default function ModelTesting() {
             />
           </section>
 
+          {/* how to read the verdicts (colour key + verdict glossary) */}
+          <Legend />
+
           {/* pair navigator + detail */}
           <section className="mt-4">
             <div className="flex items-center justify-between gap-3 text-sm">
@@ -340,9 +454,13 @@ function PairDetail({ pair, models }: { pair: PairGroup; models: string[] }) {
   return (
     <div className="mt-3 rounded-[var(--radius-sm)] border border-[var(--color-rule)] p-4">
       {/* ground truth */}
-      <div className="flex flex-wrap items-center gap-2 text-xs mb-3">
+      <div className="flex flex-wrap items-center gap-2 text-xs mb-2">
         <Chip>
-          {pair.check_type === 'precision' ? 'confirmed DIFFERENT' : 'recall reference'}
+          {pair.check_type === 'precision'
+            ? 'confirmed DIFFERENT'
+            : pair.check_type === 'review'
+              ? 'undecided'
+              : 'recall reference'}
         </Chip>
         {pair.category_main && <Chip>{pair.category_main}</Chip>}
         {pair.label_source && <Chip>{pair.label_source}</Chip>}
@@ -350,8 +468,11 @@ function PairDetail({ pair, models }: { pair: PairGroup; models: string[] }) {
           A {pair.a} · B {pair.b}
         </Chip>
         {pair.anyDangerous && (
-          <span className="text-[var(--color-brick)] font-medium">⚠ a model would merge these</span>
+          <span className="text-[var(--color-brick)] font-medium">⚠ a model false-merged these</span>
         )}
+      </div>
+      <div className="mb-3">
+        <GroundTruthNote pair={pair} />
       </div>
 
       {/* images side by side */}
@@ -392,7 +513,7 @@ function PairDetail({ pair, models }: { pair: PairGroup; models: string[] }) {
                 <th key={lane} className="px-3 py-2 font-medium">
                   {LANE_LABEL[lane]}{' '}
                   <span className="text-[var(--color-ink-3)] font-normal">
-                    (danger: {DANGER_VERDICT[lane]})
+                    · merges on “{DANGER_VERDICT[lane]}”
                   </span>
                 </th>
               ))}
@@ -407,14 +528,19 @@ function PairDetail({ pair, models }: { pair: PairGroup; models: string[] }) {
                   return (
                     <td key={lane} className="px-3 py-2">
                       {row ? (
-                        <span className={`rounded-[var(--radius-xs)] px-1.5 py-0.5 ${verdictClasses(row)}`}>
+                        <span
+                          title={verdictGloss(row.candidate_verdict)}
+                          className={`rounded-[var(--radius-xs)] px-1.5 py-0.5 ${verdictClasses(row)}`}
+                        >
                           {row.candidate_verdict}
                           {row.room_type && lane === 'compare' ? (
                             <span className="text-[var(--color-ink-3)] text-xs"> · {row.room_type}</span>
                           ) : null}
                         </span>
                       ) : (
-                        <span className="text-[var(--color-ink-3)]">—</span>
+                        <span className="text-[var(--color-ink-3)]" title="model produced no verdict for this lane">
+                          —
+                        </span>
                       )}
                     </td>
                   );

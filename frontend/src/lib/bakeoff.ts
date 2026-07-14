@@ -26,6 +26,36 @@ export const DANGER_VERDICT: Record<Lane, string> = {
   site_plan: 'same_unit',
 };
 
+/** Plain-language meaning of a raw verdict value, for the /model-testing legend + cell tooltips.
+ * Each lane's DANGER_VERDICT is the "merge-ward" one (pushes toward combining the two listings);
+ * every other verdict keeps them apart or makes no call. */
+export const VERDICT_GLOSS: Record<string, string> = {
+  High: 'confident it’s the same room → would MERGE',
+  Medium: 'unsure → keeps the listings apart',
+  Low: 'not the same room → keeps the listings apart',
+  same_layout: 'the two floor plans are the same layout → would MERGE',
+  different_layout: 'a different floor plan → keeps apart (dismisses the pair)',
+  same_unit: 'the same unit within one development → would MERGE',
+  different_unit: 'a different unit → keeps apart',
+  inconclusive: 'could not tell → makes no call',
+  no_2d_plan: 'no 2-D plan to read → makes no call',
+};
+
+/** The plain meaning of a verdict, falling back to the raw value for anything unmapped. */
+export const verdictGloss = (v: string): string => VERDICT_GLOSS[v] ?? v;
+
+/** Per-lane plain phrasing for the legend's "votes merge when it sees…" / "…otherwise" columns. */
+export const LANE_MERGE_GLOSS: Record<Lane, string> = {
+  compare: 'a room photo it’s confident matches',
+  floor_plan: 'the two floor plans are the same layout',
+  site_plan: 'the same unit within one development',
+};
+export const LANE_KEEP_GLOSS: Record<Lane, string> = {
+  compare: 'Medium / Low',
+  floor_plan: 'different_layout',
+  site_plan: 'different_unit',
+};
+
 export interface BakeoffRow {
   id: number;
   run_label: string;

@@ -9,6 +9,7 @@ import {
   groupPairs,
   isReviewRun,
   summarize,
+  verdictGloss,
 } from './bakeoff';
 
 function row(p: Partial<BakeoffRow>): BakeoffRow {
@@ -179,5 +180,14 @@ describe('distinct helpers', () => {
     const rows = [row({ model: 'sonnet' }), row({ model: 'qwen', sreality_id_a: 5, category_main: 'byt' })];
     expect(distinctModels(rows)).toEqual(['qwen', 'sonnet']);
     expect(distinctCategories(groupPairs(rows))).toEqual(['byt', 'pozemek']);
+  });
+});
+
+describe('verdictGloss', () => {
+  it('maps known verdicts to plain language and falls back to the raw value', () => {
+    expect(verdictGloss('same_unit')).toContain('MERGE');
+    expect(verdictGloss('different_unit')).toContain('keeps apart');
+    expect(verdictGloss('High')).toContain('same room');
+    expect(verdictGloss('mystery_verdict')).toBe('mystery_verdict');
   });
 });
