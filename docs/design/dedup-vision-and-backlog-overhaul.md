@@ -446,10 +446,24 @@ is its own PR + operator flip.
   model id (pre-existing routing bug, unrelated to this session — flagged for follow-up). What
   spend CANNOT fix: pozemek/komerční are structurally undismissable (no per-family dismissal
   rooms) — that's Session 2's dismissal-side work, don't paper over it here.
-- **Session 5 — recency-first compare ordering (point 2).** One shared priority function (newest
-  listings first) across candidate drain + sweep compare budgets, so 1d/3d/1w Browse filters
-  never show unmerged dups in ANY category. The dirty lane already covers the first hours; this
-  fixes the tail. Cleaner after Session 2 (most fresh pairs should then conclude free).
+- **Session 5a — recency-first compare ordering (point 2): SHIPPED (2026-07-14).** One shared
+  recency signal (`properties.first_seen_at`) feeds both halves: the candidate drain ranks its
+  whole due-set newest-first (`_recency_ranked_property_ids` → `priority_property_order`, the
+  mechanism the dirty drain already established); the three cursor-bearing sweep lanes (full
+  street, geo, byt-geo) each pull a bounded "recency head" (`_recency_head_candidate_ids`,
+  tier + 7-day-window scoped) to the front of the pass. Composed with the `scan_cursor`
+  lexicographic frontier, not a re-sort of it: `run_engine`'s `frontier_keys` ensures only
+  cursor-ordered tail groups can advance the PERSISTED cursor position, so a deadline-truncated
+  run can never regress the frontier even when the head is non-empty (migration 261's coverage
+  guarantee is preserved). `dedup_recency_backlog` (migration 307) is the acceptance-metric view
+  (per-tier unresolved-and-fresh counts, <1d/<3d/<7d); write-once `first_engine_decision_at`
+  (same migration) instruments time-to-first-look separately from `last_engine_decision_at`.
+  Live re-verification (2026-07-14) found the geo tier carries ~85% of the fresh backlog (700/
+  <1d, 1391/<3d, 5521/<7d of 39,983 total proposed) — expected, since single-dwelling families
+  have no free-arm/warmer path (rule #15 (E)); the geo lane's head is where this matters most.
+  The dirty lane already covers the first hours; this fixes the tail. Not yet measured for
+  actual acceptance-metric movement (needs a few scheduled cycles to run against the new
+  ordering) — that's the next session's first check.
 - **Vector-DB question (point 4B, assessed in Session 2):** pgvector already serves the pairwise
   cosine tier server-side; the only case for an ANN index is market-wide visual candidate
   *generation*. Assess pgvector-HNSW-on-a-scoped-subset vs an external service against rule #7;
