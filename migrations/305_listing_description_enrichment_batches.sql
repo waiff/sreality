@@ -1,4 +1,7 @@
--- 299_listing_description_enrichment_batches.sql
+-- 305_listing_description_enrichment_batches.sql
+-- (Renumbered from 299 — the live DB already applied 299_phase0_anon_hardening,
+--  and 300-304 are taken. This migration was merged to main but never applied;
+--  305 is the next free number. See the migration-number CI gate added alongside.)
 -- Enrichment PR B: async bazos description enrichment via the Anthropic
 -- Message Batches API (50% cheaper than the synchronous enrich_bazos.yml
 -- job). Mirrors migration 098 (condition_score_batches) exactly, keyed on
@@ -22,7 +25,7 @@
 -- Backend-only tables (service role). RLS enabled with no policies, so
 -- the anon/publishable key can't read them — same posture as llm_calls.
 
-create table listing_description_enrichment_batches (
+create table if not exists listing_description_enrichment_batches (
   id                 bigint generated always as identity primary key,
   provider           text not null default 'anthropic',
   provider_batch_id  text not null unique,
@@ -44,9 +47,10 @@ create table listing_description_enrichment_batches (
   notes              text
 );
 
-create index on listing_description_enrichment_batches (status, submitted_at desc);
+create index if not exists listing_description_enrichment_batches_status_idx
+  on listing_description_enrichment_batches (status, submitted_at desc);
 
-create table listing_description_enrichment_batch_requests (
+create table if not exists listing_description_enrichment_batch_requests (
   id           bigint generated always as identity primary key,
   batch_id     bigint not null
                  references listing_description_enrichment_batches(id) on delete cascade,
@@ -59,7 +63,8 @@ create table listing_description_enrichment_batch_requests (
   unique (batch_id, custom_id)
 );
 
-create index on listing_description_enrichment_batch_requests (batch_id, status);
+create index if not exists listing_description_enrichment_batch_requests_batch_status_idx
+  on listing_description_enrichment_batch_requests (batch_id, status);
 
 alter table listing_description_enrichment_batches enable row level security;
 alter table listing_description_enrichment_batch_requests enable row level security;
