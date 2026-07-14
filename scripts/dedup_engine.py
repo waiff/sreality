@@ -1407,7 +1407,7 @@ def _resolve_visual(
     site_a = [i["image_id"] for i in imgs_a if i["room_type"] == SITE_PLAN_ROOM_TYPE]
     site_b = [i["image_id"] for i in imgs_b if i["room_type"] == SITE_PLAN_ROOM_TYPE]
     if site_a and site_b and site_plan_fn is not None and vision_budget[0] > 0:
-        sp = site_plan_fn(a.sreality_id, b.sreality_id, site_a, site_b)
+        sp = site_plan_fn(a.sreality_id, b.sreality_id, site_a, site_b, a.category_main)
         if sp is not None and sp.get("deferred"):
             return {"action": "defer", "reason": "batch_pending"}
         if sp is not None and not sp.get("cache_hit"):
@@ -2455,8 +2455,9 @@ def run_engine(
 
     classify_fn(sreality_id) -> classify_listing_images envelope.
     compare_fn(a, b, room_type, ids_a, ids_b) -> {verdict, rationale} | None.
-    site_plan_fn(a, b, ids_a, ids_b) -> {verdict, rationale} | None (development
-    guard: verdict ∈ same_unit|different_unit|inconclusive).
+    site_plan_fn(a, b, ids_a, ids_b, family) -> {verdict, rationale} | None (development
+    guard: verdict ∈ same_unit|different_unit|inconclusive; family routes a per-family
+    model override, e.g. a stronger model for pozemek — toolkit.dedup_model_overrides).
 
     Self-healing: each run also RESOLVES stale proposed candidates rather than
     letting them pile up in the operator queue — it dismisses a pair the current
@@ -2941,40 +2942,52 @@ def _build_site_plan_fn(
 ) -> Any:
     from api.dependencies import get_providers
     from api.llm_client import LLMClient
+    from toolkit.dedup_model_overrides import (
+        SITE_PLAN_OVERRIDE_KEY,
+        load_model_overrides,
+        resolve_model_for_family,
+    )
     from toolkit.visual_match import (
         build_site_plan_request,
         cached_site_plan_verdict,
         compare_listing_site_plans,
     )
     llm = LLMClient(conn, providers=get_providers())
-    site_plan_model = llm.resolve_model("llm_site_plan_match_model")
+    site_plan_overrides = load_model_overrides(conn, SITE_PLAN_OVERRIDE_KEY)
     defer_providers = _batch_defer_providers() if defer_to_batch else None
 
-    def _fn(a: int, b: int, ids_a: list[int], ids_b: list[int]) -> dict[str, Any] | None:
+    def _fn(
+        a: int, b: int, ids_a: list[int], ids_b: list[int], family: str | None = None,
+    ) -> dict[str, Any] | None:
+        model = resolve_model_for_family(
+            conn, llm, setting_key=SITE_PLAN_OVERRIDE_KEY,
+            default_key="llm_site_plan_match_model", family=family,
+            overrides=site_plan_overrides,
+        )
         if defer_to_batch:
             v = cached_site_plan_verdict(
-                conn, sreality_id_a=a, sreality_id_b=b, model=site_plan_model)
+                conn, sreality_id_a=a, sreality_id_b=b, model=model)
             if v is not None:
                 return {"verdict": v, "rationale": None, "cache_hit": True}
             ca, cb = sorted((a, b))
             from toolkit.dedup_batch_defer import enqueue_deferred_request
             spooled = enqueue_deferred_request(
                 conn, defer_providers, custom_id=f"spl-{ca}-{cb}",
-                kind="site_plan", model=site_plan_model, sreality_id_a=ca, sreality_id_b=cb,
+                kind="site_plan", model=model, sreality_id_a=ca, sreality_id_b=cb,
                 room_type=None,
                 build_fn=lambda: build_site_plan_request(
                     conn, llm, sreality_id_a=a, sreality_id_b=b,
-                    image_ids_a=ids_a, image_ids_b=ids_b),
+                    image_ids_a=ids_a, image_ids_b=ids_b, model=model),
             )
             return {"deferred": True} if spooled else None
         if _breaker_open(error_count):
             v = cached_site_plan_verdict(
-                conn, sreality_id_a=a, sreality_id_b=b, model=site_plan_model)
+                conn, sreality_id_a=a, sreality_id_b=b, model=model)
             return {"verdict": v, "rationale": None, "cache_hit": True} if v is not None else None
         try:
             res = compare_listing_site_plans(
                 conn, llm, sreality_id_a=a, sreality_id_b=b,
-                image_ids_a=ids_a, image_ids_b=ids_b,
+                image_ids_a=ids_a, image_ids_b=ids_b, model=model,
             )
             return res["data"]
         except Exception as exc:  # noqa: BLE001 - one bad pair must not kill the run
@@ -3084,6 +3097,11 @@ def _build_cache_only_fns(
     from api.llm_client import LLMClient
     from api.providers.anthropic import AnthropicProvider
     from toolkit.clip_dedup import clip_room_grouping
+    from toolkit.dedup_model_overrides import (
+        SITE_PLAN_OVERRIDE_KEY,
+        load_model_overrides,
+        resolve_model_for_family,
+    )
     from toolkit.image_classification import cached_classification
     from toolkit.visual_match import (
         cached_floor_plan_verdict,
@@ -3094,7 +3112,7 @@ def _build_cache_only_fns(
     llm = LLMClient(conn, providers={"anthropic": AnthropicProvider()})
     classify_model = llm.resolve_model("llm_room_classify_model")
     compare_model = llm.resolve_model("llm_visual_match_model")
-    site_plan_model = llm.resolve_model("llm_site_plan_match_model")
+    site_plan_overrides = load_model_overrides(conn, SITE_PLAN_OVERRIDE_KEY)
     floor_plan_model = llm.resolve_model("llm_floor_plan_match_model")
 
     def classify_fn(sreality_id: int) -> dict[str, Any] | None:
@@ -3124,9 +3142,15 @@ def _build_cache_only_fns(
             model=model or compare_model)
         return {"verdict": v, "rationale": None, "cache_hit": True} if v is not None else None
 
-    def site_plan_fn(a: int, b: int, ids_a: list[int], ids_b: list[int]) -> dict[str, Any] | None:
+    def site_plan_fn(a: int, b: int, ids_a: list[int], ids_b: list[int],
+                      family: str | None = None) -> dict[str, Any] | None:
+        model = resolve_model_for_family(
+            conn, llm, setting_key=SITE_PLAN_OVERRIDE_KEY,
+            default_key="llm_site_plan_match_model", family=family,
+            overrides=site_plan_overrides,
+        )
         v = cached_site_plan_verdict(
-            conn, sreality_id_a=a, sreality_id_b=b, model=site_plan_model)
+            conn, sreality_id_a=a, sreality_id_b=b, model=model)
         return {"verdict": v, "rationale": None, "cache_hit": True} if v is not None else None
 
     def floor_plan_fn(a: int, b: int, ids_a: list[int], ids_b: list[int]) -> dict[str, Any] | None:

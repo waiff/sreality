@@ -4003,7 +4003,7 @@ def test_run_engine_site_plan_different_unit_queues(monkeypatch: Any) -> None:
             {"image_id": sid * 10 + 2, "room_type": "kitchen"},
         ]}}
 
-    def site_plan(a: int, b: int, ids_a: list, ids_b: list) -> dict:
+    def site_plan(a: int, b: int, ids_a: list, ids_b: list, family: str | None = None) -> dict:
         return {"verdict": "different_unit", "rationale": "plot 3 vs plot 4"}
 
     conn = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None, source="bazos")])
@@ -4942,7 +4942,9 @@ def test_resolve_visual_defers_when_site_plan_is_deferred() -> None:
     def classify_fn(sid: int) -> dict[str, Any]:
         return {"data": {"images": [{"image_id": sid, "room_type": "site_plan"}]}}
 
-    def site_plan_fn(a_id: int, b_id: int, ids_a: list[int], ids_b: list[int]) -> dict[str, Any]:
+    def site_plan_fn(
+        a_id: int, b_id: int, ids_a: list[int], ids_b: list[int], family: str | None = None,
+    ) -> dict[str, Any]:
         return {"deferred": True}
 
     budget = [10]

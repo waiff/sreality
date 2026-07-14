@@ -392,20 +392,22 @@ def compare_listing_site_plans(
     image_ids_a: list[int],
     image_ids_b: list[int],
     force_refresh: bool = False,
+    model: str | None = None,
 ) -> dict[str, Any]:
     """Compare two listings' SITE-PLAN images (the development guard, cache on miss).
 
     Returns data.verdict ∈ same_unit | different_unit | inconclusive. The engine
     uses different_unit to QUEUE (never auto-merge), and a same-development
     site-plan pair never auto-merges on its own. Write-allowed toolkit exception
-    (rule #5); cache in listing_site_plan_matches.
+    (rule #5); cache in listing_site_plan_matches. `model` lets a caller override the
+    flat app_settings default (e.g. a per-family route) — omit to use it as-is.
     """
     from toolkit import _now_iso
 
     if sreality_id_a == sreality_id_b:
         raise VisualMatchError("cannot compare a listing to itself")
     a, b = sorted((sreality_id_a, sreality_id_b))
-    model = llm_client.resolve_model(_SITE_PLAN_MODEL_KEY)
+    model = model or llm_client.resolve_model(_SITE_PLAN_MODEL_KEY)
 
     if not force_refresh:
         cached = _site_plan_cache_lookup(conn, a, b, model)
@@ -487,12 +489,14 @@ def build_site_plan_request(
     sreality_id_b: int,
     image_ids_a: list[int],
     image_ids_b: list[int],
+    model: str | None = None,
 ) -> dict[str, Any]:
-    """Build one development-guard (site-plan) request for the async batch lane."""
+    """Build one development-guard (site-plan) request for the async batch lane.
+    `model` lets a caller override the flat app_settings default (e.g. a per-family route)."""
     if sreality_id_a == sreality_id_b:
         raise VisualMatchError("cannot compare a listing to itself")
     a, b = sorted((sreality_id_a, sreality_id_b))
-    model = llm_client.resolve_model(_SITE_PLAN_MODEL_KEY)
+    model = model or llm_client.resolve_model(_SITE_PLAN_MODEL_KEY)
     keys_a_ids = image_ids_a if a == sreality_id_a else image_ids_b
     keys_b_ids = image_ids_b if a == sreality_id_a else image_ids_a
     content = _build_site_plan_content(conn, keys_a_ids, keys_b_ids)
