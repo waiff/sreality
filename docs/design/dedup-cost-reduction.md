@@ -55,10 +55,19 @@
   pairs.** gpt-5-mini (reasoning) is best on recall (compare 88.3%, site recall 100%) but still 56–64%
   precision AND far too slow (~12 s/call, 63 min/run — the compare lane is ~30k calls/mo). The cheap
   VLM class is disqualified on PRECISION, not recall — a distinction the recall-only 07-11 pass could
-  not see. **Sonnet stays on all three forensic lanes.** The cost path stays the free-first arms + the
-  Anthropic batch −50% discount (Session 4) + embedding coverage — NOT a model swap. Per-pair evidence
-  is browsable on `/model-testing` (migration 303). gemini-2.5-pro/2.5-flash-lite retired for new
-  projects; Google raised 3.1 Pro to $2/$12 on Jul-2.
+  not see. Per-pair evidence is browsable on `/model-testing` (migration 303).
+  gemini-2.5-pro/2.5-flash-lite retired for new projects; Google raised 3.1 Pro to $2/$12 on Jul-2.
+  - **SUPERSEDED — the operator OVERRODE "Sonnet stays" (2026-07-13/14).** The precision analysis
+    above still holds, but the operator prioritized **provider diversification off Anthropic** (credit
+    depletes ~daily) over it and flipped **all three forensic lanes + enrichment to gpt-5-mini** via a
+    new OpenAI Batch lane (PR #787, live **2026-07-13 22:25 UTC**), then flipped the **cosine cheap
+    band (`dedup_visual_match_model_haiku`) + the LLM room-classify fallback (`llm_room_classify_model`)**
+    to gpt-5-mini on **2026-07-14 10:23 UTC** (PR A) once the Anthropic credit outage made the Haiku
+    cheap band 100%-error. The dedup funnel is now **Anthropic-free**; standing Anthropic burn ≈ $0
+    (only on-demand estimation / parse_url / summarize stay on Sonnet). The cost path is now free-first
+    arms + the **OpenAI** batch −50% (Session 4 engine-fed rebuild) + embedding coverage. Watch the
+    false-merge risk (gpt-5-mini site_plan precision 86→52 on the hard photo-identical stratum) — the
+    operator owns that audit; any backlog blitz stays gated on it.
 - **Encoder upgrades (operator idea, evaluated 2026-07-11): CLOSED.** The June-26 DINOv2
   A/B (results were buried in workflow logs) showed WORSE pair separation than CLIP B/32
   (-0.0014 vs -0.0044) with hard negatives at cosine 1.0000 — identical marketing renders

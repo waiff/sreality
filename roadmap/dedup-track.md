@@ -15,13 +15,24 @@
 > `docs/design/dedup-vision-and-backlog-overhaul.md` §2.1a for the full replay.
 > **Session 3 (2026-07-13)** ran the vision-model bake-off (`docs/design/dedup-vision-model-bakeoff-2026-07.md`):
 > GPT-5-mini, Qwen3-VL-235B/30B, Gemini-3.1-flash-lite benchmarked on all 3 forensic lanes ×
-> recall AND precision vs the frozen golden set. **Every cheap VLM has good recall but 36-66%
-> precision on confirmed-different pairs — Sonnet stays on all forensic lanes; the cost lever is
-> batch (Session 4), not a model swap.** Shipped 4 providers, migration 302 (`llm_calls.provider`
-> widened), migration 303 (`dedup_vision_bakeoff_results`), and a `/model-testing` explorer page.
-> **Session 4 (next)** = engine-side batch-lane rebuild (§6 Session-4 bullet). This whole
-> track file is a candidate for a future restructure (its own PR) to replace the stale D1/D2 body
-> below with a pointer-only index, per CLAUDE.md's roadmap-maintenance rule.
+> recall AND precision vs the frozen golden set. Every cheap VLM has good recall but 36-66%
+> precision on confirmed-different pairs — the bake-off recommended keeping Sonnet. Shipped 4
+> providers, migration 302 (`llm_calls.provider` widened), migration 303 (`dedup_vision_bakeoff_results`),
+> and a `/model-testing` explorer page.
+> **OPERATOR OVERRODE "Sonnet stays" (2026-07-13/14)** — driver is **provider diversification off
+> Anthropic** (credit depletes ~daily), not cost. All three forensic lanes + enrichment flipped to
+> **gpt-5-mini** via a new OpenAI Batch lane (PR #787, live 2026-07-13 22:25 UTC); the cosine cheap
+> band + LLM room-classify fallback flipped to gpt-5-mini on 2026-07-14 10:23 UTC (**PR A**). The
+> dedup funnel is now **Anthropic-free** (standing Anthropic burn ≈ $0). **PR A also:** fixed OpenAI
+> cached-token cost double-billing (#789), renumbered+applied migration 305 (enrichment batch tables,
+> ex-299 collision) + added a duplicate-migration-number CI gate (#790), and found gpt-5-mini bazos
+> enrichment 99.6%-broken (512 max_tokens starves the reasoning model — fix #791, DRAFT, needs a live
+> smoke-test). The batch **warmer stays ON** (operator decision 2026-07-14 — it proved the OpenAI batch
+> path live), superseding overhaul §1.2's "flip off now".
+> **Session 4 (next)** = engine-side batch-lane rebuild (§6 Session-4 bullet; replaces the warmer's
+> guessed work-list). **Session 5** = recency-first ordering + the DISTINCTIVE_IMAGES / per-family
+> dismissal design. This whole track file is a candidate for a future restructure (its own PR) to
+> replace the stale D1/D2 body below with a pointer-only index, per CLAUDE.md's roadmap-maintenance rule.
 
 ## Dedup + canonical listing track (parallel)
 
