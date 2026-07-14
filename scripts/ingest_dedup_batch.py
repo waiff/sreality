@@ -21,7 +21,8 @@ Usage (typically via .github/workflows/dedup_batches.yml):
 
     python -m scripts.ingest_dedup_batch
 
-Required env: SUPABASE_DB_URL, ANTHROPIC_API_KEY.
+Required env: SUPABASE_DB_URL + at least one provider key (ANTHROPIC_API_KEY
+and/or OPENAI_API_KEY) matching the providers of the in-flight batches polled.
 """
 
 from __future__ import annotations
@@ -63,8 +64,11 @@ def main() -> int:
     if not db_url:
         print("ERROR: SUPABASE_DB_URL is not set.", file=sys.stderr)
         return 2
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        print("ERROR: ANTHROPIC_API_KEY is not set.", file=sys.stderr)
+    if not (os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("OPENAI_API_KEY")):
+        print(
+            "ERROR: no provider key set; need ANTHROPIC_API_KEY and/or OPENAI_API_KEY.",
+            file=sys.stderr,
+        )
         return 2
 
     import psycopg

@@ -233,11 +233,17 @@ def _completion_from_raw(raw: dict[str, Any], *, model: str) -> Completion:
         ))
 
     usage_raw = raw.get("usage") or {}
-    cached = (usage_raw.get("prompt_tokens_details") or {}).get("cached_tokens") or 0
+    prompt_tokens = int(usage_raw.get("prompt_tokens") or 0)
+    cached = int((usage_raw.get("prompt_tokens_details") or {}).get("cached_tokens") or 0)
     usage = Usage(
-        input_tokens=int(usage_raw.get("prompt_tokens") or 0),
+        # OpenAI/DashScope report prompt_tokens INCLUSIVE of the cached hits; the
+        # neutral Usage contract keeps input_tokens and cache_read_tokens DISJOINT
+        # (as Anthropic natively does) so compute_cost_usd bills each token once.
+        # Without the subtraction the cached fraction is charged at input+cache_read
+        # (~11x its true cache_read rate). max() guards a malformed cached>prompt.
+        input_tokens=max(prompt_tokens - cached, 0),
         output_tokens=int(usage_raw.get("completion_tokens") or 0),
-        cache_read_tokens=int(cached),
+        cache_read_tokens=cached,
         cache_write_tokens=0,
     )
     finish_reason = str(choices[0].get("finish_reason") or "")

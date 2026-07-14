@@ -129,7 +129,10 @@ def test_poll_batch_status_mapping(status, ended):
     st = _prov(fake).poll_batch("batch-9")
     assert st.ended is ended
     assert st.raw_status == status
-    assert st.counts == {"total": 5, "completed": 2, "failed": 1}
+    # OpenAI's completed/failed are normalized to the neutral succeeded/errored
+    # vocabulary that scripts/ingest_dedup_batch reads (the Anthropic provider's
+    # keys) — otherwise an OpenAI batch NULLs dedup_batches.{succeeded,errored}_count.
+    assert st.counts == {"total": 5, "succeeded": 2, "errored": 1}
 
 
 def test_iter_batch_results_parses_success_and_error():
