@@ -47,9 +47,24 @@
 > for a `gpt-5-mini` model id — a pre-existing routing bug, unrelated to this session's changes.
 > Flip `dedup_engine_batch_defer_enabled` on to activate; watch `duration_ms=0 AND error IS NULL`
 > attribution (the batch/warm-consume signature) to confirm ~1% → ~100% pair-overlap.
-> **Session 5 (next)** = recency-first ordering + the DISTINCTIVE_IMAGES / per-family
-> dismissal design. This whole track file is a candidate for a future restructure (its own PR) to
-> replace the stale D1/D2 body below with a pointer-only index, per CLAUDE.md's roadmap-maintenance rule.
+> **Session 5a (2026-07-14, shipped)** = recency-first compare ordering (overhaul §5/§6 point 2).
+> ONE shared recency signal (`properties.first_seen_at`) feeds two mechanisms: the candidate
+> drain now ranks its whole due-set newest-first via `priority_property_order` (previously
+> unordered — obec/street-alphabetical load order decided which pairs got a paid look each run);
+> the three cursor-bearing sweep lanes (full street, geo, byt-geo) each pull a bounded
+> "recency head" (`_recency_head_candidate_ids`, tier + 7-day-window scoped, migration 307's
+> `dedup_recency_backlog` view is the same basis) to the front of the pass, explicitly composed
+> with the `scan_cursor` lexicographic frontier so a fresh pair jumps the queue without ever
+> moving the PERSISTED cursor backward (`frontier_keys` in `run_engine` — only tail-processed
+> keys advance it). Write-once `first_engine_decision_at` (migration 307) instruments "time to
+> first engine look" separately from `last_engine_decision_at` (which re-decisions overwrite).
+> Baseline backlog re-verified live 2026-07-14: geo tier carries ~85% of the unresolved-and-fresh
+> backlog (700/<1d, 1391/<3d, 5521/<7d of 39,983 total proposed) — the geo lane's head matters
+> most in practice. **Session 5b (next)** = the DISTINCTIVE_IMAGES / per-family dismissal design
+> (byt/non-byt image-role registry unification + pozemek dismissal shapes, golden-set replay,
+> operator sign-off required before any flip). This whole track file is a candidate for a future
+> restructure (its own PR) to replace the stale D1/D2 body below with a pointer-only index, per
+> CLAUDE.md's roadmap-maintenance rule.
 
 ## Dedup + canonical listing track (parallel)
 
