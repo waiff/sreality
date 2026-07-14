@@ -25,17 +25,18 @@
   only; the merge record is spotless (0/49k unmerged) so it prevents ≈0 real false merges; and
   it would move development pairs from the cheap gate-dismissal to the pricier visual path
   (cost-neutral-to-negative). Not worth a change to the load-bearing pHash query.
-- **Phase 4.1 (targeted batch lane): in flight** — `submit_dedup_batch` now warms only the
-  first-priority room per pair (`--warm-rooms 1`) instead of the ~4-room superset (79-93% of
-  which the stop-at-first-High replay never reached). Crons restored, gated by
-  `dedup_batch_warmer_enabled` (default off). ~50% off the decisive-room compares when enabled.
-- **Phase 4.1 lane coverage (2026-07-10): SHIPPED** — `--lane street|geo|candidates` closes the
-  street-only gap vs §4.1's lane list. `candidates` = exactly the proposed review-queue pairs
-  (both tiers) — the queue-blitz population. Room grouping is now CLIP-FIRST when the engine
-  prefers CLIP tags (warm keys match the replay; LLM classify only as the same fallback the
-  engine uses), and geo-keyed pairs go through `_make_geo_classify` with the operator's area
-  tolerance. Batch create retries transient 5xx/429/connection errors (the Jul-4 502 killed a
-  whole run).
+- **Phase 4.1 (targeted batch lane, original "warm only the first-priority room" design):
+  SUPERSEDED (2026-07-14).** `dedup-vision-and-backlog-overhaul.md` §1 found the speculative
+  pre-warmer (a second process re-deriving the engine's work-list — this section's original
+  `submit_dedup_batch` collect() funnel, `--lane street|geo|candidates`, `--warm-rooms`) drew a
+  near-disjoint pair set from the live engine (~1% overlap) — six independent divergences, not
+  fixable by retargeting. **Rebuilt as engine-fed deferral (Session 4, PR merged 2026-07-14):**
+  the engine's own sweep lanes (full street, geo, byt-geo, candidates — never dirty/realtime)
+  spool a cold call straight into `dedup_batch_requests` (`batch_id NULL`) instead of paying
+  inline, gated by `dedup_engine_batch_defer_enabled` (default off); `submit_dedup_batch`'s only
+  job is now flushing that spool. Selection identity holds by construction. `dedup_batch_warmer_enabled`
+  is retired (inert, kept only for historical `app_settings` rows). Full design +
+  status: `dedup-vision-and-backlog-overhaul.md` §1.2/§5, `roadmap/dedup-track.md`.
 - **Phase 4 item 2 (facade-as-dismisser, fid5): SHIPPED (2026-07-10), default OFF.**
   `dedup_facade_dismiss_enabled`: a confident facade Low qualifies for auto-dismiss on non-byt
   (byt never; all other conservatism unchanged — all-rooms-verdicted, High merges, Medium

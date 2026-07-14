@@ -69,12 +69,8 @@ def main() -> int:
     from api.providers.anthropic import AnthropicProvider
     from api.providers.openai import OpenAIProvider
     from scripts.enrich_listing_descriptions import _select_pending
-    from scripts.submit_condition_batch import (
-        MAX_BATCH_BYTES,
-        MAX_BATCH_REQUESTS,
-        should_flush,
-    )
     from toolkit.bazos_enrichment import build_enrich_request, resolve_enrichment_model
+    from toolkit.batch_submit import MAX_BATCH_BYTES, MAX_BATCH_REQUESTS, should_flush
 
     provider_map = {"anthropic": AnthropicProvider(), "openai": OpenAIProvider()}
     with psycopg.connect(db_url, autocommit=True, prepare_threshold=None) as conn:
@@ -179,7 +175,11 @@ def _submit_chunk(
             LOG.info("BATCH sample %s -> sreality_id=%d snapshot_id=%d",
                      custom_id, sid, snapshot_id)
         return
-    provider_batch_id = provider.submit_batch(items)
+    from toolkit.batch_submit import submit_chunk_with_retry
+    provider_batch_id = submit_chunk_with_retry(provider, items, label="enrich")
+    if provider_batch_id is None:
+        LOG.error("BATCH chunk dropped (submit failed) requests=%d model=%s", len(items), model)
+        return
     batch_id = _insert_batch(
         conn, provider=provider.name, provider_batch_id=provider_batch_id,
         model=model, mapping=mapping,

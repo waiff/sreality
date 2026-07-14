@@ -205,11 +205,11 @@ class CompletionProvider(Protocol):
 
 
 class BatchCapableProvider(CompletionProvider, Protocol):
-    """A provider that also supports the async Message Batches API.
+    """A provider that also supports an async batch-submission API.
 
-    Only Anthropic implements this today. Callers that need batch
-    submission type against this protocol; the synchronous agent loop
-    only needs `CompletionProvider`.
+    Anthropic and OpenAI both implement this; Gemini and Qwen don't. Callers
+    that need batch submission type against this protocol; the synchronous
+    agent loop only needs `CompletionProvider`.
     """
 
     def build_batch_request_params(

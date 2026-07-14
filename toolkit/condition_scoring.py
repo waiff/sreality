@@ -1,7 +1,7 @@
 """score_listing_condition: per-listing building + apartment condition scoring.
 
 Phase B of the condition-scoring feature. For one listing's latest
-snapshot, calls Claude with the curated marker dictionary + 5-level
+snapshot, calls the LLM with the curated marker dictionary + 5-level
 rubric (both injected from app_settings at call time) and returns
 building_level / apartment_level (1..5) with per-axis confidence
 and the marker IDs the LLM relied on.
@@ -235,12 +235,14 @@ def build_scoring_request(
 ) -> dict[str, Any]:
     """Assemble the LLM request for one listing's condition score.
 
-    Returns Anthropic-shaped `system` (str) / `messages` / `tools`
+    Returns provider-neutral `system` (str) / `messages` / `tools`
     dicts plus the resolved `model` and the effective `n_images`. The
     synchronous path feeds this straight to `LLMClient.call` (which
-    accepts dict messages); the batch submitter feeds it to
-    `AnthropicProvider.build_batch_request_params`. Keeping one builder
-    guarantees both paths share an identical cached system+tools prefix.
+    accepts dict messages); the batch submitter feeds it to the
+    resolved provider's `build_batch_request_params` (Anthropic today —
+    condition scoring hasn't been flipped multi-provider). Keeping one
+    builder guarantees both paths share an identical cached system+tools
+    prefix.
 
     `context` is an optional prebuilt `build_scoring_context` result;
     when omitted the static settings are resolved per call (unchanged

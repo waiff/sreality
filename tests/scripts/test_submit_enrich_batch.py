@@ -5,8 +5,8 @@ functions are all monkeypatched at the module attribute they're imported from
 (main() does every import lazily, so patching before calling main() takes
 effect). Covers the in-flight skip and the chunk-flush boundary; the
 should_flush cap arithmetic itself is already pinned in
-tests/scripts/test_submit_condition_batch.py — this lane reuses that exact
-function/constants.
+tests/test_batch_submit.py — this lane reuses that exact function/constants
+from toolkit.batch_submit (shared with the dedup and condition batch lanes).
 """
 
 from __future__ import annotations
@@ -17,8 +17,8 @@ from typing import Any
 
 import api.providers.anthropic as anthropic_module
 import scripts.enrich_listing_descriptions as enrich_mod
-import scripts.submit_condition_batch as submit_condition_batch
 import scripts.submit_enrich_batch as sub
+import toolkit.batch_submit as batch_submit
 import toolkit.bazos_enrichment as bazos_enrichment
 
 
@@ -167,8 +167,8 @@ def test_build_enrich_request_none_is_skipped(monkeypatch: Any) -> None:
 
 def test_chunk_flush_boundary_creates_multiple_batches(monkeypatch: Any) -> None:
     # Force a flush after every single request so 3 candidates -> 3 batches.
-    monkeypatch.setattr(submit_condition_batch, "MAX_BATCH_REQUESTS", 1)
-    monkeypatch.setattr(submit_condition_batch, "MAX_BATCH_BYTES", 45 * 1024 * 1024)
+    monkeypatch.setattr(batch_submit, "MAX_BATCH_REQUESTS", 1)
+    monkeypatch.setattr(batch_submit, "MAX_BATCH_BYTES", 45 * 1024 * 1024)
 
     def build_fn(conn: Any, sid: int, *, model: str) -> dict[str, Any]:
         return _fake_request(sid)

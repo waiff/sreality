@@ -1,17 +1,21 @@
-name: "Dedup engine (vision batch warm-up)"
+name: "Dedup engine (vision batch flush)"
 
-# Async dedup-vision via the Anthropic Message Batches API (50% cheaper than the
-# synchronous dedup engine's per-call vision, recall-identical). PRE-WARMS the
-# engine's classify/compare/site_plan caches; the daily "Dedup engine
-# (street + disposition)" run then REPLAYS unchanged over the warm caches and
-# produces the identical merges for free. Two modes, selected by the `mode`
-# dispatch input:
+# Async dedup-vision via the provider Batch APIs (Anthropic or OpenAI — 50%
+# cheaper than the synchronous dedup engine's per-call vision, recall-identical).
+# Engine-fed deferral (dedup-cost-reduction.md §4.1): the dedup engine itself
+# (scripts.dedup_engine, gated by app_settings.dedup_engine_batch_defer_enabled)
+# spools a cold classify/compare/site-plan/floor-plan call it would otherwise pay
+# for inline into dedup_batch_requests (batch_id NULL) instead of calling the LLM,
+# and defers the pair; the engine's OWN next pass replays over the now-warm cache.
+# This workflow does NOT decide what to warm (that guesswork — the old
+# collect()-based pre-warmer — was retired: a second process re-deriving the
+# engine's work-list could only ever approximate it). Two modes, selected by the
+# `mode` dispatch input:
 #
-#   submit  — run the engine's FREE funnel (rules A/B/C + pHash + cross-source
-#             gate) and enqueue the cross-source pairs' classify/compare/site_plan
-#             requests as size-bounded batches (scripts.submit_dedup_batch). Two
-#             waves fall out across runs: classify first, then compare/site_plan
-#             once classify ingests. Does NO merges.
+#   submit  — flush whatever the engine has spooled: chunk unsubmitted requests
+#             per-provider under the size/count caps and submit each chunk as one
+#             Batch API call (scripts.submit_dedup_batch). Does NO merges, touches
+#             no R2 bytes (the engine already built the request at defer time).
 #   ingest  — poll in-flight batches; on completion, write each result to its
 #             cache (the same row the sync tool writes) + one llm_calls row at the
 #             50% batch-discounted cost (scripts.ingest_dedup_batch). Idempotent.
@@ -20,64 +24,30 @@ name: "Dedup engine (vision batch warm-up)"
 # untagged (no `# portal:` line) so it appears in Settings > Workflows, not any
 # one portal's pipeline panel.
 #
-# TARGETED re-enable (Phase 4.1, 2026-07): the first warmer was retired because an
-# all-rooms pre-buy is mostly wasted by a stop-at-first-High replay (79-93% of its
-# compare requests never drove a decision). The submit lane now warms only the
-# FIRST-PRIORITY room per pair (--warm-rooms 1) — the room the engine tries first
-# and stops at on a merge — plus the would-merge floor plan, dropping the tail-room
-# over-buy while still discounting the decisive room at 50%. The crons are restored
-# but the master gate dedup_batch_warmer_enabled is STILL false by default, so
-# scheduled runs stay no-ops until the operator flips it; a one-off warm/ingest is
-# also one click via workflow_dispatch.
-#
-# Required GitHub secrets: SUPABASE_DB_URL, ANTHROPIC_API_KEY, and R2_* (submit
-# downloads image bytes to build the vision requests).
+# Required GitHub secrets: SUPABASE_DB_URL, ANTHROPIC_API_KEY, OPENAI_API_KEY —
+# whichever the spooled requests' models resolve to.
 
 on:
   schedule:
-    - cron: "0 */6 * * *"   # submit: enqueue the next slice of first-priority-room warm-ups
+    - cron: "0 */6 * * *"   # submit: flush whatever the engine has spooled
     - cron: "30 * * * *"    # ingest: poll + persist completed batches
   workflow_dispatch:
     inputs:
       mode:
-        description: "submit a new batch, or ingest completed ones"
+        description: "submit (flush the spool), or ingest completed batches"
         required: true
         default: "ingest"
         type: choice
         options:
           - "ingest"
           - "submit"
-      max_pairs:
-        description: "[submit] Max visual candidate pairs examined per run"
-        required: false
-        default: "4000"
-        type: string
       max_requests:
-        description: "[submit] Cap total vision requests enqueued per run"
+        description: "[submit] Max spooled requests to flush per run"
         required: false
-        default: "1500"
+        default: "3000"
         type: string
-      max_room_attempts:
-        description: "[submit] The engine's per-pair room cap (upper bound on warm-rooms)"
-        required: false
-        default: "4"
-        type: string
-      warm_rooms:
-        description: "[submit] Like-room compares warmed per pair (1 = first-priority room only)"
-        required: false
-        default: "1"
-        type: string
-      lane:
-        description: "[submit] Population to warm: street funnel, geo funnel, or 'candidates' (the proposed review-queue pairs — the blitz population)"
-        required: false
-        default: "street"
-        type: choice
-        options:
-          - "street"
-          - "geo"
-          - "candidates"
       dry_run:
-        description: "[submit] Report what would be enqueued without submitting"
+        description: "[submit] Report what would be submitted without flushing"
         required: false
         default: "false"
         type: choice
@@ -92,9 +62,10 @@ concurrency:
 jobs:
   batch:
     runs-on: ubuntu-latest
-    # 75 = the collect() time budget (max-seconds 3000 = 50 min) + pip/setup +
-    # the flush/submit tail. At 60, 3 of 6 Jul-10 submits were killed mid-run.
-    timeout-minutes: 75
+    # The flush step is now pure DB + provider-submit (no R2 fetch, no funnel
+    # traversal — the engine already built every request at defer time), so this
+    # runs in minutes; the generous timeout is a backstop, not a real budget.
+    timeout-minutes: 20
     permissions:
       contents: read
     env:
@@ -102,10 +73,6 @@ jobs:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       # A lane flipped to gpt-5-mini submits/ingests via OpenAI's batch tier.
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
-      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-      R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
     steps:
       - uses: actions/checkout@v6
 
@@ -131,13 +98,9 @@ jobs:
           fi
 
           if [ "$MODE" = "submit" ]; then
-            ARGS="--max-pairs ${{ inputs.max_pairs || '4000' }}"
-            ARGS="$ARGS --max-requests ${{ inputs.max_requests || '1500' }}"
-            ARGS="$ARGS --max-room-attempts ${{ inputs.max_room_attempts || '4' }}"
-            ARGS="$ARGS --warm-rooms ${{ inputs.warm_rooms || '1' }}"
-            ARGS="$ARGS --lane ${{ inputs.lane || 'street' }}"
+            ARGS="--max-requests ${{ inputs.max_requests || '3000' }}"
             if [ "${{ inputs.dry_run }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
-            echo "submit with: $ARGS"
+            echo "submit (flush spool) with: $ARGS"
             python -m scripts.submit_dedup_batch $ARGS
           else
             echo "ingest in-flight batches"
