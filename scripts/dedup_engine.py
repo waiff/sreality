@@ -1261,13 +1261,18 @@ def _both_have_site_plan(
     return result
 
 
-def _classify_or_none(classify_fn: Any, sreality_id: int) -> list[dict[str, Any]] | None:
+_DEFERRED = "deferred"  # sentinel: classify_fn spooled a batch request instead of a live call
+
+
+def _classify_or_none(classify_fn: Any, sreality_id: int) -> list[dict[str, Any]] | str | None:
     if classify_fn is None:
         return None
     try:
         res = classify_fn(sreality_id)
         if res is None:  # cache-only: not fully warmed yet -> wait for the batch lane
             return None
+        if res.get("deferred"):
+            return _DEFERRED
         return res["data"]["images"]
     except Exception as exc:  # noqa: BLE001 - one bad listing must not kill the run
         LOG.warning("classify %s failed: %s", sreality_id, exc)
@@ -1306,6 +1311,11 @@ def _resolve_visual(
     """
     imgs_a = _classify_or_none(classify_fn, a.sreality_id)
     imgs_b = _classify_or_none(classify_fn, b.sreality_id)
+    if imgs_a == _DEFERRED or imgs_b == _DEFERRED:
+        # A cold classify call was spooled into the batch tier (§4.1) instead of
+        # paid inline — retry next pass once the batch lane warms it, NOT queue
+        # (mirrors the floor-plan gate's existing defer semantics).
+        return {"action": "defer", "reason": "batch_pending"}
     if imgs_a is None or imgs_b is None:
         return {"action": "queue", "reason": "no_images"}
 
@@ -1318,6 +1328,8 @@ def _resolve_visual(
     site_b = [i["image_id"] for i in imgs_b if i["room_type"] == SITE_PLAN_ROOM_TYPE]
     if site_a and site_b and site_plan_fn is not None and vision_budget[0] > 0:
         sp = site_plan_fn(a.sreality_id, b.sreality_id, site_a, site_b)
+        if sp is not None and sp.get("deferred"):
+            return {"action": "defer", "reason": "batch_pending"}
         if sp is not None and not sp.get("cache_hit"):
             vision_budget[0] -= 1  # only a COLD (paid) call consumes the budget
         if sp is not None and sp.get("verdict") == "different_unit":
@@ -1380,6 +1392,11 @@ def _resolve_visual(
         tried += 1
         verdict_obj = compare_fn(
             a.sreality_id, b.sreality_id, room, by_room_a[room], by_room_b[room], model)
+        if verdict_obj is not None and verdict_obj.get("deferred"):
+            # A cold room compare was spooled into the batch tier — stop trying
+            # further rooms this pass (mirrors --warm-rooms=1: only the first
+            # unresolved room is worth buying) and defer the WHOLE pair.
+            return {"action": "defer", "reason": "batch_pending", "room_type": room}
         if verdict_obj is None:
             continue
         # Only a COLD (cache-miss) call consumes the budget — a warm cache hit is
@@ -2247,9 +2264,14 @@ def resolve_pair(conn: Any, a: ListingKey, b: ListingKey, *, street_key: str,
         ctx.auto_dismissed_pairs.add(cp)
         _audit(ctx.audit, a, b, "visual", "dismissed", factors, source="engine")
     elif outcome["action"] == "defer":
-        # Floor-plan verdict not warmed yet -> skip, re-try next run (the batch lane
-        # warms it). NOT the manual queue.
-        stats["floor_plan_deferred"] += 1
+        # Verdict not warmed yet -> skip, re-try next run (the batch lane warms
+        # it). NOT the manual queue. "batch_pending" = this pass spooled a NEW
+        # cold classify/compare/site-plan request (§4.1 engine-fed deferral);
+        # "floor_plan_pending" = the (pre-existing) floor-plan gate is waiting
+        # on an already-spooled/warmed verdict. Separate counters so the
+        # success gate can watch spool growth vs consumption independently.
+        key = "batch_deferred" if outcome.get("reason") == "batch_pending" else "floor_plan_deferred"
+        stats[key] += 1
         ctx.seen_property_pairs.discard(cp)  # let another representative retry this run
     elif ctx.enqueue_unresolved:
         if not ctx.dry_run:
@@ -2403,7 +2425,8 @@ def run_engine(
         "auto_address": 0, "auto_phash": 0, "auto_phash_single": 0, "auto_visual": 0, "auto_attr": 0, "auto_cosine": 0,
         "queued": 0, "vision_calls": 0,
         "auto_dismissed": 0, "reconciled": 0, "skipped_unresolved": 0,
-        "floor_plan_deferred": 0, "clip_deferred": 0, "download_deferred": 0, "truncated": 0,
+        "floor_plan_deferred": 0, "batch_deferred": 0, "clip_deferred": 0,
+        "download_deferred": 0, "truncated": 0,
         "clip_classified": 0, "clip_cosine_calls": 0,
         "routed_haiku": 0, "routed_sonnet": 0,
         # Migration 271 observability: why a run stopped, what oversized groups cost,
@@ -2676,16 +2699,32 @@ def _count_vision_error(error_count: list[int] | None) -> None:
                     "rest of the run (cache reads still served)", VISION_ERROR_BREAKER)
 
 
+def _batch_defer_providers() -> dict[str, Any]:
+    """The batch-capable providers a deferring fn may spool a request to —
+    same set scripts/submit_dedup_batch.py flushes with. A model whose
+    provider isn't here (gemini/qwen) can't be deferred; the deferring fn's
+    caller falls back to its own miss handling."""
+    from api.providers.anthropic import AnthropicProvider
+    from api.providers.openai import OpenAIProvider
+    return {"anthropic": AnthropicProvider(), "openai": OpenAIProvider()}
+
+
 def _build_classify_fn(
     conn: Any, *, prefer_clip: bool = False, clip_model: str | None = None,
     clip_counter: list[int] | None = None, error_count: list[int] | None = None,
+    defer_to_batch: bool = False,
 ) -> Any:
     from api.dependencies import get_providers
     from api.llm_client import LLMClient
     from toolkit.clip_dedup import clip_room_grouping
-    from toolkit.image_classification import cached_classification, classify_listing_images
+    from toolkit.image_classification import (
+        build_classify_request,
+        cached_classification,
+        classify_listing_images,
+    )
     llm = LLMClient(conn, providers=get_providers())
     classify_model = llm.resolve_model("llm_room_classify_model")
+    defer_providers = _batch_defer_providers() if defer_to_batch else None
 
     def _fn(sreality_id: int) -> dict[str, Any] | None:
         # Prefer the FREE CLIP room tags; fall back to the paid LLM classify only
@@ -2699,6 +2738,22 @@ def _build_classify_fn(
                     {"image_id": iid, "room_type": rt}
                     for rt, ids in grouping.items() for iid in ids
                 ]}}
+        if defer_to_batch:
+            state, rooms = cached_classification(
+                conn, sreality_id=sreality_id, model=classify_model)
+            if state == "classified" and rooms is not None:
+                return {"data": {"images": [
+                    {"image_id": iid, "room_type": rt}
+                    for rt, ids in rooms.items() for iid in ids
+                ]}}
+            from toolkit.dedup_batch_defer import enqueue_deferred_request
+            spooled = enqueue_deferred_request(
+                conn, defer_providers, custom_id=f"cls-{sreality_id}",
+                kind="classify", model=classify_model, sreality_id_a=sreality_id,
+                sreality_id_b=None, room_type=None,
+                build_fn=lambda: build_classify_request(conn, llm, sreality_id=sreality_id),
+            )
+            return {"deferred": True} if spooled else None
         if _breaker_open(error_count):
             state, rooms = cached_classification(
                 conn, sreality_id=sreality_id, model=classify_model)
@@ -2717,19 +2772,43 @@ def _build_classify_fn(
     return _fn
 
 
-def _build_compare_fn(conn: Any, *, error_count: list[int] | None = None) -> Any:
+def _build_compare_fn(
+    conn: Any, *, error_count: list[int] | None = None, defer_to_batch: bool = False,
+) -> Any:
     from api.dependencies import get_providers
     from api.llm_client import LLMClient
-    from toolkit.visual_match import cached_visual_verdict, compare_listings_visually
+    from toolkit.visual_match import (
+        build_compare_request,
+        cached_visual_verdict,
+        compare_listings_visually,
+    )
     llm = LLMClient(conn, providers=get_providers())
     default_model = llm.resolve_model("llm_visual_match_model")
+    defer_providers = _batch_defer_providers() if defer_to_batch else None
 
     def _fn(a: int, b: int, room_type: str, ids_a: list[int], ids_b: list[int],
             model: str | None = None) -> dict[str, Any] | None:
+        use_model = model or default_model
+        if defer_to_batch:
+            v = cached_visual_verdict(
+                conn, sreality_id_a=a, sreality_id_b=b, room_type=room_type, model=use_model)
+            if v is not None:
+                return {"verdict": v, "rationale": None, "cache_hit": True}
+            ca, cb = sorted((a, b))
+            from toolkit.dedup_batch_defer import enqueue_deferred_request
+            spooled = enqueue_deferred_request(
+                conn, defer_providers, custom_id=f"cmp-{ca}-{cb}-{room_type}",
+                kind="compare", model=use_model, sreality_id_a=ca, sreality_id_b=cb,
+                room_type=room_type,
+                build_fn=lambda: build_compare_request(
+                    conn, llm, sreality_id_a=a, sreality_id_b=b, room_type=room_type,
+                    image_ids_a=ids_a, image_ids_b=ids_b),
+            )
+            return {"deferred": True} if spooled else None
         if _breaker_open(error_count):
             v = cached_visual_verdict(
                 conn, sreality_id_a=a, sreality_id_b=b, room_type=room_type,
-                model=model or default_model)
+                model=use_model)
             return {"verdict": v, "rationale": None, "cache_hit": True} if v is not None else None
         try:
             res = compare_listings_visually(
@@ -2745,14 +2824,37 @@ def _build_compare_fn(conn: Any, *, error_count: list[int] | None = None) -> Any
     return _fn
 
 
-def _build_site_plan_fn(conn: Any, *, error_count: list[int] | None = None) -> Any:
+def _build_site_plan_fn(
+    conn: Any, *, error_count: list[int] | None = None, defer_to_batch: bool = False,
+) -> Any:
     from api.dependencies import get_providers
     from api.llm_client import LLMClient
-    from toolkit.visual_match import cached_site_plan_verdict, compare_listing_site_plans
+    from toolkit.visual_match import (
+        build_site_plan_request,
+        cached_site_plan_verdict,
+        compare_listing_site_plans,
+    )
     llm = LLMClient(conn, providers=get_providers())
     site_plan_model = llm.resolve_model("llm_site_plan_match_model")
+    defer_providers = _batch_defer_providers() if defer_to_batch else None
 
     def _fn(a: int, b: int, ids_a: list[int], ids_b: list[int]) -> dict[str, Any] | None:
+        if defer_to_batch:
+            v = cached_site_plan_verdict(
+                conn, sreality_id_a=a, sreality_id_b=b, model=site_plan_model)
+            if v is not None:
+                return {"verdict": v, "rationale": None, "cache_hit": True}
+            ca, cb = sorted((a, b))
+            from toolkit.dedup_batch_defer import enqueue_deferred_request
+            spooled = enqueue_deferred_request(
+                conn, defer_providers, custom_id=f"spl-{ca}-{cb}",
+                kind="site_plan", model=site_plan_model, sreality_id_a=ca, sreality_id_b=cb,
+                room_type=None,
+                build_fn=lambda: build_site_plan_request(
+                    conn, llm, sreality_id_a=a, sreality_id_b=b,
+                    image_ids_a=ids_a, image_ids_b=ids_b),
+            )
+            return {"deferred": True} if spooled else None
         if _breaker_open(error_count):
             v = cached_site_plan_verdict(
                 conn, sreality_id_a=a, sreality_id_b=b, model=site_plan_model)
@@ -2770,14 +2872,40 @@ def _build_site_plan_fn(conn: Any, *, error_count: list[int] | None = None) -> A
     return _fn
 
 
-def _build_floor_plan_fn(conn: Any, *, error_count: list[int] | None = None) -> Any:
+def _build_floor_plan_fn(
+    conn: Any, *, error_count: list[int] | None = None, defer_to_batch: bool = False,
+) -> Any:
     from api.dependencies import get_providers
     from api.llm_client import LLMClient
-    from toolkit.visual_match import cached_floor_plan_verdict, compare_listing_floor_plans
+    from toolkit.visual_match import (
+        build_floor_plan_request,
+        cached_floor_plan_verdict,
+        compare_listing_floor_plans,
+    )
     llm = LLMClient(conn, providers=get_providers())
     floor_plan_model = llm.resolve_model("llm_floor_plan_match_model")
+    defer_providers = _batch_defer_providers() if defer_to_batch else None
 
     def _fn(a: int, b: int, ids_a: list[int], ids_b: list[int]) -> dict[str, Any] | None:
+        if defer_to_batch:
+            v = cached_floor_plan_verdict(
+                conn, sreality_id_a=a, sreality_id_b=b, model=floor_plan_model)
+            if v is not None:
+                return {"verdict": v, "rationale": None, "cache_hit": True}
+            # No sentinel needed: _floor_plan_gate already treats a None result
+            # as 'defer' (the pre-existing floor_plan_pending semantics), so
+            # spooling here and returning None reuses that path unchanged.
+            ca, cb = sorted((a, b))
+            from toolkit.dedup_batch_defer import enqueue_deferred_request
+            enqueue_deferred_request(
+                conn, defer_providers, custom_id=f"fpl-{ca}-{cb}",
+                kind="floor_plan", model=floor_plan_model, sreality_id_a=ca, sreality_id_b=cb,
+                room_type=None,
+                build_fn=lambda: build_floor_plan_request(
+                    conn, llm, sreality_id_a=a, sreality_id_b=b,
+                    image_ids_a=ids_a, image_ids_b=ids_b),
+            )
+            return None
         if _breaker_open(error_count):
             v = cached_floor_plan_verdict(
                 conn, sreality_id_a=a, sreality_id_b=b, model=floor_plan_model)
@@ -3463,11 +3591,21 @@ def main() -> int:
         # listings were served from CLIP rather than the paid LLM classify.
         ck = {"prefer_clip": clip["prefer_clip"], "clip_model": clip["clip_model"],
               "clip_counter": clip_counter, "error_count": vision_errors}
+        # Engine-fed batch deferral (§4.1): sweep lanes (full street/candidates via
+        # --free, geo/byt-geo via plain --max-vision-calls) spool a cold call into
+        # dedup_batch_requests instead of paying for it inline. NEVER for --dirty (the
+        # GH Actions dirty cron) — the realtime worker's dedup lane doesn't reach this
+        # branch at all (it builds its fns via build_free_engine_kw, a separate code
+        # path), so both latency-critical lanes stay synchronous regardless of the flag.
+        defer_to_batch = (
+            bool(read_setting(conn, "dedup_engine_batch_defer_enabled")) and not args.dirty
+        )
         LOG.info(
             "ENGINE auto_merge_enabled=%s autodismiss=%s prefer_clip=%s cosine=%s "
-            "shadow=%s cache_only=%s free=%s geo=%s",
+            "shadow=%s cache_only=%s free=%s geo=%s defer_to_batch=%s",
             auto_merge_enabled, autodismiss, clip["prefer_clip"],
             clip["cosine_enabled"], args.shadow, args.cache_only, args.free, run_geo,
+            defer_to_batch,
         )
 
         # Real-time dirty drain: the claim/scoped-load/clear/run-row cycle lives in
@@ -3492,11 +3630,15 @@ def main() -> int:
             #      fn (its single Sonnet check on would-merge both-plan pairs, Option C); budget 0
             #      = the $0 cache-only fn (consume warmed verdicts, defer the rest).
             if auto_merge_enabled and args.compare_budget > 0:
-                classify_fn = _build_classify_fn(conn, **ck)
-                compare_fn = _build_compare_fn(conn, error_count=vision_errors)
-                site_plan_fn = _build_site_plan_fn(conn, error_count=vision_errors)
+                classify_fn = _build_classify_fn(conn, defer_to_batch=defer_to_batch, **ck)
+                compare_fn = _build_compare_fn(
+                    conn, error_count=vision_errors, defer_to_batch=defer_to_batch)
+                site_plan_fn = _build_site_plan_fn(
+                    conn, error_count=vision_errors, defer_to_batch=defer_to_batch)
             floor_plan_fn = (
-                _build_floor_plan_fn(conn, error_count=vision_errors) if floor_plan_budget > 0
+                _build_floor_plan_fn(
+                    conn, error_count=vision_errors, defer_to_batch=defer_to_batch)
+                if floor_plan_budget > 0
                 else _build_cache_only_floor_plan_fn(conn)
             )
         elif auto_merge_enabled and args.cache_only:
@@ -3504,13 +3646,16 @@ def main() -> int:
             classify_fn, compare_fn, site_plan_fn, floor_plan_fn = _build_cache_only_fns(
                 conn, **ck)
         elif auto_merge_enabled and args.max_vision_calls > 0:
-            classify_fn = _build_classify_fn(conn, **ck)
-            compare_fn = _build_compare_fn(conn, error_count=vision_errors)
-            site_plan_fn = _build_site_plan_fn(conn, error_count=vision_errors)
-            floor_plan_fn = _build_floor_plan_fn(conn, error_count=vision_errors)
+            classify_fn = _build_classify_fn(conn, defer_to_batch=defer_to_batch, **ck)
+            compare_fn = _build_compare_fn(
+                conn, error_count=vision_errors, defer_to_batch=defer_to_batch)
+            site_plan_fn = _build_site_plan_fn(
+                conn, error_count=vision_errors, defer_to_batch=defer_to_batch)
+            floor_plan_fn = _build_floor_plan_fn(
+                conn, error_count=vision_errors, defer_to_batch=defer_to_batch)
         elif auto_merge_enabled:
             # pHash fast-path still needs room labels to gate on interior shots.
-            classify_fn = _build_classify_fn(conn, **ck)
+            classify_fn = _build_classify_fn(conn, defer_to_batch=defer_to_batch, **ck)
         # When auto-merge is off the engine never reaches the visual step, so we
         # skip building the (LLM-backed) classify/compare fns entirely.
 
@@ -3632,13 +3777,14 @@ def main() -> int:
                     _write_pair_audit(conn, run_at, pair_audit)
             LOG.info(
                 "ENGINE %s eligible=%s auto_address=%d auto_phash=%d auto_visual=%d "
-                "auto_dismissed=%d floor_plan_deferred=%d clip_deferred=%d reconciled=%d queued=%d "
-                "skipped_unresolved=%d rejected=%d prior_dismissed_skips=%d "
-                "pairs=%d vision_calls=%d",
+                "auto_dismissed=%d floor_plan_deferred=%d batch_deferred=%d clip_deferred=%d "
+                "reconciled=%d queued=%d skipped_unresolved=%d rejected=%d "
+                "prior_dismissed_skips=%d pairs=%d vision_calls=%d",
                 "shadow" if args.shadow else "done",
                 stats["eligible"], stats["auto_address"], stats["auto_phash"],
                 stats["auto_visual"], stats["auto_dismissed"],
-                stats.get("floor_plan_deferred", 0), stats.get("clip_deferred", 0),
+                stats.get("floor_plan_deferred", 0), stats.get("batch_deferred", 0),
+                stats.get("clip_deferred", 0),
                 stats["reconciled"],
                 stats["queued"], stats["skipped_unresolved"], stats["rejected"],
                 stats.get("skipped_prior_dismissed", 0),
@@ -3716,11 +3862,12 @@ def main() -> int:
                 _write_pair_audit(conn, run_at, geo_audit)
             LOG.info(
                 "GEO %s eligible=%d auto_phash=%d auto_visual=%d auto_dismissed=%d "
-                "floor_plan_deferred=%d queued=%d skipped_unresolved=%d rejected=%d "
-                "pairs=%d vision_calls=%d area_max=%.2f",
+                "floor_plan_deferred=%d batch_deferred=%d queued=%d skipped_unresolved=%d "
+                "rejected=%d pairs=%d vision_calls=%d area_max=%.2f",
                 "shadow" if args.shadow else "done",
                 geo_stats["eligible"], geo_stats["auto_phash"], geo_stats["auto_visual"],
                 geo_stats["auto_dismissed"], geo_stats.get("floor_plan_deferred", 0),
+                geo_stats.get("batch_deferred", 0),
                 geo_stats["queued"], geo_stats["skipped_unresolved"], geo_stats["rejected"],
                 geo_stats["pairs_considered"], geo_stats["vision_calls"], geo_area_max_pct,
             )
@@ -3777,11 +3924,12 @@ def main() -> int:
                 _write_pair_audit(conn, run_at, byt_audit)
             LOG.info(
                 "BYT-GEO %s eligible=%d auto_phash=%d auto_visual=%d auto_dismissed=%d "
-                "floor_plan_deferred=%d queued=%d skipped_unresolved=%d rejected=%d "
-                "pairs=%d vision_calls=%d",
+                "floor_plan_deferred=%d batch_deferred=%d queued=%d skipped_unresolved=%d "
+                "rejected=%d pairs=%d vision_calls=%d",
                 "shadow" if args.shadow else "done",
                 byt_stats["eligible"], byt_stats["auto_phash"], byt_stats["auto_visual"],
                 byt_stats["auto_dismissed"], byt_stats.get("floor_plan_deferred", 0),
+                byt_stats.get("batch_deferred", 0),
                 byt_stats["queued"], byt_stats["skipped_unresolved"], byt_stats["rejected"],
                 byt_stats["pairs_considered"], byt_stats["vision_calls"],
             )

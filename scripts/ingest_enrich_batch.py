@@ -1,5 +1,5 @@
-"""Enrichment PR B — ingest completed Anthropic bazos description-enrichment
-batches.
+"""Enrichment PR B — ingest completed bazos description-enrichment provider
+batches (Anthropic or OpenAI).
 
 Polls every non-terminal row in listing_description_enrichment_batches. For
 a batch the provider reports as `ended`, streams the results and, per
@@ -24,7 +24,8 @@ Usage (typically via .github/workflows/enrich_bazos_batch.yml):
 
     python -m scripts.ingest_enrich_batch
 
-Required env: SUPABASE_DB_URL, ANTHROPIC_API_KEY.
+Required env: SUPABASE_DB_URL + at least one provider key (ANTHROPIC_API_KEY
+and/or OPENAI_API_KEY) matching the providers of the in-flight batches polled.
 """
 
 from __future__ import annotations
@@ -35,10 +36,9 @@ import os
 import sys
 from typing import Any
 
-LOG = logging.getLogger("ingest_enrich_batch")
+from toolkit.batch_submit import BATCH_DISCOUNT
 
-# Anthropic Message Batches bills token usage at 50% of standard prices.
-BATCH_DISCOUNT = 0.5
+LOG = logging.getLogger("ingest_enrich_batch")
 
 _CALLED_FOR = "enrich_listing_description"
 

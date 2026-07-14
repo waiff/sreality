@@ -1268,8 +1268,8 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
   },
   {
     "filename": "dedup_batches.yml",
-    "name": "Dedup engine (vision batch warm-up)",
-    "description": "Async dedup-vision via the Anthropic Message Batches API (50% cheaper than the synchronous dedup engine's per-call vision, recall-identical). PRE-WARMS the engine's classify/compare/site_plan caches; the daily \"Dedup engine (street + disposition)\" run then REPLAYS unchanged over the warm caches and produces the identical merges for free. Two modes, selected by the `mode` dispatch input:",
+    "name": "Dedup engine (vision batch flush)",
+    "description": "Async dedup-vision via the provider Batch APIs (Anthropic or OpenAI — 50% cheaper than the synchronous dedup engine's per-call vision, recall-identical). Engine-fed deferral (dedup-cost-reduction.md §4.1): the dedup engine itself (scripts.dedup_engine, gated by app_settings.dedup_engine_batch_defer_enabled) spools a cold classify/compare/site-plan/floor-plan call it would otherwise pay for inline into dedup_batch_requests (batch_id NULL) instead of calling the LLM, and defers the pair; the engine's OWN next pass replays over the now-warm cache. This workflow does NOT decide what to warm (that guesswork — the old collect()-based pre-warmer — was retired: a second process re-deriving the engine's work-list could only ever approximate it). Two modes, selected by the `mode` dispatch input:",
     "portal": null,
     "manual": true,
     "schedules": [
@@ -1288,7 +1288,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "inputs": [
       {
         "name": "mode",
-        "description": "submit a new batch, or ingest completed ones",
+        "description": "submit (flush the spool), or ingest completed batches",
         "required": true,
         "type": "choice",
         "default": "ingest",
@@ -1298,52 +1298,16 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
         ]
       },
       {
-        "name": "max_pairs",
-        "description": "[submit] Max visual candidate pairs examined per run",
-        "required": false,
-        "type": "string",
-        "default": "4000",
-        "options": null
-      },
-      {
         "name": "max_requests",
-        "description": "[submit] Cap total vision requests enqueued per run",
+        "description": "[submit] Max spooled requests to flush per run",
         "required": false,
         "type": "string",
-        "default": "1500",
+        "default": "3000",
         "options": null
-      },
-      {
-        "name": "max_room_attempts",
-        "description": "[submit] The engine's per-pair room cap (upper bound on warm-rooms)",
-        "required": false,
-        "type": "string",
-        "default": "4",
-        "options": null
-      },
-      {
-        "name": "warm_rooms",
-        "description": "[submit] Like-room compares warmed per pair (1 = first-priority room only)",
-        "required": false,
-        "type": "string",
-        "default": "1",
-        "options": null
-      },
-      {
-        "name": "lane",
-        "description": "[submit] Population to warm: street funnel, geo funnel, or 'candidates' (the proposed review-queue pairs — the blitz population)",
-        "required": false,
-        "type": "choice",
-        "default": "street",
-        "options": [
-          "street",
-          "geo",
-          "candidates"
-        ]
       },
       {
         "name": "dry_run",
-        "description": "[submit] Report what would be enqueued without submitting",
+        "description": "[submit] Report what would be submitted without flushing",
         "required": false,
         "type": "choice",
         "default": "false",
@@ -1356,15 +1320,11 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "secrets": [
       "ANTHROPIC_API_KEY",
       "OPENAI_API_KEY",
-      "R2_ACCESS_KEY_ID",
-      "R2_ACCOUNT_ID",
-      "R2_BUCKET_NAME",
-      "R2_SECRET_ACCESS_KEY",
       "SUPABASE_DB_URL"
     ],
     "concurrencyGroup": "dedup-batches",
     "cancelInProgress": false,
-    "timeoutMinutes": 75,
+    "timeoutMinutes": 20,
     "permissions": "contents: read",
     "runsUrl": "https://github.com/waiff/sreality/actions/workflows/dedup_batches.yml",
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/dedup_batches.yml"

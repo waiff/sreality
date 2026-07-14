@@ -2571,6 +2571,7 @@ def _run_geo_only_main(monkeypatch: Any, *, reached_end: bool, last_key: str | N
         "dedup_nonbyt_cosine_merge_min": 0,
         "dedup_facade_dismiss_enabled": False,
         "dedup_defer_incomplete_downloads": False,
+        "dedup_engine_batch_defer_enabled": False,
     }
     monkeypatch.setattr(ds, "read_setting", lambda conn, key: settings[key])
     monkeypatch.setattr(eng, "_auto_merge_enabled", lambda conn: False)
@@ -4741,3 +4742,106 @@ def test_scoped_runs_skip_the_market_gauge_scan() -> None:
     stats2 = eng.run_engine(conn2, max_vision_calls=0)  # unscoped full scan
     assert stats2["eligible"] == 4  # the fake's gauge row
     assert any("count(*) FILTER" in s for s in conn2.executed)
+
+
+# --- Engine-fed batch deferral (§4.1): _resolve_visual + resolve_pair ------
+#
+# These exercise the 'batch_pending' defer outcome the deferring fn builders
+# produce (scripts.dedup_engine._build_classify_fn/_build_compare_fn/
+# _build_site_plan_fn with defer_to_batch=True — tested end-to-end via
+# toolkit.dedup_batch_defer in test_dedup_batch_defer.py). Here the fn
+# closures are hand-rolled to isolate _resolve_visual's / resolve_pair's own
+# handling of the {"deferred": True} sentinel from the spooling mechanics.
+
+def test_resolve_visual_defers_when_classify_is_deferred() -> None:
+    import scripts.dedup_engine as eng
+
+    a, b = _key(1, category_main="dum"), _key(2, category_main="dum")
+    calls: list[int] = []
+
+    def classify_fn(sid: int) -> dict[str, Any]:
+        calls.append(sid)
+        if sid == a.sreality_id:
+            return {"deferred": True}
+        return {"data": {"images": [{"image_id": 99, "room_type": "kitchen"}]}}
+
+    outcome = eng._resolve_visual(
+        None, a, b, classify_fn=classify_fn, compare_fn=None, site_plan_fn=None,
+        vision_budget=[10], max_room_attempts=4,
+    )
+    assert outcome == {"action": "defer", "reason": "batch_pending"}
+    # both sides are always probed (no short-circuit before the deferred check).
+    assert calls == [a.sreality_id, b.sreality_id]
+
+
+def test_resolve_visual_defers_when_site_plan_is_deferred() -> None:
+    import scripts.dedup_engine as eng
+
+    a, b = _key(1, category_main="dum"), _key(2, category_main="dum")
+
+    def classify_fn(sid: int) -> dict[str, Any]:
+        return {"data": {"images": [{"image_id": sid, "room_type": "site_plan"}]}}
+
+    def site_plan_fn(a_id: int, b_id: int, ids_a: list[int], ids_b: list[int]) -> dict[str, Any]:
+        return {"deferred": True}
+
+    budget = [10]
+    outcome = eng._resolve_visual(
+        None, a, b, classify_fn=classify_fn, compare_fn=None, site_plan_fn=site_plan_fn,
+        vision_budget=budget, max_room_attempts=4,
+    )
+    assert outcome == {"action": "defer", "reason": "batch_pending"}
+    assert budget == [10]  # a deferred call never consumes the vision budget
+
+
+def test_resolve_visual_defers_on_first_room_and_does_not_try_others() -> None:
+    import scripts.dedup_engine as eng
+
+    a, b = _key(1, category_main="dum"), _key(2, category_main="dum")
+
+    def classify_fn(sid: int) -> dict[str, Any]:
+        return {"data": {"images": [
+            {"image_id": sid * 10 + 1, "room_type": "kitchen"},
+            {"image_id": sid * 10 + 2, "room_type": "living_room"},
+        ]}}
+
+    tried_rooms: list[str] = []
+
+    def compare_fn(a_id: int, b_id: int, room_type: str, ids_a: list[int], ids_b: list[int],
+                   model: str | None = None) -> dict[str, Any]:
+        tried_rooms.append(room_type)
+        return {"deferred": True}
+
+    budget = [10]
+    outcome = eng._resolve_visual(
+        None, a, b, classify_fn=classify_fn, compare_fn=compare_fn, site_plan_fn=None,
+        vision_budget=budget, max_room_attempts=4,
+    )
+    assert outcome["action"] == "defer"
+    assert outcome["reason"] == "batch_pending"
+    assert len(tried_rooms) == 1  # stops at the first deferred room (--warm-rooms=1 parity)
+    assert budget == [10]  # no budget spent on a deferred (not cache-miss-paid) call
+
+
+def test_resolve_pair_defer_splits_stats_by_reason(monkeypatch: Any) -> None:
+    """resolve_pair must NOT lump a fresh batch_pending defer into
+    floor_plan_deferred — the success-gate measurement needs the two counted
+    separately (spool growth vs the pre-existing floor-plan-gate wait)."""
+    import scripts.dedup_engine as eng
+
+    conn = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None, source="bazos")])
+    monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 0)  # skip pHash -> visual
+
+    def classify_fn(sid: int) -> dict[str, Any]:
+        return {"data": {"images": [{"image_id": sid * 10 + 1, "room_type": "kitchen"}]}}
+
+    def compare_fn(a_id: int, b_id: int, room_type: str, ids_a: list[int], ids_b: list[int],
+                   model: str | None = None) -> dict[str, Any]:
+        return {"deferred": True}
+
+    stats = eng.run_engine(
+        conn, classify_fn=classify_fn, compare_fn=compare_fn, floor_plan_fn=None,
+        max_vision_calls=10,
+    )
+    assert stats.get("batch_deferred", 0) == 1
+    assert stats.get("floor_plan_deferred", 0) == 0

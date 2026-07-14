@@ -39,31 +39,18 @@ import os
 import sys
 from typing import Any
 
+# Chunk-sizing + submit-retry are shared with the dedup and enrichment batch
+# lanes — see toolkit.batch_submit. Re-exported here since submit_enrich_batch
+# historically imported these names from this module; new callers should
+# import toolkit.batch_submit directly.
+from toolkit.batch_submit import (
+    MAX_BATCH_BYTES,
+    MAX_BATCH_REQUESTS,
+    should_flush,
+    submit_chunk_with_retry,
+)
+
 LOG = logging.getLogger("submit_condition_batch")
-
-# The Message Batches API rejects request bodies over 256MB; flush with a
-# wide safety margin so the per-request system prompt can't sum past it.
-# Practical ceiling is NOT the API's 256MB cap but the edge/LB upload window:
-# a ~150MB single chunk uploads for 6-8 min from a GitHub runner and the LB
-# intermittently 502s it (observed 18:36Z Jun 11 -> 04:44Z Jun 12, while two
-# equally-sized uploads succeeded earlier the same day — timeout roulette).
-# ~45MB uploads in well under 2 min and removes that failure mode.
-MAX_BATCH_BYTES = 45 * 1024 * 1024
-MAX_BATCH_REQUESTS = 600
-
-
-def should_flush(
-    *,
-    n_items: int,
-    chunk_bytes: int,
-    next_item_bytes: int,
-    max_requests: int = MAX_BATCH_REQUESTS,
-    max_bytes: int = MAX_BATCH_BYTES,
-) -> bool:
-    """True when the next request must start a new batch (count or byte cap)."""
-    if n_items == 0:
-        return False
-    return n_items >= max_requests or chunk_bytes + next_item_bytes > max_bytes
 
 
 def main() -> int:
@@ -219,7 +206,13 @@ def _submit_chunk(
             LOG.info("BATCH sample %s -> sreality_id=%d snapshot_id=%d",
                      custom_id, sid, snapshot_id)
         return
-    provider_batch_id = provider.submit_batch(items)
+    provider_batch_id = submit_chunk_with_retry(provider, items, label="condition")
+    if provider_batch_id is None:
+        # Every retry failed: drop this chunk and keep going. Nothing was
+        # inserted, so these listings aren't in-flight and the next scheduled
+        # submit re-selects them.
+        LOG.error("BATCH chunk dropped (submit failed) requests=%d model=%s", len(items), model)
+        return
     batch_id = _insert_batch(
         conn,
         provider_batch_id=provider_batch_id,

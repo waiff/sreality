@@ -29,10 +29,10 @@ name: Dedup engine (street + disposition)
 # runs the forensic compare (stop-at-first-High; warm cache hits are free via the
 # cold-only budget), cache_only=true does a $0 consume of already-warmed verdicts,
 # shadow=true previews with no writes, free=true + a raised floor_plan_budget is
-# a compare-free floor-plan sweep. (The dedup_batches warmer is gated by
-# app_settings.dedup_batch_warmer_enabled — for stop-at-first-High dedup the engine's
-# own sync is cheaper than all-rooms batch
-# warming.)
+# a compare-free floor-plan sweep. (Engine-fed batch deferral — a cold call spooled
+# into dedup_batch_requests instead of paid inline, flushed by the dedup_batches
+# workflow — is gated by app_settings.dedup_engine_batch_defer_enabled, default off;
+# it applies to every sweep lane here EXCEPT --dirty, which always stays sync.)
 #
 # Required GitHub secret: SUPABASE_DB_URL; paid vision additionally needs
 # ANTHROPIC_API_KEY + R2_* for image bytes.

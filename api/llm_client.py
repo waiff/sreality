@@ -254,11 +254,11 @@ class LLMClient:
     ) -> int:
         """Record an `llm_calls` row for a call this client didn't dispatch.
 
-        Used by the async batch ingester: the Message Batches API runs the
-        request server-side, so there's no synchronous `complete()` here —
-        the ingester computes the (batch-discounted) cost from the returned
-        usage and logs it through this method to keep the audit trail and
-        daily-spend warning intact.
+        Used by the async batch ingesters (dedup / condition / enrichment): a
+        provider's Batch API runs the request server-side, so there's no
+        synchronous `complete()` here — the ingester computes the (batch-
+        discounted) cost from the returned usage and logs it through this
+        method to keep the audit trail and daily-spend warning intact.
         """
         call_id = self._record_call(
             called_for=called_for,

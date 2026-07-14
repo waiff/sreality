@@ -29,8 +29,25 @@
 > enrichment 99.6%-broken (512 max_tokens starves the reasoning model — fix #791, DRAFT, needs a live
 > smoke-test). The batch **warmer stays ON** (operator decision 2026-07-14 — it proved the OpenAI batch
 > path live), superseding overhaul §1.2's "flip off now".
-> **Session 4 (next)** = engine-side batch-lane rebuild (§6 Session-4 bullet; replaces the warmer's
-> guessed work-list). **Session 5** = recency-first ordering + the DISTINCTIVE_IMAGES / per-family
+> **Session 4 (2026-07-14, shipped)** = engine-fed batch deferral (§4.1, overhaul §1.2/§5): the
+> dedup engine's sweep lanes (full street, geo, byt-geo, candidates — NOT dirty/realtime, which stay
+> sync) now spool a cold classify/compare/site-plan/floor-plan call straight into
+> `dedup_batch_requests` (`batch_id NULL`, `request_params` = the already-built provider-shaped
+> body — migration 306) instead of paying inline, gated by `dedup_engine_batch_defer_enabled`
+> (default OFF). `scripts/submit_dedup_batch.py`'s old collect()-funnel (a second process guessing
+> the engine's work-list — the root cause of the ~1% warmer/engine overlap, overhaul §1) is retired;
+> the script's only job now is to flush the spool into provider Batch API submissions. Selection
+> identity holds by construction. Shared chunk/retry primitives extracted to `toolkit/batch_submit.py`
+> (dedup/condition/enrich converge — rule-of-three); provider-agnostic naming swept across the batch
+> layer (scripts, `api/providers/base.py`, `api/llm_client.py`, `toolkit/condition_scoring.py`,
+> workflow comments). Verified live: dedup batch requests already run at the provider default 4096
+> max_tokens with zero truncation evidence (max observed output 3546/4096 tokens on floor_plan) —
+> unlike enrichment's 512-token bug (#791), no fix needed here. Found (not fixed, flagged for
+> follow-up): ~0.4-1.2% of floor_plan/site_plan gpt-5-mini calls error with an Anthropic-provider 404
+> for a `gpt-5-mini` model id — a pre-existing routing bug, unrelated to this session's changes.
+> Flip `dedup_engine_batch_defer_enabled` on to activate; watch `duration_ms=0 AND error IS NULL`
+> attribution (the batch/warm-consume signature) to confirm ~1% → ~100% pair-overlap.
+> **Session 5 (next)** = recency-first ordering + the DISTINCTIVE_IMAGES / per-family
 > dismissal design. This whole track file is a candidate for a future restructure (its own PR) to
 > replace the stale D1/D2 body below with a pointer-only index, per CLAUDE.md's roadmap-maintenance rule.
 

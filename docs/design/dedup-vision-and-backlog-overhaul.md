@@ -425,14 +425,25 @@ is its own PR + operator flip.
   recommendation. Cleaner after Session 2 shrinks the paid volume the residue models must cover.
   **Blocker to clear first: `QWEN_API_KEY`/`OPENAI_API_KEY` exist only on the Railway api service
   — the Actions harness + local benchmark scripts need them as GH secrets / local env too.**
-- **Session 4 — batch lane rebuild for the backlog (point 3).** GOAL unchanged (warmed verdicts
-  actually consumed; the ~$1.6–2k/mo target). **MECHANISM corrected by Finding I-1 (§1.2): do NOT
-  "reconcile the warmer's selection query with the engine's"** — a second process re-deriving the
-  work-list can only approximate it (six divergences). Instead retire the speculative pre-warmer
-  (flip `dedup_batch_warmer_enabled=false`, which the operator can do any time) and build §4.1 as
-  specced: the ENGINE defers its own already-routed cold vision calls into `dedup_batches` (sweep
-  lanes only; dirty stays sync) so selection identity holds by construction. Measure via the
-  `duration_ms=0 AND error IS NULL` batch attribution + pair overlap (must go ~1% → ~100%). What
+- **Session 4 — batch lane rebuild for the backlog (point 3): SHIPPED (2026-07-14).** GOAL
+  unchanged (warmed verdicts actually consumed; the ~$1.6–2k/mo target). **MECHANISM corrected by
+  Finding I-1 (§1.2): do NOT "reconcile the warmer's selection query with the engine's"** — a
+  second process re-deriving the work-list can only approximate it (six divergences). Shipped as
+  specced: the ENGINE defers its own already-routed cold classify/compare/site-plan/floor-plan
+  calls into `dedup_batch_requests` (`batch_id NULL` — migration 306; sweep lanes only — full
+  street, geo, byt-geo, candidates; dirty/realtime stay sync) so selection identity holds by
+  construction, gated by `dedup_engine_batch_defer_enabled` (default OFF — flip to activate).
+  `scripts/submit_dedup_batch.py`'s old collect() work-list guesswork is retired; its only job now
+  is flushing the spool into provider Batch API submissions (unchanged `dedup_batches`/ingest
+  plumbing). `dedup_batch_warmer_enabled` is retired (inert). Shared chunk/retry primitives
+  extracted to `toolkit/batch_submit.py` (dedup/condition/enrich converge). Provider-agnostic
+  naming swept across the batch layer. Verified: dedup batch requests already run at 4096
+  max_tokens with no truncation evidence (max observed 3546/4096 on floor_plan) — unlike
+  enrichment's 512-token bug (#791), no fix needed. **Not yet measured live** (flag ships OFF):
+  next operator flip should watch `duration_ms=0 AND error IS NULL` batch attribution + pair
+  overlap (must go ~1% → ~100%) to confirm the fix. **Found, not fixed:** ~0.4-1.2% of
+  floor_plan/site_plan gpt-5-mini calls error with an Anthropic-provider 404 for a gpt-5-mini
+  model id (pre-existing routing bug, unrelated to this session — flagged for follow-up). What
   spend CANNOT fix: pozemek/komerční are structurally undismissable (no per-family dismissal
   rooms) — that's Session 2's dismissal-side work, don't paper over it here.
 - **Session 5 — recency-first compare ordering (point 2).** One shared priority function (newest

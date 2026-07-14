@@ -1,4 +1,4 @@
-"""Ingest completed Anthropic dedup-vision batches.
+"""Ingest completed dedup-vision provider batches (Anthropic or OpenAI).
 
 Polls every non-terminal row in dedup_batches. For a batch the provider reports
 as `ended`, streams the results and, per request, routes by `kind` to the owning
@@ -33,10 +33,9 @@ import os
 import sys
 from typing import Any
 
-LOG = logging.getLogger("ingest_dedup_batch")
+from toolkit.batch_submit import BATCH_DISCOUNT
 
-# Anthropic Message Batches bills token usage at 50% of standard prices.
-BATCH_DISCOUNT = 0.5
+LOG = logging.getLogger("ingest_dedup_batch")
 
 _CALLED_FOR = {
     "classify": "classify_listing_images",
