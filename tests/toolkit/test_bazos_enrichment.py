@@ -253,7 +253,9 @@ def test_enrich_uses_slim_tool_and_forced_choice():
     kwargs = llm.calls[0]
     assert kwargs["tools"] == [ENRICH_LISTING_TOOL]
     assert kwargs["tool_choice"] == "record_listing"
-    assert kwargs["max_tokens"] == 512
+    # Headroom for reasoning models (gpt-5-mini spends max_completion_tokens on
+    # reasoning before the tool call; 512 truncated it — 99.6% no_extraction).
+    assert kwargs["max_tokens"] == 4096
     assert len(conn.inserts) == 1
     assert conn.updates and "has_lift = %s" in conn.updates[0][0]
     assert conn.commits == 1
