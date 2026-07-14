@@ -290,7 +290,15 @@ def _select_and_check(
         "tools": [ENRICH_LISTING_TOOL],
         "tool_choice": "record_listing",
         "model": model,
-        "max_tokens": 512,
+        # 512 was fine for Haiku (a direct ~200-token tool call), but a REASONING
+        # model (gpt-5-mini) spends max_completion_tokens on reasoning BEFORE the
+        # tool call — 512 was entirely consumed by reasoning, truncating the
+        # response before record_listing was emitted, so 99.6% of gpt-5-mini
+        # enrich calls produced no extraction. Give reasoning headroom; Haiku
+        # still stops at its natural ~200 tokens, so its cost is unchanged. The
+        # cost-optimal follow-up is reasoning_effort=minimal for this extraction
+        # lane (needs provider plumbing), which would let the budget shrink again.
+        "max_tokens": 4096,
         "snapshot_id": snapshot_id,
         "current": current,
     }
