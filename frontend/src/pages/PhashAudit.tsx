@@ -71,6 +71,9 @@ export default function PhashAudit() {
   const [outcome, setOutcome] = useState('');
   const [categoryMain, setCategoryMain] = useState('');
   const [roomTypes, setRoomTypes] = useState<string[]>([]);
+  // Narrows to pairs where at least one of the two shown images already has a
+  // training-set label — for revisiting/auditing what's already been picked.
+  const [trainingOnly, setTrainingOnly] = useState(false);
   const [minText, setMinText] = useState(String(DEFAULT_MIN));
   const [maxText, setMaxText] = useState(String(DEFAULT_MAX));
   const [hammingMin, setHammingMin] = useState(DEFAULT_MIN);
@@ -89,7 +92,9 @@ export default function PhashAudit() {
     );
 
   const list = useInfiniteList<PhashAuditRow, PhashPage>({
-    queryKey: ['phash-audit', outcome, categoryMain, roomTypes, hammingMin, hammingMax],
+    queryKey: [
+      'phash-audit', outcome, categoryMain, roomTypes, trainingOnly, hammingMin, hammingMax,
+    ],
     queryFn: async (cursor) => {
       // The backend does exactly ONE bounded chunk per call (predictable ~5-7s
       // latency regardless of filter — verified live), so a chunk can legitimately
@@ -109,6 +114,7 @@ export default function PhashAudit() {
           category_main: categoryMain || undefined,
           outcome: outcome || undefined,
           room_types: roomTypes.length ? roomTypes : undefined,
+          training_only: trainingOnly || undefined,
           limit: PAGE_SIZE - collected.length,
           scan_offset: scanOffset,
         });
@@ -175,6 +181,12 @@ export default function PhashAudit() {
           {OUTCOMES.map((o) => (
             <FilterChip key={o.id} on={outcome === o.id} label={o.label} onClick={() => setOutcome(o.id)} />
           ))}
+          <span className="mx-1 h-4 w-px bg-[var(--color-rule)]" />
+          <FilterChip
+            on={trainingOnly}
+            label="Jen v trénovací sadě"
+            onClick={() => setTrainingOnly((v) => !v)}
+          />
         </div>
         <div className="flex flex-wrap items-center gap-1.5">
           <span className="text-[0.62rem] uppercase tracking-[0.1em] text-[var(--color-ink-4)] mr-1">

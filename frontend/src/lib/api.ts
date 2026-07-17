@@ -902,6 +902,9 @@ export const getPhashAudit = (
     // Both images in a returned pair must share the SAME tag, which must be one of
     // these — not "either side is one of these" (see phash_audit's docstring).
     room_types?: ReadonlyArray<string>;
+    // Only pairs where at least one of the two shown images already has a
+    // linear-probe training-set label.
+    training_only?: boolean;
     limit?: number;
     // Opaque cursor — pass back the previous response's next_scan_offset.
     scan_offset?: number;
@@ -924,6 +927,7 @@ export const getPhashAudit = (
   if (params.category_main) q.set('category_main', params.category_main);
   if (params.outcome) q.set('outcome', params.outcome);
   if (params.room_types?.length) q.set('room_types', params.room_types.join(','));
+  if (params.training_only) q.set('training_only', 'true');
   q.set('limit', String(params.limit ?? 100));
   if (params.scan_offset) q.set('scan_offset', String(params.scan_offset));
   return request(`/dedup/phash-audit?${q.toString()}`);

@@ -813,7 +813,7 @@ _PHASH_AUDIT_SCAN_CEILING = 3800  # the operator's ask: the prior 800 + 3000 mor
 def _phash_audit_chunk(
     cur: Any, *, scope_where: str, scope_params: dict[str, Any],
     hamming_min: int, hamming_max: int, room_types: list[str] | None,
-    chunk_offset: int, chunk_size: int,
+    training_only: bool, chunk_offset: int, chunk_size: int,
 ) -> list[tuple[Any, ...]]:
     """One bounded window of the scan: the `chunk_size` dedup_pair_audit rows starting
     at `chunk_offset` (newest-first), cross-joined against images, Hamming-filtered.
@@ -832,6 +832,16 @@ def _phash_audit_chunk(
             " AND ta.logical_tag = tb.logical_tag"
         )
         join_params["room_types"] = list(room_types)
+    # Exact per-image check (not just "this pair's LISTING has a trained image
+    # somewhere") — image_training_examples.image_id is unique-indexed, so each EXISTS
+    # is a cheap point lookup, not a scan. phash_audit()'s scope-level sreality_id
+    # pre-filter (below) is what keeps chunks from coming back mostly-empty; this is
+    # what keeps the result correct at the individual-photo grain.
+    training_clause = (
+        " AND (EXISTS (SELECT 1 FROM image_training_examples te WHERE te.image_id = ia.id)"
+        "   OR EXISTS (SELECT 1 FROM image_training_examples te WHERE te.image_id = ib.id))"
+        if training_only else ""
+    )
     cur.execute(
         f"""
         WITH scoped AS (
@@ -866,6 +876,7 @@ def _phash_audit_chunk(
         ) tb ON true
         WHERE bit_count((ia.phash # ib.phash)::bit(64)) BETWEEN %(hmin)s AND %(hmax)s
         {room_clause}
+        {training_clause}
         ORDER BY hamming ASC, s.run_at DESC
         LIMIT 500
         """,
@@ -882,6 +893,7 @@ def phash_audit(
     category_main: str | None = None,
     outcome: str | None = None,
     room_types: list[str] | None = None,
+    training_only: bool = False,
     scan_offset: int = 0,
     limit: int = 100,
 ) -> dict[str, Any]:
@@ -897,7 +909,10 @@ def phash_audit(
     shown for context only, never a comparison constraint on the engine side). `room_types`
     requires BOTH images to carry the SAME tag, and that tag to be one of the given set —
     the operator's ask is "show me kitchen-vs-kitchen (or bathroom-vs-bathroom, ...)
-    pairs", not "either side happens to be one of these".
+    pairs", not "either side happens to be one of these". `training_only` narrows to
+    pairs where at least one of the two specific images shown already has a
+    linear-probe training-set label (image_training_examples) — the exact photo, not
+    just some other photo on the same listing.
 
     Pagination is over the SCOPE (dedup_pair_audit), not the joined result — see
     `_PHASH_AUDIT_CHUNK`'s comment for why. `scan_offset` is the opaque cursor (how many
@@ -916,8 +931,33 @@ def phash_audit(
     if outcome is not None:
         scope_clauses.append("a.outcome = %(outcome)s")
         scope_params["outcome"] = outcome
-    scope_where = ("WHERE " + " AND ".join(scope_clauses)) if scope_clauses else ""
     with conn.cursor() as cur:
+        if training_only:
+            # The training set is tiny (an operator hand-picks it) next to
+            # dedup_pair_audit's population — without this, almost every chunk would
+            # come back empty post-join, forcing the frontend to scan the whole
+            # ceiling for a handful of rows. Narrowing the SCOPE to only the listings
+            # that own a trained image keeps a chunk's odds of matching close to 1,
+            # same as any other scope filter (category_main/outcome) already does.
+            cur.execute(
+                "SELECT DISTINCT i.sreality_id FROM images i "
+                "JOIN image_training_examples te ON te.image_id = i.id "
+                "WHERE i.sreality_id IS NOT NULL",
+            )
+            trained_sreality_ids = [r[0] for r in cur.fetchall()]
+            if not trained_sreality_ids:
+                return {
+                    "data": [], "returned": 0, "scanned_pairs": 0,
+                    "scan_cap": _PHASH_AUDIT_SCAN_CEILING, "scanned_so_far": 0,
+                    "next_scan_offset": None,
+                }
+            scope_clauses.append(
+                "(a.left_sreality_id = ANY(%(trained_sreality_ids)s)"
+                " OR a.right_sreality_id = ANY(%(trained_sreality_ids)s))",
+            )
+            scope_params["trained_sreality_ids"] = trained_sreality_ids
+
+        scope_where = ("WHERE " + " AND ".join(scope_clauses)) if scope_clauses else ""
         cur.execute(
             f"SELECT count(*) FROM dedup_pair_audit a {scope_where}", scope_params,
         )
@@ -931,7 +971,8 @@ def phash_audit(
             collected = _phash_audit_chunk(
                 cur, scope_where=scope_where, scope_params=scope_params,
                 hamming_min=hamming_min, hamming_max=hamming_max,
-                room_types=room_types, chunk_offset=offset, chunk_size=window,
+                room_types=room_types, training_only=training_only,
+                chunk_offset=offset, chunk_size=window,
             )
             offset += window
     rows = collected[:limit]
