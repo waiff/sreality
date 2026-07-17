@@ -143,7 +143,11 @@ export default function PhashAudit() {
     staleTime: 30_000,
   });
   const labelOptions = useMemo(() => {
-    const taxonomy = TAG_OPTIONS.map((t) => imageTagLabel(t) ?? t);
+    // The FULL taxonomy here, not TAG_OPTIONS (that one's deliberately restricted
+    // to the 15 canonical room tags for the Tag filter above) — the training set
+    // needs every fine_tag CLIP can produce, including the fine-only sub-styles
+    // (mapa lokality, katastrální mapa, …) that are common on house/land photos.
+    const taxonomy = Object.keys(IMAGE_TAG_LABELS).map((t) => imageTagLabel(t) ?? t);
     return [...new Set([...taxonomy, ...(trainingLabelsQ.data ?? [])])].sort();
   }, [trainingLabelsQ.data]);
 
