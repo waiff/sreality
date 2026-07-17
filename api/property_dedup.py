@@ -818,8 +818,13 @@ def phash_audit(
     [hamming_min, hamming_max] — a direct range browse, not a merged-vs-dismissed
     comparison (the operator's ask: "show me image pairs that were phash scored and were
     within this range"). Hamming is a cheap bitwise `bit_count(a XOR b)` over the already-
-    stored `images.phash` bigints — no vision recompute, no re-scoring. `room_type`
-    matches if EITHER image carries that CLIP logical_tag."""
+    stored `images.phash` bigints — no vision recompute, no re-scoring; this mirrors the
+    ENGINE's own phash pass (`_phash_identical_pairs`), which is deliberately room-blind
+    (a near-identical Hamming distance detects a reused/re-scaled PHOTO FILE, not "the
+    same room" — CLIP's room tag is a separate, independent classification of each image,
+    shown for context only, never a comparison constraint on the engine side). `room_type`
+    requires BOTH images to carry that CLIP logical_tag — the operator's ask is "show me
+    kitchen-vs-kitchen pairs", not "either side happens to be a kitchen"."""
     scope_clauses: list[str] = []
     scope_params: dict[str, Any] = {}
     if category_main is not None:
@@ -840,7 +845,7 @@ def phash_audit(
         }
         room_clause = ""
         if room_type is not None:
-            room_clause = " AND (ta.logical_tag = %(room_type)s OR tb.logical_tag = %(room_type)s)"
+            room_clause = " AND ta.logical_tag = %(room_type)s AND tb.logical_tag = %(room_type)s"
             join_params["room_type"] = room_type
         cur.execute(
             f"""
