@@ -22,7 +22,9 @@ class _Cur:
     def execute(self, sql: str, params: Any = None) -> None:
         s = " ".join(sql.split())
         self._conn.executed.append((s, params))
-        if "count(*) FROM dedup_pair_audit" in s:
+        if "image_training_examples te ON te.image_id = i.id" in s:
+            self._rows = [(sid,) for sid in self._conn.trained_sreality_ids]
+        elif "count(*) FROM dedup_pair_audit" in s:
             self._rows = [(self._conn.scanned,)]
         elif "WITH scoped AS" in s:
             idx = self._conn.chunk_calls
@@ -45,10 +47,12 @@ class _FakeConn:
     def __init__(
         self, *, scanned: int = 0, join_rows=None,
         chunk_responses: list[list[tuple[Any, ...]]] | None = None,
+        trained_sreality_ids: list[int] | None = None,
     ) -> None:
         self.scanned = scanned
         self.join_rows = join_rows or []
         self.chunk_responses = chunk_responses
+        self.trained_sreality_ids = trained_sreality_ids or []
         self.chunk_calls = 0
         self.executed: list[tuple[str, Any]] = []
 
@@ -218,3 +222,40 @@ def test_scan_offset_already_at_or_past_the_ceiling_skips_the_chunk_query() -> N
     assert out["next_scan_offset"] is None
     assert out["next_scan_offset"] is None
     assert out["scan_cap"] == 3800
+
+
+def test_training_only_with_no_trained_images_short_circuits() -> None:
+    # An empty training set means zero possible matches — skip the count/chunk
+    # queries entirely rather than scanning for something that can't exist.
+    conn = _FakeConn(scanned=2000, trained_sreality_ids=[])
+    out = dedup.phash_audit(conn, hamming_min=0, hamming_max=15, training_only=True)
+    assert out == {
+        "data": [], "returned": 0, "scanned_pairs": 0,
+        "scan_cap": 3800, "scanned_so_far": 0, "next_scan_offset": None,
+    }
+    assert len(conn.chunk_queries()) == 0
+    assert not any("count(*) FROM dedup_pair_audit" in s for s, _ in conn.executed)
+
+
+def test_training_only_narrows_scope_to_trained_listings_and_chunk_to_exact_images() -> None:
+    conn = _FakeConn(scanned=1, trained_sreality_ids=[111, 222], join_rows=[_join_row()])
+    dedup.phash_audit(conn, hamming_min=0, hamming_max=15, training_only=True)
+    scope_sql, scope_params = next(
+        (s, p) for s, p in conn.executed if "count(*) FROM dedup_pair_audit" in s
+    )
+    assert "a.left_sreality_id = ANY(%(trained_sreality_ids)s)" in scope_sql
+    assert "a.right_sreality_id = ANY(%(trained_sreality_ids)s)" in scope_sql
+    assert scope_params["trained_sreality_ids"] == [111, 222]
+    join_sql, _ = conn.chunk_queries()[0]
+    assert "image_training_examples te WHERE te.image_id = ia.id" in join_sql
+    assert "image_training_examples te WHERE te.image_id = ib.id" in join_sql
+
+
+def test_training_only_false_never_queries_trained_images_or_adds_the_clause() -> None:
+    conn = _FakeConn(scanned=1, join_rows=[_join_row()])
+    dedup.phash_audit(conn, hamming_min=0, hamming_max=15, training_only=False)
+    assert not any(
+        "image_training_examples te ON te.image_id = i.id" in s for s, _ in conn.executed
+    )
+    join_sql, _ = conn.chunk_queries()[0]
+    assert "image_training_examples" not in join_sql

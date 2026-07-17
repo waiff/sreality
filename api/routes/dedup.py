@@ -314,6 +314,10 @@ def get_phash_audit(
         default=None, description="CSV of CLIP logical tags — both images in a "
         "returned pair must share the SAME tag, which must be one of these.",
     ),
+    training_only: bool = Query(
+        default=False, description="Only pairs where at least one of the two shown "
+        "images already has a linear-probe training-set label.",
+    ),
     limit: int = Query(default=100, ge=1, le=200),
     scan_offset: int = Query(
         default=0, ge=0, description="Opaque cursor — pass back the previous "
@@ -332,7 +336,7 @@ def get_phash_audit(
     return dedup.phash_audit(
         conn, hamming_min=hamming_min, hamming_max=hamming_max,
         category_main=category_main, outcome=outcome, room_types=types,
-        limit=limit, scan_offset=scan_offset,
+        training_only=training_only, limit=limit, scan_offset=scan_offset,
     )
 
 
