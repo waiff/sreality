@@ -792,14 +792,83 @@ def _listing_room_images(
             bool(room_type))
 
 
-# How many of the newest-first dedup_pair_audit rows /phash-audit joins against images
-# for. A plain per-decision Hamming recompute is cheap (bit_count over two stored
-# bigints), but the base population isn't bounded by any index the way list_pair_audit's
-# filters are, so this caps the join's cost regardless of table size — matches the
-# "bound the expensive part, count the true population separately" pattern used
-# elsewhere (see pipeline_overview). `scanned_pairs` in the response is the TRUE count
-# under the same filters, so a capped result is never mistaken for exhaustive.
-_PHASH_AUDIT_SCAN_CAP = 800
+# Verified live (EXPLAIN ANALYZE against prod): this DB's shared_buffers is small
+# relative to images/image_clip_tags, so any sufficiently-scattered read pattern over
+# them is cold-I/O-bound — a single request crossing images for ~800 dedup_pair_audit
+# rows already costs ~5s; 3800 in one shot measured 26s+. No query rewrite fixed this
+# (tried: pushing the tag filter earlier via CTEs/indexes — all measured SLOWER, since
+# "kitchen" alone is ~774k rows, not selective enough to help, and the per-image tag
+# lookup has to hit the same cold pages either way). So /phash-audit paginates the
+# SCOPE itself in bounded chunks, not the joined result: each request processes up to
+# a few CHUNK-sized windows of dedup_pair_audit (newest-first), stopping as soon as it
+# has `limit` matching image pairs or hits the ceiling — bounding worst-case latency
+# per request while letting the operator reach the full ceiling by scrolling.
+_PHASH_AUDIT_CHUNK = 800
+_PHASH_AUDIT_SCAN_CEILING = 3800  # the operator's ask: the prior 800 + 3000 more
+
+
+def _phash_audit_chunk(
+    cur: Any, *, scope_where: str, scope_params: dict[str, Any],
+    hamming_min: int, hamming_max: int, room_types: list[str] | None,
+    chunk_offset: int, chunk_size: int,
+) -> list[tuple[Any, ...]]:
+    """One bounded window of the scan: the `chunk_size` dedup_pair_audit rows starting
+    at `chunk_offset` (newest-first), cross-joined against images, Hamming-filtered.
+    OFFSET on dedup_pair_audit itself is cheap at this scale (verified: ~90ms at
+    offset=3800 — a much smaller table than images) — the cost lives entirely in the
+    per-chunk image cross-join below, which is what stays bounded."""
+    join_params: dict[str, Any] = {
+        **scope_params, "hmin": hamming_min, "hmax": hamming_max,
+        "off": chunk_offset, "chunk": chunk_size,
+    }
+    room_clause = ""
+    if room_types:
+        room_clause = (
+            " AND ta.logical_tag = ANY(%(room_types)s)"
+            " AND tb.logical_tag = ANY(%(room_types)s)"
+            " AND ta.logical_tag = tb.logical_tag"
+        )
+        join_params["room_types"] = list(room_types)
+    cur.execute(
+        f"""
+        WITH scoped AS (
+            SELECT a.id, a.left_sreality_id, a.right_sreality_id,
+                   a.left_property_id, a.right_property_id,
+                   a.outcome, a.category_main, a.run_at, a.stage, a.detail
+            FROM dedup_pair_audit a
+            {scope_where}
+            ORDER BY a.run_at DESC
+            OFFSET %(off)s LIMIT %(chunk)s
+        )
+        SELECT s.id, s.left_sreality_id, s.right_sreality_id,
+               s.left_property_id, s.right_property_id, s.outcome,
+               s.category_main, s.run_at, s.stage, s.detail,
+               ia.id, ia.sreality_url, ia.storage_path,
+               ta.logical_tag, ta.fine_tag, ta.confidence, ta.render_score,
+               ib.id, ib.sreality_url, ib.storage_path,
+               tb.logical_tag, tb.fine_tag, tb.confidence, tb.render_score,
+               bit_count((ia.phash # ib.phash)::bit(64)) AS hamming
+        FROM scoped s
+        JOIN images ia ON ia.sreality_id = s.left_sreality_id AND ia.phash IS NOT NULL
+        JOIN images ib ON ib.sreality_id = s.right_sreality_id AND ib.phash IS NOT NULL
+        LEFT JOIN LATERAL (
+            SELECT t.logical_tag, t.fine_tag, t.confidence, t.render_score
+            FROM image_clip_tags t
+            WHERE t.image_id = ia.id ORDER BY t.tagged_at DESC LIMIT 1
+        ) ta ON true
+        LEFT JOIN LATERAL (
+            SELECT t.logical_tag, t.fine_tag, t.confidence, t.render_score
+            FROM image_clip_tags t
+            WHERE t.image_id = ib.id ORDER BY t.tagged_at DESC LIMIT 1
+        ) tb ON true
+        WHERE bit_count((ia.phash # ib.phash)::bit(64)) BETWEEN %(hmin)s AND %(hmax)s
+        {room_clause}
+        ORDER BY hamming ASC, s.run_at DESC
+        LIMIT 500
+        """,
+        join_params,
+    )
+    return cur.fetchall()
 
 
 def phash_audit(
@@ -809,11 +878,11 @@ def phash_audit(
     hamming_max: int,
     category_main: str | None = None,
     outcome: str | None = None,
-    room_type: str | None = None,
+    room_types: list[str] | None = None,
+    scan_offset: int = 0,
     limit: int = 100,
-    offset: int = 0,
 ) -> dict[str, Any]:
-    """/phash-audit: every matching-photo image PAIR, across the pairs the engine already
+    """/phash-audit: matching-photo image PAIRs, across the pairs the engine already
     looked at (dedup_pair_audit), whose live-recomputed Hamming distance falls in
     [hamming_min, hamming_max] — a direct range browse, not a merged-vs-dismissed
     comparison (the operator's ask: "show me image pairs that were phash scored and were
@@ -822,9 +891,20 @@ def phash_audit(
     ENGINE's own phash pass (`_phash_identical_pairs`), which is deliberately room-blind
     (a near-identical Hamming distance detects a reused/re-scaled PHOTO FILE, not "the
     same room" — CLIP's room tag is a separate, independent classification of each image,
-    shown for context only, never a comparison constraint on the engine side). `room_type`
-    requires BOTH images to carry that CLIP logical_tag — the operator's ask is "show me
-    kitchen-vs-kitchen pairs", not "either side happens to be a kitchen"."""
+    shown for context only, never a comparison constraint on the engine side). `room_types`
+    requires BOTH images to carry the SAME tag, and that tag to be one of the given set —
+    the operator's ask is "show me kitchen-vs-kitchen (or bathroom-vs-bathroom, ...)
+    pairs", not "either side happens to be one of these".
+
+    Pagination is over the SCOPE (dedup_pair_audit), not the joined result — see
+    `_PHASH_AUDIT_CHUNK`'s comment for why. `scan_offset` is the opaque cursor (how many
+    scoped decisions have already been scanned); pass back `next_scan_offset` for the
+    next call. ONE call processes exactly ONE chunk (bounded, predictable latency —
+    matches the CHUNK size regardless of how sparse the filter is); the caller (the
+    /phash-audit page) loops calls forward until it has a full page or `next_scan_offset`
+    comes back null, since a single chunk can legitimately return fewer than `limit`
+    rows while more remains to scan (an infinite-scroll page-size check can't tell
+    "short because sparse" from "short because done" apart on its own)."""
     scope_clauses: list[str] = []
     scope_params: dict[str, Any] = {}
     if category_main is not None:
@@ -839,54 +919,20 @@ def phash_audit(
             f"SELECT count(*) FROM dedup_pair_audit a {scope_where}", scope_params,
         )
         scanned_pairs = int(cur.fetchone()[0])
-        join_params: dict[str, Any] = {
-            **scope_params, "hmin": hamming_min, "hmax": hamming_max,
-            "cap": _PHASH_AUDIT_SCAN_CAP, "limit": limit, "offset": offset,
-        }
-        room_clause = ""
-        if room_type is not None:
-            room_clause = " AND ta.logical_tag = %(room_type)s AND tb.logical_tag = %(room_type)s"
-            join_params["room_type"] = room_type
-        cur.execute(
-            f"""
-            WITH scoped AS (
-                SELECT a.id, a.left_sreality_id, a.right_sreality_id,
-                       a.left_property_id, a.right_property_id,
-                       a.outcome, a.category_main, a.run_at, a.stage, a.detail
-                FROM dedup_pair_audit a
-                {scope_where}
-                ORDER BY a.run_at DESC
-                LIMIT %(cap)s
+
+        ceiling = min(_PHASH_AUDIT_SCAN_CEILING, scanned_pairs)
+        offset = scan_offset
+        collected: list[tuple[Any, ...]] = []
+        if offset < ceiling:
+            window = min(_PHASH_AUDIT_CHUNK, ceiling - offset)
+            collected = _phash_audit_chunk(
+                cur, scope_where=scope_where, scope_params=scope_params,
+                hamming_min=hamming_min, hamming_max=hamming_max,
+                room_types=room_types, chunk_offset=offset, chunk_size=window,
             )
-            SELECT s.id, s.left_sreality_id, s.right_sreality_id,
-                   s.left_property_id, s.right_property_id, s.outcome,
-                   s.category_main, s.run_at, s.stage, s.detail,
-                   ia.id, ia.sreality_url, ia.storage_path,
-                   ta.logical_tag, ta.fine_tag, ta.confidence, ta.render_score,
-                   ib.id, ib.sreality_url, ib.storage_path,
-                   tb.logical_tag, tb.fine_tag, tb.confidence, tb.render_score,
-                   bit_count((ia.phash # ib.phash)::bit(64)) AS hamming
-            FROM scoped s
-            JOIN images ia ON ia.sreality_id = s.left_sreality_id AND ia.phash IS NOT NULL
-            JOIN images ib ON ib.sreality_id = s.right_sreality_id AND ib.phash IS NOT NULL
-            LEFT JOIN LATERAL (
-                SELECT t.logical_tag, t.fine_tag, t.confidence, t.render_score
-                FROM image_clip_tags t
-                WHERE t.image_id = ia.id ORDER BY t.tagged_at DESC LIMIT 1
-            ) ta ON true
-            LEFT JOIN LATERAL (
-                SELECT t.logical_tag, t.fine_tag, t.confidence, t.render_score
-                FROM image_clip_tags t
-                WHERE t.image_id = ib.id ORDER BY t.tagged_at DESC LIMIT 1
-            ) tb ON true
-            WHERE bit_count((ia.phash # ib.phash)::bit(64)) BETWEEN %(hmin)s AND %(hmax)s
-            {room_clause}
-            ORDER BY hamming ASC, s.run_at DESC
-            LIMIT %(limit)s OFFSET %(offset)s
-            """,
-            join_params,
-        )
-        rows = cur.fetchall()
+            offset += window
+    rows = collected[:limit]
+    next_scan_offset = offset if offset < ceiling else None
     return {
         "data": [
             {
@@ -915,7 +961,9 @@ def phash_audit(
         ],
         "returned": len(rows),
         "scanned_pairs": scanned_pairs,
-        "scan_cap": _PHASH_AUDIT_SCAN_CAP,
+        "scan_cap": _PHASH_AUDIT_SCAN_CEILING,
+        "scanned_so_far": offset,
+        "next_scan_offset": next_scan_offset,
     }
 
 
