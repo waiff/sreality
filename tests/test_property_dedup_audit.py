@@ -183,6 +183,37 @@ def test_category_main_and_districts_share_one_properties_join() -> None:
         assert s.count("LEFT JOIN properties pr ON pr.id = a.right_property_id") == 1
 
 
+def test_room_type_filters_on_detail_room_type() -> None:
+    conn = _FakeConn(total=0, page_rows=[])
+    dedup.list_pair_audit(conn, room_type="floor_plan")
+    for s, params in conn.executed:
+        assert "a.detail->>'room_type' = %(room_type)s" in s
+        assert params["room_type"] == "floor_plan"
+
+
+def test_floor_plan_factor_filters_on_reason() -> None:
+    conn = _FakeConn(total=0, page_rows=[])
+    dedup.list_pair_audit(conn, factor="floor_plan")
+    for s, _ in conn.executed:
+        assert "a.detail->>'reason' = 'floor_plan_different_layout'" in s
+
+
+def test_property_id_in_batches_many_properties_with_any() -> None:
+    conn = _FakeConn(total=1, page_rows=[_audit_row()])
+    dedup.list_pair_audit(conn, property_id_in=[10, 20, 30])
+    for s, params in conn.executed:
+        assert "property_id = ANY(%(audit_pids)s)" in s
+        assert params["audit_pids"] == [10, 20, 30]
+
+
+def test_property_id_in_empty_list_omits_the_clause() -> None:
+    conn = _FakeConn(total=0, page_rows=[])
+    dedup.list_pair_audit(conn, property_id_in=[])
+    for s, params in conn.executed:
+        assert "audit_pids" not in s
+        assert "audit_pids" not in (params or {})
+
+
 def test_no_category_main_or_districts_omits_the_properties_join() -> None:
     conn = _FakeConn(total=0, page_rows=[])
     dedup.list_pair_audit(conn, category_main=None, districts=None)

@@ -112,6 +112,98 @@ def delete_decision_feedback(
     return {"data": {"deleted": bool(deleted)}}
 
 
+def set_image_annotation(
+    conn: psycopg.Connection,
+    *,
+    image_id: int,
+    tag_flagged: bool = False,
+    render_flagged: bool = False,
+    note: str | None = None,
+    created_by: str = "operator",
+) -> dict[str, Any]:
+    """Upsert the operator's correction on ONE image's CLIP call (the /clip-audit
+    "this tag/render score is wrong" flag + note) — same upsert-on-conflict shape as
+    `set_decision_feedback`, at image grain instead of property-pair grain (migration 308)."""
+    clean_note = (note or "").strip() or None
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO image_tag_annotations (image_id, tag_flagged, render_flagged, "
+            "  note, created_by) "
+            "VALUES (%s,%s,%s,%s,%s) "
+            "ON CONFLICT (image_id) DO UPDATE SET "
+            "  tag_flagged = excluded.tag_flagged, "
+            "  render_flagged = excluded.render_flagged, "
+            "  note = excluded.note, "
+            "  updated_at = now() "
+            "RETURNING tag_flagged, render_flagged, note, updated_at",
+            (image_id, bool(tag_flagged), bool(render_flagged), clean_note, created_by),
+        )
+        r = cur.fetchone()
+    return {
+        "data": {
+            "image_id": image_id, "tag_flagged": bool(r[0]), "render_flagged": bool(r[1]),
+            "note": r[2], "updated_at": r[3],
+        }
+    }
+
+
+def delete_image_annotation(conn: psycopg.Connection, *, image_id: int) -> dict[str, Any]:
+    """Clear an image's annotation row entirely. No-op if it had none."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "DELETE FROM image_tag_annotations WHERE image_id = %s", (image_id,),
+        )
+        deleted = cur.rowcount
+    return {"data": {"deleted": bool(deleted)}}
+
+
+def _canon_image_pair(a: int, b: int) -> tuple[int, int]:
+    """Canonical (low, high) image-id pair — the phash_pair_notes key order."""
+    a, b = int(a), int(b)
+    return (a, b) if a < b else (b, a)
+
+
+def set_phash_note(
+    conn: psycopg.Connection,
+    *,
+    image_id_a: int,
+    image_id_b: int,
+    note: str | None,
+    created_by: str = "operator",
+) -> dict[str, Any]:
+    """Upsert the operator's note on ONE image pair from the /phash-audit page — image-
+    PAIR grain (migration 308), the same mutable upsert shape as `set_decision_feedback`."""
+    lo, hi = _canon_image_pair(image_id_a, image_id_b)
+    if lo == hi:
+        raise ValueError("a phash note needs two distinct images")
+    clean_note = (note or "").strip() or None
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO phash_pair_notes (image_id_a, image_id_b, note, created_by) "
+            "VALUES (%s,%s,%s,%s) "
+            "ON CONFLICT (image_id_a, image_id_b) DO UPDATE SET "
+            "  note = excluded.note, updated_at = now() "
+            "RETURNING note, updated_at",
+            (lo, hi, clean_note, created_by),
+        )
+        r = cur.fetchone()
+    return {"data": {"image_id_a": lo, "image_id_b": hi, "note": r[0], "updated_at": r[1]}}
+
+
+def delete_phash_note(
+    conn: psycopg.Connection, *, image_id_a: int, image_id_b: int,
+) -> dict[str, Any]:
+    """Clear a phash-pair note. No-op if it had none."""
+    lo, hi = _canon_image_pair(image_id_a, image_id_b)
+    with conn.cursor() as cur:
+        cur.execute(
+            "DELETE FROM phash_pair_notes WHERE image_id_a = %s AND image_id_b = %s",
+            (lo, hi),
+        )
+        deleted = cur.rowcount
+    return {"data": {"deleted": bool(deleted)}}
+
+
 def _ledger_side_sql(pid_expr: str, grp_expr: str) -> str:
     """Scalar SQL for the representative listing id of property `pid_expr` on one
     side of merge group `grp_expr`, resolved from the `property_merge_events`
@@ -441,10 +533,15 @@ def summary(conn: psycopg.Connection, *, status: str = "proposed") -> dict[str, 
 # matching photos, or cosine routings just below a cutoff — to validate the engine's bars.
 # Keys come from this fixed dict (never the request), so interpolating them is injection-safe.
 _FACTOR_FILTER: dict[str, tuple[str, str | None]] = {
-    "phash":   ("a.stage = 'phash'",   "phash_pairs"),
-    "cosine":  ("a.detail ? 'cosine'", "cosine"),
-    "visual":  ("a.stage = 'visual'",  None),
-    "address": ("a.stage = 'address'", None),
+    "phash":      ("a.stage = 'phash'",   "phash_pairs"),
+    "cosine":     ("a.detail ? 'cosine'", "cosine"),
+    "visual":     ("a.stage = 'visual'",  None),
+    "address":    ("a.stage = 'address'", None),
+    # A real terminal reason (stamped under stage='phash' — the floor-plan gate runs as a
+    # post-check on a phash match), unlike site_plan_different_unit which never reaches
+    # dedup_pair_audit at all (that gate's action is always "queue" — see Needs-review's
+    # bucket picker / bucketLabel instead).
+    "floor_plan": ("a.detail->>'reason' = 'floor_plan_different_layout'", None),
 }
 
 
@@ -459,7 +556,9 @@ def list_pair_audit(
     factor_min: float | None = None,
     factor_max: float | None = None,
     verdict: str | None = None,
+    room_type: str | None = None,
     property_id: int | None = None,
+    property_id_in: list[int] | None = None,
     flagged: bool | None = None,
     districts: list[DistrictChip] | None = None,
     limit: int = 100,
@@ -468,11 +567,15 @@ def list_pair_audit(
     """The unified Decision history feed: every TERMINAL dedup decision (merged |
     dismissed), engine AND operator, newest first. Filterable by property type
     (`category_main`), `outcome`, `source`, `stage`, and by the decision FACTOR: `factor`
-    ∈ {phash, cosine, visual, address} with a numeric `factor_min`/`factor_max` on its
-    signal (phash_pairs / cosine), or a `verdict` for visual rows — so the operator can
-    audit the borderline decisions of one signal. `property_id` scopes to the decisions
-    that touch one property's child listings (the listing-detail "merge decisions" link) —
-    keyed on the stable `sreality_id` since `property_id` re-points on every merge.
+    ∈ {phash, cosine, visual, address, floor_plan} with a numeric `factor_min`/`factor_max`
+    on its signal (phash_pairs / cosine), or a `verdict` for visual rows — so the operator
+    can audit the borderline decisions of one signal. `room_type` filters to decisions
+    whose factor detail names that compared room/plan tag (`detail->>'room_type'`, the
+    same value `DedupFactors` already renders — e.g. 'kitchen', 'floor_plan', 'site_plan').
+    `property_id` scopes to the decisions that touch one property's child listings (the
+    listing-detail "merge decisions" link); `property_id_in` is the batched form (one call
+    for many on-screen properties, e.g. the CLIP audit page's property cards) — keyed on
+    the stable `sreality_id` since `property_id` re-points on every merge.
     `merge_group_id` is the inline-undo handle; `undone` is DERIVED by joining the merge
     ledger (the single source of truth). `category_main` and `districts` both match a
     decision if EITHER side's (merged-away-surviving, rule #18) `properties` row
@@ -511,6 +614,9 @@ def list_pair_audit(
     if verdict is not None:
         clauses.append("a.detail->>'verdict' = %(verdict)s")
         params["verdict"] = verdict
+    if room_type is not None:
+        clauses.append("a.detail->>'room_type' = %(room_type)s")
+        params["room_type"] = room_type
     if property_id is not None:
         clauses.append(
             "(a.left_sreality_id IN "
@@ -519,6 +625,14 @@ def list_pair_audit(
             "  (SELECT sreality_id FROM listings WHERE property_id = %(audit_pid)s))"
         )
         params["audit_pid"] = property_id
+    if property_id_in:
+        clauses.append(
+            "(a.left_sreality_id IN "
+            "  (SELECT sreality_id FROM listings WHERE property_id = ANY(%(audit_pids)s))"
+            " OR a.right_sreality_id IN "
+            "  (SELECT sreality_id FROM listings WHERE property_id = ANY(%(audit_pids)s)))"
+        )
+        params["audit_pids"] = list(property_id_in)
     if flagged:
         clauses.append("f.is_incorrect IS TRUE")
     if districts:
@@ -639,6 +753,122 @@ def _listing_room_images(
     return ([{"image_id": r[0], "sreality_url": r[1], "storage_path": r[2]}
              for r in cur.fetchall()],
             bool(room_type))
+
+
+# How many of the newest-first dedup_pair_audit rows /phash-audit joins against images
+# for. A plain per-decision Hamming recompute is cheap (bit_count over two stored
+# bigints), but the base population isn't bounded by any index the way list_pair_audit's
+# filters are, so this caps the join's cost regardless of table size — matches the
+# "bound the expensive part, count the true population separately" pattern used
+# elsewhere (see pipeline_overview). `scanned_pairs` in the response is the TRUE count
+# under the same filters, so a capped result is never mistaken for exhaustive.
+_PHASH_AUDIT_SCAN_CAP = 800
+
+
+def phash_audit(
+    conn: psycopg.Connection,
+    *,
+    hamming_min: int,
+    hamming_max: int,
+    category_main: str | None = None,
+    outcome: str | None = None,
+    room_type: str | None = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> dict[str, Any]:
+    """/phash-audit: every matching-photo image PAIR, across the pairs the engine already
+    looked at (dedup_pair_audit), whose live-recomputed Hamming distance falls in
+    [hamming_min, hamming_max] — a direct range browse, not a merged-vs-dismissed
+    comparison (the operator's ask: "show me image pairs that were phash scored and were
+    within this range"). Hamming is a cheap bitwise `bit_count(a XOR b)` over the already-
+    stored `images.phash` bigints — no vision recompute, no re-scoring. `room_type`
+    matches if EITHER image carries that CLIP logical_tag."""
+    scope_clauses: list[str] = []
+    scope_params: dict[str, Any] = {}
+    if category_main is not None:
+        scope_clauses.append("a.category_main = %(category_main)s")
+        scope_params["category_main"] = category_main
+    if outcome is not None:
+        scope_clauses.append("a.outcome = %(outcome)s")
+        scope_params["outcome"] = outcome
+    scope_where = ("WHERE " + " AND ".join(scope_clauses)) if scope_clauses else ""
+    with conn.cursor() as cur:
+        cur.execute(
+            f"SELECT count(*) FROM dedup_pair_audit a {scope_where}", scope_params,
+        )
+        scanned_pairs = int(cur.fetchone()[0])
+        join_params: dict[str, Any] = {
+            **scope_params, "hmin": hamming_min, "hmax": hamming_max,
+            "cap": _PHASH_AUDIT_SCAN_CAP, "limit": limit, "offset": offset,
+        }
+        room_clause = ""
+        if room_type is not None:
+            room_clause = " AND (ta.logical_tag = %(room_type)s OR tb.logical_tag = %(room_type)s)"
+            join_params["room_type"] = room_type
+        cur.execute(
+            f"""
+            WITH scoped AS (
+                SELECT a.id, a.left_sreality_id, a.right_sreality_id,
+                       a.left_property_id, a.right_property_id,
+                       a.outcome, a.category_main, a.run_at
+                FROM dedup_pair_audit a
+                {scope_where}
+                ORDER BY a.run_at DESC
+                LIMIT %(cap)s
+            )
+            SELECT s.id, s.left_sreality_id, s.right_sreality_id,
+                   s.left_property_id, s.right_property_id, s.outcome,
+                   s.category_main, s.run_at,
+                   ia.id, ia.sreality_url, ia.storage_path,
+                   ta.logical_tag, ta.fine_tag, ta.confidence, ta.render_score,
+                   ib.id, ib.sreality_url, ib.storage_path,
+                   tb.logical_tag, tb.fine_tag, tb.confidence, tb.render_score,
+                   bit_count((ia.phash # ib.phash)::bit(64)) AS hamming
+            FROM scoped s
+            JOIN images ia ON ia.sreality_id = s.left_sreality_id AND ia.phash IS NOT NULL
+            JOIN images ib ON ib.sreality_id = s.right_sreality_id AND ib.phash IS NOT NULL
+            LEFT JOIN LATERAL (
+                SELECT t.logical_tag, t.fine_tag, t.confidence, t.render_score
+                FROM image_clip_tags t
+                WHERE t.image_id = ia.id ORDER BY t.tagged_at DESC LIMIT 1
+            ) ta ON true
+            LEFT JOIN LATERAL (
+                SELECT t.logical_tag, t.fine_tag, t.confidence, t.render_score
+                FROM image_clip_tags t
+                WHERE t.image_id = ib.id ORDER BY t.tagged_at DESC LIMIT 1
+            ) tb ON true
+            WHERE bit_count((ia.phash # ib.phash)::bit(64)) BETWEEN %(hmin)s AND %(hmax)s
+            {room_clause}
+            ORDER BY hamming ASC, s.run_at DESC
+            LIMIT %(limit)s OFFSET %(offset)s
+            """,
+            join_params,
+        )
+        rows = cur.fetchall()
+    return {
+        "data": [
+            {
+                "audit_id": r[0], "left_sreality_id": r[1], "right_sreality_id": r[2],
+                "left_property_id": r[3], "right_property_id": r[4],
+                "outcome": r[5], "category_main": r[6], "run_at": r[7],
+                "left_image": {
+                    "image_id": r[8], "sreality_url": r[9], "storage_path": r[10],
+                    "room_type": r[11], "fine_tag": r[12], "confidence": r[13],
+                    "render_score": r[14],
+                },
+                "right_image": {
+                    "image_id": r[15], "sreality_url": r[16], "storage_path": r[17],
+                    "room_type": r[18], "fine_tag": r[19], "confidence": r[20],
+                    "render_score": r[21],
+                },
+                "hamming": int(r[22]),
+            }
+            for r in rows
+        ],
+        "returned": len(rows),
+        "scanned_pairs": scanned_pairs,
+        "scan_cap": _PHASH_AUDIT_SCAN_CAP,
+    }
 
 
 def _phash_pair_evidence(
