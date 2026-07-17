@@ -215,12 +215,18 @@ export default function Dedup() {
   const bulkMut = useMutation({ mutationFn: bulkMergeDedupCandidates, onSuccess: invalidateAfterMerge });
 
   // The loaded STRONG geo candidates (same coord + area + price/№) — the scoped
-  // bulk-approve target. Gated to Houses in the render (the approved auto-merge family).
+  // bulk-approve target. Houses (dum) ONLY (the approved auto-merge family) — `tier`
+  // is HOW the pair was found (street vs. geo-cell), never WHAT family it is, so a geo
+  // match spanning land/commercial/other must be excluded here explicitly, not by the
+  // outer tier gate alone (fixed alongside the stale 'geo_dum' tier check below —
+  // 'geo_dum' was never a real tier VALUE, so this bar was silently unreachable).
   const strongLoadedIds = useMemo(
     () => candidates
       .filter((c) => {
         const r = (c.markers_matched as { reason?: string } | null)?.reason;
-        return r === 'geo_exact' || r === 'geo_strong';
+        const isDum = c.left_property.category_main === 'dum'
+          || c.right_property.category_main === 'dum';
+        return isDum && (r === 'geo_exact' || r === 'geo_strong');
       })
       .map((c) => c.id),
     [candidates],
@@ -307,7 +313,7 @@ export default function Dedup() {
         </div>
       </div>
 
-      {tier === 'geo_dum' ? (
+      {tier === 'geo' ? (
         <BulkApproveBar
           count={strongLoadedIds.length}
           busy={bulkMut.isPending}
@@ -642,6 +648,10 @@ function bucketLabel(
     return { label: 'Compared — inconclusive', hint: 'no clear verdict', tone: 'muted' };
   if (reason === 'site_plan_different_unit')
     return { label: 'Different unit (site plan)', hint: 'development guard', tone: 'brick' };
+  if (reason === 'floor_plan_review')
+    return { label: 'Floor plan — ambiguous', hint: 'both sides have a usable 2D plan, comparison inconclusive', tone: 'copper' };
+  if (reason === 'floor_plan_pending')
+    return { label: 'Floor plan — pending', hint: 'verdict not yet available, deferred to next run', tone: 'muted' };
   if (reason === 'visual_match')
     return { label: 'Visual match', hint: 'High verdict', tone: 'sage' };
   if (reason === 'image_phash')
@@ -761,19 +771,26 @@ function BacklogRow({
   );
 }
 
+// `tier` is HOW a pair was found — street+disposition vs. a geo-cell blocking pass —
+// NEVER what property type it is (that's the separate "Type" row, CATEGORY_MAIN_TABS).
+// The backend (scripts/dedup_engine.py `cell_rung`) only ever writes these three values;
+// a prior per-family scheme (geo_dum/geo_komercni/geo_pozemek/geo_ostatni) was collapsed
+// into the single 'geo' tier upstream and this map was never updated to match — until
+// this fix, a geo- or byt_geo-tier chip rendered as the literal unlabelled string
+// "geo"/"byt_geo" (TIER_LABEL[t] ?? t falling through), which is what read as
+// confusing. Filter by property type via the Type row below, not this facet.
 const TIER_LABEL: Record<string, string> = {
-  street_disposition: 'Apartments',
-  geo_dum: 'Houses',
-  geo_komercni: 'Commercial',
-  geo_pozemek: 'Land',
-  geo_ostatni: 'Other',
+  street_disposition: 'Street address (byty)',
+  geo: 'Location match (domy/pozemky/komerční/ostatní)',
+  byt_geo: 'Location match (byty bez ulice)',
 };
 const tierLabel = (t: string) => TIER_LABEL[t] ?? t;
 
-/* Category (tier) facet — focus the queue on one property family at a time.
- * Houses/Land/Commercial are the geo matcher's single-dwelling families; Apartments
- * is the street+disposition tier. Picking one scopes "Needs review" and (for Houses)
- * enables the bulk-approve. Reads /dedup/summary's per-tier counts. */
+/* Category (tier) facet — focus the queue on one MATCH METHOD at a time (street vs.
+ * geo-cell vs. geo-cell-for-street-less-apartments) — orthogonal to the Type row below,
+ * which narrows by property family instead. Picking the 'geo' tier additionally enables
+ * the bulk-approve bar (Houses only — see strongLoadedIds). Reads /dedup/summary's
+ * per-tier counts. */
 function CategoryFacet({
   tiers,
   selected,
@@ -795,6 +812,10 @@ function CategoryFacet({
     <section className="mt-8">
       <p className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)]">
         Category
+      </p>
+      <p className="mt-0.5 text-[0.72rem] text-[var(--color-ink-4)]">
+        How the pair was matched (street vs. location) — not property type; use the Type
+        row below for houses/land/commercial/other.
       </p>
       <div className="mt-2 flex flex-wrap gap-2">
         <button type="button" className={chip(selected == null)} onClick={() => onSelect(null)}>

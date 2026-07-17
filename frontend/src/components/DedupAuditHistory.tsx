@@ -11,6 +11,7 @@ import { LocationTypeahead } from '@/components/filter-controls/LocationTypeahea
 import DedupFactors from '@/components/DedupFactors';
 import DecisionFeedbackControl from '@/components/DecisionFeedbackControl';
 import FilterChip from '@/components/FilterChip';
+import { IMAGE_TAG_LABELS, imageTagLabel } from '@/lib/imageTags';
 
 /* The unified decision ledger — every terminal dedup decision (merged / dismissed),
  * engine AND operator, with the evidence + inline undo. Replaces the old separate
@@ -34,13 +35,18 @@ const SOURCES = [
 ];
 
 // The decision-factor (signal) a decision turned on. phash/cosine carry a numeric
-// threshold (review the borderline tail); visual carries a verdict; address has neither.
+// threshold (review the borderline tail); visual carries a verdict; address/floor_plan
+// have neither. floor_plan is the ONE terminal reason the floor-plan gate ever produces
+// (a dismiss stamped under stage='phash' — the gate runs as a post-check on a phash
+// match); the site-plan gate's action is always "queue", so it never reaches this table
+// at all — that visibility lives on Needs-review's bucket picker instead.
 const FACTORS = [
   { id: '', label: 'Vše' },
   { id: 'phash', label: 'pHash' },
   { id: 'cosine', label: 'Cosine' },
   { id: 'visual', label: 'Vize' },
   { id: 'address', label: 'Adresa' },
+  { id: 'floor_plan', label: 'Půdorys' },
 ];
 const VERDICTS = [
   { id: '', label: 'Vše' },
@@ -48,6 +54,13 @@ const VERDICTS = [
   { id: 'Medium', label: 'Medium' },
   { id: 'Low', label: 'Low' },
 ];
+
+// Which room/plan tag the decision's factor detail names as the compared one
+// (detail.room_type) — the same 15-value taxonomy the CLIP/pHash audit pages filter by.
+const ROOM_TYPES = Object.keys(IMAGE_TAG_LABELS).filter(
+  (k) => !['situation_plan', 'cadastral_map', 'aerial_plot', 'location_map',
+           'energy_certificate', 'document_text'].includes(k),
+);
 
 const OUTCOME_STYLE: Record<string, string> = {
   merged:
@@ -75,6 +88,7 @@ export default function DedupAuditHistory({
   const [onlyFlagged, setOnlyFlagged] = useState(false);
   const [factor, setFactor] = useState('');
   const [verdict, setVerdict] = useState('');
+  const [roomType, setRoomType] = useState('');
   const [maxText, setMaxText] = useState(''); // raw threshold buffer (un-committed)
   const [factorMax, setFactorMax] = useState<number | null>(null); // committed
   // Location narrow — matches a decision if EITHER side of its pair touches
@@ -104,7 +118,7 @@ export default function DedupAuditHistory({
   const q = useQuery({
     queryKey: [
       'dedup', 'audit', outcome, type, source, onlyFlagged, factor, factorMax, verdict,
-      scopeProperty ?? null, districts,
+      roomType, scopeProperty ?? null, districts,
     ],
     queryFn: () =>
       getDedupAudit({
@@ -115,6 +129,7 @@ export default function DedupAuditHistory({
         factor: factor || undefined,
         factor_max: numericFactor && factorMax != null ? factorMax : undefined,
         verdict: factor === 'visual' && verdict ? verdict : undefined,
+        room_type: roomType || undefined,
         property_id: scopeProperty ?? undefined,
         districts: districts.length ? districts : undefined,
         limit: 150,
@@ -261,6 +276,26 @@ export default function DedupAuditHistory({
                 onClick={() => setVerdict(v.id)}
               />
             ))}
+        </div>
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className="text-[0.62rem] uppercase tracking-[0.1em] text-[var(--color-ink-4)] mr-1">
+            Porovnaná místnost/plán
+          </span>
+          <FilterChip on={roomType === ''} label="Vše" onClick={() => setRoomType('')} />
+          {ROOM_TYPES.map((rt) => (
+            <FilterChip
+              key={rt}
+              on={roomType === rt}
+              label={imageTagLabel(rt) ?? rt}
+              onClick={() => setRoomType(rt)}
+            />
+          ))}
+          <span
+            className="ml-1 text-[0.66rem] text-[var(--color-ink-4)]"
+            title="Situační plán rozhoduje jen o zařazení do fronty (Needs review), nikdy o konečném sloučení/zamítnutí — proto se v Decision history nikdy neobjeví jako samostatný faktor."
+          >
+            (situační plán → fronta „Needs review“, ne Decision history)
+          </span>
         </div>
       </div>
 
