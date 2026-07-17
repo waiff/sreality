@@ -47,6 +47,22 @@ export function imageTagLabel(tag: string | null | undefined): string | null {
   return IMAGE_TAG_LABELS[tag] ?? tag;
 }
 
+/** The 2 logical tags that exist ONLY as a `collapse` target of other fine tags
+ * (data/clip_taxonomy.json) — they share a Czech label with their fine child
+ * (site_plan/situation_plan both "situační plán"; property_document/document_text
+ * both "dokument") and are never a value CLIP predicts directly. */
+const COLLAPSE_ONLY_TAGS = new Set(['site_plan', 'property_document']);
+
+/** The 19 keys CLIP can actually predict as fine_tag (data/clip_taxonomy.json's
+ * `prompts` keys) — every IMAGE_TAG_LABELS entry except the 2 collapse-only logical
+ * tags above, so every remaining entry has a label unique to it. This is the axis a
+ * classifier trained on the frozen embeddings should learn: logical_tag is a
+ * deterministic post-hoc collapse of fine_tag (see `collapse` in the taxonomy file),
+ * so training on the finer class loses nothing and stays collapsible later. */
+export const FINE_TAG_KEYS = Object.keys(IMAGE_TAG_LABELS).filter(
+  (k) => !COLLAPSE_ONLY_TAGS.has(k),
+);
+
 /** A render-ready image plus its CLIP tag — the shape the photo carousels consume. */
 export interface TaggedImageUrl {
   url: string;
