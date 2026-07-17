@@ -310,20 +310,29 @@ def get_phash_audit(
     hamming_max: int = Query(default=15, ge=0, le=64),
     category_main: str | None = None,
     outcome: str | None = None,
-    room_type: str | None = None,
+    room_types: str | None = Query(
+        default=None, description="CSV of CLIP logical tags — both images in a "
+        "returned pair must share the SAME tag, which must be one of these.",
+    ),
     limit: int = Query(default=100, ge=1, le=200),
-    offset: int = Query(default=0, ge=0),
+    scan_offset: int = Query(
+        default=0, ge=0, description="Opaque cursor — pass back the previous "
+        "response's next_scan_offset to continue scanning.",
+    ),
     conn: Any = Depends(deps.get_db_conn),
     _: dict = Depends(deps.require_admin),
 ) -> dict[str, Any]:
     """/phash-audit: matching-photo image pairs, from decisions the engine already made,
     whose live Hamming distance falls in [hamming_min, hamming_max] — evidence for
     whether the current merge bar (Hamming <= 6) could safely widen. Read-only; no
-    engine/threshold change."""
+    engine/threshold change. Paginates the SCOPE in bounded chunks (see phash_audit's
+    docstring) — a `data` shorter than `limit` with a null `next_scan_offset` means the
+    ceiling or the true population was exhausted, not an arbitrary stop."""
+    types = [t for t in room_types.split(",") if t.strip()] if room_types else None
     return dedup.phash_audit(
         conn, hamming_min=hamming_min, hamming_max=hamming_max,
-        category_main=category_main, outcome=outcome, room_type=room_type,
-        limit=limit, offset=offset,
+        category_main=category_main, outcome=outcome, room_types=types,
+        limit=limit, scan_offset=scan_offset,
     )
 
 

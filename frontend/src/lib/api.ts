@@ -899,24 +899,33 @@ export const getPhashAudit = (
     hamming_max?: number;
     category_main?: string;
     outcome?: string;
-    room_type?: string;
+    // Both images in a returned pair must share the SAME tag, which must be one of
+    // these — not "either side is one of these" (see phash_audit's docstring).
+    room_types?: ReadonlyArray<string>;
     limit?: number;
-    offset?: number;
+    // Opaque cursor — pass back the previous response's next_scan_offset.
+    scan_offset?: number;
   } = {},
 ): Promise<{
   data: PhashAuditRow[];
   returned: number;
   scanned_pairs: number;
   scan_cap: number;
+  scanned_so_far: number;
+  // Pagination is over the scan SCOPE, not the joined result (see the backend
+  // docstring) — a short `data` with next_scan_offset != null means "nothing more in
+  // this window, but the ceiling/population isn't exhausted yet, keep scrolling";
+  // null means truly done.
+  next_scan_offset: number | null;
 }> => {
   const q = new URLSearchParams();
   if (params.hamming_min != null) q.set('hamming_min', String(params.hamming_min));
   if (params.hamming_max != null) q.set('hamming_max', String(params.hamming_max));
   if (params.category_main) q.set('category_main', params.category_main);
   if (params.outcome) q.set('outcome', params.outcome);
-  if (params.room_type) q.set('room_type', params.room_type);
+  if (params.room_types?.length) q.set('room_types', params.room_types.join(','));
   q.set('limit', String(params.limit ?? 100));
-  if (params.offset) q.set('offset', String(params.offset));
+  if (params.scan_offset) q.set('scan_offset', String(params.scan_offset));
   return request(`/dedup/phash-audit?${q.toString()}`);
 };
 

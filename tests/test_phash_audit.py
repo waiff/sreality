@@ -1,5 +1,5 @@
 """api.property_dedup.phash_audit: the /phash-audit range browse over dedup_pair_audit
-pairs. Hermetic fake conn — no DB."""
+pairs, chunked-scan pagination. Hermetic fake conn — no DB."""
 
 from __future__ import annotations
 
@@ -25,7 +25,12 @@ class _Cur:
         if "count(*) FROM dedup_pair_audit" in s:
             self._rows = [(self._conn.scanned,)]
         elif "WITH scoped AS" in s:
-            self._rows = list(self._conn.join_rows)
+            idx = self._conn.chunk_calls
+            self._conn.chunk_calls += 1
+            if self._conn.chunk_responses is not None:
+                self._rows = list(self._conn.chunk_responses[idx]) if idx < len(self._conn.chunk_responses) else []
+            else:
+                self._rows = list(self._conn.join_rows)
         else:
             self._rows = []
 
@@ -37,13 +42,21 @@ class _Cur:
 
 
 class _FakeConn:
-    def __init__(self, *, scanned: int = 0, join_rows=None) -> None:
+    def __init__(
+        self, *, scanned: int = 0, join_rows=None,
+        chunk_responses: list[list[tuple[Any, ...]]] | None = None,
+    ) -> None:
         self.scanned = scanned
         self.join_rows = join_rows or []
+        self.chunk_responses = chunk_responses
+        self.chunk_calls = 0
         self.executed: list[tuple[str, Any]] = []
 
     def cursor(self) -> _Cur:
         return _Cur(self)
+
+    def chunk_queries(self) -> list[tuple[str, Any]]:
+        return [(s, p) for s, p in self.executed if "WITH scoped AS" in s]
 
 
 def _join_row(detail: dict | None = None) -> tuple[Any, ...]:
@@ -64,9 +77,7 @@ def _join_row(detail: dict | None = None) -> tuple[Any, ...]:
 def test_hamming_range_passed_through_and_result_shaped() -> None:
     conn = _FakeConn(scanned=3, join_rows=[_join_row()])
     out = dedup.phash_audit(conn, hamming_min=7, hamming_max=15)
-    join_sql, join_params = next(
-        (s, p) for s, p in conn.executed if "WITH scoped AS" in s
-    )
+    join_sql, join_params = conn.chunk_queries()[0]
     assert join_params["hmin"] == 7 and join_params["hmax"] == 15
     assert "BETWEEN %(hmin)s AND %(hmax)s" in join_sql
     row = out["data"][0]
@@ -95,7 +106,7 @@ def test_audit_breakdown_computed_from_detail_so_the_true_decider_is_visible() -
     assert verdict_rung["value"] == "Low"
 
 
-def test_category_main_and_outcome_scope_both_queries() -> None:
+def test_category_main_and_outcome_scope_both_the_count_and_chunk_queries() -> None:
     conn = _FakeConn(scanned=0, join_rows=[])
     dedup.phash_audit(
         conn, hamming_min=0, hamming_max=15, category_main="dum", outcome="dismissed",
@@ -115,25 +126,95 @@ def test_no_scope_filters_omit_the_where_clause() -> None:
         assert "outcome" not in (params or {})
 
 
-def test_room_type_requires_both_sides_to_match() -> None:
-    # Not "either side happens to carry this tag" — a chodba<->kuchyne pair passing a
-    # kuchyne filter is exactly the confusion this must not reproduce (the engine's own
-    # phash pass is room-blind by design, but the operator's Tag filter here means
-    # "show me kitchen-vs-kitchen pairs").
-    conn = _FakeConn(scanned=0, join_rows=[])
-    dedup.phash_audit(conn, hamming_min=0, hamming_max=15, room_type="floor_plan")
-    join_sql, join_params = next(
-        (s, p) for s, p in conn.executed if "WITH scoped AS" in s
+def test_room_types_requires_both_sides_to_match_the_same_tag_from_the_set() -> None:
+    # Not "either side happens to carry ANY of these tags" — a chodba<->kuchyne pair
+    # passing a kuchyne filter is exactly the confusion this must not reproduce (the
+    # engine's own phash pass is room-blind by design, but the Tag filter here means
+    # "show me same-room pairs, for one of these rooms").
+    conn = _FakeConn(scanned=1, join_rows=[])
+    dedup.phash_audit(
+        conn, hamming_min=0, hamming_max=15, room_types=["kitchen", "bathroom"],
     )
-    assert "ta.logical_tag = %(room_type)s AND tb.logical_tag = %(room_type)s" in join_sql
-    assert join_params["room_type"] == "floor_plan"
+    join_sql, join_params = conn.chunk_queries()[0]
+    assert "ta.logical_tag = ANY(%(room_types)s)" in join_sql
+    assert "tb.logical_tag = ANY(%(room_types)s)" in join_sql
+    assert "ta.logical_tag = tb.logical_tag" in join_sql
+    assert join_params["room_types"] == ["kitchen", "bathroom"]
 
 
-def test_scan_cap_bounds_the_scoped_population() -> None:
-    conn = _FakeConn(scanned=0, join_rows=[])
-    out = dedup.phash_audit(conn, hamming_min=0, hamming_max=15)
-    join_sql, join_params = next(
-        (s, p) for s, p in conn.executed if "WITH scoped AS" in s
-    )
-    assert "LIMIT %(cap)s" in join_sql
-    assert join_params["cap"] == out["scan_cap"]
+def test_no_room_types_omits_the_tag_clause() -> None:
+    conn = _FakeConn(scanned=1, join_rows=[])
+    dedup.phash_audit(conn, hamming_min=0, hamming_max=15, room_types=None)
+    join_sql, join_params = conn.chunk_queries()[0]
+    assert "ta.logical_tag = ANY" not in join_sql
+    assert "room_types" not in join_params
+
+
+def test_first_chunk_starts_at_scan_offset_sized_to_remaining_ceiling() -> None:
+    conn = _FakeConn(scanned=200, join_rows=[_join_row()])
+    dedup.phash_audit(conn, hamming_min=0, hamming_max=15, scan_offset=0)
+    _, join_params = conn.chunk_queries()[0]
+    assert join_params["off"] == 0
+    # scanned_pairs=200 < the 800 chunk size -> the chunk shrinks to what's left, not 800.
+    assert join_params["chunk"] == 200
+
+
+def test_scan_offset_resumes_from_the_given_cursor() -> None:
+    conn = _FakeConn(scanned=2000, join_rows=[_join_row()])
+    dedup.phash_audit(conn, hamming_min=0, hamming_max=15, scan_offset=800)
+    _, join_params = conn.chunk_queries()[0]
+    assert join_params["off"] == 800
+    assert join_params["chunk"] == 800  # 2000-800=1200 remaining, capped at the 800 chunk
+
+
+def test_one_call_processes_exactly_one_chunk() -> None:
+    # Predictable, bounded per-call latency (verified live: ~5-7s/chunk regardless of
+    # filter) — no internal multi-chunk loop. The CALLER (the page) is what keeps
+    # asking for more via next_scan_offset until a full page or true exhaustion.
+    conn = _FakeConn(scanned=2000, chunk_responses=[[_join_row()], [_join_row()]])
+    out = dedup.phash_audit(conn, hamming_min=0, hamming_max=15, limit=100)
+    assert len(conn.chunk_queries()) == 1
+    assert out["returned"] == 1
+    assert out["scanned_so_far"] == 800
+    assert out["next_scan_offset"] == 800
+
+
+def test_a_sparse_chunk_can_legitimately_return_fewer_rows_than_limit() -> None:
+    # Zero matches in this chunk does NOT mean "done" — next_scan_offset must still
+    # point past it so the caller's loop keeps going.
+    conn = _FakeConn(scanned=3800, chunk_responses=[[]])
+    out = dedup.phash_audit(conn, hamming_min=0, hamming_max=15, limit=100)
+    assert out["returned"] == 0
+    assert out["scanned_so_far"] == 800
+    assert out["next_scan_offset"] == 800
+
+
+def test_next_scan_offset_is_null_once_the_ceiling_or_population_is_exhausted() -> None:
+    conn = _FakeConn(scanned=50, join_rows=[_join_row()])
+    out = dedup.phash_audit(conn, hamming_min=0, hamming_max=15, scan_offset=0)
+    # scanned_pairs=50 all fit in one chunk -> nothing left to scan.
+    assert out["next_scan_offset"] is None
+    assert out["scanned_so_far"] == 50
+
+
+def test_ceiling_bounds_the_chunk_regardless_of_true_population_size() -> None:
+    conn = _FakeConn(scanned=50_000, chunk_responses=[[]])
+    out = dedup.phash_audit(conn, hamming_min=0, hamming_max=15, scan_offset=3200)
+    # Only 600 pairs remain before the 3800 ceiling — the chunk must shrink to that,
+    # not request 800, and next_scan_offset must reflect the ceiling, not the true
+    # 50,000-row population.
+    _, first_params = conn.chunk_queries()[0]
+    assert first_params["chunk"] == 600
+    assert out["scanned_so_far"] == 3800
+    assert out["next_scan_offset"] is None
+    assert out["scan_cap"] == 3800
+
+
+def test_scan_offset_already_at_or_past_the_ceiling_skips_the_chunk_query() -> None:
+    conn = _FakeConn(scanned=50_000)
+    out = dedup.phash_audit(conn, hamming_min=0, hamming_max=15, scan_offset=3800)
+    assert len(conn.chunk_queries()) == 0
+    assert out["returned"] == 0
+    assert out["next_scan_offset"] is None
+    assert out["next_scan_offset"] is None
+    assert out["scan_cap"] == 3800

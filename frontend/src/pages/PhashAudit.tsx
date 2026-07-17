@@ -53,9 +53,13 @@ const DEFAULT_MAX = 15;
 
 interface PhashPage {
   rows: PhashAuditRow[];
-  nextCursor: number | undefined;
+  // The scan-scope cursor (null = truly done — the ceiling or the whole matching
+  // population was exhausted). Distinct from "this page came up short": a chunk can
+  // legitimately return 0 rows while there's still more to scan — see the backend.
+  nextCursor: number | null;
   scanned_pairs: number;
   scan_cap: number;
+  scanned_so_far: number;
 }
 
 function chunk<T>(arr: readonly T[], size: number): T[][] {
@@ -67,7 +71,7 @@ function chunk<T>(arr: readonly T[], size: number): T[][] {
 export default function PhashAudit() {
   const [outcome, setOutcome] = useState('');
   const [categoryMain, setCategoryMain] = useState('');
-  const [roomType, setRoomType] = useState('');
+  const [roomTypes, setRoomTypes] = useState<string[]>([]);
   const [minText, setMinText] = useState(String(DEFAULT_MIN));
   const [maxText, setMaxText] = useState(String(DEFAULT_MAX));
   const [hammingMin, setHammingMin] = useState(DEFAULT_MIN);
@@ -80,24 +84,47 @@ export default function PhashAudit() {
     if (Number.isFinite(hi)) setHammingMax(hi);
   };
 
+  const toggleRoomType = (tag: string) =>
+    setRoomTypes((prev) =>
+      prev.includes(tag) ? prev.filter((t) => t !== tag) : [...prev, tag],
+    );
+
   const list = useInfiniteList<PhashAuditRow, PhashPage>({
-    queryKey: ['phash-audit', outcome, categoryMain, roomType, hammingMin, hammingMax],
+    queryKey: ['phash-audit', outcome, categoryMain, roomTypes, hammingMin, hammingMax],
     queryFn: async (cursor) => {
-      const offset = (cursor as number | null) ?? 0;
-      const resp = await getPhashAudit({
-        hamming_min: hammingMin,
-        hamming_max: hammingMax,
-        category_main: categoryMain || undefined,
-        outcome: outcome || undefined,
-        room_type: roomType || undefined,
-        limit: PAGE_SIZE,
-        offset,
-      });
+      // The backend does exactly ONE bounded chunk per call (predictable ~5-7s
+      // latency regardless of filter — verified live), so a chunk can legitimately
+      // come back with fewer than PAGE_SIZE rows while more remains to scan. Loop
+      // here — not by relying on useInfiniteList's generic "short page = done" check,
+      // which can't tell "sparse" from "exhausted" apart — until this page either
+      // fills up or next_scan_offset genuinely comes back null.
+      let scanOffset: number | null = (cursor as number | null) ?? 0;
+      let collected: PhashAuditRow[] = [];
+      let scannedPairs = 0;
+      let scanCap = 0;
+      let scannedSoFar = 0;
+      while (collected.length < PAGE_SIZE && scanOffset != null) {
+        const resp = await getPhashAudit({
+          hamming_min: hammingMin,
+          hamming_max: hammingMax,
+          category_main: categoryMain || undefined,
+          outcome: outcome || undefined,
+          room_types: roomTypes.length ? roomTypes : undefined,
+          limit: PAGE_SIZE - collected.length,
+          scan_offset: scanOffset,
+        });
+        collected = collected.concat(resp.data);
+        scannedPairs = resp.scanned_pairs;
+        scanCap = resp.scan_cap;
+        scannedSoFar = resp.scanned_so_far;
+        scanOffset = resp.next_scan_offset;
+      }
       return {
-        rows: resp.data,
-        nextCursor: resp.data.length === PAGE_SIZE ? offset + PAGE_SIZE : undefined,
-        scanned_pairs: resp.scanned_pairs,
-        scan_cap: resp.scan_cap,
+        rows: collected,
+        nextCursor: scanOffset,
+        scanned_pairs: scannedPairs,
+        scan_cap: scanCap,
+        scanned_so_far: scannedSoFar,
       };
     },
     pageSize: PAGE_SIZE,
@@ -153,15 +180,24 @@ export default function PhashAudit() {
           <span className="text-[0.62rem] uppercase tracking-[0.1em] text-[var(--color-ink-4)] mr-1">
             Tag
           </span>
-          <FilterChip on={roomType === ''} label="Vše" onClick={() => setRoomType('')} />
+          <FilterChip
+            on={roomTypes.length === 0}
+            label="Vše"
+            onClick={() => setRoomTypes([])}
+          />
           {TAG_OPTIONS.map((tag) => (
             <FilterChip
               key={tag}
-              on={roomType === tag}
+              on={roomTypes.includes(tag)}
               label={imageTagLabel(tag) ?? tag}
-              onClick={() => setRoomType(tag)}
+              onClick={() => toggleRoomType(tag)}
             />
           ))}
+          {roomTypes.length > 1 && (
+            <span className="text-[0.66rem] text-[var(--color-ink-4)]">
+              (pár musí mít STEJNÝ tag na obou stranách, jeden z vybraných)
+            </span>
+          )}
         </div>
         <div className="flex flex-wrap items-center gap-2 text-[0.78rem] text-[var(--color-ink-3)]">
           <span className="text-[0.62rem] uppercase tracking-[0.1em] text-[var(--color-ink-4)]">
@@ -194,9 +230,10 @@ export default function PhashAudit() {
 
       {scope && (
         <p className="mt-3 text-[0.72rem] text-[var(--color-ink-4)]">
-          {fmtCount(scope.scanned_pairs)} rozhodnutí odpovídá filtru · prohledáno
-          nejnovějších {fmtCount(scope.scan_cap)}
-          {scope.scanned_pairs > scope.scan_cap ? ' (staré páry nejsou zahrnuty)' : ''}
+          {fmtCount(scope.scanned_pairs)} rozhodnutí odpovídá filtru · prohledávání
+          pokrývá nejnovějších {fmtCount(scope.scan_cap)}
+          {scope.scanned_pairs > scope.scan_cap ? ' (starší páry nejsou zahrnuty)' : ''}
+          {' '}— skrolováním se prohledává dál, po částech
         </p>
       )}
 
@@ -220,6 +257,7 @@ export default function PhashAudit() {
         isFetchingNextPage={list.isFetchingNextPage}
         loadedCount={list.loadedCount}
         total={null}
+        loadingLabel="Prohledávám další várku rozhodnutí… (několik sekund)"
       />
     </div>
   );
