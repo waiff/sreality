@@ -71,6 +71,16 @@
 > recommended order (model fix → re-replay → operator sign-off). This whole track file is a
 > candidate for a future restructure (its own PR) to replace the stale D1/D2 body below with a
 > pointer-only index, per CLAUDE.md's roadmap-maintenance rule.
+> **Session 6 (2026-07-17, in flight)** = encoder-upgrade GPU re-run (reopens the 2026-07-11
+> CLOSED verdict — see `docs/design/dedup-cost-reduction.md` for the three confounds it fixes:
+> dinov2-small-only, shared-literal-photo contamination, byt-only negatives). `embedding_ab.yml`
+> gains a `manifest` mode (zero-credential bench manifest: presigned R2 URLs + dedup_label_events
+> labels + stored CLIP cosines); `scripts/embedding_gpu_bench.py` runs DINOv2 base/large vs the
+> stored-CLIP baseline on a rented RunPod RTX 4090 (~$0.70/h, ~1 pod-hour) with shared-photo
+> exclusion, ROC-AUC, and recall-at-≥99%-precision operating points, per-category + per-family.
+> NEXT after results: decide re-embed (pgvector column sizing: 8.03M imgs × 768-d ≈ 12 GB
+> halfvec) vs keep-CLIP; the site-plan hard-negative families (pozemek/dům) are the deciding
+> stratum.
 
 ## Dedup + canonical listing track (parallel)
 
