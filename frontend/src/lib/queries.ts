@@ -1340,6 +1340,33 @@ export const fetchDistinctTrainingLabels = async (): Promise<string[]> => {
   return [...new Set((data ?? []).map((r) => (r as { label: string }).label))].sort();
 };
 
+export interface TrainingLabelCount {
+  label: string;
+  count: number;
+}
+
+/* /phash-audit's "Jen v trénovací sadě" Tag row: how many examples exist per label —
+ * lets the operator judge class coverage ("is this one big enough yet?") while
+ * building the set. A GLOBAL count (the whole training set), not scoped to the
+ * current Hamming-range/outcome/category filters — coverage is a property of the
+ * training set itself, not of whichever window is currently being browsed. Same
+ * underlying read as fetchDistinctTrainingLabels (see its comment re: bound), just
+ * aggregated client-side instead of deduped, since the table is still small. */
+export const fetchTrainingLabelCounts = async (): Promise<TrainingLabelCount[]> => {
+  const { data, error } = await supabase
+    .from('image_training_examples_public')
+    .select('label')
+    .limit(2000);
+  if (error) throw error;
+  const counts = new Map<string, number>();
+  for (const row of (data ?? []) as { label: string }[]) {
+    counts.set(row.label, (counts.get(row.label) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .map(([label, count]) => ({ label, count }))
+    .sort((a, b) => b.count - a.count || a.label.localeCompare(b.label, 'cs'));
+};
+
 /* /dedup review card: the street / house-number / floor the candidate payload
  * doesn't carry (migration 122 exposes street + house_number on
  * listings_public). Batched over the on-screen sides' sreality_ids. */

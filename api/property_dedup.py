@@ -813,7 +813,7 @@ _PHASH_AUDIT_SCAN_CEILING = 3800  # the operator's ask: the prior 800 + 3000 mor
 def _phash_audit_chunk(
     cur: Any, *, scope_where: str, scope_params: dict[str, Any],
     hamming_min: int, hamming_max: int, room_types: list[str] | None,
-    training_only: bool, chunk_offset: int, chunk_size: int,
+    training_only: bool, training_label: str | None, chunk_offset: int, chunk_size: int,
 ) -> list[tuple[Any, ...]]:
     """One bounded window of the scan: the `chunk_size` dedup_pair_audit rows starting
     at `chunk_offset` (newest-first), cross-joined against images, Hamming-filtered.
@@ -836,12 +836,18 @@ def _phash_audit_chunk(
     # somewhere") — image_training_examples.image_id is unique-indexed, so each EXISTS
     # is a cheap point lookup, not a scan. phash_audit()'s scope-level sreality_id
     # pre-filter (below) is what keeps chunks from coming back mostly-empty; this is
-    # what keeps the result correct at the individual-photo grain.
-    training_clause = (
-        " AND (EXISTS (SELECT 1 FROM image_training_examples te WHERE te.image_id = ia.id)"
-        "   OR EXISTS (SELECT 1 FROM image_training_examples te WHERE te.image_id = ib.id))"
-        if training_only else ""
-    )
+    # what keeps the result correct at the individual-photo grain. `training_label`
+    # narrows further to a SPECIFIC label (e.g. auditing one class at a time), not just
+    # "has any training label at all".
+    training_clause = ""
+    if training_only or training_label:
+        label_match = " AND te.label = %(training_label)s" if training_label else ""
+        training_clause = (
+            f" AND (EXISTS (SELECT 1 FROM image_training_examples te WHERE te.image_id = ia.id{label_match})"
+            f"   OR EXISTS (SELECT 1 FROM image_training_examples te WHERE te.image_id = ib.id{label_match}))"
+        )
+        if training_label:
+            join_params["training_label"] = training_label
     cur.execute(
         f"""
         WITH scoped AS (
@@ -894,6 +900,7 @@ def phash_audit(
     outcome: str | None = None,
     room_types: list[str] | None = None,
     training_only: bool = False,
+    training_label: str | None = None,
     scan_offset: int = 0,
     limit: int = 100,
 ) -> dict[str, Any]:
@@ -912,7 +919,9 @@ def phash_audit(
     pairs", not "either side happens to be one of these". `training_only` narrows to
     pairs where at least one of the two specific images shown already has a
     linear-probe training-set label (image_training_examples) — the exact photo, not
-    just some other photo on the same listing.
+    just some other photo on the same listing. `training_label`, if given, narrows
+    further to that SPECIFIC label (implies training_only regardless of its literal
+    value) — auditing one class's coverage at a time.
 
     Pagination is over the SCOPE (dedup_pair_audit), not the joined result — see
     `_PHASH_AUDIT_CHUNK`'s comment for why. `scan_offset` is the opaque cursor (how many
@@ -932,18 +941,24 @@ def phash_audit(
         scope_clauses.append("a.outcome = %(outcome)s")
         scope_params["outcome"] = outcome
     with conn.cursor() as cur:
-        if training_only:
+        if training_only or training_label:
             # The training set is tiny (an operator hand-picks it) next to
             # dedup_pair_audit's population — without this, almost every chunk would
             # come back empty post-join, forcing the frontend to scan the whole
             # ceiling for a handful of rows. Narrowing the SCOPE to only the listings
-            # that own a trained image keeps a chunk's odds of matching close to 1,
-            # same as any other scope filter (category_main/outcome) already does.
-            cur.execute(
+            # that own a (matching) trained image keeps a chunk's odds of matching
+            # close to 1, same as any other scope filter (category_main/outcome)
+            # already does.
+            lookup_sql = (
                 "SELECT DISTINCT i.sreality_id FROM images i "
                 "JOIN image_training_examples te ON te.image_id = i.id "
-                "WHERE i.sreality_id IS NOT NULL",
+                "WHERE i.sreality_id IS NOT NULL"
             )
+            lookup_params: dict[str, Any] = {}
+            if training_label:
+                lookup_sql += " AND te.label = %(training_label)s"
+                lookup_params["training_label"] = training_label
+            cur.execute(lookup_sql, lookup_params)
             trained_sreality_ids = [r[0] for r in cur.fetchall()]
             if not trained_sreality_ids:
                 return {
@@ -972,7 +987,7 @@ def phash_audit(
                 cur, scope_where=scope_where, scope_params=scope_params,
                 hamming_min=hamming_min, hamming_max=hamming_max,
                 room_types=room_types, training_only=training_only,
-                chunk_offset=offset, chunk_size=window,
+                training_label=training_label, chunk_offset=offset, chunk_size=window,
             )
             offset += window
     rows = collected[:limit]
