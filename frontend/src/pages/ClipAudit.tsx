@@ -94,6 +94,12 @@ export default function ClipAudit() {
   const [tagFilter, setTagFilter] = useState('');
   const [renderMin, setRenderMin] = useState('');
   const [renderMax, setRenderMax] = useState('');
+  // "already have all images tagged" — hides properties still mid-backfill (any
+  // untagged image on any of their listings) so review only lands on finished work.
+  // fine_tag completeness, not render_score (render_score is deliberately NULL for
+  // drawings/documents by taxonomy design, not incompleteness) — so this applies the
+  // same on both tabs.
+  const [onlyFullyTagged, setOnlyFullyTagged] = useState(false);
 
   const properties = useInfiniteList<ClipAuditPropertyRow, PropertyPage>({
     queryKey: ['clip-audit', 'properties', categoryMain],
@@ -151,6 +157,12 @@ export default function ClipAudit() {
               onClick={() => setCategoryMain(t.id)}
             />
           ))}
+          <span className="mx-1 h-4 w-px bg-[var(--color-rule)]" />
+          <FilterChip
+            on={onlyFullyTagged}
+            label="Jen kompletně otagované"
+            onClick={() => setOnlyFullyTagged((v) => !v)}
+          />
         </div>
         {mode === 'tagging' ? (
           <div className="flex flex-wrap items-center gap-1.5">
@@ -208,6 +220,7 @@ export default function ClipAudit() {
               renderMin={renderMin ? Number(renderMin.replace(',', '.')) : null}
               renderMax={renderMax ? Number(renderMax.replace(',', '.')) : null}
               labelOptions={labelOptions}
+              onlyFullyTagged={onlyFullyTagged}
             />
           ))
         )}
@@ -265,6 +278,28 @@ function ModelExplainer() {
   );
 }
 
+// A property qualifies once every image on every one of its listings carries a
+// fine_tag — vacuously false for a property with zero images (nothing to review).
+// Capped by fetchImagesByListingIds' own perId cap (200/listing); a listing with
+// more images than that would under-check, same known limit as every other reader
+// of this batched fetch.
+function isFullyTagged(
+  propertyId: number,
+  sourcesMap: Map<number, PropertySource[]> | undefined,
+  imagesMap: Map<number, ImagePublic[]> | undefined,
+): boolean {
+  const srcs = sourcesMap?.get(propertyId) ?? [];
+  if (srcs.length === 0) return false;
+  let sawImage = false;
+  for (const src of srcs) {
+    for (const img of imagesMap?.get(src.sreality_id) ?? []) {
+      sawImage = true;
+      if (img.clip_fine_tag == null) return false;
+    }
+  }
+  return sawImage;
+}
+
 function PropertyPageGroup({
   properties,
   mode,
@@ -272,6 +307,7 @@ function PropertyPageGroup({
   renderMin,
   renderMax,
   labelOptions,
+  onlyFullyTagged,
 }: {
   properties: ClipAuditPropertyRow[];
   mode: Mode;
@@ -279,6 +315,7 @@ function PropertyPageGroup({
   renderMin: number | null;
   renderMax: number | null;
   labelOptions: string[];
+  onlyFullyTagged: boolean;
 }) {
   const propertyIds = useMemo(() => properties.map((p) => p.property_id), [properties]);
 
@@ -330,9 +367,16 @@ function PropertyPageGroup({
     enabled: imageIds.length > 0 && mode === 'tagging',
   });
 
+  // Until sources+images have loaded for this group, completeness can't be
+  // determined yet — hold off rendering rather than flash an incomplete result.
+  const dataReady = sourcesQ.isSuccess && (srealityIds.length === 0 || imagesQ.isSuccess);
+  const visible = onlyFullyTagged
+    ? (dataReady ? properties.filter((p) => isFullyTagged(p.property_id, sourcesMap, imagesMap)) : [])
+    : properties;
+
   return (
     <>
-      {properties.map((p) => (
+      {visible.map((p) => (
         <PropertyCard
           key={p.property_id}
           property={p}
