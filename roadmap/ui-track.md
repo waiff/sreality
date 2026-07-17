@@ -256,6 +256,29 @@ End-to-end browser flow over the U1b backend.
   pg_stat_user_indexes observation window (operator OK required);
   row-comparison keyset cursor (PostgREST can't emit it yet).
 
+### Phase U-Prop: Property detail page (done)
+- `properties` (migration 091) had no first-class UI of its own — every
+  property-grain widget (golden MF, portal chips, merge-decision count,
+  cross-listing estimation runs, curation, pipeline toggle) was mounted
+  inline on whichever specific listing happened to be open, with no
+  canonical page to link to and no per-source photo attribution once a
+  property had merged more than a couple of listings.
+- New `/property/:id` (`PropertyDetail`) is the property-grain page:
+  identity/facts reused from `ListingOverview` (`properties_public` is a
+  structural superset of `listings_public`, migration 093), every child
+  listing as its own card via `SourcesList` (own thumbnails/price/dates —
+  never pooled into one gallery), merge history (`MergeDecisionsChip`,
+  now shared with `ListingDetail`), the golden MF card, curation, and the
+  pipeline toggle. `ListingDetail` gained a `PropertyLinkChip` ("View
+  property") and stays scoped to exactly the one advert it renders.
+- Found + fixed in the same PR: `publication_gate_enabled()` (migration
+  273) had lost its `anon`/`authenticated` EXECUTE grant outside the
+  migration trail — silently 403ing every direct anon read of
+  `properties_public` (the golden MF card, the `/listing?property=ID`
+  redirect, the Pipeline board's property enrichment, and this new page).
+  Browse itself was unaffected (reads the precomputed `browse_list`
+  snapshot). Re-granted in migration 310.
+
 ### Phase U-Nav: Unified browse → detail navigation (next)
 
 Today the top nav exposes `Listing` and (historically) `Estimate` as

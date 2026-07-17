@@ -30,7 +30,7 @@ Multi-portal ingestion (Scraper Phase 2) is the larger not-yet-started body of w
 | Track | Status | Scope | File |
 | --- | --- | --- | --- |
 | Next | 🟡 in progress | Live front line: real-time Wave C, building B1, Phase QUAL, async agent (7 slice 2 / 7d) | [roadmap/next.md](roadmap/next.md) |
-| UI | 🟢 mostly done | Browse / estimation / detail SPA; U-Nav next, U3 later | [roadmap/ui-track.md](roadmap/ui-track.md) |
+| UI | 🟢 mostly done | Browse / estimation / detail SPA; U-Prop (property detail page) shipped 2026-07-17; U-Nav next, U3 later | [roadmap/ui-track.md](roadmap/ui-track.md) |
 | Map | 🟡 mixed | Typed locality IDs + map layers (map-1) | [roadmap/map-track.md](roadmap/map-track.md) |
 | Scraper | 🟢 mostly done | Cadence-split, portal framework, prepared stmts; Phase 2 multi-portal (larger, later) | [roadmap/scraper-track.md](roadmap/scraper-track.md) |
 | Dedup + canonical listing | 🟡 active | LLM-cost program; funnel now **Anthropic-free** (gpt-5-mini); Session 4 batch deferral + Session 5a recency ordering shipped 2026-07-14; Session 5b image-role registry shipped, pozemek dismissal BLOCKED on a site-plan model fix (gpt-5-mini scores 50% on pozemek per the bake-off); see `docs/design/dedup-vision-and-backlog-overhaul.md` | [roadmap/dedup-track.md](roadmap/dedup-track.md) |

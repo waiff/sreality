@@ -25,6 +25,8 @@ export function ListingOverview({
   images = [],
   imagesLoading = false,
   showStatus = true,
+  showGallery = true,
+  identityLabel,
   headerExtras,
   mapFooter,
   estimatesSlot,
@@ -33,6 +35,17 @@ export function ListingOverview({
   images?: ImagePublic[];
   imagesLoading?: boolean;
   showStatus?: boolean;
+  /* The /property/:id page (PropertyDetail) reuses this header for the
+   * property's own identity but renders per-source photo groups itself
+   * instead of one pooled gallery — set false there to skip this component's
+   * single-gallery slot (and its leading hairline) entirely. */
+  showGallery?: boolean;
+  /* Overrides the "ID {sreality_id}" identity line. listing.sreality_id is a
+   * REPRESENTATIVE listing id when this component renders a PropertyPublic
+   * row (types.ts) — labelling it plain "ID" would misstate it as the
+   * specific advert you're viewing, so PropertyDetail passes e.g.
+   * "Property #3309" here instead. */
+  identityLabel?: string;
   /* Chip row (portal links, active-sibling alert) rendered at the TOP of the
    * header's left column — inside the grid, so the map column starts at the
    * very top instead of below a stack of full-width rows. */
@@ -50,16 +63,26 @@ export function ListingOverview({
 }) {
   return (
     <>
-      <Header listing={listing} showStatus={showStatus} extras={headerExtras} mapFooter={mapFooter} />
+      <Header
+        listing={listing}
+        showStatus={showStatus}
+        extras={headerExtras}
+        mapFooter={mapFooter}
+        identityLabel={identityLabel}
+      />
       <KeyFactsBlock listing={listing} />
       <DescriptionBlock listing={listing} />
       {estimatesSlot}
-      <Hairline />
-      <GalleryBlock
-        images={images}
-        isActive={listing.is_active}
-        loading={imagesLoading}
-      />
+      {showGallery && (
+        <>
+          <Hairline />
+          <GalleryBlock
+            images={images}
+            isActive={listing.is_active}
+            loading={imagesLoading}
+          />
+        </>
+      )}
     </>
   );
 }
@@ -89,11 +112,13 @@ function Header({
   showStatus,
   extras,
   mapFooter,
+  identityLabel,
 }: {
   listing: ListingPublic;
   showStatus: boolean;
   extras?: React.ReactNode;
   mapFooter?: React.ReactNode;
+  identityLabel?: string;
 }) {
   // Identity tokens, most-specific first: subtype ("Ubytování", "Rodinný dům")
   // and/or disposition ("2+kk"). Commercial/houses keep their kind instead of
@@ -112,7 +137,7 @@ function Header({
   const price = hasPrice ? fmtCzk(listing.price_czk) : 'Cena na vyžádání';
   const ppm = fmtPricePerM2(listing.price_czk, listing.area_m2);
   const unit = hasPrice && listing.price_unit ? ` / ${listing.price_unit}` : '';
-  const hasId = listing.sreality_id > 0;
+  const hasId = identityLabel != null || listing.sreality_id > 0;
   const { lat, lng } = listing;
   const hasMap = lat != null && lng != null;
 
@@ -156,12 +181,18 @@ function Header({
         {(hasId || ppm !== '—') && (
           <p className="text-[0.7rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)] mt-2">
             {hasId && (
-              <>
-                ID{' '}
+              identityLabel != null ? (
                 <span className="font-mono tabular-nums text-[var(--color-ink-3)] normal-case tracking-normal">
-                  {listing.sreality_id}
+                  {identityLabel}
                 </span>
-              </>
+              ) : (
+                <>
+                  ID{' '}
+                  <span className="font-mono tabular-nums text-[var(--color-ink-3)] normal-case tracking-normal">
+                    {listing.sreality_id}
+                  </span>
+                </>
+              )
             )}
             {ppm !== '—' && (
               <>

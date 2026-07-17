@@ -7,6 +7,7 @@ import ForgotPassword from './pages/ForgotPassword';
 import UpdatePassword from './pages/UpdatePassword';
 import Browse from './pages/Browse';
 import ListingDetail from './pages/ListingDetail';
+import PropertyDetail from './pages/PropertyDetail';
 import BuildingDetail from './pages/BuildingDetail';
 import EstimationDetail from './pages/EstimationDetail';
 import EstimationList from './pages/EstimationList';
@@ -71,6 +72,7 @@ export const routes: RouteObject[] = [
       // property's representative listing and redirects to /listing/:id.
       { path: 'listing', element: <ListingDetail />, handle: { title: 'Listing' } },
       { path: 'listing/:sreality_id', element: <ListingDetail />, handle: { title: 'Listing' } },
+      { path: 'property/:id', element: <PropertyDetail />, handle: { title: 'Property' } },
       { path: 'health', element: <AdminPage><Health /></AdminPage>, handle: { title: 'Health' } },
       { path: 'costs', element: <AdminPage><Costs /></AdminPage>, handle: { title: 'LLM costs' } },
       { path: 'estimate', element: <Navigate to="/estimations" replace /> },

@@ -1607,3 +1607,19 @@ export interface PropertySource {
   first_seen_at: string;
   last_seen_at: string;
 }
+
+/* One row of properties_public — the canonical multi-portal PROPERTY (migration
+ * 091), one per real-world unit. properties_public mirrors every listings_public
+ * column (canonical lifecycle/price/geo + the representative listing's richer
+ * filter attributes — see migration 093's comment), so PropertyPublic extends
+ * ListingPublic verbatim and adds only the property-only aggregates. This is
+ * what makes it safe to feed a PropertyPublic row into listing-shaped renderers
+ * (buildFacts, buildAmenities, ListingOverview) for the /property/:id page. */
+export interface PropertyPublic extends ListingPublic {
+  property_id: number;
+  /* Count of child listings ever attached (migration 095), including inactive/
+   * historical ones — NOT the same as the live portal count. */
+  source_count: number;
+  /* Count of distinct portals currently represented (migration 095). */
+  distinct_site_count: number;
+}
