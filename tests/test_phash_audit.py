@@ -115,13 +115,17 @@ def test_no_scope_filters_omit_the_where_clause() -> None:
         assert "outcome" not in (params or {})
 
 
-def test_room_type_matches_either_side() -> None:
+def test_room_type_requires_both_sides_to_match() -> None:
+    # Not "either side happens to carry this tag" — a chodba<->kuchyne pair passing a
+    # kuchyne filter is exactly the confusion this must not reproduce (the engine's own
+    # phash pass is room-blind by design, but the operator's Tag filter here means
+    # "show me kitchen-vs-kitchen pairs").
     conn = _FakeConn(scanned=0, join_rows=[])
     dedup.phash_audit(conn, hamming_min=0, hamming_max=15, room_type="floor_plan")
     join_sql, join_params = next(
         (s, p) for s, p in conn.executed if "WITH scoped AS" in s
     )
-    assert "ta.logical_tag = %(room_type)s OR tb.logical_tag = %(room_type)s" in join_sql
+    assert "ta.logical_tag = %(room_type)s AND tb.logical_tag = %(room_type)s" in join_sql
     assert join_params["room_type"] == "floor_plan"
 
 
