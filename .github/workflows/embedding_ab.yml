@@ -38,6 +38,11 @@ on:
         required: false
         default: "400"
         type: string
+      families:
+        description: "Comma-separated logical tags for the manifest (manifest mode only; empty = builder default)"
+        required: false
+        default: ""
+        type: string
 
 jobs:
   ab:
@@ -82,7 +87,13 @@ jobs:
         run: pip install -e "."
       - name: Build manifest
         if: ${{ inputs.mode == 'manifest' }}
-        run: python -m scripts.build_embedding_manifest --out embedding_manifest.json
+        run: |
+          if [ -n "${{ inputs.families }}" ]; then
+            python -m scripts.build_embedding_manifest --out embedding_manifest.json \
+              --families "${{ inputs.families }}"
+          else
+            python -m scripts.build_embedding_manifest --out embedding_manifest.json
+          fi
       - name: Upload manifest artifact
         if: ${{ inputs.mode == 'manifest' }}
         uses: actions/upload-artifact@v4

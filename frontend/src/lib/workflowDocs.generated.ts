@@ -1789,6 +1789,14 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
         "type": "string",
         "default": "400",
         "options": null
+      },
+      {
+        "name": "families",
+        "description": "Comma-separated logical tags for the manifest (manifest mode only; empty = builder default)",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
       }
     ],
     "secrets": [

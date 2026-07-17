@@ -8,7 +8,7 @@ set -euo pipefail
 manifest="${1:?usage: runpod_bench.sh <manifest.json> [models]}"
 models="${2:-facebook/dinov2-base,facebook/dinov2-large,facebook/dinov2-with-registers-large}"
 export HF_HOME="${HF_HOME:-/workspace/hf}"
-pip install -q transformers pillow requests
+pip install -q transformers torchvision pillow requests
 python3 "$(dirname "$0")/embedding_gpu_bench.py" \
   --manifest "$manifest" \
   --models "$models" \

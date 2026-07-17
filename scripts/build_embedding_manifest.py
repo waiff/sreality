@@ -31,6 +31,9 @@ LOG = logging.getLogger("embedding_manifest")
 DEFAULT_FAMILIES = [
     "kitchen", "bathroom", "toilet", "living_room", "bedroom", "hallway",
     "exterior_facade", "garden", "balcony_terrace",
+    # 'other' carries most pozemek (raw land) imagery — without it the site-plan
+    # hard-negative stratum loses half its pairs (v1 manifest: 39/80 negatives).
+    "other",
 ]
 
 # One row per candidate same-family image pair of a labelled listing pair. The
@@ -39,7 +42,7 @@ DEFAULT_FAMILIES = [
 _MANIFEST_SQL = """
 WITH pairs AS (
     SELECT label_id, left_listing_id AS la, right_listing_id AS lb,
-           is_same, category_main, label_source
+           is_same, coalesce(category_main, 'unknown') AS category_main, label_source
     FROM dedup_label_events
     WHERE left_listing_id IS NOT NULL AND right_listing_id IS NOT NULL
 ),

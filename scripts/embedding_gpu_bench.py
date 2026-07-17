@@ -169,6 +169,8 @@ def download_images(images: dict, cache_dir: str, workers: int) -> dict[int, str
 
     os.makedirs(cache_dir, exist_ok=True)
     session = requests.Session()
+    adapter = requests.adapters.HTTPAdapter(pool_maxsize=workers)
+    session.mount("https://", adapter)
 
     def _one(item: tuple[str, dict]) -> tuple[int, str | None]:
         iid, meta = item
@@ -202,7 +204,7 @@ def embed_images(model_id: str, paths: dict[int, str], batch_size: int,
     from PIL import Image
     from transformers import AutoImageProcessor, AutoModel
 
-    proc = AutoImageProcessor.from_pretrained(model_id)
+    proc = AutoImageProcessor.from_pretrained(model_id, use_fast=True)
     dtype = torch.float16 if (fp16 and device == "cuda") else None
     model = AutoModel.from_pretrained(model_id, torch_dtype=dtype)
     model.eval().to(device)
@@ -219,20 +221,18 @@ def embed_images(model_id: str, paths: dict[int, str], batch_size: int,
     kept_ids: list[int] = []
     embs: list = []
     t0 = time.monotonic()
+    # Per-image decode futures, one chunk ahead: the pool decodes chunk N+1 in
+    # parallel while the main thread preprocesses + forwards chunk N — otherwise
+    # single-threaded decode dominates and every model reports the same img/s.
     with ThreadPoolExecutor(max_workers=min(16, os.cpu_count() or 8)) as pool:
-        pending = None
-        for ci in range(len(chunks) + 1):
-            prev = pending
-            if ci < len(chunks):
-                chunk = chunks[ci]
-                pending = (chunk, pool.submit(lambda c=chunk: [_decode(i) for i in c]))
-            else:
-                pending = None
-            if prev is None:
-                continue
-            chunk, fut = prev
-            decoded = fut.result()
-            good = [(iid, im) for iid, im in zip(chunk, decoded) if im is not None]
+        def _submit(ci: int) -> list:
+            return [(iid, pool.submit(_decode, iid)) for iid in chunks[ci]]
+
+        pending = _submit(0) if chunks else []
+        for ci in range(len(chunks)):
+            current, pending = pending, (_submit(ci + 1) if ci + 1 < len(chunks) else [])
+            good = [(iid, f.result()) for iid, f in current]
+            good = [(iid, im) for iid, im in good if im is not None]
             if not good:
                 continue
             inp = proc(images=[im for _, im in good], return_tensors="pt").to(device)
@@ -283,7 +283,7 @@ def clip_lookup(a: int, b: int, ip: dict) -> float | None:
 
 def analyze(pairs: list[dict], images: dict, encoders: dict, args) -> dict:
     labels = {p["pair_id"]: p["is_same"] for p in pairs}
-    category = {p["pair_id"]: p["category"] for p in pairs}
+    category = {p["pair_id"]: (p.get("category") or "unknown") for p in pairs}
     tags = sorted({ip["tag"] for p in pairs for ip in p["image_pairs"]})
     results: dict = {}
     for name, cos in encoders.items():
