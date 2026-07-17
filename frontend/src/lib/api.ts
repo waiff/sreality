@@ -914,6 +914,29 @@ export const getPhashAudit = (
   return request(`/dedup/phash-audit?${q.toString()}`);
 };
 
+// /phash-audit "Train": one image's linear-probe training-set label (migration 309).
+// Data-collection only — nothing reads this table yet.
+export type TrainingExample = {
+  image_id: number;
+  label: string;
+  updated_at: string;
+};
+export const setTrainingExample = (body: {
+  image_id: number;
+  label: string;
+}): Promise<{ data: TrainingExample }> =>
+  request<{ data: TrainingExample }>('/dedup/training-example', {
+    method: 'POST',
+    json: body,
+  });
+export const deleteTrainingExample = (
+  image_id: number,
+): Promise<{ data: { deleted: boolean } }> =>
+  request<{ data: { deleted: boolean } }>('/dedup/training-example', {
+    method: 'DELETE',
+    query: { image_id },
+  });
+
 // CLIP backfill progress (listing-grain), for the /dedup tracker.
 export type DedupCoverageTier = {
   key: string;
