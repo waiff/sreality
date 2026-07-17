@@ -1,5 +1,6 @@
-"""api.property_dedup image-annotation + phash-pair-note writes (migration 308):
-canonical image-pair ordering, note cleaning, delete. Hermetic fake conn — no DB."""
+"""api.property_dedup image-annotation + phash-pair-note writes (migration 308) and
+the training-example writes (migration 309): canonical image-pair ordering, note
+cleaning, delete. Hermetic fake conn — no DB."""
 
 from __future__ import annotations
 
@@ -35,6 +36,12 @@ class _Cur:
             # RETURNING note, updated_at
             self._row = (params[2], "2026-07-17T00:00:00Z")
         elif s.startswith("DELETE FROM phash_pair_notes"):
+            self.rowcount = self._conn.delete_count
+            self._row = None
+        elif s.startswith("INSERT INTO image_training_examples"):
+            # RETURNING label, updated_at
+            self._row = (params[1], "2026-07-17T00:00:00Z")
+        elif s.startswith("DELETE FROM image_training_examples"):
             self.rowcount = self._conn.delete_count
             self._row = None
 
@@ -105,3 +112,28 @@ def test_delete_phash_note_canonicalises_and_reports() -> None:
     _, params = conn.executed[0]
     assert params == (100, 200)
     assert out["data"]["deleted"] is True
+
+
+def test_set_training_example_upserts_trimmed_label() -> None:
+    conn = _FakeConn()
+    out = dedup.set_training_example(conn, image_id=42, label="  kitchen  ")
+    _, params = conn.executed[0]
+    assert params == (42, "kitchen", "operator")
+    assert out["data"] == {"image_id": 42, "label": "kitchen", "updated_at": "2026-07-17T00:00:00Z"}
+
+
+def test_set_training_example_rejects_blank_label() -> None:
+    with pytest.raises(ValueError):
+        dedup.set_training_example(_FakeConn(), image_id=42, label="   ")
+
+
+def test_delete_training_example_reports_deleted() -> None:
+    conn = _FakeConn(delete_count=1)
+    out = dedup.delete_training_example(conn, image_id=42)
+    _, params = conn.executed[0]
+    assert params == (42,)
+    assert out["data"]["deleted"] is True
+
+    conn2 = _FakeConn(delete_count=0)
+    out2 = dedup.delete_training_example(conn2, image_id=1)
+    assert out2["data"]["deleted"] is False

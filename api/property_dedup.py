@@ -204,6 +204,43 @@ def delete_phash_note(
     return {"data": {"deleted": bool(deleted)}}
 
 
+def set_training_example(
+    conn: psycopg.Connection,
+    *,
+    image_id: int,
+    label: str,
+    created_by: str = "operator",
+) -> dict[str, Any]:
+    """Upsert ONE image's linear-probe training-set label (the /phash-audit "Train"
+    CTA) — one label per image (migration 309), overwritten on a repeat Train click
+    with a different label. `label` is free text (open-vocabulary), not constrained to
+    the CLIP taxonomy. Data-collection only: nothing reads this table yet."""
+    clean = (label or "").strip()
+    if not clean:
+        raise ValueError("a training example needs a non-empty label")
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO image_training_examples (image_id, label, created_by) "
+            "VALUES (%s,%s,%s) "
+            "ON CONFLICT (image_id) DO UPDATE SET "
+            "  label = excluded.label, updated_at = now() "
+            "RETURNING label, updated_at",
+            (image_id, clean, created_by),
+        )
+        r = cur.fetchone()
+    return {"data": {"image_id": image_id, "label": r[0], "updated_at": r[1]}}
+
+
+def delete_training_example(conn: psycopg.Connection, *, image_id: int) -> dict[str, Any]:
+    """Remove an image from the training set. No-op if it wasn't in it."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "DELETE FROM image_training_examples WHERE image_id = %s", (image_id,),
+        )
+        deleted = cur.rowcount
+    return {"data": {"deleted": bool(deleted)}}
+
+
 def _ledger_side_sql(pid_expr: str, grp_expr: str) -> str:
     """Scalar SQL for the representative listing id of property `pid_expr` on one
     side of merge group `grp_expr`, resolved from the `property_merge_events`
