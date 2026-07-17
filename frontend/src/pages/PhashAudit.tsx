@@ -8,6 +8,7 @@ import ImageTagBadge from '@/components/ImageTagBadge';
 import ImageLightbox from '@/components/ImageLightbox';
 import NoteFlagControl from '@/components/NoteFlagControl';
 import LabelCombobox from '@/components/LabelCombobox';
+import DedupBreakdown from '@/components/DedupBreakdown';
 import { useInfiniteList } from '@/lib/useInfiniteList';
 import {
   fetchPhashPairNotesForImageIds,
@@ -364,6 +365,9 @@ function PhashRow({
         >
           {row.outcome === 'merged' ? 'sloučeno' : 'zamítnuto'}
         </span>
+        <span className="text-[var(--color-ink-4)] font-mono" title="Fáze, která o páru skutečně rozhodla">
+          {row.stage}
+        </span>
         <span className="text-[var(--color-ink-4)] uppercase tracking-[0.06em]">
           {row.category_main}
         </span>
@@ -377,6 +381,11 @@ function PhashRow({
           </Link>
         )}
       </div>
+
+      {/* The Hamming number above is THIS pair's live distance — not necessarily what
+          decided the pair (a stage like 'visual' can dismiss/merge even when phash found
+          nothing at all, e.g. phash_pairs=0). This breakdown is the actual decision. */}
+      <DedupBreakdown rungs={row.audit_breakdown} />
 
       <div className="flex flex-wrap gap-3">
         {images.map((img, i) => (

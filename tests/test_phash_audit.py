@@ -46,10 +46,15 @@ class _FakeConn:
         return _Cur(self)
 
 
-def _join_row() -> tuple[Any, ...]:
-    # 23 columns matching phash_audit's join SELECT.
+def _join_row(detail: dict | None = None) -> tuple[Any, ...]:
+    # 25 columns matching phash_audit's join SELECT.
+    d = detail if detail is not None else {
+        "stage": "visual", "reason": "visual_different", "verdict": "Low",
+        "cosine": 0.86, "room_type": "kitchen", "phash_pairs": 0,
+        "phash_min_pairs": 2, "phash_threshold": 6,
+    }
     return (
-        99, -5, 42, 10, 11, "merged", "byt", "2026-07-01T00:00:00Z",
+        99, -5, 42, 10, 11, "merged", "byt", "2026-07-01T00:00:00Z", "visual", d,
         1001, "https://x/a.jpg", None, "kitchen", "kitchen", 0.91, None,
         2002, "https://x/b.jpg", None, "kitchen", "kitchen", 0.88, None,
         9,
@@ -67,6 +72,7 @@ def test_hamming_range_passed_through_and_result_shaped() -> None:
     row = out["data"][0]
     assert row["audit_id"] == 99
     assert row["hamming"] == 9
+    assert row["stage"] == "visual"
     assert row["left_property_id"] == 10 and row["right_property_id"] == 11
     assert row["left_image"] == {
         "image_id": 1001, "sreality_url": "https://x/a.jpg",
@@ -75,6 +81,18 @@ def test_hamming_range_passed_through_and_result_shaped() -> None:
     }
     assert out["scanned_pairs"] == 3
     assert out["returned"] == 1
+
+
+def test_audit_breakdown_computed_from_detail_so_the_true_decider_is_visible() -> None:
+    # The whole point: phash found nothing (phash_pairs=0) but the row still shows up
+    # because ANOTHER stage (visual) decided the pair — the breakdown must say so, not
+    # imply phash drove it just because this page is about Hamming distance.
+    conn = _FakeConn(scanned=1, join_rows=[_join_row()])
+    out = dedup.phash_audit(conn, hamming_min=7, hamming_max=15)
+    keys = [r["key"] for r in out["data"][0]["audit_breakdown"]]
+    assert "verdict" in keys
+    verdict_rung = next(r for r in out["data"][0]["audit_breakdown"] if r["key"] == "verdict")
+    assert verdict_rung["value"] == "Low"
 
 
 def test_category_main_and_outcome_scope_both_queries() -> None:

@@ -847,7 +847,7 @@ def phash_audit(
             WITH scoped AS (
                 SELECT a.id, a.left_sreality_id, a.right_sreality_id,
                        a.left_property_id, a.right_property_id,
-                       a.outcome, a.category_main, a.run_at
+                       a.outcome, a.category_main, a.run_at, a.stage, a.detail
                 FROM dedup_pair_audit a
                 {scope_where}
                 ORDER BY a.run_at DESC
@@ -855,7 +855,7 @@ def phash_audit(
             )
             SELECT s.id, s.left_sreality_id, s.right_sreality_id,
                    s.left_property_id, s.right_property_id, s.outcome,
-                   s.category_main, s.run_at,
+                   s.category_main, s.run_at, s.stage, s.detail,
                    ia.id, ia.sreality_url, ia.storage_path,
                    ta.logical_tag, ta.fine_tag, ta.confidence, ta.render_score,
                    ib.id, ib.sreality_url, ib.storage_path,
@@ -888,17 +888,23 @@ def phash_audit(
                 "audit_id": r[0], "left_sreality_id": r[1], "right_sreality_id": r[2],
                 "left_property_id": r[3], "right_property_id": r[4],
                 "outcome": r[5], "category_main": r[6], "run_at": r[7],
+                "stage": r[8],
+                # What ACTUALLY decided this pair (may well be a different signal than
+                # the phash row it's shown on — the point of this page is exactly to
+                # surface that gap, e.g. "phash found nothing, forensic vision dismissed
+                # it" — so the operator never has to guess from the Hamming number alone).
+                "audit_breakdown": build_audit_breakdown(r[9]),
                 "left_image": {
-                    "image_id": r[8], "sreality_url": r[9], "storage_path": r[10],
-                    "room_type": r[11], "fine_tag": r[12], "confidence": r[13],
-                    "render_score": r[14],
+                    "image_id": r[10], "sreality_url": r[11], "storage_path": r[12],
+                    "room_type": r[13], "fine_tag": r[14], "confidence": r[15],
+                    "render_score": r[16],
                 },
                 "right_image": {
-                    "image_id": r[15], "sreality_url": r[16], "storage_path": r[17],
-                    "room_type": r[18], "fine_tag": r[19], "confidence": r[20],
-                    "render_score": r[21],
+                    "image_id": r[17], "sreality_url": r[18], "storage_path": r[19],
+                    "room_type": r[20], "fine_tag": r[21], "confidence": r[22],
+                    "render_score": r[23],
                 },
-                "hamming": int(r[22]),
+                "hamming": int(r[24]),
             }
             for r in rows
         ],
