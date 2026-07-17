@@ -318,6 +318,10 @@ def get_phash_audit(
         default=False, description="Only pairs where at least one of the two shown "
         "images already has a linear-probe training-set label.",
     ),
+    training_label: str | None = Query(
+        default=None, description="Narrows training_only to one SPECIFIC label "
+        "(implies training_only regardless of its literal value).",
+    ),
     limit: int = Query(default=100, ge=1, le=200),
     scan_offset: int = Query(
         default=0, ge=0, description="Opaque cursor — pass back the previous "
@@ -336,7 +340,8 @@ def get_phash_audit(
     return dedup.phash_audit(
         conn, hamming_min=hamming_min, hamming_max=hamming_max,
         category_main=category_main, outcome=outcome, room_types=types,
-        training_only=training_only, limit=limit, scan_offset=scan_offset,
+        training_only=training_only, training_label=training_label,
+        limit=limit, scan_offset=scan_offset,
     )
 
 

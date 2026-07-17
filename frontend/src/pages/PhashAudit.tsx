@@ -14,7 +14,7 @@ import { useInfiniteList } from '@/lib/useInfiniteList';
 import {
   fetchPhashPairNotesForImageIds,
   fetchTrainingExamplesForImageIds,
-  fetchDistinctTrainingLabels,
+  fetchTrainingLabelCounts,
 } from '@/lib/queries';
 import {
   getPhashAudit,
@@ -73,7 +73,11 @@ export default function PhashAudit() {
   const [roomTypes, setRoomTypes] = useState<string[]>([]);
   // Narrows to pairs where at least one of the two shown images already has a
   // training-set label — for revisiting/auditing what's already been picked.
+  // `trainingLabel` further narrows to one specific label ('' = any); while
+  // trainingOnly is on, the Tag row switches from CLIP's own room tags to the
+  // training set's own labels (a different vocabulary — see labelOptions below).
   const [trainingOnly, setTrainingOnly] = useState(false);
+  const [trainingLabel, setTrainingLabel] = useState('');
   const [minText, setMinText] = useState(String(DEFAULT_MIN));
   const [maxText, setMaxText] = useState(String(DEFAULT_MAX));
   const [hammingMin, setHammingMin] = useState(DEFAULT_MIN);
@@ -91,9 +95,16 @@ export default function PhashAudit() {
       prev.includes(tag) ? prev.filter((t) => t !== tag) : [...prev, tag],
     );
 
+  const toggleTrainingOnly = () =>
+    setTrainingOnly((v) => {
+      if (v) setTrainingLabel(''); // turning off — clear the now-meaningless label pick
+      return !v;
+    });
+
   const list = useInfiniteList<PhashAuditRow, PhashPage>({
     queryKey: [
-      'phash-audit', outcome, categoryMain, roomTypes, trainingOnly, hammingMin, hammingMax,
+      'phash-audit', outcome, categoryMain, roomTypes, trainingOnly, trainingLabel,
+      hammingMin, hammingMax,
     ],
     queryFn: async (cursor) => {
       // The backend does exactly ONE bounded chunk per call (predictable ~5-7s
@@ -115,6 +126,7 @@ export default function PhashAudit() {
           outcome: outcome || undefined,
           room_types: roomTypes.length ? roomTypes : undefined,
           training_only: trainingOnly || undefined,
+          training_label: trainingLabel || undefined,
           limit: PAGE_SIZE - collected.length,
           scan_offset: scanOffset,
         });
@@ -139,27 +151,29 @@ export default function PhashAudit() {
   const scope = list.firstPage;
   const pages = useMemo(() => chunk(list.rows, PAGE_SIZE), [list.rows]);
 
-  // The label combobox's suggestion list: CLIP's 19 real fine_tag classes (not
-  // TAG_OPTIONS's 15 collapsed logical tags used by the Tag filter above — see
-  // imageTags.ts) keyed by their canonical value, plus whatever open-vocabulary
-  // labels the operator has already typed into the training set from either audit
-  // page — fetched once for the whole page, not per page-group.
+  // Every label + how many examples it has (the "Jen v trénovací sadě" Tag row's
+  // chips, so the operator can judge class coverage) — fetched once for the whole
+  // page, not per page-group. Also backs the label combobox's suggestion list:
+  // CLIP's 19 real fine_tag classes (not TAG_OPTIONS's 15 collapsed logical tags
+  // used by the CLIP Tag filter — see imageTags.ts) keyed by their canonical value,
+  // plus whatever open-vocabulary labels the operator has already typed in.
   const trainingLabelsQ = useQuery({
     queryKey: ['phash-audit', 'training-labels'],
-    queryFn: fetchDistinctTrainingLabels,
+    queryFn: fetchTrainingLabelCounts,
     staleTime: 30_000,
   });
+  const trainingLabelCounts = useMemo(() => trainingLabelsQ.data ?? [], [trainingLabelsQ.data]);
   const labelOptions: LabelOption[] = useMemo(() => {
     const taxonomy: LabelOption[] = FINE_TAG_KEYS.map((key) => ({
       value: key,
       label: imageTagLabel(key) ?? key,
     }));
     const known = new Set(FINE_TAG_KEYS);
-    const custom: LabelOption[] = (trainingLabelsQ.data ?? [])
-      .filter((v) => !known.has(v))
-      .map((v) => ({ value: v, label: v }));
+    const custom: LabelOption[] = trainingLabelCounts
+      .filter((c) => !known.has(c.label))
+      .map((c) => ({ value: c.label, label: c.label }));
     return [...taxonomy, ...custom].sort((a, b) => a.label.localeCompare(b.label, 'cs'));
-  }, [trainingLabelsQ.data]);
+  }, [trainingLabelCounts]);
 
   return (
     <div className="px-6 py-8 max-w-5xl mx-auto">
@@ -185,7 +199,7 @@ export default function PhashAudit() {
           <FilterChip
             on={trainingOnly}
             label="Jen v trénovací sadě"
-            onClick={() => setTrainingOnly((v) => !v)}
+            onClick={toggleTrainingOnly}
           />
         </div>
         <div className="flex flex-wrap items-center gap-1.5">
@@ -196,29 +210,52 @@ export default function PhashAudit() {
             <FilterChip key={t.id} on={categoryMain === t.id} label={t.label} onClick={() => setCategoryMain(t.id)} />
           ))}
         </div>
-        <div className="flex flex-wrap items-center gap-1.5">
-          <span className="text-[0.62rem] uppercase tracking-[0.1em] text-[var(--color-ink-4)] mr-1">
-            Tag
-          </span>
-          <FilterChip
-            on={roomTypes.length === 0}
-            label="Vše"
-            onClick={() => setRoomTypes([])}
-          />
-          {TAG_OPTIONS.map((tag) => (
-            <FilterChip
-              key={tag}
-              on={roomTypes.includes(tag)}
-              label={imageTagLabel(tag) ?? tag}
-              onClick={() => toggleRoomType(tag)}
-            />
-          ))}
-          {roomTypes.length > 1 && (
-            <span className="text-[0.66rem] text-[var(--color-ink-4)]">
-              (pár musí mít STEJNÝ tag na obou stranách, jeden z vybraných)
+        {trainingOnly ? (
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="text-[0.62rem] uppercase tracking-[0.1em] text-[var(--color-ink-4)] mr-1">
+              Štítek
             </span>
-          )}
-        </div>
+            <FilterChip on={trainingLabel === ''} label="Vše" onClick={() => setTrainingLabel('')} />
+            {trainingLabelCounts.map((c) => (
+              <FilterChip
+                key={c.label}
+                on={trainingLabel === c.label}
+                label={c.label}
+                count={c.count}
+                onClick={() => setTrainingLabel(trainingLabel === c.label ? '' : c.label)}
+              />
+            ))}
+            {trainingLabelCounts.length === 0 && (
+              <span className="text-[0.72rem] text-[var(--color-ink-4)]">
+                V trénovací sadě zatím nejsou žádné štítky.
+              </span>
+            )}
+          </div>
+        ) : (
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="text-[0.62rem] uppercase tracking-[0.1em] text-[var(--color-ink-4)] mr-1">
+              Tag
+            </span>
+            <FilterChip
+              on={roomTypes.length === 0}
+              label="Vše"
+              onClick={() => setRoomTypes([])}
+            />
+            {TAG_OPTIONS.map((tag) => (
+              <FilterChip
+                key={tag}
+                on={roomTypes.includes(tag)}
+                label={imageTagLabel(tag) ?? tag}
+                onClick={() => toggleRoomType(tag)}
+              />
+            ))}
+            {roomTypes.length > 1 && (
+              <span className="text-[0.66rem] text-[var(--color-ink-4)]">
+                (pár musí mít STEJNÝ tag na obou stranách, jeden z vybraných)
+              </span>
+            )}
+          </div>
+        )}
         <div className="flex flex-wrap items-center gap-2 text-[0.78rem] text-[var(--color-ink-3)]">
           <span className="text-[0.62rem] uppercase tracking-[0.1em] text-[var(--color-ink-4)]">
             Hammingova vzdálenost

@@ -259,3 +259,37 @@ def test_training_only_false_never_queries_trained_images_or_adds_the_clause() -
     )
     join_sql, _ = conn.chunk_queries()[0]
     assert "image_training_examples" not in join_sql
+
+
+def test_training_label_narrows_lookup_and_chunk_clause_to_that_specific_label() -> None:
+    conn = _FakeConn(scanned=1, trained_sreality_ids=[111], join_rows=[_join_row()])
+    dedup.phash_audit(conn, hamming_min=0, hamming_max=15, training_label="kuchyně")
+    lookup_sql, lookup_params = conn.executed[0]
+    assert "image_training_examples te ON te.image_id = i.id" in lookup_sql
+    assert "te.label = %(training_label)s" in lookup_sql
+    assert lookup_params["training_label"] == "kuchyně"
+    join_sql, join_params = conn.chunk_queries()[0]
+    # Both EXISTS arms (left image, right image) must carry the label match —
+    # not just "any label at all" once a specific one is requested.
+    assert join_sql.count("te.label = %(training_label)s") == 2
+    assert join_params["training_label"] == "kuchyně"
+
+
+def test_training_label_implies_training_scoping_even_if_training_only_is_false() -> None:
+    # A specific label request is unambiguous intent — don't require the caller to
+    # also pass training_only=True redundantly.
+    conn = _FakeConn(scanned=1, trained_sreality_ids=[111], join_rows=[_join_row()])
+    dedup.phash_audit(
+        conn, hamming_min=0, hamming_max=15, training_only=False, training_label="kuchyně",
+    )
+    assert len(conn.chunk_queries()) == 1
+    join_sql, _ = conn.chunk_queries()[0]
+    assert "image_training_examples" in join_sql
+
+
+def test_training_label_with_no_matching_images_short_circuits() -> None:
+    conn = _FakeConn(scanned=2000, trained_sreality_ids=[])
+    out = dedup.phash_audit(conn, hamming_min=0, hamming_max=15, training_label="vzácný tag")
+    assert out["returned"] == 0
+    assert out["scanned_pairs"] == 0
+    assert len(conn.chunk_queries()) == 0

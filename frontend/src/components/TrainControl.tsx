@@ -34,13 +34,21 @@ export default function TrainControl({
 
   const trained = !!example;
 
+  // Invalidate both this page-group's training examples AND the page-wide
+  // training-labels query (LabelCombobox's suggestions, and PhashAudit's per-label
+  // counts) — a fresh Train/untrain changes both, and the latter otherwise only
+  // resyncs after its 30s staleTime lapses.
+  const invalidate = () => {
+    qc.invalidateQueries({ queryKey: [queryKeyPrefix, 'training'] });
+    qc.invalidateQueries({ queryKey: [queryKeyPrefix, 'training-labels'] });
+  };
   const train = useMutation({
     mutationFn: () => setTrainingExample({ image_id: image.id, label: value }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: [queryKeyPrefix, 'training'] }),
+    onSuccess: invalidate,
   });
   const untrain = useMutation({
     mutationFn: () => deleteTrainingExample(image.id),
-    onSuccess: () => qc.invalidateQueries({ queryKey: [queryKeyPrefix, 'training'] }),
+    onSuccess: invalidate,
   });
 
   return (
