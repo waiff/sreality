@@ -76,6 +76,11 @@ class PhashNoteAction(BaseModel):
     note: str | None = None
 
 
+class TrainingExampleAction(BaseModel):
+    image_id: int
+    label: str
+
+
 @router.get("/summary")
 def get_summary(
     status: str = "proposed",
@@ -272,6 +277,31 @@ def delete_phash_note(
 ) -> dict[str, Any]:
     """Clear a phash-pair note. `a`/`b` are the two image ids."""
     return dedup.delete_phash_note(conn, image_id_a=a, image_id_b=b)
+
+
+@router.post("/training-example")
+def post_training_example(
+    body: TrainingExampleAction,
+    conn: Any = Depends(deps.get_db_conn),
+    _: dict = Depends(deps.require_admin),
+) -> dict[str, Any]:
+    """/phash-audit "Train": upsert one image's linear-probe training-set label."""
+    try:
+        return dedup.set_training_example(
+            conn, image_id=body.image_id, label=body.label,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.delete("/training-example")
+def delete_training_example(
+    image_id: int,
+    conn: Any = Depends(deps.get_db_conn),
+    _: dict = Depends(deps.require_admin),
+) -> dict[str, Any]:
+    """Remove an image from the training set."""
+    return dedup.delete_training_example(conn, image_id=image_id)
 
 
 @router.get("/phash-audit")

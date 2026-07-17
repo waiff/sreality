@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 
@@ -7,14 +7,22 @@ import InfiniteSentinel from '@/components/InfiniteSentinel';
 import ImageTagBadge from '@/components/ImageTagBadge';
 import ImageLightbox from '@/components/ImageLightbox';
 import NoteFlagControl from '@/components/NoteFlagControl';
+import LabelCombobox from '@/components/LabelCombobox';
 import { useInfiniteList } from '@/lib/useInfiniteList';
-import { fetchPhashPairNotesForImageIds } from '@/lib/queries';
+import {
+  fetchPhashPairNotesForImageIds,
+  fetchTrainingExamplesForImageIds,
+  fetchDistinctTrainingLabels,
+} from '@/lib/queries';
 import {
   getPhashAudit,
   setPhashNote,
   deletePhashNote,
+  setTrainingExample,
+  deleteTrainingExample,
   type PhashAuditRow,
   type PhashAuditImageRef,
+  type TrainingExample,
 } from '@/lib/api';
 import { CATEGORY_MAIN_TABS } from '@/lib/categoryMainTabs';
 import { IMAGE_TAG_LABELS, imageTagLabel } from '@/lib/imageTags';
@@ -97,6 +105,19 @@ export default function PhashAudit() {
 
   const scope = list.firstPage;
   const pages = useMemo(() => chunk(list.rows, PAGE_SIZE), [list.rows]);
+
+  // The label combobox's suggestion list: the fixed CLIP taxonomy (Czech labels, same
+  // set as the Tag filter above) + whatever the operator has already typed into the
+  // training set — fetched once for the whole page, not per page-group.
+  const trainingLabelsQ = useQuery({
+    queryKey: ['phash-audit', 'training-labels'],
+    queryFn: fetchDistinctTrainingLabels,
+    staleTime: 30_000,
+  });
+  const labelOptions = useMemo(() => {
+    const taxonomy = TAG_OPTIONS.map((t) => imageTagLabel(t) ?? t);
+    return [...new Set([...taxonomy, ...(trainingLabelsQ.data ?? [])])].sort();
+  }, [trainingLabelsQ.data]);
 
   return (
     <div className="px-6 py-8 max-w-5xl mx-auto">
@@ -186,7 +207,9 @@ export default function PhashAudit() {
             Žádné páry fotek v tomto rozsahu Hammingovy vzdálenosti.
           </p>
         ) : (
-          pages.map((page, i) => <PhashPageGroup key={i} rows={page} />)
+          pages.map((page, i) => (
+            <PhashPageGroup key={i} rows={page} labelOptions={labelOptions} />
+          ))
         )}
       </div>
 
@@ -237,7 +260,13 @@ function Explainer() {
   );
 }
 
-function PhashPageGroup({ rows }: { rows: PhashAuditRow[] }) {
+function PhashPageGroup({
+  rows,
+  labelOptions,
+}: {
+  rows: PhashAuditRow[];
+  labelOptions: string[];
+}) {
   const imageIds = useMemo(() => {
     const s = new Set<number>();
     for (const r of rows) {
@@ -252,6 +281,11 @@ function PhashPageGroup({ rows }: { rows: PhashAuditRow[] }) {
     queryFn: () => fetchPhashPairNotesForImageIds(imageIds),
     enabled: imageIds.length > 0,
   });
+  const trainingQ = useQuery({
+    queryKey: ['phash-audit', 'training', imageIds],
+    queryFn: () => fetchTrainingExamplesForImageIds(imageIds),
+    enabled: imageIds.length > 0,
+  });
 
   return (
     <>
@@ -260,6 +294,8 @@ function PhashPageGroup({ rows }: { rows: PhashAuditRow[] }) {
           key={`${r.audit_id}:${r.left_image.image_id}:${r.right_image.image_id}`}
           row={r}
           note={notesQ.data?.get(`${r.left_image.image_id}:${r.right_image.image_id}`)}
+          training={trainingQ.data}
+          labelOptions={labelOptions}
         />
       ))}
     </>
@@ -284,9 +320,13 @@ function toImagePublic(sreality_id: number | null, ref: PhashAuditImageRef): Ima
 function PhashRow({
   row,
   note,
+  training,
+  labelOptions,
 }: {
   row: PhashAuditRow;
   note: { note: string | null } | undefined;
+  training: Map<number, TrainingExample> | undefined;
+  labelOptions: string[];
 }) {
   const qc = useQueryClient();
   const [lightboxAt, setLightboxAt] = useState<number | null>(null);
@@ -338,24 +378,16 @@ function PhashRow({
         )}
       </div>
 
-      <div className="grid grid-cols-2 gap-2">
+      <div className="flex flex-wrap gap-3">
         {images.map((img, i) => (
-          <button
+          <TrainableImage
             key={img.id}
-            type="button"
-            onClick={() => setLightboxAt(i)}
-            className="group relative block w-full aspect-square overflow-hidden rounded-[var(--radius-xs)] border border-[var(--color-rule)] bg-[var(--color-inset)]"
-          >
-            <img src={imageSrc(img)} alt="" loading="lazy" className="w-full h-full object-cover" />
-            <ImageTagBadge
-              tag={img.clip_fine_tag}
-              confidence={img.clip_confidence}
-              className="absolute bottom-1 left-1 max-w-[calc(100%-0.5rem)] truncate"
-            />
-            <span className="absolute top-1 right-1 px-1 py-0.5 text-[0.6rem] font-mono tabular-nums rounded-[var(--radius-xs)] bg-[var(--color-paper-3)]/85 border border-[var(--color-rule)] text-[var(--color-ink-3)]">
-              {i === 0 ? row.left_sreality_id : row.right_sreality_id}
-            </span>
-          </button>
+            image={img}
+            srealityId={i === 0 ? row.left_sreality_id : row.right_sreality_id}
+            example={training?.get(img.id)}
+            labelOptions={labelOptions}
+            onOpen={() => setLightboxAt(i)}
+          />
         ))}
       </div>
 
@@ -372,6 +404,95 @@ function PhashRow({
 
       {lightboxAt != null && (
         <ImageLightbox images={images} startIndex={lightboxAt} onClose={() => setLightboxAt(null)} />
+      )}
+    </div>
+  );
+}
+
+/* One image + its "Train" data-collection control (the linear-probe training-set label
+ * picker) — sized to match Browse's Large card image (23rem, aspect-[5/4]; the fluid
+ * aspect-square 2-column grid this replaces ran noticeably larger than Browse at
+ * typical widths). Defaults the combobox to the CLIP-assigned label (fine_tag, the
+ * same value the badge already shows) so confirming a correct call is one click. */
+function TrainableImage({
+  image,
+  srealityId,
+  example,
+  labelOptions,
+  onOpen,
+}: {
+  image: ImagePublic;
+  srealityId: number | null;
+  example: TrainingExample | undefined;
+  labelOptions: string[];
+  onOpen: () => void;
+}) {
+  const qc = useQueryClient();
+  const defaultLabel = imageTagLabel(image.clip_fine_tag) ?? image.clip_fine_tag ?? '';
+  const [label, setLabel] = useState(example?.label ?? defaultLabel);
+
+  // Re-sync when the saved example changes (e.g. after invalidation confirms a
+  // write, or an example trained from a different session loads in).
+  useEffect(() => {
+    if (example?.label != null) setLabel(example.label);
+  }, [example?.label]);
+
+  const trained = !!example;
+
+  const train = useMutation({
+    mutationFn: () => setTrainingExample({ image_id: image.id, label }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['phash-audit', 'training'] }),
+  });
+  const untrain = useMutation({
+    mutationFn: () => deleteTrainingExample(image.id),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['phash-audit', 'training'] }),
+  });
+
+  return (
+    <div className="w-full max-w-[23rem] flex flex-col gap-1.5">
+      <button
+        type="button"
+        onClick={onOpen}
+        className="group relative block w-full aspect-[5/4] overflow-hidden rounded-[var(--radius-xs)] border border-[var(--color-rule)] bg-[var(--color-inset)]"
+      >
+        <img src={imageSrc(image)} alt="" loading="lazy" className="w-full h-full object-cover" />
+        <ImageTagBadge
+          tag={image.clip_fine_tag}
+          confidence={image.clip_confidence}
+          className="absolute bottom-1 left-1 max-w-[calc(100%-0.5rem)] truncate"
+        />
+        <span className="absolute top-1 right-1 px-1 py-0.5 text-[0.6rem] font-mono tabular-nums rounded-[var(--radius-xs)] bg-[var(--color-paper-3)]/85 border border-[var(--color-rule)] text-[var(--color-ink-3)]">
+          {srealityId ?? '—'}
+        </span>
+      </button>
+      <div className="flex items-center gap-1.5">
+        <div className="min-w-0 flex-1">
+          <LabelCombobox value={label} onChange={setLabel} options={labelOptions} />
+        </div>
+        <button
+          type="button"
+          onClick={() => train.mutate()}
+          disabled={train.isPending || label.trim().length === 0}
+          title={trained ? `V trénovací sadě: „${example.label}“` : 'Přidat do trénovací sady s tímto štítkem'}
+          className={[
+            'shrink-0 px-2 py-1 text-[0.72rem] rounded-[var(--radius-xs)] border transition-colors disabled:opacity-50',
+            trained
+              ? 'border-[var(--color-sage)] bg-[var(--color-sage-soft)] text-[var(--color-sage)]'
+              : 'border-[var(--color-copper)] text-[var(--color-copper)] hover:bg-[var(--color-copper-soft)]',
+          ].join(' ')}
+        >
+          {train.isPending ? '…' : trained ? '✓ Train' : 'Train'}
+        </button>
+      </div>
+      {trained && (
+        <button
+          type="button"
+          onClick={() => untrain.mutate()}
+          disabled={untrain.isPending}
+          className="self-start text-[0.68rem] text-[var(--color-ink-4)] hover:text-[var(--color-brick)] underline decoration-dotted underline-offset-2 disabled:opacity-50"
+        >
+          {untrain.isPending ? 'Odebírám…' : 'Odebrat z trénovací sady'}
+        </button>
       )}
     </div>
   );

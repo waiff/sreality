@@ -47,7 +47,7 @@ import type {
   ScrapeRun,
   ScraperHealthChecks,
 } from './types';
-import type { ImageAnnotation, PhashNote } from './api';
+import type { ImageAnnotation, PhashNote, TrainingExample } from './api';
 
 /* Circle → bounding box approximation. Used when the operator picks
  * the centre+radius mode on the map: PostgREST has no native
@@ -1305,6 +1305,39 @@ export const fetchPhashPairNotesForImageIds = async (
     out.set(`${row.image_id_a}:${row.image_id_b}`, row);
   }
   return out;
+};
+
+/* /phash-audit "Train": the operator's linear-probe training-set label per image
+ * (migration 309), batched by the on-screen image ids. Also used to seed the label
+ * combobox's "labels currently in use" suggestion list, alongside the CLIP taxonomy. */
+export const fetchTrainingExamplesForImageIds = async (
+  ids: ReadonlyArray<number>,
+): Promise<Map<number, TrainingExample>> => {
+  if (ids.length === 0) return new Map();
+  const { data, error } = await supabase
+    .from('image_training_examples_public')
+    .select('image_id,label,updated_at')
+    .in('image_id', ids as number[]);
+  if (error) throw error;
+  const out = new Map<number, TrainingExample>();
+  for (const row of (data ?? []) as unknown as TrainingExample[]) {
+    out.set(row.image_id, row);
+  }
+  return out;
+};
+
+/* /phash-audit label combobox: every DISTINCT label already in the training set, so
+ * a label the operator typed once shows up as a suggestion next time (on top of the
+ * fixed CLIP taxonomy, which the combobox already offers unconditionally). Bounded
+ * (the table is starting from zero — see migration 309), so an unindexed distinct
+ * scan is fine; revisit if the set grows into the thousands. */
+export const fetchDistinctTrainingLabels = async (): Promise<string[]> => {
+  const { data, error } = await supabase
+    .from('image_training_examples_public')
+    .select('label')
+    .limit(2000);
+  if (error) throw error;
+  return [...new Set((data ?? []).map((r) => (r as { label: string }).label))].sort();
 };
 
 /* /dedup review card: the street / house-number / floor the candidate payload
