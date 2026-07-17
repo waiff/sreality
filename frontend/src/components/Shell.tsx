@@ -33,6 +33,8 @@ const navItems: ReadonlyArray<NavItem> = [
 // whole group renders (or not) alongside the other admin-gated nav items.
 const settingsItems: ReadonlyArray<{ to: string; label: string }> = [
   { to: '/dedup',    label: 'Dedup' },
+  { to: '/clip-audit', label: 'CLIP Audit' },
+  { to: '/phash-audit', label: 'pHash Audit' },
   { to: '/model-testing', label: 'Model Testing' },
   { to: '/health',   label: 'Health' },
   { to: '/costs',    label: 'LLM Costs' },

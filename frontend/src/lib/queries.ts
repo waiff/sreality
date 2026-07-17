@@ -47,6 +47,7 @@ import type {
   ScrapeRun,
   ScraperHealthChecks,
 } from './types';
+import type { ImageAnnotation, PhashNote } from './api';
 
 /* Circle → bounding box approximation. Used when the operator picks
  * the centre+radius mode on the map: PostgREST has no native
@@ -1174,7 +1175,7 @@ export const fetchListingsByIds = async (
  * (clip_fine_tag / clip_logical_tag / clip_confidence, migration 236) so every
  * photo surface can render its bottom-left tag badge from the same read. */
 const IMAGE_PUBLIC_COLS =
-  'id,sreality_id,sequence,sreality_url,storage_path,clip_fine_tag,clip_logical_tag,clip_confidence,clip_render_score';
+  'id,sreality_id,sequence,sreality_url,storage_path,clip_fine_tag,clip_logical_tag,clip_confidence,clip_render_score,phash';
 
 export const fetchImagesByListingIds = async (
   ids: ReadonlyArray<number>,
@@ -1222,6 +1223,86 @@ export const fetchPropertySourcesByPropertyIds = async (
     const arr = out.get(row.property_id);
     if (arr) arr.push(row);
     else out.set(row.property_id, [row]);
+  }
+  return out;
+};
+
+/* /clip-audit: the property feed — newest-first within ONE property type. Reads
+ * browse_list, same read model as Browse. `category_main` is REQUIRED (no "all
+ * types" option): browse_list's only covering index is `(category_main,
+ * category_type, first_seen_at desc, property_id desc)` — measured live, a plain
+ * `ORDER BY first_seen_at DESC` with no category filter falls back to a parallel
+ * seq scan + sort (~3.5s cold on the full active cohort, over the anon 3s budget);
+ * filtered by category_main it's a sub-ms index scan. Same keyset machinery as the
+ * Browse table (lib/keyset) so paging behaves identically and stays index-matched. */
+export interface ClipAuditPropertyRow {
+  property_id: number;
+  sreality_id: number;
+  category_main: string;
+  category_type: string | null;
+  first_seen_at: string;
+}
+
+const CLIP_AUDIT_COLS = 'property_id,sreality_id,category_main,category_type,first_seen_at';
+const CLIP_AUDIT_SORT: SortSpec = { field: 'first_seen_at', direction: 'desc' };
+export const CLIP_AUDIT_PAGE_SIZE = 24;
+
+export const fetchClipAuditProperties = async (
+  categoryMain: string,
+  cursor: KeysetCursor | null,
+): Promise<{ rows: ClipAuditPropertyRow[]; nextCursor: KeysetCursor | null }> => {
+  const base = supabase
+    .from('browse_list')
+    .select(withKeysetColumns(CLIP_AUDIT_COLS, CLIP_AUDIT_SORT))
+    .eq('category_main', categoryMain);
+  const keyed = applyKeyset(
+    base as unknown as KeysetBuilder, CLIP_AUDIT_SORT, cursor,
+  ) as unknown as typeof base;
+  const { data, error } = await keyed.limit(CLIP_AUDIT_PAGE_SIZE);
+  if (error) throw error;
+  const rows = (data ?? []) as unknown as ClipAuditPropertyRow[];
+  return {
+    rows,
+    nextCursor: nextCursorFrom(rows as unknown as Record<string, unknown>[], CLIP_AUDIT_SORT),
+  };
+};
+
+/* /clip-audit + /phash-audit: the operator's per-image correction/note (migration
+ * 308), batched by the on-screen image ids. Keyed on image_id for O(1) lookup while
+ * rendering the photo grid. */
+export const fetchImageAnnotationsByImageIds = async (
+  ids: ReadonlyArray<number>,
+): Promise<Map<number, ImageAnnotation>> => {
+  if (ids.length === 0) return new Map();
+  const { data, error } = await supabase
+    .from('image_tag_annotations_public')
+    .select('image_id,tag_flagged,render_flagged,note,updated_at')
+    .in('image_id', ids as number[]);
+  if (error) throw error;
+  const out = new Map<number, ImageAnnotation>();
+  for (const row of (data ?? []) as unknown as ImageAnnotation[]) {
+    out.set(row.image_id, row);
+  }
+  return out;
+};
+
+/* /phash-audit: the operator's note on an image PAIR, batched by the on-screen
+ * images' ids. The two `.in()` filters can over-match (any a-on-screen paired with
+ * any b-on-screen, not just the specific pairs shown) — harmless, since the caller
+ * looks up by the exact `${a}:${b}` key and ignores anything else returned. */
+export const fetchPhashPairNotesForImageIds = async (
+  ids: ReadonlyArray<number>,
+): Promise<Map<string, PhashNote>> => {
+  if (ids.length === 0) return new Map();
+  const { data, error } = await supabase
+    .from('phash_pair_notes_public')
+    .select('image_id_a,image_id_b,note,updated_at')
+    .in('image_id_a', ids as number[])
+    .in('image_id_b', ids as number[]);
+  if (error) throw error;
+  const out = new Map<string, PhashNote>();
+  for (const row of (data ?? []) as unknown as PhashNote[]) {
+    out.set(`${row.image_id_a}:${row.image_id_b}`, row);
   }
   return out;
 };

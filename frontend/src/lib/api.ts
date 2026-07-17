@@ -702,11 +702,13 @@ export const getDedupAudit = (
     category_main?: string;
     source?: string;
     stage?: string;
-    factor?: string; // phash | cosine | visual | address
+    factor?: string; // phash | cosine | visual | address | floor_plan
     factor_min?: number;
     factor_max?: number;
     verdict?: string; // High | Medium | Low
+    room_type?: string; // the compared room/plan tag (detail.room_type)
     property_id?: number; // scope to one property's merge decisions
+    property_id_in?: ReadonlyArray<number>; // batched form of property_id
     flagged?: boolean; // only decisions the operator flagged as incorrect
     // Matches a decision if EITHER side of its pair touches the picked place —
     // the same `DistrictChip[]` widget Browse/Watchdog use (LocationTypeahead),
@@ -725,7 +727,11 @@ export const getDedupAudit = (
   if (params.factor_min != null) q.set('factor_min', String(params.factor_min));
   if (params.factor_max != null) q.set('factor_max', String(params.factor_max));
   if (params.verdict) q.set('verdict', params.verdict);
+  if (params.room_type) q.set('room_type', params.room_type);
   if (params.property_id != null) q.set('property_id', String(params.property_id));
+  if (params.property_id_in?.length) {
+    q.set('property_id_in', params.property_id_in.join(','));
+  }
   if (params.flagged) q.set('flagged', 'true');
   for (const [k, v] of Object.entries(districtChipsToCsvParams(params.districts ?? []))) {
     q.set(k, v);
@@ -807,6 +813,105 @@ export const getDedupDecisionEvidence = (params: {
   return request<{ data: DedupDecisionEvidence }>(
     `/dedup/decision-evidence?${q.toString()}`,
   );
+};
+
+// /clip-audit: flag one image's CLIP tag and/or render score as wrong, with a note.
+export type ImageAnnotation = {
+  image_id: number;
+  tag_flagged: boolean;
+  render_flagged: boolean;
+  note: string | null;
+  updated_at: string;
+};
+export const setImageAnnotation = (body: {
+  image_id: number;
+  tag_flagged?: boolean;
+  render_flagged?: boolean;
+  note?: string | null;
+}): Promise<{ data: ImageAnnotation }> =>
+  request<{ data: ImageAnnotation }>('/dedup/image-annotation', {
+    method: 'POST',
+    json: body,
+  });
+export const deleteImageAnnotation = (
+  image_id: number,
+): Promise<{ data: { deleted: boolean } }> =>
+  request<{ data: { deleted: boolean } }>('/dedup/image-annotation', {
+    method: 'DELETE',
+    query: { image_id },
+  });
+
+// /phash-audit: a note on one image pair.
+export type PhashNote = {
+  image_id_a: number;
+  image_id_b: number;
+  note: string | null;
+  updated_at: string;
+};
+export const setPhashNote = (body: {
+  image_id_a: number;
+  image_id_b: number;
+  note?: string | null;
+}): Promise<{ data: PhashNote }> =>
+  request<{ data: PhashNote }>('/dedup/phash-note', { method: 'POST', json: body });
+export const deletePhashNote = (
+  image_id_a: number,
+  image_id_b: number,
+): Promise<{ data: { deleted: boolean } }> =>
+  request<{ data: { deleted: boolean } }>('/dedup/phash-note', {
+    method: 'DELETE',
+    query: { a: image_id_a, b: image_id_b },
+  });
+
+// /phash-audit: matching-photo image pairs within a Hamming-distance range, from pairs
+// the engine already decided (dedup_pair_audit) — read-only evidence, no engine change.
+export type PhashAuditImageRef = {
+  image_id: number;
+  sreality_url: string | null;
+  storage_path: string | null;
+  room_type: string | null;
+  fine_tag: string | null;
+  confidence: number | null;
+  render_score: number | null;
+};
+export type PhashAuditRow = {
+  audit_id: number;
+  left_sreality_id: number | null;
+  right_sreality_id: number | null;
+  left_property_id: number | null;
+  right_property_id: number | null;
+  outcome: string;
+  category_main: string | null;
+  run_at: string;
+  left_image: PhashAuditImageRef;
+  right_image: PhashAuditImageRef;
+  hamming: number;
+};
+export const getPhashAudit = (
+  params: {
+    hamming_min?: number;
+    hamming_max?: number;
+    category_main?: string;
+    outcome?: string;
+    room_type?: string;
+    limit?: number;
+    offset?: number;
+  } = {},
+): Promise<{
+  data: PhashAuditRow[];
+  returned: number;
+  scanned_pairs: number;
+  scan_cap: number;
+}> => {
+  const q = new URLSearchParams();
+  if (params.hamming_min != null) q.set('hamming_min', String(params.hamming_min));
+  if (params.hamming_max != null) q.set('hamming_max', String(params.hamming_max));
+  if (params.category_main) q.set('category_main', params.category_main);
+  if (params.outcome) q.set('outcome', params.outcome);
+  if (params.room_type) q.set('room_type', params.room_type);
+  q.set('limit', String(params.limit ?? 100));
+  if (params.offset) q.set('offset', String(params.offset));
+  return request(`/dedup/phash-audit?${q.toString()}`);
 };
 
 // CLIP backfill progress (listing-grain), for the /dedup tracker.

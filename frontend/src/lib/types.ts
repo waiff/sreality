@@ -149,6 +149,9 @@ export interface ImagePublic {
   /* CLIP render-vs-photo score 0..1 (migration 239): >= ~0.65 is a 3D render /
    * visualization (excluded from the byt merge signal). NULL until scored. */
   clip_render_score: number | null;
+  /* 64-bit dHash perceptual hash (migration 308), as Postgres's signed bigint — a
+   * display value for the /clip-audit and /phash-audit pages. NULL until hashed. */
+  phash: number | null;
 }
 
 /* Distributional shapes — used by EstimationDetail's RangeStrip and by
