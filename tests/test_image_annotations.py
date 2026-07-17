@@ -122,6 +122,16 @@ def test_set_training_example_upserts_trimmed_label() -> None:
     assert out["data"] == {"image_id": 42, "label": "kitchen", "updated_at": "2026-07-17T00:00:00Z"}
 
 
+def test_set_training_example_collapses_internal_whitespace() -> None:
+    # Write-boundary normalization: "site  plan\n" and "site plan" must land as the
+    # SAME stored label, or they'd silently fragment one training class into two.
+    conn = _FakeConn()
+    out = dedup.set_training_example(conn, image_id=42, label="site   plan\n")
+    _, params = conn.executed[0]
+    assert params == (42, "site plan", "operator")
+    assert out["data"]["label"] == "site plan"
+
+
 def test_set_training_example_rejects_blank_label() -> None:
     with pytest.raises(ValueError):
         dedup.set_training_example(_FakeConn(), image_id=42, label="   ")

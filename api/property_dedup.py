@@ -214,8 +214,11 @@ def set_training_example(
     """Upsert ONE image's linear-probe training-set label (the /phash-audit "Train"
     CTA) — one label per image (migration 309), overwritten on a repeat Train click
     with a different label. `label` is free text (open-vocabulary), not constrained to
-    the CLIP taxonomy. Data-collection only: nothing reads this table yet."""
-    clean = (label or "").strip()
+    the CLIP taxonomy — but IS normalized here (trim + collapse internal whitespace),
+    the write boundary, so every reader (this table's distinct-label list feeds the
+    training combobox's suggestions) sees already-clean values instead of re-deriving
+    normalization at each read site. Data-collection only: nothing reads this table yet."""
+    clean = " ".join((label or "").split())
     if not clean:
         raise ValueError("a training example needs a non-empty label")
     with conn.cursor() as cur:

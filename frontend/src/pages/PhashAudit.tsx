@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 
@@ -7,7 +7,8 @@ import InfiniteSentinel from '@/components/InfiniteSentinel';
 import ImageTagBadge from '@/components/ImageTagBadge';
 import ImageLightbox from '@/components/ImageLightbox';
 import NoteFlagControl from '@/components/NoteFlagControl';
-import LabelCombobox from '@/components/LabelCombobox';
+import TrainControl from '@/components/TrainControl';
+import type { LabelOption } from '@/components/LabelCombobox';
 import DedupBreakdown from '@/components/DedupBreakdown';
 import { useInfiniteList } from '@/lib/useInfiniteList';
 import {
@@ -19,14 +20,12 @@ import {
   getPhashAudit,
   setPhashNote,
   deletePhashNote,
-  setTrainingExample,
-  deleteTrainingExample,
   type PhashAuditRow,
   type PhashAuditImageRef,
   type TrainingExample,
 } from '@/lib/api';
 import { CATEGORY_MAIN_TABS } from '@/lib/categoryMainTabs';
-import { IMAGE_TAG_LABELS, imageTagLabel } from '@/lib/imageTags';
+import { IMAGE_TAG_LABELS, FINE_TAG_KEYS, imageTagLabel } from '@/lib/imageTags';
 import { fmtRelative, fmtCount } from '@/lib/format';
 import { imageSrc } from '@/lib/imageUrl';
 import type { ImagePublic } from '@/lib/types';
@@ -134,21 +133,26 @@ export default function PhashAudit() {
   const scope = list.firstPage;
   const pages = useMemo(() => chunk(list.rows, PAGE_SIZE), [list.rows]);
 
-  // The label combobox's suggestion list: the fixed CLIP taxonomy (Czech labels, same
-  // set as the Tag filter above) + whatever the operator has already typed into the
-  // training set — fetched once for the whole page, not per page-group.
+  // The label combobox's suggestion list: CLIP's 19 real fine_tag classes (not
+  // TAG_OPTIONS's 15 collapsed logical tags used by the Tag filter above — see
+  // imageTags.ts) keyed by their canonical value, plus whatever open-vocabulary
+  // labels the operator has already typed into the training set from either audit
+  // page — fetched once for the whole page, not per page-group.
   const trainingLabelsQ = useQuery({
     queryKey: ['phash-audit', 'training-labels'],
     queryFn: fetchDistinctTrainingLabels,
     staleTime: 30_000,
   });
-  const labelOptions = useMemo(() => {
-    // The FULL taxonomy here, not TAG_OPTIONS (that one's deliberately restricted
-    // to the 15 canonical room tags for the Tag filter above) — the training set
-    // needs every fine_tag CLIP can produce, including the fine-only sub-styles
-    // (mapa lokality, katastrální mapa, …) that are common on house/land photos.
-    const taxonomy = Object.keys(IMAGE_TAG_LABELS).map((t) => imageTagLabel(t) ?? t);
-    return [...new Set([...taxonomy, ...(trainingLabelsQ.data ?? [])])].sort();
+  const labelOptions: LabelOption[] = useMemo(() => {
+    const taxonomy: LabelOption[] = FINE_TAG_KEYS.map((key) => ({
+      value: key,
+      label: imageTagLabel(key) ?? key,
+    }));
+    const known = new Set(FINE_TAG_KEYS);
+    const custom: LabelOption[] = (trainingLabelsQ.data ?? [])
+      .filter((v) => !known.has(v))
+      .map((v) => ({ value: v, label: v }));
+    return [...taxonomy, ...custom].sort((a, b) => a.label.localeCompare(b.label, 'cs'));
   }, [trainingLabelsQ.data]);
 
   return (
@@ -308,7 +312,7 @@ function PhashPageGroup({
   labelOptions,
 }: {
   rows: PhashAuditRow[];
-  labelOptions: string[];
+  labelOptions: LabelOption[];
 }) {
   const imageIds = useMemo(() => {
     const s = new Set<number>();
@@ -369,7 +373,7 @@ function PhashRow({
   row: PhashAuditRow;
   note: { note: string | null } | undefined;
   training: Map<number, TrainingExample> | undefined;
-  labelOptions: string[];
+  labelOptions: LabelOption[];
 }) {
   const qc = useQueryClient();
   const [lightboxAt, setLightboxAt] = useState<number | null>(null);
@@ -463,8 +467,7 @@ function PhashRow({
 /* One image + its "Train" data-collection control (the linear-probe training-set label
  * picker) — sized to match Browse's Large card image (23rem, aspect-[5/4]; the fluid
  * aspect-square 2-column grid this replaces ran noticeably larger than Browse at
- * typical widths). Defaults the combobox to the CLIP-assigned label (fine_tag, the
- * same value the badge already shows) so confirming a correct call is one click. */
+ * typical widths). */
 function TrainableImage({
   image,
   srealityId,
@@ -475,30 +478,9 @@ function TrainableImage({
   image: ImagePublic;
   srealityId: number | null;
   example: TrainingExample | undefined;
-  labelOptions: string[];
+  labelOptions: LabelOption[];
   onOpen: () => void;
 }) {
-  const qc = useQueryClient();
-  const defaultLabel = imageTagLabel(image.clip_fine_tag) ?? image.clip_fine_tag ?? '';
-  const [label, setLabel] = useState(example?.label ?? defaultLabel);
-
-  // Re-sync when the saved example changes (e.g. after invalidation confirms a
-  // write, or an example trained from a different session loads in).
-  useEffect(() => {
-    if (example?.label != null) setLabel(example.label);
-  }, [example?.label]);
-
-  const trained = !!example;
-
-  const train = useMutation({
-    mutationFn: () => setTrainingExample({ image_id: image.id, label }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['phash-audit', 'training'] }),
-  });
-  const untrain = useMutation({
-    mutationFn: () => deleteTrainingExample(image.id),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['phash-audit', 'training'] }),
-  });
-
   return (
     <div className="w-full max-w-[23rem] flex flex-col gap-1.5">
       <button
@@ -516,35 +498,7 @@ function TrainableImage({
           {srealityId ?? '—'}
         </span>
       </button>
-      <div className="flex items-center gap-1.5">
-        <div className="min-w-0 flex-1">
-          <LabelCombobox value={label} onChange={setLabel} options={labelOptions} />
-        </div>
-        <button
-          type="button"
-          onClick={() => train.mutate()}
-          disabled={train.isPending || label.trim().length === 0}
-          title={trained ? `V trénovací sadě: „${example.label}“` : 'Přidat do trénovací sady s tímto štítkem'}
-          className={[
-            'shrink-0 px-2 py-1 text-[0.72rem] rounded-[var(--radius-xs)] border transition-colors disabled:opacity-50',
-            trained
-              ? 'border-[var(--color-sage)] bg-[var(--color-sage-soft)] text-[var(--color-sage)]'
-              : 'border-[var(--color-copper)] text-[var(--color-copper)] hover:bg-[var(--color-copper-soft)]',
-          ].join(' ')}
-        >
-          {train.isPending ? '…' : trained ? '✓ Train' : 'Train'}
-        </button>
-      </div>
-      {trained && (
-        <button
-          type="button"
-          onClick={() => untrain.mutate()}
-          disabled={untrain.isPending}
-          className="self-start text-[0.68rem] text-[var(--color-ink-4)] hover:text-[var(--color-brick)] underline decoration-dotted underline-offset-2 disabled:opacity-50"
-        >
-          {untrain.isPending ? 'Odebírám…' : 'Odebrat z trénovací sady'}
-        </button>
-      )}
+      <TrainControl image={image} example={example} labelOptions={labelOptions} queryKeyPrefix="phash-audit" />
     </div>
   );
 }

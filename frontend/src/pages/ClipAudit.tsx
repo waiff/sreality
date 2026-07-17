@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 
@@ -9,7 +9,8 @@ import ImageTagBadge from '@/components/ImageTagBadge';
 import ImageRenderBadge from '@/components/ImageRenderBadge';
 import ImageLightbox from '@/components/ImageLightbox';
 import NoteFlagControl from '@/components/NoteFlagControl';
-import LabelCombobox from '@/components/LabelCombobox';
+import TrainControl from '@/components/TrainControl';
+import type { LabelOption } from '@/components/LabelCombobox';
 import DedupBreakdown from '@/components/DedupBreakdown';
 import { useInfiniteList } from '@/lib/useInfiniteList';
 import {
@@ -27,14 +28,12 @@ import {
   getDedupAudit,
   setImageAnnotation,
   deleteImageAnnotation,
-  setTrainingExample,
-  deleteTrainingExample,
   type DedupAuditRow,
   type ImageAnnotation,
   type TrainingExample,
 } from '@/lib/api';
 import { CATEGORY_MAIN_TABS } from '@/lib/categoryMainTabs';
-import { IMAGE_TAG_LABELS, imageTagLabel } from '@/lib/imageTags';
+import { IMAGE_TAG_LABELS, FINE_TAG_KEYS, imageTagLabel } from '@/lib/imageTags';
 import { fmtRelative } from '@/lib/format';
 import { listingPath } from '@/lib/listingUrl';
 import { portalLabel } from '@/lib/portals';
@@ -122,13 +121,20 @@ export default function ClipAudit() {
     queryFn: fetchDistinctTrainingLabels,
     staleTime: 30_000,
   });
-  const labelOptions = useMemo(() => {
-    // The FULL taxonomy here, not TAG_OPTIONS (that one's deliberately restricted
-    // to the 15 canonical room tags for the Tag filter above) — the training set
-    // needs every fine_tag CLIP can produce, including the fine-only sub-styles
-    // (mapa lokality, katastrální mapa, …) that are common on house/land photos.
-    const taxonomy = Object.keys(IMAGE_TAG_LABELS).map((t) => imageTagLabel(t) ?? t);
-    return [...new Set([...taxonomy, ...(trainingLabelsQ.data ?? [])])].sort();
+  const labelOptions: LabelOption[] = useMemo(() => {
+    // CLIP's 19 real fine_tag classes (not TAG_OPTIONS's 15 collapsed logical tags
+    // used by the Tag filter above — see imageTags.ts), keyed by canonical value,
+    // plus whatever open-vocabulary labels the operator has already typed in from
+    // either audit page.
+    const taxonomy: LabelOption[] = FINE_TAG_KEYS.map((key) => ({
+      value: key,
+      label: imageTagLabel(key) ?? key,
+    }));
+    const known = new Set(FINE_TAG_KEYS);
+    const custom: LabelOption[] = (trainingLabelsQ.data ?? [])
+      .filter((v) => !known.has(v))
+      .map((v) => ({ value: v, label: v }));
+    return [...taxonomy, ...custom].sort((a, b) => a.label.localeCompare(b.label, 'cs'));
   }, [trainingLabelsQ.data]);
 
   return (
@@ -318,7 +324,7 @@ function PropertyPageGroup({
   tagFilter: string;
   renderMin: number | null;
   renderMax: number | null;
-  labelOptions: string[];
+  labelOptions: LabelOption[];
   onlyFullyTagged: boolean;
 }) {
   const propertyIds = useMemo(() => properties.map((p) => p.property_id), [properties]);
@@ -422,7 +428,7 @@ function PropertyCard({
   imagesBySreality: Map<number, ImagePublic[]>;
   annotations: Map<number, ImageAnnotation>;
   training: Map<number, TrainingExample>;
-  labelOptions: string[];
+  labelOptions: LabelOption[];
   auditRows: DedupAuditRow[];
   mode: Mode;
   tagFilter: string;
@@ -529,7 +535,7 @@ function ListingColumn({
   images: ImagePublic[];
   annotations: Map<number, ImageAnnotation>;
   training: Map<number, TrainingExample>;
-  labelOptions: string[];
+  labelOptions: LabelOption[];
   mode: Mode;
   tagFilter: string;
   renderMin: number | null;
@@ -602,7 +608,7 @@ function ImageCell({
   mode: Mode;
   annotation: ImageAnnotation | undefined;
   example: TrainingExample | undefined;
-  labelOptions: string[];
+  labelOptions: LabelOption[];
   onOpen: () => void;
 }) {
   const qc = useQueryClient();
@@ -665,70 +671,12 @@ function ImageCell({
       {/* Linear-probe training-set data collection — Tagging tab only (Render is a
           continuous score, not a category to pick from a label list). */}
       {mode === 'tagging' && (
-        <TrainControl image={image} example={example} labelOptions={labelOptions} />
-      )}
-    </div>
-  );
-}
-
-function TrainControl({
-  image,
-  example,
-  labelOptions,
-}: {
-  image: ImagePublic;
-  example: TrainingExample | undefined;
-  labelOptions: string[];
-}) {
-  const qc = useQueryClient();
-  const defaultLabel = imageTagLabel(image.clip_fine_tag) ?? image.clip_fine_tag ?? '';
-  const [label, setLabel] = useState(example?.label ?? defaultLabel);
-
-  useEffect(() => {
-    if (example?.label != null) setLabel(example.label);
-  }, [example?.label]);
-
-  const trained = !!example;
-
-  const train = useMutation({
-    mutationFn: () => setTrainingExample({ image_id: image.id, label }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['clip-audit', 'training'] }),
-  });
-  const untrain = useMutation({
-    mutationFn: () => deleteTrainingExample(image.id),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['clip-audit', 'training'] }),
-  });
-
-  return (
-    <div className="flex flex-col gap-1">
-      <div className="flex items-center gap-1">
-        <div className="min-w-0 flex-1">
-          <LabelCombobox value={label} onChange={setLabel} options={labelOptions} />
-        </div>
-        <button
-          type="button"
-          onClick={() => train.mutate()}
-          disabled={train.isPending || label.trim().length === 0}
-          title={trained ? `V trénovací sadě: „${example.label}“` : 'Přidat do trénovací sady s tímto štítkem'}
-          className={[
-            'shrink-0 px-1.5 py-1 text-[0.68rem] rounded-[var(--radius-xs)] border transition-colors disabled:opacity-50',
-            trained
-              ? 'border-[var(--color-sage)] bg-[var(--color-sage-soft)] text-[var(--color-sage)]'
-              : 'border-[var(--color-copper)] text-[var(--color-copper)] hover:bg-[var(--color-copper-soft)]',
-          ].join(' ')}
-        >
-          {train.isPending ? '…' : trained ? '✓' : 'Train'}
-        </button>
-      </div>
-      {trained && (
-        <button
-          type="button"
-          onClick={() => untrain.mutate()}
-          disabled={untrain.isPending}
-          className="self-start text-[0.62rem] text-[var(--color-ink-4)] hover:text-[var(--color-brick)] underline decoration-dotted underline-offset-2 disabled:opacity-50"
-        >
-          {untrain.isPending ? '…' : 'Odebrat'}
-        </button>
+        <TrainControl
+          image={image}
+          example={example}
+          labelOptions={labelOptions}
+          queryKeyPrefix="clip-audit"
+        />
       )}
     </div>
   );
