@@ -69,11 +69,20 @@
     arms + the **OpenAI** batch −50% (Session 4 engine-fed rebuild) + embedding coverage. Watch the
     false-merge risk (gpt-5-mini site_plan precision 86→52 on the hard photo-identical stratum) — the
     operator owns that audit; any backlog blitz stays gated on it.
-- **Encoder upgrades (operator idea, evaluated 2026-07-11): CLOSED.** The June-26 DINOv2
-  A/B (results were buried in workflow logs) showed WORSE pair separation than CLIP B/32
-  (-0.0014 vs -0.0044) with hard negatives at cosine 1.0000 — identical marketing renders
-  defeat any encoder; the render-score exclusion is the real mitigation. ViT-L/14 rejected
-  (10-15x CPU for ~$2-3/day); DINOv3 re-run timed out and was not pursued.
+- **Encoder upgrades (operator idea, evaluated 2026-07-11): REOPENED 2026-07-17 as a GPU
+  re-run.** The June-26 DINOv2 A/B (results were buried in workflow logs) showed WORSE pair
+  separation than CLIP B/32 (-0.0014 vs -0.0044) with hard negatives at cosine 1.0000 —
+  identical marketing renders defeat any encoder; the render-score exclusion is the real
+  mitigation. ViT-L/14 rejected (10-15x CPU for ~$2-3/day); DINOv3 re-run timed out.
+  The re-run fixes the three confounds that verdict rested on: (1) dinov2-SMALL only — the
+  instance-recognition gains live in base/large; (2) shared LITERAL photos scored as signal —
+  the new harness excludes phash/cosine-identical image pairs (encoder-independently) and
+  reports both ways; (3) byt-only — the site-plan-verdict hard negatives (pozemek/dům, the
+  gpt-5-mini merge-risk families) were never tested. Mechanics: `embedding_ab.yml` mode
+  `manifest` builds a zero-credential manifest (presigned R2 URLs + labels + stored CLIP
+  cosines per image pair) consumed by `scripts/embedding_gpu_bench.py` on a rented GPU
+  (RunPod RTX 4090, ~$0.70/h — full bake-off ≈ 1 pod-hour; CPU-cost rejection doesn't apply).
+  Decision gate unchanged: ≥99%-precision operating point on the golden labels or no re-embed.
 - **768px (3.1):** still open — needs a Sonnet@768 recall run (~$2) whenever desired.
 
 Update this list as phases ship.

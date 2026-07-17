@@ -1747,7 +1747,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
   {
     "filename": "embedding_ab.yml",
     "name": "Dedup — embedding A/B (DINOv2 vs CLIP)",
-    "description": "One-shot OFFLINE analysis (read-only, no merges/writes): does a candidate instance-biased embedding (DINOv2) separate same-property from different-unit-same-development where CLIP's semantic embedding collapsed (negatives cosine >= positives)? Reports max same-room cosine percentiles by is_same for DINOv2 vs the stored CLIP, on the labelled same-disposition set (floor-plan-confirmed different units as negatives). The gate before any re-embed commitment. Dispatch-only. Secrets: SUPABASE_DB_URL + R2_* (downloads image bytes). NOT a portal ingest.",
+    "description": "One-shot OFFLINE analysis (read-only, no merges/writes): does a candidate instance-biased embedding (DINOv2) separate same-property from different-unit-same-development where CLIP's semantic embedding collapsed (negatives cosine >= positives)? Two modes: ab       — legacy CPU A/B (scripts/embedding_ab.py): DINOv2-small vs stored CLIP, byt-only, percentiles in the job log. manifest — build the GPU-bench manifest (scripts/build_embedding_manifest.py): labelled pairs from dedup_label_events + presigned R2 URLs, uploaded as a 1-day artifact for scripts/embedding_gpu_bench.py on an external GPU box. The presigned URLs grant 7-day public read on the sampled listing photos — hence the short artifact retention on this public repo. Dispatch-only. Secrets: SUPABASE_DB_URL + R2_*. NOT a portal ingest.",
     "portal": null,
     "manual": true,
     "schedules": [],
@@ -1756,8 +1756,19 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "paths": null,
     "inputs": [
       {
+        "name": "mode",
+        "description": "ab = CPU A/B in-log; manifest = build GPU-bench manifest artifact",
+        "required": false,
+        "type": "choice",
+        "default": "ab",
+        "options": [
+          "ab",
+          "manifest"
+        ]
+      },
+      {
         "name": "model",
-        "description": "HF image model id (DINOv2 CLS embedding)",
+        "description": "HF image model id (DINOv2 CLS embedding; ab mode only)",
         "required": false,
         "type": "string",
         "default": "facebook/dinov2-small",
@@ -1765,7 +1776,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
       },
       {
         "name": "npos",
-        "description": "Positive (same-property) pairs sampled",
+        "description": "Positive (same-property) pairs sampled (ab mode only)",
         "required": false,
         "type": "string",
         "default": "400",
@@ -1773,7 +1784,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
       },
       {
         "name": "nneg",
-        "description": "Negative (different-unit) pairs sampled",
+        "description": "Negative (different-unit) pairs sampled (ab mode only)",
         "required": false,
         "type": "string",
         "default": "400",
