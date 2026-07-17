@@ -883,6 +883,12 @@ export type PhashAuditRow = {
   outcome: string;
   category_main: string | null;
   run_at: string;
+  // What ACTUALLY decided this pair — may be a different signal than the Hamming
+  // number this page sorts by (e.g. phash found nothing, forensic vision dismissed
+  // it). Same shape/source as DedupAuditRow.audit_breakdown, so DedupBreakdown
+  // renders both identically.
+  stage: string;
+  audit_breakdown: AuditRung[];
   left_image: PhashAuditImageRef;
   right_image: PhashAuditImageRef;
   hamming: number;
