@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 
@@ -9,6 +9,7 @@ import ImageTagBadge from '@/components/ImageTagBadge';
 import ImageRenderBadge from '@/components/ImageRenderBadge';
 import ImageLightbox from '@/components/ImageLightbox';
 import NoteFlagControl from '@/components/NoteFlagControl';
+import LabelCombobox from '@/components/LabelCombobox';
 import DedupBreakdown from '@/components/DedupBreakdown';
 import { useInfiniteList } from '@/lib/useInfiniteList';
 import {
@@ -16,6 +17,8 @@ import {
   fetchPropertySourcesByPropertyIds,
   fetchImagesByListingIds,
   fetchImageAnnotationsByImageIds,
+  fetchTrainingExamplesForImageIds,
+  fetchDistinctTrainingLabels,
   CLIP_AUDIT_PAGE_SIZE,
   type ClipAuditPropertyRow,
 } from '@/lib/queries';
@@ -24,8 +27,11 @@ import {
   getDedupAudit,
   setImageAnnotation,
   deleteImageAnnotation,
+  setTrainingExample,
+  deleteTrainingExample,
   type DedupAuditRow,
   type ImageAnnotation,
+  type TrainingExample,
 } from '@/lib/api';
 import { CATEGORY_MAIN_TABS } from '@/lib/categoryMainTabs';
 import { IMAGE_TAG_LABELS, imageTagLabel } from '@/lib/imageTags';
@@ -101,6 +107,19 @@ export default function ClipAudit() {
     () => chunk(properties.rows, CLIP_AUDIT_PAGE_SIZE),
     [properties.rows],
   );
+
+  // The Train label combobox's suggestions (Tagging tab only — Render is a continuous
+  // score, not a pick-a-category label): the fixed CLIP taxonomy + anything the
+  // operator already typed into the training set from either audit page.
+  const trainingLabelsQ = useQuery({
+    queryKey: ['clip-audit', 'training-labels'],
+    queryFn: fetchDistinctTrainingLabels,
+    staleTime: 30_000,
+  });
+  const labelOptions = useMemo(() => {
+    const taxonomy = TAG_OPTIONS.map((t) => imageTagLabel(t) ?? t);
+    return [...new Set([...taxonomy, ...(trainingLabelsQ.data ?? [])])].sort();
+  }, [trainingLabelsQ.data]);
 
   return (
     <div className="px-6 py-8 max-w-5xl mx-auto">
@@ -188,6 +207,7 @@ export default function ClipAudit() {
               tagFilter={tagFilter}
               renderMin={renderMin ? Number(renderMin.replace(',', '.')) : null}
               renderMax={renderMax ? Number(renderMax.replace(',', '.')) : null}
+              labelOptions={labelOptions}
             />
           ))
         )}
@@ -251,12 +271,14 @@ function PropertyPageGroup({
   tagFilter,
   renderMin,
   renderMax,
+  labelOptions,
 }: {
   properties: ClipAuditPropertyRow[];
   mode: Mode;
   tagFilter: string;
   renderMin: number | null;
   renderMax: number | null;
+  labelOptions: string[];
 }) {
   const propertyIds = useMemo(() => properties.map((p) => p.property_id), [properties]);
 
@@ -302,6 +324,12 @@ function PropertyPageGroup({
     enabled: propertyIds.length > 0,
   });
 
+  const trainingQ = useQuery({
+    queryKey: ['clip-audit', 'training', imageIds],
+    queryFn: () => fetchTrainingExamplesForImageIds(imageIds),
+    enabled: imageIds.length > 0 && mode === 'tagging',
+  });
+
   return (
     <>
       {properties.map((p) => (
@@ -311,6 +339,8 @@ function PropertyPageGroup({
           sources={sourcesMap?.get(p.property_id) ?? []}
           imagesBySreality={imagesMap ?? new Map()}
           annotations={annotationsQ.data ?? new Map()}
+          training={trainingQ.data ?? new Map()}
+          labelOptions={labelOptions}
           auditRows={
             auditQ.data?.data.filter(
               (r) => r.left_property_id === p.property_id || r.right_property_id === p.property_id,
@@ -331,6 +361,8 @@ function PropertyCard({
   sources,
   imagesBySreality,
   annotations,
+  training,
+  labelOptions,
   auditRows,
   mode,
   tagFilter,
@@ -341,6 +373,8 @@ function PropertyCard({
   sources: PropertySource[];
   imagesBySreality: Map<number, ImagePublic[]>;
   annotations: Map<number, ImageAnnotation>;
+  training: Map<number, TrainingExample>;
+  labelOptions: string[];
   auditRows: DedupAuditRow[];
   mode: Mode;
   tagFilter: string;
@@ -385,6 +419,8 @@ function PropertyCard({
             listing={l}
             images={imagesBySreality.get(l.sreality_id) ?? []}
             annotations={annotations}
+            training={training}
+            labelOptions={labelOptions}
             mode={mode}
             tagFilter={tagFilter}
             renderMin={renderMin}
@@ -434,6 +470,8 @@ function ListingColumn({
   listing,
   images,
   annotations,
+  training,
+  labelOptions,
   mode,
   tagFilter,
   renderMin,
@@ -442,6 +480,8 @@ function ListingColumn({
   listing: PropertySource;
   images: ImagePublic[];
   annotations: Map<number, ImageAnnotation>;
+  training: Map<number, TrainingExample>;
+  labelOptions: string[];
   mode: Mode;
   tagFilter: string;
   renderMin: number | null;
@@ -484,6 +524,8 @@ function ListingColumn({
               image={img}
               mode={mode}
               annotation={annotations.get(img.id)}
+              example={training.get(img.id)}
+              labelOptions={labelOptions}
               onOpen={() => setLightboxAt(i)}
             />
           ))}
@@ -504,11 +546,15 @@ function ImageCell({
   image,
   mode,
   annotation,
+  example,
+  labelOptions,
   onOpen,
 }: {
   image: ImagePublic;
   mode: Mode;
   annotation: ImageAnnotation | undefined;
+  example: TrainingExample | undefined;
+  labelOptions: string[];
   onOpen: () => void;
 }) {
   const qc = useQueryClient();
@@ -568,6 +614,74 @@ function ImageCell({
         onSave={(input) => save.mutate(input)}
         onRemove={() => remove.mutate()}
       />
+      {/* Linear-probe training-set data collection — Tagging tab only (Render is a
+          continuous score, not a category to pick from a label list). */}
+      {mode === 'tagging' && (
+        <TrainControl image={image} example={example} labelOptions={labelOptions} />
+      )}
+    </div>
+  );
+}
+
+function TrainControl({
+  image,
+  example,
+  labelOptions,
+}: {
+  image: ImagePublic;
+  example: TrainingExample | undefined;
+  labelOptions: string[];
+}) {
+  const qc = useQueryClient();
+  const defaultLabel = imageTagLabel(image.clip_fine_tag) ?? image.clip_fine_tag ?? '';
+  const [label, setLabel] = useState(example?.label ?? defaultLabel);
+
+  useEffect(() => {
+    if (example?.label != null) setLabel(example.label);
+  }, [example?.label]);
+
+  const trained = !!example;
+
+  const train = useMutation({
+    mutationFn: () => setTrainingExample({ image_id: image.id, label }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['clip-audit', 'training'] }),
+  });
+  const untrain = useMutation({
+    mutationFn: () => deleteTrainingExample(image.id),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['clip-audit', 'training'] }),
+  });
+
+  return (
+    <div className="flex flex-col gap-1">
+      <div className="flex items-center gap-1">
+        <div className="min-w-0 flex-1">
+          <LabelCombobox value={label} onChange={setLabel} options={labelOptions} />
+        </div>
+        <button
+          type="button"
+          onClick={() => train.mutate()}
+          disabled={train.isPending || label.trim().length === 0}
+          title={trained ? `V trénovací sadě: „${example.label}“` : 'Přidat do trénovací sady s tímto štítkem'}
+          className={[
+            'shrink-0 px-1.5 py-1 text-[0.68rem] rounded-[var(--radius-xs)] border transition-colors disabled:opacity-50',
+            trained
+              ? 'border-[var(--color-sage)] bg-[var(--color-sage-soft)] text-[var(--color-sage)]'
+              : 'border-[var(--color-copper)] text-[var(--color-copper)] hover:bg-[var(--color-copper-soft)]',
+          ].join(' ')}
+        >
+          {train.isPending ? '…' : trained ? '✓' : 'Train'}
+        </button>
+      </div>
+      {trained && (
+        <button
+          type="button"
+          onClick={() => untrain.mutate()}
+          disabled={untrain.isPending}
+          className="self-start text-[0.62rem] text-[var(--color-ink-4)] hover:text-[var(--color-brick)] underline decoration-dotted underline-offset-2 disabled:opacity-50"
+        >
+          {untrain.isPending ? '…' : 'Odebrat'}
+        </button>
+      )}
     </div>
   );
 }
