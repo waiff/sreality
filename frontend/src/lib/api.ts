@@ -959,6 +959,28 @@ export const deleteTrainingExample = (
     query: { image_id },
   });
 
+// "Border case" flag (migration 310): even a human isn't confident about this
+// image's classification. Independent of image_training_examples — no label
+// required, may coexist with one (a best-guess flagged as uncertain).
+export type BorderCase = {
+  image_id: number;
+  created_at: string;
+};
+export const setBorderCase = (
+  image_id: number,
+): Promise<{ data: BorderCase }> =>
+  request<{ data: BorderCase }>('/dedup/border-case', {
+    method: 'POST',
+    json: { image_id },
+  });
+export const deleteBorderCase = (
+  image_id: number,
+): Promise<{ data: { deleted: boolean } }> =>
+  request<{ data: { deleted: boolean } }>('/dedup/border-case', {
+    method: 'DELETE',
+    query: { image_id },
+  });
+
 // CLIP backfill progress (listing-grain), for the /dedup tracker.
 export type DedupCoverageTier = {
   key: string;

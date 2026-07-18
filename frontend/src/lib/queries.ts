@@ -47,7 +47,7 @@ import type {
   ScrapeRun,
   ScraperHealthChecks,
 } from './types';
-import type { ImageAnnotation, PhashNote, TrainingExample } from './api';
+import type { BorderCase, ImageAnnotation, PhashNote, TrainingExample } from './api';
 
 /* Circle → bounding box approximation. Used when the operator picks
  * the centre+radius mode on the map: PostgREST has no native
@@ -1324,6 +1324,21 @@ export const fetchTrainingExamplesForImageIds = async (
     out.set(row.image_id, row);
   }
   return out;
+};
+
+/* The "Border case" button's flagged/unflagged state, batched per page-group —
+ * same shape/read path as fetchTrainingExamplesForImageIds, just image_id-keyed
+ * with no other payload (a border case carries no value of its own). */
+export const fetchBorderCasesByImageIds = async (
+  ids: ReadonlyArray<number>,
+): Promise<Set<number>> => {
+  if (ids.length === 0) return new Set();
+  const { data, error } = await supabase
+    .from('image_border_cases_public')
+    .select('image_id')
+    .in('image_id', ids as number[]);
+  if (error) throw error;
+  return new Set((data ?? []).map((r) => (r as BorderCase).image_id));
 };
 
 /* /phash-audit label combobox: every DISTINCT label already in the training set, so

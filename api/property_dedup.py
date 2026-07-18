@@ -244,6 +244,39 @@ def delete_training_example(conn: psycopg.Connection, *, image_id: int) -> dict[
     return {"data": {"deleted": bool(deleted)}}
 
 
+def set_border_case(
+    conn: psycopg.Connection, *, image_id: int, created_by: str = "operator",
+) -> dict[str, Any]:
+    """Flag ONE image as a border case (migration 310) — even a human isn't confident
+    about its room/plan classification. A separate concern from image_training_examples:
+    no label required, and independent of whether the image has one. Idempotent — a
+    repeat flag is a no-op, not a second row (image_id is unique)."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO image_border_cases (image_id, created_by) VALUES (%s,%s) "
+            "ON CONFLICT (image_id) DO NOTHING "
+            "RETURNING created_at",
+            (image_id, created_by),
+        )
+        r = cur.fetchone()
+        if r is None:
+            cur.execute(
+                "SELECT created_at FROM image_border_cases WHERE image_id = %s", (image_id,),
+            )
+            r = cur.fetchone()
+    return {"data": {"image_id": image_id, "created_at": r[0]}}
+
+
+def delete_border_case(conn: psycopg.Connection, *, image_id: int) -> dict[str, Any]:
+    """Unflag an image as a border case. No-op if it wasn't flagged."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "DELETE FROM image_border_cases WHERE image_id = %s", (image_id,),
+        )
+        deleted = cur.rowcount
+    return {"data": {"deleted": bool(deleted)}}
+
+
 def _ledger_side_sql(pid_expr: str, grp_expr: str) -> str:
     """Scalar SQL for the representative listing id of property `pid_expr` on one
     side of merge group `grp_expr`, resolved from the `property_merge_events`

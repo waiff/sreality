@@ -2,7 +2,13 @@ import { useEffect, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 
 import LabelCombobox, { type LabelOption } from '@/components/LabelCombobox';
-import { setTrainingExample, deleteTrainingExample, type TrainingExample } from '@/lib/api';
+import {
+  setTrainingExample,
+  deleteTrainingExample,
+  setBorderCase,
+  deleteBorderCase,
+  type TrainingExample,
+} from '@/lib/api';
 import type { ImagePublic } from '@/lib/types';
 
 /* The linear-probe training-set "Train" CTA — shared by /phash-audit and /clip-audit
@@ -10,15 +16,23 @@ import type { ImagePublic } from '@/lib/types';
  * which is exactly how the two of them drifted out of sync). Defaults to the
  * CLIP-assigned fine_tag KEY (not its Czech translation — see LabelCombobox/imageTags
  * for why identity has to be the canonical key), so confirming a correct call is one
- * click; `labelOptions` renders the Czech text. */
+ * click; `labelOptions` renders the Czech text.
+ *
+ * "Border case" (to Train's right) is a separate, independent flag — not a label
+ * itself: even a human isn't confident how to classify this image, and it may or may
+ * not also carry a best-guess training label. A one-click toggle (unlike Train, it
+ * has no value of its own to edit), so it needs no combobox and no separate
+ * remove-link — clicking it again just unflags. */
 export default function TrainControl({
   image,
   example,
+  borderCase,
   labelOptions,
   queryKeyPrefix,
 }: {
   image: ImagePublic;
   example: TrainingExample | undefined;
+  borderCase: boolean;
   labelOptions: ReadonlyArray<LabelOption>;
   queryKeyPrefix: string;
 }) {
@@ -51,6 +65,16 @@ export default function TrainControl({
     onSuccess: invalidate,
   });
 
+  const flagBorderCase = useMutation({
+    mutationFn: () => setBorderCase(image.id),
+    onSuccess: () => qc.invalidateQueries({ queryKey: [queryKeyPrefix, 'border-cases'] }),
+  });
+  const unflagBorderCase = useMutation({
+    mutationFn: () => deleteBorderCase(image.id),
+    onSuccess: () => qc.invalidateQueries({ queryKey: [queryKeyPrefix, 'border-cases'] }),
+  });
+  const borderCasePending = flagBorderCase.isPending || unflagBorderCase.isPending;
+
   return (
     <div className="flex flex-col gap-1">
       <div className="flex items-center gap-1.5">
@@ -70,6 +94,24 @@ export default function TrainControl({
           ].join(' ')}
         >
           {train.isPending ? '…' : trained ? '✓ Train' : 'Train'}
+        </button>
+        <button
+          type="button"
+          onClick={() => (borderCase ? unflagBorderCase.mutate() : flagBorderCase.mutate())}
+          disabled={borderCasePending}
+          title={
+            borderCase
+              ? 'Sporný případ — klikni pro odebrání'
+              : 'Nejasné i pro člověka — přidat do sporných případů'
+          }
+          className={[
+            'shrink-0 px-2 py-1 text-[0.72rem] rounded-[var(--radius-xs)] border transition-colors disabled:opacity-50',
+            borderCase
+              ? 'border-[var(--color-brick)] bg-[var(--color-brick-soft)] text-[var(--color-brick)]'
+              : 'border-[var(--color-brick)] text-[var(--color-brick)] hover:bg-[var(--color-brick-soft)]',
+          ].join(' ')}
+        >
+          {borderCasePending ? '…' : borderCase ? '✓ Border case' : 'Border case'}
         </button>
       </div>
       {trained && (

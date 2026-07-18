@@ -81,6 +81,10 @@ class TrainingExampleAction(BaseModel):
     label: str
 
 
+class BorderCaseAction(BaseModel):
+    image_id: int
+
+
 @router.get("/summary")
 def get_summary(
     status: str = "proposed",
@@ -302,6 +306,26 @@ def delete_training_example(
 ) -> dict[str, Any]:
     """Remove an image from the training set."""
     return dedup.delete_training_example(conn, image_id=image_id)
+
+
+@router.post("/border-case")
+def post_border_case(
+    body: BorderCaseAction,
+    conn: Any = Depends(deps.get_db_conn),
+    _: dict = Depends(deps.require_admin),
+) -> dict[str, Any]:
+    """Flag an image as a border case — even a human isn't confident about it."""
+    return dedup.set_border_case(conn, image_id=body.image_id)
+
+
+@router.delete("/border-case")
+def delete_border_case(
+    image_id: int,
+    conn: Any = Depends(deps.get_db_conn),
+    _: dict = Depends(deps.require_admin),
+) -> dict[str, Any]:
+    """Unflag an image as a border case."""
+    return dedup.delete_border_case(conn, image_id=image_id)
 
 
 @router.get("/phash-audit")

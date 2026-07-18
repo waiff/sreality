@@ -14,6 +14,7 @@ import { useInfiniteList } from '@/lib/useInfiniteList';
 import {
   fetchPhashPairNotesForImageIds,
   fetchTrainingExamplesForImageIds,
+  fetchBorderCasesByImageIds,
   fetchTrainingLabelCounts,
 } from '@/lib/queries';
 import {
@@ -382,6 +383,11 @@ function PhashPageGroup({
     queryFn: () => fetchTrainingExamplesForImageIds(imageIds),
     enabled: imageIds.length > 0,
   });
+  const borderCasesQ = useQuery({
+    queryKey: ['phash-audit', 'border-cases', imageIds],
+    queryFn: () => fetchBorderCasesByImageIds(imageIds),
+    enabled: imageIds.length > 0,
+  });
 
   return (
     <>
@@ -391,6 +397,7 @@ function PhashPageGroup({
           row={r}
           note={notesQ.data?.get(`${r.left_image.image_id}:${r.right_image.image_id}`)}
           training={trainingQ.data}
+          borderCases={borderCasesQ.data}
           labelOptions={labelOptions}
         />
       ))}
@@ -417,11 +424,13 @@ function PhashRow({
   row,
   note,
   training,
+  borderCases,
   labelOptions,
 }: {
   row: PhashAuditRow;
   note: { note: string | null } | undefined;
   training: Map<number, TrainingExample> | undefined;
+  borderCases: Set<number> | undefined;
   labelOptions: LabelOption[];
 }) {
   const qc = useQueryClient();
@@ -489,6 +498,7 @@ function PhashRow({
             image={img}
             srealityId={i === 0 ? row.left_sreality_id : row.right_sreality_id}
             example={training?.get(img.id)}
+            borderCase={!!borderCases?.has(img.id)}
             labelOptions={labelOptions}
             onOpen={() => setLightboxAt(i)}
           />
@@ -521,12 +531,14 @@ function TrainableImage({
   image,
   srealityId,
   example,
+  borderCase,
   labelOptions,
   onOpen,
 }: {
   image: ImagePublic;
   srealityId: number | null;
   example: TrainingExample | undefined;
+  borderCase: boolean;
   labelOptions: LabelOption[];
   onOpen: () => void;
 }) {
@@ -547,7 +559,13 @@ function TrainableImage({
           {srealityId ?? '—'}
         </span>
       </button>
-      <TrainControl image={image} example={example} labelOptions={labelOptions} queryKeyPrefix="phash-audit" />
+      <TrainControl
+        image={image}
+        example={example}
+        borderCase={borderCase}
+        labelOptions={labelOptions}
+        queryKeyPrefix="phash-audit"
+      />
     </div>
   );
 }
