@@ -907,6 +907,9 @@ export const getPhashAudit = (
     training_only?: boolean;
     // Narrows training_only to one SPECIFIC label (implies training_only).
     training_label?: string;
+    // Inverse of training_only — pairs where NEITHER shown image is in the
+    // training set yet. Takes priority if both are set.
+    training_exclude?: boolean;
     limit?: number;
     // Opaque cursor — pass back the previous response's next_scan_offset.
     scan_offset?: number;
@@ -931,6 +934,7 @@ export const getPhashAudit = (
   if (params.room_types?.length) q.set('room_types', params.room_types.join(','));
   if (params.training_only) q.set('training_only', 'true');
   if (params.training_label) q.set('training_label', params.training_label);
+  if (params.training_exclude) q.set('training_exclude', 'true');
   q.set('limit', String(params.limit ?? 100));
   if (params.scan_offset) q.set('scan_offset', String(params.scan_offset));
   return request(`/dedup/phash-audit?${q.toString()}`);

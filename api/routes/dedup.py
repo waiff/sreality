@@ -346,6 +346,10 @@ def get_phash_audit(
         default=None, description="Narrows training_only to one SPECIFIC label "
         "(implies training_only regardless of its literal value).",
     ),
+    training_exclude: bool = Query(
+        default=False, description="Inverse of training_only — pairs where NEITHER "
+        "shown image is in the training set yet. Takes priority if both are set.",
+    ),
     limit: int = Query(default=100, ge=1, le=200),
     scan_offset: int = Query(
         default=0, ge=0, description="Opaque cursor — pass back the previous "
@@ -365,7 +369,7 @@ def get_phash_audit(
         conn, hamming_min=hamming_min, hamming_max=hamming_max,
         category_main=category_main, outcome=outcome, room_types=types,
         training_only=training_only, training_label=training_label,
-        limit=limit, scan_offset=scan_offset,
+        training_exclude=training_exclude, limit=limit, scan_offset=scan_offset,
     )
 
 
