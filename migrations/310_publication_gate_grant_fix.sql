@@ -1,0 +1,29 @@
+-- 310_publication_gate_grant_fix.sql
+--
+-- Re-grants EXECUTE on publication_gate_enabled() to anon/authenticated.
+--
+-- Migration 273 granted this correctly, but the live function's ACL had
+-- regressed to {postgres=X/postgres,service_role=X/postgres} only (verified
+-- live via `set local role anon; select publication_gate_enabled();` ->
+-- "permission denied for function publication_gate_enabled" — no later
+-- migration file touches this function, so the grant was lost outside the
+-- migration trail, e.g. a direct schema edit that recreated the function).
+--
+-- Impact while broken: properties_public is a plain (non-materialized) view
+-- whose WHERE calls this SECURITY DEFINER function — Postgres checks EXECUTE
+-- against the CALLING role for functions referenced in a view body (unlike
+-- table privileges, which run as the view owner), so every anon/authenticated
+-- direct read of properties_public 403's. Browse itself is unaffected (it
+-- reads the precomputed browse_list snapshot, refreshed by a privileged pg_cron
+-- job — see migration 276), but every OTHER anon-role caller of
+-- properties_public silently broke: fetchPropertyMf (the property-grain golden
+-- MF card, rule #17 / migration 257), fetchPropertyReprId (the `/listing?
+-- property=ID` redirect), the Pipeline kanban board's per-card property
+-- enrichment, and the new PropertyDetail page (fetchPropertyById) this
+-- migration ships alongside. properties_map_mv is unaffected — matviews
+-- evaluate their WHERE at REFRESH time (under the privileged refresh job),
+-- not at anon SELECT time.
+--
+-- Purely additive (a GRANT, no schema change); idempotent.
+
+grant execute on function publication_gate_enabled() to anon, authenticated;

@@ -22,7 +22,6 @@ import {
 import { fetchListingBroker } from '@/lib/brokers';
 import {
   ApiError,
-  getDedupAudit,
   verifyListingFreshness,
   type FreshnessOutcome,
   type VerifyFreshnessResult,
@@ -49,6 +48,8 @@ import { portalShort, srealityListingUrl } from '@/lib/portals';
 import ErrorBoundary from '@/components/ErrorBoundary';
 import { ListingOverview } from '@/components/listing-detail/ListingOverview';
 import PipelineToggle from '@/components/listing-detail/PipelineToggle';
+import { MergeDecisionsChip } from '@/components/listing-detail/MergeDecisionsChip';
+import { PropertyLinkChip } from '@/components/listing-detail/PropertyLinkChip';
 import { listingPath } from '@/lib/listingUrl';
 
 const PriceLineChart = lazy(
@@ -292,6 +293,10 @@ export default function ListingDetail() {
              plus the active-sibling alert when this record is delisted.
              Rendered inside the header grid so the map starts at the top. */
           <div className="flex flex-wrap items-center gap-2">
+            <PropertyLinkChip
+              propertyId={sourcesQ.data?.property_id ?? null}
+              sourceCount={sources.length}
+            />
             <PortalLinksRow listing={listing} sources={sources} />
             <MergeDecisionsChip
               propertyId={sourcesQ.data?.property_id ?? null}
@@ -438,39 +443,6 @@ function BrokerChip({ srealityId }: { srealityId: number }) {
       <span className="font-medium truncate max-w-[12rem]">
         {b.broker_display_name ?? 'detail'}
       </span>
-      <OutArrow />
-    </Link>
-  );
-}
-
-/* When this property groups several portal observations (the chips above), it was
-   built by the dedup engine. This chip links to the Decision history scoped to
-   exactly the merges that created THIS property — the evidence + inline undo. It
-   renders nothing for singletons or properties with no recorded merge. */
-function MergeDecisionsChip({
-  propertyId,
-  multiSource,
-}: {
-  propertyId: number | null;
-  multiSource: boolean;
-}) {
-  const q = useQuery({
-    queryKey: ['merge-decisions-count', propertyId],
-    queryFn: () =>
-      getDedupAudit({ property_id: propertyId as number, outcome: 'merged', limit: 1 }),
-    enabled: propertyId != null && multiSource,
-    staleTime: 60_000,
-  });
-  const n = q.data?.total ?? 0;
-  if (propertyId == null || !multiSource || n === 0) return null;
-  return (
-    <Link
-      to={`/dedup?audit_property=${propertyId}#history`}
-      title="Zobrazit rozhodnutí o sloučení (dedup)"
-      className="inline-flex items-center gap-1.5 rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-3)] px-3 py-1.5 text-[0.8rem] text-[var(--color-ink-2)] hover:border-[var(--color-copper)] hover:text-[var(--color-copper-2)] transition-colors"
-    >
-      <span className="text-[var(--color-ink-3)]">Sloučení:</span>
-      <span className="tabular-nums">{n} rozhodnutí</span>
       <OutArrow />
     </Link>
   );

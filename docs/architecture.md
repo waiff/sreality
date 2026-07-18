@@ -433,6 +433,12 @@ renumber.** Navigate by area:
     maintenance job's straggler-attach does any spatial/geo probe anymore.
     Today sreality + bazos ingest; further portals follow the design in
     `docs/design/multi-portal-dedup.md`. Frontend Browse reads `properties_public`.
+    **`/property/:id` (`PropertyDetail`) is the property-grain page** — the one place the
+    canonical multi-portal view lives: identity/facts via `properties_public`, every child
+    listing with its OWN thumbnails/price/dates (never pooled — a merge groups records, it
+    never blends their content), the dedup merge history, curation, and the pipeline toggle.
+    `/listing/:sreality_id` (`ListingDetail`) stays scoped to exactly the one advert it renders
+    (its own images/description/price history) and links out via a `PropertyLinkChip`.
     **Dedup engine (street + disposition keyed).** `toolkit/dedup_engine.py` (pure rules) +
     `scripts/dedup_engine.py` (orchestrator, `dedup_engine.yml`, daily) replaced the old
     geo-proximity matcher. Rules: **(A)** only listings with BOTH a `street` and a `disposition`

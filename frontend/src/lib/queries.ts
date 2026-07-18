@@ -42,6 +42,7 @@ import type {
   ListingSnapshotPublic,
   MfReferenceRent,
   PortalHealth,
+  PropertyPublic,
   PropertySource,
   Ppm2Box,
   ScrapeRun,
@@ -1080,6 +1081,27 @@ export const fetchPropertyMf = async (
     .maybeSingle();
   if (error) throw error;
   return (data as unknown as PropertyMf | null) ?? null;
+};
+
+/* The property-grain read for /property/:id (the canonical multi-portal real-
+ * world unit, migration 091) — everything DETAIL_COLS pulls for a listing, PLUS
+ * the two aggregate counts, sourced from properties_public. The view mirrors
+ * listings_public column-for-column (migration 093), so the same column list
+ * works verbatim; this is what makes PropertyPublic a structural superset of
+ * ListingPublic (types.ts) that the listing-shaped renderers (buildFacts,
+ * buildAmenities, ListingOverview) can consume directly. */
+const PROPERTY_DETAIL_COLS = `property_id,${DETAIL_COLS},source_count,distinct_site_count`;
+
+export const fetchPropertyById = async (
+  property_id: number,
+): Promise<PropertyPublic | null> => {
+  const { data, error } = await supabase
+    .from('properties_public')
+    .select(PROPERTY_DETAIL_COLS)
+    .eq('property_id', property_id)
+    .maybeSingle();
+  if (error) throw error;
+  return (data as unknown as PropertyPublic | null) ?? null;
 };
 
 export const fetchSnapshotsByListing = async (
