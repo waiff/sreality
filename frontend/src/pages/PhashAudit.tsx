@@ -42,6 +42,12 @@ const OUTCOMES = [
   { id: 'dismissed', label: 'Zamítnuto' },
 ];
 
+const TRAINING_SCOPES = [
+  { id: '', label: 'Vše' },
+  { id: 'only', label: 'Jen v trénovací sadě' },
+  { id: 'exclude', label: 'Jen NE v trénovací sadě' },
+];
+
 const TAG_OPTIONS = Object.keys(IMAGE_TAG_LABELS).filter(
   (k) => !['situation_plan', 'cadastral_map', 'aerial_plot', 'location_map',
            'energy_certificate', 'document_text'].includes(k),
@@ -72,13 +78,17 @@ export default function PhashAudit() {
   const [outcome, setOutcome] = useState('');
   const [categoryMain, setCategoryMain] = useState('');
   const [roomTypes, setRoomTypes] = useState<string[]>([]);
-  // Narrows to pairs where at least one of the two shown images already has a
-  // training-set label — for revisiting/auditing what's already been picked.
-  // `trainingLabel` further narrows to one specific label ('' = any); while
-  // trainingOnly is on, the Tag row switches from CLIP's own room tags to the
-  // training set's own labels (a different vocabulary — see labelOptions below).
-  const [trainingOnly, setTrainingOnly] = useState(false);
+  // '' = no constraint, 'only' = at least one shown image already has a training-set
+  // label (revisiting/auditing what's already been picked), 'exclude' = NEITHER shown
+  // image is in the training set yet (finding fresh material to review). `trainingLabel`
+  // further narrows 'only' to one specific label (''= any); while scope is 'only', the
+  // Tag row switches from CLIP's own room tags to the training set's own labels (a
+  // different vocabulary — see labelOptions below) — 'exclude' keeps the normal CLIP
+  // tag chips, since "untrained kitchen photos" is a useful combination.
+  const [trainingScope, setTrainingScope] = useState('');
   const [trainingLabel, setTrainingLabel] = useState('');
+  const trainingOnly = trainingScope === 'only';
+  const trainingExclude = trainingScope === 'exclude';
   const [minText, setMinText] = useState(String(DEFAULT_MIN));
   const [maxText, setMaxText] = useState(String(DEFAULT_MAX));
   const [hammingMin, setHammingMin] = useState(DEFAULT_MIN);
@@ -96,15 +106,14 @@ export default function PhashAudit() {
       prev.includes(tag) ? prev.filter((t) => t !== tag) : [...prev, tag],
     );
 
-  const toggleTrainingOnly = () =>
-    setTrainingOnly((v) => {
-      if (v) setTrainingLabel(''); // turning off — clear the now-meaningless label pick
-      return !v;
-    });
+  const selectTrainingScope = (next: string) => {
+    setTrainingScope(next);
+    if (next !== 'only') setTrainingLabel(''); // no longer meaningful outside 'only'
+  };
 
   const list = useInfiniteList<PhashAuditRow, PhashPage>({
     queryKey: [
-      'phash-audit', outcome, categoryMain, roomTypes, trainingOnly, trainingLabel,
+      'phash-audit', outcome, categoryMain, roomTypes, trainingScope, trainingLabel,
       hammingMin, hammingMax,
     ],
     queryFn: async (cursor) => {
@@ -128,6 +137,7 @@ export default function PhashAudit() {
           room_types: roomTypes.length ? roomTypes : undefined,
           training_only: trainingOnly || undefined,
           training_label: trainingLabel || undefined,
+          training_exclude: trainingExclude || undefined,
           limit: PAGE_SIZE - collected.length,
           scan_offset: scanOffset,
         });
@@ -197,11 +207,14 @@ export default function PhashAudit() {
             <FilterChip key={o.id} on={outcome === o.id} label={o.label} onClick={() => setOutcome(o.id)} />
           ))}
           <span className="mx-1 h-4 w-px bg-[var(--color-rule)]" />
-          <FilterChip
-            on={trainingOnly}
-            label="Jen v trénovací sadě"
-            onClick={toggleTrainingOnly}
-          />
+          {TRAINING_SCOPES.map((s) => (
+            <FilterChip
+              key={s.id}
+              on={trainingScope === s.id}
+              label={s.label}
+              onClick={() => selectTrainingScope(s.id)}
+            />
+          ))}
         </div>
         <div className="flex flex-wrap items-center gap-1.5">
           <span className="text-[0.62rem] uppercase tracking-[0.1em] text-[var(--color-ink-4)] mr-1">

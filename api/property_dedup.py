@@ -934,6 +934,7 @@ def phash_audit(
     room_types: list[str] | None = None,
     training_only: bool = False,
     training_label: str | None = None,
+    training_exclude: bool = False,
     scan_offset: int = 0,
     limit: int = 100,
 ) -> dict[str, Any]:
@@ -954,7 +955,11 @@ def phash_audit(
     linear-probe training-set label (image_training_examples) — the exact photo, not
     just some other photo on the same listing. `training_label`, if given, narrows
     further to that SPECIFIC label (implies training_only regardless of its literal
-    value) — auditing one class's coverage at a time.
+    value) — auditing one class's coverage at a time. `training_exclude` is the
+    inverse — pairs where NEITHER shown image is in the training set yet, for finding
+    fresh material to review rather than revisiting what's already been picked. Takes
+    priority over training_only/training_label if somehow both are set (the frontend
+    never does — it's a single 3-way choice).
 
     Pagination is over the SCOPE (dedup_pair_audit), not the joined result — see
     `_PHASH_AUDIT_CHUNK`'s comment for why. `scan_offset` is the opaque cursor (how many
@@ -974,7 +979,29 @@ def phash_audit(
         scope_clauses.append("a.outcome = %(outcome)s")
         scope_params["outcome"] = outcome
     with conn.cursor() as cur:
-        if training_only or training_label:
+        if training_exclude:
+            # Unlike the inclusion case below, the SCOPE check alone is already exact
+            # here — trained_sreality_ids is "every sreality_id that owns at least one
+            # trained image", so excluding those listings guarantees neither remaining
+            # image can possibly be a trained one. No post-join re-check needed (see
+            # _phash_audit_chunk: training_only/training_label stay False here, so it
+            # never adds one). Also no "narrows to a tiny set" efficiency win the
+            # inclusion branch gets — the training set is tiny, so excluding it barely
+            # shrinks a huge population — but a small NOT-IN-style array check is cheap
+            # regardless, and an empty training set means nothing to exclude at all.
+            cur.execute(
+                "SELECT DISTINCT i.sreality_id FROM images i "
+                "JOIN image_training_examples te ON te.image_id = i.id "
+                "WHERE i.sreality_id IS NOT NULL",
+            )
+            trained_sreality_ids = [r[0] for r in cur.fetchall()]
+            if trained_sreality_ids:
+                scope_clauses.append(
+                    "NOT (a.left_sreality_id = ANY(%(trained_sreality_ids)s)"
+                    " OR a.right_sreality_id = ANY(%(trained_sreality_ids)s))",
+                )
+                scope_params["trained_sreality_ids"] = trained_sreality_ids
+        elif training_only or training_label:
             # The training set is tiny (an operator hand-picks it) next to
             # dedup_pair_audit's population — without this, almost every chunk would
             # come back empty post-join, forcing the frontend to scan the whole
@@ -1019,8 +1046,13 @@ def phash_audit(
             collected = _phash_audit_chunk(
                 cur, scope_where=scope_where, scope_params=scope_params,
                 hamming_min=hamming_min, hamming_max=hamming_max,
-                room_types=room_types, training_only=training_only,
-                training_label=training_label, chunk_offset=offset, chunk_size=window,
+                room_types=room_types,
+                # training_exclude's scope-level NOT check is already exact (see
+                # above) — never let the inclusion post-join EXISTS clause layer on
+                # top of it, even if a caller sent both.
+                training_only=training_only and not training_exclude,
+                training_label=None if training_exclude else training_label,
+                chunk_offset=offset, chunk_size=window,
             )
             offset += window
     rows = collected[:limit]

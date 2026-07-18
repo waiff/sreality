@@ -293,3 +293,47 @@ def test_training_label_with_no_matching_images_short_circuits() -> None:
     assert out["returned"] == 0
     assert out["scanned_pairs"] == 0
     assert len(conn.chunk_queries()) == 0
+
+
+def test_training_exclude_adds_a_negative_scope_clause_and_no_post_join_clause() -> None:
+    conn = _FakeConn(scanned=1, trained_sreality_ids=[111, 222], join_rows=[_join_row()])
+    dedup.phash_audit(conn, hamming_min=0, hamming_max=15, training_exclude=True)
+    scope_sql, scope_params = next(
+        (s, p) for s, p in conn.executed if "count(*) FROM dedup_pair_audit" in s
+    )
+    assert "NOT (a.left_sreality_id = ANY(%(trained_sreality_ids)s)" in scope_sql
+    assert scope_params["trained_sreality_ids"] == [111, 222]
+    # The scope-level NOT already guarantees neither image is trained (a listing
+    # absent from trained_sreality_ids can't own a trained image) — no post-join
+    # re-check needed, unlike the inclusion case.
+    join_sql, _ = conn.chunk_queries()[0]
+    assert "image_training_examples" not in join_sql
+
+
+def test_training_exclude_with_an_empty_training_set_excludes_nothing() -> None:
+    # Nothing trained yet -> nothing to exclude -> behaves like no filter at all,
+    # not a short-circuit to zero (that's the inclusion case's behavior, not this one).
+    conn = _FakeConn(scanned=500, trained_sreality_ids=[], join_rows=[_join_row()])
+    out = dedup.phash_audit(conn, hamming_min=0, hamming_max=15, training_exclude=True)
+    scope_sql, scope_params = next(
+        (s, p) for s, p in conn.executed if "count(*) FROM dedup_pair_audit" in s
+    )
+    assert "trained_sreality_ids" not in scope_sql
+    assert "trained_sreality_ids" not in scope_params
+    assert out["scanned_pairs"] == 500
+    assert len(conn.chunk_queries()) == 1
+
+
+def test_training_exclude_takes_priority_over_training_only_and_label() -> None:
+    conn = _FakeConn(scanned=1, trained_sreality_ids=[111], join_rows=[_join_row()])
+    dedup.phash_audit(
+        conn, hamming_min=0, hamming_max=15,
+        training_only=True, training_label="kuchyně", training_exclude=True,
+    )
+    scope_sql, _ = next(
+        (s, p) for s, p in conn.executed if "count(*) FROM dedup_pair_audit" in s
+    )
+    assert "NOT (a.left_sreality_id" in scope_sql
+    assert "te.label = %(training_label)s" not in scope_sql
+    join_sql, _ = conn.chunk_queries()[0]
+    assert "image_training_examples" not in join_sql
