@@ -19,6 +19,7 @@ import {
   fetchImagesByListingIds,
   fetchImageAnnotationsByImageIds,
   fetchTrainingExamplesForImageIds,
+  fetchBorderCasesByImageIds,
   fetchDistinctTrainingLabels,
   CLIP_AUDIT_PAGE_SIZE,
   type ClipAuditPropertyRow,
@@ -377,6 +378,12 @@ function PropertyPageGroup({
     enabled: imageIds.length > 0 && mode === 'tagging',
   });
 
+  const borderCasesQ = useQuery({
+    queryKey: ['clip-audit', 'border-cases', imageIds],
+    queryFn: () => fetchBorderCasesByImageIds(imageIds),
+    enabled: imageIds.length > 0 && mode === 'tagging',
+  });
+
   // Until sources+images have loaded for this group, completeness can't be
   // determined yet — hold off rendering rather than flash an incomplete result.
   const dataReady = sourcesQ.isSuccess && (srealityIds.length === 0 || imagesQ.isSuccess);
@@ -394,6 +401,7 @@ function PropertyPageGroup({
           imagesBySreality={imagesMap ?? new Map()}
           annotations={annotationsQ.data ?? new Map()}
           training={trainingQ.data ?? new Map()}
+          borderCases={borderCasesQ.data ?? new Set()}
           labelOptions={labelOptions}
           auditRows={
             auditQ.data?.data.filter(
@@ -416,6 +424,7 @@ function PropertyCard({
   imagesBySreality,
   annotations,
   training,
+  borderCases,
   labelOptions,
   auditRows,
   mode,
@@ -428,6 +437,7 @@ function PropertyCard({
   imagesBySreality: Map<number, ImagePublic[]>;
   annotations: Map<number, ImageAnnotation>;
   training: Map<number, TrainingExample>;
+  borderCases: Set<number>;
   labelOptions: LabelOption[];
   auditRows: DedupAuditRow[];
   mode: Mode;
@@ -474,6 +484,7 @@ function PropertyCard({
             images={imagesBySreality.get(l.sreality_id) ?? []}
             annotations={annotations}
             training={training}
+            borderCases={borderCases}
             labelOptions={labelOptions}
             mode={mode}
             tagFilter={tagFilter}
@@ -525,6 +536,7 @@ function ListingColumn({
   images,
   annotations,
   training,
+  borderCases,
   labelOptions,
   mode,
   tagFilter,
@@ -535,6 +547,7 @@ function ListingColumn({
   images: ImagePublic[];
   annotations: Map<number, ImageAnnotation>;
   training: Map<number, TrainingExample>;
+  borderCases: Set<number>;
   labelOptions: LabelOption[];
   mode: Mode;
   tagFilter: string;
@@ -579,6 +592,7 @@ function ListingColumn({
               mode={mode}
               annotation={annotations.get(img.id)}
               example={training.get(img.id)}
+              borderCase={borderCases.has(img.id)}
               labelOptions={labelOptions}
               onOpen={() => setLightboxAt(i)}
             />
@@ -601,6 +615,7 @@ function ImageCell({
   mode,
   annotation,
   example,
+  borderCase,
   labelOptions,
   onOpen,
 }: {
@@ -608,6 +623,7 @@ function ImageCell({
   mode: Mode;
   annotation: ImageAnnotation | undefined;
   example: TrainingExample | undefined;
+  borderCase: boolean;
   labelOptions: LabelOption[];
   onOpen: () => void;
 }) {
@@ -674,6 +690,7 @@ function ImageCell({
         <TrainControl
           image={image}
           example={example}
+          borderCase={borderCase}
           labelOptions={labelOptions}
           queryKeyPrefix="clip-audit"
         />
