@@ -35,6 +35,7 @@ const settingsItems: ReadonlyArray<{ to: string; label: string }> = [
   { to: '/dedup',    label: 'Dedup' },
   { to: '/clip-audit', label: 'CLIP Audit' },
   { to: '/phash-audit', label: 'pHash Audit' },
+  { to: '/location-audit', label: 'Location Audit' },
   { to: '/model-testing', label: 'Model Testing' },
   { to: '/health',   label: 'Health' },
   { to: '/costs',    label: 'LLM Costs' },

@@ -2171,3 +2171,99 @@ export const adminSetEntitlement = (
     method: 'PUT',
     json: body,
   });
+
+/* ----- location audit ---------------------------------------------------- */
+/* /location-audit — read-only per-listing inventory of every address / geo /
+ * coordinate field, with the acquisition method for the two fields whose
+ * provenance varies per row (coordinate + street). Backed by
+ * api/routes/location_audit.py, admin-gated. See lib/locationAudit.ts for the
+ * field glossary + method labels the page renders. */
+export type LocationAuditRow = {
+  sreality_id: number;
+  source: string;
+  source_id_native: string | null;
+  source_url: string | null;
+  category_main: string | null;
+  category_type: string | null;
+  category_sub_cb: number | null;
+  is_active: boolean;
+  last_seen_at: string | null;
+  inactive_at: string | null;
+  lat: number | null;
+  lon: number | null;
+  street: string | null;
+  house_number: string | null;
+  zip: string | null;
+  street_id: number | null;
+  street_name_key: string | null;
+  street_source: string | null;
+  locality: string | null;
+  district: string | null;
+  obec: string | null;
+  okres: string | null;
+  region: string | null;
+  obec_id: number | null;
+  okres_id: number | null;
+  region_id: number | null;
+  locality_district_id: number | null;
+  locality_region_id: number | null;
+  locality_municipality_id: number | null;
+  locality_quarter_id: number | null;
+  locality_ward_id: number | null;
+  geo_cell_key: string | null;
+  geocode_attempted_at: string | null;
+  coord_street_attempt_version: number | null;
+  coords_source: string | null;
+  inaccuracy_type: string | null;
+  accurate: boolean | null;
+  geom_method: string | null;
+  street_method: string | null;
+};
+
+export type LocationAuditPage = {
+  data: LocationAuditRow[];
+  total: number;
+  returned: number;
+  limit: number;
+  offset: number;
+};
+
+export const getLocationAudit = (
+  params: {
+    source?: string;
+    category_main?: string;
+    active?: 'active' | 'inactive';
+    has?: ReadonlyArray<string>;
+    missing?: ReadonlyArray<string>;
+    limit?: number;
+    offset?: number;
+  } = {},
+): Promise<LocationAuditPage> => {
+  const q = new URLSearchParams();
+  if (params.source) q.set('source', params.source);
+  if (params.category_main) q.set('category_main', params.category_main);
+  if (params.active) q.set('active', params.active);
+  if (params.has?.length) q.set('has', params.has.join(','));
+  if (params.missing?.length) q.set('missing', params.missing.join(','));
+  q.set('limit', String(params.limit ?? 50));
+  q.set('offset', String(params.offset ?? 0));
+  return request(`/location-audit?${q.toString()}`);
+};
+
+export type LocationAuditRaw = {
+  sreality_id: number;
+  source: string;
+  source_id_native: string | null;
+  source_url: string | null;
+  category_main: string | null;
+  category_type: string | null;
+  last_seen_at: string | null;
+  raw_json: unknown;
+};
+
+export const getLocationAuditRaw = (
+  srealityId: number,
+): Promise<LocationAuditRaw> =>
+  // sreality_id is a QUERY param, not a path segment: non-sreality PKs are
+  // negative and the int path convertor would 404 on the leading minus.
+  request('/location-audit/raw', { query: { sreality_id: srealityId } });
