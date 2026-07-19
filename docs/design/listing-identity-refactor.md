@@ -1,13 +1,72 @@
 # Listing & property identity: retire the `sreality_id` sign-hack — v2
 
-> **Status: PROPOSED v2 (2026-07-19), NOT YET BUILT. Supersedes v1 (2026-07-17) in
-> full.** v1 was adversarially audited on 2026-07-19 by a 17-agent workflow (live DB
-> via Supabase MCP, current code at HEAD `b0084b9`, plus three dedicated attack agents
-> on the migration plan). v1's *diagnosis* survived the audit; its *census* and its
-> *migration runbook* did not — five hard Postgres blockers and ~17 missed
-> identity-carrying tables. This document keeps what was verified, corrects what was
-> wrong, and re-derives the plan. Requires operator sign-off; Phase 0 is independently
-> shippable on request.
+> **Status: v2 — Phase 0 + R1 SHIPPED to production (2026-07-19); R2–R4 remaining,
+> and largely optional (see below).** Supersedes v1 (2026-07-17) in full. v1 was
+> adversarially audited on 2026-07-19 by a 17-agent workflow (live DB via Supabase
+> MCP, current code at HEAD `b0084b9`, plus three attack agents on the migration
+> plan). v1's *diagnosis* survived; its *census* and *runbook* did not — five hard
+> Postgres blockers and ~17 missed identity-carrying tables. This document keeps what
+> was verified, corrects what was wrong, and re-derives the plan.
+
+## Shipped so far (production)
+
+**Phase 0 — PR #817, merged, migration 311 live + verified.** Closed all seven live
+correctness bugs and turned the sign convention into an enforced invariant, with no
+re-key: `source_trust_rank()` SQL fn + `toolkit/source_trust.py` mirror (one trust
+order, replacing four inconsistent inline orderings) wired into every
+representative-sibling selector; the sign↔source CHECK (`listings_sreality_id_sign_check`,
+validated clean over 555k rows, forward-compatible form); `dedup_label_events` +
+`property_estimates_public` view redefines; the `portal_lookup` estimation-join
+collapse; the calibration-sampling fix; and the frontend id-leak fixes (Notifications /
+Watchdog place labels, ListingOverview / CollectionDetail source gating, the
+non-sortable Browse "ID" column with graceful preset fallback).
+
+**R1 — PR #818, merged, migrations 312 + 313 live + verified.** The clean surrogate
+`listings.id` now exists: sequence-backed (epoch ≥ 10,000,000 for new rows), all
+556,750 pre-existing rows backfilled to `row_number() OVER (first_seen_at, sreality_id)`
+(1..556,750, 0 NULL, all distinct — ascending id tracks chronology), UNIQUE constraint
+`listings_id_key` (built `CONCURRENTLY`), validated `CHECK (id IS NOT NULL)`. The PK
+stays on `sreality_id`; nothing reads `listings.id` as identity yet. The backfill ran
+via `scripts/backfill_listing_surrogate_id.py` (batched `FOR UPDATE … SKIP LOCKED`, so
+the always-on writer was never deadlocked — the naive approach *did* deadlock).
+
+Operational lessons confirmed live and folded into the runbook below: every `ALTER
+TABLE listings` catalog lock contends with the always-on writer and needs a short
+`lock_timeout` + retry to catch a gap; a sequence-backed column default burns a
+sequence value on every *upsert* (the `ON CONFLICT` INSERT arm evaluates the default
+before detecting the conflict) — harmless given the 10M epoch gap, and confirmed
+`listings.id ∉ LISTING_COLUMNS` so upserts never clobber a backfilled id.
+
+## The reframing that makes R2–R4 mostly optional
+
+Because v2 **freezes legacy `sreality_id` values forever** (never NULLed), `sreality_id`
+stays a **populated, unique, valid join key permanently**. That collapses the case for
+the expensive middle of the plan:
+
+- **R2 (repoint 19 FK columns / 15 child tables to `listing_id`, incl. an 8.08M-row
+  `images` backfill and a 1.27M-row `listing_snapshots` backfill) is deferrable polish,
+  not correctness.** Child tables can keep joining on `sreality_id` indefinitely; it
+  never goes away. The repoint buys naming honesty and the eventual ability to drop the
+  redundancy — nothing the platform needs while single-operator.
+- **The PK swap (`sreality_id` → `id`) is likewise optional.** It requires either
+  dropping every child FK (`CASCADE`) or recreating each against a new `sreality_id`
+  UNIQUE constraint — i.e. it *forces* R2. Since `listings.id` already has its own
+  UNIQUE constraint, the app can treat `id` as the identity **without** `id` being the
+  physical PK.
+
+**So the design's actual remaining value lives in the R4 *app-layer* cutover, not in
+R2 or the PK swap:** expose `listings.id` on the `*_public` views / read models / API,
+move share/detail URLs to the natural key `/listing/{source}/{native_id}` (with a
+permanent legacy `/listing/{id}` resolver), and point the chrome-extension deep link +
+notification-outbox links at an id that exists for every portal. That is where the
+negative-id contract actually leaks externally; R2's physical repoint does not.
+
+**Recommendation:** treat R2 + the PK swap as an explicitly deferred (possibly never)
+cleanup track. Do R4's app-layer cutover only if/when a public or multi-user surface
+makes the negative-id URL contract a real external liability — its one destructive
+sub-step (should it ever include the PK swap) stays gated on operator backup + OK per
+the database skill. Everything shipped so far (Phase 0 + R1) already closed every live
+defect and gave the platform the clean surrogate; the rest is optionality, not debt.
 
 ## Verdict (unchanged in substance, corrected in detail)
 
