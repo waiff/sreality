@@ -321,7 +321,11 @@ def propagate_condition_levels(conn: "psycopg.Connection") -> int:
         "           (SELECT MAX(cs.created_at) "
         "            FROM listing_condition_scores cs "
         "            WHERE cs.sreality_id = l.sreality_id) DESC NULLS LAST, "
-        "           l.sreality_id "
+        # Freshest genuine score wins; ties break by the shared trust order
+        # (migration 311) then sreality_id DESC — was a bare ascending
+        # sreality_id, the only selector in the codebase whose id tiebreak ran
+        # opposite to every other, an id-sign accident (dormant: scoring paused).
+        "           source_trust_rank(l.source), l.sreality_id DESC "
         ") "
         "UPDATE listings t "
         "SET building_condition_level = s.building_condition_level, "

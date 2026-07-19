@@ -90,9 +90,11 @@ def get_collection(
 
     properties_sql = (
         "SELECT cp.property_id, p.repr_listing_id, p.district, p.disposition, p.subtype, "
-        "       p.area_m2, p.current_price_czk, p.last_seen_at, p.is_active, cp.added_at "
+        "       p.area_m2, p.current_price_czk, p.last_seen_at, p.is_active, cp.added_at, "
+        "       rl.source "
         "FROM collection_properties cp "
         "JOIN properties p ON p.id = cp.property_id "
+        "LEFT JOIN listings rl ON rl.sreality_id = p.repr_listing_id "
         "WHERE cp.collection_id = %s "
         "ORDER BY cp.added_at DESC"
     )
@@ -111,6 +113,7 @@ def get_collection(
             "last_seen_at": _iso(r[7]),
             "is_active":    bool(r[8]),
             "added_at":     _iso(r[9]),
+            "source":       r[10],
         }
         for r in rows
     ]

@@ -492,7 +492,7 @@ function Row({
           className="block hover:text-[var(--color-copper)] hover:underline underline-offset-2"
         >
           <span className="block text-[var(--color-ink)] truncate">
-            {dispatch.locality ?? dispatch.district ?? `id ${dispatch.sreality_id}`}
+            {dispatch.locality ?? dispatch.district ?? '—'}
           </span>
           {dispatch.district && dispatch.locality ? (
             <span className="block text-[0.7rem] text-[var(--color-ink-3)] truncate">

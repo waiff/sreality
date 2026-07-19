@@ -115,24 +115,11 @@ _RECOMPUTE_BATCH_SQL = """
     WITH batch AS (
       SELECT id FROM properties WHERE id >= %(lo)s AND id < %(hi)s
     ),
-    -- Every child of the batch's properties, tagged with a per-source TRUST rank
-    -- (lower = more reliable). The golden-record CTEs below pick the best value
-    -- per field in this trust order, the same spirit as best_street's
-    -- sreality-preferred ordering (migration 183), generalised to all fields.
+    -- Every child of the batch's properties, tagged with the shared per-source
+    -- TRUST rank (source_trust_rank, migration 311; lower = more reliable). The
+    -- golden-record CTEs below pick the best value per field in this trust order.
     kids AS (
-      SELECT l.*,
-        CASE l.source
-          WHEN 'sreality'     THEN 1
-          WHEN 'bezrealitky'  THEN 2
-          WHEN 'idnes'        THEN 3
-          WHEN 'mmreality'    THEN 4
-          WHEN 'remax'        THEN 5
-          WHEN 'maxima'       THEN 6
-          WHEN 'ceskereality' THEN 7
-          WHEN 'realitymix'   THEN 8
-          WHEN 'bazos'        THEN 9
-          ELSE 10
-        END AS src_rank
+      SELECT l.*, source_trust_rank(l.source) AS src_rank
       FROM listings l
       JOIN batch b ON b.id = l.property_id
     ),
@@ -225,21 +212,30 @@ _RECOMPUTE_BATCH_SQL = """
         l.building_condition_level, l.apartment_condition_level, l.source
       FROM listings l
       JOIN batch b ON b.id = l.property_id
-      ORDER BY l.property_id, l.is_active DESC, l.last_seen_at DESC NULLS LAST,
-               l.sreality_id DESC
+      -- Representative row = the property's DISPLAY listing (drives price,
+      -- disposition, category). Active-first so a live listing represents
+      -- current state (never a delisted sibling's stale price), then the shared
+      -- trust order (migration 311) as the tiebreak among equally-active
+      -- siblings — replacing the old bare sreality_id DESC, whose sign made the
+      -- pick arbitrary across portals. Split-picker (property_identity.py) mirrors
+      -- this. NB: the golden-record field CTEs above are trust-FIRST instead —
+      -- a field's best-known value should come from the most trusted source even
+      -- if that listing later delisted; the two goals legitimately differ.
+      ORDER BY l.property_id, l.is_active DESC, source_trust_rank(l.source),
+               l.last_seen_at DESC NULLS LAST, l.sreality_id DESC
     ),
-    -- Group-best street (migration 183): the best non-null child street,
-    -- sreality-preferred (structured + most reliable), then active + most
-    -- recently seen. Lets place_search_text match a street even when the
-    -- representative listing lacks one. LEFT-JOINed below -> NULL when no child
-    -- carries a street.
+    -- Group-best street (migration 183): the best non-null child street, in the
+    -- shared source-trust order (migration 311 — was a bare source='sreality'
+    -- boolean), then active + most recently seen. Lets place_search_text match a
+    -- street even when the representative listing lacks one. LEFT-JOINed below ->
+    -- NULL when no child carries a street.
     best_street AS (
       SELECT DISTINCT ON (l.property_id)
         l.property_id AS pid, l.street
       FROM listings l
       JOIN batch b ON b.id = l.property_id
       WHERE l.street IS NOT NULL AND l.street <> ''
-      ORDER BY l.property_id, (l.source = 'sreality') DESC,
+      ORDER BY l.property_id, source_trust_rank(l.source),
                l.is_active DESC, l.last_seen_at DESC NULLS LAST, l.sreality_id DESC
     ),
     prices AS (

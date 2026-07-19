@@ -450,7 +450,9 @@ function PropertyRowView({
           to={listingPath(row.sreality_id)}
           className="hover:text-[var(--color-copper)] hover:underline underline-offset-2"
         >
-          {row.sreality_id}
+          {/* Only sreality has a meaningful public id; other portals carry a
+            * synthetic surrogate that must never render as an "ID". */}
+          {row.source === 'sreality' ? row.sreality_id : '—'}
         </Link>
       </td>
       <td className="px-3 py-2.5 align-middle text-[var(--color-ink-2)]">
@@ -485,7 +487,7 @@ function PropertyRowView({
           type="button"
           onClick={() => remove.mutate()}
           disabled={remove.isPending}
-          aria-label={`Remove ${row.sreality_id} from collection`}
+          aria-label="Remove listing from collection"
           title="Remove from collection"
           className="text-[0.7rem] tracking-wide text-[var(--color-ink-4)] hover:text-[var(--color-brick)] disabled:opacity-50 transition-colors"
         >

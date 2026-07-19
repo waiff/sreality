@@ -118,8 +118,12 @@ export interface SortSpec {
  * valid across snapshot rebuilds. last_seen_at remains a selectable option. */
 export const DEFAULT_SORT: SortSpec = { field: 'first_seen_at', direction: 'desc' };
 
+/* sreality_id stays in SortField (it's still a selected/displayed column) but
+ * is intentionally absent here: it mixes real positive ids with synthetic
+ * negative ones, so sorting by it is meaningless. Saved presets / URLs that
+ * still carry sort=sreality_id fall back to DEFAULT_SORT via parseSort. */
 const SORTABLE_FIELDS: ReadonlyArray<SortField> = [
-  'sreality_id', 'district', 'disposition',
+  'district', 'disposition',
   'area_m2', 'price_czk', 'price_per_m2',
   'first_seen_at', 'last_seen_at', 'is_active',
   'estate_area', 'usable_area', 'parking_lots',
