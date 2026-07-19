@@ -58,6 +58,13 @@ _ALLOWLIST: list[tuple[str, str, str]] = [
         "references a session-local TEMP TABLE created earlier in the same script",
     ),
     (
+        "backfill_listing_surrogate_id.py",
+        "listing_id_backfill_map",
+        "a runtime-only mapping table the script CREATEs at execution time to "
+        "freeze the chronological id assignment (migration 312 backfill); it is "
+        "not in migrations, so the replayed schema can't see it",
+    ),
+    (
         "fetch_population_wikidata",
         "wdt:",
         "a SPARQL query to the Wikidata endpoint, not Postgres SQL",
