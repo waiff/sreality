@@ -27,6 +27,7 @@ const Costs = lazy(() => import('./pages/Costs'));
 const Dedup = lazy(() => import('./pages/Dedup'));
 const ClipAudit = lazy(() => import('./pages/ClipAudit'));
 const PhashAudit = lazy(() => import('./pages/PhashAudit'));
+const LocationAudit = lazy(() => import('./pages/LocationAudit'));
 const ModelTesting = lazy(() => import('./pages/ModelTesting'));
 const Scrapers = lazy(() => import('./pages/Scrapers'));
 const Settings = lazy(() => import('./pages/Settings'));
@@ -93,6 +94,7 @@ export const routes: RouteObject[] = [
       { path: 'dedup', element: <AdminPage><Dedup /></AdminPage>, handle: { title: 'Dedup' } },
       { path: 'clip-audit', element: <AdminPage><ClipAudit /></AdminPage>, handle: { title: 'CLIP Audit' } },
       { path: 'phash-audit', element: <AdminPage><PhashAudit /></AdminPage>, handle: { title: 'pHash Audit' } },
+      { path: 'location-audit', element: <AdminPage><LocationAudit /></AdminPage>, handle: { title: 'Location Audit' } },
       { path: 'model-testing', element: <AdminPage><ModelTesting /></AdminPage>, handle: { title: 'Model testing' } },
       { path: 'settings', element: <AdminPage><Settings /></AdminPage>, handle: { title: 'Settings' } },
       { path: 'scrapers', element: <AdminPage><Scrapers /></AdminPage>, handle: { title: 'Scrapers' } },
