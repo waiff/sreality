@@ -78,7 +78,7 @@ type Presence = Record<string, 'has' | 'missing'>;
 interface LocPage {
   rows: LocationAuditRow[];
   nextCursor?: unknown;
-  total: number;
+  total: number | null;
 }
 
 export default function LocationAudit() {
@@ -225,7 +225,7 @@ export default function LocationAudit() {
 
       <p className="mt-3 text-[0.72rem] text-[var(--color-ink-4)]">
         {total != null ? `${fmtCount(total)} listingů odpovídá filtru` : 'Načítám…'}
-        {' · řazeno od naposledy viděných'}
+        {' · aktivní a naposledy viděné první'}
       </p>
 
       <div className="mt-4 flex flex-col gap-3">

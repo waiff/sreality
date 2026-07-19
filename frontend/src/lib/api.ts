@@ -2228,7 +2228,9 @@ export type LocationAuditRow = {
 
 export type LocationAuditPage = {
   data: LocationAuditRow[];
-  total: number;
+  // null on non-first pages: the count is computed once (offset 0) and read from the
+  // first page only — re-counting on every infinite-scroll fetch is wasteful (~1s each).
+  total: number | null;
   returned: number;
   limit: number;
   offset: number;

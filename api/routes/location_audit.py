@@ -240,14 +240,23 @@ def list_location_audit(
     where, params = _build_where(source, category_main, active, has_keys, miss_keys, dedup)
 
     with conn.cursor() as cur:
-        cur.execute(f"SELECT count(*) FROM listings l {where}", params)
-        total = int(cur.fetchone()[0])
+        # Count only on the first page: it's identical for every page of a given filter,
+        # and an unfiltered count(*) is ~1s (full heap scan). The frontend reads `total`
+        # from page 1 only, so re-counting on every infinite-scroll fetch is pure waste.
+        total: int | None = None
+        if offset == 0:
+            cur.execute(f"SELECT count(*) FROM listings l {where}", params)
+            total = int(cur.fetchone()[0])
+        # ORDER BY leads with is_active DESC so the (is_active, last_seen_at) index serves
+        # the whole sort as a backward index scan (no NULLS LAST — that mismatches the
+        # index's NULLS FIRST and forced a full 556k-row sort → ~6s). Active-first, then
+        # newest-first, then PK as a stable tiebreaker for offset pagination.
         cur.execute(
             f"""
             SELECT {_LIST_SELECT}{_DEDUP_COLS}
             FROM listings l
             {where}
-            ORDER BY l.last_seen_at DESC NULLS LAST, l.sreality_id DESC
+            ORDER BY l.is_active DESC, l.last_seen_at DESC, l.sreality_id DESC
             LIMIT %(limit)s OFFSET %(offset)s
             """,
             {**params, "limit": limit, "offset": offset},
