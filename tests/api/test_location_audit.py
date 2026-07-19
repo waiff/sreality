@@ -7,6 +7,7 @@ raw_json-derived predicates). No DB — the SQL itself is validated live.
 from __future__ import annotations
 
 from api.routes.location_audit import (
+    _DEDUP_REACHABLE_SQL,
     _PRESENCE_SQL,
     _build_where,
     _geom_method,
@@ -74,7 +75,7 @@ def test_street_method_free_text_for_mining_portals() -> None:
 # --- _build_where ----------------------------------------------------------
 
 def test_build_where_scalar_filters_bind_params() -> None:
-    where, params = _build_where("remax", "byt", "active", [], [])
+    where, params = _build_where("remax", "byt", "active", [], [], None)
     assert "l.source = %(source)s" in where
     assert "l.category_main = %(category_main)s" in where
     assert "l.is_active = true" in where
@@ -82,28 +83,48 @@ def test_build_where_scalar_filters_bind_params() -> None:
 
 
 def test_build_where_inactive() -> None:
-    where, _ = _build_where(None, None, "inactive", [], [])
+    where, _ = _build_where(None, None, "inactive", [], [], None)
     assert "l.is_active = false" in where
 
 
 def test_build_where_presence_has_and_missing() -> None:
-    where, _ = _build_where(None, None, None, ["street"], ["geom"])
+    where, _ = _build_where(None, None, None, ["street"], ["geom"], None)
     assert _PRESENCE_SQL["street"] in where
     assert f"NOT {_PRESENCE_SQL['geom']}" in where
 
 
 def test_build_where_unknown_key_is_ignored_not_interpolated() -> None:
     # Injection safety: a key not in the allowlist never reaches the SQL.
-    where, params = _build_where(None, None, None, ["street; drop table listings"], [])
+    where, params = _build_where(None, None, None, ["street; drop table listings"], [], None)
     assert "drop table" not in where.lower()
     assert params == {}
     assert where == ""  # the bogus key produced no clause
 
 
 def test_build_where_empty_is_no_where() -> None:
-    where, params = _build_where(None, None, None, [], [])
+    where, params = _build_where(None, None, None, [], [], None)
     assert where == ""
     assert params == {}
+
+
+def test_build_where_dedup_reachable_appends_engine_predicate() -> None:
+    where, _ = _build_where(None, None, None, [], [], "reachable")
+    assert f"({_DEDUP_REACHABLE_SQL})" in where
+    assert "NOT (" not in where
+
+
+def test_build_where_dedup_unreachable_negates_predicate() -> None:
+    where, _ = _build_where(None, None, None, [], [], "unreachable")
+    assert f"NOT ({_DEDUP_REACHABLE_SQL})" in where
+
+
+def test_dedup_predicate_is_column_only_no_raw_json() -> None:
+    # Reachability filter must be safe in a WHERE (column-only), unlike raw_json signals.
+    assert "raw_json" not in _DEDUP_REACHABLE_SQL
+    # It is the three-pass union: street+disposition, geo family, byt-geo.
+    assert "disposition" in _DEDUP_REACHABLE_SQL
+    assert "geom" in _DEDUP_REACHABLE_SQL
+    assert "area_m2" in _DEDUP_REACHABLE_SQL
 
 
 def test_presence_allowlist_excludes_raw_json_predicates() -> None:

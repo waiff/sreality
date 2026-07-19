@@ -2218,6 +2218,12 @@ export type LocationAuditRow = {
   accurate: boolean | null;
   geom_method: string | null;
   street_method: string | null;
+  // Dedup reachability: dedup_reachable = the engine can reach this listing via SOME
+  // pass; the three arm booleans show which (street+disposition / geo+area / byt-geo).
+  dedup_reachable: boolean;
+  elig_street: boolean;
+  elig_geo: boolean;
+  elig_byt_geo: boolean;
 };
 
 export type LocationAuditPage = {
@@ -2233,6 +2239,7 @@ export const getLocationAudit = (
     source?: string;
     category_main?: string;
     active?: 'active' | 'inactive';
+    dedup?: 'reachable' | 'unreachable';
     has?: ReadonlyArray<string>;
     missing?: ReadonlyArray<string>;
     limit?: number;
@@ -2243,6 +2250,7 @@ export const getLocationAudit = (
   if (params.source) q.set('source', params.source);
   if (params.category_main) q.set('category_main', params.category_main);
   if (params.active) q.set('active', params.active);
+  if (params.dedup) q.set('dedup', params.dedup);
   if (params.has?.length) q.set('has', params.has.join(','));
   if (params.missing?.length) q.set('missing', params.missing.join(','));
   q.set('limit', String(params.limit ?? 50));

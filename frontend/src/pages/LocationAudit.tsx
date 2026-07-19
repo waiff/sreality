@@ -43,6 +43,32 @@ const ACTIVE_TABS: ReadonlyArray<{ id: '' | 'active' | 'inactive'; label: string
   { id: 'inactive', label: 'Neaktivní' },
 ];
 
+const DEDUP_TABS: ReadonlyArray<{ id: '' | 'reachable' | 'unreachable'; label: string }> = [
+  { id: '', label: 'Vše' },
+  { id: 'reachable', label: 'Dosažitelné dedupem' },
+  { id: 'unreachable', label: 'Nedosažitelné (nikdy nekandiduje)' },
+];
+
+// The dedup pass a row qualifies for (from the arm booleans), for the per-card badge.
+function dedupBadge(r: LocationAuditRow): { label: string; reachable: boolean; tip: string } {
+  if (!r.dedup_reachable) {
+    return {
+      label: 'nedosažitelné pro dedup',
+      reachable: false,
+      tip: 'Nesplňuje podmínky žádné z cest (ulice+dispozice / geo+plocha / byt-geo) — nikdy se nestane kandidátem, nikdy se neporovná.',
+    };
+  }
+  const paths: string[] = [];
+  if (r.elig_street) paths.push('ulice+dispozice');
+  if (r.elig_geo) paths.push('geo+plocha');
+  if (r.elig_byt_geo) paths.push('byt-geo');
+  return {
+    label: `dedup: ${paths.join(' · ') || 'dosažitelné'}`,
+    reachable: true,
+    tip: 'Cesta(y), kterou engine tento listing dokáže zařadit mezi kandidáty. geo/byt-geo cesty jsou jen pro aktivní listingy.',
+  };
+}
+
 const CATEGORY_LABEL: Record<string, string> = Object.fromEntries(
   CATEGORY_MAIN_TABS.filter((t) => t.id).map((t) => [t.id, t.label]),
 );
@@ -59,6 +85,7 @@ export default function LocationAudit() {
   const [source, setSource] = useState('');
   const [categoryMain, setCategoryMain] = useState('');
   const [active, setActive] = useState<'' | 'active' | 'inactive'>('');
+  const [dedup, setDedup] = useState<'' | 'reachable' | 'unreachable'>('');
   const [presence, setPresence] = useState<Presence>({});
   const [presenceOpen, setPresenceOpen] = useState(false);
   const [rawFor, setRawFor] = useState<LocationAuditRow | null>(null);
@@ -83,13 +110,14 @@ export default function LocationAudit() {
     });
 
   const list = useInfiniteList<LocationAuditRow, LocPage>({
-    queryKey: ['location-audit', source, categoryMain, active, hasKeys, missingKeys],
+    queryKey: ['location-audit', source, categoryMain, active, dedup, hasKeys, missingKeys],
     queryFn: async (cursor) => {
       const offset = (cursor as number | null) ?? 0;
       const resp = await getLocationAudit({
         source: source || undefined,
         category_main: categoryMain || undefined,
         active: active || undefined,
+        dedup: dedup || undefined,
         has: hasKeys.length ? hasKeys : undefined,
         missing: missingKeys.length ? missingKeys : undefined,
         limit: PAGE_SIZE,
@@ -136,6 +164,11 @@ export default function LocationAudit() {
         <FilterRow label="Stav">
           {ACTIVE_TABS.map((t) => (
             <FilterChip key={t.id} on={active === t.id} label={t.label} onClick={() => setActive(t.id)} />
+          ))}
+        </FilterRow>
+        <FilterRow label="Dedup">
+          {DEDUP_TABS.map((t) => (
+            <FilterChip key={t.id} on={dedup === t.id} label={t.label} onClick={() => setDedup(t.id)} />
           ))}
         </FilterRow>
       </div>
@@ -267,6 +300,7 @@ function ListingCard({ row, onShowRaw }: { row: LocationAuditRow; onShowRaw: () 
     categorySubCb: row.category_sub_cb,
   });
   const cat = row.category_main ? (CATEGORY_LABEL[row.category_main] ?? row.category_main) : null;
+  const dedup = dedupBadge(row);
 
   return (
     <div className="border border-[var(--color-rule)] rounded-[var(--radius-sm)] bg-[var(--color-paper)]">
@@ -291,6 +325,17 @@ function ListingCard({ row, onShowRaw }: { row: LocationAuditRow; onShowRaw: () 
           ].join(' ')}
         >
           {row.is_active ? 'aktivní' : 'neaktivní'}
+        </span>
+        <span
+          className={[
+            'px-1.5 py-0.5 rounded-[var(--radius-xs)] text-[0.66rem] border cursor-help',
+            dedup.reachable
+              ? 'border-[var(--color-sage)] bg-[var(--color-sage-soft)] text-[var(--color-sage)]'
+              : 'border-[var(--color-brick)] bg-[var(--color-brick-soft)] text-[var(--color-brick)]',
+          ].join(' ')}
+          title={dedup.tip}
+        >
+          {dedup.label}
         </span>
         {(row.obec || row.okres) && (
           <span className="text-[0.72rem] text-[var(--color-ink-3)]">
@@ -485,6 +530,16 @@ function Explainer() {
             (<span className="font-mono">inaccuracy_type</span>, <span className="font-mono">accurate</span>,
             <span className="font-mono"> coords.source</span>), které pipeline zatím z velké části nečte —
             přesně to, co tu jde hledat a odemknout.
+          </p>
+          <p>
+            <strong className="text-[var(--color-ink)]">Dedup dosažitelnost.</strong> Engine zařadí
+            listing mezi kandidáty jen přes jednu ze tří cest: <span className="font-mono">ulice+dispozice</span> (byt),
+            <span className="font-mono"> geo+plocha</span> (dům/pozemek/komerce = kategorie + souřadnice + obec_id + plocha) nebo
+            <span className="font-mono"> byt-geo</span> (byt bez ulice, ale se souřadnicí + plochou + dispozicí). Listing, který
+            nesplní <em>žádnou</em>, se nikdy neporovná — tady ho vyfiltruješ přes „Nedosažitelné". Predikát je přesně
+            engineova vlastní podmínka způsobilosti (<span className="font-mono">toolkit.publication.eligible_predicate</span>,
+            hlídaná parity testem). geo a byt-geo cesty platí jen pro aktivní listingy (proto může být
+            neaktivní řádek „nedosažitelný", i když má data).
           </p>
         </div>
       )}
