@@ -84,9 +84,13 @@ LEFT JOIN LATERAL (
     SELECT er.id, er.estimate_kind, er.gross_yield_pct
     FROM estimation_runs er
     WHERE er.status = 'success'
+      -- Match on input_sreality_id for EVERY source — _resolve_input stamps it
+      -- source-agnostically for any already-scraped listing (estimation_runs.py).
+      -- The URL string-equality arm is a demoted fallback, only for an estimation
+      -- created before its listing was scraped (input_sreality_id still NULL).
       AND (
-        (l.source = 'sreality' AND er.input_sreality_id = l.sreality_id)
-        OR (l.source <> 'sreality' AND er.input_url = l.source_url)
+        er.input_sreality_id = l.sreality_id
+        OR (er.input_sreality_id IS NULL AND er.input_url = l.source_url)
       )
     ORDER BY er.created_at DESC
     LIMIT 1

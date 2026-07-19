@@ -254,12 +254,15 @@ def split_property_to_singletons(
             if row[1] != "active":
                 raise MergeError(f"property {property_id} is not active")
 
-            # Same ordering recompute_one's representative pick uses, so the child
-            # that stays on this property is the one it would choose anyway.
+            # Same ordering recompute_one's representative (repr) pick uses, so the
+            # child that stays on this property is the one it would choose anyway:
+            # active-first, then the shared trust order (migration 311), then
+            # recency, then sreality_id DESC.
             cur.execute(
                 """
                 SELECT sreality_id FROM listings WHERE property_id = %s
-                ORDER BY is_active DESC, last_seen_at DESC NULLS LAST, sreality_id DESC
+                ORDER BY is_active DESC, source_trust_rank(source),
+                         last_seen_at DESC NULLS LAST, sreality_id DESC
                 FOR UPDATE
                 """,
                 (property_id,),

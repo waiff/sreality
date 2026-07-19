@@ -924,6 +924,9 @@ export interface PipelineBoardCard {
 export interface CollectionPropertyRow {
   property_id: number;
   sreality_id: number;
+  /** Source portal of the representative listing; null if none joined. Drives
+   * whether sreality_id is shown as a meaningful "ID" (sreality only). */
+  source: string | null;
   district: string | null;
   disposition: string | null;
   subtype: string | null;

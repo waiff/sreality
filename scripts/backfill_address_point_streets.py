@@ -183,7 +183,12 @@ _CALIBRATE_SQL = """
       FROM listings l
       WHERE l.is_active AND l.street IS NOT NULL AND l.obec_id IS NOT NULL
         AND l.geom IS NOT NULL AND l.source = ANY(%(sources)s)
-      ORDER BY l.sreality_id DESC
+      -- Random (proportional) sample across the requested portals. Was
+      -- `ORDER BY sreality_id DESC`, which — since every real (positive) sreality
+      -- id outranks every negative synthetic id — silently yielded a
+      -- sreality-only sample regardless of the source list, miscalibrating a
+      -- tolerance that gates street assignment for every portal.
+      ORDER BY random()
       LIMIT %(n)s
     ),
     matched AS (
