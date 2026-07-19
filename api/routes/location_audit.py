@@ -24,8 +24,25 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from api import dependencies as deps
+from toolkit.publication import (
+    BYT_GEO_ELIGIBLE_PREDICATE,
+    GEO_ELIGIBLE_PREDICATE,
+    STREET_ELIGIBLE_PREDICATE,
+    eligible_predicate,
+)
 
 router = APIRouter(prefix="/location-audit", tags=["location-audit"])
+
+# Dedup reachability — the engine's OWN "can any of the three passes reach this
+# listing?" gate (`toolkit.publication.eligible_predicate`, parity-tested against
+# the engine SQL, so this can't drift). All column-only (street/disposition/
+# category_main/geom/obec_id/area) → safe + fast in a WHERE, unlike raw_json.
+# A listing failing this never becomes a dedup candidate: it lacks the data for
+# every pass — street+disposition (byt), geo+area (dům/pozemek/komerční/ostatní),
+# or byt-geo (street-less byt with coord+area+disposition). The geo + byt-geo
+# arms are active-only by construction (the street arm is not — inactive
+# street+disposition rows still merge, to preserve price history on delisting).
+_DEDUP_REACHABLE_SQL = eligible_predicate("l")
 
 
 # ---------------------------------------------------------------------------
@@ -139,6 +156,17 @@ _LIST_SELECT = """
     (l.raw_json ->> 'accurate')                      AS accurate
 """
 
+# Derived dedup-reachability booleans, appended to the page SELECT. `dedup_reachable`
+# matches the filter's predicate exactly; the three arm booleans show WHICH pass (if
+# any) the row qualifies for. The arm predicates are the canonical exports, so the
+# display can never disagree with the engine's own eligibility.
+_DEDUP_COLS = f"""
+    ,({_DEDUP_REACHABLE_SQL}) AS dedup_reachable
+    ,({STREET_ELIGIBLE_PREDICATE}) AS elig_street
+    ,({GEO_ELIGIBLE_PREDICATE}) AS elig_geo
+    ,({BYT_GEO_ELIGIBLE_PREDICATE}) AS elig_byt_geo
+"""
+
 
 def _iso(v: Any) -> str | None:
     return v.isoformat() if v is not None else None
@@ -150,6 +178,7 @@ def _build_where(
     active: str | None,
     has: list[str],
     missing: list[str],
+    dedup: str | None,
 ) -> tuple[str, dict[str, Any]]:
     clauses: list[str] = []
     params: dict[str, Any] = {}
@@ -163,6 +192,10 @@ def _build_where(
         clauses.append("l.is_active = true")
     elif active == "inactive":
         clauses.append("l.is_active = false")
+    if dedup == "reachable":
+        clauses.append(f"({_DEDUP_REACHABLE_SQL})")
+    elif dedup == "unreachable":
+        clauses.append(f"NOT ({_DEDUP_REACHABLE_SQL})")
     for key in has:
         pred = _PRESENCE_SQL.get(key)
         if pred:
@@ -188,23 +221,30 @@ def list_location_audit(
         default=None,
         description="CSV of location field keys that MUST be empty.",
     ),
+    dedup: str | None = Query(
+        default=None,
+        pattern="^(reachable|unreachable)$",
+        description="'reachable' = the dedup engine can reach this listing through some "
+        "pass; 'unreachable' = it never becomes a candidate (insufficient data on every "
+        "pass). Omit for both.",
+    ),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     conn: Any = Depends(deps.get_db_conn),
     _: dict = Depends(deps.require_admin),
 ) -> dict[str, Any]:
-    """One page of listings with their full location-field inventory and the
-    per-row acquisition method for coordinate + street. Read-only."""
+    """One page of listings with their full location-field inventory, the per-row
+    acquisition method for coordinate + street, and dedup reachability. Read-only."""
     has_keys = [k for k in (has.split(",") if has else []) if k.strip() in _PRESENCE_SQL]
     miss_keys = [k for k in (missing.split(",") if missing else []) if k.strip() in _PRESENCE_SQL]
-    where, params = _build_where(source, category_main, active, has_keys, miss_keys)
+    where, params = _build_where(source, category_main, active, has_keys, miss_keys, dedup)
 
     with conn.cursor() as cur:
         cur.execute(f"SELECT count(*) FROM listings l {where}", params)
         total = int(cur.fetchone()[0])
         cur.execute(
             f"""
-            SELECT {_LIST_SELECT}
+            SELECT {_LIST_SELECT}{_DEDUP_COLS}
             FROM listings l
             {where}
             ORDER BY l.last_seen_at DESC NULLS LAST, l.sreality_id DESC
@@ -266,6 +306,10 @@ def list_location_audit(
                 "street_method": _street_method(
                     source_v, street_present, r["street_source"], r["street_id"] is not None
                 ),
+                "dedup_reachable": r["dedup_reachable"],
+                "elig_street": r["elig_street"],
+                "elig_geo": r["elig_geo"],
+                "elig_byt_geo": r["elig_byt_geo"],
             }
         )
 
