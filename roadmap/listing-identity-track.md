@@ -69,8 +69,16 @@ Run as ONE committed track; valueless half-done. Phases and their gates are spec
   **Still open:** browse hydration, dedup `ListingKey` + pair caches, merge/unmerge
   replay, notification producers, `image_key()`, the sreality_id-cursored maintenance
   walkers, 25 read models.
-- **Phase D** — pre-flip prep: ingest `ON CONFLICT` → the natural key, child `DROP NOT
-  NULL`s, the two child PK swaps, pre-built unique indexes on `sreality_id` and `id`.
+- **Phase D** (step 1 ✅ shipped 2026-07-20) — pre-flip prep. Step 1: `listings`'s own
+  ingest `ON CONFLICT` (`upsert_listing`, `_BATCH_UPSERT_SQL`) retargeted from
+  `sreality_id` to the natural key `(source, source_id_native)`, matching Phase C's
+  child-carrier arbiters. Verified live via `EXPLAIN` (both resolve to
+  `listings_source_native_uidx`) plus a clean full pytest run; still draws the
+  synthetic sequence for new rows — only the conflict-check index changed. Needs to
+  bake ≥1 full scrape cycle across all 9 portals in production before being
+  considered validated (observed post-merge, not blocking). **Still open:** child
+  `DROP NOT NULL`s, the two child PK swaps, pre-built unique indexes on `sreality_id`
+  and `id`, the 19 legacy child FK drops, the parity-green precondition check.
 - **GATE 1** — the PK-swap window (`sreality_id` → `id`), catalog-only and reversible.
 - **GATE 2** — stop drawing `synthetic_listing_id_seq` (the true point of no return).
 - **Phase H / R5** — optional cleanup, deferrable indefinitely. Existing `sreality_id`
