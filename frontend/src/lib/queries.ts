@@ -1046,14 +1046,17 @@ export const fetchListingById = async (
 
 /* Resolve a listing's natural key (source, source_id_native) to its sreality_id,
  * so the canonical /listing/{source}/{native} route can reuse fetchListingById.
- * property_sources_public exposes the natural key (migration 091) for every
- * listing, and (source, source_id_native) is unique, so maybeSingle is safe. */
+ * Uses listing_natural_key_public (migration 315) — an UNFILTERED view over every
+ * listing — NOT property_sources_public, which filters `property_id is not null`
+ * and so cannot resolve a freshly-scraped listing during its ~5-min pre-attach
+ * window (the canonical URL would 404 while the legacy one loaded). The key
+ * (source, source_id_native) is unique (migration 091), so maybeSingle is safe. */
 export const fetchListingIdByNaturalKey = async (
   source: string,
   sourceIdNative: string,
 ): Promise<number | null> => {
   const { data, error } = await supabase
-    .from('property_sources_public')
+    .from('listing_natural_key_public')
     .select('sreality_id')
     .eq('source', source)
     .eq('source_id_native', sourceIdNative)
