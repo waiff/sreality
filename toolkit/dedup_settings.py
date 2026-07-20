@@ -69,10 +69,25 @@ REGISTRY: tuple[DedupSetting, ...] = (
     ),
     DedupSetting(
         "dedup_batch_warmer_enabled", "bool", False,
-        "Batch vision warmer", "Engine",
-        "Pre-warm the vision caches via Anthropic's Message Batches API (50% cheaper, "
-        "async) so the engine merges over warm cache for free. Off = pay cold vision "
-        "inline. The dedup_batches workflow no-ops while this is off.",
+        "Batch vision warmer (RETIRED)", "Engine",
+        "No longer read anywhere — the speculative pre-warmer this gated (a second "
+        "process guessing which pairs to warm) was replaced by engine-fed batch "
+        "deferral (dedup_engine_batch_defer_enabled): the engine now spools its OWN "
+        "cold calls, so selection identity holds by construction instead of by "
+        "approximation. Kept only so historical app_settings rows don't 404; safe "
+        "to ignore.",
+    ),
+    DedupSetting(
+        "dedup_engine_batch_defer_enabled", "bool", False,
+        "Engine-fed batch deferral", "Engine",
+        "Sweep lanes (full street, geo, byt-geo, candidates) defer a cold classify/"
+        "compare/site-plan/floor-plan call into the batch spool (dedup_batch_requests, "
+        "batch_id NULL) instead of paying for it inline; a later scripts.submit_dedup_batch "
+        "flush submits the spool as provider Batch API requests (50% off), and the next "
+        "lane pass replays over the warm cache. Selection identity holds by construction "
+        "(the engine defers its OWN routed calls, not a second process guessing the "
+        "work-list). Never applies to the --dirty drain or the realtime worker's dedup "
+        "lane — those stay synchronous regardless of this flag.",
     ),
     DedupSetting(
         "dedup_defer_incomplete_downloads", "bool", False,

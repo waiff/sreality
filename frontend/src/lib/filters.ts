@@ -422,7 +422,7 @@ const _LOCATION_LEVELS: ReadonlyArray<LocationLevel> = [
  * is an include (legacy). `districts_lvl` / `districts_id` are absent for
  * legacy / unresolved chips, which then fall back to name matching — so the
  * schema only ever widens. */
-const parseDistrictChips = (
+export const parseDistrictChips = (
   namesRaw: string | null,
   ctxRaw: string | null,
   exclRaw: string | null,
@@ -737,6 +737,34 @@ const parseIntList = (s: string | null): number[] => {
 const fmtRange = (lo: number | null, hi: number | null): string =>
   `${lo ?? ''}-${hi ?? ''}`;
 
+/* Serialise a `DistrictChip[]` into the parallel `districts` / `districts_ctx` /
+ * `districts_excl` / `districts_lvl` / `districts_id` CSV shape `parseDistrictChips`
+ * reads back — the one wire format every location-filterable surface uses (Browse's
+ * URL here; the dedup Decision history + Queue API params in `lib/api.ts`). Each
+ * optional param is only emitted when at least one chip needs it, so the common
+ * case (plain include-only, unresolved or single-level chips) keeps a minimal URL. */
+export const districtChipsToCsvParams = (
+  districts: ReadonlyArray<DistrictChip>,
+): Record<string, string> => {
+  if (!districts.length) return {};
+  const out: Record<string, string> = {
+    districts: joinCsv(districts.map((d) => d.name)),
+  };
+  if (districts.some((d) => d.context !== null)) {
+    out.districts_ctx = joinCsv(districts.map((d) => d.context ?? ''));
+  }
+  if (districts.some((d) => d.excluded)) {
+    out.districts_excl = joinCsv(districts.map((d) => (d.excluded ? '1' : '0')));
+  }
+  if (districts.some((d) => d.level != null)) {
+    out.districts_lvl = joinCsv(districts.map((d) => d.level ?? ''));
+    out.districts_id = joinCsv(
+      districts.map((d) => (d.id == null ? '' : String(d.id))),
+    );
+  }
+  return out;
+};
+
 export const toSearchParams = (f: ListingFilters): URLSearchParams => {
   const sp = new URLSearchParams();
   /* Emit `cat` whenever the set differs from the default ['byt'] — including
@@ -746,35 +774,8 @@ export const toSearchParams = (f: ListingFilters): URLSearchParams => {
     sp.set('cat', f.categoryMain.join(','));
   }
   if (f.categoryType !== 'pronajem') sp.set('deal', f.categoryType);
-  if (f.districts.length) {
-    sp.set('districts', joinCsv(f.districts.map((d) => d.name)));
-    /* Omit the contexts param when every chip's context is null —
-     * keeps URLs for the common okres-only case identical to the
-     * pre-context shape. */
-    if (f.districts.some((d) => d.context !== null)) {
-      sp.set(
-        'districts_ctx',
-        joinCsv(f.districts.map((d) => d.context ?? '')),
-      );
-    }
-    /* Same discipline for the exclude flags: only emit when at least one
-     * chip is excluded, so an all-include filter's URL is unchanged. */
-    if (f.districts.some((d) => d.excluded)) {
-      sp.set(
-        'districts_excl',
-        joinCsv(f.districts.map((d) => (d.excluded ? '1' : '0'))),
-      );
-    }
-    /* Resolved admin level + id (the precise match path). Emit both as
-     * full-length parallel CSVs only when at least one chip is resolved, so a
-     * pre-resolution / legacy filter's URL stays byte-identical to before. */
-    if (f.districts.some((d) => d.level != null)) {
-      sp.set('districts_lvl', joinCsv(f.districts.map((d) => d.level ?? '')));
-      sp.set(
-        'districts_id',
-        joinCsv(f.districts.map((d) => (d.id == null ? '' : String(d.id)))),
-      );
-    }
+  for (const [k, v] of Object.entries(districtChipsToCsvParams(f.districts))) {
+    sp.set(k, v);
   }
   if (f.dispositions.length) sp.set('disposition', f.dispositions.join(','));
   if (f.priceMin != null || f.priceMax != null) {

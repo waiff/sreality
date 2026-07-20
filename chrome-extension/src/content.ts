@@ -560,11 +560,16 @@ function mountPanel(): {
   }
 
   function renderAppLink(container: HTMLElement, state: PanelState): void {
-    const sid = state.listing?.sreality_id;
-    if (sid == null || !APP_BASE_URL) return;  // not in our DB, or base unset
+    const l = state.listing;
+    // sreality_id != null means the listing is in our DB (has an app page).
+    if (!l || l.sreality_id == null || !APP_BASE_URL) return;
     const a = document.createElement('a');
     a.className = 'app-link';
-    a.href = `${APP_BASE_URL}/listing/${sid}`;  // same template as every SPA surface
+    // Canonical natural-key URL, never the negative synthetic id (migration 097):
+    // the extension already holds the (source, native id) it looked the listing up
+    // by, which is exactly the app's /listing/{source}/{native} route.
+    a.href =
+      `${APP_BASE_URL}/listing/${encodeURIComponent(l.source)}/${encodeURIComponent(l.source_id)}`;
     a.target = '_blank';
     a.rel = 'noopener';
     const txt = document.createElement('span');

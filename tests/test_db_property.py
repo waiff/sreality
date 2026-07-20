@@ -66,8 +66,17 @@ class _FakeConn:
         return _Cur(self)
 
 
-def _stub_upsert(monkeypatch, result: str = "new") -> None:
-    monkeypatch.setattr(db, "upsert_listing", lambda *a, **k: result)
+def _stub_upsert(monkeypatch, result: str = "new") -> list[dict[str, Any]]:
+    """Stub upsert_listing and capture each row it was handed, so callers can
+    assert what the ingest path put into the INSERT row (e.g. source_id_native)."""
+    rows: list[dict[str, Any]] = []
+
+    def _fake(_conn: Any, row: dict[str, Any], *a: Any, **k: Any) -> str:
+        rows.append(row)
+        return result
+
+    monkeypatch.setattr(db, "upsert_listing", _fake)
+    return rows
 
 
 def _find(executions, needle: str) -> tuple[str, Any] | None:
@@ -136,7 +145,7 @@ def _listing(**kw: Any) -> ScrapedListing:
 
 
 def test_ingest_first_sight_draws_synthetic_pk(monkeypatch):
-    _stub_upsert(monkeypatch)
+    rows = _stub_upsert(monkeypatch)
     conn = _FakeConn([
         (lambda s: "SELECT sreality_id FROM listings WHERE source" in s, []),  # unseen
         (lambda s: "SELECT nextval('synthetic_listing_id_seq')" in s, [(-1,)]),
@@ -148,8 +157,15 @@ def test_ingest_first_sight_draws_synthetic_pk(monkeypatch):
 
     assert pk == -1 and result == "new"
     assert _find(conn.executed, "nextval('synthetic_listing_id_seq')") is not None
-    src = _find(conn.executed, "UPDATE listings SET source =")
-    assert src is not None and src[1] == ("bazos", "https://bazos.cz/x", "218865547", -1)
+    # The FULL natural key (source + native id) is carried into the INSERT row so it is
+    # stamped atomically (source's column default is 'sreality', so inserting only the
+    # native id could collide with a real sreality row on the unique natural-key index).
+    # Only source_url — not part of the key — remains on the post-insert UPDATE.
+    assert rows and rows[0]["source"] == "bazos"
+    assert rows and rows[0]["source_id_native"] == "218865547"
+    src = _find(conn.executed, "UPDATE listings SET source_url =")
+    assert src is not None and src[1] == ("https://bazos.cz/x", -1)
+    assert _find(conn.executed, "UPDATE listings SET source =") is None
     assert _find(conn.executed, "INSERT INTO properties") is not None
 
 

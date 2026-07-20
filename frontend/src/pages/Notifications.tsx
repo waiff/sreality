@@ -229,7 +229,7 @@ function StandardNotificationRow({ dispatch: d }: { dispatch: WatchdogDispatch }
     label: d.change_kind,
     dot: 'var(--color-ink-3)',
   };
-  const place = d.locality ?? d.district ?? `id ${d.sreality_id}`;
+  const place = d.locality ?? d.district ?? '—';
   const sourceLabel =
     d.source_kind === 'collection_monitor'
       ? (d.collection_name ?? 'Monitoring')

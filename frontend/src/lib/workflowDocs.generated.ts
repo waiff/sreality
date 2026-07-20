@@ -1268,8 +1268,8 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
   },
   {
     "filename": "dedup_batches.yml",
-    "name": "Dedup engine (vision batch warm-up)",
-    "description": "Async dedup-vision via the Anthropic Message Batches API (50% cheaper than the synchronous dedup engine's per-call vision, recall-identical). PRE-WARMS the engine's classify/compare/site_plan caches; the daily \"Dedup engine (street + disposition)\" run then REPLAYS unchanged over the warm caches and produces the identical merges for free. Two modes, selected by the `mode` dispatch input:",
+    "name": "Dedup engine (vision batch flush)",
+    "description": "Async dedup-vision via the provider Batch APIs (Anthropic or OpenAI — 50% cheaper than the synchronous dedup engine's per-call vision, recall-identical). Engine-fed deferral (dedup-cost-reduction.md §4.1): the dedup engine itself (scripts.dedup_engine, gated by app_settings.dedup_engine_batch_defer_enabled) spools a cold classify/compare/site-plan/floor-plan call it would otherwise pay for inline into dedup_batch_requests (batch_id NULL) instead of calling the LLM, and defers the pair; the engine's OWN next pass replays over the now-warm cache. This workflow does NOT decide what to warm (that guesswork — the old collect()-based pre-warmer — was retired: a second process re-deriving the engine's work-list could only ever approximate it). Two modes, selected by the `mode` dispatch input:",
     "portal": null,
     "manual": true,
     "schedules": [
@@ -1288,7 +1288,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "inputs": [
       {
         "name": "mode",
-        "description": "submit a new batch, or ingest completed ones",
+        "description": "submit (flush the spool), or ingest completed batches",
         "required": true,
         "type": "choice",
         "default": "ingest",
@@ -1298,52 +1298,16 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
         ]
       },
       {
-        "name": "max_pairs",
-        "description": "[submit] Max visual candidate pairs examined per run",
-        "required": false,
-        "type": "string",
-        "default": "4000",
-        "options": null
-      },
-      {
         "name": "max_requests",
-        "description": "[submit] Cap total vision requests enqueued per run",
+        "description": "[submit] Max spooled requests to flush per run",
         "required": false,
         "type": "string",
-        "default": "1500",
+        "default": "3000",
         "options": null
-      },
-      {
-        "name": "max_room_attempts",
-        "description": "[submit] The engine's per-pair room cap (upper bound on warm-rooms)",
-        "required": false,
-        "type": "string",
-        "default": "4",
-        "options": null
-      },
-      {
-        "name": "warm_rooms",
-        "description": "[submit] Like-room compares warmed per pair (1 = first-priority room only)",
-        "required": false,
-        "type": "string",
-        "default": "1",
-        "options": null
-      },
-      {
-        "name": "lane",
-        "description": "[submit] Population to warm: street funnel, geo funnel, or 'candidates' (the proposed review-queue pairs — the blitz population)",
-        "required": false,
-        "type": "choice",
-        "default": "street",
-        "options": [
-          "street",
-          "geo",
-          "candidates"
-        ]
       },
       {
         "name": "dry_run",
-        "description": "[submit] Report what would be enqueued without submitting",
+        "description": "[submit] Report what would be submitted without flushing",
         "required": false,
         "type": "choice",
         "default": "false",
@@ -1355,15 +1319,12 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     ],
     "secrets": [
       "ANTHROPIC_API_KEY",
-      "R2_ACCESS_KEY_ID",
-      "R2_ACCOUNT_ID",
-      "R2_BUCKET_NAME",
-      "R2_SECRET_ACCESS_KEY",
+      "OPENAI_API_KEY",
       "SUPABASE_DB_URL"
     ],
     "concurrencyGroup": "dedup-batches",
     "cancelInProgress": false,
-    "timeoutMinutes": 75,
+    "timeoutMinutes": 20,
     "permissions": "contents: read",
     "runsUrl": "https://github.com/waiff/sreality/actions/workflows/dedup_batches.yml",
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/dedup_batches.yml"
@@ -1548,6 +1509,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "secrets": [
       "ANTHROPIC_API_KEY",
       "GEMINI_API_KEY",
+      "OPENAI_API_KEY",
       "R2_ACCESS_KEY_ID",
       "R2_ACCOUNT_ID",
       "R2_BUCKET_NAME",
@@ -1560,6 +1522,60 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "permissions": "contents: read",
     "runsUrl": "https://github.com/waiff/sreality/actions/workflows/dedup_engine.yml",
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/dedup_engine.yml"
+  },
+  {
+    "filename": "dedup_model_compare.yml",
+    "name": "Jobs: dedup model comparison (review-queue decision support)",
+    "description": "One candidate model's pass over a /dedup \"compare all models\" snapshot. The API (POST /dedup/model-compare) snapshots the undecided pair(s) into dedup_model_compare_sets under run_label, then dispatches THIS workflow once per connected model — they run in PARALLEL (concurrency keyed on candidate_model). Each writes check_type='review' rows to dedup_vision_bakeoff_results (no ground truth — just the model's would-merge vote), which the operator reads side-by-side on /model-testing. Read-only apart from those benchmark rows.",
+    "portal": null,
+    "manual": true,
+    "schedules": [],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "candidate_model",
+        "description": "Candidate model id (claude-sonnet-4-5, gpt-5-mini, qwen3-vl-235b-a22b-instruct, ...)",
+        "required": true,
+        "type": "string",
+        "default": null,
+        "options": null
+      },
+      {
+        "name": "run_label",
+        "description": "The dedup_model_compare_sets snapshot label to score (also the /model-testing run label)",
+        "required": true,
+        "type": "string",
+        "default": null,
+        "options": null
+      },
+      {
+        "name": "review_limit",
+        "description": "Max snapshot pairs to score",
+        "required": false,
+        "type": "string",
+        "default": "200",
+        "options": null
+      }
+    ],
+    "secrets": [
+      "ANTHROPIC_API_KEY",
+      "GEMINI_API_KEY",
+      "OPENAI_API_KEY",
+      "QWEN_API_KEY",
+      "R2_ACCESS_KEY_ID",
+      "R2_ACCOUNT_ID",
+      "R2_BUCKET_NAME",
+      "R2_SECRET_ACCESS_KEY",
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "dedup-model-compare-${{ github.event.inputs.candidate_model }}-${{ github.event.inputs.run_label }}",
+    "cancelInProgress": false,
+    "timeoutMinutes": 90,
+    "permissions": "contents: read",
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/dedup_model_compare.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/dedup_model_compare.yml"
   },
   {
     "filename": "detail_drain.yml",
@@ -1848,6 +1864,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     ],
     "secrets": [
       "ANTHROPIC_API_KEY",
+      "OPENAI_API_KEY",
       "SUPABASE_DB_URL"
     ],
     "concurrencyGroup": "bazos-enrichment",
@@ -1914,6 +1931,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     ],
     "secrets": [
       "ANTHROPIC_API_KEY",
+      "OPENAI_API_KEY",
       "SUPABASE_DB_URL"
     ],
     "concurrencyGroup": "enrich-bazos-batch",
@@ -3864,7 +3882,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
   {
     "filename": "validate_vision_models.yml",
     "name": "Jobs: validate vision model/resolution A/B",
-    "description": "Read-only A/B gate for a dedup-vision (model, max_edge) change. Re-runs the forensic compare on every historical 'High' verdict and re-classifies a sample, then reports whether the candidate (default Haiku @ 768px) reproduces the ground-truth recall. Writes NO cache / app_settings — only the standard llm_calls audit rows. Exits non-zero (red run) when a gate is missed, so the model flip is only made after a green run. See scripts/validate_vision_models.py.",
+    "description": "Read-only A/B gate for a dedup-vision (model, max_edge) change, across all three forensic lanes (compare / floor_plan / site_plan): RECALL replays historical decisive verdicts (does the candidate reproduce them?); PRECISION replays a frozen dedup_golden_sets snapshot of confirmed-DIFFERENT pairs (does the candidate avoid the lane's dangerous verdict?) when golden_set_name is set. Writes NO cache / app_settings — only the standard llm_calls audit rows. Exits non-zero (red run) when a configured gate is missed — for a real proposed flip that means \"don't ship it\"; for an exploratory multi-candidate bake-off (the Session-3 use of this workflow) a red run on a cheap candidate is an expected, informative RESULT — read the printed per-lane numbers in the log, not just the run's pass/fail color. See scripts/validate_vision_models.py.",
     "portal": null,
     "manual": true,
     "schedules": [],
@@ -3874,67 +3892,101 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "inputs": [
       {
         "name": "candidate_model",
-        "description": "Candidate model id to A/B (e.g. claude-haiku-4-5)",
+        "description": "Candidate model id (e.g. gemini-3.1-flash-lite, gpt-5-mini, qwen3-vl-30b-a3b-instruct)",
         "required": true,
         "type": "string",
         "default": "claude-haiku-4-5",
         "options": null
       },
       {
-        "name": "max_edge",
-        "description": "Candidate image long-edge px (768 = comparison tier)",
+        "name": "lanes",
+        "description": "Comma-separated compare,floor_plan,site_plan (or 'all')",
         "required": true,
         "type": "string",
-        "default": "768",
+        "default": "compare,floor_plan,site_plan",
+        "options": null
+      },
+      {
+        "name": "golden_set_name",
+        "description": "Frozen dedup_golden_sets snapshot for precision checks (blank = skip precision, recall-only)",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "max_edge",
+        "description": "Compare-lane image long-edge px (768 = comparison tier, 1568 = document tier)",
+        "required": true,
+        "type": "string",
+        "default": "1568",
+        "options": null
+      },
+      {
+        "name": "plan_max_edge",
+        "description": "Floor/site-plan image long-edge px (legibility-sensitive; 1568 = production tier)",
+        "required": true,
+        "type": "string",
+        "default": "1568",
         "options": null
       },
       {
         "name": "compare_limit",
-        "description": "Max historical High verdicts to re-run",
+        "description": "Max historical compare verdicts to re-run",
         "required": true,
         "type": "string",
-        "default": "200",
+        "default": "100",
         "options": null
       },
       {
-        "name": "classify_sample",
-        "description": "Listings to re-classify for label agreement",
+        "name": "plan_limit",
+        "description": "Max historical verdicts to re-run PER plan lane (floor_plan and site_plan each)",
         "required": true,
         "type": "string",
-        "default": "40",
+        "default": "60",
         "options": null
       },
       {
-        "name": "min_compare_recall",
-        "description": "Gate — fraction of historical Highs that must stay High (1.0 = every one)",
+        "name": "precision_limit",
+        "description": "Max golden-negative pairs to re-run PER lane (only used when golden_set_name is set)",
         "required": true,
         "type": "string",
-        "default": "1.0",
+        "default": "50",
         "options": null
       },
       {
         "name": "skip_classify",
-        "description": "Only run the compare-recall gate",
+        "description": "Skip the classify-agreement check (compare/floor_plan/site_plan are this session's scope)",
         "required": false,
         "type": "choice",
-        "default": "false",
+        "default": "true",
         "options": [
-          "false",
-          "true"
+          "true",
+          "false"
         ]
+      },
+      {
+        "name": "run_label",
+        "description": "Non-empty = PERSIST per-pair results under this label for /model-testing (e.g. 2026-07-13-session3); blank = don't persist",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
       }
     ],
     "secrets": [
       "ANTHROPIC_API_KEY",
       "GEMINI_API_KEY",
+      "OPENAI_API_KEY",
+      "QWEN_API_KEY",
       "R2_ACCESS_KEY_ID",
       "R2_ACCOUNT_ID",
       "R2_BUCKET_NAME",
       "R2_SECRET_ACCESS_KEY",
       "SUPABASE_DB_URL"
     ],
-    "concurrencyGroup": "validate-vision-models",
-    "cancelInProgress": true,
+    "concurrencyGroup": "validate-vision-models-${{ github.event.inputs.candidate_model || 'default' }}",
+    "cancelInProgress": false,
     "timeoutMinutes": 90,
     "permissions": "contents: read",
     "runsUrl": "https://github.com/waiff/sreality/actions/workflows/validate_vision_models.yml",

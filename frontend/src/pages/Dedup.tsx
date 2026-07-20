@@ -41,10 +41,15 @@ import { assessDirtyQueue } from '@/lib/dedupQueueHealth';
 import { type TaggedImageUrl } from '@/lib/imageTags';
 import { portalListingUrl, portalShort } from '@/lib/portals';
 import { fmtArea, fmtCount, fmtCzk, fmtDurationSecs, fmtRelative } from '@/lib/format';
+import type { DistrictChip } from '@/lib/filters';
+import { CATEGORY_MAIN_TABS } from '@/lib/categoryMainTabs';
+import { LocationTypeahead } from '@/components/filter-controls/LocationTypeahead';
+import FilterChip from '@/components/FilterChip';
 import ImageCarousel from '@/components/ImageCarousel';
 import DedupAuditHistory from '@/components/DedupAuditHistory';
 import DedupBackfillProgress from '@/components/DedupBackfillProgress';
 import DedupCandidateReset from '@/components/DedupCandidateReset';
+import { ModelCompareButton } from '@/components/ModelCompareButton';
 import DedupFactors from '@/components/DedupFactors';
 import DecisionFeedbackControl from '@/components/DecisionFeedbackControl';
 import DedupPipelineOverview from '@/components/DedupPipelineOverview';
@@ -93,6 +98,14 @@ export default function Dedup() {
   const [bucket, setBucket] = useState<Bucket | null>(null);
   // Which category (tier) the operator is focused on (null = every family).
   const [tier, setTier] = useState<string | null>(null);
+  // Property-type narrow (the same Vše/Byty/Domy/Komerční/Pozemky/Ostatní tabs
+  // Decision history uses) — matches a pair if EITHER candidate property is that
+  // type, since a pair can legitimately span two types (the sanctioned
+  // dům↔komerční cross-type merge).
+  const [categoryMain, setCategoryMain] = useState('');
+  // Location narrow — matches a pair if EITHER candidate property touches the
+  // picked place, so the operator can prioritise the review backlog by area.
+  const [districts, setDistricts] = useState<DistrictChip[]>([]);
 
   const summaryQ = useQuery<DedupSummaryResponse, Error>({
     queryKey: dedupKeys.summary('proposed'),
@@ -107,6 +120,8 @@ export default function Dedup() {
       tier: tier ?? null,
       reason: bucket?.reason ?? null,
       verdict: bucket ? bucket.verdict ?? NULL_VERDICT : null,
+      categoryMain: categoryMain || null,
+      districts,
     }),
     queryFn: () => listDedupCandidates({
       status: 'proposed',
@@ -115,6 +130,8 @@ export default function Dedup() {
       ...(bucket
         ? { reason: bucket.reason, verdict: bucket.verdict ?? NULL_VERDICT }
         : {}),
+      ...(categoryMain ? { category_main: categoryMain } : {}),
+      ...(districts.length ? { districts } : {}),
     }),
     placeholderData: keepPreviousData,
     refetchInterval: POLL_MS,
@@ -198,12 +215,18 @@ export default function Dedup() {
   const bulkMut = useMutation({ mutationFn: bulkMergeDedupCandidates, onSuccess: invalidateAfterMerge });
 
   // The loaded STRONG geo candidates (same coord + area + price/№) — the scoped
-  // bulk-approve target. Gated to Houses in the render (the approved auto-merge family).
+  // bulk-approve target. Houses (dum) ONLY (the approved auto-merge family) — `tier`
+  // is HOW the pair was found (street vs. geo-cell), never WHAT family it is, so a geo
+  // match spanning land/commercial/other must be excluded here explicitly, not by the
+  // outer tier gate alone (fixed alongside the stale 'geo_dum' tier check below —
+  // 'geo_dum' was never a real tier VALUE, so this bar was silently unreachable).
   const strongLoadedIds = useMemo(
     () => candidates
       .filter((c) => {
         const r = (c.markers_matched as { reason?: string } | null)?.reason;
-        return r === 'geo_exact' || r === 'geo_strong';
+        const isDum = c.left_property.category_main === 'dum'
+          || c.right_property.category_main === 'dum';
+        return isDum && (r === 'geo_exact' || r === 'geo_strong');
       })
       .map((c) => c.id),
     [candidates],
@@ -262,7 +285,35 @@ export default function Dedup() {
         onSelect={setTier}
       />
 
-      {tier === 'geo_dum' ? (
+      <div className="mt-3 flex items-start gap-2">
+        <span className="mt-1.5 shrink-0 text-[0.65rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)]">
+          Type
+        </span>
+        <div className="flex flex-wrap gap-1.5">
+          {CATEGORY_MAIN_TABS.map((t) => (
+            <FilterChip
+              key={t.id}
+              on={categoryMain === t.id}
+              label={t.label}
+              onClick={() => setCategoryMain(t.id)}
+            />
+          ))}
+        </div>
+      </div>
+
+      <div className="mt-3 flex items-start gap-2">
+        <span className="mt-1.5 shrink-0 text-[0.65rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)]">
+          Location
+        </span>
+        <div className="min-w-0 flex-1 max-w-xl">
+          <LocationTypeahead
+            value={districts}
+            onChange={(n) => setDistricts(n ?? [])}
+          />
+        </div>
+      </div>
+
+      {tier === 'geo' ? (
         <BulkApproveBar
           count={strongLoadedIds.length}
           busy={bulkMut.isPending}
@@ -289,11 +340,16 @@ export default function Dedup() {
                 : 'Nothing awaiting review. The engine queues a pair here only when two listings share a street and disposition but it can’t confidently confirm they’re the same property by photos.'
         }
       >
+        {candidates.length > 0 ? (
+          <ModelCompareButton tone="bar" limit={25} label="Compare next 25 undecided" />
+        ) : null}
+
         <div className="space-y-3">
           {clusters.map((cl) => (
             <ClusterCard
               key={cl.key}
               cluster={cl}
+              candidateIds={cl.candidateIds}
               imagesMap={imagesMap}
               sourcesMap={sourcesMap}
               detailMap={detailMap}
@@ -592,6 +648,10 @@ function bucketLabel(
     return { label: 'Compared — inconclusive', hint: 'no clear verdict', tone: 'muted' };
   if (reason === 'site_plan_different_unit')
     return { label: 'Different unit (site plan)', hint: 'development guard', tone: 'brick' };
+  if (reason === 'floor_plan_review')
+    return { label: 'Floor plan — ambiguous', hint: 'both sides have a usable 2D plan, comparison inconclusive', tone: 'copper' };
+  if (reason === 'floor_plan_pending')
+    return { label: 'Floor plan — pending', hint: 'verdict not yet available, deferred to next run', tone: 'muted' };
   if (reason === 'visual_match')
     return { label: 'Visual match', hint: 'High verdict', tone: 'sage' };
   if (reason === 'image_phash')
@@ -711,19 +771,26 @@ function BacklogRow({
   );
 }
 
+// `tier` is HOW a pair was found — street+disposition vs. a geo-cell blocking pass —
+// NEVER what property type it is (that's the separate "Type" row, CATEGORY_MAIN_TABS).
+// The backend (scripts/dedup_engine.py `cell_rung`) only ever writes these three values;
+// a prior per-family scheme (geo_dum/geo_komercni/geo_pozemek/geo_ostatni) was collapsed
+// into the single 'geo' tier upstream and this map was never updated to match — until
+// this fix, a geo- or byt_geo-tier chip rendered as the literal unlabelled string
+// "geo"/"byt_geo" (TIER_LABEL[t] ?? t falling through), which is what read as
+// confusing. Filter by property type via the Type row below, not this facet.
 const TIER_LABEL: Record<string, string> = {
-  street_disposition: 'Apartments',
-  geo_dum: 'Houses',
-  geo_komercni: 'Commercial',
-  geo_pozemek: 'Land',
-  geo_ostatni: 'Other',
+  street_disposition: 'Street address (byty)',
+  geo: 'Location match (domy/pozemky/komerční/ostatní)',
+  byt_geo: 'Location match (byty bez ulice)',
 };
 const tierLabel = (t: string) => TIER_LABEL[t] ?? t;
 
-/* Category (tier) facet — focus the queue on one property family at a time.
- * Houses/Land/Commercial are the geo matcher's single-dwelling families; Apartments
- * is the street+disposition tier. Picking one scopes "Needs review" and (for Houses)
- * enables the bulk-approve. Reads /dedup/summary's per-tier counts. */
+/* Category (tier) facet — focus the queue on one MATCH METHOD at a time (street vs.
+ * geo-cell vs. geo-cell-for-street-less-apartments) — orthogonal to the Type row below,
+ * which narrows by property family instead. Picking the 'geo' tier additionally enables
+ * the bulk-approve bar (Houses only — see strongLoadedIds). Reads /dedup/summary's
+ * per-tier counts. */
 function CategoryFacet({
   tiers,
   selected,
@@ -745,6 +812,10 @@ function CategoryFacet({
     <section className="mt-8">
       <p className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)]">
         Category
+      </p>
+      <p className="mt-0.5 text-[0.72rem] text-[var(--color-ink-4)]">
+        How the pair was matched (street vs. location) — not property type; use the Type
+        row below for houses/land/commercial/other.
       </p>
       <div className="mt-2 flex flex-wrap gap-2">
         <button type="button" className={chip(selected == null)} onClick={() => onSelect(null)}>
@@ -1073,6 +1144,7 @@ function imagesFor(side: DedupPropertySide, imagesMap: ImagesMap): TaggedImageUr
  * stay Browse-sized; the table scrolls horizontally for a large cluster. */
 function ClusterCard({
   cluster,
+  candidateIds,
   imagesMap,
   sourcesMap,
   detailMap,
@@ -1082,6 +1154,7 @@ function ClusterCard({
   busy,
 }: {
   cluster: DedupCluster;
+  candidateIds: number[];
   imagesMap: ImagesMap;
   sourcesMap: SourcesMap;
   detailMap: DetailMap;
@@ -1127,6 +1200,7 @@ function ClusterCard({
           ) : null}
         </div>
         <div className="flex items-center gap-2">
+          <ModelCompareButton tone="chip" candidateIds={candidateIds} label="Ask the models" />
           <button
             type="button"
             onClick={onDismiss}

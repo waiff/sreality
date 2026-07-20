@@ -14,6 +14,7 @@ from typing import Any
 
 import psycopg
 
+from api.location_filter import DistrictChip, district_where
 from toolkit.dedup_audit import build_audit_breakdown
 from toolkit.dedup_engine import (
     PHASH_IDENTICAL_MAX,
@@ -106,6 +107,171 @@ def delete_decision_feedback(
             "DELETE FROM dedup_decision_feedback "
             "WHERE left_property_id = %s AND right_property_id = %s",
             (lo, hi),
+        )
+        deleted = cur.rowcount
+    return {"data": {"deleted": bool(deleted)}}
+
+
+def set_image_annotation(
+    conn: psycopg.Connection,
+    *,
+    image_id: int,
+    tag_flagged: bool = False,
+    render_flagged: bool = False,
+    note: str | None = None,
+    created_by: str = "operator",
+) -> dict[str, Any]:
+    """Upsert the operator's correction on ONE image's CLIP call (the /clip-audit
+    "this tag/render score is wrong" flag + note) — same upsert-on-conflict shape as
+    `set_decision_feedback`, at image grain instead of property-pair grain (migration 308)."""
+    clean_note = (note or "").strip() or None
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO image_tag_annotations (image_id, tag_flagged, render_flagged, "
+            "  note, created_by) "
+            "VALUES (%s,%s,%s,%s,%s) "
+            "ON CONFLICT (image_id) DO UPDATE SET "
+            "  tag_flagged = excluded.tag_flagged, "
+            "  render_flagged = excluded.render_flagged, "
+            "  note = excluded.note, "
+            "  updated_at = now() "
+            "RETURNING tag_flagged, render_flagged, note, updated_at",
+            (image_id, bool(tag_flagged), bool(render_flagged), clean_note, created_by),
+        )
+        r = cur.fetchone()
+    return {
+        "data": {
+            "image_id": image_id, "tag_flagged": bool(r[0]), "render_flagged": bool(r[1]),
+            "note": r[2], "updated_at": r[3],
+        }
+    }
+
+
+def delete_image_annotation(conn: psycopg.Connection, *, image_id: int) -> dict[str, Any]:
+    """Clear an image's annotation row entirely. No-op if it had none."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "DELETE FROM image_tag_annotations WHERE image_id = %s", (image_id,),
+        )
+        deleted = cur.rowcount
+    return {"data": {"deleted": bool(deleted)}}
+
+
+def _canon_image_pair(a: int, b: int) -> tuple[int, int]:
+    """Canonical (low, high) image-id pair — the phash_pair_notes key order."""
+    a, b = int(a), int(b)
+    return (a, b) if a < b else (b, a)
+
+
+def set_phash_note(
+    conn: psycopg.Connection,
+    *,
+    image_id_a: int,
+    image_id_b: int,
+    note: str | None,
+    created_by: str = "operator",
+) -> dict[str, Any]:
+    """Upsert the operator's note on ONE image pair from the /phash-audit page — image-
+    PAIR grain (migration 308), the same mutable upsert shape as `set_decision_feedback`."""
+    lo, hi = _canon_image_pair(image_id_a, image_id_b)
+    if lo == hi:
+        raise ValueError("a phash note needs two distinct images")
+    clean_note = (note or "").strip() or None
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO phash_pair_notes (image_id_a, image_id_b, note, created_by) "
+            "VALUES (%s,%s,%s,%s) "
+            "ON CONFLICT (image_id_a, image_id_b) DO UPDATE SET "
+            "  note = excluded.note, updated_at = now() "
+            "RETURNING note, updated_at",
+            (lo, hi, clean_note, created_by),
+        )
+        r = cur.fetchone()
+    return {"data": {"image_id_a": lo, "image_id_b": hi, "note": r[0], "updated_at": r[1]}}
+
+
+def delete_phash_note(
+    conn: psycopg.Connection, *, image_id_a: int, image_id_b: int,
+) -> dict[str, Any]:
+    """Clear a phash-pair note. No-op if it had none."""
+    lo, hi = _canon_image_pair(image_id_a, image_id_b)
+    with conn.cursor() as cur:
+        cur.execute(
+            "DELETE FROM phash_pair_notes WHERE image_id_a = %s AND image_id_b = %s",
+            (lo, hi),
+        )
+        deleted = cur.rowcount
+    return {"data": {"deleted": bool(deleted)}}
+
+
+def set_training_example(
+    conn: psycopg.Connection,
+    *,
+    image_id: int,
+    label: str,
+    created_by: str = "operator",
+) -> dict[str, Any]:
+    """Upsert ONE image's linear-probe training-set label (the /phash-audit "Train"
+    CTA) — one label per image (migration 309), overwritten on a repeat Train click
+    with a different label. `label` is free text (open-vocabulary), not constrained to
+    the CLIP taxonomy — but IS normalized here (trim + collapse internal whitespace),
+    the write boundary, so every reader (this table's distinct-label list feeds the
+    training combobox's suggestions) sees already-clean values instead of re-deriving
+    normalization at each read site. Data-collection only: nothing reads this table yet."""
+    clean = " ".join((label or "").split())
+    if not clean:
+        raise ValueError("a training example needs a non-empty label")
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO image_training_examples (image_id, label, created_by) "
+            "VALUES (%s,%s,%s) "
+            "ON CONFLICT (image_id) DO UPDATE SET "
+            "  label = excluded.label, updated_at = now() "
+            "RETURNING label, updated_at",
+            (image_id, clean, created_by),
+        )
+        r = cur.fetchone()
+    return {"data": {"image_id": image_id, "label": r[0], "updated_at": r[1]}}
+
+
+def delete_training_example(conn: psycopg.Connection, *, image_id: int) -> dict[str, Any]:
+    """Remove an image from the training set. No-op if it wasn't in it."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "DELETE FROM image_training_examples WHERE image_id = %s", (image_id,),
+        )
+        deleted = cur.rowcount
+    return {"data": {"deleted": bool(deleted)}}
+
+
+def set_border_case(
+    conn: psycopg.Connection, *, image_id: int, created_by: str = "operator",
+) -> dict[str, Any]:
+    """Flag ONE image as a border case (migration 310) — even a human isn't confident
+    about its room/plan classification. A separate concern from image_training_examples:
+    no label required, and independent of whether the image has one. Idempotent — a
+    repeat flag is a no-op, not a second row (image_id is unique)."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO image_border_cases (image_id, created_by) VALUES (%s,%s) "
+            "ON CONFLICT (image_id) DO NOTHING "
+            "RETURNING created_at",
+            (image_id, created_by),
+        )
+        r = cur.fetchone()
+        if r is None:
+            cur.execute(
+                "SELECT created_at FROM image_border_cases WHERE image_id = %s", (image_id,),
+            )
+            r = cur.fetchone()
+    return {"data": {"image_id": image_id, "created_at": r[0]}}
+
+
+def delete_border_case(conn: psycopg.Connection, *, image_id: int) -> dict[str, Any]:
+    """Unflag an image as a border case. No-op if it wasn't flagged."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "DELETE FROM image_border_cases WHERE image_id = %s", (image_id,),
         )
         deleted = cur.rowcount
     return {"data": {"deleted": bool(deleted)}}
@@ -237,8 +403,43 @@ LEGACY_REASON = "(legacy)"
 NULL_VERDICT = "(none)"
 
 
+def _either_side_eq(
+    column: str, value: Any, aliases: tuple[str, str], param_key: str,
+) -> tuple[str, dict[str, Any]]:
+    """A pair matches if EITHER side's `column` equals `value` — the same
+    "which half of the pair matched" latitude `district_where` gives a
+    location chip, for a plain scalar equality instead. A pair CAN
+    legitimately span two categories (the sanctioned dům↔komerční cross-type
+    merge, rule #15), so a single-column equality (`a.category_main = ...`)
+    silently drops half of those pairs from both of the type tabs they
+    actually belong in."""
+    l, r = aliases
+    return (
+        f"({l}.{column} = %({param_key})s OR {r}.{column} = %({param_key})s)",
+        {param_key: value},
+    )
+
+
+# The `property_identity_candidates` <-> `properties` join every list_candidates
+# query needs, factored out so its COUNT and its page SELECT can never disagree
+# about which tables the shared WHERE clause can reference — an inconsistency
+# here is exactly the bug that broke the location filter (a COUNT missing the
+# `l`/`r` join while its WHERE referenced `l.obec_id`/`r.obec_id`). Both sides
+# always exist (NOT NULL FKs), so the INNER JOIN never drops a candidate row.
+_CANDIDATES_FROM = (
+    "FROM property_identity_candidates c "
+    "JOIN properties l ON l.id = c.left_property_id "
+    "JOIN properties r ON r.id = c.right_property_id"
+)
+
+
 def _candidate_filters(
-    status: str | None, tier: str | None, reason: str | None, verdict: str | None,
+    status: str | None,
+    tier: str | None,
+    reason: str | None,
+    verdict: str | None,
+    districts: list[DistrictChip] | None = None,
+    category_main: str | None = None,
 ) -> tuple[str, dict[str, Any]]:
     """Shared WHERE for list_candidates + its COUNT (so the page total is real)."""
     clauses: list[str] = []
@@ -259,6 +460,21 @@ def _candidate_filters(
     elif verdict is not None:
         clauses.append("c.markers_matched->>'verdict' = %(verdict)s")
         params["verdict"] = verdict
+    if category_main is not None:
+        # Same either-side latitude as `districts` below — a Type tab picks a
+        # property type, not a claim that both sides of the pair already agree.
+        cat_where, cat_params = _either_side_eq(
+            "category_main", category_main, ("l", "r"), "category_main",
+        )
+        clauses.append(cat_where)
+        params.update(cat_params)
+    if districts:
+        # A pair matches if EITHER property in it touches the picked place —
+        # the operator is prioritising review work by location, not asserting
+        # both sides already agree on one (that's exactly what review decides).
+        d_where, d_params = district_where(districts, aliases=["l", "r"])
+        clauses.extend(d_where)
+        params.update(d_params)
     where_sql = ("WHERE " + " AND ".join(clauses)) if clauses else ""
     return where_sql, params
 
@@ -270,17 +486,20 @@ def list_candidates(
     tier: str | None = None,
     reason: str | None = None,
     verdict: str | None = None,
+    districts: list[DistrictChip] | None = None,
+    category_main: str | None = None,
     limit: int = 50,
     offset: int = 0,
 ) -> dict[str, Any]:
-    where_sql, params = _candidate_filters(status, tier, reason, verdict)
+    where_sql, params = _candidate_filters(
+        status, tier, reason, verdict, districts, category_main,
+    )
 
     with conn.cursor() as cur:
         # Real total for THIS filter (the page is capped at `limit`), so the UI
         # can show the full backlog size + paginate — not just the page count.
-        cur.execute(
-            f"SELECT count(*) FROM property_identity_candidates c {where_sql}", params,
-        )
+        # Shares `_CANDIDATES_FROM` with the page SELECT below (see its comment).
+        cur.execute(f"SELECT count(*) {_CANDIDATES_FROM} {where_sql}", params)
         total = int(cur.fetchone()[0])
 
         cur.execute(
@@ -291,9 +510,7 @@ def list_candidates(
               {_PROP_SIDE_SQL.format(p="l", rl="ll")} AS left_property,
               {_PROP_SIDE_SQL.format(p="r", rl="rl")} AS right_property,
               f.is_incorrect, f.expected_outcome, f.note, f.updated_at
-            FROM property_identity_candidates c
-            JOIN properties l ON l.id = c.left_property_id
-            JOIN properties r ON r.id = c.right_property_id
+            {_CANDIDATES_FROM}
             LEFT JOIN listings ll ON ll.sreality_id = l.repr_listing_id
             LEFT JOIN listings rl ON rl.sreality_id = r.repr_listing_id
             LEFT JOIN dedup_decision_feedback f
@@ -389,10 +606,15 @@ def summary(conn: psycopg.Connection, *, status: str = "proposed") -> dict[str, 
 # matching photos, or cosine routings just below a cutoff — to validate the engine's bars.
 # Keys come from this fixed dict (never the request), so interpolating them is injection-safe.
 _FACTOR_FILTER: dict[str, tuple[str, str | None]] = {
-    "phash":   ("a.stage = 'phash'",   "phash_pairs"),
-    "cosine":  ("a.detail ? 'cosine'", "cosine"),
-    "visual":  ("a.stage = 'visual'",  None),
-    "address": ("a.stage = 'address'", None),
+    "phash":      ("a.stage = 'phash'",   "phash_pairs"),
+    "cosine":     ("a.detail ? 'cosine'", "cosine"),
+    "visual":     ("a.stage = 'visual'",  None),
+    "address":    ("a.stage = 'address'", None),
+    # A real terminal reason (stamped under stage='phash' — the floor-plan gate runs as a
+    # post-check on a phash match), unlike site_plan_different_unit which never reaches
+    # dedup_pair_audit at all (that gate's action is always "queue" — see Needs-review's
+    # bucket picker / bucketLabel instead).
+    "floor_plan": ("a.detail->>'reason' = 'floor_plan_different_layout'", None),
 }
 
 
@@ -407,29 +629,46 @@ def list_pair_audit(
     factor_min: float | None = None,
     factor_max: float | None = None,
     verdict: str | None = None,
+    room_type: str | None = None,
     property_id: int | None = None,
+    property_id_in: list[int] | None = None,
     flagged: bool | None = None,
+    districts: list[DistrictChip] | None = None,
     limit: int = 100,
     offset: int = 0,
 ) -> dict[str, Any]:
     """The unified Decision history feed: every TERMINAL dedup decision (merged |
     dismissed), engine AND operator, newest first. Filterable by property type
     (`category_main`), `outcome`, `source`, `stage`, and by the decision FACTOR: `factor`
-    ∈ {phash, cosine, visual, address} with a numeric `factor_min`/`factor_max` on its
-    signal (phash_pairs / cosine), or a `verdict` for visual rows — so the operator can
-    audit the borderline decisions of one signal. `property_id` scopes to the decisions
-    that touch one property's child listings (the listing-detail "merge decisions" link) —
-    keyed on the stable `sreality_id` since `property_id` re-points on every merge.
+    ∈ {phash, cosine, visual, address, floor_plan} with a numeric `factor_min`/`factor_max`
+    on its signal (phash_pairs / cosine), or a `verdict` for visual rows — so the operator
+    can audit the borderline decisions of one signal. `room_type` filters to decisions
+    whose factor detail names that compared room/plan tag (`detail->>'room_type'`, the
+    same value `DedupFactors` already renders — e.g. 'kitchen', 'floor_plan', 'site_plan').
+    `property_id` scopes to the decisions that touch one property's child listings (the
+    listing-detail "merge decisions" link); `property_id_in` is the batched form (one call
+    for many on-screen properties, e.g. the CLIP audit page's property cards) — keyed on
+    the stable `sreality_id` since `property_id` re-points on every merge.
     `merge_group_id` is the inline-undo handle; `undone` is DERIVED by joining the merge
-    ledger (the single source of truth)."""
+    ledger (the single source of truth). `category_main` and `districts` both match a
+    decision if EITHER side's (merged-away-surviving, rule #18) `properties` row
+    satisfies it — `dedup_pair_audit.category_main` is the engine's single stamped
+    classification for the whole pair (falls back to whichever side was non-NULL), so
+    a sanctioned dům↔komerční cross-type merge can be stamped with only ONE of the two
+    types; filtering the pair's OWN two `properties` rows instead of that stamped column
+    is what lets it surface under both type tabs. The property row's location columns
+    aren't cleared on merge, so even a since-retired property still filters correctly."""
     clauses: list[str] = []
     params: dict[str, Any] = {}
     if outcome is not None:
         clauses.append("a.outcome = %(outcome)s")
         params["outcome"] = outcome
     if category_main is not None:
-        clauses.append("a.category_main = %(category_main)s")
-        params["category_main"] = category_main
+        cat_where, cat_params = _either_side_eq(
+            "category_main", category_main, ("pl", "pr"), "category_main",
+        )
+        clauses.append(cat_where)
+        params.update(cat_params)
     if source is not None:
         clauses.append("a.source = %(source)s")
         params["source"] = source
@@ -448,6 +687,9 @@ def list_pair_audit(
     if verdict is not None:
         clauses.append("a.detail->>'verdict' = %(verdict)s")
         params["verdict"] = verdict
+    if room_type is not None:
+        clauses.append("a.detail->>'room_type' = %(room_type)s")
+        params["room_type"] = room_type
     if property_id is not None:
         clauses.append(
             "(a.left_sreality_id IN "
@@ -456,8 +698,24 @@ def list_pair_audit(
             "  (SELECT sreality_id FROM listings WHERE property_id = %(audit_pid)s))"
         )
         params["audit_pid"] = property_id
+    if property_id_in:
+        clauses.append(
+            "(a.left_sreality_id IN "
+            "  (SELECT sreality_id FROM listings WHERE property_id = ANY(%(audit_pids)s))"
+            " OR a.right_sreality_id IN "
+            "  (SELECT sreality_id FROM listings WHERE property_id = ANY(%(audit_pids)s)))"
+        )
+        params["audit_pids"] = list(property_id_in)
     if flagged:
         clauses.append("f.is_incorrect IS TRUE")
+    if districts:
+        # A decision matches if EITHER property it touched is in the picked
+        # place. `dedup_pair_audit` has no location columns of its own — join
+        # the (nullable) property ids to `properties` for its retained
+        # (merge-survivng, rule #18) location columns.
+        d_where, d_params = district_where(districts, aliases=["pl", "pr"])
+        clauses.extend(d_where)
+        params.update(d_params)
     where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
     # The pair-keyed feedback flag (Decision history + Needs-review share one store):
     # join on the canonical (low, high) PROPERTY pair the audit row SNAPSHOTTED at
@@ -469,9 +727,22 @@ def list_pair_audit(
         " AND f.left_property_id = least(a.left_property_id, a.right_property_id) "
         " AND f.right_property_id = greatest(a.left_property_id, a.right_property_id) "
     )
+    # properties joins for the per-side filters (location, category_main) only —
+    # LEFT (not INNER) so a NULL property_id (pre-migration-091 rows) still
+    # surfaces when neither filter is applied; `category_main`/`districts`
+    # above simply can't match a NULL join, which correctly drops those rows
+    # once either filter is set. Shared by BOTH filters (not two separate
+    # joins) so the COUNT and the page SELECT below can't disagree about which
+    # tables the WHERE clause references.
+    side_join = (
+        "LEFT JOIN properties pl ON pl.id = a.left_property_id "
+        "LEFT JOIN properties pr ON pr.id = a.right_property_id "
+    ) if (districts or category_main is not None) else ""
     with conn.cursor() as cur:
         cur.execute(
-            f"SELECT count(*) FROM dedup_pair_audit a {feedback_join} {where}", params,
+            f"SELECT count(*) FROM dedup_pair_audit a {feedback_join} "
+            f"{side_join}{where}",
+            params,
         )
         total = int(cur.fetchone()[0])
         cur.execute(
@@ -491,6 +762,7 @@ def list_pair_audit(
                    f.is_incorrect, f.expected_outcome, f.note, f.updated_at
             FROM dedup_pair_audit a
             {feedback_join}
+            {side_join}
             LEFT JOIN LATERAL (
               SELECT bool_and(e.undone_at IS NOT NULL) AS fully_undone
               FROM property_merge_events e
@@ -554,6 +826,269 @@ def _listing_room_images(
     return ([{"image_id": r[0], "sreality_url": r[1], "storage_path": r[2]}
              for r in cur.fetchall()],
             bool(room_type))
+
+
+# Verified live (EXPLAIN ANALYZE against prod): this DB's shared_buffers is small
+# relative to images/image_clip_tags, so any sufficiently-scattered read pattern over
+# them is cold-I/O-bound — a single request crossing images for ~800 dedup_pair_audit
+# rows already costs ~5s; 3800 in one shot measured 26s+. No query rewrite fixed this
+# (tried: pushing the tag filter earlier via CTEs/indexes — all measured SLOWER, since
+# "kitchen" alone is ~774k rows, not selective enough to help, and the per-image tag
+# lookup has to hit the same cold pages either way). So /phash-audit paginates the
+# SCOPE itself in bounded chunks, not the joined result: each request processes up to
+# a few CHUNK-sized windows of dedup_pair_audit (newest-first), stopping as soon as it
+# has `limit` matching image pairs or hits the ceiling — bounding worst-case latency
+# per request while letting the operator reach the full ceiling by scrolling.
+_PHASH_AUDIT_CHUNK = 800
+_PHASH_AUDIT_SCAN_CEILING = 3800  # the operator's ask: the prior 800 + 3000 more
+
+
+def _phash_audit_chunk(
+    cur: Any, *, scope_where: str, scope_params: dict[str, Any],
+    hamming_min: int, hamming_max: int, room_types: list[str] | None,
+    training_only: bool, training_label: str | None, chunk_offset: int, chunk_size: int,
+) -> list[tuple[Any, ...]]:
+    """One bounded window of the scan: the `chunk_size` dedup_pair_audit rows starting
+    at `chunk_offset` (newest-first), cross-joined against images, Hamming-filtered.
+    OFFSET on dedup_pair_audit itself is cheap at this scale (verified: ~90ms at
+    offset=3800 — a much smaller table than images) — the cost lives entirely in the
+    per-chunk image cross-join below, which is what stays bounded."""
+    join_params: dict[str, Any] = {
+        **scope_params, "hmin": hamming_min, "hmax": hamming_max,
+        "off": chunk_offset, "chunk": chunk_size,
+    }
+    room_clause = ""
+    if room_types:
+        room_clause = (
+            " AND ta.logical_tag = ANY(%(room_types)s)"
+            " AND tb.logical_tag = ANY(%(room_types)s)"
+            " AND ta.logical_tag = tb.logical_tag"
+        )
+        join_params["room_types"] = list(room_types)
+    # Exact per-image check (not just "this pair's LISTING has a trained image
+    # somewhere") — image_training_examples.image_id is unique-indexed, so each EXISTS
+    # is a cheap point lookup, not a scan. phash_audit()'s scope-level sreality_id
+    # pre-filter (below) is what keeps chunks from coming back mostly-empty; this is
+    # what keeps the result correct at the individual-photo grain. `training_label`
+    # narrows further to a SPECIFIC label (e.g. auditing one class at a time), not just
+    # "has any training label at all".
+    training_clause = ""
+    if training_only or training_label:
+        label_match = " AND te.label = %(training_label)s" if training_label else ""
+        training_clause = (
+            f" AND (EXISTS (SELECT 1 FROM image_training_examples te WHERE te.image_id = ia.id{label_match})"
+            f"   OR EXISTS (SELECT 1 FROM image_training_examples te WHERE te.image_id = ib.id{label_match}))"
+        )
+        if training_label:
+            join_params["training_label"] = training_label
+    cur.execute(
+        f"""
+        WITH scoped AS (
+            SELECT a.id, a.left_sreality_id, a.right_sreality_id,
+                   a.left_property_id, a.right_property_id,
+                   a.outcome, a.category_main, a.run_at, a.stage, a.detail
+            FROM dedup_pair_audit a
+            {scope_where}
+            ORDER BY a.run_at DESC
+            OFFSET %(off)s LIMIT %(chunk)s
+        )
+        SELECT s.id, s.left_sreality_id, s.right_sreality_id,
+               s.left_property_id, s.right_property_id, s.outcome,
+               s.category_main, s.run_at, s.stage, s.detail,
+               ia.id, ia.sreality_url, ia.storage_path,
+               ta.logical_tag, ta.fine_tag, ta.confidence, ta.render_score,
+               ib.id, ib.sreality_url, ib.storage_path,
+               tb.logical_tag, tb.fine_tag, tb.confidence, tb.render_score,
+               bit_count((ia.phash # ib.phash)::bit(64)) AS hamming
+        FROM scoped s
+        JOIN images ia ON ia.sreality_id = s.left_sreality_id AND ia.phash IS NOT NULL
+        JOIN images ib ON ib.sreality_id = s.right_sreality_id AND ib.phash IS NOT NULL
+        LEFT JOIN LATERAL (
+            SELECT t.logical_tag, t.fine_tag, t.confidence, t.render_score
+            FROM image_clip_tags t
+            WHERE t.image_id = ia.id ORDER BY t.tagged_at DESC LIMIT 1
+        ) ta ON true
+        LEFT JOIN LATERAL (
+            SELECT t.logical_tag, t.fine_tag, t.confidence, t.render_score
+            FROM image_clip_tags t
+            WHERE t.image_id = ib.id ORDER BY t.tagged_at DESC LIMIT 1
+        ) tb ON true
+        WHERE bit_count((ia.phash # ib.phash)::bit(64)) BETWEEN %(hmin)s AND %(hmax)s
+        {room_clause}
+        {training_clause}
+        ORDER BY hamming ASC, s.run_at DESC
+        LIMIT 500
+        """,
+        join_params,
+    )
+    return cur.fetchall()
+
+
+def phash_audit(
+    conn: psycopg.Connection,
+    *,
+    hamming_min: int,
+    hamming_max: int,
+    category_main: str | None = None,
+    outcome: str | None = None,
+    room_types: list[str] | None = None,
+    training_only: bool = False,
+    training_label: str | None = None,
+    training_exclude: bool = False,
+    scan_offset: int = 0,
+    limit: int = 100,
+) -> dict[str, Any]:
+    """/phash-audit: matching-photo image PAIRs, across the pairs the engine already
+    looked at (dedup_pair_audit), whose live-recomputed Hamming distance falls in
+    [hamming_min, hamming_max] — a direct range browse, not a merged-vs-dismissed
+    comparison (the operator's ask: "show me image pairs that were phash scored and were
+    within this range"). Hamming is a cheap bitwise `bit_count(a XOR b)` over the already-
+    stored `images.phash` bigints — no vision recompute, no re-scoring; this mirrors the
+    ENGINE's own phash pass (`_phash_identical_pairs`), which is deliberately room-blind
+    (a near-identical Hamming distance detects a reused/re-scaled PHOTO FILE, not "the
+    same room" — CLIP's room tag is a separate, independent classification of each image,
+    shown for context only, never a comparison constraint on the engine side). `room_types`
+    requires BOTH images to carry the SAME tag, and that tag to be one of the given set —
+    the operator's ask is "show me kitchen-vs-kitchen (or bathroom-vs-bathroom, ...)
+    pairs", not "either side happens to be one of these". `training_only` narrows to
+    pairs where at least one of the two specific images shown already has a
+    linear-probe training-set label (image_training_examples) — the exact photo, not
+    just some other photo on the same listing. `training_label`, if given, narrows
+    further to that SPECIFIC label (implies training_only regardless of its literal
+    value) — auditing one class's coverage at a time. `training_exclude` is the
+    inverse — pairs where NEITHER shown image is in the training set yet, for finding
+    fresh material to review rather than revisiting what's already been picked. Takes
+    priority over training_only/training_label if somehow both are set (the frontend
+    never does — it's a single 3-way choice).
+
+    Pagination is over the SCOPE (dedup_pair_audit), not the joined result — see
+    `_PHASH_AUDIT_CHUNK`'s comment for why. `scan_offset` is the opaque cursor (how many
+    scoped decisions have already been scanned); pass back `next_scan_offset` for the
+    next call. ONE call processes exactly ONE chunk (bounded, predictable latency —
+    matches the CHUNK size regardless of how sparse the filter is); the caller (the
+    /phash-audit page) loops calls forward until it has a full page or `next_scan_offset`
+    comes back null, since a single chunk can legitimately return fewer than `limit`
+    rows while more remains to scan (an infinite-scroll page-size check can't tell
+    "short because sparse" from "short because done" apart on its own)."""
+    scope_clauses: list[str] = []
+    scope_params: dict[str, Any] = {}
+    if category_main is not None:
+        scope_clauses.append("a.category_main = %(category_main)s")
+        scope_params["category_main"] = category_main
+    if outcome is not None:
+        scope_clauses.append("a.outcome = %(outcome)s")
+        scope_params["outcome"] = outcome
+    with conn.cursor() as cur:
+        if training_exclude:
+            # Unlike the inclusion case below, the SCOPE check alone is already exact
+            # here — trained_sreality_ids is "every sreality_id that owns at least one
+            # trained image", so excluding those listings guarantees neither remaining
+            # image can possibly be a trained one. No post-join re-check needed (see
+            # _phash_audit_chunk: training_only/training_label stay False here, so it
+            # never adds one). Also no "narrows to a tiny set" efficiency win the
+            # inclusion branch gets — the training set is tiny, so excluding it barely
+            # shrinks a huge population — but a small NOT-IN-style array check is cheap
+            # regardless, and an empty training set means nothing to exclude at all.
+            cur.execute(
+                "SELECT DISTINCT i.sreality_id FROM images i "
+                "JOIN image_training_examples te ON te.image_id = i.id "
+                "WHERE i.sreality_id IS NOT NULL",
+            )
+            trained_sreality_ids = [r[0] for r in cur.fetchall()]
+            if trained_sreality_ids:
+                scope_clauses.append(
+                    "NOT (a.left_sreality_id = ANY(%(trained_sreality_ids)s)"
+                    " OR a.right_sreality_id = ANY(%(trained_sreality_ids)s))",
+                )
+                scope_params["trained_sreality_ids"] = trained_sreality_ids
+        elif training_only or training_label:
+            # The training set is tiny (an operator hand-picks it) next to
+            # dedup_pair_audit's population — without this, almost every chunk would
+            # come back empty post-join, forcing the frontend to scan the whole
+            # ceiling for a handful of rows. Narrowing the SCOPE to only the listings
+            # that own a (matching) trained image keeps a chunk's odds of matching
+            # close to 1, same as any other scope filter (category_main/outcome)
+            # already does.
+            lookup_sql = (
+                "SELECT DISTINCT i.sreality_id FROM images i "
+                "JOIN image_training_examples te ON te.image_id = i.id "
+                "WHERE i.sreality_id IS NOT NULL"
+            )
+            lookup_params: dict[str, Any] = {}
+            if training_label:
+                lookup_sql += " AND te.label = %(training_label)s"
+                lookup_params["training_label"] = training_label
+            cur.execute(lookup_sql, lookup_params)
+            trained_sreality_ids = [r[0] for r in cur.fetchall()]
+            if not trained_sreality_ids:
+                return {
+                    "data": [], "returned": 0, "scanned_pairs": 0,
+                    "scan_cap": _PHASH_AUDIT_SCAN_CEILING, "scanned_so_far": 0,
+                    "next_scan_offset": None,
+                }
+            scope_clauses.append(
+                "(a.left_sreality_id = ANY(%(trained_sreality_ids)s)"
+                " OR a.right_sreality_id = ANY(%(trained_sreality_ids)s))",
+            )
+            scope_params["trained_sreality_ids"] = trained_sreality_ids
+
+        scope_where = ("WHERE " + " AND ".join(scope_clauses)) if scope_clauses else ""
+        cur.execute(
+            f"SELECT count(*) FROM dedup_pair_audit a {scope_where}", scope_params,
+        )
+        scanned_pairs = int(cur.fetchone()[0])
+
+        ceiling = min(_PHASH_AUDIT_SCAN_CEILING, scanned_pairs)
+        offset = scan_offset
+        collected: list[tuple[Any, ...]] = []
+        if offset < ceiling:
+            window = min(_PHASH_AUDIT_CHUNK, ceiling - offset)
+            collected = _phash_audit_chunk(
+                cur, scope_where=scope_where, scope_params=scope_params,
+                hamming_min=hamming_min, hamming_max=hamming_max,
+                room_types=room_types,
+                # training_exclude's scope-level NOT check is already exact (see
+                # above) — never let the inclusion post-join EXISTS clause layer on
+                # top of it, even if a caller sent both.
+                training_only=training_only and not training_exclude,
+                training_label=None if training_exclude else training_label,
+                chunk_offset=offset, chunk_size=window,
+            )
+            offset += window
+    rows = collected[:limit]
+    next_scan_offset = offset if offset < ceiling else None
+    return {
+        "data": [
+            {
+                "audit_id": r[0], "left_sreality_id": r[1], "right_sreality_id": r[2],
+                "left_property_id": r[3], "right_property_id": r[4],
+                "outcome": r[5], "category_main": r[6], "run_at": r[7],
+                "stage": r[8],
+                # What ACTUALLY decided this pair (may well be a different signal than
+                # the phash row it's shown on — the point of this page is exactly to
+                # surface that gap, e.g. "phash found nothing, forensic vision dismissed
+                # it" — so the operator never has to guess from the Hamming number alone).
+                "audit_breakdown": build_audit_breakdown(r[9]),
+                "left_image": {
+                    "image_id": r[10], "sreality_url": r[11], "storage_path": r[12],
+                    "room_type": r[13], "fine_tag": r[14], "confidence": r[15],
+                    "render_score": r[16],
+                },
+                "right_image": {
+                    "image_id": r[17], "sreality_url": r[18], "storage_path": r[19],
+                    "room_type": r[20], "fine_tag": r[21], "confidence": r[22],
+                    "render_score": r[23],
+                },
+                "hamming": int(r[24]),
+            }
+            for r in rows
+        ],
+        "returned": len(rows),
+        "scanned_pairs": scanned_pairs,
+        "scan_cap": _PHASH_AUDIT_SCAN_CEILING,
+        "scanned_so_far": offset,
+        "next_scan_offset": next_scan_offset,
+    }
 
 
 def _phash_pair_evidence(

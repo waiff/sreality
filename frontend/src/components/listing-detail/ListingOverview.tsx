@@ -112,7 +112,9 @@ function Header({
   const price = hasPrice ? fmtCzk(listing.price_czk) : 'Cena na vyžádání';
   const ppm = fmtPricePerM2(listing.price_czk, listing.area_m2);
   const unit = hasPrice && listing.price_unit ? ` / ${listing.price_unit}` : '';
-  const hasId = listing.sreality_id > 0;
+  // Only sreality carries a real portal id; other sources hold a synthetic
+  // (negative) sreality_id that must never surface as an "ID".
+  const hasId = listing.source === 'sreality';
   const { lat, lng } = listing;
   const hasMap = lat != null && lng != null;
 

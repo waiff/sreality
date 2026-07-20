@@ -102,6 +102,13 @@ already-routed vision calls into batches**, so selection identity holds by const
   `dedup_batch_warmer_enabled=false`. It stops ~$23/day of ~0.5%-consumed spend the moment
   it's flipped, and nothing regresses (the engine never depended on the warm cache — that is
   precisely the problem). Recommend flipping today; the crons then no-op.
+  - **SUPERSEDED (operator decision 2026-07-14): the warmer STAYS ON.** After the gpt-5-mini flip
+    (PR #787), the warmer became the live proof of the OpenAI Batch round-trip — it submitted 12
+    gpt-5-mini batches ($1.17, 11 ingested clean, correct 50% batch pricing) that validated the
+    provider path end-to-end. The operator kept it running for that reason. The §4.1 engine-fed
+    rebuild below still replaces the warmer's *guessed* work-list (that argument is unchanged) — it
+    is a Session 4 build now, not an immediate flip-off. (PR A additionally fixed the OpenAI batch
+    poll-counts key mismatch that had been NULLing `dedup_batches.{succeeded,errored}_count`.)
 
 Honest saving estimate (replaces the prior "$1.6–2k/mo recoverable by fixing targeting"):
 stop-warmer ≈ **$690/mo** immediately; §4.1 batching ≈ 50% off the sweep-lane share of the
@@ -418,20 +425,98 @@ is its own PR + operator flip.
   recommendation. Cleaner after Session 2 shrinks the paid volume the residue models must cover.
   **Blocker to clear first: `QWEN_API_KEY`/`OPENAI_API_KEY` exist only on the Railway api service
   — the Actions harness + local benchmark scripts need them as GH secrets / local env too.**
-- **Session 4 — batch lane rebuild for the backlog (point 3).** GOAL unchanged (warmed verdicts
-  actually consumed; the ~$1.6–2k/mo target). **MECHANISM corrected by Finding I-1 (§1.2): do NOT
-  "reconcile the warmer's selection query with the engine's"** — a second process re-deriving the
-  work-list can only approximate it (six divergences). Instead retire the speculative pre-warmer
-  (flip `dedup_batch_warmer_enabled=false`, which the operator can do any time) and build §4.1 as
-  specced: the ENGINE defers its own already-routed cold vision calls into `dedup_batches` (sweep
-  lanes only; dirty stays sync) so selection identity holds by construction. Measure via the
-  `duration_ms=0 AND error IS NULL` batch attribution + pair overlap (must go ~1% → ~100%). What
+- **Session 4 — batch lane rebuild for the backlog (point 3): SHIPPED (2026-07-14).** GOAL
+  unchanged (warmed verdicts actually consumed; the ~$1.6–2k/mo target). **MECHANISM corrected by
+  Finding I-1 (§1.2): do NOT "reconcile the warmer's selection query with the engine's"** — a
+  second process re-deriving the work-list can only approximate it (six divergences). Shipped as
+  specced: the ENGINE defers its own already-routed cold classify/compare/site-plan/floor-plan
+  calls into `dedup_batch_requests` (`batch_id NULL` — migration 306; sweep lanes only — full
+  street, geo, byt-geo, candidates; dirty/realtime stay sync) so selection identity holds by
+  construction, gated by `dedup_engine_batch_defer_enabled` (default OFF — flip to activate).
+  `scripts/submit_dedup_batch.py`'s old collect() work-list guesswork is retired; its only job now
+  is flushing the spool into provider Batch API submissions (unchanged `dedup_batches`/ingest
+  plumbing). `dedup_batch_warmer_enabled` is retired (inert). Shared chunk/retry primitives
+  extracted to `toolkit/batch_submit.py` (dedup/condition/enrich converge). Provider-agnostic
+  naming swept across the batch layer. Verified: dedup batch requests already run at 4096
+  max_tokens with no truncation evidence (max observed 3546/4096 on floor_plan) — unlike
+  enrichment's 512-token bug (#791), no fix needed. **Not yet measured live** (flag ships OFF):
+  next operator flip should watch `duration_ms=0 AND error IS NULL` batch attribution + pair
+  overlap (must go ~1% → ~100%) to confirm the fix. **Found, not fixed:** ~0.4-1.2% of
+  floor_plan/site_plan gpt-5-mini calls error with an Anthropic-provider 404 for a gpt-5-mini
+  model id (pre-existing routing bug, unrelated to this session — flagged for follow-up). What
   spend CANNOT fix: pozemek/komerční are structurally undismissable (no per-family dismissal
   rooms) — that's Session 2's dismissal-side work, don't paper over it here.
-- **Session 5 — recency-first compare ordering (point 2).** One shared priority function (newest
-  listings first) across candidate drain + sweep compare budgets, so 1d/3d/1w Browse filters
-  never show unmerged dups in ANY category. The dirty lane already covers the first hours; this
-  fixes the tail. Cleaner after Session 2 (most fresh pairs should then conclude free).
+- **Session 5a — recency-first compare ordering (point 2): SHIPPED (2026-07-14).** One shared
+  recency signal (`properties.first_seen_at`) feeds both halves: the candidate drain ranks its
+  whole due-set newest-first (`_recency_ranked_property_ids` → `priority_property_order`, the
+  mechanism the dirty drain already established); the three cursor-bearing sweep lanes (full
+  street, geo, byt-geo) each pull a bounded "recency head" (`_recency_head_candidate_ids`,
+  tier + 7-day-window scoped) to the front of the pass. Composed with the `scan_cursor`
+  lexicographic frontier, not a re-sort of it: `run_engine`'s `frontier_keys` ensures only
+  cursor-ordered tail groups can advance the PERSISTED cursor position, so a deadline-truncated
+  run can never regress the frontier even when the head is non-empty (migration 261's coverage
+  guarantee is preserved). `dedup_recency_backlog` (migration 307) is the acceptance-metric view
+  (per-tier unresolved-and-fresh counts, <1d/<3d/<7d); write-once `first_engine_decision_at`
+  (same migration) instruments time-to-first-look separately from `last_engine_decision_at`.
+  Live re-verification (2026-07-14) found the geo tier carries ~85% of the fresh backlog (700/
+  <1d, 1391/<3d, 5521/<7d of 39,983 total proposed) — expected, since single-dwelling families
+  have no free-arm/warmer path (rule #15 (E)); the geo lane's head is where this matters most.
+  The dirty lane already covers the first hours; this fixes the tail. Not yet measured for
+  actual acceptance-metric movement (needs a few scheduled cycles to run against the new
+  ordering) — that's the next session's first check.
+- **Session 5b — DISTINCTIVE_IMAGES unification + pozemek dismissal design (2026-07-14).**
+  Two parts, only the first SHIPPED:
+  - **Registry unification: SHIPPED.** `toolkit/room_taxonomy.IMAGE_ROLE_REGISTRY` (one
+    `ImageRole` per (family, tag): `phash_vote` / `forensic_order` / `distinctive` / `dismiss`
+    / `dismiss_needs_facade_flag` / `gate`) replaces three independently hand-maintained
+    mechanisms — the byt-only pHash exclusion + single-match override, each family's
+    `INTERIOR_PRIORITY`/`HOUSE_PRIORITY`/`LAND_PRIORITY` forensic-compare order, and
+    `DISTINCTIVE_DISMISS_ROOMS` + the facade-flag conditional union inside
+    `decide_visual_dismiss` — with ONE declaration per family that
+    `distinctive_rooms_for`/`phash_excluded_tags_for`/`decide_visual_dismiss` now read
+    uniformly (no more `if family == "byt"` special-casing at each call site). Pure
+    refactor: every legacy constant (`INTERIOR_PRIORITY`, `HOUSE_PRIORITY`, `LAND_PRIORITY`,
+    `NON_INTERIOR_TAGS`, `DISTINCTIVE_ROOMS`) is now DERIVED from the registry and verified
+    value-identical to its old hand-maintained form; the full existing test suite (2694
+    tests) passed unchanged, plus 6 new registry-specific tests. No app_settings flip, no
+    migration — zero behavior change today, only where the next behavior change would be
+    written (one dict entry, not new dispatch code).
+  - **Pozemek dismissal shapes (i)/(ii)/(iii): DESIGNED + REPLAYED, NOT SHIPPED — needs a
+    model fix first, then operator sign-off.** The golden set (`2026-07-13-session3-baseline`)
+    has 111 pozemek `operator_merge` positives and 87 negatives (75 `engine_site_plan_verdict`
+    + 9 `operator_dismissal` + 3 `decision_feedback`).
+    - **Shape (ii)** (auto-dismiss on a `site_plan_different_unit` verdict) replay: joining the
+      111 positive property pairs against CURRENT `property_identity_candidates.markers_matched`
+      found ZERO pairs that were ever confirmed-different by the engine and later merged anyway
+      — i.e. no observed conflict between the label this shape would act on and a known true
+      merge. Promising, but not conclusive proof of the VERDICT's own reliability (see below).
+    - **NEW BLOCKING FINDING, not previously surfaced this precisely:** the vision-model
+      bake-off (`dedup_vision_bakeoff_results`, migration 303) scored the site-plan lane's
+      CURRENT LIVE model — `llm_site_plan_match_model = gpt-5-mini` (confirmed live) — at only
+      **50.0% correct on pozemek (12/24), with 12/24 (50%) flagged dangerous**, vs.
+      claude-sonnet-4-5's 92.9% (13/14) and gemini-3.1-flash-lite / qwen3-vl-30b's 79.2%
+      (19/24, 5 dangerous each). The golden set's 75 `engine_site_plan_verdict` negatives were
+      labeled when Sonnet drove this lane (design doc §2.1a); TODAY's verdicts come from a
+      model the bake-off shows is close to a coin-flip on this exact family, with half its
+      calls dangerous. This means: **neither shape (i) ("cadastral reading vetoes a merge")
+      nor shape (ii) ("different_unit auto-dismisses") can safely ship against the CURRENT
+      site-plan model** — both would be gating/dismissing on a coin-flip. The shape (ii)
+      replay above is a necessary but not sufficient check; it validates the LABEL's
+      structure, not gpt-5-mini's live accuracy at producing that label.
+    - **Recommendation, in order:** (1) route `llm_site_plan_match_model` to a
+      stronger model for the pozemek family specifically (Sonnet ≈93% correct / Gemini-3.1-
+      flash-lite or Qwen3-VL-30B ≈79% correct, both far above gpt-5-mini's 50%) — a
+      per-family model override, not a blanket lane flip, so byt/dum/komercni's already-
+      acceptable-cost gpt-5-mini routing is undisturbed; (2) re-run this exact replay against
+      a sample of the UPGRADED model's live different_unit verdicts (not the Sonnet-era
+      golden-set labels) before trusting shape (ii)'s precision number; (3) THEN present
+      shape (i) vs (ii) vs "leave as designed" to the operator with real numbers, per rule 15's
+      amendment protocol (golden-set replay + explicit sign-off before any auto-dismiss/gate
+      relaxation). Shape (iii) (parcel-label OCR as a per-parcel identity signal) remains
+      out of scope, unbuilt, as originally noted — no new evidence changes that.
+    - Nothing shipped or flipped for this half: `IMAGE_ROLE_REGISTRY`'s `dismiss_needs_facade_flag`
+      field is the only "flag-gated dismiss" mechanism live today (facade, non-byt, mig 285);
+      no new pozemek dismiss field was added, since shape (ii) isn't ready to gate anything yet.
 - **Vector-DB question (point 4B, assessed in Session 2):** pgvector already serves the pairwise
   cosine tier server-side; the only case for an ANN index is market-wide visual candidate
   *generation*. Assess pgvector-HNSW-on-a-scoped-subset vs an external service against rule #7;

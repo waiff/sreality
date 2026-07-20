@@ -22,7 +22,9 @@ interface Column {
 }
 
 const COLUMNS: ReadonlyArray<Column> = [
-  { field: 'sreality_id',   label: 'ID',          align: 'left',  sortable: true  },
+  /* Not sortable: sreality_id mixes real positive ids with synthetic negative
+   * ones (non-sreality portals), so ordering by it is meaningless. */
+  { field: 'sreality_id',   label: 'ID',          align: 'left',  sortable: false },
   { field: 'district',      label: 'Location',    align: 'left',  sortable: true  },
   { field: 'disposition',   label: 'Type',        align: 'left',  sortable: true  },
   { field: 'area_m2',       label: 'Area',        align: 'right', sortable: true  },

@@ -62,6 +62,7 @@ from api.routes.dedup import router as dedup_router
 from api.routes.outreach import router as outreach_router
 from api.routes.filter_presets import router as filter_presets_router
 from api.routes.images import router as images_router
+from api.routes.location_audit import router as location_audit_router
 from api.routes.notifications import router as notifications_router
 from scraper import image_storage
 from scraper.db import sweep_stuck_scrape_runs
@@ -235,6 +236,9 @@ app.include_router(notifications_router)
 # /dedup/* (cross-source merge review: list candidates, merge/dismiss/unmerge)
 # — mutating operator actions, admin-gated (require_admin).
 app.include_router(dedup_router)
+# /location-audit/* (read-only per-listing address/geo/coord field inventory +
+# acquisition provenance + raw_json viewer) — admin-gated (require_admin).
+app.include_router(location_audit_router)
 # /brokers/* (broker intelligence reads: leaderboard, detail, listings, contacts)
 # — standard bearer gate; contacts are PII not exposed by the anon public views.
 app.include_router(brokers_router)

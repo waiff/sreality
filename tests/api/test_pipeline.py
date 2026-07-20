@@ -173,6 +173,7 @@ _CARD_ROW = (42, 1, "interested", "Zájem", 5, None, None, None)
 
 def test_add_card_inserts_at_entry_stage_and_logs_event():
     conn = _FakeConn([
+        (lambda q: "RECURSIVE chain" in q, [(42, 42)]),  # property active -> itself
         (lambda q: "WHERE is_entry" in q, [(1,)]),
         (lambda q: "max(board_position)" in q, [(5,)]),
         (lambda q: "INSERT INTO property_pipeline (" in q, [(42,)]),  # RETURNING -> inserted
@@ -189,6 +190,7 @@ def test_add_card_inserts_at_entry_stage_and_logs_event():
 def test_add_card_idempotent_returns_existing_stage_no_event():
     existing = (42, 3, "offer", "Nabídka", 2, None, None, None)
     conn = _FakeConn([
+        (lambda q: "RECURSIVE chain" in q, [(42, 42)]),  # property active -> itself
         (lambda q: "WHERE is_entry" in q, [(1,)]),
         (lambda q: "max(board_position)" in q, [(5,)]),
         (lambda q: "INSERT INTO property_pipeline (" in q, []),  # ON CONFLICT -> no row
@@ -200,6 +202,31 @@ def test_add_card_idempotent_returns_existing_stage_no_event():
     assert not any(
         "INSERT INTO property_pipeline_events" in e[0] for e in conn.executed
     )
+
+
+def test_add_card_redirects_merged_away_property_to_survivor():
+    # property 99 was merged into the active survivor 42; the card + event must
+    # land on 42, never orphan onto the retired 99.
+    conn = _FakeConn([
+        (lambda q: "RECURSIVE chain" in q, [(99, 42)]),
+        (lambda q: "WHERE is_entry" in q, [(1,)]),
+        (lambda q: "max(board_position)" in q, [(5,)]),
+        (lambda q: "INSERT INTO property_pipeline (" in q, [(42,)]),
+        (lambda q: "FROM property_pipeline pp JOIN pipeline_stages" in q, [_CARD_ROW]),
+    ])
+    out = pipeline_module.add_card(conn, s.AddPipelineCardIn(property_id=99), account_id=None)
+    assert out["added"] is True
+    inserts = [p for q, p in conn.executed if "INSERT INTO property_pipeline (" in q]
+    assert inserts and inserts[0][0] == 42
+    events = [p for q, p in conn.executed if "property_pipeline_events" in q]
+    assert events and events[0][0] == 42
+
+
+def test_add_card_no_active_survivor_is_422():
+    conn = _FakeConn([(lambda q: "RECURSIVE chain" in q, [])])  # missing / broken chain
+    with pytest.raises(fastapi.HTTPException) as ei:
+        pipeline_module.add_card(conn, s.AddPipelineCardIn(property_id=7), account_id=None)
+    assert ei.value.status_code == 422
 
 
 def test_move_card_to_new_stage_logs_event_and_stamps_entered():

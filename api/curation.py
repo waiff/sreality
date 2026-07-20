@@ -22,6 +22,10 @@ import psycopg
 from fastapi import HTTPException
 
 from api import schemas as s
+from toolkit.property_identity import (
+    resolve_active_property_id,
+    resolve_active_property_ids,
+)
 
 if TYPE_CHECKING:
     pass
@@ -90,9 +94,11 @@ def get_collection(
 
     properties_sql = (
         "SELECT cp.property_id, p.repr_listing_id, p.district, p.disposition, p.subtype, "
-        "       p.area_m2, p.current_price_czk, p.last_seen_at, p.is_active, cp.added_at "
+        "       p.area_m2, p.current_price_czk, p.last_seen_at, p.is_active, cp.added_at, "
+        "       rl.source "
         "FROM collection_properties cp "
         "JOIN properties p ON p.id = cp.property_id "
+        "LEFT JOIN listings rl ON rl.sreality_id = p.repr_listing_id "
         "WHERE cp.collection_id = %s "
         "ORDER BY cp.added_at DESC"
     )
@@ -111,6 +117,7 @@ def get_collection(
             "last_seen_at": _iso(r[7]),
             "is_active":    bool(r[8]),
             "added_at":     _iso(r[9]),
+            "source":       r[10],
         }
         for r in rows
     ]
@@ -208,7 +215,16 @@ def add_properties_to_collection(
             )
             if cur.fetchone() is None:
                 raise HTTPException(404, "collection not found")
-            cur.execute(sql, (collection_id, body.property_ids))
+            # Redirect merged-away property_ids to their live survivor so
+            # membership never lands on a retired property (dedup-stability).
+            resolved = resolve_active_property_ids(conn, body.property_ids)
+            missing = [p for p in body.property_ids if p not in resolved]
+            if missing:
+                raise HTTPException(
+                    422, f"one or more property_ids do not exist: {missing}",
+                )
+            survivor_ids = list({resolved[p] for p in body.property_ids})
+            cur.execute(sql, (collection_id, survivor_ids))
             added = cur.rowcount
             cur.execute(
                 "UPDATE collections SET updated_at = now() WHERE id = %s",
@@ -218,7 +234,7 @@ def add_properties_to_collection(
         raise HTTPException(
             422, f"one or more property_ids do not exist: {exc}",
         )
-    skipped = len(body.property_ids) - added
+    skipped = len(survivor_ids) - added
     return {"added": added, "skipped": skipped}
 
 
@@ -271,7 +287,10 @@ def create_note(
     )
     try:
         with conn.transaction(), conn.cursor() as cur:
-            cur.execute(sql, (property_id, body.body, body.origin_listing_id))
+            pid = resolve_active_property_id(conn, property_id)
+            if pid is None:
+                raise HTTPException(404, "property not found")
+            cur.execute(sql, (pid, body.body, body.origin_listing_id))
             row = cur.fetchone()
     except psycopg.errors.ForeignKeyViolation:
         raise HTTPException(404, "property not found")
@@ -369,7 +388,10 @@ def attach_tag(
     )
     try:
         with conn.transaction(), conn.cursor() as cur:
-            cur.execute(sql, (property_id, body.tag_id))
+            pid = resolve_active_property_id(conn, property_id)
+            if pid is None:
+                raise HTTPException(404, "property not found")
+            cur.execute(sql, (pid, body.tag_id))
             attached = cur.rowcount > 0
     except psycopg.errors.ForeignKeyViolation as exc:
         msg = str(exc).lower()

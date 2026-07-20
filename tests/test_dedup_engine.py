@@ -2528,6 +2528,47 @@ def test_run_engine_geo_cursor_truncation_reports_frontier(monkeypatch: Any) -> 
     assert cursor_out["reached_end"] is False
 
 
+# --- Session 5: recency-first ordering composed with the cursor frontier -----
+
+def test_run_engine_recency_head_jumps_queue_without_moving_cursor_backward(
+    monkeypatch: Any,
+) -> None:
+    """A recency_head_property_ids group BEHIND the current scan_cursor still gets
+    processed this run (the whole point — a fresh duplicate doesn't wait a full cycle
+    for the lexicographic frontier to wrap back around to it), but the PERSISTED cursor
+    position only ever advances over the cursor-ordered tail: a head-only visit must
+    never regress scan_frontier, or a deadline-truncated run would walk the frontier
+    backward every time the head is non-empty (defeating migration 261's guarantee)."""
+    import scripts.dedup_engine as eng
+
+    monkeypatch.setattr(eng, "resolve_pair", _stub_resolve_pair)
+    cursor_out: dict[str, Any] = {}
+    # Sorts strictly between alfa's and gama's keys regardless of the exact suffix
+    # format (any street name < 'beta~' < any street name starting 'g...'), so alfa
+    # (property 101) is behind the cursor and beta (property 103) is skipped like any
+    # ordinary behind-cursor group; gama (property 105) is the only cursor-ordered tail.
+    stats = eng.run_engine(
+        _FakeConn(_three_group_rows()),
+        scan_cursor="name:5001:beta~", cursor_out=cursor_out,
+        recency_head_property_ids={101},
+        max_pairs=100, max_vision_calls=0)
+    assert stats["pairs_considered"] == 2  # alfa (head) + gama (tail); beta skipped
+    assert cursor_out["last_key"].startswith("name:5001:gama")  # NOT alfa
+    assert cursor_out["reached_end"] is True
+
+
+def test_run_engine_recency_head_ignored_outside_cursor_runs(monkeypatch: Any) -> None:
+    """recency_head_property_ids only means something to a cursor-bearing lane; a scoped
+    run (candidates/dirty, cursor_out=None) ignores it rather than erroring."""
+    import scripts.dedup_engine as eng
+
+    monkeypatch.setattr(eng, "resolve_pair", _stub_resolve_pair)
+    stats = eng.run_engine(
+        _FakeConn(_three_group_rows()),
+        recency_head_property_ids={101}, max_pairs=100, max_vision_calls=0)
+    assert stats["pairs_considered"] == 3  # every group processed, insertion order
+
+
 def _run_geo_only_main(monkeypatch: Any, *, reached_end: bool, last_key: str | None,
                        loaded_state: dict[str, Any] | None = None,
                        extra_argv: tuple[str, ...] = (),
@@ -2571,6 +2612,7 @@ def _run_geo_only_main(monkeypatch: Any, *, reached_end: bool, last_key: str | N
         "dedup_nonbyt_cosine_merge_min": 0,
         "dedup_facade_dismiss_enabled": False,
         "dedup_defer_incomplete_downloads": False,
+        "dedup_engine_batch_defer_enabled": False,
     }
     monkeypatch.setattr(ds, "read_setting", lambda conn, key: settings[key])
     monkeypatch.setattr(eng, "_auto_merge_enabled", lambda conn: False)
@@ -2607,6 +2649,10 @@ def _run_geo_only_main(monkeypatch: Any, *, reached_end: bool, last_key: str | N
     monkeypatch.setattr(eng, "_load_scan_state", _load)
     monkeypatch.setattr(eng, "_save_scan_state", _save)
     monkeypatch.setattr(eng, "run_engine", _fake_run_engine)
+    # Session 5: the geo/byt-geo full-scan branches compute a recency HEAD before
+    # calling run_engine; this harness fakes run_engine itself, so fake the head query
+    # too rather than hit the DB-access-forbidding _Conn.
+    monkeypatch.setattr(eng, "_recency_head_candidate_ids", lambda conn, **kw: set())
     monkeypatch.setattr(
         eng, "_write_run_row",
         lambda conn, stats, **kw: calls["run_rows"].append({"stats": stats, **kw}))
@@ -2849,6 +2895,84 @@ def test_proposed_candidate_property_ids_due_filter_sql() -> None:
     assert "last_engine_decision_at" not in captured["sql"]  # historical full load
 
 
+def test_recency_ranked_property_ids_orders_newest_first_and_dedupes() -> None:
+    """The candidate drain's half of the Session 5 recency signal: rank an id set
+    NEWEST-first by properties.first_seen_at (dedup'd + None-filtered on the way in)."""
+    import scripts.dedup_engine as eng
+
+    captured: dict[str, Any] = {}
+
+    class _C:
+        def __enter__(self): return self
+        def __exit__(self, *a): return None
+        def execute(self, sql, params=None):
+            captured["sql"] = " ".join(sql.split()); captured["params"] = params
+        def fetchall(self):
+            return [(9,), (5,), (2,)]  # already newest-first per the ORDER BY
+
+    class _Conn:
+        def cursor(self): return _C()
+
+    out = eng._recency_ranked_property_ids(_Conn(), [5, 9, 9, None, 2])
+    assert out == [9, 5, 2]
+    assert "ORDER BY first_seen_at DESC NULLS LAST" in captured["sql"]
+    assert "LIMIT" not in captured["sql"]
+    assert captured["params"]["ids"] == [2, 5, 9]  # deduped, sorted, None dropped
+
+    assert eng._recency_ranked_property_ids(_Conn(), []) == []  # no round trip needed
+
+
+def test_recency_ranked_property_ids_limit_bounds_the_ranking() -> None:
+    import scripts.dedup_engine as eng
+
+    captured: dict[str, Any] = {}
+
+    class _C:
+        def __enter__(self): return self
+        def __exit__(self, *a): return None
+        def execute(self, sql, params=None):
+            captured["sql"] = " ".join(sql.split()); captured["params"] = params
+        def fetchall(self):
+            return [(9,)]
+
+    class _Conn:
+        def cursor(self): return _C()
+
+    out = eng._recency_ranked_property_ids(_Conn(), [5, 9], limit=1)
+    assert out == [9]
+    assert "LIMIT %(limit)s" in captured["sql"]
+    assert captured["params"]["limit"] == 1
+
+
+def test_recency_head_candidate_ids_scopes_by_tier_and_window() -> None:
+    """The sweep lanes' half of the Session 5 recency signal: still-proposed `tier`
+    candidates whose newer side was first seen within the window — the SAME
+    GREATEST(first_seen_at) basis as the dedup_recency_backlog acceptance-metric view
+    (migration 307), bounded to `limit` pairs (a reserved slice, not a backlog dump)."""
+    import scripts.dedup_engine as eng
+
+    captured: dict[str, Any] = {}
+
+    class _C:
+        def __enter__(self): return self
+        def __exit__(self, *a): return None
+        def execute(self, sql, params=None):
+            captured["sql"] = " ".join(sql.split()); captured["params"] = params
+        def fetchall(self):
+            return [(101, 202), (303, None)]
+
+    class _Conn:
+        def cursor(self): return _C()
+
+    out = eng._recency_head_candidate_ids(_Conn(), tier="geo", window_days=3.0, limit=50)
+    assert out == {101, 202, 303}
+    sql, params = captured["sql"], captured["params"]
+    assert "c.status = 'proposed' AND c.tier = %(tier)s" in sql
+    assert "greatest(pl.first_seen_at, pr.first_seen_at)" in sql
+    assert "ORDER BY greatest(pl.first_seen_at, pr.first_seen_at) DESC" in sql
+    assert params == {"tier": "geo", "days": 3.0, "limit": 50}
+
+
 def test_stamp_engine_looked_set_based_update() -> None:
     import scripts.dedup_engine as eng
 
@@ -2870,6 +2994,9 @@ def test_stamp_engine_looked_set_based_update() -> None:
     sql, params = captured[-1]
     assert "SET last_engine_decision_at = now(), engine_decision = v.reason" in sql
     assert "c.status = 'proposed'" in sql
+    # Session 5: write-once first_engine_decision_at (never overwritten on a re-decision
+    # that leaves the pair proposed — COALESCE, not a plain assignment).
+    assert "first_engine_decision_at = coalesce(c.first_engine_decision_at, now())" in sql
     pairs = dict(zip(zip(params["los"], params["his"]), params["reasons"]))
     assert pairs == {(5, 9): "visual_inconclusive", (2, 3): "clip_deferred"}
 
@@ -3876,7 +4003,7 @@ def test_run_engine_site_plan_different_unit_queues(monkeypatch: Any) -> None:
             {"image_id": sid * 10 + 2, "room_type": "kitchen"},
         ]}}
 
-    def site_plan(a: int, b: int, ids_a: list, ids_b: list) -> dict:
+    def site_plan(a: int, b: int, ids_a: list, ids_b: list, family: str | None = None) -> dict:
         return {"verdict": "different_unit", "rationale": "plot 3 vs plot 4"}
 
     conn = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None, source="bazos")])
@@ -4637,6 +4764,35 @@ def test_seen_property_pairs_discarded_on_defer_allows_retry() -> None:
     assert ctx.stats["clip_deferred"] == 2  # the second representative was actually tried
 
 
+def test_resolve_candidates_stamps_first_engine_decision_at_write_once() -> None:
+    """_resolve_candidates (merge/dismiss terminal outcomes) also stamps the write-once
+    first_engine_decision_at — a merge or dismissal can be a pair's VERY FIRST engine
+    look, so this can't be left to _stamp_engine_looked alone (which only ever sees
+    pairs that stay proposed)."""
+    import scripts.dedup_engine as eng
+
+    captured: dict[str, Any] = {}
+
+    class _C:
+        def __enter__(self): return self
+        def __exit__(self, *a): return None
+        def execute(self, sql, params=None):
+            captured["sql"] = " ".join(sql.split()); captured["params"] = params
+        @property
+        def rowcount(self): return 1
+
+    class _Conn:
+        def cursor(self): return _C()
+
+    n = eng._resolve_candidates(_Conn(), {(1, 2)}, "merged")
+    assert n == 1
+    assert "SET status = %s, reviewed_at = now()" in captured["sql"]
+    assert ("first_engine_decision_at = coalesce(c.first_engine_decision_at, now())"
+            in captured["sql"])
+    assert captured["params"] == ("merged", [1], [2])
+    assert eng._resolve_candidates(_Conn(), set(), "merged") == 0
+
+
 def test_record_auto_dismissed_inserts_markers() -> None:
     """finalize()'s _record_auto_dismissed writes insert-if-absent dismissed candidate
     rows for verdict-backed dismissals only (the consult's durable negative decision)."""
@@ -4661,6 +4817,11 @@ def test_record_auto_dismissed_inserts_markers() -> None:
     # once-reopened pair doesn't read as perpetually "fresh" and treadmill again.
     assert "DO UPDATE SET reviewed_at = now()" in captured["sql"]
     assert "status = 'dismissed'" in captured["sql"]
+    # Session 5: a brand-new row (no prior candidate ever proposed) stamps its first
+    # engine look at INSERT time; the ON CONFLICT arm coalesces defensively (write-once).
+    assert "first_engine_decision_at" in captured["sql"]
+    assert ("coalesce( property_identity_candidates.first_engine_decision_at, now())"
+            in captured["sql"])
     assert eng._record_auto_dismissed(_Conn(), set(), "street_disposition") == 0
 
 
@@ -4741,3 +4902,108 @@ def test_scoped_runs_skip_the_market_gauge_scan() -> None:
     stats2 = eng.run_engine(conn2, max_vision_calls=0)  # unscoped full scan
     assert stats2["eligible"] == 4  # the fake's gauge row
     assert any("count(*) FILTER" in s for s in conn2.executed)
+
+
+# --- Engine-fed batch deferral (§4.1): _resolve_visual + resolve_pair ------
+#
+# These exercise the 'batch_pending' defer outcome the deferring fn builders
+# produce (scripts.dedup_engine._build_classify_fn/_build_compare_fn/
+# _build_site_plan_fn with defer_to_batch=True — tested end-to-end via
+# toolkit.dedup_batch_defer in test_dedup_batch_defer.py). Here the fn
+# closures are hand-rolled to isolate _resolve_visual's / resolve_pair's own
+# handling of the {"deferred": True} sentinel from the spooling mechanics.
+
+def test_resolve_visual_defers_when_classify_is_deferred() -> None:
+    import scripts.dedup_engine as eng
+
+    a, b = _key(1, category_main="dum"), _key(2, category_main="dum")
+    calls: list[int] = []
+
+    def classify_fn(sid: int) -> dict[str, Any]:
+        calls.append(sid)
+        if sid == a.sreality_id:
+            return {"deferred": True}
+        return {"data": {"images": [{"image_id": 99, "room_type": "kitchen"}]}}
+
+    outcome = eng._resolve_visual(
+        None, a, b, classify_fn=classify_fn, compare_fn=None, site_plan_fn=None,
+        vision_budget=[10], max_room_attempts=4,
+    )
+    assert outcome == {"action": "defer", "reason": "batch_pending"}
+    # both sides are always probed (no short-circuit before the deferred check).
+    assert calls == [a.sreality_id, b.sreality_id]
+
+
+def test_resolve_visual_defers_when_site_plan_is_deferred() -> None:
+    import scripts.dedup_engine as eng
+
+    a, b = _key(1, category_main="dum"), _key(2, category_main="dum")
+
+    def classify_fn(sid: int) -> dict[str, Any]:
+        return {"data": {"images": [{"image_id": sid, "room_type": "site_plan"}]}}
+
+    def site_plan_fn(
+        a_id: int, b_id: int, ids_a: list[int], ids_b: list[int], family: str | None = None,
+    ) -> dict[str, Any]:
+        return {"deferred": True}
+
+    budget = [10]
+    outcome = eng._resolve_visual(
+        None, a, b, classify_fn=classify_fn, compare_fn=None, site_plan_fn=site_plan_fn,
+        vision_budget=budget, max_room_attempts=4,
+    )
+    assert outcome == {"action": "defer", "reason": "batch_pending"}
+    assert budget == [10]  # a deferred call never consumes the vision budget
+
+
+def test_resolve_visual_defers_on_first_room_and_does_not_try_others() -> None:
+    import scripts.dedup_engine as eng
+
+    a, b = _key(1, category_main="dum"), _key(2, category_main="dum")
+
+    def classify_fn(sid: int) -> dict[str, Any]:
+        return {"data": {"images": [
+            {"image_id": sid * 10 + 1, "room_type": "kitchen"},
+            {"image_id": sid * 10 + 2, "room_type": "living_room"},
+        ]}}
+
+    tried_rooms: list[str] = []
+
+    def compare_fn(a_id: int, b_id: int, room_type: str, ids_a: list[int], ids_b: list[int],
+                   model: str | None = None) -> dict[str, Any]:
+        tried_rooms.append(room_type)
+        return {"deferred": True}
+
+    budget = [10]
+    outcome = eng._resolve_visual(
+        None, a, b, classify_fn=classify_fn, compare_fn=compare_fn, site_plan_fn=None,
+        vision_budget=budget, max_room_attempts=4,
+    )
+    assert outcome["action"] == "defer"
+    assert outcome["reason"] == "batch_pending"
+    assert len(tried_rooms) == 1  # stops at the first deferred room (--warm-rooms=1 parity)
+    assert budget == [10]  # no budget spent on a deferred (not cache-miss-paid) call
+
+
+def test_resolve_pair_defer_splits_stats_by_reason(monkeypatch: Any) -> None:
+    """resolve_pair must NOT lump a fresh batch_pending defer into
+    floor_plan_deferred — the success-gate measurement needs the two counted
+    separately (spool growth vs the pre-existing floor-plan-gate wait)."""
+    import scripts.dedup_engine as eng
+
+    conn = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None, source="bazos")])
+    monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 0)  # skip pHash -> visual
+
+    def classify_fn(sid: int) -> dict[str, Any]:
+        return {"data": {"images": [{"image_id": sid * 10 + 1, "room_type": "kitchen"}]}}
+
+    def compare_fn(a_id: int, b_id: int, room_type: str, ids_a: list[int], ids_b: list[int],
+                   model: str | None = None) -> dict[str, Any]:
+        return {"deferred": True}
+
+    stats = eng.run_engine(
+        conn, classify_fn=classify_fn, compare_fn=compare_fn, floor_plan_fn=None,
+        max_vision_calls=10,
+    )
+    assert stats.get("batch_deferred", 0) == 1
+    assert stats.get("floor_plan_deferred", 0) == 0

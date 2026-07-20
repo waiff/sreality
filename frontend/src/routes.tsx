@@ -25,6 +25,10 @@ import Notifications from './pages/Notifications';
 const Health = lazy(() => import('./pages/Health'));
 const Costs = lazy(() => import('./pages/Costs'));
 const Dedup = lazy(() => import('./pages/Dedup'));
+const ClipAudit = lazy(() => import('./pages/ClipAudit'));
+const PhashAudit = lazy(() => import('./pages/PhashAudit'));
+const LocationAudit = lazy(() => import('./pages/LocationAudit'));
+const ModelTesting = lazy(() => import('./pages/ModelTesting'));
 const Scrapers = lazy(() => import('./pages/Scrapers'));
 const Settings = lazy(() => import('./pages/Settings'));
 const Datasets = lazy(() => import('./pages/Datasets'));
@@ -67,6 +71,13 @@ export const routes: RouteObject[] = [
       // + Browse merge links use it); ListingDetail resolves it to the
       // property's representative listing and redirects to /listing/:id.
       { path: 'listing', element: <ListingDetail />, handle: { title: 'Listing' } },
+      // Canonical natural-key form (migration 091). ListingDetail redirects the
+      // legacy numeric route below to this one so no negative synthetic id
+      // (migration 097) is ever shown in the URL bar.
+      { path: 'listing/:source/:nativeId', element: <ListingDetail />, handle: { title: 'Listing' } },
+      // Legacy/resolver form, kept forever: positive → sreality's real id,
+      // negative → frozen pre-cutover alias; also the target of every deep link
+      // ever sent before the natural-key cutover.
       { path: 'listing/:sreality_id', element: <ListingDetail />, handle: { title: 'Listing' } },
       { path: 'health', element: <AdminPage><Health /></AdminPage>, handle: { title: 'Health' } },
       { path: 'costs', element: <AdminPage><Costs /></AdminPage>, handle: { title: 'LLM costs' } },
@@ -88,6 +99,10 @@ export const routes: RouteObject[] = [
       { path: 'watchdog/:id/edit', element: <WatchdogEdit />, handle: { title: 'Edit watchdog' } },
       { path: 'notifications', element: <Notifications />, handle: { title: 'Notifications' } },
       { path: 'dedup', element: <AdminPage><Dedup /></AdminPage>, handle: { title: 'Dedup' } },
+      { path: 'clip-audit', element: <AdminPage><ClipAudit /></AdminPage>, handle: { title: 'CLIP Audit' } },
+      { path: 'phash-audit', element: <AdminPage><PhashAudit /></AdminPage>, handle: { title: 'pHash Audit' } },
+      { path: 'location-audit', element: <AdminPage><LocationAudit /></AdminPage>, handle: { title: 'Location Audit' } },
+      { path: 'model-testing', element: <AdminPage><ModelTesting /></AdminPage>, handle: { title: 'Model testing' } },
       { path: 'settings', element: <AdminPage><Settings /></AdminPage>, handle: { title: 'Settings' } },
       { path: 'scrapers', element: <AdminPage><Scrapers /></AdminPage>, handle: { title: 'Scrapers' } },
       { path: 'dev/confidence-indicator', element: <AdminPage><DevConfidencePreview /></AdminPage>, handle: { title: 'Confidence indicator (dev)' } },

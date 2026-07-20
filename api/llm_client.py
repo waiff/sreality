@@ -83,6 +83,24 @@ DEFAULT_SYSTEM_PROMPT_FALLBACK = (
 DEFAULT_DAILY_COST_WARN_USD = 5.0
 
 
+def provider_for_model(model: str) -> str:
+    """The provider that serves a model id, so a caller that only knows the model
+    (e.g. a dedup lane whose `app_settings` value is now a gpt-* id) routes to the
+    right backend without threading a provider argument through every call site.
+
+    Mirrors scripts.validate_vision_models._provider_for. Unknown / bare ids fall
+    back to 'anthropic' — the historical default and the shape of every claude-* id.
+    """
+    m = (model or "").lower()
+    if m.startswith(("gpt-", "o1", "o3", "o4", "chatgpt")):
+        return "openai"
+    if m.startswith("qwen"):
+        return "qwen"
+    if m.startswith("gemini"):
+        return "gemini"
+    return "anthropic"
+
+
 @dataclass
 class LLMResponse:
     """Backwards-compatible response for the URL-parser + summary callers.
@@ -139,7 +157,7 @@ class LLMClient:
         model: str | None = None,
         max_tokens: int = 4096,
         estimation_run_id: int | None = None,
-        provider: str = "anthropic",
+        provider: str | None = None,
         tool_choice: str | None = None,
     ) -> LLMResponse:
         """Single API used by every LLM caller in the codebase.
@@ -153,6 +171,11 @@ class LLMClient:
         don't use it.
         """
         resolved_model = model or self.resolve_model()
+        # A caller that passes only a model (e.g. a dedup lane reading its
+        # app_settings value) doesn't know the backend; derive it from the id so
+        # a gpt-* / gemini-* model routes correctly. An explicit provider wins.
+        if provider is None:
+            provider = provider_for_model(resolved_model)
         prov = self.provider(provider)
         neutral_messages = [_to_neutral_message(m) for m in messages]
         neutral_tools = [_to_neutral_tool(t) for t in (tools or [])]
@@ -231,11 +254,11 @@ class LLMClient:
     ) -> int:
         """Record an `llm_calls` row for a call this client didn't dispatch.
 
-        Used by the async batch ingester: the Message Batches API runs the
-        request server-side, so there's no synchronous `complete()` here —
-        the ingester computes the (batch-discounted) cost from the returned
-        usage and logs it through this method to keep the audit trail and
-        daily-spend warning intact.
+        Used by the async batch ingesters (dedup / condition / enrichment): a
+        provider's Batch API runs the request server-side, so there's no
+        synchronous `complete()` here — the ingester computes the (batch-
+        discounted) cost from the returned usage and logs it through this
+        method to keep the audit trail and daily-spend warning intact.
         """
         call_id = self._record_call(
             called_for=called_for,

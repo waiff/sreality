@@ -50,7 +50,8 @@ import type {
   DecisionFeedback,
   AuditRung,
 } from './types';
-import type { PresetSpec } from './filters';
+import type { DistrictChip, PresetSpec } from './filters';
+import { districtChipsToCsvParams } from './filters';
 
 /* Sources the backend allowlists for high-confidence parsing.
  * Anything else falls through to a best-effort parse. The order is
@@ -701,12 +702,18 @@ export const getDedupAudit = (
     category_main?: string;
     source?: string;
     stage?: string;
-    factor?: string; // phash | cosine | visual | address
+    factor?: string; // phash | cosine | visual | address | floor_plan
     factor_min?: number;
     factor_max?: number;
     verdict?: string; // High | Medium | Low
+    room_type?: string; // the compared room/plan tag (detail.room_type)
     property_id?: number; // scope to one property's merge decisions
+    property_id_in?: ReadonlyArray<number>; // batched form of property_id
     flagged?: boolean; // only decisions the operator flagged as incorrect
+    // Matches a decision if EITHER side of its pair touches the picked place —
+    // the same `DistrictChip[]` widget Browse/Watchdog use (LocationTypeahead),
+    // serialised via the shared `districtChipsToCsvParams` wire format.
+    districts?: ReadonlyArray<DistrictChip> | null;
     limit?: number;
     offset?: number;
   } = {},
@@ -720,8 +727,15 @@ export const getDedupAudit = (
   if (params.factor_min != null) q.set('factor_min', String(params.factor_min));
   if (params.factor_max != null) q.set('factor_max', String(params.factor_max));
   if (params.verdict) q.set('verdict', params.verdict);
+  if (params.room_type) q.set('room_type', params.room_type);
   if (params.property_id != null) q.set('property_id', String(params.property_id));
+  if (params.property_id_in?.length) {
+    q.set('property_id_in', params.property_id_in.join(','));
+  }
   if (params.flagged) q.set('flagged', 'true');
+  for (const [k, v] of Object.entries(districtChipsToCsvParams(params.districts ?? []))) {
+    q.set(k, v);
+  }
   q.set('limit', String(params.limit ?? 100));
   if (params.offset) q.set('offset', String(params.offset));
   return request<{ data: DedupAuditRow[]; total: number; returned: number }>(
@@ -801,6 +815,176 @@ export const getDedupDecisionEvidence = (params: {
   );
 };
 
+// /clip-audit: flag one image's CLIP tag and/or render score as wrong, with a note.
+export type ImageAnnotation = {
+  image_id: number;
+  tag_flagged: boolean;
+  render_flagged: boolean;
+  note: string | null;
+  updated_at: string;
+};
+export const setImageAnnotation = (body: {
+  image_id: number;
+  tag_flagged?: boolean;
+  render_flagged?: boolean;
+  note?: string | null;
+}): Promise<{ data: ImageAnnotation }> =>
+  request<{ data: ImageAnnotation }>('/dedup/image-annotation', {
+    method: 'POST',
+    json: body,
+  });
+export const deleteImageAnnotation = (
+  image_id: number,
+): Promise<{ data: { deleted: boolean } }> =>
+  request<{ data: { deleted: boolean } }>('/dedup/image-annotation', {
+    method: 'DELETE',
+    query: { image_id },
+  });
+
+// /phash-audit: a note on one image pair.
+export type PhashNote = {
+  image_id_a: number;
+  image_id_b: number;
+  note: string | null;
+  updated_at: string;
+};
+export const setPhashNote = (body: {
+  image_id_a: number;
+  image_id_b: number;
+  note?: string | null;
+}): Promise<{ data: PhashNote }> =>
+  request<{ data: PhashNote }>('/dedup/phash-note', { method: 'POST', json: body });
+export const deletePhashNote = (
+  image_id_a: number,
+  image_id_b: number,
+): Promise<{ data: { deleted: boolean } }> =>
+  request<{ data: { deleted: boolean } }>('/dedup/phash-note', {
+    method: 'DELETE',
+    query: { a: image_id_a, b: image_id_b },
+  });
+
+// /phash-audit: matching-photo image pairs within a Hamming-distance range, from pairs
+// the engine already decided (dedup_pair_audit) — read-only evidence, no engine change.
+export type PhashAuditImageRef = {
+  image_id: number;
+  sreality_url: string | null;
+  storage_path: string | null;
+  room_type: string | null;
+  fine_tag: string | null;
+  confidence: number | null;
+  render_score: number | null;
+};
+export type PhashAuditRow = {
+  audit_id: number;
+  left_sreality_id: number | null;
+  right_sreality_id: number | null;
+  left_property_id: number | null;
+  right_property_id: number | null;
+  outcome: string;
+  category_main: string | null;
+  run_at: string;
+  // What ACTUALLY decided this pair — may be a different signal than the Hamming
+  // number this page sorts by (e.g. phash found nothing, forensic vision dismissed
+  // it). Same shape/source as DedupAuditRow.audit_breakdown, so DedupBreakdown
+  // renders both identically.
+  stage: string;
+  audit_breakdown: AuditRung[];
+  left_image: PhashAuditImageRef;
+  right_image: PhashAuditImageRef;
+  hamming: number;
+};
+export const getPhashAudit = (
+  params: {
+    hamming_min?: number;
+    hamming_max?: number;
+    category_main?: string;
+    outcome?: string;
+    // Both images in a returned pair must share the SAME tag, which must be one of
+    // these — not "either side is one of these" (see phash_audit's docstring).
+    room_types?: ReadonlyArray<string>;
+    // Only pairs where at least one of the two shown images already has a
+    // linear-probe training-set label.
+    training_only?: boolean;
+    // Narrows training_only to one SPECIFIC label (implies training_only).
+    training_label?: string;
+    // Inverse of training_only — pairs where NEITHER shown image is in the
+    // training set yet. Takes priority if both are set.
+    training_exclude?: boolean;
+    limit?: number;
+    // Opaque cursor — pass back the previous response's next_scan_offset.
+    scan_offset?: number;
+  } = {},
+): Promise<{
+  data: PhashAuditRow[];
+  returned: number;
+  scanned_pairs: number;
+  scan_cap: number;
+  scanned_so_far: number;
+  // Pagination is over the scan SCOPE, not the joined result (see the backend
+  // docstring) — a short `data` with next_scan_offset != null means "nothing more in
+  // this window, but the ceiling/population isn't exhausted yet, keep scrolling";
+  // null means truly done.
+  next_scan_offset: number | null;
+}> => {
+  const q = new URLSearchParams();
+  if (params.hamming_min != null) q.set('hamming_min', String(params.hamming_min));
+  if (params.hamming_max != null) q.set('hamming_max', String(params.hamming_max));
+  if (params.category_main) q.set('category_main', params.category_main);
+  if (params.outcome) q.set('outcome', params.outcome);
+  if (params.room_types?.length) q.set('room_types', params.room_types.join(','));
+  if (params.training_only) q.set('training_only', 'true');
+  if (params.training_label) q.set('training_label', params.training_label);
+  if (params.training_exclude) q.set('training_exclude', 'true');
+  q.set('limit', String(params.limit ?? 100));
+  if (params.scan_offset) q.set('scan_offset', String(params.scan_offset));
+  return request(`/dedup/phash-audit?${q.toString()}`);
+};
+
+// /phash-audit "Train": one image's linear-probe training-set label (migration 309).
+// Data-collection only — nothing reads this table yet.
+export type TrainingExample = {
+  image_id: number;
+  label: string;
+  updated_at: string;
+};
+export const setTrainingExample = (body: {
+  image_id: number;
+  label: string;
+}): Promise<{ data: TrainingExample }> =>
+  request<{ data: TrainingExample }>('/dedup/training-example', {
+    method: 'POST',
+    json: body,
+  });
+export const deleteTrainingExample = (
+  image_id: number,
+): Promise<{ data: { deleted: boolean } }> =>
+  request<{ data: { deleted: boolean } }>('/dedup/training-example', {
+    method: 'DELETE',
+    query: { image_id },
+  });
+
+// "Border case" flag (migration 310): even a human isn't confident about this
+// image's classification. Independent of image_training_examples — no label
+// required, may coexist with one (a best-guess flagged as uncertain).
+export type BorderCase = {
+  image_id: number;
+  created_at: string;
+};
+export const setBorderCase = (
+  image_id: number,
+): Promise<{ data: BorderCase }> =>
+  request<{ data: BorderCase }>('/dedup/border-case', {
+    method: 'POST',
+    json: { image_id },
+  });
+export const deleteBorderCase = (
+  image_id: number,
+): Promise<{ data: { deleted: boolean } }> =>
+  request<{ data: { deleted: boolean } }>('/dedup/border-case', {
+    method: 'DELETE',
+    query: { image_id },
+  });
+
 // CLIP backfill progress (listing-grain), for the /dedup tracker.
 export type DedupCoverageTier = {
   key: string;
@@ -864,6 +1048,24 @@ export const archiveResetDedupCandidates = (): Promise<{
     '/dedup/candidates/archive-reset',
     { method: 'POST' },
   );
+
+/* POST /dedup/model-compare — convene every connected vision model on undecided pairs
+ * (decision support). candidate_ids omitted = the oldest-undecided top-`limit`; a list =
+ * exactly those proposed candidates (the per-card button). Verdicts land on /model-testing
+ * under the returned run_label. */
+export interface ModelCompareResponse {
+  dispatched: boolean;
+  run_label: string;
+  pair_count: number;
+  models: string[];
+  model_testing_url: string;
+  run_url: string;
+}
+
+export const requestModelCompare = (
+  body: { candidate_ids?: number[]; limit?: number },
+): Promise<ModelCompareResponse> =>
+  request<ModelCompareResponse>('/dedup/model-compare', { method: 'POST', json: body });
 
 export const listAgentTools = (): Promise<{ data: AgentTool[] }> =>
   request<{ data: AgentTool[] }>('/admin/tools');
@@ -1483,6 +1685,13 @@ export interface ListDedupCandidatesParams {
   tier?: string;
   reason?: string;
   verdict?: string;
+  // Matches a pair if EITHER candidate property is that type — the same
+  // property-type tabs Decision history uses (a pair can legitimately span
+  // two types, e.g. the sanctioned dům↔komerční cross-type merge).
+  category_main?: string;
+  // Matches a pair if EITHER candidate property touches the picked place —
+  // lets the operator prioritise the manual review backlog by location.
+  districts?: ReadonlyArray<DistrictChip> | null;
   limit?: number;
   offset?: number;
 }
@@ -1508,10 +1717,15 @@ export interface UnmergeResult {
 
 export const listDedupCandidates = (
   params: ListDedupCandidatesParams = {},
-): Promise<DedupCandidatesResponse> =>
-  request<DedupCandidatesResponse>('/dedup/candidates', {
-    query: params as Record<string, QueryValue>,
+): Promise<DedupCandidatesResponse> => {
+  const { districts, ...rest } = params;
+  return request<DedupCandidatesResponse>('/dedup/candidates', {
+    query: {
+      ...(rest as Record<string, QueryValue>),
+      ...districtChipsToCsvParams(districts ?? []),
+    },
   });
+};
 
 export const getDedupSummary = (
   status = 'proposed',
@@ -1957,3 +2171,114 @@ export const adminSetEntitlement = (
     method: 'PUT',
     json: body,
   });
+
+/* ----- location audit ---------------------------------------------------- */
+/* /location-audit — read-only per-listing inventory of every address / geo /
+ * coordinate field, with the acquisition method for the two fields whose
+ * provenance varies per row (coordinate + street). Backed by
+ * api/routes/location_audit.py, admin-gated. See lib/locationAudit.ts for the
+ * field glossary + method labels the page renders. */
+export type LocationAuditRow = {
+  sreality_id: number;
+  source: string;
+  source_id_native: string | null;
+  source_url: string | null;
+  category_main: string | null;
+  category_type: string | null;
+  category_sub_cb: number | null;
+  is_active: boolean;
+  last_seen_at: string | null;
+  inactive_at: string | null;
+  lat: number | null;
+  lon: number | null;
+  street: string | null;
+  house_number: string | null;
+  zip: string | null;
+  street_id: number | null;
+  street_name_key: string | null;
+  street_source: string | null;
+  // Dedup-eligibility inputs (for the per-row "why unreachable" breakdown).
+  disposition: string | null;
+  area_m2: number | null;
+  estate_area: number | null;
+  usable_area: number | null;
+  locality: string | null;
+  district: string | null;
+  obec: string | null;
+  okres: string | null;
+  region: string | null;
+  obec_id: number | null;
+  okres_id: number | null;
+  region_id: number | null;
+  locality_district_id: number | null;
+  locality_region_id: number | null;
+  locality_municipality_id: number | null;
+  locality_quarter_id: number | null;
+  locality_ward_id: number | null;
+  geo_cell_key: string | null;
+  geocode_attempted_at: string | null;
+  coord_street_attempt_version: number | null;
+  coords_source: string | null;
+  inaccuracy_type: string | null;
+  accurate: boolean | null;
+  geom_method: string | null;
+  street_method: string | null;
+  // Dedup reachability: dedup_reachable = the engine can reach this listing via SOME
+  // pass; the three arm booleans show which (street+disposition / geo+area / byt-geo).
+  dedup_reachable: boolean;
+  elig_street: boolean;
+  elig_geo: boolean;
+  elig_byt_geo: boolean;
+};
+
+export type LocationAuditPage = {
+  data: LocationAuditRow[];
+  // null on non-first pages: the count is computed once (offset 0) and read from the
+  // first page only — re-counting on every infinite-scroll fetch is wasteful (~1s each).
+  total: number | null;
+  returned: number;
+  limit: number;
+  offset: number;
+};
+
+export const getLocationAudit = (
+  params: {
+    source?: string;
+    category_main?: string;
+    active?: 'active' | 'inactive';
+    dedup?: 'reachable' | 'unreachable';
+    has?: ReadonlyArray<string>;
+    missing?: ReadonlyArray<string>;
+    limit?: number;
+    offset?: number;
+  } = {},
+): Promise<LocationAuditPage> => {
+  const q = new URLSearchParams();
+  if (params.source) q.set('source', params.source);
+  if (params.category_main) q.set('category_main', params.category_main);
+  if (params.active) q.set('active', params.active);
+  if (params.dedup) q.set('dedup', params.dedup);
+  if (params.has?.length) q.set('has', params.has.join(','));
+  if (params.missing?.length) q.set('missing', params.missing.join(','));
+  q.set('limit', String(params.limit ?? 50));
+  q.set('offset', String(params.offset ?? 0));
+  return request(`/location-audit?${q.toString()}`);
+};
+
+export type LocationAuditRaw = {
+  sreality_id: number;
+  source: string;
+  source_id_native: string | null;
+  source_url: string | null;
+  category_main: string | null;
+  category_type: string | null;
+  last_seen_at: string | null;
+  raw_json: unknown;
+};
+
+export const getLocationAuditRaw = (
+  srealityId: number,
+): Promise<LocationAuditRaw> =>
+  // sreality_id is a QUERY param, not a path segment: non-sreality PKs are
+  // negative and the int path convertor would 404 on the leading minus.
+  request('/location-audit/raw', { query: { sreality_id: srealityId } });

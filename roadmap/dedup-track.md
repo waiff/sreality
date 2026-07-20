@@ -12,9 +12,65 @@
 > `site_plan_different_unit` forensic-negative population showed ~67-75% precision (developers
 > routinely reuse an entire photo set, drawings included, across distinct parcels/units in one
 > subdivision), nowhere near the ≥99% bar. The step-aside stays as designed; see
-> `docs/design/dedup-vision-and-backlog-overhaul.md` §2.1a for the full replay. This whole
-> track file is a candidate for a future restructure (its own PR) to replace the stale D1/D2 body
-> below with a pointer-only index, per CLAUDE.md's roadmap-maintenance rule.
+> `docs/design/dedup-vision-and-backlog-overhaul.md` §2.1a for the full replay.
+> **Session 3 (2026-07-13)** ran the vision-model bake-off (`docs/design/dedup-vision-model-bakeoff-2026-07.md`):
+> GPT-5-mini, Qwen3-VL-235B/30B, Gemini-3.1-flash-lite benchmarked on all 3 forensic lanes ×
+> recall AND precision vs the frozen golden set. Every cheap VLM has good recall but 36-66%
+> precision on confirmed-different pairs — the bake-off recommended keeping Sonnet. Shipped 4
+> providers, migration 302 (`llm_calls.provider` widened), migration 303 (`dedup_vision_bakeoff_results`),
+> and a `/model-testing` explorer page.
+> **OPERATOR OVERRODE "Sonnet stays" (2026-07-13/14)** — driver is **provider diversification off
+> Anthropic** (credit depletes ~daily), not cost. All three forensic lanes + enrichment flipped to
+> **gpt-5-mini** via a new OpenAI Batch lane (PR #787, live 2026-07-13 22:25 UTC); the cosine cheap
+> band + LLM room-classify fallback flipped to gpt-5-mini on 2026-07-14 10:23 UTC (**PR A**). The
+> dedup funnel is now **Anthropic-free** (standing Anthropic burn ≈ $0). **PR A also:** fixed OpenAI
+> cached-token cost double-billing (#789), renumbered+applied migration 305 (enrichment batch tables,
+> ex-299 collision) + added a duplicate-migration-number CI gate (#790), and found gpt-5-mini bazos
+> enrichment 99.6%-broken (512 max_tokens starves the reasoning model — fix #791, DRAFT, needs a live
+> smoke-test). The batch **warmer stays ON** (operator decision 2026-07-14 — it proved the OpenAI batch
+> path live), superseding overhaul §1.2's "flip off now".
+> **Session 4 (2026-07-14, shipped)** = engine-fed batch deferral (§4.1, overhaul §1.2/§5): the
+> dedup engine's sweep lanes (full street, geo, byt-geo, candidates — NOT dirty/realtime, which stay
+> sync) now spool a cold classify/compare/site-plan/floor-plan call straight into
+> `dedup_batch_requests` (`batch_id NULL`, `request_params` = the already-built provider-shaped
+> body — migration 306) instead of paying inline, gated by `dedup_engine_batch_defer_enabled`
+> (default OFF). `scripts/submit_dedup_batch.py`'s old collect()-funnel (a second process guessing
+> the engine's work-list — the root cause of the ~1% warmer/engine overlap, overhaul §1) is retired;
+> the script's only job now is to flush the spool into provider Batch API submissions. Selection
+> identity holds by construction. Shared chunk/retry primitives extracted to `toolkit/batch_submit.py`
+> (dedup/condition/enrich converge — rule-of-three); provider-agnostic naming swept across the batch
+> layer (scripts, `api/providers/base.py`, `api/llm_client.py`, `toolkit/condition_scoring.py`,
+> workflow comments). Verified live: dedup batch requests already run at the provider default 4096
+> max_tokens with zero truncation evidence (max observed output 3546/4096 tokens on floor_plan) —
+> unlike enrichment's 512-token bug (#791), no fix needed here. Found (not fixed, flagged for
+> follow-up): ~0.4-1.2% of floor_plan/site_plan gpt-5-mini calls error with an Anthropic-provider 404
+> for a `gpt-5-mini` model id — a pre-existing routing bug, unrelated to this session's changes.
+> Flip `dedup_engine_batch_defer_enabled` on to activate; watch `duration_ms=0 AND error IS NULL`
+> attribution (the batch/warm-consume signature) to confirm ~1% → ~100% pair-overlap.
+> **Session 5a (2026-07-14, shipped)** = recency-first compare ordering (overhaul §5/§6 point 2).
+> ONE shared recency signal (`properties.first_seen_at`) feeds two mechanisms: the candidate
+> drain now ranks its whole due-set newest-first via `priority_property_order` (previously
+> unordered — obec/street-alphabetical load order decided which pairs got a paid look each run);
+> the three cursor-bearing sweep lanes (full street, geo, byt-geo) each pull a bounded
+> "recency head" (`_recency_head_candidate_ids`, tier + 7-day-window scoped, migration 307's
+> `dedup_recency_backlog` view is the same basis) to the front of the pass, explicitly composed
+> with the `scan_cursor` lexicographic frontier so a fresh pair jumps the queue without ever
+> moving the PERSISTED cursor backward (`frontier_keys` in `run_engine` — only tail-processed
+> keys advance it). Write-once `first_engine_decision_at` (migration 307) instruments "time to
+> first engine look" separately from `last_engine_decision_at` (which re-decisions overwrite).
+> Baseline backlog re-verified live 2026-07-14: geo tier carries ~85% of the unresolved-and-fresh
+> backlog (700/<1d, 1391/<3d, 5521/<7d of 39,983 total proposed) — the geo lane's head matters
+> most in practice. **Session 5b (2026-07-14): the image-role REGISTRY unification shipped**
+> (`toolkit/room_taxonomy.IMAGE_ROLE_REGISTRY` — one per-family/per-tag declaration replacing
+> three hand-maintained mechanisms; pure refactor, zero behavior change, full suite green).
+> **The pozemek dismissal shapes did NOT ship** — replay surfaced a BLOCKING finding: the
+> site-plan lane's live model (gpt-5-mini) scores only 50% correct / 50% dangerous on pozemek
+> per the vision bake-off (vs Sonnet 92.9%), so neither shape can safely gate/dismiss until
+> that model is upgraded for pozemek and re-replayed; see
+> `docs/design/dedup-vision-and-backlog-overhaul.md` §6 Session 5b for the full finding +
+> recommended order (model fix → re-replay → operator sign-off). This whole track file is a
+> candidate for a future restructure (its own PR) to replace the stale D1/D2 body below with a
+> pointer-only index, per CLAUDE.md's roadmap-maintenance rule.
 
 ## Dedup + canonical listing track (parallel)
 

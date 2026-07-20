@@ -625,3 +625,93 @@ def test_list_notes_helper_orders_newest_first():
     assert [n["body"] for n in out["data"]] == ["second", "first"]
     assert out["data"][1]["origin_listing_id"] == 777
     assert "ORDER BY created_at DESC" in conn.executions[0][0]
+
+
+# --- merged-away redirect against a predicate-scripted fake connection -------
+# (route tests above stub the handlers; these exercise the REAL functions so the
+# survivor-redirect wiring — resolve_active_property_id — is actually covered.)
+
+from datetime import datetime  # noqa: E402
+
+import fastapi  # noqa: E402
+
+from api import schemas as _s  # noqa: E402
+
+
+class _ScriptCur:
+    def __init__(self, conn: "_ScriptConn") -> None:
+        self._conn, self._rows, self.rowcount = conn, [], 0
+
+    def __enter__(self) -> "_ScriptCur":
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        return None
+
+    def execute(self, sql: str, params: Any = None) -> None:
+        q = " ".join(sql.split())
+        self._conn.executed.append((q, params))
+        for predicate, rows in self._conn.script:
+            if predicate(q):
+                self._rows, self.rowcount = list(rows), len(rows)
+                return
+        self._rows, self.rowcount = [], 0
+
+    def fetchone(self) -> Any:
+        return self._rows[0] if self._rows else None
+
+    def fetchall(self) -> list[tuple[Any, ...]]:
+        return list(self._rows)
+
+
+class _ScriptTx:
+    def __enter__(self) -> "_ScriptTx":
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        return None
+
+
+class _ScriptConn:
+    def __init__(self, script: list[tuple[Any, list[tuple[Any, ...]]]]) -> None:
+        self.script, self.executed = script, []
+
+    def transaction(self) -> _ScriptTx:
+        return _ScriptTx()
+
+    def cursor(self) -> _ScriptCur:
+        return _ScriptCur(self)
+
+
+def test_create_note_redirects_merged_away_to_survivor():
+    conn = _ScriptConn([
+        (lambda q: "RECURSIVE chain" in q, [(99, 42)]),  # 99 merged into active 42
+        (lambda q: "INSERT INTO property_notes" in q,
+         [(1, 42, "hi", None, datetime(2026, 1, 1))]),
+    ])
+    out = curation.create_note(conn, 99, _s.CreateNoteIn(body="hi"))
+    assert out["property_id"] == 42
+    ins = [p for q, p in conn.executed if "INSERT INTO property_notes" in q]
+    assert ins and ins[0][0] == 42  # inserted onto the survivor, not 99
+
+
+def test_create_note_no_survivor_is_404():
+    conn = _ScriptConn([(lambda q: "RECURSIVE chain" in q, [])])
+    with pytest.raises(fastapi.HTTPException) as ei:
+        curation.create_note(conn, 7, _s.CreateNoteIn(body="x"))
+    assert ei.value.status_code == 404
+
+
+def test_add_properties_redirects_merged_away_to_survivor():
+    conn = _ScriptConn([
+        (lambda q: "FROM collections WHERE id" in q, [(1,)]),
+        (lambda q: "RECURSIVE chain" in q, [(99, 42)]),  # input 99 -> survivor 42
+        (lambda q: "INSERT INTO collection_properties" in q, [(1,)]),  # rowcount 1
+        (lambda q: "UPDATE collections SET updated_at" in q, []),
+    ])
+    out = curation.add_properties_to_collection(
+        conn, 1, _s.AddPropertiesToCollectionIn(property_ids=[99]),
+    )
+    assert out["added"] == 1
+    ins = [p for q, p in conn.executed if "INSERT INTO collection_properties" in q]
+    assert ins and ins[0][1] == [42]  # survivor id inserted, not 99

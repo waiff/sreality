@@ -252,18 +252,23 @@ them down to `merge_properties` for every caller is a larger, riskier refactor f
 no extra correctness. The ledger is already the authoritative source and needs no
 plumbing.
 
-**Deferred (follow-up PR):** the **engine** write path (`scripts/dedup_engine.py`
-`_audit`/`_write_pair_audit`) still stores self-paired rows for ~7.7% of pHash
-merges (a distinct, un-traced mechanism); the read-path fallback already corrects
-their *display*, so this is stored-data hygiene, not user-visible. **The
-distinctness CHECK constraints (B-constraints, below) MUST wait until that engine
-write path is fixed** — a `CHECK (left_sreality_id <> right_sreality_id)` added now
-would make the engine's next self-paired INSERT *raise*, breaking live merges. This
-sequencing was validated against the data (the engine path is an active writer of
-equal ids), not assumed.
+**Engine write path — TRACED, already correct (no fix needed).** The earlier draft
+suspected the engine's `_audit`/`_write_pair_audit` (`scripts/dedup_engine.py`) was
+still actively writing self-paired rows. Tracing `resolve_pair`
+(`scripts/dedup_engine.py:1777-1785`) disproves that: it calls `classify` **first**
+and `return`s on a `reject` before any merge/audit/pHash-fast-path, and both
+classifiers reject a same-listing pair with `"same_listing"`
+(`toolkit/dedup_engine.py:444`, `:645`). The data confirms it: of 4,426 engine
+self-paired rows, **the most recent is 2026-06-24** — 0 written in the last 7 days;
+the guard has held since. The 4,426 are pre-guard history (plus the retired
+address-rule path), and their *display* is already repaired by the read fallback.
+So there was nothing to fix — the earlier "un-traced mechanism / active writer"
+assumption was wrong, corrected here.
 
-**B-constraints (deferred until the engine write path is fixed; DDL verified
-against live data).** Ordering (`left < right`) is **wrong** for these tables
+**B-constraints — SHIPPED (migration 301). DDL verified against live data.** With
+both write paths now proven to guarantee distinct listing ids (engine guarded since
+2026-06-24; operator via the ledger, PR #778), the constraints are safe. Ordering
+(`left < right`) is **wrong** for these tables
 (20 `property_merge_events` and 43,615 `dedup_pair_audit` rows legitimately have
 left/survivor > right/retired) — the correct minimal invariant is *inequality*:
 

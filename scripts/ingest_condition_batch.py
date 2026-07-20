@@ -1,4 +1,4 @@
-"""Phase 1.8b — ingest completed Anthropic condition-scoring batches.
+"""Phase 1.8b — ingest completed condition-scoring provider batches.
 
 Polls every non-terminal row in condition_score_batches. For a batch the
 provider reports as `ended`, streams the results and, per request:
@@ -30,10 +30,9 @@ import os
 import sys
 from typing import Any
 
-LOG = logging.getLogger("ingest_condition_batch")
+from toolkit.batch_submit import BATCH_DISCOUNT
 
-# Anthropic Message Batches bills token usage at 50% of standard prices.
-BATCH_DISCOUNT = 0.5
+LOG = logging.getLogger("ingest_condition_batch")
 
 
 def main() -> int:

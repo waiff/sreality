@@ -8,6 +8,7 @@ from __future__ import annotations
 from typing import Any
 
 import api.property_dedup as dedup
+from api.location_filter import DistrictChip
 
 
 class _Cur:
@@ -128,6 +129,98 @@ def test_flagged_filter_adds_the_is_incorrect_clause() -> None:
     dedup.list_pair_audit(conn2, flagged=None)
     for s, _ in conn2.executed:
         assert "f.is_incorrect IS TRUE" not in s
+
+
+def test_districts_join_properties_and_match_either_side() -> None:
+    conn = _FakeConn(total=0, page_rows=[])
+    dedup.list_pair_audit(
+        conn, districts=[DistrictChip(name="Jihlava", level="obec", id=586846)],
+    )
+    for s, params in conn.executed:
+        assert "LEFT JOIN properties pl ON pl.id = a.left_property_id" in s
+        assert "LEFT JOIN properties pr ON pr.id = a.right_property_id" in s
+        assert "pl.obec_id = %(district_id_pl_0)s" in s
+        assert "pr.obec_id = %(district_id_pr_0)s" in s
+        assert params["district_id_pl_0"] == 586846
+        assert params["district_id_pr_0"] == 586846
+
+
+def test_no_districts_omits_the_properties_join() -> None:
+    conn = _FakeConn(total=0, page_rows=[])
+    dedup.list_pair_audit(conn)
+    for s, params in conn.executed:
+        assert "LEFT JOIN properties pl" not in s
+        assert "LEFT JOIN properties pr" not in s
+        assert not any(k.startswith("district_") for k in (params or {}))
+
+
+def test_category_main_matches_either_side_not_the_stamped_column() -> None:
+    # dedup_pair_audit.category_main is the ENGINE's single stamped classification
+    # for the whole pair (falls back to whichever side is non-NULL) — a sanctioned
+    # dům<->komercni cross-type merge can be stamped with only ONE of the two
+    # types. Filtering the pair's own two `properties` rows instead (not `a.category_main`)
+    # is what lets it surface under both type tabs.
+    conn = _FakeConn(total=0, page_rows=[])
+    dedup.list_pair_audit(conn, category_main="komercni")
+    for s, params in conn.executed:
+        assert "a.category_main = %(category_main)s" not in s
+        assert "LEFT JOIN properties pl ON pl.id = a.left_property_id" in s
+        assert "LEFT JOIN properties pr ON pr.id = a.right_property_id" in s
+        assert "(pl.category_main = %(category_main)s OR pr.category_main = %(category_main)s)" in s
+        assert params["category_main"] == "komercni"
+
+
+def test_category_main_and_districts_share_one_properties_join() -> None:
+    # Both per-side filters need the same pl/pr join — it must appear exactly
+    # once even when both filters are set together.
+    conn = _FakeConn(total=0, page_rows=[])
+    dedup.list_pair_audit(
+        conn, category_main="dum",
+        districts=[DistrictChip(name="Jihlava", level="obec", id=586846)],
+    )
+    for s, _ in conn.executed:
+        assert s.count("LEFT JOIN properties pl ON pl.id = a.left_property_id") == 1
+        assert s.count("LEFT JOIN properties pr ON pr.id = a.right_property_id") == 1
+
+
+def test_room_type_filters_on_detail_room_type() -> None:
+    conn = _FakeConn(total=0, page_rows=[])
+    dedup.list_pair_audit(conn, room_type="floor_plan")
+    for s, params in conn.executed:
+        assert "a.detail->>'room_type' = %(room_type)s" in s
+        assert params["room_type"] == "floor_plan"
+
+
+def test_floor_plan_factor_filters_on_reason() -> None:
+    conn = _FakeConn(total=0, page_rows=[])
+    dedup.list_pair_audit(conn, factor="floor_plan")
+    for s, _ in conn.executed:
+        assert "a.detail->>'reason' = 'floor_plan_different_layout'" in s
+
+
+def test_property_id_in_batches_many_properties_with_any() -> None:
+    conn = _FakeConn(total=1, page_rows=[_audit_row()])
+    dedup.list_pair_audit(conn, property_id_in=[10, 20, 30])
+    for s, params in conn.executed:
+        assert "property_id = ANY(%(audit_pids)s)" in s
+        assert params["audit_pids"] == [10, 20, 30]
+
+
+def test_property_id_in_empty_list_omits_the_clause() -> None:
+    conn = _FakeConn(total=0, page_rows=[])
+    dedup.list_pair_audit(conn, property_id_in=[])
+    for s, params in conn.executed:
+        assert "audit_pids" not in s
+        assert "audit_pids" not in (params or {})
+
+
+def test_no_category_main_or_districts_omits_the_properties_join() -> None:
+    conn = _FakeConn(total=0, page_rows=[])
+    dedup.list_pair_audit(conn, category_main=None, districts=None)
+    for s, params in conn.executed:
+        assert "LEFT JOIN properties pl" not in s
+        assert "LEFT JOIN properties pr" not in s
+        assert "category_main" not in (params or {})
 
 
 def test_read_path_resolves_self_paired_rows_from_the_merge_ledger() -> None:

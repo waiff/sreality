@@ -26,6 +26,7 @@ import contextlib
 import logging
 import os
 from typing import TYPE_CHECKING, Any
+from urllib.parse import quote
 
 from api.transports.base import RenderedMessage
 from scraper import db as scraper_db
@@ -95,8 +96,23 @@ def compose_message(row: dict[str, Any]) -> RenderedMessage:
     else:
         lines.append(price)
 
+    # Deep link: prefer the canonical natural-key form /listing/{source}/{native}
+    # (migration 091) so a sent email/Telegram — effectively a permanent URL —
+    # never carries the negative synthetic id (migration 097). Fall back to the
+    # legacy /listing/{id} resolver (still valid forever) for a listing missing
+    # the natural key, else the app base.
     sid = row.get("sreality_id")
-    deep_link = f"{_spa_base()}/listing/{sid}" if sid is not None else _spa_base()
+    source = row.get("source")
+    native = row.get("source_id_native")
+    if source and native:
+        deep_link = (
+            f"{_spa_base()}/listing/{quote(str(source), safe='')}"
+            f"/{quote(str(native), safe='')}"
+        )
+    elif sid is not None:
+        deep_link = f"{_spa_base()}/listing/{sid}"
+    else:
+        deep_link = _spa_base()
     return RenderedMessage(
         subject=subject,
         body_text="\n".join(lines),
@@ -119,14 +135,16 @@ _NEW_COLS = (
     "d.id::text, d.source_kind, d.change_kind, d.sreality_id, "
     "d.subscription_id::text, d.collection_id, "
     "d.trigger_price_czk, d.prev_price_czk, "
-    "l.locality, l.disposition, l.price_czk, l.price_unit, l.category_main, d.message, ch"
+    "l.locality, l.disposition, l.price_czk, l.price_unit, l.category_main, "
+    "l.source, l.source_id_native, d.message, ch"
 )
 
 _RETRY_COLS = (
     "cs.id, cs.channel, cs.recipient, cs.consumer, "
     "d.source_kind, d.change_kind, d.sreality_id, "
     "d.trigger_price_czk, d.prev_price_czk, "
-    "l.locality, l.disposition, l.price_czk, l.price_unit, l.category_main, d.message"
+    "l.locality, l.disposition, l.price_czk, l.price_unit, l.category_main, "
+    "l.source, l.source_id_native, d.message"
 )
 
 
@@ -166,7 +184,8 @@ def drain_once(
     for r in new_rows:
         (dispatch_id, source_kind, change_kind, sreality_id, subscription_id,
          collection_id, trigger_price_czk, prev_price_czk, locality, disposition,
-         price_czk, price_unit, _category_main, message, ch) = r
+         price_czk, price_unit, _category_main, source, source_id_native,
+         message, ch) = r
         recipient = recipients.get(ch)
         if not recipient:
             skipped += 1
@@ -174,6 +193,7 @@ def drain_once(
         msg = compose_message({
             "source_kind": source_kind, "message": message,
             "change_kind": change_kind, "sreality_id": sreality_id,
+            "source": source, "source_id_native": source_id_native,
             "locality": locality, "disposition": disposition,
             "price_czk": price_czk, "price_unit": price_unit,
             "trigger_price_czk": trigger_price_czk, "prev_price_czk": prev_price_czk,
@@ -214,12 +234,13 @@ def drain_once(
     for r in retry_rows:
         (send_id, ch, recipient, _consumer, source_kind, change_kind, sreality_id,
          trigger_price_czk, prev_price_czk, locality, disposition,
-         price_czk, price_unit, _category_main, message) = r
+         price_czk, price_unit, _category_main, source, source_id_native, message) = r
         if not recipient:
             continue
         msg = compose_message({
             "source_kind": source_kind, "message": message,
             "change_kind": change_kind, "sreality_id": sreality_id,
+            "source": source, "source_id_native": source_id_native,
             "locality": locality, "disposition": disposition,
             "price_czk": price_czk, "price_unit": price_unit,
             "trigger_price_czk": trigger_price_czk, "prev_price_czk": prev_price_czk,

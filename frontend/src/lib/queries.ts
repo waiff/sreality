@@ -47,6 +47,7 @@ import type {
   ScrapeRun,
   ScraperHealthChecks,
 } from './types';
+import type { BorderCase, ImageAnnotation, PhashNote, TrainingExample } from './api';
 
 /* Circle → bounding box approximation. Used when the operator picks
  * the centre+radius mode on the map: PostgREST has no native
@@ -117,8 +118,12 @@ export interface SortSpec {
  * valid across snapshot rebuilds. last_seen_at remains a selectable option. */
 export const DEFAULT_SORT: SortSpec = { field: 'first_seen_at', direction: 'desc' };
 
+/* sreality_id stays in SortField (it's still a selected/displayed column) but
+ * is intentionally absent here: it mixes real positive ids with synthetic
+ * negative ones, so sorting by it is meaningless. Saved presets / URLs that
+ * still carry sort=sreality_id fall back to DEFAULT_SORT via parseSort. */
 const SORTABLE_FIELDS: ReadonlyArray<SortField> = [
-  'sreality_id', 'district', 'disposition',
+  'district', 'disposition',
   'area_m2', 'price_czk', 'price_per_m2',
   'first_seen_at', 'last_seen_at', 'is_active',
   'estate_area', 'usable_area', 'parking_lots',
@@ -1039,6 +1044,28 @@ export const fetchListingById = async (
   return (data as unknown as ListingPublic | null) ?? null;
 };
 
+/* Resolve a listing's natural key (source, source_id_native) to its sreality_id,
+ * so the canonical /listing/{source}/{native} route can reuse fetchListingById.
+ * Uses listing_natural_key_public (migration 315) — an UNFILTERED view over every
+ * listing — NOT property_sources_public, which filters `property_id is not null`
+ * and so cannot resolve a freshly-scraped listing during its ~5-min pre-attach
+ * window (the canonical URL would 404 while the legacy one loaded). The key
+ * (source, source_id_native) is unique (migration 091), so maybeSingle is safe. */
+export const fetchListingIdByNaturalKey = async (
+  source: string,
+  sourceIdNative: string,
+): Promise<number | null> => {
+  const { data, error } = await supabase
+    .from('listing_natural_key_public')
+    .select('sreality_id')
+    .eq('source', source)
+    .eq('source_id_native', sourceIdNative)
+    .maybeSingle();
+  if (error) throw error;
+  const row = data as unknown as { sreality_id: number | null } | null;
+  return row?.sreality_id ?? null;
+};
+
 /* Resolve a property_id to its representative listing's sreality_id.
  * Lets /listing?property=ID (e.g. the dedup merge feed's link) land on the
  * survivor's detail page. properties_public exposes sreality_id = repr id. */
@@ -1174,7 +1201,7 @@ export const fetchListingsByIds = async (
  * (clip_fine_tag / clip_logical_tag / clip_confidence, migration 236) so every
  * photo surface can render its bottom-left tag badge from the same read. */
 const IMAGE_PUBLIC_COLS =
-  'id,sreality_id,sequence,sreality_url,storage_path,clip_fine_tag,clip_logical_tag,clip_confidence,clip_render_score';
+  'id,sreality_id,sequence,sreality_url,storage_path,clip_fine_tag,clip_logical_tag,clip_confidence,clip_render_score,phash';
 
 export const fetchImagesByListingIds = async (
   ids: ReadonlyArray<number>,
@@ -1224,6 +1251,161 @@ export const fetchPropertySourcesByPropertyIds = async (
     else out.set(row.property_id, [row]);
   }
   return out;
+};
+
+/* /clip-audit: the property feed — newest-first within ONE property type. Reads
+ * browse_list, same read model as Browse. `category_main` is REQUIRED (no "all
+ * types" option): browse_list's only covering index is `(category_main,
+ * category_type, first_seen_at desc, property_id desc)` — measured live, a plain
+ * `ORDER BY first_seen_at DESC` with no category filter falls back to a parallel
+ * seq scan + sort (~3.5s cold on the full active cohort, over the anon 3s budget);
+ * filtered by category_main it's a sub-ms index scan. Same keyset machinery as the
+ * Browse table (lib/keyset) so paging behaves identically and stays index-matched. */
+export interface ClipAuditPropertyRow {
+  property_id: number;
+  sreality_id: number;
+  category_main: string;
+  category_type: string | null;
+  first_seen_at: string;
+}
+
+const CLIP_AUDIT_COLS = 'property_id,sreality_id,category_main,category_type,first_seen_at';
+const CLIP_AUDIT_SORT: SortSpec = { field: 'first_seen_at', direction: 'desc' };
+export const CLIP_AUDIT_PAGE_SIZE = 24;
+
+export const fetchClipAuditProperties = async (
+  categoryMain: string,
+  cursor: KeysetCursor | null,
+): Promise<{ rows: ClipAuditPropertyRow[]; nextCursor: KeysetCursor | null }> => {
+  const base = supabase
+    .from('browse_list')
+    .select(withKeysetColumns(CLIP_AUDIT_COLS, CLIP_AUDIT_SORT))
+    .eq('category_main', categoryMain);
+  const keyed = applyKeyset(
+    base as unknown as KeysetBuilder, CLIP_AUDIT_SORT, cursor,
+  ) as unknown as typeof base;
+  const { data, error } = await keyed.limit(CLIP_AUDIT_PAGE_SIZE);
+  if (error) throw error;
+  const rows = (data ?? []) as unknown as ClipAuditPropertyRow[];
+  return {
+    rows,
+    nextCursor: nextCursorFrom(rows as unknown as Record<string, unknown>[], CLIP_AUDIT_SORT),
+  };
+};
+
+/* /clip-audit + /phash-audit: the operator's per-image correction/note (migration
+ * 308), batched by the on-screen image ids. Keyed on image_id for O(1) lookup while
+ * rendering the photo grid. */
+export const fetchImageAnnotationsByImageIds = async (
+  ids: ReadonlyArray<number>,
+): Promise<Map<number, ImageAnnotation>> => {
+  if (ids.length === 0) return new Map();
+  const { data, error } = await supabase
+    .from('image_tag_annotations_public')
+    .select('image_id,tag_flagged,render_flagged,note,updated_at')
+    .in('image_id', ids as number[]);
+  if (error) throw error;
+  const out = new Map<number, ImageAnnotation>();
+  for (const row of (data ?? []) as unknown as ImageAnnotation[]) {
+    out.set(row.image_id, row);
+  }
+  return out;
+};
+
+/* /phash-audit: the operator's note on an image PAIR, batched by the on-screen
+ * images' ids. The two `.in()` filters can over-match (any a-on-screen paired with
+ * any b-on-screen, not just the specific pairs shown) — harmless, since the caller
+ * looks up by the exact `${a}:${b}` key and ignores anything else returned. */
+export const fetchPhashPairNotesForImageIds = async (
+  ids: ReadonlyArray<number>,
+): Promise<Map<string, PhashNote>> => {
+  if (ids.length === 0) return new Map();
+  const { data, error } = await supabase
+    .from('phash_pair_notes_public')
+    .select('image_id_a,image_id_b,note,updated_at')
+    .in('image_id_a', ids as number[])
+    .in('image_id_b', ids as number[]);
+  if (error) throw error;
+  const out = new Map<string, PhashNote>();
+  for (const row of (data ?? []) as unknown as PhashNote[]) {
+    out.set(`${row.image_id_a}:${row.image_id_b}`, row);
+  }
+  return out;
+};
+
+/* /phash-audit "Train": the operator's linear-probe training-set label per image
+ * (migration 309), batched by the on-screen image ids. Also used to seed the label
+ * combobox's "labels currently in use" suggestion list, alongside the CLIP taxonomy. */
+export const fetchTrainingExamplesForImageIds = async (
+  ids: ReadonlyArray<number>,
+): Promise<Map<number, TrainingExample>> => {
+  if (ids.length === 0) return new Map();
+  const { data, error } = await supabase
+    .from('image_training_examples_public')
+    .select('image_id,label,updated_at')
+    .in('image_id', ids as number[]);
+  if (error) throw error;
+  const out = new Map<number, TrainingExample>();
+  for (const row of (data ?? []) as unknown as TrainingExample[]) {
+    out.set(row.image_id, row);
+  }
+  return out;
+};
+
+/* The "Border case" button's flagged/unflagged state, batched per page-group —
+ * same shape/read path as fetchTrainingExamplesForImageIds, just image_id-keyed
+ * with no other payload (a border case carries no value of its own). */
+export const fetchBorderCasesByImageIds = async (
+  ids: ReadonlyArray<number>,
+): Promise<Set<number>> => {
+  if (ids.length === 0) return new Set();
+  const { data, error } = await supabase
+    .from('image_border_cases_public')
+    .select('image_id')
+    .in('image_id', ids as number[]);
+  if (error) throw error;
+  return new Set((data ?? []).map((r) => (r as BorderCase).image_id));
+};
+
+/* /phash-audit label combobox: every DISTINCT label already in the training set, so
+ * a label the operator typed once shows up as a suggestion next time (on top of the
+ * fixed CLIP taxonomy, which the combobox already offers unconditionally). Bounded
+ * (the table is starting from zero — see migration 309), so an unindexed distinct
+ * scan is fine; revisit if the set grows into the thousands. */
+export const fetchDistinctTrainingLabels = async (): Promise<string[]> => {
+  const { data, error } = await supabase
+    .from('image_training_examples_public')
+    .select('label')
+    .limit(2000);
+  if (error) throw error;
+  return [...new Set((data ?? []).map((r) => (r as { label: string }).label))].sort();
+};
+
+export interface TrainingLabelCount {
+  label: string;
+  count: number;
+}
+
+/* /phash-audit's "Jen v trénovací sadě" Tag row: how many examples exist per label —
+ * lets the operator judge class coverage ("is this one big enough yet?") while
+ * building the set. A GLOBAL count (the whole training set), not scoped to the
+ * current Hamming-range/outcome/category filters — coverage is a property of the
+ * training set itself, not of whichever window is currently being browsed. Same
+ * underlying read as fetchDistinctTrainingLabels (see its comment re: bound), just
+ * aggregated client-side instead of deduped, since the table is still small. */
+export const fetchTrainingLabelCounts = async (): Promise<TrainingLabelCount[]> => {
+  const { data, error } = await supabase
+    .from('image_training_examples_public')
+    .select('label')
+    .limit(2000);
+  if (error) throw error;
+  const counts = new Map<string, number>();
+  for (const row of (data ?? []) as { label: string }[]) {
+    counts.set(row.label, (counts.get(row.label) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .map(([label, count]) => ({ label, count }))
+    .sort((a, b) => b.count - a.count || a.label.localeCompare(b.label, 'cs'));
 };
 
 /* /dedup review card: the street / house-number / floor the candidate payload

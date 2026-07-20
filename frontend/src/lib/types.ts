@@ -149,6 +149,9 @@ export interface ImagePublic {
   /* CLIP render-vs-photo score 0..1 (migration 239): >= ~0.65 is a 3D render /
    * visualization (excluded from the byt merge signal). NULL until scored. */
   clip_render_score: number | null;
+  /* 64-bit dHash perceptual hash (migration 308), as Postgres's signed bigint — a
+   * display value for the /clip-audit and /phash-audit pages. NULL until hashed. */
+  phash: number | null;
 }
 
 /* Distributional shapes — used by EstimationDetail's RangeStrip and by
@@ -921,6 +924,9 @@ export interface PipelineBoardCard {
 export interface CollectionPropertyRow {
   property_id: number;
   sreality_id: number;
+  /** Source portal of the representative listing; null if none joined. Drives
+   * whether sreality_id is shown as a meaningful "ID" (sreality only). */
+  source: string | null;
   district: string | null;
   disposition: string | null;
   subtype: string | null;

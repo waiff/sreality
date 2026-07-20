@@ -16,7 +16,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from api import dependencies as deps
+from api import model_compare
 from api import property_dedup as dedup
+from api.location_filter import parse_district_chips_csv
 from toolkit.asset_identity import (
     AssetError,
     get_asset,
@@ -36,6 +38,13 @@ class PropertySetAction(BaseModel):
     property_ids: list[int]
 
 
+class ModelCompareAction(BaseModel):
+    # None/omitted => the oldest-undecided top-`limit` (queue-level button);
+    # a list => exactly those proposed candidates (per-card button).
+    candidate_ids: list[int] | None = None
+    limit: int = 25
+
+
 class AssetLinkAction(BaseModel):
     property_ids: list[int]
     note: str | None = None
@@ -52,6 +61,28 @@ class DecisionFeedbackAction(BaseModel):
     expected_outcome: str | None = None  # should_merge | should_dismiss | unsure
     note: str | None = None
     category_main: str | None = None
+
+
+class ImageAnnotationAction(BaseModel):
+    image_id: int
+    tag_flagged: bool = False
+    render_flagged: bool = False
+    note: str | None = None
+
+
+class PhashNoteAction(BaseModel):
+    image_id_a: int
+    image_id_b: int
+    note: str | None = None
+
+
+class TrainingExampleAction(BaseModel):
+    image_id: int
+    label: str
+
+
+class BorderCaseAction(BaseModel):
+    image_id: int
 
 
 @router.get("/summary")
@@ -100,12 +131,24 @@ def get_pair_audit(
     category_main: str | None = None,
     source: str | None = None,
     stage: str | None = None,
-    factor: str | None = Query(default=None, pattern="^(phash|cosine|visual|address)$"),
+    factor: str | None = Query(
+        default=None, pattern="^(phash|cosine|visual|address|floor_plan)$",
+    ),
     factor_min: float | None = None,
     factor_max: float | None = None,
     verdict: str | None = Query(default=None, pattern="^(High|Medium|Low)$"),
+    room_type: str | None = None,
     property_id: int | None = None,
+    property_id_in: str | None = Query(
+        default=None, description="CSV of property_ids — batches many properties' "
+        "decisions into one call (e.g. the /clip-audit page's on-screen cards).",
+    ),
     flagged: bool | None = None,
+    districts: str | None = None,
+    districts_ctx: str | None = None,
+    districts_excl: str | None = None,
+    districts_lvl: str | None = None,
+    districts_id: str | None = None,
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     conn: Any = Depends(deps.get_db_conn),
@@ -114,12 +157,24 @@ def get_pair_audit(
     """The unified Decision history feed (merged / dismissed, engine + operator).
     Filterable by property type, outcome, source, stage, the decision FACTOR
     (`factor` + numeric `factor_min`/`factor_max`, or `verdict` for visual),
-    `property_id` (the decisions that built one property — the listing-detail link),
-    and `flagged` (only decisions the operator flagged as incorrect)."""
+    `room_type` (the compared room/plan tag), `property_id` (the decisions that built
+    one property — the listing-detail link) or its batched form `property_id_in`,
+    `flagged` (only decisions the operator flagged as incorrect), and `districts`
+    (the same `districts`/`districts_ctx`/`districts_excl`/`districts_lvl`/
+    `districts_id` CSV shape Browse's URL uses — matches if EITHER side of the
+    decision's pair touches the picked place)."""
+    pids = (
+        [int(x) for x in property_id_in.split(",") if x.strip()]
+        if property_id_in else None
+    )
     return dedup.list_pair_audit(
         conn, outcome=outcome, category_main=category_main, source=source,
         stage=stage, factor=factor, factor_min=factor_min, factor_max=factor_max,
-        verdict=verdict, property_id=property_id, flagged=flagged,
+        verdict=verdict, room_type=room_type, property_id=property_id,
+        property_id_in=pids, flagged=flagged,
+        districts=parse_district_chips_csv(
+            districts, districts_ctx, districts_excl, districts_lvl, districts_id,
+        ),
         limit=limit, offset=offset,
     )
 
@@ -177,19 +232,175 @@ def delete_decision_feedback(
     return dedup.delete_decision_feedback(conn, left_property_id=a, right_property_id=b)
 
 
+@router.post("/image-annotation")
+def post_image_annotation(
+    body: ImageAnnotationAction,
+    conn: Any = Depends(deps.get_db_conn),
+    _: dict = Depends(deps.require_admin),
+) -> dict[str, Any]:
+    """/clip-audit: flag one image's CLIP tag and/or render score as wrong, with a
+    note. Idempotent upsert, image-grain."""
+    return dedup.set_image_annotation(
+        conn, image_id=body.image_id, tag_flagged=body.tag_flagged,
+        render_flagged=body.render_flagged, note=body.note,
+    )
+
+
+@router.delete("/image-annotation")
+def delete_image_annotation(
+    image_id: int,
+    conn: Any = Depends(deps.get_db_conn),
+    _: dict = Depends(deps.require_admin),
+) -> dict[str, Any]:
+    """Clear an image's annotation."""
+    return dedup.delete_image_annotation(conn, image_id=image_id)
+
+
+@router.post("/phash-note")
+def post_phash_note(
+    body: PhashNoteAction,
+    conn: Any = Depends(deps.get_db_conn),
+    _: dict = Depends(deps.require_admin),
+) -> dict[str, Any]:
+    """/phash-audit: a note on one image pair. Idempotent upsert, image-pair-grain."""
+    try:
+        return dedup.set_phash_note(
+            conn, image_id_a=body.image_id_a, image_id_b=body.image_id_b,
+            note=body.note,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.delete("/phash-note")
+def delete_phash_note(
+    a: int,
+    b: int,
+    conn: Any = Depends(deps.get_db_conn),
+    _: dict = Depends(deps.require_admin),
+) -> dict[str, Any]:
+    """Clear a phash-pair note. `a`/`b` are the two image ids."""
+    return dedup.delete_phash_note(conn, image_id_a=a, image_id_b=b)
+
+
+@router.post("/training-example")
+def post_training_example(
+    body: TrainingExampleAction,
+    conn: Any = Depends(deps.get_db_conn),
+    _: dict = Depends(deps.require_admin),
+) -> dict[str, Any]:
+    """/phash-audit "Train": upsert one image's linear-probe training-set label."""
+    try:
+        return dedup.set_training_example(
+            conn, image_id=body.image_id, label=body.label,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.delete("/training-example")
+def delete_training_example(
+    image_id: int,
+    conn: Any = Depends(deps.get_db_conn),
+    _: dict = Depends(deps.require_admin),
+) -> dict[str, Any]:
+    """Remove an image from the training set."""
+    return dedup.delete_training_example(conn, image_id=image_id)
+
+
+@router.post("/border-case")
+def post_border_case(
+    body: BorderCaseAction,
+    conn: Any = Depends(deps.get_db_conn),
+    _: dict = Depends(deps.require_admin),
+) -> dict[str, Any]:
+    """Flag an image as a border case — even a human isn't confident about it."""
+    return dedup.set_border_case(conn, image_id=body.image_id)
+
+
+@router.delete("/border-case")
+def delete_border_case(
+    image_id: int,
+    conn: Any = Depends(deps.get_db_conn),
+    _: dict = Depends(deps.require_admin),
+) -> dict[str, Any]:
+    """Unflag an image as a border case."""
+    return dedup.delete_border_case(conn, image_id=image_id)
+
+
+@router.get("/phash-audit")
+def get_phash_audit(
+    hamming_min: int = Query(default=0, ge=0, le=64),
+    hamming_max: int = Query(default=15, ge=0, le=64),
+    category_main: str | None = None,
+    outcome: str | None = None,
+    room_types: str | None = Query(
+        default=None, description="CSV of CLIP logical tags — both images in a "
+        "returned pair must share the SAME tag, which must be one of these.",
+    ),
+    training_only: bool = Query(
+        default=False, description="Only pairs where at least one of the two shown "
+        "images already has a linear-probe training-set label.",
+    ),
+    training_label: str | None = Query(
+        default=None, description="Narrows training_only to one SPECIFIC label "
+        "(implies training_only regardless of its literal value).",
+    ),
+    training_exclude: bool = Query(
+        default=False, description="Inverse of training_only — pairs where NEITHER "
+        "shown image is in the training set yet. Takes priority if both are set.",
+    ),
+    limit: int = Query(default=100, ge=1, le=200),
+    scan_offset: int = Query(
+        default=0, ge=0, description="Opaque cursor — pass back the previous "
+        "response's next_scan_offset to continue scanning.",
+    ),
+    conn: Any = Depends(deps.get_db_conn),
+    _: dict = Depends(deps.require_admin),
+) -> dict[str, Any]:
+    """/phash-audit: matching-photo image pairs, from decisions the engine already made,
+    whose live Hamming distance falls in [hamming_min, hamming_max] — evidence for
+    whether the current merge bar (Hamming <= 6) could safely widen. Read-only; no
+    engine/threshold change. Paginates the SCOPE in bounded chunks (see phash_audit's
+    docstring) — a `data` shorter than `limit` with a null `next_scan_offset` means the
+    ceiling or the true population was exhausted, not an arbitrary stop."""
+    types = [t for t in room_types.split(",") if t.strip()] if room_types else None
+    return dedup.phash_audit(
+        conn, hamming_min=hamming_min, hamming_max=hamming_max,
+        category_main=category_main, outcome=outcome, room_types=types,
+        training_only=training_only, training_label=training_label,
+        training_exclude=training_exclude, limit=limit, scan_offset=scan_offset,
+    )
+
+
 @router.get("/candidates")
 def get_candidates(
     status: str | None = "proposed",
     tier: str | None = None,
     reason: str | None = None,
     verdict: str | None = None,
+    category_main: str | None = None,
+    districts: str | None = None,
+    districts_ctx: str | None = None,
+    districts_excl: str | None = None,
+    districts_lvl: str | None = None,
+    districts_id: str | None = None,
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     conn: Any = Depends(deps.get_db_conn),
     _: dict = Depends(deps.require_admin),
 ) -> dict[str, Any]:
+    """`category_main` and `districts` both narrow to pairs where EITHER candidate
+    property matches (the same property-type tabs Decision history uses, and the
+    same `districts`/`districts_ctx`/`districts_excl`/`districts_lvl`/`districts_id`
+    CSV shape Browse's URL uses) — lets the operator prioritise the manual review
+    backlog by property type or location."""
     return dedup.list_candidates(
         conn, status=status, tier=tier, reason=reason, verdict=verdict,
+        category_main=category_main,
+        districts=parse_district_chips_csv(
+            districts, districts_ctx, districts_excl, districts_lvl, districts_id,
+        ),
         limit=limit, offset=offset,
     )
 
@@ -231,6 +442,20 @@ def post_archive_reset_candidates(
     """Archive the proposed candidate queue to a backup table + clear it, so the
     engine regenerates fresh. Merges/dismissals are untouched."""
     return dedup.archive_reset_candidates(conn)
+
+
+@router.post("/model-compare")
+def post_model_compare(
+    body: ModelCompareAction,
+    conn: Any = Depends(deps.get_db_conn),
+    _: dict = Depends(deps.require_admin),
+) -> dict[str, Any]:
+    """Convene all connected vision models on undecided pairs (decision support): snapshot the
+    pair(s) + dispatch every model against them; verdicts land on /model-testing. `candidate_ids`
+    None = the oldest-undecided top-`limit`; a list = exactly those proposed candidates."""
+    return model_compare.compare_models(
+        conn, candidate_ids=body.candidate_ids, limit=body.limit,
+    )
 
 
 @router.post("/candidates/{candidate_id}/dismiss")

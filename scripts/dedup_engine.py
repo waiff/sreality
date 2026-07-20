@@ -89,6 +89,14 @@ MAX_GROUP_SIZE = 40
 # O(n^2) and low-value. Skip + log (mirrors MAX_GROUP_SIZE for the street path).
 MAX_GEO_GROUP_SIZE = 25
 
+# Session 5 recency-first ordering (design doc §5/§6): the reserved slice a cursor-bearing
+# sweep lane (full/geo/byt-geo) pulls to the front of its cursor-ordered pass, ahead of the
+# lexicographic frontier — same window as the widest dedup_recency_backlog bucket (migration
+# 307), so shrinking that view's <7d column is the acceptance test. LIMIT bounds it to a
+# fraction of a run's compare/floor-plan budget, not a market-wide re-sort.
+RECENCY_HEAD_WINDOW_DAYS = 7.0
+RECENCY_HEAD_LIMIT = 500
+
 # An OVERSIZED group (still > MAX_GROUP_SIZE after disposition-class sharding — a
 # same-disposition development or a geo pileup) is processed BOUNDED instead of
 # skipped: its best MAX_GROUP_PAIRS pairs in value order (prioritized_group_pairs).
@@ -410,6 +418,66 @@ def _proposed_candidate_property_ids(
     return out
 
 
+def _recency_ranked_property_ids(
+    conn: Any, property_ids: Any, *, limit: int | None = None,
+) -> list[int]:
+    """The candidate drain's half of the ONE recency signal (design doc §5/§6 Session 5):
+    rank an already-due-bounded work-list `property_ids` NEWEST-first by
+    `properties.first_seen_at`, then feed the result straight into `priority_property_order`
+    so a freshly-scraped duplicate always outranks an old one for this pass's compare slots.
+    `limit` bounds the ranking to the N freshest (unused by the candidate drain today, which
+    ranks its whole due-set — kept for symmetry / a future caller). Missing/NULL
+    first_seen_at sorts last, never first (an unknown-age property must not look
+    artificially fresh). The sweep lanes' analogous head is `_recency_head_candidate_ids`
+    below — tier/window-scoped rather than a bare id-list rank, since a cursor-bearing lane
+    needs a BOUNDED, backlog-targeted head, not a full re-sort of the whole market."""
+    ids = sorted({int(pid) for pid in property_ids if pid is not None})
+    if not ids:
+        return []
+    sql = "SELECT id FROM properties WHERE id = ANY(%(ids)s) ORDER BY first_seen_at DESC NULLS LAST"
+    if limit is not None:
+        sql += " LIMIT %(limit)s"
+    with conn.cursor() as cur:
+        cur.execute(sql, {"ids": ids, "limit": limit})
+        return [int(r[0]) for r in cur.fetchall()]
+
+
+def _recency_head_candidate_ids(
+    conn: Any, *, tier: str, window_days: float = RECENCY_HEAD_WINDOW_DAYS,
+    limit: int = RECENCY_HEAD_LIMIT,
+) -> set[int]:
+    """The sweep lanes' half of the ONE recency signal: property ids from still-`proposed`
+    `tier` candidates whose newer side was first seen within `window_days` — the reserved
+    recency-first HEAD a cursor-bearing lane (full/geo/byt-geo) pulls to the front of its
+    pass (composed with the scan_cursor frontier in run_engine, never a re-sort of it).
+    Same GREATEST(first_seen_at) basis as `dedup_recency_backlog` (migration 307) — a pair
+    counts as fresh the moment EITHER side is a new listing — so shrinking that view's <7d
+    column per tier is this feature's own acceptance test. `limit` bounds the SQL to the N
+    freshest PAIRS (each contributing up to 2 property ids), keeping the head a genuinely
+    reserved slice of the run's budget rather than an unbounded backlog dump."""
+    sql = """
+        SELECT c.left_property_id, c.right_property_id
+        FROM property_identity_candidates c
+        JOIN properties pl ON pl.id = c.left_property_id
+        JOIN properties pr ON pr.id = c.right_property_id
+        WHERE c.status = 'proposed' AND c.tier = %(tier)s
+          AND greatest(pl.first_seen_at, pr.first_seen_at)
+              > now() - (%(days)s * interval '1 day')
+        ORDER BY greatest(pl.first_seen_at, pr.first_seen_at) DESC
+        LIMIT %(limit)s
+    """
+    with conn.cursor() as cur:
+        cur.execute(sql, {"tier": tier, "days": float(window_days), "limit": int(limit)})
+        rows = cur.fetchall()
+    out: set[int] = set()
+    for left, right in rows:
+        if left is not None:
+            out.add(int(left))
+        if right is not None:
+            out.add(int(right))
+    return out
+
+
 def _stamp_engine_looked(conn: Any, looked: dict[tuple[int, int], str]) -> None:
     """Record 'the engine evaluated this proposed pair and left it proposed' — the
     stamp the candidate drain's due-filter keys on. Set-based, proposed rows only;
@@ -421,7 +489,8 @@ def _stamp_engine_looked(conn: Any, looked: dict[tuple[int, int], str]) -> None:
         cur.execute(
             """
             UPDATE property_identity_candidates c
-            SET last_engine_decision_at = now(), engine_decision = v.reason
+            SET last_engine_decision_at = now(), engine_decision = v.reason,
+                first_engine_decision_at = coalesce(c.first_engine_decision_at, now())
             FROM (SELECT unnest(%(los)s::bigint[]) AS lo,
                          unnest(%(his)s::bigint[]) AS hi,
                          unnest(%(reasons)s::text[]) AS reason) v
@@ -755,9 +824,13 @@ def _resolve_candidates(conn: Any, pairs: set[tuple[int, int]], new_status: str)
     with conn.cursor() as cur:
         cur.execute(
             # Two-arg unnest zips the arrays element-wise into (lo, hi) rows — the
-            # canonical, unambiguous parallel-unnest form.
+            # canonical, unambiguous parallel-unnest form. first_engine_decision_at is
+            # write-once (Session 5 instrumentation): a merge/dismiss can be this pair's
+            # very first engine look, so it must stamp here too, not only in
+            # _stamp_engine_looked (which only ever sees pairs that STAY proposed).
             "UPDATE property_identity_candidates c "
-            "SET status = %s, reviewed_at = now() "
+            "SET status = %s, reviewed_at = now(), "
+            "    first_engine_decision_at = coalesce(c.first_engine_decision_at, now()) "
             "FROM unnest(%s::bigint[], %s::bigint[]) AS p(lo, hi) "
             "WHERE c.left_property_id = p.lo AND c.right_property_id = p.hi "
             "AND c.status = 'proposed'",
@@ -784,12 +857,19 @@ def _record_auto_dismissed(conn: Any, pairs: set[tuple[int, int]], tier: str) ->
             # re-DISMISSED must move its settled timestamp forward, or it reads as
             # perpetually "fresh" and re-runs every scoped pass (the treadmill again).
             # Guarded to dismissed rows only — proposed/merged rows are never touched.
+            # first_engine_decision_at (Session 5, write-once): a brand-new row inserted
+            # here (no prior candidate ever proposed) has its first engine look right now;
+            # an existing dismissed row already got its stamp from _resolve_candidates in
+            # the same pass, so the ON CONFLICT arm just coalesces defensively.
             "INSERT INTO property_identity_candidates "
-            "  (left_property_id, right_property_id, tier, status, reviewed_at) "
-            "SELECT p.lo, p.hi, %s, 'dismissed', now() "
+            "  (left_property_id, right_property_id, tier, status, reviewed_at, "
+            "   first_engine_decision_at) "
+            "SELECT p.lo, p.hi, %s, 'dismissed', now(), now() "
             "FROM unnest(%s::bigint[], %s::bigint[]) AS p(lo, hi) "
             "ON CONFLICT (left_property_id, right_property_id) DO UPDATE "
-            "  SET reviewed_at = now() "
+            "  SET reviewed_at = now(), "
+            "      first_engine_decision_at = coalesce("
+            "          property_identity_candidates.first_engine_decision_at, now()) "
             "  WHERE property_identity_candidates.status = 'dismissed'",
             (tier, los, his),
         )
@@ -1261,13 +1341,18 @@ def _both_have_site_plan(
     return result
 
 
-def _classify_or_none(classify_fn: Any, sreality_id: int) -> list[dict[str, Any]] | None:
+_DEFERRED = "deferred"  # sentinel: classify_fn spooled a batch request instead of a live call
+
+
+def _classify_or_none(classify_fn: Any, sreality_id: int) -> list[dict[str, Any]] | str | None:
     if classify_fn is None:
         return None
     try:
         res = classify_fn(sreality_id)
         if res is None:  # cache-only: not fully warmed yet -> wait for the batch lane
             return None
+        if res.get("deferred"):
+            return _DEFERRED
         return res["data"]["images"]
     except Exception as exc:  # noqa: BLE001 - one bad listing must not kill the run
         LOG.warning("classify %s failed: %s", sreality_id, exc)
@@ -1306,6 +1391,11 @@ def _resolve_visual(
     """
     imgs_a = _classify_or_none(classify_fn, a.sreality_id)
     imgs_b = _classify_or_none(classify_fn, b.sreality_id)
+    if imgs_a == _DEFERRED or imgs_b == _DEFERRED:
+        # A cold classify call was spooled into the batch tier (§4.1) instead of
+        # paid inline — retry next pass once the batch lane warms it, NOT queue
+        # (mirrors the floor-plan gate's existing defer semantics).
+        return {"action": "defer", "reason": "batch_pending"}
     if imgs_a is None or imgs_b is None:
         return {"action": "queue", "reason": "no_images"}
 
@@ -1317,7 +1407,9 @@ def _resolve_visual(
     site_a = [i["image_id"] for i in imgs_a if i["room_type"] == SITE_PLAN_ROOM_TYPE]
     site_b = [i["image_id"] for i in imgs_b if i["room_type"] == SITE_PLAN_ROOM_TYPE]
     if site_a and site_b and site_plan_fn is not None and vision_budget[0] > 0:
-        sp = site_plan_fn(a.sreality_id, b.sreality_id, site_a, site_b)
+        sp = site_plan_fn(a.sreality_id, b.sreality_id, site_a, site_b, a.category_main)
+        if sp is not None and sp.get("deferred"):
+            return {"action": "defer", "reason": "batch_pending"}
         if sp is not None and not sp.get("cache_hit"):
             vision_budget[0] -= 1  # only a COLD (paid) call consumes the budget
         if sp is not None and sp.get("verdict") == "different_unit":
@@ -1380,6 +1472,11 @@ def _resolve_visual(
         tried += 1
         verdict_obj = compare_fn(
             a.sreality_id, b.sreality_id, room, by_room_a[room], by_room_b[room], model)
+        if verdict_obj is not None and verdict_obj.get("deferred"):
+            # A cold room compare was spooled into the batch tier — stop trying
+            # further rooms this pass (mirrors --warm-rooms=1: only the first
+            # unresolved room is worth buying) and defer the WHOLE pair.
+            return {"action": "defer", "reason": "batch_pending", "room_type": room}
         if verdict_obj is None:
             continue
         # Only a COLD (cache-miss) call consumes the budget — a warm cache hit is
@@ -2247,9 +2344,14 @@ def resolve_pair(conn: Any, a: ListingKey, b: ListingKey, *, street_key: str,
         ctx.auto_dismissed_pairs.add(cp)
         _audit(ctx.audit, a, b, "visual", "dismissed", factors, source="engine")
     elif outcome["action"] == "defer":
-        # Floor-plan verdict not warmed yet -> skip, re-try next run (the batch lane
-        # warms it). NOT the manual queue.
-        stats["floor_plan_deferred"] += 1
+        # Verdict not warmed yet -> skip, re-try next run (the batch lane warms
+        # it). NOT the manual queue. "batch_pending" = this pass spooled a NEW
+        # cold classify/compare/site-plan request (§4.1 engine-fed deferral);
+        # "floor_plan_pending" = the (pre-existing) floor-plan gate is waiting
+        # on an already-spooled/warmed verdict. Separate counters so the
+        # success gate can watch spool growth vs consumption independently.
+        key = "batch_deferred" if outcome.get("reason") == "batch_pending" else "floor_plan_deferred"
+        stats[key] += 1
         ctx.seen_property_pairs.discard(cp)  # let another representative retry this run
     elif ctx.enqueue_unresolved:
         if not ctx.dry_run:
@@ -2323,6 +2425,7 @@ def run_engine(
     priority_property_order: list[int] | None = None,
     scan_cursor: str | None = None,
     cursor_out: dict[str, Any] | None = None,
+    recency_head_property_ids: set[int] | None = None,
     geo: bool = False,
     geo_area_max_pct: float | None = None,
     byt_geo: bool = False,
@@ -2352,8 +2455,9 @@ def run_engine(
 
     classify_fn(sreality_id) -> classify_listing_images envelope.
     compare_fn(a, b, room_type, ids_a, ids_b) -> {verdict, rationale} | None.
-    site_plan_fn(a, b, ids_a, ids_b) -> {verdict, rationale} | None (development
-    guard: verdict ∈ same_unit|different_unit|inconclusive).
+    site_plan_fn(a, b, ids_a, ids_b, family) -> {verdict, rationale} | None (development
+    guard: verdict ∈ same_unit|different_unit|inconclusive; family routes a per-family
+    model override, e.g. a stronger model for pozemek — toolkit.dedup_model_overrides).
 
     Self-healing: each run also RESOLVES stale proposed candidates rather than
     letting them pile up in the operator queue — it dismisses a pair the current
@@ -2403,7 +2507,8 @@ def run_engine(
         "auto_address": 0, "auto_phash": 0, "auto_phash_single": 0, "auto_visual": 0, "auto_attr": 0, "auto_cosine": 0,
         "queued": 0, "vision_calls": 0,
         "auto_dismissed": 0, "reconciled": 0, "skipped_unresolved": 0,
-        "floor_plan_deferred": 0, "clip_deferred": 0, "download_deferred": 0, "truncated": 0,
+        "floor_plan_deferred": 0, "batch_deferred": 0, "clip_deferred": 0,
+        "download_deferred": 0, "truncated": 0,
         "clip_classified": 0, "clip_cosine_calls": 0,
         "routed_haiku": 0, "routed_sonnet": 0,
         # Migration 271 observability: why a run stopped, what oversized groups cost,
@@ -2513,22 +2618,52 @@ def run_engine(
     # fully-scanned/skipped key + whether the run reached the end of the list (= the cycle
     # completed — what re-arms the dirty-queue TTL eviction). Enabled only when the caller
     # passes cursor_out (the plain scheduled full scan); scoped runs keep insertion order.
+    #
+    # `frontier_keys` (Session 5): when a recency head is composed in below, the PERSISTED
+    # cursor position must only ever advance over the cursor-ordered tail, never the head —
+    # a head group can sort BEFORE scan_cursor (that's the whole point: it jumps the
+    # lexicographic queue), and if _advance let it move scan_frontier backward, a
+    # deadline-truncated run would regress the persisted frontier every time the head is
+    # non-empty, defeating migration 261's coverage guarantee. None (no head in play, or
+    # not a cursor run) preserves the exact historical behaviour: every processed key
+    # advances the frontier.
     scan_frontier: dict[str, Any] = {"last_key": None}
+    frontier_keys: set[str] | None = None
     if cursor_out is not None:
-        ordered_keys = sorted(groups)
+        all_keys = sorted(groups)
+        tail = all_keys
         if scan_cursor:
-            after = [k for k in ordered_keys if k > scan_cursor]
-            skipped_behind = len(ordered_keys) - len(after)
+            after = [k for k in all_keys if k > scan_cursor]
+            skipped_behind = len(all_keys) - len(after)
             if skipped_behind:
                 LOG.info("CURSOR resuming after %r (skipping %d already-scanned groups)",
                          scan_cursor, skipped_behind)
-            ordered_keys = after
+            tail = after
+        if recency_head_property_ids:
+            # Reserved recency-first slice (design doc §5/§6 Session 5): pulled from the
+            # WHOLE market (all_keys), not just the post-cursor tail — a freshly-scraped
+            # duplicate behind the current frontier would otherwise wait a full multi-day
+            # cycle for the cursor to wrap back around to it. Composed, not a re-sort: the
+            # tail keeps its existing lexicographic order for everything the head didn't
+            # claim, so resume semantics for the REST of the market are unchanged.
+            head = [k for k in all_keys if any(
+                m.property_id in recency_head_property_ids for m in groups[k])]
+            head_set = set(head)
+            tail = [k for k in tail if k not in head_set]
+            frontier_keys = set(tail)
+            ordered_keys = head + tail
+        else:
+            ordered_keys = tail
     else:
         ordered_keys = list(groups)
         if priority_property_order is not None:
-            # Dirty drain: process groups in CLAIM order (newest dirty property first),
-            # so a deadline-cut run spends its budget on the queue head — the real-time
-            # SLO pairs — instead of whatever fell first in load (obec-ASC) order.
+            # Dirty drain (and, since Session 5, the candidate drain): process groups in
+            # CLAIM/RANK order (newest-first), so a deadline-cut run spends its budget on
+            # the queue head — the real-time SLO / freshest unresolved pairs — instead of
+            # whatever fell first in load (obec-ASC) order. Both callers feed this from
+            # the same `_recency_ranked_property_ids` / `_claim_dedup_dirty` newest-first
+            # source; there is no cursor here to protect (these are due-bounded work-lists,
+            # re-formed fresh every run, not a persisted market-wide frontier).
             rank = {pid: i for i, pid in enumerate(priority_property_order)}
             worst = len(rank)
             ordered_keys.sort(key=lambda k: min(
@@ -2568,7 +2703,8 @@ def run_engine(
 
     def _advance(members: list[Any], street_key: str) -> None:
         _group_scanned(members)
-        scan_frontier["last_key"] = street_key
+        if frontier_keys is None or street_key in frontier_keys:
+            scan_frontier["last_key"] = street_key
         if cursor_out is not None:
             stats["scan_groups_scanned"] += 1
 
@@ -2676,16 +2812,32 @@ def _count_vision_error(error_count: list[int] | None) -> None:
                     "rest of the run (cache reads still served)", VISION_ERROR_BREAKER)
 
 
+def _batch_defer_providers() -> dict[str, Any]:
+    """The batch-capable providers a deferring fn may spool a request to —
+    same set scripts/submit_dedup_batch.py flushes with. A model whose
+    provider isn't here (gemini/qwen) can't be deferred; the deferring fn's
+    caller falls back to its own miss handling."""
+    from api.providers.anthropic import AnthropicProvider
+    from api.providers.openai import OpenAIProvider
+    return {"anthropic": AnthropicProvider(), "openai": OpenAIProvider()}
+
+
 def _build_classify_fn(
     conn: Any, *, prefer_clip: bool = False, clip_model: str | None = None,
     clip_counter: list[int] | None = None, error_count: list[int] | None = None,
+    defer_to_batch: bool = False,
 ) -> Any:
     from api.dependencies import get_providers
     from api.llm_client import LLMClient
     from toolkit.clip_dedup import clip_room_grouping
-    from toolkit.image_classification import cached_classification, classify_listing_images
+    from toolkit.image_classification import (
+        build_classify_request,
+        cached_classification,
+        classify_listing_images,
+    )
     llm = LLMClient(conn, providers=get_providers())
     classify_model = llm.resolve_model("llm_room_classify_model")
+    defer_providers = _batch_defer_providers() if defer_to_batch else None
 
     def _fn(sreality_id: int) -> dict[str, Any] | None:
         # Prefer the FREE CLIP room tags; fall back to the paid LLM classify only
@@ -2699,6 +2851,22 @@ def _build_classify_fn(
                     {"image_id": iid, "room_type": rt}
                     for rt, ids in grouping.items() for iid in ids
                 ]}}
+        if defer_to_batch:
+            state, rooms = cached_classification(
+                conn, sreality_id=sreality_id, model=classify_model)
+            if state == "classified" and rooms is not None:
+                return {"data": {"images": [
+                    {"image_id": iid, "room_type": rt}
+                    for rt, ids in rooms.items() for iid in ids
+                ]}}
+            from toolkit.dedup_batch_defer import enqueue_deferred_request
+            spooled = enqueue_deferred_request(
+                conn, defer_providers, custom_id=f"cls-{sreality_id}",
+                kind="classify", model=classify_model, sreality_id_a=sreality_id,
+                sreality_id_b=None, room_type=None,
+                build_fn=lambda: build_classify_request(conn, llm, sreality_id=sreality_id),
+            )
+            return {"deferred": True} if spooled else None
         if _breaker_open(error_count):
             state, rooms = cached_classification(
                 conn, sreality_id=sreality_id, model=classify_model)
@@ -2717,19 +2885,43 @@ def _build_classify_fn(
     return _fn
 
 
-def _build_compare_fn(conn: Any, *, error_count: list[int] | None = None) -> Any:
+def _build_compare_fn(
+    conn: Any, *, error_count: list[int] | None = None, defer_to_batch: bool = False,
+) -> Any:
     from api.dependencies import get_providers
     from api.llm_client import LLMClient
-    from toolkit.visual_match import cached_visual_verdict, compare_listings_visually
+    from toolkit.visual_match import (
+        build_compare_request,
+        cached_visual_verdict,
+        compare_listings_visually,
+    )
     llm = LLMClient(conn, providers=get_providers())
     default_model = llm.resolve_model("llm_visual_match_model")
+    defer_providers = _batch_defer_providers() if defer_to_batch else None
 
     def _fn(a: int, b: int, room_type: str, ids_a: list[int], ids_b: list[int],
             model: str | None = None) -> dict[str, Any] | None:
+        use_model = model or default_model
+        if defer_to_batch:
+            v = cached_visual_verdict(
+                conn, sreality_id_a=a, sreality_id_b=b, room_type=room_type, model=use_model)
+            if v is not None:
+                return {"verdict": v, "rationale": None, "cache_hit": True}
+            ca, cb = sorted((a, b))
+            from toolkit.dedup_batch_defer import enqueue_deferred_request
+            spooled = enqueue_deferred_request(
+                conn, defer_providers, custom_id=f"cmp-{ca}-{cb}-{room_type}",
+                kind="compare", model=use_model, sreality_id_a=ca, sreality_id_b=cb,
+                room_type=room_type,
+                build_fn=lambda: build_compare_request(
+                    conn, llm, sreality_id_a=a, sreality_id_b=b, room_type=room_type,
+                    image_ids_a=ids_a, image_ids_b=ids_b),
+            )
+            return {"deferred": True} if spooled else None
         if _breaker_open(error_count):
             v = cached_visual_verdict(
                 conn, sreality_id_a=a, sreality_id_b=b, room_type=room_type,
-                model=model or default_model)
+                model=use_model)
             return {"verdict": v, "rationale": None, "cache_hit": True} if v is not None else None
         try:
             res = compare_listings_visually(
@@ -2745,22 +2937,57 @@ def _build_compare_fn(conn: Any, *, error_count: list[int] | None = None) -> Any
     return _fn
 
 
-def _build_site_plan_fn(conn: Any, *, error_count: list[int] | None = None) -> Any:
+def _build_site_plan_fn(
+    conn: Any, *, error_count: list[int] | None = None, defer_to_batch: bool = False,
+) -> Any:
     from api.dependencies import get_providers
     from api.llm_client import LLMClient
-    from toolkit.visual_match import cached_site_plan_verdict, compare_listing_site_plans
+    from toolkit.dedup_model_overrides import (
+        SITE_PLAN_OVERRIDE_KEY,
+        load_model_overrides,
+        resolve_model_for_family,
+    )
+    from toolkit.visual_match import (
+        build_site_plan_request,
+        cached_site_plan_verdict,
+        compare_listing_site_plans,
+    )
     llm = LLMClient(conn, providers=get_providers())
-    site_plan_model = llm.resolve_model("llm_site_plan_match_model")
+    site_plan_overrides = load_model_overrides(conn, SITE_PLAN_OVERRIDE_KEY)
+    defer_providers = _batch_defer_providers() if defer_to_batch else None
 
-    def _fn(a: int, b: int, ids_a: list[int], ids_b: list[int]) -> dict[str, Any] | None:
+    def _fn(
+        a: int, b: int, ids_a: list[int], ids_b: list[int], family: str | None = None,
+    ) -> dict[str, Any] | None:
+        model = resolve_model_for_family(
+            conn, llm, setting_key=SITE_PLAN_OVERRIDE_KEY,
+            default_key="llm_site_plan_match_model", family=family,
+            overrides=site_plan_overrides,
+        )
+        if defer_to_batch:
+            v = cached_site_plan_verdict(
+                conn, sreality_id_a=a, sreality_id_b=b, model=model)
+            if v is not None:
+                return {"verdict": v, "rationale": None, "cache_hit": True}
+            ca, cb = sorted((a, b))
+            from toolkit.dedup_batch_defer import enqueue_deferred_request
+            spooled = enqueue_deferred_request(
+                conn, defer_providers, custom_id=f"spl-{ca}-{cb}",
+                kind="site_plan", model=model, sreality_id_a=ca, sreality_id_b=cb,
+                room_type=None,
+                build_fn=lambda: build_site_plan_request(
+                    conn, llm, sreality_id_a=a, sreality_id_b=b,
+                    image_ids_a=ids_a, image_ids_b=ids_b, model=model),
+            )
+            return {"deferred": True} if spooled else None
         if _breaker_open(error_count):
             v = cached_site_plan_verdict(
-                conn, sreality_id_a=a, sreality_id_b=b, model=site_plan_model)
+                conn, sreality_id_a=a, sreality_id_b=b, model=model)
             return {"verdict": v, "rationale": None, "cache_hit": True} if v is not None else None
         try:
             res = compare_listing_site_plans(
                 conn, llm, sreality_id_a=a, sreality_id_b=b,
-                image_ids_a=ids_a, image_ids_b=ids_b,
+                image_ids_a=ids_a, image_ids_b=ids_b, model=model,
             )
             return res["data"]
         except Exception as exc:  # noqa: BLE001 - one bad pair must not kill the run
@@ -2770,14 +2997,40 @@ def _build_site_plan_fn(conn: Any, *, error_count: list[int] | None = None) -> A
     return _fn
 
 
-def _build_floor_plan_fn(conn: Any, *, error_count: list[int] | None = None) -> Any:
+def _build_floor_plan_fn(
+    conn: Any, *, error_count: list[int] | None = None, defer_to_batch: bool = False,
+) -> Any:
     from api.dependencies import get_providers
     from api.llm_client import LLMClient
-    from toolkit.visual_match import cached_floor_plan_verdict, compare_listing_floor_plans
+    from toolkit.visual_match import (
+        build_floor_plan_request,
+        cached_floor_plan_verdict,
+        compare_listing_floor_plans,
+    )
     llm = LLMClient(conn, providers=get_providers())
     floor_plan_model = llm.resolve_model("llm_floor_plan_match_model")
+    defer_providers = _batch_defer_providers() if defer_to_batch else None
 
     def _fn(a: int, b: int, ids_a: list[int], ids_b: list[int]) -> dict[str, Any] | None:
+        if defer_to_batch:
+            v = cached_floor_plan_verdict(
+                conn, sreality_id_a=a, sreality_id_b=b, model=floor_plan_model)
+            if v is not None:
+                return {"verdict": v, "rationale": None, "cache_hit": True}
+            # No sentinel needed: _floor_plan_gate already treats a None result
+            # as 'defer' (the pre-existing floor_plan_pending semantics), so
+            # spooling here and returning None reuses that path unchanged.
+            ca, cb = sorted((a, b))
+            from toolkit.dedup_batch_defer import enqueue_deferred_request
+            enqueue_deferred_request(
+                conn, defer_providers, custom_id=f"fpl-{ca}-{cb}",
+                kind="floor_plan", model=floor_plan_model, sreality_id_a=ca, sreality_id_b=cb,
+                room_type=None,
+                build_fn=lambda: build_floor_plan_request(
+                    conn, llm, sreality_id_a=a, sreality_id_b=b,
+                    image_ids_a=ids_a, image_ids_b=ids_b),
+            )
+            return None
         if _breaker_open(error_count):
             v = cached_floor_plan_verdict(
                 conn, sreality_id_a=a, sreality_id_b=b, model=floor_plan_model)
@@ -2844,6 +3097,11 @@ def _build_cache_only_fns(
     from api.llm_client import LLMClient
     from api.providers.anthropic import AnthropicProvider
     from toolkit.clip_dedup import clip_room_grouping
+    from toolkit.dedup_model_overrides import (
+        SITE_PLAN_OVERRIDE_KEY,
+        load_model_overrides,
+        resolve_model_for_family,
+    )
     from toolkit.image_classification import cached_classification
     from toolkit.visual_match import (
         cached_floor_plan_verdict,
@@ -2854,7 +3112,7 @@ def _build_cache_only_fns(
     llm = LLMClient(conn, providers={"anthropic": AnthropicProvider()})
     classify_model = llm.resolve_model("llm_room_classify_model")
     compare_model = llm.resolve_model("llm_visual_match_model")
-    site_plan_model = llm.resolve_model("llm_site_plan_match_model")
+    site_plan_overrides = load_model_overrides(conn, SITE_PLAN_OVERRIDE_KEY)
     floor_plan_model = llm.resolve_model("llm_floor_plan_match_model")
 
     def classify_fn(sreality_id: int) -> dict[str, Any] | None:
@@ -2884,9 +3142,15 @@ def _build_cache_only_fns(
             model=model or compare_model)
         return {"verdict": v, "rationale": None, "cache_hit": True} if v is not None else None
 
-    def site_plan_fn(a: int, b: int, ids_a: list[int], ids_b: list[int]) -> dict[str, Any] | None:
+    def site_plan_fn(a: int, b: int, ids_a: list[int], ids_b: list[int],
+                      family: str | None = None) -> dict[str, Any] | None:
+        model = resolve_model_for_family(
+            conn, llm, setting_key=SITE_PLAN_OVERRIDE_KEY,
+            default_key="llm_site_plan_match_model", family=family,
+            overrides=site_plan_overrides,
+        )
         v = cached_site_plan_verdict(
-            conn, sreality_id_a=a, sreality_id_b=b, model=site_plan_model)
+            conn, sreality_id_a=a, sreality_id_b=b, model=model)
         return {"verdict": v, "rationale": None, "cache_hit": True} if v is not None else None
 
     def floor_plan_fn(a: int, b: int, ids_a: list[int], ids_b: list[int]) -> dict[str, Any] | None:
@@ -3463,11 +3727,21 @@ def main() -> int:
         # listings were served from CLIP rather than the paid LLM classify.
         ck = {"prefer_clip": clip["prefer_clip"], "clip_model": clip["clip_model"],
               "clip_counter": clip_counter, "error_count": vision_errors}
+        # Engine-fed batch deferral (§4.1): sweep lanes (full street/candidates via
+        # --free, geo/byt-geo via plain --max-vision-calls) spool a cold call into
+        # dedup_batch_requests instead of paying for it inline. NEVER for --dirty (the
+        # GH Actions dirty cron) — the realtime worker's dedup lane doesn't reach this
+        # branch at all (it builds its fns via build_free_engine_kw, a separate code
+        # path), so both latency-critical lanes stay synchronous regardless of the flag.
+        defer_to_batch = (
+            bool(read_setting(conn, "dedup_engine_batch_defer_enabled")) and not args.dirty
+        )
         LOG.info(
             "ENGINE auto_merge_enabled=%s autodismiss=%s prefer_clip=%s cosine=%s "
-            "shadow=%s cache_only=%s free=%s geo=%s",
+            "shadow=%s cache_only=%s free=%s geo=%s defer_to_batch=%s",
             auto_merge_enabled, autodismiss, clip["prefer_clip"],
             clip["cosine_enabled"], args.shadow, args.cache_only, args.free, run_geo,
+            defer_to_batch,
         )
 
         # Real-time dirty drain: the claim/scoped-load/clear/run-row cycle lives in
@@ -3492,11 +3766,15 @@ def main() -> int:
             #      fn (its single Sonnet check on would-merge both-plan pairs, Option C); budget 0
             #      = the $0 cache-only fn (consume warmed verdicts, defer the rest).
             if auto_merge_enabled and args.compare_budget > 0:
-                classify_fn = _build_classify_fn(conn, **ck)
-                compare_fn = _build_compare_fn(conn, error_count=vision_errors)
-                site_plan_fn = _build_site_plan_fn(conn, error_count=vision_errors)
+                classify_fn = _build_classify_fn(conn, defer_to_batch=defer_to_batch, **ck)
+                compare_fn = _build_compare_fn(
+                    conn, error_count=vision_errors, defer_to_batch=defer_to_batch)
+                site_plan_fn = _build_site_plan_fn(
+                    conn, error_count=vision_errors, defer_to_batch=defer_to_batch)
             floor_plan_fn = (
-                _build_floor_plan_fn(conn, error_count=vision_errors) if floor_plan_budget > 0
+                _build_floor_plan_fn(
+                    conn, error_count=vision_errors, defer_to_batch=defer_to_batch)
+                if floor_plan_budget > 0
                 else _build_cache_only_floor_plan_fn(conn)
             )
         elif auto_merge_enabled and args.cache_only:
@@ -3504,13 +3782,16 @@ def main() -> int:
             classify_fn, compare_fn, site_plan_fn, floor_plan_fn = _build_cache_only_fns(
                 conn, **ck)
         elif auto_merge_enabled and args.max_vision_calls > 0:
-            classify_fn = _build_classify_fn(conn, **ck)
-            compare_fn = _build_compare_fn(conn, error_count=vision_errors)
-            site_plan_fn = _build_site_plan_fn(conn, error_count=vision_errors)
-            floor_plan_fn = _build_floor_plan_fn(conn, error_count=vision_errors)
+            classify_fn = _build_classify_fn(conn, defer_to_batch=defer_to_batch, **ck)
+            compare_fn = _build_compare_fn(
+                conn, error_count=vision_errors, defer_to_batch=defer_to_batch)
+            site_plan_fn = _build_site_plan_fn(
+                conn, error_count=vision_errors, defer_to_batch=defer_to_batch)
+            floor_plan_fn = _build_floor_plan_fn(
+                conn, error_count=vision_errors, defer_to_batch=defer_to_batch)
         elif auto_merge_enabled:
             # pHash fast-path still needs room labels to gate on interior shots.
-            classify_fn = _build_classify_fn(conn, **ck)
+            classify_fn = _build_classify_fn(conn, defer_to_batch=defer_to_batch, **ck)
         # When auto-merge is off the engine never reaches the visual step, so we
         # skip building the (LLM-backed) classify/compare fns entirely.
 
@@ -3549,6 +3830,14 @@ def main() -> int:
                 conn, redecide_hours=float(
                     read_setting(conn, "dedup_candidate_redecide_hours")))
             if args.candidates else None)
+        # Session 5: the due-set has no cursor to protect (re-formed fresh every pass), so
+        # rank it newest-first, full stop — the same recency signal the sweep lanes' head
+        # slice below uses, via priority_property_order (the mechanism the dirty drain
+        # already established). Without this the due-set processed in obec/street-ASC
+        # load order, so which ~compare_budget pairs actually got a paid look each run was
+        # pure alphabetical luck, not recency.
+        candidate_priority_order = (
+            _recency_ranked_property_ids(conn, restrict) if args.candidates else None)
         if args.candidates:
             LOG.info("CANDIDATE drain: %d properties across the DUE proposed queue",
                      len(restrict or set()))
@@ -3601,15 +3890,22 @@ def main() -> int:
                 cursor_out: dict[str, Any] | None = None
                 scan_state: dict[str, Any] = {"cursor_key": None, "cycle_started_at": None}
                 cycle_started_at: Any = None
+                recency_head: set[int] | None = None
                 if full_scan:
                     scan_state = _load_scan_state(conn)
                     cycle_started_at = scan_state["cycle_started_at"] or run_at
                     cursor_out = {}
                     LOG.info("CURSOR full scan resuming after %r (cycle started %s)",
                              scan_state["cursor_key"], cycle_started_at)
+                    recency_head = _recency_head_candidate_ids(
+                        conn, tier="street_disposition")
+                    LOG.info("RECENCY head (street_disposition): %d property ids",
+                             len(recency_head))
                 stats = run_engine(
                     conn, audit=pair_audit, max_pairs=args.max_pairs,
                     scan_cursor=scan_state["cursor_key"], cursor_out=cursor_out,
+                    priority_property_order=candidate_priority_order,
+                    recency_head_property_ids=recency_head,
                     **engine_kw,
                 )
                 stats["clip_classified"] = clip_counter[0]
@@ -3632,13 +3928,14 @@ def main() -> int:
                     _write_pair_audit(conn, run_at, pair_audit)
             LOG.info(
                 "ENGINE %s eligible=%s auto_address=%d auto_phash=%d auto_visual=%d "
-                "auto_dismissed=%d floor_plan_deferred=%d clip_deferred=%d reconciled=%d queued=%d "
-                "skipped_unresolved=%d rejected=%d prior_dismissed_skips=%d "
-                "pairs=%d vision_calls=%d",
+                "auto_dismissed=%d floor_plan_deferred=%d batch_deferred=%d clip_deferred=%d "
+                "reconciled=%d queued=%d skipped_unresolved=%d rejected=%d "
+                "prior_dismissed_skips=%d pairs=%d vision_calls=%d",
                 "shadow" if args.shadow else "done",
                 stats["eligible"], stats["auto_address"], stats["auto_phash"],
                 stats["auto_visual"], stats["auto_dismissed"],
-                stats.get("floor_plan_deferred", 0), stats.get("clip_deferred", 0),
+                stats.get("floor_plan_deferred", 0), stats.get("batch_deferred", 0),
+                stats.get("clip_deferred", 0),
                 stats["reconciled"],
                 stats["queued"], stats["skipped_unresolved"], stats["rejected"],
                 stats.get("skipped_prior_dismissed", 0),
@@ -3677,16 +3974,24 @@ def main() -> int:
             geo_cursor_out: dict[str, Any] | None = None
             geo_scan_state: dict[str, Any] = {"cursor_key": None, "cycle_started_at": None}
             geo_cycle_started_at: Any = None
+            geo_recency_head: set[int] | None = None
             if geo_full_scan:
                 geo_scan_state = _load_scan_state(conn, "geo")
                 geo_cycle_started_at = geo_scan_state["cycle_started_at"] or geo_started_at
                 geo_cursor_out = {}
                 LOG.info("CURSOR geo scan resuming after %r (cycle started %s)",
                          geo_scan_state["cursor_key"], geo_cycle_started_at)
+                # Session 5: geo carries the large majority of the recency backlog
+                # (single-dwelling families have no free-arm/warmer path — rule #15 (E)),
+                # so this lane's reserved head matters most in practice.
+                geo_recency_head = _recency_head_candidate_ids(conn, tier="geo")
+                LOG.info("RECENCY head (geo): %d property ids", len(geo_recency_head))
             geo_stats = run_engine(
                 conn, audit=geo_audit, max_pairs=args.geo_max_pairs,
                 geo=True, geo_area_max_pct=geo_area_max_pct,
                 scan_cursor=geo_scan_state["cursor_key"], cursor_out=geo_cursor_out,
+                priority_property_order=candidate_priority_order,
+                recency_head_property_ids=geo_recency_head,
                 **geo_kw,
             )
             geo_stats["clip_classified"] = clip_counter[0] - geo_clip_base
@@ -3716,11 +4021,12 @@ def main() -> int:
                 _write_pair_audit(conn, run_at, geo_audit)
             LOG.info(
                 "GEO %s eligible=%d auto_phash=%d auto_visual=%d auto_dismissed=%d "
-                "floor_plan_deferred=%d queued=%d skipped_unresolved=%d rejected=%d "
-                "pairs=%d vision_calls=%d area_max=%.2f",
+                "floor_plan_deferred=%d batch_deferred=%d queued=%d skipped_unresolved=%d "
+                "rejected=%d pairs=%d vision_calls=%d area_max=%.2f",
                 "shadow" if args.shadow else "done",
                 geo_stats["eligible"], geo_stats["auto_phash"], geo_stats["auto_visual"],
                 geo_stats["auto_dismissed"], geo_stats.get("floor_plan_deferred", 0),
+                geo_stats.get("batch_deferred", 0),
                 geo_stats["queued"], geo_stats["skipped_unresolved"], geo_stats["rejected"],
                 geo_stats["pairs_considered"], geo_stats["vision_calls"], geo_area_max_pct,
             )
@@ -3745,16 +4051,21 @@ def main() -> int:
             byt_cursor_out: dict[str, Any] | None = None
             byt_scan_state: dict[str, Any] = {"cursor_key": None, "cycle_started_at": None}
             byt_cycle_started_at: Any = None
+            byt_recency_head: set[int] | None = None
             if byt_full_scan:
                 byt_scan_state = _load_scan_state(conn, "byt_geo")
                 byt_cycle_started_at = byt_scan_state["cycle_started_at"] or byt_started_at
                 byt_cursor_out = {}
                 LOG.info("CURSOR byt-geo scan resuming after %r (cycle started %s)",
                          byt_scan_state["cursor_key"], byt_cycle_started_at)
+                byt_recency_head = _recency_head_candidate_ids(conn, tier="byt_geo")
+                LOG.info("RECENCY head (byt_geo): %d property ids", len(byt_recency_head))
             byt_stats = run_engine(
                 conn, audit=byt_audit, max_pairs=args.geo_max_pairs,
                 byt_geo=True,
                 scan_cursor=byt_scan_state["cursor_key"], cursor_out=byt_cursor_out,
+                priority_property_order=candidate_priority_order,
+                recency_head_property_ids=byt_recency_head,
                 **byt_kw,
             )
             byt_stats["clip_classified"] = clip_counter[0] - byt_clip_base
@@ -3777,11 +4088,12 @@ def main() -> int:
                 _write_pair_audit(conn, run_at, byt_audit)
             LOG.info(
                 "BYT-GEO %s eligible=%d auto_phash=%d auto_visual=%d auto_dismissed=%d "
-                "floor_plan_deferred=%d queued=%d skipped_unresolved=%d rejected=%d "
-                "pairs=%d vision_calls=%d",
+                "floor_plan_deferred=%d batch_deferred=%d queued=%d skipped_unresolved=%d "
+                "rejected=%d pairs=%d vision_calls=%d",
                 "shadow" if args.shadow else "done",
                 byt_stats["eligible"], byt_stats["auto_phash"], byt_stats["auto_visual"],
                 byt_stats["auto_dismissed"], byt_stats.get("floor_plan_deferred", 0),
+                byt_stats.get("batch_deferred", 0),
                 byt_stats["queued"], byt_stats["skipped_unresolved"], byt_stats["rejected"],
                 byt_stats["pairs_considered"], byt_stats["vision_calls"],
             )

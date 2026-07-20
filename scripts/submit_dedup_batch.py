@@ -1,33 +1,37 @@
-"""Submit dedup VISION work to the Anthropic Message Batches API (50% off).
+"""Flush the dedup-vision batch spool (dedup-cost-reduction.md §4.1 / the
+overhaul doc's engine-fed deferral, superseding the old speculative warmer).
 
-PRE-WARMS the dedup engine's vision caches. Runs the engine's FREE funnel
-(rules A/B/C + the pHash fast-path — reusing the very same pure rules and SQL
-helpers the synchronous engine uses) to find the pairs that would reach the paid
-visual stage (Wave 3 removed the cross-source gate, so same-source pairs warm too),
-then enqueues their classify / compare / site_plan requests as one or more
-size-bounded batches into dedup_batches / dedup_batch_requests.
+The ENGINE decides what to warm now, not this script: a sweep lane
+(scripts/dedup_engine.py — full street scan, geo, byt-geo, candidate drain)
+that would make a COLD classify/compare/site-plan/floor-plan call instead
+builds the exact request and spools it — one dedup_batch_requests row with
+batch_id NULL, request_params holding the already-built provider-shaped body
+(toolkit.dedup_batch_defer.enqueue_deferred_request) — and defers the pair.
+Dirty/realtime lanes stay synchronous; they never spool. Gated by
+app_settings.dedup_engine_batch_defer_enabled (default off).
 
-It NEVER merges and NEVER calls the LLM synchronously: a request is enqueued
-only when its result isn't already cached and isn't already in flight. The daily
-dedup_engine.yml run later REPLAYS unchanged over the warm caches and produces
-the identical merges for free (a cache miss falls back to a synchronous call —
-still correct, just not discounted).
+This script's only job is to FLUSH that spool: read every unsubmitted
+request (batch_id IS NULL), chunk them per-provider under the size/count
+caps, submit each chunk as one provider Batch API call (50% off), record a
+dedup_batches row, and attach the batch_id back onto the flushed requests.
+It never decides what to warm and never calls the LLM synchronously.
 
-Two waves fall out naturally from re-running on a schedule: a pair whose listings
-aren't classified yet enqueues classify (wave 1); once those ingest, a later run
-finds them classified and enqueues compare / site_plan (wave 2). A both-site-plan
-pair defers compare behind its development-guard verdict, exactly mirroring the
-engine's _resolve_visual control flow — so the rooms submit enqueues are a
-SUPERSET of the rooms the synchronous engine would walk (recall-identical replay).
+Because the engine is the one choosing what to defer, selection identity
+holds by construction — no second process re-derives (and inevitably
+diverges from) the engine's own work-list, unlike the retired collect()
+funnel this replaces.
 
-Results are picked up by scripts.ingest_dedup_batch.
+Results are picked up by scripts.ingest_dedup_batch (unchanged): it reads
+the dedup_batches rows this script inserts exactly as it always has.
 
 Usage (typically via .github/workflows/dedup_batches.yml):
 
-    python -m scripts.submit_dedup_batch --max-pairs 4000 --max-requests 1500
+    python -m scripts.submit_dedup_batch --max-requests 3000
 
-Required env: SUPABASE_DB_URL, ANTHROPIC_API_KEY (the latter only when not
---dry-run), R2_* (to fetch image bytes for the requests; --dry-run needs neither).
+Required env: SUPABASE_DB_URL + at least one provider key (ANTHROPIC_API_KEY
+and/or OPENAI_API_KEY) — whichever the spooled requests' models resolve to.
+--dry-run needs neither provider key (R2 access was already spent by the
+engine at defer time; this script never touches R2).
 """
 
 from __future__ import annotations
@@ -37,64 +41,22 @@ import json
 import logging
 import os
 import sys
-import time
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 
-# Pure rules + SQL helpers shared with the synchronous engine — no rule logic is
-# re-expressed here, only the traversal that collects (rather than resolves) the
-# visual candidates. (The submit/ingest plumbing duplicated from the condition
-# lane is consolidated in a later shared-primitive PR — see the PR description.)
-from scripts.dedup_engine import (
-    MAX_GROUP_SIZE,
-    _both_have_site_plan,
-    _clip_settings,
-    _floor_plan_image_ids,
-    _group_by_street,
-    _high_render_image_ids,
-    _load_eligible,
-    _load_geo_eligible,
-    _make_byt_geo_classify,
-    _make_geo_classify,
-    _phash_distinctive_match,
-    _phash_identical_pairs,
-    _proposed_candidate_property_ids,
-)
-from scripts.submit_condition_batch import should_flush
-from toolkit.clip_dedup import clip_room_grouping
-from toolkit.dedup_engine import (
-    PHASH_MIN_IDENTICAL_PAIRS,
-    classify_pair,
-    decide_phash_fastpath,
-    phash_excluded_tags_for,
-    phash_render_exclude_for,
-    rooms_in_priority,
-)
-from toolkit.image_classification import (
-    DEFAULT_CLASSIFY_N_IMAGES,
-    SITE_PLAN_ROOM_TYPE,
-    build_classify_request,
-    cached_classification,
-)
-from toolkit.visual_match import (
-    build_compare_request,
-    build_floor_plan_request,
-    build_site_plan_request,
-    cached_floor_plan_verdict,
-    cached_site_plan_verdict,
-    cached_visual_verdict,
+from toolkit.batch_submit import (
+    MAX_BATCH_BYTES,
+    MAX_BATCH_REQUESTS,
+    should_flush,
+    submit_chunk_with_retry,
 )
 
 LOG = logging.getLogger("submit_dedup_batch")
 
-_CLASSIFY_MODEL_KEY = "llm_room_classify_model"
-_COMPARE_MODEL_KEY = "llm_visual_match_model"
-_SITE_PLAN_MODEL_KEY = "llm_site_plan_match_model"
-_FLOOR_PLAN_MODEL_KEY = "llm_floor_plan_match_model"
-
 
 @dataclass
-class _Req:
+class _SpooledReq:
+    id: int
     custom_id: str
     kind: str
     model: str
@@ -102,518 +64,157 @@ class _Req:
     sreality_id_b: int | None
     room_type: str | None
     image_ids: list[int] | None
-    params: dict[str, Any]
+    request_params: dict[str, Any]
 
 
-class _Submitter:
-    """Accumulates vision requests into size-bounded batches and submits them.
-
-    Dedups by custom_id within a run and against in-flight batches, caps total
-    requests, and streams chunks (one chunk held in memory at a time — vision
-    payloads are large) so a big run never balloons memory.
-    """
-
-    def __init__(self, conn: Any, provider: Any, *, max_requests: int, dry_run: bool) -> None:
-        self._conn = conn
-        self._provider = provider
-        self._dry_run = dry_run
-        self.requests_left = max_requests
-        self._in_flight = _in_flight_custom_ids(conn)
-        self._collected: set[str] = set()
-        self._chunk: list[_Req] = []
-        self._chunk_bytes = 0
-        self.stats: dict[str, int] = {
-            "want_classify": 0, "want_compare": 0, "want_site_plan": 0,
-            "want_floor_plan": 0, "skipped_in_flight": 0, "batches": 0,
-        }
-
-    @property
-    def exhausted(self) -> bool:
-        return self.requests_left <= 0
-
-    def add(
-        self,
-        *,
-        custom_id: str,
-        kind: str,
-        model: str,
-        a: int,
-        b: int | None,
-        room_type: str | None,
-        build_fn: Callable[[], dict[str, Any]],
-    ) -> None:
-        """Enqueue one request if it's not already collected / in flight / capped.
-
-        build_fn is a thunk so the expensive R2 download only happens when the
-        request actually needs building (skipped on dedup / in-flight / dry-run)."""
-        if self.requests_left <= 0 or custom_id in self._collected:
-            return
-        if custom_id in self._in_flight:
-            self.stats["skipped_in_flight"] += 1
-            self._collected.add(custom_id)  # don't re-count on re-encounter
-            return
-        if self._dry_run:
-            self._collected.add(custom_id)
-            self.requests_left -= 1
-            self.stats[f"want_{kind}"] += 1
-            return
-        try:
-            built = build_fn()
-        except Exception as exc:  # noqa: BLE001 - one bad listing must not kill the run
-            LOG.warning("BATCH build %s failed: %s", custom_id, exc)
-            return
-        params = self._provider.build_batch_request_params(
-            system=built["system"], messages=built["messages"],
-            tools=built["tools"], model=built["model"],
+def _fetch_spooled(conn: Any, *, limit: int) -> list[_SpooledReq]:
+    sql = (
+        "SELECT id, custom_id, kind, model, sreality_id_a, sreality_id_b, "
+        "room_type, image_ids, request_params "
+        "FROM dedup_batch_requests WHERE batch_id IS NULL "
+        "ORDER BY queued_at ASC LIMIT %s"
+    )
+    with conn.cursor() as cur:
+        cur.execute(sql, (limit,))
+        rows = cur.fetchall()
+    return [
+        _SpooledReq(
+            id=int(r[0]), custom_id=r[1], kind=r[2], model=r[3],
+            sreality_id_a=int(r[4]), sreality_id_b=int(r[5]) if r[5] is not None else None,
+            room_type=r[6], image_ids=list(r[7]) if r[7] is not None else None,
+            request_params=r[8],
         )
-        item_bytes = len(json.dumps(params, separators=(",", ":")))
-        if should_flush(
-            n_items=len(self._chunk), chunk_bytes=self._chunk_bytes,
-            next_item_bytes=item_bytes,
-        ):
-            self.flush()
-        self._chunk.append(_Req(
-            custom_id=custom_id, kind=kind, model=model,
-            sreality_id_a=a, sreality_id_b=b, room_type=room_type,
-            image_ids=built.get("image_ids"), params=params,
-        ))
-        self._chunk_bytes += item_bytes
-        self._collected.add(custom_id)
-        self.requests_left -= 1
-        self.stats[f"want_{kind}"] += 1
+        for r in rows
+    ]
 
-    def flush(self) -> None:
-        if not self._chunk:
-            self._chunk_bytes = 0
-            return
-        items = [(r.custom_id, r.params) for r in self._chunk]
-        mb = self._chunk_bytes / (1024 * 1024)
-        provider_batch_id = self._submit_with_retry(items)
-        if provider_batch_id is None:
-            # A provider failure that outlived the retries: DROP this chunk and keep
-            # collecting. Nothing was inserted, so the pairs are not in-flight and the
-            # next scheduled submit re-collects them. Losing one chunk beats the
-            # pre-retry behaviour, where a single Anthropic 5xx crashed the whole run
-            # and forfeited the 6h submit window (2026-07-09 19:47, run 29045617232).
-            self.stats["submit_failures"] = self.stats.get("submit_failures", 0) + 1
-            self._chunk = []
-            self._chunk_bytes = 0
-            return
-        batch_id = _insert_batch(self._conn, provider_batch_id, self._chunk)
-        LOG.info(
-            "BATCH submitted provider_batch_id=%s requests=%d serialized=%.1fMB "
-            "batch_id=%d kinds=%s",
-            provider_batch_id, len(self._chunk), mb, batch_id, _kind_counts(self._chunk),
+
+def _skip_no_provider(conn: Any, ids: list[int]) -> None:
+    """A spooled request whose model no longer resolves to a batch-capable
+    provider (e.g. a settings flip to gemini/qwen after it was spooled) can
+    never flush — mark it 'skipped' so it stops being re-selected every run
+    (it was never billed, so nothing to reconcile)."""
+    if not ids:
+        return
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE dedup_batch_requests SET status = 'skipped' WHERE id = ANY(%s)",
+            (ids,),
         )
-        self.stats["batches"] += 1
-        self._chunk = []
-        self._chunk_bytes = 0
-
-    # Anthropic's Batches endpoint throws occasional transient 5xx/529s; one such
-    # error must cost at most one backoff, never the submit window.
-    _SUBMIT_ATTEMPTS = 3
-    _SUBMIT_BACKOFF_S = (10, 30)
-
-    def _submit_with_retry(self, items: list[tuple[str, dict[str, Any]]]) -> str | None:
-        """provider.submit_batch with bounded retries; None when all attempts fail."""
-        last: Exception | None = None
-        for attempt in range(self._SUBMIT_ATTEMPTS):
-            try:
-                return self._provider.submit_batch(items)
-            except Exception as exc:  # noqa: BLE001 — classified below, never crashes the run
-                last = exc
-                msg = str(exc).lower()
-                transient = any(k in msg for k in (
-                    "500", "502", "503", "529", "internal", "overloaded",
-                    "unavailable", "timeout", "connection",
-                ))
-                if not transient:
-                    # Auth / invalid-request / credit errors won't heal on retry.
-                    LOG.error("BATCH submit non-transient failure (chunk dropped): %s", exc)
-                    return None
-                if attempt < self._SUBMIT_ATTEMPTS - 1:
-                    wait = self._SUBMIT_BACKOFF_S[min(attempt, len(self._SUBMIT_BACKOFF_S) - 1)]
-                    LOG.warning("BATCH submit transient failure (attempt %d/%d, retry in %ds): %s",
-                                attempt + 1, self._SUBMIT_ATTEMPTS, wait, exc)
-                    time.sleep(wait)
-        LOG.error("BATCH submit failed after %d attempts (chunk dropped): %s",
-                  self._SUBMIT_ATTEMPTS, last)
-        return None
 
 
-def _kind_counts(chunk: list[_Req]) -> dict[str, int]:
+def _insert_batch_and_attach(
+    conn: Any, provider_batch_id: str, provider: str, chunk: list[_SpooledReq],
+) -> int:
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO dedup_batches (provider, provider_batch_id, request_count, status) "
+            "VALUES (%s, %s, %s, 'submitted') RETURNING id",
+            (provider, provider_batch_id, len(chunk)),
+        )
+        row = cur.fetchone()
+        if row is None:
+            raise RuntimeError("INSERT into dedup_batches returned no id")
+        batch_id = int(row[0])
+        cur.execute(
+            "UPDATE dedup_batch_requests SET batch_id = %s WHERE id = ANY(%s)",
+            (batch_id, [r.id for r in chunk]),
+        )
+    return batch_id
+
+
+def _kind_counts(chunk: list[_SpooledReq]) -> dict[str, int]:
     out: dict[str, int] = {}
     for r in chunk:
         out[r.kind] = out.get(r.kind, 0) + 1
     return out
 
 
-def collect(
-    conn: Any,
-    llm_client: Any,
-    submitter: _Submitter,
-    *,
-    max_pairs: int,
-    max_room_attempts: int,
-    n_images: int,
-    warm_rooms: int = 1,
-    max_seconds: int = 0,
-    lane: str = "street",
-    geo_classify: Any = None,
-    byt_geo_classify: Any = None,
-    clip_model: str | None = None,
+def flush(
+    conn: Any, providers: dict[str, Any], *, max_requests: int, dry_run: bool,
 ) -> dict[str, int]:
-    """Walk the engine's free funnel and enqueue the visual requests it implies.
+    """Submit whatever's spooled, chunked per-provider by size/count caps."""
+    stats = {
+        "flushed": 0, "batches": 0, "skipped_no_provider": 0, "submit_failures": 0,
+    }
+    spooled = _fetch_spooled(conn, limit=max_requests)
+    if not spooled:
+        return stats
 
-    `warm_rooms` bounds how many priority-ordered like-room compares are warmed PER PAIR
-    (default 1). The engine walks rooms in priority order and stops at the first High, so
-    warming just the first-priority room discounts the decisive room of every merge while
-    dropping the tail-room over-buy that made the all-rooms warmer wasteful (79-93% of its
-    compare requests never drove a decision). A pair that needs a later room still resolves
-    — the engine falls back to a synchronous compare for the cache-miss room (correct, just
-    that room undiscounted). Raising warm_rooms trades more discount coverage for more
-    speculative spend.
+    from api.llm_client import provider_for_model
 
-    Returns funnel stats merged with the submitter's request counters.
-    """
-    classify_model = llm_client.resolve_model(_CLASSIFY_MODEL_KEY)
-    compare_model = llm_client.resolve_model(_COMPARE_MODEL_KEY)
-    site_plan_model = llm_client.resolve_model(_SITE_PLAN_MODEL_KEY)
-    floor_plan_model = llm_client.resolve_model(_FLOOR_PLAN_MODEL_KEY)
-    # Same operator-reordered tag priorities the engine warms against — so this lane warms
-    # the SAME priority-ordered room prefix the replay will stop at (recall-safe superset).
-    from toolkit.dedup_priorities import load_tag_priority_overrides
-    tag_overrides = load_tag_priority_overrides(conn)
+    chunks: dict[str, list[_SpooledReq]] = {}
+    chunk_bytes: dict[str, int] = {}
 
-    # _load_eligible is the one FULL-MARKET statement (the warmer passes no restrict scope).
-    # As inventory grew since the warmer was retired it began exceeding the 2-min OLTP pooler
-    # statement_timeout and the whole run died before enqueuing anything. Run just this bulk
-    # read under a batch timeout (SET LOCAL in a txn — the clip_tag_backfill pattern); the
-    # per-pair probes below are short and stay on the OLTP default.
-    with conn.transaction(), conn.cursor() as cur:
-        cur.execute("SET LOCAL statement_timeout = '10min'")
-        # Lane = which population to warm (§4.1 names street/geo/candidates; byt_geo is
-        # the street-less-apartment cell rung). 'candidates' is the review-queue blitz
-        # population: exactly the proposed pairs' own listings, all tiers, so the
-        # drain's re-decides replay over warm caches. Cell keys carry their cell in
-        # street_key, so _group_by_street groups every lane correctly.
-        if lane == "geo":
-            keys = _load_geo_eligible(conn)
-        elif lane == "byt_geo":
-            keys = _load_geo_eligible(conn, rung="byt_geo")
-        elif lane == "candidates":
-            pids = _proposed_candidate_property_ids(conn, redecide_hours=None)
-            keys = _load_eligible(conn, restrict_property_ids=pids)
-            keys = keys + _load_geo_eligible(conn, restrict_property_ids=pids)
-            keys = keys + _load_geo_eligible(
-                conn, restrict_property_ids=pids, rung="byt_geo")
-        else:
-            keys = _load_eligible(conn)
-    groups = _group_by_street(keys)
-
-    funnel = {"visual_candidates": 0, "pairs_deferred_classify": 0, "floor_plan_warmed": 0}
-    seen_listing_pairs: set[tuple[int, int]] = set()
-    seen_property_pairs: set[tuple[int, int]] = set()
-    pairs_left = max_pairs
-    # Wall-clock budget: enqueuing walks R2 image fetches pair-by-pair, so a big
-    # cache-cold funnel can outlast the workflow's timeout-minutes — which kills the
-    # run as 'cancelled' mid-submit (3 of 8 runs on 2026-07-10). Stop enqueuing at
-    # the deadline instead and finalize cleanly: everything flushed so far is
-    # submitted, the rest is picked up by the next 6h slot.
-    deadline = time.monotonic() + max_seconds if max_seconds > 0 else None
-
-    def _out_of_time() -> bool:
-        if deadline is not None and time.monotonic() >= deadline:
-            if not funnel.get("timed_out"):
-                funnel["timed_out"] = 1
-                LOG.info("BATCH time budget %ds reached; finalizing cleanly", max_seconds)
-            return True
-        return False
-
-    for members in groups.values():
-        if submitter.exhausted or pairs_left <= 0 or _out_of_time():
-            break
-        if len(members) > MAX_GROUP_SIZE:
-            continue
-        for i in range(len(members)):
-            if submitter.exhausted or pairs_left <= 0 or _out_of_time():
-                break
-            for j in range(i + 1, len(members)):
-                if submitter.exhausted or pairs_left <= 0 or _out_of_time():
-                    break
-                a, b = members[i], members[j]
-                lpair = (min(a.sreality_id, b.sreality_id), max(a.sreality_id, b.sreality_id))
-                if lpair in seen_listing_pairs:
-                    continue
-                seen_listing_pairs.add(lpair)
-
-                # Cell-keyed pairs (street_key 'geo:…') must use their rung's candidate
-                # filter — classify_pair would judge them on street fields cell keys
-                # don't carry. Byt cells (their own 'byt' bucket; a cell group is
-                # category-homogeneous) route to the byt-geo classifier; the geo
-                # families to the geo one — mirroring the engine's classify seam.
-                if (a.street_key or "").startswith("geo:"):
-                    cell_classify = (
-                        byt_geo_classify if a.category_main == "byt" else geo_classify)
-                    if cell_classify is None:
-                        continue  # cell pair in a run without its classifier: out of scope
-                    if a.street_eligible and b.street_eligible:
-                        continue  # street pass owns the pair; the engine skips it too
-                    decision = cell_classify(a, b)
-                else:
-                    decision = classify_pair(a, b)
-                if decision.action == "reject":
-                    continue
-                if a.property_id is None or b.property_id is None:
-                    continue
-                ppair = tuple(sorted((a.property_id, b.property_id)))
-                if ppair in seen_property_pairs:
-                    continue
-                seen_property_pairs.add(ppair)
-
-                # Warm the floor-plan verdict for any both-floor-plan pair (migration 234):
-                # the engine's floor-plan gate runs on a pHash OR a visual merge, so warm it
-                # FIRST — before any skip — or the cache-only run would queue/defer every
-                # floor-plan pair. (Rule B exact-address is retired; exact-address pairs are now
-                # ordinary candidates warmed through the pHash/visual path below.)
-                _warm_floor_plan(
-                    conn, llm_client, submitter, a, b, floor_plan_model, funnel)
-
-                # pHash fast-path — replay merges for free (unless both site_plan, which
-                # defers to the development guard below). Byt excludes known-exterior images
-                # (mirrors run_engine), so the warm-up funnel and the daily engine agree on
-                # which byt pairs the fast-path resolves.
-                _rmin = phash_render_exclude_for(a.category_main)
-                phash_pairs = _phash_identical_pairs(
-                    conn, a.sreality_id, b.sreality_id,
-                    phash_excluded_tags_for(a.category_main), render_exclude_min=_rmin)
-                distinctive = (
-                    phash_pairs < PHASH_MIN_IDENTICAL_PAIRS
-                    and _phash_distinctive_match(
-                        conn, a.sreality_id, b.sreality_id, render_exclude_min=_rmin))
-                if decide_phash_fastpath(phash_pairs, distinctive) and not _both_have_site_plan(
-                    conn, a.sreality_id, b.sreality_id
-                ):
-                    continue
-
-                # Wave 3 removed the cross-source gate: same-source non-exact pairs now reach
-                # the visual stage in the engine, so the warmer must warm them too.
-
-                pairs_left -= 1
-                funnel["visual_candidates"] += 1
-                _collect_visual(
-                    conn, llm_client, submitter, a, b,
-                    classify_model=classify_model, compare_model=compare_model,
-                    site_plan_model=site_plan_model, n_images=n_images,
-                    max_room_attempts=max_room_attempts, warm_rooms=warm_rooms,
-                    funnel=funnel, tag_overrides=tag_overrides, clip_model=clip_model,
-                )
-
-    return {**funnel, **submitter.stats}
-
-
-def _warm_floor_plan(
-    conn: Any, llm_client: Any, submitter: "_Submitter",
-    a: Any, b: Any, floor_plan_model: str, funnel: dict[str, int],
-) -> None:
-    """Enqueue a floor-plan compare for a both-floor-plan pair if not already cached.
-    The engine's floor-plan gate (migration 234) reads this verdict on any pHash/visual
-    merge, so warming it keeps the cache-only daily run from queueing every such pair."""
-    if submitter.exhausted:
-        return
-    ids_a = _floor_plan_image_ids(conn, a.sreality_id)
-    ids_b = _floor_plan_image_ids(conn, b.sreality_id)
-    if not (ids_a and ids_b):
-        return
-    if cached_floor_plan_verdict(
-        conn, sreality_id_a=a.sreality_id, sreality_id_b=b.sreality_id,
-        model=floor_plan_model,
-    ) is not None:
-        return
-    ca, cb = sorted((a.sreality_id, b.sreality_id))
-    submitter.add(
-        custom_id=f"fpl-{ca}-{cb}", kind="floor_plan", model=floor_plan_model,
-        a=ca, b=cb, room_type=None,
-        build_fn=lambda: build_floor_plan_request(
-            conn, llm_client, sreality_id_a=a.sreality_id, sreality_id_b=b.sreality_id,
-            image_ids_a=ids_a, image_ids_b=ids_b),
-    )
-    funnel["floor_plan_warmed"] += 1
-
-
-def _collect_visual(
-    conn: Any,
-    llm_client: Any,
-    s: _Submitter,
-    a: Any,
-    b: Any,
-    *,
-    classify_model: str,
-    compare_model: str,
-    site_plan_model: str,
-    n_images: int,
-    max_room_attempts: int,
-    warm_rooms: int = 1,
-    funnel: dict[str, int],
-    tag_overrides: dict[str, list[str]] | None = None,
-    clip_model: str | None = None,
-) -> None:
-    """Mirror of run_engine._resolve_visual, but it ENQUEUES batch requests for
-    the LLM calls the synchronous resolver would make, instead of making them.
-
-    Room grouping is CLIP-FIRST when `clip_model` is set — the SAME source the
-    prefer-CLIP engine replays with, so the warmed (a, b, room, model) cache keys are
-    the ones the replay looks up. The LLM classify cache (and a classify enqueue) is
-    only the fallback for sides with no CLIP tags, mirroring the engine's own fallback —
-    and avoiding a paid classify wave for listings the engine would never read it for."""
-
-    def _grouping(sid: int) -> tuple[str, dict[str, list[int]] | None]:
-        if clip_model:
-            g = clip_room_grouping(conn, sreality_id=sid, model=clip_model)
-            if g:
-                return "classified", g
-        return cached_classification(
-            conn, sreality_id=sid, model=classify_model, n_images=n_images)
-
-    state_a, rooms_a = _grouping(a.sreality_id)
-    state_b, rooms_b = _grouping(b.sreality_id)
-
-    # Wave 1: any side not yet classified -> enqueue its classify; compare/site_plan
-    # need BOTH classified, so defer them (next run, after these ingest).
-    if state_a == "need_classify":
-        s.add(custom_id=f"cls-{a.sreality_id}", kind="classify", model=classify_model,
-              a=a.sreality_id, b=None, room_type=None,
-              build_fn=lambda: build_classify_request(
-                  conn, llm_client, sreality_id=a.sreality_id, n_images=n_images))
-    if state_b == "need_classify":
-        s.add(custom_id=f"cls-{b.sreality_id}", kind="classify", model=classify_model,
-              a=b.sreality_id, b=None, room_type=None,
-              build_fn=lambda: build_classify_request(
-                  conn, llm_client, sreality_id=b.sreality_id, n_images=n_images))
-    if state_a != "classified" or state_b != "classified":
-        if state_a == "need_classify" or state_b == "need_classify":
-            funnel["pairs_deferred_classify"] += 1
-        return
-
-    # Wave 2: both classified.
-    ca, cb = sorted((a.sreality_id, b.sreality_id))
-    assert rooms_a is not None and rooms_b is not None  # state == 'classified'
-    site_a = rooms_a.get(SITE_PLAN_ROOM_TYPE) or []
-    site_b = rooms_b.get(SITE_PLAN_ROOM_TYPE) or []
-
-    # Development guard first (matches _resolve_visual): if both carry a site plan,
-    # warm that verdict and DEFER compare until it's known (different_unit -> the
-    # replay queues, no compare needed).
-    if site_a and site_b:
-        verdict = cached_site_plan_verdict(
-            conn, sreality_id_a=a.sreality_id, sreality_id_b=b.sreality_id, model=site_plan_model)
-        if verdict is None:
-            s.add(custom_id=f"spl-{ca}-{cb}", kind="site_plan", model=site_plan_model,
-                  a=ca, b=cb, room_type=None,
-                  build_fn=lambda: build_site_plan_request(
-                      conn, llm_client, sreality_id_a=a.sreality_id, sreality_id_b=b.sreality_id,
-                      image_ids_a=site_a, image_ids_b=site_b))
+    def _flush_chunk(pname: str) -> None:
+        chunk = chunks.get(pname) or []
+        if not chunk:
             return
-        if verdict == "different_unit":
+        mb = chunk_bytes.get(pname, 0) / (1024 * 1024)
+        if dry_run:
+            LOG.info("BATCH dry-run chunk provider=%s requests=%d serialized=%.1fMB kinds=%s",
+                      pname, len(chunk), mb, _kind_counts(chunk))
+            stats["flushed"] += len(chunk)
+            stats["batches"] += 1
+            chunks[pname] = []
+            chunk_bytes[pname] = 0
             return
+        items = [(r.custom_id, r.request_params) for r in chunk]
+        provider_batch_id = submit_chunk_with_retry(providers[pname], items, label="dedup")
+        if provider_batch_id is None:
+            # Nothing was inserted/attached, so these requests stay spooled
+            # (batch_id still NULL) and the next scheduled flush retries them.
+            stats["submit_failures"] += 1
+            chunks[pname] = []
+            chunk_bytes[pname] = 0
+            return
+        batch_id = _insert_batch_and_attach(conn, provider_batch_id, pname, chunk)
+        LOG.info(
+            "BATCH submitted provider=%s provider_batch_id=%s requests=%d serialized=%.1fMB "
+            "batch_id=%d kinds=%s",
+            pname, provider_batch_id, len(chunk), mb, batch_id, _kind_counts(chunk),
+        )
+        stats["flushed"] += len(chunk)
+        stats["batches"] += 1
+        chunks[pname] = []
+        chunk_bytes[pname] = 0
 
-    # Render exclusion (migration 239): MUST mirror _resolve_visual — drop shared
-    # development RENDER images from the room compare for byt. The visual-verdict cache is
-    # keyed (a, b, room, model) and ignores the image_ids on a hit, so if the warm-up
-    # compared the render-INCLUDED set the engine would replay that render-inflated High;
-    # both lanes have to compare the SAME filtered set. Empty rooms drop (like the engine).
-    rmin = phash_render_exclude_for(a.category_main)
-    if rmin is not None:
-        render_ids = _high_render_image_ids(conn, a.sreality_id, b.sreality_id, rmin)
-        if render_ids:
-            rooms_a = {r: f for r, ids in rooms_a.items()
-                       if (f := [i for i in ids if i not in render_ids])}
-            rooms_b = {r: f for r, ids in rooms_b.items()
-                       if (f := [i for i in ids if i not in render_ids])}
-
-    # Forensic compare: the first `warm_rooms` common rooms in priority order (default 1),
-    # never more than the engine's per-pair room cap. The replay walks rooms in this same
-    # priority order and stops at the first High, so warming the first-priority room discounts
-    # the decisive room of every merge; a pair needing a later room resolves via a synchronous
-    # fallback compare for the cache-miss room (recall-safe, just undiscounted). Warming the
-    # whole prefix (the old default) speculatively bought rooms the stop-at-first-High replay
-    # never reached — 79-93% of those compare requests never drove a decision.
-    common = set(rooms_a) & set(rooms_b)
-    warm_prefix = rooms_in_priority(common, a.category_main, tag_overrides)[
-        :max(1, min(warm_rooms, max_room_attempts))]
-    for room in warm_prefix:
-        if s.exhausted:
-            break
-        if cached_visual_verdict(
-            conn, sreality_id_a=a.sreality_id, sreality_id_b=b.sreality_id,
-            room_type=room, model=compare_model,
-        ) is not None:
+    no_provider_ids: list[int] = []
+    for req in spooled:
+        pname = provider_for_model(req.model)
+        if providers.get(pname) is None:
+            no_provider_ids.append(req.id)
+            stats["skipped_no_provider"] += 1
             continue
-        ids_a, ids_b = rooms_a[room], rooms_b[room]
-        s.add(custom_id=f"cmp-{ca}-{cb}-{room}", kind="compare", model=compare_model,
-              a=ca, b=cb, room_type=room,
-              build_fn=lambda r=room, ia=ids_a, ib=ids_b: build_compare_request(
-                  conn, llm_client, sreality_id_a=a.sreality_id, sreality_id_b=b.sreality_id,
-                  room_type=r, image_ids_a=ia, image_ids_b=ib))
+        item_bytes = len(json.dumps(req.request_params, separators=(",", ":")))
+        chunk = chunks.setdefault(pname, [])
+        if should_flush(
+            n_items=len(chunk), chunk_bytes=chunk_bytes.get(pname, 0),
+            next_item_bytes=item_bytes,
+            max_requests=MAX_BATCH_REQUESTS, max_bytes=MAX_BATCH_BYTES,
+        ):
+            _flush_chunk(pname)
+            chunk = chunks.setdefault(pname, [])
+        chunk.append(req)
+        chunk_bytes[pname] = chunk_bytes.get(pname, 0) + item_bytes
 
+    for pname in list(chunks.keys()):
+        _flush_chunk(pname)
+    if not dry_run:
+        _skip_no_provider(conn, no_provider_ids)
 
-def _in_flight_custom_ids(conn: Any) -> set[str]:
-    sql = (
-        "SELECT r.custom_id FROM dedup_batch_requests r "
-        "JOIN dedup_batches b ON b.id = r.batch_id "
-        "WHERE b.status IN ('submitted', 'ended') AND r.status = 'pending'"
-    )
-    with conn.cursor() as cur:
-        cur.execute(sql)
-        return {row[0] for row in cur.fetchall()}
-
-
-def _insert_batch(conn: Any, provider_batch_id: str, chunk: list[_Req]) -> int:
-    with conn.transaction(), conn.cursor() as cur:
-        cur.execute(
-            "INSERT INTO dedup_batches (provider, provider_batch_id, request_count, status) "
-            "VALUES ('anthropic', %s, %s, 'submitted') RETURNING id",
-            (provider_batch_id, len(chunk)),
-        )
-        row = cur.fetchone()
-        if row is None:
-            raise RuntimeError("INSERT into dedup_batches returned no id")
-        batch_id = int(row[0])
-        cur.executemany(
-            "INSERT INTO dedup_batch_requests "
-            "(batch_id, custom_id, kind, model, sreality_id_a, sreality_id_b, room_type, image_ids) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
-            [(batch_id, r.custom_id, r.kind, r.model, r.sreality_id_a,
-              r.sreality_id_b, r.room_type, r.image_ids) for r in chunk],
-        )
-    return batch_id
+    return stats
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--max-pairs", type=int, default=4000,
-                        help="Max visual candidate pairs examined per run.")
-    parser.add_argument("--max-requests", type=int, default=1500,
-                        help="Cap total vision requests enqueued per run.")
-    parser.add_argument("--max-room-attempts", type=int, default=4,
-                        help="The engine's per-pair room cap — an upper bound on warm-rooms.")
-    parser.add_argument("--warm-rooms", type=int, default=1,
-                        help="Like-room compares warmed per pair (default 1 = the first-priority "
-                             "room the engine tries first). Higher = more discount coverage for "
-                             "more speculative spend. Cannot exceed --max-room-attempts.")
-    parser.add_argument("--n-images", type=int, default=DEFAULT_CLASSIFY_N_IMAGES)
-    parser.add_argument("--lane", choices=("street", "geo", "byt_geo", "candidates"),
-                        default="street",
-                        help="Population to warm: the street funnel (default), the geo "
-                             "funnel, the byt_geo funnel (street-less apartments, "
-                             "cell+disposition), or 'candidates' = exactly the proposed "
-                             "review-queue pairs (all tiers) — the queue-blitz population.")
-    parser.add_argument("--max-seconds", type=int, default=3000,
-                        help="Wall-clock budget; stop enqueuing and finalize cleanly when reached "
-                             "(0 = no budget). Default 50min — below the workflow's 60-min kill, "
-                             "which stranded runs mid-submit as 'cancelled'.")
-    parser.add_argument("--dry-run", action="store_true",
-                        help="Report what would be enqueued without building or submitting.")
+    parser.add_argument(
+        "--max-requests", type=int, default=MAX_BATCH_REQUESTS * 5,
+        help="Maximum spooled requests to flush this run (spread across chunks).",
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true",
+        help="Report what would be submitted without calling the provider.",
+    )
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -626,73 +227,40 @@ def main() -> int:
     if not db_url:
         print("ERROR: SUPABASE_DB_URL is not set.", file=sys.stderr)
         return 2
-    if not args.dry_run and not os.environ.get("ANTHROPIC_API_KEY"):
-        print("ERROR: ANTHROPIC_API_KEY is not set.", file=sys.stderr)
+    if not args.dry_run and not (
+        os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("OPENAI_API_KEY")
+    ):
+        print(
+            "ERROR: no provider key set; need ANTHROPIC_API_KEY and/or OPENAI_API_KEY.",
+            file=sys.stderr,
+        )
         return 2
 
     import psycopg
 
-    from api.llm_client import LLMClient
     from api.providers.anthropic import AnthropicProvider
-    from scraper import image_storage
+    from api.providers.openai import OpenAIProvider
 
-    if not args.dry_run and not image_storage.is_configured():
-        LOG.warning("R2 is not configured; no vision requests can be built this run.")
-
-    provider = AnthropicProvider()
-    LOG.info(
-        "BATCH submit config lane=%s max_pairs=%d max_requests=%d max_room_attempts=%d "
-        "warm_rooms=%d n_images=%d max_seconds=%d dry_run=%s",
-        args.lane, args.max_pairs, args.max_requests, args.max_room_attempts,
-        args.warm_rooms, args.n_images, args.max_seconds, args.dry_run,
-    )
+    # Batch-capable providers, keyed by name. Each spooled request routes to the
+    # provider its model resolves to (llm_client.provider_for_model) — whatever the
+    # engine was configured with at defer time. Keys are lazy, so an unused
+    # provider's missing secret costs nothing until a request needs it.
+    providers = {"anthropic": AnthropicProvider(), "openai": OpenAIProvider()}
+    LOG.info("BATCH flush config max_requests=%d dry_run=%s", args.max_requests, args.dry_run)
 
     with psycopg.connect(db_url, autocommit=True, prepare_threshold=None) as conn:
-        from toolkit.dedup_settings import read_setting
-        if not read_setting(conn, "dedup_batch_warmer_enabled"):
-            LOG.info("WARMER disabled (dedup_batch_warmer_enabled=false); nothing to submit")
-            return 0
-        llm_client = LLMClient(conn, providers={"anthropic": provider})
-        submitter = _Submitter(conn, provider, max_requests=args.max_requests, dry_run=args.dry_run)
-        # Mirror the engine's own knobs so the warm keys match the replay: CLIP-first room
-        # grouping when the engine prefers CLIP tags, and the geo candidate filter with the
-        # operator's area tolerance for geo-keyed pairs.
-        cs = _clip_settings(conn)
-        clip_model = cs.get("clip_model") if cs.get("prefer_clip") else None
-        geo_classify = None
-        if args.lane in ("geo", "candidates"):
-            geo_classify = _make_geo_classify(
-                float(read_setting(conn, "dedup_geo_area_max_pct")))
-        byt_geo_classify = None
-        if args.lane in ("byt_geo", "candidates"):
-            byt_geo_classify = _make_byt_geo_classify()
-        stats = collect(
-            conn, llm_client, submitter,
-            max_pairs=args.max_pairs, max_room_attempts=args.max_room_attempts,
-            n_images=args.n_images, warm_rooms=args.warm_rooms,
-            max_seconds=args.max_seconds,
-            lane=args.lane, geo_classify=geo_classify,
-            byt_geo_classify=byt_geo_classify, clip_model=clip_model,
-        )
-        if not args.dry_run:
-            submitter.flush()
-            stats["batches"] = submitter.stats["batches"]
+        stats = flush(conn, providers, max_requests=args.max_requests, dry_run=args.dry_run)
 
-    submit_failures = submitter.stats.get("submit_failures", 0)
     LOG.info(
-        "BATCH done visual_candidates=%d want_classify=%d want_compare=%d "
-        "want_site_plan=%d want_floor_plan=%d floor_plan_warmed=%d skipped_in_flight=%d "
-        "deferred_classify=%d batches=%d submit_failures=%d dry_run=%s",
-        stats["visual_candidates"], stats["want_classify"], stats["want_compare"],
-        stats["want_site_plan"], stats.get("want_floor_plan", 0),
-        stats.get("floor_plan_warmed", 0), stats["skipped_in_flight"],
-        stats["pairs_deferred_classify"], stats["batches"], submit_failures, args.dry_run,
+        "BATCH done flushed=%d batches=%d skipped_no_provider=%d submit_failures=%d dry_run=%s",
+        stats["flushed"], stats["batches"], stats["skipped_no_provider"],
+        stats["submit_failures"], args.dry_run,
     )
-    if submit_failures and not stats["batches"]:
+    if stats["submit_failures"] and not stats["batches"]:
         # Every flush failed (dead key / provider outage / bad config): a red run is
         # the only signal — with retries swallowing per-chunk errors, exit 0 here
-        # would disguise a fully-dead submit lane as a quiet no-op.
-        LOG.error("BATCH submit lane produced 0 batches with %d failed flushes", submit_failures)
+        # would disguise a fully-dead flush lane as a quiet no-op.
+        LOG.error("BATCH flush produced 0 batches with %d failed flushes", stats["submit_failures"])
         return 1
     return 0
 

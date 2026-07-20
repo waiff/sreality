@@ -25,17 +25,18 @@
   only; the merge record is spotless (0/49k unmerged) so it prevents ≈0 real false merges; and
   it would move development pairs from the cheap gate-dismissal to the pricier visual path
   (cost-neutral-to-negative). Not worth a change to the load-bearing pHash query.
-- **Phase 4.1 (targeted batch lane): in flight** — `submit_dedup_batch` now warms only the
-  first-priority room per pair (`--warm-rooms 1`) instead of the ~4-room superset (79-93% of
-  which the stop-at-first-High replay never reached). Crons restored, gated by
-  `dedup_batch_warmer_enabled` (default off). ~50% off the decisive-room compares when enabled.
-- **Phase 4.1 lane coverage (2026-07-10): SHIPPED** — `--lane street|geo|candidates` closes the
-  street-only gap vs §4.1's lane list. `candidates` = exactly the proposed review-queue pairs
-  (both tiers) — the queue-blitz population. Room grouping is now CLIP-FIRST when the engine
-  prefers CLIP tags (warm keys match the replay; LLM classify only as the same fallback the
-  engine uses), and geo-keyed pairs go through `_make_geo_classify` with the operator's area
-  tolerance. Batch create retries transient 5xx/429/connection errors (the Jul-4 502 killed a
-  whole run).
+- **Phase 4.1 (targeted batch lane, original "warm only the first-priority room" design):
+  SUPERSEDED (2026-07-14).** `dedup-vision-and-backlog-overhaul.md` §1 found the speculative
+  pre-warmer (a second process re-deriving the engine's work-list — this section's original
+  `submit_dedup_batch` collect() funnel, `--lane street|geo|candidates`, `--warm-rooms`) drew a
+  near-disjoint pair set from the live engine (~1% overlap) — six independent divergences, not
+  fixable by retargeting. **Rebuilt as engine-fed deferral (Session 4, PR merged 2026-07-14):**
+  the engine's own sweep lanes (full street, geo, byt-geo, candidates — never dirty/realtime)
+  spool a cold call straight into `dedup_batch_requests` (`batch_id NULL`) instead of paying
+  inline, gated by `dedup_engine_batch_defer_enabled` (default off); `submit_dedup_batch`'s only
+  job is now flushing that spool. Selection identity holds by construction. `dedup_batch_warmer_enabled`
+  is retired (inert, kept only for historical `app_settings` rows). Full design +
+  status: `dedup-vision-and-backlog-overhaul.md` §1.2/§5, `roadmap/dedup-track.md`.
 - **Phase 4 item 2 (facade-as-dismisser, fid5): SHIPPED (2026-07-10), default OFF.**
   `dedup_facade_dismiss_enabled`: a confident facade Low qualifies for auto-dismiss on non-byt
   (byt never; all other conservatism unchanged — all-rooms-verdicted, High merges, Medium
@@ -44,12 +45,30 @@
   operator's flip.
 - **Phase 4.2 (harness): WORKING** after two fixes (#726 corpus, #727 room-source) + Gemini
   capability (#754 provider routing, #755 tool-schema strip, #760 3.x prices).
-- **Model flips (4.3) / cheaper VLMs: CLOSED 2026-07-11, harness-measured.** Compare recall
-  vs the 88.3% Sonnet self-baseline: Haiku@768 = 20%, Haiku@1568 = 30%, **Gemini 3.1 Pro
-  @1568 = 72%** at $0.0159/call measured vs Sonnet ~$0.0184 (~14% cheaper for ~18% relative
-  recall loss — no flip, no cascade). gemini-2.5-pro is retired for new projects; Google
-  raised 3.1 Pro to $2/$12 on Jul-2. **Sonnet stays on all forensic lanes**; the compare-lane
-  cost path is the shipped free-first arms + batch discount + embedding coverage.
+- **Model flips (4.3) / cheaper VLMs: CLOSED 2026-07-11, RE-CONFIRMED + widened 2026-07-13
+  (Session 3, `docs/design/dedup-vision-model-bakeoff-2026-07.md`).** The 07-11 pass measured only
+  compare RECALL (Haiku@768 20% / Haiku@1568 30% / Gemini-3.1-Pro@1568 72% vs Sonnet's 88.3%
+  self-baseline). Session 3 added the missing dimension — PRECISION on a frozen golden set of
+  confirmed-DIFFERENT pairs (`dedup_golden_sets` `2026-07-13-session3-baseline`) — across all three
+  forensic lanes, for GPT-5-mini, Qwen3-VL-235B/30B, and Gemini-3.1-flash-lite (Gemini-2.5-flash-lite
+  is 404/closed). **Result: every cheap candidate has good recall but 36–66% precision — they emit the
+  auto-merge verdict (High / same_layout / same_unit) on a THIRD to TWO-THIRDS of confirmed-different
+  pairs.** gpt-5-mini (reasoning) is best on recall (compare 88.3%, site recall 100%) but still 56–64%
+  precision AND far too slow (~12 s/call, 63 min/run — the compare lane is ~30k calls/mo). The cheap
+  VLM class is disqualified on PRECISION, not recall — a distinction the recall-only 07-11 pass could
+  not see. Per-pair evidence is browsable on `/model-testing` (migration 303).
+  gemini-2.5-pro/2.5-flash-lite retired for new projects; Google raised 3.1 Pro to $2/$12 on Jul-2.
+  - **SUPERSEDED — the operator OVERRODE "Sonnet stays" (2026-07-13/14).** The precision analysis
+    above still holds, but the operator prioritized **provider diversification off Anthropic** (credit
+    depletes ~daily) over it and flipped **all three forensic lanes + enrichment to gpt-5-mini** via a
+    new OpenAI Batch lane (PR #787, live **2026-07-13 22:25 UTC**), then flipped the **cosine cheap
+    band (`dedup_visual_match_model_haiku`) + the LLM room-classify fallback (`llm_room_classify_model`)**
+    to gpt-5-mini on **2026-07-14 10:23 UTC** (PR A) once the Anthropic credit outage made the Haiku
+    cheap band 100%-error. The dedup funnel is now **Anthropic-free**; standing Anthropic burn ≈ $0
+    (only on-demand estimation / parse_url / summarize stay on Sonnet). The cost path is now free-first
+    arms + the **OpenAI** batch −50% (Session 4 engine-fed rebuild) + embedding coverage. Watch the
+    false-merge risk (gpt-5-mini site_plan precision 86→52 on the hard photo-identical stratum) — the
+    operator owns that audit; any backlog blitz stays gated on it.
 - **Encoder upgrades (operator idea, evaluated 2026-07-11): CLOSED.** The June-26 DINOv2
   A/B (results were buried in workflow logs) showed WORSE pair separation than CLIP B/32
   (-0.0014 vs -0.0044) with hard negatives at cosine 1.0000 — identical marketing renders

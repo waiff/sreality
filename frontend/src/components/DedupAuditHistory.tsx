@@ -3,17 +3,23 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 
 import { getDedupAudit, unmergeMergeGroup, type DedupAuditRow } from '@/lib/api';
-import { FILTER_REGISTRY } from '@/lib/filterRegistry.generated';
+import { CATEGORY_MAIN_TABS } from '@/lib/categoryMainTabs';
 import { fmtRelative } from '@/lib/format';
 import { listingPath } from '@/lib/listingUrl';
+import type { DistrictChip } from '@/lib/filters';
+import { LocationTypeahead } from '@/components/filter-controls/LocationTypeahead';
 import DedupFactors from '@/components/DedupFactors';
 import DecisionFeedbackControl from '@/components/DecisionFeedbackControl';
+import FilterChip from '@/components/FilterChip';
+import { IMAGE_TAG_LABELS, imageTagLabel } from '@/lib/imageTags';
 
 /* The unified decision ledger — every terminal dedup decision (merged / dismissed),
  * engine AND operator, with the evidence + inline undo. Replaces the old separate
  * "Recent merges" panel: a merge here carries its undo handle, so the operator
  * reverses a bad merge from the same place they read it. Filter by property type
- * (the Browse/Pipeline TYPE chips), outcome, and source. Civic-archive: copper =
+ * (the Browse/Pipeline TYPE chips), outcome, source, and location (matches if
+ * EITHER side of the decision's pair touches the picked place — the same
+ * LocationTypeahead widget Browse/Watchdog/Pipeline use). Civic-archive: copper =
  * merged, brick = dismissed. */
 
 const OUTCOMES = [
@@ -28,22 +34,19 @@ const SOURCES = [
   { id: 'operator', label: 'Operátor' },
 ];
 
-// Property-type chips from the SAME generated registry as Browse's TYPE tabs.
-const CATEGORY_MAIN_ENUM =
-  FILTER_REGISTRY.filters.find((f) => f.id === 'category_main')?.enum_values ?? [];
-const TYPES = [
-  { id: '', label: 'Vše' },
-  ...CATEGORY_MAIN_ENUM.map((o) => ({ id: String(o.value), label: o.label_cs })),
-];
-
 // The decision-factor (signal) a decision turned on. phash/cosine carry a numeric
-// threshold (review the borderline tail); visual carries a verdict; address has neither.
+// threshold (review the borderline tail); visual carries a verdict; address/floor_plan
+// have neither. floor_plan is the ONE terminal reason the floor-plan gate ever produces
+// (a dismiss stamped under stage='phash' — the gate runs as a post-check on a phash
+// match); the site-plan gate's action is always "queue", so it never reaches this table
+// at all — that visibility lives on Needs-review's bucket picker instead.
 const FACTORS = [
   { id: '', label: 'Vše' },
   { id: 'phash', label: 'pHash' },
   { id: 'cosine', label: 'Cosine' },
   { id: 'visual', label: 'Vize' },
   { id: 'address', label: 'Adresa' },
+  { id: 'floor_plan', label: 'Půdorys' },
 ];
 const VERDICTS = [
   { id: '', label: 'Vše' },
@@ -51,6 +54,13 @@ const VERDICTS = [
   { id: 'Medium', label: 'Medium' },
   { id: 'Low', label: 'Low' },
 ];
+
+// Which room/plan tag the decision's factor detail names as the compared one
+// (detail.room_type) — the same 15-value taxonomy the CLIP/pHash audit pages filter by.
+const ROOM_TYPES = Object.keys(IMAGE_TAG_LABELS).filter(
+  (k) => !['situation_plan', 'cadastral_map', 'aerial_plot', 'location_map',
+           'energy_certificate', 'document_text'].includes(k),
+);
 
 const OUTCOME_STYLE: Record<string, string> = {
   merged:
@@ -62,31 +72,6 @@ const OUTCOME_LABEL: Record<string, string> = {
   merged: 'sloučeno',
   dismissed: 'zamítnuto',
 };
-
-function Chip({
-  on,
-  label,
-  onClick,
-}: {
-  on: boolean;
-  label: string;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={[
-        'px-2.5 py-1 rounded-[var(--radius-sm)] border text-[0.78rem] transition-colors',
-        on
-          ? 'border-[var(--color-copper)] bg-[var(--color-copper-soft)] text-[var(--color-copper)]'
-          : 'border-[var(--color-rule)] text-[var(--color-ink-3)] hover:text-[var(--color-ink-2)] hover:border-[var(--color-rule-strong)]',
-      ].join(' ')}
-    >
-      {label}
-    </button>
-  );
-}
 
 export default function DedupAuditHistory({
   scopeProperty,
@@ -103,8 +88,12 @@ export default function DedupAuditHistory({
   const [onlyFlagged, setOnlyFlagged] = useState(false);
   const [factor, setFactor] = useState('');
   const [verdict, setVerdict] = useState('');
+  const [roomType, setRoomType] = useState('');
   const [maxText, setMaxText] = useState(''); // raw threshold buffer (un-committed)
   const [factorMax, setFactorMax] = useState<number | null>(null); // committed
+  // Location narrow — matches a decision if EITHER side of its pair touches
+  // the picked place, so the operator can prioritise auditing by area.
+  const [districts, setDistricts] = useState<DistrictChip[]>([]);
   // Broadcast "expand/collapse all photos" to every row's DedupFactors; bump seq each
   // click so a row re-applies it even after individual toggling.
   const [batchPhotos, setBatchPhotos] =
@@ -129,7 +118,7 @@ export default function DedupAuditHistory({
   const q = useQuery({
     queryKey: [
       'dedup', 'audit', outcome, type, source, onlyFlagged, factor, factorMax, verdict,
-      scopeProperty ?? null,
+      roomType, scopeProperty ?? null, districts,
     ],
     queryFn: () =>
       getDedupAudit({
@@ -140,7 +129,9 @@ export default function DedupAuditHistory({
         factor: factor || undefined,
         factor_max: numericFactor && factorMax != null ? factorMax : undefined,
         verdict: factor === 'visual' && verdict ? verdict : undefined,
+        room_type: roomType || undefined,
         property_id: scopeProperty ?? undefined,
+        districts: districts.length ? districts : undefined,
         limit: 150,
       }),
   });
@@ -165,7 +156,7 @@ export default function DedupAuditHistory({
       <div className="flex flex-col gap-2">
         <div className="flex flex-wrap items-center gap-1.5">
           {OUTCOMES.map((o) => (
-            <Chip
+            <FilterChip
               key={o.id}
               on={outcome === o.id}
               label={o.label}
@@ -174,7 +165,7 @@ export default function DedupAuditHistory({
           ))}
           <span className="mx-1 h-4 w-px bg-[var(--color-rule)]" />
           {SOURCES.map((s) => (
-            <Chip
+            <FilterChip
               key={s.id}
               on={source === s.id}
               label={s.label}
@@ -203,8 +194,8 @@ export default function DedupAuditHistory({
           )}
         </div>
         <div className="flex flex-wrap items-center gap-1.5">
-          {TYPES.map((t) => (
-            <Chip
+          {CATEGORY_MAIN_TABS.map((t) => (
+            <FilterChip
               key={t.id}
               on={type === t.id}
               label={t.label}
@@ -233,12 +224,23 @@ export default function DedupAuditHistory({
             </span>
           )}
         </div>
+        <div className="flex items-start gap-2">
+          <span className="mt-1.5 shrink-0 text-[0.62rem] uppercase tracking-[0.1em] text-[var(--color-ink-4)]">
+            Lokalita
+          </span>
+          <div className="min-w-0 flex-1 max-w-xl">
+            <LocationTypeahead
+              value={districts}
+              onChange={(n) => setDistricts(n ?? [])}
+            />
+          </div>
+        </div>
         <div className="flex flex-wrap items-center gap-1.5">
           <span className="text-[0.62rem] uppercase tracking-[0.1em] text-[var(--color-ink-4)] mr-1">
             Faktor
           </span>
           {FACTORS.map((f) => (
-            <Chip
+            <FilterChip
               key={f.id}
               on={factor === f.id}
               label={f.label}
@@ -267,13 +269,33 @@ export default function DedupAuditHistory({
           )}
           {factor === 'visual' &&
             VERDICTS.map((v) => (
-              <Chip
+              <FilterChip
                 key={v.id}
                 on={verdict === v.id}
                 label={v.label}
                 onClick={() => setVerdict(v.id)}
               />
             ))}
+        </div>
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className="text-[0.62rem] uppercase tracking-[0.1em] text-[var(--color-ink-4)] mr-1">
+            Porovnaná místnost/plán
+          </span>
+          <FilterChip on={roomType === ''} label="Vše" onClick={() => setRoomType('')} />
+          {ROOM_TYPES.map((rt) => (
+            <FilterChip
+              key={rt}
+              on={roomType === rt}
+              label={imageTagLabel(rt) ?? rt}
+              onClick={() => setRoomType(rt)}
+            />
+          ))}
+          <span
+            className="ml-1 text-[0.66rem] text-[var(--color-ink-4)]"
+            title="Situační plán rozhoduje jen o zařazení do fronty (Needs review), nikdy o konečném sloučení/zamítnutí — proto se v Decision history nikdy neobjeví jako samostatný faktor."
+          >
+            (situační plán → fronta „Needs review“, ne Decision history)
+          </span>
         </div>
       </div>
 
