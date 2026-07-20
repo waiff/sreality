@@ -174,7 +174,8 @@ def test_ingest_one_no_tool_use_block_negative_caches() -> None:
     assert update_calls == []
     insert_calls = [c for c in conn.calls if "INSERT INTO listing_description_enrichments" in c[0]]
     assert len(insert_calls) == 1
-    assert '"no_extraction": true' in insert_calls[0][1][2]
+    # params: (sreality_id, sreality_id-for-listing_id, snapshot_id, extracted, ...)
+    assert '"no_extraction": true' in insert_calls[0][1][3]
     assert conn.marks == [("scored", None, 100)]
 
 

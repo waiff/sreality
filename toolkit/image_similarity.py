@@ -341,12 +341,18 @@ def _cache_store(
     llm_call_id: int,
     cost_usd: float,
 ) -> None:
+    # listing_id_{a,b} are stamped positionally from the legacy ids (side-coupled payloads).
     sql = (
         "INSERT INTO listing_image_comparisons "
-        "(sreality_id_a, sreality_id_b, comparison, n_images_a, n_images_b, "
+        "(sreality_id_a, listing_id_a, sreality_id_b, listing_id_b, "
+        " comparison, n_images_a, n_images_b, "
         " model, llm_call_id, cost_usd) "
-        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) "
+        "VALUES (%s, (SELECT id FROM listings WHERE sreality_id = %s), "
+        " %s, (SELECT id FROM listings WHERE sreality_id = %s), "
+        " %s, %s, %s, %s, %s, %s) "
         "ON CONFLICT (sreality_id_a, sreality_id_b) DO UPDATE SET "
+        " listing_id_a = EXCLUDED.listing_id_a, "
+        " listing_id_b = EXCLUDED.listing_id_b, "
         " comparison = EXCLUDED.comparison, "
         " n_images_a = EXCLUDED.n_images_a, "
         " n_images_b = EXCLUDED.n_images_b, "
@@ -359,7 +365,9 @@ def _cache_store(
         cur.execute(
             sql,
             (
-                sreality_id_a, sreality_id_b, _Jsonb(comparison),
+                sreality_id_a, sreality_id_a,
+                sreality_id_b, sreality_id_b,
+                _Jsonb(comparison),
                 n_images_a, n_images_b, model, llm_call_id, cost_usd,
             ),
         )

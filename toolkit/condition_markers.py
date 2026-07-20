@@ -499,12 +499,16 @@ def _cache_store(
     llm_call_id: int,
     cost_usd: float,
 ) -> None:
+    # listing_id is the surrogate twin of sreality_id (R2 dual-write); it is
+    # resolved inline so callers keep passing the legacy id only.
     sql = (
         "INSERT INTO listing_marker_extractions "
-        "(sreality_id, snapshot_id, markers, notes, n_images, "
+        "(sreality_id, listing_id, snapshot_id, markers, notes, n_images, "
         " model, llm_call_id, cost_usd) "
-        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) "
+        "VALUES (%s, (SELECT id FROM listings WHERE sreality_id = %s), "
+        " %s, %s, %s, %s, %s, %s, %s) "
         "ON CONFLICT (sreality_id, snapshot_id) DO UPDATE SET "
+        " listing_id = EXCLUDED.listing_id, "
         " markers = EXCLUDED.markers, "
         " notes = EXCLUDED.notes, "
         " n_images = EXCLUDED.n_images, "
@@ -517,7 +521,7 @@ def _cache_store(
         cur.execute(
             sql,
             (
-                sreality_id, snapshot_id, _Jsonb(markers), notes,
+                sreality_id, sreality_id, snapshot_id, _Jsonb(markers), notes,
                 n_images, model, llm_call_id, cost_usd,
             ),
         )

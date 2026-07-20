@@ -39,6 +39,7 @@ Multi-portal ingestion (Scraper Phase 2) is the larger not-yet-started body of w
 | Skill refinement | 🟡 active | Phase AI — feedback-driven estimation-skill refinement | [roadmap/skill-refinement-track.md](roadmap/skill-refinement-track.md) |
 | Summarize | ✅ done | Annotated distribution charts (summarize-1) | [roadmap/summarize-track.md](roadmap/summarize-track.md) |
 | Public release | 🟡 active | Accounts, multi-tenancy (RLS), admin gating, Stripe — see `docs/design/public-release-program.md` | [roadmap/public-release-track.md](roadmap/public-release-track.md) |
+| Listing identity | 🟡 active | Retire the `sreality_id` smart key; Phase 0/R1/natural-key/URL cutover shipped, R2→PK-swap in progress per `docs/design/listing-identity-r2-pk-swap-runbook.md` | [roadmap/listing-identity-track.md](roadmap/listing-identity-track.md) |
 | Archive | ✅ 80 entries | All completed phases (dated) | [roadmap/archive.md](roadmap/archive.md) |
 
 ## Out of scope until explicitly opened

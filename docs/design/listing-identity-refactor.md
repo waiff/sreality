@@ -1,5 +1,15 @@
 # Listing & property identity: retire the `sreality_id` sign-hack — v2
 
+> ⚠️ **Its § Migration runbook (R2–R5) is SUPERSEDED — do not execute it.** A 9-agent
+> adversarial review on 2026-07-20 found four of its steps broken (R2-before-R3 ordering
+> can never converge against the always-on writer; the PK promotion via `listings_id_key`
+> is unexecutable; `ALTER COLUMN sreality_id DROP NOT NULL` is missing entirely; the
+> destructive gate is on the wrong step) plus census drift. The corrected, live-verified,
+> execution-ready runbook is **`docs/design/listing-identity-r2-pk-swap-runbook.md`** —
+> read that for anything R2 / R3 / remaining-R4 / PK-swap. Everything else in this
+> document (diagnosis, target design, carrier census, decision framework, shipped record)
+> stands and remains the reference.
+
 > **Status: v2 — Phase 0, R1, the natural-key completion, AND the full R4 app-layer
 > cutover SHIPPED to production (2026-07-19 → 07-20). Only R2 + the PK swap remain,
 > and both are deferrable polish (see below).** Supersedes v1 (2026-07-17) in full. v1
@@ -380,6 +390,10 @@ Class F — **outside the database** (the compat surface v1 never inventoried):
    unchanged from v1.
 
 ## Migration runbook (corrected; every step additive and worker-safe)
+
+> ⚠️ **R2–R5 below are SUPERSEDED by `listing-identity-r2-pk-swap-runbook.md`** (four
+> broken steps, see the banner at the top of this file). Phase 0 and R1 are kept as the
+> historical record of what shipped; do not execute R2 onward from here.
 
 **Phase 0 — correctness + enforcement, no re-key (1–2 small PRs, ship now).**
 Fix bugs 1–5 + 7 code-only (incl. `dedup_label_events` view redefine; Browse ID column

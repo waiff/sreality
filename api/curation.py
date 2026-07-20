@@ -280,9 +280,12 @@ def create_note(
     property_id: int,
     body: s.CreateNoteIn,
 ) -> dict[str, Any]:
+    # origin_listing_ref_id is the surrogate mirror of origin_listing_id (which
+    # holds a legacy sreality_id); resolved inline for the R2 dual-write.
     sql = (
-        "INSERT INTO property_notes (property_id, body, origin_listing_id) "
-        "VALUES (%s, %s, %s) "
+        "INSERT INTO property_notes "
+        "  (property_id, body, origin_listing_id, origin_listing_ref_id) "
+        "VALUES (%s, %s, %s, (SELECT id FROM listings WHERE sreality_id = %s)) "
         "RETURNING id, property_id, body, origin_listing_id, created_at"
     )
     try:
@@ -290,7 +293,8 @@ def create_note(
             pid = resolve_active_property_id(conn, property_id)
             if pid is None:
                 raise HTTPException(404, "property not found")
-            cur.execute(sql, (pid, body.body, body.origin_listing_id))
+            cur.execute(sql, (pid, body.body, body.origin_listing_id,
+                              body.origin_listing_id))
             row = cur.fetchone()
     except psycopg.errors.ForeignKeyViolation:
         raise HTTPException(404, "property not found")

@@ -1,0 +1,88 @@
+name: Backfill child listing_id (R2)
+
+# One-off, dispatch-only backfill for the R2 leg of the listing-identity refactor
+# (docs/design/listing-identity-r2-pk-swap-runbook.md § 2 A4). Fills the surrogate
+# listings.id onto the 22 carrier tables migrations 320-325 added columns to, for
+# rows written BEFORE dual-write shipped. No re-fetch, no LLM, no snapshots.
+#
+# MUST run only after the dual-write deploy is live. Backfilling earlier cannot
+# converge: the always-on worker keeps inserting fresh NULL rows behind the scan.
+#
+# Idempotent + resumable — each run picks up at the first row still needing work,
+# so re-dispatch until "0 row(s) filled". Its OWN concurrency group: a shared one
+# would let the portal ingest jobs starve it. NOT a portal workflow, so no
+# `# portal:` tag.
+#
+# Required GitHub secrets: SUPABASE_DB_URL, SUPABASE_DB_SESSION_URL (the script
+# uses the session pooler — the transaction pooler's ~2-minute statement cap
+# would kill the wide windows on images/listing_snapshots).
+
+on:
+  workflow_dispatch:
+    inputs:
+      table:
+        description: Single carrier table (blank = all 22)
+        required: false
+        default: ""
+        type: string
+      batch:
+        description: Cursor-window width for id-cursor carriers
+        required: false
+        default: "50000"
+        type: string
+      max_seconds:
+        description: Wall-clock budget in seconds (blank = no budget)
+        required: false
+        default: "4800"
+        type: string
+      repair:
+        description: Also overwrite surrogates that are set but WRONG
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+      dry_run:
+        description: Report what each carrier needs and exit
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+concurrency:
+  group: backfill-child-listing-ids
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      SUPABASE_DB_SESSION_URL: ${{ secrets.SUPABASE_DB_SESSION_URL }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: pip install -e .
+
+      - name: Backfill child listing_id
+        run: |
+          ARGS=""
+          if [ -n "${{ inputs.table }}" ]; then ARGS="$ARGS --table ${{ inputs.table }}"; fi
+          if [ -n "${{ inputs.batch }}" ]; then ARGS="$ARGS --batch ${{ inputs.batch }}"; fi
+          if [ -n "${{ inputs.max_seconds }}" ]; then ARGS="$ARGS --max-seconds ${{ inputs.max_seconds }}"; fi
+          if [ "${{ inputs.repair }}" = "true" ]; then ARGS="$ARGS --repair"; fi
+          if [ "${{ inputs.dry_run }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
+          python -m scripts.backfill_child_listing_ids $ARGS

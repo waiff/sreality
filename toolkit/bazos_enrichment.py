@@ -348,11 +348,13 @@ def persist_enrich_result(
         # response must still not become a permanent re-bill loop.
         with conn.cursor() as cur:
             cur.execute(
+                # listing_id mirrors sreality_id via subquery during the dual-write
+                # phase of the surrogate-key migration (migrations 320-325).
                 "INSERT INTO listing_description_enrichments "
-                "(sreality_id, snapshot_id, extracted, filled, model, llm_call_id, cost_usd) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s) "
+                "(sreality_id, listing_id, snapshot_id, extracted, filled, model, llm_call_id, cost_usd) "
+                "VALUES (%s, (SELECT id FROM listings WHERE sreality_id = %s), %s, %s, %s, %s, %s, %s) "
                 "ON CONFLICT DO NOTHING",
-                (sreality_id, snapshot_id, json.dumps({"no_extraction": True}),
+                (sreality_id, sreality_id, snapshot_id, json.dumps({"no_extraction": True}),
                  json.dumps({}), model, llm_call_id, cost_usd),
             )
         conn.commit()
@@ -363,14 +365,14 @@ def persist_enrich_result(
     with conn.cursor() as cur:
         cur.execute(
             "INSERT INTO listing_description_enrichments "
-            "(sreality_id, snapshot_id, extracted, filled, model, llm_call_id, cost_usd) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s) "
+            "(sreality_id, listing_id, snapshot_id, extracted, filled, model, llm_call_id, cost_usd) "
+            "VALUES (%s, (SELECT id FROM listings WHERE sreality_id = %s), %s, %s, %s, %s, %s, %s) "
             # Targetless (not `(sid, snapshot, model)`): the only conflictable
             # constraint is the cache key (id is GENERATED ALWAYS), so this is
             # equivalent AND survives migration 249's constraint swap regardless of
             # apply-vs-deploy order — no fragile lockstep.
             "ON CONFLICT DO NOTHING",
-            (sreality_id, snapshot_id, json.dumps(extraction), json.dumps(columns),
+            (sreality_id, sreality_id, snapshot_id, json.dumps(extraction), json.dumps(columns),
              model, llm_call_id, cost_usd),
         )
         if columns:

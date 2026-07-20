@@ -206,11 +206,14 @@ def _insert_smoke_run(
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(
             "INSERT INTO estimation_runs "
-            "(source, mode, status, input_sreality_id, input_spec, "
-            "source_kind, parse_confidence, trace) "
-            "VALUES ('api', 'agent', 'running', %s, %s, "
+            "(source, mode, status, input_sreality_id, input_listing_id, "
+            "input_spec, source_kind, parse_confidence, trace) "
+            "VALUES ('api', 'agent', 'running', %s, "
+            # Dual-write (migration 324): surrogate listings.id beside the legacy key.
+            "(SELECT id FROM listings WHERE sreality_id = %s), %s, "
             "'sreality', 'high', %s) RETURNING id",
             (
+                int(target_row["sreality_id"]),
                 int(target_row["sreality_id"]),
                 Jsonb(spec),
                 Jsonb({"version": 1, "summary": "smoke seed",

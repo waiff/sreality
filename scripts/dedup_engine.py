@@ -1682,12 +1682,17 @@ def _write_pair_audit(
         return
     with conn.cursor() as cur:
         cur.executemany(
-            "INSERT INTO dedup_pair_audit (run_at, left_sreality_id, "
-            "right_sreality_id, left_property_id, right_property_id, "
+            # The *_listing_id subqueries resolve the surrogate key inline (R2 dual-write);
+            # the sreality_id parameter is simply repeated at the matching position.
+            "INSERT INTO dedup_pair_audit (run_at, left_sreality_id, left_listing_id, "
+            "right_sreality_id, right_listing_id, left_property_id, right_property_id, "
             "category_main, stage, outcome, source, merge_group_id, detail) "
-            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb)",
+            "VALUES (%s,%s,(SELECT id FROM listings WHERE sreality_id = %s),"
+            "%s,(SELECT id FROM listings WHERE sreality_id = %s),"
+            "%s,%s,%s,%s,%s,%s,%s,%s::jsonb)",
             [
-                (run_at, r["left_sreality_id"], r["right_sreality_id"],
+                (run_at, r["left_sreality_id"], r["left_sreality_id"],
+                 r["right_sreality_id"], r["right_sreality_id"],
                  r["left_property_id"], r["right_property_id"], r["category_main"],
                  r["stage"], r["outcome"], r.get("source", "engine"),
                  r.get("merge_group_id"), json.dumps(r["detail"]))

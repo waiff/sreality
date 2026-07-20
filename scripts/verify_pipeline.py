@@ -33,6 +33,7 @@ import sys
 from typing import Any, Callable
 
 from scraper.db import connect
+from toolkit.listing_identity import R2_CARRIERS as _PARITY_CARRIERS
 from toolkit.system_alerts import emit_transition_alerts, latest_statuses
 
 LOG = logging.getLogger("verify_pipeline")
@@ -866,6 +867,145 @@ def check_merge_precision_sample(conn: Any, thresholds: dict[str, Any]) -> dict[
     }
 
 
+# Keep every parity scan bounded so the 6-hourly run never degenerates into a seq
+# scan of 8M images rows: look only at the newest slice above the watermark. A live
+# writer gap shows up continuously, so the recent window catches it just as well as
+# a full scan would — and stays index-driven as the tables grow.
+_PARITY_ID_LOOKBACK = 200_000
+_PARITY_TS_LOOKBACK_DAYS = 7
+
+
+def _parity_carrier_sql(carrier: dict[str, Any]) -> str:
+    table, cursor = carrier["table"], carrier["cursor"]
+    if carrier.get("kind") == "ts":
+        floor = f"greatest(w.cursor_ts, now() - interval '{_PARITY_TS_LOOKBACK_DAYS} days')"
+    else:
+        floor = (
+            f"greatest(w.cursor_id, coalesce((select max({cursor}) from {table}), 0)"
+            f" - {_PARITY_ID_LOOKBACK})"
+        )
+    parts: list[str] = []
+    for legacy, new in carrier["cols"]:
+        parts.append(f"count(*) filter (where t.{legacy} is not null and t.{new} is null)")
+        parts.append(
+            f"count(*) filter (where t.{legacy} is not null and t.{new} is not null"
+            f" and t.{new} is distinct from"
+            f" (select l.id from listings l where l.sreality_id = t.{legacy}))"
+        )
+    return (
+        f"select {', '.join(parts)}, count(*) "
+        f"from {table} t, dual_write_watermark w "
+        f"where w.child = '{table}' and t.{cursor} > {floor}"
+    )
+
+
+def check_dual_write_parity(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]:
+    """R2 dual-write parity: every row written since the watermark that carries a
+    legacy listing id must carry the matching surrogate, and it must be the RIGHT one.
+
+    Two distinct failures, both otherwise silent: a writer nobody censused keeps
+    stamping only the legacy id (gap), or a writer stamps a surrogate belonging to a
+    different listing (mismatch — what a positional zip of an unordered RETURNING
+    produces). Gap detection is structural: it observes rows, not code paths, so it
+    catches writers this refactor never enumerated.
+    """
+    unarmed: list[str] = []
+    gaps: dict[str, int] = {}
+    mismatches: dict[str, int] = {}
+    scanned: dict[str, int] = {}
+    # Which carriers are armed has to be established SEPARATELY, before counting.
+    # The per-carrier query is aggregate-only, so with no watermark row it still
+    # returns one row of zeros — indistinguishable from "clean". Reading armedness
+    # off the counts would make every unarmed carrier silently green, which is the
+    # exact failure this check exists to catch.
+    armed = {str(r[0]) for r in _fetchall(conn, "select child from dual_write_watermark")}
+    for carrier in _PARITY_CARRIERS:
+        table = carrier["table"]
+        if table not in armed:
+            unarmed.append(table)
+            continue
+        rows = _fetchall(conn, _parity_carrier_sql(carrier))
+        row = rows[0]
+        for idx, (_legacy, new) in enumerate(carrier["cols"]):
+            gap, bad = int(row[idx * 2]), int(row[idx * 2 + 1])
+            if gap:
+                gaps[f"{table}.{new}"] = gap
+            if bad:
+                mismatches[f"{table}.{new}"] = bad
+        scanned[table] = int(row[-1])
+
+    if gaps or mismatches:
+        status = "fail"
+        bits: list[str] = []
+        if gaps:
+            bits.append("missing surrogate on "
+                        + ", ".join(f"{k} ({v} rows)" for k, v in sorted(gaps.items())))
+        if mismatches:
+            bits.append("WRONG surrogate on "
+                        + ", ".join(f"{k} ({v} rows)" for k, v in sorted(mismatches.items())))
+        message = (
+            "R2 dual-write parity broken: " + "; ".join(bits) + ". A writer is not "
+            "stamping listings.id (or is stamping the wrong one) — the child FK backfill "
+            "cannot converge until it is fixed."
+        )
+    elif len(unarmed) == len(_PARITY_CARRIERS):
+        status = "warn"
+        message = (
+            "R2 dual-write parity is INERT — no carrier has a dual_write_watermark row. "
+            "Arm it after the dual-write deploy: "
+            "python -m scripts.verify_pipeline --arm-dual-write-parity"
+        )
+    elif unarmed:
+        status = "warn"
+        message = (
+            f"R2 dual-write parity is partially armed — {len(unarmed)} carrier(s) have no "
+            f"watermark and are unwatched: {', '.join(sorted(unarmed))}."
+        )
+    else:
+        status = "ok"
+        message = (
+            f"R2 dual-write parity clean across {len(_PARITY_CARRIERS)} carriers "
+            f"({sum(scanned.values())} recent rows checked)."
+        )
+    return {
+        "check_key": "dual_write_parity",
+        "status": status,
+        "value": sum(gaps.values()) + sum(mismatches.values()),
+        "details": {"gaps": gaps, "mismatches": mismatches, "unarmed": unarmed,
+                    "scanned": scanned},
+        "message": message,
+    }
+
+
+def arm_dual_write_parity(conn: Any) -> list[str]:
+    """Seed/refresh each carrier's watermark from where its cursor stands NOW.
+
+    Run once, AFTER the dual-write deploy is live. Arming late is safe (rows written
+    in between merely look like backfill work); arming before the deploy would mark
+    old-code rows as post-dual-write and alarm falsely.
+    """
+    armed: list[str] = []
+    for carrier in _PARITY_CARRIERS:
+        table, cursor = carrier["table"], carrier["cursor"]
+        legacy, new = carrier["cols"][0]
+        is_ts = carrier.get("kind") == "ts"
+        col = "cursor_ts" if is_ts else "cursor_id"
+        default = "now()" if is_ts else "0"
+        with conn.cursor() as cur:
+            cur.execute(
+                f"insert into dual_write_watermark "
+                f"(child, legacy_col, new_col, cursor_col, {col}) "
+                f"select %s, %s, %s, %s, coalesce(max({cursor}), {default}) from {table} "
+                f"on conflict (child) do update set "
+                f"{col} = excluded.{col}, legacy_col = excluded.legacy_col, "
+                f"new_col = excluded.new_col, cursor_col = excluded.cursor_col, "
+                f"armed_at = now()",
+                (table, legacy, new, cursor),
+            )
+        armed.append(table)
+    return armed
+
+
 _CHECKS: list[tuple[str, Callable[[Any, dict[str, Any]], dict[str, Any]]]] = [
     ("street_debt", check_street_debt),
     ("geo_debt", check_geo_debt),
@@ -877,6 +1017,7 @@ _CHECKS: list[tuple[str, Callable[[Any, dict[str, Any]], dict[str, Any]]]] = [
     ("llm_burn_rate", check_llm_burn_rate),
     ("db_saturation", check_db_saturation),
     ("worker_liveness", check_worker_liveness),
+    ("dual_write_parity", check_dual_write_parity),
 ]
 
 _WEEKLY_CHECKS: list[tuple[str, Callable[[Any, dict[str, Any]], dict[str, Any]]]] = [
@@ -943,6 +1084,11 @@ def main() -> int:
                         help="Exit 1 if any run check is 'fail' — so the hourly LLM lane's "
                              "GitHub run goes red and emails the operator (belt-and-braces "
                              "for when the in-app bell path itself is down).")
+    parser.add_argument("--arm-dual-write-parity", action="store_true",
+                        help="Seed each R2 carrier's dual_write_watermark from where its "
+                             "cursor stands now, then exit. Run ONCE, after the dual-write "
+                             "deploy is live — arming before it would mark old-code rows as "
+                             "post-dual-write and alarm falsely.")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -954,6 +1100,12 @@ def main() -> int:
     if not os.environ.get("SUPABASE_DB_URL"):
         print("ERROR: SUPABASE_DB_URL is not set.", file=sys.stderr)
         return 2
+
+    if args.arm_dual_write_parity:
+        with connect() as conn:
+            armed = arm_dual_write_parity(conn)
+        LOG.info("armed dual-write parity watermarks for %d carriers", len(armed))
+        return 0
 
     only = {k.strip() for k in args.only.split(",") if k.strip()} or None
     run_at = _dt.datetime.now(_dt.timezone.utc)

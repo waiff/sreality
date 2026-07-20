@@ -142,13 +142,16 @@ def merge_properties(
                     f"category_main mismatch ({s_cm} vs {r_cm}); refusing to merge"
                 )
 
+            # `listing_id` here is a LEGACY sreality_id; `listing_ref_id` (migration
+            # 323) carries the surrogate listings.id alongside it during dual-write.
             cur.execute(
                 """
                 INSERT INTO property_merge_events
                     (merge_group_id, survivor_property_id, retired_property_id,
-                     listing_id, prev_property_id, reason, confidence, markers, source)
+                     listing_id, listing_ref_id, prev_property_id, reason,
+                     confidence, markers, source)
                 SELECT %(group)s, %(survivor)s, %(retired)s,
-                       l.sreality_id, %(retired)s, %(reason)s,
+                       l.sreality_id, l.id, %(retired)s, %(reason)s,
                        %(confidence)s, %(markers)s, %(source)s
                 FROM listings l
                 WHERE l.property_id = %(retired)s
@@ -241,7 +244,7 @@ def merge_properties(
 # unambiguously, rather than relying on the global repr_listing_id join.
 _SPLIT_INSERT_ONE_SQL = """
     INSERT INTO properties (
-        repr_listing_id, category_main, category_type, disposition,
+        repr_listing_id, repr_listing_ref_id, category_main, category_type, disposition,
         area_m2, district, locality, geom, current_price_czk,
         has_balcony, has_parking, has_lift, building_type, condition,
         ownership, furnished, terrace, cellar, garage, category_sub_cb, subtype,
@@ -253,7 +256,7 @@ _SPLIT_INSERT_ONE_SQL = """
         source_count, distinct_site_count
     )
     SELECT
-        l.sreality_id, l.category_main, l.category_type, l.disposition,
+        l.sreality_id, l.id, l.category_main, l.category_type, l.disposition,
         l.area_m2, l.district, l.locality, l.geom, l.price_czk,
         l.has_balcony, l.has_parking, l.has_lift, l.building_type, l.condition,
         l.ownership, l.furnished, l.terrace, l.cellar, l.garage, l.category_sub_cb, l.subtype,

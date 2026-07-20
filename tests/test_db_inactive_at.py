@@ -116,7 +116,9 @@ def test_touch_listings_clears_inactive_at_in_both_statements():
 
 def test_upsert_listing_clears_inactive_at_on_conflict():
     conn = _FakeConn([
-        (lambda s: "INSERT INTO listings" in s, [(False,)]),
+        # RETURNING is (inserted, id) since the R2 dual-write: the surrogate is read
+        # back in-transaction so the snapshot insert can carry it.
+        (lambda s: "INSERT INTO listings" in s, [(False, 12345)]),
         (lambda s: "SELECT content_hash FROM listing_snapshots" in s, []),
     ])
     db.upsert_listing(conn, {"sreality_id": 1}, {}, "h")

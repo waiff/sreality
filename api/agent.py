@@ -958,11 +958,14 @@ def _persist_cohort_entries(
         return
     sql = (
         "INSERT INTO estimation_cohort_entries ("
-        "  estimation_run_id, sreality_id, first_seen_round_n,"
+        "  estimation_run_id, sreality_id, listing_id, first_seen_round_n,"
         "  last_seen_round_n, snapshot_id, distance_m, price_czk,"
         "  area_m2, price_per_m2, disposition"
         ") VALUES ("
-        "  %(run_id)s, %(sid)s, %(round)s, %(round)s,"
+        "  %(run_id)s, %(sid)s,"
+        # Dual-write (migration 324): surrogate listings.id beside the legacy key.
+        "  (SELECT id FROM listings WHERE sreality_id = %(sid)s),"
+        "  %(round)s, %(round)s,"
         "  %(snap)s, %(dist)s, %(price)s, %(area)s, %(ppm2)s, %(disp)s"
         ") ON CONFLICT (estimation_run_id, sreality_id) DO UPDATE SET"
         "  last_seen_round_n = EXCLUDED.last_seen_round_n,"

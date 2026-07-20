@@ -4855,7 +4855,9 @@ def test_write_pair_audit_dedupes_recent_identical_records() -> None:
     eng._write_pair_audit(_Conn(), "RUN_AT", [rec, novel, remerge])
     assert len(inserted) == 2
     assert {r[1] for r in inserted} == {5, 1}          # novel dismissal + the re-merge
-    assert any(r[7] == "merged" for r in inserted)     # the merged record landed
+    # left/right_listing_id repeat their sreality_id at the mirrored position (R2 dual-write).
+    assert all(r[1] == r[2] and r[3] == r[4] for r in inserted)
+    assert any(r[9] == "merged" for r in inserted)     # the merged record landed
 
 
 def test_enqueue_candidate_reopen_valve() -> None:

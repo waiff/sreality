@@ -67,7 +67,7 @@ class _Cur:
         self._calls.append((sql, params))
         # The INSERTs flatten to (sreality_id, url, sequence) triples; echo one
         # "inserted" row per triple so record_images' RETURNING count is honest.
-        self._rows = len(params) // 3 if params else 1
+        self._rows = len(params) // 4 if params else 1
 
     def fetchall(self) -> list[tuple[bool]]:
         return [(True,)] * self._rows
@@ -100,8 +100,8 @@ def test_record_media_routes_images_and_videos():
     iparams = image_call[1]
     assert "https://cdn/a/1.jpg" in iparams and "https://cdn/a/2.jpg" in iparams
     assert "https://cdn/video/clip.mp4" not in iparams
-    assert iparams[2::3] == [1, 2]  # photos keep their original sequence (gap at 0)
+    assert iparams[3::4] == [1, 2]  # photos keep their original sequence (gap at 0)
 
     vparams = video_call[1]
     assert "https://cdn/video/clip.mp4" in vparams
-    assert vparams[2::3] == [0]
+    assert vparams[3::4] == [0]

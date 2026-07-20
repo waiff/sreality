@@ -573,7 +573,7 @@ def upsert_listing(
           -- incoming geom replaces the stored one.
           geom = COALESCE(EXCLUDED.geom, listings.geom),
           raw_json = EXCLUDED.raw_json
-        RETURNING xmax = 0 AS inserted
+        RETURNING xmax = 0 AS inserted, id
     """
 
     params: dict[str, Any] = {
@@ -597,6 +597,12 @@ def upsert_listing(
         cur.execute(upsert_sql, params)
         result = cur.fetchone()
         inserted = bool(result[0]) if result else False
+        # The surrogate of the row we just wrote, read back in-transaction so the
+        # snapshot below can carry it (R2 dual-write). On the ON CONFLICT arm the
+        # INSERT's sequence default is evaluated and discarded, and `id` is not in
+        # LISTING_COLUMNS so the DO UPDATE never rewrites it — RETURNING always
+        # yields the persisted row's stable id, new or existing.
+        listing_id = result[1] if result else None
 
         cur.execute(
             """
@@ -614,10 +620,10 @@ def upsert_listing(
             cur.execute(
                 """
                 INSERT INTO listing_snapshots
-                    (sreality_id, price_czk, content_hash, raw_json)
-                VALUES (%s, %s, %s, %s)
+                    (sreality_id, listing_id, price_czk, content_hash, raw_json)
+                VALUES (%s, %s, %s, %s, %s)
                 """,
-                (sreality_id, params["price_czk"], content_hash, raw_jsonb),
+                (sreality_id, listing_id, params["price_czk"], content_hash, raw_jsonb),
             )
 
     if inserted:
@@ -767,7 +773,7 @@ def _create_singleton_property(
         cur.execute(
             """
             INSERT INTO properties (
-                repr_listing_id, category_main, category_type, disposition,
+                repr_listing_id, repr_listing_ref_id, category_main, category_type, disposition,
                 area_m2, district, locality, geom, current_price_czk,
                 has_balcony, has_parking, has_lift, building_type, condition,
                 ownership, furnished, terrace, cellar, garage, category_sub_cb, subtype,
@@ -779,7 +785,7 @@ def _create_singleton_property(
                 source_count, distinct_site_count
             )
             SELECT
-                sreality_id, category_main, category_type, disposition,
+                sreality_id, id, category_main, category_type, disposition,
                 area_m2, district, locality, geom, price_czk,
                 has_balcony, has_parking, has_lift, building_type, condition,
                 ownership, furnished, terrace, cellar, garage, category_sub_cb, subtype,
@@ -901,7 +907,7 @@ def record_images(
     # statement proposes the same conflict key twice. (DO NOTHING tolerated it;
     # the URL-refresh DO UPDATE does not.) NULL sequences are kept as-is — they
     # don't conflict (NULLs are distinct in the unique index).
-    rows: list[tuple[int, str, Any]] = []
+    kept: list[tuple[str, Any]] = []
     seen_seqs: set[int] = set()
     for img in images:
         url = img.get("url")
@@ -917,29 +923,35 @@ def record_images(
             if seq in seen_seqs:
                 continue
             seen_seqs.add(seq)
-        rows.append((sreality_id, url, seq))
-    if not rows:
+        kept.append((url, seq))
+    if not kept:
         return 0
-
-    values_sql = ", ".join("(%s, %s, %s)" for _ in rows)
-    flat: list[Any] = [v for triple in rows for v in triple]
     # Refresh the URL on conflict so a re-detail-fetch repoints a stale/rotated
     # CDN path on a not-yet-downloaded image (and clears its stale error state).
     # The storage_path IS NULL guard is load-bearing: an already-downloaded image
     # is never disturbed, so we never re-download what we have. xmax = 0 is true
     # only for genuine inserts, keeping the "newly inserted" count honest.
-    sql = f"""
-        INSERT INTO images (sreality_id, sreality_url, sequence)
-        VALUES {values_sql}
-        ON CONFLICT (sreality_id, sequence) DO UPDATE SET
-            sreality_url = EXCLUDED.sreality_url,
-            download_attempts = 0,
-            last_error = NULL,
-            unavailable_reason = NULL
-        WHERE images.storage_path IS NULL
-        RETURNING (xmax = 0) AS inserted
-    """
+    # listing_id is resolved inline (R2 dual-write) so the id never travels through
+    # Python — same shape as every other child writer.
+    values_sql = ", ".join(
+        "(%s, (SELECT id FROM listings WHERE sreality_id = %s), %s, %s)" for _ in kept
+    )
+    flat: list[Any] = [
+        v for url, seq in kept for v in (sreality_id, sreality_id, url, seq)
+    ]
     with conn.transaction(), conn.cursor() as cur:
+        sql = f"""
+            INSERT INTO images (sreality_id, listing_id, sreality_url, sequence)
+            VALUES {values_sql}
+            ON CONFLICT (sreality_id, sequence) DO UPDATE SET
+                sreality_url = EXCLUDED.sreality_url,
+                listing_id = COALESCE(images.listing_id, EXCLUDED.listing_id),
+                download_attempts = 0,
+                last_error = NULL,
+                unavailable_reason = NULL
+            WHERE images.storage_path IS NULL
+            RETURNING (xmax = 0) AS inserted
+        """
         cur.execute(sql, flat)
         return sum(1 for (inserted,) in cur.fetchall() if inserted)
 
@@ -956,7 +968,7 @@ def record_videos(
     downloaded today (storage_path stays NULL), keeping the image pool free of large
     video fetches; a future isolated video drain can fill them in.
     """
-    rows: list[tuple[int, str, Any]] = []
+    kept: list[tuple[str, Any]] = []
     seen_seqs: set[int] = set()
     for vid in videos:
         url = vid.get("url")
@@ -967,21 +979,26 @@ def record_videos(
             if seq in seen_seqs:
                 continue
             seen_seqs.add(seq)
-        rows.append((sreality_id, url, seq))
-    if not rows:
+        kept.append((url, seq))
+    if not kept:
         return 0
 
-    values_sql = ", ".join("(%s, %s, %s)" for _ in rows)
-    flat: list[Any] = [v for triple in rows for v in triple]
-    sql = f"""
-        INSERT INTO listing_videos (sreality_id, source_url, sequence)
-        VALUES {values_sql}
-        ON CONFLICT (sreality_id, sequence) DO UPDATE SET
-            source_url = EXCLUDED.source_url
-        WHERE listing_videos.storage_path IS NULL
-        RETURNING (xmax = 0) AS inserted
-    """
+    values_sql = ", ".join(
+        "(%s, (SELECT id FROM listings WHERE sreality_id = %s), %s, %s)" for _ in kept
+    )
+    flat: list[Any] = [
+        v for url, seq in kept for v in (sreality_id, sreality_id, url, seq)
+    ]
     with conn.transaction(), conn.cursor() as cur:
+        sql = f"""
+            INSERT INTO listing_videos (sreality_id, listing_id, source_url, sequence)
+            VALUES {values_sql}
+            ON CONFLICT (sreality_id, sequence) DO UPDATE SET
+                source_url = EXCLUDED.source_url,
+                listing_id = COALESCE(listing_videos.listing_id, EXCLUDED.listing_id)
+            WHERE listing_videos.storage_path IS NULL
+            RETURNING (xmax = 0) AS inserted
+        """
         cur.execute(sql, flat)
         return sum(1 for (inserted,) in cur.fetchall() if inserted)
 
@@ -1964,8 +1981,8 @@ _BATCH_UPSERT_SQL = f"""
 # raw payload isn't sent twice. IS DISTINCT FROM handles the no-prior-snapshot
 # case (latest NULL → distinct → one snapshot for a brand-new listing).
 _BATCH_SNAPSHOT_SQL = """
-    INSERT INTO listing_snapshots (sreality_id, price_czk, content_hash, raw_json)
-    SELECT j.sreality_id, j.price_czk, j.content_hash, l.raw_json
+    INSERT INTO listing_snapshots (sreality_id, listing_id, price_czk, content_hash, raw_json)
+    SELECT j.sreality_id, l.id, j.price_czk, j.content_hash, l.raw_json
     FROM jsonb_to_recordset(%s::jsonb)
         AS j(sreality_id bigint, price_czk integer, content_hash text)
     JOIN listings l ON l.sreality_id = j.sreality_id
@@ -2063,13 +2080,20 @@ _BATCH_DIRTY_BROKERS_FROM_SIDS_SQL = """
     ON CONFLICT (sreality_id) DO UPDATE SET marked_at = now()
 """
 
+# The JOIN onto listings is the R2 dual-write handle: the batch upsert above ran
+# first in this same transaction, so every j.sreality_id already has its row (and
+# therefore its surrogate id) visible here. Resolving the id in SQL — rather than
+# zipping a RETURNING back to Python — is deliberate: INSERT ... SELECT RETURNING
+# order is unspecified, so a positional zip could silently misalign ids to rows.
 _BATCH_IMAGES_SQL = """
-    INSERT INTO images (sreality_id, sreality_url, sequence)
-    SELECT j.sreality_id, j.sreality_url, j.sequence
+    INSERT INTO images (sreality_id, listing_id, sreality_url, sequence)
+    SELECT j.sreality_id, l.id, j.sreality_url, j.sequence
     FROM jsonb_to_recordset(%s::jsonb)
         AS j(sreality_id bigint, sreality_url text, sequence integer)
+    JOIN listings l ON l.sreality_id = j.sreality_id
     ON CONFLICT (sreality_id, sequence) DO UPDATE SET
         sreality_url = EXCLUDED.sreality_url,
+        listing_id = COALESCE(images.listing_id, EXCLUDED.listing_id),
         download_attempts = 0,
         last_error = NULL,
         unavailable_reason = NULL

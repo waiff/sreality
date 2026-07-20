@@ -1725,8 +1725,17 @@ def _insert_run(conn: "psycopg.Connection", **fields: Any) -> int:
         if fields.get(k) is not None:
             fields[k] = Jsonb(fields[k])
     cols = list(_INSERT_COLUMNS)
+    values = [f"%({c})s" for c in cols]
+    # Dual-write (migration 324): stamp the surrogate listings.id alongside the
+    # legacy smart key, resolved inline so no extra round-trip is needed.
+    _sid_at = cols.index("input_sreality_id")
+    cols.insert(_sid_at + 1, "input_listing_id")
+    values.insert(
+        _sid_at + 1,
+        "(SELECT id FROM listings WHERE sreality_id = %(input_sreality_id)s)",
+    )
     cols_sql = ", ".join(cols)
-    placeholders = ", ".join(f"%({c})s" for c in cols)
+    placeholders = ", ".join(values)
     sql = (
         f"INSERT INTO estimation_runs ({cols_sql}) "
         f"VALUES ({placeholders}) RETURNING id"

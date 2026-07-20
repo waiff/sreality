@@ -350,10 +350,13 @@ def _cache_store(
     cost_usd: float,
 ) -> None:
     sql = (
+        # listing_id mirrors sreality_id via subquery during the dual-write phase
+        # of the surrogate-key migration (migrations 320-325).
         "INSERT INTO listing_summaries "
-        "(sreality_id, snapshot_id, summary, model, llm_call_id, cost_usd) "
-        "VALUES (%s, %s, %s, %s, %s, %s) "
+        "(sreality_id, listing_id, snapshot_id, summary, model, llm_call_id, cost_usd) "
+        "VALUES (%s, (SELECT id FROM listings WHERE sreality_id = %s), %s, %s, %s, %s, %s) "
         "ON CONFLICT (sreality_id, snapshot_id) DO UPDATE SET "
+        " listing_id = EXCLUDED.listing_id, "
         " summary = EXCLUDED.summary, "
         " model = EXCLUDED.model, "
         " llm_call_id = EXCLUDED.llm_call_id, "
@@ -364,7 +367,7 @@ def _cache_store(
         cur.execute(
             sql,
             (
-                sreality_id, snapshot_id, _Jsonb(summary),
+                sreality_id, sreality_id, snapshot_id, _Jsonb(summary),
                 model, llm_call_id, cost_usd,
             ),
         )
