@@ -152,16 +152,55 @@ existing consumer, confirmed live: `authenticated` SELECT grants unchanged on al
 4 views, sample reads return `id` alongside the legacy `sreality_id`. Sets up,
 but does NOT itself perform, the actual read cutover.
 
-**Next: Phase C, the read cutover (§4 second half) — the frontend/backend rewiring
-itself.** Key `sid`/loaders/`.eq('sreality_id')` reads in `ListingDetail.tsx`,
-`queries.ts`, `brokers.ts`, and `api.ts`'s manual-estimates path onto the now-exposed
-`id` columns (requires a dev-server browser check per CLAUDE.md before merge — this is
-user-facing SPA behavior, not just schema). Then: browse hydration, dedup `ListingKey`
-+ pair-cache reads, merge/unmerge replay, notification producers (incl. the
-`new_source` dedupe_key NULL-concat fix), the Chrome extension app-link gate +
-redistribution, `image_key()`, estimation forward provenance, the sreality_id-cursored
-maintenance walkers (geocode/street/geo_cell partial indexes), then the 25-read-model
-"may lag" wave.
+**Phase C, ListingDetail resolver chain DONE (2026-07-20, mig 335).** Investigated the
+actual mechanics before touching code: `sreality_id` stays populated for EVERY row
+through Gate 1 and the entire bake period — the forward-compat risk is narrower than
+§4's framing suggested, and only bites a *future* non-sreality row created after Gate 2
+stops drawing the synthetic sequence, which has no sreality_id to reach it by at all.
+Tracing every `sid` use in `ListingDetail.tsx` found almost all of it already read
+`listing.sreality_id` from the loaded row (which stays valid forever) rather than the
+route resolver — `BrokerChip`/`ManualEstimatesBlock`/`FreshnessBlock`/`CurationBlock`
+needed ZERO changes. The real fix was narrow:
+- `fetchListingIdByNaturalKey` (canonical `/listing/{source}/{native}` route) now
+  resolves the surrogate `id` (mig 334's new column), not `sreality_id`.
+- The legacy `/listing/{id}` route (`fetchListingBySreality`) is UNCHANGED and stays a
+  single round trip forever — the URL literally IS the sreality_id, so there's no
+  forward-compat gap to close there. `listingPath()` (22 call sites app-wide) still
+  generates this legacy form; the canonicalizing redirect (mig 314-era) rewrites the
+  URL bar client-side after load.
+- `DETAIL_COLS` (`listings_public`'s SELECT list) now includes `id`, so once
+  `listingQ.data` loads — via EITHER route — `sourcesQ`/`imagesQ` key off
+  `listingQ.data.id` (mig 335 added `images_public.listing_id` for this) and
+  `checksQ`/the snapshot-fallback stay `listingQ.data.sreality_id`-keyed, since
+  `listing_freshness_checks` has no `listing_id` column at all (rule #9 — not an R2
+  carrier). `fetchPropertySources` moved from `sreality_id` to `id` too
+  (`property_sources_public.id`, same column mig 334 exposed).
+- Caught by tracing `listingQ`'s query-key change (`['listing', sid]` →
+  `['listing', legacyId, natKeyId]`, two slots instead of one): `FreshnessBlock`'s
+  "Ověřit aktuálnost" mutation invalidated the literal `['listing', sreality_id]` key,
+  which no longer partial-matches the natural-key route's actual cache entry (its
+  `sreality_id` doesn't sit at either new key slot) — silently stopped refreshing the
+  listing after a freshness check on canonical-route pages. Fixed by invalidating the
+  bare `['listing']` prefix instead of guessing the shape.
+- **Verification**: the SPA is fully login-gated (Phase 1), so an agent can't complete
+  an interactive Google-OAuth browser click-through. Compensated with (a) the exact
+  query shapes replayed live as the `authenticated` role via the Supabase MCP
+  (`SET LOCAL ROLE authenticated`) — natural-key resolve → id → listing → sources →
+  images, full chain, real row (`idnes`/`sreality_id=-11876`/`id=105053`); (b) new
+  resolver-chain tests in `ListingDetail.test.tsx` mocking `@/lib/queries` and
+  rendering both route shapes via `MemoryRouter`, asserting the right loader fires
+  with the right argument for each route (5/5 pass); (c) `tsc --noEmit` + `vitest run`
+  (372 passed) + `eslint` (0 errors) all clean. A human click-through on both URL
+  formats is still worth doing before/shortly after merge, but isn't a hard blocker
+  given the above.
+
+**Next: Phase C, the rest of the read cutover (§4 second half).** Browse hydration,
+dedup `ListingKey` + pair-cache reads, merge/unmerge replay, notification producers
+(incl. the `new_source` dedupe_key NULL-concat fix), the Chrome extension app-link
+gate + redistribution, `image_key()`, estimation forward provenance, the
+sreality_id-cursored maintenance walkers (geocode/street/geo_cell partial indexes),
+then the 25-read-model "may lag" wave. `brokers.ts` and `api.ts`'s manual-estimates
+path turned out to need NO changes (see above) — drop them from the checklist.
 
 ## 0. What the review corrected (read this first)
 

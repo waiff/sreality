@@ -11,9 +11,12 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { MemoryRouter, Route, Routes } from 'react-router-dom';
 
-import { FreshnessBlock } from './ListingDetail';
+import ListingDetail, { FreshnessBlock } from './ListingDetail';
 import * as api from '@/lib/api';
+import * as queries from '@/lib/queries';
+import type { ListingPublic } from '@/lib/types';
 
 vi.mock('@/lib/api', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/lib/api')>();
@@ -106,10 +109,13 @@ describe('<FreshnessBlock> verify button', () => {
     for (const key of [
       ['freshness', 123],
       ['snapshots', 123],
-      ['listing', 123],
     ]) {
       expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: key });
     }
+    // listingQ's real key is ['listing', legacyId, natKeyId] (R2 Phase C
+    // resolver-chain cutover) — FreshnessBlock only knows sreality_id, so it
+    // invalidates the bare 'listing' prefix instead of guessing the shape.
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['listing'] });
   });
 
   it('surfaces a "gone" outcome', async () => {
@@ -125,5 +131,120 @@ describe('<FreshnessBlock> verify button', () => {
         screen.getByText('No longer listed — marked inactive.'),
       ).toBeInTheDocument(),
     );
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* Resolver chain — R2 Phase C cutover (legacy sreality_id route vs canonical  */
+/* natural-key route, both converging on the same surrogate-id-keyed loaders) */
+/* -------------------------------------------------------------------------- */
+
+vi.mock('@/lib/queries', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/lib/queries')>();
+  return {
+    ...actual,
+    fetchListingBySreality: vi.fn(),
+    fetchListingById: vi.fn(),
+    fetchListingIdByNaturalKey: vi.fn(),
+    fetchPropertyReprId: vi.fn(async () => null),
+    fetchPropertySources: vi.fn(async () => ({ property_id: null, sources: [] })),
+    fetchPropertyMf: vi.fn(async () => null),
+    fetchSnapshotsForListings: vi.fn(async () => []),
+    fetchFreshnessChecksByListing: vi.fn(async () => []),
+    fetchImagesByListing: vi.fn(async () => []),
+  };
+});
+vi.mock('@/lib/brokers', () => ({ fetchListingBroker: vi.fn(async () => null) }));
+vi.mock('@/components/NewEstimationModal', () => ({
+  useNewEstimationModal: () => ({ open: vi.fn() }),
+}));
+vi.mock('@/components/ExploreAreaModal', () => ({
+  useExploreAreaModal: () => ({ open: vi.fn() }),
+}));
+
+const RESOLVER_LISTING = {
+  id: 105053,
+  sreality_id: -11876,
+  first_seen_at: '2026-01-01T00:00:00Z',
+  last_seen_at: '2026-01-02T00:00:00Z',
+  is_active: true,
+  source: 'idnes',
+  category_main: 'byt',
+  category_type: 'prodej',
+  price_czk: 5_000_000,
+  disposition: '2+kk',
+  tom_days: 3,
+} as unknown as ListingPublic;
+
+describe('<ListingDetail> resolver chain', () => {
+  beforeEach(() => {
+    vi.mocked(queries.fetchListingBySreality).mockReset();
+    vi.mocked(queries.fetchListingById).mockReset();
+    vi.mocked(queries.fetchListingIdByNaturalKey).mockReset();
+    vi.mocked(queries.fetchPropertySources).mockClear();
+    vi.mocked(queries.fetchImagesByListing).mockClear();
+    vi.mocked(queries.fetchFreshnessChecksByListing).mockClear();
+  });
+
+  function renderAt(path: string) {
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    return render(
+      <QueryClientProvider client={qc}>
+        <MemoryRouter initialEntries={[path]}>
+          <Routes>
+            <Route path="listing/:sreality_id" element={<ListingDetail />} />
+            <Route
+              path="listing/:source/:nativeId"
+              element={<ListingDetail />}
+            />
+          </Routes>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+  }
+
+  it('legacy /listing/{sreality_id} fetches by sreality_id in ONE round trip, never resolves a natural key', async () => {
+    vi.mocked(queries.fetchListingBySreality).mockResolvedValue(RESOLVER_LISTING);
+
+    renderAt('/listing/-11876');
+
+    await waitFor(() =>
+      expect(queries.fetchListingBySreality).toHaveBeenCalledWith(-11876),
+    );
+    expect(queries.fetchListingIdByNaturalKey).not.toHaveBeenCalled();
+    expect(queries.fetchListingById).not.toHaveBeenCalled();
+
+    // Once loaded, the surrogate id (not sreality_id) keys the child loaders;
+    // freshness stays sreality_id-keyed (listing_freshness_checks has no
+    // listing_id column at all).
+    await waitFor(() =>
+      expect(queries.fetchPropertySources).toHaveBeenCalledWith(105053),
+    );
+    expect(queries.fetchImagesByListing).toHaveBeenCalledWith(105053);
+    expect(queries.fetchFreshnessChecksByListing).toHaveBeenCalledWith(-11876);
+  });
+
+  it('canonical /listing/{source}/{native} resolves the surrogate id first, then fetches by id', async () => {
+    vi.mocked(queries.fetchListingIdByNaturalKey).mockResolvedValue(105053);
+    vi.mocked(queries.fetchListingById).mockResolvedValue(RESOLVER_LISTING);
+
+    renderAt('/listing/idnes/6a147cfde222cf687509e018');
+
+    await waitFor(() =>
+      expect(queries.fetchListingIdByNaturalKey).toHaveBeenCalledWith(
+        'idnes',
+        '6a147cfde222cf687509e018',
+      ),
+    );
+    await waitFor(() =>
+      expect(queries.fetchListingById).toHaveBeenCalledWith(105053),
+    );
+    expect(queries.fetchListingBySreality).not.toHaveBeenCalled();
+
+    await waitFor(() =>
+      expect(queries.fetchPropertySources).toHaveBeenCalledWith(105053),
+    );
+    expect(queries.fetchImagesByListing).toHaveBeenCalledWith(105053);
+    expect(queries.fetchFreshnessChecksByListing).toHaveBeenCalledWith(-11876);
   });
 });

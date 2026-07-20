@@ -42,6 +42,9 @@ export interface MfReferenceRent {
 }
 
 export interface ListingPublic {
+  /* Surrogate PK (migration 312/334) — the stable identifier the R2 resolver-chain
+   * cutover keys child loaders on instead of sreality_id where it's available. */
+  id: number;
   sreality_id: number;
   first_seen_at: string;
   last_seen_at: string;

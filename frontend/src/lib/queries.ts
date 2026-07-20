@@ -1024,7 +1024,7 @@ export const fetchBrowseStats = async (
 };
 
 const DETAIL_COLS =
-  'sreality_id,first_seen_at,last_seen_at,is_active,source,tom_days,' +
+  'id,sreality_id,first_seen_at,last_seen_at,is_active,source,tom_days,' +
   'category_main,category_type,price_czk,price_unit,' +
   'area_m2,disposition,subtype,locality,district,obec,okres,street,locality_district_id,locality_region_id,' +
   'lat,lng,floor,total_floors,has_balcony,has_parking,has_lift,' +
@@ -1033,7 +1033,10 @@ const DETAIL_COLS =
   'furnished,terrace,cellar,garage,parking_lots,ownership,' +
   'description,mf_reference_rent_czk,mf_gross_yield_pct,mf_reference_rent';
 
-export const fetchListingById = async (
+/* Legacy /listing/{id} route: URL literally IS the sreality_id, one round trip,
+ * unchanged forever — a listing only ever gets a legacy numeric URL when it HAS a
+ * sreality_id to put in it, so there's no forward-compat concern here. */
+export const fetchListingBySreality = async (
   sreality_id: number,
 ): Promise<ListingPublic | null> => {
   const { data, error } = await supabase
@@ -1045,9 +1048,27 @@ export const fetchListingById = async (
   return (data as unknown as ListingPublic | null) ?? null;
 };
 
-/* Resolve a listing's natural key (source, source_id_native) to its sreality_id,
- * so the canonical /listing/{source}/{native} route can reuse fetchListingById.
- * Uses listing_natural_key_public (migration 315) — an UNFILTERED view over every
+/* Canonical /listing/{source}/{native} route, second half: fetch by the surrogate
+ * id fetchListingIdByNaturalKey resolved. Keyed on id, not sreality_id (R2 Phase C
+ * resolver-chain cutover) — a listing reachable only by natural key (a future
+ * non-sreality row created after Gate 2 stops drawing the synthetic sreality_id
+ * sequence) may have no sreality_id to filter on at all. */
+export const fetchListingById = async (
+  id: number,
+): Promise<ListingPublic | null> => {
+  const { data, error } = await supabase
+    .from('listings_public')
+    .select(DETAIL_COLS)
+    .eq('id', id)
+    .maybeSingle();
+  if (error) throw error;
+  return (data as unknown as ListingPublic | null) ?? null;
+};
+
+/* Resolve a listing's natural key (source, source_id_native) to its surrogate id
+ * (migration 334 exposes it — was sreality_id before the R2 Phase C cutover), so
+ * the canonical /listing/{source}/{native} route can reuse fetchListingById. Uses
+ * listing_natural_key_public (migration 315) — an UNFILTERED view over every
  * listing — NOT property_sources_public, which filters `property_id is not null`
  * and so cannot resolve a freshly-scraped listing during its ~5-min pre-attach
  * window (the canonical URL would 404 while the legacy one loaded). The key
@@ -1058,13 +1079,13 @@ export const fetchListingIdByNaturalKey = async (
 ): Promise<number | null> => {
   const { data, error } = await supabase
     .from('listing_natural_key_public')
-    .select('sreality_id')
+    .select('id')
     .eq('source', source)
     .eq('source_id_native', sourceIdNative)
     .maybeSingle();
   if (error) throw error;
-  const row = data as unknown as { sreality_id: number | null } | null;
-  return row?.sreality_id ?? null;
+  const row = data as unknown as { id: number | null } | null;
+  return row?.id ?? null;
 };
 
 /* Resolve a property_id to its representative listing's sreality_id.
@@ -1122,15 +1143,17 @@ export const fetchSnapshotsByListing = async (
 };
 
 /* Multi-portal: resolve the property a listing belongs to (works from ANY
- * child sreality_id via property_sources_public, not just the representative),
- * then return all of that property's per-portal observations. */
+ * child listing's surrogate id via property_sources_public, not just the
+ * representative), then return all of that property's per-portal observations.
+ * Keyed on id, not sreality_id (R2 Phase C resolver-chain cutover) — property_
+ * sources_public.id is the same listings.id migration 334 exposed. */
 export const fetchPropertySources = async (
-  sreality_id: number,
+  id: number,
 ): Promise<{ property_id: number | null; sources: PropertySource[] }> => {
   const { data: row, error: e1 } = await supabase
     .from('property_sources_public')
     .select('property_id')
-    .eq('sreality_id', sreality_id)
+    .eq('id', id)
     .maybeSingle();
   if (e1) throw e1;
   const property_id = (row as { property_id: number } | null)?.property_id ?? null;
@@ -1431,13 +1454,15 @@ export const fetchListingDetailByIds = async (
   return out;
 };
 
+/* Keyed on listing_id, not sreality_id (R2 Phase C resolver-chain cutover;
+ * migration 335 exposes it on images_public). */
 export const fetchImagesByListing = async (
-  sreality_id: number,
+  listing_id: number,
 ): Promise<ImagePublic[]> => {
   const { data, error } = await supabase
     .from('images_public')
     .select(IMAGE_PUBLIC_COLS)
-    .eq('sreality_id', sreality_id)
+    .eq('listing_id', listing_id)
     .order('sequence', { ascending: true, nullsFirst: false })
     .order('id', { ascending: true });
   if (error) throw error;

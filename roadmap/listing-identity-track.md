@@ -54,15 +54,21 @@ Run as ONE committed track; valueless half-done. Phases and their gates are spec
   latest-snapshot guard is rekeyed onto `listing_id` too, backed by a new composite
   index built CONCURRENTLY (`listing_snapshots_listing_id_scraped_at_idx`) since Phase
   B only gave that carrier a bare `listing_id` index. Every retarget verified live via
-  `EXPLAIN`. Read-cutover step 1 (✅ shipped 2026-07-20, mig 334) additively exposes
-  `id`/`listing_id` on `listings_public`, `property_sources_public`,
-  `listing_natural_key_public`, `listing_snapshots_public` — invisible to every
-  current reader, since the frontend always selects explicit columns, never `*`.
-  **Still open: the actual read cutover** — rewiring `ListingDetail.tsx`/
-  `queries.ts`/`brokers.ts`/`api.ts` onto the new columns (needs a browser check
-  before merge), then browse hydration, dedup `ListingKey` + pair caches,
-  merge/unmerge replay, notification producers, `image_key()`, the
-  sreality_id-cursored maintenance walkers, 25 read models.
+  `EXPLAIN`. Read-cutover step 1 (✅ shipped 2026-07-20, migs 334/335) additively
+  exposes `id`/`listing_id` on `listings_public`, `property_sources_public`,
+  `listing_natural_key_public`, `listing_snapshots_public`, `images_public` — invisible
+  to every current reader, since the frontend always selects explicit columns, never
+  `*`. The ListingDetail resolver chain (✅ shipped 2026-07-20) is DONE: the canonical
+  `/listing/{source}/{native}` route now resolves the surrogate `id` instead of
+  `sreality_id`; the legacy `/listing/{id}` route is unchanged (the URL already IS the
+  sreality_id, no forward-compat gap there). Turned out narrower than expected —
+  `BrokerChip`/`ManualEstimatesBlock`/`FreshnessBlock`/`brokers.ts`/`api.ts` needed no
+  changes, since they already read `listing.sreality_id` from the loaded row. Verified
+  via live `authenticated`-role query replay (agent can't complete an interactive
+  Google-OAuth click-through) + new resolver-chain tests + clean `tsc`/`vitest`/`eslint`.
+  **Still open:** browse hydration, dedup `ListingKey` + pair caches, merge/unmerge
+  replay, notification producers, `image_key()`, the sreality_id-cursored maintenance
+  walkers, 25 read models.
 - **Phase D** — pre-flip prep: ingest `ON CONFLICT` → the natural key, child `DROP NOT
   NULL`s, the two child PK swaps, pre-built unique indexes on `sreality_id` and `id`.
 - **GATE 1** — the PK-swap window (`sreality_id` → `id`), catalog-only and reversible.
