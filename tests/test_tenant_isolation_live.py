@@ -366,7 +366,9 @@ def seeded_tenant_rows(
         where["collections_public"] = ("name = %s", (nonce,))
 
         cur.execute(
-            "INSERT INTO tags (account_id, name, color) VALUES (%s, %s, '#ffffff') RETURNING id",
+            # `color` is a named-palette CHECK (copper/sage/brick/ochre/slate/
+            # plum/teal/sand), not a hex string.
+            "INSERT INTO tags (account_id, name, color) VALUES (%s, %s, 'slate') RETURNING id",
             (a_acc, nonce),
         )
         tag = cur.fetchone()[0]
