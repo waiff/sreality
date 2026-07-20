@@ -71,7 +71,45 @@ encoded:
 3. Per-window commits mean an aborted run keeps its progress — the first failed run had
    already committed 258k correct rows.
 
-**Next: Phase B (indexes + FKs) — unblocked, `scripts/apply_r2_constraints.py`.**
+**Phase B DONE (2026-07-20, PRs #837/#838).** `scripts/apply_r2_constraints.py`:
+indexes CONCURRENTLY built on every surrogate column; 19 FKs to `listings(id)` added
+NOT VALID then validated, across exactly the carriers whose legacy column already
+carried one (read live from `pg_constraint`, never hardcoded — Class B ledgers never
+grow one). Lock lesson worth remembering: `ADD FOREIGN KEY` takes SHARE ROW EXCLUSIVE
+on child AND `listings`, while the ingest path locks the same two tables in the
+OPPOSITE order (a new listing's singleton property is created inside the
+listings-insert transaction) — `DeadlockDetected` is expected there, not exotic; #838
+added it to the retry set alongside `LockNotAvailable`.
+
+**Next: Phase B2 (§3 items 4-5 — new unique guards + NOT NULL checks) —
+`scripts/apply_r2_unique_guards.py`.** Two independent additions, both derived from
+the *current* (not original) legacy shape — several carriers' constraints drifted
+across multiple migrations since they were first created (`listing_description_
+enrichments`'s unique widened from 2 to 3 columns in mig 249;
+`notification_dispatches.sreality_id` went NOT NULL→nullable and lost its unique
+guard entirely across migs 096/206/274) — verified fact-by-fact against `migrations/`
+before writing any DDL:
+1. A new unique index mirroring the legacy one, keyed on the surrogate column(s), for
+   the 12 carriers whose legacy column(s) carry a UNIQUE/PK today (declared
+   explicitly — which tables get a NEW invariant is a design decision, not something
+   to infer from the schema). 8 of those promote to a named `UNIQUE` constraint via
+   `ADD CONSTRAINT ... USING INDEX`; the 4 pair caches (`listing_{image_comparisons,
+   visual,floor_plan,site_plan}_matches`) key on `(LEAST(a,b), GREATEST(a,b)[,
+   discriminators])` per §0.5 and stay **index-only forever** — Postgres's `USING
+   INDEX` promotion explicitly refuses expression indexes, so there is no constraint
+   form to promote to; the plain unique index alone is sufficient for both
+   enforcement and Phase C's `ON CONFLICT` arbiter inference. The 4 pair tables are
+   NOT uniform: `listing_image_comparisons` has no discriminator at all (a `model`
+   column exists but was never in its unique key), `listing_visual_matches` has two
+   (`room_type`, `model`), the other two have one (`model`).
+2. A validated `CHECK (col IS NOT NULL)` (the mig-313 trick) on every `R2_CARRIERS`
+   column whose legacy sibling is itself NOT NULL — derived live per-column via
+   `pg_attribute` (mirrors Phase B's `_legacy_has_fk`), so it automatically covers
+   the full registry with no second hand-maintained list to drift. Net effect: 13 of
+   the 22 carriers get one; the 3 hot-ingest children (`images`, `listing_snapshots`,
+   `listing_videos`) and the fully-nullable Class B ledgers (`dedup_pair_audit`,
+   `notification_dispatches`, `estimation_runs`, `building_runs`, `properties.repr`,
+   `property_notes.origin`) never had a NOT NULL legacy column and correctly get none.
 
 ## 0. What the review corrected (read this first)
 

@@ -131,6 +131,48 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/apply_r2_constraints.yml"
   },
   {
+    "filename": "apply_r2_unique_guards.yml",
+    "name": "Apply R2 unique guards (indexes + NOT NULL checks)",
+    "description": "Phase B2 of the listing-identity refactor (docs/design/listing-identity-r2-pk-swap-runbook.md § 3, items 4-5). Builds new unique indexes on the surrogate listing_id column(s) alongside the still-live legacy sreality_id-keyed ones, then adds a validated CHECK (listing_id IS NOT NULL) wherever the legacy column is itself NOT NULL.",
+    "portal": null,
+    "manual": true,
+    "schedules": [],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "table",
+        "description": "Single carrier table (blank = all)",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "dry_run",
+        "description": "Report what each guard still needs and exit",
+        "required": false,
+        "type": "choice",
+        "default": "false",
+        "options": [
+          "false",
+          "true"
+        ]
+      }
+    ],
+    "secrets": [
+      "SUPABASE_DB_SESSION_URL",
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "apply-r2-unique-guards",
+    "cancelInProgress": false,
+    "timeoutMinutes": 180,
+    "permissions": "contents: read",
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/apply_r2_unique_guards.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/apply_r2_unique_guards.yml"
+  },
+  {
     "filename": "backfill_bazos_coords.yml",
     "name": "Backfill bazos coordinates (street geocode)",
     "description": "One-off, dispatch-only backfill. Re-places active bazos listings that are stuck on the shared maps-link pin (coords.source='link') and carry an extractable street: re-parses each from its already-staged detail HTML (portal_raw_pages, NO re-fetch of bazos) with the migration-406 parser fix + a cached Mapy.cz geocoder, and updates geom + locality in place where the street geocode is precise. Idempotent + resumable (each row stamped coords.reparsed); rerun until \"pending=0\". NOT a portal ingest workflow, so it carries no `# portal:` tag.",
