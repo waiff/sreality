@@ -203,7 +203,7 @@ def test_ingest_enqueues_broker_work_for_idnes(monkeypatch):
 
     assert pk == -9 and result == "new"
     enq = _find(conn.executed, "INSERT INTO dirty_broker_listings")
-    assert enq is not None and enq[1] == (-9,)
+    assert enq is not None and enq[1] == (-9, -9)
 
 
 def test_ingest_skips_broker_enqueue_for_non_broker_source(monkeypatch):
