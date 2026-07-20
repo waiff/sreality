@@ -11,6 +11,7 @@ import { usePageTitle } from '@/lib/pageTitle';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   fetchListingById,
+  fetchListingIdByNaturalKey,
   fetchPropertyReprId,
   fetchPropertySources,
   fetchPropertyMf,
@@ -49,7 +50,7 @@ import { portalShort, srealityListingUrl } from '@/lib/portals';
 import ErrorBoundary from '@/components/ErrorBoundary';
 import { ListingOverview } from '@/components/listing-detail/ListingOverview';
 import PipelineToggle from '@/components/listing-detail/PipelineToggle';
-import { listingPath } from '@/lib/listingUrl';
+import { listingPath, listingCanonicalPath } from '@/lib/listingUrl';
 
 const PriceLineChart = lazy(
   () => import('@/components/listing-detail/PriceLineChart'),
@@ -65,17 +66,32 @@ const EstimationsBlock = lazy(
 );
 
 export default function ListingDetail() {
-  const { sreality_id: idParam } = useParams();
+  const { sreality_id: idParam, source: natSourceParam, nativeId: natIdParam } =
+    useParams();
   const location = useLocation();
   const navigate = useNavigate();
-  // sreality_id is negative for non-sreality portals (synthetic id seq, migration 097)
-  const sid = idParam && /^-?\d+$/.test(idParam) ? Number(idParam) : null;
+
+  // Legacy/resolver route /listing/{id}: sreality_id is negative for non-sreality
+  // portals (synthetic id seq, migration 097). Kept forever (deep links, bookmarks).
+  const legacyId = idParam && /^-?\d+$/.test(idParam) ? Number(idParam) : null;
+
+  // Canonical route /listing/{source}/{native}: resolve the natural key
+  // (migration 091) to the listing's sreality_id, then reuse the id-keyed loaders.
+  const natKeyQ = useQuery<number | null, Error>({
+    queryKey: ['listing-natkey', natSourceParam, natIdParam],
+    queryFn: () =>
+      fetchListingIdByNaturalKey(natSourceParam as string, natIdParam as string),
+    enabled: !!natSourceParam && !!natIdParam,
+    staleTime: 60_000,
+  });
+  const sid = legacyId ?? natKeyQ.data ?? null;
 
   // /listing?property=ID (the dedup merge feed links this) → resolve the
-  // property's representative listing and redirect to /listing/{reprId}.
+  // property's representative listing and redirect to its detail page. Only when
+  // neither the legacy nor the canonical route matched.
   const propertyParam = new URLSearchParams(location.search).get('property');
   const propertyId =
-    sid == null && propertyParam && /^\d+$/.test(propertyParam)
+    legacyId == null && !natSourceParam && propertyParam && /^\d+$/.test(propertyParam)
       ? Number(propertyParam)
       : null;
   const reprQ = useQuery<number | null, Error>({
@@ -103,6 +119,31 @@ export default function ListingDetail() {
     enabled: sid != null && !!listingQ.data,
     staleTime: 60_000,
   });
+
+  // Canonicalize the legacy numeric route to /listing/{source}/{native} once the
+  // listing + its sources load, so the negative synthetic id disappears from the
+  // URL bar. Query string + hash are preserved (?run= / #anchor deep links). Only
+  // from the legacy route, and only when the natural key is known — a NULL one
+  // (a pre-migration-314 straggler) simply stays on the still-valid legacy URL.
+  const canonicalNative = (sourcesQ.data?.sources ?? []).find(
+    (s) => s.sreality_id === listingQ.data?.sreality_id,
+  )?.source_id_native;
+  useLayoutEffect(() => {
+    if (legacyId == null || !listingQ.data || !canonicalNative) return;
+    navigate(
+      listingCanonicalPath(listingQ.data.source, canonicalNative) +
+        location.search +
+        location.hash,
+      { replace: true },
+    );
+  }, [
+    legacyId,
+    listingQ.data,
+    canonicalNative,
+    location.search,
+    location.hash,
+    navigate,
+  ]);
 
   // PROPERTY-grain MF (the golden record): the one figure for the real-world
   // property, so the header shows the same MF whichever portal's advert opened
@@ -202,10 +243,14 @@ export default function ListingDetail() {
   );
 
   if (sid == null) {
-    // Resolving ?property=ID → redirect (handled by the effect above). Show a
-    // loading state while it resolves; only "not found" if there's no such
-    // property (or the param was neither a sreality id nor a property id).
-    if (propertyId != null && (reprQ.isLoading || reprQ.data != null)) {
+    // Resolving ?property=ID → redirect, or resolving the canonical
+    // /listing/{source}/{native} natural key → sreality_id (both handled above).
+    // Show a loading state while either resolves; only "not found" once we know
+    // there's no such property/listing.
+    const resolvingProperty =
+      propertyId != null && (reprQ.isLoading || reprQ.data != null);
+    const resolvingNatural = !!natSourceParam && !!natIdParam && natKeyQ.isLoading;
+    if (resolvingProperty || resolvingNatural) {
       return (
         <Page>
           <Crumb />
@@ -213,7 +258,7 @@ export default function ListingDetail() {
         </Page>
       );
     }
-    return <NoListingState id={idParam ?? propertyParam} reason="invalid" />;
+    return <NoListingState id={idParam ?? natIdParam ?? propertyParam} reason="invalid" />;
   }
 
   if (listingQ.isLoading) {
