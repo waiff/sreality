@@ -35,8 +35,16 @@ Run as ONE committed track; valueless half-done. Phases and their gates are spec
   backfill script + dispatch workflow. Order is load-bearing: backfilling before
   dual-write ships can never converge against the always-on worker. The backfill itself
   still has to be run to convergence.
-- **Phase B** — `CREATE INDEX CONCURRENTLY`, FK `NOT VALID` → `VALIDATE` (images is
-  8.08M rows), new unique guards alongside the old, per-child validated NOT NULL CHECK.
+- **Phase B** (✅ shipped 2026-07-20, PRs #837/#838/#839) — `CREATE INDEX CONCURRENTLY`,
+  FK `NOT VALID` → `VALIDATE` (images is 8.08M rows; #838 added `DeadlockDetected` to the
+  retry set alongside `LockNotAvailable` — the ingest path locks child+`listings` in the
+  opposite order). New unique guards alongside the old: 8 carriers promote to a named
+  `UNIQUE` constraint, the 4 pair caches key on `(LEAST(a,b), GREATEST(a,b)[, disc])` and
+  stay index-only forever (Postgres refuses to promote an expression index to a named
+  constraint). 17 per-child validated NOT NULL CHECKs, derived live from which legacy
+  columns are themselves NOT NULL. All verified live: 20 FKs + 8 unique constraints + 4
+  pair indexes + 17 checks, zero left unvalidated anywhere but two unrelated pre-existing
+  ones.
 - **Phase C** — writer `ON CONFLICT` retargets + the remaining read cutover (frontend
   resolver chain, browse hydration, dedup `ListingKey` + pair caches, merge/unmerge
   replay, notification producers, `image_key()`, the sreality_id-cursored maintenance
