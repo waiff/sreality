@@ -1,0 +1,68 @@
+name: Apply R2 constraints (indexes + FKs)
+
+# Phase B of the listing-identity refactor
+# (docs/design/listing-identity-r2-pk-swap-runbook.md § 3). Indexes each surrogate
+# column the backfill filled, then mirrors the legacy FK onto it (NOT VALID ->
+# VALIDATE) wherever the legacy column had one.
+#
+# Runs only AFTER the backfill has converged — VALIDATE hard-fails on any row whose
+# surrogate is missing or unresolvable.
+#
+# Dispatch-only, own concurrency group, idempotent: every step checks for its own
+# result first, so a killed run resumes rather than redoing work. A CONCURRENTLY
+# build killed mid-flight leaves an INVALID index, which the script detects and
+# rebuilds instead of trusting.
+#
+# Required secrets: SUPABASE_DB_URL, SUPABASE_DB_SESSION_URL (session pooler — the
+# 8.08M-row images index build and its FK validation are far past the transaction
+# pooler's ~2 minute cap).
+
+on:
+  workflow_dispatch:
+    inputs:
+      table:
+        description: Single carrier table (blank = all)
+        required: false
+        default: ""
+        type: string
+      dry_run:
+        description: Report what each column still needs and exit
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+concurrency:
+  group: apply-r2-constraints
+  cancel-in-progress: false
+
+jobs:
+  constraints:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    permissions:
+      contents: read
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      SUPABASE_DB_SESSION_URL: ${{ secrets.SUPABASE_DB_SESSION_URL }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: pip install -e .
+
+      - name: Apply R2 constraints
+        run: |
+          set -o pipefail
+          ARGS=""
+          if [ -n "${{ inputs.table }}" ]; then ARGS="$ARGS --table ${{ inputs.table }}"; fi
+          if [ "${{ inputs.dry_run }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
+          python -m scripts.apply_r2_constraints $ARGS 2>&1
