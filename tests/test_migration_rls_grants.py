@@ -18,6 +18,9 @@ architecture rule #1, so older migrations are never rewritten):
      table reachable). Escape hatch: `-- ci-allow-no-rls: <table> <reason>`.
   4. No migration re-grants the Amendment-A6 broker-directory PII surfaces to a
      browser role before Wave 4 masks them (they were revoked in migration 299).
+  5. No migration creates a view/function that reads admin-only operational data
+     without embedding `is_platform_admin()` (migrations 318/332). Enforced from
+     MIN_VIEW_GATE. Escape hatch: `-- ci-allow-ungated: <name> <reason>`.
 
 Live cross-tenant / effective-grant verification lands in the TEST_DATABASE_URL
 lane (tests/test_tenant_isolation_live.py), which this composes with.
@@ -32,6 +35,10 @@ MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "migrations"
 # Migrations 286-298 legitimately grant `authenticated` DML on tenant tables and
 # predate the gate, so enforcement starts at 299.
 MIN_ENFORCED = 299
+# Rule 5 starts after the remediation batch that established the posture
+# (329-332); 318's own 26 objects predate it and are covered by the enumerated
+# lists in the live lane.
+MIN_VIEW_GATE = 333
 
 _WRITE_PRIVS = {"insert", "update", "delete", "truncate", "all", "all privileges"}
 # `public` is included because anon/authenticated INHERIT every grant made to PUBLIC
@@ -164,6 +171,64 @@ def _rls_enabled_tables(sql: str) -> set[str]:
 
 def _rls_exempt_tables(sql: str) -> set[str]:
     return {m.group(1) for m in re.finditer(r"--\s*ci-allow-no-rls:\s*([a-z0-9_]+)", sql.lower())}
+
+
+# Admin-only operational relations. MIRRORS tests/test_tenant_isolation_live.py::
+# _ADMIN_ONLY_RELATIONS — add a new admin table/matview to BOTH. listings/
+# properties/images are deliberately absent (shared-market data behind many
+# legitimately open views); see that file for the full reasoning.
+_ADMIN_ONLY_RELATIONS = frozenset({
+    "dedup_engine_runs", "dedup_scan_state", "dedup_vision_bakeoff_results",
+    "dedup_decision_feedback", "property_identity_candidates", "property_merge_events",
+    "listing_detail_queue", "listing_fetch_failures", "detail_queue_completions",
+    "llm_calls", "parsed_url_cache", "phash_pair_notes", "pipeline_check_results",
+    "image_border_cases", "image_tag_annotations", "image_training_examples",
+    "workflow_failures", "workflow_run_health",
+    "health_summary_mv", "portal_health_mv", "scraper_health_checks_mv",
+    "category_trends_mv", "image_storage_overview_mv", "snapshot_churn_24h_mv",
+    "dedup_funnel_resolutions_mv", "dedup_llm_cost_by_category_mv",
+    "images_failure_overview_mv",
+})
+
+_CREATE_GATED_OBJ = re.compile(
+    r"create (?:or replace )?(?:materialized )?(?:view|function) "
+    r'(?:if not exists )?(?:public\.)?"?([a-z0-9_]+)"?',
+)
+
+
+def _ungated_admin_objects(sql: str) -> list[str]:
+    """Views/functions created over admin-only data with no is_platform_admin()."""
+    exempt = {m.group(1) for m in re.finditer(r"--\s*ci-allow-ungated:\s*([a-z0-9_]+)", sql.lower())}
+    out: list[str] = []
+    for stmt in _statements(_strip_comments(sql)):
+        low = re.sub(r"\s+", " ", stmt.lower()).strip()
+        m = _CREATE_GATED_OBJ.match(low)
+        if not m or m.group(1) in exempt:
+            continue
+        if "is_platform_admin()" in low:
+            continue
+        reads = sorted(
+            t for t in _ADMIN_ONLY_RELATIONS
+            if re.search(rf"\b{re.escape(t)}\b", low)
+        )
+        if reads:
+            out.append(f"{m.group(1)} reads {', '.join(reads)}")
+    return out
+
+
+def test_new_admin_objects_embed_the_gate():
+    offenders = [
+        f"  {p.name}: {o}"
+        for p in _enforced_migrations()
+        if (n := _migration_number(p)) is not None and n >= MIN_VIEW_GATE
+        for o in _ungated_admin_objects(p.read_text(encoding="utf-8"))
+    ]
+    assert not offenders, (
+        "view/function(s) read admin-only operational data with no "
+        "is_platform_admin() gate — any signed-in non-admin could read them over "
+        "supabase-js (SPA route-gating is not a security boundary). Add the gate, "
+        "or annotate `-- ci-allow-ungated: <name> <why>`:\n" + "\n".join(offenders)
+    )
 
 
 def test_no_write_grants_to_browser_roles():

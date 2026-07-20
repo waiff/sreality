@@ -15,6 +15,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import uuid
 from collections.abc import Iterator
 from typing import Any
@@ -55,6 +56,42 @@ _TENANT_VIEWS: list[str] = [
 # which is deny-all under invoker rights, so flipping them silently returns zero
 # rows to every caller instead of scoping anything.
 _MARKET_VIEWS: list[str] = ["property_estimates_public"]
+
+# Base relations + matviews that hold admin-only operational data. Any view (or
+# function an authenticated caller can EXECUTE) that reads one of these must embed
+# is_platform_admin() — enforced generically by
+# test_no_ungated_relation_reads_admin_only_data, so a NEW admin surface is caught
+# without anyone remembering to enumerate it.
+#
+# Deliberately EXCLUDED: listings / properties / images. Those are shared-market
+# data read by many legitimately open views (listings_public, properties_public,
+# browse_*, price_stat_*), so listing them would force a large, churny allowlist
+# and train people to add entries reflexively. The residual blind spot — an
+# admin-only aggregate over ONLY those tables, e.g. data_quality_by_source or
+# publication_gate_health_public — stays covered by the enumerated lists below.
+# Tenant tables are excluded too: they are scoped by RLS + security_invoker, a
+# different mechanism with its own tests.
+_ADMIN_ONLY_RELATIONS: list[str] = [
+    "dedup_engine_runs", "dedup_scan_state", "dedup_vision_bakeoff_results",
+    "dedup_decision_feedback", "property_identity_candidates", "property_merge_events",
+    "listing_detail_queue", "listing_fetch_failures", "detail_queue_completions",
+    "llm_calls", "parsed_url_cache", "phash_pair_notes", "pipeline_check_results",
+    "image_border_cases", "image_tag_annotations", "image_training_examples",
+    "workflow_failures", "workflow_run_health",
+    "health_summary_mv", "portal_health_mv", "scraper_health_checks_mv",
+    "category_trends_mv", "image_storage_overview_mv", "snapshot_churn_24h_mv",
+    "dedup_funnel_resolutions_mv", "dedup_llm_cost_by_category_mv",
+    "images_failure_overview_mv",
+]
+
+# Relations that read the above but are legitimately reachable without the gate.
+# EVERY entry needs a comment justifying it — an unexplained name here is how this
+# class of bug comes back.
+_ADMIN_GATE_ALLOWLIST: list[str] = [
+    # The pg_cron refresher itself: SECURITY DEFINER, not executable by a browser
+    # role, and it must run without a JWT context to rebuild the health matviews.
+    "refresh_health_matviews",
+]
 
 # The 19 user-state tables migrations 290-294 (+ entitlements, 298) scope per account.
 _TENANT_TABLES: list[str] = [
@@ -302,43 +339,117 @@ def test_admin_gate_opens_for_service_but_not_role_switch(svc: Any) -> None:
         conn.close()
 
 
-def test_cross_tenant_denial_through_public_view(
+@pytest.fixture(scope="module")
+def seeded_tenant_rows(
     svc: Any, tenants: dict[str, uuid.UUID],
-) -> None:
-    """The base-table test above (test_cross_tenant_denial) doesn't reproduce
-    what the SPA actually does: it never queries `collections` directly, only
-    `collections_public`. A security-definer-ish view (no security_invoker)
-    would pass the base-table test while still leaking every row through the
-    view — exactly the live bug migration 316 fixed (found 2026-07-20)."""
-    name = f"iso-view-{uuid.uuid4().hex}"
+) -> "Iterator[dict[str, tuple[str, tuple[Any, ...]]]]":
+    """One row per tenant view, all owned by account A, each findable by a filter
+    the view actually exposes. Seeded as `svc` (the owner, so RLS never blocks
+    setup); torn down children-first."""
+    nonce = uuid.uuid4().hex[:12]
+    a_acc = tenants["a_acc"]
+    where: dict[str, tuple[str, tuple[Any, ...]]] = {}
+    cleanup: list[tuple[str, tuple[Any, ...]]] = []
     with svc.cursor() as cur:
+        # property_pipeline holds at most one card per property, so it gets its own.
+        cur.execute("INSERT INTO properties DEFAULT VALUES RETURNING id")
+        prop = cur.fetchone()[0]
+        cur.execute("INSERT INTO properties DEFAULT VALUES RETURNING id")
+        prop_pipe = cur.fetchone()[0]
+
         cur.execute(
             "INSERT INTO collections (account_id, name) VALUES (%s, %s) RETURNING id",
-            (tenants["a_acc"], name),
+            (a_acc, nonce),
         )
-        coll_id = cur.fetchone()[0]
+        coll = cur.fetchone()[0]
+        cleanup.append(("DELETE FROM collections WHERE id = %s", (coll,)))
+        where["collections_public"] = ("name = %s", (nonce,))
+
+        cur.execute(
+            "INSERT INTO tags (account_id, name, color) VALUES (%s, %s, '#ffffff') RETURNING id",
+            (a_acc, nonce),
+        )
+        tag = cur.fetchone()[0]
+        cleanup.append(("DELETE FROM tags WHERE id = %s", (tag,)))
+        where["tags_public"] = ("name = %s", (nonce,))
+
+        cur.execute(
+            "INSERT INTO property_notes (account_id, property_id, body) VALUES (%s, %s, %s)",
+            (a_acc, prop, nonce),
+        )
+        cleanup.insert(0, ("DELETE FROM property_notes WHERE body = %s", (nonce,)))
+        where["property_notes_public"] = ("body = %s", (nonce,))
+
+        # No text column on this view — filter on the id pair instead.
+        cur.execute(
+            "INSERT INTO property_tags (account_id, property_id, tag_id) VALUES (%s, %s, %s)",
+            (a_acc, prop, tag),
+        )
+        cleanup.insert(0, ("DELETE FROM property_tags WHERE tag_id = %s", (tag,)))
+        where["property_tags_public"] = ("property_id = %s AND tag_id = %s", (prop, tag))
+
+        cur.execute(
+            "INSERT INTO collection_properties (account_id, collection_id, property_id) "
+            "VALUES (%s, %s, %s)",
+            (a_acc, coll, prop),
+        )
+        cleanup.insert(0, ("DELETE FROM collection_properties WHERE collection_id = %s", (coll,)))
+        where["collection_properties_public"] = ("collection_id = %s", (coll,))
+
+        # A fresh account has no stages; a lone non-entry/non-terminal stage satisfies
+        # both column CHECKs (the entry/terminal invariants are API-enforced, not DB).
+        # The view filters archived_at IS NULL, so leave it NULL.
+        cur.execute(
+            "INSERT INTO pipeline_stages (account_id, key, label, position) "
+            "VALUES (%s, %s, 'iso', 1) RETURNING id",
+            (a_acc, nonce),
+        )
+        stage = cur.fetchone()[0]
+        cleanup.append(("DELETE FROM pipeline_stages WHERE id = %s", (stage,)))
+        where["pipeline_stages_public"] = ("key = %s", (nonce,))
+
+        cur.execute(
+            "INSERT INTO property_pipeline (account_id, property_id, stage_id) VALUES (%s, %s, %s)",
+            (a_acc, prop_pipe, stage),
+        )
+        cleanup.insert(0, ("DELETE FROM property_pipeline WHERE property_id = %s", (prop_pipe,)))
+        where["property_pipeline_public"] = ("property_id = %s", (prop_pipe,))
     try:
-        with _scoped(tenants["b_user"]) as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT * FROM collections_public WHERE name = %s", (name,),
-                )
-                assert cur.fetchall() == [], (
-                    "tenant B must not see tenant A's collection through "
-                    "collections_public"
-                )
-        with _scoped(tenants["a_user"]) as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT * FROM collections_public WHERE name = %s", (name,),
-                )
-                assert len(cur.fetchall()) == 1, (
-                    "tenant A must see their own collection through "
-                    "collections_public"
-                )
+        yield where
     finally:
         with svc.cursor() as cur:
-            cur.execute("DELETE FROM collections WHERE id = %s", (coll_id,))
+            for sql, params in cleanup:
+                cur.execute(sql, params)
+            cur.execute("DELETE FROM properties WHERE id IN (%s, %s)", (prop, prop_pipe))
+
+
+@pytest.mark.parametrize("view", _TENANT_VIEWS)
+def test_tenant_view_scopes_both_ways(
+    tenants: dict[str, uuid.UUID],
+    seeded_tenant_rows: dict[str, tuple[str, tuple[Any, ...]]],
+    view: str,
+) -> None:
+    """Every SPA-facing tenant view, both directions: tenant B must not see tenant
+    A's row, and tenant A MUST see it.
+
+    The positive half is the half that was missing. `test_tenant_views_are_security_invoker`
+    checks the reloption but cannot tell a correctly-scoped view from one that
+    returns zero rows to everybody — which is exactly what migration 316 shipped
+    for `property_estimates_public`. A parameterized read-your-own-row assertion
+    would have failed CI on that PR instead of reaching production."""
+    clause, params = seeded_tenant_rows[view]
+    sql = f"SELECT * FROM {view} WHERE {clause}"  # noqa: S608 - fixed view list
+    with _scoped(tenants["b_user"]) as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            assert cur.fetchall() == [], f"tenant B saw tenant A's row through {view}"
+    with _scoped(tenants["a_user"]) as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            assert len(cur.fetchall()) == 1, (
+                f"tenant A cannot see their OWN row through {view} — the view is "
+                f"not scoped, it is broken (this is the migration 316 failure mode)"
+            )
 
 
 # Migration 318: admin-only operational views/functions the SPA reads directly
@@ -366,12 +477,22 @@ _ADMIN_GATED_FUNCTIONS: list[str] = [
 ]
 
 
+# The gate must sit in a boolean/WHERE position, not merely appear somewhere in the
+# definition: `true OR is_platform_admin()`, or the call moved into the SELECT list
+# as an `is_admin` column, would both contain the substring while gating nothing.
+_GATE_IN_PREDICATE = re.compile(r"where[^;]*is_platform_admin\(\)", re.IGNORECASE | re.DOTALL)
+
+
 def test_admin_ops_views_embed_is_platform_admin(svc: Any) -> None:
+    """Cheap structural guard against the gate being dropped or moved out of the
+    WHERE clause. It is NOT authoritative — a definition can satisfy this regex and
+    still not gate rows. `test_admin_ops_views_deny_non_admin_allow_admin` is the
+    test that actually proves the binding; keep both."""
     with svc.cursor() as cur:
         missing = []
         for name in _ADMIN_GATED_VIEWS:
             cur.execute("SELECT pg_get_viewdef(%s::regclass, true)", (f"public.{name}",))
-            if "is_platform_admin()" not in cur.fetchone()[0]:
+            if not _GATE_IN_PREDICATE.search(cur.fetchone()[0]):
                 missing.append(name)
         for name in _ADMIN_GATED_FUNCTIONS:
             cur.execute(
@@ -379,28 +500,73 @@ def test_admin_ops_views_embed_is_platform_admin(svc: Any) -> None:
                 "WHERE proname = %s AND pronamespace = 'public'::regnamespace",
                 (name,),
             )
-            if "is_platform_admin()" not in cur.fetchone()[0]:
+            if not _GATE_IN_PREDICATE.search(cur.fetchone()[0]):
                 missing.append(name)
     assert not missing, (
-        f"admin-ops view/function(s) lost their is_platform_admin() gate -- any "
-        f"authenticated caller (not just the admin) can read them again: {missing}"
+        f"admin-ops view/function(s) have no is_platform_admin() call in a WHERE "
+        f"position -- any authenticated caller (not just the admin) may be able to "
+        f"read them again: {missing}"
+    )
+
+
+def test_no_ungated_relation_reads_admin_only_data(svc: Any) -> None:
+    """The standing gate: any view or authenticated-callable function reading an
+    admin-only relation must embed is_platform_admin() or be explicitly allowlisted.
+
+    Unlike the enumerated lists above, this generalises — admin view #27, added next
+    month, is caught without anyone remembering to register it. That is the gap the
+    original review flagged: migration 316's bug class survived for months precisely
+    because nothing scanned for it, and migration 318's own triage then missed five
+    SECURITY INVOKER health RPCs (fixed in 332) for the same reason.
+
+    `listings`/`properties`/`images` are deliberately NOT sensitive here: they are
+    shared-market data read by many legitimately open views, so including them would
+    force a large churny allowlist. Admin aggregates over only those tables are the
+    known blind spot, still covered by the enumerated lists."""
+    with svc.cursor() as cur:
+        cur.execute(
+            "SELECT c.relname, 'view' FROM pg_class c "
+            "JOIN pg_namespace n ON n.oid = c.relnamespace "
+            "WHERE n.nspname = 'public' AND c.relkind = 'v' "
+            "  AND EXISTS (SELECT 1 FROM unnest(%s::text[]) t "
+            "              WHERE pg_get_viewdef(c.oid) ~ ('\\m' || t || '\\M')) "
+            "  AND pg_get_viewdef(c.oid) NOT LIKE '%%is_platform_admin()%%' "
+            "  AND NOT (c.relname = ANY(%s)) "
+            "UNION ALL "
+            "SELECT p.proname, 'function' FROM pg_proc p "
+            "JOIN pg_namespace n ON n.oid = p.pronamespace "
+            "WHERE n.nspname = 'public' "
+            "  AND has_function_privilege('authenticated', p.oid, 'EXECUTE') "
+            "  AND EXISTS (SELECT 1 FROM unnest(%s::text[]) t "
+            "              WHERE p.prosrc ~ ('\\m' || t || '\\M')) "
+            "  AND p.prosrc NOT LIKE '%%is_platform_admin()%%' "
+            "  AND NOT (p.proname = ANY(%s)) "
+            "ORDER BY 1",
+            (_ADMIN_ONLY_RELATIONS, _ADMIN_GATE_ALLOWLIST,
+             _ADMIN_ONLY_RELATIONS, _ADMIN_GATE_ALLOWLIST),
+        )
+        ungated = [f"{kind} {name}" for name, kind in cur.fetchall()]
+    assert ungated == [], (
+        f"relation(s) read admin-only data without an is_platform_admin() gate, so "
+        f"any signed-in non-admin can read them over supabase-js (SPA route-gating "
+        f"is not a security boundary). Add the gate, or add an entry to "
+        f"_ADMIN_GATE_ALLOWLIST with a comment justifying why it is safe: {ungated}"
     )
 
 
 def test_admin_ops_views_deny_non_admin_allow_admin(
     svc: Any, tenants: dict[str, uuid.UUID],
 ) -> None:
-    """Live proof the gate actually binds: tenant A (an ordinary account, not
-    admin) sees zero rows through every admin-gated view/function; promoting
-    that same user to `admins` makes them see through it (may still be zero
-    rows if the table itself is empty in this schema-replay DB -- the point is
-    no permission/relation error, not a specific count).
-
-    Three objects (dedup_funnel_resolutions_public, dedup_llm_cost_by_category_public,
-    images_failure_overview()) wrap a materialized view that a fresh schema-replay
-    never refreshes (production refreshes all three on a cron) -- querying an
-    unrefreshed matview errors regardless of caller, so refresh them here to match
-    production instead of asserting on that unrelated failure mode."""
+    """Live proof the gate actually binds: tenant A (an ordinary account, not admin)
+   sees zero rows through every admin-gated view/function; promoting that same user
+   to `admins` makes them see through it (may still be zero rows if the table itself
+   is empty in this schema-replay DB -- the point is no permission/relation error,
+   not a specific count). Three objects (dedup_funnel_resolutions_public,
+   dedup_llm_cost_by_category_public, images_failure_overview()) wrap a materialized
+   view that a fresh schema-replay never refreshes (production refreshes all three
+   on a cron) -- querying an unrefreshed matview errors regardless of caller, so
+   refresh them here to match production instead of asserting on that unrelated
+   failure mode."""
     with svc.cursor() as cur:
         cur.execute("REFRESH MATERIALIZED VIEW dedup_funnel_resolutions_mv")
         cur.execute("REFRESH MATERIALIZED VIEW dedup_llm_cost_by_category_mv")
