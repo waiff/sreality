@@ -131,6 +131,40 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/apply_r2_constraints.yml"
   },
   {
+    "filename": "apply_r2_phase_d_prep.yml",
+    "name": "Apply R2 Phase D prep (NOT NULL relax, small PK swaps, listings indexes)",
+    "description": "Phase D of the listing-identity refactor (docs/design/listing-identity-r2-pk-swap-runbook.md § 5, steps 2-5). Drops NOT NULL on every R2_CARRIERS legacy column still enforcing it, swaps estimation_cohort_entries's PK onto (estimation_run_id, listing_id), and pre-builds the two indexes + id NOT NULL that Gate 1's PK swap on `listings` itself will need. All additive/reversible — no writer-deploy dependency (see scripts/apply_r2_phase_d_prep.py's docstring for why dirty_broker_listings is NOT included here).",
+    "portal": null,
+    "manual": true,
+    "schedules": [],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "dry_run",
+        "description": "Report what each step still needs and exit",
+        "required": false,
+        "type": "choice",
+        "default": "false",
+        "options": [
+          "false",
+          "true"
+        ]
+      }
+    ],
+    "secrets": [
+      "SUPABASE_DB_SESSION_URL",
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "apply-r2-phase-d-prep",
+    "cancelInProgress": false,
+    "timeoutMinutes": 180,
+    "permissions": "contents: read",
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/apply_r2_phase_d_prep.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/apply_r2_phase_d_prep.yml"
+  },
+  {
     "filename": "apply_r2_unique_guards.yml",
     "name": "Apply R2 unique guards (indexes + NOT NULL checks)",
     "description": "Phase B2 of the listing-identity refactor (docs/design/listing-identity-r2-pk-swap-runbook.md § 3, items 4-5). Builds new unique indexes on the surrogate listing_id column(s) alongside the still-live legacy sreality_id-keyed ones, then adds a validated CHECK (listing_id IS NOT NULL) wherever the legacy column is itself NOT NULL.",
@@ -1897,6 +1931,40 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "permissions": null,
     "runsUrl": "https://github.com/waiff/sreality/actions/workflows/docs-budget.yml",
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/docs-budget.yml"
+  },
+  {
+    "filename": "drop_r2_legacy_fks.yml",
+    "name": "Drop R2 legacy child FKs",
+    "description": "Phase D step 6 of the listing-identity refactor (docs/design/listing-identity-r2-pk-swap-runbook.md § 5, item 6). Drops the legacy child FKs onto listings(sreality_id) — integrity is already held by the parallel listing_id -> listings(id) FKs Phase B validated. Not gate-destructive: re-addable any time (NOT VALID -> VALIDATE).",
+    "portal": null,
+    "manual": true,
+    "schedules": [],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "dry_run",
+        "description": "List what would be dropped and exit",
+        "required": false,
+        "type": "choice",
+        "default": "false",
+        "options": [
+          "false",
+          "true"
+        ]
+      }
+    ],
+    "secrets": [
+      "SUPABASE_DB_SESSION_URL",
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "drop-r2-legacy-fks",
+    "cancelInProgress": false,
+    "timeoutMinutes": 180,
+    "permissions": "contents: read",
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/drop_r2_legacy_fks.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/drop_r2_legacy_fks.yml"
   },
   {
     "filename": "embedding_ab.yml",

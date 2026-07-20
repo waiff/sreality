@@ -1,0 +1,59 @@
+name: Drop R2 legacy child FKs
+
+# Phase D step 6 of the listing-identity refactor
+# (docs/design/listing-identity-r2-pk-swap-runbook.md § 5, item 6). Drops the
+# legacy child FKs onto listings(sreality_id) — integrity is already held by the
+# parallel listing_id -> listings(id) FKs Phase B validated. Not gate-destructive:
+# re-addable any time (NOT VALID -> VALIDATE).
+#
+# Dispatch-only, own concurrency group, idempotent: re-running finds fewer (or
+# zero) legacy FKs left and just drops what remains.
+#
+# Required secrets: SUPABASE_DB_URL, SUPABASE_DB_SESSION_URL (session pooler — each
+# DROP CONSTRAINT takes ACCESS EXCLUSIVE and retries against the always-on
+# writer; the transaction pooler's ~2 minute cap is the wrong fit for a retry loop
+# that intentionally waits between attempts).
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: List what would be dropped and exit
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+concurrency:
+  group: drop-r2-legacy-fks
+  cancel-in-progress: false
+
+jobs:
+  drop-legacy-fks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    permissions:
+      contents: read
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      SUPABASE_DB_SESSION_URL: ${{ secrets.SUPABASE_DB_SESSION_URL }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: pip install -e .
+
+      - name: Drop R2 legacy FKs
+        run: |
+          set -o pipefail
+          ARGS=""
+          if [ "${{ inputs.dry_run }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
+          python -m scripts.drop_r2_legacy_fks $ARGS 2>&1
