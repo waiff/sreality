@@ -483,6 +483,11 @@ def test_anon_holds_no_relation_grants(svc: Any) -> None:
             "JOIN pg_namespace n ON n.oid = c.relnamespace "
             "WHERE n.nspname = 'public' AND c.relkind IN ('r','v','m','p') "
             "AND has_table_privilege('anon', c.oid, 'SELECT') "
+            # PostGIS lands geometry_columns/spatial_ref_sys in `public` on the CI
+            # image and grants them to PUBLIC; they are extension-owned, not ours.
+            "AND NOT EXISTS (SELECT 1 FROM pg_depend d "
+            "  WHERE d.classid = 'pg_class'::regclass AND d.objid = c.oid "
+            "  AND d.deptype = 'e') "
             "ORDER BY c.relname",
         )
         readable = [r[0] for r in cur.fetchall()]

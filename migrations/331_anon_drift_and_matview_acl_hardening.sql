@@ -105,7 +105,18 @@ begin
     join pg_namespace n on n.oid = c.relnamespace
    where n.nspname = 'public'
      and c.relkind in ('r', 'v', 'm', 'p')
-     and has_table_privilege('anon', c.oid, 'SELECT');
+     and has_table_privilege('anon', c.oid, 'SELECT')
+     -- PostGIS installs geometry_columns/spatial_ref_sys into `public` on the CI
+     -- image (Supabase keeps them in `extensions`) and grants them to PUBLIC, which
+     -- anon inherits. They are extension-owned, not ours to revoke — exclude any
+     -- relation an extension owns rather than asserting on someone else's objects.
+     and not exists (
+       select 1 from pg_depend d
+        where d.classid = 'pg_class'::regclass
+          and d.objid = c.oid
+          and d.deptype = 'e'
+     )
+  ;
   if array_length(v_anon, 1) is not null then
     raise exception 'anon can still SELECT: %', v_anon;
   end if;
