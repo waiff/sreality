@@ -8,18 +8,19 @@ common to all. Full plan, sequencing, and gates: `docs/design/public-release-pro
 
 ## Status
 
-- **Phase 0 (emergency hardening)** — **DB hardening applied live** 2026-07-13 (migration 299
-  via Supabase MCP): anon revoked to ~nothing, authenticated loses write on shared tables,
-  25 internal tables RLS-enabled, 8 dangerous DEFINER funcs locked, broker-PII surfaces (A6)
-  dark to `authenticated` too. **API hardening + the CI grant-gate are still NOT merged** —
-  PR #775 (`fix/phase0-anon-hardening`) has sat open since 2026-07-13, CI was green as of
-  that run but the branch is 7 days stale against main and needs a mergeability re-check.
-  Consequence: `require_token` on `main` today is still **fail-OPEN** (silently disables auth
-  if `API_TOKEN` is ever unset on Railway), `/docs` is still publicly enumerable, and `main`'s
-  `migrations/` directory is **missing files 299 + 301** that are already applied live (only
-  present on the PR branch) — the CI schema-replay lane is testing a laxer schema than
-  production actually has. **Top priority: get #775 rebased + merged** (confirm `API_TOKEN`
-  is set on Railway first, per the PR's own checklist).
+- **Phase 0 (emergency hardening)** — **fully shipped 2026-07-20.** DB hardening applied live
+  2026-07-13 (migration 299 via Supabase MCP): anon revoked to ~nothing, authenticated loses
+  write on shared tables, 25 internal tables RLS-enabled, 8 dangerous DEFINER funcs locked,
+  broker-PII surfaces (A6) dark to `authenticated` too. **PR #775 merged 2026-07-20** (after
+  7 days open, rebased cleanly onto main with zero conflicts) — `require_token` is now
+  fail-CLOSED (verified behavior-preserving first: the live API already 401s unauthenticated
+  requests, so `API_TOKEN` was already set on Railway), `/docs`/`/redoc`/`/openapi.json` are
+  hidden, and `tests/test_migration_rls_grants.py` (the anon-write-grant + RLS-on-new-tables
+  CI gate) is now enforced on every push to `main`. That merge surfaced one more gap the gate
+  itself caught: `dedup_model_compare_sets` (migration 304) had no RLS — closed same-day via
+  migration 317 (same pattern as 301), applied live and verified before pushing.
+  `migrations/299_*.sql` + `301_rls_dedup_golden_sets.sql` are now on `main` too, closing the
+  repo/live drift where CI's schema-replay was testing a laxer schema than production.
 - **Phase 1 (multi-tenant foundations)** — in progress.
   - Increment 1 ✅ — accounts/account_members/admins, `current_account_ids()` /
     `is_platform_admin()`, the on-signup handler, JWT verify (JWKS/ES256) (migrations
@@ -93,18 +94,14 @@ two fetch helpers exists in the app (grep-verified) — this was the only broken
 
 ## Next
 
-1. **Rebase + merge PR #775** (Phase 0 API hardening + CI grant-gate) — confirm `API_TOKEN` is
-   set on Railway first (its own checklist item), since the fail-closed change 503s the API if
-   it's missing. This also lands `migrations/299_*.sql` + `301_*.sql` on `main`, closing the
-   repo/live migrations-directory drift.
-2. **Triage the remaining ~26 non-`security_invoker` admin-ops views** + the 3 gap-in-function
+1. **Triage the remaining ~26 non-`security_invoker` admin-ops views** + the 3 gap-in-function
    DEFINER functions — decide per-surface: add `security_invoker` + an `is_platform_admin()`
    RLS policy, or move the SPA read behind the gated API. Use migration 316 + its regression
-   tests as the template.
-3. Phase 1 exit gate: external re-audit (`/code-review ultra`) — point it explicitly at the
+   tests as the template. (In progress — a 29-agent classification pass was dispatched
+   2026-07-20; results land as a follow-up migration + PR.)
+2. Phase 1 exit gate: external re-audit (`/code-review ultra`) — point it explicitly at the
    `_public` view / `security_invoker` class of bug found today, since the existing pen-test
    suite structurally couldn't have caught it. Then the 2-account pen-test can be considered
-   to actually cover the SPA's real read path (item 2 landed the missing view-path test).
-4. Wave 1 (extension + agent estimations: quotas, async job lane, Stripe checkout + metering).
-5. Housekeeping: deny-all RLS migration for `dedup_model_compare_sets`; enable Supabase Auth's
-   leaked-password-protection toggle before public signup.
+   to actually cover the SPA's real read path (item 1 landed the missing view-path test).
+3. Wave 1 (extension + agent estimations: quotas, async job lane, Stripe checkout + metering).
+4. Housekeeping: enable Supabase Auth's leaked-password-protection toggle before public signup.
