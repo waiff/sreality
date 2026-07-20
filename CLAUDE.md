@@ -10,14 +10,15 @@ keeps getting broken, fix it here — don't repeat the correction by hand.
 
 A **market-wide real-estate intelligence platform** for the Czech market. It began as an
 hourly sreality.cz scraper and now collects, enriches, and reasons over property data from
-**seven portals**. Store of record: Postgres (Supabase, Frankfurt, PostGIS) with full
+**nine portals**. Store of record: Postgres (Supabase, Frankfurt, PostGIS) with full
 listing history.
 
 Data layered together:
-- **Scraped listings** from seven portals — **sreality** (JSON v1 API, the steady hourly
+- **Scraped listings** from nine portals — **sreality** (JSON v1 API, the steady hourly
   ingest), **bazos** (HTML crawler), **bezrealitky** (GraphQL API), **idnes** (structured
-  HTML), **mmreality** (Vue-embedded JSON, proxied), **remax** (structured HTML), and
-  **ceskereality** (structured HTML) — landing in one `listings`/`listing_snapshots`
+  HTML), **mmreality** (Vue-embedded JSON, proxied), **remax** (structured HTML),
+  **ceskereality** (structured HTML), **realitymix** (structured HTML, Centrum.cz aggregator),
+  and **maxima** (structured HTML) — landing in one `listings`/`listing_snapshots`
   contract with one canonical vocabulary. Per-portal ingest detail: `docs/architecture.md`
   § Data sources.
 - **Geo data** — coordinates, districts, ČÚZK/RÚIAN admin boundaries, transit geometry, OSM amenities.
