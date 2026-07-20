@@ -160,9 +160,16 @@ remediation R3 closes that. Full spec: `docs/design/public-release-remediation-2
    halves together: DEFINER + gate, then revoke `authenticated` on the 7 ops matviews.
    Live-verified both directions (admin reads 16 sreality checks; foreign JWT gets NULL from
    all five and cannot read the raw matviews).
-4. **R3** — parameterize the tenant-view live tests (cross-tenant deny + own-tenant-positive
-   over all 7), strengthen the static gate test, add the standing CI gate for future
-   admin-view leaks (replaces "defer to re-audit"). § R3.
+4. ~~**R3**~~ — **SHIPPED 2026-07-20.** The cross-tenant live test is now
+   parameterized over all 7 tenant views with a **read-your-own-row** assertion per
+   view — the half that was missing, and the assertion that would have failed CI on the
+   migration-316 PR instead of shipping the Browse regression to production. The static
+   gate test now requires `is_platform_admin()` in a WHERE position (a bare substring
+   check passed `true OR is_platform_admin()`), and a **standing gate** in both lanes
+   flags any view or authenticated-callable function reading admin-only data without the
+   gate — generalizing to admin surface #27 without anyone remembering to register it,
+   which is what the deferred-to-re-audit posture could not do. Verified live: both gates
+   return zero today, and the offline gate was tested against a synthetic offender.
 5. **R4** — Pipeline broker fetch: degrade only on the A6 42501 signature, log anything else;
    update the stale `docs/architecture.md` broker paragraph in the same PR. § R4.
 6. Phase 1 exit gate: external re-audit (`/code-review ultra`) — anchor cases + blind spots
