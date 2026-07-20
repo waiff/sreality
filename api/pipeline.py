@@ -26,6 +26,7 @@ import psycopg
 from fastapi import HTTPException
 
 from api import schemas as s
+from toolkit.property_identity import resolve_active_property_id
 
 
 def list_stages(
@@ -196,9 +197,17 @@ def add_card(
     conn: "psycopg.Connection", body: s.AddPipelineCardIn, *,
     account_id: uuid.UUID | None,
 ) -> dict[str, Any]:
-    """Bookmark a property: insert a card at the entry stage. Idempotent."""
+    """Bookmark a property: insert a card at the entry stage. Idempotent.
+
+    A stale property_id (cached by the extension, or from the 5-min browse_list)
+    may have been merged away since; resolve it to the live survivor so the card
+    never orphans onto a retired property.
+    """
     try:
         with conn.transaction(), conn.cursor() as cur:
+            pid = resolve_active_property_id(conn, body.property_id)
+            if pid is None:
+                raise HTTPException(422, "property not found")
             cur.execute(
                 "SELECT id FROM pipeline_stages "
                 "WHERE is_entry AND account_id IS NOT DISTINCT FROM %s LIMIT 1",
@@ -219,7 +228,7 @@ def add_card(
                 "  (property_id, stage_id, board_position, account_id) "
                 "VALUES (%s, %s, %s, %s) ON CONFLICT DO NOTHING "
                 "RETURNING property_id",
-                (body.property_id, entry_stage_id, next_pos, account_id),
+                (pid, entry_stage_id, next_pos, account_id),
             )
             added = cur.fetchone() is not None
             if added:
@@ -227,11 +236,11 @@ def add_card(
                     "INSERT INTO property_pipeline_events "
                     "  (property_id, to_stage_id, reason, account_id) "
                     "VALUES (%s, %s, 'operator', %s)",
-                    (body.property_id, entry_stage_id, account_id),
+                    (pid, entry_stage_id, account_id),
                 )
     except psycopg.errors.ForeignKeyViolation:
         raise HTTPException(422, "property not found")
-    card = _fetch_card(conn, body.property_id, account_id)
+    card = _fetch_card(conn, pid, account_id)
     if card is None:
         raise RuntimeError("pipeline card vanished after insert")
     return {**card, "added": added}

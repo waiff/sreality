@@ -41,6 +41,48 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+# A merged-away property (status <> 'active', merged_into set) still satisfies a
+# `references properties(id)` FK, so a write keyed on a stale property_id lands on
+# the retired row and never appears on the survivor the operator sees (the merge
+# reconciler only re-points state that existed AT merge time — rule #18). Follow
+# merged_into to the live survivor before any property-anchored write. Transitive
+# (a survivor can itself later merge) with a depth guard against a malformed cycle.
+_RESOLVE_SURVIVORS_SQL = """
+WITH RECURSIVE chain(root, id, status, merged_into, depth) AS (
+    SELECT p.id, p.id, p.status, p.merged_into, 0
+    FROM properties p WHERE p.id = ANY(%(ids)s)
+    UNION ALL
+    SELECT c.root, p.id, p.status, p.merged_into, c.depth + 1
+    FROM properties p JOIN chain c ON p.id = c.merged_into
+    WHERE c.status <> 'active' AND c.depth < 20
+)
+SELECT root, id FROM chain WHERE status = 'active'
+"""
+
+
+def resolve_active_property_ids(
+    conn: "psycopg.Connection", ids: list[int],
+) -> dict[int, int]:
+    """Map each property_id to the id of its active merge survivor.
+
+    An already-active id maps to itself; a merged-away id follows merged_into to
+    the surviving active property; an id with no active survivor (missing row or a
+    broken chain) is absent from the result. Read-only; safe inside a caller txn.
+    """
+    if not ids:
+        return {}
+    with conn.cursor() as cur:
+        cur.execute(_RESOLVE_SURVIVORS_SQL, {"ids": list(ids)})
+        return {int(root): int(sid) for root, sid in cur.fetchall()}
+
+
+def resolve_active_property_id(
+    conn: "psycopg.Connection", property_id: int,
+) -> int | None:
+    """Single-id `resolve_active_property_ids`; None if no active survivor."""
+    return resolve_active_property_ids(conn, [property_id]).get(property_id)
+
+
 def merge_properties(
     conn: psycopg.Connection,
     *,
