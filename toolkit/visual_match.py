@@ -314,14 +314,18 @@ def _cache_store(
     model: str, llm_call_id: int, cost_usd: float,
 ) -> None:
     with conn.transaction(), conn.cursor() as cur:
-        # listing_id_{a,b} mirror the sreality_id side-for-side during the surrogate-key dual-write.
+        # listing_id_{a,b} mirror the sreality_id side-for-side during the surrogate-key
+        # dual-write (never re-canonicalize a/b — runbook §0.5). Arbiter is the
+        # order-independent expression index (R2 Phase C,
+        # listing_visual_matches_listing_id_pair_key).
         cur.execute(
             "INSERT INTO listing_visual_matches "
             "(sreality_id_a, listing_id_a, sreality_id_b, listing_id_b, room_type, verdict, rationale, "
             " model, llm_call_id, cost_usd) "
             "VALUES (%s, (SELECT id FROM listings WHERE sreality_id = %s), "
             "%s, (SELECT id FROM listings WHERE sreality_id = %s), %s, %s, %s, %s, %s, %s) "
-            "ON CONFLICT (sreality_id_a, sreality_id_b, room_type, model) DO UPDATE SET "
+            "ON CONFLICT (LEAST(listing_id_a, listing_id_b), GREATEST(listing_id_a, listing_id_b), "
+            "room_type, model) DO UPDATE SET "
             "  listing_id_a = EXCLUDED.listing_id_a, listing_id_b = EXCLUDED.listing_id_b, "
             "  verdict = EXCLUDED.verdict, rationale = EXCLUDED.rationale, "
             "  llm_call_id = EXCLUDED.llm_call_id, cost_usd = EXCLUDED.cost_usd, "
@@ -575,13 +579,17 @@ def _site_plan_cache_store(
     model: str, llm_call_id: int, cost_usd: float,
 ) -> None:
     with conn.transaction(), conn.cursor() as cur:
+        # listing_id_{a,b} mirror the sreality_id side-for-side (never re-canonicalize
+        # a/b — runbook §0.5). Arbiter is the order-independent expression index
+        # (R2 Phase C, listing_site_plan_matches_listing_id_pair_key).
         cur.execute(
             "INSERT INTO listing_site_plan_matches "
             "(sreality_id_a, listing_id_a, sreality_id_b, listing_id_b, verdict, rationale, "
             " model, llm_call_id, cost_usd) "
             "VALUES (%s, (SELECT id FROM listings WHERE sreality_id = %s), "
             "%s, (SELECT id FROM listings WHERE sreality_id = %s), %s, %s, %s, %s, %s) "
-            "ON CONFLICT (sreality_id_a, sreality_id_b, model) DO UPDATE SET "
+            "ON CONFLICT (LEAST(listing_id_a, listing_id_b), GREATEST(listing_id_a, listing_id_b), "
+            "model) DO UPDATE SET "
             "  listing_id_a = EXCLUDED.listing_id_a, listing_id_b = EXCLUDED.listing_id_b, "
             "  verdict = EXCLUDED.verdict, rationale = EXCLUDED.rationale, "
             "  llm_call_id = EXCLUDED.llm_call_id, cost_usd = EXCLUDED.cost_usd, "
@@ -859,13 +867,17 @@ def _floor_plan_cache_store(
     model: str, llm_call_id: int, cost_usd: float,
 ) -> None:
     with conn.transaction(), conn.cursor() as cur:
+        # listing_id_{a,b} mirror the sreality_id side-for-side (never re-canonicalize
+        # a/b — runbook §0.5). Arbiter is the order-independent expression index
+        # (R2 Phase C, listing_floor_plan_matches_listing_id_pair_key).
         cur.execute(
             "INSERT INTO listing_floor_plan_matches "
             "(sreality_id_a, listing_id_a, sreality_id_b, listing_id_b, verdict, rationale, extracted, "
             " model, llm_call_id, cost_usd) "
             "VALUES (%s, (SELECT id FROM listings WHERE sreality_id = %s), "
             "%s, (SELECT id FROM listings WHERE sreality_id = %s), %s, %s, %s::jsonb, %s, %s, %s) "
-            "ON CONFLICT (sreality_id_a, sreality_id_b, model) DO UPDATE SET "
+            "ON CONFLICT (LEAST(listing_id_a, listing_id_b), GREATEST(listing_id_a, listing_id_b), "
+            "model) DO UPDATE SET "
             "  listing_id_a = EXCLUDED.listing_id_a, listing_id_b = EXCLUDED.listing_id_b, "
             "  verdict = EXCLUDED.verdict, rationale = EXCLUDED.rationale, "
             "  extracted = EXCLUDED.extracted, llm_call_id = EXCLUDED.llm_call_id, "

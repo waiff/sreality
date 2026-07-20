@@ -341,7 +341,13 @@ def _cache_store(
     llm_call_id: int,
     cost_usd: float,
 ) -> None:
-    # listing_id_{a,b} are stamped positionally from the legacy ids (side-coupled payloads).
+    # listing_id_{a,b} are stamped positionally from the legacy ids (side-coupled
+    # payloads — never re-canonicalize a/b here, see the runbook §0.5). Arbiter is
+    # the order-independent expression index (R2 Phase C,
+    # listing_image_comparisons_listing_id_pair_key): a swapped-order call still
+    # matches the existing row, and DO UPDATE SET below overwrites every column
+    # (including listing_id_a/_b) from THIS call's fresh values, so a/b never end
+    # up mismatched with their own n_images_a/n_images_b.
     sql = (
         "INSERT INTO listing_image_comparisons "
         "(sreality_id_a, listing_id_a, sreality_id_b, listing_id_b, "
@@ -350,7 +356,8 @@ def _cache_store(
         "VALUES (%s, (SELECT id FROM listings WHERE sreality_id = %s), "
         " %s, (SELECT id FROM listings WHERE sreality_id = %s), "
         " %s, %s, %s, %s, %s, %s) "
-        "ON CONFLICT (sreality_id_a, sreality_id_b) DO UPDATE SET "
+        "ON CONFLICT (LEAST(listing_id_a, listing_id_b), GREATEST(listing_id_a, listing_id_b)) "
+        "DO UPDATE SET "
         " listing_id_a = EXCLUDED.listing_id_a, "
         " listing_id_b = EXCLUDED.listing_id_b, "
         " comparison = EXCLUDED.comparison, "

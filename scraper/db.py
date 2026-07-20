@@ -604,14 +604,18 @@ def upsert_listing(
         # yields the persisted row's stable id, new or existing.
         listing_id = result[1] if result else None
 
+        # Rekeyed onto listing_id (R2 Phase C): listing_id is already resolved
+        # above, and listing_snapshots_listing_id_scraped_at_idx (mig 333) mirrors
+        # the legacy (sreality_id, scraped_at) composite so this stays a single
+        # index lookup on the hot per-write path.
         cur.execute(
             """
             SELECT content_hash FROM listing_snapshots
-            WHERE sreality_id = %s
+            WHERE listing_id = %s
             ORDER BY scraped_at DESC
             LIMIT 1
             """,
-            (sreality_id,),
+            (listing_id,),
         )
         prev = cur.fetchone()
         unchanged = prev is not None and prev[0] == content_hash
@@ -932,7 +936,12 @@ def record_images(
     # is never disturbed, so we never re-download what we have. xmax = 0 is true
     # only for genuine inserts, keeping the "newly inserted" count honest.
     # listing_id is resolved inline (R2 dual-write) so the id never travels through
-    # Python — same shape as every other child writer.
+    # Python — same shape as every other child writer. The arbiter is listing_id,
+    # not the legacy sreality_id (R2 Phase C, images_listing_id_sequence_key):
+    # sreality_id never conflicts across two different sources' rows that happen
+    # to share a native id band, and NULLs-never-conflict made the old arbiter a
+    # silent duplicate-row generator on any race that left listing_id unresolved
+    # (images_listing_id_present_check now makes that impossible instead).
     values_sql = ", ".join(
         "(%s, (SELECT id FROM listings WHERE sreality_id = %s), %s, %s)" for _ in kept
     )
@@ -943,9 +952,8 @@ def record_images(
         sql = f"""
             INSERT INTO images (sreality_id, listing_id, sreality_url, sequence)
             VALUES {values_sql}
-            ON CONFLICT (sreality_id, sequence) DO UPDATE SET
+            ON CONFLICT (listing_id, sequence) DO UPDATE SET
                 sreality_url = EXCLUDED.sreality_url,
-                listing_id = COALESCE(images.listing_id, EXCLUDED.listing_id),
                 download_attempts = 0,
                 last_error = NULL,
                 unavailable_reason = NULL
@@ -993,9 +1001,8 @@ def record_videos(
         sql = f"""
             INSERT INTO listing_videos (sreality_id, listing_id, source_url, sequence)
             VALUES {values_sql}
-            ON CONFLICT (sreality_id, sequence) DO UPDATE SET
-                source_url = EXCLUDED.source_url,
-                listing_id = COALESCE(listing_videos.listing_id, EXCLUDED.listing_id)
+            ON CONFLICT (listing_id, sequence) DO UPDATE SET
+                source_url = EXCLUDED.source_url
             WHERE listing_videos.storage_path IS NULL
             RETURNING (xmax = 0) AS inserted
         """
@@ -1987,8 +1994,11 @@ _BATCH_SNAPSHOT_SQL = """
         AS j(sreality_id bigint, price_czk integer, content_hash text)
     JOIN listings l ON l.sreality_id = j.sreality_id
     LEFT JOIN LATERAL (
+        -- Rekeyed onto listing_id (R2 Phase C, same rule-2 guard as upsert_listing):
+        -- l.id is already joined, and listing_snapshots_listing_id_scraped_at_idx
+        -- (mig 333) mirrors the legacy composite.
         SELECT content_hash FROM listing_snapshots s
-        WHERE s.sreality_id = j.sreality_id
+        WHERE s.listing_id = l.id
         ORDER BY s.scraped_at DESC, s.id DESC
         LIMIT 1
     ) latest ON true
@@ -2091,9 +2101,10 @@ _BATCH_IMAGES_SQL = """
     FROM jsonb_to_recordset(%s::jsonb)
         AS j(sreality_id bigint, sreality_url text, sequence integer)
     JOIN listings l ON l.sreality_id = j.sreality_id
-    ON CONFLICT (sreality_id, sequence) DO UPDATE SET
+    -- Arbiter is listing_id (R2 Phase C, images_listing_id_sequence_key) — see
+    -- record_images for why sreality_id was never safe here.
+    ON CONFLICT (listing_id, sequence) DO UPDATE SET
         sreality_url = EXCLUDED.sreality_url,
-        listing_id = COALESCE(images.listing_id, EXCLUDED.listing_id),
         download_attempts = 0,
         last_error = NULL,
         unavailable_reason = NULL

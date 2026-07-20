@@ -747,7 +747,8 @@ def _cache_store_and_update_listings(
         " notes, n_images, model, llm_call_id, cost_usd) "
         "VALUES (%s, (SELECT id FROM listings WHERE sreality_id = %s), "
         " %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
-        "ON CONFLICT (sreality_id, snapshot_id) DO UPDATE SET "
+        # Arbiter is listing_id (R2 Phase C, listing_condition_scores_listing_id_snapshot_id_key).
+        "ON CONFLICT (listing_id, snapshot_id) DO UPDATE SET "
         " listing_id = EXCLUDED.listing_id, "
         " building_level = EXCLUDED.building_level, "
         " apartment_level = EXCLUDED.apartment_level, "

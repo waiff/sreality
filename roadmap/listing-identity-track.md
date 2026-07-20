@@ -45,10 +45,19 @@ Run as ONE committed track; valueless half-done. Phases and their gates are spec
   columns are themselves NOT NULL. All verified live: 20 FKs + 8 unique constraints + 4
   pair indexes + 17 checks, zero left unvalidated anywhere but two unrelated pre-existing
   ones.
-- **Phase C** — writer `ON CONFLICT` retargets + the remaining read cutover (frontend
-  resolver chain, browse hydration, dedup `ListingKey` + pair caches, merge/unmerge
-  replay, notification producers, `image_key()`, the sreality_id-cursored maintenance
-  walkers, 25 read models).
+- **Phase C** (arbiter retarget sub-step ✅ shipped 2026-07-20, mig 333) — every writer
+  into a listing-scoped carrier now arbitrates `ON CONFLICT` on `listing_id`, matching
+  Phase B2's guards (images/videos `(listing_id, sequence)`; the four snapshot-keyed
+  analytical caches `(listing_id, snapshot_id)`; the cohort table
+  `(estimation_run_id, listing_id)`; the four pair caches on the order-independent
+  `LEAST/GREATEST` expression index without re-canonicalizing stored a/b). The rule-2
+  latest-snapshot guard is rekeyed onto `listing_id` too, backed by a new composite
+  index built CONCURRENTLY (`listing_snapshots_listing_id_scraped_at_idx`) since Phase
+  B only gave that carrier a bare `listing_id` index. Every retarget verified live via
+  `EXPLAIN`. **Still open: the read cutover** (frontend resolver chain, browse
+  hydration, dedup `ListingKey` + pair caches, merge/unmerge replay, notification
+  producers, `image_key()`, the sreality_id-cursored maintenance walkers, 25 read
+  models) — the writer retarget was its precondition, not a substitute.
 - **Phase D** — pre-flip prep: ingest `ON CONFLICT` → the natural key, child `DROP NOT
   NULL`s, the two child PK swaps, pre-built unique indexes on `sreality_id` and `id`.
 - **GATE 1** — the PK-swap window (`sreality_id` → `id`), catalog-only and reversible.

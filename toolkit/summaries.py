@@ -351,11 +351,12 @@ def _cache_store(
 ) -> None:
     sql = (
         # listing_id mirrors sreality_id via subquery during the dual-write phase
-        # of the surrogate-key migration (migrations 320-325).
+        # of the surrogate-key migration (migrations 320-325). Arbiter is
+        # listing_id (R2 Phase C, listing_summaries_listing_id_snapshot_id_key).
         "INSERT INTO listing_summaries "
         "(sreality_id, listing_id, snapshot_id, summary, model, llm_call_id, cost_usd) "
         "VALUES (%s, (SELECT id FROM listings WHERE sreality_id = %s), %s, %s, %s, %s, %s) "
-        "ON CONFLICT (sreality_id, snapshot_id) DO UPDATE SET "
+        "ON CONFLICT (listing_id, snapshot_id) DO UPDATE SET "
         " listing_id = EXCLUDED.listing_id, "
         " summary = EXCLUDED.summary, "
         " model = EXCLUDED.model, "

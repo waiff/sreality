@@ -640,7 +640,8 @@ def _cache_store(
         " warnings, n_images, model, llm_call_id, cost_usd) "
         "VALUES (%s, (SELECT id FROM listings WHERE sreality_id = %s), "
         "%s, %s, %s, %s, %s, %s, %s, %s, %s) "
-        "ON CONFLICT (sreality_id, snapshot_id) DO UPDATE SET "
+        # Arbiter is listing_id (R2 Phase C, building_unit_extractions_listing_id_snapshot_id_key).
+        "ON CONFLICT (listing_id, snapshot_id) DO UPDATE SET "
         " listing_id = EXCLUDED.listing_id, "
         " units = EXCLUDED.units, "
         " building = EXCLUDED.building, "
