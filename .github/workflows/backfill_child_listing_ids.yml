@@ -90,7 +90,10 @@ jobs:
           if [ -n "${{ inputs.max_seconds }}" ]; then ARGS="$ARGS --max-seconds ${{ inputs.max_seconds }}"; fi
           if [ "${{ inputs.repair }}" = "true" ]; then ARGS="$ARGS --repair"; fi
           if [ "${{ inputs.dry_run }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
-          python -m scripts.backfill_child_listing_ids $ARGS | tee run.log
+          # 2>&1 is load-bearing: the script's progress goes through logging,
+          # which writes to STDERR — without this the marker below never lands
+          # in run.log and the chain re-dispatches even at zero work.
+          python -m scripts.backfill_child_listing_ids $ARGS 2>&1 | tee run.log
           # "filled" reports work done this run; the last line reports what remains.
           if grep -q "PENDING=0" run.log; then echo "pending=0" >> "$GITHUB_OUTPUT";
           else echo "pending=1" >> "$GITHUB_OUTPUT"; fi
