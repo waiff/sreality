@@ -2247,6 +2247,10 @@ export const getLocationAudit = (
     category_main?: string;
     active?: 'active' | 'inactive';
     dedup?: 'reachable' | 'unreachable';
+    // Narrow to ONE dedup pass's domain, optionally split into that pass's own
+    // eligible / ineligible halves — how an eligibility-matrix cell drills down.
+    path?: DedupPathKey;
+    path_state?: 'eligible' | 'ineligible';
     has?: ReadonlyArray<string>;
     missing?: ReadonlyArray<string>;
     limit?: number;
@@ -2258,12 +2262,51 @@ export const getLocationAudit = (
   if (params.category_main) q.set('category_main', params.category_main);
   if (params.active) q.set('active', params.active);
   if (params.dedup) q.set('dedup', params.dedup);
+  if (params.path) q.set('path', params.path);
+  if (params.path_state) q.set('path_state', params.path_state);
   if (params.has?.length) q.set('has', params.has.join(','));
   if (params.missing?.length) q.set('missing', params.missing.join(','));
   q.set('limit', String(params.limit ?? 50));
   q.set('offset', String(params.offset ?? 0));
   return request(`/location-audit?${q.toString()}`);
 };
+
+export type DedupPathKey = 'street' | 'geo' | 'byt_geo';
+
+/* One bucket of listings sharing an eligibility signature. The API returns the joint
+ * distribution rather than a pre-pivoted table, so every pass × scope × breakdown the
+ * matrix offers is a client-side pivot of ONE 0.8s scan. `elig_*` are the ENGINE's own
+ * predicates (nullable: a NULL category_main makes the two category-gated arms NULL —
+ * treat non-true as ineligible, never `!elig`). */
+export type EligibilityBucket = {
+  source: string;
+  category_main: string | null;
+  is_active: boolean;
+  has_street: boolean;
+  has_disposition: boolean;
+  has_geom: boolean;
+  has_obec: boolean;
+  has_area: boolean;
+  elig_street: boolean | null;
+  elig_geo: boolean | null;
+  elig_byt_geo: boolean | null;
+  n: number;
+};
+
+export type EligibilityMatrix = {
+  buckets: EligibilityBucket[];
+  /* Each pass's domain + active gate, DERIVED server-side from the same constants the
+   * SQL renders — so the client pivot can't drift from the predicate it pivots. */
+  paths: Array<{
+    key: DedupPathKey;
+    domain_categories: string[] | null;
+    active_only: boolean;
+  }>;
+  total: number;
+};
+
+export const getEligibilityMatrix = (): Promise<EligibilityMatrix> =>
+  request('/location-audit/eligibility-matrix');
 
 export type LocationAuditRaw = {
   sreality_id: number;

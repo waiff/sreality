@@ -7,12 +7,16 @@ admin-hierarchy fields side by side, with the acquisition method for the two
 fields whose provenance actually varies per row (coordinate + street), so the
 operator can see coverage gaps and hunt for portal signals the parser drops.
 
-Two endpoints:
+Three endpoints:
 - `GET /location-audit`        — paginated, filtered listing rows (small columns
   only; the per-row raw_json keys it does read are three shallow `->>` lookups,
   bounded to one page, never a full-table scan — see the raw_json note below).
 - `GET /location-audit/{sreality_id}/raw` — one row's full `raw_json` (a single
   PK detoast; NEVER selected in the list query, per migration 234's incident).
+- `GET /location-audit/eligibility-matrix` — the aggregate counterpart: ONE
+  grouped scan giving the joint distribution of the five dedup-eligibility
+  inputs, so the operator sees WHICH portal × property type loses listings to
+  WHICH missing field, instead of paging rows one at a time.
 
 No migration: every column read here already exists on `listings`.
 """
@@ -27,6 +31,7 @@ from api import dependencies as deps
 from toolkit.publication import (
     BYT_GEO_ELIGIBLE_PREDICATE,
     GEO_ELIGIBLE_PREDICATE,
+    GEO_FAMILIES,
     STREET_ELIGIBLE_PREDICATE,
     eligible_predicate,
 )
@@ -43,6 +48,35 @@ router = APIRouter(prefix="/location-audit", tags=["location-audit"])
 # arms are active-only by construction (the street arm is not — inactive
 # street+disposition rows still merge, to preserve price history on delisting).
 _DEDUP_REACHABLE_SQL = eligible_predicate("l")
+
+# The predicate is THREE-VALUED, not boolean: `category_main IS NULL` makes both
+# `category_main IN (...)` and `category_main = 'byt'` evaluate to NULL, so a
+# street-ineligible row with a NULL category yields `FALSE OR NULL OR NULL` = NULL.
+# A bare `NOT (...)` filter is then also NULL and matches nothing — such rows would
+# fall out of BOTH the reachable and the unreachable filter (197 active listings
+# today). Every consumer below therefore uses IS TRUE / IS NOT TRUE, the same
+# null-safe form `recompute_property_stats._publish_sweep` already uses.
+_REACHABLE_FILTER = f"({_DEDUP_REACHABLE_SQL}) IS TRUE"
+_UNREACHABLE_FILTER = f"({_DEDUP_REACHABLE_SQL}) IS NOT TRUE"
+
+# Per-pass DOMAIN vs ELIGIBILITY. The domain is the set of listings a pass is
+# SUPPOSED to cover (its category gate, rendered from publication.GEO_FAMILIES so
+# the family list is never hand-copied); the eligibility is the engine's own
+# canonical predicate for that pass. Keeping the two apart is precisely what the
+# matrix needs — "of the N listings this pass should reach, M fall out, and here
+# is the field they are missing". The street pass has NO category gate (the engine
+# loads every category that carries street+disposition), so its domain is TRUE;
+# that its domain is de-facto byt is a DATA fact — the single-dwelling families
+# carry ~0% disposition — not a rule, and the matrix is what makes that visible.
+_GEO_FAMILY_IN = ", ".join(f"'{f}'" for f in GEO_FAMILIES)
+_PATH_SQL: dict[str, tuple[str, str]] = {
+    "street": ("TRUE", STREET_ELIGIBLE_PREDICATE),
+    "geo": (f"l.category_main IN ({_GEO_FAMILY_IN})", GEO_ELIGIBLE_PREDICATE),
+    "byt_geo": ("l.category_main = 'byt'", BYT_GEO_ELIGIBLE_PREDICATE),
+}
+
+# The pass keys the UI can present as a matrix tab (order = display order).
+DEDUP_PATHS: tuple[str, ...] = tuple(_PATH_SQL.keys())
 
 
 # ---------------------------------------------------------------------------
@@ -82,6 +116,13 @@ _PRESENCE_SQL: dict[str, str] = {
     "locality_municipality_id": "l.locality_municipality_id IS NOT NULL",
     "locality_quarter_id": "l.locality_quarter_id IS NOT NULL",
     "locality_ward_id": "l.locality_ward_id IS NOT NULL",
+    # Not location fields, but the two remaining dedup-eligibility inputs — without
+    # them a matrix cell's "missing disposition" / "missing area" count cannot be
+    # reproduced as a row filter. Both are spelled EXACTLY as the canonical
+    # predicates spell them (`disposition IS NOT NULL`, no `<> ''`; the same area
+    # coalesce order), and a unit test pins them to those predicates' text.
+    "disposition": "l.disposition IS NOT NULL",
+    "area": "coalesce(l.area_m2, l.estate_area, l.usable_area) IS NOT NULL",
 }
 
 # The field keys the UI can present as a presence toggle (order = display order).
@@ -186,6 +227,8 @@ def _build_where(
     has: list[str],
     missing: list[str],
     dedup: str | None,
+    path: str | None = None,
+    path_state: str | None = None,
 ) -> tuple[str, dict[str, Any]]:
     clauses: list[str] = []
     params: dict[str, Any] = {}
@@ -200,9 +243,20 @@ def _build_where(
     elif active == "inactive":
         clauses.append("l.is_active = false")
     if dedup == "reachable":
-        clauses.append(f"({_DEDUP_REACHABLE_SQL})")
+        clauses.append(_REACHABLE_FILTER)
     elif dedup == "unreachable":
-        clauses.append(f"NOT ({_DEDUP_REACHABLE_SQL})")
+        clauses.append(_UNREACHABLE_FILTER)
+    # Path scoping: `path` alone narrows to that pass's domain; with `path_state` it
+    # splits the domain into the pass's own eligible / ineligible halves. This is what
+    # makes every number in a matrix cell land on the exact rows it counted.
+    if path in _PATH_SQL:
+        domain, elig = _PATH_SQL[path]
+        if domain != "TRUE":
+            clauses.append(f"({domain})")
+        if path_state == "eligible":
+            clauses.append(f"({elig}) IS TRUE")
+        elif path_state == "ineligible":
+            clauses.append(f"({elig}) IS NOT TRUE")
     for key in has:
         pred = _PRESENCE_SQL.get(key)
         if pred:
@@ -235,6 +289,19 @@ def list_location_audit(
         "pass; 'unreachable' = it never becomes a candidate (insufficient data on every "
         "pass). Omit for both.",
     ),
+    path: str | None = Query(
+        default=None,
+        pattern="^(street|geo|byt_geo)$",
+        description="Narrow to ONE dedup pass's domain — the listings that pass is "
+        "supposed to cover ('street' = every category, 'geo' = the geo families, "
+        "'byt_geo' = byt). Combine with path_state to split it.",
+    ),
+    path_state: str | None = Query(
+        default=None,
+        pattern="^(eligible|ineligible)$",
+        description="Within `path`'s domain: 'eligible' = that pass can reach the row, "
+        "'ineligible' = it cannot. Ignored without `path`.",
+    ),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     conn: Any = Depends(deps.get_db_conn),
@@ -244,7 +311,9 @@ def list_location_audit(
     acquisition method for coordinate + street, and dedup reachability. Read-only."""
     has_keys = [k for k in (has.split(",") if has else []) if k.strip() in _PRESENCE_SQL]
     miss_keys = [k for k in (missing.split(",") if missing else []) if k.strip() in _PRESENCE_SQL]
-    where, params = _build_where(source, category_main, active, has_keys, miss_keys, dedup)
+    where, params = _build_where(
+        source, category_main, active, has_keys, miss_keys, dedup, path, path_state
+    )
 
     with conn.cursor() as cur:
         # Count only on the first page: it's identical for every page of a given filter,
@@ -339,6 +408,77 @@ def list_location_audit(
         "returned": len(data),
         "limit": limit,
         "offset": offset,
+    }
+
+
+# The joint distribution of the five eligibility inputs, per portal × type × state.
+# Grouping by the three `elig_*` verdicts too costs ZERO extra buckets — each is a
+# pure function of the group keys already listed — and it is what lets the client
+# read eligibility off the engine's own predicates instead of re-implementing them.
+# Measured: 531 buckets, ~0.8s, one parallel seq scan (no index helps a full-table
+# GROUP BY, and none is worth adding for an admin surface called once per page).
+_MATRIX_SQL = f"""
+    SELECT l.source,
+           l.category_main,
+           l.is_active,
+           (l.street IS NOT NULL AND l.street <> '')                       AS has_street,
+           (l.disposition IS NOT NULL)                                     AS has_disposition,
+           (l.geom IS NOT NULL)                                            AS has_geom,
+           (l.obec_id IS NOT NULL)                                         AS has_obec,
+           (coalesce(l.area_m2, l.estate_area, l.usable_area) IS NOT NULL) AS has_area,
+           ({STREET_ELIGIBLE_PREDICATE})  AS elig_street,
+           ({GEO_ELIGIBLE_PREDICATE})     AS elig_geo,
+           ({BYT_GEO_ELIGIBLE_PREDICATE}) AS elig_byt_geo,
+           count(*) AS n
+    FROM listings l
+    GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11
+"""
+
+
+def _path_meta() -> list[dict[str, Any]]:
+    """Each pass's DOMAIN + whether it is active-only — both DERIVED (the family list
+    from publication.GEO_FAMILIES, the active gate by inspecting the predicate text)
+    so the client's pivot can never disagree with the SQL it is pivoting."""
+    return [
+        {
+            "key": key,
+            "domain_categories": (
+                None
+                if domain == "TRUE"
+                else (list(GEO_FAMILIES) if key == "geo" else ["byt"])
+            ),
+            "active_only": "is_active = true" in elig,
+        }
+        for key, (domain, elig) in _PATH_SQL.items()
+    ]
+
+
+@router.get("/eligibility-matrix")
+def eligibility_matrix(
+    conn: Any = Depends(deps.get_db_conn),
+    _: dict = Depends(deps.require_admin),
+) -> dict[str, Any]:
+    """Why the dedup engine cannot reach parts of the inventory, as counts rather than
+    rows: for every (portal, property type, active state) the joint distribution of the
+    five eligibility inputs plus the three passes' verdicts.
+
+    Returned as BUCKETS, not a pre-pivoted table, deliberately. Which pass, which scope
+    and which missing-field breakdown to show are DISPLAY choices; once the joint counts
+    are in hand the client can pivot all of them with no further round-trip — one 0.8s
+    scan backs every tab of the matrix. It also keeps this endpoint honest: it reports
+    the distribution, it does not decide what 'the reason' is."""
+    with conn.cursor() as cur:
+        cur.execute(_MATRIX_SQL)
+        cols = [c.name for c in cur.description]
+        buckets = [dict(zip(cols, r)) for r in cur.fetchall()]
+
+    for b in buckets:
+        b["n"] = int(b["n"])
+
+    return {
+        "buckets": buckets,
+        "paths": _path_meta(),
+        "total": sum(b["n"] for b in buckets),
     }
 
 
