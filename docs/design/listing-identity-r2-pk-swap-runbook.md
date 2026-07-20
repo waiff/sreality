@@ -81,8 +81,17 @@ OPPOSITE order (a new listing's singleton property is created inside the
 listings-insert transaction) — `DeadlockDetected` is expected there, not exotic; #838
 added it to the retry set alongside `LockNotAvailable`.
 
-**Next: Phase B2 (§3 items 4-5 — new unique guards + NOT NULL checks) —
-`scripts/apply_r2_unique_guards.py`.** Two independent additions, both derived from
+**Phase B2 DONE (2026-07-20, PR #839).** `scripts/apply_r2_unique_guards.py` ran
+clean on the first live dispatch — no `DeadlockDetected`/`LockNotAvailable` retries
+needed, 12 unique guards + 17 `CHECK` constraints all converged in ~51s. Verified
+live (not just trusted the script's own log): 8/8 promoted `UNIQUE` constraints
+present, 4/4 pair-cache expression indexes valid, 17/17 checks `convalidated`, 0
+invalid `listing_id`-named indexes anywhere. The only two unvalidated constraints
+left in the whole database are pre-existing and unrelated:
+`dedup_pair_audit_distinct_listing` (deliberately permanent, §2 A4) and Supabase
+Realtime's own `messages_payload_exclusive`.
+
+What shipped — two independent additions per carrier, both derived from
 the *current* (not original) legacy shape — several carriers' constraints drifted
 across multiple migrations since they were first created (`listing_description_
 enrichments`'s unique widened from 2 to 3 columns in mig 249;
@@ -110,6 +119,10 @@ before writing any DDL:
    `listing_videos`) and the fully-nullable Class B ledgers (`dedup_pair_audit`,
    `notification_dispatches`, `estimation_runs`, `building_runs`, `properties.repr`,
    `property_notes.origin`) never had a NOT NULL legacy column and correctly get none.
+
+**Next: Phase C (§4) — writer `ON CONFLICT` arbiter retargets + the remaining R4 read
+cutover.** The guards landed here are its precondition; retargeting an arbiter before
+its replacement guard exists is the #825 failure class.
 
 ## 0. What the review corrected (read this first)
 
