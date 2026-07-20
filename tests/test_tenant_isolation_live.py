@@ -51,6 +51,20 @@ _TENANT_TABLES: list[str] = [
     "entitlements",
 ]
 
+# Amendment A6 (Phase 0): the broker-directory PII surfaces stay dark to BOTH
+# browser roles until Wave 4 ships masked columns. These are SECURITY DEFINER
+# views/matview (the broker base tables are already RLS-on-no-policy), so the
+# effective gate is the absence of a browser-role SELECT grant on each.
+_BROKER_PII_RELATIONS: list[str] = [
+    "brokers_public",
+    "broker_firm_memberships_public",
+    "broker_listings_public",
+    "listing_broker_public",
+    "broker_geo_options",
+    "broker_resolution_runs_public",
+    "broker_region_type_stats",
+]
+
 
 @pytest.fixture(scope="module")
 def svc() -> "Iterator[Any]":
@@ -181,6 +195,41 @@ def test_no_anon_write_grants(svc: Any) -> None:
     assert auth_extra == [], (
         f"authenticated must never hold TRUNCATE/REFERENCES/TRIGGER: {auth_extra}"
     )
+
+
+def test_broker_pii_dark_to_browser_roles(svc: Any) -> None:
+    """Amendment A6: neither anon nor authenticated may read the broker-directory
+    PII surfaces (or execute the broker_leaderboard RPC) before Wave 4 masking."""
+    with svc.cursor() as cur:
+        leaks: list[str] = []
+        for rel in _BROKER_PII_RELATIONS:
+            cur.execute(
+                "SELECT has_table_privilege('anon', %s, 'SELECT'), "
+                "       has_table_privilege('authenticated', %s, 'SELECT')",
+                (f"public.{rel}", f"public.{rel}"),
+            )
+            anon_sel, auth_sel = cur.fetchone()
+            if anon_sel:
+                leaks.append(f"anon can SELECT {rel}")
+            if auth_sel:
+                leaks.append(f"authenticated can SELECT {rel}")
+        # broker_leaderboard RPC — look the oid up so we don't hard-code the args
+        cur.execute(
+            "SELECT p.oid FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace "
+            "WHERE n.nspname = 'public' AND p.proname = 'broker_leaderboard'"
+        )
+        for (oid,) in cur.fetchall():
+            cur.execute(
+                "SELECT has_function_privilege('anon', %s, 'EXECUTE'), "
+                "       has_function_privilege('authenticated', %s, 'EXECUTE')",
+                (oid, oid),
+            )
+            anon_x, auth_x = cur.fetchone()
+            if anon_x:
+                leaks.append("anon can EXECUTE broker_leaderboard")
+            if auth_x:
+                leaks.append("authenticated can EXECUTE broker_leaderboard")
+    assert not leaks, f"broker PII reachable by a browser role (A6 violated): {leaks}"
 
 
 def test_user_state_tables_have_account_id_and_policy(svc: Any) -> None:
