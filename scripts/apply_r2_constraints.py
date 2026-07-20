@@ -125,7 +125,15 @@ def _fk_state(conn: "psycopg.Connection", table: str, name: str) -> str | None:
 
 def _with_lock_retry(conn: "psycopg.Connection", sql: str, label: str) -> None:
     """Run a statement that briefly needs a strong lock on listings, retrying until
-    it catches a gap between the writer's transactions."""
+    it catches a gap between the writer's transactions.
+
+    DeadlockDetected is retried alongside LockNotAvailable, and it is not an exotic
+    case: ADD FOREIGN KEY takes SHARE ROW EXCLUSIVE on the child AND on listings,
+    while the ingest path locks the same two tables in the opposite order (a new
+    listing's singleton property is created inside the listings-insert transaction).
+    Either side can be chosen as the deadlock victim. Both errors mean the same
+    thing here — someone else held it first — so both just wait and try again.
+    """
     for attempt in range(_LOCK_RETRIES):
         try:
             with conn.cursor() as cur:
@@ -133,9 +141,12 @@ def _with_lock_retry(conn: "psycopg.Connection", sql: str, label: str) -> None:
                 cur.execute(sql)
             conn.commit()
             return
-        except psycopg.errors.LockNotAvailable:
+        except (psycopg.errors.LockNotAvailable, psycopg.errors.DeadlockDetected) as exc:
             conn.rollback()
-            log.info("%s: lock busy (attempt %d) — retrying", label, attempt + 1)
+            log.info(
+                "%s: %s (attempt %d) — retrying",
+                label, type(exc).__name__, attempt + 1,
+            )
             time.sleep(_RETRY_SLEEP)
     raise RuntimeError(f"{label}: could not acquire lock after {_LOCK_RETRIES} attempts")
 
