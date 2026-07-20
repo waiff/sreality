@@ -212,16 +212,75 @@ only changes which index the conflict check uses, not what gets written.** Per �
 this needs to **bake ≥1 full scrape cycle across all 9 portals in production** before
 being considered validated; that observation happens post-merge, not in this PR.
 
-**Next: Phase D, steps 2-7** (child `DROP NOT NULL` + the two child PK swaps, the
-`sreality_id`/`id` unique indexes needed before the Gate 1 swap, the 19 legacy child
-FK drops, the parity-green precondition check) — see §5. In parallel, Phase C's
-remaining read cutover (§4 second half) is still open: browse hydration, dedup
-`ListingKey` + pair-cache reads, merge/unmerge replay, notification producers
-(incl. the `new_source` dedupe_key NULL-concat fix), the Chrome extension app-link
-gate + redistribution, `image_key()`, estimation forward provenance, the
-sreality_id-cursored maintenance walkers (geocode/street/geo_cell partial indexes),
-then the 25-read-model "may lag" wave. `brokers.ts` and `api.ts`'s manual-estimates
-path turned out to need NO changes (see above) — drop them from the checklist.
+**Phase D, steps 2-6 DONE (2026-07-20, PRs #853/#854).** Two new dispatch-only
+scripts/workflows, both idempotent and re-run-safe:
+
+- `apply_r2_phase_d_prep.py` — (a) drops `NOT NULL` on every `R2_CARRIERS` legacy
+  column still enforcing it, derived live via the same `_legacy_column_not_null`
+  predicate Phase B2 used (reused, not reimplemented) — **17 columns, not the
+  runbook's estimated 14**: the design-time number predated checking
+  `pg_attribute`, same class of drift Phase A's own audits kept finding (see the
+  Phase 0/A section above). (b) Swaps `estimation_cohort_entries`'s PK from
+  `(estimation_run_id, sreality_id)` to `(estimation_run_id, listing_id)` — safe
+  immediately, no writer-deploy dependency, since Phase A4 already backfilled its
+  `listing_id` to 100%. Needed a **fresh** dedicated unique index
+  (`estimation_cohort_entries_run_listing_id_pk_idx`), not a reuse of Phase B2's
+  `..._run_listing_id_key` — an index already owned by one constraint can't back a
+  second, the same reason this runbook's §5.4 pre-builds `listings_id_pk_idx`
+  instead of reusing `listings_id_key`. (c) Pre-builds `listings_sreality_id_uidx` /
+  `listings_id_pk_idx` CONCURRENTLY + `listings.id SET NOT NULL` — §5 steps 3-5,
+  Gate 1's prerequisites. A first live dispatch hit
+  `InvalidTableDefinition: column "sreality_id" is in a primary key`: the generic
+  NOT NULL loop ran BEFORE the `estimation_cohort_entries` PK swap, and Postgres
+  refuses `DROP NOT NULL` on a still-PK-bound column. 16 of 17 columns had already
+  succeeded (the loop checks live state per-column, so it's naturally idempotent);
+  reordering the two calls (PK swap first) and re-dispatching fixed it cleanly —
+  fixed in PR #854, which also added migrations 337/338 as the plain-form tracking
+  records (mirroring migration 333's pattern; **Phase B/B2 never got this
+  treatment and have no tracking migration at all** — a pre-existing gap, not
+  something this PR tries to retroactively fix).
+- `drop_r2_legacy_fks.py` — drops the 19 legacy child FKs onto
+  `listings(sreality_id)`, read live off `pg_constraint` (matched the runbook's
+  count of 19 exactly, unlike the NOT NULL count above). Integrity is already held
+  by the parallel `listing_id -> listings(id)` FKs Phase B validated. Verified live:
+  0 legacy FKs remain.
+
+**Phase D, step 7 (parity-green precondition) CONFIRMED (2026-07-20)**, via
+`verify_pipeline.yml`'s `check_dual_write_parity`: `status=ok value=0` — zero gap,
+zero mismatch — across all 22 armed `R2_CARRIERS` (all 22 have a
+`dual_write_watermark` row; none unarmed).
+
+**`dirty_broker_listings`'s own PK swap — deliberately deferred, still open.** This
+table isn't an `R2_CARRIERS` member (no pre-existing `listing_id` column, no Phase
+A4 backfill), so it got its own migration (336: nullable `listing_id` dual-write
+column) + writer-code dual-write at both `INSERT` sites (`ingest_scraped_listing`
+and the batch drain's `_BATCH_DIRTY_BROKERS_FROM_SIDS_SQL`, both JOIN onto
+`listings` in the same transaction rather than round-tripping through Python — the
+established R2 dual-write idiom). Checked live ~10 minutes post-merge: a genuine
+MIX of old-code (no `listing_id`) and new-code (populated) writes, because this
+table's two writer sites are hit by both the always-on realtime worker (redeploys
+in minutes) AND the per-portal GH Actions cron scrapers, which are subject to the
+**SHA-freeze gotcha** (§6's Gate 1 choreography already calls this out for a
+different reason) — a run queued before the merge still executes the pre-merge
+code, so full rollout isn't instant even though the code is merged. Enforcing
+`NOT NULL` or swapping the PK now would break the still-in-flight old-code writers
+— exactly the #825 class of bug (a constraint added before every writer honors it).
+**Next session:** confirm 100% `listing_id` population on fresh
+`dirty_broker_listings` rows across a full cadence cycle, then backfill the last
+few stragglers (the queue is tiny — 115 rows observed pre-dual-write), swap its PK
+to `(listing_id)`, and retarget both `ON CONFLICT` sites — not urgent, since
+`sreality_id` stays a valid unique key on this table regardless.
+
+**Next: Phase C's remaining read cutover** (§4 second half) is still open: browse
+hydration, dedup `ListingKey` + pair-cache reads, merge/unmerge replay,
+notification producers (incl. the `new_source` dedupe_key NULL-concat fix), the
+Chrome extension app-link gate + redistribution, `image_key()`, estimation forward
+provenance, the sreality_id-cursored maintenance walkers (geocode/street/geo_cell
+partial indexes), then the 25-read-model "may lag" wave. `brokers.ts` and
+`api.ts`'s manual-estimates path turned out to need NO changes (see above) — drop
+them from the checklist. Phase D itself is now feature-complete pending only the
+`dirty_broker_listings` follow-up above; after that lands, Gate 1 (§6) has every
+listed prerequisite met and just needs an operator ask (backup + explicit OK).
 
 ## 0. What the review corrected (read this first)
 

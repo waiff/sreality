@@ -69,16 +69,35 @@ Run as ONE committed track; valueless half-done. Phases and their gates are spec
   **Still open:** browse hydration, dedup `ListingKey` + pair caches, merge/unmerge
   replay, notification producers, `image_key()`, the sreality_id-cursored maintenance
   walkers, 25 read models.
-- **Phase D** (step 1 ✅ shipped 2026-07-20) — pre-flip prep. Step 1: `listings`'s own
-  ingest `ON CONFLICT` (`upsert_listing`, `_BATCH_UPSERT_SQL`) retargeted from
-  `sreality_id` to the natural key `(source, source_id_native)`, matching Phase C's
-  child-carrier arbiters. Verified live via `EXPLAIN` (both resolve to
-  `listings_source_native_uidx`) plus a clean full pytest run; still draws the
-  synthetic sequence for new rows — only the conflict-check index changed. Needs to
-  bake ≥1 full scrape cycle across all 9 portals in production before being
-  considered validated (observed post-merge, not blocking). **Still open:** child
-  `DROP NOT NULL`s, the two child PK swaps, pre-built unique indexes on `sreality_id`
-  and `id`, the 19 legacy child FK drops, the parity-green precondition check.
+- **Phase D** (steps 1-2 (partial) and 3-7 ✅ shipped 2026-07-20) — pre-flip prep.
+  Step 1: `listings`'s own ingest `ON CONFLICT` (`upsert_listing`, `_BATCH_UPSERT_SQL`)
+  retargeted from `sreality_id` to the natural key `(source, source_id_native)`,
+  matching Phase C's child-carrier arbiters. Verified live via `EXPLAIN` (both resolve
+  to `listings_source_native_uidx`) plus a clean full pytest run; still draws the
+  synthetic sequence for new rows — only the conflict-check index changed. Preliminary
+  live signal is clean (8/9 portals wrote successfully in the first ~30 min post-merge,
+  0 errors); the full ≥1-scrape-cycle bake confirmation is still an open observation
+  task. Steps 2-7 (PRs #853/#854, `apply_r2_phase_d_prep.py` + `drop_r2_legacy_fks.py`,
+  both dispatch-only workflows, verified live): DROP NOT NULL on all 17 R2_CARRIERS
+  legacy columns still enforcing it (the runbook's design-time estimate of 14
+  undercounted — live pg_attribute is the source of truth); `estimation_cohort_entries`
+  PK swapped to `(estimation_run_id, listing_id)` (its listing_id was already 100%
+  backfilled by Phase A4); `listings_sreality_id_uidx` + `listings_id_pk_idx` built
+  CONCURRENTLY + `listings.id SET NOT NULL` (Gate 1's prerequisites); all 19 legacy
+  child FKs dropped (read live off `pg_constraint`, matched the runbook's count
+  exactly — re-addable any time, not gate-destructive). Step 7 (parity-green
+  precondition) confirmed via `verify_pipeline`'s `dual_write_parity` check:
+  `status=ok value=0` across all 22 armed carriers.
+  **Still open:** `dirty_broker_listings`'s own PK swap (migration 336 shipped the
+  nullable `listing_id` dual-write column + writer code, but the two writer sites are
+  hit by both the always-on worker (redeploys fast) AND per-portal GH Actions cron
+  (subject to the SHA-freeze gotcha — a run queued before the merge still executes
+  pre-merge code) — observed a genuine mix of old/new writes ~10 min post-merge, so
+  enforcing NOT NULL now would repeat the #825 class of bug for any lagging portal.
+  Wait for a full cadence cycle across all sources with 100% `listing_id` population
+  before backfilling the last stragglers + swapping its PK + retargeting its two
+  `ON CONFLICT` sites — a follow-up PR, not urgent (queue is tiny, sreality_id stays a
+  valid key regardless).
 - **GATE 1** — the PK-swap window (`sreality_id` → `id`), catalog-only and reversible.
 - **GATE 2** — stop drawing `synthetic_listing_id_seq` (the true point of no return).
 - **Phase H / R5** — optional cleanup, deferrable indefinitely. Existing `sreality_id`
