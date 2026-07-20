@@ -8,9 +8,19 @@ common to all. Full plan, sequencing, and gates: `docs/design/public-release-pro
 
 ## Status
 
-- **Phase 0 (emergency hardening)** — designed, **not yet applied**. Closes 3 live
-  anon-exploitable criticals (25 RLS-off tables, ~30 write-through `*_public` views, the
-  broker-PII default-ACL exposure). Independent of the SaaS decision; should ship regardless.
+- **Phase 0 (emergency hardening)** — **fully shipped 2026-07-20.** DB hardening applied live
+  2026-07-13 (migration 299 via Supabase MCP): anon revoked to ~nothing, authenticated loses
+  write on shared tables, 25 internal tables RLS-enabled, 8 dangerous DEFINER funcs locked,
+  broker-PII surfaces (A6) dark to `authenticated` too. **PR #775 merged 2026-07-20** (after
+  7 days open, rebased cleanly onto main with zero conflicts) — `require_token` is now
+  fail-CLOSED (verified behavior-preserving first: the live API already 401s unauthenticated
+  requests, so `API_TOKEN` was already set on Railway), `/docs`/`/redoc`/`/openapi.json` are
+  hidden, and `tests/test_migration_rls_grants.py` (the anon-write-grant + RLS-on-new-tables
+  CI gate) is now enforced on every push to `main`. That merge surfaced one more gap the gate
+  itself caught: `dedup_model_compare_sets` (migration 304) had no RLS — closed same-day via
+  migration 317 (same pattern as 301), applied live and verified before pushing.
+  `migrations/299_*.sql` + `301_rls_dedup_golden_sets.sql` are now on `main` too, closing the
+  repo/live drift where CI's schema-replay was testing a laxer schema than production.
 - **Phase 1 (multi-tenant foundations)** — in progress.
   - Increment 1 ✅ — accounts/account_members/admins, `current_account_ids()` /
     `is_platform_admin()`, the on-signup handler, JWT verify (JWKS/ES256) (migrations
@@ -32,7 +42,83 @@ common to all. Full plan, sequencing, and gates: `docs/design/public-release-pro
 - **Waves 1–4 (public features)** — not started; gated on Phase 1's exit (RLS lane green +
   external re-audit + 2-account pen-test).
 
+**CRITICAL finding + fix, 2026-07-20:** the 2-account pen-test
+(`tests/test_tenant_isolation_live.py`) only ever asserted RLS on **base tables**
+(`SET LOCAL ROLE authenticated; SELECT * FROM collections`) — but the SPA never reads base
+tables, only the `*_public` views. None of those views (`collections_public`,
+`property_pipeline_public`, `pipeline_stages_public`, `property_notes_public`,
+`property_tags_public`, `tags_public`, `collection_properties_public`,
+`property_estimates_public`) were ever created with `security_invoker = true` (checked every
+migration back to 022/025/202/203/205/211/278 — it was never built, not a regression). A
+Postgres view without that option runs as its **owner** (`postgres`, `rolbypassrls = true`),
+so it bypasses RLS entirely regardless of who queries it — every `authenticated` session was
+reading **every account's** collections/tags/notes/pipeline/estimates, not just its own.
+Invisible until now only because exactly one account exists. **Fixed live**: migration 316
+(`ALTER VIEW ... SET (security_invoker = true)` on all 8), verified with a foreign JWT
+(0 rows) vs the real account (unchanged row counts) — no grant/permission fallout, since
+`authenticated` already needed base-table grants for the tenant-pool API writes to work at
+all. Regression coverage added: `test_tenant_views_are_security_invoker` (static, all 8) +
+`test_cross_tenant_denial_through_public_view` (live, reproduces the exact bug). **This must
+be the anchor case in the exit-gate external re-audit** — the class of bug (`_public` view
+missing `security_invoker`) is the thing to search for exhaustively, not just these 8.
+Supabase's advisor (`security_definer_view`) flags **53 views total**; most are legitimately
+open shared-market data (no RLS to bypass), but a same-day pass found ~26 more that read
+**admin-only operational tables** (dedup tooling, health, price-stat run internals, LLM cost,
+pipeline-checks) through the identical bypass — currently harmless (the one authenticated
+user IS the admin) but a real gap the moment Wave 1 signs up a non-admin tenant, since
+frontend route-gating (`RequireAdmin`) and API `require_admin` don't apply to a direct
+supabase-js read.
+
+**Triaged + fixed the same day (migration 318):** a 29-agent live audit (Opus, one agent per
+flagged view/function) classified all 26 views + the 3 gap `SECURITY DEFINER` functions
+(`images_failure_overview`, `recent_workflow_failures`, `workflow_failure_summary`, which
+execute for any `authenticated` caller with no `is_admin` check inside — the Phase 0 doc's
+"deferred to Phase 1 admin-gating" was never actually closed at the function level). 23 views
++ all 3 functions are genuinely admin-only operational data with no legitimate non-admin SPA
+reader (confirmed per-object: base tables, RLS state, grants, and every frontend call site).
+3 views were correctly left alone: `browse_read_model_state_public` / `portal_listing_counts`
+(non-sensitive aggregate metadata) and `listing_freshness_checks_public` (a genuine non-admin
+feature — the Listing Detail "verify freshness" button reads it for any signed-in user).
+
+The fix deliberately does **NOT** reuse migration 316's technique (`security_invoker` + a
+base-table RLS policy): 7 of the flagged views read the shared `listings`/`properties`/
+`images` tables directly, which have carried RLS-enabled-with-**zero**-policies since early
+migrations specifically so their owner-bypass views (`listings_public`, `properties_public`,
+...) can keep serving shared-market reads to every authenticated user — adding a restrictive
+policy directly to those tables would risk every other reader of them for a narrow, low-value
+fix. Instead each of the 26 objects is redefined to embed `is_platform_admin()` as a plain
+query filter (the same technique `properties_public` already uses for
+`publication_gate_enabled()`) — evaluated per-request, independent of RLS/security_invoker/
+ownership, so it needs **zero** changes to `listings`/`properties`/`images` or any of the 15
+other base tables' grants or policies. Applied live and verified both directions before
+committing: a foreign JWT sees 0 rows across all 26 objects; the real admin JWT sees unchanged
+data; `listings_public`/`properties_public` reads confirmed completely unaffected. Regression
+coverage: `test_admin_ops_views_embed_is_platform_admin` (static) +
+`test_admin_ops_views_deny_non_admin_allow_admin` (live, promotes a test user into `admins`
+mid-test to prove the gate opens correctly, not just closes).
+
+**Also found the same day (lower severity, worth a cleanup pass):** `dedup_model_compare_sets`
+(migration 304) shipped without RLS — same pattern mig 300/301 already hit, currently
+protected only by the mig-299 default-ACL fix granting it zero browser access, deserves its
+own deny-all migration like 301 did. Supabase Auth's leaked-password-protection toggle is
+still off (dashboard setting, not a migration) — cheap to flip before Wave 1 public signup.
+
+**Also fixed the same day:** the Pipeline board (`/pipeline`) was failing to load
+("Nepodařilo se načíst pipeline.") — `fetchPipelineBoard` (`frontend/src/lib/queries.ts`)
+enriches each card with a canonical broker (shipped 2026-06-19, PR #519) by querying
+`listing_broker_public` + `brokers_public`, both of which the A6 decision (2026-07-13)
+correctly darkened for `authenticated` — but that pre-existing Pipeline dependency wasn't on
+anyone's radar when A6 shipped, and the fetch had no error isolation, so the 403 on broker
+data failed the *entire* board query. Fixed: both broker fetches now degrade to "no broker
+shown" on error instead of failing the board — consistent with A6's intent (broker data stays
+dark until Wave 4), stages/cards/properties/images all still load. No other caller of these
+two fetch helpers exists in the app (grep-verified) — this was the only broken surface.
+
 ## Next
 
-- Phase 1 exit gate (external re-audit + 2-account pen-test), then Wave 1 (extension + agent estimations: quotas, async job model, Stripe checkout + metering).
-- Apply Phase 0 before any wave that widens the anon/authenticated surface further.
+1. Phase 1 exit gate: external re-audit (`/code-review ultra`) — point it explicitly at the
+   `is_platform_admin()` / `security_invoker` view-gating class of bug found + fixed today
+   (migrations 316 + 318), since the existing pen-test suite structurally couldn't have caught
+   it on its own (it now can — both migrations landed live-verified regression tests).
+2. Wave 1 (extension + agent estimations: quotas, async job lane, Stripe checkout + metering).
+3. Housekeeping: enable Supabase Auth's leaked-password-protection toggle before public signup.
