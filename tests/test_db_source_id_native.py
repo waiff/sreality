@@ -43,8 +43,20 @@ def test_single_upsert_stamps_and_heals_source_id_native() -> None:
     assert 'row.get("source_id_native") or str(sreality_id)' in src
 
 
-def test_ingest_carries_native_id_into_the_insert_row() -> None:
-    # Non-sreality ingest must put its portal id in the row so upsert_listing
-    # stamps it inline, not only via the post-insert source/source_url UPDATE.
+def test_single_upsert_stamps_source_inline_to_avoid_natkey_collision() -> None:
+    # `source` MUST be in the INSERT (not only the post-insert UPDATE): its column
+    # default is 'sreality', so an insert stamping only source_id_native would write
+    # ('sreality', <native_id>) and could collide with a real sreality row on the
+    # UNIQUE(source, source_id_native) index, which ON CONFLICT (sreality_id) does not
+    # arbitrate (unique_violation -> ingest aborts -> portal drain wedges).
+    src = inspect.getsource(db.upsert_listing)
+    assert "%(source)s" in src
+    assert 'row.get("source") or "sreality"' in src
+
+
+def test_ingest_carries_full_natural_key_into_the_insert_row() -> None:
+    # Non-sreality ingest must put BOTH source and its portal id in the row so
+    # upsert_listing stamps the natural-key pair inline, not via the post-insert UPDATE.
     src = inspect.getsource(db.ingest_scraped_listing)
+    assert 'row["source"] = listing.source' in src
     assert 'row["source_id_native"] = listing.source_id_native' in src

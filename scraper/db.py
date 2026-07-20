@@ -523,16 +523,22 @@ def upsert_listing(
         INSERT INTO listings (
             sreality_id, last_seen_at, is_active,
             {column_list},
-            street_source, source_id_native, geom, raw_json
+            street_source, source, source_id_native, geom, raw_json
         )
         VALUES (
             %(sreality_id)s, now(), true,
             {placeholders},
             CASE WHEN %(street)s::text IS NOT NULL THEN 'parser' END,
-            -- Natural-key half (migration 091): non-sreality callers pass the
-            -- portal's native id in the row; sreality (no row value) falls back to
-            -- sreality_id::text. Stamped inline at INSERT — not healed afterward —
-            -- so the (source, source_id_native) NOT NULL invariant holds per-write.
+            -- The FULL natural key (migration 091) is stamped inline at INSERT, not
+            -- healed afterward: non-sreality callers pass source + the portal's native
+            -- id in the row; sreality (no row values) falls back to 'sreality' +
+            -- sreality_id::text. `source` MUST be set here, not only by the post-insert
+            -- UPDATE — its column default is 'sreality', so an insert that set only
+            -- source_id_native would transiently be ('sreality', <native_id>) and could
+            -- collide with a real sreality row on the UNIQUE(source, source_id_native)
+            -- index, which ON CONFLICT (sreality_id) does not arbitrate (unique_violation
+            -- → the whole ingest aborts and the portal drain wedges).
+            %(source)s,
             %(source_id_native)s,
             CASE
               -- Cast to double precision so a NULL lon/lat (common for bazos and
@@ -575,8 +581,10 @@ def upsert_listing(
         "raw_json": raw_jsonb,
         "lon": row.get("lon"),
         "lat": row.get("lat"),
-        # sreality's native id IS its sreality_id; non-sreality callers override
-        # by putting their portal id in row["source_id_native"] (ingest path).
+        # The natural-key pair, stamped inline (see the INSERT comment). sreality's
+        # native id IS its sreality_id; non-sreality callers (ingest) put their
+        # source + portal id in the row so the pair is written atomically.
+        "source": row.get("source") or "sreality",
         "source_id_native": row.get("source_id_native") or str(sreality_id),
     }
     for col in LISTING_COLUMNS:
@@ -687,17 +695,21 @@ def ingest_scraped_listing(
             pk = int(cur.fetchone()[0])
 
     row = listing.to_row(pk)
-    # Carry the portal's native id into the INSERT so source_id_native is stamped
-    # atomically (the NOT NULL invariant is checked at insert time, before the
-    # source/source_url UPDATE below could heal it).
+    # Carry the FULL natural key (source + native id) into the INSERT so it is stamped
+    # atomically. Both matter: source_id_native for the NOT NULL invariant, and source
+    # because its column default is 'sreality' — inserting only source_id_native would
+    # transiently write ('sreality', <native_id>) and could collide with a real sreality
+    # row on the UNIQUE(source, source_id_native) index (ON CONFLICT (sreality_id) does
+    # not arbitrate it → unique_violation → drain wedge). source_url is not part of the
+    # key, so it stays on the post-insert UPDATE.
+    row["source"] = listing.source
     row["source_id_native"] = listing.source_id_native
     with conn.transaction():
         result = upsert_listing(conn, row, listing.raw or {}, listing.content_hash())
         with conn.cursor() as cur:
             cur.execute(
-                "UPDATE listings SET source = %s, source_url = %s "
-                "WHERE sreality_id = %s",
-                (listing.source, listing.source_url, pk),
+                "UPDATE listings SET source_url = %s WHERE sreality_id = %s",
+                (listing.source_url, pk),
             )
         _ensure_property(conn, pk, listing.source)
         if result != "unchanged" and listing.source in BROKER_ATTRIBUTED_SOURCES:

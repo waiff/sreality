@@ -157,11 +157,15 @@ def test_ingest_first_sight_draws_synthetic_pk(monkeypatch):
 
     assert pk == -1 and result == "new"
     assert _find(conn.executed, "nextval('synthetic_listing_id_seq')") is not None
-    # The native id is carried into the INSERT row (stamped inline by upsert_listing),
-    # so the post-insert UPDATE only carries source + source_url now.
+    # The FULL natural key (source + native id) is carried into the INSERT row so it is
+    # stamped atomically (source's column default is 'sreality', so inserting only the
+    # native id could collide with a real sreality row on the unique natural-key index).
+    # Only source_url — not part of the key — remains on the post-insert UPDATE.
+    assert rows and rows[0]["source"] == "bazos"
     assert rows and rows[0]["source_id_native"] == "218865547"
-    src = _find(conn.executed, "UPDATE listings SET source =")
-    assert src is not None and src[1] == ("bazos", "https://bazos.cz/x", -1)
+    src = _find(conn.executed, "UPDATE listings SET source_url =")
+    assert src is not None and src[1] == ("https://bazos.cz/x", -1)
+    assert _find(conn.executed, "UPDATE listings SET source =") is None
     assert _find(conn.executed, "INSERT INTO properties") is not None
 
 
