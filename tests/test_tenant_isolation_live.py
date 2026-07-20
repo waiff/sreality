@@ -476,6 +476,20 @@ _ADMIN_GATED_FUNCTIONS: list[str] = [
     "images_failure_overview", "recent_workflow_failures", "workflow_failure_summary",
 ]
 
+# Migration 332: the five health/ops RPCs the Health dashboard calls. Unlike the
+# set-returning functions above these return a scalar jsonb, so the gate shows up as
+# NULL rather than zero rows — `count(*) FROM fn()` is 1 either way and would not
+# catch a regression. Migration 318 missed them because its triage worked from the
+# `security_definer_view` advisor list and these were plain SECURITY INVOKER SQL
+# functions; SPA route-gating (<AdminPage>) is a client affordance, not a boundary.
+_ADMIN_GATED_SCALAR_RPCS: list[str] = [
+    "health_summary()",
+    "portal_health_summary()",
+    "scraper_health_checks('sreality')",
+    "category_trends('sreality')",
+    "image_storage_overview()",
+]
+
 
 # The gate must sit in a boolean/WHERE position, not merely appear somewhere in the
 # definition: `true OR is_platform_admin()`, or the call moved into the SELECT list
@@ -583,6 +597,11 @@ def test_admin_ops_views_deny_non_admin_allow_admin(
                 assert cur.fetchone()[0] == 0, (
                     f"non-admin authenticated saw rows through {name}()"
                 )
+            for call in _ADMIN_GATED_SCALAR_RPCS:
+                cur.execute(f"SELECT {call}")  # noqa: S608 - fixed list
+                assert cur.fetchone()[0] is None, (
+                    f"non-admin authenticated got data back from {call}"
+                )
     with svc.cursor() as cur:
         cur.execute(
             "INSERT INTO admins (user_id) VALUES (%s) ON CONFLICT DO NOTHING",
@@ -595,6 +614,11 @@ def test_admin_ops_views_deny_non_admin_allow_admin(
                     cur.execute(f"SELECT count(*) FROM {name}")  # must not raise
                 for name in _ADMIN_GATED_FUNCTIONS:
                     cur.execute(f"SELECT count(*) FROM {name}()")  # must not raise
+                for call in _ADMIN_GATED_SCALAR_RPCS:
+                    # Must not raise. NOT asserted non-NULL: a fresh schema replay
+                    # never refreshes these matviews, so an admin legitimately reads
+                    # NULL here — the point is that the gate opens without error.
+                    cur.execute(f"SELECT {call}")  # noqa: S608 - fixed list
     finally:
         with svc.cursor() as cur:
             cur.execute("DELETE FROM admins WHERE user_id = %s", (tenants["a_user"],))
@@ -625,13 +649,26 @@ def test_no_anon_write_grants(svc: Any) -> None:
     )
 
 
-# Migration 318 gates these behind is_platform_admin(), but a materialized view
-# can carry neither RLS nor an embedded gate — so `authenticated` holding SELECT on
-# the raw matview reads exactly what the gated wrapper hides (migration 331).
+# A materialized view can carry neither RLS nor an embedded gate, so `authenticated`
+# holding SELECT on one reads exactly what its gated wrapper hides. The first three
+# back migration 318's gated views/function (closed by 331); the rest back the five
+# health/ops RPCs (closed by 332, which had to convert those RPCs to SECURITY
+# DEFINER first — while they were INVOKER they read these as the CALLER, so revoking
+# would have broken the operator's own Health dashboard).
+#
+# Deliberately absent: properties_map_mv, price_stat_choropleth, rent_map_choropleth
+# — the SPA reads those three directly as shared-market data.
 _ADMIN_GATED_MATVIEWS: list[str] = [
     "dedup_funnel_resolutions_mv",
     "dedup_llm_cost_by_category_mv",
     "images_failure_overview_mv",
+    "health_summary_mv",
+    "health_mv_refresh_stamp",
+    "portal_health_mv",
+    "scraper_health_checks_mv",
+    "snapshot_churn_24h_mv",
+    "category_trends_mv",
+    "image_storage_overview_mv",
 ]
 
 
