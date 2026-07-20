@@ -269,6 +269,13 @@ def main() -> int:
                 conn, carrier, args.batch, args.repair, deadline,
             )
             total += filled
+        # The chain condition, computed on the SAME connection at the end of the
+        # run: how much is genuinely left. Reported as a machine-readable marker so
+        # the workflow can decide whether to re-dispatch itself rather than a human
+        # having to. Zero means every carrier is clean and the chain stops.
+        if not args.dry_run:
+            pending = sum(_remaining(conn, c, args.repair) for c in carriers)
+            log.info("PENDING=%d", pending)
     log.info("done: %d row(s) %s", total, "pending" if args.dry_run else "filled")
     return 0
 

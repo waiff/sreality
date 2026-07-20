@@ -247,6 +247,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
       }
     ],
     "secrets": [
+      "SCRAPE_CHAIN_TOKEN",
       "SUPABASE_DB_SESSION_URL",
       "SUPABASE_DB_URL"
     ],
