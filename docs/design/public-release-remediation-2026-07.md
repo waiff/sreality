@@ -1,6 +1,8 @@
 # Public-release remediation — post-ship review of migrations 316–319
 
-**Date:** 2026-07-20. **Status: R1 shipped (migrations 329+330, live-verified). R2–R4 pending.**
+**Date:** 2026-07-20. **Status: COMPLETE — R1, R2, R2b, R3, R4 all shipped and
+live-verified (migrations 329, 330, 331, 332). The one deliberate deferral is the
+health-matview repoint; rationale in R2.**
 
 A 14-finding code review of the deployed 316–319 hardening batch was adversarially
 re-verified by a 6-agent workflow (repo + **live DB**, project `erlvtprrmrylhznfyaih`)
@@ -339,6 +341,8 @@ then revoke the matview SELECT), so it ships as its own PR rather than riding al
 
 ## R3 — test-lane hardening + the standing CI gate
 
+**✅ SHIPPED 2026-07-20.**
+
 **Branch:** `fix/tenant-test-lane`. **No migration.** This is what makes bug-class #27
 structurally impossible to ship silently, replacing the roadmap's "defer to one-time
 external re-audit" posture.
@@ -393,6 +397,8 @@ column predicate would silently go per-row).
 ---
 
 ## R4 — Pipeline broker fetch: narrow the catch, fix the doc
+
+**✅ SHIPPED 2026-07-20 (PR #845).**
 
 **Branch:** `fix/pipeline-broker-catch`. **No migration.** Frontend + docs in ONE PR
 (the same-PR-doc rule is exactly what F12 flagged).
