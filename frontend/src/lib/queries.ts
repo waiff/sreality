@@ -1044,6 +1044,25 @@ export const fetchListingById = async (
   return (data as unknown as ListingPublic | null) ?? null;
 };
 
+/* Resolve a listing's natural key (source, source_id_native) to its sreality_id,
+ * so the canonical /listing/{source}/{native} route can reuse fetchListingById.
+ * property_sources_public exposes the natural key (migration 091) for every
+ * listing, and (source, source_id_native) is unique, so maybeSingle is safe. */
+export const fetchListingIdByNaturalKey = async (
+  source: string,
+  sourceIdNative: string,
+): Promise<number | null> => {
+  const { data, error } = await supabase
+    .from('property_sources_public')
+    .select('sreality_id')
+    .eq('source', source)
+    .eq('source_id_native', sourceIdNative)
+    .maybeSingle();
+  if (error) throw error;
+  const row = data as unknown as { sreality_id: number | null } | null;
+  return row?.sreality_id ?? null;
+};
+
 /* Resolve a property_id to its representative listing's sreality_id.
  * Lets /listing?property=ID (e.g. the dedup merge feed's link) land on the
  * survivor's detail page. properties_public exposes sreality_id = repr id. */
