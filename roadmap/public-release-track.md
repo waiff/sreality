@@ -133,10 +133,15 @@ remediation R3 closes that. Full spec: `docs/design/public-release-remediation-2
 
 ## Next
 
-1. **R1 (P0 hotfix, urgent)** — migration 320: revert `security_invoker` on
-   `property_estimates_public` + claims-absent `session_user`-keyed fallback in
-   `is_platform_admin()`; un-breaks Browse estimates filter, golden-set freeze, Health
-   matviews (heal on next cron tick). Spec: `docs/design/public-release-remediation-2026-07.md` § R1.
+1. ~~**R1 (P0 hotfix)**~~ — **SHIPPED 2026-07-20, migrations 329 + 330** (320-328 were
+   taken by the listing-identity track). Reverted `security_invoker` on the market-wide
+   `property_estimates_public` + gave `is_platform_admin()` a claims-absent fallback keyed on
+   `session_user` **and** the `role` GUC. Live-verified: `dedup_label_events` 0 → 809 rows
+   (golden-set freeze works again), fetch-failures 0 → 1485, detail-queue 0 → 680, and the
+   Health matviews healed through the real pg_cron tick (sreality now reports `38 active`
+   fetch failures, matching the base table exactly). Deny direction intact: foreign JWT and
+   claims-less `SET ROLE` both stay non-admin. The two-migration split is explained in the
+   spec's R1 addendum — 330 closes a CI-replay fidelity gap 329 left open.
 2. **R2 (public-release blocker)** — revoke the 7 drifted anon view grants + matview ACL
    cleanup (auth SELECT off the 3 gate-backing `_mv`s, DML/MAINTAIN off all) + repoint the 3
    health matviews at base tables; standing anon-allowlist + matview-dark tests. § R2.
