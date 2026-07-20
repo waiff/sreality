@@ -155,6 +155,28 @@ export const FIELD_GROUPS: FieldGroup[] = [
     ],
   },
   {
+    title: 'Nelokalitní vstupy dedupu',
+    hint: 'Nejsou to adresní pole, ale dedup cesty je vyžadují stejně tvrdě jako souřadnici — bez nich listing nikdy nekandiduje. Proto se tu dají filtrovat: jinak by se číslo „chybí dispozice" z matice nedalo rozkliknout na jeho řádky.',
+    fields: [
+      {
+        key: 'disposition',
+        label: 'disposition',
+        explain:
+          'Dispozice (2+kk apod.). Povinná pro cestu ulice+dispozice i pro byt-geo příčku — u bytu je to nutný rozlišovač, protože jeden dům stojí na jedné souřadnici a stohuje desítky jednotek. Jednodomé rodiny (dům/pozemek/komerce) ji nesou téměř v 0 % případů; právě proto pro ně existuje geo cesta.',
+        value: (r) => s(r.disposition),
+        presence: true,
+      },
+      {
+        key: 'area',
+        label: 'plocha (coalesce)',
+        explain:
+          'coalesce(area_m2, estate_area, usable_area) — první nenulová plocha. Obě geo cesty ji vyžadují: bez plochy nemá geo buňka čím omezit shodu, takže se listing vůbec nenačte.',
+        value: (r) => s(r.area_m2 ?? r.estate_area ?? r.usable_area),
+        presence: true,
+      },
+    ],
+  },
+  {
     title: 'Signály přesnosti / původu (z raw_json)',
     hint: 'Portálem deklarované signály přesnosti pinu — většinou zatím nečtené kódem; přesně to, co se tu hledá. Jen zobrazení: filtrovat podle nich nejde (dotaz do raw_json by detoastoval celý payload každého řádku — incident migrace 234).',
     fields: [

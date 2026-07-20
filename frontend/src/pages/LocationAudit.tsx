@@ -1,10 +1,12 @@
-import { useMemo, useState, useEffect } from 'react';
+import { useMemo, useRef, useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 
+import EligibilityMatrix from '@/components/EligibilityMatrix';
 import FilterChip from '@/components/FilterChip';
 import InfiniteSentinel from '@/components/InfiniteSentinel';
 import { useInfiniteList } from '@/lib/useInfiniteList';
+import { PATH_BY_KEY, type CellFilter, type DedupPathKey } from '@/lib/dedupPaths';
 import {
   getLocationAudit,
   getLocationAuditRaw,
@@ -87,9 +89,44 @@ export default function LocationAudit() {
   const [categoryMain, setCategoryMain] = useState('');
   const [active, setActive] = useState<'' | 'active' | 'inactive'>('');
   const [dedup, setDedup] = useState<'' | 'reachable' | 'unreachable'>('');
+  // Set only by an eligibility-matrix cell: which dedup pass, and which half of it.
+  // No chip row of its own — it appears as a removable pill when the matrix sets it.
+  const [pathFilter, setPathFilter] = useState<{
+    path: DedupPathKey;
+    state?: 'eligible' | 'ineligible';
+  } | null>(null);
   const [presence, setPresence] = useState<Presence>({});
   const [presenceOpen, setPresenceOpen] = useState(false);
   const [rawFor, setRawFor] = useState<LocationAuditRow | null>(null);
+  const listTop = useRef<HTMLParagraphElement | null>(null);
+
+  /* A matrix cell hands over the complete filter state that reproduces the listings it
+   * counted — applied as a REPLACEMENT, not a merge: leftovers from a previous click
+   * would silently narrow the result below the number the operator just clicked. */
+  const applyCellFilter = (f: CellFilter) => {
+    setSource(f.source ?? '');
+    setCategoryMain(f.category_main ?? '');
+    setActive(f.active ?? '');
+    setDedup(f.dedup ?? '');
+    setPathFilter(f.path ? { path: f.path, state: f.path_state } : null);
+    const next: Presence = {};
+    for (const k of f.has) next[k] = 'has';
+    for (const k of f.missing) next[k] = 'missing';
+    setPresence(next);
+    if (f.has.length + f.missing.length > 0) setPresenceOpen(true);
+    requestAnimationFrame(() =>
+      listTop.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }),
+    );
+  };
+
+  const clearAll = () => {
+    setSource('');
+    setCategoryMain('');
+    setActive('');
+    setDedup('');
+    setPathFilter(null);
+    setPresence({});
+  };
 
   const hasKeys = useMemo(
     () => Object.keys(presence).filter((k) => presence[k] === 'has').sort(),
@@ -111,7 +148,17 @@ export default function LocationAudit() {
     });
 
   const list = useInfiniteList<LocationAuditRow, LocPage>({
-    queryKey: ['location-audit', source, categoryMain, active, dedup, hasKeys, missingKeys],
+    queryKey: [
+      'location-audit',
+      source,
+      categoryMain,
+      active,
+      dedup,
+      pathFilter?.path ?? '',
+      pathFilter?.state ?? '',
+      hasKeys,
+      missingKeys,
+    ],
     queryFn: async (cursor) => {
       const offset = (cursor as number | null) ?? 0;
       const resp = await getLocationAudit({
@@ -119,6 +166,8 @@ export default function LocationAudit() {
         category_main: categoryMain || undefined,
         active: active || undefined,
         dedup: dedup || undefined,
+        path: pathFilter?.path,
+        path_state: pathFilter?.state,
         has: hasKeys.length ? hasKeys : undefined,
         missing: missingKeys.length ? missingKeys : undefined,
         limit: PAGE_SIZE,
@@ -136,6 +185,8 @@ export default function LocationAudit() {
 
   const total = list.firstPage?.total ?? null;
   const activeFilters = hasKeys.length + missingKeys.length;
+  const anyFilter =
+    activeFilters > 0 || !!source || !!categoryMain || !!active || !!dedup || !!pathFilter;
 
   return (
     <div className="px-6 py-8 max-w-5xl mx-auto">
@@ -149,6 +200,10 @@ export default function LocationAudit() {
       </header>
 
       <Explainer />
+
+      {/* The aggregate view: which portal × type leaks listings, and through which
+          missing field. Its cells drive the filter bar + presence chips below. */}
+      <EligibilityMatrix onPick={applyCellFilter} />
 
       {/* Filter bar */}
       <div className="mt-6 flex flex-col gap-2">
@@ -172,6 +227,26 @@ export default function LocationAudit() {
             <FilterChip key={t.id} on={dedup === t.id} label={t.label} onClick={() => setDedup(t.id)} />
           ))}
         </FilterRow>
+        {pathFilter && (
+          <FilterRow label="Cesta">
+            <span className="inline-flex items-center gap-2 px-2.5 py-1 rounded-[var(--radius-sm)] border border-[var(--color-copper)] bg-[var(--color-copper-soft)] text-[0.78rem] text-[var(--color-copper)]">
+              {PATH_BY_KEY[pathFilter.path].label}
+              {pathFilter.state && (
+                <span className="opacity-70">
+                  · {pathFilter.state === 'eligible' ? 'způsobilé' : 'nezpůsobilé'}
+                </span>
+              )}
+              <button
+                type="button"
+                onClick={() => setPathFilter(null)}
+                className="text-[var(--color-copper)] hover:text-[var(--color-ink)]"
+                aria-label="Zrušit filtr cesty"
+              >
+                ×
+              </button>
+            </span>
+          </FilterRow>
+        )}
       </div>
 
       {/* Presence-by-field filter */}
@@ -224,9 +299,23 @@ export default function LocationAudit() {
         )}
       </div>
 
-      <p className="mt-3 text-[0.72rem] text-[var(--color-ink-4)]">
-        {total != null ? `${fmtCount(total)} listingů odpovídá filtru` : 'Načítám…'}
-        {' · aktivní a naposledy viděné první'}
+      <p
+        ref={listTop}
+        className="mt-3 scroll-mt-4 flex flex-wrap items-baseline gap-2 text-[0.72rem] text-[var(--color-ink-4)]"
+      >
+        <span>
+          {total != null ? `${fmtCount(total)} listingů odpovídá filtru` : 'Načítám…'}
+          {' · aktivní a naposledy viděné první'}
+        </span>
+        {anyFilter && (
+          <button
+            type="button"
+            onClick={clearAll}
+            className="text-[var(--color-ink-3)] hover:text-[var(--color-ink)] underline decoration-dotted underline-offset-2"
+          >
+            Vyčistit vše
+          </button>
+        )}
       </p>
 
       <div className="mt-4 flex flex-col gap-3">

@@ -71,6 +71,33 @@
 > recommended order (model fix → re-replay → operator sign-off). This whole track file is a
 > candidate for a future restructure (its own PR) to replace the stale D1/D2 body below with a
 > pointer-only index, per CLAUDE.md's roadmap-maintenance rule.
+>
+> **Session 6 (2026-07-20, shipped)** = **why the engine cannot reach part of the inventory**,
+> measured instead of guessed. `/location-audit` gained an aggregate matrix on top of the row
+> view (property type × portal, one tab per pass + a "no pass at all" summary), backed by ONE
+> grouped scan (`GET /location-audit/eligibility-matrix`, 531 buckets, ~0.8s) whose buckets carry
+> the joint distribution of the five eligibility inputs plus the engine's own three `elig_*`
+> verdicts — so the client derives only the REASON, never eligibility. Every number drills into
+> the row list via new `path` / `path_state` params + `disposition` / `area` presence filters.
+> **Live baseline (2026-07-20): 33,909 of 557,653 listings — 6.1%, and 8.9% of active — are
+> reachable by NO pass.** Ranked causes, all measured:
+> 1. **`obec_id IS NULL` while `geom` is present — ~18.3k active rows, the single biggest cause.**
+>    18,290 of them are **idnes foreign listings** (Spain/Croatia; mean lon 3.2 / lat 39.7, only
+>    106 inside the CZ bbox). `obec_id` is a PIP of the coordinate into `admin_boundaries`, which
+>    is Czech-only, so a correct foreign pin yields NULL — and BOTH geo passes hard-require
+>    `obec_id`. This is a scope question, not a parser bug: either exclude foreign inventory from
+>    the dedup expectation, or give the geo passes a non-CZ blocking key. **Undecided — flagged.**
+> 2. **No area** (~6.5k), concentrated in bazos `dum` (1,937) and `komercni` across portals.
+> 3. **No coordinate at all** (~5.3k).
+> 4. **1,487 active `byt` with a street but no disposition** — blocked on BOTH byt routes at once.
+> Structural finding the matrix makes visible: the street pass has **no category gate** but
+> requires `disposition`, which single-dwelling families carry at ~0-6% (`pozemek`: exactly 0 of
+> 86,587). The geo pass is their only route — and it is active-only, so an inactive geo-family
+> listing is **permanently** unreachable by construction. **Bug fixed in passing:**
+> `eligible_predicate` is three-valued (a NULL `category_main` makes both category-gated arms
+> NULL), so the audit page's bare `NOT (...)` unreachable filter matched nothing for those rows —
+> 197 active listings were invisible in *both* the reachable and unreachable filters. Now
+> `IS TRUE` / `IS NOT TRUE`, matching what `_publish_sweep` already did.
 
 ## Dedup + canonical listing track (parallel)
 
