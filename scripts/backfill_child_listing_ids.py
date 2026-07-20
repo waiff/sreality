@@ -64,15 +64,25 @@ _MAX_RETRIES = 5
 _MAX_WINDOW_IDS = 20_000_000
 
 
-def _predicate(new: str, legacy: str, repair: bool) -> str:
-    """Which rows this run is allowed to touch."""
+def _predicate(
+    new: str, legacy: str, repair: bool, skip: str | None = None,
+) -> str:
+    """Which rows this run is allowed to touch.
+
+    `skip` excludes rows an UPDATE legally cannot write (see R2_CARRIERS). It is
+    part of the predicate itself, so counting and updating agree — a row skipped by
+    one but counted by the other would keep "remaining" permanently above zero and
+    make the self-chaining workflow re-dispatch forever.
+    """
     if repair:
-        return (
+        base = (
             f"t.{legacy} IS NOT NULL "
             f"AND t.{new} IS DISTINCT FROM (SELECT l.id FROM listings l "
             f"WHERE l.sreality_id = t.{legacy})"
         )
-    return f"t.{legacy} IS NOT NULL AND t.{new} IS NULL"
+    else:
+        base = f"t.{legacy} IS NOT NULL AND t.{new} IS NULL"
+    return f"{base} AND NOT ({skip})" if skip else base
 
 
 def _remaining(conn: "psycopg.Connection", carrier: dict[str, Any], repair: bool) -> int:
@@ -80,7 +90,7 @@ def _remaining(conn: "psycopg.Connection", carrier: dict[str, Any], repair: bool
     for legacy, new in carrier["cols"]:
         sql = (
             f"SELECT count(*) FROM {carrier['table']} t "
-            f"WHERE {_predicate(new, legacy, repair)}"
+            f"WHERE {_predicate(new, legacy, repair, carrier.get('skip'))}"
         )
         with conn.cursor() as cur:
             cur.execute(f"SET statement_timeout = '{_STATEMENT_TIMEOUT}'")
@@ -106,7 +116,7 @@ def _bounds(
         cur.execute(f"SET statement_timeout = '{_STATEMENT_TIMEOUT}'")
         cur.execute(
             f"SELECT min({cursor}), max({cursor}) FROM {table} t "
-            f"WHERE {_predicate(new, legacy, repair)}"
+            f"WHERE {_predicate(new, legacy, repair, carrier.get('skip'))}"
         )
         lo, hi = cur.fetchone()
     conn.rollback()
@@ -137,7 +147,7 @@ def _update_window(
         f"UPDATE {carrier['table']} t SET {new} = l.id "
         f"FROM listings l "
         f"WHERE l.sreality_id = t.{legacy} "
-        f"AND {where_window} AND {_predicate(new, legacy, repair)}"
+        f"AND {where_window} AND {_predicate(new, legacy, repair, carrier.get('skip'))}"
     )
 
     def _op(c: "psycopg.Connection") -> int:
