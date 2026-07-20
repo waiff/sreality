@@ -44,9 +44,18 @@ R2_CARRIERS: list[dict[str, Any]] = [
      "cols": [("sreality_id_a", "listing_id_a"), ("sreality_id_b", "listing_id_b")]},
     {"table": "listing_site_plan_matches", "cursor": "id",
      "cols": [("sreality_id_a", "listing_id_a"), ("sreality_id_b", "listing_id_b")]},
+    # `skip` excludes rows the backfill must not touch. dedup_pair_audit carries a
+    # NOT VALID CHECK (left_sreality_id <> right_sreality_id), so ~4.5k historical
+    # self-paired rows (a dedup-engine bug, 2026-06-24..07-13, none since) are
+    # tolerated where they sit — but Postgres re-checks every CHECK on any row an
+    # UPDATE touches, so backfilling them raises CheckViolation. They keep the
+    # legacy handle only. The skip is applied to COUNTING as well as updating: skip
+    # one but not the other and "remaining" never reaches zero, which would make the
+    # self-chaining workflow re-dispatch forever.
     {"table": "dedup_pair_audit", "cursor": "id",
      "cols": [("left_sreality_id", "left_listing_id"),
-              ("right_sreality_id", "right_listing_id")]},
+              ("right_sreality_id", "right_listing_id")],
+     "skip": "t.left_sreality_id = t.right_sreality_id"},
     {"table": "properties", "cursor": "id", "cols": [("repr_listing_id", "repr_listing_ref_id")]},
     {"table": "property_notes", "cursor": "id",
      "cols": [("origin_listing_id", "origin_listing_ref_id")]},
