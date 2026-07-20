@@ -18,6 +18,41 @@
 > operator's explicit OK. Everything else is additive and worker-safe (the always-on
 > realtime worker writes `listings` + children 24/7).
 
+## Progress
+
+**Phase A — SHIPPED (2026-07-20, PR #831), migrations 320-328 applied.**
+- **A1**: nullable `listing_id` on 22 carriers (23 columns), six migrations split by
+  table group so no transaction holds ACCESS EXCLUSIVE across many hot tables. Column
+  names as planned, with the three collisions taking `_ref_id`
+  (`properties.repr_listing_ref_id`, `property_notes.origin_listing_ref_id`,
+  `property_merge_events.listing_ref_id`). The partial `WHERE listing_id IS NULL`
+  indexes were moved OUT of A1 to Phase B — before the backfill they would match every
+  row, i.e. an 8M-entry index built only to drain to empty.
+- **A2**: dual-write at every writer site, the surrogate always resolved IN SQL.
+  `manual_rental_estimates_history` turned out to have no Python writer at all — it is
+  filled by a trigger copying the OLD row, so migration 327 redefines that function and
+  its dual-write comes free. All upserts also heal `listing_id` in `DO UPDATE SET`.
+- **A3**: `check_dual_write_parity` in the existing `verify_pipeline` harness +
+  `dual_write_watermark` (326, RLS in 328). The carrier list lives once in
+  `toolkit/listing_identity.py`; parity and backfill import the same object, pinned by a
+  test — a carrier in one and not the other is the exact silent hole this refactor's
+  audits kept finding.
+- **A4**: `scripts/backfill_child_listing_ids.py` + a dispatch-only workflow. NOT yet
+  run — it must run only after the A2 deploy is live.
+
+Two bugs were caught during Phase A that are worth remembering:
+1. **The parity check was silently green when unarmed.** Its counting query is
+   aggregate-only, so a carrier with no watermark row returned `(0,0,0)` — identical to
+   clean. Armedness is now read from the watermark table. Found by running the generated
+   SQL against production rather than trusting it.
+2. **CI caught an avoidable round-trip**: `record_images`/`record_videos` resolved the
+   surrogate with a separate `SELECT` and carried it through Python. Now inline, like
+   every other site — the id never travels through Python where a mis-zip could point
+   rows at the wrong listing.
+
+**Next up: arm the watermarks (post-deploy), then run the backfill to convergence,
+then Phase B.**
+
 ## 0. What the review corrected (read this first)
 
 1. **The doc's R2→R3 order is backwards.** Backfilling children before dual-write deploys

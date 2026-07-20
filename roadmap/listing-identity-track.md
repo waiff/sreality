@@ -29,10 +29,12 @@ doc's R2–R5 runbook is superseded — a 9-agent adversarial review found four 
 ### Open — the R2 → PK-swap track (in progress)
 Run as ONE committed track; valueless half-done. Phases and their gates are specified in
 `docs/design/listing-identity-r2-pk-swap-runbook.md`:
-- **Phase A** — additive `listing_id` columns on 15 Class A + 8 Class B carriers, then
-  dual-write every writer site, then backfill (order matters: backfill before dual-write
-  can never converge against the always-on worker), plus a `check_dual_write_parity`
-  lane in `verify_pipeline`.
+- **Phase A** (✅ shipped 2026-07-20, PR #831, migs 320-328) — additive `listing_id`
+  columns on 22 carriers, dual-write at every writer site, `check_dual_write_parity` in
+  `verify_pipeline` anchored on a per-carrier `dual_write_watermark`, and the child
+  backfill script + dispatch workflow. Order is load-bearing: backfilling before
+  dual-write ships can never converge against the always-on worker. The backfill itself
+  still has to be run to convergence.
 - **Phase B** — `CREATE INDEX CONCURRENTLY`, FK `NOT VALID` → `VALIDATE` (images is
   8.08M rows), new unique guards alongside the old, per-child validated NOT NULL CHECK.
 - **Phase C** — writer `ON CONFLICT` retargets + the remaining read cutover (frontend
