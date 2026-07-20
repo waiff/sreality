@@ -1,7 +1,7 @@
 """Merge / unmerge the canonical `properties` parent (multi-portal dedup PR2).
 
 A merge re-points a retired property's child listings onto the survivor and
-soft-retires the loser; the ~9 FK child tables key on listings.sreality_id, so
+soft-retires the loser; the 19 FK child columns (15 tables) key on listings.sreality_id, so
 all history stays put. Every re-pointed child is logged to
 `property_merge_events`, which makes unmerge a deterministic replay even after
 the survivor later absorbs a third property. The survivor's stats are recomputed
