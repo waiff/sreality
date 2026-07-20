@@ -1,12 +1,15 @@
 # Listing & property identity: retire the `sreality_id` sign-hack — v2
 
-> **Status: v2 — Phase 0 + R1 SHIPPED to production (2026-07-19); R2–R4 remaining,
-> and largely optional (see below).** Supersedes v1 (2026-07-17) in full. v1 was
-> adversarially audited on 2026-07-19 by a 17-agent workflow (live DB via Supabase
+> **Status: v2 — Phase 0, R1, the natural-key completion, AND the full R4 app-layer
+> cutover SHIPPED to production (2026-07-19 → 07-20). Only R2 + the PK swap remain,
+> and both are deferrable polish (see below).** Supersedes v1 (2026-07-17) in full. v1
+> was adversarially audited on 2026-07-19 by a 17-agent workflow (live DB via Supabase
 > MCP, current code at HEAD `b0084b9`, plus three attack agents on the migration
-> plan). v1's *diagnosis* survived; its *census* and *runbook* did not — five hard
-> Postgres blockers and ~17 missed identity-carrying tables. This document keeps what
-> was verified, corrects what was wrong, and re-derives the plan.
+> plan); the shipped work (#817–826) was itself re-reviewed by a 9-agent adversarial
+> workflow on 2026-07-20 that caught two regressions (both fixed, see below). v1's
+> *diagnosis* survived; its *census* and *runbook* did not — five hard Postgres
+> blockers and ~17 missed identity-carrying tables. This document keeps what was
+> verified, corrects what was wrong, and re-derives the plan.
 
 ## Shipped so far (production)
 
@@ -37,7 +40,40 @@ sequence value on every *upsert* (the `ON CONFLICT` INSERT arm evaluates the def
 before detecting the conflict) — harmless given the 10M epoch gap, and confirmed
 `listings.id ∉ LISTING_COLUMNS` so upserts never clobber a backfilled id.
 
-## The reframing that makes R2–R4 mostly optional
+**Natural-key completion — PR #820 (+ #825 fix), migration 314 live + verified
+(2026-07-20).** § Current design below claims `(source, source_id_native)` "already
+exists" as the true natural key. **It did not** — validating that assumption found it
+*incomplete and actively regressing*: the sreality detail-drain (`write_detail_batch`,
+the primary sreality write path since the cadence split) built its row from
+`LISTING_COLUMNS`, which carries neither `source` nor `source_id_native`, and skipped
+the `_ensure_property` self-heal, so every sreality listing first-written by the drain
+got NULL `source_id_native` (35 at the audit → 421 by fix time). Phase 0 *planned* the
+backfill + NOT NULL but never shipped it. Fix: stamp the full natural key **inline at
+INSERT** on all three write paths (`upsert_listing`, `ingest_scraped_listing`,
+`write_detail_batch`); backfill; enforce via validated `CHECK (source_id_native IS NOT
+NULL)` (`listings_source_id_native_present`, same trick as mig 313's id-check).
+**#825** then fixed a HIGH regression the inline stamp introduced — `source` was still
+only on the post-insert UPDATE, so a non-sreality first-sight insert transiently wrote
+`('sreality', <native_id>)` and could collide with a real sreality row on
+`UNIQUE(source, source_id_native)` (which `ON CONFLICT (sreality_id)` doesn't
+arbitrate) → `unique_violation` → drain wedge; the fix stamps `source` inline too. Net:
+`(source, source_id_native)` is now **complete, unique, and enforced** across all
+~557k rows — the foundation the rest of this design assumes.
+
+**R4 app-layer cutover — PRs #821–824 (+ #826 fix), migration 315 live (2026-07-20).**
+The remaining value this doc identified (below) is now done, *without* R2 or the PK
+swap: a canonical **`/listing/{source}/{native_id}`** route with a permanent legacy
+`/listing/{id}` resolver and a *canonicalizing redirect* (legacy → natural-key on land,
+query + hash preserved) so the negative id never shows in the URL bar (#821); the
+notification-outbox deep link (#822) and chrome-extension "open in app" link (#823) at
+the natural key; stale-doc fixes (#824). No `listings_public` change was needed —
+resolution rides an unfiltered `listing_natural_key_public` view (migration 315, #826,
+which fixed a MEDIUM gap where the first resolver used the `property_id`-filtered
+`property_sources_public` and 404'd freshly-scraped listings). `listings.id` is *not*
+yet exposed on views/API — no consumer needs it, and the natural key (not the
+surrogate) is what URLs use, so that R4 sub-item is moot.
+
+## The reframing that makes R2 + the PK swap optional
 
 Because v2 **freezes legacy `sreality_id` values forever** (never NULLed), `sreality_id`
 stays a **populated, unique, valid join key permanently**. That collapses the case for
@@ -54,19 +90,24 @@ the expensive middle of the plan:
   UNIQUE constraint, the app can treat `id` as the identity **without** `id` being the
   physical PK.
 
-**So the design's actual remaining value lives in the R4 *app-layer* cutover, not in
-R2 or the PK swap:** expose `listings.id` on the `*_public` views / read models / API,
-move share/detail URLs to the natural key `/listing/{source}/{native_id}` (with a
-permanent legacy `/listing/{id}` resolver), and point the chrome-extension deep link +
-notification-outbox links at an id that exists for every portal. That is where the
-negative-id contract actually leaks externally; R2's physical repoint does not.
+**The design's actual remaining value was the R4 *app-layer* cutover, not R2 or the PK
+swap — and that cutover is now SHIPPED** (see "Shipped so far" above): natural-key
+share/detail URLs with a permanent legacy resolver, and the chrome-extension +
+notification-outbox links pointed at an id that exists for every portal. That is where
+the negative-id contract leaked externally; R2's physical repoint never did. The one
+remaining R4 sub-item — exposing `listings.id` on `*_public` views/API — is moot: no
+consumer needs it, and URLs ride the natural key, not the surrogate.
 
-**Recommendation:** treat R2 + the PK swap as an explicitly deferred (possibly never)
-cleanup track. Do R4's app-layer cutover only if/when a public or multi-user surface
-makes the negative-id URL contract a real external liability — its one destructive
-sub-step (should it ever include the PK swap) stays gated on operator backup + OK per
-the database skill. Everything shipped so far (Phase 0 + R1) already closed every live
-defect and gave the platform the clean surrogate; the rest is optionality, not debt.
+**Recommendation (unchanged, now with R4 done): treat R2 + the PK swap as an explicitly
+deferred, possibly-never cleanup track.** After Phase 0 + R1 + the natural-key
+completion + the R4 app-layer cutover, **zero live defects remain and no negative id
+leaks to any surface**; child tables joining on the frozen, valid, unique `sreality_id`
+is not debt. R2 (repoint 19 FK cols/15 tables incl. the 8.08M-row `images` backfill)
+delivers no value until carried all the way through the destructive PK swap (which
+*forces* R2) — so it is valueless half-done and should only be undertaken as a single
+committed track, gated on operator backup + explicit OK for the destructive step per
+the database skill. Recommended only if a public/multi-user surface later makes the
+physical smart-key PK a real liability.
 
 ## Verdict (unchanged in substance, corrected in detail)
 
@@ -118,12 +159,16 @@ Verified live facts the plan depends on:
   PK; none mention `sreality_id`'s sign. Live check: **0 rows** violate
   `(source='sreality') ⇔ (sreality_id > 0)` across all 555k rows — so the invariant is
   real, just unenforced (and immediately enforceable, § Phase 0).
-- **The true natural key already exists**: `(source, source_id_native)` with a full
-  unique index (migration 091). Gap v1 missed: **35 sreality rows have
-  `source_id_native IS NULL`** (an old-code INSERT path 091 itself anticipated); the
-  unique index is not `NULLS NOT DISTINCT`, so the natural key is incomplete until
-  those 35 are backfilled from `sreality_id::text`. `source_id_native` is write-once
-  and has never been re-mapped since 091 — the natural key is stable.
+- **The true natural key exists — but v2 UNDERSTATED its incompleteness** (corrected by
+  the #820 work above; original v2 text kept for the record): `(source,
+  source_id_native)` with a full unique index (migration 091). v2 saw **35 sreality
+  rows with `source_id_native IS NULL`** and called it a static backfill of "an
+  old-code INSERT path". It was not static — it was an **active regression**: the
+  cadence-split sreality drain (`write_detail_batch`) never stamped `source_id_native`,
+  so the NULL set *grew* (35 → 421) and would have grown unbounded. So the natural key
+  the whole plan leans on was neither complete nor self-maintaining until #820 stamped
+  it inline on every write path + enforced NOT NULL. It is now complete, unique, and
+  enforced; `source_id_native` is write-once and never re-mapped, so it is now stable.
 - **`first_seen_at` has 0 NULLs** → `(first_seen_at, sreality_id)` is a total order,
   usable for chronological id backfill. But there is **no standalone index on
   `first_seen_at`** (only `(source, first_seen_at)`), so an ordered backfill needs a
