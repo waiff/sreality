@@ -194,8 +194,11 @@ from "a service connection pretending to be a browser role."
 
 ## R2 — grant hardening + decouple cron matviews from request state
 
-**Branch:** `fix/anon-matview-grant-hardening`. **Two migrations (331 revokes, 332 matview
-repoint) + standing tests.** Latent today (single operator) but a hard public-release blocker.
+**✅ SHIPPED 2026-07-20 (grant hardening) — migration 331.** The matview repoint is
+**deliberately deferred** — see "Deferred: the matview repoint" below.
+
+**Branch:** `fix/anon-matview-grant-hardening`. Latent today (single operator) but a hard
+public-release blocker.
 
 ### 331 — revoke the drifted grants (F4 + F7)
 
@@ -286,14 +289,51 @@ Also update `docs/design/phase-0-emergency-hardening.md` in this PR: record (a) 
 PART B2 matview relkind gap, (b) the drift vector "grants added by migrations after the
 one-time revoke sweep" — the standing anon test is the durable fix for (b).
 
-### R2 live verification
+### Deferred: the matview repoint (was migration 332)
 
-- Full anon inventory query returns **0 rows**.
-- As non-admin authenticated: raw `_mv` SELECT → permission denied; gated `_public` views
-  still 0-row deny; as admin JWT: gated views still return data.
-- Health dashboard + SPA map + choropleths still render (SELECT untouched).
-- `refresh_health_matviews()` succeeds on a raw connection **even with the R1 fallback
-  reverted in a scratch session** (proves the decoupling stands alone).
+The plan called for DROP+CREATE'ing `scraper_health_checks_mv` / `health_summary_mv` /
+`portal_health_mv` so they read base tables instead of the gated wrapper views — the rule
+being that a pg_cron-refreshed matview must never depend on request-scoped state. The swap
+was confirmed semantically exact: `listing_fetch_failures_public` and
+`listing_detail_queue_public` are pure gated passthroughs (identical column list over the
+base table, wrapped `WHERE is_platform_admin()`), so pointing at the base table changes
+nothing but the gate.
+
+**Not shipped, on purpose.** The failure mode is already covered from two directions:
+migration 330's own post-condition asserts the claims-less service path stays admin, and
+`test_admin_gate_opens_for_service_but_not_role_switch` pins it in the live lane — so a
+regression in the fallback fails CI instead of silently poisoning Health. Against that, the
+repoint means DROP+CREATE on the operator's live monitoring surface, preserving each
+matview's unique index (required for `REFRESH … CONCURRENTLY`) plus its grants, with an
+in-migration repopulate — on a matview (`scraper_health_checks_mv`) whose refresh *already*
+timed out on the 17:00 cron cycle. Trading a monitoring outage for belt-and-braces on an
+already-covered failure mode is the wrong side of the risk.
+
+**Revisit** when a health-matview change is needed anyway. Operator can overrule if they
+want the coupling gone regardless.
+
+### R2 live verification — RESULTS
+
+- Full anon inventory (`has_table_privilege` over relkind r/v/m/p — catches matviews, which
+  `information_schema.role_table_grants` omits entirely, and PUBLIC-inherited grants):
+  **7 views before → 0 after**.
+- The 3 gate-backing matviews: `authenticated` SELECT **revoked**. Their owner-rights wrapper
+  views and the SECURITY DEFINER `images_failure_overview()` still reach them via the owner,
+  so the admin path is unchanged.
+- Every matview: DML (+ `MAINTAIN` on PG17) stripped from both browser roles; SELECT preserved
+  on the 10 that have real readers.
+- All three checks run as post-conditions **inside** migration 331, so a partial apply rolls
+  back rather than leaving a half-open ACL.
+
+### New finding while executing R2 — ungated health RPCs (own PR)
+
+`health_summary()` and `portal_health_summary()` are `SECURITY INVOKER` with **no**
+`is_platform_admin()` gate and `EXECUTE` granted to `authenticated` — the same
+admin-only-data-reachable-by-any-tenant class migration 318 was written to close, but these
+two were not in its 26. They are why matview SELECT could not simply be revoked on
+`health_summary_mv` / `portal_health_mv` (an invoker function reads them as the caller).
+Fixing them needs three coupled changes (convert to `SECURITY DEFINER`, embed the gate,
+then revoke the matview SELECT), so it ships as its own PR rather than riding along here.
 
 ---
 
