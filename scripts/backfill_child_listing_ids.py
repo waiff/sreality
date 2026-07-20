@@ -285,6 +285,11 @@ def main() -> int:
         # having to. Zero means every carrier is clean and the chain stops.
         if not args.dry_run:
             pending = sum(_remaining(conn, c, args.repair) for c in carriers)
+            # STDOUT, not the logger: logging writes to stderr, and the workflow
+            # decides whether to chain by grepping this marker out of captured
+            # output. Printing it here makes that decision independent of how
+            # logging happens to be configured.
+            print(f"PENDING={pending}", flush=True)
             log.info("PENDING=%d", pending)
     log.info("done: %d row(s) %s", total, "pending" if args.dry_run else "filled")
     return 0
