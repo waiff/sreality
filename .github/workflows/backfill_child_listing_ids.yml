@@ -80,6 +80,10 @@ jobs:
       - name: Backfill child listing_id
         id: backfill
         run: |
+          # pipefail is load-bearing: without it the pipe below reports tee's exit
+          # code, so a CRASHING backfill looks successful, the chain sees work still
+          # pending and re-dispatches itself — forever.
+          set -o pipefail
           ARGS=""
           if [ -n "${{ inputs.table }}" ]; then ARGS="$ARGS --table ${{ inputs.table }}"; fi
           if [ -n "${{ inputs.batch }}" ]; then ARGS="$ARGS --batch ${{ inputs.batch }}"; fi
