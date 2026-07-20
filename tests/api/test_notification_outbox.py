@@ -29,6 +29,33 @@ def test_compose_new_subject_and_deep_link(monkeypatch: Any) -> None:
     assert "6 900 000 Kč" in msg.body_text
 
 
+def test_compose_deep_link_prefers_natural_key(monkeypatch: Any) -> None:
+    # A non-sreality listing: the deep link must use the canonical natural key,
+    # never the negative synthetic id (which a sent email would freeze forever).
+    monkeypatch.setenv("SPA_BASE_URL", "https://app.example")
+    msg = ob.compose_message({
+        "change_kind": "new", "sreality_id": -284913,
+        "source": "bazos", "source_id_native": "218865547",
+        "locality": "Praha 2", "disposition": "2+kk",
+        "price_czk": 6_900_000, "price_unit": None,
+    })
+    assert msg.deep_link == "https://app.example/listing/bazos/218865547"
+    assert "-284913" not in msg.deep_link
+
+
+def test_compose_deep_link_falls_back_to_legacy_without_natural_key(monkeypatch: Any) -> None:
+    # A listing missing the natural key (pre-migration-314 straggler) still gets a
+    # working link via the permanent legacy /listing/{id} resolver.
+    monkeypatch.setenv("SPA_BASE_URL", "https://app.example")
+    msg = ob.compose_message({
+        "change_kind": "new", "sreality_id": 123,
+        "source": "sreality", "source_id_native": None,
+        "locality": "Praha 2", "disposition": "2+kk",
+        "price_czk": 6_900_000, "price_unit": None,
+    })
+    assert msg.deep_link == "https://app.example/listing/123"
+
+
 def test_compose_system_health_uses_verbatim_message(monkeypatch: Any) -> None:
     monkeypatch.setenv("SPA_BASE_URL", "https://app.example")
     msg = ob.compose_message({
@@ -114,9 +141,10 @@ class _FakeClient:
 def _new_row(ch: str = "email") -> tuple:
     # (dispatch_id, source_kind, change_kind, sreality_id, subscription_id,
     #  collection_id, trigger_price, prev_price, locality, disposition,
-    #  price_czk, price_unit, category_main, message, ch)
+    #  price_czk, price_unit, category_main, source, source_id_native, message, ch)
     return ("dab-1", "watchdog", "new", 123, "sub-1", None,
-            None, None, "Praha 2", "2+kk", 6_900_000, None, "byt", None, ch)
+            None, None, "Praha 2", "2+kk", 6_900_000, None, "byt",
+            "sreality", "123", None, ch)
 
 
 def test_drain_noop_without_configured_channels() -> None:
@@ -154,7 +182,8 @@ def test_drain_skips_when_recipient_unset() -> None:
 def test_drain_collection_monitor_routes_collection_id_as_source() -> None:
     client = _FakeClient(configured={"email"})
     row = ("dab-2", "collection_monitor", "price_drop", 55, None, 7,
-           4_000_000, 4_500_000, "Plzeň", "1+kk", 4_000_000, None, "byt", None, "email")
+           4_000_000, 4_500_000, "Plzeň", "1+kk", 4_000_000, None, "byt",
+           "sreality", "55", None, "email")
     conn = _Conn(recipient="op@example.cz", new_rows=[row], retry_rows=[])
     ob.drain_once(conn, client)  # type: ignore[arg-type]
     call = client.sends[0]
@@ -166,9 +195,10 @@ def test_drain_retries_failed_due_rows() -> None:
     client = _FakeClient(configured={"email"})
     # (send_id, channel, recipient, consumer, source_kind, change_kind, sreality_id,
     #  trigger_price, prev_price, locality, disposition, price_czk, price_unit,
-    #  category_main, message)
+    #  category_main, source, source_id_native, message)
     retry_row = (42, "email", "op@example.cz", "watchdog", "watchdog", "new", 5,
-                 None, None, "Ostrava", "2+1", 3_000_000, None, "byt", None)
+                 None, None, "Ostrava", "2+1", 3_000_000, None, "byt",
+                 "sreality", "5", None)
     conn = _Conn(recipient="op@example.cz", new_rows=[], retry_rows=[retry_row])
     stats = ob.drain_once(conn, client)  # type: ignore[arg-type]
     assert stats["retried"] == 1
