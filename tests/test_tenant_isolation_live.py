@@ -303,7 +303,17 @@ def test_admin_ops_views_deny_non_admin_allow_admin(
     admin) sees zero rows through every admin-gated view/function; promoting
     that same user to `admins` makes them see through it (may still be zero
     rows if the table itself is empty in this schema-replay DB -- the point is
-    no permission/relation error, not a specific count)."""
+    no permission/relation error, not a specific count).
+
+    Three objects (dedup_funnel_resolutions_public, dedup_llm_cost_by_category_public,
+    images_failure_overview()) wrap a materialized view that a fresh schema-replay
+    never refreshes (production refreshes all three on a cron) -- querying an
+    unrefreshed matview errors regardless of caller, so refresh them here to match
+    production instead of asserting on that unrelated failure mode."""
+    with svc.cursor() as cur:
+        cur.execute("REFRESH MATERIALIZED VIEW dedup_funnel_resolutions_mv")
+        cur.execute("REFRESH MATERIALIZED VIEW dedup_llm_cost_by_category_mv")
+        cur.execute("REFRESH MATERIALIZED VIEW images_failure_overview_mv")
     with _scoped(tenants["a_user"]) as conn:
         with conn.cursor() as cur:
             for name in _ADMIN_GATED_VIEWS:
