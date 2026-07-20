@@ -50,8 +50,28 @@ Two bugs were caught during Phase A that are worth remembering:
    every other site — the id never travels through Python where a mis-zip could point
    rows at the wrong listing.
 
-**Next up: arm the watermarks (post-deploy), then run the backfill to convergence,
-then Phase B.**
+**A4 backfill — CONVERGED (2026-07-20).** 10.7M rows filled across 22 carriers in ~30
+minutes of runtime (images 8.26M, listing_snapshots 1.41M, properties 544k). Every
+carrier reports zero unfilled. Three things were learned the hard way and are now
+encoded:
+1. **`dedup_pair_audit` cannot be fully backfilled.** It carries `CHECK
+   (left_sreality_id <> right_sreality_id)` as NOT VALID, so ~4,542 historical
+   self-paired rows (a dedup-engine bug, 2026-06-24..07-13, none since) are tolerated
+   where they sit — but Postgres re-checks every CHECK on any row an UPDATE touches, so
+   they cannot be written. They keep the legacy handle only. Carriers can now declare a
+   `skip` predicate, applied to COUNTING as well as updating — skip one but not the
+   other and "remaining" never reaches zero, which makes the self-chaining workflow spin
+   forever.
+2. **A self-chaining workflow needs its exit code and its marker to be right.**
+   `| tee` without `set -o pipefail` made a CRASHING run report success (three runs died
+   and relaunched each other before it was caught). And Python's logging writes to
+   STDERR, so a marker grepped out of stdout-only capture was never found — the chain
+   re-dispatched even at zero work. Both fixed (#835, #836); the marker is now
+   `print()`ed to stdout so it does not depend on logging configuration.
+3. Per-window commits mean an aborted run keeps its progress — the first failed run had
+   already committed 258k correct rows.
+
+**Next: Phase B (indexes + FKs) — unblocked, `scripts/apply_r2_constraints.py`.**
 
 ## 0. What the review corrected (read this first)
 
