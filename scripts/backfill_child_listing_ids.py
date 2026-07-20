@@ -59,6 +59,9 @@ log = logging.getLogger("backfill_child_listing_ids")
 
 _STATEMENT_TIMEOUT = "10min"
 _MAX_RETRIES = 5
+# Ceiling on the density-scaled window so a nearly-empty carrier cannot produce an
+# absurd single window that becomes a de-facto full-table update.
+_MAX_WINDOW_IDS = 20_000_000
 
 
 def _predicate(new: str, legacy: str, repair: bool) -> str:
@@ -118,37 +121,49 @@ def _update_window(
     where_window: str,
     params: dict[str, Any],
     repair: bool,
-) -> int:
-    """One window's UPDATE, with a bounded retry on a transient deadlock."""
+) -> tuple[int, "psycopg.Connection"]:
+    """One window's UPDATE, surviving both deadlocks and a dropped connection.
+
+    Returns (rows_updated, live_conn) — the connection may be a FRESH one, so the
+    caller must rebind its handle (db.run_resilient's contract).
+
+    A dropped connection is the expected failure here, not an exotic one: these
+    windows are wide non-HOT updates against a hot table, and the pooler will cut
+    one loose sooner or later. The window is idempotent (it only touches rows still
+    matching the predicate), so replaying it after a reconnect re-commits
+    identically.
+    """
     sql = (
         f"UPDATE {carrier['table']} t SET {new} = l.id "
         f"FROM listings l "
         f"WHERE l.sreality_id = t.{legacy} "
         f"AND {where_window} AND {_predicate(new, legacy, repair)}"
     )
-    for attempt in range(_MAX_RETRIES):
-        try:
-            with conn.cursor() as cur:
-                cur.execute(f"SET statement_timeout = '{_STATEMENT_TIMEOUT}'")
-                cur.execute(sql, params)
-                updated = cur.rowcount or 0
-            conn.commit()
-            return updated
-        except (psycopg.errors.DeadlockDetected, psycopg.errors.SerializationFailure):
-            conn.rollback()
-            time.sleep(1.0 * (attempt + 1))
-    raise RuntimeError(f"{carrier['table']}.{new}: window kept deadlocking")
+
+    def _op(c: "psycopg.Connection") -> int:
+        with c.cursor() as cur:
+            cur.execute(f"SET statement_timeout = '{_STATEMENT_TIMEOUT}'")
+            cur.execute(sql, params)
+            updated = cur.rowcount or 0
+        c.commit()
+        return updated
+
+    return db.run_resilient(
+        conn, _op, reconnect=db.connect_session,
+        attempts=_MAX_RETRIES,
+        label=f"backfill {carrier['table']}.{new}",
+    )
 
 
 def backfill_carrier(
     conn: "psycopg.Connection", carrier: dict[str, Any], batch: int, repair: bool,
     deadline: float | None = None,
-) -> int:
+) -> tuple[int, "psycopg.Connection"]:
     table = carrier["table"]
     before = _remaining(conn, carrier, repair)
     if before == 0:
         log.info("%-34s clean", table)
-        return 0
+        return 0, conn
     log.info("%-34s %d row(s) to fill", table, before)
 
     done = 0
@@ -156,13 +171,20 @@ def backfill_carrier(
         if is_ts_cursor(carrier):
             # The two timestamp-cursor carriers are small (hundreds to low
             # thousands of rows); windowing them would be pure ceremony.
-            done += _update_window(
+            updated, conn = _update_window(
                 conn, carrier, legacy, new, "TRUE", {}, repair,
             )
+            done += updated
             continue
         lo, hi = _bounds(conn, carrier, legacy, new, repair)
         if lo is None:
             continue
+        # Window in ID space, but size it by ROW density. images spans ~182M ids for
+        # ~8M rows, so a flat 50k-id window would touch ~2k rows and need thousands
+        # of round-trips; scaling by the observed sparsity keeps every window worth
+        # roughly `batch` rows regardless of how gappy the id space is.
+        span = max(1, int(hi) - int(lo) + 1)
+        step = min(_MAX_WINDOW_IDS, max(batch, batch * span // max(1, before)))
         start = int(lo)
         while start <= int(hi):
             if deadline is not None and time.monotonic() > deadline:
@@ -171,9 +193,9 @@ def backfill_carrier(
                     "(the next run resumes from the first unfilled row)",
                     table, new, start,
                 )
-                return done
-            end = start + batch
-            updated = _update_window(
+                return done, conn
+            end = start + step
+            updated, conn = _update_window(
                 conn, carrier, legacy, new,
                 "t.{c} >= %(lo)s AND t.{c} < %(hi)s".format(c=carrier["cursor"]),
                 {"lo": start, "hi": end}, repair,
@@ -190,7 +212,7 @@ def backfill_carrier(
         # SECOND pass converges them; only a persistent non-zero means a writer
         # is not dual-writing (which the parity check reports by name).
         log.warning("%s still has %d unfilled row(s) — re-run to converge", table, after)
-    return done
+    return done, conn
 
 
 def main() -> int:
@@ -243,9 +265,10 @@ def main() -> int:
             if deadline is not None and time.monotonic() > deadline:
                 log.warning("wall-clock budget reached — %s not started", carrier["table"])
                 break
-            total += backfill_carrier(
+            filled, conn = backfill_carrier(
                 conn, carrier, args.batch, args.repair, deadline,
             )
+            total += filled
     log.info("done: %d row(s) %s", total, "pending" if args.dry_run else "filled")
     return 0
 
