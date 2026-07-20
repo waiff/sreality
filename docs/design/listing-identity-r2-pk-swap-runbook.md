@@ -143,12 +143,25 @@ plan reports the expected `Conflict Arbiter Indexes:`) since these statements ar
 SQL-corpus sweep's discovery net (a pre-existing gap, not introduced here). `listings`
 itself still arbitrates on `sreality_id` (unchanged) — it stays the PK until Gate 1.
 
-**Next: Phase C, the read cutover (§4 second half).** Frontend resolver chain, browse
-hydration, dedup `ListingKey` + pair-cache reads, merge/unmerge replay, notification
-producers (incl. the `new_source` dedupe_key NULL-concat fix), the Chrome extension
-app-link gate + redistribution, `image_key()`, estimation forward provenance, the
-sreality_id-cursored maintenance walkers (geocode/street/geo_cell partial indexes), then
-the 25-read-model "may lag" wave.
+**Phase C, read cutover — step 1 DONE (2026-07-20, mig 334).** `listings_public`,
+`property_sources_public`, and `listing_natural_key_public` now expose `id` as a
+trailing column; `listing_snapshots_public` exposes `listing_id` alongside its
+own (unrelated) `id`. Purely additive — every frontend query lists explicit
+columns (`DETAIL_COLS`-style, never `select('*')`), so this is invisible to every
+existing consumer, confirmed live: `authenticated` SELECT grants unchanged on all
+4 views, sample reads return `id` alongside the legacy `sreality_id`. Sets up,
+but does NOT itself perform, the actual read cutover.
+
+**Next: Phase C, the read cutover (§4 second half) — the frontend/backend rewiring
+itself.** Key `sid`/loaders/`.eq('sreality_id')` reads in `ListingDetail.tsx`,
+`queries.ts`, `brokers.ts`, and `api.ts`'s manual-estimates path onto the now-exposed
+`id` columns (requires a dev-server browser check per CLAUDE.md before merge — this is
+user-facing SPA behavior, not just schema). Then: browse hydration, dedup `ListingKey`
++ pair-cache reads, merge/unmerge replay, notification producers (incl. the
+`new_source` dedupe_key NULL-concat fix), the Chrome extension app-link gate +
+redistribution, `image_key()`, estimation forward provenance, the sreality_id-cursored
+maintenance walkers (geocode/street/geo_cell partial indexes), then the 25-read-model
+"may lag" wave.
 
 ## 0. What the review corrected (read this first)
 
