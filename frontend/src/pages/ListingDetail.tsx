@@ -11,6 +11,7 @@ import { usePageTitle } from '@/lib/pageTitle';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   fetchListingById,
+  fetchListingBySreality,
   fetchListingIdByNaturalKey,
   fetchPropertyReprId,
   fetchPropertySources,
@@ -72,11 +73,16 @@ export default function ListingDetail() {
   const navigate = useNavigate();
 
   // Legacy/resolver route /listing/{id}: sreality_id is negative for non-sreality
-  // portals (synthetic id seq, migration 097). Kept forever (deep links, bookmarks).
+  // portals (synthetic id seq, migration 097). Kept forever (deep links, bookmarks) —
+  // and stays a single round trip forever: the URL literally IS the sreality_id, so
+  // there's no forward-compat concern resolving it (a listing only ever gets a
+  // legacy numeric URL when it has a sreality_id to put in it).
   const legacyId = idParam && /^-?\d+$/.test(idParam) ? Number(idParam) : null;
 
   // Canonical route /listing/{source}/{native}: resolve the natural key
-  // (migration 091) to the listing's sreality_id, then reuse the id-keyed loaders.
+  // (migration 091) to the listing's SURROGATE id (R2 Phase C cutover — was
+  // sreality_id, which a future non-sreality row created after Gate 2 may not
+  // have at all), then reuse the id-keyed loaders.
   const natKeyQ = useQuery<number | null, Error>({
     queryKey: ['listing-natkey', natSourceParam, natIdParam],
     queryFn: () =>
@@ -84,7 +90,7 @@ export default function ListingDetail() {
     enabled: !!natSourceParam && !!natIdParam,
     staleTime: 60_000,
   });
-  const sid = legacyId ?? natKeyQ.data ?? null;
+  const unresolved = legacyId == null && natKeyQ.data == null;
 
   // /listing?property=ID (the dedup merge feed links this) → resolve the
   // property's representative listing and redirect to its detail page. Only when
@@ -106,17 +112,24 @@ export default function ListingDetail() {
     }
   }, [reprQ.data, navigate]);
 
+  // Two shapes converging on ListingPublic: the legacy route fetches directly by
+  // sreality_id (one round trip, unchanged); the canonical route reuses the id
+  // natKeyQ just resolved. Never both — legacyId and the natural-key params are
+  // mutually exclusive route matches.
   const listingQ = useQuery<ListingPublic | null, Error>({
-    queryKey: ['listing', sid],
-    queryFn: () => fetchListingById(sid as number),
-    enabled: sid != null,
+    queryKey: ['listing', legacyId, natKeyQ.data],
+    queryFn: () =>
+      legacyId != null
+        ? fetchListingBySreality(legacyId)
+        : fetchListingById(natKeyQ.data as number),
+    enabled: legacyId != null || natKeyQ.data != null,
     staleTime: 60_000,
   });
 
   const sourcesQ = useQuery<{ property_id: number | null; sources: PropertySource[] }, Error>({
-    queryKey: ['property-sources', sid],
-    queryFn: () => fetchPropertySources(sid as number),
-    enabled: sid != null && !!listingQ.data,
+    queryKey: ['property-sources', listingQ.data?.id],
+    queryFn: () => fetchPropertySources(listingQ.data!.id),
+    enabled: !!listingQ.data,
     staleTime: 60_000,
   });
 
@@ -157,15 +170,19 @@ export default function ListingDetail() {
   });
 
   // Cross-source price history: snapshots across every child of the property,
-  // falling back to just this listing until sources load / for singletons.
+  // falling back to just this listing until sources load / for singletons. Still
+  // sreality_id-keyed (fetchSnapshotsForListings, unchanged) — childIds come from
+  // property_sources_public.sreality_id, which stays valid forever; the singleton
+  // fallback reads the already-loaded listing's own sreality_id, not the route
+  // resolver's surrogate id.
   const childIds = (sourcesQ.data?.sources ?? [])
     .map((s) => s.sreality_id)
     .filter((x): x is number => x != null);
   const snapshotIds =
     childIds.length > 0
       ? [...childIds].sort((a, b) => a - b)
-      : sid != null
-        ? [sid]
+      : listingQ.data != null
+        ? [listingQ.data.sreality_id]
         : [];
 
   const snapshotsQ = useQuery<ListingSnapshotPublic[], Error>({
@@ -175,17 +192,20 @@ export default function ListingDetail() {
     staleTime: 60_000,
   });
 
+  // listing_freshness_checks has no listing_id column at all (append-only
+  // observability, not an R2 carrier) — stays sreality_id-keyed forever, read from
+  // the already-loaded listing.
   const checksQ = useQuery<ListingFreshnessCheckPublic[], Error>({
-    queryKey: ['freshness', sid],
-    queryFn: () => fetchFreshnessChecksByListing(sid as number),
-    enabled: sid != null && !!listingQ.data,
+    queryKey: ['freshness', listingQ.data?.sreality_id],
+    queryFn: () => fetchFreshnessChecksByListing(listingQ.data!.sreality_id),
+    enabled: !!listingQ.data,
     staleTime: 60_000,
   });
 
   const imagesQ = useQuery<ImagePublic[], Error>({
-    queryKey: ['images', sid],
-    queryFn: () => fetchImagesByListing(sid as number),
-    enabled: sid != null && !!listingQ.data,
+    queryKey: ['images', listingQ.data?.id],
+    queryFn: () => fetchImagesByListing(listingQ.data!.id),
+    enabled: !!listingQ.data,
     staleTime: 5 * 60_000,
   });
 
@@ -242,9 +262,9 @@ export default function ListingDetail() {
       : null,
   );
 
-  if (sid == null) {
+  if (unresolved) {
     // Resolving ?property=ID → redirect, or resolving the canonical
-    // /listing/{source}/{native} natural key → sreality_id (both handled above).
+    // /listing/{source}/{native} natural key → surrogate id (both handled above).
     // Show a loading state while either resolves; only "not found" once we know
     // there's no such property/listing.
     const resolvingProperty =
@@ -830,7 +850,11 @@ export function FreshnessBlock({
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['freshness', sreality_id] });
       qc.invalidateQueries({ queryKey: ['snapshots', sreality_id] });
-      qc.invalidateQueries({ queryKey: ['listing', sreality_id] });
+      // Bare prefix, not ['listing', sreality_id]: listingQ's real key is
+      // ['listing', legacyId, natKeyId] (R2 Phase C resolver-chain cutover) —
+      // this component only knows the loaded row's sreality_id, which no longer
+      // matches either route-param slot for a natural-key-resolved listing.
+      qc.invalidateQueries({ queryKey: ['listing'] });
     },
   });
 
