@@ -114,13 +114,40 @@ shown" on error instead of failing the board — consistent with A6's intent (br
 dark until Wave 4), stages/cards/properties/images all still load. No other caller of these
 two fetch helpers exists in the app (grep-verified) — this was the only broken surface.
 
+**Post-ship review verified, 2026-07-20 (evening):** a 14-finding code review of the deployed
+316–319 batch was adversarially re-verified against the live DB (6-agent workflow): 11
+confirmed, 1 refuted (the per-row-gate perf claim — live EXPLAIN shows a One-Time Filter),
+2 partial. **Three findings are live P0 regressions shipped by 316/318:** (1) `security_invoker`
+on `property_estimates_public` (a market-wide view mis-grouped with the 7 tenant views) empties
+Browse's "with estimates" filter + the Stats RPC for every user; (2) `is_platform_admin()`
+returns false on any connection without `request.jwt.claims` — the golden-set freeze script is
+a silent no-op; (3) same cause: the pg_cron health-matview refresh has poisoned the Health
+dashboard to all-zeros while 1485 fetch-failures / 895 queue rows exist. Verification also
+found two exposures the review missed (anon can read `listing_natural_key_public` +
+`property_estimates_public` — 7 drifted anon-readable views total; all 13 matviews still carry
+full pre-299 `authenticated` ACLs, bypassing the 318 gate) and one fix-path landmine (a
+`current_user`-keyed fallback would open the admin gate to everyone; only `session_user`
+works under SECURITY DEFINER). Note: the claim above that the suite "now can" catch the 316
+class on its own was overstated — only `collections_public` had a live through-view test;
+remediation R3 closes that. Full spec: `docs/design/public-release-remediation-2026-07.md`.
+
 ## Next
 
-1. Phase 1 exit gate: external re-audit (`/code-review ultra`) — point it explicitly at the
-   `is_platform_admin()` / `security_invoker` view-gating class of bug found + fixed today
-   (migrations 316 + 318), since the existing pen-test suite structurally couldn't have caught
-   it on its own (it now can — both migrations landed live-verified regression tests).
-2. Wave 1 (extension + agent estimations: quotas, async job lane, Stripe checkout + metering).
+1. **R1 (P0 hotfix, urgent)** — migration 320: revert `security_invoker` on
+   `property_estimates_public` + claims-absent `session_user`-keyed fallback in
+   `is_platform_admin()`; un-breaks Browse estimates filter, golden-set freeze, Health
+   matviews (heal on next cron tick). Spec: `docs/design/public-release-remediation-2026-07.md` § R1.
+2. **R2 (public-release blocker)** — revoke the 7 drifted anon view grants + matview ACL
+   cleanup (auth SELECT off the 3 gate-backing `_mv`s, DML/MAINTAIN off all) + repoint the 3
+   health matviews at base tables; standing anon-allowlist + matview-dark tests. § R2.
+3. **R3** — parameterize the tenant-view live tests (cross-tenant deny + own-tenant-positive
+   over all 7), strengthen the static gate test, add the standing CI gate for future
+   admin-view leaks (replaces "defer to re-audit"). § R3.
+4. **R4** — Pipeline broker fetch: degrade only on the A6 42501 signature, log anything else;
+   update the stale `docs/architecture.md` broker paragraph in the same PR. § R4.
+5. Phase 1 exit gate: external re-audit (`/code-review ultra`) — anchor cases + blind spots
+   listed in the remediation doc's final section.
+6. Wave 1 (extension + agent estimations: quotas, async job lane, Stripe checkout + metering).
 
 **Housekeeping done 2026-07-20:** operator enabled Supabase Auth's leaked-password-protection
 toggle (Authentication → Sign In / Providers → Email → "Prevent use of leaked passwords").
