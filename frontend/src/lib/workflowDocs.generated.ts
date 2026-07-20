@@ -189,6 +189,75 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/backfill_bazos_street_locality.yml"
   },
   {
+    "filename": "backfill_child_listing_ids.yml",
+    "name": "Backfill child listing_id (R2)",
+    "description": "One-off, dispatch-only backfill for the R2 leg of the listing-identity refactor (docs/design/listing-identity-r2-pk-swap-runbook.md § 2 A4). Fills the surrogate listings.id onto the 22 carrier tables migrations 320-325 added columns to, for rows written BEFORE dual-write shipped. No re-fetch, no LLM, no snapshots.",
+    "portal": null,
+    "manual": true,
+    "schedules": [],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "table",
+        "description": "Single carrier table (blank = all 22)",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "batch",
+        "description": "Cursor-window width for id-cursor carriers",
+        "required": false,
+        "type": "string",
+        "default": "50000",
+        "options": null
+      },
+      {
+        "name": "max_seconds",
+        "description": "Wall-clock budget in seconds (blank = no budget)",
+        "required": false,
+        "type": "string",
+        "default": "4800",
+        "options": null
+      },
+      {
+        "name": "repair",
+        "description": "Also overwrite surrogates that are set but WRONG",
+        "required": false,
+        "type": "choice",
+        "default": "false",
+        "options": [
+          "false",
+          "true"
+        ]
+      },
+      {
+        "name": "dry_run",
+        "description": "Report what each carrier needs and exit",
+        "required": false,
+        "type": "choice",
+        "default": "false",
+        "options": [
+          "false",
+          "true"
+        ]
+      }
+    ],
+    "secrets": [
+      "SUPABASE_DB_SESSION_URL",
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "backfill-child-listing-ids",
+    "cancelInProgress": false,
+    "timeoutMinutes": 90,
+    "permissions": "contents: read",
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/backfill_child_listing_ids.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/backfill_child_listing_ids.yml"
+  },
+  {
     "filename": "backfill_geocode.yml",
     "name": "Jobs: backfill geocode coordinates (any portal, from stored locality)",
     "description": "DISPATCH-ONLY backfill for the standing no-coords stock of any portal (default: idnes, realitymix, maxima, remax, mmreality, ceskereality — bazos is excluded, its coords need the link-corroborating tree in backfill_bazos_coords). Geocodes each row's STORED locality via the persistent geocode_cache (migration 288) and stamps listings.geocode_attempted_at on every processed row (placed or not), so the pool self-empties and re-runs are cheap — re-dispatch until pending=0. Writes geom only (triggers derive hierarchy + dedup cell); no snapshots. Supersedes the completed one-off backfill_realitymix_coords.",

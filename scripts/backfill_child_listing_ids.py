@@ -87,10 +87,24 @@ def _remaining(conn: "psycopg.Connection", carrier: dict[str, Any], repair: bool
     return total
 
 
-def _bounds(conn: "psycopg.Connection", carrier: dict[str, Any]) -> tuple[Any, Any]:
-    cursor = carrier["cursor"]
+def _bounds(
+    conn: "psycopg.Connection", carrier: dict[str, Any],
+    legacy: str, new: str, repair: bool,
+) -> tuple[Any, Any]:
+    """Window bounds: start at the first row still needing work, not at min(id).
+
+    Resuming from the true minimum would re-walk every window a previous run
+    already filled — cheap per window, but ~160 no-op windows before reaching live
+    work on images. Filtering min() by the same predicate makes each run pick up
+    where the last one stopped.
+    """
+    cursor, table = carrier["cursor"], carrier["table"]
     with conn.cursor() as cur:
-        cur.execute(f"SELECT min({cursor}), max({cursor}) FROM {carrier['table']}")
+        cur.execute(f"SET statement_timeout = '{_STATEMENT_TIMEOUT}'")
+        cur.execute(
+            f"SELECT min({cursor}), max({cursor}) FROM {table} t "
+            f"WHERE {_predicate(new, legacy, repair)}"
+        )
         lo, hi = cur.fetchone()
     conn.rollback()
     return lo, hi
@@ -128,6 +142,7 @@ def _update_window(
 
 def backfill_carrier(
     conn: "psycopg.Connection", carrier: dict[str, Any], batch: int, repair: bool,
+    deadline: float | None = None,
 ) -> int:
     table = carrier["table"]
     before = _remaining(conn, carrier, repair)
@@ -145,11 +160,18 @@ def backfill_carrier(
                 conn, carrier, legacy, new, "TRUE", {}, repair,
             )
             continue
-        lo, hi = _bounds(conn, carrier)
+        lo, hi = _bounds(conn, carrier, legacy, new, repair)
         if lo is None:
             continue
         start = int(lo)
         while start <= int(hi):
+            if deadline is not None and time.monotonic() > deadline:
+                log.warning(
+                    "%s.%s: wall-clock budget reached at %s — re-run to continue "
+                    "(the next run resumes from the first unfilled row)",
+                    table, new, start,
+                )
+                return done
             end = start + batch
             updated = _update_window(
                 conn, carrier, legacy, new,
@@ -181,6 +203,10 @@ def main() -> int:
                         help="Also overwrite surrogates that are set but WRONG — the "
                              "plain backfill only fills NULLs, so a mis-stamping writer's "
                              "damage would survive it.")
+    parser.add_argument("--max-seconds", type=int, default=0,
+                        help="Wall-clock budget; stop cleanly when reached (0 = no "
+                             "budget). Lets a CI run finish inside its job timeout — the "
+                             "next run resumes from the first unfilled row.")
     parser.add_argument("--dry-run", action="store_true",
                         help="Report what each carrier needs, write nothing.")
     parser.add_argument("--verbose", action="store_true")
@@ -203,6 +229,7 @@ def main() -> int:
     else:
         carriers = R2_CARRIERS
 
+    deadline = time.monotonic() + args.max_seconds if args.max_seconds else None
     total = 0
     # Session mode: the transaction pooler's ~2-minute statement cap would kill
     # the wide windows on images / listing_snapshots.
@@ -213,7 +240,12 @@ def main() -> int:
                 log.info("%-34s %d row(s) would be filled", carrier["table"], need)
                 total += need
                 continue
-            total += backfill_carrier(conn, carrier, args.batch, args.repair)
+            if deadline is not None and time.monotonic() > deadline:
+                log.warning("wall-clock budget reached — %s not started", carrier["table"])
+                break
+            total += backfill_carrier(
+                conn, carrier, args.batch, args.repair, deadline,
+            )
     log.info("done: %d row(s) %s", total, "pending" if args.dry_run else "filled")
     return 0
 
