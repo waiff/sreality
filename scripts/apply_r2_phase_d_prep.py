@@ -231,8 +231,13 @@ def main() -> int:
         return 2
 
     with db.connect_session() as conn:
-        drop_legacy_not_nulls(conn, args.dry_run)
+        # PK swap first: estimation_cohort_entries.sreality_id is still part of its
+        # PK until this runs, and Postgres refuses DROP NOT NULL on a PK column
+        # ("column is in a primary key") — the generic loop below would hit exactly
+        # that on a fresh run. Once swapped, the loop's own live NOT NULL check
+        # naturally skips it (this function already drops it as its last step).
         swap_estimation_cohort_entries_pk(conn, args.dry_run)
+        drop_legacy_not_nulls(conn, args.dry_run)
         prepare_listings_pk_swap_indexes(conn, args.dry_run)
     log.info("done")
     return 0
