@@ -194,8 +194,29 @@ needed ZERO changes. The real fix was narrow:
   formats is still worth doing before/shortly after merge, but isn't a hard blocker
   given the above.
 
-**Next: Phase C, the rest of the read cutover (§4 second half).** Browse hydration,
-dedup `ListingKey` + pair-cache reads, merge/unmerge replay, notification producers
+**Phase D, step 1 DONE (2026-07-20).** Retargeted the `listings` table's own ingest
+`ON CONFLICT` — the two sites §5.1 named, `upsert_listing` (db.py:559) and
+`_BATCH_UPSERT_SQL` (db.py:1949) — from `sreality_id` to `(source, source_id_native)`.
+Verified live before editing: `listings_source_native_uidx` is a full (non-partial)
+UNIQUE INDEX so arbiter inference always succeeds; `listings_source_id_native_present`
+is a validated CHECK with 0 NULLs across 562,681 rows; `_listing_update_set_sql`'s
+generated SET clause excludes `sreality_id`/`source`/`source_id_native` entirely (the
+latter is COALESCE-healed on a separate line), so a conflict on the new arbiter can
+never rewrite a frozen identity column. Confirmed via `EXPLAIN (COSTS OFF)` against
+prod for both call shapes (`upsert_listing`'s explicit `source` value and
+`_BATCH_UPSERT_SQL`'s implicit column DEFAULT — Postgres materializes defaults before
+arbiter evaluation, so the default case resolves correctly too): both plans show
+`Conflict Arbiter Indexes: listings_source_native_uidx`. Full local pytest green
+(2813 passed, 30 skipped). **Still on the synthetic sequence for new rows — this step
+only changes which index the conflict check uses, not what gets written.** Per §5.1,
+this needs to **bake ≥1 full scrape cycle across all 9 portals in production** before
+being considered validated; that observation happens post-merge, not in this PR.
+
+**Next: Phase D, steps 2-7** (child `DROP NOT NULL` + the two child PK swaps, the
+`sreality_id`/`id` unique indexes needed before the Gate 1 swap, the 19 legacy child
+FK drops, the parity-green precondition check) — see §5. In parallel, Phase C's
+remaining read cutover (§4 second half) is still open: browse hydration, dedup
+`ListingKey` + pair-cache reads, merge/unmerge replay, notification producers
 (incl. the `new_source` dedupe_key NULL-concat fix), the Chrome extension app-link
 gate + redistribution, `image_key()`, estimation forward provenance, the
 sreality_id-cursored maintenance walkers (geocode/street/geo_cell partial indexes),
