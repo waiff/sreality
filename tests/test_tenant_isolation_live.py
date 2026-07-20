@@ -28,6 +28,22 @@ pytestmark = pytest.mark.skipif(
     reason="TEST_DATABASE_URL not set — live tenant-isolation checks run only in the CI DB job",
 )
 
+# SPA-facing views (migrations 022/025/202/203/205/211/278) the frontend reads
+# directly via supabase-js — must be `security_invoker` (migration 316) or they
+# run as their postgres owner and BYPASS every RLS policy below, regardless of
+# the caller's role. The base-table tests above don't exercise this: the SPA
+# never queries base tables directly, only these views.
+_TENANT_VIEWS: list[str] = [
+    "collection_properties_public",
+    "collections_public",
+    "pipeline_stages_public",
+    "property_estimates_public",
+    "property_notes_public",
+    "property_pipeline_public",
+    "property_tags_public",
+    "tags_public",
+]
+
 # The 19 user-state tables migrations 290-294 (+ entitlements, 298) scope per account.
 _TENANT_TABLES: list[str] = [
     "collections",
@@ -153,6 +169,68 @@ def test_cross_tenant_denial(svc: Any, tenants: dict[str, uuid.UUID]) -> None:
             with conn.cursor() as cur:
                 cur.execute("SELECT * FROM collections WHERE name = %s", (name,))
                 assert len(cur.fetchall()) == 1, "tenant A must see their own collection"
+    finally:
+        with svc.cursor() as cur:
+            cur.execute("DELETE FROM collections WHERE id = %s", (coll_id,))
+
+
+def test_tenant_views_are_security_invoker(svc: Any) -> None:
+    """Migration 316: every SPA-facing tenant view must run as the querying
+    role, not its postgres owner, or RLS never binds through it at all."""
+    with svc.cursor() as cur:
+        cur.execute(
+            "SELECT c.relname FROM pg_class c "
+            "JOIN pg_namespace n ON n.oid = c.relnamespace "
+            "WHERE n.nspname = 'public' AND c.relkind = 'v' "
+            "AND c.relname = ANY(%s) "
+            "AND NOT EXISTS ("
+            "  SELECT 1 FROM pg_options_to_table(c.reloptions) o "
+            "  WHERE o.option_name = 'security_invoker' AND o.option_value = 'true'"
+            ")",
+            (_TENANT_VIEWS,),
+        )
+        not_invoker = sorted(r[0] for r in cur.fetchall())
+    assert not not_invoker, (
+        f"view(s) not security_invoker — they run as their postgres owner and "
+        f"BYPASS every RLS policy on the underlying table, leaking every "
+        f"account's rows to every authenticated caller: {not_invoker}"
+    )
+
+
+def test_cross_tenant_denial_through_public_view(
+    svc: Any, tenants: dict[str, uuid.UUID],
+) -> None:
+    """The base-table test above (test_cross_tenant_denial) doesn't reproduce
+    what the SPA actually does: it never queries `collections` directly, only
+    `collections_public`. A security-definer-ish view (no security_invoker)
+    would pass the base-table test while still leaking every row through the
+    view — exactly the live bug migration 316 fixed (found 2026-07-20)."""
+    name = f"iso-view-{uuid.uuid4().hex}"
+    with svc.cursor() as cur:
+        cur.execute(
+            "INSERT INTO collections (account_id, name) VALUES (%s, %s) RETURNING id",
+            (tenants["a_acc"], name),
+        )
+        coll_id = cur.fetchone()[0]
+    try:
+        with _scoped(tenants["b_user"]) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT * FROM collections_public WHERE name = %s", (name,),
+                )
+                assert cur.fetchall() == [], (
+                    "tenant B must not see tenant A's collection through "
+                    "collections_public"
+                )
+        with _scoped(tenants["a_user"]) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT * FROM collections_public WHERE name = %s", (name,),
+                )
+                assert len(cur.fetchall()) == 1, (
+                    "tenant A must see their own collection through "
+                    "collections_public"
+                )
     finally:
         with svc.cursor() as cur:
             cur.execute("DELETE FROM collections WHERE id = %s", (coll_id,))

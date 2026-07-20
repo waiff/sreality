@@ -2,6 +2,7 @@ import { supabase } from './supabase';
 import { imageSrc } from './imageUrl';
 import { type TaggedImageUrl } from './imageTags';
 import { fetchListingBrokersByIds, fetchBrokersByIds } from './brokers';
+import type { BrokerPublic, ListingBroker } from './brokers';
 import type { ListingDetailLite } from './dedupDiff';
 import type { LlmCostDailyRow, LlmCostHourlyRow } from './llmCosts';
 import type {
@@ -2155,11 +2156,19 @@ export const fetchPipelineBoard = async (): Promise<PipelineBoardCard[]> => {
   const imagesById = await fetchImagesByListingIds(srealityIds, 1);
 
   // Canonical broker per card (name + firm + contact for the hover box), two
-  // batched reads (listing→broker, then broker→contact) — no N+1.
-  const listingBrokers = await fetchListingBrokersByIds(srealityIds);
-  const brokerContacts = await fetchBrokersByIds([
-    ...new Set([...listingBrokers.values()].map((b) => b.broker_id)),
-  ]);
+  // batched reads (listing→broker, then broker→contact) — no N+1. Both surfaces
+  // are dark to `authenticated` since Phase 0's A6 (broker PII stays masked
+  // until Wave 4), so a 403 here is expected, not a failure — degrade to no
+  // broker data instead of failing the whole board load.
+  const listingBrokers = await fetchListingBrokersByIds(srealityIds).catch(
+    () => new Map<number, ListingBroker>(),
+  );
+  const brokerContacts =
+    listingBrokers.size === 0
+      ? new Map<number, BrokerPublic>()
+      : await fetchBrokersByIds([
+          ...new Set([...listingBrokers.values()].map((b) => b.broker_id)),
+        ]).catch(() => new Map<number, BrokerPublic>());
 
   return rows.map((r) => {
     const p = byId.get(r.property_id);
