@@ -1,4 +1,5 @@
 import { useMemo, useState, useEffect } from 'react';
+import { Link } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 
 import FilterChip from '@/components/FilterChip';
@@ -310,7 +311,13 @@ function ListingCard({ row, onShowRaw }: { row: LocationAuditRow; onShowRaw: () 
           {portalShort(row.source)}
         </span>
         {cat && <span className="text-[0.72rem] text-[var(--color-ink-3)]">{cat}</span>}
-        <span className="font-mono text-[0.72rem] text-[var(--color-ink-4)]">#{row.sreality_id}</span>
+        <Link
+          to={`/listing/${row.sreality_id}`}
+          className="font-mono text-[0.72rem] text-[var(--color-copper)] hover:underline"
+          title="Otevřít listing v aplikaci (Ctrl/Cmd+klik = nová karta)"
+        >
+          #{row.sreality_id}
+        </Link>
         {row.source_id_native && row.source_id_native !== String(row.sreality_id) && (
           <span className="font-mono text-[0.68rem] text-[var(--color-ink-4)]" title="native id na portálu">
             ({row.source_id_native})
