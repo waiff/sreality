@@ -353,3 +353,12 @@ def test_parity_pair_carrier_reports_each_side() -> None:
         "listing_visual_matches.listing_id_a": 1,
         "listing_visual_matches.listing_id_b": 2,
     }
+
+
+def test_parity_registry_is_the_shared_one() -> None:
+    """The parity check and the backfill MUST walk the same carrier list — a table
+    in one and not the other is a silent hole (unwatched, or never filled)."""
+    from scripts.verify_pipeline import _PARITY_CARRIERS
+    from toolkit.listing_identity import R2_CARRIERS
+
+    assert _PARITY_CARRIERS is R2_CARRIERS

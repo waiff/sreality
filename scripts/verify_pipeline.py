@@ -33,6 +33,7 @@ import sys
 from typing import Any, Callable
 
 from scraper.db import connect
+from toolkit.listing_identity import R2_CARRIERS as _PARITY_CARRIERS
 from toolkit.system_alerts import emit_transition_alerts, latest_statuses
 
 LOG = logging.getLogger("verify_pipeline")
@@ -865,45 +866,6 @@ def check_merge_precision_sample(conn: Any, thresholds: dict[str, Any]) -> dict[
         "details": {"sampled": len(samples), "requested": n, "samples": samples},
     }
 
-
-# R2 dual-write parity (docs/design/listing-identity-r2-pk-swap-runbook.md § 2 A3).
-# Every carrier that gained a surrogate column in migrations 320-325, with the
-# monotonic cursor its watermark is anchored on. `cols` is (legacy, new) pairs —
-# the four pair caches and dedup_pair_audit carry two, checked POSITIONALLY
-# (listing_id_a is the surrogate of sreality_id_a) because dual-write deliberately
-# does not re-canonicalise a/b.
-_PARITY_CARRIERS: list[dict[str, Any]] = [
-    {"table": "images", "cursor": "id", "cols": [("sreality_id", "listing_id")]},
-    {"table": "listing_snapshots", "cursor": "id", "cols": [("sreality_id", "listing_id")]},
-    {"table": "listing_videos", "cursor": "id", "cols": [("sreality_id", "listing_id")]},
-    {"table": "listing_condition_scores", "cursor": "id", "cols": [("sreality_id", "listing_id")]},
-    {"table": "listing_marker_extractions", "cursor": "id", "cols": [("sreality_id", "listing_id")]},
-    {"table": "listing_summaries", "cursor": "id", "cols": [("sreality_id", "listing_id")]},
-    {"table": "building_unit_extractions", "cursor": "id", "cols": [("sreality_id", "listing_id")]},
-    {"table": "listing_description_enrichments", "cursor": "id", "cols": [("sreality_id", "listing_id")]},
-    {"table": "listing_image_comparisons", "cursor": "id",
-     "cols": [("sreality_id_a", "listing_id_a"), ("sreality_id_b", "listing_id_b")]},
-    {"table": "listing_visual_matches", "cursor": "id",
-     "cols": [("sreality_id_a", "listing_id_a"), ("sreality_id_b", "listing_id_b")]},
-    {"table": "listing_floor_plan_matches", "cursor": "id",
-     "cols": [("sreality_id_a", "listing_id_a"), ("sreality_id_b", "listing_id_b")]},
-    {"table": "listing_site_plan_matches", "cursor": "id",
-     "cols": [("sreality_id_a", "listing_id_a"), ("sreality_id_b", "listing_id_b")]},
-    {"table": "dedup_pair_audit", "cursor": "id",
-     "cols": [("left_sreality_id", "left_listing_id"), ("right_sreality_id", "right_listing_id")]},
-    {"table": "properties", "cursor": "id", "cols": [("repr_listing_id", "repr_listing_ref_id")]},
-    {"table": "property_notes", "cursor": "id", "cols": [("origin_listing_id", "origin_listing_ref_id")]},
-    {"table": "property_merge_events", "cursor": "id", "cols": [("listing_id", "listing_ref_id")]},
-    {"table": "manual_rental_estimates", "cursor": "id", "cols": [("sreality_id", "listing_id")]},
-    {"table": "manual_rental_estimates_history", "cursor": "id", "cols": [("sreality_id", "listing_id")]},
-    {"table": "estimation_runs", "cursor": "id", "cols": [("input_sreality_id", "input_listing_id")]},
-    {"table": "building_runs", "cursor": "id", "cols": [("input_sreality_id", "input_listing_id")]},
-    # uuid PK / no PK — timestamp axis instead.
-    {"table": "notification_dispatches", "cursor": "dispatched_at", "kind": "ts",
-     "cols": [("sreality_id", "listing_id")]},
-    {"table": "estimation_cohort_entries", "cursor": "created_at", "kind": "ts",
-     "cols": [("sreality_id", "listing_id")]},
-]
 
 # Keep every parity scan bounded so the 6-hourly run never degenerates into a seq
 # scan of 8M images rows: look only at the newest slice above the watermark. A live
