@@ -131,8 +131,9 @@ export interface PortalListing {
   source: string;
   source_id: string;
   found: boolean;
-  /* App-wide listing identity (negative for non-sreality portals); the SPA
-   * page is /listing/{sreality_id}. Null when not in our DB (no app page). */
+  /* App-wide listing identity (negative for non-sreality portals). Non-null iff
+   * the listing is in our DB (has an app page); the deep link uses the canonical
+   * /listing/{source}/{source_id} natural-key route, not this internal id. */
   sreality_id: number | null;
   /* The grouping property (the pipeline + dedup grain). Null when not in our
    * DB or not yet attached to a property. */
