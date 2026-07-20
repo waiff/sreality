@@ -395,6 +395,148 @@ function ListingCard({ row, onShowRaw }: { row: LocationAuditRow; onShowRaw: () 
           </div>
         ))}
       </div>
+
+      <DedupEligibility row={row} />
+    </div>
+  );
+}
+
+const GEO_FAMILIES = ['dum', 'pozemek', 'komercni', 'ostatni'];
+
+interface Cond {
+  label: string;
+  ok: boolean;
+  value: string;
+}
+interface Pass {
+  key: string;
+  label: string;
+  applies: boolean;
+  pass: boolean;
+  conds: Cond[];
+}
+
+// The three dedup passes computed from the row's raw fields, mirroring
+// toolkit.publication's predicates EXACTLY (street pass has no is_active gate; geo +
+// byt-geo do). Each condition shows its ✓/✗ and value so the operator can verify why a
+// row is (un)reachable. `pass` here equals the backend elig_* booleans by construction.
+function eligibilityPasses(r: LocationAuditRow): Pass[] {
+  const dash = '—';
+  const streetOk = !!r.street;
+  const dispOk = r.disposition != null; // predicate is `disposition IS NOT NULL` (no <> '')
+  const geomOk = r.lat != null && r.lon != null;
+  const obecOk = r.obec_id != null;
+  const areaVal = r.area_m2 ?? r.estate_area ?? r.usable_area ?? null;
+  const areaOk = areaVal != null;
+  const cat = r.category_main ?? '';
+  const geoFam = GEO_FAMILIES.includes(cat);
+  const isByt = cat === 'byt';
+  const active = r.is_active;
+  const geomStr = geomOk ? `${r.lat!.toFixed(4)}, ${r.lon!.toFixed(4)}` : dash;
+  const areaStr = areaOk ? `${areaVal} m²` : dash;
+  const yn = (b: boolean) => (b ? 'ano' : 'ne');
+  return [
+    {
+      key: 'street',
+      label: 'Ulice + dispozice',
+      applies: true,
+      pass: streetOk && dispOk,
+      conds: [
+        { label: 'street', ok: streetOk, value: r.street ?? dash },
+        { label: 'dispozice', ok: dispOk, value: r.disposition ?? dash },
+      ],
+    },
+    {
+      key: 'geo',
+      label: 'Geo + plocha',
+      applies: geoFam,
+      pass: active && geoFam && geomOk && obecOk && areaOk,
+      conds: [
+        { label: 'kategorie ∈ dům/pozemek/komerce/ostatní', ok: geoFam, value: cat || dash },
+        { label: 'aktivní', ok: active, value: yn(active) },
+        { label: 'geom', ok: geomOk, value: geomStr },
+        { label: 'obec_id', ok: obecOk, value: r.obec_id != null ? String(r.obec_id) : dash },
+        { label: 'plocha', ok: areaOk, value: areaStr },
+      ],
+    },
+    {
+      key: 'byt_geo',
+      label: 'Byt-geo (byt bez ulice)',
+      applies: isByt,
+      pass: active && isByt && geomOk && obecOk && areaOk && dispOk,
+      conds: [
+        { label: 'kategorie = byt', ok: isByt, value: cat || dash },
+        { label: 'aktivní', ok: active, value: yn(active) },
+        { label: 'geom', ok: geomOk, value: geomStr },
+        { label: 'obec_id', ok: obecOk, value: r.obec_id != null ? String(r.obec_id) : dash },
+        { label: 'plocha', ok: areaOk, value: areaStr },
+        { label: 'dispozice', ok: dispOk, value: r.disposition ?? dash },
+      ],
+    },
+  ];
+}
+
+function DedupEligibility({ row }: { row: LocationAuditRow }) {
+  const passes = eligibilityPasses(row);
+  const reachable = row.dedup_reachable;
+  // Why unreachable: the applicable passes and their first failing condition.
+  const why = reachable
+    ? null
+    : passes
+        .filter((p) => p.applies)
+        .map((p) => {
+          const missing = p.conds.filter((c) => !c.ok).map((c) => c.label);
+          return `${p.label}: chybí ${missing.join(', ')}`;
+        })
+        .join(' · ');
+
+  return (
+    <div className="px-4 pb-3 pt-1 border-t border-[var(--color-rule)]">
+      <div className="flex items-baseline gap-2">
+        <span className="text-[0.6rem] uppercase tracking-[0.1em] text-[var(--color-ink-4)]">
+          Dedup dosažitelnost
+        </span>
+        <span
+          className={[
+            'text-[0.66rem]',
+            reachable ? 'text-[var(--color-sage)]' : 'text-[var(--color-brick)]',
+          ].join(' ')}
+        >
+          {reachable ? 'dosažitelné' : 'nedosažitelné — nesplňuje žádnou cestu'}
+        </span>
+      </div>
+      {why && <p className="mt-0.5 text-[0.72rem] text-[var(--color-ink-3)]">{why}</p>}
+      <div className="mt-1.5 flex flex-col gap-1">
+        {passes.map((p) => (
+          <div key={p.key} className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-[0.72rem]">
+            <span
+              className={[
+                'inline-flex items-center gap-1 font-medium min-w-[10.5rem]',
+                !p.applies
+                  ? 'text-[var(--color-ink-4)]'
+                  : p.pass
+                    ? 'text-[var(--color-sage)]'
+                    : 'text-[var(--color-brick)]',
+              ].join(' ')}
+            >
+              <span aria-hidden>{!p.applies ? '·' : p.pass ? '✓' : '✗'}</span>
+              {p.label}
+              {!p.applies && <span className="text-[var(--color-ink-4)]">(neplatí)</span>}
+            </span>
+            <span className="flex flex-wrap gap-x-2 gap-y-0.5">
+              {p.conds.map((c) => (
+                <span
+                  key={c.label}
+                  className={c.ok ? 'text-[var(--color-ink-3)]' : 'text-[var(--color-brick)]'}
+                >
+                  <span aria-hidden>{c.ok ? '✓' : '✗'}</span> {c.label}
+                  <span className="text-[var(--color-ink-4)]"> ({c.value})</span>
+                </span>
+              ))}
+            </span>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

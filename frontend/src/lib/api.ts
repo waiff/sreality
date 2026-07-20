@@ -2197,6 +2197,11 @@ export type LocationAuditRow = {
   street_id: number | null;
   street_name_key: string | null;
   street_source: string | null;
+  // Dedup-eligibility inputs (for the per-row "why unreachable" breakdown).
+  disposition: string | null;
+  area_m2: number | null;
+  estate_area: number | null;
+  usable_area: number | null;
   locality: string | null;
   district: string | null;
   obec: string | null;

@@ -147,6 +147,9 @@ _LIST_SELECT = """
     ST_Y(l.geom::geometry) AS lat, ST_X(l.geom::geometry) AS lon,
     l.street, l.house_number, l.zip, l.street_id, l.street_name_key, l.street_source,
     l.locality, l.district,
+    -- dedup-eligibility inputs not otherwise shown: disposition + the area coalesce
+    -- (area_m2 → estate_area → usable_area) the geo/byt-geo predicates test.
+    l.disposition, l.area_m2, l.estate_area, l.usable_area,
     l.obec, l.okres, l.region, l.obec_id, l.okres_id, l.region_id,
     l.locality_district_id, l.locality_region_id, l.locality_municipality_id,
     l.locality_quarter_id, l.locality_ward_id,
@@ -170,6 +173,10 @@ _DEDUP_COLS = f"""
 
 def _iso(v: Any) -> str | None:
     return v.isoformat() if v is not None else None
+
+
+def _num(v: Any) -> float | None:
+    return float(v) if v is not None else None
 
 
 def _build_where(
@@ -290,6 +297,10 @@ def list_location_audit(
                 "street_id": r["street_id"],
                 "street_name_key": r["street_name_key"],
                 "street_source": r["street_source"],
+                "disposition": r["disposition"],
+                "area_m2": _num(r["area_m2"]),
+                "estate_area": _num(r["estate_area"]),
+                "usable_area": _num(r["usable_area"]),
                 "locality": r["locality"],
                 "district": r["district"],
                 "obec": r["obec"],
