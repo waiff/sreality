@@ -1,6 +1,6 @@
 # Public-release remediation — post-ship review of migrations 316–319
 
-**Date:** 2026-07-20. **Status: plan approved for execution, nothing applied yet.**
+**Date:** 2026-07-20. **Status: R1 shipped (migrations 329+330, live-verified). R2–R4 pending.**
 
 A 14-finding code review of the deployed 316–319 hardening batch was adversarially
 re-verified by a 6-agent workflow (repo + **live DB**, project `erlvtprrmrylhznfyaih`)
@@ -37,8 +37,10 @@ things are broken in production right now). R2 blocks public release. R3/R4 are 
 
 - Load the `database` skill before R1/R2. Migrations are **append-only**, applied via the
   Supabase MCP; everything below is additive → autonomous per the DB gate (no pg_dump needed).
-- Migration numbers below (`320/321/322`) mean "next free numbers" — re-check
-  `ls migrations/ | tail -3` before writing; renumber if something landed first.
+- Migration numbers mean "next free numbers" — re-check `ls migrations/ | tail -3` before
+  writing; renumber if something landed first. (This already happened: the plan said 320,
+  but the listing-identity track had taken 320–328, so R1 shipped as **329 + 330** and R2's
+  numbers move accordingly.)
 - One branch + draft PR per R-item, off fresh `main`; CI green before merge; update
   `roadmap/public-release-track.md` (this track only) in each PR.
 - After applying each migration live, run the stated verification queries **before** pushing,
@@ -50,10 +52,14 @@ things are broken in production right now). R2 blocks public release. R3/R4 are 
 
 ## R1 — P0 hotfix: un-break Browse estimates, golden-set freeze, Health matviews
 
-**Branch:** `fix/admin-gate-p0-hotfix`. **One migration (320) + test updates.**
-All three regressions share the 316–318 deployment as root cause and one migration fixes them.
+**✅ SHIPPED 2026-07-20** — migrations **329 + 330** (the plan's "320" was taken; the
+listing-identity track had landed 320–328 by execution time). Applied live and verified;
+see the live-verification results at the end of this section.
 
-### 320 part A — revert `security_invoker` on `property_estimates_public` (F1)
+**Branch:** `fix/admin-gate-p0-hotfix`. **Two migrations + test updates.**
+All three regressions share the 316–318 deployment as root cause.
+
+### 329 part A — revert `security_invoker` on `property_estimates_public` (F1)
 
 The view is a **market-wide aggregate** (`estimation_runs JOIN listings`, mig 311:200-220),
 not tenant data — mig 316 mis-grouped it with the 7 genuine tenant views. Under invoker
@@ -75,7 +81,7 @@ carries `account_id` + an RLS policy) — **do not touch them**.
 Do NOT "fix" this instead by granting browser roles SELECT on `estimation_runs`/`listings`
 base tables — that would leak tenant estimation rows and unwind Phase 0.
 
-### 320 part B — claims-absent fallback in `is_platform_admin()` (F2 + F3)
+### 329 part B — claims-absent fallback in `is_platform_admin()` (F2 + F3)
 
 `is_platform_admin()` (mig 286:71-84, SQL STABLE SECURITY DEFINER) keys solely on
 `request.jwt.claims`, which is NULL on every non-PostgREST connection. Confirmed live:
@@ -142,24 +148,56 @@ matview decoupling doesn't change refresh cost.)
    if the replay DB is empty); with `SET ROLE authenticated` + foreign claims it stays false
    (existing deny tests re-run unchanged).
 
-### R1 live verification (before pushing)
+### R1 live verification — RESULTS (2026-07-20, post-apply)
 
-- `select is_platform_admin()` on a raw MCP/psycopg connection → **true**;
-  `select count(*) from dedup_label_events` → **> 0**.
-- `property_estimates_public` under `SET LOCAL ROLE authenticated` + claims → **58-ish rows**, no error.
-- After ≤10 min: `scraper_health_checks_mv` payloads show real failure/queue numbers
-  (compare `listing_fetch_failures` active count), `portal_health_mv` shows non-null `last_parsed_at`.
-- Foreign-JWT deny still holds on the 26 gated objects (run the live suite).
-- Browse "with estimates" toggle returns results in the SPA (operator click-check).
+| Check | Before | After |
+| --- | --- | --- |
+| `dedup_label_events` (golden-set source) | 0 rows | **809 rows** |
+| `listing_fetch_failures_public` | 0 | **1485** |
+| `listing_detail_queue_public` | 0 | **680** |
+| `parsed_url_activity` | 0 | **4** |
+| `property_estimates_public` reloption | `security_invoker=true` | **owner-rights**, 58 rows |
+| `scraper_health_checks_mv` fetch-failure check (sreality) | `0 active` | **`38 active`** = base table exactly |
+| Foreign JWT → `is_platform_admin()` | false | **false** (deny direction intact) |
+| Claims-less `SET ROLE authenticated` | n/a | **false** (migration 330) |
+
+The health matviews healed through the **real pg_cron path** (the 18:10 tick), not a manual
+refresh — so the cron→matview→dashboard chain is verified end to end. Both migrations carry
+their own `DO` post-condition blocks that raise rather than leave a half-fixed gate live.
+
+Still worth an operator click-check (not blocking): the Browse "with estimates" toggle in the SPA.
+
+### R1 addendum — why there are two migrations
+
+Migration 329's fallback keyed on `session_user` alone. Live-testing it immediately after
+apply showed that guard is looser than intended: `SET ROLE` does **not** change
+`session_user`, so a connection logging in as an owner/bypassrls role and then simulating
+`SET LOCAL ROLE authenticated` **without** claims still reported admin. Production was never
+exposed (PostgREST logs in as `authenticator`, the API pool as `tenant_pool` — neither is
+bypassrls, so both already failed closed), but the **CI schema-replay DB logs in as the table
+owner**, exactly where a role-switch simulation would have been silently over-privileged and
+could have masked a real gate regression.
+
+Migration 330 adds the second condition: the `role` GUC must read `'none'`. That GUC is **not**
+masked by SECURITY DEFINER (unlike `current_user`), so it stays visible inside the function
+body — `'none'` for a genuine service connection, the switched-to role name after any
+`SET ROLE`. Both conditions must hold. pg_cron and the service-role scripts are unaffected
+(SECURITY DEFINER does not set the role GUC, and neither issues a `SET ROLE`), which 330's own
+post-condition asserts in both directions before committing.
+
+**Generalizable lesson:** when a SECURITY DEFINER function needs to know *who is calling*,
+`current_user` is the definer and useless; `session_user` identifies the login but survives
+`SET ROLE`; only `session_user` **plus** the `role` GUC distinguishes "a service connection"
+from "a service connection pretending to be a browser role."
 
 ---
 
 ## R2 — grant hardening + decouple cron matviews from request state
 
-**Branch:** `fix/anon-matview-grant-hardening`. **Two migrations (321 revokes, 322 matview
+**Branch:** `fix/anon-matview-grant-hardening`. **Two migrations (331 revokes, 332 matview
 repoint) + standing tests.** Latent today (single operator) but a hard public-release blocker.
 
-### 321 — revoke the drifted grants (F4 + F7)
+### 331 — revoke the drifted grants (F4 + F7)
 
 Live-verified full anon inventory = **exactly 7 views, all drift** (granted by migs
 303/308/309/310/311/315 *after* 299's blanket revoke; the settled posture is anon-dark, and
@@ -212,7 +250,7 @@ Do NOT revoke authenticated SELECT on the other 10 matviews without first greppi
 `frontend/src/` for each name — `properties_map_mv` (SPA map) and the health/choropleth
 matviews are legitimately read by the logged-in app.
 
-### 322 — repoint the 3 health matviews at base tables (F3 defense-in-depth)
+### 332 — repoint the 3 health matviews at base tables (F3 defense-in-depth)
 
 A matview refreshed out-of-band by pg_cron must never depend on `request.jwt.claims`. Even
 with R1's fallback, leave no request-scoped state in cron paths:
@@ -284,7 +322,7 @@ external re-audit" posture.
    views (functions: gate inside WHERE, not the SELECT list) — and add the comment that the
    live deny/allow test is authoritative; the static one only guards accidental clause removal.
 4. **Standing CI gate** (F10), in `tests/test_migration_rls_grants.py` style:
-   - *Static:* for every migration ≥ 320 (`MIN_VIEW_GATE`), any `CREATE [OR REPLACE]
+   - *Static:* for every migration ≥ 331 (`MIN_VIEW_GATE`), any `CREATE [OR REPLACE]
      [MATERIALIZED] VIEW`/`FUNCTION` whose body references a `SENSITIVE_TABLES` token
      (word-boundary) must contain `is_platform_admin()` or be named in an explicit,
      comment-justified `PUBLIC_ALLOWLIST`. `SENSITIVE_TABLES` = the admin base relations the

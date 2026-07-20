@@ -28,21 +28,33 @@ pytestmark = pytest.mark.skipif(
     reason="TEST_DATABASE_URL not set — live tenant-isolation checks run only in the CI DB job",
 )
 
-# SPA-facing views (migrations 022/025/202/203/205/211/278) the frontend reads
-# directly via supabase-js — must be `security_invoker` (migration 316) or they
-# run as their postgres owner and BYPASS every RLS policy below, regardless of
-# the caller's role. The base-table tests above don't exercise this: the SPA
-# never queries base tables directly, only these views.
+# SPA-facing PER-ACCOUNT views (migrations 022/025/202/203/205/211/278) the
+# frontend reads directly via supabase-js — must be `security_invoker` (migration
+# 316) or they run as their postgres owner and BYPASS every RLS policy below,
+# regardless of the caller's role. The base-table tests above don't exercise this:
+# the SPA never queries base tables directly, only these views.
+#
+# `property_estimates_public` is deliberately NOT here. Migration 316 included it,
+# but it is a MARKET-WIDE aggregate that joins `listings` (RLS-enabled with zero
+# policies, so deny-all to every non-bypassrls role) — under invoker rights it
+# returned zero rows to everyone and silently emptied Browse's "with estimates"
+# filter. Migration 329 reverted it; `test_market_view_not_security_invoker`
+# below pins that, and it must stay out of this list.
 _TENANT_VIEWS: list[str] = [
     "collection_properties_public",
     "collections_public",
     "pipeline_stages_public",
-    "property_estimates_public",
     "property_notes_public",
     "property_pipeline_public",
     "property_tags_public",
     "tags_public",
 ]
+
+# Market-wide views that must NOT be security_invoker: they join a shared table
+# carrying RLS-enabled-with-zero-policies (`listings`/`properties`/`images`),
+# which is deny-all under invoker rights, so flipping them silently returns zero
+# rows to every caller instead of scoping anything.
+_MARKET_VIEWS: list[str] = ["property_estimates_public"]
 
 # The 19 user-state tables migrations 290-294 (+ entitlements, 298) scope per account.
 _TENANT_TABLES: list[str] = [
@@ -209,6 +221,85 @@ def test_tenant_views_are_security_invoker(svc: Any) -> None:
         f"BYPASS every RLS policy on the underlying table, leaking every "
         f"account's rows to every authenticated caller: {not_invoker}"
     )
+
+
+def test_market_view_not_security_invoker(svc: Any) -> None:
+    """Migration 329: the mirror of the test above. A market-wide view joining a
+    zero-policy RLS table must run as its owner — invoker rights make that join
+    deny-all and it returns zero rows to EVERY caller (the live regression
+    migration 316 shipped for `property_estimates_public`, which emptied Browse's
+    "with estimates" filter and the browse_stats_properties EXISTS test)."""
+    with svc.cursor() as cur:
+        cur.execute(
+            "SELECT c.relname FROM pg_class c "
+            "JOIN pg_namespace n ON n.oid = c.relnamespace "
+            "WHERE n.nspname = 'public' AND c.relkind = 'v' "
+            "AND c.relname = ANY(%s) "
+            "AND EXISTS ("
+            "  SELECT 1 FROM pg_options_to_table(c.reloptions) o "
+            "  WHERE o.option_name = 'security_invoker' AND o.option_value = 'true'"
+            ")",
+            (_MARKET_VIEWS,),
+        )
+        wrongly_invoker = sorted(r[0] for r in cur.fetchall())
+    assert not wrongly_invoker, (
+        f"market-wide view(s) flipped to security_invoker — they join a shared "
+        f"table whose RLS is enabled with zero policies, so they now return zero "
+        f"rows to every caller instead of scoping anything: {wrongly_invoker}"
+    )
+
+
+def test_market_view_readable_by_authenticated(
+    svc: Any, tenants: dict[str, uuid.UUID],
+) -> None:
+    """The behavioural half: an ordinary authenticated tenant must read the same
+    row count a service-role connection sees. Catches the 0-vs-N regression that
+    the reloption check alone cannot (a view can carry the right flag and still
+    be broken by a grant or a base-table policy change)."""
+    for view in _MARKET_VIEWS:
+        with svc.cursor() as cur:
+            cur.execute(f"SELECT count(*) FROM {view}")  # noqa: S608 - fixed list
+            baseline = cur.fetchone()[0]
+        with _scoped(tenants["a_user"]) as conn:
+            with conn.cursor() as cur:
+                cur.execute(f"SELECT count(*) FROM {view}")  # noqa: S608 - fixed list
+                scoped = cur.fetchone()[0]
+        assert scoped == baseline, (
+            f"{view} returned {scoped} rows to an authenticated tenant but "
+            f"{baseline} to service-role — a market-wide view must not be scoped"
+        )
+
+
+def test_admin_gate_opens_for_service_but_not_role_switch(svc: Any) -> None:
+    """Migrations 329/330: `is_platform_admin()` gates 26 admin-ops objects, but
+    it reads the request.jwt.claims GUC, which only PostgREST and the tenant pool
+    set — so on a claims-less connection it was false and those objects returned
+    zero rows, silently no-op'ing build_dedup_golden_set.py and poisoning the
+    pg_cron-refreshed health matviews. The fallback must open for a genuine
+    service connection and stay shut for a claims-less role switch."""
+    with svc.cursor() as cur:
+        cur.execute("SELECT is_platform_admin()")
+        assert cur.fetchone()[0] is True, (
+            "claims-less service connection is not admin — pg_cron's health "
+            "matview refresh and the golden-set freeze would read zero rows"
+        )
+        cur.execute("SELECT count(*) FROM listing_fetch_failures_public")
+        assert cur.fetchone()[0] is not None
+
+    import psycopg
+
+    conn = psycopg.connect(_DB_URL, autocommit=False)
+    try:
+        with conn.transaction():
+            with conn.cursor() as cur:
+                cur.execute("SET LOCAL ROLE authenticated")
+                cur.execute("SELECT is_platform_admin()")
+                assert cur.fetchone()[0] is False, (
+                    "a claims-less SET ROLE reported admin — session_user alone "
+                    "is not enough on an owner login (migration 330)"
+                )
+    finally:
+        conn.close()
 
 
 def test_cross_tenant_denial_through_public_view(
