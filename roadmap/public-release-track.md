@@ -67,13 +67,35 @@ open shared-market data (no RLS to bypass), but a same-day pass found ~26 more t
 pipeline-checks) through the identical bypass — currently harmless (the one authenticated
 user IS the admin) but a real gap the moment Wave 1 signs up a non-admin tenant, since
 frontend route-gating (`RequireAdmin`) and API `require_admin` don't apply to a direct
-supabase-js read. Related: 3 SPA-called `SECURITY DEFINER` functions
-(`images_failure_overview`, `recent_workflow_failures`, `workflow_failure_summary`) execute
-for any `authenticated` caller with no `is_admin` check inside — the Phase 0 doc's "deferred
-to Phase 1 admin-gating" was never actually closed at the function level, only at the
-route/API level. **Not yet triaged or fixed** — needs a per-view pass (does it need
-`security_invoker` + an admin-only RLS policy, or should the SPA read it through the gated
-API instead?), unlike the 8 tenant views this is genuinely more work, not a one-line flip.
+supabase-js read.
+
+**Triaged + fixed the same day (migration 318):** a 29-agent live audit (Opus, one agent per
+flagged view/function) classified all 26 views + the 3 gap `SECURITY DEFINER` functions
+(`images_failure_overview`, `recent_workflow_failures`, `workflow_failure_summary`, which
+execute for any `authenticated` caller with no `is_admin` check inside — the Phase 0 doc's
+"deferred to Phase 1 admin-gating" was never actually closed at the function level). 23 views
++ all 3 functions are genuinely admin-only operational data with no legitimate non-admin SPA
+reader (confirmed per-object: base tables, RLS state, grants, and every frontend call site).
+3 views were correctly left alone: `browse_read_model_state_public` / `portal_listing_counts`
+(non-sensitive aggregate metadata) and `listing_freshness_checks_public` (a genuine non-admin
+feature — the Listing Detail "verify freshness" button reads it for any signed-in user).
+
+The fix deliberately does **NOT** reuse migration 316's technique (`security_invoker` + a
+base-table RLS policy): 7 of the flagged views read the shared `listings`/`properties`/
+`images` tables directly, which have carried RLS-enabled-with-**zero**-policies since early
+migrations specifically so their owner-bypass views (`listings_public`, `properties_public`,
+...) can keep serving shared-market reads to every authenticated user — adding a restrictive
+policy directly to those tables would risk every other reader of them for a narrow, low-value
+fix. Instead each of the 26 objects is redefined to embed `is_platform_admin()` as a plain
+query filter (the same technique `properties_public` already uses for
+`publication_gate_enabled()`) — evaluated per-request, independent of RLS/security_invoker/
+ownership, so it needs **zero** changes to `listings`/`properties`/`images` or any of the 15
+other base tables' grants or policies. Applied live and verified both directions before
+committing: a foreign JWT sees 0 rows across all 26 objects; the real admin JWT sees unchanged
+data; `listings_public`/`properties_public` reads confirmed completely unaffected. Regression
+coverage: `test_admin_ops_views_embed_is_platform_admin` (static) +
+`test_admin_ops_views_deny_non_admin_allow_admin` (live, promotes a test user into `admins`
+mid-test to prove the gate opens correctly, not just closes).
 
 **Also found the same day (lower severity, worth a cleanup pass):** `dedup_model_compare_sets`
 (migration 304) shipped without RLS — same pattern mig 300/301 already hit, currently
@@ -94,14 +116,9 @@ two fetch helpers exists in the app (grep-verified) — this was the only broken
 
 ## Next
 
-1. **Triage the remaining ~26 non-`security_invoker` admin-ops views** + the 3 gap-in-function
-   DEFINER functions — decide per-surface: add `security_invoker` + an `is_platform_admin()`
-   RLS policy, or move the SPA read behind the gated API. Use migration 316 + its regression
-   tests as the template. (In progress — a 29-agent classification pass was dispatched
-   2026-07-20; results land as a follow-up migration + PR.)
-2. Phase 1 exit gate: external re-audit (`/code-review ultra`) — point it explicitly at the
-   `_public` view / `security_invoker` class of bug found today, since the existing pen-test
-   suite structurally couldn't have caught it. Then the 2-account pen-test can be considered
-   to actually cover the SPA's real read path (item 1 landed the missing view-path test).
-3. Wave 1 (extension + agent estimations: quotas, async job lane, Stripe checkout + metering).
-4. Housekeeping: enable Supabase Auth's leaked-password-protection toggle before public signup.
+1. Phase 1 exit gate: external re-audit (`/code-review ultra`) — point it explicitly at the
+   `is_platform_admin()` / `security_invoker` view-gating class of bug found + fixed today
+   (migrations 316 + 318), since the existing pen-test suite structurally couldn't have caught
+   it on its own (it now can — both migrations landed live-verified regression tests).
+2. Wave 1 (extension + agent estimations: quotas, async job lane, Stripe checkout + metering).
+3. Housekeeping: enable Supabase Auth's leaked-password-protection toggle before public signup.
