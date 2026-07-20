@@ -523,12 +523,17 @@ def upsert_listing(
         INSERT INTO listings (
             sreality_id, last_seen_at, is_active,
             {column_list},
-            street_source, geom, raw_json
+            street_source, source_id_native, geom, raw_json
         )
         VALUES (
             %(sreality_id)s, now(), true,
             {placeholders},
             CASE WHEN %(street)s::text IS NOT NULL THEN 'parser' END,
+            -- Natural-key half (migration 091): non-sreality callers pass the
+            -- portal's native id in the row; sreality (no row value) falls back to
+            -- sreality_id::text. Stamped inline at INSERT — not healed afterward —
+            -- so the (source, source_id_native) NOT NULL invariant holds per-write.
+            %(source_id_native)s,
             CASE
               -- Cast to double precision so a NULL lon/lat (common for bazos and
               -- other portals; rare for sreality) carries a concrete type. Without
@@ -551,6 +556,9 @@ def upsert_listing(
           inactive_at = NULL,
           {update_set},
           {_STREET_SOURCE_UPDATE_SQL},
+          -- Heal a legacy NULL natural key on any refetch, but never overwrite a
+          -- set one (preserve-if-null, same rail as geom below).
+          source_id_native = COALESCE(listings.source_id_native, EXCLUDED.source_id_native),
           -- Preserve-if-null (mig-263 rail, extended to geom): an incoming NULL
           -- means "the page carried no coords", never "coords removed" — a bare
           -- EXCLUDED.geom silently wiped geocoded/backfilled coordinates on the
@@ -567,6 +575,9 @@ def upsert_listing(
         "raw_json": raw_jsonb,
         "lon": row.get("lon"),
         "lat": row.get("lat"),
+        # sreality's native id IS its sreality_id; non-sreality callers override
+        # by putting their portal id in row["source_id_native"] (ingest path).
+        "source_id_native": row.get("source_id_native") or str(sreality_id),
     }
     for col in LISTING_COLUMNS:
         params[col] = row.get(col)
@@ -676,13 +687,17 @@ def ingest_scraped_listing(
             pk = int(cur.fetchone()[0])
 
     row = listing.to_row(pk)
+    # Carry the portal's native id into the INSERT so source_id_native is stamped
+    # atomically (the NOT NULL invariant is checked at insert time, before the
+    # source/source_url UPDATE below could heal it).
+    row["source_id_native"] = listing.source_id_native
     with conn.transaction():
         result = upsert_listing(conn, row, listing.raw or {}, listing.content_hash())
         with conn.cursor() as cur:
             cur.execute(
-                "UPDATE listings SET source = %s, source_url = %s, "
-                "source_id_native = %s WHERE sreality_id = %s",
-                (listing.source, listing.source_url, listing.source_id_native, pk),
+                "UPDATE listings SET source = %s, source_url = %s "
+                "WHERE sreality_id = %s",
+                (listing.source, listing.source_url, pk),
             )
         _ensure_property(conn, pk, listing.source)
         if result != "unchanged" and listing.source in BROKER_ATTRIBUTED_SOURCES:
@@ -1898,12 +1913,17 @@ _BATCH_UPSERT_SQL = f"""
     INSERT INTO listings (
         sreality_id, last_seen_at, is_active,
         {", ".join(LISTING_COLUMNS)},
-        street_source, geom, raw_json
+        street_source, source_id_native, geom, raw_json
     )
     SELECT
         j.sreality_id, now(), true,
         {_BATCH_SELECT_COLS},
         CASE WHEN j.street IS NOT NULL THEN 'parser' END,
+        -- sreality-only path: its native id IS sreality_id. Stamped inline so the
+        -- drain (the primary sreality write path since the cadence split) no longer
+        -- leaves the (source, source_id_native) natural key NULL — the hole that
+        -- accumulated 396 NULL sreality rows before this fix.
+        j.sreality_id::text,
         CASE
           WHEN j.lon IS NOT NULL AND j.lat IS NOT NULL
           THEN ST_SetSRID(ST_MakePoint(j.lon, j.lat), 4326)::geography
@@ -1920,6 +1940,7 @@ _BATCH_UPSERT_SQL = f"""
       inactive_at = NULL,
       {_BATCH_UPDATE_SET},
       {_STREET_SOURCE_UPDATE_SQL},
+      source_id_native = COALESCE(listings.source_id_native, EXCLUDED.source_id_native),
       geom = COALESCE(EXCLUDED.geom, listings.geom),
       raw_json = EXCLUDED.raw_json
     RETURNING (xmax = 0) AS inserted
