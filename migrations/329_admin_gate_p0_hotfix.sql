@@ -78,11 +78,18 @@ as $function$
 $function$;
 
 -- Post-conditions: fail loudly rather than leave a half-fixed gate live.
+--
+-- Deliberately NOT asserted here: "the view returns > 0 rows". This block runs as
+-- the migration's superuser, which bypasses RLS, so it would read rows even with
+-- the broken `security_invoker = true` setting — it cannot detect the bug it looks
+-- like it is testing, and it hard-fails the CI schema replay, whose database has no
+-- estimation_runs data at all. The reloption assertion below is the real guard; the
+-- behavioural check belongs in the live test lane under a non-privileged role
+-- (tests/test_tenant_isolation_live.py::test_market_view_readable_by_authenticated).
 do $$
 declare
   v_invoker text;
   v_admin boolean;
-  v_estimates bigint;
 begin
   select coalesce(
            (select option_value
@@ -103,10 +110,9 @@ begin
     raise exception 'is_platform_admin() still false on a claims-less bypassrls session';
   end if;
 
-  select count(*) into v_estimates from public.property_estimates_public;
-  if v_estimates = 0 then
-    raise exception 'property_estimates_public returns 0 rows after the revert';
-  end if;
+  -- Data-independent: the view must at least be queryable end to end (a broken
+  -- definition or a missing grant on a base table raises here).
+  perform 1 from public.property_estimates_public limit 1;
 end $$;
 
 commit;
