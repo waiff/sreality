@@ -556,7 +556,13 @@ def upsert_listing(
             END,
             %(raw_json)s
         )
-        ON CONFLICT (sreality_id) DO UPDATE SET
+        -- Arbiter is the natural key, not sreality_id (R2 Phase D). Safe because
+        -- (a) listings_source_native_uidx is a full (non-partial) unique index, so
+        -- arbiter inference always succeeds, and (b) neither sreality_id nor source
+        -- appears in the SET clause below (_listing_update_set_sql excludes both,
+        -- source_id_native is COALESCE-healed separately) — a conflict on this
+        -- arbiter can never rewrite the frozen surrogate-adjacent identity columns.
+        ON CONFLICT (source, source_id_native) DO UPDATE SET
           last_seen_at = now(),
           is_active = true,
           inactive_at = NULL,
@@ -1970,7 +1976,12 @@ _BATCH_UPSERT_SQL = f"""
         sreality_id bigint, {_BATCH_RECORD_SPEC},
         lon double precision, lat double precision, raw_json jsonb
     )
-    ON CONFLICT (sreality_id) DO UPDATE SET
+    -- Arbiter is the natural key, not sreality_id (R2 Phase D) — see upsert_listing's
+    -- identical retarget for the full safety argument. `source` isn't in this
+    -- INSERT's column list (this path is sreality-only, so it always takes the
+    -- 'sreality' column DEFAULT) — Postgres materializes defaults before evaluating
+    -- the arbiter, so the conflict check still sees the right value.
+    ON CONFLICT (source, source_id_native) DO UPDATE SET
       last_seen_at = now(),
       is_active = true,
       inactive_at = NULL,
