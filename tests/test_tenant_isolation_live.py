@@ -459,6 +459,85 @@ def test_no_anon_write_grants(svc: Any) -> None:
     )
 
 
+# Migration 318 gates these behind is_platform_admin(), but a materialized view
+# can carry neither RLS nor an embedded gate — so `authenticated` holding SELECT on
+# the raw matview reads exactly what the gated wrapper hides (migration 331).
+_ADMIN_GATED_MATVIEWS: list[str] = [
+    "dedup_funnel_resolutions_mv",
+    "dedup_llm_cost_by_category_mv",
+    "images_failure_overview_mv",
+]
+
+
+def test_anon_holds_no_relation_grants(svc: Any) -> None:
+    """Migration 331: the settled Phase 0 posture is that anon reads NOTHING, so
+    the allowlist is empty and this asserts equality, never a subset. Migration 299
+    swept anon once, but a one-time sweep cannot cover grants added by LATER
+    migrations — 303/308/309/310/311/315 each re-opened a view to anon, two of them
+    leaking real rows. `has_table_privilege` is deliberate: it covers materialized
+    views (which information_schema.role_table_grants omits entirely) and privileges
+    inherited from a grant to PUBLIC."""
+    with svc.cursor() as cur:
+        cur.execute(
+            "SELECT c.relname FROM pg_class c "
+            "JOIN pg_namespace n ON n.oid = c.relnamespace "
+            "WHERE n.nspname = 'public' AND c.relkind IN ('r','v','m','p') "
+            "AND has_table_privilege('anon', c.oid, 'SELECT') "
+            "ORDER BY c.relname",
+        )
+        readable = [r[0] for r in cur.fetchall()]
+    assert readable == [], (
+        f"anon must hold no SELECT on any relation — the SPA is fully login-gated "
+        f"and reads as authenticated. Drift (usually a `grant ... to anon` in a "
+        f"migration added after 299's sweep): {readable}"
+    )
+
+
+def test_admin_gated_matviews_dark_to_authenticated(svc: Any) -> None:
+    """A matview cannot embed migration 318's is_platform_admin() filter, so raw
+    SELECT on it bypasses the gate its wrapper view enforces. Legitimate readers go
+    through the owner-rights view or the SECURITY DEFINER function, which keep
+    access via the owner — no non-admin surface needs these directly."""
+    with svc.cursor() as cur:
+        leaks: list[str] = []
+        for mv in _ADMIN_GATED_MATVIEWS:
+            cur.execute("SELECT to_regclass(%s)", (f"public.{mv}",))
+            if cur.fetchone()[0] is None:
+                continue
+            cur.execute(
+                "SELECT has_table_privilege('authenticated', %s, 'SELECT')",
+                (f"public.{mv}",),
+            )
+            if cur.fetchone()[0]:
+                leaks.append(mv)
+    assert leaks == [], (
+        f"authenticated can SELECT the raw matview(s) behind migration 318's admin "
+        f"gate, bypassing it entirely: {leaks}"
+    )
+
+
+def test_matviews_not_writable_by_browser_roles(svc: Any) -> None:
+    """Migration 299's authenticated-write revoke scoped itself to
+    relkind in ('r','p','v'), silently skipping materialized views — they kept the
+    pre-299 default ACL including DML (and MAINTAIN on PG17, which permits REFRESH).
+    Migration 331 closed it; this keeps it closed."""
+    with svc.cursor() as cur:
+        cur.execute(
+            "SELECT c.relname FROM pg_class c "
+            "JOIN pg_namespace n ON n.oid = c.relnamespace "
+            "WHERE n.nspname = 'public' AND c.relkind = 'm' "
+            "AND (has_table_privilege('authenticated', c.oid, 'INSERT') "
+            "  OR has_table_privilege('authenticated', c.oid, 'UPDATE') "
+            "  OR has_table_privilege('authenticated', c.oid, 'DELETE') "
+            "  OR has_table_privilege('anon', c.oid, 'INSERT')) "
+            "ORDER BY c.relname",
+        )
+        writable = [r[0] for r in cur.fetchall()]
+    assert writable == [], (
+        f"materialized view(s) still writable by a browser role: {writable}"
+    )
+
+
 def test_broker_pii_dark_to_browser_roles(svc: Any) -> None:
     """Amendment A6: neither anon nor authenticated may read the broker-directory
     PII surfaces (or execute the broker_leaderboard RPC) before Wave 4 masking."""

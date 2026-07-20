@@ -142,17 +142,24 @@ remediation R3 closes that. Full spec: `docs/design/public-release-remediation-2
    fetch failures, matching the base table exactly). Deny direction intact: foreign JWT and
    claims-less `SET ROLE` both stay non-admin. The two-migration split is explained in the
    spec's R1 addendum — 330 closes a CI-replay fidelity gap 329 left open.
-2. **R2 (public-release blocker)** — revoke the 7 drifted anon view grants + matview ACL
-   cleanup (auth SELECT off the 3 gate-backing `_mv`s, DML/MAINTAIN off all) + repoint the 3
-   health matviews at base tables; standing anon-allowlist + matview-dark tests. § R2.
-3. **R3** — parameterize the tenant-view live tests (cross-tenant deny + own-tenant-positive
+2. ~~**R2 (public-release blocker)**~~ — **SHIPPED 2026-07-20, migration 331.** Revoked the
+   7 drifted anon view grants (anon now reads **nothing**: 7 → 0, including
+   `listing_natural_key_public`, which was dumping every listing's natural key, and
+   `property_estimates_public`), took `authenticated` SELECT off the 3 matviews that bypassed
+   migration 318's admin gate, and stripped DML/`MAINTAIN` off all 13 — closing migration
+   299's `relkind in ('r','p','v')` gap that skipped matviews entirely. Three standing tests
+   added. The health-matview repoint is deliberately deferred (rationale in the spec).
+3. **R2b (new finding)** — `health_summary()` / `portal_health_summary()` are SECURITY INVOKER
+   with no admin gate and EXECUTE to `authenticated`: the same class migration 318 closed, but
+   these two were missed. Needs DEFINER + gate + matview SELECT revoke, together. § R2.
+4. **R3** — parameterize the tenant-view live tests (cross-tenant deny + own-tenant-positive
    over all 7), strengthen the static gate test, add the standing CI gate for future
    admin-view leaks (replaces "defer to re-audit"). § R3.
-4. **R4** — Pipeline broker fetch: degrade only on the A6 42501 signature, log anything else;
+5. **R4** — Pipeline broker fetch: degrade only on the A6 42501 signature, log anything else;
    update the stale `docs/architecture.md` broker paragraph in the same PR. § R4.
-5. Phase 1 exit gate: external re-audit (`/code-review ultra`) — anchor cases + blind spots
+6. Phase 1 exit gate: external re-audit (`/code-review ultra`) — anchor cases + blind spots
    listed in the remediation doc's final section.
-6. Wave 1 (extension + agent estimations: quotas, async job lane, Stripe checkout + metering).
+7. Wave 1 (extension + agent estimations: quotas, async job lane, Stripe checkout + metering).
 
 **Housekeeping done 2026-07-20:** operator enabled Supabase Auth's leaked-password-protection
 toggle (Authentication → Sign In / Providers → Email → "Prevent use of leaked passwords").
