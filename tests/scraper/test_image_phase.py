@@ -401,7 +401,8 @@ def test_record_images_dedupes_duplicate_sequence():
         {"url": "//a/n2.jpg", "sequence": None},  # two nulls: both kept
     ]
     scraper_db.record_images(_Conn(), 999, imgs)
-    seqs = captured["params"][2::3]  # every 3rd flat value is the sequence
+    # 4 flat values per row: (sreality_id, sreality_id-for-listing_id, url, sequence)
+    seqs = captured["params"][3::4]
     assert seqs.count(1) == 1   # deduped
     assert seqs.count(2) == 1
     assert seqs.count(None) == 2  # nulls preserved

@@ -895,17 +895,6 @@ def mark_properties_dirty(
         return cur.rowcount or 0
 
 
-def _listing_surrogate_id(cur: psycopg.Cursor, sreality_id: int) -> int | None:
-    """listings.id for a legacy pk — the R2 dual-write handle for child rows.
-
-    One PK-indexed lookup per call site, not per row: every child row a single
-    call writes belongs to the same listing.
-    """
-    cur.execute("SELECT id FROM listings WHERE sreality_id = %s", (sreality_id,))
-    row = cur.fetchone()
-    return int(row[0]) if row and row[0] is not None else None
-
-
 def record_images(
     conn: psycopg.Connection,
     sreality_id: int,
@@ -942,12 +931,15 @@ def record_images(
     # The storage_path IS NULL guard is load-bearing: an already-downloaded image
     # is never disturbed, so we never re-download what we have. xmax = 0 is true
     # only for genuine inserts, keeping the "newly inserted" count honest.
+    # listing_id is resolved inline (R2 dual-write) so the id never travels through
+    # Python — same shape as every other child writer.
+    values_sql = ", ".join(
+        "(%s, (SELECT id FROM listings WHERE sreality_id = %s), %s, %s)" for _ in kept
+    )
+    flat: list[Any] = [
+        v for url, seq in kept for v in (sreality_id, sreality_id, url, seq)
+    ]
     with conn.transaction(), conn.cursor() as cur:
-        listing_id = _listing_surrogate_id(cur, sreality_id)
-        values_sql = ", ".join("(%s, %s, %s, %s)" for _ in kept)
-        flat: list[Any] = [
-            v for url, seq in kept for v in (sreality_id, listing_id, url, seq)
-        ]
         sql = f"""
             INSERT INTO images (sreality_id, listing_id, sreality_url, sequence)
             VALUES {values_sql}
@@ -991,12 +983,13 @@ def record_videos(
     if not kept:
         return 0
 
+    values_sql = ", ".join(
+        "(%s, (SELECT id FROM listings WHERE sreality_id = %s), %s, %s)" for _ in kept
+    )
+    flat: list[Any] = [
+        v for url, seq in kept for v in (sreality_id, sreality_id, url, seq)
+    ]
     with conn.transaction(), conn.cursor() as cur:
-        listing_id = _listing_surrogate_id(cur, sreality_id)
-        values_sql = ", ".join("(%s, %s, %s, %s)" for _ in kept)
-        flat: list[Any] = [
-            v for url, seq in kept for v in (sreality_id, listing_id, url, seq)
-        ]
         sql = f"""
             INSERT INTO listing_videos (sreality_id, listing_id, source_url, sequence)
             VALUES {values_sql}
