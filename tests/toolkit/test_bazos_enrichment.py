@@ -270,9 +270,10 @@ def test_no_extraction_writes_negative_cache_row():
     assert res["status"] == "no_extraction"
     assert len(conn.inserts) == 1
     params = conn.inserts[0]
-    assert params[0] == 123 and params[1] == 901
-    assert json.loads(params[2]) == {"no_extraction": True}
-    assert json.loads(params[3]) == {}
+    # params[1] repeats sreality_id for the listing_id mirror subquery
+    assert params[0] == 123 and params[1] == 123 and params[2] == 901
+    assert json.loads(params[3]) == {"no_extraction": True}
+    assert json.loads(params[4]) == {}
     assert conn.commits == 1
     assert conn.updates == []
 

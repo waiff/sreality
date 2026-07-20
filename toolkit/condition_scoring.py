@@ -310,7 +310,7 @@ def propagate_condition_levels(conn: "psycopg.Connection") -> int:
     sql = (
         "WITH source AS ( "
         "  SELECT DISTINCT ON (l.property_id) "
-        "         l.property_id, l.sreality_id, "
+        "         l.property_id, l.sreality_id, l.id, "
         "         l.building_condition_level, l.apartment_condition_level "
         "  FROM listings l "
         "  WHERE l.property_id IS NOT NULL "
@@ -330,7 +330,8 @@ def propagate_condition_levels(conn: "psycopg.Connection") -> int:
         "UPDATE listings t "
         "SET building_condition_level = s.building_condition_level, "
         "    apartment_condition_level = s.apartment_condition_level, "
-        "    condition_levels_propagated_from = s.sreality_id "
+        "    condition_levels_propagated_from = s.sreality_id, "
+        "    condition_levels_propagated_from_id = s.id "
         "FROM source s "
         "WHERE t.property_id = s.property_id "
         "  AND t.sreality_id <> s.sreality_id "
@@ -735,15 +736,19 @@ def _cache_store_and_update_listings(
     An own score also clears `condition_levels_propagated_from`: a
     genuine score supersedes any sibling-propagated copy.
     """
+    # listing_id is the surrogate twin of sreality_id (R2 dual-write); it is
+    # resolved inline so callers keep passing the legacy id only.
     insert_sql = (
         "INSERT INTO listing_condition_scores "
-        "(sreality_id, snapshot_id, "
+        "(sreality_id, listing_id, snapshot_id, "
         " building_level, apartment_level, "
         " building_markers_found, apartment_markers_found, "
         " building_confidence, apartment_confidence, "
         " notes, n_images, model, llm_call_id, cost_usd) "
-        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+        "VALUES (%s, (SELECT id FROM listings WHERE sreality_id = %s), "
+        " %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
         "ON CONFLICT (sreality_id, snapshot_id) DO UPDATE SET "
+        " listing_id = EXCLUDED.listing_id, "
         " building_level = EXCLUDED.building_level, "
         " apartment_level = EXCLUDED.apartment_level, "
         " building_markers_found = EXCLUDED.building_markers_found, "
@@ -761,7 +766,8 @@ def _cache_store_and_update_listings(
         "UPDATE listings "
         "SET building_condition_level = %s, "
         "    apartment_condition_level = %s, "
-        "    condition_levels_propagated_from = NULL "
+        "    condition_levels_propagated_from = NULL, "
+        "    condition_levels_propagated_from_id = NULL "
         "WHERE sreality_id = %s "
         "  AND (SELECT scraped_at FROM listing_snapshots "
         "       WHERE id = %s) "
@@ -774,7 +780,7 @@ def _cache_store_and_update_listings(
         cur.execute(
             insert_sql,
             (
-                sreality_id, snapshot_id,
+                sreality_id, sreality_id, snapshot_id,
                 parsed["building_level"], parsed["apartment_level"],
                 _Jsonb(parsed["building_markers_found"]),
                 _Jsonb(parsed["apartment_markers_found"]),

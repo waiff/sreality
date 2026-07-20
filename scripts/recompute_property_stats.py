@@ -78,7 +78,7 @@ _ATTACH_BACKFILL_NATIVE_ID_SQL = """
 
 _ATTACH_INSERT_SQL = """
     INSERT INTO properties (
-        repr_listing_id, category_main, category_type, disposition,
+        repr_listing_id, repr_listing_ref_id, category_main, category_type, disposition,
         area_m2, district, locality, geom, current_price_czk,
         has_balcony, has_parking, has_lift, building_type, condition,
         ownership, furnished, terrace, cellar, garage, category_sub_cb, subtype,
@@ -90,7 +90,7 @@ _ATTACH_INSERT_SQL = """
         source_count, distinct_site_count
     )
     SELECT
-        l.sreality_id, l.category_main, l.category_type, l.disposition,
+        l.sreality_id, l.id, l.category_main, l.category_type, l.disposition,
         l.area_m2, l.district, l.locality, l.geom, l.price_czk,
         l.has_balcony, l.has_parking, l.has_lift, l.building_type, l.condition,
         l.ownership, l.furnished, l.terrace, l.cellar, l.garage, l.category_sub_cb, l.subtype,
@@ -206,7 +206,8 @@ _RECOMPUTE_BATCH_SQL = """
     ),
     repr AS (
       SELECT DISTINCT ON (l.property_id)
-        l.property_id AS pid, l.sreality_id, l.category_main, l.category_type,
+        l.property_id AS pid, l.sreality_id, l.id AS listing_ref_id,
+        l.category_main, l.category_type,
         l.disposition, l.price_czk,
         l.category_sub_cb, l.subtype,
         l.building_condition_level, l.apartment_condition_level, l.source
@@ -300,6 +301,7 @@ _RECOMPUTE_BATCH_SQL = """
       first_seen_at       = ca.first_seen_at,
       last_seen_at        = ca.last_seen_at,
       repr_listing_id     = r.sreality_id,
+      repr_listing_ref_id = r.listing_ref_id,
       category_main       = r.category_main,
       category_type       = r.category_type,
       disposition         = r.disposition,

@@ -51,16 +51,19 @@ def create_manual_estimate(
     sreality_id: int,
     body: s.CreateManualEstimateIn,
 ) -> dict[str, Any]:
+    # listing_id is the surrogate mirror of sreality_id (R2 dual-write); resolved
+    # inline so the caller keeps passing only the legacy id.
     sql = (
         "INSERT INTO manual_rental_estimates "
-        "  (sreality_id, rent_czk, author, source_kind, notes, updated_by) "
-        "VALUES (%s, %s, %s, %s, %s, %s) "
+        "  (sreality_id, listing_id, rent_czk, author, source_kind, notes, updated_by) "
+        "VALUES (%s, (SELECT id FROM listings WHERE sreality_id = %s), "
+        "        %s, %s, %s, %s, %s) "
         f"RETURNING {_SELECT}"
     )
     try:
         with conn.transaction(), conn.cursor() as cur:
             cur.execute(sql, (
-                sreality_id, body.rent_czk, body.author,
+                sreality_id, sreality_id, body.rent_czk, body.author,
                 body.source_kind, body.notes, body.updated_by,
             ))
             row = cur.fetchone()

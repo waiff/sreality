@@ -314,16 +314,19 @@ def _cache_store(
     model: str, llm_call_id: int, cost_usd: float,
 ) -> None:
     with conn.transaction(), conn.cursor() as cur:
+        # listing_id_{a,b} mirror the sreality_id side-for-side during the surrogate-key dual-write.
         cur.execute(
             "INSERT INTO listing_visual_matches "
-            "(sreality_id_a, sreality_id_b, room_type, verdict, rationale, "
+            "(sreality_id_a, listing_id_a, sreality_id_b, listing_id_b, room_type, verdict, rationale, "
             " model, llm_call_id, cost_usd) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) "
+            "VALUES (%s, (SELECT id FROM listings WHERE sreality_id = %s), "
+            "%s, (SELECT id FROM listings WHERE sreality_id = %s), %s, %s, %s, %s, %s, %s) "
             "ON CONFLICT (sreality_id_a, sreality_id_b, room_type, model) DO UPDATE SET "
+            "  listing_id_a = EXCLUDED.listing_id_a, listing_id_b = EXCLUDED.listing_id_b, "
             "  verdict = EXCLUDED.verdict, rationale = EXCLUDED.rationale, "
             "  llm_call_id = EXCLUDED.llm_call_id, cost_usd = EXCLUDED.cost_usd, "
             "  created_at = now()",
-            (a, b, room_type, verdict, rationale, model, llm_call_id, cost_usd),
+            (a, a, b, b, room_type, verdict, rationale, model, llm_call_id, cost_usd),
         )
 
 
@@ -574,13 +577,16 @@ def _site_plan_cache_store(
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(
             "INSERT INTO listing_site_plan_matches "
-            "(sreality_id_a, sreality_id_b, verdict, rationale, model, llm_call_id, cost_usd) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s) "
+            "(sreality_id_a, listing_id_a, sreality_id_b, listing_id_b, verdict, rationale, "
+            " model, llm_call_id, cost_usd) "
+            "VALUES (%s, (SELECT id FROM listings WHERE sreality_id = %s), "
+            "%s, (SELECT id FROM listings WHERE sreality_id = %s), %s, %s, %s, %s, %s) "
             "ON CONFLICT (sreality_id_a, sreality_id_b, model) DO UPDATE SET "
+            "  listing_id_a = EXCLUDED.listing_id_a, listing_id_b = EXCLUDED.listing_id_b, "
             "  verdict = EXCLUDED.verdict, rationale = EXCLUDED.rationale, "
             "  llm_call_id = EXCLUDED.llm_call_id, cost_usd = EXCLUDED.cost_usd, "
             "  created_at = now()",
-            (a, b, verdict, rationale, model, llm_call_id, cost_usd),
+            (a, a, b, b, verdict, rationale, model, llm_call_id, cost_usd),
         )
 
 
@@ -855,14 +861,16 @@ def _floor_plan_cache_store(
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(
             "INSERT INTO listing_floor_plan_matches "
-            "(sreality_id_a, sreality_id_b, verdict, rationale, extracted, "
+            "(sreality_id_a, listing_id_a, sreality_id_b, listing_id_b, verdict, rationale, extracted, "
             " model, llm_call_id, cost_usd) "
-            "VALUES (%s, %s, %s, %s, %s::jsonb, %s, %s, %s) "
+            "VALUES (%s, (SELECT id FROM listings WHERE sreality_id = %s), "
+            "%s, (SELECT id FROM listings WHERE sreality_id = %s), %s, %s, %s::jsonb, %s, %s, %s) "
             "ON CONFLICT (sreality_id_a, sreality_id_b, model) DO UPDATE SET "
+            "  listing_id_a = EXCLUDED.listing_id_a, listing_id_b = EXCLUDED.listing_id_b, "
             "  verdict = EXCLUDED.verdict, rationale = EXCLUDED.rationale, "
             "  extracted = EXCLUDED.extracted, llm_call_id = EXCLUDED.llm_call_id, "
             "  cost_usd = EXCLUDED.cost_usd, created_at = now()",
-            (a, b, verdict, rationale,
+            (a, a, b, b, verdict, rationale,
              json.dumps(extracted) if extracted is not None else None,
              model, llm_call_id, cost_usd),
         )

@@ -290,8 +290,12 @@ def test_operator_merge_records_ledger_resolved_distinct_listing_ids() -> None:
     # The ledger query ran, and the INSERT used its DISTINCT ids (100, 200) — NOT
     # the equal repr_listing_id (555, 555) the properties table returned.
     assert any("array_agg(listing_id)" in s for s, _ in conn.executed)
+    # Params are (left_sreality_id, left_listing_id, right_sreality_id,
+    # right_listing_id, ...) — each surrogate is the same id re-bound into the
+    # inline listings lookup (R2 dual-write).
     ins = _insert_params(conn)
-    assert ins[0] == 100 and ins[1] == 200
+    assert ins[0] == 100 and ins[2] == 200
+    assert ins[1] == 100 and ins[3] == 200
 
 
 def test_operator_dismiss_does_not_touch_the_ledger() -> None:

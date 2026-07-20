@@ -31,10 +31,12 @@ _VIDEO_PREDICATE = (
 _MOVE_SQL = f"""
     WITH moved AS (
         INSERT INTO listing_videos (
-            sreality_id, source_url, sequence, storage_path,
+            sreality_id, listing_id, source_url, sequence, storage_path,
             download_attempts, last_download_attempt_at, unavailable_reason, last_error
         )
-        SELECT sreality_id, sreality_url, sequence, storage_path,
+        SELECT sreality_id,
+               (SELECT id FROM listings WHERE listings.sreality_id = images.sreality_id),
+               sreality_url, sequence, storage_path,
                download_attempts, last_download_attempt_at, unavailable_reason, last_error
         FROM images
         WHERE id = ANY(%s)

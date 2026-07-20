@@ -949,19 +949,22 @@ def _insert_pending_run(
     category_main/category_type ride inside `spec` (input_spec jsonb) —
     estimation_runs has no such columns.
     """
+    # input_listing_id mirrors input_sreality_id through the surrogate key
+    # (R2 dual-write); the scalar subquery resolves it at INSERT time.
     with conn.cursor() as cur:
         cur.execute(
             "INSERT INTO estimation_runs ("
             "  source, mode, status, estimate_kind, "
-            "  input_sreality_id, input_spec, "
+            "  input_sreality_id, input_listing_id, input_spec, "
             "  trace"
             ") VALUES ("
             "  'ui', 'deterministic', 'pending', %s, "
-            "  %s, %s::jsonb, "
+            "  %s, (SELECT id FROM listings WHERE sreality_id = %s), %s::jsonb, "
             "  %s::jsonb"
             ") RETURNING id",
             (
                 estimate_kind,
+                sreality_id,
                 sreality_id,
                 json.dumps(spec),
                 json.dumps({
@@ -983,12 +986,14 @@ def _insert_failed_run(
         cur.execute(
             "INSERT INTO estimation_runs ("
             "  source, mode, status, estimate_kind, "
-            "  input_sreality_id, input_spec, error_message, trace"
+            "  input_sreality_id, input_listing_id, input_spec, error_message, trace"
             ") VALUES ("
             "  'ui', 'deterministic', 'failed', 'rent', "
-            "  %s, '{}'::jsonb, %s, %s::jsonb"
+            "  %s, (SELECT id FROM listings WHERE sreality_id = %s), "
+            "  '{}'::jsonb, %s, %s::jsonb"
             ") RETURNING id",
             (
+                sreality_id,
                 sreality_id,
                 error_message,
                 json.dumps({
@@ -1237,10 +1242,11 @@ def _insert_new_dispatches(
     with conn.cursor() as cur:
         cur.execute(
             "INSERT INTO notification_dispatches "
-            "  (subscription_id, source_kind, property_id, sreality_id, "
+            "  (subscription_id, source_kind, property_id, sreality_id, listing_id, "
             "   change_kind, status, channel, trigger_price_czk, "
             "   target_channels, dedupe_key) "
             "SELECT %(subscription_id)s, 'watchdog', l.property_id, l.sreality_id, "
+            "       (SELECT il.id FROM listings il WHERE il.sreality_id = l.sreality_id), "
             "       'new', 'sent', 'in_app', l.price_czk, "
             "       %(target_channels)s::text[], "
             "       'wd:' || %(subscription_id)s || ':new:' || l.property_id::text "
@@ -1544,10 +1550,11 @@ def match_changes_once(conn: "psycopg.Connection") -> dict[str, int]:
                 # matches against current property state (lockstep with Browse).
                 cur.execute(
                     "INSERT INTO notification_dispatches "
-                    "  (subscription_id, source_kind, property_id, sreality_id, "
+                    "  (subscription_id, source_kind, property_id, sreality_id, listing_id, "
                     "   change_kind, status, channel, target_channels, "
                     "   trigger_snapshot_id, trigger_price_czk, prev_price_czk, dedupe_key) "
                     "SELECT %(subscription_id)s, 'watchdog', l.property_id, l.sreality_id, "
+                    "       (SELECT il.id FROM listings il WHERE il.sreality_id = l.sreality_id), "
                     "       'price_drop', 'sent', 'in_app', %(target_channels)s::text[], "
                     "       d.snapshot_id, d.price_czk, d.prev_price, "
                     "       'wd:' || %(subscription_id)s || ':price_drop:' || d.snapshot_id::text "
@@ -1658,7 +1665,8 @@ def match_monitored_collections_once(conn: "psycopg.Connection") -> dict[str, in
             f"WITH {_MONITORED_CTE}, "
             "steps AS ("
             "  SELECT m.collection_id, m.notify_channels, m.monitor_since, l.property_id, "
-            "         l.sreality_id, s.id AS snapshot_id, s.scraped_at, s.price_czk, "
+            "         l.sreality_id, l.id AS listing_id, "
+            "         s.id AS snapshot_id, s.scraped_at, s.price_czk, "
             "         lag(s.price_czk) OVER ("
             "           PARTITION BY m.collection_id, l.property_id "
             "           ORDER BY s.scraped_at, s.id) AS prev "
@@ -1668,10 +1676,11 @@ def match_monitored_collections_once(conn: "psycopg.Connection") -> dict[str, in
             "  WHERE s.price_czk IS NOT NULL"
             ") "
             "INSERT INTO notification_dispatches "
-            "  (source_kind, collection_id, property_id, sreality_id, change_kind, "
+            "  (source_kind, collection_id, property_id, sreality_id, listing_id, change_kind, "
             "   status, target_channels, trigger_snapshot_id, trigger_price_czk, "
             "   prev_price_czk, dedupe_key) "
             "SELECT 'collection_monitor', st.collection_id, st.property_id, st.sreality_id, "
+            "       st.listing_id, "
             "       CASE WHEN st.price_czk < st.prev THEN 'price_drop' ELSE 'price_rise' END, "
             "       'sent', st.notify_channels, st.snapshot_id, st.price_czk, st.prev, "
             "       'cm:' || st.collection_id::text || ':' || "
@@ -1703,9 +1712,10 @@ def match_monitored_collections_once(conn: "psycopg.Connection") -> dict[str, in
             "     AND max(l.inactive_at) > m.monitor_since"
             ") "
             "INSERT INTO notification_dispatches "
-            "  (source_kind, collection_id, property_id, sreality_id, change_kind, "
+            "  (source_kind, collection_id, property_id, sreality_id, listing_id, change_kind, "
             "   status, target_channels, dedupe_key) "
             "SELECT 'collection_monitor', g.collection_id, g.property_id, g.repr_listing_id, "
+            "       (SELECT il.id FROM listings il WHERE il.sreality_id = g.repr_listing_id), "
             "       'inactive', 'sent', g.notify_channels, "
             "       'cm:' || g.collection_id::text || ':inactive:' || g.property_id::text || ':' || "
             "         floor(extract(epoch FROM g.inactive_at))::bigint::text "
@@ -1750,9 +1760,10 @@ def match_monitored_collections_once(conn: "psycopg.Connection") -> dict[str, in
             "  )"
             ") "
             "INSERT INTO notification_dispatches "
-            "  (source_kind, collection_id, property_id, sreality_id, change_kind, "
+            "  (source_kind, collection_id, property_id, sreality_id, listing_id, change_kind, "
             "   status, target_channels, dedupe_key) "
             "SELECT 'collection_monitor', b.collection_id, b.property_id, b.repr_listing_id, "
+            "       (SELECT il.id FROM listings il WHERE il.sreality_id = b.repr_listing_id), "
             "       'reactivated', 'sent', b.notify_channels, "
             "       'cm:' || b.collection_id::text || ':reactivated:' || b.property_id::text || ':' || "
             "         floor(extract(epoch FROM b.inactive_at))::bigint::text "
@@ -1771,7 +1782,7 @@ def match_monitored_collections_once(conn: "psycopg.Connection") -> dict[str, in
             f"WITH {_MONITORED_CTE}, "
             "src AS ("
             "  SELECT m.collection_id, m.notify_channels, m.monitor_since, l.property_id, l.sreality_id, "
-            "         l.first_seen_at, "
+            "         l.id AS listing_id, l.first_seen_at, "
             "         row_number() OVER (PARTITION BY m.collection_id, l.property_id, l.source "
             "                            ORDER BY l.first_seen_at, l.sreality_id) AS rn, "
             "         min(l.first_seen_at) OVER (PARTITION BY m.collection_id, l.property_id) AS prop_first "
@@ -1788,9 +1799,10 @@ def match_monitored_collections_once(conn: "psycopg.Connection") -> dict[str, in
             "  FROM src"
             ") "
             "INSERT INTO notification_dispatches "
-            "  (source_kind, collection_id, property_id, sreality_id, change_kind, "
+            "  (source_kind, collection_id, property_id, sreality_id, listing_id, change_kind, "
             "   status, target_channels, dedupe_key) "
             "SELECT 'collection_monitor', src.collection_id, src.property_id, src.sreality_id, "
+            "       src.listing_id, "
             "       'new_source', 'sent', src.notify_channels, "
             "       'cm:' || src.collection_id::text || ':new_source:' || src.sreality_id::text "
             "FROM src_counted src "

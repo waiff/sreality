@@ -350,12 +350,17 @@ def _record_operator_decision(
                 led = cur.fetchone()
                 if led is not None and led[0] is not None and led[0] != led[1]:
                     ls, rs = led[0], led[1]
+            # left/right_listing_id are the surrogate mirrors of the two
+            # *_sreality_id columns (R2 dual-write), resolved inline.
             cur.execute(
                 "INSERT INTO dedup_pair_audit (run_at, left_sreality_id, "
-                "right_sreality_id, left_property_id, right_property_id, "
+                "left_listing_id, right_sreality_id, right_listing_id, "
+                "left_property_id, right_property_id, "
                 "category_main, stage, outcome, source, merge_group_id, detail) "
-                "VALUES (now(),%s,%s,%s,%s,%s,%s,%s,'operator',%s,%s::jsonb)",
-                (ls, rs, left_property_id, right_property_id, lc or rc, stage,
+                "VALUES (now(),%s,(SELECT id FROM listings WHERE sreality_id = %s),"
+                "%s,(SELECT id FROM listings WHERE sreality_id = %s),"
+                "%s,%s,%s,%s,%s,'operator',%s,%s::jsonb)",
+                (ls, ls, rs, rs, left_property_id, right_property_id, lc or rc, stage,
                  outcome, str(merge_group_id) if merge_group_id is not None else None,
                  json.dumps(detail)),
             )

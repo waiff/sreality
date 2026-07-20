@@ -252,3 +252,104 @@ def test_weekly_flag_adds_weekly_checks(monkeypatch: Any) -> None:
     )
     assert run_checks(None, {}, weekly=False) == []
     assert [r["check_key"] for r in run_checks(None, {}, weekly=True)] == ["weekly_one"]
+
+
+# --- R2 dual-write parity --------------------------------------------------
+
+
+class _ParityConn:
+    """Serves the armed-carriers query, then one aggregate row per carrier query."""
+
+    def __init__(self, armed: set[str], per_table: dict[str, tuple[int, ...]]) -> None:
+        self._armed = armed
+        self._per_table = per_table
+        self.queries: list[str] = []
+
+    def cursor(self) -> "_ParityConn":
+        return self
+
+    def transaction(self) -> "_ParityConn":
+        return self
+
+    def execute(self, sql: str, params: Any = None) -> None:
+        self.queries.append(sql)
+        if sql.startswith("SET LOCAL"):
+            return
+        if "select child from dual_write_watermark" in sql:
+            self._rows = [(c,) for c in sorted(self._armed)]
+            return
+        # Key off the watermark predicate, not the first " from ": the counting
+        # query contains subquery FROMs (listings, and the table's own max())
+        # ahead of its real one. The clean default is sized from the query itself
+        # — a pair carrier returns two counters per side plus the row total.
+        table = sql.split("w.child = '")[1].split("'")[0]
+        clean = (0,) * sql.count("count(*)")
+        self._rows = [self._per_table.get(table, clean)]
+
+    def fetchall(self) -> Any:
+        return self._rows
+
+    def __enter__(self) -> "_ParityConn":
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        return None
+
+
+def _parity(armed: set[str], per_table: dict[str, tuple[int, ...]]) -> dict[str, Any]:
+    from scripts.verify_pipeline import check_dual_write_parity
+
+    return check_dual_write_parity(_ParityConn(armed, per_table), T)
+
+
+def _all_carrier_names() -> set[str]:
+    from scripts.verify_pipeline import _PARITY_CARRIERS
+
+    return {c["table"] for c in _PARITY_CARRIERS}
+
+
+def test_parity_unarmed_is_warn_never_ok() -> None:
+    """An unarmed carrier must never read as clean: its aggregate-only query returns
+    a row of zeros with no watermark, so armedness is established separately."""
+    res = _parity(set(), {})
+    assert res["status"] == "warn"
+    assert "INERT" in res["message"]
+    assert set(res["details"]["unarmed"]) == _all_carrier_names()
+
+
+def test_parity_partially_armed_warns_and_names_the_gap() -> None:
+    armed = _all_carrier_names() - {"images"}
+    res = _parity(armed, {})
+    assert res["status"] == "warn"
+    assert res["details"]["unarmed"] == ["images"]
+
+
+def test_parity_all_armed_and_clean_is_ok() -> None:
+    res = _parity(_all_carrier_names(), {})
+    assert res["status"] == "ok"
+    assert res["value"] == 0
+    assert res["details"]["gaps"] == {} and res["details"]["mismatches"] == {}
+
+
+def test_parity_missing_surrogate_fails() -> None:
+    res = _parity(_all_carrier_names(), {"images": (7, 0, 100)})
+    assert res["status"] == "fail"
+    assert res["details"]["gaps"] == {"images.listing_id": 7}
+    assert "missing surrogate" in res["message"]
+
+
+def test_parity_wrong_surrogate_fails() -> None:
+    """A mismatch is the positional-zip bug: a surrogate that belongs to another row."""
+    res = _parity(_all_carrier_names(), {"listing_snapshots": (0, 3, 100)})
+    assert res["status"] == "fail"
+    assert res["details"]["mismatches"] == {"listing_snapshots.listing_id": 3}
+    assert "WRONG surrogate" in res["message"]
+
+
+def test_parity_pair_carrier_reports_each_side() -> None:
+    res = _parity(_all_carrier_names(), {"listing_visual_matches": (1, 0, 2, 0, 50)})
+    assert res["status"] == "fail"
+    assert res["details"]["gaps"] == {
+        "listing_visual_matches.listing_id_a": 1,
+        "listing_visual_matches.listing_id_b": 2,
+    }
