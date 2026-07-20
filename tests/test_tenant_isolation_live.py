@@ -236,6 +236,89 @@ def test_cross_tenant_denial_through_public_view(
             cur.execute("DELETE FROM collections WHERE id = %s", (coll_id,))
 
 
+# Migration 318: admin-only operational views/functions the SPA reads directly
+# (dedup engine internals, scraper health, LLM cost, image training/labeling
+# state, workflow health) that CANNOT use migration 316's security_invoker +
+# base-table RLS policy technique, because several of them read the shared
+# `listings`/`properties`/`images` tables (which must stay universally
+# readable to every authenticated user for Browse). Instead each one embeds
+# `is_platform_admin()` directly as a query filter -- evaluated per-request,
+# independent of RLS/security_invoker/ownership.
+_ADMIN_GATED_VIEWS: list[str] = [
+    "data_quality_by_source", "dedup_engine_flow_public", "dedup_engine_runs_public",
+    "dedup_funnel_resolutions_public", "dedup_label_events",
+    "dedup_llm_cost_by_category_public", "dedup_queue_snapshot_public",
+    "dedup_recency_backlog", "dedup_scan_state_public",
+    "dedup_vision_bakeoff_results_public", "detail_latency_recent",
+    "image_border_cases_public", "image_tag_annotations_public",
+    "image_training_examples_public", "listing_detail_queue_public",
+    "listing_fetch_failures_public", "llm_cost_daily_public", "llm_cost_hourly_public",
+    "parsed_url_activity", "phash_pair_notes_public", "pipeline_check_history_public",
+    "pipeline_checks_public", "publication_gate_health_public",
+]
+_ADMIN_GATED_FUNCTIONS: list[str] = [
+    "images_failure_overview", "recent_workflow_failures", "workflow_failure_summary",
+]
+
+
+def test_admin_ops_views_embed_is_platform_admin(svc: Any) -> None:
+    with svc.cursor() as cur:
+        missing = []
+        for name in _ADMIN_GATED_VIEWS:
+            cur.execute("SELECT pg_get_viewdef(%s::regclass, true)", (f"public.{name}",))
+            if "is_platform_admin()" not in cur.fetchone()[0]:
+                missing.append(name)
+        for name in _ADMIN_GATED_FUNCTIONS:
+            cur.execute(
+                "SELECT pg_get_functiondef(oid) FROM pg_proc "
+                "WHERE proname = %s AND pronamespace = 'public'::regnamespace",
+                (name,),
+            )
+            if "is_platform_admin()" not in cur.fetchone()[0]:
+                missing.append(name)
+    assert not missing, (
+        f"admin-ops view/function(s) lost their is_platform_admin() gate -- any "
+        f"authenticated caller (not just the admin) can read them again: {missing}"
+    )
+
+
+def test_admin_ops_views_deny_non_admin_allow_admin(
+    svc: Any, tenants: dict[str, uuid.UUID],
+) -> None:
+    """Live proof the gate actually binds: tenant A (an ordinary account, not
+    admin) sees zero rows through every admin-gated view/function; promoting
+    that same user to `admins` makes them see through it (may still be zero
+    rows if the table itself is empty in this schema-replay DB -- the point is
+    no permission/relation error, not a specific count)."""
+    with _scoped(tenants["a_user"]) as conn:
+        with conn.cursor() as cur:
+            for name in _ADMIN_GATED_VIEWS:
+                cur.execute(f"SELECT count(*) FROM {name}")
+                assert cur.fetchone()[0] == 0, (
+                    f"non-admin authenticated saw rows through {name}"
+                )
+            for name in _ADMIN_GATED_FUNCTIONS:
+                cur.execute(f"SELECT count(*) FROM {name}()")
+                assert cur.fetchone()[0] == 0, (
+                    f"non-admin authenticated saw rows through {name}()"
+                )
+    with svc.cursor() as cur:
+        cur.execute(
+            "INSERT INTO admins (user_id) VALUES (%s) ON CONFLICT DO NOTHING",
+            (tenants["a_user"],),
+        )
+    try:
+        with _scoped(tenants["a_user"]) as conn:
+            with conn.cursor() as cur:
+                for name in _ADMIN_GATED_VIEWS:
+                    cur.execute(f"SELECT count(*) FROM {name}")  # must not raise
+                for name in _ADMIN_GATED_FUNCTIONS:
+                    cur.execute(f"SELECT count(*) FROM {name}()")  # must not raise
+    finally:
+        with svc.cursor() as cur:
+            cur.execute("DELETE FROM admins WHERE user_id = %s", (tenants["a_user"],))
+
+
 def test_no_anon_write_grants(svc: Any) -> None:
     with svc.cursor() as cur:
         cur.execute(
