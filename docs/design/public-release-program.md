@@ -13,6 +13,7 @@
 | **Phase 0 — Emergency hardening** | `phase-0-emergency-hardening.md` | Close the 3 live anon-exploitable criticals now (revoke anon writes, fix the default ACL, RLS-enable 25 tables, lock 8 functions) + fail-closed API + a CI grant-gate. Ships alone, independent of the SaaS decision. |
 | **Phase 1 — Multi-tenant foundations** | `phase-1-multitenancy-foundations.md` | The one large lift: Supabase Auth, `accounts`/`account_members`, RLS via `current_account_ids()`, a fail-closed non-superuser tenant pool, admin gating, Stripe skeleton, anti-abuse, the RLS test lane, a day-daily-safe rollout — plus **Amendments A1–A8** the wave reviews surfaced. |
 | **Waves 1–4 — Public features** | `waves-1-4-public-features.md` | Wave 1 extension + agent estimations (metered flagship); Wave 2 pipeline; Wave 3 watchdogs + notifications; Wave 4 broker analytics (legal-gated). |
+| **Post-ship remediation (2026-07-20)** | `public-release-remediation-2026-07.md` | Execution spec for the live-verified review of the deployed 316–319 batch: R1 P0 hotfix (Browse estimates / golden-set / Health matviews), R2 grant+matview hardening, R3 test-lane + standing CI gate, R4 broker-fetch polish. |
 
 ## Sequencing & gates
 
