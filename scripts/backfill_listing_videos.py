@@ -40,7 +40,8 @@ _MOVE_SQL = f"""
                download_attempts, last_download_attempt_at, unavailable_reason, last_error
         FROM images
         WHERE id = ANY(%s)
-        ON CONFLICT (sreality_id, sequence) DO UPDATE SET
+        -- Arbiter is listing_id (R2 Phase C, listing_videos_listing_id_sequence_key).
+        ON CONFLICT (listing_id, sequence) DO UPDATE SET
             storage_path = COALESCE(listing_videos.storage_path, EXCLUDED.storage_path)
     )
     DELETE FROM images WHERE id = ANY(%s)

@@ -120,9 +120,35 @@ before writing any DDL:
    `notification_dispatches`, `estimation_runs`, `building_runs`, `properties.repr`,
    `property_notes.origin`) never had a NOT NULL legacy column and correctly get none.
 
-**Next: Phase C (§4) — writer `ON CONFLICT` arbiter retargets + the remaining R4 read
-cutover.** The guards landed here are its precondition; retargeting an arbiter before
-its replacement guard exists is the #825 failure class.
+**Phase C, arbiter retarget sub-step DONE (2026-07-20).** Every writer that INSERTed
+against a listing-scoped carrier with an explicit `ON CONFLICT` target now arbitrates on
+`listing_id`, not the legacy `sreality_id`, matching Phase B2's guards exactly:
+`record_images`/`record_videos`/`_BATCH_IMAGES_SQL` → `(listing_id, sequence)`;
+`listing_summaries`/`listing_condition_scores`/`listing_marker_extractions`/
+`building_unit_extractions` → `(listing_id, snapshot_id)`;
+`estimation_cohort_entries` → `(estimation_run_id, listing_id)`; the 4 pair caches →
+`(LEAST(listing_id_a, listing_id_b), GREATEST(listing_id_a, listing_id_b)[, disc])` (a/b
+values themselves are NOT re-canonicalized, per §0.5 — only the arbiter is
+order-independent, DO UPDATE SET still overwrites every column from the SAME call's
+fresh values). `listing_description_enrichments`'s bazos-enrichment writer already used
+a targetless `ON CONFLICT DO NOTHING`, so it needed no change — it was already immune to
+this failure class. The rule-2 latest-snapshot guard (`upsert_listing` +
+`_BATCH_SNAPSHOT_SQL`'s LATERAL) is rekeyed onto `listing_id` too, backed by a new
+composite index (mig 333, `listing_snapshots_listing_id_scraped_at_idx`, built
+CONCURRENTLY live — Phase B had only given this carrier a bare `listing_id` index,
+insufficient for an ORDER BY scraped_at DESC LIMIT 1 on a table written every scrape
+cycle). Every retargeted arbiter was confirmed live via `EXPLAIN` against prod (each
+plan reports the expected `Conflict Arbiter Indexes:`) since these statements are local
+`sql = (...)` variables, not module-level `_SQL` constants — outside the offline
+SQL-corpus sweep's discovery net (a pre-existing gap, not introduced here). `listings`
+itself still arbitrates on `sreality_id` (unchanged) — it stays the PK until Gate 1.
+
+**Next: Phase C, the read cutover (§4 second half).** Frontend resolver chain, browse
+hydration, dedup `ListingKey` + pair-cache reads, merge/unmerge replay, notification
+producers (incl. the `new_source` dedupe_key NULL-concat fix), the Chrome extension
+app-link gate + redistribution, `image_key()`, estimation forward provenance, the
+sreality_id-cursored maintenance walkers (geocode/street/geo_cell partial indexes), then
+the 25-read-model "may lag" wave.
 
 ## 0. What the review corrected (read this first)
 

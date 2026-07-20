@@ -967,7 +967,8 @@ def _persist_cohort_entries(
         "  (SELECT id FROM listings WHERE sreality_id = %(sid)s),"
         "  %(round)s, %(round)s,"
         "  %(snap)s, %(dist)s, %(price)s, %(area)s, %(ppm2)s, %(disp)s"
-        ") ON CONFLICT (estimation_run_id, sreality_id) DO UPDATE SET"
+        # Arbiter is listing_id (R2 Phase C, estimation_cohort_entries_run_listing_id_key).
+        ") ON CONFLICT (estimation_run_id, listing_id) DO UPDATE SET"
         "  last_seen_round_n = EXCLUDED.last_seen_round_n,"
         "  snapshot_id       = COALESCE(EXCLUDED.snapshot_id, estimation_cohort_entries.snapshot_id),"
         "  distance_m        = COALESCE(EXCLUDED.distance_m, estimation_cohort_entries.distance_m),"
