@@ -17,3 +17,8 @@ def pytest_configure(config):  # noqa: ARG001 — pytest hook signature
     """
     os.environ.setdefault("NOTIFICATIONS_MATCHER_DISABLED", "1")
     os.environ.setdefault("STUCK_ROW_SWEEP_DISABLED", "1")
+    # require_token now fails CLOSED (503) when API_TOKEN is unset — a forgotten
+    # prod secret can no longer silently disable auth. The whole test suite hits
+    # gated routes without setting a token, so opt into the local-dev exemption
+    # globally; individual auth tests still delenv this to prove the 503 path.
+    os.environ.setdefault("API_AUTH_OPTIONAL", "1")
