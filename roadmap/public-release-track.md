@@ -121,4 +121,6 @@ two fetch helpers exists in the app (grep-verified) — this was the only broken
    (migrations 316 + 318), since the existing pen-test suite structurally couldn't have caught
    it on its own (it now can — both migrations landed live-verified regression tests).
 2. Wave 1 (extension + agent estimations: quotas, async job lane, Stripe checkout + metering).
-3. Housekeeping: enable Supabase Auth's leaked-password-protection toggle before public signup.
+
+**Housekeeping done 2026-07-20:** operator enabled Supabase Auth's leaked-password-protection
+toggle (Authentication → Sign In / Providers → Email → "Prevent use of leaked passwords").
