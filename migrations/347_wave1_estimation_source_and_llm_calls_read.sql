@@ -14,12 +14,21 @@
 --    llm_calls itself stays account_id-less by design (Wave 1 doc: "cost
 --    auto-attributes via llm_calls.estimation_run_id — llm_calls needs no
 --    account_id") — writes remain service-role only, no INSERT/UPDATE policy.
+--    No migration ever explicitly GRANTed authenticated SELECT on llm_calls
+--    (280's own comment: "aggregate — no grant on raw llm_calls") — the grant
+--    live production has is Supabase's project-level default ACL from table
+--    creation (migration 020), invisible to a from-scratch replay on plain
+--    Postgres (CI caught this: a policy alone is not enough, GRANT is a
+--    precondition RLS filters after). Explicit GRANT here makes the read
+--    path fully reproducible from migrations alone; a no-op on production.
 
 begin;
 
 alter table estimation_runs drop constraint estimation_runs_source_check;
 alter table estimation_runs add constraint estimation_runs_source_check
   check (source in ('ui', 'api', 'clickup', 'extension'));
+
+grant select on llm_calls to authenticated;
 
 create policy llm_calls_tenant_read on llm_calls
   for select to authenticated
