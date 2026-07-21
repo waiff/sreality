@@ -66,9 +66,20 @@ Run as ONE committed track; valueless half-done. Phases and their gates are spec
   changes, since they already read `listing.sreality_id` from the loaded row. Verified
   via live `authenticated`-role query replay (agent can't complete an interactive
   Google-OAuth click-through) + new resolver-chain tests + clean `tsc`/`vitest`/`eslint`.
-  **Still open:** browse hydration, dedup `ListingKey` + pair caches, merge/unmerge
-  replay, notification producers, `image_key()`, the sreality_id-cursored maintenance
-  walkers, 25 read models.
+  **Read cutover largely DONE (✅ 2026-07-21, PRs #866-#879, migs 343/344)** — ten
+  PRs, each verified against prod. Highlights: `exclude_ids` three-valued logic
+  (a CORRECTNESS bug — it silently DELETED post-flip listings from every cohort,
+  skewing nearly every estimate with a green run); the `new_source` dedupe_key
+  NULL-concat (would have aborted the whole collection-monitor pass on a NOT NULL
+  violation); `properties_public`'s repr join (the literal "repr goes NULL" blank-card
+  failure); the image R2 key (`"None/0001.jpg"` — every non-sreality image colliding
+  on one prefix) and drain shard (`hashint8(NULL)` matches NO shard, so those images
+  would never download); the maintenance walkers (invisible new rows → geocode/street/
+  geo_cell silently stop → dedup starves); and the agent cohort keying (`int(None)`
+  kills the agent; cohort provenance vanished inside a bare `except`).
+  **Still open:** the dedup identity chains (4 PRs — see the runbook's ordering
+  constraints, it must not be started piecemeal), the browse FRONTEND half, the
+  may-lag read models, and the LLM tool schemas.
 - **Phase D** (steps 1-2 (partial) and 3-7 ✅ shipped 2026-07-20) — pre-flip prep.
   Step 1: `listings`'s own ingest `ON CONFLICT` (`upsert_listing`, `_BATCH_UPSERT_SQL`)
   retargeted from `sreality_id` to the natural key `(source, source_id_native)`,
