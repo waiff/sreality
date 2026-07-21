@@ -744,6 +744,28 @@ URLs). NEVER touch: `srealityListingUrl()` stays bound to `source_id_native`
 >    do. The rest of the choreography below (pg_cron pauses, the GH-cron
 >    SHA-freeze check, the transaction, resume) is scriptable.
 >
+> **HOW it runs (built 2026-07-21):** `scripts/apply_listings_pk_swap.py` +
+> the dispatch-only `apply_listings_pk_swap.yml`. An agent session has NO local
+> DB path — no `psql`/`pg_dump` binary, no `SUPABASE_DB_URL` in the shell — and
+> the MCP is forbidden for the window (below), so the workflow, which holds the
+> repo secrets, is the execution vehicle. Same pattern as Phase D's
+> `apply_dirty_broker_listings_pk_swap`. Modes: `preflight` (read-only, verifies
+> every §5 gate + both quiet signals), `window` (pause pg_cron → re-verify →
+> swap → verify → resume, resume in a `finally`), `resume-cron` (emergency
+> lever), `rollback`. `window`/`rollback` need `confirm=APPLY`. NOTE a new
+> `workflow_dispatch` 404s until it is merged to the default branch.
+>
+> **Live preflight, 2026-07-21:** all §5 gates PASS — PK still
+> `PRIMARY KEY (sreality_id)`; `listings_sreality_id_uidx` and
+> `listings_id_pk_idx` both present, valid, unique; `listings.id` NOT NULL; **0**
+> legacy FKs on `sreality_id` and **19** surrogate FKs on `id`. pg_cron is
+> exactly **six** jobs (1,3,5,6,7,8) — that IS the complete listings-touching set
+> the §6 text says to prove rather than assume, and the script pauses whatever it
+> finds active rather than a hardcoded list. Operator enabled PITR the same day
+> (7-day window); recovery target recorded as **2026-07-21T12:31:00Z**.
+> Careful with the Supabase restore picker: it labels the zone "(UTC+01:00)"
+> (standard time) while Europe/Prague is on CEST (+02:00) in July.
+>
 > **Do NOT wait for the remaining §4 items.** Browse frontend, the dedup chains,
 > the may-lag read models and the LLM schemas all gate **Gate 2**, not Gate 1.
 > Gate 1 keeps `sreality_id` populated on every row, so nothing that still reads

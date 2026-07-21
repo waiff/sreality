@@ -1,0 +1,95 @@
+name: R2 GATE 1 — listings PK swap
+
+# The destructive step of the listing-identity refactor: swaps listings' PRIMARY
+# KEY from sreality_id to the surrogate id (runbook § 6). Catalog-only — no table
+# scan, no data rewrite — and reversible in place while zero NULL sreality_id rows
+# exist (see scripts/apply_listings_pk_swap.py).
+#
+# Run it HERE rather than from a laptop or the Supabase MCP: the MCP pools with a
+# ~2-minute statement_timeout and has been observed timing out client-side while
+# still COMMITTING, and a half-observed destructive transaction is the worst case.
+#
+# ORDER OF OPERATIONS (the two Railway steps are operator-only):
+#   1. Railway: set REALTIME_WORKER_ENABLED=false, wait for the restart.
+#   2. Dispatch this with mode=preflight — must report PREFLIGHT CLEAR.
+#   3. Check `gh run list --limit 20`: no scraper run mid-flight. A QUEUED run
+#      executes its own checkout SHA, so merging something does not stop it.
+#   4. Dispatch this with mode=window (pauses pg_cron, swaps, verifies, resumes).
+#   5. Railway: set REALTIME_WORKER_ENABLED=true.
+#
+# mode=resume-cron is the emergency lever if a window run is killed between the
+# pause and the resume. mode=rollback re-promotes sreality_id as the PK.
+#
+# Required secrets: SUPABASE_DB_URL, SUPABASE_DB_SESSION_URL.
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "preflight (safe, read-only) | window (THE SWAP) | resume-cron | rollback"
+        required: true
+        default: "preflight"
+        type: choice
+        options:
+          - "preflight"
+          - "window"
+          - "resume-cron"
+          - "rollback"
+      confirm:
+        description: "Type APPLY to arm window/rollback. Ignored for preflight."
+        required: false
+        default: ""
+        type: string
+
+concurrency:
+  group: apply-listings-pk-swap
+  cancel-in-progress: false
+
+jobs:
+  pk-swap:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      SUPABASE_DB_SESSION_URL: ${{ secrets.SUPABASE_DB_SESSION_URL }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: pip install -e .
+
+      # `confirm` is free text, so it goes through the environment rather than
+      # being interpolated into the shell. `mode` is a choice input and cannot
+      # take an arbitrary value, but it travels the same way for consistency.
+      - name: Guard destructive modes
+        if: inputs.mode == 'window' || inputs.mode == 'rollback'
+        env:
+          MODE: ${{ inputs.mode }}
+          CONFIRM: ${{ inputs.confirm }}
+        run: |
+          if [ "$CONFIRM" != "APPLY" ]; then
+            echo "::error::mode=$MODE requires confirm=APPLY"
+            exit 1
+          fi
+
+      - name: Run
+        env:
+          MODE: ${{ inputs.mode }}
+        run: |
+          set -o pipefail
+          case "$MODE" in
+            preflight)   ARGS="--preflight" ;;
+            window)      ARGS="--window --confirm" ;;
+            resume-cron) ARGS="--resume-cron" ;;
+            rollback)    ARGS="--rollback --confirm" ;;
+            *) echo "::error::unknown mode"; exit 1 ;;
+          esac
+          python -m scripts.apply_listings_pk_swap $ARGS 2>&1

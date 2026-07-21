@@ -123,6 +123,50 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/apply_dirty_broker_listings_pk_swap.yml"
   },
   {
+    "filename": "apply_listings_pk_swap.yml",
+    "name": "R2 GATE 1 — listings PK swap",
+    "description": "The destructive step of the listing-identity refactor: swaps listings' PRIMARY KEY from sreality_id to the surrogate id (runbook § 6). Catalog-only — no table scan, no data rewrite — and reversible in place while zero NULL sreality_id rows exist (see scripts/apply_listings_pk_swap.py).",
+    "portal": null,
+    "manual": true,
+    "schedules": [],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "mode",
+        "description": "preflight (safe, read-only) | window (THE SWAP) | resume-cron | rollback",
+        "required": true,
+        "type": "choice",
+        "default": "preflight",
+        "options": [
+          "preflight",
+          "window",
+          "resume-cron",
+          "rollback"
+        ]
+      },
+      {
+        "name": "confirm",
+        "description": "Type APPLY to arm window/rollback. Ignored for preflight.",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      }
+    ],
+    "secrets": [
+      "SUPABASE_DB_SESSION_URL",
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "apply-listings-pk-swap",
+    "cancelInProgress": false,
+    "timeoutMinutes": 30,
+    "permissions": "contents: read",
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/apply_listings_pk_swap.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/apply_listings_pk_swap.yml"
+  },
+  {
     "filename": "apply_r2_constraints.yml",
     "name": "Apply R2 constraints (indexes + FKs)",
     "description": "Phase B of the listing-identity refactor (docs/design/listing-identity-r2-pk-swap-runbook.md § 3). Indexes each surrogate column the backfill filled, then mirrors the legacy FK onto it (NOT VALID -> VALIDATE) wherever the legacy column had one.",
