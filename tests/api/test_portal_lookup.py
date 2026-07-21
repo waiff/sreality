@@ -32,7 +32,7 @@ def _mk_row(source: str, source_id: str, found: bool, **cols: Any) -> dict[str, 
     """One dict row keyed by the SELECT aliases (defaults null)."""
     row: dict[str, Any] = {
         "source": source, "source_id": source_id, "found": found,
-        "sreality_id": None, "property_id": None,
+        "sreality_id": None, "listing_id": None, "property_id": None,
         "category_main": None, "category_type": None,
         "area_m2": None, "price_czk": None, "disposition": None, "subtype": None,
         "district": None, "locality": None, "is_active": None,

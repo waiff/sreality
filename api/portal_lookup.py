@@ -41,10 +41,11 @@ if TYPE_CHECKING:
     from api import schemas as s
 
 # Listing columns projected onto each entry (dict keys === SELECT aliases).
-# `sreality_id` is the app-wide listing identity (negative synthetic for
-# non-sreality portals) — the SPA route is /listing/{sreality_id}.
+# `listing_id` is the surrogate (always present for a found listing) and is what
+# a write should carry; `sreality_id` is the legacy handle, kept for the SPA's
+# legacy /listing/{sreality_id} route and NULL post-Gate-2.
 _LISTING_COLS: tuple[str, ...] = (
-    "sreality_id", "property_id",
+    "sreality_id", "listing_id", "property_id",
     "category_main", "category_type", "area_m2", "price_czk", "disposition", "subtype",
     "district", "locality", "is_active", "last_seen_at",
     "mf_reference_rent_czk", "mf_gross_yield_pct",
@@ -56,7 +57,7 @@ SELECT
     req.source,
     req.source_id,
     (l.source_id_native IS NOT NULL) AS found,
-    l.sreality_id, l.property_id,
+    l.sreality_id, l.id AS listing_id, l.property_id,
     l.category_main, l.category_type, l.area_m2, l.price_czk, l.disposition, l.subtype,
     l.district, l.locality, l.is_active, l.last_seen_at,
     -- MF figures are PROPERTY-grain (the golden record), so every portal's advert
@@ -84,13 +85,17 @@ LEFT JOIN LATERAL (
     SELECT er.id, er.estimate_kind, er.gross_yield_pct
     FROM estimation_runs er
     WHERE er.status = 'success'
-      -- Match on input_sreality_id for EVERY source — _resolve_input stamps it
-      -- source-agnostically for any already-scraped listing (estimation_runs.py).
-      -- The URL string-equality arm is a demoted fallback, only for an estimation
-      -- created before its listing was scraped (input_sreality_id still NULL).
+      -- Match on the SURROGATE for every source (R2). input_listing_id is
+      -- dual-written for any already-scraped listing. The URL string-equality
+      -- arm stays a demoted fallback for an estimation created BEFORE its
+      -- listing was scraped (input_listing_id still NULL) — note the
+      -- discriminator had to move too: keyed on input_sreality_id it would,
+      -- post-Gate-2, route every successfully-resolved non-sreality listing
+      -- into the fragile URL arm, where any URL-normalisation difference
+      -- silently drops the estimation.
       AND (
-        er.input_sreality_id = l.sreality_id
-        OR (er.input_sreality_id IS NULL AND er.input_url = l.source_url)
+        er.input_listing_id = l.id
+        OR (er.input_listing_id IS NULL AND er.input_url = l.source_url)
       )
     ORDER BY er.created_at DESC
     LIMIT 1

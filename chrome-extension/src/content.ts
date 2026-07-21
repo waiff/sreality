@@ -561,8 +561,10 @@ function mountPanel(): {
 
   function renderAppLink(container: HTMLElement, state: PanelState): void {
     const l = state.listing;
-    // sreality_id != null means the listing is in our DB (has an app page).
-    if (!l || l.sreality_id == null || !APP_BASE_URL) return;
+    // `found` is the DB-membership flag the lookup already returns. Gating on
+    // sreality_id != null would hide the app link for every post-Gate-2 listing,
+    // which HAS an app page — and the link below never uses that id anyway.
+    if (!l || !l.found || !APP_BASE_URL) return;
     const a = document.createElement('a');
     a.className = 'app-link';
     // Canonical natural-key URL, never the negative synthetic id (migration 097):
@@ -1377,8 +1379,11 @@ async function onAddNote(): Promise<void> {
   const propertyId = l.property_id;
   setState((prev) => ({ ...prev, noteBusy: true, errorMessage: null }));
   const res = await call<ExtNote>({
+    // Send the surrogate: property_notes.origin_listing_id is the legacy handle
+    // and is NULL for a post-Gate-2 listing, which would silently drop the
+    // note's provenance. The API derives the legacy value from this.
     type: 'add_note', property_id: propertyId, body,
-    origin_listing_id: l.sreality_id ?? null,
+    origin_listing_ref_id: l.listing_id ?? null,
   });
   if (!res.ok) {
     setState((prev) => ({
