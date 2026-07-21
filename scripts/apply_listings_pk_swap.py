@@ -314,8 +314,12 @@ def main() -> int:
 
         to_pause = [j for j, _n, a in jobs if a]
         log.info("WINDOW pausing pg_cron jobs: %s", to_pause)
-        _set_cron_active(conn, to_pause, False)
+        # The pause lives INSIDE the try: _set_cron_active walks the jobs one at a
+        # time, so a failure part-way through would otherwise leave some paused
+        # with no finally to restore them (--resume-cron is the backstop for a
+        # process killed outright).
         try:
+            _set_cron_active(conn, to_pause, False)
             # Re-check quiet AFTER the pause: a cron job may have started between
             # the first check and the pause taking effect.
             requiet, _ = _quiet_signals(conn)
