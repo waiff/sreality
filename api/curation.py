@@ -102,7 +102,9 @@ def get_collection(
         "       rl.source "
         "FROM collection_properties cp "
         "JOIN properties p ON p.id = cp.property_id "
-        "LEFT JOIN listings rl ON rl.sreality_id = p.repr_listing_id "
+        # Surrogate join, not the legacy handle — same pre-Gate-2 hardening as
+        # #873's Browse fix (a non-sreality repr would otherwise blank `source`).
+        "LEFT JOIN listings rl ON rl.id = p.repr_listing_ref_id "
         "WHERE cp.collection_id = %s "
         "ORDER BY cp.added_at DESC"
     )

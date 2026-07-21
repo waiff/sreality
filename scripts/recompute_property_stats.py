@@ -479,7 +479,9 @@ def _attach_stragglers(conn: Any, *, skip_native_backfill: bool = False) -> int:
 # — so the hard gate doesn't hide them forever.
 # `IS NOT TRUE` (not `NOT (...)`) so a NULL-column listing counts as ineligible under SQL
 # three-valued logic. The predicates are imported from toolkit.publication (single source,
-# parity-tested against the engine SQL). There is deliberately NO timeout sweep: a
+# parity-tested against the engine SQL). Joins the repr listing on the SURROGATE
+# (repr_listing_ref_id), not the legacy sreality_id handle — pre-Gate-2 hardening,
+# same as #873's Browse fix. There is deliberately NO timeout sweep: a
 # dedup-CHECKABLE-but-unchecked property stays hidden until the engine stamps it (for the
 # byt rung, the dirty drain's UNGATED byt sub-pass is what evaluates + publishes new
 # street-less byt even while the scheduled rung's master switch is off).
@@ -489,7 +491,7 @@ _PUBLISH_INELIGIBLE_SQL = f"""
     FROM listings l
     WHERE p.published_at IS NULL
       AND p.status = 'active'
-      AND l.sreality_id = p.repr_listing_id
+      AND l.id = p.repr_listing_ref_id
       AND ({STREET_ELIGIBLE_PREDICATE}) IS NOT TRUE
       AND ({GEO_ELIGIBLE_PREDICATE}) IS NOT TRUE
       AND ({BYT_GEO_ELIGIBLE_PREDICATE}) IS NOT TRUE

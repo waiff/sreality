@@ -204,6 +204,10 @@ def test_publish_sweep_only_touches_unpublished_ineligible():
     sql = " ".join(sweep[0].split())
     assert "p.published_at IS NULL" in sql          # never re-publishes a stamped row
     assert "p.status = 'active'" in sql
+    # Repr join is on the SURROGATE, not the legacy sreality_id handle — a
+    # non-sreality repr must still be found (pre-Gate-2 hardening, #873-style).
+    assert "l.id = p.repr_listing_ref_id" in sql
+    assert "l.sreality_id = p.repr_listing_id" not in sql
     # ALL THREE eligibility predicates, each wrapped IS NOT TRUE (NULL-safe
     # ineligibility) so an eligible repr listing keeps the property NULL for the
     # engine to stamp.

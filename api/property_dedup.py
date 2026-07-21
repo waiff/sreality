@@ -516,8 +516,13 @@ def list_candidates(
               {_PROP_SIDE_SQL.format(p="r", rl="rl")} AS right_property,
               f.is_incorrect, f.expected_outcome, f.note, f.updated_at
             {_CANDIDATES_FROM}
-            LEFT JOIN listings ll ON ll.sreality_id = l.repr_listing_id
-            LEFT JOIN listings rl ON rl.sreality_id = r.repr_listing_id
+            -- Gate on the SURROGATE, not the legacy handle (mirrors #873's Browse
+            -- fix): repr_listing_id/repr_listing_ref_id are in sync today (both
+            -- populated on every property write path), but post-Gate-2 the legacy
+            -- column stops being trustworthy — joining on it would go quietly NULL
+            -- for a non-sreality repr, blanking source/source_url/description.
+            LEFT JOIN listings ll ON ll.id = l.repr_listing_ref_id
+            LEFT JOIN listings rl ON rl.id = r.repr_listing_ref_id
             LEFT JOIN dedup_decision_feedback f
               ON f.left_property_id = least(c.left_property_id, c.right_property_id)
              AND f.right_property_id = greatest(c.left_property_id, c.right_property_id)

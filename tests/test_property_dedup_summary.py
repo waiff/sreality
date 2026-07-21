@@ -174,6 +174,20 @@ def test_list_candidates_applies_category_main_filter() -> None:
     assert all(p["category_main"] == "byt" for _, p in conn.executed)
 
 
+def test_list_candidates_repr_join_uses_the_surrogate() -> None:
+    # Pre-Gate-2 hardening (mirrors #873's Browse fix): the repr listing must be
+    # joined on repr_listing_ref_id (listings.id), not the legacy sreality_id
+    # handle, or a non-sreality repr silently blanks source/source_url/description.
+    conn = _FakeConn(total=1, page_rows=[_candidate_row(1)])
+    dedup.list_candidates(conn, status="proposed")
+    sqls = [s for s, _ in conn.executed]
+    page_sql = next(s for s in sqls if "ORDER BY c.created_at DESC" in s)
+    assert "LEFT JOIN listings ll ON ll.id = l.repr_listing_ref_id" in page_sql
+    assert "LEFT JOIN listings rl ON rl.id = r.repr_listing_ref_id" in page_sql
+    assert "sreality_id = l.repr_listing_id" not in page_sql
+    assert "sreality_id = r.repr_listing_id" not in page_sql
+
+
 def test_summary_buckets_and_total() -> None:
     conn = _FakeConn(bucket_rows=[
         ("no_images", None, 2946),
