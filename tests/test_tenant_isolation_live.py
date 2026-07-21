@@ -53,10 +53,16 @@ _TENANT_VIEWS: list[str] = [
     "tags_public",
 ]
 
-# Market-wide views that must NOT be security_invoker: they join a shared table
-# carrying RLS-enabled-with-zero-policies (`listings`/`properties`/`images`),
-# which is deny-all under invoker rights, so flipping them silently returns zero
-# rows to every caller instead of scoping anything.
+# Views that must NOT be security_invoker: they join a shared table carrying
+# RLS-enabled-with-zero-policies (`listings`/`properties`/`images`), which is
+# deny-all under invoker rights, so flipping them silently returns zero rows to
+# every caller instead of scoping anything.
+#
+# Owner rights does NOT mean unscoped. property_estimates_public reads
+# `estimation_runs`, whose RLS cannot bind inside an owner-rights view, so
+# migration 341 mirrors that read policy as an in-body predicate instead --
+# scoping lives in the view body, not in invoker RLS
+# (test_estimates_view_scopes_per_account).
 _MARKET_VIEWS: list[str] = ["property_estimates_public"]
 
 # Base relations + matviews that hold admin-only operational data. Any view (or
@@ -292,25 +298,75 @@ def test_market_view_not_security_invoker(svc: Any) -> None:
     )
 
 
-def test_market_view_readable_by_authenticated(
+@pytest.fixture(scope="module")
+def seeded_estimate_rows(
     svc: Any, tenants: dict[str, uuid.UUID],
-) -> None:
-    """The behavioural half: an ordinary authenticated tenant must read the same
-    row count a service-role connection sees. Catches the 0-vs-N regression that
-    the reloption check alone cannot (a view can carry the right flag and still
-    be broken by a grant or a base-table policy change)."""
-    for view in _MARKET_VIEWS:
+) -> "Iterator[dict[str, int]]":
+    """One successful estimation_run per account (A, B) plus one on the shared SYSTEM
+    account, each on its own property via a seeded sreality listing, so
+    property_estimates_public has rows to scope. Seeded as svc (owner, RLS-exempt)."""
+    a_acc, b_acc = tenants["a_acc"], tenants["b_acc"]
+    system = uuid.UUID("00000000-0000-0000-0000-000000000000")
+    base = 900_000_000 + int(uuid.uuid4().int % 50_000_000)
+    plan = {"a": (a_acc, base + 1), "b": (b_acc, base + 2), "system": (system, base + 3)}
+    props: dict[str, int] = {}
+    with svc.cursor() as cur:
+        for key, (acc, srid) in plan.items():
+            cur.execute("INSERT INTO properties DEFAULT VALUES RETURNING id")
+            props[key] = cur.fetchone()[0]
+            # source='sreality' requires sreality_id > 0 (listings_sreality_id_sign_check)
+            # and source_id_native NOT NULL (listings_source_id_native_present).
+            cur.execute(
+                "INSERT INTO listings (sreality_id, source, source_id_native, raw_json, "
+                "property_id) VALUES (%s, 'sreality', %s, '{}'::jsonb, %s)",
+                (srid, f"iso-est-{srid}", props[key]),
+            )
+            cur.execute(
+                "INSERT INTO estimation_runs (account_id, source, mode, status, "
+                "input_spec, input_sreality_id) "
+                "VALUES (%s, 'api', 'deterministic', 'success', '{}'::jsonb, %s)",
+                (acc, srid),
+            )
+    try:
+        yield props
+    finally:
+        srids = [srid for _, srid in plan.values()]
         with svc.cursor() as cur:
-            cur.execute(f"SELECT count(*) FROM {view}")  # noqa: S608 - fixed list
-            baseline = cur.fetchone()[0]
-        with _scoped(tenants["a_user"]) as conn:
+            cur.execute("DELETE FROM estimation_runs WHERE input_sreality_id = ANY(%s)", (srids,))
+            cur.execute("DELETE FROM listing_snapshots WHERE sreality_id = ANY(%s)", (srids,))
+            cur.execute("DELETE FROM listings WHERE sreality_id = ANY(%s)", (srids,))
+            cur.execute("DELETE FROM properties WHERE id = ANY(%s)", (list(props.values()),))
+
+
+def test_estimates_view_scopes_per_account(
+    tenants: dict[str, uuid.UUID], seeded_estimate_rows: dict[str, int],
+) -> None:
+    """Migration 341: property_estimates_public stays owner-rights (its join to
+    zero-policy `listings` is deny-all under invoker rights) but mirrors
+    estimation_runs' read policy in its body, so a tenant sees their own estimates
+    and the shared SYSTEM account's, never another tenant's private estimation
+    activity. The SYSTEM arm is load-bearing: without it every current run becomes
+    invisible and Browse's "with estimates" filter empties -- the migration-316
+    regression this whole batch started from."""
+    pa, pb, ps = (seeded_estimate_rows[k] for k in ("a", "b", "system"))
+
+    def visible(sub: uuid.UUID) -> set[int]:
+        with _scoped(sub) as conn:
             with conn.cursor() as cur:
-                cur.execute(f"SELECT count(*) FROM {view}")  # noqa: S608 - fixed list
-                scoped = cur.fetchone()[0]
-        assert scoped == baseline, (
-            f"{view} returned {scoped} rows to an authenticated tenant but "
-            f"{baseline} to service-role — a market-wide view must not be scoped"
-        )
+                cur.execute(
+                    "SELECT property_id FROM property_estimates_public "
+                    "WHERE property_id = ANY(%s)",
+                    ([pa, pb, ps],),
+                )
+                return {r[0] for r in cur.fetchall()}
+
+    seen_a, seen_b = visible(tenants["a_user"]), visible(tenants["b_user"])
+    assert pa in seen_a, "tenant A cannot see their OWN estimate (view over-scoped)"
+    assert pb not in seen_a, "tenant A sees tenant B's private estimate (cross-tenant leak)"
+    assert ps in seen_a, "tenant A cannot see a shared SYSTEM-account estimate"
+    assert pb in seen_b, "tenant B cannot see their OWN estimate"
+    assert pa not in seen_b, "tenant B sees tenant A's private estimate (cross-tenant leak)"
+    assert ps in seen_b, "tenant B cannot see a shared SYSTEM-account estimate"
 
 
 def test_admin_gate_opens_for_service_but_not_role_switch(svc: Any) -> None:

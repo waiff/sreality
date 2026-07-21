@@ -96,7 +96,11 @@ Health page still renders for the operator.
 
 ## PR-B — per-account scoping for `property_estimates_public` (G1)
 
-**Branch `fix/estimates-per-account` · one migration (expect 341).**
+**✅ SHIPPED 2026-07-21 — migration 341.** Live-verified: a tenant still sees **58 rows**
+(the shared-SYSTEM arm preserves Browse's "with estimates" filter, where the naive
+two-arm predicate returned **0**).
+
+**Branch `fix/estimates-per-account` · one migration.**
 
 **Fix-path landmine found during verification:** the "obvious" predicate
 (`er.account_id in (select current_account_ids()) or is_platform_admin()`) was probed live
@@ -144,7 +148,11 @@ Test rework in the same PR (all in `tests/test_tenant_isolation_live.py`):
 
 ## PR-C — revoke MAINTAIN durably (G7, escalated)
 
-**Branch `fix/maintain-default-acl` · one migration (expect 342) · PG17-guarded.**
+**✅ SHIPPED 2026-07-21 — migration 342.** Live-verified: MAINTAIN holders **85 → 0**, and
+the postgres default ACL for tables went `authenticated=rm` → **`authenticated=r`**, which
+is what stops the drift-back. `authenticated` still reads shared-market tables.
+
+**Branch `fix/maintain-default-acl` · one migration · PG17-guarded.**
 
 Root cause (live): `pg_default_acl` for grantor postgres grants `authenticated`
 SELECT+MAINTAIN on **every new relation** — so mig 331's one-time revoke was undone for
@@ -167,6 +175,12 @@ Live verification: holder count 85 → 0; wait one `properties_map_mv` rebuild c
 pass where 331 failed).
 
 ## PR-D — make the standing gates honest (G2, G2b, G4, G5, G6, G7-test, G9)
+
+**✅ SHIPPED 2026-07-21.** Every claim empirically validated rather than asserted:
+`gate_is_sound` accepts all **35** live gated objects and rejects all **8** adversarial
+forms; the historical-exemption lists are **exact** (8 hits / 8 entries, no dead weight,
+no gaps); the seed's view coverage was measured by seeding production inside a
+rolled-back transaction and diffing per-view counts (**17 of 19** reached).
 
 **Branch `fix/gate-lane-hardening` · no migration · the biggest PR.**
 

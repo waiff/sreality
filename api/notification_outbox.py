@@ -65,6 +65,16 @@ def _fmt_price(czk: int | None, unit: str | None) -> str:
     return f"{czk:,}".replace(",", " ") + " Kč" + (f"/{unit}" if unit else "")
 
 
+def _identity_label(row: dict[str, Any]) -> str:
+    """Human-traceable handle for a listing with no locality, in preference
+    order: natural key, then the legacy id (NULL post-Gate-2), then nothing."""
+    source, native = row.get("source"), row.get("source_id_native")
+    if source and native:
+        return f"{source} {native}"
+    sid = row.get("sreality_id")
+    return f"id {sid}" if sid is not None else "inzerát"
+
+
 def compose_message(row: dict[str, Any]) -> RenderedMessage:
     """Build a channel-agnostic message from a dispatch + its listing fields.
 
@@ -81,7 +91,10 @@ def compose_message(row: dict[str, Any]) -> RenderedMessage:
         )
     kind = row.get("change_kind") or "new"
     disposition = row.get("disposition") or ""
-    locality = row.get("locality") or f"id {row.get('sreality_id')}"
+    # Subject fallback when the listing has no locality: prefer the natural key
+    # (stable + human-traceable to the portal) over the legacy id, which is NULL
+    # for post-Gate-2 rows and would render "id None" in a sent email.
+    locality = row.get("locality") or _identity_label(row)
     label = _SUBJECTS.get(kind, "Změna inzerátu")
     where = " ".join(p for p in (disposition, locality) if p).strip()
     subject = f"{label}: {where}" if where else label
@@ -171,7 +184,7 @@ def drain_once(
             "CROSS JOIN LATERAL unnest(d.target_channels) AS ch "
             "LEFT JOIN channel_sends cs "
             "  ON cs.dedupe_key = 'notif:' || d.id::text || ':' || ch "
-            "LEFT JOIN listings l ON l.sreality_id = d.sreality_id "
+            "LEFT JOIN listings l ON l.id = d.listing_id "
             "WHERE cs.id IS NULL "
             "  AND ch = ANY(%(channels)s) "
             "  AND d.dispatched_at > now() - %(win)s::interval "
@@ -220,7 +233,7 @@ def drain_once(
             f"SELECT {_RETRY_COLS} "
             "FROM channel_sends cs "
             "JOIN notification_dispatches d ON d.id = cs.notification_id "
-            "LEFT JOIN listings l ON l.sreality_id = d.sreality_id "
+            "LEFT JOIN listings l ON l.id = d.listing_id "
             "WHERE cs.status = 'failed' AND cs.attempts < %(max_attempts)s "
             "  AND cs.channel = ANY(%(channels)s) "
             "  AND (cs.next_attempt_at IS NULL OR cs.next_attempt_at <= now()) "
