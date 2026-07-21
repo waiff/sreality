@@ -184,6 +184,7 @@ _ADMIN_ONLY_RELATIONS = frozenset({
     "llm_calls", "parsed_url_cache", "phash_pair_notes", "pipeline_check_results",
     "image_border_cases", "image_tag_annotations", "image_training_examples",
     "workflow_failures", "workflow_run_health",
+    "scrape_runs", "worker_heartbeats",
     "health_summary_mv", "portal_health_mv", "scraper_health_checks_mv",
     "category_trends_mv", "image_storage_overview_mv", "snapshot_churn_24h_mv",
     "dedup_funnel_resolutions_mv", "dedup_llm_cost_by_category_mv",

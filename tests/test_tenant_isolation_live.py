@@ -84,6 +84,10 @@ _ADMIN_ONLY_RELATIONS: list[str] = [
     "llm_calls", "parsed_url_cache", "phash_pair_notes", "pipeline_check_results",
     "image_border_cases", "image_tag_annotations", "image_training_examples",
     "workflow_failures", "workflow_run_health",
+    # Added by migration 340: the audit found scrape_runs_public/recent_scrape_runs()
+    # ungated and browser-readable because this list was seeded from migration 318's
+    # objects rather than a first-principles table inventory.
+    "scrape_runs", "worker_heartbeats",
     "health_summary_mv", "portal_health_mv", "scraper_health_checks_mv",
     "category_trends_mv", "image_storage_overview_mv", "snapshot_churn_24h_mv",
     "dedup_funnel_resolutions_mv", "dedup_llm_cost_by_category_mv",
@@ -529,9 +533,11 @@ _ADMIN_GATED_VIEWS: list[str] = [
     "listing_fetch_failures_public", "llm_cost_daily_public", "llm_cost_hourly_public",
     "parsed_url_activity", "phash_pair_notes_public", "pipeline_check_history_public",
     "pipeline_checks_public", "publication_gate_health_public",
+    "scrape_runs_public",
 ]
 _ADMIN_GATED_FUNCTIONS: list[str] = [
     "images_failure_overview", "recent_workflow_failures", "workflow_failure_summary",
+    "recent_scrape_runs",
 ]
 
 # Migration 332: the five health/ops RPCs the Health dashboard calls. Unlike the

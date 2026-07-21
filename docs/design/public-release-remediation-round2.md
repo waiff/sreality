@@ -1,6 +1,6 @@
 # Public-release remediation, round 2 — fixes for the #856 exit-gate audit
 
-**Date:** 2026-07-21. **Status: plan, awaiting operator go-ahead. Nothing applied.**
+**Date:** 2026-07-21. **Status: in execution — PR-A shipped (migration 340). B-G pending.**
 
 The `/code-review ultra` audit of PR #856 (the migrations 329–332 batch, live in
 production) returned 13 findings. Before planning, every finding was re-verified by a
@@ -49,7 +49,11 @@ lanes that keep it all honest.
 
 ## PR-A — gate `scrape_runs_public` + `recent_scrape_runs()` + `worker_liveness` (G3)
 
-**Branch `fix/scrape-runs-admin-gate` · one migration (expect 340) · the only live exposure.**
+**✅ SHIPPED 2026-07-21 — migration 340.** Live-verified: as a non-admin `authenticated`
+session the view went **7 945 → 0 rows** and the RPC **2 166 → 0**; the admin/service path
+and the Health dashboard are unaffected.
+
+**Branch `fix/scrape-runs-admin-gate` · one migration · the only live exposure.**
 
 Live proof: `SET LOCAL ROLE authenticated` reads 7 945 rows from `scrape_runs_public` and
 2 166 from `recent_scrape_runs(14)` — scraper run bookkeeping (new/updated/inactive counts,

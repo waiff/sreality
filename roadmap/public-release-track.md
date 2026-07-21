@@ -186,7 +186,8 @@ remediation R3 closes that. Full spec: `docs/design/public-release-remediation-2
    (A: scrape_runs gate; B: per-account estimates scoping; C: durable MAINTAIN revoke;
    D: gate-lane honesty — seeds, OR-evasion, parser hardening, coverage floor 299;
    E: API require_admin route-coverage test; F: docs/skill corrections; G: CI replay
-   PG15→17). Awaiting operator go-ahead to implement.
+   PG15→17). **PR-A shipped 2026-07-21 (migration 340)** — the audit's one live exposure:
+   `scrape_runs_public` 7 945 → 0 rows and `recent_scrape_runs()` 2 166 → 0 for a non-admin.
 7. Wave 1 (extension + agent estimations: quotas, async job lane, Stripe checkout + metering).
 
 **Housekeeping done 2026-07-20:** operator enabled Supabase Auth's leaked-password-protection
