@@ -140,7 +140,11 @@ Test rework in the same PR (all in `tests/test_tenant_isolation_live.py`):
 
 ## PR-C — revoke MAINTAIN durably (G7, escalated)
 
-**Branch `fix/maintain-default-acl` · one migration (expect 342) · PG17-guarded.**
+**✅ SHIPPED 2026-07-21 — migration 342.** Live-verified: MAINTAIN holders **85 → 0**, and
+the postgres default ACL for tables went `authenticated=rm` → **`authenticated=r`**, which
+is what stops the drift-back. `authenticated` still reads shared-market tables.
+
+**Branch `fix/maintain-default-acl` · one migration · PG17-guarded.**
 
 Root cause (live): `pg_default_acl` for grantor postgres grants `authenticated`
 SELECT+MAINTAIN on **every new relation** — so mig 331's one-time revoke was undone for
