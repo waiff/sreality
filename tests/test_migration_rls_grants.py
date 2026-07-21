@@ -30,15 +30,13 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from tests._admin_gate_shape import gate_is_sound
+
 MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "migrations"
 # Phase 0 (299) is the baseline: it establishes the posture this gate protects.
 # Migrations 286-298 legitimately grant `authenticated` DML on tenant tables and
 # predate the gate, so enforcement starts at 299.
 MIN_ENFORCED = 299
-# Rule 5 starts after the remediation batch that established the posture
-# (329-332); 318's own 26 objects predate it and are covered by the enumerated
-# lists in the live lane.
-MIN_VIEW_GATE = 333
 
 _WRITE_PRIVS = {"insert", "update", "delete", "truncate", "all", "all privileges"}
 # `public` is included because anon/authenticated INHERIT every grant made to PUBLIC
@@ -66,9 +64,64 @@ _BROKER_A6_SURFACES = frozenset({
 })
 
 
+_DOLLAR = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)?\$")
+
+
 def _strip_comments(sql: str) -> str:
-    sql = re.sub(r"/\*.*?\*/", " ", sql, flags=re.DOTALL)
-    return re.sub(r"--[^\n]*", " ", sql)
+    """Remove -- and /* */ comments that are NOT inside a string or dollar-quote.
+
+    The previous regex form ran over the raw text, so a literal containing `/*` and a
+    later literal containing `*/` made the non-greedy match swallow everything between
+    them — including whole CREATE statements, which then became invisible to every rule
+    in this file. Copy string and $tag$ bodies verbatim instead.
+    """
+    out: list[str] = []
+    i, n = 0, len(sql)
+    while i < n:
+        two = sql[i:i + 2]
+        if two == "--":
+            j = sql.find("\n", i)
+            out.append(" ")
+            i = n if j == -1 else j
+            continue
+        if two == "/*":
+            depth, i = 1, i + 2
+            while i < n and depth:
+                t = sql[i:i + 2]
+                if t == "/*":
+                    depth, i = depth + 1, i + 2
+                elif t == "*/":
+                    depth, i = depth - 1, i + 2
+                else:
+                    i += 1
+            out.append(" ")
+            continue
+        if sql[i] == "'":
+            out.append("'")
+            i += 1
+            while i < n:
+                if sql[i:i + 2] == "''":
+                    out.append("''")
+                    i += 2
+                    continue
+                out.append(sql[i])
+                if sql[i] == "'":
+                    i += 1
+                    break
+                i += 1
+            continue
+        if sql[i] == "$":
+            m = _DOLLAR.match(sql, i)
+            if m:
+                tag = m.group(0)
+                end = sql.find(tag, m.end())
+                stop = (end + len(tag)) if end != -1 else n
+                out.append(sql[i:stop])
+                i = stop
+                continue
+        out.append(sql[i])
+        i += 1
+    return "".join(out)
 
 
 def _migration_number(path: Path) -> int | None:
@@ -77,7 +130,49 @@ def _migration_number(path: Path) -> int | None:
 
 
 def _statements(sql: str) -> list[str]:
-    return [s.strip() for s in _strip_comments(sql).split(";") if s.strip()]
+    """Split on `;` OUTSIDE strings and dollar-quotes, so a function body or DO block
+    stays ONE statement instead of shattering at every internal semicolon."""
+    s = _strip_comments(sql)
+    stmts: list[str] = []
+    buf: list[str] = []
+    i, n = 0, len(s)
+    while i < n:
+        ch = s[i]
+        if ch == "'":
+            buf.append(ch)
+            i += 1
+            while i < n:
+                if s[i:i + 2] == "''":
+                    buf.append("''")
+                    i += 2
+                    continue
+                buf.append(s[i])
+                if s[i] == "'":
+                    i += 1
+                    break
+                i += 1
+            continue
+        if ch == "$":
+            m = _DOLLAR.match(s, i)
+            if m:
+                tag = m.group(0)
+                end = s.find(tag, m.end())
+                stop = (end + len(tag)) if end != -1 else n
+                buf.append(s[i:stop])
+                i = stop
+                continue
+        if ch == ";":
+            frag = "".join(buf).strip()
+            if frag:
+                stmts.append(frag)
+            buf, i = [], i + 1
+            continue
+        buf.append(ch)
+        i += 1
+    frag = "".join(buf).strip()
+    if frag:
+        stmts.append(frag)
+    return stmts
 
 
 def _enforced_migrations() -> list[Path]:
@@ -197,32 +292,68 @@ _CREATE_GATED_OBJ = re.compile(
 )
 
 
-def _ungated_admin_objects(sql: str) -> list[str]:
-    """Views/functions created over admin-only data with no is_platform_admin()."""
+_DYNAMIC_DDL = re.compile(
+    r"execute\s+(?:format\s*\()?\s*['$].{0,400}?create\s+(?:or\s+replace\s+)?"
+    r"(?:materialized\s+)?(?:view|function|table)",
+    re.IGNORECASE | re.DOTALL,
+)
+# Migration 299 legitimately builds browse_list_next / properties_map_mv_next through
+# dynamic EXECUTE; it predates this rule and is fixed-forward (architecture rule #1).
+_DYNAMIC_DDL_HISTORICAL = frozenset({"299_phase0_anon_hardening.sql"})
+
+# "<file>:<object>" created ungated before migration 318 and re-created WITH the gate
+# BY migration 318 — verified sound in production today. Migrations are append-only, so
+# the exemption lives here rather than in a rewritten file.
+_HISTORICAL_UNGATED = frozenset({
+    "300_dedup_golden_set_foundation.sql:dedup_label_events",
+    "303_dedup_vision_bakeoff_results.sql:dedup_vision_bakeoff_results_public",
+    "307_dedup_recency_instrumentation.sql:dedup_recency_backlog",
+    "308_clip_phash_audit_tooling.sql:image_tag_annotations_public",
+    "308_clip_phash_audit_tooling.sql:phash_pair_notes_public",
+    "309_clip_training_examples.sql:image_training_examples_public",
+    "310_image_border_cases.sql:image_border_cases_public",
+    "311_source_trust_rank_and_sign_check.sql:dedup_label_events",
+})
+
+
+def _ungated_admin_objects(sql: str) -> list[tuple[str, str]]:
+    """(name, 'reads a, b') for each view/function created over admin-only data whose
+    is_platform_admin() gate is absent OR unsound — moved out of a boolean position,
+    OR'd into a predicate, or turned into a tautology."""
     exempt = {m.group(1) for m in re.finditer(r"--\s*ci-allow-ungated:\s*([a-z0-9_]+)", sql.lower())}
-    out: list[str] = []
-    for stmt in _statements(_strip_comments(sql)):
+    out: list[tuple[str, str]] = []
+    for stmt in _statements(sql):
         low = re.sub(r"\s+", " ", stmt.lower()).strip()
         m = _CREATE_GATED_OBJ.match(low)
         if not m or m.group(1) in exempt:
             continue
-        if "is_platform_admin()" in low:
+        kind = "function" if re.match(
+            r"create (?:or replace )?(?:materialized )?function", low) else "view"
+        if gate_is_sound(low, kind):
             continue
         reads = sorted(
             t for t in _ADMIN_ONLY_RELATIONS
             if re.search(rf"\b{re.escape(t)}\b", low)
         )
         if reads:
-            out.append(f"{m.group(1)} reads {', '.join(reads)}")
+            out.append((m.group(1), ", ".join(reads)))
     return out
+
+
+def _dynamic_ddl(sql: str) -> bool:
+    """True if the migration builds DDL through EXECUTE, which the statement scanner
+    cannot see into — the CREATE lives inside a string argument."""
+    if re.search(r"--\s*ci-allow-dynamic:", sql, re.IGNORECASE):
+        return False
+    return bool(_DYNAMIC_DDL.search(_strip_comments(sql)))
 
 
 def test_new_admin_objects_embed_the_gate():
     offenders = [
-        f"  {p.name}: {o}"
+        f"  {p.name}: {name} reads {reads}"
         for p in _enforced_migrations()
-        if (n := _migration_number(p)) is not None and n >= MIN_VIEW_GATE
-        for o in _ungated_admin_objects(p.read_text(encoding="utf-8"))
+        for name, reads in _ungated_admin_objects(p.read_text(encoding="utf-8"))
+        if f"{p.name}:{name}" not in _HISTORICAL_UNGATED
     ]
     assert not offenders, (
         "view/function(s) read admin-only operational data with no "
@@ -294,3 +425,20 @@ def test_no_broker_a6_regrants():
 def test_gate_actually_scans_migrations():
     assert MIGRATIONS_DIR.is_dir(), f"migrations dir not found: {MIGRATIONS_DIR}"
     assert len(_enforced_migrations()) >= 1, f"no migrations at/after {MIN_ENFORCED}"
+
+
+def test_dynamic_ddl_is_annotated():
+    """DDL built through `EXECUTE format('create ...')` is invisible to the statement
+    scanner above, so every rule in this file silently skips it. A migration that needs
+    dynamic DDL must say so with `-- ci-allow-dynamic: <name> <why>`, which makes the
+    blind spot reviewer-visible instead of accidental."""
+    offenders = [
+        f"  {p.name}"
+        for p in _enforced_migrations()
+        if p.name not in _DYNAMIC_DDL_HISTORICAL
+        and _dynamic_ddl(p.read_text(encoding="utf-8"))
+    ]
+    assert not offenders, (
+        "migration(s) build DDL via EXECUTE, which the offline scanner cannot inspect. "
+        "Annotate with `-- ci-allow-dynamic: <name> <why>`:\n" + "\n".join(offenders)
+    )

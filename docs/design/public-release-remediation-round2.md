@@ -176,6 +176,12 @@ pass where 331 failed).
 
 ## PR-D — make the standing gates honest (G2, G2b, G4, G5, G6, G7-test, G9)
 
+**✅ SHIPPED 2026-07-21.** Every claim empirically validated rather than asserted:
+`gate_is_sound` accepts all **35** live gated objects and rejects all **8** adversarial
+forms; the historical-exemption lists are **exact** (8 hits / 8 entries, no dead weight,
+no gaps); the seed's view coverage was measured by seeding production inside a
+rolled-back transaction and diffing per-view counts (**17 of 19** reached).
+
 **Branch `fix/gate-lane-hardening` · no migration · the biggest PR.**
 
 1. **Shared gate-shape module** `tests/_admin_gate_shape.py` (G4): `gate_is_sound(defn,
