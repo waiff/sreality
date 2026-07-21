@@ -333,7 +333,15 @@ renumber.** Navigate by area:
    `mark_inactive_native`), so a tolerated walk-miss can never flip a freshly-seen listing,
    and a false flip self-heals on the next index sighting (`touch_listings` reactivates).
    Every flip stamps `listings.inactive_at` (cleared on reactivation) — the delisting-latency
-   health check reads it.
+   health check reads it. **A non-sreality portal sweeps on its own native id**
+   (`db.mark_inactive_native` / `mark_inactive_agenda`, keyed `source_id_native`), never on a
+   PK set resolved back out of the DB: under the listing-identity refactor's Gate 2 a
+   non-sreality row carries `sreality_id = NULL`, and SQL three-valued logic makes ONE NULL
+   inside the sweep's `<> ALL(...)` predicate evaluate NULL for EVERY row — the sweep would
+   silently become a permanent no-op for the whole portal. `db.mark_inactive` (keyed
+   `sreality_id`) is therefore sreality-only. All three sweeps drop NULL ids from the bound
+   array and bail out rather than sweep with what's left of an all-NULL seen-set, since an
+   EMPTY array flips the predicate the other way and would delist the entire scope.
 4. **`last_seen_at` is driven by index sightings and successful detail fetches; failed
    fetches never touch it.** Every existing listing whose id appears in the run's index
    gets its `last_seen_at` bumped before any detail fetches happen. A successful detail

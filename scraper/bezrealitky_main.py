@@ -195,10 +195,13 @@ class BezrealitkyPortal:
         cm, ct = self.category_labels(category)
         if cm is None or ct is None:
             return 0
-        existing = db.index_summary_native(conn, SOURCE, list(seen))
-        pks = {v["sreality_id"] for v in existing.values()}
-        return db.mark_inactive(
-            conn, cm, ct, pks, source=SOURCE,
+        # Sweep on the native id the index actually walked, not on a PK set
+        # resolved back out of the DB: under listing-identity Gate 2 a
+        # non-sreality row carries sreality_id = NULL, and one NULL inside
+        # `<> ALL(...)` makes the whole predicate NULL — the sweep would become
+        # a permanent no-op for the entire portal (rule #3).
+        return db.mark_inactive_native(
+            conn, SOURCE, cm, ct, seen,
             min_unseen_hours=INACTIVE_MIN_UNSEEN_HOURS,
         )
 
