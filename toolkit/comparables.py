@@ -607,7 +607,10 @@ def build_query(
 
     sql = (
         "SELECT\n"
-        "  l.sreality_id, l.price_czk, l.area_m2,\n"
+        # The surrogate leads the projection (R2). find_comparables builds its
+        # column names from cur.description, so this flows into every comparable
+        # dict with no mapping to update.
+        "  l.id AS listing_id, l.sreality_id, l.price_czk, l.area_m2,\n"
         "  (l.price_czk::numeric / NULLIF(l.area_m2, 0)) AS price_per_m2,\n"
         "  l.disposition, l.district,\n"
         "  l.locality_district_id, l.locality_region_id,\n"
@@ -630,11 +633,23 @@ def build_query(
         "FROM listings l\n"
         "LEFT JOIN LATERAL (\n"
         "  SELECT id, scraped_at FROM listing_snapshots\n"
-        "  WHERE sreality_id = l.sreality_id\n"
+        # Re-keyed onto the surrogate: post-Gate-2 `sreality_id = l.sreality_id`
+        # is NULL = NULL, which never matches, so latest_snapshot_id would be
+        # NULL for every non-sreality comparable — silently breaking rule 8
+        # ("estimates capture the snapshot_id of each comparable"). Backed by
+        # listing_snapshots_listing_id_scraped_at_idx (mig 333), an exact mirror
+        # of the legacy composite, so the plan is unchanged.
+        "  WHERE listing_id = l.id\n"
         "  ORDER BY scraped_at DESC LIMIT 1\n"
         ") latest_snap ON true\n"
         "LEFT JOIN LATERAL (\n"
         "  SELECT checked_at FROM listing_freshness_checks\n"
+        # Stays legacy-keyed: listing_freshness_checks has NO listing_id column
+        # (rule 9 — observability/throttling, not history, so it was never made
+        # an R2 carrier). Post-Gate-2 this yields NULL for non-sreality rows, so
+        # `verified_during_estimate` reads false and confidence is dampened for
+        # them. Degraded, not wrong — and it cannot be fixed here: it needs that
+        # table to gain a carrier column first.
         "  WHERE sreality_id = l.sreality_id\n"
         "  ORDER BY checked_at DESC LIMIT 1\n"
         ") latest_check ON true\n"
