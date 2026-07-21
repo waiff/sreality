@@ -3,6 +3,7 @@
  * messages so the network call runs in a context with host_permissions
  * and isn't subject to sreality.cz's CORS posture. */
 
+import { getAccessToken } from './auth';
 import type {
   ApiResult,
   CollectionWriteResult,
@@ -33,7 +34,6 @@ function normalizeBaseUrl(raw: string): string {
 }
 
 const BASE_URL = normalizeBaseUrl(import.meta.env.VITE_API_BASE_URL ?? '');
-const TOKEN = import.meta.env.VITE_API_TOKEN ?? '';
 
 if (!BASE_URL) {
   console.warn(
@@ -42,6 +42,12 @@ if (!BASE_URL) {
   );
 }
 
+/* Every extension-touched route now runs on verify_jwt + the tenant pool
+ * (Wave 1 W1-1), so a request with no session is a clean, expected "please
+ * sign in" — not a network failure. `status: 401` + this sentinel `detail`
+ * lets the panel show a sign-in prompt instead of a raw error string. */
+export const NOT_SIGNED_IN_DETAIL = 'not_signed_in';
+
 async function request<T>(
   path: string,
   init: RequestInit = {},
@@ -49,12 +55,16 @@ async function request<T>(
   if (!BASE_URL) {
     return { ok: false, status: 0, detail: 'API base URL not configured' };
   }
+  const token = await getAccessToken();
+  if (!token) {
+    return { ok: false, status: 401, detail: NOT_SIGNED_IN_DETAIL };
+  }
   const headers: Record<string, string> = {
     Accept: 'application/json',
     ...((init.headers as Record<string, string> | undefined) ?? {}),
   };
   if (init.body !== undefined) headers['Content-Type'] = 'application/json';
-  if (TOKEN) headers.Authorization = `Bearer ${TOKEN}`;
+  headers.Authorization = `Bearer ${token}`;
 
   let res: Response;
   try {

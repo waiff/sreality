@@ -215,6 +215,16 @@ Database:
 - `TENANT_POOL_DB_URL` (Railway API only) — connection string for the `tenant_pool` role
   (migration 293), used by `api/tenant_pool.py`'s `tenant_conn` for RLS-scoped per-account
   writes. Distinct from `SUPABASE_DB_URL` (service-role, unscoped, bypasses RLS).
+  **The username MUST carry the project-ref suffix — `tenant_pool.<project-ref>`, not bare
+  `tenant_pool`** — because this points at Supabase's *shared* pooler host
+  (`aws-0-<region>.pooler.supabase.com:6543`), which routes by that suffix; without it the
+  pooler rejects the connection with `FATAL: (ENOIDENTIFIER) no tenant identifier provided`.
+  A direct-to-database DSN needs no suffix, which is why `SUPABASE_DB_URL` looks different.
+  This was mis-set from migration 293 until 2026-07-21 and stayed invisible the whole time:
+  `tenant_conn`'s legacy branch routes static-`API_TOKEN` callers to the service-role
+  connection, so until the Chrome extension's own JWT arrived, **no production request had
+  ever executed the tenant-pool path**. When moving any further route onto `tenant_conn`,
+  exercise it with a real user JWT — a green RLS test lane proves nothing about a DSN.
 
 Image storage (Cloudflare R2, S3-compatible):
 - `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET_NAME` (usually
@@ -280,7 +290,12 @@ Scraper orchestration:
 
 Frontend / extension (build-time only, inlined into the browser bundle — *not* backend
 runtime): `VITE_SUPABASE_URL` + `VITE_SUPABASE_ANON_KEY` (the publishable anon key, safe in
-the browser), and `VITE_API_BASE_URL` / `VITE_API_TOKEN` (and the extension's
-`EXT_API_BASE_URL` / `EXT_API_TOKEN` that map to them). These follow the Path 1 posture: the
-token is embedded in a build shipped only to trusted operators.
+the browser), and `VITE_API_BASE_URL` / `VITE_API_TOKEN` for the SPA (Path 1 posture: the
+static token is embedded in a build shipped only to trusted operators, until the
+platform-wide rotation cutover). The **extension** (`EXT_API_BASE_URL` /
+`EXT_SUPABASE_URL` / `EXT_SUPABASE_ANON_KEY` repo secrets → `VITE_API_BASE_URL` /
+`VITE_SUPABASE_URL` / `VITE_SUPABASE_ANON_KEY` at build) no longer carries `VITE_API_TOKEN` /
+`EXT_API_TOKEN` at all (Wave 1, 2026-07-21) — it runs its own Supabase session via a
+hand-rolled PKCE flow (`chrome-extension/src/auth.ts`), so no bearer secret ships in the
+bundle and it's safe to distribute broadly.
 

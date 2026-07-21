@@ -1,10 +1,11 @@
 {
   "manifest_version": 3,
   "name": "Limen Reality — výnos & pipeline",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Overlays our MF reference rent + Výnos MF gross yield on listing detail and search pages across every portal we scrape, deep-links to the app, and bookmarks a property into the deal pipeline.",
-  "permissions": ["storage"],
-  "host_permissions": ["https://*/*"],
+  "permissions": ["storage", "identity", "alarms"],
+  "host_permissions": [],
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAy2M/B/nji9JXxcy8vsVHSszuKCIaGvd7joiM77IksAg04HhAfF1yAFvdXepCaT0SSAwg+ciKcaribrtyS9cr6Zlr83ff/+zwjxxa1IGqnqWs7ErjYYShkrwSLoY12Z8cEUjZy47H6FThVn2K7ZINO0s9UOriYQ8GUr/XQyQlRn9lEuD9W0b8vqVkrRW01xAGBu3bAsdrU3J9p/XDV3KkeRlVZmBhB+VEH/ogo+EgFR/ztTCqV9qj5tTvrMeeb/LUoV0YQnp7kIy5fJ//z+XIV0hxielw1Wskj5sA2Z0mrR/SO9a3IGCkcSOOwrDGR4DGv/0einMMa2irpL/eYzTHYQIDAQAB",
   "background": {
     "service_worker": "background.js",
     "type": "module"

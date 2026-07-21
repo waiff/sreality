@@ -4,3 +4,7 @@ dist
 .env.local
 .env.*.local
 *.log
+# Private half of the manifest.json "key" pair (pins the stable extension ID
+# for chrome.identity's PKCE redirect) — the public half is checked into
+# manifest.json; this file must never be committed.
+*.pem

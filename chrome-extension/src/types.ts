@@ -196,7 +196,18 @@ export type ApiMessage =
   | { type: 'add_to_collection'; collection_id: number; property_id: number }
   | { type: 'remove_from_collection'; collection_id: number; property_id: number }
   | { type: 'list_notes'; property_id: number }
-  | { type: 'add_note'; property_id: number; body: string; origin_listing_ref_id: number | null };
+  | { type: 'add_note'; property_id: number; body: string; origin_listing_ref_id: number | null }
+  | { type: 'sign_in' }
+  | { type: 'sign_out' }
+  | { type: 'get_auth_state' };
+
+/* The extension's own Supabase session state (Wave 1) — read by the panel
+ * to decide whether to show data or a "please sign in" prompt, and to show
+ * the signed-in email + a sign-out control. */
+export interface AuthState {
+  signedIn: boolean;
+  email: string | null;
+}
 
 export interface ApiResponse<T> {
   ok: true;

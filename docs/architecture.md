@@ -272,14 +272,25 @@ rules. Identify which one a task belongs to before you start.
   `chrome.runtime.sendMessage` so `host_permissions` covers the API origin and the fetch
   isn't subject to the portal's CORS posture. The content script never calls `fetch`
   directly.
-- Build-time secrets: `VITE_API_BASE_URL` + `VITE_API_TOKEN` are inlined into `dist/` —
-  same Path 1 security posture as the SPA. Ship `dist/` only to trusted operators; never
-  upload to the public Chrome Web Store. `chrome-extension/README.md` documents Path 3
-  (no embedded token, writes bounced through the SPA) for when a publicly-shareable build
-  is needed.
+- **Own Supabase session (Wave 1, shipped 2026-07-21) — no bearer token in the bundle
+  anymore.** Hand-rolled PKCE (`src/auth.ts`) against GoTrue via
+  `chrome.identity.launchWebAuthFlow` (no `supabase-js`): `VITE_SUPABASE_URL` +
+  `VITE_SUPABASE_ANON_KEY` are the build-time vars (mirroring the SPA's, both are public
+  client config — the anon key is not a secret). The old `VITE_API_TOKEN` / `EXT_API_TOKEN`
+  static bearer is retired for the extension; `verify_jwt`'s legacy-token branch
+  (`api/dependencies.py`) still exists for the SPA/ClickUp until the platform-wide rotation
+  cutover. `manifest.json` pins a stable extension ID via a generated RSA keypair's public
+  half in the `key` field (needed because the GoTrue PKCE redirect URL,
+  `https://<id>.chromiumapp.org/`, must be pre-registered with Supabase + Google, and
+  "Load unpacked" would otherwise assign a different ID per machine/download path).
+  `host_permissions` is computed at build time in `vite.config.ts` from the same two origins,
+  replacing a checked-in `https://*/*` wildcard. The extension is now safe to distribute
+  broadly (no embedded secret); Chrome Web Store submission still needs the non-code
+  readiness items in `docs/design/waves-1-4-public-features.md` (privacy policy,
+  single-purpose statement, staged rollout).
 - The extension's origin (`chrome-extension://<id>`) must be added to the FastAPI
-  service's `CORS_ALLOW_ORIGINS` env var. Install unpacked first, copy the assigned ID
-  from `chrome://extensions`, then update the Railway env var.
+  service's `CORS_ALLOW_ORIGINS` env var — the id is fixed by the pinned `key` above, so
+  this is a one-time step per deployment, not per-install.
 - Backend rules (psycopg, stdlib-first, etc.) and SPA conventions (React, Tailwind,
   design tokens) do NOT apply inside `chrome-extension/`.
 

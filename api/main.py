@@ -930,10 +930,16 @@ def list_estimations(
 def post_listings_lookup(
     body: s.PortalLookupIn,
     conn: Any = Depends(tenant_pool.tenant_conn),
+    market_conn: Any = Depends(deps.get_db_conn),
 ) -> dict[str, Any]:
     """Batch (source, native id) → MF rent/yield + latest estimate, for the
-    Chrome extension's detail panel + index-card overlay across all portals."""
-    return lookup_portal_listings(conn, body.items)
+    Chrome extension's detail panel + index-card overlay across all portals.
+
+    Two connections on purpose: shared market facts on the service-role conn
+    (listings/properties are RLS-enabled-with-zero-policies — broker PII, the
+    A5 correction), per-account joins on the tenant conn (RLS-scoped). The
+    tenant_conn dependency also carries verify_jwt, so auth is unchanged."""
+    return lookup_portal_listings(market_conn, conn, body.items)
 
 
 @app.post("/buildings")

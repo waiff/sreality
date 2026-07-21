@@ -48,20 +48,62 @@ oprav / listing price) with the SPA's `/estimation/:id` page via the
 > (shipped in the `feature/portal-mf-lookup` PR). Make sure that's deployed
 > to the Railway API before loading this build.
 
-## Distribution policy — read first
+## Sign-in (Wave 1)
 
-The extension bundles the FastAPI bearer token (`API_TOKEN`) into
-the build output at `dist/`. That token gives write access to
-`POST /estimations` (creates LLM-billed runs) and `PATCH
-/estimations/:id/scenario`.
+The extension runs its **own** Supabase session — a separate sign-in from
+the SPA's, never the SPA's refresh token (Supabase rotates refresh tokens
+with reuse-detection, so sharing one between two independently-refreshing
+sessions would eventually log both out). Every API route now requires a
+real per-user session; the panel shows a **"Přihlásit se přes Google"**
+prompt until you sign in, and a compact "signed in as … · Odhlásit" line
+in the panel once you are.
 
-**Ship `dist/` only to operators you trust.** A `.crx` is a zip;
-anyone with the file can extract the token. Do NOT upload this
-build to the public Chrome Web Store. The same security posture as
-the SPA today (see `frontend/.env.example`).
+Under the hood: `chrome.identity.launchWebAuthFlow` opens the Google
+consent screen via Supabase GoTrue's PKCE flow; the code exchange and the
+periodic silent refresh (every ~30 min, via `chrome.alarms` — MV3 kills
+any in-memory timer when the service worker is evicted) happen entirely in
+the background worker. No secret ships in the bundle for this — the
+Supabase anon key is a public client key, same posture as the SPA.
 
-If you ever need a publicly-distributable build, see the "Path 3"
-section at the bottom of this README.
+**One-time setup for a NEW deployment** (already done for the operator's
+existing Railway + Supabase project — skip unless standing up a fresh one):
+
+1. **Pin the redirect URL.** This build's extension ID is fixed by the
+   `key` field in `manifest.json` (so "Load unpacked" gives the same ID on
+   every machine/CI download): `eibnegoankipleeegjilnjhpnbaedpjd`. Its auth
+   redirect URL is `https://eibnegoankipleeegjilnjhpnbaedpjd.chromiumapp.org/`.
+2. **Supabase dashboard** → your project → **Authentication** → **URL
+   Configuration** → **Redirect URLs** → add that exact URL to
+   **Additional Redirect URLs** → **Save**.
+3. **Google Cloud Console** → your OAuth client (the same one Supabase's
+   Google provider uses) → **APIs & Services** → **Credentials** → open the
+   OAuth 2.0 Client → **Authorized redirect URIs** → add the SAME URL →
+   **Save**. (This is the step that actually breaks sign-in if skipped —
+   Google rejects the redirect before Supabase ever sees it.)
+4. **Supabase dashboard** → **Authentication** → **Providers** → confirm
+   **Google** is enabled.
+
+If you ever need a *different* stable extension ID (e.g. a second
+deployment), generate a new keypair and repeat steps 1–3 with the new ID:
+
+```sh
+openssl genrsa -out extension-key.pem 2048
+openssl rsa -in extension-key.pem -pubout -outform DER | openssl base64 -A
+```
+
+Paste that output into manifest.json's `"key"` field. **Keep `extension-key.pem`
+out of git** (already gitignored) — it isn't needed again unless you locally
+pack a signed `.crx`; the committed `key` field (a public key) is all Chrome
+needs to keep deriving the same ID.
+
+## Distribution policy
+
+No secret ships in the bundle — the Supabase anon key + FastAPI base URL are
+both non-sensitive public client config (same posture as the SPA). The
+extension is safe to distribute broadly, including via the public Chrome Web
+Store, once the Chrome Web Store readiness items in
+`docs/design/waves-1-4-public-features.md` (privacy policy, single-purpose
+statement, staged rollout) are done.
 
 ## Build option A — GitHub Actions (recommended)
 
@@ -72,9 +114,10 @@ in CI and uploads the result as a downloadable artifact.
 One-time setup — repository secrets:
 1. GitHub repo → **Settings** → **Secrets and variables** → **Actions**.
 2. Add `EXT_API_BASE_URL` = the Railway FastAPI URL (no trailing slash).
-3. Add `EXT_API_TOKEN` = the same `API_TOKEN` value the Railway
-   service uses.
-4. (Optional) Add `EXT_APP_BASE_URL` = the SPA (browser app) URL, no trailing
+3. Add `EXT_SUPABASE_URL` = the same value as the SPA's `VITE_SUPABASE_URL`.
+4. Add `EXT_SUPABASE_ANON_KEY` = the same value as the SPA's
+   `VITE_SUPABASE_ANON_KEY` (the anon/publishable key — not a secret key).
+5. (Optional) Add `EXT_APP_BASE_URL` = the SPA (browser app) URL, no trailing
    slash — powers the "Otevřít v aplikaci" link to a listing's page in our app
    (`/listing/{sreality_id}`). Leave it unset to hide the link.
 
@@ -96,7 +139,7 @@ If you have Node 20 installed locally:
 ```sh
 cd chrome-extension
 cp .env.example .env
-# edit .env: set VITE_API_BASE_URL and VITE_API_TOKEN
+# edit .env: set VITE_API_BASE_URL, VITE_SUPABASE_URL, VITE_SUPABASE_ANON_KEY
 npm install
 npm run build
 ```
@@ -110,27 +153,29 @@ The output lands in `chrome-extension/dist/`.
 3. Click **Load unpacked**.
 4. Pick the `dist/` folder you downloaded (Option A) or built
    (Option B).
-5. Confirm the extension card shows "Sreality Yield Panel" with
+5. Confirm the extension card shows "Limen Reality — výnos & pipeline" with
    the copper "%" icon.
-6. **Copy the 32-character extension ID** shown on the card. You
-   need it for the CORS step below.
+
+The `key` field pinned in `manifest.json` means the extension ID is always
+`eibnegoankipleeegjilnjhpnbaedpjd` (same on every machine, every CI
+download) — the "one-time setup" steps above already registered it with
+both Supabase and Google, and the origin below is already correct.
 
 ## Allow the extension's origin in CORS (Railway)
 
-The extension's fetches run from the background service worker
-under the origin `chrome-extension://<id>` (using the ID from
-step 6 above). The FastAPI service must allow that origin or every
-request will be blocked.
+The extension's fetches run from the background service worker under the
+origin `chrome-extension://eibnegoankipleeegjilnjhpnbaedpjd`. The FastAPI
+service must allow that origin or every request will be blocked.
 
 1. Open the **Railway** dashboard.
 2. Pick the FastAPI service (the one running `api/main.py`).
 3. Open the **Variables** tab.
 4. Find `CORS_ALLOW_ORIGINS`. (If it doesn't exist yet, click
    **+ New Variable** and add it.)
-5. Set the value to a comma-separated list including the
-   extension's origin. Example:
+5. Set the value to a comma-separated list including the extension's
+   origin. Example:
    ```
-   https://your-spa.up.railway.app,chrome-extension://abcdefghijklmnopabcdefghijklmnop
+   https://your-spa.up.railway.app,chrome-extension://eibnegoankipleeegjilnjhpnbaedpjd
    ```
    Keep any existing origins (your SPA's URL) and just append the
    `chrome-extension://...` one. **No spaces** around the comma.
@@ -138,6 +183,12 @@ request will be blocked.
    the new deploy to come up.
 
 ## Use
+
+**First run:** the floating panel shows **"Přihlásit se přes Google"** —
+click it, complete the Google consent screen in the popup window that
+opens, and the panel reloads signed in. A compact "you@example.com ·
+Odhlásit" line then appears at the top of the panel on every listing; click
+**Odhlásit** to sign out again (any page will then prompt to sign back in).
 
 **On a listing detail page** (any supported portal):
 
@@ -176,16 +227,23 @@ have data; a miss just shows no badge, never a wrong one).
 > render cards client-side, so badges appear a moment after the results do and
 > re-attach as you scroll/paginate (a `MutationObserver` watches for new cards).
 
-## Path 3 (publicly distributable build — not implemented)
+## Chrome Web Store submission — what's left
 
-If you ever want to upload to the public Chrome Web Store, the
-extension must NOT contain `API_TOKEN`. The alternative is a
-zero-secret build that:
+The bundle itself carries no secret and every write is per-user + RLS-scoped
+(Wave 1), so the remaining gap to a public listing is process, not code:
 
-1. Reads listing + estimation data via the Supabase **anon key**
-   from the existing `*_public` views.
-2. Bounces every write through the SPA in a new tab
-   (`window.open('https://your-spa/estimate?source=' + ...)`).
+- `sourcemap:false` + confirm `minify:'esbuild'` for the store build
+  (`sourcemap:true` today is a dev/debug convenience — flip it off before
+  packaging a store submission).
+- A privacy policy URL + per-permission justifications (`identity`,
+  `alarms`, `storage`, the two `host_permissions` origins) + a single-purpose
+  statement in the Developer Dashboard listing.
+- Staged rollout, with the API kept backward-compatible across at least two
+  extension versions (the dual-auth window in `verify_jwt` already covers
+  this for the auth switch itself — older installed builds keep working
+  against a static `API_TOKEN` until that's rotated platform-wide, a
+  separate, deliberately-sequenced cutover per
+  `docs/design/waves-1-4-public-features.md`).
 
-The SPA's existing password gate continues to gate writes. This is
-a meaningful redesign — opening it should be a deliberate decision.
+Full detail: `docs/design/waves-1-4-public-features.md`, "Chrome Web Store
+readiness".

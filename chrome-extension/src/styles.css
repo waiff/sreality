@@ -198,6 +198,39 @@
 
 .p-body { padding: 0.8rem 0.85rem 0.9rem; }
 
+/* ---- auth strip (the signed-in identity + sign-out control) --------- */
+
+.auth-strip {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.65rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid var(--rule);
+}
+
+.auth-email {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.68rem;
+  color: var(--ink-4);
+}
+
+.auth-signout {
+  flex-shrink: 0;
+  font-size: 0.68rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--copper);
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.auth-signout:hover { color: var(--copper-deep); text-decoration: underline; }
+
 /* ---- subject (catalog line) ----------------------------------------- */
 
 .subject { margin-bottom: 0.7rem; }
