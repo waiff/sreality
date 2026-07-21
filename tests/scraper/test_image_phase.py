@@ -335,7 +335,7 @@ def test_pending_image_downloads_shard_appends_modulo():
     conn = _ScriptedConn([])
     scraper_db.pending_image_downloads(conn, limit=500, shard=(2, 4))
     sql, params = conn.cursor_obj.executed[0]
-    assert "(hashint8(i.sreality_id) & 2147483647) %% %s = %s" in sql
+    assert "(hashint8(i.listing_id) & 2147483647) %% %s = %s" in sql
     # max_attempts, then shard (n, k), then limit — modulus N before remainder K.
     assert params == (5, 4, 2, 500)
 
@@ -356,7 +356,7 @@ def test_pending_image_downloads_shard_and_sources_and_active():
     sql, params = conn.cursor_obj.executed[0]
     assert "l.is_active = true" in sql
     assert "l.source = ANY(%s)" in sql
-    assert "(hashint8(i.sreality_id) & 2147483647) %% %s = %s" in sql
+    assert "(hashint8(i.listing_id) & 2147483647) %% %s = %s" in sql
     # Order of bound params: max_attempts, sources, shard(n, k), limit.
     assert params == (5, ["idnes"], 3, 0, 500)
 
@@ -622,7 +622,8 @@ def _fake_connect():
 def _drive_image_loop(monkeypatch, batches, fetch_result):
     """Run _run_image_downloads with a scripted pending queue + fake fetcher.
 
-    `batches` is a list of row-lists (each row: image_id, sid, seq, url, cm, ct)
+    `batches` is a list of row-lists (each row: image_id, listing_id, seq, url,
+    cm, ct, sreality_id)
     returned by successive `pending_image_downloads` calls; an exhausted script
     returns [] (empty queue → terminate). `fetch_result(url)` returns the
     Exception (transient) or None (success) the fake fetcher yields for that URL.
@@ -671,7 +672,13 @@ def _drive_image_loop(monkeypatch, batches, fetch_result):
 
 
 def _rows(url, start_id, n, sid_base):
-    return [(start_id + i, sid_base + i, 0, url, "byt", "prodej") for i in range(n)]
+    """Row shape mirrors pending_image_downloads: (image_id, listing_id, seq,
+    url, category_main, category_type, sreality_id) — BOTH ids, since the drain
+    keys R2/shard on the surrogate but classifies taken-down on the legacy id."""
+    return [
+        (start_id + i, sid_base + i, 0, url, "byt", "prodej", sid_base + i)
+        for i in range(n)
+    ]
 
 
 def _timeout_for_bad(url):

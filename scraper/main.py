@@ -1583,15 +1583,15 @@ def _run_image_downloads(
                 break
 
             cat_lookup: dict[int, tuple[str | None, str | None]] = {}
-            sid_by_image: dict[int, int] = {}
+            sid_by_image: dict[int, int | None] = {}
             host_by_image: dict[int, str] = {}
 
             # Skip images whose parent listing is already known gone (we'd just
             # re-mark them) AND images on a quarantined host (its transient rate
             # crossed the bar this run — leave them pending for the next run).
             filtered_pending: list[tuple[Any, ...]] = []
-            for image_id, sid, seq, url, cm, ct in pending:
-                if sid in gone_listings:
+            for image_id, lid, seq, url, cm, ct, sid in pending:
+                if sid is not None and sid in gone_listings:
                     continue
                 host = _image_host(url)
                 if host in quarantined:
@@ -1599,7 +1599,7 @@ def _run_image_downloads(
                 cat_lookup[image_id] = (cm, ct)
                 sid_by_image[image_id] = sid
                 host_by_image[image_id] = host
-                filtered_pending.append((image_id, sid, seq, url, cm, ct))
+                filtered_pending.append((image_id, lid, seq, url, cm, ct))
 
             if not filtered_pending:
                 # Nothing fetchable in this slice: every row is a known-gone
@@ -1620,10 +1620,10 @@ def _run_image_downloads(
             with ThreadPoolExecutor(max_workers=workers) as pool:
                 future_to_id = {
                     pool.submit(
-                        _fetch_one_image, sid, seq, url, r2,
+                        _fetch_one_image, lid, seq, url, r2,
                         _semaphore_for(host_by_image[image_id]),
                     ): image_id
-                    for image_id, sid, seq, url, _cm, _ct in filtered_pending
+                    for image_id, lid, seq, url, _cm, _ct in filtered_pending
                 }
                 for future in as_completed(future_to_id):
                     image_id = future_to_id[future]
@@ -1738,7 +1738,7 @@ def _suspicious_stop(outcomes: "Any") -> bool:
 def _classify_image_failure(
     conn: Any,
     client: "Any",
-    sreality_id: int,
+    sreality_id: int | None,
     error: Exception,
     *,
     gone_listings: set[int],
@@ -1773,6 +1773,13 @@ def _classify_image_failure(
         return "source_unavailable"
     if not _is_gone_image_error(error):
         return "transient"
+    if sreality_id is None:
+        # No legacy handle (a post-Gate-2 non-sreality listing). A freshness
+        # check IS a sreality portal fetch, so "is the parent gone?" is simply
+        # unanswerable here. Park this one image rather than guessing: bulk
+        # 'taken_down' would need proof we can't get, and 'transient' would
+        # retry a permanently dead URL forever and count toward suspicious-stop.
+        return "source_unavailable"
     if sreality_id in gone_listings:
         return "taken_down"
     if sreality_id in alive_listings:

@@ -37,10 +37,18 @@ def is_configured() -> bool:
     return all(os.environ.get(v) for v in R2_ENV_VARS)
 
 
-def image_key(sreality_id: int, sequence: int | None) -> str:
-    """Bucket key for one image. Sequence padded to 4 digits for stable sort."""
+def image_key(listing_id: int, sequence: int | None) -> str:
+    """Bucket key for one image. Sequence padded to 4 digits for stable sort.
+
+    Keyed on the SURROGATE listings.id (R2). Post-Gate-2 a non-sreality listing
+    has sreality_id NULL, and the old key would render the literal string
+    "None/0001.jpg" — every such image colliding on ONE prefix and overwriting
+    the previous one. Only NEWLY stored images take this scheme; already-stored
+    images keep whatever `images.storage_path` recorded (nothing recomputes a
+    key for an existing image), so the bucket simply holds both schemes.
+    """
     seq = sequence if sequence is not None else 0
-    return f"{sreality_id}/{seq:04d}.jpg"
+    return f"{listing_id}/{seq:04d}.jpg"
 
 
 # sreality's v1 rebuild serves bare image URLs; the CDN 401s a bare URL and

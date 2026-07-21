@@ -1493,9 +1493,15 @@ def pending_image_downloads(
     *,
     shard: tuple[int, int] | None = None,
     sources: tuple[str, ...] | None = None,
-) -> list[tuple[int, int, int | None, str, str | None, str | None]]:
-    """Return (image_id, sreality_id, sequence, sreality_url, category_main, category_type)
-    rows that still need download.
+) -> list[tuple[int, int, int | None, str, str | None, str | None, int | None]]:
+    """Return (image_id, listing_id, sequence, sreality_url, category_main,
+    category_type, sreality_id) rows that still need download.
+
+    BOTH ids are returned because the drain needs each for a different job:
+    `listing_id` keys the R2 object and the shard (it survives Gate 2), while
+    `sreality_id` is what the taken-down classification path needs — a
+    freshness check is a sreality portal fetch, so it is inherently legacy-keyed
+    and simply does not apply to a listing without one.
 
     Filters out images already stored (storage_path IS NOT NULL),
     images we have given up on (download_attempts >= max_attempts), and
@@ -1507,7 +1513,7 @@ def pending_image_downloads(
     so the cap-bounded slice goes to listings users can still browse.
 
     `shard=(k, n)` partitions the pending queue by the PARENT LISTING —
-    `hash(sreality_id) mod n == k` — so N parallel drainer jobs each own a
+    `hash(listing_id) mod n == k` — so N parallel drainer jobs each own a
     disjoint slice (horizontal scale-out) AND a single listing's photos all
     fall in ONE shard. Sharding on `image_id` instead would stripe a
     listing's photos across shards that drain at slightly different rates,
@@ -1544,14 +1550,17 @@ def pending_image_downloads(
         # in one shard, and hash it (not raw modulo) because sreality ids are
         # multiples of 4 — raw `sreality_id % n` collapses everything into one
         # shard. `& 2147483647` clears the sign bit (no abs() overflow risk).
-        extra += " AND (hashint8(i.sreality_id) & 2147483647) %% %s = %s"
+        # Shards on the SURROGATE (R2): post-Gate-2 images.sreality_id is NULL
+        # for a non-sreality listing, hashint8(NULL) is NULL, and `NULL % n = k`
+        # is NULL — so those images would match NO shard and never drain at all.
+        extra += " AND (hashint8(i.listing_id) & 2147483647) %% %s = %s"
         params.extend([n, k])
     params.append(limit)
     sql = f"""
-        SELECT i.id, i.sreality_id, i.sequence, i.sreality_url,
-               l.category_main, l.category_type
+        SELECT i.id, i.listing_id, i.sequence, i.sreality_url,
+               l.category_main, l.category_type, i.sreality_id
         FROM images i
-        LEFT JOIN listings l ON l.sreality_id = i.sreality_id
+        LEFT JOIN listings l ON l.id = i.listing_id
         WHERE i.storage_path IS NULL
           AND i.unavailable_reason IS NULL
           AND i.download_attempts < %s
