@@ -553,7 +553,7 @@ class _FakeConn:
 
 
 _RESULT_COLS = [
-    "sreality_id", "price_czk", "area_m2", "price_per_m2",
+    "listing_id", "sreality_id", "price_czk", "area_m2", "price_per_m2",
     "disposition", "district",
     "locality_district_id", "locality_region_id",
     "floor", "total_floors",
@@ -572,9 +572,14 @@ def _row(
     data_age_days: int = 1,
     latest_snapshot_id: int = 100,
     last_freshness_check_at: Any = None,
+    listing_id: int | None = None,
 ):
     from datetime import datetime, timezone
     return (
+        # listing_id defaults to a distinct value (sreality_id + 900_000) rather
+        # than mirroring sreality_id, so a test that keys on the wrong id fails
+        # loudly instead of passing by coincidence.
+        listing_id if listing_id is not None else sreality_id + 900_000,
         sreality_id, price_czk, area_m2,
         float(price_czk) / area_m2,
         "2+kk", "Praha 1",
@@ -904,3 +909,30 @@ def test_mf_gross_yield_pct_absent_when_unset():
     sql, params = build_query(TargetSpec(lat=50.0, lng=14.0), ComparableFilters())
     assert "mf_gross_yield_pct" not in sql
     assert "min_mf_gross_yield_pct" not in params
+
+
+def test_cohort_emits_the_surrogate_id():
+    """Every comparable must carry listing_id — it is the only handle that
+    survives Gate 2, and the agent/cohort/provenance layers key on it."""
+    sql, _ = build_query(TargetSpec(lat=50.0, lng=14.0), ComparableFilters())
+    assert "l.id AS listing_id" in sql
+
+
+def test_snapshot_lateral_joins_on_the_surrogate():
+    """Rule 8 — estimates capture each comparable's snapshot_id. Post-Gate-2 a
+    `WHERE sreality_id = l.sreality_id` LATERAL is NULL = NULL, never matches,
+    and every non-sreality comparable silently loses its snapshot provenance."""
+    sql, _ = build_query(TargetSpec(lat=50.0, lng=14.0), ComparableFilters())
+    assert "SELECT id, scraped_at FROM listing_snapshots\n  WHERE listing_id = l.id" in sql
+
+
+def test_freshness_lateral_stays_legacy_keyed_until_that_table_is_a_carrier():
+    """Deliberate: listing_freshness_checks has NO listing_id column (rule 9 —
+    it is throttling/observability, not history). Pinned so nobody 'fixes' this
+    against a column that does not exist; flip it only when that table gains a
+    carrier column."""
+    sql, _ = build_query(TargetSpec(lat=50.0, lng=14.0), ComparableFilters())
+    assert (
+        "SELECT checked_at FROM listing_freshness_checks\n"
+        "  WHERE sreality_id = l.sreality_id" in sql
+    )
