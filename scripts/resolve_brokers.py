@@ -402,9 +402,9 @@ ident_agg AS (
 lst AS (
   SELECT bi.broker_id,
     count(*) AS lc,
-    count(DISTINCT coalesce(l.property_id, -l.sreality_id)) AS pc,
+    count(DISTINCT coalesce(l.property_id, -l.id)) AS pc,
     count(*) FILTER (WHERE l.is_active AND l.last_seen_at > now() - interval '7 days') AS alc,
-    count(DISTINCT coalesce(l.property_id, -l.sreality_id))
+    count(DISTINCT coalesce(l.property_id, -l.id))
       FILTER (WHERE l.is_active AND l.last_seen_at > now() - interval '7 days') AS apc,
     min(l.first_seen_at) AS fseen, max(l.last_seen_at) AS lseen
   FROM listings l JOIN broker_identities bi ON bi.id = l.broker_identity_id
@@ -534,8 +534,12 @@ SELECT p.broker_identity_id, p.source, p.kind, p.value
 FROM personal p JOIN multi m ON m.kind = p.kind AND m.value = p.value
 """
 
-_CLAIM_DIRTY = "SELECT sreality_id FROM dirty_broker_listings WHERE marked_at <= %(cutoff)s ORDER BY marked_at LIMIT %(limit)s"
-_DELETE_DIRTY = "DELETE FROM dirty_broker_listings WHERE sreality_id = ANY(%(ids)s) AND marked_at <= %(cutoff)s"
+# Claim/delete by listing_id: it is this queue's PRIMARY KEY since the R2 Phase D
+# swap, and the only column guaranteed non-NULL post-Gate-2 — a NULL sreality_id
+# would make the claim return NULL and the DELETE match nothing, silently stopping
+# broker attribution for new rows while leaking undeletable queue rows.
+_CLAIM_DIRTY = "SELECT listing_id FROM dirty_broker_listings WHERE marked_at <= %(cutoff)s ORDER BY marked_at LIMIT %(limit)s"
+_DELETE_DIRTY = "DELETE FROM dirty_broker_listings WHERE listing_id = ANY(%(ids)s) AND marked_at <= %(cutoff)s"
 _CLEAR_DIRTY = "DELETE FROM dirty_broker_listings WHERE marked_at <= %(cutoff)s"
 
 
@@ -738,15 +742,15 @@ def _apply_merges(conn: Any, groups: list[list[int]]) -> int:
     return len(losers)
 
 
-def _affected(conn: Any, sids: list[int]) -> list[int]:
-    if not sids:
+def _affected(conn: Any, listing_ids: list[int]) -> list[int]:
+    if not listing_ids:
         return []
     with conn.cursor() as cur:
         cur.execute(
             "SELECT DISTINCT bi.broker_id FROM listings l "
             "JOIN broker_identities bi ON bi.id = l.broker_identity_id "
-            "WHERE l.sreality_id = ANY(%s) AND bi.broker_id IS NOT NULL",
-            (sids,),
+            "WHERE l.id = ANY(%s) AND bi.broker_id IS NOT NULL",
+            (listing_ids,),
         )
         return [int(r[0]) for r in cur.fetchall()]
 
@@ -819,15 +823,17 @@ def _generate_merge_candidates(conn: Any) -> int:
 
 
 def _broker_bearing_ids(conn: Any, page_size: int) -> list[int]:
-    """Every broker-bearing listing id, ascending, fetched in bounded keyset pages.
+    """Every broker-bearing listing's SURROGATE id, ascending, in bounded keyset pages.
 
     Keyset — never one unbounded `ORDER BY` scan: the corpus crossed the pooler
     statement timeout (2 min) once four portals were attributed, so the single
     SELECT that loaded all ids timed out (#639 era). Each page is `... AND
-    sreality_id > :last ... LIMIT :n`, so no statement is unbounded. Keyset also
-    skips the sparse negative-id gaps a numeric-range loop would walk (sreality_id
-    spans [-287k, 4.29B]) — the property the load-all-ids approach existed for,
-    kept here while adding the per-statement bound it lacked."""
+    id > :last ... LIMIT :n`, so no statement is unbounded.
+
+    Paging moved from sreality_id to id with the R2 cutover (the callers now scope
+    attribution on `l.id = ANY(...)`). The gap-skipping property keyset existed for
+    is unchanged — and `id` is in fact denser than sreality_id, whose sparse
+    [-287k, 4.29B] span is what made a numeric-range loop untenable."""
     ids: list[int] = []
     last: int | None = None
     srcs = list(_BROKER_SOURCES)
@@ -835,13 +841,13 @@ def _broker_bearing_ids(conn: Any, page_size: int) -> list[int]:
         while True:
             if last is None:
                 cur.execute(
-                    "SELECT sreality_id FROM listings WHERE source = ANY(%(srcs)s) "
-                    "ORDER BY sreality_id LIMIT %(lim)s",
+                    "SELECT id FROM listings WHERE source = ANY(%(srcs)s) "
+                    "ORDER BY id LIMIT %(lim)s",
                     {"srcs": srcs, "lim": page_size})
             else:
                 cur.execute(
-                    "SELECT sreality_id FROM listings WHERE source = ANY(%(srcs)s) "
-                    "AND sreality_id > %(last)s ORDER BY sreality_id LIMIT %(lim)s",
+                    "SELECT id FROM listings WHERE source = ANY(%(srcs)s) "
+                    "AND id > %(last)s ORDER BY id LIMIT %(lim)s",
                     {"srcs": srcs, "last": last, "lim": page_size})
             page = [int(r[0]) for r in cur.fetchall()]
             if not page:
@@ -872,7 +878,7 @@ def _run_full(conn: Any, free: list[str], franchise: list[str], auto: list[str],
     for i in range(0, len(all_ids), batch_size):
         if holder:
             _heartbeat_lock(conn, holder)
-        _attribute(conn, "l.sreality_id = ANY(%(ids)s)", {"ids": all_ids[i:i + batch_size]})
+        _attribute(conn, "l.id = ANY(%(ids)s)", {"ids": all_ids[i:i + batch_size]})
         if deadline and time.monotonic() > deadline:
             LOG.warning("RESOLVE full: time budget reached during attribution at %d/%d ids",
                         i, len(all_ids))
@@ -886,7 +892,7 @@ def _run_full(conn: Any, free: list[str], franchise: list[str], auto: list[str],
     for i in range(0, len(all_ids), batch_size):
         if holder:
             _heartbeat_lock(conn, holder)
-        _link_listings_firm(conn, "AND l.sreality_id = ANY(%(ids)s)", {"ids": all_ids[i:i + batch_size]})
+        _link_listings_firm(conn, "AND l.id = ANY(%(ids)s)", {"ids": all_ids[i:i + batch_size]})
     attached = _attach_singletons(conn)
     LOG.info("RESOLVE full attribution+firms done elapsed=%.1fs", time.monotonic() - t0)
 
@@ -972,17 +978,17 @@ def _run_incremental(conn: Any, free: list[str], franchise: list[str],
         # need (re)attribution since the last pass. The claim is bounded by cutoff
         # so a write mid-run survives to the next pass (dirty_properties, rule #20).
         cur.execute(_CLAIM_DIRTY, {"cutoff": cutoff, "limit": batch_size})
-        sids = {int(r[0]) for r in cur.fetchall()}
+        claimed = {int(r[0]) for r in cur.fetchall()}
 
-    if not sids:
+    if not claimed:
         with conn.cursor() as cur:
             cur.execute("UPDATE broker_resolution_runs SET ended_at = now() WHERE id = %s", (run_id,))
         return {"attributed": 0, "brokers": 0}
 
-    ids = list(sids)
-    _attribute(conn, "l.sreality_id = ANY(%(ids)s)", {"ids": ids})
+    ids = list(claimed)
+    _attribute(conn, "l.id = ANY(%(ids)s)", {"ids": ids})
     _resolve_firms(conn, free, franchise)
-    _link_listings_firm(conn, "AND l.sreality_id = ANY(%(ids)s)", {"ids": ids})
+    _link_listings_firm(conn, "AND l.id = ANY(%(ids)s)", {"ids": ids})
     _attach_singletons(conn)
     bids = _affected(conn, ids)
     with conn.cursor() as cur:
