@@ -34,22 +34,27 @@ def clip_room_grouping(
 
 
 def pair_max_cosine(
-    conn: Any, *, sreality_id_a: int, sreality_id_b: int, model: str,
+    conn: Any, *, listing_id_a: int, listing_id_b: int, model: str,
 ) -> float | None:
     """Best (max) cosine similarity between ANY image of listing A and ANY image of
     listing B, from stored CLIP embeddings — the §2.2b free-merge signal ("pair
     max-cosine"), matching the replay corpus definition (max over the full image
     cross-product, any room). None when either side has no stored vector; callers must
-    treat None as "signal unavailable", never as low similarity."""
+    treat None as "signal unavailable", never as low similarity.
+
+    Joins on images.listing_id (the surrogate PK), not images.sreality_id — this
+    query is symmetric/order-independent by construction (a MAX aggregate), so
+    unlike the pair-cache tables there is no canonicalization to get wrong; the
+    surrogate is used purely because it's the identity resolve_pair now carries."""
     with conn.cursor() as cur:
         cur.execute(
             "SELECT max(1 - (ea.embedding <=> eb.embedding)) "
             "FROM image_clip_embeddings ea "
-            "JOIN images ia ON ia.id = ea.image_id AND ia.sreality_id = %s "
-            "JOIN images ib ON ib.sreality_id = %s "
+            "JOIN images ia ON ia.id = ea.image_id AND ia.listing_id = %s "
+            "JOIN images ib ON ib.listing_id = %s "
             "JOIN image_clip_embeddings eb ON eb.image_id = ib.id AND eb.model = %s "
             "WHERE ea.model = %s",
-            (sreality_id_a, sreality_id_b, model, model),
+            (listing_id_a, listing_id_b, model, model),
         )
         row = cur.fetchone()
     return float(row[0]) if row and row[0] is not None else None

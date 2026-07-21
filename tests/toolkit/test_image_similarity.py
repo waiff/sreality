@@ -52,12 +52,16 @@ def test_self_compare_raises():
 
 
 def test_canonicalises_pair_order(monkeypatch):
-    """Larger id passed first should still produce the smaller-first cache key."""
+    """Canonical order is by listing_id, NOT sreality_id — the sreality_id with
+    the smaller listing_id must land in slot A even when its sreality_id is
+    numerically larger (the exact 77%-of-rows-sort-differently case the R2
+    identity chain's PR3 exists to fix)."""
     _patch_r2_configured(monkeypatch, True)
     monkeypatch.setattr(ic.image_storage.R2Client, "from_env", classmethod(lambda cls: _FakeR2()))
 
     plan = [
-        ("fetchone", _comparison_row()),  # cache hit on (10, 20)
+        ("fetchall", [(20, 5), (10, 8)]),  # resolve: sreality_id 20 -> listing_id 5, 10 -> 8
+        ("fetchone", _comparison_row()),   # cache hit on (5, 8)
         ("fetchone", (_NOW,)),             # last_seen lookup
     ]
     conn = _make_conn(plan)
@@ -67,10 +71,21 @@ def test_canonicalises_pair_order(monkeypatch):
         conn, llm, sreality_id_a=20, sreality_id_b=10,  # type: ignore[arg-type]
     )
 
-    cache_sql = conn.cursor_obj.executed[0]
-    assert cache_sql[1] == (10, 20)
-    assert res["data"]["sreality_id_a"] == 10
-    assert res["data"]["sreality_id_b"] == 20
+    cache_sql = conn.cursor_obj.executed[1]
+    assert cache_sql[1] == (5, 8)
+    # sreality_id 20 carries the smaller listing_id (5) -> canonical slot A.
+    assert res["data"]["sreality_id_a"] == 20
+    assert res["data"]["sreality_id_b"] == 10
+
+
+def test_unresolvable_sreality_id_raises():
+    plan = [("fetchall", [(10, 100)])]  # sreality_id 20 not found in listings
+    conn = _make_conn(plan)
+    with pytest.raises(ic.ImageCompareError, match="20"):
+        ic.compare_listing_images(
+            conn, _FakeLLM([]),  # type: ignore[arg-type]
+            sreality_id_a=10, sreality_id_b=20,
+        )
 
 
 # ---- Cache hit path -------------------------------------------------------
@@ -80,6 +95,7 @@ def test_cache_hit_does_not_call_r2_or_llm(monkeypatch):
     _patch_r2_configured(monkeypatch, True)
 
     plan = [
+        ("fetchall", [(10, 100), (20, 200)]),  # resolve listing_ids
         ("fetchone", _comparison_row()),
         ("fetchone", (_NOW,)),  # max(last_seen)
     ]
@@ -108,6 +124,7 @@ def test_cache_miss_fetches_images_and_calls_vision(monkeypatch):
 
     comparison = _example_comparison()
     plan = [
+        ("fetchall", [(10, 100), (20, 200)]),     # resolve listing_ids
         ("fetchone", None),                       # cache miss
         ("fetchall", [("10/0000.jpg",), ("10/0001.jpg",)]),  # images A
         ("fetchall", [("20/0000.jpg",)]),                     # images B
@@ -148,6 +165,7 @@ def test_no_images_raises(monkeypatch):
         classmethod(lambda cls: _FakeR2()),
     )
     plan = [
+        ("fetchall", [(10, 100), (20, 200)]),  # resolve listing_ids
         ("fetchone", None),
         ("fetchall", []),  # listing A has none
     ]
@@ -161,7 +179,10 @@ def test_no_images_raises(monkeypatch):
 
 def test_r2_not_configured_raises(monkeypatch):
     _patch_r2_configured(monkeypatch, False)
-    plan = [("fetchone", None)]
+    plan = [
+        ("fetchall", [(10, 100), (20, 200)]),  # resolve listing_ids
+        ("fetchone", None),
+    ]
     conn = _make_conn(plan)
     with pytest.raises(ic.ImageCompareError, match="R2 is not configured"):
         ic.compare_listing_images(
@@ -180,6 +201,7 @@ def test_missing_dimension_raises(monkeypatch):
         classmethod(lambda cls: _FakeR2()),
     )
     plan = [
+        ("fetchall", [(10, 100), (20, 200)]),  # resolve listing_ids
         ("fetchone", None),
         ("fetchall", [("10/0000.jpg",)]),
         ("fetchall", [("20/0000.jpg",)]),
@@ -204,6 +226,7 @@ def test_missing_dimension_raises(monkeypatch):
 def test_envelope_metadata_shape(monkeypatch):
     _patch_r2_configured(monkeypatch, True)
     plan = [
+        ("fetchall", [(10, 100), (20, 200)]),  # resolve listing_ids
         ("fetchone", _comparison_row()),
         ("fetchone", (_NOW,)),
     ]

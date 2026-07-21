@@ -109,22 +109,24 @@ def test_ingest_routes_classify(monkeypatch: Any) -> None:
 def test_ingest_routes_compare(monkeypatch: Any) -> None:
     captured: dict[str, Any] = {}
 
-    def fake_persist(conn, *, sreality_id_a, sreality_id_b, room_type, tool_calls,
-                     model, llm_call_id, cost_usd):
-        captured.update(a=sreality_id_a, b=sreality_id_b, room=room_type,
-                        model=model, call=llm_call_id, cost=cost_usd)
+    def fake_persist(conn, *, sreality_id_a, listing_id_a, sreality_id_b, listing_id_b,
+                     room_type, tool_calls, model, llm_call_id, cost_usd):
+        captured.update(a=sreality_id_a, la=listing_id_a, b=sreality_id_b, lb=listing_id_b,
+                        room=room_type, model=model, call=llm_call_id, cost=cost_usd)
 
     monkeypatch.setattr(vm, "persist_visual_match", fake_persist)
     conn, llm = _FakeConn(), _FakeLLM()
     completion = _Completion([_TC("t", "record_visual_match", {"verdict": "High", "rationale": "x"})])
     req = {"id": 6, "kind": "compare", "model": "claude-sonnet-4-5",
-           "sreality_id_a": 1, "sreality_id_b": 2, "room_type": "kitchen", "image_ids": None}
+           "sreality_id_a": 1, "sreality_id_b": 2, "listing_id_a": 101, "listing_id_b": 102,
+           "room_type": "kitchen", "image_ids": None}
 
     outcome, cost = ing._ingest_one(conn, llm, req, completion=completion,
                                     model="claude-sonnet-4-5", cost=0.05)
 
     assert outcome == "done"
     assert captured["a"] == 1 and captured["b"] == 2 and captured["room"] == "kitchen"
+    assert captured["la"] == 101 and captured["lb"] == 102
     assert llm.recorded[0]["called_for"] == "compare_listings_visually"
     assert conn.marks == [("done", None, 6)]
 
@@ -132,22 +134,49 @@ def test_ingest_routes_compare(monkeypatch: Any) -> None:
 def test_ingest_routes_site_plan(monkeypatch: Any) -> None:
     captured: dict[str, Any] = {}
 
-    def fake_persist(conn, *, sreality_id_a, sreality_id_b, tool_calls, model,
-                     llm_call_id, cost_usd):
-        captured.update(a=sreality_id_a, b=sreality_id_b, model=model)
+    def fake_persist(conn, *, sreality_id_a, listing_id_a, sreality_id_b, listing_id_b,
+                     tool_calls, model, llm_call_id, cost_usd):
+        captured.update(a=sreality_id_a, la=listing_id_a, b=sreality_id_b, lb=listing_id_b,
+                        model=model)
 
     monkeypatch.setattr(vm, "persist_site_plan_match", fake_persist)
     conn, llm = _FakeConn(), _FakeLLM()
     completion = _Completion([_TC("t", "record_site_plan_match", {"verdict": "same_unit", "rationale": "x"})])
     req = {"id": 7, "kind": "site_plan", "model": "claude-sonnet-4-5",
-           "sreality_id_a": 3, "sreality_id_b": 4, "room_type": None, "image_ids": None}
+           "sreality_id_a": 3, "sreality_id_b": 4, "listing_id_a": 103, "listing_id_b": 104,
+           "room_type": None, "image_ids": None}
 
     outcome, _ = ing._ingest_one(conn, llm, req, completion=completion,
                                  model="claude-sonnet-4-5", cost=0.04)
 
     assert outcome == "done"
     assert captured["a"] == 3 and captured["b"] == 4
+    assert captured["la"] == 103 and captured["lb"] == 104
     assert llm.recorded[0]["called_for"] == "compare_listing_site_plans"
+
+
+def test_ingest_routes_floor_plan(monkeypatch: Any) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_persist(conn, *, sreality_id_a, listing_id_a, sreality_id_b, listing_id_b,
+                     tool_calls, model, llm_call_id, cost_usd):
+        captured.update(a=sreality_id_a, la=listing_id_a, b=sreality_id_b, lb=listing_id_b,
+                        model=model)
+
+    monkeypatch.setattr(vm, "persist_floor_plan_match", fake_persist)
+    conn, llm = _FakeConn(), _FakeLLM()
+    completion = _Completion([_TC("t", "record_floor_plan_match", {"verdict": "same_layout", "rationale": "x"})])
+    req = {"id": 9, "kind": "floor_plan", "model": "claude-sonnet-4-5",
+           "sreality_id_a": 5, "sreality_id_b": 6, "listing_id_a": 105, "listing_id_b": 106,
+           "room_type": None, "image_ids": None}
+
+    outcome, _ = ing._ingest_one(conn, llm, req, completion=completion,
+                                 model="claude-sonnet-4-5", cost=0.04)
+
+    assert outcome == "done"
+    assert captured["a"] == 5 and captured["b"] == 6
+    assert captured["la"] == 105 and captured["lb"] == 106
+    assert llm.recorded[0]["called_for"] == "compare_listing_floor_plans"
 
 
 def test_ingest_parse_error_marks_errored_but_records_cost(monkeypatch: Any) -> None:
@@ -160,7 +189,8 @@ def test_ingest_parse_error_marks_errored_but_records_cost(monkeypatch: Any) -> 
     conn, llm = _FakeConn(), _FakeLLM()
     completion = _Completion([_TC("t", "wrong_tool", {})])
     req = {"id": 8, "kind": "compare", "model": "claude-sonnet-4-5",
-           "sreality_id_a": 1, "sreality_id_b": 2, "room_type": "kitchen", "image_ids": None}
+           "sreality_id_a": 1, "sreality_id_b": 2, "listing_id_a": 101, "listing_id_b": 102,
+           "room_type": "kitchen", "image_ids": None}
 
     outcome, cost = ing._ingest_one(conn, llm, req, completion=completion,
                                     model="claude-sonnet-4-5", cost=0.05)

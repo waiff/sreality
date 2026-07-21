@@ -7,7 +7,8 @@ scores to decide whether a comparable's price signal is trustworthy
 along the axes that matter for a given listing.
 
 Cache lives in `listing_image_comparisons`, keyed on the canonical
-ordered pair (sreality_id_a < sreality_id_b). Repeat calls return
+ordered pair (LEAST/GREATEST over listing_id — the surrogate PK, not
+sreality_id, per the R2 dedup identity chain PR3). Repeat calls return
 instantly with no LLM cost.
 
 Image bytes come from R2 via the shared `toolkit.vision_images.image_block`
@@ -129,11 +130,17 @@ def compare_listing_images(
     if sreality_id_a == sreality_id_b:
         raise ImageCompareError("cannot compare a listing to itself")
 
-    a, b = sorted((sreality_id_a, sreality_id_b))
+    # Canonical order is by listing_id (the surrogate PK), not sreality_id —
+    # sreality_id rides along side-coupled with whichever listing_id it
+    # belongs to, so the persisted a/b columns and n_images_a/_b never end up
+    # swapped relative to each other.
+    (sid_a, lid_a), (sid_b, lid_b) = sorted(
+        _resolve_listing_ids(conn, sreality_id_a, sreality_id_b), key=lambda p: p[1],
+    )
     cache_hit = False
 
     if not force_refresh:
-        cached = _cache_lookup(conn, a, b)
+        cached = _cache_lookup(conn, lid_a, lid_b)
         if cached is not None:
             cache_hit = True
             comparison = cached["comparison"]
@@ -141,20 +148,20 @@ def compare_listing_images(
             cost_usd = cached["cost_usd"]
             n_a = cached["n_images_a"]
             n_b = cached["n_images_b"]
-            data_freshness = _max_listing_last_seen(conn, a, b)
+            data_freshness = _max_listing_last_seen(conn, lid_a, lid_b)
         else:
             comparison, model, cost_usd, n_a, n_b, data_freshness = (
-                _produce_comparison(conn, llm_client, a, b, n_images)
+                _produce_comparison(conn, llm_client, sid_a, sid_b, lid_a, lid_b, n_images)
             )
     else:
         comparison, model, cost_usd, n_a, n_b, data_freshness = (
-            _produce_comparison(conn, llm_client, a, b, n_images)
+            _produce_comparison(conn, llm_client, sid_a, sid_b, lid_a, lid_b, n_images)
         )
 
     return {
         "data": {
-            "sreality_id_a": a,
-            "sreality_id_b": b,
+            "sreality_id_a": sid_a,
+            "sreality_id_b": sid_b,
             "comparison": comparison,
             "n_images_a": n_a,
             "n_images_b": n_b,
@@ -177,11 +184,27 @@ def compare_listing_images(
     }
 
 
+def _resolve_listing_ids(
+    conn: "psycopg.Connection", sreality_id_a: int, sreality_id_b: int,
+) -> list[tuple[int, int]]:
+    """[(sreality_id, listing_id), ...] for the two ids, order matching the call args."""
+    sql = "SELECT sreality_id, id FROM listings WHERE sreality_id = ANY(%s)"
+    with conn.cursor() as cur:
+        cur.execute(sql, ([sreality_id_a, sreality_id_b],))
+        rows = {r[0]: r[1] for r in cur.fetchall()}
+    for sid in (sreality_id_a, sreality_id_b):
+        if sid not in rows:
+            raise ImageCompareError(f"sreality_id={sid} not found in listings")
+    return [(sreality_id_a, rows[sreality_id_a]), (sreality_id_b, rows[sreality_id_b])]
+
+
 def _produce_comparison(
     conn: "psycopg.Connection",
     llm_client: "LLMClient",
-    a: int,
-    b: int,
+    sid_a: int,
+    sid_b: int,
+    lid_a: int,
+    lid_b: int,
     n_images: int,
 ) -> tuple[dict[str, Any], str, float | None, int, int, str | None]:
     if not image_storage.is_configured():
@@ -190,15 +213,15 @@ def _produce_comparison(
             "cannot fetch listing images for vision"
         )
 
-    images_a = _fetch_image_keys(conn, a, n_images)
+    images_a = _fetch_image_keys(conn, sid_a, n_images)
     if not images_a:
         raise ImageCompareError(
-            f"no R2-stored images for sreality_id={a}; cannot compare"
+            f"no R2-stored images for sreality_id={sid_a}; cannot compare"
         )
-    images_b = _fetch_image_keys(conn, b, n_images)
+    images_b = _fetch_image_keys(conn, sid_b, n_images)
     if not images_b:
         raise ImageCompareError(
-            f"no R2-stored images for sreality_id={b}; cannot compare"
+            f"no R2-stored images for sreality_id={sid_b}; cannot compare"
         )
 
     r2 = image_storage.R2Client.from_env()
@@ -233,8 +256,10 @@ def _produce_comparison(
 
     _cache_store(
         conn,
-        sreality_id_a=a,
-        sreality_id_b=b,
+        sreality_id_a=sid_a,
+        listing_id_a=lid_a,
+        sreality_id_b=sid_b,
+        listing_id_b=lid_b,
         comparison=comparison,
         n_images_a=len(blocks_a),
         n_images_b=len(blocks_b),
@@ -248,7 +273,7 @@ def _produce_comparison(
         response.cost_usd,
         len(blocks_a),
         len(blocks_b),
-        _max_listing_last_seen(conn, a, b),
+        _max_listing_last_seen(conn, lid_a, lid_b),
     )
 
 
@@ -307,16 +332,17 @@ def _extract_tool_call(
 
 def _cache_lookup(
     conn: "psycopg.Connection",
-    a: int,
-    b: int,
+    lid_a: int,
+    lid_b: int,
 ) -> dict[str, Any] | None:
     sql = (
         "SELECT comparison, n_images_a, n_images_b, model, cost_usd "
         "FROM listing_image_comparisons "
-        "WHERE sreality_id_a = %s AND sreality_id_b = %s"
+        "WHERE LEAST(listing_id_a, listing_id_b) = %s "
+        "  AND GREATEST(listing_id_a, listing_id_b) = %s"
     )
     with conn.cursor() as cur:
-        cur.execute(sql, (a, b))
+        cur.execute(sql, (lid_a, lid_b))
         row = cur.fetchone()
     if row is None:
         return None
@@ -333,7 +359,9 @@ def _cache_store(
     conn: "psycopg.Connection",
     *,
     sreality_id_a: int,
+    listing_id_a: int,
     sreality_id_b: int,
+    listing_id_b: int,
     comparison: dict[str, Any],
     n_images_a: int,
     n_images_b: int,
@@ -341,23 +369,21 @@ def _cache_store(
     llm_call_id: int,
     cost_usd: float,
 ) -> None:
-    # listing_id_{a,b} are stamped positionally from the legacy ids (side-coupled
-    # payloads — never re-canonicalize a/b here, see the runbook §0.5). Arbiter is
-    # the order-independent expression index (R2 Phase C,
-    # listing_image_comparisons_listing_id_pair_key): a swapped-order call still
-    # matches the existing row, and DO UPDATE SET below overwrites every column
-    # (including listing_id_a/_b) from THIS call's fresh values, so a/b never end
-    # up mismatched with their own n_images_a/n_images_b.
+    # Arbiter is the order-independent expression index
+    # (listing_image_comparisons_listing_id_pair_key): a swapped-order call still
+    # matches the existing row, and DO UPDATE SET overwrites every column —
+    # including sreality_id_a/_b — from THIS call's fresh values, so a/b never
+    # end up mismatched with their own n_images_a/n_images_b.
     sql = (
         "INSERT INTO listing_image_comparisons "
         "(sreality_id_a, listing_id_a, sreality_id_b, listing_id_b, "
         " comparison, n_images_a, n_images_b, "
         " model, llm_call_id, cost_usd) "
-        "VALUES (%s, (SELECT id FROM listings WHERE sreality_id = %s), "
-        " %s, (SELECT id FROM listings WHERE sreality_id = %s), "
-        " %s, %s, %s, %s, %s, %s) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
         "ON CONFLICT (LEAST(listing_id_a, listing_id_b), GREATEST(listing_id_a, listing_id_b)) "
         "DO UPDATE SET "
+        " sreality_id_a = EXCLUDED.sreality_id_a, "
+        " sreality_id_b = EXCLUDED.sreality_id_b, "
         " listing_id_a = EXCLUDED.listing_id_a, "
         " listing_id_b = EXCLUDED.listing_id_b, "
         " comparison = EXCLUDED.comparison, "
@@ -372,8 +398,8 @@ def _cache_store(
         cur.execute(
             sql,
             (
-                sreality_id_a, sreality_id_a,
-                sreality_id_b, sreality_id_b,
+                sreality_id_a, listing_id_a,
+                sreality_id_b, listing_id_b,
                 _Jsonb(comparison),
                 n_images_a, n_images_b, model, llm_call_id, cost_usd,
             ),
@@ -382,15 +408,15 @@ def _cache_store(
 
 def _max_listing_last_seen(
     conn: "psycopg.Connection",
-    a: int,
-    b: int,
+    lid_a: int,
+    lid_b: int,
 ) -> str | None:
     sql = (
         "SELECT MAX(last_seen_at) FROM listings "
-        "WHERE sreality_id IN (%s, %s)"
+        "WHERE id IN (%s, %s)"
     )
     with conn.cursor() as cur:
-        cur.execute(sql, (a, b))
+        cur.execute(sql, (lid_a, lid_b))
         row = cur.fetchone()
     if row is None or row[0] is None:
         return None
