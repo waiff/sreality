@@ -760,8 +760,18 @@ def _record_selection_summary(
     this step to render the top-of-page strategy panel and the
     per-iteration cohort-diff sub-panels.
     """
+    used = result.data.get("comparables_used") or []
+    # Runs AFTER the estimate is computed and paid for, and outside the per-tool
+    # try/except — so an int(None) here would throw away a finished run. A
+    # comparable with no sreality_id is simply absent from the legacy list; the
+    # surrogate list beside it is complete. Both are emitted rather than
+    # switching the existing field's id space, because the two spaces overlap
+    # numerically and readers of `final_comparable_ids` expect sreality_ids.
     final_ids = sorted(
-        int(c["sreality_id"]) for c in (result.data.get("comparables_used") or [])
+        int(c["sreality_id"]) for c in used if c.get("sreality_id") is not None
+    )
+    final_listing_ids = sorted(
+        int(c["listing_id"]) for c in used if c.get("listing_id") is not None
     )
     final_filters = state.selection_rounds[-1]["filters"] if state.selection_rounds else None
     with recorder.computation("comparable_selection_summary") as h:
@@ -770,6 +780,7 @@ def _record_selection_summary(
             "rounds": state.selection_rounds,
             "final_filters": final_filters,
             "final_comparable_ids": final_ids,
+            "final_comparable_listing_ids": final_listing_ids,
             "stop_reason": stop_reason,
         })
 
@@ -1008,22 +1019,26 @@ def _persist_cohort_entries(
 def _persist_finalisation(
     state: _LoopState,
     *,
-    included_ids: set[int],
-    excluded_by_id: dict[int, str],
-    included_reasons: dict[int, str],
+    included_listing_ids: set[int],
+    excluded_by_listing_id: dict[int, str],
+    inclusion_reasons_by_listing_id: dict[int, str],
 ) -> None:
     """Mark which cohort entries survived to the final estimate.
 
-    Flips `present_at_finalisation` on every row whose sreality_id is
-    still in state.last_cohort (whether included or excluded). Sets
-    `excluded_by_agent` + `exclusion_reason` for rows the agent set
-    aside via comparable_decisions, and stores any explicit inclusion
-    reason. Hallucinated IDs were already filtered by `_finalise`, so
-    nothing the LLM invented reaches this table.
+    Every id here is a `listings.id` SURROGATE, matching the column this table
+    is keyed on — `_finalise` translates out of the agent's sreality_id space
+    before calling. The two spaces overlap numerically, so passing the wrong one
+    silently updates the wrong rows rather than failing.
+
+    Flips `present_at_finalisation` on every row still in state.last_cohort
+    (whether included or excluded). Sets `excluded_by_agent` +
+    `exclusion_reason` for rows the agent set aside via comparable_decisions,
+    and stores any explicit inclusion reason. Hallucinated IDs were already
+    filtered by `_finalise`, so nothing the LLM invented reaches this table.
     """
     if state.estimation_run_id is None:
         return
-    all_ids = set(included_ids) | set(excluded_by_id.keys())
+    all_ids = set(included_listing_ids) | set(excluded_by_listing_id.keys())
     if not all_ids:
         return
     try:
@@ -1040,10 +1055,10 @@ def _persist_finalisation(
                 {
                     "run_id": state.estimation_run_id,
                     "present": list(all_ids),
-                    "excluded": list(excluded_by_id.keys()),
+                    "excluded": list(excluded_by_listing_id.keys()),
                 },
             )
-            for lid, reason in excluded_by_id.items():
+            for lid, reason in excluded_by_listing_id.items():
                 cur.execute(
                     "UPDATE estimation_cohort_entries SET "
                     "  exclusion_reason = %(reason)s "
@@ -1054,7 +1069,7 @@ def _persist_finalisation(
                         "reason": reason,
                     },
                 )
-            for lid, reason in included_reasons.items():
+            for lid, reason in inclusion_reasons_by_listing_id.items():
                 cur.execute(
                     "UPDATE estimation_cohort_entries SET "
                     "  inclusion_reason = %(reason)s "
@@ -1240,7 +1255,13 @@ def _handle_compare_listing_images(
 ) -> dict[str, Any]:
     a = int(args["sreality_id_a"])
     b = int(args["sreality_id_b"])
-    cohort_ids = {int(l["sreality_id"]) for l in state.last_cohort}
+    # Skip cohort rows with no sreality_id rather than raising int(None): the
+    # agent addresses this tool by sreality_id, so such a listing is simply not
+    # nameable here and belongs in `missing` if the agent guesses at it.
+    cohort_ids = {
+        int(l["sreality_id"]) for l in state.last_cohort
+        if l.get("sreality_id") is not None
+    }
     missing = [sid for sid in (a, b) if sid not in cohort_ids]
     if missing:
         raise ValueError(
@@ -1441,8 +1462,22 @@ def _finalise(
     # a reason); any sreality_id it names that isn't actually in the
     # cohort surfaces as a hallucination warning but never poisons
     # the included set.
-    cohort_by_id = {int(l["sreality_id"]): l for l in state.last_cohort}
-    cohort_ids = set(cohort_by_id.keys())
+    # TWO id spaces, deliberately kept apart. The LLM addresses comparables by
+    # sreality_id (its tool schemas' contract), so decision handling stays in
+    # that space. PERSISTENCE keys on the surrogate: estimation_cohort_entries
+    # is keyed on listing_id, and a post-Gate-2 row has no sreality_id at all —
+    # keying the cohort on it would both raise int(None) here and silently drop
+    # that row from present_at_finalisation.
+    cohort_by_lid = {int(l["listing_id"]): l for l in state.last_cohort}
+    cohort_lids = set(cohort_by_lid.keys())
+    # Translation for the LLM-facing half. A listing with no sreality_id simply
+    # cannot be named by the agent yet (widening the tool schemas is its own
+    # change) — it still participates in default-include below.
+    lid_by_sid = {
+        int(l["sreality_id"]): int(l["listing_id"])
+        for l in state.last_cohort if l.get("sreality_id") is not None
+    }
+    cohort_ids = set(lid_by_sid.keys())
 
     decisions = _normalise_decisions(call.get("comparable_decisions"))
     decisions_in_cohort = [
@@ -1484,18 +1519,29 @@ def _finalise(
         for d in decisions_in_cohort if d["decision"] == "included"
     }
 
+    # Cross into surrogate space once, here, so everything below persists on the
+    # handle estimation_cohort_entries actually keys on.
+    excluded_by_lid = {
+        lid_by_sid[sid]: reason for sid, reason in excluded_by_id.items()
+    }
+    included_reasons_by_lid = {
+        lid_by_sid[sid]: reason for sid, reason in included_reasons.items()
+    }
+
     # Default-include: every cohort listing is in `comparables_used`
     # unless the agent explicitly excluded it. This mirrors the
     # statistics — analyze_distribution already consumed the full
-    # cohort, so the recorded "used" set should match.
-    included_ids = sorted(cohort_ids - set(excluded_by_id.keys()))
+    # cohort, so the recorded "used" set should match. Computed over the
+    # SURROGATE set, so a listing the agent could not name still counts as
+    # included rather than vanishing from the record.
+    included_lids = sorted(cohort_lids - set(excluded_by_lid.keys()))
 
     comparables_used = [
         {
-            **used_entry(cohort_by_id[i]),
-            "reason": included_reasons.get(i),
+            **used_entry(cohort_by_lid[lid]),
+            "reason": included_reasons_by_lid.get(lid),
         }
-        for i in included_ids
+        for lid in included_lids
     ]
     comparables_excluded = [
         {"sreality_id": sid, "reason": reason}
@@ -1504,9 +1550,9 @@ def _finalise(
 
     _persist_finalisation(
         state,
-        included_ids=set(included_ids),
-        excluded_by_id=excluded_by_id,
-        included_reasons=included_reasons,
+        included_listing_ids=set(included_lids),
+        excluded_by_listing_id=excluded_by_lid,
+        inclusion_reasons_by_listing_id=included_reasons_by_lid,
     )
 
     yield_pct: float | None = None
