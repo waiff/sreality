@@ -258,6 +258,8 @@ for JWTs) — the allowlist records it explicitly so it stays a visible decision
 
 ## PR-F — docs + skill corrections (G8, G10, G11)
 
+**✅ SHIPPED 2026-07-21.**
+
 **Branch `docs/gate-perf-and-numbering` · docs only.**
 
 - **G8**: rewrite the `database` skill's per-row paragraph into the three cases —
