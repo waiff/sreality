@@ -679,6 +679,36 @@ def test_collection_monitor_emits_the_five_clean_kinds() -> None:
     assert "'broker_change'" not in joined          # reserved, no clean signal yet
 
 
+def test_collection_monitor_dedupe_keys_survive_a_null_sreality_id() -> None:
+    """No dedupe_key may concatenate a bare `sreality_id` (R2/Gate 2).
+
+    `dedupe_key` is NOT NULL and `||` yields NULL if ANY operand is NULL, so a
+    post-Gate-2 listing (sreality_id NULL) would make the whole key NULL and abort
+    the ENTIRE collection-monitor pass with a not-null violation — every collection
+    silently stops notifying, not just the one row. The `new_source` detector was
+    the one keyed this way; it now COALESCEs onto the surrogate. This test pins the
+    invariant for every detector so a future one can't reintroduce it."""
+    script: list[tuple[Any, list[tuple[Any, ...]], int]] = [
+        (lambda s: "FROM collections WHERE monitoring_enabled = true" in s, [(1,)], 0),
+        (lambda s: "FROM app_settings" in s, [], 0),
+        (lambda s: "INSERT INTO notification_dispatches" in s, [], 0),
+    ]
+    conn = _FakeConn(script)
+    match_monitored_collections_once(conn)  # type: ignore[arg-type]
+
+    for sql, _ in conn.executed:
+        if "INSERT INTO notification_dispatches" not in sql:
+            continue
+        # The dedupe_key expression is the tail of the SELECT list; any bare
+        # sreality_id concatenated into it is the bug.
+        assert "|| src.sreality_id::text" not in sql
+        assert "|| st.sreality_id::text" not in sql
+        assert "|| l.sreality_id::text" not in sql
+        if "new_source" in sql:
+            # Positive form: the surrogate is the NULL-safe fallback.
+            assert "coalesce(src.sreality_id::text, 'l' || src.listing_id::text)" in sql
+
+
 def test_collection_monitor_gates_every_detector_on_monitor_since() -> None:
     """Each detector fires only for changes AFTER monitoring began for the
     (collection, property) pair. The shared `monitored` CTE computes the anchor

@@ -636,7 +636,11 @@ _DISPATCH_FROM = (
     "FROM notification_dispatches d "
     "LEFT JOIN notification_subscriptions s ON s.id = d.subscription_id "
     "LEFT JOIN collections c ON c.id = d.collection_id "
-    "LEFT JOIN listings l ON l.sreality_id = d.sreality_id "
+    # Surrogate join (R2): safe for the whole append-only ledger, not just new
+    # rows — Phase A4's backfill left zero (sreality_id NOT NULL, listing_id NULL)
+    # rows, so no historical dispatch loses its listing fields here. A plain
+    # equality keeps this an index lookup; a COALESCE/OR fallback would not.
+    "LEFT JOIN listings l ON l.id = d.listing_id "
     "LEFT JOIN estimation_runs er ON er.id = d.estimation_run_id "
 )
 
@@ -1193,7 +1197,7 @@ IMAGE_GATE_ZERO_ROWS_FLOOR_MINUTES = 5
 _IMAGE_GATE_SQL = (
     "( EXISTS ("
     "    SELECT 1 FROM listings gl"
-    "    JOIN images gi ON gi.sreality_id = gl.sreality_id"
+    "    JOIN images gi ON gi.listing_id = gl.id"
     "    WHERE gl.property_id = l.property_id"
     "      AND gi.storage_path IS NOT NULL"
     "  )"
@@ -1203,7 +1207,7 @@ _IMAGE_GATE_SQL = (
     "      - make_interval(mins => %(image_zero_rows_floor_minutes)s)"
     "    AND NOT EXISTS ("
     "      SELECT 1 FROM listings gl"
-    "      JOIN images gi ON gi.sreality_id = gl.sreality_id"
+    "      JOIN images gi ON gi.listing_id = gl.id"
     "      WHERE gl.property_id = l.property_id"
     "    )"
     "  )"
@@ -1246,7 +1250,14 @@ def _insert_new_dispatches(
             "   change_kind, status, channel, trigger_price_czk, "
             "   target_channels, dedupe_key) "
             "SELECT %(subscription_id)s, 'watchdog', l.property_id, l.sreality_id, "
-            "       (SELECT il.id FROM listings il WHERE il.sreality_id = l.sreality_id), "
+            # `l` is properties_public, which exposes only the repr listing's LEGACY
+            # handle. Resolve the surrogate off the property parent instead of
+            # via listings.sreality_id, so a post-Gate-2 repr listing (sreality_id
+            # NULL) still stamps listing_id. Verified live: properties_public
+            # .sreality_id == properties.repr_listing_id and repr_listing_ref_id
+            # resolves to the same listing for all 461,163 rows, zero gaps.
+            "       (SELECT p.repr_listing_ref_id FROM properties p "
+            "         WHERE p.id = l.property_id), "
             "       'new', 'sent', 'in_app', l.price_czk, "
             "       %(target_channels)s::text[], "
             "       'wd:' || %(subscription_id)s || ':new:' || l.property_id::text "
@@ -1458,11 +1469,11 @@ def _recent_price_drops(
             "  SELECT c.property_id, s.id AS snapshot_id, s.scraped_at, s.price_czk, "
             "         lag(s.price_czk) OVER w AS prev "
             "  FROM listing_snapshots s "
-            "  JOIN listings c ON c.sreality_id = s.sreality_id "
+            "  JOIN listings c ON c.id = s.listing_id "
             "  WHERE c.property_id IS NOT NULL AND s.price_czk IS NOT NULL "
             "    AND c.property_id IN ("
             "      SELECT c2.property_id FROM listing_snapshots s2 "
-            "      JOIN listings c2 ON c2.sreality_id = s2.sreality_id "
+            "      JOIN listings c2 ON c2.id = s2.listing_id "
             "      WHERE s2.scraped_at > now() - %(win)s::interval "
             "        AND c2.property_id IS NOT NULL"
             "    ) "
@@ -1554,7 +1565,14 @@ def match_changes_once(conn: "psycopg.Connection") -> dict[str, int]:
                     "   change_kind, status, channel, target_channels, "
                     "   trigger_snapshot_id, trigger_price_czk, prev_price_czk, dedupe_key) "
                     "SELECT %(subscription_id)s, 'watchdog', l.property_id, l.sreality_id, "
-                    "       (SELECT il.id FROM listings il WHERE il.sreality_id = l.sreality_id), "
+                    # `l` is properties_public, which exposes only the repr listing's LEGACY
+            # handle. Resolve the surrogate off the property parent instead of
+            # via listings.sreality_id, so a post-Gate-2 repr listing (sreality_id
+            # NULL) still stamps listing_id. Verified live: properties_public
+            # .sreality_id == properties.repr_listing_id and repr_listing_ref_id
+            # resolves to the same listing for all 461,163 rows, zero gaps.
+            "       (SELECT p.repr_listing_ref_id FROM properties p "
+            "         WHERE p.id = l.property_id), "
                     "       'price_drop', 'sent', 'in_app', %(target_channels)s::text[], "
                     "       d.snapshot_id, d.price_czk, d.prev_price, "
                     "       'wd:' || %(subscription_id)s || ':price_drop:' || d.snapshot_id::text "
@@ -1604,13 +1622,18 @@ def _read_monitor_window_days(conn: "psycopg.Connection") -> int:
 _MONITORED_CTE = (
     "monitored AS ("
     "  SELECT cp.collection_id, p.id AS property_id, p.repr_listing_id, "
+    "         p.repr_listing_ref_id, "
     "         c.notify_channels, "
     "         greatest(cp.added_at, coalesce(c.monitoring_enabled_at, cp.added_at)) "
     "           AS monitor_since "
     "  FROM collection_properties cp "
     "  JOIN collections c ON c.id = cp.collection_id AND c.monitoring_enabled = true "
     "  JOIN properties p ON p.id = cp.property_id AND p.status = 'active' "
-    "                   AND p.repr_listing_id IS NOT NULL"
+    # Gate on the SURROGATE, not the legacy handle: post-Gate-2 a property whose
+    # repr listing is a new non-sreality row has repr_listing_id NULL but
+    # repr_listing_ref_id set — gating on the legacy column would silently drop
+    # exactly those properties out of collection monitoring.
+    "                   AND p.repr_listing_ref_id IS NOT NULL"
     ")"
 )
 
@@ -1672,7 +1695,7 @@ def match_monitored_collections_once(conn: "psycopg.Connection") -> dict[str, in
             "           ORDER BY s.scraped_at, s.id) AS prev "
             "  FROM monitored m "
             "  JOIN listings l ON l.property_id = m.property_id "
-            "  JOIN listing_snapshots s ON s.sreality_id = l.sreality_id "
+            "  JOIN listing_snapshots s ON s.listing_id = l.id "
             "  WHERE s.price_czk IS NOT NULL"
             ") "
             "INSERT INTO notification_dispatches "
@@ -1702,11 +1725,13 @@ def match_monitored_collections_once(conn: "psycopg.Connection") -> dict[str, in
             f"WITH {_MONITORED_CTE}, "
             "gone AS ("
             "  SELECT m.collection_id, m.property_id, m.repr_listing_id, "
+            "         m.repr_listing_ref_id, "
             "         m.notify_channels, max(l.inactive_at) AS inactive_at "
             "  FROM monitored m "
             "  JOIN properties p ON p.id = m.property_id AND p.is_active = false "
             "  JOIN listings l ON l.property_id = m.property_id "
-            "  GROUP BY m.collection_id, m.property_id, m.repr_listing_id, m.notify_channels, "
+            "  GROUP BY m.collection_id, m.property_id, m.repr_listing_id, "
+            "           m.repr_listing_ref_id, m.notify_channels, "
             "           m.monitor_since "
             "  HAVING max(l.inactive_at) > now() - %(win)s::interval "
             "     AND max(l.inactive_at) > m.monitor_since"
@@ -1715,7 +1740,7 @@ def match_monitored_collections_once(conn: "psycopg.Connection") -> dict[str, in
             "  (source_kind, collection_id, property_id, sreality_id, listing_id, change_kind, "
             "   status, target_channels, dedupe_key) "
             "SELECT 'collection_monitor', g.collection_id, g.property_id, g.repr_listing_id, "
-            "       (SELECT il.id FROM listings il WHERE il.sreality_id = g.repr_listing_id), "
+            "       g.repr_listing_ref_id, "
             "       'inactive', 'sent', g.notify_channels, "
             "       'cm:' || g.collection_id::text || ':inactive:' || g.property_id::text || ':' || "
             "         floor(extract(epoch FROM g.inactive_at))::bigint::text "
@@ -1735,7 +1760,8 @@ def match_monitored_collections_once(conn: "psycopg.Connection") -> dict[str, in
         cur.execute(
             f"WITH {_MONITORED_CTE}, "
             "back AS ("
-            "  SELECT m.collection_id, m.property_id, m.repr_listing_id, m.notify_channels, "
+            "  SELECT m.collection_id, m.property_id, m.repr_listing_id, "
+            "         m.repr_listing_ref_id, m.notify_channels, "
             "         nd.dispatched_at AS inactive_at "
             "  FROM monitored m "
             "  JOIN properties p ON p.id = m.property_id "
@@ -1763,7 +1789,7 @@ def match_monitored_collections_once(conn: "psycopg.Connection") -> dict[str, in
             "  (source_kind, collection_id, property_id, sreality_id, listing_id, change_kind, "
             "   status, target_channels, dedupe_key) "
             "SELECT 'collection_monitor', b.collection_id, b.property_id, b.repr_listing_id, "
-            "       (SELECT il.id FROM listings il WHERE il.sreality_id = b.repr_listing_id), "
+            "       b.repr_listing_ref_id, "
             "       'reactivated', 'sent', b.notify_channels, "
             "       'cm:' || b.collection_id::text || ':reactivated:' || b.property_id::text || ':' || "
             "         floor(extract(epoch FROM b.inactive_at))::bigint::text "
@@ -1804,7 +1830,16 @@ def match_monitored_collections_once(conn: "psycopg.Connection") -> dict[str, in
             "SELECT 'collection_monitor', src.collection_id, src.property_id, src.sreality_id, "
             "       src.listing_id, "
             "       'new_source', 'sent', src.notify_channels, "
-            "       'cm:' || src.collection_id::text || ':new_source:' || src.sreality_id::text "
+            # dedupe_key is NOT NULL, and `||` yields NULL if ANY operand is NULL:
+            # post-Gate-2 a new non-sreality listing (sreality_id NULL) would make
+            # the whole key NULL and abort the ENTIRE collection-monitor pass with a
+            # not-null violation — not just skip that row. COALESCE onto the
+            # surrogate keeps every EXISTING key byte-identical (so nothing already
+            # dispatched can re-fire) while giving NULL-sreality rows a stable,
+            # collision-free key of their own ('l' prefix disambiguates the two
+            # id-spaces).
+            "       'cm:' || src.collection_id::text || ':new_source:' || "
+            "         coalesce(src.sreality_id::text, 'l' || src.listing_id::text) "
             "FROM src_counted src "
             "WHERE src.rn = 1 AND src.n_sources >= 2 "
             "  AND src.first_seen_at > src.prop_first "
