@@ -730,13 +730,13 @@ def ingest_scraped_listing(
         _ensure_property(conn, pk, listing.source)
         if result != "unchanged" and listing.source in BROKER_ATTRIBUTED_SOURCES:
             with conn.cursor() as cur:
-                # listing_id dual-write (R2 Phase D): the upsert above ran first in
-                # this same transaction, so the JOIN always finds the row.
+                # Arbiter is listing_id (R2 Phase D, dirty_broker_listings_pkey):
+                # the upsert above ran first in this same transaction, so the JOIN
+                # always finds the row.
                 cur.execute(
                     "INSERT INTO dirty_broker_listings (sreality_id, listing_id) "
                     "SELECT %s, l.id FROM listings l WHERE l.sreality_id = %s "
-                    "ON CONFLICT (sreality_id) DO UPDATE SET "
-                    "marked_at = now(), listing_id = EXCLUDED.listing_id",
+                    "ON CONFLICT (listing_id) DO UPDATE SET marked_at = now()",
                     (pk, pk),
                 )
     return pk, result
@@ -2101,14 +2101,15 @@ def mark_properties_dedup_dirty_for_images(conn: "psycopg.Connection",
 # too. Anything missed is reconciled by the daily full sweep.
 # The JOIN onto listings is the R2 dual-write handle for listing_id, same reasoning
 # as _BATCH_IMAGES_SQL below: the batch upsert ran first in this same transaction,
-# so every sid already has its row (and surrogate id) visible here.
+# so every sid already has its row (and surrogate id) visible here. Arbiter is
+# listing_id (R2 Phase D, dirty_broker_listings_pkey) — see ingest_scraped_listing's
+# identical retarget above.
 _BATCH_DIRTY_BROKERS_FROM_SIDS_SQL = """
     INSERT INTO dirty_broker_listings (sreality_id, listing_id)
     SELECT s.sid, l.id
     FROM unnest(%s::bigint[]) AS s(sid)
     JOIN listings l ON l.sreality_id = s.sid
-    ON CONFLICT (sreality_id) DO UPDATE SET
-        marked_at = now(), listing_id = EXCLUDED.listing_id
+    ON CONFLICT (listing_id) DO UPDATE SET marked_at = now()
 """
 
 # The JOIN onto listings is the R2 dual-write handle: the batch upsert above ran
