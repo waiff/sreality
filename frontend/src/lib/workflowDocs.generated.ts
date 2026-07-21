@@ -89,6 +89,40 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/aggregate_condition_markers.yml"
   },
   {
+    "filename": "apply_dirty_broker_listings_pk_swap.yml",
+    "name": "Apply dirty_broker_listings PK swap",
+    "description": "R2 Phase D — finalizes dirty_broker_listings's PK swap (sreality_id -> listing_id), deliberately deferred from PR #853's dual-write until the writer deploy was confirmed fully live (see scripts/apply_dirty_broker_listings_pk_swap.py). Must run BEFORE the matching writer-code deploy lands (ON CONFLICT (listing_id) needs the unique index this creates).",
+    "portal": null,
+    "manual": true,
+    "schedules": [],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "dry_run",
+        "description": "Report current state and exit",
+        "required": false,
+        "type": "choice",
+        "default": "false",
+        "options": [
+          "false",
+          "true"
+        ]
+      }
+    ],
+    "secrets": [
+      "SUPABASE_DB_SESSION_URL",
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "apply-dirty-broker-listings-pk-swap",
+    "cancelInProgress": false,
+    "timeoutMinutes": 30,
+    "permissions": "contents: read",
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/apply_dirty_broker_listings_pk_swap.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/apply_dirty_broker_listings_pk_swap.yml"
+  },
+  {
     "filename": "apply_r2_constraints.yml",
     "name": "Apply R2 constraints (indexes + FKs)",
     "description": "Phase B of the listing-identity refactor (docs/design/listing-identity-r2-pk-swap-runbook.md § 3). Indexes each surrogate column the backfill filled, then mirrors the legacy FK onto it (NOT VALID -> VALIDATE) wherever the legacy column had one.",
