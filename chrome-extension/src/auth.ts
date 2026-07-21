@@ -15,6 +15,10 @@ function normalizeBaseUrl(raw: string): string {
 
 const SUPABASE_URL = normalizeBaseUrl(import.meta.env.VITE_SUPABASE_URL ?? '');
 const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY ?? '';
+/* Every GoTrue REST endpoint lives under /auth/v1 — Supabase's Kong gateway
+ * 404s ("requested path is invalid") on anything hit at the bare project
+ * root, so this prefix is load-bearing, not cosmetic. */
+const AUTH_BASE = SUPABASE_URL + '/auth/v1';
 
 if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
   console.warn(
@@ -115,7 +119,7 @@ async function gotrueFetch(path: string, init: RequestInit & { accessToken?: str
   };
   let res: Response;
   try {
-    res = await fetch(SUPABASE_URL + path, { ...rest, headers });
+    res = await fetch(AUTH_BASE + path, { ...rest, headers });
   } catch {
     return { ok: false, status: 0, body: null };
   }
@@ -164,7 +168,7 @@ export async function signInWithGoogle(): Promise<{ ok: true } | { ok: false; de
   const challenge = await challengeFor(verifier);
   const redirectUri = chrome.identity.getRedirectURL();
 
-  const authUrl = `${SUPABASE_URL}/auth/v1/authorize?${new URLSearchParams({
+  const authUrl = `${AUTH_BASE}/authorize?${new URLSearchParams({
     provider: 'google',
     code_challenge: challenge,
     code_challenge_method: 's256',
