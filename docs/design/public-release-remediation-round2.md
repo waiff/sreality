@@ -1,6 +1,7 @@
 # Public-release remediation, round 2 — fixes for the #856 exit-gate audit
 
-**Date:** 2026-07-21. **Status: in execution — PR-A shipped (migration 340). B-G pending.**
+**Date:** 2026-07-21. **Status: COMPLETE — all 7 PRs (A–G) shipped, migrations 340/341/342.**
+This closes the Phase 1 exit gate; Wave 1 is unblocked.
 
 The `/code-review ultra` audit of PR #856 (the migrations 329–332 batch, live in
 production) returned 13 findings. Before planning, every finding was re-verified by a
