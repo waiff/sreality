@@ -87,7 +87,9 @@ def compare_listings_visually(
     llm_client: "LLMClient",
     *,
     sreality_id_a: int,
+    listing_id_a: int,
     sreality_id_b: int,
+    listing_id_b: int,
     room_type: str,
     image_ids_a: list[int],
     image_ids_b: list[int],
@@ -102,37 +104,42 @@ def compare_listings_visually(
     High|Medium|Low. `model` overrides the default (the dedup cosine tier routes
     high-confidence rooms to Haiku, uncertain ones to Sonnet); the cache key
     includes the model, so the two verdicts cache independently.
+
+    Canonical pair order is by listing_id (LEAST/GREATEST — the surrogate PK),
+    not sreality_id. sreality_id and the image id list ride along side-coupled
+    with whichever listing_id they belong to, so a reordered pair never leaves
+    a side's images matched to the other side's persisted columns.
     """
     from toolkit import _now_iso
 
-    if sreality_id_a == sreality_id_b:
+    if listing_id_a == listing_id_b:
         raise VisualMatchError("cannot compare a listing to itself")
-    a, b = sorted((sreality_id_a, sreality_id_b))
+    if listing_id_a < listing_id_b:
+        sid_a, lid_a, ids_a = sreality_id_a, listing_id_a, image_ids_a
+        sid_b, lid_b, ids_b = sreality_id_b, listing_id_b, image_ids_b
+    else:
+        sid_a, lid_a, ids_a = sreality_id_b, listing_id_b, image_ids_b
+        sid_b, lid_b, ids_b = sreality_id_a, listing_id_a, image_ids_a
     model = model or llm_client.resolve_model(_MODEL_KEY)
 
     if not force_refresh:
-        cached = _cache_lookup(conn, a, b, room_type, model)
+        cached = _cache_lookup(conn, lid_a, lid_b, room_type, model)
         if cached is not None:
-            return _envelope(cached, a, b, room_type, model, cache_hit=True, queried_at=_now_iso())
+            return _envelope(cached, sid_a, sid_b, room_type, model, cache_hit=True, queried_at=_now_iso())
 
     verdict, rationale, cost_usd, llm_call_id = _produce(
-        conn, llm_client, a, b, room_type,
-        image_ids_a if a == sreality_id_a else image_ids_b,
-        image_ids_b if a == sreality_id_a else image_ids_a,
-        model,
+        conn, llm_client, room_type, ids_a, ids_b, model,
     )
-    _cache_store(conn, a, b, room_type, verdict, rationale, model, llm_call_id, cost_usd)
+    _cache_store(conn, sid_a, lid_a, sid_b, lid_b, room_type, verdict, rationale, model, llm_call_id, cost_usd)
     return _envelope(
         {"verdict": verdict, "rationale": rationale, "cost_usd": cost_usd},
-        a, b, room_type, model, cache_hit=False, queried_at=_now_iso(),
+        sid_a, sid_b, room_type, model, cache_hit=False, queried_at=_now_iso(),
     )
 
 
 def _produce(
     conn: "psycopg.Connection",
     llm_client: "LLMClient",
-    a: int,
-    b: int,
     room_type: str,
     keys_a_ids: list[int],
     keys_b_ids: list[int],
@@ -191,21 +198,24 @@ def build_compare_request(
     llm_client: "LLMClient",
     *,
     sreality_id_a: int,
+    listing_id_a: int,
     sreality_id_b: int,
+    listing_id_b: int,
     room_type: str,
     image_ids_a: list[int],
     image_ids_b: list[int],
 ) -> dict[str, Any]:
     """Build one room-pair forensic request for the async batch lane.
 
-    Canonicalises the pair (sorted ids) so the request matches the cache key the
-    ingester writes. Returns {system, messages, tools, model}."""
-    if sreality_id_a == sreality_id_b:
+    Canonicalises the pair by listing_id so the request's image sides match the
+    cache key the ingester writes. Returns {system, messages, tools, model}."""
+    if listing_id_a == listing_id_b:
         raise VisualMatchError("cannot compare a listing to itself")
-    a, b = sorted((sreality_id_a, sreality_id_b))
+    keys_a_ids, keys_b_ids = (
+        (image_ids_a, image_ids_b) if listing_id_a < listing_id_b
+        else (image_ids_b, image_ids_a)
+    )
     model = llm_client.resolve_model(_MODEL_KEY)
-    keys_a_ids = image_ids_a if a == sreality_id_a else image_ids_b
-    keys_b_ids = image_ids_b if a == sreality_id_a else image_ids_a
     content = _build_compare_content(conn, room_type, keys_a_ids, keys_b_ids)
     system = llm_client.resolve_system_prompt(_PROMPT_KEY)
     return {
@@ -219,14 +229,14 @@ def build_compare_request(
 def cached_visual_verdict(
     conn: "psycopg.Connection",
     *,
-    sreality_id_a: int,
-    sreality_id_b: int,
+    listing_id_a: int,
+    listing_id_b: int,
     room_type: str,
     model: str,
 ) -> str | None:
     """Cache-only verdict read for the batch lane (skip already-warm room pairs)."""
-    a, b = sorted((sreality_id_a, sreality_id_b))
-    row = _cache_lookup(conn, a, b, room_type, model)
+    lid_a, lid_b = sorted((listing_id_a, listing_id_b))
+    row = _cache_lookup(conn, lid_a, lid_b, room_type, model)
     return row["verdict"] if row else None
 
 
@@ -234,7 +244,9 @@ def persist_visual_match(
     conn: "psycopg.Connection",
     *,
     sreality_id_a: int,
+    listing_id_a: int,
     sreality_id_b: int,
+    listing_id_b: int,
     room_type: str,
     tool_calls: list[dict[str, Any]],
     model: str,
@@ -243,9 +255,12 @@ def persist_visual_match(
 ) -> None:
     """Write a batched record_visual_match result to the cache (same row the sync
     tool writes), keyed on the canonical pair + room + model."""
-    a, b = sorted((sreality_id_a, sreality_id_b))
+    if listing_id_a < listing_id_b:
+        sid_a, lid_a, sid_b, lid_b = sreality_id_a, listing_id_a, sreality_id_b, listing_id_b
+    else:
+        sid_a, lid_a, sid_b, lid_b = sreality_id_b, listing_id_b, sreality_id_a, listing_id_a
     verdict, rationale = _extract(tool_calls)
-    _cache_store(conn, a, b, room_type, verdict, rationale, model, llm_call_id, cost_usd)
+    _cache_store(conn, sid_a, lid_a, sid_b, lid_b, room_type, verdict, rationale, model, llm_call_id, cost_usd)
 
 
 def _storage_paths(conn: "psycopg.Connection", image_ids: list[int]) -> list[str]:
@@ -293,14 +308,15 @@ def _extract(tool_calls: list[dict[str, Any]]) -> tuple[str, str]:
 
 
 def _cache_lookup(
-    conn: "psycopg.Connection", a: int, b: int, room_type: str, model: str,
+    conn: "psycopg.Connection", lid_a: int, lid_b: int, room_type: str, model: str,
 ) -> dict[str, Any] | None:
     with conn.cursor() as cur:
         cur.execute(
             "SELECT verdict, rationale, cost_usd FROM listing_visual_matches "
-            "WHERE sreality_id_a = %s AND sreality_id_b = %s "
-            "AND room_type = %s AND model = %s",
-            (a, b, room_type, model),
+            "WHERE LEAST(listing_id_a, listing_id_b) = %s "
+            "  AND GREATEST(listing_id_a, listing_id_b) = %s "
+            "  AND room_type = %s AND model = %s",
+            (lid_a, lid_b, room_type, model),
         )
         row = cur.fetchone()
     if row is None:
@@ -310,27 +326,28 @@ def _cache_lookup(
 
 def _cache_store(
     conn: "psycopg.Connection",
-    a: int, b: int, room_type: str, verdict: str, rationale: str,
+    sid_a: int, lid_a: int, sid_b: int, lid_b: int,
+    room_type: str, verdict: str, rationale: str,
     model: str, llm_call_id: int, cost_usd: float,
 ) -> None:
     with conn.transaction(), conn.cursor() as cur:
-        # listing_id_{a,b} mirror the sreality_id side-for-side during the surrogate-key
-        # dual-write (never re-canonicalize a/b — runbook §0.5). Arbiter is the
-        # order-independent expression index (R2 Phase C,
-        # listing_visual_matches_listing_id_pair_key).
+        # Arbiter is the order-independent expression index (R2 Phase C,
+        # listing_visual_matches_listing_id_pair_key): a swapped-order call still
+        # matches the existing row, and DO UPDATE SET overwrites every column —
+        # including sreality_id_a/_b — from THIS call's fresh values.
         cur.execute(
             "INSERT INTO listing_visual_matches "
             "(sreality_id_a, listing_id_a, sreality_id_b, listing_id_b, room_type, verdict, rationale, "
             " model, llm_call_id, cost_usd) "
-            "VALUES (%s, (SELECT id FROM listings WHERE sreality_id = %s), "
-            "%s, (SELECT id FROM listings WHERE sreality_id = %s), %s, %s, %s, %s, %s, %s) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
             "ON CONFLICT (LEAST(listing_id_a, listing_id_b), GREATEST(listing_id_a, listing_id_b), "
             "room_type, model) DO UPDATE SET "
+            "  sreality_id_a = EXCLUDED.sreality_id_a, sreality_id_b = EXCLUDED.sreality_id_b, "
             "  listing_id_a = EXCLUDED.listing_id_a, listing_id_b = EXCLUDED.listing_id_b, "
             "  verdict = EXCLUDED.verdict, rationale = EXCLUDED.rationale, "
             "  llm_call_id = EXCLUDED.llm_call_id, cost_usd = EXCLUDED.cost_usd, "
             "  created_at = now()",
-            (a, a, b, b, room_type, verdict, rationale, model, llm_call_id, cost_usd),
+            (sid_a, lid_a, sid_b, lid_b, room_type, verdict, rationale, model, llm_call_id, cost_usd),
         )
 
 
@@ -395,7 +412,9 @@ def compare_listing_site_plans(
     llm_client: "LLMClient",
     *,
     sreality_id_a: int,
+    listing_id_a: int,
     sreality_id_b: int,
+    listing_id_b: int,
     image_ids_a: list[int],
     image_ids_b: list[int],
     force_refresh: bool = False,
@@ -408,37 +427,40 @@ def compare_listing_site_plans(
     site-plan pair never auto-merges on its own. Write-allowed toolkit exception
     (rule #5); cache in listing_site_plan_matches. `model` lets a caller override the
     flat app_settings default (e.g. a per-family route) — omit to use it as-is.
+
+    Canonical pair order is by listing_id, sreality_id/image ids ride side-coupled
+    (see compare_listings_visually).
     """
     from toolkit import _now_iso
 
-    if sreality_id_a == sreality_id_b:
+    if listing_id_a == listing_id_b:
         raise VisualMatchError("cannot compare a listing to itself")
-    a, b = sorted((sreality_id_a, sreality_id_b))
+    if listing_id_a < listing_id_b:
+        sid_a, lid_a, ids_a = sreality_id_a, listing_id_a, image_ids_a
+        sid_b, lid_b, ids_b = sreality_id_b, listing_id_b, image_ids_b
+    else:
+        sid_a, lid_a, ids_a = sreality_id_b, listing_id_b, image_ids_b
+        sid_b, lid_b, ids_b = sreality_id_a, listing_id_a, image_ids_a
     model = model or llm_client.resolve_model(_SITE_PLAN_MODEL_KEY)
 
     if not force_refresh:
-        cached = _site_plan_cache_lookup(conn, a, b, model)
+        cached = _site_plan_cache_lookup(conn, lid_a, lid_b, model)
         if cached is not None:
-            return _site_plan_envelope(cached, a, b, model, cache_hit=True, queried_at=_now_iso())
+            return _site_plan_envelope(cached, sid_a, sid_b, model, cache_hit=True, queried_at=_now_iso())
 
     verdict, rationale, cost_usd, llm_call_id = _produce_site_plan(
-        conn, llm_client, a, b,
-        image_ids_a if a == sreality_id_a else image_ids_b,
-        image_ids_b if a == sreality_id_a else image_ids_a,
-        model,
+        conn, llm_client, ids_a, ids_b, model,
     )
-    _site_plan_cache_store(conn, a, b, verdict, rationale, model, llm_call_id, cost_usd)
+    _site_plan_cache_store(conn, sid_a, lid_a, sid_b, lid_b, verdict, rationale, model, llm_call_id, cost_usd)
     return _site_plan_envelope(
         {"verdict": verdict, "rationale": rationale, "cost_usd": cost_usd},
-        a, b, model, cache_hit=False, queried_at=_now_iso(),
+        sid_a, sid_b, model, cache_hit=False, queried_at=_now_iso(),
     )
 
 
 def _produce_site_plan(
     conn: "psycopg.Connection",
     llm_client: "LLMClient",
-    a: int,
-    b: int,
     keys_a_ids: list[int],
     keys_b_ids: list[int],
     model: str,
@@ -493,19 +515,22 @@ def build_site_plan_request(
     llm_client: "LLMClient",
     *,
     sreality_id_a: int,
+    listing_id_a: int,
     sreality_id_b: int,
+    listing_id_b: int,
     image_ids_a: list[int],
     image_ids_b: list[int],
     model: str | None = None,
 ) -> dict[str, Any]:
     """Build one development-guard (site-plan) request for the async batch lane.
     `model` lets a caller override the flat app_settings default (e.g. a per-family route)."""
-    if sreality_id_a == sreality_id_b:
+    if listing_id_a == listing_id_b:
         raise VisualMatchError("cannot compare a listing to itself")
-    a, b = sorted((sreality_id_a, sreality_id_b))
+    keys_a_ids, keys_b_ids = (
+        (image_ids_a, image_ids_b) if listing_id_a < listing_id_b
+        else (image_ids_b, image_ids_a)
+    )
     model = model or llm_client.resolve_model(_SITE_PLAN_MODEL_KEY)
-    keys_a_ids = image_ids_a if a == sreality_id_a else image_ids_b
-    keys_b_ids = image_ids_b if a == sreality_id_a else image_ids_a
     content = _build_site_plan_content(conn, keys_a_ids, keys_b_ids)
     system = llm_client.resolve_system_prompt(_SITE_PLAN_PROMPT_KEY)
     return {
@@ -519,13 +544,13 @@ def build_site_plan_request(
 def cached_site_plan_verdict(
     conn: "psycopg.Connection",
     *,
-    sreality_id_a: int,
-    sreality_id_b: int,
+    listing_id_a: int,
+    listing_id_b: int,
     model: str,
 ) -> str | None:
     """Cache-only site-plan verdict read for the batch lane."""
-    a, b = sorted((sreality_id_a, sreality_id_b))
-    row = _site_plan_cache_lookup(conn, a, b, model)
+    lid_a, lid_b = sorted((listing_id_a, listing_id_b))
+    row = _site_plan_cache_lookup(conn, lid_a, lid_b, model)
     return row["verdict"] if row else None
 
 
@@ -533,7 +558,9 @@ def persist_site_plan_match(
     conn: "psycopg.Connection",
     *,
     sreality_id_a: int,
+    listing_id_a: int,
     sreality_id_b: int,
+    listing_id_b: int,
     tool_calls: list[dict[str, Any]],
     model: str,
     llm_call_id: int,
@@ -541,9 +568,12 @@ def persist_site_plan_match(
 ) -> None:
     """Write a batched record_site_plan_match result to the cache (same row the
     sync tool writes), keyed on the canonical pair + model."""
-    a, b = sorted((sreality_id_a, sreality_id_b))
+    if listing_id_a < listing_id_b:
+        sid_a, lid_a, sid_b, lid_b = sreality_id_a, listing_id_a, sreality_id_b, listing_id_b
+    else:
+        sid_a, lid_a, sid_b, lid_b = sreality_id_b, listing_id_b, sreality_id_a, listing_id_a
     verdict, rationale = _extract_site_plan(tool_calls)
-    _site_plan_cache_store(conn, a, b, verdict, rationale, model, llm_call_id, cost_usd)
+    _site_plan_cache_store(conn, sid_a, lid_a, sid_b, lid_b, verdict, rationale, model, llm_call_id, cost_usd)
 
 
 def _extract_site_plan(tool_calls: list[dict[str, Any]]) -> tuple[str, str]:
@@ -559,13 +589,14 @@ def _extract_site_plan(tool_calls: list[dict[str, Any]]) -> tuple[str, str]:
 
 
 def _site_plan_cache_lookup(
-    conn: "psycopg.Connection", a: int, b: int, model: str,
+    conn: "psycopg.Connection", lid_a: int, lid_b: int, model: str,
 ) -> dict[str, Any] | None:
     with conn.cursor() as cur:
         cur.execute(
             "SELECT verdict, rationale, cost_usd FROM listing_site_plan_matches "
-            "WHERE sreality_id_a = %s AND sreality_id_b = %s AND model = %s",
-            (a, b, model),
+            "WHERE LEAST(listing_id_a, listing_id_b) = %s "
+            "  AND GREATEST(listing_id_a, listing_id_b) = %s AND model = %s",
+            (lid_a, lid_b, model),
         )
         row = cur.fetchone()
     if row is None:
@@ -575,26 +606,26 @@ def _site_plan_cache_lookup(
 
 def _site_plan_cache_store(
     conn: "psycopg.Connection",
-    a: int, b: int, verdict: str, rationale: str,
+    sid_a: int, lid_a: int, sid_b: int, lid_b: int, verdict: str, rationale: str,
     model: str, llm_call_id: int, cost_usd: float,
 ) -> None:
     with conn.transaction(), conn.cursor() as cur:
-        # listing_id_{a,b} mirror the sreality_id side-for-side (never re-canonicalize
-        # a/b — runbook §0.5). Arbiter is the order-independent expression index
-        # (R2 Phase C, listing_site_plan_matches_listing_id_pair_key).
+        # Arbiter is the order-independent expression index (R2 Phase C,
+        # listing_site_plan_matches_listing_id_pair_key); DO UPDATE SET overwrites
+        # every column — including sreality_id_a/_b — from THIS call's values.
         cur.execute(
             "INSERT INTO listing_site_plan_matches "
             "(sreality_id_a, listing_id_a, sreality_id_b, listing_id_b, verdict, rationale, "
             " model, llm_call_id, cost_usd) "
-            "VALUES (%s, (SELECT id FROM listings WHERE sreality_id = %s), "
-            "%s, (SELECT id FROM listings WHERE sreality_id = %s), %s, %s, %s, %s, %s) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) "
             "ON CONFLICT (LEAST(listing_id_a, listing_id_b), GREATEST(listing_id_a, listing_id_b), "
             "model) DO UPDATE SET "
+            "  sreality_id_a = EXCLUDED.sreality_id_a, sreality_id_b = EXCLUDED.sreality_id_b, "
             "  listing_id_a = EXCLUDED.listing_id_a, listing_id_b = EXCLUDED.listing_id_b, "
             "  verdict = EXCLUDED.verdict, rationale = EXCLUDED.rationale, "
             "  llm_call_id = EXCLUDED.llm_call_id, cost_usd = EXCLUDED.cost_usd, "
             "  created_at = now()",
-            (a, a, b, b, verdict, rationale, model, llm_call_id, cost_usd),
+            (sid_a, lid_a, sid_b, lid_b, verdict, rationale, model, llm_call_id, cost_usd),
         )
 
 
@@ -680,7 +711,9 @@ def compare_listing_floor_plans(
     llm_client: "LLMClient",
     *,
     sreality_id_a: int,
+    listing_id_a: int,
     sreality_id_b: int,
+    listing_id_b: int,
     image_ids_a: list[int],
     image_ids_b: list[int],
     force_refresh: bool = False,
@@ -691,37 +724,40 @@ def compare_listing_floor_plans(
     uses different_layout to DISMISS a merge it would otherwise make; same_layout /
     inconclusive let it proceed. Write-allowed toolkit exception (rule #5); cache in
     listing_floor_plan_matches.
+
+    Canonical pair order is by listing_id, sreality_id/image ids ride side-coupled
+    (see compare_listings_visually).
     """
     from toolkit import _now_iso
 
-    if sreality_id_a == sreality_id_b:
+    if listing_id_a == listing_id_b:
         raise VisualMatchError("cannot compare a listing to itself")
-    a, b = sorted((sreality_id_a, sreality_id_b))
+    if listing_id_a < listing_id_b:
+        sid_a, lid_a, ids_a = sreality_id_a, listing_id_a, image_ids_a
+        sid_b, lid_b, ids_b = sreality_id_b, listing_id_b, image_ids_b
+    else:
+        sid_a, lid_a, ids_a = sreality_id_b, listing_id_b, image_ids_b
+        sid_b, lid_b, ids_b = sreality_id_a, listing_id_a, image_ids_a
     model = llm_client.resolve_model(_FLOOR_PLAN_MODEL_KEY)
 
     if not force_refresh:
-        cached = _floor_plan_cache_lookup(conn, a, b, model)
+        cached = _floor_plan_cache_lookup(conn, lid_a, lid_b, model)
         if cached is not None:
-            return _floor_plan_envelope(cached, a, b, model, cache_hit=True, queried_at=_now_iso())
+            return _floor_plan_envelope(cached, sid_a, sid_b, model, cache_hit=True, queried_at=_now_iso())
 
     verdict, rationale, extracted, cost_usd, llm_call_id = _produce_floor_plan(
-        conn, llm_client, a, b,
-        image_ids_a if a == sreality_id_a else image_ids_b,
-        image_ids_b if a == sreality_id_a else image_ids_a,
-        model,
+        conn, llm_client, ids_a, ids_b, model,
     )
-    _floor_plan_cache_store(conn, a, b, verdict, rationale, extracted, model, llm_call_id, cost_usd)
+    _floor_plan_cache_store(conn, sid_a, lid_a, sid_b, lid_b, verdict, rationale, extracted, model, llm_call_id, cost_usd)
     return _floor_plan_envelope(
         {"verdict": verdict, "rationale": rationale, "extracted": extracted, "cost_usd": cost_usd},
-        a, b, model, cache_hit=False, queried_at=_now_iso(),
+        sid_a, sid_b, model, cache_hit=False, queried_at=_now_iso(),
     )
 
 
 def _produce_floor_plan(
     conn: "psycopg.Connection",
     llm_client: "LLMClient",
-    a: int,
-    b: int,
     keys_a_ids: list[int],
     keys_b_ids: list[int],
     model: str,
@@ -774,17 +810,20 @@ def build_floor_plan_request(
     llm_client: "LLMClient",
     *,
     sreality_id_a: int,
+    listing_id_a: int,
     sreality_id_b: int,
+    listing_id_b: int,
     image_ids_a: list[int],
     image_ids_b: list[int],
 ) -> dict[str, Any]:
     """Build one floor-plan-guard request for the async batch lane."""
-    if sreality_id_a == sreality_id_b:
+    if listing_id_a == listing_id_b:
         raise VisualMatchError("cannot compare a listing to itself")
-    a, b = sorted((sreality_id_a, sreality_id_b))
+    keys_a_ids, keys_b_ids = (
+        (image_ids_a, image_ids_b) if listing_id_a < listing_id_b
+        else (image_ids_b, image_ids_a)
+    )
     model = llm_client.resolve_model(_FLOOR_PLAN_MODEL_KEY)
-    keys_a_ids = image_ids_a if a == sreality_id_a else image_ids_b
-    keys_b_ids = image_ids_b if a == sreality_id_a else image_ids_a
     content = _build_floor_plan_content(conn, keys_a_ids, keys_b_ids)
     system = llm_client.resolve_system_prompt(_FLOOR_PLAN_PROMPT_KEY)
     return {
@@ -798,13 +837,13 @@ def build_floor_plan_request(
 def cached_floor_plan_verdict(
     conn: "psycopg.Connection",
     *,
-    sreality_id_a: int,
-    sreality_id_b: int,
+    listing_id_a: int,
+    listing_id_b: int,
     model: str,
 ) -> str | None:
     """Cache-only floor-plan verdict read for the batch lane / engine consume path."""
-    a, b = sorted((sreality_id_a, sreality_id_b))
-    row = _floor_plan_cache_lookup(conn, a, b, model)
+    lid_a, lid_b = sorted((listing_id_a, listing_id_b))
+    row = _floor_plan_cache_lookup(conn, lid_a, lid_b, model)
     return row["verdict"] if row else None
 
 
@@ -812,7 +851,9 @@ def persist_floor_plan_match(
     conn: "psycopg.Connection",
     *,
     sreality_id_a: int,
+    listing_id_a: int,
     sreality_id_b: int,
+    listing_id_b: int,
     tool_calls: list[dict[str, Any]],
     model: str,
     llm_call_id: int,
@@ -820,9 +861,12 @@ def persist_floor_plan_match(
 ) -> None:
     """Write a batched record_floor_plan_match result to the cache (same row the sync
     tool writes), keyed on the canonical pair + model."""
-    a, b = sorted((sreality_id_a, sreality_id_b))
+    if listing_id_a < listing_id_b:
+        sid_a, lid_a, sid_b, lid_b = sreality_id_a, listing_id_a, sreality_id_b, listing_id_b
+    else:
+        sid_a, lid_a, sid_b, lid_b = sreality_id_b, listing_id_b, sreality_id_a, listing_id_a
     verdict, rationale, extracted = _extract_floor_plan(tool_calls)
-    _floor_plan_cache_store(conn, a, b, verdict, rationale, extracted, model, llm_call_id, cost_usd)
+    _floor_plan_cache_store(conn, sid_a, lid_a, sid_b, lid_b, verdict, rationale, extracted, model, llm_call_id, cost_usd)
 
 
 def _extract_floor_plan(
@@ -844,13 +888,14 @@ def _extract_floor_plan(
 
 
 def _floor_plan_cache_lookup(
-    conn: "psycopg.Connection", a: int, b: int, model: str,
+    conn: "psycopg.Connection", lid_a: int, lid_b: int, model: str,
 ) -> dict[str, Any] | None:
     with conn.cursor() as cur:
         cur.execute(
             "SELECT verdict, rationale, extracted, cost_usd FROM listing_floor_plan_matches "
-            "WHERE sreality_id_a = %s AND sreality_id_b = %s AND model = %s",
-            (a, b, model),
+            "WHERE LEAST(listing_id_a, listing_id_b) = %s "
+            "  AND GREATEST(listing_id_a, listing_id_b) = %s AND model = %s",
+            (lid_a, lid_b, model),
         )
         row = cur.fetchone()
     if row is None:
@@ -863,26 +908,27 @@ def _floor_plan_cache_lookup(
 
 def _floor_plan_cache_store(
     conn: "psycopg.Connection",
-    a: int, b: int, verdict: str, rationale: str, extracted: dict[str, Any] | None,
+    sid_a: int, lid_a: int, sid_b: int, lid_b: int,
+    verdict: str, rationale: str, extracted: dict[str, Any] | None,
     model: str, llm_call_id: int, cost_usd: float,
 ) -> None:
     with conn.transaction(), conn.cursor() as cur:
-        # listing_id_{a,b} mirror the sreality_id side-for-side (never re-canonicalize
-        # a/b — runbook §0.5). Arbiter is the order-independent expression index
-        # (R2 Phase C, listing_floor_plan_matches_listing_id_pair_key).
+        # Arbiter is the order-independent expression index (R2 Phase C,
+        # listing_floor_plan_matches_listing_id_pair_key); DO UPDATE SET overwrites
+        # every column — including sreality_id_a/_b — from THIS call's values.
         cur.execute(
             "INSERT INTO listing_floor_plan_matches "
             "(sreality_id_a, listing_id_a, sreality_id_b, listing_id_b, verdict, rationale, extracted, "
             " model, llm_call_id, cost_usd) "
-            "VALUES (%s, (SELECT id FROM listings WHERE sreality_id = %s), "
-            "%s, (SELECT id FROM listings WHERE sreality_id = %s), %s, %s, %s::jsonb, %s, %s, %s) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s) "
             "ON CONFLICT (LEAST(listing_id_a, listing_id_b), GREATEST(listing_id_a, listing_id_b), "
             "model) DO UPDATE SET "
+            "  sreality_id_a = EXCLUDED.sreality_id_a, sreality_id_b = EXCLUDED.sreality_id_b, "
             "  listing_id_a = EXCLUDED.listing_id_a, listing_id_b = EXCLUDED.listing_id_b, "
             "  verdict = EXCLUDED.verdict, rationale = EXCLUDED.rationale, "
             "  extracted = EXCLUDED.extracted, llm_call_id = EXCLUDED.llm_call_id, "
             "  cost_usd = EXCLUDED.cost_usd, created_at = now()",
-            (a, a, b, b, verdict, rationale,
+            (sid_a, lid_a, sid_b, lid_b, verdict, rationale,
              json.dumps(extracted) if extracted is not None else None,
              model, llm_call_id, cost_usd),
         )

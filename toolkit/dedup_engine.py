@@ -300,6 +300,9 @@ class ListingKey:
     # treadmill); a mixed pair is exactly the cross-pass blindness the geo pass now
     # covers. Street-pass loads leave the default (they never read it).
     street_eligible: bool = False
+    # The surrogate PK (listings.id) — the identity every downstream toolkit
+    # call (pair caches, batch spool) canonicalizes on now, not sreality_id.
+    listing_id: int | None = None
 
 
 # Unit markers in the description that identify a SPECIFIC unit within one

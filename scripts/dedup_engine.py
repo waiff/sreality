@@ -133,7 +133,7 @@ _ELIGIBLE_COLS = """
       l.sreality_id, l.property_id, l.source,
       l.street, l.street_id, l.disposition, l.house_number, l.floor, l.area_m2,
       left(l.description, 600) AS description,
-      l.category_type, l.category_main, l.obec_id, l.price_czk"""
+      l.category_type, l.category_main, l.obec_id, l.price_czk, l.id"""
 _ELIGIBILITY = "l.street IS NOT NULL AND l.street <> '' AND l.disposition IS NOT NULL"
 _ELIGIBLE_ORDER = (
     "ORDER BY l.obec_id NULLS LAST, l.street_id NULLS LAST, lower(l.street), l.disposition"
@@ -241,6 +241,7 @@ def _load_eligible(
                 category_main=r[11],
                 street_id=street_id,
                 price_czk=int(r[13]) if r[13] is not None else None,
+                listing_id=int(r[14]),
             ))
     return keys
 
@@ -959,7 +960,7 @@ def _cell_eligible_sql(predicate: str) -> str:
            ST_Y(l.geom::geometry) AS lat, ST_X(l.geom::geometry) AS lng,
            l.geo_cell_key,
            ({_ELIGIBILITY}) AS street_eligible,
-           l.disposition, l.floor
+           l.disposition, l.floor, l.id
     FROM listings l
     JOIN properties p ON p.id = l.property_id AND p.status = 'active'
     WHERE {predicate}
@@ -1031,6 +1032,7 @@ def _load_geo_eligible(conn: Any,
             lng=float(r[10]) if r[10] is not None else None,
             price_czk=int(r[8]) if r[8] is not None else None,
             street_eligible=bool(r[12]),
+            listing_id=int(r[15]),
         ))
     return keys
 
@@ -1261,7 +1263,7 @@ def _trigger_clip_tagging(conn: Any, sreality_ids: list[int], model: str) -> Non
 
 
 def _floor_plan_gate(
-    conn: Any, a_id: int, b_id: int, *, floor_plan_fn: Any, vision_budget: list[int],
+    conn: Any, a: ListingKey, b: ListingKey, *, floor_plan_fn: Any, vision_budget: list[int],
     inconclusive_to_review: bool = True, cache: "_ProbeCache | None" = None,
 ) -> str:
     """The floor-plan validation on a pair the engine WOULD merge (pHash or visual).
@@ -1285,12 +1287,12 @@ def _floor_plan_gate(
       * exactly ONE side / neither side has a plan-tagged image -> 'merge' (no plan-to-plan
         compare is possible, so the gate learned nothing — the primary signal stands).
     """
-    ids_a = _floor_plan_ids_cached(conn, a_id, cache)
-    ids_b = _floor_plan_ids_cached(conn, b_id, cache)
+    ids_a = _floor_plan_ids_cached(conn, a.sreality_id, cache)
+    ids_b = _floor_plan_ids_cached(conn, b.sreality_id, cache)
     if ids_a and ids_b:
         if floor_plan_fn is None or vision_budget[0] <= 0:
             return "defer"
-        res = floor_plan_fn(a_id, b_id, ids_a, ids_b)
+        res = floor_plan_fn(a, b, ids_a, ids_b)
         if res is None:
             return "defer"
         if not res.get("cache_hit"):
@@ -1407,7 +1409,7 @@ def _resolve_visual(
     site_a = [i["image_id"] for i in imgs_a if i["room_type"] == SITE_PLAN_ROOM_TYPE]
     site_b = [i["image_id"] for i in imgs_b if i["room_type"] == SITE_PLAN_ROOM_TYPE]
     if site_a and site_b and site_plan_fn is not None and vision_budget[0] > 0:
-        sp = site_plan_fn(a.sreality_id, b.sreality_id, site_a, site_b, a.category_main)
+        sp = site_plan_fn(a, b, site_a, site_b, a.category_main)
         if sp is not None and sp.get("deferred"):
             return {"action": "defer", "reason": "batch_pending"}
         if sp is not None and not sp.get("cache_hit"):
@@ -1471,7 +1473,7 @@ def _resolve_visual(
                 stats[f"routed_{decision}"] = stats.get(f"routed_{decision}", 0) + 1
         tried += 1
         verdict_obj = compare_fn(
-            a.sreality_id, b.sreality_id, room, by_room_a[room], by_room_b[room], model)
+            a, b, room, by_room_a[room], by_room_b[room], model)
         if verdict_obj is not None and verdict_obj.get("deferred"):
             # A cold room compare was spooled into the batch tier — stop trying
             # further rooms this pass (mirrors --warm-rooms=1: only the first
@@ -1496,7 +1498,7 @@ def _resolve_visual(
             # it, NOT queue). same_layout / no_2d_plan (renders) / one-sided / none -> the
             # auto-merge stands (the gate can't contradict, so it doesn't block).
             fp = _floor_plan_gate(
-                conn, a.sreality_id, b.sreality_id,
+                conn, a, b,
                 floor_plan_fn=floor_plan_fn,
                 vision_budget=(floor_plan_budget if floor_plan_budget is not None
                                else vision_budget),
@@ -1980,7 +1982,7 @@ def resolve_pair(conn: Any, a: ListingKey, b: ListingKey, *, street_key: str,
         return
     # Dual-keyed listings appear in their 'id:' AND 'name:' groups; classify each
     # listing pair once (first group wins).
-    lpair = (min(a.sreality_id, b.sreality_id), max(a.sreality_id, b.sreality_id))
+    lpair = (min(a.listing_id, b.listing_id), max(a.listing_id, b.listing_id))
     if lpair in ctx.seen_listing_pairs:
         return
     ctx.seen_listing_pairs.add(lpair)
@@ -2127,7 +2129,7 @@ def resolve_pair(conn: Any, a: ListingKey, b: ListingKey, *, street_key: str,
         # (skip, re-try next run once the batch warms it — never the manual queue); a no_2d_plan
         # (renders) / one-sided / same_layout verdict lets the pHash merge proceed.
         fp = _floor_plan_gate(
-            conn, a.sreality_id, b.sreality_id,
+            conn, a, b,
             floor_plan_fn=ctx.floor_plan_fn, vision_budget=ctx.floor_plan_budget,
             inconclusive_to_review=ctx.inconclusive_to_review, cache=ctx.probes)
         if fp == "dismiss":
@@ -2186,7 +2188,7 @@ def resolve_pair(conn: Any, a: ListingKey, b: ListingKey, *, street_key: str,
             ctx.engine_looked[cp] = "auto_merge_off:attr_exact"
             return
         fp = _floor_plan_gate(
-            conn, a.sreality_id, b.sreality_id,
+            conn, a, b,
             floor_plan_fn=ctx.floor_plan_fn, vision_budget=ctx.floor_plan_budget,
             inconclusive_to_review=ctx.inconclusive_to_review, cache=ctx.probes)
         if fp == "dismiss":
@@ -2235,7 +2237,7 @@ def resolve_pair(conn: Any, a: ListingKey, b: ListingKey, *, street_key: str,
         else:
             from toolkit.clip_dedup import pair_max_cosine
             pair_cos = pair_max_cosine(
-                conn, sreality_id_a=a.sreality_id, sreality_id_b=b.sreality_id,
+                conn, listing_id_a=a.listing_id, listing_id_b=b.listing_id,
                 model=ctx.clip_model)
             ctx.probes.pair_cosine[cp] = pair_cos
         if (pair_cos is not None and pair_cos >= ctx.nonbyt_cosine_merge_min
@@ -2252,7 +2254,7 @@ def resolve_pair(conn: Any, a: ListingKey, b: ListingKey, *, street_key: str,
                 ctx.engine_looked[cp] = "auto_merge_off:cosine_high"
                 return
             fp = _floor_plan_gate(
-                conn, a.sreality_id, b.sreality_id,
+                conn, a, b,
                 floor_plan_fn=ctx.floor_plan_fn, vision_budget=ctx.floor_plan_budget,
                 inconclusive_to_review=ctx.inconclusive_to_review, cache=ctx.probes)
             if fp == "dismiss":
@@ -2904,40 +2906,45 @@ def _build_compare_fn(
     default_model = llm.resolve_model("llm_visual_match_model")
     defer_providers = _batch_defer_providers() if defer_to_batch else None
 
-    def _fn(a: int, b: int, room_type: str, ids_a: list[int], ids_b: list[int],
+    def _fn(a: ListingKey, b: ListingKey, room_type: str, ids_a: list[int], ids_b: list[int],
             model: str | None = None) -> dict[str, Any] | None:
         use_model = model or default_model
         if defer_to_batch:
+            lid_a, lid_b = sorted((a.listing_id, b.listing_id))
             v = cached_visual_verdict(
-                conn, sreality_id_a=a, sreality_id_b=b, room_type=room_type, model=use_model)
+                conn, listing_id_a=lid_a, listing_id_b=lid_b, room_type=room_type, model=use_model)
             if v is not None:
                 return {"verdict": v, "rationale": None, "cache_hit": True}
-            ca, cb = sorted((a, b))
             from toolkit.dedup_batch_defer import enqueue_deferred_request
             spooled = enqueue_deferred_request(
                 conn, defer_providers,
-                kind="compare", model=use_model, sreality_id_a=ca, sreality_id_b=cb,
+                kind="compare", model=use_model, listing_id_a=lid_a, listing_id_b=lid_b,
                 room_type=room_type,
                 build_fn=lambda: build_compare_request(
-                    conn, llm, sreality_id_a=a, sreality_id_b=b, room_type=room_type,
+                    conn, llm, sreality_id_a=a.sreality_id, listing_id_a=a.listing_id,
+                    sreality_id_b=b.sreality_id, listing_id_b=b.listing_id, room_type=room_type,
                     image_ids_a=ids_a, image_ids_b=ids_b),
             )
             return {"deferred": True} if spooled else None
         if _breaker_open(error_count):
+            lid_a, lid_b = sorted((a.listing_id, b.listing_id))
             v = cached_visual_verdict(
-                conn, sreality_id_a=a, sreality_id_b=b, room_type=room_type,
+                conn, listing_id_a=lid_a, listing_id_b=lid_b, room_type=room_type,
                 model=use_model)
             return {"verdict": v, "rationale": None, "cache_hit": True} if v is not None else None
         try:
             res = compare_listings_visually(
-                conn, llm, sreality_id_a=a, sreality_id_b=b,
+                conn, llm, sreality_id_a=a.sreality_id, listing_id_a=a.listing_id,
+                sreality_id_b=b.sreality_id, listing_id_b=b.listing_id,
                 room_type=room_type, image_ids_a=ids_a, image_ids_b=ids_b,
                 model=model,
             )
             return res["data"]
         except Exception as exc:  # noqa: BLE001 - one bad pair must not kill the run
             _count_vision_error(error_count)
-            LOG.warning("visual compare %s/%s room=%s failed: %s", a, b, room_type, exc)
+            LOG.warning(
+                "visual compare %s/%s room=%s failed: %s",
+                a.listing_id, b.listing_id, room_type, exc)
             return None
     return _fn
 
@@ -2962,7 +2969,8 @@ def _build_site_plan_fn(
     defer_providers = _batch_defer_providers() if defer_to_batch else None
 
     def _fn(
-        a: int, b: int, ids_a: list[int], ids_b: list[int], family: str | None = None,
+        a: ListingKey, b: ListingKey, ids_a: list[int], ids_b: list[int],
+        family: str | None = None,
     ) -> dict[str, Any] | None:
         model = resolve_model_for_family(
             conn, llm, setting_key=SITE_PLAN_OVERRIDE_KEY,
@@ -2970,34 +2978,38 @@ def _build_site_plan_fn(
             overrides=site_plan_overrides,
         )
         if defer_to_batch:
+            lid_a, lid_b = sorted((a.listing_id, b.listing_id))
             v = cached_site_plan_verdict(
-                conn, sreality_id_a=a, sreality_id_b=b, model=model)
+                conn, listing_id_a=lid_a, listing_id_b=lid_b, model=model)
             if v is not None:
                 return {"verdict": v, "rationale": None, "cache_hit": True}
-            ca, cb = sorted((a, b))
             from toolkit.dedup_batch_defer import enqueue_deferred_request
             spooled = enqueue_deferred_request(
                 conn, defer_providers,
-                kind="site_plan", model=model, sreality_id_a=ca, sreality_id_b=cb,
+                kind="site_plan", model=model, listing_id_a=lid_a, listing_id_b=lid_b,
                 room_type=None,
                 build_fn=lambda: build_site_plan_request(
-                    conn, llm, sreality_id_a=a, sreality_id_b=b,
+                    conn, llm, sreality_id_a=a.sreality_id, listing_id_a=a.listing_id,
+                    sreality_id_b=b.sreality_id, listing_id_b=b.listing_id,
                     image_ids_a=ids_a, image_ids_b=ids_b, model=model),
             )
             return {"deferred": True} if spooled else None
         if _breaker_open(error_count):
+            lid_a, lid_b = sorted((a.listing_id, b.listing_id))
             v = cached_site_plan_verdict(
-                conn, sreality_id_a=a, sreality_id_b=b, model=model)
+                conn, listing_id_a=lid_a, listing_id_b=lid_b, model=model)
             return {"verdict": v, "rationale": None, "cache_hit": True} if v is not None else None
         try:
             res = compare_listing_site_plans(
-                conn, llm, sreality_id_a=a, sreality_id_b=b,
+                conn, llm, sreality_id_a=a.sreality_id, listing_id_a=a.listing_id,
+                sreality_id_b=b.sreality_id, listing_id_b=b.listing_id,
                 image_ids_a=ids_a, image_ids_b=ids_b, model=model,
             )
             return res["data"]
         except Exception as exc:  # noqa: BLE001 - one bad pair must not kill the run
             _count_vision_error(error_count)
-            LOG.warning("site-plan compare %s/%s failed: %s", a, b, exc)
+            LOG.warning(
+                "site-plan compare %s/%s failed: %s", a.listing_id, b.listing_id, exc)
             return None
     return _fn
 
@@ -3016,39 +3028,44 @@ def _build_floor_plan_fn(
     floor_plan_model = llm.resolve_model("llm_floor_plan_match_model")
     defer_providers = _batch_defer_providers() if defer_to_batch else None
 
-    def _fn(a: int, b: int, ids_a: list[int], ids_b: list[int]) -> dict[str, Any] | None:
+    def _fn(a: ListingKey, b: ListingKey, ids_a: list[int], ids_b: list[int]) -> dict[str, Any] | None:
         if defer_to_batch:
+            lid_a, lid_b = sorted((a.listing_id, b.listing_id))
             v = cached_floor_plan_verdict(
-                conn, sreality_id_a=a, sreality_id_b=b, model=floor_plan_model)
+                conn, listing_id_a=lid_a, listing_id_b=lid_b, model=floor_plan_model)
             if v is not None:
                 return {"verdict": v, "rationale": None, "cache_hit": True}
             # No sentinel needed: _floor_plan_gate already treats a None result
             # as 'defer' (the pre-existing floor_plan_pending semantics), so
             # spooling here and returning None reuses that path unchanged.
-            ca, cb = sorted((a, b))
             from toolkit.dedup_batch_defer import enqueue_deferred_request
             enqueue_deferred_request(
                 conn, defer_providers,
-                kind="floor_plan", model=floor_plan_model, sreality_id_a=ca, sreality_id_b=cb,
+                kind="floor_plan", model=floor_plan_model,
+                listing_id_a=lid_a, listing_id_b=lid_b,
                 room_type=None,
                 build_fn=lambda: build_floor_plan_request(
-                    conn, llm, sreality_id_a=a, sreality_id_b=b,
+                    conn, llm, sreality_id_a=a.sreality_id, listing_id_a=a.listing_id,
+                    sreality_id_b=b.sreality_id, listing_id_b=b.listing_id,
                     image_ids_a=ids_a, image_ids_b=ids_b),
             )
             return None
         if _breaker_open(error_count):
+            lid_a, lid_b = sorted((a.listing_id, b.listing_id))
             v = cached_floor_plan_verdict(
-                conn, sreality_id_a=a, sreality_id_b=b, model=floor_plan_model)
+                conn, listing_id_a=lid_a, listing_id_b=lid_b, model=floor_plan_model)
             return {"verdict": v, "rationale": None, "cache_hit": True} if v is not None else None
         try:
             res = compare_listing_floor_plans(
-                conn, llm, sreality_id_a=a, sreality_id_b=b,
+                conn, llm, sreality_id_a=a.sreality_id, listing_id_a=a.listing_id,
+                sreality_id_b=b.sreality_id, listing_id_b=b.listing_id,
                 image_ids_a=ids_a, image_ids_b=ids_b,
             )
             return res["data"]
         except Exception as exc:  # noqa: BLE001 - one bad pair must not kill the run
             _count_vision_error(error_count)
-            LOG.warning("floor-plan compare %s/%s failed: %s", a, b, exc)
+            LOG.warning(
+                "floor-plan compare %s/%s failed: %s", a.listing_id, b.listing_id, exc)
             return None
     return _fn
 
@@ -3066,8 +3083,9 @@ def _build_cache_only_floor_plan_fn(conn: Any) -> Any:
     from toolkit.visual_match import cached_floor_plan_verdict
     model = LLMClient(conn).resolve_model("llm_floor_plan_match_model")
 
-    def _fn(a: int, b: int, ids_a: list[int], ids_b: list[int]) -> dict[str, Any] | None:
-        v = cached_floor_plan_verdict(conn, sreality_id_a=a, sreality_id_b=b, model=model)
+    def _fn(a: ListingKey, b: ListingKey, ids_a: list[int], ids_b: list[int]) -> dict[str, Any] | None:
+        lid_a, lid_b = sorted((a.listing_id, b.listing_id))
+        v = cached_floor_plan_verdict(conn, listing_id_a=lid_a, listing_id_b=lid_b, model=model)
         return {"verdict": v, "rationale": None, "cache_hit": True} if v is not None else None
     return _fn
 
@@ -3140,27 +3158,30 @@ def _build_cache_only_fns(
         ]
         return {"data": {"images": images}}
 
-    def compare_fn(a: int, b: int, room_type: str, ids_a: list[int], ids_b: list[int],
+    def compare_fn(a: ListingKey, b: ListingKey, room_type: str, ids_a: list[int], ids_b: list[int],
                    model: str | None = None) -> dict[str, Any] | None:
+        lid_a, lid_b = sorted((a.listing_id, b.listing_id))
         v = cached_visual_verdict(
-            conn, sreality_id_a=a, sreality_id_b=b, room_type=room_type,
+            conn, listing_id_a=lid_a, listing_id_b=lid_b, room_type=room_type,
             model=model or compare_model)
         return {"verdict": v, "rationale": None, "cache_hit": True} if v is not None else None
 
-    def site_plan_fn(a: int, b: int, ids_a: list[int], ids_b: list[int],
+    def site_plan_fn(a: ListingKey, b: ListingKey, ids_a: list[int], ids_b: list[int],
                       family: str | None = None) -> dict[str, Any] | None:
         model = resolve_model_for_family(
             conn, llm, setting_key=SITE_PLAN_OVERRIDE_KEY,
             default_key="llm_site_plan_match_model", family=family,
             overrides=site_plan_overrides,
         )
+        lid_a, lid_b = sorted((a.listing_id, b.listing_id))
         v = cached_site_plan_verdict(
-            conn, sreality_id_a=a, sreality_id_b=b, model=model)
+            conn, listing_id_a=lid_a, listing_id_b=lid_b, model=model)
         return {"verdict": v, "rationale": None, "cache_hit": True} if v is not None else None
 
-    def floor_plan_fn(a: int, b: int, ids_a: list[int], ids_b: list[int]) -> dict[str, Any] | None:
+    def floor_plan_fn(a: ListingKey, b: ListingKey, ids_a: list[int], ids_b: list[int]) -> dict[str, Any] | None:
+        lid_a, lid_b = sorted((a.listing_id, b.listing_id))
         v = cached_floor_plan_verdict(
-            conn, sreality_id_a=a, sreality_id_b=b, model=floor_plan_model)
+            conn, listing_id_a=lid_a, listing_id_b=lid_b, model=floor_plan_model)
         return {"verdict": v, "rationale": None, "cache_hit": True} if v is not None else None
 
     return classify_fn, compare_fn, site_plan_fn, floor_plan_fn

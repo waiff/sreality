@@ -216,18 +216,21 @@ def _ingest_one(
             )
         elif kind == "compare":
             persist_visual_match(
-                conn, sreality_id_a=req["sreality_id_a"], sreality_id_b=req["sreality_id_b"],
+                conn, sreality_id_a=req["sreality_id_a"], listing_id_a=req["listing_id_a"],
+                sreality_id_b=req["sreality_id_b"], listing_id_b=req["listing_id_b"],
                 room_type=req["room_type"], tool_calls=tool_calls,
                 model=model, llm_call_id=llm_call_id, cost_usd=cost,
             )
         elif kind == "site_plan":
             persist_site_plan_match(
-                conn, sreality_id_a=req["sreality_id_a"], sreality_id_b=req["sreality_id_b"],
+                conn, sreality_id_a=req["sreality_id_a"], listing_id_a=req["listing_id_a"],
+                sreality_id_b=req["sreality_id_b"], listing_id_b=req["listing_id_b"],
                 tool_calls=tool_calls, model=model, llm_call_id=llm_call_id, cost_usd=cost,
             )
         elif kind == "floor_plan":
             persist_floor_plan_match(
-                conn, sreality_id_a=req["sreality_id_a"], sreality_id_b=req["sreality_id_b"],
+                conn, sreality_id_a=req["sreality_id_a"], listing_id_a=req["listing_id_a"],
+                sreality_id_b=req["sreality_id_b"], listing_id_b=req["listing_id_b"],
                 tool_calls=tool_calls, model=model, llm_call_id=llm_call_id, cost_usd=cost,
             )
         else:
@@ -242,7 +245,8 @@ def _ingest_one(
 
 def _pending_requests(conn: Any, batch_id: int) -> dict[str, dict[str, Any]]:
     sql = (
-        "SELECT id, custom_id, kind, model, sreality_id_a, sreality_id_b, room_type, image_ids "
+        "SELECT id, custom_id, kind, model, sreality_id_a, sreality_id_b, "
+        "       listing_id_a, listing_id_b, room_type, image_ids "
         "FROM dedup_batch_requests WHERE batch_id = %s AND status = 'pending'"
     )
     with conn.cursor() as cur:
@@ -252,8 +256,10 @@ def _pending_requests(conn: Any, batch_id: int) -> dict[str, dict[str, Any]]:
                 "id": int(r[0]), "kind": r[2], "model": r[3],
                 "sreality_id_a": int(r[4]) if r[4] is not None else None,
                 "sreality_id_b": int(r[5]) if r[5] is not None else None,
-                "room_type": r[6],
-                "image_ids": list(r[7]) if r[7] is not None else None,
+                "listing_id_a": int(r[6]) if r[6] is not None else None,
+                "listing_id_b": int(r[7]) if r[7] is not None else None,
+                "room_type": r[8],
+                "image_ids": list(r[9]) if r[9] is not None else None,
             }
             for r in cur.fetchall()
         }

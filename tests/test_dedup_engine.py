@@ -70,14 +70,14 @@ def _key(
     floor: int | None = 3, area: float | None = 60.0,
     description: str | None = None,
     category_type: str | None = "prodej", category_main: str | None = "byt",
-    street_id: int | None = None,
+    street_id: int | None = None, lid: int | None = None,
 ) -> ListingKey:
     return ListingKey(
         sreality_id=sid, property_id=pid if pid is not None else sid,
         source=source, street_key=street, disposition=disp,
         house_number=hn, floor=floor, area_m2=area, description=description,
         category_type=category_type, category_main=category_main,
-        street_id=street_id,
+        street_id=street_id, listing_id=lid if lid is not None else sid + 100_000,
     )
 
 
@@ -559,13 +559,14 @@ def _gk(
     sid: int, pid: int, *, source: str = "sreality", cat: str = "dum",
     ct: str = "prodej", area: float | None = 120.0, price: int | None = 5_950_000,
     hn: str | None = None, lat: float = 50.10064, lng: float = 14.53742,
-    desc: str | None = None, street_eligible: bool = False,
+    desc: str | None = None, street_eligible: bool = False, lid: int | None = None,
 ) -> ListingKey:
     return ListingKey(
         sreality_id=sid, property_id=pid, source=source, street_key="geo:cell",
         disposition="", house_number=hn, floor=None, area_m2=area, description=desc,
         category_type=ct, category_main=cat, street_id=None, lat=lat, lng=lng,
         price_czk=price, street_eligible=street_eligible,
+        listing_id=lid if lid is not None else sid + 100_000,
     )
 
 
@@ -793,7 +794,7 @@ def _bgk(
     disp: str = "2+kk", floor: int | None = 3, area: float | None = 60.0,
     price: int | None = 5_950_000, hn: str | None = None,
     lat: float = 50.10064, lng: float = 14.53742, desc: str | None = None,
-    street_eligible: bool = False, cat: str = "byt",
+    street_eligible: bool = False, cat: str = "byt", lid: int | None = None,
 ) -> ListingKey:
     return ListingKey(
         sreality_id=sid, property_id=pid, source=source,
@@ -801,6 +802,7 @@ def _bgk(
         disposition=disp, house_number=hn, floor=floor, area_m2=area,
         description=desc, category_type=ct, category_main=cat, street_id=None,
         lat=lat, lng=lng, price_czk=price, street_eligible=street_eligible,
+        listing_id=lid if lid is not None else sid + 100_000,
     )
 
 
@@ -1315,13 +1317,17 @@ def _geo_row(sid: int, pid: int, *, source: str = "sreality",
              cell: str | None = "geo:5001:50.1006:14.5374:dum|komercni:prodej",
              street_eligible: bool = False,
              disp: str | None = None, floor: int | None = None,
+             lid: int | None = None,
              ) -> tuple[Any, ...]:
     # matches the _cell_eligible_sql column order (geo + byt_geo rungs):
     # sreality_id, property_id, source, house_number, area, description,
     # category_type, category_main, price_czk, lat, lng, geo_cell_key,
-    # street_eligible, disposition, floor
+    # street_eligible, disposition, floor, id
+    # listing_id defaults to sreality_id + 100000 — deliberately DIFFERENT from
+    # sreality_id so a test that accidentally relied on sreality_id order would
+    # fail loudly instead of silently passing on coincidental equality.
     return (sid, pid, source, hn, area, description, ct, cat, price, lat, lng, cell,
-            street_eligible, disp, floor)
+            street_eligible, disp, floor, lid if lid is not None else sid + 100_000)
 
 
 def test_load_geo_eligible_uses_stored_cell_key_verbatim() -> None:
@@ -1698,13 +1704,18 @@ def _row(sid: int, pid: int, *, street: str = "Nádražní",
          hn: str | None = "10", floor: int | None = 3, area: float | None = 60.0,
          source: str = "sreality", description: str | None = None,
          category_type: str | None = "prodej", category_main: str | None = "byt",
-         obec_id: int | None = 5001, price: int | None = None) -> tuple[Any, ...]:
+         obec_id: int | None = 5001, price: int | None = None,
+         lid: int | None = None) -> tuple[Any, ...]:
     # matches _ELIGIBLE_SQL column order:
     # sreality_id, property_id, source, street, street_id, disposition,
     # house_number, floor, area_m2, description, category_type, category_main,
-    # obec_id, price_czk
+    # obec_id, price_czk, id
+    # listing_id defaults to sreality_id + 100000 — deliberately DIFFERENT from
+    # sreality_id so a test that accidentally relied on sreality_id order would
+    # fail loudly instead of silently passing on coincidental equality.
     return (sid, pid, source, street, street_id, disp, hn, floor, area,
-            description, category_type, category_main, obec_id, price)
+            description, category_type, category_main, obec_id, price,
+            lid if lid is not None else sid + 100_000)
 
 
 def test_run_engine_exact_address_no_longer_auto_merges(monkeypatch: Any) -> None:
@@ -3557,9 +3568,9 @@ def test_load_eligible_street_group_scope() -> None:
         def __exit__(self, *a): return None
         def execute(self, sql, params=None):
             captured["sql"] = " ".join(sql.split()); captured["params"] = params
-        def fetchall(self):  # one eligible row (14 cols) -> exercises ListingKey build
+        def fetchall(self):  # one eligible row (15 cols, incl. l.id) -> exercises ListingKey build
             return [(1, 101, "sreality", "Hlavní", None, "2+kk", "10", 3, 60.0,
-                     "desc", "prodej", "byt", 42, 4_990_000)]
+                     "desc", "prodej", "byt", 42, 4_990_000, 100_001)]
 
     class _Conn:
         def cursor(self): return _C()
@@ -3701,8 +3712,10 @@ def test_resolve_pair_seam_standalone() -> None:
     import scripts.dedup_engine as eng
     from toolkit.dedup_engine import ListingKey
 
-    a = ListingKey(1, 101, "sreality", "name:5001:nadrazni", "2+kk", "10", 3, 60.0, street_id=1)
-    b = ListingKey(2, 102, "sreality", "name:5001:nadrazni", "2+kk", "10", 3, 60.0, street_id=2)
+    a = ListingKey(1, 101, "sreality", "name:5001:nadrazni", "2+kk", "10", 3, 60.0,
+                   street_id=1, listing_id=901)
+    b = ListingKey(2, 102, "sreality", "name:5001:nadrazni", "2+kk", "10", 3, 60.0,
+                   street_id=2, listing_id=902)
     ctx = eng._RunContext(stats={"rejected": 0})
     eng.resolve_pair(None, a, b, street_key="name:5001:nadrazni", ctx=ctx)
     assert ctx.stats["rejected"] == 1
@@ -3713,44 +3726,48 @@ def test_resolve_pair_seam_standalone() -> None:
 def test_floor_plan_gate_branches(monkeypatch: Any) -> None:
     import scripts.dedup_engine as eng
 
+    a = _key(1, pid=101, lid=901)
+    b = _key(2, pid=102, lid=902)
+
     # neither side has a floor plan -> merge (existing path unchanged)
     monkeypatch.setattr(eng, "_floor_plan_image_ids", lambda conn, sid: [])
-    assert eng._floor_plan_gate(None, 1, 2, floor_plan_fn=None, vision_budget=[5]) == "merge"
+    assert eng._floor_plan_gate(None, a, b, floor_plan_fn=None, vision_budget=[5]) == "merge"
 
     # exactly one side has a plan -> MERGE (contradiction-veto: no plan-to-plan compare is
     # possible, so the gate can't contradict the primary pHash/visual signal — it never queues).
     monkeypatch.setattr(eng, "_floor_plan_image_ids", lambda conn, sid: [9] if sid == 1 else [])
-    assert eng._floor_plan_gate(None, 1, 2, floor_plan_fn=None, vision_budget=[5]) == "merge"
+    assert eng._floor_plan_gate(None, a, b, floor_plan_fn=None, vision_budget=[5]) == "merge"
 
-    # both have plans + a verdict available -> confirm/dismiss
+    # both have plans + a verdict available -> confirm/dismiss. floor_plan_fn now receives the
+    # ListingKey pair (not raw ids) — the engine passes a.listing_id/b.listing_id downstream.
     monkeypatch.setattr(eng, "_floor_plan_image_ids", lambda conn, sid: [9])
     diff = lambda a, b, ia, ib: {"verdict": "different_layout"}  # noqa: E731
     same = lambda a, b, ia, ib: {"verdict": "same_layout"}       # noqa: E731
     none = lambda a, b, ia, ib: None                             # noqa: E731 (unwarmed)
     inconc = lambda a, b, ia, ib: {"verdict": "inconclusive"}    # noqa: E731
     no2d = lambda a, b, ia, ib: {"verdict": "no_2d_plan"}        # noqa: E731 (only 3D renders)
-    assert eng._floor_plan_gate(None, 1, 2, floor_plan_fn=diff, vision_budget=[5]) == "dismiss"
-    assert eng._floor_plan_gate(None, 1, 2, floor_plan_fn=same, vision_budget=[5]) == "merge"
+    assert eng._floor_plan_gate(None, a, b, floor_plan_fn=diff, vision_budget=[5]) == "dismiss"
+    assert eng._floor_plan_gate(None, a, b, floor_plan_fn=same, vision_budget=[5]) == "merge"
     # 'no_2d_plan' (>=1 side only 3D renders / illegible) -> MERGE, NEVER queue, regardless of the
     # inconclusive toggle: the plan check is moot, so the primary signal stands (the 3D-render fix).
     assert eng._floor_plan_gate(
-        None, 1, 2, floor_plan_fn=no2d, vision_budget=[5], inconclusive_to_review=True) == "merge"
+        None, a, b, floor_plan_fn=no2d, vision_budget=[5], inconclusive_to_review=True) == "merge"
     # 'inconclusive' (BOTH sides HAVE usable 2D plans, still ambiguous) -> manual review by default
     # (toggle on); off -> treat as no-contradiction -> merge.
     assert eng._floor_plan_gate(
-        None, 1, 2, floor_plan_fn=inconc, vision_budget=[5],
+        None, a, b, floor_plan_fn=inconc, vision_budget=[5],
         inconclusive_to_review=True) == "queue"
     assert eng._floor_plan_gate(
-        None, 1, 2, floor_plan_fn=inconc, vision_budget=[5],
+        None, a, b, floor_plan_fn=inconc, vision_budget=[5],
         inconclusive_to_review=False) == "merge"
     # both have plans but can't validate now (no fn / no budget / unwarmed) -> DEFER,
     # NOT the manual queue (the pair is automatable once the batch warms the verdict)
-    assert eng._floor_plan_gate(None, 1, 2, floor_plan_fn=None, vision_budget=[5]) == "defer"
-    assert eng._floor_plan_gate(None, 1, 2, floor_plan_fn=same, vision_budget=[0]) == "defer"
-    assert eng._floor_plan_gate(None, 1, 2, floor_plan_fn=none, vision_budget=[5]) == "defer"
+    assert eng._floor_plan_gate(None, a, b, floor_plan_fn=None, vision_budget=[5]) == "defer"
+    assert eng._floor_plan_gate(None, a, b, floor_plan_fn=same, vision_budget=[0]) == "defer"
+    assert eng._floor_plan_gate(None, a, b, floor_plan_fn=none, vision_budget=[5]) == "defer"
     # a COLD verdict consumes one budget unit
     budget = [3]
-    eng._floor_plan_gate(None, 1, 2, floor_plan_fn=same, vision_budget=budget)
+    eng._floor_plan_gate(None, a, b, floor_plan_fn=same, vision_budget=budget)
     assert budget[0] == 2
 
 

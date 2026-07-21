@@ -364,7 +364,7 @@ the failure each one actually prevented:
 **Still open in §4 — three groups, in priority order:**
 
 1. **Dedup identity chains (4 PRs, the biggest remaining item).** **PR1 (#883, mig
-   345) and PR2 (#884, mig 346) are SHIPPED — PR3/PR4 remain.** Do NOT start the
+   345), PR2 (#884, mig 346) and PR3 are SHIPPED — PR4 remains.** Do NOT start the
    rest piecemeal: all four pair caches carried `CHECK (sreality_id_a <
    sreality_id_b)`, and 77% of rows sort DIFFERENTLY by surrogate (56,375 rows
    checked; positional mirroring is 100% clean, so the read cutover is provably
@@ -404,6 +404,45 @@ the failure each one actually prevented:
    LLM re-bill of ~56k verdicts), and the pair-cache `DO UPDATE SET` omits
    `sreality_id_a/_b` today — harmless only because the CHECK freezes order, a
    latent inconsistency the moment order can vary.
+
+   **PR3 — DONE.** `ListingKey` gained a `listing_id` field, populated by both
+   `scripts/dedup_engine.py` loading SELECTs (`_ELIGIBLE_COLS` + `_cell_eligible_sql`
+   append `l.id`). All four layers now canonicalise by `LEAST/GREATEST(listing_id)`
+   atomically: `resolve_pair`'s in-run `seen_listing_pairs` dedup, the `_build_*_fn`
+   defer sites (pass `listing_id_a`/`listing_id_b` straight to
+   `enqueue_deferred_request`, dropping the sreality_id round-trip PR2 made
+   optional), `toolkit/image_similarity.py` (`compare_listing_images` keeps its
+   agent-facing `sreality_id_a/_b` signature — this tool has its own external
+   contract, tracked separately under "LLM tool schemas" below — but resolves
+   `listing_id` once via a single `listings` SELECT and canonicalises on it),
+   `toolkit/visual_match.py` (all 3 function groups × 6 entry points — `sreality_id_a/_b`
+   AND `listing_id_a/_b` are now both required params; canonical order is decided by
+   `listing_id`, sreality_id/image-id-list ride side-coupled with whichever
+   listing_id they belong to), and `toolkit/clip_dedup.py` (`pair_max_cosine` now
+   takes `listing_id_a/_b` and joins `images.listing_id`, no ordering change needed —
+   it was already a symmetric MAX aggregate). The 3 `_cache_lookup` SQLs moved from
+   exact `sreality_id_a = %s AND sreality_id_b = %s` to
+   `LEAST/GREATEST(listing_id_a, listing_id_b)`; every `_cache_store`/persist now
+   writes `sreality_id_a/_b` in its `ON CONFLICT ... DO UPDATE SET` (previously
+   omitted — the exact bug §0.5 point 5 flagged). `scripts/ingest_dedup_batch.py`
+   (not originally named in this bullet, but required once the persist signatures
+   changed) now selects and forwards `listing_id_a/_b` from `dedup_batch_requests`.
+
+   **Deliberately deferred, not silently dropped:** (a) `api/property_dedup.py`
+   (the `/dedup` operator panel's evidence reader, `decision_evidence` /
+   `_phash_audit_chunk`) is a pure READ surface over `dedup_pair_audit`'s own
+   already-nullable `left/right_sreality_id` columns — it does no canonicalisation
+   and rides with PR4 ("read surfaces"), not PR3. (b) The `_ProbeCache` /
+   per-listing image-fact helpers in `scripts/dedup_engine.py`
+   (`_phash_pairs_cached`, `_clip_incomplete_any`, `_downloads_incomplete_any`,
+   `_last_evidence_at`, `_both_have_site_plan`, `_floor_plan_ids_cached`,
+   `_high_render_image_ids`) still query `images.sreality_id` — a separate,
+   larger surface (7+ functions over the `images` table, not the 4 pair-cache
+   tables PR1/PR2 prepared); `images.listing_id` is already populated
+   (migration 320) so this is a clean mechanical follow-up, just out of PR3's
+   scope. (c) `classify`'s defer site (`_build_classify_fn`) still passes
+   `sreality_id_a` alone to `enqueue_deferred_request` — classify has no pair to
+   canonicalise (single listing), so there is no ordering trap there; left as-is.
 2. **Browse FRONTEND hydration** (the DB half shipped in #873). `.in('sreality_id', …)`
    at queries.ts ~1182/1212/1238/1448 → the surrogate; React keys and the maplibre
    feature id; `listingPath()` fallback for a card whose repr has no sreality_id
