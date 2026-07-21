@@ -533,6 +533,9 @@ class CreateNoteIn(BaseModel):
     # The advert the operator was viewing when they wrote the note — display
     # provenance only ("written while viewing this advert"), not a grouping key.
     origin_listing_id: int | None = None
+    # Surrogate twin (R2). Preferred when present; origin_listing_id is the
+    # legacy handle and is NULL for a post-Gate-2 listing.
+    origin_listing_ref_id: int | None = None
 
 
 class CreateTagIn(BaseModel):

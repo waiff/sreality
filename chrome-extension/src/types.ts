@@ -131,10 +131,13 @@ export interface PortalListing {
   source: string;
   source_id: string;
   found: boolean;
-  /* App-wide listing identity (negative for non-sreality portals). Non-null iff
-   * the listing is in our DB (has an app page); the deep link uses the canonical
-   * /listing/{source}/{source_id} natural-key route, not this internal id. */
+  /* LEGACY app-wide listing identity (negative for non-sreality portals).
+   * NULL for a post-Gate-2 listing — use `found` to test DB membership and
+   * `listing_id` to reference the listing in a write. The deep link uses the
+   * canonical /listing/{source}/{source_id} natural-key route regardless. */
   sreality_id: number | null;
+  /* Surrogate listing identity — present for every listing in our DB. */
+  listing_id: number | null;
   /* The grouping property (the pipeline + dedup grain). Null when not in our
    * DB or not yet attached to a property. */
   property_id: number | null;
@@ -193,7 +196,7 @@ export type ApiMessage =
   | { type: 'add_to_collection'; collection_id: number; property_id: number }
   | { type: 'remove_from_collection'; collection_id: number; property_id: number }
   | { type: 'list_notes'; property_id: number }
-  | { type: 'add_note'; property_id: number; body: string; origin_listing_id: number | null };
+  | { type: 'add_note'; property_id: number; body: string; origin_listing_ref_id: number | null };
 
 export interface ApiResponse<T> {
   ok: true;

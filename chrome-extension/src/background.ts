@@ -73,6 +73,6 @@ async function handleMessage(
     case 'list_notes':
       return listNotes(message.property_id);
     case 'add_note':
-      return addNote(message.property_id, message.body, message.origin_listing_id);
+      return addNote(message.property_id, message.body, message.origin_listing_ref_id);
   }
 }

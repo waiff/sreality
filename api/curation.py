@@ -280,12 +280,17 @@ def create_note(
     property_id: int,
     body: s.CreateNoteIn,
 ) -> dict[str, Any]:
-    # origin_listing_ref_id is the surrogate mirror of origin_listing_id (which
-    # holds a legacy sreality_id); resolved inline for the R2 dual-write.
+    # origin_listing_ref_id is the surrogate; origin_listing_id holds the legacy
+    # sreality_id. Prefer a caller-supplied surrogate and derive the legacy handle
+    # FROM it; only fall back to resolving legacy -> surrogate for a caller that
+    # still sends the old field (post-Gate-2 that lookup returns NULL, which is
+    # precisely why the surrogate has to be the driving value).
     sql = (
         "INSERT INTO property_notes "
         "  (property_id, body, origin_listing_id, origin_listing_ref_id) "
-        "VALUES (%s, %s, %s, (SELECT id FROM listings WHERE sreality_id = %s)) "
+        "VALUES (%s, %s, "
+        "  COALESCE(%s, (SELECT sreality_id FROM listings WHERE id = %s)), "
+        "  COALESCE(%s, (SELECT id FROM listings WHERE sreality_id = %s))) "
         "RETURNING id, property_id, body, origin_listing_id, created_at"
     )
     try:
@@ -293,8 +298,11 @@ def create_note(
             pid = resolve_active_property_id(conn, property_id)
             if pid is None:
                 raise HTTPException(404, "property not found")
-            cur.execute(sql, (pid, body.body, body.origin_listing_id,
-                              body.origin_listing_id))
+            cur.execute(sql, (
+                pid, body.body,
+                body.origin_listing_id, body.origin_listing_ref_id,
+                body.origin_listing_ref_id, body.origin_listing_id,
+            ))
             row = cur.fetchone()
     except psycopg.errors.ForeignKeyViolation:
         raise HTTPException(404, "property not found")
