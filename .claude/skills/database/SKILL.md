@@ -44,6 +44,15 @@ client), for two reasons:
 
 Do not introduce `supabase-py` without an explicit reason and a discussion.
 
+**`connect()` and `connect_session()` are BOTH `autocommit=True`** — "callers manage
+transactions explicitly". Anything that must be atomic needs an explicit
+`with conn.transaction():` block, or each statement commits on its own AND any
+`SET LOCAL` (e.g. a `lock_timeout` guard) silently applies to nothing. This bites
+multi-statement DDL hardest: a `DROP CONSTRAINT` + `ADD CONSTRAINT` pair without the
+block leaves a real window where writers see the table with neither. Note
+`apply_r2_constraints._with_lock_retry` commits per statement *by design* — right for
+independent DDL, wrong for a unit that must not be split.
+
 **Three connection modes** now exist — pick by who's calling and whether the call is
 tenant-scoped:
 - `connect()` (`scraper/db.py`) — the **default for everything service-role** (scrape_run
