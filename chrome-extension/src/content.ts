@@ -16,6 +16,7 @@ import { runIndexOverlay } from './index_overlay';
 import type {
   ApiMessage,
   ApiResult,
+  AuthState,
   CollectionWriteResult,
   EstimationRun,
   ExtCollection,
@@ -58,10 +59,23 @@ const APP_BASE_URL = ((raw: string): string => {
   return (/^https?:\/\//i.test(t) ? t : `https://${t}`).replace(/\/$/, '');
 })(import.meta.env.VITE_APP_BASE_URL ?? '');
 
-type Phase = 'loading' | 'deactivated' | 'active' | 'error';
+type Phase = 'loading' | 'deactivated' | 'active' | 'error' | 'signed_out';
+
+/* Mirrors api.ts's NOT_SIGNED_IN_DETAIL — duplicated, not imported, for the
+ * same reason normalizeBaseUrl is duplicated above: api.ts/auth.ts run only
+ * in the background service worker (chrome.identity, direct fetches), and
+ * content.ts must stay a self-contained bundle that never fetches directly. */
+const NOT_SIGNED_IN_DETAIL = 'not_signed_in';
+
+function friendlyDetail(detail: string): string {
+  return detail === NOT_SIGNED_IN_DETAIL ? 'nejste přihlášeni' : detail;
+}
 
 interface PanelState {
   phase: Phase;
+  /* The signed-in operator's email (Wave 1 extension login), or null when
+   * signed out / not yet loaded. Drives the sign-out control in the header. */
+  authEmail: string | null;
   /* Our scraped facts + MF rent/yield for the subject listing. */
   listing: PortalListing | null;
   /* byt+prodej? Gates the MF + estimation blocks; the app link + facts show
@@ -494,18 +508,26 @@ function mountPanel(): {
       body.appendChild(note('Načítám data…', 'note--loading'));
       return;
     }
+    if (state.phase === 'signed_out') {
+      renderSignedOut(body, state);
+      return;
+    }
     if (state.phase === 'error') {
+      renderAuthStrip(body, state);
       body.appendChild(errorLine(state.errorMessage ?? 'Něco se nepovedlo.'));
       return;
     }
     if (state.phase === 'deactivated') {
+      renderAuthStrip(body, state);
       body.appendChild(note('Tato nemovitost zatím není v naší databázi.'));
       return;
     }
 
-    /* active — read top-down: WHAT it is (subject) → the stamped MF yield →
-     * act on it (bookmark / open in app) → the deeper estimate. MF + estimate
-     * are gated to apartments for sale; the subject + actions are not. */
+    /* active — read top-down: sign-out control → WHAT it is (subject) → the
+     * stamped MF yield → act on it (bookmark / open in app) → the deeper
+     * estimate. MF + estimate are gated to apartments for sale; the subject +
+     * actions are not. */
+    renderAuthStrip(body, state);
     renderSubjectFacts(body, state);
     if (state.isSaleApt !== false) {
       renderMfBlock(body, state);
@@ -544,6 +566,44 @@ function mountPanel(): {
     p.className = 'note note--error';
     p.textContent = text;
     return p;
+  }
+
+  /* The extension's own sign-in prompt (Wave 1) — every route now requires a
+   * real Supabase session, so a signed-out operator sees this instead of a
+   * raw 401. Google OAuth via chrome.identity.launchWebAuthFlow + PKCE, run
+   * in the background worker (the only context that can open the auth
+   * window and reach GoTrue). */
+  function renderSignedOut(body: HTMLElement, state: PanelState): void {
+    body.appendChild(note('Pro zobrazení dat se prosím přihlaste.'));
+    if (state.errorMessage != null) body.appendChild(errorLine(state.errorMessage));
+    const btn = document.createElement('button');
+    btn.className = 'btn-primary';
+    btn.type = 'button';
+    btn.disabled = state.busy;
+    btn.textContent = state.busy ? 'Přihlašuji…' : 'Přihlásit se přes Google';
+    btn.onclick = () => { void onSignIn(); };
+    body.appendChild(btn);
+  }
+
+  /* The signed-in operator's identity + a sign-out control — shown atop the
+   * panel body whenever a session is loaded (active/deactivated/error), so
+   * signing out is always one click away without a separate popup surface. */
+  function renderAuthStrip(body: HTMLElement, state: PanelState): void {
+    if (state.authEmail == null) return;
+    const strip = document.createElement('div');
+    strip.className = 'auth-strip';
+    const email = document.createElement('span');
+    email.className = 'auth-email';
+    email.textContent = state.authEmail;
+    email.title = state.authEmail;
+    strip.appendChild(email);
+    const out = document.createElement('a');
+    out.className = 'auth-signout';
+    out.textContent = 'Odhlásit';
+    out.href = '#';
+    out.onclick = (e) => { e.preventDefault(); void onSignOut(); };
+    strip.appendChild(out);
+    body.appendChild(strip);
   }
 
   /* The two "this listing ↔ our app" affordances in one row: the deal-pipeline
@@ -1015,6 +1075,9 @@ let panelShadow: ShadowRoot | null = null;
  * On a detail page it's location.href; opened from an index card it's that
  * card's detail href (NOT the search page). */
 let panelUrl = '';
+/* The same listing's portal ref, kept alongside panelUrl so onSignIn can
+ * re-run openPanel() once a session lands, without the caller re-supplying it. */
+let panelRef: PortalRef | null = null;
 let patchTimer: ReturnType<typeof setTimeout> | null = null;
 
 function setState(updater: (prev: PanelState) => PanelState): void {
@@ -1031,7 +1094,7 @@ function schedulePatch(): void {
       type: 'patch_scenario', run_id: state.run.id, body: bodyFromState(state),
     });
     if (!res.ok) {
-      setState((prev) => ({ ...prev, errorMessage: `Uložení selhalo: ${res.detail}` }));
+      setState((prev) => ({ ...prev, errorMessage: `Uložení selhalo: ${friendlyDetail(res.detail)}` }));
       return;
     }
     /* Save succeeded — nothing visible depends on the refreshed run, so update
@@ -1092,7 +1155,7 @@ async function onCreateRun(): Promise<void> {
   });
   if (!res.ok) {
     setState((prev) => ({
-      ...prev, busy: false, errorMessage: `Odhad se nepodařilo spustit: ${res.detail}`,
+      ...prev, busy: false, errorMessage: `Odhad se nepodařilo spustit: ${friendlyDetail(res.detail)}`,
     }));
     return;
   }
@@ -1159,7 +1222,7 @@ async function onTogglePipeline(): Promise<void> {
         ? { in_pipeline: true, stage_id: prior?.stage_id ?? null,
             stage_key: prior?.stage_key ?? null, stage_label: prior?.stage_label ?? null }
         : { in_pipeline: false, stage_id: null, stage_key: null, stage_label: null },
-      { pipelineBusy: false, errorMessage: `Uložení do pipeline selhalo: ${res.detail}` },
+      { pipelineBusy: false, errorMessage: `Uložení do pipeline selhalo: ${friendlyDetail(res.detail)}` },
     ));
     return;
   }
@@ -1222,7 +1285,7 @@ async function onToggleMonitoring(): Promise<void> {
   if (!res.ok) {
     setState(applyCollectionsIf(
       propertyId, prior,
-      { collectionBusy: false, errorMessage: `Sledování se nepodařilo uložit: ${res.detail}` },
+      { collectionBusy: false, errorMessage: `Sledování se nepodařilo uložit: ${friendlyDetail(res.detail)}` },
     ));
     return;
   }
@@ -1259,7 +1322,7 @@ async function onMoveStage(stageId: number): Promise<void> {
   if (!res.ok) {
     setState(applyMembershipIf(
       propertyId, prior,
-      { pipelineBusy: false, errorMessage: `Změna fáze selhala: ${res.detail}` },
+      { pipelineBusy: false, errorMessage: `Změna fáze selhala: ${friendlyDetail(res.detail)}` },
     ));
     return;
   }
@@ -1387,7 +1450,8 @@ async function onAddNote(): Promise<void> {
   });
   if (!res.ok) {
     setState((prev) => ({
-      ...prev, noteBusy: false, errorMessage: `Uložení poznámky selhalo: ${res.detail}`,
+      ...prev, noteBusy: false,
+      errorMessage: `Uložení poznámky selhalo: ${friendlyDetail(res.detail)}`,
     }));
     return;
   }
@@ -1400,6 +1464,32 @@ async function onAddNote(): Promise<void> {
       : { ...prev, noteBusy: false });
 }
 
+/* Trigger the extension's own PKCE sign-in (Wave 1) — the background worker
+ * owns chrome.identity (a content script can't call it directly), so this
+ * just relays a message and re-runs openPanel() on success to reload
+ * whatever the signed-out prompt was blocking. */
+async function onSignIn(): Promise<void> {
+  if (panelRef == null) return;
+  const ref = panelRef;
+  setState((prev) => ({ ...prev, busy: true, errorMessage: null }));
+  const res = await call<undefined>({ type: 'sign_in' });
+  if (!res.ok) {
+    setState((prev) => ({
+      ...prev, busy: false, phase: 'signed_out',
+      errorMessage: `Přihlášení selhalo: ${res.detail}`,
+    }));
+    return;
+  }
+  await openPanel(ref, panelUrl);
+}
+
+async function onSignOut(): Promise<void> {
+  await call<undefined>({ type: 'sign_out' });
+  setState((prev) => ({
+    ...prev, phase: 'signed_out', authEmail: null, listing: null, errorMessage: null,
+  }));
+}
+
 /* Mounts/refreshes the floating panel for one listing. Used by the detail-page
  * entry AND by index-card badges (which pass the card's ref + href + the
  * already-fetched listing so no second lookup is needed). */
@@ -1407,12 +1497,13 @@ export async function openPanel(
   ref: PortalRef, url: string, prefetched?: PortalListing | null,
 ): Promise<void> {
   panelUrl = url;
+  panelRef = ref;
   const panel = mountPanel();
   render = panel.render;
   panelShadow = panel.shadow;
   noteDraft = '';  // a fresh panel starts with an empty note draft
   state = {
-    phase: 'loading', listing: null, isSaleApt: null, run: null,
+    phase: 'loading', authEmail: null, listing: null, isSaleApt: null, run: null,
     rentTouched: false, costTouched: false, priceTouched: false,
     renovationTouched: false,
     rent: null, costPerM2: null, price: null, renovation: null, busy: false,
@@ -1423,6 +1514,16 @@ export async function openPanel(
   await minimizedReady;  // persisted minimized pref before first paint → no flash
   render(state);
 
+  /* Every route needs a real session now (Wave 1) — check first so a
+   * signed-out operator sees one clean prompt instead of a lookup 401. */
+  const auth = await call<AuthState>({ type: 'get_auth_state' });
+  const authEmail = auth.ok && auth.data.signedIn ? auth.data.email : null;
+  if (!auth.ok || !auth.data.signedIn) {
+    setState((prev) => ({ ...prev, phase: 'signed_out', authEmail: null }));
+    return;
+  }
+  setState((prev) => ({ ...prev, authEmail }));
+
   let listing: PortalListing | null;
   if (prefetched !== undefined) {
     listing = prefetched;
@@ -1432,6 +1533,10 @@ export async function openPanel(
       items: [{ source: ref.source, source_id: ref.sourceId }],
     });
     if (!res.ok) {
+      if (res.detail === NOT_SIGNED_IN_DETAIL) {
+        setState((prev) => ({ ...prev, phase: 'signed_out', authEmail: null }));
+        return;
+      }
       setState((prev) => ({ ...prev, phase: 'error', errorMessage: res.detail }));
       return;
     }

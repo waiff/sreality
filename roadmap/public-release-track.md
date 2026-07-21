@@ -241,6 +241,37 @@ remediation R3 closes that. Full spec: `docs/design/public-release-remediation-2
      static-token bridge. Behavior-preserving for every current caller (verified against
      live account/backfill-claim state before writing code); only becomes a live boundary
      once the extension's own `chrome.identity` session (still ahead) sends real user JWTs.
+   - ~~**Extension login session**~~ — **SHIPPED 2026-07-21.** The extension now runs its
+     own Supabase session — the live boundary W1-1 set up for. Hand-rolled PKCE (no
+     supabase-js in the vanilla-TS bundle): `chrome.identity.launchWebAuthFlow` opens
+     Google's consent screen against GoTrue's `/authorize`, the background worker exchanges
+     the returned code for `{access_token, refresh_token, expires_at}` at `/token?grant_type=pkce`
+     and stores it in `chrome.storage.local`; refresh is lazy-in-the-fetch-wrapper (near
+     expiry) plus a `chrome.alarms` ~30 min periodic (MV3 evicts any in-memory timer),
+     single-flighted so the two paths can't race Supabase's refresh-token reuse-detection.
+     `VITE_API_TOKEN` deleted from the bundle entirely — every extension-touched route
+     already ran on `verify_jwt` (W1-1), so this was pure auth-plumbing with **zero backend
+     changes**. `manifest.json` gained a `key` (a generated RSA keypair's public half) so
+     "Load unpacked" gives the same extension ID everywhere, needed because the GoTrue PKCE
+     redirect URL (`https://<id>.chromiumapp.org/`) must be pre-registered with both Supabase
+     and Google; `host_permissions` narrowed from `https://*/*` to just the API + Supabase
+     origins, computed at build time in `vite.config.ts` from the same env vars that inline
+     into the bundle. The panel shows a "Přihlásit se přes Google" prompt when signed out
+     and a compact email + "Odhlásit" line when signed in — no separate popup surface.
+     **Operator follow-up needed** (dashboard access only, can't be done from a session):
+     register the pinned redirect URL in Supabase's Additional Redirect URLs + the Google
+     OAuth client's Authorized redirect URIs, and add the `EXT_SUPABASE_URL` /
+     `EXT_SUPABASE_ANON_KEY` GitHub Actions secrets (replacing the retired `EXT_API_TOKEN`)
+     — exact steps in `chrome-extension/README.md` § Sign-in. The private half of the
+     generated keypair was handed to the operator out-of-band (not committed, only the
+     public half lives in `manifest.json`).
+   - Remaining: the metering substrate (`usage_ledger`/`check_budget` — needs a product
+     decision on quota shape: free-tier run count vs USD budget, daily vs monthly window),
+     the atomic submit-time gates (entitlement/budget/concurrency/idempotency), moving agent
+     execution off the request process onto a job lane on the realtime worker, a periodic
+     zombie-run sweep, and Chrome Web Store submission readiness (privacy policy,
+     single-purpose statement, staged rollout, the platform-wide `API_TOKEN` rotation
+     cutover — see `chrome-extension/README.md` § Chrome Web Store submission).
 
 **Housekeeping done 2026-07-20:** operator enabled Supabase Auth's leaked-password-protection
 toggle (Authentication → Sign In / Providers → Email → "Prevent use of leaked passwords").

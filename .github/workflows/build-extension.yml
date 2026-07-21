@@ -5,11 +5,14 @@ name: "CI: build Chrome extension"
 # the operator's laptop (no local Node install needed).
 #
 # Secrets required on the repository:
-#   EXT_API_BASE_URL  →  same value as the Railway FastAPI URL
-#   EXT_API_TOKEN     →  same value as API_TOKEN on the Railway service
+#   EXT_API_BASE_URL       →  same value as the Railway FastAPI URL
+#   EXT_SUPABASE_URL       →  same value as VITE_SUPABASE_URL on the SPA
+#   EXT_SUPABASE_ANON_KEY  →  same value as VITE_SUPABASE_ANON_KEY on the SPA
 # Add them at Settings → Secrets and variables → Actions → New
 # repository secret. The build inlines them into the bundle at build
-# time (Path 1 — see chrome-extension/README.md).
+# time (Path 1 — see chrome-extension/README.md). Wave 1: the extension
+# runs its own PKCE session against Supabase GoTrue, so it no longer
+# carries a static API bearer token (EXT_API_TOKEN, retired).
 
 on:
   push:
@@ -49,7 +52,8 @@ jobs:
           # build the bundle — the runtime warns on startup and the
           # operator sees a clear "API base URL not configured" message.
           VITE_API_BASE_URL: ${{ secrets.EXT_API_BASE_URL }}
-          VITE_API_TOKEN: ${{ secrets.EXT_API_TOKEN }}
+          VITE_SUPABASE_URL: ${{ secrets.EXT_SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ secrets.EXT_SUPABASE_ANON_KEY }}
           # SPA base URL for the "Otevřít v aplikaci" link. Optional — empty → link hidden.
           VITE_APP_BASE_URL: ${{ secrets.EXT_APP_BASE_URL }}
       - name: Stamp build metadata

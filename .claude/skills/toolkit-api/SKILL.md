@@ -280,7 +280,12 @@ Scraper orchestration:
 
 Frontend / extension (build-time only, inlined into the browser bundle — *not* backend
 runtime): `VITE_SUPABASE_URL` + `VITE_SUPABASE_ANON_KEY` (the publishable anon key, safe in
-the browser), and `VITE_API_BASE_URL` / `VITE_API_TOKEN` (and the extension's
-`EXT_API_BASE_URL` / `EXT_API_TOKEN` that map to them). These follow the Path 1 posture: the
-token is embedded in a build shipped only to trusted operators.
+the browser), and `VITE_API_BASE_URL` / `VITE_API_TOKEN` for the SPA (Path 1 posture: the
+static token is embedded in a build shipped only to trusted operators, until the
+platform-wide rotation cutover). The **extension** (`EXT_API_BASE_URL` /
+`EXT_SUPABASE_URL` / `EXT_SUPABASE_ANON_KEY` repo secrets → `VITE_API_BASE_URL` /
+`VITE_SUPABASE_URL` / `VITE_SUPABASE_ANON_KEY` at build) no longer carries `VITE_API_TOKEN` /
+`EXT_API_TOKEN` at all (Wave 1, 2026-07-21) — it runs its own Supabase session via a
+hand-rolled PKCE flow (`chrome-extension/src/auth.ts`), so no bearer secret ships in the
+bundle and it's safe to distribute broadly.
 
