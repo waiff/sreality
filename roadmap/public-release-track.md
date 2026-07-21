@@ -170,8 +170,12 @@ remediation R3 closes that. Full spec: `docs/design/public-release-remediation-2
    gate — generalizing to admin surface #27 without anyone remembering to register it,
    which is what the deferred-to-re-audit posture could not do. Verified live: both gates
    return zero today, and the offline gate was tested against a synthetic offender.
-5. **R4** — Pipeline broker fetch: degrade only on the A6 42501 signature, log anything else;
-   update the stale `docs/architecture.md` broker paragraph in the same PR. § R4.
+5. ~~**R4**~~ — **SHIPPED 2026-07-20 (PR #845).** Both Pipeline broker fetches now degrade
+   silently only on the A6 signature (SQLSTATE `42501` on `PostgrestError.code` — verified
+   live to be a revoked grant, not an RLS-empty result) and `console.error` before degrading
+   on anything else, so a genuine regression is no longer indistinguishable from the
+   permanent mask. Dropped the redundant empty-Map ternary, and corrected the
+   `docs/architecture.md` paragraph that still described the broker box as working.
 6. Phase 1 exit gate: external re-audit (`/code-review ultra`) — anchor cases + blind spots
    listed in the remediation doc's final section.
 7. Wave 1 (extension + agent estimations: quotas, async job lane, Stripe checkout + metering).
