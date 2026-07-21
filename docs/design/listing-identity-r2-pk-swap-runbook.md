@@ -363,8 +363,8 @@ the failure each one actually prevented:
 
 **Still open in §4 — three groups, in priority order:**
 
-1. **Dedup identity chains (4 PRs, the biggest remaining item).** **PR1 (#883, mig
-   345), PR2 (#884, mig 346) and PR3 are SHIPPED — PR4 remains.** Do NOT start the
+1. **Dedup identity chains (4 PRs, the biggest remaining item) — ALL FOUR SHIPPED.**
+   **PR1 (#883, mig 345), PR2 (#884, mig 346), PR3 (#889), and PR4 are done.** Do NOT start the
    rest piecemeal: all four pair caches carried `CHECK (sreality_id_a <
    sreality_id_b)`, and 77% of rows sort DIFFERENTLY by surrogate (56,375 rows
    checked; positional mirroring is 100% clean, so the read cutover is provably
@@ -399,11 +399,8 @@ the failure each one actually prevented:
    — the chain `ListingKey → closure(a,b) → cache SQL → in-memory dict key` is one
    id-space and splitting it produces SILENT wrong answers, not errors (the pHash
    dict lookups `.get(..., 0)` their default, so the free fast-path just stops
-   firing); (PR4) read surfaces. Two traps: reads must become `LEAST/GREATEST`,
-   NOT a repositioned equality (a naive column swap misses 77% of warm rows → full
-   LLM re-bill of ~56k verdicts), and the pair-cache `DO UPDATE SET` omits
-   `sreality_id_a/_b` today — harmless only because the CHECK freezes order, a
-   latent inconsistency the moment order can vary.
+   firing); (PR4 — DONE) read surfaces — see below for what it actually found
+   (not the two anticipated traps, which turned out already closed).
 
    **PR3 — DONE.** `ListingKey` gained a `listing_id` field, populated by both
    `scripts/dedup_engine.py` loading SELECTs (`_ELIGIBLE_COLS` + `_cell_eligible_sql`
@@ -432,7 +429,8 @@ the failure each one actually prevented:
    (the `/dedup` operator panel's evidence reader, `decision_evidence` /
    `_phash_audit_chunk`) is a pure READ surface over `dedup_pair_audit`'s own
    already-nullable `left/right_sreality_id` columns — it does no canonicalisation
-   and rides with PR4 ("read surfaces"), not PR3. (b) The `_ProbeCache` /
+   and rides with PR4 ("read surfaces"), not PR3 — see the PR4 writeup below for
+   what that surface actually turned out to need. (b) The `_ProbeCache` /
    per-listing image-fact helpers in `scripts/dedup_engine.py`
    (`_phash_pairs_cached`, `_clip_incomplete_any`, `_downloads_incomplete_any`,
    `_last_evidence_at`, `_both_have_site_plan`, `_floor_plan_ids_cached`,
@@ -443,6 +441,38 @@ the failure each one actually prevented:
    scope. (c) `classify`'s defer site (`_build_classify_fn`) still passes
    `sreality_id_a` alone to `enqueue_deferred_request` — classify has no pair to
    canonicalise (single listing), so there is no ordering trap there; left as-is.
+
+   **PR4 — DONE.** The two anticipated traps (reads needing `LEAST/GREATEST`,
+   and the pair-cache `DO UPDATE SET` omitting `sreality_id_a/_b`) turned out to
+   already be closed: PR3 fixed the `DO UPDATE SET` omission on all four caches,
+   and `api/property_dedup.py` — PR4's named target — never queries the four
+   pair caches directly (it reads `dedup_pair_audit`, which per mig 322's own
+   comment has no unique constraint on its pair columns and needs "a reader
+   repoint only — no guard to replace"). Census instead found a DIFFERENT, real
+   pre-Gate-2 read-surface bug of the same "legacy handle instead of the
+   surrogate" shape as #873's Browse fix: `properties.repr_listing_id` (legacy,
+   sreality-valued) and `repr_listing_ref_id` (the surrogate FK to `listings.id`,
+   mig 323) are in sync TODAY (0/551,293 properties diverge, verified live) but
+   only because every repr listing still carries a legacy `sreality_id` value
+   (real or synthetic) — post-Gate-2 that stops being guaranteed. Three read
+   surfaces still joined the repr listing on `listings.sreality_id =
+   properties.repr_listing_id`: `api/property_dedup.py`'s `list_candidates` (the
+   review card's `source`/`source_url`/`description`), `api/curation.py`'s
+   `get_collection` (a collection's property rows' `source`), and
+   `scripts/recompute_property_stats.py`'s `_PUBLISH_INELIGIBLE_SQL` (the
+   publication-gate sweep — a miss here would leave non-sreality-repr properties
+   permanently unpublished post-Gate-2, since there's deliberately no timeout
+   sweep to catch them later). All three repointed onto `listings.id =
+   properties.repr_listing_ref_id` (already indexed:
+   `properties_repr_listing_ref_id_idx` + the `listings` PK), matching #873's
+   pattern exactly. `api/notifications.py`'s collection-monitor CTE already did
+   this correctly (gates on `repr_listing_ref_id IS NOT NULL`) — the template
+   this PR copied. **Still open, NOT part of this 4-PR chain** (unchanged from
+   (b) above): the `_ProbeCache` surface — verified live this is NOT a live bug
+   today (`images.sreality_id`/`images.listing_id` are both 0/8,344,823 NULL,
+   fully populated and reliably joinable), but repointing onto `images.listing_id`
+   is the established target pattern (`toolkit/clip_dedup.py` already does this)
+   and remains a mechanical follow-up whenever it's picked up.
 2. **Browse FRONTEND hydration** (the DB half shipped in #873). `.in('sreality_id', …)`
    at queries.ts ~1182/1212/1238/1448 → the surrogate; React keys and the maplibre
    feature id; `listingPath()` fallback for a card whose repr has no sreality_id

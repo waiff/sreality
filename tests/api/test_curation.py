@@ -727,3 +727,18 @@ def test_add_properties_redirects_merged_away_to_survivor():
     assert out["added"] == 1
     ins = [p for q, p in conn.executed if "INSERT INTO collection_properties" in q]
     assert ins and ins[0][1] == [42]  # survivor id inserted, not 99
+
+
+def test_get_collection_properties_repr_join_uses_the_surrogate(monkeypatch):
+    # Pre-Gate-2 hardening (mirrors #873's Browse fix): the repr listing must be
+    # joined on repr_listing_ref_id (listings.id), not the legacy sreality_id
+    # handle, or a non-sreality repr silently blanks `source` on the collection page.
+    monkeypatch.setattr(
+        curation, "_fetch_collection", lambda conn, cid: {"id": cid, "name": "x"},
+    )
+    conn = _ScriptConn([])
+    out = curation.get_collection(conn, 1)
+    assert out["properties"] == []
+    props_sql = next(q for q, _ in conn.executed if "collection_properties cp" in q)
+    assert "LEFT JOIN listings rl ON rl.id = p.repr_listing_ref_id" in props_sql
+    assert "sreality_id = p.repr_listing_id" not in props_sql
