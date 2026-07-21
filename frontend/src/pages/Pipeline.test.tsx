@@ -56,6 +56,7 @@ const CARDS: PipelineBoardCard[] = [
     place_search_text: 'Sadová, Praha',
     okres: 'Praha',
     region: 'Hlavní město Praha',
+    is_active: true,
     image_url: null,
     broker: {
       broker_id: 7,
@@ -88,8 +89,20 @@ const CARD_DUM: PipelineBoardCard = {
   place_search_text: 'Lesní, Brno',
   okres: 'Brno-město',
   region: 'Jihomoravský kraj',
+  is_active: true,
   image_url: null,
   broker: null,
+};
+
+// A delisted property, for the active/inactive status-filter test.
+const CARD_INACTIVE: PipelineBoardCard = {
+  ...CARD_DUM,
+  property_id: 44,
+  sreality_id: 333,
+  street: 'Polní',
+  district: 'Ostrava',
+  place_search_text: 'Polní, Ostrava',
+  is_active: false,
 };
 
 describe('planMove', () => {
@@ -178,6 +191,28 @@ describe('<Pipeline> board', () => {
       expect(screen.queryByText('Sadová, Praha')).not.toBeInTheDocument(),
     );
     expect(screen.getByText('Lesní, Brno')).toBeInTheDocument();
+  });
+
+  it('filters the board by active/inactive status', async () => {
+    vi.mocked(queries.fetchPipelineBoard).mockResolvedValue([CARDS[0], CARD_INACTIVE]);
+    renderBoard();
+    // Both cards render; the status pills appear (a delisted card is present).
+    expect(await screen.findByText('Sadová, Praha')).toBeInTheDocument();
+    expect(screen.getByText('Polní, Ostrava')).toBeInTheDocument();
+    const aktivni = screen.getByRole('button', { name: 'Aktivní' });
+    const neaktivni = screen.getByRole('button', { name: 'Neaktivní' });
+    // Filter to Aktivní → only the live card remains.
+    fireEvent.click(aktivni);
+    await waitFor(() =>
+      expect(screen.queryByText('Polní, Ostrava')).not.toBeInTheDocument(),
+    );
+    expect(screen.getByText('Sadová, Praha')).toBeInTheDocument();
+    // Switching to Neaktivní flips which card is visible.
+    fireEvent.click(neaktivni);
+    await waitFor(() =>
+      expect(screen.queryByText('Sadová, Praha')).not.toBeInTheDocument(),
+    );
+    expect(screen.getByText('Polní, Ostrava')).toBeInTheDocument();
   });
 
   it('trash → confirm removes the card via removePipelineCard', async () => {

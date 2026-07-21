@@ -915,6 +915,9 @@ export interface PipelineBoardCard {
   place_search_text: string | null;
   okres: string | null;
   region: string | null;
+  /* properties.is_active rollup (bool_or over child listings, rule #15/#20) —
+   * the same dedup-aware liveness signal Browse filters on. */
+  is_active: boolean;
   image_url: string | null;
   broker: PipelineCardBroker | null;
 }
