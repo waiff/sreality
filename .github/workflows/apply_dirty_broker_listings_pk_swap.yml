@@ -1,0 +1,56 @@
+name: Apply dirty_broker_listings PK swap
+
+# R2 Phase D — finalizes dirty_broker_listings's PK swap (sreality_id -> listing_id),
+# deliberately deferred from PR #853's dual-write until the writer deploy was
+# confirmed fully live (see scripts/apply_dirty_broker_listings_pk_swap.py). Must
+# run BEFORE the matching writer-code deploy lands (ON CONFLICT (listing_id) needs
+# the unique index this creates).
+#
+# Dispatch-only, own concurrency group, idempotent: checks current PK state first,
+# so a killed run resumes rather than redoing work.
+#
+# Required secrets: SUPABASE_DB_URL, SUPABASE_DB_SESSION_URL.
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Report current state and exit
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+concurrency:
+  group: apply-dirty-broker-listings-pk-swap
+  cancel-in-progress: false
+
+jobs:
+  pk-swap:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      SUPABASE_DB_SESSION_URL: ${{ secrets.SUPABASE_DB_SESSION_URL }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: pip install -e .
+
+      - name: Apply dirty_broker_listings PK swap
+        run: |
+          set -o pipefail
+          ARGS=""
+          if [ "${{ inputs.dry_run }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
+          python -m scripts.apply_dirty_broker_listings_pk_swap $ARGS 2>&1
