@@ -239,6 +239,25 @@ scripts/workflows, both idempotent and re-run-safe:
   records (mirroring migration 333's pattern; **Phase B/B2 never got this
   treatment and have no tracking migration at all** — a pre-existing gap, not
   something this PR tries to retroactively fix).
+
+  **Ledger + replay divergence (standing note, from the 2026-07-21 audit).** Two
+  distinct facts to keep straight: (1) migrations **337/338/339** are repo files
+  only — they were applied via the dispatch-only workflow scripts and have NO row
+  in `supabase_migrations.schema_migrations` (333–336 all DO — the earlier
+  "cf. migration 333" framing was imprecise; 333 was MCP-applied and ledgered,
+  its index merely pre-built CONCURRENTLY). A ledger-driven `supabase db push`
+  would see 337/338/339 as PENDING and re-apply them; 339 is NOT a no-op on
+  already-swapped prod (`CREATE UNIQUE INDEX IF NOT EXISTS
+  dirty_broker_listings_listing_id_key` would build a brand-new duplicate index —
+  the original was renamed to `dirty_broker_listings_pkey` by `ADD CONSTRAINT …
+  USING INDEX`). Never `db push` these against the production project. (2) A
+  **fresh replay of `migrations/` cannot reproduce prod anyway**: the Phase B FK
+  graph (19 `listing_id → listings(id)` FKs) and every Phase B2 guard (12 unique
+  indexes/constraints, 4 pair-cache expression indexes, 17 validated NOT NULL
+  CHECKs) exist only via `apply_r2_constraints.py`/`apply_r2_unique_guards.py` —
+  no migration file creates them. Disaster recovery for the R2 window is
+  PITR/base-backup, NOT migration replay; a faithful-rebuild path would need
+  plain-form Phase B/B2 migrations backfilled first.
 - `drop_r2_legacy_fks.py` — drops the 19 legacy child FKs onto
   `listings(sreality_id)`, read live off `pg_constraint` (matched the runbook's
   count of 19 exactly, unlike the NOT NULL count above). Integrity is already held
@@ -274,6 +293,26 @@ verified via `EXPLAIN` against prod: `Conflict Arbiter Indexes:
 dirty_broker_listings_pkey`) — reversing the order would have deployed code
 whose arbiter had no matching index yet. **Phase D is now fully complete**; every
 §5 prerequisite for Gate 1 is met.
+
+**Honest caveat found by the 2026-07-21 post-Phase-D audit — the chosen order was
+NOT symmetric-risk-free either.** A PK swap (unlike an additive dual-write) is the
+one step where BOTH orders carry a window: the schema swap dropped the ONLY
+unique index on `dirty_broker_listings.sreality_id` at 05:14:17Z, so any OLD-code
+writer still executing `ON CONFLICT (sreality_id)` between then and its own
+redeploy raised 42P10 ("no unique or exclusion constraint matching the ON
+CONFLICT specification") at plan time and aborted its whole enclosing
+transaction — and #859 didn't merge until 05:18:27Z, with the Railway worker
+restarting ~05:21:25Z: a ~7-minute broken window for the two enqueue sites
+(sreality batch drain + idnes ingest). Audited outcome: a brief idnes/snapshot
+write dip, fully recovered by queue retry, zero rows lost — acceptable ONLY
+because the table's writers redeploy in minutes and the failure mode is a
+retried transaction, not data loss. **Guardrail for every FUTURE carrier PK
+swap (and Gate 1 itself):** there is no zero-window ordering with only
+(old-index, new-index-as-PK) states; if a window matters, keep BOTH unique
+indexes live through the transition — build the new unique index, deploy code
+arbitrating on it, THEN swap the PK and drop the old index — or accept and
+time-box the window deliberately, during a paused-writer window (§6 already
+pauses writers for Gate 1, which is why Gate 1 does not inherit this hazard).
 
 **Next: Phase C's remaining read cutover** (§4 second half) is still open: browse
 hydration, dedup `ListingKey` + pair-cache reads, merge/unmerge replay,
@@ -529,6 +568,16 @@ MUST precede flip (the flip-gate checklist, §8):
   recreate on (id) + swap script cursors, else geocode/street/geo_cell enrichment silently
   stops for exactly the new rows.
 - `condition_levels_propagated_from` stamp (condition_scoring.py:333).
+- **Broker-resolver queue CONSUMER** (found by the 2026-07-21 post-Phase-D audit — this
+  session re-keyed `dirty_broker_listings`'s producers + PK onto `listing_id` but the
+  sole consumer still runs in sreality_id space): `resolve_brokers.py` `_CLAIM_DIRTY`
+  (:537 `SELECT sreality_id …`), `_DELETE_DIRTY` (:538 `DELETE … WHERE sreality_id =
+  ANY(…)`), and the `_attribute`/`_link` joins (:983/:985 `l.sreality_id = ANY(…)`) —
+  re-key all onto `listing_id` (now the PK). Post-flip a non-sreality enqueue writes
+  `sreality_id = NULL`: the claim returns NULL, the DELETE never matches NULL → broker
+  attribution silently stops for new rows AND the queue leaks undeletable rows. Minor
+  today: the DELETE also lost its index with the PK swap (seq scan; harmless at this
+  table's size, self-fixes with the re-key).
 
 MAY lag briefly (degraded, not broken — but health should still go before the flip to avoid
 silent-green): the 25-read-model wave — health matviews (136/176/214/216; post-flip NULL
