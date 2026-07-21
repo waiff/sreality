@@ -39,8 +39,13 @@ common to all. Full plan, sequencing, and gates: `docs/design/public-release-pro
     `require_entitlement` gate, admin Tiers & agenda-visibility screen in Settings,
     plan-driven tenant nav. Stripe products/checkout flow still to come with Wave 1
     metering; `STRIPE_WEBHOOK_SECRET` on the API service arms the webhook.
-- **Waves 1–4 (public features)** — not started; gated on Phase 1's exit (RLS lane green +
-  external re-audit + 2-account pen-test).
+- **Phase 1 exit gate — CLOSED 2026-07-21.** The external re-audit ran against PR #856 and
+  its 13 findings were remediated in full (round 2, PRs A–G, migrations 340–342); the RLS
+  lane and the 2-account pen-test are green, and both standing gate lanes (offline over
+  migration SQL, live over `pg_views` + authenticated-callable functions) are now
+  adversarially validated rather than merely asserted.
+- **Waves 1–4 (public features)** — **Wave 1 is now unblocked** and is the next body of
+  work; Waves 2–4 follow its ordering constraints (`docs/design/waves-1-4-public-features.md`).
 
 **CRITICAL finding + fix, 2026-07-20:** the 2-account pen-test
 (`tests/test_tenant_isolation_live.py`) only ever asserted RLS on **base tables**
@@ -186,9 +191,31 @@ remediation R3 closes that. Full spec: `docs/design/public-release-remediation-2
    (A: scrape_runs gate; B: per-account estimates scoping; C: durable MAINTAIN revoke;
    D: gate-lane honesty — seeds, OR-evasion, parser hardening, coverage floor 299;
    E: API require_admin route-coverage test; F: docs/skill corrections; G: CI replay
-   PG15→17). **PR-A shipped 2026-07-21 (migration 340)** — the audit's one live exposure:
-   `scrape_runs_public` 7 945 → 0 rows and `recent_scrape_runs()` 2 166 → 0 for a non-admin.
-7. Wave 1 (extension + agent estimations: quotas, async job lane, Stripe checkout + metering).
+   PG15→17). **All seven shipped 2026-07-21** (migrations 340/341/342) — details below.
+7. ~~**Round-2 remediation (PRs A–G)**~~ — **COMPLETE 2026-07-21.** Migrations 340–342.
+   - **A** (mig 340, #863) — the audit's one live exposure: `scrape_runs_public`
+     7 945 → 0 rows and `recent_scrape_runs()` 2 166 → 0 for a non-admin.
+   - **B** (mig 341, #864) — per-account scoping on `property_estimates_public`. The
+     naive "own accounts OR admin" predicate returns **zero** rows live (every run sits on
+     the shared SYSTEM account `0000…0000`, also the column DEFAULT); the view mirrors
+     **all three** RLS arms or Browse's "with estimates" filter empties again (mig-316 déjà vu).
+   - **C** (mig 342, #865) — MAINTAIN revoked at the **postgres DEFAULT ACL**, not
+     per-relation: mig 331's one-time revoke had been undone within a day by the 30-min
+     `properties_map_mv` blue-green rebuild. 85 holders → 0.
+   - **D** (#868) — made the standing gates provable: `gate_is_sound` rejects OR'd and
+     tautology gates (35/35 live accepted, 8/8 adversarial rejected), a string/dollar-quote-aware
+     SQL scanner (the old regex let a literal containing `/*` swallow whole CREATE statements),
+     coverage floor 333→299 with an 8-entry historical exemption set. The deny test was
+     **vacuous** on the empty CI DB — it now seeds 17 views and asserts reachability before denial.
+   - **E** (#869) — standing test that every admin-prefixed API route carries `require_admin`.
+     FastAPI ≥0.13x `include_router` appends one `_IncludedRouter` wrapper instead of splicing,
+     so route-table introspection must recurse via `original_router.routes`. Live app = 190
+     route-method pairs (88 admin / 89 token / 10 tenant / 3 public); **no ungated admin route**.
+   - **F** (#871) — the `database` skill's per-row-gate rule split into its three real cases,
+     plus a lock-timeout rule for GRANT/REVOKE on cron-refreshed relations.
+   - **G** (#872) — CI schema replay PG15 → PG17 to match prod 17.6; the version gap is
+     exactly what let the MAINTAIN drift go unnoticed. Passed first try.
+8. Wave 1 (extension + agent estimations: quotas, async job lane, Stripe checkout + metering).
 
 **Housekeeping done 2026-07-20:** operator enabled Supabase Auth's leaked-password-protection
 toggle (Authentication → Sign In / Providers → Email → "Prevent use of leaked passwords").
