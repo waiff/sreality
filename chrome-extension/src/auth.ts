@@ -86,6 +86,21 @@ function decodeJwtPayload(token: string): Record<string, unknown> | null {
   }
 }
 
+/* GoTrue error responses come in two shapes depending on the project's Auth
+ * server version: the older `{error, error_description}` and the current
+ * `{code, error_code, msg}`. Checking only the old shape silently swallowed
+ * every real error into a generic fallback — surface whichever is present. */
+function extractGoTrueError(body: unknown): string | null {
+  if (body == null || typeof body !== 'object') return null;
+  const b = body as Record<string, unknown>;
+  if (typeof b.msg === 'string') {
+    return typeof b.error_code === 'string' ? `${b.msg} (${b.error_code})` : b.msg;
+  }
+  if (typeof b.error_description === 'string') return b.error_description;
+  if (typeof b.error === 'string') return b.error;
+  return null;
+}
+
 async function gotrueFetch(path: string, init: RequestInit & { accessToken?: string }): Promise<{
   ok: boolean;
   status: number;
@@ -191,10 +206,8 @@ export async function signInWithGoogle(): Promise<{ ok: true } | { ok: false; de
     body: JSON.stringify({ auth_code: code, code_verifier: codeVerifier }),
   });
   if (!res.ok) {
-    const detail = res.body && typeof res.body === 'object' && res.body !== null
-      && 'error_description' in res.body
-      ? String((res.body as { error_description: unknown }).error_description)
-      : 'výměna kódu za relaci selhala';
+    const detail = extractGoTrueError(res.body)
+      ?? `výměna kódu za relaci selhala (HTTP ${res.status})`;
     return { ok: false, detail };
   }
   await storeSession(res.body as GoTrueTokenResponse);
@@ -222,6 +235,7 @@ async function doRefresh(): Promise<boolean> {
     body: JSON.stringify({ refresh_token: s.refresh_token }),
   });
   if (!res.ok) {
+    console.warn('[sreality-ext] session refresh failed:', extractGoTrueError(res.body) ?? res.status);
     await clearSession();
     return false;
   }
