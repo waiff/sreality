@@ -176,8 +176,17 @@ remediation R3 closes that. Full spec: `docs/design/public-release-remediation-2
    on anything else, so a genuine regression is no longer indistinguishable from the
    permanent mask. Dropped the redundant empty-Map ternary, and corrected the
    `docs/architecture.md` paragraph that still described the broker box as working.
-6. Phase 1 exit gate: external re-audit (`/code-review ultra`) — anchor cases + blind spots
-   listed in the remediation doc's final section.
+6. ~~Phase 1 exit gate: external re-audit~~ — **RAN 2026-07-21** against the review-only
+   PR #856 (the whole 329-332 batch as one diff). 13 findings; all re-verified live before
+   planning (11 confirmed, 1 refuted, 1 partial, one escalation the audit missed: the
+   MAINTAIN revoke had already drifted back via the postgres default ACL on the
+   `properties_map_mv` blue-green rebuild). One live exposure (`scrape_runs_public` +
+   `recent_scrape_runs()` readable by any signed-in user), the rest latent/lane-hardening.
+   **Round-2 fix plan: `docs/design/public-release-remediation-round2.md`** — 7 PRs
+   (A: scrape_runs gate; B: per-account estimates scoping; C: durable MAINTAIN revoke;
+   D: gate-lane honesty — seeds, OR-evasion, parser hardening, coverage floor 299;
+   E: API require_admin route-coverage test; F: docs/skill corrections; G: CI replay
+   PG15→17). Awaiting operator go-ahead to implement.
 7. Wave 1 (extension + agent estimations: quotas, async job lane, Stripe checkout + metering).
 
 **Housekeeping done 2026-07-20:** operator enabled Supabase Auth's leaked-password-protection
