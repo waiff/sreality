@@ -275,6 +275,8 @@ for JWTs) — the allowlist records it explicitly so it stays a visible decision
 
 ## PR-G — bump the CI schema-replay to PG17 (G7 part C)
 
+**✅ SHIPPED 2026-07-21** (after PR-C was applied live and verified holding).
+
 **Branch `ci/replay-pg17` · LAST, and only after PR-C is applied live** (else the PG17
 replay goes red on the 85 MAINTAIN holders the moment the version-guarded checks activate).
 

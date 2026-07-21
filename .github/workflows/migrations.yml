@@ -62,13 +62,16 @@ jobs:
         run: |
           set -euo pipefail
           cat > /tmp/Dockerfile.ci <<'DOCKER'
-          FROM postgis/postgis:15-3.4
+          FROM postgis/postgis:17-3.4
+          # Match production (17.x). The replay ran 15 for a long time, which silently
+          # made every PG17-only check unassertable — MAINTAIN grants in particular, so
+          # migration 331's revoke could drift back for a day without CI noticing.
           # Install server + PostGIS + pgvector in ONE apt transaction so the
-          # binary and every contrib .so land at the same (newest) 15.x minor —
+          # binary and every contrib .so land at the same (newest) 17.x minor —
           # a partial upgrade is what triggers "undefined symbol" on load.
           RUN apt-get update \
             && apt-get install -y --no-install-recommends \
-                 postgresql-15 postgresql-15-postgis-3 postgresql-15-pgvector \
+                 postgresql-17 postgresql-17-postgis-3 postgresql-17-pgvector \
             && rm -rf /var/lib/apt/lists/*
           DOCKER
           docker build -t ci-postgis-pgvector -f /tmp/Dockerfile.ci /tmp
