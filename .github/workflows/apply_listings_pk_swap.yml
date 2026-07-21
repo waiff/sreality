@@ -66,18 +66,26 @@ jobs:
       - name: Install
         run: pip install -e .
 
+      # `confirm` is free text, so it goes through the environment rather than
+      # being interpolated into the shell. `mode` is a choice input and cannot
+      # take an arbitrary value, but it travels the same way for consistency.
       - name: Guard destructive modes
         if: inputs.mode == 'window' || inputs.mode == 'rollback'
+        env:
+          MODE: ${{ inputs.mode }}
+          CONFIRM: ${{ inputs.confirm }}
         run: |
-          if [ "${{ inputs.confirm }}" != "APPLY" ]; then
-            echo "::error::mode=${{ inputs.mode }} requires confirm=APPLY"
+          if [ "$CONFIRM" != "APPLY" ]; then
+            echo "::error::mode=$MODE requires confirm=APPLY"
             exit 1
           fi
 
       - name: Run
+        env:
+          MODE: ${{ inputs.mode }}
         run: |
           set -o pipefail
-          case "${{ inputs.mode }}" in
+          case "$MODE" in
             preflight)   ARGS="--preflight" ;;
             window)      ARGS="--window --confirm" ;;
             resume-cron) ARGS="--resume-cron" ;;
