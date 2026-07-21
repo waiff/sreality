@@ -82,7 +82,7 @@ def _id_sequence(*ids: int) -> Callable[[], list[tuple[int]]]:
 def test_split_detaches_all_but_anchor_and_recomputes():
     conn = _FakeConn([
         (lambda s: "FROM properties WHERE id = %s FOR UPDATE" in s, [(50, "active")]),
-        (lambda s: "SELECT sreality_id FROM listings WHERE property_id" in s,
+        (lambda s: "SELECT id FROM listings WHERE property_id" in s,
          [(1001,), (1002,), (1003,)]),
         (lambda s: "INSERT INTO properties" in s, _id_sequence(9001, 9002)),
         (lambda s: "WITH batch AS" in s, []),
@@ -112,7 +112,7 @@ def test_split_detaches_all_but_anchor_and_recomputes():
 def test_split_is_noop_for_single_child():
     conn = _FakeConn([
         (lambda s: "FROM properties WHERE id = %s FOR UPDATE" in s, [(50, "active")]),
-        (lambda s: "SELECT sreality_id FROM listings WHERE property_id" in s, [(1001,)]),
+        (lambda s: "SELECT id FROM listings WHERE property_id" in s, [(1001,)]),
     ])
 
     res = split_property_to_singletons(conn, property_id=50)
