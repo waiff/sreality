@@ -179,23 +179,29 @@ def _set_cron_active(conn: Any, jobids: list[int], active: bool) -> None:
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT cron.alter_job(job_id := %s, active := %s)", (jobid, active))
-    conn.commit()
 
 
 def _swap_tx(conn: Any, statements: list[str], label: str) -> None:
     """Run `statements` as ONE transaction, retrying the whole unit on a lock
-    conflict. Never leaves the table between the DROP and the ADD."""
+    conflict. Never leaves the table between the DROP and the ADD.
+
+    `conn.transaction()` is REQUIRED, not stylistic: both db.connect() and
+    db.connect_session() open with autocommit=True ("callers manage transactions
+    explicitly"), so without an explicit block each ALTER would commit on its own
+    — reopening the 42P10 window this function exists to close — and `SET LOCAL
+    lock_timeout` would silently apply to nothing. The block also rolls back on
+    its own when the body raises, so no manual rollback here.
+    """
     for attempt in range(_LOCK_RETRIES):
         try:
-            with conn.cursor() as cur:
-                cur.execute(f"SET LOCAL lock_timeout = '{_LOCK_TIMEOUT}'")
-                for sql in statements:
-                    log.info("  %s", sql)
-                    cur.execute(sql)
-            conn.commit()
+            with conn.transaction():
+                with conn.cursor() as cur:
+                    cur.execute(f"SET LOCAL lock_timeout = '{_LOCK_TIMEOUT}'")
+                    for sql in statements:
+                        log.info("  %s", sql)
+                        cur.execute(sql)
             return
         except (psycopg.errors.LockNotAvailable, psycopg.errors.DeadlockDetected) as exc:
-            conn.rollback()
             log.info("%s: %s (attempt %d) — retrying",
                      label, type(exc).__name__, attempt + 1)
             time.sleep(_RETRY_SLEEP)
