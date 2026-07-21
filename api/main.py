@@ -431,6 +431,7 @@ def post_compute_market_velocity(
         disposition=body.target.disposition,
         floor=body.target.floor,
         exclude_ids=list(body.target.exclude_ids),
+        exclude_listing_ids=list(body.target.exclude_listing_ids),
     )
     filters = ComparableFilters(
         radius_m=body.radius_m,
@@ -1094,6 +1095,7 @@ def post_estimate_yield(
         disposition=body.target.disposition,
         floor=body.target.floor,
         exclude_ids=list(body.target.exclude_ids),
+        exclude_listing_ids=list(body.target.exclude_listing_ids),
     )
     filters = ComparableFilters(
         radius_m=body.radius_m,
@@ -1579,6 +1581,7 @@ def _build_comparables_inputs(
         disposition=body.target.disposition,
         floor=body.target.floor,
         exclude_ids=list(body.target.exclude_ids),
+        exclude_listing_ids=list(body.target.exclude_listing_ids),
     )
     filters = ComparableFilters(
         radius_m=body.radius_m,
