@@ -309,7 +309,7 @@ def _query_corridor(
         "),\n"
         "candidate AS (\n"
         "  SELECT\n"
-        "    l.sreality_id, l.price_czk, l.area_m2,\n"
+        "    l.id AS listing_id, l.sreality_id, l.price_czk, l.area_m2,\n"
         "    (l.price_czk::numeric / NULLIF(l.area_m2, 0)) AS price_per_m2,\n"
         "    l.disposition, l.district,\n"
         "    l.locality_district_id, l.locality_region_id,\n"

@@ -103,15 +103,15 @@ def _cohort_envelope() -> dict[str, Any]:
         "data": {
             "listings": [
                 {
-                    "sreality_id": 100, "price_czk": 30000, "area_m2": 60,
+                    "listing_id": 900100, "sreality_id": 100, "price_czk": 30000, "area_m2": 60,
                     "price_per_m2": 500, "latest_snapshot_id": 1,
                 },
                 {
-                    "sreality_id": 101, "price_czk": 32000, "area_m2": 60,
+                    "listing_id": 900101, "sreality_id": 101, "price_czk": 32000, "area_m2": 60,
                     "price_per_m2": 533, "latest_snapshot_id": 2,
                 },
                 {
-                    "sreality_id": 102, "price_czk": 28000, "area_m2": 60,
+                    "listing_id": 900102, "sreality_id": 102, "price_czk": 28000, "area_m2": 60,
                     "price_per_m2": 467, "latest_snapshot_id": 3,
                 },
             ],
@@ -430,3 +430,38 @@ def test_normalise_decisions_returns_empty_when_field_absent():
     assert _normalise_decisions(None) == []
     assert _normalise_decisions("not a list") == []
     assert _normalise_decisions([]) == []
+
+
+def test_used_entry_carries_both_ids():
+    """comparables_used must be a strict SUPERSET of the old shape.
+
+    estimation_runs rows are immutable (rule 12), so the frozen entries carry
+    sreality_id only. Emitting both gives every reader ONE rule — prefer
+    listing_id, else resolve sreality_id — with no version switch. The
+    sreality_id assertion is the load-bearing one: dropping it would silently
+    break the SPA, which drives three batch fetches off that key and would
+    render empty cells rather than raise."""
+    from api.estimate_yield import _used_entry
+
+    entry = _used_entry({
+        "listing_id": 900_123, "sreality_id": 123,
+        "latest_snapshot_id": 7, "latest_snapshot_at": None,
+        "data_age_days": 2, "last_freshness_check_at": None,
+    })
+    assert entry["listing_id"] == 900_123
+    assert entry["sreality_id"] == 123
+
+
+def test_used_entry_tolerates_a_listing_without_a_legacy_id():
+    """A post-Gate-2 comparable has no sreality_id. It must project as None,
+    not raise — _used_entry runs inside the estimation write path."""
+    from api.estimate_yield import _used_entry
+
+    entry = _used_entry({
+        "listing_id": 900_124, "sreality_id": None,
+        "latest_snapshot_id": 8, "latest_snapshot_at": None,
+        "data_age_days": 1, "last_freshness_check_at": None,
+    })
+    assert entry["listing_id"] == 900_124
+    assert entry["sreality_id"] is None
+    assert entry["snapshot_id"] == 8

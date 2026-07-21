@@ -235,7 +235,15 @@ def _gross_yield(
 
 
 def _used_entry(listing: dict[str, Any]) -> dict[str, Any]:
+    # BOTH ids, surrogate first. estimation_runs rows are immutable (rule 12), so
+    # the 600+ frozen comparables_used entries carry sreality_id only — every
+    # reader must therefore tolerate its absence rather than switch on a version.
+    # Emitting a strict superset gives them ONE rule: prefer listing_id, else
+    # resolve sreality_id. Dropping the legacy key here would also break the SPA,
+    # which drives three batch fetches off it (RunPanel), silently — empty maps,
+    # not errors — so it stays until the SPA cutover lands on its own schedule.
     return {
+        "listing_id": listing.get("listing_id"),
         "sreality_id": listing.get("sreality_id"),
         "snapshot_id": listing.get("latest_snapshot_id"),
         "snapshot_date": listing.get("latest_snapshot_at"),
