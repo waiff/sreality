@@ -363,16 +363,38 @@ the failure each one actually prevented:
 
 **Still open in §4 — three groups, in priority order:**
 
-1. **Dedup identity chains (4 PRs, the biggest remaining item).** Do NOT start it
-   piecemeal: all four pair caches carry `CHECK (sreality_id_a < sreality_id_b)`,
-   and 77% of rows sort DIFFERENTLY by surrogate (56,375 rows checked; positional
-   mirroring is 100% clean, so the read cutover is provably behaviour-preserving —
-   it is the WRITE order that is blocked). Required order: (PR1) migration
-   dropping the 4 CHECKs + adding `listing_id_a/_b` to `dedup_batch_requests`;
-   (PR2) make the batch spool identity-agnostic FIRST, because Anthropic batches
-   take up to 24h to return and `custom_id` is a persisted UNIQUE key whose scheme
-   changes — prefix the new form (`cmpL-`/`splL-`/`fplL-`) or flush the spool, else
-   in-flight requests get re-spooled and DOUBLE-BILLED; (PR3) the core swap, which
+1. **Dedup identity chains (4 PRs, the biggest remaining item).** **PR1 (#883, mig
+   345) and PR2 (#884, mig 346) are SHIPPED — PR3/PR4 remain.** Do NOT start the
+   rest piecemeal: all four pair caches carried `CHECK (sreality_id_a <
+   sreality_id_b)`, and 77% of rows sort DIFFERENTLY by surrogate (56,375 rows
+   checked; positional mirroring is 100% clean, so the read cutover is provably
+   behaviour-preserving — it is the WRITE order that is blocked). Required order:
+   (PR1 — DONE) migration dropping the 4 CHECKs + adding `listing_id_a/_b` to
+   `dedup_batch_requests`;
+   (PR2 — DONE) make the batch spool identity-agnostic FIRST, because Anthropic
+   batches take up to 24h to return and `custom_id` is a persisted UNIQUE key whose
+   scheme changes — prefix the new form (`cmpL-`/`splL-`/`fplL-`) or flush the spool,
+   else in-flight requests get re-spooled and DOUBLE-BILLED. **Live state made this
+   far cheaper than feared and the window is now closed behind us:** the spool was
+   EMPTY (0 `batch_id IS NULL`, 0 `status='pending'`; all 18,250 rows terminal, last
+   ingest 2026-07-16) and its gate `dedup_engine_batch_defer_enabled` has no
+   `app_settings` row and defaults false — the engine has never deferred, so nothing
+   could be in flight. Mig 346 encodes that as an executable pre-condition (RAISEs if
+   any row is `pending`) instead of a remembered one. `custom_id` is now built inside
+   `toolkit/dedup_batch_defer.py` (callers no longer pass one) from the SURROGATE
+   under `clsL-`/`cmpL-`/`splL-`/`fplL-`, using **min/max** so it is invariant under
+   the positional order of `(a, b)` — which is what stops PR3's re-canonicalisation
+   from re-spooling anything. The columns still follow the caller positionally,
+   because `build_*_request` orders the payload's image sides to match. The writer
+   accepts EITHER id-space and resolves the other (two UNIONed index arms, not an
+   OR — an OR of two arms full-scans this table), so PR3 can pass `listing_id` here
+   without touching this module again; `sreality_id_a` lost its NOT NULL for the
+   same reason. **PR3 trap this exposed:** the pair is canonicalised INDEPENDENTLY at
+   four layers (engine defer site, `build_*_request`, cache lookup, persist) — all on
+   `sorted()` over sreality_id today. Change one without the others and the payload's
+   image sides stop matching the columns (swapped `n_images_a/_b`, swapped A/B in the
+   prompt); and `sorted()` over a NULL sreality_id raises outright post-Gate-2;
+   (PR3) the core swap, which
    must be ATOMIC across dedup_engine + image_similarity + visual_match + clip_dedup
    — the chain `ListingKey → closure(a,b) → cache SQL → in-memory dict key` is one
    id-space and splitting it produces SILENT wrong answers, not errors (the pHash
