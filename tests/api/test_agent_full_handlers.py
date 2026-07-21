@@ -335,3 +335,144 @@ def test_all_new_tools_registered():
         td = agent_mod.AGENT_TOOLS[name]
         assert td.handler is not None
         assert not td.is_terminator
+
+
+# --- finalisation persists the SURROGATE, not the legacy handle ------------
+#
+# estimation_cohort_entries is keyed on listing_id, but the agent addresses
+# comparables by sreality_id. The two id spaces are disjoint in production
+# (0 of 566,812 listings have id = sreality_id) yet overlap numerically, so
+# feeding the wrong one silently updates the wrong rows — or none at all —
+# instead of raising. These pin the translation at the boundary.
+
+class _Skill:
+    name = "test-skill"
+
+
+def _finalise_state(cohort, *, decisions=None, run_id=7):
+    state = _state(last_cohort=cohort)
+    state.estimation_run_id = run_id
+    state.final_call = {
+        "estimated_monthly_rent_czk": 20_000,
+        "rent_p25_czk": 18_000,
+        "rent_p75_czk": 22_000,
+        "confidence": "high",
+        "comparable_decisions": decisions or [],
+    }
+    return state
+
+
+def _run_finalise(monkeypatch, cohort, *, decisions=None):
+    from api.estimate_yield import _used_entry
+
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        agent_mod, "_persist_finalisation",
+        lambda state, **kw: captured.update(kw),
+    )
+    result = agent_mod._finalise(
+        _finalise_state(cohort, decisions=decisions),
+        skill=_Skill(),
+        provider="anthropic",
+        stop_reason="record_estimate",
+        purchase_price_czk=None,
+        used_entry=_used_entry,
+    )
+    return captured, result
+
+
+def test_finalise_persists_listing_ids_not_sreality_ids(monkeypatch):
+    """The live regression: #879 moved _persist_finalisation's SQL onto
+    listing_id but left every caller building the id set from sreality_id, so
+    the UPDATE matched nothing and present_at_finalisation silently stopped
+    being written."""
+    cohort = [
+        {"listing_id": 9001, "sreality_id": 111},
+        {"listing_id": 9002, "sreality_id": 222},
+    ]
+    captured, _ = _run_finalise(monkeypatch, cohort)
+    assert captured["included_listing_ids"] == {9001, 9002}
+    # the legacy handles must NOT reach the persistence layer
+    assert not ({111, 222} & captured["included_listing_ids"])
+
+
+def test_finalise_keeps_null_sreality_row_in_the_persisted_set(monkeypatch):
+    """Post-Gate-2 a new non-sreality listing has sreality_id NULL. It must
+    neither raise int(None) nor silently drop out of present_at_finalisation —
+    default-include is computed over the surrogate set for exactly this reason."""
+    cohort = [
+        {"listing_id": 9001, "sreality_id": 111},
+        {"listing_id": 9002, "sreality_id": None},
+    ]
+    captured, result = _run_finalise(monkeypatch, cohort)
+    assert captured["included_listing_ids"] == {9001, 9002}
+    assert len(result.data["comparables_used"]) == 2
+
+
+def test_finalise_translates_agent_exclusion_into_surrogate_space(monkeypatch):
+    """The agent excludes by sreality_id; persistence must receive listing_id."""
+    cohort = [
+        {"listing_id": 9001, "sreality_id": 111},
+        {"listing_id": 9002, "sreality_id": 222},
+    ]
+    decisions = [
+        {"sreality_id": 222, "decision": "excluded", "reason": "different street"},
+    ]
+    captured, result = _run_finalise(monkeypatch, cohort, decisions=decisions)
+    assert captured["excluded_by_listing_id"] == {9002: "different street"}
+    assert captured["included_listing_ids"] == {9001}
+    # the operator-facing payload still speaks the agent's id space
+    assert result.data["comparables_excluded"] == [
+        {"sreality_id": 222, "reason": "different street"},
+    ]
+
+
+def test_record_selection_summary_tolerates_null_sreality_id(monkeypatch):
+    """Runs after the estimate is already paid for and outside the per-tool
+    try/except, so an int(None) here would discard a finished run."""
+    captured: dict[str, Any] = {}
+
+    class _H:
+        def set_summary(self, s): captured.update(s)
+
+    class _Ctx:
+        def __enter__(self): return _H()
+        def __exit__(self, *a): return None
+
+    class _Rec:
+        def computation(self, _name): return _Ctx()
+
+    result = agent_mod.AgentResult(
+        data={"comparables_used": [
+            {"listing_id": 9001, "sreality_id": 111},
+            {"listing_id": 9002, "sreality_id": None},
+        ]},
+        metadata={},
+    )
+    agent_mod._record_selection_summary(
+        _Rec(), _state(last_cohort=[]), result, "record_estimate",
+    )
+    # legacy field keeps its id space (readers expect sreality_ids); the
+    # surrogate field beside it stays complete
+    assert captured["final_comparable_ids"] == [111]
+    assert captured["final_comparable_listing_ids"] == [9001, 9002]
+
+
+def test_compare_images_cohort_gate_tolerates_null_sreality_id(monkeypatch):
+    """A NULL-sreality cohort row must not crash the membership check; it is
+    simply not nameable by a tool whose schema takes sreality_ids."""
+    monkeypatch.setattr(
+        agent_mod, "compare_listing_images",
+        lambda *a, **k: {"data": {"verdict": "High"}},
+    )
+    state = _state(last_cohort=[
+        {"sreality_id": 100}, {"sreality_id": None},
+    ])
+    out = agent_mod._handle_compare_listing_images(
+        {"sreality_id_a": 100, "sreality_id_b": 100}, state,
+    )
+    assert out["data"]["verdict"] == "High"
+    with pytest.raises(ValueError, match="not in the current"):
+        agent_mod._handle_compare_listing_images(
+            {"sreality_id_a": 100, "sreality_id_b": 999}, state,
+        )
