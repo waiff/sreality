@@ -235,6 +235,10 @@ rolled-back transaction and diffing per-view counts (**17 of 19** reached).
 
 ## PR-E — standing API `require_admin` coverage test (G12)
 
+**✅ SHIPPED 2026-07-21.** Scoped to two assertable invariants (admin-prefixed routes are
+admin-gated; no route is unauthenticated) plus a mount sentinel, rather than an 89-entry
+allowlist that could not be validated outside CI. Residual gap documented in the file.
+
 **Branch `test/api-admin-route-coverage` · no migration.**
 
 `tests/api/test_admin_route_coverage.py`: imports `api.main:app` (verified: imports clean
