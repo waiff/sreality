@@ -2866,7 +2866,7 @@ def _build_classify_fn(
                 ]}}
             from toolkit.dedup_batch_defer import enqueue_deferred_request
             spooled = enqueue_deferred_request(
-                conn, defer_providers, custom_id=f"cls-{sreality_id}",
+                conn, defer_providers,
                 kind="classify", model=classify_model, sreality_id_a=sreality_id,
                 sreality_id_b=None, room_type=None,
                 build_fn=lambda: build_classify_request(conn, llm, sreality_id=sreality_id),
@@ -2915,7 +2915,7 @@ def _build_compare_fn(
             ca, cb = sorted((a, b))
             from toolkit.dedup_batch_defer import enqueue_deferred_request
             spooled = enqueue_deferred_request(
-                conn, defer_providers, custom_id=f"cmp-{ca}-{cb}-{room_type}",
+                conn, defer_providers,
                 kind="compare", model=use_model, sreality_id_a=ca, sreality_id_b=cb,
                 room_type=room_type,
                 build_fn=lambda: build_compare_request(
@@ -2977,7 +2977,7 @@ def _build_site_plan_fn(
             ca, cb = sorted((a, b))
             from toolkit.dedup_batch_defer import enqueue_deferred_request
             spooled = enqueue_deferred_request(
-                conn, defer_providers, custom_id=f"spl-{ca}-{cb}",
+                conn, defer_providers,
                 kind="site_plan", model=model, sreality_id_a=ca, sreality_id_b=cb,
                 room_type=None,
                 build_fn=lambda: build_site_plan_request(
@@ -3028,7 +3028,7 @@ def _build_floor_plan_fn(
             ca, cb = sorted((a, b))
             from toolkit.dedup_batch_defer import enqueue_deferred_request
             enqueue_deferred_request(
-                conn, defer_providers, custom_id=f"fpl-{ca}-{cb}",
+                conn, defer_providers,
                 kind="floor_plan", model=floor_plan_model, sreality_id_a=ca, sreality_id_b=cb,
                 room_type=None,
                 build_fn=lambda: build_floor_plan_request(
