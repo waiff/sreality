@@ -20,7 +20,7 @@ import {
   fetchImageAnnotationsByImageIds,
   fetchTrainingExamplesForImageIds,
   fetchBorderCasesByImageIds,
-  fetchDistinctTrainingLabels,
+  fetchTrainingLabelCounts,
   CLIP_AUDIT_PAGE_SIZE,
   type ClipAuditPropertyRow,
 } from '@/lib/queries';
@@ -114,14 +114,17 @@ export default function ClipAudit() {
     [properties.rows],
   );
 
-  // The Train label combobox's suggestions (Tagging tab only — Render is a continuous
-  // score, not a pick-a-category label): the fixed CLIP taxonomy + anything the
-  // operator already typed into the training set from either audit page.
+  // Every label + how many training examples it has — GLOBAL across the whole
+  // training set, not scoped to the currently-loaded page (the top-of-page summary
+  // needs the full picture, and it also backs the Train label combobox's
+  // suggestions: the fixed CLIP taxonomy + anything the operator already typed into
+  // the training set from either audit page).
   const trainingLabelsQ = useQuery({
-    queryKey: ['clip-audit', 'training-labels'],
-    queryFn: fetchDistinctTrainingLabels,
+    queryKey: ['clip-audit', 'training-label-counts'],
+    queryFn: fetchTrainingLabelCounts,
     staleTime: 30_000,
   });
+  const trainingLabelCounts = useMemo(() => trainingLabelsQ.data ?? [], [trainingLabelsQ.data]);
   const labelOptions: LabelOption[] = useMemo(() => {
     // CLIP's 19 real fine_tag classes (not TAG_OPTIONS's 15 collapsed logical tags
     // used by the Tag filter above — see imageTags.ts), keyed by canonical value,
@@ -132,11 +135,11 @@ export default function ClipAudit() {
       label: imageTagLabel(key) ?? key,
     }));
     const known = new Set(FINE_TAG_KEYS);
-    const custom: LabelOption[] = (trainingLabelsQ.data ?? [])
-      .filter((v) => !known.has(v))
-      .map((v) => ({ value: v, label: v }));
+    const custom: LabelOption[] = trainingLabelCounts
+      .filter((c) => !known.has(c.label))
+      .map((c) => ({ value: c.label, label: c.label }));
     return [...taxonomy, ...custom].sort((a, b) => a.label.localeCompare(b.label, 'cs'));
-  }, [trainingLabelsQ.data]);
+  }, [trainingLabelCounts]);
 
   return (
     <div className="px-6 py-8 max-w-5xl mx-auto">
@@ -148,6 +151,8 @@ export default function ClipAudit() {
           Render diagnostics.
         </p>
       </header>
+
+      <TrainingSetSummary counts={trainingLabelCounts} isLoading={trainingLabelsQ.isLoading} />
 
       <ModelExplainer />
 
@@ -244,6 +249,52 @@ export default function ClipAudit() {
         loadedCount={properties.loadedCount}
         total={null}
       />
+    </div>
+  );
+}
+
+// Top-of-page linear-probe coverage: how many images have been added to the
+// training set so far, broken down per label. GLOBAL (the whole training set),
+// not scoped to whatever properties/filters happen to be on screen — coverage is
+// a property of the training set itself, same reasoning as PhashAudit's identical
+// summary (see fetchTrainingLabelCounts).
+function TrainingSetSummary({
+  counts,
+  isLoading,
+}: {
+  counts: ReadonlyArray<{ label: string; count: number }>;
+  isLoading: boolean;
+}) {
+  const total = useMemo(() => counts.reduce((sum, c) => sum + c.count, 0), [counts]);
+
+  return (
+    <div className="mt-4 flex flex-wrap items-center gap-1.5 text-[0.78rem]">
+      <span className="text-[0.62rem] uppercase tracking-[0.1em] text-[var(--color-ink-4)] mr-1">
+        Trénovací sada
+      </span>
+      {isLoading ? (
+        <span className="text-[var(--color-ink-4)]">Načítám…</span>
+      ) : total === 0 ? (
+        <span className="text-[var(--color-ink-4)]">Zatím žádné obrázky.</span>
+      ) : (
+        <>
+          <span className="text-[var(--color-ink-2)] font-mono tabular-nums">
+            {total} obrázků celkem
+          </span>
+          <span className="mx-1 h-4 w-px bg-[var(--color-rule)]" />
+          {counts.map((c) => (
+            <span
+              key={c.label}
+              className="px-2 py-0.5 rounded-[var(--radius-sm)] border border-[var(--color-rule)] text-[var(--color-ink-3)]"
+            >
+              {imageTagLabel(c.label) ?? c.label}
+              <span className="ml-1.5 text-[var(--color-ink-4)] font-mono tabular-nums">
+                {c.count}
+              </span>
+            </span>
+          ))}
+        </>
+      )}
     </div>
   );
 }
