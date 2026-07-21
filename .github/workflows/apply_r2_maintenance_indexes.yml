@@ -1,0 +1,61 @@
+name: Apply R2 maintenance-walker indexes
+
+# R2 read cutover: rebuilds the five `listings` partial indexes the enrichment
+# walkers page through (geocode candidates, street_name_key, both geo_cell_key
+# arms, source+active+street) onto the surrogate `id`, then drops the legacy
+# sreality_id-keyed twins. Post-Gate-2 a NULL sreality_id makes a listing
+# invisible to every one of those walkers, so geocoding / street resolution /
+# geo_cell keying would silently stop for exactly the new rows.
+#
+# Dispatch-only, own concurrency group, idempotent. Legacy indexes are dropped
+# only after every replacement is confirmed valid; --keep-legacy skips the drop
+# entirely (use while old-cursor code is still deployed).
+#
+# Required secrets: SUPABASE_DB_URL, SUPABASE_DB_SESSION_URL (session pooler —
+# CONCURRENTLY cannot run in a transaction and outlasts the tx pooler's cap).
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Report index state and exit
+        required: false
+        default: "false"
+        type: choice
+        options: ["false", "true"]
+      keep_legacy:
+        description: Build replacements but keep the legacy indexes
+        required: false
+        default: "false"
+        type: choice
+        options: ["false", "true"]
+
+concurrency:
+  group: apply-r2-maintenance-indexes
+  cancel-in-progress: false
+
+jobs:
+  maintenance-indexes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      SUPABASE_DB_SESSION_URL: ${{ secrets.SUPABASE_DB_SESSION_URL }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install
+        run: pip install -e .
+      - name: Apply R2 maintenance indexes
+        run: |
+          set -o pipefail
+          ARGS=""
+          if [ "${{ inputs.dry_run }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
+          if [ "${{ inputs.keep_legacy }}" = "true" ]; then ARGS="$ARGS --keep-legacy"; fi
+          python -m scripts.apply_r2_maintenance_indexes $ARGS 2>&1

@@ -69,7 +69,7 @@ _INPUT_PREDICATE: dict[str, str] = {
 }
 
 _SELECT_SQL = """
-    SELECT l.sreality_id, l.property_id, l.locality, l.district, l.street,
+    SELECT l.id, l.property_id, l.locality, l.district, l.street,
            l.obec, l.okres, l.region,
            l.raw_json->>'address' AS address,
            l.raw_json->>'street' AS adv_street,
@@ -81,8 +81,8 @@ _SELECT_SQL = """
     WHERE l.source = %(source)s AND (l.is_active OR %(include_inactive)s)
       AND l.raw_json->>'portal_street_backfill' IS NULL
       AND ({predicate})
-      AND l.sreality_id > %(cursor)s AND l.sreality_id <= %(cursor_hi)s
-    ORDER BY l.sreality_id
+      AND l.id > %(cursor)s AND l.id <= %(cursor_hi)s
+    ORDER BY l.id
     LIMIT %(chunk)s
 """
 
@@ -101,7 +101,7 @@ _CURSOR_MIN = -(10 ** 18)
 _SCAN_SPAN = 1_000_000
 
 _ID_RANGE_SQL = """
-    SELECT min(sreality_id), max(sreality_id) FROM listings WHERE source = %(source)s
+    SELECT min(id), max(id) FROM listings WHERE source = %(source)s
 """
 
 # COALESCE(new, existing): a derived value overrides only when present, so a
@@ -130,7 +130,7 @@ _UPDATE_SQL = """
             %(ids)s::bigint[], %(streets)s::text[], %(name_keys)s::text[],
             %(house_numbers)s::text[], %(zips)s::text[]
           ) AS t(id, street, street_name_key, house_number, zip)) d
-    WHERE l.sreality_id = d.id
+    WHERE l.id = d.id
 """
 
 _CHUNK = 1000
@@ -175,7 +175,7 @@ def derive(source: str, row: dict[str, Any]) -> tuple[str | None, str | None, st
     raise ValueError(f"unknown source {source!r}")
 
 
-_COLS = ("sreality_id", "property_id", "locality", "district", "street",
+_COLS = ("id", "property_id", "locality", "district", "street",
          "obec", "okres", "region", "address", "adv_street",
          "adv_house_number", "adv_zip", "loc_value", "loc_text")
 
@@ -206,7 +206,7 @@ def process_source(conn: Any, source: str, limit: int, deadline: float | None,
             continue
         # A full chunk may have stopped mid-window (LIMIT hit): resume INSIDE the
         # window from the last row; a short chunk exhausted the window.
-        cursor = rows[-1]["sreality_id"] if len(rows) == chunk_size else cursor_hi
+        cursor = rows[-1]["id"] if len(rows) == chunk_size else cursor_hi
         ids: list[int] = []
         streets: list[str | None] = []
         name_keys: list[str | None] = []
@@ -215,7 +215,7 @@ def process_source(conn: Any, source: str, limit: int, deadline: float | None,
         dirty: list[int] = []
         for row in rows:
             street, hn, zp, improved = derive(source, row)
-            ids.append(row["sreality_id"])
+            ids.append(row["id"])
             streets.append(street)
             name_keys.append(street_name_key(street))
             house_numbers.append(hn)
