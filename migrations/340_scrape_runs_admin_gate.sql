@@ -91,6 +91,16 @@ $function$;
 revoke execute on function public.recent_scrape_runs(integer) from public, anon;
 grant execute on function public.recent_scrape_runs(integer) to authenticated;
 
+-- Record the grant production already holds. `authenticated` can SELECT
+-- scrape_runs_public live (that IS the exposure this migration gates), but no
+-- migration ever wrote that grant down -- it came from this project's default ACL at
+-- view-creation time, which a vanilla replay does not reproduce. Migration 319 did
+-- exactly this for the other RLS-gated views; scrape_runs_public was missed then for
+-- the same reason it was missed by the gate. Stating it keeps repo and live in step
+-- and lets the deny test read the view. Now that the gate is embedded, the grant
+-- yields zero rows to a non-admin.
+grant select on public.scrape_runs_public to authenticated;
+
 -- Post-conditions: data-independent (the CI schema replay is empty of business data,
 -- and this block runs as a bypassrls superuser whose claims-less session opens the
 -- gate -- so any row-count assertion would be vacuous there and misleading here).
