@@ -112,7 +112,11 @@ class _FakePortal:
         )
 
     def write_details(self, conn, items):
-        self.calls["write"].append([it.native_id for it in items])
+        # Sorted: intra-batch order is NOT a contract. The drain collects fetch
+        # results via as_completed(), which yields already-finished futures in
+        # set order — memory-address dependent, so even detail_workers=1 can
+        # buffer ["2","1"]. (Same posture as the `complete` capture below.)
+        self.calls["write"].append(sorted(it.native_id for it in items))
         if self._write_errors:
             exc = self._write_errors.pop(0)
             if exc is not None:
