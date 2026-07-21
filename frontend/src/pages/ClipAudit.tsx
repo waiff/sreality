@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 
@@ -10,7 +10,7 @@ import ImageRenderBadge from '@/components/ImageRenderBadge';
 import ImageLightbox from '@/components/ImageLightbox';
 import NoteFlagControl from '@/components/NoteFlagControl';
 import TrainControl from '@/components/TrainControl';
-import type { LabelOption } from '@/components/LabelCombobox';
+import LabelCombobox, { type LabelOption } from '@/components/LabelCombobox';
 import DedupBreakdown from '@/components/DedupBreakdown';
 import { useInfiniteList } from '@/lib/useInfiniteList';
 import {
@@ -21,6 +21,9 @@ import {
   fetchTrainingExamplesForImageIds,
   fetchBorderCasesByImageIds,
   fetchTrainingLabelCounts,
+  fetchTrainingExamplesByLabel,
+  fetchImagesByImageIds,
+  TRAINING_LABEL_PAGE_MAX,
   CLIP_AUDIT_PAGE_SIZE,
   type ClipAuditPropertyRow,
 } from '@/lib/queries';
@@ -29,6 +32,7 @@ import {
   getDedupAudit,
   setImageAnnotation,
   deleteImageAnnotation,
+  bulkSetTrainingExamples,
   type DedupAuditRow,
   type ImageAnnotation,
   type TrainingExample,
@@ -90,6 +94,17 @@ export default function ClipAudit() {
     setParams(sp, { replace: true });
   };
 
+  // Drilling into one training label swaps the property feed for a flat browser of
+  // exactly that label's images. In the URL (not local state) so a half-done audit
+  // survives a reload and can be linked to — same reasoning as `tab`.
+  const trainingLabel = params.get('label') ?? '';
+  const setTrainingLabel = (next: string) => {
+    const sp = new URLSearchParams(params);
+    if (next) sp.set('label', next);
+    else sp.delete('label');
+    setParams(sp, { replace: true });
+  };
+
   const [categoryMain, setCategoryMain] = useState<string>(TYPE_TABS[0]?.id ?? 'byt');
   const [tagFilter, setTagFilter] = useState('');
   const [renderMin, setRenderMin] = useState('');
@@ -119,8 +134,11 @@ export default function ClipAudit() {
   // needs the full picture, and it also backs the Train label combobox's
   // suggestions: the fixed CLIP taxonomy + anything the operator already typed into
   // the training set from either audit page).
+  // Key must stay ['clip-audit','training-labels'] — TrainControl invalidates exactly
+  // that prefix after a Train/untrain, and PhashAudit's twin uses it too. Renaming it
+  // silently strands the counts until the 30s staleTime lapses.
   const trainingLabelsQ = useQuery({
-    queryKey: ['clip-audit', 'training-label-counts'],
+    queryKey: ['clip-audit', 'training-labels'],
     queryFn: fetchTrainingLabelCounts,
     staleTime: 30_000,
   });
@@ -141,21 +159,11 @@ export default function ClipAudit() {
     return [...taxonomy, ...custom].sort((a, b) => a.label.localeCompare(b.label, 'cs'));
   }, [trainingLabelCounts]);
 
-  return (
-    <div className="px-6 py-8 max-w-5xl mx-auto">
-      <header>
-        <h1 className="text-2xl leading-tight">CLIP Audit</h1>
-        <p className="mt-1 text-sm text-[var(--color-ink-2)] max-w-3xl">
-          Review the self-hosted CLIP tagger's calls across real inventory — room/plan
-          classification on the Tagging tab, the orthogonal render-vs-photo score on
-          Render diagnostics.
-        </p>
-      </header>
-
-      <TrainingSetSummary counts={trainingLabelCounts} isLoading={trainingLabelsQ.isLoading} />
-
-      <ModelExplainer />
-
+  // The default view: CLIP's calls across the live property feed. Swapped out
+  // wholesale while a training label is being audited (its filters — property type,
+  // CLIP tag, render score — don't apply to a flat training-set selection).
+  const feed = (
+    <>
       <div className="mt-6">
         <Tabs tabs={TABS} active={mode} onChange={setMode} />
       </div>
@@ -249,6 +257,38 @@ export default function ClipAudit() {
         loadedCount={properties.loadedCount}
         total={null}
       />
+    </>
+  );
+
+  return (
+    <div className="px-6 py-8 max-w-5xl mx-auto">
+      <header>
+        <h1 className="text-2xl leading-tight">CLIP Audit</h1>
+        <p className="mt-1 text-sm text-[var(--color-ink-2)] max-w-3xl">
+          Review the self-hosted CLIP tagger's calls across real inventory — room/plan
+          classification on the Tagging tab, the orthogonal render-vs-photo score on
+          Render diagnostics.
+        </p>
+      </header>
+
+      <TrainingSetSummary
+        counts={trainingLabelCounts}
+        isLoading={trainingLabelsQ.isLoading}
+        active={trainingLabel}
+        onSelect={setTrainingLabel}
+      />
+
+      <ModelExplainer />
+
+      {trainingLabel ? (
+        <TrainingLabelBrowser
+          label={trainingLabel}
+          labelOptions={labelOptions}
+          onClear={() => setTrainingLabel('')}
+        />
+      ) : (
+        feed
+      )}
     </div>
   );
 }
@@ -258,12 +298,18 @@ export default function ClipAudit() {
 // not scoped to whatever properties/filters happen to be on screen — coverage is
 // a property of the training set itself, same reasoning as PhashAudit's identical
 // summary (see fetchTrainingLabelCounts).
+// Each chip is also the way IN to that label's images: clicking one opens the
+// TrainingLabelBrowser below (clicking the active one closes it again).
 function TrainingSetSummary({
   counts,
   isLoading,
+  active,
+  onSelect,
 }: {
   counts: ReadonlyArray<{ label: string; count: number }>;
   isLoading: boolean;
+  active: string;
+  onSelect: (label: string) => void;
 }) {
   const total = useMemo(() => counts.reduce((sum, c) => sum + c.count, 0), [counts]);
 
@@ -283,18 +329,246 @@ function TrainingSetSummary({
           </span>
           <span className="mx-1 h-4 w-px bg-[var(--color-rule)]" />
           {counts.map((c) => (
-            <span
+            <FilterChip
               key={c.label}
-              className="px-2 py-0.5 rounded-[var(--radius-sm)] border border-[var(--color-rule)] text-[var(--color-ink-3)]"
-            >
-              {imageTagLabel(c.label) ?? c.label}
-              <span className="ml-1.5 text-[var(--color-ink-4)] font-mono tabular-nums">
-                {c.count}
-              </span>
-            </span>
+              on={active === c.label}
+              label={imageTagLabel(c.label) ?? c.label}
+              count={c.count}
+              onClick={() => onSelect(active === c.label ? '' : c.label)}
+            />
           ))}
         </>
       )}
+    </div>
+  );
+}
+
+/* Drilling into ONE training label: every image filed under it, flat, with a
+ * checkbox each and a single combobox that moves the whole checked set to another
+ * label in one write. This is the "audit a class as a class" view — the property
+ * feed above can't be it, since a label's images are scattered across categories and
+ * mostly far past the loaded page. The batch write is the same upsert the per-image
+ * Train button does, so a relabelled image just moves; nothing is deleted. */
+function TrainingLabelBrowser({
+  label,
+  labelOptions,
+  onClear,
+}: {
+  label: string;
+  labelOptions: LabelOption[];
+  onClear: () => void;
+}) {
+  const qc = useQueryClient();
+
+  const examplesQ = useQuery({
+    queryKey: ['clip-audit', 'training-by-label', label],
+    queryFn: () => fetchTrainingExamplesByLabel(label),
+  });
+  const imageIds = useMemo(
+    () => (examplesQ.data ?? []).map((e) => e.image_id),
+    [examplesQ.data],
+  );
+  const imagesQ = useQuery({
+    queryKey: ['clip-audit', 'images-by-id', imageIds],
+    queryFn: () => fetchImagesByImageIds(imageIds),
+    enabled: imageIds.length > 0,
+  });
+  // Keep the training set's own order (newest edit first); an image whose row is
+  // gone from images_public just drops out.
+  const images = useMemo(
+    () =>
+      imageIds
+        .map((id) => imagesQ.data?.get(id))
+        .filter((img): img is ImagePublic => img != null),
+    [imageIds, imagesQ.data],
+  );
+
+  const [selected, setSelected] = useState<ReadonlySet<number>>(new Set());
+  const [nextLabel, setNextLabel] = useState('');
+  const [lightboxAt, setLightboxAt] = useState<number | null>(null);
+
+  // Switching labels must not carry a stale selection into the new class — those
+  // ids aren't on screen any more, and applying to them would be invisible.
+  useEffect(() => {
+    setSelected(new Set());
+    setNextLabel('');
+  }, [label]);
+
+  const toggle = (id: number) =>
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+
+  const allSelected = images.length > 0 && selected.size === images.length;
+  // A full page means the label may well have more behind it — say so rather than
+  // let a truncated class read as the whole class.
+  const atPageCap = (examplesQ.data ?? []).length >= TRAINING_LABEL_PAGE_MAX;
+
+  const relabel = useMutation({
+    mutationFn: () =>
+      bulkSetTrainingExamples({ image_ids: [...selected], label: nextLabel }),
+    onSuccess: () => {
+      // Selection clears, but the TARGET label deliberately stays: triaging a
+      // mislabelled class is usually several batches into the SAME correct label,
+      // and re-picking it every round is the annoying part. Nothing can fire on the
+      // leftover value alone — Apply stays disabled until something is checked again.
+      setSelected(new Set());
+      // This view (the relabelled images leave it), the top-of-page counts, and the
+      // property feed's per-group examples — all three now hold stale rows.
+      qc.invalidateQueries({ queryKey: ['clip-audit', 'training-by-label'] });
+      qc.invalidateQueries({ queryKey: ['clip-audit', 'training-labels'] });
+      qc.invalidateQueries({ queryKey: ['clip-audit', 'training'] });
+    },
+  });
+
+  const canApply =
+    selected.size > 0 && nextLabel.trim().length > 0 && !relabel.isPending;
+
+  return (
+    <div className="mt-6">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-[var(--color-rule)] pb-3">
+        <h2 className="text-sm text-[var(--color-ink)]">
+          Trénovací sada — {imageTagLabel(label) ?? label}
+        </h2>
+        <span className="text-[0.72rem] font-mono tabular-nums text-[var(--color-ink-4)]">
+          {images.length} obrázků
+        </span>
+        {atPageCap && (
+          <span className="text-[0.72rem] text-[var(--color-brick)]">
+            zobrazeno prvních {TRAINING_LABEL_PAGE_MAX} — štítek jich má víc
+          </span>
+        )}
+        <button
+          type="button"
+          onClick={onClear}
+          className="text-[0.72rem] text-[var(--color-ink-3)] hover:text-[var(--color-copper)] underline decoration-dotted underline-offset-2"
+        >
+          ← zpět na feed
+        </button>
+      </div>
+
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          onClick={() => setSelected(allSelected ? new Set() : new Set(images.map((i) => i.id)))}
+          disabled={images.length === 0}
+          className="px-2 py-1 text-[0.72rem] rounded-[var(--radius-xs)] border border-[var(--color-rule)] text-[var(--color-ink-3)] hover:border-[var(--color-rule-strong)] disabled:opacity-50"
+        >
+          {allSelected ? 'Zrušit výběr' : 'Vybrat vše'}
+        </button>
+        <span className="text-[0.72rem] font-mono tabular-nums text-[var(--color-ink-4)]">
+          {selected.size} vybráno
+        </span>
+        <span className="mx-1 h-4 w-px bg-[var(--color-rule)]" />
+        <span className="text-[0.62rem] uppercase tracking-[0.1em] text-[var(--color-ink-4)]">
+          Přeřadit na
+        </span>
+        <div className="w-56">
+          <LabelCombobox
+            value={nextLabel}
+            onChange={setNextLabel}
+            options={labelOptions}
+            placeholder="nový štítek…"
+          />
+        </div>
+        <button
+          type="button"
+          onClick={() => relabel.mutate()}
+          disabled={!canApply}
+          className="px-2.5 py-1 text-[0.72rem] rounded-[var(--radius-xs)] border border-[var(--color-copper)] text-[var(--color-copper)] hover:bg-[var(--color-copper-soft)] disabled:opacity-40 disabled:hover:bg-transparent"
+        >
+          {relabel.isPending ? 'Ukládám…' : `Použít na ${selected.size}`}
+        </button>
+        {relabel.isError && (
+          <span className="text-[0.72rem] text-[var(--color-brick)]">
+            Uložení selhalo.
+          </span>
+        )}
+      </div>
+
+      <div className="mt-4">
+        {examplesQ.isLoading || (imageIds.length > 0 && imagesQ.isLoading) ? (
+          <p className="text-sm text-[var(--color-ink-3)]">Načítám…</p>
+        ) : images.length === 0 ? (
+          <p className="text-sm text-[var(--color-ink-3)]">
+            Pod tímto štítkem nejsou žádné obrázky.
+          </p>
+        ) : (
+          <div className="grid grid-cols-4 sm:grid-cols-6 gap-2">
+            {images.map((img, i) => (
+              <TrainingImageCell
+                key={img.id}
+                image={img}
+                checked={selected.has(img.id)}
+                onToggle={() => toggle(img.id)}
+                onOpen={() => setLightboxAt(i)}
+              />
+            ))}
+          </div>
+        )}
+      </div>
+
+      {lightboxAt != null && (
+        <ImageLightbox
+          images={images}
+          startIndex={lightboxAt}
+          onClose={() => setLightboxAt(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+// One tile in the label browser: the photo, CLIP's OWN call on it (the disagreement
+// between that badge and the label you drilled into is the whole point of the view),
+// and the checkbox that puts it in the batch.
+function TrainingImageCell({
+  image,
+  checked,
+  onToggle,
+  onOpen,
+}: {
+  image: ImagePublic;
+  checked: boolean;
+  onToggle: () => void;
+  onOpen: () => void;
+}) {
+  return (
+    <div className="flex flex-col gap-1">
+      <div
+        className={[
+          'relative aspect-square overflow-hidden rounded-[var(--radius-xs)] border bg-[var(--color-inset)]',
+          checked ? 'border-[var(--color-copper)]' : 'border-[var(--color-rule)]',
+        ].join(' ')}
+      >
+        <button type="button" onClick={onOpen} className="block w-full h-full">
+          <img src={imageSrc(image)} alt="" loading="lazy" className="w-full h-full object-cover" />
+        </button>
+        <ImageTagBadge
+          tag={image.clip_fine_tag}
+          confidence={image.clip_confidence}
+          className="absolute bottom-1 left-1 max-w-[calc(100%-0.5rem)] truncate"
+        />
+        {/* Sits ABOVE the open-lightbox button so the checkbox stays clickable. */}
+        <label className="absolute top-1 left-1 flex items-center justify-center w-5 h-5 rounded-[var(--radius-xs)] bg-[var(--color-paper)]/85 border border-[var(--color-rule)] cursor-pointer">
+          <input
+            type="checkbox"
+            checked={checked}
+            onChange={onToggle}
+            aria-label={`Vybrat obrázek ${image.id}`}
+            className="accent-[var(--color-copper)]"
+          />
+        </label>
+      </div>
+      <Link
+        to={listingPath(image.sreality_id)}
+        className="text-[0.62rem] font-mono tabular-nums text-[var(--color-ink-4)] hover:text-[var(--color-copper)] truncate"
+      >
+        {image.sreality_id}
+      </Link>
     </div>
   );
 }

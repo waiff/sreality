@@ -204,6 +204,25 @@ def delete_phash_note(
     return {"data": {"deleted": bool(deleted)}}
 
 
+TRAINING_LABEL_MAX_CHARS = 100  # image_training_examples' CHECK (migration 309)
+
+
+def _clean_training_label(label: str) -> str:
+    """Normalize a free-text training label at the write boundary (trim + collapse
+    internal whitespace). Shared by the single- and bulk-write paths so the two can't
+    drift into storing differently-spaced spellings of the same class.
+
+    Length is checked here, not left to the table's CHECK, so an over-long label comes
+    back as a 422 naming the problem instead of a 500 — and so one bad label can't
+    abort an entire batch write."""
+    clean = " ".join((label or "").split())
+    if not clean:
+        raise ValueError("a training example needs a non-empty label")
+    if len(clean) > TRAINING_LABEL_MAX_CHARS:
+        raise ValueError(f"a training label is at most {TRAINING_LABEL_MAX_CHARS} characters")
+    return clean
+
+
 def set_training_example(
     conn: psycopg.Connection,
     *,
@@ -218,9 +237,7 @@ def set_training_example(
     the write boundary, so every reader (this table's distinct-label list feeds the
     training combobox's suggestions) sees already-clean values instead of re-deriving
     normalization at each read site. Data-collection only: nothing reads this table yet."""
-    clean = " ".join((label or "").split())
-    if not clean:
-        raise ValueError("a training example needs a non-empty label")
+    clean = _clean_training_label(label)
     with conn.cursor() as cur:
         cur.execute(
             "INSERT INTO image_training_examples (image_id, label, created_by) "
@@ -232,6 +249,41 @@ def set_training_example(
         )
         r = cur.fetchone()
     return {"data": {"image_id": image_id, "label": r[0], "updated_at": r[1]}}
+
+
+BULK_TRAINING_LABEL_MAX = 500
+
+
+def bulk_set_training_examples(
+    conn: psycopg.Connection,
+    *,
+    image_ids: list[int],
+    label: str,
+    created_by: str = "operator",
+) -> dict[str, Any]:
+    """Relabel MANY images at once — the /clip-audit training-label browser's batch
+    dropdown, where the operator reviews one label's class as a whole and moves the
+    wrong ones somewhere else in one go. Same upsert semantics as
+    set_training_example (an image not yet in the set gets added), just set-at-a-time.
+
+    Ids are de-duplicated first: ON CONFLICT DO UPDATE cannot affect the same row
+    twice in one statement, so a repeated id would abort the whole write."""
+    clean = _clean_training_label(label)
+    ids = list(dict.fromkeys(int(i) for i in image_ids))
+    if not ids:
+        raise ValueError("no images selected")
+    if len(ids) > BULK_TRAINING_LABEL_MAX:
+        raise ValueError(f"at most {BULK_TRAINING_LABEL_MAX} images per batch")
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO image_training_examples (image_id, label, created_by) "
+            "SELECT u, %s, %s FROM unnest(%s::bigint[]) AS u "
+            "ON CONFLICT (image_id) DO UPDATE SET "
+            "  label = excluded.label, updated_at = now()",
+            (clean, created_by, ids),
+        )
+        updated = cur.rowcount
+    return {"data": {"updated": updated, "label": clean, "image_ids": ids}}
 
 
 def delete_training_example(conn: psycopg.Connection, *, image_id: int) -> dict[str, Any]:

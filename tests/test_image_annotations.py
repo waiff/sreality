@@ -39,8 +39,14 @@ class _Cur:
             self.rowcount = self._conn.delete_count
             self._row = None
         elif s.startswith("INSERT INTO image_training_examples"):
-            # RETURNING label, updated_at
-            self._row = (params[1], "2026-07-17T00:00:00Z")
+            if "unnest" in s:
+                # The bulk path reads rowcount, not RETURNING — one row per id
+                # (params = label, created_by, ids).
+                self.rowcount = len(params[2])
+                self._row = None
+            else:
+                # RETURNING label, updated_at
+                self._row = (params[1], "2026-07-17T00:00:00Z")
         elif s.startswith("DELETE FROM image_training_examples"):
             self.rowcount = self._conn.delete_count
             self._row = None
@@ -145,6 +151,52 @@ def test_set_training_example_collapses_internal_whitespace() -> None:
 def test_set_training_example_rejects_blank_label() -> None:
     with pytest.raises(ValueError):
         dedup.set_training_example(_FakeConn(), image_id=42, label="   ")
+
+
+def test_bulk_set_training_examples_upserts_every_id_under_one_label() -> None:
+    conn = _FakeConn()
+    out = dedup.bulk_set_training_examples(conn, image_ids=[7, 8, 9], label="  kitchen ")
+    _, params = conn.executed[0]
+    assert params == ("kitchen", "operator", [7, 8, 9])
+    assert out["data"]["updated"] == 3
+    assert out["data"]["label"] == "kitchen"
+
+
+def test_bulk_set_training_examples_dedupes_ids() -> None:
+    # ON CONFLICT DO UPDATE cannot affect the same row twice in one statement — a
+    # repeated id would abort the ENTIRE batch, so ids are deduped before the write.
+    conn = _FakeConn()
+    out = dedup.bulk_set_training_examples(conn, image_ids=[7, 8, 7, 8, 9], label="kitchen")
+    _, params = conn.executed[0]
+    assert params[2] == [7, 8, 9]
+    assert out["data"]["image_ids"] == [7, 8, 9]
+
+
+def test_training_label_length_is_capped_at_the_tables_check() -> None:
+    # The table CHECKs char_length(label) BETWEEN 1 AND 100 — caught here so it's a
+    # 422, and so one over-long label can't abort a whole batch.
+    long_label = "x" * (dedup.TRAINING_LABEL_MAX_CHARS + 1)
+    with pytest.raises(ValueError):
+        dedup.set_training_example(_FakeConn(), image_id=42, label=long_label)
+    with pytest.raises(ValueError):
+        dedup.bulk_set_training_examples(_FakeConn(), image_ids=[7], label=long_label)
+    # Exactly at the cap still goes through.
+    conn = _FakeConn()
+    dedup.set_training_example(conn, image_id=42, label="x" * dedup.TRAINING_LABEL_MAX_CHARS)
+    assert conn.executed
+
+
+def test_bulk_set_training_examples_rejects_blank_label_and_empty_selection() -> None:
+    with pytest.raises(ValueError):
+        dedup.bulk_set_training_examples(_FakeConn(), image_ids=[7], label="  ")
+    with pytest.raises(ValueError):
+        dedup.bulk_set_training_examples(_FakeConn(), image_ids=[], label="kitchen")
+
+
+def test_bulk_set_training_examples_caps_batch_size() -> None:
+    over = list(range(dedup.BULK_TRAINING_LABEL_MAX + 1))
+    with pytest.raises(ValueError):
+        dedup.bulk_set_training_examples(_FakeConn(), image_ids=over, label="kitchen")
 
 
 def test_delete_training_example_reports_deleted() -> None:

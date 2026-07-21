@@ -81,6 +81,11 @@ class TrainingExampleAction(BaseModel):
     label: str
 
 
+class BulkTrainingExampleAction(BaseModel):
+    image_ids: list[int]
+    label: str
+
+
 class BorderCaseAction(BaseModel):
     image_id: int
 
@@ -293,6 +298,21 @@ def post_training_example(
     try:
         return dedup.set_training_example(
             conn, image_id=body.image_id, label=body.label,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post("/training-examples/bulk")
+def post_bulk_training_examples(
+    body: BulkTrainingExampleAction,
+    conn: Any = Depends(deps.get_db_conn),
+    _: dict = Depends(deps.require_admin),
+) -> dict[str, Any]:
+    """/clip-audit batch relabel: put MANY images under one training-set label."""
+    try:
+        return dedup.bulk_set_training_examples(
+            conn, image_ids=body.image_ids, label=body.label,
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
