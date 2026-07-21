@@ -279,6 +279,17 @@ remediation R3 closes that. Full spec: `docs/design/public-release-remediation-2
      were queued up behind the same dead config, and the launch-gate two-account pen-test
      **must run against real user JWTs** — a green RLS lane says nothing about a DSN that
      production never dials.
+   - **Second real-JWT find, fixed same-day:** `POST /listings/lookup` reported every
+     listing as "není v databázi" under a real JWT — its one query joined the shared
+     `listings`/`properties` (RLS-enabled-with-**zero**-policies by design: broker PII
+     inline, the A5 correction) with the per-account tables on the tenant conn, so the
+     market half returned no rows. Fixed by splitting the handler onto two connections:
+     market facts on the service-role conn (the same trusted-server pattern
+     `POST /estimations` uses), pipeline/collections/estimation joins staying on the
+     tenant conn under RLS (incl. the SYSTEM arm of `estimation_runs_tenant_read`, so
+     platform golden estimates still surface). This is the server-side shape of A5 for
+     this endpoint — the full A5 (a column-safe browser-readable path for
+     `listings`/`properties`, which Wave 2's SPA-side reads still need) remains open.
    - Remaining: the metering substrate (`usage_ledger`/`check_budget` — needs a product
      decision on quota shape: free-tier run count vs USD budget, daily vs monthly window),
      the atomic submit-time gates (entitlement/budget/concurrency/idempotency), moving agent

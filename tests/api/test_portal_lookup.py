@@ -28,17 +28,27 @@ from api import tenant_pool
 # Logic: lookup_portal_listings against a fake dict-row cursor.
 # ----------------------------------------------------------------------
 
-def _mk_row(source: str, source_id: str, found: bool, **cols: Any) -> dict[str, Any]:
-    """One dict row keyed by the SELECT aliases (defaults null)."""
+def _mk_market_row(source: str, source_id: str, found: bool, **cols: Any) -> dict[str, Any]:
+    """One market-query dict row (service-role conn) keyed by SELECT aliases."""
     row: dict[str, Any] = {
         "source": source, "source_id": source_id, "found": found,
         "sreality_id": None, "listing_id": None, "property_id": None,
+        "source_url": None,
         "category_main": None, "category_type": None,
         "area_m2": None, "price_czk": None, "disposition": None, "subtype": None,
         "district": None, "locality": None, "is_active": None,
         "last_seen_at": None, "mf_reference_rent_czk": None,
-        "mf_gross_yield_pct": None, "estimation_id": None,
-        "estimation_kind": None, "estimation_yield": None,
+        "mf_gross_yield_pct": None,
+    }
+    row.update(cols)
+    return row
+
+
+def _mk_account_row(listing_id: int, **cols: Any) -> dict[str, Any]:
+    """One account-query dict row (tenant conn, RLS-scoped) per found listing."""
+    row: dict[str, Any] = {
+        "listing_id": listing_id,
+        "estimation_id": None, "estimation_kind": None, "estimation_yield": None,
         "in_pipeline": False, "pipeline_stage_id": None,
         "pipeline_stage_key": None, "pipeline_stage_label": None,
         # The SQL coalesces to an empty array (never NULL); the Python layer
@@ -83,30 +93,38 @@ def _items(*pairs: tuple[str, str]) -> list[s.PortalLookupItem]:
 
 
 def test_lookup_maps_rows_with_sreality_id_mf_and_estimation() -> None:
-    rows = [
-        # sreality: found, has MF + a successful estimation; positive sreality_id;
-        # bookmarked in the deal pipeline (entry stage)
-        _mk_row("sreality", "1184977484", True, sreality_id=1184977484,
-                property_id=501, category_main="byt", category_type="prodej",
-                area_m2=Decimal("65.0"),
-                price_czk=4_800_000, disposition="2+kk", district="Praha 5",
-                locality="Praha 5 - Smíchov", is_active=True, last_seen_at=_TS,
-                mf_reference_rent_czk=21_840, mf_gross_yield_pct=Decimal("5.46"),
-                estimation_id=99, estimation_kind="rent",
-                estimation_yield=Decimal("5.46"),
-                in_pipeline=True, pipeline_stage_id=3,
-                pipeline_stage_key="interested", pipeline_stage_label="Zájem",
-                collection_ids=[7, 9]),
-        # bazos: found, NEGATIVE synthetic sreality_id, no MF, no estimation;
+    market_rows = [
+        # sreality: found, has MF; positive sreality_id
+        _mk_market_row("sreality", "1184977484", True, sreality_id=1184977484,
+                       listing_id=9001, property_id=501,
+                       category_main="byt", category_type="prodej",
+                       area_m2=Decimal("65.0"),
+                       price_czk=4_800_000, disposition="2+kk", district="Praha 5",
+                       locality="Praha 5 - Smíchov", is_active=True, last_seen_at=_TS,
+                       mf_reference_rent_czk=21_840,
+                       mf_gross_yield_pct=Decimal("5.46")),
+        # bazos: found, NEGATIVE synthetic sreality_id, no MF;
         # has a property but is NOT in the pipeline
-        _mk_row("bazos", "220291221", True, sreality_id=-187691, property_id=777,
-                category_main="komercni", category_type="prodej", price_czk=7_700_000,
-                subtype="ubytovani", district="okres Pardubice", is_active=True),
+        _mk_market_row("bazos", "220291221", True, sreality_id=-187691,
+                       listing_id=9002, property_id=777,
+                       category_main="komercni", category_type="prodej",
+                       price_czk=7_700_000,
+                       subtype="ubytovani", district="okres Pardubice", is_active=True),
         # idnes: not found → sreality_id null
-        _mk_row("idnes", "deadbeef", False),
+        _mk_market_row("idnes", "deadbeef", False),
+    ]
+    account_rows = [
+        # sreality listing: successful estimation + bookmarked + in collections
+        _mk_account_row(9001, estimation_id=99, estimation_kind="rent",
+                        estimation_yield=Decimal("5.46"),
+                        in_pipeline=True, pipeline_stage_id=3,
+                        pipeline_stage_key="interested", pipeline_stage_label="Zájem",
+                        collection_ids=[7, 9]),
+        # bazos listing: nothing account-side (RLS found no rows for the caller)
+        _mk_account_row(9002),
     ]
     out = pl.lookup_portal_listings(
-        _FakeConn(rows),
+        _FakeConn(market_rows), _FakeConn(account_rows),
         _items(("sreality", "1184977484"), ("bazos", "220291221"),
                ("idnes", "deadbeef")),
     )
@@ -157,23 +175,44 @@ def test_lookup_maps_rows_with_sreality_id_mf_and_estimation() -> None:
 
 
 def test_lookup_binds_one_value_pair_per_item() -> None:
-    out_conn = _FakeConn([])
-    pl.lookup_portal_listings(out_conn, _items(("sreality", "1"), ("idnes", "abc")))
-    sql, params = out_conn.cur.executed
+    market_conn, tenant_conn = _FakeConn([]), _FakeConn([])
+    pl.lookup_portal_listings(
+        market_conn, tenant_conn, _items(("sreality", "1"), ("idnes", "abc")),
+    )
+    sql, params = market_conn.cur.executed
     # two (%s::text, %s::text) tuples → 4 bound params, in request order
     assert params == ["sreality", "1", "idnes", "abc"]
     assert sql.count("%s") == 4
+    # no found rows → the tenant conn is never queried at all
+    assert tenant_conn.cur.executed is None
+
+
+def test_lookup_account_query_targets_only_found_listings() -> None:
+    market_rows = [
+        _mk_market_row("sreality", "a", True, sreality_id=1, listing_id=11,
+                       property_id=100, source_url="https://sreality.cz/x",
+                       category_main="byt", category_type="prodej", is_active=True),
+        _mk_market_row("idnes", "miss", False),
+    ]
+    market_conn = _FakeConn(market_rows)
+    tenant_conn = _FakeConn([_mk_account_row(11)])
+    pl.lookup_portal_listings(
+        market_conn, tenant_conn, _items(("sreality", "a"), ("idnes", "miss")),
+    )
+    _sql, params = tenant_conn.cur.executed
+    # one (listing_id, property_id, source_url) tuple — the miss is excluded
+    assert params == [11, 100, "https://sreality.cz/x"]
 
 
 def test_lookup_preserves_request_order_even_if_db_reorders() -> None:
     rows = [
-        _mk_row("idnes", "b", True, sreality_id=-2, category_main="byt",
-                category_type="prodej", is_active=True),
-        _mk_row("sreality", "a", True, sreality_id=1, category_main="byt",
-                category_type="prodej", is_active=True),
+        _mk_market_row("idnes", "b", True, sreality_id=-2, listing_id=22,
+                       category_main="byt", category_type="prodej", is_active=True),
+        _mk_market_row("sreality", "a", True, sreality_id=1, listing_id=21,
+                       category_main="byt", category_type="prodej", is_active=True),
     ]
     out = pl.lookup_portal_listings(
-        _FakeConn(rows), _items(("sreality", "a"), ("idnes", "b")),
+        _FakeConn(rows), _FakeConn([]), _items(("sreality", "a"), ("idnes", "b")),
     )
     assert [d["source_id"] for d in out["data"]] == ["a", "b"]
 
@@ -196,7 +235,7 @@ def client() -> Any:
 def test_route_delegates_and_returns_data(client, monkeypatch) -> None:
     captured: dict[str, Any] = {}
 
-    def fake_lookup(conn, items):
+    def fake_lookup(market_conn, tenant_conn, items):
         captured["items"] = items
         return {"data": [{"source": "sreality", "source_id": "1", "found": True}]}
 

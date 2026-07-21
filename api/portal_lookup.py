@@ -23,6 +23,19 @@ bearer-gated `POST/DELETE /collections/{id}/properties`.
 
 Rows come back keyed by column name (dict_row) — no positional index math, so
 projecting one more column is a one-line change that can't silently misalign.
+
+TWO connections since the extension's own JWT went live (Wave 1): the shared
+market facts (`listings` + `properties`) are read on the SERVICE-ROLE
+connection — those tables are RLS-enabled-with-zero-policies by design (they
+carry broker PII inline, so a blanket `authenticated` read policy is the exact
+leak A6 walled off; see the A5 correction in
+docs/design/phase-1-multitenancy-foundations.md), which means a tenant
+connection sees zero rows and every lookup would report found=false. The
+per-account joins (pipeline membership, collection memberships, latest
+estimation) run on the TENANT connection so RLS scopes them to the caller —
+including the SYSTEM-account arm of estimation_runs_tenant_read (migration
+291), which is what lets the platform's pre-multi-tenancy golden estimates
+still surface. Same trusted-server split POST /estimations already uses.
 """
 
 from __future__ import annotations
@@ -51,13 +64,13 @@ _LISTING_COLS: tuple[str, ...] = (
     "mf_reference_rent_czk", "mf_gross_yield_pct",
 )
 
-_LOOKUP_SQL = """
+_MARKET_SQL = """
 WITH req(source, source_id) AS (VALUES {values})
 SELECT
     req.source,
     req.source_id,
     (l.source_id_native IS NOT NULL) AS found,
-    l.sreality_id, l.id AS listing_id, l.property_id,
+    l.sreality_id, l.id AS listing_id, l.property_id, l.source_url,
     l.category_main, l.category_type, l.area_m2, l.price_czk, l.disposition, l.subtype,
     l.district, l.locality, l.is_active, l.last_seen_at,
     -- MF figures are PROPERTY-grain (the golden record), so every portal's advert
@@ -65,7 +78,17 @@ SELECT
     -- for the brief pre-attach window (property_id NULL ~5 min) — a fresh listing
     -- is a singleton, whose golden record already equals its own per-listing value.
     coalesce(pr.mf_reference_rent_czk, l.mf_reference_rent_czk) AS mf_reference_rent_czk,
-    coalesce(pr.mf_gross_yield_pct,    l.mf_gross_yield_pct)    AS mf_gross_yield_pct,
+    coalesce(pr.mf_gross_yield_pct,    l.mf_gross_yield_pct)    AS mf_gross_yield_pct
+FROM req
+LEFT JOIN listings l
+    ON l.source = req.source AND l.source_id_native = req.source_id
+LEFT JOIN properties pr ON pr.id = l.property_id
+"""
+
+_ACCOUNT_SQL = """
+WITH tgt(listing_id, property_id, source_url) AS (VALUES {values})
+SELECT
+    tgt.listing_id,
     e.id AS estimation_id, e.estimate_kind AS estimation_kind,
     e.gross_yield_pct AS estimation_yield,
     (pp.property_id IS NOT NULL) AS in_pipeline,
@@ -74,12 +97,9 @@ SELECT
     ps.label AS pipeline_stage_label,
     (SELECT coalesce(array_agg(cp.collection_id ORDER BY cp.collection_id), array[]::bigint[])
        FROM collection_properties cp
-      WHERE cp.property_id = l.property_id) AS collection_ids
-FROM req
-LEFT JOIN listings l
-    ON l.source = req.source AND l.source_id_native = req.source_id
-LEFT JOIN properties      pr ON pr.id = l.property_id
-LEFT JOIN property_pipeline pp ON pp.property_id = l.property_id
+      WHERE cp.property_id = tgt.property_id) AS collection_ids
+FROM tgt
+LEFT JOIN property_pipeline pp ON pp.property_id = tgt.property_id
 LEFT JOIN pipeline_stages   ps ON ps.id = pp.stage_id
 LEFT JOIN LATERAL (
     SELECT er.id, er.estimate_kind, er.gross_yield_pct
@@ -94,8 +114,8 @@ LEFT JOIN LATERAL (
       -- into the fragile URL arm, where any URL-normalisation difference
       -- silently drops the estimation.
       AND (
-        er.input_listing_id = l.id
-        OR (er.input_listing_id IS NULL AND er.input_url = l.source_url)
+        er.input_listing_id = tgt.listing_id
+        OR (er.input_listing_id IS NULL AND er.input_url = tgt.source_url)
       )
     ORDER BY er.created_at DESC
     LIMIT 1
@@ -112,21 +132,37 @@ def _clean(value: Any) -> Any:
 
 
 def lookup_portal_listings(
-    conn: "psycopg.Connection", items: "list[s.PortalLookupItem]",
+    market_conn: "psycopg.Connection",
+    tenant_conn: "psycopg.Connection",
+    items: "list[s.PortalLookupItem]",
 ) -> dict[str, Any]:
     """Resolve each (source, source_id) to its MF facts + latest estimate.
 
     One row per requested item, in request order; `found=false` (and null
-    fields) when we have no listing for that pair.
+    fields) when we have no listing for that pair. Market facts read on
+    `market_conn` (service-role — see module docstring); pipeline/collections/
+    estimation on `tenant_conn` (RLS-scoped to the caller's account).
     """
     values_sql = ", ".join(["(%s::text, %s::text)"] * len(items))
     params: list[str] = []
     for it in items:
         params.extend([it.source, it.source_id])
 
-    with conn.cursor(row_factory=dict_row) as cur:
-        cur.execute(_LOOKUP_SQL.format(values=values_sql), params)
+    with market_conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(_MARKET_SQL.format(values=values_sql), params)
         rows = cur.fetchall()
+
+    found_rows = [r for r in rows if r["found"] and r["listing_id"] is not None]
+    account_by_listing: dict[int, dict[str, Any]] = {}
+    if found_rows:
+        tgt_sql = ", ".join(["(%s::bigint, %s::bigint, %s::text)"] * len(found_rows))
+        tgt_params: list[Any] = []
+        for r in found_rows:
+            tgt_params.extend([r["listing_id"], r["property_id"], r["source_url"]])
+        with tenant_conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(_ACCOUNT_SQL.format(values=tgt_sql), tgt_params)
+            for arow in cur.fetchall():
+                account_by_listing[arow["listing_id"]] = arow
 
     by_key: dict[tuple[str, str], dict[str, Any]] = {}
     for row in rows:
@@ -140,12 +176,13 @@ def lookup_portal_listings(
         # disposition (apartments). Computed server-side from the one canonical
         # label source so the extension needs no slug dictionary of its own.
         entry["kind_label"] = subtype_label_cs(row["subtype"]) or row["disposition"]
-        est_id = row["estimation_id"]
+        acct = account_by_listing.get(row["listing_id"], {})
+        est_id = acct.get("estimation_id")
         entry["latest_estimation"] = (
             {
                 "estimation_id": est_id,
-                "estimate_kind": row["estimation_kind"],
-                "gross_yield_pct": _clean(row["estimation_yield"]),
+                "estimate_kind": acct.get("estimation_kind"),
+                "gross_yield_pct": _clean(acct.get("estimation_yield")),
             }
             if est_id is not None
             else None
@@ -155,10 +192,10 @@ def lookup_portal_listings(
         # property_id NULL for ~5 min — the panel hides the toggle until then).
         entry["pipeline"] = (
             {
-                "in_pipeline": bool(row["in_pipeline"]),
-                "stage_id": row["pipeline_stage_id"],
-                "stage_key": row["pipeline_stage_key"],
-                "stage_label": row["pipeline_stage_label"],
+                "in_pipeline": bool(acct.get("in_pipeline")),
+                "stage_id": acct.get("pipeline_stage_id"),
+                "stage_key": acct.get("pipeline_stage_key"),
+                "stage_label": acct.get("pipeline_stage_label"),
             }
             if row["property_id"] is not None
             else None
@@ -166,7 +203,7 @@ def lookup_portal_listings(
         # Collection memberships are property-grain (rule #18) — same NULL-until-
         # attached posture as pipeline above; the panel's monitoring toggle reads it.
         entry["collection_ids"] = (
-            list(row["collection_ids"]) if row["property_id"] is not None else None
+            list(acct.get("collection_ids") or []) if row["property_id"] is not None else None
         )
         by_key[(row["source"], row["source_id"])] = entry
 
