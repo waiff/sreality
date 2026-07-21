@@ -23,11 +23,23 @@ TestClient = pytest.importorskip("fastapi.testclient").TestClient
 from api import curation
 from api import dependencies as deps
 from api import main as api_main
+from api import tenant_pool
 
 
 @pytest.fixture()
-def client():
+def client(monkeypatch):
     api_main.app.dependency_overrides[deps.get_db_conn] = lambda: object()
+    # /collections list + /collections/{id}/properties + /properties/{id}/notes
+    # moved onto the tenant pool (Wave 1 W1-1) — overridden to a legacy
+    # identity here, same as tests/api/test_pipeline.py; auth correctness
+    # itself lives in tests/api/test_auth.py.
+    api_main.app.dependency_overrides[tenant_pool.tenant_conn] = lambda: object()
+    api_main.app.dependency_overrides[deps.verify_jwt] = lambda: {
+        "sub": None, "legacy": True,
+    }
+    monkeypatch.setattr(
+        tenant_pool, "resolve_account_id", lambda conn, claims: None,
+    )
     yield TestClient(api_main.app)
     api_main.app.dependency_overrides.clear()
 
@@ -140,7 +152,7 @@ def store(monkeypatch):
         items.sort(key=lambda n: (n["created_at"], n["id"]), reverse=True)
         return {"data": items}
 
-    def fake_create_note(conn, pid, body):
+    def fake_create_note(conn, pid, body, account_id=None):
         nid = state["next_note"]
         state["next_note"] += 1
         note = {

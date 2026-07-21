@@ -46,6 +46,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 from api.cursor import decode_cursor, encode_cursor
+from api.dependencies import SYSTEM_ACCOUNT_ID
 
 from psycopg.types.json import Jsonb
 
@@ -334,7 +335,7 @@ def _ms_since(mono_start: float) -> int:
 # --- create / get / list endpoints -----------------------------------------
 
 _RUN_COLUMNS: tuple[str, ...] = (
-    "id", "created_at", "source", "mode", "status",
+    "id", "created_at", "account_id", "source", "mode", "status",
     "estimate_kind",
     "input_url", "input_sreality_id", "input_spec",
     "input_purchase_price_czk",
@@ -454,6 +455,7 @@ def create_estimation_run(
     llm_client: "LLMClient",
     body: s.CreateEstimationIn,
     background_tasks: Any | None = None,
+    account_id: str | None = None,
 ) -> dict[str, Any]:
     """POST /estimations: parse the URL, INSERT a pending row, schedule the
     heavy work as a BackgroundTask, return the row immediately.
@@ -470,7 +472,15 @@ def create_estimation_run(
     behaviour, ClickUp / agent callers that want the row populated
     before they read it back), the heavy work runs inline on the
     request thread.
+
+    `account_id` is the caller's account, resolved from the verified JWT by
+    the route handler (Wave 1 W1-1) — hand-threaded because the run persists
+    on the service-role connection, which has no JWT/RLS context to read it
+    from. Falls back to the platform SYSTEM account for legacy static-token
+    callers (today's exact prior behavior — the column no longer relies on
+    its own DEFAULT once it's named explicitly in every INSERT).
     """
+    account_id = account_id or SYSTEM_ACCOUNT_ID
     try:
         resolution = _resolve_input(conn, sreality_client, llm_client, body)
     except Exception as exc:
@@ -480,6 +490,7 @@ def create_estimation_run(
             recorder=TraceRecorder(),
             error_msg=f"parse failed: {type(exc).__name__}: {exc}"[:1000],
             extra_warnings=[],
+            account_id=account_id,
         )
 
     try:
@@ -491,6 +502,7 @@ def create_estimation_run(
             conn, body=body, resolution=resolution, recorder=TraceRecorder(),
             error_msg=f"target build failed: {type(exc).__name__}: {exc}"[:1000],
             extra_warnings=[],
+            account_id=account_id,
         )
 
     purchase, expected_rent, derivation = _derive_yield_inputs(body, resolution)
@@ -509,6 +521,7 @@ def create_estimation_run(
                 recorder=TraceRecorder(),
                 error_msg=f"unknown skill: {body.skill!r}",
                 extra_warnings=[],
+                account_id=account_id,
             )
         initial_status = "running"
     else:
@@ -516,6 +529,7 @@ def create_estimation_run(
 
     run_id = _insert_run(
         conn,
+        account_id=account_id,
         source=body.source,
         mode=body.mode,
         status=initial_status,
@@ -1320,11 +1334,13 @@ def _persist_failed_run(
     recorder: TraceRecorder,
     error_msg: str,
     extra_warnings: list[str],
+    account_id: str | None = None,
 ) -> dict[str, Any]:
     trace = recorder.to_dict(f"failed: {error_msg.split(':', 1)[0]}")
     merged = list(resolution.parse_warnings) + list(extra_warnings or [])
     run_id = _insert_run(
         conn,
+        account_id=account_id or SYSTEM_ACCOUNT_ID,
         source=body.source,
         mode=body.mode,
         status="failed",

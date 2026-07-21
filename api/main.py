@@ -674,10 +674,18 @@ def post_estimations(
     conn: Any = Depends(deps.get_db_conn),
     client: Any = Depends(deps.get_sreality_client),
     llm_client: Any = Depends(deps.get_llm_client),
-    _: None = Depends(deps.require_token),
+    claims: dict = Depends(deps.verify_jwt),
 ) -> dict[str, Any]:
+    """verify_jwt (not require_token) so a real per-user JWT gets its account
+    stamped onto the run — but `conn` stays the service-role connection, NOT
+    the tenant pool: a run's execution can run minutes long (agent mode), and
+    tenant_conn holds one pooler transaction open for the whole request
+    (Wave 1 W1-1 boundary; moving execution itself off the request process is
+    W1-3). resolve_account_id is plain SQL, safe on any connection."""
+    account_id = tenant_pool.resolve_account_id(conn, claims) or deps.SYSTEM_ACCOUNT_ID
     return create_estimation_run(
         conn, client, llm_client, body, background_tasks=background_tasks,
+        account_id=str(account_id),
     )
 
 
@@ -768,8 +776,8 @@ def get_latest_estimations_by_listing(
 @app.get("/estimations/{run_id}")
 def get_estimation(
     run_id: int,
-    conn: Any = Depends(deps.get_db_conn),
-    _: None = Depends(deps.require_token),
+    conn: Any = Depends(tenant_pool.tenant_conn),
+    claims: dict = Depends(deps.verify_jwt),
 ) -> dict[str, Any]:
     row = get_estimation_run(conn, run_id)
     if row is None:
@@ -781,8 +789,8 @@ def get_estimation(
 def patch_estimation_scenario(
     run_id: int,
     body: s.ScenarioUpdateIn,
-    conn: Any = Depends(deps.get_db_conn),
-    _: None = Depends(deps.require_token),
+    conn: Any = Depends(tenant_pool.tenant_conn),
+    claims: dict = Depends(deps.verify_jwt),
 ) -> dict[str, Any]:
     """Persist the operator's yield-scenario overrides.
 
@@ -1180,8 +1188,8 @@ def post_create_collection(
 
 @app.get("/collections")
 def get_list_collections(
-    conn: Any = Depends(deps.get_db_conn),
-    _: None = Depends(deps.require_token),
+    conn: Any = Depends(tenant_pool.tenant_conn),
+    claims: dict = Depends(deps.verify_jwt),
 ) -> dict[str, Any]:
     return curation.list_collections(conn)
 
@@ -1218,8 +1226,8 @@ def delete_collection(
 def post_collection_properties(
     collection_id: int,
     body: s.AddPropertiesToCollectionIn,
-    conn: Any = Depends(deps.get_db_conn),
-    _: None = Depends(deps.require_token),
+    conn: Any = Depends(tenant_pool.tenant_conn),
+    claims: dict = Depends(deps.verify_jwt),
 ) -> dict[str, Any]:
     return curation.add_properties_to_collection(conn, collection_id, body)
 
@@ -1228,8 +1236,8 @@ def post_collection_properties(
 def delete_collection_property(
     collection_id: int,
     property_id: int,
-    conn: Any = Depends(deps.get_db_conn),
-    _: None = Depends(deps.require_token),
+    conn: Any = Depends(tenant_pool.tenant_conn),
+    claims: dict = Depends(deps.verify_jwt),
 ) -> dict[str, Any]:
     return curation.remove_property_from_collection(
         conn, collection_id, property_id,
@@ -1317,8 +1325,8 @@ def get_price_stat_city_series(
 @app.get("/properties/{property_id}/notes")
 def get_property_notes(
     property_id: int,
-    conn: Any = Depends(deps.get_db_conn),
-    _: None = Depends(deps.require_token),
+    conn: Any = Depends(tenant_pool.tenant_conn),
+    claims: dict = Depends(deps.verify_jwt),
 ) -> dict[str, Any]:
     return curation.list_notes(conn, property_id)
 
@@ -1327,10 +1335,11 @@ def get_property_notes(
 def post_property_note(
     property_id: int,
     body: s.CreateNoteIn,
-    conn: Any = Depends(deps.get_db_conn),
-    _: None = Depends(deps.require_token),
+    conn: Any = Depends(tenant_pool.tenant_conn),
+    claims: dict = Depends(deps.verify_jwt),
 ) -> dict[str, Any]:
-    return curation.create_note(conn, property_id, body)
+    account_id = tenant_pool.resolve_account_id(conn, claims) or deps.SYSTEM_ACCOUNT_ID
+    return curation.create_note(conn, property_id, body, account_id=str(account_id))
 
 
 @app.get("/tags")
