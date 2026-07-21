@@ -18,6 +18,7 @@ from api import dependencies as deps
 from api import estimate_yield as ey
 from api import estimation_runs as er
 from api import main as api_main
+from api import tenant_pool
 from scraper import source_dispatcher as sd
 from scraper import url_parser as scraper_url_parser
 
@@ -30,6 +31,18 @@ def client(monkeypatch):
     )
     api_main.app.dependency_overrides[deps.get_llm_client] = (
         lambda: object()
+    )
+    # POST /estimations stays on get_db_conn (Wave 1 W1-1: execution off the
+    # request process is W1-3) but now also gates on verify_jwt to stamp
+    # account_id; GET/PATCH moved fully onto the tenant pool. Both overridden
+    # to a legacy identity here — auth correctness itself lives in
+    # tests/api/test_auth.py.
+    api_main.app.dependency_overrides[tenant_pool.tenant_conn] = lambda: object()
+    api_main.app.dependency_overrides[deps.verify_jwt] = lambda: {
+        "sub": None, "legacy": True,
+    }
+    monkeypatch.setattr(
+        tenant_pool, "resolve_account_id", lambda conn, claims: None,
     )
     # Run scheduled BackgroundTasks synchronously inside the handler so the
     # response payload reflects the post-task state. Without this, the
@@ -221,6 +234,12 @@ def test_post_returns_pending_when_background_deferred(monkeypatch):
         lambda: object()
     )
     api_main.app.dependency_overrides[deps.get_llm_client] = lambda: object()
+    api_main.app.dependency_overrides[deps.verify_jwt] = lambda: {
+        "sub": None, "legacy": True,
+    }
+    monkeypatch.setattr(
+        tenant_pool, "resolve_account_id", lambda conn, claims: None,
+    )
     try:
         state = _patch_persistence(monkeypatch)
         _patch_estimate(monkeypatch)

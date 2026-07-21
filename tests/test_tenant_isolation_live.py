@@ -369,6 +369,72 @@ def test_estimates_view_scopes_per_account(
     assert ps in seen_b, "tenant B cannot see a shared SYSTEM-account estimate"
 
 
+@pytest.fixture(scope="module")
+def seeded_llm_calls_rows(
+    svc: Any, tenants: dict[str, uuid.UUID],
+) -> "Iterator[dict[str, int]]":
+    """One estimation_run + one llm_calls row per account (A, B), so
+    migration 347's llm_calls_tenant_read policy has real cross-tenant data
+    to prove it scopes -- without this the read-back below is vacuous."""
+    a_acc, b_acc = tenants["a_acc"], tenants["b_acc"]
+    nonce = uuid.uuid4().hex[:10]
+    base = 900_000_000 + int(uuid.uuid4().int % 50_000_000)
+    run_ids: dict[str, int] = {}
+    call_ids: dict[str, int] = {}
+    with svc.cursor() as cur:
+        for key, (acc, srid) in {"a": (a_acc, base + 1), "b": (b_acc, base + 2)}.items():
+            cur.execute(
+                "INSERT INTO estimation_runs (account_id, source, mode, status, "
+                "input_spec, input_sreality_id) "
+                "VALUES (%s, 'api', 'deterministic', 'success', '{}'::jsonb, %s) "
+                "RETURNING id",
+                (acc, srid),
+            )
+            run_ids[key] = cur.fetchone()[0]
+            cur.execute(
+                "INSERT INTO llm_calls (called_for, provider, model, input_tokens, "
+                "output_tokens, cost_usd, estimation_run_id) "
+                "VALUES ('parse_url', 'anthropic', %s, 1, 1, 0.5, %s) RETURNING id",
+                (f"iso-{nonce}-{key}", run_ids[key]),
+            )
+            call_ids[key] = cur.fetchone()[0]
+    try:
+        yield call_ids
+    finally:
+        with svc.cursor() as cur:
+            cur.execute("DELETE FROM llm_calls WHERE id = ANY(%s)", (list(call_ids.values()),))
+            cur.execute("DELETE FROM estimation_runs WHERE id = ANY(%s)", (list(run_ids.values()),))
+
+
+def test_llm_calls_scoped_through_owning_run(
+    tenants: dict[str, uuid.UUID], seeded_llm_calls_rows: dict[str, int],
+) -> None:
+    """Migration 347 (Wave 1 W1-1): GET /estimations/{id} moved onto the
+    tenant pool, and its cost_usd_total subselect reads llm_calls directly --
+    which carried RLS-enabled-with-zero-policies like every table migration
+    299 swept, so a real per-account caller would silently see
+    cost_usd_total=0 on their OWN run. llm_calls_tenant_read scopes the read
+    through the owning run's account (mirroring estimation_trace_payloads/
+    estimation_feedback, migration 292) rather than granting a blanket read --
+    llm_calls itself stays account_id-less by design. It also stays listed in
+    _ADMIN_ONLY_RELATIONS above: llm_cost_daily_public/llm_cost_hourly_public
+    are aggregate admin views over this table and must keep their own gate;
+    this policy only opens a per-owning-run read, not a blanket one."""
+    ca, cb = seeded_llm_calls_rows["a"], seeded_llm_calls_rows["b"]
+
+    def visible(sub: uuid.UUID) -> set[int]:
+        with _scoped(sub) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT id FROM llm_calls WHERE id = ANY(%s)", ([ca, cb],))
+                return {r[0] for r in cur.fetchall()}
+
+    seen_a, seen_b = visible(tenants["a_user"]), visible(tenants["b_user"])
+    assert ca in seen_a, "tenant A cannot see the cost of their OWN estimation run"
+    assert cb not in seen_a, "tenant A sees tenant B's llm_calls row (cross-tenant leak)"
+    assert cb in seen_b, "tenant B cannot see the cost of their OWN estimation run"
+    assert ca not in seen_b, "tenant B sees tenant A's llm_calls row (cross-tenant leak)"
+
+
 def test_admin_gate_opens_for_service_but_not_role_switch(svc: Any) -> None:
     """Migrations 329/330: `is_platform_admin()` gates 26 admin-ops objects, but
     it reads the request.jwt.claims GUC, which only PostgREST and the tenant pool

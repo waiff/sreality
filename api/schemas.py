@@ -322,7 +322,7 @@ class CreateEstimationIn(BaseModel):
     `mode='deterministic'` for a single-shot estimate with the
     built-in filter defaults.
     """
-    source: Literal["ui", "api", "clickup"] = "api"
+    source: Literal["ui", "api", "clickup", "extension"] = "api"
     mode: Literal["deterministic", "agent"] = "deterministic"
 
     # Agent-mode only; ignored when mode == 'deterministic'.

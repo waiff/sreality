@@ -123,7 +123,7 @@ export async function createEstimation(
     method: 'POST',
     body: JSON.stringify({
       url,
-      source: 'ui',
+      source: 'extension',
       estimate_kind: 'rent',
       mode: 'deterministic',
     }),

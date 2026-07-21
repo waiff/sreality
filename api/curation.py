@@ -4,8 +4,12 @@ CRUD over the property-grain curation tables (migration 202): collection
 membership, tags and notes are keyed on `property_id` so operator curation
 describes the real-world property and is dedup-stable (it follows the property
 across merge/unmerge/split via toolkit.operator_state). Each handler is a plain
-function returning a dict; the FastAPI routes in api/main.py wrap them with the
-standard Depends(get_db_conn) + Depends(require_token).
+function returning a dict; the FastAPI routes in api/main.py wrap them with either
+Depends(get_db_conn) + Depends(require_token) (service-role, unscoped) or, for the
+extension-touched routes (Wave 1 W1-1), tenant_pool.tenant_conn (RLS-scoped by the
+caller's verified JWT) — reads then need no account_id in code, RLS filters them;
+top-level INSERTs with no account-owned parent to derive it from (create_note) take
+an explicit account_id.
 
 Pattern mirrors api/estimation_runs.py:
   - one transaction per write,
@@ -279,18 +283,26 @@ def create_note(
     conn: "psycopg.Connection",
     property_id: int,
     body: s.CreateNoteIn,
+    account_id: str | None = None,
 ) -> dict[str, Any]:
     # origin_listing_ref_id is the surrogate; origin_listing_id holds the legacy
     # sreality_id. Prefer a caller-supplied surrogate and derive the legacy handle
     # FROM it; only fall back to resolving legacy -> surrogate for a caller that
     # still sends the old field (post-Gate-2 that lookup returns NULL, which is
     # precisely why the surrogate has to be the driving value).
+    #
+    # account_id: property_notes has no owning-parent to derive it from (unlike
+    # collection_properties/property_tags, mig 292) and no DEFAULT (unlike
+    # estimation_runs) — a tenant_conn caller with account_id left NULL fails
+    # the table's WITH CHECK closed. Callers on the (still) service-role bridge
+    # pass None; RLS never applies there so the NULL is harmless.
     sql = (
         "INSERT INTO property_notes "
-        "  (property_id, body, origin_listing_id, origin_listing_ref_id) "
+        "  (property_id, body, origin_listing_id, origin_listing_ref_id, account_id) "
         "VALUES (%s, %s, "
         "  COALESCE(%s, (SELECT sreality_id FROM listings WHERE id = %s)), "
-        "  COALESCE(%s, (SELECT id FROM listings WHERE sreality_id = %s))) "
+        "  COALESCE(%s, (SELECT id FROM listings WHERE sreality_id = %s)), "
+        "  %s) "
         "RETURNING id, property_id, body, origin_listing_id, created_at"
     )
     try:
@@ -302,6 +314,7 @@ def create_note(
                 pid, body.body,
                 body.origin_listing_id, body.origin_listing_ref_id,
                 body.origin_listing_ref_id, body.origin_listing_id,
+                account_id,
             ))
             row = cur.fetchone()
     except psycopg.errors.ForeignKeyViolation:

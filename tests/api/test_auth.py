@@ -70,7 +70,7 @@ def client(monkeypatch):
         return {"data": {"categories": {}, "from_cache": {}},
                 "metadata": {"tool": "find_anchor_amenities"}}
 
-    def fake_create_run(conn, c, llm_client, body, background_tasks=None):
+    def fake_create_run(conn, c, llm_client, body, background_tasks=None, account_id=None):
         return {"id": 1, "status": "success"}
 
     def fake_get_run(conn, run_id):
@@ -78,6 +78,9 @@ def client(monkeypatch):
 
     def fake_list_runs(conn, **_kw):
         return {"data": [], "total": 0, "limit": 50, "offset": 0}
+
+    def fake_update_scenario(conn, run_id, **_kw):
+        return {"id": run_id, "status": "success"}
 
     def fake_parse_url(url, *, client, conn, persist=False):
         return {
@@ -102,6 +105,7 @@ def client(monkeypatch):
     monkeypatch.setattr(api_main, "create_estimation_run", fake_create_run)
     monkeypatch.setattr(api_main, "get_estimation_run", fake_get_run)
     monkeypatch.setattr(api_main, "list_estimation_runs", fake_list_runs)
+    monkeypatch.setattr(api_main, "update_scenario", fake_update_scenario)
     monkeypatch.setattr(scraper_url_parser, "parse_sreality_url", fake_parse_url)
 
     # Curation endpoints — gated coverage only; functional tests live in
@@ -140,7 +144,9 @@ def client(monkeypatch):
     )
     monkeypatch.setattr(
         api_curation, "create_note",
-        lambda conn, pid, body: {"id": 1, "property_id": pid, "body": body.body},
+        lambda conn, pid, body, account_id=None: {
+            "id": 1, "property_id": pid, "body": body.body,
+        },
     )
     monkeypatch.setattr(
         api_curation, "list_tags",
@@ -246,21 +252,14 @@ def _gated_calls(client) -> list:
         ("POST", "/tools/compute_listing_velocity", _LISTING_VEL_BODY),
         ("POST", "/tools/find_anchor_amenities", _ANCHORS_BODY),
         ("POST", "/estimate_yield", _ESTIMATE_BODY),
-        ("POST", "/estimations", _CREATE_ESTIMATION_BODY),
-        ("GET", "/estimations/1", None),
         ("GET", "/estimations", None),
         ("GET", "/maps/suggest?query=foo", None),
         ("POST", "/maps/resolve", _RESOLVE_BODY),
         ("GET", "/estimations/preview?url=https://www.sreality.cz/detail/x/2836292428", None),
         ("POST",   "/collections", _CREATE_COLLECTION_BODY),
-        ("GET",    "/collections", None),
         ("GET",    "/collections/1", None),
         ("PATCH",  "/collections/1", _PATCH_COLLECTION_BODY),
         ("DELETE", "/collections/1", None),
-        ("POST",   "/collections/1/properties", _ADD_PROPERTIES_BODY),
-        ("DELETE", "/collections/1/properties/2", None),
-        ("GET",    "/properties/1/notes", None),
-        ("POST",   "/properties/1/notes", _CREATE_NOTE_BODY),
         ("GET",    "/tags", None),
         ("POST",   "/tags", _CREATE_TAG_BODY),
         ("PATCH",  "/tags/1", _PATCH_TAG_BODY),
@@ -271,13 +270,24 @@ def _gated_calls(client) -> list:
 
 
 def _jwt_gated_calls() -> list:
-    """Routes on verify_jwt (Phase 1): fail CLOSED when auth is unconfigured,
-    unlike require_token's open-when-unset behavior."""
+    """Routes on verify_jwt / tenant_pool.tenant_conn (Phase 1): fail CLOSED
+    when auth is unconfigured, unlike require_token's open-when-unset
+    behavior. The Wave 1 W1-1 batch (/estimations create/read/scenario,
+    /collections list + /properties writes, /properties/{id}/notes) moved
+    here from _gated_calls in lockstep with api/main.py."""
     return [
         ("GET",    "/pipeline/stages", None),
         ("POST",   "/pipeline/cards", _PIPELINE_CARD_BODY),
         ("PATCH",  "/pipeline/cards/1", {"stage_id": 1}),
         ("DELETE", "/pipeline/cards/1", None),
+        ("POST",   "/estimations", _CREATE_ESTIMATION_BODY),
+        ("GET",    "/estimations/1", None),
+        ("PATCH",  "/estimations/1/scenario", {"rent_czk": 15000}),
+        ("GET",    "/collections", None),
+        ("POST",   "/collections/1/properties", _ADD_PROPERTIES_BODY),
+        ("DELETE", "/collections/1/properties/2", None),
+        ("GET",    "/properties/1/notes", None),
+        ("POST",   "/properties/1/notes", _CREATE_NOTE_BODY),
     ]
 
 

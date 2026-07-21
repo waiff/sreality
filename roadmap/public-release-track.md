@@ -216,6 +216,31 @@ remediation R3 closes that. Full spec: `docs/design/public-release-remediation-2
    - **G** (#872) — CI schema replay PG15 → PG17 to match prod 17.6; the version gap is
      exactly what let the MAINTAIN drift go unnoticed. Passed first try.
 8. Wave 1 (extension + agent estimations: quotas, async job lane, Stripe checkout + metering).
+   - ~~**W1-1 (IDOR fix: route scoping + account stamping)**~~ — **SHIPPED, migration 347.**
+     Verified against `origin/main` first (`docs/design/waves-1-4-public-features.md`'s
+     "Phase 1 supplies every primitive" premise was wrong — `usage_ledger`/`check_budget`
+     don't exist, corrected same-day, PR #882). Moved the extension-touched estimation +
+     curation routes onto `verify_jwt`/the tenant pool: `GET/PATCH /estimations/{id}`
+     (+ `/scenario`), `GET /collections`, `POST/DELETE /collections/{id}/properties`,
+     `GET/POST /properties/{id}/notes`. `POST /estimations` stays on the service-role
+     connection (moving execution off the request process is W1-3) but now resolves +
+     stamps `account_id` on every INSERT via `tenant_pool.resolve_account_id` — closing the
+     gap where every run silently landed on the SYSTEM account regardless of caller.
+     `estimation_runs.source` gained `'extension'` (CHECK + Pydantic lockstep); a new
+     `llm_calls_tenant_read` RLS policy scopes `GET /estimations/{id}`'s cost subselect
+     through the owning run's account (the table carried RLS-enabled-with-zero-policies
+     like every migration-299 table, so it would have silently shown cost_usd_total=0 to
+     every real per-account caller otherwise). **Deliberately deferred, not fixed here:**
+     `listings`/`properties` still have zero `authenticated` read policies on the base
+     tables (Amendment A5) — verified live they carry `broker_email`/`broker_phone`/
+     `raw_json` directly, so a blanket policy would leak broker PII over Supabase's
+     auto-REST; needs a column-safe approach (redacted view or narrow function), not a
+     table-wide policy. `list_estimation_runs`'s locality-display JOIN and
+     `POST /listings/lookup` degrade gracefully (NULL/unscoped) for real per-account JWTs
+     until that lands — cosmetic today since 100% of traffic is still the legacy
+     static-token bridge. Behavior-preserving for every current caller (verified against
+     live account/backfill-claim state before writing code); only becomes a live boundary
+     once the extension's own `chrome.identity` session (still ahead) sends real user JWTs.
 
 **Housekeeping done 2026-07-20:** operator enabled Supabase Auth's leaked-password-protection
 toggle (Authentication → Sign In / Providers → Email → "Prevent use of leaked passwords").
