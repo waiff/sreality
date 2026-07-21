@@ -92,7 +92,11 @@ Health page still renders for the operator.
 
 ## PR-B — per-account scoping for `property_estimates_public` (G1)
 
-**Branch `fix/estimates-per-account` · one migration (expect 341).**
+**✅ SHIPPED 2026-07-21 — migration 341.** Live-verified: a tenant still sees **58 rows**
+(the shared-SYSTEM arm preserves Browse's "with estimates" filter, where the naive
+two-arm predicate returned **0**).
+
+**Branch `fix/estimates-per-account` · one migration.**
 
 **Fix-path landmine found during verification:** the "obvious" predicate
 (`er.account_id in (select current_account_ids()) or is_platform_admin()`) was probed live
