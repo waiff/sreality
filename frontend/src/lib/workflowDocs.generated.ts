@@ -1001,8 +1001,9 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "inputs": [],
     "secrets": [
       "EXT_API_BASE_URL",
-      "EXT_API_TOKEN",
-      "EXT_APP_BASE_URL"
+      "EXT_APP_BASE_URL",
+      "EXT_SUPABASE_ANON_KEY",
+      "EXT_SUPABASE_URL"
     ],
     "concurrencyGroup": null,
     "cancelInProgress": null,
