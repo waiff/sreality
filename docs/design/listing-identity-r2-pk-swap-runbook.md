@@ -314,16 +314,96 @@ arbitrating on it, THEN swap the PK and drop the old index — or accept and
 time-box the window deliberately, during a paused-writer window (§6 already
 pauses writers for Gate 1, which is why Gate 1 does not inherit this hazard).
 
-**Next: Phase C's remaining read cutover** (§4 second half) is still open: browse
-hydration, dedup `ListingKey` + pair-cache reads, merge/unmerge replay,
-notification producers (incl. the `new_source` dedupe_key NULL-concat fix), the
-Chrome extension app-link gate + redistribution, `image_key()`, estimation forward
-provenance, the sreality_id-cursored maintenance walkers (geocode/street/geo_cell
-partial indexes), then the 25-read-model "may lag" wave. `brokers.ts` and
-`api.ts`'s manual-estimates path turned out to need NO changes (see above) — drop
-them from the checklist. Phase D itself is now feature-complete pending only the
-`dirty_broker_listings` follow-up above; after that lands, Gate 1 (§6) has every
-listed prerequisite met and just needs an operator ask (backup + explicit OK).
+**Phase C read cutover — MOSTLY DONE (2026-07-21, PRs #866-#879, migs 343/344).**
+Ten PRs, each verified against prod rather than reasoned about. What shipped, and
+the failure each one actually prevented:
+
+- **#870 `exclude_ids` NULL-safety — the severest finding of the whole sweep, and
+  a CORRECTNESS bug, not a provenance one.** `l.sreality_id <> ALL(...)` is
+  three-valued: for a post-flip listing it evaluates to NULL and a WHERE keeps
+  only TRUE, so the predicate SILENTLY DELETES those rows from the cohort rather
+  than merely failing to exclude them. `_build_target` puts the run's own subject
+  into `exclude_ids`, so it is non-empty on essentially EVERY listing-anchored
+  estimation — post-flip nearly every estimate would quietly draw its cohort from
+  sreality-only inventory and shift the price distribution, with a green run.
+  Guarded, plus a surrogate-keyed `exclude_listing_ids` twin. Same PR fixed
+  transit_axis's `PARTITION BY l.sreality_id`, which would have collapsed every
+  non-sreality listing into ONE partition and kept exactly one of them (`rn = 1`)
+  for the whole axis cohort.
+- **#866 notifications**: the `new_source` dedupe_key concatenated a bare
+  `sreality_id`; `dedupe_key` is NOT NULL and `||` yields NULL on any NULL operand,
+  so the first post-flip listing would have aborted the ENTIRE collection-monitor
+  pass with a not-null violation — every collection stops notifying, not just that
+  row. COALESCEd onto the surrogate (existing keys stay byte-identical, so nothing
+  already dispatched re-fires). Also found while tracing it: `_MONITORED_CTE` gated
+  on `p.repr_listing_id IS NOT NULL`, silently dropping exactly the new-portal
+  properties out of monitoring; now gates on the surrogate. Plus 7 read joins.
+- **#867 broker queue CONSUMER** — the audit's MEDIUM, uncensused until PR #861.
+  Also fixed two `count(DISTINCT coalesce(property_id, -sreality_id))` rollups
+  (count(DISTINCT) skips NULLs → silent undercount).
+- **#873 (mig 343) browse read model**: `properties_public`'s repr join moves onto
+  the surrogate — this IS the "repr goes NULL" failure (price_unit/floor/broker_*/
+  description/street fallback all NULL, cards render blank). `browse_projection`
+  and `listing_broker_public` expose the surrogate. Verified: 548,498/548,498
+  properties carry `repr_listing_ref_id` and it resolves identically; 50,000
+  sampled rows, 0 mismatches on every repr-supplied field.
+- **#874 merge/unmerge/split replay**; **#875 image R2 key + drain shard** (the key
+  rendered the literal `"None/0001.jpg"` — every non-sreality image colliding on
+  one prefix and overwriting; and `hashint8(NULL) % n = k` is NULL, so those images
+  matched NO shard and would never have downloaded at all); **#876 cohort emits
+  listing_id + snapshot LATERAL** (rule 8); **#877 (mig 344) maintenance walkers**
+  (five partial indexes + four backfill scripts re-keyed END TO END, not just at
+  the cursor — a half-swap pages one id-space while updating another); **#878
+  extension gate + note write + portal_lookup** (its estimation-join DISCRIMINATOR
+  had to move too, else every resolved non-sreality listing routes into the fragile
+  URL-string-equality arm); **#879 agent cohort keying + comparable provenance**
+  (`int(l["sreality_id"])` is a TypeError on None — the agent DIES; and
+  `_persist_cohort_entries` resolved a NOT NULL column through the legacy key
+  inside a bare `except`, so provenance would vanish with a green run).
+
+**Still open in §4 — three groups, in priority order:**
+
+1. **Dedup identity chains (4 PRs, the biggest remaining item).** Do NOT start it
+   piecemeal: all four pair caches carry `CHECK (sreality_id_a < sreality_id_b)`,
+   and 77% of rows sort DIFFERENTLY by surrogate (56,375 rows checked; positional
+   mirroring is 100% clean, so the read cutover is provably behaviour-preserving —
+   it is the WRITE order that is blocked). Required order: (PR1) migration
+   dropping the 4 CHECKs + adding `listing_id_a/_b` to `dedup_batch_requests`;
+   (PR2) make the batch spool identity-agnostic FIRST, because Anthropic batches
+   take up to 24h to return and `custom_id` is a persisted UNIQUE key whose scheme
+   changes — prefix the new form (`cmpL-`/`splL-`/`fplL-`) or flush the spool, else
+   in-flight requests get re-spooled and DOUBLE-BILLED; (PR3) the core swap, which
+   must be ATOMIC across dedup_engine + image_similarity + visual_match + clip_dedup
+   — the chain `ListingKey → closure(a,b) → cache SQL → in-memory dict key` is one
+   id-space and splitting it produces SILENT wrong answers, not errors (the pHash
+   dict lookups `.get(..., 0)` their default, so the free fast-path just stops
+   firing); (PR4) read surfaces. Two traps: reads must become `LEAST/GREATEST`,
+   NOT a repositioned equality (a naive column swap misses 77% of warm rows → full
+   LLM re-bill of ~56k verdicts), and the pair-cache `DO UPDATE SET` omits
+   `sreality_id_a/_b` today — harmless only because the CHECK freezes order, a
+   latent inconsistency the moment order can vary.
+2. **Browse FRONTEND hydration** (the DB half shipped in #873). `.in('sreality_id', …)`
+   at queries.ts ~1182/1212/1238/1448 → the surrogate; React keys and the maplibre
+   feature id; `listingPath()` fallback for a card whose repr has no sreality_id
+   (Browse links are GENERATED, not stored, so `/listing/null` is reachable);
+   `listings_with_city_quality()` must DROP+CREATE to return both ids (re-grant
+   after — a dropped function loses its grants). **Trap:** `fetchPropertyReprId`
+   must NOT simply return the surrogate — `listingPath()` builds the LEGACY route,
+   and the two id-spaces overlap numerically, so it would silently load the WRONG
+   listing. Return the natural key and redirect canonically.
+3. **May-lag read models** (health/dedup/broker/image matviews, remaining `*_public`).
+   `listing_fetch_failures` is the highest-leverage blocker — it has no carrier
+   column and gates three health matviews. Health should still precede Gate 2 to
+   avoid a silent-green blind spot. Lowest value, do last: `dedup_label_events` —
+   note `property_merge_events.listing_id` is SREALITY-valued despite its name.
+
+Also still open: the LLM tool schemas still name `sreality_id` (a contract change
+touching `skills.system_prompt`, an operator-edited DB row currently drifted from
+its git mirror — wants tolerant input handling so a stale prompt degrades rather
+than breaks).
+
+**Gate 1 is NOT blocked by any of the above** — those all gate Gate 2. Every §5
+prerequisite for Gate 1 is met; it needs only the operator window (§6).
 
 ## 0. What the review corrected (read this first)
 
@@ -619,6 +699,38 @@ URLs). NEVER touch: `srealityListingUrl()` stays bound to `source_id_native`
 7. Parity green (writer_gap = mismatched = 0 across all tables) is a hard precondition.
 
 ## 6. Phase E — GATE 1: the PK-swap window (pg_dump + operator OK)
+
+> **OPERATOR HANDOFF — Gate 1 is ready as of 2026-07-21.** Every technical
+> prerequisite in §5 is met and verified live. What remains is not code; it is
+> the four things only the operator can do. In order:
+>
+> 1. **Confirm Supabase PITR is enabled and RECORD the exact pre-window UTC
+>    timestamp.** This is the recovery target and the whole safety net — a 63 GB
+>    logical dump is not the backup for this (tens of minutes, stale the instant
+>    it finishes, and restoring it loses every always-on-writer row since).
+> 2. **Take the two small dumps**: `pg_dump --schema-only` (seconds), plus data
+>    for the small Class-B carriers only (`notification_dispatches`,
+>    `estimation_runs`, `estimation_cohort_entries`, `property_merge_events` —
+>    all <100k rows).
+> 3. **Say go.** The swap transaction itself is catalog-only and reversible
+>    in-place (re-promote `PRIMARY KEY USING INDEX listings_sreality_id_uidx`,
+>    re-add the legacy FKs `NOT VALID` → `VALIDATE`); the backups guard the data
+>    operations AROUND it, not the swap. There are zero NULL `sreality_id` rows,
+>    which is exactly the condition that makes rollback trivial.
+> 4. **Be reachable for the window** — pausing the realtime worker needs a
+>    Railway env change (`REALTIME_WORKER_ENABLED=false`), which an agent cannot
+>    do. The rest of the choreography below (pg_cron pauses, the GH-cron
+>    SHA-freeze check, the transaction, resume) is scriptable.
+>
+> **Do NOT wait for the remaining §4 items.** Browse frontend, the dedup chains,
+> the may-lag read models and the LLM schemas all gate **Gate 2**, not Gate 1.
+> Gate 1 keeps `sreality_id` populated on every row, so nothing that still reads
+> it breaks.
+>
+> One caveat carried forward from the 2026-07-21 audit: a PK swap has **no
+> zero-window ordering** in general (see the `dirty_broker_listings` note in the
+> Progress section). Gate 1 is exempt *because* this choreography pauses the
+> writers — which is precisely why the pause steps are not optional.
 
 **Backup first — but the right one.** The DB is **63 GB** (listing_snapshots 14 GB,
 listings 7.7 GB, images-table 2.7 GB); a full logical pg_dump takes tens of minutes to
