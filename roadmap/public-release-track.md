@@ -264,7 +264,21 @@ remediation R3 closes that. Full spec: `docs/design/public-release-remediation-2
      `EXT_SUPABASE_ANON_KEY` GitHub Actions secrets (replacing the retired `EXT_API_TOKEN`)
      — exact steps in `chrome-extension/README.md` § Sign-in. The private half of the
      generated keypair was handed to the operator out-of-band (not committed, only the
-     public half lives in `manifest.json`).
+     public half lives in `manifest.json`). **Verified live end-to-end 2026-07-21** (real
+     Google sign-in → panel loads real data).
+   - **Latent P0 the first real JWT exposed:** Railway's `TENANT_POOL_DB_URL` carried a bare
+     `tenant_pool` username, but the Supabase **shared** pooler routes by a project-ref
+     suffix (`tenant_pool.<ref>`) and rejects anything else with `FATAL: (ENOIDENTIFIER) no
+     tenant identifier provided`. Every tenant-pool route 500'd the moment a real user JWT
+     arrived. Proven with a raw Postgres startup-packet probe (bare → the exact error;
+     suffixed → proceeds to auth), fixed by the operator in the Railway dashboard.
+     **It had been dead since the tenant pool shipped (increment 3, migration 293)** and was
+     unobservable because `tenant_conn`'s legacy branch sends static-`API_TOKEN` callers to
+     the service-role connection — so no production request had ever run that code path.
+     Consequences for what's left: Wave 2's pipeline writes and Wave 3's notification routes
+     were queued up behind the same dead config, and the launch-gate two-account pen-test
+     **must run against real user JWTs** — a green RLS lane says nothing about a DSN that
+     production never dials.
    - Remaining: the metering substrate (`usage_ledger`/`check_budget` — needs a product
      decision on quota shape: free-tier run count vs USD budget, daily vs monthly window),
      the atomic submit-time gates (entitlement/budget/concurrency/idempotency), moving agent
