@@ -125,6 +125,11 @@ explicitly on every new function; grant back only the roles that need it.
 - **Additive migrations** (new tables / columns / indexes / RPCs) — write the new
   numbered file, commit it, apply via MCP, verify with a SELECT, and report. No approval
   gate; CI + the tracked file are the net.
+- **Open with `set local lock_timeout = '5s';` when a migration GRANT/REVOKEs or
+  CREATE-OR-REPLACEs a hot or cron-refreshed relation** (any matview, `browse_list`,
+  `listings`). Those take ACCESS EXCLUSIVE, and a whole-transaction loop holds every
+  lock it has already taken — so without a timeout it queues behind, or blocks, the
+  `*/10` health refresh or the 30-min map rebuild. Fail fast and retry instead.
 - **Destructive migrations** (`DROP TABLE`/`COLUMN`, type-changing `ALTER`, `DELETE`
   without `WHERE`, `TRUNCATE`) — **pause for explicit operator OK** ("yes, apply it") and
   take a `pg_dump` backup of the affected tables *first*. There's no staging DB, so these
@@ -205,17 +210,23 @@ projection. This retired the old `scripts/refresh_map_mv.py` GH Actions cron ent
 pg_cron runs on-the-minute where GH Actions cron was measured ~2× jittered (see
 `gh-actions-cron-throttle-fleet` if you need the numbers).
 
-**A bare `SECURITY DEFINER` function call in a view's WHERE is NOT inlined by the
-planner and runs once per candidate row, not once per query** (migration 275, PR #707).
-Migration 273 added `properties.published_at`'s gate as a bare
-`(NOT publication_gate_enabled() OR published_at IS NOT NULL)`; measured live, that's
-~87k calls for one cohort, shared buffers 33.5k→172k, warm latency 146ms→914ms, and it
-timed out cold under the anon 3s statement budget (this is what broke Browse
-market-wide). Wrapping the call as a scalar subquery,
-`(NOT (SELECT publication_gate_enabled()) OR ...)`, folds it to a one-time `InitPlan`
-(confirmed via `EXPLAIN ANALYZE`: 211 buffers instead of 172k) — same result, O(1)
-instead of O(rows). Apply this to any future gate/flag function referenced from a view
-WHERE.
+**A `SECURITY DEFINER` gate in a view's WHERE is per-row ONLY when it is combined with a
+column predicate.** Three cases, don't conflate them:
+- **Standalone** (`WHERE is_platform_admin()`) — the qual references no column, so it is a
+  pseudoconstant and the planner emits a **One-Time Filter**: evaluated once, and for a
+  false result the subtree is never scanned. This is the migration 318/332 admin-gate
+  pattern; it is O(1) and needs no wrapping (re-confirmed by `EXPLAIN` on the live gated
+  views during the 2026-07 remediation).
+- **Combined with a column Var** (`(NOT publication_gate_enabled() OR published_at IS NOT
+  NULL)`) — the Var defeats the pseudoconstant fold and the function runs **once per
+  candidate row**. This is the actual migration 275 / PR #707 incident: ~87k calls for one
+  cohort, shared buffers 33.5k→172k, warm latency 146ms→914ms, timing out cold under the
+  anon 3s budget — what broke Browse market-wide.
+- **Scalar-subquery wrap** (`(NOT (SELECT publication_gate_enabled()) OR ...)`) — folds the
+  combined case to a one-time `InitPlan` (211 buffers instead of 172k). It is the rescue for
+  case 2, not a requirement for case 1.
+
+So: wrap a gate that sits alongside a column predicate; a standalone gate is already O(1).
 
 **Stored blocking keys**: `listings.street_name_key` (migration 256) and
 `listings.geo_cell_key` (migration 276, trigger-maintained, extended to the `byt` family

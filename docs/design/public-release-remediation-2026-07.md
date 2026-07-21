@@ -255,7 +255,7 @@ Do NOT revoke authenticated SELECT on the other 10 matviews without first greppi
 `frontend/src/` for each name — `properties_map_mv` (SPA map) and the health/choropleth
 matviews are legitimately read by the logged-in app.
 
-### 332 — repoint the 3 health matviews at base tables (F3 defense-in-depth)
+### Repoint the 3 health matviews at base tables (F3 defense-in-depth) — NOT SHIPPED
 
 A matview refreshed out-of-band by pg_cron must never depend on `request.jwt.claims`. Even
 with R1's fallback, leave no request-scoped state in cron paths:
@@ -291,7 +291,10 @@ Also update `docs/design/phase-0-emergency-hardening.md` in this PR: record (a) 
 PART B2 matview relkind gap, (b) the drift vector "grants added by migrations after the
 one-time revoke sweep" — the standing anon test is the durable fix for (b).
 
-### Deferred: the matview repoint (was migration 332)
+### Deferred: the matview repoint (never assigned a number)
+
+(The number 332 went to the health-RPC admin gate that R2's audit turned up — see
+"New finding while executing R2" below. This repoint was never assigned a number.)
 
 The plan called for DROP+CREATE'ing `scraper_health_checks_mv` / `health_summary_mv` /
 `portal_health_mv` so they read base tables instead of the gated wrapper views — the rule
