@@ -88,16 +88,13 @@ Run as ONE committed track; valueless half-done. Phases and their gates are spec
   exactly — re-addable any time, not gate-destructive). Step 7 (parity-green
   precondition) confirmed via `verify_pipeline`'s `dual_write_parity` check:
   `status=ok value=0` across all 22 armed carriers.
-  **Still open:** `dirty_broker_listings`'s own PK swap (migration 336 shipped the
-  nullable `listing_id` dual-write column + writer code, but the two writer sites are
-  hit by both the always-on worker (redeploys fast) AND per-portal GH Actions cron
-  (subject to the SHA-freeze gotcha — a run queued before the merge still executes
-  pre-merge code) — observed a genuine mix of old/new writes ~10 min post-merge, so
-  enforcing NOT NULL now would repeat the #825 class of bug for any lagging portal.
-  Wait for a full cadence cycle across all sources with 100% `listing_id` population
-  before backfilling the last stragglers + swapping its PK + retargeting its two
-  `ON CONFLICT` sites — a follow-up PR, not urgent (queue is tiny, sreality_id stays a
-  valid key regardless).
+  `dirty_broker_listings`'s own PK swap (✅ shipped 2026-07-21, PRs #857/#859) closes
+  out Phase D: after confirming a full cadence cycle had passed with 100%
+  `listing_id` population (zero NULLs table-wide, ~6.5h post-#853), the schema swap
+  (`dirty_broker_listings_pkey` → `PRIMARY KEY (listing_id)`) landed and was
+  dispatched live BEFORE the writer-code retarget (both `ON CONFLICT` sites →
+  `(listing_id)`, verified via `EXPLAIN` against prod) — the #825-safe order.
+  **Phase D is now fully complete**; every prerequisite for Gate 1 is met.
 - **GATE 1** — the PK-swap window (`sreality_id` → `id`), catalog-only and reversible.
 - **GATE 2** — stop drawing `synthetic_listing_id_seq` (the true point of no return).
 - **Phase H / R5** — optional cleanup, deferrable indefinitely. Existing `sreality_id`

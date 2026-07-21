@@ -250,26 +250,30 @@ scripts/workflows, both idempotent and re-run-safe:
 zero mismatch — across all 22 armed `R2_CARRIERS` (all 22 have a
 `dual_write_watermark` row; none unarmed).
 
-**`dirty_broker_listings`'s own PK swap — deliberately deferred, still open.** This
+**`dirty_broker_listings`'s own PK swap — DONE (2026-07-21, PRs #857/#859).** This
 table isn't an `R2_CARRIERS` member (no pre-existing `listing_id` column, no Phase
 A4 backfill), so it got its own migration (336: nullable `listing_id` dual-write
-column) + writer-code dual-write at both `INSERT` sites (`ingest_scraped_listing`
-and the batch drain's `_BATCH_DIRTY_BROKERS_FROM_SIDS_SQL`, both JOIN onto
-`listings` in the same transaction rather than round-tripping through Python — the
-established R2 dual-write idiom). Checked live ~10 minutes post-merge: a genuine
-MIX of old-code (no `listing_id`) and new-code (populated) writes, because this
-table's two writer sites are hit by both the always-on realtime worker (redeploys
-in minutes) AND the per-portal GH Actions cron scrapers, which are subject to the
-**SHA-freeze gotcha** (§6's Gate 1 choreography already calls this out for a
-different reason) — a run queued before the merge still executes the pre-merge
-code, so full rollout isn't instant even though the code is merged. Enforcing
-`NOT NULL` or swapping the PK now would break the still-in-flight old-code writers
-— exactly the #825 class of bug (a constraint added before every writer honors it).
-**Next session:** confirm 100% `listing_id` population on fresh
-`dirty_broker_listings` rows across a full cadence cycle, then backfill the last
-few stragglers (the queue is tiny — 115 rows observed pre-dual-write), swap its PK
-to `(listing_id)`, and retarget both `ON CONFLICT` sites — not urgent, since
-`sreality_id` stays a valid unique key on this table regardless.
+column) + writer-code dual-write at both `INSERT` sites — shipped in PR #853. It
+was deliberately held back at that point: checked live ~10 minutes post-merge, a
+genuine MIX of old-code (no `listing_id`) and new-code (populated) writes was
+observed, because this table's two writer sites are hit by both the always-on
+realtime worker (redeploys in minutes) AND the per-portal GH Actions cron
+scrapers, which are subject to the **SHA-freeze gotcha** (§6's Gate 1
+choreography already calls this out for a different reason) — a run queued
+before the merge still executes the pre-merge code, so full rollout isn't
+instant even though the code is merged. Re-checked ~6.5 hours later (well past
+even the slowest 6h-cadence portal's cycle): **zero** rows anywhere in the table
+had a NULL `listing_id` — the fleet had fully rolled over. Landed in two PRs, in
+the order the #825 lesson demands: **#857** (schema only — a new dispatch-only
+`apply_dirty_broker_listings_pk_swap.py`/`.yml`, defensive backfill + `listing_id
+SET NOT NULL` + PK swap `sreality_id` → `listing_id` + `sreality_id DROP NOT
+NULL`, dispatched live and verified — `dirty_broker_listings_pkey` now
+`PRIMARY KEY (listing_id)`), merged and dispatched BEFORE **#859** (the writer-code
+retarget, both `ON CONFLICT` sites moved from `(sreality_id)` to `(listing_id)`,
+verified via `EXPLAIN` against prod: `Conflict Arbiter Indexes:
+dirty_broker_listings_pkey`) — reversing the order would have deployed code
+whose arbiter had no matching index yet. **Phase D is now fully complete**; every
+§5 prerequisite for Gate 1 is met.
 
 **Next: Phase C's remaining read cutover** (§4 second half) is still open: browse
 hydration, dedup `ListingKey` + pair-cache reads, merge/unmerge replay,
