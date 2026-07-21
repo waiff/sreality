@@ -102,10 +102,10 @@ _REJECT_SQL = """
 
 # rlat/rlon are SQL-rounded with the SAME expression as _REJECT_SQL so the
 # in-memory set membership is exact (identical float8 on both sides). The scan is
-# served by migration 184's partial index (source, sreality_id) WHERE street IS
-# NULL; the version predicate is a cheap filter on the fetched rows.
+# served by migration 184's partial index, rebuilt on (source, id) by
+# scripts.apply_r2_maintenance_indexes, WHERE street IS NULL; the version predicate is a cheap filter on the fetched rows.
 _CANDIDATE_SQL = """
-    SELECT l.sreality_id, l.obec_id,
+    SELECT l.id, l.obec_id,
            st_y(l.geom::geometry) AS lat, st_x(l.geom::geometry) AS lon,
            round(st_y(l.geom::geometry)::numeric, 5)::float8 AS rlat,
            round(st_x(l.geom::geometry)::numeric, 5)::float8 AS rlon
@@ -122,8 +122,8 @@ _CANDIDATE_SQL = """
       AND (%(force)s
            OR l.coord_street_attempt_version IS NULL
            OR l.coord_street_attempt_version <> %(version)s)
-      AND l.sreality_id > %(cursor)s
-    ORDER BY l.sreality_id
+      AND l.id > %(cursor)s
+    ORDER BY l.id
     LIMIT %(chunk)s
 """
 
@@ -164,7 +164,7 @@ _UPDATE_SQL = """
     FROM (SELECT * FROM unnest(%(ids)s::bigint[], %(streets)s::text[],
                               %(name_keys)s::text[], %(houses)s::text[])
           AS t(id, street, street_name_key, house_number)) d
-    WHERE l.sreality_id = d.id
+    WHERE l.id = d.id
     RETURNING l.property_id
 """
 
@@ -173,12 +173,12 @@ _UPDATE_SQL = """
 _STAMP_SQL = """
     UPDATE listings
     SET coord_street_attempt_version = %(version)s
-    WHERE sreality_id = ANY(%(ids)s::bigint[])
+    WHERE id = ANY(%(ids)s::bigint[])
 """
 
 _CALIBRATE_SQL = """
     WITH gt AS (
-      SELECT l.sreality_id, l.obec_id, l.street,
+      SELECT l.id, l.obec_id, l.street,
              ST_SetSRID(ST_MakePoint(st_x(l.geom::geometry), st_y(l.geom::geometry)), 4326)::geography AS pt
       FROM listings l
       WHERE l.is_active AND l.street IS NOT NULL AND l.obec_id IS NOT NULL
@@ -192,7 +192,7 @@ _CALIBRATE_SQL = """
       LIMIT %(n)s
     ),
     matched AS (
-      SELECT gt.sreality_id,
+      SELECT gt.id,
         (SELECT min(ST_Distance(ap.geom, gt.pt))
            FROM address_points ap
            WHERE ap.obec_id = gt.obec_id

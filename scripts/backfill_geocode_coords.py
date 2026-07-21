@@ -52,12 +52,12 @@ DEFAULT_SOURCES = (
 # an inactive row can't be refetched and gains nothing user-facing from a pin;
 # flip to inactive coverage later if the inactive-geo dedup pass (P2) lands.
 _SELECT_SQL = """
-    SELECT l.sreality_id, l.locality, l.property_id
+    SELECT l.id, l.locality, l.property_id
     FROM listings l
     WHERE l.source = ANY(%(sources)s) AND l.is_active
       AND l.geom IS NULL AND l.locality IS NOT NULL AND l.locality <> ''
       AND l.geocode_attempted_at IS NULL
-    ORDER BY l.sreality_id
+    ORDER BY l.id
     LIMIT %(limit)s
 """
 
@@ -74,11 +74,11 @@ _PLACE_SQL = """
     UPDATE listings
     SET geom = ST_SetSRID(ST_MakePoint(%(lon)s, %(lat)s), 4326)::geography,
         geocode_attempted_at = now()
-    WHERE sreality_id = %(id)s
+    WHERE id = %(id)s
 """
 
 _STAMP_SQL = """
-    UPDATE listings SET geocode_attempted_at = now() WHERE sreality_id = %(id)s
+    UPDATE listings SET geocode_attempted_at = now() WHERE id = %(id)s
 """
 
 

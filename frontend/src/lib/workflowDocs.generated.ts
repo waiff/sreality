@@ -165,6 +165,51 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/apply_r2_constraints.yml"
   },
   {
+    "filename": "apply_r2_maintenance_indexes.yml",
+    "name": "Apply R2 maintenance-walker indexes",
+    "description": "R2 read cutover: rebuilds the five `listings` partial indexes the enrichment walkers page through (geocode candidates, street_name_key, both geo_cell_key arms, source+active+street) onto the surrogate `id`, then drops the legacy sreality_id-keyed twins. Post-Gate-2 a NULL sreality_id makes a listing invisible to every one of those walkers, so geocoding / street resolution / geo_cell keying would silently stop for exactly the new rows.",
+    "portal": null,
+    "manual": true,
+    "schedules": [],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "dry_run",
+        "description": "Report index state and exit",
+        "required": false,
+        "type": "choice",
+        "default": "false",
+        "options": [
+          "false",
+          "true"
+        ]
+      },
+      {
+        "name": "keep_legacy",
+        "description": "Build replacements but keep the legacy indexes",
+        "required": false,
+        "type": "choice",
+        "default": "false",
+        "options": [
+          "false",
+          "true"
+        ]
+      }
+    ],
+    "secrets": [
+      "SUPABASE_DB_SESSION_URL",
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "apply-r2-maintenance-indexes",
+    "cancelInProgress": false,
+    "timeoutMinutes": 120,
+    "permissions": "contents: read",
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/apply_r2_maintenance_indexes.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/apply_r2_maintenance_indexes.yml"
+  },
+  {
     "filename": "apply_r2_phase_d_prep.yml",
     "name": "Apply R2 Phase D prep (NOT NULL relax, small PK swaps, listings indexes)",
     "description": "Phase D of the listing-identity refactor (docs/design/listing-identity-r2-pk-swap-runbook.md § 5, steps 2-5). Drops NOT NULL on every R2_CARRIERS legacy column still enforcing it, swaps estimation_cohort_entries's PK onto (estimation_run_id, listing_id), and pre-builds the two indexes + id NOT NULL that Gate 1's PK swap on `listings` itself will need. All additive/reversible — no writer-deploy dependency (see scripts/apply_r2_phase_d_prep.py's docstring for why dirty_broker_listings is NOT included here).",

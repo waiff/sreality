@@ -43,11 +43,11 @@ _BASE_PREDICATE = "l.street IS NOT NULL AND l.street <> ''"
 _NULL_PREDICATE = _BASE_PREDICATE + " AND l.street_name_key IS NULL"
 
 _SELECT_SQL = """
-    SELECT l.sreality_id, l.street
+    SELECT l.id, l.street
     FROM listings l
     WHERE {predicate}
-      AND l.sreality_id > %(cursor)s
-    ORDER BY l.sreality_id
+      AND l.id > %(cursor)s
+    ORDER BY l.id
     LIMIT %(chunk)s
 """
 
@@ -61,7 +61,7 @@ _UPDATE_SQL = """
     UPDATE listings l
     SET street_name_key = d.key
     FROM unnest(%(ids)s::bigint[], %(keys)s::text[]) AS d(id, key)
-    WHERE l.sreality_id = d.id
+    WHERE l.id = d.id
       AND l.street_name_key IS DISTINCT FROM d.key
 """
 
