@@ -245,7 +245,7 @@ def test_split_stamps_detached_singletons_published():
     conn = _FakeConn([
         (lambda s: "SELECT id, status FROM properties WHERE id = %s FOR UPDATE" in s,
          [(100, "active")]),
-        (lambda s: "SELECT sreality_id FROM listings WHERE property_id" in s,
+        (lambda s: "SELECT id FROM listings WHERE property_id" in s,
          [(1,), (2,)]),  # anchor=1 stays, detach=[2] -> one new singleton
         (lambda s: "INSERT INTO properties (" in s, [(999,)]),  # RETURNING the new id
     ])
@@ -262,9 +262,9 @@ def test_unmerge_stamps_reactivated_published():
     # unit — COALESCE ensures it is published even in the edge where a never-published
     # singleton was merged away before any dedup stamp landed.
     conn = _FakeConn([
-        (lambda s: "FROM property_merge_events WHERE merge_group_id" in s,
+        (lambda s: "FROM property_merge_events" in s and "merge_group_id = %s" in s,
          [(10, 20, 1001)]),
-        (lambda s: "UPDATE listings SET property_id = %s WHERE sreality_id" in s,
+        (lambda s: "UPDATE listings SET property_id = %s WHERE id" in s,
          [(1,)]),
     ])
 
@@ -305,9 +305,9 @@ def test_merge_reconciles_pipeline_stage():
 
 def test_unmerge_replays_ledger_and_reactivates():
     conn = _FakeConn([
-        (lambda s: "FROM property_merge_events WHERE merge_group_id" in s,
+        (lambda s: "FROM property_merge_events" in s and "merge_group_id = %s" in s,
          [(10, 20, 1001), (10, 20, 1002)]),
-        (lambda s: "UPDATE listings SET property_id = %s WHERE sreality_id" in s,
+        (lambda s: "UPDATE listings SET property_id = %s WHERE id" in s,
          [(1,)]),  # each replay re-points exactly one child
     ])
 
@@ -329,7 +329,7 @@ def test_unmerge_replays_ledger_and_reactivates():
 
 def test_unmerge_conflict_when_child_repointed_elsewhere():
     conn = _FakeConn([
-        (lambda s: "FROM property_merge_events WHERE merge_group_id" in s,
+        (lambda s: "FROM property_merge_events" in s and "merge_group_id = %s" in s,
          [(10, 20, 1001)]),
         # re-point UPDATE matches nothing (child no longer on survivor) -> rowcount 0
     ])
@@ -375,7 +375,7 @@ def test_split_patches_browse_read_model():
     conn = _FakeConn([
         (lambda s: "SELECT id, status FROM properties WHERE id = %s FOR UPDATE" in s,
          [(100, "active")]),
-        (lambda s: "SELECT sreality_id FROM listings WHERE property_id" in s,
+        (lambda s: "SELECT id FROM listings WHERE property_id" in s,
          [(1,), (2,)]),
         (lambda s: "INSERT INTO properties (" in s, [(999,)]),
     ])
@@ -386,9 +386,9 @@ def test_split_patches_browse_read_model():
 
 def test_unmerge_patches_browse_read_model():
     conn = _FakeConn([
-        (lambda s: "FROM property_merge_events WHERE merge_group_id" in s,
+        (lambda s: "FROM property_merge_events" in s and "merge_group_id = %s" in s,
          [(10, 20, 1001)]),
-        (lambda s: "UPDATE listings SET property_id = %s WHERE sreality_id" in s,
+        (lambda s: "UPDATE listings SET property_id = %s WHERE id" in s,
          [(1,)]),
     ])
     unmerge_group(conn, merge_group_id="grp", undone_by="operator")

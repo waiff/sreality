@@ -266,7 +266,7 @@ _SPLIT_INSERT_ONE_SQL = """
         l.building_condition_level, l.apartment_condition_level,
         l.is_active, l.first_seen_at, l.last_seen_at, l.first_seen_at, 1, 1
     FROM listings l
-    WHERE l.sreality_id = %(sid)s
+    WHERE l.id = %(lid)s
     RETURNING id
 """
 
@@ -302,12 +302,13 @@ def split_property_to_singletons(
             # Same ordering recompute_one's representative (repr) pick uses, so the
             # child that stays on this property is the one it would choose anyway:
             # active-first, then the shared trust order (migration 311), then
-            # recency, then sreality_id DESC.
+            # recency, then id DESC (was sreality_id DESC — same total order
+            # today, but the surrogate is the one that survives Gate 2).
             cur.execute(
                 """
-                SELECT sreality_id FROM listings WHERE property_id = %s
+                SELECT id FROM listings WHERE property_id = %s
                 ORDER BY is_active DESC, source_trust_rank(source),
-                         last_seen_at DESC NULLS LAST, sreality_id DESC
+                         last_seen_at DESC NULLS LAST, id DESC
                 FOR UPDATE
                 """,
                 (property_id,),
@@ -329,12 +330,12 @@ def split_property_to_singletons(
 
             anchor, detach = child_ids[0], child_ids[1:]
             new_ids: list[int] = []
-            for sid in detach:
-                cur.execute(_SPLIT_INSERT_ONE_SQL, {"sid": sid})
+            for lid in detach:
+                cur.execute(_SPLIT_INSERT_ONE_SQL, {"lid": lid})
                 new_id = int(cur.fetchone()[0])
                 cur.execute(
-                    "UPDATE listings SET property_id = %s WHERE sreality_id = %s",
-                    (new_id, sid),
+                    "UPDATE listings SET property_id = %s WHERE id = %s",
+                    (new_id, lid),
                 )
                 new_ids.append(new_id)
 
@@ -388,8 +389,16 @@ def unmerge_group(
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT survivor_property_id, retired_property_id, listing_id
-                FROM property_merge_events
+                SELECT survivor_property_id, retired_property_id,
+                       -- Prefer the surrogate (mig 323); fall back to resolving the
+                       -- legacy handle for ledger rows written before dual-write.
+                       -- NOTE: property_merge_events.listing_id is SREALITY-valued
+                       -- despite its name — listing_ref_id is the surrogate twin.
+                       coalesce(
+                         e.listing_ref_id,
+                         (SELECT l.id FROM listings l WHERE l.sreality_id = e.listing_id)
+                       ) AS listing_ref_id
+                FROM property_merge_events e
                 WHERE merge_group_id = %s AND undone_at IS NULL
                 ORDER BY id
                 """,
@@ -405,17 +414,22 @@ def unmerge_group(
             retired_ids: set[int] = set()
             moved_back = 0
             conflicts: list[int] = []
-            for _surv, retired, listing_id in events:
+            for _surv, retired, listing_ref_id in events:
                 retired_ids.add(int(retired))
+                if listing_ref_id is None:
+                    # Neither handle resolves (the listing is gone entirely) —
+                    # nothing to move back; record it as a conflict, don't crash.
+                    conflicts.append(0)
+                    continue
                 cur.execute(
                     "UPDATE listings SET property_id = %s "
-                    "WHERE sreality_id = %s AND property_id = %s",
-                    (retired, listing_id, survivor_id),
+                    "WHERE id = %s AND property_id = %s",
+                    (retired, listing_ref_id, survivor_id),
                 )
                 if (cur.rowcount or 0) == 1:
                     moved_back += 1
                 else:
-                    conflicts.append(int(listing_id))
+                    conflicts.append(int(listing_ref_id))
 
             cur.execute(
                 """
