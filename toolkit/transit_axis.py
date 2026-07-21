@@ -326,8 +326,12 @@ def _query_corridor(
         "    nl.transport_type AS nearest_line_transport_type,\n"
         "    nl.route_ref      AS nearest_line_route_ref,\n"
         "    ST_Distance(l.geom, nl.geom) AS corridor_distance_m,\n"
+        # Partition on the surrogate (R2): this window picks each listing's
+        # nearest corridor line via `rn = 1`, so partitioning on a column that
+        # goes NULL post-Gate-2 would collapse EVERY non-sreality listing into
+        # one partition and keep exactly one of them for the whole cohort.
         "    ROW_NUMBER() OVER (\n"
-        "      PARTITION BY l.sreality_id\n"
+        "      PARTITION BY l.id\n"
         "      ORDER BY ST_Distance(l.geom, nl.geom)\n"
         "    ) AS rn\n"
         "  FROM listings l\n"

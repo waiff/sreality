@@ -42,6 +42,10 @@ class TargetSpec:
     disposition: str | None = None
     floor: int | None = None
     exclude_ids: list[int] = field(default_factory=list)
+    # Surrogate-keyed twin of exclude_ids (R2). The legacy list stays for frozen
+    # specs + callers that only know a sreality_id; new callers should populate
+    # this one, which is the only arm that can exclude a post-Gate-2 listing.
+    exclude_listing_ids: list[int] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -528,6 +532,12 @@ def _shared_filter_where(
     params.update(city_params)
 
     if not filters.include_unreliable:
+        # Stays sreality-keyed: listing_fetch_failures is a queue table, not an R2
+        # carrier (rule 5), so it has no listing_id to join on. Post-Gate-2 this
+        # fails OPEN — `NULL = NULL` finds no failure row, NOT EXISTS is true, the
+        # listing is KEPT — so the filter degrades to a no-op for non-sreality
+        # rows rather than dropping them. Acceptable; re-key only if that table
+        # ever gains a listing_id.
         where.append(
             "NOT EXISTS ("
             "SELECT 1 FROM listing_fetch_failures lff "
@@ -536,8 +546,21 @@ def _shared_filter_where(
         )
 
     if target.exclude_ids:
-        where.append("l.sreality_id <> ALL(%(exclude_ids)s)")
+        # `NULL <> ALL(...)` is NULL, and a WHERE keeps only TRUE — so the bare
+        # predicate DROPS every listing with a NULL sreality_id instead of merely
+        # failing to exclude it. Post-Gate-2 that silently deletes ~68% of the
+        # market from every cohort (`_build_target` puts the run's own subject in
+        # exclude_ids, so it is non-empty on essentially every listing-anchored
+        # estimation) — a WRONG estimate, not a logged failure. The IS NULL arm
+        # can never remove a row that survives today; verified against prod:
+        # NULL survives, a normal id survives, an excluded id is still excluded.
+        where.append("(l.sreality_id IS NULL OR l.sreality_id <> ALL(%(exclude_ids)s))")
         params["exclude_ids"] = list(target.exclude_ids)
+
+    if target.exclude_listing_ids:
+        # l.id is NOT NULL, so this arm is plain two-valued logic — no guard needed.
+        where.append("l.id <> ALL(%(exclude_listing_ids)s)")
+        params["exclude_listing_ids"] = list(target.exclude_listing_ids)
 
     return where, params
 
@@ -631,6 +654,7 @@ def _filters_used(target: TargetSpec, filters: ComparableFilters) -> dict[str, A
             "disposition": target.disposition,
             "floor": target.floor,
             "exclude_ids": list(target.exclude_ids),
+            "exclude_listing_ids": list(target.exclude_listing_ids),
         },
         "radius_m": filters.radius_m,
         "area_band_pct": filters.area_band_pct,

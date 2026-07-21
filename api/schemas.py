@@ -33,6 +33,7 @@ class TargetIn(BaseModel):
     disposition: str | None = None
     floor: int | None = None
     exclude_ids: list[int] = Field(default_factory=list)
+    exclude_listing_ids: list[int] = Field(default_factory=list)
 
 
 class FindComparablesIn(BaseModel):
