@@ -29,7 +29,7 @@ import {
   pipelineKeys,
 } from '@/lib/queries';
 import { LocationTypeahead } from '@/components/filter-controls/LocationTypeahead';
-import { type DistrictChip } from '@/lib/filters';
+import { type DistrictChip, type ListingStatus } from '@/lib/filters';
 import { fmtArea, fmtCzk } from '@/lib/format';
 import { listingKindLabel } from '@/lib/enums';
 import { listingPath } from '@/lib/listingUrl';
@@ -53,10 +53,25 @@ const CATEGORY_MAIN_LABEL: Record<string, string> = Object.fromEntries(
   CATEGORY_MAIN_ENUM.map((o) => [String(o.value), o.label_cs]),
 );
 
+/* Active/inactive filter — the SAME any/active/inactive vocabulary and Czech
+ * labels as Browse's `status` filter (single source of truth: the registry),
+ * applied here against the property-grain `is_active` rollup (bool_or over
+ * child listings, rule #15/#20) that fetchPipelineBoard already selects from
+ * properties_public. */
+const STATUS_ENUM =
+  FILTER_REGISTRY.filters.find((f) => f.id === 'status')?.enum_values ?? [];
+const STATUS_ORDER: ListingStatus[] = STATUS_ENUM.map(
+  (o) => String(o.value) as ListingStatus,
+);
+const STATUS_LABEL: Record<string, string> = Object.fromEntries(
+  STATUS_ENUM.map((o) => [String(o.value), o.label_cs]),
+);
+
 export default function Pipeline() {
   const [manage, setManage] = useState(false);
   const [types, setTypes] = useState<Set<string>>(new Set());
   const [districts, setDistricts] = useState<DistrictChip[]>([]);
+  const [status, setStatus] = useState<ListingStatus>('any');
   const stagesQ = useQuery({
     queryKey: pipelineKeys.stages,
     queryFn: fetchPipelineStages,
@@ -79,10 +94,20 @@ export default function Pipeline() {
     return CATEGORY_MAIN_ORDER.filter((t) => set.has(t));
   }, [boardQ.data]);
 
+  // Only offer the status filter when the board actually holds a delisted
+  // property to filter out — an all-active pipeline has nothing to stratify.
+  const hasInactive = useMemo(
+    () => (boardQ.data ?? []).some((c) => !c.is_active),
+    [boardQ.data],
+  );
+
   // Client-side filters (the board is small, rule #22): type chips + the region
-  // picker, applied in-memory. Region reuses Browse's exact chip semantics via
-  // matchesDistricts. Empty = no constraint.
-  const filtersActive = types.size > 0 || districts.length > 0;
+  // picker + active/inactive status, applied in-memory. Region reuses Browse's
+  // exact chip semantics via matchesDistricts; status reuses Browse's
+  // any/active/inactive vocabulary against the same is_active rollup. Empty /
+  // 'any' = no constraint.
+  const filtersActive =
+    types.size > 0 || districts.length > 0 || status !== 'any';
   const filteredCards = useMemo(() => {
     let result = boardQ.data ?? [];
     if (types.size > 0) {
@@ -93,8 +118,11 @@ export default function Pipeline() {
     if (districts.length > 0) {
       result = result.filter((c) => matchesDistricts(c, districts));
     }
+    if (status !== 'any') {
+      result = result.filter((c) => c.is_active === (status === 'active'));
+    }
     return result;
-  }, [boardQ.data, types, districts]);
+  }, [boardQ.data, types, districts, status]);
 
   const byStage = useMemo(() => {
     const m = new Map<number, PipelineBoardCard[]>();
@@ -140,12 +168,41 @@ export default function Pipeline() {
 
       {manage && stages.length > 0 && <StageManager stages={stages} />}
 
-      {/* Filters — property type (only when the pipeline holds >1 type) + the
-          region picker. The region control is the SAME LocationTypeahead Browse
-          and Datasets use; both filters apply client-side (rule #22, the board
-          is small). */}
+      {/* Filters — active/inactive status (only when the pipeline holds a
+          delisted property) + property type (only when the pipeline holds >1
+          type) + the region picker. The region control is the SAME
+          LocationTypeahead Browse and Datasets use; the status pills are the
+          SAME any/active/inactive vocabulary as Browse's status filter
+          (single source of truth: FILTER_REGISTRY). All three apply
+          client-side (rule #22, the board is small). */}
       {cards.length > 0 && (
         <div className="mt-5 flex flex-col gap-3">
+          {hasInactive && (
+            <div className="flex flex-wrap items-center gap-1.5">
+              <span className="mr-1 text-[0.65rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)]">
+                Stav
+              </span>
+              {STATUS_ORDER.map((s) => {
+                const active = status === s;
+                return (
+                  <button
+                    key={s}
+                    type="button"
+                    aria-pressed={active}
+                    onClick={() => setStatus(active ? 'any' : s)}
+                    className={[
+                      'rounded-[var(--radius-sm)] border px-2.5 py-1 text-[0.78rem] transition-colors',
+                      active
+                        ? 'border-[var(--color-copper)] bg-[var(--color-copper-soft)] text-[var(--color-copper)]'
+                        : 'border-[var(--color-rule)] text-[var(--color-ink-2)] hover:border-[var(--color-rule-strong)] hover:text-[var(--color-ink)]',
+                    ].join(' ')}
+                  >
+                    {STATUS_LABEL[s] ?? s}
+                  </button>
+                );
+              })}
+            </div>
+          )}
           {presentTypes.length >= 2 && (
             <div className="flex flex-wrap items-center gap-1.5">
               <span className="mr-1 text-[0.65rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)]">
@@ -628,11 +685,20 @@ function StageColumn({
   );
 }
 
-function CardThumb({ url }: { url: string | null }) {
+function CardThumb({ url, inactive }: { url: string | null; inactive: boolean }) {
   const cls =
     'h-12 w-12 shrink-0 rounded-[var(--radius-sm)] border border-[var(--color-rule)]';
   if (!url) return <div className={`${cls} bg-[var(--color-inset)]`} aria-hidden />;
-  return <img src={url} alt="" loading="lazy" className={`${cls} object-cover`} />;
+  // Same gentle desaturation Browse's card photo gets when is_active=false —
+  // the only signal left in the photo lane once the surface carries status.
+  return (
+    <img
+      src={url}
+      alt=""
+      loading="lazy"
+      className={`${cls} object-cover ${inactive ? 'saturate-[0.4] brightness-[0.97]' : ''}`}
+    />
+  );
 }
 
 /* The card's visible content — reused by the in-column card and the drag ghost.
@@ -640,6 +706,8 @@ function CardThumb({ url }: { url: string | null }) {
  * image + yield reuse the same resolution/format Browse cards use (broker is a
  * deferred follow-up — needs a batched canonical-broker lookup). */
 function CardFace({ card }: { card: PipelineBoardCard }) {
+  const inactive = !card.is_active;
+  const priceColor = inactive ? 'text-[var(--color-ink-2)]' : 'text-[var(--color-ink)]';
   const place = [card.street, card.district].filter(Boolean).join(', ');
   const dims = [
     listingKindLabel(card),
@@ -649,17 +717,18 @@ function CardFace({ card }: { card: PipelineBoardCard }) {
     .join(' · ');
   return (
     <div className="flex gap-2.5">
-      <CardThumb url={card.image_url} />
+      <CardThumb url={card.image_url} inactive={inactive} />
       <div className="min-w-0 flex-1">
         {card.sreality_id != null ? (
           <Link
             to={listingPath(card.sreality_id)}
-            className="font-mono tabular-nums text-sm text-[var(--color-ink)] hover:text-[var(--color-copper)] hover:underline underline-offset-2"
+            title={inactive ? 'Neaktivní inzerát' : undefined}
+            className={`font-mono tabular-nums text-sm hover:text-[var(--color-copper)] hover:underline underline-offset-2 ${priceColor}`}
           >
             {fmtCzk(card.price_czk)}
           </Link>
         ) : (
-          <span className="font-mono tabular-nums text-sm text-[var(--color-ink)]">
+          <span className={`font-mono tabular-nums text-sm ${priceColor}`}>
             {fmtCzk(card.price_czk)}
           </span>
         )}
@@ -728,12 +797,18 @@ function BoardCard({
     transform: CSS.Translate.toString(transform),
     opacity: isDragging ? 0.4 : undefined,
   };
+  // Inactive cards recede via surface tint, matching Browse's "filed away"
+  // treatment for delisted listings (rule: app-wide unification of the
+  // is_active signal, not a bespoke Pipeline-only style).
+  const surface = !card.is_active
+    ? 'border-[var(--color-rule-soft)] bg-[var(--color-inset)]'
+    : 'border-[var(--color-rule)] bg-[var(--color-paper-2)]';
 
   return (
     <div
       ref={setNodeRef}
       style={style}
-      className="rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] p-2.5"
+      className={`rounded-[var(--radius-md)] border p-2.5 ${surface}`}
     >
       <div className="flex items-start gap-1.5">
         <button

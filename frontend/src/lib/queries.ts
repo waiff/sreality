@@ -2161,7 +2161,7 @@ export const fetchPipelineBoard = async (): Promise<PipelineBoardCard[]> => {
   const { data: props, error: pErr } = await supabase
     .from('properties_public')
     .select(
-      'property_id, sreality_id, category_main, street, district, disposition, subtype, area_m2, price_czk, mf_gross_yield_pct, obec_id, okres_id, region_id, place_search_text, okres, region',
+      'property_id, sreality_id, category_main, street, district, disposition, subtype, area_m2, price_czk, mf_gross_yield_pct, obec_id, okres_id, region_id, place_search_text, okres, region, is_active',
     )
     .in('property_id', ids);
   if (pErr) throw pErr;
@@ -2233,6 +2233,7 @@ export const fetchPipelineBoard = async (): Promise<PipelineBoardCard[]> => {
       place_search_text: (p?.place_search_text as string | null) ?? null,
       okres: (p?.okres as string | null) ?? null,
       region: (p?.region as string | null) ?? null,
+      is_active: (p?.is_active as boolean | null) ?? true,
       image_url: firstImage ? imageSrc(firstImage) : null,
       broker: lb
         ? {
