@@ -922,8 +922,8 @@ def _handle_find_comparables_relaxed(
     )
     listings = result.get("data", {}).get("listings") or []
 
-    prev_ids = {int(l["sreality_id"]) for l in state.last_cohort}
-    new_ids = {int(l["sreality_id"]) for l in listings}
+    prev_ids = {int(l["listing_id"]) for l in state.last_cohort}
+    new_ids = {int(l["listing_id"]) for l in listings}
     round_n = len(state.selection_rounds) + 1
     state.selection_rounds.append({
         "n": round_n,
@@ -962,9 +962,13 @@ def _persist_cohort_entries(
         "  last_seen_round_n, snapshot_id, distance_m, price_czk,"
         "  area_m2, price_per_m2, disposition"
         ") VALUES ("
-        "  %(run_id)s, %(sid)s,"
-        # Dual-write (migration 324): surrogate listings.id beside the legacy key.
-        "  (SELECT id FROM listings WHERE sreality_id = %(sid)s),"
+        # listing_id is bound DIRECTLY, not resolved through the legacy key.
+        # estimation_cohort_entries.listing_id is NOT NULL (it is half the PK
+        # since the Phase D swap), so the old
+        # `(SELECT id FROM listings WHERE sreality_id = %(sid)s)` subquery would
+        # return NULL post-Gate-2 and hard-fail the INSERT — inside the bare
+        # `except` below, i.e. cohort provenance would vanish with a green run.
+        "  %(run_id)s, %(sid)s, %(lid)s,"
         "  %(round)s, %(round)s,"
         "  %(snap)s, %(dist)s, %(price)s, %(area)s, %(ppm2)s, %(disp)s"
         # Arbiter is listing_id (R2 Phase C, estimation_cohort_entries_run_listing_id_key).
@@ -982,7 +986,10 @@ def _persist_cohort_entries(
             for l in listings:
                 cur.execute(sql, {
                     "run_id": state.estimation_run_id,
-                    "sid": int(l["sreality_id"]),
+                    # sreality_id is nullable on this table and NULL post-flip —
+                    # never int() it. listing_id is the required one.
+                    "sid": l.get("sreality_id"),
+                    "lid": int(l["listing_id"]),
                     "round": round_n,
                     "snap": l.get("latest_snapshot_id"),
                     "dist": l.get("distance_m"),
@@ -1023,8 +1030,10 @@ def _persist_finalisation(
         with state.conn.transaction(), state.conn.cursor() as cur:
             cur.execute(
                 "UPDATE estimation_cohort_entries SET "
-                "  present_at_finalisation = (sreality_id = ANY(%(present)s)),"
-                "  excluded_by_agent       = (sreality_id = ANY(%(excluded)s)),"
+                # Keyed on the surrogate: `sreality_id = ANY(...)` is NULL for a post-flip
+                # row, so present_at_finalisation would never flip for it.
+                "  present_at_finalisation = (listing_id = ANY(%(present)s)),"
+                "  excluded_by_agent       = (listing_id = ANY(%(excluded)s)),"
                 "  exclusion_reason        = NULL,"
                 "  inclusion_reason        = NULL "
                 "WHERE estimation_run_id = %(run_id)s",
@@ -1034,25 +1043,25 @@ def _persist_finalisation(
                     "excluded": list(excluded_by_id.keys()),
                 },
             )
-            for sid, reason in excluded_by_id.items():
+            for lid, reason in excluded_by_id.items():
                 cur.execute(
                     "UPDATE estimation_cohort_entries SET "
                     "  exclusion_reason = %(reason)s "
-                    "WHERE estimation_run_id = %(run_id)s AND sreality_id = %(sid)s",
+                    "WHERE estimation_run_id = %(run_id)s AND listing_id = %(lid)s",
                     {
                         "run_id": state.estimation_run_id,
-                        "sid": sid,
+                        "lid": lid,
                         "reason": reason,
                     },
                 )
-            for sid, reason in included_reasons.items():
+            for lid, reason in included_reasons.items():
                 cur.execute(
                     "UPDATE estimation_cohort_entries SET "
                     "  inclusion_reason = %(reason)s "
-                    "WHERE estimation_run_id = %(run_id)s AND sreality_id = %(sid)s",
+                    "WHERE estimation_run_id = %(run_id)s AND listing_id = %(lid)s",
                     {
                         "run_id": state.estimation_run_id,
-                        "sid": sid,
+                        "lid": lid,
                         "reason": reason,
                     },
                 )
@@ -1175,16 +1184,16 @@ def _handle_find_comparables_along_axis(
     )
     new_listings = result.get("data", {}).get("listings") or []
 
-    # Merge into the active cohort, deduped by sreality_id. Existing
+    # Merge into the active cohort, deduped by listing_id. Existing
     # entries win — they came from find_comparables_relaxed and carry
     # the canonical numeric fields (distance_m to the anchor, etc).
-    existing_ids = {int(l["sreality_id"]) for l in state.last_cohort}
+    existing_ids = {int(l["listing_id"]) for l in state.last_cohort}
     added = 0
     for listing in new_listings:
-        sid = int(listing["sreality_id"])
-        if sid not in existing_ids:
+        lid = int(listing["listing_id"])
+        if lid not in existing_ids:
             state.last_cohort.append(listing)
-            existing_ids.add(sid)
+            existing_ids.add(lid)
             added += 1
     result["data"]["cohort_added"] = added
     result["data"]["cohort_size_after_merge"] = len(state.last_cohort)

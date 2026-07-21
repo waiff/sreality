@@ -143,9 +143,9 @@ def test_axis_merges_new_listings_into_cohort(monkeypatch):
         return {
             "data": {
                 "listings": [
-                    {"sreality_id": 100, "price_per_m2": 500},  # already in cohort
-                    {"sreality_id": 200, "price_per_m2": 600},  # new
-                    {"sreality_id": 300, "price_per_m2": 700},  # new
+                    {"listing_id": 900100, "sreality_id": 100, "price_per_m2": 500},  # already in cohort
+                    {"listing_id": 900200, "sreality_id": 200, "price_per_m2": 600},  # new
+                    {"listing_id": 900300, "sreality_id": 300, "price_per_m2": 700},  # new
                 ],
             },
             "metadata": {"result_count": 3, "lines_considered": 2},
@@ -153,8 +153,8 @@ def test_axis_merges_new_listings_into_cohort(monkeypatch):
 
     monkeypatch.setattr(agent_mod, "find_comparables_along_axis", fake)
     state = _state(last_cohort=[
-        {"sreality_id": 100, "price_per_m2": 500},
-        {"sreality_id": 101, "price_per_m2": 510},
+        {"listing_id": 900100, "sreality_id": 100, "price_per_m2": 500},
+        {"listing_id": 900101, "sreality_id": 101, "price_per_m2": 510},
     ])
     out = agent_mod._handle_find_comparables_along_axis(
         {"transport_types": ["tram"], "anchor_radius_m": 600, "corridor_m": 250},
