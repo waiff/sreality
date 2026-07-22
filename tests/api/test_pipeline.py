@@ -18,44 +18,55 @@ from api import dependencies as deps
 from api import main as api_main
 from api import pipeline as pipeline_module
 from api import schemas as s
+from api import tenant_pool
 
 
 @pytest.fixture()
 def client(monkeypatch):
     api_main.app.dependency_overrides[deps.get_db_conn] = lambda: object()
+    # Pipeline routes run on the tenant pool since Phase 1; the route-level
+    # verify_jwt is overridden to a legacy identity and account resolution is
+    # stubbed so no SQL hits the fake connection object.
+    api_main.app.dependency_overrides[tenant_pool.tenant_conn] = lambda: object()
+    api_main.app.dependency_overrides[deps.verify_jwt] = lambda: {
+        "sub": None, "legacy": True,
+    }
+    monkeypatch.setattr(
+        tenant_pool, "resolve_account_id", lambda conn, claims: None,
+    )
     monkeypatch.setattr(
         pipeline_module, "list_stages",
-        lambda conn: {"data": [{
+        lambda conn, *, account_id=None: {"data": [{
             "id": 1, "key": "interested", "label": "Zájem", "position": 1,
             "color": "copper", "is_terminal": False, "is_entry": True,
         }]},
     )
     monkeypatch.setattr(
         pipeline_module, "add_card",
-        lambda conn, body: {
+        lambda conn, body, *, account_id=None: {
             "property_id": body.property_id, "stage_key": "interested", "added": True,
         },
     )
     monkeypatch.setattr(
         pipeline_module, "remove_card",
-        lambda conn, pid: {"removed": True},
+        lambda conn, pid, *, account_id=None: {"removed": True},
     )
     monkeypatch.setattr(
         pipeline_module, "move_card",
-        lambda conn, pid, body: {
+        lambda conn, pid, body, *, account_id=None: {
             "property_id": pid, "stage_id": body.stage_id, "stage_key": "offer",
         },
     )
     monkeypatch.setattr(
         pipeline_module, "create_stage",
-        lambda conn, body: {
+        lambda conn, body, *, account_id=None: {
             "id": 9, "key": "due_diligence", "label": body.label, "position": 6,
             "color": body.color, "is_terminal": body.is_terminal, "is_entry": False,
         },
     )
     monkeypatch.setattr(
         pipeline_module, "update_stage",
-        lambda conn, sid, body: {
+        lambda conn, sid, body, *, account_id=None: {
             "id": sid, "key": "viewing", "label": body.label or "Prohlídka",
             "position": 2, "color": body.color, "is_terminal": False,
             "is_entry": bool(body.is_entry),
@@ -63,11 +74,11 @@ def client(monkeypatch):
     )
     monkeypatch.setattr(
         pipeline_module, "reorder_stages",
-        lambda conn, body: {"data": [{"id": i} for i in body.ordered_ids]},
+        lambda conn, body, *, account_id=None: {"data": [{"id": i} for i in body.ordered_ids]},
     )
     monkeypatch.setattr(
         pipeline_module, "archive_stage",
-        lambda conn, sid: {"archived": True, "stage_id": sid},
+        lambda conn, sid, *, account_id=None: {"archived": True, "stage_id": sid},
     )
     yield TestClient(api_main.app)
     api_main.app.dependency_overrides.clear()
@@ -162,12 +173,13 @@ _CARD_ROW = (42, 1, "interested", "Zájem", 5, None, None, None)
 
 def test_add_card_inserts_at_entry_stage_and_logs_event():
     conn = _FakeConn([
+        (lambda q: "RECURSIVE chain" in q, [(42, 42)]),  # property active -> itself
         (lambda q: "WHERE is_entry" in q, [(1,)]),
         (lambda q: "max(board_position)" in q, [(5,)]),
         (lambda q: "INSERT INTO property_pipeline (" in q, [(42,)]),  # RETURNING -> inserted
         (lambda q: "FROM property_pipeline pp JOIN pipeline_stages" in q, [_CARD_ROW]),
     ])
-    out = pipeline_module.add_card(conn, s.AddPipelineCardIn(property_id=42))
+    out = pipeline_module.add_card(conn, s.AddPipelineCardIn(property_id=42), account_id=None)
     assert out["added"] is True
     assert out["stage_key"] == "interested"
     assert any(
@@ -178,17 +190,66 @@ def test_add_card_inserts_at_entry_stage_and_logs_event():
 def test_add_card_idempotent_returns_existing_stage_no_event():
     existing = (42, 3, "offer", "Nabídka", 2, None, None, None)
     conn = _FakeConn([
+        (lambda q: "RECURSIVE chain" in q, [(42, 42)]),  # property active -> itself
         (lambda q: "WHERE is_entry" in q, [(1,)]),
         (lambda q: "max(board_position)" in q, [(5,)]),
         (lambda q: "INSERT INTO property_pipeline (" in q, []),  # ON CONFLICT -> no row
         (lambda q: "FROM property_pipeline pp JOIN pipeline_stages" in q, [existing]),
     ])
-    out = pipeline_module.add_card(conn, s.AddPipelineCardIn(property_id=42))
+    out = pipeline_module.add_card(conn, s.AddPipelineCardIn(property_id=42), account_id=None)
     assert out["added"] is False
     assert out["stage_key"] == "offer"  # the existing card's stage, untouched
     assert not any(
         "INSERT INTO property_pipeline_events" in e[0] for e in conn.executed
     )
+
+
+def test_add_card_redirects_merged_away_property_to_survivor():
+    # property 99 was merged into the active survivor 42; the card + event must
+    # land on 42, never orphan onto the retired 99.
+    conn = _FakeConn([
+        (lambda q: "RECURSIVE chain" in q, [(99, 42)]),
+        (lambda q: "WHERE is_entry" in q, [(1,)]),
+        (lambda q: "max(board_position)" in q, [(5,)]),
+        (lambda q: "INSERT INTO property_pipeline (" in q, [(42,)]),
+        (lambda q: "FROM property_pipeline pp JOIN pipeline_stages" in q, [_CARD_ROW]),
+    ])
+    out = pipeline_module.add_card(conn, s.AddPipelineCardIn(property_id=99), account_id=None)
+    assert out["added"] is True
+    inserts = [p for q, p in conn.executed if "INSERT INTO property_pipeline (" in q]
+    assert inserts and inserts[0][0] == 42
+    events = [p for q, p in conn.executed if "property_pipeline_events" in q]
+    assert events and events[0][0] == 42
+
+
+def test_add_card_locks_entry_stage_before_computing_board_position():
+    # Two accounts' members bookmarking concurrently into the same entry stage
+    # must not race on `max(board_position)` — the stage row is locked first so
+    # the lock serializes them within each request's tenant-pool transaction
+    # (migration 357's board index backs this query; no advisory lock needed).
+    conn = _FakeConn([
+        (lambda q: "RECURSIVE chain" in q, [(42, 42)]),
+        (lambda q: "WHERE is_entry" in q, [(1,)]),
+        (lambda q: "FOR UPDATE" in q, [(1,)]),
+        (lambda q: "max(board_position)" in q, [(5,)]),
+        (lambda q: "INSERT INTO property_pipeline (" in q, [(42,)]),
+        (lambda q: "FROM property_pipeline pp JOIN pipeline_stages" in q, [_CARD_ROW]),
+    ])
+    pipeline_module.add_card(conn, s.AddPipelineCardIn(property_id=42), account_id=None)
+    sqls = [q for q, _ in conn.executed]
+    lock_idx = next(i for i, q in enumerate(sqls) if "FOR UPDATE" in q)
+    max_idx = next(i for i, q in enumerate(sqls) if "max(board_position)" in q)
+    assert lock_idx < max_idx, "the stage row must be locked before reading max(board_position)"
+    lock_sql, lock_params = next((q, p) for q, p in conn.executed if "FOR UPDATE" in q)
+    assert lock_sql == "SELECT 1 FROM pipeline_stages WHERE id = %s FOR UPDATE"
+    assert lock_params == (1,)  # the resolved entry stage id, not the property id
+
+
+def test_add_card_no_active_survivor_is_422():
+    conn = _FakeConn([(lambda q: "RECURSIVE chain" in q, [])])  # missing / broken chain
+    with pytest.raises(fastapi.HTTPException) as ei:
+        pipeline_module.add_card(conn, s.AddPipelineCardIn(property_id=7), account_id=None)
+    assert ei.value.status_code == 422
 
 
 def test_move_card_to_new_stage_logs_event_and_stamps_entered():
@@ -197,7 +258,7 @@ def test_move_card_to_new_stage_logs_event_and_stamps_entered():
         (lambda q: "FROM property_pipeline pp JOIN pipeline_stages" in q,
          [(42, 3, "offer", "Nabídka", 2, None, None, None)]),
     ])
-    out = pipeline_module.move_card(conn, 42, s.MoveCardIn(stage_id=3))
+    out = pipeline_module.move_card(conn, 42, s.MoveCardIn(stage_id=3), account_id=None)
     sqls = [q for q, _ in conn.executed]
     assert any(
         "UPDATE property_pipeline SET" in q and "entered_stage_at = now()" in q
@@ -213,7 +274,7 @@ def test_move_card_reorder_only_logs_no_event():
         (lambda q: "FROM property_pipeline pp JOIN pipeline_stages" in q,
          [(42, 1, "interested", "Zájem", 3, None, None, None)]),
     ])
-    pipeline_module.move_card(conn, 42, s.MoveCardIn(stage_id=1, board_position=2.5))
+    pipeline_module.move_card(conn, 42, s.MoveCardIn(stage_id=1, board_position=2.5), account_id=None)
     sqls = [q for q, _ in conn.executed]
     assert any("UPDATE property_pipeline SET" in q and "board_position" in q for q in sqls)
     assert not any("entered_stage_at = now()" in q for q in sqls)
@@ -272,7 +333,7 @@ def test_create_stage_derives_key_and_appends_position():
         (lambda q: "INSERT INTO pipeline_stages" in q, [stage_row]),
     ])
     out = pipeline_module.create_stage(
-        conn, s.CreateStageIn(label="Due diligence", color="plum"),
+        conn, s.CreateStageIn(label="Due diligence", color="plum"), account_id=None,
     )
     assert out["key"] == "due_diligence"
     assert out["position"] == 6
@@ -283,7 +344,7 @@ def test_create_stage_derives_key_and_appends_position():
 def test_create_stage_rejects_palette_violation():
     conn = _FakeConn([])
     with pytest.raises(fastapi.HTTPException) as ei:
-        pipeline_module.create_stage(conn, s.CreateStageIn(label="X", color="neon"))
+        pipeline_module.create_stage(conn, s.CreateStageIn(label="X", color="neon"), account_id=None)
     assert ei.value.status_code == 422
 
 
@@ -294,7 +355,7 @@ def test_update_stage_crowning_entry_demotes_the_others():
          [(False, False)]),
         (lambda q: "UPDATE pipeline_stages SET" in q and "RETURNING" in q, [updated]),
     ])
-    out = pipeline_module.update_stage(conn, 2, s.UpdateStageIn(is_entry=True))
+    out = pipeline_module.update_stage(conn, 2, s.UpdateStageIn(is_entry=True), account_id=None)
     assert out["is_entry"] is True
     sqls = [q for q, _ in conn.executed]
     assert any(
@@ -306,7 +367,7 @@ def test_update_stage_crowning_entry_demotes_the_others():
 def test_update_stage_rejects_uncrowning_entry():
     conn = _FakeConn([])
     with pytest.raises(fastapi.HTTPException) as ei:
-        pipeline_module.update_stage(conn, 1, s.UpdateStageIn(is_entry=False))
+        pipeline_module.update_stage(conn, 1, s.UpdateStageIn(is_entry=False), account_id=None)
     assert ei.value.status_code == 422
 
 
@@ -316,7 +377,7 @@ def test_update_stage_rejects_entry_that_is_terminal():
          [(False, True)]),  # already terminal
     ])
     with pytest.raises(fastapi.HTTPException) as ei:
-        pipeline_module.update_stage(conn, 4, s.UpdateStageIn(is_entry=True))
+        pipeline_module.update_stage(conn, 4, s.UpdateStageIn(is_entry=True), account_id=None)
     assert ei.value.status_code == 422
 
 
@@ -326,7 +387,7 @@ def test_reorder_rejects_set_mismatch():
          [(1,), (2,), (3,)]),
     ])
     with pytest.raises(fastapi.HTTPException) as ei:
-        pipeline_module.reorder_stages(conn, s.ReorderStagesIn(ordered_ids=[1, 2]))
+        pipeline_module.reorder_stages(conn, s.ReorderStagesIn(ordered_ids=[1, 2]), account_id=None)
     assert ei.value.status_code == 422
 
 
@@ -336,7 +397,7 @@ def test_archive_refuses_entry_stage():
          [(True, None)]),
     ])
     with pytest.raises(fastapi.HTTPException) as ei:
-        pipeline_module.archive_stage(conn, 1)
+        pipeline_module.archive_stage(conn, 1, account_id=None)
     assert ei.value.status_code == 409
 
 
@@ -347,7 +408,7 @@ def test_archive_refuses_stage_with_cards():
         (lambda q: "SELECT 1 FROM property_pipeline WHERE stage_id" in q, [(1,)]),
     ])
     with pytest.raises(fastapi.HTTPException) as ei:
-        pipeline_module.archive_stage(conn, 3)
+        pipeline_module.archive_stage(conn, 3, account_id=None)
     assert ei.value.status_code == 409
 
 
@@ -357,6 +418,6 @@ def test_archive_soft_retires_empty_stage():
          [(False, None)]),
         (lambda q: "SELECT 1 FROM property_pipeline WHERE stage_id" in q, []),
     ])
-    out = pipeline_module.archive_stage(conn, 3)
+    out = pipeline_module.archive_stage(conn, 3, account_id=None)
     assert out == {"archived": True, "stage_id": 3}
     assert any("SET archived_at = now()" in q for q, _ in conn.executed)
