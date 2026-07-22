@@ -219,12 +219,12 @@ class MaximaPortal:
             if walk.price_map.get(nid) is not None and not price_changed(
                 prev["price_czk"], walk.price_map[nid], self._price_change_min_pct,
             ):
-                unchanged_pks.append(prev["sreality_id"])
+                unchanged_pks.append(prev["id"])
             else:
                 changed.append(nid)
 
         if conn is not None and unchanged_pks:
-            db.touch_listings(conn, unchanged_pks)
+            db.touch_listings_by_id(conn, unchanged_pks)
 
         entries = (
             [(n, walk.ref_map[n], walk.price_map.get(n), db.QUEUE_PRIORITY_CHANGED) for n in changed]

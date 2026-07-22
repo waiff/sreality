@@ -564,3 +564,23 @@ def test_touch_listings_enqueues_reactivated_properties():
     assert "inactive_at = NULL" in react[0]
     bulk = _find(conn.executed, "SET last_seen_at = now(), is_active = true")
     assert bulk is not None and "inactive_at = NULL" in bulk[0]
+
+
+def test_touch_listings_by_id_keys_on_surrogate_not_sreality_id():
+    # The portal analogue keys on listings.id, never sreality_id: a post-Gate-2
+    # portal row has sreality_id = NULL, so a sreality_id-keyed touch would match
+    # nothing and starve rule #4's last_seen_at signal for every unchanged row.
+    conn = _FakeConn([
+        (lambda s: "WITH react AS" in s, []),
+        (lambda s: "SET last_seen_at = now(), is_active = true" in s, [(1,), (2,)]),
+    ])
+    db.touch_listings_by_id(conn, [1, 2])
+    react = _find(conn.executed, "WITH react AS")
+    assert react is not None
+    assert "listings.id = u.id" in react[0]
+    assert "listings.sreality_id" not in react[0]
+    assert "inactive_at = NULL" in react[0]
+    bulk = _find(conn.executed, "SET last_seen_at = now(), is_active = true")
+    assert bulk is not None
+    assert "listings.id = u.id" in bulk[0]
+    assert "listings.sreality_id" not in bulk[0]

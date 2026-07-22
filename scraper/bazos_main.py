@@ -187,7 +187,7 @@ class BazosPortal:
             db.index_summary_native(conn, SOURCE, seen) if conn is not None else {}
         )
         if conn is not None and existing:
-            db.touch_listings(conn, [v["sreality_id"] for v in existing.values()])
+            db.touch_listings_by_id(conn, [v["id"] for v in existing.values()])
 
         new_entries: list[tuple[str, str, int | None, int]] = []
         changed_entries: list[tuple[str, str, int | None, int]] = []

@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import re
 
+import pytest
+
 from scraper import ceskereality_main as m
 from scraper.ceskereality_client import REGION_HOSTS, CeskerealityClient
 from scraper.ceskereality_parser import extract_facet_slugs
@@ -255,8 +257,8 @@ def test_probe_category_early_stops_on_all_known_page(monkeypatch):
     })
     monkeypatch.setattr(m, "CeskerealityClient", lambda **kw: fake)
     stored = {
-        "7000001": {"sreality_id": -1, "price_czk": 3_200_000, "last_seen_at": None},
-        "7000002": {"sreality_id": -2, "price_czk": 4_100_000, "last_seen_at": None},
+        "7000001": {"id": 51, "sreality_id": -1, "price_czk": 3_200_000, "last_seen_at": None},
+        "7000002": {"id": 52, "sreality_id": -2, "price_czk": 4_100_000, "last_seen_at": None},
     }
     touched: list[int] = []
     enqueued: list[tuple] = []
@@ -264,7 +266,7 @@ def test_probe_category_early_stops_on_all_known_page(monkeypatch):
         m.db, "index_summary_native",
         lambda _c, src, ids: {i: stored[i] for i in ids if i in stored})
     monkeypatch.setattr(
-        m.db, "touch_listings", lambda _c, pks: touched.extend(pks) or len(pks))
+        m.db, "touch_listings_by_id", lambda _c, pks: touched.extend(pks) or len(pks))
     monkeypatch.setattr(
         m.db, "enqueue_detail", lambda _c, src, entries: enqueued.extend(entries) or len(entries))
     portal = m.CeskerealityPortal(default_config("ceskereality"))
@@ -276,7 +278,24 @@ def test_probe_category_early_stops_on_all_known_page(monkeypatch):
     assert len(fake.urls) == 1
     assert counts["found_new"] == 0
     assert enqueued == []           # unchanged prices -> nothing enqueued
-    assert sorted(touched) == [-2, -1]   # but last_seen was bumped
+    assert sorted(touched) == [51, 52]   # but last_seen was bumped (by surrogate id)
+
+
+def test_mark_gone_flips_native_inactive(monkeypatch):
+    # Gate 2: the gone-flip keys on the native id (mark_listing_inactive_native),
+    # NOT a sreality_id resolved out of the DB — a post-Gate-2 ceskereality row has
+    # sreality_id = NULL, so the legacy sreality_id-keyed flip would silently no-op.
+    captured: dict = {}
+    monkeypatch.setattr(
+        m.db, "mark_listing_inactive_native",
+        lambda _c, source, nid: captured.update(source=source, nid=nid),
+    )
+    monkeypatch.setattr(
+        m.db, "mark_listing_inactive",
+        lambda *a, **k: pytest.fail("legacy sreality_id-keyed gone-flip must not be used"),
+    )
+    m.CeskerealityPortal(default_config("ceskereality")).mark_gone(object(), "7000009")
+    assert captured == {"source": "ceskereality", "nid": "7000009"}
 
 
 def test_probe_category_enqueues_new_and_changed_with_priorities(monkeypatch):

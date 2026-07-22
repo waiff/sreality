@@ -801,9 +801,24 @@ def seeded_admin_rows(svc: Any) -> "Iterator[None]":
         cur.execute("INSERT INTO properties DEFAULT VALUES RETURNING id")
         pb = cur.fetchone()[0]
         lo, hi = min(pa, pb), max(pa, pb)  # CHECK left_property_id < right_property_id
-        cur.execute("INSERT INTO images (sreality_url) VALUES (%s) RETURNING id", (f"https://iso.test/{n}a.jpg",))
+        # images.listing_id is NOT NULL (migration 350) and FKs to listings.id, so
+        # seed a minimal listing to hang the two fixture images off. A non-sreality
+        # source keeps sreality_id NULL within the sign CHECK.
+        cur.execute(
+            "INSERT INTO listings (source, source_id_native, raw_json) "
+            "VALUES ('idnes', %s, '{}'::jsonb) RETURNING id",
+            (n,),
+        )
+        lid = cur.fetchone()[0]
+        cur.execute(
+            "INSERT INTO images (listing_id, sreality_url) VALUES (%s, %s) RETURNING id",
+            (lid, f"https://iso.test/{n}a.jpg"),
+        )
         ia = cur.fetchone()[0]
-        cur.execute("INSERT INTO images (sreality_url) VALUES (%s) RETURNING id", (f"https://iso.test/{n}b.jpg",))
+        cur.execute(
+            "INSERT INTO images (listing_id, sreality_url) VALUES (%s, %s) RETURNING id",
+            (lid, f"https://iso.test/{n}b.jpg"),
+        )
         ib = cur.fetchone()[0]
         ilo, ihi = min(ia, ib), max(ia, ib)  # CHECK image_id_a < image_id_b
 
@@ -866,6 +881,7 @@ def seeded_admin_rows(svc: Any) -> "Iterator[None]":
             cur.execute("DELETE FROM dedup_engine_runs WHERE id = %s", (run_id,))
             cur.execute("DELETE FROM scrape_runs WHERE id = %s", (scrape_id,))
             cur.execute("DELETE FROM images WHERE id IN (%s, %s)", (ia, ib))
+            cur.execute("DELETE FROM listings WHERE id = %s", (lid,))
             cur.execute("DELETE FROM properties WHERE id IN (%s, %s)", (pa, pb))
 
 
