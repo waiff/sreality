@@ -264,6 +264,19 @@ scripts/workflows, both idempotent and re-run-safe:
   by the parallel `listing_id -> listings(id)` FKs Phase B validated. Verified live:
   0 legacy FKs remain.
 
+**Gate 1 is now recorded as `migrations/348_listings_pk_swap_catchup.sql` (2026-07-21).**
+The swap ran live through `apply_listings_pk_swap.py`, so `001_initial.sql`'s
+`sreality_id bigint primary key` was still what the CI schema replay rebuilt — meaning
+the Gate 2 migration, which needs `sreality_id` nullable, would have aborted in replay
+("column sreality_id is in a primary key") on a change that is a no-op against prod.
+348 is a **catch-up**: every step is guarded on `pg_constraint`/`pg_attribute`, so it
+is a true no-op (and takes no lock on `listings`) against the already-swapped
+production database, and it is deliberately NEVER applied there. It closes the replay
+divergence only for the PK itself — the broader "a fresh replay cannot reproduce prod"
+caveat above (Phase B/B2 constraints have no plain form) still stands.
+`tests/test_listings_pk_swap_migration.py` is the offline guard that the chain keeps
+reaching it.
+
 **Phase D, step 7 (parity-green precondition) CONFIRMED (2026-07-20)**, via
 `verify_pipeline.yml`'s `check_dual_write_parity`: `status=ok value=0` — zero gap,
 zero mismatch — across all 22 armed `R2_CARRIERS` (all 22 have a
