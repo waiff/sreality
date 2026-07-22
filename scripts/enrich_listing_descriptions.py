@@ -45,6 +45,19 @@ def _select_pending(
         "FROM listings l "
         "WHERE l.is_active = true "
         "  AND l.source = %s "
+        # Gate 2 of the listing-identity refactor makes new non-sreality rows
+        # insert sreality_id = NULL. This whole enrichment lane is sreality_id-
+        # keyed end-to-end — the returned handle feeds enrich_listing_description /
+        # build_enrich_request (toolkit.bazos_enrichment, all `WHERE sreality_id=%s`)
+        # and lands in listing_description_enrichment_batch_requests.sreality_id
+        # (NOT NULL, no listing_id column) — so a NULL-sreality row cannot be
+        # processed here. Without this guard `int(None)` (below) crashes the run, and
+        # because the NOT-EXISTS anti-join is never true for a NULL and ORDER BY
+        # first_seen_at DESC floats the newest (NULL) row to the top, every
+        # subsequent run re-crashes on the same row (the lane dies permanently).
+        # Migrating the lane onto listings.id (toolkit + a batch-table migration)
+        # is out of this fix's scope; until then NULL-sreality rows are skipped.
+        "  AND l.sreality_id IS NOT NULL "
         "  AND l.description IS NOT NULL "
         "  AND length(btrim(l.description)) > 0 "
         + freshness +
