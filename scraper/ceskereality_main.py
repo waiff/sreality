@@ -269,12 +269,12 @@ class CeskerealityPortal:
             if price_map.get(nid) is not None and not price_changed(
                 prev["price_czk"], price_map[nid], self._price_change_min_pct,
             ):
-                unchanged_pks.append(prev["sreality_id"])
+                unchanged_pks.append(prev["id"])
             else:
                 changed.append(nid)
 
         if conn is not None and unchanged_pks:
-            db.touch_listings(conn, unchanged_pks)
+            db.touch_listings_by_id(conn, unchanged_pks)
 
         entries = (
             [(n, ref_map[n], price_map.get(n), db.QUEUE_PRIORITY_CHANGED) for n in changed]
@@ -354,9 +354,9 @@ class CeskerealityPortal:
                     changed_entries.append(
                         (nid, ref, price, db.QUEUE_PRIORITY_CHANGED))
                 else:
-                    unchanged_pks.append(prev["sreality_id"])
+                    unchanged_pks.append(prev["id"])
             if conn is not None and unchanged_pks:
-                db.touch_listings(conn, unchanged_pks)
+                db.touch_listings_by_id(conn, unchanged_pks)
             entries = changed_entries + new_entries
             if conn is not None and entries:
                 enqueued += db.enqueue_detail(conn, SOURCE, entries)
@@ -448,10 +448,9 @@ class CeskerealityPortal:
         return counts
 
     def mark_gone(self, conn: Any, native_id: str) -> None:
-        existing = db.index_summary_native(conn, SOURCE, [native_id])
-        row = existing.get(native_id)
-        if row is not None:
-            db.mark_listing_inactive(conn, row["sreality_id"])
+        # Keyed on the native id directly (not a sreality_id round-trip): post-Gate-2
+        # the row's sreality_id is NULL, so the legacy mark_listing_inactive no-ops.
+        db.mark_listing_inactive_native(conn, SOURCE, native_id)
 
     def record_failure(self, conn: Any, native_id: str, message: str) -> None:
         # The queue (fail_detail) tracks attempts/give-up; non-sreality sources

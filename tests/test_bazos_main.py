@@ -204,13 +204,13 @@ def test_walk_category_complete_walk_enqueues_new_and_changed(monkeypatch):
     monkeypatch.setattr(
         bazos_main.db, "index_summary_native",
         lambda _c, _src, _natives: {
-            "b": {"sreality_id": -2, "price_czk": 4_000_000, "last_seen_at": None},
-            "c": {"sreality_id": -3, "price_czk": 9_999_999, "last_seen_at": None},
+            "b": {"id": 42, "sreality_id": -2, "price_czk": 4_000_000, "last_seen_at": None},
+            "c": {"id": 41, "sreality_id": -3, "price_czk": 9_999_999, "last_seen_at": None},
         },
     )
     touched: dict[str, Any] = {}
     monkeypatch.setattr(
-        bazos_main.db, "touch_listings",
+        bazos_main.db, "touch_listings_by_id",
         lambda _c, ids: touched.update(ids=sorted(ids)),
     )
     captured: dict[str, Any] = {}
@@ -225,7 +225,7 @@ def test_walk_category_complete_walk_enqueues_new_and_changed(monkeypatch):
     )
     assert seen == {"a", "b", "c"}
     assert result_size == 3 and complete is True          # full walk, collected == total
-    assert touched["ids"] == [-3, -2]                     # both existing rows touched
+    assert touched["ids"] == [41, 42]                     # both existing rows touched by surrogate id
     assert counts["found_new"] == 1                       # only "a" is genuinely new
     assert captured["source"] == "bazos"
     natives = {e[0] for e in captured["entries"]}
@@ -399,8 +399,8 @@ def test_write_details_ingests_and_counts(monkeypatch):
     items = [DrainItem("a", "ok", payload={
         "listing": listing, "html": "<h>", "status": 200, "url": "/a"})]
     monkeypatch.setattr(bazos_main.db, "upsert_portal_raw_page", lambda *a, **k: 9)
-    monkeypatch.setattr(bazos_main.db, "ingest_scraped_listing", lambda _c, _l: (-5, "new"))
-    monkeypatch.setattr(bazos_main.db, "record_images", lambda _c, _pk, imgs: len(imgs))
+    monkeypatch.setattr(bazos_main.db, "ingest_scraped_listing", lambda _c, _l: (8105, "new"))
+    monkeypatch.setattr(bazos_main.db, "record_images", lambda _c, _sid, imgs, **k: len(imgs))
     monkeypatch.setattr(bazos_main.db, "mark_portal_page_parsed", lambda *a, **k: None)
     counts = _portal().write_details(object(), items)
     assert counts["new"] == 1
