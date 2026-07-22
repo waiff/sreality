@@ -298,12 +298,20 @@ def create_note(
     # estimation_runs) — a tenant_conn caller with account_id left NULL fails
     # the table's WITH CHECK closed. Callers on the (still) service-role bridge
     # pass None; RLS never applies there so the NULL is harmless.
+    #
+    # The id<->sreality_id map reads through listing_natural_key_public, NOT base
+    # `listings`: on the tenant conn (SET LOCAL ROLE authenticated) `listings` is
+    # RLS deny-all, so `(SELECT sreality_id FROM listings ...)` folds to NULL and
+    # silently drops the note's provenance. The identity view is owner-bypass +
+    # PII-free (id/sreality_id/source/source_id_native only) — Amendment A5. The
+    # service-role bridge could read base listings fine, but the view is correct
+    # for both callers, so there's one path.
     sql = (
         "INSERT INTO property_notes "
         "  (property_id, body, origin_listing_id, origin_listing_ref_id, account_id) "
         "VALUES (%s, %s, "
-        "  COALESCE(%s, (SELECT sreality_id FROM listings WHERE id = %s)), "
-        "  COALESCE(%s, (SELECT id FROM listings WHERE sreality_id = %s)), "
+        "  COALESCE(%s, (SELECT sreality_id FROM listing_natural_key_public WHERE id = %s)), "
+        "  COALESCE(%s, (SELECT id FROM listing_natural_key_public WHERE sreality_id = %s)), "
         "  %s) "
         "RETURNING id, property_id, body, origin_listing_id, created_at"
     )

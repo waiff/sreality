@@ -53,10 +53,13 @@ _TENANT_VIEWS: list[str] = [
     "tags_public",
 ]
 
-# Views that must NOT be security_invoker: they join a shared table carrying
-# RLS-enabled-with-zero-policies (`listings`/`properties`/`images`), which is
+# Views that must NOT be security_invoker: they join a shared table that is
 # deny-all under invoker rights, so flipping them silently returns zero rows to
-# every caller instead of scoping anything.
+# every caller instead of scoping anything. `listings`/`images` are
+# RLS-enabled-with-zero-policies (fully deny-all); `properties` now carries one
+# permissive authenticated-SELECT policy (Amendment A5, migration 349) but the
+# views still must stay owner-bypass because they JOIN `listings`, which stays
+# deny-all.
 #
 # Owner rights does NOT mean unscoped. property_estimates_public reads
 # `estimation_runs`, whose RLS cannot bind inside an owner-rights view, so
@@ -296,6 +299,70 @@ def test_market_view_not_security_invoker(svc: Any) -> None:
         f"table whose RLS is enabled with zero policies, so they now return zero "
         f"rows to every caller instead of scoping anything: {wrongly_invoker}"
     )
+
+
+def test_a5_properties_readable_listings_still_deny_all(
+    svc: Any, tenants: dict[str, uuid.UUID],
+) -> None:
+    """Amendment A5 (migration 349). The tenant role can read base `properties`
+    directly (the read policy), but base `listings` stays deny-all (broker PII),
+    and the id<->sreality_id map create_note needs resolves only through the
+    PII-free `listing_natural_key_public` identity view.
+
+    Regression for the Wave-1 breakage where a signed-in user's add-note /
+    bookmark / add-to-collection all 404'd because resolve_active_property_ids'
+    walk over `properties` returned zero rows under RLS deny-all."""
+    srid = 900_000_000 + int(uuid.uuid4().int % 50_000_000)
+    with svc.cursor() as cur:
+        cur.execute("INSERT INTO properties DEFAULT VALUES RETURNING id")
+        prop = cur.fetchone()[0]
+        cur.execute(
+            "INSERT INTO listings (sreality_id, source, source_id_native, raw_json, "
+            "broker_email, property_id) "
+            "VALUES (%s, 'sreality', %s, '{}'::jsonb, 'secret@broker.cz', %s)",
+            (srid, f"iso-a5-{srid}", prop),
+        )
+    try:
+        with _scoped(tenants["a_user"]) as conn:
+            with conn.cursor() as cur:
+                # A5: the read policy makes base `properties` visible to a tenant.
+                cur.execute("SELECT id FROM properties WHERE id = %s", (prop,))
+                assert cur.fetchall() == [(prop,)], (
+                    "A5 policy: authenticated must read base properties"
+                )
+                # `listings` stays deny-all — the broker-PII base table is NOT
+                # opened by A5 (a permissive policy there would leak broker_email
+                # via PostgREST; RLS filters rows, not columns).
+                cur.execute(
+                    "SELECT count(*) FROM listings WHERE sreality_id = %s", (srid,)
+                )
+                assert cur.fetchone()[0] == 0, (
+                    "base listings must remain deny-all to authenticated (broker PII)"
+                )
+                # ...but the PII-free identity view resolves the id<->sreality_id
+                # map create_note depends on (owner-bypass, no broker columns).
+                # Both directions the INSERT subselects use must round-trip.
+                cur.execute(
+                    "SELECT id FROM listing_natural_key_public WHERE sreality_id = %s",
+                    (srid,),
+                )
+                row = cur.fetchone()
+                assert row is not None, (
+                    "listing_natural_key_public must resolve sreality_id -> id for a tenant"
+                )
+                listing_id = row[0]
+                cur.execute(
+                    "SELECT sreality_id FROM listing_natural_key_public WHERE id = %s",
+                    (listing_id,),
+                )
+                assert cur.fetchone() == (srid,), (
+                    "listing_natural_key_public must resolve id -> sreality_id for a tenant"
+                )
+    finally:
+        with svc.cursor() as cur:
+            cur.execute("DELETE FROM listing_snapshots WHERE sreality_id = %s", (srid,))
+            cur.execute("DELETE FROM listings WHERE sreality_id = %s", (srid,))
+            cur.execute("DELETE FROM properties WHERE id = %s", (prop,))
 
 
 @pytest.fixture(scope="module")
