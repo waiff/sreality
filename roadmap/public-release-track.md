@@ -288,8 +288,21 @@ remediation R3 closes that. Full spec: `docs/design/public-release-remediation-2
      `POST /estimations` uses), pipeline/collections/estimation joins staying on the
      tenant conn under RLS (incl. the SYSTEM arm of `estimation_runs_tenant_read`, so
      platform golden estimates still surface). This is the server-side shape of A5 for
-     this endpoint — the full A5 (a column-safe browser-readable path for
-     `listings`/`properties`, which Wave 2's SPA-side reads still need) remains open.
+     this endpoint.
+   - **A5 proper — SHIPPED 2026-07-22 (migration 349).** The column-safe tenant read
+     path for the shared-market tables, split along their real PII shape: `properties`
+     gets a plain `FOR SELECT TO authenticated USING (true)` policy (safe — the base
+     table has **no** broker/`raw_json` column; all such data on `properties_public` is
+     joined in from `listings`, so a tenant reading base `properties` sees strictly less
+     than the view they already read), while `listings` **stays deny-all** and its one
+     tenant-conn reader (`create_note`'s id↔sreality_id map) reroutes through the PII-free
+     `listing_natural_key_public` identity view. This un-breaks add-note / add-to-collection
+     / pipeline-bookmark for signed-in extension users — all three were 404'ing because
+     `resolve_active_property_ids`' walk over `properties` returned zero rows under RLS
+     deny-all (found while shipping this, not yet reported by the operator). `list_estimation_runs`
+     turned out **not** degraded (runs on the service-role conn). `admin_boundaries` left
+     un-policied until a tenant-conn consumer needs it (Wave 3 matcher). Live regression:
+     `test_a5_properties_readable_listings_still_deny_all`.
    - Remaining: the metering substrate (`usage_ledger`/`check_budget` — needs a product
      decision on quota shape: free-tier run count vs USD budget, daily vs monthly window),
      the atomic submit-time gates (entitlement/budget/concurrency/idempotency), moving agent
