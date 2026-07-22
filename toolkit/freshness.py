@@ -35,13 +35,29 @@ _LISTING_COLS: tuple[str, ...] = (
 def verify_listing_freshness(
     conn: "psycopg.Connection",
     client: "SrealityClient",
-    sreality_id: int,
+    sreality_id: int | None = None,
     max_age_hours: int = 24,
+    *,
+    listing_id: int | None = None,
 ) -> dict[str, Any]:
     from toolkit import _now_iso
 
-    listing = _fetch_listing(conn, sreality_id)
-    last_check_at = _fetch_last_check_at(conn, sreality_id)
+    if sreality_id is None and listing_id is None:
+        raise ValueError(
+            "verify_listing_freshness requires a sreality_id or listing_id"
+        )
+
+    listing = _fetch_listing(conn, sreality_id=sreality_id, listing_id=listing_id)
+    # The refetch (sreality.cz) and listing_freshness_checks are sreality-native
+    # — the latter has no listing_id column — so key the rest of the flow on the
+    # subject's own sreality_id: the input when given, else the resolved row's.
+    # `sid` is separate from the original selector so the re-fetch below keeps
+    # addressing the row the caller named (a NULL-sreality row stays reachable).
+    sid = (
+        sreality_id if sreality_id is not None
+        else (listing["sreality_id"] if listing else None)
+    )
+    last_check_at = _fetch_last_check_at(conn, sid)
     last_seen_at = listing["last_seen_at"] if listing else None
     age_hours = _effective_age_hours(last_seen_at, last_check_at)
 
@@ -51,19 +67,19 @@ def verify_listing_freshness(
         and age_hours < max_age_hours
     ):
         return _envelope(
-            sreality_id, max_age_hours,
+            sid, max_age_hours,
             outcome="cached", verified=False, cached=True,
             age_hours=age_hours,
             what_changed=[],
-            snapshot_id=_fetch_latest_snapshot_id(conn, sreality_id),
+            snapshot_id=_fetch_latest_snapshot_id(conn, sid),
             current=_serialize_listing(listing),
             data_freshness_iso=_iso(last_seen_at),
             queried_at=_now_iso(),
         )
 
     from scraper import freshness as scraper_freshness
-    res = scraper_freshness.freshness_check(conn, client, sreality_id)
-    current = _fetch_listing(conn, sreality_id)
+    res = scraper_freshness.freshness_check(conn, client, sid)
+    current = _fetch_listing(conn, sreality_id=sreality_id, listing_id=listing_id)
 
     if res["outcome"] == "fetch_error":
         post_age = age_hours
@@ -73,7 +89,7 @@ def verify_listing_freshness(
         data_freshness_iso = res["checked_at"]
 
     return _envelope(
-        sreality_id, max_age_hours,
+        sid, max_age_hours,
         outcome=res["outcome"],
         verified=True, cached=False,
         age_hours=post_age,
@@ -124,13 +140,19 @@ def _envelope(
 
 
 def _fetch_listing(
-    conn: "psycopg.Connection", sreality_id: int
+    conn: "psycopg.Connection",
+    sreality_id: int | None = None,
+    *,
+    listing_id: int | None = None,
 ) -> dict[str, Any] | None:
+    from toolkit import _listing_id_clause
+
+    id_clause, id_val = _listing_id_clause(sreality_id, listing_id)
     cols_sql = ", ".join(_LISTING_COLS)
     with conn.cursor() as cur:
         cur.execute(
-            f"SELECT {cols_sql} FROM listings WHERE sreality_id = %s",
-            (sreality_id,),
+            f"SELECT {cols_sql} FROM listings WHERE {id_clause}",
+            (id_val,),
         )
         row = cur.fetchone()
     if not row:

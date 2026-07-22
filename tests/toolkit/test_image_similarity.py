@@ -382,3 +382,51 @@ class _ScriptedConn:
 
 def _make_conn(plan: list[tuple[str, Any]]) -> _ScriptedConn:
     return _ScriptedConn(plan)
+
+
+# ---- Gate-2: addressable by the surrogate listing_id ----------------------
+
+
+def test_listing_id_pair_resolves_by_id_arm(monkeypatch):
+    _patch_r2_configured(monkeypatch, True)
+    plan = [
+        # resolve WHERE id = ANY: rows are (sreality_id, id)
+        ("fetchall", [(11, 100), (22, 200)]),
+        ("fetchone", _comparison_row()),  # cache hit on (100, 200)
+        ("fetchone", (_NOW,)),
+    ]
+    conn = _make_conn(plan)
+    res = ic.compare_listing_images(
+        conn, _FakeLLM([]),  # type: ignore[arg-type]
+        listing_id_a=100, listing_id_b=200,
+    )
+
+    resolve_sql, resolve_params = conn.cursor_obj.executed[0]
+    assert "WHERE id = ANY(%s)" in resolve_sql
+    assert resolve_params == ([100, 200],)
+
+    cache_params = conn.cursor_obj.executed[1][1]
+    assert cache_params == (100, 200)  # keyed on the surrogate listing_ids
+
+    # sreality_ids ride along from the resolved rows.
+    assert res["data"]["sreality_id_a"] == 11
+    assert res["data"]["sreality_id_b"] == 22
+    assert res["metadata"]["filters_used"] == {
+        "listing_id_a": 100, "listing_id_b": 200,
+        "n_images": 6, "force_refresh": False,
+    }
+
+
+def test_listing_id_pair_requires_both_sides():
+    conn = _make_conn([])
+    with pytest.raises(ic.ImageCompareError, match="BOTH"):
+        ic.compare_listing_images(
+            conn, _FakeLLM([]),  # type: ignore[arg-type]
+            listing_id_a=100,
+        )
+
+
+def test_neither_pair_id_raises():
+    conn = _make_conn([])
+    with pytest.raises(ic.ImageCompareError):
+        ic.compare_listing_images(conn, _FakeLLM([]))  # type: ignore[arg-type]

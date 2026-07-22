@@ -150,23 +150,31 @@ def compute_market_velocity(
 
 def compute_listing_velocity(
     conn: "psycopg.Connection",
-    sreality_id: int,
+    sreality_id: int | None = None,
     radius_m: int = 1000,
     disposition_match: Literal["exact", "loose", "any"] = "exact",
     lifecycle: _VelocityLifecycle = "all",
+    *,
+    listing_id: int | None = None,
 ) -> dict[str, Any]:
     """Percentile-rank a single listing against its peer cohort.
 
     Cohort is built from the listing's own lat/lng/disposition with the
     given radius. The target listing itself is excluded from the cohort
     so the percentile is "compared to peers", not "self vs self+peers".
+
+    Addressable by either the portal-native sreality_id or the surrogate
+    listing_id; the surrogate wins if both are given.
     """
     from toolkit import _now_iso
 
-    listing = _fetch_listing_for_velocity(conn, sreality_id)
+    listing = _fetch_listing_for_velocity(
+        conn, sreality_id, listing_id=listing_id,
+    )
     if listing is None:
         return _listing_envelope(
             sreality_id=sreality_id,
+            listing_id=listing_id,
             radius_m=radius_m,
             disposition_match=disposition_match,
             lifecycle=lifecycle,
@@ -183,6 +191,7 @@ def compute_listing_velocity(
     if listing["lat"] is None or listing["lng"] is None:
         return _listing_envelope(
             sreality_id=sreality_id,
+            listing_id=listing_id,
             radius_m=radius_m,
             disposition_match=disposition_match,
             lifecycle=lifecycle,
@@ -204,7 +213,12 @@ def compute_listing_velocity(
         lat=listing["lat"],
         lng=listing["lng"],
         disposition=listing["disposition"],
-        exclude_ids=[sreality_id],
+        # Exclude the subject from its own peer cohort on the id-space it was
+        # addressed by. `exclude_ids` (sreality) carries a NULL guard in
+        # _shared_filter_where; `exclude_listing_ids` (surrogate) is the only
+        # arm that can exclude a subject with no sreality_id.
+        exclude_ids=[sreality_id] if sreality_id is not None else [],
+        exclude_listing_ids=[listing_id] if listing_id is not None else [],
     )
     filters = ComparableFilters(
         radius_m=radius_m,
@@ -251,6 +265,7 @@ def compute_listing_velocity(
         notes = []
     return _listing_envelope(
         sreality_id=sreality_id,
+        listing_id=listing_id,
         radius_m=radius_m,
         disposition_match=disposition_match,
         lifecycle=lifecycle,
@@ -261,15 +276,21 @@ def compute_listing_velocity(
 
 
 def _fetch_listing_for_velocity(
-    conn: "psycopg.Connection", sreality_id: int
+    conn: "psycopg.Connection",
+    sreality_id: int | None = None,
+    *,
+    listing_id: int | None = None,
 ) -> dict[str, Any] | None:
+    from toolkit import _listing_id_clause
+
+    id_clause, id_val = _listing_id_clause(sreality_id, listing_id)
     with conn.cursor() as cur:
         cur.execute(
             "SELECT first_seen_at, last_seen_at, is_active, disposition,\n"
             "  ST_Y(geom::geometry) AS lat, ST_X(geom::geometry) AS lng,\n"
             "  category_main, category_type\n"
-            "FROM listings WHERE sreality_id = %s",
-            (sreality_id,),
+            f"FROM listings WHERE {id_clause}",
+            (id_val,),
         )
         row = cur.fetchone()
     if not row:
@@ -417,22 +438,29 @@ def _filters_used(
 
 def _listing_envelope(
     *,
-    sreality_id: int,
+    sreality_id: int | None,
     radius_m: int,
     disposition_match: str,
     lifecycle: str,
     data: dict[str, Any],
     queried_at: str,
+    listing_id: int | None = None,
     notes: list[str] | None = None,
 ) -> dict[str, Any]:
+    filters_used: dict[str, Any] = {
+        "sreality_id": sreality_id,
+        "radius_m": radius_m,
+        "disposition_match": disposition_match,
+        "lifecycle": lifecycle,
+    }
+    # Echo the surrogate handle only when the caller addressed by it, so the
+    # sreality_id path stays byte-identical.
+    if listing_id is not None:
+        data["listing_id"] = listing_id
+        filters_used["listing_id"] = listing_id
     metadata: dict[str, Any] = {
         "tool": "compute_listing_velocity",
-        "filters_used": {
-            "sreality_id": sreality_id,
-            "radius_m": radius_m,
-            "disposition_match": disposition_match,
-            "lifecycle": lifecycle,
-        },
+        "filters_used": filters_used,
         "result_count": data.get("cohort_size", 0),
         "queried_at": queried_at,
         "data_freshness": None,
