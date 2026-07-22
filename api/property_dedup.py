@@ -396,13 +396,13 @@ def _record_operator_decision(
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT id, repr_listing_id, category_main FROM properties "
-                "WHERE id IN (%s, %s)",
+                "SELECT id, repr_listing_id, repr_listing_ref_id, category_main "
+                "FROM properties WHERE id IN (%s, %s)",
                 (left_property_id, right_property_id),
             )
-            info = {int(r[0]): (r[1], r[2]) for r in cur.fetchall()}
-            ls, lc = info.get(int(left_property_id), (None, None))
-            rs, rc = info.get(int(right_property_id), (None, None))
+            info = {int(r[0]): (r[1], r[2], r[3]) for r in cur.fetchall()}
+            ls, lref, lc = info.get(int(left_property_id), (None, None, None))
+            rs, rref, rc = info.get(int(right_property_id), (None, None, None))
             if merge_group_id is not None:
                 # A MERGE just re-pointed listings + recomputed the survivor's
                 # repr_listing_id, so the repr read above can be the SAME id on
@@ -418,18 +418,24 @@ def _record_operator_decision(
                 led = cur.fetchone()
                 if led is not None and led[0] is not None and led[0] != led[1]:
                     ls, rs = led[0], led[1]
-            # left/right_listing_id are the surrogate mirrors of the two
-            # *_sreality_id columns (R2 dual-write), resolved inline.
+            # left/right_listing_id are the SURROGATE ids (listings.id). Prefer the
+            # (ledger-disambiguated) sreality id resolved inline so a sreality pair
+            # records exactly the surrogate it always has; fall back to the property's
+            # repr surrogate (repr_listing_ref_id) when that sreality id is NULL — a
+            # non-sreality repr post-Gate-2 — so the row never lands a NULL,
+            # unattributable left/right_listing_id.
             cur.execute(
                 "INSERT INTO dedup_pair_audit (run_at, left_sreality_id, "
                 "left_listing_id, right_sreality_id, right_listing_id, "
                 "left_property_id, right_property_id, "
                 "category_main, stage, outcome, source, merge_group_id, detail) "
-                "VALUES (now(),%s,(SELECT id FROM listings WHERE sreality_id = %s),"
-                "%s,(SELECT id FROM listings WHERE sreality_id = %s),"
+                "VALUES (now(),%s,"
+                "COALESCE((SELECT id FROM listings WHERE sreality_id = %s),%s),"
+                "%s,COALESCE((SELECT id FROM listings WHERE sreality_id = %s),%s),"
                 "%s,%s,%s,%s,%s,'operator',%s,%s::jsonb)",
-                (ls, ls, rs, rs, left_property_id, right_property_id, lc or rc, stage,
-                 outcome, str(merge_group_id) if merge_group_id is not None else None,
+                (ls, ls, lref, rs, rs, rref, left_property_id, right_property_id,
+                 lc or rc, stage, outcome,
+                 str(merge_group_id) if merge_group_id is not None else None,
                  json.dumps(detail)),
             )
     except Exception:  # noqa: BLE001 — audit logging must never break a real write
@@ -874,32 +880,34 @@ def list_pair_audit(
 
 
 def _listing_room_images(
-    cur: Any, sreality_id: int, room_type: str | None, n: int,
+    cur: Any, listing_id: int | None, room_type: str | None, n: int,
 ) -> tuple[list[dict[str, Any]], bool]:
     """Images for the deciding room of one listing (CLIP image_clip_tags OR the
     LLM image_room_classifications cache — both backend-only, hence this server
     hop), falling back to the listing's first images when the room is unset /
     untagged. Prefers CLIP so the photos reflect what the engine actually paired
-    on (the engine runs dedup_prefer_clip_tags). Returns (images, fallback)."""
+    on (the engine runs dedup_prefer_clip_tags). Keyed on the surrogate
+    `images.listing_id` (NOT NULL), so it works for a non-sreality listing too.
+    Returns (images, fallback)."""
     if room_type:
         cur.execute(
             "SELECT i.id, i.sreality_url, i.storage_path FROM images i "
-            "WHERE i.sreality_id = %(sid)s AND ("
+            "WHERE i.listing_id = %(lid)s AND ("
             "  EXISTS (SELECT 1 FROM image_clip_tags t "
             "          WHERE t.image_id = i.id AND t.logical_tag = %(rt)s) "
             "  OR EXISTS (SELECT 1 FROM image_room_classifications c "
             "             WHERE c.image_id = i.id AND c.room_type = %(rt)s)) "
             "ORDER BY i.sequence NULLS LAST, i.id LIMIT %(n)s",
-            {"sid": sreality_id, "rt": room_type, "n": n},
+            {"lid": listing_id, "rt": room_type, "n": n},
         )
         rows = cur.fetchall()
         if rows:
             return ([{"image_id": r[0], "sreality_url": r[1], "storage_path": r[2]}
                      for r in rows], False)
     cur.execute(
-        "SELECT id, sreality_url, storage_path FROM images WHERE sreality_id = %s "
+        "SELECT id, sreality_url, storage_path FROM images WHERE listing_id = %s "
         "ORDER BY sequence NULLS LAST, id LIMIT %s",
-        (sreality_id, n),
+        (listing_id, n),
     )
     return ([{"image_id": r[0], "sreality_url": r[1], "storage_path": r[2]}
              for r in cur.fetchall()],
@@ -963,6 +971,7 @@ def _phash_audit_chunk(
         f"""
         WITH scoped AS (
             SELECT a.id, a.left_sreality_id, a.right_sreality_id,
+                   a.left_listing_id, a.right_listing_id,
                    a.left_property_id, a.right_property_id,
                    a.outcome, a.category_main, a.run_at, a.stage, a.detail
             FROM dedup_pair_audit a
@@ -978,9 +987,11 @@ def _phash_audit_chunk(
                ib.id, ib.sreality_url, ib.storage_path,
                tb.logical_tag, tb.fine_tag, tb.confidence, tb.render_score,
                bit_count((ia.phash # ib.phash)::bit(64)) AS hamming
+        -- Join images on the surrogate listing_id (NOT NULL), never the post-Gate-2
+        -- possibly-NULL sreality_id — so non-sreality pairs' photos still render.
         FROM scoped s
-        JOIN images ia ON ia.sreality_id = s.left_sreality_id AND ia.phash IS NOT NULL
-        JOIN images ib ON ib.sreality_id = s.right_sreality_id AND ib.phash IS NOT NULL
+        JOIN images ia ON ia.listing_id = s.left_listing_id AND ia.phash IS NOT NULL
+        JOIN images ib ON ib.listing_id = s.right_listing_id AND ib.phash IS NOT NULL
         LEFT JOIN LATERAL (
             SELECT t.logical_tag, t.fine_tag, t.confidence, t.render_score
             FROM image_clip_tags t
@@ -1059,7 +1070,7 @@ def phash_audit(
     with conn.cursor() as cur:
         if training_exclude:
             # Unlike the inclusion case below, the SCOPE check alone is already exact
-            # here — trained_sreality_ids is "every sreality_id that owns at least one
+            # here — trained_listing_ids is "every listing_id that owns at least one
             # trained image", so excluding those listings guarantees neither remaining
             # image can possibly be a trained one. No post-join re-check needed (see
             # _phash_audit_chunk: training_only/training_label stay False here, so it
@@ -1067,18 +1078,20 @@ def phash_audit(
             # inclusion branch gets — the training set is tiny, so excluding it barely
             # shrinks a huge population — but a small NOT-IN-style array check is cheap
             # regardless, and an empty training set means nothing to exclude at all.
+            # Keyed on the surrogate listing_id (NOT NULL), never the post-Gate-2
+            # possibly-NULL sreality_id, on BOTH the images lookup and the audit filter.
             cur.execute(
-                "SELECT DISTINCT i.sreality_id FROM images i "
+                "SELECT DISTINCT i.listing_id FROM images i "
                 "JOIN image_training_examples te ON te.image_id = i.id "
-                "WHERE i.sreality_id IS NOT NULL",
+                "WHERE i.listing_id IS NOT NULL",
             )
-            trained_sreality_ids = [r[0] for r in cur.fetchall()]
-            if trained_sreality_ids:
+            trained_listing_ids = [r[0] for r in cur.fetchall()]
+            if trained_listing_ids:
                 scope_clauses.append(
-                    "NOT (a.left_sreality_id = ANY(%(trained_sreality_ids)s)"
-                    " OR a.right_sreality_id = ANY(%(trained_sreality_ids)s))",
+                    "NOT (a.left_listing_id = ANY(%(trained_listing_ids)s)"
+                    " OR a.right_listing_id = ANY(%(trained_listing_ids)s))",
                 )
-                scope_params["trained_sreality_ids"] = trained_sreality_ids
+                scope_params["trained_listing_ids"] = trained_listing_ids
         elif training_only or training_label:
             # The training set is tiny (an operator hand-picks it) next to
             # dedup_pair_audit's population — without this, almost every chunk would
@@ -1086,29 +1099,30 @@ def phash_audit(
             # ceiling for a handful of rows. Narrowing the SCOPE to only the listings
             # that own a (matching) trained image keeps a chunk's odds of matching
             # close to 1, same as any other scope filter (category_main/outcome)
-            # already does.
+            # already does. Keyed on the surrogate listing_id (NOT NULL), never the
+            # post-Gate-2 possibly-NULL sreality_id.
             lookup_sql = (
-                "SELECT DISTINCT i.sreality_id FROM images i "
+                "SELECT DISTINCT i.listing_id FROM images i "
                 "JOIN image_training_examples te ON te.image_id = i.id "
-                "WHERE i.sreality_id IS NOT NULL"
+                "WHERE i.listing_id IS NOT NULL"
             )
             lookup_params: dict[str, Any] = {}
             if training_label:
                 lookup_sql += " AND te.label = %(training_label)s"
                 lookup_params["training_label"] = training_label
             cur.execute(lookup_sql, lookup_params)
-            trained_sreality_ids = [r[0] for r in cur.fetchall()]
-            if not trained_sreality_ids:
+            trained_listing_ids = [r[0] for r in cur.fetchall()]
+            if not trained_listing_ids:
                 return {
                     "data": [], "returned": 0, "scanned_pairs": 0,
                     "scan_cap": _PHASH_AUDIT_SCAN_CEILING, "scanned_so_far": 0,
                     "next_scan_offset": None,
                 }
             scope_clauses.append(
-                "(a.left_sreality_id = ANY(%(trained_sreality_ids)s)"
-                " OR a.right_sreality_id = ANY(%(trained_sreality_ids)s))",
+                "(a.left_listing_id = ANY(%(trained_listing_ids)s)"
+                " OR a.right_listing_id = ANY(%(trained_listing_ids)s))",
             )
-            scope_params["trained_sreality_ids"] = trained_sreality_ids
+            scope_params["trained_listing_ids"] = trained_listing_ids
 
         scope_where = ("WHERE " + " AND ".join(scope_clauses)) if scope_clauses else ""
         cur.execute(
@@ -1170,12 +1184,13 @@ def phash_audit(
 
 
 def _phash_pair_evidence(
-    cur: Any, a_id: int, b_id: int, category_main: str | None, limit: int,
+    cur: Any, a_id: int | None, b_id: int | None, category_main: str | None, limit: int,
 ) -> list[dict[str, Any]]:
     """The actual near-identical image PAIRS (Hamming <= bar) the pHash signal turned on,
     recomputed from stored phashes with the SAME category exclusions the engine applied —
     so 'the specific pictures' are exactly the ones that drove the decision, recoverable
-    for ANY historical row (nothing extra had to be stored at decision time)."""
+    for ANY historical row (nothing extra had to be stored at decision time). `a_id`/`b_id`
+    are the surrogate `images.listing_id` (NOT NULL), so it works for a non-sreality pair."""
     excluded = phash_excluded_tags_for(category_main)
     rmin = phash_render_exclude_for(category_main, RENDER_SCORE_EXCLUDE_MIN)
     params: dict[str, Any] = {"a": a_id, "b": b_id, "max": PHASH_IDENTICAL_MAX, "lim": limit}
@@ -1184,7 +1199,7 @@ def _phash_pair_evidence(
         "       ib.id, ib.sreality_url, ib.storage_path, "
         "       bit_count((ia.phash # ib.phash)::bit(64)) AS hamming "
         "FROM images ia JOIN images ib ON true "
-        "WHERE ia.sreality_id = %(a)s AND ib.sreality_id = %(b)s "
+        "WHERE ia.listing_id = %(a)s AND ib.listing_id = %(b)s "
         "  AND ia.phash IS NOT NULL AND ib.phash IS NOT NULL "
         "  AND bit_count((ia.phash # ib.phash)::bit(64)) <= %(max)s"
     )
@@ -1229,11 +1244,25 @@ def decision_evidence(
         strip_room = room_type
     want_pairs = stage == "phash" or reason == "image_phash"
     with conn.cursor() as cur:
+        # The frontend still addresses evidence by the DISPLAYED sreality_id, but the
+        # image joins are keyed on the surrogate images.listing_id (post-Gate-2 the
+        # sreality columns go NULL for the non-sreality portals) — so resolve each
+        # sreality id to its listing_id ONCE and carry the surrogate through. An
+        # unresolved id -> None -> the helpers return empty, exactly as an unknown id
+        # did before. (Full non-sreality support additionally needs the /dedup UI to
+        # address evidence by left/right_listing_id — a frontend-territory change.)
+        cur.execute(
+            "SELECT sreality_id, id FROM listings WHERE sreality_id IN (%s, %s)",
+            (left_sreality_id, right_sreality_id),
+        )
+        sid_to_lid = {int(r[0]): int(r[1]) for r in cur.fetchall()}
+        left_lid = sid_to_lid.get(left_sreality_id)
+        right_lid = sid_to_lid.get(right_sreality_id)
         pairs = (_phash_pair_evidence(
-            cur, left_sreality_id, right_sreality_id, category_main, per_side * 2)
+            cur, left_lid, right_lid, category_main, per_side * 2)
             if want_pairs else None)
-        left, lfb = _listing_room_images(cur, left_sreality_id, strip_room, per_side)
-        right, rfb = _listing_room_images(cur, right_sreality_id, strip_room, per_side)
+        left, lfb = _listing_room_images(cur, left_lid, strip_room, per_side)
+        right, rfb = _listing_room_images(cur, right_lid, strip_room, per_side)
     return {
         "data": {
             "pairs": pairs or None,
@@ -1413,8 +1442,11 @@ def clip_coverage(
         cur.execute(
             """
             WITH tagged AS (
-              SELECT DISTINCT i.sreality_id
+              -- Surrogate listing_id (NOT NULL), never the post-Gate-2 possibly-NULL
+              -- sreality_id, so a non-sreality listing still counts as covered.
+              SELECT DISTINCT i.listing_id
               FROM image_clip_tags t JOIN images i ON i.id = t.image_id
+              WHERE i.listing_id IS NOT NULL
             ),
             cand AS (
               SELECT left_property_id AS pid FROM property_identity_candidates
@@ -1436,7 +1468,7 @@ def clip_coverage(
                 (l.region_id = %(r)s
                  AND l.category_main IN ('dum', 'komercni')) AS sc_dk,
                 (l.region_id = %(r)s AND l.category_main = 'byt') AS sc_byt,
-                (l.sreality_id IN (SELECT sreality_id FROM tagged)) AS tagged
+                (l.id IN (SELECT listing_id FROM tagged)) AS tagged
               FROM listings l WHERE l.is_active
             ) inc
             """,

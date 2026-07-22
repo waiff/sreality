@@ -242,6 +242,7 @@ class _RecCur:
     def __init__(self, conn: "_RecConn") -> None:
         self._c = conn
         self._rows: list[tuple[Any, ...]] = []
+        self._props = conn.props
 
     def __enter__(self) -> "_RecCur":
         return self
@@ -252,12 +253,12 @@ class _RecCur:
     def execute(self, sql: str, params: Any = None) -> None:
         s = " ".join(sql.split())
         self._c.executed.append((s, params))
-        if "repr_listing_id FROM properties" in s:
-            # Both properties share the SAME repr_listing_id — the post-merge drift
-            # that produced the self-paired bug.
-            self._rows = [(10, 555, "byt"), (11, 555, "byt")]
+        if "FROM properties WHERE id IN" in s:
+            # (id, repr_listing_id [legacy sreality-valued], repr_listing_ref_id
+            #  [surrogate], category_main).
+            self._rows = list(self._props)
         elif "array_agg(listing_id)" in s:
-            # Ledger resolves the two sides to DISTINCT listings.
+            # Ledger resolves the two sides to DISTINCT (sreality-valued) listings.
             self._rows = [(100, 200)]
         else:
             self._rows = []
@@ -270,8 +271,13 @@ class _RecCur:
 
 
 class _RecConn:
-    def __init__(self) -> None:
+    def __init__(self, props: list[tuple[Any, ...]] | None = None) -> None:
         self.executed: list[tuple[str, Any]] = []
+        # Default: both properties share the SAME repr (sreality 555, surrogate 5550)
+        # — the post-merge drift that produced the self-paired bug.
+        self.props = props if props is not None else [
+            (10, 555, 5550, "byt"), (11, 555, 5550, "byt"),
+        ]
 
     def cursor(self) -> _RecCur:
         return _RecCur(self)
@@ -287,23 +293,47 @@ def test_operator_merge_records_ledger_resolved_distinct_listing_ids() -> None:
         conn, left_property_id=10, right_property_id=11,
         outcome="merged", markers={"stage": "operator"}, merge_group_id="grp-1",
     )
-    # The ledger query ran, and the INSERT used its DISTINCT ids (100, 200) — NOT
-    # the equal repr_listing_id (555, 555) the properties table returned.
+    # The ledger query ran, and the INSERT drove BOTH the sreality columns and the
+    # surrogate resolution off its DISTINCT ids (100, 200) — NOT the equal repr the
+    # properties table returned (which would collapse both sides to one listing).
     assert any("array_agg(listing_id)" in s for s, _ in conn.executed)
-    # Params are (left_sreality_id, left_listing_id, right_sreality_id,
-    # right_listing_id, ...) — each surrogate is the same id re-bound into the
-    # inline listings lookup (R2 dual-write).
     ins = _insert_params(conn)
-    assert ins[0] == 100 and ins[2] == 200
-    assert ins[1] == 100 and ins[3] == 200
+    # Param order: (left_sreality_id, subquery_arg, left_ref_fallback,
+    #               right_sreality_id, subquery_arg, right_ref_fallback, ...).
+    # The surrogate column is COALESCE((SELECT id WHERE sreality_id=<disambiguated>),
+    # repr_ref) — so the DISTINCT ledger sreality id drives the resolution, and the
+    # (collapsed) repr_ref is only the NULL-sreality fallback.
+    assert "COALESCE((SELECT id FROM listings WHERE sreality_id = %s)" in \
+        next(s for s, _ in conn.executed if "INSERT INTO dedup_pair_audit" in s)
+    assert ins[0] == 100 and ins[3] == 200        # sreality columns, disambiguated
+    assert ins[1] == 100 and ins[4] == 200        # surrogate resolution args, distinct
 
 
-def test_operator_dismiss_does_not_touch_the_ledger() -> None:
-    # A dismissal is not a merge (no group, no re-point) so repr_listing_id is
-    # correct and the ledger must not be consulted.
-    conn = _RecConn()
+def test_operator_dismiss_records_surrogate_from_repr_ref_and_skips_the_ledger() -> None:
+    # A dismissal is not a merge (no group, no re-point) so the repr is correct and the
+    # ledger must not be consulted; left/right_listing_id come from repr_listing_ref_id.
+    conn = _RecConn(props=[(10, 700, 7000, "byt"), (11, 800, 8000, "byt")])
     dedup._record_operator_decision(
         conn, left_property_id=10, right_property_id=11,
         outcome="dismissed", markers={"stage": "visual"}, merge_group_id=None,
     )
     assert not any("array_agg(listing_id)" in s for s, _ in conn.executed)
+    ins = _insert_params(conn)
+    # sreality columns = repr_listing_id (700/800); surrogate fallback = repr_ref
+    # (7000/8000) — the value used when the sreality lookup returns nothing.
+    assert ins[0] == 700 and ins[3] == 800
+    assert ins[2] == 7000 and ins[5] == 8000
+
+
+def test_operator_decision_gate2_null_sreality_still_records_a_surrogate() -> None:
+    # Post-Gate-2 a non-sreality property has repr_listing_id (sreality) NULL but a
+    # non-NULL repr_listing_ref_id. The audit row must NOT land both *_listing_id NULL
+    # (permanently unattributable) — it falls back to the surrogate repr_ref.
+    conn = _RecConn(props=[(10, None, 480001, "byt"), (11, None, 480002, "byt")])
+    dedup._record_operator_decision(
+        conn, left_property_id=10, right_property_id=11,
+        outcome="dismissed", markers={"stage": "visual"}, merge_group_id=None,
+    )
+    ins = _insert_params(conn)
+    assert ins[0] is None and ins[3] is None      # legacy sreality columns are NULL
+    assert ins[2] == 480001 and ins[5] == 480002  # surrogate fallback keeps it attributable
