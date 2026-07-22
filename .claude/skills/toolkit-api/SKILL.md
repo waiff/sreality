@@ -184,8 +184,26 @@ an already-bound one); `customer.subscription.*` upserts plan/status/period guar
 `require_entitlement(agenda)` is a dependency **factory** (not a single dependency like
 `require_admin`) — call it as `Depends(require_entitlement("watchdogs"))` to 403 unless the
 caller's plan has that agenda's visibility flag on; admin + legacy claims always pass (the
-operator is never billing-gated). **Not wired to any route yet** — a future wave attaches it
-per-agenda; don't assume any endpoint is currently billing-gated.
+operator is never billing-gated). Wired to no *router* yet — the first real enforcement is
+**inline in `create_estimation_run`** (below), not via the dependency.
+
+**Agent-estimation metering** (Wave 1, migration 355) is the first metered path. The paid
+`mode:'agent'` submit is gated **inside `api/estimation_runs.py:create_estimation_run`**, at
+the single choke point *before the URL parse* (`_prepare_metered_submit`) so a rejected submit
+spends zero LLM cost. Meter = **per successful agent run, monthly** (operator decision, not
+USD): free plan `plans.agent_estimations_monthly_quota` = 3, `trial_*` = 10 (used while
+`entitlements.status='trialing'` + unexpired). Only a real, non-admin tenant sending
+`mode:'agent'` is metered — admin/legacy/SYSTEM/ClickUp and all deterministic runs bypass,
+mirroring `require_entitlement`. The enforcement is **atomic** (A9 — never check-then-act over
+the tx pooler): the INSERT is `INSERT … SELECT WHERE (monthly non-failed count) < quota AND
+(in-flight count) < cap ON CONFLICT (account_id, idempotency_key) DO NOTHING` — budget +
+per-account concurrency + idempotency in one write, arbiter index `estimation_runs_inflight_idem`.
+The budget counts `estimation_runs` (non-failed this month) directly, not `usage_ledger`;
+`usage_ledger` is the append-only billing/margin record (one row per metered success, cost =
+the run's `llm_calls` sum), written at the agent terminal, RLS-scoped like `entitlements`.
+Flags (app_settings, read on the service-role conn): `estimation_budget_enabled` (absent ⇒
+**enforced** — fail-closed; the emergency off), `agent_estimation_concurrency_cap` (default 3).
+Deferred: granting the trial at signup, and the extension sending `mode:'agent'`.
 
 ## Auth and secrets
 

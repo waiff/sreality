@@ -318,12 +318,30 @@ remediation R3 closes that. Full spec: `docs/design/public-release-remediation-2
      cutover and rollback are one `app_settings` edit, no deploy. The realtime worker was
      verified live (heartbeat age ~6 s, all lanes running) before this landed, so flipping the
      flag activates a confirmed-alive executor. **Operator flip sequence** in the PR body.
-   - Remaining: the metering substrate (`usage_ledger`/`check_budget` — needs a product
-     decision on quota shape: free-tier run count vs USD budget, daily vs monthly window),
-     the atomic submit-time gates (entitlement/budget/concurrency/idempotency), and Chrome Web
-     Store submission readiness (privacy policy, single-purpose statement, staged rollout, the
-     platform-wide `API_TOKEN` rotation cutover — see `chrome-extension/README.md` § Chrome Web
-     Store submission).
+   - ~~**Metering substrate + atomic submit-time gates (A9, item J)**~~ — **SHIPPED,
+     migration 355.** Quota shape settled by the operator 2026-07-22: meter **per successful
+     agent run** against a **monthly** quota (run-count, not USD — the cheap atomic COUNT gate;
+     USD would need cost pre-authorization the agent's variable iterations make messy); free =
+     **3/mo**, **trial = 10** (the `entitlements.status='trialing'` arm). Deterministic stays
+     free + ungated. `create_estimation_run` now runs all gates at the single choke point
+     **before the URL parse** (so a reject spends nothing): entitlement (`estimations` agenda +
+     not-canceled), raw `spec`/`spec_overrides` blocked for metered callers, a pre-parse
+     duplicate short-circuit, and a pre-parse budget/concurrency check. The **atomic** spine is
+     the INSERT itself (A9 — never check-then-act over the tx pooler): `INSERT … SELECT WHERE
+     (monthly non-failed agent count) < quota AND (in-flight count) < cap ON CONFLICT
+     (account_id, idempotency_key) DO NOTHING` — budget + concurrency + idempotency in one
+     write, the partial unique index `estimation_runs_inflight_idem` its arbiter (both verified
+     live by EXPLAIN). New `usage_ledger` row per metered success (cost = the run's `llm_calls`
+     sum, for margin + future Stripe metered billing). Admin/legacy/SYSTEM/ClickUp bypass
+     everything, mirroring `require_entitlement`. Ships **fail-closed** (enforced by default;
+     `estimation_budget_enabled` app-setting is the emergency off) — safe today because the only
+     account is the admin, who bypasses. Deferred (small follow-ups): granting the trial at
+     signup (`handle_new_user` seed-hook, mig 286:101) and wiring the extension to send
+     `mode:'agent'` for entitled users.
+   - Remaining: extension submit/poll tuning (widen the 120 s poll window, persist `run_id`,
+     send `mode:'agent'` for entitled users) and Chrome Web Store submission readiness (privacy
+     policy, single-purpose statement, staged rollout, the platform-wide `API_TOKEN` rotation
+     cutover — see `chrome-extension/README.md` § Chrome Web Store submission).
 
 **Housekeeping done 2026-07-20:** operator enabled Supabase Auth's leaked-password-protection
 toggle (Authentication → Sign In / Providers → Email → "Prevent use of leaked passwords").

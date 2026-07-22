@@ -685,7 +685,7 @@ def post_estimations(
     account_id = tenant_pool.resolve_account_id(conn, claims) or deps.SYSTEM_ACCOUNT_ID
     return create_estimation_run(
         conn, client, llm_client, body, background_tasks=background_tasks,
-        account_id=str(account_id),
+        account_id=str(account_id), claims=claims,
     )
 
 

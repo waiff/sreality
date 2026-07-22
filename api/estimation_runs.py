@@ -37,6 +37,8 @@ handle older versions.
 from __future__ import annotations
 
 import contextlib
+import hashlib
+import json
 import logging
 import time
 from collections.abc import Iterator
@@ -44,6 +46,9 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
+from fastapi import HTTPException
 
 from api.cursor import decode_cursor, encode_cursor
 from api.dependencies import SYSTEM_ACCOUNT_ID
@@ -540,6 +545,262 @@ def execute_pending_run(
         )
 
 
+# --- Wave 1 metering + atomic submit-time gates (Phase 1 items J + A9) --------
+#
+# The paid agent estimation is metered per SUCCESSFUL run against a MONTHLY quota
+# (operator decision 2026-07-22 — run-count, not USD; free = 3/mo, trial = 10).
+# Deterministic runs stay free + ungated. Only a real, non-admin tenant sending
+# mode='agent' is metered; admin / legacy-static-token / SYSTEM callers (operator,
+# ClickUp, tests) bypass everything, exactly like require_entitlement.
+#
+# The spine is atomic (A9 — check-then-act is TOCTOU-racy over the tx pooler, the
+# mig-279 lesson): idempotency + single-in-flight ride a UNIQUE partial index +
+# ON CONFLICT (mig 355); the monthly budget + concurrency cap ride an atomic
+# INSERT ... SELECT WHERE (count) < limit. A cheap PRE-parse check short-circuits
+# the common duplicate / over-quota case before the URL parse spends an LLM call
+# (parse cost can't attribute to a not-yet-existing run — llm_client stamps
+# estimation_run_id=NULL — so only a pre-parse gate caps it).
+
+AGENT_ESTIMATION_ACTION = "agent_estimation"
+BUDGET_ENABLED_SETTING = "estimation_budget_enabled"   # absent => enabled (fail-closed)
+CONCURRENCY_CAP_SETTING = "agent_estimation_concurrency_cap"
+CONCURRENCY_CAP_DEFAULT = 3
+_TRACKING_QUERY_PREFIXES = ("utm_",)
+_TRACKING_QUERY_KEYS = {
+    "fbclid", "gclid", "gbraid", "wbraid", "mc_eid", "igshid", "ref", "src",
+}
+
+
+@dataclass
+class _MeterDecision:
+    idempotency_key: str
+    quota: int
+    concurrency_cap: int
+    short_circuit_run: dict[str, Any] | None = None
+
+
+def _is_privileged(claims: dict[str, Any] | None) -> bool:
+    """Admin / legacy-static-token callers bypass metering (operator, ClickUp,
+    internal + tests), mirroring require_entitlement's bypass."""
+    if claims is None:
+        return True   # internal caller (ClickUp / agent / test) — never metered
+    if claims.get("legacy") or claims.get("is_admin") is True:
+        return True
+    meta = claims.get("app_metadata") or {}
+    return meta.get("is_admin") is True
+
+
+def _budget_enabled(conn: "psycopg.Connection") -> bool:
+    val = _load_app_setting(conn, BUDGET_ENABLED_SETTING, True)
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, str):
+        return val.strip().lower() in ("true", "1", "yes", "on")
+    return bool(val)
+
+
+def _canonical_url(url: str) -> str:
+    """Canonicalize a portal URL for the idempotency key: https scheme, lower
+    host, no fragment, tracking params dropped, remaining query sorted, no
+    trailing slash — so query-param / scheme / trailing-slash variance across
+    portals doesn't double-charge the same listing."""
+    try:
+        parts = urlsplit(url.strip())
+    except Exception:  # noqa: BLE001 - a weird URL is still a usable raw key
+        return url.strip()
+    netloc = parts.netloc.lower()
+    path = parts.path.rstrip("/") or "/"
+    q = [
+        (k, v)
+        for k, v in parse_qsl(parts.query, keep_blank_values=True)
+        if not (
+            k.lower() in _TRACKING_QUERY_KEYS
+            or any(k.lower().startswith(p) for p in _TRACKING_QUERY_PREFIXES)
+        )
+    ]
+    q.sort()
+    return urlunsplit(("https", netloc, path, urlencode(q), ""))
+
+
+def _idempotency_key(body: s.CreateEstimationIn) -> str | None:
+    """A stable per-target key computable BEFORE the URL parse. sreality_id is
+    already clean; a URL is canonicalized; a spec is hashed (spec is blocked for
+    metered callers, so that arm is defensive only)."""
+    if body.sreality_id is not None:
+        return f"sid:{int(body.sreality_id)}"
+    if body.url:
+        return f"url:{_canonical_url(body.url)}"
+    if body.spec is not None:
+        blob = json.dumps(body.spec.model_dump(mode="json"), sort_keys=True)
+        return "spec:" + hashlib.sha256(blob.encode()).hexdigest()[:32]
+    return None
+
+
+def _resolve_entitlement(
+    conn: "psycopg.Connection", account_id: str,
+) -> tuple[str, bool, int]:
+    """(status, estimations_agenda_ok, monthly_agent_quota) for an account.
+    Honors an active trial (status='trialing' + unexpired → the plan's trial
+    quota). No entitlements row (mig 286 signup makes none) → the default plan,
+    status 'active'."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT e.status, (p.agendas->>'estimations') = 'true', "
+            "  CASE WHEN e.status = 'trialing' AND (e.current_period_end IS NULL "
+            "            OR e.current_period_end > now()) "
+            "       THEN coalesce(p.trial_agent_estimations_monthly_quota, 0) "
+            "       ELSE coalesce(p.agent_estimations_monthly_quota, 0) END "
+            "FROM entitlements e JOIN plans p ON p.key = e.plan "
+            "WHERE e.account_id = %s",
+            (account_id,),
+        )
+        row = cur.fetchone()
+        if row is not None:
+            return str(row[0]), bool(row[1]), int(row[2])
+        cur.execute(
+            "SELECT (agendas->>'estimations') = 'true', "
+            "  coalesce(agent_estimations_monthly_quota, 0) "
+            "FROM plans WHERE is_default LIMIT 1",
+        )
+        d = cur.fetchone()
+    if d is None:
+        return "active", False, 0
+    return "active", bool(d[0]), int(d[1])
+
+
+def _count_agent_runs_this_month(
+    conn: "psycopg.Connection", account_id: str,
+) -> int:
+    """Non-failed agent runs this calendar month — the budget count. Counting
+    pending+running+success (not just success) bounds run CREATION, and a failed
+    run frees the slot (matches 'absorb the count on failure')."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM estimation_runs "
+            "WHERE account_id = %s AND mode = 'agent' AND status <> 'failed' "
+            "  AND created_at >= date_trunc('month', now())",
+            (account_id,),
+        )
+        return int(cur.fetchone()[0])
+
+
+def _count_inflight_agent_runs(
+    conn: "psycopg.Connection", account_id: str,
+) -> int:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM estimation_runs "
+            "WHERE account_id = %s AND mode = 'agent' "
+            "  AND status IN ('pending', 'running')",
+            (account_id,),
+        )
+        return int(cur.fetchone()[0])
+
+
+def _find_inflight_run(
+    conn: "psycopg.Connection", account_id: str, idem_key: str,
+) -> dict[str, Any] | None:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT id FROM estimation_runs "
+            "WHERE account_id = %s AND idempotency_key = %s "
+            "  AND status IN ('pending', 'running') "
+            "ORDER BY created_at DESC LIMIT 1",
+            (account_id, idem_key),
+        )
+        row = cur.fetchone()
+    return _fetch_run(conn, int(row[0])) if row else None
+
+
+def _concurrency_cap(conn: "psycopg.Connection") -> int:
+    try:
+        return max(1, int(_load_app_setting(
+            conn, CONCURRENCY_CAP_SETTING, CONCURRENCY_CAP_DEFAULT)))
+    except (TypeError, ValueError):
+        return CONCURRENCY_CAP_DEFAULT
+
+
+def _prepare_metered_submit(
+    conn: "psycopg.Connection",
+    claims: dict[str, Any] | None,
+    body: s.CreateEstimationIn,
+    account_id: str,
+) -> _MeterDecision | None:
+    """Pre-parse submit gates for a metered (agent, non-admin) submit. Returns
+    None for ungated callers; a _MeterDecision (carrying an existing in-flight
+    run to short-circuit, or the quota/cap for the atomic INSERT) when cleared;
+    raises HTTPException (403 not entitled / raw spec, 429 over quota / too many
+    in flight) otherwise. Runs entirely BEFORE the URL parse, so a reject spends
+    nothing."""
+    if (
+        _is_privileged(claims)
+        or body.mode != "agent"
+        or account_id == SYSTEM_ACCOUNT_ID
+        or not _budget_enabled(conn)
+    ):
+        return None
+    if body.spec is not None or body.spec_overrides is not None:
+        raise HTTPException(
+            status_code=403,
+            detail="Custom spec is not permitted for this caller",
+        )
+    status, estimations_ok, quota = _resolve_entitlement(conn, account_id)
+    if status == "canceled" or not estimations_ok:
+        raise HTTPException(
+            status_code=403, detail="Your plan does not include agent estimations",
+        )
+    idem_key = _idempotency_key(body)
+    if idem_key is None:
+        raise HTTPException(status_code=400, detail="A url or sreality_id is required")
+    cap = _concurrency_cap(conn)
+    existing = _find_inflight_run(conn, account_id, idem_key)
+    if existing is not None:
+        # Duplicate submit while one is already in flight — return the existing
+        # run instead of parsing + charging again (and don't re-enqueue).
+        return _MeterDecision(idem_key, quota, cap, short_circuit_run=existing)
+    if _count_agent_runs_this_month(conn, account_id) >= quota:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Monthly agent-estimation limit reached ({quota}/mo)",
+        )
+    if _count_inflight_agent_runs(conn, account_id) >= cap:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many estimations in progress; try again shortly",
+        )
+    return _MeterDecision(idem_key, quota, cap)
+
+
+def _record_usage(conn: "psycopg.Connection", run_id: int) -> None:
+    """Append a usage_ledger row at a metered agent run's terminal SUCCESS —
+    cost = the run's llm_calls sum (mig 355). Best-effort: a ledger hiccup must
+    not fail the run (estimation_runs + llm_calls stay the source of truth).
+    Reads the run's own account_id/mode so callers needn't thread them."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT account_id, mode FROM estimation_runs WHERE id = %s",
+                (run_id,),
+            )
+            row = cur.fetchone()
+        if not row:
+            return
+        account_id, mode = row
+        if mode != "agent" or account_id is None or str(account_id) == SYSTEM_ACCOUNT_ID:
+            return
+        with conn.transaction(), conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO usage_ledger "
+                "  (account_id, action, cost_usd, estimation_run_id) "
+                "SELECT %(aid)s, %(act)s, "
+                "  (SELECT sum(cost_usd) FROM llm_calls WHERE estimation_run_id = %(rid)s), "
+                "  %(rid)s",
+                {"aid": account_id, "act": AGENT_ESTIMATION_ACTION, "rid": run_id},
+            )
+    except Exception:  # noqa: BLE001 - metering must never fail a completed run
+        LOG.exception("usage_ledger write failed for run %s", run_id)
+
+
 def create_estimation_run(
     conn: "psycopg.Connection",
     sreality_client: "SrealityClient",
@@ -547,6 +808,7 @@ def create_estimation_run(
     body: s.CreateEstimationIn,
     background_tasks: Any | None = None,
     account_id: str | None = None,
+    claims: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """POST /estimations: parse the URL, INSERT a pending row, schedule the
     heavy work as a BackgroundTask, return the row immediately.
@@ -572,6 +834,14 @@ def create_estimation_run(
     its own DEFAULT once it's named explicitly in every INSERT).
     """
     account_id = account_id or SYSTEM_ACCOUNT_ID
+
+    # Submit-time gates BEFORE any spend (entitlement + monthly budget +
+    # concurrency + idempotency). Ungated for admin/legacy/ClickUp/deterministic;
+    # a rejected metered submit raises HTTPException here, before the URL parse.
+    meter = _prepare_metered_submit(conn, claims, body, account_id)
+    if meter is not None and meter.short_circuit_run is not None:
+        return meter.short_circuit_run
+
     try:
         resolution = _resolve_input(conn, sreality_client, llm_client, body)
     except Exception as exc:
@@ -659,7 +929,22 @@ def create_estimation_run(
         skill_name=skill_obj.name if skill_obj is not None else None,
         skill_version=skill_obj.version if skill_obj is not None else None,
         job_payload=_job_payload(body, resolution) if lane else None,
+        idempotency_key=meter.idempotency_key if meter else None,
+        gate=meter,
     )
+
+    if run_id is None:
+        # The atomic gate rejected the INSERT (a concurrent submit crossed the
+        # quota / cap between the pre-parse check and here) or an idempotent
+        # duplicate raced in — return the winner if one exists, else 429.
+        assert meter is not None
+        existing = _find_inflight_run(conn, account_id, meter.idempotency_key)
+        if existing is not None:
+            return existing
+        raise HTTPException(
+            status_code=429,
+            detail=f"Monthly agent-estimation limit reached ({meter.quota}/mo)",
+        )
 
     if lane:
         # Execution drains off the request process onto the realtime worker's
@@ -1816,6 +2101,10 @@ def _run_agent_path(
         reference_rent=reference_rent,
     )
     flush_trace_payloads(conn, run_id, recorder)
+    if status == "success":
+        # Meter the successful agent run (no-op for admin/SYSTEM/deterministic).
+        # A failed run consumes no quota and writes no ledger row.
+        _record_usage(conn, run_id)
 
 
 def _update_run_terminal(
@@ -1842,7 +2131,22 @@ def _update_run_terminal(
         cur.execute(sql, params)
 
 
-def _insert_run(conn: "psycopg.Connection", **fields: Any) -> int:
+def _insert_run(
+    conn: "psycopg.Connection",
+    *,
+    gate: "_MeterDecision | None" = None,
+    **fields: Any,
+) -> int | None:
+    """INSERT an estimation_runs row, returning its id.
+
+    With `gate` (a metered submit), the INSERT is the ATOMIC enforcement point
+    (A9): an `INSERT ... SELECT WHERE (monthly non-failed count) < quota AND
+    (in-flight count) < cap ON CONFLICT (account_id, idempotency_key) DO NOTHING`
+    — budget + concurrency + idempotency in one write, with zero check-then-act
+    race. No row back (returns None) means the gate rejected it or an idempotent
+    duplicate raced in; the caller resolves the winner or 429s. Without `gate`
+    (admin/internal/deterministic) it's the plain VALUES insert, which must
+    always return an id (raises otherwise, unchanged)."""
     for col in _INSERT_COLUMNS:
         fields.setdefault(col, None)
     for k in (
@@ -1870,16 +2174,42 @@ def _insert_run(conn: "psycopg.Connection", **fields: Any) -> int:
         fields["job_payload"] = Jsonb(fields["job_payload"])
         cols.append("job_payload")
         values.append("%(job_payload)s")
+    # Idempotency / single-in-flight key for metered submits (migration 355),
+    # likewise out of _RUN_COLUMNS. NULL for ungated callers.
+    if fields.get("idempotency_key") is not None:
+        cols.append("idempotency_key")
+        values.append("%(idempotency_key)s")
     cols_sql = ", ".join(cols)
     placeholders = ", ".join(values)
-    sql = (
-        f"INSERT INTO estimation_runs ({cols_sql}) "
-        f"VALUES ({placeholders}) RETURNING id"
-    )
+    if gate is None:
+        sql = (
+            f"INSERT INTO estimation_runs ({cols_sql}) "
+            f"VALUES ({placeholders}) RETURNING id"
+        )
+    else:
+        fields["_g_quota"] = gate.quota
+        fields["_g_cap"] = gate.concurrency_cap
+        sql = (
+            f"INSERT INTO estimation_runs ({cols_sql}) "
+            f"SELECT {placeholders} "
+            "WHERE (SELECT count(*) FROM estimation_runs "
+            "         WHERE account_id = %(account_id)s AND mode = 'agent' "
+            "           AND status <> 'failed' "
+            "           AND created_at >= date_trunc('month', now())) < %(_g_quota)s "
+            "  AND (SELECT count(*) FROM estimation_runs "
+            "         WHERE account_id = %(account_id)s AND mode = 'agent' "
+            "           AND status IN ('pending', 'running')) < %(_g_cap)s "
+            "ON CONFLICT (account_id, idempotency_key) "
+            "  WHERE status IN ('pending', 'running') AND idempotency_key IS NOT NULL "
+            "DO NOTHING "
+            "RETURNING id"
+        )
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(sql, fields)
         row = cur.fetchone()
         if row is None:
+            if gate is not None:
+                return None
             raise RuntimeError("INSERT did not return an id")
         return int(row[0])
 
