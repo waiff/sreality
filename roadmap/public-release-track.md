@@ -44,8 +44,14 @@ common to all. Full plan, sequencing, and gates: `docs/design/public-release-pro
   lane and the 2-account pen-test are green, and both standing gate lanes (offline over
   migration SQL, live over `pg_views` + authenticated-callable functions) are now
   adversarially validated rather than merely asserted.
-- **Waves 1–4 (public features)** — **Wave 1 is now unblocked** and is the next body of
-  work; Waves 2–4 follow its ordering constraints (`docs/design/waves-1-4-public-features.md`).
+- **Waves 1–4 (public features)** — Wave 1's backend core (extension session, IDOR fix, job
+  lane, metering) is built; the remaining pieces need operator product/account decisions (item
+  8 below). **Wave 2's engineering scope turned out to be already mostly shipped** by Phase 1
+  increment 3 + Wave 1 (item 9 below) — the connection-swap, the account-partitioned reconciler,
+  and the composite FK all predate this wave being picked up; only a DB-level invariant, an
+  index, and a concurrency fix were genuinely left, shipped this pass. Its launch gate (external
+  re-audit + two-real-account pen-test) still needs a second real account to exist. Waves 3–4
+  are unstarted (`docs/design/waves-1-4-public-features.md`).
 
 **CRITICAL finding + fix, 2026-07-20:** the 2-account pen-test
 (`tests/test_tenant_isolation_live.py`) only ever asserted RLS on **base tables**
@@ -342,6 +348,39 @@ remediation R3 closes that. Full spec: `docs/design/public-release-remediation-2
      send `mode:'agent'` for entitled users) and Chrome Web Store submission readiness (privacy
      policy, single-purpose statement, staged rollout, the platform-wide `API_TOKEN` rotation
      cutover — see `chrome-extension/README.md` § Chrome Web Store submission).
+9. **Wave 2 (opportunity pipeline management) — mostly already shipped, confirmed 2026-07-22.**
+   Picking this wave up, a live-schema audit (`pg_constraint`/`pg_indexes` against
+   `erlvtprrmrylhznfyaih`) found the design doc's "genuinely new" pieces had already landed —
+   ahead of the wave being explicitly worked — as part of Phase 1 increment 3 (migrations
+   294/295, PR #763) and Wave 1: the cross-account stage-ownership composite FK
+   (`property_pipeline(account_id, stage_id) → pipeline_stages(account_id, id)`, `move_card`
+   already catches the resulting `ForeignKeyViolation` into a no-leak 422), both stage uniques
+   re-keyed per account (Amendment A3), `seed_default_pipeline(account_id)` wired into
+   `handle_new_user`, the account-partitioned merge/unmerge reconciler (Amendment A2,
+   `toolkit/pipeline_identity.py`), and the connection-swap itself — all eight `/pipeline/*`
+   routes plus `POST /listings/lookup` already run on the tenant pool (294/295's Python cutover;
+   `portal_lookup.py`'s two-connection split shipped alongside A5, PR #899). The live two-account
+   RLS test lane already covers `pipeline_stages_public` + `property_pipeline_public`
+   (`test_tenant_view_scopes_both_ways`).
+   - **Shipped this pass, migration 357:** the one invariant that really was still missing — a
+     DB-level `CHECK (not (is_entry and is_terminal))` on `pipeline_stages` (previously
+     app-layer only, called out verbatim in `test_tenant_isolation_live.py`'s seed comment) —
+     and an account-leading `(account_id, stage_id, board_position)` index for the board query
+     shape Wave 2 assumed. Also fixed the one real concurrency gap the design flagged:
+     `add_card`'s `max(board_position)+1` computation now locks the entry stage row
+     (`SELECT … FOR UPDATE`) first, so two members bookmarking into the same stage concurrently
+     can't compute the same position — a plain row lock inside the tenant pool's one-transaction-
+     per-request shape (Amendment A1), not a session advisory lock (unsound over the pooler; the
+     mig-279 lesson). The kanban board itself doesn't yet do within-column drag reordering (the
+     SPA only sends `stage_id` on move, never `board_position`), so this was the only place the
+     race could actually fire.
+   - **Genuinely still open, all needing a decision or state this session can't produce:** the
+     Wave 2 launch gate (a `/code-review ultra` re-audit + a manual two-real-account pen-test) —
+     only one account/member exists live today, so "A can't see/move/archive/reorder/inject into
+     B's board" has no second account to test against yet; and registering
+     `property_pipeline`/`property_pipeline_events` in a future GDPR export/deletion feature (the
+     `on delete cascade` from `accounts` already scrubs them on account deletion — there's just no
+     self-service deletion/export surface yet, a Phase-1-wide gap, not pipeline-specific).
 
 **Housekeeping done 2026-07-20:** operator enabled Supabase Auth's leaked-password-protection
 toggle (Authentication → Sign In / Providers → Email → "Prevent use of leaked passwords").

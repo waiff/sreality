@@ -604,9 +604,10 @@ def seeded_tenant_rows(
         cleanup.insert(0, ("DELETE FROM collection_properties WHERE collection_id = %s", (coll,)))
         where["collection_properties_public"] = ("collection_id = %s", (coll,))
 
-        # A fresh account has no stages; a lone non-entry/non-terminal stage satisfies
-        # both column CHECKs (the entry/terminal invariants are API-enforced, not DB).
-        # The view filters archived_at IS NULL, so leave it NULL.
+        # A fresh account has no stages; a lone non-entry/non-terminal stage trivially
+        # satisfies both the app-layer rule and the DB CHECK (migration 357) that a
+        # stage can't be entry and terminal at once. The view filters
+        # archived_at IS NULL, so leave it NULL.
         cur.execute(
             "INSERT INTO pipeline_stages (account_id, key, label, position) "
             "VALUES (%s, %s, 'iso', 1) RETURNING id",
