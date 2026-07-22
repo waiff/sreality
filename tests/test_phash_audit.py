@@ -23,7 +23,7 @@ class _Cur:
         s = " ".join(sql.split())
         self._conn.executed.append((s, params))
         if "image_training_examples te ON te.image_id = i.id" in s:
-            self._rows = [(sid,) for sid in self._conn.trained_sreality_ids]
+            self._rows = [(sid,) for sid in self._conn.trained_listing_ids]
         elif "count(*) FROM dedup_pair_audit" in s:
             self._rows = [(self._conn.scanned,)]
         elif "WITH scoped AS" in s:
@@ -47,12 +47,12 @@ class _FakeConn:
     def __init__(
         self, *, scanned: int = 0, join_rows=None,
         chunk_responses: list[list[tuple[Any, ...]]] | None = None,
-        trained_sreality_ids: list[int] | None = None,
+        trained_listing_ids: list[int] | None = None,
     ) -> None:
         self.scanned = scanned
         self.join_rows = join_rows or []
         self.chunk_responses = chunk_responses
-        self.trained_sreality_ids = trained_sreality_ids or []
+        self.trained_listing_ids = trained_listing_ids or []
         self.chunk_calls = 0
         self.executed: list[tuple[str, Any]] = []
 
@@ -227,7 +227,7 @@ def test_scan_offset_already_at_or_past_the_ceiling_skips_the_chunk_query() -> N
 def test_training_only_with_no_trained_images_short_circuits() -> None:
     # An empty training set means zero possible matches — skip the count/chunk
     # queries entirely rather than scanning for something that can't exist.
-    conn = _FakeConn(scanned=2000, trained_sreality_ids=[])
+    conn = _FakeConn(scanned=2000, trained_listing_ids=[])
     out = dedup.phash_audit(conn, hamming_min=0, hamming_max=15, training_only=True)
     assert out == {
         "data": [], "returned": 0, "scanned_pairs": 0,
@@ -238,14 +238,14 @@ def test_training_only_with_no_trained_images_short_circuits() -> None:
 
 
 def test_training_only_narrows_scope_to_trained_listings_and_chunk_to_exact_images() -> None:
-    conn = _FakeConn(scanned=1, trained_sreality_ids=[111, 222], join_rows=[_join_row()])
+    conn = _FakeConn(scanned=1, trained_listing_ids=[111, 222], join_rows=[_join_row()])
     dedup.phash_audit(conn, hamming_min=0, hamming_max=15, training_only=True)
     scope_sql, scope_params = next(
         (s, p) for s, p in conn.executed if "count(*) FROM dedup_pair_audit" in s
     )
-    assert "a.left_sreality_id = ANY(%(trained_sreality_ids)s)" in scope_sql
-    assert "a.right_sreality_id = ANY(%(trained_sreality_ids)s)" in scope_sql
-    assert scope_params["trained_sreality_ids"] == [111, 222]
+    assert "a.left_listing_id = ANY(%(trained_listing_ids)s)" in scope_sql
+    assert "a.right_listing_id = ANY(%(trained_listing_ids)s)" in scope_sql
+    assert scope_params["trained_listing_ids"] == [111, 222]
     join_sql, _ = conn.chunk_queries()[0]
     assert "image_training_examples te WHERE te.image_id = ia.id" in join_sql
     assert "image_training_examples te WHERE te.image_id = ib.id" in join_sql
@@ -262,7 +262,7 @@ def test_training_only_false_never_queries_trained_images_or_adds_the_clause() -
 
 
 def test_training_label_narrows_lookup_and_chunk_clause_to_that_specific_label() -> None:
-    conn = _FakeConn(scanned=1, trained_sreality_ids=[111], join_rows=[_join_row()])
+    conn = _FakeConn(scanned=1, trained_listing_ids=[111], join_rows=[_join_row()])
     dedup.phash_audit(conn, hamming_min=0, hamming_max=15, training_label="kuchyně")
     lookup_sql, lookup_params = conn.executed[0]
     assert "image_training_examples te ON te.image_id = i.id" in lookup_sql
@@ -278,7 +278,7 @@ def test_training_label_narrows_lookup_and_chunk_clause_to_that_specific_label()
 def test_training_label_implies_training_scoping_even_if_training_only_is_false() -> None:
     # A specific label request is unambiguous intent — don't require the caller to
     # also pass training_only=True redundantly.
-    conn = _FakeConn(scanned=1, trained_sreality_ids=[111], join_rows=[_join_row()])
+    conn = _FakeConn(scanned=1, trained_listing_ids=[111], join_rows=[_join_row()])
     dedup.phash_audit(
         conn, hamming_min=0, hamming_max=15, training_only=False, training_label="kuchyně",
     )
@@ -288,7 +288,7 @@ def test_training_label_implies_training_scoping_even_if_training_only_is_false(
 
 
 def test_training_label_with_no_matching_images_short_circuits() -> None:
-    conn = _FakeConn(scanned=2000, trained_sreality_ids=[])
+    conn = _FakeConn(scanned=2000, trained_listing_ids=[])
     out = dedup.phash_audit(conn, hamming_min=0, hamming_max=15, training_label="vzácný tag")
     assert out["returned"] == 0
     assert out["scanned_pairs"] == 0
@@ -296,15 +296,15 @@ def test_training_label_with_no_matching_images_short_circuits() -> None:
 
 
 def test_training_exclude_adds_a_negative_scope_clause_and_no_post_join_clause() -> None:
-    conn = _FakeConn(scanned=1, trained_sreality_ids=[111, 222], join_rows=[_join_row()])
+    conn = _FakeConn(scanned=1, trained_listing_ids=[111, 222], join_rows=[_join_row()])
     dedup.phash_audit(conn, hamming_min=0, hamming_max=15, training_exclude=True)
     scope_sql, scope_params = next(
         (s, p) for s, p in conn.executed if "count(*) FROM dedup_pair_audit" in s
     )
-    assert "NOT (a.left_sreality_id = ANY(%(trained_sreality_ids)s)" in scope_sql
-    assert scope_params["trained_sreality_ids"] == [111, 222]
+    assert "NOT (a.left_listing_id = ANY(%(trained_listing_ids)s)" in scope_sql
+    assert scope_params["trained_listing_ids"] == [111, 222]
     # The scope-level NOT already guarantees neither image is trained (a listing
-    # absent from trained_sreality_ids can't own a trained image) — no post-join
+    # absent from trained_listing_ids can't own a trained image) — no post-join
     # re-check needed, unlike the inclusion case.
     join_sql, _ = conn.chunk_queries()[0]
     assert "image_training_examples" not in join_sql
@@ -313,19 +313,19 @@ def test_training_exclude_adds_a_negative_scope_clause_and_no_post_join_clause()
 def test_training_exclude_with_an_empty_training_set_excludes_nothing() -> None:
     # Nothing trained yet -> nothing to exclude -> behaves like no filter at all,
     # not a short-circuit to zero (that's the inclusion case's behavior, not this one).
-    conn = _FakeConn(scanned=500, trained_sreality_ids=[], join_rows=[_join_row()])
+    conn = _FakeConn(scanned=500, trained_listing_ids=[], join_rows=[_join_row()])
     out = dedup.phash_audit(conn, hamming_min=0, hamming_max=15, training_exclude=True)
     scope_sql, scope_params = next(
         (s, p) for s, p in conn.executed if "count(*) FROM dedup_pair_audit" in s
     )
-    assert "trained_sreality_ids" not in scope_sql
-    assert "trained_sreality_ids" not in scope_params
+    assert "trained_listing_ids" not in scope_sql
+    assert "trained_listing_ids" not in scope_params
     assert out["scanned_pairs"] == 500
     assert len(conn.chunk_queries()) == 1
 
 
 def test_training_exclude_takes_priority_over_training_only_and_label() -> None:
-    conn = _FakeConn(scanned=1, trained_sreality_ids=[111], join_rows=[_join_row()])
+    conn = _FakeConn(scanned=1, trained_listing_ids=[111], join_rows=[_join_row()])
     dedup.phash_audit(
         conn, hamming_min=0, hamming_max=15,
         training_only=True, training_label="kuchyně", training_exclude=True,
@@ -333,7 +333,22 @@ def test_training_exclude_takes_priority_over_training_only_and_label() -> None:
     scope_sql, _ = next(
         (s, p) for s, p in conn.executed if "count(*) FROM dedup_pair_audit" in s
     )
-    assert "NOT (a.left_sreality_id" in scope_sql
+    assert "NOT (a.left_listing_id" in scope_sql
     assert "te.label = %(training_label)s" not in scope_sql
     join_sql, _ = conn.chunk_queries()[0]
     assert "image_training_examples" not in join_sql
+
+
+def test_phash_audit_joins_images_on_the_surrogate_listing_id() -> None:
+    # Gate 2: the sreality columns go NULL for the non-sreality portals, so the chunk
+    # must scope on a.left_listing_id / a.right_listing_id and join images on
+    # images.listing_id (NOT NULL) — never images.sreality_id, or those pairs' photos
+    # vanish. Behaviour-identical for a sreality row (images.listing_id agrees with the
+    # listing whose sreality_id matches — verified live: 0 divergence).
+    conn = _FakeConn(scanned=1, join_rows=[_join_row()])
+    dedup.phash_audit(conn, hamming_min=0, hamming_max=15)
+    join_sql, _ = conn.chunk_queries()[0]
+    assert "a.left_listing_id" in join_sql and "a.right_listing_id" in join_sql
+    assert "ia.listing_id = s.left_listing_id" in join_sql
+    assert "ib.listing_id = s.right_listing_id" in join_sql
+    assert "ia.sreality_id" not in join_sql and "ib.sreality_id" not in join_sql

@@ -4510,6 +4510,11 @@ def test_pair_audit_records_a_merge(monkeypatch: Any) -> None:
     assert len(rec) == 1
     assert rec[0]["outcome"] == "merged"
     assert rec[0]["left_sreality_id"] in (1, 2)
+    # The audit record ALSO carries the surrogate listing_id the engine holds (sid+100000)
+    # — what keeps the row attributable once sreality_id goes NULL post-Gate-2.
+    assert rec[0]["left_listing_id"] in (100_001, 100_002)
+    assert rec[0]["right_listing_id"] in (100_001, 100_002)
+    assert rec[0]["left_listing_id"] != rec[0]["right_listing_id"]
     # The unified audit row carries the undo handle + provenance + factor detail.
     assert rec[0]["source"] == "engine"
     assert rec[0]["merge_group_id"] == "g"
@@ -4857,27 +4862,102 @@ def test_write_pair_audit_dedupes_recent_identical_records() -> None:
         def __exit__(self, *a): return None
         def execute(self, sql, params=None): self._sql = " ".join(sql.split())
         def executemany(self, sql, rows): inserted.extend(rows)
-        def fetchall(self):  # pair (1,2) phash/engine dismissal already logged
-            return [(1, 2, "phash", "engine")]
+        def fetchall(self):  # pair listing_id (901,902) phash/engine dismissal already logged
+            return [(901, 902, "phash", "engine")]
 
     class _Conn:
         def cursor(self): return _C()
 
+    # sreality_id is deliberately DIFFERENT from listing_id here: the dedupe + the INSERT
+    # must key on the surrogate listing_id, so a sreality mismatch must not change the
+    # verdict and the INSERT must bind listing_id directly (not a sreality mirror).
     rec = {
-        "left_sreality_id": 1, "right_sreality_id": 2, "left_property_id": 101,
+        "left_sreality_id": 1, "right_sreality_id": 2,
+        "left_listing_id": 901, "right_listing_id": 902, "left_property_id": 101,
         "right_property_id": 102, "category_main": "byt", "stage": "phash",
         "outcome": "dismissed", "source": "engine", "detail": {},
     }
-    novel = {**rec, "left_sreality_id": 5, "right_sreality_id": 6}
+    novel = {**rec, "left_listing_id": 905, "right_listing_id": 906}
     # A re-MERGE of the same pair must ALWAYS land (its fresh merge_group_id is the
     # operator's only undo handle after an unmerge) — only dismissals dedupe.
     remerge = {**rec, "outcome": "merged", "merge_group_id": "G2"}
     eng._write_pair_audit(_Conn(), "RUN_AT", [rec, novel, remerge])
     assert len(inserted) == 2
-    assert {r[1] for r in inserted} == {5, 1}          # novel dismissal + the re-merge
-    # left/right_listing_id repeat their sreality_id at the mirrored position (R2 dual-write).
-    assert all(r[1] == r[2] and r[3] == r[4] for r in inserted)
+    # rec (901,902) is deduped; novel (905) dismissal + the re-merge (901) both land.
+    assert {r[2] for r in inserted} == {905, 901}      # column index 2 == left_listing_id
+    # The INSERT binds the surrogate listing_id directly (NOT the sreality_id) — column
+    # order is (run_at, left_sreality_id, left_listing_id, right_sreality_id, ...).
+    assert all(r[1] != r[2] for r in inserted)         # sreality (1/5) != listing_id (901/905)
     assert any(r[9] == "merged" for r in inserted)     # the merged record landed
+
+
+def test_write_pair_audit_dedupe_matches_on_listing_id_despite_null_sreality() -> None:
+    # Gate 2: a NULL-sreality dismissal must still dedupe against a prior identical one —
+    # the join keys on listing_id, not sreality_id. Pre-fix (keyed on sreality_id) the
+    # NULL `= u.l` never matched, so every run re-appended the dismissal forever.
+    import scripts.dedup_engine as eng
+
+    inserted: list[Any] = []
+    seen_params: dict[str, Any] = {}
+
+    class _C:
+        def __enter__(self): return self
+        def __exit__(self, *a): return None
+        def execute(self, sql, params=None):
+            self._sql = " ".join(sql.split())
+            if "SELECT DISTINCT d.left_listing_id" in self._sql:
+                seen_params.update({"sql": self._sql, "params": params})
+        def executemany(self, sql, rows): inserted.extend(rows)
+        def fetchall(self):  # the (480001,480002) dismissal is already on record
+            return [(480001, 480002, "phash", "engine")]
+
+    class _Conn:
+        def cursor(self): return _C()
+
+    rec = {
+        "left_sreality_id": None, "right_sreality_id": None,
+        "left_listing_id": 480001, "right_listing_id": 480002, "left_property_id": 101,
+        "right_property_id": 102, "category_main": "byt", "stage": "phash",
+        "outcome": "dismissed", "source": "engine", "detail": {},
+    }
+    eng._write_pair_audit(_Conn(), "RUN_AT", [rec])
+    # The probe binds the surrogate listing_id arrays (never sreality_id) and keys the
+    # join on d.left_listing_id — so the NULL-sreality dismissal is recognized as seen.
+    assert "d.left_listing_id = u.l" in seen_params["sql"]
+    assert seen_params["params"]["ll"] == [480001]
+    assert inserted == []                              # deduped, not re-appended
+
+
+def test_write_pair_audit_binds_listing_id_for_null_sreality_pair() -> None:
+    # A brand-new NULL-sreality merge record: sreality columns land NULL (correct — the
+    # portal has no sreality id) but left/right_listing_id carry the surrogate, so the
+    # append-only row is never permanently unattributable.
+    import scripts.dedup_engine as eng
+
+    inserted: list[Any] = []
+
+    class _C:
+        def __enter__(self): return self
+        def __exit__(self, *a): return None
+        def execute(self, sql, params=None): self._sql = " ".join(sql.split())
+        def executemany(self, sql, rows): inserted.extend(rows)
+        def fetchall(self): return []
+
+    class _Conn:
+        def cursor(self): return _C()
+
+    rec = {
+        "left_sreality_id": None, "right_sreality_id": None,
+        "left_listing_id": 480001, "right_listing_id": 480002, "left_property_id": 101,
+        "right_property_id": 102, "category_main": "byt", "stage": "phash",
+        "outcome": "merged", "source": "engine", "merge_group_id": "G1", "detail": {},
+    }
+    eng._write_pair_audit(_Conn(), "RUN_AT", [rec])
+    assert len(inserted) == 1
+    row = inserted[0]
+    # (run_at, left_sreality_id, left_listing_id, right_sreality_id, right_listing_id, ...)
+    assert row[1] is None and row[3] is None           # sreality columns NULL
+    assert row[2] == 480001 and row[4] == 480002       # surrogate ids present
 
 
 def test_enqueue_candidate_reopen_valve() -> None:
@@ -5231,3 +5311,19 @@ def test_run_engine_group_sid_batch_keys_on_listing_id(monkeypatch: Any) -> None
                         lambda *a, **k: {"data": {"merge_group_id": "g"}})
     eng.run_engine(_FakeConn([]), classify_fn=None, compare_fn=None, max_vision_calls=10)
     assert captured["ids"] == [480001, 480002, 480003]
+
+
+def test_audit_record_carries_surrogate_listing_ids_for_null_sreality_pair() -> None:
+    # _audit stamps left/right_listing_id from ListingKey.listing_id (NOT NULL) — the
+    # attribution that survives when sreality_id is NULL for the non-sreality portals.
+    import scripts.dedup_engine as eng
+
+    a = _null_sreality_key(pid=101, lid=480001, source="bazos")
+    b = _null_sreality_key(pid=102, lid=480002, source="idnes")
+    audit: list[dict[str, Any]] = []
+    eng._audit(audit, a, b, "phash", "merged", {"reason": "image_phash"},
+               merge_group_id="g")
+    assert len(audit) == 1
+    r = audit[0]
+    assert r["left_sreality_id"] is None and r["right_sreality_id"] is None
+    assert r["left_listing_id"] == 480001 and r["right_listing_id"] == 480002

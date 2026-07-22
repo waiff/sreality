@@ -1626,6 +1626,10 @@ def _audit(
         return
     audit.append({
         "left_sreality_id": a.sreality_id, "right_sreality_id": b.sreality_id,
+        # The surrogate ids the engine already holds (NOT NULL, ListingKey.listing_id).
+        # Post-Gate-2 sreality_id is NULL on a non-sreality pair, so left/right_listing_id
+        # is what keeps the audit row attributable — never resolved from sreality_id.
+        "left_listing_id": a.listing_id, "right_listing_id": b.listing_id,
         "left_property_id": a.property_id, "right_property_id": b.property_id,
         "category_main": a.category_main or b.category_main,
         "stage": stage, "outcome": outcome, "source": source,
@@ -1660,18 +1664,21 @@ def _write_pair_audit(
     if dismissals:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT DISTINCT d.left_sreality_id, d.right_sreality_id, d.stage, "
+                # Key the dismissal-dedupe on the surrogate listing_id, not sreality_id:
+                # post-Gate-2 a non-sreality pair's sreality_id is NULL and `= u.l` never
+                # matches NULL, so the dismissal would re-fire every run forever.
+                "SELECT DISTINCT d.left_listing_id, d.right_listing_id, d.stage, "
                 "       d.source "
                 "FROM dedup_pair_audit d "
-                "JOIN unnest(%(ls)s::bigint[], %(rs)s::bigint[], %(st)s::text[], "
+                "JOIN unnest(%(ll)s::bigint[], %(rl)s::bigint[], %(st)s::text[], "
                 "            %(so)s::text[]) AS u(l, r, st, so) "
-                "  ON d.left_sreality_id = u.l AND d.right_sreality_id = u.r "
+                "  ON d.left_listing_id = u.l AND d.right_listing_id = u.r "
                 " AND d.stage = u.st AND d.source = u.so "
                 "WHERE d.outcome = 'dismissed' "
                 "  AND d.run_at > now() - make_interval(days => %(days)s)",
                 {
-                    "ls": [r["left_sreality_id"] for r in dismissals],
-                    "rs": [r["right_sreality_id"] for r in dismissals],
+                    "ll": [r["left_listing_id"] for r in dismissals],
+                    "rl": [r["right_listing_id"] for r in dismissals],
                     "st": [r["stage"] for r in dismissals],
                     "so": [r.get("source", "engine") for r in dismissals],
                     "days": _AUDIT_DEDUPE_DAYS,
@@ -1681,24 +1688,23 @@ def _write_pair_audit(
     novel = [
         r for r in records
         if r["outcome"] != "dismissed"
-        or (r["left_sreality_id"], r["right_sreality_id"], r["stage"],
+        or (r["left_listing_id"], r["right_listing_id"], r["stage"],
             r.get("source", "engine")) not in seen
     ]
     if not novel:
         return
     with conn.cursor() as cur:
         cur.executemany(
-            # The *_listing_id subqueries resolve the surrogate key inline (R2 dual-write);
-            # the sreality_id parameter is simply repeated at the matching position.
+            # left/right_listing_id are the surrogate ids the engine already holds
+            # (ListingKey.listing_id) — bound directly, never resolved from the
+            # post-Gate-2 possibly-NULL sreality_id.
             "INSERT INTO dedup_pair_audit (run_at, left_sreality_id, left_listing_id, "
             "right_sreality_id, right_listing_id, left_property_id, right_property_id, "
             "category_main, stage, outcome, source, merge_group_id, detail) "
-            "VALUES (%s,%s,(SELECT id FROM listings WHERE sreality_id = %s),"
-            "%s,(SELECT id FROM listings WHERE sreality_id = %s),"
-            "%s,%s,%s,%s,%s,%s,%s,%s::jsonb)",
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb)",
             [
-                (run_at, r["left_sreality_id"], r["left_sreality_id"],
-                 r["right_sreality_id"], r["right_sreality_id"],
+                (run_at, r["left_sreality_id"], r["left_listing_id"],
+                 r["right_sreality_id"], r["right_listing_id"],
                  r["left_property_id"], r["right_property_id"], r["category_main"],
                  r["stage"], r["outcome"], r.get("source", "engine"),
                  r.get("merge_group_id"), json.dumps(r["detail"]))
