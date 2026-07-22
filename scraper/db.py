@@ -16,7 +16,7 @@ import logging
 import os
 import random
 import time
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Collection, Iterable, Sequence
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Literal, Protocol, TypeVar
@@ -1102,6 +1102,25 @@ def touch_listings(
     return total
 
 
+def _seen_without_nulls(seen: Collection[Any], label: str) -> list[Any] | None:
+    """Drop NULL ids from a delisting sweep's seen-set; None if that empties it.
+
+    Two SQL three-valued-logic traps guard this family's `<> ALL(%s)` predicate:
+    ONE NULL element makes the comparison NULL for EVERY row, silently turning
+    the sweep into a permanent no-op, while an EMPTY array makes it true for
+    every row, delisting the whole scope. A NULL can't identify a row, so
+    dropping it is right — but the caller must then bail out rather than sweep
+    with what is left of an all-NULL set (hence the None return).
+    """
+    kept = [i for i in seen if i is not None]
+    if not kept:
+        return None
+    if len(kept) != len(seen):
+        LOG.warning("INACTIVE %s: dropped %d NULL id(s) from the seen-set",
+                    label, len(seen) - len(kept))
+    return kept
+
+
 def mark_inactive(
     conn: psycopg.Connection,
     category_main: str,
@@ -1125,6 +1144,9 @@ def mark_inactive(
     """
     if not seen_ids:
         return 0
+    ids = _seen_without_nulls(seen_ids, f"{source}/{category_main}/{category_type}")
+    if ids is None:
+        return 0
     stale_clause = (
         "\n              AND last_seen_at < now() - make_interval(hours => %s)"
         if min_unseen_hours is not None else ""
@@ -1132,7 +1154,7 @@ def mark_inactive(
     params: list[Any] = [source, category_main, category_type]
     if min_unseen_hours is not None:
         params.append(min_unseen_hours)
-    params.append(list(seen_ids))
+    params.append(ids)
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(
             f"""
@@ -1217,6 +1239,9 @@ def mark_inactive_native(
     """
     if not seen_natives:
         return 0
+    natives = _seen_without_nulls(seen_natives, f"{source}/{category_main}/{category_type}")
+    if natives is None:
+        return 0
     sub_clause = "\n              AND subtype IS NOT DISTINCT FROM %s" if scope_subtype else ""
     stale_clause = (
         "\n              AND last_seen_at < now() - make_interval(hours => %s)"
@@ -1227,7 +1252,7 @@ def mark_inactive_native(
         params.append(subtype)
     if min_unseen_hours is not None:
         params.append(min_unseen_hours)
-    params.append(list(seen_natives))
+    params.append(natives)
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(
             f"""
@@ -1282,6 +1307,9 @@ def mark_inactive_agenda(
     """
     if not seen_natives:
         return 0
+    natives = _seen_without_nulls(seen_natives, f"{source}/{category_type}")
+    if natives is None:
+        return 0
     stale_clause = (
         "\n              AND last_seen_at < now() - make_interval(hours => %s)"
         if min_unseen_hours is not None else ""
@@ -1289,7 +1317,7 @@ def mark_inactive_agenda(
     params: list[Any] = [source, category_type]
     if min_unseen_hours is not None:
         params.append(min_unseen_hours)
-    params.append(list(seen_natives))
+    params.append(natives)
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(
             f"""

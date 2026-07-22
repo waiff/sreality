@@ -224,22 +224,26 @@ def test_walk_category_max_pages_suppresses_complete(monkeypatch):
 
 
 def test_mark_inactive_source_scoped(monkeypatch):
+    # Listing-identity Gate 2: non-sreality rows carry sreality_id = NULL, and
+    # ONE NULL inside `<> ALL(...)` makes the predicate NULL for every row —
+    # idnes's 108k-listing delisting sweep would become a permanent no-op
+    # (rule #3). The sweep must key on the native id the index walked.
     monkeypatch.setattr(
-        idnes_main.db, "index_summary_native",
-        lambda _c, _s, ids: {n: {"sreality_id": -i, "price_czk": 1, "last_seen_at": None}
-                             for i, n in enumerate(ids, 1)},
+        idnes_main.db, "mark_inactive",
+        lambda *a, **k: pytest.fail("legacy sreality_id-keyed sweep must not be used"),
     )
     captured: dict[str, Any] = {}
     monkeypatch.setattr(
-        idnes_main.db, "mark_inactive",
-        lambda _c, cm, ct, pks, source, min_unseen_hours: (captured.update(
-            cm=cm, ct=ct, pks=set(pks), source=source,
+        idnes_main.db, "mark_inactive_native",
+        lambda _c, source, cm, ct, natives, min_unseen_hours: (captured.update(
+            cm=cm, ct=ct, natives=set(natives), source=source,
             min_unseen_hours=min_unseen_hours) or 7),
     )
     n = _portal().mark_inactive(object(), {"sale_type": "prodej", "category": "byty"}, {"x", "y"})
     assert n == 7
     assert captured["cm"] == "byt" and captured["ct"] == "prodej"
     assert captured["source"] == "idnes"
+    assert captured["natives"] == {"x", "y"}    # raw walked ids, no PK round-trip
     assert captured["min_unseen_hours"] == 12   # staleness rail rides on every sweep
 
 
