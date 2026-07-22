@@ -217,6 +217,12 @@ def add_card(
             if row is None:
                 raise HTTPException(500, "no entry stage configured")
             entry_stage_id = int(row[0])
+            # Lock the stage row first so two accounts' members bookmarking into the
+            # same entry stage concurrently can't both read the same max() and land
+            # on the same board_position — the row lock serializes them within each
+            # request's one tenant-pool transaction (Amendment A1), no advisory lock
+            # needed (those are unsound over the transaction pooler; mig-279 lesson).
+            cur.execute("SELECT 1 FROM pipeline_stages WHERE id = %s FOR UPDATE", (entry_stage_id,))
             cur.execute(
                 "SELECT coalesce(max(board_position), 0) + 1 "
                 "FROM property_pipeline WHERE stage_id = %s",

@@ -222,6 +222,29 @@ def test_add_card_redirects_merged_away_property_to_survivor():
     assert events and events[0][0] == 42
 
 
+def test_add_card_locks_entry_stage_before_computing_board_position():
+    # Two accounts' members bookmarking concurrently into the same entry stage
+    # must not race on `max(board_position)` — the stage row is locked first so
+    # the lock serializes them within each request's tenant-pool transaction
+    # (migration 357's board index backs this query; no advisory lock needed).
+    conn = _FakeConn([
+        (lambda q: "RECURSIVE chain" in q, [(42, 42)]),
+        (lambda q: "WHERE is_entry" in q, [(1,)]),
+        (lambda q: "FOR UPDATE" in q, [(1,)]),
+        (lambda q: "max(board_position)" in q, [(5,)]),
+        (lambda q: "INSERT INTO property_pipeline (" in q, [(42,)]),
+        (lambda q: "FROM property_pipeline pp JOIN pipeline_stages" in q, [_CARD_ROW]),
+    ])
+    pipeline_module.add_card(conn, s.AddPipelineCardIn(property_id=42), account_id=None)
+    sqls = [q for q, _ in conn.executed]
+    lock_idx = next(i for i, q in enumerate(sqls) if "FOR UPDATE" in q)
+    max_idx = next(i for i, q in enumerate(sqls) if "max(board_position)" in q)
+    assert lock_idx < max_idx, "the stage row must be locked before reading max(board_position)"
+    lock_sql, lock_params = next((q, p) for q, p in conn.executed if "FOR UPDATE" in q)
+    assert lock_sql == "SELECT 1 FROM pipeline_stages WHERE id = %s FOR UPDATE"
+    assert lock_params == (1,)  # the resolved entry stage id, not the property id
+
+
 def test_add_card_no_active_survivor_is_422():
     conn = _FakeConn([(lambda q: "RECURSIVE chain" in q, [])])  # missing / broken chain
     with pytest.raises(fastapi.HTTPException) as ei:
