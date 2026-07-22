@@ -47,6 +47,7 @@ import type {
   DedupCandidatesResponse,
   DedupSummaryResponse,
   MergesResponse,
+  MergedPropertiesResponse,
   DecisionFeedback,
   AuditRung,
 } from './types';
@@ -1856,6 +1857,23 @@ export const listDedupMerges = (
   params: { limit?: number; offset?: number } = {},
 ): Promise<MergesResponse> =>
   request<MergesResponse>('/dedup/merges', {
+    query: params as Record<string, QueryValue>,
+  });
+
+/* Browse the RESULTS of dedup: already-merged properties whose child-listing
+ * count (`source_count`) is in [min_listings, max_listings], biggest groups
+ * first. `max_listings`/`category_main` omitted => no upper bound / any type
+ * (null query params are dropped by `request`). Admin-gated. */
+export const listMergedProperties = (
+  params: {
+    min_listings?: number;
+    max_listings?: number | null;
+    category_main?: string | null;
+    limit?: number;
+    offset?: number;
+  } = {},
+): Promise<MergedPropertiesResponse> =>
+  request<MergedPropertiesResponse>('/dedup/merged-properties', {
     query: params as Record<string, QueryValue>,
   });
 

@@ -1603,6 +1603,35 @@ export interface MergesResponse {
   total: number;
 }
 
+/* One already-merged property (survivor) in the /dedup/merged-properties audit
+ * browse — the RESULT of dedup, not a proposed pair. `source_count` is every
+ * child listing ever grouped under it (active or delisted); `active_count` the
+ * still-live subset; `sources` the distinct portals those children span. */
+export interface MergedProperty {
+  property_id: number;
+  sreality_id: number | null;   // representative listing (app-wide listing identity)
+  source_count: number;         // listings merged together (the range filter's axis)
+  distinct_site_count: number;  // distinct portals
+  active_count: number;         // children still is_active
+  sources: string[];            // distinct portal keys, e.g. ['bazos','sreality']
+  category_main: string | null;
+  category_type: string | null;
+  disposition: string | null;
+  area_m2: number | null;
+  estate_area: number | null;
+  price_czk: number | null;
+  district: string | null;
+  street: string | null;
+  first_seen_at: string | null;
+  last_seen_at: string | null;
+}
+
+export interface MergedPropertiesResponse {
+  data: MergedProperty[];
+  total: number;       // total matching the filter (the page is capped by `limit`)
+  returned: number;    // rows on this page
+}
+
 /* One row of property_sources_public — a property's per-portal observations
  * (multi-portal dedup). Drives the Listing Detail "listed on N sites" panel. */
 export interface PropertySource {
