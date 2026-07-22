@@ -70,7 +70,8 @@ def client(monkeypatch):
         return {"data": {"categories": {}, "from_cache": {}},
                 "metadata": {"tool": "find_anchor_amenities"}}
 
-    def fake_create_run(conn, c, llm_client, body, background_tasks=None, account_id=None):
+    def fake_create_run(conn, c, llm_client, body, background_tasks=None,
+                        account_id=None, claims=None):
         return {"id": 1, "status": "success"}
 
     def fake_get_run(conn, run_id):
