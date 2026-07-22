@@ -963,6 +963,17 @@ export const deleteTrainingExample = (
     query: { image_id },
   });
 
+// /clip-audit summary-chip trash: remove EVERY training example under one label.
+// Only the training assignments go — the images stay. A custom label disappears
+// with its rows; a taxonomy label just drops to zero coverage.
+export const deleteTrainingLabel = (
+  label: string,
+): Promise<{ data: { deleted: number; label: string } }> =>
+  request<{ data: { deleted: number; label: string } }>(
+    '/dedup/training-examples/by-label',
+    { method: 'DELETE', query: { label } },
+  );
+
 // /clip-audit batch relabel: move a whole checked selection under one label in a
 // single statement (server-side dedupe + a 500-per-batch cap). Same upsert
 // semantics as setTrainingExample — an image not yet in the set gets added.

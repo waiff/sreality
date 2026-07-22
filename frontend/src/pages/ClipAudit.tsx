@@ -33,10 +33,12 @@ import {
   setImageAnnotation,
   deleteImageAnnotation,
   bulkSetTrainingExamples,
+  deleteTrainingLabel,
   type DedupAuditRow,
   type ImageAnnotation,
   type TrainingExample,
 } from '@/lib/api';
+import { pushToast } from '@/lib/toast';
 import { CATEGORY_MAIN_TABS } from '@/lib/categoryMainTabs';
 import { IMAGE_TAG_LABELS, FINE_TAG_KEYS, imageTagLabel } from '@/lib/imageTags';
 import { fmtRelative } from '@/lib/format';
@@ -159,6 +161,43 @@ export default function ClipAudit() {
     return [...taxonomy, ...custom].sort((a, b) => a.label.localeCompare(b.label, 'cs'));
   }, [trainingLabelCounts]);
 
+  // The summary is a COVERAGE view, so it shows every taxonomy class — including
+  // the ones still at zero examples, which are exactly the classes that need
+  // collecting next. (A custom label can't be at zero: it exists only as its rows.)
+  // Sortable by count (default — the working order) or alphabetically by the
+  // DISPLAYED Czech label, since that's what the operator scans for.
+  const [summarySort, setSummarySort] = useState<'count' | 'alpha'>('count');
+  const summaryCounts = useMemo(() => {
+    const byLabel = new Map<string, number>(trainingLabelCounts.map((c) => [c.label, c.count]));
+    for (const key of FINE_TAG_KEYS) if (!byLabel.has(key)) byLabel.set(key, 0);
+    const display = (l: string) => imageTagLabel(l) ?? l;
+    return [...byLabel.entries()]
+      .map(([label, count]) => ({ label, count }))
+      .sort((a, b) =>
+        summarySort === 'alpha'
+          ? display(a.label).localeCompare(display(b.label), 'cs')
+          : b.count - a.count || display(a.label).localeCompare(display(b.label), 'cs'),
+      );
+  }, [trainingLabelCounts, summarySort]);
+
+  // Chip-trash: drop EVERY training example under one label (the images stay).
+  // Cross-page invalidation on purpose — PhashAudit reads the same table under its
+  // own query prefix, and both pages share the one QueryClient.
+  const qc = useQueryClient();
+  const removeLabel = useMutation({
+    mutationFn: (label: string) => deleteTrainingLabel(label),
+    onSuccess: ({ data }, label) => {
+      if (trainingLabel === label) setTrainingLabel('');
+      for (const prefix of ['clip-audit', 'phash-audit']) {
+        qc.invalidateQueries({ queryKey: [prefix, 'training-labels'] });
+        qc.invalidateQueries({ queryKey: [prefix, 'training'] });
+      }
+      qc.invalidateQueries({ queryKey: ['clip-audit', 'training-by-label'] });
+      pushToast('ok', `Štítek odebrán z trénovací sady (${data.deleted} obrázků).`);
+    },
+    onError: () => pushToast('err', 'Odebrání štítku selhalo.'),
+  });
+
   // The default view: CLIP's calls across the live property feed. Swapped out
   // wholesale while a training label is being audited (its filters — property type,
   // CLIP tag, render score — don't apply to a flat training-set selection).
@@ -272,10 +311,13 @@ export default function ClipAudit() {
       </header>
 
       <TrainingSetSummary
-        counts={trainingLabelCounts}
+        counts={summaryCounts}
         isLoading={trainingLabelsQ.isLoading}
         active={trainingLabel}
         onSelect={setTrainingLabel}
+        sort={summarySort}
+        onSortChange={setSummarySort}
+        onDeleteLabel={(label) => removeLabel.mutate(label)}
       />
 
       <ModelExplainer />
@@ -294,50 +336,103 @@ export default function ClipAudit() {
 }
 
 // Top-of-page linear-probe coverage: how many images have been added to the
-// training set so far, broken down per label. GLOBAL (the whole training set),
-// not scoped to whatever properties/filters happen to be on screen — coverage is
-// a property of the training set itself, same reasoning as PhashAudit's identical
-// summary (see fetchTrainingLabelCounts).
+// training set so far, broken down per label — zero-example taxonomy classes
+// included (the caller merges them in), since "which classes still need
+// collecting" is the point of a coverage view. GLOBAL (the whole training set),
+// not scoped to whatever properties/filters happen to be on screen.
 // Each chip is also the way IN to that label's images: clicking one opens the
-// TrainingLabelBrowser below (clicking the active one closes it again).
+// TrainingLabelBrowser below (clicking the active one closes it again). Chips
+// with examples carry a trash that removes the whole label from the training
+// set, behind the app's inline two-step confirm (same pattern as Pipeline's
+// card removal); a zero chip has nothing to delete, so no trash.
 function TrainingSetSummary({
   counts,
   isLoading,
   active,
   onSelect,
+  sort,
+  onSortChange,
+  onDeleteLabel,
 }: {
   counts: ReadonlyArray<{ label: string; count: number }>;
   isLoading: boolean;
   active: string;
   onSelect: (label: string) => void;
+  sort: 'count' | 'alpha';
+  onSortChange: (next: 'count' | 'alpha') => void;
+  onDeleteLabel: (label: string) => void;
 }) {
   const total = useMemo(() => counts.reduce((sum, c) => sum + c.count, 0), [counts]);
+  const [confirming, setConfirming] = useState<string | null>(null);
+  const display = (l: string) => imageTagLabel(l) ?? l;
+  // Re-resolved from counts so a stale label (deleted elsewhere, refresh landed)
+  // silently closes the strip instead of confirming against nothing.
+  const confirmingRow = confirming != null
+    ? counts.find((c) => c.label === confirming) ?? null
+    : null;
 
   return (
-    <div className="mt-4 flex flex-wrap items-center gap-1.5 text-[0.78rem]">
-      <span className="text-[0.62rem] uppercase tracking-[0.1em] text-[var(--color-ink-4)] mr-1">
-        Trénovací sada
-      </span>
-      {isLoading ? (
-        <span className="text-[var(--color-ink-4)]">Načítám…</span>
-      ) : total === 0 ? (
-        <span className="text-[var(--color-ink-4)]">Zatím žádné obrázky.</span>
-      ) : (
-        <>
-          <span className="text-[var(--color-ink-2)] font-mono tabular-nums">
-            {total} obrázků celkem
+    <div className="mt-4 text-[0.78rem]">
+      <div className="flex flex-wrap items-center gap-1.5">
+        <span className="text-[0.62rem] uppercase tracking-[0.1em] text-[var(--color-ink-4)] mr-1">
+          Trénovací sada
+        </span>
+        {isLoading ? (
+          <span className="text-[var(--color-ink-4)]">Načítám…</span>
+        ) : (
+          <>
+            <span className="text-[var(--color-ink-2)] font-mono tabular-nums">
+              {total} obrázků celkem
+            </span>
+            <span className="mx-1 h-4 w-px bg-[var(--color-rule)]" />
+            <FilterChip on={sort === 'count'} label="počet" onClick={() => onSortChange('count')} />
+            <FilterChip on={sort === 'alpha'} label="A–Z" onClick={() => onSortChange('alpha')} />
+            <span className="mx-1 h-4 w-px bg-[var(--color-rule)]" />
+            {counts.map((c) => (
+              <FilterChip
+                key={c.label}
+                on={active === c.label}
+                label={display(c.label)}
+                count={c.count}
+                onClick={() => onSelect(active === c.label ? '' : c.label)}
+                onRemove={
+                  c.count > 0
+                    ? () => setConfirming(confirming === c.label ? null : c.label)
+                    : undefined
+                }
+                removeLabel={`Odebrat štítek ${display(c.label)} z trénovací sady`}
+              />
+            ))}
+          </>
+        )}
+      </div>
+      {/* Inline two-step confirm (the app's destructive-action pattern — see
+          Pipeline's card removal): the trash only arms this strip; the deletion
+          itself fires from the explicit brick button. */}
+      {confirmingRow && (
+        <div className="mt-2 flex flex-wrap items-center gap-2 border-t border-[var(--color-rule-soft)] pt-2 text-[0.72rem]">
+          <span className="mr-auto text-[var(--color-ink-3)]">
+            Odebrat štítek „{display(confirmingRow.label)}“ z trénovací sady
+            ({confirmingRow.count} obrázků)? Obrázky zůstanou, zruší se jen jejich přiřazení.
           </span>
-          <span className="mx-1 h-4 w-px bg-[var(--color-rule)]" />
-          {counts.map((c) => (
-            <FilterChip
-              key={c.label}
-              on={active === c.label}
-              label={imageTagLabel(c.label) ?? c.label}
-              count={c.count}
-              onClick={() => onSelect(active === c.label ? '' : c.label)}
-            />
-          ))}
-        </>
+          <button
+            type="button"
+            onClick={() => {
+              setConfirming(null);
+              onDeleteLabel(confirmingRow.label);
+            }}
+            className="rounded-[var(--radius-sm)] border border-[var(--color-brick)] px-2 py-0.5 text-[var(--color-brick)] hover:bg-[var(--color-brick)]/10"
+          >
+            Odebrat
+          </button>
+          <button
+            type="button"
+            onClick={() => setConfirming(null)}
+            className="rounded-[var(--radius-sm)] border border-[var(--color-rule)] px-2 py-0.5 text-[var(--color-ink-2)] hover:border-[var(--color-rule-strong)] hover:bg-[var(--color-rule-soft)]"
+          >
+            Zrušit
+          </button>
+        </div>
       )}
     </div>
   );

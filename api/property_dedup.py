@@ -296,6 +296,22 @@ def delete_training_example(conn: psycopg.Connection, *, image_id: int) -> dict[
     return {"data": {"deleted": bool(deleted)}}
 
 
+def delete_training_label(conn: psycopg.Connection, *, label: str) -> dict[str, Any]:
+    """Remove EVERY training example carrying one label — the /clip-audit summary
+    chips' trash affordance. Only the training assignments go; the images stay. For
+    an open-vocabulary label this also retires the label itself (it existed only as
+    its rows), while a taxonomy label just drops to zero coverage. Normalized through
+    the same cleaner as the writes, so the delete target can't miss rows over
+    whitespace spelling."""
+    clean = _clean_training_label(label)
+    with conn.cursor() as cur:
+        cur.execute(
+            "DELETE FROM image_training_examples WHERE label = %s", (clean,),
+        )
+        deleted = cur.rowcount
+    return {"data": {"deleted": deleted, "label": clean}}
+
+
 def set_border_case(
     conn: psycopg.Connection, *, image_id: int, created_by: str = "operator",
 ) -> dict[str, Any]:
