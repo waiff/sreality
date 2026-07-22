@@ -69,6 +69,19 @@ _REASONING_MAX_CHARS = 800
 # (The full result still lives in memory and shapes the cohort.)
 _TOOL_RESULT_PREVIEW = 4_000
 
+# Shared descriptions for the dual listing-address inputs the per-listing tools
+# accept. The cohort emitted by find_comparables_relaxed carries BOTH ids, so
+# the agent can name either; post-Gate-2 a listing with no sreality_id is only
+# reachable by the surrogate.
+_SREALITY_ID_DESC = (
+    "Portal-native listing id. Supply either sreality_id or listing_id; when "
+    "both are given, listing_id (the stable surrogate) wins."
+)
+_LISTING_ID_DESC = (
+    "Stable surrogate listing id (listings.id) — preferred, and the only handle "
+    "for a listing that has no sreality_id."
+)
+
 
 @dataclass
 class AgentResult:
@@ -208,10 +221,14 @@ def _build_tool_registry() -> dict[str, _ToolDef]:
             input_schema={
                 "type": "object",
                 "properties": {
-                    "sreality_id": {"type": "integer"},
+                    "sreality_id": {"type": "integer", "description": _SREALITY_ID_DESC},
+                    "listing_id": {"type": "integer", "description": _LISTING_ID_DESC},
                     "max_age_hours": {"type": "integer", "minimum": 1, "maximum": 168},
                 },
-                "required": ["sreality_id"],
+                # At-least-one is enforced in the handler, not the JSON schema:
+                # a portable XOR isn't expressible across providers, and a stale
+                # operator prompt naming only sreality_id must still resolve.
+                "required": [],
             },
             handler=_handle_verify_listing_freshness,
         ),
@@ -262,7 +279,8 @@ def _build_tool_registry() -> dict[str, _ToolDef]:
             input_schema={
                 "type": "object",
                 "properties": {
-                    "sreality_id": {"type": "integer"},
+                    "sreality_id": {"type": "integer", "description": _SREALITY_ID_DESC},
+                    "listing_id": {"type": "integer", "description": _LISTING_ID_DESC},
                     "radius_m": {"type": "integer", "minimum": 100, "maximum": 5000},
                     "disposition_match": {
                         "type": "string",
@@ -273,7 +291,8 @@ def _build_tool_registry() -> dict[str, _ToolDef]:
                         "enum": ["active", "delisted", "all"],
                     },
                 },
-                "required": ["sreality_id"],
+                # At-least-one of sreality_id / listing_id enforced in the handler.
+                "required": [],
             },
             handler=_handle_compute_listing_velocity,
         ),
@@ -355,9 +374,11 @@ def _build_tool_registry() -> dict[str, _ToolDef]:
             input_schema={
                 "type": "object",
                 "properties": {
-                    "sreality_id": {"type": "integer"},
+                    "sreality_id": {"type": "integer", "description": _SREALITY_ID_DESC},
+                    "listing_id": {"type": "integer", "description": _LISTING_ID_DESC},
                 },
-                "required": ["sreality_id"],
+                # At-least-one of sreality_id / listing_id enforced in the handler.
+                "required": [],
             },
             handler=_handle_summarize_listing,
         ),
@@ -375,11 +396,15 @@ def _build_tool_registry() -> dict[str, _ToolDef]:
             input_schema={
                 "type": "object",
                 "properties": {
-                    "sreality_id_a": {"type": "integer"},
-                    "sreality_id_b": {"type": "integer"},
+                    "sreality_id_a": {"type": "integer", "description": _SREALITY_ID_DESC},
+                    "sreality_id_b": {"type": "integer", "description": _SREALITY_ID_DESC},
+                    "listing_id_a": {"type": "integer", "description": _LISTING_ID_DESC},
+                    "listing_id_b": {"type": "integer", "description": _LISTING_ID_DESC},
                     "n_images": {"type": "integer", "minimum": 1, "maximum": 12},
                 },
-                "required": ["sreality_id_a", "sreality_id_b"],
+                # Address BOTH sides by the same id-space: sreality_id_a+_b, or
+                # listing_id_a+_b. Enforced in the handler.
+                "required": [],
             },
             handler=_handle_compare_listing_images,
         ),
@@ -398,9 +423,11 @@ def _build_tool_registry() -> dict[str, _ToolDef]:
             input_schema={
                 "type": "object",
                 "properties": {
-                    "sreality_id": {"type": "integer"},
+                    "sreality_id": {"type": "integer", "description": _SREALITY_ID_DESC},
+                    "listing_id": {"type": "integer", "description": _LISTING_ID_DESC},
                 },
-                "required": ["sreality_id"],
+                # At-least-one of sreality_id / listing_id enforced in the handler.
+                "required": [],
             },
             handler=_handle_get_manual_rental_estimates,
         ),
@@ -795,6 +822,24 @@ def _dispatch_tool(
     return tool_def.handler(args, state)
 
 
+def _listing_id_kwargs(args: dict[str, Any]) -> dict[str, int]:
+    """The single {sreality_id|listing_id: value} kwarg for a per-listing tool.
+
+    The surrogate listing_id wins when the model names both (the id-spaces
+    overlap numerically, so we never cross-resolve). Exactly one kwarg is
+    returned, so a tool called with only sreality_id dispatches byte-identically
+    to before. Raises ValueError — not TypeError — when the model names neither,
+    so a stale operator prompt degrades to a clean tool error.
+    """
+    lid = args.get("listing_id")
+    if lid is not None:
+        return {"listing_id": int(lid)}
+    sid = args.get("sreality_id")
+    if sid is not None:
+        return {"sreality_id": int(sid)}
+    raise ValueError("tool call must include either sreality_id or listing_id")
+
+
 _FCR_OVERRIDE_FIELDS: tuple[tuple[str, Callable[[Any], Any]], ...] = (
     ("radius_m", int),
     ("area_band_pct", float),
@@ -1127,15 +1172,15 @@ def _handle_verify_listing_freshness(
     return verify_listing_freshness(
         state.conn,
         state.sreality_client,
-        int(args["sreality_id"]),
-        int(args.get("max_age_hours", 24)),
+        **_listing_id_kwargs(args),
+        max_age_hours=int(args.get("max_age_hours", 24)),
     )
 
 
 def _handle_get_manual_rental_estimates(
     args: dict[str, Any], state: _LoopState,
 ) -> dict[str, Any]:
-    return get_manual_rental_estimates(state.conn, int(args["sreality_id"]))
+    return get_manual_rental_estimates(state.conn, **_listing_id_kwargs(args))
 
 
 def _handle_compute_market_velocity(
@@ -1157,7 +1202,7 @@ def _handle_compute_listing_velocity(
 ) -> dict[str, Any]:
     return compute_listing_velocity(
         state.conn,
-        int(args["sreality_id"]),
+        **_listing_id_kwargs(args),
         radius_m=int(args.get("radius_m", state.base_filters.radius_m)),
         disposition_match=args.get(
             "disposition_match", state.base_filters.disposition_match,
@@ -1220,7 +1265,7 @@ def _handle_summarize_listing(
 ) -> dict[str, Any]:
     return summarize_listing(
         state.conn, state.llm_client,
-        sreality_id=int(args["sreality_id"]),
+        **_listing_id_kwargs(args),
     )
 
 
@@ -1253,27 +1298,47 @@ def _handle_read_floor_plan(
 def _handle_compare_listing_images(
     args: dict[str, Any], state: _LoopState,
 ) -> dict[str, Any]:
-    a = int(args["sreality_id_a"])
-    b = int(args["sreality_id_b"])
-    # Skip cohort rows with no sreality_id rather than raising int(None): the
-    # agent addresses this tool by sreality_id, so such a listing is simply not
-    # nameable here and belongs in `missing` if the agent guesses at it.
+    # The surrogate wins per pair: if either side names a listing_id, both must,
+    # and cohort membership is checked in surrogate space (always present on the
+    # cohort). Otherwise fall back to the legacy sreality_id space — a NULL-
+    # sreality cohort row is then simply not nameable and lands in `missing`.
+    by_lid = args.get("listing_id_a") is not None or args.get("listing_id_b") is not None
+    if by_lid:
+        if args.get("listing_id_a") is None or args.get("listing_id_b") is None:
+            raise ValueError(
+                "compare_listing_images: supply listing_id for BOTH a and b"
+            )
+        a, b = int(args["listing_id_a"]), int(args["listing_id_b"])
+        id_key = "listing_id"
+    else:
+        if args.get("sreality_id_a") is None or args.get("sreality_id_b") is None:
+            raise ValueError(
+                "compare_listing_images: supply a sreality_id or listing_id "
+                "for both a and b"
+            )
+        a, b = int(args["sreality_id_a"]), int(args["sreality_id_b"])
+        id_key = "sreality_id"
+
     cohort_ids = {
-        int(l["sreality_id"]) for l in state.last_cohort
-        if l.get("sreality_id") is not None
+        int(l[id_key]) for l in state.last_cohort
+        if l.get(id_key) is not None
     }
-    missing = [sid for sid in (a, b) if sid not in cohort_ids]
+    missing = [i for i in (a, b) if i not in cohort_ids]
     if missing:
         raise ValueError(
-            f"compare_listing_images: id(s) {missing} are not in the current "
-            f"cohort. Build the cohort with find_comparables_relaxed first, "
-            f"then compare two ids from the result."
+            f"compare_listing_images: {id_key}(s) {missing} are not in the "
+            f"current cohort. Build the cohort with find_comparables_relaxed "
+            f"first, then compare two ids from the result."
+        )
+    n_images = int(args.get("n_images", 6))
+    if by_lid:
+        return compare_listing_images(
+            state.conn, state.llm_client,
+            listing_id_a=a, listing_id_b=b, n_images=n_images,
         )
     return compare_listing_images(
         state.conn, state.llm_client,
-        sreality_id_a=a,
-        sreality_id_b=b,
-        n_images=int(args.get("n_images", 6)),
+        sreality_id_a=a, sreality_id_b=b, n_images=n_images,
     )
 
 

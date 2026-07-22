@@ -370,3 +370,52 @@ class _ScriptedConn:
 
 def _make_conn(plan: list[tuple[str, Any]]) -> _ScriptedConn:
     return _ScriptedConn(plan)
+
+
+# ---- Gate-2: addressable by the surrogate listing_id ----------------------
+
+
+def test_listing_id_resolves_snapshot_and_cache_by_id_arm():
+    summary = _example_summary()
+    plan = [
+        ("fetchone", (42, _NOW, {"text": "..."})),   # _resolve_snapshot
+        ("fetchone", (summary, "claude-sonnet-4-5", 0.0042)),  # _cache_lookup hit
+    ]
+    conn = _make_conn(plan)
+    res = summaries.summarize_listing(
+        conn, _FakeLLM([]), listing_id=456,  # type: ignore[arg-type]
+    )
+
+    snap_sql, snap_params = conn.cursor_obj.executed[0]
+    assert "WHERE listing_id = %s ORDER BY" in snap_sql
+    assert snap_params == (456,)
+
+    cache_sql, cache_params = conn.cursor_obj.executed[1]
+    assert "WHERE listing_id = %s AND snapshot_id = %s" in cache_sql
+    assert cache_params == (456, 42)
+
+    assert res["data"]["cache_hit"] is True
+    assert res["data"]["listing_id"] == 456
+    assert res["data"]["sreality_id"] is None
+    assert res["data"]["snapshot_id"] == 42
+    assert res["metadata"]["filters_used"]["listing_id"] == 456
+
+
+def test_listing_id_with_explicit_snapshot_filters_both_columns():
+    plan = [
+        ("fetchone", (777, _NOW, {"text": "..."})),
+        ("fetchone", (_example_summary(), "claude-sonnet-4-5", 0.001)),
+    ]
+    conn = _make_conn(plan)
+    summaries.summarize_listing(
+        conn, _FakeLLM([]), listing_id=456, snapshot_id=777,  # type: ignore[arg-type]
+    )
+    snap_sql, snap_params = conn.cursor_obj.executed[0]
+    assert "WHERE id = %s AND listing_id = %s" in snap_sql
+    assert snap_params == (777, 456)
+
+
+def test_summarize_neither_id_raises_value_error():
+    conn = _make_conn([])
+    with pytest.raises(ValueError):
+        summaries.summarize_listing(conn, _FakeLLM([]))  # type: ignore[arg-type]

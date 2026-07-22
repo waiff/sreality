@@ -55,7 +55,9 @@ def _patch(
     listings = [listing, listing_after if listing_after is not None else listing]
     state = {"i": 0}
 
-    def fake_fetch_listing(_c: Any, _sid: int) -> Any:
+    def fake_fetch_listing(
+        _c: Any, sreality_id: Any = None, listing_id: Any = None,
+    ) -> Any:
         i = state["i"]
         state["i"] += 1
         return listings[i] if i < len(listings) else listings[-1]
@@ -242,3 +244,72 @@ def test_serializes_datetimes_to_iso(monkeypatch):
     cur = res["data"]["current"]
     assert cur["first_seen_at"] == fixed.isoformat()
     assert cur["last_seen_at"] == fixed.isoformat()
+
+
+# --- Gate-2: addressable by the surrogate listing_id ----------------------
+
+
+class _CaptureCursor:
+    def __init__(self, row):
+        self.row = row
+        self.executed: list[Any] = []
+
+    def execute(self, sql, params=()):
+        self.executed.append((sql, params))
+
+    def fetchone(self):
+        return self.row
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return None
+
+
+class _CaptureConn:
+    def __init__(self, row):
+        self.cur = _CaptureCursor(row)
+
+    def cursor(self):
+        return self.cur
+
+
+def test_fetch_listing_uses_id_arm_for_listing_id():
+    """_fetch_listing keys on listings.id when addressed by the surrogate."""
+    row = tuple(range(len(toolkit_freshness._LISTING_COLS)))
+    conn = _CaptureConn(row)
+    out = toolkit_freshness._fetch_listing(conn, listing_id=555)
+    sql, params = conn.cur.executed[0]
+    assert "WHERE id = %s" in sql
+    assert params == (555,)
+    assert out["sreality_id"] == 0  # first column of the row
+
+
+def test_fetch_listing_sreality_arm_is_byte_identical():
+    row = tuple(range(len(toolkit_freshness._LISTING_COLS)))
+    conn = _CaptureConn(row)
+    toolkit_freshness._fetch_listing(conn, sreality_id=7)
+    sql, params = conn.cur.executed[0]
+    assert "WHERE sreality_id = %s" in sql
+    assert params == (7,)
+
+
+def test_listing_id_resolves_to_row_sreality_id_for_refetch(monkeypatch):
+    """Addressed by listing_id, the sreality-native refetch + freshness_checks
+    must key on the RESOLVED row's sreality_id, not the surrogate handle."""
+    listing = _listing(sreality_id=1, last_seen_at=_now() - timedelta(days=5))
+    calls = _patch(monkeypatch, listing=listing)
+
+    res = toolkit_freshness.verify_listing_freshness(
+        conn=None, client=None, listing_id=987654, max_age_hours=24,
+    )
+
+    # freshness_check saw the row's sreality_id (1), never the listing_id (987654).
+    assert calls["fresh"] == [1]
+    assert res["data"]["sreality_id"] == 1
+
+
+def test_neither_id_raises_clean_value_error():
+    with pytest.raises(ValueError):
+        toolkit_freshness.verify_listing_freshness(conn=None, client=None)

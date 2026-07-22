@@ -9,6 +9,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+import pytest
+
 from toolkit.comparables import ComparableFilters, TargetSpec
 from toolkit.velocity import (
     VELOCITY_BANDS,
@@ -432,3 +434,41 @@ def test_listing_velocity_small_peer_cohort_emits_note():
     res = compute_listing_velocity(conn, sreality_id=999)  # type: ignore[arg-type]
     assert "notes" in res["metadata"]
     assert "below 5" in res["metadata"]["notes"][0]
+
+
+# --- Gate-2: addressable by the surrogate listing_id ----------------------
+
+
+def test_listing_velocity_by_listing_id_uses_id_arm_and_surrogate_exclude():
+    """Addressed by listing_id: subject fetched via listings.id and excluded
+    from its own peer cohort via the surrogate arm (exclude_listing_ids), NOT
+    the sreality-space exclude_ids that a NULL sreality_id would void."""
+    n = _now()
+    listing_cur = _FakeCursor()
+    listing_cur._fetchone_row = (
+        n - timedelta(days=10), n, True, "2+kk", 50.0, 14.0, "byt", "pronajem",
+    )
+    peer_cur = _FakeCursor([])
+    conn = _FakeConn(listing_cur, peer_cur)
+
+    res = compute_listing_velocity(conn, listing_id=42)  # type: ignore[arg-type]
+
+    fetch_sql, fetch_params = listing_cur.executed[0]
+    assert "WHERE id = %s" in fetch_sql
+    assert fetch_params == (42,)
+
+    cohort_sql, cohort_params = peer_cur.executed[0]
+    assert "l.id <> ALL" in cohort_sql
+    assert cohort_params["exclude_listing_ids"] == [42]
+    assert "exclude_ids" not in cohort_params
+
+    assert res["data"]["found"] is True
+    assert res["data"]["listing_id"] == 42
+    assert res["data"]["sreality_id"] is None
+    assert res["metadata"]["filters_used"]["listing_id"] == 42
+
+
+def test_listing_velocity_neither_id_raises():
+    conn = _FakeConn(_FakeCursor([]))
+    with pytest.raises(ValueError):
+        compute_listing_velocity(conn)  # type: ignore[arg-type]

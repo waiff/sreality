@@ -32,6 +32,28 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _listing_id_clause(
+    sreality_id: int | None,
+    listing_id: int | None,
+    *,
+    lid_col: str = "id",
+    sid_col: str = "sreality_id",
+) -> tuple[str, int]:
+    """WHERE-fragment + bound value to address one listing by EITHER id.
+
+    The agent-facing tools accept a sreality_id OR the surrogate listing_id.
+    The surrogate wins when both are supplied — it is the only stable handle
+    post-Gate-2, and the two id-spaces overlap numerically, so we never
+    cross-resolve one into the other. Raises ValueError (never TypeError) when
+    neither is supplied, so a tool call with an empty selector fails cleanly.
+    """
+    if listing_id is not None:
+        return f"{lid_col} = %s", listing_id
+    if sreality_id is not None:
+        return f"{sid_col} = %s", sreality_id
+    raise ValueError("a sreality_id or listing_id is required")
+
+
 def _max_last_seen(listings: list[dict[str, Any]]) -> str | None:
     stamps = [
         l["last_seen_at"]
