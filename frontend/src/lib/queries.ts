@@ -452,7 +452,7 @@ async function resolveTagPrefilter(
  * predicate is active, the RPC returns the listing_id allowlist and the
  * main listings query AND's it via `.in('listing_id', ids)`. Returns
  * null when no city-quality filter is set so the fast path stays
- * unchanged. Keyed on the surrogate `listing_id` (migration 349), NOT
+ * unchanged. Keyed on the surrogate `listing_id` (migration 351), NOT
  * sreality_id — a post-Gate-2 non-sreality repr has a NULL sreality_id, and
  * `IN` never matches NULL, so the old sreality-keyed filter silently dropped
  * those listings from Map/Table/Cards/Count while browse_stats still counted
@@ -485,7 +485,7 @@ async function resolveCityQualityPrefilter(
     })
     .range(0, 99999);
   if (error) throw error;
-  /* The RPC returns the surrogate `listing_id` (migration 349); the cast type
+  /* The RPC returns the surrogate `listing_id` (migration 351); the cast type
    * pins that so a stray `r.sreality_id` can't silently reintroduce the
    * id-space half-swap. Applied downstream via `.in('listing_id', ids)`. */
   return ((data ?? []) as Array<{ listing_id: number }>).map(
@@ -566,7 +566,7 @@ const intersectPrefilters = (
  * matched nothing, so the caller can short-circuit to zero results without
  * issuing the main query. Shared by the Map / Table / Cards fetchers. */
 export interface BrowsePrefilters {
-  listingIds: number[] | null;    // city-quality (surrogate listing_id, migration 349)
+  listingIds: number[] | null;    // city-quality (surrogate listing_id, migration 351)
   obecIds: number[] | null;       // market growth (price-stats datasets)
   propertyIds: number[] | null;   // tags ∩ with-estimates (property grain)
   empty: boolean;
@@ -594,7 +594,7 @@ async function resolveBrowsePrefilters(
 }
 
 /* Exported for queries.test.ts — pins that the city-quality allowlist filters on
- * the surrogate `listing_id` (migration 349), not the nullable `sreality_id`
+ * the surrogate `listing_id` (migration 351), not the nullable `sreality_id`
  * (passing a sreality_id into an `IN listing_id` predicate would silently read a
  * DIFFERENT listing, the id-spaces overlap by ~435). */
 export const applyPrefilters = <T>(q: T, p: BrowsePrefilters): T => {
