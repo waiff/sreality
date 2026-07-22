@@ -1171,7 +1171,7 @@ def test_insert_pending_run_does_not_reference_nonexistent_columns() -> None:
     }
     run_id = _insert_pending_run(
         conn,  # type: ignore[arg-type]
-        sreality_id=99, spec=spec, estimate_kind="sale",
+        listing_id=99, spec=spec, estimate_kind="sale",
     )
     assert run_id == 4242
 
@@ -1197,11 +1197,14 @@ def test_kickoff_always_runs_a_rent_estimate_even_for_a_sale_listing(monkeypatch
     run's estimate_kind must be 'rent', even when the listing is 'prodej'."""
     monkeypatch.setattr(
         nf, "_fetch_dispatch",
-        lambda conn, did: {"sreality_id": 12345, "estimation_run_id": None},
+        lambda conn, did: {
+            "sreality_id": 12345, "listing_id": 987, "estimation_run_id": None,
+        },
     )
     monkeypatch.setattr(
         nf, "_resolve_listing_for_estimate",
-        lambda conn, sid: {
+        lambda conn, lid: {
+            "listing_id": lid, "sreality_id": 12345,
             "lat": 50.08, "lng": 14.42, "area_m2": 62.0, "disposition": "2+kk",
             "floor": 3, "category_main": "byt", "category_type": "prodej",
             "price_czk": 4_500_000, "price_unit": "czk",
@@ -1211,7 +1214,8 @@ def test_kickoff_always_runs_a_rent_estimate_even_for_a_sale_listing(monkeypatch
 
     captured: dict[str, Any] = {}
 
-    def _fake_insert(conn, *, sreality_id, spec, estimate_kind):
+    def _fake_insert(conn, *, listing_id, spec, estimate_kind):
+        captured["listing_id"] = listing_id
         captured["spec"] = spec
         captured["estimate_kind"] = estimate_kind
         return 777
@@ -1221,7 +1225,123 @@ def test_kickoff_always_runs_a_rent_estimate_even_for_a_sale_listing(monkeypatch
     _dispatch, run_id = nf.kickoff_estimation_for_dispatch(object(), "d-1")  # type: ignore[arg-type]
 
     assert run_id == 777
+    assert captured["listing_id"] == 987
     assert captured["estimate_kind"] == "rent"
     # Forces a rental comparable cohort even though the subject is 'prodej'.
     assert captured["spec"]["category_type"] == "pronajem"
     assert captured["spec"]["category_main"] == "byt"
+    # The subject is excluded from its own cohort on the surrogate arm (the only
+    # one that can exclude a NULL-sreality listing).
+    assert captured["spec"]["exclude_listing_ids"] == [987]
+
+
+def test_kickoff_null_sreality_dispatch_resolves_on_the_surrogate(monkeypatch) -> None:
+    """Post-Gate-2 a listing has sreality_id NULL. The kickoff must resolve it on
+    listing_id, not `int(dispatch["sreality_id"])` (which raised TypeError -> 500),
+    and must exclude the subject from its own cohort on the surrogate arm."""
+    monkeypatch.setattr(
+        nf, "_fetch_dispatch",
+        lambda conn, did: {
+            "sreality_id": None, "listing_id": 555, "estimation_run_id": None,
+        },
+    )
+    monkeypatch.setattr(
+        nf, "_resolve_listing_for_estimate",
+        lambda conn, lid: {
+            "listing_id": lid, "sreality_id": None,
+            "lat": 49.2, "lng": 16.6, "area_m2": 70.0, "disposition": "3+kk",
+            "floor": 2, "category_main": "byt", "category_type": "pronajem",
+            "price_czk": 20_000, "price_unit": "czk",
+        },
+    )
+    monkeypatch.setattr(nf, "_link_dispatch_run", lambda conn, did, rid: None)
+
+    captured: dict[str, Any] = {}
+
+    def _fake_insert(conn, *, listing_id, spec, estimate_kind):
+        captured["listing_id"] = listing_id
+        captured["spec"] = spec
+        return 42
+
+    monkeypatch.setattr(nf, "_insert_pending_run", _fake_insert)
+
+    _dispatch, run_id = nf.kickoff_estimation_for_dispatch(object(), "d-2")  # type: ignore[arg-type]
+
+    assert run_id == 42
+    assert captured["listing_id"] == 555
+    # The surrogate arm carries the exclusion; the legacy arm is empty (no
+    # sreality_id to exclude), NOT [None] — a NULL there would empty the cohort.
+    assert captured["spec"]["exclude_listing_ids"] == [555]
+    assert captured["spec"]["exclude_ids"] == []
+
+
+def test_kickoff_listing_less_dispatch_schedules_nothing(monkeypatch) -> None:
+    """A system_health alert has no listing at all (sreality_id AND listing_id
+    NULL — 35 such rows live today). It must not crash on int(None); it simply
+    has nothing to estimate."""
+    monkeypatch.setattr(
+        nf, "_fetch_dispatch",
+        lambda conn, did: {
+            "sreality_id": None, "listing_id": None, "estimation_run_id": None,
+        },
+    )
+
+    def _boom(*a, **k):  # resolving a listing must never be attempted
+        raise AssertionError("must not resolve a listing for a listing-less dispatch")
+
+    monkeypatch.setattr(nf, "_resolve_listing_for_estimate", _boom)
+
+    dispatch, run_id = nf.kickoff_estimation_for_dispatch(object(), "d-3")  # type: ignore[arg-type]
+
+    assert run_id is None
+    assert dispatch["listing_id"] is None
+
+
+def test_run_pending_never_excludes_a_null_into_the_cohort_filter(monkeypatch) -> None:
+    """Regression for the empty-cohort trap: the old default
+    `exclude_ids=[sreality_id]` put [None] into the filter for a NULL-sreality
+    subject, and `l.sreality_id <> ALL(ARRAY[NULL])` is NULL for EVERY row, so
+    the whole comparable cohort silently emptied. On rehydration each arm now
+    falls back only to an id that exists.
+
+    _update_run_terminal, estimate_yield and load_filter_defaults are imported
+    lazily from their own modules inside run_pending_estimation (cycle-avoidance),
+    so they are patched at the SOURCE, not on `nf`."""
+    import api.estimate_yield as ey_mod
+    import api.estimation_runs as er_mod
+
+    captured: dict[str, Any] = {}
+
+    def _fake_estimate(conn, target, filters, _client=None, **kw):
+        captured["exclude_ids"] = list(target.exclude_ids)
+        captured["exclude_listing_ids"] = list(target.exclude_listing_ids)
+        return {"data": {}}
+
+    monkeypatch.setattr(ey_mod, "estimate_yield", _fake_estimate)
+    monkeypatch.setattr(er_mod, "_update_run_terminal", lambda *a, **k: None)
+
+    class _Defaults:
+        radius_m = 1000
+        area_band_pct = 0.2
+        disposition_match = "exact"
+        lifecycle = "active"
+        def max_age_days_for(self, _kind): return 30
+    monkeypatch.setattr(er_mod, "load_filter_defaults", lambda conn: _Defaults())
+
+    # input_sreality_id NULL, input_spec (no exclude_* keys), estimate_kind,
+    # input_listing_id — the classic post-Gate-2 pending row.
+    monkeypatch.setattr(nf.scraper_db, "connect", lambda: _FakeConn([
+        (lambda s: "FROM estimation_runs WHERE id" in s,
+         [(None, {"lat": 49.0, "lng": 16.0, "area_m2": 55.0,
+                  "disposition": "2+kk", "category_main": "byt",
+                  "category_type": "pronajem"}, "rent", 555)], 1),
+        (lambda s: "UPDATE estimation_runs SET status = 'running'" in s, [], 1),
+    ]))
+
+    nf.run_pending_estimation(999)
+
+    # The subject's NULL sreality_id must NOT reach exclude_ids; the surrogate
+    # arm carries the self-exclusion instead.
+    assert None not in captured.get("exclude_ids", [])
+    assert captured.get("exclude_ids") == []
+    assert captured.get("exclude_listing_ids") == [555]

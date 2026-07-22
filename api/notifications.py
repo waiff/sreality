@@ -619,7 +619,7 @@ _DISPATCH_SELECT = (
     "d.id, d.source_kind, "
     "d.subscription_id, s.name AS subscription_name, "
     "d.collection_id, c.name AS collection_name, "
-    "d.sreality_id, d.property_id, d.change_kind, d.message, "
+    "d.sreality_id, d.listing_id, d.property_id, d.change_kind, d.message, "
     "d.dispatched_at, d.seen_at, "
     "d.trigger_price_czk, d.prev_price_czk, d.trigger_snapshot_id, "
     "d.target_channels, "
@@ -844,22 +844,25 @@ _PRONAJEM = "pronajem"
 
 
 def _resolve_listing_for_estimate(
-    conn: "psycopg.Connection", sreality_id: int,
+    conn: "psycopg.Connection", listing_id: int,
 ) -> dict[str, Any] | None:
     """Read everything the deterministic estimate needs straight from
     `listings`. The notification matcher only ever fires on listings we
     already have a row for, so we don't have to re-scrape.
+
+    Keyed on the surrogate: a dispatch for a listing with no sreality_id would
+    otherwise resolve to nothing and be reported as "listing missing".
     """
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT sreality_id, "
+            "SELECT id AS listing_id, sreality_id, "
             "  ST_Y(geom::geometry) AS lat, "
             "  ST_X(geom::geometry) AS lng, "
             "  area_m2, disposition, floor, "
             "  category_main, category_type, "
             "  price_czk, price_unit "
-            "FROM listings WHERE sreality_id = %s",
-            (sreality_id,),
+            "FROM listings WHERE id = %s",
+            (listing_id,),
         )
         row = cur.fetchone()
         cols = [d[0] for d in cur.description] if cur.description else []
@@ -890,12 +893,20 @@ def kickoff_estimation_for_dispatch(
     if dispatch.get("estimation_run_id") is not None:
         return (dispatch, None)
 
-    sreality_id = int(dispatch["sreality_id"])
-    listing = _resolve_listing_for_estimate(conn, sreality_id)
+    # Surrogate-keyed. `sreality_id` is NULL on every system_health alert today
+    # (35 live rows) and on any post-Gate-2 listing, so int() on it raised
+    # TypeError -> 500 rather than resolving the listing or refusing cleanly.
+    raw_listing_id = dispatch.get("listing_id")
+    if raw_listing_id is None:
+        # A listing-less dispatch (system_health) has nothing to estimate; same
+        # "nothing scheduled" signal the already-linked branch above returns.
+        return (dispatch, None)
+    listing_id = int(raw_listing_id)
+    listing = _resolve_listing_for_estimate(conn, listing_id)
 
     if listing is None:
         run_id = _insert_failed_run(
-            conn, sreality_id, error_message="listing missing or has no geom",
+            conn, listing_id, error_message="listing missing or has no geom",
         )
         _link_dispatch_run(conn, dispatch_id, run_id)
         return (_fetch_dispatch(conn, dispatch_id) or {}, None)
@@ -911,7 +922,14 @@ def kickoff_estimation_for_dispatch(
         "area_m2": float(listing["area_m2"]) if listing.get("area_m2") else None,
         "disposition": listing.get("disposition"),
         "floor": listing.get("floor"),
-        "exclude_ids": [sreality_id],
+        # Exclude the subject from its own cohort on BOTH arms. The surrogate
+        # arm is the only one that can exclude a listing with no sreality_id;
+        # the legacy arm stays populated (when there is one) for frozen specs.
+        "exclude_listing_ids": [listing_id],
+        "exclude_ids": (
+            [int(listing["sreality_id"])]
+            if listing.get("sreality_id") is not None else []
+        ),
         # category_main/type are NOT columns on estimation_runs; carry them in
         # input_spec so run_pending_estimation can build ComparableFilters.
         "category_main": listing.get("category_main"),
@@ -921,7 +939,7 @@ def kickoff_estimation_for_dispatch(
 
     run_id = _insert_pending_run(
         conn,
-        sreality_id=sreality_id,
+        listing_id=listing_id,
         spec=spec,
         estimate_kind=estimate_kind,
     )
@@ -943,7 +961,7 @@ def _link_dispatch_run(
 def _insert_pending_run(
     conn: "psycopg.Connection",
     *,
-    sreality_id: int,
+    listing_id: int,
     spec: dict[str, Any],
     estimate_kind: str,
 ) -> int:
@@ -953,8 +971,8 @@ def _insert_pending_run(
     category_main/category_type ride inside `spec` (input_spec jsonb) —
     estimation_runs has no such columns.
     """
-    # input_listing_id mirrors input_sreality_id through the surrogate key
-    # (R2 dual-write); the scalar subquery resolves it at INSERT time.
+    # The surrogate is authoritative; input_sreality_id mirrors it back through
+    # the listing (NULL for a post-Gate-2 row, which is correct).
     with conn.cursor() as cur:
         cur.execute(
             "INSERT INTO estimation_runs ("
@@ -963,13 +981,13 @@ def _insert_pending_run(
             "  trace"
             ") VALUES ("
             "  'ui', 'deterministic', 'pending', %s, "
-            "  %s, (SELECT id FROM listings WHERE sreality_id = %s), %s::jsonb, "
+            "  (SELECT sreality_id FROM listings WHERE id = %s), %s, %s::jsonb, "
             "  %s::jsonb"
             ") RETURNING id",
             (
                 estimate_kind,
-                sreality_id,
-                sreality_id,
+                listing_id,
+                listing_id,
                 json.dumps(spec),
                 json.dumps({
                     "version": 2,
@@ -984,7 +1002,7 @@ def _insert_pending_run(
 
 
 def _insert_failed_run(
-    conn: "psycopg.Connection", sreality_id: int, *, error_message: str,
+    conn: "psycopg.Connection", listing_id: int, *, error_message: str,
 ) -> int:
     with conn.cursor() as cur:
         cur.execute(
@@ -993,12 +1011,12 @@ def _insert_failed_run(
             "  input_sreality_id, input_listing_id, input_spec, error_message, trace"
             ") VALUES ("
             "  'ui', 'deterministic', 'failed', 'rent', "
-            "  %s, (SELECT id FROM listings WHERE sreality_id = %s), "
+            "  (SELECT sreality_id FROM listings WHERE id = %s), %s, "
             "  '{}'::jsonb, %s, %s::jsonb"
             ") RETURNING id",
             (
-                sreality_id,
-                sreality_id,
+                listing_id,
+                listing_id,
                 error_message,
                 json.dumps({
                     "version": 2,
@@ -1032,7 +1050,7 @@ def run_pending_estimation(run_id: int) -> None:
         conn = scraper_db.connect()
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT input_sreality_id, input_spec, estimate_kind "
+                "SELECT input_sreality_id, input_spec, estimate_kind, input_listing_id "
                 "FROM estimation_runs WHERE id = %s",
                 (run_id,),
             )
@@ -1044,6 +1062,7 @@ def run_pending_estimation(run_id: int) -> None:
         sreality_id = row[0]
         spec = row[1] or {}
         estimate_kind = row[2] or "rent"
+        listing_id = row[3]
         # category_main/type travel in input_spec (no such columns on the table).
         category_main = spec.get("category_main")
         category_type = spec.get("category_type")
@@ -1065,7 +1084,18 @@ def run_pending_estimation(run_id: int) -> None:
             area_m2=spec.get("area_m2"),
             disposition=spec.get("disposition"),
             floor=spec.get("floor"),
-            exclude_ids=list(spec.get("exclude_ids") or [sreality_id]),
+            # NEVER fall back to a bare [sreality_id]: a NULL in this list makes
+            # `l.sreality_id <> ALL(...)` evaluate to NULL for every row that HAS
+            # a sreality_id, which empties the whole cohort rather than excluding
+            # one listing. Each arm falls back only to an id that actually exists.
+            exclude_ids=list(
+                spec.get("exclude_ids")
+                or ([sreality_id] if sreality_id is not None else [])
+            ),
+            exclude_listing_ids=list(
+                spec.get("exclude_listing_ids")
+                or ([listing_id] if listing_id is not None else [])
+            ),
         )
         # Use the same defaults as the deterministic UI path; reading
         # from app_settings keeps the operator-tunable knobs honoured.
