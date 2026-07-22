@@ -81,7 +81,7 @@ def summarize(observations: list[tuple[bool, str, str | None]]) -> dict[str, dic
 _FEATURES_SQL = """
     SELECT sreality_id, source, street, street_id, disposition, house_number, floor,
            area_m2, left(description, 600) AS description, category_type, category_main,
-           obec_id
+           obec_id, id
     FROM listings
     WHERE sreality_id = ANY(%s)
 """
@@ -90,8 +90,14 @@ _FEATURES_SQL = """
 def _key_from_row(row: tuple[Any, ...], street_key: str) -> ListingKey:
     raw_street_id = int(row[3]) if row[3] is not None else None
     street_id = raw_street_id if raw_street_id is not None and raw_street_id > 0 else None
+    listing_id = int(row[12])  # surrogate PK (listings.id): NOT-NULL, distinct per listing
     return ListingKey(
-        sreality_id=int(row[0]), property_id=int(row[0]), source=row[1],
+        # sreality_id is None-safe: post-Gate-2 a non-sreality row carries NULL here and
+        # int(None) would crash. property_id/listing_id use the surrogate so two DISTINCT
+        # NULL-sreality listings never collide — property_id==property_id -> already_merged,
+        # listing_id==listing_id -> same_listing — and the eval never short-circuits a real pair.
+        sreality_id=int(row[0]) if row[0] is not None else None,
+        property_id=listing_id, listing_id=listing_id, source=row[1],
         street_key=street_key, disposition=row[4], house_number=row[5],
         floor=int(row[6]) if row[6] is not None else None,
         area_m2=float(row[7]) if row[7] is not None else None,
@@ -109,8 +115,8 @@ def _predict(a: tuple[Any, ...], b: tuple[Any, ...]) -> str:
     if not shared:
         return "not_blocked"
     sk = sorted(shared)[0]
-    # property_id is set to the sreality_id in _key_from_row, so distinct listings never
-    # trip the already_merged short-circuit.
+    # property_id/listing_id are set to the surrogate in _key_from_row (distinct per
+    # listing), so distinct listings never trip the already_merged / same_listing short-circuit.
     return classify_pair(_key_from_row(a, sk), _key_from_row(b, sk)).action
 
 

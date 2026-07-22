@@ -13,17 +13,33 @@ from typing import Any
 
 
 def clip_room_grouping(
-    conn: Any, *, sreality_id: int, model: str,
+    conn: Any, *, listing_id: int | None = None, sreality_id: int | None = None, model: str,
 ) -> dict[str, list[int]] | None:
     """{logical_tag: [image_id, ...]} for one listing from image_clip_tags, or
-    None if it has no CLIP-tagged image yet (caller falls back to LLM classify)."""
+    None if it has no CLIP-tagged image yet (caller falls back to LLM classify).
+
+    Identify the listing by the surrogate `listing_id` (images.listing_id, the NOT-NULL
+    FK — the only Gate-2-safe key). `sreality_id` is the legacy fallback for the one
+    remaining caller (dedup_engine's classify_fn) that still hands us the portal-native
+    id; it selects the same rows today (1:1 map) but goes NULL for the non-sreality
+    portals once Gate 2 flips, so that caller must move to listing_id."""
     with conn.cursor() as cur:
-        cur.execute(
-            "SELECT t.logical_tag, t.image_id "
-            "FROM image_clip_tags t JOIN images i ON i.id = t.image_id "
-            "WHERE i.sreality_id = %s AND t.model = %s",
-            (sreality_id, model),
-        )
+        if listing_id is not None:
+            cur.execute(
+                "SELECT t.logical_tag, t.image_id "
+                "FROM image_clip_tags t JOIN images i ON i.id = t.image_id "
+                "WHERE i.listing_id = %s AND t.model = %s",
+                (listing_id, model),
+            )
+        elif sreality_id is not None:
+            cur.execute(
+                "SELECT t.logical_tag, t.image_id "
+                "FROM image_clip_tags t JOIN images i ON i.id = t.image_id "
+                "WHERE i.sreality_id = %s AND t.model = %s",
+                (sreality_id, model),
+            )
+        else:
+            raise ValueError("clip_room_grouping requires listing_id or sreality_id")
         rows = cur.fetchall()
     if not rows:
         return None

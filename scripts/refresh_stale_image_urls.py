@@ -26,8 +26,13 @@ from scraper import db
 
 LOG = logging.getLogger("refresh_stale_image_urls")
 
+# The image↔listing join keys on the surrogate images.listing_id = listings.id (the
+# NOT-NULL FK), not sreality_id — sreality_id goes NULL for the non-sreality portals
+# once Gate 2 flips, which would silently drop every crawler-portal candidate from this
+# sweep. l.sreality_id is still SELECTed because the sreality enqueue path uses it as the
+# detail-queue native id (enqueue_entry).
 _CANDIDATES_SQL = """
-    SELECT l.sreality_id, l.source, l.source_id_native, l.source_url
+    SELECT l.id, l.sreality_id, l.source, l.source_id_native, l.source_url
     FROM listings l
     WHERE l.is_active
       AND (l.source = 'sreality' OR l.source_url IS NOT NULL)
@@ -35,11 +40,11 @@ _CANDIDATES_SQL = """
            OR l.images_refreshed_at < now() - %(cooldown)s::interval)
       AND EXISTS (
             SELECT 1 FROM images i
-            WHERE i.sreality_id = l.sreality_id AND i.storage_path IS NULL)
+            WHERE i.listing_id = l.id AND i.storage_path IS NULL)
       AND (l.first_seen_at < now() - %(min_age)s::interval
            OR EXISTS (
             SELECT 1 FROM images i
-            WHERE i.sreality_id = l.sreality_id
+            WHERE i.listing_id = l.id
               AND i.storage_path IS NULL
               AND i.unavailable_reason = 'source_unavailable'))
     ORDER BY l.first_seen_at ASC
@@ -91,9 +96,9 @@ def main() -> int:
             return 0
 
         by_source: dict[str, list[tuple[str, str | None, int | None, int]]] = defaultdict(list)
-        sids: list[int] = []
-        for sid, source, native, url in rows:
-            sids.append(sid)
+        lids: list[int] = []
+        for lid, sid, source, native, url in rows:
+            lids.append(lid)
             by_source[source].append(enqueue_entry(sid, source, native, url))
 
         if args.dry_run:
@@ -105,15 +110,18 @@ def main() -> int:
         for source, entries in by_source.items():
             enqueued += db.enqueue_detail(conn, source, entries)
         # Stamp the cooldown marker on every candidate (incl. any whose queue row was
-        # already claimed, so we don't keep re-selecting them next sweep).
+        # already claimed, so we don't keep re-selecting them next sweep). Keyed on the
+        # surrogate listings.id — sreality_id is NULL for non-sreality rows post-Gate-2,
+        # so `WHERE sreality_id = ANY(...)` would stamp none of them and re-select them
+        # every sweep (and collapse all NULL-sreality rows together).
         with conn.cursor() as cur:
             cur.execute(
-                "UPDATE listings SET images_refreshed_at = now() WHERE sreality_id = ANY(%s)",
-                (sids,),
+                "UPDATE listings SET images_refreshed_at = now() WHERE id = ANY(%s)",
+                (lids,),
             )
         conn.commit()
         LOG.info("REFRESH done enqueued=%d listings=%d by_source=%s",
-                 enqueued, len(sids), {s: len(e) for s, e in by_source.items()})
+                 enqueued, len(lids), {s: len(e) for s, e in by_source.items()})
     return 0
 
 

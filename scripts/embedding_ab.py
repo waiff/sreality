@@ -47,8 +47,13 @@ SELECT g.la, g.lb, g.is_same,
        ta.logical_tag,
        (1 - (ea.embedding <=> eb.embedding)) AS clip_cos
 FROM labelled g
-JOIN images ia ON ia.sreality_id=g.la AND ia.storage_path IS NOT NULL
-JOIN images ib ON ib.sreality_id=g.lb AND ib.storage_path IS NOT NULL
+-- Resolve each labelled sreality-id to its surrogate listings.id, then join images on
+-- the NOT-NULL images.listing_id — sreality_id goes NULL for non-sreality portals once
+-- Gate 2 flips, so joining images directly on sreality_id would drop those rows.
+JOIN listings l_a ON l_a.sreality_id=g.la
+JOIN listings l_b ON l_b.sreality_id=g.lb
+JOIN images ia ON ia.listing_id=l_a.id AND ia.storage_path IS NOT NULL
+JOIN images ib ON ib.listing_id=l_b.id AND ib.storage_path IS NOT NULL
 JOIN image_clip_tags ta ON ta.image_id=ia.id
 JOIN image_clip_tags tb ON tb.image_id=ib.id AND tb.logical_tag=ta.logical_tag
 JOIN image_clip_embeddings ea ON ea.image_id=ia.id AND ea.model=ta.model
