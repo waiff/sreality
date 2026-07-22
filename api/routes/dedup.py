@@ -328,6 +328,19 @@ def delete_training_example(
     return dedup.delete_training_example(conn, image_id=image_id)
 
 
+@router.delete("/training-examples/by-label")
+def delete_training_label(
+    label: str,
+    conn: Any = Depends(deps.get_db_conn),
+    _: dict = Depends(deps.require_admin),
+) -> dict[str, Any]:
+    """Remove every training example under one label (the /clip-audit chip trash)."""
+    try:
+        return dedup.delete_training_label(conn, label=label)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
 @router.post("/border-case")
 def post_border_case(
     body: BorderCaseAction,

@@ -199,6 +199,19 @@ def test_bulk_set_training_examples_caps_batch_size() -> None:
         dedup.bulk_set_training_examples(_FakeConn(), image_ids=over, label="kitchen")
 
 
+def test_delete_training_label_removes_every_row_under_the_normalized_label() -> None:
+    conn = _FakeConn(delete_count=87)
+    out = dedup.delete_training_label(conn, label="  půdorys ")
+    _, params = conn.executed[0]
+    assert params == ("půdorys",)
+    assert out["data"] == {"deleted": 87, "label": "půdorys"}
+
+
+def test_delete_training_label_rejects_blank() -> None:
+    with pytest.raises(ValueError):
+        dedup.delete_training_label(_FakeConn(), label="   ")
+
+
 def test_delete_training_example_reports_deleted() -> None:
     conn = _FakeConn(delete_count=1)
     out = dedup.delete_training_example(conn, image_id=42)
