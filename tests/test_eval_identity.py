@@ -2,7 +2,39 @@
 
 from __future__ import annotations
 
-from scripts.eval_identity import summarize
+from typing import Any
+
+from scripts.eval_identity import _key_from_row, summarize
+
+
+def _row(sid: int | None, lid: int) -> tuple[Any, ...]:
+    # _FEATURES_SQL column order: 0 sreality_id .. 11 obec_id, 12 id (the surrogate).
+    return (sid, "sreality", "Nadrazni", 42, "2+kk", "12", 3, 60.0, "desc",
+            "prodej", "byt", 500, lid)
+
+
+def test_key_from_row_uses_surrogate_for_identity() -> None:
+    k = _key_from_row(_row(12345, 900001), "id:42")
+    assert k.listing_id == 900001
+    assert k.property_id == 900001      # the surrogate, NOT the sreality_id
+    assert k.sreality_id == 12345
+
+
+def test_key_from_row_none_safe_sreality_id_post_gate2() -> None:
+    # A non-sreality row carries NULL sreality_id once Gate 2 flips; int(None) must not crash.
+    k = _key_from_row(_row(None, 900002), "id:42")
+    assert k.sreality_id is None
+    assert k.property_id == 900002 and k.listing_id == 900002
+
+
+def test_two_null_sreality_rows_stay_distinct() -> None:
+    # Distinct listings must not collapse onto one identity (None == None is True); the
+    # surrogate keeps property_id/listing_id distinct so classify_pair never short-circuits
+    # a real pair as already_merged / same_listing.
+    a = _key_from_row(_row(None, 900003), "id:42")
+    b = _key_from_row(_row(None, 900004), "id:42")
+    assert a.property_id != b.property_id
+    assert a.listing_id != b.listing_id
 
 
 def test_summarize_counts_and_metrics() -> None:
