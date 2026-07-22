@@ -158,19 +158,19 @@ _ELIGIBLE_SQL = f"""
 # claimed set yields empty unnests -> no rows (loads nothing, never a full scan).
 _ELIGIBLE_SCOPED_SQL = f"""
     WITH claimed AS (
-        SELECT l.sreality_id
+        SELECT l.id
         FROM unnest(%(sids)s::bigint[]) AS s(id)
         JOIN listings l ON l.street_id = s.id
         WHERE {_ELIGIBILITY}
       UNION
-        SELECT l.sreality_id
+        SELECT l.id
         FROM unnest(%(obecs)s::bigint[], %(keys)s::text[]) AS g(o, k)
         JOIN listings l ON coalesce(l.obec_id, -1) = g.o AND l.street_name_key = g.k
         WHERE {_ELIGIBILITY}
     )
     SELECT {_ELIGIBLE_COLS}
     FROM claimed c
-    JOIN listings l ON l.sreality_id = c.sreality_id
+    JOIN listings l ON l.id = c.id
     JOIN properties p ON p.id = l.property_id AND p.status = 'active'
     {_ELIGIBLE_ORDER}
 """
@@ -228,7 +228,7 @@ def _load_eligible(
         shard = disposition_class(r[5])
         for street_key in street_group_keys(r[3], raw_street_id, obec_id):
             keys.append(ListingKey(
-                sreality_id=int(r[0]),
+                sreality_id=int(r[0]) if r[0] is not None else None,
                 property_id=int(r[1]) if r[1] is not None else None,
                 source=r[2],
                 street_key=f"{street_key}|d:{shard}",
@@ -401,7 +401,7 @@ def _proposed_candidate_property_ids(
                 OR EXISTS (
                     SELECT 1
                     FROM listings l
-                    JOIN images i ON i.sreality_id = l.sreality_id
+                    JOIN images i ON i.listing_id = l.id
                     WHERE l.property_id IN (c.left_property_id, c.right_property_id)
                       AND i.clip_tagged_at > c.last_engine_decision_at)
               )
@@ -1018,7 +1018,7 @@ def _load_geo_eligible(conn: Any,
         if cell is None:
             continue
         keys.append(ListingKey(
-            sreality_id=int(r[0]),
+            sreality_id=int(r[0]) if r[0] is not None else None,
             property_id=int(r[1]) if r[1] is not None else None,
             source=r[2],
             street_key=f"{cell}|d:{disposition_class(r[13])}" if byt else cell,
@@ -1059,7 +1059,7 @@ def _phash_identical_pairs(
     """
     sql = (
         "SELECT count(*) FROM images ia JOIN images ib ON true "
-        "WHERE ia.sreality_id = %(a)s AND ib.sreality_id = %(b)s "
+        "WHERE ia.listing_id = %(a)s AND ib.listing_id = %(b)s "
         "AND ia.phash IS NOT NULL AND ib.phash IS NOT NULL "
         "AND bit_count((ia.phash # ib.phash)::bit(64)) <= %(max)s"
     )
@@ -1091,10 +1091,10 @@ def _phash_distinctive_match(
             "SELECT EXISTS (SELECT 1 FROM images ia"
             "  JOIN image_clip_tags ta ON ta.image_id = ia.id AND ta.logical_tag = ANY(%(rooms)s)"
             + rfilter.format(t="ta") +
-            "  JOIN images ib ON ib.sreality_id = %(b)s AND ib.phash IS NOT NULL"
+            "  JOIN images ib ON ib.listing_id = %(b)s AND ib.phash IS NOT NULL"
             "  JOIN image_clip_tags tb ON tb.image_id = ib.id AND tb.logical_tag = ANY(%(rooms)s)"
             + rfilter.format(t="tb") +
-            "  WHERE ia.sreality_id = %(a)s AND ia.phash IS NOT NULL"
+            "  WHERE ia.listing_id = %(a)s AND ia.phash IS NOT NULL"
             "    AND bit_count((ia.phash # ib.phash)::bit(64)) <= %(max)s)",
             params,
         )
@@ -1102,24 +1102,25 @@ def _phash_distinctive_match(
 
 
 def _phash_group_counts(
-    conn: Any, sreality_ids: list[int], excluded_tags: tuple[str, ...] = (),
+    conn: Any, listing_ids: list[int], excluded_tags: tuple[str, ...] = (),
     render_exclude_min: float | None = None,
 ) -> dict[tuple[int, int], int]:
     """_phash_identical_pairs for EVERY cross-listing pair of a street group in ONE round
-    trip: {(lo_sid, hi_sid): count}, pairs with no near-identical match absent (= 0). The
-    2026-07 audit measured per-pair sequential round-trips as the dirty lane's cost floor
-    (~0.5-0.75 s/pair from a GitHub runner to the EU pooler ≈ the whole 1200 s budget), so
-    the group batch turns O(pairs) pHash trips into O(groups). Exclusion predicates are the
-    SAME `render_exclusion_clause` fragments as the per-pair query — one source, no drift."""
+    trip: {(lo_lid, hi_lid): count} keyed on the surrogate listing_id, pairs with no near-
+    identical match absent (= 0). The 2026-07 audit measured per-pair sequential round-trips
+    as the dirty lane's cost floor (~0.5-0.75 s/pair from a GitHub runner to the EU pooler ≈
+    the whole 1200 s budget), so the group batch turns O(pairs) pHash trips into O(groups).
+    Exclusion predicates are the SAME `render_exclusion_clause` fragments as the per-pair
+    query — one source, no drift."""
     sql = (
-        "SELECT least(ia.sreality_id, ib.sreality_id), "
-        "       greatest(ia.sreality_id, ib.sreality_id), count(*) "
-        "FROM images ia JOIN images ib ON ia.sreality_id < ib.sreality_id "
-        "WHERE ia.sreality_id = ANY(%(ids)s) AND ib.sreality_id = ANY(%(ids)s) "
+        "SELECT least(ia.listing_id, ib.listing_id), "
+        "       greatest(ia.listing_id, ib.listing_id), count(*) "
+        "FROM images ia JOIN images ib ON ia.listing_id < ib.listing_id "
+        "WHERE ia.listing_id = ANY(%(ids)s) AND ib.listing_id = ANY(%(ids)s) "
         "AND ia.phash IS NOT NULL AND ib.phash IS NOT NULL "
         "AND bit_count((ia.phash # ib.phash)::bit(64)) <= %(max)s"
     )
-    params: dict[str, Any] = {"ids": list(sreality_ids), "max": PHASH_IDENTICAL_MAX}
+    params: dict[str, Any] = {"ids": list(listing_ids), "max": PHASH_IDENTICAL_MAX}
     sql += _render_exclusion_predicate(params, "ia", excluded_tags, render_exclude_min)
     sql += _render_exclusion_predicate(params, "ib", excluded_tags, render_exclude_min)
     sql += " GROUP BY 1, 2"
@@ -1129,31 +1130,31 @@ def _phash_group_counts(
 
 
 def _phash_group_distinctive(
-    conn: Any, sreality_ids: list[int],
+    conn: Any, listing_ids: list[int],
     rooms: tuple[str, ...] | frozenset[str] = DISTINCTIVE_ROOMS,
     render_exclude_min: float | None = None,
 ) -> set[tuple[int, int]]:
     """_phash_distinctive_match for every cross-listing pair of a group in one round trip:
-    the (lo_sid, hi_sid) pairs sharing >=1 near-identical DISTINCTIVE-room (kitchen/
-    bathroom) image pair. Same predicates as the per-pair query, batched."""
+    the (lo_lid, hi_lid) surrogate-listing_id pairs sharing >=1 near-identical DISTINCTIVE-
+    room (kitchen/bathroom) image pair. Same predicates as the per-pair query, batched."""
     rfilter = ""
     params: dict[str, Any] = {
-        "ids": list(sreality_ids), "rooms": list(rooms), "max": PHASH_IDENTICAL_MAX}
+        "ids": list(listing_ids), "rooms": list(rooms), "max": PHASH_IDENTICAL_MAX}
     if render_exclude_min is not None:
         rfilter = " AND coalesce({t}.render_score, 0) < %(rmin)s"
         params["rmin"] = render_exclude_min
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT DISTINCT least(ia.sreality_id, ib.sreality_id),"
-            "       greatest(ia.sreality_id, ib.sreality_id)"
+            "SELECT DISTINCT least(ia.listing_id, ib.listing_id),"
+            "       greatest(ia.listing_id, ib.listing_id)"
             " FROM images ia"
             "  JOIN image_clip_tags ta ON ta.image_id = ia.id AND ta.logical_tag = ANY(%(rooms)s)"
             + rfilter.format(t="ta") +
-            "  JOIN images ib ON ib.sreality_id = ANY(%(ids)s) AND ib.phash IS NOT NULL"
-            "   AND ia.sreality_id < ib.sreality_id"
+            "  JOIN images ib ON ib.listing_id = ANY(%(ids)s) AND ib.phash IS NOT NULL"
+            "   AND ia.listing_id < ib.listing_id"
             "  JOIN image_clip_tags tb ON tb.image_id = ib.id AND tb.logical_tag = ANY(%(rooms)s)"
             + rfilter.format(t="tb") +
-            " WHERE ia.sreality_id = ANY(%(ids)s) AND ia.phash IS NOT NULL"
+            " WHERE ia.listing_id = ANY(%(ids)s) AND ia.phash IS NOT NULL"
             "   AND bit_count((ia.phash # ib.phash)::bit(64)) <= %(max)s",
             params,
         )
@@ -1166,7 +1167,7 @@ def _high_render_image_ids(conn: Any, a_id: int, b_id: int, threshold: float) ->
     with conn.cursor() as cur:
         cur.execute(
             "SELECT t.image_id FROM image_clip_tags t JOIN images i ON i.id = t.image_id "
-            "WHERE i.sreality_id IN (%(a)s, %(b)s) AND t.render_score >= %(rmin)s",
+            "WHERE i.listing_id IN (%(a)s, %(b)s) AND t.render_score >= %(rmin)s",
             {"a": a_id, "b": b_id, "rmin": threshold},
         )
         return {int(r[0]) for r in cur.fetchall()}
@@ -1185,47 +1186,49 @@ FLOOR_PLAN_MIN_CONFIDENCE = 0.50
 
 
 def _floor_plan_image_ids(
-    conn: Any, sreality_id: int, min_confidence: float = FLOOR_PLAN_MIN_CONFIDENCE,
+    conn: Any, listing_id: int, min_confidence: float = FLOOR_PLAN_MIN_CONFIDENCE,
 ) -> list[int]:
-    """Stored floor-plan image ids for a listing — a CLIP floor_plan tag at or above
-    `min_confidence` OR an LLM room classification (enum confidence, unfiltered); storage_path
-    present so they can be sent to vision. Empty -> no floor plan."""
+    """Stored floor-plan image ids for a listing (keyed on the surrogate images.listing_id)
+    — a CLIP floor_plan tag at or above `min_confidence` OR an LLM room classification (enum
+    confidence, unfiltered); storage_path present so they can be sent to vision. Empty -> no
+    floor plan."""
     with conn.cursor() as cur:
         cur.execute(
             "SELECT i.id FROM images i "
-            "WHERE i.sreality_id = %(sid)s AND i.storage_path IS NOT NULL AND ("
+            "WHERE i.listing_id = %(lid)s AND i.storage_path IS NOT NULL AND ("
             "  EXISTS (SELECT 1 FROM image_clip_tags t "
             "          WHERE t.image_id = i.id AND t.logical_tag = %(fp)s "
             "            AND t.confidence >= %(minconf)s)"
             "  OR EXISTS (SELECT 1 FROM image_room_classifications c "
             "             WHERE c.image_id = i.id AND c.room_type = %(fp)s)) "
             "ORDER BY i.sequence ASC NULLS LAST, i.id ASC",
-            {"sid": sreality_id, "fp": FLOOR_PLAN_ROOM_TYPE, "minconf": min_confidence},
+            {"lid": listing_id, "fp": FLOOR_PLAN_ROOM_TYPE, "minconf": min_confidence},
         )
         return [r[0] for r in cur.fetchall()]
 
 
-def _clip_incomplete(conn: Any, sreality_ids: list[int], model: str) -> list[int]:
+def _clip_incomplete(conn: Any, listing_ids: list[int], model: str) -> list[int]:
     """Which of these listings are NOT fully CLIP-tagged yet — any STORED image still pending
     the tagger (`clip_tagged_at IS NULL`). The dedup readiness gate: deciding a pair before a
     listing's images finish tagging mis-reads the floor-plan gate (a pending plan looks absent,
     the false 'one-sided') and under-pairs the visual flow, so such a pair is DEFERRED until
     tagging completes. Gates on `clip_tagged_at` (processed?), NOT on tag presence — a
     processed-but-untaggable image is terminal, so it never blocks readiness forever. One query
-    for the pair (a single round-trip). `model` is unused here (the tagger stamps `clip_tagged_at`
-    model-agnostically) but kept for call-site symmetry."""
+    for the pair (a single round-trip); ids are the surrogate images.listing_id. `model` is
+    unused here (the tagger stamps `clip_tagged_at` model-agnostically) but kept for call-site
+    symmetry."""
     del model
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT s.sid FROM unnest(%s::bigint[]) AS s(sid) "
-            "WHERE EXISTS (SELECT 1 FROM images i WHERE i.sreality_id = s.sid "
+            "SELECT s.lid FROM unnest(%s::bigint[]) AS s(lid) "
+            "WHERE EXISTS (SELECT 1 FROM images i WHERE i.listing_id = s.lid "
             "              AND i.storage_path IS NOT NULL AND i.clip_tagged_at IS NULL)",
-            (sreality_ids,),
+            (listing_ids,),
         )
         return [int(r[0]) for r in cur.fetchall()]
 
 
-def _downloads_incomplete(conn: Any, sreality_ids: list[int]) -> list[int]:
+def _downloads_incomplete(conn: Any, listing_ids: list[int]) -> list[int]:
     """Which of these listings still have an image PENDING DOWNLOAD — a row with
     `storage_path IS NULL AND download_attempts < 5` (an image queued for R2 that hasn't
     landed yet; migration 002: `< 5` is still-retrying, `>= 5` is exhausted/terminal).
@@ -1234,31 +1237,32 @@ def _downloads_incomplete(conn: Any, sreality_ids: list[int]) -> list[int]:
     set is still arriving can be decided — and pay for forensic vision — on a partial set,
     when the free pHash signal that would merge it lands minutes later. Deferring such a
     pair lets it re-decide for FREE once the last image downloads + tags. Bounded: an image
-    that exhausts its 5 attempts stops counting, so this never blocks a listing forever."""
+    that exhausts its 5 attempts stops counting, so this never blocks a listing forever.
+    ids are the surrogate images.listing_id."""
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT s.sid FROM unnest(%s::bigint[]) AS s(sid) "
-            "WHERE EXISTS (SELECT 1 FROM images i WHERE i.sreality_id = s.sid "
+            "SELECT s.lid FROM unnest(%s::bigint[]) AS s(lid) "
+            "WHERE EXISTS (SELECT 1 FROM images i WHERE i.listing_id = s.lid "
             "              AND i.storage_path IS NULL AND i.download_attempts < 5)",
-            (sreality_ids,),
+            (listing_ids,),
         )
         return [int(r[0]) for r in cur.fetchall()]
 
 
-def _trigger_clip_tagging(conn: Any, sreality_ids: list[int], model: str) -> None:
+def _trigger_clip_tagging(conn: Any, listing_ids: list[int], model: str) -> None:
     """Re-queue a CLIP-untagged listing's images for the tagger (clip_tag.yml drains
     `clip_tagged_at IS NULL`): reset the marker on every stored image of these listings that
     has no CLIP tag for `model`. A never-tagged image is already pending (no-op); a stuck one
     (marked done but tagless — a failed/old run) gets re-queued, so a gap can self-heal
-    instead of deferring forever."""
+    instead of deferring forever. ids are the surrogate images.listing_id."""
     with conn.cursor() as cur:
         cur.execute(
             "UPDATE images SET clip_tagged_at = NULL "
-            "WHERE sreality_id = ANY(%s) AND storage_path IS NOT NULL "
+            "WHERE listing_id = ANY(%s) AND storage_path IS NOT NULL "
             "  AND clip_tagged_at IS NOT NULL "
             "  AND NOT EXISTS (SELECT 1 FROM image_clip_tags t "
             "                  WHERE t.image_id = images.id AND t.model = %s)",
-            (sreality_ids, model),
+            (listing_ids, model),
         )
 
 
@@ -1287,8 +1291,8 @@ def _floor_plan_gate(
       * exactly ONE side / neither side has a plan-tagged image -> 'merge' (no plan-to-plan
         compare is possible, so the gate learned nothing — the primary signal stands).
     """
-    ids_a = _floor_plan_ids_cached(conn, a.sreality_id, cache)
-    ids_b = _floor_plan_ids_cached(conn, b.sreality_id, cache)
+    ids_a = _floor_plan_ids_cached(conn, a.listing_id, cache)
+    ids_b = _floor_plan_ids_cached(conn, b.listing_id, cache)
     if ids_a and ids_b:
         if floor_plan_fn is None or vision_budget[0] <= 0:
             return "defer"
@@ -1327,10 +1331,10 @@ def _both_have_site_plan(
         return cache.site_plan_pair[key]
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT count(*) FILTER (WHERE i.sreality_id = %(a)s) > 0 "
-            "   AND count(*) FILTER (WHERE i.sreality_id = %(b)s) > 0 "
+            "SELECT count(*) FILTER (WHERE i.listing_id = %(a)s) > 0 "
+            "   AND count(*) FILTER (WHERE i.listing_id = %(b)s) > 0 "
             "FROM images i "
-            "WHERE i.sreality_id IN (%(a)s, %(b)s) AND ("
+            "WHERE i.listing_id IN (%(a)s, %(b)s) AND ("
             "  EXISTS (SELECT 1 FROM image_clip_tags t "
             "          WHERE t.image_id = i.id AND t.logical_tag = %(sp)s) "
             "  OR EXISTS (SELECT 1 FROM image_room_classifications c "
@@ -1431,7 +1435,7 @@ def _resolve_visual(
     # score High on it. Untagged / not-yet-scored images are kept (recall holds).
     rmin = phash_render_exclude_for(a.category_main, render_min)
     if rmin is not None:
-        render_ids = _high_render_image_ids(conn, a.sreality_id, b.sreality_id, rmin)
+        render_ids = _high_render_image_ids(conn, a.listing_id, b.listing_id, rmin)
         if render_ids:
             imgs_a = [i for i in imgs_a if i["image_id"] not in render_ids]
             imgs_b = [i for i in imgs_b if i["image_id"] not in render_ids]
@@ -1733,47 +1737,49 @@ class _ProbeCache:
 
 
 def _clip_incomplete_any(
-    conn: Any, sreality_ids: list[int], model: str, cache: _ProbeCache | None = None,
+    conn: Any, listing_ids: list[int], model: str, cache: _ProbeCache | None = None,
 ) -> bool:
     """Memoized any-incomplete check over `_clip_incomplete` (a per-LISTING fact queried
     per PAIR before — a group of n re-checked each listing n-1 times). Only the not-yet-
-    cached ids hit the DB; no cache -> the plain one-shot query (tests, standalone use)."""
+    cached ids hit the DB; no cache -> the plain one-shot query (tests, standalone use).
+    ids are the surrogate listing_id."""
     if cache is None:
-        return bool(_clip_incomplete(conn, sreality_ids, model))
-    unknown = [s for s in sreality_ids if s not in cache.clip_incomplete]
+        return bool(_clip_incomplete(conn, listing_ids, model))
+    unknown = [s for s in listing_ids if s not in cache.clip_incomplete]
     if unknown:
         incomplete = set(_clip_incomplete(conn, unknown, model))
         for s in unknown:
             cache.clip_incomplete[s] = s in incomplete
-    return any(cache.clip_incomplete[s] for s in sreality_ids)
+    return any(cache.clip_incomplete[s] for s in listing_ids)
 
 
 def _downloads_incomplete_any(
-    conn: Any, sreality_ids: list[int], cache: _ProbeCache | None = None,
+    conn: Any, listing_ids: list[int], cache: _ProbeCache | None = None,
 ) -> bool:
     """Memoized any-pending-download check over `_downloads_incomplete` (per-listing fact;
-    same O(n)-per-group memoization as `_clip_incomplete_any`)."""
+    same O(n)-per-group memoization as `_clip_incomplete_any`). ids are the surrogate
+    listing_id."""
     if cache is None:
-        return bool(_downloads_incomplete(conn, sreality_ids))
-    unknown = [s for s in sreality_ids if s not in cache.download_incomplete]
+        return bool(_downloads_incomplete(conn, listing_ids))
+    unknown = [s for s in listing_ids if s not in cache.download_incomplete]
     if unknown:
         incomplete = set(_downloads_incomplete(conn, unknown))
         for s in unknown:
             cache.download_incomplete[s] = s in incomplete
-    return any(cache.download_incomplete[s] for s in sreality_ids)
+    return any(cache.download_incomplete[s] for s in listing_ids)
 
 
 def _floor_plan_ids_cached(
-    conn: Any, sreality_id: int, cache: _ProbeCache | None = None,
+    conn: Any, listing_id: int, cache: _ProbeCache | None = None,
 ) -> list[int]:
     """Memoized `_floor_plan_image_ids` (per-listing; the floor-plan gate queries both
     sides of every would-merge pair). Resolved via the module attribute so tests that
-    monkeypatch `_floor_plan_image_ids` keep working."""
+    monkeypatch `_floor_plan_image_ids` keep working. The id is the surrogate listing_id."""
     if cache is None:
-        return _floor_plan_image_ids(conn, sreality_id)
-    if sreality_id not in cache.floor_plan_ids:
-        cache.floor_plan_ids[sreality_id] = _floor_plan_image_ids(conn, sreality_id)
-    return cache.floor_plan_ids[sreality_id]
+        return _floor_plan_image_ids(conn, listing_id)
+    if listing_id not in cache.floor_plan_ids:
+        cache.floor_plan_ids[listing_id] = _floor_plan_image_ids(conn, listing_id)
+    return cache.floor_plan_ids[listing_id]
 
 
 def _phash_pairs_cached(
@@ -1823,18 +1829,19 @@ def _phash_distinctive_cached(
     return cache.phash_distinctive.get((lo, hi, profile), False)
 
 
-def _last_evidence_at(conn: Any, sreality_id: int, cache: _ProbeCache) -> Any:
+def _last_evidence_at(conn: Any, listing_id: int, cache: _ProbeCache) -> Any:
     """max(images.clip_tagged_at) for a listing — "when did its photo evidence last
-    change" for the prior-dismissal consult. Memoized; None = no tagged images."""
-    if sreality_id not in cache.evidence_at:
+    change" for the prior-dismissal consult. Memoized; None = no tagged images. The id is
+    the surrogate images.listing_id."""
+    if listing_id not in cache.evidence_at:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT max(clip_tagged_at) FROM images WHERE sreality_id = %s",
-                (sreality_id,),
+                "SELECT max(clip_tagged_at) FROM images WHERE listing_id = %s",
+                (listing_id,),
             )
             row = cur.fetchone()
-        cache.evidence_at[sreality_id] = row[0] if row else None
-    return cache.evidence_at[sreality_id]
+        cache.evidence_at[listing_id] = row[0] if row else None
+    return cache.evidence_at[listing_id]
 
 
 @dataclass
@@ -2024,8 +2031,8 @@ def resolve_pair(conn: Any, a: ListingKey, b: ListingKey, *, street_key: str,
             # prod has 0 such rows today, this is a guard against future writers).
             pass
         else:
-            ev_a = _last_evidence_at(conn, a.sreality_id, ctx.probes)
-            ev_b = _last_evidence_at(conn, b.sreality_id, ctx.probes)
+            ev_a = _last_evidence_at(conn, a.listing_id, ctx.probes)
+            ev_b = _last_evidence_at(conn, b.listing_id, ctx.probes)
             fresh = any(ev is not None and ev > reviewed_at for ev in (ev_a, ev_b))
             if not fresh:
                 stats["skipped_prior_dismissed"] = (
@@ -2049,7 +2056,7 @@ def resolve_pair(conn: Any, a: ListingKey, b: ListingKey, *, street_key: str,
     # whenever CLIP is the tagger (clip_model set) — there is no opt-out (it replaced the retired
     # dedup_clip_only setting).
     if ctx.clip_model and _clip_incomplete_any(
-            conn, [a.sreality_id, b.sreality_id], ctx.clip_model, ctx.probes):
+            conn, [a.listing_id, b.listing_id], ctx.clip_model, ctx.probes):
         stats["clip_deferred"] += 1
         ctx.engine_looked[cp] = "clip_deferred"  # fresh clip_tagged_at re-opens the pair
         ctx.seen_property_pairs.discard(cp)  # let another representative retry this run
@@ -2063,7 +2070,7 @@ def resolve_pair(conn: Any, a: ListingKey, b: ListingKey, *, street_key: str,
     # clip_tagged_at), which then decides for FREE. Bounded by the 5-attempt give-up, so it never
     # blocks a listing whose images can't download.
     if ctx.defer_incomplete_downloads and _downloads_incomplete_any(
-            conn, [a.sreality_id, b.sreality_id], ctx.probes):
+            conn, [a.listing_id, b.listing_id], ctx.probes):
         stats["download_deferred"] += 1
         ctx.engine_looked[cp] = "download_deferred"
         ctx.seen_property_pairs.discard(cp)  # let another representative retry this run
@@ -2087,7 +2094,7 @@ def resolve_pair(conn: Any, a: ListingKey, b: ListingKey, *, street_key: str,
     # returns an empty set for non-byt families and the override is skipped (require >=2).
     _rmin = phash_render_exclude_for(a.category_main, ctx.render_min)
     phash_pairs = _phash_pairs_cached(
-        conn, a.sreality_id, b.sreality_id,
+        conn, a.listing_id, b.listing_id,
         phash_excluded_tags_for(a.category_main), _rmin,
         cache=ctx.probes, group_sids=group_sids)
     _distinctive_rooms = distinctive_rooms_for(a.category_main)
@@ -2095,7 +2102,7 @@ def resolve_pair(conn: Any, a: ListingKey, b: ListingKey, *, street_key: str,
         bool(_distinctive_rooms)
         and phash_pairs < PHASH_MIN_IDENTICAL_PAIRS
         and _phash_distinctive_cached(
-            conn, a.sreality_id, b.sreality_id, _distinctive_rooms, _rmin,
+            conn, a.listing_id, b.listing_id, _distinctive_rooms, _rmin,
             cache=ctx.probes, group_sids=group_sids))
     # §2.2 arm (a): non-byt photo sets are property-unique (not development-shared renders
     # like byt), so ONE pHash-identical pair is conclusive there — 99%+ on the replay corpus.
@@ -2109,7 +2116,7 @@ def resolve_pair(conn: Any, a: ListingKey, b: ListingKey, *, street_key: str,
     if decide_phash_fastpath(
         phash_pairs, distinctive, min_identical_pairs=_phash_min,
     ) and not _both_have_site_plan(
-        conn, a.sreality_id, b.sreality_id, ctx.probes
+        conn, a.listing_id, b.listing_id, ctx.probes
     ):
         _phash_reason = "phash_single" if _phash_single_fired else "image_phash"
         factors = _factors("phash", reason=_phash_reason,
@@ -2175,7 +2182,7 @@ def resolve_pair(conn: Any, a: ListingKey, b: ListingKey, *, street_key: str,
     # fast-path didn't fire) rides along as the "photos differ, decided on attributes" signal.
     if (ctx.nonbyt_attr_merge and a.category_main and a.category_main != "byt"
             and _attr_exact_nonbyt(a, b)
-            and not _both_have_site_plan(conn, a.sreality_id, b.sreality_id, ctx.probes)):
+            and not _both_have_site_plan(conn, a.listing_id, b.listing_id, ctx.probes)):
         factors = _factors("attr", reason="attr_exact", street_key=street_key,
                            phash_pairs=phash_pairs)
         if not ctx.auto_merge_enabled:
@@ -2241,7 +2248,7 @@ def resolve_pair(conn: Any, a: ListingKey, b: ListingKey, *, street_key: str,
                 model=ctx.clip_model)
             ctx.probes.pair_cosine[cp] = pair_cos
         if (pair_cos is not None and pair_cos >= ctx.nonbyt_cosine_merge_min
-                and not _both_have_site_plan(conn, a.sreality_id, b.sreality_id, ctx.probes)):
+                and not _both_have_site_plan(conn, a.listing_id, b.listing_id, ctx.probes)):
             factors = _factors("cosine", reason="cosine_high", street_key=street_key,
                                phash_pairs=phash_pairs, cosine=pair_cos)
             if not ctx.auto_merge_enabled:
@@ -2497,7 +2504,9 @@ def run_engine(
         keys = _load_geo_eligible(conn, restrict_property_ids=restrict_property_ids,
                                   restrict_cells=restrict_geo_cells, rung=cell_rung)
         stats = {
-            "eligible": len({k.sreality_id for k in keys}),
+            # Distinct listings by the NOT-NULL surrogate; keying on sreality_id would
+            # collapse every NULL-sreality (non-sreality-portal) row onto one and undercount.
+            "eligible": len({k.listing_id for k in keys}),
             "flagged_location": None, "flagged_disposition": None,
         }
     else:
@@ -2747,11 +2756,13 @@ def run_engine(
             pair_iter = ((members[i], members[j])
                          for i in range(len(members))
                          for j in range(i + 1, len(members)))
-        # The group's listing ids let the pHash probes batch ONE round trip per
-        # (group, exclusion-profile) instead of one per pair (_phash_pairs_cached).
+        # The group's surrogate listing ids let the pHash probes batch ONE round trip per
+        # (group, exclusion-profile) instead of one per pair (_phash_pairs_cached). Keyed on
+        # listing_id (the NOT-NULL PK) so a NULL-sreality member neither crashes the sort
+        # (`sorted({...None...})`) nor collapses the batch key onto a single None.
         # Above PHASH_BATCH_MAX_MEMBERS the batch itself is the hazard (members^2
         # IN-list) — fall back to per-pair probes, bounded by MAX_GROUP_PAIRS.
-        group_sids = (tuple(sorted({m.sreality_id for m in members}))
+        group_sids = (tuple(sorted({m.listing_id for m in members}))
                       if len(members) <= PHASH_BATCH_MAX_MEMBERS else None)
         for a, b in pair_iter:
             if ctx.pairs_left <= 0:

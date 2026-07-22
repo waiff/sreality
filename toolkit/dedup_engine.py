@@ -271,7 +271,11 @@ def render_exclusion_clause(
 @dataclass(frozen=True)
 class ListingKey:
     """The matchable identity of one eligible listing."""
-    sreality_id: int
+    # Portal-native id — NULL for the non-sreality portals once Gate 2 flips (and
+    # already nullable in the schema). Identity comparisons canonicalize on the
+    # surrogate `listing_id` below, NOT this: two distinct NULL-sreality listings
+    # must never compare equal (`None == None` is True).
+    sreality_id: int | None
     property_id: int | None
     source: str
     street_key: str          # one grouping key: 'id:<street_id>' or 'name:<normalized>'
@@ -469,7 +473,12 @@ def classify_pair(a: ListingKey, b: ListingKey) -> PairDecision:
     is a precondition the caller guarantees by only pairing within a street
     group; we re-assert disposition compatibility here.
     """
-    if a.sreality_id == b.sreality_id:
+    # Same listing = same surrogate PK. Never compare sreality_id: it is NULL for
+    # non-sreality portals, and `None == None` is True, so two DISTINCT NULL-sreality
+    # listings would wrongly reject as the same one. listing_id is the NOT-NULL PK; the
+    # `is not None` guard keeps a keyless test/caller (listing_id unset) from tripping
+    # the same trap on the surrogate.
+    if a.listing_id is not None and a.listing_id == b.listing_id:
         return PairDecision("reject", None, "same_listing")
     if a.property_id is not None and a.property_id == b.property_id:
         return PairDecision("reject", None, "already_merged")
@@ -670,7 +679,8 @@ def classify_geo_pair(
     orchestrator decides whether to honour an auto_merge — in the unified geo path it maps
     auto_merge → candidate, so the free-first visual flow is the sole merge gate."""
     area_max_pct = profile.candidate_area_max_pct if max_area_pct is None else max_area_pct
-    if a.sreality_id == b.sreality_id:
+    # Same listing = same surrogate PK, never sreality_id (NULL-equal trap; see classify_pair).
+    if a.listing_id is not None and a.listing_id == b.listing_id:
         return PairDecision("reject", None, "same_listing")
     if a.property_id is not None and a.property_id == b.property_id:
         return PairDecision("reject", None, "already_merged")
@@ -735,7 +745,8 @@ def classify_byt_geo_pair(
     divergence: floors reject on ANY known difference (not the street path's ±1
     convention tolerance) — inside one building the floor is the unit disambiguator,
     and on a candidate-only rung a false reject only costs recall, never a merge."""
-    if a.sreality_id == b.sreality_id:
+    # Same listing = same surrogate PK, never sreality_id (NULL-equal trap; see classify_pair).
+    if a.listing_id is not None and a.listing_id == b.listing_id:
         return PairDecision("reject", None, "same_listing")
     if a.property_id is not None and a.property_id == b.property_id:
         return PairDecision("reject", None, "already_merged")
