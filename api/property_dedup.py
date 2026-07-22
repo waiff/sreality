@@ -1853,6 +1853,103 @@ def dismiss_candidate(
     return {"id": candidate_id, "status": "dismissed"}
 
 
+def _merged_property_filters(
+    *,
+    min_listings: int,
+    max_listings: int | None,
+    category_main: str | None,
+) -> tuple[str, dict[str, Any]]:
+    """Shared WHERE for list_merged_properties + its COUNT, so the page total
+    can never drift from the page rows. Only live survivors (`status='active'`):
+    a `merged_away` loser's children have already repointed to its survivor, so
+    its `source_count` is stale."""
+    clauses = ["p.status = 'active'", "p.source_count >= %(min_listings)s"]
+    params: dict[str, Any] = {"min_listings": min_listings}
+    if max_listings is not None:
+        clauses.append("p.source_count <= %(max_listings)s")
+        params["max_listings"] = max_listings
+    if category_main:
+        # A property carries ONE category_main (the survivor's) — plain equality,
+        # no either-side latitude (that is for candidate PAIRS, which can span the
+        # sanctioned dům↔komerční cross-type merge, rule #15).
+        clauses.append("p.category_main = %(category_main)s")
+        params["category_main"] = category_main
+    return "WHERE " + " AND ".join(clauses), params
+
+
+def list_merged_properties(
+    conn: psycopg.Connection,
+    *,
+    min_listings: int = 2,
+    max_listings: int | None = None,
+    category_main: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> dict[str, Any]:
+    """Already-merged properties (survivors) whose child-listing count
+    (`source_count` — every listing ever grouped under the property, active or
+    delisted) is in [min_listings, max_listings]. The audit view for spotting
+    over-merges — biggest groups first. Reads the base `properties` table
+    (service role), so it sees the unpublished / publication-gated rows the
+    `*_public` views hide. The per-property portal list + active count come from
+    a LATERAL over the children."""
+    where_sql, params = _merged_property_filters(
+        min_listings=min_listings,
+        max_listings=max_listings,
+        category_main=category_main,
+    )
+    with conn.cursor() as cur:
+        # Real total for THIS filter (the page is capped at `limit`), sharing the
+        # exact WHERE with the page SELECT so they can never disagree.
+        cur.execute(f"SELECT count(*) FROM properties p {where_sql}", params)
+        total = int(cur.fetchone()[0])
+
+        cur.execute(
+            f"""
+            SELECT
+              p.id, p.repr_listing_id, p.source_count, p.distinct_site_count,
+              p.category_main, p.category_type, p.disposition, p.area_m2,
+              p.estate_area, p.current_price_czk, p.district, p.street,
+              p.first_seen_at, p.last_seen_at,
+              agg.sources, agg.active_count
+            FROM properties p
+            LEFT JOIN LATERAL (
+              SELECT array_agg(DISTINCT l.source ORDER BY l.source) AS sources,
+                     count(*) FILTER (WHERE l.is_active)            AS active_count
+              FROM listings l WHERE l.property_id = p.id
+            ) agg ON true
+            {where_sql}
+            ORDER BY p.source_count DESC, p.id DESC
+            LIMIT %(limit)s OFFSET %(offset)s
+            """,
+            {**params, "limit": limit, "offset": offset},
+        )
+        rows = cur.fetchall()
+
+    data = [
+        {
+            "property_id": r[0],
+            "sreality_id": r[1],
+            "source_count": r[2],
+            "distinct_site_count": r[3],
+            "category_main": r[4],
+            "category_type": r[5],
+            "disposition": r[6],
+            "area_m2": float(r[7]) if r[7] is not None else None,
+            "estate_area": float(r[8]) if r[8] is not None else None,
+            "price_czk": r[9],
+            "district": r[10],
+            "street": r[11],
+            "first_seen_at": r[12],
+            "last_seen_at": r[13],
+            "sources": list(r[14]) if r[14] is not None else [],
+            "active_count": r[15],
+        }
+        for r in rows
+    ]
+    return {"data": data, "total": total, "returned": len(data)}
+
+
 def list_merges(
     conn: psycopg.Connection, *, limit: int = 50, offset: int = 0,
 ) -> dict[str, Any]:

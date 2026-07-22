@@ -551,6 +551,29 @@ def post_dismiss_cluster(
     return result
 
 
+@router.get("/merged-properties")
+def get_merged_properties(
+    min_listings: int = Query(default=2, ge=1),
+    max_listings: int | None = Query(default=None, ge=1),
+    category_main: str | None = None,
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    conn: Any = Depends(deps.get_db_conn),
+    _: dict = Depends(deps.require_admin),
+) -> dict[str, Any]:
+    """Browse the RESULTS of dedup: active properties whose child-listing count
+    (`source_count`) is in [min_listings, max_listings], biggest groups first —
+    the operator's over-merge audit. `category_main` narrows by property type."""
+    return dedup.list_merged_properties(
+        conn,
+        min_listings=min_listings,
+        max_listings=max_listings,
+        category_main=category_main,
+        limit=limit,
+        offset=offset,
+    )
+
+
 @router.get("/merges")
 def get_merges(
     limit: int = Query(default=50, ge=1, le=200),

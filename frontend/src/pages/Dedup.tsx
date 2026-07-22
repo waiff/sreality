@@ -14,6 +14,7 @@ import {
   getDedupSummary,
   isApiConfigured,
   listDedupCandidates,
+  listMergedProperties,
   mergeDedupCluster,
   mergeDedupPropertySet,
   updateAppSetting,
@@ -54,7 +55,7 @@ import DedupFactors from '@/components/DedupFactors';
 import DecisionFeedbackControl from '@/components/DecisionFeedbackControl';
 import DedupPipelineOverview from '@/components/DedupPipelineOverview';
 import DedupFunnel from '@/components/DedupFunnel';
-import { listingPath } from '@/lib/listingUrl';
+import { listingPath, propertyListingPath } from '@/lib/listingUrl';
 import type {
   DedupCandidatesResponse,
   DedupPropertySide,
@@ -62,6 +63,8 @@ import type {
   DedupSummaryResponse,
   DedupSummaryTier,
   ImagePublic,
+  MergedPropertiesResponse,
+  MergedProperty,
   PropertySource,
 } from '@/lib/types';
 
@@ -253,6 +256,8 @@ export default function Dedup() {
 
       <DedupFunnel />
 
+      <MergedProperties />
+
       <CollapsibleSection id="clip" eyebrow="Backfill" title="CLIP backfill">
         <DedupBackfillProgress />
       </CollapsibleSection>
@@ -379,6 +384,261 @@ export default function Dedup() {
 }
 
 /* -------------------------------------------------------------------------- */
+
+const MERGED_PAGE = 30; // rows per "Show more" step
+const MERGED_MAX = 200; // the API caps `limit` here — narrow the range past this
+
+/* Debounce a fast-changing value (the range inputs) so typing doesn't refetch
+ * on every keystroke. */
+function useDebounced<T>(value: T, ms: number): T {
+  const [v, setV] = useState(value);
+  useEffect(() => {
+    const t = setTimeout(() => setV(value), ms);
+    return () => clearTimeout(t);
+  }, [value, ms]);
+  return v;
+}
+
+/* Browse the RESULTS of dedup — properties the engine has ALREADY grouped, by
+ * how many listings were folded into each (`source_count`), with a min–max
+ * range + a property-type filter, biggest groups first. The over-merge audit: a
+ * property folding 15 listings is worth a second look. Reads
+ * /dedup/merged-properties (admin). Distinct from "Needs review" below, which is
+ * the PROPOSED queue the engine hasn't merged yet. */
+function MergedProperties() {
+  // Range inputs stay strings so "" means unbounded; debounced into the query.
+  const [minRaw, setMinRaw] = useState('2');
+  const [maxRaw, setMaxRaw] = useState('');
+  const [categoryMain, setCategoryMain] = useState('');
+  const [limit, setLimit] = useState(MERGED_PAGE);
+
+  const minDeb = useDebounced(minRaw, 350);
+  const maxDeb = useDebounced(maxRaw, 350);
+
+  // min defaults to 2 (the "merged" floor) when blank/invalid; max is null (no
+  // cap) when blank/invalid.
+  const minListings = Math.max(1, Number.parseInt(minDeb, 10) || 2);
+  const maxParsed = Number.parseInt(maxDeb, 10);
+  const maxListings = Number.isFinite(maxParsed) && maxParsed >= 1 ? maxParsed : null;
+
+  // A changed filter pages back to the first page.
+  useEffect(() => {
+    setLimit(MERGED_PAGE);
+  }, [minListings, maxListings, categoryMain]);
+
+  const q = useQuery<MergedPropertiesResponse, Error>({
+    queryKey: dedupKeys.mergedProperties({
+      min: minListings,
+      max: maxListings,
+      categoryMain: categoryMain || null,
+      limit,
+    }),
+    queryFn: () =>
+      listMergedProperties({
+        min_listings: minListings,
+        ...(maxListings != null ? { max_listings: maxListings } : {}),
+        ...(categoryMain ? { category_main: categoryMain } : {}),
+        limit,
+      }),
+    placeholderData: keepPreviousData,
+    refetchInterval: POLL_MS,
+  });
+
+  const rows = q.data?.data ?? [];
+  const total = q.data?.total ?? 0;
+  const rangeInvalid = maxListings != null && maxListings < minListings;
+  const canLoadMore = rows.length < total && limit < MERGED_MAX;
+
+  return (
+    <CollapsibleSection id="merged" eyebrow="Audit" title="Merged properties">
+      <p className="text-sm text-[var(--color-ink-2)] max-w-2xl">
+        Properties the engine has already grouped, ranked by how many listings
+        were merged into each. Set a range (e.g. 5–10) to hunt for over-merges —
+        a property folding many listings is worth a second look. This is the
+        <span className="text-[var(--color-ink)]"> result</span> of dedup;
+        “Needs review” below is the proposed queue it hasn’t merged yet.
+      </p>
+
+      <div className="mt-4 flex flex-wrap items-end gap-x-6 gap-y-3">
+        <div>
+          <label
+            htmlFor="merged-min"
+            className="block text-[0.65rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)]"
+          >
+            Listings merged
+          </label>
+          <div className="mt-1 flex items-center gap-2">
+            <input
+              id="merged-min"
+              type="number"
+              min={1}
+              inputMode="numeric"
+              value={minRaw}
+              onChange={(e) => setMinRaw(e.target.value)}
+              aria-label="Minimum listings merged"
+              className="w-16 rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper)] px-2 py-1 text-sm tabular-nums text-[var(--color-ink)] focus:border-[var(--color-copper)] focus:outline-none"
+            />
+            <span className="text-[var(--color-ink-4)]">–</span>
+            <input
+              type="number"
+              min={1}
+              inputMode="numeric"
+              value={maxRaw}
+              placeholder="∞"
+              onChange={(e) => setMaxRaw(e.target.value)}
+              aria-label="Maximum listings merged (blank = no cap)"
+              className="w-16 rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper)] px-2 py-1 text-sm tabular-nums text-[var(--color-ink)] focus:border-[var(--color-copper)] focus:outline-none"
+            />
+          </div>
+        </div>
+
+        <div className="flex items-start gap-2">
+          <span className="mt-1.5 shrink-0 text-[0.65rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)]">
+            Type
+          </span>
+          <div className="flex flex-wrap gap-1.5">
+            {CATEGORY_MAIN_TABS.map((t) => (
+              <FilterChip
+                key={t.id}
+                on={categoryMain === t.id}
+                label={t.label}
+                onClick={() => setCategoryMain(t.id)}
+              />
+            ))}
+          </div>
+        </div>
+      </div>
+
+      <div className="mt-4">
+        {rangeInvalid ? (
+          <MergedEmpty>Max is below min — widen the range.</MergedEmpty>
+        ) : q.isLoading ? (
+          <MergedEmpty>Loading…</MergedEmpty>
+        ) : q.error ? (
+          <MergedEmpty>Failed to load: {q.error.message}</MergedEmpty>
+        ) : rows.length === 0 ? (
+          <MergedEmpty>
+            No merged properties with {minListings}
+            {maxListings != null ? `–${maxListings}` : '+'} listings
+            {categoryMain ? ' for this type' : ''}. Try widening the range.
+          </MergedEmpty>
+        ) : (
+          <>
+            <p className="mb-2 text-[0.72rem] text-[var(--color-ink-4)]">
+              {fmtCount(total)} {total === 1 ? 'property' : 'properties'} match ·
+              showing {fmtCount(rows.length)}
+            </p>
+            <div className="space-y-2">
+              {rows.map((p) => (
+                <MergedPropertyRow key={p.property_id} p={p} />
+              ))}
+            </div>
+            {canLoadMore ? (
+              <div className="mt-3 flex justify-center">
+                <button
+                  type="button"
+                  onClick={() =>
+                    setLimit((n) => Math.min(MERGED_MAX, n + MERGED_PAGE))
+                  }
+                  disabled={q.isFetching}
+                  className={`${BTN} border border-[var(--color-rule)] text-[var(--color-ink-2)] hover:text-[var(--color-ink)] hover:border-[var(--color-rule-strong)]`}
+                >
+                  {q.isFetching
+                    ? 'Loading…'
+                    : `Show more (${fmtCount(total - rows.length)} more)`}
+                </button>
+              </div>
+            ) : rows.length >= MERGED_MAX && rows.length < total ? (
+              <p className="mt-3 text-center text-[0.72rem] text-[var(--color-ink-4)]">
+                Showing the top {fmtCount(MERGED_MAX)} — narrow the range to see
+                the rest.
+              </p>
+            ) : null}
+          </>
+        )}
+      </div>
+    </CollapsibleSection>
+  );
+}
+
+function MergedEmpty({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="px-6 py-8 text-center border border-dashed border-[var(--color-rule)] rounded-[var(--radius-md)] text-sm text-[var(--color-ink-3)]">
+      {children}
+    </div>
+  );
+}
+
+/* One already-merged property: a big listings-merged count, the representative
+ * address/disposition/price, the distinct portals its children span, and links
+ * to open the property + its merge history (the scoped Decision-history deep
+ * link `/dedup?audit_property=ID`). */
+function MergedPropertyRow({ p }: { p: MergedProperty }) {
+  const place = p.street || p.district || '—';
+  const secondary = [
+    p.disposition,
+    p.area_m2 != null ? fmtArea(p.area_m2) : null,
+    p.estate_area != null ? `pozemek ${fmtArea(p.estate_area)}` : null,
+  ]
+    .filter(Boolean)
+    .join(' · ');
+  const inactive = p.source_count - p.active_count;
+  return (
+    <div className="rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] p-3 flex items-center gap-4">
+      <div className="shrink-0 w-14 text-center">
+        <div className="font-mono tabular-nums text-2xl leading-none text-[var(--color-copper-2)]">
+          {fmtCount(p.source_count)}
+        </div>
+        <div className="mt-0.5 text-[0.58rem] tracking-[0.1em] uppercase text-[var(--color-ink-4)]">
+          listings
+        </div>
+      </div>
+
+      <div className="min-w-0 flex-1">
+        <div className="flex items-baseline justify-between gap-3">
+          <span className="truncate text-sm text-[var(--color-ink)]">{place}</span>
+          <span className="shrink-0 font-mono tabular-nums text-sm text-[var(--color-ink-2)]">
+            {fmtCzk(p.price_czk)}
+          </span>
+        </div>
+        <div className="mt-0.5 text-[0.8rem] text-[var(--color-ink-3)] truncate">
+          {secondary || '—'}
+        </div>
+        <div className="mt-1.5 flex flex-wrap items-center gap-1">
+          {p.sources.map((s) => (
+            <span
+              key={s}
+              className="inline-flex items-center px-1.5 py-0.5 text-[0.6rem] tracking-[0.1em] uppercase rounded-[var(--radius-xs)] border border-[var(--color-rule)] bg-[var(--color-paper)] text-[var(--color-ink-3)] whitespace-nowrap"
+            >
+              {portalShort(s)}
+            </span>
+          ))}
+          <span className="ml-1 text-[0.68rem] text-[var(--color-ink-4)]">
+            {fmtCount(p.distinct_site_count)}{' '}
+            {p.distinct_site_count === 1 ? 'portal' : 'portals'}
+            {inactive > 0 ? ` · ${fmtCount(p.active_count)} active` : ''}
+          </span>
+        </div>
+      </div>
+
+      <div className="shrink-0 flex flex-col items-end gap-1 text-[0.72rem]">
+        <span className="font-mono text-[var(--color-ink-4)]">#{p.property_id}</span>
+        <Link
+          to={propertyListingPath(p.property_id)}
+          className="text-[var(--color-ink-3)] hover:text-[var(--color-copper)] hover:underline underline-offset-2"
+        >
+          view →
+        </Link>
+        <Link
+          to={`/dedup?audit_property=${p.property_id}`}
+          className="text-[var(--color-ink-3)] hover:text-[var(--color-copper)] hover:underline underline-offset-2"
+        >
+          merge history →
+        </Link>
+      </div>
+    </div>
+  );
+}
 
 /* What the autonomous engine did — eligibility breakdown + how each recent run
  * resolved its candidates (auto-merged by address / identical photos / a High
