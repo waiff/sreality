@@ -709,3 +709,114 @@ def test_maintenance_pass_records_lock_skip(monkeypatch):
     state = rw._new_state()
     asyncio.run(rw._maintenance_pass(asyncio.Event(), state))
     assert state["lanes"]["maintenance"]["last"]["skipped"] is True
+
+
+# --- estimation lane (Wave 1 W1-3 / A10) --------------------------------------
+
+
+class _LaneCtx:
+    def __enter__(self) -> "_LaneCtx":
+        return self
+
+    def __exit__(self, *a: Any) -> None:
+        return None
+
+
+class _LaneCur:
+    def __init__(self, conn: "_LaneConn") -> None:
+        self._conn = conn
+        self._last = ""
+
+    def __enter__(self) -> "_LaneCur":
+        return self
+
+    def __exit__(self, *a: Any) -> None:
+        return None
+
+    def execute(self, sql: str, params: Any = None) -> None:
+        self._last = " ".join(sql.split())
+        self._conn.executed.append((self._last, params))
+
+    def fetchone(self) -> Any:
+        low = self._last.lower()
+        if "skip locked" in low:
+            return self._conn.claim
+        if "select status" in low:
+            return (self._conn.status,)
+        return None
+
+
+class _LaneConn:
+    def __init__(self, claim: Any, status: str = "success") -> None:
+        self.claim = claim
+        self.status = status
+        self.executed: list[tuple[str, Any]] = []
+        self.closed = False
+
+    def transaction(self) -> _LaneCtx:
+        return _LaneCtx()
+
+    def cursor(self) -> _LaneCur:
+        return _LaneCur(self)
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_estimation_lane_registered_and_dark_by_default(monkeypatch):
+    # The lane must be registered in _amain, and it ships DARK: with the flag
+    # absent, _read_estimation_interval returns 0 so _lane_loop idles it.
+    src = inspect.getsource(rw._amain)
+    assert '("estimation"' in src
+    monkeypatch.setattr(rw, "_read_flag", lambda key: False)
+    assert rw._read_estimation_interval() == 0
+
+
+def test_estimation_interval_uses_configured_when_enabled(monkeypatch):
+    monkeypatch.setattr(rw, "_read_flag", lambda key: True)
+    monkeypatch.setattr(rw, "_read_int", lambda key, default: 7)
+    assert rw._read_estimation_interval() == 7
+
+
+def test_estimation_pass_sweeps_then_records_counters(monkeypatch):
+    monkeypatch.setattr(rw, "_sweep_estimations_sync", lambda: 2)
+    monkeypatch.setattr(
+        rw, "_estimation_sync",
+        lambda: {"claimed": 1, "run_id": 7, "status": "success"})
+    state = rw._new_state()
+    asyncio.run(rw._estimation_pass(asyncio.Event(), state))
+    lane = state["lanes"]["estimation"]
+    assert lane["passes"] == 1
+    assert lane["last"] == {"claimed": 1, "swept": 2, "status": "success"}
+
+
+def test_estimation_sync_empty_queue_returns_zero(monkeypatch):
+    # An empty claim must NOT import/execute the api path — it returns claimed=0
+    # after the single claim query.
+    conn = _LaneConn(claim=None)
+    monkeypatch.setattr(rw.db, "connect", lambda: conn)
+    assert rw._estimation_sync() == {"claimed": 0}
+    assert conn.closed
+    assert len(conn.executed) == 1  # just the claim
+
+
+def test_estimation_sync_claims_executes_and_clears_payload(monkeypatch):
+    payload = {"body": {"url": "https://example.test/1"}, "resolution": {}}
+    conn = _LaneConn(claim=(42, payload), status="success")
+    monkeypatch.setattr(rw.db, "connect", lambda: conn)
+    monkeypatch.setattr("api.dependencies.get_sreality_client", lambda: object())
+    monkeypatch.setattr("api.dependencies.get_providers", lambda: {})
+    monkeypatch.setattr(
+        "api.llm_client.LLMClient", lambda conn, providers=None: object())
+    seen: dict[str, Any] = {}
+    monkeypatch.setattr(
+        "api.estimation_runs.execute_pending_run",
+        lambda conn, sc, lc, run_id, pl: seen.update(run_id=run_id, payload=pl))
+
+    out = rw._estimation_sync()
+
+    assert out == {"claimed": 1, "run_id": 42, "status": "success"}
+    assert seen == {"run_id": 42, "payload": payload}
+    # payload cleared to NULL once terminal
+    assert any("job_payload = null" in sql.lower() for sql, _ in conn.executed)
+    assert conn.closed

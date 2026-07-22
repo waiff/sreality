@@ -303,13 +303,27 @@ remediation R3 closes that. Full spec: `docs/design/public-release-remediation-2
      turned out **not** degraded (runs on the service-role conn). `admin_boundaries` left
      un-policied until a tenant-conn consumer needs it (Wave 3 matcher). Live regression:
      `test_a5_properties_readable_listings_still_deny_all`.
+   - ~~**W1-3 (async job lane + periodic zombie sweep — Amendment A10)**~~ — **SHIPPED,
+     migration 352.** Agent + deterministic estimation EXECUTION now drains off the FastAPI
+     request threadpool onto a new `estimation` lane on the always-on realtime worker: it
+     claims one `pending` `estimation_runs` row per pass (`FOR UPDATE SKIP LOCKED`, the
+     pooler-safe claim — not a session advisory lock), stamps `running`/`claimed_at`/`worker`,
+     and runs the SAME `execute_pending_run` path from a `{body, resolution}` snapshot the
+     submit route stored in the row's new `job_payload` column (the run row stays the job — no
+     new table). The stuck-run sweep is now periodic (each lane pass, not just API startup) and
+     keys `running` rows off `coalesce(claimed_at, created_at)` so a legitimately long agent run
+     is timed from when it STARTED, not when it queued. Ships **DARK behind one flag**
+     (`estimation_job_lane_enabled`): the flag gates the lane (interval 0 = idle) AND makes
+     `POST /estimations` route rows to it instead of an in-process BackgroundTask — so the
+     cutover and rollback are one `app_settings` edit, no deploy. The realtime worker was
+     verified live (heartbeat age ~6 s, all lanes running) before this landed, so flipping the
+     flag activates a confirmed-alive executor. **Operator flip sequence** in the PR body.
    - Remaining: the metering substrate (`usage_ledger`/`check_budget` — needs a product
      decision on quota shape: free-tier run count vs USD budget, daily vs monthly window),
-     the atomic submit-time gates (entitlement/budget/concurrency/idempotency), moving agent
-     execution off the request process onto a job lane on the realtime worker, a periodic
-     zombie-run sweep, and Chrome Web Store submission readiness (privacy policy,
-     single-purpose statement, staged rollout, the platform-wide `API_TOKEN` rotation
-     cutover — see `chrome-extension/README.md` § Chrome Web Store submission).
+     the atomic submit-time gates (entitlement/budget/concurrency/idempotency), and Chrome Web
+     Store submission readiness (privacy policy, single-purpose statement, staged rollout, the
+     platform-wide `API_TOKEN` rotation cutover — see `chrome-extension/README.md` § Chrome Web
+     Store submission).
 
 **Housekeeping done 2026-07-20:** operator enabled Supabase Auth's leaked-password-protection
 toggle (Authentication → Sign In / Providers → Email → "Prevent use of leaked passwords").

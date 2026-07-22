@@ -97,6 +97,11 @@ def test_create_estimation_run_defaults_to_system_account(monkeypatch: Any) -> N
         source_kind="sreality", parse_confidence="high",
         parse_confidence_per_field=None, source_html=None,
     )
+    # Pin the legacy inline path: with the job lane on, create_estimation_run
+    # returns after INSERT without calling _execute_estimation_run, and
+    # _job_lane_enabled would otherwise read the fake cursor (whose fetchone
+    # returns a truthy row) as "enabled" — shifting executed[0] off the INSERT.
+    monkeypatch.setattr(er, "_job_lane_enabled", lambda conn: False)
     monkeypatch.setattr(er, "_resolve_input", lambda *a, **k: resolution)
     monkeypatch.setattr(er, "load_filter_defaults", lambda *a, **k: object())
     monkeypatch.setattr(
