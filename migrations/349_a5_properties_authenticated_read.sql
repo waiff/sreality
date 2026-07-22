@@ -38,6 +38,16 @@
 
 begin;
 
+-- The policy governs which ROWS are visible; a table-level SELECT grant is the
+-- separate privilege that must also hold. `authenticated` already has it on
+-- `properties` in production (Supabase's project-level default ACL from table
+-- creation — invisible to any migration file), so this GRANT is a no-op there.
+-- It is load-bearing in the from-scratch CI schema-replay, which has no such
+-- default ACL and otherwise fails closed with "permission denied for table
+-- properties" (the same self-containment lesson as migration 347's llm_calls
+-- grant). SELECT only — no write privilege, which the RLS-grants CI gate rejects.
+grant select on properties to authenticated;
+
 create policy properties_authenticated_read on properties
   for select to authenticated
   using (true);
