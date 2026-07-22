@@ -13,7 +13,7 @@ import {
   fetchListingById,
   fetchListingBySreality,
   fetchListingIdByNaturalKey,
-  fetchPropertyReprId,
+  fetchPropertyReprNaturalKey,
   fetchPropertySources,
   fetchPropertyMf,
   fetchSnapshotsForListings,
@@ -51,7 +51,7 @@ import { portalShort, srealityListingUrl } from '@/lib/portals';
 import ErrorBoundary from '@/components/ErrorBoundary';
 import { ListingOverview } from '@/components/listing-detail/ListingOverview';
 import PipelineToggle from '@/components/listing-detail/PipelineToggle';
-import { listingPath, listingCanonicalPath } from '@/lib/listingUrl';
+import { listingCanonicalPath, listingRowPath } from '@/lib/listingUrl';
 
 const PriceLineChart = lazy(
   () => import('@/components/listing-detail/PriceLineChart'),
@@ -94,21 +94,28 @@ export default function ListingDetail() {
 
   // /listing?property=ID (the dedup merge feed links this) → resolve the
   // property's representative listing and redirect to its detail page. Only when
-  // neither the legacy nor the canonical route matched.
+  // neither the legacy nor the canonical route matched. Resolve to the repr's
+  // NATURAL KEY and redirect to the CANONICAL route — never to listingPath(id):
+  // the surrogate id and sreality_id spaces overlap (~435), so the legacy route
+  // would load the wrong listing, and a post-Gate-2 repr may have no sreality_id
+  // at all (which is why the old sreality-id resolver dead-ended to "not found").
   const propertyParam = new URLSearchParams(location.search).get('property');
   const propertyId =
     legacyId == null && !natSourceParam && propertyParam && /^\d+$/.test(propertyParam)
       ? Number(propertyParam)
       : null;
-  const reprQ = useQuery<number | null, Error>({
+  const reprQ = useQuery<{ source: string; source_id_native: string } | null, Error>({
     queryKey: ['property-repr', propertyId],
-    queryFn: () => fetchPropertyReprId(propertyId as number),
+    queryFn: () => fetchPropertyReprNaturalKey(propertyId as number),
     enabled: propertyId != null,
     staleTime: 60_000,
   });
   useLayoutEffect(() => {
     if (reprQ.data != null) {
-      navigate(listingPath(reprQ.data), { replace: true });
+      navigate(
+        listingCanonicalPath(reprQ.data.source, reprQ.data.source_id_native),
+        { replace: true },
+      );
     }
   }, [reprQ.data, navigate]);
 
@@ -138,8 +145,12 @@ export default function ListingDetail() {
   // URL bar. Query string + hash are preserved (?run= / #anchor deep links). Only
   // from the legacy route, and only when the natural key is known — a NULL one
   // (a pre-migration-314 straggler) simply stays on the still-valid legacy URL.
+  // Match THIS listing's source row by the surrogate id (never null, never
+  // overlaps), not sreality_id — `null === null` would wrongly match the first
+  // null-sreality sibling. (Only reached from the legacy route, where sreality_id
+  // is present, but the surrogate match is correct regardless.)
   const canonicalNative = (sourcesQ.data?.sources ?? []).find(
-    (s) => s.sreality_id === listingQ.data?.sreality_id,
+    (s) => s.id === listingQ.data?.id,
   )?.source_id_native;
   useLayoutEffect(() => {
     if (legacyId == null || !listingQ.data || !canonicalNative) return;
@@ -169,26 +180,32 @@ export default function ListingDetail() {
     staleTime: 60_000,
   });
 
-  // Cross-source price history: snapshots across every child of the property,
-  // falling back to just this listing until sources load / for singletons. Still
-  // sreality_id-keyed (fetchSnapshotsForListings, unchanged) — childIds come from
-  // property_sources_public.sreality_id, which stays valid forever; the singleton
-  // fallback reads the already-loaded listing's own sreality_id, not the route
-  // resolver's surrogate id.
+  // childIds = the property's children's sreality_ids, for the (sreality-keyed)
+  // EstimationsBlock lookup. Post-Gate-2 a non-sreality child has none, so these
+  // are null-filtered — that block simply won't find runs for a null-sreality
+  // child (a separate, sreality-keyed cutover).
   const childIds = (sourcesQ.data?.sources ?? [])
     .map((s) => s.sreality_id)
     .filter((x): x is number => x != null);
-  const snapshotIds =
-    childIds.length > 0
-      ? [...childIds].sort((a, b) => a - b)
-      : listingQ.data != null
-        ? [listingQ.data.sreality_id]
-        : [];
+
+  // Cross-source price history: snapshots across every child of the property,
+  // falling back to just this listing for singletons / until sources load. Keyed
+  // on the SURROGATE listing_id (fetchSnapshotsForListings, migration 343) — the
+  // children's ids come from property_sources_public.id and the singleton
+  // fallback from the already-loaded listing's own surrogate id, both NEVER null,
+  // so a null-sreality listing's chart no longer silently empties on `[null]`.
+  const snapshotListingIds = (() => {
+    const ids = (sourcesQ.data?.sources ?? [])
+      .map((s) => s.id)
+      .filter((x): x is number => x != null);
+    if (ids.length > 0) return [...ids].sort((a, b) => a - b);
+    return listingQ.data != null ? [listingQ.data.id] : [];
+  })();
 
   const snapshotsQ = useQuery<ListingSnapshotPublic[], Error>({
-    queryKey: ['snapshots', snapshotIds],
-    queryFn: () => fetchSnapshotsForListings(snapshotIds),
-    enabled: snapshotIds.length > 0 && !!listingQ.data,
+    queryKey: ['snapshots', snapshotListingIds],
+    queryFn: () => fetchSnapshotsForListings(snapshotListingIds),
+    enabled: snapshotListingIds.length > 0 && !!listingQ.data,
     staleTime: 60_000,
   });
 
@@ -218,7 +235,7 @@ export default function ListingDetail() {
     const listing = listingQ.data;
     if (!listing) return undefined;
     const currentSource = (sourcesQ.data?.sources ?? []).find(
-      (s) => s.sreality_id === listing.sreality_id,
+      (s) => s.id === listing.id,
     );
     const url =
       currentSource?.source_url
@@ -463,8 +480,11 @@ function LatestActiveLink({
   listing: ListingPublic;
   sources: PropertySource[];
 }) {
+  // Exclude the current listing by SURROGATE id (never null) — `sreality_id !==
+  // sreality_id` would keep a null-sreality sibling (null !== 5 is true) and then
+  // build /listing/null. listingRowPath handles the null-sreality sibling.
   const liveSibling = sources
-    .filter((s) => s.is_active && s.sreality_id !== listing.sreality_id)
+    .filter((s) => s.is_active && s.id !== listing.id)
     .sort(
       (a, b) =>
         new Date(b.last_seen_at).getTime() - new Date(a.last_seen_at).getTime(),
@@ -472,7 +492,7 @@ function LatestActiveLink({
   if (!liveSibling) return null;
   return (
     <Link
-      to={listingPath(liveSibling.sreality_id)}
+      to={listingRowPath(liveSibling)}
       className="inline-flex items-center gap-1.5 rounded-[var(--radius-sm)] border border-[var(--color-copper)]/30 bg-[var(--color-copper-soft)] px-3 py-1.5 text-[0.8rem] text-[var(--color-copper)] hover:bg-[var(--color-copper)]/15 transition-colors"
     >
       <span className="w-1.5 h-1.5 rounded-full bg-[var(--color-sage)]" aria-hidden />

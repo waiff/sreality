@@ -12,10 +12,12 @@ import { describe, expect, it } from 'vitest';
 
 import { DEFAULT_FILTERS } from './filters';
 import {
+  applyPrefilters,
   districtsFilterClause,
   effectiveBbox,
   matchesDistricts,
   priceNullTolerantOr,
+  type BrowsePrefilters,
   type DistrictMatchRow,
 } from './queries';
 import type { DistrictChip } from './filters';
@@ -33,6 +35,59 @@ describe('priceNullTolerantOr', () => {
     expect(priceNullTolerantOr(null, 5_000_000)).toBe(
       'price_czk.lte.5000000,price_czk.is.null',
     );
+  });
+});
+
+/* Gate-2: the city-quality allowlist must be AND'd onto the cohort via the
+ * surrogate `listing_id`, NOT `sreality_id`. A post-Gate-2 non-sreality repr has
+ * a NULL sreality_id (IN never matches NULL → the listing silently vanishes from
+ * Map/Table/Cards/Count while browse_stats still counts it), and — worse — the
+ * id-spaces overlap by ~435, so a sreality_id passed into an `IN listing_id`
+ * predicate would match a DIFFERENT listing. Pin the filter column here. */
+describe('applyPrefilters (city-quality id-space)', () => {
+  const record = () => {
+    const calls: Array<{ col: string; vals: readonly unknown[] }> = [];
+    const q = {
+      in(col: string, vals: readonly unknown[]) {
+        calls.push({ col, vals });
+        return q;
+      },
+    };
+    return { q, calls };
+  };
+  const base: BrowsePrefilters = {
+    listingIds: null,
+    obecIds: null,
+    propertyIds: null,
+    empty: false,
+  };
+
+  it('filters the city-quality allowlist on listing_id, never sreality_id', () => {
+    const { q, calls } = record();
+    applyPrefilters(q, { ...base, listingIds: [10, 20, 30] });
+    expect(calls).toContainEqual({ col: 'listing_id', vals: [10, 20, 30] });
+    expect(calls.some((c) => c.col === 'sreality_id')).toBe(false);
+  });
+
+  it('leaves the other prefilter grains on their own columns', () => {
+    const { q, calls } = record();
+    applyPrefilters(q, {
+      ...base,
+      listingIds: [1],
+      obecIds: [500],
+      propertyIds: [7],
+    });
+    expect(calls).toEqual([
+      { col: 'listing_id', vals: [1] },
+      { col: 'obec_id', vals: [500] },
+      { col: 'property_id', vals: [7] },
+    ]);
+  });
+
+  it('applies no id filter when city-quality is inactive (null)', () => {
+    const { q, calls } = record();
+    applyPrefilters(q, base);
+    expect(calls).toEqual([]);
   });
 });
 

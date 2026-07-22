@@ -399,8 +399,15 @@ export default function BrowseExperience({
     return `cards:${sp.toString()}`;
   }, [filters, sort]);
 
+  /* The on-card estimate is sreality-keyed (the estimation backend runs by
+   * sreality_id), so a post-Gate-2 non-sreality card (sreality_id NULL) can't be
+   * estimated — drop the nulls so the batch lookup never queries `sreality_id IN
+   * (…,null)` and no null bleeds into the estimate-state map. */
   const cardIds = useMemo(
-    () => cards.rows.map((r) => r.sreality_id),
+    () =>
+      cards.rows
+        .map((r) => r.sreality_id)
+        .filter((x): x is number => x != null),
     [cards.rows],
   );
   const [estimatingIds, setEstimatingIds] = useState<ReadonlySet<number>>(
