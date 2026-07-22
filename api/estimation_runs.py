@@ -40,7 +40,7 @@ import contextlib
 import logging
 import time
 from collections.abc import Iterator
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
@@ -448,6 +448,97 @@ _EMPTY_RESOLUTION = _Resolution(
     parse_warnings=[],
 )
 
+JOB_LANE_SETTING = "estimation_job_lane_enabled"
+
+
+def _job_lane_enabled(conn: "psycopg.Connection") -> bool:
+    """True when POST /estimations should hand execution to the realtime
+    worker's estimation lane (Amendment A10) instead of running the heavy work
+    in-process. Reads app_settings.estimation_job_lane_enabled — an absent key
+    (or any read error) means False, so the lane ships dark and a settings
+    hiccup never strands a submit."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT value FROM app_settings WHERE key = %s",
+                (JOB_LANE_SETTING,),
+            )
+            row = cur.fetchone()
+    except Exception:  # noqa: BLE001 - a settings read must never fail a submit
+        LOG.warning("job-lane flag read failed; treating as disabled")
+        return False
+    if row is None:
+        return False
+    value = row[0]
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in ("true", "1", "yes", "on")
+    return bool(value)
+
+
+def _job_payload(
+    body: s.CreateEstimationIn, resolution: _Resolution,
+) -> dict[str, Any]:
+    """Snapshot the execution inputs for the worker job lane. The run row IS the
+    job (no new table): {body, resolution} is everything _execute_estimation_run
+    needs, captured AFTER yield-input derivation so the worker re-runs nothing.
+    source_html is dropped — it's already persisted as its own column and the
+    execution path never reads resolution.source_html, so this keeps the
+    (transient) payload small."""
+    res = asdict(resolution)
+    res["source_html"] = None
+    return {"body": body.model_dump(mode="json"), "resolution": res}
+
+
+def execute_pending_run(
+    conn: "psycopg.Connection",
+    sreality_client: "SrealityClient",
+    llm_client: "LLMClient",
+    run_id: int,
+    payload: dict[str, Any],
+) -> None:
+    """Execute a `pending` estimation_runs row claimed by the realtime worker's
+    estimation lane. Rehydrates the job_payload snapshot, rebuilds target/filters,
+    and runs the SAME heavy path the in-process BackgroundTask runs — only the
+    executor moved off the request threadpool (Amendment A10). Fully
+    self-contained: any failure flips the row to 'failed', so a claimed row can
+    never get stuck. Never raises."""
+    try:
+        body = s.CreateEstimationIn(**payload["body"])
+        resolution = _Resolution(**payload["resolution"])
+    except Exception as exc:  # noqa: BLE001
+        LOG.exception("estimation lane: invalid job_payload for run %s", run_id)
+        _safe_mark_failed(
+            conn, run_id,
+            f"job payload invalid: {type(exc).__name__}: {exc}"[:1000],
+        )
+        return
+    try:
+        target = _build_target(
+            resolution.target_spec, resolution.input_sreality_id,
+        )
+        filters = _build_filters(body, load_filter_defaults(conn))
+    except Exception as exc:  # noqa: BLE001
+        LOG.exception(
+            "estimation lane: target/filters build failed for run %s", run_id,
+        )
+        _safe_mark_failed(
+            conn, run_id,
+            f"target build failed: {type(exc).__name__}: {exc}"[:1000],
+        )
+        return
+    try:
+        _execute_estimation_run(
+            conn, sreality_client, llm_client, run_id,
+            body=body, resolution=resolution, target=target, filters=filters,
+        )
+    except Exception as exc:  # noqa: BLE001 - the lane must not crash on one run
+        LOG.exception("estimation lane: run %s crashed", run_id)
+        _safe_mark_failed(
+            conn, run_id, f"lane crash: {type(exc).__name__}: {exc}"[:1000],
+        )
+
 
 def create_estimation_run(
     conn: "psycopg.Connection",
@@ -510,6 +601,7 @@ def create_estimation_run(
     body.expected_monthly_rent_czk = expected_rent
     resolution.yield_input_derivation = derivation
 
+    lane = _job_lane_enabled(conn)
     skill_obj = None
     if body.mode == "agent":
         from api.skills import SkillNotFound, load_skill
@@ -523,7 +615,11 @@ def create_estimation_run(
                 extra_warnings=[],
                 account_id=account_id,
             )
-        initial_status = "running"
+        # Agent runs normally INSERT 'running' so per-turn llm_calls attribute
+        # while the loop runs in-process. On the job lane the worker stamps
+        # 'running' + claimed_at at claim time, so the row starts 'pending' and
+        # the lane's claim (WHERE status='pending') can see it.
+        initial_status = "pending" if lane else "running"
     else:
         initial_status = "pending"
 
@@ -562,7 +658,16 @@ def create_estimation_run(
         contextual_text=body.contextual_text,
         skill_name=skill_obj.name if skill_obj is not None else None,
         skill_version=skill_obj.version if skill_obj is not None else None,
+        job_payload=_job_payload(body, resolution) if lane else None,
     )
+
+    if lane:
+        # Execution drains off the request process onto the realtime worker's
+        # estimation lane (Amendment A10): a 240 s agent run no longer pins a
+        # Starlette threadpool token, and a deploy SIGTERM no longer kills it
+        # mid-flight with no ledger row. The worker claims this pending row and
+        # runs the same heavy path; the client polls GET /estimations/{id}.
+        return _fetch_run(conn, run_id) or {}
 
     if background_tasks is not None:
         background_tasks.add_task(
@@ -784,10 +889,17 @@ def sweep_stuck_runs(
     """Mark any estimation_runs in a non-terminal status older than the
     cutoff as 'failed'. Returns the number of rows updated.
 
-    Called from the FastAPI lifespan startup hook to recover rows
-    orphaned by a server restart mid-background-task. Manual SQL is
-    fine for one-off cleanup; this is the routine path so the operator
-    doesn't have to.
+    Called from the FastAPI lifespan startup hook to recover rows orphaned by a
+    server restart mid-background-task, AND periodically by the realtime worker's
+    estimation lane so a run orphaned mid-execution (worker crash) frees its
+    concurrency/idempotency slot instead of polling a corpse forever (A10).
+
+    `running` rows are keyed off coalesce(claimed_at, created_at) — the worker
+    stamps claimed_at when it starts a run, so a legitimately long agent run is
+    timed from when execution BEGAN, not from when it was queued behind a
+    backlog. Legacy background-task runs have claimed_at NULL and fall back to
+    created_at (identical to the pre-lane behavior). `pending` rows have no claim
+    time, so they key off created_at as before.
     """
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(
@@ -796,7 +908,8 @@ def sweep_stuck_runs(
             "    error_message = coalesce(error_message, "
             "        'interrupted by server restart') "
             "WHERE status IN ('pending', 'running') "
-            "  AND created_at < now() - make_interval(mins => %s) "
+            "  AND coalesce(claimed_at, created_at) "
+            "      < now() - make_interval(mins => %s) "
             "RETURNING id",
             (older_than_minutes,),
         )
@@ -1750,6 +1863,13 @@ def _insert_run(conn: "psycopg.Connection", **fields: Any) -> int:
         _sid_at + 1,
         "(SELECT id FROM listings WHERE sreality_id = %(input_sreality_id)s)",
     )
+    # Optional worker-lane execution snapshot (migration 349). Kept out of
+    # _RUN_COLUMNS so it never rides the API read surface; only ever present when
+    # the job lane is enabled, and cleared to NULL by the lane at terminal.
+    if fields.get("job_payload") is not None:
+        fields["job_payload"] = Jsonb(fields["job_payload"])
+        cols.append("job_payload")
+        values.append("%(job_payload)s")
     cols_sql = ", ".join(cols)
     placeholders = ", ".join(values)
     sql = (

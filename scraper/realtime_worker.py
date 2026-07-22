@@ -131,6 +131,20 @@ DEDUP_MAX_SECONDS_CAP = 240.0
 MAINTENANCE_INTERVAL_DEFAULT = 120
 MAINTENANCE_BATCH_SIZE_DEFAULT = 2000
 
+# estimation lane (Wave 1 W1-3 / Amendment A10): drain `pending` estimation_runs
+# — the agent/deterministic rent-estimate executor moved OFF the FastAPI request
+# threadpool onto this worker, so a 240 s agent run can't pin a Starlette token
+# and a deploy SIGTERM can't kill a paid run mid-flight (no resume, no ledger
+# row). Ships DARK: the lane idles until the operator sets
+# estimation_job_lane_enabled, which ALSO makes POST /estimations route rows to
+# it (one flag, both halves). One run per pass keeps each pass bounded by a
+# single run's wall clock; the heartbeat lane beats independently so the worker
+# stays observably live through a long run. Each pass first runs the periodic
+# stuck-run sweep so a run orphaned by a worker crash frees its slot.
+ESTIMATION_JOB_LANE_SETTING = "estimation_job_lane_enabled"
+ESTIMATION_INTERVAL_DEFAULT = 5
+ESTIMATION_STUCK_MINUTES_DEFAULT = 15
+
 # sreality count-probe lane (W3): sreality's v1 search API ignores every sort
 # param, so the newest-first delta probe the other portals use is impossible for
 # it. Instead this lane polls pagination.total per (cm, ct) every
@@ -263,6 +277,21 @@ def _read_maintenance_interval() -> int:
 def _read_maintenance_batch_size() -> int:
     return _read_int(
         "realtime_maintenance_batch_size", MAINTENANCE_BATCH_SIZE_DEFAULT)
+
+
+def _read_estimation_interval() -> int:
+    # The flag gates the lane via interval<=0 (idle-not-dead, the _lane_loop
+    # contract): disabled => 0 (no claim attempts at all), enabled => the
+    # configured poll interval. Ships dark because the flag defaults absent.
+    if not _read_flag(ESTIMATION_JOB_LANE_SETTING):
+        return 0
+    return _read_int(
+        "realtime_estimation_interval_seconds", ESTIMATION_INTERVAL_DEFAULT)
+
+
+def _read_estimation_stuck_minutes() -> int:
+    return _read_int(
+        "estimation_stuck_run_minutes", ESTIMATION_STUCK_MINUTES_DEFAULT)
 
 
 def _read_flag(key: str) -> bool:
@@ -786,6 +815,104 @@ async def _maintenance_pass(stop_event: asyncio.Event, state: dict[str, Any]) ->
     _record_pass(state, "maintenance", last)
 
 
+# estimation lane: claim ONE pending run atomically over the transaction pooler.
+# FOR UPDATE SKIP LOCKED (not a session advisory lock — unsound over the pooler,
+# the mig-279 lesson) flips pending->running + stamps claimed_at/worker in one
+# statement; `job_payload IS NOT NULL` ensures only lane-routed rows are claimed,
+# never a legacy inline row still executing in an API BackgroundTask.
+_CLAIM_ESTIMATION_SQL = """
+    WITH c AS (
+        SELECT id FROM estimation_runs
+        WHERE status = 'pending' AND job_payload IS NOT NULL
+        ORDER BY created_at
+        LIMIT 1
+        FOR UPDATE SKIP LOCKED
+    )
+    UPDATE estimation_runs r
+       SET status = 'running', claimed_at = now(), worker = %(worker)s
+      FROM c WHERE r.id = c.id
+    RETURNING r.id, r.job_payload
+"""
+
+
+def _sweep_estimations_sync() -> int:
+    """Periodic zombie-run sweep (A10): fail runs stuck non-terminal past the
+    threshold so a run orphaned mid-execution (worker crash) frees its slot
+    instead of the user polling a corpse forever. Reuses THE api implementation
+    (keys `running` off coalesce(claimed_at, created_at))."""
+    from api.estimation_runs import sweep_stuck_runs
+
+    minutes = _read_estimation_stuck_minutes()
+    conn = db.connect()
+    try:
+        return sweep_stuck_runs(conn, older_than_minutes=minutes)
+    finally:
+        with contextlib.suppress(Exception):
+            conn.close()
+
+
+def _estimation_sync() -> dict[str, Any]:
+    """Claim ONE pending run and execute it on the worker's own connection,
+    reusing THE api execute_pending_run path (never forks the estimator). One run
+    per pass bounds each pass by a single run's wall clock; the heartbeat lane
+    beats independently so the worker stays observably alive through a 240 s run.
+    Lazy imports keep api.* off the worker's startup path AND off every idle
+    pass (only pulled in once a row is actually claimed). Clears job_payload at
+    terminal to reclaim the (potentially large) execution snapshot."""
+    conn = db.connect()
+    try:
+        with conn.transaction(), conn.cursor() as cur:
+            cur.execute(_CLAIM_ESTIMATION_SQL, {"worker": WORKER_NAME})
+            row = cur.fetchone()
+        if row is None:
+            return {"claimed": 0}
+        run_id, payload = int(row[0]), row[1]
+        from api import dependencies as deps
+        from api.estimation_runs import execute_pending_run
+        from api.llm_client import LLMClient
+        status = "failed"
+        try:
+            sreality_client = deps.get_sreality_client()
+            llm_client = LLMClient(conn, providers=deps.get_providers())
+            execute_pending_run(
+                conn, sreality_client, llm_client, run_id, payload,
+            )
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT status FROM estimation_runs WHERE id = %s", (run_id,),
+                )
+                r = cur.fetchone()
+                status = r[0] if r else "unknown"
+        finally:
+            with contextlib.suppress(Exception), conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE estimation_runs SET job_payload = NULL WHERE id = %s",
+                    (run_id,),
+                )
+        LOG.info("ESTIMATION lane ran run_id=%d status=%s", run_id, status)
+        return {"claimed": 1, "run_id": run_id, "status": status}
+    finally:
+        with contextlib.suppress(Exception):
+            conn.close()
+
+
+async def _estimation_pass(stop_event: asyncio.Event, state: dict[str, Any]) -> None:
+    if stop_event.is_set():
+        return
+    swept = 0
+    try:
+        swept = await asyncio.to_thread(_sweep_estimations_sync)
+    except Exception:  # noqa: BLE001 - a sweep failure must not skip execution
+        LOG.exception("ESTIMATION lane: stuck-run sweep failed")
+    if swept:
+        LOG.info("ESTIMATION lane swept %d stuck run(s)", swept)
+    result = await asyncio.to_thread(_estimation_sync)
+    last: dict[str, Any] = {"claimed": result.get("claimed", 0), "swept": swept}
+    if "status" in result:
+        last["status"] = result["status"]
+    _record_pass(state, "estimation", last)
+
+
 def _beat_sync(state: dict[str, Any]) -> None:
     conn = db.connect()
     try:
@@ -913,6 +1040,10 @@ async def _amain() -> int:
             "maintenance", stop_event, _read_maintenance_interval,
             lambda: _maintenance_pass(stop_event, state),
             default_interval=MAINTENANCE_INTERVAL_DEFAULT)),
+        ("estimation", lambda: _lane_loop(
+            "estimation", stop_event, _read_estimation_interval,
+            lambda: _estimation_pass(stop_event, state),
+            default_interval=ESTIMATION_INTERVAL_DEFAULT)),
         ("heartbeat", lambda: _lane_loop(
             "heartbeat", stop_event, lambda: HEARTBEAT_INTERVAL_SECONDS,
             lambda: _heartbeat_pass(state),

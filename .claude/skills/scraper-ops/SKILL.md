@@ -363,6 +363,17 @@ Lanes shipped so far:
 - **Unified real-time geo+street dirty path** (PR #713) — the street dirty-drain and the geo
   scan-state lane were merged into one queue / one decision brain rather than two parallel dirty
   paths.
+- **Estimation job lane** (migration 349, Wave 1 W1-3 / Phase 1 Amendment A10) — moves agent +
+  deterministic rent-estimate EXECUTION off the FastAPI request threadpool (a 240 s agent run
+  used to pin a Starlette token; a deploy SIGTERM killed paid runs mid-flight). Claims one
+  `pending` `estimation_runs` row per pass via `FOR UPDATE SKIP LOCKED`, flips it `running` +
+  stamps `claimed_at`/`worker`, runs the SAME `execute_pending_run` path from a `{body,
+  resolution}` snapshot the submit route stored in `job_payload` (the run row stays the job — no
+  new table), then clears the payload. Each pass first runs the periodic stuck-run sweep (keyed
+  off `coalesce(claimed_at, created_at)`) so a run orphaned by a crash frees its slot. Ships
+  **DARK**: idle until `estimation_job_lane_enabled` is set — the SAME flag makes
+  `POST /estimations` route rows to the lane instead of an in-process BackgroundTask, so the
+  cutover (and rollback) is one setting, no deploy.
 
 ## Publication gate and pipeline verification (migrations 273–274)
 
