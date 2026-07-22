@@ -760,7 +760,10 @@ function PropertyPageGroup({
   const srealityIds = useMemo(() => {
     const s = new Set<number>();
     for (const list of sourcesMap?.values() ?? []) {
-      for (const src of list) s.add(src.sreality_id);
+      // Guard the null (post-Gate-2 non-sreality source) so it never enters the
+      // set — images_public is still batched by sreality_id here, and a null
+      // would be a dead key (mirrors the Dedup collector's guard).
+      for (const src of list) if (src.sreality_id != null) s.add(src.sreality_id);
     }
     return [...s];
   }, [sourcesMap]);

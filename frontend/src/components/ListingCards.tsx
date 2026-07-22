@@ -31,7 +31,7 @@ import { portalLabel } from '@/lib/portals';
 import { placePrimary } from '@/lib/placeLabel';
 import type { ListingEstimate } from '@/lib/types';
 import { runSurfaceUrl } from '@/lib/runLinks';
-import { listingPath } from '@/lib/listingUrl';
+import { listingRowPath } from '@/lib/listingUrl';
 
 /* The card grid is CONTAINER-intrinsic, not viewport-keyed: columns flow to
  * fit the cards COLUMN's own width via `auto-fill`, each at least --card-min
@@ -88,10 +88,11 @@ interface Props {
   /* Truthy whenever the operator has narrowed by map area. Drives the
    * "0 in this map area — Show all" empty state. */
   hasBounds: boolean;
-  /* Hover-sync set: when a sreality_id appears here (because the
+  /* Hover-sync set: when a card's listing_id appears here (because the
    * user is hovering the matching pin on the map, or the matching row
    * in the table), the card lights up. Cards push their own hover
-   * state outward via onHover. */
+   * state (their listing_id) outward via onHover. Keyed on the surrogate
+   * listing_id, never sreality_id — null-safe past Gate-2. */
   hoveredIds: ReadonlySet<number>;
   onHover: (ids: ReadonlyArray<number> | null) => void;
   /* Which pane originated the hover. Map-origin hovers get the full
@@ -163,10 +164,10 @@ export default function ListingCards({
    * cluster hover would grey the whole grid with nothing lit. */
   const hoveredOnPage =
     hoverOrigin === 'map' && rows != null
-      ? rows.filter((r) => hoveredIds.has(r.sreality_id))
+      ? rows.filter((r) => hoveredIds.has(r.listing_id))
       : [];
   const mapHover = hoveredOnPage.length > 0;
-  const firstHoveredId = mapHover ? hoveredOnPage[0].sreality_id : null;
+  const firstHoveredId = mapHover ? hoveredOnPage[0].listing_id : null;
 
   /* "N of total" — N is what has accumulated so far via infinite scroll. */
   const loaded = rows?.length ?? 0;
@@ -205,18 +206,21 @@ export default function ListingCards({
           <>
             <ul className={CARD_GRID_CLASS}>
               {rows.map((r) => (
-                <li key={r.sreality_id}>
+                <li key={r.listing_id}>
                   <Card
                     r={r}
-                    hovered={hoveredIds.has(r.sreality_id)}
-                    dimmed={mapHover && !hoveredIds.has(r.sreality_id)}
-                    scrollOnHover={mapHover && r.sreality_id === firstHoveredId}
+                    hovered={hoveredIds.has(r.listing_id)}
+                    dimmed={mapHover && !hoveredIds.has(r.listing_id)}
+                    scrollOnHover={mapHover && r.listing_id === firstHoveredId}
                     onHover={onHover}
                     mergeMode={mergeMode}
                     selected={selectedPropertyIds.has(r.property_id)}
                     onToggleSelect={onToggleSelect}
-                    estimate={estimates?.[r.sreality_id]}
-                    estimating={estimatingIds.has(r.sreality_id)}
+                    /* Estimate state is sreality-keyed (the estimation backend
+                       runs by sreality_id) — a null-sreality card can't be
+                       estimated, so it reads no state and shows no affordance. */
+                    estimate={r.sreality_id != null ? estimates?.[r.sreality_id] : undefined}
+                    estimating={r.sreality_id != null && estimatingIds.has(r.sreality_id)}
                     onEstimate={onEstimate}
                   />
                 </li>
@@ -667,7 +671,7 @@ function Card({
             </span>
           </p>
         )}
-        {r.category_main === 'byt' && (
+        {r.category_main === 'byt' && r.sreality_id != null && (
           <div className="mt-1 flex justify-end">
             <EstimateCorner
               srealityId={r.sreality_id}
@@ -705,8 +709,8 @@ function Card({
   return (
     <Link
       ref={setWrapperEl}
-      to={listingPath(r.sreality_id)}
-      onMouseEnter={() => onHover([r.sreality_id])}
+      to={listingRowPath(r)}
+      onMouseEnter={() => onHover([r.listing_id])}
       onMouseLeave={() => onHover(null)}
       className={wrapperClass}
     >

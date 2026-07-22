@@ -12,7 +12,7 @@ import {
 import type { Furnished, Ownership } from '@/lib/types';
 import { placePrimary } from '@/lib/placeLabel';
 import { listingKindLabel } from '@/lib/enums';
-import { listingPath } from '@/lib/listingUrl';
+import { listingRowPath } from '@/lib/listingUrl';
 
 interface Column {
   field: SortField | 'furnished' | 'ownership';
@@ -100,9 +100,9 @@ export default function ListingTable({
             {isEmpty && <EmptyRow hasFilters={hasFilters} onClear={onClearFilters} />}
             {!showSkeleton && rows?.map((r) => (
               <Row
-                key={r.sreality_id}
+                key={r.listing_id}
                 row={r}
-                hovered={hoveredIds.has(r.sreality_id)}
+                hovered={hoveredIds.has(r.listing_id)}
                 onHover={onHover}
               />
             ))}
@@ -206,7 +206,7 @@ function Row({
    * surfaced this", just "these belong together". */
   return (
     <tr
-      onMouseEnter={() => onHover([row.sreality_id])}
+      onMouseEnter={() => onHover([row.listing_id])}
       onMouseLeave={() => onHover(null)}
       className={[
         'border-b border-[var(--color-rule-soft)] transition-colors',
@@ -217,10 +217,12 @@ function Row({
     >
       <td className="px-4 py-2.5 align-middle">
         <Link
-          to={listingPath(row.sreality_id)}
+          to={listingRowPath(row)}
           className="font-mono tabular-nums text-[var(--color-copper)] hover:underline underline-offset-2"
         >
-          {row.sreality_id}
+          {/* Portal-native id; a post-Gate-2 non-sreality row has none, so the
+              cell shows a dash while the link falls back to the property route. */}
+          {row.sreality_id ?? '—'}
         </Link>
       </td>
       <td className="px-4 py-2.5 align-middle text-[var(--color-ink)] truncate max-w-[260px]">

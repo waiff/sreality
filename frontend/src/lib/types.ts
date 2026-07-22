@@ -1607,6 +1607,12 @@ export interface MergesResponse {
  * (multi-portal dedup). Drives the Listing Detail "listed on N sites" panel. */
 export interface PropertySource {
   property_id: number;
+  /* The child listing's SURROGATE id (property_sources_public.id = listings.id,
+   * migration 334). NEVER null on rows read from property_sources_public — the
+   * R2 resolver-chain keys child loaders (snapshots, sibling links) on this
+   * instead of sreality_id, which a post-Gate-2 non-sreality row may not have.
+   * Optional only so ClipAudit's synthetic single-source fallback still types. */
+  id?: number;
   sreality_id: number;
   source: string;
   source_url: string | null;

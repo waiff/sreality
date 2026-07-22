@@ -26,9 +26,27 @@ export function listingCanonicalPath(source: string, sourceIdNative: string): st
 }
 
 /* Property-grain entry: `/listing?property=<id>` lands on `ListingDetail`,
- * which resolves the property's representative listing and redirects to
- * `listingPath(reprId)`. Used where only the property id is known (the dedup
+ * which resolves the property's representative listing and redirects to its
+ * canonical detail URL. Used where only the property id is known (the dedup
  * merge feed). */
 export function propertyListingPath(propertyId: number): string {
   return `/listing?property=${propertyId}`;
+}
+
+/* The detail link for a PROPERTY-GRAIN Browse row (Map / Table / Cards). The
+ * legacy `/listing/{sreality_id}` route is one round trip, so it stays the fast
+ * path whenever the representative child HAS a sreality_id. Post-Gate-2 a new
+ * non-sreality listing inserts `sreality_id = NULL`, and `listingPath(null)`
+ * would build `/listing/null` (the id-spaces overlap, so we must never route the
+ * surrogate through the legacy sreality route either); those rows fall back to
+ * the property route, which ListingDetail resolves to the canonical natural-key
+ * URL. `property_id` is never null on the property grain, so this always yields
+ * a working link. */
+export function listingRowPath(row: {
+  sreality_id: number | null;
+  property_id: number;
+}): string {
+  return row.sreality_id != null
+    ? listingPath(row.sreality_id)
+    : propertyListingPath(row.property_id);
 }

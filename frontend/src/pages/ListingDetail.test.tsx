@@ -146,7 +146,7 @@ vi.mock('@/lib/queries', async (importOriginal) => {
     fetchListingBySreality: vi.fn(),
     fetchListingById: vi.fn(),
     fetchListingIdByNaturalKey: vi.fn(),
-    fetchPropertyReprId: vi.fn(async () => null),
+    fetchPropertyReprNaturalKey: vi.fn(async () => null),
     fetchPropertySources: vi.fn(async () => ({ property_id: null, sources: [] })),
     fetchPropertyMf: vi.fn(async () => null),
     fetchSnapshotsForListings: vi.fn(async () => []),
