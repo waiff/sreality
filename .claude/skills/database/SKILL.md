@@ -196,6 +196,18 @@ until an explicit `SET LOCAL ROLE authenticated`, fail-closed by construction) +
 `api/tenant_pool.py`'s `tenant_conn` — see the connection-modes section above for the
 runtime mechanics.
 
+**Shared-market tables under the tenant role (Amendment A5, migration 349)**: the
+shared `listings`/`properties`/`images` tables are RLS-enabled-with-**zero**-policies
+(deny-all), so a `tenant_conn` handler reading them directly gets nothing — the anon/tenant
+SPA is expected to read the owner-bypass `*_public` views instead. **Exception: `properties`
+now carries one permissive `FOR SELECT TO authenticated` policy** (its base columns are
+market-only, no broker PII), so the merge-survivor resolver and similar tenant-conn reads
+work. **`listings` stays deny-all** (broker_email/phone/name + raw_json inline — a row
+policy would leak them column-wise via PostgREST); read a listing's identity on the tenant
+conn through `listing_natural_key_public`, and market facts through a service-role
+connection (as `portal_lookup` does), never a blanket policy. Don't add a `USING (true)`
+policy to `listings`.
+
 **First-signup backfill race**: the on-signup trigger (migration 294) does an atomic
 INSERT-with-`ON CONFLICT` CAS into `legacy_backfill_claim` (mirrors the lease-row CAS
 pattern above) — whoever signs up first wins and claims every pre-tenancy NULL-
