@@ -1391,18 +1391,43 @@ export const fetchBorderCasesByImageIds = async (
   return new Set((data ?? []).map((r) => (r as BorderCase).image_id));
 };
 
-/* /phash-audit label combobox: every DISTINCT label already in the training set, so
- * a label the operator typed once shows up as a suggestion next time (on top of the
- * fixed CLIP taxonomy, which the combobox already offers unconditionally). Bounded
- * (the table is starting from zero — see migration 309), so an unindexed distinct
- * scan is fine; revisit if the set grows into the thousands. */
-export const fetchDistinctTrainingLabels = async (): Promise<string[]> => {
+/* /clip-audit training-label browser: every image filed under ONE training label,
+ * newest edit first. The property feed can't express this — a label's images are
+ * scattered across the whole corpus (any category, any property, most of them far
+ * past the loaded page), so auditing a label as a CLASS needs its own flat read.
+ *
+ * The cap is deliberately the SAME 500 as the bulk-relabel endpoint's batch cap, so
+ * "select all" on a fully-loaded class can never be rejected as too large. The page
+ * says so when a label actually hits it (biggest class today: 86). */
+export const TRAINING_LABEL_PAGE_MAX = 500;
+
+export const fetchTrainingExamplesByLabel = async (
+  label: string,
+): Promise<TrainingExample[]> => {
   const { data, error } = await supabase
     .from('image_training_examples_public')
-    .select('label')
-    .limit(2000);
+    .select('image_id,label,updated_at')
+    .eq('label', label)
+    .order('updated_at', { ascending: false })
+    .limit(TRAINING_LABEL_PAGE_MAX);
   if (error) throw error;
-  return [...new Set((data ?? []).map((r) => (r as { label: string }).label))].sort();
+  return (data ?? []) as unknown as TrainingExample[];
+};
+
+/* The images behind those examples. Sibling of fetchImagesByListingIds — same view
+ * and columns, keyed on the image's own id instead of its listing's. */
+export const fetchImagesByImageIds = async (
+  ids: ReadonlyArray<number>,
+): Promise<Map<number, ImagePublic>> => {
+  if (ids.length === 0) return new Map();
+  const { data, error } = await supabase
+    .from('images_public')
+    .select(IMAGE_PUBLIC_COLS)
+    .in('id', ids as number[]);
+  if (error) throw error;
+  const out = new Map<number, ImagePublic>();
+  for (const row of (data ?? []) as unknown as ImagePublic[]) out.set(row.id, row);
+  return out;
 };
 
 export interface TrainingLabelCount {

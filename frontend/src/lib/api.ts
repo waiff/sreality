@@ -963,6 +963,18 @@ export const deleteTrainingExample = (
     query: { image_id },
   });
 
+// /clip-audit batch relabel: move a whole checked selection under one label in a
+// single statement (server-side dedupe + a 500-per-batch cap). Same upsert
+// semantics as setTrainingExample — an image not yet in the set gets added.
+export const bulkSetTrainingExamples = (body: {
+  image_ids: number[];
+  label: string;
+}): Promise<{ data: { updated: number; label: string; image_ids: number[] } }> =>
+  request<{ data: { updated: number; label: string; image_ids: number[] } }>(
+    '/dedup/training-examples/bulk',
+    { method: 'POST', json: body },
+  );
+
 // "Border case" flag (migration 310): even a human isn't confident about this
 // image's classification. Independent of image_training_examples — no label
 // required, may coexist with one (a best-guess flagged as uncertain).
