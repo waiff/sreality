@@ -312,6 +312,8 @@ def test_a5_properties_readable_listings_still_deny_all(
     Regression for the Wave-1 breakage where a signed-in user's add-note /
     bookmark / add-to-collection all 404'd because resolve_active_property_ids'
     walk over `properties` returned zero rows under RLS deny-all."""
+    import psycopg
+
     srid = 900_000_000 + int(uuid.uuid4().int % 50_000_000)
     with svc.cursor() as cur:
         cur.execute("INSERT INTO properties DEFAULT VALUES RETURNING id")
@@ -330,18 +332,9 @@ def test_a5_properties_readable_listings_still_deny_all(
                 assert cur.fetchall() == [(prop,)], (
                     "A5 policy: authenticated must read base properties"
                 )
-                # `listings` stays deny-all — the broker-PII base table is NOT
-                # opened by A5 (a permissive policy there would leak broker_email
-                # via PostgREST; RLS filters rows, not columns).
-                cur.execute(
-                    "SELECT count(*) FROM listings WHERE sreality_id = %s", (srid,)
-                )
-                assert cur.fetchone()[0] == 0, (
-                    "base listings must remain deny-all to authenticated (broker PII)"
-                )
-                # ...but the PII-free identity view resolves the id<->sreality_id
-                # map create_note depends on (owner-bypass, no broker columns).
-                # Both directions the INSERT subselects use must round-trip.
+                # The PII-free identity view resolves the id<->sreality_id map
+                # create_note depends on (owner-bypass, no broker columns). Both
+                # directions the INSERT subselects use must round-trip.
                 cur.execute(
                     "SELECT id FROM listing_natural_key_public WHERE sreality_id = %s",
                     (srid,),
@@ -358,6 +351,24 @@ def test_a5_properties_readable_listings_still_deny_all(
                 assert cur.fetchone() == (srid,), (
                     "listing_natural_key_public must resolve id -> sreality_id for a tenant"
                 )
+            # `listings` stays closed to a tenant — A5 does NOT open the broker-PII
+            # base table. The block mechanism differs by environment and BOTH are
+            # acceptable: production grants `authenticated` a table-level SELECT (via
+            # Supabase's default ACL) so RLS deny-all returns 0 rows; the CI schema
+            # replay has no such grant so it raises InsufficientPrivilege first.
+            # Either way the tenant obtains no `listings` row (and no broker_email).
+            # Runs in its own SAVEPOINT so a privilege error doesn't poison the txn.
+            try:
+                with conn.transaction():
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "SELECT count(*) FROM listings WHERE sreality_id = %s", (srid,)
+                        )
+                        assert cur.fetchone()[0] == 0, (
+                            "base listings RLS must return zero rows to authenticated"
+                        )
+            except psycopg.errors.InsufficientPrivilege:
+                pass  # grant-blocked (CI replay) — also a valid deny
     finally:
         with svc.cursor() as cur:
             cur.execute("DELETE FROM listing_snapshots WHERE sreality_id = %s", (srid,))
