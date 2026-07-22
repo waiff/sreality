@@ -3942,7 +3942,8 @@ def test_run_engine_visual_high_but_different_floor_plan_dismisses(monkeypatch: 
     monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 0)  # no pHash -> visual
     monkeypatch.setattr(eng, "_floor_plan_image_ids", lambda conn, sid: [sid])
 
-    def classify(sid: int) -> dict:
+    def classify(key: ListingKey) -> dict:
+        sid = key.sreality_id
         return {"data": {"images": [{"image_id": sid * 10 + 1, "room_type": "kitchen"}]}}
 
     def compare(a: int, b: int, room: str, ids_a: list, ids_b: list,
@@ -3970,7 +3971,8 @@ def test_run_engine_visual_high_merges_low_queues(monkeypatch: Any) -> None:
     )
     monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 0)  # no pHash -> falls to visual
 
-    def classify(sid: int) -> dict:
+    def classify(key: ListingKey) -> dict:
+        sid = key.sreality_id
         return {"data": {"images": [{"image_id": sid * 10 + 1, "room_type": "kitchen"}]}}
 
     # First pair: kitchen -> High. (single candidate pair). The 6th `model` arg
@@ -4017,7 +4019,8 @@ def test_run_engine_site_plan_different_unit_queues(monkeypatch: Any) -> None:
     # Both have a site plan -> pHash defers to the development guard.
     monkeypatch.setattr(eng, "_both_have_site_plan", lambda *a, **k: True)
 
-    def classify(sid: int) -> dict:
+    def classify(key: ListingKey) -> dict:
+        sid = key.sreality_id
         return {"data": {"images": [
             {"image_id": sid * 10 + 1, "room_type": "site_plan"},
             {"image_id": sid * 10 + 2, "room_type": "kitchen"},
@@ -4049,7 +4052,8 @@ def test_run_engine_site_plan_same_unit_falls_through_to_merge(monkeypatch: Any)
     monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 5)
     monkeypatch.setattr(eng, "_both_have_site_plan", lambda *a, **k: True)  # defer to visual stage
 
-    def classify(sid: int) -> dict:
+    def classify(key: ListingKey) -> dict:
+        sid = key.sreality_id
         return {"data": {"images": [
             {"image_id": sid * 10 + 1, "room_type": "site_plan"},
             {"image_id": sid * 10 + 2, "room_type": "kitchen"},
@@ -4125,7 +4129,8 @@ def test_run_engine_auto_merge_off_queues_candidate_without_vision(monkeypatch: 
     )
     vision: list[int] = []
 
-    def classify(sid: int) -> dict:
+    def classify(key: ListingKey) -> dict:
+        sid = key.sreality_id
         vision.append(sid)
         return {"data": {"images": []}}
 
@@ -4216,7 +4221,8 @@ def test_run_engine_visual_high_not_dismissed(monkeypatch: Any) -> None:
     )
     monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 0)
 
-    def classify(sid: int) -> dict:
+    def classify(key: ListingKey) -> dict:
+        sid = key.sreality_id
         return {"data": {"images": [{"image_id": sid * 10 + 1, "room_type": "kitchen"}]}}
 
     conn = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None, source="bazos")])
@@ -4235,7 +4241,8 @@ def test_run_engine_low_on_generic_room_queues_not_dismiss(monkeypatch: Any) -> 
     monkeypatch.setattr(eng, "merge_properties", lambda *a, **k: {"data": {"merge_group_id": "g"}})
     monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 0)
 
-    def classify(sid: int) -> dict:
+    def classify(key: ListingKey) -> dict:
+        sid = key.sreality_id
         return {"data": {"images": [{"image_id": sid * 10 + 1, "room_type": "living_room"}]}}
 
     conn = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None, source="bazos")])
@@ -4253,7 +4260,8 @@ def test_run_engine_autodismiss_off_queues_low(monkeypatch: Any) -> None:
     monkeypatch.setattr(eng, "merge_properties", lambda *a, **k: {"data": {"merge_group_id": "g"}})
     monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 0)
 
-    def classify(sid: int) -> dict:
+    def classify(key: ListingKey) -> dict:
+        sid = key.sreality_id
         return {"data": {"images": [{"image_id": sid * 10 + 1, "room_type": "kitchen"}]}}
 
     conn = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None, source="bazos")])
@@ -4299,7 +4307,8 @@ def test_run_engine_partial_room_scan_does_not_dismiss(monkeypatch: Any) -> None
     monkeypatch.setattr(eng, "merge_properties", lambda *a, **k: {"data": {"merge_group_id": "g"}})
     monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 0)
 
-    def classify(sid: int) -> dict:
+    def classify(key: ListingKey) -> dict:
+        sid = key.sreality_id
         return {"data": {"images": [
             {"image_id": sid * 10 + 1, "room_type": "kitchen"},
             {"image_id": sid * 10 + 2, "room_type": "bedroom"},
@@ -4323,7 +4332,8 @@ def test_run_engine_warm_cache_hits_do_not_consume_budget(monkeypatch: Any) -> N
     monkeypatch.setattr(eng, "merge_properties", lambda *a, **k: {"data": {"merge_group_id": "g"}})
     monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 0)
 
-    def classify(sid: int) -> dict:
+    def classify(key: ListingKey) -> dict:
+        sid = key.sreality_id
         return {"data": {"images": [
             {"image_id": sid * 10 + 1, "room_type": "kitchen"},
             {"image_id": sid * 10 + 2, "room_type": "bathroom"},
@@ -4348,7 +4358,8 @@ def test_run_engine_missing_room_verdict_blocks_dismiss(monkeypatch: Any) -> Non
     monkeypatch.setattr(eng, "merge_properties", lambda *a, **k: {"data": {"merge_group_id": "g"}})
     monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 0)
 
-    def classify(sid: int) -> dict:
+    def classify(key: ListingKey) -> dict:
+        sid = key.sreality_id
         return {"data": {"images": [
             {"image_id": sid * 10 + 1, "room_type": "kitchen"},
             {"image_id": sid * 10 + 2, "room_type": "bathroom"},
@@ -4443,7 +4454,8 @@ def test_cosine_tier_routes_high_cosine_to_haiku(monkeypatch: Any) -> None:
     )
     monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 0)
 
-    def classify(sid: int) -> dict:
+    def classify(key: ListingKey) -> dict:
+        sid = key.sreality_id
         return {"data": {"images": [{"image_id": sid * 10 + 1, "room_type": "kitchen"}]}}
 
     seen: list[str | None] = []
@@ -4473,7 +4485,8 @@ def test_cosine_tier_low_cosine_skips_room_and_queues_not_dismiss(
     import scripts.dedup_engine as eng
     monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 0)
 
-    def classify(sid: int) -> dict:
+    def classify(key: ListingKey) -> dict:
+        sid = key.sreality_id
         return {"data": {"images": [{"image_id": sid * 10 + 1, "room_type": "kitchen"}]}}
 
     def compare(a: int, b: int, room: str, ids_a: list, ids_b: list,
@@ -4529,7 +4542,8 @@ def test_pair_audit_does_not_record_queued_pairs(monkeypatch: Any) -> None:
     monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 0)
     monkeypatch.setattr(eng, "_enqueue_candidate", lambda *a, **k: None)
 
-    def classify(sid: int) -> dict:
+    def classify(key: ListingKey) -> dict:
+        sid = key.sreality_id
         return {"data": {"images": [{"image_id": sid * 10 + 1, "room_type": "kitchen"}]}}
 
     def compare(a: int, b: int, room: str, ids_a: list, ids_b: list,
@@ -4556,7 +4570,8 @@ def test_pair_audit_records_visual_factors(monkeypatch: Any) -> None:
     )
     monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 0)
 
-    def classify(sid: int) -> dict:
+    def classify(key: ListingKey) -> dict:
+        sid = key.sreality_id
         return {"data": {"images": [{"image_id": sid * 10 + 1, "room_type": "kitchen"}]}}
 
     def compare(a: int, b: int, room: str, ids_a: list, ids_b: list,
@@ -5021,7 +5036,8 @@ def test_resolve_visual_defers_when_classify_is_deferred() -> None:
     a, b = _key(1, category_main="dum"), _key(2, category_main="dum")
     calls: list[int] = []
 
-    def classify_fn(sid: int) -> dict[str, Any]:
+    def classify_fn(key: ListingKey) -> dict[str, Any]:
+        sid = key.sreality_id
         calls.append(sid)
         if sid == a.sreality_id:
             return {"deferred": True}
@@ -5041,7 +5057,8 @@ def test_resolve_visual_defers_when_site_plan_is_deferred() -> None:
 
     a, b = _key(1, category_main="dum"), _key(2, category_main="dum")
 
-    def classify_fn(sid: int) -> dict[str, Any]:
+    def classify_fn(key: ListingKey) -> dict[str, Any]:
+        sid = key.sreality_id
         return {"data": {"images": [{"image_id": sid, "room_type": "site_plan"}]}}
 
     def site_plan_fn(
@@ -5063,7 +5080,8 @@ def test_resolve_visual_defers_on_first_room_and_does_not_try_others() -> None:
 
     a, b = _key(1, category_main="dum"), _key(2, category_main="dum")
 
-    def classify_fn(sid: int) -> dict[str, Any]:
+    def classify_fn(key: ListingKey) -> dict[str, Any]:
+        sid = key.sreality_id
         return {"data": {"images": [
             {"image_id": sid * 10 + 1, "room_type": "kitchen"},
             {"image_id": sid * 10 + 2, "room_type": "living_room"},
@@ -5096,7 +5114,8 @@ def test_resolve_pair_defer_splits_stats_by_reason(monkeypatch: Any) -> None:
     conn = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None, source="bazos")])
     monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 0)  # skip pHash -> visual
 
-    def classify_fn(sid: int) -> dict[str, Any]:
+    def classify_fn(key: ListingKey) -> dict[str, Any]:
+        sid = key.sreality_id
         return {"data": {"images": [{"image_id": sid * 10 + 1, "room_type": "kitchen"}]}}
 
     def compare_fn(a_id: int, b_id: int, room_type: str, ids_a: list[int], ids_b: list[int],

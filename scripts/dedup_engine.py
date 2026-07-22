@@ -1350,18 +1350,18 @@ def _both_have_site_plan(
 _DEFERRED = "deferred"  # sentinel: classify_fn spooled a batch request instead of a live call
 
 
-def _classify_or_none(classify_fn: Any, sreality_id: int) -> list[dict[str, Any]] | str | None:
+def _classify_or_none(classify_fn: Any, key: ListingKey) -> list[dict[str, Any]] | str | None:
     if classify_fn is None:
         return None
     try:
-        res = classify_fn(sreality_id)
+        res = classify_fn(key)
         if res is None:  # cache-only: not fully warmed yet -> wait for the batch lane
             return None
         if res.get("deferred"):
             return _DEFERRED
         return res["data"]["images"]
     except Exception as exc:  # noqa: BLE001 - one bad listing must not kill the run
-        LOG.warning("classify %s failed: %s", sreality_id, exc)
+        LOG.warning("classify listing_id=%s failed: %s", key.listing_id, exc)
         return None
 
 
@@ -1395,8 +1395,8 @@ def _resolve_visual(
     room verdicts confidently say "different property" (decide_visual_dismiss), the
     pair is auto-dismissed instead of queued for the operator.
     """
-    imgs_a = _classify_or_none(classify_fn, a.sreality_id)
-    imgs_b = _classify_or_none(classify_fn, b.sreality_id)
+    imgs_a = _classify_or_none(classify_fn, a)
+    imgs_b = _classify_or_none(classify_fn, b)
     if imgs_a == _DEFERRED or imgs_b == _DEFERRED:
         # A cold classify call was spooled into the batch tier (§4.1) instead of
         # paid inline — retry next pass once the batch lane warms it, NOT queue
@@ -2863,11 +2863,12 @@ def _build_classify_fn(
     classify_model = llm.resolve_model("llm_room_classify_model")
     defer_providers = _batch_defer_providers() if defer_to_batch else None
 
-    def _fn(sreality_id: int) -> dict[str, Any] | None:
+    def _fn(key: ListingKey) -> dict[str, Any] | None:
+        listing_id = key.listing_id
         # Prefer the FREE CLIP room tags; fall back to the paid LLM classify only
         # for a listing CLIP hasn't tagged yet (during the backfill ramp).
         if prefer_clip and clip_model:
-            grouping = clip_room_grouping(conn, sreality_id=sreality_id, model=clip_model)
+            grouping = clip_room_grouping(conn, listing_id=listing_id, model=clip_model)
             if grouping is not None:
                 if clip_counter is not None:
                     clip_counter[0] += 1
@@ -2877,7 +2878,7 @@ def _build_classify_fn(
                 ]}}
         if defer_to_batch:
             state, rooms = cached_classification(
-                conn, sreality_id=sreality_id, model=classify_model)
+                conn, listing_id=listing_id, model=classify_model)
             if state == "classified" and rooms is not None:
                 return {"data": {"images": [
                     {"image_id": iid, "room_type": rt}
@@ -2886,14 +2887,15 @@ def _build_classify_fn(
             from toolkit.dedup_batch_defer import enqueue_deferred_request
             spooled = enqueue_deferred_request(
                 conn, defer_providers,
-                kind="classify", model=classify_model, sreality_id_a=sreality_id,
-                sreality_id_b=None, room_type=None,
-                build_fn=lambda: build_classify_request(conn, llm, sreality_id=sreality_id),
+                kind="classify", model=classify_model,
+                sreality_id_a=key.sreality_id, listing_id_a=listing_id,
+                sreality_id_b=None, listing_id_b=None, room_type=None,
+                build_fn=lambda: build_classify_request(conn, llm, listing_id=listing_id),
             )
             return {"deferred": True} if spooled else None
         if _breaker_open(error_count):
             state, rooms = cached_classification(
-                conn, sreality_id=sreality_id, model=classify_model)
+                conn, listing_id=listing_id, model=classify_model)
             if state != "classified" or rooms is None:
                 return None
             return {"data": {"images": [
@@ -2901,10 +2903,10 @@ def _build_classify_fn(
                 for rt, ids in rooms.items() for iid in ids
             ]}}
         try:
-            return classify_listing_images(conn, llm, sreality_id=sreality_id)
+            return classify_listing_images(conn, llm, listing_id=listing_id)
         except Exception as exc:  # noqa: BLE001 - one bad listing must not kill the run
             _count_vision_error(error_count)
-            LOG.warning("classify %s failed: %s", sreality_id, exc)
+            LOG.warning("classify listing_id=%s failed: %s", listing_id, exc)
             return None
     return _fn
 
@@ -3155,9 +3157,10 @@ def _build_cache_only_fns(
     site_plan_overrides = load_model_overrides(conn, SITE_PLAN_OVERRIDE_KEY)
     floor_plan_model = llm.resolve_model("llm_floor_plan_match_model")
 
-    def classify_fn(sreality_id: int) -> dict[str, Any] | None:
+    def classify_fn(key: ListingKey) -> dict[str, Any] | None:
+        listing_id = key.listing_id
         if prefer_clip and clip_model:
-            grouping = clip_room_grouping(conn, sreality_id=sreality_id, model=clip_model)
+            grouping = clip_room_grouping(conn, listing_id=listing_id, model=clip_model)
             if grouping is not None:
                 if clip_counter is not None:
                     clip_counter[0] += 1
@@ -3166,7 +3169,7 @@ def _build_cache_only_fns(
                     for rt, ids in grouping.items() for iid in ids
                 ]}}
         state, rooms = cached_classification(
-            conn, sreality_id=sreality_id, model=classify_model)
+            conn, listing_id=listing_id, model=classify_model)
         if state != "classified" or rooms is None:
             return None  # not fully warmed -> wait for the batch lane
         images = [
