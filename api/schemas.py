@@ -121,8 +121,9 @@ class VerifyFreshnessIn(BaseModel):
 
 
 class CompareSnapshotsIn(BaseModel):
-    sreality_id: int
+    sreality_id: int | None = None
     since_days: int | None = None
+    listing_id: int | None = None
 
 
 class DescribeNeighborhoodIn(BaseModel):
