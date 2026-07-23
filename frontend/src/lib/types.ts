@@ -1448,7 +1448,8 @@ export const manualEstimateSourceLabel = (kind: ManualEstimateSourceKind): strin
 
 export interface ManualRentalEstimate {
   id: number;
-  sreality_id: number;
+  sreality_id: number | null;
+  listing_id: number | null;
   rent_czk: number;
   author: string;
   source_kind: ManualEstimateSourceKind;
