@@ -402,7 +402,17 @@ export interface TargetSpecIn {
 }
 
 export interface ComparableUsed {
-  sreality_id: number;
+  /* Surrogate `listing_id` (api/estimate_yield.py:_used_entry, since #879/#892).
+   * Present on every run finalised after that ship; ABSENT (not null — the key
+   * itself is missing) on the ~600 frozen pre-cutover rows, which carry
+   * sreality_id only (estimation_runs rows are immutable, rule 12). A comparable
+   * always has at least one of {listing_id, sreality_id} — prefer listing_id for
+   * identity (React keys, map marker ids, batch-fetch routing) since it survives
+   * the post-flip NULL sreality_id case a non-sreality-portal comparable can hit. */
+  listing_id?: number | null;
+  /* NULL for a post-Gate-2-flip non-sreality-portal comparable (flip not live
+   * yet, so always populated today) — never assume non-null. */
+  sreality_id: number | null;
   snapshot_id: number | null;
   snapshot_date: string | null;
   data_age_days: number | null;

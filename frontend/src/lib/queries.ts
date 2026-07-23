@@ -1262,6 +1262,27 @@ export const fetchListingsByIds = async (
   return out;
 };
 
+/* Sibling of fetchListingsByIds keyed on the surrogate `id` (listings_public.id).
+ * The estimation comparables track (RunPanel's ComparablesSection) carries
+ * `listing_id` on every comparable emitted after R2 (#879/#892) — this is what
+ * a comparable with a NULL sreality_id (post-Gate-2-flip non-sreality listing)
+ * must be fetched through instead, mirroring fetchImagesForListingIds. */
+export const fetchListingsForListingIds = async (
+  ids: ReadonlyArray<number>,
+): Promise<Map<number, ListingPublic>> => {
+  if (ids.length === 0) return new Map();
+  const { data, error } = await supabase
+    .from('listings_public')
+    .select(DETAIL_COLS)
+    .in('id', ids as number[]);
+  if (error) throw error;
+  const out = new Map<number, ListingPublic>();
+  for (const row of (data ?? []) as unknown as ListingPublic[]) {
+    out.set(row.id, row);
+  }
+  return out;
+};
+
 /* Batch image fetch for the comparables modal — first three per id is
  * enough for the modal's thumbnail strip; the Listing Detail page
  * still pulls the full set independently. */
@@ -1273,12 +1294,15 @@ const IMAGE_PUBLIC_COLS =
 
 /* Batch image fetch keyed on `sreality_id` — kept for the callers whose upstream
  * read model is still sreality-keyed and carries no surrogate id: the dedup
- * candidate sides (DedupPropertySide), the estimation comparables
- * (ComparableUsed), and the vision bakeoff pairs. These CANNOT cut to listing_id
- * without a backend change to those payloads, and flipping this loader in place
- * would be a catastrophic half-swap (a sreality_id fed into an `IN listing_id`
- * matches a DIFFERENT listing, id-spaces overlap). The Browse card path uses
- * fetchImagesForListingIds below instead. */
+ * candidate sides (DedupPropertySide) and the vision bakeoff pairs. These
+ * CANNOT cut to listing_id without a backend change to those payloads, and
+ * flipping this loader in place would be a catastrophic half-swap (a
+ * sreality_id fed into an `IN listing_id` matches a DIFFERENT listing,
+ * id-spaces overlap). The Browse card path uses fetchImagesForListingIds
+ * below instead — as does RunPanel's ComparablesSection now, for the subset
+ * of comparables (ComparableUsed) that carry a `listing_id`; this loader
+ * only covers the sreality_id-only fallback for pre-#879 frozen runs
+ * (see RunPanel.fetchComparableImages). */
 export const fetchImagesByListingIds = async (
   ids: ReadonlyArray<number>,
   perId = 3,

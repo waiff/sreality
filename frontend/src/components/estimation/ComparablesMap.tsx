@@ -8,7 +8,13 @@ import { useMapFeatureHover } from '@/lib/useMapFeatureHover';
 import MapImagePreview from '../MapImagePreview';
 
 export interface ComparablePoint {
-  sreality_id: number;
+  /* Marker identity — the comparable's surrogate listing_id (preferred) or
+   * legacy sreality_id fallback, computed by RunPanel's comparableId(). NOT
+   * necessarily the row's own sreality_id: a post-Gate-2-flip non-sreality
+   * comparable has none, so this is the ONLY id every marker is guaranteed
+   * to have. Matches the keys of `imagesById` and the table's row ids. */
+  listing_id: number;
+  sreality_id: number | null;
   lat: number;
   lng: number;
   price_czk: number | null;
@@ -26,16 +32,18 @@ interface Subject {
 interface Props {
   subject: Subject;
   comparables: ComparablePoint[];
-  /* Photos per comparable sreality_id — fed by the existing imagesQ in
-   * ComparablesSection (ImagePublic satisfies ImageRef structurally). */
+  /* Photos per comparable, keyed on ComparablePoint.listing_id — fed by the
+   * existing imagesQ in ComparablesSection (ImagePublic satisfies ImageRef
+   * structurally). */
   imagesById: ReadonlyMap<number, ImageRef[]>;
   /* Cross-pane hover sync (scalar — the estimation map has no clusters):
    * a table-row hover sets this to light the matching pin; a pin hover is
-   * pushed out via onHover to light the matching row. */
+   * pushed out via onHover to light the matching row. Both ends key on
+   * ComparablePoint.listing_id. */
   hoveredId: number | null;
   onHover: (id: number | null) => void;
-  /* Pin click → open the full comparable modal. */
-  onPick?: (sreality_id: number) => void;
+  /* Pin click → open the full comparable modal, keyed on listing_id. */
+  onPick?: (listing_id: number) => void;
 }
 
 const EMPTY_SET: ReadonlySet<number> = new Set<number>();
@@ -197,7 +205,7 @@ export default function ComparablesMap({
         const id = f?.id;
         if (typeof id !== 'number') return;
         clearCloseTimer();
-        if (pinHoverRef.current?.sreality_id === id) return;
+        if (pinHoverRef.current?.listing_id === id) return;
         const p = f!.properties as unknown as ComparablePoint;
         pinHoverRef.current = p;
         setPinHover(p);
@@ -233,7 +241,7 @@ export default function ComparablesMap({
       type: 'FeatureCollection',
       features: comparables.map((c) => ({
         type: 'Feature',
-        id: c.sreality_id,
+        id: c.listing_id,
         properties: c,
         geometry: { type: 'Point', coordinates: [c.lng, c.lat] },
       })),
@@ -250,7 +258,7 @@ export default function ComparablesMap({
   /* Drive the pin highlight from pinHover first so the dot stays lit while the
    * cursor is on the preview card (where `hoveredId` may momentarily clear). */
   const effHovered = useMemo<ReadonlySet<number>>(() => {
-    const id = pinHover?.sreality_id ?? hoveredId;
+    const id = pinHover?.listing_id ?? hoveredId;
     return id == null ? EMPTY_SET : new Set([id]);
   }, [pinHover, hoveredId]);
   useMapFeatureHover(mapRef.current, ready, 'comparables', effHovered, comparables);
@@ -263,8 +271,8 @@ export default function ComparablesMap({
     const src = map.getSource('hover-halo') as GeoJSONSource | undefined;
     if (!src) return;
     const tableId =
-      hoveredId != null && hoveredId !== pinHover?.sreality_id ? hoveredId : null;
-    const c = tableId != null ? comparables.find((x) => x.sreality_id === tableId) : undefined;
+      hoveredId != null && hoveredId !== pinHover?.listing_id ? hoveredId : null;
+    const c = tableId != null ? comparables.find((x) => x.listing_id === tableId) : undefined;
     src.setData({
       type: 'FeatureCollection',
       features: c
@@ -293,7 +301,7 @@ export default function ComparablesMap({
   }, [pinHover]);
 
   const previewUrls = useMemo(
-    () => (pinHover ? (imagesById.get(pinHover.sreality_id) ?? []).map(imageSrc) : []),
+    () => (pinHover ? (imagesById.get(pinHover.listing_id) ?? []).map(imageSrc) : []),
     [pinHover, imagesById],
   );
 
@@ -323,7 +331,7 @@ export default function ComparablesMap({
             district={pinHover.district}
             onMouseEnter={() => {
               clearCloseTimer();
-              onHoverRef.current?.(pinHover.sreality_id);
+              onHoverRef.current?.(pinHover.listing_id);
             }}
             onMouseLeave={scheduleClose}
           />
