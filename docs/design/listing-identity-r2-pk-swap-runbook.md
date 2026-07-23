@@ -49,6 +49,17 @@ Two bugs were caught during Phase A that are worth remembering:
    surrogate with a separate `SELECT` and carried it through Python. Now inline, like
    every other site — the id never travels through Python where a mis-zip could point
    rows at the wrong listing.
+3. **(2026-07-23, Gate-2 wave-5 tail) The "always `legacy IS NOT NULL`" predicate above
+   was necessary but not sufficient.** It correctly keeps the *gap* and *mismatch*
+   buckets from false-firing on legit-NULL-legacy rows — but it also means, taken alone,
+   those two buckets go **completely blind** to any row whose legacy id is NULL once
+   Gate-2 flips (new non-sreality-portal rows, by design). A writer bug that stamps
+   NEITHER id on such a row would report 100% clean forever. `check_dual_write_parity`
+   now carries a third bucket, `orphans` (`legacy IS NULL AND listing_id IS NULL`), that
+   watches exactly that shape — existence-only (there's no legacy value left to
+   cross-check the surrogate against). Same fix in `check_merge_latency`: it now joins
+   `dedup_pair_audit` on `left_listing_id`/`right_listing_id` (populated for every row,
+   legacy or not) instead of `left_sreality_id`/`right_sreality_id`.
 
 **A4 backfill — CONVERGED (2026-07-20).** 10.7M rows filled across 22 carriers in ~30
 minutes of runtime (images 8.26M, listing_snapshots 1.41M, properties 544k). Every
@@ -666,7 +677,11 @@ via verify_pipeline.yml, rings the in-app bell on red). Per table:
 Watermark = one row per table captured at A2 deploy (id for serial-PK tables; `dispatched_at`
 for notification_dispatches — its uuid PK is unordered; `created_at` for cohort entries).
 Predicate is always `legacy IS NOT NULL AND …` — never bare `listing_id IS NULL` (legit-NULL
-legacy rows would false-fire forever, and it stays correct post-flip).
+legacy rows would false-fire forever). **Correction (2026-07-23, see the Phase A bug list
+above, item 3): "stays correct post-flip" was true for THESE two buckets but incomplete —
+it also meant they went totally blind to legit-NULL-legacy rows, a live monitoring gap once
+Gate-2 flips. A third bucket, `orphans` (`legacy IS NULL AND listing_id IS NULL`), now covers
+that shape.**
 
 **A4. Backfills** (script PR: `scripts/backfill_child_listing_ids.py`, template =
 backfill_listing_surrogate_id.py **with two fixes**): keyset-paginate the child PK with a
