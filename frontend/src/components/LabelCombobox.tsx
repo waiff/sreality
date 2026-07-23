@@ -18,6 +18,10 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 export interface LabelOption {
   value: string;
   label: string;
+  /** Current training-example count for this label, shown in brackets — matches the
+   * coverage chips at the top of the audit page. Omitted for options where a count
+   * isn't meaningful (e.g. the free-text "Create" option). */
+  count?: number;
 }
 
 export default function LabelCombobox({
@@ -121,6 +125,9 @@ export default function LabelCombobox({
                 className="w-full px-2.5 py-1 text-left text-[0.78rem] text-[var(--color-ink)] hover:bg-[var(--color-copper-soft)]"
               >
                 {opt.label}
+                {opt.count != null && (
+                  <span className="ml-1 text-[var(--color-ink-4)]">({opt.count})</span>
+                )}
               </button>
             </li>
           ))}
