@@ -480,6 +480,19 @@ remediation R3 closes that. Full spec: `docs/design/public-release-remediation-2
       (sticky renewal), skips the passes when another replica holds it, releases on graceful
       shutdown, and **fails open** (runs unguarded) if the lease can't be evaluated. Co-hosted
       in the API (Phase 1 A8), not moved to the dark worker. Test `test_matcher_lease_cas_acquires_and_yields`.
+    - **Delivery safety envelope (suppression + bounce webhook) — SHIPPED DARK, migration 367.**
+      The delivery mechanism (outbox + `channel_sends` + Resend/Telegram transports) was built
+      Sprint N but had no public-safety envelope. Added: (1) `notification_suppression(channel,
+      address)` — GLOBAL, deletion-surviving address suppression (mirrors `broker_outreach_suppression`);
+      `ChannelClient.send`/`retry` now check it pre-send and record a terminal `'suppressed'`
+      `channel_sends` row instead of hitting the transport. (2) `channel_sends.status` widened
+      +`delivered`/`bounced`/`complained`/`suppressed` (foreseen at mig 207). (3) `POST /webhooks/resend`
+      — a Svix-HMAC-verified webhook (stdlib `hmac`/`hashlib`, the Stripe-webhook auth class; 503
+      without `RESEND_WEBHOOK_SECRET`; dedups by `svix-id` via `resend_webhook_events`) that advances
+      the send row's status by `provider_message_id` and inserts a suppression on bounce/complaint.
+      All internal objects RLS-on + default-ACL revoked. Tests: `test_resend_webhook` (Svix HMAC
+      accept/tamper/stale/wrong-secret/missing), `test_send_skips_suppressed_recipient`. **Go-live is
+      operator-gated**: a Resend account + verified sending domain + `RESEND_WEBHOOK_SECRET`.
 
 **Housekeeping done 2026-07-20:** operator enabled Supabase Auth's leaked-password-protection
 toggle (Authentication → Sign In / Providers → Email → "Prevent use of leaked passwords").
