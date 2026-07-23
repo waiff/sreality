@@ -37,7 +37,7 @@ LOG = logging.getLogger("check_street_key_parity")
 # would appear first). last_seen_at also covers UPDATED rows (a refetch that rewrites
 # street), which row-creation recency would miss.
 _RECENT_SQL = """
-    SELECT sreality_id, street, street_name_key
+    SELECT id, sreality_id, street, street_name_key
     FROM listings
     WHERE street IS NOT NULL AND street <> ''
     ORDER BY last_seen_at DESC
@@ -51,7 +51,7 @@ _RECENT_SQL = """
 # fixed 2% capped the yield at ~4k rows and silently under-sampled bigger requests
 # (which the minimum-sample floor would then flag as a false alarm).
 _RANDOM_SQL = """
-    SELECT sreality_id, street, street_name_key
+    SELECT id, sreality_id, street, street_name_key
     FROM listings TABLESAMPLE SYSTEM (%(pct)s)
     WHERE street IS NOT NULL AND street <> ''
     LIMIT %(n)s
@@ -59,15 +59,20 @@ _RANDOM_SQL = """
 
 
 def find_mismatches(
-    rows: list[tuple[int, str, str | None]],
-) -> list[tuple[int, str, str | None, str | None]]:
-    """(sreality_id, street, stored, recomputed) for every row whose stored key differs
-    from the function. Pure — the whole decision, unit-tested."""
-    out: list[tuple[int, str, str | None, str | None]] = []
-    for sid, street, stored in rows:
+    rows: list[tuple[int, int | None, str, str | None]],
+) -> list[tuple[int, int | None, str, str | None, str | None]]:
+    """(listing_id, sreality_id, street, stored, recomputed) for every row whose stored
+    key differs from the function. Pure — the whole decision, unit-tested.
+
+    Identity is keyed on listing_id (the surrogate PK, never NULL) — a post-Gate-2
+    non-sreality row has sreality_id=NULL, and a bare int(sreality_id) would raise
+    TypeError and crash the whole sampled run instead of just flagging the row.
+    """
+    out: list[tuple[int, int | None, str, str | None, str | None]] = []
+    for lid, sid, street, stored in rows:
         expected = street_name_key(street)
         if stored != expected:
-            out.append((int(sid), street, stored, expected))
+            out.append((int(lid), int(sid) if sid is not None else None, street, stored, expected))
     return out
 
 
@@ -106,9 +111,9 @@ def main() -> int:
         return 1
     if not mismatches:
         return 0
-    for sid, street, stored, expected in mismatches[:20]:
-        LOG.error("PARITY MISMATCH sid=%s street=%r stored=%r expected=%r",
-                  sid, street, stored, expected)
+    for lid, sid, street, stored, expected in mismatches[:20]:
+        LOG.error("PARITY MISMATCH id=%s sid=%s street=%r stored=%r expected=%r",
+                  lid, sid, street, stored, expected)
     if len(mismatches) > 20:
         LOG.error("PARITY ... and %d more", len(mismatches) - 20)
     LOG.error(
