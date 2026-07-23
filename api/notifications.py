@@ -36,6 +36,7 @@ import contextlib
 import json
 import logging
 import time
+import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Literal
@@ -539,13 +540,23 @@ def create_subscription(
     filter_spec: WatchdogFilterSpec,
     is_active: bool = True,
     channels: list[str] | None = None,
+    account_id: uuid.UUID | str | None = None,
 ) -> dict[str, Any]:
+    # account_id is NOT NULL (migration 364) — the route resolves it from the
+    # caller's JWT via tenant_pool.resolve_account_id and 400s before we get here
+    # if it can't; a None reaching this INSERT is a NotNullViolation by design.
     with conn.cursor() as cur:
         cur.execute(
             "INSERT INTO notification_subscriptions "
-            "  (name, filter_spec, is_active, channels) "
-            "VALUES (%s, %s::jsonb, %s, %s::text[]) RETURNING id",
-            (name, json.dumps(filter_spec.model_dump()), is_active, channels or []),
+            "  (name, filter_spec, is_active, channels, account_id) "
+            "VALUES (%s, %s::jsonb, %s, %s::text[], %s) RETURNING id",
+            (
+                name,
+                json.dumps(filter_spec.model_dump()),
+                is_active,
+                channels or [],
+                account_id,
+            ),
         )
         row = cur.fetchone()
     assert row is not None

@@ -449,6 +449,25 @@ remediation R3 closes that. Full spec: `docs/design/public-release-remediation-2
       `home_obec_pop`/`near_*`); the listings-grain callers via `_shared_filter_where`
       (comparables/velocity/transit) never set these filters, so the change is inert for them.
       Regression test `test_build_clauses_city_quality_uses_latlng_not_geom`.
+    - **Route-layer tenancy — SHIPPED, migration 364.** Phase 1 (mig 290/292) already
+      gave `notification_subscriptions`/`notification_dispatches` `account_id` + RLS +
+      the operator backfill, but all 11 `/notifications/*` routes still ran on the
+      **service-role** connection + static `require_token` (account-blind: with 4 accounts
+      now live, `get_unread_count`/`mark_all_seen`/the feed operated across ALL accounts).
+      Moved the 9 user-facing routes (subscription CRUD + feed + unread-count + mark-seen +
+      mark-all-seen) onto `tenant_pool.tenant_conn` — RLS now scopes every read/write to the
+      caller's account, and `create_subscription` resolves + stamps `account_id` from the JWT
+      (`resolve_account_id`, 400 if unresolvable). Behaviour-preserving for the operator's
+      static-token SPA (legacy branch → service-role, unscoped, exactly as today) until the
+      SPA/extension send real user JWTs. Left `POST /dispatches/{id}/estimate` (reads shared
+      `listings` deny-all + stamps an `estimation_runs` row — needs the A5 two-connection
+      split, a follow-up) and `POST /matcher/run` (platform-wide producers, rule #16) on the
+      service-role connection. Migration 364: routed the 38 orphan `system_health` dispatches
+      to the SYSTEM account (read policy's NULL escape → `= SYSTEM AND is_platform_admin()`,
+      still admin-only), hardened the dispatch trigger's else-branch to stamp SYSTEM, and made
+      `account_id` **NOT NULL** on both tables. Tests: `test_create_subscription_stamps_account_id`;
+      the standing route-coverage gate buckets all 9 as `tenant`. The manual two-account
+      pen-test (now possible — 4 accounts exist) is a launch-gate follow-up.
 
 **Housekeeping done 2026-07-20:** operator enabled Supabase Auth's leaked-password-protection
 toggle (Authentication → Sign In / Providers → Email → "Prevent use of leaked passwords").

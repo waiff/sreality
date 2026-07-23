@@ -1,18 +1,26 @@
 """FastAPI routes for the Watchdog (new-listing notification) surface.
 
-Mounted under `/notifications/*`. Bearer-gated by the standard
-`require_token` dependency, like every other write surface.
+Mounted under `/notifications/*`.
 
-Two flavours of writes touch this router:
+The user-facing surface — subscription CRUD, the dispatch feed, unread-count,
+mark-seen/mark-all-seen — runs on the **tenant pool** (`tenant_pool.tenant_conn`,
+RLS-scoped by the caller's JWT claims), so every read/write is account-isolated
+by the policies migrations 290/292 put on `notification_subscriptions` /
+`notification_dispatches`. A legacy static-`API_TOKEN` caller (the operator's SPA
+today) has no Supabase `sub`, so `tenant_conn` routes it to the unscoped
+service-role connection — behaviour-preserving until the SPA/extension send real
+user JWTs, at which point RLS becomes a live boundary. `verify_jwt` (which
+`tenant_conn` depends on) accepts BOTH the JWT and the legacy token, so no route
+loses the operator.
 
-- Subscription CRUD (`POST/PUT/DELETE /notifications/subscriptions/*`)
-  is straight psycopg I/O.
-- The "Run estimation" action on a dispatch row goes through
-  `BackgroundTasks`. The endpoint INSERTs a `pending` estimation_runs
-  row synchronously, returns immediately, then `run_pending_estimation`
-  finishes the deterministic estimate in the background. The frontend
-  polls the dispatch (or the linked estimation_run row) until the
-  status flips to a terminal value.
+Two routes deliberately stay on the service-role connection + `require_token`:
+- `POST /dispatches/{id}/estimate` kicks off an estimation that reads the shared
+  `listings` table (RLS deny-all for `authenticated`, the A5 shape) and INSERTs an
+  `estimation_runs` row whose own `account_id` stamping is Wave-1 metering scope —
+  moving it correctly needs the two-connection split `POST /listings/lookup` uses,
+  a separate follow-up.
+- `POST /matcher/run` runs the platform-wide producer passes (service-role by
+  design, rule #16); the row-level trigger stamps each dispatch's `account_id`.
 """
 
 from __future__ import annotations
@@ -24,6 +32,7 @@ from pydantic import BaseModel, Field
 
 from api import dependencies as deps
 from api import notifications as nf
+from api import tenant_pool
 from api.notifications import WatchdogFilterSpec
 
 if TYPE_CHECKING:
@@ -56,8 +65,7 @@ class UpdateSubscriptionIn(BaseModel):
 @router.get("/subscriptions")
 def get_subscriptions(
     include_inactive: bool = True,
-    conn: Any = Depends(deps.get_db_conn),
-    _: None = Depends(deps.require_token),
+    conn: Any = Depends(tenant_pool.tenant_conn),
 ) -> dict[str, Any]:
     rows = nf.list_subscriptions(conn, include_inactive=include_inactive)
     return {"data": rows, "total": len(rows)}
@@ -66,23 +74,29 @@ def get_subscriptions(
 @router.post("/subscriptions")
 def post_subscription(
     body: CreateSubscriptionIn,
-    conn: Any = Depends(deps.get_db_conn),
-    _: None = Depends(deps.require_token),
+    conn: Any = Depends(tenant_pool.tenant_conn),
+    claims: dict = Depends(deps.verify_jwt),
 ) -> dict[str, Any]:
+    account_id = tenant_pool.resolve_account_id(conn, claims)
+    if account_id is None:
+        # No resolvable account (a JWT with no membership, or the legacy operator
+        # before their first signup claimed the backfill) — the account_id column
+        # is NOT NULL (migration 364), so refuse rather than 500 on the insert.
+        raise HTTPException(status_code=400, detail="no account for caller")
     return nf.create_subscription(
         conn,
         name=body.name,
         filter_spec=body.filter_spec,
         is_active=body.is_active,
         channels=body.channels,
+        account_id=account_id,
     )
 
 
 @router.get("/subscriptions/{subscription_id}")
 def get_subscription(
     subscription_id: str,
-    conn: Any = Depends(deps.get_db_conn),
-    _: None = Depends(deps.require_token),
+    conn: Any = Depends(tenant_pool.tenant_conn),
 ) -> dict[str, Any]:
     row = nf.get_subscription(conn, subscription_id)
     if row is None:
@@ -94,8 +108,7 @@ def get_subscription(
 def put_subscription(
     subscription_id: str,
     body: UpdateSubscriptionIn,
-    conn: Any = Depends(deps.get_db_conn),
-    _: None = Depends(deps.require_token),
+    conn: Any = Depends(tenant_pool.tenant_conn),
 ) -> dict[str, Any]:
     row = nf.update_subscription(
         conn,
@@ -113,8 +126,7 @@ def put_subscription(
 @router.delete("/subscriptions/{subscription_id}")
 def delete_subscription(
     subscription_id: str,
-    conn: Any = Depends(deps.get_db_conn),
-    _: None = Depends(deps.require_token),
+    conn: Any = Depends(tenant_pool.tenant_conn),
 ) -> dict[str, Any]:
     if not nf.delete_subscription(conn, subscription_id):
         raise HTTPException(status_code=404, detail="subscription not found")
@@ -133,8 +145,7 @@ def get_dispatches(
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     cursor: str | None = Query(default=None, description="Keyset cursor (next_cursor)"),
-    conn: Any = Depends(deps.get_db_conn),
-    _: None = Depends(deps.require_token),
+    conn: Any = Depends(tenant_pool.tenant_conn),
 ) -> dict[str, Any]:
     try:
         return nf.list_dispatches(
@@ -154,13 +165,13 @@ def get_dispatches(
 @router.get("/unread-count")
 def get_unread_count(
     source_kind: Literal["watchdog", "collection_monitor", "system_health", "all"] = "all",
-    conn: Any = Depends(deps.get_db_conn),
-    _: None = Depends(deps.require_token),
+    conn: Any = Depends(tenant_pool.tenant_conn),
 ) -> dict[str, int]:
     """Unseen dispatch counts for the nav badge.
 
     Returns `{watchdog, collection_monitor, total, unread_count}` — `unread_count`
-    is the total (or the scoped count when `source_kind` is set).
+    is the total (or the scoped count when `source_kind` is set). RLS scopes the
+    count to the caller's own account.
     """
     return nf.get_unread_count(conn, source_kind=source_kind)
 
@@ -168,18 +179,20 @@ def get_unread_count(
 @router.post("/mark-all-seen")
 def post_mark_all_seen(
     source_kind: Literal["watchdog", "collection_monitor", "system_health", "all"] = "all",
-    conn: Any = Depends(deps.get_db_conn),
-    _: None = Depends(deps.require_token),
+    conn: Any = Depends(tenant_pool.tenant_conn),
 ) -> dict[str, int]:
-    """Mark every unseen dispatch (optionally scoped to a source) as seen."""
+    """Mark every unseen dispatch (optionally scoped to a source) as seen.
+
+    The UPDATE is account-blind SQL; the tenant pool's RLS UPDATE policy scopes it
+    to the caller's own dispatches.
+    """
     return {"updated": nf.mark_all_seen(conn, source_kind=source_kind)}
 
 
 @router.post("/dispatches/{dispatch_id}/mark-seen")
 def post_mark_seen(
     dispatch_id: str,
-    conn: Any = Depends(deps.get_db_conn),
-    _: None = Depends(deps.require_token),
+    conn: Any = Depends(tenant_pool.tenant_conn),
 ) -> dict[str, Any]:
     row = nf.mark_dispatch_seen(conn, dispatch_id)
     if row is None:
@@ -209,6 +222,12 @@ def post_kickoff_estimate(
     If the dispatch already has a run linked we surface the existing
     row untouched — the operator can click again on a failed run via
     the standard rerun affordance, not via this endpoint.
+
+    Stays on the service-role connection: it reads the shared `listings`
+    table (RLS deny-all for `authenticated`, the A5 shape) and stamps an
+    `estimation_runs` row whose per-account `account_id` is Wave-1 metering
+    scope — the correct tenant-pool move needs the two-connection split
+    `POST /listings/lookup` uses (a follow-up).
     """
     dispatch, run_id = nf.kickoff_estimation_for_dispatch(conn, dispatch_id)
     if not dispatch:
@@ -233,6 +252,9 @@ def post_matcher_run(
     for the next scheduler tick — the periodic loop continues to run
     on its own clock. Idempotent against the (subscription_id,
     property_id, change_kind) UNIQUE constraint.
+
+    Service-role by design: the producers scan the whole market (rule #16),
+    and the row-level trigger stamps each dispatch's `account_id`.
     """
     stats = nf.match_once(conn)
     change_stats = nf.match_changes_once(conn)
