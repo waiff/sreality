@@ -1,4 +1,11 @@
--- 362_browse_projection_source_id_native.sql
+-- 363_browse_projection_source_id_native.sql
+-- NOTE ON NUMBERING: applied live via the Supabase MCP under the name
+-- `362_browse_projection_source_id_native` (schema_migrations version
+-- 20260723201941) before a concurrent branch merged `362_trial_at_signup` to
+-- main. The recorded name is immutable, so the DISK file is renumbered to 363 to
+-- clear the duplicate-number guard; prod is unaffected (already applied), and CI
+-- replays this file on a fresh DB where the CREATE OR REPLACE is a clean forward.
+--
 -- Gate-2 canonical-URL tail: expose the repr listing's source_id_native on the
 -- Browse read path so the SPA can build /listing/{source}/{native} links for a
 -- representative listing that has no sreality_id (post-Gate-2 non-sreality rows
