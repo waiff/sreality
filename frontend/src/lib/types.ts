@@ -507,6 +507,12 @@ export interface EstimationRun {
   status: EstimationStatus;
   input_url: string | null;
   input_sreality_id: number | null;
+  /* Gate 2 surrogate twin of input_sreality_id (stamped by #914), the only
+   * handle for a post-Gate-2 non-sreality subject (input_sreality_id NULL).
+   * Null on rows written before #914 and on unresolved subjects (no matched
+   * listings row at all). Not yet consumed for routing — the existing
+   * input_sreality_id-gated links below are a documented separate cutover. */
+  input_listing_id: number | null;
   input_spec: TargetSpecIn | null;
   /* Discriminator added in migration 029. Null on legacy rows
    * predating the migration — readers should treat null as 'rent'. */

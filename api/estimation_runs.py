@@ -342,7 +342,7 @@ def _ms_since(mono_start: float) -> int:
 _RUN_COLUMNS: tuple[str, ...] = (
     "id", "created_at", "account_id", "source", "mode", "status",
     "estimate_kind",
-    "input_url", "input_sreality_id", "input_spec",
+    "input_url", "input_sreality_id", "input_listing_id", "input_spec",
     "input_purchase_price_czk",
     "estimated_monthly_rent_czk", "rent_p25_czk", "rent_p75_czk",
     "estimated_sale_price_czk", "sale_p25_czk", "sale_p75_czk",
@@ -377,9 +377,12 @@ _HAS_FEEDBACK_SUBSELECT = (
     ") AS has_feedback"
 )
 # Best-available city/locality string for the /estimations list:
-# - sreality runs use listings.district ("Praha 2"-style) via LEFT JOIN
-# - non-sreality runs fall back to the locality the LLM parser stored
-#   in parsed_url_cache.parse_result.extraction.locality.value
+# - runs with a resolved subject use listings.district ("Praha 2"-style) via
+#   LEFT JOIN (matched on the surrogate input_listing_id; input_sreality_id is
+#   only the fallback join key for pre-#914 rows never stamped with it —
+#   Gate 2, a post-Gate-2 non-sreality subject has input_sreality_id NULL)
+# - subjects with no matched listings row fall back to the locality the LLM
+#   parser stored in parsed_url_cache.parse_result.extraction.locality.value
 # Scalar subquery (not a join) on parsed_url_cache since source_url
 # isn't unique there — pick the freshest row.
 _LOCALITY_DISPLAY_EXPR = (
@@ -409,7 +412,8 @@ _LIST_PROJECTION = (
 )
 _LIST_FROM = (
     "estimation_runs er "
-    "LEFT JOIN listings l ON l.sreality_id = er.input_sreality_id"
+    "LEFT JOIN listings l ON l.id = er.input_listing_id "
+    "OR (er.input_listing_id IS NULL AND l.sreality_id = er.input_sreality_id)"
 )
 _RUN_COLUMNS_OUT: tuple[str, ...] = _RUN_COLUMNS + (
     "cost_usd_total", "has_feedback",
@@ -1506,18 +1510,28 @@ def latest_rent_estimations_by_listing(
 ) -> dict[int, dict[str, Any]]:
     """Latest RENT estimation_runs row per listing id (any status), for the
     Browse cards' on-card estimate chip. Returns {sreality_id: {...}}; ids with
-    no rent run are absent."""
+    no rent run are absent.
+
+    Joined through `listings` and matched preferring the surrogate
+    `input_listing_id` (Gate 2's stable handle), falling back to
+    `input_sreality_id` only for rows written before that column was
+    stamped (#914) — a run's input_sreality_id staying unmatched while its
+    input_listing_id correctly resolves would otherwise silently drop it
+    from a sreality-keyed caller's result."""
     if not sreality_ids:
         return {}
     ids = [int(x) for x in sreality_ids]
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT DISTINCT ON (input_sreality_id) "
-            "input_sreality_id, id, status, estimate_kind, "
-            "gross_yield_pct, estimated_monthly_rent_czk, created_at "
-            "FROM estimation_runs "
-            "WHERE input_sreality_id = ANY(%(ids)s) AND estimate_kind = 'rent' "
-            "ORDER BY input_sreality_id, created_at DESC",
+            "SELECT DISTINCT ON (l.sreality_id) "
+            "l.sreality_id, er.id, er.status, er.estimate_kind, "
+            "er.gross_yield_pct, er.estimated_monthly_rent_czk, er.created_at "
+            "FROM listings l "
+            "JOIN estimation_runs er "
+            "  ON er.input_listing_id = l.id "
+            "  OR (er.input_listing_id IS NULL AND er.input_sreality_id = l.sreality_id) "
+            "WHERE l.sreality_id = ANY(%(ids)s) AND er.estimate_kind = 'rent' "
+            "ORDER BY l.sreality_id, er.created_at DESC",
             {"ids": ids},
         )
         rows = cur.fetchall()
@@ -2182,13 +2196,13 @@ def _insert_run(
     # legacy smart key. Prefer an explicit input_listing_id from the caller's
     # resolution (Gate 2: the only handle for a NULL-sreality_id subject) and
     # fall back to the inline subquery for legacy sreality-anchored callers.
-    _sid_at = cols.index("input_sreality_id")
-    cols.insert(_sid_at + 1, "input_listing_id")
-    fields.setdefault("input_listing_id", None)
-    values.insert(
-        _sid_at + 1,
+    # input_listing_id now also rides the read surface (_RUN_COLUMNS), so its
+    # placeholder is already in `values` at its natural column position —
+    # only the VALUE expression needs overriding here, not a second column.
+    _lid_at = cols.index("input_listing_id")
+    values[_lid_at] = (
         "COALESCE(%(input_listing_id)s, "
-        "(SELECT id FROM listings WHERE sreality_id = %(input_sreality_id)s))",
+        "(SELECT id FROM listings WHERE sreality_id = %(input_sreality_id)s))"
     )
     # Optional worker-lane execution snapshot (migration 349). Kept out of
     # _RUN_COLUMNS so it never rides the API read surface; only ever present when
