@@ -358,17 +358,28 @@ def _ledger_side_sql(pid_expr: str, grp_expr: str) -> str:
     that did NOT move in this group; retired side -> the (min) listing that moved
     from it. Returns NULL for the survivor side only when the survivor was itself
     later merged away (its listings moved on) — an honest "—", never a false pair.
+
+    `property_merge_events.listing_id` is legacy SREALITY-valued and, post-Gate-2,
+    NULL for a moved non-sreality listing — so `array_agg(listing_id)` can itself
+    contain a NULL. `col = ANY(array-with-a-NULL)` is NULL (not false) for every
+    `_l.sreality_id` that isn't one of the array's non-NULL elements, which would
+    NULL out the whole `NOT (...)` predicate and starve the survivor-side subquery
+    to empty for EVERY group with such a listing (the established NOT-ANY-with-NULL
+    trap). Filter the NULL out of the array first, then COALESCE the (possibly now
+    NULL, if everything moved was non-sreality) array to empty so `= ANY(...)`
+    itself never sees a NULL operand.
     """
     return f"""(
       SELECT CASE WHEN {pid_expr} = _ev.survivor_property_id THEN (
                SELECT min(_l.sreality_id) FROM listings _l
                 WHERE _l.property_id = {pid_expr}
-                  AND NOT (_l.sreality_id = ANY(_ev.moved)))
+                  AND NOT (_l.sreality_id = ANY(COALESCE(_ev.moved, ARRAY[]::bigint[]))))
              ELSE (
                SELECT min(_pme.listing_id) FROM property_merge_events _pme
                 WHERE _pme.merge_group_id = {grp_expr}
                   AND _pme.retired_property_id = {pid_expr}) END
-      FROM (SELECT survivor_property_id, array_agg(listing_id) AS moved
+      FROM (SELECT survivor_property_id,
+                   array_agg(listing_id) FILTER (WHERE listing_id IS NOT NULL) AS moved
             FROM property_merge_events
             WHERE merge_group_id = {grp_expr}
             GROUP BY survivor_property_id LIMIT 1) _ev
@@ -732,7 +743,9 @@ def list_pair_audit(
     `property_id` scopes to the decisions that touch one property's child listings (the
     listing-detail "merge decisions" link); `property_id_in` is the batched form (one call
     for many on-screen properties, e.g. the CLIP audit page's property cards) — keyed on
-    the stable `sreality_id` since `property_id` re-points on every merge.
+    the stable surrogate `left/right_listing_id` (always populated, unlike `sreality_id`
+    which is NULL for a post-Gate-2 non-sreality listing) since `property_id` re-points on
+    every merge.
     `merge_group_id` is the inline-undo handle; `undone` is DERIVED by joining the merge
     ledger (the single source of truth). `category_main` and `districts` both match a
     decision if EITHER side's (merged-away-surviving, rule #18) `properties` row
@@ -776,18 +789,18 @@ def list_pair_audit(
         params["room_type"] = room_type
     if property_id is not None:
         clauses.append(
-            "(a.left_sreality_id IN "
-            "  (SELECT sreality_id FROM listings WHERE property_id = %(audit_pid)s)"
-            " OR a.right_sreality_id IN "
-            "  (SELECT sreality_id FROM listings WHERE property_id = %(audit_pid)s))"
+            "(a.left_listing_id IN "
+            "  (SELECT id FROM listings WHERE property_id = %(audit_pid)s)"
+            " OR a.right_listing_id IN "
+            "  (SELECT id FROM listings WHERE property_id = %(audit_pid)s))"
         )
         params["audit_pid"] = property_id
     if property_id_in:
         clauses.append(
-            "(a.left_sreality_id IN "
-            "  (SELECT sreality_id FROM listings WHERE property_id = ANY(%(audit_pids)s))"
-            " OR a.right_sreality_id IN "
-            "  (SELECT sreality_id FROM listings WHERE property_id = ANY(%(audit_pids)s)))"
+            "(a.left_listing_id IN "
+            "  (SELECT id FROM listings WHERE property_id = ANY(%(audit_pids)s))"
+            " OR a.right_listing_id IN "
+            "  (SELECT id FROM listings WHERE property_id = ANY(%(audit_pids)s)))"
         )
         params["audit_pids"] = list(property_id_in)
     if flagged:
