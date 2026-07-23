@@ -49,6 +49,8 @@ from psycopg.rows import dict_row
 from toolkit.filter_registry import subtype_label_cs
 
 if TYPE_CHECKING:
+    import uuid
+
     import psycopg
 
     from api import schemas as s
@@ -85,6 +87,16 @@ LEFT JOIN listings l
 LEFT JOIN properties pr ON pr.id = l.property_id
 """
 
+# The %s account predicates on the pipeline + collection joins are explicit
+# defense-in-depth, NOT redundant with RLS: this runs on tenant_conn, whose
+# legacy static-token branch is the unscoped service-role connection (RLS off) —
+# the same reason api/pipeline.py scopes every statement by account. Positional
+# params, so account_id is appended THREE times in the textual order the
+# placeholders appear (collection subquery in the SELECT list first, then the
+# two JOINs). The estimation LATERAL is deliberately NOT given an explicit
+# predicate: its correct scoping needs the three-arm SYSTEM-account logic
+# (estimation_runs_tenant_read / mig 341), so it stays on RLS to avoid the
+# mig-316 "empties the golden estimate" regression.
 _ACCOUNT_SQL = """
 WITH tgt(listing_id, property_id, source_url) AS (VALUES {values})
 SELECT
@@ -97,10 +109,13 @@ SELECT
     ps.label AS pipeline_stage_label,
     (SELECT coalesce(array_agg(cp.collection_id ORDER BY cp.collection_id), array[]::bigint[])
        FROM collection_properties cp
-      WHERE cp.property_id = tgt.property_id) AS collection_ids
+      WHERE cp.property_id = tgt.property_id
+        AND cp.account_id IS NOT DISTINCT FROM %s) AS collection_ids
 FROM tgt
-LEFT JOIN property_pipeline pp ON pp.property_id = tgt.property_id
-LEFT JOIN pipeline_stages   ps ON ps.id = pp.stage_id
+LEFT JOIN property_pipeline pp
+       ON pp.property_id = tgt.property_id AND pp.account_id IS NOT DISTINCT FROM %s
+LEFT JOIN pipeline_stages   ps
+       ON ps.id = pp.stage_id AND ps.account_id IS NOT DISTINCT FROM %s
 LEFT JOIN LATERAL (
     SELECT er.id, er.estimate_kind, er.gross_yield_pct
     FROM estimation_runs er
@@ -135,13 +150,16 @@ def lookup_portal_listings(
     market_conn: "psycopg.Connection",
     tenant_conn: "psycopg.Connection",
     items: "list[s.PortalLookupItem]",
+    account_id: "uuid.UUID | None" = None,
 ) -> dict[str, Any]:
     """Resolve each (source, source_id) to its MF facts + latest estimate.
 
     One row per requested item, in request order; `found=false` (and null
     fields) when we have no listing for that pair. Market facts read on
     `market_conn` (service-role — see module docstring); pipeline/collections/
-    estimation on `tenant_conn` (RLS-scoped to the caller's account).
+    estimation on `tenant_conn` (RLS-scoped to the caller's account, with
+    `account_id` also predicated explicitly on the pipeline + collection joins
+    for the RLS-bypassing legacy branch — see `_ACCOUNT_SQL`).
     """
     values_sql = ", ".join(["(%s::text, %s::text)"] * len(items))
     params: list[str] = []
@@ -159,6 +177,9 @@ def lookup_portal_listings(
         tgt_params: list[Any] = []
         for r in found_rows:
             tgt_params.extend([r["listing_id"], r["property_id"], r["source_url"]])
+        # account_id thrice, in the textual placeholder order of _ACCOUNT_SQL
+        # (collection subquery, property_pipeline join, pipeline_stages join).
+        tgt_params.extend([account_id, account_id, account_id])
         with tenant_conn.cursor(row_factory=dict_row) as cur:
             cur.execute(_ACCOUNT_SQL.format(values=tgt_sql), tgt_params)
             for arow in cur.fetchall():

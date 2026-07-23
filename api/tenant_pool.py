@@ -20,12 +20,12 @@ import json
 import os
 import uuid
 from collections.abc import Iterator
-from typing import Any
 
 import psycopg
 from fastapi import Depends
 
 from api import dependencies as deps
+from scraper import db
 
 _TENANT_POOL_ENV = "TENANT_POOL_DB_URL"
 
@@ -46,8 +46,14 @@ def tenant_conn(
     connection (today's exact behavior) until they re-auth with a real JWT.
     """
     if claims.get("legacy"):
-        conn = psycopg.connect(
-            os.environ["SUPABASE_DB_URL"], autocommit=True, prepare_threshold=None
+        # Mirror get_db_conn exactly (this branch IS the service-role path):
+        # db.connect adds the one-retry-on-pooler-blip + TCP keepalives + a clean
+        # RuntimeError when SUPABASE_DB_URL is unset, which the bare
+        # psycopg.connect(os.environ[...]) here did not (a transient hiccup
+        # 500'd every /pipeline/* route, and a missing env var raised KeyError).
+        conn = db.connect(
+            attempts=deps._API_CONNECT_ATTEMPTS,
+            retry_delay=deps._API_CONNECT_RETRY_DELAY,
         )
         try:
             yield conn
@@ -101,18 +107,15 @@ def resolve_account_id(conn: psycopg.Connection, claims: dict) -> uuid.UUID | No
             return None
         return row[0] if row else None
     with conn.cursor() as cur:
+        # ORDER BY for a deterministic pick: account_members has only a composite
+        # PK, so a user with >1 membership (already legal — team/multi-account is
+        # anticipated) would otherwise resolve to a per-request-arbitrary account,
+        # making every pipeline write nondeterministically scoped. Stable oldest-
+        # membership-wins until a real primary-account concept exists.
         cur.execute(
-            "SELECT account_id FROM account_members WHERE user_id = %s LIMIT 1",
+            "SELECT account_id FROM account_members WHERE user_id = %s "
+            "ORDER BY created_at, account_id LIMIT 1",
             (claims["sub"],),
         )
-        row = cur.fetchone()
-    return row[0] if row else None
-
-
-def current_account_id(conn: psycopg.Connection) -> Any | None:
-    """The caller's (single, for now) account id inside a tenant_conn
-    transaction; None on the legacy/service-role branch."""
-    with conn.cursor() as cur:
-        cur.execute("SELECT account_id FROM account_members WHERE user_id = nullif(current_setting('request.jwt.claims', true)::jsonb ->> 'sub', '')::uuid LIMIT 1")
         row = cur.fetchone()
     return row[0] if row else None

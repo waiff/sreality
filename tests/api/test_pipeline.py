@@ -362,6 +362,13 @@ def test_update_stage_crowning_entry_demotes_the_others():
         "UPDATE pipeline_stages SET is_entry = false" in q and "WHERE is_entry AND id <> %s" in q
         for q in sqls
     )
+    # F1: the lookup + the row's own UPDATE are account-scoped too (not just the
+    # sibling-demote), so a legacy service-role call can't touch another account.
+    assert all(
+        "account_id IS NOT DISTINCT FROM %s" in q
+        for q in sqls
+        if "pipeline_stages" in q and ("WHERE id" in q or "RETURNING" in q)
+    )
 
 
 def test_update_stage_rejects_uncrowning_entry():
@@ -421,3 +428,11 @@ def test_archive_soft_retires_empty_stage():
     out = pipeline_module.archive_stage(conn, 3, account_id=None)
     assert out == {"archived": True, "stage_id": 3}
     assert any("SET archived_at = now()" in q for q, _ in conn.executed)
+    # F2: every statement (existence check, cards-check, the archive UPDATE) is
+    # account-scoped — a legacy service-role call can't archive or probe another
+    # account's stage by id.
+    assert all(
+        "account_id IS NOT DISTINCT FROM %s" in q
+        for q, _ in conn.executed
+        if "pipeline_stages WHERE id" in q or "property_pipeline WHERE stage_id" in q
+    )
