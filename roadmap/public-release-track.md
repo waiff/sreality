@@ -493,6 +493,26 @@ remediation R3 closes that. Full spec: `docs/design/public-release-remediation-2
       All internal objects RLS-on + default-ACL revoked. Tests: `test_resend_webhook` (Svix HMAC
       accept/tamper/stale/wrong-secret/missing), `test_send_skips_suppressed_recipient`. **Go-live is
       operator-gated**: a Resend account + verified sending domain + `RESEND_WEBHOOK_SECRET`.
+    - **One-click unsubscribe (RFC 8058) — SHIPPED DARK.** `api/unsubscribe.py` HMAC-signs
+      `channel:address` with `NOTIFICATION_UNSUB_SECRET` (stdlib, no dependency); the Resend
+      transport adds `List-Unsubscribe` + `List-Unsubscribe-Post` headers pointing at
+      `{API_PUBLIC_URL}/u/{token}`; the unauthenticated `GET`/`POST /u/{token}` route (the HMAC
+      token IS the auth, renders for logged-out recipients) inserts a `source='unsubscribe'`
+      suppression on the one-click POST. Both env vars optional → the header is omitted and no
+      token verifies when unconfigured (dark-safe). Tests `test_unsubscribe`.
+    - **Remaining Wave 3 — operator / product / legal-gated (NOT started, surfaced as decisions):**
+      (a) **Resend go-live** — operator provisions a Resend account + verified sending domain +
+      DNS (SPF/DKIM/DMARC) + `RESEND_WEBHOOK_SECRET`/`NOTIFICATION_UNSUB_SECRET`/`API_PUBLIC_URL`,
+      then registers the webhook. (b) **Per-account recipients + double-opt-in**
+      (`account_notification_settings`: email/telegram/digest/tz, verified-before-send) — replaces
+      the global `app_settings` recipient pair; **needs GDPR sign-off** on double-opt-in + the
+      opt-in UX. (c) **Quotas** (max active watchdogs at create/activate, channel entitlements,
+      per-tier detection cadence, daily-dispatch cap on DELIVERY not detection) — the
+      `require_entitlement("watchdogs")` factory + `plans.agendas` already exist; **needs the
+      product decision on tier values**. (d) **Digests** (per-account grouping + atomic
+      multi-dispatch claim) — depends on (b). (e) **Launch gate:** cross-tenant audit of the three
+      tables + webhook + unsubscribe, GDPR sign-off, a deliverability check, and a matcher-pass load
+      check at target sub count.
 
 **Housekeeping done 2026-07-20:** operator enabled Supabase Auth's leaked-password-protection
 toggle (Authentication → Sign In / Providers → Email → "Prevent use of leaked passwords").

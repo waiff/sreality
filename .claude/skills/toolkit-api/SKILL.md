@@ -296,6 +296,12 @@ rule #16; all OPTIONAL, dark until set):
   `svix-id` (`resend_webhook_events`), advances `channel_sends.status`
   (`delivered`/`bounced`/`complained`), and inserts a GLOBAL, address-level `notification_suppression`
   row (survives tenant deletion) on bounce/complaint — the outbox hard-skips suppressed addresses.
+- `NOTIFICATION_UNSUB_SECRET` + `API_PUBLIC_URL` (Wave 3) — one-click unsubscribe (RFC 8058).
+  `make_unsub_token`/`verify_unsub_token` (`api/unsubscribe.py`) HMAC-sign `channel:address` with
+  the secret; the Resend transport adds `List-Unsubscribe`/`List-Unsubscribe-Post` headers pointing
+  at `{API_PUBLIC_URL}/u/{token}` (the unauthenticated `GET`/`POST /u/{token}` route, HMAC = auth,
+  renders for logged-out users, POST inserts a `source='unsubscribe'` suppression). BOTH env vars
+  optional: unset → the header is omitted (email still sends) and the token can authenticate no one.
 - `STRIPE_WEBHOOK_SECRET` — Stripe webhook signing secret (Dashboard → Developers →
   Webhooks). Railway API env. Unset = `POST /billing/webhook` 503s (fail closed); the
   handler verifies the `Stripe-Signature` HMAC with the stdlib (no stripe SDK).

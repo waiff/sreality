@@ -35,6 +35,10 @@ _PUBLIC_ALLOWLIST: frozenset[tuple[str, str]] = frozenset({
     ("POST", "/billing/webhook"),
     # Authenticates in-handler by verifying a Svix (Resend) HMAC over the raw body.
     ("POST", "/webhooks/resend"),
+    # RFC 8058 one-click unsubscribe — the HMAC token in the path IS the auth, and it
+    # must render for a logged-out recipient (no session).
+    ("GET", "/u/{token}"),
+    ("POST", "/u/{token}"),
 })
 
 # Every route under these must resolve to require_admin.
