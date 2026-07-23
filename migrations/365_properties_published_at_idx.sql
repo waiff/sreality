@@ -1,4 +1,8 @@
--- 363_properties_published_at_idx.sql
+-- 365_properties_published_at_idx.sql
+-- (originally authored as 363; renumbered to 365 after a same-day collision with
+--  363_browse_projection_source_id_native.sql — both branches were green alone,
+--  the dup only existed post-merge on main; the index was already applied live so
+--  this rename only fixes the on-disk record, per the mig-360/354 renumber pattern.)
 --
 -- The Watchdog matcher's new-listing producer (api/notifications.py::match_once) walks
 -- properties_public with a per-subscription forward cursor: `published_at > cursor
