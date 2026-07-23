@@ -175,14 +175,16 @@ export default function PhashAudit() {
   });
   const trainingLabelCounts = useMemo(() => trainingLabelsQ.data ?? [], [trainingLabelsQ.data]);
   const labelOptions: LabelOption[] = useMemo(() => {
+    const byLabel = new Map<string, number>(trainingLabelCounts.map((c) => [c.label, c.count]));
     const taxonomy: LabelOption[] = FINE_TAG_KEYS.map((key) => ({
       value: key,
       label: imageTagLabel(key) ?? key,
+      count: byLabel.get(key) ?? 0,
     }));
     const known = new Set(FINE_TAG_KEYS);
     const custom: LabelOption[] = trainingLabelCounts
       .filter((c) => !known.has(c.label))
-      .map((c) => ({ value: c.label, label: c.label }));
+      .map((c) => ({ value: c.label, label: c.label, count: c.count }));
     return [...taxonomy, ...custom].sort((a, b) => a.label.localeCompare(b.label, 'cs'));
   }, [trainingLabelCounts]);
 
