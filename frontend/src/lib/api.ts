@@ -1409,13 +1409,19 @@ export const createPropertyNote = (
   property_id: number,
   body: string,
   origin_listing_id?: number,
+  // Surrogate twin (migration 323/R2). origin_listing_id is the legacy
+  // sreality_id, NULL for a post-Gate-2 listing — pass the surrogate too so
+  // the note's provenance survives even when the legacy id is unavailable
+  // (api.create_note COALESCEs one from the other server-side).
+  origin_listing_ref_id?: number,
 ): Promise<Note> =>
   request<Note>(`/properties/${property_id}/notes`, {
     method: 'POST',
-    json:
-      origin_listing_id != null
-        ? { body, origin_listing_id }
-        : { body },
+    json: {
+      body,
+      ...(origin_listing_id != null ? { origin_listing_id } : {}),
+      ...(origin_listing_ref_id != null ? { origin_listing_ref_id } : {}),
+    },
   });
 
 /* Deal pipeline (migration 205) — bookmark a property into the pipeline

@@ -380,7 +380,7 @@ export default function ListingDetail() {
               multiSource={sources.length > 1}
             />
             <LatestActiveLink listing={listing} sources={sources} />
-            <BrokerChip srealityId={listing.sreality_id} />
+            <BrokerChip listingId={listing.id} />
           </div>
         }
         mapFooter={<ExploreAreaButton listing={listing} images={images} />}
@@ -409,6 +409,7 @@ export default function ListingDetail() {
           <CurationBlock
             property_id={sourcesQ.data.property_id}
             sreality_id={listing.sreality_id}
+            listing_id={listing.id}
           />
         )}
       </Suspense>
@@ -456,7 +457,7 @@ function PortalLinksRow({
             aria-hidden
           />
           <span>{portalShort(u.source)}</span>
-          {linkable.length > 1 && u.id === listing.sreality_id && (
+          {linkable.length > 1 && u.id === listing.id && (
             <span className="text-[0.6rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)]">
               this
             </span>
@@ -505,10 +506,10 @@ function LatestActiveLink({
 
 /* The resolved broker behind this listing → its broker-intelligence detail.
    Renders nothing for listings whose broker isn't resolved yet. */
-function BrokerChip({ srealityId }: { srealityId: number }) {
+function BrokerChip({ listingId }: { listingId: number }) {
   const q = useQuery({
-    queryKey: ['listing-broker', srealityId],
-    queryFn: () => fetchListingBroker(srealityId),
+    queryKey: ['listing-broker', listingId],
+    queryFn: () => fetchListingBroker(listingId),
     staleTime: 60_000,
   });
   const b = q.data;
@@ -767,7 +768,7 @@ function ListingHistoryBlock({
           >
             <div className="flex items-center gap-2 min-w-0">
               <span className="text-sm text-[var(--color-ink)] capitalize">{u.source}</span>
-              {u.id === listing.sreality_id ? (
+              {u.id === listing.id ? (
                 <span className="text-[0.6rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)]">
                   this listing
                 </span>

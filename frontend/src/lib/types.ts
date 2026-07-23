@@ -112,6 +112,12 @@ export interface ListingPublic {
 export interface ListingSnapshotPublic {
   id: number;
   sreality_id: number;
+  /* The owning listing's SURROGATE id (listing_snapshots_public.listing_id,
+   * migration 334/343). Group/join snapshots on this, not sreality_id — a
+   * post-Gate-2 non-sreality listing's snapshots all carry NULL sreality_id
+   * and would otherwise collide onto one shared bucket. Only populated by
+   * fetchSnapshotsForListings' select; fetchSnapshotsByListing omits it. */
+  listing_id: number;
   scraped_at: string;
   price_czk: number | null;
   /* Migration 084 — projected from listing_snapshots.raw_json so the
@@ -915,6 +921,11 @@ export interface PipelineBoardCard {
   board_position: number;
   entered_stage_at: string;
   sreality_id: number | null;
+  /* The representative listing's SURROGATE id (properties_public.listing_id,
+   * migration 343) — never null in practice. Use this for the card's link and
+   * for keying image/broker lookups; sreality_id may be NULL for a
+   * post-Gate-2 non-sreality representative. */
+  listing_id: number | null;
   category_main: string | null;
   street: string | null;
   district: string | null;
