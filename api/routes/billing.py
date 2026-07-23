@@ -294,14 +294,48 @@ def _entitlement_view(conn: Any, account_id: Any) -> dict[str, Any]:
             "current_period_end": None}
 
 
+def _agent_estimation_quota(conn: Any, claims: dict, account_id: Any) -> dict[str, Any]:
+    """The caller's agent-estimation allowance, for the extension's '(X left)' UX.
+
+    `metered` mirrors create_estimation_run's bypass set (admin/legacy never
+    metered), so the panel hides the counter for the operator (unlimited).
+    Lazy import breaks the estimation_runs <-> billing cycle."""
+    meta = claims.get("app_metadata") or {}
+    if (
+        account_id is None
+        or claims.get("legacy")
+        or claims.get("is_admin") is True
+        or meta.get("is_admin") is True
+    ):
+        return {"quota": 0, "used": 0, "remaining": 0, "is_trial": False, "metered": False}
+
+    from api.estimation_runs import (
+        _count_agent_runs_this_month,
+        _resolve_entitlement,
+    )
+
+    status, _agenda_ok, quota = _resolve_entitlement(conn, str(account_id))
+    used = _count_agent_runs_this_month(conn, str(account_id))
+    return {
+        "quota": quota,
+        "used": used,
+        "remaining": max(0, quota - used),
+        "is_trial": status == "trialing",
+        "metered": True,
+    }
+
+
 @router.get("/me")
 def get_billing_me(
     claims: dict = Depends(deps.verify_jwt),
     conn: Any = Depends(tenant_pool.tenant_conn),
 ) -> dict[str, Any]:
-    """The caller's plan + agenda visibility (legacy/no-account -> default plan)."""
+    """The caller's plan + agenda visibility + agent-estimation quota
+    (legacy/no-account -> default plan, unmetered)."""
     account_id = tenant_pool.resolve_account_id(conn, claims)
-    return _entitlement_view(conn, account_id)
+    view = _entitlement_view(conn, account_id)
+    view["agent_estimations"] = _agent_estimation_quota(conn, claims, account_id)
+    return view
 
 
 def require_entitlement(agenda: str) -> Callable[..., dict]:

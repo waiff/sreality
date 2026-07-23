@@ -14,9 +14,11 @@ import styles from './styles.css?inline';
 import { detailRef, portalForHost, portalForUrl, type PortalRef } from './portals';
 import { runIndexOverlay } from './index_overlay';
 import type {
+  AgentQuota,
   ApiMessage,
   ApiResult,
   AuthState,
+  BillingMe,
   CollectionWriteResult,
   EstimationRun,
   ExtCollection,
@@ -34,7 +36,11 @@ const DEFAULT_FOND_CZK_PER_M2 = 10;
 const DEFAULT_RENOVATION_CZK = 0;
 const PATCH_DEBOUNCE_MS = 500;
 const POLL_INTERVAL_MS = 2000;
-const POLL_MAX_ATTEMPTS = 60;
+// Agent estimates (Wave 1) run the LLM comparable search and may drain via the
+// worker job lane, so they can take well past the old 120 s (60×2 s) window —
+// which reported a succeeding run as failed. 180×2 s = 360 s, safely above the
+// agent's ~240 s wall clock plus queue latency.
+const POLL_MAX_ATTEMPTS = 180;
 const HOST_ELEMENT_ID = '__sreality_yield_panel_host__';
 
 /* Minimized = the panel collapses to a tiny bar showing just the two yield
@@ -107,6 +113,9 @@ interface PanelState {
   notes: ExtNote[] | null;
   /* True while a note save is in flight (disables the add box). */
   noteBusy: boolean;
+  /* The caller's agent-estimation allowance (null = not loaded / fetch failed —
+   * the counter is simply hidden, never blocking the estimate button). */
+  quota: AgentQuota | null;
   errorMessage: string | null;
 }
 
@@ -923,14 +932,34 @@ function mountPanel(): {
     /* No estimation yet (or one is running). */
     if (state.run == null) {
       if (state.busy) {
-        sec.appendChild(note('Odhad probíhá… (~10–30 s)', 'note--loading'));
+        sec.appendChild(note('Odhad probíhá… (~1–3 min)', 'note--loading'));
       } else {
-        const btn = document.createElement('button');
-        btn.className = 'btn-primary';
-        btn.type = 'button';
-        btn.textContent = 'Spustit odhad';
-        btn.onclick = () => onCreateRun();
-        sec.appendChild(btn);
+        const q = state.quota;
+        const metered = q != null && q.metered;
+        if (metered && q.remaining <= 0) {
+          /* Monthly allowance spent — offer an upgrade instead of a run that
+           * would 429. No purchase flow yet: the button just opens the web app. */
+          sec.appendChild(note(`Měsíční limit vyčerpán (${q.used}/${q.quota}).`));
+          const up = document.createElement('button');
+          up.className = 'btn-primary';
+          up.type = 'button';
+          up.textContent = 'Upgradovat';
+          up.title = 'Správa plánu ve webové aplikaci.';
+          up.onclick = () => onUpgrade();
+          sec.appendChild(up);
+        } else {
+          const btn = document.createElement('button');
+          btn.className = 'btn-primary';
+          btn.type = 'button';
+          btn.textContent = metered
+            ? `Spustit odhad (zbývá ${q.remaining})`
+            : 'Spustit odhad';
+          btn.onclick = () => onCreateRun();
+          sec.appendChild(btn);
+          if (metered && q.is_trial) {
+            sec.appendChild(note(`Zkušební období: ${q.remaining} z ${q.quota} odhadů.`));
+          }
+        }
       }
       body.appendChild(sec);
       return;
@@ -1154,6 +1183,15 @@ async function onCreateRun(): Promise<void> {
     type: 'create_estimation', url: panelUrl,
   });
   if (!res.ok) {
+    // 429 = the monthly allowance is spent (the atomic quota gate). Refresh the
+    // quota so the button flips to the upgrade prompt, and say so plainly.
+    if (res.status === 429) {
+      void loadQuota();
+      setState((prev) => ({
+        ...prev, busy: false, errorMessage: 'Měsíční limit odhadů vyčerpán.',
+      }));
+      return;
+    }
     setState((prev) => ({
       ...prev, busy: false, errorMessage: `Odhad se nepodařilo spustit: ${friendlyDetail(res.detail)}`,
     }));
@@ -1167,6 +1205,9 @@ async function onCreateRun(): Promise<void> {
     if (!next.ok) break;
     row = next.data;
   }
+  // A metered agent run consumed a slot (success OR failed-but-created) — refresh
+  // the counter so the next panel view is accurate.
+  void loadQuota();
   if (row.status !== 'success') {
     setState((prev) => ({
       ...prev, busy: false,
@@ -1175,6 +1216,12 @@ async function onCreateRun(): Promise<void> {
     return;
   }
   setState((prev) => seedFromRun({ ...prev, busy: false }, row));
+}
+
+/* "Upgradovat" — no purchase flow yet (Wave 1); open the web app where plan
+ * management will live. No-op if the app URL isn't configured. */
+function onUpgrade(): void {
+  if (APP_BASE_URL) window.open(APP_BASE_URL, '_blank', 'noopener');
 }
 
 /* Bookmark / un-bookmark the listing's property into the deal pipeline. The
@@ -1401,6 +1448,17 @@ async function loadCollections(): Promise<void> {
   }
 }
 
+/* Fetch the caller's agent-estimation allowance for the "(zbývá X)" counter +
+ * upgrade prompt. Best-effort: a failure leaves state.quota null (counter hidden,
+ * button still works). Fetched per panel open so a run that just consumed a slot
+ * is reflected on the next open. */
+async function loadQuota(): Promise<void> {
+  const res = await call<BillingMe>({ type: 'get_billing' });
+  if (res.ok) {
+    setState((prev) => ({ ...prev, quota: res.data.agent_estimations }));
+  }
+}
+
 /* The note add-box draft. A module global (not panel state) so editing it never
  * triggers a re-render — the textarea reads it on render, writes it on input;
  * reset per panel open so one listing's draft never bleeds onto another. */
@@ -1509,7 +1567,7 @@ export async function openPanel(
     rent: null, costPerM2: null, price: null, renovation: null, busy: false,
     pipelineBusy: false, stages: cachedStages,
     collections: cachedCollections, collectionBusy: false,
-    notes: null, noteBusy: false, errorMessage: null,
+    notes: null, noteBusy: false, quota: null, errorMessage: null,
   };
   await minimizedReady;  // persisted minimized pref before first paint → no flash
   render(state);
@@ -1557,6 +1615,12 @@ export async function openPanel(
     listing, isSaleApt: saleApt,
   }));
   if (!active) return;
+
+  /* Agent estimates are metered — fetch the remaining allowance so the estimate
+   * button can show "(zbývá X)" and flip to an upgrade prompt at zero. Only the
+   * estimate block (sale apartments) uses it; non-blocking, and a failure just
+   * leaves the counter hidden. */
+  if (saleApt !== false) void loadQuota();
 
   /* For a property we have, load the stage list so the in-pipeline control can
    * offer stage changes, and the collection list so the monitoring toggle can

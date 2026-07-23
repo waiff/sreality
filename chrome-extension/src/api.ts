@@ -6,6 +6,7 @@
 import { getAccessToken } from './auth';
 import type {
   ApiResult,
+  BillingMe,
   CollectionWriteResult,
   EstimationRun,
   ExtCollection,
@@ -135,9 +136,18 @@ export async function createEstimation(
       url,
       source: 'extension',
       estimate_kind: 'rent',
-      mode: 'deterministic',
+      // mode:'agent' is the metered path (Wave 1) — this is what the "(zbývá X)"
+      // quota counts. The server enforces the monthly quota atomically and 429s
+      // when it's exhausted; the panel surfaces that as an upgrade prompt.
+      mode: 'agent',
     }),
   });
+}
+
+/* GET /billing/me — the caller's plan + agent-estimation allowance. The panel
+ * reads `agent_estimations` for its "(zbývá X)" counter and upgrade prompt. */
+export async function getBillingMe(): Promise<ApiResult<BillingMe>> {
+  return request<BillingMe>('/billing/me');
 }
 
 /* GET /estimations/:id — used by the polling loop after we trigger a
