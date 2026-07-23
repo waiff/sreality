@@ -442,19 +442,32 @@ def check_eligibility_funnel(conn: Any, thresholds: dict[str, Any]) -> dict[str,
     }
 
 
+# Joins on left_listing_id/right_listing_id (the R2 surrogate, migrations 322 + 353
+# backfill), NOT left_sreality_id/right_sreality_id: once Gate-2 flips, a merge
+# involving a brand-new non-sreality-portal listing carries sreality_id=NULL on both
+# the listing and the audit row, and a sreality_id-keyed join would silently drop it
+# from the p50/p95 sample forever — a shrinking, growingly-unrepresentative latency
+# gate that still reports green. The surrogate is populated for every row already
+# (backfilled for legacy rows, stamped at insert by the engine/operator writers for
+# new ones) except the ~4.5k historical self-paired audit rows the backfill
+# deliberately skips (migration 353) — excluding those is correct, not a blind spot.
 _MERGE_LATENCY_SQL = """
 select
   percentile_cont(0.5)  within group (order by hrs) as p50,
   percentile_cont(0.95) within group (order by hrs) as p95,
-  count(*) as n
+  count(*) as n,
+  (select count(*) from dedup_pair_audit d0
+     where d0.outcome = 'merged' and d0.source = 'engine'
+       and d0.run_at > now() - interval '7 days'
+       and (d0.left_listing_id is null or d0.right_listing_id is null)) as excluded_n
 from (
   select extract(epoch from (d.run_at - least(l1.first_seen_at, l2.first_seen_at))) / 3600.0 as hrs
   from dedup_pair_audit d
-  join listings l1 on l1.sreality_id = d.left_sreality_id
-  join listings l2 on l2.sreality_id = d.right_sreality_id
+  join listings l1 on l1.id = d.left_listing_id
+  join listings l2 on l2.id = d.right_listing_id
   where d.outcome = 'merged' and d.source = 'engine'
     and d.run_at > now() - interval '7 days'
-    and d.left_sreality_id is not null and d.right_sreality_id is not null
+    and d.left_listing_id is not null and d.right_listing_id is not null
 ) t
 where hrs is not null and hrs >= 0
 """
@@ -465,6 +478,7 @@ def check_merge_latency(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]
     p50 = float(row[0]) if row and row[0] is not None else None
     p95 = float(row[1]) if row and row[1] is not None else None
     n = int(row[2]) if row and row[2] is not None else 0
+    excluded = int(row[3]) if row and row[3] is not None else 0
     status = _status_for_merge_latency(p95, thresholds)
     return {
         "check_key": "merge_latency",
@@ -474,6 +488,7 @@ def check_merge_latency(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]
             "p50_hours": round(p50, 2) if p50 is not None else None,
             "p95_hours": round(p95, 2) if p95 is not None else None,
             "merges_7d": n,
+            "excluded_no_listing_id_7d": excluded,
             "warn_at_hours": thresholds["merge_p95_warn_hours"],
         },
     }
@@ -884,14 +899,24 @@ def _parity_carrier_sql(carrier: dict[str, Any]) -> str:
             f"greatest(w.cursor_id, coalesce((select max({cursor}) from {table}), 0)"
             f" - {_PARITY_ID_LOOKBACK})"
         )
+    skip = carrier.get("skip")
+    skip_clause = f" and not ({skip})" if skip else ""
     parts: list[str] = []
     for legacy, new in carrier["cols"]:
-        parts.append(f"count(*) filter (where t.{legacy} is not null and t.{new} is null)")
+        parts.append(f"count(*) filter (where t.{legacy} is not null and t.{new} is null{skip_clause})")
         parts.append(
             f"count(*) filter (where t.{legacy} is not null and t.{new} is not null"
             f" and t.{new} is distinct from"
-            f" (select l.id from listings l where l.sreality_id = t.{legacy}))"
+            f" (select l.id from listings l where l.sreality_id = t.{legacy}){skip_clause})"
         )
+        # Once Gate-2 flips, a brand-new non-sreality-portal row carries a NULL
+        # legacy id by design — the two filters above (both anchored on
+        # `t.{legacy} is not null`) silently stop seeing it. This counts rows
+        # where the surrogate is ALSO missing despite the legacy id being absent:
+        # the one shape of gap that is still detectable with no legacy value to
+        # cross-check against (existence, not correctness — there's nothing to
+        # compare a NULL legacy id to).
+        parts.append(f"count(*) filter (where t.{legacy} is null and t.{new} is null{skip_clause})")
     return (
         f"select {', '.join(parts)}, count(*) "
         f"from {table} t, dual_write_watermark w "
@@ -903,15 +928,19 @@ def check_dual_write_parity(conn: Any, thresholds: dict[str, Any]) -> dict[str, 
     """R2 dual-write parity: every row written since the watermark that carries a
     legacy listing id must carry the matching surrogate, and it must be the RIGHT one.
 
-    Two distinct failures, both otherwise silent: a writer nobody censused keeps
-    stamping only the legacy id (gap), or a writer stamps a surrogate belonging to a
+    Three distinct failures, all otherwise silent: a writer nobody censused keeps
+    stamping only the legacy id (gap), a writer stamps a surrogate belonging to a
     different listing (mismatch — what a positional zip of an unordered RETURNING
-    produces). Gap detection is structural: it observes rows, not code paths, so it
-    catches writers this refactor never enumerated.
+    produces), or — once Gate-2 flips and new non-sreality-portal rows carry a NULL
+    legacy id by design — a writer stamps NEITHER id (orphan; the gap/mismatch
+    filters are both anchored on "legacy is not null" and go blind to these rows).
+    Gap detection is structural: it observes rows, not code paths, so it catches
+    writers this refactor never enumerated.
     """
     unarmed: list[str] = []
     gaps: dict[str, int] = {}
     mismatches: dict[str, int] = {}
+    orphans: dict[str, int] = {}
     scanned: dict[str, int] = {}
     # Which carriers are armed has to be established SEPARATELY, before counting.
     # The per-carrier query is aggregate-only, so with no watermark row it still
@@ -927,14 +956,18 @@ def check_dual_write_parity(conn: Any, thresholds: dict[str, Any]) -> dict[str, 
         rows = _fetchall(conn, _parity_carrier_sql(carrier))
         row = rows[0]
         for idx, (_legacy, new) in enumerate(carrier["cols"]):
-            gap, bad = int(row[idx * 2]), int(row[idx * 2 + 1])
+            gap, bad, orphan = (
+                int(row[idx * 3]), int(row[idx * 3 + 1]), int(row[idx * 3 + 2]),
+            )
             if gap:
                 gaps[f"{table}.{new}"] = gap
             if bad:
                 mismatches[f"{table}.{new}"] = bad
+            if orphan:
+                orphans[f"{table}.{new}"] = orphan
         scanned[table] = int(row[-1])
 
-    if gaps or mismatches:
+    if gaps or mismatches or orphans:
         status = "fail"
         bits: list[str] = []
         if gaps:
@@ -943,6 +976,9 @@ def check_dual_write_parity(conn: Any, thresholds: dict[str, Any]) -> dict[str, 
         if mismatches:
             bits.append("WRONG surrogate on "
                         + ", ".join(f"{k} ({v} rows)" for k, v in sorted(mismatches.items())))
+        if orphans:
+            bits.append("NEITHER id on (NULL-legacy, i.e. post-flip) "
+                        + ", ".join(f"{k} ({v} rows)" for k, v in sorted(orphans.items())))
         message = (
             "R2 dual-write parity broken: " + "; ".join(bits) + ". A writer is not "
             "stamping listings.id (or is stamping the wrong one) — the child FK backfill "
@@ -970,9 +1006,9 @@ def check_dual_write_parity(conn: Any, thresholds: dict[str, Any]) -> dict[str, 
     return {
         "check_key": "dual_write_parity",
         "status": status,
-        "value": sum(gaps.values()) + sum(mismatches.values()),
-        "details": {"gaps": gaps, "mismatches": mismatches, "unarmed": unarmed,
-                    "scanned": scanned},
+        "value": sum(gaps.values()) + sum(mismatches.values()) + sum(orphans.values()),
+        "details": {"gaps": gaps, "mismatches": mismatches, "orphans": orphans,
+                    "unarmed": unarmed, "scanned": scanned},
         "message": message,
     }
 
