@@ -931,6 +931,7 @@ def post_listings_lookup(
     body: s.PortalLookupIn,
     conn: Any = Depends(tenant_pool.tenant_conn),
     market_conn: Any = Depends(deps.get_db_conn),
+    claims: dict = Depends(deps.verify_jwt),
 ) -> dict[str, Any]:
     """Batch (source, native id) → MF rent/yield + latest estimate, for the
     Chrome extension's detail panel + index-card overlay across all portals.
@@ -938,8 +939,11 @@ def post_listings_lookup(
     Two connections on purpose: shared market facts on the service-role conn
     (listings/properties are RLS-enabled-with-zero-policies — broker PII, the
     A5 correction), per-account joins on the tenant conn (RLS-scoped). The
-    tenant_conn dependency also carries verify_jwt, so auth is unchanged."""
-    return lookup_portal_listings(market_conn, conn, body.items)
+    tenant_conn dependency also carries verify_jwt, so auth is unchanged. The
+    resolved account_id also scopes the pipeline/collection joins explicitly,
+    defending the RLS-bypassing legacy branch (see portal_lookup._ACCOUNT_SQL)."""
+    account_id = tenant_pool.resolve_account_id(conn, claims)
+    return lookup_portal_listings(market_conn, conn, body.items, account_id)
 
 
 @app.post("/buildings")

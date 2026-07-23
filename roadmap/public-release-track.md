@@ -374,13 +374,36 @@ remediation R3 closes that. Full spec: `docs/design/public-release-remediation-2
      mig-279 lesson). The kanban board itself doesn't yet do within-column drag reordering (the
      SPA only sends `stage_id` on move, never `board_position`), so this was the only place the
      race could actually fire.
-   - **Genuinely still open, all needing a decision or state this session can't produce:** the
-     Wave 2 launch gate (a `/code-review ultra` re-audit + a manual two-real-account pen-test) —
-     only one account/member exists live today, so "A can't see/move/archive/reorder/inject into
-     B's board" has no second account to test against yet; and registering
-     `property_pipeline`/`property_pipeline_events` in a future GDPR export/deletion feature (the
-     `on delete cascade` from `accounts` already scrubs them on account deletion — there's just no
-     self-service deletion/export surface yet, a Phase-1-wide gap, not pipeline-specific).
+   - **Review-gate re-audit RAN 2026-07-23** — a max-effort `/code-review ultra` pass (8 finder
+     angles + per-finding verify) against the whole pipeline tenancy surface (bundled as review-
+     only PR #911 on a synthetic pre-Phase-1 baseline). 15 findings; each re-verified against the
+     **live DB** before acting. **Remediated (PR TBD):** the two functions that broke the module's
+     explicit-`account_id`-scoping convention — `update_stage` + `archive_stage` were unscoped, so
+     a legacy service-role (RLS-bypassing) call could rename/re-flag/archive/probe another account's
+     stage by id (F1/F2); `portal_lookup._ACCOUNT_SQL`'s pipeline + collection joins relied on RLS
+     alone (same legacy bypass) — now explicitly account-scoped (F3, estimation LATERAL left on RLS
+     to preserve the mig-341 SYSTEM-arm); `resolve_account_id`'s `LIMIT 1` had no `ORDER BY`
+     (nondeterministic once a user has >1 membership, F8); the legacy `tenant_conn` branch dropped
+     `scraper/db.py`'s retry/keepalive/clean-error hardening (F7); the mig-357 board index was dead
+     (add_card's `max(board_position)` now scoped by account so the index is used, F10); a dead
+     `current_account_id()` duplicate removed (F11); the FK-violation catch documented (F15).
+     **Refuted/moot on live verification:** the stale-test finding (F5 — passes 8/8 on `main`, a
+     synthetic-baseline artifact); the NULL-`account_id` unique-index gap (F6 — `account_id` is
+     `NOT NULL` with zero NULL rows since mig 295); and the **legacy-backfill inheritance race
+     (F4)** — `legacy_backfill_claim` was claimed by the operator's account on 2026-07-11, and
+     `handle_new_user`'s `ON CONFLICT DO NOTHING` means no later signup can ever claim it, so the
+     "sign up first, inherit everything" exploit is already closed (every new signup now gets a
+     fresh seeded board). **Deferred:** the composed-route-dependency refactor (F13, churn without
+     addressing the actual bug class) and the one-time signup-trigger sweep cost (F14, runs once
+     ever, already spent). **Operator flag (F4 residual):** the email/password `signUp` flow in
+     `frontend/src/pages/Login.tsx` is unauthenticated + un-allowlisted on `main` — the data-
+     inheritance vector is closed, but *whether public signup should be open at all pre-launch* is
+     a product decision (invite/allowlist gate), not a code fix.
+   - **Still open, needs a second real account:** the manual two-real-account pen-test half of the
+     launch gate ("A can't see/move/archive/reorder/inject into B's board") — only one
+     account/member exists live today. Plus registering `property_pipeline`/`property_pipeline_events`
+     in a future GDPR export/deletion surface (the `on delete cascade` from `accounts` already
+     scrubs them on account deletion; there's just no self-service surface yet — a Phase-1-wide gap).
 
 **Housekeeping done 2026-07-20:** operator enabled Supabase Auth's leaked-password-protection
 toggle (Authentication → Sign In / Providers → Email → "Prevent use of leaked passwords").
