@@ -200,6 +200,26 @@ def test_ingest_reuses_surrogate_on_refetch(monkeypatch):
     assert _find(conn.executed, "UPDATE properties p SET") is not None  # rollup
 
 
+def test_ingest_first_sight_null_sreality_id_when_flip_enabled(monkeypatch):
+    """Gate-2 flip-writer scaffold: when `gate2_null_sreality_id_enabled` reads
+    true from app_settings, first sight skips the synthetic-negative sequence
+    entirely and writes NULL into the legacy sreality_id column instead."""
+    rows = _stub_upsert(monkeypatch)
+    conn = _FakeConn([
+        (lambda s: "SELECT id, sreality_id FROM listings WHERE source" in s, []),  # unseen
+        (lambda s: "SELECT value FROM app_settings WHERE key" in s, [(True,)]),
+        (lambda s: "SELECT id FROM listings WHERE source" in s, [(8005,)]),  # surrogate, post-upsert
+        (lambda s: "SELECT property_id FROM listings WHERE id" in s, [(None,)]),
+        (lambda s: "INSERT INTO properties" in s, [(51,)]),
+    ])
+
+    listing_id, result = db.ingest_scraped_listing(conn, _listing())
+
+    assert listing_id == 8005 and result == "new"
+    assert _find(conn.executed, "nextval('synthetic_listing_id_seq')") is None
+    assert rows and rows[0]["sreality_id"] is None
+
+
 def test_ingest_survives_null_sreality_id_on_refetch(monkeypatch):
     """Post-Gate-2 a re-fetched portal row carries sreality_id = NULL. The pre-lookup
     now selects `id` (never `int(sreality_id)`), so this no longer raises
@@ -296,3 +316,39 @@ def test_scraped_listing_to_row_maps_fields():
     assert row["price_czk"] == 20000
     # sreality-only locality ids aren't carried; upsert_listing defaults them.
     assert "locality_district_id" not in row
+
+
+def test_scraped_listing_to_row_accepts_none_sreality_id():
+    """Gate-2 flip-writer scaffold: to_row's signature is widened to `int | None`
+    so a flag-on first-sight write can pass NULL straight through."""
+    row = _listing().to_row(None)
+    assert row["sreality_id"] is None
+
+
+# --- gate2_null_sreality_id_enabled flag (app_settings, read live) ---------
+
+
+def test_gate2_flag_reads_default_false_when_setting_absent():
+    conn = _FakeConn([])  # no app_settings row scripted -> fetchone() is None
+    assert db._gate2_null_sreality_id_enabled(conn) is False
+
+
+def test_gate2_flag_reads_true_from_jsonb_bool():
+    conn = _FakeConn([
+        (lambda s: "SELECT value FROM app_settings WHERE key" in s, [(True,)]),
+    ])
+    assert db._gate2_null_sreality_id_enabled(conn) is True
+
+
+def test_gate2_flag_reads_false_from_jsonb_bool():
+    conn = _FakeConn([
+        (lambda s: "SELECT value FROM app_settings WHERE key" in s, [(False,)]),
+    ])
+    assert db._gate2_null_sreality_id_enabled(conn) is False
+
+
+def test_gate2_flag_tolerates_string_true():
+    conn = _FakeConn([
+        (lambda s: "SELECT value FROM app_settings WHERE key" in s, [("true",)]),
+    ])
+    assert db._gate2_null_sreality_id_enabled(conn) is True
