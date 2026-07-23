@@ -112,7 +112,7 @@ export default function LabelCombobox({
       {open && (matches.length > 0 || showCreate) && (
         <ul
           role="listbox"
-          className="absolute z-20 mt-1 w-full max-h-56 overflow-y-auto rounded-[var(--radius-sm)] bg-[var(--color-paper-3)] border border-[var(--color-rule-strong)] shadow-[0_4px_16px_rgba(0,0,0,0.06)] py-1"
+          className="absolute z-20 mt-1 w-full min-w-[10rem] max-h-56 overflow-y-auto rounded-[var(--radius-sm)] bg-[var(--color-paper-3)] border border-[var(--color-rule-strong)] shadow-[0_4px_16px_rgba(0,0,0,0.06)] py-1"
         >
           {matches.map((opt) => (
             <li key={opt.value} role="option" aria-selected={opt.value === value}>
