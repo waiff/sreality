@@ -1222,7 +1222,7 @@ export const fetchSnapshotsForListings = async (
   if (ids.length === 0) return [];
   const { data, error } = await supabase
     .from('listing_snapshots_public')
-    .select('id,sreality_id,scraped_at,price_czk,description')
+    .select('id,sreality_id,listing_id,scraped_at,price_czk,description')
     .in('listing_id', ids)
     .order('scraped_at', { ascending: true });
   if (error) throw error;
@@ -2268,7 +2268,7 @@ export const fetchPipelineBoard = async (): Promise<PipelineBoardCard[]> => {
   const { data: props, error: pErr } = await supabase
     .from('properties_public')
     .select(
-      'property_id, sreality_id, category_main, street, district, disposition, subtype, area_m2, price_czk, mf_gross_yield_pct, obec_id, okres_id, region_id, place_search_text, okres, region, is_active',
+      'property_id, sreality_id, listing_id, category_main, street, district, disposition, subtype, area_m2, price_czk, mf_gross_yield_pct, obec_id, okres_id, region_id, place_search_text, okres, region, is_active',
     )
     .in('property_id', ids);
   if (pErr) throw pErr;
@@ -2279,25 +2279,29 @@ export const fetchPipelineBoard = async (): Promise<PipelineBoardCard[]> => {
     ]),
   );
 
-  // One thumbnail per card — the same batched image hydration Browse cards use
-  // (images are keyed on sreality_id, not on the property), resolved through the
-  // shared imageSrc() helper so the board and Browse render identical URLs.
-  const srealityIds = rows
-    .map((r) => byId.get(r.property_id)?.sreality_id as number | null | undefined)
+  // One thumbnail per card, keyed on the representative listing's SURROGATE
+  // `listing_id` (properties_public.listing_id, migration 343), not
+  // sreality_id — a post-Gate-2 non-sreality representative has a NULL
+  // sreality_id and would silently lose its thumbnail. Browse cards already
+  // made this switch (fetchImagesForListingIds); the board follows suit.
+  const listingIds = rows
+    .map((r) => byId.get(r.property_id)?.listing_id as number | null | undefined)
     .filter((x): x is number => x != null);
-  const imagesById = await fetchImagesByListingIds(srealityIds, 1);
+  const imagesById = await fetchImagesForListingIds(listingIds, 1);
 
   // Canonical broker per card (name + firm + contact for the hover box), two
-  // batched reads (listing→broker, then broker→contact) — no N+1. Both surfaces
-  // are dark to `authenticated` since Phase 0's A6 (broker PII stays masked
-  // until Wave 4): the grant is revoked outright, so PostgREST answers with
-  // SQLSTATE 42501 and every card degrades to "no broker" until the mask lifts.
-  // Only that signature is expected — anything else (schema drift, network, 5xx,
-  // expired session) is a real fault, so log it before degrading, or the board
-  // silently shows "no broker" forever with no signal that broker data regressed.
+  // batched reads (listing→broker, then broker→contact) — no N+1, keyed on the
+  // same surrogate listing_id for the same NULL-safety reason as the images
+  // above. Both surfaces are dark to `authenticated` since Phase 0's A6
+  // (broker PII stays masked until Wave 4): the grant is revoked outright, so
+  // PostgREST answers with SQLSTATE 42501 and every card degrades to "no
+  // broker" until the mask lifts. Only that signature is expected — anything
+  // else (schema drift, network, 5xx, expired session) is a real fault, so log
+  // it before degrading, or the board silently shows "no broker" forever with
+  // no signal that broker data regressed.
   const brokerMaskExpected = (err: unknown): boolean =>
     (err as { code?: string } | null)?.code === '42501';
-  const listingBrokers = await fetchListingBrokersByIds(srealityIds).catch(
+  const listingBrokers = await fetchListingBrokersByIds(listingIds).catch(
     (err): Map<number, ListingBroker> => {
       if (!brokerMaskExpected(err))
         console.error('fetchPipelineBoard: listing_broker_public read failed', err);
@@ -2317,8 +2321,9 @@ export const fetchPipelineBoard = async (): Promise<PipelineBoardCard[]> => {
   return rows.map((r) => {
     const p = byId.get(r.property_id);
     const sid = (p?.sreality_id as number | null) ?? null;
-    const firstImage = sid != null ? imagesById.get(sid)?.[0] : undefined;
-    const lb = sid != null ? listingBrokers.get(sid) : undefined;
+    const lid = (p?.listing_id as number | null) ?? null;
+    const firstImage = lid != null ? imagesById.get(lid)?.[0] : undefined;
+    const lb = lid != null ? listingBrokers.get(lid) : undefined;
     const contact = lb ? brokerContacts.get(lb.broker_id) : undefined;
     return {
       property_id: r.property_id,
@@ -2326,6 +2331,7 @@ export const fetchPipelineBoard = async (): Promise<PipelineBoardCard[]> => {
       board_position: r.board_position,
       entered_stage_at: r.entered_stage_at,
       sreality_id: sid,
+      listing_id: lid,
       category_main: (p?.category_main as string | null) ?? null,
       street: (p?.street as string | null) ?? null,
       district: (p?.district as string | null) ?? null,

@@ -10,6 +10,10 @@ const DAY_MS = 86_400_000;
 /* One place the property has been seen = one URL record. Re-listings on the
  * same portal with a fresh URL are separate `listings` rows → separate rows. */
 export interface UrlRow {
+  // The SURROGATE listing id (property_sources_public.id / the viewed
+  // listing's own id), never sreality_id — a post-Gate-2 non-sreality source
+  // has a NULL sreality_id, and every such row would collide onto the same
+  // key (`null === null`) instead of getting its own price track.
   id: number;
   source: string;
   url: string | null;
@@ -60,7 +64,11 @@ export function listingUrlRows(
           new Date(b.last_seen_at).getTime() - new Date(a.last_seen_at).getTime(),
       )
       .map((s) => ({
-        id: s.sreality_id,
+        // s.id is the surrogate (property_sources_public.id) — NEVER null on
+        // a real row (only optional in the type for ClipAudit's synthetic
+        // fallback). s.sreality_id still drives the sreality URL below since
+        // that's a portal-native id, not an internal identity key.
+        id: s.id as number,
         source: s.source,
         url: portalListingUrl(s.source, s.source_url, s.sreality_id, srealityCategory),
         isActive: s.is_active,
@@ -71,7 +79,7 @@ export function listingUrlRows(
   }
   return [
     {
-      id: listing.sreality_id,
+      id: listing.id,
       source: listing.source ?? 'sreality',
       url: portalListingUrl(
         listing.source ?? 'sreality',
@@ -97,9 +105,12 @@ export function buildPriceSeries(
   const byId = new Map<number, { t: number; price: number }[]>();
   for (const s of snapshots) {
     if (s.price_czk == null) continue;
-    const arr = byId.get(s.sreality_id) ?? [];
+    // Grouped on the surrogate listing_id, not sreality_id: a post-Gate-2
+    // non-sreality source's snapshots all carry NULL sreality_id and would
+    // otherwise collapse onto one shared (wrong) track.
+    const arr = byId.get(s.listing_id) ?? [];
     arr.push({ t: new Date(s.scraped_at).getTime(), price: s.price_czk });
-    byId.set(s.sreality_id, arr);
+    byId.set(s.listing_id, arr);
   }
   const out: PriceSeries[] = [];
   for (const u of urls) {

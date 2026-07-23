@@ -14,16 +14,24 @@ import type {
 const NOW = Date.parse('2026-03-01T00:00:00Z');
 
 function snap(
-  sreality_id: number,
+  listing_id: number,
   scraped_at: string,
   price_czk: number | null,
 ): ListingSnapshotPublic {
-  return { id: Math.random(), sreality_id, scraped_at, price_czk, description: null };
+  return {
+    id: Math.random(),
+    sreality_id: listing_id,
+    listing_id,
+    scraped_at,
+    price_czk,
+    description: null,
+  };
 }
 
 function source(over: Partial<PropertySource>): PropertySource {
   return {
     property_id: 1,
+    id: 100,
     sreality_id: 100,
     source: 'sreality',
     source_url: 'https://example.cz/1',
@@ -37,6 +45,7 @@ function source(over: Partial<PropertySource>): PropertySource {
 }
 
 const listing = {
+  id: 100,
   sreality_id: 100,
   source: 'sreality',
   is_active: true,
@@ -49,8 +58,8 @@ describe('listingUrlRows', () => {
   it('maps property sources newest-seen first', () => {
     const rows = listingUrlRows(
       [
-        source({ sreality_id: 1, last_seen_at: '2026-01-10T00:00:00Z' }),
-        source({ sreality_id: 2, last_seen_at: '2026-02-20T00:00:00Z' }),
+        source({ id: 1, sreality_id: 1, last_seen_at: '2026-01-10T00:00:00Z' }),
+        source({ id: 2, sreality_id: 2, last_seen_at: '2026-02-20T00:00:00Z' }),
       ],
       listing,
     );
@@ -71,10 +80,33 @@ describe('listingUrlRows', () => {
       category_sub_cb: 5, // 2+1
     } as unknown as ListingPublic;
     const rows = listingUrlRows(
-      [source({ sreality_id: 100, source: 'sreality', source_url: null })],
+      [source({ id: 100, sreality_id: 100, source: 'sreality', source_url: null })],
       withCategory,
     );
     expect(rows[0].url).toBe('https://www.sreality.cz/detail/prodej/byt/2+1/x/100');
+  });
+
+  it('keys rows on the surrogate id, not sreality_id, so two NULL-sreality sources never collide', () => {
+    const rows = listingUrlRows(
+      [
+        source({
+          id: 11,
+          sreality_id: null as unknown as number,
+          source: 'idnes',
+          source_url: 'https://idnes.cz/a',
+          last_seen_at: '2026-01-10T00:00:00Z',
+        }),
+        source({
+          id: 12,
+          sreality_id: null as unknown as number,
+          source: 'bezrealitky',
+          source_url: 'https://bezrealitky.cz/b',
+          last_seen_at: '2026-02-20T00:00:00Z',
+        }),
+      ],
+      listing,
+    );
+    expect(rows.map((r) => r.id)).toEqual([12, 11]);
   });
 });
 
