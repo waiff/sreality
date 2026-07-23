@@ -344,10 +344,30 @@ remediation R3 closes that. Full spec: `docs/design/public-release-remediation-2
      account is the admin, who bypasses. Deferred (small follow-ups): granting the trial at
      signup (`handle_new_user` seed-hook, mig 286:101) and wiring the extension to send
      `mode:'agent'` for entitled users.
-   - Remaining: extension submit/poll tuning (widen the 120 s poll window, persist `run_id`,
-     send `mode:'agent'` for entitled users) and Chrome Web Store submission readiness (privacy
-     policy, single-purpose statement, staged rollout, the platform-wide `API_TOKEN` rotation
-     cutover — see `chrome-extension/README.md` § Chrome Web Store submission).
+   - ~~**Trial-at-signup**~~ — **SHIPPED 2026-07-23, migration 362.** A SECURITY DEFINER
+     `seed_trial_entitlement()` (mirroring `seed_default_pipeline`/`_collections`) wired into
+     `handle_new_user`'s fresh-signup branch inserts a `('free','trialing', now()+7d)`
+     entitlement, so every new signup gets **10 agent estimations for 7 days**, then falls to
+     the free 3/mo (the resolver already honored the `trialing` arm; nothing marked signups
+     trialing before). Trial length hardcoded 7 days (operator decision). The legacy-backfill
+     branch (the operator) is skipped — they're admin and bypass metering. Verified live: the
+     resolver returns 10 for a trialing account.
+   - Remaining: **extension agent-estimate quota UX** (switch the panel's estimate from
+     `mode:'deterministic'` to metered `mode:'agent'` for entitled users, show "(X left)",
+     swap the button to "upgrade" at 0 — no purchase flow yet; widen the 120 s poll window,
+     persist `run_id`); and Chrome Web Store submission (on hold per operator).
+   - **The platform-wide `API_TOKEN` rotation now has a full runbook:**
+     `docs/design/api-token-rotation-and-spa-jwt-migration.md`. A 2026-07-23 two-account
+     pen-test surfaced its live symptom: the **SPA sends the shared static `API_TOKEN`** (the
+     god-token embedded in the bundle) on every API call → `verify_jwt` → synthetic admin →
+     `tenant_conn`'s service-role branch → RLS bypassed → a logged-in user sees **all
+     accounts'** collections/tags/etc. (the operator's "3 monitoring collections" report). The
+     **DB RLS + views are sound** (a real JWT scopes perfectly) and the **extension is safe**
+     (per-user JWT since Wave 1) — the fix is **Part A: migrate the SPA's `request()` to send
+     the logged-in user's Supabase JWT** (+ a bounded `require_token`→`verify_jwt` route audit;
+     the operator's JWT carries `app_metadata.is_admin` so admin survives), then **Part B:
+     rotate the secret** (operator, Railway + ClickUp). **Until Part A ships the SPA stays
+     operator-only behind its password gate**; the extension is the per-user public surface.
 9. **Wave 2 (opportunity pipeline management) — mostly already shipped, confirmed 2026-07-22.**
    Picking this wave up, a live-schema audit (`pg_constraint`/`pg_indexes` against
    `erlvtprrmrylhznfyaih`) found the design doc's "genuinely new" pieces had already landed —
