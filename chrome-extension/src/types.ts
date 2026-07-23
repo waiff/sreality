@@ -199,7 +199,26 @@ export type ApiMessage =
   | { type: 'add_note'; property_id: number; body: string; origin_listing_ref_id: number | null }
   | { type: 'sign_in' }
   | { type: 'sign_out' }
-  | { type: 'get_auth_state' };
+  | { type: 'get_auth_state' }
+  | { type: 'get_billing' };
+
+/* The caller's agent-estimation allowance (GET /billing/me → agent_estimations),
+ * for the panel's "(zbývá X)" counter + the upgrade prompt at zero. `metered`
+ * is false for the operator/admin (unlimited) — the panel hides the counter. */
+export interface AgentQuota {
+  quota: number;
+  used: number;
+  remaining: number;
+  is_trial: boolean;
+  metered: boolean;
+}
+
+/* GET /billing/me — only the fields the panel reads. */
+export interface BillingMe {
+  plan: string;
+  status: string;
+  agent_estimations: AgentQuota;
+}
 
 /* The extension's own Supabase session state (Wave 1) — read by the panel
  * to decide whether to show data or a "please sign in" prompt, and to show
