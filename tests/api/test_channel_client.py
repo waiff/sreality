@@ -26,8 +26,14 @@ class _FakeCursor:
     def execute(self, sql: str, params: Any = None) -> None:
         norm = " ".join(sql.split())
         self._conn.executed.append((norm, params))
-        # Only the claim INSERT ... RETURNING id yields a row.
-        self._last = self._conn.claim_result if "INSERT INTO channel_sends" in norm else None
+        # The claim INSERT ... RETURNING id yields a row; the suppression probe
+        # yields one only when this conn is flagged suppressed.
+        if "INSERT INTO channel_sends" in norm:
+            self._last = self._conn.claim_result
+        elif "notification_suppression" in norm:
+            self._last = (1,) if self._conn.suppressed else None
+        else:
+            self._last = None
 
     def fetchone(self) -> tuple[Any, ...] | None:
         return self._last
@@ -48,9 +54,14 @@ class _FakeTxn:
 
 
 class _FakeConn:
-    def __init__(self, claim_result: tuple[Any, ...] | None = (1,)) -> None:
+    def __init__(
+        self,
+        claim_result: tuple[Any, ...] | None = (1,),
+        suppressed: bool = False,
+    ) -> None:
         self.executed: list[tuple[str, Any]] = []
         self.claim_result = claim_result
+        self.suppressed = suppressed
 
     def cursor(self) -> _FakeCursor:
         return _FakeCursor(self)
@@ -114,10 +125,34 @@ def test_send_success_claims_then_finalizes_sent() -> None:
     assert "ON CONFLICT (dedupe_key) DO NOTHING" in insert_sql
     # dedupe_key is the last positional param.
     assert insert_params[-1] == "notif:abc:email"
-    update_sql, update_params = conn.executed[1]
+    update_sql, update_params = next(
+        (sql, p)
+        for sql, p in conn.executed
+        if sql.startswith("UPDATE channel_sends SET")
+    )
     assert update_sql.startswith("UPDATE channel_sends SET")
     assert update_params[0] == "sent"  # status
     assert update_params[2] == "pm1"   # provider_message_id
+
+
+def test_send_skips_suppressed_recipient() -> None:
+    """A globally-suppressed (channel, address) records a terminal 'suppressed'
+    channel_sends row and never hits the transport (migration 367 pre-send gate)."""
+    conn = _FakeConn(claim_result=(9,), suppressed=True)
+    transport = _FakeTransport(SendResult(status="sent"))
+    client = ChannelClient(conn, transports={"email": transport})  # type: ignore[arg-type]
+
+    out = _send(client)
+
+    assert out == {"status": "suppressed", "id": 9}
+    assert transport.calls == []  # transport never fired
+    assert any("notification_suppression" in sql for sql, _ in conn.executed)
+    _, update_params = next(
+        (sql, p)
+        for sql, p in conn.executed
+        if sql.startswith("UPDATE channel_sends SET")
+    )
+    assert update_params[0] == "suppressed"
 
 
 def test_send_already_claimed_is_idempotent_noop() -> None:

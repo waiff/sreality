@@ -290,6 +290,12 @@ rule #16; all OPTIONAL, dark until set):
 - `TELEGRAM_BOT_TOKEN` — the Telegram Bot API transport (`api/transports/telegram.py`). Railway
   API env. The recipient `chat_id` lives in `app_settings.notification_telegram_chat_id`.
 - `SPA_BASE_URL` — SPA origin for notification deep links (`{SPA_BASE_URL}/listing/{id}`).
+- `RESEND_WEBHOOK_SECRET` (Wave 3, migration 367) — Svix signing secret for `POST /webhooks/resend`.
+  Railway API env. Unset = the webhook 503s (fail closed); the handler verifies the Svix HMAC over
+  the raw body with the stdlib (no dependency, same auth class as the Stripe webhook), dedups by
+  `svix-id` (`resend_webhook_events`), advances `channel_sends.status`
+  (`delivered`/`bounced`/`complained`), and inserts a GLOBAL, address-level `notification_suppression`
+  row (survives tenant deletion) on bounce/complaint — the outbox hard-skips suppressed addresses.
 - `STRIPE_WEBHOOK_SECRET` — Stripe webhook signing secret (Dashboard → Developers →
   Webhooks). Railway API env. Unset = `POST /billing/webhook` 503s (fail closed); the
   handler verifies the `Stripe-Signature` HMAC with the stdlib (no stripe SDK).
