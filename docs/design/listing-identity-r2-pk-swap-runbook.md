@@ -781,10 +781,11 @@ MUST precede flip (the flip-gate checklist, §8):
 MAY lag briefly (degraded, not broken — but health should still go before the flip to avoid
 silent-green): the 25-read-model wave — health matviews (136/176/214/216; post-flip NULL
 rows silently vanish from health counts = silent-green blind spot), dedup/broker/image
-matviews (`dedup_funnel_resolutions_mv`, `dedup_llm_cost_by_category_mv`,
-`broker_region_type_stats`, `category_trends_mv`, `image_storage_overview_mv`,
-`images_failure_overview_mv`, `properties_map_mv`, `snapshot_churn_24h_mv`), remaining
-`*_public` views, `dedup_label_events`, `portal_lookup` collapse onto `input_listing_id`
+matviews (`category_trends_mv`, `image_storage_overview_mv`, `images_failure_overview_mv`,
+`properties_map_mv`, `snapshot_churn_24h_mv` — `dedup_funnel_resolutions_mv`,
+`dedup_llm_cost_by_category_mv` and `broker_region_type_stats` DONE, migration 361),
+remaining `*_public` views (`manual_rental_estimates_public` DONE, migration 361),
+`dedup_label_events`, `portal_lookup` collapse onto `input_listing_id`
 (+ `property_estimates_public` on COALESCE), ClickUp payloads (unaffected — carry sreality
 URLs). NEVER touch: `srealityListingUrl()` stays bound to `source_id_native`
 (frontend + extension portals.ts) — renaming it to any surrogate emits 404 sreality.cz links.
