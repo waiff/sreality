@@ -506,6 +506,25 @@ the failure each one actually prevented:
    must NOT simply return the surrogate — `listingPath()` builds the LEGACY route,
    and the two id-spaces overlap numerically, so it would silently load the WRONG
    listing. Return the natural key and redirect canonically.
+
+   **UPDATE (2026-07-23, canonical-first Browse links):** migration **362** adds
+   `source_id_native` to `browse_projection` (correlated PK scalar subquery on
+   `listings`, since the view has no listings join and shares bare column names —
+   a real join would make the unqualified select list ambiguous) and rebuilds
+   `browse_list` + `properties_map_mv`. `queries.ts` MAP/TABLE/CARD col-sets +
+   MapRow/TableRow/CardRow now carry `source` + `source_id_native`, and
+   `listingRowPath()` is **canonical-first** (`source`+`native` → `/listing/{source}/{native}`,
+   else `sreality_id` → legacy, else `?property=`). This kills the negative-id flash
+   at the SOURCE for Browse-originated navs — the URL bar is clean from first paint,
+   no post-load redirect — and Browse cards/table + the pipeline board seed the
+   repr's surrogate `listing_id` via `<Link state>` so `ListingDetail` skips the
+   natural-key resolver round trip on in-SPA nav. Cold loads / shared links / map
+   popups (a raw `<a>` can't carry router state) keep the resolver + on-land
+   canonicalizing redirect. Pipeline rides `properties_public` (already carries the
+   key). Follow-ups still legacy: Notifications/Watchdog (`api/notifications.py`
+   `_LISTING_PROJECTION` needs `l.source_id_native`) + CollectionDetail
+   (`api/curation.py`) — one backend column add each; and BrokerDetail
+   (`broker_listings_public` view needs the column).
 3. **May-lag read models** (health/dedup/broker/image matviews, remaining `*_public`).
    `listing_fetch_failures` is the highest-leverage blocker — it has no carrier
    column and gates three health matviews. Health should still precede Gate 2 to

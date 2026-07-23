@@ -719,11 +719,13 @@ function CardFace({ card }: { card: PipelineBoardCard }) {
     <div className="flex gap-2.5">
       <CardThumb url={card.image_url} inactive={inactive} />
       <div className="min-w-0 flex-1">
-        {/* listingRowPath falls back to the property route when the
-            representative listing has no sreality_id (post-Gate-2), instead
-            of leaving the card's price unlinked entirely. */}
+        {/* listingRowPath is canonical-first (source + source_id_native from
+            properties_public), so the card links straight to the clean
+            /listing/{source}/{native} URL; it falls back to the legacy/property
+            route only for a representative with no natural key. */}
         <Link
           to={listingRowPath(card)}
+          state={{ listingId: card.listing_id ?? undefined }}
           title={inactive ? 'Neaktivní inzerát' : undefined}
           className={`font-mono tabular-nums text-sm hover:text-[var(--color-copper)] hover:underline underline-offset-2 ${priceColor}`}
         >

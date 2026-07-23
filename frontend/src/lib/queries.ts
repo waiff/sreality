@@ -93,18 +93,21 @@ export const CARD_PAGE_SIZE = 24;
 /* Every Browse row carries `listing_id` (the surrogate = the repr child's
  * listings.id, migration 343 on browse_list / properties_map_mv) — the stable,
  * NEVER-NULL identity used for React keys, the maplibre feature-state id, and
- * the hover-sync set. `sreality_id` stays selected for the fast legacy detail
- * link but is NULLABLE post-Gate-2, so it must never be a key/feature id. The
- * map has no keyset tiebreaker column, so it carries `property_id` explicitly
- * (Table/Cards get it from withKeysetColumns / CARD_COLS) for the null-safe
- * detail-link fallback. */
-const MAP_COLS = 'listing_id,property_id,sreality_id,lat,lng,price_czk,disposition,subtype,area_m2,district,last_seen_at,is_active,tom_days';
+ * the hover-sync set. The detail link is CANONICAL-first: `source` +
+ * `source_id_native` (migration 362 exposed the latter on the Browse read path)
+ * build `/listing/{source}/{native}`, so the URL bar never flashes the negative
+ * synthetic id. `sreality_id` stays selected for the legacy fallback (and as a
+ * sort field) but is NULLABLE post-Gate-2, so it must never be a key/feature id.
+ * The map has no keyset tiebreaker column, so it carries `property_id` explicitly
+ * (Table/Cards get it from withKeysetColumns / CARD_COLS) for the final null-safe
+ * `?property=` detail-link fallback. */
+const MAP_COLS = 'listing_id,property_id,sreality_id,source,source_id_native,lat,lng,price_czk,disposition,subtype,area_m2,district,last_seen_at,is_active,tom_days';
 const TABLE_COLS =
-  'listing_id,sreality_id,district,locality,obec,okres,street,disposition,subtype,area_m2,price_czk,first_seen_at,last_seen_at,is_active,tom_days,' +
+  'listing_id,sreality_id,source,source_id_native,district,locality,obec,okres,street,disposition,subtype,area_m2,price_czk,first_seen_at,last_seen_at,is_active,tom_days,' +
   'estate_area,usable_area,parking_lots,furnished,ownership,category_sub_cb,building_type';
 const CARD_COLS =
-  'listing_id,property_id,sreality_id,district,locality,obec,okres,street,disposition,subtype,area_m2,price_czk,first_seen_at,last_seen_at,is_active,tom_days,' +
-  'category_main,category_type,source,mf_gross_yield_pct';
+  'listing_id,property_id,sreality_id,source,source_id_native,district,locality,obec,okres,street,disposition,subtype,area_m2,price_czk,first_seen_at,last_seen_at,is_active,tom_days,' +
+  'category_main,category_type,mf_gross_yield_pct';
 
 export type SortField =
   | 'sreality_id' | 'district' | 'disposition'
@@ -402,6 +405,8 @@ export interface MapRow {
   listing_id: number;
   property_id: number;
   sreality_id: number | null;
+  source: string | null;
+  source_id_native: string | null;
   lat: number;
   lng: number;
   price_czk: number | null;
@@ -688,6 +693,8 @@ export interface TableRow {
   /* Surrogate identity (never null) — the React key + hover-sync key. */
   listing_id: number;
   sreality_id: number | null;
+  source: string | null;
+  source_id_native: string | null;
   district: string | null;
   locality: string | null;
   obec: string | null;
@@ -837,6 +844,9 @@ export interface CardRow {
   category_main: string | null;
   category_type: string | null;
   source: string | null;
+  /* Portal-native id (migration 091). With `source`, builds the canonical
+   * `/listing/{source}/{native}` link; null on pre-091 rows → legacy fallback. */
+  source_id_native: string | null;
   /* MF gross rental yield % (migration 133). Non-null only on sale
    * apartments that resolved to an MF territory. */
   mf_gross_yield_pct: number | null;
@@ -2292,7 +2302,7 @@ export const fetchPipelineBoard = async (): Promise<PipelineBoardCard[]> => {
   const { data: props, error: pErr } = await supabase
     .from('properties_public')
     .select(
-      'property_id, sreality_id, listing_id, category_main, street, district, disposition, subtype, area_m2, price_czk, mf_gross_yield_pct, obec_id, okres_id, region_id, place_search_text, okres, region, is_active',
+      'property_id, sreality_id, source, source_id_native, listing_id, category_main, street, district, disposition, subtype, area_m2, price_czk, mf_gross_yield_pct, obec_id, okres_id, region_id, place_search_text, okres, region, is_active',
     )
     .in('property_id', ids);
   if (pErr) throw pErr;
@@ -2355,6 +2365,8 @@ export const fetchPipelineBoard = async (): Promise<PipelineBoardCard[]> => {
       board_position: r.board_position,
       entered_stage_at: r.entered_stage_at,
       sreality_id: sid,
+      source: (p?.source as string | null) ?? null,
+      source_id_native: (p?.source_id_native as string | null) ?? null,
       listing_id: lid,
       category_main: (p?.category_main as string | null) ?? null,
       street: (p?.street as string | null) ?? null,

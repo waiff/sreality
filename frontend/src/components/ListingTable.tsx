@@ -218,6 +218,7 @@ function Row({
       <td className="px-4 py-2.5 align-middle">
         <Link
           to={listingRowPath(row)}
+          state={{ listingId: row.listing_id }}
           className="font-mono tabular-nums text-[var(--color-copper)] hover:underline underline-offset-2"
         >
           {/* Portal-native id; a post-Gate-2 non-sreality row has none, so the

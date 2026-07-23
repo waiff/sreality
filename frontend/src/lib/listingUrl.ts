@@ -33,19 +33,37 @@ export function propertyListingPath(propertyId: number): string {
   return `/listing?property=${propertyId}`;
 }
 
-/* The detail link for a PROPERTY-GRAIN Browse row (Map / Table / Cards). The
- * legacy `/listing/{sreality_id}` route is one round trip, so it stays the fast
- * path whenever the representative child HAS a sreality_id. Post-Gate-2 a new
- * non-sreality listing inserts `sreality_id = NULL`, and `listingPath(null)`
- * would build `/listing/null` (the id-spaces overlap, so we must never route the
- * surrogate through the legacy sreality route either); those rows fall back to
- * the property route, which ListingDetail resolves to the canonical natural-key
- * URL. `property_id` is never null on the property grain, so this always yields
- * a working link. */
+/* The detail link for a PROPERTY-GRAIN row (Browse Map / Table / Cards, the
+ * pipeline board, …). Precedence is CANONICAL → legacy → property:
+ *
+ *   1. `source` + `source_id_native` present → the self-describing
+ *      `/listing/{source}/{native}` URL. This is the preferred form for every
+ *      row that carries the natural key: the URL bar is clean from the first
+ *      paint, with no post-load legacy→canonical redirect flashing the negative
+ *      synthetic id (migration 097). ListingDetail resolves the natural key to
+ *      the repr child; in-SPA navs also seed `listing_id` via Link `state` to
+ *      skip that resolver round trip entirely.
+ *   2. no natural key but a `sreality_id` → the legacy `/listing/{id}` route
+ *      (pre-Gate-2 rows whose row payload doesn't carry the natural key, or
+ *      callers that only know the id). ListingDetail canonicalizes on land.
+ *   3. neither → the property route `/listing?property=<id>`, which ListingDetail
+ *      resolves to the representative's canonical URL. Post-Gate-2 a new
+ *      non-sreality listing inserts `sreality_id = NULL`, so a row without the
+ *      natural key still links here; `property_id` is never null on the property
+ *      grain, so this always yields a working link. Never route the surrogate
+ *      through the legacy sreality route — the id-spaces overlap.
+ *
+ * `source`/`source_id_native` are optional so pre-existing callers that pass only
+ * `{ sreality_id, property_id }` keep the legacy→property behavior unchanged. */
 export function listingRowPath(row: {
+  source?: string | null;
+  source_id_native?: string | null;
   sreality_id: number | null;
   property_id: number;
 }): string {
+  if (row.source && row.source_id_native) {
+    return listingCanonicalPath(row.source, row.source_id_native);
+  }
   return row.sreality_id != null
     ? listingPath(row.sreality_id)
     : propertyListingPath(row.property_id);
