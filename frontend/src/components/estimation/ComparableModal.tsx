@@ -106,7 +106,10 @@ function Header({ listing }: { listing: ListingPublic }) {
   return (
     <div className="pr-10">
       <p className="text-[0.65rem] tracking-[0.16em] uppercase text-[var(--color-ink-4)]">
-        Comparable · id <span className="font-mono tabular-nums text-[var(--color-ink-3)] normal-case tracking-normal">{listing.sreality_id}</span>
+        {/* sreality_id is NULL for a post-Gate-2-flip non-sreality-portal
+         * listing (flip not live yet); fall back to the surrogate `id`,
+         * which every row always has. */}
+        Comparable · id <span className="font-mono tabular-nums text-[var(--color-ink-3)] normal-case tracking-normal">{listing.sreality_id ?? listing.id}</span>
       </p>
       <h2
         className="mt-1 text-[1.7rem] leading-[1.1] tabular-nums"
@@ -362,13 +365,21 @@ function Footer({ listing }: { listing: ListingPublic }) {
   });
   return (
     <div className="flex items-center justify-between">
-      <Link
-        to={listingPath(listing.sreality_id)}
-        className="inline-flex items-center gap-1.5 px-4 py-2 text-sm rounded-[var(--radius-sm)] border border-[var(--color-copper)]/40 bg-[var(--color-copper-soft)] text-[var(--color-copper)] hover:text-[var(--color-copper-2)] hover:border-[var(--color-copper)] transition-colors"
-      >
-        View in full
-        <OutArrow />
-      </Link>
+      {/* listingPath needs a real sreality_id (never route the surrogate
+       * through the legacy sreality route — see lib/listingUrl.ts); a
+       * post-flip non-sreality comparable has none, so the internal link
+       * simply doesn't render rather than building a dead `/listing/null`. */}
+      {listing.sreality_id != null ? (
+        <Link
+          to={listingPath(listing.sreality_id)}
+          className="inline-flex items-center gap-1.5 px-4 py-2 text-sm rounded-[var(--radius-sm)] border border-[var(--color-copper)]/40 bg-[var(--color-copper-soft)] text-[var(--color-copper)] hover:text-[var(--color-copper-2)] hover:border-[var(--color-copper)] transition-colors"
+        >
+          View in full
+          <OutArrow />
+        </Link>
+      ) : (
+        <span />
+      )}
       {external && (
         <a
           href={external}
