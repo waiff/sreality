@@ -86,6 +86,29 @@ def test_build_clauses_emits_spatial_when_set() -> None:
     assert params["radius_m"] == 1500
 
 
+def test_build_clauses_city_quality_uses_latlng_not_geom() -> None:
+    """City-index containment + near-city proximity watchdogs scan
+    properties_public, which projects lat/lng but NOT the raw geom column.
+    Every point in _city_quality_clauses must be built from l.lng/l.lat — a
+    stray `l.geom` throws `column l.geom does not exist`, caught by the
+    per-subscription try/except, so those watchdogs silently NEVER match
+    (the Wave 3 detection fix; this guards against a geom regression)."""
+    spec = WatchdogFilterSpec(
+        city_index_rules=[{"index_name": "safety", "value": 60, "op": ">="}],
+        near_city_proximity={"radius_km": 10, "index_rules": []},
+    )
+    where, params = _build_match_clauses(spec)
+    city = [w for w in where if "curated_cities_public" in w]
+    # both branches emitted: one EXISTS for city_index_rules, one for near_city_proximity
+    assert len(city) == 2
+    joined = " ".join(city)
+    assert "l.geom" not in joined
+    assert "ST_MakePoint(l.lng, l.lat)" in joined
+    # polygon-containment fallback also builds the listing point from lat/lng
+    assert "ST_Covers(b.geom, ST_SetSRID(ST_MakePoint(l.lng, l.lat), 4326))" in joined
+    assert params["near_city_radius_m"] == 10000
+
+
 def test_build_clauses_property_grain_derived_predicates() -> None:
     """The merged price-change filters (migration 173) render against the
     property-grain columns properties_public exposes; the window picks the

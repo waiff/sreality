@@ -205,6 +205,16 @@ def _city_quality_clauses(
     Three concerns, one helper, isolated from the rest of
     `_shared_filter_where` so the Watchdog matcher can reuse the same
     code path. Returns the clause list + parameter additions.
+
+    Every predicate here reads a properties_public-grain column
+    (`home_obec_pop`, `near_*`, and the listing point built from
+    `l.lng`/`l.lat`) — properties_public projects lat/lng (ST_Y/ST_X of
+    the geom) but NOT the raw geom, so the containment/proximity branches
+    build the point from lat/lng rather than referencing `l.geom` (which
+    would throw `column l.geom does not exist` against properties_public,
+    silently zeroing every city-index/proximity watchdog). The
+    listings-grain callers via `_shared_filter_where` never set these
+    filters, so the whole helper is inert for them.
     """
     where: list[str] = []
     params: dict[str, Any] = {}
@@ -248,10 +258,10 @@ def _city_quality_clauses(
         # fallback for cities that didn't match a RÚIAN obec by name.
         sub_where: list[str] = [
             "((c.admin_boundary_id IS NOT NULL "
-            "AND ST_Covers(b.geom, l.geom)) "
+            "AND ST_Covers(b.geom, ST_SetSRID(ST_MakePoint(l.lng, l.lat), 4326))) "
             "OR (c.admin_boundary_id IS NULL "
             "AND ST_DWithin("
-            "l.geom, "
+            "ST_SetSRID(ST_MakePoint(l.lng, l.lat), 4326)::geography, "
             "ST_SetSRID(ST_MakePoint(c.lng, c.lat), 4326)::geography, "
             "c.default_radius_m)))"
         ]
@@ -277,7 +287,7 @@ def _city_quality_clauses(
             raise ValueError("near_city_proximity.radius_km must be > 0")
         sub_where = [
             "ST_DWithin("
-            "l.geom, "
+            "ST_SetSRID(ST_MakePoint(l.lng, l.lat), 4326)::geography, "
             "ST_SetSRID(ST_MakePoint(c.lng, c.lat), 4326)::geography, "
             "%(near_city_radius_m)s)"
         ]

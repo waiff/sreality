@@ -50,8 +50,9 @@ common to all. Full plan, sequencing, and gates: `docs/design/public-release-pro
   increment 3 + Wave 1 (item 9 below) — the connection-swap, the account-partitioned reconciler,
   and the composite FK all predate this wave being picked up; only a DB-level invariant, an
   index, and a concurrency fix were genuinely left, shipped this pass. Its launch gate (external
-  re-audit + two-real-account pen-test) still needs a second real account to exist. Waves 3–4
-  are unstarted (`docs/design/waves-1-4-public-features.md`).
+  re-audit + two-real-account pen-test) still needs a second real account to exist. **Wave 3
+  (watchdogs & notifications) is now in progress** (item 10 below); Wave 4 is unstarted
+  (`docs/design/waves-1-4-public-features.md`).
 
 **CRITICAL finding + fix, 2026-07-20:** the 2-account pen-test
 (`tests/test_tenant_isolation_live.py`) only ever asserted RLS on **base tables**
@@ -424,6 +425,30 @@ remediation R3 closes that. Full spec: `docs/design/public-release-remediation-2
      account/member exists live today. Plus registering `property_pipeline`/`property_pipeline_events`
      in a future GDPR export/deletion surface (the `on delete cascade` from `accounts` already
      scrubs them on account deletion; there's just no self-service surface yet — a Phase-1-wide gap).
+
+10. **Wave 3 (watchdogs & notifications) — in progress.** A three-agent live audit (2026-07-23)
+    confirmed the Wave-2 pattern again: the delivery *mechanism* (outbox loop, `channel_sends`
+    ledger, Resend/Telegram transports, retry/backoff, dark-gating) and the *event-side* tenancy
+    (`account_id` + RLS on `notification_subscriptions`/`notification_dispatches`, migrations
+    290/292, backfilled by 294) were **already shipped**. What genuinely remains is detection
+    scale/correctness, the route-layer tenancy move, and the public-product delivery envelope
+    (per-account recipients, opt-in, suppression, unsubscribe, bounce webhook, quotas) — all
+    buildable-dark; the hard gates are operator Resend-provisioning + GDPR/product sign-off.
+    - **Detection scale + correctness — SHIPPED, migration 363.** (1) `properties_published_at_idx`
+      — a plain btree over the published rows the matcher's new-listing cursor actually scans
+      (`published_at > cursor ORDER BY published_at ASC`); the only prior published_at index was
+      `properties_unpublished_idx` (mig 273), a partial over the INVERSE (`WHERE published_at IS
+      NULL`), so the hot forward-window scan over **555k** published properties was unindexed.
+      Created CONCURRENTLY on prod (valid, 3.9 MB), the file carries the replay-safe plain form.
+      (2) Fixed the city-quality/geom lockstep bug: `toolkit/comparables._city_quality_clauses`
+      emitted `l.geom` in its containment + proximity branches, but the matcher scans
+      `properties_public` (projects lat/lng, no raw geom) — so every `city_index_rules` /
+      `near_city_proximity` watchdog threw `column l.geom does not exist`, swallowed by the
+      per-subscription try/except → **silently never matched**. Rewrote all three point
+      constructions to build from `l.lng`/`l.lat` (the grain the whole helper already uses for
+      `home_obec_pop`/`near_*`); the listings-grain callers via `_shared_filter_where`
+      (comparables/velocity/transit) never set these filters, so the change is inert for them.
+      Regression test `test_build_clauses_city_quality_uses_latlng_not_geom`.
 
 **Housekeeping done 2026-07-20:** operator enabled Supabase Auth's leaked-password-protection
 toggle (Authentication → Sign In / Providers → Email → "Prevent use of leaked passwords").
