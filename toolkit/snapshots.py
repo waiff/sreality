@@ -28,14 +28,16 @@ _DIFF_SKIP_KEYS: frozenset[str] = frozenset({"sreality_id", "lon", "lat"})
 
 def compare_snapshots(
     conn: "psycopg.Connection",
-    sreality_id: int,
+    sreality_id: int | None = None,
     since: timedelta | None = None,
+    *,
+    listing_id: int | None = None,
 ) -> dict[str, Any]:
     from scraper import parser
     from toolkit import _now_iso
 
-    snapshots = _fetch_snapshots(conn, sreality_id, since)
-    first_seen = _fetch_first_seen_at(conn, sreality_id)
+    snapshots = _fetch_snapshots(conn, sreality_id, since, listing_id=listing_id)
+    first_seen = _fetch_first_seen_at(conn, sreality_id, listing_id=listing_id)
 
     trajectory = _build_trajectory(snapshots)
     price_change_count, price_change_total = _price_change_stats(trajectory)
@@ -51,6 +53,7 @@ def compare_snapshots(
 
     data: dict[str, Any] = {
         "sreality_id": sreality_id,
+        "listing_id": listing_id,
         "snapshot_count": len(snapshots),
         "first_snapshot_at": (
             snapshots[0]["scraped_at"].isoformat() if snapshots else None
@@ -72,6 +75,7 @@ def compare_snapshots(
             "tool": "compare_snapshots",
             "filters_used": {
                 "sreality_id": sreality_id,
+                "listing_id": listing_id,
                 "since_days": since.days if since else None,
             },
             "result_count": len(snapshots),
@@ -85,26 +89,35 @@ def compare_snapshots(
 
 def _fetch_snapshots(
     conn: "psycopg.Connection",
-    sreality_id: int,
+    sreality_id: int | None,
     since: timedelta | None,
+    *,
+    listing_id: int | None = None,
 ) -> list[dict[str, Any]]:
+    from toolkit import _listing_id_clause
+
+    # listing_snapshots' surrogate FK column is `listing_id`, distinct from its
+    # own PK `id` — override lid_col (the helper's default assumes the PK).
+    id_clause, id_val = _listing_id_clause(
+        sreality_id, listing_id, lid_col="listing_id", sid_col="sreality_id",
+    )
     if since is not None:
-        sql = """
+        sql = f"""
         SELECT id, scraped_at, price_czk, raw_json
         FROM listing_snapshots
-        WHERE sreality_id = %s
+        WHERE {id_clause}
           AND scraped_at > now() - make_interval(secs => %s)
         ORDER BY scraped_at ASC
         """
-        params: tuple[Any, ...] = (sreality_id, int(since.total_seconds()))
+        params: tuple[Any, ...] = (id_val, int(since.total_seconds()))
     else:
-        sql = """
+        sql = f"""
         SELECT id, scraped_at, price_czk, raw_json
         FROM listing_snapshots
-        WHERE sreality_id = %s
+        WHERE {id_clause}
         ORDER BY scraped_at ASC
         """
-        params = (sreality_id,)
+        params = (id_val,)
     with conn.cursor() as cur:
         cur.execute(sql, params)
         rows = cur.fetchall()
@@ -115,12 +128,18 @@ def _fetch_snapshots(
 
 
 def _fetch_first_seen_at(
-    conn: "psycopg.Connection", sreality_id: int
+    conn: "psycopg.Connection",
+    sreality_id: int | None,
+    *,
+    listing_id: int | None = None,
 ) -> datetime | None:
+    from toolkit import _listing_id_clause
+
+    id_clause, id_val = _listing_id_clause(sreality_id, listing_id)
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT first_seen_at FROM listings WHERE sreality_id = %s",
-            (sreality_id,),
+            f"SELECT first_seen_at FROM listings WHERE {id_clause}",
+            (id_val,),
         )
         row = cur.fetchone()
     return row[0] if row else None

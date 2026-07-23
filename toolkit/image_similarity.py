@@ -266,15 +266,15 @@ def _produce_comparison(
             "cannot fetch listing images for vision"
         )
 
-    images_a = _fetch_image_keys(conn, sid_a, n_images)
+    images_a = _fetch_image_keys(conn, lid_a, n_images)
     if not images_a:
         raise ImageCompareError(
-            f"no R2-stored images for sreality_id={sid_a}; cannot compare"
+            f"no R2-stored images for listing_id={lid_a}; cannot compare"
         )
-    images_b = _fetch_image_keys(conn, sid_b, n_images)
+    images_b = _fetch_image_keys(conn, lid_b, n_images)
     if not images_b:
         raise ImageCompareError(
-            f"no R2-stored images for sreality_id={sid_b}; cannot compare"
+            f"no R2-stored images for listing_id={lid_b}; cannot compare"
         )
 
     r2 = image_storage.R2Client.from_env()
@@ -332,16 +332,18 @@ def _produce_comparison(
 
 def _fetch_image_keys(
     conn: "psycopg.Connection",
-    sreality_id: int,
+    listing_id: int,
     n_images: int,
 ) -> list[str]:
+    # Keyed on the surrogate (images.listing_id, fully populated): sreality_id
+    # is NULL for a post-Gate-2 listing, which would silently starve this query.
     sql = (
         "SELECT storage_path FROM images "
-        "WHERE sreality_id = %s AND storage_path IS NOT NULL "
+        "WHERE listing_id = %s AND storage_path IS NOT NULL "
         "ORDER BY sequence ASC NULLS LAST LIMIT %s"
     )
     with conn.cursor() as cur:
-        cur.execute(sql, (sreality_id, n_images))
+        cur.execute(sql, (listing_id, n_images))
         rows = cur.fetchall()
     return [r[0] for r in rows]
 
