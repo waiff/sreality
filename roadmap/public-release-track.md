@@ -469,6 +469,17 @@ remediation R3 closes that. Full spec: `docs/design/public-release-remediation-2
       `account_id` **NOT NULL** on both tables. Tests: `test_create_subscription_stamps_account_id`;
       the standing route-coverage gate buckets all 9 as `tenant`. The manual two-account
       pen-test (now possible — 4 accounts exist) is a launch-gate follow-up.
+    - **Matcher single-runner lease — SHIPPED, migration 366.** The three producer passes
+      (`match_once`/`match_changes_once`/`match_monitored_collections_once`) run as an
+      asyncio loop inside EVERY API replica (`matcher_loop`) with no single-runner guard →
+      N replicas fan out N× market-wide scans. (The per-event `dedupe_key` already prevents
+      *duplicate notifications*, rule #16, so this is a wasted-scan guard, not a correctness
+      one — latent until >1 replica, like the design's other public-scale items.) Added
+      `notification_matcher_lease`, a single-row CAS lease (the mig-279 `property_maintenance_lease`
+      shape — pooler-proof, unlike a session advisory lock); `matcher_loop` claims it each pass
+      (sticky renewal), skips the passes when another replica holds it, releases on graceful
+      shutdown, and **fails open** (runs unguarded) if the lease can't be evaluated. Co-hosted
+      in the API (Phase 1 A8), not moved to the dark worker. Test `test_matcher_lease_cas_acquires_and_yields`.
 
 **Housekeeping done 2026-07-20:** operator enabled Supabase Auth's leaked-password-protection
 toggle (Authentication → Sign In / Providers → Email → "Prevent use of leaked passwords").
