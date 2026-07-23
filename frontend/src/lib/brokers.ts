@@ -73,7 +73,10 @@ export interface BrokerMembership {
 
 export interface BrokerListing {
   broker_id: number;
-  sreality_id: number;
+  // NULL for a post-Gate-2 (non-sreality) listing. listing_id is the
+  // surrogate that's always present — use it for a stable React key.
+  sreality_id: number | null;
+  listing_id: number;
   source: string;
   source_url: string | null;
   locality: string | null;
