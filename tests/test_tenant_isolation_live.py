@@ -53,10 +53,13 @@ _TENANT_VIEWS: list[str] = [
     "tags_public",
 ]
 
-# Views that must NOT be security_invoker: they join a shared table carrying
-# RLS-enabled-with-zero-policies (`listings`/`properties`/`images`), which is
+# Views that must NOT be security_invoker: they join a shared table that is
 # deny-all under invoker rights, so flipping them silently returns zero rows to
-# every caller instead of scoping anything.
+# every caller instead of scoping anything. `listings`/`images` are
+# RLS-enabled-with-zero-policies (fully deny-all); `properties` now carries one
+# permissive authenticated-SELECT policy (Amendment A5, migration 349) but the
+# views still must stay owner-bypass because they JOIN `listings`, which stays
+# deny-all.
 #
 # Owner rights does NOT mean unscoped. property_estimates_public reads
 # `estimation_runs`, whose RLS cannot bind inside an owner-rights view, so
@@ -298,6 +301,81 @@ def test_market_view_not_security_invoker(svc: Any) -> None:
     )
 
 
+def test_a5_properties_readable_listings_still_deny_all(
+    svc: Any, tenants: dict[str, uuid.UUID],
+) -> None:
+    """Amendment A5 (migration 349). The tenant role can read base `properties`
+    directly (the read policy), but base `listings` stays deny-all (broker PII),
+    and the id<->sreality_id map create_note needs resolves only through the
+    PII-free `listing_natural_key_public` identity view.
+
+    Regression for the Wave-1 breakage where a signed-in user's add-note /
+    bookmark / add-to-collection all 404'd because resolve_active_property_ids'
+    walk over `properties` returned zero rows under RLS deny-all."""
+    import psycopg
+
+    srid = 900_000_000 + int(uuid.uuid4().int % 50_000_000)
+    with svc.cursor() as cur:
+        cur.execute("INSERT INTO properties DEFAULT VALUES RETURNING id")
+        prop = cur.fetchone()[0]
+        cur.execute(
+            "INSERT INTO listings (sreality_id, source, source_id_native, raw_json, "
+            "broker_email, property_id) "
+            "VALUES (%s, 'sreality', %s, '{}'::jsonb, 'secret@broker.cz', %s)",
+            (srid, f"iso-a5-{srid}", prop),
+        )
+    try:
+        with _scoped(tenants["a_user"]) as conn:
+            with conn.cursor() as cur:
+                # A5: the read policy makes base `properties` visible to a tenant.
+                cur.execute("SELECT id FROM properties WHERE id = %s", (prop,))
+                assert cur.fetchall() == [(prop,)], (
+                    "A5 policy: authenticated must read base properties"
+                )
+                # The PII-free identity view resolves the id<->sreality_id map
+                # create_note depends on (owner-bypass, no broker columns). Both
+                # directions the INSERT subselects use must round-trip.
+                cur.execute(
+                    "SELECT id FROM listing_natural_key_public WHERE sreality_id = %s",
+                    (srid,),
+                )
+                row = cur.fetchone()
+                assert row is not None, (
+                    "listing_natural_key_public must resolve sreality_id -> id for a tenant"
+                )
+                listing_id = row[0]
+                cur.execute(
+                    "SELECT sreality_id FROM listing_natural_key_public WHERE id = %s",
+                    (listing_id,),
+                )
+                assert cur.fetchone() == (srid,), (
+                    "listing_natural_key_public must resolve id -> sreality_id for a tenant"
+                )
+            # `listings` stays closed to a tenant — A5 does NOT open the broker-PII
+            # base table. The block mechanism differs by environment and BOTH are
+            # acceptable: production grants `authenticated` a table-level SELECT (via
+            # Supabase's default ACL) so RLS deny-all returns 0 rows; the CI schema
+            # replay has no such grant so it raises InsufficientPrivilege first.
+            # Either way the tenant obtains no `listings` row (and no broker_email).
+            # Runs in its own SAVEPOINT so a privilege error doesn't poison the txn.
+            try:
+                with conn.transaction():
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "SELECT count(*) FROM listings WHERE sreality_id = %s", (srid,)
+                        )
+                        assert cur.fetchone()[0] == 0, (
+                            "base listings RLS must return zero rows to authenticated"
+                        )
+            except psycopg.errors.InsufficientPrivilege:
+                pass  # grant-blocked (CI replay) — also a valid deny
+    finally:
+        with svc.cursor() as cur:
+            cur.execute("DELETE FROM listing_snapshots WHERE sreality_id = %s", (srid,))
+            cur.execute("DELETE FROM listings WHERE sreality_id = %s", (srid,))
+            cur.execute("DELETE FROM properties WHERE id = %s", (prop,))
+
+
 @pytest.fixture(scope="module")
 def seeded_estimate_rows(
     svc: Any, tenants: dict[str, uuid.UUID],
@@ -526,9 +604,10 @@ def seeded_tenant_rows(
         cleanup.insert(0, ("DELETE FROM collection_properties WHERE collection_id = %s", (coll,)))
         where["collection_properties_public"] = ("collection_id = %s", (coll,))
 
-        # A fresh account has no stages; a lone non-entry/non-terminal stage satisfies
-        # both column CHECKs (the entry/terminal invariants are API-enforced, not DB).
-        # The view filters archived_at IS NULL, so leave it NULL.
+        # A fresh account has no stages; a lone non-entry/non-terminal stage trivially
+        # satisfies both the app-layer rule and the DB CHECK (migration 357) that a
+        # stage can't be entry and terminal at once. The view filters
+        # archived_at IS NULL, so leave it NULL.
         cur.execute(
             "INSERT INTO pipeline_stages (account_id, key, label, position) "
             "VALUES (%s, %s, 'iso', 1) RETURNING id",
@@ -723,9 +802,24 @@ def seeded_admin_rows(svc: Any) -> "Iterator[None]":
         cur.execute("INSERT INTO properties DEFAULT VALUES RETURNING id")
         pb = cur.fetchone()[0]
         lo, hi = min(pa, pb), max(pa, pb)  # CHECK left_property_id < right_property_id
-        cur.execute("INSERT INTO images (sreality_url) VALUES (%s) RETURNING id", (f"https://iso.test/{n}a.jpg",))
+        # images.listing_id is NOT NULL (migration 350) and FKs to listings.id, so
+        # seed a minimal listing to hang the two fixture images off. A non-sreality
+        # source keeps sreality_id NULL within the sign CHECK.
+        cur.execute(
+            "INSERT INTO listings (source, source_id_native, raw_json) "
+            "VALUES ('idnes', %s, '{}'::jsonb) RETURNING id",
+            (n,),
+        )
+        lid = cur.fetchone()[0]
+        cur.execute(
+            "INSERT INTO images (listing_id, sreality_url) VALUES (%s, %s) RETURNING id",
+            (lid, f"https://iso.test/{n}a.jpg"),
+        )
         ia = cur.fetchone()[0]
-        cur.execute("INSERT INTO images (sreality_url) VALUES (%s) RETURNING id", (f"https://iso.test/{n}b.jpg",))
+        cur.execute(
+            "INSERT INTO images (listing_id, sreality_url) VALUES (%s, %s) RETURNING id",
+            (lid, f"https://iso.test/{n}b.jpg"),
+        )
         ib = cur.fetchone()[0]
         ilo, ihi = min(ia, ib), max(ia, ib)  # CHECK image_id_a < image_id_b
 
@@ -788,6 +882,7 @@ def seeded_admin_rows(svc: Any) -> "Iterator[None]":
             cur.execute("DELETE FROM dedup_engine_runs WHERE id = %s", (run_id,))
             cur.execute("DELETE FROM scrape_runs WHERE id = %s", (scrape_id,))
             cur.execute("DELETE FROM images WHERE id IN (%s, %s)", (ia, ib))
+            cur.execute("DELETE FROM listings WHERE id = %s", (lid,))
             cur.execute("DELETE FROM properties WHERE id IN (%s, %s)", (pa, pb))
 
 

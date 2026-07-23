@@ -162,6 +162,110 @@ def test_select_pending_sql_invariants():
     assert conn2.cur.params == ("bazos", "7 days", "m2", 500)
 
 
+def test_select_pending_skips_null_sreality_id_gate2():
+    """Gate 2 of the listing-identity refactor makes new non-sreality listings
+    insert sreality_id = NULL. This enrichment lane is sreality_id-keyed
+    end-to-end (toolkit.bazos_enrichment + listing_description_enrichment_batch_
+    requests.sreality_id NOT NULL, no listing_id column), so _select_pending must
+    exclude NULL-sreality rows in SQL. Without the `l.sreality_id IS NOT NULL`
+    guard a NULL row reaches `int(r[0])` and raises TypeError; and because the
+    NOT-EXISTS anti-join is never true for a NULL and ORDER BY first_seen_at DESC
+    floats the newest (NULL) row to the top, the lane re-crashes on it forever.
+
+    The fake cursor honours the guard clause (standing in for Postgres'
+    `IS NOT NULL`), so this is red-without-the-fix (int(None) TypeError) and
+    green with it.
+    """
+    import importlib
+
+    m = importlib.import_module("scripts.enrich_listing_descriptions")
+
+    # Newest-first, a NULL-sreality (post-Gate-2) row on top — exactly the row
+    # ORDER BY first_seen_at DESC surfaces first; the rest are existing bazos
+    # rows carrying negative synthetic sreality_ids.
+    all_rows = [(None,), (-391732,), (-391731,)]
+
+    class _Cur:
+        def __init__(self) -> None:
+            self.sql = ""
+
+        def execute(self, sql: str, params: Any = None) -> None:
+            self.sql = sql
+
+        def fetchall(self):
+            if "l.sreality_id IS NOT NULL" in self.sql:
+                return [r for r in all_rows if r[0] is not None]
+            return list(all_rows)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    class _Conn:
+        def __init__(self) -> None:
+            self.cur = _Cur()
+
+        def cursor(self):
+            return self.cur
+
+    conn = _Conn()
+    out = m._select_pending(
+        conn, source="bazos", model="claude-haiku-4-5", max_age_days=0, limit=500
+    )
+    assert out == [-391732, -391731]  # NULL row excluded, no int(None) crash
+    assert "l.sreality_id IS NOT NULL" in conn.cur.sql
+
+    # The guard is emitted in the freshness branch too.
+    conn2 = _Conn()
+    m._select_pending(conn2, source="bazos", model="m2", max_age_days=7, limit=500)
+    assert "l.sreality_id IS NOT NULL" in conn2.cur.sql
+
+
+def test_count_null_identity_skipped():
+    """Diagnostic-only companion to the guard above: surfaces how many rows it's
+    excluding so a post-Gate-2-flip backlog is visible in the run log instead of
+    only discoverable by reading _select_pending's SQL."""
+    import importlib
+
+    m = importlib.import_module("scripts.enrich_listing_descriptions")
+
+    class _Cur:
+        def __init__(self, n: int) -> None:
+            self.n = n
+            self.sql = ""
+            self.params: Any = None
+
+        def execute(self, sql: str, params: Any = None) -> None:
+            self.sql, self.params = sql, params
+
+        def fetchone(self):
+            return (self.n,)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    class _Conn:
+        def __init__(self, n: int) -> None:
+            self.cur = _Cur(n)
+
+        def cursor(self):
+            return self.cur
+
+    conn = _Conn(0)
+    assert m._count_null_identity_skipped(conn, source="bazos") == 0
+    assert "l.sreality_id IS NULL" in conn.cur.sql
+    assert "l.source = %s" in conn.cur.sql
+    assert conn.cur.params == ("bazos",)
+
+    conn2 = _Conn(42)
+    assert m._count_null_identity_skipped(conn2, source="bazos") == 42
+
+
 # ----------------------------------------------------------------------
 # LLM call contract: slim tool, forced tool_choice, negative cache
 # ----------------------------------------------------------------------

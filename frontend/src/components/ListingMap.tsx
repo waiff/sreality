@@ -25,7 +25,7 @@ import {
   type HoverData,
 } from '@/lib/growthChoropleth';
 import HoverChart from '@/components/HoverChart';
-import { listingPath } from '@/lib/listingUrl';
+import { listingRowPath } from '@/lib/listingUrl';
 
 const psgLayerId = (m: GrowthMetric) => `psg-${m}`;
 
@@ -114,8 +114,10 @@ const toFeatureCollection = (rows: MapRow[]): FC => ({
     type: 'Feature',
     /* Stable feature id lets maplibre's setFeatureState target this
      * point even after the source data is replaced — that's what
-     * powers the cross-source hover highlight (cards / table → map). */
-    id: r.sreality_id,
+     * powers the cross-source hover highlight (cards / table → map).
+     * The surrogate listing_id (never null), NOT sreality_id — a null
+     * feature id would make setFeatureState a no-op post-Gate-2. */
+    id: r.listing_id,
     geometry: { type: 'Point', coordinates: [r.lng, r.lat] },
     properties: { ...r, price_label: formatPriceLabel(r.price_czk) },
   })),
@@ -931,7 +933,7 @@ export default function ListingMap({
         src.getClusterLeaves(clusterId, pointCount, 0)
           .then((leaves) => {
             const ids = leaves
-              .map((leaf) => leaf.properties?.sreality_id as number | undefined)
+              .map((leaf) => leaf.properties?.listing_id as number | undefined)
               .filter((x): x is number => typeof x === 'number');
             onHoverRef.current?.(ids);
           })
@@ -1379,7 +1381,7 @@ export default function ListingMap({
     const features: GeoJSON.Feature<GeoJSON.Point>[] =
       hoverOrigin === 'list' && hoveredIds.size > 0
         ? rows
-            .filter((r) => hoveredIds.has(r.sreality_id))
+            .filter((r) => hoveredIds.has(r.listing_id))
             .map((r) => ({
               type: 'Feature',
               geometry: { type: 'Point', coordinates: [r.lng, r.lat] },
@@ -1840,7 +1842,7 @@ function popupHtml(r: MapRow): string {
       </p>
       ${district ? `<p class="lp-district">${escape(district)}</p>` : ''}
       <p class="lp-seen" title="${escape(seenAbs)}">last seen ${escape(seen)}</p>
-      <a href="${listingPath(r.sreality_id)}" class="lp-link">View details →</a>
+      <a href="${listingRowPath(r)}" class="lp-link">View details →</a>
     </div>
   `;
 }

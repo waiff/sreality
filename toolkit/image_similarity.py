@@ -120,22 +120,46 @@ def compare_listing_images(
     conn: "psycopg.Connection",
     llm_client: "LLMClient",
     *,
-    sreality_id_a: int,
-    sreality_id_b: int,
+    sreality_id_a: int | None = None,
+    sreality_id_b: int | None = None,
     n_images: int = 6,
     force_refresh: bool = False,
+    listing_id_a: int | None = None,
+    listing_id_b: int | None = None,
 ) -> dict[str, Any]:
     from toolkit import _now_iso
 
-    if sreality_id_a == sreality_id_b:
-        raise ImageCompareError("cannot compare a listing to itself")
+    # Each slot is addressable by the surrogate listing_id (preferred) or the
+    # portal-native sreality_id; a mix per slot across a/b is rejected so the
+    # self-compare guard and canonical-order resolve stay in one id-space.
+    by_lid = listing_id_a is not None or listing_id_b is not None
+    if by_lid:
+        if listing_id_a is None or listing_id_b is None:
+            raise ImageCompareError(
+                "compare_listing_images: supply listing_id for BOTH a and b"
+            )
+        if listing_id_a == listing_id_b:
+            raise ImageCompareError("cannot compare a listing to itself")
+    else:
+        if sreality_id_a is None or sreality_id_b is None:
+            raise ImageCompareError(
+                "compare_listing_images: supply a sreality_id or listing_id "
+                "for both a and b"
+            )
+        if sreality_id_a == sreality_id_b:
+            raise ImageCompareError("cannot compare a listing to itself")
 
     # Canonical order is by listing_id (the surrogate PK), not sreality_id —
     # sreality_id rides along side-coupled with whichever listing_id it
     # belongs to, so the persisted a/b columns and n_images_a/_b never end up
     # swapped relative to each other.
     (sid_a, lid_a), (sid_b, lid_b) = sorted(
-        _resolve_listing_ids(conn, sreality_id_a, sreality_id_b), key=lambda p: p[1],
+        _resolve_listing_ids(
+            conn,
+            sreality_id_a=sreality_id_a, sreality_id_b=sreality_id_b,
+            listing_id_a=listing_id_a, listing_id_b=listing_id_b,
+        ),
+        key=lambda p: p[1],
     )
     cache_hit = False
 
@@ -171,12 +195,21 @@ def compare_listing_images(
         },
         "metadata": {
             "tool": "compare_listing_images",
-            "filters_used": {
-                "sreality_id_a": sreality_id_a,
-                "sreality_id_b": sreality_id_b,
-                "n_images": n_images,
-                "force_refresh": force_refresh,
-            },
+            "filters_used": (
+                {
+                    "listing_id_a": listing_id_a,
+                    "listing_id_b": listing_id_b,
+                    "n_images": n_images,
+                    "force_refresh": force_refresh,
+                }
+                if by_lid else
+                {
+                    "sreality_id_a": sreality_id_a,
+                    "sreality_id_b": sreality_id_b,
+                    "n_images": n_images,
+                    "force_refresh": force_refresh,
+                }
+            ),
             "result_count": 1,
             "queried_at": _now_iso(),
             "data_freshness": data_freshness,
@@ -185,14 +218,34 @@ def compare_listing_images(
 
 
 def _resolve_listing_ids(
-    conn: "psycopg.Connection", sreality_id_a: int, sreality_id_b: int,
+    conn: "psycopg.Connection",
+    *,
+    sreality_id_a: int | None = None,
+    sreality_id_b: int | None = None,
+    listing_id_a: int | None = None,
+    listing_id_b: int | None = None,
 ) -> list[tuple[int, int]]:
-    """[(sreality_id, listing_id), ...] for the two ids, order matching the call args."""
+    """[(sreality_id, listing_id), ...] for the two slots, order matching the call args.
+
+    Resolves by the surrogate listing_id when supplied, else the sreality_id.
+    """
+    if listing_id_a is not None or listing_id_b is not None:
+        keys = [listing_id_a, listing_id_b]
+        sql = "SELECT sreality_id, id FROM listings WHERE id = ANY(%s)"
+        with conn.cursor() as cur:
+            cur.execute(sql, (keys,))
+            by_id = {r[1]: (r[0], r[1]) for r in cur.fetchall()}
+        for lid in keys:
+            if lid not in by_id:
+                raise ImageCompareError(f"listing_id={lid} not found in listings")
+        return [by_id[listing_id_a], by_id[listing_id_b]]
+
+    keys = [sreality_id_a, sreality_id_b]
     sql = "SELECT sreality_id, id FROM listings WHERE sreality_id = ANY(%s)"
     with conn.cursor() as cur:
-        cur.execute(sql, ([sreality_id_a, sreality_id_b],))
+        cur.execute(sql, (keys,))
         rows = {r[0]: r[1] for r in cur.fetchall()}
-    for sid in (sreality_id_a, sreality_id_b):
+    for sid in keys:
         if sid not in rows:
             raise ImageCompareError(f"sreality_id={sid} not found in listings")
     return [(sreality_id_a, rows[sreality_id_a]), (sreality_id_b, rows[sreality_id_b])]
@@ -213,15 +266,15 @@ def _produce_comparison(
             "cannot fetch listing images for vision"
         )
 
-    images_a = _fetch_image_keys(conn, sid_a, n_images)
+    images_a = _fetch_image_keys(conn, lid_a, n_images)
     if not images_a:
         raise ImageCompareError(
-            f"no R2-stored images for sreality_id={sid_a}; cannot compare"
+            f"no R2-stored images for listing_id={lid_a}; cannot compare"
         )
-    images_b = _fetch_image_keys(conn, sid_b, n_images)
+    images_b = _fetch_image_keys(conn, lid_b, n_images)
     if not images_b:
         raise ImageCompareError(
-            f"no R2-stored images for sreality_id={sid_b}; cannot compare"
+            f"no R2-stored images for listing_id={lid_b}; cannot compare"
         )
 
     r2 = image_storage.R2Client.from_env()
@@ -279,16 +332,18 @@ def _produce_comparison(
 
 def _fetch_image_keys(
     conn: "psycopg.Connection",
-    sreality_id: int,
+    listing_id: int,
     n_images: int,
 ) -> list[str]:
+    # Keyed on the surrogate (images.listing_id, fully populated): sreality_id
+    # is NULL for a post-Gate-2 listing, which would silently starve this query.
     sql = (
         "SELECT storage_path FROM images "
-        "WHERE sreality_id = %s AND storage_path IS NOT NULL "
+        "WHERE listing_id = %s AND storage_path IS NOT NULL "
         "ORDER BY sequence ASC NULLS LAST LIMIT %s"
     )
     with conn.cursor() as cur:
-        cur.execute(sql, (sreality_id, n_images))
+        cur.execute(sql, (listing_id, n_images))
         rows = cur.fetchall()
     return [r[0] for r in rows]
 

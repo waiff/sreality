@@ -2,8 +2,10 @@
  *
  * Curation is property-grain (migration 202): a tag / collection membership /
  * note describes the real-world property, so this block operates on the
- * listing's `property_id`. The viewed `sreality_id` is recorded as a note's
- * `origin_listing_id` (display provenance — "written while viewing this advert").
+ * listing's `property_id`. The viewed listing is recorded as a note's
+ * `origin_listing_id` + `origin_listing_ref_id` (display provenance —
+ * "written while viewing this advert"); both are sent since the legacy id
+ * is NULL for a post-Gate-2 listing (migration 323).
  *
  * Reads come from two places by design:
  *   - The "which collections / tags exist" indices use the bearer-gated
@@ -44,9 +46,14 @@ import TagEditPopover from '@/components/curation/TagEditPopover';
 export default function CurationBlock({
   property_id,
   sreality_id,
+  listing_id,
 }: {
   property_id: number;
   sreality_id: number;
+  // The viewed listing's SURROGATE id — always present, unlike sreality_id
+  // (NULL for a post-Gate-2 listing). Passed through to NotesRow so a note's
+  // provenance survives even when the legacy id is unavailable.
+  listing_id: number;
 }) {
   return (
     <div className="space-y-7">
@@ -56,7 +63,7 @@ export default function CurationBlock({
           the secondary curation: collections, tags, notes. */}
       <CollectionsRow property_id={property_id} />
       <TagsRow property_id={property_id} />
-      <NotesRow property_id={property_id} sreality_id={sreality_id} />
+      <NotesRow property_id={property_id} sreality_id={sreality_id} listing_id={listing_id} />
     </div>
   );
 }
@@ -490,9 +497,11 @@ function CreateTagForm({
 function NotesRow({
   property_id,
   sreality_id,
+  listing_id,
 }: {
   property_id: number;
   sreality_id: number;
+  listing_id: number;
 }) {
   const qc = useQueryClient();
   const [body, setBody] = useState('');
@@ -506,7 +515,7 @@ function NotesRow({
 
   const create = useMutation({
     mutationFn: (text: string) =>
-      createPropertyNote(property_id, text, sreality_id),
+      createPropertyNote(property_id, text, sreality_id, listing_id),
     onSuccess: () => {
       setBody('');
       setError(null);

@@ -45,6 +45,19 @@ def _select_pending(
         "FROM listings l "
         "WHERE l.is_active = true "
         "  AND l.source = %s "
+        # Gate 2 of the listing-identity refactor makes new non-sreality rows
+        # insert sreality_id = NULL. This whole enrichment lane is sreality_id-
+        # keyed end-to-end — the returned handle feeds enrich_listing_description /
+        # build_enrich_request (toolkit.bazos_enrichment, all `WHERE sreality_id=%s`)
+        # and lands in listing_description_enrichment_batch_requests.sreality_id
+        # (NOT NULL, no listing_id column) — so a NULL-sreality row cannot be
+        # processed here. Without this guard `int(None)` (below) crashes the run, and
+        # because the NOT-EXISTS anti-join is never true for a NULL and ORDER BY
+        # first_seen_at DESC floats the newest (NULL) row to the top, every
+        # subsequent run re-crashes on the same row (the lane dies permanently).
+        # Migrating the lane onto listings.id (toolkit + a batch-table migration)
+        # is out of this fix's scope; until then NULL-sreality rows are skipped.
+        "  AND l.sreality_id IS NOT NULL "
         "  AND l.description IS NOT NULL "
         "  AND length(btrim(l.description)) > 0 "
         + freshness +
@@ -67,6 +80,31 @@ def _select_pending(
     with conn.cursor() as cur:
         cur.execute(sql, params)
         return [int(r[0]) for r in cur.fetchall()]
+
+
+def _count_null_identity_skipped(conn: Any, *, source: str) -> int:
+    """How many active, description-bearing `source` listings _select_pending's
+    `sreality_id IS NOT NULL` guard is currently excluding.
+
+    0 today (Gate 2 hasn't flipped: every existing row still carries a
+    sreality_id, real or negative-synthetic). Once it flips, new non-sreality
+    rows land with sreality_id NULL and this lane — sreality_id-keyed
+    end-to-end, see the guard's comment in _select_pending — can never enrich
+    them; this makes that silent, permanent skip visible in the run log
+    instead of only being discoverable by reading the SQL.
+    """
+    sql = (
+        "SELECT count(*) FROM listings l "
+        "WHERE l.is_active = true "
+        "  AND l.source = %s "
+        "  AND l.sreality_id IS NULL "
+        "  AND l.description IS NOT NULL "
+        "  AND length(btrim(l.description)) > 0"
+    )
+    with conn.cursor() as cur:
+        cur.execute(sql, (source,))
+        row = cur.fetchone()
+        return int(row[0]) if row else 0
 
 
 # A provider outage (dead key, exhausted credit, sustained 5xx) fails EVERY
@@ -182,6 +220,13 @@ def main() -> int:
             max_age_days=args.max_age_days, limit=args.limit,
         )
         LOG.info("ENRICH pending=%d", len(ids))
+        null_identity_skipped = _count_null_identity_skipped(conn, source=args.source)
+        if null_identity_skipped:
+            LOG.warning(
+                "ENRICH %d active %s listings permanently skipped (NULL sreality_id, "
+                "Gate-2 flip active) -- this lane needs a listings.id migration to reach them",
+                null_identity_skipped, args.source,
+            )
         if args.dry_run:
             LOG.info("ENRICH dry-run: would enrich %d listings", len(ids))
             return 0

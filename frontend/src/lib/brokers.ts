@@ -73,7 +73,10 @@ export interface BrokerMembership {
 
 export interface BrokerListing {
   broker_id: number;
-  sreality_id: number;
+  // NULL for a post-Gate-2 (non-sreality) listing. listing_id is the
+  // surrogate that's always present — use it for a stable React key.
+  sreality_id: number | null;
+  listing_id: number;
   source: string;
   source_url: string | null;
   locality: string | null;
@@ -108,7 +111,10 @@ export interface LeaderboardParams {
 }
 
 export interface ListingBroker {
-  sreality_id: number;
+  // NULL for a post-Gate-2 (non-sreality) listing. listing_id (migration 343)
+  // is the surrogate that's always present — key lookups on it, not this.
+  sreality_id: number | null;
+  listing_id: number;
   broker_id: number;
   broker_display_name: string | null;
   broker_firm_label: string | null;
@@ -171,29 +177,33 @@ export async function searchBrokersByName(q: string): Promise<BrokerPublic[]> {
   return (data ?? []) as BrokerPublic[];
 }
 
-export async function fetchListingBroker(srealityId: number): Promise<ListingBroker | null> {
+// Keyed on the surrogate `listing_id` (listing_broker_public.listing_id,
+// migration 343), NOT sreality_id — a post-Gate-2 non-sreality listing has a
+// NULL sreality_id, so a sreality-keyed lookup would silently find nothing.
+export async function fetchListingBroker(listingId: number): Promise<ListingBroker | null> {
   const { data, error } = await supabase
     .from('listing_broker_public')
     .select('*')
-    .eq('sreality_id', srealityId)
+    .eq('listing_id', listingId)
     .maybeSingle();
   if (error) throw error;
   return (data as ListingBroker) ?? null;
 }
 
 // Batched canonical-broker lookup for many listings at once (the pipeline board
-// hydrates N cards in one round-trip — no N+1). Returns sreality_id → broker.
+// hydrates N cards in one round-trip — no N+1). Keyed on the surrogate
+// `listing_id`, same NULL-safety reason as fetchListingBroker above.
 export async function fetchListingBrokersByIds(
-  srealityIds: ReadonlyArray<number>,
+  listingIds: ReadonlyArray<number>,
 ): Promise<Map<number, ListingBroker>> {
-  if (srealityIds.length === 0) return new Map();
+  if (listingIds.length === 0) return new Map();
   const { data, error } = await supabase
     .from('listing_broker_public')
-    .select('sreality_id, broker_id, broker_display_name, broker_firm_label')
-    .in('sreality_id', srealityIds as number[]);
+    .select('sreality_id, listing_id, broker_id, broker_display_name, broker_firm_label')
+    .in('listing_id', listingIds as number[]);
   if (error) throw error;
   const out = new Map<number, ListingBroker>();
-  for (const r of (data ?? []) as ListingBroker[]) out.set(r.sreality_id, r);
+  for (const r of (data ?? []) as ListingBroker[]) out.set(r.listing_id, r);
   return out;
 }
 

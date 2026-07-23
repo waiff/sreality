@@ -658,7 +658,13 @@ def upsert_listing_with_property(
     sreality_id = row["sreality_id"]
     with conn.transaction():
         result = upsert_listing(conn, row, raw_json, content_hash)
-        _ensure_property(conn, sreality_id, "sreality")
+        # Property linkage keys on the surrogate id (like the portal path), not on
+        # sreality_id. For sreality the natural sreality_id is always present and
+        # uniquely identifies the row, so it's the safe lookup back to the surrogate.
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM listings WHERE sreality_id = %s", (sreality_id,))
+            listing_id = int(cur.fetchone()[0])
+        _ensure_property(conn, listing_id, "sreality")
     return result
 
 
@@ -675,21 +681,53 @@ def upsert_listing_with_property(
 BROKER_ATTRIBUTED_SOURCES = frozenset({"sreality", "idnes", "ceskereality", "realitymix"})
 
 
+# The Gate-2 flip-writer scaffold (wave-5 item 7): OFF by default, so the
+# nextval draw below is unconditional until an operator explicitly opts in.
+# app_settings-backed (not env/process-cached) so the always-on realtime
+# worker and cron drains pick up a flip on their very next batch, not after a
+# restart — same posture as toolkit.dedup_settings' operator-gated knobs.
+GATE2_NULL_SREALITY_ID_SETTING = "gate2_null_sreality_id_enabled"
+
+
+def _gate2_null_sreality_id_enabled(conn: psycopg.Connection) -> bool:
+    """Live read of the flip-writer flag. Missing row or NULL value -> False
+    (fresh-deploy-safe default: keep minting synthetic negative sreality_ids)."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT value FROM app_settings WHERE key = %s",
+            (GATE2_NULL_SREALITY_ID_SETTING,),
+        )
+        row = cur.fetchone()
+    if row is None or row[0] is None:
+        return False
+    value = row[0]
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in ("true", "1", "yes", "on")
+    return bool(value)
+
+
 def ingest_scraped_listing(
     conn: psycopg.Connection, listing: ScrapedListing,
 ) -> tuple[int, UpsertResult]:
     """Write a non-sreality ScrapedListing through the same matcher path.
 
-    Returns `(pk, result)` — the assigned listing PK (synthetic negative for
-    non-sreality rows) so the caller can attribute images / further writes to
-    the right row, plus the upsert result.
+    Returns `(listing_id, result)` — the row's SURROGATE `listings.id` (never the
+    legacy sreality_id, which is a synthetic negative today and NULL for new rows
+    once Gate 2 flips) so the caller can attribute images / further writes to the
+    right row, plus the upsert result.
 
-    Tier 0: (source, source_id_native) is the idempotency key — a re-fetch
-    reuses the existing synthetic PK and updates in place; first sight draws a
-    fresh negative PK from `synthetic_listing_id_seq`. The listing write +
-    source identity + Tier-1 property matching then commit in one transaction.
-    `upsert_listing` doesn't manage the source columns, so they're stamped
-    right after the write, before the matcher reads `source`.
+    Tier 0: (source, source_id_native) is the idempotency key — a re-fetch reuses
+    the existing row and updates in place; first sight draws a fresh negative
+    sreality_id from `synthetic_listing_id_seq` for the legacy column only (the
+    sign-check rail), UNLESS the `gate2_null_sreality_id_enabled` app_settings
+    flag is on, in which case it writes NULL instead (the actual Gate-2 flip,
+    still off by default — see `_gate2_null_sreality_id_enabled`). Identity is
+    carried on the surrogate `id`, resolved back out of the natural key
+    (validated present + unique, migration 314) — every follow-up write keys on
+    it, so nothing depends on a sreality_id that may be NULL. The listing write +
+    source identity + Tier-1 property matching commit in one transaction.
 
     A content-changed write of a broker-attributed source also enqueues the row
     into dirty_broker_listings (the incremental resolver's sole feed — same role
@@ -698,19 +736,28 @@ def ingest_scraped_listing(
     """
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT sreality_id FROM listings "
+            "SELECT id, sreality_id FROM listings "
             "WHERE source = %s AND source_id_native = %s",
             (listing.source, listing.source_id_native),
         )
         found = cur.fetchone()
     if found is not None:
-        pk = int(found[0])
+        # Re-fetch: reuse the persisted surrogate. Its legacy sreality_id (whatever
+        # it is now — synthetic negative pre-flip, NULL after) is fed back to to_row
+        # only to fill the INSERT's sreality_id column; upsert's ON CONFLICT never
+        # rewrites it, so the value is inert on this path.
+        listing_id: int | None = int(found[0])
+        legacy_sreality_id: int | None = found[1]
     else:
-        with conn.cursor() as cur:
-            cur.execute("SELECT nextval('synthetic_listing_id_seq')")
-            pk = int(cur.fetchone()[0])
+        listing_id = None  # sequence-generated in the INSERT; resolved post-upsert
+        if _gate2_null_sreality_id_enabled(conn):
+            legacy_sreality_id = None
+        else:
+            with conn.cursor() as cur:
+                cur.execute("SELECT nextval('synthetic_listing_id_seq')")
+                legacy_sreality_id = int(cur.fetchone()[0])
 
-    row = listing.to_row(pk)
+    row = listing.to_row(legacy_sreality_id)
     # Carry the FULL natural key (source + native id) into the INSERT so it is stamped
     # atomically. Both matter: source_id_native for the NOT NULL invariant, and source
     # because its column default is 'sreality' — inserting only source_id_native would
@@ -722,56 +769,62 @@ def ingest_scraped_listing(
     row["source_id_native"] = listing.source_id_native
     with conn.transaction():
         result = upsert_listing(conn, row, listing.raw or {}, listing.content_hash())
+        if listing_id is None:
+            # First sight: the surrogate was just minted by the INSERT's sequence
+            # default. Read it back on the natural key (never on sreality_id).
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT id FROM listings "
+                    "WHERE source = %s AND source_id_native = %s",
+                    (listing.source, listing.source_id_native),
+                )
+                listing_id = int(cur.fetchone()[0])
         with conn.cursor() as cur:
             cur.execute(
-                "UPDATE listings SET source_url = %s WHERE sreality_id = %s",
-                (listing.source_url, pk),
+                "UPDATE listings SET source_url = %s WHERE id = %s",
+                (listing.source_url, listing_id),
             )
-        _ensure_property(conn, pk, listing.source)
+        _ensure_property(conn, listing_id, listing.source)
         if result != "unchanged" and listing.source in BROKER_ATTRIBUTED_SOURCES:
             with conn.cursor() as cur:
-                # Arbiter is listing_id (R2 Phase D, dirty_broker_listings_pkey):
-                # the upsert above ran first in this same transaction, so the JOIN
-                # always finds the row.
+                # Keyed on the surrogate (dirty_broker_listings_pkey is listing_id;
+                # its sreality_id column is legacy/nullable). The upsert above ran
+                # first in this same transaction, so the row is already present.
                 cur.execute(
-                    "INSERT INTO dirty_broker_listings (sreality_id, listing_id) "
-                    "SELECT %s, l.id FROM listings l WHERE l.sreality_id = %s "
+                    "INSERT INTO dirty_broker_listings (listing_id) VALUES (%s) "
                     "ON CONFLICT (listing_id) DO UPDATE SET marked_at = now()",
-                    (pk, pk),
+                    (listing_id,),
                 )
-    return pk, result
+    return listing_id, result
 
 
-def _ensure_property(conn: psycopg.Connection, listing_pk: int, source: str) -> None:
+def _ensure_property(conn: psycopg.Connection, listing_id: int, source: str) -> None:
     """Attach the listing to its canonical property, or refresh it if linked.
 
-    Runs inside the caller's transaction (no own transaction block). A new
-    (unlinked) listing goes through the Tier-1 matcher; an already-linked one
-    gets a cheap rollup of its property.
+    Keyed on the surrogate `listings.id` — `listing_id` is a real PK, never a
+    sreality_id (which is NULL for post-Gate-2 portal rows). Runs inside the
+    caller's transaction (no own transaction block). A new (unlinked) listing goes
+    through the Tier-1 matcher; an already-linked one gets a cheap rollup of its
+    property. (The legacy source_id_native heal is gone: migration 314 enforces
+    source_id_native NOT NULL and upsert_listing stamps it inline, so the old
+    heal-if-NULL was provably dead — and keyed on the wrong id besides.)
     """
     with conn.cursor() as cur:
         cur.execute(
-            """
-            UPDATE listings SET source_id_native = sreality_id::text
-            WHERE sreality_id = %s AND source_id_native IS NULL
-            """,
-            (listing_pk,),
-        )
-        cur.execute(
-            "SELECT property_id FROM listings WHERE sreality_id = %s",
-            (listing_pk,),
+            "SELECT property_id FROM listings WHERE id = %s",
+            (listing_id,),
         )
         found = cur.fetchone()
         property_id = found[0] if found else None
 
     if property_id is None:
-        _create_singleton_property(conn, listing_pk, source)
+        _create_singleton_property(conn, listing_id, source)
     else:
-        _cheap_property_rollup(conn, listing_pk)
+        _cheap_property_rollup(conn, listing_id)
 
 
 def _create_singleton_property(
-    conn: psycopg.Connection, listing_pk: int, source: str,
+    conn: psycopg.Connection, listing_id: int, source: str,
 ) -> None:
     """Give a newly-seen listing its own singleton `properties` parent.
 
@@ -808,19 +861,19 @@ def _create_singleton_property(
                 locality_district_id, locality_region_id, source, energy_rating,
                 building_condition_level, apartment_condition_level,
                 is_active, first_seen_at, last_seen_at, 1, 1
-            FROM listings WHERE sreality_id = %s
+            FROM listings WHERE id = %s
             RETURNING id
             """,
-            (listing_pk,),
+            (listing_id,),
         )
         new_pid = int(cur.fetchone()[0])
         cur.execute(
-            "UPDATE listings SET property_id = %s WHERE sreality_id = %s",
-            (new_pid, listing_pk),
+            "UPDATE listings SET property_id = %s WHERE id = %s",
+            (new_pid, listing_id),
         )
 
 
-def _cheap_property_rollup(conn: psycopg.Connection, listing_pk: int) -> None:
+def _cheap_property_rollup(conn: psycopg.Connection, listing_id: int) -> None:
     """Insert-time rollup for one property: counts + lifecycle always; the
     display columns are mirrored from this child only while the property is a
     singleton. For multi-source properties the representative + price-history +
@@ -878,9 +931,9 @@ def _cheap_property_rollup(conn: psycopg.Connection, listing_pk: int) -> None:
                        max(last_seen_at) AS last_seen, bool_or(is_active) AS active
                 FROM listings WHERE property_id = l.property_id
             ) agg ON true
-            WHERE p.id = l.property_id AND l.sreality_id = %s
+            WHERE p.id = l.property_id AND l.id = %s
             """,
-            (listing_pk,),
+            (listing_id,),
         )
 
 
@@ -911,10 +964,20 @@ def mark_properties_dirty(
 
 def record_images(
     conn: psycopg.Connection,
-    sreality_id: int,
+    sreality_id: int | None,
     images: Iterable[dict[str, Any]],
+    *,
+    listing_id: int | None = None,
 ) -> int:
-    """Insert any image rows that don't already exist. Returns newly inserted count."""
+    """Insert any image rows that don't already exist. Returns newly inserted count.
+
+    Two call shapes resolve the surrogate FK (`images.listing_id`) two ways:
+    sreality's own callers pass their always-present `sreality_id` and the row is
+    looked up from it; the portal chokepoint (`record_media`) passes the resolved
+    surrogate `listing_id` directly (post-Gate-2 a portal row's sreality_id is
+    NULL, so it can never be the FK). Either way `images.listing_id` is non-NULL,
+    which is what the ON CONFLICT (listing_id, sequence) arbiter needs to dedupe.
+    """
     # De-dupe non-null sequences within this batch: sreality occasionally
     # returns two images sharing one `order`, and ON CONFLICT DO UPDATE raises
     # CardinalityViolation ("cannot affect row a second time") if a single
@@ -945,19 +1008,29 @@ def record_images(
     # The storage_path IS NULL guard is load-bearing: an already-downloaded image
     # is never disturbed, so we never re-download what we have. xmax = 0 is true
     # only for genuine inserts, keeping the "newly inserted" count honest.
-    # listing_id is resolved inline (R2 dual-write) so the id never travels through
-    # Python — same shape as every other child writer. The arbiter is listing_id,
-    # not the legacy sreality_id (R2 Phase C, images_listing_id_sequence_key):
-    # sreality_id never conflicts across two different sources' rows that happen
-    # to share a native id band, and NULLs-never-conflict made the old arbiter a
-    # silent duplicate-row generator on any race that left listing_id unresolved
-    # (images_listing_id_present_check now makes that impossible instead).
-    values_sql = ", ".join(
-        "(%s, (SELECT id FROM listings WHERE sreality_id = %s), %s, %s)" for _ in kept
-    )
-    flat: list[Any] = [
-        v for url, seq in kept for v in (sreality_id, sreality_id, url, seq)
-    ]
+    #
+    # The arbiter is listing_id (R2 Phase C, images_listing_id_sequence_key), so it
+    # MUST be non-NULL — a NULL listing_id never conflicts, so it would spawn an
+    # unbounded duplicate row on every refetch. The FK is therefore always carried
+    # explicitly: the caller either hands us the resolved surrogate (`listing_id=`,
+    # the portal path) or its sreality_id, from which we look the surrogate up
+    # inline. images.sreality_id mirrors the listing's own (legacy negative today,
+    # NULL after the Gate-2 flip) so the two never disagree. The DB backstop for the
+    # non-NULL invariant is images_listing_id_present_check (migration 350).
+    if listing_id is not None:
+        values_sql = ", ".join(
+            "((SELECT sreality_id FROM listings WHERE id = %s), %s, %s, %s)" for _ in kept
+        )
+        flat: list[Any] = [
+            v for url, seq in kept for v in (listing_id, listing_id, url, seq)
+        ]
+    else:
+        values_sql = ", ".join(
+            "(%s, (SELECT id FROM listings WHERE sreality_id = %s), %s, %s)" for _ in kept
+        )
+        flat = [
+            v for url, seq in kept for v in (sreality_id, sreality_id, url, seq)
+        ]
     with conn.transaction(), conn.cursor() as cur:
         sql = f"""
             INSERT INTO images (sreality_id, listing_id, sreality_url, sequence)
@@ -976,15 +1049,19 @@ def record_images(
 
 def record_videos(
     conn: psycopg.Connection,
-    sreality_id: int,
+    sreality_id: int | None,
     videos: Iterable[dict[str, Any]],
+    *,
+    listing_id: int | None = None,
 ) -> int:
     """Insert video-media rows into listing_videos. Returns newly inserted count.
 
-    Mirrors record_images (same de-dupe + URL-refresh-where-not-downloaded upsert)
-    but writes the non-image sibling table. We capture the URL only — bytes are NOT
-    downloaded today (storage_path stays NULL), keeping the image pool free of large
-    video fetches; a future isolated video drain can fill them in.
+    Mirrors record_images (same de-dupe + URL-refresh-where-not-downloaded upsert,
+    same two FK-resolution shapes — `listing_id=` for the portal chokepoint, else
+    looked up from sreality_id) but writes the non-image sibling table. We capture
+    the URL only — bytes are NOT downloaded today (storage_path stays NULL), keeping
+    the image pool free of large video fetches; a future isolated video drain can
+    fill them in.
     """
     kept: list[tuple[str, Any]] = []
     seen_seqs: set[int] = set()
@@ -1001,12 +1078,20 @@ def record_videos(
     if not kept:
         return 0
 
-    values_sql = ", ".join(
-        "(%s, (SELECT id FROM listings WHERE sreality_id = %s), %s, %s)" for _ in kept
-    )
-    flat: list[Any] = [
-        v for url, seq in kept for v in (sreality_id, sreality_id, url, seq)
-    ]
+    if listing_id is not None:
+        values_sql = ", ".join(
+            "((SELECT sreality_id FROM listings WHERE id = %s), %s, %s, %s)" for _ in kept
+        )
+        flat: list[Any] = [
+            v for url, seq in kept for v in (listing_id, listing_id, url, seq)
+        ]
+    else:
+        values_sql = ", ".join(
+            "(%s, (SELECT id FROM listings WHERE sreality_id = %s), %s, %s)" for _ in kept
+        )
+        flat = [
+            v for url, seq in kept for v in (sreality_id, sreality_id, url, seq)
+        ]
     with conn.transaction(), conn.cursor() as cur:
         sql = f"""
             INSERT INTO listing_videos (sreality_id, listing_id, source_url, sequence)
@@ -1022,7 +1107,7 @@ def record_videos(
 
 def record_media(
     conn: psycopg.Connection,
-    sreality_id: int,
+    listing_id: int,
     media_urls: Iterable[str],
 ) -> int:
     """Split a portal's ordered media URLs into images + videos and record each.
@@ -1032,10 +1117,14 @@ def record_media(
     `listing_videos`, with each item's sequence = its original gallery position
     (so a leading video leaves a sequence gap, never renumbering the photos).
     Returns the number of newly inserted image rows (what the portals log).
+
+    `listing_id` is the SURROGATE `listings.id` (as returned by
+    ingest_scraped_listing), carried straight into the child rows' FK — never a
+    sreality_id, which is NULL for a post-Gate-2 portal row.
     """
     image_rows, video_rows = media.split_media_rows(media_urls)
-    new_images = record_images(conn, sreality_id, image_rows)
-    record_videos(conn, sreality_id, video_rows)
+    new_images = record_images(conn, None, image_rows, listing_id=listing_id)
+    record_videos(conn, None, video_rows, listing_id=listing_id)
     return new_images
 
 
@@ -1095,6 +1184,58 @@ def touch_listings(
                     inactive_at = NULL
                 FROM unnest(%s::bigint[]) AS u(sreality_id)
                 WHERE listings.sreality_id = u.sreality_id
+                """,
+                (chunk,),
+            )
+            total += cur.rowcount or 0
+    return total
+
+
+def touch_listings_by_id(
+    conn: psycopg.Connection,
+    listing_ids: Iterable[int],
+) -> int:
+    """Surrogate-id analogue of `touch_listings` for the non-sreality portals.
+
+    Same last_seen_at bump + reactivation dirty-mark, but keyed on the surrogate
+    `listings.id`. A portal index walk resolves the surrogate (its sreality_id is
+    a synthetic negative today and NULL once Gate 2 flips), so a sreality_id-keyed
+    touch would match nothing — starving rule #4's last_seen_at signal for every
+    unchanged portal row. Separate function (not a parametrized key column) to
+    mirror the mark_inactive / mark_inactive_native split and stay discoverable by
+    the SQL-correctness gate.
+    """
+    ids = list(listing_ids)
+    if not ids:
+        return 0
+    total = 0
+    with conn.cursor() as cur:
+        for start in range(0, len(ids), TOUCH_CHUNK_SIZE):
+            chunk = ids[start : start + TOUCH_CHUNK_SIZE]
+            cur.execute(
+                """
+                WITH react AS (
+                    UPDATE listings
+                    SET is_active = true, inactive_at = NULL, last_seen_at = now()
+                    FROM unnest(%s::bigint[]) AS u(id)
+                    WHERE listings.id = u.id
+                      AND listings.is_active = false
+                    RETURNING listings.property_id
+                )
+                INSERT INTO dirty_properties (property_id)
+                SELECT DISTINCT property_id FROM react WHERE property_id IS NOT NULL
+                ON CONFLICT (property_id) DO UPDATE SET marked_at = now()
+                """,
+                (chunk,),
+            )
+            cur.execute(
+                """
+                UPDATE listings
+                SET last_seen_at = now(),
+                    is_active = true,
+                    inactive_at = NULL
+                FROM unnest(%s::bigint[]) AS u(id)
+                WHERE listings.id = u.id
                 """,
                 (chunk,),
             )
@@ -1435,14 +1576,15 @@ def index_summary_native(
     source: str,
     native_ids: Iterable[str],
 ) -> dict[str, dict[str, Any]]:
-    """Fetch (sreality_id PK, price_czk, last_seen_at) keyed by source_id_native
-    for one portal.
+    """Fetch (surrogate id, sreality_id, price_czk, last_seen_at) keyed by
+    source_id_native for one portal.
 
     The native-id analogue of `index_summary` (which keys on the bigint PK that
     sreality's index already carries). A non-sreality portal's index walk only
     knows the portal-native string id, so it looks rows up by
-    (source, source_id_native) to decide price-change refetch — and to resolve
-    the PK set for a source-scoped `mark_inactive`.
+    (source, source_id_native) to decide price-change refetch — and to resolve the
+    surrogate `id` set for touch_listings_by_id. The `"id"` value is the identity
+    to carry forward; `"sreality_id"` is legacy (NULL for post-Gate-2 rows).
     """
     ids = [str(n) for n in native_ids]
     if not ids:
@@ -1450,15 +1592,15 @@ def index_summary_native(
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT source_id_native, sreality_id, price_czk, last_seen_at
+            SELECT source_id_native, id, sreality_id, price_czk, last_seen_at
             FROM listings
             WHERE source = %s AND source_id_native = ANY(%s)
             """,
             (source, ids),
         )
         return {
-            native: {"sreality_id": pk, "price_czk": price, "last_seen_at": ls}
-            for native, pk, price, ls in cur.fetchall()
+            native: {"id": lid, "sreality_id": pk, "price_czk": price, "last_seen_at": ls}
+            for native, lid, pk, price, ls in cur.fetchall()
         }
 
 

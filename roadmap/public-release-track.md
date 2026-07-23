@@ -44,8 +44,15 @@ common to all. Full plan, sequencing, and gates: `docs/design/public-release-pro
   lane and the 2-account pen-test are green, and both standing gate lanes (offline over
   migration SQL, live over `pg_views` + authenticated-callable functions) are now
   adversarially validated rather than merely asserted.
-- **Waves 1–4 (public features)** — **Wave 1 is now unblocked** and is the next body of
-  work; Waves 2–4 follow its ordering constraints (`docs/design/waves-1-4-public-features.md`).
+- **Waves 1–4 (public features)** — Wave 1's backend core (extension session, IDOR fix, job
+  lane, metering) is built; the remaining pieces need operator product/account decisions (item
+  8 below). **Wave 2's engineering scope turned out to be already mostly shipped** by Phase 1
+  increment 3 + Wave 1 (item 9 below) — the connection-swap, the account-partitioned reconciler,
+  and the composite FK all predate this wave being picked up; only a DB-level invariant, an
+  index, and a concurrency fix were genuinely left, shipped this pass. Its launch gate (external
+  re-audit + two-real-account pen-test) still needs a second real account to exist. **Wave 3
+  (watchdogs & notifications) is now in progress** (item 10 below); Wave 4 is unstarted
+  (`docs/design/waves-1-4-public-features.md`).
 
 **CRITICAL finding + fix, 2026-07-20:** the 2-account pen-test
 (`tests/test_tenant_isolation_live.py`) only ever asserted RLS on **base tables**
@@ -288,15 +295,180 @@ remediation R3 closes that. Full spec: `docs/design/public-release-remediation-2
      `POST /estimations` uses), pipeline/collections/estimation joins staying on the
      tenant conn under RLS (incl. the SYSTEM arm of `estimation_runs_tenant_read`, so
      platform golden estimates still surface). This is the server-side shape of A5 for
-     this endpoint — the full A5 (a column-safe browser-readable path for
-     `listings`/`properties`, which Wave 2's SPA-side reads still need) remains open.
-   - Remaining: the metering substrate (`usage_ledger`/`check_budget` — needs a product
-     decision on quota shape: free-tier run count vs USD budget, daily vs monthly window),
-     the atomic submit-time gates (entitlement/budget/concurrency/idempotency), moving agent
-     execution off the request process onto a job lane on the realtime worker, a periodic
-     zombie-run sweep, and Chrome Web Store submission readiness (privacy policy,
-     single-purpose statement, staged rollout, the platform-wide `API_TOKEN` rotation
-     cutover — see `chrome-extension/README.md` § Chrome Web Store submission).
+     this endpoint.
+   - **A5 proper — SHIPPED 2026-07-22 (migration 349).** The column-safe tenant read
+     path for the shared-market tables, split along their real PII shape: `properties`
+     gets a plain `FOR SELECT TO authenticated USING (true)` policy (safe — the base
+     table has **no** broker/`raw_json` column; all such data on `properties_public` is
+     joined in from `listings`, so a tenant reading base `properties` sees strictly less
+     than the view they already read), while `listings` **stays deny-all** and its one
+     tenant-conn reader (`create_note`'s id↔sreality_id map) reroutes through the PII-free
+     `listing_natural_key_public` identity view. This un-breaks add-note / add-to-collection
+     / pipeline-bookmark for signed-in extension users — all three were 404'ing because
+     `resolve_active_property_ids`' walk over `properties` returned zero rows under RLS
+     deny-all (found while shipping this, not yet reported by the operator). `list_estimation_runs`
+     turned out **not** degraded (runs on the service-role conn). `admin_boundaries` left
+     un-policied until a tenant-conn consumer needs it (Wave 3 matcher). Live regression:
+     `test_a5_properties_readable_listings_still_deny_all`.
+   - ~~**W1-3 (async job lane + periodic zombie sweep — Amendment A10)**~~ — **SHIPPED,
+     migration 352.** Agent + deterministic estimation EXECUTION now drains off the FastAPI
+     request threadpool onto a new `estimation` lane on the always-on realtime worker: it
+     claims one `pending` `estimation_runs` row per pass (`FOR UPDATE SKIP LOCKED`, the
+     pooler-safe claim — not a session advisory lock), stamps `running`/`claimed_at`/`worker`,
+     and runs the SAME `execute_pending_run` path from a `{body, resolution}` snapshot the
+     submit route stored in the row's new `job_payload` column (the run row stays the job — no
+     new table). The stuck-run sweep is now periodic (each lane pass, not just API startup) and
+     keys `running` rows off `coalesce(claimed_at, created_at)` so a legitimately long agent run
+     is timed from when it STARTED, not when it queued. Ships **DARK behind one flag**
+     (`estimation_job_lane_enabled`): the flag gates the lane (interval 0 = idle) AND makes
+     `POST /estimations` route rows to it instead of an in-process BackgroundTask — so the
+     cutover and rollback are one `app_settings` edit, no deploy. The realtime worker was
+     verified live (heartbeat age ~6 s, all lanes running) before this landed, so flipping the
+     flag activates a confirmed-alive executor. **Operator flip sequence** in the PR body.
+   - ~~**Metering substrate + atomic submit-time gates (A9, item J)**~~ — **SHIPPED,
+     migration 355.** Quota shape settled by the operator 2026-07-22: meter **per successful
+     agent run** against a **monthly** quota (run-count, not USD — the cheap atomic COUNT gate;
+     USD would need cost pre-authorization the agent's variable iterations make messy); free =
+     **3/mo**, **trial = 10** (the `entitlements.status='trialing'` arm). Deterministic stays
+     free + ungated. `create_estimation_run` now runs all gates at the single choke point
+     **before the URL parse** (so a reject spends nothing): entitlement (`estimations` agenda +
+     not-canceled), raw `spec`/`spec_overrides` blocked for metered callers, a pre-parse
+     duplicate short-circuit, and a pre-parse budget/concurrency check. The **atomic** spine is
+     the INSERT itself (A9 — never check-then-act over the tx pooler): `INSERT … SELECT WHERE
+     (monthly non-failed agent count) < quota AND (in-flight count) < cap ON CONFLICT
+     (account_id, idempotency_key) DO NOTHING` — budget + concurrency + idempotency in one
+     write, the partial unique index `estimation_runs_inflight_idem` its arbiter (both verified
+     live by EXPLAIN). New `usage_ledger` row per metered success (cost = the run's `llm_calls`
+     sum, for margin + future Stripe metered billing). Admin/legacy/SYSTEM/ClickUp bypass
+     everything, mirroring `require_entitlement`. Ships **fail-closed** (enforced by default;
+     `estimation_budget_enabled` app-setting is the emergency off) — safe today because the only
+     account is the admin, who bypasses. Deferred (small follow-ups): granting the trial at
+     signup (`handle_new_user` seed-hook, mig 286:101) and wiring the extension to send
+     `mode:'agent'` for entitled users.
+   - ~~**Trial-at-signup**~~ — **SHIPPED 2026-07-23, migration 362.** A SECURITY DEFINER
+     `seed_trial_entitlement()` (mirroring `seed_default_pipeline`/`_collections`) wired into
+     `handle_new_user`'s fresh-signup branch inserts a `('free','trialing', now()+7d)`
+     entitlement, so every new signup gets **10 agent estimations for 7 days**, then falls to
+     the free 3/mo (the resolver already honored the `trialing` arm; nothing marked signups
+     trialing before). Trial length hardcoded 7 days (operator decision). The legacy-backfill
+     branch (the operator) is skipped — they're admin and bypass metering. Verified live: the
+     resolver returns 10 for a trialing account.
+   - Remaining: **extension agent-estimate quota UX** (switch the panel's estimate from
+     `mode:'deterministic'` to metered `mode:'agent'` for entitled users, show "(X left)",
+     swap the button to "upgrade" at 0 — no purchase flow yet; widen the 120 s poll window,
+     persist `run_id`); and Chrome Web Store submission (on hold per operator).
+   - **The platform-wide `API_TOKEN` rotation now has a full runbook:**
+     `docs/design/api-token-rotation-and-spa-jwt-migration.md`. A 2026-07-23 two-account
+     pen-test surfaced its live symptom: the **SPA sends the shared static `API_TOKEN`** (the
+     god-token embedded in the bundle) on every API call → `verify_jwt` → synthetic admin →
+     `tenant_conn`'s service-role branch → RLS bypassed → a logged-in user sees **all
+     accounts'** collections/tags/etc. (the operator's "3 monitoring collections" report). The
+     **DB RLS + views are sound** (a real JWT scopes perfectly) and the **extension is safe**
+     (per-user JWT since Wave 1) — the fix is **Part A: migrate the SPA's `request()` to send
+     the logged-in user's Supabase JWT** (+ a bounded `require_token`→`verify_jwt` route audit;
+     the operator's JWT carries `app_metadata.is_admin` so admin survives), then **Part B:
+     rotate the secret** (operator, Railway + ClickUp). **Until Part A ships the SPA stays
+     operator-only behind its password gate**; the extension is the per-user public surface.
+9. **Wave 2 (opportunity pipeline management) — mostly already shipped, confirmed 2026-07-22.**
+   Picking this wave up, a live-schema audit (`pg_constraint`/`pg_indexes` against
+   `erlvtprrmrylhznfyaih`) found the design doc's "genuinely new" pieces had already landed —
+   ahead of the wave being explicitly worked — as part of Phase 1 increment 3 (migrations
+   294/295, PR #763) and Wave 1: the cross-account stage-ownership composite FK
+   (`property_pipeline(account_id, stage_id) → pipeline_stages(account_id, id)`, `move_card`
+   already catches the resulting `ForeignKeyViolation` into a no-leak 422), both stage uniques
+   re-keyed per account (Amendment A3), `seed_default_pipeline(account_id)` wired into
+   `handle_new_user`, the account-partitioned merge/unmerge reconciler (Amendment A2,
+   `toolkit/pipeline_identity.py`), and the connection-swap itself — all eight `/pipeline/*`
+   routes plus `POST /listings/lookup` already run on the tenant pool (294/295's Python cutover;
+   `portal_lookup.py`'s two-connection split shipped alongside A5, PR #899). The live two-account
+   RLS test lane already covers `pipeline_stages_public` + `property_pipeline_public`
+   (`test_tenant_view_scopes_both_ways`).
+   - **Shipped this pass, migration 357:** the one invariant that really was still missing — a
+     DB-level `CHECK (not (is_entry and is_terminal))` on `pipeline_stages` (previously
+     app-layer only, called out verbatim in `test_tenant_isolation_live.py`'s seed comment) —
+     and an account-leading `(account_id, stage_id, board_position)` index for the board query
+     shape Wave 2 assumed. Also fixed the one real concurrency gap the design flagged:
+     `add_card`'s `max(board_position)+1` computation now locks the entry stage row
+     (`SELECT … FOR UPDATE`) first, so two members bookmarking into the same stage concurrently
+     can't compute the same position — a plain row lock inside the tenant pool's one-transaction-
+     per-request shape (Amendment A1), not a session advisory lock (unsound over the pooler; the
+     mig-279 lesson). The kanban board itself doesn't yet do within-column drag reordering (the
+     SPA only sends `stage_id` on move, never `board_position`), so this was the only place the
+     race could actually fire.
+   - **Review-gate re-audit RAN 2026-07-23** — a max-effort `/code-review ultra` pass (8 finder
+     angles + per-finding verify) against the whole pipeline tenancy surface (bundled as review-
+     only PR #911 on a synthetic pre-Phase-1 baseline). 15 findings; each re-verified against the
+     **live DB** before acting. **Remediated (PR TBD):** the two functions that broke the module's
+     explicit-`account_id`-scoping convention — `update_stage` + `archive_stage` were unscoped, so
+     a legacy service-role (RLS-bypassing) call could rename/re-flag/archive/probe another account's
+     stage by id (F1/F2); `portal_lookup._ACCOUNT_SQL`'s pipeline + collection joins relied on RLS
+     alone (same legacy bypass) — now explicitly account-scoped (F3, estimation LATERAL left on RLS
+     to preserve the mig-341 SYSTEM-arm); `resolve_account_id`'s `LIMIT 1` had no `ORDER BY`
+     (nondeterministic once a user has >1 membership, F8); the legacy `tenant_conn` branch dropped
+     `scraper/db.py`'s retry/keepalive/clean-error hardening (F7); the mig-357 board index was dead
+     (add_card's `max(board_position)` now scoped by account so the index is used, F10); a dead
+     `current_account_id()` duplicate removed (F11); the FK-violation catch documented (F15).
+     **Refuted/moot on live verification:** the stale-test finding (F5 — passes 8/8 on `main`, a
+     synthetic-baseline artifact); the NULL-`account_id` unique-index gap (F6 — `account_id` is
+     `NOT NULL` with zero NULL rows since mig 295); and the **legacy-backfill inheritance race
+     (F4)** — `legacy_backfill_claim` was claimed by the operator's account on 2026-07-11, and
+     `handle_new_user`'s `ON CONFLICT DO NOTHING` means no later signup can ever claim it, so the
+     "sign up first, inherit everything" exploit is already closed (every new signup now gets a
+     fresh seeded board). **Deferred:** the composed-route-dependency refactor (F13, churn without
+     addressing the actual bug class) and the one-time signup-trigger sweep cost (F14, runs once
+     ever, already spent). **Operator flag (F4 residual):** the email/password `signUp` flow in
+     `frontend/src/pages/Login.tsx` is unauthenticated + un-allowlisted on `main` — the data-
+     inheritance vector is closed, but *whether public signup should be open at all pre-launch* is
+     a product decision (invite/allowlist gate), not a code fix.
+   - **Still open, needs a second real account:** the manual two-real-account pen-test half of the
+     launch gate ("A can't see/move/archive/reorder/inject into B's board") — only one
+     account/member exists live today. Plus registering `property_pipeline`/`property_pipeline_events`
+     in a future GDPR export/deletion surface (the `on delete cascade` from `accounts` already
+     scrubs them on account deletion; there's just no self-service surface yet — a Phase-1-wide gap).
+
+10. **Wave 3 (watchdogs & notifications) — in progress.** A three-agent live audit (2026-07-23)
+    confirmed the Wave-2 pattern again: the delivery *mechanism* (outbox loop, `channel_sends`
+    ledger, Resend/Telegram transports, retry/backoff, dark-gating) and the *event-side* tenancy
+    (`account_id` + RLS on `notification_subscriptions`/`notification_dispatches`, migrations
+    290/292, backfilled by 294) were **already shipped**. What genuinely remains is detection
+    scale/correctness, the route-layer tenancy move, and the public-product delivery envelope
+    (per-account recipients, opt-in, suppression, unsubscribe, bounce webhook, quotas) — all
+    buildable-dark; the hard gates are operator Resend-provisioning + GDPR/product sign-off.
+    - **Detection scale + correctness — SHIPPED, migration 365** (authored 363, renumbered
+      after a same-day collision with `363_browse_projection_source_id_native.sql`)**.** (1) `properties_published_at_idx`
+      — a plain btree over the published rows the matcher's new-listing cursor actually scans
+      (`published_at > cursor ORDER BY published_at ASC`); the only prior published_at index was
+      `properties_unpublished_idx` (mig 273), a partial over the INVERSE (`WHERE published_at IS
+      NULL`), so the hot forward-window scan over **555k** published properties was unindexed.
+      Created CONCURRENTLY on prod (valid, 3.9 MB), the file carries the replay-safe plain form.
+      (2) Fixed the city-quality/geom lockstep bug: `toolkit/comparables._city_quality_clauses`
+      emitted `l.geom` in its containment + proximity branches, but the matcher scans
+      `properties_public` (projects lat/lng, no raw geom) — so every `city_index_rules` /
+      `near_city_proximity` watchdog threw `column l.geom does not exist`, swallowed by the
+      per-subscription try/except → **silently never matched**. Rewrote all three point
+      constructions to build from `l.lng`/`l.lat` (the grain the whole helper already uses for
+      `home_obec_pop`/`near_*`); the listings-grain callers via `_shared_filter_where`
+      (comparables/velocity/transit) never set these filters, so the change is inert for them.
+      Regression test `test_build_clauses_city_quality_uses_latlng_not_geom`.
+    - **Route-layer tenancy — SHIPPED, migration 364.** Phase 1 (mig 290/292) already
+      gave `notification_subscriptions`/`notification_dispatches` `account_id` + RLS +
+      the operator backfill, but all 11 `/notifications/*` routes still ran on the
+      **service-role** connection + static `require_token` (account-blind: with 4 accounts
+      now live, `get_unread_count`/`mark_all_seen`/the feed operated across ALL accounts).
+      Moved the 9 user-facing routes (subscription CRUD + feed + unread-count + mark-seen +
+      mark-all-seen) onto `tenant_pool.tenant_conn` — RLS now scopes every read/write to the
+      caller's account, and `create_subscription` resolves + stamps `account_id` from the JWT
+      (`resolve_account_id`, 400 if unresolvable). Behaviour-preserving for the operator's
+      static-token SPA (legacy branch → service-role, unscoped, exactly as today) until the
+      SPA/extension send real user JWTs. Left `POST /dispatches/{id}/estimate` (reads shared
+      `listings` deny-all + stamps an `estimation_runs` row — needs the A5 two-connection
+      split, a follow-up) and `POST /matcher/run` (platform-wide producers, rule #16) on the
+      service-role connection. Migration 364: routed the 38 orphan `system_health` dispatches
+      to the SYSTEM account (read policy's NULL escape → `= SYSTEM AND is_platform_admin()`,
+      still admin-only), hardened the dispatch trigger's else-branch to stamp SYSTEM, and made
+      `account_id` **NOT NULL** on both tables. Tests: `test_create_subscription_stamps_account_id`;
+      the standing route-coverage gate buckets all 9 as `tenant`. The manual two-account
+      pen-test (now possible — 4 accounts exist) is a launch-gate follow-up.
 
 **Housekeeping done 2026-07-20:** operator enabled Supabase Auth's leaked-password-protection
 toggle (Authentication → Sign In / Providers → Email → "Prevent use of leaked passwords").

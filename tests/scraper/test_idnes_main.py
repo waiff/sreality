@@ -19,10 +19,12 @@ _CUT_ID = "aaaaaaaaaaaaaaaaaaaaaa02"      # stored 10 000 000, index -1%
 _NEW_ID = "aaaaaaaaaaaaaaaaaaaaaa03"      # not in the DB
 _NULLPRICE_ID = "aaaaaaaaaaaaaaaaaaaaaa04"  # stored NULL, index has a price
 
+# `id` is the surrogate (listings.id) the unchanged-path now carries into
+# touch_listings_by_id; `sreality_id` is legacy (NULL for post-Gate-2 rows).
 _STORED = {
-    _JITTER_ID: {"sreality_id": -101, "price_czk": 23_692_431, "last_seen_at": None},
-    _CUT_ID: {"sreality_id": -102, "price_czk": 10_000_000, "last_seen_at": None},
-    _NULLPRICE_ID: {"sreality_id": -104, "price_czk": None, "last_seen_at": None},
+    _JITTER_ID: {"id": 5101, "sreality_id": -101, "price_czk": 23_692_431, "last_seen_at": None},
+    _CUT_ID: {"id": 5102, "sreality_id": -102, "price_czk": 10_000_000, "last_seen_at": None},
+    _NULLPRICE_ID: {"id": 5104, "sreality_id": -104, "price_czk": None, "last_seen_at": None},
 }
 
 _INDEX_PRICES = {
@@ -66,7 +68,7 @@ def _walk(monkeypatch, ids: list[str], **portal_kw: Any) -> dict[str, Any]:
         return len(entries)
 
     monkeypatch.setattr(db, "index_summary_native", fake_summary)
-    monkeypatch.setattr(db, "touch_listings", fake_touch)
+    monkeypatch.setattr(db, "touch_listings_by_id", fake_touch)
     monkeypatch.setattr(db, "enqueue_detail", fake_enqueue)
     monkeypatch.setattr(
         idnes_main, "IdnesClient", lambda limiter=None: _FakeClient(_index_html(ids))
@@ -82,8 +84,10 @@ def _walk(monkeypatch, ids: list[str], **portal_kw: Any) -> dict[str, Any]:
 
 def test_fx_jitter_reads_unchanged_while_genuine_cut_enqueues(monkeypatch):
     got = _walk(monkeypatch, [_JITTER_ID, _CUT_ID, _NEW_ID])
-    # the 0.075% FX move is under the 0.5% baked tolerance -> touched, no enqueue
-    assert got["touched"] == [-101]
+    # the 0.075% FX move is under the 0.5% baked tolerance -> touched, no enqueue.
+    # touched is the SURROGATE id (5101), not the legacy sreality_id (-101):
+    # touch_listings_by_id keys on listings.id so a NULL-sreality row is bumped too.
+    assert got["touched"] == [5101]
     enqueued = {e[0]: e[3] for e in got["entries"]}
     assert enqueued == {
         _CUT_ID: db.QUEUE_PRIORITY_CHANGED,   # -1% is a real price cut

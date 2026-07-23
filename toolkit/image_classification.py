@@ -84,22 +84,25 @@ def classify_listing_images(
     conn: "psycopg.Connection",
     llm_client: "LLMClient",
     *,
-    sreality_id: int,
+    listing_id: int | None = None,
+    sreality_id: int | None = None,
     n_images: int = DEFAULT_CLASSIFY_N_IMAGES,
     force_refresh: bool = False,
 ) -> dict[str, Any]:
     """Return per-image room types for one listing, classifying on cache miss.
 
-    data.images is a list of {image_id, sequence, storage_path, room_type,
-    confidence}; the engine uses room_type to pair like rooms and to gate the
-    pHash fast-path on interior shots only.
+    Identify the listing by the surrogate `listing_id` (Gate-2-safe); `sreality_id` is
+    the legacy fallback (see _fetch_images). data.images is a list of {image_id,
+    sequence, storage_path, room_type, confidence}; the engine uses room_type to pair
+    like rooms and to gate the pHash fast-path on interior shots only.
     """
     from toolkit import _now_iso
 
     model = llm_client.resolve_model(_MODEL_KEY)
-    images = _fetch_images(conn, sreality_id, n_images)
+    images = _fetch_images(conn, n_images, listing_id=listing_id, sreality_id=sreality_id)
     if not images:
-        raise ClassifyError(f"no R2-stored images for sreality_id={sreality_id}")
+        raise ClassifyError(
+            f"no R2-stored images for listing_id={listing_id} sreality_id={sreality_id}")
 
     cached = _cache_lookup(conn, [img["id"] for img in images], model)
     missing = [img for img in images if img["id"] not in cached]
@@ -124,10 +127,10 @@ def classify_listing_images(
         })
 
     return {
-        "data": {"sreality_id": sreality_id, "model": model, "images": out},
+        "data": {"listing_id": listing_id, "sreality_id": sreality_id, "model": model, "images": out},
         "metadata": {
             "tool": "classify_listing_images",
-            "filters_used": {"sreality_id": sreality_id, "n_images": n_images},
+            "filters_used": {"listing_id": listing_id, "sreality_id": sreality_id, "n_images": n_images},
             "result_count": len(out),
             "queried_at": _now_iso(),
             "data_freshness": None,
@@ -204,18 +207,21 @@ def build_classify_request(
     conn: "psycopg.Connection",
     llm_client: "LLMClient",
     *,
-    sreality_id: int,
+    listing_id: int | None = None,
+    sreality_id: int | None = None,
     n_images: int = DEFAULT_CLASSIFY_N_IMAGES,
 ) -> dict[str, Any]:
     """Build one listing's room-classify request for the async batch lane.
 
-    Returns {system, messages, tools, model, image_ids} — the Anthropic-shaped
-    request body the batch submitter wraps, plus the ordered image_ids the
-    ingester maps the tool-call indices back onto (rooms_to_produced)."""
+    Identify by the surrogate `listing_id` (Gate-2-safe); `sreality_id` is the legacy
+    fallback (see _fetch_images). Returns {system, messages, tools, model, image_ids} —
+    the Anthropic-shaped request body the batch submitter wraps, plus the ordered
+    image_ids the ingester maps the tool-call indices back onto (rooms_to_produced)."""
     model = llm_client.resolve_model(_MODEL_KEY)
-    images = _fetch_images(conn, sreality_id, n_images)
+    images = _fetch_images(conn, n_images, listing_id=listing_id, sreality_id=sreality_id)
     if not images:
-        raise ClassifyError(f"no R2-stored images for sreality_id={sreality_id}")
+        raise ClassifyError(
+            f"no R2-stored images for listing_id={listing_id} sreality_id={sreality_id}")
     if not image_storage.is_configured():
         raise ClassifyError("R2 is not configured; cannot fetch image bytes for vision")
     r2 = image_storage.R2Client.from_env()
@@ -233,13 +239,15 @@ def build_classify_request(
 def cached_classification(
     conn: "psycopg.Connection",
     *,
-    sreality_id: int,
+    listing_id: int | None = None,
+    sreality_id: int | None = None,
     model: str,
     n_images: int = DEFAULT_CLASSIFY_N_IMAGES,
 ) -> tuple[str, dict[str, list[int]] | None]:
     """Cache-only room read for the batch lane — never triggers the LLM.
 
-    Returns (state, rooms):
+    Identify by the surrogate `listing_id` (Gate-2-safe); `sreality_id` is the legacy
+    fallback (see _fetch_images). Returns (state, rooms):
       ('no_images', None)     — no R2-stored images (replay would queue 'no_images')
       ('need_classify', None) — has images, not all classified under `model`
       ('classified', {room_type: [image_id, ...]}) — fully classified
@@ -247,7 +255,7 @@ def cached_classification(
     The submitter uses this to decide whether to enqueue a classify request and,
     once classified, to pick each room's images for the compare/site_plan requests.
     """
-    images = _fetch_images(conn, sreality_id, n_images)
+    images = _fetch_images(conn, n_images, listing_id=listing_id, sreality_id=sreality_id)
     if not images:
         return ("no_images", None)
     cached = _cache_lookup(conn, [im["id"] for im in images], model)
@@ -278,15 +286,29 @@ def persist_room_classifications(
 
 
 def _fetch_images(
-    conn: "psycopg.Connection", sreality_id: int, n_images: int,
+    conn: "psycopg.Connection", n_images: int,
+    *, listing_id: int | None = None, sreality_id: int | None = None,
 ) -> list[dict[str, Any]]:
+    # Identify by the surrogate images.listing_id (NOT-NULL FK) — the only Gate-2-safe
+    # key. sreality_id is the legacy fallback for the not-yet-repointed dedup_engine
+    # classify_fn caller; it selects the same rows today but goes NULL post-Gate-2.
     with conn.cursor() as cur:
-        cur.execute(
-            "SELECT id, sequence, storage_path FROM images "
-            "WHERE sreality_id = %s AND storage_path IS NOT NULL "
-            "ORDER BY sequence ASC NULLS LAST, id ASC LIMIT %s",
-            (sreality_id, n_images),
-        )
+        if listing_id is not None:
+            cur.execute(
+                "SELECT id, sequence, storage_path FROM images "
+                "WHERE listing_id = %s AND storage_path IS NOT NULL "
+                "ORDER BY sequence ASC NULLS LAST, id ASC LIMIT %s",
+                (listing_id, n_images),
+            )
+        elif sreality_id is not None:
+            cur.execute(
+                "SELECT id, sequence, storage_path FROM images "
+                "WHERE sreality_id = %s AND storage_path IS NOT NULL "
+                "ORDER BY sequence ASC NULLS LAST, id ASC LIMIT %s",
+                (sreality_id, n_images),
+            )
+        else:
+            raise ClassifyError("classify requires listing_id or sreality_id")
         rows = cur.fetchall()
     return [{"id": r[0], "sequence": r[1], "storage_path": r[2]} for r in rows]
 

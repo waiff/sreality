@@ -166,12 +166,12 @@ def test_walk_category_classifies_and_never_complete(monkeypatch):
     monkeypatch.setattr(
         mmreality_main.db, "index_summary_native",
         lambda _c, _s, ids: {
-            b: {"sreality_id": -2, "price_czk": 5_500_000, "last_seen_at": None},  # differs
-            c: {"sreality_id": -3, "price_czk": 7_000_000, "last_seen_at": None},  # same
+            b: {"id": 8102, "sreality_id": -2, "price_czk": 5_500_000, "last_seen_at": None},  # differs
+            c: {"id": 8103, "sreality_id": -3, "price_czk": 7_000_000, "last_seen_at": None},  # same
         },
     )
     touched: dict[str, Any] = {}
-    monkeypatch.setattr(mmreality_main.db, "touch_listings", lambda _c, pks: touched.update(pks=list(pks)))
+    monkeypatch.setattr(mmreality_main.db, "touch_listings_by_id", lambda _c, pks: touched.update(pks=list(pks)))
     captured: dict[str, Any] = {}
     monkeypatch.setattr(
         mmreality_main.db, "enqueue_detail",
@@ -184,7 +184,7 @@ def test_walk_category_classifies_and_never_complete(monkeypatch):
     assert seen == {a, b, c}
     assert total is None
     assert complete is False           # partial-walk portal: never mark_inactive
-    assert touched["pks"] == [-3]
+    assert touched["pks"] == [8103]    # unchanged listing touched by surrogate id
     refs = {e[0]: e for e in captured["entries"]}
     assert refs[a][3] == mmreality_main.db.QUEUE_PRIORITY_NEW
     assert refs[b][3] == mmreality_main.db.QUEUE_PRIORITY_CHANGED
@@ -237,8 +237,8 @@ def test_write_details_ingests_and_counts(monkeypatch):
     items = [DrainItem("a", "ok", payload={
         "listing": listing, "html": "<h>", "status": 200, "url": "/d/a"})]
     monkeypatch.setattr(mmreality_main.db, "upsert_portal_raw_page", lambda *a, **k: 9)
-    monkeypatch.setattr(mmreality_main.db, "ingest_scraped_listing", lambda _c, _l: (-5, "new"))
-    monkeypatch.setattr(mmreality_main.db, "record_images", lambda _c, _pk, imgs: len(imgs))
+    monkeypatch.setattr(mmreality_main.db, "ingest_scraped_listing", lambda _c, _l: (8105, "new"))
+    monkeypatch.setattr(mmreality_main.db, "record_images", lambda _c, _sid, imgs, **k: len(imgs))
     monkeypatch.setattr(mmreality_main.db, "mark_portal_page_parsed", lambda *a, **k: None)
     counts = _portal().write_details(object(), items)
     assert counts["new"] == 1

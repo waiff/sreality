@@ -90,13 +90,24 @@ export const MAP_CAP = 50_000;
 export const TABLE_PAGE_SIZE = 50;
 export const CARD_PAGE_SIZE = 24;
 
-const MAP_COLS = 'sreality_id,lat,lng,price_czk,disposition,subtype,area_m2,district,last_seen_at,is_active,tom_days';
+/* Every Browse row carries `listing_id` (the surrogate = the repr child's
+ * listings.id, migration 343 on browse_list / properties_map_mv) — the stable,
+ * NEVER-NULL identity used for React keys, the maplibre feature-state id, and
+ * the hover-sync set. The detail link is CANONICAL-first: `source` +
+ * `source_id_native` (migration 362 exposed the latter on the Browse read path)
+ * build `/listing/{source}/{native}`, so the URL bar never flashes the negative
+ * synthetic id. `sreality_id` stays selected for the legacy fallback (and as a
+ * sort field) but is NULLABLE post-Gate-2, so it must never be a key/feature id.
+ * The map has no keyset tiebreaker column, so it carries `property_id` explicitly
+ * (Table/Cards get it from withKeysetColumns / CARD_COLS) for the final null-safe
+ * `?property=` detail-link fallback. */
+const MAP_COLS = 'listing_id,property_id,sreality_id,source,source_id_native,lat,lng,price_czk,disposition,subtype,area_m2,district,last_seen_at,is_active,tom_days';
 const TABLE_COLS =
-  'sreality_id,district,locality,obec,okres,street,disposition,subtype,area_m2,price_czk,first_seen_at,last_seen_at,is_active,tom_days,' +
+  'listing_id,sreality_id,source,source_id_native,district,locality,obec,okres,street,disposition,subtype,area_m2,price_czk,first_seen_at,last_seen_at,is_active,tom_days,' +
   'estate_area,usable_area,parking_lots,furnished,ownership,category_sub_cb,building_type';
 const CARD_COLS =
-  'property_id,sreality_id,district,locality,obec,okres,street,disposition,subtype,area_m2,price_czk,first_seen_at,last_seen_at,is_active,tom_days,' +
-  'category_main,category_type,source,mf_gross_yield_pct';
+  'listing_id,property_id,sreality_id,source,source_id_native,district,locality,obec,okres,street,disposition,subtype,area_m2,price_czk,first_seen_at,last_seen_at,is_active,tom_days,' +
+  'category_main,category_type,mf_gross_yield_pct';
 
 export type SortField =
   | 'sreality_id' | 'district' | 'disposition'
@@ -389,7 +400,13 @@ const applyFilters = <T>(q: T, f: ListingFilters): T => {
 };
 
 export interface MapRow {
-  sreality_id: number;
+  /* Surrogate identity (never null) — the maplibre feature-state id + hover-sync
+   * key. `sreality_id` is nullable post-Gate-2 and is only for the detail link. */
+  listing_id: number;
+  property_id: number;
+  sreality_id: number | null;
+  source: string | null;
+  source_id_native: string | null;
   lat: number;
   lng: number;
   price_czk: number | null;
@@ -437,10 +454,14 @@ async function resolveTagPrefilter(
 
 /* Phase QUAL — `listings_with_city_quality` RPC prefilter. Same
  * composition pattern as the tags prefilter above: when ANY city-quality
- * predicate is active, the RPC returns the sreality_id allowlist and the
- * main listings query AND's it via `.in('sreality_id', ids)`. Returns
+ * predicate is active, the RPC returns the listing_id allowlist and the
+ * main listings query AND's it via `.in('listing_id', ids)`. Returns
  * null when no city-quality filter is set so the fast path stays
- * unchanged. */
+ * unchanged. Keyed on the surrogate `listing_id` (migration 351), NOT
+ * sreality_id — a post-Gate-2 non-sreality repr has a NULL sreality_id, and
+ * `IN` never matches NULL, so the old sreality-keyed filter silently dropped
+ * those listings from Map/Table/Cards/Count while browse_stats still counted
+ * them (count-vs-list divergence). */
 /* min/max city population and the near_* proximity filters are NOT here:
  * since migration 142 they're precomputed columns on properties_public, so
  * they dispatch directly via applyRegistryFilters (no prefilter RPC, no anon
@@ -469,8 +490,11 @@ async function resolveCityQualityPrefilter(
     })
     .range(0, 99999);
   if (error) throw error;
-  return ((data ?? []) as Array<{ sreality_id: number }>).map(
-    (r) => r.sreality_id,
+  /* The RPC returns the surrogate `listing_id` (migration 351); the cast type
+   * pins that so a stray `r.sreality_id` can't silently reintroduce the
+   * id-space half-swap. Applied downstream via `.in('listing_id', ids)`. */
+  return ((data ?? []) as Array<{ listing_id: number }>).map(
+    (r) => r.listing_id,
   );
 }
 
@@ -546,8 +570,8 @@ const intersectPrefilters = (
  * own grain (null = inactive); `empty` is true when any ACTIVE prefilter
  * matched nothing, so the caller can short-circuit to zero results without
  * issuing the main query. Shared by the Map / Table / Cards fetchers. */
-interface BrowsePrefilters {
-  srealityIds: number[] | null;   // city-quality (representative-listing grain)
+export interface BrowsePrefilters {
+  listingIds: number[] | null;    // city-quality (surrogate listing_id, migration 351)
   obecIds: number[] | null;       // market growth (price-stats datasets)
   propertyIds: number[] | null;   // tags ∩ with-estimates (property grain)
   empty: boolean;
@@ -564,20 +588,25 @@ async function resolveBrowsePrefilters(
   ]);
   // Tags are now property-grain (properties_with_tags) — intersect them with the
   // with-estimates property prefilter and apply via .in('property_id', …).
-  // City-quality stays representative-listing grain (.in('sreality_id', …)).
+  // City-quality is representative-listing grain, keyed on the surrogate
+  // listing_id (.in('listing_id', …)) — null-safe past Gate-2.
   const propertyIds = intersectPrefilters(tagProps, estimateProps);
   const empty =
     (cityIds != null && cityIds.length === 0)
     || (growthObec != null && growthObec.length === 0)
     || (propertyIds != null && propertyIds.length === 0);
-  return { srealityIds: cityIds, obecIds: growthObec, propertyIds, empty };
+  return { listingIds: cityIds, obecIds: growthObec, propertyIds, empty };
 }
 
-const applyPrefilters = <T>(q: T, p: BrowsePrefilters): T => {
+/* Exported for queries.test.ts — pins that the city-quality allowlist filters on
+ * the surrogate `listing_id` (migration 351), not the nullable `sreality_id`
+ * (passing a sreality_id into an `IN listing_id` predicate would silently read a
+ * DIFFERENT listing, the id-spaces overlap by ~435). */
+export const applyPrefilters = <T>(q: T, p: BrowsePrefilters): T => {
   let r = q as unknown as {
     in: (c: string, v: readonly unknown[]) => typeof r;
   };
-  if (p.srealityIds != null) r = r.in('sreality_id', p.srealityIds);
+  if (p.listingIds != null) r = r.in('listing_id', p.listingIds);
   if (p.obecIds != null) r = r.in('obec_id', p.obecIds);
   if (p.propertyIds != null) r = r.in('property_id', p.propertyIds);
   return r as unknown as T;
@@ -661,7 +690,11 @@ export const fetchListingsForMap = async (
 export interface TableRow {
   /* Property-grain tiebreaker for keyset paging + row de-dup. */
   property_id: number;
-  sreality_id: number;
+  /* Surrogate identity (never null) — the React key + hover-sync key. */
+  listing_id: number;
+  sreality_id: number | null;
+  source: string | null;
+  source_id_native: string | null;
   district: string | null;
   locality: string | null;
   obec: string | null;
@@ -788,7 +821,11 @@ export interface CardRow {
   /* The canonical property this card represents (Browse is property-grain via
    * properties_public). Used by the Browse merge-mode dedup action. */
   property_id: number;
-  sreality_id: number;
+  /* Surrogate identity (never null) — the React key, the hover-sync key, and the
+   * key the card image hydration batches on. `sreality_id` is nullable post-
+   * Gate-2 and is only the fast detail link + the (sreality-backed) estimate. */
+  listing_id: number;
+  sreality_id: number | null;
   district: string | null;
   locality: string | null;
   obec: string | null;
@@ -807,6 +844,9 @@ export interface CardRow {
   category_main: string | null;
   category_type: string | null;
   source: string | null;
+  /* Portal-native id (migration 091). With `source`, builds the canonical
+   * `/listing/{source}/{native}` link; null on pre-091 rows → legacy fallback. */
+  source_id_native: string | null;
   /* MF gross rental yield % (migration 133). Non-null only on sale
    * apartments that resolved to an MF territory. */
   mf_gross_yield_pct: number | null;
@@ -845,17 +885,17 @@ export const fetchListingsForCards = async (
     sort,
   );
   if (baseRows.length === 0) return { rows: [], nextCursor };
-  /* fetchImagesByListingIds already pulls every image row for the
-   * visible ids over the wire; perId is a client-side retention cap.
-   * 50 comfortably covers any sreality listing (typical max ~25) so
-   * the card carousel never silently truncates. URLs only — actual
-   * image bytes are lazy-loaded by the <img loading="lazy">. */
-  const images = await fetchImagesByListingIds(
-    baseRows.map((r) => r.sreality_id),
+  /* Hydrate the card photos keyed on the surrogate `listing_id`, NOT sreality_id
+   * — a post-Gate-2 non-sreality card has a NULL sreality_id, so a sreality-keyed
+   * batch would drop its images entirely. perId is a client-side retention cap;
+   * 50 comfortably covers any listing (typical max ~25) so the carousel never
+   * silently truncates. URLs only — bytes are lazy-loaded by <img loading="lazy">. */
+  const images = await fetchImagesForListingIds(
+    baseRows.map((r) => r.listing_id),
     50,
   );
   const rows: CardRow[] = baseRows.map((r) => {
-    const imgs = images.get(r.sreality_id) ?? [];
+    const imgs = images.get(r.listing_id) ?? [];
     return {
       ...r,
       images: imgs.map((im) => ({
@@ -1088,20 +1128,31 @@ export const fetchListingIdByNaturalKey = async (
   return row?.id ?? null;
 };
 
-/* Resolve a property_id to its representative listing's sreality_id.
- * Lets /listing?property=ID (e.g. the dedup merge feed's link) land on the
- * survivor's detail page. properties_public exposes sreality_id = repr id. */
-export const fetchPropertyReprId = async (
+/* Resolve a property_id to its representative listing's NATURAL KEY
+ * (source, source_id_native). Lets /listing?property=ID (e.g. the dedup merge
+ * feed's link) land on the survivor's detail page via the canonical natural-key
+ * route. NOT the surrogate id: listingPath() builds the LEGACY sreality route,
+ * and the id-spaces overlap (~435 collisions), so routing the surrogate through
+ * it would load the WRONG listing. NOT sreality_id either: a post-Gate-2 repr may
+ * have none, which is exactly why the old sreality-id form dead-ended (returned
+ * null → NoListingState). properties_public exposes source + source_id_native for
+ * the repr child (migration 343). */
+export const fetchPropertyReprNaturalKey = async (
   property_id: number,
-): Promise<number | null> => {
+): Promise<{ source: string; source_id_native: string } | null> => {
   const { data, error } = await supabase
     .from('properties_public')
-    .select('sreality_id')
+    .select('source, source_id_native')
     .eq('property_id', property_id)
     .maybeSingle();
   if (error) throw error;
-  const row = data as unknown as { sreality_id: number | null } | null;
-  return row?.sreality_id ?? null;
+  const row = data as unknown as {
+    source: string | null;
+    source_id_native: string | null;
+  } | null;
+  return row?.source != null && row.source_id_native != null
+    ? { source: row.source, source_id_native: row.source_id_native }
+    : null;
 };
 
 /* The PROPERTY-grain MF reference rent/yield (the golden record, migration 257):
@@ -1161,7 +1212,7 @@ export const fetchPropertySources = async (
   const { data, error } = await supabase
     .from('property_sources_public')
     .select(
-      'property_id,sreality_id,source,source_url,source_id_native,is_active,price_czk,first_seen_at,last_seen_at',
+      'id,property_id,sreality_id,source,source_url,source_id_native,is_active,price_czk,first_seen_at,last_seen_at',
     )
     .eq('property_id', property_id)
     .order('first_seen_at', { ascending: true });
@@ -1170,16 +1221,19 @@ export const fetchPropertySources = async (
 };
 
 /* Snapshots across several listings (a property's children) — the union that
- * makes the Listing Detail price chart cross-source. For a singleton property
- * this is identical to fetchSnapshotsByListing. */
+ * makes the Listing Detail price chart cross-source. Keyed on the surrogate
+ * `listing_id` (listing_snapshots_public.listing_id, migration 343), NOT
+ * sreality_id — the caller passes the children's surrogate ids, and a post-
+ * Gate-2 non-sreality child has a NULL sreality_id (the old sreality filter
+ * would then get `[null]` and the chart would silently go empty). */
 export const fetchSnapshotsForListings = async (
   ids: number[],
 ): Promise<ListingSnapshotPublic[]> => {
   if (ids.length === 0) return [];
   const { data, error } = await supabase
     .from('listing_snapshots_public')
-    .select('id,sreality_id,scraped_at,price_czk,description')
-    .in('sreality_id', ids)
+    .select('id,sreality_id,listing_id,scraped_at,price_czk,description')
+    .in('listing_id', ids)
     .order('scraped_at', { ascending: true });
   if (error) throw error;
   return (data ?? []) as unknown as ListingSnapshotPublic[];
@@ -1218,6 +1272,27 @@ export const fetchListingsByIds = async (
   return out;
 };
 
+/* Sibling of fetchListingsByIds keyed on the surrogate `id` (listings_public.id).
+ * The estimation comparables track (RunPanel's ComparablesSection) carries
+ * `listing_id` on every comparable emitted after R2 (#879/#892) — this is what
+ * a comparable with a NULL sreality_id (post-Gate-2-flip non-sreality listing)
+ * must be fetched through instead, mirroring fetchImagesForListingIds. */
+export const fetchListingsForListingIds = async (
+  ids: ReadonlyArray<number>,
+): Promise<Map<number, ListingPublic>> => {
+  if (ids.length === 0) return new Map();
+  const { data, error } = await supabase
+    .from('listings_public')
+    .select(DETAIL_COLS)
+    .in('id', ids as number[]);
+  if (error) throw error;
+  const out = new Map<number, ListingPublic>();
+  for (const row of (data ?? []) as unknown as ListingPublic[]) {
+    out.set(row.id, row);
+  }
+  return out;
+};
+
 /* Batch image fetch for the comparables modal — first three per id is
  * enough for the modal's thumbnail strip; the Listing Detail page
  * still pulls the full set independently. */
@@ -1227,6 +1302,17 @@ export const fetchListingsByIds = async (
 const IMAGE_PUBLIC_COLS =
   'id,sreality_id,sequence,sreality_url,storage_path,clip_fine_tag,clip_logical_tag,clip_confidence,clip_render_score,phash';
 
+/* Batch image fetch keyed on `sreality_id` — kept for the callers whose upstream
+ * read model is still sreality-keyed and carries no surrogate id: the dedup
+ * candidate sides (DedupPropertySide) and the vision bakeoff pairs. These
+ * CANNOT cut to listing_id without a backend change to those payloads, and
+ * flipping this loader in place would be a catastrophic half-swap (a
+ * sreality_id fed into an `IN listing_id` matches a DIFFERENT listing,
+ * id-spaces overlap). The Browse card path uses fetchImagesForListingIds
+ * below instead — as does RunPanel's ComparablesSection now, for the subset
+ * of comparables (ComparableUsed) that carry a `listing_id`; this loader
+ * only covers the sreality_id-only fallback for pre-#879 frozen runs
+ * (see RunPanel.fetchComparableImages). */
 export const fetchImagesByListingIds = async (
   ids: ReadonlyArray<number>,
   perId = 3,
@@ -1251,6 +1337,34 @@ export const fetchImagesByListingIds = async (
   return out;
 };
 
+/* Sibling of fetchImagesByListingIds keyed on the surrogate `listing_id`
+ * (images_public.listing_id, migration 335). The Browse card hydration uses this
+ * so a post-Gate-2 non-sreality card (sreality_id NULL) still gets its photos.
+ * `listing_id` is appended to the select just for keying the result map. */
+export const fetchImagesForListingIds = async (
+  ids: ReadonlyArray<number>,
+  perId = 3,
+): Promise<Map<number, ImagePublic[]>> => {
+  if (ids.length === 0) return new Map();
+  const { data, error } = await supabase
+    .from('images_public')
+    .select(`${IMAGE_PUBLIC_COLS},listing_id`)
+    .in('listing_id', ids as number[])
+    .order('sequence', { ascending: true, nullsFirst: false })
+    .order('id', { ascending: true });
+  if (error) throw error;
+  const out = new Map<number, ImagePublic[]>();
+  for (const row of (data ?? []) as unknown as Array<ImagePublic & { listing_id: number }>) {
+    const arr = out.get(row.listing_id);
+    if (arr) {
+      if (arr.length < perId) arr.push(row);
+    } else {
+      out.set(row.listing_id, [row]);
+    }
+  }
+  return out;
+};
+
 /* /dedup review card: per-side portal chips. Batched over the candidate
  * properties on screen (≤100), keyed on property_id. property_sources_public
  * is one row per (child listing) of a property — post-merge a property spans
@@ -1262,7 +1376,7 @@ export const fetchPropertySourcesByPropertyIds = async (
   const { data, error } = await supabase
     .from('property_sources_public')
     .select(
-      'property_id,sreality_id,source,source_url,source_id_native,is_active,price_czk,first_seen_at,last_seen_at',
+      'id,property_id,sreality_id,source,source_url,source_id_native,is_active,price_czk,first_seen_at,last_seen_at',
     )
     .in('property_id', ids as number[])
     .order('is_active', { ascending: false })
@@ -1984,6 +2098,8 @@ export const dedupKeys = {
     ['dedup', 'candidates', params] as const,
   merges: (params: Record<string, unknown>) =>
     ['dedup', 'merges', params] as const,
+  mergedProperties: (params: Record<string, unknown>) =>
+    ['dedup', 'merged-properties', params] as const,
   summary: (status: string) => ['dedup', 'summary', status] as const,
   sources: (propertyIds: ReadonlyArray<number>) =>
     ['dedup', 'sources', sortedIds(propertyIds)] as const,
@@ -2186,7 +2302,7 @@ export const fetchPipelineBoard = async (): Promise<PipelineBoardCard[]> => {
   const { data: props, error: pErr } = await supabase
     .from('properties_public')
     .select(
-      'property_id, sreality_id, category_main, street, district, disposition, subtype, area_m2, price_czk, mf_gross_yield_pct, obec_id, okres_id, region_id, place_search_text, okres, region, is_active',
+      'property_id, sreality_id, source, source_id_native, listing_id, category_main, street, district, disposition, subtype, area_m2, price_czk, mf_gross_yield_pct, obec_id, okres_id, region_id, place_search_text, okres, region, is_active',
     )
     .in('property_id', ids);
   if (pErr) throw pErr;
@@ -2197,25 +2313,29 @@ export const fetchPipelineBoard = async (): Promise<PipelineBoardCard[]> => {
     ]),
   );
 
-  // One thumbnail per card — the same batched image hydration Browse cards use
-  // (images are keyed on sreality_id, not on the property), resolved through the
-  // shared imageSrc() helper so the board and Browse render identical URLs.
-  const srealityIds = rows
-    .map((r) => byId.get(r.property_id)?.sreality_id as number | null | undefined)
+  // One thumbnail per card, keyed on the representative listing's SURROGATE
+  // `listing_id` (properties_public.listing_id, migration 343), not
+  // sreality_id — a post-Gate-2 non-sreality representative has a NULL
+  // sreality_id and would silently lose its thumbnail. Browse cards already
+  // made this switch (fetchImagesForListingIds); the board follows suit.
+  const listingIds = rows
+    .map((r) => byId.get(r.property_id)?.listing_id as number | null | undefined)
     .filter((x): x is number => x != null);
-  const imagesById = await fetchImagesByListingIds(srealityIds, 1);
+  const imagesById = await fetchImagesForListingIds(listingIds, 1);
 
   // Canonical broker per card (name + firm + contact for the hover box), two
-  // batched reads (listing→broker, then broker→contact) — no N+1. Both surfaces
-  // are dark to `authenticated` since Phase 0's A6 (broker PII stays masked
-  // until Wave 4): the grant is revoked outright, so PostgREST answers with
-  // SQLSTATE 42501 and every card degrades to "no broker" until the mask lifts.
-  // Only that signature is expected — anything else (schema drift, network, 5xx,
-  // expired session) is a real fault, so log it before degrading, or the board
-  // silently shows "no broker" forever with no signal that broker data regressed.
+  // batched reads (listing→broker, then broker→contact) — no N+1, keyed on the
+  // same surrogate listing_id for the same NULL-safety reason as the images
+  // above. Both surfaces are dark to `authenticated` since Phase 0's A6
+  // (broker PII stays masked until Wave 4): the grant is revoked outright, so
+  // PostgREST answers with SQLSTATE 42501 and every card degrades to "no
+  // broker" until the mask lifts. Only that signature is expected — anything
+  // else (schema drift, network, 5xx, expired session) is a real fault, so log
+  // it before degrading, or the board silently shows "no broker" forever with
+  // no signal that broker data regressed.
   const brokerMaskExpected = (err: unknown): boolean =>
     (err as { code?: string } | null)?.code === '42501';
-  const listingBrokers = await fetchListingBrokersByIds(srealityIds).catch(
+  const listingBrokers = await fetchListingBrokersByIds(listingIds).catch(
     (err): Map<number, ListingBroker> => {
       if (!brokerMaskExpected(err))
         console.error('fetchPipelineBoard: listing_broker_public read failed', err);
@@ -2235,8 +2355,9 @@ export const fetchPipelineBoard = async (): Promise<PipelineBoardCard[]> => {
   return rows.map((r) => {
     const p = byId.get(r.property_id);
     const sid = (p?.sreality_id as number | null) ?? null;
-    const firstImage = sid != null ? imagesById.get(sid)?.[0] : undefined;
-    const lb = sid != null ? listingBrokers.get(sid) : undefined;
+    const lid = (p?.listing_id as number | null) ?? null;
+    const firstImage = lid != null ? imagesById.get(lid)?.[0] : undefined;
+    const lb = lid != null ? listingBrokers.get(lid) : undefined;
     const contact = lb ? brokerContacts.get(lb.broker_id) : undefined;
     return {
       property_id: r.property_id,
@@ -2244,6 +2365,9 @@ export const fetchPipelineBoard = async (): Promise<PipelineBoardCard[]> => {
       board_position: r.board_position,
       entered_stage_at: r.entered_stage_at,
       sreality_id: sid,
+      source: (p?.source as string | null) ?? null,
+      source_id_native: (p?.source_id_native as string | null) ?? null,
+      listing_id: lid,
       category_main: (p?.category_main as string | null) ?? null,
       street: (p?.street as string | null) ?? null,
       district: (p?.district as string | null) ?? null,

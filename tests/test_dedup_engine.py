@@ -1234,7 +1234,8 @@ def test_run_engine_defers_pair_while_image_downloading(monkeypatch: Any) -> Non
         _gk(1, 101, area=120.0, price=5_950_000),
         _gk(2, 102, area=120.0, price=5_950_000),
     ])
-    monkeypatch.setattr(eng, "_downloads_incomplete", lambda conn, sids: [s for s in sids if s == 1])
+    # Keyed on the SURROGATE listing_id (sid+100000): listing 1's pending download is id 100001.
+    monkeypatch.setattr(eng, "_downloads_incomplete", lambda conn, sids: [s for s in sids if s == 100001])
     monkeypatch.setattr(eng, "merge_properties", lambda *a, **k: {"data": {"merge_group_id": "g"}})
     stats = eng.run_engine(_FakeConn([]), classify_fn=None, compare_fn=None,
                            max_vision_calls=10, geo=True, geo_area_max_pct=0.20,
@@ -1643,7 +1644,7 @@ class _Cur:
             self._rows = []  # _phash_group_counts default: no near-identical pairs anywhere
         elif "FROM images ia JOIN images ib" in s:
             self._rows = [(0,)]  # _phash_identical_pairs default (tests monkeypatch when needed)
-        elif "FROM images i WHERE i.sreality_id" in s and "storage_path IS NOT NULL" in s:
+        elif "FROM images i WHERE i.listing_id" in s and "storage_path IS NOT NULL" in s:
             self._rows = []  # _floor_plan_image_ids default (no floor plan -> gate passes)
         elif "image_room_classifications" in s:
             self._rows = [(False,)]  # _both_have_site_plan default (CLIP-OR-LLM query)
@@ -1776,7 +1777,9 @@ def test_run_engine_defers_on_incomplete_tagging(monkeypatch: Any) -> None:
     # in the clip_tag queue, clip_tagged_at IS NULL).
     import scripts.dedup_engine as eng
 
-    monkeypatch.setattr(eng, "_clip_incomplete", lambda conn, sids, model: [2])  # 2 still tagging
+    # The readiness gate keys on the SURROGATE listing_id (not sreality_id); _row gives
+    # listing 2 the id sid+100000, so "still tagging" is expressed as 100002.
+    monkeypatch.setattr(eng, "_clip_incomplete", lambda conn, sids, model: [100002])
     monkeypatch.setattr(eng, "_trigger_clip_tagging",
                         lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not re-queue")))
     monkeypatch.setattr(eng, "merge_properties",
@@ -3939,7 +3942,8 @@ def test_run_engine_visual_high_but_different_floor_plan_dismisses(monkeypatch: 
     monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 0)  # no pHash -> visual
     monkeypatch.setattr(eng, "_floor_plan_image_ids", lambda conn, sid: [sid])
 
-    def classify(sid: int) -> dict:
+    def classify(key: ListingKey) -> dict:
+        sid = key.sreality_id
         return {"data": {"images": [{"image_id": sid * 10 + 1, "room_type": "kitchen"}]}}
 
     def compare(a: int, b: int, room: str, ids_a: list, ids_b: list,
@@ -3967,7 +3971,8 @@ def test_run_engine_visual_high_merges_low_queues(monkeypatch: Any) -> None:
     )
     monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 0)  # no pHash -> falls to visual
 
-    def classify(sid: int) -> dict:
+    def classify(key: ListingKey) -> dict:
+        sid = key.sreality_id
         return {"data": {"images": [{"image_id": sid * 10 + 1, "room_type": "kitchen"}]}}
 
     # First pair: kitchen -> High. (single candidate pair). The 6th `model` arg
@@ -4014,7 +4019,8 @@ def test_run_engine_site_plan_different_unit_queues(monkeypatch: Any) -> None:
     # Both have a site plan -> pHash defers to the development guard.
     monkeypatch.setattr(eng, "_both_have_site_plan", lambda *a, **k: True)
 
-    def classify(sid: int) -> dict:
+    def classify(key: ListingKey) -> dict:
+        sid = key.sreality_id
         return {"data": {"images": [
             {"image_id": sid * 10 + 1, "room_type": "site_plan"},
             {"image_id": sid * 10 + 2, "room_type": "kitchen"},
@@ -4046,7 +4052,8 @@ def test_run_engine_site_plan_same_unit_falls_through_to_merge(monkeypatch: Any)
     monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 5)
     monkeypatch.setattr(eng, "_both_have_site_plan", lambda *a, **k: True)  # defer to visual stage
 
-    def classify(sid: int) -> dict:
+    def classify(key: ListingKey) -> dict:
+        sid = key.sreality_id
         return {"data": {"images": [
             {"image_id": sid * 10 + 1, "room_type": "site_plan"},
             {"image_id": sid * 10 + 2, "room_type": "kitchen"},
@@ -4122,7 +4129,8 @@ def test_run_engine_auto_merge_off_queues_candidate_without_vision(monkeypatch: 
     )
     vision: list[int] = []
 
-    def classify(sid: int) -> dict:
+    def classify(key: ListingKey) -> dict:
+        sid = key.sreality_id
         vision.append(sid)
         return {"data": {"images": []}}
 
@@ -4213,7 +4221,8 @@ def test_run_engine_visual_high_not_dismissed(monkeypatch: Any) -> None:
     )
     monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 0)
 
-    def classify(sid: int) -> dict:
+    def classify(key: ListingKey) -> dict:
+        sid = key.sreality_id
         return {"data": {"images": [{"image_id": sid * 10 + 1, "room_type": "kitchen"}]}}
 
     conn = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None, source="bazos")])
@@ -4232,7 +4241,8 @@ def test_run_engine_low_on_generic_room_queues_not_dismiss(monkeypatch: Any) -> 
     monkeypatch.setattr(eng, "merge_properties", lambda *a, **k: {"data": {"merge_group_id": "g"}})
     monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 0)
 
-    def classify(sid: int) -> dict:
+    def classify(key: ListingKey) -> dict:
+        sid = key.sreality_id
         return {"data": {"images": [{"image_id": sid * 10 + 1, "room_type": "living_room"}]}}
 
     conn = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None, source="bazos")])
@@ -4250,7 +4260,8 @@ def test_run_engine_autodismiss_off_queues_low(monkeypatch: Any) -> None:
     monkeypatch.setattr(eng, "merge_properties", lambda *a, **k: {"data": {"merge_group_id": "g"}})
     monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 0)
 
-    def classify(sid: int) -> dict:
+    def classify(key: ListingKey) -> dict:
+        sid = key.sreality_id
         return {"data": {"images": [{"image_id": sid * 10 + 1, "room_type": "kitchen"}]}}
 
     conn = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None, source="bazos")])
@@ -4296,7 +4307,8 @@ def test_run_engine_partial_room_scan_does_not_dismiss(monkeypatch: Any) -> None
     monkeypatch.setattr(eng, "merge_properties", lambda *a, **k: {"data": {"merge_group_id": "g"}})
     monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 0)
 
-    def classify(sid: int) -> dict:
+    def classify(key: ListingKey) -> dict:
+        sid = key.sreality_id
         return {"data": {"images": [
             {"image_id": sid * 10 + 1, "room_type": "kitchen"},
             {"image_id": sid * 10 + 2, "room_type": "bedroom"},
@@ -4320,7 +4332,8 @@ def test_run_engine_warm_cache_hits_do_not_consume_budget(monkeypatch: Any) -> N
     monkeypatch.setattr(eng, "merge_properties", lambda *a, **k: {"data": {"merge_group_id": "g"}})
     monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 0)
 
-    def classify(sid: int) -> dict:
+    def classify(key: ListingKey) -> dict:
+        sid = key.sreality_id
         return {"data": {"images": [
             {"image_id": sid * 10 + 1, "room_type": "kitchen"},
             {"image_id": sid * 10 + 2, "room_type": "bathroom"},
@@ -4345,7 +4358,8 @@ def test_run_engine_missing_room_verdict_blocks_dismiss(monkeypatch: Any) -> Non
     monkeypatch.setattr(eng, "merge_properties", lambda *a, **k: {"data": {"merge_group_id": "g"}})
     monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 0)
 
-    def classify(sid: int) -> dict:
+    def classify(key: ListingKey) -> dict:
+        sid = key.sreality_id
         return {"data": {"images": [
             {"image_id": sid * 10 + 1, "room_type": "kitchen"},
             {"image_id": sid * 10 + 2, "room_type": "bathroom"},
@@ -4440,7 +4454,8 @@ def test_cosine_tier_routes_high_cosine_to_haiku(monkeypatch: Any) -> None:
     )
     monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 0)
 
-    def classify(sid: int) -> dict:
+    def classify(key: ListingKey) -> dict:
+        sid = key.sreality_id
         return {"data": {"images": [{"image_id": sid * 10 + 1, "room_type": "kitchen"}]}}
 
     seen: list[str | None] = []
@@ -4470,7 +4485,8 @@ def test_cosine_tier_low_cosine_skips_room_and_queues_not_dismiss(
     import scripts.dedup_engine as eng
     monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 0)
 
-    def classify(sid: int) -> dict:
+    def classify(key: ListingKey) -> dict:
+        sid = key.sreality_id
         return {"data": {"images": [{"image_id": sid * 10 + 1, "room_type": "kitchen"}]}}
 
     def compare(a: int, b: int, room: str, ids_a: list, ids_b: list,
@@ -4507,6 +4523,11 @@ def test_pair_audit_records_a_merge(monkeypatch: Any) -> None:
     assert len(rec) == 1
     assert rec[0]["outcome"] == "merged"
     assert rec[0]["left_sreality_id"] in (1, 2)
+    # The audit record ALSO carries the surrogate listing_id the engine holds (sid+100000)
+    # — what keeps the row attributable once sreality_id goes NULL post-Gate-2.
+    assert rec[0]["left_listing_id"] in (100_001, 100_002)
+    assert rec[0]["right_listing_id"] in (100_001, 100_002)
+    assert rec[0]["left_listing_id"] != rec[0]["right_listing_id"]
     # The unified audit row carries the undo handle + provenance + factor detail.
     assert rec[0]["source"] == "engine"
     assert rec[0]["merge_group_id"] == "g"
@@ -4521,7 +4542,8 @@ def test_pair_audit_does_not_record_queued_pairs(monkeypatch: Any) -> None:
     monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 0)
     monkeypatch.setattr(eng, "_enqueue_candidate", lambda *a, **k: None)
 
-    def classify(sid: int) -> dict:
+    def classify(key: ListingKey) -> dict:
+        sid = key.sreality_id
         return {"data": {"images": [{"image_id": sid * 10 + 1, "room_type": "kitchen"}]}}
 
     def compare(a: int, b: int, room: str, ids_a: list, ids_b: list,
@@ -4548,7 +4570,8 @@ def test_pair_audit_records_visual_factors(monkeypatch: Any) -> None:
     )
     monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 0)
 
-    def classify(sid: int) -> dict:
+    def classify(key: ListingKey) -> dict:
+        sid = key.sreality_id
         return {"data": {"images": [{"image_id": sid * 10 + 1, "room_type": "kitchen"}]}}
 
     def compare(a: int, b: int, room: str, ids_a: list, ids_b: list,
@@ -4854,27 +4877,102 @@ def test_write_pair_audit_dedupes_recent_identical_records() -> None:
         def __exit__(self, *a): return None
         def execute(self, sql, params=None): self._sql = " ".join(sql.split())
         def executemany(self, sql, rows): inserted.extend(rows)
-        def fetchall(self):  # pair (1,2) phash/engine dismissal already logged
-            return [(1, 2, "phash", "engine")]
+        def fetchall(self):  # pair listing_id (901,902) phash/engine dismissal already logged
+            return [(901, 902, "phash", "engine")]
 
     class _Conn:
         def cursor(self): return _C()
 
+    # sreality_id is deliberately DIFFERENT from listing_id here: the dedupe + the INSERT
+    # must key on the surrogate listing_id, so a sreality mismatch must not change the
+    # verdict and the INSERT must bind listing_id directly (not a sreality mirror).
     rec = {
-        "left_sreality_id": 1, "right_sreality_id": 2, "left_property_id": 101,
+        "left_sreality_id": 1, "right_sreality_id": 2,
+        "left_listing_id": 901, "right_listing_id": 902, "left_property_id": 101,
         "right_property_id": 102, "category_main": "byt", "stage": "phash",
         "outcome": "dismissed", "source": "engine", "detail": {},
     }
-    novel = {**rec, "left_sreality_id": 5, "right_sreality_id": 6}
+    novel = {**rec, "left_listing_id": 905, "right_listing_id": 906}
     # A re-MERGE of the same pair must ALWAYS land (its fresh merge_group_id is the
     # operator's only undo handle after an unmerge) — only dismissals dedupe.
     remerge = {**rec, "outcome": "merged", "merge_group_id": "G2"}
     eng._write_pair_audit(_Conn(), "RUN_AT", [rec, novel, remerge])
     assert len(inserted) == 2
-    assert {r[1] for r in inserted} == {5, 1}          # novel dismissal + the re-merge
-    # left/right_listing_id repeat their sreality_id at the mirrored position (R2 dual-write).
-    assert all(r[1] == r[2] and r[3] == r[4] for r in inserted)
+    # rec (901,902) is deduped; novel (905) dismissal + the re-merge (901) both land.
+    assert {r[2] for r in inserted} == {905, 901}      # column index 2 == left_listing_id
+    # The INSERT binds the surrogate listing_id directly (NOT the sreality_id) — column
+    # order is (run_at, left_sreality_id, left_listing_id, right_sreality_id, ...).
+    assert all(r[1] != r[2] for r in inserted)         # sreality (1/5) != listing_id (901/905)
     assert any(r[9] == "merged" for r in inserted)     # the merged record landed
+
+
+def test_write_pair_audit_dedupe_matches_on_listing_id_despite_null_sreality() -> None:
+    # Gate 2: a NULL-sreality dismissal must still dedupe against a prior identical one —
+    # the join keys on listing_id, not sreality_id. Pre-fix (keyed on sreality_id) the
+    # NULL `= u.l` never matched, so every run re-appended the dismissal forever.
+    import scripts.dedup_engine as eng
+
+    inserted: list[Any] = []
+    seen_params: dict[str, Any] = {}
+
+    class _C:
+        def __enter__(self): return self
+        def __exit__(self, *a): return None
+        def execute(self, sql, params=None):
+            self._sql = " ".join(sql.split())
+            if "SELECT DISTINCT d.left_listing_id" in self._sql:
+                seen_params.update({"sql": self._sql, "params": params})
+        def executemany(self, sql, rows): inserted.extend(rows)
+        def fetchall(self):  # the (480001,480002) dismissal is already on record
+            return [(480001, 480002, "phash", "engine")]
+
+    class _Conn:
+        def cursor(self): return _C()
+
+    rec = {
+        "left_sreality_id": None, "right_sreality_id": None,
+        "left_listing_id": 480001, "right_listing_id": 480002, "left_property_id": 101,
+        "right_property_id": 102, "category_main": "byt", "stage": "phash",
+        "outcome": "dismissed", "source": "engine", "detail": {},
+    }
+    eng._write_pair_audit(_Conn(), "RUN_AT", [rec])
+    # The probe binds the surrogate listing_id arrays (never sreality_id) and keys the
+    # join on d.left_listing_id — so the NULL-sreality dismissal is recognized as seen.
+    assert "d.left_listing_id = u.l" in seen_params["sql"]
+    assert seen_params["params"]["ll"] == [480001]
+    assert inserted == []                              # deduped, not re-appended
+
+
+def test_write_pair_audit_binds_listing_id_for_null_sreality_pair() -> None:
+    # A brand-new NULL-sreality merge record: sreality columns land NULL (correct — the
+    # portal has no sreality id) but left/right_listing_id carry the surrogate, so the
+    # append-only row is never permanently unattributable.
+    import scripts.dedup_engine as eng
+
+    inserted: list[Any] = []
+
+    class _C:
+        def __enter__(self): return self
+        def __exit__(self, *a): return None
+        def execute(self, sql, params=None): self._sql = " ".join(sql.split())
+        def executemany(self, sql, rows): inserted.extend(rows)
+        def fetchall(self): return []
+
+    class _Conn:
+        def cursor(self): return _C()
+
+    rec = {
+        "left_sreality_id": None, "right_sreality_id": None,
+        "left_listing_id": 480001, "right_listing_id": 480002, "left_property_id": 101,
+        "right_property_id": 102, "category_main": "byt", "stage": "phash",
+        "outcome": "merged", "source": "engine", "merge_group_id": "G1", "detail": {},
+    }
+    eng._write_pair_audit(_Conn(), "RUN_AT", [rec])
+    assert len(inserted) == 1
+    row = inserted[0]
+    # (run_at, left_sreality_id, left_listing_id, right_sreality_id, right_listing_id, ...)
+    assert row[1] is None and row[3] is None           # sreality columns NULL
+    assert row[2] == 480001 and row[4] == 480002       # surrogate ids present
 
 
 def test_enqueue_candidate_reopen_valve() -> None:
@@ -4938,7 +5036,8 @@ def test_resolve_visual_defers_when_classify_is_deferred() -> None:
     a, b = _key(1, category_main="dum"), _key(2, category_main="dum")
     calls: list[int] = []
 
-    def classify_fn(sid: int) -> dict[str, Any]:
+    def classify_fn(key: ListingKey) -> dict[str, Any]:
+        sid = key.sreality_id
         calls.append(sid)
         if sid == a.sreality_id:
             return {"deferred": True}
@@ -4958,7 +5057,8 @@ def test_resolve_visual_defers_when_site_plan_is_deferred() -> None:
 
     a, b = _key(1, category_main="dum"), _key(2, category_main="dum")
 
-    def classify_fn(sid: int) -> dict[str, Any]:
+    def classify_fn(key: ListingKey) -> dict[str, Any]:
+        sid = key.sreality_id
         return {"data": {"images": [{"image_id": sid, "room_type": "site_plan"}]}}
 
     def site_plan_fn(
@@ -4980,7 +5080,8 @@ def test_resolve_visual_defers_on_first_room_and_does_not_try_others() -> None:
 
     a, b = _key(1, category_main="dum"), _key(2, category_main="dum")
 
-    def classify_fn(sid: int) -> dict[str, Any]:
+    def classify_fn(key: ListingKey) -> dict[str, Any]:
+        sid = key.sreality_id
         return {"data": {"images": [
             {"image_id": sid * 10 + 1, "room_type": "kitchen"},
             {"image_id": sid * 10 + 2, "room_type": "living_room"},
@@ -5013,7 +5114,8 @@ def test_resolve_pair_defer_splits_stats_by_reason(monkeypatch: Any) -> None:
     conn = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None, source="bazos")])
     monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 0)  # skip pHash -> visual
 
-    def classify_fn(sid: int) -> dict[str, Any]:
+    def classify_fn(key: ListingKey) -> dict[str, Any]:
+        sid = key.sreality_id
         return {"data": {"images": [{"image_id": sid * 10 + 1, "room_type": "kitchen"}]}}
 
     def compare_fn(a_id: int, b_id: int, room_type: str, ids_a: list[int], ids_b: list[int],
@@ -5026,3 +5128,221 @@ def test_resolve_pair_defer_splits_stats_by_reason(monkeypatch: Any) -> None:
     )
     assert stats.get("batch_deferred", 0) == 1
     assert stats.get("floor_plan_deferred", 0) == 0
+
+
+# --- Gate 2: listing-identity repoint (sreality_id -> surrogate listing_id) ---------
+# Post-Gate-2 the non-sreality portals insert sreality_id=NULL. The engine must key every
+# identity decision on the NOT-NULL surrogate listing_id, never sreality_id. Pre-fix:
+#   * classify_pair compared a.sreality_id == b.sreality_id -> None==None is True, so two
+#     DISTINCT NULL-sreality listings wrongly rejected as "same_listing" (silent wrong answer);
+#   * the loaders did bare int(r[0]) on sreality_id -> int(None) crashes the whole pass;
+#   * the group pHash batch sorted {m.sreality_id ...} -> sorted({...None...}) crashes;
+#   * every image probe read images.sreality_id (NULL for these rows) -> the pHash /
+#     floor-plan / site-plan / readiness conservatism layers failed OPEN (auto-merge).
+# images.listing_id is a NOT-NULL FK to listings.id (verified live), so the repoint is
+# behaviour-identical for a sreality row and correct for a NULL-sreality row.
+
+def _null_sreality_key(*, pid: int, lid: int, source: str = "bazos",
+                       street_key: str = "id:42|d:2+kk") -> ListingKey:
+    """A post-Gate-2 non-sreality ListingKey: sreality_id=None, distinct surrogate listing_id."""
+    return ListingKey(
+        sreality_id=None, property_id=pid, source=source, street_key=street_key,
+        disposition="2+kk", house_number=None, floor=3, area_m2=60.0,
+        category_type="prodej", category_main="byt", street_id=42, listing_id=lid,
+    )
+
+
+def test_classify_pair_distinct_null_sreality_not_same_listing() -> None:
+    # Two distinct non-sreality listings sharing street+disposition -> a candidate, NOT a
+    # 'same_listing' reject. Pre-fix: None==None -> reject "same_listing".
+    a = _null_sreality_key(pid=101, lid=480001)
+    b = _null_sreality_key(pid=102, lid=480002, source="idnes")
+    d = classify_pair(a, b)
+    assert d.detail != "same_listing"
+    assert d.action == "candidate"
+
+
+def test_classify_pair_same_surrogate_still_rejects_same_listing() -> None:
+    # The guard still fires on a genuine self-pair, identified by the surrogate PK (not pid).
+    a = _null_sreality_key(pid=101, lid=480001)
+    b = _null_sreality_key(pid=999, lid=480001)  # same listing_id, different property_id
+    assert classify_pair(a, b).detail == "same_listing"
+
+
+def _null_sreality_geo_key(*, pid: int, lid: int, cat: str = "dum",
+                           source: str = "bazos", disp: str = "") -> ListingKey:
+    return ListingKey(
+        sreality_id=None, property_id=pid, source=source, street_key="geo:cell",
+        disposition=disp, house_number=None, floor=(3 if disp else None), area_m2=120.0,
+        category_type="prodej", category_main=cat, street_id=None,
+        lat=50.10064, lng=14.53742, price_czk=5_950_000, listing_id=lid,
+    )
+
+
+def test_classify_geo_pair_distinct_null_sreality_not_same_listing() -> None:
+    a = _null_sreality_geo_key(pid=101, lid=480001)
+    b = _null_sreality_geo_key(pid=102, lid=480002, source="idnes")
+    d = classify_geo_pair(a, b, profile_for("dum"))
+    assert d.detail != "same_listing"       # pre-fix: None==None -> reject "same_listing"
+    assert d.action == "auto_merge"          # identical coord+area+price dum -> strong
+
+
+def test_classify_byt_geo_pair_distinct_null_sreality_not_same_listing() -> None:
+    a = _null_sreality_geo_key(pid=101, lid=480001, cat="byt", disp="2+kk")
+    b = _null_sreality_geo_key(pid=102, lid=480002, cat="byt", disp="2+kk", source="idnes")
+    d = classify_byt_geo_pair(a, b, profile_for("byt"))
+    assert d.detail != "same_listing"
+    assert d.action == "candidate" and d.reason == "byt_geo"
+
+
+def test_load_eligible_tolerates_null_sreality_id() -> None:
+    # Pre-fix: sreality_id=int(r[0]) -> int(None) TypeError kills the whole load.
+    import scripts.dedup_engine as eng
+    conn = _FakeConn([_row(None, 101, lid=480001), _row(None, 102, lid=480002)])
+    keys = eng._load_eligible(conn)
+    assert keys, "NULL-sreality rows were dropped from the eligible load"
+    assert all(k.sreality_id is None for k in keys)
+    assert {k.listing_id for k in keys} == {480001, 480002}
+
+
+def test_load_geo_eligible_tolerates_null_sreality_id() -> None:
+    import scripts.dedup_engine as eng
+    conn = _FakeConn([], geo_rows=[_geo_row(None, 101, lid=480001),
+                                   _geo_row(None, 102, lid=480002)])
+    keys = eng._load_geo_eligible(conn, rung="geo")
+    assert {k.listing_id for k in keys} == {480001, 480002}
+    assert all(k.sreality_id is None for k in keys)
+
+
+def test_gate2_image_probes_query_listing_id_not_sreality_id() -> None:
+    # Every per-listing / per-pair image probe must read images.listing_id (the NOT-NULL
+    # surrogate) and bind the fed listing_id — NOT images.sreality_id. Pre-fix each read
+    # sreality_id, so post-Gate-2 (sreality_id NULL) the conservatism layers returned empty
+    # ("ready" / "no plan" / "no shared render") and failed OPEN into a merge.
+    import scripts.dedup_engine as eng
+
+    class _Cur:
+        def __init__(self, rows: list[tuple[Any, ...]]) -> None:
+            self.rows = rows
+            self.calls: list[tuple[str, Any]] = []
+
+        def __enter__(self) -> "_Cur":
+            return self
+
+        def __exit__(self, *a: Any) -> None:
+            return None
+
+        def execute(self, sql: str, params: Any = None) -> None:
+            self.calls.append((" ".join(sql.split()), params))
+
+        def fetchone(self) -> tuple[Any, ...] | None:
+            return self.rows[0] if self.rows else None
+
+        def fetchall(self) -> list[tuple[Any, ...]]:
+            return self.rows
+
+    class _Conn:
+        def __init__(self, rows: list[tuple[Any, ...]]) -> None:
+            self._cur = _Cur(rows)
+
+        def cursor(self) -> _Cur:
+            return self._cur
+
+    LID_A, LID_B = 480001, 480002
+
+    def cap(fn: Any, rows: list[tuple[Any, ...]], *args: Any, **kw: Any) -> tuple[str, Any]:
+        conn = _Conn(rows)
+        fn(conn, *args, **kw)
+        return conn._cur.calls[0]
+
+    sql, params = cap(eng._floor_plan_image_ids, [], LID_A)
+    assert "i.listing_id" in sql and "sreality_id" not in sql and params["lid"] == LID_A
+
+    sql, params = cap(eng._both_have_site_plan, [(False,)], LID_A, LID_B)
+    assert "i.listing_id" in sql and "sreality_id" not in sql
+    assert params["a"] == LID_A and params["b"] == LID_B
+
+    sql, params = cap(eng._phash_identical_pairs, [(0,)], LID_A, LID_B)
+    assert "ia.listing_id" in sql and "ib.listing_id" in sql and "sreality_id" not in sql
+    assert params["a"] == LID_A and params["b"] == LID_B
+
+    sql, _ = cap(eng._phash_group_counts, [], [LID_A, LID_B, 480003])
+    assert "ia.listing_id" in sql and "ib.listing_id" in sql and "sreality_id" not in sql
+
+    sql, params = cap(eng._high_render_image_ids, [], LID_A, LID_B, 0.9)
+    assert "i.listing_id IN" in sql and "sreality_id" not in sql
+
+    sql, _ = cap(eng._clip_incomplete, [], [LID_A], "m")
+    assert "i.listing_id = s.lid" in sql and "sreality_id" not in sql
+
+    sql, _ = cap(eng._downloads_incomplete, [], [LID_A])
+    assert "i.listing_id = s.lid" in sql and "sreality_id" not in sql
+
+    conn = _Conn([(None,)])
+    eng._last_evidence_at(conn, LID_A, eng._ProbeCache())
+    sql, params = conn._cur.calls[0]
+    assert "WHERE listing_id" in sql and "sreality_id" not in sql and params == (LID_A,)
+
+
+def test_run_engine_merges_two_null_sreality_listings(monkeypatch: Any) -> None:
+    # End-to-end: two NULL-sreality listings sharing street+disposition with a pHash match
+    # MERGE. Exercises the loader (no int(None) crash), classify_pair (no false same_listing),
+    # the group_sid batch (no None-sort crash) and the probe feed together.
+    import scripts.dedup_engine as eng
+
+    merges: list[str] = []
+    monkeypatch.setattr(
+        eng, "merge_properties",
+        lambda conn, *, survivor_id, retired_id, reason, **kw:
+            merges.append(reason) or {"data": {"merge_group_id": "g"}})
+    monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 3)
+    monkeypatch.setattr(eng, "_both_have_site_plan", lambda *a, **k: False)
+    conn = _FakeConn([
+        _row(None, 101, hn=None, source="bazos", lid=480001),
+        _row(None, 102, hn=None, source="idnes", lid=480002),
+    ])
+    stats = eng.run_engine(conn, classify_fn=None, compare_fn=None, max_vision_calls=10)
+    assert stats["auto_phash"] == 1
+    assert merges == ["image_phash"]
+
+
+def test_run_engine_group_sid_batch_keys_on_listing_id(monkeypatch: Any) -> None:
+    # A 3-member group with a MIXED sreality_id set (5, None, None) must batch the pHash probe
+    # on the surrogate listing_id. Pre-fix: sorted({5, None, None}) -> TypeError. The loader is
+    # bypassed to isolate the group_sid construction from the int(None) loader crash.
+    import scripts.dedup_engine as eng
+
+    keys = [
+        _null_sreality_key(pid=101, lid=480001, source="bazos"),
+        ListingKey(sreality_id=5, property_id=102, source="sreality",
+                   street_key="id:42|d:2+kk", disposition="2+kk", house_number=None,
+                   floor=3, area_m2=60.0, category_type="prodej", category_main="byt",
+                   street_id=42, listing_id=480002),
+        _null_sreality_key(pid=103, lid=480003, source="idnes"),
+    ]
+    monkeypatch.setattr(eng, "_load_eligible", lambda conn, **k: keys)
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        eng, "_phash_group_counts",
+        lambda conn, ids, *a, **k: captured.__setitem__("ids", list(ids)) or {})
+    monkeypatch.setattr(eng, "_phash_group_distinctive", lambda conn, ids, *a, **k: set())
+    monkeypatch.setattr(eng, "merge_properties",
+                        lambda *a, **k: {"data": {"merge_group_id": "g"}})
+    eng.run_engine(_FakeConn([]), classify_fn=None, compare_fn=None, max_vision_calls=10)
+    assert captured["ids"] == [480001, 480002, 480003]
+
+
+def test_audit_record_carries_surrogate_listing_ids_for_null_sreality_pair() -> None:
+    # _audit stamps left/right_listing_id from ListingKey.listing_id (NOT NULL) — the
+    # attribution that survives when sreality_id is NULL for the non-sreality portals.
+    import scripts.dedup_engine as eng
+
+    a = _null_sreality_key(pid=101, lid=480001, source="bazos")
+    b = _null_sreality_key(pid=102, lid=480002, source="idnes")
+    audit: list[dict[str, Any]] = []
+    eng._audit(audit, a, b, "phash", "merged", {"reason": "image_phash"},
+               merge_group_id="g")
+    assert len(audit) == 1
+    r = audit[0]
+    assert r["left_sreality_id"] is None and r["right_sreality_id"] is None
+    assert r["left_listing_id"] == 480001 and r["right_listing_id"] == 480002

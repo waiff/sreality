@@ -49,6 +49,17 @@ Two bugs were caught during Phase A that are worth remembering:
    surrogate with a separate `SELECT` and carried it through Python. Now inline, like
    every other site — the id never travels through Python where a mis-zip could point
    rows at the wrong listing.
+3. **(2026-07-23, Gate-2 wave-5 tail) The "always `legacy IS NOT NULL`" predicate above
+   was necessary but not sufficient.** It correctly keeps the *gap* and *mismatch*
+   buckets from false-firing on legit-NULL-legacy rows — but it also means, taken alone,
+   those two buckets go **completely blind** to any row whose legacy id is NULL once
+   Gate-2 flips (new non-sreality-portal rows, by design). A writer bug that stamps
+   NEITHER id on such a row would report 100% clean forever. `check_dual_write_parity`
+   now carries a third bucket, `orphans` (`legacy IS NULL AND listing_id IS NULL`), that
+   watches exactly that shape — existence-only (there's no legacy value left to
+   cross-check the surrogate against). Same fix in `check_merge_latency`: it now joins
+   `dedup_pair_audit` on `left_listing_id`/`right_listing_id` (populated for every row,
+   legacy or not) instead of `left_sreality_id`/`right_sreality_id`.
 
 **A4 backfill — CONVERGED (2026-07-20).** 10.7M rows filled across 22 carriers in ~30
 minutes of runtime (images 8.26M, listing_snapshots 1.41M, properties 544k). Every
@@ -495,6 +506,25 @@ the failure each one actually prevented:
    must NOT simply return the surrogate — `listingPath()` builds the LEGACY route,
    and the two id-spaces overlap numerically, so it would silently load the WRONG
    listing. Return the natural key and redirect canonically.
+
+   **UPDATE (2026-07-23, canonical-first Browse links):** migration **362** adds
+   `source_id_native` to `browse_projection` (correlated PK scalar subquery on
+   `listings`, since the view has no listings join and shares bare column names —
+   a real join would make the unqualified select list ambiguous) and rebuilds
+   `browse_list` + `properties_map_mv`. `queries.ts` MAP/TABLE/CARD col-sets +
+   MapRow/TableRow/CardRow now carry `source` + `source_id_native`, and
+   `listingRowPath()` is **canonical-first** (`source`+`native` → `/listing/{source}/{native}`,
+   else `sreality_id` → legacy, else `?property=`). This kills the negative-id flash
+   at the SOURCE for Browse-originated navs — the URL bar is clean from first paint,
+   no post-load redirect — and Browse cards/table + the pipeline board seed the
+   repr's surrogate `listing_id` via `<Link state>` so `ListingDetail` skips the
+   natural-key resolver round trip on in-SPA nav. Cold loads / shared links / map
+   popups (a raw `<a>` can't carry router state) keep the resolver + on-land
+   canonicalizing redirect. Pipeline rides `properties_public` (already carries the
+   key). Follow-ups still legacy: Notifications/Watchdog (`api/notifications.py`
+   `_LISTING_PROJECTION` needs `l.source_id_native`) + CollectionDetail
+   (`api/curation.py`) — one backend column add each; and BrokerDetail
+   (`broker_listings_public` view needs the column).
 3. **May-lag read models** (health/dedup/broker/image matviews, remaining `*_public`).
    `listing_fetch_failures` is the highest-leverage blocker — it has no carrier
    column and gates three health matviews. Health should still precede Gate 2 to
@@ -666,7 +696,11 @@ via verify_pipeline.yml, rings the in-app bell on red). Per table:
 Watermark = one row per table captured at A2 deploy (id for serial-PK tables; `dispatched_at`
 for notification_dispatches — its uuid PK is unordered; `created_at` for cohort entries).
 Predicate is always `legacy IS NOT NULL AND …` — never bare `listing_id IS NULL` (legit-NULL
-legacy rows would false-fire forever, and it stays correct post-flip).
+legacy rows would false-fire forever). **Correction (2026-07-23, see the Phase A bug list
+above, item 3): "stays correct post-flip" was true for THESE two buckets but incomplete —
+it also meant they went totally blind to legit-NULL-legacy rows, a live monitoring gap once
+Gate-2 flips. A third bucket, `orphans` (`legacy IS NULL AND listing_id IS NULL`), now covers
+that shape.**
 
 **A4. Backfills** (script PR: `scripts/backfill_child_listing_ids.py`, template =
 backfill_listing_surrogate_id.py **with two fixes**): keyset-paginate the child PK with a
@@ -766,10 +800,11 @@ MUST precede flip (the flip-gate checklist, §8):
 MAY lag briefly (degraded, not broken — but health should still go before the flip to avoid
 silent-green): the 25-read-model wave — health matviews (136/176/214/216; post-flip NULL
 rows silently vanish from health counts = silent-green blind spot), dedup/broker/image
-matviews (`dedup_funnel_resolutions_mv`, `dedup_llm_cost_by_category_mv`,
-`broker_region_type_stats`, `category_trends_mv`, `image_storage_overview_mv`,
-`images_failure_overview_mv`, `properties_map_mv`, `snapshot_churn_24h_mv`), remaining
-`*_public` views, `dedup_label_events`, `portal_lookup` collapse onto `input_listing_id`
+matviews (`category_trends_mv`, `image_storage_overview_mv`, `images_failure_overview_mv`,
+`properties_map_mv`, `snapshot_churn_24h_mv` — `dedup_funnel_resolutions_mv`,
+`dedup_llm_cost_by_category_mv` and `broker_region_type_stats` DONE, migration 361),
+remaining `*_public` views (`manual_rental_estimates_public` DONE, migration 361),
+`dedup_label_events`, `portal_lookup` collapse onto `input_listing_id`
 (+ `property_estimates_public` on COALESCE), ClickUp payloads (unaffected — carry sreality
 URLs). NEVER touch: `srealityListingUrl()` stays bound to `source_id_native`
 (frontend + extension portals.ts) — renaming it to any surrogate emits 404 sreality.cz links.
@@ -929,6 +964,11 @@ schema-only + small-carrier dumps).
 Deploy the flip writer **behind a config flag** (instant rollback for future rows): new
 non-sreality rows stop drawing `synthetic_listing_id_seq` and insert `sreality_id = NULL`;
 sreality rows unchanged (real positive ids forever — the sign CHECK enforces all of it).
+Scaffold shipped (wave-5 item 7, off by default): the app_settings bool
+`gate2_null_sreality_id_enabled`, read live by `scraper.db._gate2_null_sreality_id_enabled`
+on every `ingest_scraped_listing` first-sight — no process cache, so a flip lands on the
+always-on realtime worker's and cron drains' very next batch, no restart. This is the flag
+the operator ask below turns on.
 
 **Safe abort** (if post-flip breakage with NULL rows already written): flip the flag back
 (or: pause worker → `UPDATE listings SET sreality_id = nextval('synthetic_listing_id_seq')

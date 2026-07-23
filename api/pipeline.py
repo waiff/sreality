@@ -79,9 +79,13 @@ def update_stage(
             422, "re-home the entry stage by crowning another, not by un-crowning",
         )
     with conn.transaction(), conn.cursor() as cur:
+        # account-scoped (like every write in this module): the legacy
+        # service-role branch bypasses RLS, so a bare `WHERE id = %s` would let
+        # a legacy caller read/rename/re-flag another account's stage by id.
         cur.execute(
-            "SELECT is_entry, is_terminal FROM pipeline_stages WHERE id = %s",
-            (stage_id,),
+            "SELECT is_entry, is_terminal FROM pipeline_stages "
+            "WHERE id = %s AND account_id IS NOT DISTINCT FROM %s",
+            (stage_id, account_id),
         )
         cur_row = cur.fetchone()
         if cur_row is None:
@@ -121,9 +125,10 @@ def update_stage(
             params += [body.is_entry]
         if sets:
             sets += ["updated_at = now()"]
-            params += [stage_id]
+            params += [stage_id, account_id]
             cur.execute(
-                f"UPDATE pipeline_stages SET {', '.join(sets)} WHERE id = %s "
+                f"UPDATE pipeline_stages SET {', '.join(sets)} "
+                "WHERE id = %s AND account_id IS NOT DISTINCT FROM %s "
                 "RETURNING id, key, label, position, color, is_terminal, is_entry",
                 params,
             )
@@ -131,8 +136,8 @@ def update_stage(
         else:
             cur.execute(
                 "SELECT id, key, label, position, color, is_terminal, is_entry "
-                "FROM pipeline_stages WHERE id = %s",
-                (stage_id,),
+                "FROM pipeline_stages WHERE id = %s AND account_id IS NOT DISTINCT FROM %s",
+                (stage_id, account_id),
             )
             row = cur.fetchone()
     return _to_stage(row)
@@ -169,9 +174,14 @@ def archive_stage(
 ) -> dict[str, Any]:
     """Soft-retire a stage. Refused if it is the entry stage or still holds cards."""
     with conn.transaction(), conn.cursor() as cur:
+        # account-scoped throughout (the legacy service-role branch bypasses
+        # RLS): otherwise a legacy caller could archive another account's stage
+        # by id, and the cards-check would leak (via 409-vs-success) whether a
+        # foreign stage holds cards.
         cur.execute(
-            "SELECT is_entry, archived_at FROM pipeline_stages WHERE id = %s",
-            (stage_id,),
+            "SELECT is_entry, archived_at FROM pipeline_stages "
+            "WHERE id = %s AND account_id IS NOT DISTINCT FROM %s",
+            (stage_id, account_id),
         )
         row = cur.fetchone()
         if row is None:
@@ -181,14 +191,16 @@ def archive_stage(
         if row[1] is not None:
             return {"archived": False, "stage_id": stage_id}
         cur.execute(
-            "SELECT 1 FROM property_pipeline WHERE stage_id = %s LIMIT 1", (stage_id,),
+            "SELECT 1 FROM property_pipeline WHERE stage_id = %s "
+            "AND account_id IS NOT DISTINCT FROM %s LIMIT 1",
+            (stage_id, account_id),
         )
         if cur.fetchone() is not None:
             raise HTTPException(409, "stage still holds cards; move them first")
         cur.execute(
             "UPDATE pipeline_stages SET archived_at = now(), updated_at = now() "
-            "WHERE id = %s",
-            (stage_id,),
+            "WHERE id = %s AND account_id IS NOT DISTINCT FROM %s",
+            (stage_id, account_id),
         )
     return {"archived": True, "stage_id": stage_id}
 
@@ -217,10 +229,22 @@ def add_card(
             if row is None:
                 raise HTTPException(500, "no entry stage configured")
             entry_stage_id = int(row[0])
+            # Lock the stage row first so two members of the same account
+            # bookmarking into the entry stage concurrently can't both read the
+            # same max() and land on the same board_position — the row lock
+            # serializes them within each request's one tenant-pool transaction
+            # (Amendment A1), no advisory lock needed (those are unsound over the
+            # transaction pooler; mig-279 lesson).
+            cur.execute("SELECT 1 FROM pipeline_stages WHERE id = %s FOR UPDATE", (entry_stage_id,))
+            # board_position is per (account, stage): scope the max by account so
+            # the query is served by mig-357's (account_id, stage_id,
+            # board_position) index and two accounts sharing a stage id can't
+            # interleave positions.
             cur.execute(
                 "SELECT coalesce(max(board_position), 0) + 1 "
-                "FROM property_pipeline WHERE stage_id = %s",
-                (entry_stage_id,),
+                "FROM property_pipeline "
+                "WHERE account_id IS NOT DISTINCT FROM %s AND stage_id = %s",
+                (account_id, entry_stage_id),
             )
             next_pos = cur.fetchone()[0]
             cur.execute(
@@ -239,6 +263,11 @@ def add_card(
                     (pid, entry_stage_id, account_id),
                 )
     except psycopg.errors.ForeignKeyViolation:
+        # Reachable only from the property_pipeline INSERT's property/account FK
+        # (a stale/merged-away property, or an unknown account) — genuinely
+        # "property not found". The events INSERT that follows reuses the same
+        # pid/stage/account the card INSERT already validated, so it can never be
+        # the first FK violation and be misattributed here.
         raise HTTPException(422, "property not found")
     card = _fetch_card(conn, pid, account_id)
     if card is None:

@@ -90,11 +90,13 @@ def test_new_listing_creates_singleton(monkeypatch):
     """A new (unlinked) listing always becomes its own singleton property.
 
     No geo probe, no candidate enqueue — matching is the out-of-band dedup
-    engine's job now.
+    engine's job now. Property linkage keys on the SURROGATE listings.id (resolved
+    from the always-present sreality_id on the sreality path), never on sreality_id.
     """
     _stub_upsert(monkeypatch)
     conn = _FakeConn([
-        (lambda s: "SELECT property_id FROM listings" in s, [(None,)]),
+        (lambda s: "SELECT id FROM listings WHERE sreality_id" in s, [(8001,)]),  # resolve surrogate
+        (lambda s: "SELECT property_id FROM listings WHERE id" in s, [(None,)]),
         (lambda s: "INSERT INTO properties" in s, [(42,)]),
     ])
 
@@ -109,7 +111,8 @@ def test_new_listing_creates_singleton(monkeypatch):
     # that's up to ~24h). Guards against the column list being trimmed again.
     assert "locality" in ins[0] and "condition" in ins[0]
     link = _find(conn.executed, "UPDATE listings SET property_id =")
-    assert link is not None and link[1] == (42, 555)
+    # Keyed on the surrogate (8001), NOT the sreality_id (555).
+    assert link is not None and link[1] == (42, 8001)
     # the removed geo matcher: no probe, no rollup, no candidate
     assert _find(conn.executed, "SELECT price_czk, area_m2 FROM listings") is None
     assert _find(conn.executed, "SELECT p.id FROM properties p") is None
@@ -120,7 +123,8 @@ def test_new_listing_creates_singleton(monkeypatch):
 def test_linked_listing_refreshes_via_rollup(monkeypatch):
     _stub_upsert(monkeypatch, "updated")
     conn = _FakeConn([
-        (lambda s: "SELECT property_id FROM listings" in s, [(7,)]),  # already linked
+        (lambda s: "SELECT id FROM listings WHERE sreality_id" in s, [(8002,)]),  # resolve surrogate
+        (lambda s: "SELECT property_id FROM listings WHERE id" in s, [(7,)]),  # already linked
     ])
 
     result = db.upsert_listing_with_property(conn, {"sreality_id": 777}, {}, "h")
@@ -128,8 +132,10 @@ def test_linked_listing_refreshes_via_rollup(monkeypatch):
     assert result == "updated"
     roll = _find(conn.executed, "UPDATE properties p SET")
     assert roll is not None
-    # The singleton rollup keeps the display payload in sync on re-fetch.
+    # The singleton rollup keeps the display payload in sync on re-fetch, keyed on
+    # the surrogate (l.id = 8002).
     assert "locality" in roll[0] and "condition" in roll[0]
+    assert roll[1] == (8002,)
     assert _find(conn.executed, "INSERT INTO properties") is None
     assert _find(conn.executed, "SELECT p.id FROM properties p") is None
 
@@ -144,43 +150,91 @@ def _listing(**kw: Any) -> ScrapedListing:
     return ScrapedListing(**base)
 
 
-def test_ingest_first_sight_draws_synthetic_pk(monkeypatch):
+def test_ingest_first_sight_returns_surrogate_not_synthetic(monkeypatch):
+    """First sight draws a synthetic negative for the legacy sreality_id COLUMN,
+    but every follow-up write (source_url, property link) — and the return value —
+    keys on the SURROGATE listings.id resolved from the natural key. Post-Gate-2
+    the row's sreality_id is NULL, so anything keyed on it would hit the wrong row
+    or no row; this pins the identity onto the surrogate."""
     rows = _stub_upsert(monkeypatch)
     conn = _FakeConn([
-        (lambda s: "SELECT sreality_id FROM listings WHERE source" in s, []),  # unseen
+        (lambda s: "SELECT id, sreality_id FROM listings WHERE source" in s, []),  # unseen
         (lambda s: "SELECT nextval('synthetic_listing_id_seq')" in s, [(-1,)]),
-        (lambda s: "SELECT property_id FROM listings" in s, [(None,)]),
+        (lambda s: "SELECT id FROM listings WHERE source" in s, [(8001,)]),  # surrogate, post-upsert
+        (lambda s: "SELECT property_id FROM listings WHERE id" in s, [(None,)]),
         (lambda s: "INSERT INTO properties" in s, [(50,)]),
     ])
 
-    pk, result = db.ingest_scraped_listing(conn, _listing())
+    listing_id, result = db.ingest_scraped_listing(conn, _listing())
 
-    assert pk == -1 and result == "new"
+    assert listing_id == 8001 and result == "new"   # the SURROGATE, not -1
     assert _find(conn.executed, "nextval('synthetic_listing_id_seq')") is not None
     # The FULL natural key (source + native id) is carried into the INSERT row so it is
     # stamped atomically (source's column default is 'sreality', so inserting only the
     # native id could collide with a real sreality row on the unique natural-key index).
-    # Only source_url — not part of the key — remains on the post-insert UPDATE.
     assert rows and rows[0]["source"] == "bazos"
     assert rows and rows[0]["source_id_native"] == "218865547"
+    # The legacy sreality_id column still gets the synthetic negative (pre-flip rail).
+    assert rows and rows[0]["sreality_id"] == -1
+    # source_url UPDATE keys on the surrogate id (8001), not the synthetic sreality_id.
     src = _find(conn.executed, "UPDATE listings SET source_url =")
-    assert src is not None and src[1] == ("https://bazos.cz/x", -1)
+    assert src is not None and src[1] == ("https://bazos.cz/x", 8001)
     assert _find(conn.executed, "UPDATE listings SET source =") is None
     assert _find(conn.executed, "INSERT INTO properties") is not None
 
 
-def test_ingest_reuses_pk_on_refetch(monkeypatch):
+def test_ingest_reuses_surrogate_on_refetch(monkeypatch):
     _stub_upsert(monkeypatch, "unchanged")
     conn = _FakeConn([
-        (lambda s: "SELECT sreality_id FROM listings WHERE source" in s, [(-5,)]),  # seen
-        (lambda s: "SELECT property_id FROM listings" in s, [(3,)]),  # already linked
+        # seen: the pre-lookup returns (surrogate id, legacy sreality_id)
+        (lambda s: "SELECT id, sreality_id FROM listings WHERE source" in s, [(8003, -5)]),
+        (lambda s: "SELECT property_id FROM listings WHERE id" in s, [(3,)]),  # already linked
     ])
 
-    pk, result = db.ingest_scraped_listing(conn, _listing())
+    listing_id, result = db.ingest_scraped_listing(conn, _listing())
 
-    assert pk == -5 and result == "unchanged"
-    assert _find(conn.executed, "nextval(") is None  # no new PK drawn
+    assert listing_id == 8003 and result == "unchanged"   # persisted surrogate reused
+    assert _find(conn.executed, "nextval(") is None       # no new id drawn on refetch
+    # no post-upsert re-resolve either — the surrogate was already in hand
+    assert _find(conn.executed, "SELECT id FROM listings WHERE source") is None
     assert _find(conn.executed, "UPDATE properties p SET") is not None  # rollup
+
+
+def test_ingest_first_sight_null_sreality_id_when_flip_enabled(monkeypatch):
+    """Gate-2 flip-writer scaffold: when `gate2_null_sreality_id_enabled` reads
+    true from app_settings, first sight skips the synthetic-negative sequence
+    entirely and writes NULL into the legacy sreality_id column instead."""
+    rows = _stub_upsert(monkeypatch)
+    conn = _FakeConn([
+        (lambda s: "SELECT id, sreality_id FROM listings WHERE source" in s, []),  # unseen
+        (lambda s: "SELECT value FROM app_settings WHERE key" in s, [(True,)]),
+        (lambda s: "SELECT id FROM listings WHERE source" in s, [(8005,)]),  # surrogate, post-upsert
+        (lambda s: "SELECT property_id FROM listings WHERE id" in s, [(None,)]),
+        (lambda s: "INSERT INTO properties" in s, [(51,)]),
+    ])
+
+    listing_id, result = db.ingest_scraped_listing(conn, _listing())
+
+    assert listing_id == 8005 and result == "new"
+    assert _find(conn.executed, "nextval('synthetic_listing_id_seq')") is None
+    assert rows and rows[0]["sreality_id"] is None
+
+
+def test_ingest_survives_null_sreality_id_on_refetch(monkeypatch):
+    """Post-Gate-2 a re-fetched portal row carries sreality_id = NULL. The pre-lookup
+    now selects `id` (never `int(sreality_id)`), so this no longer raises
+    TypeError('int(None)') on the very first refetch of every Gate-2-era row."""
+    _stub_upsert(monkeypatch, "updated")
+    conn = _FakeConn([
+        (lambda s: "SELECT id, sreality_id FROM listings WHERE source" in s, [(8004, None)]),
+        (lambda s: "SELECT property_id FROM listings WHERE id" in s, [(9,)]),
+    ])
+
+    listing_id, result = db.ingest_scraped_listing(conn, _listing())
+
+    assert listing_id == 8004 and result == "updated"
+    # the legacy NULL flowed into to_row untouched (upsert ignores it on conflict)
+    assert _find(conn.executed, "nextval(") is None
 
 
 # --- broker work enqueue (the incremental resolver's sole feed) ------------
@@ -190,20 +244,22 @@ def test_ingest_enqueues_broker_work_for_idnes(monkeypatch):
     """A content-changed idnes write enqueues dirty_broker_listings so the
     incremental resolver re-attributes it within its cadence — the queue is the
     resolver's sole feed (there is no straggler scan). Mirrors the enqueue
-    write_detail_batch does for sreality."""
+    write_detail_batch does for sreality. Keyed on the surrogate (single-column)."""
     _stub_upsert(monkeypatch, "new")
     conn = _FakeConn([
-        (lambda s: "SELECT sreality_id FROM listings WHERE source" in s, []),  # unseen
+        (lambda s: "SELECT id, sreality_id FROM listings WHERE source" in s, []),  # unseen
         (lambda s: "SELECT nextval('synthetic_listing_id_seq')" in s, [(-9,)]),
-        (lambda s: "SELECT property_id FROM listings" in s, [(None,)]),
+        (lambda s: "SELECT id FROM listings WHERE source" in s, [(8009,)]),
+        (lambda s: "SELECT property_id FROM listings WHERE id" in s, [(None,)]),
         (lambda s: "INSERT INTO properties" in s, [(50,)]),
     ])
 
-    pk, result = db.ingest_scraped_listing(conn, _listing(source="idnes"))
+    listing_id, result = db.ingest_scraped_listing(conn, _listing(source="idnes"))
 
-    assert pk == -9 and result == "new"
+    assert listing_id == 8009 and result == "new"
     enq = _find(conn.executed, "INSERT INTO dirty_broker_listings")
-    assert enq is not None and enq[1] == (-9, -9)
+    # single-column (listing_id) INSERT, carrying the surrogate — no sreality_id join.
+    assert enq is not None and enq[1] == (8009,)
 
 
 def test_ingest_skips_broker_enqueue_for_non_broker_source(monkeypatch):
@@ -211,9 +267,10 @@ def test_ingest_skips_broker_enqueue_for_non_broker_source(monkeypatch):
     enter the broker queue — keeps the queue and the run metrics clean."""
     _stub_upsert(monkeypatch, "new")
     conn = _FakeConn([
-        (lambda s: "SELECT sreality_id FROM listings WHERE source" in s, []),
+        (lambda s: "SELECT id, sreality_id FROM listings WHERE source" in s, []),
         (lambda s: "SELECT nextval('synthetic_listing_id_seq')" in s, [(-9,)]),
-        (lambda s: "SELECT property_id FROM listings" in s, [(None,)]),
+        (lambda s: "SELECT id FROM listings WHERE source" in s, [(8009,)]),
+        (lambda s: "SELECT property_id FROM listings WHERE id" in s, [(None,)]),
         (lambda s: "INSERT INTO properties" in s, [(50,)]),
     ])
 
@@ -227,8 +284,8 @@ def test_ingest_skips_broker_enqueue_when_unchanged(monkeypatch):
     broker work — the resolver already attributed it (no churn)."""
     _stub_upsert(monkeypatch, "unchanged")
     conn = _FakeConn([
-        (lambda s: "SELECT sreality_id FROM listings WHERE source" in s, [(-9,)]),  # seen
-        (lambda s: "SELECT property_id FROM listings" in s, [(3,)]),  # linked
+        (lambda s: "SELECT id, sreality_id FROM listings WHERE source" in s, [(8009, -9)]),  # seen
+        (lambda s: "SELECT property_id FROM listings WHERE id" in s, [(3,)]),  # linked
     ])
 
     db.ingest_scraped_listing(conn, _listing(source="idnes"))
@@ -259,3 +316,39 @@ def test_scraped_listing_to_row_maps_fields():
     assert row["price_czk"] == 20000
     # sreality-only locality ids aren't carried; upsert_listing defaults them.
     assert "locality_district_id" not in row
+
+
+def test_scraped_listing_to_row_accepts_none_sreality_id():
+    """Gate-2 flip-writer scaffold: to_row's signature is widened to `int | None`
+    so a flag-on first-sight write can pass NULL straight through."""
+    row = _listing().to_row(None)
+    assert row["sreality_id"] is None
+
+
+# --- gate2_null_sreality_id_enabled flag (app_settings, read live) ---------
+
+
+def test_gate2_flag_reads_default_false_when_setting_absent():
+    conn = _FakeConn([])  # no app_settings row scripted -> fetchone() is None
+    assert db._gate2_null_sreality_id_enabled(conn) is False
+
+
+def test_gate2_flag_reads_true_from_jsonb_bool():
+    conn = _FakeConn([
+        (lambda s: "SELECT value FROM app_settings WHERE key" in s, [(True,)]),
+    ])
+    assert db._gate2_null_sreality_id_enabled(conn) is True
+
+
+def test_gate2_flag_reads_false_from_jsonb_bool():
+    conn = _FakeConn([
+        (lambda s: "SELECT value FROM app_settings WHERE key" in s, [(False,)]),
+    ])
+    assert db._gate2_null_sreality_id_enabled(conn) is False
+
+
+def test_gate2_flag_tolerates_string_true():
+    conn = _FakeConn([
+        (lambda s: "SELECT value FROM app_settings WHERE key" in s, [("true",)]),
+    ])
+    assert db._gate2_null_sreality_id_enabled(conn) is True

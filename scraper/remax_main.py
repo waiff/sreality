@@ -219,12 +219,12 @@ class RemaxPortal:
             if idx_price is None or not price_changed(
                 prev["price_czk"], idx_price, self._price_change_min_pct,
             ):
-                unchanged_pks.append(prev["sreality_id"])
+                unchanged_pks.append(prev["id"])
             else:
                 changed.append(nid)
 
         if conn is not None and unchanged_pks:
-            db.touch_listings(conn, unchanged_pks)
+            db.touch_listings_by_id(conn, unchanged_pks)
 
         entries = (
             [(n, walk.ref_map[n], walk.price_map.get(n), db.QUEUE_PRIORITY_CHANGED) for n in changed]

@@ -19,7 +19,9 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   estimationKeys,
   fetchImagesByListingIds,
+  fetchImagesForListingIds,
   fetchListingsByIds,
+  fetchListingsForListingIds,
 } from '@/lib/queries';
 import {
   fmtAbsolute,
@@ -955,27 +957,78 @@ function OperatorInputsPanel({ run }: { run: EstimationRun }) {
 /* Comparables — map + table + popup                                          */
 /* -------------------------------------------------------------------------- */
 
+/* Numeric identity for a comparable — prefers the surrogate `listing_id`
+ * (present on every comparable finalised after #879/#892) and falls back to
+ * `sreality_id` for the ~600 frozen pre-cutover runs that predate the
+ * surrogate key. One of the two is always present; never mix a fallback
+ * sreality_id from one comparable against a listing_id from another —
+ * within a single run's comparables_used blob the set is homogeneous (all
+ * legacy or all surrogate), so this per-comparable fallback never collides. */
+function comparableId(c: ComparableUsed): number {
+  return c.listing_id ?? c.sreality_id!;
+}
+
+/* Routes a batch of comparables to the right id-space fetcher and merges the
+ * two result maps, keyed uniformly by comparableId(). Safe to merge: the
+ * listing_id and sreality_id spaces are disjoint (Gate-2 invariant), so a
+ * listing_id-keyed row and a sreality_id-keyed row can never collide. */
+async function fetchComparableListings(
+  comps: ComparableUsed[],
+): Promise<Map<number, ListingPublic>> {
+  const lids = comps.filter((c) => c.listing_id != null).map((c) => c.listing_id!);
+  const sids = comps.filter((c) => c.listing_id == null).map((c) => c.sreality_id!);
+  const [byLid, bySid] = await Promise.all([
+    fetchListingsForListingIds(lids),
+    fetchListingsByIds(sids),
+  ]);
+  /* byLid is already keyed by row.id, bySid by row.sreality_id — both equal
+   * comparableId() for their respective comps, so a plain merge is safe. */
+  return new Map([...byLid, ...bySid]);
+}
+
+async function fetchComparableImages(
+  comps: ComparableUsed[],
+  perId: number,
+): Promise<Map<number, ImagePublic[]>> {
+  const lids = comps.filter((c) => c.listing_id != null).map((c) => c.listing_id!);
+  const sids = comps.filter((c) => c.listing_id == null).map((c) => c.sreality_id!);
+  const [byLid, bySid] = await Promise.all([
+    fetchImagesForListingIds(lids, perId),
+    fetchImagesByListingIds(sids, perId),
+  ]);
+  return new Map([...byLid, ...bySid]);
+}
+
 function ComparablesSection({ run }: { run: EstimationRun }) {
   const comps = useMemo(
     () => sortedComparables(run.comparables_used ?? []),
     [run.comparables_used],
   );
-  const ids = useMemo(() => comps.map((c) => c.sreality_id), [comps]);
+  /* comparableId() — listing_id preferred, sreality_id fallback — for
+   * everything identity-shaped: batch-fetch routing, React keys, map marker
+   * ids, hover/active state. Summaries stay sreality_id-keyed below (the
+   * /listings/summaries endpoint doesn't address by listing_id yet), looked
+   * up separately from the comp itself rather than through this id. */
+  const cids = useMemo(() => comps.map(comparableId), [comps]);
+  const sids = useMemo(
+    () => comps.map((c) => c.sreality_id).filter((s): s is number => s != null),
+    [comps],
+  );
   const [activeId, setActiveId] = useState<number | null>(null);
   /* Shared hover id — drives the bidirectional table↔map highlight. */
   const [hoveredId, setHoveredId] = useState<number | null>(null);
 
   const listingsQ = useQuery<Map<number, ListingPublic>, Error>({
-    queryKey: ['estimation-comparables', 'listings', ids.join(',')],
-    queryFn: () => fetchListingsByIds(ids),
-    enabled: ids.length > 0,
+    queryKey: ['estimation-comparables', 'listings', cids.join(',')],
+    queryFn: () => fetchComparableListings(comps),
+    enabled: comps.length > 0,
     staleTime: 60_000,
   });
 
   const imagesQ = useQuery<Map<number, ImagePublic[]>, Error>({
-    queryKey: ['estimation-comparables', 'images', ids.join(',')],
-    queryFn: () => fetchImagesByListingIds(ids, 6),
-    enabled: ids.length > 0,
+    queryKey: ['estimation-comparables', 'images', cids.join(',')],
+    queryFn: () => fetchComparableImages(comps, 6),
+    enabled: comps.length > 0,
     staleTime: 5 * 60_000,
   });
 
@@ -983,19 +1036,21 @@ function ComparablesSection({ run }: { run: EstimationRun }) {
     queryKey: [
       'estimation-comparables',
       'summaries',
-      comps.map((c) => `${c.sreality_id}:${c.snapshot_id ?? ''}`).join(','),
+      comps.map((c) => `${c.sreality_id ?? ''}:${c.snapshot_id ?? ''}`).join(','),
     ],
     queryFn: async () => {
-      const items = comps.map((c) => ({
-        sreality_id: c.sreality_id,
-        snapshot_id: c.snapshot_id,
-      }));
+      /* Only sreality-addressable comps can be summarized today — a
+       * listing_id-only comparable (post-flip non-sreality portal) has no
+       * sreality_id to send; its row just renders "—" (see ComparableRow). */
+      const items = comps
+        .filter((c) => c.sreality_id != null)
+        .map((c) => ({ sreality_id: c.sreality_id!, snapshot_id: c.snapshot_id }));
       const res = await fetchListingSummaries(items);
       const map = new Map<number, ListingSummaryBatchRow>();
       for (const row of res.data) map.set(row.sreality_id, row);
       return map;
     },
-    enabled: ids.length > 0,
+    enabled: sids.length > 0,
     staleTime: 10 * 60_000,
   });
 
@@ -1006,9 +1061,11 @@ function ComparablesSection({ run }: { run: EstimationRun }) {
     if (!ls) return [];
     return comps
       .map((c) => {
-        const l = ls.get(c.sreality_id);
+        const id = comparableId(c);
+        const l = ls.get(id);
         if (!l || l.lat == null || l.lng == null) return null;
         return {
+          listing_id: id,
           sreality_id: l.sreality_id,
           lat: l.lat,
           lng: l.lng,
@@ -1039,8 +1096,10 @@ function ComparablesSection({ run }: { run: EstimationRun }) {
   const images = imagesQ.data ?? new Map<number, ImagePublic[]>();
   const summaries = summariesQ.data ?? new Map<number, ListingSummaryBatchRow>();
 
+  const activeComp = activeId != null ? comps.find((c) => comparableId(c) === activeId) : undefined;
   const activeListing = activeId != null ? listings.get(activeId) ?? null : null;
-  const activeSummary = activeId != null ? summaries.get(activeId) ?? null : null;
+  const activeSummary =
+    activeComp?.sreality_id != null ? summaries.get(activeComp.sreality_id) ?? null : null;
   const activeImages = activeId != null ? images.get(activeId) ?? [] : [];
 
   return (
@@ -1085,19 +1144,22 @@ function ComparablesSection({ run }: { run: EstimationRun }) {
             </tr>
           </thead>
           <tbody>
-            {comps.map((c) => (
-              <ComparableRow
-                key={`${c.sreality_id}:${c.snapshot_id ?? 'none'}`}
-                comp={c}
-                listing={listings.get(c.sreality_id) ?? null}
-                summary={summaries.get(c.sreality_id) ?? null}
-                onOpen={() => setActiveId(c.sreality_id)}
-                hovered={hoveredId === c.sreality_id}
-                onHover={setHoveredId}
-                listingsLoading={listingsQ.isLoading}
-                summariesLoading={summariesQ.isLoading}
-              />
-            ))}
+            {comps.map((c) => {
+              const id = comparableId(c);
+              return (
+                <ComparableRow
+                  key={`${id}:${c.snapshot_id ?? 'none'}`}
+                  comp={c}
+                  listing={listings.get(id) ?? null}
+                  summary={c.sreality_id != null ? summaries.get(c.sreality_id) ?? null : null}
+                  onOpen={() => setActiveId(id)}
+                  hovered={hoveredId === id}
+                  onHover={setHoveredId}
+                  listingsLoading={listingsQ.isLoading}
+                  summariesLoading={summariesQ.isLoading}
+                />
+              );
+            })}
           </tbody>
         </table>
       </div>
@@ -1149,10 +1211,11 @@ function ComparableRow({
       : summary?.error
         ? `Summary unavailable (${summary.error})`
         : '—');
+  const id = comparableId(comp);
   return (
     <tr
       onClick={onOpen}
-      onMouseEnter={() => onHover(comp.sreality_id)}
+      onMouseEnter={() => onHover(id)}
       onMouseLeave={() => onHover(null)}
       className={[
         'cursor-pointer border-b border-[var(--color-rule-soft)] last:border-b-0 transition-colors',
@@ -1170,7 +1233,7 @@ function ComparableRow({
           }}
           className="font-mono tabular-nums text-[var(--color-copper)] hover:underline underline-offset-2"
         >
-          {comp.sreality_id}
+          {comp.sreality_id ?? comp.listing_id}
         </button>
       </td>
       <td className="px-3 py-2 align-middle text-right font-mono tabular-nums text-[var(--color-ink)]">

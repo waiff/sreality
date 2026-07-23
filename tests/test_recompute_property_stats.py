@@ -103,7 +103,7 @@ def test_attach_stragglers_singletons_only_no_spatial_link():
     _attach_stragglers(conn)
     order = _sqls(conn)
     insert = next(i for i, s in enumerate(order) if "INSERT INTO properties" in s)
-    link = next(i for i, s in enumerate(order) if "p.repr_listing_id = l.sreality_id" in s)
+    link = next(i for i, s in enumerate(order) if "p.repr_listing_ref_id = l.id" in s)
     assert insert < link
     assert not any("ST_DWithin" in s for s in order)
     assert not any("INSERT INTO dirty_properties" in s for s in order)

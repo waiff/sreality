@@ -149,7 +149,7 @@ def test_verify_listing_freshness_passes_args(client, monkeypatch):
 
 def test_compare_snapshots_converts_since_days_to_timedelta(client, monkeypatch):
     captured = {}
-    def fake(conn, sid, since):
+    def fake(conn, sid, since, listing_id=None):
         captured["sid"] = sid
         captured["since"] = since
         return {"data": {"snapshot_count": 0}, "metadata": {"tool": "compare_snapshots"}}
@@ -166,7 +166,7 @@ def test_compare_snapshots_converts_since_days_to_timedelta(client, monkeypatch)
 
 def test_compare_snapshots_none_since_passes_none(client, monkeypatch):
     captured = {}
-    def fake(conn, sid, since):
+    def fake(conn, sid, since, listing_id=None):
         captured["since"] = since
         return {"data": {"snapshot_count": 0}, "metadata": {"tool": "compare_snapshots"}}
     monkeypatch.setattr(api_main, "compare_snapshots", fake)

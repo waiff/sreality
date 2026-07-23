@@ -47,7 +47,7 @@ def client(monkeypatch):
     def fake_verify(conn, c, sid, max_age):
         return {"data": {"sreality_id": sid}, "metadata": {"tool": "verify_listing_freshness"}}
 
-    def fake_compare(conn, sid, since):
+    def fake_compare(conn, sid, since, listing_id=None):
         return {"data": {"snapshot_count": 0}, "metadata": {"tool": "compare_snapshots"}}
 
     def fake_estimate(conn, target, filters, purchase_price_czk=None, **_kw):
@@ -70,7 +70,8 @@ def client(monkeypatch):
         return {"data": {"categories": {}, "from_cache": {}},
                 "metadata": {"tool": "find_anchor_amenities"}}
 
-    def fake_create_run(conn, c, llm_client, body, background_tasks=None, account_id=None):
+    def fake_create_run(conn, c, llm_client, body, background_tasks=None,
+                        account_id=None, claims=None):
         return {"id": 1, "status": "success"}
 
     def fake_get_run(conn, run_id):

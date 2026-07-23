@@ -32,7 +32,7 @@ import { LocationTypeahead } from '@/components/filter-controls/LocationTypeahea
 import { type DistrictChip, type ListingStatus } from '@/lib/filters';
 import { fmtArea, fmtCzk } from '@/lib/format';
 import { listingKindLabel } from '@/lib/enums';
-import { listingPath } from '@/lib/listingUrl';
+import { listingRowPath } from '@/lib/listingUrl';
 import { FILTER_REGISTRY } from '@/lib/filterRegistry.generated';
 import TagColorPicker from '@/components/TagColorPicker';
 import { FunnelIcon, InfoIcon, TrashIcon } from '@/components/icons';
@@ -719,19 +719,18 @@ function CardFace({ card }: { card: PipelineBoardCard }) {
     <div className="flex gap-2.5">
       <CardThumb url={card.image_url} inactive={inactive} />
       <div className="min-w-0 flex-1">
-        {card.sreality_id != null ? (
-          <Link
-            to={listingPath(card.sreality_id)}
-            title={inactive ? 'Neaktivní inzerát' : undefined}
-            className={`font-mono tabular-nums text-sm hover:text-[var(--color-copper)] hover:underline underline-offset-2 ${priceColor}`}
-          >
-            {fmtCzk(card.price_czk)}
-          </Link>
-        ) : (
-          <span className={`font-mono tabular-nums text-sm ${priceColor}`}>
-            {fmtCzk(card.price_czk)}
-          </span>
-        )}
+        {/* listingRowPath is canonical-first (source + source_id_native from
+            properties_public), so the card links straight to the clean
+            /listing/{source}/{native} URL; it falls back to the legacy/property
+            route only for a representative with no natural key. */}
+        <Link
+          to={listingRowPath(card)}
+          state={{ listingId: card.listing_id ?? undefined }}
+          title={inactive ? 'Neaktivní inzerát' : undefined}
+          className={`font-mono tabular-nums text-sm hover:text-[var(--color-copper)] hover:underline underline-offset-2 ${priceColor}`}
+        >
+          {fmtCzk(card.price_czk)}
+        </Link>
         {place && (
           <p className="mt-0.5 truncate text-xs text-[var(--color-ink-2)]">{place}</p>
         )}

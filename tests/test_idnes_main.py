@@ -166,12 +166,12 @@ def test_walk_category_classifies_new_changed_unchanged(monkeypatch):
     monkeypatch.setattr(
         idnes_main.db, "index_summary_native",
         lambda _c, _s, ids: {
-            b: {"sreality_id": -2, "price_czk": 5_500_000, "last_seen_at": None},  # differs -> changed
-            c: {"sreality_id": -3, "price_czk": 7_000_000, "last_seen_at": None},  # same -> unchanged
+            b: {"id": 8102, "sreality_id": -2, "price_czk": 5_500_000, "last_seen_at": None},  # differs -> changed
+            c: {"id": 8103, "sreality_id": -3, "price_czk": 7_000_000, "last_seen_at": None},  # same -> unchanged
         },
     )
     touched: dict[str, Any] = {}
-    monkeypatch.setattr(idnes_main.db, "touch_listings", lambda _c, pks: touched.update(pks=list(pks)))
+    monkeypatch.setattr(idnes_main.db, "touch_listings_by_id", lambda _c, pks: touched.update(pks=list(pks)))
     captured: dict[str, Any] = {}
     monkeypatch.setattr(
         idnes_main.db, "enqueue_detail",
@@ -183,7 +183,7 @@ def test_walk_category_classifies_new_changed_unchanged(monkeypatch):
     )
     assert seen == {a, b, c}
     assert total == 3 and complete is True       # full walk (no max_pages), collected == total
-    assert touched["pks"] == [-3]                # unchanged listing touched
+    assert touched["pks"] == [8103]              # unchanged listing touched by surrogate id
     refs = {e[0]: e for e in captured["entries"]}
     assert refs[a][3] == idnes_main.db.QUEUE_PRIORITY_NEW      # new
     assert refs[b][3] == idnes_main.db.QUEUE_PRIORITY_CHANGED  # changed
@@ -299,8 +299,8 @@ def test_write_details_ingests_and_counts(monkeypatch):
     items = [DrainItem("a", "ok", payload={
         "listing": listing, "html": "<h>", "status": 200, "url": "/d/a"})]
     monkeypatch.setattr(idnes_main.db, "upsert_portal_raw_page", lambda *a, **k: 9)
-    monkeypatch.setattr(idnes_main.db, "ingest_scraped_listing", lambda _c, _l: (-5, "new"))
-    monkeypatch.setattr(idnes_main.db, "record_images", lambda _c, _pk, imgs: len(imgs))
+    monkeypatch.setattr(idnes_main.db, "ingest_scraped_listing", lambda _c, _l: (8105, "new"))
+    monkeypatch.setattr(idnes_main.db, "record_images", lambda _c, _sid, imgs, **k: len(imgs))
     monkeypatch.setattr(idnes_main.db, "mark_portal_page_parsed", lambda *a, **k: None)
     counts = _portal().write_details(object(), items)
     assert counts["new"] == 1
@@ -308,14 +308,17 @@ def test_write_details_ingests_and_counts(monkeypatch):
 
 
 def test_mark_gone_flips_listing_inactive(monkeypatch):
-    monkeypatch.setattr(
-        idnes_main.db, "index_summary_native",
-        lambda _c, _s, ids: {"a": {"sreality_id": -5, "price_czk": 1, "last_seen_at": None}},
-    )
+    # Gate 2: the gone-flip keys on the native id (mark_listing_inactive_native),
+    # NOT a sreality_id resolved back out of the DB — a post-Gate-2 idnes row has
+    # sreality_id = NULL, so the legacy sreality_id-keyed flip would silently no-op.
     captured: dict[str, Any] = {}
     monkeypatch.setattr(
+        idnes_main.db, "mark_listing_inactive_native",
+        lambda _c, source, nid: captured.update(source=source, nid=nid),
+    )
+    monkeypatch.setattr(
         idnes_main.db, "mark_listing_inactive",
-        lambda _c, pk: captured.update(pk=pk),
+        lambda *a, **k: pytest.fail("legacy sreality_id-keyed gone-flip must not be used"),
     )
     _portal().mark_gone(object(), "a")
-    assert captured["pk"] == -5
+    assert captured == {"source": "idnes", "nid": "a"}

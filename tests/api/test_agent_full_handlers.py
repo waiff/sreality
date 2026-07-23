@@ -317,6 +317,114 @@ def test_tool_summary_compare_images():
     assert out["cache_hit"] is True
 
 
+# --- Gate-2: handlers accept the surrogate listing_id --------------------
+
+def test_listing_velocity_handler_forwards_listing_id(monkeypatch):
+    captured: dict[str, Any] = {}
+
+    def fake(conn, sreality_id=None, *, listing_id=None, radius_m, disposition_match, lifecycle):
+        captured.update(sreality_id=sreality_id, listing_id=listing_id, radius_m=radius_m)
+        return {"data": {"classification": "fast"}, "metadata": {}}
+
+    monkeypatch.setattr(agent_mod, "compute_listing_velocity", fake)
+    state = _state()
+    agent_mod._handle_compute_listing_velocity({"listing_id": 555, "radius_m": 900}, state)
+    assert captured["listing_id"] == 555
+    assert captured["sreality_id"] is None
+    assert captured["radius_m"] == 900
+
+
+def test_summarize_handler_forwards_listing_id(monkeypatch):
+    captured: dict[str, Any] = {}
+
+    def fake(conn, llm_client, *, sreality_id=None, listing_id=None):
+        captured.update(sreality_id=sreality_id, listing_id=listing_id)
+        return {"data": {}, "metadata": {}}
+
+    monkeypatch.setattr(agent_mod, "summarize_listing", fake)
+    agent_mod._handle_summarize_listing({"listing_id": 777}, _state())
+    assert captured == {"sreality_id": None, "listing_id": 777}
+
+
+def test_handler_listing_id_wins_when_both_supplied(monkeypatch):
+    captured: dict[str, Any] = {}
+
+    def fake(conn, llm_client, *, sreality_id=None, listing_id=None):
+        captured.update(sreality_id=sreality_id, listing_id=listing_id)
+        return {"data": {}, "metadata": {}}
+
+    monkeypatch.setattr(agent_mod, "summarize_listing", fake)
+    # The id-spaces overlap numerically; the surrogate is authoritative and we
+    # do NOT cross-resolve — the sreality_id must simply be dropped.
+    agent_mod._handle_summarize_listing({"sreality_id": 1, "listing_id": 2}, _state())
+    assert captured == {"sreality_id": None, "listing_id": 2}
+
+
+def test_handler_neither_id_raises_value_error():
+    with pytest.raises(ValueError):
+        agent_mod._handle_summarize_listing({}, _state())
+
+
+def test_compare_images_handler_dispatches_by_listing_id(monkeypatch):
+    captured: dict[str, Any] = {}
+
+    def fake(conn, llm_client, *, listing_id_a, listing_id_b, n_images):
+        captured.update(a=listing_id_a, b=listing_id_b, n_images=n_images)
+        return {"data": {"cache_hit": False}, "metadata": {}}
+
+    monkeypatch.setattr(agent_mod, "compare_listing_images", fake)
+    state = _state(last_cohort=[
+        {"listing_id": 100, "sreality_id": 11},
+        {"listing_id": 200, "sreality_id": 22},
+    ])
+    agent_mod._handle_compare_listing_images(
+        {"listing_id_a": 100, "listing_id_b": 200, "n_images": 4}, state,
+    )
+    assert captured == {"a": 100, "b": 200, "n_images": 4}
+
+
+def test_compare_images_listing_id_cohort_gate(monkeypatch):
+    monkeypatch.setattr(
+        agent_mod, "compare_listing_images",
+        lambda *a, **k: pytest.fail("toolkit must not be called when gate fails"),
+    )
+    state = _state(last_cohort=[
+        {"listing_id": 100, "sreality_id": 11},
+        {"listing_id": 200, "sreality_id": None},  # NULL sreality still nameable by surrogate
+    ])
+    with pytest.raises(ValueError, match="999"):
+        agent_mod._handle_compare_listing_images(
+            {"listing_id_a": 100, "listing_id_b": 999}, state,
+        )
+
+
+def test_compare_images_handler_requires_both_listing_ids():
+    with pytest.raises(ValueError, match="BOTH"):
+        agent_mod._handle_compare_listing_images(
+            {"listing_id_a": 100}, _state(last_cohort=[{"listing_id": 100}]),
+        )
+
+
+def test_per_listing_tool_schemas_accept_listing_id():
+    """Every per-listing tool schema now takes listing_id and enforces
+    at-least-one in the handler (required is empty)."""
+    for name in (
+        "verify_listing_freshness",
+        "compute_listing_velocity",
+        "summarize_listing",
+        "get_manual_rental_estimates",
+    ):
+        schema = agent_mod.AGENT_TOOLS[name].input_schema
+        assert "listing_id" in schema["properties"], name
+        assert "sreality_id" in schema["properties"], name
+        assert schema["required"] == [], name
+    compare = agent_mod.AGENT_TOOLS["compare_listing_images"].input_schema
+    assert {"sreality_id_a", "sreality_id_b", "listing_id_a", "listing_id_b"} <= set(
+        compare["properties"].keys()
+    )
+    assert compare["required"] == []
+
+
 # --- registry sanity check -----------------------------------------------
 
 def test_all_new_tools_registered():

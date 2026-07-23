@@ -222,6 +222,29 @@ def test_add_card_redirects_merged_away_property_to_survivor():
     assert events and events[0][0] == 42
 
 
+def test_add_card_locks_entry_stage_before_computing_board_position():
+    # Two accounts' members bookmarking concurrently into the same entry stage
+    # must not race on `max(board_position)` — the stage row is locked first so
+    # the lock serializes them within each request's tenant-pool transaction
+    # (migration 357's board index backs this query; no advisory lock needed).
+    conn = _FakeConn([
+        (lambda q: "RECURSIVE chain" in q, [(42, 42)]),
+        (lambda q: "WHERE is_entry" in q, [(1,)]),
+        (lambda q: "FOR UPDATE" in q, [(1,)]),
+        (lambda q: "max(board_position)" in q, [(5,)]),
+        (lambda q: "INSERT INTO property_pipeline (" in q, [(42,)]),
+        (lambda q: "FROM property_pipeline pp JOIN pipeline_stages" in q, [_CARD_ROW]),
+    ])
+    pipeline_module.add_card(conn, s.AddPipelineCardIn(property_id=42), account_id=None)
+    sqls = [q for q, _ in conn.executed]
+    lock_idx = next(i for i, q in enumerate(sqls) if "FOR UPDATE" in q)
+    max_idx = next(i for i, q in enumerate(sqls) if "max(board_position)" in q)
+    assert lock_idx < max_idx, "the stage row must be locked before reading max(board_position)"
+    lock_sql, lock_params = next((q, p) for q, p in conn.executed if "FOR UPDATE" in q)
+    assert lock_sql == "SELECT 1 FROM pipeline_stages WHERE id = %s FOR UPDATE"
+    assert lock_params == (1,)  # the resolved entry stage id, not the property id
+
+
 def test_add_card_no_active_survivor_is_422():
     conn = _FakeConn([(lambda q: "RECURSIVE chain" in q, [])])  # missing / broken chain
     with pytest.raises(fastapi.HTTPException) as ei:
@@ -339,6 +362,13 @@ def test_update_stage_crowning_entry_demotes_the_others():
         "UPDATE pipeline_stages SET is_entry = false" in q and "WHERE is_entry AND id <> %s" in q
         for q in sqls
     )
+    # F1: the lookup + the row's own UPDATE are account-scoped too (not just the
+    # sibling-demote), so a legacy service-role call can't touch another account.
+    assert all(
+        "account_id IS NOT DISTINCT FROM %s" in q
+        for q in sqls
+        if "pipeline_stages" in q and ("WHERE id" in q or "RETURNING" in q)
+    )
 
 
 def test_update_stage_rejects_uncrowning_entry():
@@ -398,3 +428,11 @@ def test_archive_soft_retires_empty_stage():
     out = pipeline_module.archive_stage(conn, 3, account_id=None)
     assert out == {"archived": True, "stage_id": 3}
     assert any("SET archived_at = now()" in q for q, _ in conn.executed)
+    # F2: every statement (existence check, cards-check, the archive UPDATE) is
+    # account-scoped — a legacy service-role call can't archive or probe another
+    # account's stage by id.
+    assert all(
+        "account_id IS NOT DISTINCT FROM %s" in q
+        for q, _ in conn.executed
+        if "pipeline_stages WHERE id" in q or "property_pipeline WHERE stage_id" in q
+    )

@@ -383,7 +383,7 @@ def post_compare_snapshots(
         if body.since_days is not None
         else None
     )
-    return compare_snapshots(conn, body.sreality_id, since)
+    return compare_snapshots(conn, body.sreality_id, since, listing_id=body.listing_id)
 
 
 @app.post("/tools/describe_neighborhood")
@@ -685,7 +685,7 @@ def post_estimations(
     account_id = tenant_pool.resolve_account_id(conn, claims) or deps.SYSTEM_ACCOUNT_ID
     return create_estimation_run(
         conn, client, llm_client, body, background_tasks=background_tasks,
-        account_id=str(account_id),
+        account_id=str(account_id), claims=claims,
     )
 
 

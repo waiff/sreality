@@ -17,17 +17,22 @@ _COLS = (
 
 def get_manual_rental_estimates(
     conn: "psycopg.Connection",
-    sreality_id: int,
+    sreality_id: int | None = None,
+    *,
+    listing_id: int | None = None,
 ) -> dict[str, Any]:
-    from toolkit import _now_iso
+    from toolkit import _listing_id_clause, _now_iso
 
+    id_clause, id_val = _listing_id_clause(
+        sreality_id, listing_id, lid_col="listing_id",
+    )
     with conn.cursor() as cur:
         cur.execute(
             f"select {', '.join(_COLS)} "
             "from manual_rental_estimates "
-            "where sreality_id = %s "
+            f"where {id_clause} "
             "order by created_at desc",
-            (sreality_id,),
+            (id_val,),
         )
         rows = cur.fetchall()
 
@@ -36,7 +41,10 @@ def get_manual_rental_estimates(
         "data": {"estimates": estimates},
         "metadata": {
             "tool": "get_manual_rental_estimates",
-            "filters_used": {"sreality_id": sreality_id},
+            "filters_used": (
+                {"listing_id": listing_id} if listing_id is not None
+                else {"sreality_id": sreality_id}
+            ),
             "result_count": len(estimates),
             "queried_at": _now_iso(),
             "data_freshness": _latest_updated_at(estimates),

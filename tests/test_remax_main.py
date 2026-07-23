@@ -115,21 +115,21 @@ def test_walk_priceless_card_is_unchanged_not_changed(monkeypatch):
     monkeypatch.setattr(
         remax_main.db, "index_summary_native",
         lambda *a, **k: {
-            "r1": {"sreality_id": -1, "price_czk": 5_000_000},
-            "r2": {"sreality_id": -2, "price_czk": None},
-            "r3": {"sreality_id": -3, "price_czk": 5_500_000},
+            "r1": {"id": 61, "sreality_id": -1, "price_czk": 5_000_000},
+            "r2": {"id": 62, "sreality_id": -2, "price_czk": None},
+            "r3": {"id": 63, "sreality_id": -3, "price_czk": 5_500_000},
         },
     )
     touched: list[list[int]] = []
     enqueued: list[tuple[str, int]] = []
     monkeypatch.setattr(
-        remax_main.db, "touch_listings", lambda _c, pks: touched.append(list(pks)))
+        remax_main.db, "touch_listings_by_id", lambda _c, pks: touched.append(list(pks)))
     monkeypatch.setattr(
         remax_main.db, "enqueue_detail",
         lambda _c, _s, entries: enqueued.extend((n, prio) for n, _r, _p, prio in entries) or len(entries),
     )
     _seen, counts, *_ = portal.walk_category(_CATEGORIES[0], object(), False, _Limiter())
-    assert touched == [[-1, -2]]
+    assert touched == [[61, 62]]   # unchanged rows touched by surrogate id
     assert enqueued == [
         ("r3", remax_main.db.QUEUE_PRIORITY_CHANGED),
         ("r4", remax_main.db.QUEUE_PRIORITY_NEW),

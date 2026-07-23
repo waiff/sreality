@@ -9,6 +9,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
+import pytest
+
 from toolkit.manual_estimates import get_manual_rental_estimates
 
 
@@ -110,3 +112,31 @@ def test_sql_executed_with_sreality_id_param() -> None:
     assert "where sreality_id = %s" in sql
     assert "order by created_at desc" in sql
     assert params == (42,)
+
+
+# --- Gate-2: addressable by the surrogate listing_id ----------------------
+
+
+def test_listing_id_arm_queries_by_id_column() -> None:
+    conn = _FakeConn(rows=[])
+    out = get_manual_rental_estimates(conn, listing_id=77)  # type: ignore[arg-type]
+    sql, params = conn.cur.executed[0]
+    # The surrogate arm keys on listing_id, never the legacy sreality_id.
+    assert "where listing_id = %s" in sql
+    assert "sreality_id" not in sql.split("where", 1)[1]
+    assert params == (77,)
+    assert out["metadata"]["filters_used"] == {"listing_id": 77}
+
+
+def test_listing_id_wins_when_both_supplied() -> None:
+    conn = _FakeConn(rows=[])
+    get_manual_rental_estimates(conn, sreality_id=42, listing_id=77)  # type: ignore[arg-type]
+    sql, params = conn.cur.executed[0]
+    assert "where listing_id = %s" in sql
+    assert params == (77,)
+
+
+def test_neither_id_raises_clean_value_error() -> None:
+    conn = _FakeConn(rows=[])
+    with pytest.raises(ValueError):
+        get_manual_rental_estimates(conn)  # type: ignore[arg-type]

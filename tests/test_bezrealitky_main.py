@@ -56,3 +56,20 @@ def test_mark_inactive_sweeps_on_native_ids_not_resolved_pks(monkeypatch):
     assert captured["source"] == "bezrealitky"
     assert captured["natives"] == {"x", "y"}   # raw walked ids, no PK round-trip
     assert captured["min_unseen_hours"] == 12
+
+
+def test_mark_gone_flips_native_inactive(monkeypatch):
+    # Gate 2: the gone-flip keys on the native id (mark_listing_inactive_native),
+    # NOT a sreality_id resolved out of the DB — a post-Gate-2 bezrealitky row has
+    # sreality_id = NULL, so the legacy sreality_id-keyed flip would silently no-op.
+    captured: dict = {}
+    monkeypatch.setattr(
+        bezrealitky_main.db, "mark_listing_inactive_native",
+        lambda _c, source, nid: captured.update(source=source, nid=nid),
+    )
+    monkeypatch.setattr(
+        bezrealitky_main.db, "mark_listing_inactive",
+        lambda *a, **k: pytest.fail("legacy sreality_id-keyed gone-flip must not be used"),
+    )
+    _portal().mark_gone(object(), "brk-123")
+    assert captured == {"source": "bezrealitky", "nid": "brk-123"}

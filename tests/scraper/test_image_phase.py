@@ -384,6 +384,7 @@ def test_record_images_dedupes_duplicate_sequence():
         def __enter__(self): return self
         def __exit__(self, *a): return None
         def execute(self, sql: str, params: Any) -> None:
+            captured["sql"] = sql
             captured["params"] = params
         def fetchall(self): return [(True,)]
 
@@ -408,6 +409,40 @@ def test_record_images_dedupes_duplicate_sequence():
     assert seqs.count(None) == 2  # nulls preserved
     assert "//a/1.jpg" in captured["params"]       # first of the dup kept
     assert "//a/1b.jpg" not in captured["params"]  # second dropped
+    # sreality path resolves the FK from sreality_id (the row is always present).
+    assert "(SELECT id FROM listings WHERE sreality_id = %s)" in captured["sql"]
+
+
+def test_record_images_portal_path_carries_surrogate_fk():
+    """THE Gate-2 fix: a portal write passes the resolved surrogate directly
+    (listing_id=), so images.listing_id is NEVER resolved from a sreality_id that
+    is NULL post-Gate-2. A NULL listing_id never conflicts on (listing_id,
+    sequence), so the old sreality_id-subquery path spawned an unbounded duplicate
+    row (and orphan R2 bytes) on every refetch of every portal listing."""
+    captured: dict[str, Any] = {}
+
+    class _Cur:
+        def __enter__(self): return self
+        def __exit__(self, *a): return None
+        def execute(self, sql: str, params: Any) -> None:
+            captured["sql"] = sql
+            captured["params"] = params
+        def fetchall(self): return [(True,)]
+
+    class _Conn:
+        def cursor(self): return _Cur()
+        def transaction(self):
+            from contextlib import nullcontext
+            return nullcontext()
+
+    imgs = [{"url": "//a/1.jpg", "sequence": 0}]
+    scraper_db.record_images(_Conn(), None, imgs, listing_id=8201)
+    # The FK column is carried in directly; sreality_id is mirrored FROM the
+    # surrogate (matching listings.sreality_id) — never the reverse.
+    assert "SELECT sreality_id FROM listings WHERE id = %s" in captured["sql"]
+    assert "WHERE sreality_id = %s" not in captured["sql"]
+    # flat params per row: (listing_id, listing_id, url, sequence)
+    assert captured["params"] == [8201, 8201, "//a/1.jpg", 0]
 
 
 # ---- _image_host -----------------------------------------------------------

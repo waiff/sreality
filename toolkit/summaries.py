@@ -113,23 +113,29 @@ def summarize_listing(
     conn: "psycopg.Connection",
     llm_client: "LLMClient",
     *,
-    sreality_id: int,
+    sreality_id: int | None = None,
     snapshot_id: int | None = None,
     force_refresh: bool = False,
+    listing_id: int | None = None,
 ) -> dict[str, Any]:
     from toolkit import _now_iso
 
-    snapshot = _resolve_snapshot(conn, sreality_id, snapshot_id)
+    snapshot = _resolve_snapshot(
+        conn, sreality_id, snapshot_id, listing_id=listing_id,
+    )
     if snapshot is None:
+        _ref = f"listing_id={listing_id}" if listing_id is not None else f"sreality_id={sreality_id}"
         raise SummarizeError(
-            f"no snapshot found for sreality_id={sreality_id}"
+            f"no snapshot found for {_ref}"
             + (f", snapshot_id={snapshot_id}" if snapshot_id is not None else "")
         )
 
     resolved_snapshot_id = snapshot["id"]
     cache_hit = False
     if not force_refresh:
-        cached = _cache_lookup(conn, sreality_id, resolved_snapshot_id)
+        cached = _cache_lookup(
+            conn, sreality_id, resolved_snapshot_id, listing_id=listing_id,
+        )
         if cached is not None:
             cache_hit = True
             summary = cached["summary"]
@@ -137,29 +143,37 @@ def summarize_listing(
             cost_usd = cached["cost_usd"]
         else:
             summary, model, cost_usd = _produce_summary(
-                conn, llm_client, sreality_id, snapshot,
+                conn, llm_client, sreality_id, snapshot, listing_id=listing_id,
             )
     else:
         summary, model, cost_usd = _produce_summary(
-            conn, llm_client, sreality_id, snapshot,
+            conn, llm_client, sreality_id, snapshot, listing_id=listing_id,
         )
 
+    data: dict[str, Any] = {
+        "sreality_id": sreality_id,
+        "snapshot_id": resolved_snapshot_id,
+        "summary": summary,
+        "model": model,
+        "cost_usd": float(cost_usd) if cost_usd is not None else None,
+        "cache_hit": cache_hit,
+    }
+    filters_used: dict[str, Any] = {
+        "sreality_id": sreality_id,
+        "snapshot_id": snapshot_id,
+        "force_refresh": force_refresh,
+    }
+    # Echo the surrogate handle only when addressed by it, so the sreality_id
+    # path stays byte-identical.
+    if listing_id is not None:
+        data["listing_id"] = listing_id
+        filters_used["listing_id"] = listing_id
+
     return {
-        "data": {
-            "sreality_id": sreality_id,
-            "snapshot_id": resolved_snapshot_id,
-            "summary": summary,
-            "model": model,
-            "cost_usd": float(cost_usd) if cost_usd is not None else None,
-            "cache_hit": cache_hit,
-        },
+        "data": data,
         "metadata": {
             "tool": "summarize_listing",
-            "filters_used": {
-                "sreality_id": sreality_id,
-                "snapshot_id": snapshot_id,
-                "force_refresh": force_refresh,
-            },
+            "filters_used": filters_used,
             "result_count": 1,
             "queried_at": _now_iso(),
             "data_freshness": snapshot["scraped_at"].isoformat(),
@@ -170,10 +184,12 @@ def summarize_listing(
 def _produce_summary(
     conn: "psycopg.Connection",
     llm_client: "LLMClient",
-    sreality_id: int,
+    sreality_id: int | None,
     snapshot: dict[str, Any],
+    *,
+    listing_id: int | None = None,
 ) -> tuple[dict[str, Any], str, float | None]:
-    listing = _fetch_listing(conn, sreality_id)
+    listing = _fetch_listing(conn, sreality_id, listing_id=listing_id)
     payload = _build_payload(listing, snapshot)
 
     system = llm_client.resolve_system_prompt(_SYSTEM_PROMPT_KEY)
@@ -191,6 +207,7 @@ def _produce_summary(
     _cache_store(
         conn,
         sreality_id=sreality_id,
+        listing_id=listing_id,
         snapshot_id=snapshot["id"],
         summary=summary,
         model=response.model,
@@ -202,21 +219,28 @@ def _produce_summary(
 
 def _resolve_snapshot(
     conn: "psycopg.Connection",
-    sreality_id: int,
+    sreality_id: int | None,
     snapshot_id: int | None,
+    *,
+    listing_id: int | None = None,
 ) -> dict[str, Any] | None:
+    from toolkit import _listing_id_clause
+
+    id_clause, id_val = _listing_id_clause(
+        sreality_id, listing_id, lid_col="listing_id",
+    )
     if snapshot_id is not None:
         sql = (
             "SELECT id, scraped_at, raw_json FROM listing_snapshots "
-            "WHERE id = %s AND sreality_id = %s"
+            f"WHERE id = %s AND {id_clause}"
         )
-        params: tuple[Any, ...] = (snapshot_id, sreality_id)
+        params: tuple[Any, ...] = (snapshot_id, id_val)
     else:
         sql = (
             "SELECT id, scraped_at, raw_json FROM listing_snapshots "
-            "WHERE sreality_id = %s ORDER BY scraped_at DESC LIMIT 1"
+            f"WHERE {id_clause} ORDER BY scraped_at DESC LIMIT 1"
         )
-        params = (sreality_id,)
+        params = (id_val,)
     with conn.cursor() as cur:
         cur.execute(sql, params)
         row = cur.fetchone()
@@ -227,21 +251,27 @@ def _resolve_snapshot(
 
 def _fetch_listing(
     conn: "psycopg.Connection",
-    sreality_id: int,
+    sreality_id: int | None,
+    *,
+    listing_id: int | None = None,
 ) -> dict[str, Any]:
+    from toolkit import _listing_id_clause
+
+    id_clause, id_val = _listing_id_clause(sreality_id, listing_id)
     sql = (
         "SELECT category_main, category_type, price_czk, price_unit, "
         "area_m2, disposition, locality, district, floor, "
         "has_balcony, has_parking, has_lift, "
         "building_type, condition, energy_rating "
-        "FROM listings WHERE sreality_id = %s"
+        f"FROM listings WHERE {id_clause}"
     )
     with conn.cursor() as cur:
-        cur.execute(sql, (sreality_id,))
+        cur.execute(sql, (id_val,))
         row = cur.fetchone()
     if row is None:
+        _ref = f"listing_id={listing_id}" if listing_id is not None else f"sreality_id={sreality_id}"
         raise SummarizeError(
-            f"listing sreality_id={sreality_id} has snapshot but no listings row"
+            f"listing {_ref} has snapshot but no listings row"
         )
     return {
         "category_main": row[0],
@@ -315,15 +345,22 @@ def _extract_tool_call(
 
 def _cache_lookup(
     conn: "psycopg.Connection",
-    sreality_id: int,
+    sreality_id: int | None,
     snapshot_id: int,
+    *,
+    listing_id: int | None = None,
 ) -> dict[str, Any] | None:
+    from toolkit import _listing_id_clause
+
+    id_clause, id_val = _listing_id_clause(
+        sreality_id, listing_id, lid_col="listing_id",
+    )
     sql = (
         "SELECT summary, model, cost_usd FROM listing_summaries "
-        "WHERE sreality_id = %s AND snapshot_id = %s"
+        f"WHERE {id_clause} AND snapshot_id = %s"
     )
     with conn.cursor() as cur:
-        cur.execute(sql, (sreality_id, snapshot_id))
+        cur.execute(sql, (id_val, snapshot_id))
         row = cur.fetchone()
     if row is None:
         return None
@@ -342,20 +379,27 @@ def _cache_lookup(
 def _cache_store(
     conn: "psycopg.Connection",
     *,
-    sreality_id: int,
+    sreality_id: int | None,
     snapshot_id: int,
     summary: dict[str, Any],
     model: str,
     llm_call_id: int,
     cost_usd: float,
+    listing_id: int | None = None,
 ) -> None:
+    # Arbiter is listing_id (R2 Phase C, listing_summaries_listing_id_snapshot_id_key).
+    # We supply the id we were addressed by and derive the sibling column from
+    # listings — from the surrogate when named by listing_id (the sreality_id
+    # column then reflects the row, NULL post-Gate-2), else from the legacy
+    # handle (the dual-write phase of migrations 320-325).
+    if listing_id is not None:
+        id_values = "(SELECT sreality_id FROM listings WHERE id = %(listing_id)s), %(listing_id)s"
+    else:
+        id_values = "%(sreality_id)s, (SELECT id FROM listings WHERE sreality_id = %(sreality_id)s)"
     sql = (
-        # listing_id mirrors sreality_id via subquery during the dual-write phase
-        # of the surrogate-key migration (migrations 320-325). Arbiter is
-        # listing_id (R2 Phase C, listing_summaries_listing_id_snapshot_id_key).
         "INSERT INTO listing_summaries "
         "(sreality_id, listing_id, snapshot_id, summary, model, llm_call_id, cost_usd) "
-        "VALUES (%s, (SELECT id FROM listings WHERE sreality_id = %s), %s, %s, %s, %s, %s) "
+        f"VALUES ({id_values}, %(snapshot_id)s, %(summary)s, %(model)s, %(llm_call_id)s, %(cost_usd)s) "
         "ON CONFLICT (listing_id, snapshot_id) DO UPDATE SET "
         " listing_id = EXCLUDED.listing_id, "
         " summary = EXCLUDED.summary, "
@@ -367,8 +411,13 @@ def _cache_store(
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(
             sql,
-            (
-                sreality_id, sreality_id, snapshot_id, _Jsonb(summary),
-                model, llm_call_id, cost_usd,
-            ),
+            {
+                "sreality_id": sreality_id,
+                "listing_id": listing_id,
+                "snapshot_id": snapshot_id,
+                "summary": _Jsonb(summary),
+                "model": model,
+                "llm_call_id": llm_call_id,
+                "cost_usd": cost_usd,
+            },
         )

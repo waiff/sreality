@@ -112,6 +112,12 @@ export interface ListingPublic {
 export interface ListingSnapshotPublic {
   id: number;
   sreality_id: number;
+  /* The owning listing's SURROGATE id (listing_snapshots_public.listing_id,
+   * migration 334/343). Group/join snapshots on this, not sreality_id — a
+   * post-Gate-2 non-sreality listing's snapshots all carry NULL sreality_id
+   * and would otherwise collide onto one shared bucket. Only populated by
+   * fetchSnapshotsForListings' select; fetchSnapshotsByListing omits it. */
+  listing_id: number;
   scraped_at: string;
   price_czk: number | null;
   /* Migration 084 — projected from listing_snapshots.raw_json so the
@@ -402,7 +408,17 @@ export interface TargetSpecIn {
 }
 
 export interface ComparableUsed {
-  sreality_id: number;
+  /* Surrogate `listing_id` (api/estimate_yield.py:_used_entry, since #879/#892).
+   * Present on every run finalised after that ship; ABSENT (not null — the key
+   * itself is missing) on the ~600 frozen pre-cutover rows, which carry
+   * sreality_id only (estimation_runs rows are immutable, rule 12). A comparable
+   * always has at least one of {listing_id, sreality_id} — prefer listing_id for
+   * identity (React keys, map marker ids, batch-fetch routing) since it survives
+   * the post-flip NULL sreality_id case a non-sreality-portal comparable can hit. */
+  listing_id?: number | null;
+  /* NULL for a post-Gate-2-flip non-sreality-portal comparable (flip not live
+   * yet, so always populated today) — never assume non-null. */
+  sreality_id: number | null;
   snapshot_id: number | null;
   snapshot_date: string | null;
   data_age_days: number | null;
@@ -507,6 +523,12 @@ export interface EstimationRun {
   status: EstimationStatus;
   input_url: string | null;
   input_sreality_id: number | null;
+  /* Gate 2 surrogate twin of input_sreality_id (stamped by #914), the only
+   * handle for a post-Gate-2 non-sreality subject (input_sreality_id NULL).
+   * Null on rows written before #914 and on unresolved subjects (no matched
+   * listings row at all). Not yet consumed for routing — the existing
+   * input_sreality_id-gated links below are a documented separate cutover. */
+  input_listing_id: number | null;
   input_spec: TargetSpecIn | null;
   /* Discriminator added in migration 029. Null on legacy rows
    * predating the migration — readers should treat null as 'rent'. */
@@ -899,6 +921,16 @@ export interface PipelineBoardCard {
   board_position: number;
   entered_stage_at: string;
   sreality_id: number | null;
+  /* Representative listing's portal + native id (migration 091) — builds the
+   * canonical `/listing/{source}/{native}` link so the card never flashes the
+   * negative synthetic id; null on pre-091 rows → legacy/property fallback. */
+  source: string | null;
+  source_id_native: string | null;
+  /* The representative listing's SURROGATE id (properties_public.listing_id,
+   * migration 343) — never null in practice. Use this for the card's link and
+   * for keying image/broker lookups; sreality_id may be NULL for a
+   * post-Gate-2 non-sreality representative. */
+  listing_id: number | null;
   category_main: string | null;
   street: string | null;
   district: string | null;
@@ -1448,7 +1480,8 @@ export const manualEstimateSourceLabel = (kind: ManualEstimateSourceKind): strin
 
 export interface ManualRentalEstimate {
   id: number;
-  sreality_id: number;
+  sreality_id: number | null;
+  listing_id: number | null;
   rent_czk: number;
   author: string;
   source_kind: ManualEstimateSourceKind;
@@ -1603,10 +1636,45 @@ export interface MergesResponse {
   total: number;
 }
 
+/* One already-merged property (survivor) in the /dedup/merged-properties audit
+ * browse — the RESULT of dedup, not a proposed pair. `source_count` is every
+ * child listing ever grouped under it (active or delisted); `active_count` the
+ * still-live subset; `sources` the distinct portals those children span. */
+export interface MergedProperty {
+  property_id: number;
+  sreality_id: number | null;   // representative listing (app-wide listing identity)
+  source_count: number;         // listings merged together (the range filter's axis)
+  distinct_site_count: number;  // distinct portals
+  active_count: number;         // children still is_active
+  sources: string[];            // distinct portal keys, e.g. ['bazos','sreality']
+  category_main: string | null;
+  category_type: string | null;
+  disposition: string | null;
+  area_m2: number | null;
+  estate_area: number | null;
+  price_czk: number | null;
+  district: string | null;
+  street: string | null;
+  first_seen_at: string | null;
+  last_seen_at: string | null;
+}
+
+export interface MergedPropertiesResponse {
+  data: MergedProperty[];
+  total: number;       // total matching the filter (the page is capped by `limit`)
+  returned: number;    // rows on this page
+}
+
 /* One row of property_sources_public — a property's per-portal observations
  * (multi-portal dedup). Drives the Listing Detail "listed on N sites" panel. */
 export interface PropertySource {
   property_id: number;
+  /* The child listing's SURROGATE id (property_sources_public.id = listings.id,
+   * migration 334). NEVER null on rows read from property_sources_public — the
+   * R2 resolver-chain keys child loaders (snapshots, sibling links) on this
+   * instead of sreality_id, which a post-Gate-2 non-sreality row may not have.
+   * Optional only so ClipAudit's synthetic single-source fallback still types. */
+  id?: number;
   sreality_id: number;
   source: string;
   source_url: string | null;

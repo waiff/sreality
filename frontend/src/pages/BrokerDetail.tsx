@@ -15,7 +15,7 @@ import {
 import { fmtCount, fmtCzk, fmtArea, fmtRelative } from '../lib/format';
 import { portalShort } from '../lib/portals';
 import { PickButton } from '../components/controls';
-import { listingPath } from '@/lib/listingUrl';
+import { listingRowPath } from '@/lib/listingUrl';
 import { categoryMainLabel, categoryTypeLabel, listingKindLabel } from '@/lib/enums';
 import { usePageTitle } from '@/lib/pageTitle';
 
@@ -379,12 +379,12 @@ function Inventory({
             <tbody className="font-[family-name:var(--font-mono)] text-[0.78rem]">
               {filtered.map((l) => (
                 <tr
-                  key={l.sreality_id}
+                  key={l.listing_id}
                   className="border-b border-[var(--color-rule-soft)] last:border-0 hover:bg-[var(--color-paper-2)]"
                 >
                   <td className="px-3 py-1.5 max-w-[16rem]">
                     <Link
-                      to={listingPath(l.sreality_id)}
+                      to={listingRowPath({ sreality_id: l.sreality_id, property_id: l.property_id ?? 0 })}
                       className="flex items-center gap-2 hover:text-[var(--color-copper-2)]"
                     >
                       {!l.is_active && (

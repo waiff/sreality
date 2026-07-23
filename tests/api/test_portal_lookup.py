@@ -188,6 +188,8 @@ def test_lookup_binds_one_value_pair_per_item() -> None:
 
 
 def test_lookup_account_query_targets_only_found_listings() -> None:
+    import uuid
+
     market_rows = [
         _mk_market_row("sreality", "a", True, sreality_id=1, listing_id=11,
                        property_id=100, source_url="https://sreality.cz/x",
@@ -196,12 +198,15 @@ def test_lookup_account_query_targets_only_found_listings() -> None:
     ]
     market_conn = _FakeConn(market_rows)
     tenant_conn = _FakeConn([_mk_account_row(11)])
+    acct = uuid.uuid4()
     pl.lookup_portal_listings(
-        market_conn, tenant_conn, _items(("sreality", "a"), ("idnes", "miss")),
+        market_conn, tenant_conn, _items(("sreality", "a"), ("idnes", "miss")), acct,
     )
-    _sql, params = tenant_conn.cur.executed
-    # one (listing_id, property_id, source_url) tuple — the miss is excluded
-    assert params == [11, 100, "https://sreality.cz/x"]
+    sql, params = tenant_conn.cur.executed
+    # one (listing_id, property_id, source_url) tuple — the miss is excluded —
+    # then account_id thrice (collection subquery + the two joins, F3 scoping).
+    assert params == [11, 100, "https://sreality.cz/x", acct, acct, acct]
+    assert sql.count("account_id IS NOT DISTINCT FROM %s") == 3
 
 
 def test_lookup_preserves_request_order_even_if_db_reorders() -> None:
@@ -222,12 +227,19 @@ def test_lookup_preserves_request_order_even_if_db_reorders() -> None:
 # ----------------------------------------------------------------------
 
 @pytest.fixture()
-def client() -> Any:
+def client(monkeypatch) -> Any:
     # The route runs on the tenant pool since Phase 1 — stub the whole
     # tenant_conn chain (auth included) for delegation/validation tests; the
     # auth gate itself is exercised by test_route_fails_closed_without_token.
+    # verify_jwt is overridden too (the route now also depends on it directly to
+    # resolve account_id) and resolve_account_id is stubbed so no SQL hits the
+    # fake connection object.
     api_main.app.dependency_overrides[deps.get_db_conn] = lambda: object()
     api_main.app.dependency_overrides[tenant_pool.tenant_conn] = lambda: object()
+    api_main.app.dependency_overrides[deps.verify_jwt] = lambda: {
+        "sub": None, "legacy": True,
+    }
+    monkeypatch.setattr(tenant_pool, "resolve_account_id", lambda conn, claims: None)
     yield TestClient(api_main.app)
     api_main.app.dependency_overrides.clear()
 
@@ -235,7 +247,7 @@ def client() -> Any:
 def test_route_delegates_and_returns_data(client, monkeypatch) -> None:
     captured: dict[str, Any] = {}
 
-    def fake_lookup(market_conn, tenant_conn, items):
+    def fake_lookup(market_conn, tenant_conn, items, account_id=None):
         captured["items"] = items
         return {"data": [{"source": "sreality", "source_id": "1", "found": True}]}
 

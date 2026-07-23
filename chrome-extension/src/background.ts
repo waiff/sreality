@@ -8,6 +8,7 @@ import {
   addPipelineCard,
   addToCollection,
   createEstimation,
+  getBillingMe,
   getEstimation,
   listCollections,
   listNotes,
@@ -103,5 +104,7 @@ async function handleMessage(
       return { ok: true, data: undefined };
     case 'get_auth_state':
       return { ok: true, data: await getAuthState() };
+    case 'get_billing':
+      return getBillingMe();
   }
 }

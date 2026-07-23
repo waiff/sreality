@@ -7,6 +7,7 @@ estimate_yield so no real DB / HTTP / LLM is hit.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any
 
 import pytest
@@ -1096,6 +1097,22 @@ def test_list_filters_by_source_kind():
     assert list_params["source_kind"] == "bezrealitky"
 
 
+def test_list_join_prefers_input_listing_id():
+    """The locality-display LEFT JOIN (_LIST_FROM) must match on the surrogate
+    input_listing_id first — matching input_sreality_id only is stale (Gate 2:
+    a post-Gate-2 non-sreality subject has input_sreality_id NULL even when its
+    input_listing_id correctly resolves). The sreality_id branch stays as the
+    fallback for rows written before input_listing_id was stamped (#914)."""
+    conn = _FakeConn(results=[[], (0,)])
+    er.list_estimation_runs(conn, limit=1)
+    list_sql, _ = conn.executions[0]
+    assert "l.id = er.input_listing_id" in list_sql
+    assert (
+        "er.input_listing_id IS NULL AND l.sreality_id = er.input_sreality_id"
+        in list_sql
+    )
+
+
 def test_get_estimation_run_returns_none_when_missing():
     conn = _FakeConn(results=[None])
     res = er.get_estimation_run(conn, run_id=999)
@@ -1115,9 +1132,9 @@ def test_match_listing_by_url_casts_numeric_area_to_float():
     import json
     from decimal import Decimal
 
-    # row: sreality_id, lat, lng, area_m2(numeric->Decimal), disposition,
-    #      floor, price_czk, category_type
-    row = (-70120, 50.4208, 14.9016, Decimal("108.0"), "2+kk", 3, 6299000, "prodej")
+    # row: sreality_id, listing_id, lat, lng, area_m2(numeric->Decimal),
+    #      disposition, floor, price_czk, category_type
+    row = (-70120, 501, 50.4208, 14.9016, Decimal("108.0"), "2+kk", 3, 6299000, "prodej")
     conn = _FakeConn(results=[row])
 
     matched = er._match_listing_by_url(
@@ -1125,6 +1142,7 @@ def test_match_listing_by_url_casts_numeric_area_to_float():
     )
 
     assert matched is not None
+    assert matched["listing_id"] == 501
     area = matched["spec"]["area_m2"]
     assert isinstance(area, float) and area == 108.0
     # The whole spec must round-trip through json — this is what psycopg's
@@ -1133,7 +1151,7 @@ def test_match_listing_by_url_casts_numeric_area_to_float():
 
 
 def test_match_listing_by_url_null_area_stays_none():
-    row = (-70120, 50.4208, 14.9016, None, "2+kk", 3, 6299000, "prodej")
+    row = (-70120, 501, 50.4208, 14.9016, None, "2+kk", 3, 6299000, "prodej")
     conn = _FakeConn(results=[row])
 
     matched = er._match_listing_by_url(
@@ -1452,6 +1470,7 @@ def test_post_known_portal_url_reuses_scraped_listing(client, monkeypatch):
     _patch_estimate(monkeypatch)
     monkeypatch.setattr(er, "_match_listing_by_url", lambda conn, url: {
         "sreality_id": -42,
+        "listing_id": 917,
         "spec": {
             "lat": 50.0, "lng": 14.4, "area_m2": 60.0,
             "disposition": "2+kk", "floor": 3, "exclude_ids": [],
@@ -1477,6 +1496,7 @@ def test_post_known_portal_url_reuses_scraped_listing(client, monkeypatch):
     assert body["subject_attributes"] is None  # UI reads listings_public instead
     inserted = state.inserts[1]
     assert inserted["input_sreality_id"] == -42
+    assert inserted["input_listing_id"] == 917
     assert inserted["subject_attributes"] is None
 
 
@@ -1664,3 +1684,53 @@ def test_latest_by_listing_route_parses_csv(client, monkeypatch):
     # JSON object keys are strings
     assert body["estimates"]["1"]["gross_yield_pct"] == 4.2
     assert body["estimates"]["1"]["run_id"] == 7
+
+
+# ----------------------------------------------------------------------
+# latest_rent_estimations_by_listing — the Browse rent chip's data source.
+# Repointed (wave-5 tail) to prefer estimation_runs.input_listing_id (the
+# surrogate stamped by #914) over input_sreality_id, which is NULL for a
+# post-Gate-2 non-sreality subject even when its input_listing_id correctly
+# resolves. The join-through-listings shape falls back to input_sreality_id
+# only for rows written before #914 stamped input_listing_id.
+# ----------------------------------------------------------------------
+
+def test_latest_rent_estimations_by_listing_query_prefers_listing_id():
+    conn = _FakeConn(results=[[]])
+    er.latest_rent_estimations_by_listing(conn, [12345])
+    sql, params = conn.executions[0]
+    assert "er.input_listing_id = l.id" in sql
+    assert (
+        "er.input_listing_id IS NULL AND er.input_sreality_id = l.sreality_id"
+        in sql
+    )
+    assert "FROM listings l" in sql
+    assert "JOIN estimation_runs er" in sql
+    assert params["ids"] == [12345]
+
+
+def test_latest_rent_estimations_by_listing_maps_row_to_dict():
+    conn = _FakeConn(results=[[
+        (
+            12345, 7, "success", "rent", 5.2, 15000,
+            datetime(2026, 7, 23, 10, 0, tzinfo=timezone.utc),
+        ),
+    ]])
+    out = er.latest_rent_estimations_by_listing(conn, [12345])
+    assert out == {
+        12345: {
+            "sreality_id": 12345,
+            "run_id": 7,
+            "status": "success",
+            "estimate_kind": "rent",
+            "gross_yield_pct": 5.2,
+            "estimated_monthly_rent_czk": 15000,
+            "created_at": "2026-07-23T10:00:00+00:00",
+        },
+    }
+
+
+def test_latest_rent_estimations_by_listing_empty_ids_skips_query():
+    conn = _FakeConn()
+    assert er.latest_rent_estimations_by_listing(conn, []) == {}
+    assert conn.executions == []
