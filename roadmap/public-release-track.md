@@ -434,7 +434,8 @@ remediation R3 closes that. Full spec: `docs/design/public-release-remediation-2
     scale/correctness, the route-layer tenancy move, and the public-product delivery envelope
     (per-account recipients, opt-in, suppression, unsubscribe, bounce webhook, quotas) — all
     buildable-dark; the hard gates are operator Resend-provisioning + GDPR/product sign-off.
-    - **Detection scale + correctness — SHIPPED, migration 363.** (1) `properties_published_at_idx`
+    - **Detection scale + correctness — SHIPPED, migration 365** (authored 363, renumbered
+      after a same-day collision with `363_browse_projection_source_id_native.sql`)**.** (1) `properties_published_at_idx`
       — a plain btree over the published rows the matcher's new-listing cursor actually scans
       (`published_at > cursor ORDER BY published_at ASC`); the only prior published_at index was
       `properties_unpublished_idx` (mig 273), a partial over the INVERSE (`WHERE published_at IS
