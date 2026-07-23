@@ -107,7 +107,7 @@ _ATTACH_LINK_SQL = """
     UPDATE listings l
     SET property_id = p.id
     FROM properties p
-    WHERE p.repr_listing_id = l.sreality_id
+    WHERE p.repr_listing_ref_id = l.id
       AND l.property_id IS NULL
 """
 
@@ -248,7 +248,7 @@ _RECOMPUTE_BATCH_SQL = """
           PARTITION BY l.property_id ORDER BY s.scraped_at, s.id
         ) AS rn
       FROM listing_snapshots s
-      JOIN listings l ON l.sreality_id = s.sreality_id
+      JOIN listings l ON l.id = s.listing_id
       JOIN batch b ON b.id = l.property_id
       WHERE s.price_czk IS NOT NULL
     ),
@@ -290,7 +290,7 @@ _RECOMPUTE_BATCH_SQL = """
     changes AS (
       SELECT l.property_id AS pid, max(s.scraped_at) AS last_change_at
       FROM listing_snapshots s
-      JOIN listings l ON l.sreality_id = s.sreality_id
+      JOIN listings l ON l.id = s.listing_id
       JOIN batch b ON b.id = l.property_id
       GROUP BY l.property_id
     )
@@ -533,7 +533,7 @@ _ENQUEUE_IMAGELESS_SQL = f"""
       )
       AND NOT EXISTS (
         SELECT 1 FROM listings li
-        JOIN images i ON i.sreality_id = li.sreality_id
+        JOIN images i ON i.listing_id = li.id
         WHERE li.property_id = p.id
           AND i.storage_path IS NOT NULL
       )
