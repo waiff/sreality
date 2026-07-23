@@ -61,6 +61,18 @@ class _Conn:
         return _Cur(self)
 
 
+def test_region_and_global_selects_join_images_on_listing_id() -> None:
+    # Gate-2: images.listing_id is fully populated + NOT-NULL-enforced (migration 350),
+    # but images.sreality_id/listings.sreality_id both go NULL for every non-sreality row
+    # once the flip lands. A sreality_id-keyed join (INNER, in the region arm's old form)
+    # would then match NULL = NULL -> no rows -> those images silently never surface for
+    # region-priority tagging, forever. Both arms must key on the surrogate instead.
+    assert "i.listing_id = l.id" in ctb._SELECT_REGION
+    assert "sreality_id" not in ctb._SELECT_REGION
+    assert "l.id = i.listing_id" in ctb._SELECT_GLOBAL
+    assert "sreality_id" not in ctb._SELECT_GLOBAL
+
+
 def test_set_local_statement_timeout_is_literal_not_parameterized() -> None:
     conn = _Conn(global_rows=[(1, "k", True)])
     ctb._select_pending(conn, limit=10, shards=1, shard=0, priority_regions=[])
