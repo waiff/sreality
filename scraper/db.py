@@ -681,6 +681,33 @@ def upsert_listing_with_property(
 BROKER_ATTRIBUTED_SOURCES = frozenset({"sreality", "idnes", "ceskereality", "realitymix"})
 
 
+# The Gate-2 flip-writer scaffold (wave-5 item 7): OFF by default, so the
+# nextval draw below is unconditional until an operator explicitly opts in.
+# app_settings-backed (not env/process-cached) so the always-on realtime
+# worker and cron drains pick up a flip on their very next batch, not after a
+# restart — same posture as toolkit.dedup_settings' operator-gated knobs.
+GATE2_NULL_SREALITY_ID_SETTING = "gate2_null_sreality_id_enabled"
+
+
+def _gate2_null_sreality_id_enabled(conn: psycopg.Connection) -> bool:
+    """Live read of the flip-writer flag. Missing row or NULL value -> False
+    (fresh-deploy-safe default: keep minting synthetic negative sreality_ids)."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT value FROM app_settings WHERE key = %s",
+            (GATE2_NULL_SREALITY_ID_SETTING,),
+        )
+        row = cur.fetchone()
+    if row is None or row[0] is None:
+        return False
+    value = row[0]
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in ("true", "1", "yes", "on")
+    return bool(value)
+
+
 def ingest_scraped_listing(
     conn: psycopg.Connection, listing: ScrapedListing,
 ) -> tuple[int, UpsertResult]:
@@ -694,11 +721,13 @@ def ingest_scraped_listing(
     Tier 0: (source, source_id_native) is the idempotency key — a re-fetch reuses
     the existing row and updates in place; first sight draws a fresh negative
     sreality_id from `synthetic_listing_id_seq` for the legacy column only (the
-    sign-check rail, until the Gate-2 flip nulls it). Identity is carried on the
-    surrogate `id`, resolved back out of the natural key (validated present +
-    unique, migration 314) — every follow-up write keys on it, so nothing depends
-    on a sreality_id that may be NULL. The listing write + source identity + Tier-1
-    property matching commit in one transaction.
+    sign-check rail), UNLESS the `gate2_null_sreality_id_enabled` app_settings
+    flag is on, in which case it writes NULL instead (the actual Gate-2 flip,
+    still off by default — see `_gate2_null_sreality_id_enabled`). Identity is
+    carried on the surrogate `id`, resolved back out of the natural key
+    (validated present + unique, migration 314) — every follow-up write keys on
+    it, so nothing depends on a sreality_id that may be NULL. The listing write +
+    source identity + Tier-1 property matching commit in one transaction.
 
     A content-changed write of a broker-attributed source also enqueues the row
     into dirty_broker_listings (the incremental resolver's sole feed — same role
@@ -718,12 +747,15 @@ def ingest_scraped_listing(
         # only to fill the INSERT's sreality_id column; upsert's ON CONFLICT never
         # rewrites it, so the value is inert on this path.
         listing_id: int | None = int(found[0])
-        legacy_sreality_id = found[1]
+        legacy_sreality_id: int | None = found[1]
     else:
         listing_id = None  # sequence-generated in the INSERT; resolved post-upsert
-        with conn.cursor() as cur:
-            cur.execute("SELECT nextval('synthetic_listing_id_seq')")
-            legacy_sreality_id = int(cur.fetchone()[0])
+        if _gate2_null_sreality_id_enabled(conn):
+            legacy_sreality_id = None
+        else:
+            with conn.cursor() as cur:
+                cur.execute("SELECT nextval('synthetic_listing_id_seq')")
+                legacy_sreality_id = int(cur.fetchone()[0])
 
     row = listing.to_row(legacy_sreality_id)
     # Carry the FULL natural key (source + native id) into the INSERT so it is stamped

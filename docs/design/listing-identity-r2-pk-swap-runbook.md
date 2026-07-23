@@ -929,6 +929,11 @@ schema-only + small-carrier dumps).
 Deploy the flip writer **behind a config flag** (instant rollback for future rows): new
 non-sreality rows stop drawing `synthetic_listing_id_seq` and insert `sreality_id = NULL`;
 sreality rows unchanged (real positive ids forever — the sign CHECK enforces all of it).
+Scaffold shipped (wave-5 item 7, off by default): the app_settings bool
+`gate2_null_sreality_id_enabled`, read live by `scraper.db._gate2_null_sreality_id_enabled`
+on every `ingest_scraped_listing` first-sight — no process cache, so a flip lands on the
+always-on realtime worker's and cron drains' very next batch, no restart. This is the flag
+the operator ask below turns on.
 
 **Safe abort** (if post-flip breakage with NULL rows already written): flip the flag back
 (or: pause worker → `UPDATE listings SET sreality_id = nextval('synthetic_listing_id_seq')
