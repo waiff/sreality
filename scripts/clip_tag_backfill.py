@@ -32,17 +32,25 @@ LOG = logging.getLogger("clip_tag_backfill")
 # tag — NOT a cross-table anti-join against image_clip_tags, which forced a full seq-scan
 # + sort of the ~5.2M-row images table every run and intermittently blew the pooler's
 # 2-min statement timeout (the failed shards). The marker is backed by partial indexes
-# (images_needs_clip_{id,sid}_idx) that become selective as coverage rises, so the SELECT
-# trends to sub-second. During the initial bulk backfill (most images still untagged) the
-# partial index is NOT selective and a scan is unavoidable, so the SELECT runs under a
-# generous batch statement_timeout (the 2-min pooler default is an OLTP limit, wrong for a
-# backfill). Region scope lets the operator make one kraj's dedup ready first
-# (app_settings.clip_tagging_priority_region_ids, ordered) — drained before the global
-# newest-first fallback that covers every remaining region + the region-NULL (foreign) tail.
+# (images_needs_clip_{id,lid}_idx, migration 232 + 359) that become selective as coverage
+# rises, so the SELECT trends to sub-second. During the initial bulk backfill (most images
+# still untagged) the partial index is NOT selective and a scan is unavoidable, so the
+# SELECT runs under a generous batch statement_timeout (the 2-min pooler default is an
+# OLTP limit, wrong for a backfill). Region scope lets the operator make one kraj's dedup
+# ready first (app_settings.clip_tagging_priority_region_ids, ordered) — drained before
+# the global newest-first fallback that covers every remaining region + the region-NULL
+# (foreign) tail.
+#
+# Both arms key the images<->listings join on the surrogate listing_id/id, NOT
+# sreality_id: images.listing_id is fully populated + NOT NULL-enforced (migration 350,
+# every portal's writer resolves it), while sreality_id goes NULL for every non-sreality
+# row once the Gate-2 flip lands. A sreality_id-keyed INNER join (the region arm's old
+# form) would then silently exclude those rows forever — not merely lag, a permanent
+# region-priority blind spot for every non-sreality portal, with no error anywhere.
 _SELECT_REGION = """
     SELECT i.id, i.storage_path, (l.is_active IS TRUE) AS is_active
     FROM listings l
-    JOIN images i ON i.sreality_id = l.sreality_id
+    JOIN images i ON i.listing_id = l.id
     WHERE l.region_id = %(region)s
       AND i.clip_tagged_at IS NULL AND i.storage_path IS NOT NULL
       AND (%(shards)s = 1 OR i.id %% %(shards)s = %(shard)s)
@@ -52,7 +60,7 @@ _SELECT_REGION = """
 _SELECT_GLOBAL = """
     SELECT i.id, i.storage_path, (l.is_active IS TRUE) AS is_active
     FROM images i
-    LEFT JOIN listings l ON l.sreality_id = i.sreality_id
+    LEFT JOIN listings l ON l.id = i.listing_id
     WHERE i.clip_tagged_at IS NULL AND i.storage_path IS NOT NULL
       AND (%(shards)s = 1 OR i.id %% %(shards)s = %(shard)s)
     ORDER BY i.id DESC

@@ -347,12 +347,25 @@ def test_parity_wrong_surrogate_fails() -> None:
 
 
 def test_parity_pair_carrier_reports_each_side() -> None:
-    res = _parity(_all_carrier_names(), {"listing_visual_matches": (1, 0, 2, 0, 50)})
+    # (gap_a, mismatch_a, orphan_a, gap_b, mismatch_b, orphan_b, scanned)
+    res = _parity(_all_carrier_names(), {"listing_visual_matches": (1, 0, 0, 2, 0, 0, 50)})
     assert res["status"] == "fail"
     assert res["details"]["gaps"] == {
         "listing_visual_matches.listing_id_a": 1,
         "listing_visual_matches.listing_id_b": 2,
     }
+
+
+def test_parity_orphan_null_legacy_and_null_surrogate_is_reported() -> None:
+    """Post-Gate-2-flip shape: a new non-sreality row has NULL legacy id by design,
+    so the gap/mismatch filters (both anchored on legacy IS NOT NULL) can't see it —
+    only the orphan bucket (legacy IS NULL and surrogate IS NULL too) catches it."""
+    res = _parity(_all_carrier_names(), {"images": (0, 0, 3, 50)})
+    assert res["status"] == "fail"
+    assert res["details"]["gaps"] == {}
+    assert res["details"]["mismatches"] == {}
+    assert res["details"]["orphans"] == {"images.listing_id": 3}
+    assert res["value"] == 3
 
 
 def test_parity_registry_is_the_shared_one() -> None:

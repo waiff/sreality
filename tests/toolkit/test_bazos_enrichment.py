@@ -223,6 +223,49 @@ def test_select_pending_skips_null_sreality_id_gate2():
     assert "l.sreality_id IS NOT NULL" in conn2.cur.sql
 
 
+def test_count_null_identity_skipped():
+    """Diagnostic-only companion to the guard above: surfaces how many rows it's
+    excluding so a post-Gate-2-flip backlog is visible in the run log instead of
+    only discoverable by reading _select_pending's SQL."""
+    import importlib
+
+    m = importlib.import_module("scripts.enrich_listing_descriptions")
+
+    class _Cur:
+        def __init__(self, n: int) -> None:
+            self.n = n
+            self.sql = ""
+            self.params: Any = None
+
+        def execute(self, sql: str, params: Any = None) -> None:
+            self.sql, self.params = sql, params
+
+        def fetchone(self):
+            return (self.n,)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    class _Conn:
+        def __init__(self, n: int) -> None:
+            self.cur = _Cur(n)
+
+        def cursor(self):
+            return self.cur
+
+    conn = _Conn(0)
+    assert m._count_null_identity_skipped(conn, source="bazos") == 0
+    assert "l.sreality_id IS NULL" in conn.cur.sql
+    assert "l.source = %s" in conn.cur.sql
+    assert conn.cur.params == ("bazos",)
+
+    conn2 = _Conn(42)
+    assert m._count_null_identity_skipped(conn2, source="bazos") == 42
+
+
 # ----------------------------------------------------------------------
 # LLM call contract: slim tool, forced tool_choice, negative cache
 # ----------------------------------------------------------------------

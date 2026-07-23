@@ -408,7 +408,17 @@ export interface TargetSpecIn {
 }
 
 export interface ComparableUsed {
-  sreality_id: number;
+  /* Surrogate `listing_id` (api/estimate_yield.py:_used_entry, since #879/#892).
+   * Present on every run finalised after that ship; ABSENT (not null — the key
+   * itself is missing) on the ~600 frozen pre-cutover rows, which carry
+   * sreality_id only (estimation_runs rows are immutable, rule 12). A comparable
+   * always has at least one of {listing_id, sreality_id} — prefer listing_id for
+   * identity (React keys, map marker ids, batch-fetch routing) since it survives
+   * the post-flip NULL sreality_id case a non-sreality-portal comparable can hit. */
+  listing_id?: number | null;
+  /* NULL for a post-Gate-2-flip non-sreality-portal comparable (flip not live
+   * yet, so always populated today) — never assume non-null. */
+  sreality_id: number | null;
   snapshot_id: number | null;
   snapshot_date: string | null;
   data_age_days: number | null;
@@ -513,6 +523,12 @@ export interface EstimationRun {
   status: EstimationStatus;
   input_url: string | null;
   input_sreality_id: number | null;
+  /* Gate 2 surrogate twin of input_sreality_id (stamped by #914), the only
+   * handle for a post-Gate-2 non-sreality subject (input_sreality_id NULL).
+   * Null on rows written before #914 and on unresolved subjects (no matched
+   * listings row at all). Not yet consumed for routing — the existing
+   * input_sreality_id-gated links below are a documented separate cutover. */
+  input_listing_id: number | null;
   input_spec: TargetSpecIn | null;
   /* Discriminator added in migration 029. Null on legacy rows
    * predating the migration — readers should treat null as 'rent'. */
@@ -1459,7 +1475,8 @@ export const manualEstimateSourceLabel = (kind: ManualEstimateSourceKind): strin
 
 export interface ManualRentalEstimate {
   id: number;
-  sreality_id: number;
+  sreality_id: number | null;
+  listing_id: number | null;
   rent_czk: number;
   author: string;
   source_kind: ManualEstimateSourceKind;

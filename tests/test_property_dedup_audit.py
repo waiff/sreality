@@ -63,15 +63,18 @@ def _audit_row(
     )
 
 
-def test_property_id_scopes_both_count_and_page_by_sreality_id() -> None:
+def test_property_id_scopes_both_count_and_page_by_surrogate_listing_id() -> None:
+    # Scoped via left/right_listing_id (surrogate, always populated) -- NOT
+    # sreality_id, which is NULL for a post-Gate-2 non-sreality child listing and
+    # would silently drop it from the property's decision history.
     conn = _FakeConn(total=1, page_rows=[_audit_row()])
     out = dedup.list_pair_audit(conn, property_id=335901, outcome="merged")
     sqls = [s for s, _ in conn.executed]
     assert len(sqls) == 2
     for s in sqls:
-        assert "a.left_sreality_id IN" in s
-        assert "a.right_sreality_id IN" in s
-        assert "FROM listings WHERE property_id = %(audit_pid)s" in s
+        assert "a.left_listing_id IN" in s
+        assert "a.right_listing_id IN" in s
+        assert "(SELECT id FROM listings WHERE property_id = %(audit_pid)s)" in s
     for _, params in conn.executed:
         assert params["audit_pid"] == 335901
         assert params["outcome"] == "merged"
@@ -202,7 +205,9 @@ def test_property_id_in_batches_many_properties_with_any() -> None:
     conn = _FakeConn(total=1, page_rows=[_audit_row()])
     dedup.list_pair_audit(conn, property_id_in=[10, 20, 30])
     for s, params in conn.executed:
-        assert "property_id = ANY(%(audit_pids)s)" in s
+        assert "a.left_listing_id IN" in s
+        assert "a.right_listing_id IN" in s
+        assert "(SELECT id FROM listings WHERE property_id = ANY(%(audit_pids)s))" in s
         assert params["audit_pids"] == [10, 20, 30]
 
 
@@ -232,6 +237,20 @@ def test_read_path_resolves_self_paired_rows_from_the_merge_ledger() -> None:
     page_sql = next(s for s, _ in conn.executed if "ORDER BY a.run_at DESC" in s)
     assert "CASE WHEN a.left_sreality_id = a.right_sreality_id" in page_sql
     assert "property_merge_events" in page_sql
+
+
+def test_ledger_side_sql_guards_against_a_null_in_the_moved_array() -> None:
+    # property_merge_events.listing_id is legacy SREALITY-valued and NULL for a
+    # moved post-Gate-2 non-sreality listing, so array_agg(listing_id) can itself
+    # contain a NULL. `col = ANY(array-with-NULL)` is NULL (not false), which would
+    # NULL out `NOT (...)` for every row and starve the survivor-side subquery to
+    # empty. The generated SQL must filter that NULL out AND coalesce the
+    # (possibly all-NULL) array before the `= ANY(...)` comparison.
+    conn = _FakeConn(total=1, page_rows=[_audit_row()])
+    dedup.list_pair_audit(conn)
+    page_sql = next(s for s, _ in conn.executed if "ORDER BY a.run_at DESC" in s)
+    assert "array_agg(listing_id) FILTER (WHERE listing_id IS NOT NULL)" in page_sql
+    assert "ANY(COALESCE(_ev.moved, ARRAY[]::bigint[]))" in page_sql
     assert "survivor_property_id" in page_sql
     assert "array_agg(listing_id)" in page_sql
 

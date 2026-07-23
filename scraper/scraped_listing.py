@@ -110,9 +110,12 @@ class ScrapedListing:
         blob = json.dumps(payload, sort_keys=True, default=str, ensure_ascii=False)
         return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
-    def to_row(self, sreality_id: int) -> dict[str, Any]:
+    def to_row(self, sreality_id: int | None) -> dict[str, Any]:
         """The dict scraper.db.upsert_listing consumes. Listing columns this
-        contract doesn't carry default to NULL via upsert_listing's row.get."""
+        contract doesn't carry default to NULL via upsert_listing's row.get.
+        `sreality_id` is None once the Gate-2 flip-writer (scraper.db's
+        `gate2_null_sreality_id_enabled` app_settings flag) is turned on for a
+        first-sight non-sreality row — NULL, not a synthetic negative."""
         row: dict[str, Any] = {k: getattr(self, k) for k in _LISTING_FIELDS}
         row["sreality_id"] = sreality_id
         row["lon"] = self.lon

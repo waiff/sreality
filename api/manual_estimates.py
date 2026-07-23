@@ -27,7 +27,7 @@ if TYPE_CHECKING:
 
 
 _COLS = (
-    "id", "sreality_id", "rent_czk", "author", "source_kind", "notes",
+    "id", "sreality_id", "listing_id", "rent_czk", "author", "source_kind", "notes",
     "created_at", "updated_at",
 )
 _SELECT = ", ".join(_COLS)
@@ -141,15 +141,18 @@ def _fetch_estimate(
 
 
 def _to_estimate(row: tuple[Any, ...]) -> dict[str, Any]:
+    # sreality_id is NULL for non-sreality-portal listings post-Gate-2-flip
+    # (int(None) would crash); listing_id is the surrogate that's always present.
     return {
         "id":          int(row[0]),
-        "sreality_id": int(row[1]),
-        "rent_czk":    int(row[2]),
-        "author":      row[3],
-        "source_kind": row[4],
-        "notes":       row[5],
-        "created_at":  _iso(row[6]),
-        "updated_at":  _iso(row[7]),
+        "sreality_id": int(row[1]) if row[1] is not None else None,
+        "listing_id":  int(row[2]) if row[2] is not None else None,
+        "rent_czk":    int(row[3]),
+        "author":      row[4],
+        "source_kind": row[5],
+        "notes":       row[6],
+        "created_at":  _iso(row[7]),
+        "updated_at":  _iso(row[8]),
     }
 
 

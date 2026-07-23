@@ -106,7 +106,11 @@ export default function ManualEstimatesBlock({
         <ul className="mt-3 space-y-3">
           {estimates.map((e) => (
             <li key={e.id}>
-              <EstimateRow estimate={e} onChange={invalidate} />
+              <EstimateRow
+                sreality_id={sreality_id}
+                estimate={e}
+                onChange={invalidate}
+              />
             </li>
           ))}
         </ul>
@@ -116,9 +120,11 @@ export default function ManualEstimatesBlock({
 }
 
 function EstimateRow({
+  sreality_id,
   estimate,
   onChange,
 }: {
+  sreality_id: number;
   estimate: ManualRentalEstimate;
   onChange: () => void;
 }) {
@@ -132,7 +138,7 @@ function EstimateRow({
   if (editing) {
     return (
       <EstimateForm
-        sreality_id={estimate.sreality_id}
+        sreality_id={sreality_id}
         initial={estimate}
         onSaved={() => {
           setEditing(false);
