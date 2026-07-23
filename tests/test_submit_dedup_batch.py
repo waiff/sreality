@@ -90,11 +90,14 @@ class _FakeProvider:
 
 def _row(
     req_id: int, *, custom_id: str, kind: str = "compare", model: str = "claude-sonnet-4-5",
-    a: int = 1, b: int | None = 2, room_type: str | None = "kitchen",
+    a: int | None = 1, b: int | None = 2,
+    listing_id_a: int | None = None, listing_id_b: int | None = None,
+    room_type: str | None = "kitchen",
     image_ids: list[int] | None = None, request_params: dict[str, Any] | None = None,
 ) -> tuple[Any, ...]:
     return (
-        req_id, custom_id, kind, model, a, b, room_type, image_ids,
+        req_id, custom_id, kind, model, a, b, listing_id_a, listing_id_b,
+        room_type, image_ids,
         request_params or {"model": model, "system": "s", "messages": [], "tools": []},
     )
 
@@ -211,9 +214,9 @@ def test_flush_chunks_by_request_count_cap(monkeypatch: Any) -> None:
 
 def test_kind_counts_groups_by_kind() -> None:
     reqs = [
-        sub._SpooledReq(1, "cls-1", "classify", "m", 1, None, None, None, {}),
-        sub._SpooledReq(2, "cmp-1-2-k", "compare", "m", 1, 2, "kitchen", None, {}),
-        sub._SpooledReq(3, "cmp-1-2-b", "compare", "m", 1, 2, "bathroom", None, {}),
+        sub._SpooledReq(1, "cls-1", "classify", "m", 1, None, None, None, None, None, {}),
+        sub._SpooledReq(2, "cmp-1-2-k", "compare", "m", 1, 2, None, None, "kitchen", None, {}),
+        sub._SpooledReq(3, "cmp-1-2-b", "compare", "m", 1, 2, None, None, "bathroom", None, {}),
     ]
     assert sub._kind_counts(reqs) == {"classify": 1, "compare": 2}
 
@@ -228,3 +231,17 @@ def test_fetch_spooled_maps_rows_to_dataclass() -> None:
     assert out[0].kind == "compare"
     assert out[0].sreality_id_a == 1
     assert out[0].sreality_id_b == 2
+    assert out[0].listing_id_a is None
+    assert out[0].listing_id_b is None
+
+
+def test_fetch_spooled_tolerates_null_sreality_id_gate2_row() -> None:
+    """Gate 2 regression: a spooled side identified only by listing_id (NULL
+    sreality_id_a) must not crash the whole fetch (wave-5 audit finding #3)."""
+    rows = [_row(1, custom_id="cmp-1-2-kitchen", a=None, listing_id_a=501, listing_id_b=502)]
+    conn = _FakeConn(spooled=rows)
+    out = sub._fetch_spooled(conn, limit=10)
+    assert len(out) == 1
+    assert out[0].sreality_id_a is None
+    assert out[0].listing_id_a == 501
+    assert out[0].listing_id_b == 502

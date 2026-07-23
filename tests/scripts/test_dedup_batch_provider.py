@@ -71,9 +71,12 @@ class _FakeProvider:
 
 
 def _row(req_id: int, *, custom_id: str, kind: str, model: str,
-         a: int = 1, b: int | None = 2, room_type: str | None = "kitchen") -> tuple[Any, ...]:
+         a: int | None = 1, b: int | None = 2,
+         listing_id_a: int | None = None, listing_id_b: int | None = None,
+         room_type: str | None = "kitchen") -> tuple[Any, ...]:
     return (
-        req_id, custom_id, kind, model, a, b, room_type, [1],
+        req_id, custom_id, kind, model, a, b, listing_id_a, listing_id_b,
+        room_type, [1],
         {"model": model, "system": "s", "messages": [], "tools": []},
     )
 
