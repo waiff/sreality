@@ -921,6 +921,11 @@ export interface PipelineBoardCard {
   board_position: number;
   entered_stage_at: string;
   sreality_id: number | null;
+  /* Representative listing's portal + native id (migration 091) — builds the
+   * canonical `/listing/{source}/{native}` link so the card never flashes the
+   * negative synthetic id; null on pre-091 rows → legacy/property fallback. */
+  source: string | null;
+  source_id_native: string | null;
   /* The representative listing's SURROGATE id (properties_public.listing_id,
    * migration 343) — never null in practice. Use this for the card's link and
    * for keying image/broker lookups; sreality_id may be NULL for a

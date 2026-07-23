@@ -710,6 +710,7 @@ function Card({
     <Link
       ref={setWrapperEl}
       to={listingRowPath(r)}
+      state={{ listingId: r.listing_id }}
       onMouseEnter={() => onHover([r.listing_id])}
       onMouseLeave={() => onHover(null)}
       className={wrapperClass}

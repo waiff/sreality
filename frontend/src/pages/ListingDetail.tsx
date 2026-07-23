@@ -79,18 +79,31 @@ export default function ListingDetail() {
   // legacy numeric URL when it has a sreality_id to put in it).
   const legacyId = idParam && /^-?\d+$/.test(idParam) ? Number(idParam) : null;
 
+  // In-SPA navs (Browse cards/table) seed the repr child's surrogate id via Link
+  // `state`, so the canonical route can skip the natural-key round trip below and
+  // load the listing directly. Cold loads / shared links / map popups (a raw
+  // <a href> can't carry router state) have no seed and fall back to the resolver.
+  const stateListingId =
+    (location.state as { listingId?: number } | null)?.listingId ?? null;
+
   // Canonical route /listing/{source}/{native}: resolve the natural key
   // (migration 091) to the listing's SURROGATE id (R2 Phase C cutover — was
   // sreality_id, which a future non-sreality row created after Gate 2 may not
-  // have at all), then reuse the id-keyed loaders.
+  // have at all), then reuse the id-keyed loaders. Disabled when `state` already
+  // carries the surrogate id (in-SPA nav fast path).
   const natKeyQ = useQuery<number | null, Error>({
     queryKey: ['listing-natkey', natSourceParam, natIdParam],
     queryFn: () =>
       fetchListingIdByNaturalKey(natSourceParam as string, natIdParam as string),
-    enabled: !!natSourceParam && !!natIdParam,
+    enabled: !!natSourceParam && !!natIdParam && stateListingId == null,
     staleTime: 60_000,
   });
-  const unresolved = legacyId == null && natKeyQ.data == null;
+  // The surrogate id the id-keyed loaders use: the seeded one when present, else
+  // whatever the natural-key resolver returned. Both name the SAME row — the
+  // Browse row that supplied the canonical URL also supplied its `listing_id`, so
+  // the seed can never disagree with what the resolver would find for that key.
+  const resolvedListingId = stateListingId ?? natKeyQ.data ?? null;
+  const unresolved = legacyId == null && resolvedListingId == null;
 
   // /listing?property=ID (the dedup merge feed links this) → resolve the
   // property's representative listing and redirect to its detail page. Only when
@@ -124,12 +137,12 @@ export default function ListingDetail() {
   // natKeyQ just resolved. Never both — legacyId and the natural-key params are
   // mutually exclusive route matches.
   const listingQ = useQuery<ListingPublic | null, Error>({
-    queryKey: ['listing', legacyId, natKeyQ.data],
+    queryKey: ['listing', legacyId, resolvedListingId],
     queryFn: () =>
       legacyId != null
         ? fetchListingBySreality(legacyId)
-        : fetchListingById(natKeyQ.data as number),
-    enabled: legacyId != null || natKeyQ.data != null,
+        : fetchListingById(resolvedListingId as number),
+    enabled: legacyId != null || resolvedListingId != null,
     staleTime: 60_000,
   });
 
@@ -286,7 +299,8 @@ export default function ListingDetail() {
     // there's no such property/listing.
     const resolvingProperty =
       propertyId != null && (reprQ.isLoading || reprQ.data != null);
-    const resolvingNatural = !!natSourceParam && !!natIdParam && natKeyQ.isLoading;
+    const resolvingNatural =
+      !!natSourceParam && !!natIdParam && stateListingId == null && natKeyQ.isLoading;
     if (resolvingProperty || resolvingNatural) {
       return (
         <Page>
