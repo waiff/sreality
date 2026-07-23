@@ -444,6 +444,9 @@ class _Resolution:
     # subject with no resolved listings row — lets the UI render the subject like
     # a listing. None when input_sreality_id is set (the UI reads listings_public).
     subject_attributes: dict[str, Any] | None = None
+    # Surrogate twin of input_sreality_id (Gate 2): the only handle that can
+    # identify a post-Gate-2 subject listing, which carries sreality_id=NULL.
+    input_listing_id: int | None = None
 
 
 _EMPTY_RESOLUTION = _Resolution(
@@ -522,6 +525,7 @@ def execute_pending_run(
     try:
         target = _build_target(
             resolution.target_spec, resolution.input_sreality_id,
+            resolution.input_listing_id,
         )
         filters = _build_filters(body, load_filter_defaults(conn))
     except Exception as exc:  # noqa: BLE001
@@ -855,7 +859,10 @@ def create_estimation_run(
         )
 
     try:
-        target = _build_target(resolution.target_spec, resolution.input_sreality_id)
+        target = _build_target(
+            resolution.target_spec, resolution.input_sreality_id,
+            resolution.input_listing_id,
+        )
         filters = _build_filters(body, load_filter_defaults(conn))
     except Exception as exc:
         LOG.warning("target/filters build failed: %s", exc)
@@ -902,6 +909,7 @@ def create_estimation_run(
         estimate_kind=body.estimate_kind,
         input_url=resolution.input_url,
         input_sreality_id=resolution.input_sreality_id,
+        input_listing_id=resolution.input_listing_id,
         input_spec=resolution.target_spec,
         input_purchase_price_czk=body.purchase_price_czk,
         estimated_monthly_rent_czk=None,
@@ -990,6 +998,7 @@ def _execute_estimation_run_background(
             try:
                 target = _build_target(
                     resolution.target_spec, resolution.input_sreality_id,
+                    resolution.input_listing_id,
                 )
                 filters = _build_filters(body, load_filter_defaults(conn))
             except Exception as exc:
@@ -1418,7 +1427,7 @@ def _match_listing_by_url(
     canon = source_dispatcher.canonical_url(url)
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT sreality_id, "
+            "SELECT sreality_id, id AS listing_id, "
             "ST_Y(geom::geometry) AS lat, ST_X(geom::geometry) AS lng, "
             "area_m2, disposition, floor, price_czk, category_type "
             "FROM listings "
@@ -1429,17 +1438,20 @@ def _match_listing_by_url(
             {"url": url, "canon": canon},
         )
         row = cur.fetchone()
-    if row is None or row[1] is None or row[2] is None:
+    if row is None or row[2] is None or row[3] is None:
         return None
     return {
-        "sreality_id": int(row[0]),
+        # NULL for a post-Gate-2 (non-sreality) listing — listing_id is the
+        # handle that always resolves.
+        "sreality_id": int(row[0]) if row[0] is not None else None,
+        "listing_id": int(row[1]),
         "spec": {
-            "lat": float(row[1]), "lng": float(row[2]),
-            "area_m2": float(row[3]) if row[3] is not None else None,
-            "disposition": row[4], "floor": row[5], "exclude_ids": [],
+            "lat": float(row[2]), "lng": float(row[3]),
+            "area_m2": float(row[4]) if row[4] is not None else None,
+            "disposition": row[5], "floor": row[6], "exclude_ids": [],
         },
-        "price_czk": row[6],
-        "category_type": row[7],
+        "price_czk": row[7],
+        "category_type": row[8],
     }
 
 
@@ -1611,6 +1623,7 @@ def _resolve_input(
                     subject_listing_price_czk=_coerce_int(matched.get("price_czk")),
                     subject_listing_category_type=matched.get("category_type"),
                     subject_attributes=None,
+                    input_listing_id=matched["listing_id"],
                 )
 
         result = source_dispatcher.parse_listing_url(
@@ -1745,6 +1758,7 @@ def _persist_failed_run(
         estimate_kind=body.estimate_kind,
         input_url=resolution.input_url,
         input_sreality_id=resolution.input_sreality_id,
+        input_listing_id=resolution.input_listing_id,
         input_spec=resolution.target_spec,
         input_purchase_price_czk=body.purchase_price_czk,
         estimated_monthly_rent_czk=None,
@@ -1911,12 +1925,16 @@ def _reference_rent_for_run(
 def _build_target(
     spec: dict[str, Any] | None,
     input_sreality_id: int | None = None,
+    input_listing_id: int | None = None,
 ) -> TargetSpec:
     if spec is None:
         raise ValueError("target_spec is required to build a TargetSpec")
     exclude_ids = list(spec.get("exclude_ids") or [])
     if input_sreality_id is not None and input_sreality_id not in exclude_ids:
         exclude_ids.append(int(input_sreality_id))
+    exclude_listing_ids = []
+    if input_listing_id is not None:
+        exclude_listing_ids.append(int(input_listing_id))
     return TargetSpec(
         lat=float(spec["lat"]),
         lng=float(spec["lng"]),
@@ -1924,6 +1942,7 @@ def _build_target(
         disposition=spec.get("disposition"),
         floor=spec.get("floor"),
         exclude_ids=exclude_ids,
+        exclude_listing_ids=exclude_listing_ids,
     )
 
 
@@ -2160,12 +2179,16 @@ def _insert_run(
     cols = list(_INSERT_COLUMNS)
     values = [f"%({c})s" for c in cols]
     # Dual-write (migration 324): stamp the surrogate listings.id alongside the
-    # legacy smart key, resolved inline so no extra round-trip is needed.
+    # legacy smart key. Prefer an explicit input_listing_id from the caller's
+    # resolution (Gate 2: the only handle for a NULL-sreality_id subject) and
+    # fall back to the inline subquery for legacy sreality-anchored callers.
     _sid_at = cols.index("input_sreality_id")
     cols.insert(_sid_at + 1, "input_listing_id")
+    fields.setdefault("input_listing_id", None)
     values.insert(
         _sid_at + 1,
-        "(SELECT id FROM listings WHERE sreality_id = %(input_sreality_id)s)",
+        "COALESCE(%(input_listing_id)s, "
+        "(SELECT id FROM listings WHERE sreality_id = %(input_sreality_id)s))",
     )
     # Optional worker-lane execution snapshot (migration 349). Kept out of
     # _RUN_COLUMNS so it never rides the API read surface; only ever present when

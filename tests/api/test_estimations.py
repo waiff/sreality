@@ -1115,9 +1115,9 @@ def test_match_listing_by_url_casts_numeric_area_to_float():
     import json
     from decimal import Decimal
 
-    # row: sreality_id, lat, lng, area_m2(numeric->Decimal), disposition,
-    #      floor, price_czk, category_type
-    row = (-70120, 50.4208, 14.9016, Decimal("108.0"), "2+kk", 3, 6299000, "prodej")
+    # row: sreality_id, listing_id, lat, lng, area_m2(numeric->Decimal),
+    #      disposition, floor, price_czk, category_type
+    row = (-70120, 501, 50.4208, 14.9016, Decimal("108.0"), "2+kk", 3, 6299000, "prodej")
     conn = _FakeConn(results=[row])
 
     matched = er._match_listing_by_url(
@@ -1125,6 +1125,7 @@ def test_match_listing_by_url_casts_numeric_area_to_float():
     )
 
     assert matched is not None
+    assert matched["listing_id"] == 501
     area = matched["spec"]["area_m2"]
     assert isinstance(area, float) and area == 108.0
     # The whole spec must round-trip through json — this is what psycopg's
@@ -1133,7 +1134,7 @@ def test_match_listing_by_url_casts_numeric_area_to_float():
 
 
 def test_match_listing_by_url_null_area_stays_none():
-    row = (-70120, 50.4208, 14.9016, None, "2+kk", 3, 6299000, "prodej")
+    row = (-70120, 501, 50.4208, 14.9016, None, "2+kk", 3, 6299000, "prodej")
     conn = _FakeConn(results=[row])
 
     matched = er._match_listing_by_url(
@@ -1452,6 +1453,7 @@ def test_post_known_portal_url_reuses_scraped_listing(client, monkeypatch):
     _patch_estimate(monkeypatch)
     monkeypatch.setattr(er, "_match_listing_by_url", lambda conn, url: {
         "sreality_id": -42,
+        "listing_id": 917,
         "spec": {
             "lat": 50.0, "lng": 14.4, "area_m2": 60.0,
             "disposition": "2+kk", "floor": 3, "exclude_ids": [],
@@ -1477,6 +1479,7 @@ def test_post_known_portal_url_reuses_scraped_listing(client, monkeypatch):
     assert body["subject_attributes"] is None  # UI reads listings_public instead
     inserted = state.inserts[1]
     assert inserted["input_sreality_id"] == -42
+    assert inserted["input_listing_id"] == 917
     assert inserted["subject_attributes"] is None
 
 
