@@ -60,8 +60,14 @@ class _SpooledReq:
     custom_id: str
     kind: str
     model: str
-    sreality_id_a: int
+    # Gate 2: a spooled request's identity is stored under EITHER key (the
+    # writer, toolkit.dedup_batch_defer.enqueue_deferred_request, resolves and
+    # stores both) — a post-Gate-2 side has sreality_id_*=NULL and only
+    # listing_id_* set.
+    sreality_id_a: int | None
     sreality_id_b: int | None
+    listing_id_a: int | None
+    listing_id_b: int | None
     room_type: str | None
     image_ids: list[int] | None
     request_params: dict[str, Any]
@@ -70,6 +76,7 @@ class _SpooledReq:
 def _fetch_spooled(conn: Any, *, limit: int) -> list[_SpooledReq]:
     sql = (
         "SELECT id, custom_id, kind, model, sreality_id_a, sreality_id_b, "
+        "listing_id_a, listing_id_b, "
         "room_type, image_ids, request_params "
         "FROM dedup_batch_requests WHERE batch_id IS NULL "
         "ORDER BY queued_at ASC LIMIT %s"
@@ -80,9 +87,12 @@ def _fetch_spooled(conn: Any, *, limit: int) -> list[_SpooledReq]:
     return [
         _SpooledReq(
             id=int(r[0]), custom_id=r[1], kind=r[2], model=r[3],
-            sreality_id_a=int(r[4]), sreality_id_b=int(r[5]) if r[5] is not None else None,
-            room_type=r[6], image_ids=list(r[7]) if r[7] is not None else None,
-            request_params=r[8],
+            sreality_id_a=int(r[4]) if r[4] is not None else None,
+            sreality_id_b=int(r[5]) if r[5] is not None else None,
+            listing_id_a=int(r[6]) if r[6] is not None else None,
+            listing_id_b=int(r[7]) if r[7] is not None else None,
+            room_type=r[8], image_ids=list(r[9]) if r[9] is not None else None,
+            request_params=r[10],
         )
         for r in rows
     ]
