@@ -197,7 +197,7 @@ def test_insert_run_omits_job_payload_when_none() -> None:
 def test_execute_pending_run_rehydrates_and_runs(monkeypatch: Any) -> None:
     conn = _FakeConn()
     monkeypatch.setattr(er, "load_filter_defaults", lambda conn: object())
-    monkeypatch.setattr(er, "_build_target", lambda spec, sid=None: object())
+    monkeypatch.setattr(er, "_build_target", lambda spec, sid=None, lid=None: object())
     monkeypatch.setattr(er, "_build_filters", lambda body, defaults: object())
     seen: dict[str, Any] = {}
     monkeypatch.setattr(
