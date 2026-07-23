@@ -578,6 +578,31 @@ class _FakeConn:
         return _FakeCursor(self)
 
 
+def test_create_subscription_stamps_account_id() -> None:
+    """create_subscription must write account_id into the INSERT — it is NOT NULL
+    since migration 364. The route resolves it from the caller's JWT via
+    tenant_pool.resolve_account_id and passes it here; None would be a
+    NotNullViolation by design (the route 400s first)."""
+    from api.notifications import create_subscription
+
+    acct = UUID("11111111-1111-1111-1111-111111111111")
+    script: list[tuple[Any, list[tuple[Any, ...]], int]] = [
+        (
+            lambda s: "INSERT INTO notification_subscriptions" in s,
+            [(UUID("22222222-2222-2222-2222-222222222222"),)],
+            1,
+        ),
+    ]
+    conn = _FakeConn(script)
+    create_subscription(
+        conn, name="Test", filter_spec=WatchdogFilterSpec(), account_id=acct
+    )
+    insert_sql, insert_params = conn.executed[0]
+    assert "INSERT INTO notification_subscriptions" in insert_sql
+    assert "account_id" in insert_sql
+    assert acct in insert_params
+
+
 def test_match_once_uses_per_subscription_cursor() -> None:
     """The matcher reads `last_matched_first_seen_at` per subscription
     and injects it as the `cursor` clause — proves the per-subscription
