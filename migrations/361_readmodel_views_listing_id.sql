@@ -1,4 +1,5 @@
--- 359_readmodel_views_listing_id.sql
+-- 361_readmodel_views_listing_id.sql
+-- (renumbered from 359 at merge time — collided with sibling wave-5 PRs #921/#923)
 --
 -- Gate-2 wave-5 tail, lead 6: read-model matviews/views identity.
 --

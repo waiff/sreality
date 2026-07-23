@@ -768,8 +768,8 @@ silent-green): the 25-read-model wave — health matviews (136/176/214/216; post
 rows silently vanish from health counts = silent-green blind spot), dedup/broker/image
 matviews (`category_trends_mv`, `image_storage_overview_mv`, `images_failure_overview_mv`,
 `properties_map_mv`, `snapshot_churn_24h_mv` — `dedup_funnel_resolutions_mv`,
-`dedup_llm_cost_by_category_mv` and `broker_region_type_stats` DONE, migration 359),
-remaining `*_public` views (`manual_rental_estimates_public` DONE, migration 359),
+`dedup_llm_cost_by_category_mv` and `broker_region_type_stats` DONE, migration 361),
+remaining `*_public` views (`manual_rental_estimates_public` DONE, migration 361),
 `dedup_label_events`, `portal_lookup` collapse onto `input_listing_id`
 (+ `property_estimates_public` on COALESCE), ClickUp payloads (unaffected — carry sreality
 URLs). NEVER touch: `srealityListingUrl()` stays bound to `source_id_native`
