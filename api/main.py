@@ -57,6 +57,7 @@ from api.portal_lookup import lookup_portal_listings
 from api.routes.admin import router as admin_router
 from api.routes.billing import router as billing_router
 from api.routes.resend_webhook import router as resend_webhook_router
+from api.routes.unsubscribe import router as unsubscribe_router
 from api.routes.brokers import router as brokers_router
 from api.routes.broker_review import router as broker_review_router
 from api.routes.dedup import router as dedup_router
@@ -232,6 +233,7 @@ app.include_router(admin_router)
 # GET /billing/me rides verify_jwt + the tenant pool like any per-account read.
 app.include_router(billing_router)
 app.include_router(resend_webhook_router)
+app.include_router(unsubscribe_router)
 # /notifications/* (Watchdog feed + subscription CRUD) goes through
 # the standard bearer gate — operator content, not configuration.
 app.include_router(notifications_router)
