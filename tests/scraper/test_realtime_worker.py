@@ -175,12 +175,14 @@ def test_probe_pass_filters_disabled_and_proxied(monkeypatch):
 
     asyncio.run(scenario())
     # ceskereality is proxied (USE_PROXY) and SCRAPER_PROXY_URL is unset.
-    assert ran == ["bezrealitky", "idnes", "maxima", "realitymix"]
+    # sreality (Phase 4 of portal-order-fidelity) is neither disabled nor
+    # proxied, so it runs too.
+    assert ran == ["bezrealitky", "idnes", "maxima", "realitymix", "sreality"]
     probe = state["lanes"]["probe"]
     assert probe["passes"] == 1
-    assert probe["last"]["portals"] == 4
+    assert probe["last"]["portals"] == 5
     assert probe["last"]["skipped"] == 3
-    assert probe["last"]["enqueued"] == 8
+    assert probe["last"]["enqueued"] == 10
 
 
 def test_probe_pass_includes_proxied_portal_when_env_set(monkeypatch):
@@ -232,12 +234,12 @@ def test_drain_pass_serves_only_claimable_registry_sources(monkeypatch):
     monkeypatch.setattr(rw, "_run_drain_sync", fake_drain)
     state = rw._new_state()
     asyncio.run(rw._drain_pass(asyncio.Event(), state))
-    # sreality has claimable rows but is outside the worker registry (its own
-    # */15 Actions split covers it); bazos has none.
-    assert ran == [("ceskereality", 200), ("idnes", 200)]
+    # sreality (Phase 4 of portal-order-fidelity) is now in the worker
+    # registry too, so its claimable rows drain here; bazos still has none.
+    assert ran == [("ceskereality", 200), ("idnes", 200), ("sreality", 200)]
     drain = state["lanes"]["drain"]
-    assert drain["last"]["sources"] == 2
-    assert drain["last"]["new"] == 6
+    assert drain["last"]["sources"] == 3
+    assert drain["last"]["new"] == 9
 
 
 def test_drain_pass_skips_proxied_source_without_env(monkeypatch):

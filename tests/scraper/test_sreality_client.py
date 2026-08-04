@@ -144,3 +144,57 @@ def test_iter_index_stops_cleanly_at_cap(monkeypatch):
 
     monkeypatch.setattr(client, "_get_json", fake)
     assert [e["id"] for e in client.iter_index()] == [1, 2]
+
+
+def test_fetch_index_page_returns_one_pages_results(monkeypatch):
+    # The per-page seam the probe (docs/design/portal-order-fidelity.md, Phase 4)
+    # needs: unlike iter_index (a generator that walks to exhaustion), this must
+    # return control after exactly one page regardless of the reported total.
+    client = SrealityClient(per_page=2)
+    monkeypatch.setattr(
+        client, "_get_json",
+        lambda url, params=None: {
+            "pagination": {"total": 500}, "results": [{"id": 1}, {"id": 2}],
+        },
+    )
+    assert [e["id"] for e in client.fetch_index_page(0)] == [1, 2]
+    assert client.result_size == 500
+    assert client.pages_fetched == 1
+
+
+def test_fetch_index_page_at_offset_forwards_it(monkeypatch):
+    client = SrealityClient(per_page=2)
+    seen_offsets = []
+
+    def fake(url, params=None):
+        seen_offsets.append(params["offset"])
+        return {"pagination": {"total": 10}, "results": [{"id": params["offset"]}]}
+
+    monkeypatch.setattr(client, "_get_json", fake)
+    client.fetch_index_page(6)
+    assert seen_offsets == [6]
+
+
+def test_fetch_index_page_returns_empty_at_cap(monkeypatch):
+    client = SrealityClient(per_page=2)
+
+    def fake(url, params=None):
+        resp = requests.Response()
+        resp.status_code = 422
+        raise requests.HTTPError("422", response=resp)
+
+    monkeypatch.setattr(client, "_get_json", fake)
+    assert client.fetch_index_page(9999) == []
+
+
+def test_fetch_index_page_reraises_non_cap_http_error(monkeypatch):
+    client = SrealityClient(per_page=2)
+
+    def fake(url, params=None):
+        resp = requests.Response()
+        resp.status_code = 500
+        raise requests.HTTPError("500", response=resp)
+
+    monkeypatch.setattr(client, "_get_json", fake)
+    with pytest.raises(requests.HTTPError):
+        client.fetch_index_page(0)

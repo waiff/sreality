@@ -13,8 +13,18 @@ The full findings live in the session record; the decisions are here.
 
 ## Why the pipeline is slow today (verified)
 
-Every stage is already an idempotent, resumable, newest-first drain over a Postgres queue —
-the data model needs no redesign. The latency is **cron quantization on GitHub Actions**:
+Every stage is already an idempotent, resumable drain over a Postgres queue — the data model
+needs no redesign for LATENCY. **Correction (2026-08-04, portal-order-fidelity Phase 1/4
+investigation):** "newest-first" above was an unqualified assumption, not a verified property —
+`listings.first_seen_at` (what Browse's "newest first" sort reads) is stamped at detail-drain
+WRITE time, and five independent mechanisms (priority-bucketed claiming, transaction-constant
+`enqueued_at`, thread-pool completion-order fetch, batch-constant `now()`, concurrent drain
+processes) reorder a listing between discovery and that write. See
+`docs/design/portal-order-fidelity.md` for the full analysis and the fix
+(`listings.discovery_seq`, migration 368). The latency claim in this doc is unaffected — cron
+quantization is real and independent of ordering fidelity — but the queue was never actually
+order-preserving the way this sentence implied. The latency is **cron quantization on GitHub
+Actions**:
 each hop (index walk → detail drain → image bytes → pHash → CLIP → dedup dirty drain →
 matcher) waits for its next cron tick, and GH schedules are throttled (sreality's `*/15`
 walk fires every ~61 min measured; community data shows 10–45 min delays are routine; the
@@ -38,7 +48,12 @@ settings-paced asyncio-loop pattern — matcher/outbox). It runs, as continuous 
    sort param (live-probed; page 1 is promotion-polluted), so it gets `pagination.total`
    count-delta probes (20 pairs ≈ 10 s) that trigger targeted category walks, plus a
    one-time HAR spike on the Next.js BFF (its react-query key proves `sort:'-date'`
-   exists server-side). **mmreality** — proxied, low-frequency only (cost).
+   exists server-side, still unused — see the "hard case" section of
+   `docs/design/portal-order-fidelity.md`). **Update (2026-08-04, portal-order-fidelity
+   Phase 4):** sreality also joined `REALTIME_SOURCES` with its own bespoke
+   `probe_category` (the ceskereality pattern — per-page early-stop diff, UNSPLIT since
+   the 422 is offset- not size-triggered), complementing rather than replacing the
+   count-probe lane. **mmreality** — proxied, low-frequency only (cost).
    Probes reuse the safe partial-walk primitive: diff + enqueue, `complete=False`, so a
    probe can never falsely delist (rule #3 machinery unchanged).
 2. **Continuous detail drain** off the existing SKIP LOCKED queue (multi-runtime-safe by

@@ -217,8 +217,9 @@ incident history: `docs/architecture.md` § Architectural rules.
 21. **Every portal runs through ONE shared framework (Phase 4); per-portal code is a fetcher + parser +
     config row — no per-portal branches in shared code.** `portal_base` / `portal` / `portal_runner`; one
     source-generic `listing_detail_queue`. A portal that can't prove a near-complete walk sets
-    `supports_complete_walk=false` and is never marked inactive from index absence (rule #3). The one
-    sanctioned per-portal hook is sreality's district-split.
+    `supports_complete_walk=false` and is never marked inactive from index absence (rule #3). Sanctioned
+    per-portal hooks: sreality's district-split; ceskereality's and sreality's bespoke `probe_category`
+    (neither portal's index accepts a sort param, so each implements its own early-stop discovery probe).
 22. **The deal pipeline is single-valued, property-grain operator state** (migration 205): `property_pipeline`
     holds ≤1 card per property at one `pipeline_stages` stage (a TABLE, not an enum); "bookmark" == presence of
     a row at the entry stage. It has its OWN merge reconciler (`reconcile_pipeline_on_merge`, TERMINAL-AWARE — a
