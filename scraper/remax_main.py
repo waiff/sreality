@@ -314,7 +314,8 @@ class RemaxPortal:
                 source_url=p["url"], page_kind="detail",
                 html=p["html"], http_status=p["status"],
             )
-            pk, result = db.ingest_scraped_listing(conn, p["listing"])
+            pk, result = db.ingest_scraped_listing(
+                conn, p["listing"], discovery_seq=it.discovery_seq)
             image_urls = p["listing"].raw.get("image_urls") or []
             inserted = db.record_media(conn, pk, image_urls)
             db.mark_portal_page_parsed(conn, page_id)

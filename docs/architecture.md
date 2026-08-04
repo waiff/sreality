@@ -984,7 +984,16 @@ renumber.** Navigate by area:
     the Health-visible give-up ledger. As of Phase 4 both phases run through the **shared
     `portal_runner`** (rule #21) and the queue is **source-generic** (`(source, native_id)`,
     migration 108), so this same split is how every portal scrapes — sreality is just one
-    `Portal`.
+    `Portal`. **This split does NOT preserve portal-native listing order** — priority-bucketed
+    claiming, concurrent thread-pool fetch, batch-constant `now()`, and (for 7/9 portals) two
+    independent drain processes racing the same queue all reorder a listing between discovery and
+    write (full analysis: `docs/design/portal-order-fidelity.md`). `listing_detail_queue.discovery_seq`
+    / `listings.discovery_seq` (migration 368) is a dedicated sequence assigned once at true
+    enqueue time — immune to all of the above because it's fixed before any of it happens — carried
+    through `claim_detail_batch` → `write_detail_batch` / `ingest_scraped_listing` and written
+    **once**, never on a later re-fetch (`COALESCE(listings.discovery_seq, EXCLUDED.discovery_seq)`,
+    the same shape as `source_id_native`'s preserve-if-set rail). It is the true relative-discovery-order
+    signal; `first_seen_at` (this rule's write-time stamp) is display-only going forward.
 20. **Property maintenance is dirty-set incremental (Phase 3), not a full-table recompute.**
     The writers that change a property's children — `write_detail_batch` (a content change →
     new snapshot), `mark_inactive` / `mark_listing_inactive` (delisting), `touch_listings`

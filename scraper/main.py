@@ -918,6 +918,9 @@ class SrealityPortal:
         return DrainItem(native_id=str(native_id), kind=fr.kind, payload=fr, error=error)
 
     def write_details(self, conn: Any, items: list[DrainItem]) -> dict[str, int]:
+        for it in items:
+            if it.payload is not None:
+                it.payload.discovery_seq = it.discovery_seq
         return db.write_detail_batch(conn, [it.payload for it in items])
 
     def mark_gone(self, conn: Any, native_id: str) -> None:
@@ -1305,6 +1308,10 @@ class FetchResult:
     content_hash: str | None = None
     error: BaseException | None = None
     source: str | None = None  # "fetch" | "parse" for kind == "error"
+    # Set post-hoc by SrealityPortal.write_details from the owning DrainItem
+    # (migration 368) — not known at fetch time, which runs before the claim's
+    # discovery_seq is looked up. See db.DetailResult.discovery_seq.
+    discovery_seq: int | None = None
 
 
 def _fetch_detail(client: SrealityClient, sid: int) -> FetchResult:

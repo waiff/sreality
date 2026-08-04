@@ -234,7 +234,8 @@ class BezrealitkyPortal:
         counts = {"new": 0, "updated": 0, "unchanged": 0, "images_discovered": 0}
         for it in items:
             listing = it.payload["listing"]
-            pk, result = db.ingest_scraped_listing(conn, listing)
+            pk, result = db.ingest_scraped_listing(
+                conn, listing, discovery_seq=it.discovery_seq)
             image_urls = listing.raw.get("image_urls") or []
             inserted = db.record_media(conn, pk, image_urls)
             if result in counts:
