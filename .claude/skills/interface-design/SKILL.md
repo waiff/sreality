@@ -288,6 +288,19 @@ Fast micro-interactions, smooth easing. Larger transitions can be slightly longe
 
 Every interactive element needs states: default, hover, active, focus, disabled. Data needs states too: loading, empty, error. Missing states feel broken.
 
+## Charts (this repo)
+
+Every time series and value axis goes through `frontend/src/lib/chartAxis.ts` — never a
+per-chart `Intl.DateTimeFormat` or hand-rolled `k`/`M` formatter. `timeAxisSpec(domain)`
+returns calendar-aligned ticks (hour/day/week/month/year) plus a tick and a tooltip
+formatter whose granularity follows the span; `valueAxisSpec(domain)` returns the domain,
+the nice-number ticks and a label formatter whose scale unit and decimals follow the step.
+Hand both `ticks` and `domain` to the recharts axis, not just the formatter — precision
+derived from anything other than the rendered step is how an axis ends up printing the same
+label twice. For a series that is already bucketed by a grain toggle, use
+`timeLabel` / `timeLabelFull(bucket, grain)`. Charts are pinned to `Europe/Prague`
+(`CHART_TZ`), so a chart reads the same for every viewer.
+
 ## Navigation Context
 
 Screens need grounding. A data table floating in space feels like a component demo, not a product. Include navigation showing where you are in the app, location indicators, and user context. When building sidebars, consider same background as main content with border separation rather than different colors.
