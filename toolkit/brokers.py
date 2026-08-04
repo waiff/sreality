@@ -1,10 +1,13 @@
 """Read-only broker intelligence queries (leaderboard, detail, contacts, listings).
 
-Mirrors the browser read layer (frontend/src/lib/brokers.ts) server-side so the
-agent, API consumers, and outreach (Phase 4) all hit the SAME public views +
-broker_leaderboard RPC — one definition of "who has what". Bearer-gated routes
-live in api/routes/brokers.py. A broker's full contact set is NOT exposed by the
-anon public views (PII), so broker_contacts here is the only path to it.
+The SAME public views + broker_leaderboard RPC the agent, API consumers, and
+outreach (Phase 4) all hit — one definition of "who has what". Every broker-*
+relation is revoked from `anon`/`authenticated` (Phase 0 Amendment A6, migration
+299 — broker PII stays dark to non-admin sessions until Wave 4 ships masked
+columns), so this module's `conn` is always a privileged (postgres/service-role)
+connection. Bearer-gated (`require_admin`) routes live in api/routes/brokers.py;
+frontend/src/lib/brokers.ts is a thin client over those routes, not a second
+implementation of these reads.
 
 Read-only — no toolkit write exception (rule #5) is added.
 """
@@ -132,14 +135,43 @@ def broker_listings(conn: Any, broker_id: int, *, limit: int = 500) -> dict[str,
                      len(rows), _iso(fresh))
 
 
-def listing_broker(conn: Any, sreality_id: int) -> dict[str, Any] | None:
-    """The broker behind one listing (listing_broker_public), or None if unattributed."""
+def listing_broker(conn: Any, listing_id: int) -> dict[str, Any] | None:
+    """The broker behind one listing (listing_broker_public), or None if unattributed.
+
+    Keyed on the surrogate `listing_id` (migration 343), not `sreality_id` — a
+    post-Gate-2 non-sreality listing has a NULL sreality_id, so a sreality-keyed
+    lookup would silently find nothing for it.
+    """
     with conn.cursor(row_factory=dict_row) as cur:
-        cur.execute("SELECT * FROM listing_broker_public WHERE sreality_id = %s", (sreality_id,))
+        cur.execute("SELECT * FROM listing_broker_public WHERE listing_id = %s", (listing_id,))
         row = cur.fetchone()
     if row is None:
         return None
-    return _envelope("listing_broker", row, {"sreality_id": sreality_id}, 1, None)
+    return _envelope("listing_broker", row, {"listing_id": listing_id}, 1, None)
+
+
+def listing_brokers_by_ids(conn: Any, listing_ids: list[int]) -> dict[str, Any]:
+    """Batched listing->broker lookup (listing_broker_public), for N-card hydration
+    (Pipeline board, Browse cards) without an N+1 round trip per card."""
+    if not listing_ids:
+        return _envelope("listing_brokers_by_ids", [], {"listing_ids": []}, 0, None)
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT * FROM listing_broker_public WHERE listing_id = ANY(%s)",
+            (listing_ids,))
+        rows = cur.fetchall()
+    return _envelope("listing_brokers_by_ids", rows, {"listing_ids": listing_ids}, len(rows), None)
+
+
+def brokers_by_ids(conn: Any, broker_ids: list[int]) -> dict[str, Any]:
+    """Batched broker-contact lookup (brokers_public), pairs with
+    listing_brokers_by_ids to fill N cards' hover contact boxes in one round trip."""
+    if not broker_ids:
+        return _envelope("brokers_by_ids", [], {"broker_ids": []}, 0, None)
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute("SELECT * FROM brokers_public WHERE broker_id = ANY(%s)", (broker_ids,))
+        rows = cur.fetchall()
+    return _envelope("brokers_by_ids", rows, {"broker_ids": broker_ids}, len(rows), None)
 
 
 def broker_contacts(conn: Any, broker_id: int) -> dict[str, Any]:

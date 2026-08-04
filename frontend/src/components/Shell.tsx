@@ -22,7 +22,9 @@ const navItems: ReadonlyArray<NavItem> = [
   { to: '/estimations', label: 'Estimations', agenda: 'estimations' },
   { to: '/watchdog',    label: 'Watchdogs', agenda: 'watchdogs' },
   { to: '/notifications', label: 'Notifications', agenda: 'notifications' },
-  { to: '/brokers',     label: 'Brokers', agenda: 'brokers' },
+  // Broker PII is dark to non-admin sessions at the DB layer until Wave 4 ships
+  // masked columns (Phase 0 Amendment A6) — admin-only, not plan-gated.
+  { to: '/brokers',     label: 'Brokers', admin: true },
   { to: '/datasets',    label: 'Datasets', admin: true },
   { to: '/outreach',    label: 'Outreach', disabled: true, admin: true,
     title: 'Outreach is paused — not available yet.' },

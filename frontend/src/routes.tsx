@@ -10,8 +10,6 @@ import ListingDetail from './pages/ListingDetail';
 import BuildingDetail from './pages/BuildingDetail';
 import EstimationDetail from './pages/EstimationDetail';
 import EstimationList from './pages/EstimationList';
-import Brokers from './pages/Brokers';
-import BrokerDetail from './pages/BrokerDetail';
 import Collections from './pages/Collections';
 import CollectionDetail from './pages/CollectionDetail';
 import Pipeline from './pages/Pipeline';
@@ -35,6 +33,10 @@ const Datasets = lazy(() => import('./pages/Datasets'));
 const Outreach = lazy(() => import('./pages/Outreach'));
 const OutreachDetail = lazy(() => import('./pages/OutreachDetail'));
 const BrokerReview = lazy(() => import('./pages/BrokerReview'));
+// Broker PII is dark to non-admin sessions at the DB layer until Wave 4 ships
+// masked columns (Phase 0 Amendment A6) — admin-gated like the rest of this block.
+const Brokers = lazy(() => import('./pages/Brokers'));
+const BrokerDetail = lazy(() => import('./pages/BrokerDetail'));
 // TODO(estimation-5 Part C1): remove DevConfidencePreview + its route
 // once design is approved and the indicator is in real use.
 const DevConfidencePreview = lazy(() => import('./pages/DevConfidencePreview'));
@@ -84,9 +86,9 @@ export const routes: RouteObject[] = [
       { path: 'estimate', element: <Navigate to="/estimations" replace /> },
       { path: 'estimations', element: <EstimationList />, handle: { title: 'Estimations' } },
       { path: 'estimation/:id', element: <EstimationDetail />, handle: { title: 'Estimation' } },
-      { path: 'brokers', element: <Brokers />, handle: { title: 'Brokers' } },
+      { path: 'brokers', element: <AdminPage><Brokers /></AdminPage>, handle: { title: 'Brokers' } },
       { path: 'brokers/review', element: <AdminPage><BrokerReview /></AdminPage>, handle: { title: 'Brokers · Review' } },
-      { path: 'brokers/:id', element: <BrokerDetail />, handle: { title: 'Broker' } },
+      { path: 'brokers/:id', element: <AdminPage><BrokerDetail /></AdminPage>, handle: { title: 'Broker' } },
       { path: 'outreach', element: <AdminPage><Outreach /></AdminPage>, handle: { title: 'Outreach' } },
       { path: 'outreach/:id', element: <AdminPage><OutreachDetail /></AdminPage>, handle: { title: 'Campaign' } },
       { path: 'building/:id', element: <BuildingDetail />, handle: { title: 'Building' } },

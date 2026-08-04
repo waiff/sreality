@@ -15,13 +15,15 @@ import {
  * per-account plan assignment (manual comps). Admin routes; the tenant nav
  * reads the same plans.agendas map via supabase RLS. */
 
+// 'brokers' deliberately excluded: /brokers is admin-only (Shell.tsx `admin: true`),
+// not plan-gated — broker PII stays dark to every non-admin session (Phase 0's A6)
+// regardless of a plan's agenda flags, so a per-plan toggle here would be inert.
 export const AGENDA_KEYS = [
   'browse',
   'pipeline',
   'estimations',
   'watchdogs',
   'notifications',
-  'brokers',
   'collections',
 ] as const;
 
@@ -31,7 +33,6 @@ const AGENDA_LABELS: Record<string, string> = {
   estimations: 'Estimations',
   watchdogs: 'Watchdogs',
   notifications: 'Notifications',
-  brokers: 'Brokers',
   collections: 'Collections',
 };
 

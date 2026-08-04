@@ -1,4 +1,4 @@
-import { supabase } from './supabase';
+import { apiGet, ApiError } from './api';
 import type { DistrictChip } from './filters';
 
 // 420731404040 -> +420 731 404 040 (display only; storage stays digit-normalized).
@@ -10,23 +10,18 @@ export function prettyPhone(p: string): string {
   return p;
 }
 
-// Broker intelligence read layer. All reads go through the anon-public views +
-// the broker_leaderboard RPC (migrations 187 / 189). No writes from the browser.
+// Broker intelligence read layer. Every broker-* view/function is revoked from
+// `anon` AND `authenticated` at the DB layer (Phase 0 Amendment A6, migration
+// 299 — broker PII stays dark to non-admin sessions until Wave 4 ships masked
+// columns), so this is a thin client over the admin-gated `/brokers/*` FastAPI
+// routes (api/routes/brokers.py), not a second implementation reading the
+// public views/RPC directly. No writes from the browser.
 
-export type GeoLevel = 'region' | 'okres';
 export type LeaderMetric =
   | 'active_property_count'
   | 'property_count'
   | 'listing_count'
   | 'active_listing_count';
-
-export interface BrokerGeoOption {
-  geo_level: GeoLevel;
-  geo_id: number;
-  name: string;
-  parent_id: number | null;
-  broker_count: number;
-}
 
 export interface BrokerLeaderRow {
   broker_id: number;
@@ -94,10 +89,31 @@ export interface BrokerListing {
 
 export interface BrokerRegionShare {
   geo_id: number;
-  name: string;
+  // The LEFT JOIN to broker_geo_options in toolkit.brokers.get_broker can miss
+  // (a geo_id with no matching admin_boundaries row) — nullable, not '—'; the
+  // fallback display string is a render concern, not a data-layer one.
+  name: string | null;
   property_count: number;
   active_property_count: number;
   listing_count: number;
+}
+
+// One distinct (kind, value) contact across a broker's identities — the full
+// reachable set for outreach, richer than BrokerPublic's primary_email/phone.
+export interface BrokerContact {
+  kind: string;
+  value: string;
+  sources: string[];
+  last_seen_at: string | null;
+}
+
+// The broker detail "dossier" — one round trip for the whole /brokers/:id page
+// (GET /brokers/{id}), mirroring toolkit.brokers.get_broker exactly.
+export interface BrokerDossier {
+  broker: BrokerPublic;
+  memberships: BrokerMembership[];
+  region_shares: BrokerRegionShare[];
+  contacts: BrokerContact[];
 }
 
 export interface LeaderboardParams {
@@ -121,8 +137,8 @@ export interface ListingBroker {
 }
 
 // Split Browse location chips into per-level admin-id arrays for the leaderboard
-// RPC. Only resolved, non-excluded chips contribute; a 'locality' chip's id is its
-// containing obec.
+// route. Only resolved, non-excluded chips contribute; a 'locality' chip's id is
+// its containing obec.
 export function chipsToGeoArrays(chips: DistrictChip[]): {
   regionIds: number[];
   okresIds: number[];
@@ -140,54 +156,49 @@ export function chipsToGeoArrays(chips: DistrictChip[]): {
   return { regionIds, okresIds, obecIds };
 }
 
-export async function fetchBrokerGeoOptions(): Promise<BrokerGeoOption[]> {
-  const { data, error } = await supabase
-    .from('broker_geo_options')
-    .select('geo_level, geo_id, name, parent_id, broker_count');
-  if (error) throw error;
-  return (data ?? []) as BrokerGeoOption[];
+// FastAPI `list[int] = Query(...)` params need a repeated key
+// (?region_ids=1&region_ids=2), not the comma-joined form `apiGet`'s plain
+// `params` object produces — build the query string by hand for these.
+function appendIds(q: URLSearchParams, key: string, ids: ReadonlyArray<number>): void {
+  for (const id of ids) q.append(key, String(id));
 }
 
 export async function fetchBrokerLeaderboard(
   p: LeaderboardParams,
 ): Promise<BrokerLeaderRow[]> {
-  const { data, error } = await supabase.rpc('broker_leaderboard', {
-    p_region_ids: p.regionIds.length ? p.regionIds : null,
-    p_okres_ids: p.okresIds.length ? p.okresIds : null,
-    p_obec_ids: p.obecIds.length ? p.obecIds : null,
-    p_category_main: p.categoryMain,
-    p_category_type: p.categoryType,
-    p_metric: p.metric,
-    p_limit: p.limit ?? 100,
-  });
-  if (error) throw error;
-  return (data ?? []) as BrokerLeaderRow[];
+  const q = new URLSearchParams();
+  appendIds(q, 'region_ids', p.regionIds);
+  appendIds(q, 'okres_ids', p.okresIds);
+  appendIds(q, 'obec_ids', p.obecIds);
+  if (p.categoryMain != null) q.set('category_main', p.categoryMain);
+  if (p.categoryType != null) q.set('category_type', p.categoryType);
+  q.set('metric', p.metric);
+  q.set('limit', String(p.limit ?? 100));
+  const res = await apiGet<{ data: BrokerLeaderRow[] }>(`/brokers/leaderboard?${q.toString()}`);
+  return res.data ?? [];
 }
 
 export async function searchBrokersByName(q: string): Promise<BrokerPublic[]> {
   const term = q.trim();
   if (term.length < 2) return [];
-  const { data, error } = await supabase
-    .from('brokers_public')
-    .select('*')
-    .ilike('display_name', `%${term}%`)
-    .order('active_property_count', { ascending: false })
-    .limit(12);
-  if (error) throw error;
-  return (data ?? []) as BrokerPublic[];
+  const res = await apiGet<{ data: BrokerPublic[] }>('/brokers/search', {
+    q: term,
+    limit: 12,
+  });
+  return res.data ?? [];
 }
 
-// Keyed on the surrogate `listing_id` (listing_broker_public.listing_id,
-// migration 343), NOT sreality_id — a post-Gate-2 non-sreality listing has a
-// NULL sreality_id, so a sreality-keyed lookup would silently find nothing.
+// Keyed on the surrogate `listing_id` (migration 343), NOT sreality_id — a
+// post-Gate-2 non-sreality listing has a NULL sreality_id, so a sreality-keyed
+// lookup would silently find nothing. Returns null for an unattributed listing.
 export async function fetchListingBroker(listingId: number): Promise<ListingBroker | null> {
-  const { data, error } = await supabase
-    .from('listing_broker_public')
-    .select('*')
-    .eq('listing_id', listingId)
-    .maybeSingle();
-  if (error) throw error;
-  return (data as ListingBroker) ?? null;
+  try {
+    const res = await apiGet<{ data: ListingBroker }>(`/brokers/by-listing/${listingId}`);
+    return res.data;
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 404) return null;
+    throw err;
+  }
 }
 
 // Batched canonical-broker lookup for many listings at once (the pipeline board
@@ -197,13 +208,11 @@ export async function fetchListingBrokersByIds(
   listingIds: ReadonlyArray<number>,
 ): Promise<Map<number, ListingBroker>> {
   if (listingIds.length === 0) return new Map();
-  const { data, error } = await supabase
-    .from('listing_broker_public')
-    .select('sreality_id, listing_id, broker_id, broker_display_name, broker_firm_label')
-    .in('listing_id', listingIds as number[]);
-  if (error) throw error;
+  const q = new URLSearchParams();
+  appendIds(q, 'listing_ids', listingIds);
+  const res = await apiGet<{ data: ListingBroker[] }>(`/brokers/by-listing?${q.toString()}`);
   const out = new Map<number, ListingBroker>();
-  for (const r of (data ?? []) as ListingBroker[]) out.set(r.listing_id, r);
+  for (const r of res.data ?? []) out.set(r.listing_id, r);
   return out;
 }
 
@@ -213,82 +222,30 @@ export async function fetchBrokersByIds(
   brokerIds: ReadonlyArray<number>,
 ): Promise<Map<number, BrokerPublic>> {
   if (brokerIds.length === 0) return new Map();
-  const { data, error } = await supabase
-    .from('brokers_public')
-    .select('*')
-    .in('broker_id', brokerIds as number[]);
-  if (error) throw error;
+  const q = new URLSearchParams();
+  appendIds(q, 'broker_ids', brokerIds);
+  const res = await apiGet<{ data: BrokerPublic[] }>(`/brokers/by-ids?${q.toString()}`);
   const out = new Map<number, BrokerPublic>();
-  for (const r of (data ?? []) as BrokerPublic[]) out.set(r.broker_id, r);
+  for (const r of res.data ?? []) out.set(r.broker_id, r);
   return out;
 }
 
-export async function fetchBroker(brokerId: number): Promise<BrokerPublic | null> {
-  const { data, error } = await supabase
-    .from('brokers_public')
-    .select('*')
-    .eq('broker_id', brokerId)
-    .maybeSingle();
-  if (error) throw error;
-  return (data as BrokerPublic) ?? null;
-}
-
-export async function fetchBrokerMemberships(
-  brokerId: number,
-): Promise<BrokerMembership[]> {
-  const { data, error } = await supabase
-    .from('broker_firm_memberships_public')
-    .select('*')
-    .eq('broker_id', brokerId)
-    .order('last_seen_at', { ascending: false });
-  if (error) throw error;
-  return (data ?? []) as BrokerMembership[];
+// The full broker-detail dossier (identity + firm memberships + regional
+// footprint + every distinct contact) in one round trip. Returns null for an
+// unknown / merged-away broker id.
+export async function fetchBrokerDossier(brokerId: number): Promise<BrokerDossier | null> {
+  try {
+    const res = await apiGet<{ data: BrokerDossier }>(`/brokers/${brokerId}`);
+    return res.data;
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 404) return null;
+    throw err;
+  }
 }
 
 export async function fetchBrokerListings(brokerId: number): Promise<BrokerListing[]> {
-  const { data, error } = await supabase
-    .from('broker_listings_public')
-    .select('*')
-    .eq('broker_id', brokerId)
-    .order('is_active', { ascending: false })
-    .order('last_seen_at', { ascending: false })
-    .limit(500);
-  if (error) throw error;
-  return (data ?? []) as BrokerListing[];
-}
-
-// The broker's regional footprint: the leaderboard matview at region grain, summed
-// across categories (disjoint per property), with region names from the geo options.
-export async function fetchBrokerRegionShares(
-  brokerId: number,
-  regionNames: Map<number, string>,
-): Promise<BrokerRegionShare[]> {
-  const { data, error } = await supabase
-    .from('broker_region_type_stats')
-    .select('geo_id, property_count, active_property_count, listing_count')
-    .eq('broker_id', brokerId)
-    .eq('geo_level', 'region');
-  if (error) throw error;
-  const byRegion = new Map<number, BrokerRegionShare>();
-  for (const r of (data ?? []) as Array<{
-    geo_id: number;
-    property_count: number;
-    active_property_count: number;
-    listing_count: number;
-  }>) {
-    const cur = byRegion.get(r.geo_id) ?? {
-      geo_id: r.geo_id,
-      name: regionNames.get(r.geo_id) ?? '—',
-      property_count: 0,
-      active_property_count: 0,
-      listing_count: 0,
-    };
-    cur.property_count += r.property_count;
-    cur.active_property_count += r.active_property_count;
-    cur.listing_count += r.listing_count;
-    byRegion.set(r.geo_id, cur);
-  }
-  return [...byRegion.values()].sort(
-    (a, b) => b.active_property_count - a.active_property_count,
-  );
+  const res = await apiGet<{ data: BrokerListing[] }>(`/brokers/${brokerId}/listings`, {
+    limit: 500,
+  });
+  return res.data ?? [];
 }
