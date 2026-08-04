@@ -72,10 +72,11 @@ def _find(executed, needle: str) -> tuple[str, Any] | None:
     return next((e for e in executed if needle in e[0]), None)
 
 
-def _result(sid: int, *, price: int, content_hash: str, images=None):
+def _result(sid: int, *, price: int, content_hash: str, images=None, discovery_seq=None):
     row = {"sreality_id": sid, "price_czk": price}
     return SimpleNamespace(
         row=row, raw={"id": sid}, content_hash=content_hash, images=images or [],
+        discovery_seq=discovery_seq,
     )
 
 
@@ -136,6 +137,29 @@ def test_write_detail_batch_dedupes_images_per_listing_sequence():
     assert len(image_objs) == 2
     assert image_objs[0] == {"sreality_id": 1, "sreality_url": "a", "sequence": 0}
     assert image_objs[1] == {"sreality_id": 1, "sreality_url": "c", "sequence": None}
+
+
+def test_write_detail_batch_carries_discovery_seq_into_listing_obj():
+    """discovery_seq (migration 368) rides through write_detail_batch onto the
+    jsonb payload untouched -- it's a queue-assigned value, not something derived
+    from the fetch/parse result."""
+    conn = _FakeConn([
+        (lambda s: "INSERT INTO listings (" in s, [(True,), (True,)]),
+        (lambda s: "INSERT INTO listing_snapshots" in s, [(0,), (0,)]),
+        (lambda s: "DELETE FROM listing_fetch_failures" in s, []),
+    ])
+    results = [
+        _result(1, price=100, content_hash="h1", discovery_seq=501),
+        _result(2, price=200, content_hash="h2", discovery_seq=None),
+    ]
+    db.write_detail_batch(conn, results)
+    upsert = _find(conn.executed, "INSERT INTO listings (")
+    listing_objs = upsert[1][0].obj
+    by_sid = {o["sreality_id"]: o["discovery_seq"] for o in listing_objs}
+    assert by_sid == {1: 501, 2: None}
+    assert "discovery_seq" in upsert[0]
+    # Set-once: a later write must never clobber a stored discovery_seq.
+    assert "discovery_seq = COALESCE(listings.discovery_seq, EXCLUDED.discovery_seq)" in upsert[0]
 
 
 def test_write_detail_batch_empty_is_noop():
@@ -263,7 +287,9 @@ def test_write_detail_batch_nulls_overflow_locality_id():
         "locality_municipality_id": 3_000_000_000,
         "street_id": 2_500_000_000,
     }
-    res = SimpleNamespace(row=row, raw={"id": 1}, content_hash="h1", images=[])
+    res = SimpleNamespace(
+        row=row, raw={"id": 1}, content_hash="h1", images=[], discovery_seq=None,
+    )
     db.write_detail_batch(conn, [res])
     obj = _find(conn.executed, "INSERT INTO listings (")[1][0].obj[0]
     assert obj["locality_municipality_id"] is None
@@ -359,15 +385,15 @@ def test_enqueue_detail_nulls_overflow_index_price():
 
 def test_claim_detail_batch_skip_locked_priority_order():
     conn = _FakeConn([
-        (lambda s: "FOR UPDATE SKIP LOCKED" in s, [("5", None, 100), ("6", "/p", None)]),
+        (lambda s: "FOR UPDATE SKIP LOCKED" in s, [("5", None, 100, 42), ("6", "/p", None, 43)]),
     ])
     claimed = db.claim_detail_batch(conn, "sreality", 50)
-    assert claimed == [("5", None, 100), ("6", "/p", None)]
+    assert claimed == [("5", None, 100, 42), ("6", "/p", None, 43)]
     sql, params = conn.executed[0]
     assert "ORDER BY priority DESC, enqueued_at" in sql
     assert "source = %s AND claimed_at IS NULL AND given_up = false" in sql
     assert "SET claimed_at = now()" in sql
-    assert "RETURNING q.native_id, q.detail_ref, q.index_price_czk" in sql
+    assert "RETURNING q.native_id, q.detail_ref, q.index_price_czk, q.discovery_seq" in sql
     assert params == ("sreality", 50)
 
 
