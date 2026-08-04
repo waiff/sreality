@@ -13,6 +13,7 @@ import {
 import { getDedupPipelineTimeline } from '@/lib/api';
 import { fmtCount } from '@/lib/format';
 import { useTokenColors } from '@/lib/useTokenColors';
+import { numericDomain, timeLabel, timeLabelFull, valueAxisSpec } from '@/lib/chartAxis';
 import GrainToggle, { type Grain } from '@/components/GrainToggle';
 
 /* How the funnel evolves over time, at Day (~2 weeks) or Hour (~2 days) grain — the same
@@ -37,27 +38,10 @@ const SERIES = [
   { key: 'dismissed', label: 'Dismissed', token: '--color-brick', axis: 'left' as const },
 ];
 
-// bucket is an ISO timestamp; the X-axis ticks are terse, the tooltip is full.
-function fmtTick(iso: string, grain: Grain): string {
-  const dt = new Date(iso);
-  return grain === 'hour'
-    ? dt.toLocaleTimeString('cs-CZ', { hour: '2-digit', minute: '2-digit' })
-    : dt.toLocaleDateString('cs-CZ', { day: 'numeric', month: 'numeric' });
-}
-
-function fmtFull(iso: string, grain: Grain): string {
-  const dt = new Date(iso);
-  return grain === 'hour'
-    ? dt.toLocaleString('cs-CZ', {
-        day: 'numeric', month: 'numeric', hour: '2-digit', minute: '2-digit',
-      })
-    : dt.toLocaleDateString('cs-CZ', { day: 'numeric', month: 'numeric', year: '2-digit' });
-}
-
-function fmtAxis(v: number): string {
-  if (v >= 1000) return `${Math.round(v / 1000)}k`;
-  return String(v);
-}
+/* Bucket labels and both count axes come from lib/chartAxis, shared with every
+ * other chart: the grain fixes the label granularity, and each axis picks its
+ * scale and decimals from its own data range (the two Y axes differ by orders
+ * of magnitude) so no two ticks can print the same text. */
 
 export default function DedupPipelineTimeline() {
   const colors = useTokenColors(TOKEN_KEYS);
@@ -68,6 +52,10 @@ export default function DedupPipelineTimeline() {
     staleTime: 5 * 60_000,
   });
   const data = q.data?.data ?? [];
+  const leftKeys = SERIES.filter((s) => s.axis === 'left').map((s) => s.key);
+  const rightKeys = SERIES.filter((s) => s.axis === 'right').map((s) => s.key);
+  const leftAxis = valueAxisSpec(numericDomain(data, leftKeys), { zeroBased: true, integer: true });
+  const rightAxis = valueAxisSpec(numericDomain(data, rightKeys), { zeroBased: true, integer: true });
   const axis = colors['--color-ink-3'] || '#7a7d86';
   const grid = colors['--color-rule'] || 'rgba(26,28,34,0.08)';
 
@@ -103,34 +91,36 @@ export default function DedupPipelineTimeline() {
               <CartesianGrid stroke={grid} vertical={false} />
               <XAxis
                 dataKey="bucket"
-                tickFormatter={(v) => fmtTick(v as string, grain)}
+                tickFormatter={(v) => timeLabel(v as string, grain)}
                 tick={{ fill: axis, fontSize: 11 }}
                 stroke={axis}
                 minTickGap={24}
               />
               <YAxis
                 yAxisId="left"
-                tickFormatter={fmtAxis}
+                domain={leftAxis.domain}
+                ticks={leftAxis.ticks}
+                tickFormatter={leftAxis.format}
                 tick={{ fill: axis, fontSize: 11 }}
                 stroke={axis}
                 width={40}
-                allowDecimals={false}
               />
               <YAxis
                 yAxisId="right"
                 orientation="right"
-                tickFormatter={fmtAxis}
+                domain={rightAxis.domain}
+                ticks={rightAxis.ticks}
+                tickFormatter={rightAxis.format}
                 tick={{ fill: axis, fontSize: 11 }}
                 stroke={axis}
                 width={44}
-                allowDecimals={false}
               />
               <Tooltip
                 isAnimationActive={false}
                 content={({ active, payload, label }) =>
                   active && payload && payload.length ? (
                     <div className="rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] px-2.5 py-1.5 text-[0.72rem] shadow-sm">
-                      <div className="text-[var(--color-ink-3)] mb-0.5">{fmtFull(label as string, grain)}</div>
+                      <div className="text-[var(--color-ink-3)] mb-0.5">{timeLabelFull(label as string, grain)}</div>
                       {SERIES.map((s) => {
                         const p = payload.find((x) => x.dataKey === s.key);
                         return (

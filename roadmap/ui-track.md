@@ -256,6 +256,22 @@ End-to-end browser flow over the U1b backend.
   pg_stat_user_indexes observation window (operator OK required);
   row-comparison keyset cursor (PostgREST can't emit it yet).
 
+### Chart axis unification (done)
+
+- One axis vocabulary for every chart: `frontend/src/lib/chartAxis.ts`
+  (`timeAxisSpec` / `valueAxisSpec` / `timeLabel`), Prague-pinned and
+  unit-tested, replacing four per-chart formatter sets. Time ticks are
+  calendar-aligned (hour/day/week/month/year) with span-driven label
+  granularity; value ticks are nice-numbered with step-driven decimals,
+  so no axis can print the same label twice (listing detail was showing
+  "červenec 26" and "3,8 M" twice each).
+- Listing detail also gained dated price-change events (exact day, old →
+  new, %), dots only where a track was really observed, and a per-track
+  change count (portal-to-portal price differences no longer counted as
+  price moves).
+- Adopted by the listing price chart, Health scrape trend, Costs, and the
+  dedup pipeline timeline.
+
 ### Phase U-Nav: Unified browse → detail navigation (next)
 
 Today the top nav exposes `Listing` and (historically) `Estimate` as
