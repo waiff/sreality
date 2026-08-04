@@ -102,8 +102,12 @@ export const CARD_PAGE_SIZE = 24;
  * (Table/Cards get it from withKeysetColumns / CARD_COLS) for the final null-safe
  * `?property=` detail-link fallback. */
 const MAP_COLS = 'listing_id,property_id,sreality_id,source,source_id_native,lat,lng,price_czk,disposition,subtype,area_m2,district,last_seen_at,is_active,tom_days';
+/* `property_id` is listed explicitly rather than arriving via withKeysetColumns:
+ * it used to come free because the tiebreak was ALWAYS property_id, but the
+ * portal-mirror lane tiebreaks on listing_id, which would have left
+ * TableRow.property_id undefined at runtime while still typed `number`. */
 const TABLE_COLS =
-  'listing_id,sreality_id,source,source_id_native,district,locality,obec,okres,street,disposition,subtype,area_m2,price_czk,first_seen_at,last_seen_at,is_active,tom_days,' +
+  'listing_id,property_id,sreality_id,source,source_id_native,district,locality,obec,okres,street,disposition,subtype,area_m2,price_czk,first_seen_at,last_seen_at,is_active,tom_days,' +
   'estate_area,usable_area,parking_lots,furnished,ownership,category_sub_cb,building_type';
 const CARD_COLS =
   'listing_id,property_id,sreality_id,source,source_id_native,district,locality,obec,okres,street,disposition,subtype,area_m2,price_czk,first_seen_at,last_seen_at,is_active,tom_days,' +
