@@ -1032,8 +1032,14 @@ renumber.** Navigate by area:
     sreality/bazos and POST for bezrealitky's GraphQL), the parser strategy, and the
     config — everything else (queue claim/complete/fail, the fetch pool, batched writes,
     completeness-gated `mark_inactive`, `scrape_runs`) is shared. A genuine per-portal need is an
-    explicit method on the `Portal` protocol, justified in review — **sreality's district-split
-    (the deep-pagination-cap workaround) inside its `walk_category` is the one sanctioned hook**.
+    explicit method on the `Portal` protocol, justified in review. Sanctioned hooks so far:
+    **sreality's district-split** (the deep-pagination-cap workaround) inside its `walk_category`;
+    **ceskereality's and sreality's bespoke `probe_category`** (both lack a sort param their
+    index accepts, so each implements its own per-page early-stop discovery probe instead of the
+    generic capped-walk-then-diff fallback `run_index_probe` otherwise uses — sreality's version,
+    added Phase 4 of the portal-order-fidelity program, is deliberately UNSPLIT: the
+    deep-pagination 422 is offset-triggered, not size-triggered, so a shallow probe never needs
+    the district-split; full rationale `docs/design/portal-order-fidelity.md`).
     The needs-detail queue is **source-generic** (`listing_detail_queue` keyed on
     `(source, native_id)` + `detail_ref`, migration 108) so every portal shares the one queue and
     the one drain. A portal that cannot prove a near-complete walk sets
