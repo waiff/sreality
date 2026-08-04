@@ -27,11 +27,24 @@
  * index seek — blocked on PostgREST not emitting row comparisons; tracked in
  * docs/design/browse-read-model.md.
  *
- * The tiebreaker is `property_id` (= `properties.id`): immutable, unique,
- * never null — the only safe choice (`sreality_id` is nullable and can be
- * re-pointed by the dedup engine). It is appended to every ORDER BY and
- * compared DESC, so a whole scrape batch that lands on one identical
- * `last_seen_at` second still has a total order.
+ * The tiebreaker defaults to `property_id` (= `properties.id`): immutable,
+ * unique, never null — the only safe choice on the property-grain read models
+ * (`sreality_id` is nullable and can be re-pointed by the dedup engine). It is
+ * appended to every ORDER BY and compared DESC, so a whole scrape batch that
+ * lands on one identical `last_seen_at` second still has a total order.
+ *
+ * It is a PARAMETER rather than a constant because of the listing-grain
+ * single-portal feed (`listing_feed_public`, migrations 369/370), where
+ * `property_id` is NOT UNIQUE and so is not a legal tiebreaker at all: a
+ * keyset tiebreaker has to impose a TOTAL order, and 7,951 properties carry
+ * more than one active listing on a single portal (18,521 rows, measured live
+ * 2026-08-04 — same-portal duplicates the dedup engine merged under one
+ * property). Anchoring a cursor on a value shared by two rows in the same
+ * result set silently skips or repeats rows at every page boundary that lands
+ * on one. That surface passes `listing_id` instead: the surrogate
+ * `listings.id`, unique and never null on either read model. Every function
+ * here takes the same `tiebreak` argument, so a caller cannot mix a
+ * `property_id` ORDER BY with a `listing_id` cursor.
  *
  * NULLS LAST two-phase: nullable sort columns (district, area_m2, …) place
  * NULLs last in both directions (`nullsFirst: false`). A cursor therefore
@@ -61,7 +74,17 @@ const NON_NULL_SORT_FIELDS = new Set<string>([
   'last_seen_at',
   'first_seen_at',
   'is_active',
+  /* listing_feed_public.portal_sort_key (migration 370). NOT NULL by
+   * construction — both halves of the composite key coalesce their NULLs to a
+   * zero-padded run rather than propagating them, precisely so this lane keeps
+   * the single-phase cursor and the `(source, portal_sort_key, id)` index. */
+  'portal_sort_key',
 ]);
+
+/* The default keyset tiebreaker — the property-grain read models' immutable
+ * unique id. See the module header for why the listing-grain portal feed
+ * overrides it with `listing_id`. */
+export const DEFAULT_KEYSET_TIEBREAK = 'property_id';
 
 /* A PostgREST filter builder, narrowed to the methods keyset needs. The
  * supabase-js query builder satisfies this at runtime; typing it
@@ -98,6 +121,7 @@ export function applyKeyset<T extends KeysetBuilder>(
   query: T,
   sort: SortSpec,
   cursor: KeysetCursor | null,
+  tiebreak: string = DEFAULT_KEYSET_TIEBREAK,
 ): T {
   const asc = sort.direction === 'asc';
   /* NULLS placement must match the serving `(col, id)` btree, or the planner
@@ -122,7 +146,7 @@ export function applyKeyset<T extends KeysetBuilder>(
     : false;
   const ordered = query
     .order(sort.field, { ascending: asc, nullsFirst: nullsLast })
-    .order('property_id', { ascending: asc }) as T;
+    .order(tiebreak, { ascending: asc }) as T;
 
   if (!cursor) return ordered;
 
@@ -132,8 +156,8 @@ export function applyKeyset<T extends KeysetBuilder>(
   if (cursor.value === null) {
     const tail = ordered.is(sort.field, null);
     return (asc
-      ? tail.gt('property_id', cursor.id)
-      : tail.lt('property_id', cursor.id)) as T;
+      ? tail.gt(tiebreak, cursor.id)
+      : tail.lt(tiebreak, cursor.id)) as T;
   }
 
   /* Phase 1 — non-null block. Disjuncts: the strictly-beyond rows, the
@@ -150,7 +174,7 @@ export function applyKeyset<T extends KeysetBuilder>(
   const v = formatKeysetValue(cursor.value);
   const terms = [
     `${sort.field}.${op}.${v}`,
-    `and(${sort.field}.eq.${v},property_id.${op}.${cursor.id})`,
+    `and(${sort.field}.eq.${v},${tiebreak}.${op}.${cursor.id})`,
   ];
   if (!NON_NULL_SORT_FIELDS.has(sort.field)) {
     terms.push(`${sort.field}.is.null`);
@@ -159,11 +183,13 @@ export function applyKeyset<T extends KeysetBuilder>(
 }
 
 /* Derive the cursor for the NEXT page from the last row of THIS page.
- * Reads the active sort column and `property_id` off the row (both are
- * guaranteed selected by the fetcher). Returns null for an empty page. */
+ * Reads the active sort column and the tiebreaker off the row (both are
+ * guaranteed selected by the fetcher via withKeysetColumns). Returns null for
+ * an empty page. */
 export function nextCursorFrom(
   rows: ReadonlyArray<Record<string, unknown>>,
   sort: SortSpec,
+  tiebreak: string = DEFAULT_KEYSET_TIEBREAK,
 ): KeysetCursor | null {
   if (rows.length === 0) return null;
   const last = rows[rows.length - 1];
@@ -172,16 +198,20 @@ export function nextCursorFrom(
     raw == null
       ? null
       : (raw as string | number | boolean);
-  return { value, id: Number(last.property_id) };
+  return { value, id: Number(last[tiebreak]) };
 }
 
-/* Ensure the SELECT carries the columns keyset needs: the tiebreaker
- * (`property_id`) and the active sort column (e.g. `price_per_m2`, a
- * computed view column not otherwise selected). Deduped, order-stable. */
-export function withKeysetColumns(baseCols: string, sort: SortSpec): string {
+/* Ensure the SELECT carries the columns keyset needs: the tiebreaker and the
+ * active sort column (e.g. `price_per_m2` / `portal_sort_key`, computed view
+ * columns not otherwise selected). Deduped, order-stable. */
+export function withKeysetColumns(
+  baseCols: string,
+  sort: SortSpec,
+  tiebreak: string = DEFAULT_KEYSET_TIEBREAK,
+): string {
   const cols = baseCols.split(',').map((c) => c.trim());
   const set = new Set(cols);
-  set.add('property_id');
+  set.add(tiebreak);
   set.add(sort.field);
   return Array.from(set).join(',');
 }
