@@ -26,6 +26,7 @@ import type {
   PipelineCardResult,
   PipelineStage,
   PortalListing,
+  RouteMessage,
   YieldScenarioUpdate,
 } from './types';
 // Shared product brand — the ONE definition (frontend/src/lib/brand.ts), the
@@ -1658,10 +1659,27 @@ function urlSaleApartmentHint(url: string): boolean | null {
 // ----------------------------------------------------------------------
 // Entry: detail pages get the panel; other pages on a known portal host
 // get the index-card overlay (a no-op if there are no listing cards).
+//
+// Several portals are SPAs (sreality's Next.js app confirmed live) that
+// navigate via the History API — no new document, so the manifest-injected
+// content script only ever runs once per real page load. `renderForUrl` is
+// re-entrant so the background worker's route_changed relay (webNavigation,
+// see background.ts) can re-run it on every soft-navigation, not just on the
+// document this script was first injected into.
 // ----------------------------------------------------------------------
 
-function main(): void {
-  const url = window.location.href;
+let lastRenderedUrl: string | null = null;
+let stopIndexOverlay: (() => void) | null = null;
+
+function renderForUrl(url: string): void {
+  if (url === lastRenderedUrl) return;  // e.g. a replaceState for scroll/query bookkeeping
+  lastRenderedUrl = url;
+
+  if (stopIndexOverlay != null) {
+    stopIndexOverlay();
+    stopIndexOverlay = null;
+  }
+
   const ref = detailRef(url);
   if (ref != null) {
     openPanel(ref, url).catch((err: unknown) => {
@@ -1669,11 +1687,19 @@ function main(): void {
     });
     return;
   }
+
+  document.getElementById(HOST_ELEMENT_ID)?.remove();
   if (portalForHost(window.location.hostname) != null) {
-    runIndexOverlay(call, openPanel).catch((err: unknown) => {
-      console.error('[mf-ext] index overlay failed', err);
-    });
+    runIndexOverlay(call, openPanel)
+      .then((stop) => { stopIndexOverlay = stop; })
+      .catch((err: unknown) => {
+        console.error('[mf-ext] index overlay failed', err);
+      });
   }
 }
 
-main();
+chrome.runtime.onMessage.addListener((message: RouteMessage) => {
+  if (message.type === 'route_changed') renderForUrl(message.url);
+});
+
+renderForUrl(window.location.href);

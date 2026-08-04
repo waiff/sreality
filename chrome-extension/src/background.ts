@@ -20,7 +20,8 @@ import {
   removePipelineCard,
 } from './api';
 import { getAuthState, refreshIfSignedIn, signInWithGoogle, signOut } from './auth';
-import type { ApiMessage, ApiResult } from './types';
+import { PORTALS } from './portals';
+import type { ApiMessage, ApiResult, RouteMessage } from './types';
 
 /* MV3 service-worker eviction kills any in-memory auto-refresh timer, so the
  * lazy per-request refresh (api.ts's getAccessToken) is backstopped by this
@@ -38,6 +39,24 @@ chrome.runtime.onStartup.addListener(() => {
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === REFRESH_ALARM) void refreshIfSignedIn();
 });
+
+/* Several portals (sreality's Next.js app confirmed live; others are React/Vue
+ * SPAs too) navigate between listings via the History API, not a fresh document
+ * load — the only thing MV3's static content_scripts re-inject on. Without this,
+ * the panel/overlay only ever reflects whatever URL was current when the script
+ * first loaded, until the operator forces a real reload. webNavigation fires
+ * uniformly for any router a portal uses, so no per-portal handling is needed;
+ * the host filter is the same PORTALS registry the content script uses, so a
+ * new portal picks this up automatically. */
+const ROUTE_FILTER = { url: PORTALS.flatMap((p) => p.hosts).map((host) => ({ hostEquals: host })) };
+
+chrome.webNavigation.onHistoryStateUpdated.addListener((details) => {
+  if (details.frameId !== 0) return;
+  const message: RouteMessage = { type: 'route_changed', url: details.url };
+  chrome.tabs.sendMessage(details.tabId, message).catch(() => {
+    /* Tab navigated away again / no listener yet — nothing to recover. */
+  });
+}, ROUTE_FILTER);
 
 chrome.runtime.onMessage.addListener(
   (

@@ -41,9 +41,15 @@ function fmtCzk(n: number | null): string {
   return n == null ? '—' : `${Math.round(n).toLocaleString('cs-CZ')} Kč`;
 }
 
-export async function runIndexOverlay(call: Caller, openPanel: OpenPanel): Promise<void> {
+/* Returns a stop() to disconnect the observer + cancel any pending scan —
+ * called when a route change (SPA soft-nav) moves the tab off an index page,
+ * so repeated navigations don't stack duplicate observers scanning the DOM. */
+export async function runIndexOverlay(
+  call: Caller, openPanel: OpenPanel,
+): Promise<() => void> {
+  const noop = (): void => {};
   const portal = portalForHost(location.hostname);
-  if (portal == null) return;
+  if (portal == null) return noop;
   injectStyle();
 
   const cache = new Map<string, PortalListing>();
@@ -79,6 +85,11 @@ export async function runIndexOverlay(call: Caller, openPanel: OpenPanel): Promi
   const obs = new MutationObserver(schedule);
   obs.observe(document.body, { childList: true, subtree: true });
   void pass();
+
+  return () => {
+    obs.disconnect();
+    if (timer != null) clearTimeout(timer);
+  };
 }
 
 function collectHits(source: string): Hit[] {

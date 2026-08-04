@@ -4,6 +4,10 @@ import { resolve } from 'node:path';
 // Shared product brand — the SAME source the SPA + content script use, so the
 // chrome://extensions display name stays linked to the one definition.
 import { EXTENSION_NAME } from '../frontend/src/lib/brand';
+// The portal registry is the single source of truth for "which hosts we run
+// on" — content_scripts.matches is computed from it below instead of hand-
+// duplicating the host list in manifest.json.
+import { PORTALS } from './src/portals';
 
 /* Two-entry build: the content script that mounts onto sreality.cz
  * detail pages, and the background service worker that owns every
@@ -74,6 +78,9 @@ export default defineConfig(({ mode }) => {
             originPermission(env.VITE_API_BASE_URL),
             originPermission(env.VITE_SUPABASE_URL),
           ].filter((o): o is string => o != null);
+          manifest.content_scripts[0].matches = PORTALS.flatMap((p) =>
+            p.hosts.map((h) => `https://${h}/*`),
+          );
           writeFileSync(
             resolve(__dirname, 'dist', 'manifest.json'),
             JSON.stringify(manifest, null, 2) + '\n',

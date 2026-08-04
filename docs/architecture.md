@@ -236,11 +236,21 @@ rules. Identify which one a task belongs to before you start.
 **Chrome-extension territory** (`chrome-extension/`):
 - Manifest v3 browser extension that overlays MF rent/yield + an estimate panel on portal
   listing pages. The content script matches **every scraped portal's host** (sreality,
-  bazos, bezrealitky, idnes, maxima, remax, mmreality, ceskereality, realitymix) — widen
-  BOTH `manifest.json` `content_scripts.matches` (so the script INJECTS there — a registry
-  entry without a match is dead) AND the registry in `src/portals.ts` (host→portal +
-  detail-URL→native-id) as new portals come online; `host_permissions` stays broad
-  `https://*/*` for the background fetch. Match patterns are exact-host, so an apex-canonical
+  bazos, bezrealitky, idnes, maxima, remax, mmreality, ceskereality, realitymix). `src/portals.ts`
+  (host→portal + detail-URL→native-id) is the single source of truth for the host list —
+  `manifest.json`'s checked-in `content_scripts.matches` is a template only; `vite.config.ts`'s
+  `closeBundle` hook overwrites it at build time from `PORTALS[].hosts` (same pattern already
+  used there for `name` + `host_permissions`), so onboarding a new portal only means adding it
+  to `src/portals.ts` — no second hand-maintained match list to keep in sync. `host_permissions`
+  is narrowed at build time to just the two live API/auth origins the background worker fetches
+  (`VITE_API_BASE_URL` + `VITE_SUPABASE_URL`), not a broad wildcard. Several portals (sreality's
+  Next.js frontend confirmed live) navigate between listings via client-side routing (History
+  API) rather than a full page load, which MV3's manifest-declared content script does NOT
+  re-inject for. `background.ts` listens for `chrome.webNavigation.onHistoryStateUpdated`
+  (`webNavigation` permission, filtered to the same `PORTALS` host list) and relays the new URL
+  to the tab's already-injected content script (`route_changed` message), which re-runs its
+  page-type decision (`renderForUrl` in `content.ts`) without needing a real reload — this
+  fixed the "panel only appears after F5" bug. Match patterns are exact-host, so an apex-canonical
   portal (e.g. `realitymix.cz`) needs its apex pattern, not just `www.`. **Detail pages** get a floating
   panel (closed shadow root). For ANY listing we have it shows a **"Přidat do pipeline"**
   deal-pipeline control (bookmark; once in, change stage via a native `<select>` + remove)
