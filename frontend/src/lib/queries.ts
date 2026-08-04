@@ -102,8 +102,12 @@ export const CARD_PAGE_SIZE = 24;
  * (Table/Cards get it from withKeysetColumns / CARD_COLS) for the final null-safe
  * `?property=` detail-link fallback. */
 const MAP_COLS = 'listing_id,property_id,sreality_id,source,source_id_native,lat,lng,price_czk,disposition,subtype,area_m2,district,last_seen_at,is_active,tom_days';
+/* `property_id` is listed explicitly rather than arriving via withKeysetColumns:
+ * it used to come free because the tiebreak was ALWAYS property_id, but the
+ * portal-mirror lane tiebreaks on listing_id, which would have left
+ * TableRow.property_id undefined at runtime while still typed `number`. */
 const TABLE_COLS =
-  'listing_id,sreality_id,source,source_id_native,district,locality,obec,okres,street,disposition,subtype,area_m2,price_czk,first_seen_at,last_seen_at,is_active,tom_days,' +
+  'listing_id,property_id,sreality_id,source,source_id_native,district,locality,obec,okres,street,disposition,subtype,area_m2,price_czk,first_seen_at,last_seen_at,is_active,tom_days,' +
   'estate_area,usable_area,parking_lots,furnished,ownership,category_sub_cb,building_type';
 const CARD_COLS =
   'listing_id,property_id,sreality_id,source,source_id_native,district,locality,obec,okres,street,disposition,subtype,area_m2,price_czk,first_seen_at,last_seen_at,is_active,tom_days,' +
@@ -114,7 +118,10 @@ export type SortField =
   | 'area_m2' | 'price_czk' | 'price_per_m2'
   | 'first_seen_at' | 'last_seen_at' | 'is_active'
   | 'estate_area' | 'usable_area' | 'parking_lots'
-  | 'mf_gross_yield_pct';
+  | 'mf_gross_yield_pct'
+  /* Portal-mirror only, never user-selectable and never in a URL — derived by
+   * portalMirrorSort() below. See the PORTAL MIRROR block. */
+  | 'portal_sort_key';
 
 export type SortDirection = 'asc' | 'desc';
 
@@ -152,6 +159,77 @@ export const parseSort = (raw: string | null): SortSpec => {
 
 export const sortToParam = (s: SortSpec): string =>
   `${s.direction === 'desc' ? '-' : ''}${s.field}`;
+
+/* -------------------------------------------------------------------------- */
+/* PORTAL MIRROR — filter to exactly one portal and Browse mirrors that        */
+/* portal's own page (docs/design/portal-order-fidelity.md, migrations 368-370)*/
+/* -------------------------------------------------------------------------- */
+/* The default Browse read models are PROPERTY-grain (rule #15): one row per
+ * real-world property, its displayed fields assembled from whichever child
+ * listing wins a trust rank. That is the right model for the market-wide view
+ * and the wrong one for "show me portal X's page", in two ways that are both
+ * measured, not theoretical (live, 2026-08-04):
+ *
+ *   - MISSING ROWS. The portal filter constrains `properties.source`, i.e. the
+ *     REPRESENTATIVE child's portal — so a property whose repr is sreality is
+ *     invisible under `portal = idnes` even when it has a perfectly good active
+ *     idnes listing. That hides 23,429 of the 109,034 properties with an active
+ *     idnes listing (21%); 19% for ceskereality and realitymix, 10% for bazos.
+ *   - WRONG FIELDS. Even for a row that IS shown, `area_m2` / `district` /
+ *     `street` / `condition` / `ownership` come from golden-record CTEs that
+ *     rank source trust ABOVE activity, so a card under "portal = bazos" can
+ *     display area and location lifted from a DELISTED sreality sibling
+ *     (root cause 3 in the design doc).
+ *
+ * With exactly one portal selected, every cohort surface switches to the
+ * listing-grain `listing_feed_public` (migrations 369 + 370) instead. That view
+ * carries the SAME filter columns and the SAME publication gate as
+ * browse_projection, so nothing about the filter engine changes — only which
+ * relation it reads. Two portals or none keeps today's deduped property view,
+ * which is exactly what dedup exists for.
+ *
+ * Deliberately NOT changed: the Stats tab. It is a property-grain RPC
+ * (browse_stats_properties); mirroring it needs a listing-grain twin, tracked
+ * as a follow-up in the design doc rather than half-done here. */
+export const portalMirrorSource = (f: ListingFilters): string | null =>
+  f.portals.length === 1 ? f.portals[0] : null;
+
+export const isPortalMirror = (f: ListingFilters): boolean =>
+  portalMirrorSource(f) != null;
+
+/* Relation names, in one place so a fetcher cannot read one grain and count
+ * another. */
+const PORTAL_FEED_RELATION = 'listing_feed_public';
+const BROWSE_LIST_RELATION = 'browse_list';
+const MAP_RELATION = 'properties_map_mv';
+
+const listRelation = (f: ListingFilters): string =>
+  isPortalMirror(f) ? PORTAL_FEED_RELATION : BROWSE_LIST_RELATION;
+
+const mapRelation = (f: ListingFilters): string =>
+  isPortalMirror(f) ? PORTAL_FEED_RELATION : MAP_RELATION;
+
+/* Keyset tiebreak — REQUIRED to differ per grain, not a stylistic choice.
+ * `property_id` is not unique on the listing-grain feed: 7,951 properties hold
+ * more than one active listing on a single portal (18,521 rows, live
+ * 2026-08-04). A keyset cursor anchored on a non-unique column skips or
+ * repeats rows at page boundaries, and the same value used as a React row key
+ * would collapse those rows out of the list entirely. `listing_id` (the
+ * surrogate `listings.id`) is unique and never null on both read models. */
+export const keysetTiebreak = (f: ListingFilters): string =>
+  isPortalMirror(f) ? 'listing_id' : 'property_id';
+
+/* "Newest first" means something different once we are mirroring a portal: not
+ * "newest in OUR archive" (first_seen_at, stamped at batched detail-drain write
+ * time and therefore scrambled — root cause 2) but "newest on THAT portal".
+ * `portal_sort_key` (migration 370) is the single fixed-width column encoding
+ * `portal_date desc nulls last, discovery_seq desc nulls last`, verified
+ * order-identical to that pair. Every other sort field the UI offers exists on
+ * the feed with listing-grain semantics and is passed through untouched. */
+export const effectiveSort = (f: ListingFilters, sort: SortSpec): SortSpec =>
+  isPortalMirror(f) && sort.field === 'first_seen_at'
+    ? { field: 'portal_sort_key', direction: sort.direction }
+    : sort;
 
 /* Escape a literal user-supplied substring for embedding in a
  * PostgREST `or=(...)` clause as the right-hand side of `ilike`.
@@ -624,8 +702,8 @@ export const fetchNoPriceCount = async (f: ListingFilters): Promise<number> => {
   const pre = await resolveBrowsePrefilters(f);
   if (pre.empty) return 0;
   const base = supabase
-    .from('browse_list')
-    .select('property_id', { count: 'exact', head: true });
+    .from(listRelation(f))
+    .select(keysetTiebreak(f), { count: 'exact', head: true });
   // Strip the price bound (and the toggle) so the count is purely "no-price
   // rows in the rest of the cohort", then restrict to NULL price.
   const noPriceFilters: ListingFilters = {
@@ -665,8 +743,16 @@ export const fetchListingsForMap = async (
    * Rebuilt from browse_projection by rebuild_properties_map_mv() (pg_cron,
    * every 30 min — migration 277); freshness readable off
    * browse_read_model_state_public. */
+  /* Single-portal mode reads the listing-grain feed here too (see the PORTAL
+   * MIRROR block). It has no matview twin, so this is a live indexed read of
+   * `listings` rather than the cached copy — acceptable because the mirror
+   * cohort is bounded by one portal (largest is idnes at ~110k active rows,
+   * measured 1.2s for a full uncapped 50k-point fetch, inside the anon 3s
+   * budget) and because plotting one portal's own listings is the entire point:
+   * property-grain pins would silently relocate a listing to a sibling
+   * portal's coordinates. */
   const base = supabase
-    .from('properties_map_mv')
+    .from(mapRelation(f))
     .select(MAP_COLS)
     .not('lat', 'is', null)
     .not('lng', 'is', null);
@@ -734,22 +820,32 @@ export const fetchListingsForTable = async (
   if (pre.empty) return { rows: [], nextCursor: null };
   /* browse_list (migration 276): the compact snapshot read model — a STABLE
    * relation under the scroll (the live table mutates last_seen_at every
-   * scrape cycle), rebuilt every 5 min from browse_projection. */
+   * scrape cycle), rebuilt every 5 min from browse_projection. Single-portal
+   * mode swaps in listing_feed_public; that one IS the live table, so a row
+   * whose last_seen_at is bumped mid-scroll can shift — harmless here because
+   * the mirror's sort key (portal_sort_key) is immutable after first write. */
+  const s = effectiveSort(f, sort);
+  const tiebreak = keysetTiebreak(f);
   const base = supabase
-    .from('browse_list')
-    .select(withKeysetColumns(TABLE_COLS, sort));
+    .from(listRelation(f))
+    .select(withKeysetColumns(TABLE_COLS, s, tiebreak));
   const scoped = applyPrefilters(applyFilters(base, f), pre);
   const keyed = applyKeyset(
     scoped as unknown as KeysetBuilder,
-    sort,
+    s,
     cursor,
+    tiebreak,
   ) as unknown as typeof scoped;
   const { data, error } = await keyed.limit(TABLE_PAGE_SIZE);
   if (error) throw error;
   const rows = (data ?? []) as unknown as TableRow[];
   return {
     rows,
-    nextCursor: nextCursorFrom(rows as unknown as Record<string, unknown>[], sort),
+    nextCursor: nextCursorFrom(
+      rows as unknown as Record<string, unknown>[],
+      s,
+      tiebreak,
+    ),
   };
 };
 
@@ -789,8 +885,8 @@ export const fetchBrowseCount = async (
     applyPrefilters(
       applyFilters(
         supabase
-          .from('browse_list')
-          .select('property_id', { count: mode, head: true }),
+          .from(listRelation(f))
+          .select(keysetTiebreak(f), { count: mode, head: true }),
         f,
       ),
       pre,
@@ -868,21 +964,25 @@ export const fetchListingsForCards = async (
 ): Promise<CardsResult> => {
   const pre = await resolveBrowsePrefilters(f);
   if (pre.empty) return { rows: [], nextCursor: null };
+  const s = effectiveSort(f, sort);
+  const tiebreak = keysetTiebreak(f);
   const base = supabase
-    .from('browse_list')
-    .select(withKeysetColumns(CARD_COLS, sort));
+    .from(listRelation(f))
+    .select(withKeysetColumns(CARD_COLS, s, tiebreak));
   const scoped = applyPrefilters(applyFilters(base, f), pre);
   const keyed = applyKeyset(
     scoped as unknown as KeysetBuilder,
-    sort,
+    s,
     cursor,
+    tiebreak,
   ) as unknown as typeof scoped;
   const { data, error } = await keyed.limit(CARD_PAGE_SIZE);
   if (error) throw error;
   const baseRows = (data ?? []) as unknown as Omit<CardRow, 'images'>[];
   const nextCursor = nextCursorFrom(
     baseRows as unknown as Record<string, unknown>[],
-    sort,
+    s,
+    tiebreak,
   );
   if (baseRows.length === 0) return { rows: [], nextCursor };
   /* Hydrate the card photos keyed on the surrogate `listing_id`, NOT sreality_id

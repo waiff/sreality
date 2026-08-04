@@ -233,3 +233,91 @@ describe('withKeysetColumns', () => {
     expect(out.split(',')).toContain('price_per_m2');
   });
 });
+
+/* ---------------------------------------------------------------------- */
+/* Portal-mirror lane: a caller-supplied tiebreaker (listing_feed_public,  */
+/* migrations 369/370, where property_id is NOT unique — 7,951 properties  */
+/* hold >1 active listing on one portal, so it cannot impose a total order)*/
+/* ---------------------------------------------------------------------- */
+
+describe('applyKeyset with a custom tiebreak', () => {
+  it('orders by the tiebreak column it was given, not property_id', () => {
+    const r = applyKeyset(
+      new Recorder(),
+      sort('portal_sort_key', 'desc'),
+      null,
+      'listing_id',
+    );
+    expect(r.calls).toEqual([
+      { m: 'order', column: 'portal_sort_key', ascending: false, nullsFirst: undefined },
+      { m: 'order', column: 'listing_id', ascending: false },
+    ]);
+  });
+
+  it('treats portal_sort_key as NOT NULL — no `is.null` disjunct to defeat the index', () => {
+    const r = applyKeyset(
+      new Recorder(),
+      sort('portal_sort_key', 'desc'),
+      { value: '000000000000' + '0'.repeat(19), id: 900 },
+      'listing_id',
+    );
+    const or = r.calls.find((c) => c.m === 'or');
+    expect(or).toBeDefined();
+    const filters = (or as { m: 'or'; filters: string }).filters;
+    expect(filters).not.toContain('portal_sort_key.is.null');
+    expect(filters).toContain('listing_id.lt.900');
+    expect(filters).not.toContain('property_id');
+  });
+
+  it('carries the tiebreak into the NULLS-LAST tail phase too', () => {
+    const r = applyKeyset(
+      new Recorder(),
+      sort('price_per_m2', 'desc'),
+      { value: null, id: 41 },
+      'listing_id',
+    );
+    expect(r.calls).toContainEqual({ m: 'lt', column: 'listing_id', value: 41 });
+    expect(r.calls.some((c) => 'column' in c && c.column === 'property_id')).toBe(false);
+  });
+
+  it('pages ASC with `>` on the tiebreak, same as the default lane', () => {
+    const r = applyKeyset(
+      new Recorder(),
+      sort('portal_sort_key', 'asc'),
+      { value: 'abc', id: 7 },
+      'listing_id',
+    );
+    const or = r.calls.find((c) => c.m === 'or') as { m: 'or'; filters: string };
+    expect(or.filters).toContain('portal_sort_key.gt."abc"');
+    expect(or.filters).toContain('and(portal_sort_key.eq."abc",listing_id.gt.7)');
+  });
+
+  it('still defaults to property_id when no tiebreak is passed', () => {
+    const r = applyKeyset(new Recorder(), sort('first_seen_at', 'desc'), null);
+    expect(r.calls[1]).toEqual({ m: 'order', column: 'property_id', ascending: false });
+  });
+});
+
+describe('nextCursorFrom / withKeysetColumns with a custom tiebreak', () => {
+  it('reads the cursor id off the given tiebreak column', () => {
+    const rows = [
+      { listing_id: 11, property_id: 999, portal_sort_key: 'k1' },
+      { listing_id: 12, property_id: 999, portal_sort_key: 'k2' },
+    ];
+    expect(nextCursorFrom(rows, sort('portal_sort_key', 'desc'), 'listing_id')).toEqual({
+      value: 'k2',
+      id: 12,
+    });
+  });
+
+  it('selects the tiebreak + sort column so the cursor can be derived', () => {
+    const cols = withKeysetColumns(
+      'listing_id,price_czk',
+      sort('portal_sort_key', 'desc'),
+      'listing_id',
+    ).split(',');
+    expect(cols).toContain('portal_sort_key');
+    expect(cols.filter((c) => c === 'listing_id')).toHaveLength(1);
+    expect(cols).not.toContain('property_id');
+  });
+});
