@@ -2326,19 +2326,19 @@ export const fetchPipelineBoard = async (): Promise<PipelineBoardCard[]> => {
   // Canonical broker per card (name + firm + contact for the hover box), two
   // batched reads (listing→broker, then broker→contact) — no N+1, keyed on the
   // same surrogate listing_id for the same NULL-safety reason as the images
-  // above. Both surfaces are dark to `authenticated` since Phase 0's A6
-  // (broker PII stays masked until Wave 4): the grant is revoked outright, so
-  // PostgREST answers with SQLSTATE 42501 and every card degrades to "no
-  // broker" until the mask lifts. Only that signature is expected — anything
-  // else (schema drift, network, 5xx, expired session) is a real fault, so log
-  // it before degrading, or the board silently shows "no broker" forever with
-  // no signal that broker data regressed.
+  // above. Both routes are admin-gated since Phase 0's A6 (broker PII stays
+  // dark to non-admin sessions until Wave 4 masks it): a non-admin session gets
+  // a clean 403 from the API and every card degrades to "no broker" until the
+  // mask lifts; an admin session gets real data. Only that 403 is expected —
+  // anything else (schema drift, network, 5xx, expired session) is a real
+  // fault, so log it before degrading, or the board silently shows "no broker"
+  // forever with no signal that broker data regressed.
   const brokerMaskExpected = (err: unknown): boolean =>
-    (err as { code?: string } | null)?.code === '42501';
+    err instanceof ApiError && err.status === 403;
   const listingBrokers = await fetchListingBrokersByIds(listingIds).catch(
     (err): Map<number, ListingBroker> => {
       if (!brokerMaskExpected(err))
-        console.error('fetchPipelineBoard: listing_broker_public read failed', err);
+        console.error('fetchPipelineBoard: listing_broker read failed', err);
       return new Map();
     },
   );

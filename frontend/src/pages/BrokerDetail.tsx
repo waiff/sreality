@@ -2,11 +2,8 @@ import { useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import {
-  fetchBroker,
-  fetchBrokerGeoOptions,
+  fetchBrokerDossier,
   fetchBrokerListings,
-  fetchBrokerMemberships,
-  fetchBrokerRegionShares,
   prettyPhone,
   type BrokerListing,
   type BrokerRegionShare,
@@ -39,31 +36,13 @@ export default function BrokerDetail() {
   const { id } = useParams<{ id: string }>();
   const brokerId = Number(id);
 
-  const brokerQ = useQuery({
-    queryKey: ['broker', brokerId],
-    queryFn: () => fetchBroker(brokerId),
+  // One round trip for the whole page: identity + firm memberships + regional
+  // footprint + contacts (toolkit.brokers.get_broker's dossier — region_shares
+  // already carries resolved region names, no separate geo-options lookup).
+  const dossierQ = useQuery({
+    queryKey: ['broker-dossier', brokerId],
+    queryFn: () => fetchBrokerDossier(brokerId),
     enabled: Number.isFinite(brokerId),
-  });
-  const geoQ = useQuery({
-    queryKey: ['broker-geo-options'],
-    queryFn: fetchBrokerGeoOptions,
-    staleTime: 5 * 60_000,
-  });
-  const regionNames = useMemo(() => {
-    const m = new Map<number, string>();
-    for (const o of geoQ.data ?? []) if (o.geo_level === 'region') m.set(o.geo_id, o.name);
-    return m;
-  }, [geoQ.data]);
-
-  const membershipsQ = useQuery({
-    queryKey: ['broker-memberships', brokerId],
-    queryFn: () => fetchBrokerMemberships(brokerId),
-    enabled: Number.isFinite(brokerId),
-  });
-  const sharesQ = useQuery({
-    queryKey: ['broker-region-shares', brokerId, regionNames.size],
-    queryFn: () => fetchBrokerRegionShares(brokerId, regionNames),
-    enabled: Number.isFinite(brokerId) && regionNames.size > 0,
   });
   const listingsQ = useQuery({
     queryKey: ['broker-listings', brokerId],
@@ -71,7 +50,9 @@ export default function BrokerDetail() {
     enabled: Number.isFinite(brokerId),
   });
 
-  const b = brokerQ.data;
+  const b = dossierQ.data?.broker;
+  const memberships = dossierQ.data?.memberships ?? [];
+  const regionShares = dossierQ.data?.region_shares ?? [];
   usePageTitle(b?.display_name ?? null);
 
   return (
@@ -83,7 +64,7 @@ export default function BrokerDetail() {
         ← Žebříček makléřů
       </Link>
 
-      {brokerQ.isLoading ? (
+      {dossierQ.isLoading ? (
         <p className="mt-8 text-sm text-[var(--color-ink-3)]">Načítám…</p>
       ) : !b ? (
         <p className="mt-8 text-sm text-[var(--color-ink-3)]">Makléř nenalezen.</p>
@@ -125,13 +106,13 @@ export default function BrokerDetail() {
               total={b.listing_count}
               hint="aktivní / celkem"
             />
-            <Stat label="Kanceláře" value={membershipsQ.data?.length ?? 0} hint="historicky" />
-            <Stat label="Regiony" value={sharesQ.data?.length ?? 0} hint="kde inzeruje" />
+            <Stat label="Kanceláře" value={memberships.length} hint="historicky" />
+            <Stat label="Regiony" value={regionShares.length} hint="kde inzeruje" />
           </div>
 
           <div className="mt-7 grid gap-7 md:grid-cols-2">
-            <Footprint shares={sharesQ.data ?? []} loading={sharesQ.isLoading} />
-            <Firms rows={membershipsQ.data ?? []} loading={membershipsQ.isLoading} />
+            <Footprint shares={regionShares} />
+            <Firms rows={memberships} />
           </div>
 
           <Inventory
@@ -232,7 +213,7 @@ function Stat({
   );
 }
 
-function Footprint({ shares, loading }: { shares: BrokerRegionShare[]; loading: boolean }) {
+function Footprint({ shares }: { shares: BrokerRegionShare[] }) {
   const max = shares.reduce((m, s) => Math.max(m, s.active_property_count), 0) || 1;
   return (
     <section>
@@ -240,16 +221,14 @@ function Footprint({ shares, loading }: { shares: BrokerRegionShare[]; loading: 
         Kde inzeruje
       </h2>
       <div className="mt-3 border border-[var(--color-rule)] rounded-[var(--radius-md)] bg-[var(--color-paper-2)] px-4 py-3">
-        {loading ? (
-          <p className="text-sm text-[var(--color-ink-3)]">Načítám…</p>
-        ) : shares.length === 0 ? (
+        {shares.length === 0 ? (
           <p className="text-sm text-[var(--color-ink-4)]">Bez aktivního regionu.</p>
         ) : (
           <ul className="space-y-2">
             {shares.slice(0, 8).map((s) => (
               <li key={s.geo_id} className="flex items-center gap-3">
                 <span className="w-40 shrink-0 truncate text-sm text-[var(--color-ink-2)]">
-                  {s.name}
+                  {s.name ?? '—'}
                 </span>
                 <span className="flex-1 h-1.5 rounded-full bg-[var(--color-inset)] overflow-hidden">
                   <span
@@ -269,16 +248,14 @@ function Footprint({ shares, loading }: { shares: BrokerRegionShare[]; loading: 
   );
 }
 
-function Firms({ rows, loading }: { rows: BrokerMembership[]; loading: boolean }) {
+function Firms({ rows }: { rows: BrokerMembership[] }) {
   return (
     <section>
       <h2 className="text-xs tracking-[0.14em] uppercase text-[var(--color-ink-3)]">
         Kanceláře
       </h2>
       <div className="mt-3 border border-[var(--color-rule)] rounded-[var(--radius-md)] bg-[var(--color-paper-2)] px-4 py-3">
-        {loading ? (
-          <p className="text-sm text-[var(--color-ink-3)]">Načítám…</p>
-        ) : rows.length === 0 ? (
+        {rows.length === 0 ? (
           <p className="text-sm text-[var(--color-ink-4)]">Žádná kancelář (nezávislý).</p>
         ) : (
           <ul className="space-y-2">

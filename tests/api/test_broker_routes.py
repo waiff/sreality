@@ -15,6 +15,9 @@ from api.routes import brokers as broker_routes
 @pytest.fixture()
 def client():
     api_main.app.dependency_overrides[deps.get_db_conn] = lambda: object()
+    api_main.app.dependency_overrides[deps.require_admin] = (
+        lambda: {"is_admin": True, "legacy": True}
+    )
     yield TestClient(api_main.app)
     api_main.app.dependency_overrides.clear()
 
@@ -49,8 +52,34 @@ def test_get_broker_returns_dossier(client, monkeypatch):
 
 
 def test_by_listing_404_when_unattributed(client, monkeypatch):
-    monkeypatch.setattr(broker_routes.brokers, "listing_broker", lambda conn, sid: None)
+    monkeypatch.setattr(broker_routes.brokers, "listing_broker", lambda conn, lid: None)
     assert client.get("/brokers/by-listing/123").status_code == 404
+
+
+def test_by_listing_batch_passes_ids(client, monkeypatch):
+    captured = {}
+    def fake(conn, listing_ids):
+        captured["listing_ids"] = listing_ids
+        return {"data": [{"listing_id": 123, "broker_id": 1}], "metadata": {}}
+    monkeypatch.setattr(broker_routes.brokers, "listing_brokers_by_ids", fake)
+
+    res = client.get("/brokers/by-listing", params={"listing_ids": [123, 456]})
+    assert res.status_code == 200
+    assert captured["listing_ids"] == [123, 456]
+    assert res.json()["data"][0]["listing_id"] == 123
+
+
+def test_by_ids_batch_passes_ids(client, monkeypatch):
+    captured = {}
+    def fake(conn, broker_ids):
+        captured["broker_ids"] = broker_ids
+        return {"data": [{"broker_id": 7}], "metadata": {}}
+    monkeypatch.setattr(broker_routes.brokers, "brokers_by_ids", fake)
+
+    res = client.get("/brokers/by-ids", params={"broker_ids": [7, 8]})
+    assert res.status_code == 200
+    assert captured["broker_ids"] == [7, 8]
+    assert res.json()["data"][0]["broker_id"] == 7
 
 
 def test_contacts_route(client, monkeypatch):
@@ -59,3 +88,16 @@ def test_contacts_route(client, monkeypatch):
     res = client.get("/brokers/527/contacts")
     assert res.status_code == 200
     assert res.json()["data"][0]["value"] == "a@b.cz"
+
+
+def test_leaderboard_requires_admin():
+    """Without the require_admin override (and no Authorization header), the
+    request must be rejected — this is the actual A6 gate, not just a UX nicety
+    (see api/routes/brokers.py). A stray require_token regression here would
+    silently reopen the exposure migration 299 closed."""
+    api_main.app.dependency_overrides[deps.get_db_conn] = lambda: object()
+    try:
+        res = TestClient(api_main.app).get("/brokers/leaderboard")
+        assert res.status_code == 401
+    finally:
+        api_main.app.dependency_overrides.clear()
