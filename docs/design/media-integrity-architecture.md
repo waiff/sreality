@@ -715,10 +715,28 @@ production HTML** pulled from `portal_raw_pages` — the first non-tautological 
 in the repo. Low risk, extraction-only.
 
 ### PR 2 — `fix/media-reextract-backfill` · ~1 day, no migration
-Recover ~15.8k listings from bytes we already own. New `scripts/reextract.py` +
-`workflow_dispatch`-only workflow. **Scope idnes by shortfall, not zero-row** — zero-row scoping
-leaves the majority of the loss on the floor. Rules #2/#3 satisfied by construction. Assert zero
-new `listing_snapshots` in a rollback test.
+Recover listings from bytes we already own. New `scripts/reextract.py` +
+`workflow_dispatch`-only workflow. Rules #2/#3 satisfied by construction.
+
+> **CORRECTION (implemented in #949).** This entry originally said *"scope idnes by shortfall,
+> not zero-row"*. ✅ That is **unsafe** and was dropped. `record_images` upserts on
+> `(listing_id, sequence)` where sequence is the URL's position in the parsed gallery, and
+> refreshes the URL only `WHERE storage_path IS NULL` (`scraper/db.py:1044-1063`). Re-parsing a
+> listing that already holds photos and now yields *more* of them — exactly idnes, where the fix
+> recovers first-party anchors interleaved in document order — shifts every later photo:
+> already-downloaded rows keep their old URL at a sequence the new parse means for a different
+> photo, while not-yet-downloaded rows get repointed. The gallery silently reorders.
+>
+> So re-extraction repairs **zero-row listings only** (nothing to collide with). That recovers
+> realitymix (6,905 active) and the idnes zero-row cohort (5,955), but **not** idnes's partial-loss
+> cohort. Partial loss needs a **stable media identity** rather than a positional one — folded
+> into PR 3, which is where the contract lands anyway. This is a real reduction in PR 2's scope,
+> not a detail.
+>
+> Also implemented differently: only realitymix and idnes are wired. The other parsers build
+> `image_urls` inline inside `parse_detail`; lifting that out per portal in the backfill would be
+> the per-portal special-casing rule #21 forbids. The registry collapses to one lookup once every
+> parser returns a `MediaExtraction`.
 
 ### PR 3 — `feature/media-extraction-contract` · ~2 days, additive migration
 Make a zero return mean something, forever. New `scraper/media_extract.py`, `GallerySpec` per
