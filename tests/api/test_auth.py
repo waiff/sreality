@@ -16,6 +16,7 @@ import pytest
 
 fastapi = pytest.importorskip("fastapi")
 TestClient = pytest.importorskip("fastapi.testclient").TestClient
+jwt = pytest.importorskip("jwt")  # PyJWT (api extra)
 
 from api import curation as api_curation
 from api import dependencies as deps
@@ -373,6 +374,8 @@ def test_malformed_authorization_header_rejected(client, monkeypatch):
 
 # --- verify_jwt-gated routes (Phase 1 tenant pool) --------------------------
 
+_JWT_SECRET = "test-hs256-secret"
+
 
 def test_jwt_routes_fail_closed_without_token(client, monkeypatch):
     monkeypatch.delenv("API_TOKEN", raising=False)
@@ -385,18 +388,40 @@ def test_jwt_routes_fail_closed_without_token(client, monkeypatch):
 def test_jwt_routes_reject_wrong_token(client, monkeypatch):
     monkeypatch.setenv("API_TOKEN", "secret-token-xyz")
     monkeypatch.delenv("SUPABASE_URL", raising=False)
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-hs256-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", _JWT_SECRET)
     headers = {"Authorization": "Bearer wrong-token"}
 
     for method, path, body in _jwt_gated_calls():
         res = _call(client, method, path, body, headers=headers)
-        assert res.status_code == 401, f"{path} should reject a non-legacy non-JWT token"
+        assert res.status_code == 401, f"{path} should reject a garbage non-JWT token"
 
 
-def test_jwt_routes_accept_legacy_token(client, monkeypatch):
+def test_jwt_routes_reject_legacy_static_token(client, monkeypatch):
+    """The old dual-auth branch is gone: the static API_TOKEN is no longer
+    special-cased by verify_jwt, so it's rejected here exactly like any other
+    string that isn't a valid Supabase JWT."""
     monkeypatch.setenv("API_TOKEN", "secret-token-xyz")
+    monkeypatch.delenv("SUPABASE_URL", raising=False)
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", _JWT_SECRET)
     headers = {"Authorization": "Bearer secret-token-xyz"}
 
     for method, path, body in _jwt_gated_calls():
         res = _call(client, method, path, body, headers=headers)
-        assert res.status_code == 200, f"{path} should pass on the legacy dual-auth branch"
+        assert res.status_code == 401, f"{path} should reject the retired legacy token"
+
+
+def test_jwt_routes_accept_real_jwt(client, monkeypatch):
+    """A real Supabase-signed JWT (no admin claim needed — these routes gate on
+    identity via verify_jwt/tenant_conn, not require_admin) passes."""
+    monkeypatch.setenv("API_TOKEN", "secret-token-xyz")
+    monkeypatch.delenv("SUPABASE_URL", raising=False)
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", _JWT_SECRET)
+    tok = jwt.encode(
+        {"aud": "authenticated", "sub": "11111111-1111-1111-1111-111111111111"},
+        _JWT_SECRET, algorithm="HS256",
+    )
+    headers = {"Authorization": f"Bearer {tok}"}
+
+    for method, path, body in _jwt_gated_calls():
+        res = _call(client, method, path, body, headers=headers)
+        assert res.status_code == 200, f"{path} should pass with a real JWT"
