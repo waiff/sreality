@@ -286,6 +286,20 @@ bazos's top 240 rows share one key; idnes 213; realitymix 210). Card page: 11.6 
 `fetchBrowseCount`'s existing 2.5s budget and degrades to the planner estimate rendered as "~N" —
 the designed fallback, not a regression.
 
+**Day-one behaviour, and why it improves on its own.** `discovery_seq` is NULL for every row
+written before migration 368 (a stated non-goal — no retrofit). For the two portals with a
+trustworthy `portal_date` (bazos, ceskereality) that changes nothing: the date half of the key
+dominates and the order is right immediately. For the other seven the legacy rows all share the
+identical all-zeros key, so the mirror currently falls back to the `listing_id` tiebreak —
+surrogate-PK order, a reasonable proxy for "newest in our archive" but not portal order. The
+useful part is that this self-corrects in the right direction: any row WITH a `discovery_seq`
+sorts above every zero-key row, so newly discovered listings float to the top from the first
+drain onward, and the resolution of the ordering deepens as the sequence accumulates. Measured
+~40 minutes after 368 was applied: 1,782 sreality rows already carried a sequence, plus
+bezrealitky, realitymix, idnes, bazos, remax and ceskereality. maxima and mmreality were still at
+zero — expected for maxima (tiny catalogue) and worth a look for mmreality, whose drain is
+disabled via `realtime_drain_disabled_sources`.
+
 **Deliberately not changed — the Stats tab.** It is a property-grain RPC
 (`browse_stats_properties`); mirroring it needs a listing-grain twin, which is a separate piece of
 work rather than something to half-do here. In single-portal mode Stats therefore still describes
