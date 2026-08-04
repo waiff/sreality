@@ -773,39 +773,35 @@ per the same-PR-doc rule.
 
 ---
 
-## 6. Open questions for the operator
+## 6. Operator decisions — ANSWERED 2026-08-04
 
-**Q1 — Seed the contracts: which zeros are intentional?** ~90% can be seeded from observed reality;
-these need a call:
-- `broker_identity_id` = 0.0% on bazos / bezrealitky / maxima / mmreality / remax (but 96.8% idnes,
-  95.5% realitymix) — private sellers, or unbuilt resolvers?
-- `broker_phone` = 0.0% on **all nine** — deliberately not collected (GDPR), or never parsed?
-- ✅ **`description` = 0.0% on remax — 7,877 active listings, zero descriptions, since 2026-06-01.**
-  Verified. Almost certainly a genuine 64-day-old undetected bug and the third-largest finding in
-  this audit. Confirm and it becomes its own fix.
-- `total_floors` = 0.0% on ceskereality; `locality_district_id` = 0.0% on eight of nine.
+All six are decided. They are binding inputs to PRs 3–8, not open questions.
 
-**Q2 — `portal_raw_pages` retention.** 13 GB / 429,316 pages, declared ephemeral in migration 099
-with no pruner. This proposal makes it **load-bearing** (the free repair substrate for 7 of 9
-portals). Choose: (a) keep unbounded, (b) retain N days and accept the repair window closes, or
-(c) retain only pages whose listing has a media shortfall. Recommend (a) until PR 4 is live — but
-it must become a stated policy, not an accident.
+**Q1 — which zeros are intentional?** → **Three are bugs, two are intentional.**
 
-**Q3 — Alert delivery.** `app_settings.system_health_channels = []`, so every system-health alert
-is in-app-bell-only. The realitymix blackout would have produced a bell badge you might not open
-for a week. Route the contract check to email/Telegram (the Wave-3 envelope is shipped)?
+| field | verdict | action |
+|---|---|---|
+| `description` = 0.0% on remax (7,877 active, since 2026-06-01) | **BUG** — confirmed | its own fix |
+| `broker_identity_id` = 0.0% on bazos / bezrealitky / maxima / mmreality / remax | **BUG** — brokers are expected there | its own fix |
+| `total_floors` = 0.0% on ceskereality | **suspected bug** | investigate, then fix or declare |
+| `broker_phone` = 0.0% on all nine | **intentional** | seed `severity='none'` |
+| `locality_district_id` = 0.0% on eight of nine | **intentional** | seed `severity='none'` |
 
-**Q4 — Foreign inventory.** idnes now carries ~4,000 foreign (Spanish/coastal) listings per week,
-~39% of its volume, natively 0–1 photos, from a single syndication feed. They pollute every blended
-quality metric and enter the dedup candidate pool. Segment metrics only, flag them, or stop
-ingesting them? Market/product call, but it directly changes how the media contract is scoped.
+**Q2 — `portal_raw_pages` retention** → **(a) keep unbounded** until PR 4 is live, then revisit.
+It is now load-bearing repair substrate, so this must be written down as policy (do it in PR 8's
+`docs/architecture.md` pass), not left as an accident of migration 099 having no pruner.
 
-**Q5 — Ship posture for the acute fixes.** PR 1 fixes forward, PR 2 recovers backward. Merge
-together, or PR 1 alone first so new inventory starts capturing photos within the hour? Recommend
-the latter.
+**Q3 — alert delivery** → **bell only.** No email, no Telegram; `system_health_channels` stays `[]`.
+Consequence for PR 4: the badge is the *only* signal, so the two zero-false-positive checks
+(`media`, `media_unknown`) ship straight at `severity='fail'` rather than warming up on `warn`.
+The FP-prone ones (`media_complete`, `media_photoless`) still start at `warn`.
 
-**Q6 — R2 key namespace (latent, small, cheap to close now).** `image_key()` switched from
-`sreality_id` to the surrogate `listings.id` with no discriminator. 893 listings carry a positive
-`sreality_id` inside the current id range, and 25 exact collisions exist today (21 with images on
-both sides). Zero realised collisions so far. Namespacing new keys as `l/{listing_id}/{seq}.jpg` is
-forward-only and needs no backfill. Fold into PR 3, or defer?
+**Q4 — foreign inventory** → **segment metrics AND flag in the UI.** Split every media/quality
+metric by `obec_id IS NULL`, and surface a visible marker + Browse filter so foreign stock can be
+excluded from browsing without being dropped from the database. Do not stop ingesting.
+
+**Q5 — ship posture** → **PR 1 + PR 2 together.** Shipped as #949 (merged 2026-08-04), with the
+scope correction in the PR 2 entry above.
+
+**Q6 — R2 key namespace** → **fold into PR 3.** Namespace new keys `l/{listing_id}/{seq}.jpg`;
+forward-only, no backfill.
