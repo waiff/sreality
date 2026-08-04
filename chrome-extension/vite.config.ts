@@ -81,6 +81,19 @@ export default defineConfig(({ mode }) => {
           manifest.content_scripts[0].matches = PORTALS.flatMap((p) =>
             p.hosts.map((h) => `https://${h}/*`),
           );
+          /* Chrome only auto-updates when the offered version is STRICTLY greater
+           * than the installed one, and the Web Store rejects re-uploading a
+           * version that already exists — so a forgotten hand-bump silently
+           * strands every installed copy on the old build (PR #942 shipped with
+           * no bump). manifest.json's MAJOR.MINOR stays the hand-owned feature
+           * declaration; CI stamps the patch from the run number, which is
+           * monotonic and never resets. Local builds keep the committed version
+           * so a dev reload doesn't churn it. */
+          const runNumber = process.env.GITHUB_RUN_NUMBER;
+          if (runNumber != null && runNumber !== '') {
+            const [major, minor] = String(manifest.version).split('.');
+            manifest.version = `${major}.${minor}.${runNumber}`;
+          }
           writeFileSync(
             resolve(__dirname, 'dist', 'manifest.json'),
             JSON.stringify(manifest, null, 2) + '\n',

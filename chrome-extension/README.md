@@ -161,6 +161,87 @@ The `key` field pinned in `manifest.json` means the extension ID is always
 download) — the "one-time setup" steps above already registered it with
 both Supabase and Google, and the origin below is already correct.
 
+## Keeping it up to date (auto-update)
+
+**"Load unpacked" has no update channel.** Chrome never fetches anything for an
+unpacked extension — a new build only lands when you replace the folder and click
+**Reload**. That's the right loop while *developing*; it's the wrong one for
+*using* the extension day to day. To stop re-downloading, move the everyday
+install onto a real update channel.
+
+### The version number (prerequisite for any channel)
+
+Chrome only auto-updates when the offered version is **strictly greater** than the
+installed one, and the Web Store rejects re-uploading a version that already
+exists. Hand-bumping `manifest.json` was being missed (PR #942 shipped with no
+bump), which would silently strand every installed copy.
+
+So `vite.config.ts` now stamps it: `manifest.json`'s `MAJOR.MINOR` stays the
+hand-owned feature declaration, and CI appends the GitHub run number as the patch
+component (`0.9.0` committed → `0.9.417` built in CI). The run number is monotonic
+and never resets, so **every CI build is automatically newer than the last** with
+nothing to remember. Local builds keep the committed version, so a dev reload
+doesn't churn it. Bump `MAJOR.MINOR` by hand only to mark a meaningful release.
+
+### Option 1 — Chrome Web Store, "Unlisted" (recommended)
+
+Unlisted means: **not searchable, not public** — installable only by direct link,
+but distributed and auto-updated by Google's infrastructure exactly like a public
+extension. Chrome polls for updates roughly every 5 hours, and you can force one
+from `chrome://extensions` → **Update**.
+
+This is the industry-standard way to run a pre-launch/internal extension, and it
+makes going public later a **visibility dropdown change** — same item, same
+extension ID, same update channel, no reinstall.
+
+1. Register once at the [Chrome Web Store Developer Dashboard](https://chrome.google.com/webstore/devconsole)
+   (one-time US$5 fee, any Google account).
+2. **+ New item** → upload a ZIP of `dist/` (download the `chrome-extension-dist`
+   artifact from the Actions build, then zip the folder's *contents*).
+3. Fill the listing: description, an icon, at least one screenshot, a **privacy
+   policy URL**, a **single-purpose statement**, and a justification for each
+   permission (`storage`, `identity`, `alarms`, `webNavigation`, and the two
+   `host_permissions` origins). See "Chrome Web Store submission" below.
+4. **Visibility → Unlisted**. Submit for review. (Unlisted items are still
+   reviewed; expect hours to a few days.)
+5. Install once from the item's link. From then on it updates itself.
+
+> ⚠️ **The extension ID will probably change — check before you cut over.** The
+> store assigns the item its own ID, which will most likely differ from the
+> self-generated `eibnegoankipleeegjilnjhpnbaedpjd` pinned in the `key` field.
+> That ID is baked into three places, and sign-in plus every API call break if
+> they aren't updated: the **Supabase** redirect-URL allowlist, the **Google OAuth**
+> client's authorized redirect URIs (both `https://<id>.chromiumapp.org/`), and
+> Railway's `CORS_ALLOW_ORIGINS` (`chrome-extension://<id>`). After creating the
+> draft item, read its assigned ID off the dashboard URL and **add** the new
+> values alongside the existing ones (all three accept multiple entries) *before*
+> installing the store build. Adding rather than replacing means the unpacked dev
+> copy keeps working throughout — no downtime, and no cutover to time.
+
+### Option 2 — self-hosted `.crx` + `update_url`
+
+The classic off-store route: sign a `.crx`, host it plus an `updates.xml` manifest
+(Cloudflare R2 is already in this stack and would serve both fine), and point
+`manifest.json`'s `update_url` at the XML. Chrome then polls it directly — no
+review, no store, full control of cadence.
+
+**The catch:** Chrome on **Windows and macOS blocks installing extensions that
+don't come from the Web Store.** Getting around it legitimately means pushing an
+enterprise policy (`ExtensionSettings` / `ExtensionInstallForcelist`) onto the
+machine — a registry edit on Windows — per machine you use.
+
+Worth it only if Web Store review latency becomes intolerable during heavy
+iteration. Otherwise it's infrastructure you'd build now and throw away at public
+launch, so Option 1 is the better default.
+
+### Fully automated publishing (once Option 1 is live)
+
+The Web Store has a publish API, so `.github/workflows/build-extension.yml` can be
+extended to upload and publish each `main` build — making "merge a PR" the only
+step, with the operator's browser updating itself a few hours later. Needs four
+repository secrets (`CWS_CLIENT_ID`, `CWS_CLIENT_SECRET`, `CWS_REFRESH_TOKEN`,
+`CWS_EXTENSION_ID`); ask for it once the store item exists.
+
 ## Allow the extension's origin in CORS (Railway)
 
 The extension's fetches run from the background service worker under the

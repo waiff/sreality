@@ -250,7 +250,25 @@ rules. Identify which one a task belongs to before you start.
   (`webNavigation` permission, filtered to the same `PORTALS` host list) and relays the new URL
   to the tab's already-injected content script (`route_changed` message), which re-runs its
   page-type decision (`renderForUrl` in `content.ts`) without needing a real reload — this
-  fixed the "panel only appears after F5" bug. Match patterns are exact-host, so an apex-canonical
+  fixed the "panel only appears after F5" bug. `renderForUrl` keys on the **listing identity**
+  (`source:sourceId`), not the raw href, so a gallery/tracking query-param rewrite doesn't tear
+  down the panel and discard the operator's note draft + calculator edits. Because the panel's
+  state is a single module global that `openPanel` replaces wholesale, **every apply that resumes
+  after an `await` is epoch-guarded** (`renderEpoch` / `setStateIf`) — without it, listing A's
+  lookup or its ~6-minute estimation poll paints into listing B's panel. That epoch ("is this
+  still the same panel instance?") sits alongside the older property-id guards
+  (`applyMembershipIf` / `loadNotes`, "is the panel still showing this property?"), which survive
+  a re-open of the same listing. Index-card badges mark the card with the **listing id** they were
+  drawn for (not a boolean), so a card DOM node recycled by the portal's router is re-badged
+  rather than left showing the previous listing's yield.
+  **Distribution + auto-update:** an unpacked install has no update channel at all, so the
+  everyday install belongs on the Chrome Web Store (Unlisted pre-launch → a visibility flip to go
+  public, same ID + update channel). Chrome only auto-updates on a strictly-greater version, so
+  `vite.config.ts` stamps the patch component from `GITHUB_RUN_NUMBER` (monotonic, never resets);
+  the committed `MAJOR.MINOR` is the hand-owned release marker. Publishing to the store reassigns
+  the extension ID, which is baked into the Supabase redirect allowlist, the Google OAuth client,
+  and `CORS_ALLOW_ORIGINS` — add the new ID alongside the old one before cutover
+  (`chrome-extension/README.md`, "Keeping it up to date"). Match patterns are exact-host, so an apex-canonical
   portal (e.g. `realitymix.cz`) needs its apex pattern, not just `www.`. **Detail pages** get a floating
   panel (closed shadow root). For ANY listing we have it shows a **"Přidat do pipeline"**
   deal-pipeline control (bookmark; once in, change stage via a native `<select>` + remove)
