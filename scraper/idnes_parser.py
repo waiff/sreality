@@ -488,6 +488,55 @@ def _resolve_coords(
     return None, None, {"source": None}
 
 
+# The gallery anchor IS the portal's assertion of what photos exist, so we deny what is
+# provably not a photo rather than allow-listing hosts — mirroring scraper/media.py's
+# reject-list philosophy. The previous `"1gr.cz" or "sta-reality"` allow-list silently
+# dropped ~63% of anchors once iDNES migrated galleries to its own
+# `reality.idnes.cz/file/thumbnail/{id}` service. Video anchors are deliberately NOT
+# filtered here — media.split_media_rows owns the image/video split for every portal.
+# A lazy-load placeholder is the dangerous one: it is byte-identical across every
+# listing, so ingesting it collides at identical pHash / CLIP cosine 1.0, and rule #15
+# auto-merges non-byt listings at >=0.98 — a property-graph corruption, not a display bug.
+_IMG_DENY_TOKENS: tuple[str, ...] = (
+    "my.matterport.com",  # 3D tour; passes media.is_image_url but is not a photo
+    "no-image-gallery",  # the lazy-load placeholder itself
+    "/ui/image/",  # static site chrome (icons, logos)
+)
+# `?profile=` is LOAD-BEARING on the first-party host: the path is extension-less and
+# the bare URL 404s, so the old `href.split("?")[0]` would now store dead links. Strip
+# only the tracking param.
+_IMG_DROP_PARAMS: frozenset[str] = frozenset({"gt"})
+
+
+def _clean_image_url(href: str) -> str:
+    base, sep, query = href.partition("?")
+    if not sep:
+        return base
+    kept = [p for p in query.split("&") if p and p.split("=", 1)[0] not in _IMG_DROP_PARAMS]
+    return f"{base}?{'&'.join(kept)}" if kept else base
+
+
+def _gallery_urls(tree: HTMLParser) -> list[str]:
+    """Ordered, deduped media URLs from the detail gallery.
+
+    Video anchors pass through on purpose — media.split_media_rows owns the
+    image/video split for every portal (rule #21).
+    """
+    urls: list[str] = []
+    seen: set[str] = set()
+    for a in tree.css('a[data-fancybox="images"]'):
+        href = a.attributes.get("href")
+        if not href:
+            continue
+        if any(token in href.lower() for token in _IMG_DENY_TOKENS):
+            continue
+        href = _clean_image_url(href)
+        if href not in seen:
+            seen.add(href)
+            urls.append(href)
+    return urls
+
+
 def parse_detail(
     html: str,
     *,
@@ -546,18 +595,7 @@ def parse_detail(
         ("garaz" in _strip_diacritics(parking_text).lower()) if parking_text else None,
     )
 
-    image_urls: list[str] = []
-    seen_img: set[str] = set()
-    for a in tree.css('a[data-fancybox="images"]'):
-        href = a.attributes.get("href")
-        if not href:
-            continue
-        href = href.split("?")[0]
-        if "1gr.cz" not in href and "sta-reality" not in href:
-            continue
-        if href not in seen_img:
-            seen_img.add(href)
-            image_urls.append(href)
+    image_urls = _gallery_urls(tree)
 
     params_text = {k: _text(v) for k, v in params.items()}
     if params_text.get("cena"):

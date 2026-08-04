@@ -71,12 +71,29 @@ _EMAIL_RE = re.compile(
 )
 # Czech address number format: '123/45a' or '123/45'. Replace with X/Y.
 _STREET_NUM_RE = re.compile(r"\b(\d{1,4})/(\d{1,4}[a-z]?)\b")
+# http(s) URLs are masked out before scrubbing — see anonymize().
+_URL_RE = re.compile(r"https?://[^\s\"'<>]+")
 
 
 def anonymize(html: str) -> str:
-    out = _PHONE_RE.sub("+420 XXX XXX XXX", html)
+    # URLs are masked before scrubbing and restored after. Without this the scrubbers
+    # silently CORRUPT image URLs: _PHONE_RE matches any 9 consecutive digits, so a
+    # realitymix photo id becomes `nab_+420 XXX XXX XXX.jpg`, and _STREET_NUM_RE
+    # matches any `N/M` pair, so an idnes CDN shard path `/thumbs/1/6/e/` becomes
+    # `/thumbs/XXX/YY/e/`. That makes a fixture useless for testing media extraction —
+    # the exact blind spot that let a 19-day gallery blackout ship green.
+    # URLs carry no contact PII (mailto: is not http, so emails are still scrubbed).
+    urls: list[str] = []
+
+    def _mask(match: re.Match[str]) -> str:
+        urls.append(match.group(0))
+        return f"\x00URL{len(urls) - 1}\x00"
+
+    out = _URL_RE.sub(_mask, html)
+    out = _PHONE_RE.sub("+420 XXX XXX XXX", out)
     out = _EMAIL_RE.sub("agent@example.cz", out)
     out = _STREET_NUM_RE.sub("XXX/YY", out)
+    out = re.sub(r"\x00URL(\d+)\x00", lambda m: urls[int(m.group(1))], out)
     return ANON_BANNER + out
 
 
