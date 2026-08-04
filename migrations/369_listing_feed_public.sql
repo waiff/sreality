@@ -100,7 +100,14 @@ select
        else null::numeric end as price_per_m2
 from listings l;
 
-grant select on listing_feed_public to anon;
+-- anon holds NO relation grants (migration 299's settled Phase 0 posture — the
+-- SPA is fully login-gated and reads as authenticated; CI's
+-- test_anon_holds_no_relation_grants enforces this on every new view). Unlike
+-- listings_public/properties_public (grandfathered pre-299 anon grants, left
+-- untouched rather than risk breaking their existing consumers), this is a
+-- brand-new view with no such history — it follows the current posture from
+-- day one.
+grant select on listing_feed_public to authenticated;
 
 -- Covering index for the intended query shape: filter (source, is_active[, category_main,
 -- category_type]), sort (portal_date desc nulls last, discovery_seq desc nulls last, id desc)
