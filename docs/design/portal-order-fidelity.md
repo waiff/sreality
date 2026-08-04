@@ -179,34 +179,79 @@ actually disturb it: `discovery_seq` values for the "new" bucket are still assig
 page-walk sub-order — priority only affects *when* a row gets claimed/processed, not the sequence
 value stamped at its original enqueue.
 
-### Phase 2 — promote `published_at` to a real sort input
+### Phase 2+3 — SHIPPED (backend): `listing_feed_public` + a per-portal-safe sort key
 
-Expose `listings.published_at` as an available signal on the new listing-grain view (Phase 3):
-prefer it when non-NULL (genuine portal-declared date for bazos/ceskereality/sreality/bezrealitky),
-fall back to `discovery_seq`-derived order when NULL (the only available proxy for
-idnes/maxima/mmreality/realitymix/remax, and it is a strictly better proxy than today's
-batch-coarsened `first_seen_at`). Keep `first_seen_at` as-is for *display* ("added N days ago") —
-it doesn't need to double as the sort key once `discovery_seq` exists.
+**Status: backend shipped in PR (migration 369, branch `feature/browse-portal-mirror`, stacked on
+#945 since it depends on `discovery_seq`). Frontend wiring NOT shipped — see the follow-up spec
+below.** These turned out to be one coherent piece, not two: `published_at` promotion (Phase 2)
+only matters in the context of the new listing-grain view (Phase 3), so they shipped together.
 
-### Phase 3 — a listing-grain "portal mirror" Browse mode
+**The read contract:** a new `listing_feed_public` view (migration 369) — listing-grain, never
+touching `properties`/`browse_list`, so Root cause 3's golden-record leakage (trust-blended
+`area_m2`/`district`/etc. from a *different* portal's sibling listing) cannot happen: every
+column is unambiguously the filtered listing's own row. Identity is `id` (surrogate PK) +
+`source_id_native` — not `sreality_id`, which is legacy/NULL post-Gate-2 for non-sreality rows.
 
-When Browse's portal filter narrows to **exactly one source**, switch the query from
-`browse_list` (property-grain, trust-blended) to a listing-grain path: filter directly on
-`listings.source = X AND listings.is_active = true`, sort on the Phase 2 key, and surface every
-field from that one listing's own row. This is a *mode* of the same Browse UI (same filter/sort
-controls), not a new page — when zero or multiple portals are selected, behavior is unchanged
-(the deduped market view rule #15 is designed for). This also fixes Root cause 3's golden-record
-leakage for free: a listing-grain row never touches the `golden`/`best_geo`/`best_street`
-trust-blend CTEs, so every displayed field genuinely is that portal's own data.
+**The sort key resolved a subtlety the original plan glossed over.** `published_at` and
+`discovery_seq` live in different domains (a timestamp vs. a bigint sequence) and can't be
+naively COALESCEd into one global ordering — a 3-month-old bazos `published_at` would then
+outrank a listing discovered 2 minutes ago on a portal with no date signal. The fix only works
+*because* this view is always queried scoped to one portal (Phase 3's whole premise): a plain
 
-Implementation-weight question, worth a quick load test before committing: `browse_list` exists
-because live `properties` queries blew the anon 3s statement timeout at market-wide scale
-(`docs/design/browse-read-model.md`). A single-source, `is_active=true`-filtered `listings` query
-is far more selective than a market-wide property scan — **try a direct indexed query against
-`listings`/`listings_public` first** (one new covering index:
-`(source, is_active, category_main, category_type, <sort key> desc)`); only build a second
-blue-green unlogged feed (mirroring `browse_list`'s proven pattern) if live EXPLAIN shows the
-direct path can't hold the budget. Lower-maintenance option first, escalate only if proven necessary.
+```sql
+order by portal_date desc nulls last, discovery_seq desc nulls last, id desc
+```
+
+self-selects the right effective key per portal with **no per-portal branching in the reader** —
+`portal_date` is a view-level `CASE WHEN source IN ('bazos','ceskereality') THEN published_at END`
+(the only two sources where it's a reliable signal today; sreality's is deliberately excluded
+despite being non-NULL — its ~40%-populated day-granular `published_at` would rank a
+stale-dated row above a same-day discovery within sreality's own result set, the same
+domain-mixing problem one level down). For every other source `portal_date` is NULL for the
+whole filtered result set, so `discovery_seq` becomes the *functional* primary key — a pure
+data-driven fallback, not a code branch. Adding bezrealitky once its `timeActivated` actually
+populates (migration 266 — wired but NULL today) is a one-line `create or replace view`.
+
+A covering index (`listings_feed_sort_idx`, same migration) mirrors `browse_list`'s proven
+pattern — filter columns first (`source, is_active, category_main, category_type`), then the
+same two-column sort expression, then `id` for the keyset tiebreak — chosen defensively (matching
+this codebase's established answer to this exact class of problem) since this session couldn't
+run a live EXPLAIN to confirm a plain indexed `listings` scan would hold the anon 3s budget without it.
+
+#### Frontend follow-up — NOT implemented this session, needs live testing
+
+This session had no working frontend dev environment (`frontend/node_modules` not installed, no
+`.env` — the empty-Supabase-URL crash this repo has hit before) and CLAUDE.md is explicit that UI
+changes need real browser verification before being called done. Rather than ship pagination-
+cursor code no one has run, here is the exact spec for whoever picks this up:
+
+1. **Detect the mode.** In `frontend/src/lib/queries.ts`'s Cards/Table fetchers, when the
+   `portals` filter (`frontend/src/lib/filterRegistry.generated.ts:947-960`) resolves to exactly
+   one value, query `.from('listing_feed_public')` instead of `.from('browse_list')`; for 0 or
+   ≥2 portals, behavior is unchanged (this is additive, not a replacement).
+2. **New sort keys.** `first_seen_at`/`last_seen_at`/`property_id` (the current `SORTABLE_FIELDS`
+   / keyset tiebreak, `frontend/src/lib/queries.ts:137-143`) don't exist on this view. The
+   "Newest first" preset in this mode should map to the `portal_date`/`discovery_seq` pair above,
+   with `id` as the tiebreak instead of `property_id`.
+3. **The real risk: `frontend/src/lib/keyset.ts`'s `applyKeyset`** (`:91-125`) is built and
+   commented around a **2-column** cursor (one sort field + one tiebreak,
+   `.order(sort.field, ...).order('property_id', ...)`). This view's correct sort is **3
+   columns** (`portal_date, discovery_seq, id`) precisely because of the domain-mixing fix above
+   — collapsing it back to 2 columns would reintroduce the bug this design avoided. Extending
+   `applyKeyset` to a variable-width cursor (or adding a parallel 3-column variant) needs to
+   preserve keyset.ts's existing correctness properties (its own comments call this out as
+   subtle — a table whose sort key can tie across many rows in one write batch); this is exactly
+   the kind of change that wants a live pagination test (scroll through a real filtered result
+   set, confirm no skipped/duplicated rows across a page boundary), not a logic review alone.
+4. **Count / stats surfaces.** Browse's header count and Stats tab currently also read
+   `browse_list` (`frontend/src/lib/queries.ts`) — decide whether single-portal mode should
+   recompute these against `listing_feed_public` too (e.g. "1,204 bazos listings" vs. today's
+   deduped property count) or leave them showing the market-wide (property-grain) numbers even
+   while the card/table list is portal-scoped. Not decided in this doc — a product call, not
+   an engineering one.
+5. **Map view.** Almost certainly should stay on `browse_list`/property-grain regardless of the
+   portal filter (a map of one portal's raw, undeduped listings would show near-duplicate pins
+   for every multi-portal property) — but confirm that's the intended behavior before shipping.
 
 ### Phase 4 — sreality: separate discovery from completeness, drop the district-split for discovery
 
@@ -315,10 +360,17 @@ natural fallback to revisit — but only as a targeted follow-up, not a prerequi
 ## Open decisions for the operator
 
 1. ~~Ship Phases 1–3 now~~ **Approved 2026-08-04** — build Phases 1–3.
-2. Direct indexed `listings` query vs. a second blue-green read model for Phase 3 — recommend
-   trying the direct query first and only escalating if load testing proves it's needed.
+2. ~~Direct indexed `listings` query vs. a second blue-green read model for Phase 3~~
+   **Resolved: direct indexed view** (`listing_feed_public` + `listings_feed_sort_idx`,
+   migration 369) — chosen without a live load test (none available this session); revisit if
+   production EXPLAIN shows it can't hold the anon 3s budget.
 3. ~~Phase 4~~ **Approved 2026-08-04, in revised form** — separate discovery from completeness,
    give sreality its own `probe_category` (ceskereality pattern), unsplit, added to
    `REALTIME_SOURCES`. No other portal needs this.
+4. **New, from the Phase 2+3 backend work:** should single-portal Browse mode also swap the
+   header count / Stats tab to `listing_feed_public`-based numbers, or leave those showing the
+   market-wide deduped figures? Product call, not decided here (see the frontend follow-up spec).
+5. **New:** the map view should almost certainly stay property-grain (`browse_list`) regardless
+   of the portal filter — confirm before the frontend follow-up ships.
 4. Phase 5 (verified sort params + ceskereality main-walk sort slug) — bundle into this program or
    track separately as its own hardening PR? Still open.
