@@ -1,9 +1,21 @@
 # API_TOKEN rotation & the SPA → user-JWT migration
 
-**Status:** planned, operator-sequenced. This is the runbook for retiring the shared
-static bearer token — the last piece of the public-release auth story. It has a
-code half (the SPA must send per-user JWTs) and an operator half (rotate the secret).
-Written 2026-07-23 after a two-account pen-test surfaced the live symptom below.
+**Status:** Part A's admin/tenant slice **shipped 2026-08-04**; the `require_token`-only
+route audit and Part B (secret rotation) remain operator-sequenced. This is the runbook for
+retiring the shared static bearer token — the last piece of the public-release auth story.
+It has a code half (the SPA must send per-user JWTs) and an operator half (rotate the
+secret). Written 2026-07-23 after a two-account pen-test surfaced the live symptom below.
+
+**2026-08-04 update:** `verify_jwt`'s legacy branch (quoted below) is now **fully removed**,
+not just de-privileged — the static token no longer authenticates *anything* through
+`verify_jwt`, closing both the `require_admin` god-token bypass and the `tenant_conn`
+RLS-bypass for every route that already used it. `frontend/src/lib/api.ts` sends the
+caller's real Supabase JWT on every `require_admin`/`verify_jwt`/`tenant_conn`-gated call
+(a per-call `jwt: true` request option, not a blanket switch — see Part A below). **Not**
+done by this change: the `require_token`-only route audit (step 2) — `POST /collections`,
+single-collection CRUD, tags, buildings, manual estimates, filter-presets, and (pre-#940)
+brokers still authenticate via the shared static token and are not yet per-account scoped.
+The "treat the SPA as operator-only" interim posture stays in force until that audit lands.
 
 ## What `API_TOKEN` is
 
@@ -18,11 +30,13 @@ everyone. It exists in three places:
 - **Any other trusted caller** that talks to the API directly (e.g. a ClickUp automation,
   CI scripts) — each holds its own copy of the same string.
 
-Crucially, `verify_jwt` treats a request bearing this token as a **synthetic platform
-admin**: `{"sub": None, "role": "operator", "is_admin": True, "legacy": True}`. And
-`tenant_pool.tenant_conn` routes a `legacy` caller to the **unscoped service-role DB
-connection** — RLS is bypassed. So *the static token is a god-token*: it authenticates as
-admin and reads/writes every account's data.
+Crucially, `verify_jwt` **used to** treat a request bearing this token as a **synthetic
+platform admin**: `{"sub": None, "role": "operator", "is_admin": True, "legacy": True}`. And
+`tenant_pool.tenant_conn` routed a `legacy` caller to the **unscoped service-role DB
+connection** — RLS was bypassed. So *the static token was a god-token*: it authenticated as
+admin and read/wrote every account's data. (Retired 2026-08-04 — see the status note above.
+`require_token`, the separate simpler gate for non-identity routes, is unaffected and still
+accepts this token by design.)
 
 ## Why it must change (the live symptom)
 
@@ -45,8 +59,9 @@ So the leak is entirely: **the SPA authenticates to the API with the shared admi
 instead of the logged-in user's JWT.** Anyone who can reach the SPA (past its password gate)
 also holds admin API access via the embedded token.
 
-**Interim posture until Part A ships:** treat the SPA as an **operator-only** console and
-keep it behind its password gate. The **extension** is the per-user-safe public surface
+**Interim posture — still in force for the `require_token` surface:** treat the SPA as an
+**operator-only** console and keep it behind its password gate for anything not yet migrated
+off `require_token` (step 2 below). The **extension** is the per-user-safe public surface
 (Wave 1). Do not onboard non-operator tenants onto the SPA yet.
 
 ## The cutover — two parts
@@ -54,32 +69,47 @@ keep it behind its password gate. The **extension** is the per-user-safe public 
 ### Part A — SPA sends per-user JWTs (code; the real fix for the leak)
 
 The SPA must send the logged-in user's Supabase `access_token` instead of the static token.
-The extension already does exactly this; the SPA is the last static-token client.
+The extension already does exactly this; the SPA was the last static-token client.
 
-1. **`frontend/src/lib/api.ts` `request()`** — when a Supabase session exists, send
-   `Authorization: Bearer <session.access_token>`; fall back to the static token only when
-   logged out (public/anon calls) — or drop the static fallback entirely once every
-   SPA-called route accepts a JWT. The session is already available via the auth context
-   (`frontend/src/lib/auth.tsx`).
-2. **Route audit — every route the SPA calls must accept a JWT, not only the static token.**
-   `verify_jwt` accepts *both* the static token (→ legacy admin) and a real user JWT, so
-   migrating a route from `require_token` → `verify_jwt` never breaks existing callers.
-   Per-account data routes additionally move onto `tenant_pool.tenant_conn` (RLS) — the same
-   pattern Wave 1/2 already applied to `/pipeline/*`, `/collections` (GET), `/estimations/*`,
-   notes, and `/listings/lookup`. Routes still on `require_token` that the SPA calls (e.g.
-   `POST /collections`, `GET/PATCH/DELETE /collections/{id}`, and other curation/estimation
-   writes) need this migration or they will 401 once the SPA stops sending the static token.
-3. **Admin continuity is already satisfied:** the operator's Supabase user
-   (`hejtmanekp@gmail.com`) carries `app_metadata.is_admin = true`, which Supabase includes
-   in the JWT, so `require_admin` (which checks `app_metadata.is_admin`) keeps passing under
-   the operator's real JWT. The second account has no such flag → correctly non-admin.
-4. **Verify** with the two real accounts: the non-admin account sees only its own
-   collections/tags/notes/pipeline through the SPA; the operator still reaches every admin
-   page; no route the SPA uses 401s.
+1. **SHIPPED 2026-08-04 — `frontend/src/lib/api.ts` `request()`.** Every call site that
+   maps to a `require_admin`/`verify_jwt`/`tenant_conn`-gated backend route passes a new
+   `jwt: true` request option (see the file's header comment for the full route list); the
+   shared `request()`/`apiGet`/`apiPost` helpers then send
+   `Authorization: Bearer <session.access_token>` (via `supabase.auth.getSession()`) instead
+   of the static token for that call. Calls without the flag (routes still on `require_token`)
+   are unaffected. This is a per-call opt-in, not a blanket "always send the JWT" switch —
+   the blanket approach would also send a JWT to `require_token`-only routes, which reject
+   anything that isn't a literal match on the static secret and would 401 the SPA on those
+   calls (tags, single-collection CRUD, buildings, manual estimates, filter-presets). Backing
+   this up, `verify_jwt`'s legacy branch is now fully removed (not just de-privileged) — see
+   the status note at the top of this doc — so a `require_admin`/`verify_jwt` route rejects
+   the static token outright regardless of what the frontend sends.
+2. **STILL OPEN — route audit: every route the SPA calls must accept a JWT, not only the
+   static token.** Routes still on `require_token` that the SPA calls (`POST /collections`,
+   `GET/PATCH/DELETE /collections/{id}`, tags, buildings, manual estimates, filter-presets,
+   and pre-#940 brokers) still authenticate via the shared static token and are not yet
+   per-account scoped. Migrating one means moving it onto `verify_jwt`/`tenant_conn` (the
+   pattern already used by `/pipeline/*`, `/collections` GET, `/estimations/*` create/read,
+   notes, and `/listings/lookup`) *and* updating its `frontend/src/lib/api.ts` call site to
+   add `jwt: true` in the same change — do both together, not one then the other, or the
+   route either 401s (JWT added, frontend not updated) or silently keeps accepting the
+   shared secret (frontend updated, JWT not required server-side).
+3. **Admin continuity is confirmed working:** the operator's Supabase user
+   (`hejtmanekp@gmail.com`) carries `app_metadata.is_admin = true` (verified live against
+   the `admins` table and `auth.users.raw_app_meta_data` on 2026-08-04 — no Custom Access
+   Token Hook is configured; Supabase includes `app_metadata` in every issued JWT by
+   default), so `require_admin` keeps passing under the operator's real JWT. The one other
+   account on the platform has no such flag → correctly non-admin.
+4. **Verified 2026-08-04:** the full backend + frontend test suites pass with the legacy
+   branch removed (`tests/api/test_verify_jwt.py`, `test_admin_routes.py`, `test_auth.py`
+   all assert the old static token now gets 401/403, not 200, on every route it used to
+   silently pass).
 
-Part A is a self-contained engineering PR (SPA `request()` change + a bounded route-auth
-audit). It closes the leak **without** needing the secret rotated. Recommend shipping it as
-its own focused change with the operator watching, since it touches auth on the live console.
+Step 1 shipped as a self-contained PR alongside the `verify_jwt` legacy-branch removal. It
+closes the `require_admin` god-token bypass and the `tenant_conn` RLS-bypass for every route
+that already used those gates, **without** needing the secret rotated. Step 2 (the
+`require_token` route audit) is unstarted — do it as its own follow-up, since each route
+needs a real backend gate change, not just a frontend header change.
 
 ### Part B — rotate the secret (operator; after Part A)
 
@@ -87,7 +117,8 @@ Once no legitimate caller *needs* the old shared token, rotate its value so any 
 (every SPA bundle ever shipped contains it) becomes useless.
 
 1. **Inventory the remaining legitimate holders** of the old token and give each a plan:
-   - SPA — after Part A it no longer needs it (drop `VITE_API_TOKEN` from the build).
+   - SPA — still needs `VITE_API_TOKEN` for its `require_token`-only calls until Part A step 2
+     (the route audit) lands; can only drop it once every SPA-called route accepts a JWT.
    - Extension — already off it (Wave 1).
    - **ClickUp / any automation / CI** — if these call the API with the static token, they
      need the new value (or their own dedicated credential). Confirm the full list before
@@ -107,12 +138,13 @@ Once no legitimate caller *needs* the old shared token, rotate its value so any 
 
 - **Decide the sequencing/date.** Rotation is disruptive: it invalidates old SPA bundles and
   breaks any automation still on the old token — so it's a dated cutover, not a background task.
-- **Before rotating:** confirm Part A has shipped and the ClickUp/automation token list is
-  complete (Part B step 1).
+- **Before rotating:** confirm Part A step 2 (the `require_token` route audit) has shipped
+  and the ClickUp/automation token list is complete (Part B step 1). Step 1 (this PR) alone
+  isn't enough — the SPA still depends on the static token for its `require_token` calls.
 - **At rotation:** change `API_TOKEN` on Railway, update ClickUp + any automation to the new
   value, redeploy the API and the SPA. (These are dashboard/Railway actions a session can't do.)
-- **Until Part A ships:** keep the SPA operator-only behind its password gate; route new
-  tenants through the extension.
+- **Until Part A step 2 ships:** keep the SPA operator-only behind its password gate; route
+  new tenants through the extension.
 
 ## Relationship to public signup
 

@@ -2451,5 +2451,6 @@ function computeLineDiff(
 
 async function fetchSkillRefinement(id: number): Promise<SkillRefinement> {
   const { apiGet } = await import('@/lib/api');
-  return apiGet<SkillRefinement>(`/skill-refinements/${id}`);
+  // /skill-refinements/* is require_admin-gated (api/dependencies.py).
+  return apiGet<SkillRefinement>(`/skill-refinements/${id}`, undefined, undefined, true);
 }

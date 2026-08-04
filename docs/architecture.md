@@ -204,6 +204,20 @@ rules. Identify which one a task belongs to before you start.
 - **No write path from the browser.** Any UI action that needs a write goes through the
   bearer-token-gated FastAPI service, not direct Postgres. The toolkit's write-allowed
   exceptions (see Toolkit rule #5) are reachable only via the API.
+- **Two auth shapes to the FastAPI service** (`frontend/src/lib/api.ts`), matching the
+  backend gate each route actually uses. `require_admin`/`verify_jwt`/`tenant_conn` routes
+  (Settings, Dedup, Outreach, broker-review, location-audit, skill-refinements, Collections
+  list, Pipeline, Watchdog subscriptions, `/estimations` create/read) get `jwt: true` on
+  their `request()` call and receive the caller's real Supabase session `access_token`
+  (`supabase.auth.getSession()`) — `api/dependencies.py:verify_jwt` no longer accepts
+  anything else there (the legacy static-token branch that used to grant a synthetic
+  `is_admin: True` identity was removed 2026-08-04; see
+  `docs/design/api-token-rotation-and-spa-jwt-migration.md`). Routes still gated by the
+  simpler `require_token` (a shared-secret check, no identity) keep sending the static
+  `VITE_API_TOKEN` — extractable from the bundle via devtools by design, since that gate
+  only proves "past the password gate," never an admin or per-account claim. Adding a new
+  `require_admin`/`verify_jwt` route means adding `jwt: true` to its frontend call in the
+  same change, or it 401s.
 - **`Mapy.cz`-powered location search.** The Region/Browse pages call `GET /maps/suggest`
   and `POST /maps/resolve` on the FastAPI service for autocomplete + admin-unit
   resolution. The `MAPY_CZ_API_KEY` is server-side only — never inlined into the browser
@@ -278,8 +292,9 @@ rules. Identify which one a task belongs to before you start.
   `VITE_SUPABASE_ANON_KEY` are the build-time vars (mirroring the SPA's, both are public
   client config — the anon key is not a secret). The old `VITE_API_TOKEN` / `EXT_API_TOKEN`
   static bearer is retired for the extension; `verify_jwt`'s legacy-token branch
-  (`api/dependencies.py`) still exists for the SPA/ClickUp until the platform-wide rotation
-  cutover. `manifest.json` pins a stable extension ID via a generated RSA keypair's public
+  (`api/dependencies.py`) has since been removed entirely (2026-08-04) — see the Frontend
+  territory entry below and `docs/design/api-token-rotation-and-spa-jwt-migration.md`.
+  `manifest.json` pins a stable extension ID via a generated RSA keypair's public
   half in the `key` field (needed because the GoTrue PKCE redirect URL,
   `https://<id>.chromiumapp.org/`, must be pre-registered with Supabase + Google, and
   "Load unpacked" would otherwise assign a different ID per machine/download path).

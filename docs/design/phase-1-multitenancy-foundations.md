@@ -39,8 +39,8 @@ A billing account is **not** an auth user (a paid account may have several login
 - **Provider: Supabase Auth (GoTrue)** — email + Google. `supabase-js` (already installed) bundles it, so the SPA gets login with **no new frontend dependency**.
 - **Custom SMTP via Resend** (`api/transports/email_resend.py` exists) — Supabase's built-in mailer caps at a few emails/hour. Dedicated auth subdomain with SPF/DKIM/DMARC, **separate** from the notification stream so a notification-spam complaint can't break password resets.
 - **FastAPI JWT verification** — the one justified new backend dependency (`PyJWT`). Verify against Supabase's **asymmetric JWKS** (ES256 signing keys, not the legacy shared HS256 secret — the modern, rotation-friendly path). A `verify_jwt` dependency yields the validated claims; it slots in exactly where `require_token` sits today (`api/dependencies.py`).
-- **Dual-auth window (the safety net):** during migration the API accepts **both** the legacy static bearer (the operator's current SPA/extension keep working) **and** a Supabase JWT. The legacy bearer is retired only at the very end (§11 step 5), after the last old extension build ages out.
-- **Admin role:** an `admins` table is the source of truth; a **Custom Access Token Hook** stamps `is_admin` into `app_metadata` so it rides in the JWT (fast, no per-request lookup). A `require_admin` dependency checks the claim.
+- **Dual-auth window (the safety net) — retired 2026-08-04 for `verify_jwt`/`require_admin`:** during migration the API accepted **both** the legacy static bearer (the operator's current SPA/extension keep working) **and** a Supabase JWT; the extension moved off it in Wave 1 (2026-07-21), and the SPA's `require_admin`/`verify_jwt`/`tenant_conn` calls moved off it 2026-08-04 (`docs/design/api-token-rotation-and-spa-jwt-migration.md`). `verify_jwt` no longer accepts the static bearer at all. Still open: `require_token`-only routes (§11 step 6 / workstream item L) — see that doc's "STILL OPEN" step 2.
+- **Admin role:** an `admins` table is the source of truth allowlist, but the live `is_admin` JWT claim rides on the user's `app_metadata` directly (`auth.users.raw_app_meta_data`), which Supabase includes in every issued JWT **without needing a Custom Access Token Hook** — verified live 2026-08-04 (no hook function exists in the DB). A hook would only be needed if `is_admin` had to be computed dynamically at token-issue time instead of read off a static per-user attribute. A `require_admin` dependency checks the claim.
 - **Signup abuse controls Supabase supports:** Turnstile/hCaptcha on signup, **mandatory** email verification, disposable-domain blocking.
 
 ## 3. Tenancy enforcement — Option C, hardened (two DB roles, two pools)
@@ -130,7 +130,7 @@ The trap (from the adversarial critique): flipping user-state views to `security
 3. **Add RLS policies** `TO authenticated` while the `*_public` views are **still definer** — so the anon SPA still reads globally and the operator sees everything exactly as before. No visible change.
 4. **Move the SPA's user-state reads** from `anon`+definer-views to `authenticated`+invoker-views **page by page**, behind the login. As each page moves, flip **that** view to `security_invoker`. The operator (logged in as account #1, owner of all backfilled rows) sees the same data — because they own it.
 5. **Re-grant the shared-market views from `anon` to `authenticated`** and point the SPA's market reads at the `authenticated` role. Now every logged-in user reads shared data; user state stays RLS-scoped.
-6. **Revoke `anon` to ~nothing and retire the legacy static bearer** once the SPA is fully logged-in on JWT and the last old extension build has aged out. The only remaining anonymous surface is the static marketing page (which ships no Supabase key) and the deliberately-public image redirect.
+6. **Revoke `anon` to ~nothing and retire the legacy static bearer** once the SPA is fully logged-in on JWT and the last old extension build has aged out. The only remaining anonymous surface is the static marketing page (which ships no Supabase key) and the deliberately-public image redirect. **Partially done 2026-08-04:** the legacy bearer is fully retired for `verify_jwt`/`require_admin`/`tenant_conn` (`docs/design/api-token-rotation-and-spa-jwt-migration.md`); the `require_token`-only surface and the `anon` revoke are still open.
 
 The **pipeline PK rewrite** rides with step 2's `account_id` backfill (trivial row volume). Every migration is additive/reversible; there is no big-bang.
 
@@ -156,7 +156,7 @@ H. admin gating (is_admin, re-gate 70 routes, code-split)── depends on A
 I. Stripe skeleton + entitlements + webhook           ── depends on B
 J. usage ledger + check_budget + kill-switch          ── depends on B,D
 K. RLS test lane + GDPR lifecycle + Sentry/audit/PITR  ── continuous
-L. retire legacy bearer                               ── last, depends on G,H
+L. retire legacy bearer                    ── PARTIAL 2026-08-04 (verify_jwt/require_admin/tenant_conn done; require_token open)
 ```
 
 **Exit gate (before any public wave):** the RLS test lane green + an external re-audit (`/code-review ultra`) + a manual cross-tenant pen-test with two real accounts.
