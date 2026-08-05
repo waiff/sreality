@@ -32,11 +32,7 @@ const navItems: ReadonlyArray<NavItem> = [
 // Grouped under the "Settings" dropdown trigger — all admin-only, so the
 // whole group renders (or not) alongside the other admin-gated nav items.
 const settingsItems: ReadonlyArray<{ to: string; label: string }> = [
-  { to: '/dedup',    label: 'Dedup' },
   { to: '/clip-audit', label: 'CLIP Audit' },
-  { to: '/phash-audit', label: 'pHash Audit' },
-  { to: '/location-audit', label: 'Location Audit' },
-  { to: '/model-testing', label: 'Model Testing' },
   { to: '/health',   label: 'Health' },
   { to: '/costs',    label: 'LLM Costs' },
   { to: '/scrapers', label: 'Scrapers' },
