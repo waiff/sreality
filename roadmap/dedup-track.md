@@ -1,6 +1,6 @@
 > Track file — part of [ROADMAP.md](../ROADMAP.md). After shipping, edit only this file + its index row.
 
-> # ⛔ EVERYTHING BELOW IS HISTORY — DO NOT ACT ON IT
+> # ⛔ SUPERSEDED (2026-08) — EVERYTHING BELOW IS HISTORY, DO NOT ACT ON IT
 >
 > **The automatic dedup decision engine was REMOVED wholesale in the 2026-08 "NEW DEDUP" cutoff.**
 > The entire body of this file describes that removed engine (its funnel, vision lanes, batch
@@ -9,6 +9,7 @@
 > branch `backup/pre-new-dedup-2026-08` only. **Standing rule: the removed engine, its comments,
 > and its design docs are never consulted again for any purpose.**
 >
+> **The live track is [`roadmap/new-dedup.md`](new-dedup.md)** — do not resume work here.
 > **Current source of truth:** [`docs/design/new-dedup/PROGRAM.md`](../docs/design/new-dedup/PROGRAM.md)
 > (the simulation-first rebuild: waves, gates, decisions ledger) and
 > [`docs/design/new-dedup/CUTOFF.md`](../docs/design/new-dedup/CUTOFF.md) (exactly what was cut).

@@ -1,0 +1,58 @@
+name: NEW DEDUP teardown backup (one-off)
+
+# One-off pg_dump backup of the tables docs/design/new-dedup/CUTOFF.md §4 marks for drop,
+# uploaded to R2 under backups/new-dedup-teardown/<date>/. Run manually once, before the
+# teardown migration (PR-3) drops those tables — the destructive-migration safety net
+# (CLAUDE.md rule 1 / the `database` skill: pg_dump first, then explicit operator OK to apply).
+# Not scheduled; workflow_dispatch only. Safe to re-run (each run writes to its own date prefix).
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: new-dedup-teardown-backup
+  cancel-in-progress: false
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      SUPABASE_DB_SESSION_URL: ${{ secrets.SUPABASE_DB_SESSION_URL }}
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install postgresql-client 17 (pg_dump)
+        # The runner's default postgresql-client is v16; the Supabase server is v17.x and
+        # pg_dump refuses to dump from a newer major version. Pull the matching client from
+        # the official PGDG apt repo instead of the Ubuntu default.
+        run: |
+          sudo apt-get install -y curl ca-certificates
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+            --fail https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] \
+            https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client-17
+          echo "/usr/lib/postgresql/17/bin" >> "$GITHUB_PATH"
+
+      - name: Install
+        run: pip install -e .
+
+      - name: Backup teardown tables to R2
+        run: python -m scripts.backup_new_dedup_teardown_tables

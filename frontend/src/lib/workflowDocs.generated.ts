@@ -2499,6 +2499,32 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/monitor_workflow_failures.yml"
   },
   {
+    "filename": "new_dedup_teardown_backup.yml",
+    "name": "NEW DEDUP teardown backup (one-off)",
+    "description": "One-off pg_dump backup of the tables docs/design/new-dedup/CUTOFF.md §4 marks for drop, uploaded to R2 under backups/new-dedup-teardown/<date>/. Run manually once, before the teardown migration (PR-3) drops those tables — the destructive-migration safety net (CLAUDE.md rule 1 / the `database` skill: pg_dump first, then explicit operator OK to apply). Not scheduled; workflow_dispatch only. Safe to re-run (each run writes to its own date prefix).",
+    "portal": null,
+    "manual": true,
+    "schedules": [],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [],
+    "secrets": [
+      "R2_ACCESS_KEY_ID",
+      "R2_ACCOUNT_ID",
+      "R2_BUCKET_NAME",
+      "R2_SECRET_ACCESS_KEY",
+      "SUPABASE_DB_SESSION_URL",
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "new-dedup-teardown-backup",
+    "cancelInProgress": false,
+    "timeoutMinutes": 20,
+    "permissions": "contents: read",
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/new_dedup_teardown_backup.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/new_dedup_teardown_backup.yml"
+  },
+  {
     "filename": "property_maintenance.yml",
     "name": "Jobs: property maintenance (incremental)",
     "description": "Phase 3 of the scaling roadmap: real-time properties. This is the FAST, FREQUENT half of property maintenance — the dirty-set incremental pass. It runs scripts/recompute_property_stats --incremental, which:",
