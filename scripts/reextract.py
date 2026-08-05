@@ -45,6 +45,7 @@ Required env: SUPABASE_DB_URL.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import sys
@@ -58,6 +59,7 @@ from dataclasses import dataclass
 from scraper import db
 from scraper.idnes_parser import _gallery_urls as _idnes_gallery
 from scraper.realitymix_parser import _images as _realitymix_images
+from scraper.remax_parser import _broker as _remax_broker
 from scraper.remax_parser import _description as _remax_description
 from scraper.scraped_listing import _HASH_FIELDS
 
@@ -99,6 +101,16 @@ _FIELDS: dict[str, FieldSpec] = {
         missing_predicate="l.description IS NULL",
         hashed=True,
     ),
+    # `raw_json` is not in _HASH_FIELDS, so this is snapshot-free like media. Attribution
+    # itself is NOT done here: the resolver is queue-driven and `ingest_scraped_listing`
+    # only enqueues when the content hash changes — which writing raw_json does not. The
+    # daily full sweep enumerates resolve_brokers._BROKER_SOURCES, so remax is picked up
+    # there (or run resolve_brokers_full.yml to attribute immediately).
+    "broker": FieldSpec(
+        extractors={"remax": lambda html, _native: _remax_broker(HTMLParser(html))},
+        missing_predicate="NOT (l.raw_json ? 'broker')",
+        hashed=False,
+    ),
 }
 
 # Guard against the registry drifting out of sync with the hash contract: if a field is
@@ -139,6 +151,12 @@ LIMIT %(limit)s
 # (regressing a price that has since changed). One column, one statement.
 _WRITE_DESCRIPTION = """
 UPDATE listings SET description = %(value)s WHERE id = %(id)s AND description IS NULL
+"""
+
+_WRITE_BROKER = """
+UPDATE listings
+SET raw_json = jsonb_set(coalesce(raw_json, '{}'::jsonb), '{broker}', %(value)s::jsonb)
+WHERE id = %(id)s
 """
 
 
@@ -222,18 +240,17 @@ def main() -> int:
                     still_empty += 1
                     continue
                 recovered += 1
+                urls_found += len(value)
+                if args.dry_run:
+                    continue
                 if args.field == "media":
-                    urls_found += len(value)
-                    if not args.dry_run:
-                        rows_written += db.record_media(conn, int(listing_id), value)
-                else:
-                    urls_found += len(value)
-                    if not args.dry_run:
-                        with conn.cursor() as wcur:
-                            wcur.execute(
-                                _WRITE_DESCRIPTION, {"value": value, "id": int(listing_id)}
-                            )
-                            rows_written += wcur.rowcount or 0
+                    rows_written += db.record_media(conn, int(listing_id), value)
+                    continue
+                sql = _WRITE_DESCRIPTION if args.field == "description" else _WRITE_BROKER
+                payload = value if args.field == "description" else json.dumps(value)
+                with conn.cursor() as wcur:
+                    wcur.execute(sql, {"value": payload, "id": int(listing_id)})
+                    rows_written += wcur.rowcount or 0
 
             LOG.info(
                 "REEXTRACT progress seen=%d recovered=%d size=%d written=%d empty=%d cursor=%d",

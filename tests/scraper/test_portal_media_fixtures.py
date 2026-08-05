@@ -243,3 +243,55 @@ def test_fixtures_are_anonymized_but_urls_survive():
         assert "+420 XXX XXX XXX" in html, "PII scrubbing still runs"
         assert "nab_+420" not in html, "photo ids must not be scrubbed as phone numbers"
         assert "/thumbs/XXX/YY/" not in html, "CDN paths must not be scrubbed as streets"
+
+
+def test_remax_broker_block_matches_the_resolver_contract():
+    """resolve_brokers reads raw_json->'broker'->>'broker_id' as the identity key. The id
+    is the `uzivatele/{id}` photo DIRECTORY — the two filename numbers are per-asset and
+    change on photo re-upload, so only the directory is 1:1 with the agent."""
+    from scraper.remax_parser import parse_detail
+
+    listing = parse_detail(
+        _fixture("remax_detail.html"),
+        source_url="https://www.remax-czech.cz/reality/detail/445483/x",
+    )
+
+    broker = listing.raw["broker"]
+    assert broker["broker_id"] == "90001"
+    assert broker["name"]
+    assert "@" in broker["email"]
+    assert broker["agency_slug"] == "re-max-diamond"
+    assert "phone" not in broker, "broker_phone is an intentional zero on every portal"
+
+
+def test_remax_broker_profile_link_is_absolute():
+    """The profile href is absolute — a `/reality/`-prefixed relative selector matches
+    nothing, which is how the agency slug would silently come back empty."""
+    html = _fixture("remax_detail.html")
+
+    assert 'href="https://www.remax-czech.cz/reality/' in html
+    assert 'href="/reality/re-max' not in html
+
+
+def test_remax_is_wired_end_to_end_for_broker_attribution():
+    """Three registries must agree or nothing is ever attributed: the ingest enqueue
+    allow-list, the resolver's source list, and the per-source SQL in _attribute()."""
+    import importlib.util
+    import sys
+
+    from scraper.db import BROKER_ATTRIBUTED_SOURCES
+
+    assert "remax" in BROKER_ATTRIBUTED_SOURCES
+
+    spec = importlib.util.spec_from_file_location(
+        "resolve_brokers", Path(__file__).resolve().parents[2] / "scripts" / "resolve_brokers.py"
+    )
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["resolve_brokers"] = module
+    spec.loader.exec_module(module)
+
+    assert "remax" in module._BROKER_SOURCES
+    import inspect
+
+    assert inspect.getsource(module._attribute).count("_REMAX_") == 3

@@ -53,7 +53,7 @@ it replaced.
 
 ## Recovering a field a parser silently stopped extracting
 
-`scripts/reextract.py --source <portal> --field media [--since YYYY-MM-DD] --dry-run` replays the
+`scripts/reextract.py --source <portal> --field <media|description|broker> [--since YYYY-MM-DD] --dry-run` replays the
 CURRENT parser over already-stored `portal_raw_pages` HTML — no re-fetch, and it repairs
 **inactive** listings too, which a re-fetch structurally cannot. Snapshot-safe by construction:
 it writes only child media rows, never a `listings` content column, so the content hash cannot

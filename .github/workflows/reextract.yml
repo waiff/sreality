@@ -27,13 +27,14 @@ on:
           - idnes
           - remax
       field:
-        description: "Field to recover (remax=description; realitymix/idnes=media)"
+        description: "Field to recover (remax=description|broker; realitymix/idnes=media)"
         required: true
         default: media
         type: choice
         options:
           - media
           - description
+          - broker
       since:
         description: "Only listings first seen on/after (YYYY-MM-DD; blank = all)"
         required: false
