@@ -914,6 +914,10 @@ export type PhashAuditImageRef = {
   fine_tag: string | null;
   confidence: number | null;
   render_score: number | null;
+  // The portal-agnostic natural key (never null, unlike legacy sreality_id) — lets
+  // every image identify + link to its listing regardless of portal/Gate-2 status.
+  source: string;
+  source_id_native: string;
 };
 export type PhashAuditRow = {
   audit_id: number;
@@ -933,6 +937,9 @@ export type PhashAuditRow = {
   left_image: PhashAuditImageRef;
   right_image: PhashAuditImageRef;
   hamming: number;
+  // The engine's current merge bar (PHASH_IDENTICAL_MAX) — sourced from the backend
+  // rather than hardcoded, so a card can show hamming met/unmet without drifting.
+  hamming_merge_bar: number;
 };
 export const getPhashAudit = (
   params: {
@@ -979,6 +986,41 @@ export const getPhashAudit = (
   q.set('limit', String(params.limit ?? 100));
   if (params.scan_offset) q.set('scan_offset', String(params.scan_offset));
   return request(`/dedup/phash-audit?${q.toString()}`, { jwt: true });
+};
+
+// Merged-vs-dismissed pair counts per Hamming-distance bucket — the aggregate behind
+// the threshold-tuning panel; same scope filters as getPhashAudit, no engine change.
+export type PhashHammingBucket = {
+  bucket_start: number;
+  bucket_end: number;
+  merged: number;
+  dismissed: number;
+};
+export const getPhashAuditHistogram = (
+  params: {
+    category_main?: string;
+    outcome?: string;
+    room_types?: ReadonlyArray<string>;
+    training_only?: boolean;
+    training_label?: string;
+    training_exclude?: boolean;
+    bucket_width?: number;
+  } = {},
+): Promise<{
+  buckets: PhashHammingBucket[];
+  scanned_pairs: number;
+  scan_cap: number;
+  hamming_merge_bar: number;
+}> => {
+  const q = new URLSearchParams();
+  if (params.category_main) q.set('category_main', params.category_main);
+  if (params.outcome) q.set('outcome', params.outcome);
+  if (params.room_types?.length) q.set('room_types', params.room_types.join(','));
+  if (params.training_only) q.set('training_only', 'true');
+  if (params.training_label) q.set('training_label', params.training_label);
+  if (params.training_exclude) q.set('training_exclude', 'true');
+  if (params.bucket_width) q.set('bucket_width', String(params.bucket_width));
+  return request(`/dedup/phash-audit/histogram?${q.toString()}`, { jwt: true });
 };
 
 // /phash-audit "Train": one image's linear-probe training-set label (migration 309).
