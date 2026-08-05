@@ -143,6 +143,37 @@ def test_idnes_video_anchors_pass_through_to_the_shared_media_split():
 # --------------------------------------------------------------------------- fixtures
 
 
+def test_remax_extracts_the_server_rendered_description():
+    """remax sat at 0.0% description for its entire life (11,091 rows) because
+    `.pd-detail-text` / `#popis` match no state of the page — 0/300 stored pages carry
+    either. The text IS server-rendered in the first response; the container is only a
+    CSS read-more collapse, so no JS execution is involved."""
+    from scraper.remax_parser import parse_detail
+
+    html = _fixture("remax_detail.html")
+    assert ".pd-detail-text" not in html and 'id="popis"' not in html
+
+    listing = parse_detail(html, source_url="https://www.remax-czech.cz/reality/detail/445483/x")
+
+    assert listing.description is not None
+    assert len(listing.description) > 500
+    assert listing.description.startswith("Nabízíme k prodeji rodinný dům")
+    assert "\n" in listing.description, "<br> paragraphing must survive"
+
+
+def test_remax_description_is_never_the_og_boilerplate():
+    """og:description is REMAX marketing copy, byte-identical on every listing. Using it
+    would look like a fix while poisoning all 11,091 rows with one constant string."""
+    from scraper.remax_parser import parse_detail
+
+    html = _fixture("remax_detail.html")
+    assert "Spolehněte se na jedničku mezi realitkami" in html, "the trap is in the fixture"
+
+    listing = parse_detail(html, source_url="https://www.remax-czech.cz/reality/detail/445483/x")
+
+    assert "Spolehněte se na jedničku" not in (listing.description or "")
+
+
 def test_reextract_registry_recovers_media_for_every_wired_portal():
     """scripts/reextract.py replays these same extractors over stored HTML. If a
     registered portal's extractor returns nothing on a real page, the backfill would

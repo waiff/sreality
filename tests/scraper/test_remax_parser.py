@@ -98,7 +98,7 @@ DETAIL_HTML = """
   <div class="pd-detail-info__row"><div class="pd-detail-info__label">Vybaveno:</div><div class="pd-detail-info__value">Ano</div></div>
   <div class="pd-detail-info__row"><div class="pd-detail-info__label">Energetická náročnost budovy:</div><div class="pd-detail-info__value">C</div></div>
 </div>
-<div class="pd-detail-text">K prodeji nabízíme byt 2+kk v žádané lokalitě.</div>
+<div class="pd-base-info__content-collapse-inner"><div ref="content-inner">K prodeji nabízíme byt 2+kk v žádané lokalitě.<br><br>Byt je po rekonstrukci.</div></div>
 <div class="pd-gallery">
   <a data-fancybox="g" href="https://mlsf.remax-czech.cz/data//zs/440872/3387561.jpg">
     <img data-thumb="https://mlsf.remax-czech.cz/data//zs/440872/3387561_th350.jpg"></a>

@@ -457,6 +457,26 @@ def _detail_params(tree: HTMLParser) -> dict[str, str]:
     return rows
 
 
+def _description(tree: HTMLParser) -> str | None:
+    """The listing's free-text body.
+
+    The container is a read-more collapse: the FULL text is server-rendered in the
+    first response and Vue only toggles a CSS class over it, so no JS execution is
+    needed. `<br>` carries the seller's paragraphing, so separate on it rather than
+    running every paragraph together.
+
+    The previous selectors (`.pd-detail-text`, `#popis`) match no state of this page,
+    pre- or post-JS — 0/300 stored pages carry either — which is why remax sat at 0.0%
+    description for its entire life. Do NOT substitute `og:description`: it is REMAX
+    marketing boilerplate, byte-identical on every listing, so it would look like a fix
+    while poisoning every row with one constant string.
+    """
+    node = tree.css_first('div.pd-base-info__content-collapse-inner div[ref="content-inner"]')
+    if node is None:
+        return None
+    return node.text(separator="\n", strip=True) or None
+
+
 def _detail_images(html: str, source_id: str) -> list[str]:
     images: list[str] = []
     seen: set[str] = set()
@@ -507,6 +527,15 @@ def parse_detail(
         value = int(price_attr)
         price_czk = value if 0 < value <= _PRICE_MAX else None
     if price_czk is None:
+        # DEAD FALLBACK, deliberately left dead for now: `.pd-price` is absent from
+        # 300/300 stored pages, so ~44% of remax listings (the ones without
+        # `data-advert-price`) have no price path at all. The obvious replacement,
+        # `.pd-table__value--price`, is NOT safe yet: it renders three different units
+        # ("za nemovitost", "za měsíc", "za m2") and `_parse_price` scrapes digits
+        # naively, so a land plot showing "7 759 CZK/ za m2" yields 77592 — it swallows
+        # the "2" from "m2". A unit-price written as a total is far worse than a NULL
+        # (it poisons €/m² stats, estimation comparables and Browse sorting), so this
+        # waits on a unit-aware `_parse_price`. See docs/design/remax-extraction.md.
         price_czk, price_unit = _parse_price(_text(tree.css_first(".pd-price")), category_type)
 
     # Coordinates: the first data-gps on the page is the subject listing's (the
@@ -588,6 +617,6 @@ def parse_detail(
         furnished=_norm_furnished(params.get("vybaveno")),
         estate_area=_parse_area(params.get("plocha pozemku")),
         garden_area=_parse_area(params.get("plocha zahrady")),
-        description=_text(tree.css_first(".pd-detail-text")) or _text(tree.css_first("#popis")),
+        description=_description(tree),
         raw=raw,
     )
