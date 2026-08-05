@@ -22,20 +22,35 @@ non-negotiables" for the full rationale.
 
 ## Status
 
-🟡 **W0 in progress** (Wave 0 — backup + teardown + scaffolding). See PROGRAM.md's progress
-ledger for session-by-session detail; this file tracks only the phase-to-phase status.
+🟡 **W0 in progress** (Wave 0 — backup + teardown + scaffolding), **W1 started in parallel**
+(Wave 1 — shared prerequisites; its additive-only pieces don't depend on W0 landing). See
+PROGRAM.md's progress ledger for session-by-session detail; this file tracks only the
+phase-to-phase status.
 
 - [x] PR-0: design docs landed (#960).
 - [x] Backup branch `backup/pre-new-dedup-2026-08` + tag `backup-pre-new-dedup` cut.
-- [ ] Day-0 freeze (disable the 6 legacy decision workflows + confirm the worker dedup lane dark).
-- [ ] M-0 (`app_settings.dedup_publication_gate_enabled = false`).
-- [ ] pg_dump backup of to-be-dropped tables to R2.
-- [ ] PR-1 (backend decision-layer removal) — in progress.
+- [ ] Day-0 freeze (disable the 6 legacy decision workflows + confirm the worker dedup lane dark)
+      — blocked on operator permission (classifier denies both `gh workflow disable` and the DB
+      flip from an agent session).
+- [ ] M-0 (`app_settings.dedup_publication_gate_enabled = false`) — same blocker as above.
+- [x] pg_dump backup of to-be-dropped tables to R2.
+- [ ] PR-1 (backend decision-layer removal) — code + tests done and staged in the worktree; the
+      CUTOFF §6 doc pass (CLAUDE.md rule 15, architecture.md §15, 2 skills, legacy design doc
+      deletes) is still outstanding before it opens.
 - [ ] PR-2 (frontend decision-layer removal).
 - [ ] PR-3 (migration: table drops + view redefinition + legacy stamp).
 - [ ] W0 verification checklist green → Gate 0 closes.
 
-Waves W1-W8 (labeling program, L0-L4 levels, production wiring) are not started; see PROGRAM.md.
+W1 (shared prerequisites + labeling program) — backend/infra half started:
+- [x] `dedup_sim` schema + `settings`/`settings_history`/`simulation_runs` (migration 372).
+- [x] Settings registry (`toolkit/dedup_sim_settings.py`), 12 knobs seeded from the decisions
+      ledger, each with a plain-language blurb.
+- [ ] RunPod serverless workflow — blocked on the operator creating the RunPod account (no
+      `RUNPOD_API_KEY` secret exists yet); reuse target is PR #804's pod-side harness.
+- [ ] Dashboard skeleton + Labeling page — deliberately held until PR-2 lands (same nav
+      territory PR-2 restructures).
+
+Waves W2-W8 (candidate selection through production wiring) are not started; see PROGRAM.md.
 
 ## Data-quality prerequisite (operator-run, parallel to the code work)
 
