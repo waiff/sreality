@@ -1,5 +1,4 @@
-"""The single-source image-tag taxonomy + family grouping is internally consistent
-and is what image_classification / dedup_engine re-export."""
+"""The single-source image-tag taxonomy + family grouping is internally consistent."""
 
 from __future__ import annotations
 
@@ -37,19 +36,6 @@ def test_full_priority_covers_every_tag_that_can_be_compared() -> None:
     # FULL_PRIORITY (non-byt) excludes only the never-compared plan/other families.
     comparable = {t for t, f in rt.ROOM_FAMILIES.items() if f in ("interior", "exterior")}
     assert set(rt.FULL_PRIORITY) == comparable
-
-
-def test_reexports_match_single_source() -> None:
-    from toolkit import image_classification as ic
-    from toolkit import dedup_engine as de
-
-    assert ic.ROOM_TYPES == rt.ROOM_TYPES
-    assert ic.INTERIOR_ROOM_TYPES == rt.INTERIOR_ROOM_TYPES
-    assert ic.SITE_PLAN_ROOM_TYPE == rt.SITE_PLAN_ROOM_TYPE
-    assert de.BYT_ROOM_PRIORITY == rt.INTERIOR_PRIORITY
-    assert de.ROOM_PRIORITY == rt.FULL_PRIORITY
-    assert de.NON_INTERIOR_TAGS == rt.NON_INTERIOR_TAGS
-    assert de.DISTINCTIVE_ROOMS == rt.DISTINCTIVE_ROOMS
 
 
 # --- IMAGE_ROLE_REGISTRY (Session 5b): the per-family, per-tag role declaration that

@@ -1,9 +1,7 @@
 """Tests for the shared district/location filter builder
-(`api.location_filter.district_where`): the single-alias case is pinned
+(`api.location_filter.district_where`): the clauses/param-names are pinned
 byte-identical to Watchdog's pre-extraction implementation (see
-`tests/api/test_notifications.py`); these tests cover the generalisation to
-multiple aliases the dedup Decision history + Queue filters need (a pair
-matches if EITHER side touches the picked place).
+`tests/api/test_notifications.py`).
 """
 
 from __future__ import annotations
@@ -12,82 +10,59 @@ from api.location_filter import DistrictChip, district_where, parse_district_chi
 
 
 def test_no_chips_is_a_no_op() -> None:
-    where, params = district_where(None, aliases=["l"])
+    where, params = district_where(None, alias="l")
     assert where == []
     assert params == {}
-    where, params = district_where([], aliases=["l"])
+    where, params = district_where([], alias="l")
     assert where == []
     assert params == {}
 
 
-def test_single_alias_matches_legacy_param_names() -> None:
+def test_resolved_chip_matches_legacy_param_names() -> None:
     where, params = district_where(
-        [DistrictChip(name="Jihlava", level="obec", id=586846)], aliases=["l"],
+        [DistrictChip(name="Jihlava", level="obec", id=586846)], alias="l",
     )
     assert where == ["(l.obec_id = %(district_id_0)s)"]
     assert params == {"district_id_0": 586846}
 
 
-def test_two_aliases_or_the_chip_across_both_sides() -> None:
-    where, params = district_where(
-        [DistrictChip(name="Jihlava", level="obec", id=586846)], aliases=["l", "r"],
-    )
+def test_legacy_chip_name_matches_across_name_columns() -> None:
+    where, params = district_where([DistrictChip(name="Brno", context=None)], alias="l")
     assert len(where) == 1
-    # Double-wrapped: the per-chip alias-OR group, then the include-group OR
-    # (of just this one chip) — harmless, same shape the single-alias locality
-    # branch has always produced.
-    assert where[0] == (
-        "((l.obec_id = %(district_id_l_0)s OR r.obec_id = %(district_id_r_0)s))"
-    )
-    assert params == {"district_id_l_0": 586846, "district_id_r_0": 586846}
+    assert "l.district ILIKE %(district_name_0)s" in where[0]
+    assert "l.place_search_text ILIKE %(district_name_0)s" in where[0]
+    assert params["district_name_0"] == "%Brno%"
 
 
-def test_two_alias_legacy_chip_name_match_both_sides() -> None:
-    where, params = district_where(
-        [DistrictChip(name="Brno", context=None)], aliases=["l", "r"],
-    )
-    assert len(where) == 1
-    assert "l.district ILIKE %(district_name_l_0)s" in where[0]
-    assert "r.district ILIKE %(district_name_r_0)s" in where[0]
-    assert " OR " in where[0]
-    assert params["district_name_l_0"] == "%Brno%"
-    assert params["district_name_r_0"] == "%Brno%"
-
-
-def test_excluded_chip_negated_across_both_aliases() -> None:
-    where, params = district_where(
-        [DistrictChip(name="Praha", excluded=True)], aliases=["l", "r"],
-    )
+def test_excluded_chip_negated() -> None:
+    where, _params = district_where([DistrictChip(name="Praha", excluded=True)], alias="l")
     assert len(where) == 1
     assert where[0].startswith("NOT (")
-    assert "l.district ILIKE %(district_name_l_0)s" in where[0]
-    assert "r.district ILIKE %(district_name_r_0)s" in where[0]
+    assert "l.district ILIKE %(district_name_0)s" in where[0]
 
 
-def test_mixed_include_exclude_two_aliases() -> None:
+def test_mixed_include_exclude() -> None:
     where, params = district_where(
         [
             DistrictChip(name="Praha"),
             DistrictChip(name="Modřany", excluded=True),
         ],
-        aliases=["l", "r"],
+        alias="l",
     )
     assert len(where) == 2
-    inc = next(w for w in where if "district_name_l_0" in w)
-    exc = next(w for w in where if "district_name_l_1" in w)
+    inc = next(w for w in where if "district_name_0" in w)
+    exc = next(w for w in where if "district_name_1" in w)
     assert not inc.startswith("NOT (")
     assert exc.startswith("NOT (")
-    assert params["district_name_l_0"] == "%Praha%"
-    assert params["district_name_r_0"] == "%Praha%"
-    assert params["district_name_l_1"] == "%Modřany%"
-    assert params["district_name_r_1"] == "%Modřany%"
+    assert params["district_name_0"] == "%Praha%"
+    assert params["district_name_1"] == "%Modřany%"
 
 
-def test_no_aliases_raises() -> None:
+def test_empty_alias_raises() -> None:
     import pytest
 
     with pytest.raises(ValueError):
-        district_where([DistrictChip(name="Praha")], aliases=[])
+        district_where([DistrictChip(name="Praha")], alias="")
 
 
 def test_parse_csv_absent_names_is_none() -> None:

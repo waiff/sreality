@@ -1,12 +1,12 @@
-"""Self-hosted CLIP image tagger — zero-shot room/plot tagging for dedup.
+"""Self-hosted CLIP image tagger — zero-shot room/plot tagging.
 
-ONE tagger shared by the trial (scripts/clip_trial.py) and the production backfill
-(scripts/clip_tag_backfill.py). Loads CLIP (transformers, CPU), embeds the taxonomy
-prompts once, and tags an image by argmax cosine — collapsing the fine visual
-anchors to the engine's logical labels per data/clip_taxonomy.json. Pure image ->
-tag (no DB, no R2), so it is reusable and unit-testable. Validated free replacement
-for the paid room classifier on the coarse, dedup-relevant distinctions, and the
-first tagger for the non-apartment categories (dum/pozemek/komercni).
+Driven by the production backfill (scripts/clip_tag_backfill.py). Loads CLIP
+(transformers, CPU), embeds the taxonomy prompts once, and tags an image by argmax
+cosine — collapsing the fine visual anchors to the logical labels per
+data/clip_taxonomy.json. Pure image -> tag (no DB, no R2), so it is reusable and
+unit-testable. Validated free replacement for the paid room classifier on the
+coarse distinctions, and the first tagger for the non-apartment categories
+(dum/pozemek/komercni).
 
 transformers/torch are the optional `clip` extra — imported lazily so this module
 loads without them (e.g. for a --help or a taxonomy lint).

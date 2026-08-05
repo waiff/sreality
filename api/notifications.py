@@ -306,7 +306,7 @@ def _build_match_clauses(
         # disagree on what a district chip means. Single-alias here (`l`),
         # so the emitted SQL/params are byte-identical to this matcher's
         # previous inline implementation.
-        d_where, d_params = district_where(spec.districts, aliases=["l"])
+        d_where, d_params = district_where(spec.districts, alias="l")
         where.extend(d_where)
         params.update(d_params)
 

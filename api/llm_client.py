@@ -65,9 +65,6 @@ CalledFor = Literal[
     "score_listing_condition",
     "summarize_region_dispositions",
     "enrich_listing_description",
-    "classify_listing_images",
-    "compare_listings_visually",
-    "compare_listing_site_plans",
 ]
 
 
@@ -85,11 +82,11 @@ DEFAULT_DAILY_COST_WARN_USD = 5.0
 
 def provider_for_model(model: str) -> str:
     """The provider that serves a model id, so a caller that only knows the model
-    (e.g. a dedup lane whose `app_settings` value is now a gpt-* id) routes to the
-    right backend without threading a provider argument through every call site.
+    (e.g. a lane whose `app_settings` value is now a gpt-* id) routes to the right
+    backend without threading a provider argument through every call site.
 
-    Mirrors scripts.validate_vision_models._provider_for. Unknown / bare ids fall
-    back to 'anthropic' — the historical default and the shape of every claude-* id.
+    Unknown / bare ids fall back to 'anthropic' — the historical default and the
+    shape of every claude-* id.
     """
     m = (model or "").lower()
     if m.startswith(("gpt-", "o1", "o3", "o4", "chatgpt")):

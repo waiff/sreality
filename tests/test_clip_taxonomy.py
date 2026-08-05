@@ -7,7 +7,7 @@ catches a malformed taxonomy before any dispatch burns a runner.
 import json
 from pathlib import Path
 
-from toolkit.image_classification import ROOM_TYPES
+from toolkit.room_taxonomy import ROOM_TYPES
 
 _TAX = json.loads(
     (Path(__file__).resolve().parent.parent / "data" / "clip_taxonomy.json").read_text()
