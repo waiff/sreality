@@ -805,3 +805,14 @@ scope correction in the PR 2 entry above.
 
 **Q6 — R2 key namespace** → **fold into PR 3.** Namespace new keys `l/{listing_id}/{seq}.jpg`;
 forward-only, no backfill.
+
+> **SHIPPED 2026-08-05 as `img/{listing_id}/{images.id}.jpg`** — forward-only and no backfill as
+> decided, but with a **different second segment than this answer specified**, because the
+> collision turned out to have a second half. Keying on `{seq}` keeps the key POSITIONAL, and
+> `sequence` is not a stable identity for a photo (the same `record_images` hazard § 3.3 warns
+> about): every NULL-sequence row of a listing maps to one `.../0000.jpg`, and a re-parse that
+> shifts positions re-points a key at a different photo. `images.id` is the primary key, so the
+> key is unique per ROW by construction. The prefix is `img/` rather than `l/` purely for
+> legibility when browsing the bucket — say the word and it is a one-line change plus the
+> `_KEY_RE` alternative in `api/routes/images.py`. Live damage found and repaired: 16 objects /
+> 32 rows (migration 371); rationale in `docs/architecture.md` rule 6.

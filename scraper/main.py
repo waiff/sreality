@@ -1715,10 +1715,10 @@ def _run_image_downloads(
             with ThreadPoolExecutor(max_workers=workers) as pool:
                 future_to_id = {
                     pool.submit(
-                        _fetch_one_image, lid, seq, url, r2,
+                        _fetch_one_image, lid, image_id, url, r2,
                         _semaphore_for(host_by_image[image_id]),
                     ): image_id
-                    for image_id, lid, seq, url, _cm, _ct in filtered_pending
+                    for image_id, lid, _seq, url, _cm, _ct in filtered_pending
                 }
                 for future in as_completed(future_to_id):
                     image_id = future_to_id[future]
@@ -1955,8 +1955,8 @@ def _phash_or_none(data: bytes) -> int | None:
 
 
 def _fetch_one_image(
-    sreality_id: int,
-    sequence: int | None,
+    listing_id: int,
+    image_id: int,
     url: str,
     r2: image_storage.R2Client,
     semaphore: "threading.BoundedSemaphore | None" = None,
@@ -1974,7 +1974,7 @@ def _fetch_one_image(
     wraps only the CDN download — the R2 upload (a different host) runs
     unbounded — so a small portal CDN isn't dogpiled by the full worker pool.
     """
-    key = image_storage.image_key(sreality_id, sequence)
+    key = image_storage.image_key(listing_id, image_id)
     try:
         if semaphore is not None:
             with semaphore:

@@ -348,6 +348,12 @@ via these jobs):
   (low priority) so the detail drain repoints the URLs and the backfill can then store the
   bytes.
 
+The R2 key is `img/{listing_id}/{images.id}.jpg` — **unique per ROW, never per position**. The
+two legacy `{id}/{seq:04d}.jpg` schemes shared one numeric namespace and silently overwrote each
+other (rule #6 in `docs/architecture.md`); stored rows keep their old key forever, so never
+recompute a key for an existing row, and clear `storage_path` + `phash` together if you ever need
+one re-downloaded.
+
 **Cadence:** `*/15` for each half, deliberately — frequent index walks surface delistings fast,
 while the bounded drain keeps a steady, polite fetch volume. GitHub throttles scheduled
 workflows, so effective cadence is slower; Health liveness/freshness thresholds are **per-portal
