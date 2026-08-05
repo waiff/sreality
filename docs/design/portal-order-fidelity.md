@@ -305,6 +305,16 @@ disabled via `realtime_drain_disabled_sources`.
 work rather than something to half-do here. In single-portal mode Stats therefore still describes
 the deduped property cohort while the list describes the portal's listings.
 
+**The grain is stated in the UI, not inferred.** One portal and several portals produce rows that
+count differently, and nothing on screen said so — the `mirroring {portal}` chip named the mode but
+not its consequence. `RowGrainNotice` (below the cohort count) carries the two explanations: with
+one portal, each row is one of that portal's listings, so a property posted twice there appears
+twice; otherwise one row per property, with the merged record's provenance spelled out (price /
+disposition from the representative child, every other field from the golden-record CTEs, so a card
+can mix portals and match none of them exactly — 9.4% of multi-portal active properties disagree on
+price outright, median spread 7.4%). Dismissal is per variant and per browser: the two say opposite
+things, so dismissing the everyday one must not suppress the other's first appearance.
+
 **Follow-up this surfaced:** the ≥2-portal case still filters on `properties.source`, so it keeps
 the row-hiding bug above and the count can *drop* when a second portal is added. Fixing it properly
 means a property-grain "has a child on portal X" predicate (a `sources` array or an EXISTS on
