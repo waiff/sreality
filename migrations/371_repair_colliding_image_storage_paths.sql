@@ -53,13 +53,19 @@
 -- describe each row's own photo; this keeps that true if a re-download brings back
 -- different bytes.)
 --
+-- The cleared trio `download_attempts / last_error / unavailable_reason` is exactly
+-- what `record_images` already resets for a storage_path-NULL row (scraper/db.py,
+-- the ON CONFLICT arm) — so this is the established meaning of "this row has no
+-- bytes and should be fetched again", not a new policy. It matters: the download
+-- queue excludes `unavailable_reason IS NOT NULL`, and ~14k rows repo-wide carry one
+-- ALONGSIDE a storage_path, so a future collision that catches one would otherwise
+-- silently leave the queue instead of re-entering it. None of today's 16 carry one.
+--
 -- Operator-curated per-image tables (`image_training_examples`,
 -- `image_border_cases`, `image_tag_annotations`) are deliberately untouched — a
 -- label records what a human judged about a photo, and silently deleting that is
--- worse than a stale row. None of the 16 carry one today. `unavailable_reason` is
--- likewise left alone: it is terminal by design, and none of the 16 carry one — but
--- a FUTURE collision row that does will leave the queue instead of re-entering it
--- (`pending_image_downloads` excludes it), so check for that if this ever re-fires.
+-- worse than a stale row. None of the 16 carry one. Nor does any of them carry an
+-- `image_room_classifications` row, so the LLM room cache needs nothing here.
 
 -- Duplicate detection has to see every stored key, and there is no index on a
 -- non-null storage_path (`images_storage_path_idx` is partial on IS NULL, for the
@@ -89,7 +95,8 @@ SET storage_path = NULL,
     phash = NULL,
     clip_tagged_at = NULL,
     download_attempts = 0,
-    last_error = NULL
+    last_error = NULL,
+    unavailable_reason = NULL
 FROM colliding c
 WHERE c.id = i.id
   AND c.owns_object > 1;
