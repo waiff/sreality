@@ -603,6 +603,27 @@ def test_create_subscription_stamps_account_id() -> None:
     assert acct in insert_params
 
 
+def test_matcher_lease_cas_acquires_and_yields() -> None:
+    """The single-runner lease (migration 366) is a mig-279-shape CAS
+    UPDATE ... RETURNING: a returned row means we hold it, no row means another
+    runner does. Guards against N replicas fanning out N× market-wide scans."""
+    from api.notifications import _try_matcher_lease
+
+    acquired = _FakeConn(
+        [(lambda s: "UPDATE notification_matcher_lease" in s, [(1,)], 1)]
+    )
+    assert _try_matcher_lease(acquired, "matcher:me") is True
+    sql, params = acquired.executed[0]
+    assert "notification_matcher_lease" in sql
+    assert "RETURNING" in sql.upper()
+    assert params["holder"] == "matcher:me"
+
+    held = _FakeConn(
+        [(lambda s: "UPDATE notification_matcher_lease" in s, [], 0)]
+    )
+    assert _try_matcher_lease(held, "matcher:me") is False
+
+
 def test_match_once_uses_per_subscription_cursor() -> None:
     """The matcher reads `last_matched_first_seen_at` per subscription
     and injects it as the `cursor` clause — proves the per-subscription

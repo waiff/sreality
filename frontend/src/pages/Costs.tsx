@@ -34,6 +34,7 @@ import {
 } from '@/lib/llmCosts';
 import { fmtCount, fmtRelative, fmtUsd, fmtUsdPerCall } from '@/lib/format';
 import { useTokenColors } from '@/lib/useTokenColors';
+import { timeLabel, timeLabelFull, valueAxisSpec } from '@/lib/chartAxis';
 import GrainToggle, { type Grain } from '@/components/GrainToggle';
 
 /* Operator dashboard for LLM spend — aggregates of the `llm_calls` audit
@@ -57,23 +58,6 @@ const TOKEN_KEYS = [
   '--color-tag-copper',
 ];
 
-const fmtAxisUsd = (v: number): string =>
-  v >= 1000 ? `$${Math.round(v / 100) / 10}k` : v >= 10 ? `$${Math.round(v)}` : `$${v}`;
-
-const fmtChartDay = (day: string): string => {
-  const d = new Date(`${day}T00:00:00Z`);
-  return d.toLocaleDateString('cs-CZ', { day: 'numeric', month: 'numeric' });
-};
-
-// Hour buckets are full ISO timestamps; terse ticks, full tooltip — the
-// same convention as DedupPipelineTimeline's hour grain.
-const fmtChartHour = (iso: string): string =>
-  new Date(iso).toLocaleTimeString('cs-CZ', { hour: '2-digit', minute: '2-digit' });
-
-const fmtChartHourFull = (iso: string): string =>
-  new Date(iso).toLocaleString('cs-CZ', {
-    day: 'numeric', month: 'numeric', hour: '2-digit', minute: '2-digit',
-  });
 
 export default function Costs() {
   const { data, isLoading, error, dataUpdatedAt } = useQuery({
@@ -222,8 +206,19 @@ function CostChart({
   const grid = colors['--color-rule'] || 'rgba(26,28,34,0.08)';
   const gap = colors['--color-paper-2'] || '#fbf9f3';
   const xKey = grain === 'hour' ? 'bucket' : 'day';
-  const fmtTick = grain === 'hour' ? fmtChartHour : fmtChartDay;
-  const fmtTooltipLabel = grain === 'hour' ? fmtChartHourFull : fmtChartDay;
+  // Bucket labels and the $ axis come from lib/chartAxis, shared with every
+  // other chart: the grain fixes the label granularity, and the axis scale and
+  // its decimals follow the data range so two ticks can't print the same text.
+  const fmtTick = (v: string) => timeLabel(v, grain);
+  const fmtTooltipLabel = (v: string) => timeLabelFull(v, grain);
+  // Bars are stacked, so the axis runs to the tallest stack, not the tallest slice.
+  const stackTotals = series.data.map((row) =>
+    series.features.reduce((sum, f) => sum + (Number(row[f]) || 0), 0),
+  );
+  const usdAxis = valueAxisSpec([0, Math.max(0, ...stackTotals)], {
+    zeroBased: true,
+    prefix: '$',
+  });
 
   return (
     <div>
@@ -239,7 +234,9 @@ function CostChart({
               minTickGap={24}
             />
             <YAxis
-              tickFormatter={fmtAxisUsd}
+              domain={usdAxis.domain}
+              ticks={usdAxis.ticks}
+              tickFormatter={usdAxis.format}
               tick={{ fill: axis, fontSize: 11 }}
               stroke={axis}
               width={46}

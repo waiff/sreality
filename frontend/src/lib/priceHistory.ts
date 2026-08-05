@@ -130,6 +130,87 @@ export function buildPriceSeries(
   return out;
 }
 
+/* -------------------------------------------------------------------------- */
+/* Chart-ready shapes                                                         */
+/* -------------------------------------------------------------------------- */
+
+export const seriesValueKey = (id: number): string => `s${id}`;
+/* Sibling flag per value key: true only where the track was actually observed,
+ * so the chart can dot real observations instead of every merged row. */
+export const seriesObservedKey = (id: number): string => `o${id}`;
+
+export type PriceChartRow = Record<string, number | boolean | null>;
+
+/* Every track merged onto one sorted time axis, each carrying its last known
+ * price forward (the step) and NULL outside its own [start, endT] window.
+ * Lives here rather than in the chart component so the step semantics are
+ * unit-tested and the component stays pure rendering. */
+export function buildChartRows(series: PriceSeries[]): PriceChartRow[] {
+  const times = new Set<number>();
+  for (const s of series) {
+    for (const p of s.points) times.add(p.t);
+    if (s.points.length) times.add(s.endT);
+  }
+  return [...times]
+    .sort((a, b) => a - b)
+    .map((t) => {
+      const row: PriceChartRow = { t };
+      for (const s of series) {
+        const vKey = seriesValueKey(s.id);
+        const oKey = seriesObservedKey(s.id);
+        if (!s.points.length || t < s.points[0].t || t > s.endT) {
+          row[vKey] = null;
+          row[oKey] = false;
+          continue;
+        }
+        let v = s.points[0].price;
+        let observed = false;
+        for (const p of s.points) {
+          if (p.t > t) break;
+          v = p.price;
+          if (p.t === t) observed = true;
+        }
+        row[vKey] = v;
+        row[oKey] = observed;
+      }
+      return row;
+    });
+}
+
+export interface PriceChangeEvent {
+  t: number;
+  seriesId: number;
+  /** Track label — only distinguishing when the property has several URLs. */
+  label: string;
+  from: number;
+  to: number;
+  pct: number;
+}
+
+/* The moments the asking price actually moved, newest first. Derived from the
+ * same series the chart draws, so the chart, the event list, and the "price
+ * changes" stat can never disagree. Changes are counted WITHIN a track: two
+ * portals quoting different prices are not a price change. */
+export function priceChangeEvents(series: PriceSeries[]): PriceChangeEvent[] {
+  const events: PriceChangeEvent[] = [];
+  for (const s of series) {
+    for (let i = 1; i < s.points.length; i++) {
+      const prev = s.points[i - 1];
+      const cur = s.points[i];
+      if (cur.price === prev.price) continue;
+      events.push({
+        t: cur.t,
+        seriesId: s.id,
+        label: s.label,
+        from: prev.price,
+        to: cur.price,
+        pct: prev.price === 0 ? 0 : ((cur.price - prev.price) / prev.price) * 100,
+      });
+    }
+  }
+  return events.sort((a, b) => b.t - a.t);
+}
+
 /* Summary across every snapshot of the property, chronologically. */
 export function summarizePriceHistory(
   urls: UrlRow[],
@@ -143,9 +224,20 @@ export function summarizePriceHistory(
       (a, b) =>
         new Date(a.scraped_at).getTime() - new Date(b.scraped_at).getTime(),
     );
+  // Count moves WITHIN each URL's own track. Counting them over the merged
+  // chronology would read two portals quoting different prices as a price
+  // change on every alternating snapshot.
+  const byTrack = new Map<number, (number | null)[]>();
+  for (const s of priced) {
+    const arr = byTrack.get(s.listing_id) ?? [];
+    arr.push(s.price_czk);
+    byTrack.set(s.listing_id, arr);
+  }
   let changes = 0;
-  for (let i = 1; i < priced.length; i++) {
-    if (priced[i].price_czk !== priced[i - 1].price_czk) changes++;
+  for (const prices of byTrack.values()) {
+    for (let i = 1; i < prices.length; i++) {
+      if (prices[i] !== prices[i - 1]) changes++;
+    }
   }
   const firstPrice = priced.length ? priced[0].price_czk : currentPrice;
   const lastPrice = priced.length ? priced[priced.length - 1].price_czk : currentPrice;

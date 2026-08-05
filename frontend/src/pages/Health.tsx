@@ -68,6 +68,7 @@ import {
   type PortalPosture,
 } from '@/lib/portalPosture';
 import { fmtCount, fmtRelative, fmtAbsolute } from '@/lib/format';
+import { numericDomain, timeAxisSpec, timeLabelFull, valueAxisSpec } from '@/lib/chartAxis';
 import { portalShort } from '@/lib/portals';
 import { WORKFLOW_DOCS } from '@/lib/workflowDocs.generated';
 import { listingPath } from '@/lib/listingUrl';
@@ -1131,18 +1132,6 @@ function CategoryTableRow({
   );
 }
 
-// Tooltip date formats for the trend hover: full timestamp for the hourly
-// series, just the day for the daily one. Defined here (not reusing the later
-// CHART_TIME_FMT) so the trend feature is self-contained.
-const TREND_HOUR_FMT = new Intl.DateTimeFormat('cs-CZ', {
-  timeZone: 'Europe/Prague',
-  day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit',
-});
-const TREND_DAY_FMT = new Intl.DateTimeFormat('cs-CZ', {
-  timeZone: 'Europe/Prague',
-  day: '2-digit', month: '2-digit',
-});
-
 // Two-line sparkline on a shared auto-fit scale: copper = active on portal,
 // ink = active in DB. Auto-fit (not zero-based) so the gap between the two —
 // the real drift — stays visible even when both sit near the same magnitude.
@@ -1240,7 +1229,7 @@ function TrendChart({
           style={{ left: hover.x + 12, top: hover.y + 12 }}
         >
           <div className="mb-0.5 tabular-nums text-[var(--color-ink-3)]">
-            {(grain === 'hour' ? TREND_HOUR_FMT : TREND_DAY_FMT).format(new Date(hp.t))}
+            {timeLabelFull(hp.t, grain)}
           </div>
           <div className="flex items-center justify-between gap-3 tabular-nums">
             <span style={{ color: 'var(--color-copper)' }}>Portal</span>
@@ -1750,14 +1739,6 @@ const RUN_TIME_FMT = new Intl.DateTimeFormat('cs-CZ', {
   minute: '2-digit',
 });
 
-const CHART_TIME_FMT = new Intl.DateTimeFormat('cs-CZ', {
-  timeZone: 'Europe/Prague',
-  month: '2-digit',
-  day: '2-digit',
-  hour: '2-digit',
-  minute: '2-digit',
-});
-
 function categoryPairLabel(
   cm: string | null,
   ct: string | null,
@@ -1818,6 +1799,17 @@ function RecentScrapesPanel({
       images_found: r.images_discovered,
     }));
 
+  // Runs land at irregular instants; calendar-aligned ticks keep the axis
+  // readable whether the window covers six hours or three weeks (lib/chartAxis).
+  const timeAxis = timeAxisSpec(
+    [chartData[0]?.t ?? 0, chartData[chartData.length - 1]?.t ?? 0],
+    { targetTicks: 6, fullUnit: 'minute' },
+  );
+  const countAxis = valueAxisSpec(
+    numericDomain(chartData, ['scraped_new', 'inactive', 'images_found']),
+    { zeroBased: true, integer: true },
+  );
+
   return (
     <div>
       <div className="h-56 -mx-1 mb-4">
@@ -1829,14 +1821,18 @@ function RecentScrapesPanel({
               type="number"
               scale="time"
               domain={['dataMin', 'dataMax']}
-              tickFormatter={(t: number) => CHART_TIME_FMT.format(new Date(t))}
+              ticks={timeAxis.ticks}
+              tickFormatter={timeAxis.formatTick}
               tick={{ fill: 'var(--color-ink-3)', fontSize: 11 }}
               stroke="var(--color-rule)"
+              minTickGap={24}
             />
             <YAxis
+              domain={countAxis.domain}
+              ticks={countAxis.ticks}
+              tickFormatter={countAxis.format}
               tick={{ fill: 'var(--color-ink-3)', fontSize: 11 }}
               stroke="var(--color-rule)"
-              allowDecimals={false}
             />
             <Tooltip
               contentStyle={{
@@ -1845,9 +1841,7 @@ function RecentScrapesPanel({
                 borderRadius: 6,
                 fontSize: 12,
               }}
-              labelFormatter={(t) =>
-                CHART_TIME_FMT.format(new Date(Number(t)))
-              }
+              labelFormatter={(t) => timeAxis.formatFull(Number(t))}
               formatter={(v: number, name: string) => [fmtCount(v), name]}
             />
             <Legend

@@ -66,7 +66,7 @@ _TENANT_VIEWS: list[str] = [
 # migration 341 mirrors that read policy as an in-body predicate instead --
 # scoping lives in the view body, not in invoker RLS
 # (test_estimates_view_scopes_per_account).
-_MARKET_VIEWS: list[str] = ["property_estimates_public"]
+_MARKET_VIEWS: list[str] = ["property_estimates_public", "listing_feed_public"]
 
 # Base relations + matviews that hold admin-only operational data. Any view (or
 # function an authenticated caller can EXECUTE) that reads one of these must embed

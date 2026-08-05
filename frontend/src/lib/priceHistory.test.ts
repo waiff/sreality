@@ -3,6 +3,10 @@ import {
   listingUrlRows,
   buildPriceSeries,
   summarizePriceHistory,
+  buildChartRows,
+  priceChangeEvents,
+  seriesValueKey,
+  seriesObservedKey,
   type UrlRow,
 } from './priceHistory';
 import type {
@@ -207,5 +211,122 @@ describe('summarizePriceHistory', () => {
     expect(stats.days).toBe(30); // 2026-01-01 → 2026-01-31
     expect(stats.changes).toBe(0);
     expect(stats.pct).toBe(0);
+  });
+});
+
+describe('summarizePriceHistory — multi-portal', () => {
+  it('counts moves within a track, not portal-to-portal price differences', () => {
+    const urls: UrlRow[] = [
+      {
+        id: 1, source: 'sreality', url: null, isActive: true, price: 2_500_000,
+        firstSeen: '2026-01-01T00:00:00Z', lastSeen: '2026-03-01T00:00:00Z',
+      },
+      {
+        id: 2, source: 'bazos', url: null, isActive: true, price: 2_600_000,
+        firstSeen: '2026-01-01T00:00:00Z', lastSeen: '2026-03-01T00:00:00Z',
+      },
+    ];
+    // Two portals quoting steady but different prices, interleaved in time.
+    const stats = summarizePriceHistory(
+      urls,
+      [
+        snap(1, '2026-01-01T00:00:00Z', 2_500_000),
+        snap(2, '2026-01-02T00:00:00Z', 2_600_000),
+        snap(1, '2026-01-03T00:00:00Z', 2_500_000),
+        snap(2, '2026-01-04T00:00:00Z', 2_600_000),
+      ],
+      2_500_000,
+      NOW,
+    );
+    expect(stats.changes).toBe(0);
+  });
+});
+
+describe('buildChartRows', () => {
+  const series = () =>
+    buildPriceSeries(
+      [
+        {
+          id: 100, source: 'sreality', url: null, isActive: true, price: 2_400_000,
+          firstSeen: '2026-01-01T00:00:00Z', lastSeen: '2026-03-01T00:00:00Z',
+        },
+      ],
+      [
+        snap(100, '2026-01-01T00:00:00Z', 2_600_000),
+        snap(100, '2026-02-01T00:00:00Z', 2_400_000),
+      ],
+      NOW,
+    );
+
+  it('carries the last known price forward between observations', () => {
+    const rows = buildChartRows(series());
+    expect(rows.map((r) => r.t)).toEqual([
+      Date.parse('2026-01-01T00:00:00Z'),
+      Date.parse('2026-02-01T00:00:00Z'),
+      NOW,
+    ]);
+    expect(rows.map((r) => r[seriesValueKey(100)])).toEqual([2_600_000, 2_400_000, 2_400_000]);
+  });
+
+  it('flags only the rows where the track was really observed', () => {
+    const rows = buildChartRows(series());
+    // The trailing row is the live extension to "now", not a snapshot.
+    expect(rows.map((r) => r[seriesObservedKey(100)])).toEqual([true, true, false]);
+  });
+
+  it('leaves a track NULL outside its own window', () => {
+    const rows = buildChartRows([
+      { id: 1, label: 'A', points: [{ t: 10, price: 100 }], endT: 20 },
+      { id: 2, label: 'B', points: [{ t: 30, price: 200 }], endT: 40 },
+    ]);
+    expect(rows.map((r) => r[seriesValueKey(1)])).toEqual([100, 100, null, null]);
+    expect(rows.map((r) => r[seriesValueKey(2)])).toEqual([null, null, 200, 200]);
+  });
+
+  it('returns no rows for an empty series set', () => {
+    expect(buildChartRows([])).toEqual([]);
+  });
+});
+
+describe('priceChangeEvents', () => {
+  it('reports each step with its exact instant, delta and direction, newest first', () => {
+    const events = priceChangeEvents([
+      {
+        id: 100,
+        label: 'Price',
+        points: [
+          { t: Date.parse('2026-01-01T00:00:00Z'), price: 4_000_000 },
+          { t: Date.parse('2026-01-10T00:00:00Z'), price: 4_000_000 },
+          { t: Date.parse('2026-01-20T00:00:00Z'), price: 3_700_000 },
+          { t: Date.parse('2026-02-05T00:00:00Z'), price: 3_850_000 },
+        ],
+        endT: NOW,
+      },
+    ]);
+    expect(events).toHaveLength(2);
+    expect(events[0]).toMatchObject({
+      t: Date.parse('2026-02-05T00:00:00Z'),
+      from: 3_700_000,
+      to: 3_850_000,
+    });
+    expect(events[0].pct).toBeCloseTo(4.054, 3);
+    expect(events[1]).toMatchObject({ from: 4_000_000, to: 3_700_000 });
+    expect(events[1].pct).toBeCloseTo(-7.5, 5);
+  });
+
+  it('keeps tracks separate and labels them', () => {
+    const events = priceChangeEvents([
+      { id: 1, label: 'Sreality', points: [{ t: 1, price: 100 }, { t: 3, price: 90 }], endT: 5 },
+      { id: 2, label: 'Bazos', points: [{ t: 2, price: 200 }, { t: 4, price: 180 }], endT: 5 },
+    ]);
+    expect(events.map((e) => [e.label, e.t])).toEqual([
+      ['Bazos', 4],
+      ['Sreality', 3],
+    ]);
+  });
+
+  it('is empty for a flat or single-point track', () => {
+    expect(priceChangeEvents([{ id: 1, label: 'A', points: [{ t: 1, price: 100 }], endT: 2 }]))
+      .toEqual([]);
   });
 });

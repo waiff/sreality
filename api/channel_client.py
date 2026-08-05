@@ -90,6 +90,14 @@ class ChannelClient:
         if claim_id is None:
             return {"status": "already_claimed", "id": None}
 
+        if self._is_suppressed(channel, recipient):
+            # Global (channel, address) suppression (bounce/complaint/unsubscribe,
+            # migration 367). Record a terminal 'suppressed' row — the outbox's NEW
+            # query excludes it (cs.id IS NOT NULL) and RETRY only touches 'failed',
+            # so it is never re-processed — and never hit the transport.
+            self._finalize(claim_id, status="suppressed", error="suppressed")
+            return {"status": "suppressed", "id": claim_id}
+
         try:
             transport = self.transport(channel)
         except TransportError as exc:
@@ -208,6 +216,18 @@ class ChannelClient:
                 ),
             )
 
+    def _is_suppressed(self, channel: str, recipient: str) -> bool:
+        """Global (channel, address) suppression gate (migration 367): a bounce,
+        complaint, or one-click unsubscribe suppresses that address on that channel
+        everywhere. Cheap indexed PK lookup."""
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT 1 FROM notification_suppression "
+                "WHERE channel = %s AND address = %s",
+                (channel, recipient),
+            )
+            return cur.fetchone() is not None
+
     def retry(
         self,
         *,
@@ -219,6 +239,10 @@ class ChannelClient:
         """Re-attempt an existing `failed` channel_sends row (the outbox retry
         pass). No claim — the row exists; re-run the transport and re-finalize
         (attempts + next_attempt_at advance). Never raises on a send failure."""
+        if self._is_suppressed(channel, recipient):
+            # Suppressed between the first attempt and this retry — stop retrying.
+            self._finalize(send_id, status="suppressed", error="suppressed")
+            return {"status": "suppressed", "id": send_id}
         transport = self.transport(channel)
         mono = time.monotonic()
         try:

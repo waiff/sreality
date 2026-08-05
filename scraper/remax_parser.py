@@ -314,6 +314,46 @@ def _parse_price(text: str | None, category_type: str | None) -> tuple[int | Non
     return (value if value <= _PRICE_MAX else None), unit
 
 
+# The detail spec-table cell renders "{amount} CZK/ {unit}" with three observed units.
+# `listings.price_czk` is a TOTAL (or a monthly rent) everywhere in this schema —
+# production carries only `za nemovitost` / `za mesic` / `celkem` / `měsíc`, none per-area
+# — so a per-m² cell MUST yield NULL. A unit price written into price_czk reads as a total
+# in every downstream consumer (Kč/m² stats, estimation comparables, Browse sort,
+# price-drop watchdogs), which is strictly worse than the missing value it replaces.
+_PER_AREA_MARKERS: tuple[str, ...] = ("za m2", "za m 2", "/m2", "za metr")
+_DETAIL_PRICE_UNITS: tuple[tuple[str, str], ...] = (
+    ("za mesic", "za mesic"),
+    ("za nemovitost", "za nemovitost"),
+)
+
+
+def _detail_price(text: str | None, category_type: str | None) -> tuple[int | None, str | None]:
+    """Price from the detail spec table's price cell.
+
+    Separate from `_parse_price` on purpose: that one reads an index card's `data-price`
+    (a bare amount) and is shared with `index_price`. This cell carries a trailing unit,
+    and a naive digit scrape swallows it — `7 759 CZK/ za m2` becomes 77592, taking the
+    "2" from "m2" into the number. So the amount is read ONLY from the part before `CZK`.
+    """
+    default_unit = "za mesic" if category_type == "pronajem" else "za nemovitost"
+    if not text:
+        return None, default_unit
+    low = _norm_key(text)
+    if any(k in low for k in ("na vyzadani", "info o cene", "cena v rk", "dohodou", "neuvedena")):
+        return None, default_unit
+    if any(marker in low for marker in _PER_AREA_MARKERS):
+        return None, default_unit  # per-area pricing has no representation in price_czk
+    head, sep, tail = low.partition("czk")
+    if not sep:
+        return None, default_unit
+    digits = re.sub(r"\D", "", head)
+    if not digits:
+        return None, default_unit
+    value = int(digits)
+    unit = next((mapped for token, mapped in _DETAIL_PRICE_UNITS if token in tail), default_unit)
+    return (value if 0 < value <= _PRICE_MAX else None), unit
+
+
 def index_price(text: str | None) -> int | None:
     """The Kč amount from an index card's data-price text, or None. Drives
     price-change detection for the detail-refetch queue."""
@@ -457,6 +497,75 @@ def _detail_params(tree: HTMLParser) -> dict[str, str]:
     return rows
 
 
+# The selling agent's stable key is the `uzivatele/{id}` DIRECTORY of their photo URL
+# (mlsf.remax-czech.cz/data//uzivatele/{id}/{asset}_{asset}_photo_detail_w.jpg) — the two
+# FILENAME numbers are per-asset and change when a photo is re-uploaded, so only the
+# directory is 1:1 with the human (775 distinct ids = 775 distinct (id, profile-slug)
+# pairs over 3,000 stored pages). Same photo-URL-derived shape realitymix already uses.
+# Note the double slash after `data`, and that the extension is not always .jpg.
+_BROKER_UID_RE = re.compile(r"/uzivatele/(\d+)/")
+# The profile link is ABSOLUTE (`https://www.remax-czech.cz/reality/{office}/{agent}/`) —
+# a `/reality/`-prefixed relative match finds nothing.
+_BROKER_PROFILE_RE = re.compile(
+    r"remax-czech\.cz/reality/([a-z0-9-]+)/([a-z0-9-]+)/", re.IGNORECASE
+)
+
+
+def _broker(tree: HTMLParser) -> dict[str, Any] | None:
+    """The selling agent as the idnes-shaped `raw["broker"]` block resolve_brokers reads.
+
+    Email is included (unlike ceskereality/realitymix, which have none): remax exposes a
+    personal `mailto:` on 3,000/3,000 stored pages, and `broker_identities.email_domain`
+    is the ONLY firm key — without it a broker gets no firm, no membership and no
+    cross-source bridge. Phone is deliberately NOT collected (operator: `broker_phone` is
+    an intentional zero on all nine portals).
+
+    Known limit: ~0.3% of agents hold two ids after an office move (both carrying the same
+    email). Identities are never merged within a source, so those split permanently. That
+    is the accepted cost of a rename-proof numeric key over a mutable profile slug.
+    """
+    block = tree.css_first("div.pd-sidebar__agent-info")
+    if block is None:
+        return None
+    broker: dict[str, Any] = {}
+    html = block.html or ""
+    uid = _BROKER_UID_RE.search(html)
+    if uid:
+        broker["broker_id"] = uid.group(1)
+    name = block.css_first("strong")
+    if name is not None and (text := name.text(strip=True)):
+        broker["name"] = text
+    mail = block.css_first('a[href^="mailto:"]')
+    if mail is not None:
+        address = (mail.attributes.get("href") or "")[len("mailto:") :].strip()
+        if "@" in address:
+            broker["email"] = address.lower()
+    profile = _BROKER_PROFILE_RE.search(html)
+    if profile:
+        broker["agency_slug"] = profile.group(1).lower()
+    return broker or None
+
+
+def _description(tree: HTMLParser) -> str | None:
+    """The listing's free-text body.
+
+    The container is a read-more collapse: the FULL text is server-rendered in the
+    first response and Vue only toggles a CSS class over it, so no JS execution is
+    needed. `<br>` carries the seller's paragraphing, so separate on it rather than
+    running every paragraph together.
+
+    The previous selectors (`.pd-detail-text`, `#popis`) match no state of this page,
+    pre- or post-JS — 0/300 stored pages carry either — which is why remax sat at 0.0%
+    description for its entire life. Do NOT substitute `og:description`: it is REMAX
+    marketing boilerplate, byte-identical on every listing, so it would look like a fix
+    while poisoning every row with one constant string.
+    """
+    node = tree.css_first('div.pd-base-info__content-collapse-inner div[ref="content-inner"]')
+    if node is None:
+        return None
+    return node.text(separator="\n", strip=True) or None
+
+
 def _detail_images(html: str, source_id: str) -> list[str]:
     images: list[str] = []
     seen: set[str] = set()
@@ -507,7 +616,14 @@ def parse_detail(
         value = int(price_attr)
         price_czk = value if 0 < value <= _PRICE_MAX else None
     if price_czk is None:
-        price_czk, price_unit = _parse_price(_text(tree.css_first(".pd-price")), category_type)
+        # `data-advert-price` is absent on 132/300 stored pages, and the previous
+        # `.pd-price` fallback on ALL 300 — so ~44% of remax listings had no price path at
+        # all. The spec-table cell carries it on 300/300 and, unlike `.pd-header__price`,
+        # is not polluted by the adjacent energy-rating glyphs. `_detail_price` (not
+        # `_parse_price`) because that cell carries a trailing unit.
+        price_czk, price_unit = _detail_price(
+            _text(tree.css_first(".pd-table__value--price")), category_type
+        )
 
     # Coordinates: the first data-gps on the page is the subject listing's (the
     # rest belong to recommended cards). CZ-bbox-guarded.
@@ -549,6 +665,7 @@ def parse_detail(
         "price_text": price_attr,
         "address": address,
         "remax_ref": params.get("cislo zakazky"),
+        "broker": _broker(tree),
         "image_urls": image_urls,
         "params": params,
     }
@@ -588,6 +705,6 @@ def parse_detail(
         furnished=_norm_furnished(params.get("vybaveno")),
         estate_area=_parse_area(params.get("plocha pozemku")),
         garden_area=_parse_area(params.get("plocha zahrady")),
-        description=_text(tree.css_first(".pd-detail-text")) or _text(tree.css_first("#popis")),
+        description=_description(tree),
         raw=raw,
     )

@@ -63,10 +63,13 @@ SHIPS DARK: the process exits immediately unless env REALTIME_WORKER_ENABLED=1,
 so merging changes nothing until the operator creates the Railway service.
 Setting any lane's interval <= 0 idles that lane (kill-switch without redeploy).
 
-sreality and mmreality are deliberately OUT of the registry: sreality's v1 API
-ignores every sort param (no probe capability; its own */15 Actions split
-already covers it) and mmreality is proxied low-frequency by design. Adding a
-portal later is one registry line.
+mmreality is deliberately OUT of the registry: it is proxied low-frequency by
+design. sreality JOINED the registry in Phase 4 of the portal-order-fidelity
+program (docs/design/portal-order-fidelity.md) via its own bespoke
+probe_category (the ceskereality pattern — no sort param to request, so a
+per-page early-stop diff replaces it) — UNSPLIT, since the deep-pagination 422
+is offset-triggered, not size-triggered, so a shallow probe never needs
+sreality's district-split. Adding a portal later is one registry line.
 """
 
 from __future__ import annotations
@@ -146,8 +149,10 @@ ESTIMATION_INTERVAL_DEFAULT = 5
 ESTIMATION_STUCK_MINUTES_DEFAULT = 15
 
 # sreality count-probe lane (W3): sreality's v1 search API ignores every sort
-# param, so the newest-first delta probe the other portals use is impossible for
-# it. Instead this lane polls pagination.total per (cm, ct) every
+# param, so its own probe (added Phase 4 of portal-order-fidelity) can only
+# diff ids seen on a shallow unsplit page walk, not request a true newest-first
+# ordering — this lane is a CHEAP, COMPLEMENTARY total-count signal, not made
+# redundant by that probe. It polls pagination.total per (cm, ct) every
 # COUNT_PROBE_INTERVAL_DEFAULT seconds; a change beyond +-COUNT_PROBE_JITTER can
 # trigger a targeted index_walk sooner than the */15 cron. Interval <= 0 idles it.
 COUNT_PROBE_INTERVAL_DEFAULT = 600
@@ -160,7 +165,7 @@ COUNT_PROBE_RATE_PER_S = 2.0  # ~20 total-only requests in ~10s, politely paced
 # to build.
 REALTIME_SOURCES: tuple[str, ...] = (
     "bazos", "bezrealitky", "ceskereality", "idnes",
-    "maxima", "realitymix", "remax",
+    "maxima", "realitymix", "remax", "sreality",
 )
 
 _PORTAL_CLASSES: dict[str, tuple[str, str]] = {
@@ -170,6 +175,12 @@ _PORTAL_CLASSES: dict[str, tuple[str, str]] = {
     "maxima": ("scraper.maxima_main", "MaximaPortal"),
     "realitymix": ("scraper.realitymix_main", "RealitymixPortal"),
     "remax": ("scraper.remax_main", "RemaxPortal"),
+    # sreality is special-cased in _build_portal (like bazos) — SrealityPortal
+    # predates the config-taking constructor and builds its own category list
+    # internally, so this entry is unused; kept for _CLIENT_CLASSES symmetry
+    # and so a future refactor toward the uniform constructor has one place
+    # to update.
+    "sreality": ("scraper.main", "SrealityPortal"),
 }
 
 _CLIENT_CLASSES: dict[str, tuple[str, str]] = {
@@ -180,6 +191,7 @@ _CLIENT_CLASSES: dict[str, tuple[str, str]] = {
     "maxima": ("scraper.maxima_client", "MaximaClient"),
     "realitymix": ("scraper.realitymix_client", "RealitymixClient"),
     "remax": ("scraper.remax_client", "RemaxClient"),
+    "sreality": ("scraper.sreality_client", "SrealityClient"),
 }
 
 # log-once-per-process guard for proxied portals skipped without SCRAPER_PROXY_URL.
@@ -341,6 +353,13 @@ def _build_portal(source: str, config: PortalConfig) -> Any:
         portal.shared_rate_limiter = config.limits.shared_rate_limiter
         portal.supports_complete_walk = config.supports_complete_walk
         return portal
+    if source == "sreality":
+        # Also predates the config-taking constructor (main.SrealityPortal
+        # takes index_rate, not a PortalConfig, and builds its own category
+        # list internally — see the _PORTAL_CLASSES comment).
+        from scraper import main as sreality_main
+
+        return sreality_main.SrealityPortal(index_rate=config.limits.index_rate)
     mod_name, cls_name = _PORTAL_CLASSES[source]
     cls = getattr(importlib.import_module(mod_name), cls_name)
     return cls(config)

@@ -3176,6 +3176,79 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/recompute_property_stats.yml"
   },
   {
+    "filename": "reextract.yml",
+    "name": "Data: re-extract a field from stored pages",
+    "description": "Replays the CURRENT parser over already-stored `portal_raw_pages` HTML to recover a field a parser silently stopped extracting. No re-fetch, no LLM, no new secrets — and it repairs INACTIVE listings too, which a re-fetch structurally cannot.",
+    "portal": null,
+    "manual": true,
+    "schedules": [],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "source",
+        "description": "Portal to re-extract",
+        "required": true,
+        "type": "choice",
+        "default": null,
+        "options": [
+          "realitymix",
+          "idnes",
+          "remax"
+        ]
+      },
+      {
+        "name": "field",
+        "description": "Field to recover (remax=description|broker; realitymix/idnes=media)",
+        "required": true,
+        "type": "choice",
+        "default": "media",
+        "options": [
+          "media",
+          "description",
+          "broker"
+        ]
+      },
+      {
+        "name": "since",
+        "description": "Only listings first seen on/after (YYYY-MM-DD; blank = all)",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "max_seconds",
+        "description": "Wall-clock budget; resume from the cursor next run",
+        "required": false,
+        "type": "string",
+        "default": "3000",
+        "options": null
+      },
+      {
+        "name": "dry_run",
+        "description": "Parse + report counts without writing",
+        "required": false,
+        "type": "choice",
+        "default": "true",
+        "options": [
+          "true",
+          "false"
+        ]
+      }
+    ],
+    "secrets": [
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "sreality-images",
+    "cancelInProgress": false,
+    "timeoutMinutes": 60,
+    "permissions": "contents: read",
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/reextract.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/reextract.yml"
+  },
+  {
     "filename": "refresh_population.yml",
     "name": "Data: refresh city populations (Wikidata)",
     "description": "FALLBACK SOURCE. The preferred population source is now the official ČSÚ DataStat export \"Počet obyvatel v obcích k 1. 1.\" — download the JSON from https://data.csu.gov.cz/datastat/data/VYBER/OBY02AT02, commit it to data/csu_population.json, and run \"Data: seed curated cities\" (which ingests the JSON directly). Use this Wikidata fetcher only when you can't get the official file.",

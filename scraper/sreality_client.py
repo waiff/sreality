@@ -173,44 +173,57 @@ class SrealityClient(BasePortalClient):
             self.result_size = total
         return self.result_size
 
+    def fetch_index_page(self, offset: int) -> list[dict[str, Any]]:
+        """Fetch ONE search page at `offset` (self.per_page items).
+
+        For callers that need per-page control (e.g. the newest-first discovery
+        probe, which must stop early rather than walk to exhaustion) instead of
+        iter_index's generator. Also updates self.pages_fetched / self.result_size,
+        same as a step of iter_index's loop. Returns [] at/past the deep-pagination
+        cap (HTTP 422) or once results genuinely run out — the same stop signal
+        iter_index uses, just surfaced per call instead of ending a generator.
+        """
+        if self._limiter is not None:
+            self._limiter.acquire()
+        try:
+            payload = self._get_json(INDEX_URL, params=self._index_params(offset))
+        except requests.HTTPError as exc:
+            status = (
+                exc.response.status_code
+                if getattr(exc, "response", None) is not None
+                else None
+            )
+            if status in CAP_STATUSES:
+                LOG.info(
+                    "INDEX cap reached offset=%d status=%s; stopping page fetch",
+                    offset, status,
+                )
+                return []
+            raise
+        self.pages_fetched += 1
+        total = (payload.get("pagination") or {}).get("total")
+        if isinstance(total, int):
+            self.result_size = total
+        results = payload.get("results") or []
+        LOG.info(
+            "INDEX offset=%d estates=%d total=%s", offset, len(results),
+            self.result_size,
+        )
+        return results
+
     def iter_index(self) -> Iterator[dict[str, Any]]:
         """Yield every estate dict from every search page until exhausted.
 
-        Paged by offset/limit. Each page fetch is paced by the shared limiter
-        when present. Stops cleanly at the deep-pagination cap (HTTP 422).
+        Paged by offset/limit via fetch_index_page. Stops cleanly at the
+        deep-pagination cap (HTTP 422), when a page is empty, or when a short
+        page / the reported total signals the walk is done.
         """
         offset = 0
         while True:
-            if self._limiter is not None:
-                self._limiter.acquire()
-            try:
-                payload = self._get_json(INDEX_URL, params=self._index_params(offset))
-            except requests.HTTPError as exc:
-                status = (
-                    exc.response.status_code
-                    if getattr(exc, "response", None) is not None
-                    else None
-                )
-                if status in CAP_STATUSES:
-                    LOG.info(
-                        "INDEX cap reached offset=%d status=%s; stopping walk",
-                        offset, status,
-                    )
-                    return
-                raise
-            self.pages_fetched += 1
-            total = (payload.get("pagination") or {}).get("total")
-            if isinstance(total, int):
-                self.result_size = total
-            results = payload.get("results") or []
-            LOG.info(
-                "INDEX offset=%d estates=%d total=%s", offset, len(results),
-                self.result_size,
-            )
+            results = self.fetch_index_page(offset)
             if not results:
                 return
-            for estate in results:
-                yield estate
+            yield from results
             offset += self.per_page
             if self.result_size is not None and offset >= self.result_size:
                 return

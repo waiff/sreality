@@ -1,0 +1,89 @@
+name: "Data: re-extract a field from stored pages"
+
+# Replays the CURRENT parser over already-stored `portal_raw_pages` HTML to recover a
+# field a parser silently stopped extracting. No re-fetch, no LLM, no new secrets — and
+# it repairs INACTIVE listings too, which a re-fetch structurally cannot.
+#
+# Only ZERO-row listings are touched: `record_images` keys on (listing_id, sequence), so
+# re-parsing a listing that already holds photos would shift every subsequent photo's
+# position and silently reorder the gallery. Partial-loss recovery waits for the media
+# contract (a stable media identity). See scripts/reextract.py's module docstring.
+#
+# Snapshot-safe by construction: only child media rows are written, never a `listings`
+# content column, so the content hash cannot change (rule #2).
+#
+# Dispatch-only + resumable via its keyset cursor — re-dispatch until it reports
+# recovered≈0. Run --dry-run first and read the counts.
+
+on:
+  workflow_dispatch:
+    inputs:
+      source:
+        description: Portal to re-extract
+        required: true
+        type: choice
+        options:
+          - realitymix
+          - idnes
+          - remax
+      field:
+        description: "Field to recover (remax=description|broker; realitymix/idnes=media)"
+        required: true
+        default: media
+        type: choice
+        options:
+          - media
+          - description
+          - broker
+      since:
+        description: "Only listings first seen on/after (YYYY-MM-DD; blank = all)"
+        required: false
+        default: ""
+        type: string
+      max_seconds:
+        description: Wall-clock budget; resume from the cursor next run
+        required: false
+        default: "3000"
+        type: string
+      dry_run:
+        description: Parse + report counts without writing
+        required: false
+        default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
+
+concurrency:
+  # Shares the image-download group so a large recovery can't race the R2 drain it feeds.
+  group: sreality-images
+  cancel-in-progress: false
+
+jobs:
+  reextract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install
+        run: pip install -e .
+      - name: Re-extract
+        run: |
+          ARGS="--source ${{ inputs.source }} --field ${{ inputs.field }}"
+          # `description` is in _HASH_FIELDS: one snapshot per listing is DEFERRED to that
+          # listing's next natural detail scrape. The script refuses without this flag.
+          if [ "${{ inputs.field }}" != "media" ]; then ARGS="$ARGS --allow-snapshot-deferral"; fi
+          ARGS="$ARGS --max-seconds ${{ inputs.max_seconds || '3000' }}"
+          if [ -n "${{ inputs.since }}" ]; then ARGS="$ARGS --since ${{ inputs.since }}"; fi
+          if [ "${{ inputs.dry_run }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
+          echo "python -m scripts.reextract $ARGS"
+          python -m scripts.reextract $ARGS

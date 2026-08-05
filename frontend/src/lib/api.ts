@@ -1,12 +1,19 @@
 /* Fetch wrapper for the Railway FastAPI service.
  *
- * SECURITY NOTE: VITE_API_TOKEN is inlined into the JS bundle at build
- * time and is therefore extractable by anyone with browser devtools.
- * This is the same security category as the password gate — it keeps
- * casual visitors out, the real protection is the password gate plus
- * the URL not being shared publicly. Do NOT treat this token as a
- * meaningful secret. Server-side enforcement sits at
- * api/dependencies.py:require_token. See frontend/README.md.
+ * Two auth shapes, matching the backend gate each route actually uses:
+ *  - `jwt: true` (require_admin / verify_jwt routes — Settings, Dedup,
+ *    Outreach, broker-review, location-audit, skill-refinements, Collections
+ *    list, Pipeline, Watchdog subscriptions, /estimations create/read) sends
+ *    the caller's real Supabase session access_token. The backend no longer
+ *    accepts anything else here (api/dependencies.py:verify_jwt) — admin
+ *    status rides in the JWT's app_metadata.is_admin claim, never a shared
+ *    secret.
+ *  - default (require_token routes) sends VITE_API_TOKEN, a static secret
+ *    inlined into the JS bundle at build time and therefore extractable by
+ *    anyone with browser devtools. That's fine for this gate: it only proves
+ *    "loaded the SPA past its password gate", never an identity or admin
+ *    claim. Server-side enforcement is api/dependencies.py:require_token.
+ *    See frontend/README.md.
  */
 
 import type {
@@ -53,6 +60,7 @@ import type {
 } from './types';
 import type { DistrictChip, PresetSpec } from './filters';
 import { districtChipsToCsvParams } from './filters';
+import { supabase } from './supabase';
 
 /* Sources the backend allowlists for high-confidence parsing.
  * Anything else falls through to a best-effort parse. The order is
@@ -122,6 +130,22 @@ export type QueryValue = string | number | boolean | undefined | null;
 interface RequestOptions extends Omit<RequestInit, 'body'> {
   query?: Record<string, QueryValue>;
   json?: unknown;
+  /* True for require_admin / verify_jwt-gated routes — see the file-header
+   * comment. Sends the caller's real Supabase JWT instead of VITE_API_TOKEN. */
+  jwt?: boolean;
+}
+
+/* Resolves to the caller's real Supabase JWT for `jwt: true` requests, falling
+ * back to the static token when logged out (shouldn't happen behind
+ * RequireAuth/RequireAdmin in normal operation, but a request made during
+ * that brief window must not silently claim a capability it doesn't have). */
+async function authHeader(useJwt: boolean | undefined): Promise<Record<string, string>> {
+  if (useJwt) {
+    const { data } = await supabase.auth.getSession();
+    const accessToken = data.session?.access_token;
+    if (accessToken) return { Authorization: `Bearer ${accessToken}` };
+  }
+  return TOKEN ? { Authorization: `Bearer ${TOKEN}` } : {};
 }
 
 async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
@@ -133,7 +157,7 @@ async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
     );
   }
 
-  const { query, json, headers, ...rest } = opts;
+  const { query, json, headers, jwt, ...rest } = opts;
   const url = new URL(BASE_URL + path);
   if (query) {
     for (const [k, v] of Object.entries(query)) {
@@ -144,7 +168,7 @@ async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
   const finalHeaders: Record<string, string> = {
     Accept: 'application/json',
     ...(json !== undefined ? { 'Content-Type': 'application/json' } : {}),
-    ...(TOKEN ? { Authorization: `Bearer ${TOKEN}` } : {}),
+    ...(await authHeader(jwt)),
     ...((headers as Record<string, string> | undefined) ?? {}),
   };
 
@@ -181,19 +205,23 @@ async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
 }
 
 /* Generic verbs used by lib/maps.ts (and any other future module that
- * needs raw GET/POST without going through a feature-specific wrapper). */
+ * needs raw GET/POST without going through a feature-specific wrapper).
+ * `jwt` defaults to false — pass true for a require_admin/verify_jwt route
+ * (see the file-header comment). */
 export const apiGet = <T>(
   path: string,
   params?: Record<string, string | number | undefined>,
   signal?: AbortSignal,
+  jwt?: boolean,
 ): Promise<T> =>
-  request<T>(path, { query: params as Record<string, QueryValue> | undefined, signal });
+  request<T>(path, { query: params as Record<string, QueryValue> | undefined, signal, jwt });
 
 export const apiPost = <T>(
   path: string,
   body: unknown,
   signal?: AbortSignal,
-): Promise<T> => request<T>(path, { method: 'POST', json: body, signal });
+  jwt?: boolean,
+): Promise<T> => request<T>(path, { method: 'POST', json: body, signal, jwt });
 
 /* ----- estimations ------------------------------------------------------- */
 
@@ -214,10 +242,10 @@ export const previewListingUrl = (
 export const createEstimation = (
   input: CreateEstimationIn,
 ): Promise<EstimationRun> =>
-  request<EstimationRun>('/estimations', { method: 'POST', json: input });
+  request<EstimationRun>('/estimations', { method: 'POST', json: input, jwt: true });
 
 export const getEstimation = (id: number): Promise<EstimationRun> =>
-  request<EstimationRun>(`/estimations/${id}`);
+  request<EstimationRun>(`/estimations/${id}`, { jwt: true });
 
 /* PATCH /estimations/:id/scenario — shared yield-scenario state.
  * Used by YieldBlock and the Chrome extension. All three fields are
@@ -237,6 +265,7 @@ export const patchEstimationScenario = (
   request<EstimationRun>(`/estimations/${id}/scenario`, {
     method: 'PATCH',
     json: body,
+    jwt: true,
   });
 
 export interface TracePayload {
@@ -289,6 +318,7 @@ export const decideRefinement = (
   request<SkillRefinement>(`/skill-refinements/${refinementId}/decision`, {
     method: 'POST',
     json: { decision },
+    jwt: true,
   });
 
 export const listEstimations = (
@@ -603,10 +633,11 @@ export const listSkills = (
 ): Promise<{ data: Skill[] }> =>
   request<{ data: Skill[] }>('/admin/skills', {
     query: { include_archived: options.includeArchived ?? false },
+    jwt: true,
   });
 
 export const getSkill = (name: string): Promise<Skill> =>
-  request<Skill>(`/admin/skills/${encodeURIComponent(name)}`);
+  request<Skill>(`/admin/skills/${encodeURIComponent(name)}`, { jwt: true });
 
 export const updateSkill = (
   name: string,
@@ -615,13 +646,14 @@ export const updateSkill = (
   request<Skill>(`/admin/skills/${encodeURIComponent(name)}`, {
     method: 'PUT',
     json: patch,
+    jwt: true,
   });
 
 export const listAppSettings = (): Promise<{ data: AppSetting[] }> =>
-  request<{ data: AppSetting[] }>('/admin/app_settings');
+  request<{ data: AppSetting[] }>('/admin/app_settings', { jwt: true });
 
 export const getAppSetting = (key: string): Promise<AppSetting> =>
-  request<AppSetting>(`/admin/app_settings/${encodeURIComponent(key)}`);
+  request<AppSetting>(`/admin/app_settings/${encodeURIComponent(key)}`, { jwt: true });
 
 export const updateAppSetting = (
   key: string,
@@ -630,6 +662,7 @@ export const updateAppSetting = (
   request<AppSetting>(`/admin/app_settings/${encodeURIComponent(key)}`, {
     method: 'PUT',
     json: { value },
+    jwt: true,
   });
 
 // The dedup-engine knob registry (one typed source of truth, backend-defined).
@@ -647,7 +680,7 @@ export type DedupSetting = {
 };
 
 export const getDedupSettings = (): Promise<{ data: DedupSetting[] }> =>
-  request<{ data: DedupSetting[] }>('/admin/dedup-settings');
+  request<{ data: DedupSetting[] }>('/admin/dedup-settings', { jwt: true });
 
 export const updateDedupSetting = (
   key: string,
@@ -655,7 +688,7 @@ export const updateDedupSetting = (
 ): Promise<{ key: string; value: unknown; is_default: boolean }> =>
   request<{ key: string; value: unknown; is_default: boolean }>(
     `/admin/dedup-settings/${encodeURIComponent(key)}`,
-    { method: 'PUT', json: { value } },
+    { method: 'PUT', json: { value }, jwt: true },
   );
 
 export type DedupTagPriority = {
@@ -666,7 +699,7 @@ export type DedupTagPriority = {
 };
 
 export const getDedupTagPriorities = (): Promise<{ data: DedupTagPriority[] }> =>
-  request<{ data: DedupTagPriority[] }>('/admin/dedup-tag-priorities');
+  request<{ data: DedupTagPriority[] }>('/admin/dedup-tag-priorities', { jwt: true });
 
 export const updateDedupTagPriority = (
   family: string,
@@ -674,7 +707,7 @@ export const updateDedupTagPriority = (
 ): Promise<DedupTagPriority> =>
   request<DedupTagPriority>(
     `/admin/dedup-tag-priorities/${encodeURIComponent(family)}`,
-    { method: 'PUT', json: { order } },
+    { method: 'PUT', json: { order }, jwt: true },
   );
 
 // The unified Decision history feed: every terminal dedup decision (merged /
@@ -741,6 +774,7 @@ export const getDedupAudit = (
   if (params.offset) q.set('offset', String(params.offset));
   return request<{ data: DedupAuditRow[]; total: number; returned: number }>(
     `/dedup/audit?${q.toString()}`,
+    { jwt: true },
   );
 };
 
@@ -761,6 +795,7 @@ export const setDecisionFeedback = (
   request<{ data: Record<string, unknown> }>('/dedup/feedback', {
     method: 'POST',
     json: body,
+    jwt: true,
   });
 export const deleteDecisionFeedback = (
   left_property_id: number,
@@ -769,6 +804,7 @@ export const deleteDecisionFeedback = (
   request<{ data: { deleted: boolean } }>('/dedup/feedback', {
     method: 'DELETE',
     query: { a: left_property_id, b: right_property_id },
+    jwt: true,
   });
 
 // The SPECIFIC pictures behind a decision, resolved at read time: the pHash matched
@@ -813,6 +849,7 @@ export const getDedupDecisionEvidence = (params: {
   if (params.per_side) q.set('per_side', String(params.per_side));
   return request<{ data: DedupDecisionEvidence }>(
     `/dedup/decision-evidence?${q.toString()}`,
+    { jwt: true },
   );
 };
 
@@ -833,6 +870,7 @@ export const setImageAnnotation = (body: {
   request<{ data: ImageAnnotation }>('/dedup/image-annotation', {
     method: 'POST',
     json: body,
+    jwt: true,
   });
 export const deleteImageAnnotation = (
   image_id: number,
@@ -840,6 +878,7 @@ export const deleteImageAnnotation = (
   request<{ data: { deleted: boolean } }>('/dedup/image-annotation', {
     method: 'DELETE',
     query: { image_id },
+    jwt: true,
   });
 
 // /phash-audit: a note on one image pair.
@@ -854,7 +893,7 @@ export const setPhashNote = (body: {
   image_id_b: number;
   note?: string | null;
 }): Promise<{ data: PhashNote }> =>
-  request<{ data: PhashNote }>('/dedup/phash-note', { method: 'POST', json: body });
+  request<{ data: PhashNote }>('/dedup/phash-note', { method: 'POST', json: body, jwt: true });
 export const deletePhashNote = (
   image_id_a: number,
   image_id_b: number,
@@ -862,6 +901,7 @@ export const deletePhashNote = (
   request<{ data: { deleted: boolean } }>('/dedup/phash-note', {
     method: 'DELETE',
     query: { a: image_id_a, b: image_id_b },
+    jwt: true,
   });
 
 // /phash-audit: matching-photo image pairs within a Hamming-distance range, from pairs
@@ -938,7 +978,7 @@ export const getPhashAudit = (
   if (params.training_exclude) q.set('training_exclude', 'true');
   q.set('limit', String(params.limit ?? 100));
   if (params.scan_offset) q.set('scan_offset', String(params.scan_offset));
-  return request(`/dedup/phash-audit?${q.toString()}`);
+  return request(`/dedup/phash-audit?${q.toString()}`, { jwt: true });
 };
 
 // /phash-audit "Train": one image's linear-probe training-set label (migration 309).
@@ -955,6 +995,7 @@ export const setTrainingExample = (body: {
   request<{ data: TrainingExample }>('/dedup/training-example', {
     method: 'POST',
     json: body,
+    jwt: true,
   });
 export const deleteTrainingExample = (
   image_id: number,
@@ -962,6 +1003,7 @@ export const deleteTrainingExample = (
   request<{ data: { deleted: boolean } }>('/dedup/training-example', {
     method: 'DELETE',
     query: { image_id },
+    jwt: true,
   });
 
 // /clip-audit summary-chip trash: remove EVERY training example under one label.
@@ -972,7 +1014,7 @@ export const deleteTrainingLabel = (
 ): Promise<{ data: { deleted: number; label: string } }> =>
   request<{ data: { deleted: number; label: string } }>(
     '/dedup/training-examples/by-label',
-    { method: 'DELETE', query: { label } },
+    { method: 'DELETE', query: { label }, jwt: true },
   );
 
 // /clip-audit batch relabel: move a whole checked selection under one label in a
@@ -984,7 +1026,7 @@ export const bulkSetTrainingExamples = (body: {
 }): Promise<{ data: { updated: number; label: string; image_ids: number[] } }> =>
   request<{ data: { updated: number; label: string; image_ids: number[] } }>(
     '/dedup/training-examples/bulk',
-    { method: 'POST', json: body },
+    { method: 'POST', json: body, jwt: true },
   );
 
 // "Border case" flag (migration 310): even a human isn't confident about this
@@ -1000,6 +1042,7 @@ export const setBorderCase = (
   request<{ data: BorderCase }>('/dedup/border-case', {
     method: 'POST',
     json: { image_id },
+    jwt: true,
   });
 export const deleteBorderCase = (
   image_id: number,
@@ -1007,6 +1050,7 @@ export const deleteBorderCase = (
   request<{ data: { deleted: boolean } }>('/dedup/border-case', {
     method: 'DELETE',
     query: { image_id },
+    jwt: true,
   });
 
 // CLIP backfill progress (listing-grain), for the /dedup tracker.
@@ -1024,7 +1068,7 @@ export type DedupClipCoverage = {
   tiers: DedupCoverageTier[];
 };
 export const getDedupClipCoverage = (): Promise<{ data: DedupClipCoverage }> =>
-  request<{ data: DedupClipCoverage }>('/dedup/clip-coverage');
+  request<{ data: DedupClipCoverage }>('/dedup/clip-coverage', { jwt: true });
 
 // Top-of-page dedup funnel: per-stage count + last-24h movement.
 export type DedupPipelineOverview = {
@@ -1046,7 +1090,7 @@ export type DedupPipelineOverview = {
   } | null;
 };
 export const getDedupPipelineOverview = (): Promise<{ data: DedupPipelineOverview }> =>
-  request<{ data: DedupPipelineOverview }>('/dedup/pipeline-overview');
+  request<{ data: DedupPipelineOverview }>('/dedup/pipeline-overview', { jwt: true });
 
 // Dedup-funnel throughput per bucket (hour | day), for the overview's timeline chart.
 export type DedupTimelinePoint = {
@@ -1061,6 +1105,7 @@ export const getDedupPipelineTimeline = (
 ): Promise<{ grain: string; data: DedupTimelinePoint[] }> =>
   request<{ grain: string; data: DedupTimelinePoint[] }>(
     `/dedup/pipeline-timeline?bucket=${bucket}`,
+    { jwt: true },
   );
 
 export const archiveResetDedupCandidates = (): Promise<{
@@ -1070,7 +1115,7 @@ export const archiveResetDedupCandidates = (): Promise<{
 }> =>
   request<{ archived: number; deleted: number; batch: string }>(
     '/dedup/candidates/archive-reset',
-    { method: 'POST' },
+    { method: 'POST', jwt: true },
   );
 
 /* POST /dedup/model-compare — convene every connected vision model on undecided pairs
@@ -1089,10 +1134,10 @@ export interface ModelCompareResponse {
 export const requestModelCompare = (
   body: { candidate_ids?: number[]; limit?: number },
 ): Promise<ModelCompareResponse> =>
-  request<ModelCompareResponse>('/dedup/model-compare', { method: 'POST', json: body });
+  request<ModelCompareResponse>('/dedup/model-compare', { method: 'POST', json: body, jwt: true });
 
 export const listAgentTools = (): Promise<{ data: AgentTool[] }> =>
-  request<{ data: AgentTool[] }>('/admin/tools');
+  request<{ data: AgentTool[] }>('/admin/tools', { jwt: true });
 
 /* ----- per-portal operational limits (Scrapers dashboard, migration 114) ---
  * Each portal's limits resolve as CLI override > per-portal DB > global
@@ -1125,7 +1170,7 @@ export interface PortalAdminRow {
 }
 
 export const listPortals = (): Promise<{ data: PortalAdminRow[] }> =>
-  request<{ data: PortalAdminRow[] }>('/admin/portals');
+  request<{ data: PortalAdminRow[] }>('/admin/portals', { jwt: true });
 
 export const updatePortalLimits = (
   source: string,
@@ -1134,6 +1179,7 @@ export const updatePortalLimits = (
   request(`/admin/portals/${encodeURIComponent(source)}/limits`, {
     method: 'PUT',
     json: patch,
+    jwt: true,
   });
 
 /* ----- rent map: MF Cenová mapa nájemného (migration 132) ------------------
@@ -1160,13 +1206,13 @@ export interface RentMapIngestResult {
 }
 
 export const getRentMapStatus = (): Promise<{ current: RentMapRevision | null }> =>
-  request<{ current: RentMapRevision | null }>('/admin/rent-map');
+  request<{ current: RentMapRevision | null }>('/admin/rent-map', { jwt: true });
 
 export const listRentMapRevisions = (): Promise<{ data: RentMapRevision[] }> =>
-  request<{ data: RentMapRevision[] }>('/admin/rent-map/revisions');
+  request<{ data: RentMapRevision[] }>('/admin/rent-map/revisions', { jwt: true });
 
 export const triggerRentMapFetch = (): Promise<RentMapIngestResult> =>
-  request<RentMapIngestResult>('/admin/rent-map/fetch', { method: 'POST' });
+  request<RentMapIngestResult>('/admin/rent-map/fetch', { method: 'POST', jwt: true });
 
 export async function uploadRentMapFile(
   file: File,
@@ -1177,7 +1223,7 @@ export async function uploadRentMapFile(
     method: 'POST',
     headers: {
       Accept: 'application/json',
-      ...(TOKEN ? { Authorization: `Bearer ${TOKEN}` } : {}),
+      ...(await authHeader(true)),
     },
     body: form,
   });
@@ -1217,6 +1263,7 @@ export const getConditionScoringRegions = (): Promise<{
 }> =>
   request<{ data: ConditionScoringRegionsPayload }>(
     '/admin/condition-scoring/regions',
+    { jwt: true },
   );
 
 export const updateConditionScoringRegions = (
@@ -1224,7 +1271,7 @@ export const updateConditionScoringRegions = (
 ): Promise<{ data: ConditionScoringRegionsPayload }> =>
   request<{ data: ConditionScoringRegionsPayload }>(
     '/admin/condition-scoring/regions',
-    { method: 'PUT', json: { enabled_region_ids: enabledRegionIds } },
+    { method: 'PUT', json: { enabled_region_ids: enabledRegionIds }, jwt: true },
   );
 
 /* Per-kraj CLIP-tagging drain priority. GET every kraj with its priority flag +
@@ -1245,14 +1292,14 @@ export interface ClipTaggingRegionsPayload {
 export const getClipTaggingRegions = (): Promise<{
   data: ClipTaggingRegionsPayload;
 }> =>
-  request<{ data: ClipTaggingRegionsPayload }>('/admin/clip-tagging/regions');
+  request<{ data: ClipTaggingRegionsPayload }>('/admin/clip-tagging/regions', { jwt: true });
 
 export const updateClipTaggingRegions = (
   priorityRegionIds: number[],
 ): Promise<{ data: ClipTaggingRegionsPayload }> =>
   request<{ data: ClipTaggingRegionsPayload }>(
     '/admin/clip-tagging/regions',
-    { method: 'PUT', json: { priority_region_ids: priorityRegionIds } },
+    { method: 'PUT', json: { priority_region_ids: priorityRegionIds }, jwt: true },
   );
 
 /* ----- filter registry + visibility (PR 1 / migration 059) ----------------
@@ -1289,10 +1336,10 @@ export interface FilterVisibilityRow {
 }
 
 export const getFilterSchema = (): Promise<FilterSchemaPayload> =>
-  request<FilterSchemaPayload>('/admin/filter-schema');
+  request<FilterSchemaPayload>('/admin/filter-schema', { jwt: true });
 
 export const getFilterVisibility = (): Promise<{ data: FilterVisibilityRow[] }> =>
-  request<{ data: FilterVisibilityRow[] }>('/admin/filter-visibility');
+  request<{ data: FilterVisibilityRow[] }>('/admin/filter-visibility', { jwt: true });
 
 export const setFilterVisibility = (
   agenda: Agenda,
@@ -1301,7 +1348,7 @@ export const setFilterVisibility = (
 ): Promise<FilterVisibilityRow> =>
   request<FilterVisibilityRow>(
     `/admin/filter-visibility/${encodeURIComponent(agenda)}/${encodeURIComponent(filterId)}`,
-    { method: 'PUT', json: { enabled } },
+    { method: 'PUT', json: { enabled }, jwt: true },
   );
 
 /* ----- curation (U2.6) ---------------------------------------------------
@@ -1318,7 +1365,7 @@ export const setFilterVisibility = (
 /* Collections */
 
 export const listCollections = (): Promise<{ data: Collection[]; total: number }> =>
-  request<{ data: Collection[]; total: number }>('/collections');
+  request<{ data: Collection[]; total: number }>('/collections', { jwt: true });
 
 export const getCollection = (id: number): Promise<CollectionWithProperties> =>
   request<CollectionWithProperties>(`/collections/${id}`);
@@ -1352,6 +1399,7 @@ export const addPropertiesToCollection = (
   request<{ added: number; skipped: number }>(`/collections/${id}/properties`, {
     method: 'POST',
     json: { property_ids },
+    jwt: true,
   });
 
 export const removePropertyFromCollection = (
@@ -1360,7 +1408,7 @@ export const removePropertyFromCollection = (
 ): Promise<{ removed: boolean }> =>
   request<{ removed: boolean }>(
     `/collections/${id}/properties/${property_id}`,
-    { method: 'DELETE' },
+    { method: 'DELETE', jwt: true },
   );
 
 /* Tags */
@@ -1403,7 +1451,7 @@ export const detachTag = (
 export const listPropertyNotes = (
   property_id: number,
 ): Promise<{ data: Note[] }> =>
-  request<{ data: Note[] }>(`/properties/${property_id}/notes`);
+  request<{ data: Note[] }>(`/properties/${property_id}/notes`, { jwt: true });
 
 export const createPropertyNote = (
   property_id: number,
@@ -1422,6 +1470,7 @@ export const createPropertyNote = (
       ...(origin_listing_id != null ? { origin_listing_id } : {}),
       ...(origin_listing_ref_id != null ? { origin_listing_ref_id } : {}),
     },
+    jwt: true,
   });
 
 /* Deal pipeline (migration 205) — bookmark a property into the pipeline
@@ -1432,7 +1481,7 @@ export const addPipelineCard = (
 ): Promise<{ property_id: number; stage_key: string; added: boolean }> =>
   request<{ property_id: number; stage_key: string; added: boolean }>(
     '/pipeline/cards',
-    { method: 'POST', json: { property_id } },
+    { method: 'POST', json: { property_id }, jwt: true },
   );
 
 export const removePipelineCard = (
@@ -1440,6 +1489,7 @@ export const removePipelineCard = (
 ): Promise<{ removed: boolean }> =>
   request<{ removed: boolean }>(`/pipeline/cards/${property_id}`, {
     method: 'DELETE',
+    jwt: true,
   });
 
 export const movePipelineCard = (
@@ -1452,6 +1502,7 @@ export const movePipelineCard = (
     {
       method: 'PATCH',
       json: board_position != null ? { stage_id, board_position } : { stage_id },
+      jwt: true,
     },
   );
 
@@ -1463,7 +1514,7 @@ export const createPipelineStage = (input: {
   color?: TagColor | null;
   is_terminal?: boolean;
 }): Promise<PipelineStage> =>
-  request<PipelineStage>('/pipeline/stages', { method: 'POST', json: input });
+  request<PipelineStage>('/pipeline/stages', { method: 'POST', json: input, jwt: true });
 
 export const updatePipelineStage = (
   stage_id: number,
@@ -1477,6 +1528,7 @@ export const updatePipelineStage = (
   request<PipelineStage>(`/pipeline/stages/${stage_id}`, {
     method: 'PATCH',
     json: patch,
+    jwt: true,
   });
 
 export const reorderPipelineStages = (
@@ -1485,6 +1537,7 @@ export const reorderPipelineStages = (
   request<{ data: PipelineStage[] }>('/pipeline/stages/reorder', {
     method: 'POST',
     json: { ordered_ids },
+    jwt: true,
   });
 
 export const archivePipelineStage = (
@@ -1492,7 +1545,7 @@ export const archivePipelineStage = (
 ): Promise<{ archived: boolean; stage_id: number }> =>
   request<{ archived: boolean; stage_id: number }>(
     `/pipeline/stages/${stage_id}`,
-    { method: 'DELETE' },
+    { method: 'DELETE', jwt: true },
   );
 
 /* Manual rental estimates (Phase U-ME).
@@ -1552,7 +1605,7 @@ export const listWatchdogSubscriptions = (
 ): Promise<{ data: WatchdogSubscription[]; total: number }> =>
   request<{ data: WatchdogSubscription[]; total: number }>(
     '/notifications/subscriptions',
-    { query: { include_inactive: options.includeInactive ?? true } },
+    { query: { include_inactive: options.includeInactive ?? true }, jwt: true },
   );
 
 export const getWatchdogSubscription = (
@@ -1560,6 +1613,7 @@ export const getWatchdogSubscription = (
 ): Promise<WatchdogSubscription> =>
   request<WatchdogSubscription>(
     `/notifications/subscriptions/${encodeURIComponent(id)}`,
+    { jwt: true },
   );
 
 export const createWatchdogSubscription = (input: {
@@ -1571,6 +1625,7 @@ export const createWatchdogSubscription = (input: {
   request<WatchdogSubscription>('/notifications/subscriptions', {
     method: 'POST',
     json: input,
+    jwt: true,
   });
 
 export const updateWatchdogSubscription = (
@@ -1584,7 +1639,7 @@ export const updateWatchdogSubscription = (
 ): Promise<WatchdogSubscription> =>
   request<WatchdogSubscription>(
     `/notifications/subscriptions/${encodeURIComponent(id)}`,
-    { method: 'PUT', json: patch },
+    { method: 'PUT', json: patch, jwt: true },
   );
 
 export const deleteWatchdogSubscription = (
@@ -1592,7 +1647,7 @@ export const deleteWatchdogSubscription = (
 ): Promise<{ deleted: true }> =>
   request<{ deleted: true }>(
     `/notifications/subscriptions/${encodeURIComponent(id)}`,
-    { method: 'DELETE' },
+    { method: 'DELETE', jwt: true },
   );
 
 export const listWatchdogDispatches = (
@@ -1600,6 +1655,7 @@ export const listWatchdogDispatches = (
 ): Promise<WatchdogDispatchesResponse> =>
   request<WatchdogDispatchesResponse>('/notifications/dispatches', {
     query: params as Record<string, QueryValue>,
+    jwt: true,
   });
 
 export const markWatchdogDispatchSeen = (
@@ -1607,7 +1663,7 @@ export const markWatchdogDispatchSeen = (
 ): Promise<WatchdogDispatch> =>
   request<WatchdogDispatch>(
     `/notifications/dispatches/${encodeURIComponent(dispatchId)}/mark-seen`,
-    { method: 'POST' },
+    { method: 'POST', jwt: true },
   );
 
 export const kickoffWatchdogDispatchEstimate = (
@@ -1652,6 +1708,7 @@ export const listNotifications = (
 ): Promise<WatchdogDispatchesResponse> =>
   request<WatchdogDispatchesResponse>('/notifications/dispatches', {
     query: params as Record<string, QueryValue>,
+    jwt: true,
   });
 
 export const getNotificationUnreadCount = (
@@ -1659,6 +1716,7 @@ export const getNotificationUnreadCount = (
 ): Promise<NotificationUnreadCount> =>
   request<NotificationUnreadCount>('/notifications/unread-count', {
     query: { source_kind },
+    jwt: true,
   });
 
 export const markAllNotificationsSeen = (
@@ -1667,6 +1725,7 @@ export const markAllNotificationsSeen = (
   request<{ updated: number }>('/notifications/mark-all-seen', {
     method: 'POST',
     query: { source_kind },
+    jwt: true,
   });
 
 /* ----- Saved Browse filter presets (migration 151) ---------------------- */
@@ -1914,23 +1973,23 @@ export interface PriceStatDatasetInput {
 export const createPriceStatDataset = (
   input: PriceStatDatasetInput,
 ): Promise<import('./priceStats').PriceStatDataset> =>
-  apiPost('/price-stats/datasets', input);
+  apiPost('/price-stats/datasets', input, undefined, true);
 
 export const deletePriceStatDataset = (
   id: number,
 ): Promise<{ id: number; is_active: boolean }> =>
-  request(`/price-stats/datasets/${id}`, { method: 'DELETE' });
+  request(`/price-stats/datasets/${id}`, { method: 'DELETE', jwt: true });
 
 export const updatePriceStatDataset = (
   id: number,
   patch: Partial<PriceStatDatasetInput> & { is_active?: boolean },
 ): Promise<import('./priceStats').PriceStatDataset> =>
-  request(`/price-stats/datasets/${id}`, { method: 'PATCH', json: patch });
+  request(`/price-stats/datasets/${id}`, { method: 'PATCH', json: patch, jwt: true });
 
 export const runPriceStatDataset = (
   id: number,
 ): Promise<{ dispatched: boolean; run_url?: string; detail?: string }> =>
-  apiPost(`/price-stats/datasets/${id}/run`, {});
+  apiPost(`/price-stats/datasets/${id}/run`, {}, undefined, true);
 
 /* ----- broker outreach CRM (Phase 4) ------------------------------------- *
  *
@@ -2007,10 +2066,10 @@ export interface OutreachSuppression {
 }
 
 export const listOutreachCampaigns = (): Promise<{ campaigns: OutreachCampaign[] }> =>
-  request<{ campaigns: OutreachCampaign[] }>('/outreach/campaigns');
+  request<{ campaigns: OutreachCampaign[] }>('/outreach/campaigns', { jwt: true });
 
 export const getOutreachCampaign = (id: number): Promise<OutreachCampaign> =>
-  request<OutreachCampaign>(`/outreach/campaigns/${id}`);
+  request<OutreachCampaign>(`/outreach/campaigns/${id}`, { jwt: true });
 
 export const createOutreachCampaign = (input: {
   name: string;
@@ -2018,7 +2077,7 @@ export const createOutreachCampaign = (input: {
   guidance?: string | null;
   target?: OutreachTargetSpec | null;
 }): Promise<OutreachCampaign> =>
-  request<OutreachCampaign>('/outreach/campaigns', { method: 'POST', json: input });
+  request<OutreachCampaign>('/outreach/campaigns', { method: 'POST', json: input, jwt: true });
 
 export const updateOutreachCampaign = (
   id: number,
@@ -2030,7 +2089,7 @@ export const updateOutreachCampaign = (
     target?: OutreachTargetSpec;
   },
 ): Promise<OutreachCampaign> =>
-  request<OutreachCampaign>(`/outreach/campaigns/${id}`, { method: 'PATCH', json: patch });
+  request<OutreachCampaign>(`/outreach/campaigns/${id}`, { method: 'PATCH', json: patch, jwt: true });
 
 export const previewOutreachTargets = (
   id: number,
@@ -2038,7 +2097,7 @@ export const previewOutreachTargets = (
 ): Promise<{ targets: OutreachTarget[]; count: number }> =>
   request<{ targets: OutreachTarget[]; count: number }>(
     `/outreach/campaigns/${id}/targets`,
-    { query: { limit } },
+    { query: { limit }, jwt: true },
   );
 
 export const generateOutreachDrafts = (
@@ -2047,7 +2106,7 @@ export const generateOutreachDrafts = (
 ): Promise<{ generated: number; targets: number }> =>
   request<{ generated: number; targets: number }>(
     `/outreach/campaigns/${id}/generate`,
-    { method: 'POST', query: { limit } },
+    { method: 'POST', query: { limit }, jwt: true },
   );
 
 export const listOutreachMessages = (
@@ -2056,7 +2115,7 @@ export const listOutreachMessages = (
 ): Promise<{ messages: OutreachMessage[] }> =>
   request<{ messages: OutreachMessage[] }>(
     `/outreach/campaigns/${id}/messages`,
-    { query: status ? { status } : undefined },
+    { query: status ? { status } : undefined, jwt: true },
   );
 
 export const updateOutreachMessage = (
@@ -2066,6 +2125,7 @@ export const updateOutreachMessage = (
   request<OutreachMessage>(`/outreach/messages/${messageId}`, {
     method: 'PATCH',
     json: patch,
+    jwt: true,
   });
 
 export const regenerateOutreachMessage = (
@@ -2073,10 +2133,11 @@ export const regenerateOutreachMessage = (
 ): Promise<OutreachMessage> =>
   request<OutreachMessage>(`/outreach/messages/${messageId}/regenerate`, {
     method: 'POST',
+    jwt: true,
   });
 
 export const listOutreachSuppressions = (): Promise<{ suppressions: OutreachSuppression[] }> =>
-  request<{ suppressions: OutreachSuppression[] }>('/outreach/suppressions');
+  request<{ suppressions: OutreachSuppression[] }>('/outreach/suppressions', { jwt: true });
 
 export const addOutreachSuppression = (
   broker_id: number,
@@ -2085,6 +2146,7 @@ export const addOutreachSuppression = (
   request<OutreachSuppression>('/outreach/suppressions', {
     method: 'POST',
     json: { broker_id, reason },
+    jwt: true,
   });
 
 export const removeOutreachSuppression = (
@@ -2092,6 +2154,7 @@ export const removeOutreachSuppression = (
 ): Promise<{ removed: number }> =>
   request<{ removed: number }>(`/outreach/suppressions/${broker_id}`, {
     method: 'DELETE',
+    jwt: true,
   });
 
 /* ----- broker merge review (Phase 5) ------------------------------------- *
@@ -2139,7 +2202,7 @@ export const listBrokerMergeCandidates = (
 ): Promise<{ candidates: BrokerMergeCandidate[]; count: number }> =>
   request<{ candidates: BrokerMergeCandidate[]; count: number }>(
     '/broker-review/candidates',
-    { query: { limit } },
+    { query: { limit }, jwt: true },
   );
 
 export const mergeBrokerCandidate = (
@@ -2149,23 +2212,25 @@ export const mergeBrokerCandidate = (
   request('/broker-review/candidates/' + candidateId + '/merge', {
     method: 'POST',
     json: { broker_ids: brokerIds ?? null },
+    jwt: true,
   });
 
 export const dismissBrokerCandidate = (
   candidateId: number,
 ): Promise<{ id: number; status: string }> =>
-  request('/broker-review/candidates/' + candidateId + '/dismiss', { method: 'POST' });
+  request('/broker-review/candidates/' + candidateId + '/dismiss', { method: 'POST', jwt: true });
 
 export const listBrokerMerges = (
   limit = 50,
 ): Promise<{ merges: BrokerMergeRecord[] }> =>
-  request<{ merges: BrokerMergeRecord[] }>('/broker-review/merges', { query: { limit } });
+  request<{ merges: BrokerMergeRecord[] }>('/broker-review/merges', { query: { limit }, jwt: true });
 
 export const unmergeBrokers = (
   mergeGroupId: string,
 ): Promise<{ merge_group_id: string; survivor_broker_id: number; restored_broker_ids: number[] }> =>
   request('/broker-review/merges/' + encodeURIComponent(mergeGroupId) + '/unmerge', {
     method: 'POST',
+    jwt: true,
   });
 
 /* ----- billing: tiers + agenda visibility (admin) ------------------------- */
@@ -2189,26 +2254,26 @@ export type EntitlementRow = {
 };
 
 export const adminListPlans = (): Promise<{ data: Plan[] }> =>
-  request('/admin/plans');
+  request('/admin/plans', { jwt: true });
 
 export const adminCreatePlan = (body: {
   key: string;
   name: string;
   position?: number;
   agendas?: Record<string, boolean>;
-}): Promise<Plan> => request('/admin/plans', { method: 'POST', json: body });
+}): Promise<Plan> => request('/admin/plans', { method: 'POST', json: body, jwt: true });
 
 export const adminUpdatePlan = (
   key: string,
   body: Partial<Pick<Plan, 'name' | 'position' | 'agendas' | 'is_default'>>,
 ): Promise<Plan> =>
-  request(`/admin/plans/${encodeURIComponent(key)}`, { method: 'PATCH', json: body });
+  request(`/admin/plans/${encodeURIComponent(key)}`, { method: 'PATCH', json: body, jwt: true });
 
 export const adminDeletePlan = (key: string): Promise<{ deleted: boolean }> =>
-  request(`/admin/plans/${encodeURIComponent(key)}`, { method: 'DELETE' });
+  request(`/admin/plans/${encodeURIComponent(key)}`, { method: 'DELETE', jwt: true });
 
 export const adminListEntitlements = (): Promise<{ data: EntitlementRow[] }> =>
-  request('/admin/entitlements');
+  request('/admin/entitlements', { jwt: true });
 
 export const adminSetEntitlement = (
   accountId: string,
@@ -2217,6 +2282,7 @@ export const adminSetEntitlement = (
   request(`/admin/entitlements/${encodeURIComponent(accountId)}`, {
     method: 'PUT',
     json: body,
+    jwt: true,
   });
 
 /* ----- location audit ---------------------------------------------------- */
@@ -2315,7 +2381,7 @@ export const getLocationAudit = (
   if (params.missing?.length) q.set('missing', params.missing.join(','));
   q.set('limit', String(params.limit ?? 50));
   q.set('offset', String(params.offset ?? 0));
-  return request(`/location-audit?${q.toString()}`);
+  return request(`/location-audit?${q.toString()}`, { jwt: true });
 };
 
 export type DedupPathKey = 'street' | 'geo' | 'byt_geo';
@@ -2353,7 +2419,7 @@ export type EligibilityMatrix = {
 };
 
 export const getEligibilityMatrix = (): Promise<EligibilityMatrix> =>
-  request('/location-audit/eligibility-matrix');
+  request('/location-audit/eligibility-matrix', { jwt: true });
 
 export type LocationAuditRaw = {
   sreality_id: number;
@@ -2371,4 +2437,4 @@ export const getLocationAuditRaw = (
 ): Promise<LocationAuditRaw> =>
   // sreality_id is a QUERY param, not a path segment: non-sreality PKs are
   // negative and the int path convertor would 404 on the leading minus.
-  request('/location-audit/raw', { query: { sreality_id: srealityId } });
+  request('/location-audit/raw', { query: { sreality_id: srealityId }, jwt: true });

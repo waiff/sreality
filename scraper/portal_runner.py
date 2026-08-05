@@ -55,6 +55,12 @@ class DrainItem:
     kind: str  # "ok" | "gone" | "error"
     payload: Any = None
     error: str | None = None
+    # The claimed queue row's enqueue-time sequence value (migration 368),
+    # attached below in run_detail_drain (not by fetch_detail, which is a
+    # portal-specific network+parse step that has nothing to do with the queue).
+    # Threaded into each portal's write_details so listings.discovery_seq can be
+    # stamped independent of fetch/claim/write order.
+    discovery_seq: int | None = None
 
 
 class Portal(Protocol):
@@ -550,13 +556,20 @@ def run_detail_drain(
             if not claimed:
                 break
             total_claimed += len(claimed)
+            # discovery_seq is a property of the CLAIM (when this id was originally
+            # enqueued), not of the fetch — looked up by native_id after the fetch
+            # completes rather than threaded through fetch_detail, which is a
+            # portal-specific network+parse seam that shouldn't need to know about
+            # the queue's internals.
+            dseq_by_nid = {nid: dseq for nid, _ref, _price, dseq in claimed}
             with ThreadPoolExecutor(max_workers=max(1, detail_workers)) as pool:
                 futures = {
                     pool.submit(portal.fetch_detail, client, nid, ref): nid
-                    for nid, ref, _price in claimed
+                    for nid, ref, _price, _dseq in claimed
                 }
                 for future in as_completed(futures):
                     item = future.result()  # never raises
+                    item.discovery_seq = dseq_by_nid.get(item.native_id)
                     if item.kind == "ok":
                         buffer.append(item)
                         if len(buffer) >= DETAIL_BATCH_SIZE:

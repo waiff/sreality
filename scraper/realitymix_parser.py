@@ -103,9 +103,20 @@ _ADDRESS_RE = re.compile(r'id="print-map"[^>]*\bdata-address="([^"]*)"')
 _BROKER_ID_RE = re.compile(r"/profil-realitniho-maklere/[^\"'/]*?-(\d{3,})\b")
 _MAKLER_IMG_RE = re.compile(r"/makleri/makler_(\d+)\.")
 _AGENCY_ID_RE = re.compile(r'data-fk_rk="(\d+)"')
-# Full-size listing photos: st.realitymix.cz/i/{agency}/{id}/nab_*.jpg. The
-# `_nahled` variant is the thumbnail — excluded (data-src is already full size).
-_IMG_RE = re.compile(r'https://st\.realitymix\.cz/i/\d+/\d+/nab_\d+\.(?:jpe?g|png|webp)', re.IGNORECASE)
+# Full-size listing photos: st.realitymix.cz/i/{agency}/{listing_id}/nab_{photo}.jpg.
+# SCHEME-AGNOSTIC ON PURPOSE: realitymix flipped this CDN from https:// to http://
+# on 2026-07-16 and the pinned `https://` silently zeroed every gallery for 19 days
+# (8,109 listings). The scheme carries no meaning — http 301s to https and serves
+# identical bytes — so accept either and normalise to https below.
+# The {listing_id} segment is CAPTURED so extraction can be scoped to this listing:
+# the page also renders a "related adverts" rail whose photos live under other ids.
+_IMG_RE = re.compile(
+    r"https?://st\.realitymix\.cz/i/\d+/(\d+)/nab_\d+[a-z_]*\.(?:jpe?g|png|webp)",
+    re.IGNORECASE,
+)
+# `_nahled` is the thumbnail (data-src is already full size); `_detail` is the crop
+# the related-adverts rail uses; `/makleri/` is the broker's portrait, not the property.
+_IMG_DENY: tuple[str, ...] = ("_nahled", "_detail", "/makleri/")
 # A trailing house number on the data-address street segment ("Luční 1793/3").
 _HOUSE_NO_RE = re.compile(r"\s(\d{1,4}(?:/\d{1,4})?[a-z]?)$", re.IGNORECASE)
 # The detail slug encodes "{prodej|pronajem}-{family}-…": a robust category
@@ -460,15 +471,27 @@ def _broker(html: str) -> dict[str, Any] | None:
     return broker or None
 
 
-def _images(html: str) -> list[str]:
-    urls: list[str] = []
+def _images(html: str, source_id: str | None = None) -> list[str]:
+    candidates: list[tuple[str, str]] = []  # (listing_id from the URL, normalised URL)
     seen: set[str] = set()
-    for href in _IMG_RE.findall(html):
-        if "_nahled" in href or href in seen:
+    for match in _IMG_RE.finditer(html):
+        href = match.group(0)
+        if any(token in href.lower() for token in _IMG_DENY):
+            continue
+        href = "https://" + href.split("://", 1)[1]
+        if href in seen:
             continue
         seen.add(href)
-        urls.append(href)
-    return urls
+        candidates.append((match.group(1), href))
+    # Prefer photos filed under THIS listing's id — that drops the related-adverts
+    # rail by construction rather than by relying on its `_detail` suffix. If nothing
+    # carries our id (an upstream id-shape change), keep everything: returning an
+    # empty gallery is the failure mode this whole fix exists to prevent.
+    if source_id:
+        own = [url for listing_id, url in candidates if listing_id == source_id]
+        if own:
+            return own
+    return [url for _, url in candidates]
 
 
 def parse_index(html: str) -> IndexPage:
@@ -565,7 +588,7 @@ def parse_detail(html: str, *, source_url: str) -> ScrapedListing:
         or tree.css_first("div.advert-description__text")
     )
 
-    image_urls = _images(html)
+    image_urls = _images(html, source_id)
 
     raw: dict[str, Any] = {
         "id": source_id,

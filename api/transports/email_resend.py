@@ -20,9 +20,25 @@ import os
 import requests
 
 from api.transports.base import RenderedMessage, SendResult, TransportError
+from api.unsubscribe import make_unsub_token
 
 _ENDPOINT = "https://api.resend.com/emails"
 _TIMEOUT_S = 15
+
+
+def _list_unsubscribe_headers(recipient: str) -> dict[str, str]:
+    """RFC 8058 one-click unsubscribe headers, when configured. Empty (no headers)
+    if NOTIFICATION_UNSUB_SECRET or API_PUBLIC_URL is unset — the email still sends,
+    just without one-click unsubscribe (graceful, keeps the transport dark-safe)."""
+    base = os.environ.get("API_PUBLIC_URL", "").rstrip("/")
+    token = make_unsub_token("email", recipient)
+    if not base or not token:
+        return {}
+    url = f"{base}/u/{token}"
+    return {
+        "List-Unsubscribe": f"<{url}>",
+        "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
+    }
 
 
 class ResendEmail:
@@ -50,6 +66,9 @@ class ResendEmail:
         }
         if message.body_html:
             payload["html"] = message.body_html
+        unsub = _list_unsubscribe_headers(recipient)
+        if unsub:
+            payload["headers"] = unsub
         try:
             resp = requests.post(
                 _ENDPOINT,

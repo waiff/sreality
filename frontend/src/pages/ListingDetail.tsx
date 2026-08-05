@@ -45,8 +45,10 @@ import type {
 import {
   listingUrlRows,
   buildPriceSeries,
+  priceChangeEvents,
   summarizePriceHistory,
 } from '@/lib/priceHistory';
+import { timeLabelFull } from '@/lib/chartAxis';
 import { portalShort, srealityListingUrl } from '@/lib/portals';
 import ErrorBoundary from '@/components/ErrorBoundary';
 import { ListingOverview } from '@/components/listing-detail/ListingOverview';
@@ -722,6 +724,10 @@ function ListingHistoryBlock({
     () => summarizePriceHistory(urls, snapshots, listing.price_czk, now),
     [urls, snapshots, listing.price_czk, now],
   );
+  // Dated price moves, from the same series the chart draws. The chart shows
+  // the shape; this gives the exact day and size of each step (and stays
+  // readable if the chart itself fails to render).
+  const changes = useMemo(() => priceChangeEvents(series), [series]);
 
   return (
     <div>
@@ -772,6 +778,35 @@ function ListingHistoryBlock({
             </Suspense>
           </ErrorBoundary>
         </div>
+      )}
+
+      {changes.length > 0 && (
+        <ul className="mt-4 flex flex-wrap gap-x-5 gap-y-1.5">
+          {changes.map((c) => (
+            <li
+              key={`${c.seriesId}-${c.t}`}
+              className="flex items-center gap-2 text-[0.78rem] tabular-nums"
+            >
+              <span className="font-mono text-[var(--color-ink-3)]">
+                {timeLabelFull(c.t, 'day')}
+              </span>
+              {urls.length > 1 ? (
+                <span className="text-[0.6rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)]">
+                  {c.label}
+                </span>
+              ) : null}
+              <span className="font-mono text-[var(--color-ink-3)]">{fmtCzk(c.from)}</span>
+              <span className="text-[var(--color-ink-4)]">→</span>
+              <span className="font-mono text-[var(--color-ink)]">{fmtCzk(c.to)}</span>
+              <span
+                className="font-mono"
+                style={{ color: c.pct > 0 ? 'var(--color-brick)' : 'var(--color-sage)' }}
+              >
+                {fmtPct(c.pct)}
+              </span>
+            </li>
+          ))}
+        </ul>
       )}
 
       <ul className="mt-6 space-y-2">

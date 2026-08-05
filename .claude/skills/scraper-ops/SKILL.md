@@ -38,7 +38,44 @@ exist.
 Anonymization scope: phones → `+420 XXX XXX XXX`, emails → `agent@example.cz`, street numbers
 (`123/45`) → `XXX/YY`. Listing prices and the surrounding HTML structure are preserved — public
 data the parsers need. Agent names are too varied to scrub by regex; if a fixture leaks one,
-hand-edit the file.
+hand-edit the file. **`http(s)` URLs are masked during scrubbing and restored after** — without
+that the phone regex (any 9 consecutive digits) rewrote realitymix photo ids to
+`nab_+420 XXX XXX XXX.jpg` and the street regex rewrote idnes CDN shard paths `/thumbs/1/6/e/`
+to `/thumbs/XXX/YY/e/`, silently corrupting the only data a media test can assert on.
+
+**The nine SCRAPER portal parsers are a separate fixture set** in `tests/fixtures/portal_html/`
+(`tests/scraper/test_portal_media_fixtures.py`), distinct from the LLM `source_parsers` set
+above. They exist because a hand-authored fixture can only assert back the strings the test
+itself planted, so it is structurally blind to upstream drift — that blindness is what let a
+19-day realitymix gallery blackout and a ~63% idnes photo loss both ship with CI green. Never
+hand-edit a URL in one; regenerate the page instead, or the fixture degrades into the tautology
+it replaced.
+
+## Recovering a field a parser silently stopped extracting
+
+`scripts/reextract.py --source <portal> --field <media|description|broker> [--since YYYY-MM-DD] --dry-run` replays the
+CURRENT parser over already-stored `portal_raw_pages` HTML — no re-fetch, and it repairs
+**inactive** listings too, which a re-fetch structurally cannot. Snapshot-safe by construction:
+it writes only child media rows, never a `listings` content column, so the content hash cannot
+change (rule #2). Dispatch via the `reextract.yml` workflow; resumable by keyset cursor, so
+re-dispatch until it reports `recovered≈0`.
+
+For `--field media` it only repairs listings with **zero** image rows. `record_images` upserts on
+`(listing_id, sequence)` = gallery position and refreshes the URL only `WHERE storage_path IS
+NULL`, so re-parsing a listing that already holds photos and now yields more of them shifts
+every later photo's position — downloaded rows keep an old URL at a sequence the new parse means
+for a different photo. Partial-loss recovery therefore needs a stable media identity, not a
+positional one, and is deliberately not attempted here.
+
+**Hashed vs unhashed fields.** The `_FIELDS` registry declares, per field, whether it sits in
+`_HASH_FIELDS`, and the module raises at import if that ever disagrees with
+`scraper.scraped_listing`. An unhashed field (`media`) writes only child rows → zero snapshots.
+A hashed field (`description`) genuinely changes the content hash, so **one snapshot per listing
+is appended on that listing's next natural detail scrape** — deferred, never skipped, and spread
+over the normal cadence instead of landing all at once. `--allow-snapshot-deferral` is required
+so that is a deliberate choice. Hashed fields are written with a targeted single-column UPDATE,
+never by replaying a whole `ScrapedListing`, which would rewrite every other column from a
+possibly-stale stored page and could regress a price the portal has since changed.
 
 ## How to manually trigger the scrapers
 

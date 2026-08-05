@@ -28,6 +28,26 @@ if (!('createObjectURL' in URL)) {
     'blob:stub';
 }
 
+// jsdom implements no media queries, so `useTokenColors` (which watches
+// prefers-color-scheme to re-read the CSS variables on a theme flip) throws on
+// mount. Every chart component reads its palette that way; the stub reports
+// light mode and a listener that never fires.
+if (typeof window.matchMedia !== 'function') {
+  Object.defineProperty(window, 'matchMedia', {
+    writable: true,
+    value: (query: string) => ({
+      matches: false,
+      media: query,
+      onchange: null,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      addListener: () => {},
+      removeListener: () => {},
+      dispatchEvent: () => false,
+    }),
+  });
+}
+
 afterEach(() => {
   cleanup();
 });

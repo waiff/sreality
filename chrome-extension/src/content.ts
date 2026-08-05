@@ -26,6 +26,7 @@ import type {
   PipelineCardResult,
   PipelineStage,
   PortalListing,
+  RouteMessage,
   YieldScenarioUpdate,
 } from './types';
 // Shared product brand — the ONE definition (frontend/src/lib/brand.ts), the
@@ -1109,9 +1110,29 @@ let panelUrl = '';
 let panelRef: PortalRef | null = null;
 let patchTimer: ReturnType<typeof setTimeout> | null = null;
 
+/* Monotonic id of the panel currently on screen. Every openPanel() replaces the
+ * module-global panel state wholesale, so anything resuming after an `await` has
+ * to prove the panel it started for is still the one being shown — otherwise one
+ * listing's figures paint into another listing's panel. That was survivable when
+ * only an index-badge click could re-open mid-flight; since route_changed re-opens
+ * the panel on every SPA soft-navigation (see the entry section), listing-to-
+ * listing browsing is now the COMMON path through these awaits.
+ *
+ * Two layers, deliberately: the property-id guards below (applyMembershipIf,
+ * loadNotes, onAddNote) answer "is the panel still showing this property?" and
+ * survive a re-open of the SAME listing; this epoch answers the stricter "is this
+ * still the same panel instance?", which is what openPanel's own awaits and the
+ * multi-minute estimation poll need. */
+let renderEpoch = 0;
+
 function setState(updater: (prev: PanelState) => PanelState): void {
   state = updater(state);
   render(state);
+}
+
+/* setState, but a no-op once the panel it was captured for has been replaced. */
+function setStateIf(epoch: number, updater: (prev: PanelState) => PanelState): void {
+  if (epoch === renderEpoch) setState(updater);
 }
 
 function schedulePatch(): void {
@@ -1177,7 +1198,13 @@ function onReset(): void {
   schedulePatch();
 }
 
+/* The poll runs up to POLL_MAX_ATTEMPTS × POLL_INTERVAL_MS (~6 min), far longer
+ * than an operator stays on one listing — so every apply here is epoch-guarded.
+ * The run itself still completes server-side and is picked up by the next open
+ * of THAT listing (openPanel loads latest_estimation); only the display is
+ * dropped, never the work. */
 async function onCreateRun(): Promise<void> {
+  const epoch = renderEpoch;
   setState((prev) => ({ ...prev, busy: true, errorMessage: null }));
   const res = await call<EstimationRun>({
     type: 'create_estimation', url: panelUrl,
@@ -1187,12 +1214,12 @@ async function onCreateRun(): Promise<void> {
     // quota so the button flips to the upgrade prompt, and say so plainly.
     if (res.status === 429) {
       void loadQuota();
-      setState((prev) => ({
+      setStateIf(epoch, (prev) => ({
         ...prev, busy: false, errorMessage: 'Měsíční limit odhadů vyčerpán.',
       }));
       return;
     }
-    setState((prev) => ({
+    setStateIf(epoch, (prev) => ({
       ...prev, busy: false, errorMessage: `Odhad se nepodařilo spustit: ${friendlyDetail(res.detail)}`,
     }));
     return;
@@ -1201,6 +1228,7 @@ async function onCreateRun(): Promise<void> {
   for (let i = 0; i < POLL_MAX_ATTEMPTS; i++) {
     if (row.status === 'success' || row.status === 'failed') break;
     await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+    if (epoch !== renderEpoch) return;  // navigated away — stop burning polls
     const next = await call<EstimationRun>({ type: 'get_estimation', run_id: row.id });
     if (!next.ok) break;
     row = next.data;
@@ -1209,13 +1237,13 @@ async function onCreateRun(): Promise<void> {
   // the counter so the next panel view is accurate.
   void loadQuota();
   if (row.status !== 'success') {
-    setState((prev) => ({
+    setStateIf(epoch, (prev) => ({
       ...prev, busy: false,
       errorMessage: row.error_message ?? 'Odhad se nedokončil včas.',
     }));
     return;
   }
-  setState((prev) => seedFromRun({ ...prev, busy: false }, row));
+  setStateIf(epoch, (prev) => seedFromRun({ ...prev, busy: false }, row));
 }
 
 /* "Upgradovat" — no purchase flow yet (Wave 1); open the web app where plan
@@ -1554,6 +1582,7 @@ async function onSignOut(): Promise<void> {
 export async function openPanel(
   ref: PortalRef, url: string, prefetched?: PortalListing | null,
 ): Promise<void> {
+  const epoch = ++renderEpoch;
   panelUrl = url;
   panelRef = ref;
   const panel = mountPanel();
@@ -1570,6 +1599,7 @@ export async function openPanel(
     notes: null, noteBusy: false, quota: null, errorMessage: null,
   };
   await minimizedReady;  // persisted minimized pref before first paint → no flash
+  if (epoch !== renderEpoch) return;
   render(state);
 
   /* Every route needs a real session now (Wave 1) — check first so a
@@ -1577,10 +1607,10 @@ export async function openPanel(
   const auth = await call<AuthState>({ type: 'get_auth_state' });
   const authEmail = auth.ok && auth.data.signedIn ? auth.data.email : null;
   if (!auth.ok || !auth.data.signedIn) {
-    setState((prev) => ({ ...prev, phase: 'signed_out', authEmail: null }));
+    setStateIf(epoch, (prev) => ({ ...prev, phase: 'signed_out', authEmail: null }));
     return;
   }
-  setState((prev) => ({ ...prev, authEmail }));
+  setStateIf(epoch, (prev) => ({ ...prev, authEmail }));
 
   let listing: PortalListing | null;
   if (prefetched !== undefined) {
@@ -1592,14 +1622,17 @@ export async function openPanel(
     });
     if (!res.ok) {
       if (res.detail === NOT_SIGNED_IN_DETAIL) {
-        setState((prev) => ({ ...prev, phase: 'signed_out', authEmail: null }));
+        setStateIf(epoch, (prev) => ({ ...prev, phase: 'signed_out', authEmail: null }));
         return;
       }
-      setState((prev) => ({ ...prev, phase: 'error', errorMessage: res.detail }));
+      setStateIf(epoch, (prev) => ({ ...prev, phase: 'error', errorMessage: res.detail }));
       return;
     }
     listing = res.data[0] ?? null;
   }
+  /* The lookup for a listing the operator has already navigated away from must
+   * not land — this is the apply that would otherwise show A's yield under B. */
+  if (epoch !== renderEpoch) return;
 
   const saleApt =
     listing?.found
@@ -1610,7 +1643,7 @@ export async function openPanel(
    * end is a listing not in our DB whose URL clearly isn't a sale apartment —
    * nothing to link, no MF, no estimate. */
   const active = Boolean(listing?.found) || saleApt !== false;
-  setState((prev) => ({
+  setStateIf(epoch, (prev) => ({
     ...prev, phase: active ? 'active' : 'deactivated',
     listing, isSaleApt: saleApt,
   }));
@@ -1639,7 +1672,7 @@ export async function openPanel(
       type: 'get_estimation', run_id: est.estimation_id,
     });
     if (full.ok && full.data.status === 'success') {
-      setState((prev) => seedFromRun(prev, full.data));
+      setStateIf(epoch, (prev) => seedFromRun(prev, full.data));
     }
   }
 }
@@ -1658,10 +1691,43 @@ function urlSaleApartmentHint(url: string): boolean | null {
 // ----------------------------------------------------------------------
 // Entry: detail pages get the panel; other pages on a known portal host
 // get the index-card overlay (a no-op if there are no listing cards).
+//
+// Several portals are SPAs (sreality's Next.js app confirmed live) that
+// navigate via the History API — no new document, so the manifest-injected
+// content script only ever runs once per real page load. `renderForUrl` is
+// re-entrant so the background worker's route_changed relay (webNavigation,
+// see background.ts) can re-run it on every soft-navigation, not just on the
+// document this script was first injected into.
 // ----------------------------------------------------------------------
 
-function main(): void {
-  const url = window.location.href;
+/* What the current URL means to US — the LISTING it shows, not its query string.
+ * SPAs rewrite the URL for things that don't change the subject (photo-gallery
+ * lightbox, tracking params, scroll bookkeeping); keying on the raw href would
+ * tear the panel down and re-fetch on every one of those, discarding the
+ * operator's half-typed note draft and calculator edits. Index pages collapse to
+ * one key per host: paginating doesn't restart the overlay, whose MutationObserver
+ * already picks up the new cards. */
+function routeKey(url: string): string {
+  const ref = detailRef(url);
+  return ref != null ? `detail:${ref.source}:${ref.sourceId}` : 'index';
+}
+
+let lastRouteKey: string | null = null;
+let stopIndexOverlay: (() => void) | null = null;
+
+function renderForUrl(url: string): void {
+  const key = routeKey(url);
+  if (key === lastRouteKey) return;
+  lastRouteKey = key;
+  /* Leaving a page invalidates whatever the old one still had in flight, even
+   * when the new page opens no panel of its own (detail → index). */
+  renderEpoch++;
+
+  if (stopIndexOverlay != null) {
+    stopIndexOverlay();
+    stopIndexOverlay = null;
+  }
+
   const ref = detailRef(url);
   if (ref != null) {
     openPanel(ref, url).catch((err: unknown) => {
@@ -1669,11 +1735,25 @@ function main(): void {
     });
     return;
   }
+
+  document.getElementById(HOST_ELEMENT_ID)?.remove();
   if (portalForHost(window.location.hostname) != null) {
-    runIndexOverlay(call, openPanel).catch((err: unknown) => {
-      console.error('[mf-ext] index overlay failed', err);
-    });
+    runIndexOverlay(call, openPanel)
+      .then((stop) => {
+        /* Another route change landed while the overlay was starting — adopt
+         * nothing, or its observer outlives the page it was scanning. Keyed on
+         * the route, not renderEpoch, which an index-badge click also bumps. */
+        if (lastRouteKey !== key) stop();
+        else stopIndexOverlay = stop;
+      })
+      .catch((err: unknown) => {
+        console.error('[mf-ext] index overlay failed', err);
+      });
   }
 }
 
-main();
+chrome.runtime.onMessage.addListener((message: RouteMessage) => {
+  if (message.type === 'route_changed') renderForUrl(message.url);
+});
+
+renderForUrl(window.location.href);

@@ -1,6 +1,6 @@
 ---
 name: toolkit-api
-description: Use when writing or changing analytical toolkit functions (toolkit/) or the FastAPI service (api/) — the facts-not-opinions rule, the standard tool return envelope, the read-only-with-write-exceptions rule, dual-mode auth (legacy bearer token + Supabase JWT / login / admin gating / identity), the billing/entitlements skeleton (Stripe webhook, plans, agenda gating), the versioned estimation trace, provider pluggability (Anthropic + Gemini), or the full env-var/secrets reference (Postgres, tenant pool, R2 images, LLM+maps keys, API service, notification delivery, scraper orchestration, frontend/extension build-time). Triggers on: new toolkit tool, /admin route, API_TOKEN, login, admin gating, identity, account menu, billing, Stripe, entitlement, plan, agenda gating, write exception, estimation_runs.trace, llm_calls, provider, env var, secret, R2/ANTHROPIC/GEMINI/MAPY/RESEND/TELEGRAM/STRIPE keys, CORS.
+description: Use when writing or changing analytical toolkit functions (toolkit/) or the FastAPI service (api/) — the facts-not-opinions rule, the standard tool return envelope, the read-only-with-write-exceptions rule, the two-gate auth split (require_token shared-secret vs. require_admin/verify_jwt real Supabase JWT / login / admin gating / identity), the billing/entitlements skeleton (Stripe webhook, plans, agenda gating), the versioned estimation trace, provider pluggability (Anthropic + Gemini), or the full env-var/secrets reference (Postgres, tenant pool, R2 images, LLM+maps keys, API service, notification delivery, scraper orchestration, frontend/extension build-time). Triggers on: new toolkit tool, /admin route, API_TOKEN, login, admin gating, identity, account menu, billing, Stripe, entitlement, plan, agenda gating, write exception, estimation_runs.trace, llm_calls, provider, env var, secret, R2/ANTHROPIC/GEMINI/MAPY/RESEND/TELEGRAM/STRIPE keys, CORS.
 ---
 
 # Toolkit & API
@@ -80,7 +80,8 @@ it (`api/`). They do not apply to the scraper.
    radius_m)`. Never compute distance in Python.
 7. **psycopg directly, not supabase-py.** Same reasoning as the scraper.
    `prepare_threshold=None` for pgbouncer-mode pooler.
-8. **Dual-auth window: a legacy bearer token AND Supabase-JWT auth coexist.** Baseline:
+8. **Two auth gates coexist by design: `require_token` (shared secret) and
+   `require_admin`/`verify_jwt` (real identity, JWT-only since 2026-08-04).** Baseline:
    every endpoint except `/health` requires `Authorization: Bearer <token>` when
    `API_TOKEN` is set (no-op when unset, for local dev); `/health` stays open for Railway
    healthchecks. `/admin/*` (Settings-page surface: skills, `app_settings`, agent tool
@@ -89,11 +90,18 @@ it (`api/`). They do not apply to the scraper.
    inside the public SPA bundle, so the exemption gave no real protection.
    **Phase 1 (increments 1–4, #747/#753/#763/#765) layered identity on top**, not instead
    of the token: `/admin/*`, `/dedup/*`, `/outreach/*`, `/broker-review/*`,
-   `/skill-refinements/*`, and dataset-write/dispatch routes on price-stats now use
-   `require_admin` (JWT-gated, see below) instead of plain `require_token`; every other
-   route is still bearer-only. The legacy static token still passes `require_admin` too
-   (see below) — this is a coexistence window, not a hard cutover, and no route currently
-   requires a JWT with no token fallback.
+   `/skill-refinements/*`, `/location-audit/*`, and dataset-write/dispatch routes on
+   price-stats use `require_admin` (JWT-gated, see below) instead of plain `require_token`;
+   `/pipeline/*`, `/collections` (GET), `/estimations` create/read/scenario, notes, and
+   `/listings/lookup` use `verify_jwt`/`tenant_conn` for per-account identity without the
+   admin claim; every other route is still `require_token`-only (a shared secret, no
+   identity — `POST /collections`, tags, buildings, manual estimates, filter-presets).
+   **The old coexistence window is gone for `require_admin`/`verify_jwt`**: the static
+   `API_TOKEN`, extractable from the shipped SPA bundle via devtools, used to also satisfy
+   `verify_jwt` as a synthetic `is_admin: True` identity — a live CRITICAL finding closed
+   2026-08-04 (`docs/design/api-token-rotation-and-spa-jwt-migration.md`). It never
+   authenticates through `verify_jwt` now; `require_token`-only routes are unaffected (a
+   fully separate, simpler check that was never the vulnerable path).
    See "Identity, login, and admin gating" for the JWT mechanics.
 9. **Trace format on `estimation_runs.trace` is versioned.** `TRACE_SCHEMA_VERSION` lives in
    `api/estimation_runs.py`; every row's `trace.version` matches that constant at write time.
@@ -146,28 +154,38 @@ Three auth primitives now coexist in `api/dependencies.py`:
 - `verify_jwt` — verifies a Supabase user JWT and returns its claims. Preferred path:
   asymmetric JWKS (`SUPABASE_URL` → `/auth/v1/.well-known/jwks.json`, ES256/RS256, cached
   via `PyJWKClient`, no shared secret). Falls back to a shared HS256 secret
-  (`SUPABASE_JWT_SECRET`) if that's all that's configured. **Dual-auth branch:** the
-  legacy static `API_TOKEN` bearer is checked FIRST and, if it matches, returns a
-  synthetic claims dict `{"sub": None, "role": "operator", "is_admin": True,
-  "legacy": True}` — so a route behind `verify_jwt`/`require_admin` still accepts the
-  operator's existing token. Fails closed with `503` if neither JWKS nor the HS256
-  secret is configured (an unconfigured auth backend must never authenticate anyone).
+  (`SUPABASE_JWT_SECRET`) if that's all that's configured. Fails closed with `503` if
+  neither JWKS nor the HS256 secret is configured (an unconfigured auth backend must
+  never authenticate anyone). **The legacy dual-auth branch is gone (removed 2026-08-04):**
+  it used to check the static `API_TOKEN` bearer FIRST and, if it matched, return a
+  synthetic claims dict `{"sub": None, "role": "operator", "is_admin": True, "legacy":
+  True}` — so any route behind `verify_jwt`/`require_admin` accepted the SPA-bundle-
+  embedded token as a god-credential. Presenting that token now just fails normal JWT
+  decoding (401) like any other garbage bearer value. See
+  `docs/design/api-token-rotation-and-spa-jwt-migration.md` for the incident + fix.
 - `require_admin` (`Depends(verify_jwt)`) — gates on `claims["is_admin"]` or
-  `claims["app_metadata"]["is_admin"]`; `403` otherwise. The legacy synthetic claims
-  dict always has `is_admin: True`, so the operator token passes this too.
+  `claims["app_metadata"]["is_admin"]`; `403` otherwise. Only reachable now via a real
+  Supabase JWT whose `app_metadata.is_admin` was stamped `true` (the `admins` table is the
+  provisioning allowlist, but the live claim is a plain `auth.users.raw_app_meta_data`
+  attribute — Supabase includes `app_metadata` in every issued JWT by default, no Custom
+  Access Token Hook needed or configured).
 
 `SYSTEM_ACCOUNT_ID = "00000000-0000-0000-0000-000000000000"` mirrors migration 286's
-fixed system account — legacy callers (no Supabase `sub`) resolve to it until they
-re-auth with a real JWT.
+fixed system account — the fallback owner for a run/write whose caller has no resolvable
+account (service-role/background writers that never had a JWT `sub` to begin with; no
+longer describes a "legacy caller" path since `verify_jwt` has none).
 
 For routes that need per-account **data isolation** (not just an admin/non-admin split),
 use `api/tenant_pool.py`'s `tenant_conn` dependency instead of the service-role
 `get_db_conn` — it opens an RLS-scoped transaction under the `tenant_pool` role. See the
 `database` skill's connection-modes + Multi-tenancy sections for the mechanics;
 `verify_jwt` is authentication, `tenant_conn` (via RLS) is authorization. Its
-`resolve_account_id(conn, claims)` helper picks the caller's own account, or — for the
-legacy operator — whichever account claimed the legacy backfill (`None` until that
-happens).
+`resolve_account_id(conn, claims)` helper picks the caller's own account; both this
+helper and `tenant_conn` still carry an internal `if claims.get("legacy")` branch (routes
+to the unscoped service-role connection / the legacy-backfill claim) that is now
+unreachable dead code, since `verify_jwt` can no longer produce a `legacy` claim — left in
+place rather than refactored in the same change that closed the `verify_jwt` gap, to keep
+that fix narrowly scoped; safe to remove in a follow-up.
 
 **Billing skeleton** (`api/routes/billing.py`, migration 298, PR #769 — Phase 1 increment
 5) adds a **fourth** auth class alongside the three above: `POST /billing/webhook` verifies
@@ -183,9 +201,12 @@ an already-bound one); `customer.subscription.*` upserts plan/status/period guar
 `tenant_conn` (RLS) and returns the caller's plan + agenda visibility.
 `require_entitlement(agenda)` is a dependency **factory** (not a single dependency like
 `require_admin`) — call it as `Depends(require_entitlement("watchdogs"))` to 403 unless the
-caller's plan has that agenda's visibility flag on; admin + legacy claims always pass (the
-operator is never billing-gated). Wired to no *router* yet — the first real enforcement is
-**inline in `create_estimation_run`** (below), not via the dependency.
+caller's plan has that agenda's visibility flag on; its bypass check is `claims.get("legacy")
+or is_admin` (the operator is never billing-gated) — the `legacy` half is now dead code
+(`verify_jwt` can't produce it, see "Identity, login, and admin gating" above), left as-is
+since it's harmless and this file wasn't touched by the 2026-08-04 `verify_jwt` fix. Wired
+to no *router* yet — the first real enforcement is **inline in `create_estimation_run`**
+(below), not via the dependency.
 
 **Agent-estimation metering** (Wave 1, migration 355) is the first metered path. The paid
 `mode:'agent'` submit is gated **inside `api/estimation_runs.py:create_estimation_run`**, at
@@ -193,8 +214,16 @@ the single choke point *before the URL parse* (`_prepare_metered_submit`) so a r
 spends zero LLM cost. Meter = **per successful agent run, monthly** (operator decision, not
 USD): free plan `plans.agent_estimations_monthly_quota` = 3, `trial_*` = 10 (used while
 `entitlements.status='trialing'` + unexpired). Only a real, non-admin tenant sending
-`mode:'agent'` is metered — admin/legacy/SYSTEM/ClickUp and all deterministic runs bypass,
-mirroring `require_entitlement`. The enforcement is **atomic** (A9 — never check-then-act over
+`mode:'agent'` is metered — admin/SYSTEM and all deterministic runs bypass, mirroring
+`require_entitlement` (`_is_privileged`'s `claims.get("legacy")` disjunct is dead code
+today, same note as `require_entitlement` above). ClickUp is named in the comments here as
+a bypass beneficiary via `claims is None` (an internal/direct-Python call path, not the
+`POST /estimations` HTTP route — that route's `Depends(deps.verify_jwt)` always yields a
+dict, never `None`), but ClickUp has zero historical rows in `estimation_runs`/
+`building_runs` (verified live 2026-08-04) — it has never actually called the HTTP API with
+the static token. If it ever does, that call now 401s at `verify_jwt` like any other; giving
+it a real credential is deferred until the integration is actually activated (operator
+decision 2026-08-04). The enforcement is **atomic** (A9 — never check-then-act over
 the tx pooler): the INSERT is `INSERT … SELECT WHERE (monthly non-failed count) < quota AND
 (in-flight count) < cap ON CONFLICT (account_id, idempotency_key) DO NOTHING` — budget +
 per-account concurrency + idempotency in one write, arbiter index `estimation_runs_inflight_idem`.
@@ -239,10 +268,12 @@ Database:
   pooler rejects the connection with `FATAL: (ENOIDENTIFIER) no tenant identifier provided`.
   A direct-to-database DSN needs no suffix, which is why `SUPABASE_DB_URL` looks different.
   This was mis-set from migration 293 until 2026-07-21 and stayed invisible the whole time:
-  `tenant_conn`'s legacy branch routes static-`API_TOKEN` callers to the service-role
+  `tenant_conn`'s legacy branch routed static-`API_TOKEN` callers to the service-role
   connection, so until the Chrome extension's own JWT arrived, **no production request had
-  ever executed the tenant-pool path**. When moving any further route onto `tenant_conn`,
-  exercise it with a real user JWT — a green RLS test lane proves nothing about a DSN.
+  ever executed the tenant-pool path**. (That branch is dead code as of 2026-08-04 — see
+  "Identity, login, and admin gating" above — but the lesson stands.) When moving any
+  further route onto `tenant_conn`, exercise it with a real user JWT — a green RLS test
+  lane proves nothing about a DSN.
 
 Image storage (Cloudflare R2, S3-compatible):
 - `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET_NAME` (usually
@@ -290,6 +321,18 @@ rule #16; all OPTIONAL, dark until set):
 - `TELEGRAM_BOT_TOKEN` — the Telegram Bot API transport (`api/transports/telegram.py`). Railway
   API env. The recipient `chat_id` lives in `app_settings.notification_telegram_chat_id`.
 - `SPA_BASE_URL` — SPA origin for notification deep links (`{SPA_BASE_URL}/listing/{id}`).
+- `RESEND_WEBHOOK_SECRET` (Wave 3, migration 367) — Svix signing secret for `POST /webhooks/resend`.
+  Railway API env. Unset = the webhook 503s (fail closed); the handler verifies the Svix HMAC over
+  the raw body with the stdlib (no dependency, same auth class as the Stripe webhook), dedups by
+  `svix-id` (`resend_webhook_events`), advances `channel_sends.status`
+  (`delivered`/`bounced`/`complained`), and inserts a GLOBAL, address-level `notification_suppression`
+  row (survives tenant deletion) on bounce/complaint — the outbox hard-skips suppressed addresses.
+- `NOTIFICATION_UNSUB_SECRET` + `API_PUBLIC_URL` (Wave 3) — one-click unsubscribe (RFC 8058).
+  `make_unsub_token`/`verify_unsub_token` (`api/unsubscribe.py`) HMAC-sign `channel:address` with
+  the secret; the Resend transport adds `List-Unsubscribe`/`List-Unsubscribe-Post` headers pointing
+  at `{API_PUBLIC_URL}/u/{token}` (the unauthenticated `GET`/`POST /u/{token}` route, HMAC = auth,
+  renders for logged-out users, POST inserts a `source='unsubscribe'` suppression). BOTH env vars
+  optional: unset → the header is omitted (email still sends) and the token can authenticate no one.
 - `STRIPE_WEBHOOK_SECRET` — Stripe webhook signing secret (Dashboard → Developers →
   Webhooks). Railway API env. Unset = `POST /billing/webhook` 503s (fail closed); the
   handler verifies the `Stripe-Signature` HMAC with the stdlib (no stripe SDK).

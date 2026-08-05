@@ -469,6 +469,50 @@ remediation R3 closes that. Full spec: `docs/design/public-release-remediation-2
       `account_id` **NOT NULL** on both tables. Tests: `test_create_subscription_stamps_account_id`;
       the standing route-coverage gate buckets all 9 as `tenant`. The manual two-account
       pen-test (now possible — 4 accounts exist) is a launch-gate follow-up.
+    - **Matcher single-runner lease — SHIPPED, migration 366.** The three producer passes
+      (`match_once`/`match_changes_once`/`match_monitored_collections_once`) run as an
+      asyncio loop inside EVERY API replica (`matcher_loop`) with no single-runner guard →
+      N replicas fan out N× market-wide scans. (The per-event `dedupe_key` already prevents
+      *duplicate notifications*, rule #16, so this is a wasted-scan guard, not a correctness
+      one — latent until >1 replica, like the design's other public-scale items.) Added
+      `notification_matcher_lease`, a single-row CAS lease (the mig-279 `property_maintenance_lease`
+      shape — pooler-proof, unlike a session advisory lock); `matcher_loop` claims it each pass
+      (sticky renewal), skips the passes when another replica holds it, releases on graceful
+      shutdown, and **fails open** (runs unguarded) if the lease can't be evaluated. Co-hosted
+      in the API (Phase 1 A8), not moved to the dark worker. Test `test_matcher_lease_cas_acquires_and_yields`.
+    - **Delivery safety envelope (suppression + bounce webhook) — SHIPPED DARK, migration 367.**
+      The delivery mechanism (outbox + `channel_sends` + Resend/Telegram transports) was built
+      Sprint N but had no public-safety envelope. Added: (1) `notification_suppression(channel,
+      address)` — GLOBAL, deletion-surviving address suppression (mirrors `broker_outreach_suppression`);
+      `ChannelClient.send`/`retry` now check it pre-send and record a terminal `'suppressed'`
+      `channel_sends` row instead of hitting the transport. (2) `channel_sends.status` widened
+      +`delivered`/`bounced`/`complained`/`suppressed` (foreseen at mig 207). (3) `POST /webhooks/resend`
+      — a Svix-HMAC-verified webhook (stdlib `hmac`/`hashlib`, the Stripe-webhook auth class; 503
+      without `RESEND_WEBHOOK_SECRET`; dedups by `svix-id` via `resend_webhook_events`) that advances
+      the send row's status by `provider_message_id` and inserts a suppression on bounce/complaint.
+      All internal objects RLS-on + default-ACL revoked. Tests: `test_resend_webhook` (Svix HMAC
+      accept/tamper/stale/wrong-secret/missing), `test_send_skips_suppressed_recipient`. **Go-live is
+      operator-gated**: a Resend account + verified sending domain + `RESEND_WEBHOOK_SECRET`.
+    - **One-click unsubscribe (RFC 8058) — SHIPPED DARK.** `api/unsubscribe.py` HMAC-signs
+      `channel:address` with `NOTIFICATION_UNSUB_SECRET` (stdlib, no dependency); the Resend
+      transport adds `List-Unsubscribe` + `List-Unsubscribe-Post` headers pointing at
+      `{API_PUBLIC_URL}/u/{token}`; the unauthenticated `GET`/`POST /u/{token}` route (the HMAC
+      token IS the auth, renders for logged-out recipients) inserts a `source='unsubscribe'`
+      suppression on the one-click POST. Both env vars optional → the header is omitted and no
+      token verifies when unconfigured (dark-safe). Tests `test_unsubscribe`.
+    - **Remaining Wave 3 — operator / product / legal-gated (NOT started, surfaced as decisions):**
+      (a) **Resend go-live** — operator provisions a Resend account + verified sending domain +
+      DNS (SPF/DKIM/DMARC) + `RESEND_WEBHOOK_SECRET`/`NOTIFICATION_UNSUB_SECRET`/`API_PUBLIC_URL`,
+      then registers the webhook. (b) **Per-account recipients + double-opt-in**
+      (`account_notification_settings`: email/telegram/digest/tz, verified-before-send) — replaces
+      the global `app_settings` recipient pair; **needs GDPR sign-off** on double-opt-in + the
+      opt-in UX. (c) **Quotas** (max active watchdogs at create/activate, channel entitlements,
+      per-tier detection cadence, daily-dispatch cap on DELIVERY not detection) — the
+      `require_entitlement("watchdogs")` factory + `plans.agendas` already exist; **needs the
+      product decision on tier values**. (d) **Digests** (per-account grouping + atomic
+      multi-dispatch claim) — depends on (b). (e) **Launch gate:** cross-tenant audit of the three
+      tables + webhook + unsubscribe, GDPR sign-off, a deliverability check, and a matcher-pass load
+      check at target sub count.
 
 **Housekeeping done 2026-07-20:** operator enabled Supabase Auth's leaked-password-protection
 toggle (Authentication → Sign In / Providers → Email → "Prevent use of leaked passwords").

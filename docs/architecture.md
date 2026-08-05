@@ -204,6 +204,20 @@ rules. Identify which one a task belongs to before you start.
 - **No write path from the browser.** Any UI action that needs a write goes through the
   bearer-token-gated FastAPI service, not direct Postgres. The toolkit's write-allowed
   exceptions (see Toolkit rule #5) are reachable only via the API.
+- **Two auth shapes to the FastAPI service** (`frontend/src/lib/api.ts`), matching the
+  backend gate each route actually uses. `require_admin`/`verify_jwt`/`tenant_conn` routes
+  (Settings, Dedup, Outreach, broker-review, location-audit, skill-refinements, Collections
+  list, Pipeline, Watchdog subscriptions, `/estimations` create/read) get `jwt: true` on
+  their `request()` call and receive the caller's real Supabase session `access_token`
+  (`supabase.auth.getSession()`) — `api/dependencies.py:verify_jwt` no longer accepts
+  anything else there (the legacy static-token branch that used to grant a synthetic
+  `is_admin: True` identity was removed 2026-08-04; see
+  `docs/design/api-token-rotation-and-spa-jwt-migration.md`). Routes still gated by the
+  simpler `require_token` (a shared-secret check, no identity) keep sending the static
+  `VITE_API_TOKEN` — extractable from the bundle via devtools by design, since that gate
+  only proves "past the password gate," never an admin or per-account claim. Adding a new
+  `require_admin`/`verify_jwt` route means adding `jwt: true` to its frontend call in the
+  same change, or it 401s.
 - **`Mapy.cz`-powered location search.** The Region/Browse pages call `GET /maps/suggest`
   and `POST /maps/resolve` on the FastAPI service for autocomplete + admin-unit
   resolution. The `MAPY_CZ_API_KEY` is server-side only — never inlined into the browser
@@ -222,11 +236,39 @@ rules. Identify which one a task belongs to before you start.
 **Chrome-extension territory** (`chrome-extension/`):
 - Manifest v3 browser extension that overlays MF rent/yield + an estimate panel on portal
   listing pages. The content script matches **every scraped portal's host** (sreality,
-  bazos, bezrealitky, idnes, maxima, remax, mmreality, ceskereality, realitymix) — widen
-  BOTH `manifest.json` `content_scripts.matches` (so the script INJECTS there — a registry
-  entry without a match is dead) AND the registry in `src/portals.ts` (host→portal +
-  detail-URL→native-id) as new portals come online; `host_permissions` stays broad
-  `https://*/*` for the background fetch. Match patterns are exact-host, so an apex-canonical
+  bazos, bezrealitky, idnes, maxima, remax, mmreality, ceskereality, realitymix). `src/portals.ts`
+  (host→portal + detail-URL→native-id) is the single source of truth for the host list —
+  `manifest.json`'s checked-in `content_scripts.matches` is a template only; `vite.config.ts`'s
+  `closeBundle` hook overwrites it at build time from `PORTALS[].hosts` (same pattern already
+  used there for `name` + `host_permissions`), so onboarding a new portal only means adding it
+  to `src/portals.ts` — no second hand-maintained match list to keep in sync. `host_permissions`
+  is narrowed at build time to just the two live API/auth origins the background worker fetches
+  (`VITE_API_BASE_URL` + `VITE_SUPABASE_URL`), not a broad wildcard. Several portals (sreality's
+  Next.js frontend confirmed live) navigate between listings via client-side routing (History
+  API) rather than a full page load, which MV3's manifest-declared content script does NOT
+  re-inject for. `background.ts` listens for `chrome.webNavigation.onHistoryStateUpdated`
+  (`webNavigation` permission, filtered to the same `PORTALS` host list) and relays the new URL
+  to the tab's already-injected content script (`route_changed` message), which re-runs its
+  page-type decision (`renderForUrl` in `content.ts`) without needing a real reload — this
+  fixed the "panel only appears after F5" bug. `renderForUrl` keys on the **listing identity**
+  (`source:sourceId`), not the raw href, so a gallery/tracking query-param rewrite doesn't tear
+  down the panel and discard the operator's note draft + calculator edits. Because the panel's
+  state is a single module global that `openPanel` replaces wholesale, **every apply that resumes
+  after an `await` is epoch-guarded** (`renderEpoch` / `setStateIf`) — without it, listing A's
+  lookup or its ~6-minute estimation poll paints into listing B's panel. That epoch ("is this
+  still the same panel instance?") sits alongside the older property-id guards
+  (`applyMembershipIf` / `loadNotes`, "is the panel still showing this property?"), which survive
+  a re-open of the same listing. Index-card badges mark the card with the **listing id** they were
+  drawn for (not a boolean), so a card DOM node recycled by the portal's router is re-badged
+  rather than left showing the previous listing's yield.
+  **Distribution + auto-update:** an unpacked install has no update channel at all, so the
+  everyday install belongs on the Chrome Web Store (Unlisted pre-launch → a visibility flip to go
+  public, same ID + update channel). Chrome only auto-updates on a strictly-greater version, so
+  `vite.config.ts` stamps the patch component from `GITHUB_RUN_NUMBER` (monotonic, never resets);
+  the committed `MAJOR.MINOR` is the hand-owned release marker. Publishing to the store reassigns
+  the extension ID, which is baked into the Supabase redirect allowlist, the Google OAuth client,
+  and `CORS_ALLOW_ORIGINS` — add the new ID alongside the old one before cutover
+  (`chrome-extension/README.md`, "Keeping it up to date"). Match patterns are exact-host, so an apex-canonical
   portal (e.g. `realitymix.cz`) needs its apex pattern, not just `www.`. **Detail pages** get a floating
   panel (closed shadow root). For ANY listing we have it shows a **"Přidat do pipeline"**
   deal-pipeline control (bookmark; once in, change stage via a native `<select>` + remove)
@@ -278,8 +320,9 @@ rules. Identify which one a task belongs to before you start.
   `VITE_SUPABASE_ANON_KEY` are the build-time vars (mirroring the SPA's, both are public
   client config — the anon key is not a secret). The old `VITE_API_TOKEN` / `EXT_API_TOKEN`
   static bearer is retired for the extension; `verify_jwt`'s legacy-token branch
-  (`api/dependencies.py`) still exists for the SPA/ClickUp until the platform-wide rotation
-  cutover. `manifest.json` pins a stable extension ID via a generated RSA keypair's public
+  (`api/dependencies.py`) has since been removed entirely (2026-08-04) — see the Frontend
+  territory entry below and `docs/design/api-token-rotation-and-spa-jwt-migration.md`.
+  `manifest.json` pins a stable extension ID via a generated RSA keypair's public
   half in the `key` field (needed because the GoTrue PKCE redirect URL,
   `https://<id>.chromiumapp.org/`, must be pre-registered with Supabase + Google, and
   "Load unpacked" would otherwise assign a different ID per machine/download path).
@@ -941,7 +984,16 @@ renumber.** Navigate by area:
     the Health-visible give-up ledger. As of Phase 4 both phases run through the **shared
     `portal_runner`** (rule #21) and the queue is **source-generic** (`(source, native_id)`,
     migration 108), so this same split is how every portal scrapes — sreality is just one
-    `Portal`.
+    `Portal`. **This split does NOT preserve portal-native listing order** — priority-bucketed
+    claiming, concurrent thread-pool fetch, batch-constant `now()`, and (for 7/9 portals) two
+    independent drain processes racing the same queue all reorder a listing between discovery and
+    write (full analysis: `docs/design/portal-order-fidelity.md`). `listing_detail_queue.discovery_seq`
+    / `listings.discovery_seq` (migration 368) is a dedicated sequence assigned once at true
+    enqueue time — immune to all of the above because it's fixed before any of it happens — carried
+    through `claim_detail_batch` → `write_detail_batch` / `ingest_scraped_listing` and written
+    **once**, never on a later re-fetch (`COALESCE(listings.discovery_seq, EXCLUDED.discovery_seq)`,
+    the same shape as `source_id_native`'s preserve-if-set rail). It is the true relative-discovery-order
+    signal; `first_seen_at` (this rule's write-time stamp) is display-only going forward.
 20. **Property maintenance is dirty-set incremental (Phase 3), not a full-table recompute.**
     The writers that change a property's children — `write_detail_batch` (a content change →
     new snapshot), `mark_inactive` / `mark_listing_inactive` (delisting), `touch_listings`
@@ -980,8 +1032,14 @@ renumber.** Navigate by area:
     sreality/bazos and POST for bezrealitky's GraphQL), the parser strategy, and the
     config — everything else (queue claim/complete/fail, the fetch pool, batched writes,
     completeness-gated `mark_inactive`, `scrape_runs`) is shared. A genuine per-portal need is an
-    explicit method on the `Portal` protocol, justified in review — **sreality's district-split
-    (the deep-pagination-cap workaround) inside its `walk_category` is the one sanctioned hook**.
+    explicit method on the `Portal` protocol, justified in review. Sanctioned hooks so far:
+    **sreality's district-split** (the deep-pagination-cap workaround) inside its `walk_category`;
+    **ceskereality's and sreality's bespoke `probe_category`** (both lack a sort param their
+    index accepts, so each implements its own per-page early-stop discovery probe instead of the
+    generic capped-walk-then-diff fallback `run_index_probe` otherwise uses — sreality's version,
+    added Phase 4 of the portal-order-fidelity program, is deliberately UNSPLIT: the
+    deep-pagination 422 is offset-triggered, not size-triggered, so a shallow probe never needs
+    the district-split; full rationale `docs/design/portal-order-fidelity.md`).
     The needs-detail queue is **source-generic** (`listing_detail_queue` keyed on
     `(source, native_id)` + `detail_ref`, migration 108) so every portal shares the one queue and
     the one drain. A portal that cannot prove a near-complete walk sets

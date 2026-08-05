@@ -55,7 +55,7 @@ _AUTO_MERGE_KEY = "broker_auto_merge_sources"
 # Sources whose listings carry a broker block (one attribution path each in
 # _attribute). The full sweep enumerates exactly these for re-attribution; add a
 # source here when its attribution lands so the daily sweep reconciles it.
-_BROKER_SOURCES = ("sreality", "idnes", "ceskereality", "realitymix")
+_BROKER_SOURCES = ("sreality", "idnes", "ceskereality", "realitymix", "remax")
 
 # --- Attribution (sreality, set-based from raw_json). {sel} = a listings selector. ---
 
@@ -610,6 +610,74 @@ def _attribute(conn: Any, sel: str, params: dict[str, Any]) -> None:
         cur.execute(_CESKEREALITY_LINK_LISTINGS_IDENTITY.format(sel=sel), params)
         cur.execute(_REALITYMIX_IDENTITIES_UPSERT.format(sel=sel), params)
         cur.execute(_REALITYMIX_LINK_LISTINGS_IDENTITY.format(sel=sel), params)
+        cur.execute(_REMAX_IDENTITIES_UPSERT.format(sel=sel), params)
+        cur.execute(_REMAX_CONTACTS_EMAIL_UPSERT.format(sel=sel), params)
+        cur.execute(_REMAX_LINK_LISTINGS_IDENTITY.format(sel=sel), params)
+
+# --- remax attribution (from raw_json->'broker'; broker_id is the `uzivatele/{id}`
+#     photo-directory key, name from the sidebar heading, email from its mailto).
+#     Same shape as idnes but EMAIL-ONLY: `broker_phone` is an intentional zero on every
+#     portal, so there is no phone upsert. Email matters here beyond contact detail —
+#     broker_identities.email_domain is the ONLY firm key, and re-max.cz already exists
+#     as an is_franchise firm, so these identities join it rather than minting a new one. ---
+
+_REMAX_IDENTITIES_UPSERT = """
+WITH src AS (
+  SELECT
+    (l.raw_json->'broker'->>'broker_id')               AS uid,
+    nullif(l.raw_json->'broker'->>'name', '')          AS name,
+    lower(nullif(l.raw_json->'broker'->>'email', ''))  AS email,
+    l.first_seen_at, l.last_seen_at
+  FROM listings l
+  WHERE l.source = 'remax' AND l.raw_json ? 'broker'
+    AND (l.raw_json->'broker'->>'broker_id') IS NOT NULL
+    AND {sel}
+),
+agg AS (SELECT uid, min(first_seen_at) AS fseen, max(last_seen_at) AS lseen FROM src GROUP BY uid),
+latest AS (SELECT DISTINCT ON (uid) uid, name, email FROM src ORDER BY uid, last_seen_at DESC NULLS LAST)
+INSERT INTO broker_identities
+  (source, source_broker_id_native, display_name, email, first_seen_at, last_seen_at, attrs_computed_at)
+SELECT 'remax', a.uid, lt.name, lt.email, a.fseen, a.lseen, now()
+FROM agg a JOIN latest lt USING (uid)
+ON CONFLICT (source, source_broker_id_native) DO UPDATE SET
+  display_name = CASE WHEN EXCLUDED.last_seen_at >= broker_identities.last_seen_at
+                      THEN EXCLUDED.display_name ELSE broker_identities.display_name END,
+  email        = CASE WHEN EXCLUDED.last_seen_at >= broker_identities.last_seen_at
+                      THEN EXCLUDED.email ELSE broker_identities.email END,
+  first_seen_at = least(broker_identities.first_seen_at, EXCLUDED.first_seen_at),
+  last_seen_at  = greatest(broker_identities.last_seen_at, EXCLUDED.last_seen_at),
+  attrs_computed_at = now()
+"""
+
+# MATERIALIZED for the same reason as the idnes variant: bound the listings scan by
+# {sel} BEFORE joining broker_identities, or the planner detoasts far more raw_json
+# than the chunk and blows the statement timeout on a cold first sweep.
+_REMAX_CONTACTS_EMAIL_UPSERT = """
+WITH chunk AS MATERIALIZED (
+  SELECT (l.raw_json->'broker'->>'broker_id') AS uid,
+         lower(nullif(l.raw_json->'broker'->>'email', '')) AS email,
+         l.first_seen_at, l.last_seen_at
+  FROM listings l
+  WHERE l.source = 'remax' AND l.raw_json ? 'broker'
+    AND nullif(l.raw_json->'broker'->>'email', '') IS NOT NULL AND {sel}
+)
+INSERT INTO broker_identity_contacts (broker_identity_id, source, kind, value, first_seen_at, last_seen_at)
+SELECT bi.id, 'remax', 'email', c.email, min(c.first_seen_at), max(c.last_seen_at)
+FROM chunk c
+JOIN broker_identities bi ON bi.source = 'remax' AND bi.source_broker_id_native = c.uid
+GROUP BY bi.id, c.email
+ON CONFLICT (broker_identity_id, kind, value) DO UPDATE SET
+  last_seen_at = greatest(broker_identity_contacts.last_seen_at, EXCLUDED.last_seen_at)
+"""
+
+_REMAX_LINK_LISTINGS_IDENTITY = """
+UPDATE listings l SET broker_identity_id = bi.id
+FROM broker_identities bi
+WHERE bi.source = 'remax' AND bi.source_broker_id_native = (l.raw_json->'broker'->>'broker_id')
+  AND l.source = 'remax' AND l.raw_json ? 'broker'
+  AND (l.raw_json->'broker'->>'broker_id') IS NOT NULL
+  AND l.broker_identity_id IS DISTINCT FROM bi.id AND {sel}
+"""
 
 
 def _resolve_firms(conn: Any, free: list[str], franchise: list[str]) -> None:

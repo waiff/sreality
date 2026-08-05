@@ -33,6 +33,12 @@ _PUBLIC_ALLOWLIST: frozenset[tuple[str, str]] = frozenset({
     ("GET", "/images/{key:path}"),    # R2 image proxy, opaque keys
     # Authenticates in-handler by verifying a Stripe HMAC over the raw request body.
     ("POST", "/billing/webhook"),
+    # Authenticates in-handler by verifying a Svix (Resend) HMAC over the raw body.
+    ("POST", "/webhooks/resend"),
+    # RFC 8058 one-click unsubscribe — the HMAC token in the path IS the auth, and it
+    # must render for a logged-out recipient (no session).
+    ("GET", "/u/{token}"),
+    ("POST", "/u/{token}"),
 })
 
 # Every route under these must resolve to require_admin.

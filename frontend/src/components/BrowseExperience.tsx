@@ -73,6 +73,7 @@ import {
   fetchBrowseStats,
   fetchRentMapChoropleth,
   fetchRentMapKraje,
+  portalMirrorSource,
   sortToParam,
   CARD_PAGE_SIZE,
   TABLE_PAGE_SIZE,
@@ -364,7 +365,11 @@ export default function BrowseExperience({
     queryFn: (cursor) =>
       fetchListingsForCards(filters, sort, cursor as KeysetCursor | null),
     pageSize: CARD_PAGE_SIZE,
-    getRowId: (r) => r.property_id,
+    /* `listing_id`, not `property_id`: in portal-mirror mode the rows are
+     * listing-grain and 7,951 properties carry more than one active listing on
+     * a single portal, so a property_id row key would silently collapse those
+     * siblings out of the list. `listing_id` is unique on both read models. */
+    getRowId: (r) => r.listing_id,
     enabled: tab === 'map',
     gcTime: 10 * 60_000,
   });
@@ -499,7 +504,8 @@ export default function BrowseExperience({
     queryFn: (cursor) =>
       fetchListingsForTable(filters, sort, cursor as KeysetCursor | null),
     pageSize: TABLE_PAGE_SIZE,
-    getRowId: (r) => r.property_id,
+    /* See the cards lane above — listing-grain rows need a listing-grain key. */
+    getRowId: (r) => r.listing_id,
     enabled: tab === 'table',
     gcTime: 10 * 60_000,
   });
@@ -659,6 +665,7 @@ export default function BrowseExperience({
         <div className="px-6 pt-5">
           <FilterSummary
             filters={filters}
+            portalMirror={portalMirrorSource(filters)}
             count={cohortTotal}
             countApprox={cohortTotalApprox}
             countStale={cohortCountStale}
@@ -907,6 +914,7 @@ function defaultDirectionFor(field: SortField): 'asc' | 'desc' {
 
 function FilterSummary({
   filters,
+  portalMirror,
   count,
   countApprox,
   countStale,
@@ -918,6 +926,11 @@ function FilterSummary({
   onCreateWatchdog,
 }: {
   filters: ListingFilters;
+  /* The single selected portal, or null. Non-null means Browse is reading that
+   * portal's own listings rather than the deduped market view — a real change
+   * in what the count and the rows mean, so it is stated rather than left for
+   * the operator to infer from a number that moved. */
+  portalMirror: string | null;
   count: number | null;
   /* `count` is the planner estimate (exact count exceeded budget) — render
    * "~N" so the headline figure is never silently approximate. */
@@ -948,6 +961,14 @@ function FilterSummary({
           >
             {loading && count == null ? 'Loading…' : summarise(filters, count, countApprox)}
           </p>
+          {portalMirror && (
+            <span
+              className="inline-flex items-center px-2 py-0.5 text-[0.7rem] tracking-wide rounded-[var(--radius-sm)] bg-[var(--color-copper-soft)] text-[var(--color-copper)]"
+              title={`Showing ${portalMirror}'s own listings in that portal's order, with that listing's own data. With one portal selected Browse reads the listing feed instead of the deduped market view, so a property listed twice on ${portalMirror} appears twice — and one listed elsewhere too is no longer hidden behind another portal's record.`}
+            >
+              mirroring {portalMirror}
+            </span>
+          )}
           {countStale && (
             <span
               className="inline-flex items-center text-[0.7rem] tracking-wide text-[var(--color-ink-3)]"

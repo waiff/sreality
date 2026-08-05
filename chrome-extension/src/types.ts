@@ -202,6 +202,13 @@ export type ApiMessage =
   | { type: 'get_auth_state' }
   | { type: 'get_billing' };
 
+/* Background → content, the other direction: webNavigation.onHistoryStateUpdated
+ * fires when a portal's SPA soft-navigates (History API, no new document), which
+ * static manifest content_scripts never re-inject for. The background worker
+ * relays the new URL so the already-running content script can re-decide what
+ * to render without needing a real page reload. */
+export type RouteMessage = { type: 'route_changed'; url: string };
+
 /* The caller's agent-estimation allowance (GET /billing/me → agent_estimations),
  * for the panel's "(zbývá X)" counter + the upgrade prompt at zero. `metered`
  * is false for the operator/admin (unlimited) — the panel hides the counter. */

@@ -15,8 +15,14 @@ import {
   applyPrefilters,
   districtsFilterClause,
   effectiveBbox,
+  effectiveSort,
+  isPortalMirror,
+  keysetTiebreak,
   matchesDistricts,
+  parseSort,
+  portalMirrorSource,
   priceNullTolerantOr,
+  DEFAULT_SORT,
   type BrowsePrefilters,
   type DistrictMatchRow,
 } from './queries';
@@ -316,5 +322,75 @@ describe('matchesDistricts', () => {
     expect(matchesDistricts(mkRow({ obec_id: 554782, place_search_text: 'Modřany' }), [inc, exc])).toBe(false);
     // Exclude-only: a non-Modřany row passes.
     expect(matchesDistricts(mkRow({ obec_id: 1 }), [exc])).toBe(true);
+  });
+});
+
+/* ---------------------------------------------------------------------- */
+/* Portal-mirror mode selection (docs/design/portal-order-fidelity.md).    */
+/*                                                                        */
+/* These pin the THREE things that have to move together, because getting */
+/* any one of them wrong is silent rather than loud: the relation read,    */
+/* the keyset tiebreaker, and the sort key. A property_id tiebreaker on    */
+/* the listing-grain feed does not error — it just drops rows at page      */
+/* boundaries, which looks like ordinary infinite-scroll behaviour.        */
+/* ---------------------------------------------------------------------- */
+
+describe('portal-mirror mode selection', () => {
+  const withPortals = (portals: string[]) => ({ ...DEFAULT_FILTERS, portals });
+
+  it('engages on exactly one portal', () => {
+    expect(isPortalMirror(withPortals(['bazos']))).toBe(true);
+    expect(portalMirrorSource(withPortals(['bazos']))).toBe('bazos');
+  });
+
+  it('stays off for no portal filter — the deduped market view is the default', () => {
+    expect(isPortalMirror(DEFAULT_FILTERS)).toBe(false);
+    expect(portalMirrorSource(DEFAULT_FILTERS)).toBeNull();
+  });
+
+  it('stays off for two or more portals — that is what dedup is for', () => {
+    expect(isPortalMirror(withPortals(['bazos', 'sreality']))).toBe(false);
+    expect(portalMirrorSource(withPortals(['bazos', 'sreality']))).toBeNull();
+  });
+
+  it('anchors the cursor on listing_id in mirror mode, property_id otherwise', () => {
+    expect(keysetTiebreak(withPortals(['idnes']))).toBe('listing_id');
+    expect(keysetTiebreak(DEFAULT_FILTERS)).toBe('property_id');
+    expect(keysetTiebreak(withPortals(['idnes', 'remax']))).toBe('property_id');
+  });
+
+  it('remaps only "newest/oldest first" onto the portal order key', () => {
+    const mirror = withPortals(['bazos']);
+    expect(effectiveSort(mirror, { field: 'first_seen_at', direction: 'desc' })).toEqual({
+      field: 'portal_sort_key',
+      direction: 'desc',
+    });
+    /* Direction is preserved: "oldest first" mirrors the portal's oldest. */
+    expect(effectiveSort(mirror, { field: 'first_seen_at', direction: 'asc' })).toEqual({
+      field: 'portal_sort_key',
+      direction: 'asc',
+    });
+  });
+
+  it('passes every other sort field straight through — they all exist on the feed', () => {
+    const mirror = withPortals(['bazos']);
+    for (const field of ['price_czk', 'price_per_m2', 'area_m2', 'last_seen_at',
+                         'district', 'mf_gross_yield_pct'] as const) {
+      expect(effectiveSort(mirror, { field, direction: 'desc' })).toEqual({
+        field, direction: 'desc',
+      });
+    }
+  });
+
+  it('never remaps the sort when the mirror is off', () => {
+    expect(effectiveSort(DEFAULT_FILTERS, { field: 'first_seen_at', direction: 'desc' }))
+      .toEqual({ field: 'first_seen_at', direction: 'desc' });
+    expect(effectiveSort(withPortals(['a', 'b']), { field: 'first_seen_at', direction: 'desc' }))
+      .toEqual({ field: 'first_seen_at', direction: 'desc' });
+  });
+
+  it('keeps portal_sort_key out of the user-selectable sorts, so no URL can pin it', () => {
+    /* It is derived from the filter state, never round-tripped through ?sort=. */
+    expect(parseSort('-portal_sort_key')).toEqual(DEFAULT_SORT);
   });
 });

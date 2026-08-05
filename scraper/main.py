@@ -81,6 +81,17 @@ INDEX_MIN_COMPLETENESS = 0.995
 # backstop for listings whose detail we don't re-fetch).
 INACTIVE_MIN_UNSEEN_HOURS = 3
 
+# Safety ceiling on SrealityPortal.probe_category's own page loop, independent of
+# the caller-supplied probe_pages (docs/design/portal-order-fidelity.md, Phase 4).
+# The deep-pagination 422 is offset-triggered, not size-triggered (confirmed: the
+# API refuses an offset past its window regardless of a category's total), so a
+# shallow probe never approaches it in practice — this is defense-in-depth against
+# a misconfigured very-high probe_pages, not a wall the normal (probe_pages=1,
+# every ~180s) cadence gets anywhere near. 20 pages * per_page=500 = 10,000 items,
+# the same order of magnitude as SPLIT_THRESHOLD (the point district-split exists
+# for full walks) — chosen for that same margin, not a measured exact boundary.
+PROBE_MAX_PAGES = 20
+
 # How many of the most recent download outcomes the suspicious-stop
 # heuristic considers. 100 is small enough to react within a minute or
 # two at 32-worker throughput, large enough that a few transient
@@ -892,6 +903,83 @@ class SrealityPortal:
             enqueue_only=True,
         )
 
+    def probe_category(
+        self, category: tuple[int, int], conn: Any, dry_run: bool,
+        limiter: RateLimiter, probe_pages: int,
+    ) -> tuple[set[int], dict[str, int], int | None, int, bool]:
+        """Newest-first-ish discovery probe (portal_runner.run_index_probe),
+        modeled on CeskerealityPortal.probe_category — sreality needs its own
+        bespoke probe for the same reason ceskereality does: no sort param to
+        request, so the generic capped-walk-then-diff fallback can't be trusted
+        to see the freshest listings first.
+
+        UNSPLIT, unlike walk_category: the deep-pagination 422 is triggered by
+        offset depth, not category size (docs/design/portal-order-fidelity.md,
+        Phase 4 — confirmed via scraper.sreality_client's own CAP_STATUSES
+        comment), so a shallow probe never needs — and must never pay for —
+        SrealityPortal's district-split. Early-stops a category the moment a
+        page returns zero new ids, exactly like ceskereality's probe; capped at
+        PROBE_MAX_PAGES regardless of the caller's probe_pages as defense in
+        depth. Diff + enqueue only; always complete=False so the caller can
+        never be tempted into a delisting sweep (rule #3) off a partial walk.
+        """
+        cm, ct = category
+        client = _build_client(cm, ct, limiter=limiter)
+        seen: set[int] = set()
+        total: int | None = None
+        pages = 0
+        found_new = 0
+        enqueued = 0
+        page_cap = min(max(1, probe_pages), PROBE_MAX_PAGES)
+        offset = 0
+        for _ in range(page_cap):
+            results = client.fetch_index_page(offset)
+            pages += 1
+            if client.result_size is not None:
+                total = client.result_size
+            if not results:
+                break
+            index_entries: list[tuple[int, int | None]] = []
+            for estate in results:
+                sid = _extract_id(estate)
+                if sid is None:
+                    continue
+                index_entries.append((sid, _extract_price(estate)))
+            page_ids = {sid for sid, _ in index_entries if sid not in seen}
+            seen.update(page_ids)
+            price_map = dict(index_entries)
+            # sreality's own index_summary keys on the bigint sreality_id PK
+            # directly (no surrogate "id" field, unlike index_summary_native) —
+            # so touch_listings (also sreality_id-keyed) is the matching call,
+            # same pairing _walk_category already uses.
+            existing = db.index_summary(conn, page_ids) if conn is not None else {}
+            new_ids = [s for s in page_ids if s not in existing]
+            changed = [
+                s for s in page_ids
+                if s in existing and price_map.get(s) is not None
+                and existing[s]["price_czk"] != price_map[s]
+            ]
+            unchanged_ids = [
+                s for s in page_ids if s in existing and s not in changed
+            ]
+            if conn is not None and unchanged_ids:
+                db.touch_listings(conn, unchanged_ids)
+            entries = (
+                [(str(s), None, price_map.get(s), db.QUEUE_PRIORITY_CHANGED) for s in changed]
+                + [(str(s), None, price_map.get(s), db.QUEUE_PRIORITY_NEW) for s in new_ids]
+            )
+            if conn is not None and entries:
+                enqueued += db.enqueue_detail(conn, self.source, entries)
+            found_new += len(new_ids)
+            LOG.info(
+                "PROBE page cm=%s ct=%s offset=%d new=%d changed=%d unchanged=%d",
+                ct, cm, offset, len(new_ids), len(changed), len(unchanged_ids),
+            )
+            if not new_ids:
+                break
+            offset += client.per_page
+        return seen, {"found_new": found_new, "enqueued": enqueued}, total, pages, False
+
     def mark_inactive(self, conn: Any, category: tuple[int, int], seen: set[int]) -> int:
         cm, ct = category
         return db.mark_inactive(
@@ -918,6 +1006,9 @@ class SrealityPortal:
         return DrainItem(native_id=str(native_id), kind=fr.kind, payload=fr, error=error)
 
     def write_details(self, conn: Any, items: list[DrainItem]) -> dict[str, int]:
+        for it in items:
+            if it.payload is not None:
+                it.payload.discovery_seq = it.discovery_seq
         return db.write_detail_batch(conn, [it.payload for it in items])
 
     def mark_gone(self, conn: Any, native_id: str) -> None:
@@ -1305,6 +1396,10 @@ class FetchResult:
     content_hash: str | None = None
     error: BaseException | None = None
     source: str | None = None  # "fetch" | "parse" for kind == "error"
+    # Set post-hoc by SrealityPortal.write_details from the owning DrainItem
+    # (migration 368) — not known at fetch time, which runs before the claim's
+    # discovery_seq is looked up. See db.DetailResult.discovery_seq.
+    discovery_seq: int | None = None
 
 
 def _fetch_detail(client: SrealityClient, sid: int) -> FetchResult:

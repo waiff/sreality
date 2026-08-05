@@ -1,4 +1,5 @@
-"""Phase 1 auth — verify_jwt dual-auth dependency."""
+"""Phase 1 auth — verify_jwt (real Supabase JWTs only; the legacy static-token
+branch that used to grant a synthetic admin identity has been retired)."""
 
 from __future__ import annotations
 
@@ -22,10 +23,17 @@ def test_missing_header_401():
     assert ei.value.status_code == 401
 
 
-def test_legacy_token_resolves_to_operator(monkeypatch):
+def test_legacy_static_token_no_longer_authenticates(monkeypatch):
+    """The static API_TOKEN — extractable from the shipped SPA bundle via
+    devtools — used to resolve to a synthetic {"is_admin": True, "legacy":
+    True} identity here. That branch is gone: presenting it is now just an
+    invalid JWT, same as any other garbage bearer value."""
     monkeypatch.setenv("API_TOKEN", "legacy-secret")
-    claims = deps.verify_jwt(authorization="Bearer legacy-secret")
-    assert claims["legacy"] is True and claims["is_admin"] is True
+    monkeypatch.delenv("SUPABASE_URL", raising=False)
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", SECRET)
+    with pytest.raises(HTTPException) as ei:
+        deps.verify_jwt(authorization="Bearer legacy-secret")
+    assert ei.value.status_code == 401
 
 
 def test_no_secret_fails_closed(monkeypatch):
@@ -87,3 +95,14 @@ def test_require_admin_rejects_non_admin(monkeypatch):
     with pytest.raises(HTTPException) as ei:
         deps.require_admin(deps.verify_jwt(authorization=f"Bearer {tok}"))
     assert ei.value.status_code == 403
+
+
+def test_require_admin_accepts_real_admin_jwt(monkeypatch):
+    """The one path that must keep working: a real Supabase JWT whose
+    app_metadata.is_admin claim is true (stamped from the admins table)."""
+    monkeypatch.delenv("API_TOKEN", raising=False)
+    monkeypatch.delenv("SUPABASE_URL", raising=False)
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", SECRET)
+    tok = _token({"sub": "u", "app_metadata": {"is_admin": True}})
+    claims = deps.require_admin(deps.verify_jwt(authorization=f"Bearer {tok}"))
+    assert claims["sub"] == "u"

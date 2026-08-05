@@ -20,7 +20,12 @@ type OpenPanel = (
   ref: PortalRef, url: string, prefetched?: PortalListing | null,
 ) => Promise<void>;
 
+/* Holds the listing id the card was badged FOR, not a boolean: SPA routers
+ * recycle card DOM nodes between result sets, so a node can still carry the
+ * badge of the listing it previously held. Storing the id lets a recycled node
+ * be detected and re-badged instead of silently showing another listing's yield. */
 const PROCESSED_ATTR = 'data-mf-processed';
+const BADGE_CLASS = '__mf_badge';
 const STYLE_ID = '__mf_badge_style__';
 const SCAN_DEBOUNCE_MS = 400;
 const MAX_LOOKUP_PER_PASS = 50;
@@ -41,9 +46,15 @@ function fmtCzk(n: number | null): string {
   return n == null ? '—' : `${Math.round(n).toLocaleString('cs-CZ')} Kč`;
 }
 
-export async function runIndexOverlay(call: Caller, openPanel: OpenPanel): Promise<void> {
+/* Returns a stop() to disconnect the observer + cancel any pending scan —
+ * called when a route change (SPA soft-nav) moves the tab off an index page,
+ * so repeated navigations don't stack duplicate observers scanning the DOM. */
+export async function runIndexOverlay(
+  call: Caller, openPanel: OpenPanel,
+): Promise<() => void> {
+  const noop = (): void => {};
   const portal = portalForHost(location.hostname);
-  if (portal == null) return;
+  if (portal == null) return noop;
   injectStyle();
 
   const cache = new Map<string, PortalListing>();
@@ -79,15 +90,23 @@ export async function runIndexOverlay(call: Caller, openPanel: OpenPanel): Promi
   const obs = new MutationObserver(schedule);
   obs.observe(document.body, { childList: true, subtree: true });
   void pass();
+
+  return () => {
+    obs.disconnect();
+    if (timer != null) clearTimeout(timer);
+  };
 }
 
 function collectHits(source: string): Hit[] {
   const hits: Hit[] = [];
   const anchors = document.querySelectorAll<HTMLAnchorElement>('a[href]');
   for (const anchor of Array.from(anchors)) {
-    if (anchor.closest(`[${PROCESSED_ATTR}]`) != null) continue;
     const ref = detailRef(anchor.href, location.hostname);
     if (ref == null || ref.source !== source) continue;
+    // Skip only if this card is already badged for THIS listing (see PROCESSED_ATTR).
+    if (anchor.closest(`[${PROCESSED_ATTR}]`)?.getAttribute(PROCESSED_ATTR) === ref.sourceId) {
+      continue;
+    }
     hits.push({ ref, anchor, href: anchor.href });
   }
   return hits;
@@ -112,8 +131,11 @@ function urlSaleHint(portal: Portal, href: string): boolean | null {
 
 function process(hit: Hit, listing: PortalListing, portal: Portal, openPanel: OpenPanel): void {
   const card = cardFor(hit.anchor);
-  if (card.getAttribute(PROCESSED_ATTR) != null) return;
-  card.setAttribute(PROCESSED_ATTR, '1');
+  const prevId = card.getAttribute(PROCESSED_ATTR);
+  if (prevId === hit.ref.sourceId) return;
+  // Recycled node — drop the previous listing's badge before re-badging.
+  if (prevId != null) card.querySelector(`:scope > .${BADGE_CLASS}`)?.remove();
+  card.setAttribute(PROCESSED_ATTR, hit.ref.sourceId);
 
   const saleApt = listing.found
     ? listing.category_main === 'byt' && listing.category_type === 'prodej'
@@ -123,7 +145,7 @@ function process(hit: Hit, listing: PortalListing, portal: Portal, openPanel: Op
   if (getComputedStyle(card).position === 'static') card.style.position = 'relative';
 
   const badge = document.createElement('div');
-  badge.className = '__mf_badge';
+  badge.className = BADGE_CLASS;
   badge.setAttribute('role', 'button');
   badge.title = 'Klikni pro odhad výnosu';
 
