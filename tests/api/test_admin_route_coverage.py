@@ -43,8 +43,7 @@ _PUBLIC_ALLOWLIST: frozenset[tuple[str, str]] = frozenset({
 
 # Every route under these must resolve to require_admin.
 _ADMIN_PREFIXES: tuple[str, ...] = (
-    "/admin", "/dedup", "/outreach", "/broker-review", "/location-audit",
-    "/skill-refinements",
+    "/admin", "/dedup", "/outreach", "/broker-review", "/skill-refinements",
 )
 
 # Sentinels proving those routers actually mounted. Without this, a mis-mounted router

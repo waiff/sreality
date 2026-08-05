@@ -321,68 +321,6 @@ def test_images_pass_slice_zero_skips_entirely(monkeypatch):
     assert "images" not in state["lanes"]
 
 
-# --- dedup pass ------------------------------------------------------------------
-
-
-def test_dedup_lane_registered_and_dark_by_default():
-    # Ships DARK: the interval default is 0, so the lane idles until the operator flips
-    # realtime_dedup_interval_seconds. The lane must be registered in _amain's list.
-    assert rw.DEDUP_INTERVAL_DEFAULT == 0
-    src = inspect.getsource(rw._amain)
-    assert '("dedup"' in src
-
-
-def test_dedup_pass_records_merge_counters(monkeypatch):
-    def fake_sync() -> dict[str, Any]:
-        return {"dirty_claimed": 5, "dirty_cleared": 3, "auto_phash": 2,
-                "auto_visual": 1, "queued": 0, "truncated": 0, "vision_errors": 0}
-
-    monkeypatch.setattr(rw, "_dedup_sync", fake_sync)
-    state = rw._new_state()
-    asyncio.run(rw._dedup_pass(asyncio.Event(), state))
-    dedup = state["lanes"]["dedup"]
-    assert dedup["passes"] == 1
-    assert dedup["last"] == {
-        "claimed": 5, "cleared": 3, "auto_phash": 2, "auto_visual": 1,
-        "queued": 0, "truncated": 0, "vision_errors": 0,
-    }
-
-
-def test_dedup_pass_empty_queue_records_zero(monkeypatch):
-    # run_realtime_dirty_pass returns None on an empty queue -> the lane records a
-    # zero-claim pass (heartbeat visibility) without a run row.
-    monkeypatch.setattr(rw, "_dedup_sync", lambda: None)
-    state = rw._new_state()
-    asyncio.run(rw._dedup_pass(asyncio.Event(), state))
-    assert state["lanes"]["dedup"]["last"] == {"claimed": 0, "empty": True}
-
-
-def test_dedup_sync_max_seconds_from_interval(monkeypatch):
-    # max_seconds = min(cap, max(60, interval*2)); the pass delegates to the engine's
-    # run_realtime_dirty_pass with the worker-configured budgets and runner='worker'.
-    monkeypatch.setattr(rw, "_read_dedup_interval", lambda: 90)
-    monkeypatch.setattr(rw, "_read_dedup_budgets", lambda: (150, 6, 3))
-    monkeypatch.setattr(rw.db, "connect", lambda: _FakeConn())
-    captured: dict[str, Any] = {}
-
-    import scripts.dedup_engine as eng
-
-    def fake_pass(conn, *, max_dirty, compare_budget, floor_plan_budget,
-                  max_seconds, runner="worker"):
-        captured.update(max_dirty=max_dirty, compare_budget=compare_budget,
-                        floor_plan_budget=floor_plan_budget, max_seconds=max_seconds,
-                        runner=runner)
-        return {"dirty_claimed": 0}
-
-    monkeypatch.setattr(eng, "run_realtime_dirty_pass", fake_pass)
-    rw._dedup_sync()
-    assert captured["max_dirty"] == 150
-    assert captured["compare_budget"] == 6
-    assert captured["floor_plan_budget"] == 3
-    assert captured["max_seconds"] == 180.0   # interval 90 * 2, under the 240 cap
-    assert captured["runner"] == "worker"
-
-
 def test_images_pass_without_r2_logs_once_and_idles(monkeypatch, caplog):
     """No R2 env vars → the lane idles (never calls the downloader), records a
     skipped heartbeat pass, and warns exactly once per process — the proxy-skip
@@ -677,7 +615,7 @@ def test_count_probe_pass_no_change_skips_dispatch(monkeypatch):
 
 
 def test_maintenance_lane_registered_and_live_by_default():
-    # Ships LIVE (unlike dedup): the lane exists precisely because GH throttles
+    # Ships LIVE: the lane exists precisely because GH throttles
     # property_maintenance.yml's */5 to a measured ~2h median, so merging must
     # activate the fix. Interval <= 0 remains the kill-switch.
     assert rw.MAINTENANCE_INTERVAL_DEFAULT == 120
@@ -687,8 +625,7 @@ def test_maintenance_lane_registered_and_live_by_default():
 
 def test_maintenance_pass_records_counters(monkeypatch):
     def fake_sync() -> dict[str, Any]:
-        return {"skipped": False, "attached": 7, "recomputed": 12,
-                "published": 3, "imageless": 2}
+        return {"skipped": False, "attached": 7, "recomputed": 12, "published": 3}
 
     monkeypatch.setattr(rw, "_maintenance_sync", fake_sync)
     state = rw._new_state()
@@ -696,8 +633,7 @@ def test_maintenance_pass_records_counters(monkeypatch):
     lane = state["lanes"]["maintenance"]
     assert lane["passes"] == 1
     assert lane["last"] == {
-        "skipped": False, "attached": 7, "recomputed": 12,
-        "published": 3, "imageless": 2,
+        "skipped": False, "attached": 7, "recomputed": 12, "published": 3,
     }
 
 
@@ -706,8 +642,7 @@ def test_maintenance_pass_records_lock_skip(monkeypatch):
     # sweep holds the advisory lock — the lane records the skip and moves on.
     monkeypatch.setattr(
         rw, "_maintenance_sync",
-        lambda: {"skipped": True, "attached": 0, "recomputed": 0,
-                 "published": 0, "imageless": 0})
+        lambda: {"skipped": True, "attached": 0, "recomputed": 0, "published": 0})
     state = rw._new_state()
     asyncio.run(rw._maintenance_pass(asyncio.Event(), state))
     assert state["lanes"]["maintenance"]["last"]["skipped"] is True

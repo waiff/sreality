@@ -2077,16 +2077,6 @@ def test_run_engine_truncated_flag() -> None:
     assert stats2["truncated"] == 0
 
 
-def test_mark_dedup_dirty_empty_noop() -> None:
-    """The dedup-ready enqueue is a no-op (no SQL) on an empty image-id list."""
-    from scraper import db
-
-    class _Conn:
-        def cursor(self): raise AssertionError("must not touch the DB for an empty batch")
-
-    assert db.mark_properties_dedup_dirty_for_images(_Conn(), []) == 0
-
-
 def test_should_run_geo_only_on_explicit_flag() -> None:
     """Geo runs ONLY on an explicit flag — never auto-bolted onto the street full-scan /
     candidate runs (where it was deadline-starved / apartment-restricted and produced nothing)."""
@@ -2222,37 +2212,6 @@ def test_prune_stale_dedup_dirty_evicts_by_ttl() -> None:
     assert eng._prune_stale_dedup_dirty(_Conn()) == 7
     assert "DELETE FROM dedup_dirty_properties" in captured[-1]
     assert "now() - interval" in captured[-1] and "hours" in captured[-1]
-
-
-def test_dedup_dirty_enqueue_gates_eligible_and_recent() -> None:
-    """The dedup-ready enqueue SQL keeps the real-time lane a CHANGE signal, not an
-    enrichment-progress firehose: it enqueues a property ONLY when (a) it is fully tagged,
-    (b) it has a listing the engine can REACH — street+disposition OR a geo-eligible
-    single-dwelling row (property-grain EXISTS; the dirty pass resolves both families),
-    and (c) the just-tagged listing is recent (a genuinely NEW arrival). Without these the
-    market-wide CLIP backfill floods the queue (78.5% un-mergeable) and it stalls."""
-    from scraper import db
-    from toolkit.publication import eligible_predicate
-
-    sql = db._DEDUP_DIRTY_FROM_IMAGE_IDS_SQL
-    # eligibility: property-grain EXISTS over the property's listings, not the tagged one alone.
-    assert "EXISTS" in sql and "le.property_id = l.property_id" in sql
-    # the gate IS the shared street-OR-geo predicate rendered for the subquery alias —
-    # single-sourced from toolkit.publication, never a hand copy.
-    assert eligible_predicate("le") in sql
-    # street arm: a street+disposition listing still qualifies.
-    assert "le.street IS NOT NULL" in sql and "le.disposition IS NOT NULL" in sql
-    # geo arm: a street-less dum/pozemek/komercni/ostatni listing with geom+obec+area
-    # NOW enqueues too (the dirty pass grew a geo sub-pass)...
-    assert "le.category_main IN ('dum', 'pozemek', 'komercni', 'ostatni')" in sql
-    assert "le.geom IS NOT NULL" in sql and "le.obec_id IS NOT NULL" in sql
-    # ...and the byt-geo arm: a street-less byt with geom+obec+area+DISPOSITION rides
-    # the real-time lane too (the dirty pass grew a byt-geo sub-pass, rung B).
-    assert "le.category_main = 'byt'" in sql
-    assert "le.category_main = 'byt'" in eligible_predicate("le")
-    # recency: the tagged listing's first_seen_at within the window.
-    assert "l.first_seen_at > now() - interval" in sql
-    assert db._DEDUP_DIRTY_RECENCY_DAYS >= 1
 
 
 def test_eligible_predicate_single_sources_the_parity_constants() -> None:

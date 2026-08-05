@@ -506,63 +506,6 @@ def _publish_sweep(conn: Any) -> int:
         return cur.rowcount or 0
 
 
-# The CLIP-tag event fires only when a listing's STORED images finish tagging, so it is
-# the real-time dedup enqueue trigger for photo-carrying listings only. Images usually
-# land in R2 within minutes of a scrape; a property still image-less after this window
-# is a genuinely photo-less ad that will never tag and never enqueue.
-IMAGELESS_EVAL_MINUTES = 30
-
-# Already-queued properties are EXCLUDED outright (NOT bumped via ON CONFLICT ... DO
-# UPDATE): this sweep runs every 5 minutes, and re-bumping marked_at on the same
-# still-queued rows would keep resetting their position in the --dirty drain's
-# newest-first claim — making stale imageless rows perpetually "fresh" and starving the
-# genuinely new ones the real-time lane exists for. The residual ON CONFLICT DO NOTHING
-# only guards the race with a concurrent tag-event enqueue between the anti-join and the
-# INSERT.
-_ENQUEUE_IMAGELESS_SQL = f"""
-    INSERT INTO dedup_dirty_properties (property_id)
-    SELECT p.id
-    FROM properties p
-    WHERE p.published_at IS NULL
-      AND p.status = 'active'
-      AND p.first_seen_at < now() - interval '{IMAGELESS_EVAL_MINUTES} minutes'
-      AND EXISTS (
-        SELECT 1 FROM listings le
-        WHERE le.property_id = p.id
-          AND ({eligible_predicate("le")})
-      )
-      AND NOT EXISTS (
-        SELECT 1 FROM listings li
-        JOIN images i ON i.listing_id = li.id
-        WHERE li.property_id = p.id
-          AND i.storage_path IS NOT NULL
-      )
-      AND NOT EXISTS (
-        SELECT 1 FROM dedup_dirty_properties d WHERE d.property_id = p.id
-      )
-    ON CONFLICT (property_id) DO NOTHING
-"""
-
-
-def _enqueue_imageless_for_dedup(conn: Any) -> int:
-    """Route unpublished, dedup-ELIGIBLE properties with zero stored images into the
-    real-time dedup_dirty_properties lane so the engine EVALUATES them.
-
-    WHY: the CLIP-tag event is the only real-time enqueue trigger, and a photo-less
-    listing never tags — so an eligible imageless property would otherwise sit
-    unpublished until a slow full scan reached its group. This is an EVALUATION
-    trigger, NOT a publish-timeout: the property publishes only after the engine
-    actually decides its groups (rule B/C or the geo classify — both deterministic;
-    the visual layer no-ops without photos) and stamps it dedup-checked, exactly like
-    every other property. (The operator explicitly rejected publish-on-timer.)
-
-    A property that later GETS images re-enqueues via the tag event naturally;
-    re-evaluation is idempotent."""
-    with conn.cursor() as cur:
-        cur.execute(_ENQUEUE_IMAGELESS_SQL)
-        return cur.rowcount or 0
-
-
 def _drain_dirty(conn: Any, batch_size: int, cutoff: Any) -> int:
     """Recompute every property queued at/before `cutoff`, scoped + batched.
 
@@ -650,8 +593,8 @@ def run_incremental_pass(conn: Any, batch_size: int = 2000) -> dict[str, Any]:
     """ONE incremental property-maintenance pass — THE shared implementation
     behind the GH cron (property_maintenance.yml) and the realtime worker's
     maintenance lane: attach new stragglers (skip the legacy native-id
-    backfill), recompute the dirty set, publish ineligible properties, enqueue
-    imageless for dedup. Serialized by the maintenance lease; a caller that
+    backfill), recompute the dirty set, publish ineligible properties.
+    Serialized by the maintenance lease; a caller that
     finds the lease held returns {"skipped": True} — the concurrent pass is
     doing the same work, and the next tick is seconds away. A pass normally
     runs seconds; the 15-minute lease is a wide margin, and its expiry
@@ -659,8 +602,7 @@ def run_incremental_pass(conn: Any, batch_size: int = 2000) -> dict[str, Any]:
     """
     holder = _new_holder("incremental")
     if not _try_lease(conn, holder, _INCREMENTAL_LEASE):
-        return {"skipped": True, "attached": 0, "recomputed": 0,
-                "published": 0, "imageless": 0}
+        return {"skipped": True, "attached": 0, "recomputed": 0, "published": 0}
     try:
         with conn.cursor() as cur:
             cur.execute("SELECT now()")
@@ -668,9 +610,8 @@ def run_incremental_pass(conn: Any, batch_size: int = 2000) -> dict[str, Any]:
         attached = _attach_stragglers(conn, skip_native_backfill=True)
         recomputed = _drain_dirty(conn, batch_size, cutoff)
         published = _publish_sweep(conn)
-        imageless = _enqueue_imageless_for_dedup(conn)
         return {"skipped": False, "attached": attached, "recomputed": recomputed,
-                "published": published, "imageless": imageless}
+                "published": published}
     finally:
         _release_lease(conn, holder)
 
@@ -750,9 +691,8 @@ def main() -> int:
                 return 0
             LOG.info(
                 "RECOMPUTE incremental done attached=%d recomputed=%d "
-                "published_ineligible=%d imageless_enqueued=%d elapsed=%.1fs",
-                stats["attached"], stats["recomputed"],
-                stats["published"], stats["imageless"], elapsed,
+                "published_ineligible=%d elapsed=%.1fs",
+                stats["attached"], stats["recomputed"], stats["published"], elapsed,
             )
             return 0
 
