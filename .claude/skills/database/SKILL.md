@@ -221,13 +221,15 @@ Full table-by-table migration list, RLS policy text, and the composite-FK detail
 ## Read-model patterns
 
 **Browse read model** (migrations 275–278, 283; PRs #705/#707/#711/#714/#724): a
-`properties_public`-style view is fed from `browse_projection` (the column contract +
-the dedup-aware publication gate, defined once) into `browse_list` — an **UNLOGGED
+`properties_public`-style view is fed from `browse_projection` (the column contract,
+defined once) into `browse_list` — an **UNLOGGED
 table**, blue-green rebuilt every 5 minutes by a `SECURITY DEFINER` pg_cron function
 (`rebuild_browse_list()`, `pg_try_advisory_lock` guards overlapping runs, `ANALYZE`
 *before* the swap is mandatory or the planner uses stale stats on the fresh table).
 `properties_map_mv` stays a real `MATERIALIZED VIEW` (30-min cadence) fed from the same
-projection. This retired the old `scripts/refresh_map_mv.py` GH Actions cron entirely —
+projection. (The projection still carries the old publication-gate predicate in SQL, but the
+gate is **inert** — `dedup_publication_gate_enabled` is `false` and its code side is gone,
+rule #15; the predicate itself comes out in the NEW DEDUP teardown migration.) This retired the old `scripts/refresh_map_mv.py` GH Actions cron entirely —
 pg_cron runs on-the-minute where GH Actions cron was measured ~2× jittered (see
 `gh-actions-cron-throttle-fleet` if you need the numbers).
 
@@ -291,21 +293,19 @@ that don't key on street.
   equal to the row's own geo-derived obec/okres/region; a wrong street is worse than NULL (it poisons
   the dedup street-key and Browse). Stored values are bare/human-readable for display; the SEPARATE
   match-time grouping NAME key is **`scraper.street.street_name_key`** (the single home for street
-  string logic; consumed live by `toolkit.dedup_engine.street_group_keys` AND stored on
-  `listings.street_name_key`, migration 256 — don't confuse the human-readable `street` with the key):
-  a row dual-keys into `id:<street_id>` (sreality/bezrealitky) AND `name:<obec_id>:<street_name_key>`.
-  The NAME key is **obec-scoped** to keep each town's street its own small group and block
-  cross-town false merges (classify_pair has no geo check). An oversized nationwide group (a
-  common name like "Žižkova" across 100+ towns) is no longer skipped whole — migration 271 (PR
-  #699) processes it **bounded**, prioritizing the best candidate pairs up to a cap and
-  recording `dedup_engine_runs.oversized_groups`/`skipped_oversized` for observability, so
-  cross-portal pairs in an oversized group are still found, just not exhaustively.
+  string logic), stored on `listings.street_name_key` (migration 256) by every `street` write path
+  — don't confuse the human-readable `street` with the key. It is **obec-scoped**, so each town's
+  street is its own small group. The legacy dedup engine that consumed it was removed in the
+  2026-08 cutoff (rule #15), but the column, its trigger and its parity guards **stay**: the
+  rebuilt engine's Level 0 blocking reuses it (`docs/design/new-dedup/PROGRAM.md`), so a
+  normalizer edit still requires the `backfill_street_name_key.yml all=true` re-key and the weekly
+  `street_key_parity.yml` job is still the alarm for forgetting it.
 - **RÚIAN address-point resolver** now covers mmreality, ceskereality, and realitymix (PR #750)
   in addition to its original portals, gated by `matched_type='regional.address'` — a
   geocoded street/town *centroid* match must never resolve a street, only an exact address
   point. realitymix additionally gained a `locality_text`-derived arm (PR #756, its index
   cards carry no structured address). Backfill (`scripts/backfill_portal_streets.py`) gained
-  `--include-inactive` (PR #758, dedup needs delisted streets too) and now bounds its chunk
+  `--include-inactive` (PR #758, grouping needs delisted streets too) and now bounds its chunk
   scans to fixed ID windows (PR #759, avoiding pooler-timeout scans on the full table).
 - **Location/geocode lifecycle** (migration 288, PR #749): a unified `CoordResolver`
   (`scraper/location.py`) now backs idnes/realitymix/maxima/remax/mmreality/ceskereality —

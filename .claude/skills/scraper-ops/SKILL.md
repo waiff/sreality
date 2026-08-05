@@ -1,6 +1,6 @@
 ---
 name: scraper-ops
-description: Use when running, debugging, or extending the scrapers — triggering the per-portal index-walk/detail-drain workflows, adding a new scraper field without breaking data, refreshing per-source HTML fixtures, reading the pipeline logs (INDEX/ENQUEUE/INACTIVE/DRAIN/IMAGES line shapes), the always-on real-time worker (count-probe, live forensics, property-maintenance/dedup/geo lanes), the dedup-aware publication gate, or the pipeline verification/alerting harness. Also covers condition-scoring (currently unscheduled) and image-download workflow cadence. Triggers on: index_walk, detail_drain, gh workflow run, mark_inactive, scrape_runs, fixtures, RUN done, a new listings column, onboarding a portal, reading a scrape log, realtime_worker, publication gate, verify_pipeline, llm_burn_rate.
+description: Use when running, debugging, or extending the scrapers — triggering the per-portal index-walk/detail-drain workflows, adding a new scraper field without breaking data, refreshing per-source HTML fixtures, reading the pipeline logs (INDEX/ENQUEUE/INACTIVE/DRAIN/IMAGES line shapes), the always-on real-time worker (probe/drain/images/count-probe/property-maintenance/estimation lanes), the visual-signal producer jobs (image pHash, CLIP tagging/retag), or the pipeline verification/alerting harness. Also covers condition-scoring (currently unscheduled) and image-download workflow cadence. Triggers on: index_walk, detail_drain, gh workflow run, mark_inactive, scrape_runs, fixtures, RUN done, a new listings column, onboarding a portal, reading a scrape log, realtime_worker, clip_tag, compute_image_phash, verify_pipeline, llm_burn_rate.
 ---
 
 # Scraper operations
@@ -114,134 +114,31 @@ hourly cron `30 * * * *`, bounded by a `--max-seconds` wall-clock budget; with
 backlog drains). There is no combined bazos/idnes fallback workflow anymore — sreality's
 `scrape.yml` is the only retained combined fallback (its `_run_full` is the instant revert for
 the split); for the other portals an ad-hoc combined run is `python -m scraper.<portal>_main`
-locally. The dedup/properties track adds
+locally. The properties track adds
 `property_maintenance.yml` (**dirty-set incremental, cron `*/5`** — attaches new stragglers as
-singletons + recomputes only changed properties; rule #20),
+singletons + recomputes only changed properties; rule #20) and
 `recompute_property_stats.yml` (the **daily full-sweep reconcile** at 04:15 — recomputes every
-property + clears the dirty queue), `dedup_engine.yml` (street+disposition dedup engine +
-auto-merge; rule #15 — THREE scheduled modes, ONE `resolve_pair` decision tree (the brain),
-three work-lists: a **FULL SCAN** every 6h that DISCOVERS new dups across the market; a
-**CANDIDATE DRAIN** every 2h (`--candidates`) that re-decides ONLY the properties in
-still-proposed `/dedup` candidates so the queue **self-clears in O(queue)** regardless of the
-full scan's deadline frontier — a re-decide backoff (`engine_decision`/
-`last_engine_decision_at`, migration 272, PR #701) skips a candidate whose last decision is
-recent and not stale/superseded by fresh CLIP evidence, fixing a prior infinite-treadmill bug
-where the same undecided pairs re-ran every cycle for no new evidence; and a **DIRTY DRAIN**
-hourly at :45 (`--dirty`, Wave 4c) that
-re-decides ONLY the street groups touching a just-dedup-ready property
-(`dedup_dirty_properties`, migration 242) so a **new cross-portal listing merges within ~minutes**
-instead of waiting hours (the watchdog-grain goal). **The enqueue is a real-time CHANGE signal,
-NOT enrichment progress** (`scraper.db.mark_properties_dedup_dirty_for_images`, called by the CLIP
-tag job): a property lands here only when a just-tagged listing is (a) now FULLY tagged, (b) its
-property has a street+disposition listing (**eligibility** — the street-only dirty drain can never
-merge one without, geo is skipped on `--dirty`), AND (c) the tagged listing is **recent**
-(`first_seen_at` within `_DEDUP_DIRTY_RECENCY_DAYS`, a genuinely NEW arrival). Without (b)+(c) the
-market-wide CLIP backfill / a new portal's back-catalogue floods the queue with un-mergeable /
-already-full-scanned rows — the flood that stalled it twice (201k, 78.5% ineligible); anything the
-gates drop is still deduped by the 6h full scan. The dirty drain's eligible LOAD is **SCOPED to
-the claimed properties' street groups** (`restrict_street_groups`) — not a full-market scan — via the
-**stored `listings.street_name_key`** (migration 256): `_claimed_street_groups` reads the dirty
-properties' `street_id` + `(coalesce(obec_id,-1), street_name_key)`, and the load (`_ELIGIBLE_SCOPED_SQL`)
-UNION-joins those claimed keys against `listings` as **unnest-JOINs the planner index-seeks PER claimed
-key** (the street_id arm via migration 127's index, the name-key arm via 256's
-`(coalesce(obec_id,-1), street_name_key)` partial expression index) — NOT an `OR` (validated to collapse
-to one full-eligible bitmap scan). Street groups are obec-bounded (the name key is obec-scoped; a
-`street_id` is one physical street), so the scoped load is **complete** — it carries each dirty
-property's existing peers, so a dirty property still
-re-decides against its whole group, while staying **O(dirty)** in BOTH load and pair-work. The
-`only_groups_with_property_ids` filter still gates the RESOLVE to dirty-containing groups, so the
-scoped load is a pure perf optimization layered under that correctness gate (no fragile SQL
-street-key replay); race-free claim/clear like `dirty_properties` (rule #20). `street_name_key` is
-THE single source `scraper.street.street_name_key` (also what the engine groups on live via
-`street_group_keys`), stamped at every `listings.street` write path via that ONE function
-(`scraper.db._set_street_name_key` at ingest + ALL the bulk street backfills: `backfill_portal_streets`
-/ `backfill_bazos_street_locality` / `backfill_address_point_streets` — the weekly coord→street
-resolver), out of the content hash, backfilled by `scripts.backfill_street_name_key`. Four guards hold stored == function:
-golden-case tests pin the normalization, a write-path test asserts every backfill's UPDATE stamps the
-column, the migration-264 presence CHECK (`listings_street_key_presence`) fails a keyless street write
-LOUDLY at write time, and the weekly sampled-parity job (`street_key_parity.yml` →
-`scripts/check_street_key_parity.py`) alerts via the workflow-failure monitor on any stored key
-drifting from the function (a normalizer edit requires the `backfill_street_name_key.yml all=true`
-re-key; the parity failure is the alarm for forgetting it). The ultimate backstop remains that the 6h
-full scan recomputes the key LIVE (never reads the column), so any drift is latency-only, never a
-wrong or lost merge. The claim is **NEWEST-FIRST + bounded** (`--max-dirty`,
-3000 on the cron) and the queue is **TTL-bounded** (`_prune_stale_dedup_dirty`, 24h): the real-time
-lane is a LATENCY optimization backstopped by the full scan, so it serves the FRESHEST dedup-ready
-listing first (the "merge in minutes" SLO holds even under a transient backlog) and evicts rows
-older than the TTL **that a COMPLETED full-scan cycle has provably covered** (`marked_at <
-dedup_scan_state.last_cycle_started_at`, migration 261 — no completed cycle yet → evict NOTHING;
-the original unconditional TTL claimed "the full scan has already covered them", which was FALSE
-while the full scan head-restarted at ~9% coverage — eviction was silent work loss) — so an
-un-drainable backlog can never pin the head, and eviction never discards uncovered work. **The 6h
-full scan itself is CURSOR-ROTATED** (migration 261, `dedup_scan_state`): groups iterate in sorted
-key order resuming after `cursor_key`, each run advances the frontier, reaching the end of the
-list completes the CYCLE (stamps `last_cycle_*`, resets the cursor) — so the WHOLE market is
-covered every ~2–3 days instead of the head ~9% being re-scanned forever (the tail structurally
-never reached). The dirty/candidate drains have their own work-lists and stay cursor-free. (Replaced
-a **FIFO** claim that let an unfinished head be re-claimed forever — FIFO is the wrong order for a
-latency SLO; the full scan is the tail's backstop.) The **dirty cron runs
-`--floor-plan-budget 0`**: the real-time lane pays NO inline floor-plan vision (a cold call
-downloads plan images from R2 + Sonnet ~15s each; a batch of them blew the wall-clock budget →
-truncate → never clear), consuming only warm verdicts and DEFERRING the rest to the 6h full scan /
-the batch warmer — keeping the hot path fast so it always finishes-and-clears. **The dirty cron
-runs in its OWN concurrency group** (`group: dedup-engine${{ ... '-dirty' }}`) so the slow batch
-runs (full scan / candidate / geo, all in `dedup-engine`) can never starve or cancel it; safe to
-run concurrently because `merge_properties` row-locks both properties `FOR UPDATE` + gates on
-`status='active'` (the same lock safety that lets dedup run concurrently with property-maintenance),
-so concurrent merges serialize per-property and a redundant re-decide is an `already_merged` no-op.
-**The claim clears INCREMENTALLY, per completed street group** (`run_engine`'s
-`resolved_property_ids` out-collector): a claimed property clears once EVERY group containing it
-(a listing dual-keys into 'id:' + 'name:' groups) was fully scanned — so a deadline/pair-cap-
-truncated run still clears the slice it finished and only the unprocessed remainder re-drains
-(replaced an all-or-nothing clear that pinned `dirty_cleared` at 0 whenever a run truncated —
-per-group clear makes progress monotonic regardless of budget).
-**The per-pair cost floor itself is fixed by the run-scoped `_ProbeCache` + group-batched pHash**:
-CLIP-completeness / floor-plan ids / site-plan presence are per-LISTING facts memoized for the run
-(O(n) probes per group, not O(n²)), and `_phash_group_counts` computes a whole street group's pair
-counts in ONE round trip per exclusion-profile (`resolve_pair(group_sids=…)`; per-pair fallback
-without it). **Scoped runs also consult PRIOR verdict-backed dismissals** (`dismissed_prior` +
-`_record_auto_dismissed` markers): a pair the engine already confidently dismissed is skipped
-unless either side gained photo evidence since (`images.clip_tagged_at` > `reviewed_at`), and
-`_write_pair_audit` refuses records identical to one logged within 7 days — the audit table logs
-decisions, not run cadence (pre-fix: ~5.8x duplicate dismissal rows). Full scans never consult
-(cursor-rotated: one re-decision per cycle is the designed refresh).
-**Each dirty run
-records `dedup_engine_runs.dirty_queue_depth` (backlog at run start) + `dirty_claimed` (its slice)**
-(migration 255) **plus `dirty_cleared` + `dirty_truncated`** (migration 258, NULL on other run
-modes) — `cleared==0` while `dirty_queue_depth` stays high across runs is the silent-livelock guard
-the FIFO stall lacked. **EVERY run row additionally records `run_kind` ('full' | 'candidates' |
-'dirty') + the run-level `truncated` + a real `started_at`** (migration 262): a chronically
-deadline-cut FULL SCAN is the signal that matters most — TTL eviction hands work to the full scan,
-so eviction is only safe while scans actually cover the market (the 2026-07 audit found the
-pre-cursor scans silently truncating at ~9% of it; the migration-261 cursor + cycle-gated TTL fix
-the coverage, and `truncated` on `run_kind='full'` rows is the alarm if it regresses). "Latest
-run" readers order by `id`/`ended_at` (insert order) — NOT `started_at`, which would sort a long
-scan's row below dirty runs that started after it. The `/dedup`
-dashboard shows a "Dirty queue" stat + a stall banner, and the Health page raises an amber/red
-banner. The shared, unit-tested `assessDirtyQueue` (`frontend/src/lib/dedupQueueHealth.ts`) is the
-single source of that status for both surfaces, and it keys on **`dirty_cleared`, not depth**.
-**Market gauges are decoupled from run activity** (migration 265): `eligible`/`flagged_*` are NULL on
-scoped runs (the ~9s full-table aggregate only runs on full scans) — dashboards read gauges from the
-latest `run_kind='full'` row and activity from the latest row of any lane; the geo pass writes its own
-`run_kind='geo'` rows (its `eligible` is the geo lane's count, excluded from street gauges). Health keys:
-"draining" means cleared>0 in the recent window (the 24h TTL prune shrinks depth whether or not
-the drain works, so a falling depth alone proves nothing), and a truncated streak with zero
-cleared is a red LIVELOCK regardless of depth (pre-258 rows fall back to the depth trend).
-All three drains compose with `--free` + the floor-plan budget), `dedup_batches.yml` ("Dedup engine (vision batch warm-up)", submit every
-6h + ingest hourly — pre-warms the engine's vision caches via the Anthropic Batches API at 50%
-off so the daily engine run merges over warm cache for free; rule #15; the warmer submits by
-`--lane street|geo|candidates`, has a wall-clock submit budget, and retries transient provider
-errors within its ~75-min job window), and
-`compute_image_phash.yml` (hourly pHash backfill, active-listing images first).
+property + clears the dirty queue). The visual-signal producers run alongside:
+`compute_image_phash.yml` (hourly pHash backfill, active-listing images first),
+`clip_tag.yml` (`scripts/clip_tag_backfill.py` — zero-shot CLIP room/plot tags into
+`image_clip_tags` + a 512-d vector into `image_clip_embeddings`), `clip_retag.yml`
+(`scripts/retag_from_embeddings.py` — re-runs the zero-shot over each image's STORED embedding
+when the taxonomy changes, driven by `app_settings.clip_taxonomy_retag_after`; no R2 download,
+no re-inference) and `backfill_render_score.yml` (one-shot render-vs-photo axis backfill from
+stored embeddings).
 
-**CLIP tagging (`toolkit/image_tagging.py`) now persists an embedding for every TAGGED
-image, not just active-listing ones** (PR #748) — closed a ~19% coverage gap that was
-forcing unnecessary Sonnet vision fallback in the dedup engine; a spare-capacity repair
-phase (PR #751) backfills the pre-existing tagged-but-vectorless backlog. Byt (apartment)
-candidate generation gained a **geo rung** (migration 296, PR #764) — extends the
-`geo_cell_key` blocking key (migration 276, see the `database` skill) to the `byt` family,
-so street-less apartments (~19.3k) are now reachable via a geo-cell + disposition candidate
-lane, generation-only (doesn't change the auto-merge gate, rule #15).
+**There is NO scheduled dedup job any more.** The automatic decision layer — the engine, its
+queues, its batch warmer, its geo/byt-geo runs, the model-compare and vision A/B harnesses, and
+the publication gate — was removed wholesale in the 2026-08 NEW DEDUP cutoff (architectural rule
+#15; `docs/design/new-dedup/CUTOFF.md`). Nothing auto-merges; merges are operator-ordered through
+`POST /properties/merge`. The tagging/pHash/embedding lanes above are kept running precisely
+because the rebuilt engine (`docs/design/new-dedup/PROGRAM.md`) consumes them, so treat a stalled
+`clip_tag.yml` or `compute_image_phash.yml` as a real problem even though nothing reads their
+output for decisions today. Do not resurrect the removed workflows or scripts.
+
+**CLIP tagging persists an embedding for every TAGGED image, not just active-listing ones**
+(PR #748) — it closed a ~19% coverage gap; a spare-capacity repair phase (PR #751) backfilled the
+pre-existing tagged-but-vectorless backlog.
 
 A unified `CoordResolver` (`scraper/location.py`, migration 288, PR #749) now backs
 idnes/realitymix/maxima/remax/mmreality/ceskereality — four of those had no geocode path at
@@ -279,7 +176,7 @@ into `WorkflowDoc.portal`, which is what the Health dashboard's per-portal "Pipe
 panel groups on — so a new portal's cron lines surface there automatically, with **no hardcoded
 frontend map to keep in sync**. Tag only the actual ingest workflows (index walk / detail drain /
 combined fallback); shared, source-agnostic jobs (`images.yml`, `condition_scores.yml`,
-`recompute_property_stats.yml`, `dedup_engine.yml`, …) stay **untagged** (`portal: null`) and
+`recompute_property_stats.yml`, `clip_tag.yml`, …) stay **untagged** (`portal: null`) and
 appear in the full Settings → Workflows list rather than any single portal's schedule. As with any
 workflow edit, regenerate `frontend/src/lib/workflowDocs.generated.ts` in the same commit
 (`python scripts/generate_workflow_docs.py`; CI's `--check` guards drift).
@@ -299,7 +196,7 @@ from the slow "download each ad" write:
   per ~100 listings, ~0.1–0.2 s/listing). Uses the **session pooler** (`connect_session()`) for
   prepared statements. New listings land with `property_id` NULL and become **singletons** via
   `recompute_property_stats`'s straggler-attach (the hot write path carries no matching at all;
-  grouping is the dedup engine's job, rule #15). A gone fetch flips that listing inactive +
+  grouping is out-of-band and operator-ordered, rule #15). A gone fetch flips that listing inactive +
   dequeues it; a transient error bumps
   the queue row's `attempts` (given up after 5) and stays queued. Records `run_type='detail'`,
   `index_pages=0`. The queue persists across runs, so a bounded run never loses work; a
@@ -377,10 +274,6 @@ Lanes shipped so far:
 - **Per-source drain-disable knob** (`realtime_drain_disabled_sources`, PR #694) — the bounded
   detail drain skips sources listed here, letting a portal be pulled from the real-time lane
   without touching its GH Actions cadence.
-- **Bounded live forensics** (`--compare-budget`, PR #695) — the worker can run a small,
-  wall-clock-bounded slice of the forensic visual-compare step inline instead of waiting for
-  the batch warmer; the warmer itself was NOT retired despite an earlier commit's title —
-  PRs #725/#728/#735/#741/#757/#762 continued actively building it well after.
 - **sreality count-probe lane** (migration 270, PR #696) — a lightweight per-`(category_main,
   category_type)` count check that detects a market-wide count swing faster than a full index
   walk would, feeding the completeness/delisting rails.
@@ -393,13 +286,6 @@ Lanes shipped so far:
   over the transaction pooler and stranded within minutes of deploy (PR #717 fixed it with the
   lease-row CAS pattern — see the `database` skill's connection-modes section; don't reintroduce
   a session advisory lock on any pooled connection).
-- **Real-time dedup lane** (PR #702) — lets a cross-portal merge complete within minutes of both
-  sides landing, rather than waiting for the hourly dirty-drain cron.
-- **Geo scan-state lane** (PR #715) — a geo-dedup analogue of the street dirty path, plus a geo
-  cron budget and an imageless-candidate eval sweep.
-- **Unified real-time geo+street dirty path** (PR #713) — the street dirty-drain and the geo
-  scan-state lane were merged into one queue / one decision brain rather than two parallel dirty
-  paths.
 - **Estimation job lane** (migration 349, Wave 1 W1-3 / Phase 1 Amendment A10) — moves agent +
   deterministic rent-estimate EXECUTION off the FastAPI request threadpool (a 240 s agent run
   used to pin a Starlette token; a deploy SIGTERM killed paid runs mid-flight). Claims one
@@ -412,15 +298,17 @@ Lanes shipped so far:
   `POST /estimations` route rows to the lane instead of an in-process BackgroundTask, so the
   cutover (and rollback) is one setting, no deploy.
 
-## Publication gate and pipeline verification (migrations 273–274)
+## Pipeline verification (migration 274)
 
-**A new property is hidden from Browse, the map, Stats, the agent, and Watchdog until it has
-been dedup-evaluated** — `properties.published_at` (migration 273), gated by
-`dedup_publication_gate_enabled` (seeded `false`; flip only with the operator's sign-off, since
-it changes what's visible market-wide). `publication_gate_enabled()` is `SECURITY DEFINER`; if
-you're referencing it (or any future gate function) from a view's `WHERE`, wrap it in a scalar
-subquery, not a bare call — see the `database` skill's InitPlan gotcha, migration 275, which
-fixed exactly this on `properties_public` and broke Browse market-wide until it did.
+**No publication gate any more.** Migration 273 used to hide a new property from Browse, the
+map, Stats, the agent and Watchdog until something stamped `properties.published_at` — and the
+only stamper for ordinary properties was the dedup engine, so the gate died with it in the
+2026-08 cutoff (rule #15). It was flipped inert first (`dedup_publication_gate_enabled=false`),
+then removed in code and views; `published_at` / `publish_reason` are frozen as a historical
+record. Watchdog's "new property" cursor is anchored on `listings.first_seen_at` again. Keep the
+one durable lesson: a `SECURITY DEFINER` function referenced from a view's `WHERE` must be
+wrapped in a scalar subquery, not called bare — see the `database` skill's InitPlan gotcha
+(migration 275 fixed exactly that on `properties_public` after it broke Browse market-wide).
 
 **Pipeline verification harness** (`scripts/verify_pipeline.py`, migration 274, PR #703) — a
 scheduled job that writes one `pipeline_check_results` row per health metric (`ok`/`warn`/`fail`)
@@ -429,7 +317,11 @@ and is the origin of the notification system's third producer, `system_health` (
 polls. A `SECURITY DEFINER` dead-man-switch pg_cron function fires if the hourly job itself stops
 running (the migration-136 exception-guarded pg_cron pattern). This exists because the pipeline
 stalled silently for two days in 2026-07 (Anthropic credit exhaustion, 38k+ failed LLM calls) and
-the only alarm was a failing GH Actions cron the operator happened to miss.
+the only alarm was a failing GH Actions cron the operator happened to miss. The live checks are
+`llm_errors`, `llm_liveness`, `llm_burn_rate`, `db_saturation`, `worker_liveness` and
+`dual_write_parity`; the six dedup-specific checks (street/geo debt, eligibility funnel, merge
+latency, engine health, merge-precision sample) went with the engine, along with their
+`pipeline_check_thresholds` rows.
 
 ## Reading the logs
 

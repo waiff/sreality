@@ -176,19 +176,27 @@ incident history: `docs/architecture.md` § Architectural rules.
     `score_listing_condition` in one latest-wins transaction. Filter on the derived columns, not the
     coarse `condition_assessment`.
 15. **Multi-portal listings sit behind a thin `properties` parent (migration 091); grouping is out-of-band,
-    never inline at insert (new rows get a singleton property).** Two eligibility paths feed **one**
-    `resolve_pair` decision tree (pHash fast-path → CLIP cosine tier → forensic visual compare →
-    floor/site-plan gate): **apartments** key on **street + disposition**, plus an operator-gated
-    geo-cell+disposition candidate rung for street-less byt (`dedup_byt_geo_enabled`, OFF by default);
-    **single-dwelling house / land /
-    commercial** key on **geo-proximity** (its OWN scheduled run, `dedup_geo_enabled`). A geo/visual signal
-    never auto-merges on proximity alone — the forensic **High** verdict is the sole auto-merge gate; the
-    floor-plan gate only ever adds conservatism (`different_layout` dismiss; both-2D `inconclusive` queues;
-    `no_2d_plan` / one-sided → proceed). `db.mark_inactive` / `active_count` are source-scoped; category
-    compatibility is enforced at merge (sale≠rent, flat≠house — except the one sanctioned **dům↔komerční**
-    cross-type); merges are reversible (`property_merge_events` / `unmerge_group`). Applies to anything
-    touching `listings.property_id`, the dedup engine, or `properties` rollups. Full engine spec:
-    `docs/architecture.md` § rule 15 (+ `docs/design/multi-portal-dedup.md`, `dedup-byt-precision.md`, `clip-visual-embeddings.md`).
+    never inline at insert (new rows get a singleton property).** What is LIVE today is only the **link
+    mechanics**: `toolkit/property_identity.py` (`merge_properties` / `unmerge_group` /
+    `split_property_to_singletons`) is the single merge chokepoint — it re-points `listings.property_id`,
+    soft-retires the loser (`properties.status='merged_away'`), logs `property_merge_events` (so unmerge is
+    a deterministic replay), carries operator state (rule #18) + the deal pipeline (rule #22) onto the
+    survivor, re-syncs the browse read model, and enforces **category compatibility**
+    (`room_taxonomy.category_main_compatible`: sale≠rent, flat≠house — except the one sanctioned
+    **dům↔komerční** cross-type). `db.mark_inactive` / `active_count` are source-scoped. Merges are ordered
+    **only by the operator** (Browse mergeMode → `POST /properties/merge`; ledger + unmerge under
+    `/properties/merges*`); asset links (migration 224) still link different units in one building without
+    collapsing them.
+    **The automatic decision engine was REMOVED wholesale (2026-08, the "NEW DEDUP" cutoff)** — no
+    pHash/CLIP/vision decision path, no dedup queues or scheduled dedup runs, no publication gate; nothing
+    auto-merges, and duplicates accumulate in Browse until the replacement ships. Signal producers stay
+    live (image pHash, CLIP tagging + embeddings, the `/labeling` label store). The replacement is being
+    rebuilt **simulation-first**: `docs/design/new-dedup/PROGRAM.md` (waves, gates, decisions ledger) with
+    `docs/design/new-dedup/CUTOFF.md` recording exactly what was cut. **Never resurrect or consult the
+    removed engine, its comments, or its design docs** (they live only in git history + branch
+    `backup/pre-new-dedup-2026-08`); the operator owns all merge/no-merge logic. Applies to anything
+    touching `listings.property_id`, `properties` rollups, or the merge chokepoint. Fuller rationale:
+    `docs/architecture.md` § rule 15.
 16. **Watchdog + Browse share one definition of "matches"** (`_shared_filter_where` + `_city_quality_clauses`).
     `notification_dispatches` is the unified, property-grain, append-only event table with **two producers**
     (`watchdog` + `collection_monitor`), a per-event `dedupe_key` (`:new:` once-ever, `:price_drop:{snapshot_id}`
