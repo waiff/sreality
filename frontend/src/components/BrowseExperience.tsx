@@ -26,11 +26,13 @@ import {
   useMapSplitFraction,
   useMapCollapsed,
   useCardImageLarge,
+  useGrainNotice,
 } from '@/lib/browseLayout';
 import { FilterSidebar } from '@/components/Filters';
 import ListingTable from '@/components/ListingTable';
 import ListingCards from '@/components/ListingCards';
 import BrowseStatsView from '@/components/BrowseStats';
+import RowGrainNotice from '@/components/RowGrainNotice';
 import type { AnchorPoint, MapFlyToCommand } from '@/components/ListingMap';
 import type { MapySuggestion } from '@/lib/maps';
 import { fetchDatasets, fetchGrowth, fetchSeries, priceStatsKeys } from '@/lib/priceStats';
@@ -259,6 +261,7 @@ export default function BrowseExperience({
   const mapSplit = useMapSplitFraction();
   const mapCollapsed = useMapCollapsed();
   const cardImageLarge = useCardImageLarge();
+  const grainNotice = useGrainNotice();
   /* The map is only present on the Listings tab AND only when not collapsed —
    * the single source of truth the data-fetch gates and the layout both read,
    * so they can never disagree. */
@@ -680,6 +683,10 @@ export default function BrowseExperience({
             }
             onClearBounds={filters.bounds ? () => view.setBounds(null) : undefined}
             onCreateWatchdog={f.watchdog ? () => setWatchdogModalOpen(true) : undefined}
+          />
+          <RowGrainNotice
+            portalMirror={portalMirrorSource(filters)}
+            notice={grainNotice}
           />
           {f.presetBar && (
             <div className="mt-3">

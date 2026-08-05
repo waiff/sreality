@@ -1,6 +1,6 @@
 import { act, renderHook } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { readFlag, useMapCollapsed } from './browseLayout';
+import { readFlag, useGrainNotice, useMapCollapsed } from './browseLayout';
 
 const KEY = 'sreality.browse.mapCollapsed';
 
@@ -36,6 +36,39 @@ describe('useMapCollapsed', () => {
     localStorage.setItem(KEY, '1');
     const { result } = renderHook(() => useMapCollapsed());
     expect(result.current.value).toBe(true);
+  });
+});
+
+describe('useGrainNotice', () => {
+  const MIRROR = 'sreality.browse.grainNoticeDismissed.mirror';
+  const MERGED = 'sreality.browse.grainNoticeDismissed.merged';
+
+  beforeEach(() => localStorage.clear());
+  afterEach(() => localStorage.clear());
+
+  it('shows both variants until each is dismissed', () => {
+    const { result } = renderHook(() => useGrainNotice());
+    expect(result.current.dismissed('mirror')).toBe(false);
+    expect(result.current.dismissed('merged')).toBe(false);
+  });
+
+  /* The whole point of two keys: the merged note is on the default view and
+   * gets dismissed early, but the mirror note explains the OPPOSITE row grain
+   * and must still appear the first time a single portal is picked. */
+  it('keeps the two variants independent', () => {
+    const { result } = renderHook(() => useGrainNotice());
+    act(() => result.current.dismiss('merged'));
+    expect(result.current.dismissed('merged')).toBe(true);
+    expect(result.current.dismissed('mirror')).toBe(false);
+    expect(localStorage.getItem(MERGED)).toBe('1');
+    expect(localStorage.getItem(MIRROR)).toBe(null);
+  });
+
+  it('reads persisted dismissals on mount', () => {
+    localStorage.setItem(MIRROR, '1');
+    const { result } = renderHook(() => useGrainNotice());
+    expect(result.current.dismissed('mirror')).toBe(true);
+    expect(result.current.dismissed('merged')).toBe(false);
   });
 });
 

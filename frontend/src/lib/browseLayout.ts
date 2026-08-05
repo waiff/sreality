@@ -24,6 +24,7 @@ const SIDEBAR_KEY = 'sreality.browse.sidebarWidth';
 const MAP_SPLIT_KEY = 'sreality.browse.mapSplitFraction';
 const MAP_COLLAPSED_KEY = 'sreality.browse.mapCollapsed';
 const CARD_IMAGE_LARGE_KEY = 'sreality.browse.cardImageLarge';
+const GRAIN_NOTICE_KEY_PREFIX = 'sreality.browse.grainNoticeDismissed.';
 
 export const SIDEBAR_DEFAULT = 320;
 export const SIDEBAR_MIN = 240;
@@ -168,3 +169,24 @@ export const useMapCollapsed = (): PersistedFlag =>
  * different in one view than the other. Default false (today's size). */
 export const useCardImageLarge = (): PersistedFlag =>
   usePersistedFlag(CARD_IMAGE_LARGE_KEY, false);
+
+/* Which of the two row-grain explanations the operator has already read and
+ * dismissed. Tracked SEPARATELY per variant: they say opposite things ("rows
+ * are one portal's listings" vs "rows are one merged property"), so dismissing
+ * the one you see every day must not silently suppress the other the first
+ * time you land on it. */
+export type GrainVariant = 'mirror' | 'merged';
+
+export interface GrainNoticeState {
+  dismissed: (v: GrainVariant) => boolean;
+  dismiss: (v: GrainVariant) => void;
+}
+
+export function useGrainNotice(): GrainNoticeState {
+  const mirror = usePersistedFlag(`${GRAIN_NOTICE_KEY_PREFIX}mirror`, false);
+  const merged = usePersistedFlag(`${GRAIN_NOTICE_KEY_PREFIX}merged`, false);
+  return {
+    dismissed: (v) => (v === 'mirror' ? mirror.value : merged.value),
+    dismiss: (v) => (v === 'mirror' ? mirror : merged).set(true),
+  };
+}
