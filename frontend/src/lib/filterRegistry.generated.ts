@@ -949,7 +949,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "type": "string_list",
       "pg_column": "source",
       "default": null,
-      "description": "Restrict the cohort to listings from one or more source portals (`listings.source`): sreality, bazos, idnes, maxima, ceskereality, bezrealitky, mmreality, remax. A listing matches if its source is in the list. Empty list / null = all portals.",
+      "description": "Restrict the cohort to one or more source portals: sreality, bazos, idnes, maxima, ceskereality, bezrealitky, mmreality, remax, realitymix. The semantic is IS LISTED ON: a property matches if ANY of its listings is from a portal in the list, so a property advertised on several portals matches under each of them. Empty list / null = all portals. NOTE for query builders: `pg_column` is the LISTING-grain answer and is only correct against a listing-grain relation. On the property-grain Browse read models `source` is the trust-ranked representative child's portal, which is a different question and hides 10-22 percent of each portal's properties; those relations carry `all_sources` / `active_sources` arrays instead (migration 371) and must be matched with array overlap, not equality.",
       "category": "Property",
       "ui_control": "multiselect",
       "agendas": [

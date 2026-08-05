@@ -18,6 +18,7 @@ import {
   effectiveSort,
   isPortalMirror,
   keysetTiebreak,
+  portalFilterColumn,
   matchesDistricts,
   parseSort,
   portalMirrorSource,
@@ -392,5 +393,38 @@ describe('portal-mirror mode selection', () => {
   it('keeps portal_sort_key out of the user-selectable sorts, so no URL can pin it', () => {
     /* It is derived from the filter state, never round-tripped through ?sort=. */
     expect(parseSort('-portal_sort_key')).toEqual(DEFAULT_SORT);
+  });
+});
+
+describe('portalFilterColumn — "is listed on X", not "its best record is from X"', () => {
+  const f = (portals: string[], status: 'any' | 'active' | 'inactive' = 'any') =>
+    ({ ...DEFAULT_FILTERS, portals, status });
+
+  it('is null when no portal is selected, so the clause is omitted entirely', () => {
+    expect(portalFilterColumn(DEFAULT_FILTERS)).toBeNull();
+  });
+
+  it('uses the listing\'s own `source` on the single-portal mirror', () => {
+    expect(portalFilterColumn(f(['bazos']))).toBe('source');
+    expect(portalFilterColumn(f(['bazos'], 'active'))).toBe('source');
+  });
+
+  it('uses the property-grain arrays for >=2 portals — never `source`', () => {
+    /* `source` is the trust-ranked REPRESENTATIVE child there; using it is the
+     * bug that hid 22% of idnes properties behind a sreality sibling. */
+    expect(portalFilterColumn(f(['bazos', 'sreality']))).toBe('all_sources');
+    expect(portalFilterColumn(f(['bazos', 'sreality'], 'active'))).toBe('active_sources');
+  });
+
+  it('tracks the status filter, matching browse_stats_properties active_only_filter', () => {
+    expect(portalFilterColumn(f(['a', 'b'], 'active'))).toBe('active_sources');
+    expect(portalFilterColumn(f(['a', 'b'], 'inactive'))).toBe('all_sources');
+    expect(portalFilterColumn(f(['a', 'b'], 'any'))).toBe('all_sources');
+  });
+
+  it('never returns an array column for the mirror, whose rows have no arrays', () => {
+    for (const st of ['any', 'active', 'inactive'] as const) {
+      expect(portalFilterColumn(f(['idnes'], st))).toBe('source');
+    }
   });
 });

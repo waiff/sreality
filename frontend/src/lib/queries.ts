@@ -226,6 +226,31 @@ export const keysetTiebreak = (f: ListingFilters): string =>
  * `portal_date desc nulls last, discovery_seq desc nulls last`, verified
  * order-identical to that pair. Every other sort field the UI offers exists on
  * the feed with listing-grain semantics and is passed through untouched. */
+/* Which column answers "is this on portal X" for the relation this filter set
+ * will be applied to — null when no portal is selected.
+ *
+ * `source` (listing grain, single-portal mirror): the row IS one portal's
+ * listing, so its own source is exactly the question.
+ *
+ * `all_sources` / `active_sources` (property grain, migration 371): on
+ * browse_list / properties_map_mv, `source` is only the trust-ranked
+ * REPRESENTATIVE child's portal. Filtering on it answers "whose best record is
+ * from X", not "is listed on X" — which silently hid 23,229 of the 105,050
+ * properties holding a live idnes listing (22%), 19% ceskereality and
+ * realitymix, 11% bazos (measured live 2026-08-05). The arrays are the honest
+ * answer and are matched with overlap (`&&`), not equality.
+ *
+ * The active/all split tracks the status filter for the same reason
+ * browse_stats_properties branches on active_only_filter: an active-only cohort
+ * must not match a property whose only listing on that portal is long dead. */
+export const portalFilterColumn = (
+  f: ListingFilters,
+): 'source' | 'all_sources' | 'active_sources' | null => {
+  if (!f.portals.length) return null;
+  if (isPortalMirror(f)) return 'source';
+  return f.status === 'active' ? 'active_sources' : 'all_sources';
+};
+
 export const effectiveSort = (f: ListingFilters, sort: SortSpec): SortSpec =>
   isPortalMirror(f) && sort.field === 'first_seen_at'
     ? { field: 'portal_sort_key', direction: sort.direction }
@@ -398,7 +423,32 @@ const applyFilters = <T>(q: T, f: ListingFilters): T => {
     lte: (c: string, v: unknown) => typeof r;
     in:  (c: string, v: readonly unknown[]) => typeof r;
     or:  (q: string) => typeof r;
+    overlaps: (c: string, v: readonly unknown[]) => typeof r;
   };
+  /* Portal filter — hand-coded (removed from the registry auto-dispatch in
+   * registryQueryBuilder.ts) because the right COLUMN depends on the grain of
+   * the relation this is being applied to, which the dispatcher can't see.
+   *
+   * Listing grain (single-portal mirror): the row IS one portal's listing, so
+   * its own `source` is exactly the question being asked.
+   *
+   * Property grain (browse_list / properties_map_mv): `source` is only the
+   * trust-ranked REPRESENTATIVE child's portal. Filtering on it answers "whose
+   * best record is from X", not "is listed on X" — which silently hid 23,229 of
+   * the 105,050 properties with a live idnes listing (22%), 19% for
+   * ceskereality and realitymix, 11% for bazos (live, 2026-08-05). Migration 371
+   * adds the honest answer as arrays; `&&` is "the two arrays intersect".
+   *
+   * active_sources vs all_sources tracks the status filter, exactly as
+   * browse_stats_properties does with active_only_filter — otherwise an
+   * active-only cohort would match a property whose only listing on that portal
+   * is long dead. */
+  const portalCol = portalFilterColumn(f);
+  if (portalCol) {
+    r = portalCol === 'source'
+      ? r.in(portalCol, f.portals)
+      : r.overlaps(portalCol, f.portals);
+  }
   if (f.status === 'active') r = r.eq('is_active', true);
   else if (f.status === 'inactive') r = r.eq('is_active', false);
   /* Days-ago ranges. min = most recent allowed (so last_seen >= now()
