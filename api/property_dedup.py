@@ -999,12 +999,18 @@ def _phash_audit_chunk(
                ta.logical_tag, ta.fine_tag, ta.confidence, ta.render_score,
                ib.id, ib.sreality_url, ib.storage_path,
                tb.logical_tag, tb.fine_tag, tb.confidence, tb.render_score,
-               bit_count((ia.phash # ib.phash)::bit(64)) AS hamming
+               bit_count((ia.phash # ib.phash)::bit(64)) AS hamming,
+               la.source, la.source_id_native, lb.source, lb.source_id_native
         -- Join images on the surrogate listing_id (NOT NULL), never the post-Gate-2
         -- possibly-NULL sreality_id — so non-sreality pairs' photos still render.
         FROM scoped s
         JOIN images ia ON ia.listing_id = s.left_listing_id AND ia.phash IS NOT NULL
         JOIN images ib ON ib.listing_id = s.right_listing_id AND ib.phash IS NOT NULL
+        -- (source, source_id_native) is the portal-agnostic natural key (never NULL,
+        -- unlike legacy sreality_id) — lets the UI badge/link every image regardless
+        -- of portal or Gate-2 identity status.
+        JOIN listings la ON la.id = s.left_listing_id
+        JOIN listings lb ON lb.id = s.right_listing_id
         LEFT JOIN LATERAL (
             SELECT t.logical_tag, t.fine_tag, t.confidence, t.render_score
             FROM image_clip_tags t
@@ -1024,6 +1030,83 @@ def _phash_audit_chunk(
         join_params,
     )
     return cur.fetchall()
+
+
+def _phash_audit_scope(
+    cur: Any,
+    *,
+    category_main: str | None,
+    outcome: str | None,
+    training_only: bool,
+    training_label: str | None,
+    training_exclude: bool,
+) -> tuple[str, dict[str, Any]] | None:
+    """The dedup_pair_audit WHERE scope shared by phash_audit and
+    phash_hamming_histogram — category/outcome plus the training-set narrowing (see
+    phash_audit's docstring for training_only/training_label/training_exclude
+    semantics). Returns None when a training filter narrows to an empty training set
+    (nothing to scan, not worth a query)."""
+    scope_clauses: list[str] = []
+    scope_params: dict[str, Any] = {}
+    if category_main is not None:
+        scope_clauses.append("a.category_main = %(category_main)s")
+        scope_params["category_main"] = category_main
+    if outcome is not None:
+        scope_clauses.append("a.outcome = %(outcome)s")
+        scope_params["outcome"] = outcome
+    if training_exclude:
+        # Unlike the inclusion case below, the SCOPE check alone is already exact
+        # here — trained_listing_ids is "every listing_id that owns at least one
+        # trained image", so excluding those listings guarantees neither remaining
+        # image can possibly be a trained one. No post-join re-check needed (see
+        # _phash_audit_chunk: training_only/training_label stay False here, so it
+        # never adds one). Also no "narrows to a tiny set" efficiency win the
+        # inclusion branch gets — the training set is tiny, so excluding it barely
+        # shrinks a huge population — but a small NOT-IN-style array check is cheap
+        # regardless, and an empty training set means nothing to exclude at all.
+        # Keyed on the surrogate listing_id (NOT NULL), never the post-Gate-2
+        # possibly-NULL sreality_id, on BOTH the images lookup and the audit filter.
+        cur.execute(
+            "SELECT DISTINCT i.listing_id FROM images i "
+            "JOIN image_training_examples te ON te.image_id = i.id "
+            "WHERE i.listing_id IS NOT NULL",
+        )
+        trained_listing_ids = [r[0] for r in cur.fetchall()]
+        if trained_listing_ids:
+            scope_clauses.append(
+                "NOT (a.left_listing_id = ANY(%(trained_listing_ids)s)"
+                " OR a.right_listing_id = ANY(%(trained_listing_ids)s))",
+            )
+            scope_params["trained_listing_ids"] = trained_listing_ids
+    elif training_only or training_label:
+        # The training set is tiny (an operator hand-picks it) next to
+        # dedup_pair_audit's population — without this, almost every chunk would
+        # come back empty post-join, forcing the frontend to scan the whole
+        # ceiling for a handful of rows. Narrowing the SCOPE to only the listings
+        # that own a (matching) trained image keeps a chunk's odds of matching
+        # close to 1, same as any other scope filter (category_main/outcome)
+        # already does. Keyed on the surrogate listing_id (NOT NULL), never the
+        # post-Gate-2 possibly-NULL sreality_id.
+        lookup_sql = (
+            "SELECT DISTINCT i.listing_id FROM images i "
+            "JOIN image_training_examples te ON te.image_id = i.id "
+            "WHERE i.listing_id IS NOT NULL"
+        )
+        lookup_params: dict[str, Any] = {}
+        if training_label:
+            lookup_sql += " AND te.label = %(training_label)s"
+            lookup_params["training_label"] = training_label
+        cur.execute(lookup_sql, lookup_params)
+        trained_listing_ids = [r[0] for r in cur.fetchall()]
+        if not trained_listing_ids:
+            return None
+        scope_clauses.append(
+            "(a.left_listing_id = ANY(%(trained_listing_ids)s)"
+            " OR a.right_listing_id = ANY(%(trained_listing_ids)s))",
+        )
+        scope_params["trained_listing_ids"] = trained_listing_ids
+    scope_where = ("WHERE " + " AND ".join(scope_clauses)) if scope_clauses else ""
+    return scope_where, scope_params
 
 
 def phash_audit(
@@ -1072,72 +1155,19 @@ def phash_audit(
     comes back null, since a single chunk can legitimately return fewer than `limit`
     rows while more remains to scan (an infinite-scroll page-size check can't tell
     "short because sparse" from "short because done" apart on its own)."""
-    scope_clauses: list[str] = []
-    scope_params: dict[str, Any] = {}
-    if category_main is not None:
-        scope_clauses.append("a.category_main = %(category_main)s")
-        scope_params["category_main"] = category_main
-    if outcome is not None:
-        scope_clauses.append("a.outcome = %(outcome)s")
-        scope_params["outcome"] = outcome
     with conn.cursor() as cur:
-        if training_exclude:
-            # Unlike the inclusion case below, the SCOPE check alone is already exact
-            # here — trained_listing_ids is "every listing_id that owns at least one
-            # trained image", so excluding those listings guarantees neither remaining
-            # image can possibly be a trained one. No post-join re-check needed (see
-            # _phash_audit_chunk: training_only/training_label stay False here, so it
-            # never adds one). Also no "narrows to a tiny set" efficiency win the
-            # inclusion branch gets — the training set is tiny, so excluding it barely
-            # shrinks a huge population — but a small NOT-IN-style array check is cheap
-            # regardless, and an empty training set means nothing to exclude at all.
-            # Keyed on the surrogate listing_id (NOT NULL), never the post-Gate-2
-            # possibly-NULL sreality_id, on BOTH the images lookup and the audit filter.
-            cur.execute(
-                "SELECT DISTINCT i.listing_id FROM images i "
-                "JOIN image_training_examples te ON te.image_id = i.id "
-                "WHERE i.listing_id IS NOT NULL",
-            )
-            trained_listing_ids = [r[0] for r in cur.fetchall()]
-            if trained_listing_ids:
-                scope_clauses.append(
-                    "NOT (a.left_listing_id = ANY(%(trained_listing_ids)s)"
-                    " OR a.right_listing_id = ANY(%(trained_listing_ids)s))",
-                )
-                scope_params["trained_listing_ids"] = trained_listing_ids
-        elif training_only or training_label:
-            # The training set is tiny (an operator hand-picks it) next to
-            # dedup_pair_audit's population — without this, almost every chunk would
-            # come back empty post-join, forcing the frontend to scan the whole
-            # ceiling for a handful of rows. Narrowing the SCOPE to only the listings
-            # that own a (matching) trained image keeps a chunk's odds of matching
-            # close to 1, same as any other scope filter (category_main/outcome)
-            # already does. Keyed on the surrogate listing_id (NOT NULL), never the
-            # post-Gate-2 possibly-NULL sreality_id.
-            lookup_sql = (
-                "SELECT DISTINCT i.listing_id FROM images i "
-                "JOIN image_training_examples te ON te.image_id = i.id "
-                "WHERE i.listing_id IS NOT NULL"
-            )
-            lookup_params: dict[str, Any] = {}
-            if training_label:
-                lookup_sql += " AND te.label = %(training_label)s"
-                lookup_params["training_label"] = training_label
-            cur.execute(lookup_sql, lookup_params)
-            trained_listing_ids = [r[0] for r in cur.fetchall()]
-            if not trained_listing_ids:
-                return {
-                    "data": [], "returned": 0, "scanned_pairs": 0,
-                    "scan_cap": _PHASH_AUDIT_SCAN_CEILING, "scanned_so_far": 0,
-                    "next_scan_offset": None,
-                }
-            scope_clauses.append(
-                "(a.left_listing_id = ANY(%(trained_listing_ids)s)"
-                " OR a.right_listing_id = ANY(%(trained_listing_ids)s))",
-            )
-            scope_params["trained_listing_ids"] = trained_listing_ids
-
-        scope_where = ("WHERE " + " AND ".join(scope_clauses)) if scope_clauses else ""
+        scope = _phash_audit_scope(
+            cur, category_main=category_main, outcome=outcome,
+            training_only=training_only, training_label=training_label,
+            training_exclude=training_exclude,
+        )
+        if scope is None:
+            return {
+                "data": [], "returned": 0, "scanned_pairs": 0,
+                "scan_cap": _PHASH_AUDIT_SCAN_CEILING, "scanned_so_far": 0,
+                "next_scan_offset": None,
+            }
+        scope_where, scope_params = scope
         cur.execute(
             f"SELECT count(*) FROM dedup_pair_audit a {scope_where}", scope_params,
         )
@@ -1177,14 +1207,15 @@ def phash_audit(
                 "left_image": {
                     "image_id": r[10], "sreality_url": r[11], "storage_path": r[12],
                     "room_type": r[13], "fine_tag": r[14], "confidence": r[15],
-                    "render_score": r[16],
+                    "render_score": r[16], "source": r[25], "source_id_native": r[26],
                 },
                 "right_image": {
                     "image_id": r[17], "sreality_url": r[18], "storage_path": r[19],
                     "room_type": r[20], "fine_tag": r[21], "confidence": r[22],
-                    "render_score": r[23],
+                    "render_score": r[23], "source": r[27], "source_id_native": r[28],
                 },
                 "hamming": int(r[24]),
+                "hamming_merge_bar": PHASH_IDENTICAL_MAX,
             }
             for r in rows
         ],
@@ -1193,6 +1224,126 @@ def phash_audit(
         "scan_cap": _PHASH_AUDIT_SCAN_CEILING,
         "scanned_so_far": offset,
         "next_scan_offset": next_scan_offset,
+    }
+
+
+def _phash_audit_chunk_histogram(
+    cur: Any, *, scope_where: str, scope_params: dict[str, Any],
+    room_types: list[str] | None, training_only: bool, training_label: str | None,
+    chunk_offset: int, chunk_size: int, bucket_width: int,
+) -> dict[int, dict[str, int]]:
+    """Same scope/join as `_phash_audit_chunk`, but GROUP BY Hamming bucket instead of
+    returning rows — the per-chunk aggregate behind the threshold-tuning histogram.
+    Reuses the bounded chunk-on-dedup_pair_audit mechanism (never an unrestricted image
+    cross-join) so this costs the same as one page of the row-level audit."""
+    join_params: dict[str, Any] = {
+        **scope_params, "off": chunk_offset, "chunk": chunk_size, "width": bucket_width,
+    }
+    room_clause = ""
+    if room_types:
+        room_clause = (
+            " AND ta.logical_tag = ANY(%(room_types)s)"
+            " AND tb.logical_tag = ANY(%(room_types)s)"
+            " AND ta.logical_tag = tb.logical_tag"
+        )
+        join_params["room_types"] = list(room_types)
+    training_clause = ""
+    if training_only or training_label:
+        label_match = " AND te.label = %(training_label)s" if training_label else ""
+        training_clause = (
+            f" AND (EXISTS (SELECT 1 FROM image_training_examples te WHERE te.image_id = ia.id{label_match})"
+            f"   OR EXISTS (SELECT 1 FROM image_training_examples te WHERE te.image_id = ib.id{label_match}))"
+        )
+        if training_label:
+            join_params["training_label"] = training_label
+    cur.execute(
+        f"""
+        WITH scoped AS (
+            SELECT a.id, a.left_listing_id, a.right_listing_id, a.outcome
+            FROM dedup_pair_audit a
+            {scope_where}
+            ORDER BY a.run_at DESC
+            OFFSET %(off)s LIMIT %(chunk)s
+        )
+        SELECT (bit_count((ia.phash # ib.phash)::bit(64)) / %(width)s) * %(width)s AS bucket,
+               count(*) FILTER (WHERE s.outcome = 'merged') AS merged,
+               count(*) FILTER (WHERE s.outcome = 'dismissed') AS dismissed
+        FROM scoped s
+        JOIN images ia ON ia.listing_id = s.left_listing_id AND ia.phash IS NOT NULL
+        JOIN images ib ON ib.listing_id = s.right_listing_id AND ib.phash IS NOT NULL
+        LEFT JOIN LATERAL (
+            SELECT t.logical_tag FROM image_clip_tags t
+            WHERE t.image_id = ia.id ORDER BY t.tagged_at DESC LIMIT 1
+        ) ta ON true
+        LEFT JOIN LATERAL (
+            SELECT t.logical_tag FROM image_clip_tags t
+            WHERE t.image_id = ib.id ORDER BY t.tagged_at DESC LIMIT 1
+        ) tb ON true
+        WHERE true {room_clause} {training_clause}
+        GROUP BY 1
+        """,
+        join_params,
+    )
+    return {int(r[0]): {"merged": int(r[1]), "dismissed": int(r[2])} for r in cur.fetchall()}
+
+
+def phash_hamming_histogram(
+    conn: psycopg.Connection,
+    *,
+    category_main: str | None = None,
+    outcome: str | None = None,
+    room_types: list[str] | None = None,
+    training_only: bool = False,
+    training_label: str | None = None,
+    training_exclude: bool = False,
+    bucket_width: int = 2,
+) -> dict[str, Any]:
+    """Merged-vs-dismissed pair counts per Hamming-distance bucket, across the exact
+    same scope/scan-ceiling `phash_audit` uses — the aggregate view for judging whether
+    PHASH_IDENTICAL_MAX (the merge bar, currently 6) should move, without eyeballing
+    pairs one at a time. A bucket with a healthy merged share right at/below the bar and
+    a rising dismissed share past it is exactly what "the bar is calibrated right"
+    looks like; a bucket with mostly-merged pairs sitting above the bar is evidence it
+    could safely widen. Internally loops the same bounded chunk-on-dedup_pair_audit
+    mechanism `phash_audit` paginates over (server-side here, since an aggregate has no
+    natural page to stop at), so total DB cost is the same scan-ceiling either way."""
+    with conn.cursor() as cur:
+        scope = _phash_audit_scope(
+            cur, category_main=category_main, outcome=outcome,
+            training_only=training_only, training_label=training_label,
+            training_exclude=training_exclude,
+        )
+        if scope is None:
+            return {"buckets": [], "scanned_pairs": 0, "scan_cap": _PHASH_AUDIT_SCAN_CEILING}
+        scope_where, scope_params = scope
+        cur.execute(f"SELECT count(*) FROM dedup_pair_audit a {scope_where}", scope_params)
+        scanned_pairs = int(cur.fetchone()[0])
+
+        ceiling = min(_PHASH_AUDIT_SCAN_CEILING, scanned_pairs)
+        totals: dict[int, dict[str, int]] = {}
+        offset = 0
+        while offset < ceiling:
+            window = min(_PHASH_AUDIT_CHUNK, ceiling - offset)
+            chunk_buckets = _phash_audit_chunk_histogram(
+                cur, scope_where=scope_where, scope_params=scope_params,
+                room_types=room_types,
+                training_only=training_only and not training_exclude,
+                training_label=None if training_exclude else training_label,
+                chunk_offset=offset, chunk_size=window, bucket_width=bucket_width,
+            )
+            for bucket, counts in chunk_buckets.items():
+                dst = totals.setdefault(bucket, {"merged": 0, "dismissed": 0})
+                dst["merged"] += counts["merged"]
+                dst["dismissed"] += counts["dismissed"]
+            offset += window
+
+    buckets = [
+        {"bucket_start": b, "bucket_end": b + bucket_width - 1, **counts}
+        for b, counts in sorted(totals.items())
+    ]
+    return {
+        "buckets": buckets, "scanned_pairs": scanned_pairs,
+        "scan_cap": _PHASH_AUDIT_SCAN_CEILING, "hamming_merge_bar": PHASH_IDENTICAL_MAX,
     }
 
 

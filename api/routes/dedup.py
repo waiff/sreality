@@ -406,6 +406,32 @@ def get_phash_audit(
     )
 
 
+@router.get("/phash-audit/histogram")
+def get_phash_audit_histogram(
+    category_main: str | None = None,
+    outcome: str | None = None,
+    room_types: str | None = Query(
+        default=None, description="CSV of CLIP logical tags — both images in a "
+        "counted pair must share the SAME tag, which must be one of these.",
+    ),
+    training_only: bool = Query(default=False),
+    training_label: str | None = Query(default=None),
+    training_exclude: bool = Query(default=False),
+    bucket_width: int = Query(default=2, ge=1, le=16),
+    conn: Any = Depends(deps.get_db_conn),
+    _: dict = Depends(deps.require_admin),
+) -> dict[str, Any]:
+    """Merged-vs-dismissed pair counts per Hamming-distance bucket — the aggregate
+    behind /phash-audit's threshold-tuning panel. Same scope filters as /phash-audit
+    itself; read-only, no engine/threshold change."""
+    types = [t for t in room_types.split(",") if t.strip()] if room_types else None
+    return dedup.phash_hamming_histogram(
+        conn, category_main=category_main, outcome=outcome, room_types=types,
+        training_only=training_only, training_label=training_label,
+        training_exclude=training_exclude, bucket_width=bucket_width,
+    )
+
+
 @router.get("/candidates")
 def get_candidates(
     status: str | None = "proposed",

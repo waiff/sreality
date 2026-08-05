@@ -64,7 +64,8 @@ class _FakeConn:
 
 
 def _join_row(detail: dict | None = None) -> tuple[Any, ...]:
-    # 25 columns matching phash_audit's join SELECT.
+    # 29 columns matching phash_audit's join SELECT (25 base + source/source_id_native
+    # per side, appended so existing column indices never shift).
     d = detail if detail is not None else {
         "stage": "visual", "reason": "visual_different", "verdict": "Low",
         "cosine": 0.86, "room_type": "kitchen", "phash_pairs": 0,
@@ -75,6 +76,7 @@ def _join_row(detail: dict | None = None) -> tuple[Any, ...]:
         1001, "https://x/a.jpg", None, "kitchen", "kitchen", 0.91, None,
         2002, "https://x/b.jpg", None, "kitchen", "kitchen", 0.88, None,
         9,
+        "sreality", "12345", "mmreality", "R987654",
     )
 
 
@@ -93,7 +95,11 @@ def test_hamming_range_passed_through_and_result_shaped() -> None:
         "image_id": 1001, "sreality_url": "https://x/a.jpg",
         "storage_path": None, "room_type": "kitchen",
         "fine_tag": "kitchen", "confidence": 0.91, "render_score": None,
+        "source": "sreality", "source_id_native": "12345",
     }
+    assert row["right_image"]["source"] == "mmreality"
+    assert row["right_image"]["source_id_native"] == "R987654"
+    assert row["hamming_merge_bar"] == dedup.PHASH_IDENTICAL_MAX
     assert out["scanned_pairs"] == 3
     assert out["returned"] == 1
 
@@ -352,3 +358,55 @@ def test_phash_audit_joins_images_on_the_surrogate_listing_id() -> None:
     assert "ia.listing_id = s.left_listing_id" in join_sql
     assert "ib.listing_id = s.right_listing_id" in join_sql
     assert "ia.sreality_id" not in join_sql and "ib.sreality_id" not in join_sql
+
+
+def test_phash_audit_joins_listings_for_the_portal_agnostic_natural_key() -> None:
+    # source/source_id_native is never NULL (unlike legacy sreality_id, which is NULL
+    # or a meaningless negative placeholder for most non-sreality-portal images) — the
+    # UI badge/link needs it per image, so the join must reach `listings`.
+    conn = _FakeConn(scanned=1, join_rows=[_join_row()])
+    dedup.phash_audit(conn, hamming_min=0, hamming_max=15)
+    join_sql, _ = conn.chunk_queries()[0]
+    assert "JOIN listings la ON la.id = s.left_listing_id" in join_sql
+    assert "JOIN listings lb ON lb.id = s.right_listing_id" in join_sql
+    assert "la.source, la.source_id_native, lb.source, lb.source_id_native" in join_sql
+
+
+def _histogram_bucket_row(bucket: int, merged: int, dismissed: int) -> tuple[Any, ...]:
+    return (bucket, merged, dismissed)
+
+
+def test_histogram_scopes_identically_to_phash_audit_and_sums_across_chunks() -> None:
+    conn = _FakeConn(
+        scanned=1000,
+        chunk_responses=[
+            [_histogram_bucket_row(4, 3, 1), _histogram_bucket_row(8, 1, 2)],
+            [_histogram_bucket_row(4, 2, 0)],
+        ],
+    )
+    out = dedup.phash_hamming_histogram(conn, category_main="byt", outcome="merged")
+    for s, params in conn.executed:
+        if "count(*) FROM dedup_pair_audit" in s or "WITH scoped AS" in s:
+            assert "a.category_main = %(category_main)s" in s
+            assert "a.outcome = %(outcome)s" in s
+            assert params["category_main"] == "byt"
+            assert params["outcome"] == "merged"
+    buckets = {b["bucket_start"]: b for b in out["buckets"]}
+    assert buckets[4] == {"bucket_start": 4, "bucket_end": 5, "merged": 5, "dismissed": 1}
+    assert buckets[8] == {"bucket_start": 8, "bucket_end": 9, "merged": 1, "dismissed": 2}
+    assert out["scanned_pairs"] == 1000
+    assert out["hamming_merge_bar"] == dedup.PHASH_IDENTICAL_MAX
+
+
+def test_histogram_returns_empty_buckets_when_nothing_scanned() -> None:
+    conn = _FakeConn(scanned=0)
+    out = dedup.phash_hamming_histogram(conn)
+    assert out["buckets"] == []
+    assert out["scanned_pairs"] == 0
+
+
+def test_histogram_training_only_with_no_trained_images_short_circuits() -> None:
+    conn = _FakeConn(scanned=2000, trained_listing_ids=[])
+    out = dedup.phash_hamming_histogram(conn, training_only=True)
+    assert out == {"buckets": [], "scanned_pairs": 0, "scan_cap": dedup._PHASH_AUDIT_SCAN_CEILING}
+    assert not any("WITH scoped AS" in s for s, _ in conn.executed)

@@ -19,16 +19,19 @@ import {
 } from '@/lib/queries';
 import {
   getPhashAudit,
+  getPhashAuditHistogram,
   setPhashNote,
   deletePhashNote,
   type PhashAuditRow,
   type PhashAuditImageRef,
+  type PhashHammingBucket,
   type TrainingExample,
 } from '@/lib/api';
 import { CATEGORY_MAIN_TABS } from '@/lib/categoryMainTabs';
 import { IMAGE_TAG_LABELS, FINE_TAG_KEYS, imageTagLabel } from '@/lib/imageTags';
 import { fmtRelative, fmtCount } from '@/lib/format';
 import { imageSrc } from '@/lib/imageUrl';
+import { listingCanonicalPath } from '@/lib/listingUrl';
 import type { ImagePublic } from '@/lib/types';
 
 /* /phash-audit — evidence for whether the pHash merge bar (Hamming <= 6, the hardcoded
@@ -310,6 +313,17 @@ export default function PhashAudit() {
         </p>
       )}
 
+      <HammingHistogram
+        outcome={outcome}
+        categoryMain={categoryMain}
+        roomTypes={roomTypes}
+        trainingOnly={trainingOnly}
+        trainingLabel={trainingLabel}
+        trainingExclude={trainingExclude}
+        currentMin={hammingMin}
+        currentMax={hammingMax}
+      />
+
       <div className="mt-4 flex flex-col gap-3">
         {list.isLoading ? (
           <p className="text-sm text-[var(--color-ink-3)]">Načítám…</p>
@@ -366,6 +380,114 @@ function Explainer() {
             distinctive rooms kitchen/bathroom). This page is read-only evidence —
             it doesn't change either.
           </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* Merged-vs-dismissed pair counts per Hamming-distance bucket — the aggregate view for
+ * judging whether the merge bar should move, instead of eyeballing pairs one at a time.
+ * Independent of hammingMin/hammingMax (those scope the ROW list below; this shows the
+ * whole distribution so the operator can pick a new range informed by where the
+ * merged/dismissed split actually shifts). Copper/brick match DedupBreakdown's met/unmet
+ * language — merged is what "met" means for a phash-driven pair. */
+function HammingHistogram({
+  outcome,
+  categoryMain,
+  roomTypes,
+  trainingOnly,
+  trainingLabel,
+  trainingExclude,
+  currentMin,
+  currentMax,
+}: {
+  outcome: string;
+  categoryMain: string;
+  roomTypes: string[];
+  trainingOnly: boolean;
+  trainingLabel: string;
+  trainingExclude: boolean;
+  currentMin: number;
+  currentMax: number;
+}) {
+  const q = useQuery({
+    queryKey: [
+      'phash-audit', 'histogram', outcome, categoryMain, roomTypes,
+      trainingOnly, trainingLabel, trainingExclude,
+    ],
+    queryFn: () =>
+      getPhashAuditHistogram({
+        category_main: categoryMain || undefined,
+        outcome: outcome || undefined,
+        room_types: roomTypes.length ? roomTypes : undefined,
+        training_only: trainingOnly || undefined,
+        training_label: trainingLabel || undefined,
+        training_exclude: trainingExclude || undefined,
+      }),
+    staleTime: 30_000,
+  });
+
+  const buckets: PhashHammingBucket[] = q.data?.buckets ?? [];
+  const mergeBar = q.data?.hamming_merge_bar;
+  const maxCount = Math.max(1, ...buckets.map((b) => b.merged + b.dismissed));
+
+  return (
+    <div className="mt-3 border border-[var(--color-rule)] rounded-[var(--radius-sm)] bg-[var(--color-paper)] p-3">
+      <div className="flex flex-wrap items-baseline justify-between gap-2 mb-2">
+        <span className="text-[0.62rem] uppercase tracking-[0.1em] text-[var(--color-ink-4)]">
+          Sloučeno / zamítnuto podle Hammingovy vzdálenosti
+        </span>
+        {q.data && (
+          <span className="text-[0.68rem] text-[var(--color-ink-4)]">
+            {fmtCount(q.data.scanned_pairs)} rozhodnutí (nejnovějších {fmtCount(q.data.scan_cap)})
+          </span>
+        )}
+      </div>
+      {q.isLoading ? (
+        <p className="text-[0.72rem] text-[var(--color-ink-4)]">Počítám…</p>
+      ) : buckets.length === 0 ? (
+        <p className="text-[0.72rem] text-[var(--color-ink-4)]">Žádná data pro tento filtr.</p>
+      ) : (
+        <div className="flex flex-col gap-1">
+          {buckets.map((b) => {
+            const total = b.merged + b.dismissed;
+            const inRange = b.bucket_end >= currentMin && b.bucket_start <= currentMax;
+            const holdsBar = mergeBar != null && b.bucket_start <= mergeBar && mergeBar <= b.bucket_end;
+            return (
+              <div key={b.bucket_start} className="flex items-center gap-2 text-[0.7rem]">
+                <span
+                  className={`w-12 shrink-0 font-mono tabular-nums text-right ${
+                    inRange ? 'text-[var(--color-ink)]' : 'text-[var(--color-ink-4)]'
+                  }`}
+                >
+                  {b.bucket_start === b.bucket_end ? b.bucket_start : `${b.bucket_start}–${b.bucket_end}`}
+                </span>
+                <div className="flex-1 h-3 flex overflow-hidden rounded-[var(--radius-xs)] bg-[var(--color-inset)]">
+                  {total > 0 && (
+                    <>
+                      <div
+                        className="h-full bg-[var(--color-copper)]"
+                        style={{ width: `${(b.merged / maxCount) * 100}%` }}
+                        title={`sloučeno: ${b.merged}`}
+                      />
+                      <div
+                        className="h-full bg-[var(--color-brick)]"
+                        style={{ width: `${(b.dismissed / maxCount) * 100}%` }}
+                        title={`zamítnuto: ${b.dismissed}`}
+                      />
+                    </>
+                  )}
+                </div>
+                <span className="w-16 shrink-0 font-mono tabular-nums text-[var(--color-ink-3)]">
+                  {b.merged}/{b.dismissed}
+                </span>
+                <span className="w-8 shrink-0 text-[0.62rem] text-[var(--color-ink-4)]" title="Aktuální práh sloučení (PHASH_IDENTICAL_MAX)">
+                  {holdsBar ? 'práh' : ''}
+                </span>
+              </div>
+            );
+          })}
         </div>
       )}
     </div>
@@ -473,11 +595,22 @@ function PhashRow({
     onSuccess: () => qc.invalidateQueries({ queryKey: ['phash-audit', 'notes'] }),
   });
 
+  const hammingMet = row.hamming <= row.hamming_merge_bar;
+
   return (
     <div className="border border-[var(--color-rule)] rounded-[var(--radius-sm)] bg-[var(--color-paper)] p-3 flex flex-col gap-2">
       <div className="flex flex-wrap items-center gap-2 text-[0.78rem]">
-        <span className="font-mono tabular-nums text-[var(--color-copper)]">
-          ⟷ {row.hamming}
+        <span
+          className={`inline-flex items-baseline gap-1 font-mono ${hammingMet ? 'text-[var(--color-copper)]' : 'text-[var(--color-brick)]'}`}
+          title={
+            hammingMet
+              ? 'Hammingova vzdálenost je pod prahem sloučení (PHASH_IDENTICAL_MAX)'
+              : 'Hammingova vzdálenost je nad prahem sloučení (PHASH_IDENTICAL_MAX)'
+          }
+        >
+          <span aria-hidden>{hammingMet ? '✓' : '✕'}</span>
+          Hamming <span className="tabular-nums">{row.hamming}</span>
+          <span className="text-[var(--color-ink-4)]">≤ {row.hamming_merge_bar}</span>
         </span>
         <span
           className={row.outcome === 'merged' ? 'text-[var(--color-copper)]' : 'text-[var(--color-brick)]'}
@@ -511,7 +644,7 @@ function PhashRow({
           <TrainableImage
             key={img.id}
             image={img}
-            srealityId={i === 0 ? row.left_sreality_id : row.right_sreality_id}
+            link={i === 0 ? row.left_image : row.right_image}
             example={training?.get(img.id)}
             borderCase={!!borderCases?.has(img.id)}
             labelOptions={labelOptions}
@@ -544,14 +677,14 @@ function PhashRow({
  * typical widths). */
 function TrainableImage({
   image,
-  srealityId,
+  link,
   example,
   borderCase,
   labelOptions,
   onOpen,
 }: {
   image: ImagePublic;
-  srealityId: number | null;
+  link: PhashAuditImageRef;
   example: TrainingExample | undefined;
   borderCase: boolean;
   labelOptions: LabelOption[];
@@ -559,21 +692,34 @@ function TrainableImage({
 }) {
   return (
     <div className="w-full max-w-[23rem] flex flex-col gap-1.5">
-      <button
-        type="button"
-        onClick={onOpen}
-        className="group relative block w-full aspect-[5/4] overflow-hidden rounded-[var(--radius-xs)] border border-[var(--color-rule)] bg-[var(--color-inset)]"
-      >
-        <img src={imageSrc(image)} alt="" loading="lazy" className="w-full h-full object-cover" />
+      <div className="group relative w-full aspect-[5/4] overflow-hidden rounded-[var(--radius-xs)] border border-[var(--color-rule)] bg-[var(--color-inset)]">
+        <button
+          type="button"
+          onClick={onOpen}
+          className="absolute inset-0 block w-full h-full"
+        >
+          <img src={imageSrc(image)} alt="" loading="lazy" className="w-full h-full object-cover" />
+        </button>
         <ImageTagBadge
           tag={image.clip_fine_tag}
           confidence={image.clip_confidence}
           className="absolute bottom-1 left-1 max-w-[calc(100%-0.5rem)] truncate"
         />
-        <span className="absolute top-1 right-1 px-1 py-0.5 text-[0.6rem] font-mono tabular-nums rounded-[var(--radius-xs)] bg-[var(--color-paper-3)]/85 border border-[var(--color-rule)] text-[var(--color-ink-3)]">
-          {srealityId ?? '—'}
-        </span>
-      </button>
+        {/* Sibling to (not nested in) the lightbox button, so its own click opens the
+         * listing in a new tab instead of the lightbox — (source, source_id_native) is
+         * the portal-agnostic natural key, always present (unlike legacy sreality_id,
+         * null for ~6% and a meaningless negative placeholder for another ~64% of
+         * non-sreality-portal images). */}
+        <Link
+          to={listingCanonicalPath(link.source, link.source_id_native)}
+          target="_blank"
+          rel="noreferrer"
+          title={`Otevřít inzerát (${link.source}): ${link.source_id_native}`}
+          className="absolute top-1 right-1 px-1 py-0.5 text-[0.6rem] font-mono tabular-nums rounded-[var(--radius-xs)] bg-[var(--color-paper-3)]/85 border border-[var(--color-rule)] text-[var(--color-ink-3)] hover:text-[var(--color-copper)] hover:border-[var(--color-copper)]"
+        >
+          {link.source_id_native}
+        </Link>
+      </div>
       <TrainControl
         image={image}
         example={example}
