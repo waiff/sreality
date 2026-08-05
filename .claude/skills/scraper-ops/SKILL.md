@@ -60,12 +60,22 @@ it writes only child media rows, never a `listings` content column, so the conte
 change (rule #2). Dispatch via the `reextract.yml` workflow; resumable by keyset cursor, so
 re-dispatch until it reports `recovered≈0`.
 
-It only repairs listings with **zero** image rows. `record_images` upserts on
+For `--field media` it only repairs listings with **zero** image rows. `record_images` upserts on
 `(listing_id, sequence)` = gallery position and refreshes the URL only `WHERE storage_path IS
 NULL`, so re-parsing a listing that already holds photos and now yields more of them shifts
 every later photo's position — downloaded rows keep an old URL at a sequence the new parse means
 for a different photo. Partial-loss recovery therefore needs a stable media identity, not a
 positional one, and is deliberately not attempted here.
+
+**Hashed vs unhashed fields.** The `_FIELDS` registry declares, per field, whether it sits in
+`_HASH_FIELDS`, and the module raises at import if that ever disagrees with
+`scraper.scraped_listing`. An unhashed field (`media`) writes only child rows → zero snapshots.
+A hashed field (`description`) genuinely changes the content hash, so **one snapshot per listing
+is appended on that listing's next natural detail scrape** — deferred, never skipped, and spread
+over the normal cadence instead of landing all at once. `--allow-snapshot-deferral` is required
+so that is a deliberate choice. Hashed fields are written with a targeted single-column UPDATE,
+never by replaying a whole `ScrapedListing`, which would rewrite every other column from a
+possibly-stale stored page and could regress a price the portal has since changed.
 
 ## How to manually trigger the scrapers
 

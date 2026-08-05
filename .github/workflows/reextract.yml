@@ -25,6 +25,15 @@ on:
         options:
           - realitymix
           - idnes
+          - remax
+      field:
+        description: "Field to recover (remax=description; realitymix/idnes=media)"
+        required: true
+        default: media
+        type: choice
+        options:
+          - media
+          - description
       since:
         description: "Only listings first seen on/after (YYYY-MM-DD; blank = all)"
         required: false
@@ -68,7 +77,10 @@ jobs:
         run: pip install -e .
       - name: Re-extract
         run: |
-          ARGS="--source ${{ inputs.source }} --field media"
+          ARGS="--source ${{ inputs.source }} --field ${{ inputs.field }}"
+          # `description` is in _HASH_FIELDS: one snapshot per listing is DEFERRED to that
+          # listing's next natural detail scrape. The script refuses without this flag.
+          if [ "${{ inputs.field }}" != "media" ]; then ARGS="$ARGS --allow-snapshot-deferral"; fi
           ARGS="$ARGS --max-seconds ${{ inputs.max_seconds || '3000' }}"
           if [ -n "${{ inputs.since }}" ]; then ARGS="$ARGS --since ${{ inputs.since }}"; fi
           if [ "${{ inputs.dry_run }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi

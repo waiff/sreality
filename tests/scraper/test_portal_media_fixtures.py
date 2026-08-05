@@ -174,27 +174,61 @@ def test_remax_description_is_never_the_og_boilerplate():
     assert "Spolehněte se na jedničku" not in (listing.description or "")
 
 
-def test_reextract_registry_recovers_media_for_every_wired_portal():
-    """scripts/reextract.py replays these same extractors over stored HTML. If a
-    registered portal's extractor returns nothing on a real page, the backfill would
-    silently 'recover' zero rows and report success — the failure shape being fixed."""
+def _reextract():
     import importlib.util
+    import sys
 
     spec = importlib.util.spec_from_file_location(
         "reextract", Path(__file__).resolve().parents[2] / "scripts" / "reextract.py"
     )
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
+    # @dataclass resolves types via sys.modules[cls.__module__], so register before exec.
+    sys.modules["reextract"] = module
     spec.loader.exec_module(module)
+    return module
+
+
+def test_reextract_field_registry_agrees_with_the_hash_contract():
+    """A field in _HASH_FIELDS cannot be repaired snapshot-free. The registry declares
+    that per field and the module raises at import on a mismatch, so adding a field to
+    _HASH_FIELDS later can never silently downgrade the backfill's guarantee."""
+    from scraper.scraped_listing import _HASH_FIELDS
+
+    module = _reextract()
+
+    assert module._FIELDS["media"].hashed is False
+    assert module._FIELDS["description"].hashed is True
+    for name, spec in module._FIELDS.items():
+        assert spec.hashed == (name in _HASH_FIELDS)
+
+
+def test_reextract_recovers_remax_description_from_a_stored_page():
+    """The backfill substrate is stored portal_raw_pages HTML — assert the wired
+    extractor actually yields text on a real page, or the run would report a clean
+    'recovered 0' and look like success."""
+    module = _reextract()
+
+    text = module._FIELDS["description"].extractors["remax"](_fixture("remax_detail.html"), "")
+
+    assert text and len(text) > 500
+
+
+def test_reextract_registry_recovers_media_for_every_wired_portal():
+    """scripts/reextract.py replays these same extractors over stored HTML. If a
+    registered portal's extractor returns nothing on a real page, the backfill would
+    silently 'recover' zero rows and report success — the failure shape being fixed."""
+    module = _reextract()
 
     cases = {
         "realitymix": ("realitymix_detail.html", _REALITYMIX_ID),
         "idnes": ("idnes_detail.html", ""),
     }
-    assert set(module._MEDIA_EXTRACTORS) == set(cases), "wire a fixture for every portal"
+    extractors = module._FIELDS["media"].extractors
+    assert set(extractors) == set(cases), "wire a fixture for every portal"
 
     for source, (fixture, native) in cases.items():
-        urls = module._MEDIA_EXTRACTORS[source](_fixture(fixture), native)
+        urls = extractors[source](_fixture(fixture), native)
         assert urls, f"{source} extractor returned nothing on real HTML"
 
 

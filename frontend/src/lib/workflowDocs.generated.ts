@@ -3194,7 +3194,19 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
         "default": null,
         "options": [
           "realitymix",
-          "idnes"
+          "idnes",
+          "remax"
+        ]
+      },
+      {
+        "name": "field",
+        "description": "Field to recover (remax=description; realitymix/idnes=media)",
+        "required": true,
+        "type": "choice",
+        "default": "media",
+        "options": [
+          "media",
+          "description"
         ]
       },
       {
