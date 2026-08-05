@@ -3,14 +3,7 @@ import { imageSrc } from './imageUrl';
 import { type TaggedImageUrl } from './imageTags';
 import { fetchListingBrokersByIds, fetchBrokersByIds } from './brokers';
 import type { BrokerPublic, ListingBroker } from './brokers';
-import type { ListingDetailLite } from './dedupDiff';
 import type { LlmCostDailyRow, LlmCostHourlyRow } from './llmCosts';
-import type {
-  DedupCostByCategoryRow,
-  DedupEngineFlowRow,
-  DedupQueueRow,
-  DedupResolutionRow,
-} from './dedupFunnel';
 import {
   type CenterRadius,
   type DistrictChip,
@@ -1671,28 +1664,6 @@ export const fetchTrainingLabelCounts = async (): Promise<TrainingLabelCount[]> 
     .sort((a, b) => b.count - a.count || a.label.localeCompare(b.label, 'cs'));
 };
 
-/* /dedup review card: the street / house-number / floor the candidate payload
- * doesn't carry (migration 122 exposes street + house_number on
- * listings_public). Batched over the on-screen sides' sreality_ids. */
-const DEDUP_DETAIL_COLS =
-  'sreality_id,street,house_number,floor,disposition,district,price_czk,area_m2,category_type,category_main,category_sub_cb';
-
-export const fetchListingDetailByIds = async (
-  ids: ReadonlyArray<number>,
-): Promise<Map<number, ListingDetailLite>> => {
-  if (ids.length === 0) return new Map();
-  const { data, error } = await supabase
-    .from('listings_public')
-    .select(DEDUP_DETAIL_COLS)
-    .in('sreality_id', ids as number[]);
-  if (error) throw error;
-  const out = new Map<number, ListingDetailLite>();
-  for (const row of (data ?? []) as unknown as ListingDetailLite[]) {
-    out.set(row.sreality_id, row);
-  }
-  return out;
-};
-
 /* Keyed on listing_id, not sreality_id (R2 Phase C resolver-chain cutover;
  * migration 335 exposes it on images_public). */
 export const fetchImagesByListing = async (
@@ -2551,73 +2522,5 @@ export const fetchLlmCostHourly = async (hours: number): Promise<LlmCostHourlyRo
     output_tokens: Number(r.output_tokens ?? 0),
     cache_read_tokens: Number(r.cache_read_tokens ?? 0),
     cache_write_tokens: Number(r.cache_write_tokens ?? 0),
-  }));
-};
-
-/* ---- Dedup funnel (/dedup) + dedup cost breakdown (/costs) ------------- */
-/* Views from migration 282. The two heavy aggregates are matviews refreshed
- * every 15 min by pg_cron; flow + queue are live. All numerics coerced once
- * here (PostgREST serializes numeric as string on some paths). */
-
-const num = (v: unknown): number => Number(v ?? 0);
-
-export const fetchDedupFunnelResolutions = async (): Promise<DedupResolutionRow[]> => {
-  const { data, error } = await supabase.from('dedup_funnel_resolutions_public').select('*');
-  if (error) throw error;
-  return (data ?? []).map((r: Record<string, unknown>) => ({
-    source: String(r.source),
-    stage: String(r.stage),
-    outcome: String(r.outcome),
-    category_main: String(r.category_main),
-    category_type: String(r.category_type),
-    pairs_7d: num(r.pairs_7d), pairs_30d: num(r.pairs_30d),
-    properties_7d: num(r.properties_7d), properties_30d: num(r.properties_30d),
-    listings_7d: num(r.listings_7d), listings_30d: num(r.listings_30d),
-  }));
-};
-
-export const fetchDedupEngineFlow = async (): Promise<DedupEngineFlowRow | null> => {
-  const { data, error } = await supabase
-    .from('dedup_engine_flow_public').select('*').maybeSingle();
-  if (error) throw error;
-  if (!data) return null;
-  const r = data as Record<string, unknown>;
-  const out: Record<string, number | null> = {
-    eligible_market: r.eligible_market == null ? null : num(r.eligible_market),
-    flagged_location_market: r.flagged_location_market == null ? null : num(r.flagged_location_market),
-    flagged_disposition_market: r.flagged_disposition_market == null ? null : num(r.flagged_disposition_market),
-  };
-  for (const base of [
-    'runs', 'pairs_considered', 'rejected', 'queued', 'clip_cosine_calls',
-    'routed_haiku', 'routed_sonnet', 'floor_plan_deferred', 'clip_deferred',
-    'skipped_unresolved', 'vision_calls', 'vision_errors',
-  ]) {
-    out[`${base}_7d`] = num(r[`${base}_7d`]);
-    out[`${base}_30d`] = num(r[`${base}_30d`]);
-  }
-  return out as unknown as DedupEngineFlowRow;
-};
-
-export const fetchDedupQueueSnapshot = async (): Promise<DedupQueueRow[]> => {
-  const { data, error } = await supabase.from('dedup_queue_snapshot_public').select('*');
-  if (error) throw error;
-  return (data ?? []).map((r: Record<string, unknown>) => ({
-    tier: String(r.tier ?? ''),
-    category_main: String(r.category_main),
-    category_type: String(r.category_type),
-    pairs: num(r.pairs),
-  }));
-};
-
-export const fetchDedupCostByCategory = async (): Promise<DedupCostByCategoryRow[]> => {
-  const { data, error } = await supabase.from('dedup_llm_cost_by_category_public').select('*');
-  if (error) throw error;
-  return (data ?? []).map((r: Record<string, unknown>) => ({
-    called_for: String(r.called_for),
-    category_main: String(r.category_main),
-    category_type: String(r.category_type),
-    calls_7d: num(r.calls_7d), calls_30d: num(r.calls_30d),
-    cost_7d: num(r.cost_7d), cost_30d: num(r.cost_30d),
-    listings_7d: num(r.listings_7d), listings_30d: num(r.listings_30d),
   }));
 };

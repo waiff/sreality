@@ -20,15 +20,12 @@ import {
   fetchRecentScrapeRuns,
   fetchWorkflowFailureSummary,
   fetchScraperHealthChecks,
-  fetchDedupEngineRuns,
   fetchPublicationGateHealth,
   fetchPipelineChecks,
-  type DedupEngineRun,
   type WorkflowFailureSummaryRow,
   type PublicationGateRow,
   type PipelineCheckRow,
 } from '@/lib/queries';
-import { assessDirtyQueue } from '@/lib/dedupQueueHealth';
 import {
   assessPublicationGate,
   type PublicationGateStatus,
@@ -114,7 +111,6 @@ export default function Health() {
 
       {data && <StaleHealthDataBanner generatedAt={data.generated_at ?? null} />}
       {data && <StaleScrapeBanner lastScrapeAt={data.last_scrape_at} />}
-      <DedupQueueBanner />
 
       {isLoading && !data ? (
         <Skeleton />
@@ -685,37 +681,6 @@ function StaleScrapeBanner({ lastScrapeAt }: { lastScrapeAt: string | null }) {
       <span>
         No scrape activity in <span className="font-mono tabular-nums">{Math.round(ageH)}&thinsp;h</span>.
         The daily cron may have failed — check the latest run in GitHub Actions.
-      </span>
-    </div>
-  );
-}
-
-/* Real-time dedup --dirty drain backlog. Self-fetches the recent engine runs (anon public view)
- * and surfaces a banner ONLY when the dedup-ready queue is high — amber while it's draining (a
- * transient tagging flood), red when it has stopped draining (the drain is failing / out-paced).
- * This is the alarm that the 165K backlog lacked: it ran ~2 days unseen. Returns null when healthy. */
-function DedupQueueBanner() {
-  const { data } = useQuery<DedupEngineRun[], Error>({
-    queryKey: ['dedup-engine-runs', 'health'],
-    queryFn: () => fetchDedupEngineRuns(14),
-    refetchInterval: 60_000,
-    staleTime: 30_000,
-  });
-  const dq = assessDirtyQueue(data ?? []);
-  if (dq.status !== 'warn' && dq.status !== 'fail') return null;
-  const fail = dq.status === 'fail';
-  return (
-    <div
-      className={`mt-4 p-3 rounded-[var(--radius-sm)] border text-sm flex items-baseline gap-2 ${
-        fail
-          ? 'border-[var(--color-brick)]/40 bg-[var(--color-brick-soft)] text-[var(--color-brick)]'
-          : 'border-[var(--color-ochre)]/40 bg-[var(--color-ochre-soft)] text-[var(--color-ochre)]'
-      }`}
-    >
-      <span className="text-[0.7rem] tracking-[0.18em] uppercase font-medium">dedup queue</span>
-      <span>
-        <span className="font-mono tabular-nums">{(dq.depth ?? 0).toLocaleString()}</span>{' '}
-        dedup-ready properties waiting. {dq.reason}
       </span>
     </div>
   );
