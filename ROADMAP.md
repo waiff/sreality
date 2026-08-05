@@ -33,7 +33,8 @@ Multi-portal ingestion (Scraper Phase 2) is the larger not-yet-started body of w
 | UI | 🟢 mostly done | Browse / estimation / detail SPA; U-Nav next, U3 later | [roadmap/ui-track.md](roadmap/ui-track.md) |
 | Map | 🟡 mixed | Typed locality IDs + map layers (map-1) | [roadmap/map-track.md](roadmap/map-track.md) |
 | Scraper | 🟢 mostly done | Cadence-split, portal framework, prepared stmts; Phase 2 multi-portal (larger, later) | [roadmap/scraper-track.md](roadmap/scraper-track.md) |
-| Dedup + canonical listing | 🟡 active | LLM-cost program; funnel now **Anthropic-free** (gpt-5-mini); Session 4 batch deferral + Session 5a recency ordering shipped 2026-07-14; Session 5b image-role registry shipped, pozemek dismissal BLOCKED on a site-plan model fix (gpt-5-mini scores 50% on pozemek per the bake-off); see `docs/design/dedup-vision-and-backlog-overhaul.md` | [roadmap/dedup-track.md](roadmap/dedup-track.md) |
+| Dedup + canonical listing (legacy, superseded) | ⚪ superseded | Legacy engine history only — see NEW DEDUP below | [roadmap/dedup-track.md](roadmap/dedup-track.md) |
+| NEW DEDUP | 🟡 active (W0) | Ground-up decision-layer rebuild, simulation-first; backup+teardown+scaffolding wave in progress | [roadmap/new-dedup.md](roadmap/new-dedup.md) |
 | Operator workflow | 🟢 mostly done | Collections / tags / notes, deal pipeline; U-ME (manual rental estimates) next | [roadmap/operator-workflow-track.md](roadmap/operator-workflow-track.md) |
 | Building decomposition | 🟢 mostly done | Paste-a-building unit extraction + fan-out; B3 business-case tab proposed | [roadmap/building-decomposition-track.md](roadmap/building-decomposition-track.md) |
 | Skill refinement | 🟡 active | Phase AI — feedback-driven estimation-skill refinement | [roadmap/skill-refinement-track.md](roadmap/skill-refinement-track.md) |

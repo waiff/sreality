@@ -1,5 +1,10 @@
 > Track file — part of [ROADMAP.md](../ROADMAP.md). After shipping, edit only this file + its index row.
 
+> **SUPERSEDED (2026-08-05) — the legacy decision engine this file tracks is being torn out
+> entirely and rebuilt from scratch.** Do not resume work here; the live track is
+> [`roadmap/new-dedup.md`](new-dedup.md) / [`docs/design/new-dedup/PROGRAM.md`](../docs/design/new-dedup/PROGRAM.md).
+> Everything below is retained as history only.
+
 > **STALE BELOW (D1/D2 planning from the pre-`properties`-parent era) — this file predates the
 > shipped architecture and is not the current source of truth.** The dedup engine has been under
 > active development for many PRs; the governing plans are

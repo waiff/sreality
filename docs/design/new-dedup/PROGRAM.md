@@ -119,5 +119,51 @@ Session handoff points marked ⛳ (good places to end a session; update the ledg
 
 ## Progress ledger (update every session, newest first)
 
-- 2026-08-05 — Program + cutoff drafts written; awaiting operator approval of both. Next
-  session: on approval, execute W0 starting with PR-0 (ship clip-audit branch + commit docs).
+- 2026-08-06 — W0 execution started (operator kickoff: "start with the dedup workflow refactor
+  based on program.md and cutoff.md" = Gate 0 approval). Done this session:
+  - **PR-0 merged** (#960, commit `9d1eb177`) — clip-linear-probe.md + this PROGRAM.md/CUTOFF.md
+    pair landed on `main`. Note: the branch CUTOFF.md's §7 step 1 named
+    (`feature/clip-audit-tag-management`) had already merged its own content separately via #954
+    before this session started; PR-0 was re-cut as a fresh docs-only branch off current `main`.
+  - **Backup cut**: branch `backup/pre-new-dedup-2026-08` + tag `backup-pre-new-dedup`, both at
+    `9d1eb177` (post-PR-0 main). Supabase DB confirmed live and unmodified at
+    **2026-08-05 21:55:22 UTC** (`select now()` reading taken before any Wave 0 DB write was
+    attempted) — use this as the PITR reference point; no schema/data changes have landed since
+    (both Day-0 freeze and M-0 are still blocked, see below).
+  - **PR-1 (backend removal) launched** as a 12-stage background workflow (run id
+    `wf_066de830-b20`) in an isolated worktree, branch `feature/new-dedup-backend-removal`,
+    covering CUTOFF.md §1 (C1/C2/C3/C6/C7 + C5 code-only + C4 workflow-YAML), §2 (wholesale
+    deletes + S3/S5/S6 splits), and §6 (backend-relevant docs/tests) — ending in a **draft PR**,
+    explicitly not merged (see gating note below). Result pending as of this ledger entry.
+  - Scaffolding: `roadmap/new-dedup.md` track created, `ROADMAP.md` index updated, old
+    `roadmap/dedup-track.md` marked superseded. NEW DEDUP nav group / placeholder pages deferred
+    to ride along with the PR-2 frontend-removal pass (same territory, avoids a throwaway page
+    that PR-2 immediately restructures).
+  - **Blocked by the permission classifier this session** (both explicitly part of CUTOFF.md §7's
+    Day-0 freeze, both need the operator to either run them directly or grant permission):
+    1. `gh workflow disable` on the 6 legacy decision workflows (dedup_engine.yml,
+       dedup_batches.yml, dedup_model_compare.yml, clip_trial.yml, embedding_ab.yml,
+       validate_render_detection.yml).
+    2. The M-0 DB flip itself (`update app_settings set value='false'::jsonb where
+       key='dedup_publication_gate_enabled'`) via Supabase execute_sql. **Confirmed live current
+       value: `true`** — the gate is actively hiding un-evaluated new properties from Browse/map/
+       watchdogs right now. The worker dedup lane is also confirmed live at
+       `realtime_dedup_interval_seconds = 90` (NOT dark) — same freeze dependency.
+    Net effect: the legacy engine + its scheduled jobs are still fully live; duplicates are
+    accumulating per the accepted Q1 tradeoff, but the freeze itself hasn't landed yet. **PR-1
+    must not be merged until M-0 actually lands** (PR-1 deletes the only code that stamps
+    `properties.published_at`; merging it while the gate is still `true` would hide every new
+    property with no self-heal).
+  - **New sequencing risk identified** (not in the original CUTOFF.md §7 order): PR-1 renames
+    `/dedup/properties/merge` → `/properties/merge` (+ merges/unmerge/merged/assets). Browse's
+    live `mergeMode` calls the old paths. Merging PR-1 alone, before PR-2 (frontend) is ready to
+    merge in the same window, breaks manual merge in production. **PR-1 and PR-2 should merge
+    back-to-back, not PR-1-then-wait.**
+  - `pg_dump`-to-R2 backup of the to-be-dropped tables (CUTOFF.md §4) not yet started — needs
+    either a GH Actions one-off job (this session's environment has no local `.env`/`psql`/R2
+    creds; GH Actions secrets `SUPABASE_DB_URL` + `R2_*` confirmed present) or the operator's own
+    local machine.
+  - Next session: once PR-1's workflow completes, review it; get the two blockers resolved
+    (freeze + M-0); build the pg_dump-to-R2 backup job; launch PR-2 (frontend removal); only then
+    consider merging PR-1+PR-2 together.
+- 2026-08-05 — Program + cutoff drafts written; awaiting operator approval of both.
