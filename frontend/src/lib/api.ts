@@ -1,8 +1,8 @@
 /* Fetch wrapper for the Railway FastAPI service.
  *
  * Two auth shapes, matching the backend gate each route actually uses:
- *  - `jwt: true` (require_admin / verify_jwt routes — Settings, Dedup,
- *    Outreach, broker-review, location-audit, skill-refinements, Collections
+ *  - `jwt: true` (require_admin / verify_jwt routes — Settings, labeling,
+ *    Outreach, broker-review, skill-refinements, Collections
  *    list, Pipeline, Watchdog subscriptions, /estimations create/read) sends
  *    the caller's real Supabase session access_token. The backend no longer
  *    accepts anything else here (api/dependencies.py:verify_jwt) — admin
@@ -51,15 +51,10 @@ import type {
   WatchdogSeenFilter,
   WatchdogSubscription,
   FilterPreset,
-  DedupCandidatesResponse,
-  DedupSummaryResponse,
   MergesResponse,
   MergedPropertiesResponse,
-  DecisionFeedback,
-  AuditRung,
 } from './types';
-import type { DistrictChip, PresetSpec } from './filters';
-import { districtChipsToCsvParams } from './filters';
+import type { PresetSpec } from './filters';
 import { supabase } from './supabase';
 
 /* Sources the backend allowlists for high-confidence parsing.
@@ -665,194 +660,6 @@ export const updateAppSetting = (
     jwt: true,
   });
 
-// The dedup-engine knob registry (one typed source of truth, backend-defined).
-export type DedupSetting = {
-  key: string;
-  kind: 'bool' | 'float' | 'model';
-  default: unknown;
-  label: string;
-  group: string;
-  help: string;
-  min: number | null;
-  max: number | null;
-  value: unknown;
-  is_default: boolean;
-};
-
-export const getDedupSettings = (): Promise<{ data: DedupSetting[] }> =>
-  request<{ data: DedupSetting[] }>('/admin/dedup-settings', { jwt: true });
-
-export const updateDedupSetting = (
-  key: string,
-  value: unknown,
-): Promise<{ key: string; value: unknown; is_default: boolean }> =>
-  request<{ key: string; value: unknown; is_default: boolean }>(
-    `/admin/dedup-settings/${encodeURIComponent(key)}`,
-    { method: 'PUT', json: { value }, jwt: true },
-  );
-
-export type DedupTagPriority = {
-  family: string;
-  order: string[];
-  default_order: string[];
-  is_default: boolean;
-};
-
-export const getDedupTagPriorities = (): Promise<{ data: DedupTagPriority[] }> =>
-  request<{ data: DedupTagPriority[] }>('/admin/dedup-tag-priorities', { jwt: true });
-
-export const updateDedupTagPriority = (
-  family: string,
-  order: string[],
-): Promise<DedupTagPriority> =>
-  request<DedupTagPriority>(
-    `/admin/dedup-tag-priorities/${encodeURIComponent(family)}`,
-    { method: 'PUT', json: { order }, jwt: true },
-  );
-
-// The unified Decision history feed: every terminal dedup decision (merged /
-// dismissed), engine AND operator, with the undo handle + factor detail.
-export type DedupAuditRow = {
-  audit_id: number;
-  run_at: string;
-  left_sreality_id: number | null;
-  right_sreality_id: number | null;
-  left_property_id: number | null;
-  right_property_id: number | null;
-  category_main: string | null;
-  stage: string;
-  outcome: 'merged' | 'dismissed' | string;
-  source: 'engine' | 'operator' | string | null;
-  merge_group_id: string | null;
-  detail: Record<string, unknown> | null;
-  undone: boolean;
-  feedback: DecisionFeedback | null;
-  audit_breakdown: AuditRung[];
-};
-
-export const getDedupAudit = (
-  params: {
-    outcome?: string;
-    category_main?: string;
-    source?: string;
-    stage?: string;
-    factor?: string; // phash | cosine | visual | address | floor_plan
-    factor_min?: number;
-    factor_max?: number;
-    verdict?: string; // High | Medium | Low
-    room_type?: string; // the compared room/plan tag (detail.room_type)
-    property_id?: number; // scope to one property's merge decisions
-    property_id_in?: ReadonlyArray<number>; // batched form of property_id
-    flagged?: boolean; // only decisions the operator flagged as incorrect
-    // Matches a decision if EITHER side of its pair touches the picked place —
-    // the same `DistrictChip[]` widget Browse/Watchdog use (LocationTypeahead),
-    // serialised via the shared `districtChipsToCsvParams` wire format.
-    districts?: ReadonlyArray<DistrictChip> | null;
-    limit?: number;
-    offset?: number;
-  } = {},
-): Promise<{ data: DedupAuditRow[]; total: number; returned: number }> => {
-  const q = new URLSearchParams();
-  if (params.outcome) q.set('outcome', params.outcome);
-  if (params.category_main) q.set('category_main', params.category_main);
-  if (params.source) q.set('source', params.source);
-  if (params.stage) q.set('stage', params.stage);
-  if (params.factor) q.set('factor', params.factor);
-  if (params.factor_min != null) q.set('factor_min', String(params.factor_min));
-  if (params.factor_max != null) q.set('factor_max', String(params.factor_max));
-  if (params.verdict) q.set('verdict', params.verdict);
-  if (params.room_type) q.set('room_type', params.room_type);
-  if (params.property_id != null) q.set('property_id', String(params.property_id));
-  if (params.property_id_in?.length) {
-    q.set('property_id_in', params.property_id_in.join(','));
-  }
-  if (params.flagged) q.set('flagged', 'true');
-  for (const [k, v] of Object.entries(districtChipsToCsvParams(params.districts ?? []))) {
-    q.set(k, v);
-  }
-  q.set('limit', String(params.limit ?? 100));
-  if (params.offset) q.set('offset', String(params.offset));
-  return request<{ data: DedupAuditRow[]; total: number; returned: number }>(
-    `/dedup/audit?${q.toString()}`,
-    { jwt: true },
-  );
-};
-
-// Flag a dedup decision / candidate PAIR as incorrect (with direction + note).
-// PROPERTY-pair-keyed, so the same flag shows on both the history feed and the queue and
-// never orphans on a repr-listing recompute.
-export type DecisionFeedbackInput = {
-  left_property_id: number;
-  right_property_id: number;
-  is_incorrect?: boolean;
-  expected_outcome?: 'should_merge' | 'should_dismiss' | 'unsure' | null;
-  note?: string | null;
-  category_main?: string | null;
-};
-export const setDecisionFeedback = (
-  body: DecisionFeedbackInput,
-): Promise<{ data: Record<string, unknown> }> =>
-  request<{ data: Record<string, unknown> }>('/dedup/feedback', {
-    method: 'POST',
-    json: body,
-    jwt: true,
-  });
-export const deleteDecisionFeedback = (
-  left_property_id: number,
-  right_property_id: number,
-): Promise<{ data: { deleted: boolean } }> =>
-  request<{ data: { deleted: boolean } }>('/dedup/feedback', {
-    method: 'DELETE',
-    query: { a: left_property_id, b: right_property_id },
-    jwt: true,
-  });
-
-// The SPECIFIC pictures behind a decision, resolved at read time: the pHash matched
-// PAIRS (with Hamming), the compared plans, or the deciding room.
-export type DedupEvidenceImage = {
-  image_id?: number;
-  sreality_url: string | null;
-  storage_path: string | null;
-};
-export type DedupEvidenceSide = {
-  sreality_id: number;
-  images: DedupEvidenceImage[];
-  fallback: boolean;
-};
-export type DedupEvidencePair = {
-  hamming: number;
-  left: DedupEvidenceImage;
-  right: DedupEvidenceImage;
-};
-export type DedupDecisionEvidence = {
-  pairs: DedupEvidencePair[] | null;
-  room_type: string | null;
-  left: DedupEvidenceSide;
-  right: DedupEvidenceSide;
-};
-export const getDedupDecisionEvidence = (params: {
-  a: number;
-  b: number;
-  stage?: string | null;
-  reason?: string | null;
-  room_type?: string | null;
-  category_main?: string | null;
-  per_side?: number;
-}): Promise<{ data: DedupDecisionEvidence }> => {
-  const q = new URLSearchParams();
-  q.set('a', String(params.a));
-  q.set('b', String(params.b));
-  if (params.stage) q.set('stage', params.stage);
-  if (params.reason) q.set('reason', params.reason);
-  if (params.room_type) q.set('room_type', params.room_type);
-  if (params.category_main) q.set('category_main', params.category_main);
-  if (params.per_side) q.set('per_side', String(params.per_side));
-  return request<{ data: DedupDecisionEvidence }>(
-    `/dedup/decision-evidence?${q.toString()}`,
-    { jwt: true },
-  );
-};
-
 // /clip-audit: flag one image's CLIP tag and/or render score as wrong, with a note.
 export type ImageAnnotation = {
   image_id: number;
@@ -881,7 +688,7 @@ export const deleteImageAnnotation = (
     jwt: true,
   });
 
-// /phash-audit: a note on one image pair.
+// Label store: a note on one image pair.
 export type PhashNote = {
   image_id_a: number;
   image_id_b: number;
@@ -904,126 +711,7 @@ export const deletePhashNote = (
     jwt: true,
   });
 
-// /phash-audit: matching-photo image pairs within a Hamming-distance range, from pairs
-// the engine already decided (dedup_pair_audit) — read-only evidence, no engine change.
-export type PhashAuditImageRef = {
-  image_id: number;
-  sreality_url: string | null;
-  storage_path: string | null;
-  room_type: string | null;
-  fine_tag: string | null;
-  confidence: number | null;
-  render_score: number | null;
-  // The portal-agnostic natural key (never null, unlike legacy sreality_id) — lets
-  // every image identify + link to its listing regardless of portal/Gate-2 status.
-  source: string;
-  source_id_native: string;
-};
-export type PhashAuditRow = {
-  audit_id: number;
-  left_sreality_id: number | null;
-  right_sreality_id: number | null;
-  left_property_id: number | null;
-  right_property_id: number | null;
-  outcome: string;
-  category_main: string | null;
-  run_at: string;
-  // What ACTUALLY decided this pair — may be a different signal than the Hamming
-  // number this page sorts by (e.g. phash found nothing, forensic vision dismissed
-  // it). Same shape/source as DedupAuditRow.audit_breakdown, so DedupBreakdown
-  // renders both identically.
-  stage: string;
-  audit_breakdown: AuditRung[];
-  left_image: PhashAuditImageRef;
-  right_image: PhashAuditImageRef;
-  hamming: number;
-  // The engine's current merge bar (PHASH_IDENTICAL_MAX) — sourced from the backend
-  // rather than hardcoded, so a card can show hamming met/unmet without drifting.
-  hamming_merge_bar: number;
-};
-export const getPhashAudit = (
-  params: {
-    hamming_min?: number;
-    hamming_max?: number;
-    category_main?: string;
-    outcome?: string;
-    // Both images in a returned pair must share the SAME tag, which must be one of
-    // these — not "either side is one of these" (see phash_audit's docstring).
-    room_types?: ReadonlyArray<string>;
-    // Only pairs where at least one of the two shown images already has a
-    // linear-probe training-set label.
-    training_only?: boolean;
-    // Narrows training_only to one SPECIFIC label (implies training_only).
-    training_label?: string;
-    // Inverse of training_only — pairs where NEITHER shown image is in the
-    // training set yet. Takes priority if both are set.
-    training_exclude?: boolean;
-    limit?: number;
-    // Opaque cursor — pass back the previous response's next_scan_offset.
-    scan_offset?: number;
-  } = {},
-): Promise<{
-  data: PhashAuditRow[];
-  returned: number;
-  scanned_pairs: number;
-  scan_cap: number;
-  scanned_so_far: number;
-  // Pagination is over the scan SCOPE, not the joined result (see the backend
-  // docstring) — a short `data` with next_scan_offset != null means "nothing more in
-  // this window, but the ceiling/population isn't exhausted yet, keep scrolling";
-  // null means truly done.
-  next_scan_offset: number | null;
-}> => {
-  const q = new URLSearchParams();
-  if (params.hamming_min != null) q.set('hamming_min', String(params.hamming_min));
-  if (params.hamming_max != null) q.set('hamming_max', String(params.hamming_max));
-  if (params.category_main) q.set('category_main', params.category_main);
-  if (params.outcome) q.set('outcome', params.outcome);
-  if (params.room_types?.length) q.set('room_types', params.room_types.join(','));
-  if (params.training_only) q.set('training_only', 'true');
-  if (params.training_label) q.set('training_label', params.training_label);
-  if (params.training_exclude) q.set('training_exclude', 'true');
-  q.set('limit', String(params.limit ?? 100));
-  if (params.scan_offset) q.set('scan_offset', String(params.scan_offset));
-  return request(`/dedup/phash-audit?${q.toString()}`, { jwt: true });
-};
-
-// Merged-vs-dismissed pair counts per Hamming-distance bucket — the aggregate behind
-// the threshold-tuning panel; same scope filters as getPhashAudit, no engine change.
-export type PhashHammingBucket = {
-  bucket_start: number;
-  bucket_end: number;
-  merged: number;
-  dismissed: number;
-};
-export const getPhashAuditHistogram = (
-  params: {
-    category_main?: string;
-    outcome?: string;
-    room_types?: ReadonlyArray<string>;
-    training_only?: boolean;
-    training_label?: string;
-    training_exclude?: boolean;
-    bucket_width?: number;
-  } = {},
-): Promise<{
-  buckets: PhashHammingBucket[];
-  scanned_pairs: number;
-  scan_cap: number;
-  hamming_merge_bar: number;
-}> => {
-  const q = new URLSearchParams();
-  if (params.category_main) q.set('category_main', params.category_main);
-  if (params.outcome) q.set('outcome', params.outcome);
-  if (params.room_types?.length) q.set('room_types', params.room_types.join(','));
-  if (params.training_only) q.set('training_only', 'true');
-  if (params.training_label) q.set('training_label', params.training_label);
-  if (params.training_exclude) q.set('training_exclude', 'true');
-  if (params.bucket_width) q.set('bucket_width', String(params.bucket_width));
-  return request(`/dedup/phash-audit/histogram?${q.toString()}`, { jwt: true });
-};
-
-// /phash-audit "Train": one image's linear-probe training-set label (migration 309).
+// /clip-audit "Train": one image's linear-probe training-set label (migration 309).
 // Data-collection only — nothing reads this table yet.
 export type TrainingExample = {
   image_id: number;
@@ -1094,89 +782,6 @@ export const deleteBorderCase = (
     query: { image_id },
     jwt: true,
   });
-
-// CLIP backfill progress (listing-grain), for the /dedup tracker.
-export type DedupCoverageTier = {
-  key: string;
-  label: string;
-  tagged: number;
-  total: number;
-};
-export type DedupClipCoverage = {
-  total_tags: number;
-  total_embeddings: number;
-  priority_region_id: number;
-  grain: string;
-  tiers: DedupCoverageTier[];
-};
-export const getDedupClipCoverage = (): Promise<{ data: DedupClipCoverage }> =>
-  request<{ data: DedupClipCoverage }>('/dedup/clip-coverage', { jwt: true });
-
-// Top-of-page dedup funnel: per-stage count + last-24h movement.
-export type DedupPipelineOverview = {
-  tagging: { total: number; delta_24h: number; embeddings: number };
-  eligible: { total: number; flagged_location: number; flagged_disposition: number };
-  candidates: { total: number; delta_24h: number };
-  decisions: { total: number; delta_24h: number; merged: number; dismissed: number };
-  last_run: {
-    started_at: string;
-    /* which lane wrote the row ('full' | 'candidates' | 'dirty' | 'geo'; null pre-262) */
-    run_kind: string | null;
-    auto_merged: number;
-    auto_dismissed: number;
-    queued: number;
-    clip_classified: number;
-    routed_haiku: number;
-    routed_sonnet: number;
-    vision_calls: number;
-  } | null;
-};
-export const getDedupPipelineOverview = (): Promise<{ data: DedupPipelineOverview }> =>
-  request<{ data: DedupPipelineOverview }>('/dedup/pipeline-overview', { jwt: true });
-
-// Dedup-funnel throughput per bucket (hour | day), for the overview's timeline chart.
-export type DedupTimelinePoint = {
-  bucket: string; // ISO timestamp of the bucket start
-  tagged: number;
-  candidates: number;
-  merged: number;
-  dismissed: number;
-};
-export const getDedupPipelineTimeline = (
-  bucket: 'hour' | 'day' = 'day',
-): Promise<{ grain: string; data: DedupTimelinePoint[] }> =>
-  request<{ grain: string; data: DedupTimelinePoint[] }>(
-    `/dedup/pipeline-timeline?bucket=${bucket}`,
-    { jwt: true },
-  );
-
-export const archiveResetDedupCandidates = (): Promise<{
-  archived: number;
-  deleted: number;
-  batch: string;
-}> =>
-  request<{ archived: number; deleted: number; batch: string }>(
-    '/dedup/candidates/archive-reset',
-    { method: 'POST', jwt: true },
-  );
-
-/* POST /dedup/model-compare — convene every connected vision model on undecided pairs
- * (decision support). candidate_ids omitted = the oldest-undecided top-`limit`; a list =
- * exactly those proposed candidates (the per-card button). Verdicts land on /model-testing
- * under the returned run_label. */
-export interface ModelCompareResponse {
-  dispatched: boolean;
-  run_label: string;
-  pair_count: number;
-  models: string[];
-  model_testing_url: string;
-  run_url: string;
-}
-
-export const requestModelCompare = (
-  body: { candidate_ids?: number[]; limit?: number },
-): Promise<ModelCompareResponse> =>
-  request<ModelCompareResponse>('/dedup/model-compare', { method: 'POST', json: body, jwt: true });
 
 export const listAgentTools = (): Promise<{ data: AgentTool[] }> =>
   request<{ data: AgentTool[] }>('/admin/tools', { jwt: true });
@@ -1809,32 +1414,7 @@ export const reorderFilterPresets = (
     json: { ids },
   });
 
-/* ----- Cross-source dedup review (multi-portal PR3b) --------------------- */
-
-export interface ListDedupCandidatesParams {
-  status?: string;
-  tier?: string;
-  reason?: string;
-  verdict?: string;
-  // Matches a pair if EITHER candidate property is that type — the same
-  // property-type tabs Decision history uses (a pair can legitimately span
-  // two types, e.g. the sanctioned dům↔komerční cross-type merge).
-  category_main?: string;
-  // Matches a pair if EITHER candidate property touches the picked place —
-  // lets the operator prioritise the manual review backlog by location.
-  districts?: ReadonlyArray<DistrictChip> | null;
-  limit?: number;
-  offset?: number;
-}
-
-export interface MergeResult {
-  data: {
-    merge_group_id: string;
-    survivor_id: number;
-    retired_id: number;
-    listings_moved: number;
-  };
-}
+/* ----- Operator merge mechanics (multi-portal) ---------------------------- */
 
 export interface UnmergeResult {
   data: {
@@ -1846,37 +1426,6 @@ export interface UnmergeResult {
   };
 }
 
-export const listDedupCandidates = (
-  params: ListDedupCandidatesParams = {},
-): Promise<DedupCandidatesResponse> => {
-  const { districts, ...rest } = params;
-  return request<DedupCandidatesResponse>('/dedup/candidates', {
-    query: {
-      ...(rest as Record<string, QueryValue>),
-      ...districtChipsToCsvParams(districts ?? []),
-    },
-  });
-};
-
-export const getDedupSummary = (
-  status = 'proposed',
-): Promise<DedupSummaryResponse> =>
-  request<DedupSummaryResponse>('/dedup/summary', { query: { status } });
-
-export const mergeDedupCandidate = (candidateId: number): Promise<MergeResult> =>
-  request<MergeResult>(
-    `/dedup/candidates/${candidateId}/merge`,
-    { method: 'POST' },
-  );
-
-export const dismissDedupCandidate = (
-  candidateId: number,
-): Promise<{ id: number; status: string }> =>
-  request<{ id: number; status: string }>(
-    `/dedup/candidates/${candidateId}/dismiss`,
-    { method: 'POST' },
-  );
-
 export interface ClusterMergeResult {
   merge_group_id: string;
   survivor_id: number;
@@ -1885,26 +1434,8 @@ export interface ClusterMergeResult {
   candidates_resolved: number;
 }
 
-/* Merge a whole cluster of candidates (A-B, B-C, ...) into one property under
- * one reversible merge group. */
-export const mergeDedupCluster = (
-  candidateIds: number[],
-): Promise<ClusterMergeResult> =>
-  request<ClusterMergeResult>('/dedup/clusters/merge', {
-    method: 'POST',
-    json: { candidate_ids: candidateIds },
-  });
-
-export const dismissDedupCluster = (
-  candidateIds: number[],
-): Promise<{ dismissed: number[]; status: string }> =>
-  request<{ dismissed: number[]; status: string }>('/dedup/clusters/dismiss', {
-    method: 'POST',
-    json: { candidate_ids: candidateIds },
-  });
-
-/* Merge an explicit operator-checked SUBSET of a cluster by property id; the
- * unchecked rest stays in the proposal queue (re-pointed server-side). */
+/* Merge an operator-checked SET of properties (Browse mergeMode) into one
+ * survivor under one reversible merge group. */
 export const mergeDedupPropertySet = (
   propertyIds: number[],
 ): Promise<ClusterMergeResult> =>
@@ -1942,24 +1473,6 @@ export const unlinkAssetProperty = (
     { method: 'POST', json: { property_id: propertyId } },
   );
 
-export interface BulkMergeResult {
-  data: {
-    merged: number;
-    skipped: number;
-    merge_group_ids: string[];
-  };
-}
-
-/* Scoped bulk-approve: merge many proposed candidates as INDEPENDENT reversible
- * pairs (per-pair tolerant). The /dedup surface sends the loaded STRONG ids. */
-export const bulkMergeDedupCandidates = (
-  candidateIds: number[],
-): Promise<BulkMergeResult> =>
-  request<BulkMergeResult>('/dedup/candidates/bulk-merge', {
-    method: 'POST',
-    json: { candidate_ids: candidateIds },
-  });
-
 export const listDedupMerges = (
   params: { limit?: number; offset?: number } = {},
 ): Promise<MergesResponse> =>
@@ -1967,7 +1480,7 @@ export const listDedupMerges = (
     query: params as Record<string, QueryValue>,
   });
 
-/* Browse the RESULTS of dedup: already-merged properties whose child-listing
+/* Browse the RESULTS of merging: already-merged properties whose child-listing
  * count (`source_count`) is in [min_listings, max_listings], biggest groups
  * first. `max_listings`/`category_main` omitted => no upper bound / any type
  * (null query params are dropped by `request`). Admin-gated. */
@@ -2326,157 +1839,3 @@ export const adminSetEntitlement = (
     json: body,
     jwt: true,
   });
-
-/* ----- location audit ---------------------------------------------------- */
-/* /location-audit — read-only per-listing inventory of every address / geo /
- * coordinate field, with the acquisition method for the two fields whose
- * provenance varies per row (coordinate + street). Backed by
- * api/routes/location_audit.py, admin-gated. See lib/locationAudit.ts for the
- * field glossary + method labels the page renders. */
-export type LocationAuditRow = {
-  sreality_id: number;
-  source: string;
-  source_id_native: string | null;
-  source_url: string | null;
-  category_main: string | null;
-  category_type: string | null;
-  category_sub_cb: number | null;
-  is_active: boolean;
-  last_seen_at: string | null;
-  inactive_at: string | null;
-  lat: number | null;
-  lon: number | null;
-  street: string | null;
-  house_number: string | null;
-  zip: string | null;
-  street_id: number | null;
-  street_name_key: string | null;
-  street_source: string | null;
-  // Dedup-eligibility inputs (for the per-row "why unreachable" breakdown).
-  disposition: string | null;
-  area_m2: number | null;
-  estate_area: number | null;
-  usable_area: number | null;
-  locality: string | null;
-  district: string | null;
-  obec: string | null;
-  okres: string | null;
-  region: string | null;
-  obec_id: number | null;
-  okres_id: number | null;
-  region_id: number | null;
-  locality_district_id: number | null;
-  locality_region_id: number | null;
-  locality_municipality_id: number | null;
-  locality_quarter_id: number | null;
-  locality_ward_id: number | null;
-  geo_cell_key: string | null;
-  geocode_attempted_at: string | null;
-  coord_street_attempt_version: number | null;
-  coords_source: string | null;
-  inaccuracy_type: string | null;
-  accurate: boolean | null;
-  geom_method: string | null;
-  street_method: string | null;
-  // Dedup reachability: dedup_reachable = the engine can reach this listing via SOME
-  // pass; the three arm booleans show which (street+disposition / geo+area / byt-geo).
-  dedup_reachable: boolean;
-  elig_street: boolean;
-  elig_geo: boolean;
-  elig_byt_geo: boolean;
-};
-
-export type LocationAuditPage = {
-  data: LocationAuditRow[];
-  // null on non-first pages: the count is computed once (offset 0) and read from the
-  // first page only — re-counting on every infinite-scroll fetch is wasteful (~1s each).
-  total: number | null;
-  returned: number;
-  limit: number;
-  offset: number;
-};
-
-export const getLocationAudit = (
-  params: {
-    source?: string;
-    category_main?: string;
-    active?: 'active' | 'inactive';
-    dedup?: 'reachable' | 'unreachable';
-    // Narrow to ONE dedup pass's domain, optionally split into that pass's own
-    // eligible / ineligible halves — how an eligibility-matrix cell drills down.
-    path?: DedupPathKey;
-    path_state?: 'eligible' | 'ineligible';
-    has?: ReadonlyArray<string>;
-    missing?: ReadonlyArray<string>;
-    limit?: number;
-    offset?: number;
-  } = {},
-): Promise<LocationAuditPage> => {
-  const q = new URLSearchParams();
-  if (params.source) q.set('source', params.source);
-  if (params.category_main) q.set('category_main', params.category_main);
-  if (params.active) q.set('active', params.active);
-  if (params.dedup) q.set('dedup', params.dedup);
-  if (params.path) q.set('path', params.path);
-  if (params.path_state) q.set('path_state', params.path_state);
-  if (params.has?.length) q.set('has', params.has.join(','));
-  if (params.missing?.length) q.set('missing', params.missing.join(','));
-  q.set('limit', String(params.limit ?? 50));
-  q.set('offset', String(params.offset ?? 0));
-  return request(`/location-audit?${q.toString()}`, { jwt: true });
-};
-
-export type DedupPathKey = 'street' | 'geo' | 'byt_geo';
-
-/* One bucket of listings sharing an eligibility signature. The API returns the joint
- * distribution rather than a pre-pivoted table, so every pass × scope × breakdown the
- * matrix offers is a client-side pivot of ONE 0.8s scan. `elig_*` are the ENGINE's own
- * predicates (nullable: a NULL category_main makes the two category-gated arms NULL —
- * treat non-true as ineligible, never `!elig`). */
-export type EligibilityBucket = {
-  source: string;
-  category_main: string | null;
-  is_active: boolean;
-  has_street: boolean;
-  has_disposition: boolean;
-  has_geom: boolean;
-  has_obec: boolean;
-  has_area: boolean;
-  elig_street: boolean | null;
-  elig_geo: boolean | null;
-  elig_byt_geo: boolean | null;
-  n: number;
-};
-
-export type EligibilityMatrix = {
-  buckets: EligibilityBucket[];
-  /* Each pass's domain + active gate, DERIVED server-side from the same constants the
-   * SQL renders — so the client pivot can't drift from the predicate it pivots. */
-  paths: Array<{
-    key: DedupPathKey;
-    domain_categories: string[] | null;
-    active_only: boolean;
-  }>;
-  total: number;
-};
-
-export const getEligibilityMatrix = (): Promise<EligibilityMatrix> =>
-  request('/location-audit/eligibility-matrix', { jwt: true });
-
-export type LocationAuditRaw = {
-  sreality_id: number;
-  source: string;
-  source_id_native: string | null;
-  source_url: string | null;
-  category_main: string | null;
-  category_type: string | null;
-  last_seen_at: string | null;
-  raw_json: unknown;
-};
-
-export const getLocationAuditRaw = (
-  srealityId: number,
-): Promise<LocationAuditRaw> =>
-  // sreality_id is a QUERY param, not a path segment: non-sreality PKs are
-  // negative and the int path convertor would 404 on the leading minus.
-  request('/location-audit/raw', { query: { sreality_id: srealityId }, jwt: true });

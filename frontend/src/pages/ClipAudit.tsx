@@ -751,16 +751,13 @@ function ModelExplainer() {
           </p>
           <p>
             <strong className="text-[var(--color-ink)]">Live-tunable, no redeploy</strong>{' '}
-            (<Link to="/settings#dedup-engine" className="text-[var(--color-copper)] hover:underline">Settings → Dedup engine</Link>):
-            whether the engine prefers CLIP tags over the paid classifier, and the two
-            cosine bars that route the forensic visual compare.
+            (<Link to="/settings#clip-regions" className="text-[var(--color-copper)] hover:underline">Settings → CLIP tagging priority kraje</Link>):
+            which kraje the tagging sweep drains first.
           </p>
           <p>
             <strong className="text-[var(--color-ink)]">Hardcoded in code</strong> (changing
-            these needs a deploy, not a Settings edit): the anchor taxonomy itself
-            (adding/rewording a prompt), and the render-exclusion cutoff
-            (<span className="font-mono">RENDER_SCORE_EXCLUDE_MIN = 0.95</span>) that drops
-            high-render images from the byt merge signal.
+            this needs a deploy, not a Settings edit): the anchor taxonomy itself
+            (adding/rewording a prompt).
           </p>
         </div>
       )}

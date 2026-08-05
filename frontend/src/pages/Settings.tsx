@@ -50,10 +50,9 @@ import { PickButton } from '@/components/controls';
 import TiersSection from '@/components/TiersSection';
 import { WORKFLOW_DOCS, type WorkflowDoc } from '@/lib/workflowDocs.generated';
 
-/* Deep-link arrivals (e.g. a /dedup decision's "→ ⚙ cosine haiku min" link →
- * /settings#setting-dedup_cosine_haiku_min): scroll the targeted row into view and flash
- * it, once the force-opened section has rendered it. Outline via inline style so there's
- * no Tailwind-JIT class to miss. */
+/* Deep-link arrivals (a `/settings#setting-<key>` link from another surface):
+ * scroll the targeted row into view and flash it, once the force-opened section has
+ * rendered it. Outline via inline style so there's no Tailwind-JIT class to miss. */
 function useScrollToSettingHash(hash: string): void {
   useEffect(() => {
     const id = hash.startsWith('#') ? hash.slice(1) : '';
@@ -152,7 +151,7 @@ export default function Settings() {
         id="clip-regions"
         eyebrow="Tagging"
         title="CLIP tagging — priority kraje"
-        description="CLIP image tagging drains the marked kraje first — tags + embeddings — so their dedup cosine is ready before the global sweep. Unmarked = no priority (everything drains newest-first); the count is the kraj's active listings."
+        description="CLIP image tagging drains the marked kraje first — tags + embeddings — so their coverage lands before the global sweep. Unmarked = no priority (everything drains newest-first); the count is the kraj's active listings."
       >
         <ClipRegionsSection />
       </CollapsibleSection>
@@ -212,11 +211,10 @@ export default function Settings() {
 /* Collapsible section                                                   */
 /* -------------------------------------------------------------------- */
 
-/* Mirrors the /dedup page's CollapsibleSection so the two operator surfaces read
- * the same: a clickable header (chevron + eyebrow + display-serif title) with the
- * body — description + content — hidden when collapsed. Per-section open/closed
- * state persists in localStorage so the operator's choices survive a reload (the
- * page is long). */
+/* A clickable header (chevron + eyebrow + display-serif title) with the body —
+ * description + content — hidden when collapsed. Per-section open/closed state
+ * persists in localStorage so the operator's choices survive a reload (the page
+ * is long). */
 function useCollapsed(id: string, defaultOpen: boolean): [boolean, () => void] {
   const key = `settings.collapsed.${id}`;
   const [open, setOpen] = useState<boolean>(() => {
