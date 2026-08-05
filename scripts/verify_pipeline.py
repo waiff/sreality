@@ -42,7 +42,6 @@ LOG = logging.getLogger("verify_pipeline")
 # llm_silence_fail_hours, added with the WS4 alerting rebuild) is served from this
 # default until a future seed migration includes it.
 DEFAULT_THRESHOLDS: dict[str, float] = {
-    "unpublished_overdue_fail": 1,
     "llm_error_rate_warn": 0.2,
     "llm_silence_fail_hours": 4,
     "llm_spend_24h_warn_usd": 90,

@@ -436,8 +436,7 @@ This isn't purely a UX polish item. For up to 5 minutes after every merge —
 manual or Tier-2 automatic — Browse actively **contradicts a dedup decision
 that was just made**: it shows what looks like two separate active listings
 for a property the system just declared to be one. That's a direct, visible
-regression in the exact metric the entire dedup program (rules #15-16,
-`docs/design/multi-portal-dedup.md`, `clip-visual-embeddings.md`) exists to
+regression in the exact metric the entire dedup program (rules #15-16) exists to
 improve — perceived duplicate rate. Because the fix lives at the shared
 `merge_properties`/`unmerge_group`/`split_property_to_singletons` chokepoint,
 it closes this window for **every** merge path, including the much

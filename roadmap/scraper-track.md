@@ -216,8 +216,9 @@ Unblocks end-to-end house and commercial estimations over data that
 already existed in the database.
 
 ### Phase 2: Multi-portal ingestion (later, larger)
-> **Design locked (2026-05-25): see
-> [`docs/design/multi-portal-dedup.md`](docs/design/multi-portal-dedup.md).**
+> **Design locked (2026-05-25): see `docs/design/multi-portal-dedup.md`** (deleted in the
+> 2026-08 "NEW DEDUP" cutoff; git history only — the ingestion half of that doc shipped, the
+> dedup half was removed).
 > Multi-portal ingestion is now unified with the Dedup track into one
 > sliced feature. Chosen target portals: **bezrealitky, bazos,
 > reality.idnes**. Ingestion arrives in Slice 3 (after the Shape-B

@@ -663,8 +663,7 @@ def upsert_listing_with_property(
     The listing write and its property linkage commit in one transaction so a
     partial failure can't leave a listing unlinked. New listings become their
     own singleton property (`_create_singleton_property`); cross-listing
-    grouping is the out-of-band street+disposition dedup engine's job, not the
-    insert path.
+    grouping is out-of-band and operator-ordered, never the insert path.
     """
     sreality_id = row["sreality_id"]
     with conn.transaction():
@@ -698,7 +697,7 @@ BROKER_ATTRIBUTED_SOURCES = frozenset(
 # nextval draw below is unconditional until an operator explicitly opts in.
 # app_settings-backed (not env/process-cached) so the always-on realtime
 # worker and cron drains pick up a flip on their very next batch, not after a
-# restart — same posture as toolkit.dedup_settings' operator-gated knobs.
+# restart.
 GATE2_NULL_SREALITY_ID_SETTING = "gate2_null_sreality_id_enabled"
 
 
@@ -848,13 +847,11 @@ def _create_singleton_property(
 ) -> None:
     """Give a newly-seen listing its own singleton `properties` parent.
 
-    No matching at insert time: the street+disposition dedup engine
-    (`toolkit.dedup_engine` + `scripts.dedup_engine`) owns ALL grouping and runs
-    out-of-band. The old geo Tier-1 spatial probe (20m/price/area) was removed
-    when matching moved to street+disposition — insert-time geo proximity is no
-    longer how properties are linked. Every new listing starts as a singleton;
-    the engine merges it onto a sibling later if street+disposition (+ visual)
-    agree.
+    No matching at insert time, ever. The old geo Tier-1 spatial probe
+    (20m/price/area) was removed long ago, and the automatic decision engine
+    that replaced it was itself removed in the 2026-08 "NEW DEDUP" cutoff
+    (CLAUDE.md rule 15). Every new listing starts as a singleton and stays one
+    until an operator orders a merge through `toolkit.property_identity`.
     """
     with conn.cursor() as cur:
         cur.execute(

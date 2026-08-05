@@ -7,9 +7,10 @@ all history stays put. Every re-pointed child is logged to
 the survivor later absorbs a third property. The survivor's stats are recomputed
 inline (reusing the recompute job's exact SQL) so there is no stale window.
 
-Both the operator review API (`api.property_dedup`) and the Tier-2 auto-merge
-sweep (PR3) go through these two functions, so the transaction mechanics live in
-one tested place. Auto-merge is only safe because every merge is reversible here.
+This module is the single merge chokepoint. Since the 2026-08 "NEW DEDUP" cutoff
+there is no automatic decision path at all — every merge is operator-ordered via
+`api.property_merge` (`POST /properties/merge`) — but the mechanics stay in one
+tested place, and every merge is reversible (`unmerge_group`).
 """
 
 from __future__ import annotations
@@ -122,15 +123,14 @@ def merge_properties(
             if rows[retired_id][1] != "active":
                 raise MergeError(f"retired {retired_id} is not active")
             # Final category guard at THE chokepoint every merge path funnels
-            # through (engine, cluster, operator one-click, Browse merge-mode).
+            # through (operator one-click, Browse merge-mode).
             # A sale and a rental are never the same property, and a flat and a
             # house aren't either — but dum <-> komercni IS allowed (the same
             # building listed as a house on one portal, commercial on another).
             # `category_main_compatible` encodes that one sanctioned cross-type;
             # refuse everything else even on an operator-initiated merge. NULL =
-            # unknown, not a conflict. The engine's classify_pair also gates
-            # earlier; this backstops the manual merge surface (api.property_dedup)
-            # that calls merge_properties directly without classify_pair.
+            # unknown, not a conflict. With no automatic decision layer left,
+            # this is the ONLY category gate — nothing upstream pre-screens.
             s_ct, s_cm = rows[survivor_id][2], rows[survivor_id][3]
             r_ct, r_cm = rows[retired_id][2], rows[retired_id][3]
             if s_ct is not None and r_ct is not None and s_ct != r_ct:

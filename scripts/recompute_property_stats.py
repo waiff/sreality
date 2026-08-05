@@ -5,9 +5,8 @@ Two phases, both idempotent:
 1. Attach stragglers. Any `listings` row with `property_id IS NULL` — an
    old-code insert, or a row written by the batched detail-drain — gets its own
    singleton property here, mirroring migration 092. No cross-listing matching
-   happens at this step: the old geo Tier-1 spatial probe was removed when
-   grouping moved to the street+disposition dedup engine (`toolkit.dedup_engine`
-   / `scripts.dedup_engine`), which runs out-of-band and owns ALL merges.
+   happens at this step, ever: grouping is out-of-band and, since the 2026-08
+   "NEW DEDUP" cutoff, operator-ordered only (CLAUDE.md rule 15).
 
 2. Recompute every property from its children. Per property:
      is_active           = bool_or(children.is_active)   (decision #3 rollup)
@@ -452,9 +451,8 @@ def _attach_stragglers(conn: Any, *, skip_native_backfill: bool = False) -> int:
     The native-id backfill is a one-time legacy fix that scans the whole listings
     table, so the */5 incremental pass skips it (daily full mode runs it). No
     cross-listing matching happens here anymore: the old geo Tier-1 spatial link
-    was removed when grouping moved to the street+disposition dedup engine
-    (`toolkit.dedup_engine` / `scripts.dedup_engine`), which runs out-of-band.
-    Fresh singletons are inserted already-correct (one child, no price history),
+    was removed when grouping moved out-of-band, and grouping is now
+    operator-ordered only (CLAUDE.md rule 15). Fresh singletons are inserted already-correct (one child, no price history),
     so they need no recompute and are not enqueued dirty.
     """
     with conn.cursor() as cur:
