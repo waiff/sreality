@@ -314,6 +314,46 @@ def _parse_price(text: str | None, category_type: str | None) -> tuple[int | Non
     return (value if value <= _PRICE_MAX else None), unit
 
 
+# The detail spec-table cell renders "{amount} CZK/ {unit}" with three observed units.
+# `listings.price_czk` is a TOTAL (or a monthly rent) everywhere in this schema —
+# production carries only `za nemovitost` / `za mesic` / `celkem` / `měsíc`, none per-area
+# — so a per-m² cell MUST yield NULL. A unit price written into price_czk reads as a total
+# in every downstream consumer (Kč/m² stats, estimation comparables, Browse sort,
+# price-drop watchdogs), which is strictly worse than the missing value it replaces.
+_PER_AREA_MARKERS: tuple[str, ...] = ("za m2", "za m 2", "/m2", "za metr")
+_DETAIL_PRICE_UNITS: tuple[tuple[str, str], ...] = (
+    ("za mesic", "za mesic"),
+    ("za nemovitost", "za nemovitost"),
+)
+
+
+def _detail_price(text: str | None, category_type: str | None) -> tuple[int | None, str | None]:
+    """Price from the detail spec table's price cell.
+
+    Separate from `_parse_price` on purpose: that one reads an index card's `data-price`
+    (a bare amount) and is shared with `index_price`. This cell carries a trailing unit,
+    and a naive digit scrape swallows it — `7 759 CZK/ za m2` becomes 77592, taking the
+    "2" from "m2" into the number. So the amount is read ONLY from the part before `CZK`.
+    """
+    default_unit = "za mesic" if category_type == "pronajem" else "za nemovitost"
+    if not text:
+        return None, default_unit
+    low = _norm_key(text)
+    if any(k in low for k in ("na vyzadani", "info o cene", "cena v rk", "dohodou", "neuvedena")):
+        return None, default_unit
+    if any(marker in low for marker in _PER_AREA_MARKERS):
+        return None, default_unit  # per-area pricing has no representation in price_czk
+    head, sep, tail = low.partition("czk")
+    if not sep:
+        return None, default_unit
+    digits = re.sub(r"\D", "", head)
+    if not digits:
+        return None, default_unit
+    value = int(digits)
+    unit = next((mapped for token, mapped in _DETAIL_PRICE_UNITS if token in tail), default_unit)
+    return (value if 0 < value <= _PRICE_MAX else None), unit
+
+
 def index_price(text: str | None) -> int | None:
     """The Kč amount from an index card's data-price text, or None. Drives
     price-change detection for the detail-refetch queue."""
@@ -527,16 +567,14 @@ def parse_detail(
         value = int(price_attr)
         price_czk = value if 0 < value <= _PRICE_MAX else None
     if price_czk is None:
-        # DEAD FALLBACK, deliberately left dead for now: `.pd-price` is absent from
-        # 300/300 stored pages, so ~44% of remax listings (the ones without
-        # `data-advert-price`) have no price path at all. The obvious replacement,
-        # `.pd-table__value--price`, is NOT safe yet: it renders three different units
-        # ("za nemovitost", "za měsíc", "za m2") and `_parse_price` scrapes digits
-        # naively, so a land plot showing "7 759 CZK/ za m2" yields 77592 — it swallows
-        # the "2" from "m2". A unit-price written as a total is far worse than a NULL
-        # (it poisons €/m² stats, estimation comparables and Browse sorting), so this
-        # waits on a unit-aware `_parse_price`. See docs/design/remax-extraction.md.
-        price_czk, price_unit = _parse_price(_text(tree.css_first(".pd-price")), category_type)
+        # `data-advert-price` is absent on 132/300 stored pages, and the previous
+        # `.pd-price` fallback on ALL 300 — so ~44% of remax listings had no price path at
+        # all. The spec-table cell carries it on 300/300 and, unlike `.pd-header__price`,
+        # is not polluted by the adjacent energy-rating glyphs. `_detail_price` (not
+        # `_parse_price`) because that cell carries a trailing unit.
+        price_czk, price_unit = _detail_price(
+            _text(tree.css_first(".pd-table__value--price")), category_type
+        )
 
     # Coordinates: the first data-gps on the page is the subject listing's (the
     # rest belong to recommended cards). CZ-bbox-guarded.
