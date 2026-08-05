@@ -331,3 +331,31 @@ def test_parse_detail_rent_and_category_from_typ():
     assert listing.price_unit == "za mesic"
     assert listing.price_czk == 2_500
     assert "Praha 10" in (listing.locality or "")
+
+
+def test_detail_price_refuses_per_area_pricing():
+    """`listings.price_czk` is a TOTAL (or monthly rent) across all nine portals —
+    production carries only za nemovitost / za mesic / celkem / měsíc, none per-area. A
+    per-m² figure stored there reads as a total in every downstream consumer, so it must
+    yield NULL. The naive digit scrape also took the "2" out of "m2": 7 759 -> 77592."""
+    from scraper.remax_parser import _detail_price
+
+    assert _detail_price("7\xa0759\n\t\tCZK/ za m2", "prodej") == (None, "za nemovitost")
+
+
+def test_detail_price_reads_amount_and_unit():
+    from scraper.remax_parser import _detail_price
+
+    assert _detail_price("7\xa0800\xa0000\n\tCZK/ za nemovitost", "prodej") == (
+        7800000,
+        "za nemovitost",
+    )
+    assert _detail_price("2\xa0429\n\tCZK/ za měsíc", "pronajem") == (2429, "za mesic")
+
+
+def test_detail_price_is_none_when_the_portal_withholds_it():
+    from scraper.remax_parser import _detail_price
+
+    assert _detail_price("Cena na vyžádání v kanceláři", "prodej")[0] is None
+    assert _detail_price(None, "prodej")[0] is None
+    assert _detail_price("bez CZK ale bez cisla", "prodej")[0] is None
