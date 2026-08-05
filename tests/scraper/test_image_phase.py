@@ -481,9 +481,12 @@ def test_fetch_one_image_success_with_semaphore(monkeypatch):
         def upload_bytes(self, key, data, content_type="image/jpeg"):
             return None
 
-    key, phash, err = scraper_main._fetch_one_image(7, 0, "https://h/x.jpg", _R2(), sem)
+    key, phash, err = scraper_main._fetch_one_image(7, 51, "https://h/x.jpg", _R2(), sem)
     assert err is None
-    assert key == scraper_main.image_storage.image_key(7, 0)
+    # Literal, not image_key(...) again: distinct ids catch a swapped-argument
+    # regression, which the collision fix makes load-bearing (the image id is what
+    # makes the key row-unique).
+    assert key == "img/7/51.jpg"
     assert phash == 42
     assert sem.acquire(blocking=False)  # slot was released
     sem.release()
@@ -694,10 +697,10 @@ def _drive_image_loop(monkeypatch, batches, fetch_result):
         scraper_main.db, "mark_image_listing_taken_down", lambda conn, sid: 0
     )
 
-    def _fake_fetch(sid, seq, url, r2, semaphore=None):
+    def _fake_fetch(lid, image_id, url, r2, semaphore=None):
         err = fetch_result(url)
         phash = None if err is not None else 777
-        return (scraper_main.image_storage.image_key(sid, seq), phash, err)
+        return (scraper_main.image_storage.image_key(lid, image_id), phash, err)
 
     monkeypatch.setattr(scraper_main, "_fetch_one_image", _fake_fetch)
 

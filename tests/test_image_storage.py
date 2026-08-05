@@ -38,14 +38,20 @@ def _patch_get(monkeypatch, captured: list, resp: _StreamResp) -> None:
     monkeypatch.setattr(image_storage.requests, "get", _get)
 
 
-def test_image_key_pads_sequence():
-    assert image_key(2836292428, 1) == "2836292428/0001.jpg"
-    assert image_key(2836292428, 19) == "2836292428/0019.jpg"
-    assert image_key(2836292428, 1234) == "2836292428/1234.jpg"
+def test_image_key_is_namespaced_and_row_unique():
+    assert image_key(2836292428, 17503887) == "img/2836292428/17503887.jpg"
+    assert image_key(123, 4) == "img/123/4.jpg"
 
 
-def test_image_key_handles_missing_sequence():
-    assert image_key(123, None) == "123/0000.jpg"
+def test_image_key_cannot_collide_with_either_legacy_scheme():
+    # The bug this scheme fixes: a NEW listing whose surrogate id equals an OLD
+    # listing's sreality_id minted the same `{prefix}/{seq:04d}.jpg` key, and the
+    # second upload overwrote the first. The `img/` namespace rules that out
+    # whatever the numbers are, and images.id keeps two rows of ONE listing apart.
+    legacy = "13251404/0001.jpg"
+    assert image_key(13251404, 1) != legacy
+    assert not image_key(13251404, 1).endswith(legacy)
+    assert image_key(31419, 529986) != image_key(31419, 529987)
 
 
 def test_is_configured_requires_all_vars(monkeypatch):

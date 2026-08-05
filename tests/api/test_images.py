@@ -45,6 +45,14 @@ def test_negative_id_key_allowed(client):
     assert res.status_code == 302
 
 
+def test_current_namespaced_key_allowed(client):
+    # `img/{listing_id}/{image_id}.jpg` — the collision-proof scheme every newly
+    # stored image takes; the two legacy shapes above stay serveable forever.
+    res = client.get("/images/img/443628/226547358.jpg", follow_redirects=False)
+    assert res.status_code == 302
+    assert res.headers["location"].endswith("img/443628/226547358.jpg?sig=abc")
+
+
 def test_public_even_when_token_set(client, monkeypatch):
     monkeypatch.setenv("API_TOKEN", "secret-token-xyz")
     res = client.get("/images/2872083276/0001.jpg", follow_redirects=False)
@@ -59,6 +67,10 @@ def test_public_even_when_token_set(client, monkeypatch):
         "../etc/passwd",                          # traversal
         "2872083276",                             # no sequence
         "foo/0001.jpg",                           # non-numeric id
+        "img/custom-attachments/1.jpg",           # namespace is not a free prefix
+        "img/443628/226547358.pdf",               # wrong extension under img/
+        "img/443628.jpg",                         # missing the image-id segment
+        "x/img/443628/226547358.jpg",             # not anchored at the namespace
     ],
 )
 def test_non_image_keys_rejected(client, key):
