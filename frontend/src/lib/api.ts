@@ -2,8 +2,8 @@
  *
  * Two auth shapes, matching the backend gate each route actually uses:
  *  - `jwt: true` (require_admin / verify_jwt routes — Settings, labeling,
- *    Outreach, broker-review, skill-refinements, Collections
- *    list, Pipeline, Watchdog subscriptions, /estimations create/read) sends
+ *    property merge mechanics, Outreach, broker-review, skill-refinements,
+ *    Collections list, Pipeline, Watchdog subscriptions, /estimations) sends
  *    the caller's real Supabase session access_token. The backend no longer
  *    accepts anything else here (api/dependencies.py:verify_jwt) — admin
  *    status rides in the JWT's app_metadata.is_admin claim, never a shared
@@ -674,7 +674,7 @@ export const setImageAnnotation = (body: {
   render_flagged?: boolean;
   note?: string | null;
 }): Promise<{ data: ImageAnnotation }> =>
-  request<{ data: ImageAnnotation }>('/dedup/image-annotation', {
+  request<{ data: ImageAnnotation }>('/labeling/image-annotation', {
     method: 'POST',
     json: body,
     jwt: true,
@@ -682,7 +682,7 @@ export const setImageAnnotation = (body: {
 export const deleteImageAnnotation = (
   image_id: number,
 ): Promise<{ data: { deleted: boolean } }> =>
-  request<{ data: { deleted: boolean } }>('/dedup/image-annotation', {
+  request<{ data: { deleted: boolean } }>('/labeling/image-annotation', {
     method: 'DELETE',
     query: { image_id },
     jwt: true,
@@ -700,12 +700,12 @@ export const setPhashNote = (body: {
   image_id_b: number;
   note?: string | null;
 }): Promise<{ data: PhashNote }> =>
-  request<{ data: PhashNote }>('/dedup/phash-note', { method: 'POST', json: body, jwt: true });
+  request<{ data: PhashNote }>('/labeling/phash-note', { method: 'POST', json: body, jwt: true });
 export const deletePhashNote = (
   image_id_a: number,
   image_id_b: number,
 ): Promise<{ data: { deleted: boolean } }> =>
-  request<{ data: { deleted: boolean } }>('/dedup/phash-note', {
+  request<{ data: { deleted: boolean } }>('/labeling/phash-note', {
     method: 'DELETE',
     query: { a: image_id_a, b: image_id_b },
     jwt: true,
@@ -722,7 +722,7 @@ export const setTrainingExample = (body: {
   image_id: number;
   label: string;
 }): Promise<{ data: TrainingExample }> =>
-  request<{ data: TrainingExample }>('/dedup/training-example', {
+  request<{ data: TrainingExample }>('/labeling/training-example', {
     method: 'POST',
     json: body,
     jwt: true,
@@ -730,7 +730,7 @@ export const setTrainingExample = (body: {
 export const deleteTrainingExample = (
   image_id: number,
 ): Promise<{ data: { deleted: boolean } }> =>
-  request<{ data: { deleted: boolean } }>('/dedup/training-example', {
+  request<{ data: { deleted: boolean } }>('/labeling/training-example', {
     method: 'DELETE',
     query: { image_id },
     jwt: true,
@@ -743,7 +743,7 @@ export const deleteTrainingLabel = (
   label: string,
 ): Promise<{ data: { deleted: number; label: string } }> =>
   request<{ data: { deleted: number; label: string } }>(
-    '/dedup/training-examples/by-label',
+    '/labeling/training-examples/by-label',
     { method: 'DELETE', query: { label }, jwt: true },
   );
 
@@ -755,7 +755,7 @@ export const bulkSetTrainingExamples = (body: {
   label: string;
 }): Promise<{ data: { updated: number; label: string; image_ids: number[] } }> =>
   request<{ data: { updated: number; label: string; image_ids: number[] } }>(
-    '/dedup/training-examples/bulk',
+    '/labeling/training-examples/bulk',
     { method: 'POST', json: body, jwt: true },
   );
 
@@ -769,7 +769,7 @@ export type BorderCase = {
 export const setBorderCase = (
   image_id: number,
 ): Promise<{ data: BorderCase }> =>
-  request<{ data: BorderCase }>('/dedup/border-case', {
+  request<{ data: BorderCase }>('/labeling/border-case', {
     method: 'POST',
     json: { image_id },
     jwt: true,
@@ -777,7 +777,7 @@ export const setBorderCase = (
 export const deleteBorderCase = (
   image_id: number,
 ): Promise<{ data: { deleted: boolean } }> =>
-  request<{ data: { deleted: boolean } }>('/dedup/border-case', {
+  request<{ data: { deleted: boolean } }>('/labeling/border-case', {
     method: 'DELETE',
     query: { image_id },
     jwt: true,
@@ -1414,7 +1414,10 @@ export const reorderFilterPresets = (
     json: { ids },
   });
 
-/* ----- Operator merge mechanics (multi-portal) ---------------------------- */
+/* ----- Operator merge mechanics (multi-portal) ----------------------------
+ * Mounted under `/properties/*` since the NEW DEDUP cutoff (docs/design/
+ * new-dedup/CUTOFF.md §2/S5) — the mechanics that survived the decision-layer
+ * removal. Every route is `require_admin`, so each call sends `jwt: true`. */
 
 export interface UnmergeResult {
   data: {
@@ -1436,12 +1439,13 @@ export interface ClusterMergeResult {
 
 /* Merge an operator-checked SET of properties (Browse mergeMode) into one
  * survivor under one reversible merge group. */
-export const mergeDedupPropertySet = (
+export const mergePropertySet = (
   propertyIds: number[],
 ): Promise<ClusterMergeResult> =>
-  request<ClusterMergeResult>('/dedup/properties/merge', {
+  request<ClusterMergeResult>('/properties/merge', {
     method: 'POST',
     json: { property_ids: propertyIds },
+    jwt: true,
   });
 
 /* Asset links (migration 224): group properties that are the same physical
@@ -1460,24 +1464,26 @@ export const linkAssetProperties = (
   propertyIds: number[],
   note?: string,
 ): Promise<AssetLinkResult> =>
-  request<AssetLinkResult>('/dedup/assets/link', {
+  request<AssetLinkResult>('/properties/assets/link', {
     method: 'POST',
     json: { property_ids: propertyIds, note: note ?? null },
+    jwt: true,
   });
 
 export const unlinkAssetProperty = (
   propertyId: number,
 ): Promise<{ data: { asset_id: number; asset_dissolved: boolean } }> =>
   request<{ data: { asset_id: number; asset_dissolved: boolean } }>(
-    '/dedup/assets/unlink',
-    { method: 'POST', json: { property_id: propertyId } },
+    '/properties/assets/unlink',
+    { method: 'POST', json: { property_id: propertyId }, jwt: true },
   );
 
-export const listDedupMerges = (
+export const listPropertyMerges = (
   params: { limit?: number; offset?: number } = {},
 ): Promise<MergesResponse> =>
-  request<MergesResponse>('/dedup/merges', {
+  request<MergesResponse>('/properties/merges', {
     query: params as Record<string, QueryValue>,
+    jwt: true,
   });
 
 /* Browse the RESULTS of merging: already-merged properties whose child-listing
@@ -1493,16 +1499,17 @@ export const listMergedProperties = (
     offset?: number;
   } = {},
 ): Promise<MergedPropertiesResponse> =>
-  request<MergedPropertiesResponse>('/dedup/merged-properties', {
+  request<MergedPropertiesResponse>('/properties/merged', {
     query: params as Record<string, QueryValue>,
+    jwt: true,
   });
 
 export const unmergeMergeGroup = (
   mergeGroupId: string,
 ): Promise<UnmergeResult> =>
   request<UnmergeResult>(
-    `/dedup/merges/${encodeURIComponent(mergeGroupId)}/unmerge`,
-    { method: 'POST' },
+    `/properties/merges/${encodeURIComponent(mergeGroupId)}/unmerge`,
+    { method: 'POST', jwt: true },
   );
 
 /* ----- price-stats datasets ---------------------------------------------- */
