@@ -137,8 +137,12 @@ _RECOMPUTE_BATCH_SQL = """
         count(distinct l.source)   AS distinct_site_count,
         -- Browse's portal filter (migration 371): "is this property listed on
         -- portal X", as opposed to `properties.source`, which is only the ONE
-        -- trust-ranked representative child and therefore hides ~10-22% of a
-        -- portal's properties behind a higher-trust sibling. NULL active_sources
+        -- trust-ranked representative child and therefore hides 10-22 percent
+        -- of a portal's properties behind a higher-trust sibling. (Spelled out:
+        -- psycopg scans the whole query string for placeholders on every
+        -- parameterized execute, so a literal percent sign here raises
+        -- ProgrammingError -- see tests/test_sql_placeholders.py.)
+        -- NULL active_sources
         -- (no live child) is intentional: NULL && anything is NULL, so such a
         -- property drops out of an active-only portal filter on its own.
         array_agg(distinct l.source) AS all_sources,
