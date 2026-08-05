@@ -11,7 +11,6 @@ import ImageLightbox from '@/components/ImageLightbox';
 import NoteFlagControl from '@/components/NoteFlagControl';
 import TrainControl from '@/components/TrainControl';
 import LabelCombobox, { type LabelOption } from '@/components/LabelCombobox';
-import DedupBreakdown from '@/components/DedupBreakdown';
 import { useInfiniteList } from '@/lib/useInfiniteList';
 import {
   fetchClipAuditProperties,
@@ -29,12 +28,10 @@ import {
 } from '@/lib/queries';
 import type { KeysetCursor } from '@/lib/keyset';
 import {
-  getDedupAudit,
   setImageAnnotation,
   deleteImageAnnotation,
   bulkSetTrainingExamples,
   deleteTrainingLabel,
-  type DedupAuditRow,
   type ImageAnnotation,
   type TrainingExample,
 } from '@/lib/api';
@@ -52,9 +49,8 @@ import type { ImagePublic, PropertySource } from '@/lib/types';
  * Two tabs share ONE feed (properties -> child listings -> images, grouped, infinite
  * scroll) since fine_tag/logical_tag and render_score come from the SAME CLIP call —
  * only the overlay badge + filter row differ per tab. Reuses the exact anon read path
- * Browse/Listing-Detail/dedup already use (browse_list, property_sources_public,
- * images_public) and the exact Decision-history components (DedupBreakdown) so "which
- * dedup level this pair settled at" needs no new rendering code. */
+ * Browse/Listing-Detail already use (browse_list, property_sources_public,
+ * images_public). */
 
 type Mode = 'tagging' | 'render';
 
@@ -852,12 +848,6 @@ function PropertyPageGroup({
     enabled: imageIds.length > 0,
   });
 
-  const auditQ = useQuery({
-    queryKey: ['clip-audit', 'audit', propertyIds],
-    queryFn: () => getDedupAudit({ property_id_in: propertyIds, limit: 300 }),
-    enabled: propertyIds.length > 0,
-  });
-
   const trainingQ = useQuery({
     queryKey: ['clip-audit', 'training', imageIds],
     queryFn: () => fetchTrainingExamplesForImageIds(imageIds),
@@ -889,11 +879,6 @@ function PropertyPageGroup({
           training={trainingQ.data ?? new Map()}
           borderCases={borderCasesQ.data ?? new Set()}
           labelOptions={labelOptions}
-          auditRows={
-            auditQ.data?.data.filter(
-              (r) => r.left_property_id === p.property_id || r.right_property_id === p.property_id,
-            ) ?? []
-          }
           mode={mode}
           tagFilter={tagFilter}
           renderMin={renderMin}
@@ -912,7 +897,6 @@ function PropertyCard({
   training,
   borderCases,
   labelOptions,
-  auditRows,
   mode,
   tagFilter,
   renderMin,
@@ -925,7 +909,6 @@ function PropertyCard({
   training: Map<number, TrainingExample>;
   borderCases: Set<number>;
   labelOptions: LabelOption[];
-  auditRows: DedupAuditRow[];
   mode: Mode;
   tagFilter: string;
   renderMin: number | null;
@@ -979,40 +962,6 @@ function PropertyCard({
           />
         ))}
       </div>
-
-      {auditRows.length > 0 && (
-        <div className="mt-3 flex flex-col gap-2 border-t border-[var(--color-rule-soft)] pt-3">
-          <span className="text-[0.62rem] uppercase tracking-[0.1em] text-[var(--color-ink-4)]">
-            Dedup rozhodnutí
-          </span>
-          {auditRows.map((r) => (
-            <div key={r.audit_id} className="flex flex-col gap-1">
-              <div className="flex items-center gap-2 text-[0.74rem]">
-                <span
-                  className={
-                    r.outcome === 'merged'
-                      ? 'text-[var(--color-copper)]'
-                      : 'text-[var(--color-brick)]'
-                  }
-                >
-                  {r.outcome === 'merged' ? 'sloučeno' : 'zamítnuto'}
-                </span>
-                <span className="text-[var(--color-ink-4)] font-mono">{r.stage}</span>
-                <span className="text-[var(--color-ink-3)] font-mono tabular-nums">
-                  {r.left_sreality_id} ↔ {r.right_sreality_id}
-                </span>
-              </div>
-              <DedupBreakdown rungs={r.audit_breakdown} />
-            </div>
-          ))}
-          <Link
-            to={`/dedup?audit_property=${property.property_id}#history`}
-            className="self-start text-[0.72rem] text-[var(--color-ink-3)] hover:text-[var(--color-copper)] underline decoration-dotted underline-offset-2"
-          >
-            zobrazit v Decision history →
-          </Link>
-        </div>
-      )}
     </div>
   );
 }

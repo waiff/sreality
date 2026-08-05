@@ -47,10 +47,7 @@ import {
 import { fmtAbsolute } from '@/lib/format';
 import { useTheme, type ThemeMode } from '@/lib/theme';
 import { PickButton } from '@/components/controls';
-import DedupEngineSection from '@/components/DedupEngineSection';
-import DedupTagPrioritiesSection from '@/components/DedupTagPrioritiesSection';
 import TiersSection from '@/components/TiersSection';
-import { hashTargetsSetting } from '@/lib/settingsAnchor';
 import { WORKFLOW_DOCS, type WorkflowDoc } from '@/lib/workflowDocs.generated';
 
 /* Deep-link arrivals (e.g. a /dedup decision's "→ ⚙ cosine haiku min" link →
@@ -158,43 +155,6 @@ export default function Settings() {
         description="CLIP image tagging drains the marked kraje first — tags + embeddings — so their dedup cosine is ready before the global sweep. Unmarked = no priority (everything drains newest-first); the count is the kraj's active listings."
       >
         <ClipRegionsSection />
-      </CollapsibleSection>
-
-      <CollapsibleSection
-        id="dedup-engine"
-        eyebrow="Matching"
-        title="Dedup engine"
-        ownsHash={hashTargetsSetting}
-        description={
-          <>
-            Every rule the cross-portal duplicate matcher uses — as a toggle or a
-            threshold. The CLIP knobs ship <span className="font-mono">off</span>:
-            turning on <span className="font-mono">prefer CLIP tags</span> switches
-            room labelling to the free self-hosted model (and unblocks houses /
-            land / commercial); the cosine tier routes the forensic compare by
-            photo similarity. Changes take effect on the next engine run — no
-            deploy.
-          </>
-        }
-      >
-        <DedupEngineSection />
-      </CollapsibleSection>
-
-      <CollapsibleSection
-        id="dedup-tag-priorities"
-        eyebrow="Matching"
-        title="Dedup comparison priority"
-        description={
-          <>
-            The order the visual layer compares matching rooms in — it stops at the
-            first confident match, so the tag at the top leads. Drag to reorder per
-            listing type. The defaults are grounded (facade for houses, situation plan
-            for plots, wet rooms for flats); a reorder only changes which photos are
-            compared first, never which are dropped.
-          </>
-        }
-      >
-        <DedupTagPrioritiesSection />
       </CollapsibleSection>
 
       <CollapsibleSection

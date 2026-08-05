@@ -1,10 +1,9 @@
 import { useEffect, useState } from 'react';
 
-/* The generic "flag this + leave a note" control — the same button/textarea/save/remove
- * shell as DecisionFeedbackControl (the merge-decision review flag), reused by the CLIP
- * tag/render-score annotations and the pHash pair notes so all three surfaces read alike
- * without three near-identical components. The caller owns the mutation (each subject —
- * property pair / image / image pair — has its own store), this component owns only the
+/* The generic "flag this + leave a note" control — one button/textarea/save/remove shell
+ * reused by the CLIP tag/render-score annotations and the pHash pair notes so both
+ * surfaces read alike without near-identical components. The caller owns the mutation
+ * (each subject — image / image pair — has its own store), this component owns only the
  * open/draft/save-remove interaction. Civic-archive: brick = flagged. */
 
 export default function NoteFlagControl({
