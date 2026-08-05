@@ -1,5 +1,11 @@
 -- 371_repair_colliding_image_storage_paths.sql
 --
+-- APPLY ONLY AFTER the new `scraper/image_storage.image_key` is DEPLOYED. This
+-- migration re-opens rows for download and two drains pick them up within minutes
+-- (`images_fresh.yml` on `*/15` plus its self-chain, and the always-on realtime
+-- worker), so applying it against the old code re-uploads them straight back into
+-- the colliding namespace and the repair has to be re-run.
+--
 -- Repair the rows whose R2 object was silently overwritten by a key collision.
 --
 -- Two key schemes shared one numeric namespace: the pre-Gate-2
@@ -34,7 +40,26 @@
 --
 -- pHash is cleared with the path: it describes bytes that no longer exist in the
 -- bucket, and a NULL pHash is simply invisible to every dedup query until the
--- re-download recomputes it inline.
+-- re-download recomputes it inline. `clip_tagged_at` is cleared for the same
+-- reason — it is the tagger's queue marker, so nulling it re-derives the CLIP tag
+-- and embedding from whatever bytes land. Deliberately NOT a DELETE of
+-- `image_clip_tags` / `image_clip_embeddings`: the tagger upserts
+-- `ON CONFLICT (image_id, model) DO UPDATE`, so the existing vector keeps serving
+-- dedup until it is replaced, where a missing one makes the cosine NULL and routes
+-- the pair to the paid forensic compare. Sequencing is automatic — both tagger arms
+-- require `storage_path IS NOT NULL`, so a cleared row is invisible to them until
+-- the re-download restores the path. (Live check before writing this: all 16 rows
+-- were tagged 24-27 June, i.e. BEFORE the August overwrites, so today's vectors do
+-- describe each row's own photo; this keeps that true if a re-download brings back
+-- different bytes.)
+--
+-- Operator-curated per-image tables (`image_training_examples`,
+-- `image_border_cases`, `image_tag_annotations`) are deliberately untouched — a
+-- label records what a human judged about a photo, and silently deleting that is
+-- worse than a stale row. None of the 16 carry one today. `unavailable_reason` is
+-- likewise left alone: it is terminal by design, and none of the 16 carry one — but
+-- a FUTURE collision row that does will leave the queue instead of re-entering it
+-- (`pending_image_downloads` excludes it), so check for that if this ever re-fires.
 
 -- Duplicate detection has to see every stored key, and there is no index on a
 -- non-null storage_path (`images_storage_path_idx` is partial on IS NULL, for the
@@ -62,6 +87,7 @@ colliding AS (
 UPDATE images i
 SET storage_path = NULL,
     phash = NULL,
+    clip_tagged_at = NULL,
     download_attempts = 0,
     last_error = NULL
 FROM colliding c

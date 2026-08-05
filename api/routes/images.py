@@ -28,7 +28,9 @@ router = APIRouter(prefix="/images", tags=["images"])
 # two legacy `{native_id}/{seq:04d}.jpg` ones (native_id is negative for non-sreality
 # portals). Anchored and enumerated — never a general prefix — so this still cannot
 # presign the operator-private `custom-attachments/` uploads sharing the bucket.
-_KEY_RE = re.compile(r"^(?:-?\d+/\d{4}|img/\d+/\d+)\.jpg$")
+# `[0-9]` not `\d` (which is unicode-aware, so `\d` would admit non-ASCII digits into
+# a security predicate) and `\Z` not `$` (which also matches before a trailing newline).
+_KEY_RE = re.compile(r"^(?:-?[0-9]+/[0-9]{4}|img/[0-9]+/[0-9]+)\.jpg\Z")
 
 # Presign lifetime (R2/SigV4 max is 7 days). The 302 is cached only briefly on purpose:
 # a long cache means a serve-path change (e.g. an R2 credential rotation) leaves browsers

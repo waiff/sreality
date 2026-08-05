@@ -45,6 +45,21 @@ def test_negative_id_key_allowed(client):
     assert res.status_code == 302
 
 
+def test_key_whitelist_accepts_what_the_writer_actually_mints():
+    """The route's whitelist and the key writer are in two territories and nothing
+    else ties them together — a scheme change that forgets _KEY_RE 404s every photo
+    silently. Assert the actual producer's output against the actual gate."""
+    from scraper.image_storage import image_key
+
+    assert images_route._KEY_RE.match(image_key(443628, 226547358))
+
+
+@pytest.mark.parametrize("key", ["2872083276/0001.jpg\n", "img/443628/226547358.jpg\n"])
+def test_trailing_newline_rejected(client, key):
+    # `\Z`, not `$` — a security predicate must not accept a trailing newline.
+    assert not images_route._KEY_RE.match(key)
+
+
 def test_current_namespaced_key_allowed(client):
     # `img/{listing_id}/{image_id}.jpg` — the collision-proof scheme every newly
     # stored image takes; the two legacy shapes above stay serveable forever.
