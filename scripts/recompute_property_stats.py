@@ -61,13 +61,6 @@ import time
 from collections.abc import Iterator
 from typing import Any
 
-from toolkit.publication import (
-    BYT_GEO_ELIGIBLE_PREDICATE,
-    GEO_ELIGIBLE_PREDICATE,
-    STREET_ELIGIBLE_PREDICATE,
-    eligible_predicate,
-)
-
 LOG = logging.getLogger("recompute_property_stats")
 
 
@@ -473,39 +466,6 @@ def _attach_stragglers(conn: Any, *, skip_native_backfill: bool = False) -> int:
     return inserted
 
 
-# Publication gate (migration 273): publish the properties the dedup engine can NEVER
-# evaluate — repr listing eligible for NONE of the street pass (STREET_ELIGIBLE_PREDICATE),
-# the geo pass (GEO_ELIGIBLE_PREDICATE), or the byt geo rung (BYT_GEO_ELIGIBLE_PREDICATE)
-# — so the hard gate doesn't hide them forever.
-# `IS NOT TRUE` (not `NOT (...)`) so a NULL-column listing counts as ineligible under SQL
-# three-valued logic. The predicates are imported from toolkit.publication (single source,
-# parity-tested against the engine SQL). Joins the repr listing on the SURROGATE
-# (repr_listing_ref_id), not the legacy sreality_id handle — pre-Gate-2 hardening,
-# same as #873's Browse fix. There is deliberately NO timeout sweep: a
-# dedup-CHECKABLE-but-unchecked property stays hidden until the engine stamps it (for the
-# byt rung, the dirty drain's UNGATED byt sub-pass is what evaluates + publishes new
-# street-less byt even while the scheduled rung's master switch is off).
-_PUBLISH_INELIGIBLE_SQL = f"""
-    UPDATE properties p
-    SET published_at = now(), publish_reason = 'ineligible'
-    FROM listings l
-    WHERE p.published_at IS NULL
-      AND p.status = 'active'
-      AND l.id = p.repr_listing_ref_id
-      AND ({STREET_ELIGIBLE_PREDICATE}) IS NOT TRUE
-      AND ({GEO_ELIGIBLE_PREDICATE}) IS NOT TRUE
-      AND ({BYT_GEO_ELIGIBLE_PREDICATE}) IS NOT TRUE
-"""
-
-
-def _publish_sweep(conn: Any) -> int:
-    """Publish (reason 'ineligible') unpublished active properties the engine can never
-    dedup-check. Partial-index-backed (properties_unpublished_idx); no-op once caught up."""
-    with conn.cursor() as cur:
-        cur.execute(_PUBLISH_INELIGIBLE_SQL)
-        return cur.rowcount or 0
-
-
 def _drain_dirty(conn: Any, batch_size: int, cutoff: Any) -> int:
     """Recompute every property queued at/before `cutoff`, scoped + batched.
 
@@ -593,7 +553,7 @@ def run_incremental_pass(conn: Any, batch_size: int = 2000) -> dict[str, Any]:
     """ONE incremental property-maintenance pass — THE shared implementation
     behind the GH cron (property_maintenance.yml) and the realtime worker's
     maintenance lane: attach new stragglers (skip the legacy native-id
-    backfill), recompute the dirty set, publish ineligible properties.
+    backfill) + recompute the dirty set.
     Serialized by the maintenance lease; a caller that
     finds the lease held returns {"skipped": True} — the concurrent pass is
     doing the same work, and the next tick is seconds away. A pass normally
@@ -602,16 +562,14 @@ def run_incremental_pass(conn: Any, batch_size: int = 2000) -> dict[str, Any]:
     """
     holder = _new_holder("incremental")
     if not _try_lease(conn, holder, _INCREMENTAL_LEASE):
-        return {"skipped": True, "attached": 0, "recomputed": 0, "published": 0}
+        return {"skipped": True, "attached": 0, "recomputed": 0}
     try:
         with conn.cursor() as cur:
             cur.execute("SELECT now()")
             cutoff = cur.fetchone()[0]
         attached = _attach_stragglers(conn, skip_native_backfill=True)
         recomputed = _drain_dirty(conn, batch_size, cutoff)
-        published = _publish_sweep(conn)
-        return {"skipped": False, "attached": attached, "recomputed": recomputed,
-                "published": published}
+        return {"skipped": False, "attached": attached, "recomputed": recomputed}
     finally:
         _release_lease(conn, holder)
 
@@ -690,9 +648,8 @@ def main() -> int:
                 )
                 return 0
             LOG.info(
-                "RECOMPUTE incremental done attached=%d recomputed=%d "
-                "published_ineligible=%d elapsed=%.1fs",
-                stats["attached"], stats["recomputed"], stats["published"], elapsed,
+                "RECOMPUTE incremental done attached=%d recomputed=%d elapsed=%.1fs",
+                stats["attached"], stats["recomputed"], elapsed,
             )
             return 0
 

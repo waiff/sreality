@@ -16,7 +16,6 @@ from scripts.recompute_property_stats import (
     _attach_stragglers,
     _batch_ranges,
     _drain_dirty,
-    _publish_sweep,
 )
 
 
@@ -182,31 +181,6 @@ def test_drain_dirty_empty_queue_is_noop():
     assert conn.deleted == []
 
 
-def test_publish_sweep_only_touches_unpublished_ineligible():
-    """The ineligible publish sweep (migration 273) publishes ONLY unpublished, active
-    properties whose repr listing is eligible for NONE of the three dedup passes — an
-    eligible-but-unchecked property stays NULL (the engine stamps that one), and an
-    already-published row is never touched. Row-level semantics run in the DB; here we
-    pin the SQL shape that guarantees them + the returned rowcount."""
-    conn = _FakeConn([
-        (lambda s: "publish_reason = 'ineligible'" in s, [(1,), (2,)]),  # 2 rows published
-    ])
-    assert _publish_sweep(conn) == 2
-
-    sweep = _find(conn, "publish_reason = 'ineligible'")
-    assert sweep is not None
-    sql = " ".join(sweep[0].split())
-    assert "p.published_at IS NULL" in sql          # never re-publishes a stamped row
-    assert "p.status = 'active'" in sql
-    # Repr join is on the SURROGATE, not the legacy sreality_id handle — a
-    # non-sreality repr must still be found (pre-Gate-2 hardening, #873-style).
-    assert "l.id = p.repr_listing_ref_id" in sql
-    assert "l.sreality_id = p.repr_listing_id" not in sql
-    # Each eligibility predicate is wrapped IS NOT TRUE (NULL-safe ineligibility) so an
-    # eligible repr listing keeps the property NULL.
-    assert sql.count(") IS NOT TRUE") == 3
-
-
 class _MainConn(_FakeConn):
     """Context-manager conn for driving main(): serves the cutoff SELECT and
     the maintenance lease CAS (acquired), records the rest."""
@@ -240,21 +214,20 @@ def _run_main(monkeypatch: Any, argv: list[str]) -> list[str]:
         rps, "_attach_stragglers", lambda c, **k: calls.append("attach") or 0)
     monkeypatch.setattr(
         rps, "_drain_dirty", lambda c, bs, cutoff: calls.append("drain") or 0)
-    monkeypatch.setattr(rps, "_publish_sweep", lambda c: calls.append("publish") or 0)
     monkeypatch.setattr(rps, "_reconcile_childless", lambda c: 0)
     monkeypatch.setattr(rps, "_max_property_id", lambda c: 0)
     assert rps.main() == 0
     return calls
 
 
-def test_incremental_runs_publish_sweep_after_drain(monkeypatch: Any) -> None:
-    """--incremental (the */5 cron) runs attach -> dirty drain -> ineligible publish
-    sweep, in that order, O(new unpublished) each pass."""
-    assert _run_main(monkeypatch, ["--incremental"]) == ["attach", "drain", "publish"]
+def test_incremental_runs_attach_then_drain(monkeypatch: Any) -> None:
+    """--incremental (the */5 cron) runs attach -> dirty drain, in that order,
+    O(changes) each pass."""
+    assert _run_main(monkeypatch, ["--incremental"]) == ["attach", "drain"]
 
 
-def test_full_mode_skips_publish_sweep(monkeypatch: Any) -> None:
-    """The daily full sweep does not publish — that is the incremental pass's job."""
+def test_full_mode_skips_the_dirty_drain(monkeypatch: Any) -> None:
+    """The daily full sweep recomputes every property instead of draining the queue."""
     calls = _run_main(monkeypatch, [])
     assert calls == ["attach"]
 
@@ -305,7 +278,7 @@ def test_run_incremental_pass_runs_all_phases_and_unlocks():
     # every phase of the incremental pass ran...
     assert _find(conn, "INSERT INTO properties")  # straggler attach
     assert not any("source_id_native = sreality_id" in s for s in sqls)  # skip legacy backfill
-    assert _find(conn, "published_at")  # publish sweep
+    assert _find(conn, "FROM dirty_properties")  # dirty drain claim
     # ...and the lease was released even on the happy path.
     assert _find(conn, "SET holder = NULL")
 
@@ -315,8 +288,8 @@ def test_run_incremental_pass_skips_when_lease_held():
 
     conn = _FakeConn(script=_lock_script(acquired=False))
     stats = run_incremental_pass(conn, batch_size=500)
-    assert stats == {"skipped": True, "attached": 0, "recomputed": 0, "published": 0}
-    # NOTHING ran: no attach, no recompute, no publish — and no release either
+    assert stats == {"skipped": True, "attached": 0, "recomputed": 0}
+    # NOTHING ran: no attach, no recompute — and no release either
     # (we never held the lease; clearing it would release someone else's).
     sqls = _sqls(conn)
     assert not any("INSERT INTO properties" in s for s in sqls)

@@ -1378,15 +1378,13 @@ def match_once(conn: "psycopg.Connection") -> dict[str, int]:
         # subscription and the others still match.
         try:
             where, params = _build_match_clauses(spec)
-            # Publication gate (migration 273): key NEW-dispatch detection on
-            # published_at, NOT first_seen_at. With a hard gate, publication can lag
-            # arrival arbitrarily, so a property published long after first_seen would
-            # fall outside a first_seen window and never notify. published_at is also
-            # semantically the "appears" moment (properties_public only exposes published
-            # rows while the gate is on). The per-subscription cursor column keeps its
-            # name (last_matched_first_seen_at) but now holds a published_at watermark.
-            # The images-first gate below stays keyed on first_seen_at (a separate layer).
-            window_where = [*where, "l.published_at > %(cursor)s"]
+            # NEW-dispatch detection is keyed on arrival (first_seen_at), the
+            # pre-migration-273 anchor restored now the publication gate is gone
+            # (NEW DEDUP cutoff §3): nothing stamps published_at for ordinary new
+            # properties anymore, so a published_at window would never fire. The
+            # per-subscription cursor column (last_matched_first_seen_at) once again
+            # holds what its name says.
+            window_where = [*where, "l.first_seen_at > %(cursor)s"]
             params["cursor"] = cursor_ts
             joined_where = " AND ".join(window_where)
 
@@ -1401,10 +1399,10 @@ def match_once(conn: "psycopg.Connection") -> dict[str, int]:
             # whole subscription.
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT max(published_at), count(*) FROM ("
-                    "  SELECT l.published_at FROM properties_public l "
+                    "SELECT max(first_seen_at), count(*) FROM ("
+                    "  SELECT l.first_seen_at FROM properties_public l "
                     f"  WHERE {joined_where} "
-                    "  ORDER BY l.published_at ASC "
+                    "  ORDER BY l.first_seen_at ASC "
                     "  LIMIT %(window_size)s"
                     ") sub",
                     {**params, "window_size": settings.window_listings},
@@ -1434,7 +1432,7 @@ def match_once(conn: "psycopg.Connection") -> dict[str, int]:
                 # Phase 2: insert dispatches for matches in the window (held
                 # back by the image gate when it is enabled).
                 insert_where = [
-                    *window_where, "l.published_at <= %(upper)s", *gate_where,
+                    *window_where, "l.first_seen_at <= %(upper)s", *gate_where,
                 ]
                 total_inserted += _insert_new_dispatches(
                     conn, insert_where, {**insert_params, "upper": upper},
@@ -1463,8 +1461,8 @@ def match_once(conn: "psycopg.Connection") -> dict[str, int]:
                 # the dedupe_key conflict.
                 lookback_where = [
                     *where,
-                    "l.published_at <= %(cursor)s",
-                    "l.published_at > now()"
+                    "l.first_seen_at <= %(cursor)s",
+                    "l.first_seen_at > now()"
                     " - make_interval(mins => %(image_lookback_minutes)s)",
                     *gate_where,
                 ]

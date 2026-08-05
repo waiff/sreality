@@ -36,7 +36,7 @@ matcher/outbox pattern from api/notifications + api/notification_outbox):
              per-pair totals to sreality_count_probe_state (migration 270).
 - maintenance: every `realtime_maintenance_interval_seconds` (default 120), one
              incremental property-maintenance pass — straggler attach + dirty-set
-             recompute + publish sweep, via scripts.recompute_property_stats.
+             recompute, via scripts.recompute_property_stats.
              run_incremental_pass (THE same implementation the GH cron runs;
              never forked). Exists because GH throttles property_maintenance.yml
              (nominal */5) to a measured 2h median / 4.1h worst — this lane is
@@ -99,7 +99,7 @@ IDLE_WAIT_SECONDS = 60.0
 LANE_RESTART_SECONDS = 30.0
 
 # maintenance lane: the incremental property-maintenance pass (straggler attach
-# + dirty-set recompute + publish sweep — scripts.recompute_property_stats.
+# + dirty-set recompute — scripts.recompute_property_stats.
 # run_incremental_pass, THE same implementation the GH cron runs), every
 # MAINTENANCE_INTERVAL_DEFAULT seconds. Exists because GH Actions throttles this
 # repo's schedules to ~hourly at best — property_maintenance.yml (nominal */5)
@@ -739,14 +739,13 @@ async def _maintenance_pass(stop_event: asyncio.Event, state: dict[str, Any]) ->
         "skipped": bool(stats.get("skipped")),
         "attached": stats.get("attached", 0),
         "recomputed": stats.get("recomputed", 0),
-        "published": stats.get("published", 0),
     }
     if last["skipped"]:
         LOG.info("MAINTENANCE lane skipped (lease held by cron or daily sweep)")
     else:
         LOG.info(
-            "MAINTENANCE lane attached=%d recomputed=%d published=%d",
-            last["attached"], last["recomputed"], last["published"],
+            "MAINTENANCE lane attached=%d recomputed=%d",
+            last["attached"], last["recomputed"],
         )
     _record_pass(state, "maintenance", last)
 
