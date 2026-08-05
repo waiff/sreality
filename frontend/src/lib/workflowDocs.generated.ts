@@ -3200,13 +3200,14 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
       },
       {
         "name": "field",
-        "description": "Field to recover (remax=description; realitymix/idnes=media)",
+        "description": "Field to recover (remax=description|broker; realitymix/idnes=media)",
         "required": true,
         "type": "choice",
         "default": "media",
         "options": [
           "media",
-          "description"
+          "description",
+          "broker"
         ]
       },
       {

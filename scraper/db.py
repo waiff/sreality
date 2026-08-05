@@ -690,7 +690,9 @@ def upsert_listing_with_property(
 # to daily-sweep-only attribution rather than breaking. sreality flows through
 # write_detail_batch (which enqueues directly), not this path, but is listed for
 # completeness so the set reads as the full broker-attributed source list.
-BROKER_ATTRIBUTED_SOURCES = frozenset({"sreality", "idnes", "ceskereality", "realitymix"})
+BROKER_ATTRIBUTED_SOURCES = frozenset(
+    {"sreality", "idnes", "ceskereality", "realitymix", "remax"}
+)
 
 
 # The Gate-2 flip-writer scaffold (wave-5 item 7): OFF by default, so the

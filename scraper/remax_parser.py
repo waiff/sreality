@@ -497,6 +497,55 @@ def _detail_params(tree: HTMLParser) -> dict[str, str]:
     return rows
 
 
+# The selling agent's stable key is the `uzivatele/{id}` DIRECTORY of their photo URL
+# (mlsf.remax-czech.cz/data//uzivatele/{id}/{asset}_{asset}_photo_detail_w.jpg) — the two
+# FILENAME numbers are per-asset and change when a photo is re-uploaded, so only the
+# directory is 1:1 with the human (775 distinct ids = 775 distinct (id, profile-slug)
+# pairs over 3,000 stored pages). Same photo-URL-derived shape realitymix already uses.
+# Note the double slash after `data`, and that the extension is not always .jpg.
+_BROKER_UID_RE = re.compile(r"/uzivatele/(\d+)/")
+# The profile link is ABSOLUTE (`https://www.remax-czech.cz/reality/{office}/{agent}/`) —
+# a `/reality/`-prefixed relative match finds nothing.
+_BROKER_PROFILE_RE = re.compile(
+    r"remax-czech\.cz/reality/([a-z0-9-]+)/([a-z0-9-]+)/", re.IGNORECASE
+)
+
+
+def _broker(tree: HTMLParser) -> dict[str, Any] | None:
+    """The selling agent as the idnes-shaped `raw["broker"]` block resolve_brokers reads.
+
+    Email is included (unlike ceskereality/realitymix, which have none): remax exposes a
+    personal `mailto:` on 3,000/3,000 stored pages, and `broker_identities.email_domain`
+    is the ONLY firm key — without it a broker gets no firm, no membership and no
+    cross-source bridge. Phone is deliberately NOT collected (operator: `broker_phone` is
+    an intentional zero on all nine portals).
+
+    Known limit: ~0.3% of agents hold two ids after an office move (both carrying the same
+    email). Identities are never merged within a source, so those split permanently. That
+    is the accepted cost of a rename-proof numeric key over a mutable profile slug.
+    """
+    block = tree.css_first("div.pd-sidebar__agent-info")
+    if block is None:
+        return None
+    broker: dict[str, Any] = {}
+    html = block.html or ""
+    uid = _BROKER_UID_RE.search(html)
+    if uid:
+        broker["broker_id"] = uid.group(1)
+    name = block.css_first("strong")
+    if name is not None and (text := name.text(strip=True)):
+        broker["name"] = text
+    mail = block.css_first('a[href^="mailto:"]')
+    if mail is not None:
+        address = (mail.attributes.get("href") or "")[len("mailto:") :].strip()
+        if "@" in address:
+            broker["email"] = address.lower()
+    profile = _BROKER_PROFILE_RE.search(html)
+    if profile:
+        broker["agency_slug"] = profile.group(1).lower()
+    return broker or None
+
+
 def _description(tree: HTMLParser) -> str | None:
     """The listing's free-text body.
 
@@ -616,6 +665,7 @@ def parse_detail(
         "price_text": price_attr,
         "address": address,
         "remax_ref": params.get("cislo zakazky"),
+        "broker": _broker(tree),
         "image_urls": image_urls,
         "params": params,
     }
