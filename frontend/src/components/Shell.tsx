@@ -29,14 +29,23 @@ const navItems: ReadonlyArray<NavItem> = [
   { to: '/collections', label: 'Collections', agenda: 'collections' },
 ];
 
+type MenuItem = { to: string; label: string; end?: boolean };
+
 // Grouped under the "Settings" dropdown trigger — all admin-only, so the
 // whole group renders (or not) alongside the other admin-gated nav items.
-const settingsItems: ReadonlyArray<{ to: string; label: string }> = [
+const settingsItems: ReadonlyArray<MenuItem> = [
   { to: '/clip-audit', label: 'CLIP Audit' },
   { to: '/health',   label: 'Health' },
   { to: '/costs',    label: 'LLM Costs' },
   { to: '/scrapers', label: 'Scrapers' },
   { to: '/settings', label: 'General Settings' },
+];
+
+// The NEW DEDUP program's own group (Wave 0 scaffold — both pages are
+// placeholders). Admin-only, same posture as the Settings group.
+const newDedupItems: ReadonlyArray<MenuItem> = [
+  { to: '/new-dedup', label: 'Dashboard', end: true },
+  { to: '/new-dedup/settings', label: 'Settings' },
 ];
 
 function isPathActive(pathname: string, to: string): boolean {
@@ -84,6 +93,7 @@ function TopBar() {
     return true;
   });
   const settingsActive = settingsItems.some((s) => isPathActive(location.pathname, s.to));
+  const newDedupActive = newDedupItems.some((s) => isPathActive(location.pathname, s.to));
   return (
     <header className="border-b border-[var(--color-rule)] bg-[var(--color-paper)] sticky top-0 z-30">
       <div className="px-6 h-14 flex items-center gap-8">
@@ -134,7 +144,8 @@ function TopBar() {
           {showAdmin && (
             <>
               <span className="mx-2 h-4 w-px bg-[var(--color-rule)]" aria-hidden />
-              <SettingsMenu items={settingsItems} active={settingsActive} />
+              <NavMenu label="NEW DEDUP" items={newDedupItems} active={newDedupActive} />
+              <NavMenu label="Settings" items={settingsItems} active={settingsActive} />
             </>
           )}
         </nav>
@@ -146,11 +157,13 @@ function TopBar() {
   );
 }
 
-function SettingsMenu({
+function NavMenu({
+  label,
   items,
   active,
 }: {
-  items: ReadonlyArray<{ to: string; label: string }>;
+  label: string;
+  items: ReadonlyArray<MenuItem>;
   active: boolean;
 }) {
   const [open, setOpen] = useState(false);
@@ -178,7 +191,7 @@ function SettingsMenu({
         ].join(' ')}
       >
         <NavLabel active={active}>
-          Settings
+          {label}
           <CaretIcon spin={open} />
         </NavLabel>
       </button>
@@ -191,6 +204,7 @@ function SettingsMenu({
             <NavLink
               key={item.to}
               to={item.to}
+              end={item.end}
               role="menuitem"
               onClick={() => setOpen(false)}
               className={({ isActive }) =>
