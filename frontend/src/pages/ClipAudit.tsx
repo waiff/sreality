@@ -479,6 +479,19 @@ function TrainingLabelBrowser({
         .filter((img): img is ImagePublic => img != null),
     [imageIds, imagesQ.data],
   );
+  // Every image here already carries a training example under `label` (that's
+  // what the query selects on) — keyed for the per-image TrainControl below,
+  // which needs the row itself (not just membership) to prefill its combobox.
+  const examplesByImageId = useMemo(() => {
+    const m = new Map<number, TrainingExample>();
+    for (const e of examplesQ.data ?? []) m.set(e.image_id, e);
+    return m;
+  }, [examplesQ.data]);
+  const borderCasesQ = useQuery({
+    queryKey: ['clip-audit', 'border-cases', imageIds],
+    queryFn: () => fetchBorderCasesByImageIds(imageIds),
+    enabled: imageIds.length > 0,
+  });
 
   const [selected, setSelected] = useState<ReadonlySet<number>>(new Set());
   const [nextLabel, setNextLabel] = useState('');
@@ -490,6 +503,31 @@ function TrainingLabelBrowser({
     setSelected(new Set());
     setNextLabel('');
   }, [label]);
+
+  // The per-image TrainControl below can also drop an image out of THIS label's
+  // view (relabel or remove) without going through onClear — keep the bulk
+  // selection in sync so a later "Použít na N" never silently reaches an image
+  // no longer on screen.
+  useEffect(() => {
+    const ids = new Set(images.map((img) => img.id));
+    setSelected((prev) => {
+      let changed = false;
+      const next = new Set<number>();
+      for (const id of prev) {
+        if (ids.has(id)) next.add(id);
+        else changed = true;
+      }
+      return changed ? next : prev;
+    });
+  }, [images]);
+
+  // TrainControl's own invalidation covers [queryKeyPrefix,'training'] and
+  // '-labels' (global counts), but this view's own read is the narrower
+  // 'training-by-label' query — a relabel/untrain needs that one refetched too,
+  // whichever way it moved the image.
+  const handleTrainingChanged = () => {
+    qc.invalidateQueries({ queryKey: ['clip-audit', 'training-by-label'] });
+  };
 
   const toggle = (id: number) =>
     setSelected((prev) => {
@@ -594,7 +632,7 @@ function TrainingLabelBrowser({
             Pod tímto štítkem nejsou žádné obrázky.
           </p>
         ) : (
-          <div className="grid grid-cols-4 sm:grid-cols-6 gap-2">
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
             {images.map((img, i) => (
               <TrainingImageCell
                 key={img.id}
@@ -602,6 +640,10 @@ function TrainingLabelBrowser({
                 checked={selected.has(img.id)}
                 onToggle={() => toggle(img.id)}
                 onOpen={() => setLightboxAt(i)}
+                example={examplesByImageId.get(img.id)}
+                borderCase={borderCasesQ.data?.has(img.id) ?? false}
+                labelOptions={labelOptions}
+                onChanged={handleTrainingChanged}
               />
             ))}
           </div>
@@ -621,17 +663,28 @@ function TrainingLabelBrowser({
 
 // One tile in the label browser: the photo, CLIP's OWN call on it (the disagreement
 // between that badge and the label you drilled into is the whole point of the view),
-// and the checkbox that puts it in the batch.
+// the checkbox that puts it in the bulk-relabel batch below, and — same as the
+// unfiltered feed's ImageCell — a per-image TrainControl for acting on just this
+// one image: recategorize it (change the combobox value, Train again), remove it
+// from this label ("Odebrat z trénovací sady"), or flag it a border case.
 function TrainingImageCell({
   image,
   checked,
   onToggle,
   onOpen,
+  example,
+  borderCase,
+  labelOptions,
+  onChanged,
 }: {
   image: ImagePublic;
   checked: boolean;
   onToggle: () => void;
   onOpen: () => void;
+  example: TrainingExample | undefined;
+  borderCase: boolean;
+  labelOptions: LabelOption[];
+  onChanged: () => void;
 }) {
   return (
     <div className="flex flex-col gap-1">
@@ -666,6 +719,14 @@ function TrainingImageCell({
       >
         {image.sreality_id}
       </Link>
+      <TrainControl
+        image={image}
+        example={example}
+        borderCase={borderCase}
+        labelOptions={labelOptions}
+        queryKeyPrefix="clip-audit"
+        onChanged={onChanged}
+      />
     </div>
   );
 }

@@ -29,12 +29,19 @@ export default function TrainControl({
   borderCase,
   labelOptions,
   queryKeyPrefix,
+  onChanged,
 }: {
   image: ImagePublic;
   example: TrainingExample | undefined;
   borderCase: boolean;
   labelOptions: ReadonlyArray<LabelOption>;
   queryKeyPrefix: string;
+  // Fires after a Train/untrain write lands, in addition to the invalidation
+  // below — for a caller whose own list is scoped narrower than
+  // [queryKeyPrefix,'training'] (e.g. /clip-audit's per-label browser, where a
+  // relabel must drop the image from the label it just left, not only refresh
+  // counts).
+  onChanged?: () => void;
 }) {
   const qc = useQueryClient();
   const defaultValue = image.clip_fine_tag ?? '';
@@ -55,6 +62,7 @@ export default function TrainControl({
   const invalidate = () => {
     qc.invalidateQueries({ queryKey: [queryKeyPrefix, 'training'] });
     qc.invalidateQueries({ queryKey: [queryKeyPrefix, 'training-labels'] });
+    onChanged?.();
   };
   const train = useMutation({
     mutationFn: () => setTrainingExample({ image_id: image.id, label: value }),
