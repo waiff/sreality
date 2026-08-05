@@ -55,6 +55,14 @@ export const HAND_CODED_BROWSE_FILTERS: ReadonlySet<string> = new Set([
   'ownership',
   // Operator tags — not yet translated to PostgREST (no public-view column).
   'tags',
+  // Portal filter — the column depends on the RELATION GRAIN, which the
+  // auto-dispatcher cannot see. On the listing-grain single-portal feed the
+  // listing's own `source` is the answer; on the property-grain read models
+  // `source` is only the trust-ranked REPRESENTATIVE child's portal, which
+  // hides 10-22% of a portal's properties behind a higher-trust sibling
+  // (migration 371) — there the answer is an array-overlap against
+  // active_sources / all_sources. Hand-coded in queries.ts:applyFilters.
+  'portals',
   // Merged price-history pair (migration 173): the window picks which
   // precomputed count column the threshold reads, and the signed
   // total-change predicate flips direction on sign — both hand-coded in

@@ -87,7 +87,8 @@ _ATTACH_INSERT_SQL = """
         locality_district_id, locality_region_id, source, energy_rating,
         building_condition_level, apartment_condition_level,
         is_active, first_seen_at, last_seen_at, last_change_at,
-        source_count, distinct_site_count
+        source_count, distinct_site_count,
+        all_sources, active_sources
     )
     SELECT
         l.sreality_id, l.id, l.category_main, l.category_type, l.disposition,
@@ -98,7 +99,12 @@ _ATTACH_INSERT_SQL = """
         l.ku_id, l.obec_id, l.okres_id, l.region_id, l.obec, l.okres, l.region,
         l.locality_district_id, l.locality_region_id, l.source, l.energy_rating,
         l.building_condition_level, l.apartment_condition_level,
-        l.is_active, l.first_seen_at, l.last_seen_at, l.first_seen_at, 1, 1
+        l.is_active, l.first_seen_at, l.last_seen_at, l.first_seen_at, 1, 1,
+        -- Browse's portal filter reads these (migration 371). A fresh singleton
+        -- is never enqueued dirty (see the docstring above), so if they were not
+        -- set right here the listing would be invisible to `portal = <its own
+        -- source>` until the next FULL sweep — up to a day.
+        ARRAY[l.source], CASE WHEN l.is_active THEN ARRAY[l.source] END
     FROM listings l
     WHERE l.property_id IS NULL
 """
@@ -129,6 +135,14 @@ _RECOMPUTE_BATCH_SQL = """
         bool_or(l.is_active)       AS is_active,
         count(*)                   AS source_count,
         count(distinct l.source)   AS distinct_site_count,
+        -- Browse's portal filter (migration 371): "is this property listed on
+        -- portal X", as opposed to `properties.source`, which is only the ONE
+        -- trust-ranked representative child and therefore hides ~10-22% of a
+        -- portal's properties behind a higher-trust sibling. NULL active_sources
+        -- (no live child) is intentional: NULL && anything is NULL, so such a
+        -- property drops out of an active-only portal filter on its own.
+        array_agg(distinct l.source) AS all_sources,
+        array_agg(distinct l.source) FILTER (WHERE l.is_active) AS active_sources,
         min(l.first_seen_at)       AS first_seen_at,
         max(l.last_seen_at)        AS last_seen_at
       FROM listings l
@@ -352,6 +366,8 @@ _RECOMPUTE_BATCH_SQL = """
           THEN (ph.last_price - ph.first_price)::numeric / ph.first_price * 100
       END,
       last_change_at      = coalesce(ch.last_change_at, ca.first_seen_at),
+      all_sources         = ca.all_sources,
+      active_sources      = ca.active_sources,
       stats_computed_at   = now()
     FROM child_agg ca
     JOIN repr r ON r.pid = ca.pid
