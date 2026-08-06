@@ -226,6 +226,15 @@ export interface HealthCategoryBlock {
   failures_given_up: number;
 }
 
+export interface BrowseReadModelState {
+  list_rebuilt_at: string | null;
+  list_duration_ms: number | null;
+  list_rows: number | null;
+  map_rebuilt_at: string | null;
+  map_duration_ms: number | null;
+  map_rows: number | null;
+}
+
 export interface HealthSummary {
   // When the pg_cron loop last refreshed the Health matviews (migration 176).
   // Absent on payloads generated before that migration.

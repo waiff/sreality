@@ -12,6 +12,7 @@ import {
   YAxis,
 } from 'recharts';
 import {
+  fetchBrowseReadModelState,
   fetchCategoryTrends,
   fetchHealthSummary,
   fetchImageStorageOverview,
@@ -35,6 +36,7 @@ import {
 import { categoryMainLabelPlural, categoryTypeLabel } from '@/lib/enums';
 import GrainToggle from '@/components/GrainToggle';
 import type {
+  BrowseReadModelState,
   CategoryTrend,
   CategoryTrendPoint,
   HealthSummary,
@@ -68,6 +70,13 @@ const STALE_HOURS_WARN = 36;
 // The pg_cron loop refreshes the Health matviews every 10 min; 25 min of
 // silence means it has missed two cycles — likely dead, not just slow.
 const HEALTH_DATA_STALE_MIN = 25;
+// browse_list rebuilds every 5 min, properties_map_mv every 30 min
+// (migration 277); a stalled list_rebuilt_at/map_rebuilt_at is also what a
+// failed anon-grant self-check inside either rebuild function looks like
+// from the outside (migration 374 — the RAISE rolls back the whole tick, so
+// the timestamp simply stops advancing instead of the object going missing).
+const BROWSE_LIST_STALE_MIN = 15;
+const BROWSE_MAP_STALE_MIN = 60;
 
 function categoryLabel(c: { category_main: string; category_type: string }): string {
   return `${categoryMainLabelPlural(c.category_main)} · ${categoryTypeLabel(c.category_type).toLowerCase()}`;
@@ -77,6 +86,12 @@ export default function Health() {
   const { data, isLoading, error, dataUpdatedAt } = useQuery<HealthSummary, Error>({
     queryKey: ['health-summary'],
     queryFn: fetchHealthSummary,
+    refetchInterval: 60_000,
+    staleTime: 30_000,
+  });
+  const { data: browseState } = useQuery<BrowseReadModelState, Error>({
+    queryKey: ['browse-read-model-state'],
+    queryFn: fetchBrowseReadModelState,
     refetchInterval: 60_000,
     staleTime: 30_000,
   });
@@ -105,6 +120,20 @@ export default function Health() {
 
       {data && <StaleHealthDataBanner generatedAt={data.generated_at ?? null} />}
       {data && <StaleScrapeBanner lastScrapeAt={data.last_scrape_at} />}
+      {browseState && (
+        <StaleHealthDataBanner
+          generatedAt={browseState.list_rebuilt_at}
+          staleMin={BROWSE_LIST_STALE_MIN}
+          label="Browse list je zastaralý (rebuild_browse_list možná selhává)"
+        />
+      )}
+      {browseState && (
+        <StaleHealthDataBanner
+          generatedAt={browseState.map_rebuilt_at}
+          staleMin={BROWSE_MAP_STALE_MIN}
+          label="Browse mapa je zastaralá (rebuild_properties_map_mv možná selhává)"
+        />
+      )}
 
       {isLoading && !data ? (
         <Skeleton />
@@ -642,15 +671,23 @@ function PortalStat({
 /* generated_at (pre-176 payload) renders nothing.                            */
 /* -------------------------------------------------------------------------- */
 
-function StaleHealthDataBanner({ generatedAt }: { generatedAt: string | null }) {
+function StaleHealthDataBanner({
+  generatedAt,
+  staleMin = HEALTH_DATA_STALE_MIN,
+  label = 'Health data je zastaralá (pg_cron refresh možná stojí)',
+}: {
+  generatedAt: string | null;
+  staleMin?: number;
+  label?: string;
+}) {
   if (!generatedAt) return null;
   const ageMin = (Date.now() - new Date(generatedAt).getTime()) / 60_000;
-  if (ageMin < HEALTH_DATA_STALE_MIN) return null;
+  if (ageMin < staleMin) return null;
   return (
     <div className="mt-4 p-3 rounded-[var(--radius-sm)] border border-[var(--color-ochre)]/40 bg-[var(--color-ochre-soft)] text-sm text-[var(--color-ochre)] flex items-baseline gap-2">
       <span className="text-[0.7rem] tracking-[0.18em] uppercase font-medium">stale</span>
       <span>
-        Health data je zastaralá (pg_cron refresh možná stojí) — poslední refresh před{' '}
+        {label} — poslední refresh před{' '}
         <span className="font-mono tabular-nums">{Math.round(ageMin)}&thinsp;min</span>.
       </span>
     </div>
