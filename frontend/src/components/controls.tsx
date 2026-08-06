@@ -221,6 +221,51 @@ export function PickButton({
 }
 
 /* -------------------------------------------------------------------------- */
+/* Switch — pill on/off toggle. One implementation shared by every boolean    */
+/* control in the app (filter-visibility cells, region-priority toggles, the  */
+/* NEW DEDUP boolean settings) instead of each screen redrawing its own pill. */
+/* -------------------------------------------------------------------------- */
+
+export function Switch({
+  on,
+  onChange,
+  pending = false,
+  disabled = false,
+  ariaLabel,
+}: {
+  on: boolean;
+  onChange: (next: boolean) => void;
+  pending?: boolean;
+  disabled?: boolean;
+  ariaLabel?: string;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={() => onChange(!on)}
+      aria-pressed={on}
+      aria-label={ariaLabel}
+      disabled={pending || disabled}
+      className={[
+        'inline-flex shrink-0 items-center justify-center w-9 h-5 rounded-full border transition-colors',
+        on
+          ? 'bg-[var(--color-sage-soft)] border-[var(--color-sage)]/60'
+          : 'bg-[var(--color-paper-2)] border-[var(--color-rule)]',
+        pending ? 'opacity-50 cursor-wait' : disabled ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer',
+      ].join(' ')}
+    >
+      <span
+        className={[
+          'w-3 h-3 rounded-full transition-transform',
+          on ? 'translate-x-2 bg-[var(--color-sage)]' : '-translate-x-2 bg-[var(--color-ink-4)]',
+        ].join(' ')}
+        aria-hidden
+      />
+    </button>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
 /* NumberCell — paired-input cell used inside RangeFilter and any standalone  */
 /* numeric input slot. Inset background + tabular monospace so values align   */
 /* vertically across rows.                                                    */

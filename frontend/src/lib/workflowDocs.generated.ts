@@ -2400,9 +2400,62 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/ingest_boundaries.yml"
   },
   {
+    "filename": "label_proposal_backfill.yml",
+    "name": "NEW DEDUP — Labeling secondary-CLIP proposals (sharded, dispatch-only)",
+    "description": "Wave 1 (docs/design/new-dedup/PROGRAM.md): scores every image currently in dedup_sim.labeling_sample against the operator's active Taxonomy v1 labels (dedup_sim.taxonomy_labels) using the stronger secondary CLIP checkpoint (dedup_sim_settings' labeling_secondary_model), writing one proposal row per image into dedup_sim.label_proposals for review on the Labeling page. Dispatch-only, not cron — the sample grows in bursts as the operator works through the program, not continuously. No-op if R2 is unconfigured or the taxonomy is still empty. Horizontally sharded (image_id %% 2), like the production clip_tag.yml but smaller (this is a curated sample, not the full corpus).",
+    "portal": null,
+    "manual": true,
+    "schedules": [],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "limit",
+        "description": "Max images proposed per shard per run",
+        "required": false,
+        "type": "string",
+        "default": "2000",
+        "options": null
+      },
+      {
+        "name": "workers",
+        "description": "Parallel R2 downloads",
+        "required": false,
+        "type": "string",
+        "default": "16",
+        "options": null
+      },
+      {
+        "name": "dry_run",
+        "description": "Report the pending count and exit without tagging",
+        "required": false,
+        "type": "choice",
+        "default": "false",
+        "options": [
+          "false",
+          "true"
+        ]
+      }
+    ],
+    "secrets": [
+      "R2_ACCESS_KEY_ID",
+      "R2_ACCOUNT_ID",
+      "R2_BUCKET_NAME",
+      "R2_SECRET_ACCESS_KEY",
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "label-proposal-backfill",
+    "cancelInProgress": false,
+    "timeoutMinutes": 55,
+    "permissions": "contents: read",
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/label_proposal_backfill.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/label_proposal_backfill.yml"
+  },
+  {
     "filename": "llm_health.yml",
     "name": "Monitoring: acute health (hourly)",
-    "description": "The fast lane of verify_pipeline: runs the ACUTE checks — LLM errors, LLM silence, DB saturation (pg_cron failure rate) and realtime-worker liveness — hourly, and exits non-zero when any is `fail` so GitHub emails the operator on a red scheduled run. This is the belt-and-braces channel for when the in-app bell path itself is down; the bell is rung (edge-triggered) by the checks via emit_transition_alerts, so an incident alerts once — not per run — and clears on recovery. The 6h full verify_pipeline run additionally covers these (shared emitter keys → no double-alert) plus the slower structural checks (dedup debt, latency, engine cycle).",
+    "description": "The fast lane of verify_pipeline: runs the ACUTE checks — LLM errors, LLM silence, DB saturation (pg_cron failure rate), realtime-worker liveness and property- maintenance staleness (sweep death / stranded lease) — hourly, and exits non-zero when any is `fail` so GitHub emails the operator on a red scheduled run. This is the belt-and-braces channel for when the in-app bell path itself is down; the bell is rung (edge-triggered) by the checks via emit_transition_alerts, so an incident alerts once — not per run — and clears on recovery. The 6h full verify_pipeline run additionally covers these (shared emitter keys → no double-alert) plus the slower structural checks (dedup debt, latency, engine cycle).",
     "portal": null,
     "manual": true,
     "schedules": [
@@ -2826,6 +2879,14 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
           "false",
           "true"
         ]
+      },
+      {
+        "name": "max_seconds",
+        "description": "Wall-clock sweep budget in seconds (clean-stop + RED past it; clamped to 4200 — timeout-minutes is sized for that ceiling, raise both together in the yml)",
+        "required": false,
+        "type": "string",
+        "default": "4200",
+        "options": null
       }
     ],
     "secrets": [
@@ -2833,7 +2894,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     ],
     "concurrencyGroup": "sreality-property-maintenance",
     "cancelInProgress": false,
-    "timeoutMinutes": 30,
+    "timeoutMinutes": 75,
     "permissions": "contents: read",
     "runsUrl": "https://github.com/waiff/sreality/actions/workflows/recompute_property_stats.yml",
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/recompute_property_stats.yml"

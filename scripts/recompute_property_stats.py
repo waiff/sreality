@@ -50,6 +50,15 @@ Batched by property-id range so each statement stays well under the
 transaction-pooler statement timeout. autocommit=True means each batch
 commits independently -- a workflow timeout preserves completed batches.
 
+Liveness (2026-08-06 incident): the maintenance lease is a SHORT (15 min) TTL
+heartbeat-renewed every batch/slice — never a runtime-sized grant — so a
+SIGKILL at any point freezes maintenance for minutes, not hours. The full
+sweep also takes a --max-seconds wall-clock budget and CLEAN-STOPS at a batch
+boundary when it runs out: finalize what was covered, release the lease, exit
+RED (GH reports a timeout kill as `cancelled`, which alerts nobody). The
+`property_maintenance` check in scripts/verify_pipeline.py watches the
+resulting staleness independently.
+
 Two run modes (Phase 3 -- real-time properties):
 
   * --incremental (cron */5, property_maintenance.yml): attach new stragglers
@@ -72,12 +81,17 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import signal
 import sys
 import time
 from collections.abc import Iterator
 from typing import Any
 
 LOG = logging.getLogger("recompute_property_stats")
+
+
+def _sigterm_to_systemexit(signum: int, frame: Any) -> None:
+    raise SystemExit(143)
 
 
 _ATTACH_BACKFILL_NATIVE_ID_SQL = """
@@ -446,6 +460,16 @@ _DELETE_DIRTY_SQL = """
 # existed at its start -- anything dirtied mid-sweep is left for the next pass.
 _CLEAR_DIRTY_SQL = "DELETE FROM dirty_properties WHERE marked_at <= %(cutoff)s"
 
+# The budget-exhausted variant: a sweep that stops early has only recomputed
+# ids below its high-water mark, so clearing the GLOBAL pre-cutoff queue would
+# erase the recompute signal for unswept ids — those rows would stay stale
+# until the next FULL sweep instead of being healed by the next incremental
+# pass minutes later. Scope the delete to the swept range.
+_CLEAR_DIRTY_SWEPT_SQL = (
+    "DELETE FROM dirty_properties "
+    "WHERE marked_at <= %(cutoff)s AND property_id < %(hi)s"
+)
+
 # A merge re-points a retired property's children onto the survivor, leaving the
 # loser childless. _RECOMPUTE_BATCH_SQL inner-joins listings, so a childless
 # property drops out of the UPDATE and keeps stale columns -- merge_properties
@@ -456,6 +480,27 @@ _RECONCILE_CHILDLESS_SQL = """
     UPDATE properties p SET is_active = false
     WHERE p.is_active = true
       AND NOT EXISTS (SELECT 1 FROM listings l WHERE l.property_id = p.id)
+"""
+
+# Written ONLY when a walk covered every id — the O(1) liveness signal the
+# `property_maintenance` health check reads. Per-row stats_computed_at cannot
+# serve that role: min() over 620k properties with a listings semi-join
+# measured ~3.5 min live, and a check that heavy would blow the hourly acute
+# lane's own 5-min job timeout — recreating the silent-`cancelled` failure
+# mode it exists to catch. A dead, killed, or chronically-incomplete sweep
+# shows up here as a stale stamp within hours, however the process died.
+_STAMP_SWEEP_COMPLETE_SQL = """
+    INSERT INTO app_settings (key, value, updated_by)
+    VALUES ('property_sweep_last_complete',
+            jsonb_build_object(
+                'completed_at', now(),
+                'max_property_id', %(max_id)s::bigint,
+                'batches', %(batches)s::int,
+                'elapsed_s', %(elapsed_s)s::numeric),
+            'recompute_property_stats')
+    ON CONFLICT (key) DO UPDATE
+      SET value = excluded.value, updated_at = now(),
+          updated_by = excluded.updated_by
 """
 
 
@@ -481,6 +526,18 @@ def recompute_mf_one(conn: Any, property_id: int) -> None:
             "SELECT public.recompute_property_mf(ARRAY[%s]::bigint[])",
             (property_id,),
         )
+
+
+def _run_recompute_statement(conn: Any, sql: str, params: dict[str, Any]) -> None:
+    """One recompute statement under the raised per-statement ceiling.
+
+    Explicit transaction so SET LOCAL takes effect (it silently no-ops in
+    autocommit); the transaction spans exactly this one statement, so the
+    batch-commits-independently crash-safety property is unchanged."""
+    with conn.transaction():
+        with conn.cursor() as cur:
+            cur.execute(f"SET LOCAL statement_timeout = '{_BATCH_STATEMENT_TIMEOUT}'")
+            cur.execute(sql, params)
 
 
 def _reconcile_childless(conn: Any) -> int:
@@ -516,24 +573,33 @@ def _attach_stragglers(conn: Any, *, skip_native_backfill: bool = False) -> int:
     return inserted
 
 
-def _drain_dirty(conn: Any, batch_size: int, cutoff: Any) -> int:
+def _drain_dirty(
+    conn: Any, batch_size: int, cutoff: Any,
+    renew: Any = None,
+) -> int:
     """Recompute every property queued at/before `cutoff`, scoped + batched.
 
     Crash-safe under autocommit: recompute then delete per batch, so an
     interrupted run simply re-recomputes (idempotent) on the next pass. Always
     terminates -- only rows with marked_at <= cutoff are claimable, the delete
     removes the claimed ones, and a row re-dirtied mid-run moves past the cutoff.
+
+    `renew` (a zero-arg callable) is invoked once per claimed slice so a long
+    drain — e.g. the backlog after a maintenance freeze, or the nine-portal
+    enqueue volume post-#971 — heartbeats its 15-min lease instead of silently
+    outliving it.
     """
     total = 0
     while True:
+        if renew is not None:
+            renew()
         with conn.cursor() as cur:
             cur.execute(_CLAIM_DIRTY_SQL, {"cutoff": cutoff, "limit": batch_size})
             claimed = cur.fetchall()
         if not claimed:
             break
         ids = [int(r[0]) for r in claimed]
-        with conn.cursor() as cur:
-            cur.execute(_RECOMPUTE_SCOPED_SQL, {"ids": ids})
+        _run_recompute_statement(conn, _RECOMPUTE_SCOPED_SQL, {"ids": ids})
         with conn.cursor() as cur:
             cur.execute(_DELETE_DIRTY_SQL, {"ids": ids, "cutoff": cutoff})
         total += len(ids)
@@ -554,11 +620,50 @@ def _max_property_id(conn: Any) -> int:
 # DIFFERENT pooled backends (the #716 defect: the unlock silently no-ops and
 # the lock strands, skipping every future pass). Expiry self-heals a crashed
 # holder. Incremental callers TRY the lease and skip when held (the next tick
-# is seconds away); the daily full sweep RETRIES until it holds it (the
-# backstop must not be skipped) and takes a sweep-length lease.
-_INCREMENTAL_LEASE = "15 minutes"
-_FULL_SWEEP_LEASE = "3 hours"
+# is seconds away); the daily full sweep RETRIES (bounded) until it holds it —
+# the backstop must not be skipped.
+#
+# ONE short TTL, HEARTBEAT-renewed between statements. The full sweep used to
+# take a single 3-hour grant sized to its whole runtime and release it in a
+# `finally` — but a GH Actions timeout kill escalates SIGINT→SIGTERM→SIGKILL
+# faster than the release round-trip, so every timeout stranded the lease and
+# froze ALL property maintenance (worker lane + both crons) for hours
+# (2026-08-06 incident: 5 kills in 4 days, each a multi-hour freeze). Cleanup-
+# on-death cannot be relied on; cheap-death can: every writer takes the same
+# 15-minute TTL and re-grants it (the `holder = %(holder)s` arm below, the
+# notification matcher's sticky-holder pattern from migration 366) between
+# batches, so a kill at ANY point strands the row for at most 15 minutes.
+# Renewal only runs between statements on this autocommit connection, so the
+# TTL must comfortably exceed one statement's worst case — recompute
+# statements run under the explicit _BATCH_STATEMENT_TIMEOUT (10 min) ceiling
+# — 15 min is that margin, not a renewal cadence.
+_LEASE_TTL = "15 minutes"
 _LEASE_RETRY_SECONDS = 10.0
+# A dispatched sweep that cannot get the lease within this budget fails RED
+# instead of burning its whole job retrying (observed 2026-08-06: a 30-min run
+# spent 100% of its budget in _wait_lease against a dead holder's 3h grant).
+# Every holder now renews a 15-min TTL, so 20 min of waiting means something
+# is genuinely wrong, not merely slow.
+_MAX_LEASE_WAIT_SECONDS = 1200.0
+
+# Ceiling for --max-seconds. The workflow's timeout-minutes (75) is sized as
+# budget + one in-flight batch + prelude + finalize headroom FOR THIS
+# CEILING; an unclamped dispatch input above ~4200s would let the runner
+# SIGKILL a healthy sweep before its clean-stop fires — a silent `cancelled`,
+# the exact mode this script exists to eliminate. Raising the ceiling means
+# raising timeout-minutes in the same change.
+_MAX_BUDGET_SECONDS = 4200.0
+
+# Per-recompute-statement ceiling, applied via SET LOCAL inside an explicit
+# transaction (the repo's layered-timeout pattern; SET LOCAL no-ops without
+# conn.transaction() on an autocommit connection). The pooler's ~2-min default
+# proved too tight for the post-#971 batch SQL on deep-history batches: the
+# 2026-08-06 10:09Z run's FIRST batch (ids 1-2001, the oldest sreality
+# listings) was killed at ~3.5 min while later-id batches run in seconds.
+# MUST stay comfortably under _LEASE_TTL (15 min): renewal only fires between
+# statements, so one statement's worst case is the longest possible renewal
+# gap.
+_BATCH_STATEMENT_TIMEOUT = "10min"
 
 _TRY_LEASE_SQL = """
     UPDATE property_maintenance_lease
@@ -587,8 +692,37 @@ def _try_lease(conn: Any, holder: str, lease: str) -> bool:
         return cur.fetchone() is not None
 
 
-def _wait_lease(conn: Any, holder: str, lease: str) -> None:
+def _renew_lease(conn: Any, holder: str) -> None:
+    """Heartbeat: re-grant our own lease, pushing expiry out one TTL.
+
+    Raises if the re-grant misses — that means the lease expired mid-work and
+    ANOTHER writer took it, so continuing would run two recomputes concurrently.
+    That is idempotent-safe but wasteful, and it means this process stalled for
+    >15 min on a single statement, which is itself worth a red run.
+    """
+    if not _try_lease(conn, holder, _LEASE_TTL):
+        raise RuntimeError(
+            "maintenance lease lost mid-work (expired and re-claimed by another "
+            "writer) — aborting rather than recomputing concurrently"
+        )
+
+
+def _wait_lease(
+    conn: Any, holder: str, lease: str,
+    max_wait_seconds: float = _MAX_LEASE_WAIT_SECONDS,
+) -> None:
+    # Wall-clock anchored: the CAS round trips themselves can be slow exactly
+    # when this path runs (degraded DB), and counting only the sleeps would
+    # let the wait silently outgrow the job budget.
+    entered = time.monotonic()
     while not _try_lease(conn, holder, lease):
+        waited = time.monotonic() - entered
+        if waited >= max_wait_seconds:
+            raise RuntimeError(
+                f"maintenance lease still held after {waited:.0f}s of waiting — "
+                "failing RED instead of burning the job budget; every holder "
+                "renews a 15-min TTL, so this indicates a real fault"
+            )
         LOG.info("MAINTENANCE lease held by another writer; retrying in %.0fs",
                  _LEASE_RETRY_SECONDS)
         time.sleep(_LEASE_RETRY_SECONDS)
@@ -611,14 +745,17 @@ def run_incremental_pass(conn: Any, batch_size: int = 2000) -> dict[str, Any]:
     self-heals a crashed holder.
     """
     holder = _new_holder("incremental")
-    if not _try_lease(conn, holder, _INCREMENTAL_LEASE):
+    if not _try_lease(conn, holder, _LEASE_TTL):
         return {"skipped": True, "attached": 0, "recomputed": 0}
     try:
         with conn.cursor() as cur:
             cur.execute("SELECT now()")
             cutoff = cur.fetchone()[0]
         attached = _attach_stragglers(conn, skip_native_backfill=True)
-        recomputed = _drain_dirty(conn, batch_size, cutoff)
+        recomputed = _drain_dirty(
+            conn, batch_size, cutoff,
+            renew=lambda: _renew_lease(conn, holder),
+        )
         return {"skipped": False, "attached": attached, "recomputed": recomputed}
     finally:
         _release_lease(conn, holder)
@@ -640,8 +777,25 @@ def main() -> int:
         "--dry-run", action="store_true",
         help="Report straggler + dirty + property counts and exit without writing.",
     )
+    parser.add_argument(
+        "--max-seconds", type=float, default=3600.0,
+        help="Full-sweep wall-clock budget (default 3600). On exhaustion the "
+             "sweep clean-stops at a batch boundary, finalizes only what it "
+             "covered, releases the lease, and exits RED (1) — a visible "
+             "failure instead of a silent timeout-minutes `cancelled` kill. "
+             f"Clamped to {int(_MAX_BUDGET_SECONDS)}s: the workflow's "
+             "timeout-minutes backstop is sized for that ceiling, and a "
+             "larger budget would let the runner SIGKILL the job before the "
+             "clean-stop fires (raising both requires editing the yml).",
+    )
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
+
+    # SIGTERM (the middle step of GH's SIGINT→SIGTERM→SIGKILL cancel ladder)
+    # defaults to instant death — no finally, lease stranded. Route it through
+    # SystemExit so the release path gets its chance; the short renewed TTL is
+    # the guarantee for when even this loses the race.
+    signal.signal(signal.SIGTERM, _sigterm_to_systemexit)
 
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
@@ -704,41 +858,113 @@ def main() -> int:
             return 0
 
         # The full sweep RETRIES for the lease (it is the daily backstop and
-        # must not be skipped); incremental passes elsewhere skip while it
-        # runs. Worst-case wait = one incremental lease (15 min).
+        # must not be skipped) — but boundedly, failing RED rather than burning
+        # the whole job against a stuck holder. Acquisition happens INSIDE the
+        # try: a kill between grant and try-entry used to strand a fresh lease
+        # with zero work done; the holder-guarded release no-ops when the wait
+        # never succeeded, so this ordering is safe.
         holder = _new_holder("full")
-        _wait_lease(conn, holder, _FULL_SWEEP_LEASE)
+        incomplete_at: int | None = None
         try:
+            _wait_lease(conn, holder, _LEASE_TTL)
             attached = _attach_stragglers(conn)
             LOG.info("RECOMPUTE stragglers attached=%d", attached)
 
+            budget = min(args.max_seconds, _MAX_BUDGET_SECONDS)
+            if budget < args.max_seconds:
+                LOG.warning(
+                    "RECOMPUTE --max-seconds %.0f clamped to %.0f — the "
+                    "workflow's timeout-minutes backstop is sized for this "
+                    "ceiling; raise both together in the yml",
+                    args.max_seconds, budget,
+                )
+            deadline = started_at + budget
             max_id = _max_property_id(conn)
+            total_batches = -(-max_id // args.batch_size) if max_id else 0
             batches = 0
             for lo, hi in _batch_ranges(max_id, args.batch_size):
-                with conn.cursor() as cur:
-                    cur.execute(_RECOMPUTE_BATCH_SQL, {"lo": lo, "hi": hi})
+                # Budget clean-stop (the detail drains' --max-seconds pattern):
+                # stop batching with enough headroom left to finalize + release,
+                # instead of being SIGKILLed mid-statement by timeout-minutes.
+                batch_started = time.monotonic()
+                if batch_started >= deadline:
+                    incomplete_at = lo
+                    break
+                _renew_lease(conn, holder)
+                try:
+                    _run_recompute_statement(
+                        conn, _RECOMPUTE_BATCH_SQL, {"lo": lo, "hi": hi})
+                except Exception:
+                    # Name the poisoned range before dying — the 10:09Z run's
+                    # log showed only a bare QueryCanceled with no way to tell
+                    # WHICH ids need investigating.
+                    LOG.error(
+                        "RECOMPUTE batch=%d-%d FAILED after %.1fs",
+                        lo, hi, time.monotonic() - batch_started,
+                    )
+                    raise
                 batches += 1
-                LOG.debug("RECOMPUTE batch=%d-%d done", lo, hi)
-
-            reconciled = _reconcile_childless(conn)
-            if reconciled:
+                # One line per batch, deliberately: ~311 lines/day buys the
+                # per-range cost profile that diagnosing the post-#971 SQL
+                # (and any future creep toward the budget) depends on.
                 LOG.info(
-                    "RECOMPUTE reconciled childless=%d (set is_active=false)",
-                    reconciled,
+                    "RECOMPUTE batch=%d-%d %.1fs (%d/%d)",
+                    lo, hi, time.monotonic() - batch_started,
+                    batches, total_batches,
                 )
 
-            # The full sweep recomputed every property, so clear the dirt that
-            # existed at its start; anything dirtied mid-sweep survives for the
-            # next incremental pass.
-            with conn.cursor() as cur:
-                cur.execute(_CLEAR_DIRTY_SQL, {"cutoff": cutoff})
+            if incomplete_at is None:
+                reconciled = _reconcile_childless(conn)
+                if reconciled:
+                    LOG.info(
+                        "RECOMPUTE reconciled childless=%d (set is_active=false)",
+                        reconciled,
+                    )
+                # The full sweep recomputed every property, so clear the dirt
+                # that existed at its start; anything dirtied mid-sweep survives
+                # for the next incremental pass.
+                with conn.cursor() as cur:
+                    cur.execute(_CLEAR_DIRTY_SQL, {"cutoff": cutoff})
+                # Completion stamp — the health check's O(1) liveness signal.
+                # Complete walks only: an incomplete sweep leaving the stamp
+                # stale IS the alarm condition.
+                with conn.cursor() as cur:
+                    cur.execute(_STAMP_SWEEP_COMPLETE_SQL, {
+                        "max_id": max_id, "batches": batches,
+                        "elapsed_s": round(time.monotonic() - started_at, 1),
+                    })
+            else:
+                # Only ids < incomplete_at were recomputed — clear their dirt
+                # only, and skip _reconcile_childless (next complete sweep runs
+                # it; its targets are near-zero in practice).
+                with conn.cursor() as cur:
+                    cur.execute(
+                        _CLEAR_DIRTY_SWEPT_SQL,
+                        {"cutoff": cutoff, "hi": incomplete_at},
+                    )
         finally:
             _release_lease(conn, holder)
 
     elapsed = time.monotonic() - started_at
+    if incomplete_at is not None:
+        # RED on purpose: an incomplete reconcile is a broken contract, not a
+        # partial success — GH only emails on scheduled-run FAILURES (a
+        # timeout kill lands as `cancelled` and alerts nobody, which is how
+        # 5 dead sweeps went unnoticed for 4 days). The id tail above
+        # `incomplete_at` keeps its pre-sweep stats until a sweep finishes;
+        # the `property_maintenance` health check tracks that staleness.
+        LOG.error(
+            "RECOMPUTE budget exhausted after %.0fs: swept ids<%d of %d "
+            "(%d/%d batches); exiting RED — investigate per-batch cost first "
+            "(see the progress logs); raising the budget past %.0fs requires "
+            "editing BOTH --max-seconds and the workflow's timeout-minutes",
+            elapsed, incomplete_at, max_id, batches, total_batches,
+            _MAX_BUDGET_SECONDS,
+        )
+        return 1
     LOG.info(
-        "RECOMPUTE done max_property_id=%d batches=%d elapsed=%.1fs",
-        max_id, batches, elapsed,
+        "RECOMPUTE done max_property_id=%d batches=%d avg_batch_s=%.1f elapsed=%.1fs",
+        max_id, batches, elapsed / batches if batches else 0.0, elapsed,
     )
     return 0
 

@@ -1,4 +1,16 @@
-import { useEffect, useState } from 'react';
+/* NEW DEDUP · Settings — every knob the simulation engine will use, set up
+ * waves ahead of any wave actually running one.
+ *
+ * Shares its section chrome with the main Settings page (see
+ * components/settings/SectionChrome): each category is a numbered-free
+ * CollapsibleSection folio (the "L0 · …" label already carries its own
+ * ordinal, so no extra index chip), and every explanation collapses to an
+ * InfoHint icon unless the page's Compact/Detailed toggle is set to
+ * Detailed — in Compact, rows also pack two-up since a bare key + control
+ * is short; Detailed drops back to one column so wrapped prose has room.
+ */
+
+import { useEffect, useState, type ReactNode } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   listNewDedupSettings,
@@ -6,6 +18,14 @@ import {
   updateNewDedupSetting,
   type NewDedupSetting,
 } from '@/lib/api';
+import { Switch } from '@/components/controls';
+import {
+  CollapsibleSection,
+  InfoHint,
+  InfoModeToggle,
+  useInfoMode,
+  ErrorBanner,
+} from '@/components/settings/SectionChrome';
 
 const CATEGORY_ORDER = [
   'general',
@@ -30,21 +50,22 @@ export default function NewDedupSettings() {
     queryKey: ['new-dedup', 'settings'],
     queryFn: listNewDedupSettings,
   });
+  const [infoExpanded, setInfoExpanded] = useInfoMode('new-dedup-settings');
 
   return (
-    <div className="px-6 py-12 max-w-3xl mx-auto">
-      <h1
-        className="text-[1.6rem] leading-tight"
-        style={{ fontFamily: 'var(--font-display)', fontWeight: 600 }}
-      >
-        NEW DEDUP · Settings
-      </h1>
-      <p className="mt-3 text-sm text-[var(--color-ink-2)] leading-relaxed">
-        Every knob the simulation engine will use, set up waves ahead of any wave actually
-        running one. Each default traces to the design's decisions ledger — nothing here is
-        a guess. A <em>not yet calibrated</em> tag means the wave that consumes this knob
-        hasn't produced a real sample to check it against.
-      </p>
+    <div className="px-6 pt-5 pb-10 max-w-screen-lg mx-auto">
+      <div className="flex flex-wrap items-start justify-between gap-x-4 gap-y-3">
+        <header>
+          <h1 className="text-2xl leading-tight">NEW DEDUP · Settings</h1>
+          <p className="mt-1 text-sm text-[var(--color-ink-2)] leading-relaxed max-w-[46rem]">
+            Every knob the simulation engine will use, set up waves ahead of any wave actually
+            running one. Each default traces to the design's decisions ledger — nothing here is
+            a guess. A <em>not yet calibrated</em> tag means the wave that consumes this knob
+            hasn't produced a real sample to check it against.
+          </p>
+        </header>
+        <InfoModeToggle expanded={infoExpanded} onChange={setInfoExpanded} />
+      </div>
 
       {q.error && <ErrorBanner message={(q.error as Error).message} />}
       {!q.data && !q.error && (
@@ -56,23 +77,40 @@ export default function NewDedupSettings() {
           const rows = q.data.data.filter((r) => r.category === cat);
           if (!rows.length) return null;
           return (
-            <section key={cat} className="mt-8">
-              <span className="block text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)] mb-3">
-                {CATEGORY_LABELS[cat] ?? cat}
-              </span>
-              <div className="space-y-3">
+            <CollapsibleSection
+              key={cat}
+              id={`new-dedup-${cat}`}
+              title={CATEGORY_LABELS[cat] ?? cat}
+              infoExpanded={infoExpanded}
+            >
+              <div className={infoExpanded ? 'space-y-2' : 'grid grid-cols-1 lg:grid-cols-2 gap-2'}>
                 {rows.map((s) => (
-                  <SettingCard key={s.key} setting={s} />
+                  <SettingCard key={s.key} setting={s} infoExpanded={infoExpanded} />
                 ))}
               </div>
-            </section>
+            </CollapsibleSection>
           );
         })}
     </div>
   );
 }
 
-function SettingCard({ setting }: { setting: NewDedupSetting }) {
+function Badge({ tone, children }: { tone: 'ochre' | 'sage'; children: ReactNode }) {
+  return (
+    <span
+      className={[
+        'shrink-0 text-[0.6rem] tracking-[0.1em] uppercase px-1.5 py-0.5 rounded-[var(--radius-xs)]',
+        tone === 'ochre'
+          ? 'bg-[var(--color-ochre-soft)] text-[var(--color-ochre)]'
+          : 'bg-[var(--color-sage-soft)] text-[var(--color-sage)]',
+      ].join(' ')}
+    >
+      {children}
+    </span>
+  );
+}
+
+function SettingCard({ setting, infoExpanded }: { setting: NewDedupSetting; infoExpanded: boolean }) {
   const qc = useQueryClient();
   const [toast, setToast] = useState<{ kind: 'ok' | 'err'; message: string } | null>(null);
 
@@ -102,25 +140,13 @@ function SettingCard({ setting }: { setting: NewDedupSetting }) {
   }, [toast]);
 
   return (
-    <div className="border border-[var(--color-rule)] rounded-[var(--radius-sm)] bg-[var(--color-paper)] px-4 py-3">
-      <div className="flex items-start justify-between gap-4">
-        <div className="min-w-0">
-          <div className="flex items-center gap-2 flex-wrap">
-            <span className="font-mono text-sm">{setting.key}</span>
-            {!setting.decided && (
-              <span className="text-[0.6rem] tracking-[0.1em] uppercase px-1.5 py-0.5 rounded-[var(--radius-xs)] bg-[var(--color-ochre-soft)] text-[var(--color-ochre)]">
-                not yet calibrated
-              </span>
-            )}
-            {setting.is_override && (
-              <span className="text-[0.6rem] tracking-[0.1em] uppercase px-1.5 py-0.5 rounded-[var(--radius-xs)] bg-[var(--color-sage-soft)] text-[var(--color-sage)]">
-                edited
-              </span>
-            )}
-          </div>
-          <p className="text-xs text-[var(--color-ink-3)] mt-1.5 leading-relaxed">
-            {setting.explanation}
-          </p>
+    <div className="border border-[var(--color-rule)] rounded-[var(--radius-sm)] bg-[var(--color-paper)] px-3 py-2">
+      <div className="flex items-center justify-between gap-3">
+        <div className="min-w-0 flex items-center gap-1.5 flex-wrap">
+          <span className="font-mono text-[0.8rem] truncate">{setting.key}</span>
+          {!setting.decided && <Badge tone="ochre">not yet calibrated</Badge>}
+          {setting.is_override && <Badge tone="sage">edited</Badge>}
+          {!infoExpanded && <InfoHint text={setting.explanation} />}
         </div>
         <SettingControl
           setting={setting}
@@ -128,8 +154,13 @@ function SettingCard({ setting }: { setting: NewDedupSetting }) {
           onSave={(value) => updateMut.mutate(value)}
         />
       </div>
+      {infoExpanded && (
+        <p className="text-xs text-[var(--color-ink-3)] mt-1.5 leading-relaxed">
+          {setting.explanation}
+        </p>
+      )}
       {(setting.is_override || toast) && (
-        <div className="flex items-center gap-3 mt-2.5 pt-2.5 border-t border-[var(--color-rule-soft)]">
+        <div className="flex items-center gap-3 mt-2 pt-2 border-t border-[var(--color-rule-soft)]">
           {setting.is_override && (
             <button
               type="button"
@@ -173,10 +204,11 @@ function SettingControl({
 }) {
   if (setting.value_type === 'boolean') {
     return (
-      <BooleanToggle
-        value={setting.value as boolean}
+      <Switch
+        on={setting.value as boolean}
         pending={pending}
         onChange={(next) => onSave(next)}
+        ariaLabel={setting.key}
       />
     );
   }
@@ -210,40 +242,6 @@ function SettingControl({
   }
   return (
     <TextField value={setting.value as string} pending={pending} onSave={onSave} />
-  );
-}
-
-function BooleanToggle({
-  value,
-  pending,
-  onChange,
-}: {
-  value: boolean;
-  pending: boolean;
-  onChange: (next: boolean) => void;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={() => onChange(!value)}
-      aria-pressed={value}
-      disabled={pending}
-      className={[
-        'shrink-0 inline-flex items-center justify-center w-9 h-5 rounded-full border transition-colors',
-        value
-          ? 'bg-[var(--color-sage-soft)] border-[var(--color-sage)]/60'
-          : 'bg-[var(--color-paper-2)] border-[var(--color-rule)]',
-        pending ? 'opacity-50 cursor-wait' : 'cursor-pointer',
-      ].join(' ')}
-    >
-      <span
-        className={[
-          'w-3 h-3 rounded-full transition-transform',
-          value ? 'translate-x-2 bg-[var(--color-sage)]' : '-translate-x-2 bg-[var(--color-ink-4)]',
-        ].join(' ')}
-        aria-hidden
-      />
-    </button>
   );
 }
 
@@ -339,14 +337,6 @@ function TextField({
           Save
         </button>
       )}
-    </div>
-  );
-}
-
-function ErrorBanner({ message }: { message: string }) {
-  return (
-    <div className="mt-6 p-3 rounded-[var(--radius-sm)] border border-[var(--color-brick)]/30 bg-[var(--color-brick-soft)] text-sm text-[var(--color-brick)]">
-      <strong className="font-medium">Failed:</strong> {message}
     </div>
   );
 }

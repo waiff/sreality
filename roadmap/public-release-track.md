@@ -21,6 +21,22 @@ common to all. Full plan, sequencing, and gates: `docs/design/public-release-pro
   migration 317 (same pattern as 301), applied live and verified before pushing.
   `migrations/299_*.sql` + `301_rls_dedup_golden_sets.sql` are now on `main` too, closing the
   repo/live drift where CI's schema-replay was testing a laxer schema than production.
+- **2026-08-06 regression + fix**: migration 371 (pg_cron_statement_timeout_scoping, unrelated
+  subject) silently reverted 299's `browse_list`/`properties_map_mv` grant narrowing —
+  `rebuild_browse_list()`/`rebuild_properties_map_mv()` re-granted anon SELECT inside their
+  `EXECUTE`-based DDL, and since both are blue-green DROP+CREATE'd by pg_cron every 5/30 min,
+  every tick re-asserted the regression. Live-verified anon-readable (full active-market
+  dataset, no broker PII) for an unknown period. Migration 331's post-condition assertion
+  didn't catch it — a one-shot check at migration-apply time cannot see a scheduled function
+  regress later. Fixed (migration 376, same PR): restored 299's grant + write-revoke and
+  283's covering indexes (also reverted by 371 — a live perf regression, not just security);
+  added a STANDING self-check inside both rebuild functions (raises + rolls back the whole
+  tick if anon ever regains SELECT, so a future regression self-heals within one 5-min cycle
+  instead of persisting indefinitely); added `tests/test_browse_grant_drift.py`, an offline
+  CI gate that reaches into EXECUTE-embedded DDL specifically for these two relations (the
+  existing `test_migration_rls_grants.py` scanner deliberately treats dollar-quoted function
+  bodies as opaque); wired `browse_read_model_state_public` into the Health page (it existed
+  since migration 276 but nothing read it) so a stalled rebuild is visible within 15/60 min.
 - **Phase 1 (multi-tenant foundations)** — in progress.
   - Increment 1 ✅ — accounts/account_members/admins, `current_account_ids()` /
     `is_platform_admin()`, the on-signup handler, JWT verify (JWKS/ES256) (migrations

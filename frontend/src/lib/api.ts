@@ -690,6 +690,127 @@ export const resetNewDedupSetting = (key: string): Promise<NewDedupSetting> =>
     jwt: true,
   });
 
+// NEW DEDUP Labeling program (Wave 1, docs/design/new-dedup/PROGRAM.md) — the
+// operator-curated Taxonomy v1 vocabulary, the relabel sample, and the
+// secondary-CLIP proposal review queue. Distinct from the /labeling/* group
+// above: those write image_training_examples/image_border_cases/etc
+// directly (the confirmed store + the flat CLIP-audit annotations);
+// everything here lives in dedup_sim and only ever REACHES
+// image_training_examples via confirmNewDedupProposal/bulkConfirm — never
+// image_clip_tags (gallery-flip hazard).
+export interface NewDedupTaxonomyLabel {
+  id: number;
+  label: string;
+  family: string | null;
+  active: boolean;
+  created_at: string;
+  confirmed_count: number;
+  pending_count: number;
+  dismissed_count: number;
+}
+export interface NewDedupLabelingOverview {
+  sample_size: number;
+  labels: NewDedupTaxonomyLabel[];
+}
+export const getNewDedupLabelingOverview = (): Promise<{ data: NewDedupLabelingOverview }> =>
+  request<{ data: NewDedupLabelingOverview }>('/new-dedup/labeling/overview', { jwt: true });
+
+export const addNewDedupTaxonomyLabel = (
+  label: string,
+  family?: string | null,
+): Promise<{ data: NewDedupTaxonomyLabel }> =>
+  request<{ data: NewDedupTaxonomyLabel }>('/new-dedup/labeling/taxonomy', {
+    method: 'POST',
+    json: { label, family: family ?? null },
+    jwt: true,
+  });
+
+export const renameNewDedupTaxonomyLabel = (
+  labelId: number,
+  label: string,
+): Promise<{ data: NewDedupTaxonomyLabel }> =>
+  request<{ data: NewDedupTaxonomyLabel }>(`/new-dedup/labeling/taxonomy/${labelId}`, {
+    method: 'PUT',
+    json: { label },
+    jwt: true,
+  });
+
+export const removeNewDedupTaxonomyLabel = (
+  labelId: number,
+): Promise<{ data: { label: string; deleted_training_examples: number; deleted_proposals: number } }> =>
+  request<{ data: { label: string; deleted_training_examples: number; deleted_proposals: number } }>(
+    `/new-dedup/labeling/taxonomy/${labelId}`,
+    { method: 'DELETE', jwt: true },
+  );
+
+export const growNewDedupSample = (
+  count: number,
+  categoryMain?: string | null,
+): Promise<{ data: { added: number } }> =>
+  request<{ data: { added: number } }>('/new-dedup/labeling/sample/grow', {
+    method: 'POST',
+    json: { count, category_main: categoryMain ?? null },
+    jwt: true,
+  });
+
+export interface NewDedupLabelProposal {
+  image_id: number;
+  model: string;
+  label: string;
+  confidence: number | null;
+  proposed_at: string;
+  status: 'pending' | 'confirmed' | 'dismissed';
+  reviewed_at: string | null;
+  reviewed_by: string | null;
+}
+export const listNewDedupProposals = (params: {
+  status?: string;
+  label?: string;
+  limit?: number;
+}): Promise<{ data: NewDedupLabelProposal[] }> =>
+  request<{ data: NewDedupLabelProposal[] }>('/new-dedup/labeling/proposals', {
+    query: params,
+    jwt: true,
+  });
+
+export const confirmNewDedupProposal = (
+  imageId: number,
+  model: string,
+): Promise<{ data: NewDedupLabelProposal }> =>
+  request<{ data: NewDedupLabelProposal }>('/new-dedup/labeling/proposals/confirm', {
+    method: 'POST',
+    json: { image_id: imageId, model },
+    jwt: true,
+  });
+
+export const dismissNewDedupProposal = (
+  imageId: number,
+  model: string,
+): Promise<{ data: NewDedupLabelProposal }> =>
+  request<{ data: NewDedupLabelProposal }>('/new-dedup/labeling/proposals/dismiss', {
+    method: 'POST',
+    json: { image_id: imageId, model },
+    jwt: true,
+  });
+
+export const bulkConfirmNewDedupProposals = (
+  model: string,
+  imageIds: number[],
+): Promise<{ data: { confirmed: number; model: string; image_ids: number[] } }> =>
+  request<{ data: { confirmed: number; model: string; image_ids: number[] } }>(
+    '/new-dedup/labeling/proposals/bulk-confirm',
+    { method: 'POST', json: { model, image_ids: imageIds }, jwt: true },
+  );
+
+export const bulkDismissNewDedupProposals = (
+  model: string,
+  imageIds: number[],
+): Promise<{ data: { dismissed: number; model: string; image_ids: number[] } }> =>
+  request<{ data: { dismissed: number; model: string; image_ids: number[] } }>(
+    '/new-dedup/labeling/proposals/bulk-dismiss',
+    { method: 'POST', json: { model, image_ids: imageIds }, jwt: true },
+  );
+
 // /clip-audit: flag one image's CLIP tag and/or render score as wrong, with a note.
 export type ImageAnnotation = {
   image_id: number;

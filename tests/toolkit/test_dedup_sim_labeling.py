@@ -1,0 +1,571 @@
+"""Taxonomy/sample/proposal CRUD for the NEW DEDUP Labeling program.
+Hermetic fake conn — no DB (migration 373 is verified separately, live)."""
+
+from __future__ import annotations
+
+from typing import Any
+
+import pytest
+
+from toolkit import dedup_sim_labeling as dsl
+
+
+# --- fake conn: in-memory tables + a tiny SQL dispatcher ---------------------
+
+
+class _Cur:
+    def __init__(self, conn: "_FakeConn") -> None:
+        self._conn = conn
+        self._rows: list[tuple[Any, ...]] = []
+        self.rowcount = 0
+
+    def __enter__(self) -> "_Cur":
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        return None
+
+    def execute(self, sql: str, params: Any = None) -> None:
+        s = " ".join(sql.split())
+        self._conn.executed.append((s, params))
+        c = self._conn
+
+        if s.startswith("INSERT INTO dedup_sim.taxonomy_labels"):
+            label, family, created_by = params
+            if any(t["label"] == label for t in c.taxonomy.values()):
+                raise c.UniqueViolation(f"duplicate label {label!r}")
+            c.next_taxonomy_id += 1
+            row = {
+                "id": c.next_taxonomy_id, "label": label, "family": family,
+                "active": True, "created_at": "2026-08-06T00:00:00Z",
+            }
+            c.taxonomy[row["id"]] = row
+            self._rows = [(row["id"], row["label"], row["family"], row["active"], row["created_at"])]
+
+        elif s.startswith("SELECT label FROM dedup_sim.taxonomy_labels WHERE id"):
+            (label_id,) = params
+            row = c.taxonomy.get(label_id)
+            self._rows = [(row["label"],)] if row else []
+
+        elif s.startswith("UPDATE dedup_sim.taxonomy_labels SET label"):
+            new_label, label_id = params
+            if any(t["label"] == new_label for lid, t in c.taxonomy.items() if lid != label_id):
+                raise c.UniqueViolation(f"duplicate label {new_label!r}")
+            c.taxonomy[label_id]["label"] = new_label
+            self.rowcount = 1
+
+        elif s.startswith("SELECT id, label, family, active, created_at"):
+            (label_id,) = params
+            row = c.taxonomy.get(label_id)
+            self._rows = (
+                [(row["id"], row["label"], row["family"], row["active"], row["created_at"])]
+                if row else []
+            )
+
+        elif s.startswith("UPDATE image_training_examples SET label"):
+            new_label, old_label = params
+            n = 0
+            for te in c.training_examples.values():
+                if te["label"] == old_label:
+                    te["label"] = new_label
+                    n += 1
+            self.rowcount = n
+
+        elif s.startswith("UPDATE dedup_sim.label_proposals SET label"):
+            new_label, old_label = params
+            n = 0
+            for p in c.proposals.values():
+                if p["label"] == old_label:
+                    p["label"] = new_label
+                    n += 1
+            self.rowcount = n
+
+        elif s.startswith("DELETE FROM image_training_examples WHERE label"):
+            (label,) = params
+            before = len(c.training_examples)
+            c.training_examples = {
+                k: v for k, v in c.training_examples.items() if v["label"] != label
+            }
+            self.rowcount = before - len(c.training_examples)
+
+        elif s.startswith("DELETE FROM dedup_sim.label_proposals WHERE label"):
+            (label,) = params
+            before = len(c.proposals)
+            c.proposals = {k: v for k, v in c.proposals.items() if v["label"] != label}
+            self.rowcount = before - len(c.proposals)
+
+        elif s.startswith("DELETE FROM dedup_sim.taxonomy_labels WHERE id"):
+            (label_id,) = params
+            self.rowcount = 1 if c.taxonomy.pop(label_id, None) is not None else 0
+
+        elif s.startswith("SELECT count(*) FROM dedup_sim.labeling_sample"):
+            self._rows = [(len(c.sample),)]
+
+        elif s.startswith("SELECT t.id, t.label, t.family"):
+            rows = []
+            for t in sorted(c.taxonomy.values(), key=lambda t: t["label"]):
+                confirmed = sum(1 for te in c.training_examples.values() if te["label"] == t["label"])
+                pending = sum(
+                    1 for p in c.proposals.values()
+                    if p["label"] == t["label"] and p["status"] == "pending"
+                )
+                dismissed = sum(
+                    1 for p in c.proposals.values()
+                    if p["label"] == t["label"] and p["status"] == "dismissed"
+                )
+                rows.append((
+                    t["id"], t["label"], t["family"], t["active"], t["created_at"],
+                    confirmed, pending, dismissed,
+                ))
+            self._rows = rows
+
+        elif s.startswith("INSERT INTO dedup_sim.labeling_sample"):
+            kw = params
+            added = 0
+            for img_id in sorted(c.images, reverse=True):
+                if len(c.sample) - added >= 0 and img_id not in c.sample:
+                    if kw.get("category_main") is not None and c.image_category.get(img_id) != kw["category_main"]:
+                        continue
+                    c.sample[img_id] = {"image_id": img_id, "added_by": kw["added_by"]}
+                    added += 1
+                    if added >= kw["count"]:
+                        break
+            self.rowcount = added
+
+        elif s.startswith("SELECT image_id, model, label, confidence"):
+            kw = params
+            rows = [
+                p for p in c.proposals.values()
+                if (kw.get("status") is None or p["status"] == kw["status"])
+                and (kw.get("label") is None or p["label"] == kw["label"])
+            ]
+            rows.sort(key=lambda p: p["proposed_at"], reverse=True)
+            rows = rows[: kw["limit"]]
+            self._rows = [
+                (p["image_id"], p["model"], p["label"], p["confidence"], p["proposed_at"],
+                 p["status"], p.get("reviewed_at"), p.get("reviewed_by"))
+                for p in rows
+            ]
+
+        elif s.startswith("UPDATE dedup_sim.label_proposals SET status = 'confirmed'") \
+                and "image_id = ANY" in s:
+            reviewed_by, model, ids = params
+            rows = []
+            for image_id in ids:
+                p = c.proposals.get((image_id, model))
+                if p is not None and p["status"] == "pending":
+                    p["status"] = "confirmed"
+                    p["reviewed_by"] = reviewed_by
+                    rows.append((image_id, p["label"]))
+            self._rows = rows
+
+        elif s.startswith("UPDATE dedup_sim.label_proposals SET status = 'dismissed'") \
+                and "image_id = ANY" in s:
+            reviewed_by, model, ids = params
+            n = 0
+            for image_id in ids:
+                p = c.proposals.get((image_id, model))
+                if p is not None and p["status"] == "pending":
+                    p["status"] = "dismissed"
+                    p["reviewed_by"] = reviewed_by
+                    n += 1
+            self.rowcount = n
+
+        elif s.startswith("UPDATE dedup_sim.label_proposals SET status = 'confirmed'"):
+            reviewed_by, image_id, model = params
+            p = c.proposals.get((image_id, model))
+            if p is None or p["status"] != "pending":
+                self._rows = []
+            else:
+                p["status"] = "confirmed"
+                p["reviewed_by"] = reviewed_by
+                self._rows = [(p["label"],)]
+
+        elif s.startswith("UPDATE dedup_sim.label_proposals SET status = 'dismissed'"):
+            reviewed_by, image_id, model = params
+            p = c.proposals.get((image_id, model))
+            if p is None or p["status"] != "pending":
+                self._rows = []
+            else:
+                p["status"] = "dismissed"
+                p["reviewed_by"] = reviewed_by
+                self._rows = [(p["label"],)]
+
+        elif s.startswith("INSERT INTO image_training_examples"):
+            # Mirrors the real ON CONFLICT (image_id) DO UPDATE SET label=...,
+            # updated_at=now() — created_by is only ever set on first insert,
+            # never touched by a later re-confirm.
+            image_id, label, created_by = params
+            existing = c.training_examples.get(image_id)
+            c.training_examples[image_id] = {
+                "image_id": image_id, "label": label,
+                "created_by": existing["created_by"] if existing else created_by,
+            }
+
+        else:
+            raise AssertionError(f"unhandled SQL in fake conn: {s}")
+
+    def executemany(self, sql: str, params_seq: Any) -> None:
+        for params in params_seq:
+            self.execute(sql, params)
+
+    def fetchone(self) -> tuple[Any, ...] | None:
+        return self._rows[0] if self._rows else None
+
+    def fetchall(self) -> list[tuple[Any, ...]]:
+        return self._rows
+
+
+class _Txn:
+    def __enter__(self) -> "_Txn":
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        return None
+
+
+class _FakeConn:
+    class UniqueViolation(Exception):
+        pass
+
+    def __init__(self) -> None:
+        self.taxonomy: dict[int, dict[str, Any]] = {}
+        self.next_taxonomy_id = 0
+        self.training_examples: dict[int, dict[str, Any]] = {}
+        self.proposals: dict[tuple[int, str], dict[str, Any]] = {}
+        self.sample: dict[int, dict[str, Any]] = {}
+        self.images: set[int] = set()
+        self.image_category: dict[int, str] = {}
+        self.executed: list[tuple[str, Any]] = []
+
+    def cursor(self) -> _Cur:
+        return _Cur(self)
+
+    def transaction(self) -> _Txn:
+        return _Txn()
+
+
+@pytest.fixture(autouse=True)
+def _patch_unique_violation(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Route psycopg.errors.UniqueViolation catches in dsl.py to the fake's
+    own exception class, so the fake conn doesn't need a real psycopg
+    connection to exercise the duplicate-label path."""
+    import psycopg.errors
+
+    monkeypatch.setattr(psycopg.errors, "UniqueViolation", _FakeConn.UniqueViolation)
+
+
+@pytest.fixture()
+def conn() -> _FakeConn:
+    return _FakeConn()
+
+
+# --- taxonomy -----------------------------------------------------------
+
+
+def test_add_taxonomy_label(conn: _FakeConn) -> None:
+    row = dsl.add_taxonomy_label(conn, label="interier - kuchyne")
+    assert row["label"] == "interier - kuchyne"
+    assert row["active"] is True
+
+
+def test_add_taxonomy_label_normalizes_whitespace(conn: _FakeConn) -> None:
+    row = dsl.add_taxonomy_label(conn, label="  interier   -   kuchyne  ")
+    assert row["label"] == "interier - kuchyne"
+
+
+def test_add_taxonomy_label_rejects_empty(conn: _FakeConn) -> None:
+    with pytest.raises(ValueError):
+        dsl.add_taxonomy_label(conn, label="   ")
+
+
+def test_add_taxonomy_label_rejects_duplicate(conn: _FakeConn) -> None:
+    dsl.add_taxonomy_label(conn, label="garaz")
+    with pytest.raises(ValueError, match="already exists"):
+        dsl.add_taxonomy_label(conn, label="garaz")
+
+
+def test_rename_taxonomy_label_cascades(conn: _FakeConn) -> None:
+    row = dsl.add_taxonomy_label(conn, label="old-name")
+    conn.training_examples[1] = {"image_id": 1, "label": "old-name", "created_by": "x"}
+    conn.proposals[(2, "m1")] = {
+        "image_id": 2, "model": "m1", "label": "old-name", "confidence": 0.9,
+        "proposed_at": "t", "status": "pending",
+    }
+
+    renamed = dsl.rename_taxonomy_label(conn, label_id=row["id"], new_label="new-name")
+    assert renamed["label"] == "new-name"
+    assert conn.training_examples[1]["label"] == "new-name"
+    assert conn.proposals[(2, "m1")]["label"] == "new-name"
+
+
+def test_rename_taxonomy_label_unknown_id_raises(conn: _FakeConn) -> None:
+    with pytest.raises(KeyError):
+        dsl.rename_taxonomy_label(conn, label_id=999, new_label="x")
+
+
+def test_rename_taxonomy_label_collision_raises(conn: _FakeConn) -> None:
+    dsl.add_taxonomy_label(conn, label="a")
+    b = dsl.add_taxonomy_label(conn, label="b")
+    with pytest.raises(ValueError, match="already exists"):
+        dsl.rename_taxonomy_label(conn, label_id=b["id"], new_label="a")
+
+
+def test_rename_taxonomy_label_noop_when_unchanged(conn: _FakeConn) -> None:
+    row = dsl.add_taxonomy_label(conn, label="same")
+    renamed = dsl.rename_taxonomy_label(conn, label_id=row["id"], new_label="same")
+    assert renamed["label"] == "same"
+
+
+def test_remove_taxonomy_label_cascades(conn: _FakeConn) -> None:
+    row = dsl.add_taxonomy_label(conn, label="doomed")
+    conn.training_examples[1] = {"image_id": 1, "label": "doomed", "created_by": "x"}
+    conn.proposals[(2, "m1")] = {
+        "image_id": 2, "model": "m1", "label": "doomed", "confidence": 0.9,
+        "proposed_at": "t", "status": "pending",
+    }
+
+    result = dsl.remove_taxonomy_label(conn, label_id=row["id"])
+    assert result["deleted_training_examples"] == 1
+    assert result["deleted_proposals"] == 1
+    assert row["id"] not in conn.taxonomy
+    assert conn.training_examples == {}
+    assert conn.proposals == {}
+
+
+def test_remove_taxonomy_label_unknown_id_raises(conn: _FakeConn) -> None:
+    with pytest.raises(KeyError):
+        dsl.remove_taxonomy_label(conn, label_id=999)
+
+
+def test_taxonomy_overview_shape(conn: _FakeConn) -> None:
+    a = dsl.add_taxonomy_label(conn, label="a")
+    dsl.add_taxonomy_label(conn, label="b")
+    conn.training_examples[1] = {"image_id": 1, "label": "a", "created_by": "x"}
+    conn.proposals[(2, "m1")] = {
+        "image_id": 2, "model": "m1", "label": "a", "confidence": 0.9,
+        "proposed_at": "t", "status": "pending",
+    }
+    conn.proposals[(3, "m1")] = {
+        "image_id": 3, "model": "m1", "label": "a", "confidence": 0.9,
+        "proposed_at": "t", "status": "dismissed",
+    }
+    conn.sample[1] = {"image_id": 1}
+    conn.sample[2] = {"image_id": 2}
+
+    overview = dsl.taxonomy_overview(conn)
+    assert overview["sample_size"] == 2
+    row_a = next(r for r in overview["labels"] if r["label"] == "a")
+    assert row_a["id"] == a["id"]
+    assert row_a["confirmed_count"] == 1
+    assert row_a["pending_count"] == 1
+    assert row_a["dismissed_count"] == 1
+    row_b = next(r for r in overview["labels"] if r["label"] == "b")
+    assert row_b["confirmed_count"] == 0
+
+
+# --- sample ---------------------------------------------------------------
+
+
+def test_grow_sample_adds_new_images(conn: _FakeConn) -> None:
+    conn.images = {1, 2, 3, 4, 5}
+    result = dsl.grow_sample(conn, count=3)
+    assert result["added"] == 3
+    assert len(conn.sample) == 3
+
+
+def test_grow_sample_skips_already_sampled(conn: _FakeConn) -> None:
+    conn.images = {1, 2, 3}
+    conn.sample[3] = {"image_id": 3}
+    result = dsl.grow_sample(conn, count=5)
+    assert result["added"] == 2
+
+
+def test_grow_sample_rejects_zero_or_negative(conn: _FakeConn) -> None:
+    with pytest.raises(ValueError):
+        dsl.grow_sample(conn, count=0)
+
+
+def test_grow_sample_rejects_over_max(conn: _FakeConn) -> None:
+    with pytest.raises(ValueError):
+        dsl.grow_sample(conn, count=dsl.GROW_SAMPLE_MAX + 1)
+
+
+def test_grow_sample_filters_by_category(conn: _FakeConn) -> None:
+    conn.images = {1, 2}
+    conn.image_category = {1: "byt", 2: "dum"}
+    result = dsl.grow_sample(conn, count=5, category_main="byt")
+    assert result["added"] == 1
+    assert 1 in conn.sample
+    assert 2 not in conn.sample
+
+
+def test_grow_sample_includes_images_with_no_property_yet(conn: _FakeConn) -> None:
+    # A new listing whose property_maintenance attach hasn't run yet has no
+    # properties row (rule #19: new rows land property_id NULL) — an
+    # unfiltered grow must still pick it up (LEFT JOIN, not INNER JOIN).
+    conn.images = {1}
+    result = dsl.grow_sample(conn, count=5)
+    assert result["added"] == 1
+    assert 1 in conn.sample
+
+
+# --- proposals --------------------------------------------------------------
+
+
+def test_list_proposals_filters(conn: _FakeConn) -> None:
+    conn.proposals[(1, "m1")] = {
+        "image_id": 1, "model": "m1", "label": "a", "confidence": 0.9,
+        "proposed_at": "t2", "status": "pending",
+    }
+    conn.proposals[(2, "m1")] = {
+        "image_id": 2, "model": "m1", "label": "b", "confidence": 0.8,
+        "proposed_at": "t1", "status": "confirmed",
+    }
+    pending = dsl.list_proposals(conn, status="pending")
+    assert len(pending) == 1
+    assert pending[0]["image_id"] == 1
+
+    by_label = dsl.list_proposals(conn, label="b")
+    assert len(by_label) == 1
+    assert by_label[0]["image_id"] == 2
+
+
+def test_confirm_proposal_writes_training_example(conn: _FakeConn) -> None:
+    conn.proposals[(1, "m1")] = {
+        "image_id": 1, "model": "m1", "label": "a", "confidence": 0.9,
+        "proposed_at": "t", "status": "pending",
+    }
+    result = dsl.confirm_proposal(conn, image_id=1, model="m1")
+    assert result["status"] == "confirmed"
+    assert conn.proposals[(1, "m1")]["status"] == "confirmed"
+    assert conn.training_examples[1]["label"] == "a"
+
+
+def test_confirm_proposal_unknown_raises(conn: _FakeConn) -> None:
+    with pytest.raises(KeyError):
+        dsl.confirm_proposal(conn, image_id=1, model="m1")
+
+
+def test_confirm_proposal_already_reviewed_raises(conn: _FakeConn) -> None:
+    conn.proposals[(1, "m1")] = {
+        "image_id": 1, "model": "m1", "label": "a", "confidence": 0.9,
+        "proposed_at": "t", "status": "dismissed",
+    }
+    with pytest.raises(KeyError):
+        dsl.confirm_proposal(conn, image_id=1, model="m1")
+    # A dismissed proposal must never be silently resurrected into confirmed,
+    # nor should it write a training example.
+    assert conn.proposals[(1, "m1")]["status"] == "dismissed"
+    assert 1 not in conn.training_examples
+
+
+def test_dismiss_proposal_after_confirm_does_not_retract_training_example(
+    conn: _FakeConn,
+) -> None:
+    conn.proposals[(1, "m1")] = {
+        "image_id": 1, "model": "m1", "label": "a", "confidence": 0.9,
+        "proposed_at": "t", "status": "pending",
+    }
+    dsl.confirm_proposal(conn, image_id=1, model="m1")
+    assert conn.training_examples[1]["label"] == "a"
+
+    # A second (stale/retried) dismiss call against the now-confirmed
+    # proposal must 404, not silently flip status while leaving the
+    # already-written training example behind (the two stores diverging).
+    with pytest.raises(KeyError):
+        dsl.dismiss_proposal(conn, image_id=1, model="m1")
+    assert conn.proposals[(1, "m1")]["status"] == "confirmed"
+    assert conn.training_examples[1]["label"] == "a"
+
+
+def test_dismiss_proposal(conn: _FakeConn) -> None:
+    conn.proposals[(1, "m1")] = {
+        "image_id": 1, "model": "m1", "label": "a", "confidence": 0.9,
+        "proposed_at": "t", "status": "pending",
+    }
+    result = dsl.dismiss_proposal(conn, image_id=1, model="m1")
+    assert result["status"] == "dismissed"
+    assert conn.proposals[(1, "m1")]["status"] == "dismissed"
+    assert 1 not in conn.training_examples
+
+
+def test_dismiss_proposal_unknown_raises(conn: _FakeConn) -> None:
+    with pytest.raises(KeyError):
+        dsl.dismiss_proposal(conn, image_id=1, model="m1")
+
+
+def test_dismiss_proposal_already_reviewed_raises(conn: _FakeConn) -> None:
+    conn.proposals[(1, "m1")] = {
+        "image_id": 1, "model": "m1", "label": "a", "confidence": 0.9,
+        "proposed_at": "t", "status": "confirmed",
+    }
+    with pytest.raises(KeyError):
+        dsl.dismiss_proposal(conn, image_id=1, model="m1")
+    assert conn.proposals[(1, "m1")]["status"] == "confirmed"
+
+
+def test_confirm_proposal_preserves_created_by_on_re_review(conn: _FakeConn) -> None:
+    # Simulates confirming a second proposal for the same image (e.g. after
+    # a taxonomy rename produced a fresh pending row) — real Postgres'
+    # ON CONFLICT (image_id) DO UPDATE never touches created_by once set.
+    conn.training_examples[1] = {"image_id": 1, "label": "old", "created_by": "operator"}
+    conn.proposals[(1, "m1")] = {
+        "image_id": 1, "model": "m1", "label": "new", "confidence": 0.9,
+        "proposed_at": "t", "status": "pending",
+    }
+    dsl.confirm_proposal(conn, image_id=1, model="m1", reviewed_by="someone_else")
+    assert conn.training_examples[1]["label"] == "new"
+    assert conn.training_examples[1]["created_by"] == "operator"
+
+
+def _add_proposal(conn: _FakeConn, image_id: int, model: str, label: str, status: str = "pending") -> None:
+    conn.proposals[(image_id, model)] = {
+        "image_id": image_id, "model": model, "label": label, "confidence": 0.9,
+        "proposed_at": "t", "status": status,
+    }
+
+
+def test_bulk_confirm_proposals_writes_training_examples(conn: _FakeConn) -> None:
+    _add_proposal(conn, 1, "m1", "a")
+    _add_proposal(conn, 2, "m1", "b")
+    result = dsl.bulk_confirm_proposals(conn, model="m1", image_ids=[1, 2])
+    assert result["confirmed"] == 2
+    assert conn.proposals[(1, "m1")]["status"] == "confirmed"
+    assert conn.proposals[(2, "m1")]["status"] == "confirmed"
+    assert conn.training_examples[1]["label"] == "a"
+    assert conn.training_examples[2]["label"] == "b"
+
+
+def test_bulk_confirm_proposals_skips_already_reviewed(conn: _FakeConn) -> None:
+    _add_proposal(conn, 1, "m1", "a", status="dismissed")
+    result = dsl.bulk_confirm_proposals(conn, model="m1", image_ids=[1])
+    assert result["confirmed"] == 0
+    assert 1 not in conn.training_examples
+
+
+def test_bulk_confirm_proposals_rejects_empty(conn: _FakeConn) -> None:
+    with pytest.raises(ValueError):
+        dsl.bulk_confirm_proposals(conn, model="m1", image_ids=[])
+
+
+def test_bulk_confirm_proposals_rejects_over_max(conn: _FakeConn) -> None:
+    with pytest.raises(ValueError):
+        dsl.bulk_confirm_proposals(
+            conn, model="m1", image_ids=list(range(dsl.BULK_PROPOSAL_MAX + 1)),
+        )
+
+
+def test_bulk_dismiss_proposals(conn: _FakeConn) -> None:
+    _add_proposal(conn, 1, "m1", "a")
+    _add_proposal(conn, 2, "m1", "b")
+    result = dsl.bulk_dismiss_proposals(conn, model="m1", image_ids=[1, 2])
+    assert result["dismissed"] == 2
+    assert conn.proposals[(1, "m1")]["status"] == "dismissed"
+    assert conn.proposals[(2, "m1")]["status"] == "dismissed"
+    assert conn.training_examples == {}
+
+
+def test_bulk_dismiss_proposals_rejects_empty(conn: _FakeConn) -> None:
+    with pytest.raises(ValueError):
+        dsl.bulk_dismiss_proposals(conn, model="m1", image_ids=[])

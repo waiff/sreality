@@ -118,7 +118,9 @@ locally. The properties track adds
 `property_maintenance.yml` (**dirty-set incremental, cron `*/5`** — attaches new stragglers as
 singletons + recomputes only changed properties; rule #20) and
 `recompute_property_stats.yml` (the **daily full-sweep reconcile** at 04:15 — recomputes every
-property + clears the dirty queue). The visual-signal producers run alongside:
+property + clears the dirty queue, within a `--max-seconds` budget: on exhaustion it clean-stops
+at a batch boundary, clears only the swept id range, exits RED, and leaves the completion stamp
+unwritten so the `property_maintenance` check alarms). The visual-signal producers run alongside:
 `compute_image_phash.yml` (hourly pHash backfill, active-listing images first),
 `clip_tag.yml` (`scripts/clip_tag_backfill.py` — zero-shot CLIP room/plot tags into
 `image_clip_tags` + a 512-d vector into `image_clip_embeddings`), `clip_retag.yml`
@@ -150,11 +152,11 @@ failures", cron `*/30` — records failed / timed-out / startup-failed runs into
 so the Health page can list them; GitHub only emails about failed *scheduled* runs; it now
 distinguishes a never-started supersession cancel from a genuine failure so cancelled-by-newer-run
 doesn't inflate the failure count, and captures the run's cursor + whether it was killed by
-timeout, PR #767/#738) and `llm_health.yml` ("Monitoring: LLM pipeline liveness", hourly — goes red
-on ANY of: recorded `llm_calls` FAILURE rows in the window (`error IS NOT NULL`, migration 259 — a
-credit-balance error alarms immediately, `>= --min-failures` generic failures otherwise), OR
-`llm_calls` idle for hours while condition-scoring work is pending, OR the condition batch pipeline
-stale despite fresh unrelated traffic. The failure probe is INDEPENDENT of pending work — it closes
+timeout, PR #767/#738) and `llm_health.yml` ("Monitoring: acute health", hourly — runs
+verify_pipeline's acute lane: `llm_errors`, `llm_liveness`, `llm_burn_rate`, `db_saturation`,
+`worker_liveness`, `property_maintenance`, with `--exit-nonzero-on-fail` so any `fail` goes red
+and emails; it replaced the standalone `check_llm_health.py` in the WS4 alerting rebuild). A
+credit-balance error alarms immediately; the LLM failure probe is INDEPENDENT of pending work — it closes
 the blind spot where a credit-exhausted account stayed green for ~8h because condition scoring
 happened to be quiet. `LLMClient` records the failure row on every provider exception; the check
 needs no Anthropic key of its own). Two more alerting layers were added on top: `llm_burn_rate`
@@ -318,9 +320,11 @@ polls. A `SECURITY DEFINER` dead-man-switch pg_cron function fires if the hourly
 running (the migration-136 exception-guarded pg_cron pattern). This exists because the pipeline
 stalled silently for two days in 2026-07 (Anthropic credit exhaustion, 38k+ failed LLM calls) and
 the only alarm was a failing GH Actions cron the operator happened to miss. The live checks are
-`llm_errors`, `llm_liveness`, `llm_burn_rate`, `db_saturation`, `worker_liveness` and
-`dual_write_parity`; the six dedup-specific checks (street/geo debt, eligibility funnel, merge
-latency, engine health, merge-precision sample) went with the engine, along with their
+`llm_errors`, `llm_liveness`, `llm_burn_rate`, `db_saturation`, `worker_liveness`,
+`dual_write_parity` and `property_maintenance` (last-complete-sweep stamp age + oldest
+dirty-queue row — the 2026-08-06 sweep-death/stranded-lease incident; both axes O(1) reads,
+never a properties scan); the six dedup-specific checks (street/geo debt, eligibility funnel,
+merge latency, engine health, merge-precision sample) went with the engine, along with their
 `pipeline_check_thresholds` rows.
 
 ## Reading the logs

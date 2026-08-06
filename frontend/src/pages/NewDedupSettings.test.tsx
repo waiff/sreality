@@ -1,11 +1,12 @@
 /* NewDedupSettings — the Wave 1 settings registry page.
  *
  * Hermetic: mock listNewDedupSettings/updateNewDedupSetting/resetNewDedupSetting.
- * Pins: category grouping + explanation text render, the boolean toggle flips
- * immediately, a number field only calls the API after Enter (not per keystroke),
- * the "not yet calibrated" / "edited" badges gate on decided/is_override, and
- * reset calls the reset endpoint. Backend CRUD is covered by
- * tests/api/test_new_dedup_routes.py; this only checks the wiring.
+ * Pins: category grouping renders, explanations default to a hover-only InfoHint
+ * and the page's Compact/Detailed toggle switches every explanation inline, the
+ * boolean toggle flips immediately, a number field only calls the API after
+ * Enter (not per keystroke), the "not yet calibrated" / "edited" badges gate on
+ * decided/is_override, and reset calls the reset endpoint. Backend CRUD is
+ * covered by tests/api/test_new_dedup_routes.py; this only checks the wiring.
  */
 
 import { describe, expect, it, vi, beforeEach } from 'vitest';
@@ -95,15 +96,36 @@ function renderPage() {
 describe('<NewDedupSettings>', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // The Compact/Detailed toggle and each category's open state persist to
+    // localStorage (keyed by page/section id) — clear it so one test's clicks
+    // can't leak into the next.
+    localStorage.clear();
     vi.mocked(api.listNewDedupSettings).mockResolvedValue({ data: SETTINGS });
   });
 
-  it('groups settings by category and shows each explanation', async () => {
+  it('groups settings by category, compact by default with explanations on hover', async () => {
     renderPage();
     expect(await screen.findByText('L0 · Candidate selection')).toBeInTheDocument();
     expect(screen.getByText('L2 · Perceptual hash')).toBeInTheDocument();
+    // Compact (the default): the explanation lives on the InfoHint icon's
+    // title/aria-label, not as its own visible text node.
     expect(
-      screen.getByText('How close two listings need to be to become a candidate pair.'),
+      screen.getByTitle('How close two listings need to be to become a candidate pair.'),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText('How close two listings need to be to become a candidate pair.'),
+    ).not.toBeInTheDocument();
+  });
+
+  it('Detailed mode shows every explanation inline', async () => {
+    renderPage();
+    await screen.findByText('L0 · Candidate selection');
+    fireEvent.click(screen.getByRole('button', { name: 'Detailed' }));
+    expect(
+      await screen.findByText('How close two listings need to be to become a candidate pair.'),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText('Whether the exact-attributes level is active.'),
     ).toBeInTheDocument();
   });
 
@@ -127,7 +149,7 @@ describe('<NewDedupSettings>', () => {
     });
     renderPage();
     await screen.findByText('l1_exact_attrs_enabled');
-    const toggle = screen.getByRole('button', { name: '' , pressed: false });
+    const toggle = screen.getByRole('button', { name: 'l1_exact_attrs_enabled', pressed: false });
     fireEvent.click(toggle);
     await waitFor(() =>
       expect(api.updateNewDedupSetting).toHaveBeenCalledWith('l1_exact_attrs_enabled', true),

@@ -29,6 +29,7 @@ if TYPE_CHECKING:
 
 class Category(StrEnum):
     GENERAL = "general"
+    LABELING = "labeling"
     L0_CANDIDATES = "l0_candidates"
     L1_EXACT_ATTRS = "l1_exact_attrs"
     L2_PHASH = "l2_phash"
@@ -114,6 +115,47 @@ REGISTRY: dict[str, SettingDef] = {
                 "pozemek (land): plot sizes are surveyed more precisely "
                 "than living area, so a wider gap is more likely a "
                 "genuinely different lot."
+            ),
+        ),
+        SettingDef(
+            key="labeling_secondary_model",
+            category=Category.LABELING,
+            value_type=ValueType.TEXT,
+            default="openai/clip-vit-large-patch14",
+            decided=False,
+            explanation=(
+                "The stronger CLIP checkpoint the Labeling page's relabel "
+                "job uses to propose Taxonomy v1 tags for operator review. "
+                "A starting pick (bigger than the production tagger's "
+                "vit-base-patch32) — expect this to change once the first "
+                "labeling rounds show whether it's worth the extra compute."
+            ),
+        ),
+        SettingDef(
+            key="labeling_target_proposals_per_category",
+            category=Category.LABELING,
+            value_type=ValueType.INTEGER,
+            default=300,
+            minimum=1,
+            explanation=(
+                "How many secondary-CLIP proposals a taxonomy label needs "
+                "before its sample is considered wide enough to assess "
+                "coverage with the operator. From the design Q&A: iterate "
+                "the sample until 300 proposals land for at least half the "
+                "active categories."
+            ),
+        ),
+        SettingDef(
+            key="labeling_gate1_target_per_tag",
+            category=Category.LABELING,
+            value_type=ValueType.INTEGER,
+            default=150,
+            minimum=1,
+            explanation=(
+                "Wave 1's gate: how many operator-confirmed training images "
+                "each active tag needs before the labeling program is "
+                "considered done and the program can move to Wave 2 "
+                "(candidate selection)."
             ),
         ),
         SettingDef(
