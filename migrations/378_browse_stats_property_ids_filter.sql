@@ -238,7 +238,7 @@ begin
   )
   );
 end
-$function$
+$function$;
 
 -- DROP wiped the function's ACL; the live grant is explicit (postgres +
 -- authenticated + service_role, with PUBLIC/anon deliberately absent since the
