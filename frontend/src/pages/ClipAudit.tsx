@@ -66,8 +66,7 @@ const TYPE_TABS = CATEGORY_MAIN_TABS.filter((t) => t.id !== '');
 
 const TAG_OPTIONS = Object.keys(IMAGE_TAG_LABELS).filter(
   // The fine-only sub-styles (situation_plan, cadastral_map, …) collapse into
-  // site_plan for the engine; filter on the 15 canonical logical tags only, the
-  // same set the render badge / dedup engine reason about.
+  // site_plan; filter on the 15 canonical logical tags only.
   (k) => !['situation_plan', 'cadastral_map', 'aerial_plot', 'location_map',
            'energy_certificate', 'document_text'].includes(k),
 );
@@ -179,17 +178,13 @@ export default function ClipAudit() {
   }, [trainingLabelCounts, summarySort]);
 
   // Chip-trash: drop EVERY training example under one label (the images stay).
-  // Cross-page invalidation on purpose — PhashAudit reads the same table under its
-  // own query prefix, and both pages share the one QueryClient.
   const qc = useQueryClient();
   const removeLabel = useMutation({
     mutationFn: (label: string) => deleteTrainingLabel(label),
     onSuccess: ({ data }, label) => {
       if (trainingLabel === label) setTrainingLabel('');
-      for (const prefix of ['clip-audit', 'phash-audit']) {
-        qc.invalidateQueries({ queryKey: [prefix, 'training-labels'] });
-        qc.invalidateQueries({ queryKey: [prefix, 'training'] });
-      }
+      qc.invalidateQueries({ queryKey: ['clip-audit', 'training-labels'] });
+      qc.invalidateQueries({ queryKey: ['clip-audit', 'training'] });
       qc.invalidateQueries({ queryKey: ['clip-audit', 'training-by-label'] });
       pushToast('ok', `Štítek odebrán z trénovací sady (${data.deleted} obrázků).`);
     },
@@ -818,7 +813,7 @@ function PropertyPageGroup({
     for (const list of sourcesMap?.values() ?? []) {
       // Guard the null (post-Gate-2 non-sreality source) so it never enters the
       // set — images_public is still batched by sreality_id here, and a null
-      // would be a dead key (mirrors the Dedup collector's guard).
+      // would be a dead key.
       for (const src of list) if (src.sreality_id != null) s.add(src.sreality_id);
     }
     return [...s];

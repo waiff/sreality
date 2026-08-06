@@ -41,7 +41,7 @@ import type {
   ScrapeRun,
   ScraperHealthChecks,
 } from './types';
-import type { BorderCase, ImageAnnotation, PhashNote, TrainingExample } from './api';
+import type { BorderCase, ImageAnnotation, TrainingExample } from './api';
 
 /* Circle → bounding box approximation. Used when the operator picks
  * the centre+radius mode on the map: PostgREST has no native
@@ -1538,27 +1538,6 @@ export const fetchImageAnnotationsByImageIds = async (
   const out = new Map<number, ImageAnnotation>();
   for (const row of (data ?? []) as unknown as ImageAnnotation[]) {
     out.set(row.image_id, row);
-  }
-  return out;
-};
-
-/* Label store: the operator's note on an image PAIR, batched by the on-screen
- * images' ids. The two `.in()` filters can over-match (any a-on-screen paired with
- * any b-on-screen, not just the specific pairs shown) — harmless, since the caller
- * looks up by the exact `${a}:${b}` key and ignores anything else returned. */
-export const fetchPhashPairNotesForImageIds = async (
-  ids: ReadonlyArray<number>,
-): Promise<Map<string, PhashNote>> => {
-  if (ids.length === 0) return new Map();
-  const { data, error } = await supabase
-    .from('phash_pair_notes_public')
-    .select('image_id_a,image_id_b,note,updated_at')
-    .in('image_id_a', ids as number[])
-    .in('image_id_b', ids as number[]);
-  if (error) throw error;
-  const out = new Map<string, PhashNote>();
-  for (const row of (data ?? []) as unknown as PhashNote[]) {
-    out.set(`${row.image_id_a}:${row.image_id_b}`, row);
   }
   return out;
 };

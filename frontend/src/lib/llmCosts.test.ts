@@ -13,7 +13,7 @@ const NOW = new Date('2026-07-07T12:00:00Z');
 
 const row = (over: Partial<LlmCostDailyRow>): LlmCostDailyRow => ({
   day: '2026-07-07',
-  called_for: 'compare_listings_visually',
+  called_for: 'enrich_listing_description',
   provider: 'anthropic',
   model: 'claude-sonnet-4-5',
   calls: 10,
@@ -73,17 +73,17 @@ describe('buildDailySeries', () => {
 
   it('keeps canonical features in fixed stack order regardless of rank', () => {
     const rows = [
-      row({ day: '2026-07-06', called_for: 'classify_listing_images', cost_usd: 99 }),
-      row({ day: '2026-07-06', called_for: 'compare_listings_visually', cost_usd: 1 }),
+      row({ day: '2026-07-06', called_for: 'agent_estimation', cost_usd: 99 }),
+      row({ day: '2026-07-06', called_for: 'enrich_listing_description', cost_usd: 1 }),
     ];
     const s = buildDailySeries(rows, NOW, 3, 6);
-    expect(s.features).toEqual(['compare_listings_visually', 'classify_listing_images']);
+    expect(s.features).toEqual(['enrich_listing_description', 'agent_estimation']);
   });
 });
 
 describe('colorTokenFor', () => {
   it('is entity-stable for known features and deterministic for unknown ones', () => {
-    expect(colorTokenFor('compare_listings_visually')).toBe('--color-tag-ochre');
+    expect(colorTokenFor('enrich_listing_description')).toBe('--color-tag-brick');
     expect(colorTokenFor('other')).toBe('--color-ink-3');
     expect(colorTokenFor('brand_new_feature')).toBe(colorTokenFor('brand_new_feature'));
   });

@@ -25,7 +25,7 @@ interface Props {
   /* group-hover:scale the image — cards live inside a `.group` Link. */
   hoverZoom?: boolean;
   /* Chevrons fade in on parent `.group` hover (cards) rather than always
-   * showing (the dedup panel, which has no hover-group wrapper). */
+   * showing (a panel with no hover-group wrapper). */
   fadeChevrons?: boolean;
   children?: ReactNode;
 }

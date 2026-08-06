@@ -788,7 +788,7 @@ function PipelineChecksPanel({
               {pipelineCheckLabel(c.check_key)}
             </span>
             <span className="font-mono tabular-nums text-[var(--color-ink-2)] whitespace-nowrap">
-              {pipelineCheckValueLabel(c.check_key, c.value)}
+              {pipelineCheckValueLabel(c.value)}
             </span>
             <span
               className="shrink-0 tabular-nums text-[0.7rem] text-[var(--color-ink-4)] w-16 text-right cursor-help"

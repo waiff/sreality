@@ -18,17 +18,14 @@ export interface LlmCostDailyRow {
 
 /* Color follows the ENTITY (the called_for tag), never its rank — a
  * feature keeps its hue when volumes shift or filters change. The order
- * below is also the chart's stack order; the ochre→slate→brick→teal→
- * plum→sage adjacency was validated for CVD separation against the
- * civic-archive tag tokens (light + dark). Unknown future tags hash
- * onto the spare tokens deterministically by name. */
+ * below is also the chart's stack order; the brick→plum→sand adjacency
+ * was validated for CVD separation against the civic-archive tag tokens
+ * (light + dark). Unknown tags — including the retired dedup vision
+ * tools still present in historical rows — hash onto the spare tokens
+ * deterministically by name. */
 export const FEATURE_COLOR_TOKENS: ReadonlyArray<readonly [string, string]> = [
-  ['compare_listings_visually', '--color-tag-ochre'],
-  ['compare_listing_floor_plans', '--color-tag-slate'],
   ['enrich_listing_description', '--color-tag-brick'],
-  ['compare_listing_site_plans', '--color-tag-teal'],
   ['score_listing_condition', '--color-tag-plum'],
-  ['classify_listing_images', '--color-tag-sage'],
   ['agent_estimation', '--color-tag-sand'],
 ];
 
@@ -53,10 +50,6 @@ export function colorTokenFor(feature: string): string {
 /* Short human labels for the audit tags; unknown tags fall back to the
  * raw tag so a new backend feature appears without a frontend release. */
 const FEATURE_LABELS: Record<string, string> = {
-  compare_listings_visually: 'Visual compare (dedup)',
-  compare_listing_floor_plans: 'Floor-plan gate (dedup)',
-  compare_listing_site_plans: 'Site-plan guard (dedup)',
-  classify_listing_images: 'Image classify (dedup)',
   enrich_listing_description: 'Description enrichment',
   score_listing_condition: 'Condition scoring',
   agent_estimation: 'Estimation agent',

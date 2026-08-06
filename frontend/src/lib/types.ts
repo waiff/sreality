@@ -328,10 +328,9 @@ export interface PortalHealth {
   listings_active: number;
   listings_active_7d: number;
   // Active-listing data-quality coverage (migration 219; null when no active
-  // listings). dedup_eligible_pct = street AND disposition (view column, unsurfaced).
+  // listings). The view also carries dedup_eligible_pct — unmodelled, nothing reads it.
   geo_pct: number | null;
   street_pct: number | null;
-  dedup_eligible_pct: number | null;
   parses_total: number;
   parses_30d: number;
   last_scrape_at: string | null;

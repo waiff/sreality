@@ -11,9 +11,10 @@ import {
 } from '@/lib/api';
 import type { ImagePublic } from '@/lib/types';
 
-/* The linear-probe training-set "Train" CTA — shared by /phash-audit and /clip-audit
- * (both pages were carrying a byte-for-byte copy of this state/mutation logic before,
- * which is exactly how the two of them drifted out of sync). Defaults to the
+/* The linear-probe training-set "Train" CTA, used by /clip-audit (it was extracted
+ * when a second labeling surface carried a byte-for-byte copy of this state/mutation
+ * logic and the two drifted out of sync; `queryKeyPrefix` keeps it page-agnostic for
+ * the Wave-1 Labeling page). Defaults to the
  * CLIP-assigned fine_tag KEY (not its Czech translation — see LabelCombobox/imageTags
  * for why identity has to be the canonical key), so confirming a correct call is one
  * click; `labelOptions` renders the Czech text.
@@ -56,9 +57,9 @@ export default function TrainControl({
   const trained = !!example;
 
   // Invalidate both this page-group's training examples AND the page-wide
-  // training-labels query (LabelCombobox's suggestions, and PhashAudit's per-label
-  // counts) — a fresh Train/untrain changes both, and the latter otherwise only
-  // resyncs after its 30s staleTime lapses.
+  // training-labels query (LabelCombobox's suggestions, the per-label counts) — a
+  // fresh Train/untrain changes both, and the latter otherwise only resyncs after
+  // its 30s staleTime lapses.
   const invalidate = () => {
     qc.invalidateQueries({ queryKey: [queryKeyPrefix, 'training'] });
     qc.invalidateQueries({ queryKey: [queryKeyPrefix, 'training-labels'] });

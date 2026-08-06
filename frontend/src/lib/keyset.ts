@@ -29,7 +29,7 @@
  *
  * The tiebreaker defaults to `property_id` (= `properties.id`): immutable,
  * unique, never null — the only safe choice on the property-grain read models
- * (`sreality_id` is nullable and can be re-pointed by the dedup engine). It is
+ * (`sreality_id` is nullable and can be re-pointed by a merge). It is
  * appended to every ORDER BY and compared DESC, so a whole scrape batch that
  * lands on one identical `last_seen_at` second still has a total order.
  *
@@ -38,8 +38,8 @@
  * `property_id` is NOT UNIQUE and so is not a legal tiebreaker at all: a
  * keyset tiebreaker has to impose a TOTAL order, and 7,951 properties carry
  * more than one active listing on a single portal (18,521 rows, measured live
- * 2026-08-04 — same-portal duplicates the dedup engine merged under one
- * property). Anchoring a cursor on a value shared by two rows in the same
+ * 2026-08-04 — same-portal duplicates merged under one property).
+ * Anchoring a cursor on a value shared by two rows in the same
  * result set silently skips or repeats rows at every page boundary that lands
  * on one. That surface passes `listing_id` instead: the surrogate
  * `listings.id`, unique and never null on either read model. Every function

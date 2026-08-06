@@ -647,9 +647,6 @@ export const updateSkill = (
 export const listAppSettings = (): Promise<{ data: AppSetting[] }> =>
   request<{ data: AppSetting[] }>('/admin/app_settings', { jwt: true });
 
-export const getAppSetting = (key: string): Promise<AppSetting> =>
-  request<AppSetting>(`/admin/app_settings/${encodeURIComponent(key)}`, { jwt: true });
-
 export const updateAppSetting = (
   key: string,
   value: unknown,
@@ -685,29 +682,6 @@ export const deleteImageAnnotation = (
   request<{ data: { deleted: boolean } }>('/labeling/image-annotation', {
     method: 'DELETE',
     query: { image_id },
-    jwt: true,
-  });
-
-// Label store: a note on one image pair.
-export type PhashNote = {
-  image_id_a: number;
-  image_id_b: number;
-  note: string | null;
-  updated_at: string;
-};
-export const setPhashNote = (body: {
-  image_id_a: number;
-  image_id_b: number;
-  note?: string | null;
-}): Promise<{ data: PhashNote }> =>
-  request<{ data: PhashNote }>('/labeling/phash-note', { method: 'POST', json: body, jwt: true });
-export const deletePhashNote = (
-  image_id_a: number,
-  image_id_b: number,
-): Promise<{ data: { deleted: boolean } }> =>
-  request<{ data: { deleted: boolean } }>('/labeling/phash-note', {
-    method: 'DELETE',
-    query: { a: image_id_a, b: image_id_b },
     jwt: true,
   });
 
@@ -1478,6 +1452,10 @@ export const unlinkAssetProperty = (
     { method: 'POST', json: { property_id: propertyId }, jwt: true },
   );
 
+/* Merge ledger (list / browse-results / unmerge). Retained without a UI caller on
+ * purpose: the buttons lived on the deleted Dedup page, and until the new production
+ * wave gives them a permanent home unmerge is API-only. These three wrap the surviving
+ * `/properties/*` mechanics routes — do not delete them as "dead". */
 export const listPropertyMerges = (
   params: { limit?: number; offset?: number } = {},
 ): Promise<MergesResponse> =>

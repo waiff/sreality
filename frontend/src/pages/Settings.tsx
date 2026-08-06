@@ -15,7 +15,6 @@
  */
 
 import { useEffect, useMemo, useState } from 'react';
-import { useLocation } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   listSkills,
@@ -50,46 +49,7 @@ import { PickButton } from '@/components/controls';
 import TiersSection from '@/components/TiersSection';
 import { WORKFLOW_DOCS, type WorkflowDoc } from '@/lib/workflowDocs.generated';
 
-/* Deep-link arrivals (a `/settings#setting-<key>` link from another surface):
- * scroll the targeted row into view and flash it, once the force-opened section has
- * rendered it. Outline via inline style so there's no Tailwind-JIT class to miss. */
-function useScrollToSettingHash(hash: string): void {
-  useEffect(() => {
-    const id = hash.startsWith('#') ? hash.slice(1) : '';
-    if (!id) return;
-    let tries = 0;
-    let timer = 0;
-    let raf = 0;
-    // The target row may render after an async settings fetch resolves, so retry until it
-    // appears (then flash it). ~3s budget covers a cold-cache load; outline via inline
-    // style so there's no Tailwind-JIT class to miss.
-    const focus = () => {
-      const el = document.getElementById(id);
-      if (el) {
-        el.scrollIntoView({ block: 'center', behavior: 'smooth' });
-        el.style.outline = '2px solid var(--color-copper)';
-        el.style.outlineOffset = '3px';
-        el.style.borderRadius = 'var(--radius-sm)';
-        timer = window.setTimeout(() => {
-          el.style.outline = '';
-          el.style.outlineOffset = '';
-        }, 2200);
-      } else if (tries++ < 30) {
-        timer = window.setTimeout(focus, 100);
-      }
-    };
-    // Defer the first attempt one frame so a freshly force-opened section can mount.
-    raf = window.requestAnimationFrame(focus);
-    return () => {
-      window.clearTimeout(timer);
-      window.cancelAnimationFrame(raf);
-    };
-  }, [hash]);
-}
-
 export default function Settings() {
-  const location = useLocation();
-  useScrollToSettingHash(location.hash);
   return (
     <div className="px-6 pt-5 pb-10 max-w-screen-lg mx-auto">
       <header>
@@ -265,7 +225,6 @@ function CollapsibleSection({
   eyebrow,
   description,
   defaultOpen = true,
-  ownsHash,
   children,
 }: {
   id: string;
@@ -273,15 +232,9 @@ function CollapsibleSection({
   eyebrow?: string;
   description?: React.ReactNode;
   defaultOpen?: boolean;
-  // When the current URL hash targets an anchor INSIDE this section, force it open so the
-  // target row is in the DOM to scroll to (a deep-link from another page).
-  ownsHash?: (hash: string) => boolean;
   children: React.ReactNode;
 }) {
-  const [open, toggle] = useCollapsed(id, defaultOpen);
-  const location = useLocation();
-  const forced = ownsHash ? ownsHash(location.hash) : false;
-  const isOpen = open || forced;
+  const [isOpen, toggle] = useCollapsed(id, defaultOpen);
   return (
     <section id={id} className="mt-8 scroll-mt-20">
       <button
