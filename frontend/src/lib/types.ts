@@ -918,7 +918,15 @@ export interface PipelineBoardCard {
   property_id: number;
   stage_id: number;
   board_position: number;
+  /* Stamped by the API on a real stage change only (a pure within-stage
+   * reorder is not deal history) — so "how long has this sat where it is".
+   * Audited against property_pipeline_events: for every live card the newest
+   * reason='operator' event matches this to the microsecond. */
   entered_stage_at: string;
+  /* When the property entered the pipeline at all. Defaulted at INSERT and
+   * never updated, EXCEPT by an unmerge restore, which re-INSERTs the card and
+   * resets it to now() — see the sort-option docstring in lib/pipelineSort. */
+  added_at: string;
   sreality_id: number | null;
   /* Representative listing's portal + native id (migration 091) — builds the
    * canonical `/listing/{source}/{native}` link so the card never flashes the
@@ -938,9 +946,25 @@ export interface PipelineBoardCard {
   area_m2: number | null;
   price_czk: number | null;
   mf_gross_yield_pct: number | null;
+  /* Signed (last − first) percent across the REPRESENTATIVE listing's own price
+   * series — the same listing whose price is `price_czk`, so the two always
+   * describe one series. NULL when that listing has fewer than two priced
+   * snapshots, which is NOT the same claim as "the price never moved"; the
+   * <PriceDelta> component renders nothing in that case. */
+  total_price_change_pct: number | null;
+  /* Consecutive-step price changes within each child listing, summed across
+   * children. Distinguishes "observed twice, never moved" (0) from "moved and
+   * came back" (>0) when total_price_change_pct is exactly 0. */
+  price_change_count: number | null;
   /* Region fields from properties_public — the in-memory region filter
-   * (matchesDistricts) reuses Browse's admin-id + name-fallback semantics. */
+   * (matchesDistricts) reuses Browse's admin-id + name-fallback semantics.
+   * `obec_id` doubles as the join key to the curated-city index strip
+   * (= curated_cities.admin_boundary_id; see lib/useCityQuality). */
   obec_id: number | null;
+  /* Municipality + free-text locality — feed placePrimary() so the card's place
+   * line names the TOWN, and so the "Město" sort orders by something visible. */
+  obec: string | null;
+  locality: string | null;
   okres_id: number | null;
   region_id: number | null;
   place_search_text: string | null;
