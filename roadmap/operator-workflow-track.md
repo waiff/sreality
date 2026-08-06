@@ -265,6 +265,42 @@ Vertical ordering the operator controls, plus two data signals on the card.
   printing "okres Beroun" for a village); `BoardCard`/`CardFace` extracted out of
   the 863-line page. Rule #22 unchanged.
 
+### Phase U-PIPE Phase 3h: Pipeline scope on Browse + stage badge (done)
+Two halves of one idea — make "which deals am I working" legible and filterable
+from Browse, not just from the board.
+- **Stage badge.** `pipeline_stages.code` (migration 377) is the short mark the
+  funnel renders. The number is operator DATA, not ordering: the live board
+  hand-numbers stages inside the labels ("1. For Review" … "9. Passed", "9.
+  Bought", "9. Lost"), so three stages share "9" while `position` runs 5/6/7 —
+  an ordinal badge would contradict the operator's own labels, and a regex over
+  the label would break on the first unnumbered rename. Nullable + NOT unique;
+  NULL falls back to the ordinal at render time (`lib/pipelineStage.ts`).
+  Backfilled once from the existing label prefixes; the stage editor exposes it
+  as a 4-char box whose placeholder is the ordinal.
+- **One mark, one accent, one write path.** `<PipelineMark>` (funnel + badge) and
+  `stageAccent`/`stageBadge` replace the per-surface copies — the board fell back
+  to grey for an uncoloured stage while the listing header fell back to copper.
+  `PipelineFunnelButton` now serves the Browse cards AND the Table (which had no
+  pipeline affordance at all, quietly breaking rule #22's "every surface"), and
+  `usePipelineCard` is the single add/remove/move hook + invalidation policy.
+  The Chrome-extension panel mirrors the badge and tints its pill by stage, with
+  the tag palette added to its by-value mirror of the SPA tokens.
+- **Pipeline scope.** `ListingFilters.pipeline` (`?pipeline=any` or `?pipeline=`
+  stage ids; registry id `pipeline`, BROWSE agenda only) resolves a property-id
+  allowlist from `property_pipeline_public` and AND's it onto the cohort exactly
+  like tags / with-estimates, reading through the SAME `fetchPipelineMembers` the
+  funnels render from. `browse_stats_properties` gained a generic
+  `property_ids_filter` (migration 378) so the Stats tab can't diverge from the
+  list — the failure class migration 351 closed.
+- **A scope, not a preset.** The chip leads the preset row, but `pipeline` sits in
+  `PRESET_EXCLUDED_KEYS`: it is never stored in a preset and never counted in the
+  dirty comparison, so toggling it shows no "Update preset" and it survives
+  loading one. Per-stage narrowing lives in the sidebar (Curation → Pipeline).
+  Watchdogs report it as unsupported — the operator's own state can't be a
+  trigger for their own clicks.
+- Next: nothing queued here; per-stage columns on the Table and a "days in stage"
+  signal are the obvious follow-ups if the scope gets heavy use.
+
 ### Phase U-ME: Manual rental estimates (next)
 
 Capture operator-judgement rent figures as first-class data and

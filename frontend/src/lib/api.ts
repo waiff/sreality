@@ -1288,6 +1288,8 @@ export const createPipelineStage = (input: {
   label: string;
   color?: TagColor | null;
   is_terminal?: boolean;
+  /* Short funnel badge (migration 377); omit to fall back to the ordinal. */
+  code?: string | null;
 }): Promise<PipelineStage> =>
   request<PipelineStage>('/pipeline/stages', { method: 'POST', json: input, jwt: true });
 
@@ -1298,6 +1300,8 @@ export const updatePipelineStage = (
     color?: TagColor | null;
     is_terminal?: boolean;
     is_entry?: boolean;
+    /* Explicit null clears the badge back to the ordinal fallback. */
+    code?: string | null;
   },
 ): Promise<PipelineStage> =>
   request<PipelineStage>(`/pipeline/stages/${stage_id}`, {

@@ -291,6 +291,34 @@ describe('URL round-trip', () => {
   });
 });
 
+describe('pipeline scope URL codec', () => {
+  it('round-trips "any stage"', () => {
+    const f: ListingFilters = { ...DEFAULT_FILTERS, pipeline: { stage_ids: [] } };
+    const sp = toSearchParams(f);
+    expect(sp.get('pipeline')).toBe('any');
+    expect(fromSearchParams(sp)).toEqual(f);
+  });
+
+  it('round-trips a stage narrowing', () => {
+    const f: ListingFilters = { ...DEFAULT_FILTERS, pipeline: { stage_ids: [12, 13] } };
+    const sp = toSearchParams(f);
+    expect(sp.get('pipeline')).toBe('12,13');
+    expect(fromSearchParams(sp)).toEqual(f);
+  });
+
+  it('emits nothing when the scope is off', () => {
+    expect(toSearchParams(DEFAULT_FILTERS).has('pipeline')).toBe(false);
+    expect(fromSearchParams(new URLSearchParams()).pipeline).toBeNull();
+  });
+
+  it('degrades an unparseable stage list to "any stage", never to off', () => {
+    // Losing the scope entirely would swap the operator's pipeline for the
+    // whole market — the loud failure is showing them all their cards.
+    const got = fromSearchParams(new URLSearchParams('pipeline=abc'));
+    expect(got.pipeline).toEqual({ stage_ids: [] });
+  });
+});
+
 describe('isDefault', () => {
   it('returns true for the canonical default state', () => {
     expect(isDefault(DEFAULT_FILTERS)).toBe(true);
@@ -592,6 +620,36 @@ describe('filter presets', () => {
     expect(filtersForPreset(f, true).bounds).toEqual(BOUNDS);
     // Non-viewport filters survive either way.
     expect(filtersForPreset(f, false).priceMax).toBe(6_000_000);
+  });
+
+  it('filtersForPreset always strips the pipeline scope', () => {
+    const f: ListingFilters = {
+      ...DEFAULT_FILTERS,
+      priceMax: 6_000_000,
+      pipeline: { stage_ids: [12] },
+    };
+    // Both branches: the scope is a lens, not preset criteria.
+    expect(filtersForPreset(f, false).pipeline).toBeNull();
+    expect(filtersForPreset(f, true).pipeline).toBeNull();
+  });
+
+  it('never marks a preset dirty because of the pipeline scope', () => {
+    const saved: ListingFilters = { ...DEFAULT_FILTERS, priceMax: 5_000_000 };
+    // This is the operator-visible contract: toggling Pipeline (or picking
+    // stages inside it) must NOT surface the "Update preset" button.
+    expect(
+      filtersEqualForPreset({ ...saved, pipeline: { stage_ids: [] } }, saved),
+    ).toBe(true);
+    expect(
+      filtersEqualForPreset({ ...saved, pipeline: { stage_ids: [3, 9] } }, saved),
+    ).toBe(true);
+    // …and a real criteria change still is dirty, scope on or not.
+    expect(
+      filtersEqualForPreset(
+        { ...saved, priceMax: 4_000_000, pipeline: { stage_ids: [] } },
+        saved,
+      ),
+    ).toBe(false);
   });
 
   it('matches identical filter sets', () => {

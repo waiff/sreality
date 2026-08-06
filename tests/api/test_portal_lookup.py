@@ -144,6 +144,8 @@ def test_lookup_maps_rows_with_sreality_id_mf_and_estimation() -> None:
     assert sr["pipeline"] == {  # bookmarked → entry-stage membership
         "in_pipeline": True, "stage_id": 3,
         "stage_key": "interested", "stage_label": "Zájem",
+        # Badge + accent (migration 377) so the panel's funnel matches the SPA's.
+        "stage_code": None, "stage_color": None,
     }
     assert sr["collection_ids"] == [7, 9]  # property-grain memberships
     # apartment: subtype NULL → kind_label is the disposition
@@ -162,6 +164,7 @@ def test_lookup_maps_rows_with_sreality_id_mf_and_estimation() -> None:
     assert bz["pipeline"] == {
         "in_pipeline": False, "stage_id": None,
         "stage_key": None, "stage_label": None,
+        "stage_code": None, "stage_color": None,
     }
     assert bz["collection_ids"] == []  # has a property, in no collection
 

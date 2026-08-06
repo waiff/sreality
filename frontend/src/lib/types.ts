@@ -888,6 +888,9 @@ export interface PipelineCard {
   stage_color: TagColor | null;
   is_terminal: boolean;
   stage_position: number;
+  /* Short operator-owned badge (migration 377). NULL = render the stage's
+   * ordinal instead (lib/pipelineStage.ts:stageBadge). */
+  stage_code: string | null;
 }
 
 /* The kanban columns (pipeline_stages_public, operator-curated). */
@@ -899,6 +902,9 @@ export interface PipelineStage {
   color: TagColor | null;
   is_terminal: boolean;
   is_entry: boolean;
+  /* Short operator-owned badge shown inside the funnel (migration 377). NULL =
+   * fall back to the stage's 1-based ordinal among live stages. */
+  code: string | null;
 }
 
 /* The canonical (resolved) broker for a card, with the contact the hover box

@@ -168,7 +168,7 @@ class _FakeConn:
         return _Cur(self)
 
 
-_CARD_ROW = (42, 1, "interested", "Zájem", 5, None, None, None)
+_CARD_ROW = (42, 1, "interested", "Zájem", 5, None, None, None, "1", "copper")
 
 
 def test_add_card_inserts_at_entry_stage_and_logs_event():
@@ -188,7 +188,7 @@ def test_add_card_inserts_at_entry_stage_and_logs_event():
 
 
 def test_add_card_idempotent_returns_existing_stage_no_event():
-    existing = (42, 3, "offer", "Nabídka", 2, None, None, None)
+    existing = (42, 3, "offer", "Nabídka", 2, None, None, None, "3", "teal")
     conn = _FakeConn([
         (lambda q: "RECURSIVE chain" in q, [(42, 42)]),  # property active -> itself
         (lambda q: "WHERE is_entry" in q, [(1,)]),
@@ -256,7 +256,7 @@ def test_move_card_to_new_stage_logs_event_and_stamps_entered():
     conn = _FakeConn([
         (lambda q: "SELECT stage_id FROM property_pipeline WHERE property_id" in q, [(1,)]),
         (lambda q: "FROM property_pipeline pp JOIN pipeline_stages" in q,
-         [(42, 3, "offer", "Nabídka", 2, None, None, None)]),
+         [(42, 3, "offer", "Nabídka", 2, None, None, None, "3", "teal")]),
     ])
     out = pipeline_module.move_card(conn, 42, s.MoveCardIn(stage_id=3), account_id=None)
     sqls = [q for q, _ in conn.executed]
@@ -272,7 +272,7 @@ def test_move_card_reorder_only_logs_no_event():
     conn = _FakeConn([
         (lambda q: "SELECT stage_id FROM property_pipeline WHERE property_id" in q, [(1,)]),
         (lambda q: "FROM property_pipeline pp JOIN pipeline_stages" in q,
-         [(42, 1, "interested", "Zájem", 3, None, None, None)]),
+         [(42, 1, "interested", "Zájem", 3, None, None, None, "1", "copper")]),
     ])
     pipeline_module.move_card(conn, 42, s.MoveCardIn(stage_id=1, board_position=2.5), account_id=None)
     sqls = [q for q, _ in conn.executed]
@@ -325,7 +325,9 @@ def test_slugify_strips_diacritics_and_punctuation():
 
 
 def test_create_stage_derives_key_and_appends_position():
-    stage_row = (9, "due_diligence", "Due diligence", 6, "plum", False, False)
+    # trailing None = code: a new stage carries no badge, so the funnels fall
+    # back to its ordinal (migration 377).
+    stage_row = (9, "due_diligence", "Due diligence", 6, "plum", False, False, None)
     conn = _FakeConn([
         (lambda q: "SELECT lower(key) FROM pipeline_stages" in q,
          [("interested",), ("viewing",)]),
@@ -348,8 +350,55 @@ def test_create_stage_rejects_palette_violation():
     assert ei.value.status_code == 422
 
 
+def test_create_stage_rejects_a_padded_code():
+    # The DB CHECK (migration 377) refuses padded / blank codes; the API must
+    # answer 422 rather than let it surface as a 500 constraint violation.
+    conn = _FakeConn([])
+    with pytest.raises(fastapi.HTTPException) as ei:
+        pipeline_module.create_stage(
+            conn, s.CreateStageIn(label="X", code=" 1"), account_id=None,
+        )
+    assert ei.value.status_code == 422
+
+
+def test_update_stage_clears_the_code_when_sent_explicit_null():
+    # An explicit null means "drop the badge back to the ordinal", which an
+    # `is not None` check would silently swallow — hence model_fields_set.
+    updated = (2, "viewing", "Prohlídka", 2, "ochre", False, False, None)
+    conn = _FakeConn([
+        (lambda q: "SELECT is_entry, is_terminal FROM pipeline_stages WHERE id" in q,
+         [(False, False)]),
+        (lambda q: "UPDATE pipeline_stages SET" in q and "RETURNING" in q, [updated]),
+    ])
+    out = pipeline_module.update_stage(
+        conn, 2, s.UpdateStageIn.model_validate({"code": None}), account_id=None,
+    )
+    assert out["code"] is None
+    sql, params = next(
+        (q, p) for q, p in conn.executed if "UPDATE pipeline_stages SET" in q and "RETURNING" in q
+    )
+    assert "code = %s" in sql
+    assert params[0] is None
+
+
+def test_update_stage_leaves_the_code_alone_when_absent():
+    updated = (2, "viewing", "Prohlídka", 2, "ochre", False, False, "9")
+    conn = _FakeConn([
+        (lambda q: "SELECT is_entry, is_terminal FROM pipeline_stages WHERE id" in q,
+         [(False, False)]),
+        (lambda q: "UPDATE pipeline_stages SET" in q and "RETURNING" in q, [updated]),
+    ])
+    pipeline_module.update_stage(
+        conn, 2, s.UpdateStageIn(label="Prohlídka"), account_id=None,
+    )
+    sql = next(
+        q for q, _ in conn.executed if "UPDATE pipeline_stages SET" in q and "RETURNING" in q
+    )
+    assert "code = %s" not in sql
+
+
 def test_update_stage_crowning_entry_demotes_the_others():
-    updated = (2, "viewing", "Prohlídka", 2, "ochre", False, True)
+    updated = (2, "viewing", "Prohlídka", 2, "ochre", False, True, "2")
     conn = _FakeConn([
         (lambda q: "SELECT is_entry, is_terminal FROM pipeline_stages WHERE id" in q,
          [(False, False)]),

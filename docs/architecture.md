@@ -780,13 +780,38 @@ renumber.** Navigate by area:
     (the card rides the anchor property). Writes go through the bearer-gated API (`POST/DELETE /pipeline/cards` to
     bookmark/un-bookmark, `PATCH /pipeline/cards/{id}` to move stage — a stage change stamps
     `entered_stage_at` and logs a `moved` event, a pure within-stage reorder logs nothing;
-    `GET /pipeline/stages`). **The "Přidat do pipeline" affordance is the shared `<FunnelIcon>`
-    (a funnel with three arrows, filled body = in-pipeline) used on EVERY pipeline
-    surface — the listing-detail header (`PipelineToggle`, in the top action bar next to "New
-    estimation", NOT buried in CurationBlock), every Browse card (`BookmarkButton`), the
-    stage-manager's entry-stage indicator (`is_entry` — filled = the entry stage), AND the
-    Chrome-extension panel (the glyph reproduced by value in vanilla TS — separate territory,
-    no React import) — so the "into the pipeline" concept reads as one icon everywhere.** The
+    `GET /pipeline/stages`). **The "Přidat do pipeline" affordance is the shared `<PipelineMark>`
+    (`<FunnelIcon>` — a funnel with three arrows, filled body = in-pipeline — plus the stage
+    badge) used on EVERY pipeline surface — the listing-detail header (`PipelineToggle`, in the
+    top action bar next to "New estimation", NOT buried in CurationBlock), every Browse card AND
+    every Browse **table row** (`PipelineFunnelButton`, a leading unsortable column), the
+    stage-manager's entry-stage indicator (`is_entry` — filled = the entry stage), the Pipeline
+    scope chip + its sidebar stage picker, AND the Chrome-extension panel (the glyph reproduced
+    by value in vanilla TS — separate territory, no React import) — so the "into the pipeline"
+    concept reads as one icon everywhere.**
+    **The badge is `pipeline_stages.code` (migration 377), not an ordinal and never a parse of
+    the label.** The live board numbers its stages inside the display text ("1. For Review" …
+    "9. Passed", "9. Bought", "9. Lost"), so the number is operator data: three stages
+    deliberately share "9" while their `position` runs 5/6/7, and a badge derived from ordering
+    would contradict the labels the operator reads. `code` is nullable and NOT unique; when it is
+    NULL the funnel falls back to the stage's 1-based ordinal among the live stages
+    (`lib/pipelineStage.ts:stageBadge`) — computed where it renders, so nothing guessed is ever
+    written back. `stageAccent` in the same module is the one answer to "what colour is this
+    stage" (the operator's `color`, copper when unset — the board used to fall back to grey while
+    the listing header fell back to copper). The stage editor exposes `code` as a 4-char box whose
+    placeholder IS the ordinal, so "empty = automatic" is visible. Writes (add/remove/move) go
+    through one hook, `lib/usePipelineCard.ts`, which owns the cache-invalidation policy for every
+    surface.
+    **Browse can be SCOPED to the pipeline** (`ListingFilters.pipeline`, `?pipeline=any` or
+    `?pipeline=<stage ids>`, registry id `pipeline`, BROWSE agenda only): a property-grain id
+    allowlist resolved from `property_pipeline_public` by `resolvePipelinePrefilter` and AND'd
+    onto the cohort exactly like tags / with-estimates, plus `browse_stats_properties`'
+    `property_ids_filter` (migration 378) so the Stats tab can never disagree with the list. The
+    scope reads its membership through the SAME `fetchPipelineMembers` the funnels render from —
+    one definition of "in my pipeline". It is surfaced as a chip in the preset row but is **not a
+    preset**: `PRESET_EXCLUDED_KEYS` keeps it out of what a preset stores and out of the dirty
+    comparison, so toggling it never offers "Update preset" and it survives loading one. A
+    watchdog can't use it (`UNSUPPORTED_LABELS`) — the operator's own state can't be a trigger. The
     extension bookmarks AND changes stage property-grain like every other surface: it reads
     `property_id` + membership (incl. `stage_id`) off the batched `POST /listings/lookup` (and
     `GET /pipeline/stages` for the select options) and writes through these same

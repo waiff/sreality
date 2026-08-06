@@ -60,6 +60,7 @@ import {
 } from '@/lib/filters';
 import type { FilterPreset, TagColor } from '@/lib/types';
 import PresetSaveModal from '@/components/PresetSaveModal';
+import PipelineMark from '@/components/PipelineMark';
 
 export interface PresetBarProps {
   filters: ListingFilters;
@@ -67,6 +68,9 @@ export interface PresetBarProps {
   activePresetId: string | null;
   onLoad: (preset: FilterPreset) => void;
   onActivePresetIdChange: (id: string | null) => void;
+  /* Used by the Pipeline scope chip, which writes a filter field rather than
+   * loading a preset. */
+  onFiltersChange: (next: ListingFilters) => void;
 }
 
 type ModalState =
@@ -85,6 +89,7 @@ export default function PresetBar({
   activePresetId,
   onLoad,
   onActivePresetIdChange,
+  onFiltersChange,
 }: PresetBarProps) {
   const enabled = isApiConfigured();
   const qc = useQueryClient();
@@ -201,8 +206,6 @@ export default function PresetBar({
     reorderMut.mutate(reordered.map((p) => p.id));
   };
 
-  if (!enabled) return null;
-
   const errMsg = (e: unknown): string | null =>
     e instanceof ApiError ? e.message : e ? 'Something went wrong.' : null;
 
@@ -231,13 +234,19 @@ export default function PresetBar({
 
   return (
     <div ref={barRef} className="flex items-center gap-2 flex-wrap">
-      {presets.length === 0 && !presetsQ.isLoading ? (
+      {/* The Pipeline scope leads the row. It is NOT a preset: it toggles one
+        * filter field, it is never dirty, and it composes with whichever preset
+        * is loaded (see PRESET_EXCLUDED_KEYS) — so it renders even when the
+        * preset service isn't configured and the saved chips below are gone. */}
+      <PipelineScopeChip filters={filters} onFiltersChange={onFiltersChange} />
+
+      {enabled && presets.length === 0 && !presetsQ.isLoading ? (
         <span className="text-[0.75rem] text-[var(--color-ink-4)]">
           No saved presets yet.
         </span>
       ) : null}
 
-      <DndContext
+      {!enabled ? null : <DndContext
         sensors={sensors}
         collisionDetection={closestCenter}
         onDragStart={closeMenu}
@@ -271,9 +280,9 @@ export default function PresetBar({
             />
           ))}
         </SortableContext>
-      </DndContext>
+      </DndContext>}
 
-      {active && dirty ? (
+      {enabled && active && dirty ? (
         <button
           type="button"
           onClick={() => setModal({ mode: 'update', preset: active })}
@@ -284,14 +293,16 @@ export default function PresetBar({
         </button>
       ) : null}
 
-      <button
-        type="button"
-        onClick={() => setModal({ mode: 'save' })}
-        className="px-2.5 py-1 text-[0.8rem] rounded-[var(--radius-sm)] border border-dashed border-[var(--color-rule-strong)] text-[var(--color-ink-3)] hover:text-[var(--color-ink)] hover:border-[var(--color-copper)] transition-colors"
-        title="Save the current filters as a new preset"
-      >
-        + Save preset
-      </button>
+      {enabled ? (
+        <button
+          type="button"
+          onClick={() => setModal({ mode: 'save' })}
+          className="px-2.5 py-1 text-[0.8rem] rounded-[var(--radius-sm)] border border-dashed border-[var(--color-rule-strong)] text-[var(--color-ink-3)] hover:text-[var(--color-ink)] hover:border-[var(--color-copper)] transition-colors"
+          title="Save the current filters as a new preset"
+        >
+          + Save preset
+        </button>
+      ) : null}
 
       {modal ? (
         <PresetSaveModal
@@ -324,6 +335,62 @@ export default function PresetBar({
         />
       ) : null}
     </div>
+  );
+}
+
+/* The Pipeline scope chip — the deal-pipeline lens over whatever cohort the
+ * other filters describe (rule #22).
+ *
+ * It sits in the preset row because that is where the operator reaches for
+ * "show me a different slice", but it is deliberately NOT a preset:
+ *   * it writes one filter field (`pipeline`) instead of replacing the filter set,
+ *   * it stays on when a preset is loaded, and narrowing by byt / dům / price
+ *     keeps working normally on top of it,
+ *   * it never marks a preset dirty, so "Update preset" does not appear — a
+ *     preset describes market criteria, not which deals the operator is working
+ *     (see PRESET_EXCLUDED_KEYS in lib/filters.ts).
+ *
+ * Per-stage narrowing lives in the sidebar (Curation → Pipeline); this chip is
+ * the coarse on/off, and clicking it off clears any stage selection with it. */
+function PipelineScopeChip({
+  filters,
+  onFiltersChange,
+}: {
+  filters: ListingFilters;
+  onFiltersChange: (next: ListingFilters) => void;
+}) {
+  const scope = filters.pipeline;
+  const on = scope != null;
+  const stageCount = scope?.stage_ids.length ?? 0;
+
+  return (
+    <button
+      type="button"
+      onClick={() =>
+        onFiltersChange({ ...filters, pipeline: on ? null : { stage_ids: [] } })
+      }
+      aria-pressed={on}
+      title={
+        on
+          ? 'Zobrazují se jen nemovitosti v pipeline — kliknutím zrušíte'
+          : 'Zobrazit jen nemovitosti v pipeline'
+      }
+      className={[
+        chipBase,
+        'gap-1.5 px-2.5 py-1',
+        on
+          ? 'border-[var(--color-copper)] bg-[var(--color-copper-soft)] text-[var(--color-copper)]'
+          : 'border-[var(--color-rule)] text-[var(--color-ink-2)] hover:border-[var(--color-copper)] hover:text-[var(--color-copper)]',
+      ].join(' ')}
+    >
+      <PipelineMark filled={on} />
+      <span>Pipeline</span>
+      {stageCount > 0 ? (
+        <span className="font-mono tabular-nums text-[0.7rem] opacity-70">
+          {stageCount}
+        </span>
+      ) : null}
+    </button>
   );
 }
 

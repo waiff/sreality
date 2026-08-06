@@ -107,6 +107,8 @@ SELECT
     pp.stage_id AS pipeline_stage_id,
     ps.key   AS pipeline_stage_key,
     ps.label AS pipeline_stage_label,
+    ps.code  AS pipeline_stage_code,
+    ps.color AS pipeline_stage_color,
     (SELECT coalesce(array_agg(cp.collection_id ORDER BY cp.collection_id), array[]::bigint[])
        FROM collection_properties cp
       WHERE cp.property_id = tgt.property_id
@@ -217,6 +219,10 @@ def lookup_portal_listings(
                 "stage_id": acct.get("pipeline_stage_id"),
                 "stage_key": acct.get("pipeline_stage_key"),
                 "stage_label": acct.get("pipeline_stage_label"),
+                # Badge + colour (migration 377) so the panel's funnel renders
+                # the same mark as the SPA's, from one server-side source.
+                "stage_code": acct.get("pipeline_stage_code"),
+                "stage_color": acct.get("pipeline_stage_color"),
             }
             if row["property_id"] is not None
             else None

@@ -154,8 +154,9 @@ describe('planMove', () => {
 });
 
 const STAGES: PipelineStage[] = [
-  { id: 1, key: 'interested', label: 'Zájem', position: 1, color: 'copper', is_terminal: false, is_entry: true },
-  { id: 3, key: 'offer', label: 'Nabídka', position: 3, color: 'teal', is_terminal: false, is_entry: false },
+  { id: 1, key: 'interested', label: 'Zájem', position: 1, color: 'copper', is_terminal: false, is_entry: true, code: '1' },
+  /* No `code` — exercises stageBadge's ordinal fallback (migration 377). */
+  { id: 3, key: 'offer', label: 'Nabídka', position: 3, color: 'teal', is_terminal: false, is_entry: false, code: null },
 ];
 
 function renderBoard() {

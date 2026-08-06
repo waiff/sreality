@@ -35,8 +35,9 @@ vi.mock('@/lib/queries', async (importOriginal) => {
 });
 
 const STAGES: PipelineStage[] = [
-  { id: 1, key: 'interested', label: 'Zájem', position: 1, color: 'copper', is_terminal: false, is_entry: true },
-  { id: 3, key: 'offer', label: 'Nabídka', position: 3, color: 'teal', is_terminal: false, is_entry: false },
+  { id: 1, key: 'interested', label: 'Zájem', position: 1, color: 'copper', is_terminal: false, is_entry: true, code: '1' },
+  /* No `code` — exercises stageBadge's ordinal fallback (migration 377). */
+  { id: 3, key: 'offer', label: 'Nabídka', position: 3, color: 'teal', is_terminal: false, is_entry: false, code: null },
 ];
 
 const CARD: PipelineCard = {
@@ -44,6 +45,7 @@ const CARD: PipelineCard = {
   stage_id: 1,
   stage_key: 'interested',
   stage_label: 'Zájem',
+  stage_code: '1',
   stage_color: 'copper',
   is_terminal: false,
   stage_position: 1,

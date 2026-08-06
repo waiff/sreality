@@ -124,6 +124,21 @@ export interface DistrictChip {
  * the entered rent/sale growth p.a. (CAGR ≥), computed for the [fromYm, toYm]
  * window of a chosen dataset by the price_stat_growth RPC. Multiple rules AND.
  * BROWSE-only (window-dependent, live-computed). */
+/* Deal-pipeline scope (rule #22) — "show only properties I'm working".
+ *
+ * `null` on ListingFilters = off. `{ stage_ids: [] }` = a card at ANY stage;
+ * a non-empty list narrows to those stages (e.g. hide the closed ones). Snake-
+ * cased inside the object because composite filter values cross into the
+ * registry / watchdog JSON world verbatim (same convention as CenterRadius's
+ * `radius_m` and NearCityProximity's `population_min`).
+ *
+ * Stage ids are ACCOUNT-scoped (migration 294), so a URL carrying ids only
+ * reproduces for the account that wrote it — the empty-list form is the
+ * portable one. Same trade-off as `tags`, which stores tag ids. */
+export interface PipelineScope {
+  stage_ids: number[];
+}
+
 export interface PriceGrowthRule {
   datasetId: number;
   fromYm: string | null;   // 'YYYY-MM' or null = dataset's full window
@@ -230,6 +245,11 @@ export interface ListingFilters {
   /* Browse-only: restrict to properties with at least one successful
    * estimation run (property_estimates_public, migration 173). */
   withEstimates: boolean;
+  /* Browse-only deal-pipeline scope (rule #22). Null = off. Deliberately NOT
+   * part of a saved preset's identity (see PRESET_EXCLUDED_KEYS): a preset
+   * describes market criteria, the pipeline scope is a lens over the
+   * operator's own state — so toggling it never dirties a loaded preset. */
+  pipeline: PipelineScope | null;
   /* Migration 025 — operator tags. AND-semantics: a listing must carry
    * every selected tag id. Stored as ids (not names) so renames /
    * recolour-by-delete-recreate stay queryable. */
@@ -316,6 +336,7 @@ export const DEFAULT_FILTERS: ListingFilters = {
   priceChangeWindowDays: null,
   totalPriceChangePct: null,
   withEstimates: false,
+  pipeline: null,
   tags: [],
   bounds: null,
   locationMode: 'viewport',
@@ -591,6 +612,7 @@ export const fromSearchParams = (sp: URLSearchParams): ListingFilters => {
     priceChangeWindowDays: parsePriceChangeWindow(sp.get('changes_window')),
     totalPriceChangePct: parseFloatOrNull(sp.get('total_change_pct')),
     withEstimates: sp.get('with_est') === '1',
+    pipeline: parsePipelineScope(sp.get('pipeline')),
     tags: parseIntList(sp.get('tags')),
     bounds: parseBounds(sp.get('bbox')),
     locationMode: sp.get('locmode') === 'center_radius'
@@ -734,6 +756,17 @@ const parseIntList = (s: string | null): number[] => {
   return out;
 };
 
+/* `?pipeline=any` → any stage; `?pipeline=12,13` → those stages; absent or
+ * unparseable → off. A list that parses to nothing (stale ids from another
+ * account, or junk) degrades to "any stage" rather than to "off": the operator
+ * asked to see their pipeline, so showing the whole pipeline is the honest
+ * failure, while silently dropping the scope would show them the whole market. */
+const parsePipelineScope = (s: string | null): PipelineScope | null => {
+  if (!s) return null;
+  if (s === 'any') return { stage_ids: [] };
+  return { stage_ids: parseIntList(s) };
+};
+
 const fmtRange = (lo: number | null, hi: number | null): string =>
   `${lo ?? ''}-${hi ?? ''}`;
 
@@ -833,6 +866,12 @@ export const toSearchParams = (f: ListingFilters): URLSearchParams => {
   if (f.priceChangeWindowDays != null) sp.set('changes_window', String(f.priceChangeWindowDays));
   if (f.totalPriceChangePct != null) sp.set('total_change_pct', String(f.totalPriceChangePct));
   if (f.withEstimates) sp.set('with_est', '1');
+  if (f.pipeline) {
+    sp.set(
+      'pipeline',
+      f.pipeline.stage_ids.length ? f.pipeline.stage_ids.join(',') : 'any',
+    );
+  }
   if (f.tags.length) sp.set('tags', f.tags.join(','));
   if (f.bounds) {
     const { west, south, east, north } = f.bounds;
@@ -967,6 +1006,10 @@ export const summarise = (
   if (f.recentlyChangedDays != null) bits.push(`changed ≤ ${f.recentlyChangedDays} d`);
   const tomLabel = fmtDaysRange(f.tomDaysMin, f.tomDaysMax);
   if (tomLabel) bits.push(`TOM ${tomLabel}`);
+  if (f.pipeline) {
+    const n = f.pipeline.stage_ids.length;
+    bits.push(n === 0 ? 'in pipeline' : `in pipeline (${n} stage${n > 1 ? 's' : ''})`);
+  }
   if (f.bounds) bits.push('in this map area');
   return `Showing ${bits.join(' ')}`;
 };
@@ -1075,13 +1118,41 @@ export interface PresetSpec {
   sort?: string | null;
 }
 
+/* Filter fields that ride ALONGSIDE a preset rather than inside it: they are
+ * reset before persisting and ignored when deciding whether a loaded preset is
+ * dirty. A preset describes MARKET CRITERIA ("2+kk, 60–90 m², Praha"); the
+ * pipeline scope is a lens over the operator's own deal state, orthogonal to
+ * every preset and combinable with all of them — so toggling it must never
+ * offer to bake itself into the saved filters.
+ *
+ * `bounds` is deliberately NOT here: it is opt-in per save (the "include map
+ * area" toggle), which is a different rule, expressed below. */
+const PRESET_EXCLUDED_KEYS = ['pipeline'] as const satisfies ReadonlyArray<
+  keyof ListingFilters
+>;
+
+/* The same fields as URL params — the form preset equality is computed in. */
+const PRESET_EXCLUDED_PARAMS: readonly string[] = ['pipeline'];
+
+const stripPresetExcluded = (f: ListingFilters): ListingFilters => {
+  const out = { ...f };
+  for (const k of PRESET_EXCLUDED_KEYS) {
+    (out as Record<string, unknown>)[k] = DEFAULT_FILTERS[k];
+  }
+  return out;
+};
+
 /** Build the spec to persist. The transient map viewport (`bounds`) is
  *  dropped unless the operator opts to include the current map area, so a
- *  criteria-only preset doesn't pin a stale bounding box. */
+ *  criteria-only preset doesn't pin a stale bounding box; the
+ *  PRESET_EXCLUDED_KEYS lenses are always dropped. */
 export const filtersForPreset = (
   f: ListingFilters,
   includeMapArea: boolean,
-): ListingFilters => (includeMapArea ? f : { ...f, bounds: null });
+): ListingFilters => {
+  const base = stripPresetExcluded(f);
+  return includeMapArea ? base : { ...base, bounds: null };
+};
 
 /* Merge a stored (possibly stale-typed) filter blob onto DEFAULT_FILTERS,
  * dropping any field whose CARDINALITY drifted since it was saved — e.g. a
@@ -1143,6 +1214,13 @@ export const filtersEqualForPreset = (
   const a = toSearchParams({ ...DEFAULT_FILTERS, ...current });
   const b = toSearchParams({ ...DEFAULT_FILTERS, ...saved });
   if (!b.has('bbox')) a.delete('bbox');
+  // The lenses (pipeline scope) sit outside preset identity: switching one on
+  // must not light up "Update preset", and a preset saved before they existed
+  // must not read as dirty the moment one is toggled.
+  for (const p of PRESET_EXCLUDED_PARAMS) {
+    a.delete(p);
+    b.delete(p);
+  }
   return canonicalParams(a) === canonicalParams(b);
 };
 
@@ -1203,6 +1281,7 @@ export const REGISTRY_KEY_MAP = {
   price_change_window_days: 'priceChangeWindowDays',
   total_price_change_pct: 'totalPriceChangePct',
   with_estimates: 'withEstimates',
+  pipeline: 'pipeline',
   tags: 'tags',
   tom_days_min: 'tomDaysMin',
   tom_days_max: 'tomDaysMax',
@@ -1405,6 +1484,10 @@ const UNSUPPORTED_LABELS: ReadonlyArray<{
   { test: (f) => f.tags.length > 0, label: 'tags' },
   { test: (f) => f.priceGrowthRules.length > 0, label: 'market growth (datasets)' },
   { test: (f) => f.withEstimates, label: 'with estimates' },
+  /* The pipeline is the operator's own state: a watchdog scoped to it would
+   * only ever fire on properties they already put there — and "new listing"
+   * events can't match a card that doesn't exist yet. */
+  { test: (f) => f.pipeline != null, label: 'pipeline' },
 ];
 
 export interface FiltersToWatchdogResult {

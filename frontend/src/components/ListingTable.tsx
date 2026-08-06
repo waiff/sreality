@@ -1,5 +1,6 @@
 import { Link } from 'react-router-dom';
 import InfiniteSentinel from '@/components/InfiniteSentinel';
+import PipelineFunnelButton from '@/components/PipelineFunnelButton';
 import PriceDelta from '@/components/PriceDelta';
 import {
   type TableRow,
@@ -16,13 +17,22 @@ import { listingKindLabel } from '@/lib/enums';
 import { listingRowPath } from '@/lib/listingUrl';
 
 interface Column {
-  field: SortField | 'furnished' | 'ownership';
+  field: SortField | 'furnished' | 'ownership' | 'pipeline';
   label: string;
+  /* Header text for assistive tech when `label` is intentionally blank (an
+     icon-only column). */
+  srLabel?: string;
   align?: 'left' | 'right';
   sortable: boolean;
 }
 
 const COLUMNS: ReadonlyArray<Column> = [
+  /* The deal-pipeline funnel (rule #22 — the affordance belongs on EVERY
+     surface a property appears on; the Table was the one that never got it).
+     Not sortable: membership is operator state, not a listing attribute, and
+     the cohort-level way to see only pipeline rows is the Pipeline scope. */
+  { field: 'pipeline',      label: '',            align: 'left',  sortable: false,
+    srLabel: 'Pipeline' },
   /* Not sortable: sreality_id mixes real positive ids with synthetic negative
    * ones (non-sreality portals), so ordering by it is meaningless. */
   { field: 'sreality_id',   label: 'ID',          align: 'left',  sortable: false },
@@ -57,6 +67,9 @@ interface Props {
   onHover: (ids: ReadonlyArray<number> | null) => void;
   onSort: (field: SortField) => void;
   onClearFilters: () => void;
+  /* The cohort is filtered by deal-pipeline membership (the Pipeline scope), so
+     a funnel write changes which rows match — see usePipelineCard. */
+  pipelineScoped: boolean;
 }
 
 export default function ListingTable({
@@ -74,6 +87,7 @@ export default function ListingTable({
   onHover,
   onSort,
   onClearFilters,
+  pipelineScoped,
 }: Props) {
   const showSkeleton = isLoading && rows == null;
   const isEmpty = !showSkeleton && !isError && rows != null && rows.length === 0;
@@ -105,6 +119,7 @@ export default function ListingTable({
                 row={r}
                 hovered={hoveredIds.has(r.listing_id)}
                 onHover={onHover}
+                pipelineScoped={pipelineScoped}
               />
             ))}
           </tbody>
@@ -162,7 +177,7 @@ function Th({
       aria-sort={active ? (direction === 'asc' ? 'ascending' : 'descending') : 'none'}
     >
       <span className="inline-flex items-center gap-1.5">
-        {col.label}
+        {col.label || <span className="sr-only">{col.srLabel}</span>}
         {col.sortable && (
           <SortIndicator active={active} direction={direction} />
         )}
@@ -195,10 +210,12 @@ function Row({
   row,
   hovered,
   onHover,
+  pipelineScoped,
 }: {
   row: TableRow;
   hovered: boolean;
   onHover: (ids: ReadonlyArray<number> | null) => void;
+  pipelineScoped: boolean;
 }) {
   /* Cross-source hover: own mouseenter sets the shared id; the same
    * highlight also fires when the matching pin is hovered on the map.
@@ -216,6 +233,13 @@ function Row({
           : 'hover:bg-[var(--color-copper-soft)]/40',
       ].join(' ')}
     >
+      <td className="pl-3 pr-1 py-2.5 align-middle">
+        <PipelineFunnelButton
+          property_id={row.property_id}
+          cohortScoped={pipelineScoped}
+          variant="inline"
+        />
+      </td>
       <td className="px-4 py-2.5 align-middle">
         <Link
           to={listingRowPath(row)}

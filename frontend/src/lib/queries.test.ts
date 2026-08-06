@@ -20,6 +20,7 @@ import {
   keysetTiebreak,
   matchesDistricts,
   parseSort,
+  pipelineIdsForScope,
   portalMirrorSource,
   priceNullTolerantOr,
   DEFAULT_SORT,
@@ -94,6 +95,36 @@ describe('applyPrefilters (city-quality id-space)', () => {
     const { q, calls } = record();
     applyPrefilters(q, base);
     expect(calls).toEqual([]);
+  });
+});
+
+/* The deal-pipeline scope resolves to a property-id allowlist that is AND'd
+ * onto the cohort like tags / with-estimates. The distinction that matters:
+ * "scope off" (null → no constraint) vs "scope on, nothing matched" ([] → the
+ * caller short-circuits to zero results). Collapsing those would show the whole
+ * market to an operator who asked for an empty pipeline. */
+describe('pipelineIdsForScope', () => {
+  const members = new Map([
+    [1, { property_id: 1, stage_id: 11 }],
+    [2, { property_id: 2, stage_id: 12 }],
+    [3, { property_id: 3, stage_id: 12 }],
+  ] as const) as unknown as Parameters<typeof pipelineIdsForScope>[0];
+
+  it('is null (no constraint) when the scope is off', () => {
+    expect(pipelineIdsForScope(members, null)).toBeNull();
+  });
+
+  it('takes every card when no stage is picked', () => {
+    expect(pipelineIdsForScope(members, { stage_ids: [] })).toEqual([1, 2, 3]);
+  });
+
+  it('narrows to the picked stages', () => {
+    expect(pipelineIdsForScope(members, { stage_ids: [12] })).toEqual([2, 3]);
+  });
+
+  it('returns [] — not null — when the scope matches nothing', () => {
+    expect(pipelineIdsForScope(members, { stage_ids: [999] })).toEqual([]);
+    expect(pipelineIdsForScope(new Map(), { stage_ids: [] })).toEqual([]);
   });
 });
 

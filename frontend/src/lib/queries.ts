@@ -9,6 +9,7 @@ import {
   type DistrictChip,
   type ListingFilters,
   type MapBounds,
+  type PipelineScope,
   buildingMaterialToValues,
   isoNDaysAgo,
   priceChangeCountColumn,
@@ -627,6 +628,35 @@ async function resolveEstimatesPrefilter(
   );
 }
 
+/* Deal-pipeline scope prefilter (rule #22, migration 205). Same composition
+ * pattern as tags / with-estimates: resolve the property-id allowlist, AND it
+ * onto the cohort via `.in('property_id', …)`. Reads through the SAME
+ * `fetchPipelineMembers` every funnel uses, so "what is in my pipeline" has one
+ * definition — a second query here could disagree with the badges on screen.
+ *
+ * An empty `stage_ids` means "any stage"; a non-empty one narrows to those
+ * stages (ids are account-scoped, and the map only ever holds this account's
+ * cards, so a foreign id simply matches nothing). Returns null when off. */
+export const pipelineIdsForScope = (
+  members: PipelineMembers,
+  scope: PipelineScope | null,
+): number[] | null => {
+  if (scope == null) return null;
+  const wanted = new Set(scope.stage_ids);
+  const ids: number[] = [];
+  for (const m of members.values()) {
+    if (wanted.size === 0 || wanted.has(m.stage_id)) ids.push(m.property_id);
+  }
+  return ids;
+};
+
+async function resolvePipelinePrefilter(
+  f: ListingFilters,
+): Promise<number[] | null> {
+  if (f.pipeline == null) return null;
+  return pipelineIdsForScope(await fetchPipelineMembers(), f.pipeline);
+}
+
 /* Intersect two prefilter id sets (null = "no constraint"). Used so a
  * filter that combines tags + city-quality applies both prefilters
  * before paging the main query. */
@@ -654,17 +684,22 @@ export interface BrowsePrefilters {
 async function resolveBrowsePrefilters(
   f: ListingFilters,
 ): Promise<BrowsePrefilters> {
-  const [tagProps, cityIds, growthObec, estimateProps] = await Promise.all([
-    resolveTagPrefilter(f),
-    resolveCityQualityPrefilter(f),
-    resolvePriceGrowthPrefilter(f),
-    resolveEstimatesPrefilter(f),
-  ]);
+  const [tagProps, cityIds, growthObec, estimateProps, pipelineProps] =
+    await Promise.all([
+      resolveTagPrefilter(f),
+      resolveCityQualityPrefilter(f),
+      resolvePriceGrowthPrefilter(f),
+      resolveEstimatesPrefilter(f),
+      resolvePipelinePrefilter(f),
+    ]);
   // Tags are now property-grain (properties_with_tags) — intersect them with the
-  // with-estimates property prefilter and apply via .in('property_id', …).
-  // City-quality is representative-listing grain, keyed on the surrogate
-  // listing_id (.in('listing_id', …)) — null-safe past Gate-2.
-  const propertyIds = intersectPrefilters(tagProps, estimateProps);
+  // with-estimates and pipeline property prefilters and apply via
+  // .in('property_id', …). City-quality is representative-listing grain, keyed
+  // on the surrogate listing_id (.in('listing_id', …)) — null-safe past Gate-2.
+  const propertyIds = intersectPrefilters(
+    intersectPrefilters(tagProps, estimateProps),
+    pipelineProps,
+  );
   const empty =
     (cityIds != null && cityIds.length === 0)
     || (growthObec != null && growthObec.length === 0)
@@ -1067,6 +1102,12 @@ export const fetchBrowseStats = async (
    * qualifies (the RPC's `= any('{}')` then yields total 0). Keeps Stats
    * aligned with Map/Table. */
   const growthObec = await resolvePriceGrowthPrefilter(f);
+  /* Deal-pipeline allowlist (property_ids); same contract as growthObec above —
+   * null = scope off, [] = an empty pipeline (the RPC's `= any('{}')` then
+   * yields total 0). Without this the Stats tab would keep counting the whole
+   * market while Cards/Table/Map/Count show only the pipeline: the exact
+   * count-vs-list divergence migration 351 was written to close. */
+  const pipelineProps = await resolvePipelinePrefilter(f);
 
   const { data, error } = await supabase.rpc('browse_stats_properties', {
     category_main_filter:    f.categoryMain.length ? f.categoryMain : null,
@@ -1163,6 +1204,10 @@ export const fetchBrowseStats = async (
     portal_filter:           f.portals.length ? f.portals : null,
     /* Migration 162 — market-growth obec allowlist (price-stats datasets). */
     obec_ids_filter:         growthObec,
+    /* Migration 378 — generic property-id allowlist; carries the deal-pipeline
+     * scope (rule #22) today, and is the seam any future property-grain
+     * prefilter should reuse instead of growing another bespoke param. */
+    property_ids_filter:     pipelineProps,
   });
   if (error) throw error;
   return data as BrowseStats;
@@ -2003,6 +2048,7 @@ import type {
   PipelineBoardCard,
   PipelineCard,
   PipelineStage,
+  TagColor,
 } from './types';
 
 export const estimationKeys = {
@@ -2168,16 +2214,42 @@ export const pipelineKeys = {
   members: ['pipeline', 'members'] as const,
 };
 
-/* The set of property_ids currently in the pipeline — one cheap read shared
- * (React Query dedupes the key) by every Browse-card bookmark toggle. */
-export const fetchPipelineMemberSet = async (): Promise<Set<number>> => {
+/* Every pipeline card the caller's account holds, keyed by property_id — one
+ * cheap read shared (React Query dedupes the key) by every funnel on every
+ * surface: Browse cards, the Table rows, and the pipeline scope's prefilter.
+ *
+ * It carries the stage, not just membership, because the funnel renders the
+ * stage badge (migration 377) — the earlier "set of ids" shape forced each
+ * surface to either show a colourless funnel or issue its own per-property
+ * read. `property_pipeline_public` is RLS-scoped + security_invoker (migration
+ * 316), so this returns the caller's own board and nothing else.
+ *
+ * `.range(0, 99999)` for the same reason the tag prefilter does it: PostgREST
+ * caps responses at 1,000 rows by default, and a silently truncated membership
+ * map would both blank funnels and, once the pipeline scope is on, drop
+ * properties the operator explicitly asked to see. */
+export interface PipelineMembership {
+  property_id: number;
+  stage_id: number;
+  stage_label: string;
+  stage_color: TagColor | null;
+  stage_code: string | null;
+  stage_position: number;
+  is_terminal: boolean;
+}
+
+export type PipelineMembers = Map<number, PipelineMembership>;
+
+export const fetchPipelineMembers = async (): Promise<PipelineMembers> => {
   const { data, error } = await supabase
     .from('property_pipeline_public')
-    .select('property_id')
+    .select(
+      'property_id, stage_id, stage_label, stage_color, stage_code, stage_position, is_terminal',
+    )
     .range(0, 99999);
   if (error) throw error;
-  return new Set(
-    ((data ?? []) as Array<{ property_id: number }>).map((r) => r.property_id),
+  return new Map(
+    ((data ?? []) as PipelineMembership[]).map((r) => [r.property_id, r]),
   );
 };
 

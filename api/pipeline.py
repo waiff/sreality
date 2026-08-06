@@ -33,7 +33,7 @@ def list_stages(
     conn: "psycopg.Connection", *, account_id: uuid.UUID | None,
 ) -> dict[str, Any]:
     sql = (
-        "SELECT id, key, label, position, color, is_terminal, is_entry "
+        "SELECT id, key, label, position, color, is_terminal, is_entry, code "
         "FROM pipeline_stages WHERE archived_at IS NULL "
         "AND account_id IS NOT DISTINCT FROM %s ORDER BY position"
     )
@@ -49,6 +49,7 @@ def create_stage(
 ) -> dict[str, Any]:
     """Append a new column to the right. New stages are never the entry stage."""
     _validate_color(body.color)
+    _validate_code(body.code)
     with conn.transaction(), conn.cursor() as cur:
         key = _unique_key(cur, body.label, account_id)
         cur.execute(
@@ -59,10 +60,13 @@ def create_stage(
         position = int(cur.fetchone()[0])
         cur.execute(
             "INSERT INTO pipeline_stages "
-            "  (key, label, position, color, is_terminal, account_id) "
-            "VALUES (%s, %s, %s, %s, %s, %s) "
-            "RETURNING id, key, label, position, color, is_terminal, is_entry",
-            (key, body.label, position, body.color, body.is_terminal, account_id),
+            "  (key, label, position, color, is_terminal, account_id, code) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s) "
+            "RETURNING id, key, label, position, color, is_terminal, is_entry, code",
+            (
+                key, body.label, position, body.color, body.is_terminal,
+                account_id, body.code,
+            ),
         )
         row = cur.fetchone()
     return _to_stage(row)
@@ -72,8 +76,9 @@ def update_stage(
     conn: "psycopg.Connection", stage_id: int, body: s.UpdateStageIn, *,
     account_id: uuid.UUID | None,
 ) -> dict[str, Any]:
-    """Rename / recolor / retag a stage, or move the entry crown onto it."""
+    """Rename / recolor / recode / retag a stage, or move the entry crown onto it."""
     _validate_color(body.color)
+    _validate_code(body.code)
     if body.is_entry is False:
         raise HTTPException(
             422, "re-home the entry stage by crowning another, not by un-crowning",
@@ -117,6 +122,11 @@ def update_stage(
         if "color" in body.model_fields_set:
             sets += ["color = %s"]
             params += [body.color]
+        # model_fields_set (not `is not None`): an explicit null clears the badge
+        # back to the ordinal fallback, which `is not None` would swallow.
+        if "code" in body.model_fields_set:
+            sets += ["code = %s"]
+            params += [body.code]
         if body.is_terminal is not None:
             sets += ["is_terminal = %s"]
             params += [body.is_terminal]
@@ -129,13 +139,13 @@ def update_stage(
             cur.execute(
                 f"UPDATE pipeline_stages SET {', '.join(sets)} "
                 "WHERE id = %s AND account_id IS NOT DISTINCT FROM %s "
-                "RETURNING id, key, label, position, color, is_terminal, is_entry",
+                "RETURNING id, key, label, position, color, is_terminal, is_entry, code",
                 params,
             )
             row = cur.fetchone()
         else:
             cur.execute(
-                "SELECT id, key, label, position, color, is_terminal, is_entry "
+                "SELECT id, key, label, position, color, is_terminal, is_entry, code "
                 "FROM pipeline_stages WHERE id = %s AND account_id IS NOT DISTINCT FROM %s",
                 (stage_id, account_id),
             )
@@ -367,6 +377,12 @@ def _validate_color(color: str | None) -> None:
         raise HTTPException(422, f"invalid color; pick one of {s.PIPELINE_STAGE_COLORS}")
 
 
+def _validate_code(code: str | None) -> None:
+    """Mirror migration 377's CHECK, so a bad badge is a 422 and not a 500."""
+    if code is not None and (code.strip() != code or not code.strip()):
+        raise HTTPException(422, "code must not be blank or padded with spaces")
+
+
 def _slugify(label: str) -> str:
     norm = unicodedata.normalize("NFKD", label).encode("ascii", "ignore").decode()
     slug = re.sub(r"[^a-z0-9]+", "_", norm.lower()).strip("_")
@@ -396,7 +412,7 @@ def _fetch_card(
 ) -> dict[str, Any] | None:
     sql = (
         "SELECT pp.property_id, pp.stage_id, ps.key, ps.label, pp.board_position, "
-        "       pp.note, pp.entered_stage_at, pp.added_at "
+        "       pp.note, pp.entered_stage_at, pp.added_at, ps.code, ps.color "
         "FROM property_pipeline pp JOIN pipeline_stages ps ON ps.id = pp.stage_id "
         "WHERE pp.property_id = %s AND pp.account_id IS NOT DISTINCT FROM %s"
     )
@@ -414,6 +430,11 @@ def _fetch_card(
         "note":             row[5],
         "entered_stage_at": _iso(row[6]),
         "added_at":         _iso(row[7]),
+        # Badge + colour ride along so a surface that only holds the card (the
+        # Chrome extension panel) can render the same funnel the SPA does
+        # without a second round trip for the stage list.
+        "stage_code":       row[8],
+        "stage_color":      row[9],
     }
 
 
@@ -426,6 +447,7 @@ def _to_stage(row: tuple[Any, ...]) -> dict[str, Any]:
         "color":       row[4],
         "is_terminal": bool(row[5]),
         "is_entry":    bool(row[6]),
+        "code":        row[7],
     }
 
 
