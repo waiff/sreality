@@ -60,6 +60,39 @@ export const fmtUsdPerCall = (n: number | null | undefined): string =>
 export const fmtArea = (n: number | null | undefined): string =>
   n == null ? '—' : `${czNumber.format(Math.round(n))}${NBSP}m²`;
 
+/* THE percentage formatter. Czech typography puts a NON-BREAKING space before
+ * the sign (`4,2 %`, never `4.2%`) and uses a comma decimal separator — this
+ * replaced three hand-rolled variants that disagreed on all three counts, one
+ * of which emitted an English decimal point on a Czech UI.
+ *
+ * `signed` prepends '+' to positives (negatives already carry the locale's
+ * minus) — use it wherever the number is a DELTA, so "+3,5 %" and "−3,5 %"
+ * are visually symmetric. Bare magnitudes (a yield, a share) stay unsigned. */
+export const fmtPct = (
+  n: number | null | undefined,
+  opts: { signed?: boolean; digits?: number } = {},
+): string => {
+  if (n == null || !Number.isFinite(n)) return '—';
+  const { signed = false, digits = 1 } = opts;
+  const body = n.toLocaleString('cs-CZ', {
+    minimumFractionDigits: digits,
+    maximumFractionDigits: digits,
+  });
+  const sign = signed && n > 0 ? '+' : '';
+  return `${sign}${body}${NBSP}%`;
+};
+
+/* Percentage POINTS — a difference between two percentages (a yield moving
+ * from 4,2 % to 5,1 % changed by +0,9 pp, not by +21 %). Always signed;
+ * conflating the two is the classic stats-reporting error. */
+export const fmtPP = (n: number | null | undefined, digits = 2): string =>
+  n == null || !Number.isFinite(n)
+    ? '—'
+    : `${n > 0 ? '+' : ''}${n.toLocaleString('cs-CZ', {
+        minimumFractionDigits: digits,
+        maximumFractionDigits: digits,
+      })}${NBSP}pp`;
+
 export const fmtPricePerM2 = (
   price: number | null | undefined,
   area: number | null | undefined,

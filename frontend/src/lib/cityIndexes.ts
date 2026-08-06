@@ -35,6 +35,30 @@ export const PINNED_SLUGS: readonly string[] = [
   'zeleznicni_doprava',    // Index železniční dopravy
 ];
 
+/* The four indexes carried on a property CARD (the pipeline board's index
+ * strip, and any surface that adopts it). Deliberately a short, FIXED,
+ * ordered set rather than "whatever the operator picked": the strip earns its
+ * space by being positionally readable — the third cell is always young-
+ * migration — so an operator scanning thirty cards reads it pre-attentively
+ * without reading a single label. A configurable set would destroy that.
+ *
+ * These are the first four PINNED_SLUGS; the unit test pins that relationship
+ * so the two lists can't silently drift apart. Two-letter abbreviations are
+ * the cell captions — the full Czech label rides in the hover title. */
+export const CARD_INDEX_SLUGS: readonly string[] = [
+  'celkove_hodnoceni',   // Celkové hodnocení
+  'prirustek_obyvatel',  // Index přírůstku obyvatelstva
+  'stehovani_mladych',   // Index stěhování mladých
+  'pracovni_mista',      // Index nabídky pracovních míst
+];
+
+export const CARD_INDEX_ABBR: Record<string, string> = {
+  celkove_hodnoceni: 'CH',
+  prirustek_obyvatel: 'PO',
+  stehovani_mladych: 'SM',
+  pracovni_mista: 'PM',
+};
+
 /** Czech label first; fall back to the English one if `label_cs` is
  *  missing (shouldn't happen post-seed, but the registry typing keeps
  *  `label_en` optional / nullable so we stay defensive). */
