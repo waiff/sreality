@@ -104,6 +104,42 @@ def test_worker_liveness_fails_only_when_stale() -> None:
     assert status == "fail" and stale == ["realtime-worker (42m)"]
 
 
+def test_property_maintenance_healthy_day_is_ok() -> None:
+    """~25h oldest stamp just before the next daily sweep is the healthy
+    steady state, not a warning; empty axes (None) never trip anything."""
+    from scripts.verify_pipeline import _status_for_property_maintenance
+
+    t = DEFAULT_THRESHOLDS
+    assert _status_for_property_maintenance(25.0, 20.0, 0.1, t) == ("ok", [])
+    assert _status_for_property_maintenance(None, None, None, t) == ("ok", [])
+
+
+def test_property_maintenance_worst_axis_wins() -> None:
+    from scripts.verify_pipeline import _status_for_property_maintenance
+
+    t = DEFAULT_THRESHOLDS
+    # One warn axis → warn; adding a fail axis anywhere → fail overall.
+    status, offenders = _status_for_property_maintenance(31.0, None, None, t)
+    assert status == "warn" and "oldest stats stamp" in offenders[0]
+    status, offenders = _status_for_property_maintenance(31.0, None, 4.0, t)
+    assert status == "fail"
+    assert any("dirty-queue" in o for o in offenders)
+    # The 2026-08-06 incident shape: sweep dead for days + frozen dirt.
+    status, offenders = _status_for_property_maintenance(49.0, 55.0, 2.5, t)
+    assert status == "fail" and len(offenders) == 3
+
+
+def test_property_maintenance_sql_scopes_to_live_children() -> None:
+    """The staleness axes must exclude merged_away/childless rows — they are
+    structurally never restamped (batch UPDATE joins through listings), and
+    counting them makes the check permanently red (~74% of the naive numbers
+    in the 2026-08-06 incident were exactly that)."""
+    from scripts.verify_pipeline import _PROPERTY_MAINTENANCE_SQL as sql
+
+    assert sql.count("p.status = 'active'") == 2
+    assert sql.count("exists (select 1 from listings l where l.property_id = p.id)") == 2
+
+
 # --- thresholds ------------------------------------------------------------
 
 

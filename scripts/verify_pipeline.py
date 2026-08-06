@@ -1,9 +1,9 @@
 """verify_pipeline.py — scheduled pipeline-health harness.
 
 Computes a fixed set of pipeline-health metrics (LLM error rate + liveness + burn
-rate, DB saturation, worker liveness, dual-write parity), writes one
-`pipeline_check_results` row per check, and rings the in-app bell on STATE
-TRANSITIONS only (toolkit.system_alerts.emit_transition_alerts): once when a check
+rate, DB saturation, worker liveness, dual-write parity, property maintenance),
+writes one `pipeline_check_results` row per check, and rings the in-app bell on
+STATE TRANSITIONS only (toolkit.system_alerts.emit_transition_alerts): once when a check
 goes red, once when it recovers — not on every red run.
 
 Born from the 2026-07 incident: the pipeline stalled silently for two days
@@ -49,6 +49,19 @@ DEFAULT_THRESHOLDS: dict[str, float] = {
     "db_cron_fail_rate_fail": 0.5,
     "worker_stale_fail_minutes": 5,
     "verification_stale_hours": 24,
+    # Property maintenance (2026-08-06 incident: 4 days of silently dead daily
+    # sweeps + a stranded lease freezing every maintenance lane). Healthy
+    # steady state: the daily 04:15 sweep restamps every live property, so the
+    # oldest stamp is ~24-25h just before the next sweep; new singletons carry
+    # NULL stats until their first sweep (~26h worst case). Dirty rows drain
+    # within ~2 min of the worker lane's tick; the daily sweep holds the lease
+    # ~30-60 min, so oldest-dirt ~1h only appears when maintenance is frozen.
+    "property_stats_stamp_warn_hours": 30,
+    "property_stats_stamp_fail_hours": 48,
+    "property_stats_null_warn_hours": 30,
+    "property_stats_null_fail_hours": 54,
+    "property_dirty_warn_hours": 1.5,
+    "property_dirty_fail_hours": 3,
 }
 
 # --- pure status derivation (unit-tested without a DB) ---------------------
@@ -119,6 +132,45 @@ def _status_for_cron(
         if finished >= _MIN_CRON_RUNS and j["failed"] / finished > fail_rate:
             offenders.append(f"{j['jobname']} {j['failed']}/{finished}")
     return ("fail" if offenders else "ok"), offenders
+
+
+def _status_for_property_maintenance(
+    oldest_stamp_hours: float | None,
+    oldest_null_hours: float | None,
+    oldest_dirty_hours: float | None,
+    thresholds: dict[str, Any],
+) -> tuple[str, list[str]]:
+    """Worst-of over the three maintenance staleness axes; None = healthy/empty.
+
+    Each axis is an AGE, not a count, and each is scoped upstream to LIVE
+    properties with children — merged_away losers are childless and the batch
+    UPDATE joins through `listings`, so they are structurally never restamped;
+    counting them would leave this check permanently red (they were ~74% of the
+    naive numbers in the 2026-08-06 incident)."""
+    axes = [
+        ("oldest stats stamp", oldest_stamp_hours,
+         thresholds["property_stats_stamp_warn_hours"],
+         thresholds["property_stats_stamp_fail_hours"]),
+        ("oldest never-computed property", oldest_null_hours,
+         thresholds["property_stats_null_warn_hours"],
+         thresholds["property_stats_null_fail_hours"]),
+        ("oldest dirty-queue row", oldest_dirty_hours,
+         thresholds["property_dirty_warn_hours"],
+         thresholds["property_dirty_fail_hours"]),
+    ]
+    status = "ok"
+    offenders: list[str] = []
+    for name, hours, warn_h, fail_h in axes:
+        if hours is None:
+            continue
+        if hours > fail_h:
+            status = "fail"
+            offenders.append(f"{name} {hours:.1f}h (fail > {fail_h:.0f}h)")
+        elif hours > warn_h:
+            if status == "ok":
+                status = "warn"
+            offenders.append(f"{name} {hours:.1f}h (warn > {warn_h:.0f}h)")
+    return status, offenders
 
 
 def _status_for_worker(
@@ -443,6 +495,74 @@ def check_worker_liveness(conn: Any, thresholds: dict[str, Any]) -> dict[str, An
     }
 
 
+# One round trip for all four maintenance metrics. LIVE scope everywhere:
+# status='active' AND >= 1 child listing (merged_away rows are childless by
+# merge design and structurally unstampable — see _status_for_property_maintenance).
+_PROPERTY_MAINTENANCE_SQL = """
+select
+  (select extract(epoch from (now() - min(p.stats_computed_at))) / 3600.0
+     from properties p
+    where p.status = 'active'
+      and p.stats_computed_at is not null
+      and exists (select 1 from listings l where l.property_id = p.id))
+    as oldest_stamp_hours,
+  (select extract(epoch from (now() - min(p.created_at))) / 3600.0
+     from properties p
+    where p.status = 'active'
+      and p.stats_computed_at is null
+      and exists (select 1 from listings l where l.property_id = p.id))
+    as oldest_null_hours,
+  (select extract(epoch from (now() - min(d.marked_at))) / 3600.0
+     from dirty_properties d) as oldest_dirty_hours,
+  (select count(*) from dirty_properties) as dirty_depth
+"""
+
+
+def check_property_maintenance(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]:
+    """Watch the property-stats maintenance loop (rule 20): the daily full sweep,
+    the incremental dirty drain, and the lease that serializes them. Born from the
+    2026-08-06 incident — the sweep outgrew its job timeout and died `cancelled`
+    (not `failed`) for 4 days straight while each kill's stranded lease froze every
+    maintenance lane; no check watched any of it."""
+    row = _fetchone(conn, _PROPERTY_MAINTENANCE_SQL)
+    oldest_stamp, oldest_null, oldest_dirty, dirty_depth = (
+        (None, None, None, 0) if row is None else (
+            float(row[0]) if row[0] is not None else None,
+            float(row[1]) if row[1] is not None else None,
+            float(row[2]) if row[2] is not None else None,
+            int(row[3] or 0),
+        )
+    )
+    status, offenders = _status_for_property_maintenance(
+        oldest_stamp, oldest_null, oldest_dirty, thresholds)
+    if offenders:
+        message = (
+            "Property maintenance is falling behind: " + "; ".join(offenders)
+            + " — check the daily sweep's runs (timeout kills report as "
+            "cancelled) and the maintenance lease."
+        )
+    else:
+        message = (
+            f"Property maintenance healthy (oldest stamp "
+            f"{oldest_stamp:.1f}h, dirty queue {dirty_depth})."
+            if oldest_stamp is not None
+            else f"Property maintenance healthy (dirty queue {dirty_depth})."
+        )
+    return {
+        "check_key": "property_maintenance",
+        "status": status,
+        "value": round(oldest_stamp, 2) if oldest_stamp is not None else None,
+        "details": {
+            "oldest_stamp_hours": oldest_stamp,
+            "oldest_null_hours": oldest_null,
+            "oldest_dirty_hours": oldest_dirty,
+            "dirty_depth": dirty_depth,
+            "offenders": offenders,
+        },
+        "message": message,
+    }
+
+
 # Keep every parity scan bounded so the 6-hourly run never degenerates into a seq
 # scan of 8M images rows: look only at the newest slice above the watermark. A live
 # writer gap shows up continuously, so the recent window catches it just as well as
@@ -610,6 +730,7 @@ _CHECKS: list[tuple[str, Callable[[Any, dict[str, Any]], dict[str, Any]]]] = [
     ("db_saturation", check_db_saturation),
     ("worker_liveness", check_worker_liveness),
     ("dual_write_parity", check_dual_write_parity),
+    ("property_maintenance", check_property_maintenance),
 ]
 
 # --weekly stays a valid (currently empty) lane so the scheduled invocation keeps
