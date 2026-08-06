@@ -43,6 +43,7 @@ export type PipelineSortField =
   | 'added_at'
   | 'entered_stage_at'
   | 'price_czk'
+  | 'total_price_change_pct'
   | 'city';
 
 export type PipelineSort = Sort<PipelineSortField>;
@@ -62,6 +63,8 @@ export const PIPELINE_SORT_OPTIONS: ReadonlyArray<SortOption<PipelineSortField>>
   { value: '-entered_stage_at', label: 'Ve fázi nejkratčeji', field: 'entered_stage_at', direction: 'desc' },
   { value: '-price_czk',        label: 'Cena nejvyšší',       field: 'price_czk',        direction: 'desc' },
   { value: 'price_czk',         label: 'Cena nejnižší',       field: 'price_czk',        direction: 'asc'  },
+  { value: 'total_price_change_pct',  label: 'Cena nejvíc klesla',   field: 'total_price_change_pct', direction: 'asc'  },
+  { value: '-total_price_change_pct', label: 'Cena nejvíc vzrostla', field: 'total_price_change_pct', direction: 'desc' },
   { value: 'city',              label: 'Město A–Ž',           field: 'city',             direction: 'asc'  },
 ];
 
@@ -85,11 +88,30 @@ const cityKey = (c: PipelineBoardCard): string | null =>
     street: null, // street would sort by house number, not by town
   });
 
+/* Price movement sorts on the SIGNED percent, not its magnitude, and ASCENDING
+ * is offered first: most-negative-first puts the deepest cut at the top. That
+ * follows <PriceDelta>'s polarity — this is a buyer's board, so a seller
+ * dropping their ask is the actionable event, not a symmetric "biggest mover".
+ * An |abs| option would rank a 20% rise alongside a 20% cut and is deliberately
+ * not offered; the two directions answer the two real questions separately.
+ *
+ * NULL IS NOT ZERO, and it is the majority case. `total_price_change_pct` is
+ * NULL whenever the representative listing has fewer than two priced snapshots
+ * — roughly 60% of live cards, which have been seen exactly once. cardSort's
+ * NULLS-LAST-in-both-directions rule sinks them under the movers in either
+ * direction, which is the honest placement: "not observed to move" must never
+ * outrank an observed 0%, and it must never head the list of biggest risers
+ * either. Those cards land at the bottom ordered only by the property_id
+ * tiebreak, and the card renders no arrow at all for them.
+ *
+ * Percent, not koruny: normalising by the base price is what lets a 400k cut on
+ * a panelák and a 4M cut on a villa be compared at all. */
 const ACCESSORS: Record<PipelineSortField, Accessor<PipelineBoardCard>> = {
   board_position: (c) => c.board_position,
   added_at: (c) => timeKey(c.added_at),
   entered_stage_at: (c) => timeKey(c.entered_stage_at),
   price_czk: (c) => c.price_czk,
+  total_price_change_pct: (c) => c.total_price_change_pct,
   city: cityKey,
 };
 
