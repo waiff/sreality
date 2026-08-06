@@ -1,4 +1,4 @@
--- 374_browse_list_anon_grant_and_index_fix.sql
+-- 376_browse_list_anon_grant_and_index_fix.sql
 --
 -- Migration 371 (pg_cron_statement_timeout_scoping) redefined
 -- rebuild_browse_list() and rebuild_properties_map_mv() to fix an unrelated
@@ -128,7 +128,7 @@ begin
     execute 'revoke insert, update, delete, truncate on browse_list from anon, authenticated';
 
     if has_table_privilege('anon', 'browse_list', 'SELECT') then
-      raise exception 'rebuild_browse_list: anon must never hold SELECT on browse_list -- refusing to publish this rebuild (see migration 374)';
+      raise exception 'rebuild_browse_list: anon must never hold SELECT on browse_list -- refusing to publish this rebuild (see migration 376)';
     end if;
 
     update browse_read_model_state
@@ -184,7 +184,7 @@ begin
     execute 'grant select on properties_map_mv to authenticated';
 
     if has_table_privilege('anon', 'properties_map_mv', 'SELECT') then
-      raise exception 'rebuild_properties_map_mv: anon must never hold SELECT on properties_map_mv -- refusing to publish this rebuild (see migration 374)';
+      raise exception 'rebuild_properties_map_mv: anon must never hold SELECT on properties_map_mv -- refusing to publish this rebuild (see migration 376)';
     end if;
 
     update browse_read_model_state
@@ -216,10 +216,10 @@ do $$
 begin
   if to_regclass('public.browse_list') is not null then
     assert not has_table_privilege('anon', 'public.browse_list', 'SELECT'),
-      'browse_list is still anon-SELECTable after migration 374';
+      'browse_list is still anon-SELECTable after migration 376';
   end if;
   if to_regclass('public.properties_map_mv') is not null then
     assert not has_table_privilege('anon', 'public.properties_map_mv', 'SELECT'),
-      'properties_map_mv is still anon-SELECTable after migration 374';
+      'properties_map_mv is still anon-SELECTable after migration 376';
   end if;
 end $$;

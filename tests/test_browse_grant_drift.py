@@ -30,7 +30,7 @@ protected relations, and -- like test_cron_statement_timeout_guard.py --
 tracks only the LATEST `create or replace function` per name across all
 migrations (migrations replay in order; CREATE OR REPLACE is cumulative, so
 only the last definition reflects live behavior). Complements, not
-replaces, migration 374's runtime self-check (an
+replaces, migration 376's runtime self-check (an
 `if has_table_privilege('anon', ...) then raise exception` inside both
 functions, so a regression is also caught on the very next pg_cron tick even
 if it somehow bypassed this offline gate, e.g. a grant issued directly

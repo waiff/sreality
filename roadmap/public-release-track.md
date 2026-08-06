@@ -28,7 +28,7 @@ common to all. Full plan, sequencing, and gates: `docs/design/public-release-pro
   every tick re-asserted the regression. Live-verified anon-readable (full active-market
   dataset, no broker PII) for an unknown period. Migration 331's post-condition assertion
   didn't catch it — a one-shot check at migration-apply time cannot see a scheduled function
-  regress later. Fixed (migration 374, same PR): restored 299's grant + write-revoke and
+  regress later. Fixed (migration 376, same PR): restored 299's grant + write-revoke and
   283's covering indexes (also reverted by 371 — a live perf regression, not just security);
   added a STANDING self-check inside both rebuild functions (raises + rolls back the whole
   tick if anon ever regains SELECT, so a future regression self-heals within one 5-min cycle

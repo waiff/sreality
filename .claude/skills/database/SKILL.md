@@ -239,7 +239,7 @@ DROP+CREATE their object every tick, including the `GRANT SELECT ... TO authenti
 covering indexes (migration 283's 9-column form, not migration 277's original 3-column form).
 Migration 371 copied from an outdated body and silently reintroduced BOTH the anon grant and
 the narrow indexes while its own commit message claimed no behavior change — live-anon-readable
-for an unknown period, fixed in migration 374. Always `CREATE OR REPLACE` from the CURRENT
+for an unknown period, fixed in migration 376. Always `CREATE OR REPLACE` from the CURRENT
 function body (`pg_get_functiondef`), never from an old migration file or a design doc's
 emergency-rollback snippet. Both functions now also self-check after granting
 (`if has_table_privilege('anon', ..., 'SELECT') then raise exception`) — a regression RAISEs,
