@@ -657,6 +657,39 @@ export const updateAppSetting = (
     jwt: true,
   });
 
+export interface NewDedupSetting {
+  key: string;
+  category: string;
+  value_type: 'integer' | 'numeric' | 'boolean' | 'text';
+  value: unknown;
+  default: unknown;
+  is_override: boolean;
+  decided: boolean;
+  explanation: string;
+  enum_choices: string[] | null;
+  minimum: number | null;
+  maximum: number | null;
+}
+
+export const listNewDedupSettings = (): Promise<{ data: NewDedupSetting[] }> =>
+  request<{ data: NewDedupSetting[] }>('/new-dedup/settings', { jwt: true });
+
+export const updateNewDedupSetting = (
+  key: string,
+  value: unknown,
+): Promise<NewDedupSetting> =>
+  request<NewDedupSetting>(`/new-dedup/settings/${encodeURIComponent(key)}`, {
+    method: 'PUT',
+    json: { value },
+    jwt: true,
+  });
+
+export const resetNewDedupSetting = (key: string): Promise<NewDedupSetting> =>
+  request<NewDedupSetting>(`/new-dedup/settings/${encodeURIComponent(key)}`, {
+    method: 'DELETE',
+    jwt: true,
+  });
+
 // /clip-audit: flag one image's CLIP tag and/or render score as wrong, with a note.
 export type ImageAnnotation = {
   image_id: number;

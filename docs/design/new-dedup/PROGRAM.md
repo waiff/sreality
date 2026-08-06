@@ -119,6 +119,36 @@ Session handoff points marked ⛳ (good places to end a session; update the ledg
 
 ## Progress ledger (update every session, newest first)
 
+- 2026-08-06 (session continuation, part 2) — With PR #965 merged and PR-2's minimal nav
+  placeholder confirmed live, continued W1: made the Settings page real.
+  - **Backend**: `api/routes/new_dedup.py` — `GET /new-dedup/settings` (full registry +
+    effective values in one call), `PUT /new-dedup/settings/{key}` (validated write, 400 on a
+    bad type/range/enum, 404 on an unknown key), `DELETE /new-dedup/settings/{key}` (drop the
+    override, revert to the registry default). Admin-gated (`require_admin`), mounted in
+    `api/main.py` alongside the other split-out routers. 7 new hermetic tests
+    (`tests/api/test_new_dedup_routes.py`), including the 401-without-admin gate.
+  - **Frontend**: `frontend/src/pages/NewDedupSettings.tsx` replaces PR-2's placeholder — all 12
+    registry settings grouped by category (L0-L4 + general), each card showing the
+    plain-language explanation, a `not yet calibrated` tag (ochre — this app's existing
+    low-confidence/pending semantic, e.g. `EstimationList`'s confidence badge,
+    `BuildingDetail`'s `awaiting_input` status) for the two settings the ledger flagged as
+    calibration-pending, and an `edited` tag + "reset to default" once overridden. Controls are
+    type-aware: a toggle switch for the boolean (mirrors `Settings.tsx`'s `FilterCell`), a
+    number input with min/max + explicit Save once dirty, a native `<select>` for the two
+    family-semantics enums (native select is this codebase's established pattern —
+    `Watchdog.tsx`/`ListingMap.tsx`/others — not the interface-design skill's generic custom-
+    dropdown guidance, since this is one page inside an already-coherent app, not a new
+    product). Reused `frontend/src/lib/api.ts`'s existing `request()` + react-query mutation
+    pattern (`AppSettingRow`'s shape) rather than inventing a new one. 6 new vitest tests.
+  - Verified against the app's EXISTING design tokens/components (no `.interface-design/
+    system.md` in this repo; treated `Settings.tsx`'s established patterns as the de facto
+    system rather than running a fresh domain-exploration pass, since this is one page inside
+    an existing coherent product, not a new one).
+  - Full suite green: `pytest -q` 2568 passed; `tsc --noEmit` clean; `vitest run` 380 passed;
+    both codegen checks (`generate_filter_registry.py`, `generate_workflow_docs.py`) OK.
+  - Not done: the Dashboard skeleton (funnel + cost table) — genuinely has no data to show yet
+    (candidates/evidence/decisions are W2/W4/W5); building more than PR-2's placeholder there
+    now would be speculative. RunPod serverless workflow — still no `RUNPOD_API_KEY` secret.
 - 2026-08-06 (session continuation) — Operator confirmed the freeze + PRs were landing and asked
   to check back in 5-10 minutes. Re-verified live state after the wait: **Day-0 freeze and M-0
   are both actually done now** (`dedup_publication_gate_enabled=false`,

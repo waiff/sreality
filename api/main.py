@@ -65,6 +65,7 @@ from api.routes.broker_review import router as broker_review_router
 from api.routes.outreach import router as outreach_router
 from api.routes.filter_presets import router as filter_presets_router
 from api.routes.images import router as images_router
+from api.routes.new_dedup import router as new_dedup_router
 from api.routes.notifications import router as notifications_router
 from scraper import image_storage
 from scraper.db import sweep_stuck_scrape_runs
@@ -261,6 +262,10 @@ app.include_router(filter_presets_router)
 # /health) — an <img> tag can't send a bearer header and these are public
 # photos; the key regex keeps it scoped to listing images only.
 app.include_router(images_router)
+# /new-dedup/settings/* (simulation-engine settings registry: list + per-key
+# update/reset) — operator config, admin-gated (require_admin). See
+# toolkit/dedup_sim_settings.py and docs/design/new-dedup/PROGRAM.md (Wave 1).
+app.include_router(new_dedup_router)
 
 
 @app.get("/health")
