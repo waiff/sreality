@@ -41,11 +41,13 @@ const settingsItems: ReadonlyArray<MenuItem> = [
   { to: '/settings', label: 'General Settings' },
 ];
 
-// The NEW DEDUP program's own group (Wave 0 scaffold — both pages are
-// placeholders). Admin-only, same posture as the Settings group.
+// The NEW DEDUP program's own group. Admin-only, same posture as the
+// Settings group. Dashboard is still a Wave 0 placeholder (real content
+// lands with the funnel/cost work); Settings + Labeling are real (Wave 1).
 const newDedupItems: ReadonlyArray<MenuItem> = [
   { to: '/new-dedup', label: 'Dashboard', end: true },
   { to: '/new-dedup/settings', label: 'Settings' },
+  { to: '/new-dedup/labeling', label: 'Labeling' },
 ];
 
 function isPathActive(pathname: string, to: string): boolean {

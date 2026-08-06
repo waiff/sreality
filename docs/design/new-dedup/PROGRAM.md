@@ -119,6 +119,139 @@ Session handoff points marked ⛳ (good places to end a session; update the ledg
 
 ## Progress ledger (update every session, newest first)
 
+- 2026-08-06 (session continuation, part 3) — Built the Labeling page (W1's last unstarted
+  mechanic besides the Dashboard skeleton and RunPod, both separately blocked).
+  - **Migration 373** (`dedup_sim_labeling`) applied live via MCP: `dedup_sim.taxonomy_labels`
+    (the operator-curated Taxonomy v1 vocabulary — free text, add/rename/remove; deliberately
+    NOT pre-seeded with the ledger's "49 labels" description, since PROGRAM.md itself flags that
+    exact list as unfinalized and operator-owned), `dedup_sim.labeling_sample` (which images are
+    in scope for the relabel job), `dedup_sim.label_proposals` (one row per (image, model): what
+    the secondary CLIP proposes, `pending`/`confirmed`/`dismissed`). All three backend-only (no
+    `_public` view), matching migration 372's settings/simulation_runs precedent. Every join/
+    upsert/cascade statement verified live via `EXPLAIN` against the real schema before landing.
+  - **`toolkit/dedup_sim_labeling.py`**: taxonomy CRUD (add; rename cascades to every
+    `image_training_examples` + `label_proposals` row under the old text in one transaction;
+    remove purges both, images untouched — mirrors `api/labeling.py`'s
+    `delete_training_label` "images stay" semantics), `grow_sample` (newest not-yet-sampled
+    images, optional category filter), proposal review (`list_proposals`,
+    `confirm_proposal` — upserts into `image_training_examples`, the ONLY path that promotes a
+    sim-side proposal into the real confirmed store, never `image_clip_tags` — gallery-flip
+    hazard — `dismiss_proposal`, plus `bulk_confirm_proposals`/`bulk_dismiss_proposals` for the
+    review queue's batch action). 40 hermetic tests (hand-rolled in-memory SQL dispatcher, since
+    the queries are multi-table joins/cascades the simple key-value fake `dedup_sim_settings`
+    tests use couldn't model).
+  - **3 new registry settings** (`toolkit/dedup_sim_settings.py`, new `Category.LABELING`):
+    `labeling_secondary_model` (text, default `openai/clip-vit-large-patch14`, decided=False —
+    a starting pick pending calibration), `labeling_target_proposals_per_category` (300) and
+    `labeling_gate1_target_per_tag` (150) — both `decided=True` since PROGRAM.md's own text
+    states these numbers verbatim (the 300-proposal sample-widening target and the Gate 1
+    criterion), not invented here.
+  - **Secondary CLIP encoder — new, separate infra from the DINOv2/RunPod embeddings path**:
+    `scraper/label_proposal_tagger.py` (a self-contained `ProposalTagger`, deliberately NOT a
+    change to the production `scraper/clip_tagger.py` — zero risk to the live gallery tagger —
+    zero-shot against whatever labels are currently active in `taxonomy_labels`, simple "a photo
+    of {label}" prompts, no fine/logical collapse layer since proposals are flat single-label).
+    `scripts/label_proposal_backfill.py` mirrors `clip_tag_backfill.py`'s shape (R2 download,
+    sharded, chunked) but selects from `labeling_sample` minus already-proposed-for-this-model
+    images. `.github/workflows/label_proposal_backfill.yml`, dispatch-only (2-way shard, smaller
+    than the production 4-way — this is a curated sample, not the full corpus), needs the same
+    R2 secrets as `clip_tag.yml`. No RunPod involved — this is a bigger CLIP checkpoint on CPU,
+    unrelated to Wave 5's DINOv2-on-RunPod plan; don't conflate the two "secondary encoder"
+    mentions in the program.
+  - **API**: `api/new_dedup_labeling.py` (new file, mirrors the existing `api/labeling.py` vs
+    `api/property_merge.py` one-file-per-concern split rather than growing
+    `api/routes/new_dedup.py`), mounted at `/new-dedup/labeling/*`, admin-gated. 18 hermetic
+    route tests (toolkit functions monkeypatched, so this layer only proves status codes +
+    error-mapping, not SQL — that's the toolkit test file's job).
+  - **Frontend**: `frontend/src/pages/NewDedupLabeling.tsx` + nav/route wiring
+    (`routes.tsx`/`Shell.tsx`, third NEW DEDUP item after Dashboard/Settings) + ~150 lines of new
+    `api.ts` functions/types. Structure: a Taxonomy v1 coverage strip (per-label
+    confirmed/pending/dismissed counts + a Gate-1 progress bar, inline rename, two-step-confirm
+    remove, add-label form) above a sample-management panel (size + grow-by-N-images form) above
+    the proposal review grid (status tabs, a "New tag"/"Original tag" toggle that swaps the
+    `ImageTagBadge` between the proposal's label and the image's live `clip_fine_tag` for visual
+    comparison, per-tile confirm/dismiss, and a batch select-all + bulk confirm/dismiss bar
+    scoped to the CURRENT `labeling_secondary_model` — an older model's leftover pending rows
+    review one at a time only). Investigated first via a 4-way parallel research pass (ClipAudit's
+    full structure — turned out to have **no dedup-pair UI to subtract**, the whole file is
+    already single-image labeling; the `/labeling/*` schema family; the CLIP pipeline + taxonomy
+    landscape — confirmed the "49 labels" vocabulary exists nowhere in code, design-doc-only;
+    the `NewDedupSettings.tsx` wiring pattern) before writing any page code, so the page reuses
+    established components (`FilterChip`-style toggles, `Tabs`, `ImageTagBadge`, the
+    `fetchImagesByImageIds`/`imageSrc` Supabase-read pattern) rather than reinventing them. 10
+    new vitest tests. `tsc --noEmit` clean, production `vite build` clean.
+  - Full suite green: `pytest -q` 2612 passed (up from 2568 at session start); `vitest run` 390
+    passed; `tsc --noEmit` clean; both codegen checks OK (`generate_workflow_docs.py` needed a
+    regen for the new GH Actions file, `generate_filter_registry.py` already matched).
+  - Not done, deliberately: the operator still has to run several `grow_sample` +
+    `label_proposal_backfill.yml` + review rounds to actually reach Gate 1 (150 confirmed images
+    per active tag) — this session shipped the tool, not the labeling itself. Dashboard skeleton
+    stays a placeholder (same "no data yet" reasoning as prior sessions). RunPod is unrelated to
+    this work (Wave 5 only). Not built: a way to deactivate a taxonomy label without hard-deleting
+    it (`taxonomy_labels.active` is read by the backfill's label selector but nothing ever sets it
+    false — the only lever today is the destructive DELETE, which cascades away confirmed training
+    examples). Flagged by the review pass below as a real but low-severity gap; a follow-up PR if
+    the operator hits it in practice, not addressed now to avoid unbounded scope growth.
+  - **Adversarial review before merge** (5-dimension parallel pass — backend correctness, security/
+    migration, the CLIP pipeline, frontend correctness, test quality — each finding independently
+    re-verified by a second agent against the actual code): 16 findings, all 16 confirmed real
+    on verification, all fixed same-session:
+    - **High**: `confirm_proposal`/`dismiss_proposal` had no `status = 'pending'` guard (unlike
+      their bulk siblings) — a stale/retried dismiss after a confirm would flip
+      `label_proposals.status` without ever retracting the `image_training_examples` row the
+      confirm had already written, silently diverging the two stores. Fixed: both now require
+      `status = 'pending'` and 404 otherwise, exactly like the bulk functions.
+    - **High**: the Labeling page's rename handler switched the active proposals filter to
+      *whatever label was just renamed* rather than checking it was the SAME label being
+      filtered — renaming an unrelated taxonomy row silently hijacked the operator's filter.
+      Fixed by threading the pre-rename label text through the mutation and comparing it, not
+      just checking "is some filter active".
+    - **High**: the new `label_proposal_backfill.yml` GH Actions workflow interpolated
+      `workflow_dispatch` string inputs directly into the shell `run:` block via `${{ }}` — a
+      classic GH Actions script-injection surface (a `"` in the input breaks out of the quoted
+      arg string), reachable by anyone who can dispatch the workflow, with every R2/DB secret in
+      scope. Fixed: inputs now pass through `env:` and are referenced as quoted shell variables.
+    - **Medium**: `grow_sample`'s SQL used a plain `JOIN` from `listings` to `properties`, so an
+      image whose listing hasn't had a `properties` row attached yet (rule #19/#20: new rows land
+      `property_id` NULL until the incremental maintenance cron runs) was silently excluded even
+      with no category filter — contradicting the "newest not-yet-sampled images" contract. Fixed
+      with a `LEFT JOIN`.
+    - **Medium**: the secondary-CLIP tagger's confidence is a softmax over the active taxonomy
+      labels — mathematically always exactly 1.0 when only one label is active (the realistic
+      bootstrap state right after the operator adds their first label), making the confidence
+      column meaningless exactly when an operator might lean on it most to triage a bulk-confirm.
+      Fixed: falls back to raw cosine similarity (not softmax-normalized) when there's only one
+      active label.
+    - **Medium**: the page's confirm/dismiss mutations were one shared `useMutation` instance for
+      the whole grid — TanStack Query's observer only reflects the most-recently-clicked tile's
+      `isPending`/`variables`, so clicking Confirm on a second tile made an earlier still-in-flight
+      tile's buttons visually re-enable, opening a real race (confirm and dismiss in flight for the
+      same proposal at once). Fixed with a local per-image-id pending set, independent of which
+      mutation call is "current".
+    - **Medium** (×4, test-quality): `PUT /taxonomy/{id}`'s 422 path, `POST /proposals/dismiss`'s
+      404 path, and `POST /proposals/bulk-dismiss`'s 422 path were untested at the route level
+      (asymmetric with their tested siblings); the page's mutation tests only asserted API-call
+      args, never that `invalidateQueries` actually fired or that the UI reflected it. All four
+      closed — the three route tests added, and the confirm/dismiss/bulk-confirm page tests now
+      also assert the proposals grid actually empties after the refetch.
+    - **Low** (×3): the fake-conn test double for `INSERT ... ON CONFLICT DO UPDATE SET label,
+      updated_at` was overwriting `created_by` on every call, diverging from Postgres' real
+      partial-column update (fixed, + a regression test); `scripts/label_proposal_backfill.py` had
+      zero tests unlike its production analogue `clip_tag_backfill.py` (added
+      `tests/scripts/test_label_proposal_backfill.py`, same shape as the existing
+      `test_clip_tag_backfill.py`); the GH workflow's cache-key comment claimed "a model swap just
+      costs one cold cache fill", which is false (the static key never varies with the
+      operator-tunable `labeling_secondary_model` setting, so `actions/cache`'s immutable-key
+      behavior means a swap re-downloads on *every* run, forever) — comment corrected to state the
+      actual (accepted, CI-cost-only) behavior rather than engineer a fully dynamic cache key for a
+      low-severity, non-correctness issue.
+    - Full re-run after all fixes: `pytest -q` 2626 passed (up from 2612), `vitest run` 392 passed
+      (up from 390), `tsc --noEmit` clean, `vite build` clean, both codegen checks OK.
+  - Next session: once the operator starts labeling rounds, watch for real usage friction (is the
+    batch-review flow fast enough, does the coverage strip's progress read clearly); revisit W0's
+    PR-3 (still the only blocker on Gate 0) if it hasn't landed by then; consider a non-destructive
+    "deactivate a taxonomy label" affordance if the hard-delete-only gap above turns out to matter
+    in practice.
 - 2026-08-06 (session continuation, part 2) — With PR #965 merged and PR-2's minimal nav
   placeholder confirmed live, continued W1: made the Settings page real.
   - **Backend**: `api/routes/new_dedup.py` — `GET /new-dedup/settings` (full registry +

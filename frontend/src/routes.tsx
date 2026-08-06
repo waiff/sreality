@@ -33,6 +33,7 @@ const OutreachDetail = lazy(() => import('./pages/OutreachDetail'));
 const BrokerReview = lazy(() => import('./pages/BrokerReview'));
 const NewDedupDashboard = lazy(() => import('./pages/NewDedupDashboard'));
 const NewDedupSettings = lazy(() => import('./pages/NewDedupSettings'));
+const NewDedupLabeling = lazy(() => import('./pages/NewDedupLabeling'));
 // TODO(estimation-5 Part C1): remove DevConfidencePreview + its route
 // once design is approved and the indicator is in real use.
 const DevConfidencePreview = lazy(() => import('./pages/DevConfidencePreview'));
@@ -100,6 +101,7 @@ export const routes: RouteObject[] = [
       { path: 'settings', element: <AdminPage><Settings /></AdminPage>, handle: { title: 'Settings' } },
       { path: 'new-dedup', element: <AdminPage><NewDedupDashboard /></AdminPage>, handle: { title: 'NEW DEDUP' } },
       { path: 'new-dedup/settings', element: <AdminPage><NewDedupSettings /></AdminPage>, handle: { title: 'NEW DEDUP · Settings' } },
+      { path: 'new-dedup/labeling', element: <AdminPage><NewDedupLabeling /></AdminPage>, handle: { title: 'NEW DEDUP · Labeling' } },
       { path: 'scrapers', element: <AdminPage><Scrapers /></AdminPage>, handle: { title: 'Scrapers' } },
       { path: 'dev/confidence-indicator', element: <AdminPage><DevConfidencePreview /></AdminPage>, handle: { title: 'Confidence indicator (dev)' } },
       { path: '*', element: <NotFound />, handle: { title: 'Not found' } },
