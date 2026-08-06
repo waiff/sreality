@@ -36,7 +36,7 @@ operator-ordered merge mechanics are live (see the table below).
 | Map | 🟡 mixed | Typed locality IDs + map layers (map-1) | [roadmap/map-track.md](roadmap/map-track.md) |
 | Scraper | 🟢 mostly done | Cadence-split, portal framework, prepared stmts; Phase 2 multi-portal (larger, later) | [roadmap/scraper-track.md](roadmap/scraper-track.md) |
 | Dedup + canonical listing (legacy, superseded) | ⚪ superseded | Legacy decision engine REMOVED wholesale (2026-08 "NEW DEDUP" cutoff); history only — see NEW DEDUP below | [roadmap/dedup-track.md](roadmap/dedup-track.md) |
-| NEW DEDUP | 🟡 active (W0) | Ground-up decision-layer rebuild, simulation-first; W0 backup+teardown+scaffolding in progress; only operator-ordered merge mechanics are live — see `docs/design/new-dedup/PROGRAM.md` + `CUTOFF.md` | [roadmap/new-dedup.md](roadmap/new-dedup.md) |
+| NEW DEDUP | 🟡 active (W0 + W1) | Legacy decision engine removed (PR-1/PR-2 merged, M-0 done); PR-3 (table drops) + W0 verification still pending; W1 shared prerequisites running in parallel — see `docs/design/new-dedup/PROGRAM.md` + `CUTOFF.md` | [roadmap/new-dedup.md](roadmap/new-dedup.md) |
 | Operator workflow | 🟢 mostly done | Collections / tags / notes, deal pipeline; U-ME (manual rental estimates) next | [roadmap/operator-workflow-track.md](roadmap/operator-workflow-track.md) |
 | Building decomposition | 🟢 mostly done | Paste-a-building unit extraction + fan-out; B3 business-case tab proposed | [roadmap/building-decomposition-track.md](roadmap/building-decomposition-track.md) |
 | Skill refinement | 🟡 active | Phase AI — feedback-driven estimation-skill refinement | [roadmap/skill-refinement-track.md](roadmap/skill-refinement-track.md) |

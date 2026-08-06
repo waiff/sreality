@@ -119,6 +119,98 @@ Session handoff points marked ⛳ (good places to end a session; update the ledg
 
 ## Progress ledger (update every session, newest first)
 
+- 2026-08-06 (session continuation) — Operator confirmed the freeze + PRs were landing and asked
+  to check back in 5-10 minutes. Re-verified live state after the wait: **Day-0 freeze and M-0
+  are both actually done now** (`dedup_publication_gate_enabled=false`,
+  `realtime_dedup_interval_seconds=0`; the 6 legacy workflow IDs from the entry below no longer
+  resolve via the GH API at all — PR-1 deleted the files outright rather than merely disabling
+  them, which supersedes "disabled"). **PR-1 (#966) and PR-2 (#967) are both merged**
+  (2026-08-06T05:12/05:14), landed by a parallel session that also finished the CUTOFF §6 doc
+  pass this ledger flagged as missing (verified: PR-1's diff touches CLAUDE.md,
+  architecture.md, both skills, and the legacy design-doc deletes). That session's own ledger
+  entry (immediately below) landed as #968 before PR-1/PR-2 merged, then PR-1/PR-2 landed later
+  once M-0 was applied — the entry order below is chronological-as-written, not
+  chronological-as-true; treat this entry as the current source of truth. **PR-3 (teardown
+  migration: table drops + view redefinition + legacy generation stamp) has NOT landed** — the
+  only piece left before Gate 0's post-teardown verification checklist can go green.
+  - Merged `origin/main` into this session's W1 branch (`feature/new-dedup-w1-foundation`,
+    PR #965): one real conflict, in `ROADMAP.md`'s NEW DEDUP row (both this branch and #968 had
+    edited it independently) — resolved by combining both: legacy-removed status from #968's
+    wording + the W0+W1-parallel note from this branch's wording. `docs/design/new-dedup/
+    PROGRAM.md` merged clean (this entry's insertion point didn't overlap #968's rewritten
+    entry). Full suite re-run green post-merge; pushing and merging #965 now that CI is clean.
+  - PR-2 already shipped "a minimal NEW DEDUP nav placeholder (Dashboard + Settings stub
+    pages)" per its own description — checking that before building W1's dashboard skeleton
+    further, to build ON it rather than duplicate it.
+  - Continuing W1: with PR-2 landed, the dashboard skeleton + Labeling page are now unblocked
+    (the nav-territory reason for holding them is gone).
+- 2026-08-06 (later same day) — Operator asked whether to start W1 in parallel with the still-
+  in-progress W0. Verified LIVE state instead of trusting the entry below (it undersold how far
+  W0 had actually gotten in places, overstated it in one):
+  - Day-0 freeze and M-0 both **still not done** — confirmed live (all 6 legacy decision
+    workflows still `active` on GitHub; `dedup_publication_gate_enabled=true`;
+    `realtime_dedup_interval_seconds=90`). Attempted both again (`gh api .../disable` on all 6
+    workflow IDs, the two `app_settings` UPDATEs via Supabase MCP) — **blocked by the permission
+    classifier again**, same as last session. Needs the operator to run these two directly or
+    grant permission; exact commands were relayed to the operator in-chat this session.
+  - pg_dump backup (CUTOFF.md §4) — **actually done**, contrary to the "not yet started" note
+    below: workflow run `31052835193` succeeded 2026-08-05T22:27:48Z, after the pg_dump-17 fix
+    (#964) landed.
+  - **PR-1 (backend removal) branch — further along than this ledger said, but not opened.** The
+    worktree (`feature/new-dedup-backend-removal`) is correctly based on PR-0's merge commit
+    (`9d1eb177`, verified via `git merge-base` against `origin/main` — first miscalculated this
+    against a stale *local* `main` ref, caught before reporting it, see
+    [[worktree-absolute-path-stale-branch-hazard]]). Diff vs `origin/main`: 77 files,
+    +179/-20,776, matching CUTOFF §1/§2 exactly. The ~8 decision-side test file deletes/edits and
+    the S5 split (`api/property_merge.py` + `api/labeling.py`, wired into `api/main.py`) are done
+    and staged. **Missing entirely: CUTOFF §6's doc pass** (CLAUDE.md rule 15, architecture.md
+    §15, the `scraper-ops`/`llm-pipelines` skills, deleting the ~7 legacy design docs) — per
+    CLAUDE.md's own same-PR-doc-update rule this needs to land before PR-1 opens for real review.
+    Not pushed/opened this session (would need the doc pass first); left as-is for a future
+    session or the operator's own continuation.
+  - **W1 backend slice started** (operator chose this over finishing W0's blockers, in a fresh
+    worktree/branch `feature/new-dedup-w1-foundation` off current `origin/main`, unrelated to the
+    PR-1 branch above):
+    - **Migration 372** (`dedup_sim_foundation`) applied live via MCP: schema `dedup_sim`
+      (droppable wholesale, Wave 8) with `settings` + `settings_history` (override-only,
+      mirrors `filter_registry.py` + `filter_visibility` migration 059 — a missing row means
+      "use the code registry's default," so a later wave's new setting needs no migration) and
+      `simulation_runs` (decision-tier run bookkeeping, mirrors `estimation_runs` shape,
+      migration 010). Evidence-tier tables (candidates, pHash/embedding evidence) are NOT part
+      of this migration — each lands with the wave that needs it (W2/W4/W5).
+    - **`toolkit/dedup_sim_settings.py`**: the registry half — 12 `SettingDef`s, one per value
+      PROGRAM.md's 2026-08-05 Q&A ledger already decided (L0 radius/floor/area tolerances, pHash
+      threshold + family-semantics toggle, embeddings threshold + family-semantics toggle,
+      RunPod cost cap, vision model + manual-batch-only toggle, L1 exact-attrs OFF), each with a
+      plain-language `explanation` (mission non-negotiable) and a `decided` flag (false on the
+      two the ledger flagged as starting points pending later-wave calibration: embeddings
+      threshold, L1 enabled). No new thresholds invented — every default traces to the ledger.
+      `effective_value`/`effective_settings`/`update_setting`/`reset_setting` CRUD, validated
+      against each setting's declared type/range/enum. 20 hermetic tests, all passing.
+    - **Fixed a latent CI gap** this migration exposed: `tests/test_migration_rls_grants.py`'s
+      table-name regexes assumed every table lives in `public` (or unqualified) — `dedup_sim.*`
+      broke both the created-table capture (truncated to just `dedup_sim`) and the
+      RLS-enabled-table capture (schema-qualified name didn't match `\s+enable row level
+      security` right after the truncated capture), producing a false "table dedup_sim never
+      gets RLS" failure despite RLS being correctly enabled on all 3 real tables. Fixed the
+      regex to handle a non-`public` schema prefix generically; full suite green (3089 passed).
+    - **RunPod serverless workflow — not built, and deliberately so.** No `RUNPOD_API_KEY` (or
+      similarly named) secret exists in GH Actions yet — the operator's RunPod account (W1's
+      "(operator)" half) hasn't been created. Building pod-orchestration code now, with nothing
+      real to call it against (candidate-scoped embedding computation is Wave 5) and no way to
+      test it, would be exactly the kind of speculative scaffolding CLAUDE.md's conventions warn
+      against. Reuse target once the account exists: PR #804's `scripts/embedding_gpu_bench.py`
+      (`download_images`/`embed_images` pattern, presigned-URL manifest, no repo imports) — that
+      harness is a bake-off tool (reads the legacy `dedup_label_events` golden set, which
+      CUTOFF.md §4 drops), so its DATA SOURCE isn't reusable, but its POD-SIDE MECHANICS are.
+    - **Dashboard skeleton + Labeling page — deliberately held**, not started: both sit in the
+      same nav territory the ledger already decided to defer to ride with PR-2 (avoids building
+      UI that PR-2's frontend removal immediately restructures); same reasoning extends from the
+      dashboard (explicitly deferred below) to the Labeling page (not explicitly said before, but
+      identical logic).
+  - Next session: get the operator to unblock Day-0 freeze + M-0 (or grant permission), finish
+    PR-1's CUTOFF §6 doc pass and open it as a draft PR, then continue W1 (candidate-store-
+    adjacent settings will grow the registry once W2 starts; RunPod once the account exists).
 - 2026-08-06 — W0 execution started (operator kickoff: "start with the dedup workflow refactor
   based on program.md and cutoff.md" = Gate 0 approval). Done this session:
   - **PR-0 merged** (#960, commit `9d1eb177`) — clip-linear-probe.md + this PROGRAM.md/CUTOFF.md

@@ -249,16 +249,27 @@ def _created_base_tables(sql: str) -> list[str]:
             continue
         if re.match(r"create (or replace )?(materialized view|view|temp|temporary|foreign)", low):
             continue
-        m = re.match(r'create (?:unlogged )?table (?:if not exists )?(?:public\.)?"?([a-z0-9_]+)"?', low)
+        m = re.match(
+            r'create (?:unlogged )?table (?:if not exists )?(?:"?([a-z0-9_]+)"?\.)?"?([a-z0-9_]+)"?',
+            low,
+        )
         if m:
-            names.append(m.group(1))
+            names.append(_qualify(m.group(1), m.group(2)))
     return names
+
+
+def _qualify(schema: str | None, name: str) -> str:
+    """Bare name for `public`/unqualified tables (preserves every existing
+    exemption-list entry, which was written before non-public schemas
+    existed); `schema.table` for anything else, e.g. `dedup_sim.settings` —
+    so a create/ALTER pair in a non-public schema still correlates."""
+    return name if schema in (None, "public") else f"{schema}.{name}"
 
 
 def _rls_enabled_tables(sql: str) -> set[str]:
     return {
-        m.group(1) for m in re.finditer(
-            r'alter table (?:if exists )?(?:public\.)?"?([a-z0-9_]+)"?\s+enable row level security',
+        _qualify(m.group(1), m.group(2)) for m in re.finditer(
+            r'alter table (?:if exists )?(?:"?([a-z0-9_]+)"?\.)?"?([a-z0-9_]+)"?\s+enable row level security',
             _strip_comments(sql).lower(),
         )
     }
