@@ -330,14 +330,24 @@ def test_agent_find_comparables_relaxed_descriptions_come_from_registry() -> Non
 
 
 def test_codegen_check_passes() -> None:
-    """`scripts/generate_filter_registry.py --check` must pass.
+    """`generate_filter_registry --check` must pass.
 
-    If you've just edited `filter_registry.py`, re-run the script and
-    commit the updated `frontend/src/lib/filterRegistry.generated.ts`.
+    If you've just edited `filter_registry.py`, re-run the generator and commit
+    the updated `frontend/src/lib/filterRegistry.generated.ts`.
+
+    Invoked as `-m scripts.generate_filter_registry`, NOT by script path. Running
+    a script by path puts `scripts/` on sys.path[0] and leaves the repo root off
+    it entirely, so `from toolkit import filter_registry` inside the generator
+    resolves through whatever the ambient editable install points at — which, on
+    a machine that ran `pip install -e .` from a git worktree, is a DIFFERENT
+    CHECKOUT. This test then compares the committed file against a registry from
+    someone else's branch: a spurious failure at best, and a false PASS (stale
+    codegen declared fresh) at worst. `-m` with cwd=root puts the repo root on
+    sys.path, so the generator always reads the tree under test.
     """
     root = Path(__file__).resolve().parent.parent.parent
     result = subprocess.run(
-        [sys.executable, str(root / "scripts" / "generate_filter_registry.py"), "--check"],
+        [sys.executable, "-m", "scripts.generate_filter_registry", "--check"],
         cwd=root,
         capture_output=True,
         text=True,
@@ -345,7 +355,7 @@ def test_codegen_check_passes() -> None:
     if result.returncode != 0:
         pytest.fail(
             "Filter registry codegen is stale.\n"
-            "Run: python scripts/generate_filter_registry.py\n"
+            "Run: python -m scripts.generate_filter_registry\n"
             "and commit the updated frontend/src/lib/filterRegistry.generated.ts\n\n"
             f"stdout:\n{result.stdout}\n\nstderr:\n{result.stderr}"
         )
