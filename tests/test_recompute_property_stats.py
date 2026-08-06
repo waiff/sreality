@@ -213,7 +213,8 @@ def _run_main(monkeypatch: Any, argv: list[str]) -> list[str]:
     monkeypatch.setattr(
         rps, "_attach_stragglers", lambda c, **k: calls.append("attach") or 0)
     monkeypatch.setattr(
-        rps, "_drain_dirty", lambda c, bs, cutoff: calls.append("drain") or 0)
+        rps, "_drain_dirty",
+        lambda c, bs, cutoff, renew=None: calls.append("drain") or 0)
     monkeypatch.setattr(rps, "_reconcile_childless", lambda c: 0)
     monkeypatch.setattr(rps, "_max_property_id", lambda c: 0)
     assert rps.main() == 0
@@ -315,4 +316,141 @@ def test_run_incremental_pass_unlocks_on_failure():
     conn = _Boom(script=_lock_script(acquired=True))
     with pytest.raises(RuntimeError):
         run_incremental_pass(conn, batch_size=500)
+    assert _find(conn, "SET holder = NULL")
+
+
+# --- lease heartbeat + bounded wait (the 2026-08-06 strand incident) ----------
+
+
+def test_drain_dirty_renews_lease_once_per_slice():
+    """A long drain (post-freeze backlog, nine-portal enqueue) must heartbeat
+    its 15-min lease per claimed slice instead of silently outliving it."""
+    renewals: list[int] = []
+    conn = _DrainConn([[(7, "t1"), (8, "t1")], [(9, "t2")], []])
+    total = _drain_dirty(conn, batch_size=2, cutoff="C",
+                         renew=lambda: renewals.append(1))
+    assert total == 3
+    # one renewal per claim attempt (two full slices + the terminating empty one)
+    assert len(renewals) == 3
+
+
+def test_renew_lease_raises_when_lost():
+    """Renewal missing = the TTL expired mid-work and another writer holds the
+    lease — continuing would recompute concurrently, so it must abort."""
+    from scripts.recompute_property_stats import _renew_lease
+
+    conn = _FakeConn(script=_lock_script(acquired=False))
+    with pytest.raises(RuntimeError, match="lease lost"):
+        _renew_lease(conn, "full:x")
+
+
+def test_wait_lease_is_bounded_by_wall_clock(monkeypatch: Any):
+    """A dispatched sweep must fail RED against a stuck lease, not burn its
+    whole job budget at 10s CAS intervals recomputing nothing (observed
+    2026-08-06 08:08: 30 min in _wait_lease, 0 rows). The bound is WALL time —
+    slow CAS round trips (the degraded-DB case) count against it, not just
+    the sleeps."""
+    import itertools
+
+    import scripts.recompute_property_stats as rps
+
+    monkeypatch.setattr(rps.time, "sleep", lambda s: None)
+    # Each monotonic() call advances 20s: two CAS attempts (~40s of simulated
+    # round-trip wall time) blow a 30s budget even though sleep() was free.
+    ticks = itertools.count(start=0, step=20)
+    monkeypatch.setattr(rps.time, "monotonic", lambda: float(next(ticks)))
+    conn = _FakeConn(script=_lock_script(acquired=False))
+    with pytest.raises(RuntimeError, match="failing RED"):
+        rps._wait_lease(conn, "full:x", rps._LEASE_TTL, max_wait_seconds=30.0)
+
+
+def test_lease_ttl_is_short_everywhere():
+    """The 3h full-sweep grant is what turned every timeout kill into a
+    multi-hour maintenance freeze — a strand must now cost minutes. If this
+    needs raising, renew more often instead."""
+    import scripts.recompute_property_stats as rps
+
+    assert rps._LEASE_TTL == "15 minutes"
+    assert not hasattr(rps, "_FULL_SWEEP_LEASE")
+
+
+# --- full-sweep budget clean-stop --------------------------------------------
+
+
+class _SweepConn(_FakeConn):
+    """Context-manager conn driving main()'s full sweep without stubbing the
+    batch loop: serves now(), the lease CAS (always granted), and max(id)."""
+
+    def __init__(self, max_id: int) -> None:
+        super().__init__([
+            (lambda s: s == "SELECT now()", [("CUTOFF",)]),
+            (lambda s: "property_maintenance_lease" in s and "RETURNING" in s, [(1,)]),
+            (lambda s: "coalesce(max(id), 0) FROM properties" in s, [(max_id,)]),
+        ])
+
+    def __enter__(self) -> "_SweepConn":
+        return self
+
+    def __exit__(self, *exc: Any) -> bool:
+        return False
+
+
+def _run_sweep(monkeypatch: Any, conn: _SweepConn, argv: list[str],
+               clock: list[float] | None = None) -> int:
+    import sys
+    import types
+
+    import scripts.recompute_property_stats as rps
+
+    monkeypatch.setenv("SUPABASE_DB_URL", "postgres://test")
+    monkeypatch.setattr(sys, "argv", ["recompute_property_stats", *argv])
+    monkeypatch.setitem(
+        sys.modules, "psycopg",
+        types.SimpleNamespace(connect=lambda *a, **k: conn))
+    monkeypatch.setattr(rps.signal, "signal", lambda *a: None)
+    if clock is not None:
+        ticks = iter(clock)
+        monkeypatch.setattr(rps.time, "monotonic", lambda: next(ticks))
+    return rps.main()
+
+
+def test_full_sweep_renews_lease_every_batch(monkeypatch: Any) -> None:
+    conn = _SweepConn(max_id=4000)  # 2 batches at the default size
+    assert _run_sweep(monkeypatch, conn, []) == 0
+    grants = [s for s, _ in conn.executed
+              if "property_maintenance_lease" in s and "RETURNING" in s]
+    # initial acquisition + one renewal per batch
+    assert len(grants) == 1 + 2
+    # complete walk → global dirty clear, no swept-range scope
+    cleared = _find(conn, "DELETE FROM dirty_properties")
+    assert cleared and "property_id <" not in cleared[0]
+    # ...and the completion stamp the health check reads (O(1) liveness signal)
+    stamp = _find(conn, "property_sweep_last_complete")
+    assert stamp and stamp[1]["max_id"] == 4000 and stamp[1]["batches"] == 2
+
+
+def test_full_sweep_budget_exhaustion_is_red_and_scopes_the_dirty_clear(
+    monkeypatch: Any,
+) -> None:
+    """Stopping early must (a) exit RED — GH reports a timeout kill as
+    `cancelled` which alerts nobody, an explicit failure emails — and (b) clear
+    dirty rows ONLY below the high-water mark: the global clear would erase the
+    recompute signal for unswept ids, leaving them stale until the next full
+    sweep instead of healed by the next incremental pass."""
+    conn = _SweepConn(max_id=6000)  # 3 batches at the default size
+    # monotonic: started_at, _wait_lease entry anchor, deadline checks
+    # (batch 1 ok, batch 2 over budget), then the elapsed stamps in logging.
+    clock = [0.0, 1.0, 5.0, 100.0, 101.0, 102.0, 103.0]
+    rc = _run_sweep(monkeypatch, conn, ["--max-seconds", "60"], clock=clock)
+    assert rc == 1
+    recomputes = [p for s, p in conn.executed if "WITH batch AS" in s]
+    assert [(p["lo"], p["hi"]) for p in recomputes] == [(1, 2001)]
+    cleared = _find(conn, "DELETE FROM dirty_properties")
+    assert cleared and "property_id < %(hi)s" in cleared[0]
+    assert cleared[1] == {"cutoff": "CUTOFF", "hi": 2001}
+    # incomplete walk must NOT reconcile childless, claim a full clear, or
+    # stamp completion — a stale stamp IS the health check's alarm condition
+    assert not _find(conn, "NOT EXISTS (SELECT 1 FROM listings")
+    assert not _find(conn, "property_sweep_last_complete")
+    # the lease is still released
     assert _find(conn, "SET holder = NULL")

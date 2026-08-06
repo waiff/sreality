@@ -127,6 +127,28 @@ scale to 5–10 portals.
   `sreality-property-maintenance` concurrency group.
 - Accepted lag: a byte-identical reactivation (no snapshot) waits for the
   daily sweep — rare, documented. Architectural rule #20.
+- **Liveness hardening (2026-08-06 incident).** The sweep outgrew its 30-min
+  `timeout-minutes` (runtime doubled in ~3 weeks); each kill reported as
+  `cancelled` (never `failure` — no email) and stranded the old 3-hour lease
+  grant, freezing the worker lane + both crons for hours; 5 dead sweeps in
+  4 days went unnoticed and ~38k live properties in the id tail went stale.
+  Fix: the maintenance lease is ONE 15-min TTL heartbeat-renewed every
+  batch/slice (the mig-366 sticky-holder pattern; a SIGKILL now strands
+  minutes, not hours), acquisition inside the try, `_wait_lease` bounded
+  (fail RED, not a 30-min retry burn), the full sweep clean-stops at
+  `--max-seconds` (default 3600, `timeout-minutes: 75` backstop) and exits
+  RED with a swept-range-scoped dirty clear, and a `property_maintenance`
+  check in `verify_pipeline` (hourly acute lane) alarms on the
+  `property_sweep_last_complete` stamp age (written on complete walks only —
+  O(1); the per-row staleness scan measured ~3.5 min live and would have
+  blown the acute lane's own 5-min timeout) + oldest dirty-queue row age.
+  Known follow-ups: (1) the batch UPDATE rewrites all ~515k live rows daily
+  with no changed-only guard — the suspected driver of the runtime growth
+  (bloat feedback); measure and add an `IS DISTINCT FROM` guard as its own
+  change; (2) repeated budget exhaustion restarts from id 1 each day (no
+  resume cursor), so a chronically over-budget sweep starves the high-id
+  tail — loud (daily RED + stamp-age fail) but not self-healing; add a
+  cursor only if (1) doesn't restore headroom.
 
 ### Phase 4.0: Portal framework — one pipeline for every portal (done)
 The fourth scaling-roadmap unlock: collapse sreality + bazos onto ONE shared

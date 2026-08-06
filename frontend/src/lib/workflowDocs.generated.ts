@@ -2455,7 +2455,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
   {
     "filename": "llm_health.yml",
     "name": "Monitoring: acute health (hourly)",
-    "description": "The fast lane of verify_pipeline: runs the ACUTE checks — LLM errors, LLM silence, DB saturation (pg_cron failure rate) and realtime-worker liveness — hourly, and exits non-zero when any is `fail` so GitHub emails the operator on a red scheduled run. This is the belt-and-braces channel for when the in-app bell path itself is down; the bell is rung (edge-triggered) by the checks via emit_transition_alerts, so an incident alerts once — not per run — and clears on recovery. The 6h full verify_pipeline run additionally covers these (shared emitter keys → no double-alert) plus the slower structural checks (dedup debt, latency, engine cycle).",
+    "description": "The fast lane of verify_pipeline: runs the ACUTE checks — LLM errors, LLM silence, DB saturation (pg_cron failure rate), realtime-worker liveness and property- maintenance staleness (sweep death / stranded lease) — hourly, and exits non-zero when any is `fail` so GitHub emails the operator on a red scheduled run. This is the belt-and-braces channel for when the in-app bell path itself is down; the bell is rung (edge-triggered) by the checks via emit_transition_alerts, so an incident alerts once — not per run — and clears on recovery. The 6h full verify_pipeline run additionally covers these (shared emitter keys → no double-alert) plus the slower structural checks (dedup debt, latency, engine cycle).",
     "portal": null,
     "manual": true,
     "schedules": [
@@ -2844,6 +2844,14 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
           "false",
           "true"
         ]
+      },
+      {
+        "name": "max_seconds",
+        "description": "Wall-clock sweep budget in seconds (clean-stop + RED past it; clamped to 4200 — timeout-minutes is sized for that ceiling, raise both together in the yml)",
+        "required": false,
+        "type": "string",
+        "default": "3600",
+        "options": null
       }
     ],
     "secrets": [
@@ -2851,7 +2859,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     ],
     "concurrencyGroup": "sreality-property-maintenance",
     "cancelInProgress": false,
-    "timeoutMinutes": 30,
+    "timeoutMinutes": 75,
     "permissions": "contents: read",
     "runsUrl": "https://github.com/waiff/sreality/actions/workflows/recompute_property_stats.yml",
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/recompute_property_stats.yml"

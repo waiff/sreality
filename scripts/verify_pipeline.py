@@ -1,9 +1,9 @@
 """verify_pipeline.py — scheduled pipeline-health harness.
 
 Computes a fixed set of pipeline-health metrics (LLM error rate + liveness + burn
-rate, DB saturation, worker liveness, dual-write parity), writes one
-`pipeline_check_results` row per check, and rings the in-app bell on STATE
-TRANSITIONS only (toolkit.system_alerts.emit_transition_alerts): once when a check
+rate, DB saturation, worker liveness, dual-write parity, property maintenance),
+writes one `pipeline_check_results` row per check, and rings the in-app bell on
+STATE TRANSITIONS only (toolkit.system_alerts.emit_transition_alerts): once when a check
 goes red, once when it recovers — not on every red run.
 
 Born from the 2026-07 incident: the pipeline stalled silently for two days
@@ -49,6 +49,18 @@ DEFAULT_THRESHOLDS: dict[str, float] = {
     "db_cron_fail_rate_fail": 0.5,
     "worker_stale_fail_minutes": 5,
     "verification_stale_hours": 24,
+    # Property maintenance (2026-08-06 incident: 4 days of silently dead daily
+    # sweeps + a stranded lease freezing every maintenance lane). The sweep
+    # stamps app_settings.property_sweep_last_complete ONLY on a complete
+    # walk; healthy age is ~24h (daily 04:15 cadence), so fail at 30h fires
+    # ~5-6h after a dead/killed/incomplete sweep — however the process died.
+    # Dirty rows drain within ~2 min of the worker lane's tick; the daily
+    # sweep holds the lease ~30-60 min, so oldest-dirt beyond ~1.5h only
+    # appears when maintenance is frozen.
+    "property_sweep_warn_hours": 26,
+    "property_sweep_fail_hours": 30,
+    "property_dirty_warn_hours": 1.5,
+    "property_dirty_fail_hours": 3,
 }
 
 # --- pure status derivation (unit-tested without a DB) ---------------------
@@ -119,6 +131,51 @@ def _status_for_cron(
         if finished >= _MIN_CRON_RUNS and j["failed"] / finished > fail_rate:
             offenders.append(f"{j['jobname']} {j['failed']}/{finished}")
     return ("fail" if offenders else "ok"), offenders
+
+
+def _status_for_property_maintenance(
+    sweep_age_hours: float | None,
+    oldest_dirty_hours: float | None,
+    thresholds: dict[str, Any],
+) -> tuple[str, list[str]]:
+    """Worst-of over the two maintenance liveness axes.
+
+    `sweep_age_hours` is the age of the last COMPLETE full sweep's stamp
+    (app_settings.property_sweep_last_complete, written by the sweep itself) —
+    None means no stamp on record, which is a warn, not a fail: it is the
+    expected state between deploying this check and the first complete sweep,
+    and permanently red would train the operator to ignore the check. A dirty
+    row aging past its axis means the incremental drain (worker lane + cron)
+    is frozen. Both axes are O(1) reads: a per-row staleness scan over 620k
+    properties measured ~3.5 min live and would blow the hourly acute lane's
+    own 5-min job timeout — recreating the silent-`cancelled` mode this check
+    exists to catch."""
+    axes = [
+        ("last complete sweep", sweep_age_hours,
+         thresholds["property_sweep_warn_hours"],
+         thresholds["property_sweep_fail_hours"]),
+        ("oldest dirty-queue row", oldest_dirty_hours,
+         thresholds["property_dirty_warn_hours"],
+         thresholds["property_dirty_fail_hours"]),
+    ]
+    status = "ok"
+    offenders: list[str] = []
+    if sweep_age_hours is None:
+        status = "warn"
+        offenders.append(
+            "no complete-sweep stamp on record (first sweep since deploy "
+            "still pending, or the sweep has never completed)")
+    for name, hours, warn_h, fail_h in axes:
+        if hours is None:
+            continue
+        if hours > fail_h:
+            status = "fail"
+            offenders.append(f"{name} {hours:.1f}h (fail > {fail_h:.0f}h)")
+        elif hours > warn_h:
+            if status == "ok":
+                status = "warn"
+            offenders.append(f"{name} {hours:.1f}h (warn > {warn_h:.0f}h)")
+    return status, offenders
 
 
 def _status_for_worker(
@@ -443,6 +500,66 @@ def check_worker_liveness(conn: Any, thresholds: dict[str, Any]) -> dict[str, An
     }
 
 
+# One O(1) round trip: the sweep-completion stamp + the tiny dirty queue.
+# Deliberately NOT a per-row staleness scan over properties — that measured
+# ~3.5 min live (620k-row heap × listings semi-join) and would blow the hourly
+# acute lane's 5-min job timeout, taking every other acute check's rows and
+# alerts down with it.
+_PROPERTY_MAINTENANCE_SQL = """
+select
+  (select extract(epoch from (now() - (value->>'completed_at')::timestamptz)) / 3600.0
+     from app_settings where key = 'property_sweep_last_complete')
+    as sweep_age_hours,
+  (select extract(epoch from (now() - min(d.marked_at))) / 3600.0
+     from dirty_properties d) as oldest_dirty_hours,
+  (select count(*) from dirty_properties) as dirty_depth
+"""
+
+
+def check_property_maintenance(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]:
+    """Watch the property-stats maintenance loop (rule 20): the daily full sweep,
+    the incremental dirty drain, and the lease that serializes them. Born from the
+    2026-08-06 incident — the sweep outgrew its job timeout and died `cancelled`
+    (not `failed`) for 4 days straight while each kill's stranded lease froze every
+    maintenance lane; no check watched any of it. The sweep axis reads the
+    completion stamp the (fixed) sweep writes on complete walks only, so ANY way
+    the sweep dies — SIGKILL, runner death, chronic budget exhaustion — surfaces
+    as a stale stamp within hours."""
+    row = _fetchone(conn, _PROPERTY_MAINTENANCE_SQL)
+    sweep_age, oldest_dirty, dirty_depth = (
+        (None, None, 0) if row is None else (
+            float(row[0]) if row[0] is not None else None,
+            float(row[1]) if row[1] is not None else None,
+            int(row[2] or 0),
+        )
+    )
+    status, offenders = _status_for_property_maintenance(
+        sweep_age, oldest_dirty, thresholds)
+    if offenders:
+        message = (
+            "Property maintenance is falling behind: " + "; ".join(offenders)
+            + " — check the daily sweep's runs (timeout kills report as "
+            "cancelled) and the maintenance lease."
+        )
+    else:
+        message = (
+            f"Property maintenance healthy (last complete sweep "
+            f"{sweep_age:.1f}h ago, dirty queue {dirty_depth})."
+        )
+    return {
+        "check_key": "property_maintenance",
+        "status": status,
+        "value": round(sweep_age, 2) if sweep_age is not None else None,
+        "details": {
+            "sweep_age_hours": sweep_age,
+            "oldest_dirty_hours": oldest_dirty,
+            "dirty_depth": dirty_depth,
+            "offenders": offenders,
+        },
+        "message": message,
+    }
+
+
 # Keep every parity scan bounded so the 6-hourly run never degenerates into a seq
 # scan of 8M images rows: look only at the newest slice above the watermark. A live
 # writer gap shows up continuously, so the recent window catches it just as well as
@@ -610,6 +727,7 @@ _CHECKS: list[tuple[str, Callable[[Any, dict[str, Any]], dict[str, Any]]]] = [
     ("db_saturation", check_db_saturation),
     ("worker_liveness", check_worker_liveness),
     ("dual_write_parity", check_dual_write_parity),
+    ("property_maintenance", check_property_maintenance),
 ]
 
 # --weekly stays a valid (currently empty) lane so the scheduled invocation keeps
