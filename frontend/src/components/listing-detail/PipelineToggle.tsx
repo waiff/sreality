@@ -15,10 +15,11 @@
  * here invalidate the other surfaces' keys to keep them in sync.
  */
 
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { addPipelineCard, movePipelineCard, removePipelineCard } from '@/lib/api';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { fetchPipelineStages, fetchPropertyPipeline, pipelineKeys } from '@/lib/queries';
-import { FunnelIcon } from '@/components/icons';
+import PipelineMark from '@/components/PipelineMark';
+import { stageAccent, stageBadge } from '@/lib/pipelineStage';
+import { usePipelineCard } from '@/lib/usePipelineCard';
 import type { PipelineCard } from '@/lib/types';
 
 export default function PipelineToggle({ property_id }: { property_id: number }) {
@@ -38,52 +39,33 @@ export default function PipelineToggle({ property_id }: { property_id: number })
   const stages = stagesQ.data ?? [];
   const inPipeline = card != null;
 
-  // The Browse-card funnels (shared members-set) + the kanban board read pipeline
-  // state elsewhere; keep them in sync after any write here.
-  const syncSurfaces = () => {
-    qc.invalidateQueries({ queryKey: pipelineKeys.card(property_id) });
-    qc.invalidateQueries({ queryKey: pipelineKeys.members });
-    qc.invalidateQueries({ queryKey: pipelineKeys.board });
+  // Writes — and the cache invalidation every other surface depends on — live
+  // in the shared hook. A listing page is never itself a pipeline-scoped
+  // cohort, so it has no reason to invalidate the Browse read surfaces.
+  const { add, remove, move, pending } = usePipelineCard(property_id);
+
+  /* Optimistic stage change: recolour the pill + reselect instantly, like the
+   * kanban board. It stays here rather than in the hook because it patches THIS
+   * surface's single-card query, which no list surface reads. */
+  const moveTo = (stageId: number) => {
+    const prev = qc.getQueryData<PipelineCard | null>(pipelineKeys.card(property_id));
+    const s = stages.find((st) => st.id === stageId);
+    if (prev && s) {
+      qc.setQueryData<PipelineCard | null>(pipelineKeys.card(property_id), {
+        ...prev,
+        stage_id: s.id,
+        stage_key: s.key,
+        stage_label: s.label,
+        stage_color: s.color,
+        stage_code: s.code,
+        is_terminal: s.is_terminal,
+        stage_position: s.position,
+      });
+    }
+    move.mutate(stageId, {
+      onError: () => qc.setQueryData(pipelineKeys.card(property_id), prev ?? null),
+    });
   };
-
-  const add = useMutation({
-    mutationFn: () => addPipelineCard(property_id),
-    onSuccess: syncSurfaces,
-  });
-  const remove = useMutation({
-    mutationFn: () => removePipelineCard(property_id),
-    onSuccess: syncSurfaces,
-  });
-  const move = useMutation({
-    mutationFn: (stageId: number) => movePipelineCard(property_id, stageId),
-    // Optimistic: recolour the pill + reselect instantly, like the kanban board.
-    onMutate: async (stageId): Promise<{ prev: PipelineCard | null | undefined }> => {
-      await qc.cancelQueries({ queryKey: pipelineKeys.card(property_id) });
-      const prev = qc.getQueryData<PipelineCard | null>(pipelineKeys.card(property_id));
-      const s = stages.find((st) => st.id === stageId);
-      if (prev && s) {
-        qc.setQueryData<PipelineCard | null>(pipelineKeys.card(property_id), {
-          ...prev,
-          stage_id: s.id,
-          stage_key: s.key,
-          stage_label: s.label,
-          stage_color: s.color,
-          is_terminal: s.is_terminal,
-          stage_position: s.position,
-        });
-      }
-      return { prev };
-    },
-    onError: (_e, _v, ctx) => {
-      if (ctx) qc.setQueryData(pipelineKeys.card(property_id), ctx.prev ?? null);
-    },
-    onSettled: () => {
-      qc.invalidateQueries({ queryKey: pipelineKeys.card(property_id) });
-      qc.invalidateQueries({ queryKey: pipelineKeys.board });
-    },
-  });
-
-  const pending = add.isPending || remove.isPending || move.isPending;
 
   if (cardQ.isLoading) {
     return (
@@ -103,28 +85,27 @@ export default function PipelineToggle({ property_id }: { property_id: number })
         title="Přidat do pipeline"
         className="inline-flex items-center gap-1.5 rounded-[var(--radius-sm)] border border-[var(--color-copper)] bg-[var(--color-paper-2)] px-3 py-1.5 text-[0.8rem] text-[var(--color-copper)] transition-colors hover:bg-[var(--color-copper-soft)] disabled:opacity-60"
       >
-        <FunnelIcon filled={false} className="h-4 w-4 shrink-0" />
+        <PipelineMark filled={false} iconClassName="h-4 w-4" />
         <span>Přidat do pipeline</span>
       </button>
     );
   }
 
-  const fg = card.stage_color
-    ? `var(--color-tag-${card.stage_color})`
-    : 'var(--color-copper)';
-  const bg = card.stage_color
-    ? `var(--color-tag-${card.stage_color}-soft)`
-    : 'var(--color-copper-soft)';
+  /* Accent + badge come from the shared stage helpers, so this pill, the Browse
+   * card funnels and the board all render one stage the same way. */
+  const look = { id: card.stage_id, color: card.stage_color, code: card.stage_code };
+  const { fg, soft: bg } = stageAccent(look);
+  const badge = stageBadge(look, stages);
 
   return (
     <div
       className="inline-flex items-center gap-1 rounded-[var(--radius-sm)] border py-0.5 pl-2.5 pr-1 text-[0.8rem]"
       style={{ background: bg, color: fg, borderColor: fg, opacity: pending ? 0.6 : undefined }}
     >
-      <FunnelIcon filled className="h-4 w-4 shrink-0" />
+      <PipelineMark filled badge={badge} iconClassName="h-4 w-4" badgeClassName="text-[0.7rem]" />
       <select
         value={card.stage_id}
-        onChange={(e) => move.mutate(Number(e.target.value))}
+        onChange={(e) => moveTo(Number(e.target.value))}
         disabled={pending}
         aria-label="Fáze v pipeline"
         title="Změnit fázi"

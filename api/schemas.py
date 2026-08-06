@@ -579,6 +579,10 @@ class CreateStageIn(BaseModel):
     label: str = Field(min_length=1, max_length=80)
     color: str | None = None
     is_terminal: bool = False
+    # Short badge shown inside the funnel glyph on every surface (migration 377).
+    # Deliberately not unique and deliberately nullable — NULL means "use the
+    # stage's ordinal", which is what a freshly created stage gets.
+    code: str | None = Field(default=None, min_length=1, max_length=4)
 
 
 class UpdateStageIn(BaseModel):
@@ -589,6 +593,9 @@ class UpdateStageIn(BaseModel):
     color: str | None = None
     is_terminal: bool | None = None
     is_entry: bool | None = None
+    # Sent explicitly as null to clear the badge back to the ordinal fallback,
+    # so this one is read via model_fields_set, not `is not None`.
+    code: str | None = Field(default=None, min_length=1, max_length=4)
 
 
 class ReorderStagesIn(BaseModel):

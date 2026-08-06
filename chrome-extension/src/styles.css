@@ -19,6 +19,19 @@
   --bg-sunk: #f1ebde;     /* a hair darker paper — groups the estimate slip */
   --paper: #fffdf8;       /* fresh near-white paper — input fields */
   --copper-deep: #9a4b25; /* copper hover */
+  /* Pipeline-stage palette, mirrored BY VALUE from the SPA's globals.css
+     `--color-tag-*` light-theme tokens (the panel is light-only). The stage
+     badge + pill take the operator's stage colour here exactly as they do in
+     the SPA, so one stage never reads copper in the panel and teal in Browse.
+     Keep in step with globals.css if a colour is ever retuned. */
+  --tag-copper: #b3592d; --tag-copper-soft: #f3eadf;
+  --tag-sage:   #5e7a4a; --tag-sage-soft:   rgba(94, 122, 74, 0.10);
+  --tag-brick:  #a04b3d; --tag-brick-soft:  rgba(160, 75, 61, 0.10);
+  --tag-ochre:  #b58438; --tag-ochre-soft:  rgba(181, 132, 56, 0.10);
+  --tag-slate:  #4a5b73; --tag-slate-soft:  rgba(74, 91, 115, 0.10);
+  --tag-plum:   #7a4664; --tag-plum-soft:   rgba(122, 70, 100, 0.10);
+  --tag-teal:   #2e6f7c; --tag-teal-soft:   rgba(46, 111, 124, 0.10);
+  --tag-sand:   #9c8c5e; --tag-sand-soft:   rgba(156, 140, 94, 0.10);
   all: initial;
 }
 
@@ -369,7 +382,19 @@
 
 .pipeline-pill-icon {
   display: inline-flex;
+  align-items: center;
+  gap: 0.15rem;
   flex-shrink: 0;
+}
+
+/* The stage badge riding beside the funnel — the SPA's <PipelineMark> shape:
+   a small tabular numeral in the stage's own colour, never inside the glyph
+   (unreadable at 14px, and a two-character code doesn't fit). */
+.pipeline-stage-code {
+  font-size: 0.65rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
 }
 
 .pipeline-select {

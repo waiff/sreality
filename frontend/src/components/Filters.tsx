@@ -20,6 +20,7 @@ import {
   LocationTypeahead,
   MultiselectChips,
   TagPicker,
+  PipelineScopePicker,
 } from '@/components/filter-controls';
 import { SUBTYPE_LABELS_BY_MAIN } from '@/lib/enums';
 
@@ -68,7 +69,7 @@ const FEATURES_KEYS = [
 ] as const satisfies ReadonlyArray<keyof ListingFilters>;
 
 const CURATION_KEYS = [
-  'tags', 'withEstimates',
+  'pipeline', 'tags', 'withEstimates',
   'cityIndexRules', 'minCityPopulation', 'maxCityPopulation',
   'nearCityProximity',
   'nearPop5kmMin', 'nearPop15kmMin', 'nearJobs5kmMin', 'nearJobs15kmMin',
@@ -208,6 +209,7 @@ export function FilterSidebar({ filters, onChange, onLocationPick, width = 320, 
   const customWidgets = {
     tags: TagPicker as never,
     city_index_rules: CityIndexRulesPicker as never,
+    pipeline: PipelineScopePicker as never,
   };
 
   return (
@@ -472,8 +474,12 @@ export function FilterSidebar({ filters, onChange, onLocationPick, width = 320, 
               scope="browse"
               state={registryView}
               onChange={handleRegistryChange}
-              includeOnly={['tags', 'with_estimates']}
-              labels={{ tags: 'Tags', with_estimates: 'With estimates' }}
+              includeOnly={['pipeline', 'tags', 'with_estimates']}
+              labels={{
+                pipeline: 'Pipeline',
+                tags: 'Tags',
+                with_estimates: 'With estimates',
+              }}
               customWidgets={customWidgets}
               flat
             />

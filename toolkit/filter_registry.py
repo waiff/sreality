@@ -69,6 +69,7 @@ class UiControl(StrEnum):
     LOCATION = "location"              # composite: districts + map + dot/radius
     CITY_INDEX_RULES = "city_index_rules"  # repeatable {index, op, threshold} rows
     NEAR_CITY_RULE = "near_city_rule"  # city_index_rules + radius_km + population
+    PIPELINE_SCOPE = "pipeline_scope"  # in-pipeline toggle + optional stage checkboxes
 
 
 class FilterType(StrEnum):
@@ -83,6 +84,7 @@ class FilterType(StrEnum):
     DISTRICT_CHIP_LIST = "district_chip_list"  # list of {name, context|null} — Browse/Watchdog districts
     CITY_INDEX_RULE_LIST = "city_index_rule_list"  # list of {index_name, op, value} — Browse/Watchdog city quality
     NEAR_CITY_PROXIMITY = "near_city_proximity"   # composite {index_rules, population_min, radius_km}
+    PIPELINE_SCOPE = "pipeline_scope"             # composite {stage_ids} — deal-pipeline membership
 
 
 # --- value containers -----------------------------------------------------
@@ -1398,6 +1400,27 @@ def _build_registry() -> dict[str, FilterDef]:
             category=CATEGORY_CURATION,
             ui_control=UiControl.MULTISELECT,
             agendas=frozenset({Agenda.BROWSE, Agenda.WATCHDOG}),
+        ),
+        FilterDef(
+            id="pipeline",
+            type=FilterType.PIPELINE_SCOPE,
+            pg_column=None,  # prefilter via property_pipeline_public (mig 205/377)
+            default=None,
+            description=(
+                "Deal-pipeline scope (rule #22). NULL = no constraint. "
+                "`{stage_ids: []}` = the property has a pipeline card at ANY "
+                "stage; `{stage_ids: [12, 13]}` narrows to those stages. "
+                "Stage ids are account-scoped, so a scope carrying ids is "
+                "meaningful only inside the account that wrote it — the "
+                "empty-list form is the portable one. BROWSE-only: the "
+                "pipeline is the operator's own state, so watching for it "
+                "would fire on their own clicks, and it is deliberately "
+                "invisible to the estimation agent (an operator's interest "
+                "must never feed back into a valuation)."
+            ),
+            category=CATEGORY_CURATION,
+            ui_control=UiControl.PIPELINE_SCOPE,
+            agendas=frozenset({Agenda.BROWSE}),
         ),
         FilterDef(
             id="with_estimates",

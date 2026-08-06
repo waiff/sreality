@@ -65,6 +65,11 @@ export interface PipelineMembership {
   stage_id: number | null;
   stage_key: string | null;
   stage_label: string | null;
+  /* Short funnel badge + accent (migration 377), served by the lookup so the
+   * panel renders the same mark as the SPA without a second round trip.
+   * stage_code null = fall back to the stage's ordinal in `stages`. */
+  stage_code: string | null;
+  stage_color: string | null;
 }
 
 /* One operator-curated pipeline stage (GET /pipeline/stages). Mirrors the SPA's
@@ -77,6 +82,7 @@ export interface PipelineStage {
   color: string | null;
   is_terminal: boolean;
   is_entry: boolean;
+  code: string | null;
 }
 
 /* Response of the pipeline-card writes: POST /pipeline/cards (add) and
@@ -87,6 +93,8 @@ export interface PipelineCardResult {
   stage_id?: number;
   stage_key?: string | null;
   stage_label?: string | null;
+  stage_code?: string | null;
+  stage_color?: string | null;
   added?: boolean;
   removed?: boolean;
 }

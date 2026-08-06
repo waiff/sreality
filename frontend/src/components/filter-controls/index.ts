@@ -5,4 +5,5 @@ export { RangeSlider, type RangeBounds } from './RangeSlider';
 export { LocationControl, type CenterRadius } from './LocationControl';
 export { LocationTypeahead } from './LocationTypeahead';
 export { TagPicker } from './TagPicker';
+export { PipelineScopePicker } from './PipelineScopePicker';
 export type { EnumOptionLite } from './types';

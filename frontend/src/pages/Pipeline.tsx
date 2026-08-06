@@ -510,6 +510,7 @@ function StageManager({ stages }: { stages: PipelineStage[] }) {
           <StageEditorRow
             key={s.id}
             stage={s}
+            ordinal={i + 1}
             isFirst={i === 0}
             isLast={i === stages.length - 1}
             onMove={(dir) => move(i, dir)}
@@ -544,6 +545,7 @@ function StageManager({ stages }: { stages: PipelineStage[] }) {
 
 function StageEditorRow({
   stage,
+  ordinal,
   isFirst,
   isLast,
   onMove,
@@ -551,6 +553,9 @@ function StageEditorRow({
   invalidate,
 }: {
   stage: PipelineStage;
+  /* Ordinal among the live stages — the placeholder shown in the code box when
+     the operator hasn't set one, i.e. exactly what the funnels will render. */
+  ordinal: number;
   isFirst: boolean;
   isLast: boolean;
   onMove: (dir: -1 | 1) => void;
@@ -558,6 +563,7 @@ function StageEditorRow({
   invalidate: () => void;
 }) {
   const [label, setLabel] = useState(stage.label);
+  const [code, setCode] = useState(stage.code ?? '');
 
   const update = useMutation({
     mutationFn: (patch: {
@@ -565,6 +571,7 @@ function StageEditorRow({
       color?: TagColor | null;
       is_terminal?: boolean;
       is_entry?: boolean;
+      code?: string | null;
     }) => updatePipelineStage(stage.id, patch),
     onSuccess: invalidate,
     onError,
@@ -579,6 +586,14 @@ function StageEditorRow({
     const next = label.trim();
     if (next && next !== stage.label) update.mutate({ label: next });
     else setLabel(stage.label);
+  };
+
+  /* Empty box = no code: the badge falls back to the ordinal rather than
+   * freezing a guessed number into the row (migration 377). */
+  const saveCode = () => {
+    const next = code.trim();
+    if (next === (stage.code ?? '')) return;
+    update.mutate({ code: next === '' ? null : next });
   };
 
   return (
@@ -609,6 +624,19 @@ function StageEditorRow({
             ▼
           </button>
         </div>
+        <input
+          value={code}
+          onChange={(e) => setCode(e.target.value)}
+          onBlur={saveCode}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+          }}
+          maxLength={4}
+          placeholder={String(ordinal)}
+          aria-label="Značka fáze"
+          title={'Značka ve trychtýři (např. „1“, „9“). Prázdné = pořadí fáze.'}
+          className="w-10 shrink-0 rounded-[var(--radius-sm)] border border-transparent bg-[var(--color-inset)] px-1 py-1 text-center font-mono text-sm tabular-nums text-[var(--color-ink)] hover:border-[var(--color-rule)] focus:border-[var(--color-rule-strong)] focus:outline-none"
+        />
         <input
           value={label}
           onChange={(e) => setLabel(e.target.value)}

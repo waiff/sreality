@@ -28,7 +28,8 @@ export type UiControl =
   | "boolean"
   | "location"
   | "city_index_rules"
-  | "near_city_rule";
+  | "near_city_rule"
+  | "pipeline_scope";
 
 export type FilterType =
   | "bool"
@@ -39,6 +40,7 @@ export type FilterType =
   | "int_list"
   | "location"
   | "near_city_proximity"
+  | "pipeline_scope"
   | "string"
   | "string_list";
 
@@ -102,7 +104,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
     "boolean",
     "location",
     "city_index_rules",
-    "near_city_rule"
+    "near_city_rule",
+    "pipeline_scope"
   ],
   "filters": [
     {
@@ -2014,6 +2017,22 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "agendas": [
         "browse",
         "watchdog"
+      ],
+      "constraints": null,
+      "unit": null,
+      "enum_values": null,
+      "aliases": []
+    },
+    {
+      "id": "pipeline",
+      "type": "pipeline_scope",
+      "pg_column": null,
+      "default": null,
+      "description": "Deal-pipeline scope (rule #22). NULL = no constraint. `{stage_ids: []}` = the property has a pipeline card at ANY stage; `{stage_ids: [12, 13]}` narrows to those stages. Stage ids are account-scoped, so a scope carrying ids is meaningful only inside the account that wrote it — the empty-list form is the portable one. BROWSE-only: the pipeline is the operator's own state, so watching for it would fire on their own clicks, and it is deliberately invisible to the estimation agent (an operator's interest must never feed back into a valuation).",
+      "category": "Curation",
+      "ui_control": "pipeline_scope",
+      "agendas": [
+        "browse"
       ],
       "constraints": null,
       "unit": null,

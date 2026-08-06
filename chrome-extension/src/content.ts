@@ -187,6 +187,35 @@ function funnelIconSvg(filled: boolean): string {
   );
 }
 
+/* The stage's accent, mirroring the SPA's lib/pipelineStage.ts:stageAccent —
+ * the operator's stage colour, copper when the stage has none (copper is THE
+ * deal-tracking accent, rule #22). Values come from styles.css's --tag-* vars,
+ * which mirror the SPA palette by value. */
+const STAGE_COLORS = new Set([
+  'copper', 'sage', 'brick', 'ochre', 'slate', 'plum', 'teal', 'sand',
+]);
+
+function stageAccent(color: string | null | undefined): { fg: string; soft: string } {
+  return color && STAGE_COLORS.has(color)
+    ? { fg: `var(--tag-${color})`, soft: `var(--tag-${color}-soft)` }
+    : { fg: 'var(--copper)', soft: 'var(--copper-soft)' };
+}
+
+/* The funnel badge, mirroring lib/pipelineStage.ts:stageBadge — the operator's
+ * own short code, else the stage's 1-based ordinal among the live stages, else
+ * nothing (stage list not loaded / stage archived). Never derived from
+ * `position`: the live board reuses "9" across its three closed stages. */
+function stageBadge(
+  code: string | null | undefined,
+  stageId: number | null | undefined,
+  stages: PipelineStage[] | null,
+): string | null {
+  if (code) return code;
+  if (stageId == null || stages == null) return null;
+  const idx = stages.findIndex((s) => s.id === stageId);
+  return idx < 0 ? null : String(idx + 1);
+}
+
 /* Immutably set the listing's pipeline membership on a state update. */
 function withPipeline(
   prev: PanelState, membership: PortalListing['pipeline'],
@@ -682,10 +711,26 @@ function mountPanel(): {
 
     const pill = document.createElement('div');
     pill.className = 'pipeline-pill' + (state.pipelineBusy ? ' pipeline-pill--busy' : '');
+    /* Tint by the CURRENT stage, like the SPA's pill — the pill was copper for
+     * every stage before the badge existed, which made "which stage am I on?"
+     * unreadable at a glance. */
+    const accent = stageAccent(l.pipeline?.stage_color);
+    pill.style.color = accent.fg;
+    pill.style.background = accent.soft;
+    pill.style.borderColor = accent.fg;
 
     const icon = document.createElement('span');
     icon.className = 'pipeline-pill-icon';
     icon.innerHTML = funnelIconSvg(true);
+    const badge = stageBadge(
+      l.pipeline?.stage_code, l.pipeline?.stage_id, state.stages,
+    );
+    if (badge != null) {
+      const code = document.createElement('span');
+      code.className = 'pipeline-stage-code';
+      code.textContent = badge;
+      icon.appendChild(code);
+    }
     pill.appendChild(icon);
 
     /* The stage selector. Options come from the loaded stage list; until it
@@ -1281,7 +1326,8 @@ async function onTogglePipeline(): Promise<void> {
 
   setState(applyMembershipIf(
     propertyId,
-    { in_pipeline: !wasIn, stage_id: null, stage_key: null, stage_label: null },
+    { in_pipeline: !wasIn, stage_id: null, stage_key: null, stage_label: null,
+      stage_code: null, stage_color: null },
     { pipelineBusy: true, errorMessage: null },
   ));
 
@@ -1295,8 +1341,10 @@ async function onTogglePipeline(): Promise<void> {
       propertyId,
       wasIn
         ? { in_pipeline: true, stage_id: prior?.stage_id ?? null,
-            stage_key: prior?.stage_key ?? null, stage_label: prior?.stage_label ?? null }
-        : { in_pipeline: false, stage_id: null, stage_key: null, stage_label: null },
+            stage_key: prior?.stage_key ?? null, stage_label: prior?.stage_label ?? null,
+            stage_code: prior?.stage_code ?? null, stage_color: prior?.stage_color ?? null }
+        : { in_pipeline: false, stage_id: null, stage_key: null, stage_label: null,
+            stage_code: null, stage_color: null },
       { pipelineBusy: false, errorMessage: `Uložení do pipeline selhalo: ${friendlyDetail(res.detail)}` },
     ));
     return;
@@ -1305,12 +1353,15 @@ async function onTogglePipeline(): Promise<void> {
   setState(applyMembershipIf(
     propertyId,
     wasIn
-      ? { in_pipeline: false, stage_id: null, stage_key: null, stage_label: null }
+      ? { in_pipeline: false, stage_id: null, stage_key: null, stage_label: null,
+          stage_code: null, stage_color: null }
       : {
           in_pipeline: true,
           stage_id: res.data.stage_id ?? null,
           stage_key: res.data.stage_key ?? null,
           stage_label: res.data.stage_label ?? null,
+          stage_code: res.data.stage_code ?? null,
+          stage_color: res.data.stage_color ?? null,
         },
     { pipelineBusy: false },
   ));
@@ -1386,6 +1437,8 @@ async function onMoveStage(stageId: number): Promise<void> {
       in_pipeline: true, stage_id: stageId,
       stage_key: target?.key ?? prior.stage_key,
       stage_label: target?.label ?? prior.stage_label,
+      stage_code: target?.code ?? null,
+      stage_color: target?.color ?? prior.stage_color,
     },
     { pipelineBusy: true, errorMessage: null },
   ));
@@ -1409,6 +1462,8 @@ async function onMoveStage(stageId: number): Promise<void> {
       stage_id: res.data.stage_id ?? stageId,
       stage_key: res.data.stage_key ?? target?.key ?? prior.stage_key,
       stage_label: res.data.stage_label ?? target?.label ?? prior.stage_label,
+      stage_code: res.data.stage_code ?? target?.code ?? null,
+      stage_color: res.data.stage_color ?? target?.color ?? prior.stage_color,
     },
     { pipelineBusy: false },
   ));

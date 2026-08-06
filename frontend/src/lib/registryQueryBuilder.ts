@@ -65,6 +65,10 @@ export const HAND_CODED_BROWSE_FILTERS: ReadonlySet<string> = new Set([
   // With-estimates is a property-id allowlist prefilter
   // (property_estimates_public), not a column predicate.
   'with_estimates',
+  // The deal-pipeline scope is likewise a property-id allowlist prefilter
+  // (property_pipeline_public), resolved in queries.ts:resolvePipelinePrefilter
+  // — there is no pipeline column on the browse read model to narrow on.
+  'pipeline',
   // Price bounds are hand-coded (not the plain `.gte`/`.lte` auto-path) so they
   // can branch on `include_no_price`: when that toggle is on AND a bound is set,
   // the clause becomes `.or((price>=lo,price<=hi),price.is.null)` to keep

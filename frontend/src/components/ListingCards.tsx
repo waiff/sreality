@@ -4,23 +4,19 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import ImageCarousel from '@/components/ImageCarousel';
 import InfiniteSentinel from '@/components/InfiniteSentinel';
 import Spinner from '@/components/Spinner';
-import { FunnelIcon } from '@/components/icons';
+import PipelineFunnelButton from '@/components/PipelineFunnelButton';
 import PriceDelta from '@/components/PriceDelta';
 import { useScrollRestoration } from '@/lib/useScrollRestoration';
 import {
   curationKeys,
-  fetchPipelineMemberSet,
   fetchPropertyCollectionMemberSet,
-  pipelineKeys,
   sortToParam,
   type CardRow,
   type SortSpec,
 } from '@/lib/queries';
 import {
-  addPipelineCard,
   addPropertiesToCollection,
   listCollections,
-  removePipelineCard,
   removePropertyFromCollection,
 } from '@/lib/api';
 import {
@@ -111,6 +107,10 @@ interface Props {
   mergeMode: boolean;
   selectedPropertyIds: ReadonlySet<number>;
   onToggleSelect: (propertyId: number) => void;
+  /* The cohort is filtered by deal-pipeline membership right now (the Pipeline
+   * scope chip). Bookmark writes then change the result set, so the card
+   * funnels must invalidate the Browse reads — see usePipelineCard. */
+  pipelineScoped: boolean;
   /* On-card estimate: latest rent estimate per listing id (keyed by
    * sreality_id), the set of ids whose run is being kicked off right now
    * (optimistic spinner), and the trigger. Estimate runs on apartment cards
@@ -143,6 +143,7 @@ export default function ListingCards({
   mergeMode,
   selectedPropertyIds,
   onToggleSelect,
+  pipelineScoped,
   estimates,
   estimatingIds,
   onEstimate,
@@ -223,6 +224,7 @@ export default function ListingCards({
                     estimate={r.sreality_id != null ? estimates?.[r.sreality_id] : undefined}
                     estimating={r.sreality_id != null && estimatingIds.has(r.sreality_id)}
                     onEstimate={onEstimate}
+                    pipelineScoped={pipelineScoped}
                   />
                 </li>
               ))}
@@ -239,54 +241,6 @@ export default function ListingCards({
         )}
       </div>
     </div>
-  );
-}
-
-/* Pipeline bookmark toggle on a Browse card. Reads the shared member set (one
- * deduped query across all cards) and toggles the property in/out of the
- * pipeline's entry stage. Stops the click from triggering the card's Link. */
-function BookmarkButton({ property_id }: { property_id: number }) {
-  const qc = useQueryClient();
-  const membersQ = useQuery({
-    queryKey: pipelineKeys.members,
-    queryFn: fetchPipelineMemberSet,
-    staleTime: 30_000,
-  });
-  const inPipeline = membersQ.data?.has(property_id) ?? false;
-  const onDone = () =>
-    qc.invalidateQueries({ queryKey: pipelineKeys.members });
-  const add = useMutation({
-    mutationFn: () => addPipelineCard(property_id),
-    onSuccess: onDone,
-  });
-  const remove = useMutation({
-    mutationFn: () => removePipelineCard(property_id),
-    onSuccess: onDone,
-  });
-  const pending = add.isPending || remove.isPending;
-
-  return (
-    <button
-      type="button"
-      onClick={(e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        if (pending) return;
-        (inPipeline ? remove : add).mutate();
-      }}
-      disabled={pending}
-      aria-pressed={inPipeline}
-      aria-label={inPipeline ? 'Odebrat z pipeline' : 'Přidat do pipeline'}
-      title={inPipeline ? 'V pipeline — odebrat' : 'Přidat do pipeline'}
-      className={[
-        'flex items-center justify-center w-6 h-6 rounded-[var(--radius-xs)] border backdrop-blur transition-colors disabled:opacity-60',
-        inPipeline
-          ? 'bg-[var(--color-copper-soft)]/90 border-[var(--color-copper)] text-[var(--color-copper)]'
-          : 'bg-[var(--color-paper-3)]/85 border-[var(--color-rule)] text-[var(--color-ink-3)] hover:text-[var(--color-copper)] hover:border-[var(--color-copper)]',
-      ].join(' ')}
-    >
-      <FunnelIcon filled={inPipeline} className="h-3.5 w-3.5" />
-    </button>
   );
 }
 
@@ -316,7 +270,7 @@ function CollectionSaveButton({ property_id }: { property_id: number }) {
     enabled: open,
   });
   // One shared read across ALL cards (React Query dedupes the key), mirroring
-  // the pipeline BookmarkButton — avoids one anon query per card on Browse.
+  // the pipeline funnel's members query — avoids one anon query per card.
   const membersQ = useQuery({
     queryKey: curationKeys.propertyCollectionMembers,
     queryFn: fetchPropertyCollectionMemberSet,
@@ -491,6 +445,7 @@ function Card({
   estimate,
   estimating,
   onEstimate,
+  pipelineScoped,
 }: {
   r: CardRow;
   hovered: boolean;
@@ -507,6 +462,9 @@ function Card({
   estimate: ListingEstimate | undefined;
   estimating: boolean;
   onEstimate: (srealityId: number) => void;
+  /* The cohort is currently scoped to the deal pipeline, so a bookmark write
+   * changes which cards match — see usePipelineCard's cohortScoped. */
+  pipelineScoped: boolean;
 }) {
   /* Callback ref so the one ref serves both wrappers (Link → anchor,
    * merge-mode → div). */
@@ -597,7 +555,10 @@ function Card({
         )}
         {!mergeMode && (
           <div className="absolute top-1 left-1 z-10 flex items-center gap-1">
-            <BookmarkButton property_id={r.property_id} />
+            <PipelineFunnelButton
+              property_id={r.property_id}
+              cohortScoped={pipelineScoped}
+            />
             <CollectionSaveButton property_id={r.property_id} />
           </div>
         )}
