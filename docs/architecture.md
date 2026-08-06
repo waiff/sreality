@@ -638,7 +638,7 @@ renumber.** Navigate by area:
     BROWSE + WATCHDOG only** (`toolkit/filter_registry.py`) — the estimation agent
     deliberately never sees them, preserving deterministic estimate semantics. **Curated-city
     *membership* (which city, if any, a property's coordinate falls in) is precomputed onto
-    `properties.home_city_id`** (migration 374, `recompute_home_city()`, hourly incremental job
+    `properties.home_city_id`** (migration 375, `recompute_home_city()`, hourly incremental job
     mirroring migration 142's `home_obec_pop`/`near_*` pattern) rather than evaluated live: a
     per-request `ST_Covers(admin boundary)` / `ST_DWithin(centroid, radius)` scan against all
     curated cities is only cheap at Watchdog's small per-subscription scale, not at Browse's

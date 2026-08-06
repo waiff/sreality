@@ -1,76 +1,335 @@
--- 373_city_quality_browse_list.sql
+-- 375_home_city_precompute.sql
 --
--- BUG: listings_with_city_quality(jsonb, int, int, jsonb) (migration 351) is
--- SECURITY INVOKER and reads `FROM listings l` -- the base table, which has
--- RLS enabled with ZERO policies (deny-all to every non-owner/non-bypass
--- role). Live-reproduced: `set local role authenticated; select count(*)
--- from listings_with_city_quality(...)` returns 0 regardless of the filter
--- arguments, because `SELECT ... FROM listings` itself returns nothing under
--- RLS for `authenticated` -- the WHERE predicate never gets a chance to
--- matter. This fails CLOSED: `frontend/src/lib/queries.ts`'s
--- resolveCityQualityPrefilter treats an empty RPC result as "zero listings
--- match" and short-circuits Browse to an empty cohort, so any logged-in user
--- who sets an "Advanced city-quality rule" (CityIndexRulesPicker, a live,
--- reachable widget in FilterSidebar) sees Browse go silently empty. Not a
--- leak -- EXECUTE was already `authenticated, service_role` only, no anon --
--- a broken feature.
+-- Migration 374 fixed listings_with_city_quality's RLS lockout (BUG1) by
+-- repointing FROM listings -> FROM browse_list, which is correct but
+-- exposed a SECOND, pre-existing defect: evaluating ST_Covers(admin
+-- boundary) / ST_DWithin(centroid, radius) against all 206 curated cities,
+-- live, per browse_list row, for a rule-bearing call. Live EXPLAIN on a
+-- single real rule ("bezpecnost >= 0"): estimated cost ~1.8 BILLION even
+-- after materializing the city_index_values_public "latest revision"
+-- lookup (which itself re-executed a 13,563-row aggregate scan per
+-- (row x city x rule) triple before that fix) -- the query does not
+-- complete. Root cause: `browse_list` stores plain lat/lng floats, not an
+-- indexed geometry column, so there is no way for a per-request join to use
+-- a spatial index from the point side; the naive fix trades BUG1's silent
+-- empty result for an unusable timeout, which is not actually fixed.
 --
--- Root cause: unlike browse_stats_properties (migration 278), which reads
--- `browse_list` (authenticated-granted directly, RLS disabled -- it's a
--- blue-green-rebuilt UNLOGGED snapshot, not RLS-eligible the way `listings`
--- is), this function was never re-pointed off the raw table when the Phase-1
--- RLS-deny-all posture landed on `listings` (database skill, Amendment A5:
--- "listings stays deny-all ... read market facts through a service-role
--- connection ... never a blanket policy. Don't add a USING (true) policy to
--- listings."). The fix is therefore to re-point the body, not to add RLS
--- exposure to `listings`.
+-- This was never caught before because BUG1 has made every real
+-- authenticated call return instantly-empty (via the RLS lockout) since
+-- Phase 1 shipped, and it is unclear the RPC was ever exercised at full
+-- production scale before that either.
 --
--- Fix: FROM listings l -> FROM browse_list l. browse_list is property-grain
--- (one row per property, `listing_id` = the representative child's
--- listings.id) but that is semantically sufficient here: the caller only
--- ever tests membership of the RETURNED ids against `browse_list.listing_id`
--- itself (`.in('listing_id', ids)` against the SAME relation in
--- queries.ts), so evaluating the predicate once per property against the
--- representative's coordinate is exactly as correct as evaluating it per
--- child listing and is a strict simplification (no wasted rows for listings
--- whose id can never appear in the main cohort query's id-space anyway).
--- browse_list carries no raw geom column (like properties_public, only
--- lat/lng), so the point is rebuilt via ST_MakePoint(l.lng, l.lat) --
--- mirroring the exact idiom `toolkit.comparables._city_quality_clauses`
--- already uses for the identical reason (see that function's docstring).
--- Signature and return shape (`returns table(listing_id bigint)`) are
--- unchanged, so this is a plain CREATE OR REPLACE -- no DROP, no grant loss,
--- no PGRST202 window.
+-- Fix (mirrors the ESTABLISHED precedent for exactly this problem,
+-- migration 142's home_obec_pop/near_* columns + recompute_city_proximity()):
+-- precompute which curated city (if any) a property's coordinate belongs
+-- to, ONCE, incrementally, off the request path -- not per Browse query.
+-- `properties.geom` already carries a GiST index (migration 091), so the
+-- backfill itself is a cheap small-anchor-set spatial join (same shape as
+-- recompute_city_proximity: ~2ms/property). Every consumer then becomes a
+-- plain indexed equality join instead of a live spatial containment test.
 --
--- ADDITIONALLY (confirmed live-reachable, not the reported bug but found and
--- fixed while in here -- CLAUDE.md rule 16, "Watchdog + Browse share one
--- definition of matches"): browse_stats_properties (migration 278) diverges
--- from listings_with_city_quality / toolkit.comparables._city_quality_clauses
--- in TWO ways for its city_index_rules clause:
---   1. Geo shape: browse_stats_properties uses ST_DWithin(radius) only, never
---      ST_Covers(admin boundary) -- listings_with_city_quality and the
---      Watchdog matcher both prefer polygon containment when the curated
---      city is wired to a RUIAN obec, falling back to centroid+radius only
---      when it isn't. A listing inside a large city's polygon but beyond
---      `default_radius_m` from its centroid (or vice versa for an
---      irregularly-shaped city) is included/excluded differently by the
---      Stats tab than by Map/Table/Cards for the exact same filter --
---      migration 278's own header promises "the four surfaces can never
---      disagree -- one snapshot, one number", which this one predicate broke.
---   2. Comparison operator: browse_stats_properties hardcodes `v.value >=
---      rule.value` for every rule, ignoring the `op` field entirely.
---      CityIndexRulesPicker.tsx offers both '>=' and '<=' in the UI -- a
---      user-selected '<=' rule is evaluated correctly by
---      listings_with_city_quality but silently re-interpreted as '>=' by
---      the Stats tab, a live wrong-count bug, not a hypothetical one.
--- The city_proximity clause already matches (DWithin-only is correct there
--- too -- it is an explicit user radius_km search, not curated-city polygon
--- membership -- confirmed both functions agree), but its op-handling has the
--- same hardcoded '>=' gap, fixed here for the same reason.
--- Fix is a body-only CREATE OR REPLACE: only the city_index_rules and
--- city_proximity predicate blocks change; every other line is reproduced
--- byte-identical from migration 278. Signature (74 args) is unchanged.
+-- Tie-break when a property's point could satisfy more than one curated
+-- city (RUIAN obec polygons never overlap each other, so at most one
+-- boundary-covers match is possible; only the radius-fallback cities -- the
+-- ones with no admin_boundary_id -- can genuinely overlap): an exact
+-- boundary-covers match always wins over a radius-fallback match, and among
+-- radius-fallback candidates the NEAREST centroid wins. This mirrors the
+-- existing predicate's own precedence (ST_Covers checked before the
+-- ST_DWithin fallback) rather than inventing new semantics.
+--
+-- This ALSO permanently closes the CLAUDE.md rule-16 divergence flagged in
+-- migration 374's header: listings_with_city_quality, browse_stats_properties,
+-- and toolkit.comparables._city_quality_clauses (Watchdog) now all join the
+-- SAME home_city_id column instead of each re-implementing (and inevitably
+-- drifting on) the geo containment test.
+--
+-- The city_proximity / near_city_proximity branch is UNCHANGED (still a
+-- live ST_DWithin spatial join, both here and in browse_stats_properties):
+-- confirmed dead in the frontend today (no widget ever sets
+-- nearCityProximity -- CityIndexRulesPicker only wires city_index_rules),
+-- so it carries no live production traffic and is not the bottleneck this
+-- migration addresses. It is NOT precomputable the same way regardless,
+-- since the radius is chosen by the operator at query time, not fixed.
+-- Left correct but unoptimized; flagged here so a future session does not
+-- assume it was load-tested.
 
+set local lock_timeout = '5s';
+
+alter table properties
+  add column if not exists home_city_id bigint references curated_cities(id),
+  add column if not exists home_city_computed_at timestamptz;
+
+comment on column properties.home_city_id is
+  'The curated city (if any) whose polygon covers this property, or whose '
+  'radius fallback reaches it. Precomputed by recompute_home_city() -- '
+  'migration 374 -- so listings_with_city_quality / browse_stats_properties / '
+  'Watchdog''s _city_quality_clauses share one indexed join instead of each '
+  'running a live ST_Covers/ST_DWithin containment test.';
+
+create index if not exists properties_home_city_id_idx
+  on properties (home_city_id) where home_city_id is not null;
+
+create or replace function recompute_home_city(p_full boolean default false)
+returns integer
+language plpgsql
+as $$
+declare
+  n integer;
+begin
+  -- Anchor sets: the 206 curated cities, split by which containment test
+  -- applies (mirrors migration 142's _prox_anchors pattern -- a tiny
+  -- GiST-indexed temp set keeps the per-property probe cheap instead of a
+  -- live join against the full admin_boundaries/curated_cities tables).
+  drop table if exists _home_city_boundary_anchors;
+  create temp table _home_city_boundary_anchors on commit drop as
+  select cc.id as city_id, ab.geom as boundary_geom
+  from curated_cities cc
+  join admin_boundaries ab on ab.id = cc.admin_boundary_id
+  where cc.admin_boundary_id is not null;
+  create index on _home_city_boundary_anchors using gist (boundary_geom);
+
+  drop table if exists _home_city_radius_anchors;
+  create temp table _home_city_radius_anchors on commit drop as
+  select cc.id as city_id, cc.centroid, cc.default_radius_m
+  from curated_cities cc
+  where cc.admin_boundary_id is null;
+  create index on _home_city_radius_anchors using gist (centroid);
+
+  analyze _home_city_boundary_anchors;
+  analyze _home_city_radius_anchors;
+
+  update properties p set
+    home_city_id = s.city_id,
+    home_city_computed_at = now()
+  from (
+    select p2.id, coalesce(cov.city_id, rad.city_id) as city_id
+    from properties p2
+    left join lateral (
+      select ba.city_id from _home_city_boundary_anchors ba
+      where st_covers(ba.boundary_geom, p2.geom)
+      limit 1
+    ) cov on true
+    left join lateral (
+      select ra.city_id from _home_city_radius_anchors ra
+      where st_dwithin(p2.geom, ra.centroid, ra.default_radius_m)
+      order by p2.geom <-> ra.centroid
+      limit 1
+    ) rad on cov.city_id is null
+    where p2.geom is not null
+      and (p_full or p2.home_city_computed_at is null)
+  ) s
+  where p.id = s.id;
+
+  get diagnostics n = row_count;
+  return n;
+end
+$$;
+
+comment on function recompute_home_city(boolean) is
+  'Fill properties.home_city_id from the curated-city ST_Covers/ST_DWithin '
+  'containment test. Incremental (home_city_computed_at IS NULL) unless '
+  'p_full. Run by recompute_home_city.yml (hourly) and after a '
+  'curated_cities/admin boundary change (workflow_dispatch full=true).';
+
+-- Expose on properties_public (Watchdog's _city_quality_clauses reads this
+-- view) -- appended at the end, verbatim reproduction of migration 343's
+-- body otherwise (CREATE OR REPLACE VIEW can only append columns).
+create or replace view properties_public as
+select
+    p.id as property_id,
+    p.repr_listing_id as sreality_id,
+    p.first_seen_at,
+    p.last_seen_at,
+    p.is_active,
+    p.category_main,
+    p.category_type,
+    p.current_price_czk as price_czk,
+    l.price_unit,
+    p.area_m2,
+    p.disposition,
+    p.locality,
+    p.district,
+    p.locality_district_id,
+    p.locality_region_id,
+    p.lat,
+    p.lng,
+    l.floor,
+    l.total_floors,
+    p.has_balcony,
+    p.has_parking,
+    p.has_lift,
+    p.building_type,
+    p.condition,
+    p.energy_rating,
+    p.estate_area,
+    p.usable_area,
+    p.garden_area,
+    p.category_sub_cb,
+    p.furnished,
+    p.terrace,
+    p.cellar,
+    p.garage,
+    p.parking_lots,
+    p.ownership,
+    l.broker_name,
+    l.broker_email,
+    l.broker_phone,
+    case
+        when p.is_active then greatest(0, floor(extract(epoch from now() - p.first_seen_at) / 86400::numeric)::integer)
+        else greatest(0, floor(extract(epoch from p.last_seen_at - p.first_seen_at) / 86400::numeric)::integer)
+    end as tom_days,
+    case
+        when p.area_m2 is not null and p.area_m2 > 0::numeric and p.current_price_czk is not null then round(p.current_price_czk::numeric / p.area_m2, 2)
+        else null::numeric
+    end as price_per_m2,
+    p.building_condition_level,
+    p.apartment_condition_level,
+    l.description,
+    p.source_count,
+    p.distinct_site_count,
+    p.price_drop_count,
+    p.price_rise_count,
+    p.max_price_drop_pct,
+    p.stats_computed_at,
+    p.source,
+    coalesce(p.street, l.street) as street,
+    p.mf_reference_rent_czk,
+    p.mf_gross_yield_pct,
+    p.obec,
+    p.okres,
+    p.region,
+    p.home_obec_pop,
+    p.near_pop_5km,
+    p.near_pop_15km,
+    p.near_jobs_5km,
+    p.near_jobs_15km,
+    p.near_youth_5km,
+    p.near_youth_15km,
+    p.near_overall_5km,
+    p.near_overall_15km,
+    p.subtype,
+    p.last_change_at,
+    p.obec_id,
+    p.okres_id,
+    p.region_id,
+    p.price_change_count,
+    p.price_change_count_30d,
+    p.price_change_count_90d,
+    p.price_change_count_365d,
+    p.total_price_change_pct,
+    concat_ws(', '::text, p.street, p.locality) as place_search_text,
+    p.asset_id,
+    p.mf_reference_rent,
+    p.published_at,
+    p.repr_listing_ref_id as listing_id,
+    l.source_id_native,
+    p.home_city_id
+from properties p
+     left join listings l on l.id = p.repr_listing_ref_id
+where p.status = 'active'::text
+  and (not (select publication_gate_enabled()) or p.published_at is not null);
+
+-- Expose on browse_projection (Browse's two RPCs read browse_list, built
+-- from `select * from browse_projection`) -- appended at the end, verbatim
+-- reproduction of migration 363's body otherwise.
+create or replace view browse_projection as
+select
+    id as property_id,
+    repr_listing_id as sreality_id,
+    first_seen_at,
+    last_seen_at,
+    is_active,
+    category_main,
+    category_type,
+    current_price_czk as price_czk,
+    area_m2,
+    disposition,
+    locality,
+    district,
+    locality_district_id,
+    locality_region_id,
+    lat,
+    lng,
+    has_balcony,
+    has_parking,
+    has_lift,
+    building_type,
+    condition,
+    energy_rating,
+    estate_area,
+    usable_area,
+    garden_area,
+    category_sub_cb,
+    furnished,
+    terrace,
+    cellar,
+    garage,
+    parking_lots,
+    ownership,
+    case
+        when is_active then greatest(0, floor(extract(epoch from now() - first_seen_at) / 86400::numeric)::integer)
+        else greatest(0, floor(extract(epoch from last_seen_at - first_seen_at) / 86400::numeric)::integer)
+    end as tom_days,
+    case
+        when area_m2 is not null and area_m2 > 0::numeric and current_price_czk is not null then round(current_price_czk::numeric / area_m2, 2)
+        else null::numeric
+    end as price_per_m2,
+    building_condition_level,
+    apartment_condition_level,
+    source,
+    street,
+    mf_reference_rent_czk,
+    mf_gross_yield_pct,
+    obec,
+    okres,
+    region,
+    home_obec_pop,
+    near_pop_5km,
+    near_pop_15km,
+    near_jobs_5km,
+    near_jobs_15km,
+    near_youth_5km,
+    near_youth_15km,
+    near_overall_5km,
+    near_overall_15km,
+    subtype,
+    last_change_at,
+    obec_id,
+    okres_id,
+    region_id,
+    price_change_count,
+    price_change_count_30d,
+    price_change_count_90d,
+    price_change_count_365d,
+    total_price_change_pct,
+    concat_ws(', '::text, street, locality) as place_search_text,
+    asset_id,
+    repr_listing_ref_id as listing_id,
+    (select l.source_id_native from listings l where l.id = p.repr_listing_ref_id) as source_id_native,
+    -- all_sources/active_sources: live on browse_projection already (an
+    -- in-flight, not-yet-merged-to-main branch applied them directly via
+    -- MCP -- CREATE OR REPLACE VIEW is append-only, so they must be
+    -- reproduced here or Postgres reads this as dropping them). Orthogonal
+    -- to this migration; reproduced verbatim from the live view definition.
+    all_sources,
+    active_sources,
+    home_city_id
+from properties p
+where status = 'active'::text
+  and (not (select publication_gate_enabled()) or published_at is not null);
+
+-- Propagate the new column into the browse_list TABLE now, before the two
+-- functions below are defined: LANGUAGE SQL functions are parsed (and their
+-- column references resolved) at CREATE TIME, not just on first call, so
+-- listings_with_city_quality would fail to even compile against browse_list's
+-- pre-rebuild column set otherwise. Mirrors migration 363's same ordering.
+select rebuild_browse_list();
+select rebuild_properties_map_mv();
+
+-- listings_with_city_quality: the city_index_rules branch now joins
+-- l.home_city_id (indexed equality) instead of a live ST_Covers/ST_DWithin
+-- scan against all 206 curated cities per row. city_proximity is unchanged
+-- (see header -- confirmed dead in the frontend, kept correct not optimized).
 create or replace function listings_with_city_quality(
   p_index_rules jsonb default null,
   p_pop_min     int   default null,
@@ -106,39 +365,32 @@ as $$
       not (exists (select 1 from rules)
            or p_pop_min is not null
            or p_pop_max is not null)
-      or exists (
-        select 1
-          from curated_cities_public c
-          left join admin_boundaries_public b
-            on b.id = c.admin_boundary_id
-         where (
-                 (c.admin_boundary_id is not null
-                    and st_covers(b.geom, st_setsrid(st_makepoint(l.lng, l.lat), 4326)))
-                 or (c.admin_boundary_id is null
-                    and st_dwithin(
-                          st_setsrid(st_makepoint(l.lng, l.lat), 4326)::geography,
-                          st_setsrid(st_makepoint(c.lng, c.lat), 4326)::geography,
-                          c.default_radius_m))
+      or (
+        l.home_city_id is not null
+        and exists (
+          select 1
+            from curated_cities_public c
+           where c.city_id = l.home_city_id
+             and (p_pop_min is null or c.population >= p_pop_min)
+             and (p_pop_max is null or c.population <= p_pop_max)
+             and not exists (
+               select 1 from rules r
+               where not exists (
+                 select 1 from city_index_values_public v
+                 where v.city_id = l.home_city_id
+                   and v.index_name = r.index_name
+                   and case r.op
+                         when '>=' then v.value >= r.value
+                         when '<=' then v.value <= r.value
+                         when '>'  then v.value >  r.value
+                         when '<'  then v.value <  r.value
+                         when '==' then v.value =  r.value
+                         when '!=' then v.value <> r.value
+                         else           v.value >= r.value
+                       end
                )
-           and (p_pop_min is null or c.population >= p_pop_min)
-           and (p_pop_max is null or c.population <= p_pop_max)
-           and not exists (
-             select 1 from rules r
-             where not exists (
-               select 1 from city_index_values_public v
-               where v.city_id = c.city_id
-                 and v.index_name = r.index_name
-                 and case r.op
-                       when '>=' then v.value >= r.value
-                       when '<=' then v.value <= r.value
-                       when '>'  then v.value >  r.value
-                       when '<'  then v.value <  r.value
-                       when '==' then v.value =  r.value
-                       when '!=' then v.value <> r.value
-                       else           v.value >= r.value
-                     end
              )
-           )
+        )
       )
     )
     and (
@@ -176,13 +428,11 @@ as $$
     );
 $$;
 
--- ACL unchanged (CREATE OR REPLACE preserves the existing grant), but keep it
--- pinned so this migration is self-verifying on a fresh CI replay too.
 revoke execute on function listings_with_city_quality(jsonb, int, int, jsonb) from public;
 grant  execute on function listings_with_city_quality(jsonb, int, int, jsonb) to authenticated, service_role;
 
--- browse_stats_properties: body reproduced verbatim from migration 278
--- except the city_index_rules / city_proximity predicate blocks (see header).
+-- browse_stats_properties: same home_city_id join for city_index_rules.
+-- Every other line reproduced byte-identical from migration 374.
 CREATE OR REPLACE FUNCTION public.browse_stats_properties(districts_filter text[] DEFAULT NULL::text[], dispositions_filter text[] DEFAULT NULL::text[], price_min_filter integer DEFAULT NULL::integer, price_max_filter integer DEFAULT NULL::integer, area_min_filter integer DEFAULT NULL::integer, area_max_filter integer DEFAULT NULL::integer, active_only_filter boolean DEFAULT false, last_seen_min_days integer DEFAULT NULL::integer, last_seen_max_days integer DEFAULT NULL::integer, first_seen_min_days integer DEFAULT NULL::integer, first_seen_max_days integer DEFAULT NULL::integer, tom_days_min integer DEFAULT NULL::integer, tom_days_max integer DEFAULT NULL::integer, has_balcony_filter boolean DEFAULT NULL::boolean, has_lift_filter boolean DEFAULT NULL::boolean, has_parking_filter boolean DEFAULT NULL::boolean, inactive_only_filter boolean DEFAULT false, furnished_filter text[] DEFAULT NULL::text[], terrace_filter boolean DEFAULT NULL::boolean, cellar_filter boolean DEFAULT NULL::boolean, garage_filter boolean DEFAULT NULL::boolean, category_sub_cb_filter integer DEFAULT NULL::integer, building_type_filter text[] DEFAULT NULL::text[], tag_ids bigint[] DEFAULT NULL::bigint[], category_main_filter text[] DEFAULT NULL::text[], category_type_filter text DEFAULT NULL::text, bbox_west double precision DEFAULT NULL::double precision, bbox_south double precision DEFAULT NULL::double precision, bbox_east double precision DEFAULT NULL::double precision, bbox_north double precision DEFAULT NULL::double precision, ownership_filter text[] DEFAULT NULL::text[], estate_area_min_filter double precision DEFAULT NULL::double precision, estate_area_max_filter double precision DEFAULT NULL::double precision, usable_area_min_filter double precision DEFAULT NULL::double precision, usable_area_max_filter double precision DEFAULT NULL::double precision, parking_lots_min_filter integer DEFAULT NULL::integer, garden_area_min_filter double precision DEFAULT NULL::double precision, garden_area_max_filter double precision DEFAULT NULL::double precision, condition_match_filter text[] DEFAULT NULL::text[], districts_context_filter text[] DEFAULT NULL::text[], city_index_rules jsonb DEFAULT NULL::jsonb, city_pop_min integer DEFAULT NULL::integer, city_pop_max integer DEFAULT NULL::integer, city_proximity jsonb DEFAULT NULL::jsonb, price_per_m2_min double precision DEFAULT NULL::double precision, price_per_m2_max double precision DEFAULT NULL::double precision, portal_filter text[] DEFAULT NULL::text[], mf_gross_yield_pct_min double precision DEFAULT NULL::double precision, mf_gross_yield_pct_max double precision DEFAULT NULL::double precision, near_pop_5km_min integer DEFAULT NULL::integer, near_pop_15km_min integer DEFAULT NULL::integer, near_jobs_5km_min double precision DEFAULT NULL::double precision, near_jobs_15km_min double precision DEFAULT NULL::double precision, near_youth_5km_min double precision DEFAULT NULL::double precision, near_youth_15km_min double precision DEFAULT NULL::double precision, near_overall_5km_min double precision DEFAULT NULL::double precision, near_overall_15km_min double precision DEFAULT NULL::double precision, districts_excluded_filter boolean[] DEFAULT NULL::boolean[], subtype_filter text[] DEFAULT NULL::text[], recently_added_days integer DEFAULT NULL::integer, recently_changed_days integer DEFAULT NULL::integer, obec_ids_filter bigint[] DEFAULT NULL::bigint[], districts_levels text[] DEFAULT NULL::text[], districts_ids bigint[] DEFAULT NULL::bigint[], building_condition_level_min integer DEFAULT NULL::integer, building_condition_level_max integer DEFAULT NULL::integer, apartment_condition_level_min integer DEFAULT NULL::integer, apartment_condition_level_max integer DEFAULT NULL::integer, price_change_count_min integer DEFAULT NULL::integer, price_change_window_days integer DEFAULT NULL::integer, total_price_change_pct_filter double precision DEFAULT NULL::double precision, with_estimates boolean DEFAULT false, include_no_price boolean DEFAULT false)
  RETURNS jsonb
  LANGUAGE plpgsql
@@ -329,17 +579,9 @@ begin
       and (near_overall_5km_min  is null or l.near_overall_5km  >= near_overall_5km_min)
       and (near_overall_15km_min is null or l.near_overall_15km >= near_overall_15km_min)
       and ((city_index_rules is null or jsonb_array_length(city_index_rules) = 0)
-        or (l.lat is not null and l.lng is not null and exists (
-            select 1 from curated_cities_public c
-            left join admin_boundaries_public b on b.id = c.admin_boundary_id
-            where (
-                    (c.admin_boundary_id is not null
-                       and st_covers(b.geom, st_setsrid(st_makepoint(l.lng, l.lat), 4326)))
-                    or (c.admin_boundary_id is null
-                       and st_dwithin(st_setsrid(st_makepoint(l.lng, l.lat), 4326)::geography, st_setsrid(st_makepoint(c.lng, c.lat), 4326)::geography, c.default_radius_m))
-                  )
-              and not exists (select 1 from jsonb_array_elements(coalesce(city_index_rules, '[]'::jsonb)) r
-                where not exists (select 1 from city_index_values_public v where v.city_id = c.city_id and v.index_name = r->>'index_name'
+        or (l.home_city_id is not null
+            and not exists (select 1 from jsonb_array_elements(coalesce(city_index_rules, '[]'::jsonb)) r
+                where not exists (select 1 from city_index_values_public v where v.city_id = l.home_city_id and v.index_name = r->>'index_name'
                   and case coalesce(r->>'op', '>=')
                         when '>=' then v.value >= (r->>'value')::numeric
                         when '<=' then v.value <= (r->>'value')::numeric
@@ -348,7 +590,7 @@ begin
                         when '==' then v.value =  (r->>'value')::numeric
                         when '!=' then v.value <> (r->>'value')::numeric
                         else           v.value >= (r->>'value')::numeric
-                      end)))))
+                      end))))
       and (city_proximity is null or (l.lat is not null and l.lng is not null and exists (
             select 1 from curated_cities_public c
             where st_dwithin(st_setsrid(st_makepoint(l.lng, l.lat), 4326)::geography, st_setsrid(st_makepoint(c.lng, c.lat), 4326)::geography, ((city_proximity ->> 'radius_km')::int * 1000))

@@ -94,7 +94,7 @@ def test_build_clauses_city_quality_uses_latlng_not_geom() -> None:
     per-subscription try/except, so those watchdogs silently NEVER match
     (the Wave 3 detection fix; this guards against a geom regression).
     city_index_rules no longer needs a point at all: curated-city membership
-    is precomputed onto properties_public.home_city_id (migration 374), so
+    is precomputed onto properties_public.home_city_id (migration 375), so
     that branch is a plain indexed equality join, not a live spatial test."""
     spec = WatchdogFilterSpec(
         city_index_rules=[{"index_name": "safety", "value": 60, "op": ">="}],

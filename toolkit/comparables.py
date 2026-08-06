@@ -214,7 +214,7 @@ def _city_quality_clauses(
     `column l.geom does not exist` against properties_public, silently
     zeroing every proximity watchdog). The city-quality (`rules`) branch
     doesn't need a point at all — curated-city membership is precomputed
-    onto `home_city_id` (migration 374) — only the proximity branch still
+    onto `home_city_id` (migration 375) — only the proximity branch still
     does a live radius search, since that radius is chosen per-rule at query
     time and isn't precomputable the same way. The listings-grain callers via
     `_shared_filter_where` never set these filters, so the whole helper is
@@ -258,13 +258,13 @@ def _city_quality_clauses(
 
     if rules:
         # Membership in a curated city is precomputed onto
-        # properties_public.home_city_id (migration 374, recompute_home_city())
+        # properties_public.home_city_id (migration 375, recompute_home_city())
         # -- the SAME column Browse's listings_with_city_quality RPC and
         # browse_stats_properties join against, so all three "does this row
         # belong to a qualifying curated city" consumers share one source of
         # truth (CLAUDE.md rule 16) instead of each re-running the
         # ST_Covers(admin boundary) / ST_DWithin(centroid, radius) containment
-        # test live. Prior to migration 374 this ran that containment test
+        # test live. Prior to migration 375 this ran that containment test
         # inline per row; live EXPLAIN on the Browse-grain equivalent showed a
         # cost in the billions at ~500k-row scale (Watchdog's cohorts are
         # normally much smaller, which is why this was never observed here,
