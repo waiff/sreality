@@ -11,6 +11,7 @@ import type {
 } from '@/lib/queries';
 import type { CenterRadius, MapBounds } from '@/lib/filters';
 import { groupForPicker, indexLabel, pinnedFirst } from '@/lib/cityIndexes';
+import { legendGradient, mapRampStops, normalizeIndexValue } from '@/lib/cityIndexScale';
 import { fmtCzk, fmtArea, fmtRelative, fmtAbsolute } from '@/lib/format';
 import { listingKindLabel } from '@/lib/enums';
 import type { PriceStatDataset, PriceStatGrowthRow } from '@/lib/priceStats';
@@ -171,17 +172,27 @@ type CityFC = GeoJSON.FeatureCollection<
   CityFeatureProps
 >;
 
-/* City choropleth ramp (red → yellow → green), shared by the fill and
- * the outline so the two never drift; matches the legend gradient in
- * CityMapControls and the popup highlight. Flattened inline into the
- * MapLibre `interpolate` expressions below. */
-const CITY_INDEX_RAMP: ReadonlyArray<readonly [number, string]> = [
-  [0, '#c0392b'],
-  [5, '#f1c40f'],
-  [10, '#2ecc71'],
-];
-/* Neutral grey for a city with no reading for the selected index (or no
- * index selected at all) — gated on the `< 0` value sentinel. */
+/* City choropleth ramp — now THE app-wide city-index scale (lib/cityIndexScale),
+ * shared with the pipeline board's card strip so one dataset never speaks two
+ * visual languages. Three changes from the ramp this replaced:
+ *
+ *   - It was red → yellow → green: three hues with a HUE at the midpoint (the
+ *     textbook diverging anti-pattern) and red↔green is the deuteranopia /
+ *     protanopia confusion pair. The shared scale is a proper diverging ramp —
+ *     two hues around a neutral midpoint — in the app's own brick / ink-4 /
+ *     sage tokens. Measured worst-adjacent CVD ΔE 21.9, against a ≥8 bar.
+ *   - The paint interpolated against literal 0/5/10 stops while the legend
+ *     printed the definition's scale_min/scale_max underneath it. The layers
+ *     below are now fed a NORMALIZED 0..1 value, so paint and legend cannot
+ *     disagree about the domain whatever an index's scale is set to.
+ *   - `higher_is_better` was stored per definition and read by nothing. The
+ *     normalizer honours it, so a low-is-good index can't paint backwards.
+ *
+ * The `< 0` sentinel is unchanged: normalized readings are 0..1, so a negative
+ * still means "no reading" and still routes to the neutral grey + dashed
+ * boundary treatment. That grey stays deliberately DISTINCT from the scale's
+ * neutral midpoint — "we have no number" must not look like "this city is
+ * average" — and is further separated by the lower fill-opacity below. */
 const CITY_NULL_COLOR = '#8c9196';
 
 /* -------------------------------------------------------------------------- */
@@ -712,7 +723,7 @@ export default function ListingMap({
             ['<', ['get', 'value'], 0], CITY_NULL_COLOR,
             [
               'interpolate', ['linear'], ['get', 'value'],
-              ...CITY_INDEX_RAMP.flatMap(([stop, color]) => [stop, color]),
+              ...mapRampStops(),
             ],
           ],
           'fill-opacity': [
@@ -737,7 +748,7 @@ export default function ListingMap({
         paint: {
           'line-color': [
             'interpolate', ['linear'], ['get', 'value'],
-            ...CITY_INDEX_RAMP.flatMap(([stop, color]) => [stop, color]),
+            ...mapRampStops(),
           ],
           'line-width': [
             'interpolate', ['linear'], ['zoom'],
@@ -1255,11 +1266,24 @@ export default function ListingMap({
         const v = idxVals.get(c.city_id);
         const hasReading = typeof v === 'number' && Number.isFinite(v);
         /* Below the operator's min threshold → treat as "no reading" so
-         * it falls onto the existing grey path (grey fill, no label). */
+         * it falls onto the existing grey path (grey fill, no label).
+         * Compared against the RAW reading: the threshold input is in the
+         * index's own units, which is what the operator typed. */
         const passesMin =
           hasReading && (colorByMin == null || (v as number) >= colorByMin);
-        const value = passesMin ? (v as number) : -1;
-        const valueLabel = colorByIndex && passesMin ? value.toFixed(1) : '';
+        /* PAINT reads a NORMALIZED 0..1 value, LABEL prints the raw one.
+         * Splitting them is what lets the ramp stay a fixed 0→1 gradient while
+         * each index keeps its own scale_min/scale_max and higher_is_better —
+         * the old code fed the raw reading into stops hardcoded at 0/5/10 and
+         * printed the definition's bounds beside it. -1 remains the "no
+         * reading" sentinel (MapLibre expressions can't read literal null). */
+        const norm =
+          colorByIndex && passesMin
+            ? normalizeIndexValue(v as number, colorByIndex)
+            : null;
+        const value = norm ?? -1;
+        const valueLabel =
+          colorByIndex && passesMin ? (v as number).toFixed(1) : '';
         return {
           type: 'Feature',
           id: c.city_id,
@@ -1775,16 +1799,31 @@ function CityMapControls({
       )}
       {showCities && colorByIndex && (
         <div className="pointer-events-auto flex flex-col gap-1 px-2.5 py-1.5 rounded-[var(--radius-sm)] bg-[var(--color-paper-3)]/95 backdrop-blur-sm border border-[var(--color-rule)] shadow-[0_2px_6px_rgba(0,0,0,0.04)] min-w-[160px]">
+          {/* Same stops as the choropleth, from the one shared scale — the
+              gradient used to be a hand-written copy of the ramp and could
+              drift from it silently. The end labels are the definition's real
+              bounds, which the paint now normalizes against, so the two
+              genuinely describe the same domain. */}
           <div
             className="h-1.5 rounded-sm"
-            style={{
-              background: 'linear-gradient(to right, #c0392b 0%, #f1c40f 50%, #2ecc71 100%)',
-            }}
+            style={{ background: legendGradient() }}
           />
+          {/* The gradient always runs worst → best. For a lower-is-better index
+              the normalizer inverts, so the bound labels must swap with it or
+              the legend would read backwards against its own colours. Every
+              seeded index is higher_is_better today, so this is prevention. */}
           <div className="flex justify-between text-[0.65rem] text-[var(--color-ink-3)] tabular-nums">
-            <span>{colorByIndex.scale_min}</span>
+            <span>
+              {colorByIndex.higher_is_better === false
+                ? colorByIndex.scale_max
+                : colorByIndex.scale_min}
+            </span>
             <span className="text-[var(--color-ink-2)]">{indexLabel(colorByIndex)}</span>
-            <span>{colorByIndex.scale_max}</span>
+            <span>
+              {colorByIndex.higher_is_better === false
+                ? colorByIndex.scale_min
+                : colorByIndex.scale_max}
+            </span>
           </div>
           <div className="flex items-center gap-1.5 pt-0.5">
             <span className="text-[0.65rem] text-[var(--color-ink-2)]">Min:</span>
