@@ -49,9 +49,14 @@ W1 (shared prerequisites + labeling program):
       review/tune every decided default ahead of any wave consuming it.
 - [ ] Dashboard skeleton (funnel + cost table) — still just PR-2's placeholder; genuinely no data
       to show until W2+ produces candidates/decisions. Revisit once W2 lands.
-- [ ] Labeling page (ClipAudit clone minus dedup block + sample management) — not started.
-- [ ] RunPod serverless workflow — blocked on the operator creating the RunPod account (no
-      `RUNPOD_API_KEY` secret exists yet); reuse target is PR #804's pod-side harness.
+- [ ] Labeling page (ClipAudit clone minus dedup block + sample management) — picked up by a
+      parallel session.
+- [x] RunPod client (`scripts/runpod_client.py`, #972/#975/#977) — launch/poll/terminate an
+      on-demand pod, live cheapest-GPU catalog lookup, capacity fallback. Guaranteed teardown
+      verified across 3 real live dispatches (zero cost each time).
+- [ ] RunPod end-to-end proof — blocked on the operator adding funds to the RunPod account
+      balance (a payment method alone isn't a balance); re-dispatch
+      `new_dedup_runpod_smoke_test.yml` once funded.
 
 Waves W2-W8 (candidate selection through production wiring) are not started; see PROGRAM.md.
 
