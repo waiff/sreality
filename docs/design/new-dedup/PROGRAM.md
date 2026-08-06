@@ -119,6 +119,29 @@ Session handoff points marked ⛳ (good places to end a session; update the ledg
 
 ## Progress ledger (update every session, newest first)
 
+- 2026-08-06 (session continuation, part 7) — Fixed a gap in the just-shipped Labeling page
+  (operator report: taxonomy showed "0 labels, 0 sampled" and the Confirmed tab was empty despite
+  an existing 48-label / ~1,185-image training set). Root cause: `dedup_sim.taxonomy_labels`
+  opened empty — nothing ever seeded it from `image_training_examples`'
+  pre-existing labels, even though `taxonomy_overview`'s confirmed_count already LEFT JOINs on
+  label text (it just had nothing on the left side to join against) and PROGRAM.md's own
+  Taxonomy v1 definition (line 38) already points at that table. **Migration 374** backfills
+  `dedup_sim.taxonomy_labels` with the 48 distinct `image_training_examples` labels
+  (`on conflict (label) do nothing`, one-time, not an ongoing sync) — applied live, confirmed
+  48 rows. Separately, `list_proposals(status='confirmed')` in `toolkit/dedup_sim_labeling.py`
+  now drives FROM `image_training_examples` (LEFT JOINing the most-recently-confirmed
+  `label_proposals` row per image, via `DISTINCT ON`, for display provenance only) instead of
+  querying `label_proposals` alone — the pre-existing 1,185 images were trained via
+  `/phash-audit`'s Train CTA, never through a proposal, so the Confirmed tab was only ever
+  going to show this page's own review actions without it. First cut used a UNION keyed off
+  `label_proposals.label`; adversarial review caught that `/phash-audit`'s Train CTA can still
+  relabel an image AFTER it's confirmed here (it only ever writes `image_training_examples`,
+  never touches `label_proposals`), which would have shown a stale label — switched to always
+  reading `te.label` live instead. Verified live: returns exactly 1,185 rows, one per image, all
+  `model='manual'` (no secondary-CLIP proposals exist yet). Tests added in
+  `tests/toolkit/test_dedup_sim_labeling.py` (no-duplicate-when-both-exist, label filter,
+  manual-model tagging, stale-label-after-relabel regression).
+
 - 2026-08-06 (session continuation, part 6 — parallel to the RunPod session below) — Built the
   Labeling page (W1's last unstarted mechanic besides the Dashboard skeleton, which stays a
   placeholder — genuinely no data until W2+).

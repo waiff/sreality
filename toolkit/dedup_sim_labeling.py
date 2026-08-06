@@ -15,6 +15,8 @@ label purges both `image_training_examples` and `label_proposals`):
   `image_training_examples` (the real, confirmed training set); dismissing
   one just marks it reviewed. Never writes `image_clip_tags` — that table
   feeds the live gallery badge, and a proposal isn't operator-approved yet.
+  Listing the 'confirmed' status pulls in the WHOLE training set, not just
+  proposals reviewed on this page — see `list_proposals`.
 """
 
 from __future__ import annotations
@@ -234,14 +236,57 @@ _LIST_PROPOSALS_SQL = """
     LIMIT %(limit)s
 """
 
+# 'confirmed' means something wider than "a label_proposals row we flipped": most of the
+# real training set (image_training_examples) predates this page and was written straight
+# from /phash-audit's Train CTA, never through a proposal, and that older page's Train CTA
+# (api/labeling.py's set_training_example/bulk_set_training_examples) stays live and can
+# still relabel an image AFTER it was confirmed here — it only ever touches
+# image_training_examples, never label_proposals. So this drives FROM
+# image_training_examples (one row per image_id, always the CURRENT label) and only
+# LEFT JOINs label_proposals for display provenance (model/confidence/who-reviewed-it);
+# a naive UNION keyed off label_proposals.label would silently show a stale label once the
+# two tables diverge. DISTINCT ON picks the most-recently-confirmed proposal per image (an
+# image can accumulate more than one confirmed proposal across models over time) or, if
+# none exists, synthesizes model='manual' from the training example itself.
+_LIST_CONFIRMED_SQL = """
+    WITH confirmed AS (
+      SELECT DISTINCT ON (te.image_id)
+        te.image_id,
+        COALESCE(lp.model, 'manual') AS model,
+        te.label,
+        lp.confidence,
+        COALESCE(lp.proposed_at, te.created_at) AS proposed_at,
+        'confirmed'::text AS status,
+        COALESCE(lp.reviewed_at, te.updated_at) AS reviewed_at,
+        COALESCE(lp.reviewed_by, te.created_by) AS reviewed_by
+      FROM image_training_examples te
+      LEFT JOIN dedup_sim.label_proposals lp
+        ON lp.image_id = te.image_id AND lp.status = 'confirmed'
+      WHERE (%(label)s::text IS NULL OR te.label = %(label)s)
+      ORDER BY te.image_id, lp.proposed_at DESC NULLS LAST
+    )
+    SELECT image_id, model, label, confidence, proposed_at, status,
+           reviewed_at, reviewed_by
+    FROM confirmed
+    ORDER BY proposed_at DESC
+    LIMIT %(limit)s
+"""
+
 
 def list_proposals(
     conn: psycopg.Connection, *, status: str | None = None, label: str | None = None,
     limit: int = 100,
 ) -> list[dict[str, Any]]:
+    """List proposals for the review grid. status='confirmed' is special-cased to union
+    in image_training_examples rows with no matching confirmed proposal (see
+    _LIST_CONFIRMED_SQL) — every other status is a plain label_proposals filter."""
     limit = min(max(1, limit), PROPOSAL_LIST_MAX)
+    if status == "confirmed":
+        sql, params = _LIST_CONFIRMED_SQL, {"label": label, "limit": limit}
+    else:
+        sql, params = _LIST_PROPOSALS_SQL, {"status": status, "label": label, "limit": limit}
     with conn.cursor() as cur:
-        cur.execute(_LIST_PROPOSALS_SQL, {"status": status, "label": label, "limit": limit})
+        cur.execute(sql, params)
         rows = cur.fetchall()
     return [
         {
