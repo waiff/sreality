@@ -400,3 +400,31 @@ def test_category_main_multiselect_split():
     assert fr.Agenda.ESTIMATION in scalar.agendas
     # The two never co-occupy an agenda.
     assert scalar.agendas.isdisjoint(multi.agendas)
+
+
+def test_nullable_is_declared_not_encoded_as_an_enum_member() -> None:
+    """`nullable` says "NULL means no constraint here", and the UI renders an
+    explicit "all" pill from it.
+
+    It must NEVER be spelled as an extra enum member: `category_type` is on
+    every agenda, so an `any` value would be a legal input to the estimation
+    agent, where "any deal type" silently mixes rent and sale comparables into
+    one valuation. NULL is already the no-constraint contract in
+    toolkit/comparables.py, api/notifications.py's matcher and
+    browse_stats_properties — all three guard the clause with an
+    `is not None` check.
+    """
+    deal = fr.REGISTRY["category_type"]
+    assert deal.nullable is True
+    assert deal.default == "pronajem"          # an absent value still defaults
+    assert "any" not in deal.constraints["enum"]
+    assert all(o.value != "any" for o in (deal.enum_values or ()))
+
+
+def test_nullable_reaches_the_generated_payload() -> None:
+    """The flag drives a frontend control, so it has to survive codegen."""
+    payload = fr.registry_to_json()  # already a dict, despite the name
+    by_id = {f["id"]: f for f in payload["filters"]}
+    assert by_id["category_type"]["nullable"] is True
+    # Default-off everywhere else — this is opt-in, not a blanket relaxation.
+    assert by_id["category_main_in"]["nullable"] is False

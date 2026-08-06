@@ -298,6 +298,14 @@ from Browse, not just from the board.
   loading one. Per-stage narrowing lives in the sidebar (Curation → Pipeline).
   Watchdogs report it as unsupported — the operator's own state can't be a
   trigger for their own clicks.
+- **Follow-up, same day:** the chip shipped as a MODIFIER and that was wrong —
+  it AND'd the scope onto Browse's default cohort (byt + pronájem), so an
+  operator with 45 deals saw 1. It now loads a VIEW: neutral cohort + scope,
+  active preset deselected, one atomic write, Back as the undo. That required
+  `category_type` to become nullable ("Vše"), which every backend consumer
+  already supported — see architecture rule 21b — and which incidentally fixes
+  a control that lied: clicking the selected deal-type pill wrote `deal=null`
+  and silently snapped back to `pronajem`.
 - Next: nothing queued here; per-stage columns on the Table and a "days in stage"
   signal are the obvious follow-ups if the scope gets heavy use.
 

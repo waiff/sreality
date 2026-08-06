@@ -73,6 +73,10 @@ export interface FilterDef {{
   unit: string | null;
   enum_values: EnumOption[] | null;
   aliases: string[];
+  /** NULL is a legal "no constraint" value, and the UI must offer a way to
+   *  reach it (an explicit "all" pill) — see FilterDef.nullable in
+   *  toolkit/filter_registry.py. */
+  nullable: boolean;
 }}
 
 export interface FilterRegistryPayload {{

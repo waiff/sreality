@@ -245,7 +245,11 @@ incident history: `docs/architecture.md` § Architectural rules.
     ordinal at render time; never derived from `position` (the live board codes three closed stages "9") and
     never parsed out of the label. Browse can be scoped to the pipeline (`?pipeline=any|<stage ids>`): a
     property-id prefilter like tags, mirrored into `browse_stats_properties.property_ids_filter` (migration 378)
-    so Stats can't diverge, and deliberately OUTSIDE preset identity so it never dirties a loaded preset.
+    so Stats can't diverge, and deliberately OUTSIDE preset identity so it never dirties a loaded preset. The
+    chip LOADS A VIEW (neutral cohort + scope, preset deselected, one atomic write) — it is not a modifier;
+    the sidebar's Curation → Pipeline control is. That needs `category_type` nullable (`?deal=any`, the "Vše"
+    pill, `FilterDef.nullable`) — NULL has always meant "no constraint" to comparables, the watchdog matcher
+    and browse_stats; never spell it as an `any` enum member (it would reach the estimation agent).
 
 Full rationale, edge cases, and incident history: read `docs/architecture.md` before modifying anything
 these rules touch.

@@ -772,6 +772,20 @@ renumber.** Navigate by area:
     bazos (partial single-category walks) is such a portal; bezrealitky is NOT (its GraphQL
     `totalCount` + uncapped paging make a per-category walk provable-complete, so it sets
     `supports_complete_walk=true` and marks delistings inactive, source-scoped).
+21b. **`category_type` is NULLABLE on Browse — NULL means "no deal-type constraint"** (the
+    "Vše" pill). This is not new semantics: `toolkit/comparables.py`, the watchdog matcher in
+    `api/notifications.py` and `browse_stats_properties` have always guarded the clause with an
+    `is not null` check, and `applyRegistryFilters` skips null values — the only thing missing
+    was a frontend type and a control that could reach the state. It is declared once, as
+    `FilterDef.nullable` in the registry, which is what makes the shared `PillRow` render a
+    leading "Vše" pill; any future nullable enum gets the control for free. Deliberately NOT an
+    extra `any` enum member: `category_type` is on EVERY agenda, so an `any` token would be a
+    legal input to the estimation agent, where "any deal type" silently mixes rent and sale
+    comparables into one valuation. URL: `?deal=any`; an ABSENT `deal` still means the
+    `pronajem` default, so bare `/browse` links are unchanged. Before this, clicking the
+    selected deal-type pill (which `PillRow` has always offered) wrote `deal=null`, which
+    `enumOr` silently snapped back to `pronajem` — the control lied about what it could do.
+
 22. **The deal pipeline is single-valued, property-grain operator state (migration 205).**
     `property_pipeline` holds at most ONE card per property (PK on `property_id`) at one
     `stage_id` (`pipeline_stages`, a TABLE not an enum so the operator can rename/reorder/add
@@ -821,9 +835,21 @@ renumber.** Navigate by area:
     onto the cohort exactly like tags / with-estimates, plus `browse_stats_properties`'
     `property_ids_filter` (migration 378) so the Stats tab can never disagree with the list. The
     scope reads its membership through the SAME `fetchPipelineMembers` the funnels render from —
-    one definition of "in my pipeline". It is surfaced as a chip in the preset row but is **not a
-    preset**: `PRESET_EXCLUDED_KEYS` keeps it out of what a preset stores and out of the dirty
-    comparison, so toggling it never offers "Update preset" and it survives loading one. A
+    one definition of "in my pipeline". It is surfaced as a chip in the preset row, and it behaves like the
+    other chips in that row: clicking it **loads a VIEW** — the scope over a NEUTRAL cohort
+    (`pipelineViewFilters`: no category, no deal type, no price/area/location), with any active
+    preset deselected, in ONE atomic write (`browseState.loadPipelineView`; two writes against
+    one searchParams snapshot clobber each other, and a preset left active over replaced filters
+    reads as dirty and pops "Update preset"). It shipped as a modifier that AND'd itself onto
+    whatever was set, which was wrong: Browse's default cohort is `byt` + `pronajem`, so "show me
+    my pipeline" showed 1 of 45 deals — every sale flat, house and commercial unit hidden by a
+    default the operator never chose for that purpose. `status` deliberately stays `any` so a
+    deal whose listing was delisted mid-negotiation does not vanish; Back undoes the load
+    (the write is pushed, not replaced). Turning the chip OFF is a plain filter edit that keeps
+    the cohort the operator has since built, and the MODIFIER semantics still exist in the
+    sidebar's Curation → Pipeline control (compose with current filters, pick stages). It is
+    still **not a preset**: `PRESET_EXCLUDED_KEYS` keeps it out of what a preset stores and out
+    of the dirty comparison, so it never offers "Update preset" and it survives loading one. A
     watchdog can't use it (`UNSUPPORTED_LABELS`) — the operator's own state can't be a trigger. The
     extension bookmarks AND changes stage property-grain like every other surface: it reads
     `property_id` + membership (incl. `stage_id`) off the batched `POST /listings/lookup` (and

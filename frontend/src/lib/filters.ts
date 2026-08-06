@@ -151,8 +151,13 @@ export interface ListingFilters {
   /* Multi-select (Browse + Watchdog): a property matches if its category_main
    * is in the list. Default ['byt']; empty [] = no category constraint. */
   categoryMain: CategoryMain[];
-  /* Single-select deal type (rent / sale / auction / fractional). */
-  categoryType: CategoryType;
+  /* Deal type (rent / sale / auction / fractional). NULL = no deal-type
+   * constraint — the "Vše" pill. Nullable because every backend consumer
+   * already treats a missing category_type that way (comparables, the watchdog
+   * matcher, browse_stats_properties all guard the clause), and because a
+   * cohort like "everything in my pipeline" spans rent AND sale. The default
+   * stays `pronajem`, so an empty URL is unchanged. */
+  categoryType: CategoryType | null;
   districts: DistrictChip[];
   dispositions: Disposition[];
   priceMin: number | null;
@@ -553,7 +558,11 @@ export const fromSearchParams = (sp: URLSearchParams): ListingFilters => {
       ? [...DEFAULT_CATEGORY_MAIN]
       : splitCsv(sp.get('cat')).filter((c): c is CategoryMain =>
           (CATEGORY_MAIN_VALUES as ReadonlyArray<string>).includes(c)),
-    categoryType: enumOr(sp.get('deal'), CATEGORY_TYPE_VALUES, 'pronajem'),
+    /* `deal=any` is the explicit "no constraint" state; an ABSENT param keeps
+     * meaning the default (`pronajem`), so a bare /browse URL is untouched. */
+    categoryType: sp.get('deal') === ANY_DEAL_TYPE
+      ? null
+      : enumOr(sp.get('deal'), CATEGORY_TYPE_VALUES, 'pronajem'),
     districts: parseDistrictChips(
       sp.get('districts'),
       sp.get('districts_ctx'),
@@ -806,7 +815,8 @@ export const toSearchParams = (f: ListingFilters): URLSearchParams => {
   if (!(f.categoryMain.length === 1 && f.categoryMain[0] === 'byt')) {
     sp.set('cat', f.categoryMain.join(','));
   }
-  if (f.categoryType !== 'pronajem') sp.set('deal', f.categoryType);
+  if (f.categoryType == null) sp.set('deal', ANY_DEAL_TYPE);
+  else if (f.categoryType !== 'pronajem') sp.set('deal', f.categoryType);
   for (const [k, v] of Object.entries(districtChipsToCsvParams(f.districts))) {
     sp.set(k, v);
   }
@@ -928,6 +938,10 @@ const categoryMainLabel = (cats: ReadonlyArray<CategoryMain>): string =>
     ? 'listings'
     : cats.map((c) => CATEGORY_MAIN_PLURAL[c]).join(' / ');
 
+/* URL token for "no deal-type constraint". Spelled the same as the pipeline
+ * scope's `any` so the two read as one vocabulary. */
+export const ANY_DEAL_TYPE = 'any';
+
 const CATEGORY_TYPE_LABEL: Record<CategoryType, string> = {
   pronajem: 'for rent',
   prodej: 'for sale',
@@ -935,8 +949,15 @@ const CATEGORY_TYPE_LABEL: Record<CategoryType, string> = {
   podil: 'fractional',
 };
 
+/* "for sale" / "for rent" / … — empty when no deal type is constrained, so the
+ * caller's sentence reads "12 apartments" rather than "12 apartments for null". */
+export const categoryTypeLabel = (t: CategoryType | null): string =>
+  t == null ? '' : CATEGORY_TYPE_LABEL[t];
+
 export const categoryHeading = (f: ListingFilters): string =>
-  `${categoryMainLabel(f.categoryMain)} ${CATEGORY_TYPE_LABEL[f.categoryType]}`;
+  [categoryMainLabel(f.categoryMain), categoryTypeLabel(f.categoryType)]
+    .filter(Boolean)
+    .join(' ');
 
 /* Stable, order-independent serialization of the cohort-defining filters.
  * Reuses the canonical URL serializer (toSearchParams) and sorts the
@@ -985,7 +1006,8 @@ export const summarise = (
   const countStr =
     count == null ? '…' : `${approx ? '~' : ''}${count.toLocaleString('cs-CZ')}`;
   bits.push(`${countStr} ${categoryMainLabel(f.categoryMain)}`);
-  bits.push(CATEGORY_TYPE_LABEL[f.categoryType]);
+  const dealLabel = categoryTypeLabel(f.categoryType);
+  if (dealLabel) bits.push(dealLabel);
   if (f.districts.length) {
     const shown = f.districts
       .slice(0, 3)
@@ -1020,7 +1042,7 @@ export const summarise = (
  * Create-watchdog dialog. */
 export const watchdogNameSuggestion = (f: ListingFilters): string => {
   const parts: string[] = [
-    `${f.categoryMain.join('+') || 'vše'} ${f.categoryType}`,
+    `${f.categoryMain.join('+') || 'vše'} ${f.categoryType ?? 'vše'}`,
   ];
   if (f.dispositions.length) {
     parts.push(
@@ -1117,6 +1139,32 @@ export interface PresetSpec {
   filters: ListingFilters;
   sort?: string | null;
 }
+
+/* The Pipeline lens as a COMPLETE view, not a modifier.
+ *
+ * The chip lives in the preset row, and every other chip in that row REPLACES
+ * the filter set. Ours ANDed itself onto whatever was set instead — and Browse's
+ * default cohort is already narrow (byt + pronájem), so "show me my pipeline"
+ * showed 1 of 45 deals: the sale flats, the houses and the commercial units were
+ * all filtered out by defaults the operator never chose for this purpose.
+ *
+ * So loading the lens loads a NEUTRAL cohort: no category, no deal type, no
+ * price/area/location narrowing — every deal on the board, whatever it is. The
+ * operator then narrows from there (Byty, Prodej, a district …) and the count
+ * moves, which is the "still use the other filters" half of the ask.
+ *
+ * `status` deliberately stays at its default `any`: a deal whose listing was
+ * delisted mid-negotiation must not vanish from the pipeline view.
+ *
+ * The modifier semantics are still available — the sidebar's Curation → Pipeline
+ * control ANDs the scope onto the current filters without resetting anything.
+ * Chip = view, sidebar control = modifier, exactly like preset chip vs sidebar. */
+export const pipelineViewFilters = (): ListingFilters => ({
+  ...DEFAULT_FILTERS,
+  categoryMain: [],
+  categoryType: null,
+  pipeline: { stage_ids: [] },
+});
 
 /* Filter fields that ride ALONGSIDE a preset rather than inside it: they are
  * reset before persisting and ignored when deciding whether a loaded preset is

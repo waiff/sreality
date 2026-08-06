@@ -19,6 +19,7 @@ import {
   DEFAULT_FILTERS,
   bboxAround,
   fromSearchParams,
+  pipelineViewFilters,
   readPresetSpec,
   toSearchParams,
   type ListingFilters,
@@ -70,6 +71,14 @@ export interface BrowseViewState {
   setOverlay: (patch: Partial<MapOverlayState>) => void;
   setActivePresetId: (id: string | null) => void;
   loadPreset: (p: FilterPreset) => void;
+  /* Load the built-in Pipeline view: the deal-pipeline scope over a NEUTRAL
+   * cohort, with any active preset deselected. One action rather than
+   * setFilters + setActivePresetId, because in the URL adapter those are two
+   * writes against the same searchParams snapshot — the second would clobber
+   * the first. Deselecting matters beyond tidiness: leaving a preset marked
+   * active after replacing its filters would render it dirty and pop the
+   * "Update preset" button, which this chip must never do. */
+  loadPipelineView: () => void;
 }
 
 const OVERLAY_URL_KEYS = ['tab', 'sort', 'cities', 'colorby', 'rentmap', 'rentvk', 'kraje', 'preset'];
@@ -177,9 +186,19 @@ export function useUrlBrowseState(): BrowseViewState {
     [preserveExtras, setSearchParams],
   );
 
+  const loadPipelineView = useCallback(() => {
+    // Same shape as loadPreset: one write, filters + preset id together. Pushed
+    // (not replaced) so Back returns the operator to the view they came from —
+    // that is the undo for "it wiped my filters".
+    const sp = preserveExtras(toSearchParams(pipelineViewFilters()));
+    sp.delete('preset');
+    setSearchParams(sp, { replace: false });
+  }, [preserveExtras, setSearchParams]);
+
   return {
     filters, sort, tab, overlay, activePresetId,
     setFilters, setBounds, setSort, setTab, setOverlay, setActivePresetId, loadPreset,
+    loadPipelineView,
   };
 }
 
@@ -211,6 +230,10 @@ export function useMemoryBrowseState(init: {
         const { filters: pf, sort: ps } = readPresetSpec(p.filter_spec);
         setFiltersState(pf);
         if (ps) setSortState(parseSort(ps));
+      },
+      loadPipelineView: () => {
+        setFiltersState(pipelineViewFilters());
+        setActivePresetId(null);
       },
     }),
     [filters, sort, tab, overlay, activePresetId],

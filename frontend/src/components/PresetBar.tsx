@@ -68,9 +68,11 @@ export interface PresetBarProps {
   activePresetId: string | null;
   onLoad: (preset: FilterPreset) => void;
   onActivePresetIdChange: (id: string | null) => void;
-  /* Used by the Pipeline scope chip, which writes a filter field rather than
-   * loading a preset. */
+  /* The Pipeline chip turning OFF is a plain filter edit… */
   onFiltersChange: (next: ListingFilters) => void;
+  /* …turning ON loads a whole view (neutral cohort + scope, preset deselected)
+   * — one atomic write, see browseState.loadPipelineView. */
+  onLoadPipelineView: () => void;
 }
 
 type ModalState =
@@ -90,6 +92,7 @@ export default function PresetBar({
   onLoad,
   onActivePresetIdChange,
   onFiltersChange,
+  onLoadPipelineView,
 }: PresetBarProps) {
   const enabled = isApiConfigured();
   const qc = useQueryClient();
@@ -238,7 +241,11 @@ export default function PresetBar({
         * filter field, it is never dirty, and it composes with whichever preset
         * is loaded (see PRESET_EXCLUDED_KEYS) — so it renders even when the
         * preset service isn't configured and the saved chips below are gone. */}
-      <PipelineScopeChip filters={filters} onFiltersChange={onFiltersChange} />
+      <PipelineScopeChip
+        filters={filters}
+        onFiltersChange={onFiltersChange}
+        onLoadView={onLoadPipelineView}
+      />
 
       {enabled && presets.length === 0 && !presetsQ.isLoading ? (
         <span className="text-[0.75rem] text-[var(--color-ink-4)]">
@@ -338,26 +345,33 @@ export default function PresetBar({
   );
 }
 
-/* The Pipeline scope chip — the deal-pipeline lens over whatever cohort the
- * other filters describe (rule #22).
+/* The Pipeline chip — "show me my deals" (rule #22).
  *
- * It sits in the preset row because that is where the operator reaches for
- * "show me a different slice", but it is deliberately NOT a preset:
- *   * it writes one filter field (`pipeline`) instead of replacing the filter set,
- *   * it stays on when a preset is loaded, and narrowing by byt / dům / price
- *     keeps working normally on top of it,
- *   * it never marks a preset dirty, so "Update preset" does not appear — a
- *     preset describes market criteria, not which deals the operator is working
- *     (see PRESET_EXCLUDED_KEYS in lib/filters.ts).
+ * It is a VIEW, like every other chip in this row: clicking it loads the
+ * pipeline over a NEUTRAL cohort (see pipelineViewFilters) instead of ANDing
+ * itself onto the filters that happen to be set. It shipped as a modifier and
+ * that was wrong: Browse's default cohort is byt + pronájem, so the chip showed
+ * 1 of 45 deals — every sale flat, house and commercial unit on the board was
+ * hidden by a default the operator never chose for this purpose.
  *
- * Per-stage narrowing lives in the sidebar (Curation → Pipeline); this chip is
- * the coarse on/off, and clicking it off clears any stage selection with it. */
+ * It is still NOT a preset:
+ *   * nothing is saved, and there is nothing to update;
+ *   * `pipeline` is outside preset identity (PRESET_EXCLUDED_KEYS), so it never
+ *     marks a loaded preset dirty and never pops "Update preset";
+ *   * loading it deselects the active preset — you have left that view.
+ *
+ * Turning it OFF is just a filter edit (drop the scope, keep the cohort the
+ * operator has since built). Back undoes the load. Per-stage narrowing and the
+ * compose-with-current-filters behaviour live in the sidebar's Curation →
+ * Pipeline control. */
 function PipelineScopeChip({
   filters,
   onFiltersChange,
+  onLoadView,
 }: {
   filters: ListingFilters;
   onFiltersChange: (next: ListingFilters) => void;
+  onLoadView: () => void;
 }) {
   const scope = filters.pipeline;
   const on = scope != null;
@@ -366,14 +380,12 @@ function PipelineScopeChip({
   return (
     <button
       type="button"
-      onClick={() =>
-        onFiltersChange({ ...filters, pipeline: on ? null : { stage_ids: [] } })
-      }
+      onClick={() => (on ? onFiltersChange({ ...filters, pipeline: null }) : onLoadView())}
       aria-pressed={on}
       title={
         on
           ? 'Zobrazují se jen nemovitosti v pipeline — kliknutím zrušíte'
-          : 'Zobrazit jen nemovitosti v pipeline'
+          : 'Zobrazit celou pipeline (zruší ostatní filtry; Zpět je vrátí)'
       }
       className={[
         chipBase,
