@@ -1,5 +1,22 @@
 -- 375_home_city_precompute.sql
 --
+-- NOTE ON SCOPE: live `browse_projection` currently ALSO carries two columns
+-- this migration does not touch -- `all_sources`/`active_sources`
+-- (`properties.all_sources`/`active_sources text[]`) -- applied directly to
+-- prod via the Supabase MCP by an in-flight, not-yet-merged-to-main branch
+-- (`.claude/worktrees/portal-arrays/migrations/371_property_source_arrays.sql`
+-- at investigation time), with NO corresponding migration file on any
+-- branch that has reached `main`. That is undocumented prod/repo schema
+-- drift, pre-existing and unrelated to this fix -- flagged to the operator
+-- separately, not silently worked around here. This migration's own
+-- `browse_projection` CREATE OR REPLACE deliberately does NOT reproduce
+-- those two columns, so a fresh CI schema-replay (which only has committed
+-- migrations, hence never has them) applies cleanly; the columns already
+-- live on prod are untouched by this file (Supabase's migration-history
+-- tracking never re-runs an already-applied migration, so this file being
+-- "narrower" than what actually ran live is inert in practice -- same
+-- precedent as migration 363's own renumbering note below).
+--
 -- Migration 374 fixed listings_with_city_quality's RLS lockout (BUG1) by
 -- repointing FROM listings -> FROM browse_list, which is correct but
 -- exposed a SECOND, pre-existing defect: evaluating ST_Covers(admin
@@ -306,13 +323,6 @@ select
     asset_id,
     repr_listing_ref_id as listing_id,
     (select l.source_id_native from listings l where l.id = p.repr_listing_ref_id) as source_id_native,
-    -- all_sources/active_sources: live on browse_projection already (an
-    -- in-flight, not-yet-merged-to-main branch applied them directly via
-    -- MCP -- CREATE OR REPLACE VIEW is append-only, so they must be
-    -- reproduced here or Postgres reads this as dropping them). Orthogonal
-    -- to this migration; reproduced verbatim from the live view definition.
-    all_sources,
-    active_sources,
     home_city_id
 from properties p
 where status = 'active'::text
