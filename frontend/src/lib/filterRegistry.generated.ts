@@ -64,6 +64,10 @@ export interface FilterDef {
   unit: string | null;
   enum_values: EnumOption[] | null;
   aliases: string[];
+  /** NULL is a legal "no constraint" value, and the UI must offer a way to
+   *  reach it (an explicit "all" pill) — see FilterDef.nullable in
+   *  toolkit/filter_registry.py. */
+  nullable: boolean;
 }
 
 export interface FilterRegistryPayload {
@@ -123,7 +127,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "constraints": null,
       "unit": null,
       "enum_values": null,
-      "aliases": []
+      "aliases": [],
+      "nullable": false
     },
     {
       "id": "districts",
@@ -140,7 +145,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "constraints": null,
       "unit": null,
       "enum_values": null,
-      "aliases": []
+      "aliases": [],
+      "nullable": false
     },
     {
       "id": "radius_m",
@@ -163,7 +169,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       },
       "unit": "m",
       "enum_values": null,
-      "aliases": []
+      "aliases": [],
+      "nullable": false
     },
     {
       "id": "area_band_pct",
@@ -186,7 +193,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       },
       "unit": "%",
       "enum_values": null,
-      "aliases": []
+      "aliases": [],
+      "nullable": false
     },
     {
       "id": "disposition_match",
@@ -227,7 +235,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
           "label_en": "Any"
         }
       ],
-      "aliases": []
+      "aliases": [],
+      "nullable": false
     },
     {
       "id": "floor_band",
@@ -248,7 +257,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       },
       "unit": null,
       "enum_values": null,
-      "aliases": []
+      "aliases": [],
+      "nullable": false
     },
     {
       "id": "max_age_days",
@@ -271,7 +281,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       },
       "unit": "days",
       "enum_values": null,
-      "aliases": []
+      "aliases": [],
+      "nullable": false
     },
     {
       "id": "lifecycle",
@@ -312,7 +323,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
           "label_en": "All"
         }
       ],
-      "aliases": []
+      "aliases": [],
+      "nullable": false
     },
     {
       "id": "status",
@@ -350,7 +362,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
           "label_en": "Inactive"
         }
       ],
-      "aliases": []
+      "aliases": [],
+      "nullable": false
     },
     {
       "id": "recently_added_days",
@@ -400,7 +413,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
           "label_en": "Last month"
         }
       ],
-      "aliases": []
+      "aliases": [],
+      "nullable": false
     },
     {
       "id": "recently_changed_days",
@@ -450,7 +464,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
           "label_en": "Last month"
         }
       ],
-      "aliases": []
+      "aliases": [],
+      "nullable": false
     },
     {
       "id": "tom_days_min",
@@ -470,7 +485,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       },
       "unit": "days",
       "enum_values": null,
-      "aliases": []
+      "aliases": [],
+      "nullable": false
     },
     {
       "id": "tom_days_max",
@@ -490,7 +506,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       },
       "unit": "days",
       "enum_values": null,
-      "aliases": []
+      "aliases": [],
+      "nullable": false
     },
     {
       "id": "last_seen_min_days",
@@ -510,7 +527,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       },
       "unit": "days",
       "enum_values": null,
-      "aliases": []
+      "aliases": [],
+      "nullable": false
     },
     {
       "id": "last_seen_max_days",
@@ -530,7 +548,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       },
       "unit": "days",
       "enum_values": null,
-      "aliases": []
+      "aliases": [],
+      "nullable": false
     },
     {
       "id": "first_seen_min_days",
@@ -550,7 +569,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       },
       "unit": "days",
       "enum_values": null,
-      "aliases": []
+      "aliases": [],
+      "nullable": false
     },
     {
       "id": "first_seen_max_days",
@@ -570,7 +590,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       },
       "unit": "days",
       "enum_values": null,
-      "aliases": []
+      "aliases": [],
+      "nullable": false
     },
     {
       "id": "category_main",
@@ -624,7 +645,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
           "label_en": "Other"
         }
       ],
-      "aliases": []
+      "aliases": [],
+      "nullable": false
     },
     {
       "id": "category_main_in",
@@ -667,14 +689,15 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
           "label_en": "Other"
         }
       ],
-      "aliases": []
+      "aliases": [],
+      "nullable": false
     },
     {
       "id": "category_type",
       "type": "string",
       "pg_column": "category_type",
       "default": "pronajem",
-      "description": "Deal type. `pronajem` = for rent, `prodej` = for sale, `drazba` = auction, `podil` = fractional ownership. Default depends on context: estimation flows use the estimate_kind to pick (rent → pronajem, sale → prodej).",
+      "description": "Deal type. `pronajem` = for rent, `prodej` = for sale, `drazba` = auction, `podil` = fractional ownership. NULL = no deal-type constraint (Browse's 'Vše' pill); every consumer already treats it that way — comparables, the watchdog matcher and browse_stats_properties all guard the clause with an `is not null` check. Default depends on context: estimation flows use the estimate_kind to pick (rent → pronajem, sale → prodej) and must never send NULL, which would mix rent and sale comparables in one valuation.",
       "category": "Property",
       "ui_control": "pill_group",
       "agendas": [
@@ -717,7 +740,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
           "label_en": "Fractional"
         }
       ],
-      "aliases": []
+      "aliases": [],
+      "nullable": true
     },
     {
       "id": "category_sub_cb",
@@ -739,7 +763,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "constraints": null,
       "unit": null,
       "enum_values": null,
-      "aliases": []
+      "aliases": [],
+      "nullable": false
     },
     {
       "id": "dispositions",
@@ -807,7 +832,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
           "label_en": "5+1"
         }
       ],
-      "aliases": []
+      "aliases": [],
+      "nullable": false
     },
     {
       "id": "subtype",
@@ -945,7 +971,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
           "group": "komercni"
         }
       ],
-      "aliases": []
+      "aliases": [],
+      "nullable": false
     },
     {
       "id": "portals",
@@ -1008,7 +1035,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
           "label_en": "RE/MAX"
         }
       ],
-      "aliases": []
+      "aliases": [],
+      "nullable": false
     },
     {
       "id": "condition_match",
@@ -1061,7 +1089,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
           "label_en": "For demolition"
         }
       ],
-      "aliases": []
+      "aliases": [],
+      "nullable": false
     },
     {
       "id": "building_type_match",
@@ -1120,7 +1149,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
           "label_en": "Low-energy"
         }
       ],
-      "aliases": []
+      "aliases": [],
+      "nullable": false
     },
     {
       "id": "building_material",
@@ -1158,7 +1188,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
           "label_en": "Other"
         }
       ],
-      "aliases": []
+      "aliases": [],
+      "nullable": false
     },
     {
       "id": "energy_rating_match",
@@ -1212,7 +1243,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
           "label_en": "G"
         }
       ],
-      "aliases": []
+      "aliases": [],
+      "nullable": false
     },
     {
       "id": "building_condition_level_min",
@@ -1239,7 +1271,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "enum_values": null,
       "aliases": [
         "buildingConditionLevelMin"
-      ]
+      ],
+      "nullable": false
     },
     {
       "id": "apartment_condition_level_min",
@@ -1266,7 +1299,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "enum_values": null,
       "aliases": [
         "apartmentConditionLevelMin"
-      ]
+      ],
+      "nullable": false
     },
     {
       "id": "building_condition_level_max",
@@ -1293,7 +1327,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "enum_values": null,
       "aliases": [
         "buildingConditionLevelMax"
-      ]
+      ],
+      "nullable": false
     },
     {
       "id": "apartment_condition_level_max",
@@ -1320,7 +1355,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "enum_values": null,
       "aliases": [
         "apartmentConditionLevelMax"
-      ]
+      ],
+      "nullable": false
     },
     {
       "id": "furnished",
@@ -1363,7 +1399,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
           "label_en": "Unknown / not specified"
         }
       ],
-      "aliases": []
+      "aliases": [],
+      "nullable": false
     },
     {
       "id": "ownership",
@@ -1406,7 +1443,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
           "label_en": "Unknown / not specified"
         }
       ],
-      "aliases": []
+      "aliases": [],
+      "nullable": false
     },
     {
       "id": "has_balcony",
@@ -1430,7 +1468,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "enum_values": null,
       "aliases": [
         "balcony"
-      ]
+      ],
+      "nullable": false
     },
     {
       "id": "has_lift",
@@ -1454,7 +1493,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "enum_values": null,
       "aliases": [
         "lift"
-      ]
+      ],
+      "nullable": false
     },
     {
       "id": "has_parking",
@@ -1478,7 +1518,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "enum_values": null,
       "aliases": [
         "parking"
-      ]
+      ],
+      "nullable": false
     },
     {
       "id": "terrace",
@@ -1500,7 +1541,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "constraints": null,
       "unit": null,
       "enum_values": null,
-      "aliases": []
+      "aliases": [],
+      "nullable": false
     },
     {
       "id": "cellar",
@@ -1522,7 +1564,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "constraints": null,
       "unit": null,
       "enum_values": null,
-      "aliases": []
+      "aliases": [],
+      "nullable": false
     },
     {
       "id": "garage",
@@ -1544,7 +1587,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "constraints": null,
       "unit": null,
       "enum_values": null,
-      "aliases": []
+      "aliases": [],
+      "nullable": false
     },
     {
       "id": "min_parking_lots",
@@ -1571,7 +1615,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "aliases": [
         "parking_lots_min",
         "parkingLotsMin"
-      ]
+      ],
+      "nullable": false
     },
     {
       "id": "min_price_czk",
@@ -1600,7 +1645,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "aliases": [
         "price_min",
         "priceMin"
-      ]
+      ],
+      "nullable": false
     },
     {
       "id": "max_price_czk",
@@ -1629,7 +1675,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "aliases": [
         "price_max",
         "priceMax"
-      ]
+      ],
+      "nullable": false
     },
     {
       "id": "include_no_price",
@@ -1648,7 +1695,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "enum_values": null,
       "aliases": [
         "includeNoPrice"
-      ]
+      ],
+      "nullable": false
     },
     {
       "id": "min_price_per_m2",
@@ -1677,7 +1725,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "aliases": [
         "price_per_m2_min",
         "pricePerM2Min"
-      ]
+      ],
+      "nullable": false
     },
     {
       "id": "max_price_per_m2",
@@ -1706,7 +1755,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "aliases": [
         "price_per_m2_max",
         "pricePerM2Max"
-      ]
+      ],
+      "nullable": false
     },
     {
       "id": "min_mf_gross_yield_pct",
@@ -1730,7 +1780,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "aliases": [
         "mf_gross_yield_pct_min",
         "mfGrossYieldPctMin"
-      ]
+      ],
+      "nullable": false
     },
     {
       "id": "max_mf_gross_yield_pct",
@@ -1754,7 +1805,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "aliases": [
         "mf_gross_yield_pct_max",
         "mfGrossYieldPctMax"
-      ]
+      ],
+      "nullable": false
     },
     {
       "id": "min_area_m2",
@@ -1778,7 +1830,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "aliases": [
         "area_min",
         "areaMin"
-      ]
+      ],
+      "nullable": false
     },
     {
       "id": "max_area_m2",
@@ -1802,7 +1855,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "aliases": [
         "area_max",
         "areaMax"
-      ]
+      ],
+      "nullable": false
     },
     {
       "id": "min_estate_area",
@@ -1830,7 +1884,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "enum_values": null,
       "aliases": [
         "estate_min"
-      ]
+      ],
+      "nullable": false
     },
     {
       "id": "max_estate_area",
@@ -1858,7 +1913,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "enum_values": null,
       "aliases": [
         "estate_max"
-      ]
+      ],
+      "nullable": false
     },
     {
       "id": "min_usable_area",
@@ -1886,7 +1942,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "enum_values": null,
       "aliases": [
         "usable_min"
-      ]
+      ],
+      "nullable": false
     },
     {
       "id": "max_usable_area",
@@ -1914,7 +1971,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "enum_values": null,
       "aliases": [
         "usable_max"
-      ]
+      ],
+      "nullable": false
     },
     {
       "id": "min_garden_area",
@@ -1940,7 +1998,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       },
       "unit": "m²",
       "enum_values": null,
-      "aliases": []
+      "aliases": [],
+      "nullable": false
     },
     {
       "id": "max_garden_area",
@@ -1966,7 +2025,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       },
       "unit": "m²",
       "enum_values": null,
-      "aliases": []
+      "aliases": [],
+      "nullable": false
     },
     {
       "id": "locality_district_id",
@@ -1985,7 +2045,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "constraints": null,
       "unit": null,
       "enum_values": null,
-      "aliases": []
+      "aliases": [],
+      "nullable": false
     },
     {
       "id": "locality_region_id",
@@ -2004,7 +2065,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "constraints": null,
       "unit": null,
       "enum_values": null,
-      "aliases": []
+      "aliases": [],
+      "nullable": false
     },
     {
       "id": "tags",
@@ -2021,7 +2083,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "constraints": null,
       "unit": null,
       "enum_values": null,
-      "aliases": []
+      "aliases": [],
+      "nullable": false
     },
     {
       "id": "pipeline",
@@ -2037,7 +2100,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "constraints": null,
       "unit": null,
       "enum_values": null,
-      "aliases": []
+      "aliases": [],
+      "nullable": false
     },
     {
       "id": "with_estimates",
@@ -2055,7 +2119,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "enum_values": null,
       "aliases": [
         "withEstimates"
-      ]
+      ],
+      "nullable": false
     },
     {
       "id": "city_index_rules",
@@ -2072,7 +2137,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "constraints": null,
       "unit": null,
       "enum_values": null,
-      "aliases": []
+      "aliases": [],
+      "nullable": false
     },
     {
       "id": "min_city_population",
@@ -2095,7 +2161,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "enum_values": null,
       "aliases": [
         "minCityPopulation"
-      ]
+      ],
+      "nullable": false
     },
     {
       "id": "max_city_population",
@@ -2118,7 +2185,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "enum_values": null,
       "aliases": [
         "maxCityPopulation"
-      ]
+      ],
+      "nullable": false
     },
     {
       "id": "near_city_proximity",
@@ -2135,7 +2203,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "constraints": null,
       "unit": null,
       "enum_values": null,
-      "aliases": []
+      "aliases": [],
+      "nullable": false
     },
     {
       "id": "near_pop_5km_min",
@@ -2158,7 +2227,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "enum_values": null,
       "aliases": [
         "nearPop5kmMin"
-      ]
+      ],
+      "nullable": false
     },
     {
       "id": "near_pop_15km_min",
@@ -2181,7 +2251,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "enum_values": null,
       "aliases": [
         "nearPop15kmMin"
-      ]
+      ],
+      "nullable": false
     },
     {
       "id": "near_jobs_5km_min",
@@ -2204,7 +2275,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "enum_values": null,
       "aliases": [
         "nearJobs5kmMin"
-      ]
+      ],
+      "nullable": false
     },
     {
       "id": "near_jobs_15km_min",
@@ -2227,7 +2299,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "enum_values": null,
       "aliases": [
         "nearJobs15kmMin"
-      ]
+      ],
+      "nullable": false
     },
     {
       "id": "near_youth_5km_min",
@@ -2250,7 +2323,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "enum_values": null,
       "aliases": [
         "nearYouth5kmMin"
-      ]
+      ],
+      "nullable": false
     },
     {
       "id": "near_youth_15km_min",
@@ -2273,7 +2347,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "enum_values": null,
       "aliases": [
         "nearYouth15kmMin"
-      ]
+      ],
+      "nullable": false
     },
     {
       "id": "near_overall_5km_min",
@@ -2296,7 +2371,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "enum_values": null,
       "aliases": [
         "nearOverall5kmMin"
-      ]
+      ],
+      "nullable": false
     },
     {
       "id": "near_overall_15km_min",
@@ -2319,7 +2395,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "enum_values": null,
       "aliases": [
         "nearOverall15kmMin"
-      ]
+      ],
+      "nullable": false
     },
     {
       "id": "price_change_count_min",
@@ -2340,7 +2417,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "enum_values": null,
       "aliases": [
         "priceChangeCountMin"
-      ]
+      ],
+      "nullable": false
     },
     {
       "id": "price_change_window_days",
@@ -2381,7 +2459,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       ],
       "aliases": [
         "priceChangeWindowDays"
-      ]
+      ],
+      "nullable": false
     },
     {
       "id": "total_price_change_pct",
@@ -2400,7 +2479,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "enum_values": null,
       "aliases": [
         "totalPriceChangePct"
-      ]
+      ],
+      "nullable": false
     },
     {
       "id": "include_unreliable",
@@ -2418,7 +2498,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "constraints": null,
       "unit": null,
       "enum_values": null,
-      "aliases": []
+      "aliases": [],
+      "nullable": false
     }
   ]
 };

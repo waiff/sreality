@@ -18,6 +18,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   DEFAULT_FILTERS,
+  pipelineViewFilters,
   applyRegistryUpdate,
   applyRegistryUpdates,
   filtersEqualForPreset,
@@ -29,6 +30,7 @@ import {
   type ListingFilters,
   type MapBounds,
   listingFiltersToRegistryView,
+  summarise,
   toSearchParams,
   watchdogNameSuggestion,
 } from './filters';
@@ -288,6 +290,57 @@ describe('URL round-trip', () => {
     const sp = toSearchParams(f);
     expect(sp.has('districts_lvl')).toBe(false);
     expect(sp.has('districts_id')).toBe(false);
+  });
+});
+
+/* The bug this fixes: the chip ANDed the pipeline onto Browse's DEFAULT cohort
+ * (byt + pronájem), so an operator with 45 deals — sale flats, houses,
+ * commercial — saw 1. The lens has to load a neutral cohort, not narrow one. */
+describe('pipelineViewFilters', () => {
+  it('constrains nothing except the pipeline itself', () => {
+    const f = pipelineViewFilters();
+    expect(f.pipeline).toEqual({ stage_ids: [] });
+    expect(f.categoryMain).toEqual([]);   // not ['byt']
+    expect(f.categoryType).toBeNull();    // not 'pronajem'
+    expect(f.districts).toEqual([]);
+    expect(f.priceMin).toBeNull();
+    expect(f.priceMax).toBeNull();
+    expect(f.areaMin).toBeNull();
+    expect(f.bounds).toBeNull();
+  });
+
+  it('keeps status "any" so a delisted deal stays visible', () => {
+    // A property whose listing went inactive mid-negotiation is exactly the one
+    // an operator needs to see on the board.
+    expect(pipelineViewFilters().status).toBe('any');
+  });
+
+  it('round-trips through the URL', () => {
+    const sp = toSearchParams(pipelineViewFilters());
+    expect(sp.get('pipeline')).toBe('any');
+    expect(sp.get('deal')).toBe('any');
+    expect(fromSearchParams(sp)).toEqual(pipelineViewFilters());
+  });
+});
+
+describe('nullable deal type', () => {
+  it('encodes "no deal-type constraint" as deal=any', () => {
+    const f: ListingFilters = { ...DEFAULT_FILTERS, categoryType: null };
+    expect(toSearchParams(f).get('deal')).toBe('any');
+    expect(fromSearchParams(toSearchParams(f)).categoryType).toBeNull();
+  });
+
+  it('keeps an ABSENT param meaning the pronajem default', () => {
+    // The empty URL must stay byte-identical to DEFAULT_FILTERS — a bare
+    // /browse link is unchanged by making the field nullable.
+    expect(fromSearchParams(new URLSearchParams()).categoryType).toBe('pronajem');
+    expect(toSearchParams(DEFAULT_FILTERS).has('deal')).toBe(false);
+  });
+
+  it('drops the deal phrase from the headline instead of printing null', () => {
+    const line = summarise({ ...DEFAULT_FILTERS, categoryType: null }, 12);
+    expect(line).not.toMatch(/null|undefined/);
+    expect(line).toMatch(/12/);
   });
 });
 

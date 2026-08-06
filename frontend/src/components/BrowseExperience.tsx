@@ -698,6 +698,7 @@ export default function BrowseExperience({
                 onLoad={view.loadPreset}
                 onActivePresetIdChange={view.setActivePresetId}
                 onFiltersChange={view.setFilters}
+                onLoadPipelineView={view.loadPipelineView}
               />
             </div>
           )}

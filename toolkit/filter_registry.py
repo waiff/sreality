@@ -133,6 +133,15 @@ class FilterDef:
     unit: str | None = None
     enum_values: tuple[EnumOption, ...] | None = None
     aliases: tuple[str, ...] = ()
+    # True when NULL is a legal, meaningful value meaning "no constraint on this
+    # column" — not merely "unset, so fall back to the default". Only enum-ish
+    # controls need this: the UI has to offer an explicit way to reach that state
+    # (an "all" pill), and callers must not assume the default is always in force.
+    # It is deliberately NOT expressed as an extra `any` enum member: `any` would
+    # become a legal value in every agenda that shares the filter, including the
+    # estimation agent, where "any deal type" silently mixes rent and sale
+    # comparables into one valuation.
+    nullable: bool = False
 
 
 # --- enum value tables ----------------------------------------------------
@@ -753,11 +762,17 @@ def _build_registry() -> dict[str, FilterDef]:
             type=FilterType.STRING,
             pg_column="category_type",
             default="pronajem",
+            nullable=True,
             description=(
                 "Deal type. `pronajem` = for rent, `prodej` = for sale, "
                 "`drazba` = auction, `podil` = fractional ownership. "
-                "Default depends on context: estimation flows use the "
-                "estimate_kind to pick (rent → pronajem, sale → prodej)."
+                "NULL = no deal-type constraint (Browse's 'Vše' pill); every "
+                "consumer already treats it that way — comparables, the "
+                "watchdog matcher and browse_stats_properties all guard the "
+                "clause with an `is not null` check. Default depends on "
+                "context: estimation flows use the estimate_kind to pick "
+                "(rent → pronajem, sale → prodej) and must never send NULL, "
+                "which would mix rent and sale comparables in one valuation."
             ),
             category=CATEGORY_PROPERTY,
             ui_control=UiControl.PILL_GROUP,
@@ -1849,6 +1864,7 @@ def _filter_to_json(f: FilterDef) -> dict[str, Any]:
             if f.enum_values else None
         ),
         "aliases": list(f.aliases) if f.aliases else [],
+        "nullable": f.nullable,
     }
 
 
