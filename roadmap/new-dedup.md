@@ -49,8 +49,15 @@ W1 (shared prerequisites + labeling program):
       review/tune every decided default ahead of any wave consuming it.
 - [ ] Dashboard skeleton (funnel + cost table) — still just PR-2's placeholder; genuinely no data
       to show until W2+ produces candidates/decisions. Revisit once W2 lands.
-- [ ] Labeling page (ClipAudit clone minus dedup block + sample management) — picked up by a
-      parallel session.
+- [x] Labeling page — `dedup_sim.taxonomy_labels`/`labeling_sample`/`label_proposals` (migration
+      373), `toolkit/dedup_sim_labeling.py`, `/new-dedup/labeling/*` API, and
+      `frontend/src/pages/NewDedupLabeling.tsx`: Taxonomy v1 add/rename/remove, sample grow,
+      proposal review (single + batch confirm/dismiss) with a new-vs-original tag toggle.
+      Secondary-CLIP scoring (`scraper/label_proposal_tagger.py` +
+      `scripts/label_proposal_backfill.py`, dispatch-only GH Actions workflow) is separate infra
+      from the DINOv2/RunPod embeddings path below — a stronger CLIP checkpoint, CPU, no RunPod
+      dependency. Operator still needs to run several labeling rounds to reach Gate 1 (150
+      confirmed images/tag) — the tool is built, the labeling itself is ongoing curation work.
 - [x] RunPod client (`scripts/runpod_client.py`, #972/#975/#977) — launch/poll/terminate an
       on-demand pod, live cheapest-GPU catalog lookup, capacity fallback. Guaranteed teardown
       verified across 4 real live dispatches (3 zero-cost, 1 real ~1.7¢ pod rental).

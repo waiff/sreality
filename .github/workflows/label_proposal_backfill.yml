@@ -1,0 +1,102 @@
+name: NEW DEDUP — Labeling secondary-CLIP proposals (sharded, dispatch-only)
+
+# Wave 1 (docs/design/new-dedup/PROGRAM.md): scores every image currently in
+# dedup_sim.labeling_sample against the operator's active Taxonomy v1 labels
+# (dedup_sim.taxonomy_labels) using the stronger secondary CLIP checkpoint
+# (dedup_sim_settings' labeling_secondary_model), writing one proposal row per
+# image into dedup_sim.label_proposals for review on the Labeling page.
+# Dispatch-only, not cron — the sample grows in bursts as the operator works
+# through the program, not continuously. No-op if R2 is unconfigured or the
+# taxonomy is still empty. Horizontally sharded (image_id %% 2), like the
+# production clip_tag.yml but smaller (this is a curated sample, not the
+# full corpus).
+#
+# Required secrets: SUPABASE_DB_URL + the R2_* set (same as clip_tag.yml).
+
+on:
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: Max images proposed per shard per run
+        required: false
+        default: "2000"
+        type: string
+      workers:
+        description: Parallel R2 downloads
+        required: false
+        default: "16"
+        type: string
+      dry_run:
+        description: Report the pending count and exit without tagging
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+concurrency:
+  group: label-proposal-backfill
+  cancel-in-progress: false
+
+jobs:
+  propose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1]
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+      HF_HUB_DOWNLOAD_TIMEOUT: "60"
+      # workflow_dispatch inputs are attacker-shapeable free text on the
+      # dispatch API even when the UI shows a dropdown (dry_run's `choice`
+      # type is a UI-only constraint) — pass them through env so bash sees
+      # them as data, never interpolated into the `run:` script text where
+      # a `"` in the value could break out of the ARGS string and execute
+      # arbitrary commands with every secret above in scope.
+      INPUT_LIMIT: ${{ inputs.limit || '2000' }}
+      INPUT_WORKERS: ${{ inputs.workers || '16' }}
+      INPUT_DRY_RUN: ${{ inputs.dry_run || 'false' }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      # Keyed generically (not per-model): labeling_secondary_model is an
+      # operator-tunable DB setting, not a build-time constant, so a model
+      # swap isn't visible to this workflow file at all. That means a swap
+      # does NOT get a fresh cache key here — the cache keeps serving the
+      # OLD model's weights (a hit), the new model downloads fresh every
+      # run, and (since actions/cache never overwrites an existing key) that
+      # fresh download never gets persisted back. Acceptable for now (CI
+      # time/bandwidth only, not correctness — from_pretrained still loads
+      # the right model, just not from cache); revisit if model swaps
+      # become routine enough for the repeated re-download to matter.
+      - name: Cache CLIP model (HuggingFace hub)
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-label-proposal-clip-v1
+
+      - name: Install (CPU torch + clip extra)
+        run: |
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -e ".[clip]"
+
+      - name: Propose labels (shard ${{ matrix.shard }}/2)
+        run: |
+          ARGS="--limit $INPUT_LIMIT --workers $INPUT_WORKERS --shard ${{ matrix.shard }} --shards 2"
+          if [ "$INPUT_DRY_RUN" = "true" ]; then ARGS="$ARGS --dry-run"; fi
+          python -m scripts.label_proposal_backfill $ARGS
