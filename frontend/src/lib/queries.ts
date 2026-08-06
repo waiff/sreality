@@ -101,10 +101,13 @@ const MAP_COLS = 'listing_id,property_id,sreality_id,source,source_id_native,lat
  * TableRow.property_id undefined at runtime while still typed `number`. */
 const TABLE_COLS =
   'listing_id,property_id,sreality_id,source,source_id_native,district,locality,obec,okres,street,disposition,subtype,area_m2,price_czk,first_seen_at,last_seen_at,is_active,tom_days,' +
-  'estate_area,usable_area,parking_lots,furnished,ownership,category_sub_cb,building_type';
+  'estate_area,usable_area,parking_lots,furnished,ownership,category_sub_cb,building_type,total_price_change_pct,price_change_count';
 const CARD_COLS =
   'listing_id,property_id,sreality_id,source,source_id_native,district,locality,obec,okres,street,disposition,subtype,area_m2,price_czk,first_seen_at,last_seen_at,is_active,tom_days,' +
-  'category_main,category_type,mf_gross_yield_pct';
+  /* The two price-history columns back <PriceDelta>. Both were already on
+   * browse_list (migrations 276/343/363) and simply never selected — they
+   * existed only as filter inputs, never as anything displayed. */
+  'category_main,category_type,mf_gross_yield_pct,total_price_change_pct,price_change_count';
 
 export type SortField =
   | 'sreality_id' | 'district' | 'disposition'
@@ -794,6 +797,10 @@ export interface TableRow {
   ownership: string | null;
   category_sub_cb: number | null;
   building_type: string | null;
+  /* Same price-movement pair the cards read — the table's Price column shows
+   * the delta beside the figure so the two lanes agree. */
+  total_price_change_pct: number | null;
+  price_change_count: number | null;
 }
 
 /* A page of the keyset-paginated infinite list (see lib/keyset.ts).
@@ -939,6 +946,11 @@ export interface CardRow {
   /* MF gross rental yield % (migration 133). Non-null only on sale
    * apartments that resolved to an MF territory. */
   mf_gross_yield_pct: number | null;
+  /* Signed percent across the representative listing's own price series, and
+   * the per-child change count. NULL pct = fewer than two observed prices,
+   * which <PriceDelta> renders as nothing rather than as "unchanged". */
+  total_price_change_pct: number | null;
+  price_change_count: number | null;
   /* Per-image render data (url + CLIP tag + confidence) in source-sequence
    * order. Empty when the listing has no photos yet. The card uses index 0 by
    * default and the carousel chevrons step through the remaining entries. */
@@ -1793,6 +1805,14 @@ export interface CuratedCity {
   default_radius_m: number;
   population: number | null;
   population_as_of_year: number | null;
+  /* The RÚIAN obec this curated city was matched to (migration 081), or null
+   * when the name match failed. The view has always exposed it and
+   * fetchCuratedCities has always `select('*')`-ed it — it was simply absent
+   * from this type. It is the join key that lets a property carry its city's
+   * indexes without a PostGIS round-trip: `properties.obec_id =
+   * curated_cities.admin_boundary_id`. All 206 curated cities have one, so the
+   * centroid+radius fallback arm in the SQL predicates is currently dead. */
+  admin_boundary_id: number | null;
 }
 
 export interface CityIndexDefinition {
@@ -1812,6 +1832,16 @@ export interface CityIndexValue {
   index_name: string;
   value: number;
 }
+
+/* Query keys for the three operator-static city-quality datasets. They were
+ * inline string literals in BrowseExperience; anything else wanting the same
+ * cached rows (the pipeline board's index strip) has to spell them identically
+ * or it silently refetches into a parallel cache entry. */
+export const cityQualityKeys = {
+  cities: ['curated_cities'] as const,
+  definitions: ['city_index_definitions'] as const,
+  values: ['city_index_values'] as const,
+};
 
 export const fetchCuratedCities = async (): Promise<CuratedCity[]> => {
   /* `.range` bypasses PostgREST's default 1,000-row cap. 205 rows
@@ -2178,14 +2208,22 @@ export const fetchPipelineStages = async (): Promise<PipelineStage[]> => {
 export const fetchPipelineBoard = async (): Promise<PipelineBoardCard[]> => {
   const { data: cards, error: cErr } = await supabase
     .from('property_pipeline_public')
-    .select('property_id, stage_id, board_position, entered_stage_at')
-    .order('board_position');
+    .select('property_id, stage_id, board_position, entered_stage_at, added_at')
+    /* board_position is the MANUAL order and stays the default sort, but it is
+     * not unique — it is assigned max+1 within the entry stage at bookmark time
+     * and never renumbered on a stage move, so live data has collisions WITHIN
+     * a stage. property_id is the deterministic tiebreak; without it equal
+     * positions reshuffle between refetches. Any explicit sort re-sorts
+     * client-side (lib/pipelineSort) and tiebreaks the same way. */
+    .order('board_position')
+    .order('property_id');
   if (cErr) throw cErr;
   const rows = (cards ?? []) as Array<{
     property_id: number;
     stage_id: number;
     board_position: number;
     entered_stage_at: string;
+    added_at: string;
   }>;
   if (rows.length === 0) return [];
 
@@ -2193,7 +2231,7 @@ export const fetchPipelineBoard = async (): Promise<PipelineBoardCard[]> => {
   const { data: props, error: pErr } = await supabase
     .from('properties_public')
     .select(
-      'property_id, sreality_id, source, source_id_native, listing_id, category_main, street, district, disposition, subtype, area_m2, price_czk, mf_gross_yield_pct, obec_id, okres_id, region_id, place_search_text, okres, region, is_active',
+      'property_id, sreality_id, source, source_id_native, listing_id, category_main, street, district, disposition, subtype, area_m2, price_czk, mf_gross_yield_pct, total_price_change_pct, price_change_count, obec_id, okres_id, region_id, place_search_text, obec, locality, okres, region, is_active',
     )
     .in('property_id', ids);
   if (pErr) throw pErr;
@@ -2255,6 +2293,7 @@ export const fetchPipelineBoard = async (): Promise<PipelineBoardCard[]> => {
       stage_id: r.stage_id,
       board_position: r.board_position,
       entered_stage_at: r.entered_stage_at,
+      added_at: r.added_at,
       sreality_id: sid,
       source: (p?.source as string | null) ?? null,
       source_id_native: (p?.source_id_native as string | null) ?? null,
@@ -2267,10 +2306,18 @@ export const fetchPipelineBoard = async (): Promise<PipelineBoardCard[]> => {
       area_m2: (p?.area_m2 as number | null) ?? null,
       price_czk: (p?.price_czk as number | null) ?? null,
       mf_gross_yield_pct: (p?.mf_gross_yield_pct as number | null) ?? null,
+      // numeric arrives from PostgREST as a string on some paths — coerce once,
+      // here, so no consumer has to guess (the llm_cost_daily reader does the same).
+      total_price_change_pct:
+        p?.total_price_change_pct == null ? null : Number(p.total_price_change_pct),
+      price_change_count:
+        p?.price_change_count == null ? null : Number(p.price_change_count),
       obec_id: (p?.obec_id as number | null) ?? null,
       okres_id: (p?.okres_id as number | null) ?? null,
       region_id: (p?.region_id as number | null) ?? null,
       place_search_text: (p?.place_search_text as string | null) ?? null,
+      obec: (p?.obec as string | null) ?? null,
+      locality: (p?.locality as string | null) ?? null,
       okres: (p?.okres as string | null) ?? null,
       region: (p?.region as string | null) ?? null,
       is_active: (p?.is_active as boolean | null) ?? true,

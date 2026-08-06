@@ -98,6 +98,12 @@ operator can watch, and work to completion.
   `main`, so broken code can't reach production. Lean on it; keep tests green.
 - **Database changes** have their own gate (the `database` skill: additive migrations are
   autonomous; destructive ones pause for confirmation + a backup).
+- **A merge is not a deploy.** After a PR merges to `main`, confirm Railway's rollout with
+  `gh api repos/{owner}/{repo}/commits/<sha>/status` — Railway posts a per-service commit
+  status (API / vite / realtime-worker), each with `state` + a live URL, no Railway token
+  needed. For frontend-visible changes, follow with a real-browser check against the
+  production URL — read-only only; never drive a mutating action (merge/unmerge, delete,
+  send, …) against production autonomously.
 
 ## Fetching live state (fetch, don't ask)
 

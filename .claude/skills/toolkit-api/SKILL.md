@@ -350,6 +350,15 @@ Scraper orchestration:
   scrape workflow re-dispatch itself for tighter-than-cron cadence; no-op without it.
 - `GITHUB_ACTOR` — CI context, used for curated-cities upload attribution.
 
+NEW DEDUP (docs/design/new-dedup/PROGRAM.md, Wave 1):
+- `RUNPOD_API_KEY` — GitHub Actions secret only (no Railway/frontend use). Auths
+  `scripts/runpod_client.py`'s REST (`rest.runpod.io/v1`) and GraphQL (`api.runpod.io/graphql`)
+  calls to launch/poll/terminate on-demand GPU pods for DINOv2 embedding batches (Wave 5) —
+  today exercised only by the `new_dedup_runpod_smoke_test.yml` workflow_dispatch. Every job
+  goes through `RunPodClient.run_job`, which terminates the pod in a `finally` regardless of
+  how the job ends — the actual cost-safety guarantee, since RunPod's pod API has no
+  documented "run once and stop" flag.
+
 Frontend / extension (build-time only, inlined into the browser bundle — *not* backend
 runtime): `VITE_SUPABASE_URL` + `VITE_SUPABASE_ANON_KEY` (the publishable anon key, safe in
 the browser), and `VITE_API_BASE_URL` / `VITE_API_TOKEN` for the SPA (Path 1 posture: the

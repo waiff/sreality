@@ -16,13 +16,30 @@ Two phases, both idempotent:
      repr_listing_id     = the active, most-recently-seen child
      category/area/...    + current_price_czk mirror that representative child
      price_drop_count     \\
-     price_rise_count      \\
-     max_price_drop_pct     } from the union of all children's snapshots,
-     price_change_count*   /  ordered by scraped_at (consecutive-step deltas;
-     total_price_change_pct/  the *_30d/_90d/_365d window counts + the signed
-                              first-to-last total back migration 173's filters)
+     price_rise_count      \\  consecutive-step deltas computed WITHIN EACH
+     max_price_drop_pct     }  CHILD's own snapshot series, then summed across
+     price_change_count*   /   children (+ the *_30d/_90d/_365d window counts)
+     total_price_change_pct =  signed first-to-last of the REPRESENTATIVE
+                               child's series only
      last_change_at      = max(children snapshots.scraped_at) -- "recently changed"
      stats_computed_at   = now()
+
+   PRICE SERIES GRAIN (changed 2026-08; migration 173 introduced these columns).
+   The window PARTITIONs by listing, NOT by property. Interleaving every child's
+   snapshots into one property-level series — the original behaviour — makes a
+   multi-portal property whose portals quote slightly different asking prices
+   register a "change" on every single scrape, and simultaneously HIDES real
+   cuts when the other portal's unchanged reading lands between two readings of
+   the one that moved. Both directions were confirmed market-wide across every
+   multi-source property with priced snapshots.
+
+   `total_price_change_pct` is anchored on the representative child because
+   `current_price_czk` is that same child's price: a headline price and a delta
+   drawn from different series is how a card ends up describing two different
+   numbers. The cost is a narrower claim — NULL when the representative alone
+   has fewer than two priced snapshots, even if a sibling has a longer history.
+   These columns also back Browse/Watchdog filters (`price_change_count_min`,
+   `total_price_change_pct`), so cohort membership shifts after the backfill.
 
    For today's singleton properties this reproduces exactly what the
    insert-time path (`scraper.db._ensure_property` / `_cheap_property_rollup`)
@@ -231,13 +248,24 @@ _RECOMPUTE_BATCH_SQL = """
       ORDER BY l.property_id, source_trust_rank(l.source),
                l.is_active DESC, l.last_seen_at DESC NULLS LAST, l.sreality_id DESC
     ),
+    -- PER-LISTING price series. The window PARTITIONs by listing, not by
+    -- property: a multi-portal property's children are independent asking-price
+    -- streams, and interleaving them by scraped_at (as this did until now) makes
+    -- every alternating read look like a price change. A property listed at
+    -- 5.0M on one portal and 5.2M on another registered a "change" on EVERY
+    -- scrape, inflating price_change_count without bound; the same interleaving
+    -- also HID real changes, because a genuine cut could be masked by the other
+    -- portal's unchanged price landing between the two readings. Measured
+    -- market-wide over all multi-source properties with priced snapshots, this
+    -- cut both ways. A change is now only ever a change WITHIN one listing.
     prices AS (
       SELECT
         l.property_id AS pid,
+        s.listing_id,
         s.price_czk,
         s.scraped_at,
         row_number() OVER (
-          PARTITION BY l.property_id ORDER BY s.scraped_at, s.id
+          PARTITION BY s.listing_id ORDER BY s.scraped_at, s.id
         ) AS rn
       FROM listing_snapshots s
       JOIN listings l ON l.id = s.listing_id
@@ -246,14 +274,40 @@ _RECOMPUTE_BATCH_SQL = """
     ),
     steps AS (
       SELECT
-        pid, price_czk, scraped_at, rn,
-        lag(price_czk) OVER (PARTITION BY pid ORDER BY rn) AS prev
+        pid, listing_id, price_czk, scraped_at, rn,
+        lag(price_czk) OVER (PARTITION BY listing_id ORDER BY rn) AS prev
       FROM prices
     ),
+    -- Endpoints of each child's own series.
+    listing_span AS (
+      SELECT
+        pid, listing_id,
+        (array_agg(price_czk ORDER BY rn))[1]      AS first_price,
+        (array_agg(price_czk ORDER BY rn DESC))[1] AS last_price,
+        count(*)                                   AS price_points
+      FROM prices
+      GROUP BY pid, listing_id
+    ),
+    -- The property's headline delta is anchored on the REPRESENTATIVE child —
+    -- the same listing whose price becomes properties.current_price_czk below.
+    -- That coupling is the point: a delta computed over a different series than
+    -- the displayed price is how a card ends up quoting a headline price and a
+    -- drop that describe two different numbers. (No literal percent sign in this
+    -- comment on purpose -- prose percent inside executed SQL is an
+    -- `incomplete placeholder` crash in psycopg; tests/test_sql_placeholders.py
+    -- guards it.) NULL when the representative has fewer than two priced
+    -- snapshots -- a narrower claim than the old any-child version, but a true one.
+    repr_span AS (
+      SELECT ls.pid, ls.first_price, ls.last_price, ls.price_points
+      FROM listing_span ls
+      JOIN repr r ON r.listing_ref_id = ls.listing_id
+    ),
     -- Windowed change counts (migration 173): a "change" is any consecutive
-    -- pair where the price moved, dated by the later snapshot's scraped_at.
-    -- The windowed counts decay as events age out, so they are only as fresh
-    -- as the last recompute of the row -- the daily full sweep is the bound.
+    -- pair WITHIN A CHILD where the price moved, dated by the later snapshot's
+    -- scraped_at, then summed across the property's children — a change on any
+    -- portal is a change for the property. The windowed counts decay as events
+    -- age out, so they are only as fresh as the last recompute of the row --
+    -- the daily full sweep is the bound.
     price_hist AS (
       SELECT
         pid,
@@ -267,10 +321,7 @@ _RECOMPUTE_BATCH_SQL = """
         count(*) FILTER (WHERE prev IS NOT NULL AND price_czk <> prev
                          AND scraped_at >= now() - interval '365 days') AS changes_365d,
         max(CASE WHEN prev IS NOT NULL AND price_czk < prev
-                 THEN (prev - price_czk)::numeric / prev * 100 END)   AS max_drop_pct,
-        (array_agg(price_czk ORDER BY rn))[1]      AS first_price,
-        (array_agg(price_czk ORDER BY rn DESC))[1] AS last_price,
-        count(*)                                   AS price_points
+                 THEN (prev - price_czk)::numeric / prev * 100 END)   AS max_drop_pct
       FROM steps
       GROUP BY pid
     ),
@@ -340,8 +391,8 @@ _RECOMPUTE_BATCH_SQL = """
       price_change_count_90d  = coalesce(ph.changes_90d, 0),
       price_change_count_365d = coalesce(ph.changes_365d, 0),
       total_price_change_pct  = CASE
-          WHEN ph.price_points >= 2 AND ph.first_price > 0
-          THEN (ph.last_price - ph.first_price)::numeric / ph.first_price * 100
+          WHEN rs.price_points >= 2 AND rs.first_price > 0
+          THEN (rs.last_price - rs.first_price)::numeric / rs.first_price * 100
       END,
       last_change_at      = coalesce(ch.last_change_at, ca.first_seen_at),
       stats_computed_at   = now()
@@ -351,6 +402,7 @@ _RECOMPUTE_BATCH_SQL = """
     JOIN best_geo bg ON bg.pid = ca.pid
     LEFT JOIN best_street bs ON bs.pid = ca.pid
     LEFT JOIN price_hist ph ON ph.pid = ca.pid
+    LEFT JOIN repr_span rs ON rs.pid = ca.pid
     LEFT JOIN changes ch ON ch.pid = ca.pid
     WHERE p.id = ca.pid
 """

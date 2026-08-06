@@ -64,6 +64,7 @@ import {
 import { pushToast } from '@/lib/toast';
 import { invalidateBrowseQueries } from '@/lib/browseInvalidation';
 import {
+  cityQualityKeys,
   fetchCityIndexDefinitions,
   fetchCityIndexValues,
   fetchCuratedCities,
@@ -293,19 +294,19 @@ export default function BrowseExperience({
   });
 
   const citiesQuery = useQuery<CuratedCity[], Error>({
-    queryKey: ['curated_cities'],
+    queryKey: cityQualityKeys.cities,
     queryFn: fetchCuratedCities,
     staleTime: Infinity,
     gcTime: Infinity,
   });
   const cityDefsQuery = useQuery<CityIndexDefinition[], Error>({
-    queryKey: ['city_index_definitions'],
+    queryKey: cityQualityKeys.definitions,
     queryFn: fetchCityIndexDefinitions,
     staleTime: Infinity,
     gcTime: Infinity,
   });
   const cityValuesQuery = useQuery<CityIndexValue[], Error>({
-    queryKey: ['city_index_values'],
+    queryKey: cityQualityKeys.values,
     queryFn: fetchCityIndexValues,
     staleTime: Infinity,
     gcTime: Infinity,

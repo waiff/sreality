@@ -110,8 +110,8 @@ card between stages.
   `pipeline_stages_public`, cards from `property_pipeline_public` hydrated
   against `properties_public` (batched join by property_id); each card links to
   its representative listing + a per-card stage picker that PATCHes the move.
-- Move UX is a stage-picker dropdown for now; drag-and-drop (`@dnd-kit`, already
-  a dep) is a deferred progressive enhancement.
+- Move UX is drag-and-drop (`@dnd-kit/core`, column droppables only); the
+  stage-picker dropdown it replaced is gone.
 - Next: Phase 2 = lossless unmerge replay + terminal-aware merge policy;
   Browse-card bookmark icons; operator stage-management UI (rename/reorder/add).
 
@@ -232,6 +232,38 @@ Basic filtering of the kanban board by property type (`category_main`).
 - `category_main` added to `fetchPipelineBoard`'s `properties_public` select +
   `PipelineBoardCard` (the column was already on the view). `Pipeline.test.tsx`
   gains a filter case. Rule #22 updated.
+
+### Phase U-PIPE Phase 3g: Board sort + card signals (done)
+Vertical ordering the operator controls, plus two data signals on the card.
+- **Sort** as a fourth row in the existing Stav/Typ/Lokalita chip stack, applied
+  WITHIN each column: Ruční pořadí (default) / Přidáno / Ve fázi nejdéle / Cena /
+  Změna ceny / Město. Manual order is modelled as a named option over the long-dormant
+  `board_position` rather than replaced — the API always accepted it and the
+  frontend never wrote it, and its values collide *within* a stage, so the old
+  single global `ORDER BY board_position` was non-deterministic between refetches.
+  Every comparator tiebreaks on `property_id`. `lib/pipelineSort` + `lib/cardSort`
+  (the shared serialization / NULLS-LAST / Czech-collation half; Browse keeps its
+  server-side keyset path — different execution models by design).
+- **Civic index strip** — four fixed cells (celkové hodnocení, přírůstek obyvatel,
+  stěhování mladých, nabídka práce) underscored by a 2px rule in the shared
+  city-index scale's band colour, repeating the column header's motif at card
+  scale. Joined `properties.obec_id = curated_cities.admin_boundary_id`, an
+  integer equi-join that reproduces the SQL predicate's `ST_Covers` arm (all 206
+  curated cities have a boundary, so its radius arm is dead). No migration.
+  ~52% of properties resolve to a curated city; the rest render no strip.
+- **Price movement** — shared `<PriceDelta>` (drop = sage, rise = brick, the
+  polarity ListingDetail already used). Renders NOTHING when
+  `total_price_change_pct` is NULL (fewer than two observed prices), which is not
+  the same claim as "unchanged". Also adopted on Browse cards + table. Sortable
+  on the SIGNED percent (ascending = deepest cut first, matching the buyer-board
+  polarity); no |abs| "biggest mover" option, and the NULL majority sinks below
+  the movers in both directions rather than being read as 0%.
+- **URL state** (`lib/pipelineState`) for sort AND the three existing filters, in
+  Browse's own param vocabulary — the board's filters were `useState`-only and
+  silently reset on reload.
+- The card adopts the shared `placePrimary()` (it hand-rolled `[street, district]`,
+  printing "okres Beroun" for a village); `BoardCard`/`CardFace` extracted out of
+  the 863-line page. Rule #22 unchanged.
 
 ### Phase U-ME: Manual rental estimates (next)
 

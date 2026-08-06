@@ -119,8 +119,9 @@ Session handoff points marked ⛳ (good places to end a session; update the ledg
 
 ## Progress ledger (update every session, newest first)
 
-- 2026-08-06 (session continuation, part 3) — Built the Labeling page (W1's last unstarted
-  mechanic besides the Dashboard skeleton and RunPod, both separately blocked).
+- 2026-08-06 (session continuation, part 4 — parallel to the RunPod session below) — Built the
+  Labeling page (W1's last unstarted mechanic besides the Dashboard skeleton, which stays a
+  placeholder — genuinely no data until W2+).
   - **Migration 373** (`dedup_sim_labeling`) applied live via MCP: `dedup_sim.taxonomy_labels`
     (the operator-curated Taxonomy v1 vocabulary — free text, add/rename/remove; deliberately
     NOT pre-seeded with the ledger's "49 labels" description, since PROGRAM.md itself flags that
@@ -252,6 +253,37 @@ Session handoff points marked ⛳ (good places to end a session; update the ledg
     PR-3 (still the only blocker on Gate 0) if it hasn't landed by then; consider a non-destructive
     "deactivate a taxonomy label" affordance if the hard-delete-only gap above turns out to matter
     in practice.
+- 2026-08-06 (session continuation, part 3) — Operator confirmed `RUNPOD_API_KEY` was added as
+  a repo secret; asked to finish the RunPod piece (Labeling page picked up by a different
+  session in parallel). Built `scripts/runpod_client.py` (#972) + a `new_dedup_runpod_smoke_test`
+  workflow_dispatch to prove it end-to-end. Three real live dispatches, two real bugs found and
+  fixed by actually running it rather than trusting the code on paper — **zero cost incurred
+  across all three**, since every failure happened before RunPod ever started billing (the
+  point of `run_job`'s launch-outside-try / terminate-in-finally split):
+  1. Run [31081790027](https://github.com/waiff/sreality/actions/runs/31081790027) — `cheapest_gpu()`'s
+     `communityPrice is not None` filter let through a placeholder catalog entry (id "unknown",
+     price 0), which always "won" as cheapest and got rejected by RunPod's pod API (400, not a
+     valid `gpuTypeIds` value). Fixed in #975: require `communityPrice > 0`.
+  2. Run [31082278388](https://github.com/waiff/sreality/actions/runs/31082278388) — the
+     (correctly-picked, this time) cheapest real GPU, RTX A2000, had zero free community-cloud
+     instances at that moment — a live availability condition, not a bug (RunPod's community
+     cloud is peer-hosted). Fixed in #977: `NoCapacityError` + `run_job_with_fallback`, which
+     tries `eligible_gpus()` in ascending price order and only advances past a genuine
+     capacity 500, not any other failure.
+  3. Run [31083022260](https://github.com/waiff/sreality/actions/runs/31083022260) — the
+     fallback logic worked exactly as designed (RTX A2000 → no capacity → tried RTX 3070 next),
+     but that attempt hit `"Your account balance is too low to rent a pod. Please add funds to
+     your account."` **This is the actual current blocker, and it's on the operator's side, not
+     code**: a payment method on file isn't the same as an available RunPod balance. Needs the
+     operator to add funds/credit in the RunPod dashboard (Billing) before any pod can launch.
+  - Minor known cosmetic gap (not fixed, not worth its own PR): the smoke-test driver's
+    top-level error message ("job failed on every eligible GPU type") is misleading for case 3
+    — the fallback didn't actually exhaust every option, it stopped correctly on a non-capacity
+    error after trying 2. Functionally correct (it did NOT keep retrying), just an imprecise
+    log line; worth tightening whenever this file is touched again for the real end-to-end run.
+  - Next session (once funds are added): re-dispatch `new_dedup_runpod_smoke_test.yml` from
+    main, confirm a pod actually boots + runs the CUDA op + reports `SMOKE_TEST_OK` + terminates,
+    note the real elapsed time / cost in this ledger. That closes out W1's RunPod deliverable.
 - 2026-08-06 (session continuation, part 2) — With PR #965 merged and PR-2's minimal nav
   placeholder confirmed live, continued W1: made the Settings page real.
   - **Backend**: `api/routes/new_dedup.py` — `GET /new-dedup/settings` (full registry +

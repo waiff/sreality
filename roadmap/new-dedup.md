@@ -58,9 +58,12 @@ W1 (shared prerequisites + labeling program):
       from the DINOv2/RunPod embeddings path below — a stronger CLIP checkpoint, CPU, no RunPod
       dependency. Operator still needs to run several labeling rounds to reach Gate 1 (150
       confirmed images/tag) — the tool is built, the labeling itself is ongoing curation work.
-- [ ] RunPod serverless workflow (DINOv2 embeddings, Wave 5) — blocked on the operator creating
-      the RunPod account (no `RUNPOD_API_KEY` secret exists yet); reuse target is PR #804's
-      pod-side harness.
+- [x] RunPod client (`scripts/runpod_client.py`, #972/#975/#977) — launch/poll/terminate an
+      on-demand pod, live cheapest-GPU catalog lookup, capacity fallback. Guaranteed teardown
+      verified across 3 real live dispatches (zero cost each time).
+- [ ] RunPod end-to-end proof (DINOv2 embeddings, Wave 5) — blocked on the operator adding funds
+      to the RunPod account balance (a payment method alone isn't a balance); re-dispatch
+      `new_dedup_runpod_smoke_test.yml` once funded.
 
 Waves W2-W8 (candidate selection through production wiring) are not started; see PROGRAM.md.
 

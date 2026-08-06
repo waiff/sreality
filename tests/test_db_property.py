@@ -293,6 +293,68 @@ def test_ingest_skips_broker_enqueue_when_unchanged(monkeypatch):
     assert _find(conn.executed, "INSERT INTO dirty_broker_listings") is None
 
 
+# --- property-stats work enqueue (the incremental recompute's ingest feed) ---
+
+
+def test_ingest_enqueues_property_stats_work(monkeypatch):
+    """A content-changed write enqueues dirty_properties so the */5 incremental
+    recompute refreshes the price-history columns.
+
+    This is the counterpart of write_detail_batch's _BATCH_DIRTY_FROM_SIDS_SQL,
+    which only ever covered sreality. The other eight portals ingest through
+    ingest_scraped_listing, so before this they never enqueued on a content
+    change and their price_change_count* / total_price_change_pct were refreshed
+    only by the 04:15 full sweep — while _cheap_property_rollup updates
+    current_price_czk inline. A displayed price could sit up to 24h out of step
+    with its own change history.
+    """
+    _stub_upsert(monkeypatch, "changed")
+    conn = _FakeConn([
+        (lambda s: "SELECT id, sreality_id FROM listings WHERE source" in s, [(8009, -9)]),
+        (lambda s: "SELECT property_id FROM listings WHERE id" in s, [(3,)]),  # linked
+    ])
+
+    db.ingest_scraped_listing(conn, _listing(source="bazos"))
+
+    enq = _find(conn.executed, "INSERT INTO dirty_properties")
+    # Keyed on the SURROGATE listings.id; the property is resolved inside the
+    # statement so a listing with property_id NULL is skipped, not crashed on.
+    assert enq is not None and enq[1] == (8009,)
+    assert "property_id IS NOT NULL" in enq[0]
+
+
+def test_ingest_enqueues_property_stats_work_for_every_source(monkeypatch):
+    """Unlike the broker queue, the stats queue is source-independent — a price
+    change matters for the rollup on all nine portals."""
+    for source in ("idnes", "bazos", "remax", "bezrealitky"):
+        _stub_upsert(monkeypatch, "new")
+        conn = _FakeConn([
+            (lambda s: "SELECT id, sreality_id FROM listings WHERE source" in s, []),
+            (lambda s: "SELECT nextval('synthetic_listing_id_seq')" in s, [(-9,)]),
+            (lambda s: "SELECT id FROM listings WHERE source" in s, [(8009,)]),
+            (lambda s: "SELECT property_id FROM listings WHERE id" in s, [(None,)]),
+            (lambda s: "INSERT INTO properties" in s, [(50,)]),
+        ])
+
+        db.ingest_scraped_listing(conn, _listing(source=source))
+
+        assert _find(conn.executed, "INSERT INTO dirty_properties") is not None, source
+
+
+def test_ingest_skips_property_stats_enqueue_when_unchanged(monkeypatch):
+    """An unchanged re-fetch appends no snapshot, so nothing about the price
+    history moved — re-enqueueing would churn the queue on every drain cycle."""
+    _stub_upsert(monkeypatch, "unchanged")
+    conn = _FakeConn([
+        (lambda s: "SELECT id, sreality_id FROM listings WHERE source" in s, [(8009, -9)]),
+        (lambda s: "SELECT property_id FROM listings WHERE id" in s, [(3,)]),
+    ])
+
+    db.ingest_scraped_listing(conn, _listing(source="idnes"))
+
+    assert _find(conn.executed, "INSERT INTO dirty_properties") is None
+
+
 # --- ScrapedListing contract ----------------------------------------------
 
 

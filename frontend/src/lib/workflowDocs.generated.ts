@@ -2552,6 +2552,27 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/monitor_workflow_failures.yml"
   },
   {
+    "filename": "new_dedup_runpod_smoke_test.yml",
+    "name": "NEW DEDUP RunPod smoke test (one-off)",
+    "description": "Proves the RunPod pipeline end-to-end (docs/design/new-dedup/PROGRAM.md, Wave 1): launch the cheapest available GPU pod, run a trivial CUDA op, confirm it, guarantee teardown either way (scripts/runpod_client.py's run_job). Not scheduled — manual trigger only, matching the design's \"manual batches only\" cost-conscious posture. Wave 5's real embedding batches will reuse the same client, different payload.",
+    "portal": null,
+    "manual": true,
+    "schedules": [],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [],
+    "secrets": [
+      "RUNPOD_API_KEY"
+    ],
+    "concurrencyGroup": "new-dedup-runpod-smoke-test",
+    "cancelInProgress": false,
+    "timeoutMinutes": 15,
+    "permissions": "contents: read",
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/new_dedup_runpod_smoke_test.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/new_dedup_runpod_smoke_test.yml"
+  },
+  {
     "filename": "new_dedup_teardown_backup.yml",
     "name": "NEW DEDUP teardown backup (one-off)",
     "description": "One-off pg_dump backup of the tables docs/design/new-dedup/CUTOFF.md §4 marks for drop, uploaded to R2 under backups/new-dedup-teardown/<date>/. Run manually once, before the teardown migration (PR-3) drops those tables — the destructive-migration safety net (CLAUDE.md rule 1 / the `database` skill: pg_dump first, then explicit operator OK to apply). Not scheduled; workflow_dispatch only. Safe to re-run (each run writes to its own date prefix).",

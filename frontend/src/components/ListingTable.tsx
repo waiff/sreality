@@ -1,5 +1,6 @@
 import { Link } from 'react-router-dom';
 import InfiniteSentinel from '@/components/InfiniteSentinel';
+import PriceDelta from '@/components/PriceDelta';
 import {
   type TableRow,
   type SortSpec,
@@ -241,7 +242,15 @@ function Row({
           : fmtArea(row.estate_area)}
       </td>
       <td className="px-4 py-2.5 align-middle text-right font-mono tabular-nums text-[var(--color-ink)]">
-        {fmtCzk(row.price_czk)}
+        <span className="inline-flex items-baseline justify-end gap-1.5">
+          {fmtCzk(row.price_czk)}
+          {/* Same component the cards and the pipeline board use. */}
+          <PriceDelta
+            pct={row.total_price_change_pct}
+            changes={row.price_change_count}
+            muted={!row.is_active}
+          />
+        </span>
       </td>
       <td className="px-4 py-2.5 align-middle text-right font-mono tabular-nums text-[var(--color-ink-2)]">
         {fmtPricePerM2(row.price_czk, row.area_m2)}
