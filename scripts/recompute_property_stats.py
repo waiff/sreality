@@ -528,6 +528,18 @@ def recompute_mf_one(conn: Any, property_id: int) -> None:
         )
 
 
+def _run_recompute_statement(conn: Any, sql: str, params: dict[str, Any]) -> None:
+    """One recompute statement under the raised per-statement ceiling.
+
+    Explicit transaction so SET LOCAL takes effect (it silently no-ops in
+    autocommit); the transaction spans exactly this one statement, so the
+    batch-commits-independently crash-safety property is unchanged."""
+    with conn.transaction():
+        with conn.cursor() as cur:
+            cur.execute(f"SET LOCAL statement_timeout = '{_BATCH_STATEMENT_TIMEOUT}'")
+            cur.execute(sql, params)
+
+
 def _reconcile_childless(conn: Any) -> int:
     with conn.cursor() as cur:
         cur.execute(_RECONCILE_CHILDLESS_SQL)
@@ -587,8 +599,7 @@ def _drain_dirty(
         if not claimed:
             break
         ids = [int(r[0]) for r in claimed]
-        with conn.cursor() as cur:
-            cur.execute(_RECOMPUTE_SCOPED_SQL, {"ids": ids})
+        _run_recompute_statement(conn, _RECOMPUTE_SCOPED_SQL, {"ids": ids})
         with conn.cursor() as cur:
             cur.execute(_DELETE_DIRTY_SQL, {"ids": ids, "cutoff": cutoff})
         total += len(ids)
@@ -623,8 +634,9 @@ def _max_property_id(conn: Any) -> int:
 # notification matcher's sticky-holder pattern from migration 366) between
 # batches, so a kill at ANY point strands the row for at most 15 minutes.
 # Renewal only runs between statements on this autocommit connection, so the
-# TTL must comfortably exceed one statement's worst case (the ~2-min pooler
-# statement_timeout) — 15 min is that margin, not a renewal cadence.
+# TTL must comfortably exceed one statement's worst case — recompute
+# statements run under the explicit _BATCH_STATEMENT_TIMEOUT (10 min) ceiling
+# — 15 min is that margin, not a renewal cadence.
 _LEASE_TTL = "15 minutes"
 _LEASE_RETRY_SECONDS = 10.0
 # A dispatched sweep that cannot get the lease within this budget fails RED
@@ -635,12 +647,23 @@ _LEASE_RETRY_SECONDS = 10.0
 _MAX_LEASE_WAIT_SECONDS = 1200.0
 
 # Ceiling for --max-seconds. The workflow's timeout-minutes (75) is sized as
-# budget + one in-flight batch (~2-min statement timeout) + prelude + finalize
-# headroom FOR THIS CEILING; an unclamped dispatch input above ~4200s would
-# let the runner SIGKILL a healthy sweep before its clean-stop fires — a
-# silent `cancelled`, the exact mode this script exists to eliminate. Raising
-# the ceiling means raising timeout-minutes in the same change.
+# budget + one in-flight batch + prelude + finalize headroom FOR THIS
+# CEILING; an unclamped dispatch input above ~4200s would let the runner
+# SIGKILL a healthy sweep before its clean-stop fires — a silent `cancelled`,
+# the exact mode this script exists to eliminate. Raising the ceiling means
+# raising timeout-minutes in the same change.
 _MAX_BUDGET_SECONDS = 4200.0
+
+# Per-recompute-statement ceiling, applied via SET LOCAL inside an explicit
+# transaction (the repo's layered-timeout pattern; SET LOCAL no-ops without
+# conn.transaction() on an autocommit connection). The pooler's ~2-min default
+# proved too tight for the post-#971 batch SQL on deep-history batches: the
+# 2026-08-06 10:09Z run's FIRST batch (ids 1-2001, the oldest sreality
+# listings) was killed at ~3.5 min while later-id batches run in seconds.
+# MUST stay comfortably under _LEASE_TTL (15 min): renewal only fires between
+# statements, so one statement's worst case is the longest possible renewal
+# gap.
+_BATCH_STATEMENT_TIMEOUT = "10min"
 
 _TRY_LEASE_SQL = """
     UPDATE property_maintenance_lease
@@ -863,21 +886,32 @@ def main() -> int:
                 # Budget clean-stop (the detail drains' --max-seconds pattern):
                 # stop batching with enough headroom left to finalize + release,
                 # instead of being SIGKILLed mid-statement by timeout-minutes.
-                if time.monotonic() >= deadline:
+                batch_started = time.monotonic()
+                if batch_started >= deadline:
                     incomplete_at = lo
                     break
                 _renew_lease(conn, holder)
-                with conn.cursor() as cur:
-                    cur.execute(_RECOMPUTE_BATCH_SQL, {"lo": lo, "hi": hi})
-                batches += 1
-                if batches % 25 == 0:
-                    done_s = time.monotonic() - started_at
-                    LOG.info(
-                        "RECOMPUTE progress batches=%d/%d ids<%d "
-                        "avg_batch_s=%.1f elapsed=%.0fs",
-                        batches, total_batches, hi, done_s / batches, done_s,
+                try:
+                    _run_recompute_statement(
+                        conn, _RECOMPUTE_BATCH_SQL, {"lo": lo, "hi": hi})
+                except Exception:
+                    # Name the poisoned range before dying — the 10:09Z run's
+                    # log showed only a bare QueryCanceled with no way to tell
+                    # WHICH ids need investigating.
+                    LOG.error(
+                        "RECOMPUTE batch=%d-%d FAILED after %.1fs",
+                        lo, hi, time.monotonic() - batch_started,
                     )
-                LOG.debug("RECOMPUTE batch=%d-%d done", lo, hi)
+                    raise
+                batches += 1
+                # One line per batch, deliberately: ~311 lines/day buys the
+                # per-range cost profile that diagnosing the post-#971 SQL
+                # (and any future creep toward the budget) depends on.
+                LOG.info(
+                    "RECOMPUTE batch=%d-%d %.1fs (%d/%d)",
+                    lo, hi, time.monotonic() - batch_started,
+                    batches, total_batches,
+                )
 
             if incomplete_at is None:
                 reconciled = _reconcile_childless(conn)
