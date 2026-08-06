@@ -128,42 +128,73 @@ Session handoff points marked ⛳ (good places to end a session; update the ledg
   - **Backup cut**: branch `backup/pre-new-dedup-2026-08` + tag `backup-pre-new-dedup`, both at
     `9d1eb177` (post-PR-0 main). Supabase DB confirmed live and unmodified at
     **2026-08-05 21:55:22 UTC** (`select now()` reading taken before any Wave 0 DB write was
-    attempted) — use this as the PITR reference point; no schema/data changes have landed since
-    (both Day-0 freeze and M-0 are still blocked, see below).
-  - **PR-1 (backend removal) launched** as a 12-stage background workflow (run id
-    `wf_066de830-b20`) in an isolated worktree, branch `feature/new-dedup-backend-removal`,
-    covering CUTOFF.md §1 (C1/C2/C3/C6/C7 + C5 code-only + C4 workflow-YAML), §2 (wholesale
-    deletes + S3/S5/S6 splits), and §6 (backend-relevant docs/tests) — ending in a **draft PR**,
-    explicitly not merged (see gating note below). Result pending as of this ledger entry.
-  - Scaffolding: `roadmap/new-dedup.md` track created, `ROADMAP.md` index updated, old
-    `roadmap/dedup-track.md` marked superseded. NEW DEDUP nav group / placeholder pages deferred
-    to ride along with the PR-2 frontend-removal pass (same territory, avoids a throwaway page
-    that PR-2 immediately restructures).
-  - **Blocked by the permission classifier this session** (both explicitly part of CUTOFF.md §7's
-    Day-0 freeze, both need the operator to either run them directly or grant permission):
+    attempted) — use this as the PITR reference point.
+  - **Scaffolding merged** (#961) — `roadmap/new-dedup.md` track created, `ROADMAP.md` index
+    updated, old `roadmap/dedup-track.md` marked superseded.
+  - **pg_dump-to-R2 backup done and verified** (#963, fix #964) — a `workflow_dispatch`-only GH
+    Actions job (`scripts/backup_new_dedup_teardown_tables.py`) dumped all 9 CUTOFF.md §4
+    "Drop"-list tables/matviews to R2 under `backups/new-dedup-teardown/2026-08-05/`. First run
+    failed on every table (`pg_dump` 16 vs. server 17.6 — "aborting because of server version
+    mismatch"); fixed by pulling `postgresql-client-17` from the PGDG apt repo; re-run succeeded
+    9/9 (largest: `property_identity_candidates`, 4.4 MB gzipped / ~158k rows). Satisfies the
+    destructive-migration safety net ahead of PR-3.
+  - **PR-1 (backend removal) — done, draft, CI green, mergeable**: [#966](https://github.com/waiff/sreality/pull/966),
+    branch `feature/new-dedup-backend-removal`. Ran as a 12-stage background workflow covering
+    CUTOFF.md §1 (C1/C2/C3/C6/C7 + C5 code-only + C4 workflow-YAML), §2 (wholesale deletes +
+    S3/S5/S6 splits), §6 (backend docs/tests) — 120 files, +1,441/−28,772, 2,541 tests passing.
+    Its own verification pass flagged one real blocker pre-fix-up (stale
+    `workflowDocs.generated.ts`, since fixed) plus several non-blocking gaps (stale comments
+    citing the removed engine, a few dead links to deleted design docs, one pre-existing dead
+    threshold in `verify_pipeline.py` — none are regressions or build-affecting, left as
+    follow-up cleanup rather than another fix round). Picked up a real merge conflict against
+    `main` after the scaffolding/backup PRs landed (ROADMAP.md's Dedup row, `roadmap/dedup-track.md`'s
+    superseded banner — both had been touched independently on both sides); resolved by a
+    follow-up agent, merge commit `f99fb819`, now `mergeable: MERGEABLE` / `mergeStateStatus: CLEAN`.
+    New backend route shapes it landed (ground truth for PR-2 and any future caller):
+    `POST /properties/merge`, `GET /properties/merges`, `POST /properties/merges/{id}/unmerge`,
+    `GET /properties/merged`, `POST /properties/assets/{link,unlink}` (all in
+    `api/property_merge.py`, mounted at `/properties`), plus label/annotation CRUD moved to
+    `api/labeling.py` under `/labeling/*` (image-annotation, phash-note, training-example(s),
+    border-case). The old `/dedup/*` router is gone entirely.
+  - **PR-2 (frontend removal) — done, draft, CI green, mergeable**: [#967](https://github.com/waiff/sreality/pull/967),
+    branch `feature/new-dedup-frontend-removal`, **stacked on PR-1** (base branch
+    `feature/new-dedup-backend-removal`, not `main` — it depends on PR-1's route renames). 62
+    files, +240/−11,716, tsc/vitest/build all green. Repoints every Browse `mergeMode` /
+    labeling-CRUD caller in `lib/api.ts` from the old `/dedup/*` paths to the new ones (spot-
+    verified against the diff — matches the ground-truth route audit exactly), deletes the
+    decision-layer pages/components/libs, trims the dedup sections out of Settings/Health/Costs/
+    ListingDetail, and adds a minimal NEW DEDUP nav placeholder (Dashboard + Settings stub pages,
+    real content comes in Wave 1). `/clip-audit` and all its labeling widgets
+    (TrainControl/LabelCombobox/NoteFlagControl/ImageTagBadge/RenderBadge/ImageLightbox) are
+    untouched. Non-blocking gaps from its own verification pass (a handful of now-orphaned
+    `api.ts`/`queries.ts` exports, stale comments citing deleted backend modules, one unused
+    `dedup_eligible_pct` type field) — cosmetic, left for follow-up cleanup, not a merge blocker.
+  - **Still blocked by the permission classifier this session** (both explicitly part of
+    CUTOFF.md §7's Day-0 freeze, both need the operator to either run them directly or grant
+    permission — see the ask below):
     1. `gh workflow disable` on the 6 legacy decision workflows (dedup_engine.yml,
        dedup_batches.yml, dedup_model_compare.yml, clip_trial.yml, embedding_ab.yml,
-       validate_render_detection.yml).
+       validate_render_detection.yml). Note: PR-1 already deletes 4 of these 6 outright
+       (dedup_engine/dedup_batches/dedup_model_compare/validate_render_detection) plus
+       clip_trial/embedding_ab — so once PR-1 merges, disabling becomes moot for those files;
+       the gap is only the WINDOW between now and that merge.
     2. The M-0 DB flip itself (`update app_settings set value='false'::jsonb where
        key='dedup_publication_gate_enabled'`) via Supabase execute_sql. **Confirmed live current
        value: `true`** — the gate is actively hiding un-evaluated new properties from Browse/map/
        watchdogs right now. The worker dedup lane is also confirmed live at
        `realtime_dedup_interval_seconds = 90` (NOT dark) — same freeze dependency.
     Net effect: the legacy engine + its scheduled jobs are still fully live; duplicates are
-    accumulating per the accepted Q1 tradeoff, but the freeze itself hasn't landed yet. **PR-1
-    must not be merged until M-0 actually lands** (PR-1 deletes the only code that stamps
-    `properties.published_at`; merging it while the gate is still `true` would hide every new
-    property with no self-heal).
-  - **New sequencing risk identified** (not in the original CUTOFF.md §7 order): PR-1 renames
-    `/dedup/properties/merge` → `/properties/merge` (+ merges/unmerge/merged/assets). Browse's
-    live `mergeMode` calls the old paths. Merging PR-1 alone, before PR-2 (frontend) is ready to
-    merge in the same window, breaks manual merge in production. **PR-1 and PR-2 should merge
-    back-to-back, not PR-1-then-wait.**
-  - `pg_dump`-to-R2 backup of the to-be-dropped tables (CUTOFF.md §4) not yet started — needs
-    either a GH Actions one-off job (this session's environment has no local `.env`/`psql`/R2
-    creds; GH Actions secrets `SUPABASE_DB_URL` + `R2_*` confirmed present) or the operator's own
-    local machine.
-  - Next session: once PR-1's workflow completes, review it; get the two blockers resolved
-    (freeze + M-0); build the pg_dump-to-R2 backup job; launch PR-2 (frontend removal); only then
-    consider merging PR-1+PR-2 together.
+    accumulating per the accepted Q1 tradeoff. **PR-1 must not merge until M-0 actually lands**
+    (PR-1 deletes the only code that stamps `properties.published_at`; merging while the gate is
+    still `true` would hide every new property with no self-heal). **PR-1 and PR-2 should then
+    merge back-to-back** (PR-2 already stacked correctly for this).
+  - **Operator ask to unblock the rest of W0**: either (a) run the `gh workflow disable` x6 and
+    the M-0 SQL update yourself (exact statement above), or (b) grant this session permission to
+    do so. Once M-0 is applied, PR-1 → PR-2 can merge in sequence; PR-3 (the actual teardown
+    migration + view redefinition) is separately gated on your explicit OK per CLAUDE.md rule 1,
+    independent of this.
+  - Next session: get the two blockers resolved; merge PR-1 then PR-2; watch the post-merge
+    verification checklist (CI green, a brand-new property visible in Browse without a stamp,
+    manual merge/unmerge end-to-end, scrape/image/tag lanes unaffected, Health page clean); only
+    then draft PR-3 (migration) — it stays separately gated regardless of Gate 0's status.
 - 2026-08-05 — Program + cutoff drafts written; awaiting operator approval of both.
