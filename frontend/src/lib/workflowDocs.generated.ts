@@ -2850,7 +2850,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
         "description": "Wall-clock sweep budget in seconds (clean-stop + RED past it; clamped to 4200 — timeout-minutes is sized for that ceiling, raise both together in the yml)",
         "required": false,
         "type": "string",
-        "default": "3600",
+        "default": "4200",
         "options": null
       }
     ],

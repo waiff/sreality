@@ -25,8 +25,10 @@ name: "Jobs: recompute property stats (daily full reconcile)"
 # Budget + liveness (2026-08-06 incident — sweeps outgrew a 30-min
 # timeout-minutes; every kill stranded a 3h maintenance lease, freezing the
 # worker lane + both crons, and reported as `cancelled`, which alerts nobody):
-#   * the script CLEAN-STOPS at --max-seconds (default 3600) and exits RED so
-#     an overrun is a visible scheduled-run failure, not a silent kill;
+#   * the script CLEAN-STOPS at --max-seconds (default 4200, the clamp: the
+#     first post-#971 sweep measured 58.4 min against the old 60-min default —
+#     ~90s of headroom with the table growing ~30s/day) and exits RED so an
+#     overrun is a visible scheduled-run failure, not a silent kill;
 #   * timeout-minutes below is only the outer backstop, sized budget+headroom;
 #   * the lease is a 15-min TTL renewed every batch — a SIGKILL freezes
 #     maintenance for minutes, not hours;
@@ -62,7 +64,7 @@ on:
       max_seconds:
         description: Wall-clock sweep budget in seconds (clean-stop + RED past it; clamped to 4200 — timeout-minutes is sized for that ceiling, raise both together in the yml)
         required: false
-        default: "3600"
+        default: "4200"
         type: string
 
 concurrency:
@@ -94,7 +96,7 @@ jobs:
       - name: Run recompute
         run: |
           ARGS="--batch-size ${{ inputs.batch_size || '2000' }}"
-          ARGS="$ARGS --max-seconds ${{ inputs.max_seconds || '3600' }}"
+          ARGS="$ARGS --max-seconds ${{ inputs.max_seconds || '4200' }}"
           if [ "${{ inputs.dry_run }}" = "true" ]; then
             ARGS="$ARGS --dry-run"
           fi
