@@ -157,7 +157,17 @@ class RunPodClient:
     ) -> tuple[str, bool]:
         """(final desiredStatus, timed_out). Polls until the pod reports EXITED/
         TERMINATED or max_wait_s elapses — never raises on timeout, the caller
-        decides whether a timeout is a failure."""
+        decides whether a timeout is a failure.
+
+        A real live run (2026-08-06) rented a pod for the full wait window and
+        `desiredStatus` never left RUNNING, even though the startup command
+        should finish in well under a minute. On-demand Pods appear to track
+        pod (rental) lifecycle, not the inner container process — unlike
+        RunPod's Serverless product, there is no evidence a Pod self-reports
+        "my command finished." Treat a timeout here as the EXPECTED path for a
+        bounded job, not a failure signal on its own; a real batch job (Wave 5)
+        should detect its own completion externally (e.g. a row it writes to
+        Postgres/R2) rather than waiting on this to flip."""
         deadline = time.monotonic() + max_wait_s
         status = "UNKNOWN"
         while time.monotonic() < deadline:
@@ -169,10 +179,15 @@ class RunPodClient:
         return status, True
 
     def fetch_logs(self, pod_id: str, *, max_lines: int = 500, read_timeout_s: float = 10.0) -> str:
-        """Best-effort log fetch over the SSE logs endpoint. Logs are diagnostic,
-        not load-bearing — any read/parse failure returns what was collected
-        rather than raising, so a logging hiccup never masks whether the job
-        itself (tracked via desiredStatus) actually finished."""
+        """Best-effort log fetch over the documented SSE logs endpoint. Logs are
+        diagnostic, not load-bearing — any read/parse failure returns what was
+        collected rather than raising. A real live run (2026-08-06) got a plain
+        400 from this endpoint with no pod-specific detail; RunPod's own docs
+        elsewhere suggest Pod (as opposed to Serverless) log retrieval isn't
+        really exposed via this REST API yet. Don't design a real job's
+        success signal around this returning anything — a real batch job
+        (Wave 5) should write its result somewhere durable (Postgres/R2)
+        instead of relying on stdout capture."""
         lines: list[str] = []
         try:
             resp = self._session.get(

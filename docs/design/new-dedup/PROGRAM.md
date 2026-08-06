@@ -119,7 +119,7 @@ Session handoff points marked ⛳ (good places to end a session; update the ledg
 
 ## Progress ledger (update every session, newest first)
 
-- 2026-08-06 (session continuation, part 4 — parallel to the RunPod session below) — Built the
+- 2026-08-06 (session continuation, part 5 — parallel to the RunPod session below) — Built the
   Labeling page (W1's last unstarted mechanic besides the Dashboard skeleton, which stays a
   placeholder — genuinely no data until W2+).
   - **Migration 373** (`dedup_sim_labeling`) applied live via MCP: `dedup_sim.taxonomy_labels`
@@ -253,6 +253,38 @@ Session handoff points marked ⛳ (good places to end a session; update the ledg
     PR-3 (still the only blocker on Gate 0) if it hasn't landed by then; consider a non-destructive
     "deactivate a taxonomy label" affordance if the hard-delete-only gap above turns out to matter
     in practice.
+- 2026-08-06 (session continuation, part 4) — Operator added RunPod account funds. Re-dispatch
+  ([31083936844](https://github.com/waiff/sreality/actions/runs/31083936844)) got past the
+  account-balance blocker and, for the first time, **actually launched a real pod**: `g39f02wj642her`
+  on an `NVIDIA GeForce RTX 3070` (\$0.13/hr, after the cheaper RTX A2000 again had no capacity —
+  the fallback from #977 worked as designed). Real GPU-hours were billed (~482s ≈ 1.7¢) and the
+  pod was cleanly terminated by the client's `finally` guarantee. **Two real API limitations
+  surfaced that no amount of pre-reading the docs caught, only actually running it did:**
+  - `desiredStatus` never left `RUNNING` for the entire wait window, even though the smoke
+    test's own command should finish in well under a minute. On-demand Pods appear to track pod
+    (rental) lifecycle, not the inner container process — there's no evidence they self-report
+    "my command finished," unlike RunPod's separate Serverless product.
+  - The documented SSE logs endpoint (`GET /pods/{id}/logs`) returned a bare 400 with no
+    pod-specific detail — RunPod's REST API doesn't appear to actually expose Pod log retrieval
+    yet (a Feb-2025 GitHub feature request corroborates this), despite docs suggesting otherwise.
+  - **Neither is a code bug** — `run_job`'s `finally`-terminate held regardless, so the pod was
+    still torn down correctly. Fixed the *expectations*, not a defect: `wait_for_exit`/
+    `fetch_logs` docstrings now say plainly not to rely on either signal; the smoke test's pass
+    criteria dropped the "success marker in logs" requirement (structurally unreliable) in favor
+    of "a real pod launched on a real GPU, accrued measurable cost, and was torn down cleanly" —
+    which IS what actually matters for Wave 1's "prove the pipeline works" goal. Wait window cut
+    480s → 120s (no point paying to wait for a status flip that isn't coming).
+  - **Design note for whoever builds Wave 5's real embedding batch job:** don't rely on RunPod
+    Pod status or logs for "is it done" / "what did it produce" — have the job write its result
+    directly to Postgres or R2 (it'll have network access + credentials via env) and have the
+    orchestrator poll THAT for completion instead.
+  - Also fixed pre-existing (unrelated, landed via #971) `filterRegistry.generated.ts` codegen
+    staleness that was blocking this PR's `build` check — bundled since it had to be regenerated
+    to get CI green, not touched otherwise.
+  - **W1's RunPod deliverable is now genuinely done**: client built, 23 hermetic tests, and the
+    core guarantee (launch on a real GPU, bill real time, always tear down) verified against
+    real infrastructure across 4 live dispatches. Log/status-based completion detection is
+    explicitly NOT solved and explicitly deferred to Wave 5's real design (see note above).
 - 2026-08-06 (session continuation, part 3) — Operator confirmed `RUNPOD_API_KEY` was added as
   a repo secret; asked to finish the RunPod piece (Labeling page picked up by a different
   session in parallel). Built `scripts/runpod_client.py` (#972) + a `new_dedup_runpod_smoke_test`
