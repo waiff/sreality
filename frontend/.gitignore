@@ -8,6 +8,9 @@ dist-ssr
 .DS_Store
 .vite
 
+# smoke-check.mjs screenshots (local debugging artifacts)
+scripts/.smoke-shots/
+
 # tsc -b project-references artifacts
 *.tsbuildinfo
 vite.config.d.ts
