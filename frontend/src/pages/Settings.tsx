@@ -12,6 +12,13 @@
  *
  * No auth on /admin/* per the slice-1 design — the private Railway
  * URL is the security perimeter. We do NOT pass a bearer token.
+ *
+ * Layout: every section is a numbered CollapsibleSection folio (shared
+ * with NewDedupSettings — see components/settings/SectionChrome) and every
+ * help paragraph collapses to an InfoHint icon by default. The page-level
+ * Compact/Detailed toggle flips every description on the page at once —
+ * Detailed reproduces the old always-inline layout for reviewing many
+ * settings in one pass.
  */
 
 import { useEffect, useMemo, useState } from 'react';
@@ -45,38 +52,55 @@ import {
 } from '@/lib/api';
 import { fmtAbsolute } from '@/lib/format';
 import { useTheme, type ThemeMode } from '@/lib/theme';
-import { PickButton } from '@/components/controls';
+import { PickButton, Switch } from '@/components/controls';
 import TiersSection from '@/components/TiersSection';
 import { WORKFLOW_DOCS, type WorkflowDoc } from '@/lib/workflowDocs.generated';
+import {
+  CollapsibleSection,
+  Chevron,
+  InfoHint,
+  InfoModeToggle,
+  useInfoMode,
+  ErrorBanner,
+} from '@/components/settings/SectionChrome';
 
 export default function Settings() {
+  const [infoExpanded, setInfoExpanded] = useInfoMode('settings');
   return (
     <div className="px-6 pt-5 pb-10 max-w-screen-lg mx-auto">
-      <header>
-        <h1 className="text-2xl leading-tight">Settings</h1>
-        <p className="mt-1 text-sm text-[var(--color-ink-2)]">
-          Edit agent skills and app settings. Saves take effect on the next
-          request — no redeploy. Every change is preserved in history.
-        </p>
-      </header>
+      <div className="flex flex-wrap items-start justify-between gap-x-4 gap-y-3">
+        <header>
+          <h1 className="text-2xl leading-tight">Settings</h1>
+          <p className="mt-1 text-sm text-[var(--color-ink-2)]">
+            Edit agent skills and app settings. Saves take effect on the next
+            request — no redeploy. Every change is preserved in history.
+          </p>
+        </header>
+        <InfoModeToggle expanded={infoExpanded} onChange={setInfoExpanded} />
+      </div>
 
       <CollapsibleSection
         id="tiers"
+        index={1}
         eyebrow="Billing"
-        title="Tiers &amp; agenda visibility"
+        title="Tiers & agenda visibility"
+        infoExpanded={infoExpanded}
         description="Which agendas each plan can see, and which plan each account is on. Accounts without an explicit assignment get the default tier."
       >
         <TiersSection />
       </CollapsibleSection>
 
-      <CollapsibleSection id="skills" eyebrow="Agent" title="Skills">
-        <SkillsSection />
+      <CollapsibleSection id="skills" index={2} eyebrow="Agent" title="Skills" infoExpanded={infoExpanded}>
+        <SkillsSection infoExpanded={infoExpanded} />
       </CollapsibleSection>
 
       <CollapsibleSection
         id="delivery"
+        index={3}
         eyebrow="Alerts"
         title="Delivery"
+        infoExpanded={infoExpanded}
+        hint="Where watchdog & collection-monitoring alerts reach you, beyond the in-app feed. Pick the channels per watchdog / collection; set the destination address here. (Each channel also needs its transport key on the API service.)"
         description={
           <>
             Where watchdog &amp; collection-monitoring alerts reach you, beyond
@@ -86,22 +110,26 @@ export default function Settings() {
           </>
         }
       >
-        <DeliverySection />
+        <DeliverySection infoExpanded={infoExpanded} />
       </CollapsibleSection>
 
       <CollapsibleSection
         id="app-settings"
+        index={4}
         eyebrow="Tuning"
         title="App settings"
+        infoExpanded={infoExpanded}
         description="Operator-tunable prompts and model names used outside the agent (URL parser, listing summary, image comparison)."
       >
-        <AppSettingsSection />
+        <AppSettingsSection infoExpanded={infoExpanded} />
       </CollapsibleSection>
 
       <CollapsibleSection
         id="condition-regions"
+        index={5}
         eyebrow="Scoring"
         title="Hodnocení stavu — kraje"
+        infoExpanded={infoExpanded}
         description="Condition scoring runs kraj by kraj. Enabling a kraj means the scheduled batch job (every 3 h) starts draining that kraj automatically; the count is how many active listings there still await a condition score."
       >
         <ConditionRegionsSection />
@@ -109,8 +137,10 @@ export default function Settings() {
 
       <CollapsibleSection
         id="clip-regions"
+        index={6}
         eyebrow="Tagging"
         title="CLIP tagging — priority kraje"
+        infoExpanded={infoExpanded}
         description="CLIP image tagging drains the marked kraje first — tags + embeddings — so their coverage lands before the global sweep. Unmarked = no priority (everything drains newest-first); the count is the kraj's active listings."
       >
         <ClipRegionsSection />
@@ -118,8 +148,11 @@ export default function Settings() {
 
       <CollapsibleSection
         id="rent-map"
+        index={7}
         eyebrow="Rent map"
         title="Cenová mapa nájemného (MF)"
+        infoExpanded={infoExpanded}
+        hint="The Ministry of Finance rent price map feeds the secondary rent reference shown on every rental estimate. It auto-grabs monthly from mf.gov.cz; you can also upload a fresh .xlsx or pull the latest now. Every upload is kept in history; the latest revision is always the one in use."
         description={
           <>
             The Ministry of Finance rent price map feeds the secondary rent
@@ -135,17 +168,22 @@ export default function Settings() {
 
       <CollapsibleSection
         id="filter-availability"
+        index={8}
         eyebrow="Filters"
         title="Filter availability"
+        infoExpanded={infoExpanded}
         description="One row per filter from the canonical registry; columns are the agendas (Browse, Watchdog, agent tools, …) where that filter can apply. Toggle a cell off to hide the filter from that surface — backend matchers and UI forms both respect the matrix. Default is on everywhere a filter is declared."
       >
-        <FilterVisibilitySection />
+        <FilterVisibilitySection infoExpanded={infoExpanded} />
       </CollapsibleSection>
 
       <CollapsibleSection
         id="workflows"
+        index={9}
         eyebrow="Workflows"
         title="GitHub Actions"
+        infoExpanded={infoExpanded}
+        hint="Every workflow in .github/workflows/ — what it does, when it runs, the parameters you can set when running it manually, and links to its run history and source. This list is generated from the workflow files themselves and is kept in sync automatically (the build fails if a workflow changes without regenerating)."
         description={
           <>
             Every workflow in <span className="font-mono">.github/workflows/</span>{' '}
@@ -157,489 +195,12 @@ export default function Settings() {
           </>
         }
       >
-        <WorkflowsSection />
+        <WorkflowsSection infoExpanded={infoExpanded} />
       </CollapsibleSection>
 
-      <CollapsibleSection id="appearance" eyebrow="Theme" title="Appearance">
+      <CollapsibleSection id="appearance" index={10} eyebrow="Theme" title="Appearance" infoExpanded={infoExpanded}>
         <ThemeToggle />
       </CollapsibleSection>
-    </div>
-  );
-}
-
-/* -------------------------------------------------------------------- */
-/* Collapsible section                                                   */
-/* -------------------------------------------------------------------- */
-
-/* A clickable header (chevron + eyebrow + display-serif title) with the body —
- * description + content — hidden when collapsed. Per-section open/closed state
- * persists in localStorage so the operator's choices survive a reload (the page
- * is long). */
-function useCollapsed(id: string, defaultOpen: boolean): [boolean, () => void] {
-  const key = `settings.collapsed.${id}`;
-  const [open, setOpen] = useState<boolean>(() => {
-    try {
-      const v = localStorage.getItem(key);
-      return v == null ? defaultOpen : v === 'open';
-    } catch {
-      return defaultOpen;
-    }
-  });
-  const toggle = () =>
-    setOpen((prev) => {
-      const next = !prev;
-      try {
-        localStorage.setItem(key, next ? 'open' : 'closed');
-      } catch {
-        /* storage may be unavailable — collapse still works in-session */
-      }
-      return next;
-    });
-  return [open, toggle];
-}
-
-function Chevron({ open }: { open: boolean }) {
-  return (
-    <svg
-      width="14"
-      height="14"
-      viewBox="0 0 16 16"
-      aria-hidden="true"
-      className={`shrink-0 text-[var(--color-ink-4)] transition-transform ${open ? 'rotate-90' : ''}`}
-    >
-      <path
-        d="M6 4l4 4-4 4"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.5"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
-}
-
-function CollapsibleSection({
-  id,
-  title,
-  eyebrow,
-  description,
-  defaultOpen = true,
-  children,
-}: {
-  id: string;
-  title: string;
-  eyebrow?: string;
-  description?: React.ReactNode;
-  defaultOpen?: boolean;
-  children: React.ReactNode;
-}) {
-  const [isOpen, toggle] = useCollapsed(id, defaultOpen);
-  return (
-    <section id={id} className="mt-8 scroll-mt-20">
-      <button
-        type="button"
-        onClick={toggle}
-        aria-expanded={isOpen}
-        className="flex w-full items-center gap-2 text-left group"
-      >
-        <Chevron open={isOpen} />
-        <span className="min-w-0">
-          {eyebrow ? (
-            <span className="block text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)]">
-              {eyebrow}
-            </span>
-          ) : null}
-          <span
-            className="block text-xl group-hover:text-[var(--color-copper-2)] transition-colors"
-            style={{ fontFamily: 'var(--font-display)', fontWeight: 600 }}
-          >
-            {title}
-          </span>
-        </span>
-      </button>
-      {isOpen ? (
-        <div className="mt-3">
-          {description ? (
-            <p className="text-sm text-[var(--color-ink-3)] mb-3">{description}</p>
-          ) : null}
-          {children}
-        </div>
-      ) : null}
-    </section>
-  );
-}
-
-/* -------------------------------------------------------------------- */
-/* Rent map (MF Cenová mapa nájemného)                                   */
-/* -------------------------------------------------------------------- */
-
-function RentMapSection() {
-  const qc = useQueryClient();
-  const statusQ = useQuery({
-    queryKey: ['admin', 'rentmap'],
-    queryFn: getRentMapStatus,
-  });
-  const revsQ = useQuery({
-    queryKey: ['admin', 'rentmap', 'revisions'],
-    queryFn: listRentMapRevisions,
-  });
-  const [busy, setBusy] = useState<'upload' | 'fetch' | null>(null);
-  const [result, setResult] = useState<RentMapIngestResult | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  const refresh = () => {
-    qc.invalidateQueries({ queryKey: ['admin', 'rentmap'] });
-  };
-
-  const uploadMut = useMutation({
-    mutationFn: (file: File) => uploadRentMapFile(file),
-    onMutate: () => { setBusy('upload'); setError(null); setResult(null); },
-    onSuccess: (r) => { setResult(r); refresh(); },
-    onError: (e: unknown) =>
-      setError(e instanceof Error ? e.message : 'Upload failed'),
-    onSettled: () => setBusy(null),
-  });
-
-  const fetchMut = useMutation({
-    mutationFn: () => triggerRentMapFetch(),
-    onMutate: () => { setBusy('fetch'); setError(null); setResult(null); },
-    onSuccess: (r) => { setResult(r); refresh(); },
-    onError: (e: unknown) =>
-      setError(e instanceof Error ? e.message : 'Fetch failed'),
-    onSettled: () => setBusy(null),
-  });
-
-  const current: RentMapRevision | null = statusQ.data?.current ?? null;
-  const revisions = revsQ.data?.data ?? [];
-
-  return (
-    <div className="space-y-4">
-      <div className="border border-[var(--color-rule)] rounded-[var(--radius-sm)] p-4 bg-[var(--color-paper)]">
-        <div className="text-xs tracking-[0.18em] uppercase text-[var(--color-ink-3)]">
-          Current revision
-        </div>
-        {current ? (
-          <div className="mt-2 text-sm">
-            <span className="font-medium">{current.source_date ?? '—'}</span>{' '}
-            <span className="text-[var(--color-ink-3)]">
-              · {current.row_count.toLocaleString('cs-CZ')} territories ·{' '}
-              {current.source_filename}
-            </span>
-            <div className="text-xs text-[var(--color-ink-3)] mt-0.5">
-              ingested{' '}
-              {current.uploaded_at ? fmtAbsolute(current.uploaded_at) : '—'}
-              {current.uploaded_by ? ` by ${current.uploaded_by}` : ''}
-            </div>
-          </div>
-        ) : (
-          <div className="mt-2 text-sm text-[var(--color-ink-3)]">
-            No revision ingested yet.
-          </div>
-        )}
-      </div>
-
-      <div className="flex flex-wrap items-center gap-3">
-        <label className="inline-flex items-center gap-2 text-sm cursor-pointer border border-[var(--color-rule)] rounded-[var(--radius-sm)] px-3 py-2">
-          <span>Upload .xlsx</span>
-          <input
-            type="file"
-            accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            className="hidden"
-            disabled={busy !== null}
-            onChange={(e) => {
-              const f = e.target.files?.[0];
-              if (f) uploadMut.mutate(f);
-              e.target.value = '';
-            }}
-          />
-        </label>
-        <button
-          type="button"
-          className="text-sm border border-[var(--color-rule)] rounded-[var(--radius-sm)] px-3 py-2 disabled:opacity-50"
-          disabled={busy !== null}
-          onClick={() => fetchMut.mutate()}
-        >
-          {busy === 'fetch' ? 'Fetching…' : 'Fetch latest from MF'}
-        </button>
-        {busy === 'upload' && (
-          <span className="text-sm text-[var(--color-ink-3)]">Uploading…</span>
-        )}
-      </div>
-
-      {result && (
-        <p className="text-sm text-[var(--color-sage)]">
-          {result.ingested
-            ? `Ingested revision ${result.source_revision} — ${result.territory_count.toLocaleString('cs-CZ')} territories (${result.source_date ?? '—'}).`
-            : `No change — this file (sha ${result.file_sha256.slice(0, 8)}) was already ingested.`}
-        </p>
-      )}
-      {error && <p className="text-sm text-[var(--color-brick)]">{error}</p>}
-
-      <div>
-        <div className="text-xs tracking-[0.18em] uppercase text-[var(--color-ink-3)] mb-2">
-          History
-        </div>
-        {revisions.length === 0 ? (
-          <p className="text-sm text-[var(--color-ink-3)]">No revisions yet.</p>
-        ) : (
-          <table className="w-full text-sm border border-[var(--color-rule)]">
-            <thead>
-              <tr className="text-left text-xs uppercase tracking-[0.1em] text-[var(--color-ink-3)] border-b border-[var(--color-rule)]">
-                <th className="px-3 py-2 font-medium">Rev</th>
-                <th className="px-3 py-2 font-medium">Source date</th>
-                <th className="px-3 py-2 font-medium">Territories</th>
-                <th className="px-3 py-2 font-medium">File</th>
-                <th className="px-3 py-2 font-medium">Ingested</th>
-              </tr>
-            </thead>
-            <tbody>
-              {revisions.map((r) => (
-                <tr
-                  key={r.source_revision}
-                  className="border-b border-[var(--color-rule)] last:border-0"
-                >
-                  <td className="px-3 py-2 tabular-nums">{r.source_revision}</td>
-                  <td className="px-3 py-2">{r.source_date ?? '—'}</td>
-                  <td className="px-3 py-2 tabular-nums">
-                    {r.row_count.toLocaleString('cs-CZ')}
-                  </td>
-                  <td className="px-3 py-2 font-mono text-xs text-[var(--color-ink-3)] truncate max-w-[14rem]">
-                    {r.source_filename}
-                  </td>
-                  <td className="px-3 py-2 text-xs text-[var(--color-ink-3)]">
-                    {r.uploaded_at ? fmtAbsolute(r.uploaded_at) : '—'}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </div>
-    </div>
-  );
-}
-
-/* -------------------------------------------------------------------- */
-/* GitHub Actions (generated from .github/workflows/*.yml)               */
-/* -------------------------------------------------------------------- */
-
-function triggerLabels(doc: WorkflowDoc): string[] {
-  const labels: string[] = [];
-  for (const s of doc.schedules) labels.push(s.human);
-  if (doc.manual) labels.push('Manual');
-  if (doc.onPush) labels.push('On push');
-  if (doc.onPullRequest) labels.push('On pull request');
-  return labels.length ? labels : ['—'];
-}
-
-function WorkflowsSection() {
-  const sorted = [...WORKFLOW_DOCS].sort((a, b) => a.name.localeCompare(b.name));
-  return (
-    <div className="space-y-3">
-      {sorted.map((doc) => (
-        <WorkflowCard key={doc.filename} doc={doc} />
-      ))}
-    </div>
-  );
-}
-
-function WorkflowCard({ doc }: { doc: WorkflowDoc }) {
-  const [open, setOpen] = useState(false);
-  return (
-    <div className="border border-[var(--color-rule)] rounded-[var(--radius-sm)] bg-[var(--color-paper)]">
-      <button
-        type="button"
-        className="w-full px-4 py-3 flex items-baseline justify-between gap-4 text-left"
-        onClick={() => setOpen((v) => !v)}
-      >
-        <div className="min-w-0">
-          <div className="flex items-baseline gap-2 flex-wrap">
-            <span className="font-medium">{doc.name}</span>
-            <span className="font-mono text-[0.7rem] text-[var(--color-ink-4)]">
-              {doc.filename}
-            </span>
-          </div>
-          <div className="text-xs text-[var(--color-ink-3)] mt-0.5 line-clamp-2">
-            {doc.description}
-          </div>
-        </div>
-        <div className="flex items-center gap-2 whitespace-nowrap">
-          {triggerLabels(doc).slice(0, 2).map((label) => (
-            <TriggerBadge key={label} label={label} />
-          ))}
-          <span className="text-[0.7rem] text-[var(--color-ink-4)]" aria-hidden="true">
-            {open ? '▴' : '▾'}
-          </span>
-        </div>
-      </button>
-      {open && <WorkflowDetail doc={doc} />}
-    </div>
-  );
-}
-
-function TriggerBadge({ label }: { label: string }) {
-  return (
-    <span className="inline-block px-1.5 py-px text-[0.6rem] tracking-[0.08em] uppercase rounded-[var(--radius-xs)] bg-[var(--color-copper-soft)] text-[var(--color-copper)] border border-[var(--color-copper)]/30">
-      {label}
-    </span>
-  );
-}
-
-function WorkflowDetail({ doc }: { doc: WorkflowDoc }) {
-  return (
-    <div className="px-4 pt-2 pb-4 border-t border-[var(--color-rule-soft)] space-y-4">
-      <p className="text-sm text-[var(--color-ink-2)] leading-relaxed">
-        {doc.description}
-      </p>
-
-      <Field label="Triggers">
-        <ul className="text-sm text-[var(--color-ink-2)] space-y-0.5">
-          {doc.schedules.map((s) => (
-            <li key={s.cron}>
-              Scheduled · {s.human}{' '}
-              <span className="font-mono text-xs text-[var(--color-ink-4)]">
-                ({s.cron})
-              </span>
-            </li>
-          ))}
-          {doc.manual && <li>Manual · run from the Actions tab with the parameters below</li>}
-          {doc.onPush && (
-            <li>
-              On push{doc.paths ? ' (when matching paths change)' : ''}
-            </li>
-          )}
-          {doc.onPullRequest && (
-            <li>
-              On pull request{doc.paths ? ' (when matching paths change)' : ''}
-            </li>
-          )}
-          {doc.schedules.length === 0 &&
-            !doc.manual &&
-            !doc.onPush &&
-            !doc.onPullRequest && <li className="text-[var(--color-ink-3)]">None declared</li>}
-        </ul>
-        {doc.paths && (
-          <div className="mt-1 text-xs text-[var(--color-ink-3)]">
-            Paths:{' '}
-            {doc.paths.map((p) => (
-              <span
-                key={p}
-                className="font-mono text-[0.7rem] bg-[var(--color-paper-2)] px-1 py-px rounded-[var(--radius-xs)] mr-1"
-              >
-                {p}
-              </span>
-            ))}
-          </div>
-        )}
-      </Field>
-
-      {doc.inputs.length > 0 && (
-        <Field label="Parameters (when run manually)">
-          <div className="border border-[var(--color-rule)] rounded-[var(--radius-xs)] overflow-x-auto">
-            <table className="w-full text-sm border-collapse">
-              <thead>
-                <tr className="bg-[var(--color-paper-2)] border-b border-[var(--color-rule)] text-[0.65rem] tracking-[0.1em] uppercase text-[var(--color-ink-3)]">
-                  <th className="text-left px-3 py-1.5 font-medium">Parameter</th>
-                  <th className="text-left px-3 py-1.5 font-medium">Type</th>
-                  <th className="text-left px-3 py-1.5 font-medium">Default</th>
-                  <th className="text-left px-3 py-1.5 font-medium">Description</th>
-                </tr>
-              </thead>
-              <tbody>
-                {doc.inputs.map((input) => (
-                  <tr
-                    key={input.name}
-                    className="border-b border-[var(--color-rule-soft)] last:border-b-0 align-top"
-                  >
-                    <td className="px-3 py-1.5">
-                      <span className="font-mono text-[0.78rem]">{input.name}</span>
-                      {input.required && (
-                        <span className="ml-1 text-[0.6rem] uppercase tracking-wide text-[var(--color-brick)]">
-                          required
-                        </span>
-                      )}
-                    </td>
-                    <td className="px-3 py-1.5 text-xs text-[var(--color-ink-3)]">
-                      {input.type}
-                      {input.options && (
-                        <div className="mt-0.5 text-[var(--color-ink-4)]">
-                          {input.options.join(' | ')}
-                        </div>
-                      )}
-                    </td>
-                    <td className="px-3 py-1.5 font-mono text-xs text-[var(--color-ink-3)]">
-                      {input.default == null ? '—' : input.default}
-                    </td>
-                    <td className="px-3 py-1.5 text-xs text-[var(--color-ink-2)] max-w-[24rem]">
-                      {input.description || '—'}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </Field>
-      )}
-
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-        {doc.secrets.length > 0 && (
-          <Field label="Secrets used">
-            <div className="flex flex-wrap gap-1">
-              {doc.secrets.map((s) => (
-                <span
-                  key={s}
-                  className="font-mono text-[0.7rem] bg-[var(--color-paper-2)] px-1.5 py-px rounded-[var(--radius-xs)] border border-[var(--color-rule-soft)]"
-                >
-                  {s}
-                </span>
-              ))}
-            </div>
-          </Field>
-        )}
-        <Field label="Run settings">
-          <ul className="text-xs text-[var(--color-ink-2)] space-y-0.5">
-            {doc.timeoutMinutes != null && (
-              <li>Timeout: {doc.timeoutMinutes} min</li>
-            )}
-            {doc.concurrencyGroup && (
-              <li>
-                Concurrency: <span className="font-mono">{doc.concurrencyGroup}</span>{' '}
-                {doc.cancelInProgress === false
-                  ? '(queues, never cancelled)'
-                  : doc.cancelInProgress === true
-                    ? '(cancels in-progress)'
-                    : ''}
-              </li>
-            )}
-            {doc.permissions && <li>Permissions: {doc.permissions}</li>}
-            {doc.timeoutMinutes == null &&
-              !doc.concurrencyGroup &&
-              !doc.permissions && (
-                <li className="text-[var(--color-ink-3)]">Defaults</li>
-              )}
-          </ul>
-        </Field>
-      </div>
-
-      <div className="flex items-center gap-4 pt-1">
-        <a
-          href={doc.runsUrl}
-          target="_blank"
-          rel="noreferrer"
-          className="text-sm text-[var(--color-copper)] hover:underline underline-offset-2"
-        >
-          View run history ↗
-        </a>
-        <a
-          href={doc.sourceUrl}
-          target="_blank"
-          rel="noreferrer"
-          className="text-sm text-[var(--color-copper)] hover:underline underline-offset-2"
-        >
-          View YAML ↗
-        </a>
-      </div>
     </div>
   );
 }
@@ -711,7 +272,7 @@ function ThemeGlyph({ kind }: { kind: 'sun' | 'moon' | 'system' }) {
 /* Skills                                                                */
 /* -------------------------------------------------------------------- */
 
-function SkillsSection() {
+function SkillsSection({ infoExpanded }: { infoExpanded: boolean }) {
   const [showArchived, setShowArchived] = useState(false);
   const skillsQ = useQuery({
     queryKey: ['admin', 'skills', { includeArchived: showArchived }],
@@ -734,14 +295,14 @@ function SkillsSection() {
   const archivedCount = skills.filter((s) => s.archived_at != null).length;
 
   return (
-    <div className="space-y-3">
+    <div className="space-y-2">
       {skills.length === 0 && (
         <p className="text-sm text-[var(--color-ink-3)]">No skills yet.</p>
       )}
       {skills
         .filter((s) => showArchived || s.archived_at == null)
         .map((s) => (
-          <SkillCard key={s.name} skill={s} tools={tools} />
+          <SkillCard key={s.name} skill={s} tools={tools} infoExpanded={infoExpanded} />
         ))}
 
       <button
@@ -759,7 +320,15 @@ function SkillsSection() {
   );
 }
 
-function SkillCard({ skill, tools }: { skill: Skill; tools: AgentTool[] }) {
+function SkillCard({
+  skill,
+  tools,
+  infoExpanded,
+}: {
+  skill: Skill;
+  tools: AgentTool[];
+  infoExpanded: boolean;
+}) {
   const [open, setOpen] = useState(false);
   const isArchived = skill.archived_at != null;
   return (
@@ -773,30 +342,33 @@ function SkillCard({ skill, tools }: { skill: Skill; tools: AgentTool[] }) {
     >
       <button
         type="button"
-        className="w-full px-4 py-3 flex items-baseline justify-between gap-4 text-left"
+        className="w-full px-4 py-2.5 flex items-center justify-between gap-4 text-left"
         onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
       >
-        <div className="min-w-0">
-          <div className="flex items-baseline gap-2">
-            <span className={['font-medium', isArchived ? 'text-[var(--color-ink-3)]' : ''].join(' ')}>
-              {skill.name}
+        <div className="min-w-0 flex items-center gap-2">
+          <span className={['font-medium', isArchived ? 'text-[var(--color-ink-3)]' : ''].join(' ')}>
+            {skill.name}
+          </span>
+          {isArchived && (
+            <span className="inline-block px-1.5 py-px text-[0.6rem] tracking-[0.14em] uppercase rounded-[var(--radius-xs)] bg-[var(--color-paper-2)] text-[var(--color-ink-4)] border border-[var(--color-rule)]">
+              archived
             </span>
-            {isArchived && (
-              <span className="inline-block px-1.5 py-px text-[0.6rem] tracking-[0.14em] uppercase rounded-[var(--radius-xs)] bg-[var(--color-paper-2)] text-[var(--color-ink-4)] border border-[var(--color-rule)]">
-                archived
-              </span>
-            )}
-          </div>
-          <div className="text-xs text-[var(--color-ink-3)] mt-0.5">
-            {skill.description}
-          </div>
+          )}
+          {skill.description && !infoExpanded && <InfoHint text={skill.description} />}
         </div>
-        <div className="text-[0.7rem] text-[var(--color-ink-4)] tracking-wide whitespace-nowrap">
-          {skill.updated_at ? `last edit ${fmtAbsolute(skill.updated_at)}` : ''}
-          {' '}
-          <span aria-hidden="true">{open ? '▴' : '▾'}</span>
+        <div className="flex items-center gap-2.5 shrink-0">
+          <span className="text-[0.7rem] text-[var(--color-ink-4)] tracking-wide whitespace-nowrap">
+            {skill.updated_at ? `edited ${fmtAbsolute(skill.updated_at)}` : ''}
+          </span>
+          <Chevron open={open} />
         </div>
       </button>
+      {infoExpanded && skill.description && (
+        <div className="px-4 pb-2.5 text-xs text-[var(--color-ink-3)] leading-relaxed">
+          {skill.description}
+        </div>
+      )}
       {open && <SkillEditor skill={skill} tools={tools} />}
     </div>
   );
@@ -969,10 +541,10 @@ function LimitInput({
 }
 
 /* -------------------------------------------------------------------- */
-/* App settings                                                          */
+/* Delivery (notification channels)                                      */
 /* -------------------------------------------------------------------- */
 
-function DeliverySection() {
+function DeliverySection({ infoExpanded }: { infoExpanded: boolean }) {
   const q = useQuery({ queryKey: ['admin', 'app_settings'], queryFn: listAppSettings });
   if (q.error) return <ErrorBanner message={q.error.message} />;
   if (!q.data)
@@ -982,13 +554,14 @@ function DeliverySection() {
     return typeof s?.value === 'string' ? s.value : '';
   };
   return (
-    <div className="space-y-4 max-w-xl">
+    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
       <RecipientField
         settingKey="notification_email_to"
         label="Email recipient"
         placeholder="you@example.com"
         hint="Where watchdog / collection email alerts are sent. Also needs RESEND_API_KEY + EMAIL_FROM on the API service."
         initial={val('notification_email_to')}
+        infoExpanded={infoExpanded}
       />
       <RecipientField
         settingKey="notification_telegram_chat_id"
@@ -996,6 +569,7 @@ function DeliverySection() {
         placeholder="e.g. 123456789"
         hint="DM your bot once, then paste the numeric chat_id. Also needs TELEGRAM_BOT_TOKEN on the API service."
         initial={val('notification_telegram_chat_id')}
+        infoExpanded={infoExpanded}
       />
     </div>
   );
@@ -1007,12 +581,14 @@ function RecipientField({
   placeholder,
   hint,
   initial,
+  infoExpanded,
 }: {
   settingKey: string;
   label: string;
   placeholder: string;
   hint: string;
   initial: string;
+  infoExpanded: boolean;
 }) {
   const queryClient = useQueryClient();
   const [text, setText] = useState(initial);
@@ -1040,8 +616,11 @@ function RecipientField({
   return (
     <div>
       <label className="block">
-        <span className="text-[0.65rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)]">
-          {label}
+        <span className="flex items-center gap-1.5">
+          <span className="text-[0.65rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)]">
+            {label}
+          </span>
+          {!infoExpanded && <InfoHint text={hint} />}
         </span>
         <div className="mt-1 flex items-center gap-2">
           <input
@@ -1049,7 +628,7 @@ function RecipientField({
             value={text}
             onChange={(e) => setText(e.target.value)}
             placeholder={placeholder}
-            className="flex-1 px-3 py-2 text-sm rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)] placeholder:text-[var(--color-ink-4)] focus:outline-none focus:border-[var(--color-rule-strong)]"
+            className="flex-1 min-w-0 px-3 py-2 text-sm rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)] placeholder:text-[var(--color-ink-4)] focus:outline-none focus:border-[var(--color-rule-strong)]"
           />
           <button
             type="button"
@@ -1061,7 +640,7 @@ function RecipientField({
           </button>
         </div>
       </label>
-      <p className="mt-1 text-[0.72rem] text-[var(--color-ink-4)]">{hint}</p>
+      {infoExpanded && <p className="mt-1 text-[0.72rem] text-[var(--color-ink-4)]">{hint}</p>}
       {toast && (
         <p
           className={[
@@ -1078,20 +657,24 @@ function RecipientField({
   );
 }
 
-function AppSettingsSection() {
+/* -------------------------------------------------------------------- */
+/* App settings                                                          */
+/* -------------------------------------------------------------------- */
+
+function AppSettingsSection({ infoExpanded }: { infoExpanded: boolean }) {
   const q = useQuery({ queryKey: ['admin', 'app_settings'], queryFn: listAppSettings });
   if (q.error) return <ErrorBanner message={q.error.message} />;
   if (!q.data) return <p className="text-sm text-[var(--color-ink-3)]">Loading app settings…</p>;
   return (
-    <div className="space-y-3">
+    <div className="space-y-2">
       {q.data.data.map((setting) => (
-        <AppSettingRow key={setting.key} setting={setting} />
+        <AppSettingRow key={setting.key} setting={setting} infoExpanded={infoExpanded} />
       ))}
     </div>
   );
 }
 
-function AppSettingRow({ setting }: { setting: AppSetting }) {
+function AppSettingRow({ setting, infoExpanded }: { setting: AppSetting; infoExpanded: boolean }) {
   const queryClient = useQueryClient();
   const [open, setOpen] = useState(false);
   const [text, setText] = useState<string>(() => JSON.stringify(setting.value, null, 2));
@@ -1131,23 +714,26 @@ function AppSettingRow({ setting }: { setting: AppSetting }) {
     <div className="border border-[var(--color-rule)] rounded-[var(--radius-sm)] bg-[var(--color-paper)]">
       <button
         type="button"
-        className="w-full px-4 py-3 flex items-baseline justify-between gap-4 text-left"
+        className="w-full px-4 py-2.5 flex items-center justify-between gap-4 text-left"
         onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
       >
-        <div>
-          <div className="font-mono text-sm">{setting.key}</div>
-          {setting.description && (
-            <div className="text-xs text-[var(--color-ink-3)] mt-0.5">
-              {setting.description}
-            </div>
-          )}
+        <div className="min-w-0 flex items-center gap-2">
+          <span className="font-mono text-sm">{setting.key}</span>
+          {setting.description && !infoExpanded && <InfoHint text={setting.description} />}
         </div>
-        <div className="text-[0.7rem] text-[var(--color-ink-4)] tracking-wide whitespace-nowrap">
-          {setting.updated_at ? `last edit ${fmtAbsolute(setting.updated_at)}` : ''}
-          {' '}
-          <span aria-hidden="true">{open ? '▴' : '▾'}</span>
+        <div className="flex items-center gap-2.5 shrink-0">
+          <span className="text-[0.7rem] text-[var(--color-ink-4)] tracking-wide whitespace-nowrap">
+            {setting.updated_at ? `edited ${fmtAbsolute(setting.updated_at)}` : ''}
+          </span>
+          <Chevron open={open} />
         </div>
       </button>
+      {infoExpanded && setting.description && (
+        <div className="px-4 pb-2.5 text-xs text-[var(--color-ink-3)] leading-relaxed">
+          {setting.description}
+        </div>
+      )}
       {open && (
         <div className="px-4 pt-2 pb-4 border-t border-[var(--color-rule-soft)] space-y-3">
           <textarea
@@ -1181,6 +767,56 @@ function AppSettingRow({ setting }: { setting: AppSetting }) {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+/* -------------------------------------------------------------------- */
+/* Region toggle grid — shared shape behind the two per-kraj tables       */
+/* below (condition scoring, CLIP priority). A responsive 1/2/3-column    */
+/* grid of compact cells reads far better than a 3-column table for a    */
+/* flat list of ~14 kraje.                                                */
+/* -------------------------------------------------------------------- */
+
+function RegionToggleGrid({
+  rows,
+  countLabel,
+  toggleLabel,
+  pending,
+  onToggle,
+  footnote,
+}: {
+  rows: Array<{ id: number; name: string; count: number; on: boolean }>;
+  countLabel: string;
+  toggleLabel: string;
+  pending: boolean;
+  onToggle: (id: number, next: boolean) => void;
+  footnote: string;
+}) {
+  return (
+    <div>
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+        {rows.map((r) => (
+          <div
+            key={r.id}
+            className="flex items-center justify-between gap-3 px-3 py-2 rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper)]"
+          >
+            <div className="min-w-0">
+              <div className="text-sm truncate">{r.name}</div>
+              <div className="text-[0.7rem] text-[var(--color-ink-4)] tabular-nums">
+                {r.count.toLocaleString('cs-CZ')} {countLabel}
+              </div>
+            </div>
+            <Switch
+              on={r.on}
+              pending={pending}
+              onChange={(next) => onToggle(r.id, next)}
+              ariaLabel={`${toggleLabel} ${r.name}`}
+            />
+          </div>
+        ))}
+      </div>
+      <p className="mt-2.5 text-[0.7rem] text-[var(--color-ink-4)]">{footnote}</p>
     </div>
   );
 }
@@ -1243,45 +879,16 @@ function ConditionRegionsSection() {
   };
 
   return (
-    <div className="border border-[var(--color-rule)] rounded-[var(--radius-sm)] overflow-hidden">
-      <table className="w-full text-sm border-collapse">
-        <thead>
-          <tr className="bg-[var(--color-paper-2)] border-b border-[var(--color-rule)] text-[0.65rem] tracking-[0.16em] uppercase text-[var(--color-ink-3)]">
-            <th className="text-left px-3 py-2 font-medium">Kraj</th>
-            <th className="text-right px-3 py-2 font-medium">Unscored active</th>
-            <th className="text-center px-3 py-2 font-medium w-24">Scoring</th>
-          </tr>
-        </thead>
-        <tbody>
-          {regions.map((r) => (
-            <tr
-              key={r.id}
-              className="border-b border-[var(--color-rule-soft)] last:border-b-0"
-            >
-              <td className="px-3 py-2">{r.name}</td>
-              <td className="px-3 py-2 text-right tabular-nums">
-                {r.unscored_active.toLocaleString('cs-CZ')}
-              </td>
-              <td className="px-3 py-2 text-center">
-                <FilterCell
-                  enabled={r.enabled}
-                  pending={mut.isPending}
-                  onChange={(next) => toggle(r.id, next)}
-                />
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-      {error && (
-        <p className="px-3 py-2 text-sm text-[var(--color-brick)] border-t border-[var(--color-rule)]">
-          {error}
-        </p>
-      )}
-      <p className="px-3 py-2 text-[0.7rem] text-[var(--color-ink-4)] border-t border-[var(--color-rule)] bg-[var(--color-paper-2)]/50">
-        {parked_no_geo.toLocaleString('cs-CZ')} unscored active listings carry
-        no kraj (missing coordinates) and are outside every toggle.
-      </p>
+    <div>
+      <RegionToggleGrid
+        rows={regions.map((r) => ({ id: r.id, name: r.name, count: r.unscored_active, on: r.enabled }))}
+        countLabel="unscored active"
+        toggleLabel="Condition scoring for"
+        pending={mut.isPending}
+        onToggle={toggle}
+        footnote={`${parked_no_geo.toLocaleString('cs-CZ')} unscored active listings carry no kraj (missing coordinates) and are outside every toggle.`}
+      />
+      {error && <p className="mt-2 text-sm text-[var(--color-brick)]">{error}</p>}
     </div>
   );
 }
@@ -1339,45 +946,396 @@ function ClipRegionsSection() {
   };
 
   return (
-    <div className="border border-[var(--color-rule)] rounded-[var(--radius-sm)] overflow-hidden">
-      <table className="w-full text-sm border-collapse">
-        <thead>
-          <tr className="bg-[var(--color-paper-2)] border-b border-[var(--color-rule)] text-[0.65rem] tracking-[0.16em] uppercase text-[var(--color-ink-3)]">
-            <th className="text-left px-3 py-2 font-medium">Kraj</th>
-            <th className="text-right px-3 py-2 font-medium">Active listings</th>
-            <th className="text-center px-3 py-2 font-medium w-24">Priority</th>
-          </tr>
-        </thead>
-        <tbody>
-          {regions.map((r) => (
-            <tr
-              key={r.id}
-              className="border-b border-[var(--color-rule-soft)] last:border-b-0"
+    <div>
+      <RegionToggleGrid
+        rows={regions.map((r) => ({ id: r.id, name: r.name, count: r.active_listings, on: r.priority }))}
+        countLabel="active"
+        toggleLabel="CLIP priority for"
+        pending={mut.isPending}
+        onToggle={toggle}
+        footnote={`${parked_no_geo.toLocaleString('cs-CZ')} active listings carry no kraj (missing coordinates); they tag in the global sweep, after the priority kraje.`}
+      />
+      {error && <p className="mt-2 text-sm text-[var(--color-brick)]">{error}</p>}
+    </div>
+  );
+}
+
+/* -------------------------------------------------------------------- */
+/* Rent map (MF Cenová mapa nájemného)                                   */
+/* -------------------------------------------------------------------- */
+
+function RentMapSection() {
+  const qc = useQueryClient();
+  const statusQ = useQuery({
+    queryKey: ['admin', 'rentmap'],
+    queryFn: getRentMapStatus,
+  });
+  const revsQ = useQuery({
+    queryKey: ['admin', 'rentmap', 'revisions'],
+    queryFn: listRentMapRevisions,
+  });
+  const [busy, setBusy] = useState<'upload' | 'fetch' | null>(null);
+  const [result, setResult] = useState<RentMapIngestResult | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const refresh = () => {
+    qc.invalidateQueries({ queryKey: ['admin', 'rentmap'] });
+  };
+
+  const uploadMut = useMutation({
+    mutationFn: (file: File) => uploadRentMapFile(file),
+    onMutate: () => { setBusy('upload'); setError(null); setResult(null); },
+    onSuccess: (r) => { setResult(r); refresh(); },
+    onError: (e: unknown) =>
+      setError(e instanceof Error ? e.message : 'Upload failed'),
+    onSettled: () => setBusy(null),
+  });
+
+  const fetchMut = useMutation({
+    mutationFn: () => triggerRentMapFetch(),
+    onMutate: () => { setBusy('fetch'); setError(null); setResult(null); },
+    onSuccess: (r) => { setResult(r); refresh(); },
+    onError: (e: unknown) =>
+      setError(e instanceof Error ? e.message : 'Fetch failed'),
+    onSettled: () => setBusy(null),
+  });
+
+  const current: RentMapRevision | null = statusQ.data?.current ?? null;
+  const revisions = revsQ.data?.data ?? [];
+
+  return (
+    <div className="space-y-4">
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div className="border border-[var(--color-rule)] rounded-[var(--radius-sm)] p-4 bg-[var(--color-paper)]">
+          <div className="text-xs tracking-[0.18em] uppercase text-[var(--color-ink-3)]">
+            Current revision
+          </div>
+          {current ? (
+            <div className="mt-2 text-sm">
+              <span className="font-medium">{current.source_date ?? '—'}</span>{' '}
+              <span className="text-[var(--color-ink-3)]">
+                · {current.row_count.toLocaleString('cs-CZ')} territories ·{' '}
+                {current.source_filename}
+              </span>
+              <div className="text-xs text-[var(--color-ink-3)] mt-0.5">
+                ingested{' '}
+                {current.uploaded_at ? fmtAbsolute(current.uploaded_at) : '—'}
+                {current.uploaded_by ? ` by ${current.uploaded_by}` : ''}
+              </div>
+            </div>
+          ) : (
+            <div className="mt-2 text-sm text-[var(--color-ink-3)]">
+              No revision ingested yet.
+            </div>
+          )}
+        </div>
+
+        <div className="border border-[var(--color-rule)] rounded-[var(--radius-sm)] p-4 bg-[var(--color-paper)]">
+          <div className="text-xs tracking-[0.18em] uppercase text-[var(--color-ink-3)]">
+            Actions
+          </div>
+          <div className="mt-2 flex flex-wrap items-center gap-3">
+            <label className="inline-flex items-center gap-2 text-sm cursor-pointer border border-[var(--color-rule)] rounded-[var(--radius-sm)] px-3 py-2">
+              <span>Upload .xlsx</span>
+              <input
+                type="file"
+                accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                className="hidden"
+                disabled={busy !== null}
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  if (f) uploadMut.mutate(f);
+                  e.target.value = '';
+                }}
+              />
+            </label>
+            <button
+              type="button"
+              className="text-sm border border-[var(--color-rule)] rounded-[var(--radius-sm)] px-3 py-2 disabled:opacity-50"
+              disabled={busy !== null}
+              onClick={() => fetchMut.mutate()}
             >
-              <td className="px-3 py-2">{r.name}</td>
-              <td className="px-3 py-2 text-right tabular-nums">
-                {r.active_listings.toLocaleString('cs-CZ')}
-              </td>
-              <td className="px-3 py-2 text-center">
-                <FilterCell
-                  enabled={r.priority}
-                  pending={mut.isPending}
-                  onChange={(next) => toggle(r.id, next)}
-                />
-              </td>
-            </tr>
+              {busy === 'fetch' ? 'Fetching…' : 'Fetch latest from MF'}
+            </button>
+            {busy === 'upload' && (
+              <span className="text-sm text-[var(--color-ink-3)]">Uploading…</span>
+            )}
+          </div>
+          {result && (
+            <p className="mt-2 text-sm text-[var(--color-sage)]">
+              {result.ingested
+                ? `Ingested revision ${result.source_revision} — ${result.territory_count.toLocaleString('cs-CZ')} territories (${result.source_date ?? '—'}).`
+                : `No change — this file (sha ${result.file_sha256.slice(0, 8)}) was already ingested.`}
+            </p>
+          )}
+          {error && <p className="mt-2 text-sm text-[var(--color-brick)]">{error}</p>}
+        </div>
+      </div>
+
+      <div>
+        <div className="text-xs tracking-[0.18em] uppercase text-[var(--color-ink-3)] mb-2">
+          History
+        </div>
+        {revisions.length === 0 ? (
+          <p className="text-sm text-[var(--color-ink-3)]">No revisions yet.</p>
+        ) : (
+          <table className="w-full text-sm border border-[var(--color-rule)]">
+            <thead>
+              <tr className="text-left text-xs uppercase tracking-[0.1em] text-[var(--color-ink-3)] border-b border-[var(--color-rule)]">
+                <th className="px-3 py-2 font-medium">Rev</th>
+                <th className="px-3 py-2 font-medium">Source date</th>
+                <th className="px-3 py-2 font-medium">Territories</th>
+                <th className="px-3 py-2 font-medium">File</th>
+                <th className="px-3 py-2 font-medium">Ingested</th>
+              </tr>
+            </thead>
+            <tbody>
+              {revisions.map((r) => (
+                <tr
+                  key={r.source_revision}
+                  className="border-b border-[var(--color-rule)] last:border-0"
+                >
+                  <td className="px-3 py-2 tabular-nums">{r.source_revision}</td>
+                  <td className="px-3 py-2">{r.source_date ?? '—'}</td>
+                  <td className="px-3 py-2 tabular-nums">
+                    {r.row_count.toLocaleString('cs-CZ')}
+                  </td>
+                  <td className="px-3 py-2 font-mono text-xs text-[var(--color-ink-3)] truncate max-w-[14rem]">
+                    {r.source_filename}
+                  </td>
+                  <td className="px-3 py-2 text-xs text-[var(--color-ink-3)]">
+                    {r.uploaded_at ? fmtAbsolute(r.uploaded_at) : '—'}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* -------------------------------------------------------------------- */
+/* GitHub Actions (generated from .github/workflows/*.yml)               */
+/* -------------------------------------------------------------------- */
+
+function triggerLabels(doc: WorkflowDoc): string[] {
+  const labels: string[] = [];
+  for (const s of doc.schedules) labels.push(s.human);
+  if (doc.manual) labels.push('Manual');
+  if (doc.onPush) labels.push('On push');
+  if (doc.onPullRequest) labels.push('On pull request');
+  return labels.length ? labels : ['—'];
+}
+
+function WorkflowsSection({ infoExpanded }: { infoExpanded: boolean }) {
+  const sorted = [...WORKFLOW_DOCS].sort((a, b) => a.name.localeCompare(b.name));
+  return (
+    <div className="space-y-2">
+      {sorted.map((doc) => (
+        <WorkflowCard key={doc.filename} doc={doc} infoExpanded={infoExpanded} />
+      ))}
+    </div>
+  );
+}
+
+function WorkflowCard({ doc, infoExpanded }: { doc: WorkflowDoc; infoExpanded: boolean }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="border border-[var(--color-rule)] rounded-[var(--radius-sm)] bg-[var(--color-paper)]">
+      <button
+        type="button"
+        className="w-full px-4 py-2.5 flex items-center justify-between gap-4 text-left"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+      >
+        <div className="min-w-0 flex items-center gap-2 flex-wrap">
+          <span className="font-medium">{doc.name}</span>
+          <span className="font-mono text-[0.7rem] text-[var(--color-ink-4)]">
+            {doc.filename}
+          </span>
+          {!infoExpanded && <InfoHint text={doc.description} />}
+        </div>
+        <div className="flex items-center gap-2 whitespace-nowrap shrink-0">
+          {triggerLabels(doc).slice(0, 2).map((label) => (
+            <TriggerBadge key={label} label={label} />
           ))}
-        </tbody>
-      </table>
-      {error && (
-        <p className="px-3 py-2 text-sm text-[var(--color-brick)] border-t border-[var(--color-rule)]">
-          {error}
-        </p>
+          <Chevron open={open} />
+        </div>
+      </button>
+      {infoExpanded && (
+        <div className="px-4 pb-2.5 text-xs text-[var(--color-ink-3)] leading-relaxed">
+          {doc.description}
+        </div>
       )}
-      <p className="px-3 py-2 text-[0.7rem] text-[var(--color-ink-4)] border-t border-[var(--color-rule)] bg-[var(--color-paper-2)]/50">
-        {parked_no_geo.toLocaleString('cs-CZ')} active listings carry no kraj (missing
-        coordinates); they tag in the global sweep, after the priority kraje.
+      {open && <WorkflowDetail doc={doc} />}
+    </div>
+  );
+}
+
+function TriggerBadge({ label }: { label: string }) {
+  return (
+    <span className="inline-block px-1.5 py-px text-[0.6rem] tracking-[0.08em] uppercase rounded-[var(--radius-xs)] bg-[var(--color-copper-soft)] text-[var(--color-copper)] border border-[var(--color-copper)]/30">
+      {label}
+    </span>
+  );
+}
+
+function WorkflowDetail({ doc }: { doc: WorkflowDoc }) {
+  return (
+    <div className="px-4 pt-2 pb-4 border-t border-[var(--color-rule-soft)] space-y-4">
+      <p className="text-sm text-[var(--color-ink-2)] leading-relaxed">
+        {doc.description}
       </p>
+
+      <Field label="Triggers">
+        <ul className="text-sm text-[var(--color-ink-2)] space-y-0.5">
+          {doc.schedules.map((s) => (
+            <li key={s.cron}>
+              Scheduled · {s.human}{' '}
+              <span className="font-mono text-xs text-[var(--color-ink-4)]">
+                ({s.cron})
+              </span>
+            </li>
+          ))}
+          {doc.manual && <li>Manual · run from the Actions tab with the parameters below</li>}
+          {doc.onPush && (
+            <li>
+              On push{doc.paths ? ' (when matching paths change)' : ''}
+            </li>
+          )}
+          {doc.onPullRequest && (
+            <li>
+              On pull request{doc.paths ? ' (when matching paths change)' : ''}
+            </li>
+          )}
+          {doc.schedules.length === 0 &&
+            !doc.manual &&
+            !doc.onPush &&
+            !doc.onPullRequest && <li className="text-[var(--color-ink-3)]">None declared</li>}
+        </ul>
+        {doc.paths && (
+          <div className="mt-1 text-xs text-[var(--color-ink-3)]">
+            Paths:{' '}
+            {doc.paths.map((p) => (
+              <span
+                key={p}
+                className="font-mono text-[0.7rem] bg-[var(--color-paper-2)] px-1 py-px rounded-[var(--radius-xs)] mr-1"
+              >
+                {p}
+              </span>
+            ))}
+          </div>
+        )}
+      </Field>
+
+      {doc.inputs.length > 0 && (
+        <Field label="Parameters (when run manually)">
+          <div className="border border-[var(--color-rule)] rounded-[var(--radius-xs)] overflow-x-auto">
+            <table className="w-full text-sm border-collapse">
+              <thead>
+                <tr className="bg-[var(--color-paper-2)] border-b border-[var(--color-rule)] text-[0.65rem] tracking-[0.1em] uppercase text-[var(--color-ink-3)]">
+                  <th className="text-left px-3 py-1.5 font-medium">Parameter</th>
+                  <th className="text-left px-3 py-1.5 font-medium">Type</th>
+                  <th className="text-left px-3 py-1.5 font-medium">Default</th>
+                  <th className="text-left px-3 py-1.5 font-medium">Description</th>
+                </tr>
+              </thead>
+              <tbody>
+                {doc.inputs.map((input) => (
+                  <tr
+                    key={input.name}
+                    className="border-b border-[var(--color-rule-soft)] last:border-b-0 align-top"
+                  >
+                    <td className="px-3 py-1.5">
+                      <span className="font-mono text-[0.78rem]">{input.name}</span>
+                      {input.required && (
+                        <span className="ml-1 text-[0.6rem] uppercase tracking-wide text-[var(--color-brick)]">
+                          required
+                        </span>
+                      )}
+                    </td>
+                    <td className="px-3 py-1.5 text-xs text-[var(--color-ink-3)]">
+                      {input.type}
+                      {input.options && (
+                        <div className="mt-0.5 text-[var(--color-ink-4)]">
+                          {input.options.join(' | ')}
+                        </div>
+                      )}
+                    </td>
+                    <td className="px-3 py-1.5 font-mono text-xs text-[var(--color-ink-3)]">
+                      {input.default == null ? '—' : input.default}
+                    </td>
+                    <td className="px-3 py-1.5 text-xs text-[var(--color-ink-2)] max-w-[24rem]">
+                      {input.description || '—'}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Field>
+      )}
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        {doc.secrets.length > 0 && (
+          <Field label="Secrets used">
+            <div className="flex flex-wrap gap-1">
+              {doc.secrets.map((s) => (
+                <span
+                  key={s}
+                  className="font-mono text-[0.7rem] bg-[var(--color-paper-2)] px-1.5 py-px rounded-[var(--radius-xs)] border border-[var(--color-rule-soft)]"
+                >
+                  {s}
+                </span>
+              ))}
+            </div>
+          </Field>
+        )}
+        <Field label="Run settings">
+          <ul className="text-xs text-[var(--color-ink-2)] space-y-0.5">
+            {doc.timeoutMinutes != null && (
+              <li>Timeout: {doc.timeoutMinutes} min</li>
+            )}
+            {doc.concurrencyGroup && (
+              <li>
+                Concurrency: <span className="font-mono">{doc.concurrencyGroup}</span>{' '}
+                {doc.cancelInProgress === false
+                  ? '(queues, never cancelled)'
+                  : doc.cancelInProgress === true
+                    ? '(cancels in-progress)'
+                    : ''}
+              </li>
+            )}
+            {doc.permissions && <li>Permissions: {doc.permissions}</li>}
+            {doc.timeoutMinutes == null &&
+              !doc.concurrencyGroup &&
+              !doc.permissions && (
+                <li className="text-[var(--color-ink-3)]">Defaults</li>
+              )}
+          </ul>
+        </Field>
+      </div>
+
+      <div className="flex items-center gap-4 pt-1">
+        <a
+          href={doc.runsUrl}
+          target="_blank"
+          rel="noreferrer"
+          className="text-sm text-[var(--color-copper)] hover:underline underline-offset-2"
+        >
+          View run history ↗
+        </a>
+        <a
+          href={doc.sourceUrl}
+          target="_blank"
+          rel="noreferrer"
+          className="text-sm text-[var(--color-copper)] hover:underline underline-offset-2"
+        >
+          View YAML ↗
+        </a>
+      </div>
     </div>
   );
 }
@@ -1386,7 +1344,7 @@ function ClipRegionsSection() {
 /* Filter availability (PR 1 / migration 059)                            */
 /* -------------------------------------------------------------------- */
 
-function FilterVisibilitySection() {
+function FilterVisibilitySection({ infoExpanded }: { infoExpanded: boolean }) {
   const qc = useQueryClient();
   const schemaQ = useQuery({
     queryKey: ['admin', 'filter-schema'],
@@ -1478,6 +1436,7 @@ function FilterVisibilitySection() {
                   filters={filtersByCategory.get(category)!}
                   agendas={agendas}
                   pending={pending}
+                  infoExpanded={infoExpanded}
                   onToggle={(agenda, filterId, enabled) =>
                     mut.mutate({ agenda, filterId, enabled })
                   }
@@ -1499,12 +1458,14 @@ function FilterCategoryRows({
   filters,
   agendas,
   pending,
+  infoExpanded,
   onToggle,
 }: {
   category: string;
   filters: FilterSchemaEntry[];
   agendas: Agenda[];
   pending: Set<string>;
+  infoExpanded: boolean;
   onToggle: (agenda: Agenda, filterId: string, enabled: boolean) => void;
 }) {
   return (
@@ -1520,10 +1481,15 @@ function FilterCategoryRows({
       {filters.map((f) => (
         <tr key={f.id} className="border-b border-[var(--color-rule-soft)] last:border-b-0">
           <td className="px-3 py-2 align-top sticky left-0 bg-[var(--color-paper)]">
-            <div className="font-mono text-[0.78rem] text-[var(--color-ink)]">{f.id}</div>
-            <div className="mt-0.5 text-[0.7rem] text-[var(--color-ink-3)] max-w-[28rem] leading-snug">
-              {f.description}
+            <div className="flex items-center gap-1.5">
+              <span className="font-mono text-[0.78rem] text-[var(--color-ink)]">{f.id}</span>
+              {!infoExpanded && <InfoHint text={f.description} />}
             </div>
+            {infoExpanded && (
+              <div className="mt-0.5 text-[0.7rem] text-[var(--color-ink-3)] max-w-[28rem] leading-snug">
+                {f.description}
+              </div>
+            )}
           </td>
           {agendas.map((a) => {
             const declared = a in f.visibility;
@@ -1538,10 +1504,11 @@ function FilterCategoryRows({
             const isPending = pending.has(`${a}|${f.id}`);
             return (
               <td key={a} className="text-center px-2 py-2">
-                <FilterCell
-                  enabled={enabled}
+                <Switch
+                  on={enabled}
                   pending={isPending}
                   onChange={(next) => onToggle(a, f.id, next)}
+                  ariaLabel={`${f.id} on ${a}`}
                 />
               </td>
             );
@@ -1551,43 +1518,6 @@ function FilterCategoryRows({
     </>
   );
 }
-
-function FilterCell({
-  enabled,
-  pending,
-  onChange,
-}: {
-  enabled: boolean;
-  pending: boolean;
-  onChange: (next: boolean) => void;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={() => onChange(!enabled)}
-      aria-pressed={enabled}
-      disabled={pending}
-      className={[
-        'inline-flex items-center justify-center w-9 h-5 rounded-full border transition-colors',
-        enabled
-          ? 'bg-[var(--color-sage-soft)] border-[var(--color-sage)]/60'
-          : 'bg-[var(--color-paper-2)] border-[var(--color-rule)]',
-        pending ? 'opacity-50 cursor-wait' : 'cursor-pointer',
-      ].join(' ')}
-    >
-      <span
-        className={[
-          'w-3 h-3 rounded-full transition-transform',
-          enabled
-            ? 'translate-x-2 bg-[var(--color-sage)]'
-            : '-translate-x-2 bg-[var(--color-ink-4)]',
-        ].join(' ')}
-        aria-hidden
-      />
-    </button>
-  );
-}
-
 
 /* -------------------------------------------------------------------- */
 /* Shared                                                                */
@@ -1600,14 +1530,6 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
         {label}
       </div>
       {children}
-    </div>
-  );
-}
-
-function ErrorBanner({ message }: { message: string }) {
-  return (
-    <div className="p-3 rounded-[var(--radius-sm)] border border-[var(--color-brick)]/30 bg-[var(--color-brick-soft)] text-sm text-[var(--color-brick)]">
-      <strong className="font-medium">Failed:</strong> {message}
     </div>
   );
 }
