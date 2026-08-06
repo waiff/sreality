@@ -636,7 +636,20 @@ renumber.** Navigate by area:
     is the default query target. Filtering goes through the shared `_city_quality_clauses`
     helper and the `listings_with_city_quality` RPC, and the filters are **agenda-gated to
     BROWSE + WATCHDOG only** (`toolkit/filter_registry.py`) — the estimation agent
-    deliberately never sees them, preserving deterministic estimate semantics.
+    deliberately never sees them, preserving deterministic estimate semantics. **Curated-city
+    *membership* (which city, if any, a property's coordinate falls in) is precomputed onto
+    `properties.home_city_id`** (migration 375, `recompute_home_city()`, hourly incremental job
+    mirroring migration 142's `home_obec_pop`/`near_*` pattern) rather than evaluated live: a
+    per-request `ST_Covers(admin boundary)` / `ST_DWithin(centroid, radius)` scan against all
+    curated cities is only cheap at Watchdog's small per-subscription scale, not at Browse's
+    full-table scale (a live EXPLAIN on the Browse-grain form priced in the billions). All three
+    consumers — `listings_with_city_quality`, `browse_stats_properties`, and
+    `_city_quality_clauses` — join the same `home_city_id` column, so they can no longer drift
+    on the containment test the way `browse_stats_properties` previously had (radius-only,
+    silently disagreeing with the other two's boundary-aware version on edge-of-city listings).
+    The one exception is `near_city_proximity` (an operator-chosen radius search, not curated-city
+    membership) — not precomputable the same way, and confirmed dead in the SPA UI today (no
+    widget wires it), so left as a live, unoptimized, unexercised code path.
 18. **Operator curation is PROPERTY-grain and dedup-stable** (`collections` +
     `collection_properties(collection_id, property_id)`, `tags` + `property_tags(property_id,
     tag_id)`, `property_notes(property_id, body, origin_listing_id)`, migration 202 — was

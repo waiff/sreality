@@ -2785,6 +2785,41 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/recompute_city_proximity.yml"
   },
   {
+    "filename": "recompute_home_city.yml",
+    "name": "Jobs: recompute home city (hourly)",
+    "description": "Recompute properties.home_city_id (migration 374) so the Browse city-quality RPC (listings_with_city_quality), browse_stats_properties, and Watchdog's _city_quality_clauses all join a plain indexed column instead of each running a live ST_Covers/ST_DWithin containment test against every curated city per row. Incremental hourly run fills newly-ingested properties within the hour; the same function rebuilds everything after a curated_cities / admin_boundaries change.",
+    "portal": null,
+    "manual": true,
+    "schedules": [
+      {
+        "cron": "45 * * * *",
+        "human": "Every hour at :45"
+      }
+    ],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "full",
+        "description": "Rebuild every property (not just new ones)",
+        "required": false,
+        "type": "boolean",
+        "default": "false",
+        "options": null
+      }
+    ],
+    "secrets": [
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "recompute-home-city",
+    "cancelInProgress": false,
+    "timeoutMinutes": 25,
+    "permissions": "contents: read",
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/recompute_home_city.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/recompute_home_city.yml"
+  },
+  {
     "filename": "recompute_mf_yields.yml",
     "name": "Jobs: recompute MF gross yields (hourly)",
     "description": "Recompute listings.mf_gross_yield_pct (MF Cenová mapa reference rent / asking price) for every sale apartment. The yield shifts when a listing's price changes (scrape) or the rent map updates (quarterly), so a cheap, idempotent set-based recompute runs hourly to keep new + re-priced listings filterable in Browse within the hour. The same function also runs after each rent-map ingest (scripts.fetch_rent_map). Only changed rows are written.",
