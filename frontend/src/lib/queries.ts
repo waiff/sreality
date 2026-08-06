@@ -3,14 +3,7 @@ import { imageSrc } from './imageUrl';
 import { type TaggedImageUrl } from './imageTags';
 import { fetchListingBrokersByIds, fetchBrokersByIds } from './brokers';
 import type { BrokerPublic, ListingBroker } from './brokers';
-import type { ListingDetailLite } from './dedupDiff';
 import type { LlmCostDailyRow, LlmCostHourlyRow } from './llmCosts';
-import type {
-  DedupCostByCategoryRow,
-  DedupEngineFlowRow,
-  DedupQueueRow,
-  DedupResolutionRow,
-} from './dedupFunnel';
 import {
   type CenterRadius,
   type DistrictChip,
@@ -48,7 +41,7 @@ import type {
   ScrapeRun,
   ScraperHealthChecks,
 } from './types';
-import type { BorderCase, ImageAnnotation, PhashNote, TrainingExample } from './api';
+import type { BorderCase, ImageAnnotation, TrainingExample } from './api';
 
 /* Circle → bounding box approximation. Used when the operator picks
  * the centre+radius mode on the map: PostgREST has no native
@@ -915,7 +908,7 @@ export const fetchBrowseCount = async (
 
 export interface CardRow {
   /* The canonical property this card represents (Browse is property-grain via
-   * properties_public). Used by the Browse merge-mode dedup action. */
+   * properties_public). Used by the Browse merge-mode action. */
   property_id: number;
   /* Surrogate identity (never null) — the React key, the hover-sync key, and the
    * key the card image hydration batches on. `sreality_id` is nullable post-
@@ -1229,8 +1222,8 @@ export const fetchListingIdByNaturalKey = async (
 };
 
 /* Resolve a property_id to its representative listing's NATURAL KEY
- * (source, source_id_native). Lets /listing?property=ID (e.g. the dedup merge
- * feed's link) land on the survivor's detail page via the canonical natural-key
+ * (source, source_id_native). Lets /listing?property=ID (a property-grain
+ * link) land on the survivor's detail page via the canonical natural-key
  * route. NOT the surrogate id: listingPath() builds the LEGACY sreality route,
  * and the id-spaces overlap (~435 collisions), so routing the surrogate through
  * it would load the WRONG listing. NOT sreality_id either: a post-Gate-2 repr may
@@ -1403,8 +1396,7 @@ const IMAGE_PUBLIC_COLS =
   'id,sreality_id,sequence,sreality_url,storage_path,clip_fine_tag,clip_logical_tag,clip_confidence,clip_render_score,phash';
 
 /* Batch image fetch keyed on `sreality_id` — kept for the callers whose upstream
- * read model is still sreality-keyed and carries no surrogate id: the dedup
- * candidate sides (DedupPropertySide) and the vision bakeoff pairs. These
+ * read model is still sreality-keyed and carries no surrogate id. These
  * CANNOT cut to listing_id without a backend change to those payloads, and
  * flipping this loader in place would be a catastrophic half-swap (a
  * sreality_id fed into an `IN listing_id` matches a DIFFERENT listing,
@@ -1465,8 +1457,8 @@ export const fetchImagesForListingIds = async (
   return out;
 };
 
-/* /dedup review card: per-side portal chips. Batched over the candidate
- * properties on screen (≤100), keyed on property_id. property_sources_public
+/* Per-side portal chips. Batched over the properties on screen (≤100), keyed
+ * on property_id. property_sources_public
  * is one row per (child listing) of a property — post-merge a property spans
  * several portals, which is exactly what the chips show. */
 export const fetchPropertySourcesByPropertyIds = async (
@@ -1531,7 +1523,7 @@ export const fetchClipAuditProperties = async (
   };
 };
 
-/* /clip-audit + /phash-audit: the operator's per-image correction/note (migration
+/* /clip-audit: the operator's per-image correction/note (migration
  * 308), batched by the on-screen image ids. Keyed on image_id for O(1) lookup while
  * rendering the photo grid. */
 export const fetchImageAnnotationsByImageIds = async (
@@ -1550,28 +1542,7 @@ export const fetchImageAnnotationsByImageIds = async (
   return out;
 };
 
-/* /phash-audit: the operator's note on an image PAIR, batched by the on-screen
- * images' ids. The two `.in()` filters can over-match (any a-on-screen paired with
- * any b-on-screen, not just the specific pairs shown) — harmless, since the caller
- * looks up by the exact `${a}:${b}` key and ignores anything else returned. */
-export const fetchPhashPairNotesForImageIds = async (
-  ids: ReadonlyArray<number>,
-): Promise<Map<string, PhashNote>> => {
-  if (ids.length === 0) return new Map();
-  const { data, error } = await supabase
-    .from('phash_pair_notes_public')
-    .select('image_id_a,image_id_b,note,updated_at')
-    .in('image_id_a', ids as number[])
-    .in('image_id_b', ids as number[]);
-  if (error) throw error;
-  const out = new Map<string, PhashNote>();
-  for (const row of (data ?? []) as unknown as PhashNote[]) {
-    out.set(`${row.image_id_a}:${row.image_id_b}`, row);
-  }
-  return out;
-};
-
-/* /phash-audit "Train": the operator's linear-probe training-set label per image
+/* /clip-audit "Train": the operator's linear-probe training-set label per image
  * (migration 309), batched by the on-screen image ids. Also used to seed the label
  * combobox's "labels currently in use" suggestion list, alongside the CLIP taxonomy. */
 export const fetchTrainingExamplesForImageIds = async (
@@ -1649,7 +1620,7 @@ export interface TrainingLabelCount {
   count: number;
 }
 
-/* /phash-audit's "Jen v trénovací sadě" Tag row: how many examples exist per label —
+/* /clip-audit's "Jen v trénovací sadě" Tag row: how many examples exist per label —
  * lets the operator judge class coverage ("is this one big enough yet?") while
  * building the set. A GLOBAL count (the whole training set), not scoped to the
  * current Hamming-range/outcome/category filters — coverage is a property of the
@@ -1669,28 +1640,6 @@ export const fetchTrainingLabelCounts = async (): Promise<TrainingLabelCount[]> 
   return [...counts.entries()]
     .map(([label, count]) => ({ label, count }))
     .sort((a, b) => b.count - a.count || a.label.localeCompare(b.label, 'cs'));
-};
-
-/* /dedup review card: the street / house-number / floor the candidate payload
- * doesn't carry (migration 122 exposes street + house_number on
- * listings_public). Batched over the on-screen sides' sreality_ids. */
-const DEDUP_DETAIL_COLS =
-  'sreality_id,street,house_number,floor,disposition,district,price_czk,area_m2,category_type,category_main,category_sub_cb';
-
-export const fetchListingDetailByIds = async (
-  ids: ReadonlyArray<number>,
-): Promise<Map<number, ListingDetailLite>> => {
-  if (ids.length === 0) return new Map();
-  const { data, error } = await supabase
-    .from('listings_public')
-    .select(DEDUP_DETAIL_COLS)
-    .in('sreality_id', ids as number[]);
-  if (error) throw error;
-  const out = new Map<number, ListingDetailLite>();
-  for (const row of (data ?? []) as unknown as ListingDetailLite[]) {
-    out.set(row.sreality_id, row);
-  }
-  return out;
 };
 
 /* Keyed on listing_id, not sreality_id (R2 Phase C resolver-chain cutover;
@@ -1760,34 +1709,9 @@ export const fetchScraperHealthChecks = async (
   return data as ScraperHealthChecks;
 };
 
-/* Migration 273 — the dedup-aware publication gate. New properties are hidden
- * from Browse until dedup evaluates them; this single-row aggregate exposes the
- * backlog (`unpublished`), its age, and the active baseline. The gate has no
- * auto-publish timeout, so a rising `unpublished` is the dedup-stall signal. */
-export interface PublicationGateRow {
-  unpublished: number;
-  oldest_unpublished_at: string | null;
-  active_total: number;
-}
-
-export const fetchPublicationGateHealth = async (): Promise<PublicationGateRow> => {
-  const { data, error } = await supabase
-    .from('publication_gate_health_public')
-    .select('unpublished,oldest_unpublished_at,active_total')
-    .maybeSingle();
-  if (error) throw error;
-  return (
-    (data as PublicationGateRow | null) ?? {
-      unpublished: 0,
-      oldest_unpublished_at: null,
-      active_total: 0,
-    }
-  );
-};
-
-/* Migration 274 — dedup pipeline verification checks (latest row per check_key).
+/* Migration 274 — pipeline verification checks (latest row per check_key).
  * The DB stamps the ok/warn/fail status + a `value` whose unit is check-specific
- * (suspect-pair counts for street/geo debt, ratios/minutes elsewhere). */
+ * (ratios, minutes, counts — see scripts/verify_pipeline.py). */
 export interface PipelineCheckRow {
   check_key: string;
   status: string;
@@ -2189,139 +2113,6 @@ export const filterPresetKeys = {
   all: ['filter-presets'] as const,
 };
 
-const sortedIds = (ids: ReadonlyArray<number>): number[] =>
-  [...ids].sort((a, b) => a - b);
-
-export const dedupKeys = {
-  all: ['dedup'] as const,
-  candidates: (params: Record<string, unknown>) =>
-    ['dedup', 'candidates', params] as const,
-  merges: (params: Record<string, unknown>) =>
-    ['dedup', 'merges', params] as const,
-  mergedProperties: (params: Record<string, unknown>) =>
-    ['dedup', 'merged-properties', params] as const,
-  summary: (status: string) => ['dedup', 'summary', status] as const,
-  sources: (propertyIds: ReadonlyArray<number>) =>
-    ['dedup', 'sources', sortedIds(propertyIds)] as const,
-  images: (srealityIds: ReadonlyArray<number>) =>
-    ['dedup', 'images', sortedIds(srealityIds)] as const,
-  detail: (srealityIds: ReadonlyArray<number>) =>
-    ['dedup', 'detail', sortedIds(srealityIds)] as const,
-  engineRuns: (limit: number) => ['dedup', 'engine-runs', limit] as const,
-  scanState: ['dedup', 'scan-state'] as const,
-};
-
-export interface DedupEngineRun {
-  id: number;
-  started_at: string;
-  ended_at: string | null;
-  /* Market gauges — NULL on scoped runs (dirty/candidates; not measured, migration 265)
-   * and geo-lane-scoped on run_kind='geo' rows. Read them from the latest FULL-scan row
-   * (run_kind='full', or legacy null run_kind), not from runs[0]. */
-  eligible: number | null;
-  flagged_location: number | null;
-  flagged_disposition: number | null;
-  pairs_considered: number;
-  rejected: number;
-  auto_address: number;
-  auto_phash: number;
-  auto_visual: number;
-  queued: number;
-  vision_calls: number;
-  auto_dismissed: number;
-  floor_plan_deferred: number;
-  clip_deferred: number;
-  /* --dirty runs only (NULL on full scan / candidate / geo): the dedup-ready queue depth
-   * at run start, how many this run claimed, how many it actually CLEARED (per-group
-   * incremental clear), and whether it hit its budget. cleared==0 across truncated runs
-   * is the livelock signature migration 258 exposes — assessDirtyQueue keys on it. */
-  dirty_queue_depth: number | null;
-  dirty_claimed: number | null;
-  dirty_cleared: number | null;
-  dirty_truncated: number | null;
-  /* Every run (migration 262; null on pre-262 rows): the lane that wrote the row
-   * ('full' | 'candidates' | 'dirty') + whether the run stopped on its wall-clock /
-   * pair budget before finishing its scan. truncated on run_kind='full' is the
-   * full-scan coverage-gap signal (the TTL backstop is only as good as scan coverage). */
-  run_kind: string | null;
-  truncated: number | null;
-  /* Migration 271 observability — the stall tripwires that were previously invisible
-   * (null on pre-271 rows / lanes that don't measure a given gauge):
-   *  - skipped_oversized / oversized_groups: street groups over MAX_GROUP_SIZE the scan
-   *    skipped whole (a coverage hole — those listings are never compared).
-   *  - skipped_unresolved: pairs the free funnel reached but left undecided this run.
-   *  - vision_errors: failed vision calls this run — the credit-outage tripwire (nonzero
-   *    means the LLM lane is erroring, e.g. out-of-credit).
-   *  - truncated_cause: WHY a truncated run stopped ('deadline' wall-clock | 'pair_cap').
-   *  - scan_groups_total / scan_groups_scanned: full-scan cursor coverage this cycle.
-   *  - dirty_age_p95_seconds: p95 wait of the dedup-ready queue — the real-time SLO gauge.
-   *  - dirty_pruned: dedup-ready rows TTL-evicted (not merged) this run.
-   *  - runner: which executor wrote the row ('actions' cron | 'worker' always-on). */
-  skipped_unresolved: number | null;
-  skipped_oversized: number | null;
-  oversized_groups: number | null;
-  vision_errors: number | null;
-  truncated_cause: 'deadline' | 'pair_cap' | null;
-  scan_groups_total: number | null;
-  scan_groups_scanned: number | null;
-  dirty_age_p95_seconds: number | null;
-  dirty_pruned: number | null;
-  runner: 'actions' | 'worker' | null;
-}
-
-/* Recent dedup-engine runs for the /dedup automation dashboard. Reads the anon
- * dedup_engine_runs_public view (migration 130) directly — operational counters,
- * no secrets, same posture as the rest of the page's public-view reads. */
-export const fetchDedupEngineRuns = async (
-  limit = 14,
-): Promise<DedupEngineRun[]> => {
-  const { data, error } = await supabase
-    .from('dedup_engine_runs_public')
-    .select(
-      'id,started_at,ended_at,eligible,flagged_location,flagged_disposition,' +
-        'pairs_considered,rejected,auto_address,auto_phash,auto_visual,queued,' +
-        'vision_calls,auto_dismissed,floor_plan_deferred,clip_deferred,' +
-        'dirty_queue_depth,dirty_claimed,dirty_cleared,dirty_truncated,run_kind,truncated,' +
-        'skipped_unresolved,skipped_oversized,oversized_groups,vision_errors,truncated_cause,' +
-        'scan_groups_total,scan_groups_scanned,dirty_age_p95_seconds,dirty_pruned,runner',
-    )
-    // Insert order (id), NOT started_at: started_at is now the REAL run start (migration
-    // 262), so an 80-min full scan's row would sort below dirty runs that STARTED after it
-    // and the completed scan would never headline. id preserves the pre-262 semantics.
-    .order('id', { ascending: false })
-    .limit(limit);
-  if (error) throw error;
-  return (data ?? []) as unknown as DedupEngineRun[];
-};
-
-/* Full-scan cursor + cycle state per dedup lane (dedup_scan_state_public, migration
- * 271). One row per lane; the 'street' lane is the apartment full scan whose cycle
- * completion is the dashboard's cursor-stall signal. */
-export interface DedupScanState {
-  lane: string;
-  mid_cycle: boolean;
-  cycle_started_at: string | null;
-  last_cycle_started_at: string | null;
-  last_cycle_completed_at: string | null;
-  updated_at: string;
-}
-
-/* Latest scan-cycle state, preferring the 'street' (apartment) lane, else the most
- * recently updated lane. Small view — one row per lane — a cheap anon read well under
- * the 3 s statement timeout. */
-export const fetchDedupScanState = async (): Promise<DedupScanState | null> => {
-  const { data, error } = await supabase
-    .from('dedup_scan_state_public')
-    .select(
-      'lane,mid_cycle,cycle_started_at,last_cycle_started_at,' +
-        'last_cycle_completed_at,updated_at',
-    )
-    .order('updated_at', { ascending: false });
-  if (error) throw error;
-  const rows = (data ?? []) as unknown as DedupScanState[];
-  return rows.find((r) => r.lane === 'street') ?? rows[0] ?? null;
-};
-
 export const curationKeys = {
   collections: ['curation', 'collections'] as const,
   collection: (id: number) => ['curation', 'collection', id] as const,
@@ -2551,73 +2342,5 @@ export const fetchLlmCostHourly = async (hours: number): Promise<LlmCostHourlyRo
     output_tokens: Number(r.output_tokens ?? 0),
     cache_read_tokens: Number(r.cache_read_tokens ?? 0),
     cache_write_tokens: Number(r.cache_write_tokens ?? 0),
-  }));
-};
-
-/* ---- Dedup funnel (/dedup) + dedup cost breakdown (/costs) ------------- */
-/* Views from migration 282. The two heavy aggregates are matviews refreshed
- * every 15 min by pg_cron; flow + queue are live. All numerics coerced once
- * here (PostgREST serializes numeric as string on some paths). */
-
-const num = (v: unknown): number => Number(v ?? 0);
-
-export const fetchDedupFunnelResolutions = async (): Promise<DedupResolutionRow[]> => {
-  const { data, error } = await supabase.from('dedup_funnel_resolutions_public').select('*');
-  if (error) throw error;
-  return (data ?? []).map((r: Record<string, unknown>) => ({
-    source: String(r.source),
-    stage: String(r.stage),
-    outcome: String(r.outcome),
-    category_main: String(r.category_main),
-    category_type: String(r.category_type),
-    pairs_7d: num(r.pairs_7d), pairs_30d: num(r.pairs_30d),
-    properties_7d: num(r.properties_7d), properties_30d: num(r.properties_30d),
-    listings_7d: num(r.listings_7d), listings_30d: num(r.listings_30d),
-  }));
-};
-
-export const fetchDedupEngineFlow = async (): Promise<DedupEngineFlowRow | null> => {
-  const { data, error } = await supabase
-    .from('dedup_engine_flow_public').select('*').maybeSingle();
-  if (error) throw error;
-  if (!data) return null;
-  const r = data as Record<string, unknown>;
-  const out: Record<string, number | null> = {
-    eligible_market: r.eligible_market == null ? null : num(r.eligible_market),
-    flagged_location_market: r.flagged_location_market == null ? null : num(r.flagged_location_market),
-    flagged_disposition_market: r.flagged_disposition_market == null ? null : num(r.flagged_disposition_market),
-  };
-  for (const base of [
-    'runs', 'pairs_considered', 'rejected', 'queued', 'clip_cosine_calls',
-    'routed_haiku', 'routed_sonnet', 'floor_plan_deferred', 'clip_deferred',
-    'skipped_unresolved', 'vision_calls', 'vision_errors',
-  ]) {
-    out[`${base}_7d`] = num(r[`${base}_7d`]);
-    out[`${base}_30d`] = num(r[`${base}_30d`]);
-  }
-  return out as unknown as DedupEngineFlowRow;
-};
-
-export const fetchDedupQueueSnapshot = async (): Promise<DedupQueueRow[]> => {
-  const { data, error } = await supabase.from('dedup_queue_snapshot_public').select('*');
-  if (error) throw error;
-  return (data ?? []).map((r: Record<string, unknown>) => ({
-    tier: String(r.tier ?? ''),
-    category_main: String(r.category_main),
-    category_type: String(r.category_type),
-    pairs: num(r.pairs),
-  }));
-};
-
-export const fetchDedupCostByCategory = async (): Promise<DedupCostByCategoryRow[]> => {
-  const { data, error } = await supabase.from('dedup_llm_cost_by_category_public').select('*');
-  if (error) throw error;
-  return (data ?? []).map((r: Record<string, unknown>) => ({
-    called_for: String(r.called_for),
-    category_main: String(r.category_main),
-    category_type: String(r.category_type),
-    calls_7d: num(r.calls_7d), calls_30d: num(r.calls_30d),
-    cost_7d: num(r.cost_7d), cost_30d: num(r.cost_30d),
-    listings_7d: num(r.listings_7d), listings_30d: num(r.listings_30d),
   }));
 };

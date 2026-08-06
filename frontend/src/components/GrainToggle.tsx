@@ -1,7 +1,7 @@
 export type Grain = 'hour' | 'day';
 
-/* The Hour/Day granularity switch shared by the Health reconciliation trends and the
- * /dedup pipeline timeline, so the two read identically. Civic-archive: a small segmented
+/* The Hour/Day granularity switch used by the Health reconciliation trends (and any
+ * future time-series panel, so they read identically). Civic-archive: a small segmented
  * control, active segment in copper. */
 export default function GrainToggle({
   grain,

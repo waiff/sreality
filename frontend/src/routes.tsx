@@ -24,17 +24,15 @@ import Notifications from './pages/Notifications';
 // session never downloads them.
 const Health = lazy(() => import('./pages/Health'));
 const Costs = lazy(() => import('./pages/Costs'));
-const Dedup = lazy(() => import('./pages/Dedup'));
 const ClipAudit = lazy(() => import('./pages/ClipAudit'));
-const PhashAudit = lazy(() => import('./pages/PhashAudit'));
-const LocationAudit = lazy(() => import('./pages/LocationAudit'));
-const ModelTesting = lazy(() => import('./pages/ModelTesting'));
 const Scrapers = lazy(() => import('./pages/Scrapers'));
 const Settings = lazy(() => import('./pages/Settings'));
 const Datasets = lazy(() => import('./pages/Datasets'));
 const Outreach = lazy(() => import('./pages/Outreach'));
 const OutreachDetail = lazy(() => import('./pages/OutreachDetail'));
 const BrokerReview = lazy(() => import('./pages/BrokerReview'));
+const NewDedupDashboard = lazy(() => import('./pages/NewDedupDashboard'));
+const NewDedupSettings = lazy(() => import('./pages/NewDedupSettings'));
 // TODO(estimation-5 Part C1): remove DevConfidencePreview + its route
 // once design is approved and the indicator is in real use.
 const DevConfidencePreview = lazy(() => import('./pages/DevConfidencePreview'));
@@ -67,9 +65,9 @@ export const routes: RouteObject[] = [
       // and refine it at runtime with usePageTitle — see lib/pageTitle.tsx.
       { index: true, element: <Navigate to="/browse" replace /> },
       { path: 'browse', element: <Browse />, handle: { title: 'Browse' } },
-      // Bare /listing handles the ?property=ID query form (the dedup merge feed
-      // + Browse merge links use it); ListingDetail resolves it to the
-      // property's representative listing and redirects to /listing/:id.
+      // Bare /listing handles the ?property=ID query form (Browse merge links
+      // use it); ListingDetail resolves it to the property's representative
+      // listing and redirects to /listing/:id.
       { path: 'listing', element: <ListingDetail />, handle: { title: 'Listing' } },
       // Canonical natural-key form (migration 091). ListingDetail redirects the
       // legacy numeric route below to this one so no negative synthetic id
@@ -98,12 +96,10 @@ export const routes: RouteObject[] = [
       { path: 'watchdog/manage', element: <WatchdogManage />, handle: { title: 'Watchdogs · Manage' } },
       { path: 'watchdog/:id/edit', element: <WatchdogEdit />, handle: { title: 'Edit watchdog' } },
       { path: 'notifications', element: <Notifications />, handle: { title: 'Notifications' } },
-      { path: 'dedup', element: <AdminPage><Dedup /></AdminPage>, handle: { title: 'Dedup' } },
       { path: 'clip-audit', element: <AdminPage><ClipAudit /></AdminPage>, handle: { title: 'CLIP Audit' } },
-      { path: 'phash-audit', element: <AdminPage><PhashAudit /></AdminPage>, handle: { title: 'pHash Audit' } },
-      { path: 'location-audit', element: <AdminPage><LocationAudit /></AdminPage>, handle: { title: 'Location Audit' } },
-      { path: 'model-testing', element: <AdminPage><ModelTesting /></AdminPage>, handle: { title: 'Model testing' } },
       { path: 'settings', element: <AdminPage><Settings /></AdminPage>, handle: { title: 'Settings' } },
+      { path: 'new-dedup', element: <AdminPage><NewDedupDashboard /></AdminPage>, handle: { title: 'NEW DEDUP' } },
+      { path: 'new-dedup/settings', element: <AdminPage><NewDedupSettings /></AdminPage>, handle: { title: 'NEW DEDUP · Settings' } },
       { path: 'scrapers', element: <AdminPage><Scrapers /></AdminPage>, handle: { title: 'Scrapers' } },
       { path: 'dev/confidence-indicator', element: <AdminPage><DevConfidencePreview /></AdminPage>, handle: { title: 'Confidence indicator (dev)' } },
       { path: '*', element: <NotFound />, handle: { title: 'Not found' } },

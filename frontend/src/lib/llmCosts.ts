@@ -2,8 +2,6 @@
  * deterministic math over `llm_cost_daily_public` rows so it can be
  * unit-tested without the DB or React. */
 
-import { isDedupCalledFor } from './dedupFunnel';
-
 export interface LlmCostDailyRow {
   day: string; // 'YYYY-MM-DD'
   called_for: string;
@@ -20,17 +18,14 @@ export interface LlmCostDailyRow {
 
 /* Color follows the ENTITY (the called_for tag), never its rank — a
  * feature keeps its hue when volumes shift or filters change. The order
- * below is also the chart's stack order; the ochre→slate→brick→teal→
- * plum→sage adjacency was validated for CVD separation against the
- * civic-archive tag tokens (light + dark). Unknown future tags hash
- * onto the spare tokens deterministically by name. */
+ * below is also the chart's stack order; the brick→plum→sand adjacency
+ * was validated for CVD separation against the civic-archive tag tokens
+ * (light + dark). Unknown tags — including the retired dedup vision
+ * tools still present in historical rows — hash onto the spare tokens
+ * deterministically by name. */
 export const FEATURE_COLOR_TOKENS: ReadonlyArray<readonly [string, string]> = [
-  ['compare_listings_visually', '--color-tag-ochre'],
-  ['compare_listing_floor_plans', '--color-tag-slate'],
   ['enrich_listing_description', '--color-tag-brick'],
-  ['compare_listing_site_plans', '--color-tag-teal'],
   ['score_listing_condition', '--color-tag-plum'],
-  ['classify_listing_images', '--color-tag-sage'],
   ['agent_estimation', '--color-tag-sand'],
 ];
 
@@ -55,10 +50,6 @@ export function colorTokenFor(feature: string): string {
 /* Short human labels for the audit tags; unknown tags fall back to the
  * raw tag so a new backend feature appears without a frontend release. */
 const FEATURE_LABELS: Record<string, string> = {
-  compare_listings_visually: 'Visual compare (dedup)',
-  compare_listing_floor_plans: 'Floor-plan gate (dedup)',
-  compare_listing_site_plans: 'Site-plan guard (dedup)',
-  classify_listing_images: 'Image classify (dedup)',
   enrich_listing_description: 'Description enrichment',
   score_listing_condition: 'Condition scoring',
   agent_estimation: 'Estimation agent',
@@ -295,36 +286,4 @@ export function summarizeByModel(rows: LlmCostDailyRow[], now: Date): ModelSumma
   return [...acc.values()]
     .map((s) => ({ ...s, share30: total > 0 ? s.cost30 / total : 0 }))
     .sort((a, b) => b.cost30 - a.cost30);
-}
-
-/* ---- Dedup grouping for the /costs feature table ------------------------ */
-/* The dedup called_for set comes from the shared funnel registry
- * (lib/dedupFunnel), so /costs and /dedup can never disagree about which
- * features belong to the dedup pipeline. */
-
-
-export interface DedupFeatureGroup {
-  children: FeatureSummary[];
-  totals: FeatureSummary;
-}
-
-export function splitDedupFeatures(features: FeatureSummary[]): {
-  dedup: DedupFeatureGroup | null;
-  other: FeatureSummary[];
-} {
-  const children = features.filter((f) => isDedupCalledFor(f.feature));
-  const other = features.filter((f) => !isDedupCalledFor(f.feature));
-  if (!children.length) return { dedup: null, other };
-  const totals: FeatureSummary = {
-    feature: 'dedup_pipeline',
-    models: [...new Set(children.flatMap((c) => c.models))].sort(),
-    calls7: children.reduce((s, c) => s + c.calls7, 0),
-    errors7: children.reduce((s, c) => s + c.errors7, 0),
-    cost7: children.reduce((s, c) => s + c.cost7, 0),
-    avgPerCall7: null,
-    cost30: children.reduce((s, c) => s + c.cost30, 0),
-    share30: children.reduce((s, c) => s + c.share30, 0),
-  };
-  totals.avgPerCall7 = totals.calls7 > 0 ? totals.cost7 / totals.calls7 : null;
-  return { dedup: { children, totals }, other };
 }

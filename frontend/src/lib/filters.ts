@@ -740,7 +740,7 @@ const fmtRange = (lo: number | null, hi: number | null): string =>
 /* Serialise a `DistrictChip[]` into the parallel `districts` / `districts_ctx` /
  * `districts_excl` / `districts_lvl` / `districts_id` CSV shape `parseDistrictChips`
  * reads back — the one wire format every location-filterable surface uses (Browse's
- * URL here; the dedup Decision history + Queue API params in `lib/api.ts`). Each
+ * URL here; the API params in `lib/api.ts`). Each
  * optional param is only emitted when at least one chip needs it, so the common
  * case (plain include-only, unresolved or single-level chips) keeps a minimal URL. */
 export const districtChipsToCsvParams = (

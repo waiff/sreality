@@ -1,9 +1,8 @@
 import { TrashIcon } from '@/components/icons';
 
 // A toggle-style filter pill: on/off, an optional trailing count badge (omit
-// `count` for the plain form). Shared by every dedup surface with a row of
-// single-select text filters (outcome, source, property type, factor) —
-// Decision history and the manual review Queue.
+// `count` for the plain form). Used wherever a surface needs a row of
+// single-select text filters (source, property type, training label).
 //
 // `onRemove` (optional) splits the pill into two buttons — the toggle and a small
 // trailing trash — for chips that are also deletable things, not just filters

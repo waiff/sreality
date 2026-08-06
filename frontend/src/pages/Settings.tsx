@@ -15,7 +15,6 @@
  */
 
 import { useEffect, useMemo, useState } from 'react';
-import { useLocation } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   listSkills,
@@ -47,53 +46,10 @@ import {
 import { fmtAbsolute } from '@/lib/format';
 import { useTheme, type ThemeMode } from '@/lib/theme';
 import { PickButton } from '@/components/controls';
-import DedupEngineSection from '@/components/DedupEngineSection';
-import DedupTagPrioritiesSection from '@/components/DedupTagPrioritiesSection';
 import TiersSection from '@/components/TiersSection';
-import { hashTargetsSetting } from '@/lib/settingsAnchor';
 import { WORKFLOW_DOCS, type WorkflowDoc } from '@/lib/workflowDocs.generated';
 
-/* Deep-link arrivals (e.g. a /dedup decision's "→ ⚙ cosine haiku min" link →
- * /settings#setting-dedup_cosine_haiku_min): scroll the targeted row into view and flash
- * it, once the force-opened section has rendered it. Outline via inline style so there's
- * no Tailwind-JIT class to miss. */
-function useScrollToSettingHash(hash: string): void {
-  useEffect(() => {
-    const id = hash.startsWith('#') ? hash.slice(1) : '';
-    if (!id) return;
-    let tries = 0;
-    let timer = 0;
-    let raf = 0;
-    // The target row may render after an async settings fetch resolves, so retry until it
-    // appears (then flash it). ~3s budget covers a cold-cache load; outline via inline
-    // style so there's no Tailwind-JIT class to miss.
-    const focus = () => {
-      const el = document.getElementById(id);
-      if (el) {
-        el.scrollIntoView({ block: 'center', behavior: 'smooth' });
-        el.style.outline = '2px solid var(--color-copper)';
-        el.style.outlineOffset = '3px';
-        el.style.borderRadius = 'var(--radius-sm)';
-        timer = window.setTimeout(() => {
-          el.style.outline = '';
-          el.style.outlineOffset = '';
-        }, 2200);
-      } else if (tries++ < 30) {
-        timer = window.setTimeout(focus, 100);
-      }
-    };
-    // Defer the first attempt one frame so a freshly force-opened section can mount.
-    raf = window.requestAnimationFrame(focus);
-    return () => {
-      window.clearTimeout(timer);
-      window.cancelAnimationFrame(raf);
-    };
-  }, [hash]);
-}
-
 export default function Settings() {
-  const location = useLocation();
-  useScrollToSettingHash(location.hash);
   return (
     <div className="px-6 pt-5 pb-10 max-w-screen-lg mx-auto">
       <header>
@@ -155,46 +111,9 @@ export default function Settings() {
         id="clip-regions"
         eyebrow="Tagging"
         title="CLIP tagging — priority kraje"
-        description="CLIP image tagging drains the marked kraje first — tags + embeddings — so their dedup cosine is ready before the global sweep. Unmarked = no priority (everything drains newest-first); the count is the kraj's active listings."
+        description="CLIP image tagging drains the marked kraje first — tags + embeddings — so their coverage lands before the global sweep. Unmarked = no priority (everything drains newest-first); the count is the kraj's active listings."
       >
         <ClipRegionsSection />
-      </CollapsibleSection>
-
-      <CollapsibleSection
-        id="dedup-engine"
-        eyebrow="Matching"
-        title="Dedup engine"
-        ownsHash={hashTargetsSetting}
-        description={
-          <>
-            Every rule the cross-portal duplicate matcher uses — as a toggle or a
-            threshold. The CLIP knobs ship <span className="font-mono">off</span>:
-            turning on <span className="font-mono">prefer CLIP tags</span> switches
-            room labelling to the free self-hosted model (and unblocks houses /
-            land / commercial); the cosine tier routes the forensic compare by
-            photo similarity. Changes take effect on the next engine run — no
-            deploy.
-          </>
-        }
-      >
-        <DedupEngineSection />
-      </CollapsibleSection>
-
-      <CollapsibleSection
-        id="dedup-tag-priorities"
-        eyebrow="Matching"
-        title="Dedup comparison priority"
-        description={
-          <>
-            The order the visual layer compares matching rooms in — it stops at the
-            first confident match, so the tag at the top leads. Drag to reorder per
-            listing type. The defaults are grounded (facade for houses, situation plan
-            for plots, wet rooms for flats); a reorder only changes which photos are
-            compared first, never which are dropped.
-          </>
-        }
-      >
-        <DedupTagPrioritiesSection />
       </CollapsibleSection>
 
       <CollapsibleSection
@@ -252,11 +171,10 @@ export default function Settings() {
 /* Collapsible section                                                   */
 /* -------------------------------------------------------------------- */
 
-/* Mirrors the /dedup page's CollapsibleSection so the two operator surfaces read
- * the same: a clickable header (chevron + eyebrow + display-serif title) with the
- * body — description + content — hidden when collapsed. Per-section open/closed
- * state persists in localStorage so the operator's choices survive a reload (the
- * page is long). */
+/* A clickable header (chevron + eyebrow + display-serif title) with the body —
+ * description + content — hidden when collapsed. Per-section open/closed state
+ * persists in localStorage so the operator's choices survive a reload (the page
+ * is long). */
 function useCollapsed(id: string, defaultOpen: boolean): [boolean, () => void] {
   const key = `settings.collapsed.${id}`;
   const [open, setOpen] = useState<boolean>(() => {
@@ -307,7 +225,6 @@ function CollapsibleSection({
   eyebrow,
   description,
   defaultOpen = true,
-  ownsHash,
   children,
 }: {
   id: string;
@@ -315,15 +232,9 @@ function CollapsibleSection({
   eyebrow?: string;
   description?: React.ReactNode;
   defaultOpen?: boolean;
-  // When the current URL hash targets an anchor INSIDE this section, force it open so the
-  // target row is in the DOM to scroll to (a deep-link from another page).
-  ownsHash?: (hash: string) => boolean;
   children: React.ReactNode;
 }) {
-  const [open, toggle] = useCollapsed(id, defaultOpen);
-  const location = useLocation();
-  const forced = ownsHash ? ownsHash(location.hash) : false;
-  const isOpen = open || forced;
+  const [isOpen, toggle] = useCollapsed(id, defaultOpen);
   return (
     <section id={id} className="mt-8 scroll-mt-20">
       <button
