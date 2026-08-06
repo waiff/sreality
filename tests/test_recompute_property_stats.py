@@ -82,6 +82,17 @@ class _FakeConn:
     def cursor(self) -> _Cur:
         return _Cur(self)
 
+    def transaction(self) -> "_FakeTxn":
+        return _FakeTxn()
+
+
+class _FakeTxn:
+    def __enter__(self) -> "_FakeTxn":
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        return None
+
 
 def _sqls(conn: _FakeConn) -> list[str]:
     return [e[0] for e in conn.executed]
@@ -164,6 +175,9 @@ class _DrainConn:
     def cursor(self) -> _DrainCur:
         return _DrainCur(self)
 
+    def transaction(self) -> _FakeTxn:
+        return _FakeTxn()
+
 
 def test_drain_dirty_recomputes_each_batch_then_terminates():
     conn = _DrainConn([[(7, "t1"), (8, "t1")], [(9, "t2")], []])
@@ -172,6 +186,8 @@ def test_drain_dirty_recomputes_each_batch_then_terminates():
     assert conn.recomputed == [[7, 8], [9]]
     # deletes are scoped to the claimed ids and the run cutoff
     assert conn.deleted == [([7, 8], "CUTOFF"), ([9], "CUTOFF")]
+    # scoped recomputes run under the raised per-statement ceiling too
+    assert sum("SET LOCAL statement_timeout" in s for s, _ in conn.executed) == 2
 
 
 def test_drain_dirty_empty_queue_is_noop():
@@ -427,6 +443,11 @@ def test_full_sweep_renews_lease_every_batch(monkeypatch: Any) -> None:
     # ...and the completion stamp the health check reads (O(1) liveness signal)
     stamp = _find(conn, "property_sweep_last_complete")
     assert stamp and stamp[1]["max_id"] == 4000 and stamp[1]["batches"] == 2
+    # every recompute statement runs under the raised per-statement ceiling
+    # (the pooler's ~2-min default killed the first post-#971 batch at 3.5min)
+    ceilings = [s for s, _ in conn.executed if "SET LOCAL statement_timeout" in s]
+    recomputes = [s for s, _ in conn.executed if "WITH batch AS" in s]
+    assert len(ceilings) == len(recomputes) == 2
 
 
 def test_full_sweep_budget_exhaustion_is_red_and_scopes_the_dirty_clear(
@@ -438,9 +459,10 @@ def test_full_sweep_budget_exhaustion_is_red_and_scopes_the_dirty_clear(
     recompute signal for unswept ids, leaving them stale until the next full
     sweep instead of healed by the next incremental pass."""
     conn = _SweepConn(max_id=6000)  # 3 batches at the default size
-    # monotonic: started_at, _wait_lease entry anchor, deadline checks
-    # (batch 1 ok, batch 2 over budget), then the elapsed stamps in logging.
-    clock = [0.0, 1.0, 5.0, 100.0, 101.0, 102.0, 103.0]
+    # monotonic: started_at, _wait_lease entry anchor, batch-1 deadline check,
+    # batch-1 per-batch timing, batch-2 deadline check (over budget), then the
+    # elapsed stamps in logging.
+    clock = [0.0, 1.0, 5.0, 50.0, 100.0, 101.0, 102.0, 103.0]
     rc = _run_sweep(monkeypatch, conn, ["--max-seconds", "60"], clock=clock)
     assert rc == 1
     recomputes = [p for s, p in conn.executed if "WITH batch AS" in s]
