@@ -10,6 +10,7 @@
 import { useMemo } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import {
+  cityQualityKeys,
   fetchCityIndexDefinitions,
   type CityIndexDefinition,
 } from '@/lib/queries';
@@ -43,7 +44,7 @@ export default function CityIndexRulesPicker({ value, onChange }: Props) {
   const rules = ((value as CityIndexRule[] | null) ?? []);
 
   const { data: defs } = useQuery<CityIndexDefinition[], Error>({
-    queryKey: ['city_index_definitions'],
+    queryKey: cityQualityKeys.definitions,
     queryFn: fetchCityIndexDefinitions,
     staleTime: Infinity,
     gcTime: Infinity,

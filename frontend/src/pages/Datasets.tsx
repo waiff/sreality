@@ -25,12 +25,14 @@ import {
   updatePriceStatDataset,
 } from '@/lib/api';
 import {
+  cityQualityKeys,
   fetchCuratedCities,
   fetchCityIndexDefinitions,
   fetchCityIndexValues,
   type CityIndexDefinition,
 } from '@/lib/queries';
 import { PINNED_SLUGS, indexLabel } from '@/lib/cityIndexes';
+import { fmtPct, fmtPP } from '@/lib/format';
 import DatasetMap, { METRICS, type DatasetMetric } from '@/components/DatasetMap';
 import CityPicker from '@/components/CityPicker';
 import { buildHoverData } from '@/lib/growthChoropleth';
@@ -61,10 +63,12 @@ function estimateScrapeText(cities: number, startYm: string, endYm: string): str
   return `~${Math.max(1, Math.round(secs / 60))} min`;
 }
 
-const fmtPct = (n: number | null | undefined): string =>
-  n == null || !Number.isFinite(n) ? '—' : `${n.toFixed(1)}%`;
-const fmtPP = (n: number | null | undefined): string =>
-  n == null || !Number.isFinite(n) ? '—' : `${n >= 0 ? '+' : ''}${n.toFixed(2)} pp`;
+/* Growth rates are DELTAS, so they render signed; a gross yield is a
+ * magnitude and stays unsigned. Both now go through the shared Czech
+ * formatter — the local variant these replaced emitted "3.5%" with an English
+ * decimal point and no space, on an otherwise Czech page. */
+const fmtGrowthPct = (n: number | null | undefined): string =>
+  fmtPct(n, { signed: true });
 const fmtPerM2 = (n: number | null | undefined): string =>
   n == null || !Number.isFinite(n) ? '—' : n.toLocaleString('cs-CZ');
 
@@ -108,11 +112,11 @@ const BASE_COLUMNS: ColSpec[] = [
   { key: 'sale_latest_price', label: 'Sale Kč/m²', align: 'right', defaultOn: true,
     sortVal: (r) => r.sale_latest_price, render: (r) => fmtPerM2(r.sale_latest_price) },
   { key: 'sale_cagr_pct', label: 'Sale growth', align: 'right', metric: 'sale_cagr_pct', defaultOn: true,
-    sortVal: (r) => r.sale_cagr_pct, render: (r) => <Delta n={r.sale_cagr_pct} fmt={fmtPct} /> },
+    sortVal: (r) => r.sale_cagr_pct, render: (r) => <Delta n={r.sale_cagr_pct} fmt={fmtGrowthPct} /> },
   { key: 'rent_latest_price', label: 'Rent Kč/m²/mo', align: 'right', defaultOn: true,
     sortVal: (r) => r.rent_latest_price, render: (r) => fmtPerM2(r.rent_latest_price) },
   { key: 'rent_cagr_pct', label: 'Rent growth', align: 'right', metric: 'rent_cagr_pct', defaultOn: true,
-    sortVal: (r) => r.rent_cagr_pct, render: (r) => <Delta n={r.rent_cagr_pct} fmt={fmtPct} /> },
+    sortVal: (r) => r.rent_cagr_pct, render: (r) => <Delta n={r.rent_cagr_pct} fmt={fmtGrowthPct} /> },
   { key: 'gross_yield_pct', label: 'Gross yield', align: 'right', defaultOn: true,
     sortVal: (r) => r.gross_yield_pct, render: (r) => fmtPct(r.gross_yield_pct) },
   { key: 'yield_change_pp_pa', label: 'Yield change', align: 'right', metric: 'yield_change_pp_pa', defaultOn: true,
@@ -187,7 +191,7 @@ export default function Datasets() {
   // toggles can render; the heavier values/cities/obec-tree load only when a
   // matching column is switched on. Query keys are shared with Browse's cache.
   const indexDefsQ = useQuery<CityIndexDefinition[], Error>({
-    queryKey: ['city_index_definitions'],
+    queryKey: cityQualityKeys.definitions,
     queryFn: fetchCityIndexDefinitions,
     staleTime: Infinity, gcTime: Infinity,
   });
@@ -203,11 +207,11 @@ export default function Datasets() {
     enabled: activeId != null, staleTime: Infinity, gcTime: Infinity,
   });
   const citiesQ = useQuery({
-    queryKey: ['curated_cities'], queryFn: fetchCuratedCities,
+    queryKey: cityQualityKeys.cities, queryFn: fetchCuratedCities,
     enabled: anyIndexVisible, staleTime: Infinity, gcTime: Infinity,
   });
   const idxValuesQ = useQuery({
-    queryKey: ['city_index_values'], queryFn: fetchCityIndexValues,
+    queryKey: cityQualityKeys.values, queryFn: fetchCityIndexValues,
     enabled: anyIndexVisible, staleTime: Infinity, gcTime: Infinity,
   });
 
@@ -665,8 +669,8 @@ function SummaryBand({
   loading: boolean;
 }) {
   const cards: Array<{ key: DatasetMetric | 'gross'; label: string; value: string }> = [
-    { key: 'rent_cagr_pct', label: 'Median rent growth p.a.', value: fmtPct(summary.rent) },
-    { key: 'sale_cagr_pct', label: 'Median sale growth p.a.', value: fmtPct(summary.sale) },
+    { key: 'rent_cagr_pct', label: 'Median rent growth p.a.', value: fmtGrowthPct(summary.rent) },
+    { key: 'sale_cagr_pct', label: 'Median sale growth p.a.', value: fmtGrowthPct(summary.sale) },
     { key: 'gross', label: 'Median gross yield', value: fmtPct(summary.yield) },
   ];
   return (

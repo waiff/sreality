@@ -30,6 +30,7 @@ import {
 } from '@/lib/api';
 import {
   fmtCzk,
+  fmtPct,
   fmtRelative,
   fmtAbsolute,
   fmtShortDate,
@@ -715,7 +716,7 @@ function ListingHistoryBlock({
         <Stat label="Price changes" value={String(stats.changes)} mono />
         <Stat
           label="Price change"
-          value={stats.pct == null ? '—' : fmtPct(stats.pct)}
+          value={fmtPct(stats.pct, { signed: true })}
           mono
           pct={stats.pct}
         />
@@ -764,7 +765,7 @@ function ListingHistoryBlock({
                 className="font-mono"
                 style={{ color: c.pct > 0 ? 'var(--color-brick)' : 'var(--color-sage)' }}
               >
-                {fmtPct(c.pct)}
+                {fmtPct(c.pct, { signed: true })}
               </span>
             </li>
           ))}
@@ -857,10 +858,6 @@ function UrlStatusPill({ active }: { active: boolean }) {
   );
 }
 
-function fmtPct(pct: number): string {
-  const sign = pct > 0 ? '+' : '';
-  return `${sign}${pct.toLocaleString('cs-CZ', { maximumFractionDigits: 1 })} %`;
-}
 
 
 /* -------------------------------------------------------------------------- */

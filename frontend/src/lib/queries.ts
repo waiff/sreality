@@ -1793,6 +1793,14 @@ export interface CuratedCity {
   default_radius_m: number;
   population: number | null;
   population_as_of_year: number | null;
+  /* The RÚIAN obec this curated city was matched to (migration 081), or null
+   * when the name match failed. The view has always exposed it and
+   * fetchCuratedCities has always `select('*')`-ed it — it was simply absent
+   * from this type. It is the join key that lets a property carry its city's
+   * indexes without a PostGIS round-trip: `properties.obec_id =
+   * curated_cities.admin_boundary_id`. All 206 curated cities have one, so the
+   * centroid+radius fallback arm in the SQL predicates is currently dead. */
+  admin_boundary_id: number | null;
 }
 
 export interface CityIndexDefinition {
@@ -1812,6 +1820,16 @@ export interface CityIndexValue {
   index_name: string;
   value: number;
 }
+
+/* Query keys for the three operator-static city-quality datasets. They were
+ * inline string literals in BrowseExperience; anything else wanting the same
+ * cached rows (the pipeline board's index strip) has to spell them identically
+ * or it silently refetches into a parallel cache entry. */
+export const cityQualityKeys = {
+  cities: ['curated_cities'] as const,
+  definitions: ['city_index_definitions'] as const,
+  values: ['city_index_values'] as const,
+};
 
 export const fetchCuratedCities = async (): Promise<CuratedCity[]> => {
   /* `.range` bypasses PostgREST's default 1,000-row cap. 205 rows
