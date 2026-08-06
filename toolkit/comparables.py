@@ -207,14 +207,18 @@ def _city_quality_clauses(
     code path. Returns the clause list + parameter additions.
 
     Every predicate here reads a properties_public-grain column
-    (`home_obec_pop`, `near_*`, and the listing point built from
-    `l.lng`/`l.lat`) — properties_public projects lat/lng (ST_Y/ST_X of
-    the geom) but NOT the raw geom, so the containment/proximity branches
-    build the point from lat/lng rather than referencing `l.geom` (which
-    would throw `column l.geom does not exist` against properties_public,
-    silently zeroing every city-index/proximity watchdog). The
-    listings-grain callers via `_shared_filter_where` never set these
-    filters, so the whole helper is inert for them.
+    (`home_obec_pop`, `near_*`, `home_city_id`, and the listing point built
+    from `l.lng`/`l.lat`) — properties_public projects lat/lng (ST_Y/ST_X of
+    the geom) but NOT the raw geom, so the proximity branch builds the point
+    from lat/lng rather than referencing `l.geom` (which would throw
+    `column l.geom does not exist` against properties_public, silently
+    zeroing every proximity watchdog). The city-quality (`rules`) branch
+    doesn't need a point at all — curated-city membership is precomputed
+    onto `home_city_id` (migration 374) — only the proximity branch still
+    does a live radius search, since that radius is chosen per-rule at query
+    time and isn't precomputable the same way. The listings-grain callers via
+    `_shared_filter_where` never set these filters, so the whole helper is
+    inert for them.
     """
     where: list[str] = []
     params: dict[str, Any] = {}
@@ -253,27 +257,26 @@ def _city_quality_clauses(
             params[attr] = val
 
     if rules:
-        # Polygon containment (migration 081) when the curated city is
-        # wired to an obec admin_boundary; centroid+radius is the
-        # fallback for cities that didn't match a RÚIAN obec by name.
-        sub_where: list[str] = [
-            "((c.admin_boundary_id IS NOT NULL "
-            "AND ST_Covers(b.geom, ST_SetSRID(ST_MakePoint(l.lng, l.lat), 4326))) "
-            "OR (c.admin_boundary_id IS NULL "
-            "AND ST_DWithin("
-            "ST_SetSRID(ST_MakePoint(l.lng, l.lat), 4326)::geography, "
-            "ST_SetSRID(ST_MakePoint(c.lng, c.lat), 4326)::geography, "
-            "c.default_radius_m)))"
-        ]
+        # Membership in a curated city is precomputed onto
+        # properties_public.home_city_id (migration 374, recompute_home_city())
+        # -- the SAME column Browse's listings_with_city_quality RPC and
+        # browse_stats_properties join against, so all three "does this row
+        # belong to a qualifying curated city" consumers share one source of
+        # truth (CLAUDE.md rule 16) instead of each re-running the
+        # ST_Covers(admin boundary) / ST_DWithin(centroid, radius) containment
+        # test live. Prior to migration 374 this ran that containment test
+        # inline per row; live EXPLAIN on the Browse-grain equivalent showed a
+        # cost in the billions at ~500k-row scale (Watchdog's cohorts are
+        # normally much smaller, which is why this was never observed here,
+        # but there's no reason to keep the slower, divergence-prone form).
+        sub_where: list[str] = ["c.city_id = l.home_city_id"]
         for i, rule in enumerate(rules):
             idx_p, val_p = f"ciq_rule_{i}_name", f"ciq_rule_{i}_val"
             sub_where.append(_index_rule_predicate(f"viq_{i}", rule, idx_p, val_p))
             params[idx_p] = rule["index_name"]
             params[val_p] = rule["value"]
         where.append(
-            "EXISTS (SELECT 1 FROM curated_cities_public c "
-            "LEFT JOIN admin_boundaries_public b "
-            "ON b.id = c.admin_boundary_id "
+            "l.home_city_id IS NOT NULL AND EXISTS (SELECT 1 FROM curated_cities_public c "
             "WHERE "
             + " AND ".join(sub_where)
             + ")"

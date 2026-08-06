@@ -87,12 +87,15 @@ def test_build_clauses_emits_spatial_when_set() -> None:
 
 
 def test_build_clauses_city_quality_uses_latlng_not_geom() -> None:
-    """City-index containment + near-city proximity watchdogs scan
-    properties_public, which projects lat/lng but NOT the raw geom column.
-    Every point in _city_quality_clauses must be built from l.lng/l.lat — a
-    stray `l.geom` throws `column l.geom does not exist`, caught by the
+    """Near-city proximity watchdogs scan properties_public, which projects
+    lat/lng but NOT the raw geom column. Every point in the near_city_proximity
+    branch of _city_quality_clauses must be built from l.lng/l.lat — a stray
+    `l.geom` throws `column l.geom does not exist`, caught by the
     per-subscription try/except, so those watchdogs silently NEVER match
-    (the Wave 3 detection fix; this guards against a geom regression)."""
+    (the Wave 3 detection fix; this guards against a geom regression).
+    city_index_rules no longer needs a point at all: curated-city membership
+    is precomputed onto properties_public.home_city_id (migration 374), so
+    that branch is a plain indexed equality join, not a live spatial test."""
     spec = WatchdogFilterSpec(
         city_index_rules=[{"index_name": "safety", "value": 60, "op": ">="}],
         near_city_proximity={"radius_km": 10, "index_rules": []},
@@ -104,8 +107,10 @@ def test_build_clauses_city_quality_uses_latlng_not_geom() -> None:
     joined = " ".join(city)
     assert "l.geom" not in joined
     assert "ST_MakePoint(l.lng, l.lat)" in joined
-    # polygon-containment fallback also builds the listing point from lat/lng
-    assert "ST_Covers(b.geom, ST_SetSRID(ST_MakePoint(l.lng, l.lat), 4326))" in joined
+    # city_index_rules branch joins the precomputed column, not a live containment test
+    assert "l.home_city_id IS NOT NULL" in joined
+    assert "c.city_id = l.home_city_id" in joined
+    assert "ST_Covers" not in joined
     assert params["near_city_radius_m"] == 10000
 
 

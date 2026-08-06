@@ -376,6 +376,31 @@ Headline scope:
   cities, current population, and latest index values for sanity-
   checking the most recent upload.
 
+**2026-08-06 fix: RLS lockout + scale (migrations 373/374)**:
+
+- `listings_with_city_quality` was `SECURITY INVOKER` reading `FROM
+  listings` — after the Phase-1 RLS-deny-all posture landed on
+  `listings` (Amendment A5), `authenticated` saw zero rows
+  unconditionally, so any logged-in user who set a city-quality rule
+  got a silently empty Browse cohort. Fixed by repointing to
+  `browse_list` (373), which surfaced a second, pre-existing defect:
+  the live `ST_Covers`/`ST_DWithin` containment scan against all 206
+  curated cities costs billions at Browse's ~500k-row scale (fine at
+  Watchdog's small per-subscription scale, which is why nobody had
+  hit it). Fixed by precomputing curated-city membership onto
+  `properties.home_city_id` (374, `recompute_home_city()`, hourly
+  incremental job mirroring the existing `home_obec_pop`/`near_*`
+  pattern) — `listings_with_city_quality`, `browse_stats_properties`,
+  and `_city_quality_clauses` now all join the same indexed column.
+  Also closed while in there: `browse_stats_properties`'s
+  `city_index_rules` predicate had silently drifted from a
+  radius-only, `>=`-only approximation of the other two consumers'
+  boundary-aware, all-six-operator logic — a live Stats-vs-Cards
+  count divergence, now unified. `near_city_proximity` stays a live,
+  unoptimized radius search (confirmed dead in the SPA UI — no widget
+  wires it — so not the bottleneck and not precomputable the same way
+  regardless, since the radius is chosen per-query).
+
 **Open questions (operator to decide before implementation starts)**
 
 - **Canonical city identity.** Match cities by ČSÚ municipality code

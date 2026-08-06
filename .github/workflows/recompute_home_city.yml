@@ -1,0 +1,52 @@
+name: "Jobs: recompute home city (hourly)"
+
+# Recompute properties.home_city_id (migration 374) so the Browse city-quality
+# RPC (listings_with_city_quality), browse_stats_properties, and Watchdog's
+# _city_quality_clauses all join a plain indexed column instead of each
+# running a live ST_Covers/ST_DWithin containment test against every curated
+# city per row. Incremental hourly run fills newly-ingested properties within
+# the hour; the same function rebuilds everything after a curated_cities /
+# admin_boundaries change.
+#
+# Dispatch with full=true after adding/editing a curated city or its RUIAN
+# obec link, since that shifts which properties match.
+#
+# Required GitHub secret:
+#   SUPABASE_DB_URL  -- same one used by every other workflow.
+
+on:
+  schedule:
+    - cron: "45 * * * *"
+  workflow_dispatch:
+    inputs:
+      full:
+        description: "Rebuild every property (not just new ones)"
+        type: boolean
+        default: false
+
+concurrency:
+  group: recompute-home-city
+  cancel-in-progress: false
+
+jobs:
+  recompute:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install runtime deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+
+      - name: Recompute home city
+        run: python -m scripts.recompute_home_city ${{ (github.event_name == 'workflow_dispatch' && inputs.full) && '--full' || '' }}
