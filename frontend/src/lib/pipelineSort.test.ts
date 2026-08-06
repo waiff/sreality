@@ -57,7 +57,14 @@ describe('sort options', () => {
 
   it('covers every requested key', () => {
     const fields = new Set(PIPELINE_SORT_OPTIONS.map((o) => o.field));
-    for (const f of ['board_position', 'added_at', 'entered_stage_at', 'price_czk', 'city']) {
+    for (const f of [
+      'board_position',
+      'added_at',
+      'entered_stage_at',
+      'price_czk',
+      'total_price_change_pct',
+      'city',
+    ]) {
       expect(fields.has(f as never)).toBe(true);
     }
   });
@@ -89,6 +96,30 @@ describe('sorting', () => {
     ];
     expect(by(rows, { field: 'price_czk', direction: 'desc' })).toEqual([3, 1, 2]);
     expect(by(rows, { field: 'price_czk', direction: 'asc' })).toEqual([1, 3, 2]);
+  });
+
+  it('ranks the deepest price cut first when ascending', () => {
+    const rows = [
+      card({ property_id: 1, total_price_change_pct: -2.5 }),
+      card({ property_id: 2, total_price_change_pct: 8 }),
+      card({ property_id: 3, total_price_change_pct: -14 }),
+      card({ property_id: 4, total_price_change_pct: 0 }),
+    ];
+    expect(by(rows, { field: 'total_price_change_pct', direction: 'asc' })).toEqual([3, 1, 4, 2]);
+    expect(by(rows, { field: 'total_price_change_pct', direction: 'desc' })).toEqual([2, 4, 1, 3]);
+  });
+
+  it('sinks never-observed-moving cards below the movers in BOTH directions', () => {
+    // NULL is "fewer than two priced snapshots", not "0% change" — the majority
+    // of live cards. It must not outrank an observed 0%, and must not head the
+    // biggest-risers list either.
+    const rows = [
+      card({ property_id: 1, total_price_change_pct: null }),
+      card({ property_id: 2, total_price_change_pct: 0 }),
+      card({ property_id: 3, total_price_change_pct: -6 }),
+    ];
+    expect(by(rows, { field: 'total_price_change_pct', direction: 'asc' })).toEqual([3, 2, 1]);
+    expect(by(rows, { field: 'total_price_change_pct', direction: 'desc' })).toEqual([2, 3, 1]);
   });
 
   it('orders by city using Czech collation on the label the card shows', () => {

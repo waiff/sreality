@@ -237,7 +237,7 @@ Basic filtering of the kanban board by property type (`category_main`).
 Vertical ordering the operator controls, plus two data signals on the card.
 - **Sort** as a fourth row in the existing Stav/Typ/Lokalita chip stack, applied
   WITHIN each column: Ruční pořadí (default) / Přidáno / Ve fázi nejdéle / Cena /
-  Město. Manual order is modelled as a named option over the long-dormant
+  Změna ceny / Město. Manual order is modelled as a named option over the long-dormant
   `board_position` rather than replaced — the API always accepted it and the
   frontend never wrote it, and its values collide *within* a stage, so the old
   single global `ORDER BY board_position` was non-deterministic between refetches.
@@ -254,7 +254,10 @@ Vertical ordering the operator controls, plus two data signals on the card.
 - **Price movement** — shared `<PriceDelta>` (drop = sage, rise = brick, the
   polarity ListingDetail already used). Renders NOTHING when
   `total_price_change_pct` is NULL (fewer than two observed prices), which is not
-  the same claim as "unchanged". Also adopted on Browse cards + table.
+  the same claim as "unchanged". Also adopted on Browse cards + table. Sortable
+  on the SIGNED percent (ascending = deepest cut first, matching the buyer-board
+  polarity); no |abs| "biggest mover" option, and the NULL majority sinks below
+  the movers in both directions rather than being read as 0%.
 - **URL state** (`lib/pipelineState`) for sort AND the three existing filters, in
   Browse's own param vocabulary — the board's filters were `useState`-only and
   silently reset on reload.
