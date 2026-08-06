@@ -119,7 +119,7 @@ Session handoff points marked ⛳ (good places to end a session; update the ledg
 
 ## Progress ledger (update every session, newest first)
 
-- 2026-08-06 (session continuation, part 5 — parallel to the RunPod session below) — Built the
+- 2026-08-06 (session continuation, part 6 — parallel to the RunPod session below) — Built the
   Labeling page (W1's last unstarted mechanic besides the Dashboard skeleton, which stays a
   placeholder — genuinely no data until W2+).
   - **Migration 373** (`dedup_sim_labeling`) applied live via MCP: `dedup_sim.taxonomy_labels`
@@ -253,6 +253,16 @@ Session handoff points marked ⛳ (good places to end a session; update the ledg
     PR-3 (still the only blocker on Gate 0) if it hasn't landed by then; consider a non-destructive
     "deactivate a taxonomy label" affordance if the hard-delete-only gap above turns out to matter
     in practice.
+- 2026-08-06 (session continuation, part 5) — **W1's RunPod deliverable closes out.** After
+  #982's redesigned pass criteria landed, re-dispatched once more
+  ([31085275059](https://github.com/waiff/sreality/actions/runs/31085275059)): pod `ci87ta3vltru6l`
+  launched on the RTX 3070 fallback (RTX A2000 again had no capacity), ran for 126s, was cleanly
+  terminated — **SMOKE TEST PASSED**, workflow run status `success`, estimated cost **~$0.0046**.
+  `desiredStatus` stayed `RUNNING` and the logs endpoint still 400'd, exactly as the part-4 entry
+  predicted — no longer treated as failures. Total real spend across all 5 live dispatches this
+  session: ~2.2¢. The RunPod client, its capacity/pricing edge cases, and the cost-safety
+  guarantee are now proven against real infrastructure end-to-end; nothing further needed here
+  until Wave 5 builds the real embedding batch job on top of `RunPodClient.run_job`.
 - 2026-08-06 (session continuation, part 4) — Operator added RunPod account funds. Re-dispatch
   ([31083936844](https://github.com/waiff/sreality/actions/runs/31083936844)) got past the
   account-balance blocker and, for the first time, **actually launched a real pod**: `g39f02wj642her`
