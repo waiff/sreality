@@ -3,10 +3,10 @@
 Wraps the plain Chat Completions REST API via `OpenAICompatibleProvider` — no
 `openai` SDK dependency (rule #7): the wire format is JSON over HTTP and the
 shared base already speaks it. Also implements the async Batch API (the
-`BatchCapableProvider` surface) so gpt-5-mini can run the dedup/enrichment vision
-lanes through OpenAI's own −50% batch tier, the way Sonnet runs through
-Anthropic's — see scripts.submit_dedup_batch / ingest_dedup_batch, which drive
-whichever provider a lane's model resolves to (llm_client.provider_for_model).
+`BatchCapableProvider` surface) so gpt-5-mini can run the enrichment lanes
+through OpenAI's own −50% batch tier, the way Sonnet runs through Anthropic's —
+see scripts.submit_enrich_batch / ingest_enrich_batch, which drive whichever
+provider a lane's model resolves to (llm_client.provider_for_model).
 """
 
 from __future__ import annotations
@@ -86,8 +86,8 @@ class OpenAIProvider(OpenAICompatibleProvider):
     ) -> dict[str, Any]:
         """One batch request's `body` (the `/v1/chat/completions` params).
 
-        The batch builders (visual_match.build_compare_request, …) emit
-        Anthropic-shaped content-block dicts, so convert to neutral blocks first
+        The batch builders emit Anthropic-shaped content-block dicts, so convert
+        to neutral blocks first
         and reuse `_chat_body` — a batched request then serialises identically to
         the same request on the sync path. The neutral converters are imported
         lazily to avoid a provider→llm_client cycle at module load.
@@ -151,9 +151,9 @@ class OpenAIProvider(OpenAICompatibleProvider):
         rc = raw.get("request_counts") or {}
         # Normalize to the neutral BatchStatus.counts vocabulary the Anthropic
         # provider established (succeeded/errored) — OpenAI names them
-        # completed/failed. scripts/ingest_dedup_batch reads counts["succeeded"] /
+        # completed/failed. Every ingest lane reads counts["succeeded"] /
         # counts["errored"] regardless of provider; without this mapping an OpenAI
-        # batch NULLs dedup_batches.{succeeded,errored}_count.
+        # batch NULLs the per-batch succeeded/errored counters.
         counts = {
             "total": int(rc.get("total") or 0),
             "succeeded": int(rc.get("completed") or 0),
@@ -272,8 +272,8 @@ def _result_item(rec: dict[str, Any]) -> BatchResultItem:
 
 def _raise_for_status(resp: Any, what: str) -> None:
     if resp.status_code >= 400:
-        # Keep status + body in the message so scripts.validate_vision_models
-        # ._is_infra_error can keyword-match a dead key / quota (mirrors complete()).
+        # Keep status + body in the message so a caller can keyword-match a dead
+        # key / exhausted quota apart from a real failure (mirrors complete()).
         raise ProviderError(
             f"openai {what} failed: HTTP {resp.status_code} {resp.text[:500]}"
         )

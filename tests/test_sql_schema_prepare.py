@@ -115,7 +115,7 @@ def _allowlisted(item) -> str | None:
 
 
 # An UNQUOTED `.format()` slot — `{name}` not preceded by a quote. Some constants
-# (e.g. dedup_engine `_ELIGIBLE_SQL` -> `{filter}`, portal_lookup -> `{values}`)
+# (e.g. portal_lookup -> `{values}`)
 # hold a template filled per-call; resolve-imports surfaces the raw template,
 # which is not runnable SQL. A QUOTED `'{...}'` (a jsonb path / array literal) is
 # deliberately NOT matched — it is valid SQL and PREPAREs fine.

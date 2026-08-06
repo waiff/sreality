@@ -199,6 +199,7 @@ workflow failure); keep exit-1 only for harness malfunctions (INCONCLUSIVE, cras
 (d) cap pairs-per-listing in sampling (verified correlated-sample bias: single listings dominate
 the missed set). Record both verdicts (Haiku@768: 20% recall DO-NOT-ADOPT; Sonnet@1568: 88.3%
 DO-NOT-ADOPT) in `roadmap/dedup` track + `docs/design/clip-visual-embeddings.md` in the same PR.
+(Historical: both that doc and the workflow were deleted in the 2026-08 "NEW DEDUP" cutoff.)
 When the operator's model-migration program concludes, retire the workflow in a cleanup PR.
 
 **WS0-5 (operator).** Anthropic console: enable auto-reload / billing alerts (RC1 prevention).

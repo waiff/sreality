@@ -2,7 +2,7 @@
 unauthenticated by accident.
 
 The DB side now has a generalizing gate (tests/test_tenant_isolation_live.py), but
-nothing checked the API side, so a new /admin or /dedup route that forgot
+nothing checked the API side, so a new /admin or /labeling route that forgot
 `Depends(require_admin)` would ship un-caught. This walks the live FastAPI app and
 buckets each route by the auth dependency reachable from its dependant tree —
 router-level ``dependencies=[...]``, per-parameter ``Depends(...)``, and their nested
@@ -41,15 +41,20 @@ _PUBLIC_ALLOWLIST: frozenset[tuple[str, str]] = frozenset({
     ("POST", "/u/{token}"),
 })
 
-# Every route under these must resolve to require_admin.
+# Every route under these must resolve to require_admin. `/properties` as a whole is
+# NOT an admin prefix (notes/tags under it ride the plain bearer gate), so the merge
+# mechanics are listed by their own sub-paths — "/properties/merge" covers /merge,
+# /merges and /merged.
 _ADMIN_PREFIXES: tuple[str, ...] = (
-    "/admin", "/dedup", "/outreach", "/broker-review", "/location-audit",
-    "/skill-refinements",
+    "/admin", "/properties/merge", "/properties/assets", "/labeling",
+    "/outreach", "/broker-review", "/skill-refinements",
 )
 
 # Sentinels proving those routers actually mounted. Without this, a mis-mounted router
 # would leave an empty route table and every assertion below would pass vacuously.
-_MOUNT_SENTINELS: tuple[str, ...] = ("/admin", "/dedup", "/notifications")
+_MOUNT_SENTINELS: tuple[str, ...] = (
+    "/admin", "/properties/merge", "/labeling", "/notifications",
+)
 
 
 def _reachable_calls(dependant) -> set:

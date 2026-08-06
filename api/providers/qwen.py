@@ -9,9 +9,9 @@ new translation code. Two vision-capable MoE sizes are benchmarked: 235B-A22B
 Thinking — this repo's dedup verdicts are forced single-tool-call decisions,
 not chain-of-thought tasks, and Thinking pricing/latency would be a worse fit.
 
-Bake-off candidate only; NOT registered as a production dedup-vision model
-until a green harness run + operator flip (docs/design/dedup-cost-reduction.md
-§Operator gates).
+Candidate provider only; nothing routes to it today. The vision route that
+would use it is a parked item of the dedup rebuild (docs/design/new-dedup/
+PROGRAM.md, W6) — register a production model only on the operator's flip.
 """
 
 from __future__ import annotations

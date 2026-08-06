@@ -328,10 +328,9 @@ export interface PortalHealth {
   listings_active: number;
   listings_active_7d: number;
   // Active-listing data-quality coverage (migration 219; null when no active
-  // listings). dedup_eligible_pct = street AND disposition (the dedup gate, rule #15).
+  // listings). The view also carries dedup_eligible_pct — unmodelled, nothing reads it.
   geo_pct: number | null;
   street_pct: number | null;
-  dedup_eligible_pct: number | null;
   parses_total: number;
   parses_30d: number;
   last_scrape_at: string | null;
@@ -948,7 +947,7 @@ export interface PipelineBoardCard {
   okres: string | null;
   region: string | null;
   /* properties.is_active rollup (bool_or over child listings, rule #15/#20) —
-   * the same dedup-aware liveness signal Browse filters on. */
+   * the same property-grain liveness signal Browse filters on. */
   is_active: boolean;
   image_url: string | null;
   broker: PipelineCardBroker | null;
@@ -1523,102 +1522,7 @@ export interface ScraperHealthChecks {
   checks: ScraperHealthCheck[];
 }
 
-/* ----- Cross-source dedup review (multi-portal PR3b) --------------------- */
-
-export interface DedupPropertySide {
-  property_id: number;
-  status: string;
-  sreality_id: number | null;
-  price_czk: number | null;
-  area_m2: number | null;
-  disposition: string | null;
-  district: string | null;
-  category_main: string | null;
-  category_type: string | null;
-  source_count: number | null;
-  distinct_site_count: number | null;
-  first_seen_at: string | null;
-  lat: number | null;
-  lng: number | null;
-  // Disambiguating fields for a town-pin review (added with the review-card
-  // hardening). Optional so older cached payloads / test fixtures still type.
-  // `street` null on both sides of a geo pair ⇒ the match rests on an
-  // approximate town-level coordinate, not a precise address.
-  estate_area?: number | null;
-  street?: string | null;
-  building_type?: string | null;
-  condition?: string | null;
-  source?: string | null;
-  source_url?: string | null;
-  description?: string | null;
-}
-
-// Operator "this decision was wrong" flag — pair-keyed, shared by the Decision history
-// feed AND the Needs-review queue (one store, one control).
-export interface DecisionFeedback {
-  is_incorrect: boolean;
-  expected_outcome: 'should_merge' | 'should_dismiss' | 'unsure' | null;
-  note: string | null;
-  updated_at: string | null;
-}
-
-// One auditable rung of a decision: a signal (pHash / cosine / verdict / floor-plan /
-// address) with its measured value vs the bar it was judged against, whether it was met,
-// and which Settings knob(s) govern it (for a deep-link). Computed server-side from the
-// stored factor `detail`, so it is identical on the history feed and the queue.
-export interface AuditRung {
-  key: string;
-  label: string;
-  value: string | number;
-  threshold?: string | number | null;
-  comparator?: string | null;
-  status: 'met' | 'unmet' | 'info';
-  settings_keys: string[];
-  note?: string | null;
-}
-
-export interface DedupCandidate {
-  id: number;
-  tier: string;
-  status: string;
-  confidence: number | null;
-  markers_matched: Record<string, unknown> | null;
-  auto_merged: boolean;
-  merge_group_id: string | null;
-  created_at: string;
-  reviewed_at: string | null;
-  left_property: DedupPropertySide;
-  right_property: DedupPropertySide;
-  feedback?: DecisionFeedback | null;
-  audit_breakdown?: AuditRung[];
-}
-
-export interface DedupCandidatesResponse {
-  data: DedupCandidate[];
-  total: number;       // total matching the filter (the page is capped by `limit`)
-  returned?: number;   // rows on this page
-}
-
-export interface DedupSummaryBucket {
-  reason: string;          // markers_matched.reason, or "(legacy)" for pre-reason rows
-  verdict: string | null;  // markers_matched.verdict (visual buckets)
-  count: number;
-}
-
-export interface DedupSummaryTier {
-  tier: string;     // 'street_disposition' (apartments) | 'geo_dum' | 'geo_komercni' | ...
-  count: number;    // pending candidates in this family
-  strong: number;   // the bulk-approvable subset (geo_exact / geo_strong)
-}
-
-export interface DedupSummaryResponse {
-  data: {
-    status: string;
-    total: number;
-    buckets: DedupSummaryBucket[];
-    tiers: DedupSummaryTier[];
-  };
-}
+/* ----- Operator merge mechanics (multi-portal) --------------------------- */
 
 export interface MergeGroup {
   merge_group_id: string;
@@ -1636,8 +1540,8 @@ export interface MergesResponse {
   total: number;
 }
 
-/* One already-merged property (survivor) in the /dedup/merged-properties audit
- * browse — the RESULT of dedup, not a proposed pair. `source_count` is every
+/* One already-merged property (survivor) in the merged-properties audit
+ * browse. `source_count` is every
  * child listing ever grouped under it (active or delisted); `active_count` the
  * still-live subset; `sources` the distinct portals those children span. */
 export interface MergedProperty {
@@ -1665,8 +1569,8 @@ export interface MergedPropertiesResponse {
   returned: number;    // rows on this page
 }
 
-/* One row of property_sources_public — a property's per-portal observations
- * (multi-portal dedup). Drives the Listing Detail "listed on N sites" panel. */
+/* One row of property_sources_public — a property's per-portal observations.
+ * Drives the Listing Detail "listed on N sites" panel. */
 export interface PropertySource {
   property_id: number;
   /* The child listing's SURROGATE id (property_sources_public.id = listings.id,

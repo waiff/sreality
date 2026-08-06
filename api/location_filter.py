@@ -2,8 +2,7 @@
 
 One `DistrictChip` shape + one SQL-clause builder for every surface that lets
 the operator narrow by place: Browse (browse_stats, migration 182, and the
-client's `districtsFilterClause`), Watchdog (`api.notifications`), and the
-dedup Decision history + manual review Queue (`api.property_dedup`). A
+client's `districtsFilterClause`) and Watchdog (`api.notifications`). A
 resolved chip matches by STABLE ADMIN ID (`obec_id` / `okres_id` / `region_id`)
 so an obec pick can't collide with its same-named okres; a 'locality'
 (street/POI) chip narrows to its containing obec AND a `place_search_text`
@@ -12,13 +11,9 @@ ILIKE; a legacy chip (no level/id) falls back to ILIKE-by-name across
 parent-municipality `context` narrow. INCLUDE chips are OR'd (match any);
 EXCLUDE chips are NOT'd (subtract).
 
-`district_where` takes one or more table aliases. A single alias reproduces
-the exact clauses/param-names Watchdog has shipped since migration 067 (kept
+`district_where` takes exactly one table alias and reproduces the exact
+clauses/param-names Watchdog has shipped since migration 067 (kept
 byte-identical on purpose — `tests/api/test_notifications.py` pins the shape).
-Multiple aliases OR each chip across all of them before applying the
-include/exclude grouping — "does EITHER side of this pair touch this place" —
-which is what a pair-grain dedup query needs (a candidate/decision references
-two `properties` rows, not one).
 """
 
 from __future__ import annotations
@@ -43,20 +38,11 @@ class DistrictChip(BaseModel):
     id: int | None = None
 
 
-def _keys_for(i: int, alias: str | None) -> tuple[str, str, str]:
-    # `alias is None` is the legacy single-alias caller — keep the exact
-    # `district_id_{i}` / `district_name_{i}` / `district_ctx_{i}` names the
-    # Watchdog matcher has always used, so that caller's SQL/params are
-    # byte-identical to before this was extracted. Extra aliases (the dedup
-    # pair-grain callers) get an alias-qualified name instead, since two
-    # aliases testing the same chip index would otherwise collide.
-    if alias is None:
-        return f"district_id_{i}", f"district_name_{i}", f"district_ctx_{i}"
-    return (
-        f"district_id_{alias}_{i}",
-        f"district_name_{alias}_{i}",
-        f"district_ctx_{alias}_{i}",
-    )
+def _keys_for(i: int) -> tuple[str, str, str]:
+    # The exact `district_id_{i}` / `district_name_{i}` / `district_ctx_{i}` names
+    # the Watchdog matcher has always used, so that caller's SQL/params stay
+    # byte-identical to before this was extracted.
+    return f"district_id_{i}", f"district_name_{i}", f"district_ctx_{i}"
 
 
 def _chip_clause_sql(
@@ -116,7 +102,7 @@ def parse_district_chips_csv(
     `districts_lvl` / `districts_id` CSV query params into `DistrictChip`s —
     the exact wire format `frontend/src/lib/filters.ts` (`parseDistrictChips` /
     `districtChipsToCsvParams`) emits for every location-filterable GET
-    endpoint (Browse's URL, the dedup Decision history + Queue routes below).
+    endpoint (Browse's URL, the Watchdog routes).
     Returns `None` when `names_raw` is absent/empty, matching "no filter"."""
     if not names_raw:
         return None
@@ -142,31 +128,25 @@ def parse_district_chips_csv(
 
 def district_where(
     chips: list[DistrictChip] | None,
-    aliases: list[str],
+    alias: str,
 ) -> tuple[list[str], dict[str, Any]]:
     """Render `chips` as parameterised WHERE-clause fragments (AND them
     together with the rest of the caller's WHERE) plus their params dict.
 
-    `aliases` names the `properties`/`listings`-shaped table(s) each chip is
-    tested against — e.g. `["l"]` for Watchdog's single listing alias, or
-    `["l", "r"]` for a dedup pair query's two `properties` sides. Every alias
-    must expose `district`, `place_search_text`, `okres`, `region`, `obec_id`,
-    `okres_id`, `region_id` columns (the `properties`/`properties_public` /
-    Watchdog `listings l` shape)."""
+    `alias` names the `properties`/`listings`-shaped table each chip is tested
+    against — e.g. `"l"` for Watchdog's listing alias. It must expose
+    `district`, `place_search_text`, `okres`, `region`, `obec_id`, `okres_id`,
+    `region_id` columns (the `properties`/`properties_public` / Watchdog
+    `listings l` shape)."""
     if not chips:
         return [], {}
-    if not aliases:
-        raise ValueError("district_where requires at least one alias")
-    legacy = len(aliases) == 1
+    if not alias:
+        raise ValueError("district_where requires an alias")
     params: dict[str, Any] = {}
     inc_clauses: list[str] = []
     exc_clauses: list[str] = []
     for i, chip in enumerate(chips):
-        per_alias = [
-            _chip_clause_sql(chip, alias, *_keys_for(i, None if legacy else alias), params)
-            for alias in aliases
-        ]
-        clause = per_alias[0] if legacy else "(" + " OR ".join(per_alias) + ")"
+        clause = _chip_clause_sql(chip, alias, *_keys_for(i), params)
         (exc_clauses if chip.excluded else inc_clauses).append(clause)
     where: list[str] = []
     if inc_clauses:

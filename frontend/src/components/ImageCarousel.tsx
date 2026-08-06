@@ -3,8 +3,8 @@ import ImageTagBadge from './ImageTagBadge';
 import ImageRenderBadge from './ImageRenderBadge';
 import { type TaggedImageUrl } from '@/lib/imageTags';
 
-/* Compact inline image carousel — the photo strip shared by Browse listing
- * cards and the /dedup review panels. Local index state (the carousel never
+/* Compact inline image carousel — the photo strip on Browse listing
+ * cards. Local index state (the carousel never
  * outlives its mount); chevrons stopPropagation + preventDefault so paging
  * inside a wrapping <Link> doesn't navigate. Inline only — no lightbox.
  *
@@ -25,7 +25,7 @@ interface Props {
   /* group-hover:scale the image — cards live inside a `.group` Link. */
   hoverZoom?: boolean;
   /* Chevrons fade in on parent `.group` hover (cards) rather than always
-   * showing (the dedup panel, which has no hover-group wrapper). */
+   * showing (a panel with no hover-group wrapper). */
   fadeChevrons?: boolean;
   children?: ReactNode;
 }

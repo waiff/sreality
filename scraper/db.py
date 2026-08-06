@@ -27,7 +27,6 @@ from psycopg.types.json import Jsonb, set_json_dumps
 from scraper import media
 from scraper.scraped_listing import ScrapedListing
 from scraper.street import street_name_key
-from toolkit.publication import eligible_predicate
 
 LOG = logging.getLogger(__name__)
 
@@ -664,8 +663,7 @@ def upsert_listing_with_property(
     The listing write and its property linkage commit in one transaction so a
     partial failure can't leave a listing unlinked. New listings become their
     own singleton property (`_create_singleton_property`); cross-listing
-    grouping is the out-of-band street+disposition dedup engine's job, not the
-    insert path.
+    grouping is out-of-band and operator-ordered, never the insert path.
     """
     sreality_id = row["sreality_id"]
     with conn.transaction():
@@ -699,7 +697,7 @@ BROKER_ATTRIBUTED_SOURCES = frozenset(
 # nextval draw below is unconditional until an operator explicitly opts in.
 # app_settings-backed (not env/process-cached) so the always-on realtime
 # worker and cron drains pick up a flip on their very next batch, not after a
-# restart — same posture as toolkit.dedup_settings' operator-gated knobs.
+# restart.
 GATE2_NULL_SREALITY_ID_SETTING = "gate2_null_sreality_id_enabled"
 
 
@@ -849,13 +847,11 @@ def _create_singleton_property(
 ) -> None:
     """Give a newly-seen listing its own singleton `properties` parent.
 
-    No matching at insert time: the street+disposition dedup engine
-    (`toolkit.dedup_engine` + `scripts.dedup_engine`) owns ALL grouping and runs
-    out-of-band. The old geo Tier-1 spatial probe (20m/price/area) was removed
-    when matching moved to street+disposition — insert-time geo proximity is no
-    longer how properties are linked. Every new listing starts as a singleton;
-    the engine merges it onto a sibling later if street+disposition (+ visual)
-    agree.
+    No matching at insert time, ever. The old geo Tier-1 spatial probe
+    (20m/price/area) was removed long ago, and the automatic decision engine
+    that replaced it was itself removed in the 2026-08 "NEW DEDUP" cutoff
+    (CLAUDE.md rule 15). Every new listing starts as a singleton and stays one
+    until an operator orders a merge through `toolkit.property_identity`.
     """
     with conn.cursor() as cur:
         cur.execute(
@@ -2239,67 +2235,6 @@ _BATCH_DIRTY_FROM_SIDS_SQL = """
     WHERE sreality_id = ANY(%s) AND property_id IS NOT NULL
     ON CONFLICT (property_id) DO UPDATE SET marked_at = now()
 """
-
-# Wave 4c: a listing becomes DEDUP-ready once ALL its images are CLIP-tagged (pHash runs just
-# before). The clip_tag job calls this after each batch of tags; we enqueue the owning property
-# ONLY when the listing whose image was just tagged has NO remaining un-tagged stored image —
-# i.e. it is now FULLY tagged. Enqueuing on a PARTIAL batch (the old behaviour) shoved a listing
-# into the real-time --dirty drain at 1-of-N images tagged, so the floor-plan gate mis-read its
-# still-pending plan as absent (the false floor_plan_review queue). The dedup engine ALSO defers
-# any incompletely-tagged pair (resolve_pair `_clip_incomplete` gate), so this is the trigger
-# half of one invariant: the engine only ever decides a pair when both sides are fully tagged.
-# Same append-and-bump-marked_at discipline as dirty_properties (rule #20).
-#
-# TWO enqueue gates keep this a REAL-TIME CHANGE signal, not an ENRICHMENT-progress firehose
-# (the flood that stalled the drain twice — the whole market streamed through the tagger and
-# every property landed here, 78.5% of them un-mergeable):
-#   * ELIGIBILITY (property-grain): the property must have >=1 listing the dedup engine can
-#     actually reach — street+disposition (the street pass), OR a geo-eligible single-dwelling
-#     row (the geo pass), OR a byt-geo-eligible street-less apartment (the byt geo rung);
-#     run_dirty_pass runs cell sub-passes over the claimed properties' stored geo_cell_key
-#     cells, so cell-family properties merge on this lane too — the gate was street-only
-#     while the drain was. The predicate is
-#     toolkit.publication.eligible_predicate rendered for the subquery alias, never a hand
-#     copy. Property-grain (any listing of P), NOT the tagged listing's own eligibility: the
-#     re-tagged image may belong to an ineligible sibling (a geom-less re-post) while the
-#     property's eligible listing is what actually merges.
-#   * RECENCY: only a genuinely NEW listing needs the minutes-latency lane. A market-wide CLIP
-#     backfill (or a new portal's back-catalogue) tags OLD listings whose dedup is already the
-#     6h full scan's job; routing them here is what floods the queue. `first_seen_at` on the
-#     TAGGED listing is the "new arrival" signal. Older-but-newly-eligible pairs (a street
-#     backfilled onto an old listing) are the full scan's job today too — no regression.
-# Anything these gates drop is still deduped by the scheduled full scans (the correctness
-# backstop); they only keep the real-time lane scoped to work it can act on fast.
-_DEDUP_DIRTY_RECENCY_DAYS = 7
-
-_DEDUP_DIRTY_FROM_IMAGE_IDS_SQL = f"""
-    INSERT INTO dedup_dirty_properties (property_id)
-    SELECT DISTINCT l.property_id FROM listings l JOIN images i ON i.sreality_id = l.sreality_id
-    WHERE i.id = ANY(%s) AND l.property_id IS NOT NULL
-      AND NOT EXISTS (
-        SELECT 1 FROM images i2
-        WHERE i2.sreality_id = l.sreality_id
-          AND i2.storage_path IS NOT NULL AND i2.clip_tagged_at IS NULL
-      )
-      AND EXISTS (
-        SELECT 1 FROM listings le
-        WHERE le.property_id = l.property_id
-          AND ({eligible_predicate("le")})
-      )
-      AND l.first_seen_at > now() - interval '{_DEDUP_DIRTY_RECENCY_DAYS} days'
-    ON CONFLICT (property_id) DO UPDATE SET marked_at = now()
-"""
-
-
-def mark_properties_dedup_dirty_for_images(conn: "psycopg.Connection",
-                                           image_ids: list[int]) -> int:
-    """Enqueue the properties owning these just-CLIP-tagged images into
-    dedup_dirty_properties (dedup-ready). Set-based + idempotent; returns rows touched."""
-    if not image_ids:
-        return 0
-    with conn.cursor() as cur:
-        cur.execute(_DEDUP_DIRTY_FROM_IMAGE_IDS_SQL, (list(image_ids),))
-        return cur.rowcount or 0
 
 # Broker intelligence (phase 1): a content change can alter a listing's broker
 # block (it is part of the content hash), so enqueue the changed listings for

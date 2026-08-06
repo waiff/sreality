@@ -20,19 +20,10 @@ import {
   fetchRecentScrapeRuns,
   fetchWorkflowFailureSummary,
   fetchScraperHealthChecks,
-  fetchDedupEngineRuns,
-  fetchPublicationGateHealth,
   fetchPipelineChecks,
-  type DedupEngineRun,
   type WorkflowFailureSummaryRow,
-  type PublicationGateRow,
   type PipelineCheckRow,
 } from '@/lib/queries';
-import { assessDirtyQueue } from '@/lib/dedupQueueHealth';
-import {
-  assessPublicationGate,
-  type PublicationGateStatus,
-} from '@/lib/publicationHealth';
 import {
   normalizePipelineStatus,
   pipelineCheckLabel,
@@ -114,7 +105,6 @@ export default function Health() {
 
       {data && <StaleHealthDataBanner generatedAt={data.generated_at ?? null} />}
       {data && <StaleScrapeBanner lastScrapeAt={data.last_scrape_at} />}
-      <DedupQueueBanner />
 
       {isLoading && !data ? (
         <Skeleton />
@@ -149,7 +139,7 @@ function Body({ data }: { data: HealthSummary }) {
 
   return (
     <div className="mt-5 space-y-6">
-      <PublicationPipelineSection />
+      <PipelineChecksSection />
 
       <PortalLedger />
 
@@ -504,10 +494,9 @@ function PortalGroupCard({
 }
 
 /* Active-listing data-quality coverage (migration 219) — informational, not a
- * pass/warn/fail check. `dedup-ready` = street AND disposition, the share of a
- * portal's active listings eligible for cross-portal dedup (rule #15); a portal
- * shipping near-0% street would otherwise sit invisibly green (field_null_drift
- * only watches same-day deltas, so a persistent gap never "drifts"). */
+ * pass/warn/fail check. A portal shipping near-0% street would otherwise sit
+ * invisibly green (field_null_drift only watches same-day deltas, so a
+ * persistent gap never "drifts"). */
 function CoverageLine({ scraper }: { scraper: PortalHealth }) {
   const pct = (v: number | null): string => (v == null ? '—' : `${v}%`);
   return (
@@ -517,9 +506,6 @@ function CoverageLine({ scraper }: { scraper: PortalHealth }) {
       </span>
       <Inline label="geo" value={pct(scraper.geo_pct)} />
       <Inline label="street" value={pct(scraper.street_pct)} />
-      <span title="Share of active listings with BOTH a parsed street and disposition — the gate for cross-portal dedup (rule #15).">
-        <Inline label="dedup-ready" value={pct(scraper.dedup_eligible_pct)} />
-      </span>
     </div>
   );
 }
@@ -690,55 +676,12 @@ function StaleScrapeBanner({ lastScrapeAt }: { lastScrapeAt: string | null }) {
   );
 }
 
-/* Real-time dedup --dirty drain backlog. Self-fetches the recent engine runs (anon public view)
- * and surfaces a banner ONLY when the dedup-ready queue is high — amber while it's draining (a
- * transient tagging flood), red when it has stopped draining (the drain is failing / out-paced).
- * This is the alarm that the 165K backlog lacked: it ran ~2 days unseen. Returns null when healthy. */
-function DedupQueueBanner() {
-  const { data } = useQuery<DedupEngineRun[], Error>({
-    queryKey: ['dedup-engine-runs', 'health'],
-    queryFn: () => fetchDedupEngineRuns(14),
-    refetchInterval: 60_000,
-    staleTime: 30_000,
-  });
-  const dq = assessDirtyQueue(data ?? []);
-  if (dq.status !== 'warn' && dq.status !== 'fail') return null;
-  const fail = dq.status === 'fail';
-  return (
-    <div
-      className={`mt-4 p-3 rounded-[var(--radius-sm)] border text-sm flex items-baseline gap-2 ${
-        fail
-          ? 'border-[var(--color-brick)]/40 bg-[var(--color-brick-soft)] text-[var(--color-brick)]'
-          : 'border-[var(--color-ochre)]/40 bg-[var(--color-ochre-soft)] text-[var(--color-ochre)]'
-      }`}
-    >
-      <span className="text-[0.7rem] tracking-[0.18em] uppercase font-medium">dedup queue</span>
-      <span>
-        <span className="font-mono tabular-nums">{(dq.depth ?? 0).toLocaleString()}</span>{' '}
-        dedup-ready properties waiting. {dq.reason}
-      </span>
-    </div>
-  );
-}
-
 /* -------------------------------------------------------------------------- */
-/* Scrape → publish: the dedup-aware publication gate (migration 273) + the     */
-/* dedup pipeline verification checks (migration 274).                          */
-/*                                                                            */
-/* The publication gate is the operator's headline "is new inventory reaching  */
-/* Browse" signal: new properties stay hidden until dedup evaluates them, and   */
-/* the gate has NO auto-publish timeout — so a rising unpublished backlog is    */
-/* the ONLY surface for a dedup stall. Placed first, above Data sources.        */
+/* Pipeline verification checks (migration 274) — the latest row per check_key   */
+/* written by scripts/verify_pipeline.py (LLM liveness/errors/burn rate, DB      */
+/* saturation, worker liveness, dual-write parity). Placed first, above Data     */
+/* sources, because a red check here explains most downstream weirdness.         */
 /* -------------------------------------------------------------------------- */
-
-const PUB_STATUS: Record<
-  PublicationGateStatus,
-  { dot: string; pill: string; label: string }
-> = {
-  ok: { dot: 'var(--color-sage)', pill: 'bg-[var(--color-sage-soft)] text-[var(--color-sage)]', label: 'OK' },
-  warn: { dot: 'var(--color-ochre)', pill: 'bg-[var(--color-ochre-soft)] text-[var(--color-ochre)]', label: 'Watch' },
-  danger: { dot: 'var(--color-brick)', pill: 'bg-[var(--color-brick-soft)] text-[var(--color-brick)]', label: 'Problem' },
-};
 
 const PIPELINE_DOT: Record<PipelineCheckStatus, string> = {
   ok: 'var(--color-sage)',
@@ -746,7 +689,7 @@ const PIPELINE_DOT: Record<PipelineCheckStatus, string> = {
   fail: 'var(--color-brick)',
 };
 
-function PublicationPipelineSection() {
+function PipelineChecksSection() {
   const checksQuery = useQuery<PipelineCheckRow[], Error>({
     queryKey: ['pipeline-checks'],
     queryFn: fetchPipelineChecks,
@@ -758,11 +701,8 @@ function PublicationPipelineSection() {
 
   return (
     <section>
-      <SectionHeading>Scrape → publish</SectionHeading>
-      <div className="mt-3 grid grid-cols-1 lg:grid-cols-2 gap-4">
-        <Card label="Publikace · publication gate">
-          <PublicationGatePanel />
-        </Card>
+      <SectionHeading>Pipeline</SectionHeading>
+      <div className="mt-3">
         <Card
           label="Kontroly pipeline"
           accessory={
@@ -781,74 +721,6 @@ function PublicationPipelineSection() {
         </Card>
       </div>
     </section>
-  );
-}
-
-function PublicationGatePanel() {
-  const q = useQuery<PublicationGateRow, Error>({
-    queryKey: ['publication-gate-health'],
-    queryFn: fetchPublicationGateHealth,
-    refetchInterval: 60_000,
-    staleTime: 30_000,
-  });
-  if (q.error) {
-    return (
-      <p className="text-sm text-[var(--color-brick)]">
-        publication_gate_health failed: {q.error.message}
-      </p>
-    );
-  }
-  if (q.isLoading && !q.data) {
-    return <p className="text-sm text-[var(--color-ink-4)]">Loading…</p>;
-  }
-  if (!q.data) return null;
-
-  const h = assessPublicationGate(q.data);
-  const s = PUB_STATUS[h.status];
-  const ratioText =
-    h.ratioPct == null ? '—' : `${h.ratioPct.toFixed(h.ratioPct < 1 ? 2 : 1)}%`;
-
-  return (
-    <div>
-      <div className="flex items-start justify-between gap-4">
-        <div>
-          <p
-            className="font-mono tabular-nums text-[2rem] leading-none tracking-tight"
-            style={{ color: h.status === 'ok' ? 'var(--color-ink)' : s.dot }}
-          >
-            {fmtCount(h.unpublished)}
-          </p>
-          <p className="mt-1 text-[0.6rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)]">
-            unpublished
-          </p>
-        </div>
-        <span
-          className={
-            'inline-flex items-center gap-1.5 px-1.5 py-0.5 rounded-[var(--radius-xs)] text-[0.6rem] uppercase tracking-wide font-medium ' +
-            s.pill
-          }
-        >
-          <span className="h-1.5 w-1.5 rounded-full" style={{ backgroundColor: s.dot }} />
-          {s.label}
-        </span>
-      </div>
-
-      <div className="mt-4 flex items-baseline gap-x-8 gap-y-2 flex-wrap">
-        <PortalStat label="podíl z aktivních" value={ratioText} />
-        <PortalStat
-          label="nejstarší"
-          value={h.oldestUnpublishedAt ? fmtRelative(h.oldestUnpublishedAt) : '—'}
-          title={h.oldestUnpublishedAt ? fmtAbsolute(h.oldestUnpublishedAt) : undefined}
-        />
-        <PortalStat label="active total" value={fmtCount(h.activeTotal)} />
-      </div>
-
-      <p className="mt-4 text-xs text-[var(--color-ink-3)] leading-snug">
-        New listings publish to Browse only after the dedup engine evaluates
-        them; a rising count means a dedup stall (the gate has no auto-publish
-        timeout).
-      </p>
-    </div>
   );
 }
 
@@ -916,7 +788,7 @@ function PipelineChecksPanel({
               {pipelineCheckLabel(c.check_key)}
             </span>
             <span className="font-mono tabular-nums text-[var(--color-ink-2)] whitespace-nowrap">
-              {pipelineCheckValueLabel(c.check_key, c.value)}
+              {pipelineCheckValueLabel(c.value)}
             </span>
             <span
               className="shrink-0 tabular-nums text-[0.7rem] text-[var(--color-ink-4)] w-16 text-right cursor-help"

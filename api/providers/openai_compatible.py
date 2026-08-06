@@ -108,9 +108,9 @@ class OpenAICompatibleProvider:
 
         if resp.status_code >= 400:
             # Keep the status code + body IN the message text (not just logged) —
-            # _is_infra_error (scripts/validate_vision_models.py) keyword-matches the
-            # exception string to tell a dead key / exhausted quota apart from a real
-            # verdict miss, and it needs "429" / "401" / etc. to actually appear here.
+            # callers keyword-match the exception string to tell a dead key /
+            # exhausted quota apart from a real model miss, and they need
+            # "429" / "401" / etc. to actually appear here.
             raise ProviderError(
                 f"{self.name} call failed: HTTP {resp.status_code} {resp.text[:500]}"
             )

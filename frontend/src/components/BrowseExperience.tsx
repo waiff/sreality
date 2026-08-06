@@ -59,7 +59,7 @@ import {
   isApiConfigured,
   latestEstimationsByListing,
   linkAssetProperties,
-  mergeDedupPropertySet,
+  mergePropertySet,
 } from '@/lib/api';
 import { pushToast } from '@/lib/toast';
 import { invalidateBrowseQueries } from '@/lib/browseInvalidation';
@@ -182,7 +182,7 @@ export default function BrowseExperience({
     setSelectedForMerge(new Set());
   }, []);
   const mergeMut = useMutation({
-    mutationFn: (propertyIds: number[]) => mergeDedupPropertySet(propertyIds),
+    mutationFn: (propertyIds: number[]) => mergePropertySet(propertyIds),
     onSuccess: (res) => {
       /* The server has already patched the browse_list read model in the merge
        * txn (toolkit.browse_read_model.sync_browse_list), so this refetch serves

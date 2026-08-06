@@ -60,11 +60,10 @@ geo = [
 pricestats = [
   "playwright>=1.40",
 ]
-# CLIP visual-tagging feasibility trial (scripts/clip_trial.py, clip_trial.yml).
-# Heavy (torch + transformers) — kept out of the default install; ONLY the trial
-# workflow installs it, and it installs the CPU-only torch wheel first. This is a
-# trial dependency: the production CLIP backfill is intended to run on int8 ONNX
-# (onnxruntime, far lighter), so this extra is NOT a runtime dep of the scraper/API.
+# CLIP visual tagging (scraper/clip_tagger.py; clip_tag.yml / clip_retag.yml /
+# backfill_render_score.yml). Heavy (torch + transformers) — kept out of the default
+# install; ONLY the tagging workflows install it, and they install the CPU-only torch
+# wheel first, so this extra is NOT a runtime dep of the scraper/API images.
 clip = [
   "transformers>=4.40",
 ]

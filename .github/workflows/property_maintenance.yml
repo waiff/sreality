@@ -29,8 +29,8 @@ name: "Jobs: property maintenance (incremental)"
 #
 # The DAILY FULL sweep (recompute_property_stats.yml, no --incremental) stays the
 # reconcile backstop: it recomputes every property and clears the queue, so a
-# missed enqueue self-heals within 24h. The street+disposition dedup engine
-# (dedup_engine) runs separately and owns all cross-listing grouping.
+# missed enqueue self-heals within 24h. Cross-listing grouping is out of scope
+# here — new listings land on singleton properties.
 #
 # Concurrency: shares the `sreality-property-maintenance` group with the daily
 # full sweep so two GH runs never overlap; the realtime worker's lane is

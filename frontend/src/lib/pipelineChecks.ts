@@ -1,21 +1,22 @@
 import type { PipelineCheckRow } from './queries';
 import { fmtCount } from './format';
 
-/* Presentation + rollup helpers for the dedup pipeline verification checks
+/* Presentation + rollup helpers for the pipeline verification checks
  * (migration 274, pipeline_checks_public). One latest row per check_key; the
  * DB already emits an ok/warn/fail status, so these helpers only humanize the
  * key/value and roll the statuses up for the Health panel's header badge. */
 
 export type PipelineCheckStatus = 'ok' | 'warn' | 'fail';
 
+/* The keys scripts/verify_pipeline.py still emits. Historical rows from retired
+ * checks (the dedup decision-engine ones) fall through to the humanizer below. */
 const CHECK_LABELS: Record<string, string> = {
-  street_debt: 'Street debt',
-  geo_debt: 'Geo debt',
-  eligibility_funnel: 'Eligibility funnel',
-  merge_latency: 'Merge latency',
-  engine_health: 'Engine health',
   llm_errors: 'LLM errors',
-  merge_precision_sample: 'Merge precision (sample)',
+  llm_liveness: 'LLM liveness',
+  llm_burn_rate: 'LLM burn rate',
+  db_saturation: 'DB saturation',
+  worker_liveness: 'Worker liveness',
+  dual_write_parity: 'Dual-write parity',
 };
 
 export function pipelineCheckLabel(key: string): string {
@@ -25,14 +26,11 @@ export function pipelineCheckLabel(key: string): string {
   );
 }
 
-/* street_debt / geo_debt count SUSPECT PAIRS; every other check's `value` is a
- * ratio / percentage / minutes whose unit lives in the check itself, so we show
- * the bare number (integers compact, decimals to 2 dp). */
-const PAIR_COUNT_CHECKS = new Set(['street_debt', 'geo_debt']);
-
-export function pipelineCheckValueLabel(key: string, value: number | null): string {
+/* Every surviving check's `value` is a ratio / percentage / count / minutes whose
+ * unit lives in the check itself, so we show the bare number (integers compact,
+ * decimals to 2 dp). */
+export function pipelineCheckValueLabel(value: number | null): string {
   if (value == null) return '—';
-  if (PAIR_COUNT_CHECKS.has(key)) return `${fmtCount(value)} pairs`;
   return Number.isInteger(value) ? fmtCount(value) : value.toFixed(2);
 }
 

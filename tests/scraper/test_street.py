@@ -190,10 +190,9 @@ class TestRemaxDataAddress:
 class TestStreetNameKey:
     """The match-time grouping key (migration 256 stores it on listings.street_name_key).
 
-    These golden cases are the REGRESSION GUARD: the stored column and the dedup
-    engine's live grouping (toolkit.dedup_engine.street_group_keys) both come from
-    THIS one function, so a silent edit that changes its output would change dedup
-    recall AND stale every stored key. Lock the contract down."""
+    These golden cases are the REGRESSION GUARD: every stored key comes from THIS
+    one function, so a silent edit that changes its output would stale the whole
+    column. Lock the contract down."""
 
     @pytest.mark.parametrize("street,expected", [
         (None, None),
@@ -235,8 +234,3 @@ class TestStreetNameKey:
             == street_name_key("ul. Koterovská 12")
             == "koterovska"
         )
-
-    def test_single_source_alias(self):
-        # toolkit.dedup_engine consumes the SAME object (no second implementation).
-        from toolkit.dedup_engine import _street_name_key
-        assert _street_name_key is street_name_key

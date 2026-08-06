@@ -1,15 +1,14 @@
 """verify_pipeline.py — scheduled pipeline-health harness.
 
-Computes a fixed set of pipeline-health metrics (dedup debt, eligibility funnel,
-merge latency, engine cycle health, LLM error rate, a weekly precision sample),
-writes one `pipeline_check_results` row per check, and rings the in-app bell on
-STATE TRANSITIONS only (toolkit.system_alerts.emit_transition_alerts): once when a
-check goes red, once when it recovers — not on every red run.
+Computes a fixed set of pipeline-health metrics (LLM error rate + liveness + burn
+rate, DB saturation, worker liveness, dual-write parity), writes one
+`pipeline_check_results` row per check, and rings the in-app bell on STATE
+TRANSITIONS only (toolkit.system_alerts.emit_transition_alerts): once when a check
+goes red, once when it recovers — not on every red run.
 
-Born from the 2026-07 incident: the dedup/scrape pipeline stalled silently for two
-days (Anthropic credit exhaustion; 38k+ failed LLM calls) with no in-app signal,
-while ~39,376 suspect unmerged byt pairs of "dedup debt" sat invisible. This job
-makes both loud and durable.
+Born from the 2026-07 incident: the pipeline stalled silently for two days
+(Anthropic credit exhaustion; 38k+ failed LLM calls) with no in-app signal. This
+job makes that loud and durable.
 
 Each check is isolated (one failing check writes a `fail` row with the error in
 `details`, never kills the run). Thresholds live in
@@ -17,7 +16,7 @@ Each check is isolated (one failing check writes a `fail` row with the error in
 
     python -m scripts.verify_pipeline            # compute + write + alert
     python -m scripts.verify_pipeline --dry-run  # compute + log only, no writes
-    python -m scripts.verify_pipeline --weekly   # also emit the precision sample
+    python -m scripts.verify_pipeline --weekly   # also run the weekly-only checks
 
 Needs only SUPABASE_DB_URL.
 """
@@ -43,16 +42,6 @@ LOG = logging.getLogger("verify_pipeline")
 # llm_silence_fail_hours, added with the WS4 alerting rebuild) is served from this
 # default until a future seed migration includes it.
 DEFAULT_THRESHOLDS: dict[str, float] = {
-    "street_debt_price_pct": 1.0,
-    "street_debt_warn": 30000,
-    "street_debt_fail": 45000,
-    "geo_debt_area_pct": 20,
-    "geo_debt_price_pct": 5,
-    "merge_p95_warn_hours": 24,
-    "unpublished_overdue_fail": 1,
-    "cycle_stall_fail_hours": 12,
-    "dirty_age_p95_warn_hours": 6,
-    "candidate_age_p95_warn_days": 14,
     "llm_error_rate_warn": 0.2,
     "llm_silence_fail_hours": 4,
     "llm_spend_24h_warn_usd": 90,
@@ -60,66 +49,9 @@ DEFAULT_THRESHOLDS: dict[str, float] = {
     "db_cron_fail_rate_fail": 0.5,
     "worker_stale_fail_minutes": 5,
     "verification_stale_hours": 24,
-    "precision_sample_n": 15,
 }
 
-_NONBYT = ("dum", "pozemek", "komercni", "ostatni")
-
-
 # --- pure status derivation (unit-tested without a DB) ---------------------
-
-
-def _worst(statuses: list[str]) -> str:
-    for s in ("fail", "warn", "ok"):
-        if s in statuses:
-            return s
-    return "ok"
-
-
-def _status_for_street_debt(count: int, thresholds: dict[str, Any]) -> str:
-    if count > thresholds["street_debt_fail"]:
-        return "fail"
-    if count > thresholds["street_debt_warn"]:
-        return "warn"
-    return "ok"
-
-
-def _status_for_merge_latency(
-    p95_hours: float | None, thresholds: dict[str, Any],
-) -> str:
-    if p95_hours is not None and p95_hours > thresholds["merge_p95_warn_hours"]:
-        return "warn"
-    return "ok"
-
-
-def _status_for_cycle(
-    *, has_row: bool, updated_age_hours: float | None, thresholds: dict[str, Any],
-) -> str:
-    """Fail on a STALLED cursor, not a slow one. The street backstop scan never completes a
-    full-market cycle (~2 weeks at throughput) — that's the expected steady state for a large
-    market, so alarming on cycle AGE was structurally-always-red and unactionable. What IS
-    actionable is the cursor going idle: dedup_scan_state.updated_at advances on every run, so a
-    long gap means the lane stopped running. Cycle age is reported as a gauge, not a fail driver
-    (raising throughput is a capacity decision, not an incident)."""
-    if not has_row:
-        return "warn"  # engine has never established a scan cycle
-    if updated_age_hours is None:
-        return "warn"  # row exists but no progress timestamp
-    if updated_age_hours > thresholds["cycle_stall_fail_hours"]:
-        return "fail"  # cursor idle → the backstop scan is stalled
-    return "ok"
-
-
-def _status_for_dirty(p95_hours: float | None, thresholds: dict[str, Any]) -> str:
-    if p95_hours is not None and p95_hours > thresholds["dirty_age_p95_warn_hours"]:
-        return "warn"
-    return "ok"
-
-
-def _status_for_candidates(p95_days: float | None, thresholds: dict[str, Any]) -> str:
-    if p95_days is not None and p95_days > thresholds["candidate_age_p95_warn_days"]:
-        return "warn"
-    return "ok"
 
 
 def _status_for_llm_errors(
@@ -241,348 +173,6 @@ def _fetchall(conn: Any, sql: str, params: Any = None) -> list[tuple[Any, ...]]:
 
 
 # --- checks ----------------------------------------------------------------
-
-# A pair of cross-source LISTINGS is suspect dedup debt when it shares the dedup
-# key, is price-comparable, isn't contradicted, and its two properties aren't
-# already merged or operator-dismissed. Counted at the PROPERTY-pair grain.
-_STREET_DEBT_SQL = """
-with pairs as (
-  select l1.property_id as pa, l2.property_id as pb,
-         l1.sreality_id as sa, l2.sreality_id as sb
-  from listings l1
-  join listings l2
-    on l1.obec_id = l2.obec_id
-   and l1.street_name_key = l2.street_name_key
-   and l1.disposition = l2.disposition
-   and l1.source <> l2.source
-   and l1.property_id < l2.property_id
-  where l1.is_active and l2.is_active
-    and l1.street is not null and l1.street <> '' and l1.disposition is not null
-    and l2.street is not null and l2.street <> ''
-    and l1.obec_id is not null and l1.street_name_key is not null
-    and l1.price_czk is not null and l2.price_czk is not null
-    and abs(l1.price_czk - l2.price_czk)
-        <= (%(price_pct)s / 100.0) * greatest(l1.price_czk, l2.price_czk)
-    and not (l1.house_number is not null and l2.house_number is not null
-             and lower(trim(l1.house_number)) <> lower(trim(l2.house_number)))
-    and not (l1.floor is not null and l2.floor is not null
-             and abs(l1.floor - l2.floor) >= 2)
-),
-filtered as (
-  select pr.pa, pr.pb, min(pr.sa) as sa, min(pr.sb) as sb
-  from pairs pr
-  join properties p1 on p1.id = pr.pa and p1.status = 'active'
-  join properties p2 on p2.id = pr.pb and p2.status = 'active'
-  where not exists (
-    select 1 from property_identity_candidates c
-    where c.left_property_id = least(pr.pa, pr.pb)
-      and c.right_property_id = greatest(pr.pa, pr.pb)
-      and c.status = 'dismissed'
-  )
-  group by pr.pa, pr.pb
-)
-select
-  (select count(*) from filtered) as cnt,
-  coalesce((
-    select jsonb_agg(jsonb_build_object(
-             'property_a', pa, 'property_b', pb,
-             'sreality_a', sa, 'sreality_b', sb))
-    from (select * from filtered order by pa, pb limit 20) s
-  ), '[]'::jsonb) as samples
-"""
-
-
-def check_street_debt(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]:
-    row = _fetchone(conn, _STREET_DEBT_SQL, {"price_pct": thresholds["street_debt_price_pct"]})
-    count = int(row[0]) if row and row[0] is not None else 0
-    samples = row[1] if row and row[1] is not None else []
-    status = _status_for_street_debt(count, thresholds)
-    return {
-        "check_key": "street_debt",
-        "status": status,
-        "value": count,
-        "details": {
-            "suspect_pairs": count,
-            "price_pct": thresholds["street_debt_price_pct"],
-            "warn_at": thresholds["street_debt_warn"],
-            "fail_at": thresholds["street_debt_fail"],
-            "samples": samples,
-        },
-        "message": (
-            f"Street-keyed dedup debt is {count:,} suspect cross-source byt/property "
-            f"pairs (> fail threshold {int(thresholds['street_debt_fail']):,}). The dedup "
-            f"engine is falling behind the market inflow."
-        ),
-    }
-
-
-_GEO_DEBT_SQL = """
-with pairs as (
-  select l1.property_id as pa, l2.property_id as pb,
-         l1.sreality_id as sa, l2.sreality_id as sb
-  from listings l1
-  join listings l2
-    on l1.obec_id = l2.obec_id
-   and round(st_y(l1.geom::geometry)::numeric, 4) = round(st_y(l2.geom::geometry)::numeric, 4)
-   and round(st_x(l1.geom::geometry)::numeric, 4) = round(st_x(l2.geom::geometry)::numeric, 4)
-   and l1.category_type = l2.category_type
-   and l1.source <> l2.source
-   and l1.property_id < l2.property_id
-  where l1.is_active and l2.is_active
-    and l1.category_main = any(%(nonbyt)s) and l2.category_main = any(%(nonbyt)s)
-    and l1.geom is not null and l2.geom is not null and l1.obec_id is not null
-    and l1.price_czk is not null and l2.price_czk is not null
-    and abs(l1.price_czk - l2.price_czk)
-        <= (%(price_pct)s / 100.0) * greatest(l1.price_czk, l2.price_czk)
-    and coalesce(l1.area_m2, l1.estate_area, l1.usable_area) is not null
-    and coalesce(l2.area_m2, l2.estate_area, l2.usable_area) is not null
-    and abs(coalesce(l1.area_m2, l1.estate_area, l1.usable_area)
-            - coalesce(l2.area_m2, l2.estate_area, l2.usable_area))
-        <= (%(area_pct)s / 100.0) * greatest(
-             coalesce(l1.area_m2, l1.estate_area, l1.usable_area),
-             coalesce(l2.area_m2, l2.estate_area, l2.usable_area))
-),
-filtered as (
-  select pr.pa, pr.pb, min(pr.sa) as sa, min(pr.sb) as sb
-  from pairs pr
-  join properties p1 on p1.id = pr.pa and p1.status = 'active'
-  join properties p2 on p2.id = pr.pb and p2.status = 'active'
-  where not exists (
-    select 1 from property_identity_candidates c
-    where c.left_property_id = least(pr.pa, pr.pb)
-      and c.right_property_id = greatest(pr.pa, pr.pb)
-      and c.status = 'dismissed'
-  )
-  group by pr.pa, pr.pb
-)
-select
-  (select count(*) from filtered) as cnt,
-  coalesce((
-    select jsonb_agg(jsonb_build_object(
-             'property_a', pa, 'property_b', pb,
-             'sreality_a', sa, 'sreality_b', sb))
-    from (select * from filtered order by pa, pb limit 20) s
-  ), '[]'::jsonb) as samples
-"""
-
-
-def check_geo_debt(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]:
-    row = _fetchone(conn, _GEO_DEBT_SQL, {
-        "nonbyt": list(_NONBYT),
-        "price_pct": thresholds["geo_debt_price_pct"],
-        "area_pct": thresholds["geo_debt_area_pct"],
-    })
-    count = int(row[0]) if row and row[0] is not None else 0
-    samples = row[1] if row and row[1] is not None else []
-    # value-only: a trend baseline (warn/fail on a rising count) needs history this
-    # check does not yet have, so the status stays 'ok' and the number is recorded
-    # for the /health sparkline until a threshold is calibrated.
-    return {
-        "check_key": "geo_debt",
-        "status": "ok",
-        "value": count,
-        "details": {
-            "suspect_pairs": count,
-            "area_pct": thresholds["geo_debt_area_pct"],
-            "price_pct": thresholds["geo_debt_price_pct"],
-            "note": "value-only; trend-based thresholds are future work",
-            "samples": samples,
-        },
-    }
-
-
-_FUNNEL_SQL = """
-select
-  l.source,
-  count(*) as total_active,
-  count(*) filter (where l.street is not null and l.street <> '') as with_street,
-  count(*) filter (where l.disposition is not null) as with_disposition,
-  count(*) filter (where l.geom is not null) as with_geom,
-  count(*) filter (where l.obec_id is not null) as with_obec,
-  count(*) filter (where l.street is not null and l.street <> ''
-                     and l.disposition is not null) as street_eligible,
-  count(*) filter (where l.geom is not null
-                     and l.category_main = any(%(nonbyt)s)) as geo_eligible
-from listings l
-where l.is_active = true
-group by l.source
-order by total_active desc
-"""
-
-
-def _pct(num: int, den: int) -> float:
-    return round(100.0 * num / den, 2) if den else 0.0
-
-
-def check_eligibility_funnel(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]:
-    rows = _fetchall(conn, _FUNNEL_SQL, {"nonbyt": list(_NONBYT)})
-    per_source: list[dict[str, Any]] = []
-    tot_active = tot_street_elig = 0
-    for (source, total, w_street, w_disp, w_geom, w_obec, street_elig, geo_elig) in rows:
-        total = int(total)
-        tot_active += total
-        tot_street_elig += int(street_elig)
-        per_source.append({
-            "source": source,
-            "total_active": total,
-            "pct_street": _pct(int(w_street), total),
-            "pct_disposition": _pct(int(w_disp), total),
-            "pct_geom": _pct(int(w_geom), total),
-            "pct_obec": _pct(int(w_obec), total),
-            "pct_street_eligible": _pct(int(street_elig), total),
-            "pct_geo_eligible": _pct(int(geo_elig), total),
-        })
-    overall = _pct(tot_street_elig, tot_active)
-    return {
-        "check_key": "eligibility_funnel",
-        "status": "ok",
-        "value": overall,
-        "details": {"overall_street_eligible_pct": overall,
-                    "total_active": tot_active, "per_source": per_source},
-    }
-
-
-# Joins on left_listing_id/right_listing_id (the R2 surrogate, migrations 322 + 353
-# backfill), NOT left_sreality_id/right_sreality_id: once Gate-2 flips, a merge
-# involving a brand-new non-sreality-portal listing carries sreality_id=NULL on both
-# the listing and the audit row, and a sreality_id-keyed join would silently drop it
-# from the p50/p95 sample forever — a shrinking, growingly-unrepresentative latency
-# gate that still reports green. The surrogate is populated for every row already
-# (backfilled for legacy rows, stamped at insert by the engine/operator writers for
-# new ones) except the ~4.5k historical self-paired audit rows the backfill
-# deliberately skips (migration 353) — excluding those is correct, not a blind spot.
-_MERGE_LATENCY_SQL = """
-select
-  percentile_cont(0.5)  within group (order by hrs) as p50,
-  percentile_cont(0.95) within group (order by hrs) as p95,
-  count(*) as n,
-  (select count(*) from dedup_pair_audit d0
-     where d0.outcome = 'merged' and d0.source = 'engine'
-       and d0.run_at > now() - interval '7 days'
-       and (d0.left_listing_id is null or d0.right_listing_id is null)) as excluded_n
-from (
-  select extract(epoch from (d.run_at - least(l1.first_seen_at, l2.first_seen_at))) / 3600.0 as hrs
-  from dedup_pair_audit d
-  join listings l1 on l1.id = d.left_listing_id
-  join listings l2 on l2.id = d.right_listing_id
-  where d.outcome = 'merged' and d.source = 'engine'
-    and d.run_at > now() - interval '7 days'
-    and d.left_listing_id is not null and d.right_listing_id is not null
-) t
-where hrs is not null and hrs >= 0
-"""
-
-
-def check_merge_latency(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]:
-    row = _fetchone(conn, _MERGE_LATENCY_SQL)
-    p50 = float(row[0]) if row and row[0] is not None else None
-    p95 = float(row[1]) if row and row[1] is not None else None
-    n = int(row[2]) if row and row[2] is not None else 0
-    excluded = int(row[3]) if row and row[3] is not None else 0
-    status = _status_for_merge_latency(p95, thresholds)
-    return {
-        "check_key": "merge_latency",
-        "status": status,
-        "value": round(p95, 2) if p95 is not None else None,
-        "details": {
-            "p50_hours": round(p50, 2) if p50 is not None else None,
-            "p95_hours": round(p95, 2) if p95 is not None else None,
-            "merges_7d": n,
-            "excluded_no_listing_id_7d": excluded,
-            "warn_at_hours": thresholds["merge_p95_warn_hours"],
-        },
-    }
-
-
-_ENGINE_HEALTH_SQL = """
-select
-  (select last_cycle_completed_at from dedup_scan_state where lane = 'street') as last_completed,
-  (select cycle_started_at        from dedup_scan_state where lane = 'street') as cycle_started,
-  (select updated_at              from dedup_scan_state where lane = 'street') as street_updated,
-  (select (count(*) > 0) from dedup_scan_state where lane = 'street') as has_row,
-  (select percentile_cont(0.95) within group (order by extract(epoch from (now() - marked_at)) / 3600.0)
-     from dedup_dirty_properties) as dirty_p95_hours,
-  (select percentile_cont(0.95) within group (order by extract(epoch from (now() - created_at)) / 86400.0)
-     from property_identity_candidates where status = 'proposed') as cand_p95_days,
-  (select count(*) from dedup_dirty_properties) as dirty_n,
-  (select count(*) from property_identity_candidates where status = 'proposed') as proposed_n
-"""
-
-
-def _age_hours(ts: Any) -> float | None:
-    if ts is None:
-        return None
-    now = _dt.datetime.now(_dt.timezone.utc)
-    if ts.tzinfo is None:
-        ts = ts.replace(tzinfo=_dt.timezone.utc)
-    return (now - ts).total_seconds() / 3600.0
-
-
-def check_engine_health(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]:
-    row = _fetchone(conn, _ENGINE_HEALTH_SQL)
-    (last_completed, cycle_started, street_updated, has_row,
-     dirty_p95, cand_p95, dirty_n, proposed_n) = (
-        row if row else (None, None, None, False, None, None, 0, 0)
-    )
-    completed_age = _age_hours(last_completed)
-    started_age = _age_hours(cycle_started)
-    updated_age = _age_hours(street_updated)
-    cycle_status = _status_for_cycle(
-        has_row=bool(has_row), updated_age_hours=updated_age, thresholds=thresholds,
-    )
-    dirty_p95_h = float(dirty_p95) if dirty_p95 is not None else None
-    cand_p95_d = float(cand_p95) if cand_p95 is not None else None
-    dirty_status = _status_for_dirty(dirty_p95_h, thresholds)
-    cand_status = _status_for_candidates(cand_p95_d, thresholds)
-    status = _worst([cycle_status, dirty_status, cand_status])
-
-    # Name only the component(s) actually degraded; keep the real-time-vs-backstop distinction
-    # explicit so a stalled backstop scan is never read as "new listings aren't being deduped".
-    issues: list[str] = []
-    if cycle_status == "fail":
-        issues.append(
-            f"the street backstop scan is STALLED — its cursor hasn't advanced in "
-            f"{updated_age:.1f}h (real-time cross-portal merges still flow via the worker; "
-            "this is the market-wide catch-up scan that's stuck)"
-            if updated_age is not None else "the street backstop scan has no progress signal"
-        )
-    elif cycle_status == "warn":
-        issues.append("the dedup engine has not yet established a scan cycle")
-    if dirty_status == "warn":
-        issues.append(f"the dirty queue is aging (p95 {dirty_p95_h:.1f}h > "
-                      f"{thresholds['dirty_age_p95_warn_hours']}h)")
-    if cand_status == "warn":
-        issues.append(f"the /dedup review queue is aging (p95 {cand_p95_d:.1f}d > "
-                      f"{thresholds['candidate_age_p95_warn_days']}d)")
-    if status == "ok":
-        message = (
-            f"Dedup engine healthy (street cursor advanced "
-            f"{updated_age:.1f}h ago" + (f", dirty p95 {dirty_p95_h:.1f}h" if dirty_p95_h is not None else "") + ")."
-        )
-    else:
-        message = "Dedup engine: " + "; ".join(issues) + "."
-    return {
-        "check_key": "engine_health",
-        "status": status,
-        "value": round(updated_age, 2) if updated_age is not None else None,
-        "details": {
-            "cycle_status": cycle_status,
-            "street_cursor_updated_age_hours": round(updated_age, 2) if updated_age is not None else None,
-            "cycle_stall_fail_hours": thresholds["cycle_stall_fail_hours"],
-            "last_cycle_completed_at": last_completed.isoformat() if last_completed else None,
-            "cycle_started_age_hours": round(started_age, 2) if started_age is not None else None,
-            "dirty_status": dirty_status,
-            "dirty_queue_n": int(dirty_n or 0),
-            "dirty_age_p95_hours": round(dirty_p95_h, 2) if dirty_p95_h is not None else None,
-            "dirty_age_p95_warn_hours": thresholds["dirty_age_p95_warn_hours"],
-            "candidate_status": cand_status,
-            "proposed_candidates_n": int(proposed_n or 0),
-            "candidate_age_p95_days": round(cand_p95_d, 2) if cand_p95_d is not None else None,
-            "candidate_age_p95_warn_days": thresholds["candidate_age_p95_warn_days"],
-        },
-        "message": message,
-    }
-
 
 _LLM_ERRORS_SQL = """
 select called_for,
@@ -853,35 +443,6 @@ def check_worker_liveness(conn: Any, thresholds: dict[str, Any]) -> dict[str, An
     }
 
 
-_PRECISION_SAMPLE_SQL = """
-select id, run_at, left_sreality_id, right_sreality_id,
-       left_property_id, right_property_id, category_main, stage, detail
-from dedup_pair_audit
-where source = 'engine' and outcome = 'merged'
-  and run_at > now() - interval '7 days'
-order by random()
-limit %(n)s
-"""
-
-
-def check_merge_precision_sample(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]:
-    n = int(thresholds["precision_sample_n"])
-    rows = _fetchall(conn, _PRECISION_SAMPLE_SQL, {"n": n})
-    samples = [{
-        "audit_id": int(r[0]),
-        "run_at": r[1].isoformat() if r[1] else None,
-        "sreality_a": r[2], "sreality_b": r[3],
-        "property_a": r[4], "property_b": r[5],
-        "category_main": r[6], "stage": r[7], "detail": r[8],
-    } for r in rows]
-    return {
-        "check_key": "merge_precision_sample",
-        "status": "ok",
-        "value": len(samples),
-        "details": {"sampled": len(samples), "requested": n, "samples": samples},
-    }
-
-
 # Keep every parity scan bounded so the 6-hourly run never degenerates into a seq
 # scan of 8M images rows: look only at the newest slice above the watermark. A live
 # writer gap shows up continuously, so the recent window catches it just as well as
@@ -1043,11 +604,6 @@ def arm_dual_write_parity(conn: Any) -> list[str]:
 
 
 _CHECKS: list[tuple[str, Callable[[Any, dict[str, Any]], dict[str, Any]]]] = [
-    ("street_debt", check_street_debt),
-    ("geo_debt", check_geo_debt),
-    ("eligibility_funnel", check_eligibility_funnel),
-    ("merge_latency", check_merge_latency),
-    ("engine_health", check_engine_health),
     ("llm_errors", check_llm_errors),
     ("llm_liveness", check_llm_liveness),
     ("llm_burn_rate", check_llm_burn_rate),
@@ -1056,9 +612,9 @@ _CHECKS: list[tuple[str, Callable[[Any, dict[str, Any]], dict[str, Any]]]] = [
     ("dual_write_parity", check_dual_write_parity),
 ]
 
-_WEEKLY_CHECKS: list[tuple[str, Callable[[Any, dict[str, Any]], dict[str, Any]]]] = [
-    ("merge_precision_sample", check_merge_precision_sample),
-]
+# --weekly stays a valid (currently empty) lane so the scheduled invocation keeps
+# working; the merge-precision sample went with the legacy decision engine.
+_WEEKLY_CHECKS: list[tuple[str, Callable[[Any, dict[str, Any]], dict[str, Any]]]] = []
 
 
 def run_checks(
@@ -1112,7 +668,7 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true",
                         help="Compute + log, write nothing (no result rows, no alerts).")
     parser.add_argument("--weekly", action="store_true",
-                        help="Also emit the weekly merge-precision sample.")
+                        help="Also run the weekly-only checks.")
     parser.add_argument("--only", default="",
                         help="Comma-separated check keys to run (e.g. 'llm_errors,llm_liveness' "
                              "for the hourly LLM lane). Empty = all checks.")

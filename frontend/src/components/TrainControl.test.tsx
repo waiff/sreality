@@ -1,4 +1,4 @@
-/* TrainControl — the shared Train + Border case CTA (/phash-audit, /clip-audit).
+/* TrainControl — the shared Train + Border case CTA (/clip-audit).
  *
  * Hermetic: mock the four writes. Pins: Train submits the default (CLIP fine_tag)
  * value; Border case is a plain toggle independent of the label, in both directions.
@@ -49,7 +49,7 @@ function renderControl(borderCase: boolean, example?: api.TrainingExample) {
         example={example}
         borderCase={borderCase}
         labelOptions={[{ value: 'hallway', label: 'chodba' }]}
-        queryKeyPrefix="phash-audit"
+        queryKeyPrefix="clip-audit"
       />
     </QueryClientProvider>,
   );

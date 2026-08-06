@@ -159,8 +159,8 @@ def test_provider_for_model(model, expected):
 
 
 def test_call_derives_openai_provider_from_gpt_model():
-    """A caller that passes only a gpt-* model (a dedup lane reading its
-    app_settings value) is routed to OpenAI without threading a provider arg."""
+    """A caller that passes only a gpt-* model (a lane reading its app_settings
+    value) is routed to OpenAI without threading a provider arg."""
     conn = _FakeConn(app_settings={})
     prov_a = _ScriptedProvider(
         "anthropic", [_completion(text="A")],
@@ -173,7 +173,7 @@ def test_call_derives_openai_provider_from_gpt_model():
     client = lc.LLMClient(conn, providers={"anthropic": prov_a, "openai": prov_o})
 
     resp = client.call(
-        called_for="compare_listings_visually",
+        called_for="compare_listing_images",
         messages=[{"role": "user", "content": "x"}],
         model="gpt-5-mini",
     )

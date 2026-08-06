@@ -1,16 +1,28 @@
 > Track file — part of [ROADMAP.md](../ROADMAP.md). After shipping, edit only this file + its index row.
 
-> **SUPERSEDED (2026-08-05) — the legacy decision engine this file tracks is being torn out
-> entirely and rebuilt from scratch.** Do not resume work here; the live track is
-> [`roadmap/new-dedup.md`](new-dedup.md) / [`docs/design/new-dedup/PROGRAM.md`](../docs/design/new-dedup/PROGRAM.md).
-> Everything below is retained as history only.
+> # ⛔ SUPERSEDED (2026-08) — EVERYTHING BELOW IS HISTORY, DO NOT ACT ON IT
+>
+> **The automatic dedup decision engine was REMOVED wholesale in the 2026-08 "NEW DEDUP" cutoff.**
+> The entire body of this file describes that removed engine (its funnel, vision lanes, batch
+> program, queues, publication gate, golden sets). It is retained only as a record of what was
+> tried. Every design doc it cites has been deleted from `main` and survives in git history +
+> branch `backup/pre-new-dedup-2026-08` only. **Standing rule: the removed engine, its comments,
+> and its design docs are never consulted again for any purpose.**
+>
+> **The live track is [`roadmap/new-dedup.md`](new-dedup.md)** — do not resume work here.
+> **Current source of truth:** [`docs/design/new-dedup/PROGRAM.md`](../docs/design/new-dedup/PROGRAM.md)
+> (the simulation-first rebuild: waves, gates, decisions ledger) and
+> [`docs/design/new-dedup/CUTOFF.md`](../docs/design/new-dedup/CUTOFF.md) (exactly what was cut).
+> What is LIVE today is only the operator-ordered merge mechanics (CLAUDE.md rule 15).
+> This file is a candidate for replacement by a pointer-only index in its own restructure PR.
 
 > **STALE BELOW (D1/D2 planning from the pre-`properties`-parent era) — this file predates the
 > shipped architecture and is not the current source of truth.** The dedup engine has been under
-> active development for many PRs; the governing plans are
-> [`docs/design/dedup-cost-reduction.md`](../docs/design/dedup-cost-reduction.md) (the executing
-> LLM-cost plan) and [`docs/design/dedup-vision-and-backlog-overhaul.md`](../docs/design/dedup-vision-and-backlog-overhaul.md)
-> (the free-signal-precision → vision-bake-off → batch-lane → recency program, Sessions 1-5).
+> active development for many PRs; the governing plans were
+> `docs/design/dedup-cost-reduction.md` (the executing
+> LLM-cost plan) and `docs/design/dedup-vision-and-backlog-overhaul.md`
+> (the free-signal-precision → vision-bake-off → batch-lane → recency program, Sessions 1-5) —
+> both deleted in the 2026-08 cutoff.
 > **Session 2 (2026-07-13)** shipped the golden-set foundation (`dedup_label_events` view +
 > `dedup_golden_sets` table, migration 300) and validated — then RETRACTED — the §2.1 proposed
 > fix for the `_both_have_site_plan` step-aside: replaying "count non-drawing images" against the
@@ -125,8 +137,8 @@ The migration is significant; this track plans the path but does
 not commit to it without an operator decision on the canonical
 shape (see D1 below).
 
-> **Design locked (2026-05-25): see
-> [`docs/design/multi-portal-dedup.md`](docs/design/multi-portal-dedup.md).**
+> **Design locked (2026-05-25): see `docs/design/multi-portal-dedup.md`** (deleted in the
+> 2026-08 cutoff; git history only).
 > The operator's expanded requirements (cross-portal price-history
 > chart, link history, all-sources-inactive lifecycle, "listed on 3+
 > sites" / "price dropped 10%+" filters, daily property-change
@@ -183,9 +195,9 @@ shape (see D1 below).
 > reuse the same `ScrapedListing` → `ingest_scraped_listing` framework.
 
 > **Active program (2026-07): dedup vision cost + backlog quality.** The executing
-> cost plan is [`docs/design/dedup-cost-reduction.md`](../docs/design/dedup-cost-reduction.md);
-> the 2026-07-12 investigation is
-> [`docs/design/dedup-vision-and-backlog-overhaul.md`](../docs/design/dedup-vision-and-backlog-overhaul.md)
+> cost plan was `docs/design/dedup-cost-reduction.md`;
+> the 2026-07-12 investigation was
+> `docs/design/dedup-vision-and-backlog-overhaul.md` (both deleted in the 2026-08 cutoff)
 > (validated the batch warmer draws a near-disjoint pair set from the live engine —
 > ~1% overlap, ~0.5%-consumed — and that a single `_both_have_site_plan` step-aside
 > vetoed the free arms on 98.6% of a 142-pair operator merge burst). Program order

@@ -7,9 +7,10 @@ all history stays put. Every re-pointed child is logged to
 the survivor later absorbs a third property. The survivor's stats are recomputed
 inline (reusing the recompute job's exact SQL) so there is no stale window.
 
-Both the operator review API (`api.property_dedup`) and the Tier-2 auto-merge
-sweep (PR3) go through these two functions, so the transaction mechanics live in
-one tested place. Auto-merge is only safe because every merge is reversible here.
+This module is the single merge chokepoint. Since the 2026-08 "NEW DEDUP" cutoff
+there is no automatic decision path at all — every merge is operator-ordered via
+`api.property_merge` (`POST /properties/merge`) — but the mechanics stay in one
+tested place, and every merge is reversible (`unmerge_group`).
 """
 
 from __future__ import annotations
@@ -99,8 +100,8 @@ def merge_properties(
     Re-points every child of the retired property onto the survivor, logs one
     `property_merge_events` row per child, carries the retired property's
     property-anchored operator state (collections/tags/notes/watchdog dispatches,
-    see `toolkit.operator_state`) onto the survivor, soft-retires the loser, marks
-    any matching candidate pair merged, and recomputes the survivor inline.
+    see `toolkit.operator_state`) onto the survivor, soft-retires the loser, and
+    recomputes the survivor inline.
     Returns the standard toolkit envelope with the new merge_group_id.
     """
     if survivor_id == retired_id:
@@ -122,15 +123,14 @@ def merge_properties(
             if rows[retired_id][1] != "active":
                 raise MergeError(f"retired {retired_id} is not active")
             # Final category guard at THE chokepoint every merge path funnels
-            # through (engine, cluster, operator one-click, Browse merge-mode).
+            # through (operator one-click, Browse merge-mode).
             # A sale and a rental are never the same property, and a flat and a
             # house aren't either — but dum <-> komercni IS allowed (the same
             # building listed as a house on one portal, commercial on another).
             # `category_main_compatible` encodes that one sanctioned cross-type;
             # refuse everything else even on an operator-initiated merge. NULL =
-            # unknown, not a conflict. The engine's classify_pair also gates
-            # earlier; this backstops the manual merge surface (api.property_dedup)
-            # that calls merge_properties directly without classify_pair.
+            # unknown, not a conflict. With no automatic decision layer left,
+            # this is the ONLY category gate — nothing upstream pre-screens.
             s_ct, s_cm = rows[survivor_id][2], rows[survivor_id][3]
             r_ct, r_cm = rows[retired_id][2], rows[retired_id][3]
             if s_ct is not None and r_ct is not None and s_ct != r_ct:
@@ -189,30 +189,6 @@ def merge_properties(
                 WHERE id = %s
                 """,
                 (survivor_id, retired_id),
-            )
-
-            lo, hi = sorted((survivor_id, retired_id))
-            cur.execute(
-                """
-                UPDATE property_identity_candidates
-                SET status = 'merged', reviewed_at = now(),
-                    reviewed_action = %s, auto_merged = %s, merge_group_id = %s
-                WHERE left_property_id = %s AND right_property_id = %s
-                """,
-                (source, source == "auto", group, lo, hi),
-            )
-            # Publication gate (migration 273): a merge IS a dedup verdict, so the
-            # survivor must be visible — a pHash merge of two brand-new unchecked
-            # singletons would otherwise stay hidden. COALESCE keeps an already-published
-            # survivor's timestamp/reason.
-            cur.execute(
-                """
-                UPDATE properties
-                SET published_at = COALESCE(published_at, now()),
-                    publish_reason = COALESCE(publish_reason, 'merge_survivor')
-                WHERE id = %s
-                """,
-                (survivor_id,),
             )
 
         recompute_one(conn, survivor_id)
@@ -339,16 +315,6 @@ def split_property_to_singletons(
                 )
                 new_ids.append(new_id)
 
-            # Publication gate (migration 273): a split is an explicit dedup decision. The
-            # detached singletons are freshly inserted (published_at NULL = hidden), so
-            # publish them — a previously-visible unit must not be hidden by being split out.
-            if new_ids:
-                cur.execute(
-                    "UPDATE properties SET published_at = now(), publish_reason = 'split' "
-                    "WHERE id = ANY(%s)",
-                    (new_ids,),
-                )
-
         recompute_one(conn, property_id)
         recompute_mf_one(conn, property_id)
         for nid in new_ids:
@@ -382,8 +348,7 @@ def unmerge_group(
     Each not-yet-undone event moves its child back to the retired property — but
     only if the child still points at the survivor (a child re-merged elsewhere
     since is left alone and reported as a conflict, never yanked). Retired
-    properties are reactivated, the candidate re-opened for review, and both
-    sides recomputed inline.
+    properties are reactivated and both sides recomputed inline.
     """
     with conn.transaction():
         with conn.cursor() as cur:
@@ -439,19 +404,6 @@ def unmerge_group(
                 """,
                 (list(retired_ids),),
             )
-            # Publication gate (migration 273): a reactivated property is a previously-
-            # visible unit — don't hide it. COALESCE preserves its pre-merge publication;
-            # the now() branch only fires for the edge where a never-published singleton
-            # was merged away before any dedup stamp landed.
-            cur.execute(
-                """
-                UPDATE properties
-                SET published_at = COALESCE(published_at, now()),
-                    publish_reason = COALESCE(publish_reason, 'split')
-                WHERE id = ANY(%s)
-                """,
-                (list(retired_ids),),
-            )
             # Reactivated retired properties get their pre-merge pipeline card
             # back from the snapshot (lossless); runs after the reactivation so
             # the restore targets active properties.
@@ -465,15 +417,6 @@ def unmerge_group(
                 WHERE merge_group_id = %s AND undone_at IS NULL
                 """,
                 (undone_by, merge_group_id),
-            )
-            cur.execute(
-                """
-                UPDATE property_identity_candidates
-                SET status = 'proposed', reviewed_at = NULL, reviewed_action = NULL,
-                    auto_merged = false, merge_group_id = NULL
-                WHERE merge_group_id = %s
-                """,
-                (merge_group_id,),
             )
 
         recompute_one(conn, survivor_id)

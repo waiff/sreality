@@ -5,9 +5,8 @@ Two phases, both idempotent:
 1. Attach stragglers. Any `listings` row with `property_id IS NULL` — an
    old-code insert, or a row written by the batched detail-drain — gets its own
    singleton property here, mirroring migration 092. No cross-listing matching
-   happens at this step: the old geo Tier-1 spatial probe was removed when
-   grouping moved to the street+disposition dedup engine (`toolkit.dedup_engine`
-   / `scripts.dedup_engine`), which runs out-of-band and owns ALL merges.
+   happens at this step, ever: grouping is out-of-band and, since the 2026-08
+   "NEW DEDUP" cutoff, operator-ordered only (CLAUDE.md rule 15).
 
 2. Recompute every property from its children. Per property:
      is_active           = bool_or(children.is_active)   (decision #3 rollup)
@@ -60,13 +59,6 @@ import sys
 import time
 from collections.abc import Iterator
 from typing import Any
-
-from toolkit.publication import (
-    BYT_GEO_ELIGIBLE_PREDICATE,
-    GEO_ELIGIBLE_PREDICATE,
-    STREET_ELIGIBLE_PREDICATE,
-    eligible_predicate,
-)
 
 LOG = logging.getLogger("recompute_property_stats")
 
@@ -459,9 +451,8 @@ def _attach_stragglers(conn: Any, *, skip_native_backfill: bool = False) -> int:
     The native-id backfill is a one-time legacy fix that scans the whole listings
     table, so the */5 incremental pass skips it (daily full mode runs it). No
     cross-listing matching happens here anymore: the old geo Tier-1 spatial link
-    was removed when grouping moved to the street+disposition dedup engine
-    (`toolkit.dedup_engine` / `scripts.dedup_engine`), which runs out-of-band.
-    Fresh singletons are inserted already-correct (one child, no price history),
+    was removed when grouping moved out-of-band, and grouping is now
+    operator-ordered only (CLAUDE.md rule 15). Fresh singletons are inserted already-correct (one child, no price history),
     so they need no recompute and are not enqueued dirty.
     """
     with conn.cursor() as cur:
@@ -471,96 +462,6 @@ def _attach_stragglers(conn: Any, *, skip_native_backfill: bool = False) -> int:
         inserted = cur.rowcount or 0
         cur.execute(_ATTACH_LINK_SQL)
     return inserted
-
-
-# Publication gate (migration 273): publish the properties the dedup engine can NEVER
-# evaluate — repr listing eligible for NONE of the street pass (STREET_ELIGIBLE_PREDICATE),
-# the geo pass (GEO_ELIGIBLE_PREDICATE), or the byt geo rung (BYT_GEO_ELIGIBLE_PREDICATE)
-# — so the hard gate doesn't hide them forever.
-# `IS NOT TRUE` (not `NOT (...)`) so a NULL-column listing counts as ineligible under SQL
-# three-valued logic. The predicates are imported from toolkit.publication (single source,
-# parity-tested against the engine SQL). Joins the repr listing on the SURROGATE
-# (repr_listing_ref_id), not the legacy sreality_id handle — pre-Gate-2 hardening,
-# same as #873's Browse fix. There is deliberately NO timeout sweep: a
-# dedup-CHECKABLE-but-unchecked property stays hidden until the engine stamps it (for the
-# byt rung, the dirty drain's UNGATED byt sub-pass is what evaluates + publishes new
-# street-less byt even while the scheduled rung's master switch is off).
-_PUBLISH_INELIGIBLE_SQL = f"""
-    UPDATE properties p
-    SET published_at = now(), publish_reason = 'ineligible'
-    FROM listings l
-    WHERE p.published_at IS NULL
-      AND p.status = 'active'
-      AND l.id = p.repr_listing_ref_id
-      AND ({STREET_ELIGIBLE_PREDICATE}) IS NOT TRUE
-      AND ({GEO_ELIGIBLE_PREDICATE}) IS NOT TRUE
-      AND ({BYT_GEO_ELIGIBLE_PREDICATE}) IS NOT TRUE
-"""
-
-
-def _publish_sweep(conn: Any) -> int:
-    """Publish (reason 'ineligible') unpublished active properties the engine can never
-    dedup-check. Partial-index-backed (properties_unpublished_idx); no-op once caught up."""
-    with conn.cursor() as cur:
-        cur.execute(_PUBLISH_INELIGIBLE_SQL)
-        return cur.rowcount or 0
-
-
-# The CLIP-tag event fires only when a listing's STORED images finish tagging, so it is
-# the real-time dedup enqueue trigger for photo-carrying listings only. Images usually
-# land in R2 within minutes of a scrape; a property still image-less after this window
-# is a genuinely photo-less ad that will never tag and never enqueue.
-IMAGELESS_EVAL_MINUTES = 30
-
-# Already-queued properties are EXCLUDED outright (NOT bumped via ON CONFLICT ... DO
-# UPDATE): this sweep runs every 5 minutes, and re-bumping marked_at on the same
-# still-queued rows would keep resetting their position in the --dirty drain's
-# newest-first claim — making stale imageless rows perpetually "fresh" and starving the
-# genuinely new ones the real-time lane exists for. The residual ON CONFLICT DO NOTHING
-# only guards the race with a concurrent tag-event enqueue between the anti-join and the
-# INSERT.
-_ENQUEUE_IMAGELESS_SQL = f"""
-    INSERT INTO dedup_dirty_properties (property_id)
-    SELECT p.id
-    FROM properties p
-    WHERE p.published_at IS NULL
-      AND p.status = 'active'
-      AND p.first_seen_at < now() - interval '{IMAGELESS_EVAL_MINUTES} minutes'
-      AND EXISTS (
-        SELECT 1 FROM listings le
-        WHERE le.property_id = p.id
-          AND ({eligible_predicate("le")})
-      )
-      AND NOT EXISTS (
-        SELECT 1 FROM listings li
-        JOIN images i ON i.listing_id = li.id
-        WHERE li.property_id = p.id
-          AND i.storage_path IS NOT NULL
-      )
-      AND NOT EXISTS (
-        SELECT 1 FROM dedup_dirty_properties d WHERE d.property_id = p.id
-      )
-    ON CONFLICT (property_id) DO NOTHING
-"""
-
-
-def _enqueue_imageless_for_dedup(conn: Any) -> int:
-    """Route unpublished, dedup-ELIGIBLE properties with zero stored images into the
-    real-time dedup_dirty_properties lane so the engine EVALUATES them.
-
-    WHY: the CLIP-tag event is the only real-time enqueue trigger, and a photo-less
-    listing never tags — so an eligible imageless property would otherwise sit
-    unpublished until a slow full scan reached its group. This is an EVALUATION
-    trigger, NOT a publish-timeout: the property publishes only after the engine
-    actually decides its groups (rule B/C or the geo classify — both deterministic;
-    the visual layer no-ops without photos) and stamps it dedup-checked, exactly like
-    every other property. (The operator explicitly rejected publish-on-timer.)
-
-    A property that later GETS images re-enqueues via the tag event naturally;
-    re-evaluation is idempotent."""
-    with conn.cursor() as cur:
-        cur.execute(_ENQUEUE_IMAGELESS_SQL)
-        return cur.rowcount or 0
 
 
 def _drain_dirty(conn: Any, batch_size: int, cutoff: Any) -> int:
@@ -650,8 +551,8 @@ def run_incremental_pass(conn: Any, batch_size: int = 2000) -> dict[str, Any]:
     """ONE incremental property-maintenance pass — THE shared implementation
     behind the GH cron (property_maintenance.yml) and the realtime worker's
     maintenance lane: attach new stragglers (skip the legacy native-id
-    backfill), recompute the dirty set, publish ineligible properties, enqueue
-    imageless for dedup. Serialized by the maintenance lease; a caller that
+    backfill) + recompute the dirty set.
+    Serialized by the maintenance lease; a caller that
     finds the lease held returns {"skipped": True} — the concurrent pass is
     doing the same work, and the next tick is seconds away. A pass normally
     runs seconds; the 15-minute lease is a wide margin, and its expiry
@@ -659,18 +560,14 @@ def run_incremental_pass(conn: Any, batch_size: int = 2000) -> dict[str, Any]:
     """
     holder = _new_holder("incremental")
     if not _try_lease(conn, holder, _INCREMENTAL_LEASE):
-        return {"skipped": True, "attached": 0, "recomputed": 0,
-                "published": 0, "imageless": 0}
+        return {"skipped": True, "attached": 0, "recomputed": 0}
     try:
         with conn.cursor() as cur:
             cur.execute("SELECT now()")
             cutoff = cur.fetchone()[0]
         attached = _attach_stragglers(conn, skip_native_backfill=True)
         recomputed = _drain_dirty(conn, batch_size, cutoff)
-        published = _publish_sweep(conn)
-        imageless = _enqueue_imageless_for_dedup(conn)
-        return {"skipped": False, "attached": attached, "recomputed": recomputed,
-                "published": published, "imageless": imageless}
+        return {"skipped": False, "attached": attached, "recomputed": recomputed}
     finally:
         _release_lease(conn, holder)
 
@@ -749,10 +646,8 @@ def main() -> int:
                 )
                 return 0
             LOG.info(
-                "RECOMPUTE incremental done attached=%d recomputed=%d "
-                "published_ineligible=%d imageless_enqueued=%d elapsed=%.1fs",
-                stats["attached"], stats["recomputed"],
-                stats["published"], stats["imageless"], elapsed,
+                "RECOMPUTE incremental done attached=%d recomputed=%d elapsed=%.1fs",
+                stats["attached"], stats["recomputed"], elapsed,
             )
             return 0
 

@@ -6,6 +6,7 @@ import {
   sortPipelineChecks,
   summarizePipelineChecks,
 } from './pipelineChecks';
+import { fmtCount } from './format';
 import type { PipelineCheckRow } from './queries';
 
 function check(
@@ -18,25 +19,25 @@ function check(
 
 describe('pipelineCheckLabel', () => {
   it('maps known keys to a humanized label', () => {
-    expect(pipelineCheckLabel('street_debt')).toBe('Street debt');
-    expect(pipelineCheckLabel('merge_precision_sample')).toBe('Merge precision (sample)');
+    expect(pipelineCheckLabel('llm_errors')).toBe('LLM errors');
+    expect(pipelineCheckLabel('dual_write_parity')).toBe('Dual-write parity');
   });
-  it('title-cases an unknown key rather than throwing', () => {
+  it('title-cases an unknown key (incl. retired ones) rather than throwing', () => {
     expect(pipelineCheckLabel('some_new_check')).toBe('Some New Check');
+    expect(pipelineCheckLabel('street_debt')).toBe('Street Debt');
   });
 });
 
 describe('pipelineCheckValueLabel', () => {
-  it('labels street/geo debt as suspect-pair counts', () => {
-    expect(pipelineCheckValueLabel('street_debt', 35_479)).toMatch(/pairs$/);
-    expect(pipelineCheckValueLabel('geo_debt', 98_830)).toMatch(/pairs$/);
+  it('renders decimals to 2 dp', () => {
+    expect(pipelineCheckValueLabel(0.9583)).toBe('0.96');
+    expect(pipelineCheckValueLabel(1351.76)).toBe('1351.76');
   });
-  it('renders decimals to 2 dp for ratio/percent checks', () => {
-    expect(pipelineCheckValueLabel('llm_errors', 0.9583)).toBe('0.96');
-    expect(pipelineCheckValueLabel('merge_latency', 1351.76)).toBe('1351.76');
+  it('renders integers compactly', () => {
+    expect(pipelineCheckValueLabel(35_479)).toBe(fmtCount(35_479));
   });
-  it('renders an em-dash for a null value (e.g. engine_health)', () => {
-    expect(pipelineCheckValueLabel('engine_health', null)).toBe('—');
+  it('renders an em-dash for a null value', () => {
+    expect(pipelineCheckValueLabel(null)).toBe('—');
   });
 });
 

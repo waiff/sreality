@@ -89,7 +89,8 @@ it (`api/`). They do not apply to the scraper.
    on the theory that the private Railway URL was the perimeter, but that URL ships
    inside the public SPA bundle, so the exemption gave no real protection.
    **Phase 1 (increments 1–4, #747/#753/#763/#765) layered identity on top**, not instead
-   of the token: `/admin/*`, `/dedup/*`, `/outreach/*`, `/broker-review/*`,
+   of the token: `/admin/*`, `/properties/merge*`, `/properties/assets/*`, `/labeling/*`,
+   `/outreach/*`, `/broker-review/*`,
    `/skill-refinements/*`, `/location-audit/*`, and dataset-write/dispatch routes on
    price-stats use `require_admin` (JWT-gated, see below) instead of plain `require_token`;
    `/pipeline/*`, `/collections` (GET), `/estimations` create/read/scenario, notes, and

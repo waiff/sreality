@@ -1,11 +1,12 @@
 /* The CLIP render-vs-photo pill (migration 239), shown bottom-RIGHT of a listing
  * photo (the room tag owns bottom-left). Lets the operator eyeball the render
- * detector: >= the engine's exclusion threshold reads "Render NN" (oxidised-brick
- * accent — these images are dropped from the byt merge signal), otherwise "Foto NN"
- * (neutral). Shows the score itself so a wrong call is obvious. Self-guards: renders
- * nothing until the image is CLIP-scored. Caller owns positioning. */
+ * detector: at/over the threshold reads "Render NN" (oxidised-brick accent),
+ * otherwise "Foto NN" (neutral). Shows the score itself so a wrong call is
+ * obvious. Self-guards: renders nothing until the image is CLIP-scored. Caller
+ * owns positioning. */
 
-// Mirrors toolkit.dedup_engine.RENDER_SCORE_EXCLUDE_MIN (0.65) — keep in sync.
+/* Presentation-only cutoff, owned here: the backend threshold it used to mirror
+ * went with the old decision engine, and nothing downstream consumes it now. */
 const RENDER_THRESHOLD = 0.65;
 
 interface Props {

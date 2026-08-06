@@ -22,8 +22,10 @@ Map, Operator-workflow, Building-decomposition, Skill-refinement, and Summarize 
 in parallel and are independent within a track. The current front line is in
 `roadmap/next.md` — the real-time hot lane (Wave C, greenlit 2026-07-02), building
 decomposition (Phase B1), and Phase QUAL (qualitative city data) are the live items.
-Multi-portal ingestion (Scraper Phase 2) is the larger not-yet-started body of work (design in
-`docs/design/multi-portal-dedup.md`); Dedup is active (see the table below).
+Multi-portal ingestion (Scraper Phase 2) is the larger not-yet-started body of work. Dedup is
+**rebuilding**: the automatic decision engine was removed wholesale in the 2026-08 "NEW DEDUP"
+cutoff and is being rebuilt simulation-first (`docs/design/new-dedup/PROGRAM.md`); only the
+operator-ordered merge mechanics are live (see the table below).
 
 ## Tracks
 
@@ -33,8 +35,8 @@ Multi-portal ingestion (Scraper Phase 2) is the larger not-yet-started body of w
 | UI | 🟢 mostly done | Browse / estimation / detail SPA; U-Nav next, U3 later | [roadmap/ui-track.md](roadmap/ui-track.md) |
 | Map | 🟡 mixed | Typed locality IDs + map layers (map-1) | [roadmap/map-track.md](roadmap/map-track.md) |
 | Scraper | 🟢 mostly done | Cadence-split, portal framework, prepared stmts; Phase 2 multi-portal (larger, later) | [roadmap/scraper-track.md](roadmap/scraper-track.md) |
-| Dedup + canonical listing (legacy, superseded) | ⚪ superseded | Legacy engine history only — see NEW DEDUP below | [roadmap/dedup-track.md](roadmap/dedup-track.md) |
-| NEW DEDUP | 🟡 active (W0 + W1) | Ground-up decision-layer rebuild, simulation-first; teardown (W0) and shared prerequisites (W1) running in parallel | [roadmap/new-dedup.md](roadmap/new-dedup.md) |
+| Dedup + canonical listing (legacy, superseded) | ⚪ superseded | Legacy decision engine REMOVED wholesale (2026-08 "NEW DEDUP" cutoff); history only — see NEW DEDUP below | [roadmap/dedup-track.md](roadmap/dedup-track.md) |
+| NEW DEDUP | 🟡 active (W0 + W1) | Legacy decision engine removed (PR-1/PR-2 merged, M-0 done); PR-3 (table drops) + W0 verification still pending; W1 shared prerequisites running in parallel — see `docs/design/new-dedup/PROGRAM.md` + `CUTOFF.md` | [roadmap/new-dedup.md](roadmap/new-dedup.md) |
 | Operator workflow | 🟢 mostly done | Collections / tags / notes, deal pipeline; U-ME (manual rental estimates) next | [roadmap/operator-workflow-track.md](roadmap/operator-workflow-track.md) |
 | Building decomposition | 🟢 mostly done | Paste-a-building unit extraction + fan-out; B3 business-case tab proposed | [roadmap/building-decomposition-track.md](roadmap/building-decomposition-track.md) |
 | Skill refinement | 🟡 active | Phase AI — feedback-driven estimation-skill refinement | [roadmap/skill-refinement-track.md](roadmap/skill-refinement-track.md) |
