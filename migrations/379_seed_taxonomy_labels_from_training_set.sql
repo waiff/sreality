@@ -1,4 +1,4 @@
--- 374_seed_taxonomy_labels_from_training_set.sql
+-- 379_seed_taxonomy_labels_from_training_set.sql
 --
 -- One-time backfill: dedup_sim.taxonomy_labels (migration 373) opened empty, but the
 -- operator had already built a 48-label, ~1,185-image training set through /phash-audit's

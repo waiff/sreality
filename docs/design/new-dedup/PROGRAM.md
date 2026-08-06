@@ -125,7 +125,7 @@ Session handoff points marked ⛳ (good places to end a session; update the ledg
   opened empty — nothing ever seeded it from `image_training_examples`'
   pre-existing labels, even though `taxonomy_overview`'s confirmed_count already LEFT JOINs on
   label text (it just had nothing on the left side to join against) and PROGRAM.md's own
-  Taxonomy v1 definition (line 38) already points at that table. **Migration 374** backfills
+  Taxonomy v1 definition (line 38) already points at that table. **Migration 379** backfills
   `dedup_sim.taxonomy_labels` with the 48 distinct `image_training_examples` labels
   (`on conflict (label) do nothing`, one-time, not an ongoing sync) — applied live, confirmed
   48 rows. Separately, `list_proposals(status='confirmed')` in `toolkit/dedup_sim_labeling.py`
