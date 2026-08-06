@@ -1637,11 +1637,13 @@ def _build_registry() -> dict[str, FilterDef]:
             pg_column=None,  # synthetic: window picks among 4 count columns
             default=None,
             description=(
-                "Minimum number of price changes (cuts AND raises) across "
-                "the property's combined snapshot history, counted inside "
-                "the `price_change_window_days` window (all time when the "
-                "window is unset). One count per consecutive snapshot pair "
-                "where the asking price moved. Use 2+ for repeatedly "
+                "Minimum number of price changes (cuts AND raises) for the "
+                "property, counted inside the `price_change_window_days` "
+                "window (all time when the window is unset). One count per "
+                "consecutive snapshot pair where the asking price moved "
+                "WITHIN a single portal listing, summed over the property's "
+                "listings — so two portals quoting different prices for the "
+                "same property is not itself a change. Use 2+ for repeatedly "
                 "repriced listings."
             ),
             category=CATEGORY_VELOCITY,
@@ -1676,12 +1678,15 @@ def _build_registry() -> dict[str, FilterDef]:
             default=None,
             description=(
                 "Signed total price change threshold, as a percent of the "
-                "first observed price across the property's combined "
-                "snapshot history. Negative = total drop of at least that "
-                "much (`total_price_change_pct <= X`, e.g. -10 for 'down "
-                "10%+ overall'); positive = total rise of at least that "
-                "much (`>= X`). Zero is treated as unset. Properties with "
-                "fewer than two price points are excluded when set."
+                "first observed price of the property's REPRESENTATIVE "
+                "listing — the same listing whose price is displayed, so the "
+                "shown price and this delta always describe one series. "
+                "Negative = total drop of at least that much "
+                "(`total_price_change_pct <= X`, e.g. -10 for 'down 10%+ "
+                "overall'); positive = total rise of at least that much "
+                "(`>= X`). Zero is treated as unset. Properties whose "
+                "representative listing has fewer than two price points are "
+                "excluded when set."
             ),
             category=CATEGORY_VELOCITY,
             ui_control=UiControl.NUMBER_INPUT,

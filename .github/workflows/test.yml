@@ -26,8 +26,14 @@ jobs:
       - name: Install
         run: pip install -e ".[dev,api,geo]"
 
+      # -m, not a script path: invoking by path puts scripts/ on sys.path[0] and
+      # leaves the repo root off it, so the generator's `from toolkit import ...`
+      # resolves through the ambient editable install rather than this checkout.
+      # Benign on a clean CI runner, silently wrong on a dev machine whose
+      # `pip install -e .` came from a git worktree — same command, different
+      # tree. Keep the two invocations identical so local and CI agree.
       - name: Check filter registry codegen is fresh
-        run: python scripts/generate_filter_registry.py --check
+        run: python -m scripts.generate_filter_registry --check
 
       - name: Check workflow docs codegen is fresh
         run: python scripts/generate_workflow_docs.py --check

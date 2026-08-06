@@ -804,6 +804,25 @@ def ingest_scraped_listing(
                 (listing.source_url, listing_id),
             )
         _ensure_property(conn, listing_id, listing.source)
+        if result != "unchanged":
+            # Enqueue for the incremental property-stats recompute — the exact
+            # counterpart of write_detail_batch's _BATCH_DIRTY_FROM_SIDS_SQL,
+            # which only ever covered sreality. Without this the OTHER EIGHT
+            # portals never enqueued on a content change, so their price-history
+            # columns (price_change_count*, total_price_change_pct) were
+            # refreshed only by the 04:15 full sweep — while _cheap_property_rollup
+            # updates current_price_czk INLINE for singletons. A price could
+            # therefore be up to 24h out of step with its own change history.
+            # Set-based off the surrogate so a listing not yet attached to a
+            # property (property_id NULL) is skipped, not crashed on.
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO dirty_properties (property_id) "
+                    "SELECT property_id FROM listings "
+                    "WHERE id = %s AND property_id IS NOT NULL "
+                    "ON CONFLICT (property_id) DO UPDATE SET marked_at = now()",
+                    (listing_id,),
+                )
         if result != "unchanged" and listing.source in BROKER_ATTRIBUTED_SOURCES:
             with conn.cursor() as cur:
                 # Keyed on the surrogate (dirty_broker_listings_pkey is listing_id;
