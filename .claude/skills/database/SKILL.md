@@ -233,6 +233,23 @@ rule #15; the predicate itself comes out in the NEW DEDUP teardown migration.) T
 pg_cron runs on-the-minute where GH Actions cron was measured ~2× jittered (see
 `gh-actions-cron-throttle-fleet` if you need the numbers).
 
+**Never hand-retype `rebuild_browse_list()`/`rebuild_properties_map_mv()`.** Both blue-green
+DROP+CREATE their object every tick, including the `GRANT SELECT ... TO authenticated` (never
+`anon` — migration 299 deliberately narrowed this) and, for `browse_list`, the district/price
+covering indexes (migration 283's 9-column form, not migration 277's original 3-column form).
+Migration 371 copied from an outdated body and silently reintroduced BOTH the anon grant and
+the narrow indexes while its own commit message claimed no behavior change — live-anon-readable
+for an unknown period, fixed in migration 374. Always `CREATE OR REPLACE` from the CURRENT
+function body (`pg_get_functiondef`), never from an old migration file or a design doc's
+emergency-rollback snippet. Both functions now also self-check after granting
+(`if has_table_privilege('anon', ..., 'SELECT') then raise exception`) — a regression RAISEs,
+rolling back the whole tick so the last known-good object stays published instead of a
+mis-permissioned one, and `browse_read_model_state_public.list_rebuilt_at`/`map_rebuilt_at`
+(surfaced on the Health page) stops advancing within one cycle. `tests/test_browse_grant_drift.py`
+is the matching OFFLINE gate — it reaches inside `EXECUTE`-embedded DDL for these two relations
+specifically, unlike `test_migration_rls_grants.py`'s scanner, which treats dollar-quoted
+function bodies as opaque by design.
+
 **A `SECURITY DEFINER` gate in a view's WHERE is per-row ONLY when it is combined with a
 column predicate.** Three cases, don't conflate them:
 - **Standalone** (`WHERE is_platform_admin()`) — the qual references no column, so it is a
