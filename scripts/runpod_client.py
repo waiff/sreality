@@ -34,8 +34,19 @@ GRAPHQL_URL = "https://api.runpod.io/graphql"
 _TERMINAL_STATUSES = {"EXITED", "TERMINATED"}
 
 
+def _is_no_capacity(response_text: str) -> bool:
+    return "no instances" in response_text.lower()
+
+
 class RunPodError(RuntimeError):
     pass
+
+
+class NoCapacityError(RunPodError):
+    """RunPod has no free instances of the requested GPU type right now — a
+    live availability condition (community cloud is peer-hosted), not a bug.
+    Distinct from RunPodError so a caller can fall back to the next-cheapest
+    GPU type instead of failing the whole job."""
 
 
 @dataclass(frozen=True)
@@ -62,14 +73,17 @@ class RunPodClient:
         self._session = session or requests.Session()
         self._session.headers["Authorization"] = f"Bearer {api_key}"
 
-    def cheapest_gpu(self, *, max_price_per_hr: float | None = None) -> GpuOption:
-        """The lowest community-cloud-priced GPU type, optionally capped by price.
-        Queries live rather than hardcoding an ID — RunPod's catalog and pricing
-        both shift with supply/demand. `communityPrice <= 0` is excluded, not just
-        `None` — a real live run (2026-08-06) hit a catalog entry with id
-        "unknown" and `communityPrice: 0`, a placeholder/unavailable listing that
-        a `None`-only filter let through and that then always "won" as cheapest
-        since 0 beats every real price."""
+    def eligible_gpus(self, *, max_price_per_hr: float | None = None) -> list[GpuOption]:
+        """GPU types under `max_price_per_hr`, cheapest first. Queries live rather
+        than hardcoding IDs — RunPod's catalog and pricing both shift with supply/
+        demand. `communityPrice <= 0` is excluded, not just `None` — a real live
+        run (2026-08-06) hit a catalog entry with id "unknown" and
+        `communityPrice: 0`, a placeholder/unavailable listing that a `None`-only
+        filter let through and that then always "won" as cheapest since 0 beats
+        every real price. Returns a ranked list, not a single pick, because the
+        cheapest type can be at zero community capacity right now (also observed
+        live, same session) — callers needing resilience to that should try
+        several via `run_job_with_fallback`, not just the first result."""
         query = (
             "query { gpuTypes { id displayName memoryInGb communityPrice } }"
         )
@@ -92,7 +106,10 @@ class RunPodClient:
             options = [o for o in options if o.community_price_per_hr <= max_price_per_hr]
         if not options:
             raise RunPodError("no GPU type available under the given price cap")
-        return min(options, key=lambda o: o.community_price_per_hr)
+        return sorted(options, key=lambda o: o.community_price_per_hr)
+
+    def cheapest_gpu(self, *, max_price_per_hr: float | None = None) -> GpuOption:
+        return self.eligible_gpus(max_price_per_hr=max_price_per_hr)[0]
 
     def launch_pod(
         self,
@@ -119,6 +136,8 @@ class RunPodClient:
         }
         resp = self._session.post(f"{REST_BASE}/pods", json=body, timeout=30)
         if resp.status_code >= 400:
+            if _is_no_capacity(resp.text):
+                raise NoCapacityError(f"no capacity for {gpu_type_id}: {resp.text}")
             raise RunPodError(f"pod launch failed ({resp.status_code}): {resp.text}")
         return resp.json()
 
@@ -221,3 +240,42 @@ class RunPodClient:
         finally:
             LOG.info("terminating pod %s", pod_id)
             self.terminate_pod(pod_id)
+
+    def run_job_with_fallback(
+        self,
+        *,
+        name: str,
+        image: str,
+        gpu_options: list[GpuOption],
+        start_cmd: list[str],
+        max_wait_s: float = 600.0,
+        poll_interval_s: float = 10.0,
+        container_disk_gb: int = 10,
+        volume_gb: int = 1,
+    ) -> JobResult:
+        """Try each GPU type in order (cheapest first, per `eligible_gpus`) until
+        one actually has capacity. Only `NoCapacityError` moves on to the next
+        option — any other failure (bad image, auth, quota) is real and not
+        GPU-specific, so it propagates immediately rather than burning through
+        the whole list for something retrying won't fix."""
+        if not gpu_options:
+            raise RunPodError("no GPU options to try")
+        last_error: NoCapacityError | None = None
+        for gpu in gpu_options:
+            try:
+                return self.run_job(
+                    name=name,
+                    image=image,
+                    gpu_type_id=gpu.id,
+                    start_cmd=start_cmd,
+                    max_wait_s=max_wait_s,
+                    poll_interval_s=poll_interval_s,
+                    container_disk_gb=container_disk_gb,
+                    volume_gb=volume_gb,
+                )
+            except NoCapacityError as exc:
+                LOG.warning("no capacity for %s, trying next option: %s", gpu.id, exc)
+                last_error = exc
+                continue
+        assert last_error is not None
+        raise last_error

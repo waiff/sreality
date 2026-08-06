@@ -29,7 +29,7 @@ START_CMD = [
     "x = torch.rand(4, 4, device='cuda'); "
     f"print('{SUCCESS_MARKER}', float(x.sum()))\"",
 ]
-MAX_PRICE_PER_HR = 0.50  # sanity cap; the cheapest option today is well under this
+MAX_PRICE_PER_HR = 1.00  # sanity cap; several eligible options today are well under this
 
 
 def main() -> int:
@@ -42,26 +42,27 @@ def main() -> int:
 
     client = RunPodClient(api_key)
     try:
-        gpu = client.cheapest_gpu(max_price_per_hr=MAX_PRICE_PER_HR)
+        gpus = client.eligible_gpus(max_price_per_hr=MAX_PRICE_PER_HR)
     except RunPodError as exc:
-        LOG.error("could not pick a GPU: %s", exc)
+        LOG.error("could not list eligible GPUs: %s", exc)
         return 1
     LOG.info(
-        "cheapest eligible GPU: %s (%s, %.2f GB, $%.3f/hr community)",
-        gpu.id, gpu.display_name, gpu.memory_gb, gpu.community_price_per_hr,
+        "%d eligible GPU(s), cheapest first: %s",
+        len(gpus),
+        ", ".join(f"{g.id} (${g.community_price_per_hr:.3f}/hr)" for g in gpus[:5]),
     )
 
     try:
-        result = client.run_job(
+        result = client.run_job_with_fallback(
             name="new-dedup-smoke-test",
             image=IMAGE,
-            gpu_type_id=gpu.id,
+            gpu_options=gpus,
             start_cmd=START_CMD,
             max_wait_s=480,
             poll_interval_s=10,
         )
     except RunPodError as exc:
-        LOG.error("job failed: %s", exc)
+        LOG.error("job failed on every eligible GPU type: %s", exc)
         return 1
 
     LOG.info(
