@@ -101,10 +101,13 @@ const MAP_COLS = 'listing_id,property_id,sreality_id,source,source_id_native,lat
  * TableRow.property_id undefined at runtime while still typed `number`. */
 const TABLE_COLS =
   'listing_id,property_id,sreality_id,source,source_id_native,district,locality,obec,okres,street,disposition,subtype,area_m2,price_czk,first_seen_at,last_seen_at,is_active,tom_days,' +
-  'estate_area,usable_area,parking_lots,furnished,ownership,category_sub_cb,building_type';
+  'estate_area,usable_area,parking_lots,furnished,ownership,category_sub_cb,building_type,total_price_change_pct,price_change_count';
 const CARD_COLS =
   'listing_id,property_id,sreality_id,source,source_id_native,district,locality,obec,okres,street,disposition,subtype,area_m2,price_czk,first_seen_at,last_seen_at,is_active,tom_days,' +
-  'category_main,category_type,mf_gross_yield_pct';
+  /* The two price-history columns back <PriceDelta>. Both were already on
+   * browse_list (migrations 276/343/363) and simply never selected — they
+   * existed only as filter inputs, never as anything displayed. */
+  'category_main,category_type,mf_gross_yield_pct,total_price_change_pct,price_change_count';
 
 export type SortField =
   | 'sreality_id' | 'district' | 'disposition'
@@ -794,6 +797,10 @@ export interface TableRow {
   ownership: string | null;
   category_sub_cb: number | null;
   building_type: string | null;
+  /* Same price-movement pair the cards read — the table's Price column shows
+   * the delta beside the figure so the two lanes agree. */
+  total_price_change_pct: number | null;
+  price_change_count: number | null;
 }
 
 /* A page of the keyset-paginated infinite list (see lib/keyset.ts).
@@ -939,6 +946,11 @@ export interface CardRow {
   /* MF gross rental yield % (migration 133). Non-null only on sale
    * apartments that resolved to an MF territory. */
   mf_gross_yield_pct: number | null;
+  /* Signed percent across the representative listing's own price series, and
+   * the per-child change count. NULL pct = fewer than two observed prices,
+   * which <PriceDelta> renders as nothing rather than as "unchanged". */
+  total_price_change_pct: number | null;
+  price_change_count: number | null;
   /* Per-image render data (url + CLIP tag + confidence) in source-sequence
    * order. Empty when the listing has no photos yet. The card uses index 0 by
    * default and the carousel chevrons step through the remaining entries. */

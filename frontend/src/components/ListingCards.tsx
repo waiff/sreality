@@ -5,6 +5,7 @@ import ImageCarousel from '@/components/ImageCarousel';
 import InfiniteSentinel from '@/components/InfiniteSentinel';
 import Spinner from '@/components/Spinner';
 import { FunnelIcon } from '@/components/icons';
+import PriceDelta from '@/components/PriceDelta';
 import { useScrollRestoration } from '@/lib/useScrollRestoration';
 import {
   curationKeys,
@@ -643,7 +644,7 @@ function Card({
           </p>
         )}
         <div className="mt-1 flex items-baseline justify-between gap-1">
-          <p className={`text-[0.78rem] font-medium tabular-nums ${priceColor}`}>
+          <p className={`flex items-baseline gap-1 text-[0.78rem] font-medium tabular-nums ${priceColor}`}>
             {r.price_czk != null ? (
               <>
                 {fmtCzk(r.price_czk)}
@@ -652,6 +653,13 @@ function Card({
             ) : (
               <span className="text-[var(--color-ink-3)] text-[0.7rem]">Cena na vyžádání</span>
             )}
+            {/* Same component the pipeline card uses — one price-movement
+                vocabulary app-wide. Renders nothing without price history. */}
+            <PriceDelta
+              pct={r.total_price_change_pct}
+              changes={r.price_change_count}
+              muted={!r.is_active}
+            />
           </p>
           <p className="text-[0.62rem] text-[var(--color-ink-4)] tabular-nums whitespace-nowrap">
             {fmtPricePerM2(r.price_czk, r.area_m2)}
