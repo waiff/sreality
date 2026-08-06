@@ -2196,14 +2196,22 @@ export const fetchPipelineStages = async (): Promise<PipelineStage[]> => {
 export const fetchPipelineBoard = async (): Promise<PipelineBoardCard[]> => {
   const { data: cards, error: cErr } = await supabase
     .from('property_pipeline_public')
-    .select('property_id, stage_id, board_position, entered_stage_at')
-    .order('board_position');
+    .select('property_id, stage_id, board_position, entered_stage_at, added_at')
+    /* board_position is the MANUAL order and stays the default sort, but it is
+     * not unique — it is assigned max+1 within the entry stage at bookmark time
+     * and never renumbered on a stage move, so live data has collisions WITHIN
+     * a stage. property_id is the deterministic tiebreak; without it equal
+     * positions reshuffle between refetches. Any explicit sort re-sorts
+     * client-side (lib/pipelineSort) and tiebreaks the same way. */
+    .order('board_position')
+    .order('property_id');
   if (cErr) throw cErr;
   const rows = (cards ?? []) as Array<{
     property_id: number;
     stage_id: number;
     board_position: number;
     entered_stage_at: string;
+    added_at: string;
   }>;
   if (rows.length === 0) return [];
 
@@ -2211,7 +2219,7 @@ export const fetchPipelineBoard = async (): Promise<PipelineBoardCard[]> => {
   const { data: props, error: pErr } = await supabase
     .from('properties_public')
     .select(
-      'property_id, sreality_id, source, source_id_native, listing_id, category_main, street, district, disposition, subtype, area_m2, price_czk, mf_gross_yield_pct, obec_id, okres_id, region_id, place_search_text, okres, region, is_active',
+      'property_id, sreality_id, source, source_id_native, listing_id, category_main, street, district, disposition, subtype, area_m2, price_czk, mf_gross_yield_pct, total_price_change_pct, price_change_count, obec_id, okres_id, region_id, place_search_text, obec, locality, okres, region, is_active',
     )
     .in('property_id', ids);
   if (pErr) throw pErr;
@@ -2273,6 +2281,7 @@ export const fetchPipelineBoard = async (): Promise<PipelineBoardCard[]> => {
       stage_id: r.stage_id,
       board_position: r.board_position,
       entered_stage_at: r.entered_stage_at,
+      added_at: r.added_at,
       sreality_id: sid,
       source: (p?.source as string | null) ?? null,
       source_id_native: (p?.source_id_native as string | null) ?? null,
@@ -2285,10 +2294,18 @@ export const fetchPipelineBoard = async (): Promise<PipelineBoardCard[]> => {
       area_m2: (p?.area_m2 as number | null) ?? null,
       price_czk: (p?.price_czk as number | null) ?? null,
       mf_gross_yield_pct: (p?.mf_gross_yield_pct as number | null) ?? null,
+      // numeric arrives from PostgREST as a string on some paths — coerce once,
+      // here, so no consumer has to guess (the llm_cost_daily reader does the same).
+      total_price_change_pct:
+        p?.total_price_change_pct == null ? null : Number(p.total_price_change_pct),
+      price_change_count:
+        p?.price_change_count == null ? null : Number(p.price_change_count),
       obec_id: (p?.obec_id as number | null) ?? null,
       okres_id: (p?.okres_id as number | null) ?? null,
       region_id: (p?.region_id as number | null) ?? null,
       place_search_text: (p?.place_search_text as string | null) ?? null,
+      obec: (p?.obec as string | null) ?? null,
+      locality: (p?.locality as string | null) ?? null,
       okres: (p?.okres as string | null) ?? null,
       region: (p?.region as string | null) ?? null,
       is_active: (p?.is_active as boolean | null) ?? true,

@@ -1,19 +1,16 @@
 import { useMemo, useState } from 'react';
-import { Link } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   DndContext,
   DragOverlay,
   KeyboardSensor,
   PointerSensor,
-  useDraggable,
   useDroppable,
   useSensor,
   useSensors,
   type DragEndEvent,
   type DragStartEvent,
 } from '@dnd-kit/core';
-import { CSS } from '@dnd-kit/utilities';
 import {
   archivePipelineStage,
   createPipelineStage,
@@ -29,16 +26,21 @@ import {
   pipelineKeys,
 } from '@/lib/queries';
 import { LocationTypeahead } from '@/components/filter-controls/LocationTypeahead';
-import { type DistrictChip, type ListingStatus } from '@/lib/filters';
-import { fmtArea, fmtCzk } from '@/lib/format';
-import { listingKindLabel } from '@/lib/enums';
-import { listingRowPath } from '@/lib/listingUrl';
+import { type ListingStatus } from '@/lib/filters';
 import { FILTER_REGISTRY } from '@/lib/filterRegistry.generated';
 import TagColorPicker from '@/components/TagColorPicker';
-import { FunnelIcon, InfoIcon, TrashIcon } from '@/components/icons';
+import { FunnelIcon, InfoIcon } from '@/components/icons';
+import BoardCard, {
+  CardFace,
+  CARD_PREFIX,
+  STAGE_PREFIX,
+} from '@/components/pipeline/BoardCard';
+import { sortParamOf } from '@/lib/cardSort';
+import { PIPELINE_SORT_OPTIONS, sortPipelineCards } from '@/lib/pipelineSort';
+import { usePipelineViewState } from '@/lib/pipelineState';
+import { useCityQuality, type CityQualityByObec } from '@/lib/useCityQuality';
 import {
   type PipelineBoardCard,
-  type PipelineCardBroker,
   type PipelineStage,
   type TagColor,
 } from '@/lib/types';
@@ -69,9 +71,20 @@ const STATUS_LABEL: Record<string, string> = Object.fromEntries(
 
 export default function Pipeline() {
   const [manage, setManage] = useState(false);
-  const [types, setTypes] = useState<Set<string>>(new Set());
-  const [districts, setDistricts] = useState<DistrictChip[]>([]);
-  const [status, setStatus] = useState<ListingStatus>('any');
+  /* Filters AND sort live in the URL (lib/pipelineState) using Browse's own
+   * param vocabulary, so a filtered/sorted board is linkable and survives a
+   * reload. `manage` stays local — it's a transient editor toggle, not a view. */
+  const {
+    status,
+    types,
+    districts,
+    sort,
+    setStatus,
+    toggleType,
+    clearTypes,
+    setDistricts,
+    setSort,
+  } = usePipelineViewState();
   const stagesQ = useQuery({
     queryKey: pipelineKeys.stages,
     queryFn: fetchPipelineStages,
@@ -124,6 +137,11 @@ export default function Pipeline() {
     return result;
   }, [boardQ.data, types, districts, status]);
 
+  /* Curated-city indexes for the card strip. Cached forever and keyed shared
+   * with the Browse map, so this is free once either surface has loaded them;
+   * `enabled` only once there is a board to decorate. */
+  const { byObec: cityQuality } = useCityQuality(cards.length > 0);
+
   const byStage = useMemo(() => {
     const m = new Map<number, PipelineBoardCard[]>();
     for (const s of stagesQ.data ?? []) m.set(s.id, []);
@@ -131,8 +149,13 @@ export default function Pipeline() {
       const bucket = m.get(c.stage_id);
       if (bucket) bucket.push(c);
     }
+    /* Sort WITHIN each column, not across the board — a kanban's vertical axis
+     * is per-column. Every comparator tiebreaks on property_id, so equal keys
+     * (and colliding board_positions, which live data has) hold a stable order
+     * across refetches instead of reshuffling. */
+    for (const [id, bucket] of m) m.set(id, sortPipelineCards(bucket, sort));
     return m;
-  }, [stagesQ.data, filteredCards]);
+  }, [stagesQ.data, filteredCards, sort]);
 
   return (
     <div className="px-6 py-8">
@@ -215,14 +238,7 @@ export default function Pipeline() {
                     key={t}
                     type="button"
                     aria-pressed={active}
-                    onClick={() =>
-                      setTypes((prev) => {
-                        const next = new Set(prev);
-                        if (next.has(t)) next.delete(t);
-                        else next.add(t);
-                        return next;
-                      })
-                    }
+                    onClick={() => toggleType(t)}
                     className={[
                       'rounded-[var(--radius-sm)] border px-2.5 py-1 text-[0.78rem] transition-colors',
                       active
@@ -237,7 +253,7 @@ export default function Pipeline() {
               {types.size > 0 && (
                 <button
                   type="button"
-                  onClick={() => setTypes(new Set())}
+                  onClick={clearTypes}
                   className="ml-1 text-[0.72rem] text-[var(--color-ink-3)] underline underline-offset-2 hover:text-[var(--color-ink)]"
                 >
                   Vše
@@ -256,6 +272,36 @@ export default function Pipeline() {
               />
             </div>
           </div>
+          {/* Sort joins the existing Stav/Typ/Lokalita chip grammar as a fourth
+              row rather than floating in a new header toolbar — it is another
+              knob on the same cohort, and the operator's eye is already here.
+              Ordering applies WITHIN each column. */}
+          <div className="flex items-center gap-2">
+            <span className="shrink-0 text-[0.65rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)]">
+              Řazení
+            </span>
+            <select
+              aria-label="Řazení karet ve fázi"
+              value={
+                PIPELINE_SORT_OPTIONS.find(
+                  (o) => o.field === sort.field && o.direction === sort.direction,
+                )?.value ?? sortParamOf(sort)
+              }
+              onChange={(e) => {
+                const picked = PIPELINE_SORT_OPTIONS.find(
+                  (o) => o.value === e.target.value,
+                );
+                if (picked) setSort({ field: picked.field, direction: picked.direction });
+              }}
+              className="rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] px-2 py-1 text-[0.78rem] text-[var(--color-ink-2)] transition-colors hover:border-[var(--color-rule-strong)] focus:border-[var(--color-rule-strong)] focus:outline-none"
+            >
+              {PIPELINE_SORT_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {o.label}
+                </option>
+              ))}
+            </select>
+          </div>
         </div>
       )}
 
@@ -271,7 +317,12 @@ export default function Pipeline() {
           pipeline" na detailu inzerátu.
         </p>
       ) : (
-        <Board stages={stages} cards={filteredCards} byStage={byStage} />
+        <Board
+          stages={stages}
+          cards={filteredCards}
+          byStage={byStage}
+          cityQuality={cityQuality}
+        />
       )}
     </div>
   );
@@ -282,9 +333,6 @@ function stageColor(stage: PipelineStage): string {
     ? `var(--color-tag-${stage.color})`
     : 'var(--color-rule-strong)';
 }
-
-const CARD_PREFIX = 'card:';
-const STAGE_PREFIX = 'stage:';
 
 /* Pure: resolve a drag-end (active card, over column) into a stage move, or
  * null for a no-op (same column / dropped outside a column / unknown card).
@@ -307,10 +355,12 @@ function Board({
   stages,
   cards,
   byStage,
+  cityQuality,
 }: {
   stages: PipelineStage[];
   cards: PipelineBoardCard[];
   byStage: Map<number, PipelineBoardCard[]>;
+  cityQuality: CityQualityByObec;
 }) {
   const qc = useQueryClient();
   const [activeId, setActiveId] = useState<string | null>(null);
@@ -388,6 +438,7 @@ function Board({
             key={s.id}
             stage={s}
             cards={byStage.get(s.id) ?? []}
+            cityQuality={cityQuality}
             onRemove={(propertyId) => remove.mutate(propertyId)}
           />
         ))}
@@ -399,7 +450,7 @@ function Board({
       <DragOverlay dropAnimation={null}>
         {activeCard ? (
           <div className="w-64 rounded-[var(--radius-md)] border border-[var(--color-rule-strong)] bg-[var(--color-paper-2)] p-2.5 shadow-lg">
-            <CardFace card={activeCard} />
+            <CardFace card={activeCard} cityQuality={cityQuality} />
           </div>
         ) : null}
       </DragOverlay>
@@ -640,10 +691,12 @@ function Hint({ text }: { text: string }) {
 function StageColumn({
   stage,
   cards,
+  cityQuality,
   onRemove,
 }: {
   stage: PipelineStage;
   cards: PipelineBoardCard[];
+  cityQuality: CityQualityByObec;
   onRemove: (propertyId: number) => void;
 }) {
   const { setNodeRef, isOver } = useDroppable({ id: `${STAGE_PREFIX}${stage.id}` });
@@ -676,188 +729,11 @@ function StageColumn({
         ) : (
           cards.map((c) => (
             <li key={c.property_id}>
-              <BoardCard card={c} onRemove={onRemove} />
+              <BoardCard card={c} cityQuality={cityQuality} onRemove={onRemove} />
             </li>
           ))
         )}
       </ul>
-    </div>
-  );
-}
-
-function CardThumb({ url, inactive }: { url: string | null; inactive: boolean }) {
-  const cls =
-    'h-12 w-12 shrink-0 rounded-[var(--radius-sm)] border border-[var(--color-rule)]';
-  if (!url) return <div className={`${cls} bg-[var(--color-inset)]`} aria-hidden />;
-  // Same gentle desaturation Browse's card photo gets when is_active=false —
-  // the only signal left in the photo lane once the surface carries status.
-  return (
-    <img
-      src={url}
-      alt=""
-      loading="lazy"
-      className={`${cls} object-cover ${inactive ? 'saturate-[0.4] brightness-[0.97]' : ''}`}
-    />
-  );
-}
-
-/* The card's visible content — reused by the in-column card and the drag ghost.
- * Thumbnail + price + street/district + disposition·area + MF gross yield. The
- * image + yield reuse the same resolution/format Browse cards use (broker is a
- * deferred follow-up — needs a batched canonical-broker lookup). */
-function CardFace({ card }: { card: PipelineBoardCard }) {
-  const inactive = !card.is_active;
-  const priceColor = inactive ? 'text-[var(--color-ink-2)]' : 'text-[var(--color-ink)]';
-  const place = [card.street, card.district].filter(Boolean).join(', ');
-  const dims = [
-    listingKindLabel(card),
-    card.area_m2 != null ? fmtArea(card.area_m2) : null,
-  ]
-    .filter(Boolean)
-    .join(' · ');
-  return (
-    <div className="flex gap-2.5">
-      <CardThumb url={card.image_url} inactive={inactive} />
-      <div className="min-w-0 flex-1">
-        {/* listingRowPath is canonical-first (source + source_id_native from
-            properties_public), so the card links straight to the clean
-            /listing/{source}/{native} URL; it falls back to the legacy/property
-            route only for a representative with no natural key. */}
-        <Link
-          to={listingRowPath(card)}
-          state={{ listingId: card.listing_id ?? undefined }}
-          title={inactive ? 'Neaktivní inzerát' : undefined}
-          className={`font-mono tabular-nums text-sm hover:text-[var(--color-copper)] hover:underline underline-offset-2 ${priceColor}`}
-        >
-          {fmtCzk(card.price_czk)}
-        </Link>
-        {place && (
-          <p className="mt-0.5 truncate text-xs text-[var(--color-ink-2)]">{place}</p>
-        )}
-        <div className="mt-0.5 flex items-center justify-between gap-2">
-          <span className="truncate font-mono tabular-nums text-xs text-[var(--color-ink-4)]">
-            {dims || '—'}
-          </span>
-          {card.mf_gross_yield_pct != null && (
-            <span
-              className="shrink-0 font-mono tabular-nums text-[0.68rem] text-[var(--color-ink-3)]"
-              title="Hrubý výnos dle cenové mapy nájemného MF"
-            >
-              MF{' '}
-              {card.mf_gross_yield_pct.toLocaleString('cs-CZ', {
-                minimumFractionDigits: 1,
-                maximumFractionDigits: 1,
-              })}{' '}
-              %
-            </span>
-          )}
-        </div>
-        {card.broker && (
-          <p className="mt-0.5 truncate text-[0.7rem] text-[var(--color-ink-3)]">
-            <Link
-              to={`/brokers/${card.broker.broker_id}`}
-              title={brokerHoverTitle(card.broker)}
-              className="hover:text-[var(--color-copper)] hover:underline underline-offset-2"
-            >
-              {card.broker.display_name ?? 'Makléř'}
-            </Link>
-            {card.broker.firm_label && (
-              <span className="text-[var(--color-ink-4)]"> · {card.broker.firm_label}</span>
-            )}
-          </p>
-        )}
-      </div>
-    </div>
-  );
-}
-
-/* Native-title hover box for a card's broker — name, firm, and contact on one
- * line (the codebase's tooltip convention). The name itself links to the broker
- * page for the full record. */
-function brokerHoverTitle(b: PipelineCardBroker): string {
-  return (
-    [b.display_name, b.firm_label, b.phone, b.email].filter(Boolean).join(' · ') ||
-    'Zobrazit makléře'
-  );
-}
-
-function BoardCard({
-  card,
-  onRemove,
-}: {
-  card: PipelineBoardCard;
-  onRemove: (propertyId: number) => void;
-}) {
-  const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
-    id: `${CARD_PREFIX}${card.property_id}`,
-  });
-  const [confirming, setConfirming] = useState(false);
-  const style = {
-    transform: CSS.Translate.toString(transform),
-    opacity: isDragging ? 0.4 : undefined,
-  };
-  // Inactive cards recede via surface tint, matching Browse's "filed away"
-  // treatment for delisted listings (rule: app-wide unification of the
-  // is_active signal, not a bespoke Pipeline-only style).
-  const surface = !card.is_active
-    ? 'border-[var(--color-rule-soft)] bg-[var(--color-inset)]'
-    : 'border-[var(--color-rule)] bg-[var(--color-paper-2)]';
-
-  return (
-    <div
-      ref={setNodeRef}
-      style={style}
-      className={`rounded-[var(--radius-md)] border p-2.5 ${surface}`}
-    >
-      <div className="flex items-start gap-1.5">
-        <button
-          type="button"
-          {...attributes}
-          {...listeners}
-          aria-label="Přetáhnout kartu do jiné fáze"
-          className="shrink-0 cursor-grab touch-none pt-0.5 leading-none text-[var(--color-ink-4)] hover:text-[var(--color-ink-2)] active:cursor-grabbing"
-        >
-          ⠿
-        </button>
-        <div className="min-w-0 flex-1">
-          <CardFace card={card} />
-        </div>
-        <button
-          type="button"
-          onClick={() => setConfirming((v) => !v)}
-          aria-label="Odebrat z pipeline"
-          aria-expanded={confirming}
-          title="Odebrat z pipeline"
-          className="shrink-0 rounded-[var(--radius-xs)] pt-0.5 text-[var(--color-ink-4)] hover:text-[var(--color-brick)] focus-visible:outline focus-visible:outline-1 focus-visible:outline-offset-1 focus-visible:outline-[var(--color-rule-strong)]"
-        >
-          <TrashIcon className="h-3.5 w-3.5" />
-        </button>
-      </div>
-      {/* Inline two-step confirm (the app's destructive-action pattern) — removing
-          a property from the pipeline drops the card entirely. Stage moves are
-          drag-only now; the select fallback was removed. */}
-      {confirming && (
-        <div className="mt-2 flex items-center gap-2 border-t border-[var(--color-rule-soft)] pt-2 text-[0.72rem]">
-          <span className="mr-auto text-[var(--color-ink-3)]">Odebrat z pipeline?</span>
-          <button
-            type="button"
-            onClick={() => {
-              setConfirming(false);
-              onRemove(card.property_id);
-            }}
-            className="rounded-[var(--radius-sm)] border border-[var(--color-brick)] px-2 py-0.5 text-[var(--color-brick)] hover:bg-[var(--color-brick)]/10"
-          >
-            Odebrat
-          </button>
-          <button
-            type="button"
-            onClick={() => setConfirming(false)}
-            className="rounded-[var(--radius-sm)] border border-[var(--color-rule)] px-2 py-0.5 text-[var(--color-ink-2)] hover:border-[var(--color-rule-strong)] hover:bg-[var(--color-rule-soft)]"
-          >
-            Zrušit
-          </button>
-        </div>
-      )}
     </div>
   );
 }
