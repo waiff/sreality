@@ -1,0 +1,37 @@
+name: NEW DEDUP RunPod smoke test (one-off)
+
+# Proves the RunPod pipeline end-to-end (docs/design/new-dedup/PROGRAM.md, Wave 1):
+# launch the cheapest available GPU pod, run a trivial CUDA op, confirm it, guarantee
+# teardown either way (scripts/runpod_client.py's run_job). Not scheduled — manual
+# trigger only, matching the design's "manual batches only" cost-conscious posture.
+# Wave 5's real embedding batches will reuse the same client, different payload.
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: new-dedup-runpod-smoke-test
+  cancel-in-progress: false
+
+jobs:
+  smoke-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: pip install -e .
+
+      - name: Launch pod, run CUDA smoke test, terminate
+        run: python -m scripts.new_dedup_runpod_smoke_test
