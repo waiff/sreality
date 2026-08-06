@@ -714,7 +714,15 @@ renumber.** Navigate by area:
     New listings (`property_id` NULL) are resolved by straggler-attach, not the queue. The
     **daily full sweep** (`recompute_property_stats.yml`, no `--incremental`, 04:15 UTC) is the
     reconcile backstop — it recomputes every property and clears the queue, so a missed enqueue
-    self-heals within 24h. (There is no scheduled dedup job any more — the automatic decision
+    self-heals within 24h *provided the sweep completes*: since the 2026-08-06 incident it runs
+    under a `--max-seconds` budget (default 3600s) and on exhaustion clean-stops at a batch
+    boundary, clears only the swept id range, exits RED, and does NOT write the
+    `property_sweep_last_complete` stamp — so chronic exhaustion surfaces as a red run daily plus
+    the `property_maintenance` health check failing on stamp age, and the unswept id tail keeps
+    its pre-sweep windowed stats until a sweep finishes (is_active flips still heal incrementally
+    — every delist path enqueues `dirty_properties`). The maintenance lease is one 15-minute TTL
+    heartbeat-renewed every batch/slice, so a killed job freezes maintenance for minutes, not
+    hours. (There is no scheduled dedup job any more — the automatic decision
     layer was removed in the 2026-08 cutoff, rule #15.) Both
     maintenance jobs share the `sreality-property-maintenance` concurrency group so they never
     mutate `properties` concurrently. Inline merge/unmerge still call `recompute_one` directly

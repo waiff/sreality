@@ -50,16 +50,15 @@ DEFAULT_THRESHOLDS: dict[str, float] = {
     "worker_stale_fail_minutes": 5,
     "verification_stale_hours": 24,
     # Property maintenance (2026-08-06 incident: 4 days of silently dead daily
-    # sweeps + a stranded lease freezing every maintenance lane). Healthy
-    # steady state: the daily 04:15 sweep restamps every live property, so the
-    # oldest stamp is ~24-25h just before the next sweep; new singletons carry
-    # NULL stats until their first sweep (~26h worst case). Dirty rows drain
-    # within ~2 min of the worker lane's tick; the daily sweep holds the lease
-    # ~30-60 min, so oldest-dirt ~1h only appears when maintenance is frozen.
-    "property_stats_stamp_warn_hours": 30,
-    "property_stats_stamp_fail_hours": 48,
-    "property_stats_null_warn_hours": 30,
-    "property_stats_null_fail_hours": 54,
+    # sweeps + a stranded lease freezing every maintenance lane). The sweep
+    # stamps app_settings.property_sweep_last_complete ONLY on a complete
+    # walk; healthy age is ~24h (daily 04:15 cadence), so fail at 30h fires
+    # ~5-6h after a dead/killed/incomplete sweep — however the process died.
+    # Dirty rows drain within ~2 min of the worker lane's tick; the daily
+    # sweep holds the lease ~30-60 min, so oldest-dirt beyond ~1.5h only
+    # appears when maintenance is frozen.
+    "property_sweep_warn_hours": 26,
+    "property_sweep_fail_hours": 30,
     "property_dirty_warn_hours": 1.5,
     "property_dirty_fail_hours": 3,
 }
@@ -135,31 +134,37 @@ def _status_for_cron(
 
 
 def _status_for_property_maintenance(
-    oldest_stamp_hours: float | None,
-    oldest_null_hours: float | None,
+    sweep_age_hours: float | None,
     oldest_dirty_hours: float | None,
     thresholds: dict[str, Any],
 ) -> tuple[str, list[str]]:
-    """Worst-of over the three maintenance staleness axes; None = healthy/empty.
+    """Worst-of over the two maintenance liveness axes.
 
-    Each axis is an AGE, not a count, and each is scoped upstream to LIVE
-    properties with children — merged_away losers are childless and the batch
-    UPDATE joins through `listings`, so they are structurally never restamped;
-    counting them would leave this check permanently red (they were ~74% of the
-    naive numbers in the 2026-08-06 incident)."""
+    `sweep_age_hours` is the age of the last COMPLETE full sweep's stamp
+    (app_settings.property_sweep_last_complete, written by the sweep itself) —
+    None means no stamp on record, which is a warn, not a fail: it is the
+    expected state between deploying this check and the first complete sweep,
+    and permanently red would train the operator to ignore the check. A dirty
+    row aging past its axis means the incremental drain (worker lane + cron)
+    is frozen. Both axes are O(1) reads: a per-row staleness scan over 620k
+    properties measured ~3.5 min live and would blow the hourly acute lane's
+    own 5-min job timeout — recreating the silent-`cancelled` mode this check
+    exists to catch."""
     axes = [
-        ("oldest stats stamp", oldest_stamp_hours,
-         thresholds["property_stats_stamp_warn_hours"],
-         thresholds["property_stats_stamp_fail_hours"]),
-        ("oldest never-computed property", oldest_null_hours,
-         thresholds["property_stats_null_warn_hours"],
-         thresholds["property_stats_null_fail_hours"]),
+        ("last complete sweep", sweep_age_hours,
+         thresholds["property_sweep_warn_hours"],
+         thresholds["property_sweep_fail_hours"]),
         ("oldest dirty-queue row", oldest_dirty_hours,
          thresholds["property_dirty_warn_hours"],
          thresholds["property_dirty_fail_hours"]),
     ]
     status = "ok"
     offenders: list[str] = []
+    if sweep_age_hours is None:
+        status = "warn"
+        offenders.append(
+            "no complete-sweep stamp on record (first sweep since deploy "
+            "still pending, or the sweep has never completed)")
     for name, hours, warn_h, fail_h in axes:
         if hours is None:
             continue
@@ -495,23 +500,16 @@ def check_worker_liveness(conn: Any, thresholds: dict[str, Any]) -> dict[str, An
     }
 
 
-# One round trip for all four maintenance metrics. LIVE scope everywhere:
-# status='active' AND >= 1 child listing (merged_away rows are childless by
-# merge design and structurally unstampable — see _status_for_property_maintenance).
+# One O(1) round trip: the sweep-completion stamp + the tiny dirty queue.
+# Deliberately NOT a per-row staleness scan over properties — that measured
+# ~3.5 min live (620k-row heap × listings semi-join) and would blow the hourly
+# acute lane's 5-min job timeout, taking every other acute check's rows and
+# alerts down with it.
 _PROPERTY_MAINTENANCE_SQL = """
 select
-  (select extract(epoch from (now() - min(p.stats_computed_at))) / 3600.0
-     from properties p
-    where p.status = 'active'
-      and p.stats_computed_at is not null
-      and exists (select 1 from listings l where l.property_id = p.id))
-    as oldest_stamp_hours,
-  (select extract(epoch from (now() - min(p.created_at))) / 3600.0
-     from properties p
-    where p.status = 'active'
-      and p.stats_computed_at is null
-      and exists (select 1 from listings l where l.property_id = p.id))
-    as oldest_null_hours,
+  (select extract(epoch from (now() - (value->>'completed_at')::timestamptz)) / 3600.0
+     from app_settings where key = 'property_sweep_last_complete')
+    as sweep_age_hours,
   (select extract(epoch from (now() - min(d.marked_at))) / 3600.0
      from dirty_properties d) as oldest_dirty_hours,
   (select count(*) from dirty_properties) as dirty_depth
@@ -523,18 +521,20 @@ def check_property_maintenance(conn: Any, thresholds: dict[str, Any]) -> dict[st
     the incremental dirty drain, and the lease that serializes them. Born from the
     2026-08-06 incident — the sweep outgrew its job timeout and died `cancelled`
     (not `failed`) for 4 days straight while each kill's stranded lease froze every
-    maintenance lane; no check watched any of it."""
+    maintenance lane; no check watched any of it. The sweep axis reads the
+    completion stamp the (fixed) sweep writes on complete walks only, so ANY way
+    the sweep dies — SIGKILL, runner death, chronic budget exhaustion — surfaces
+    as a stale stamp within hours."""
     row = _fetchone(conn, _PROPERTY_MAINTENANCE_SQL)
-    oldest_stamp, oldest_null, oldest_dirty, dirty_depth = (
-        (None, None, None, 0) if row is None else (
+    sweep_age, oldest_dirty, dirty_depth = (
+        (None, None, 0) if row is None else (
             float(row[0]) if row[0] is not None else None,
             float(row[1]) if row[1] is not None else None,
-            float(row[2]) if row[2] is not None else None,
-            int(row[3] or 0),
+            int(row[2] or 0),
         )
     )
     status, offenders = _status_for_property_maintenance(
-        oldest_stamp, oldest_null, oldest_dirty, thresholds)
+        sweep_age, oldest_dirty, thresholds)
     if offenders:
         message = (
             "Property maintenance is falling behind: " + "; ".join(offenders)
@@ -543,18 +543,15 @@ def check_property_maintenance(conn: Any, thresholds: dict[str, Any]) -> dict[st
         )
     else:
         message = (
-            f"Property maintenance healthy (oldest stamp "
-            f"{oldest_stamp:.1f}h, dirty queue {dirty_depth})."
-            if oldest_stamp is not None
-            else f"Property maintenance healthy (dirty queue {dirty_depth})."
+            f"Property maintenance healthy (last complete sweep "
+            f"{sweep_age:.1f}h ago, dirty queue {dirty_depth})."
         )
     return {
         "check_key": "property_maintenance",
         "status": status,
-        "value": round(oldest_stamp, 2) if oldest_stamp is not None else None,
+        "value": round(sweep_age, 2) if sweep_age is not None else None,
         "details": {
-            "oldest_stamp_hours": oldest_stamp,
-            "oldest_null_hours": oldest_null,
+            "sweep_age_hours": sweep_age,
             "oldest_dirty_hours": oldest_dirty,
             "dirty_depth": dirty_depth,
             "offenders": offenders,

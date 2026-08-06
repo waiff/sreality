@@ -482,6 +482,27 @@ _RECONCILE_CHILDLESS_SQL = """
       AND NOT EXISTS (SELECT 1 FROM listings l WHERE l.property_id = p.id)
 """
 
+# Written ONLY when a walk covered every id — the O(1) liveness signal the
+# `property_maintenance` health check reads. Per-row stats_computed_at cannot
+# serve that role: min() over 620k properties with a listings semi-join
+# measured ~3.5 min live, and a check that heavy would blow the hourly acute
+# lane's own 5-min job timeout — recreating the silent-`cancelled` failure
+# mode it exists to catch. A dead, killed, or chronically-incomplete sweep
+# shows up here as a stale stamp within hours, however the process died.
+_STAMP_SWEEP_COMPLETE_SQL = """
+    INSERT INTO app_settings (key, value, updated_by)
+    VALUES ('property_sweep_last_complete',
+            jsonb_build_object(
+                'completed_at', now(),
+                'max_property_id', %(max_id)s::bigint,
+                'batches', %(batches)s::int,
+                'elapsed_s', %(elapsed_s)s::numeric),
+            'recompute_property_stats')
+    ON CONFLICT (key) DO UPDATE
+      SET value = excluded.value, updated_at = now(),
+          updated_by = excluded.updated_by
+"""
+
 
 def recompute_one(conn: Any, property_id: int) -> None:
     """Recompute one property's rollup + stats using the batch job's exact SQL.
@@ -613,6 +634,14 @@ _LEASE_RETRY_SECONDS = 10.0
 # is genuinely wrong, not merely slow.
 _MAX_LEASE_WAIT_SECONDS = 1200.0
 
+# Ceiling for --max-seconds. The workflow's timeout-minutes (75) is sized as
+# budget + one in-flight batch (~2-min statement timeout) + prelude + finalize
+# headroom FOR THIS CEILING; an unclamped dispatch input above ~4200s would
+# let the runner SIGKILL a healthy sweep before its clean-stop fires — a
+# silent `cancelled`, the exact mode this script exists to eliminate. Raising
+# the ceiling means raising timeout-minutes in the same change.
+_MAX_BUDGET_SECONDS = 4200.0
+
 _TRY_LEASE_SQL = """
     UPDATE property_maintenance_lease
        SET holder = %(holder)s, expires_at = now() + %(lease)s::interval
@@ -659,8 +688,12 @@ def _wait_lease(
     conn: Any, holder: str, lease: str,
     max_wait_seconds: float = _MAX_LEASE_WAIT_SECONDS,
 ) -> None:
-    waited = 0.0
+    # Wall-clock anchored: the CAS round trips themselves can be slow exactly
+    # when this path runs (degraded DB), and counting only the sleeps would
+    # let the wait silently outgrow the job budget.
+    entered = time.monotonic()
     while not _try_lease(conn, holder, lease):
+        waited = time.monotonic() - entered
         if waited >= max_wait_seconds:
             raise RuntimeError(
                 f"maintenance lease still held after {waited:.0f}s of waiting — "
@@ -670,7 +703,6 @@ def _wait_lease(
         LOG.info("MAINTENANCE lease held by another writer; retrying in %.0fs",
                  _LEASE_RETRY_SECONDS)
         time.sleep(_LEASE_RETRY_SECONDS)
-        waited += _LEASE_RETRY_SECONDS
 
 
 def _release_lease(conn: Any, holder: str) -> None:
@@ -727,7 +759,11 @@ def main() -> int:
         help="Full-sweep wall-clock budget (default 3600). On exhaustion the "
              "sweep clean-stops at a batch boundary, finalizes only what it "
              "covered, releases the lease, and exits RED (1) — a visible "
-             "failure instead of a silent timeout-minutes `cancelled` kill.",
+             "failure instead of a silent timeout-minutes `cancelled` kill. "
+             f"Clamped to {int(_MAX_BUDGET_SECONDS)}s: the workflow's "
+             "timeout-minutes backstop is sized for that ceiling, and a "
+             "larger budget would let the runner SIGKILL the job before the "
+             "clean-stop fires (raising both requires editing the yml).",
     )
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
@@ -811,7 +847,15 @@ def main() -> int:
             attached = _attach_stragglers(conn)
             LOG.info("RECOMPUTE stragglers attached=%d", attached)
 
-            deadline = started_at + args.max_seconds
+            budget = min(args.max_seconds, _MAX_BUDGET_SECONDS)
+            if budget < args.max_seconds:
+                LOG.warning(
+                    "RECOMPUTE --max-seconds %.0f clamped to %.0f — the "
+                    "workflow's timeout-minutes backstop is sized for this "
+                    "ceiling; raise both together in the yml",
+                    args.max_seconds, budget,
+                )
+            deadline = started_at + budget
             max_id = _max_property_id(conn)
             total_batches = -(-max_id // args.batch_size) if max_id else 0
             batches = 0
@@ -847,6 +891,14 @@ def main() -> int:
                 # for the next incremental pass.
                 with conn.cursor() as cur:
                     cur.execute(_CLEAR_DIRTY_SQL, {"cutoff": cutoff})
+                # Completion stamp — the health check's O(1) liveness signal.
+                # Complete walks only: an incomplete sweep leaving the stamp
+                # stale IS the alarm condition.
+                with conn.cursor() as cur:
+                    cur.execute(_STAMP_SWEEP_COMPLETE_SQL, {
+                        "max_id": max_id, "batches": batches,
+                        "elapsed_s": round(time.monotonic() - started_at, 1),
+                    })
             else:
                 # Only ids < incomplete_at were recomputed — clear their dirt
                 # only, and skip _reconcile_childless (next complete sweep runs
@@ -869,9 +921,11 @@ def main() -> int:
         # the `property_maintenance` health check tracks that staleness.
         LOG.error(
             "RECOMPUTE budget exhausted after %.0fs: swept ids<%d of %d "
-            "(%d/%d batches); exiting RED — raise --max-seconds / "
-            "timeout-minutes or investigate per-batch cost",
+            "(%d/%d batches); exiting RED — investigate per-batch cost first "
+            "(see the progress logs); raising the budget past %.0fs requires "
+            "editing BOTH --max-seconds and the workflow's timeout-minutes",
             elapsed, incomplete_at, max_id, batches, total_batches,
+            _MAX_BUDGET_SECONDS,
         )
         return 1
     LOG.info(

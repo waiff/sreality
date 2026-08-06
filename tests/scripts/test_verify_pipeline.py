@@ -105,39 +105,52 @@ def test_worker_liveness_fails_only_when_stale() -> None:
 
 
 def test_property_maintenance_healthy_day_is_ok() -> None:
-    """~25h oldest stamp just before the next daily sweep is the healthy
-    steady state, not a warning; empty axes (None) never trip anything."""
+    """~24-25h sweep age just before the next daily sweep is the healthy
+    steady state, not a warning; an empty dirty queue (None) trips nothing."""
     from scripts.verify_pipeline import _status_for_property_maintenance
 
     t = DEFAULT_THRESHOLDS
-    assert _status_for_property_maintenance(25.0, 20.0, 0.1, t) == ("ok", [])
-    assert _status_for_property_maintenance(None, None, None, t) == ("ok", [])
+    assert _status_for_property_maintenance(24.5, 0.1, t) == ("ok", [])
+    assert _status_for_property_maintenance(2.0, None, t) == ("ok", [])
+
+
+def test_property_maintenance_missing_stamp_warns_not_fails() -> None:
+    """No stamp on record = the state between deploying this check and the
+    first complete sweep. Permanently red would train the operator to ignore
+    the check; silently green would hide a sweep that has never completed."""
+    from scripts.verify_pipeline import _status_for_property_maintenance
+
+    status, offenders = _status_for_property_maintenance(None, 0.1, DEFAULT_THRESHOLDS)
+    assert status == "warn"
+    assert any("no complete-sweep stamp" in o for o in offenders)
 
 
 def test_property_maintenance_worst_axis_wins() -> None:
     from scripts.verify_pipeline import _status_for_property_maintenance
 
     t = DEFAULT_THRESHOLDS
-    # One warn axis → warn; adding a fail axis anywhere → fail overall.
-    status, offenders = _status_for_property_maintenance(31.0, None, None, t)
-    assert status == "warn" and "oldest stats stamp" in offenders[0]
-    status, offenders = _status_for_property_maintenance(31.0, None, 4.0, t)
+    # Warn axis alone → warn; a fail axis anywhere → fail overall.
+    status, offenders = _status_for_property_maintenance(27.0, None, t)
+    assert status == "warn" and "last complete sweep" in offenders[0]
+    status, offenders = _status_for_property_maintenance(27.0, 4.0, t)
     assert status == "fail"
     assert any("dirty-queue" in o for o in offenders)
     # The 2026-08-06 incident shape: sweep dead for days + frozen dirt.
-    status, offenders = _status_for_property_maintenance(49.0, 55.0, 2.5, t)
-    assert status == "fail" and len(offenders) == 3
+    status, offenders = _status_for_property_maintenance(49.0, 2.5, t)
+    assert status == "fail" and len(offenders) == 2
 
 
-def test_property_maintenance_sql_scopes_to_live_children() -> None:
-    """The staleness axes must exclude merged_away/childless rows — they are
-    structurally never restamped (batch UPDATE joins through listings), and
-    counting them makes the check permanently red (~74% of the naive numbers
-    in the 2026-08-06 incident were exactly that)."""
+def test_property_maintenance_sql_is_o1() -> None:
+    """The check runs in the hourly acute lane (job timeout 5 min): it must
+    read the completion stamp + the tiny dirty queue, never scan `properties`
+    — the per-row staleness variant measured ~3.5 min live and would have
+    killed the whole lane's rows and alerts each hour."""
     from scripts.verify_pipeline import _PROPERTY_MAINTENANCE_SQL as sql
 
-    assert sql.count("p.status = 'active'") == 2
-    assert sql.count("exists (select 1 from listings l where l.property_id = p.id)") == 2
+    assert "property_sweep_last_complete" in sql
+    assert "dirty_properties" in sql
+    assert "from properties" not in sql.lower()
+    assert "listings" not in sql.lower()
 
 
 # --- thresholds ------------------------------------------------------------
