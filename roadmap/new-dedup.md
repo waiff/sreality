@@ -53,10 +53,12 @@ W1 (shared prerequisites + labeling program):
       parallel session.
 - [x] RunPod client (`scripts/runpod_client.py`, #972/#975/#977) — launch/poll/terminate an
       on-demand pod, live cheapest-GPU catalog lookup, capacity fallback. Guaranteed teardown
-      verified across 3 real live dispatches (zero cost each time).
-- [ ] RunPod end-to-end proof — blocked on the operator adding funds to the RunPod account
-      balance (a payment method alone isn't a balance); re-dispatch
-      `new_dedup_runpod_smoke_test.yml` once funded.
+      verified across 4 real live dispatches (3 zero-cost, 1 real ~1.7¢ pod rental).
+- [x] RunPod end-to-end proof — a real pod (`g39f02wj642her`, RTX 3070) launched, billed, and
+      was cleanly torn down. Pod status/logs turned out unreliable for on-demand Pods (design
+      note left for Wave 5, which should have its job write results to Postgres/R2 instead of
+      relying on either) — not a blocker for W1's actual goal, which was proving the launch→
+      bill→terminate pipeline itself works.
 
 Waves W2-W8 (candidate selection through production wiring) are not started; see PROGRAM.md.
 
