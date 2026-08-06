@@ -53,18 +53,18 @@ from api.estimation_runs import (
     update_scenario,
 )
 from api import notifications as nf_module
+from api.labeling import router as labeling_router
 from api.portal_lookup import lookup_portal_listings
+from api.property_merge import router as property_merge_router
 from api.routes.admin import router as admin_router
 from api.routes.billing import router as billing_router
 from api.routes.resend_webhook import router as resend_webhook_router
 from api.routes.unsubscribe import router as unsubscribe_router
 from api.routes.brokers import router as brokers_router
 from api.routes.broker_review import router as broker_review_router
-from api.routes.dedup import router as dedup_router
 from api.routes.outreach import router as outreach_router
 from api.routes.filter_presets import router as filter_presets_router
 from api.routes.images import router as images_router
-from api.routes.location_audit import router as location_audit_router
 from api.routes.notifications import router as notifications_router
 from scraper import image_storage
 from scraper.db import sweep_stuck_scrape_runs
@@ -237,12 +237,14 @@ app.include_router(unsubscribe_router)
 # /notifications/* (Watchdog feed + subscription CRUD) goes through
 # the standard bearer gate — operator content, not configuration.
 app.include_router(notifications_router)
-# /dedup/* (cross-source merge review: list candidates, merge/dismiss/unmerge)
-# — mutating operator actions, admin-gated (require_admin).
-app.include_router(dedup_router)
-# /location-audit/* (read-only per-listing address/geo/coord field inventory +
-# acquisition provenance + raw_json viewer) — admin-gated (require_admin).
-app.include_router(location_audit_router)
+# /properties/merge|merges|merged|assets/* (merge MECHANICS: collapse an operator-
+# chosen set, the merge ledger, unmerge, the over-merge audit browse, asset links)
+# — mutating operator actions, admin-gated (require_admin). Mounted before the
+# /properties/{property_id}/... routes below; none of those can shadow these.
+app.include_router(property_merge_router)
+# /labeling/* (operator image labels + annotations: training examples, border
+# cases, tag annotations, image-pair notes) — admin-gated (require_admin).
+app.include_router(labeling_router)
 # /brokers/* (broker intelligence reads: leaderboard, detail, listings, contacts)
 # — standard bearer gate; contacts are PII not exposed by the anon public views.
 app.include_router(brokers_router)

@@ -1,7 +1,7 @@
 # Real-time scrapers — the dual-lane program
 
 Decision record for the operator-greenlit (2026-07-02) real-time program. It consciously
-supersedes `multi-portal-dedup.md`'s locked decision #3 ("a property's inactive flag lags by
+supersedes the since-deleted `multi-portal-dedup.md`'s locked decision #3 ("a property's inactive flag lags by
 at most one job interval … notifications are (at most) daily"): the north star is now
 minutes-grade for new listings (incl. images), delistings, cross-portal merges, and watchdog
 notifications, at 100% portal coverage with zero standing health issues.

@@ -1,13 +1,11 @@
-"""Tests for toolkit.batch_submit — the primitives shared by the dedup,
-condition, and enrichment batch-submit lanes (chunk-sizing, batch discount,
-and the transient-retry loop around provider.submit_batch).
+"""Tests for toolkit.batch_submit — the primitives shared by the condition and
+enrichment batch-submit lanes (chunk-sizing, batch discount, and the
+transient-retry loop around provider.submit_batch).
 
 should_flush's cap arithmetic is exercised end-to-end via each lane's own
 tests (tests/scripts/test_submit_condition_batch.py,
-tests/scripts/test_submit_enrich_batch.py, tests/test_submit_dedup_batch.py);
-this file adds direct unit coverage plus submit_chunk_with_retry, which had
-no dedicated tests before this module existed (only indirectly, via the now-
-removed dedup _Submitter._submit_with_retry).
+tests/scripts/test_submit_enrich_batch.py); this file adds direct unit
+coverage plus submit_chunk_with_retry.
 """
 
 from __future__ import annotations

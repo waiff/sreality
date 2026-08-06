@@ -1,6 +1,6 @@
 ---
 name: llm-pipelines
-description: Use when working on any LLM-backed path — the on-demand URL parser (source_dispatcher + per-source parsers), the cached analytical vision/text tools (summarize_listing, compare_listing_images, classify/compare for dedup, score_listing_condition, extract_building_units, read_floor_plan, discover_condition_markers, summarize_region_dispositions), the unified vision downscaling tiers, the forensic vision-model A/B harness (Anthropic + Gemini candidates), or the MF Cenová mapa nájemného reference-rent calc/ingest and gross-yield filter. Triggers on: parse_url, source_parsers, app_settings prompt/model, llm_calls, vision, max_edge downscale, reference_rent, rent map, mf_gross_yield, Gemini, provider, tool schema, additionalProperties, validate_vision_models.
+description: Use when working on any LLM-backed path — the on-demand URL parser (source_dispatcher + per-source parsers), the cached analytical vision/text tools (summarize_listing, compare_listing_images, score_listing_condition, extract_building_units, read_floor_plan, discover_condition_markers, summarize_region_dispositions, enrich_listing_description), the unified vision downscaling tiers, or the MF Cenová mapa nájemného reference-rent calc/ingest and gross-yield filter. Triggers on: parse_url, source_parsers, app_settings prompt/model, llm_calls, called_for, vision, max_edge downscale, reference_rent, rent map, mf_gross_yield, Gemini, provider, tool schema, additionalProperties.
 ---
 
 # LLM pipelines
@@ -73,33 +73,40 @@ exception per Toolkit rule #5. System prompts and model IDs are operator-tunable
   drives the chart. Cached per `(region_hash, day)` — invalidates by calendar day, not by
   snapshot. Powers the `summarize-1` annotated-charts feature; FACTS not opinions (toolkit
   rule #1) — it describes the distribution, never recommends a price.
+- `enrich_listing_description` (`toolkit/bazos_enrichment.py`) — pulls structured fields out of
+  a free-text portal description (bazos above all, whose ads carry no field grid). Driven by
+  `scripts/enrich_listing_descriptions.py` (sync) or the Batches lane
+  (`scripts/submit_enrich_batch.py` + `ingest_enrich_batch.py`).
 
 **Vision image downscaling is unified in `toolkit/vision_images.py` — one helper, two
 tiers.** Every image→LLM call routes R2 bytes through `image_block(r2, key, max_edge)`
 (download → Pillow downscale → base64) rather than hand-rolling base64 per call. Two
-semantic constants pick the tier: `COMPARISON_MAX_EDGE = 768` for photo comparison /
-classification (`classify_listing_images`, `compare_listings_visually`,
-`compare_listing_images`) — sub-megapixel is ample and, crucially, *below* Anthropic's
-~1.15 MP resize cap, so it actually cuts vision tokens to ~⅓ (the cost lever); and
-`DOCUMENT_MAX_EDGE = 1568` for reads where fine text/markers matter (site-plan compare,
-condition scoring/markers, building-extraction listing photos) — that *is* Anthropic's own
+semantic constants pick the tier: `COMPARISON_MAX_EDGE = 768` (also `DEFAULT_MAX_EDGE`) for
+photo comparison — today `compare_listing_images` — where sub-megapixel is ample and,
+crucially, *below* Anthropic's ~1.15 MP resize cap, so it actually cuts vision tokens to ~⅓
+(the cost lever); and `DOCUMENT_MAX_EDGE = 1568` for reads where fine text/markers matter
+(condition scoring/markers, building-extraction listing photos) — that *is* Anthropic's own
 cap, so the model sees the same pixels it would have anyway (quality-neutral; just less
 upload + no 200k prompt-assembly blowups). Anthropic bills tokens on the post-resize size,
 so anything ≥ the cap costs the *same* tokens — the saving only appears below it. **Operator
 attachments (`read_floor_plan`, building-extraction custom attachments) are deliberately
 NOT routed through this** — they carry arbitrary mime (PDF/PNG line-art) where the JPEG
 re-encode would corrupt PDFs and degrade crisp text; they keep their full-fidelity base64
-path. The forensic `compare_listings_visually` is the one call whose verdict auto-merges, so
-its tier is gated: `scripts/validate_vision_models.py` (workflow
-`validate_vision_models.yml`) A/Bs a candidate `(model, max_edge)` against every historical
-`High` verdict and only a green run authorizes flipping its model to Haiku / its edge to 768.
-The harness is no longer Anthropic-only — it can A/B a Gemini candidate model too (PR #754),
-routed through the same `additionalProperties`/pricing quirks documented in the `toolkit-api`
-skill's provider rule. It's the **sole admissible evidence** for any model flip, so a harness
-bug is a correctness bug: past ones include a wrong-model room-image lookup (PR #727) and
-sampling delisted pairs that always returned `INCONCLUSIVE` (PR #726) — verify the sampling
-+ image-fetch logic, not just the verdict comparison, when touching this script. It also has
-a 90-minute per-run timeout that cancels stale dispatches (PR #731).
+path. `tests/test_vision_downscale_tiers.py` pins which builder passes which tier — keep a
+new vision caller in that test rather than picking an edge by hand.
+
+**The dedup vision tools are gone.** `classify_listing_images`, `compare_listings_visually`,
+`compare_listing_site_plans`, `compare_listing_floor_plans` and the `validate_vision_models`
+A/B harness were deleted wholesale with the legacy dedup decision engine (2026-08 cutoff —
+architectural rule #15, `docs/design/new-dedup/CUTOFF.md`), along with their `app_settings`
+prompt/model keys and their `llm_calls.called_for` values. Nothing routes vision at dedup any
+more; the `CalledFor` literal in `api/llm_client.py` is the live list. The rebuilt engine's
+vision level (manual batches, model routing, its own prompt contract) is Wave 6 of
+`docs/design/new-dedup/PROGRAM.md` — build it there, don't restore the old tools. Their paid
+verdict caches (`listing_visual_matches`, `listing_site_plan_matches`,
+`listing_floor_plan_matches`, `image_room_classifications`) are kept **frozen**: no writes, and
+the new design never reads them. `listing_image_comparisons` is unrelated — it is the
+agent-facing `compare_listing_images` cache and stays live.
 
 ## Secondary rent reference (MF Cenová mapa nájemného)
 

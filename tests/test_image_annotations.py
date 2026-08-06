@@ -1,6 +1,6 @@
-"""api.property_dedup image-annotation + phash-pair-note writes (migration 308) and
-the training-example writes (migration 309): canonical image-pair ordering, note
-cleaning, delete. Hermetic fake conn — no DB."""
+"""api.labeling image-annotation + image-pair-note writes (migration 308) and the
+training-example / border-case writes (migrations 309-310): canonical image-pair
+ordering, label normalization, note cleaning, delete. Hermetic fake conn — no DB."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-import api.property_dedup as dedup
+import api.labeling as labeling
 
 
 class _Cur:
@@ -76,7 +76,7 @@ class _FakeConn:
 
 def test_set_image_annotation_upserts_and_cleans_note() -> None:
     conn = _FakeConn()
-    out = dedup.set_image_annotation(
+    out = labeling.set_image_annotation(
         conn, image_id=42, tag_flagged=True, note="  wrong room  ",
     )
     _, params = conn.executed[0]
@@ -90,26 +90,26 @@ def test_set_image_annotation_upserts_and_cleans_note() -> None:
 
 def test_set_image_annotation_blank_note_becomes_null() -> None:
     conn = _FakeConn()
-    dedup.set_image_annotation(conn, image_id=7, note="   ")
+    labeling.set_image_annotation(conn, image_id=7, note="   ")
     _, params = conn.executed[0]
     assert params[3] is None
 
 
 def test_delete_image_annotation_reports_deleted() -> None:
     conn = _FakeConn(delete_count=1)
-    out = dedup.delete_image_annotation(conn, image_id=42)
+    out = labeling.delete_image_annotation(conn, image_id=42)
     _, params = conn.executed[0]
     assert params == (42,)
     assert out["data"]["deleted"] is True
 
     conn2 = _FakeConn(delete_count=0)
-    out2 = dedup.delete_image_annotation(conn2, image_id=1)
+    out2 = labeling.delete_image_annotation(conn2, image_id=1)
     assert out2["data"]["deleted"] is False
 
 
 def test_set_phash_note_canonicalises_pair_and_cleans_note() -> None:
     conn = _FakeConn()
-    out = dedup.set_phash_note(conn, image_id_a=200, image_id_b=100, note="  same photo  ")
+    out = labeling.set_phash_note(conn, image_id_a=200, image_id_b=100, note="  same photo  ")
     _, params = conn.executed[0]
     assert params[0] == 100 and params[1] == 200  # low, high image id
     assert params[2] == "same photo"
@@ -119,12 +119,12 @@ def test_set_phash_note_canonicalises_pair_and_cleans_note() -> None:
 
 def test_set_phash_note_rejects_identical_pair() -> None:
     with pytest.raises(ValueError):
-        dedup.set_phash_note(_FakeConn(), image_id_a=7, image_id_b=7, note="x")
+        labeling.set_phash_note(_FakeConn(), image_id_a=7, image_id_b=7, note="x")
 
 
 def test_delete_phash_note_canonicalises_and_reports() -> None:
     conn = _FakeConn(delete_count=1)
-    out = dedup.delete_phash_note(conn, image_id_a=200, image_id_b=100)
+    out = labeling.delete_phash_note(conn, image_id_a=200, image_id_b=100)
     _, params = conn.executed[0]
     assert params == (100, 200)
     assert out["data"]["deleted"] is True
@@ -132,7 +132,7 @@ def test_delete_phash_note_canonicalises_and_reports() -> None:
 
 def test_set_training_example_upserts_trimmed_label() -> None:
     conn = _FakeConn()
-    out = dedup.set_training_example(conn, image_id=42, label="  kitchen  ")
+    out = labeling.set_training_example(conn, image_id=42, label="  kitchen  ")
     _, params = conn.executed[0]
     assert params == (42, "kitchen", "operator")
     assert out["data"] == {"image_id": 42, "label": "kitchen", "updated_at": "2026-07-17T00:00:00Z"}
@@ -142,7 +142,7 @@ def test_set_training_example_collapses_internal_whitespace() -> None:
     # Write-boundary normalization: "site  plan\n" and "site plan" must land as the
     # SAME stored label, or they'd silently fragment one training class into two.
     conn = _FakeConn()
-    out = dedup.set_training_example(conn, image_id=42, label="site   plan\n")
+    out = labeling.set_training_example(conn, image_id=42, label="site   plan\n")
     _, params = conn.executed[0]
     assert params == (42, "site plan", "operator")
     assert out["data"]["label"] == "site plan"
@@ -150,12 +150,12 @@ def test_set_training_example_collapses_internal_whitespace() -> None:
 
 def test_set_training_example_rejects_blank_label() -> None:
     with pytest.raises(ValueError):
-        dedup.set_training_example(_FakeConn(), image_id=42, label="   ")
+        labeling.set_training_example(_FakeConn(), image_id=42, label="   ")
 
 
 def test_bulk_set_training_examples_upserts_every_id_under_one_label() -> None:
     conn = _FakeConn()
-    out = dedup.bulk_set_training_examples(conn, image_ids=[7, 8, 9], label="  kitchen ")
+    out = labeling.bulk_set_training_examples(conn, image_ids=[7, 8, 9], label="  kitchen ")
     _, params = conn.executed[0]
     assert params == ("kitchen", "operator", [7, 8, 9])
     assert out["data"]["updated"] == 3
@@ -166,7 +166,7 @@ def test_bulk_set_training_examples_dedupes_ids() -> None:
     # ON CONFLICT DO UPDATE cannot affect the same row twice in one statement — a
     # repeated id would abort the ENTIRE batch, so ids are deduped before the write.
     conn = _FakeConn()
-    out = dedup.bulk_set_training_examples(conn, image_ids=[7, 8, 7, 8, 9], label="kitchen")
+    out = labeling.bulk_set_training_examples(conn, image_ids=[7, 8, 7, 8, 9], label="kitchen")
     _, params = conn.executed[0]
     assert params[2] == [7, 8, 9]
     assert out["data"]["image_ids"] == [7, 8, 9]
@@ -175,33 +175,33 @@ def test_bulk_set_training_examples_dedupes_ids() -> None:
 def test_training_label_length_is_capped_at_the_tables_check() -> None:
     # The table CHECKs char_length(label) BETWEEN 1 AND 100 — caught here so it's a
     # 422, and so one over-long label can't abort a whole batch.
-    long_label = "x" * (dedup.TRAINING_LABEL_MAX_CHARS + 1)
+    long_label = "x" * (labeling.TRAINING_LABEL_MAX_CHARS + 1)
     with pytest.raises(ValueError):
-        dedup.set_training_example(_FakeConn(), image_id=42, label=long_label)
+        labeling.set_training_example(_FakeConn(), image_id=42, label=long_label)
     with pytest.raises(ValueError):
-        dedup.bulk_set_training_examples(_FakeConn(), image_ids=[7], label=long_label)
+        labeling.bulk_set_training_examples(_FakeConn(), image_ids=[7], label=long_label)
     # Exactly at the cap still goes through.
     conn = _FakeConn()
-    dedup.set_training_example(conn, image_id=42, label="x" * dedup.TRAINING_LABEL_MAX_CHARS)
+    labeling.set_training_example(conn, image_id=42, label="x" * labeling.TRAINING_LABEL_MAX_CHARS)
     assert conn.executed
 
 
 def test_bulk_set_training_examples_rejects_blank_label_and_empty_selection() -> None:
     with pytest.raises(ValueError):
-        dedup.bulk_set_training_examples(_FakeConn(), image_ids=[7], label="  ")
+        labeling.bulk_set_training_examples(_FakeConn(), image_ids=[7], label="  ")
     with pytest.raises(ValueError):
-        dedup.bulk_set_training_examples(_FakeConn(), image_ids=[], label="kitchen")
+        labeling.bulk_set_training_examples(_FakeConn(), image_ids=[], label="kitchen")
 
 
 def test_bulk_set_training_examples_caps_batch_size() -> None:
-    over = list(range(dedup.BULK_TRAINING_LABEL_MAX + 1))
+    over = list(range(labeling.BULK_TRAINING_LABEL_MAX + 1))
     with pytest.raises(ValueError):
-        dedup.bulk_set_training_examples(_FakeConn(), image_ids=over, label="kitchen")
+        labeling.bulk_set_training_examples(_FakeConn(), image_ids=over, label="kitchen")
 
 
 def test_delete_training_label_removes_every_row_under_the_normalized_label() -> None:
     conn = _FakeConn(delete_count=87)
-    out = dedup.delete_training_label(conn, label="  půdorys ")
+    out = labeling.delete_training_label(conn, label="  půdorys ")
     _, params = conn.executed[0]
     assert params == ("půdorys",)
     assert out["data"] == {"deleted": 87, "label": "půdorys"}
@@ -209,24 +209,24 @@ def test_delete_training_label_removes_every_row_under_the_normalized_label() ->
 
 def test_delete_training_label_rejects_blank() -> None:
     with pytest.raises(ValueError):
-        dedup.delete_training_label(_FakeConn(), label="   ")
+        labeling.delete_training_label(_FakeConn(), label="   ")
 
 
 def test_delete_training_example_reports_deleted() -> None:
     conn = _FakeConn(delete_count=1)
-    out = dedup.delete_training_example(conn, image_id=42)
+    out = labeling.delete_training_example(conn, image_id=42)
     _, params = conn.executed[0]
     assert params == (42,)
     assert out["data"]["deleted"] is True
 
     conn2 = _FakeConn(delete_count=0)
-    out2 = dedup.delete_training_example(conn2, image_id=1)
+    out2 = labeling.delete_training_example(conn2, image_id=1)
     assert out2["data"]["deleted"] is False
 
 
 def test_set_border_case_inserts_and_returns_the_new_row() -> None:
     conn = _FakeConn()
-    out = dedup.set_border_case(conn, image_id=42)
+    out = labeling.set_border_case(conn, image_id=42)
     sql, params = conn.executed[0]
     assert sql.startswith("INSERT INTO image_border_cases")
     assert params == (42, "operator")
@@ -237,18 +237,18 @@ def test_set_border_case_is_idempotent_on_a_repeat_flag() -> None:
     # Clicking the button twice for the same image must not error or duplicate —
     # it falls back to reading back the pre-existing row's timestamp.
     conn = _FakeConn(border_case_already_exists=True)
-    out = dedup.set_border_case(conn, image_id=42)
+    out = labeling.set_border_case(conn, image_id=42)
     assert len(conn.executed) == 2  # the no-op INSERT, then the fallback SELECT
     assert out["data"] == {"image_id": 42, "created_at": "2026-07-16T00:00:00Z"}
 
 
 def test_delete_border_case_reports_deleted() -> None:
     conn = _FakeConn(delete_count=1)
-    out = dedup.delete_border_case(conn, image_id=42)
+    out = labeling.delete_border_case(conn, image_id=42)
     _, params = conn.executed[0]
     assert params == (42,)
     assert out["data"]["deleted"] is True
 
     conn2 = _FakeConn(delete_count=0)
-    out2 = dedup.delete_border_case(conn2, image_id=1)
+    out2 = labeling.delete_border_case(conn2, image_id=1)
     assert out2["data"]["deleted"] is False

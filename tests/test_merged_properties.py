@@ -1,5 +1,5 @@
-"""Tests for the /dedup/merged-properties audit browse:
-api.property_dedup.list_merged_properties + its WHERE builder
+"""Tests for the GET /properties/merged over-merge audit browse:
+api.property_merge.list_merged_properties + its WHERE builder
 (_merged_property_filters). Hermetic: a scripted fake conn, no DB.
 """
 
@@ -7,8 +7,8 @@ from __future__ import annotations
 
 from typing import Any
 
-import api.property_dedup as dedup
-from api.property_dedup import _merged_property_filters
+import api.property_merge as pm
+from api.property_merge import _merged_property_filters
 
 
 # --- _merged_property_filters (pure) ---------------------------------------
@@ -36,7 +36,7 @@ def test_filters_max_binds_upper_bound() -> None:
 
 def test_filters_category_is_plain_equality_not_either_side() -> None:
     # A merged property carries ONE category_main (the survivor's) — plain
-    # equality, unlike a candidate PAIR which matches on EITHER side (rule #15).
+    # equality, never an either-side OR.
     where, params = _merged_property_filters(
         min_listings=2, max_listings=None, category_main="byt",
     )
@@ -114,7 +114,7 @@ def test_total_is_real_count_not_page_size() -> None:
             _merged_row(2, 5, active=5, sources=["idnes", "remax", "sreality"]),
         ],
     )
-    out = dedup.list_merged_properties(conn, min_listings=5, max_listings=10, limit=2)
+    out = pm.list_merged_properties(conn, min_listings=5, max_listings=10, limit=2)
     assert out["total"] == 137
     assert out["returned"] == 2
     assert len(out["data"]) == 2
@@ -124,7 +124,7 @@ def test_row_shape_counts_sources_and_floats() -> None:
     conn = _FakeConn(total=1, page_rows=[
         _merged_row(7, 6, active=4, sources=["bazos", "sreality"]),
     ])
-    row = dedup.list_merged_properties(conn)["data"][0]
+    row = pm.list_merged_properties(conn)["data"][0]
     assert row["property_id"] == 7
     assert row["source_count"] == 6
     assert row["active_count"] == 4
@@ -138,14 +138,14 @@ def test_row_shape_counts_sources_and_floats() -> None:
 def test_null_sources_becomes_empty_list() -> None:
     # array_agg over zero children is NULL — must surface as [] not None.
     conn = _FakeConn(total=1, page_rows=[_merged_row(3, 2, active=2, sources=None)])
-    assert dedup.list_merged_properties(conn)["data"][0]["sources"] == []
+    assert pm.list_merged_properties(conn)["data"][0]["sources"] == []
 
 
 def test_count_and_page_share_the_same_filter() -> None:
-    # Regression guard (mirrors list_candidates): the COUNT and the page SELECT
-    # must carry the identical WHERE, or the page total drifts from the rows.
+    # Regression guard: the COUNT and the page SELECT must carry the identical
+    # WHERE, or the page total drifts from the rows.
     conn = _FakeConn(total=3, page_rows=[_merged_row(1, 8, active=8, sources=["sreality"])])
-    dedup.list_merged_properties(
+    pm.list_merged_properties(
         conn, min_listings=5, max_listings=10, category_main="byt",
     )
     sqls = [s for s, _ in conn.executed]
@@ -163,7 +163,7 @@ def test_count_and_page_share_the_same_filter() -> None:
 
 def test_page_orders_biggest_first_and_rolls_up_children() -> None:
     conn = _FakeConn(total=1, page_rows=[_merged_row(1, 9, active=9, sources=["sreality"])])
-    dedup.list_merged_properties(conn)
+    pm.list_merged_properties(conn)
     page_sql = next(s for s in (x for x, _ in conn.executed)
                     if "ORDER BY p.source_count DESC" in s)
     assert "ORDER BY p.source_count DESC, p.id DESC" in page_sql

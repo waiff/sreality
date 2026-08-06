@@ -5,8 +5,8 @@ Per carrier column, in this order:
   2. ADD FOREIGN KEY (new) REFERENCES listings(id) NOT VALID — but ONLY where the
      legacy column already has an FK to listings. Which carriers those are is read
      from pg_constraint rather than hardcoded, so this cannot drift from the real
-     graph: Class B ledgers (dedup_pair_audit, property_merge_events, the estimation
-     family) deliberately have no FK, and they simply never grow one here.
+     graph: Class B ledgers (property_merge_events, the estimation family)
+     deliberately have no FK, and they simply never grow one here.
   3. VALIDATE CONSTRAINT — the full-table check, non-blocking.
 
 Why a script and not a plain migration: steps 1 and 3 must not run inside a

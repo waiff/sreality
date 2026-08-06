@@ -7,16 +7,16 @@ constraints (nothing here touches those):
      keyed on the surrogate column(s) instead. Only the closed set of carriers in
      UNIQUE_GUARDS below get one — declared explicitly rather than derived from
      pg_constraint, because "should this table gain a NEW uniqueness invariant" is a
-     design decision (e.g. dedup_pair_audit deliberately has none, ever), not a fact
+     design decision (some ledgers deliberately have none, ever), not a fact
      mechanically readable off the legacy schema.
 
      Pair caches key on `(LEAST(a,b), GREATEST(a,b)[, discriminators])`: unlike
      sreality_id, the surrogate has no canonical a<b order, and physically
      re-canonicalizing the pair would desynchronise side-coupled payloads
-     (visual_match.py / image_similarity.py store side-ordered image lists) — see
+     (image_similarity.py stores side-ordered image lists) — see
      docs/design/listing-identity-r2-pk-swap-runbook.md §0.5. Postgres's
-     `ADD CONSTRAINT ... UNIQUE USING INDEX` refuses expression indexes, so these four
-     stay plain unique indexes (never promoted to a named constraint) — that's fine,
+     `ADD CONSTRAINT ... UNIQUE USING INDEX` refuses expression indexes, so this one
+     stays a plain unique index (never promoted to a named constraint) — that's fine,
      enforcement and ON CONFLICT arbiter inference both work off the index alone.
 
   2. A validated `CHECK (col IS NOT NULL)` (the mig-313 trick — same integrity as
@@ -90,23 +90,10 @@ UNIQUE_GUARDS: list[dict[str, Any]] = [
     {"table": "estimation_cohort_entries",
      "name": "estimation_cohort_entries_run_listing_id_key"[:63],
      "cols_sql": "(estimation_run_id, listing_id)", "constraint": True},
-    # Pair caches: order-independent, index-only (expression index; see docstring).
+    # Pair cache: order-independent, index-only (expression index; see docstring).
     {"table": "listing_image_comparisons",
      "name": "listing_image_comparisons_listing_id_pair_key"[:63],
      "cols_sql": "(LEAST(listing_id_a, listing_id_b), GREATEST(listing_id_a, listing_id_b))",
-     "constraint": False},
-    {"table": "listing_visual_matches",
-     "name": "listing_visual_matches_listing_id_pair_key"[:63],
-     "cols_sql": ("(LEAST(listing_id_a, listing_id_b), GREATEST(listing_id_a, listing_id_b), "
-                  "room_type, model)"),
-     "constraint": False},
-    {"table": "listing_floor_plan_matches",
-     "name": "listing_floor_plan_matches_listing_id_pair_key"[:63],
-     "cols_sql": "(LEAST(listing_id_a, listing_id_b), GREATEST(listing_id_a, listing_id_b), model)",
-     "constraint": False},
-    {"table": "listing_site_plan_matches",
-     "name": "listing_site_plan_matches_listing_id_pair_key"[:63],
-     "cols_sql": "(LEAST(listing_id_a, listing_id_b), GREATEST(listing_id_a, listing_id_b), model)",
      "constraint": False},
 ]
 

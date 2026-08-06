@@ -83,12 +83,6 @@ class UpdateClipRegionsIn(BaseModel):
     priority_region_ids: list[int]
 
 
-class UpdateTagPriorityIn(BaseModel):
-    # The largest family has 9 tags; cap well above that (defense-in-depth — normalize_priority
-    # drops anything unknown anyway, but reject an oversized payload before deserializing it).
-    order: list[str] = Field(default_factory=list, max_length=100)
-
-
 class CreatePlanIn(BaseModel):
     key: str = Field(pattern=r"^[a-z0-9_]{1,40}$")
     name: str = Field(min_length=1, max_length=80)
@@ -213,103 +207,6 @@ def put_app_setting(
     row = _fetch_app_setting(conn, key)
     assert row is not None
     return row
-
-
-# --- dedup settings registry ----------------------------------------------
-
-
-@router.get("/dedup-settings")
-def get_dedup_settings(
-    conn: Any = Depends(deps.get_db_conn),
-) -> dict[str, Any]:
-    """The dedup-engine knob registry + each knob's current value (its registry
-    default when never edited). One typed source of truth for the Settings panel."""
-    from toolkit.dedup_settings import REGISTRY
-
-    with conn.cursor() as cur:
-        cur.execute(
-            "SELECT key, value FROM app_settings WHERE key = ANY(%s)",
-            ([s.key for s in REGISTRY],),
-        )
-        stored = {row[0]: row[1] for row in cur.fetchall()}
-    return {
-        "data": [
-            {
-                "key": s.key, "kind": s.kind, "default": s.default,
-                "label": s.label, "group": s.group, "help": s.help,
-                "min": s.min, "max": s.max,
-                "value": stored.get(s.key, s.default),
-                "is_default": s.key not in stored,
-            }
-            for s in REGISTRY
-        ]
-    }
-
-
-@router.put("/dedup-settings/{key}")
-def put_dedup_setting(
-    key: str,
-    body: UpdateAppSettingIn,
-    conn: Any = Depends(deps.get_db_conn),
-) -> dict[str, Any]:
-    """Validate against the registry, then UPSERT — so editing a not-yet-stored
-    knob just creates its app_settings row. Only registered keys are writable."""
-    import json
-
-    from toolkit.dedup_settings import REGISTRY_BY_KEY, coerce
-
-    setting = REGISTRY_BY_KEY.get(key)
-    if setting is None:
-        raise HTTPException(status_code=404, detail=f"unknown dedup setting {key!r}")
-    try:
-        value = coerce(setting, body.value)
-    except (ValueError, TypeError) as exc:
-        raise HTTPException(status_code=400, detail=f"invalid value: {exc}") from exc
-    with conn.transaction(), conn.cursor() as cur:
-        cur.execute(
-            "INSERT INTO app_settings "
-            "  (key, value, description, updated_at, updated_by) "
-            "VALUES (%s, %s::jsonb, %s, now(), %s) "
-            "ON CONFLICT (key) DO UPDATE "
-            "  SET value = excluded.value, updated_at = now(), "
-            "      updated_by = excluded.updated_by",
-            (key, json.dumps(value), setting.label, "settings_ui"),
-        )
-    return {"key": key, "value": value, "is_default": False}
-
-
-# --- dedup tag-comparison priorities (per family) -------------------------
-
-@router.get("/dedup-tag-priorities")
-def get_dedup_tag_priorities(
-    conn: Any = Depends(deps.get_db_conn),
-) -> dict[str, Any]:
-    """Per-family comparison-tag order for the dedup visual layer: the current order, the
-    coded default (= the full valid tag set the operator may reorder), and an edited flag."""
-    from toolkit.dedup_priorities import priorities_view
-
-    return {"data": priorities_view(conn)}
-
-
-@router.put("/dedup-tag-priorities/{family}")
-def put_dedup_tag_priority(
-    family: str,
-    body: UpdateTagPriorityIn,
-    conn: Any = Depends(deps.get_db_conn),
-) -> dict[str, Any]:
-    """Persist one family's reordering (validated to its tag set + completed from the default,
-    so no room is ever silently dropped). Other families are untouched."""
-    from toolkit.dedup_priorities import set_family_priority
-
-    try:
-        order = set_family_priority(conn, family, body.order)
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    from toolkit.dedup_engine import default_priority_for_family
-
-    default = list(default_priority_for_family(family))
-    return {"family": family, "order": order, "default_order": default,
-            "is_default": order == default}
 
 
 # --- agent tool inventory -------------------------------------------------

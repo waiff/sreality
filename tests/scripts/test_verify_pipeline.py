@@ -12,85 +12,16 @@ from typing import Any
 
 from scripts.verify_pipeline import (
     DEFAULT_THRESHOLDS,
-    _status_for_candidates,
-    _status_for_cycle,
-    _status_for_dirty,
     _status_for_cron,
     _status_for_burn,
     _status_for_llm_errors,
     _status_for_llm_silence,
-    _status_for_merge_latency,
     _status_for_worker,
-    _status_for_street_debt,
-    _worst,
     load_thresholds,
     run_checks,
 )
 
 T = DEFAULT_THRESHOLDS
-
-
-# --- _worst ----------------------------------------------------------------
-
-
-def test_worst_precedence() -> None:
-    assert _worst(["ok", "warn", "fail"]) == "fail"
-    assert _worst(["ok", "warn"]) == "warn"
-    assert _worst(["ok", "ok"]) == "ok"
-    assert _worst([]) == "ok"
-
-
-# --- street_debt -----------------------------------------------------------
-
-
-def test_street_debt_status_bands() -> None:
-    assert _status_for_street_debt(0, T) == "ok"
-    assert _status_for_street_debt(int(T["street_debt_warn"]), T) == "ok"        # == warn: not > → ok
-    assert _status_for_street_debt(int(T["street_debt_warn"]) + 1, T) == "warn"
-    assert _status_for_street_debt(int(T["street_debt_fail"]), T) == "warn"      # == fail: not > → warn
-    assert _status_for_street_debt(int(T["street_debt_fail"]) + 1, T) == "fail"
-    # The measured incident count (39,376) sits between warn (30k) and fail (45k).
-    assert _status_for_street_debt(39_376, T) == "warn"
-
-
-# --- merge_latency ---------------------------------------------------------
-
-
-def test_merge_latency_status() -> None:
-    assert _status_for_merge_latency(None, T) == "ok"
-    assert _status_for_merge_latency(T["merge_p95_warn_hours"], T) == "ok"       # boundary: not >
-    assert _status_for_merge_latency(T["merge_p95_warn_hours"] + 0.1, T) == "warn"
-
-
-# --- cycle -----------------------------------------------------------------
-
-
-def test_cycle_no_row_or_no_progress_is_warn() -> None:
-    assert _status_for_cycle(has_row=False, updated_age_hours=None, thresholds=T) == "warn"
-    assert _status_for_cycle(has_row=True, updated_age_hours=None, thresholds=T) == "warn"
-
-
-def test_cycle_progressing_is_ok_even_if_never_completes() -> None:
-    # The street cycle takes ~2 weeks and never "completes" — a recently-advanced cursor is
-    # healthy, NOT a failure (the old age-based check was structurally always-red here).
-    assert _status_for_cycle(has_row=True, updated_age_hours=4.0, thresholds=T) == "ok"
-
-
-def test_cycle_stalled_cursor_fails() -> None:
-    stall = T["cycle_stall_fail_hours"]
-    assert _status_for_cycle(has_row=True, updated_age_hours=stall, thresholds=T) == "ok"
-    assert _status_for_cycle(has_row=True, updated_age_hours=stall + 0.1, thresholds=T) == "fail"
-
-
-# --- dirty / candidates ----------------------------------------------------
-
-
-def test_dirty_and_candidate_warn_bands() -> None:
-    assert _status_for_dirty(None, T) == "ok"
-    assert _status_for_dirty(T["dirty_age_p95_warn_hours"], T) == "ok"
-    assert _status_for_dirty(T["dirty_age_p95_warn_hours"] + 0.1, T) == "warn"
-    assert _status_for_candidates(None, T) == "ok"
-    assert _status_for_candidates(T["candidate_age_p95_warn_days"] + 0.1, T) == "warn"
 
 
 # --- llm_errors ------------------------------------------------------------
@@ -204,19 +135,19 @@ def test_thresholds_missing_row_is_all_defaults() -> None:
 
 
 def test_thresholds_partial_override_merges_over_defaults() -> None:
-    merged = load_thresholds(_ThresholdConn({"street_debt_fail": 99999}))
-    assert merged["street_debt_fail"] == 99999
-    assert merged["street_debt_warn"] == DEFAULT_THRESHOLDS["street_debt_warn"]
+    merged = load_thresholds(_ThresholdConn({"llm_spend_24h_fail_usd": 99999}))
+    assert merged["llm_spend_24h_fail_usd"] == 99999
+    assert merged["llm_spend_24h_warn_usd"] == DEFAULT_THRESHOLDS["llm_spend_24h_warn_usd"]
 
 
 def test_thresholds_json_string_is_parsed() -> None:
-    merged = load_thresholds(_ThresholdConn(json.dumps({"merge_p95_warn_hours": 6})))
-    assert merged["merge_p95_warn_hours"] == 6
+    merged = load_thresholds(_ThresholdConn(json.dumps({"llm_silence_fail_hours": 6})))
+    assert merged["llm_silence_fail_hours"] == 6
 
 
 def test_thresholds_ignores_non_numeric_values() -> None:
-    merged = load_thresholds(_ThresholdConn({"street_debt_fail": "lots"}))
-    assert merged["street_debt_fail"] == DEFAULT_THRESHOLDS["street_debt_fail"]
+    merged = load_thresholds(_ThresholdConn({"llm_spend_24h_fail_usd": "lots"}))
+    assert merged["llm_spend_24h_fail_usd"] == DEFAULT_THRESHOLDS["llm_spend_24h_fail_usd"]
 
 
 # --- run_checks isolation --------------------------------------------------
