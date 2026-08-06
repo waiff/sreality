@@ -113,15 +113,35 @@ describe('<NewDedupLabeling>', () => {
     );
   });
 
-  it('renders taxonomy rows with their confirmed/pending/dismissed counts', async () => {
+  it('renders the taxonomy bar chart sorted by confirmed count, most first', async () => {
+    vi.mocked(api.getNewDedupLabelingOverview).mockResolvedValue({
+      data: {
+        sample_size: 42,
+        labels: [
+          { id: 1, label: 'interier - kuchyne', family: 'interier', active: true,
+            created_at: 't', confirmed_count: 12, pending_count: 3, dismissed_count: 1 },
+          { id: 2, label: 'exterier - fasada', family: null, active: true,
+            created_at: 't', confirmed_count: 54, pending_count: 0, dismissed_count: 0 },
+          { id: 3, label: 'garaz', family: null, active: true,
+            created_at: 't', confirmed_count: 4, pending_count: 0, dismissed_count: 0 },
+        ],
+      },
+    });
     renderPage();
-    expect(await screen.findByRole('button', { name: 'interier - kuchyne' })).toBeInTheDocument();
-    expect(screen.getByText('✓ 12/150')).toBeInTheDocument();
-    expect(screen.getByText('? 3/300')).toBeInTheDocument();
-    expect(screen.getByText('✗ 1')).toBeInTheDocument();
+    const bars = await screen.findAllByRole(
+      'button', { name: /^(interier - kuchyne|exterier - fasada|garaz)$/ },
+    );
+    expect(bars.map((b) => b.textContent)).toEqual([
+      'exterier - fasada', 'interier - kuchyne', 'garaz',
+    ]);
+    // Value at the bar tip, and the pending annotation for the one label that has any.
+    expect(screen.getByText('54')).toBeInTheDocument();
+    expect(screen.getByText('12')).toBeInTheDocument();
+    expect(screen.getByText('4')).toBeInTheDocument();
+    expect(screen.getByText('· 3/300 pending')).toBeInTheDocument();
   });
 
-  it('adds a new taxonomy label', async () => {
+  it('opens the manage modal and adds a new taxonomy label', async () => {
     vi.mocked(api.addNewDedupTaxonomyLabel).mockResolvedValue({
       data: {
         id: 2, label: 'exterier - fasada', family: null, active: true, created_at: 't',
@@ -130,7 +150,8 @@ describe('<NewDedupLabeling>', () => {
     });
     renderPage();
     await screen.findByRole('button', { name: 'interier - kuchyne' });
-    const input = screen.getByPlaceholderText(/new label/);
+    fireEvent.click(screen.getByText('Modify labels'));
+    const input = await screen.findByPlaceholderText(/new label/);
     fireEvent.change(input, { target: { value: 'exterier - fasada' } });
     fireEvent.click(screen.getByText('Add label'));
     await waitFor(() =>
@@ -138,13 +159,14 @@ describe('<NewDedupLabeling>', () => {
     );
   });
 
-  it('renames a taxonomy label', async () => {
+  it('renames a taxonomy label from the manage modal', async () => {
     vi.mocked(api.renameNewDedupTaxonomyLabel).mockResolvedValue({
       data: { ...OVERVIEW.labels[0], label: 'interier - kuchyn nova' },
     });
     renderPage();
     await screen.findByRole('button', { name: 'interier - kuchyne' });
-    fireEvent.click(screen.getByText('rename'));
+    fireEvent.click(screen.getByText('Modify labels'));
+    fireEvent.click(await screen.findByText('rename'));
     const input = screen.getByDisplayValue('interier - kuchyne');
     fireEvent.change(input, { target: { value: 'interier - kuchyn nova' } });
     fireEvent.click(screen.getByText('Save'));
@@ -153,19 +175,20 @@ describe('<NewDedupLabeling>', () => {
     );
   });
 
-  it('removes a taxonomy label after the two-step confirm', async () => {
+  it('removes a taxonomy label from the manage modal after the two-step confirm', async () => {
     vi.mocked(api.removeNewDedupTaxonomyLabel).mockResolvedValue({
       data: { label: 'interier - kuchyne', deleted_training_examples: 12, deleted_proposals: 4 },
     });
     renderPage();
     await screen.findByRole('button', { name: 'interier - kuchyne' });
-    fireEvent.click(screen.getByLabelText('Remove interier - kuchyne'));
+    fireEvent.click(screen.getByText('Modify labels'));
+    fireEvent.click(await screen.findByLabelText('Remove interier - kuchyne'));
     expect(api.removeNewDedupTaxonomyLabel).not.toHaveBeenCalled();
     fireEvent.click(screen.getByText('Remove'));
     await waitFor(() => expect(api.removeNewDedupTaxonomyLabel).toHaveBeenCalledWith(1));
   });
 
-  it('renaming an unrelated label never hijacks the active proposals filter', async () => {
+  it('renaming an unrelated label in the manage modal never hijacks the active proposals filter', async () => {
     const TWO_LABELS = {
       sample_size: 42,
       labels: [
@@ -182,7 +205,7 @@ describe('<NewDedupLabeling>', () => {
       data: { ...TWO_LABELS.labels[1], label: 'koupelna-v2' },
     });
     renderPage();
-    // Filter proposals to "interier - kuchyne" first.
+    // Filter proposals to "interier - kuchyne" via the bar chart first.
     fireEvent.click(await screen.findByRole('button', { name: 'interier - kuchyne' }));
     await waitFor(() =>
       expect(api.listNewDedupProposals).toHaveBeenCalledWith(
@@ -190,11 +213,12 @@ describe('<NewDedupLabeling>', () => {
       ),
     );
 
-    // Now rename the UNRELATED "koupelna" row.
-    const koupelnaRow = screen.getByRole('button', { name: 'koupelna' }).closest('div')!
+    // Open the manage modal and rename the UNRELATED "koupelna" row.
+    fireEvent.click(screen.getByText('Modify labels'));
+    const koupelnaRow = (await screen.findByLabelText('Remove koupelna')).closest('div')!
       .parentElement!.parentElement!;
     fireEvent.click(within(koupelnaRow).getByText('rename'));
-    fireEvent.change(screen.getByDisplayValue('koupelna'), {
+    fireEvent.change(within(koupelnaRow).getByDisplayValue('koupelna'), {
       target: { value: 'koupelna-v2' },
     });
     fireEvent.click(within(koupelnaRow).getByText('Save'));
@@ -210,7 +234,7 @@ describe('<NewDedupLabeling>', () => {
     );
   });
 
-  it('removing the currently-filtered label clears the filter', async () => {
+  it('removing the currently-filtered label from the manage modal clears the filter', async () => {
     vi.mocked(api.removeNewDedupTaxonomyLabel).mockResolvedValue({
       data: { label: 'interier - kuchyne', deleted_training_examples: 12, deleted_proposals: 4 },
     });
@@ -218,7 +242,8 @@ describe('<NewDedupLabeling>', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'interier - kuchyne' }));
     await waitFor(() => expect(screen.getByText(/Filtered to/)).toBeInTheDocument());
 
-    fireEvent.click(screen.getByLabelText('Remove interier - kuchyne'));
+    fireEvent.click(screen.getByText('Modify labels'));
+    fireEvent.click(await screen.findByLabelText('Remove interier - kuchyne'));
     fireEvent.click(screen.getByText('Remove'));
     await waitFor(() => expect(api.removeNewDedupTaxonomyLabel).toHaveBeenCalledWith(1));
     expect(screen.queryByText(/Filtered to/)).not.toBeInTheDocument();
@@ -233,6 +258,33 @@ describe('<NewDedupLabeling>', () => {
     fireEvent.click(screen.getByText('Grow sample'));
     await waitFor(() =>
       expect(api.growNewDedupSample).toHaveBeenCalledWith(50, null),
+    );
+  });
+
+  it('shows an inline pending state while growing the sample, so a slow request never reads as "nothing happened"', async () => {
+    let resolveGrow: (v: { data: { added: number } }) => void = () => {};
+    vi.mocked(api.growNewDedupSample).mockImplementation(
+      () => new Promise((resolve) => { resolveGrow = resolve; }),
+    );
+    renderPage();
+    await screen.findByRole('button', { name: 'interier - kuchyne' });
+    fireEvent.click(screen.getByText('Grow sample'));
+
+    expect(await screen.findByText('Growing…')).toBeInTheDocument();
+    expect(screen.getByDisplayValue('200')).toBeDisabled();
+
+    resolveGrow({ data: { added: 1000 } });
+    await waitFor(() => expect(screen.getByText(/Added 1000 images/)).toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByText('Growing…')).not.toBeInTheDocument());
+  });
+
+  it('tells the operator when a grow finds nothing new to add', async () => {
+    vi.mocked(api.growNewDedupSample).mockResolvedValue({ data: { added: 0 } });
+    renderPage();
+    await screen.findByRole('button', { name: 'interier - kuchyne' });
+    fireEvent.click(screen.getByText('Grow sample'));
+    await waitFor(() =>
+      expect(screen.getByText(/No new images matched/)).toBeInTheDocument(),
     );
   });
 

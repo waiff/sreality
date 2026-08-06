@@ -18,9 +18,10 @@ import {
 import { fetchImagesByImageIds } from '@/lib/queries';
 import { imageSrc } from '@/lib/imageUrl';
 import { pushToast } from '@/lib/toast';
-import { TrashIcon } from '@/components/icons';
 import Tabs from '@/components/Tabs';
 import ImageTagBadge from '@/components/ImageTagBadge';
+import Spinner from '@/components/Spinner';
+import TaxonomyManageModal from '@/components/TaxonomyManageModal';
 import { CATEGORY_MAIN_TABS } from '@/lib/categoryMainTabs';
 import type { ImagePublic } from '@/lib/types';
 
@@ -41,6 +42,7 @@ export default function NewDedupLabeling() {
   const settingsQ = useQuery({ queryKey: SETTINGS_KEY, queryFn: listNewDedupSettings });
 
   const [labelFilter, setLabelFilter] = useState<string | null>(null);
+  const [manageOpen, setManageOpen] = useState(false);
   const [status, setStatus] = useState<Status>('pending');
   const [showOriginal, setShowOriginal] = useState(false);
   const [selected, setSelected] = useState<ReadonlySet<number>>(new Set());
@@ -132,10 +134,17 @@ export default function NewDedupLabeling() {
   // "2.5" would 422 server-side with an unreadable toast, so validate
   // integer-ness client-side too, not just positivity.
   const growCountValid = Number.isInteger(Number(growCount)) && Number(growCount) > 0;
+  // A toast alone is easy to miss on a slow connection or a big count (1000+
+  // candidate images still take a real network round-trip) — the operator
+  // reported clicking "Grow sample" and seeing nothing happen. Surface the
+  // result inline, next to the button itself, not just in a corner toast.
+  const [lastGrow, setLastGrow] = useState<{ requested: number; added: number } | null>(null);
   const growMut = useMutation({
     mutationFn: () => growNewDedupSample(Number(growCount), growCategory || null),
+    onMutate: () => setLastGrow(null),
     onSuccess: (res) => {
       pushToast('ok', `Sample grew by ${res.data.added}.`);
+      setLastGrow({ requested: Number(growCount), added: res.data.added });
       invalidateOverview();
     },
     onError: (err: Error) => pushToast('err', err.message),
@@ -229,7 +238,7 @@ export default function NewDedupLabeling() {
 
       {overviewQ.error && <ErrorBanner message={(overviewQ.error as Error).message} />}
 
-      <TaxonomySection
+      <TaxonomyBarChart
         labels={overviewQ.data?.data.labels ?? []}
         sampleSize={overviewQ.data?.data.sample_size}
         loading={!overviewQ.data && !overviewQ.error}
@@ -237,15 +246,23 @@ export default function NewDedupLabeling() {
         proposalTarget={proposalTarget}
         activeLabel={labelFilter}
         onFilter={(label) => setLabelFilter((cur) => (cur === label ? null : label))}
-        newLabelText={newLabelText}
-        onNewLabelTextChange={setNewLabelText}
-        onAdd={() => addLabelMut.mutate()}
-        addPending={addLabelMut.isPending}
-        onRename={(id, oldLabel, label) => renameLabelMut.mutate({ id, oldLabel, label })}
-        renamePending={renameLabelMut.isPending}
-        onRemove={(id, oldLabel) => removeLabelMut.mutate({ id, oldLabel })}
-        removePending={removeLabelMut.isPending}
+        onOpenManage={() => setManageOpen(true)}
       />
+
+      {manageOpen && (
+        <TaxonomyManageModal
+          labels={overviewQ.data?.data.labels ?? []}
+          onClose={() => setManageOpen(false)}
+          newLabelText={newLabelText}
+          onNewLabelTextChange={setNewLabelText}
+          onAdd={() => addLabelMut.mutate()}
+          addPending={addLabelMut.isPending}
+          onRename={(id, oldLabel, label) => renameLabelMut.mutate({ id, oldLabel, label })}
+          renamePending={renameLabelMut.isPending}
+          onRemove={(id, oldLabel) => removeLabelMut.mutate({ id, oldLabel })}
+          removePending={removeLabelMut.isPending}
+        />
+      )}
 
       <section className="mt-8 border border-[var(--color-rule)] rounded-[var(--radius-sm)] p-4">
         <span className="block text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)] mb-3">
@@ -262,12 +279,14 @@ export default function NewDedupLabeling() {
             step={1}
             value={growCount}
             onChange={(e) => setGrowCount(e.target.value)}
-            className="w-20 px-2 py-1 font-mono text-sm text-right rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] focus:outline-none focus:border-[var(--color-copper)]"
+            disabled={growMut.isPending}
+            className="w-20 px-2 py-1 font-mono text-sm text-right rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] focus:outline-none focus:border-[var(--color-copper)] disabled:opacity-50"
           />
           <select
             value={growCategory}
             onChange={(e) => setGrowCategory(e.target.value)}
-            className="px-2 py-1 text-sm rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] text-[var(--color-ink)]"
+            disabled={growMut.isPending}
+            className="px-2 py-1 text-sm rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] text-[var(--color-ink)] disabled:opacity-50"
           >
             {CATEGORY_MAIN_TABS.map((t) => (
               <option key={t.id} value={t.id}>
@@ -279,15 +298,26 @@ export default function NewDedupLabeling() {
             type="button"
             onClick={() => growMut.mutate()}
             disabled={growMut.isPending || !growCountValid}
-            className="px-3 py-1 text-xs rounded-[var(--radius-xs)] bg-[var(--color-copper)] text-[var(--color-paper)] disabled:opacity-50"
+            className="flex items-center gap-1.5 px-3 py-1 text-xs rounded-[var(--radius-xs)] bg-[var(--color-copper)] text-[var(--color-paper)] disabled:opacity-50"
           >
-            Grow sample
+            {growMut.isPending && <Spinner size={10} />}
+            {growMut.isPending ? 'Growing…' : 'Grow sample'}
           </button>
         </div>
+
+        {lastGrow && (
+          <p className="mt-2.5 text-xs text-[var(--color-sage)]">
+            {lastGrow.added > 0
+              ? `Added ${lastGrow.added} image${lastGrow.added === 1 ? '' : 's'} — dispatch the relabel workflow below to generate proposals for them.`
+              : `No new images matched (requested ${lastGrow.requested}) — everything eligible is already in the sample.`}
+          </p>
+        )}
+
         <p className="mt-2 text-xs text-[var(--color-ink-4)] leading-relaxed">
-          Adds newest not-yet-sampled images to the pool the relabel job scores. Scoring itself
-          runs separately via the "NEW DEDUP — Labeling secondary-CLIP proposals" GitHub Actions
-          workflow (model: {secondaryModel ?? '…'}).
+          Adds newest not-yet-sampled images to the pool the relabel job scores — this only grows
+          membership, it does NOT run scoring itself and no new pending proposals appear here yet.
+          Scoring runs separately via the "NEW DEDUP — Labeling secondary-CLIP proposals" GitHub
+          Actions workflow (model: {secondaryModel ?? '…'}).
         </p>
       </section>
 
@@ -412,7 +442,14 @@ function ToggleButton({
   );
 }
 
-function TaxonomySection({
+/* Ranked horizontal bar chart, most confirmed training images first — the
+ * training set IS the point of this page, so its size per label is the
+ * primary view; managing the vocabulary (add/rename/remove) moves to the
+ * "Modify labels" modal, sorted alphabetically instead (see
+ * TaxonomyManageModal). Single hue (sage = confirmed/good, matching the old
+ * per-row progress fill); the currently-filtered label switches to the
+ * app's accent (copper) — color follows the one selected entity, not rank. */
+function TaxonomyBarChart({
   labels,
   sampleSize,
   loading,
@@ -420,14 +457,7 @@ function TaxonomySection({
   proposalTarget,
   activeLabel,
   onFilter,
-  newLabelText,
-  onNewLabelTextChange,
-  onAdd,
-  addPending,
-  onRename,
-  renamePending,
-  onRemove,
-  removePending,
+  onOpenManage,
 }: {
   labels: NewDedupTaxonomyLabel[];
   sampleSize: number | undefined;
@@ -436,232 +466,101 @@ function TaxonomySection({
   proposalTarget: number;
   activeLabel: string | null;
   onFilter: (label: string) => void;
-  newLabelText: string;
-  onNewLabelTextChange: (v: string) => void;
-  onAdd: () => void;
-  addPending: boolean;
-  onRename: (id: number, oldLabel: string, label: string) => void;
-  renamePending: boolean;
-  onRemove: (id: number, oldLabel: string) => void;
-  removePending: boolean;
+  onOpenManage: () => void;
 }) {
+  const sorted = useMemo(
+    () => [...labels].sort((a, b) => b.confirmed_count - a.confirmed_count),
+    [labels],
+  );
+  // Bars scale to whichever is bigger — the Gate 1 target or the current
+  // leader — so the target tick is always on-chart, not off the right edge.
+  const domainMax = Math.max(gate1Target, ...sorted.map((l) => l.confirmed_count), 1);
+  const gatePct = Math.min(100, (gate1Target / domainMax) * 100);
+
   return (
     <section className="mt-8">
-      <div className="flex items-center justify-between mb-3">
+      <div className="flex items-center justify-between mb-3 gap-3">
         <span className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)]">
           Taxonomy v1 ({labels.length} labels{sampleSize != null ? `, ${sampleSize} sampled` : ''})
         </span>
+        <button
+          type="button"
+          onClick={onOpenManage}
+          className="shrink-0 px-2.5 py-1 text-xs rounded-[var(--radius-sm)] border border-[var(--color-rule)] text-[var(--color-ink-2)] hover:border-[var(--color-copper)] hover:text-[var(--color-copper)] transition-colors"
+        >
+          Modify labels
+        </button>
       </div>
 
       {loading && <p className="text-sm text-[var(--color-ink-3)]">Loading…</p>}
-      {!loading && labels.length === 0 && (
+      {!loading && sorted.length === 0 && (
         <p className="text-sm text-[var(--color-ink-3)]">
-          No labels yet — add the first one below.
+          No labels yet — add the first one via "Modify labels".
         </p>
       )}
 
-      <div className="space-y-2">
-        {labels.map((l) => (
-          <TaxonomyLabelRow
-            key={l.id}
-            label={l}
-            active={activeLabel === l.label}
-            gate1Target={gate1Target}
-            proposalTarget={proposalTarget}
-            onFilter={() => onFilter(l.label)}
-            onRename={(next) => onRename(l.id, l.label, next)}
-            renamePending={renamePending}
-            onRemove={() => onRemove(l.id, l.label)}
-            removePending={removePending}
-          />
-        ))}
-      </div>
-
-      <div className="mt-3 flex items-center gap-2">
-        <input
-          type="text"
-          value={newLabelText}
-          onChange={(e) => onNewLabelTextChange(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' && newLabelText.trim()) onAdd();
-          }}
-          placeholder="new label, e.g. interier - kuchyne"
-          className="px-2 py-1 text-sm font-mono rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] focus:outline-none focus:border-[var(--color-copper)] w-64"
-        />
-        <button
-          type="button"
-          onClick={onAdd}
-          disabled={addPending || !newLabelText.trim()}
-          className="px-3 py-1 text-xs rounded-[var(--radius-xs)] bg-[var(--color-copper)] text-[var(--color-paper)] disabled:opacity-50"
-        >
-          Add label
-        </button>
-      </div>
-    </section>
-  );
-}
-
-function TaxonomyLabelRow({
-  label,
-  active,
-  gate1Target,
-  proposalTarget,
-  onFilter,
-  onRename,
-  renamePending,
-  onRemove,
-  removePending,
-}: {
-  label: NewDedupTaxonomyLabel;
-  active: boolean;
-  gate1Target: number;
-  proposalTarget: number;
-  onFilter: () => void;
-  onRename: (next: string) => void;
-  renamePending: boolean;
-  onRemove: () => void;
-  removePending: boolean;
-}) {
-  const [renaming, setRenaming] = useState(false);
-  const [draft, setDraft] = useState(label.label);
-  const [confirmingRemove, setConfirmingRemove] = useState(false);
-
-  const gate1Pct = Math.min(100, Math.round((label.confirmed_count / gate1Target) * 100));
-
-  return (
-    <div
-      className={[
-        'border rounded-[var(--radius-sm)] px-3 py-2',
-        active ? 'border-[var(--color-copper)] bg-[var(--color-copper-soft)]' : 'border-[var(--color-rule)]',
-      ].join(' ')}
-    >
-      <div className="flex items-center justify-between gap-3 flex-wrap">
-        <div className="min-w-0 flex items-center gap-2">
-          {renaming ? (
-            <input
-              autoFocus
-              type="text"
-              value={draft}
-              onChange={(e) => setDraft(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && draft.trim()) {
-                  onRename(draft.trim());
-                  setRenaming(false);
-                }
-                if (e.key === 'Escape') {
-                  setDraft(label.label);
-                  setRenaming(false);
-                }
-              }}
-              className="px-1.5 py-0.5 text-sm font-mono rounded-[var(--radius-xs)] border border-[var(--color-rule-strong)] bg-[var(--color-paper-2)]"
-            />
-          ) : (
-            <button
-              type="button"
-              onClick={onFilter}
-              className="font-mono text-sm hover:text-[var(--color-copper-2)] truncate"
-              title="Filter proposals to this label"
-            >
-              {label.label}
-            </button>
-          )}
-          {!label.active && (
-            <span className="text-[0.6rem] tracking-[0.1em] uppercase px-1.5 py-0.5 rounded-[var(--radius-xs)] bg-[var(--color-ink-4)]/20 text-[var(--color-ink-3)]">
-              inactive
-            </span>
-          )}
-        </div>
-
-        <div className="flex items-center gap-3 text-xs font-mono tabular-nums text-[var(--color-ink-3)] shrink-0">
-          <span title="Confirmed training images">{`✓ ${label.confirmed_count}/${gate1Target}`}</span>
-          <span title="Pending proposals">{`? ${label.pending_count}/${proposalTarget}`}</span>
-          {label.dismissed_count > 0 && (
-            <span title="Dismissed proposals">{`✗ ${label.dismissed_count}`}</span>
-          )}
-        </div>
-
-        <div className="flex items-center gap-2 shrink-0">
-          {renaming ? (
-            <>
-              <button
-                type="button"
-                disabled={renamePending || !draft.trim()}
-                onClick={() => {
-                  onRename(draft.trim());
-                  setRenaming(false);
-                }}
-                className="text-xs text-[var(--color-copper)] disabled:opacity-40"
-              >
-                Save
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setDraft(label.label);
-                  setRenaming(false);
-                }}
-                className="text-xs text-[var(--color-ink-3)]"
-              >
-                Cancel
-              </button>
-            </>
-          ) : (
-            <button
-              type="button"
-              onClick={() => setRenaming(true)}
-              className="text-xs text-[var(--color-ink-3)] underline decoration-dotted underline-offset-2 hover:text-[var(--color-copper-2)]"
-            >
-              rename
-            </button>
-          )}
-          <button
-            type="button"
-            onClick={() => setConfirmingRemove(true)}
-            aria-label={`Remove ${label.label}`}
-            className="text-[var(--color-ink-4)] hover:text-[var(--color-brick)]"
-          >
-            <TrashIcon className="h-3.5 w-3.5" />
-          </button>
-        </div>
-      </div>
-
-      <div className="mt-1.5 h-1 rounded-full bg-[var(--color-rule-soft)] overflow-hidden">
-        <div
-          className="h-full bg-[var(--color-sage)]"
-          style={{ width: `${gate1Pct}%` }}
-          aria-hidden
-        />
-      </div>
-
-      {confirmingRemove && (
-        <div className="mt-2 pt-2 border-t border-[var(--color-rule-soft)] flex items-center gap-3 text-xs text-[var(--color-brick)]">
-          <span>
-            Remove {label.label}? {label.confirmed_count} training example
-            {label.confirmed_count === 1 ? '' : 's'} and {label.pending_count + label.dismissed_count}{' '}
-            proposal{label.pending_count + label.dismissed_count === 1 ? '' : 's'} go with it
-            (images stay).
-          </span>
-          <button
-            type="button"
-            disabled={removePending}
-            onClick={() => {
-              onRemove();
-              setConfirmingRemove(false);
-            }}
-            className="text-[var(--color-brick)] font-medium disabled:opacity-40"
-          >
-            Remove
-          </button>
-          <button
-            type="button"
-            onClick={() => setConfirmingRemove(false)}
-            className="text-[var(--color-ink-3)]"
-          >
-            Cancel
-          </button>
-        </div>
+      {sorted.length > 0 && (
+        <>
+          <p className="text-[0.7rem] text-[var(--color-ink-4)]">
+            Bars are confirmed training images, scaled to Gate 1's target of {gate1Target}{' '}
+            (marked ▏below).
+          </p>
+          <div className="mt-3 space-y-2">
+            {sorted.map((l) => {
+              const pct = Math.min(100, (l.confirmed_count / domainMax) * 100);
+              const active = activeLabel === l.label;
+              return (
+                <div key={l.id}>
+                  <div className="flex items-baseline gap-1.5 min-w-0">
+                    <button
+                      type="button"
+                      onClick={() => onFilter(l.label)}
+                      title="Filter proposals to this label"
+                      className={[
+                        'min-w-0 truncate font-mono text-[0.76rem] hover:text-[var(--color-copper-2)]',
+                        active ? 'text-[var(--color-copper)]' : 'text-[var(--color-ink-2)]',
+                      ].join(' ')}
+                    >
+                      {l.label}
+                    </button>
+                    {l.pending_count > 0 && (
+                      <span className="shrink-0 text-[0.68rem] text-[var(--color-ink-4)]">
+                        · {l.pending_count}/{proposalTarget} pending
+                      </span>
+                    )}
+                  </div>
+                  <div className="mt-1 flex items-center gap-2">
+                    <div className="relative h-3.5 flex-1 rounded-[var(--radius-xs)] bg-[var(--color-rule-soft)] overflow-hidden">
+                      <div
+                        className={[
+                          'h-full rounded-r-[var(--radius-sm)] transition-[width]',
+                          active ? 'bg-[var(--color-copper)]' : 'bg-[var(--color-sage)]',
+                        ].join(' ')}
+                        style={{ width: `${pct}%` }}
+                        aria-hidden
+                      />
+                      <div
+                        className="absolute top-0 bottom-0 w-px bg-[var(--color-ink)]/40"
+                        // `left: N%` at N=100 places the whole 1px line just past
+                        // the track's right edge, invisible under overflow-hidden
+                        // (confirmed visually — the leader's bar hits the target
+                        // and the tick vanished). Inset by the line's own width so
+                        // it stays on-screen at every position, including 100%.
+                        style={{ left: `calc(${gatePct}% - 1px)` }}
+                        aria-hidden
+                      />
+                    </div>
+                    <span className="w-8 shrink-0 text-right font-mono text-[0.7rem] tabular-nums text-[var(--color-ink-3)]">
+                      {l.confirmed_count}
+                    </span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </>
       )}
-    </div>
+    </section>
   );
 }
 

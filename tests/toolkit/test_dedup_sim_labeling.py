@@ -147,6 +147,38 @@ class _Cur:
                 for p in rows
             ]
 
+        elif s.startswith("WITH confirmed AS"):
+            # Mirrors _LIST_CONFIRMED_SQL: driven FROM training_examples (one row per
+            # image, label always the CURRENT value) with the most-recently-proposed
+            # confirmed proposal for that image supplying display provenance, or a
+            # synthetic 'manual' row when none exists.
+            kw = params
+            label_filter = kw.get("label")
+            rows = []
+            for te in c.training_examples.values():
+                if label_filter is not None and te["label"] != label_filter:
+                    continue
+                confirmed = [
+                    p for p in c.proposals.values()
+                    if p["image_id"] == te["image_id"] and p["status"] == "confirmed"
+                ]
+                if confirmed:
+                    latest = max(confirmed, key=lambda p: p["proposed_at"])
+                    model, confidence = latest["model"], latest["confidence"]
+                    proposed_at = latest["proposed_at"]
+                    reviewed_at, reviewed_by = latest.get("reviewed_at"), latest.get("reviewed_by")
+                else:
+                    model, confidence = "manual", None
+                    proposed_at = te.get("created_at", "t")
+                    reviewed_at = te.get("updated_at", "t")
+                    reviewed_by = te.get("created_by")
+                rows.append((
+                    te["image_id"], model, te["label"], confidence, proposed_at,
+                    "confirmed", reviewed_at, reviewed_by,
+                ))
+            rows.sort(key=lambda r: r[4], reverse=True)
+            self._rows = rows[: kw["limit"]]
+
         elif s.startswith("UPDATE dedup_sim.label_proposals SET status = 'confirmed'") \
                 and "image_id = ANY" in s:
             reviewed_by, model, ids = params
@@ -429,6 +461,85 @@ def test_list_proposals_filters(conn: _FakeConn) -> None:
     by_label = dsl.list_proposals(conn, label="b")
     assert len(by_label) == 1
     assert by_label[0]["image_id"] == 2
+
+
+def test_list_proposals_confirmed_includes_training_examples_without_a_proposal(
+    conn: _FakeConn,
+) -> None:
+    # image 1 was confirmed through this page's own proposal review flow.
+    conn.proposals[(1, "m1")] = {
+        "image_id": 1, "model": "m1", "label": "a", "confidence": 0.9,
+        "proposed_at": "t2", "status": "confirmed",
+    }
+    conn.training_examples[1] = {"image_id": 1, "label": "a", "created_by": "operator"}
+    # image 2 predates the Labeling page — trained via /phash-audit's Train CTA,
+    # never went through a proposal at all.
+    conn.training_examples[2] = {"image_id": 2, "label": "b", "created_by": "operator"}
+    # a pending proposal must never leak into the confirmed listing.
+    conn.proposals[(3, "m1")] = {
+        "image_id": 3, "model": "m1", "label": "a", "confidence": 0.5,
+        "proposed_at": "t3", "status": "pending",
+    }
+
+    confirmed = dsl.list_proposals(conn, status="confirmed")
+    assert {r["image_id"] for r in confirmed} == {1, 2}
+    manual_row = next(r for r in confirmed if r["image_id"] == 2)
+    assert manual_row["model"] == "manual"
+    assert manual_row["label"] == "b"
+    assert manual_row["status"] == "confirmed"
+    proposal_row = next(r for r in confirmed if r["image_id"] == 1)
+    assert proposal_row["model"] == "m1"
+
+
+def test_list_proposals_confirmed_does_not_duplicate_a_confirmed_proposal(
+    conn: _FakeConn,
+) -> None:
+    # image_id 1 has BOTH a confirmed proposal AND (as confirm_proposal always
+    # writes) a matching image_training_examples row — must surface exactly once.
+    conn.proposals[(1, "m1")] = {
+        "image_id": 1, "model": "m1", "label": "a", "confidence": 0.9,
+        "proposed_at": "t2", "status": "confirmed",
+    }
+    conn.training_examples[1] = {"image_id": 1, "label": "a", "created_by": "operator"}
+
+    confirmed = dsl.list_proposals(conn, status="confirmed")
+    assert len(confirmed) == 1
+    assert confirmed[0]["model"] == "m1"
+
+
+def test_list_proposals_confirmed_shows_current_label_not_stale_proposal_label(
+    conn: _FakeConn,
+) -> None:
+    # image 1 was confirmed here with label "kuchyne", then relabeled to "koupelna"
+    # via the OLDER /phash-audit Train CTA — which only ever touches
+    # image_training_examples, never label_proposals (api/labeling.py's
+    # set_training_example). The confirmed listing must reflect the image's
+    # CURRENT label, not the now-stale text still sitting in label_proposals.
+    conn.proposals[(1, "m1")] = {
+        "image_id": 1, "model": "m1", "label": "kuchyne", "confidence": 0.9,
+        "proposed_at": "t1", "status": "confirmed",
+    }
+    conn.training_examples[1] = {"image_id": 1, "label": "koupelna", "created_by": "operator"}
+
+    confirmed = dsl.list_proposals(conn, status="confirmed")
+    assert len(confirmed) == 1
+    assert confirmed[0]["label"] == "koupelna"
+    # provenance (which model/proposal it came from) is still preserved
+    assert confirmed[0]["model"] == "m1"
+
+    # filtering by the stale proposal text must NOT find it anymore...
+    assert dsl.list_proposals(conn, status="confirmed", label="kuchyne") == []
+    # ...only the current label does.
+    by_current_label = dsl.list_proposals(conn, status="confirmed", label="koupelna")
+    assert len(by_current_label) == 1
+
+
+def test_list_proposals_confirmed_respects_label_filter(conn: _FakeConn) -> None:
+    conn.training_examples[1] = {"image_id": 1, "label": "a", "created_by": "operator"}
+    conn.training_examples[2] = {"image_id": 2, "label": "b", "created_by": "operator"}
+
+    confirmed = dsl.list_proposals(conn, status="confirmed", label="a")
+    assert [r["image_id"] for r in confirmed] == [1]
 
 
 def test_confirm_proposal_writes_training_example(conn: _FakeConn) -> None:
