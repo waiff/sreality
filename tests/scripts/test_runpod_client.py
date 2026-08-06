@@ -89,6 +89,10 @@ def test_cheapest_gpu_picks_lowest_community_price():
                     {"id": "rtx4090", "displayName": "RTX 4090", "memoryInGb": 24, "communityPrice": 0.34},
                     {"id": "rtxa2000", "displayName": "RTX A2000", "memoryInGb": 6, "communityPrice": 0.11},
                     {"id": "unpriced", "displayName": "Unpriced", "memoryInGb": 8, "communityPrice": None},
+                    # A real live run (2026-08-06) hit exactly this: a placeholder/
+                    # unavailable catalog entry priced at 0, which "wins" as cheapest
+                    # under a naive `is not None` filter since 0 beats every real price.
+                    {"id": "unknown", "displayName": "unknown", "memoryInGb": 0, "communityPrice": 0},
                 ]
             }
         },

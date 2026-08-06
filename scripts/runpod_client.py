@@ -65,7 +65,11 @@ class RunPodClient:
     def cheapest_gpu(self, *, max_price_per_hr: float | None = None) -> GpuOption:
         """The lowest community-cloud-priced GPU type, optionally capped by price.
         Queries live rather than hardcoding an ID — RunPod's catalog and pricing
-        both shift with supply/demand."""
+        both shift with supply/demand. `communityPrice <= 0` is excluded, not just
+        `None` — a real live run (2026-08-06) hit a catalog entry with id
+        "unknown" and `communityPrice: 0`, a placeholder/unavailable listing that
+        a `None`-only filter let through and that then always "won" as cheapest
+        since 0 beats every real price."""
         query = (
             "query { gpuTypes { id displayName memoryInGb communityPrice } }"
         )
@@ -82,7 +86,7 @@ class RunPodClient:
                 community_price_per_hr=g["communityPrice"],
             )
             for g in body["data"]["gpuTypes"]
-            if g.get("communityPrice") is not None
+            if (g.get("communityPrice") or 0) > 0
         ]
         if max_price_per_hr is not None:
             options = [o for o in options if o.community_price_per_hr <= max_price_per_hr]
