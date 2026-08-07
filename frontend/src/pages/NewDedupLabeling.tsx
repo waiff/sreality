@@ -12,6 +12,7 @@ import {
   bulkConfirmNewDedupProposals,
   bulkDismissNewDedupProposals,
   listNewDedupSettings,
+  setTrainingExample,
   type NewDedupTaxonomyLabel,
   type NewDedupLabelProposal,
 } from '@/lib/api';
@@ -22,6 +23,7 @@ import Tabs from '@/components/Tabs';
 import ImageTagBadge from '@/components/ImageTagBadge';
 import Spinner from '@/components/Spinner';
 import TaxonomyManageModal from '@/components/TaxonomyManageModal';
+import LabelCombobox, { type LabelOption } from '@/components/LabelCombobox';
 import { CATEGORY_MAIN_TABS } from '@/lib/categoryMainTabs';
 import type { ImagePublic } from '@/lib/types';
 
@@ -52,6 +54,16 @@ export default function NewDedupLabeling() {
   // would make an earlier tile's still-in-flight action look finished.
   // Track per-tile pending state locally instead.
   const [pendingActionIds, setPendingActionIds] = useState<ReadonlySet<number>>(new Set());
+  // Staged tag edits, held HERE rather than inside the tile: the batch
+  // actions below send image ids only (the bulk endpoint takes no per-image
+  // labels), so the page has to know which tiles carry an unsaved correction
+  // in order to keep them out of a batch — otherwise "Confirm selected" would
+  // silently write the model's label over the operator's fix. Page-level also
+  // survives a background refetch replacing the proposals array mid-edit.
+  // Keyed by (image_id, model), matching label_proposals' own PK: one image
+  // can carry proposals from several models, and they must not share a slot.
+  const [drafts, setDrafts] = useState<ReadonlyMap<string, string>>(new Map());
+  const draftKey = (p: NewDedupLabelProposal) => `${p.image_id}:${p.model}`;
 
   const proposalsQ = useQuery({
     queryKey: [...PROPOSALS_KEY, status, labelFilter],
@@ -68,11 +80,20 @@ export default function NewDedupLabeling() {
   });
   const images = imagesQ.data;
 
-  useEffect(() => setSelected(new Set()), [status, labelFilter]);
   useEffect(() => {
+    setSelected(new Set());
+    setDrafts(new Map());
+  }, [status, labelFilter]);
+  useEffect(() => {
+    const ids = new Set(imageIds);
     setSelected((prev) => {
-      const ids = new Set(imageIds);
       const next = new Set([...prev].filter((id) => ids.has(id)));
+      return next.size === prev.size ? prev : next;
+    });
+    setDrafts((prev) => {
+      const next = new Map(
+        [...prev].filter(([key]) => ids.has(Number(key.split(':')[0]))),
+      );
       return next.size === prev.size ? prev : next;
     });
   }, [imageIds]);
@@ -84,6 +105,19 @@ export default function NewDedupLabeling() {
 
   const invalidateOverview = () => qc.invalidateQueries({ queryKey: OVERVIEW_KEY });
   const invalidateProposals = () => qc.invalidateQueries({ queryKey: PROPOSALS_KEY });
+
+  // The taxonomy IS the option list for correcting a wrong suggestion —
+  // same shape the /clip-audit combobox uses (label + its current training
+  // count), so a mis-tagged proposal is fixed by picking the right tag
+  // rather than dismissing and re-labelling elsewhere. Free text still
+  // creates a new label, matching that page.
+  const labelOptions: LabelOption[] = useMemo(
+    () =>
+      (overviewQ.data?.data.labels ?? [])
+        .map((l) => ({ value: l.label, label: l.label, count: l.confirmed_count }))
+        .sort((a, b) => a.label.localeCompare(b.label, 'cs')),
+    [overviewQ.data],
+  );
 
   // --- taxonomy ---------------------------------------------------------
 
@@ -163,9 +197,36 @@ export default function NewDedupLabeling() {
     });
 
   const confirmMut = useMutation({
-    mutationFn: ({ imageId, model }: { imageId: number; model: string }) =>
-      confirmNewDedupProposal(imageId, model),
-    onSuccess: () => {
+    mutationFn: ({
+      imageId,
+      model,
+      label,
+    }: {
+      imageId: number;
+      model: string;
+      label?: string;
+    }) => confirmNewDedupProposal(imageId, model, label),
+    onSuccess: (res) => {
+      if (res.data.corrected) {
+        pushToast('ok', `Corrected to “${res.data.label}”.`);
+      }
+      invalidateProposals();
+      invalidateOverview();
+    },
+    onError: (err: Error) => pushToast('err', err.message),
+    onSettled: (_data, _err, vars) => endAction(vars.imageId),
+  });
+
+  // Relabelling an image that's ALREADY in the training set is a plain
+  // image_training_examples upsert — the same endpoint /clip-audit's Train
+  // CTA uses. It deliberately does NOT touch label_proposals: the proposal
+  // row records what the model predicted, and the Confirmed tab reads the
+  // label live from image_training_examples, so this shows up immediately.
+  const relabelMut = useMutation({
+    mutationFn: ({ imageId, label }: { imageId: number; label: string }) =>
+      setTrainingExample({ image_id: imageId, label }),
+    onSuccess: (res) => {
+      pushToast('ok', `Relabelled to “${res.data.label}”.`);
       invalidateProposals();
       invalidateOverview();
     },
@@ -210,15 +271,45 @@ export default function NewDedupLabeling() {
       else next.add(id);
       return next;
     });
+
+  const draftFor = (p: NewDedupLabelProposal) => drafts.get(draftKey(p)) ?? p.label;
+  const isCorrected = (p: NewDedupLabelProposal) => {
+    const d = draftFor(p);
+    return d.trim() !== '' && d !== p.label;
+  };
+  // Editing a tag takes that tile out of the batch: the batch endpoint writes
+  // each proposal's OWN label, so leaving a corrected tile selected would
+  // discard the correction without telling anyone. It gets confirmed through
+  // its own button instead.
+  const setDraft = (p: NewDedupLabelProposal, label: string) => {
+    setDrafts((prev) => {
+      const next = new Map(prev);
+      next.set(draftKey(p), label);
+      return next;
+    });
+    if (label.trim() !== '' && label !== p.label) {
+      setSelected((prev) => {
+        if (!prev.has(p.image_id)) return prev;
+        const next = new Set(prev);
+        next.delete(p.image_id);
+        return next;
+      });
+    }
+  };
+
   // Only pending proposals under the CURRENT secondary model batch together —
   // an older model's leftover pending rows (from before a model config change)
-  // still review one at a time via the per-tile buttons.
+  // still review one at a time via the per-tile buttons. Corrected tiles are
+  // excluded for the reason above.
   const selectableIds = useMemo(
     () =>
       status === 'pending' && secondaryModel
-        ? proposals.filter((p) => p.model === secondaryModel).map((p) => p.image_id)
+        ? proposals
+            .filter((p) => p.model === secondaryModel && !isCorrected(p))
+            .map((p) => p.image_id)
         : [],
-    [proposals, status, secondaryModel],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [proposals, status, secondaryModel, drafts],
   );
   const allSelected = selectableIds.length > 0 && selectableIds.every((id) => selected.has(id));
 
@@ -393,16 +484,35 @@ export default function NewDedupLabeling() {
               proposal={p}
               image={images?.get(p.image_id)}
               showOriginal={showOriginal}
-              selectable={status === 'pending' && p.model === secondaryModel}
+              selectable={
+                status === 'pending' && p.model === secondaryModel && !isCorrected(p)
+              }
               selected={selected.has(p.image_id)}
               onToggleSelect={() => toggle(p.image_id)}
-              onConfirm={() => {
+              labelOptions={labelOptions}
+              draft={draftFor(p)}
+              onDraftChange={(label) => setDraft(p, label)}
+              corrected={isCorrected(p)}
+              onConfirm={(label) => {
                 beginAction(p.image_id);
-                confirmMut.mutate({ imageId: p.image_id, model: p.model });
+                confirmMut.mutate({
+                  imageId: p.image_id,
+                  model: p.model,
+                  // Only an actual correction travels: an untouched Confirm
+                  // sends no label, so the server uses the proposal's CURRENT
+                  // stored label rather than whatever this (possibly stale)
+                  // page last rendered — a taxonomy rename in between must
+                  // not be undone by echoing the old spelling back.
+                  label: isCorrected(p) ? label : undefined,
+                });
               }}
               onDismiss={() => {
                 beginAction(p.image_id);
                 dismissMut.mutate({ imageId: p.image_id, model: p.model });
+              }}
+              onRelabel={(label) => {
+                beginAction(p.image_id);
+                relabelMut.mutate({ imageId: p.image_id, label });
               }}
               actionPending={
                 pendingActionIds.has(p.image_id)
@@ -571,8 +681,13 @@ function ProposalTile({
   selectable,
   selected,
   onToggleSelect,
+  labelOptions,
+  draft,
+  onDraftChange,
+  corrected,
   onConfirm,
   onDismiss,
+  onRelabel,
   actionPending,
   reviewed,
 }: {
@@ -582,17 +697,30 @@ function ProposalTile({
   selectable: boolean;
   selected: boolean;
   onToggleSelect: () => void;
-  onConfirm: () => void;
+  labelOptions: LabelOption[];
+  /** The tag the operator intends for this image — seeded from the
+   * suggestion, owned by the page (see the `drafts` map there). */
+  draft: string;
+  onDraftChange: (label: string) => void;
+  corrected: boolean;
+  onConfirm: (label: string) => void;
   onDismiss: () => void;
+  onRelabel: (label: string) => void;
   actionPending: boolean;
   reviewed: boolean;
 }) {
   const badgeTag = showOriginal ? image?.clip_fine_tag ?? null : proposal.label;
   const badgeConfidence = showOriginal ? image?.clip_confidence ?? null : proposal.confidence;
 
+  const changed = corrected;
+  const isDismissed = proposal.status === 'dismissed';
+
+  // NB: the card must NOT be overflow-hidden — the tag picker's dropdown is
+  // absolutely positioned and would be clipped away by it. Only the photo is
+  // clipped (to round its top corners).
   return (
-    <div className="border border-[var(--color-rule)] rounded-[var(--radius-sm)] overflow-hidden bg-[var(--color-paper)]">
-      <div className="relative aspect-[4/3] bg-[var(--color-inset)]">
+    <div className="border border-[var(--color-rule)] rounded-[var(--radius-sm)] bg-[var(--color-paper)]">
+      <div className="relative aspect-[4/3] overflow-hidden rounded-t-[var(--radius-sm)] bg-[var(--color-inset)]">
         {selectable && (
           <input
             type="checkbox"
@@ -616,14 +744,28 @@ function ProposalTile({
           className="absolute bottom-1.5 left-1.5"
         />
       </div>
+
       <div className="px-2 py-1.5 flex items-center justify-between gap-1">
         {!reviewed ? (
           <>
             <button
               type="button"
-              onClick={onConfirm}
-              disabled={actionPending}
-              className="flex-1 px-1.5 py-1 text-[0.7rem] rounded-[var(--radius-xs)] bg-[var(--color-sage-soft)] text-[var(--color-sage)] disabled:opacity-40"
+              onClick={() => onConfirm(draft)}
+              disabled={actionPending || draft.trim() === ''}
+              title={
+                changed
+                  ? `Confirm as “${draft}” instead of the suggested “${proposal.label}”`
+                  : undefined
+              }
+              // Same text either way — the label can't grow, so it still fits
+              // the narrowest (2-column) tile. Copper marks "this writes your
+              // correction, not the suggestion".
+              className={[
+                'min-w-0 flex-1 truncate px-1.5 py-1 text-[0.7rem] rounded-[var(--radius-xs)] disabled:opacity-40',
+                changed
+                  ? 'bg-[var(--color-copper)] text-[var(--color-paper)]'
+                  : 'bg-[var(--color-sage-soft)] text-[var(--color-sage)]',
+              ].join(' ')}
             >
               Confirm
             </button>
@@ -636,12 +778,49 @@ function ProposalTile({
               Dismiss
             </button>
           </>
+        ) : changed ? (
+          // Already in the training set — an edited tag saves in place rather
+          // than going back through the confirm flow.
+          <>
+            <button
+              type="button"
+              onClick={() => onRelabel(draft)}
+              disabled={actionPending}
+              className="flex-1 px-1.5 py-1 text-[0.7rem] rounded-[var(--radius-xs)] bg-[var(--color-copper)] text-[var(--color-paper)] disabled:opacity-40"
+            >
+              Save tag
+            </button>
+            <button
+              type="button"
+              onClick={() => onDraftChange(proposal.label)}
+              disabled={actionPending}
+              className="px-1.5 py-1 text-[0.7rem] text-[var(--color-ink-3)] hover:text-[var(--color-ink-2)] disabled:opacity-40"
+            >
+              Cancel
+            </button>
+          </>
         ) : (
-          <span className="text-[0.65rem] text-[var(--color-ink-4)] font-mono">
+          <span className="text-[0.65rem] text-[var(--color-ink-4)] font-mono truncate">
             {proposal.status} · {proposal.reviewed_by ?? '—'}
           </span>
         )}
       </div>
+
+      {/* Picker sits BELOW the action row on purpose: its dropdown is
+        * absolutely positioned and opens downward, so above the buttons it
+        * would paint over them and swallow the first click aimed at Confirm.
+        * A dismissed proposal isn't in the training set, so it has no label
+        * to correct and gets no picker at all. */}
+      {!isDismissed && (
+        <div className="px-2 pb-2">
+          <LabelCombobox
+            value={draft}
+            onChange={onDraftChange}
+            options={labelOptions}
+            placeholder="tag…"
+          />
+        </div>
+      )}
     </div>
   );
 }

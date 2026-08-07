@@ -773,13 +773,29 @@ export const listNewDedupProposals = (params: {
     jwt: true,
   });
 
+/* Confirm echoes back what actually landed in the training set: `label` is the
+ * final one, `proposed_label` what the model had suggested, and `corrected` is
+ * true when the operator overrode it. */
+export interface NewDedupConfirmResult {
+  image_id: number;
+  model: string;
+  label: string;
+  status: 'confirmed';
+  proposed_label: string;
+  corrected: boolean;
+}
+
+/* `label` corrects a wrong suggestion before accepting it — that label lands in
+ * the training set instead of the proposed one (the proposal row keeps the
+ * model's own prediction either way). Omit to accept the proposal as-is. */
 export const confirmNewDedupProposal = (
   imageId: number,
   model: string,
-): Promise<{ data: NewDedupLabelProposal }> =>
-  request<{ data: NewDedupLabelProposal }>('/new-dedup/labeling/proposals/confirm', {
+  label?: string,
+): Promise<{ data: NewDedupConfirmResult }> =>
+  request<{ data: NewDedupConfirmResult }>('/new-dedup/labeling/proposals/confirm', {
     method: 'POST',
-    json: { image_id: imageId, model },
+    json: { image_id: imageId, model, label: label ?? null },
     jwt: true,
   });
 

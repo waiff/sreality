@@ -119,6 +119,47 @@ Session handoff points marked ⛳ (good places to end a session; update the ledg
 
 ## Progress ledger (update every session, newest first)
 
+- 2026-08-07 — **Labeling page: correct a wrong suggestion instead of only accept/reject it**
+  (operator request, pointing at /clip-audit's combobox as the model). Every non-dismissed tile now
+  carries a `LabelCombobox` seeded from the proposal's tag; Confirm writes whatever is in it.
+  Already-confirmed tiles get "Save tag", which relabels in place through the EXISTING
+  `/labeling/training-example` endpoint (the same one /clip-audit's Train CTA uses) rather than
+  re-running the confirm flow.
+  - **Backend**: `confirm_proposal(..., label=None)`. The override lands in
+    `image_training_examples`; `dedup_sim.label_proposals.label` deliberately keeps the model's own
+    prediction, so "model said X, operator said Y" stays derivable by comparing the two tables —
+    **no migration needed**, which is why none was written.
+  - **A freehand correction also registers itself in `dedup_sim.taxonomy_labels`** (same
+    transaction, `ON CONFLICT (label) DO NOTHING`). This is load-bearing, not tidiness: the coverage
+    chart, the tag picker's options, AND `scripts/label_proposal_backfill.py`'s class list all read
+    the taxonomy table, not the training set — so an unregistered label would be invisible in the
+    chart, never re-offered for the next image, and impossible for the secondary encoder to ever
+    propose. Migration 379 backfilled exactly this class of gap once already; this closes the door
+    that would have reopened it.
+  - **Adversarial review before merge** (3 dimensions — backend, frontend, UX/regression — each
+    finding independently re-verified): 15 candidates, 9 confirmed, deduplicating to 5 real issues,
+    all fixed. Two were things neither the type-checker nor jsdom tests could have caught:
+    1. *(high)* The picker sat directly ABOVE the Confirm/Dismiss row, so its downward-opening
+       absolutely-positioned dropdown painted over those buttons and would have swallowed the first
+       click aimed at Confirm — committing whichever taxonomy option happened to sit at that
+       y-offset. Both pre-existing usages avoid this by laying picker and action side-by-side; this
+       was the first vertical layout. Fixed by moving the picker BELOW the action row.
+    2. *(high)* Off-taxonomy labels silently dead-ending (the registration fix above).
+    3. *(high)* The page-level `drafts` map was keyed by `image_id` alone while proposals are keyed
+       `(image_id, model)` — two models' proposals for one image shared a draft slot, so correcting
+       one tile rewrote the other's tag. Re-keyed to `${image_id}:${model}`.
+    4. *(high, found while the review ran)* "Confirm selected" ignores per-tile corrections (the
+       bulk endpoint takes ids only), so a corrected-AND-selected tile would have had its fix
+       silently overwritten by the model's label. A corrected tile now drops out of the selection.
+    5. *(medium)* The client always sent its draft, even untouched — a page whose proposal list
+       predated a taxonomy rename would resurrect the retired spelling. The label now travels only
+       when it is an actual correction; otherwise the server uses its own stored value.
+  - I'd also independently caught and fixed a clipping bug before the review: the tile card's
+    `overflow-hidden` (there to round the photo) would have clipped the dropdown to nothing. Moved
+    it to the inner photo wrapper and pinned it with a structural test that walks the listbox's
+    ancestors — verified the test genuinely fails when the class is put back, so it isn't vacuous.
+  - Suites: `pytest -q` 2683, `vitest run` 494, `tsc --noEmit` clean, `vite build` clean, both
+    codegen checks fresh. No migration in this PR.
 - 2026-08-06 (session continuation, part 7) — Fixed a gap in the just-shipped Labeling page
   (operator report: taxonomy showed "0 labels, 0 sampled" and the Confirmed tab was empty despite
   an existing 48-label / ~1,185-image training set). Root cause: `dedup_sim.taxonomy_labels`

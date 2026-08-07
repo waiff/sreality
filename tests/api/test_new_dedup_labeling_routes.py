@@ -181,6 +181,31 @@ def test_post_confirm_proposal(client, _patch_toolkit):
     res = client.post("/new-dedup/labeling/proposals/confirm", json={"image_id": 1, "model": "m"})
     assert res.status_code == 200
     assert res.json()["data"]["status"] == "confirmed"
+    # An omitted label means "accept the suggestion as-is".
+    assert _patch_toolkit["confirm_proposal"]["label"] is None
+
+
+def test_post_confirm_proposal_passes_a_corrected_label_through(client, _patch_toolkit):
+    res = client.post(
+        "/new-dedup/labeling/proposals/confirm",
+        json={"image_id": 1, "model": "m", "label": "interier - loznice"},
+    )
+    assert res.status_code == 200
+    assert _patch_toolkit["confirm_proposal"]["label"] == "interier - loznice"
+
+
+def test_post_confirm_proposal_bad_label_422s(client, monkeypatch):
+    from toolkit import dedup_sim_labeling as dsl
+
+    def _raise(conn, **kw):
+        raise ValueError("a taxonomy label is at most 100 characters")
+
+    monkeypatch.setattr(dsl, "confirm_proposal", _raise)
+    res = client.post(
+        "/new-dedup/labeling/proposals/confirm",
+        json={"image_id": 1, "model": "m", "label": "x" * 101},
+    )
+    assert res.status_code == 422
 
 
 def test_post_confirm_proposal_unknown_404s(client, monkeypatch):

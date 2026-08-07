@@ -299,14 +299,36 @@ def list_proposals(
 
 def confirm_proposal(
     conn: psycopg.Connection, *, image_id: int, model: str, reviewed_by: str = "operator",
+    label: str | None = None,
 ) -> dict[str, Any]:
-    """Accept a proposal: mark it confirmed AND upsert its label into
+    """Accept a proposal: mark it confirmed AND upsert a label into
     image_training_examples — the one write path that ever promotes a
     sim-side proposal into the real, confirmed training set. Only a
     'pending' proposal can be confirmed (mirrors bulk_confirm_proposals'
     guard) — a stale/repeated call against an already-reviewed proposal
     404s instead of silently re-flipping it or re-writing a training
-    example a dismiss may have since superseded."""
+    example a dismiss may have since superseded.
+
+    `label` overrides what lands in the training set when the operator
+    corrects a wrong suggestion before accepting it (the Labeling page's
+    per-tile combobox). The proposal row KEEPS the model's own label
+    untouched — that's the record of what the encoder actually predicted,
+    and the correction stays derivable by comparing it against
+    image_training_examples, so no extra column is needed to capture
+    "model said X, operator said Y".
+
+    A correction the operator typed freehand is REGISTERED in
+    dedup_sim.taxonomy_labels as part of the same transaction. Without
+    that, an off-taxonomy label would be a dead end: the coverage chart
+    and the tag picker both read the taxonomy table (not the training
+    set), and the secondary-CLIP backfill only ever scores against
+    `taxonomy_labels WHERE active` — so the class would be invisible,
+    un-reofferable, and impossible for the model to ever propose. This is
+    the same open-vocabulary behaviour /clip-audit has, where the picker
+    reads image_training_examples directly and free text self-registers;
+    here the vocabulary lives in its own table, so it takes an explicit
+    write (migration 379 backfilled exactly this gap once already)."""
+    corrected = _clean_label(label) if label is not None and label.strip() else None
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(
             "UPDATE dedup_sim.label_proposals SET status = 'confirmed', "
@@ -318,15 +340,25 @@ def confirm_proposal(
         row = cur.fetchone()
         if row is None:
             raise KeyError((image_id, model))
-        label = row[0]
+        proposed = row[0]
+        final = corrected or proposed
+        if final != proposed:
+            cur.execute(
+                "INSERT INTO dedup_sim.taxonomy_labels (label, created_by) "
+                "VALUES (%s,%s) ON CONFLICT (label) DO NOTHING",
+                (final, reviewed_by),
+            )
         cur.execute(
             "INSERT INTO image_training_examples (image_id, label, created_by) "
             "VALUES (%s,%s,%s) "
             "ON CONFLICT (image_id) DO UPDATE SET "
             "  label = excluded.label, updated_at = now()",
-            (image_id, label, reviewed_by),
+            (image_id, final, reviewed_by),
         )
-    return {"image_id": image_id, "model": model, "label": label, "status": "confirmed"}
+    return {
+        "image_id": image_id, "model": model, "label": final, "status": "confirmed",
+        "proposed_label": proposed, "corrected": final != proposed,
+    }
 
 
 def dismiss_proposal(

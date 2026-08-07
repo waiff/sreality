@@ -15,6 +15,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 
 import NewDedupLabeling from './NewDedupLabeling';
 import type {
+  NewDedupConfirmResult,
   NewDedupLabelingOverview,
   NewDedupLabelProposal,
   NewDedupSetting,
@@ -38,6 +39,7 @@ vi.mock('@/lib/api', async (importOriginal) => {
     bulkConfirmNewDedupProposals: vi.fn(),
     bulkDismissNewDedupProposals: vi.fn(),
     listNewDedupSettings: vi.fn(),
+    setTrainingExample: vi.fn(),
   };
 });
 
@@ -84,6 +86,11 @@ const PROPOSALS: NewDedupLabelProposal[] = [
     reviewed_at: null, reviewed_by: null,
   },
 ];
+
+const CONFIRM_RESULT: NewDedupConfirmResult = {
+  image_id: 101, model: 'openai/clip-vit-large-patch14', label: 'interier - kuchyne',
+  status: 'confirmed', proposed_label: 'interier - kuchyne', corrected: false,
+};
 
 const IMAGE: ImagePublic = {
   id: 101, sreality_id: 555, sequence: 1, sreality_url: 'https://sdn.cz/x.jpg',
@@ -167,9 +174,13 @@ describe('<NewDedupLabeling>', () => {
     await screen.findByRole('button', { name: 'interier - kuchyne' });
     fireEvent.click(screen.getByText('Modify labels'));
     fireEvent.click(await screen.findByText('rename'));
-    const input = screen.getByDisplayValue('interier - kuchyne');
-    fireEvent.change(input, { target: { value: 'interier - kuchyn nova' } });
-    fireEvent.click(screen.getByText('Save'));
+    // Scope to the modal: the proposal tiles carry their own tag pickers,
+    // which are seeded with this same label text.
+    const modal = within(screen.getByRole('dialog'));
+    fireEvent.change(modal.getByDisplayValue('interier - kuchyne'), {
+      target: { value: 'interier - kuchyn nova' },
+    });
+    fireEvent.click(modal.getByText('Save'));
     await waitFor(() =>
       expect(api.renameNewDedupTaxonomyLabel).toHaveBeenCalledWith(1, 'interier - kuchyn nova'),
     );
@@ -299,7 +310,7 @@ describe('<NewDedupLabeling>', () => {
   });
 
   it('confirms a single proposal, refetches, and the tile leaves the pending grid', async () => {
-    vi.mocked(api.confirmNewDedupProposal).mockResolvedValue({ data: PROPOSALS[0] });
+    vi.mocked(api.confirmNewDedupProposal).mockResolvedValue({ data: CONFIRM_RESULT });
     // First load returns the pending proposal; the post-confirm refetch
     // (triggered by invalidateProposals) returns none — proves the
     // invalidation actually fires and the grid reflects it, not just that
@@ -311,13 +322,150 @@ describe('<NewDedupLabeling>', () => {
     await screen.findByText('Confirm');
     fireEvent.click(screen.getByText('Confirm'));
     await waitFor(() =>
+      // An untouched Confirm sends NO label — the server then uses the
+      // proposal's own stored label, so a rename landing between page load
+      // and click can't be undone by echoing back a stale spelling.
       expect(api.confirmNewDedupProposal).toHaveBeenCalledWith(
-        101, 'openai/clip-vit-large-patch14',
+        101, 'openai/clip-vit-large-patch14', undefined,
       ),
     );
     await waitFor(() => expect(api.listNewDedupProposals).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(screen.getByText('No pending proposals.')).toBeInTheDocument());
     expect(screen.queryByText('Confirm')).not.toBeInTheDocument();
+  });
+
+  it('confirms with a corrected tag when the suggestion is wrong', async () => {
+    vi.mocked(api.confirmNewDedupProposal).mockResolvedValue({
+      data: { ...CONFIRM_RESULT, label: 'interier - loznice', corrected: true },
+    });
+    renderPage();
+    await screen.findByText('Confirm');
+    // The tile's picker is seeded with the suggestion; typing a different
+    // taxonomy label and confirming must send THAT, not the suggestion.
+    const picker = screen.getByPlaceholderText('tag…');
+    fireEvent.change(picker, { target: { value: 'interier - loznice' } });
+    fireEvent.blur(picker);
+    fireEvent.click(screen.getByText('Confirm'));
+    await waitFor(() =>
+      expect(api.confirmNewDedupProposal).toHaveBeenCalledWith(
+        101, 'openai/clip-vit-large-patch14', 'interier - loznice',
+      ),
+    );
+  });
+
+  it('keeps the tag dropdown un-clipped — no overflow-hidden ancestor inside the card', async () => {
+    renderPage();
+    const picker = await screen.findByPlaceholderText('tag…');
+    fireEvent.focus(picker);
+    const listbox = await screen.findByRole('listbox');
+
+    // The dropdown is absolutely positioned and overflows the card by design.
+    // An `overflow-hidden` anywhere up the chain silently clips it to nothing
+    // (jsdom does no layout, so only the class can be asserted — but that IS
+    // the bug: the card used to carry overflow-hidden to round the photo).
+    const offenders: string[] = [];
+    for (let el = listbox.parentElement; el && el !== document.body; el = el.parentElement) {
+      if (el.className.includes('overflow-hidden')) offenders.push(el.className);
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  it('renders the tag picker after the action row so its dropdown cannot cover Confirm', async () => {
+    renderPage();
+    const picker = await screen.findByPlaceholderText('tag…');
+    const confirm = screen.getByText('Confirm');
+    // The dropdown opens downward out of the picker. If the picker preceded
+    // the buttons in document order it would paint over them and eat the
+    // first click aimed at Confirm (LabelCombobox keeps focus on mousedown,
+    // so the option, not the button, receives it).
+    const order = picker.compareDocumentPosition(confirm);
+    expect(order & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy();
+  });
+
+  it('keeps per-model drafts separate for the same image', async () => {
+    // One image, two models' proposals — correcting one must not rewrite the
+    // other (label_proposals' PK is (image_id, model), so both are real rows).
+    vi.mocked(api.listNewDedupProposals).mockResolvedValue({
+      data: [
+        PROPOSALS[0],
+        { ...PROPOSALS[0], model: 'older-model', label: 'exterier - fasada' },
+      ],
+    });
+    renderPage();
+    const pickers = await screen.findAllByPlaceholderText('tag…');
+    expect(pickers).toHaveLength(2);
+
+    fireEvent.change(pickers[0], { target: { value: 'interier - loznice' } });
+    fireEvent.blur(pickers[0]);
+
+    await waitFor(() =>
+      expect((pickers[0] as HTMLInputElement).value).toBe('interier - loznice'),
+    );
+    // The second tile still shows its own model's suggestion.
+    expect((pickers[1] as HTMLInputElement).value).toBe('exterier - fasada');
+  });
+
+  it('takes a corrected tile out of the batch so bulk-confirm cannot discard the fix', async () => {
+    // Two pending proposals; select both, then correct the first one's tag.
+    // The batch endpoint writes each proposal's OWN label, so a corrected
+    // tile must drop out of the selection rather than be silently confirmed
+    // under the model's label.
+    vi.mocked(api.listNewDedupProposals).mockResolvedValue({
+      data: [PROPOSALS[0], { ...PROPOSALS[0], image_id: 102, label: 'exterier - fasada' }],
+    });
+    vi.mocked(api.bulkConfirmNewDedupProposals).mockResolvedValue({
+      data: { confirmed: 1, model: 'openai/clip-vit-large-patch14', image_ids: [102] },
+    });
+    renderPage();
+    fireEvent.click(await screen.findByText('Select all'));
+    expect(screen.getByText('2 selected')).toBeInTheDocument();
+
+    const picker = screen.getAllByPlaceholderText('tag…')[0];
+    fireEvent.change(picker, { target: { value: 'interier - loznice' } });
+    fireEvent.blur(picker);
+
+    await waitFor(() => expect(screen.getByText('1 selected')).toBeInTheDocument());
+    fireEvent.click(screen.getByText('Confirm selected'));
+    await waitFor(() =>
+      expect(api.bulkConfirmNewDedupProposals).toHaveBeenCalledWith(
+        'openai/clip-vit-large-patch14',
+        [102],
+      ),
+    );
+  });
+
+  it('relabels an already-confirmed image in place via the training-example endpoint', async () => {
+    vi.mocked(api.listNewDedupProposals).mockResolvedValue({
+      data: [{ ...PROPOSALS[0], status: 'confirmed', reviewed_by: 'operator' }],
+    });
+    vi.mocked(api.setTrainingExample).mockResolvedValue({
+      data: { image_id: 101, label: 'interier - loznice', updated_at: 't' },
+    });
+    renderPage();
+    fireEvent.click(await screen.findByRole('tab', { name: 'Confirmed' }));
+    const picker = await screen.findByPlaceholderText('tag…');
+    fireEvent.change(picker, { target: { value: 'interier - loznice' } });
+    fireEvent.blur(picker);
+    fireEvent.click(await screen.findByText('Save tag'));
+    await waitFor(() =>
+      expect(api.setTrainingExample).toHaveBeenCalledWith({
+        image_id: 101,
+        label: 'interier - loznice',
+      }),
+    );
+    // Confirming a proposal is a different write path — relabelling an image
+    // already in the training set must not go back through it.
+    expect(api.confirmNewDedupProposal).not.toHaveBeenCalled();
+  });
+
+  it('offers no tag picker on a dismissed proposal (it is not in the training set)', async () => {
+    vi.mocked(api.listNewDedupProposals).mockResolvedValue({
+      data: [{ ...PROPOSALS[0], status: 'dismissed', reviewed_by: 'operator' }],
+    });
+    renderPage();
+    fireEvent.click(await screen.findByRole('tab', { name: 'Dismissed' }));
+    await waitFor(() => expect(screen.getByText(/dismissed/)).toBeInTheDocument());
+    expect(screen.queryByPlaceholderText('tag…')).not.toBeInTheDocument();
   });
 
   it('dismisses a single proposal and refetches the proposals list', async () => {

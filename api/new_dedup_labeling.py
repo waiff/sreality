@@ -43,6 +43,10 @@ class GrowSampleIn(BaseModel):
 class ProposalActionIn(BaseModel):
     image_id: int
     model: str
+    # Set when the operator corrects a wrong suggestion before accepting it —
+    # this label lands in the training set instead of the proposed one. Unset
+    # (or blank) accepts the proposal as-is. Ignored by the dismiss route.
+    label: str | None = None
 
 
 class BulkProposalActionIn(BaseModel):
@@ -126,11 +130,17 @@ def post_confirm_proposal(
     body: ProposalActionIn, conn: Any = Depends(deps.get_db_conn),
 ) -> dict[str, Any]:
     """Accept a proposal into the confirmed training set
-    (image_training_examples)."""
+    (image_training_examples), optionally under a corrected label."""
     try:
-        return {"data": dsl.confirm_proposal(conn, image_id=body.image_id, model=body.model)}
+        return {
+            "data": dsl.confirm_proposal(
+                conn, image_id=body.image_id, model=body.model, label=body.label,
+            )
+        }
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="proposal not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.post("/proposals/dismiss")
