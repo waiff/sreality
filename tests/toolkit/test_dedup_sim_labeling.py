@@ -30,7 +30,19 @@ class _Cur:
         self._conn.executed.append((s, params))
         c = self._conn
 
-        if s.startswith("INSERT INTO dedup_sim.taxonomy_labels"):
+        # confirm_proposal's register-a-correction insert: 2 params, and a
+        # duplicate is a silent no-op rather than a UniqueViolation.
+        if s.startswith("INSERT INTO dedup_sim.taxonomy_labels") and "ON CONFLICT" in s:
+            label, created_by = params
+            if not any(t["label"] == label for t in c.taxonomy.values()):
+                c.next_taxonomy_id += 1
+                c.taxonomy[c.next_taxonomy_id] = {
+                    "id": c.next_taxonomy_id, "label": label, "family": None,
+                    "active": True, "created_at": "2026-08-06T00:00:00Z",
+                }
+            self._rows = []
+
+        elif s.startswith("INSERT INTO dedup_sim.taxonomy_labels"):
             label, family, created_by = params
             if any(t["label"] == label for t in c.taxonomy.values()):
                 raise c.UniqueViolation(f"duplicate label {label!r}")
@@ -549,8 +561,102 @@ def test_confirm_proposal_writes_training_example(conn: _FakeConn) -> None:
     }
     result = dsl.confirm_proposal(conn, image_id=1, model="m1")
     assert result["status"] == "confirmed"
+    assert result["corrected"] is False
     assert conn.proposals[(1, "m1")]["status"] == "confirmed"
     assert conn.training_examples[1]["label"] == "a"
+
+
+def test_confirm_proposal_with_corrected_label(conn: _FakeConn) -> None:
+    conn.proposals[(1, "m1")] = {
+        "image_id": 1, "model": "m1", "label": "a", "confidence": 0.9,
+        "proposed_at": "t", "status": "pending",
+    }
+    result = dsl.confirm_proposal(conn, image_id=1, model="m1", label="  b  ")
+    # The operator's correction is what lands in the training set...
+    assert conn.training_examples[1]["label"] == "b"
+    assert result["label"] == "b"
+    assert result["corrected"] is True
+    # ...while the proposal keeps the model's own prediction, so "model said a,
+    # operator said b" stays derivable without an extra column.
+    assert result["proposed_label"] == "a"
+    assert conn.proposals[(1, "m1")]["label"] == "a"
+
+
+def test_confirm_proposal_registers_a_freehand_correction_in_the_taxonomy(
+    conn: _FakeConn,
+) -> None:
+    # The coverage chart, the tag picker and the secondary-CLIP backfill all
+    # read dedup_sim.taxonomy_labels — a correction that only reached
+    # image_training_examples would be invisible to every one of them, and the
+    # model could never propose that class again.
+    conn.proposals[(1, "m1")] = {
+        "image_id": 1, "model": "m1", "label": "a", "confidence": 0.9,
+        "proposed_at": "t", "status": "pending",
+    }
+    assert not any(t["label"] == "brand-new-tag" for t in conn.taxonomy.values())
+
+    dsl.confirm_proposal(conn, image_id=1, model="m1", label="brand-new-tag")
+
+    assert any(t["label"] == "brand-new-tag" for t in conn.taxonomy.values())
+    assert conn.training_examples[1]["label"] == "brand-new-tag"
+
+
+def test_confirm_proposal_does_not_duplicate_an_existing_taxonomy_label(
+    conn: _FakeConn,
+) -> None:
+    dsl.add_taxonomy_label(conn, label="existing")
+    before = len(conn.taxonomy)
+    conn.proposals[(1, "m1")] = {
+        "image_id": 1, "model": "m1", "label": "a", "confidence": 0.9,
+        "proposed_at": "t", "status": "pending",
+    }
+    dsl.confirm_proposal(conn, image_id=1, model="m1", label="existing")
+    assert len(conn.taxonomy) == before
+
+
+def test_confirm_proposal_without_a_correction_touches_no_taxonomy_row(
+    conn: _FakeConn,
+) -> None:
+    conn.proposals[(1, "m1")] = {
+        "image_id": 1, "model": "m1", "label": "a", "confidence": 0.9,
+        "proposed_at": "t", "status": "pending",
+    }
+    dsl.confirm_proposal(conn, image_id=1, model="m1")
+    assert conn.taxonomy == {}
+
+
+def test_confirm_proposal_blank_label_falls_back_to_the_proposal(conn: _FakeConn) -> None:
+    conn.proposals[(1, "m1")] = {
+        "image_id": 1, "model": "m1", "label": "a", "confidence": 0.9,
+        "proposed_at": "t", "status": "pending",
+    }
+    result = dsl.confirm_proposal(conn, image_id=1, model="m1", label="   ")
+    assert conn.training_examples[1]["label"] == "a"
+    assert result["corrected"] is False
+
+
+def test_confirm_proposal_same_label_is_not_flagged_as_corrected(conn: _FakeConn) -> None:
+    conn.proposals[(1, "m1")] = {
+        "image_id": 1, "model": "m1", "label": "a", "confidence": 0.9,
+        "proposed_at": "t", "status": "pending",
+    }
+    # The UI always sends the picker's value, which is seeded from the
+    # proposal — an untouched Confirm must not read as a correction.
+    result = dsl.confirm_proposal(conn, image_id=1, model="m1", label="a")
+    assert result["corrected"] is False
+
+
+def test_confirm_proposal_rejects_an_overlong_correction(conn: _FakeConn) -> None:
+    conn.proposals[(1, "m1")] = {
+        "image_id": 1, "model": "m1", "label": "a", "confidence": 0.9,
+        "proposed_at": "t", "status": "pending",
+    }
+    with pytest.raises(ValueError):
+        dsl.confirm_proposal(conn, image_id=1, model="m1", label="x" * 101)
+    # Rejected at the boundary — nothing was written, and the proposal is
+    # still pending for a retry with a valid label.
+    assert conn.training_examples == {}
+    assert conn.proposals[(1, "m1")]["status"] == "pending"
 
 
 def test_confirm_proposal_unknown_raises(conn: _FakeConn) -> None:
