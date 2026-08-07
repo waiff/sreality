@@ -120,8 +120,15 @@ def get_proposals(
     status: str | None = None, label: str | None = None, limit: int = 100,
     conn: Any = Depends(deps.get_db_conn),
 ) -> dict[str, Any]:
-    """List proposals, optionally filtered by status ('pending' /
-    'confirmed' / 'dismissed') and/or label."""
+    """List proposals, optionally filtered by status ('all' / 'pending' /
+    'confirmed' / 'dismissed') and/or label. An unknown status is a 422
+    rather than a silent unfiltered listing — a typo'd tab would otherwise
+    read as "every proposal" and look like a working filter."""
+    if status is not None and status not in dsl.LIST_STATUSES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"status must be one of {', '.join(dsl.LIST_STATUSES)}",
+        )
     return {"data": dsl.list_proposals(conn, status=status, label=label, limit=limit)}
 
 

@@ -226,13 +226,19 @@ def grow_sample(
 
 # --- proposals --------------------------------------------------------------
 
+# `proposed_at` is NOT a tiebreaker on its own: the backfill inserts a whole
+# batch inside one transaction, so every row in it shares the same now(), and
+# an unqualified ORDER BY proposed_at DESC leaves Postgres free to return ties
+# in a different order on every call — the review grid reshuffling under the
+# operator between refetches. image_id makes the sort total (it's in the PK).
 _LIST_PROPOSALS_SQL = """
-    SELECT image_id, model, label, confidence, proposed_at, status,
-           reviewed_at, reviewed_by
-    FROM dedup_sim.label_proposals
-    WHERE (%(status)s::text IS NULL OR status = %(status)s)
-      AND (%(label)s::text IS NULL OR label = %(label)s)
-    ORDER BY proposed_at DESC
+    SELECT lp.image_id, lp.model, lp.label, lp.confidence, lp.proposed_at, lp.status,
+           lp.reviewed_at, lp.reviewed_by, te.label AS trained_label
+    FROM dedup_sim.label_proposals lp
+    LEFT JOIN image_training_examples te ON te.image_id = lp.image_id
+    WHERE (%(status)s::text IS NULL OR lp.status = %(status)s)
+      AND (%(label)s::text IS NULL OR lp.label = %(label)s)
+    ORDER BY lp.proposed_at DESC, lp.image_id DESC
     LIMIT %(limit)s
 """
 
@@ -266,11 +272,54 @@ _LIST_CONFIRMED_SQL = """
       ORDER BY te.image_id, lp.proposed_at DESC NULLS LAST
     )
     SELECT image_id, model, label, confidence, proposed_at, status,
-           reviewed_at, reviewed_by
+           reviewed_at, reviewed_by, label AS trained_label
     FROM confirmed
-    ORDER BY proposed_at DESC
+    ORDER BY proposed_at DESC, image_id DESC
     LIMIT %(limit)s
 """
+
+# The 'all' tab: the union of the other three, so a tile keeps its position
+# when its status changes under it (the page greys reviewed rows rather than
+# moving them). Same two sources as above — label_proposals for what a model
+# suggested, image_training_examples for what the operator actually confirmed
+# — with `trained_label` carried on every row so the page can grey the
+# already-tagged ones without a second query. A confirmed row shows the
+# CURRENT training label for the same reason _LIST_CONFIRMED_SQL does: the
+# proposal keeps the model's own prediction, which goes stale the moment the
+# operator corrects it.
+_LIST_ALL_SQL = """
+    WITH all_rows AS (
+      SELECT
+        lp.image_id,
+        lp.model,
+        CASE WHEN lp.status = 'confirmed' THEN COALESCE(te.label, lp.label)
+             ELSE lp.label END AS label,
+        lp.confidence,
+        lp.proposed_at,
+        lp.status,
+        lp.reviewed_at,
+        lp.reviewed_by,
+        te.label AS trained_label
+      FROM dedup_sim.label_proposals lp
+      LEFT JOIN image_training_examples te ON te.image_id = lp.image_id
+      UNION ALL
+      SELECT
+        te.image_id, 'manual'::text, te.label, NULL::real, te.created_at,
+        'confirmed'::text, te.updated_at, te.created_by, te.label
+      FROM image_training_examples te
+      WHERE NOT EXISTS (
+        SELECT 1 FROM dedup_sim.label_proposals lp WHERE lp.image_id = te.image_id
+      )
+    )
+    SELECT image_id, model, label, confidence, proposed_at, status,
+           reviewed_at, reviewed_by, trained_label
+    FROM all_rows
+    WHERE (%(label)s::text IS NULL OR label = %(label)s)
+    ORDER BY proposed_at DESC, image_id DESC
+    LIMIT %(limit)s
+"""
+
+LIST_STATUSES = ("all", "pending", "confirmed", "dismissed")
 
 
 def list_proposals(
@@ -279,10 +328,15 @@ def list_proposals(
 ) -> list[dict[str, Any]]:
     """List proposals for the review grid. status='confirmed' is special-cased to union
     in image_training_examples rows with no matching confirmed proposal (see
-    _LIST_CONFIRMED_SQL) — every other status is a plain label_proposals filter."""
+    _LIST_CONFIRMED_SQL); status='all' is the union of all three tabs (_LIST_ALL_SQL);
+    every other status is a plain label_proposals filter. Every row carries
+    `trained_label` — the image's current image_training_examples label, or None —
+    so the caller can tell an already-tagged image from an untouched one."""
     limit = min(max(1, limit), PROPOSAL_LIST_MAX)
     if status == "confirmed":
         sql, params = _LIST_CONFIRMED_SQL, {"label": label, "limit": limit}
+    elif status == "all":
+        sql, params = _LIST_ALL_SQL, {"label": label, "limit": limit}
     else:
         sql, params = _LIST_PROPOSALS_SQL, {"status": status, "label": label, "limit": limit}
     with conn.cursor() as cur:
@@ -292,6 +346,7 @@ def list_proposals(
         {
             "image_id": r[0], "model": r[1], "label": r[2], "confidence": r[3],
             "proposed_at": r[4], "status": r[5], "reviewed_at": r[6], "reviewed_by": r[7],
+            "trained_label": r[8],
         }
         for r in rows
     ]

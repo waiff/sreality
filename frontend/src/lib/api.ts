@@ -762,7 +762,17 @@ export interface NewDedupLabelProposal {
   status: 'pending' | 'confirmed' | 'dismissed';
   reviewed_at: string | null;
   reviewed_by: string | null;
+  /* The image's CURRENT image_training_examples label, or null when it isn't in
+   * the training set at all — how the All tab tells an already-tagged image
+   * from one still waiting, without a second query. Not the same as `label`:
+   * a pending row's label is the model's suggestion, and a dismissed row's is
+   * what got rejected. */
+  trained_label: string | null;
 }
+/* `status` is 'all' | 'pending' | 'confirmed' | 'dismissed' — 'all' being the
+ * union of the other three (proposals of every status plus training examples
+ * that never had a proposal). An unknown value is a 422, not a silent
+ * unfiltered listing. */
 export const listNewDedupProposals = (params: {
   status?: string;
   label?: string;

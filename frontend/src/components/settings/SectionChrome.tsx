@@ -126,7 +126,7 @@ export function InfoModeToggle({
 /* long) via the same `settings.collapsed.<id>` scheme both pages share.  */
 /* -------------------------------------------------------------------- */
 
-function useCollapsed(id: string, defaultOpen: boolean): [boolean, () => void] {
+export function useCollapsed(id: string, defaultOpen: boolean): [boolean, () => void] {
   const key = `settings.collapsed.${id}`;
   const [open, setOpen] = useState<boolean>(() => {
     try {

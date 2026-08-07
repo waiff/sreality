@@ -83,7 +83,7 @@ const PROPOSALS: NewDedupLabelProposal[] = [
   {
     image_id: 101, model: 'openai/clip-vit-large-patch14', label: 'interier - kuchyne',
     confidence: 0.87, proposed_at: '2026-08-06T00:00:00Z', status: 'pending',
-    reviewed_at: null, reviewed_by: null,
+    reviewed_at: null, reviewed_by: null, trained_label: null,
   },
 ];
 
@@ -112,6 +112,9 @@ function renderPage() {
 describe('<NewDedupLabeling>', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // The taxonomy chart's collapsed state persists in localStorage — without
+    // this, one test's collapse leaks into every test that follows.
+    localStorage.clear();
     vi.mocked(api.getNewDedupLabelingOverview).mockResolvedValue({ data: OVERVIEW });
     vi.mocked(api.listNewDedupSettings).mockResolvedValue({ data: SETTINGS });
     vi.mocked(api.listNewDedupProposals).mockResolvedValue({ data: PROPOSALS });
@@ -239,7 +242,9 @@ describe('<NewDedupLabeling>', () => {
 
     // The filter must still read "interier - kuchyne" — no call to
     // listNewDedupProposals with label 'koupelna-v2' should ever happen.
-    expect(screen.getByText(/Filtered to/)).toHaveTextContent('interier - kuchyne');
+    expect((screen.getByLabelText('Tag') as HTMLSelectElement).value).toBe(
+      'interier - kuchyne',
+    );
     expect(api.listNewDedupProposals).not.toHaveBeenCalledWith(
       expect.objectContaining({ label: 'koupelna-v2' }),
     );
@@ -251,13 +256,17 @@ describe('<NewDedupLabeling>', () => {
     });
     renderPage();
     fireEvent.click(await screen.findByRole('button', { name: 'interier - kuchyne' }));
-    await waitFor(() => expect(screen.getByText(/Filtered to/)).toBeInTheDocument());
+    await waitFor(() =>
+      expect((screen.getByLabelText('Tag') as HTMLSelectElement).value).toBe(
+        'interier - kuchyne',
+      ),
+    );
 
     fireEvent.click(screen.getByText('Modify labels'));
     fireEvent.click(await screen.findByLabelText('Remove interier - kuchyne'));
     fireEvent.click(screen.getByText('Remove'));
     await waitFor(() => expect(api.removeNewDedupTaxonomyLabel).toHaveBeenCalledWith(1));
-    expect(screen.queryByText(/Filtered to/)).not.toBeInTheDocument();
+    expect((screen.getByLabelText('Tag') as HTMLSelectElement).value).toBe('');
   });
 
   it('grows the sample with the entered count', async () => {
@@ -309,17 +318,11 @@ describe('<NewDedupLabeling>', () => {
     await waitFor(() => expect(screen.getByText('kuchyně')).toBeInTheDocument());
   });
 
-  it('confirms a single proposal, refetches, and the tile leaves the pending grid', async () => {
+  it('confirms a single proposal and drops that tile from Pending WITHOUT refetching the grid', async () => {
     vi.mocked(api.confirmNewDedupProposal).mockResolvedValue({ data: CONFIRM_RESULT });
-    // First load returns the pending proposal; the post-confirm refetch
-    // (triggered by invalidateProposals) returns none — proves the
-    // invalidation actually fires and the grid reflects it, not just that
-    // confirmNewDedupProposal was called with the right args.
-    vi.mocked(api.listNewDedupProposals)
-      .mockResolvedValueOnce({ data: PROPOSALS })
-      .mockResolvedValue({ data: [] });
     renderPage();
     await screen.findByText('Confirm');
+    const callsBefore = vi.mocked(api.listNewDedupProposals).mock.calls.length;
     fireEvent.click(screen.getByText('Confirm'));
     await waitFor(() =>
       // An untouched Confirm sends NO label — the server then uses the
@@ -329,9 +332,40 @@ describe('<NewDedupLabeling>', () => {
         101, 'openai/clip-vit-large-patch14', undefined,
       ),
     );
-    await waitFor(() => expect(api.listNewDedupProposals).toHaveBeenCalledTimes(2));
+    // The reviewed tile leaves this tab — but by a local cache patch, not a
+    // refetch. Refetching re-renders (and, on tied proposed_at values,
+    // re-orders) every remaining tile, which is the churn this page avoids.
     await waitFor(() => expect(screen.getByText('No pending proposals.')).toBeInTheDocument());
-    expect(screen.queryByText('Confirm')).not.toBeInTheDocument();
+    expect(vi.mocked(api.listNewDedupProposals).mock.calls.length).toBe(callsBefore);
+  });
+
+  it('leaves every other tile untouched when one is confirmed on Pending', async () => {
+    vi.mocked(api.confirmNewDedupProposal).mockResolvedValue({ data: CONFIRM_RESULT });
+    vi.mocked(api.listNewDedupProposals).mockResolvedValue({
+      data: [
+        PROPOSALS[0],
+        { ...PROPOSALS[0], image_id: 102, label: 'exterier - fasada' },
+        { ...PROPOSALS[0], image_id: 103, label: 'garaz' },
+      ],
+    });
+    vi.mocked(queries.fetchImagesByImageIds).mockResolvedValue(
+      new Map([
+        [101, IMAGE], [102, { ...IMAGE, id: 102 }], [103, { ...IMAGE, id: 103 }],
+      ]),
+    );
+    renderPage();
+    await waitFor(() => expect(screen.getAllByPlaceholderText('tag…')).toHaveLength(3));
+    const imageCallsBefore = vi.mocked(queries.fetchImagesByImageIds).mock.calls.length;
+
+    fireEvent.click(screen.getAllByText('Confirm')[0]);
+
+    await waitFor(() => expect(screen.getAllByPlaceholderText('tag…')).toHaveLength(2));
+    // Order preserved, and no image re-fetch: the photo cache accumulates by
+    // id instead of being keyed on the current (now changed) id list.
+    expect(
+      screen.getAllByPlaceholderText('tag…').map((i) => (i as HTMLInputElement).value),
+    ).toEqual(['exterier - fasada', 'garaz']);
+    expect(vi.mocked(queries.fetchImagesByImageIds).mock.calls.length).toBe(imageCallsBefore);
   });
 
   it('confirms with a corrected tag when the suggestion is wrong', async () => {
@@ -468,31 +502,28 @@ describe('<NewDedupLabeling>', () => {
     expect(screen.queryByPlaceholderText('tag…')).not.toBeInTheDocument();
   });
 
-  it('dismisses a single proposal and refetches the proposals list', async () => {
+  it('dismisses a single proposal and drops the tile without refetching the grid', async () => {
     vi.mocked(api.dismissNewDedupProposal).mockResolvedValue({ data: PROPOSALS[0] });
     renderPage();
-    const callsBefore = vi.mocked(api.listNewDedupProposals).mock.calls.length;
     await screen.findByText('Dismiss');
+    const callsBefore = vi.mocked(api.listNewDedupProposals).mock.calls.length;
     fireEvent.click(screen.getByText('Dismiss'));
     await waitFor(() =>
       expect(api.dismissNewDedupProposal).toHaveBeenCalledWith(
         101, 'openai/clip-vit-large-patch14',
       ),
     );
-    await waitFor(() =>
-      expect(vi.mocked(api.listNewDedupProposals).mock.calls.length).toBeGreaterThan(callsBefore),
-    );
+    await waitFor(() => expect(screen.getByText('No pending proposals.')).toBeInTheDocument());
+    expect(vi.mocked(api.listNewDedupProposals).mock.calls.length).toBe(callsBefore);
   });
 
-  it('batch-confirms selected proposals, refetches, and the grid empties', async () => {
+  it('batch-confirms selected proposals and the grid empties in place', async () => {
     vi.mocked(api.bulkConfirmNewDedupProposals).mockResolvedValue({
       data: { confirmed: 1, model: 'openai/clip-vit-large-patch14', image_ids: [101] },
     });
-    vi.mocked(api.listNewDedupProposals)
-      .mockResolvedValueOnce({ data: PROPOSALS })
-      .mockResolvedValue({ data: [] });
     renderPage();
     await screen.findByText('Select all');
+    const callsBefore = vi.mocked(api.listNewDedupProposals).mock.calls.length;
     fireEvent.click(screen.getByText('Select all'));
     fireEvent.click(screen.getByText('Confirm selected'));
     await waitFor(() =>
@@ -501,6 +532,7 @@ describe('<NewDedupLabeling>', () => {
       ),
     );
     await waitFor(() => expect(screen.getByText('No pending proposals.')).toBeInTheDocument());
+    expect(vi.mocked(api.listNewDedupProposals).mock.calls.length).toBe(callsBefore);
   });
 
   it('switching status tabs re-queries proposals with the new status', async () => {
@@ -512,5 +544,189 @@ describe('<NewDedupLabeling>', () => {
         expect.objectContaining({ status: 'confirmed' }),
       ),
     );
+  });
+
+  // --- chart collapse ------------------------------------------------------
+
+  it('collapses the taxonomy chart, keeping its header (and the coverage filter) reachable', async () => {
+    renderPage();
+    const bar = await screen.findByRole('button', { name: 'interier - kuchyne' });
+    expect(bar).toBeInTheDocument();
+
+    const header = screen.getByRole('button', { expanded: true });
+    fireEvent.click(header);
+
+    expect(screen.queryByRole('button', { name: 'interier - kuchyne' })).not.toBeInTheDocument();
+    // Folded, but not gone: the header and the tag-coverage ceiling it carries
+    // stay usable, and the label count is still readable.
+    expect(screen.getByRole('button', { expanded: false })).toBeInTheDocument();
+    expect(screen.getByLabelText('Max training images per tag')).toBeInTheDocument();
+    expect(screen.getByText(/Taxonomy v1 \(1 labels/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { expanded: false }));
+    expect(await screen.findByRole('button', { name: 'interier - kuchyne' })).toBeInTheDocument();
+  });
+
+  // --- tag + coverage filters ---------------------------------------------
+
+  it('filters the grid to one tag from the tag select', async () => {
+    renderPage();
+    await screen.findByRole('button', { name: 'interier - kuchyne' });
+    fireEvent.change(screen.getByLabelText('Tag'), {
+      target: { value: 'interier - kuchyne' },
+    });
+    await waitFor(() =>
+      expect(api.listNewDedupProposals).toHaveBeenCalledWith(
+        expect.objectContaining({ label: 'interier - kuchyne', status: 'pending' }),
+      ),
+    );
+  });
+
+  it('narrows both the chart and the tag select to tags still short of training images', async () => {
+    vi.mocked(api.getNewDedupLabelingOverview).mockResolvedValue({
+      data: {
+        sample_size: 42,
+        labels: [
+          { id: 1, label: 'interier - kuchyne', family: null, active: true,
+            created_at: 't', confirmed_count: 12, pending_count: 0, dismissed_count: 0 },
+          { id: 2, label: 'exterier - fasada', family: null, active: true,
+            created_at: 't', confirmed_count: 200, pending_count: 0, dismissed_count: 0 },
+        ],
+      },
+    });
+    renderPage();
+    await screen.findByRole('button', { name: 'exterier - fasada' });
+
+    fireEvent.change(screen.getByLabelText('Max training images per tag'), {
+      target: { value: '50' },
+    });
+
+    // The well-covered tag drops out of the chart AND out of the tag select —
+    // the point of the filter is to work through what's still short of Gate 1.
+    await waitFor(() =>
+      expect(screen.queryByRole('button', { name: 'exterier - fasada' })).not.toBeInTheDocument(),
+    );
+    expect(screen.getByRole('button', { name: 'interier - kuchyne' })).toBeInTheDocument();
+    const tagSelect = screen.getByLabelText('Tag') as HTMLSelectElement;
+    expect([...tagSelect.options].map((o) => o.textContent)).toEqual([
+      'All tags', 'interier - kuchyne (12)',
+    ]);
+    expect(screen.getByText(/1 of 2 tags/)).toBeInTheDocument();
+  });
+
+  it('never hides the tag the grid is currently filtered to, whatever the ceiling', async () => {
+    vi.mocked(api.getNewDedupLabelingOverview).mockResolvedValue({
+      data: {
+        sample_size: 42,
+        labels: [
+          { id: 2, label: 'exterier - fasada', family: null, active: true,
+            created_at: 't', confirmed_count: 200, pending_count: 0, dismissed_count: 0 },
+        ],
+      },
+    });
+    renderPage();
+    // Wait for the taxonomy to land, else the select has no option to pick yet.
+    await screen.findByRole('button', { name: 'exterier - fasada' });
+    fireEvent.change(screen.getByLabelText('Tag'), {
+      target: { value: 'exterier - fasada' },
+    });
+    fireEvent.change(screen.getByLabelText('Max training images per tag'), {
+      target: { value: '10' },
+    });
+    // Otherwise the select would read "All tags" while the grid stayed filtered.
+    expect((screen.getByLabelText('Tag') as HTMLSelectElement).value).toBe('exterier - fasada');
+  });
+
+  it('leaves the per-tile tag picker offering the WHOLE taxonomy, ceiling or not', async () => {
+    vi.mocked(api.getNewDedupLabelingOverview).mockResolvedValue({
+      data: {
+        sample_size: 42,
+        labels: [
+          { id: 1, label: 'interier - kuchyne', family: null, active: true,
+            created_at: 't', confirmed_count: 12, pending_count: 0, dismissed_count: 0 },
+          { id: 2, label: 'exterier - fasada', family: null, active: true,
+            created_at: 't', confirmed_count: 200, pending_count: 0, dismissed_count: 0 },
+        ],
+      },
+    });
+    renderPage();
+    await screen.findByRole('button', { name: 'exterier - fasada' });
+    fireEvent.change(screen.getByLabelText('Max training images per tag'), {
+      target: { value: '50' },
+    });
+
+    // The ceiling picks what to WORK ON; it must never restrict what a wrong
+    // suggestion can be corrected to.
+    fireEvent.focus(await screen.findByPlaceholderText('tag…'));
+    const options = within(await screen.findByRole('listbox')).getAllByRole('option');
+    expect(options.map((o) => o.textContent)).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining('exterier - fasada'),
+        expect.stringContaining('interier - kuchyne'),
+      ]),
+    );
+  });
+
+  // --- the All tab ---------------------------------------------------------
+
+  const MIXED: NewDedupLabelProposal[] = [
+    { ...PROPOSALS[0], image_id: 101, label: 'interier - kuchyne', status: 'pending',
+      trained_label: null },
+    { ...PROPOSALS[0], image_id: 102, label: 'exterier - fasada', status: 'confirmed',
+      reviewed_by: 'operator', trained_label: 'exterier - fasada' },
+    { ...PROPOSALS[0], image_id: 103, label: 'garaz', status: 'dismissed',
+      reviewed_by: 'operator', trained_label: null },
+  ];
+
+  it('greys out the already-handled tiles on All and leaves the pending one bright', async () => {
+    vi.mocked(api.listNewDedupProposals).mockResolvedValue({ data: MIXED });
+    vi.mocked(queries.fetchImagesByImageIds).mockResolvedValue(
+      new Map([[101, IMAGE], [102, { ...IMAGE, id: 102 }], [103, { ...IMAGE, id: 103 }]]),
+    );
+    renderPage();
+    fireEvent.click(await screen.findByRole('tab', { name: 'All' }));
+    await waitFor(() =>
+      expect(api.listNewDedupProposals).toHaveBeenCalledWith(
+        expect.objectContaining({ status: 'all' }),
+      ),
+    );
+
+    // One tile still awaits a decision; the tagged and the dismissed ones recede.
+    await waitFor(() => expect(document.querySelectorAll('[data-dimmed]')).toHaveLength(2));
+    // The bright one is the pending row — it's the only tile with Confirm/Dismiss.
+    expect(screen.getAllByText('Confirm')).toHaveLength(1);
+  });
+
+  it('confirming on All greys the tile in place instead of moving or reordering anything', async () => {
+    vi.mocked(api.listNewDedupProposals).mockResolvedValue({ data: MIXED });
+    vi.mocked(api.confirmNewDedupProposal).mockResolvedValue({ data: CONFIRM_RESULT });
+    vi.mocked(queries.fetchImagesByImageIds).mockResolvedValue(
+      new Map([[101, IMAGE], [102, { ...IMAGE, id: 102 }], [103, { ...IMAGE, id: 103 }]]),
+    );
+    renderPage();
+    fireEvent.click(await screen.findByRole('tab', { name: 'All' }));
+    await waitFor(() => expect(screen.getAllByPlaceholderText('tag…')).toHaveLength(2));
+    const callsBefore = vi.mocked(api.listNewDedupProposals).mock.calls.length;
+
+    fireEvent.click(screen.getByText('Confirm'));
+
+    // Same three tiles, same order, one more greyed and no refetch: this tab
+    // is where the operator works continuously, so nothing may move.
+    await waitFor(() => expect(document.querySelectorAll('[data-dimmed]')).toHaveLength(3));
+    expect(screen.queryByText('Confirm')).not.toBeInTheDocument();
+    expect(vi.mocked(api.listNewDedupProposals).mock.calls.length).toBe(callsBefore);
+    expect(
+      screen.getAllByPlaceholderText('tag…').map((i) => (i as HTMLInputElement).value),
+    ).toEqual(['interier - kuchyne', 'exterier - fasada']);
+  });
+
+  it('offers the batch bar for pending rows on the All tab too', async () => {
+    vi.mocked(api.listNewDedupProposals).mockResolvedValue({ data: MIXED });
+    renderPage();
+    fireEvent.click(await screen.findByRole('tab', { name: 'All' }));
+    // Exactly the one pending row is selectable — a confirmed/dismissed row
+    // can't be batch-reviewed again.
+    fireEvent.click(await screen.findByText('Select all'));
+    expect(screen.getByText('1 selected')).toBeInTheDocument();
   });
 });

@@ -144,20 +144,47 @@ class _Cur:
                         break
             self.rowcount = added
 
-        elif s.startswith("SELECT image_id, model, label, confidence"):
+        elif s.startswith("SELECT lp.image_id, lp.model, lp.label, lp.confidence"):
             kw = params
             rows = [
                 p for p in c.proposals.values()
                 if (kw.get("status") is None or p["status"] == kw["status"])
                 and (kw.get("label") is None or p["label"] == kw["label"])
             ]
-            rows.sort(key=lambda p: p["proposed_at"], reverse=True)
+            rows.sort(key=lambda p: (p["proposed_at"], p["image_id"]), reverse=True)
             rows = rows[: kw["limit"]]
             self._rows = [
                 (p["image_id"], p["model"], p["label"], p["confidence"], p["proposed_at"],
-                 p["status"], p.get("reviewed_at"), p.get("reviewed_by"))
+                 p["status"], p.get("reviewed_at"), p.get("reviewed_by"),
+                 (c.training_examples.get(p["image_id"]) or {}).get("label"))
                 for p in rows
             ]
+
+        elif s.startswith("WITH all_rows AS"):
+            # Mirrors _LIST_ALL_SQL: every proposal row (a confirmed one showing
+            # the CURRENT training label), plus training examples that never had
+            # a proposal at all, as synthetic 'manual' rows.
+            kw = params
+            rows = []
+            for p in c.proposals.values():
+                trained = (c.training_examples.get(p["image_id"]) or {}).get("label")
+                label = trained if (p["status"] == "confirmed" and trained) else p["label"]
+                rows.append((
+                    p["image_id"], p["model"], label, p["confidence"], p["proposed_at"],
+                    p["status"], p.get("reviewed_at"), p.get("reviewed_by"), trained,
+                ))
+            proposed_image_ids = {p["image_id"] for p in c.proposals.values()}
+            for te in c.training_examples.values():
+                if te["image_id"] in proposed_image_ids:
+                    continue
+                rows.append((
+                    te["image_id"], "manual", te["label"], None, te.get("created_at", "t"),
+                    "confirmed", te.get("updated_at", "t"), te.get("created_by"), te["label"],
+                ))
+            if kw.get("label") is not None:
+                rows = [r for r in rows if r[2] == kw["label"]]
+            rows.sort(key=lambda r: (r[4], r[0]), reverse=True)
+            self._rows = rows[: kw["limit"]]
 
         elif s.startswith("WITH confirmed AS"):
             # Mirrors _LIST_CONFIRMED_SQL: driven FROM training_examples (one row per
@@ -186,9 +213,9 @@ class _Cur:
                     reviewed_by = te.get("created_by")
                 rows.append((
                     te["image_id"], model, te["label"], confidence, proposed_at,
-                    "confirmed", reviewed_at, reviewed_by,
+                    "confirmed", reviewed_at, reviewed_by, te["label"],
                 ))
-            rows.sort(key=lambda r: r[4], reverse=True)
+            rows.sort(key=lambda r: (r[4], r[0]), reverse=True)
             self._rows = rows[: kw["limit"]]
 
         elif s.startswith("UPDATE dedup_sim.label_proposals SET status = 'confirmed'") \
@@ -552,6 +579,95 @@ def test_list_proposals_confirmed_respects_label_filter(conn: _FakeConn) -> None
 
     confirmed = dsl.list_proposals(conn, status="confirmed", label="a")
     assert [r["image_id"] for r in confirmed] == [1]
+
+
+def test_list_proposals_carries_the_current_training_label(conn: _FakeConn) -> None:
+    # `trained_label` is how the page tells an already-tagged image from an
+    # untouched one WITHOUT a second query — image 1 is in the training set
+    # (from /clip-audit, before this proposal ever existed), image 2 isn't.
+    conn.proposals[(1, "m1")] = {
+        "image_id": 1, "model": "m1", "label": "a", "confidence": 0.9,
+        "proposed_at": "t2", "status": "pending",
+    }
+    conn.proposals[(2, "m1")] = {
+        "image_id": 2, "model": "m1", "label": "a", "confidence": 0.9,
+        "proposed_at": "t1", "status": "pending",
+    }
+    conn.training_examples[1] = {"image_id": 1, "label": "koupelna", "created_by": "operator"}
+
+    rows = {r["image_id"]: r for r in dsl.list_proposals(conn, status="pending")}
+    assert rows[1]["trained_label"] == "koupelna"
+    assert rows[2]["trained_label"] is None
+
+
+def test_list_proposals_all_is_the_union_of_the_three_tabs(conn: _FakeConn) -> None:
+    conn.proposals[(1, "m1")] = {
+        "image_id": 1, "model": "m1", "label": "a", "confidence": 0.9,
+        "proposed_at": "t4", "status": "pending",
+    }
+    conn.proposals[(2, "m1")] = {
+        "image_id": 2, "model": "m1", "label": "b", "confidence": 0.8,
+        "proposed_at": "t3", "status": "confirmed",
+    }
+    conn.training_examples[2] = {"image_id": 2, "label": "b", "created_by": "operator"}
+    conn.proposals[(3, "m1")] = {
+        "image_id": 3, "model": "m1", "label": "c", "confidence": 0.7,
+        "proposed_at": "t2", "status": "dismissed",
+    }
+    # trained elsewhere, never proposed — still part of "all".
+    conn.training_examples[4] = {
+        "image_id": 4, "label": "d", "created_by": "operator", "created_at": "t1",
+    }
+
+    rows = dsl.list_proposals(conn, status="all")
+    assert [r["image_id"] for r in rows] == [1, 2, 3, 4]
+    assert {r["image_id"]: r["status"] for r in rows} == {
+        1: "pending", 2: "confirmed", 3: "dismissed", 4: "confirmed",
+    }
+    assert rows[3]["model"] == "manual"
+    # Only the reviewed-and-kept ones count as already tagged.
+    assert {r["image_id"] for r in rows if r["trained_label"] is not None} == {2, 4}
+
+
+def test_list_proposals_all_shows_a_corrected_label_not_the_model_s_guess(
+    conn: _FakeConn,
+) -> None:
+    # The operator confirmed image 1 under a corrected label; the proposal row
+    # deliberately keeps the model's own prediction (that's the record of what
+    # the encoder said), so the 'all' listing must read the training set.
+    conn.proposals[(1, "m1")] = {
+        "image_id": 1, "model": "m1", "label": "kuchyne", "confidence": 0.9,
+        "proposed_at": "t", "status": "confirmed",
+    }
+    conn.training_examples[1] = {"image_id": 1, "label": "koupelna", "created_by": "operator"}
+
+    rows = dsl.list_proposals(conn, status="all")
+    assert rows[0]["label"] == "koupelna"
+    assert dsl.list_proposals(conn, status="all", label="kuchyne") == []
+
+
+def test_list_proposals_all_keeps_a_dismissed_row_showing_what_was_rejected(
+    conn: _FakeConn,
+) -> None:
+    conn.proposals[(1, "m1")] = {
+        "image_id": 1, "model": "m1", "label": "a", "confidence": 0.9,
+        "proposed_at": "t", "status": "dismissed",
+    }
+    rows = dsl.list_proposals(conn, status="all")
+    assert rows[0]["label"] == "a"
+    assert rows[0]["trained_label"] is None
+
+
+def test_list_proposals_all_respects_the_label_filter(conn: _FakeConn) -> None:
+    conn.proposals[(1, "m1")] = {
+        "image_id": 1, "model": "m1", "label": "a", "confidence": 0.9,
+        "proposed_at": "t2", "status": "pending",
+    }
+    conn.proposals[(2, "m1")] = {
+        "image_id": 2, "model": "m1", "label": "b", "confidence": 0.9,
+        "proposed_at": "t1", "status": "pending",
+    }
+    assert [r["image_id"] for r in dsl.list_proposals(conn, status="all", label="b")] == [2]
 
 
 def test_confirm_proposal_writes_training_example(conn: _FakeConn) -> None:
