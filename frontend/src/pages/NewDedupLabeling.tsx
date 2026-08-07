@@ -194,6 +194,14 @@ export default function NewDedupLabeling() {
     patch: (p: NewDedupLabelProposal) => NewDedupLabelProposal,
   ) => {
     patchRows(ids, model, tab === 'pending' ? 'drop' : patch);
+    // A tile reviewed through its OWN button while checkbox-selected has to
+    // leave the selection too. On Pending the row is gone and the imageIds
+    // effect prunes it, but on All it stays on screen — and a later "Confirm
+    // selected" would then re-send an id that's no longer pending.
+    setSelected((prev) => {
+      const next = new Set([...prev].filter((id) => !ids.includes(id)));
+      return next.size === prev.size ? prev : next;
+    });
     invalidateOtherTabs();
     invalidateOverview();
   };

@@ -720,6 +720,23 @@ describe('<NewDedupLabeling>', () => {
     ).toEqual(['interier - kuchyne', 'exterier - fasada']);
   });
 
+  it('drops a per-tile-reviewed image out of the batch selection on All', async () => {
+    // The tile stays on screen there, so a stale selection would re-send an id
+    // that is no longer pending on the next "Confirm selected".
+    vi.mocked(api.listNewDedupProposals).mockResolvedValue({
+      data: [MIXED[0], { ...MIXED[0], image_id: 104, label: 'garaz' }],
+    });
+    vi.mocked(api.confirmNewDedupProposal).mockResolvedValue({ data: CONFIRM_RESULT });
+    renderPage();
+    fireEvent.click(await screen.findByRole('tab', { name: 'All' }));
+    fireEvent.click(await screen.findByText('Select all'));
+    expect(screen.getByText('2 selected')).toBeInTheDocument();
+
+    fireEvent.click(screen.getAllByText('Confirm')[0]);
+
+    await waitFor(() => expect(screen.getByText('1 selected')).toBeInTheDocument());
+  });
+
   it('offers the batch bar for pending rows on the All tab too', async () => {
     vi.mocked(api.listNewDedupProposals).mockResolvedValue({ data: MIXED });
     renderPage();
