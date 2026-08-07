@@ -119,6 +119,35 @@ Session handoff points marked ⛳ (good places to end a session; update the ledg
 
 ## Progress ledger (update every session, newest first)
 
+- 2026-08-07 (part 2) — **Labeling page review ergonomics** (operator request, four edits): a
+  collapsible taxonomy chart, filtering the grid by tag + filtering the tag list by how much
+  training data it already has, an **All** tab alongside pending/confirmed/dismissed, and — the
+  substantive one — **the grid no longer churns when you review a tile**.
+  - **The churn had two independent causes**, both fixed:
+    1. `ORDER BY proposed_at DESC` had no tiebreaker, and the backfill inserts a whole batch in
+       one transaction — so every row in it carries the *same* `now()` and Postgres was free to
+       return ties in a different order on each call. The grid genuinely reshuffled on any
+       refetch. Every list query is now totally ordered (`, image_id DESC`).
+    2. Reviewing one proposal invalidated the whole proposals query AND the image query was keyed
+       on the current id list, so a confirm swapped in an empty cache entry and every tile lost
+       its photo at once. Single-tile actions now **patch the cached list in place** (drop the row
+       on Pending, patch it in place elsewhere) and photos accumulate in a page-level id→image map
+       that only ever fetches ids it has never seen. Other tabs are invalidated, never the visible
+       one. Five tests pin this; all five were verified to go red when the old invalidate-and-
+       refetch behavior is restored.
+  - **The All tab** (`status='all'`) is the union of the other three — every `label_proposals` row
+    plus training examples that never had a proposal, as synthetic `model='manual'` rows, same as
+    the Confirmed tab already did. A new `trained_label` on every row (the image's *current*
+    `image_training_examples` label, or NULL) is what lets the page grey already-handled tiles
+    without a second query; reviewing a tile there greys it **in place**, nothing moves.
+    `status` is now validated server-side — an unknown value 422s instead of silently listing
+    everything while the tab claims to be filtered. **No migration**: both new reads are plain
+    queries over existing tables.
+  - **The coverage ceiling** ("≤ N training images") narrows the chart *and* the grid's tag
+    select — the Gate-1 question is "which tags are still short" — but deliberately NOT the
+    per-tile correction picker, which must always offer the whole vocabulary. The currently
+    filtered tag is never hidden by the ceiling.
+  - Suites: `pytest -q` 2690 passed / 32 skipped, `vitest run` 503 passed, `tsc --noEmit` clean.
 - 2026-08-07 — **Labeling page: correct a wrong suggestion instead of only accept/reject it**
   (operator request, pointing at /clip-audit's combobox as the model). Every non-dismissed tile now
   carries a `LabelCombobox` seeded from the proposal's tag; Confirm writes whatever is in it.

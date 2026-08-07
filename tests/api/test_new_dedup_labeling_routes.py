@@ -177,6 +177,20 @@ def test_get_proposals(client, _patch_toolkit):
     assert _patch_toolkit["list_proposals"]["status"] == "pending"
 
 
+def test_get_proposals_all(client, _patch_toolkit):
+    res = client.get("/new-dedup/labeling/proposals?status=all")
+    assert res.status_code == 200
+    assert _patch_toolkit["list_proposals"]["status"] == "all"
+
+
+def test_get_proposals_rejects_an_unknown_status(client, _patch_toolkit):
+    # Silently ignoring it would list EVERY proposal while the tab claims to
+    # be filtered — the failure mode is invisible, so make it loud.
+    res = client.get("/new-dedup/labeling/proposals?status=pendign")
+    assert res.status_code == 422
+    assert "list_proposals" not in _patch_toolkit
+
+
 def test_post_confirm_proposal(client, _patch_toolkit):
     res = client.post("/new-dedup/labeling/proposals/confirm", json={"image_id": 1, "model": "m"})
     assert res.status_code == 200
