@@ -292,12 +292,29 @@ insert into location_uncertainty_policy
   ('v1', 'derived_geocode',    'address_point',        '*', 100,  'geometric_bound', 'constant', 'interpolated'),
   ('v1', 'derived_geocode',    'street_segment',       '*', 100,  'geometric_bound', 'constant', 'interpolated'),
   ('v1', 'derived_geocode',    'street',               '*', 300,  'geometric_bound', 'constant', 'street centroid'),
-  -- portal-declared obfuscation: use the DECLARED shape where the portal
-  -- publishes one (maxima circles, sreality locality.geometry bbox), else the
-  -- 500-1000 m band section B3 states, tightening as granularity improves.
-  ('v1', 'portal_pin_blurred', 'obec',                 '*', 1000, 'declared', 'declared_shape', 'declared blur, obec-level fallback'),
-  ('v1', 'portal_pin_blurred', 'cast_obce_or_quarter', '*', 750,  'declared', 'declared_shape', 'declared blur, quarter-level fallback'),
-  ('v1', 'portal_pin_blurred', 'street',               '*', 500,  'declared', 'declared_shape', 'declared blur, street-level fallback'),
+  -- portal-declared obfuscation. TWO different statements, never one row: 01
+  -- section 3.3.1 says a geometric_bound, an r95_empirical and a declared value
+  -- are incompatible, and a row cannot simultaneously carry an invented
+  -- constant AND tell the builder to derive from a published shape.
+  --   (a) the '*' fallback is the 500-1000 m band section B3 states for a blur
+  --       nobody published a shape for - engineering judgement, so it is a
+  --       geometric_bound produced by derivation='constant';
+  ('v1', 'portal_pin_blurred', 'obec',                 '*', 1000, 'geometric_bound', 'constant', 'blur fallback, obec-level; no shape published'),
+  ('v1', 'portal_pin_blurred', 'cast_obce_or_quarter', '*', 750,  'geometric_bound', 'constant', 'blur fallback, quarter-level; no shape published'),
+  ('v1', 'portal_pin_blurred', 'street',               '*', 500,  'geometric_bound', 'constant', 'blur fallback, street-level; no shape published'),
+  --   (b) a portal that genuinely PUBLISHES a shape gets its own source rows,
+  --       r95_m NULL + derivation='declared_shape' (read the claim's
+  --       uncertainty_geometry) + radius_semantics='declared'. maxima ships
+  --       Circle.radius (1.36 / 2.26 km observed; unit unresolved, 01 OQ7 -
+  --       'declared' keeps it honest either way); sreality ships the
+  --       locality.geometry bbox, which is an empty stub on
+  --       entity_type='address', hence no address_point row here.
+  ('v1', 'portal_pin_blurred', 'obec',                 'maxima',   null, 'declared', 'declared_shape', 'maxima Circle.radius'),
+  ('v1', 'portal_pin_blurred', 'cast_obce_or_quarter', 'maxima',   null, 'declared', 'declared_shape', 'maxima Circle.radius'),
+  ('v1', 'portal_pin_blurred', 'street',               'maxima',   null, 'declared', 'declared_shape', 'maxima Circle.radius'),
+  ('v1', 'portal_pin',         'obec',                 'sreality', null, 'declared', 'declared_shape', 'sreality locality.geometry bbox'),
+  ('v1', 'portal_pin',         'cast_obce_or_quarter', 'sreality', null, 'declared', 'declared_shape', 'sreality locality.geometry bbox'),
+  ('v1', 'portal_pin',         'street',               'sreality', null, 'declared', 'declared_shape', 'sreality locality.geometry bbox'),
   -- area centroid: derived from the polygon, never a constant.
   ('v1', 'admin_centroid',     'country',              '*', null, 'geometric_bound', 'admin_containment_radius', null),
   ('v1', 'admin_centroid',     'kraj',                 '*', null, 'geometric_bound', 'admin_containment_radius', null),

@@ -4,9 +4,18 @@ Implements the CI checks of `01-schema.md` appendix A.2 as STATIC checks over th
 migration SQL text — no database connection, so they run in the normal pytest job
 and fail a PR the moment the schema drifts from the design corpus.
 
+The corpus these checks read is NOT frozen at 384 (`_structural_files`): it is
+every migration from 380 onward that is location work, so migration 385 and
+everything after it is held to the same rules.
+
 Which A.2 check each test covers:
 
-  A.2 #2  every literal compared against a location enum is a member of it
+  A.2 #2  every literal cast to a location enum IN A MIGRATION is a member of it.
+          NARROWED ON PURPOSE: A.2 #2 as written is a source-tree literal scan
+          (any Python/SQL string compared against a location enum anywhere in the
+          backend); this file implements only the migration-enum-cast half. The
+          source-tree scan lands with the resolver PR, which is the first code to
+          hold such literals.
           -> test_enum_types_carry_the_canonical_vocabulary
              test_enum_casts_reference_declared_members
              test_granularity_rank_seeds_every_label_in_declaration_order
@@ -16,6 +25,7 @@ Which A.2 check each test covers:
           -> test_no_source_emits_portal_json
   A.2 #6  a new location_granularity value also touches location_granularity_rank
           -> test_granularity_rank_seeds_every_label_in_declaration_order
+             test_granularity_alter_type_always_seeds_a_rank_row
   A.2 #8  `pin_collision_class IS [NOT] NULL` appears nowhere
           -> test_pin_collision_class_is_never_null_tested
              test_pin_collision_class_vocabulary_is_not_null_default_normal
@@ -48,21 +58,56 @@ from tests.test_migration_rls_grants import _statements, _strip_comments
 _ROOT = Path(__file__).resolve().parent.parent.parent
 _MIGRATIONS_DIR = _ROOT / "migrations"
 _W1_GLOB = "38[0-4]_location_w1_*.sql"
+# The structural checks start here — 380 is the first location migration, and
+# nothing before it may be rewritten (architecture rule #1).
+_MIN_STRUCTURAL_MIGRATION = 380
 # Trees whose SQL/Python could compare a literal against a location enum.
 _SOURCE_DIRS = ("scraper", "toolkit", "api", "scripts", "migrations")
+# A migration >= 380 joins the structural corpus if its name says location or its
+# body names a location enum / table family. Enum names come from CANONICAL_ENUMS
+# below (resolved at call time).
+_LOCATION_TABLE_MARKERS = (
+    "location_", "ruian_", "registry_version", "pin_cluster", "pin_collision",
+    "dirty_locations", "portal_contract",
+)
 
 
 def _w1_files() -> list[Path]:
     return sorted(_MIGRATIONS_DIR.glob(_W1_GLOB))
 
 
-def _w1_sql() -> str:
-    return "\n".join(p.read_text(encoding="utf-8") for p in _w1_files())
+def _migration_number(path: Path) -> int | None:
+    m = re.match(r"(\d+)_", path.name)
+    return int(m.group(1)) if m else None
+
+
+def _structural_files() -> list[Path]:
+    """Every migration the structural checks below must see.
+
+    NOT frozen at 384. A corpus glued to the five W1 files would let migration
+    385 add a `location_granularity` label, drop a REVOKE, reintroduce the
+    forbidden `pin_collision_class IS NULL` form or bury an ordinal enum
+    comparison in a CHECK — with every assertion in this file still green.
+    """
+    markers = tuple(CANONICAL_ENUMS) + _LOCATION_TABLE_MARKERS
+    out: list[Path] = []
+    for path in sorted(_MIGRATIONS_DIR.glob("*.sql")):
+        number = _migration_number(path)
+        if number is None or number < _MIN_STRUCTURAL_MIGRATION:
+            continue
+        if "_location_" in path.name:
+            out.append(path)
+            continue
+        text = path.read_text(encoding="utf-8").lower()
+        if any(marker in text for marker in markers):
+            out.append(path)
+    return out
 
 
 def _clean() -> str:
-    """The W1 migration corpus, comments stripped and lowercased."""
-    return _strip_comments(_w1_sql()).lower()
+    """The location migration corpus, comments stripped and lowercased."""
+    sql = "\n".join(p.read_text(encoding="utf-8") for p in _structural_files())
+    return _strip_comments(sql).lower()
 
 
 # --------------------------------------------------------------------------
@@ -213,7 +258,7 @@ def _split_top_level(body: str, sep: str = ",") -> list[str]:
 
 def _table_body(sql: str, table: str) -> str:
     m = re.search(rf"create table {re.escape(table)}\s*\(", sql)
-    assert m, f"migrations 380-384 do not create table {table}"
+    assert m, f"no location migration creates table {table}"
     return _balanced(sql, m.end() - 1)
 
 
@@ -319,7 +364,7 @@ def test_enum_types_carry_the_canonical_vocabulary():
     label for label AND (for the ordinal ones) in declaration order."""
     declared = _declared_enums(_clean())
     missing = sorted(set(CANONICAL_ENUMS) - set(declared))
-    assert not missing, f"location enum type(s) never declared in migrations 380-384: {missing}"
+    assert not missing, f"location enum type(s) never declared in any location migration: {missing}"
     drift = {
         name: {"declared": declared[name], "canonical": list(labels)}
         for name, labels in CANONICAL_ENUMS.items()
@@ -371,6 +416,38 @@ def test_granularity_rank_seeds_every_label_in_declaration_order():
     ranks = [rank for _, rank in seeded]
     assert ranks == sorted(ranks) and len(set(ranks)) == len(ranks), (
         f"ranks must be strictly increasing coarse->fine and unique, got {ranks}"
+    )
+
+
+def test_granularity_alter_type_always_seeds_a_rank_row():
+    """A.2 #6 over the WHOLE migration directory, not just the location corpus.
+
+    `rank()` is the only legal persisted granularity comparison (01 section 0.4),
+    so a label added by `ALTER TYPE location_granularity ADD VALUE` without a
+    `location_granularity_rank` row in the SAME migration leaves every rank join
+    silently dropping the new rung — and a rank row "one migration later" is a
+    live window in which that happens in production."""
+    add_value = re.compile(
+        r"alter\s+type\s+location_granularity\s+add\s+value\s+"
+        r"(?:if\s+not\s+exists\s+)?'([a-z0-9_]+)'"
+    )
+    offenders: list[str] = []
+    for path in sorted(_MIGRATIONS_DIR.glob("*.sql")):
+        text = _strip_comments(path.read_text(encoding="utf-8")).lower()
+        labels = [m.group(1) for m in add_value.finditer(text)]
+        if not labels:
+            continue
+        seeds = "\n".join(
+            s for s in _statements(text)
+            if re.match(r"\s*insert into location_granularity_rank\b", s.lower())
+        )
+        for label in labels:
+            if f"'{label}'" not in seeds:
+                offenders.append(f"{path.name}: '{label}'")
+    assert not offenders, (
+        "location_granularity label(s) added by ALTER TYPE with no matching "
+        "location_granularity_rank INSERT in the same migration (01 section A.2 "
+        "check 6):\n  " + "\n  ".join(offenders)
     )
 
 
@@ -489,7 +566,7 @@ def test_pin_collision_class_vocabulary_is_not_null_default_normal():
     ):
         defn = next(
             (d for d in _column_defs(_table_body(sql, table)) if d.startswith(column)), "")
-        got = set(re.findall(r"'([a-z0-9_]+)'", defn)) - {"normal"} | {"normal"}
+        got = set(re.findall(r"'([a-z0-9_]+)'", defn))
         assert got == set(PIN_COLLISION_CLASSES), (
             f"{table}.{column} vocabulary drifted from the canonical six values: "
             f"{sorted(got)}"
@@ -578,17 +655,36 @@ def test_dispositions_key_on_dedupe_key():
     ), "location_contradictions must keep its version-tuple UNIQUE"
 
 
+def _revoked_roles(sql: str, head: str) -> set[str] | None:
+    """Roles named by the REVOKE whose head matches `head`, or None if there is
+    no such REVOKE. A REVOKE that names the wrong roles is worse than none: it
+    reads as protection and grants nothing back."""
+    m = re.search(head + r"\s+from\s+([a-z0-9_,\s]+?);", sql)
+    if not m:
+        return None
+    return {role.strip() for role in m.group(1).split(",") if role.strip()}
+
+
 def test_every_created_object_is_revoked():
     """This Supabase project auto-GRANTs anon/authenticated on new tables,
     sequences AND functions, so a location object without an explicit REVOKE is
-    reachable from the browser roles."""
+    reachable from the browser roles. Functions additionally need `public`: the
+    default ACL is `EXECUTE TO PUBLIC`, which anon and authenticated INHERIT, so
+    revoking only the two named roles leaves the function callable."""
     sql = _clean()
     missing: list[str] = []
+    relation_roles = {"anon", "authenticated"}
+    function_roles = {"public", "anon", "authenticated"}
 
-    relations = re.findall(r"create (?:table|view) ([a-z0-9_]+)", sql)
-    for rel in relations:
-        if not re.search(rf"revoke all on {rel}\s+from anon,\s*authenticated", sql):
-            missing.append(f"table/view {rel}")
+    def check(label: str, head: str, required: set[str]) -> None:
+        roles = _revoked_roles(sql, head)
+        if roles is None:
+            missing.append(f"{label} — no REVOKE at all")
+        elif not required <= roles:
+            missing.append(f"{label} — REVOKE omits {sorted(required - roles)} (got {sorted(roles)})")
+
+    for rel in re.findall(r"create (?:table|view) ([a-z0-9_]+)", sql):
+        check(f"table/view {rel}", rf"revoke all on {rel}\b", relation_roles)
 
     for m in re.finditer(r"create table ([a-z0-9_]+)\s*\(", sql):
         table = m.group(1)
@@ -596,16 +692,14 @@ def test_every_created_object_is_revoked():
             parts = col.split()
             if len(parts) >= 2 and parts[1] in ("bigserial", "serial"):
                 seq = f"{table}_{parts[0]}_seq"
-                if not re.search(rf"revoke all on sequence {seq}\s+from anon,\s*authenticated", sql):
-                    missing.append(f"sequence {seq}")
+                check(f"sequence {seq}", rf"revoke all on sequence {seq}\b", relation_roles)
 
     for m in re.finditer(r"create function ([a-z0-9_]+)\s*\(", sql):
         fn = m.group(1)
-        if not re.search(rf"revoke execute on function {fn}\s*\(", sql):
-            missing.append(f"function {fn}")
+        check(f"function {fn}", rf"revoke execute on function {fn}\s*\([^)]*\)", function_roles)
 
     assert not missing, (
-        "location W1 object(s) created without an explicit REVOKE from the browser "
+        "location object(s) created without an explicit REVOKE from the browser "
         "roles:\n  " + "\n  ".join(sorted(set(missing)))
     )
 

@@ -82,7 +82,11 @@ is the tie-breaker). This track records sequencing + shipped state only.
   01 §A.2 (enum vocabularies, the forbidden `pin_collision_class IS NULL` form, no
   ordinal enum comparison in a CHECK/index predicate/generated column, NOT NULL
   axes on both projections, the three-artifact licence guard, `collision_epoch_id`
-  in the resolution identity, dispositions keyed on `dedupe_key`).
+  in the resolution identity, dispositions keyed on `dedupe_key`). Its corpus is
+  every location migration from 380 onward, not a frozen 380–384 list, so the
+  next migration is held to the same rules. §A.2 #2 is implemented here **only
+  for enum casts inside migrations**; the full source-tree literal scan lands
+  with the resolver PR, which is the first code to hold such literals.
 - h3-pg is NOT available on this instance: the stated fallback ships — the rounded
   4-dp `location_geo_cell_key` with a MANDATORY 3×3 neighbourhood expansion at
   query time. `h3_r10` stays a nullable additive upgrade slot.
@@ -91,7 +95,18 @@ is the tie-breaker). This track records sequencing + shipped state only.
   merge, then verify.
 - Uncalibrated by design and flagged in the seeds themselves: `threshold_n`
   (01 OQ3) and every R95 radius (01 OQ4, seeded as `geometric_bound`/`declared`,
-  never `r95_empirical`). Calibration writes a new `policy_version`.
+  never `r95_empirical`). Calibration writes a new `policy_version`. The invented
+  500/750/1000 m blur band is `geometric_bound` + `derivation='constant'`; only
+  the portals that genuinely publish a shape (maxima `Circle.radius`, sreality
+  `locality.geometry` bbox) get `derivation='declared_shape'` rows with
+  `r95_m` NULL — one row can never be both (01 §3.3.1).
+- **Erratum to the design corpus:** 00 §1.5 says the `uncertainty_radius_m` +
+  `radius_semantics` pair is NOT NULL "on the claim, the resolution, the
+  candidate and both projections". 01 §4.2 owns the DDL and wins: at claim grain
+  there is only a nullable `declared_radius_m` (a claim records what the portal
+  declared, and most declare nothing). The NOT NULL pair is real on the
+  resolution, the candidate and both projections. Recorded in migration 382 at
+  the column itself.
 
 ## Standing decisions
 

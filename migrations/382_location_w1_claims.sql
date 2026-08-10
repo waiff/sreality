@@ -228,6 +228,17 @@ create table location_claims (
   -- self-declared precision riding on the claim
   declared_precision_label  text,
   declared_confidence       text,
+  -- ERRATUM to 00 section 1.5. That section says uncertainty_radius_m +
+  -- radius_semantics are "NOT NULL on the claim, the resolution, the candidate
+  -- and both projections". 01 section 4.2 - which OWNS the DDL and therefore
+  -- wins - carries only this NULLABLE declared_radius_m at claim grain, and no
+  -- radius_semantics column on location_claims at all (the nullable one on
+  -- location_claim_links belongs to the link, not the claim): a claim records
+  -- what the portal DECLARED, and most portals declare nothing. The NOT NULL
+  -- pair is real on the
+  -- resolution, the candidate and both projections (383, 384), where it is the
+  -- fail-open gate 05 P5 requires. Read 00 section 1.5's "on the claim" as
+  -- corrected to those three projections.
   declared_radius_m         numeric,
   blur_evidence             blur_evidence not null default 'none',
   claim_confidence          match_confidence,
