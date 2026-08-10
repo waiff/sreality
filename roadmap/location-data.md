@@ -49,10 +49,17 @@ is the tie-breaker). This track records sequencing + shipped state only.
 
 ## W0 — remaining
 
-- 0b/0c standing-corpus backfills (sreality `zip='-1'` 43,371 rows → NULL; bazos
-  psc → zip) — after #999 merges.
-- Post-merge gate verifications: resolver-write rate 0 over 7 days; index rows
-  accumulating; bezrealitky `ruianId` ≥95% of new rows; R2 export verified.
+- ~~0b/0c standing-corpus backfills~~ DONE 2026-08-10: sreality sentinel 43,371→0;
+  bazos psc→zip 60,278 rows (30,013 active — gate ≥29k MET); PLUS the 0d repair
+  (5,591 carousel-derived remax streets nulled + dirty-enqueued).
+- Post-merge gate verifications: index rows accumulating ✅ (243 sreality pages in
+  2h, week-stamped keys); geocode silent ✅ (last geocode_cache write 2026-07-11);
+  ruianId collecting ✅ (41 rows in 40 min). R2 export VERIFIED ✅ 2026-08-10 (snapshot 2026-08-10b:
+  447,510 rows / 801 chunks / 7.69 GB gz; manifest == chunk sum == DB count; the
+  cancelled first run's partial `2026-08-10/` prefix in R2 is garbage, safe to
+  delete). Still open: resolver-write rate 0 over 7 days (structurally true;
+  confirm 2026-08-17); bezrealitky ruianId ≥95% of NEW rows (measure after a few
+  drain cycles).
 - 0k idnes disclaimer + 0l remaining declared-quality signals: forward-preserved
   already (detail HTML archived + raw_json); querying them as claims is the W1
   loader's job — no interim side table needed. ceskereality's `exact` map-endpoint
