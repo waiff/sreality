@@ -1,5 +1,14 @@
 """Resolve listings.street from a trustworthy per-listing coordinate via RÚIAN.
 
+AUTO-WRITE STOPPED (location-data program, W0 item 0a): a 108-listing LLM
+mining experiment measured ~11 of ~21 text-checkable resolver-derived streets
+WRONG, including two fabricated street+house-number pairs on rows selected as
+controls. Writes now require the explicit `--write` flag (a bare invocation is
+a dry run) and the weekly cron is removed from resolve_coord_streets.yml. The
+replacement is the location program's claims/resolution pipeline (W1+); already-
+written 'resolver' streets stay in place until that program's migration wave
+quarantines them.
+
 Implements docs/design/street-coverage-ruian.md. For listings that publish NO
 street text but DO carry a precise coordinate, look up the street from the local
 `address_points` mirror. EXACT-MATCH ONLY — a street is assigned only when it is
@@ -377,8 +386,13 @@ def main() -> int:
     parser.add_argument("--limit", type=int, default=200000,
                         help="Max candidates processed per source this run.")
     parser.add_argument("--max-seconds", type=float, default=None)
+    parser.add_argument("--write", action="store_true",
+                        help="Actually write streets. Without it every run is a dry run "
+                             "(W0 item 0a: the auto-write is stopped; see module docstring).")
     parser.add_argument("--dry-run", action="store_true",
-                        help="Match but write nothing (report matched/ambiguous/nomatch).")
+                        help="Match but write nothing (report matched/ambiguous/nomatch). "
+                             "Redundant since 0a: this is already the default; kept so "
+                             "existing invocations stay valid.")
     parser.add_argument("--force-rescan", action="store_true",
                         help="Re-attempt every candidate regardless of its stamp (use after tuning).")
     parser.add_argument("--calibrate-n", type=int, default=20000)
@@ -396,6 +410,10 @@ def main() -> int:
     sources = (args.source,) if args.source else _SOURCES
     start = time.monotonic()
     deadline = start + args.max_seconds if args.max_seconds else None
+
+    dry_run = args.dry_run or not args.write
+    if dry_run and not args.dry_run:
+        LOG.info("DRY RUN (default since W0 item 0a) — pass --write to persist streets")
 
     # A run that deviates from the calibrated defaults is re-testing the guards,
     # so it must bypass the stamp or it would silently no-op on exactly the rows
@@ -416,7 +434,7 @@ def main() -> int:
             if deadline is not None and time.monotonic() > deadline:
                 break
             res = resolve_source(conn, source, args.tolerance, args.limit, version,
-                                 force, reject, deadline, args.dry_run)
+                                 force, reject, deadline, dry_run)
             for k in totals:
                 totals[k] += res[k]
     LOG.info("RESOLVE all-done matched=%d ambiguous=%d nomatch=%d town_pins=%d stamped=%d",

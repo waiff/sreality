@@ -2,15 +2,29 @@ name: Jobs - resolve streets from coordinates (RÚIAN)
 
 # Resolves listings.street from a trustworthy per-listing coordinate via the
 # RÚIAN address_points mirror — exact-match only, never a town-center geocode
-# (docs/design/street-coverage-ruian.md). Dispatch-driven (+ weekly catch-up for
-# newly-scraped trustworthy-coord rows). Run `-f calibrate=true` first to pick the
+# (docs/design/street-coverage-ruian.md). Run `-f calibrate=true` first to pick the
 # tolerance from ground truth. NOT a portal ingest workflow — no `# portal:` tag.
+#
+# AUTO-WRITE STOPPED (location-data program, W0 item 0a): an LLM mining
+# experiment measured ~11 of ~21 text-checkable resolver-derived streets WRONG,
+# including two fabricated street+number pairs on control rows. The weekly cron
+# is removed and a dispatch is DRY-RUN unless `write=true` is passed explicitly.
+# W0 gate: resolver-street write rate = 0 for 7 days. The replacement is the
+# location program's claims/resolution pipeline (W1+).
 #
 # Required GitHub secret: SUPABASE_DB_URL. Depends on ingest_address_points.yml.
 
 on:
   workflow_dispatch:
     inputs:
+      write:
+        description: "DANGER: actually write streets (default is dry-run; see W0 item 0a)"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
       calibrate:
         description: Report same-street distance distribution and exit
         required: false
@@ -60,8 +74,6 @@ on:
         options:
           - "false"
           - "true"
-  schedule:
-    - cron: "0 5 * * 1"   # weekly Mon 05:00 UTC — catch newer trustworthy-coord rows
 
 concurrency:
   group: sreality-property-maintenance   # shares the properties-mutation group (writes street + enqueues dirty)
@@ -89,6 +101,7 @@ jobs:
           ARGS="--tolerance ${{ inputs.tolerance || '15' }} --min-share ${{ inputs.min_share || '4' }}"
           if [ "${{ inputs.calibrate }}" = "true" ]; then ARGS="$ARGS --calibrate"; fi
           if [ -n "${{ inputs.source }}" ]; then ARGS="$ARGS --source ${{ inputs.source }}"; fi
+          if [ "${{ inputs.write }}" = "true" ]; then ARGS="$ARGS --write"; fi
           if [ "${{ inputs.dry_run }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
           if [ "${{ inputs.force_rescan }}" = "true" ]; then ARGS="$ARGS --force-rescan"; fi
           python -m scripts.backfill_address_point_streets $ARGS
