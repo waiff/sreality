@@ -1,0 +1,64 @@
+name: Export portal_raw_pages archive to R2
+
+# Location-data program W0 item 0o: the ~447k-row / 14 GB portal_raw_pages archive is
+# the only surviving copy of several portals' best location signal, so a full off-database
+# copy goes to R2 under backups/portal-raw-pages/<snapshot>/. Chunked + resumable —
+# re-dispatch with the same snapshot date to continue an interrupted run; the final step
+# verifies the manifest row count against the DB. Deletion of the live table is guarded
+# by tests/test_portal_raw_pages_guard.py. workflow_dispatch only; re-run with a new
+# snapshot date for a fresh export.
+
+on:
+  workflow_dispatch:
+    inputs:
+      snapshot:
+        description: "Snapshot prefix date YYYY-MM-DD (empty = today UTC); reuse to resume"
+        required: false
+        default: ""
+      verify_only:
+        description: "Only verify an existing snapshot's manifest against the DB"
+        type: boolean
+        required: false
+        default: false
+
+concurrency:
+  group: raw-pages-archive-export
+  cancel-in-progress: false
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    permissions:
+      contents: read
+    env:
+      SUPABASE_DB_SESSION_URL: ${{ secrets.SUPABASE_DB_SESSION_URL }}
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: pip install -e .
+
+      - name: Export archive to R2
+        if: ${{ !inputs.verify_only }}
+        run: |
+          ARGS=""
+          if [ -n "${{ inputs.snapshot }}" ]; then ARGS="--snapshot ${{ inputs.snapshot }}"; fi
+          python -m scripts.export_portal_raw_pages_archive $ARGS
+
+      - name: Verify snapshot manifest against DB
+        run: |
+          ARGS=""
+          if [ -n "${{ inputs.snapshot }}" ]; then ARGS="--snapshot ${{ inputs.snapshot }}"; fi
+          python -m scripts.export_portal_raw_pages_archive --verify $ARGS
