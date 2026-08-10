@@ -318,3 +318,20 @@ def test_parse_detail_price_on_request_is_none_for_rent():
     assert listing.disposition == "2+kk"
     assert listing.lat is None and listing.lon is None   # no coords, no geocoder
     assert listing.raw["broker"] is None                 # no broker block on the page
+
+
+def test_title_street_and_okres(monkeypatch):
+    # W0 item 0j: the <title> states the accented street (", ulice Písecká,")
+    # and the okres — live-verified shape 2026-08-10. Street beats the
+    # ASCII-folded slug; okres fills the hitherto always-NULL district.
+    from scraper.ceskereality_parser import _TITLE_OKRES_RE, _TITLE_STREET_RE
+
+    title = ("Pronájem komerčního pozemku, 1 085 m², Strakonice, "
+             "ulice Písecká, okres Strakonice - ČESKÉREALITY.cz inzerce realit")
+    assert _TITLE_STREET_RE.search(title).group(1).strip() == "Písecká"
+    assert _TITLE_OKRES_RE.search(title).group(1).strip() == "okres Strakonice"
+    # No street segment in a street-less title, and the site-name suffix
+    # ("- ČESKÉREALITY.cz ...") never leaks into the okres capture.
+    bare = "Prodej stavební parcely, 1 715 m², Žihle, okres Plzeň-sever - ČESKÉREALITY.cz"
+    assert _TITLE_STREET_RE.search(bare) is None
+    assert _TITLE_OKRES_RE.search(bare).group(1).strip() == "okres Plzeň-sever"
