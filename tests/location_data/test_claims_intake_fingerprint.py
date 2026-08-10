@@ -41,6 +41,7 @@ from location_data.claims_intake import (
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MIGRATION_382 = REPO_ROOT / "migrations" / "382_location_w1_claims.sql"
+MIGRATION_386 = REPO_ROOT / "migrations" / "386_location_w1_claim_fingerprint_fn.sql"
 
 # The body as migration 382 (PR-A) declares it. Pinned here so a change to the definition
 # on either side is a failing test rather than a silent divergence.
@@ -104,28 +105,85 @@ def test_the_mirror_declares_where_it_cannot_be_trusted():
     assert value_norm_mirror("Straße") == "stra e"
 
 
+def _fingerprint_fn_body() -> str:
+    """The body of `location_claim_fingerprint` as migration 386 declares it."""
+    text = MIGRATION_386.read_text(encoding="utf-8")
+    match = re.search(
+        r"create function location_claim_fingerprint\s*\(.*?\)\s*returns bytea\s*"
+        r"language sql immutable as \$fn\$(?P<body>.*?)\$fn\$",
+        text, re.DOTALL | re.IGNORECASE)
+    assert match, "location_claim_fingerprint is not declared as expected in migration 386"
+    return " ".join(match.group("body").split())
+
+
 def test_the_write_path_computes_the_fingerprint_in_sql_from_the_same_function():
     """The mirror is diagnostic; the claim writer must never use it."""
     assert "location_value_norm(i.value_text) AS value_norm" in _CLAIM_WRITE_SQL
-    assert "sha256(convert_to(jsonb_build_array(" in _CLAIM_FINGERPRINT_SQL
+    assert "location_claim_fingerprint(" in _CLAIM_FINGERPRINT_SQL
     assert _CLAIM_FINGERPRINT_SQL.strip() in _CLAIM_WRITE_SQL
     assert "ON CONFLICT (claim_fingerprint) DO NOTHING" in _CLAIM_WRITE_SQL
+    # The hash is computed by the named function, never re-spelled at the call site: the
+    # column carries a UNIQUE index, so a second transcription of the tuple would stop
+    # deduping instead of conflicting.
+    assert "sha256(" not in _CLAIM_WRITE_SQL
+
+
+def test_the_write_path_passes_every_tuple_element_to_the_named_function():
+    """The call site must feed all 23 arguments in declaration order — a transposed pair
+    of same-typed text arguments is exactly the silent-divergence class this function
+    exists to prevent, and it is invisible to the type checker."""
+    call = re.search(r"location_claim_fingerprint\((?P<args>.*?)\)\s*$",
+                     _CLAIM_FINGERPRINT_SQL.strip(), re.DOTALL)
+    assert call, _CLAIM_FINGERPRINT_SQL
+    passed = [a.strip() for a in call.group("args").split(",")]
+    assert passed == [
+        "t.listing_id", "t.source", "t.source_id_native",
+        "t.claim_type", "t.surface", "t.page_kind", "t.extraction_method",
+        "t.extractor_id", "t.extractor_version", "t.contract_entry_id",
+        "t.value_norm", "t.value_text",
+        "t.value_num", "t.geom", "t.shape",
+        "t.value_jsonb", "t.distance_m", "t.travel_mode", "t.target_text",
+        "t.declared_precision_label", "t.declared_confidence", "t.declared_radius_m",
+        "t.legacy_source_column",
+    ]
+
+    params = re.search(r"create function location_claim_fingerprint\s*\((?P<p>.*?)\)\s*"
+                       r"returns bytea", MIGRATION_386.read_text(encoding="utf-8"),
+                       re.DOTALL)
+    assert params
+    declared = [p.strip().split()[0] for p in params.group("p").split(",")]
+    assert len(declared) == len(passed), (declared, passed)
 
 
 def test_the_fingerprint_tuple_is_the_one_01_declares_and_is_time_free():
     """01 §4.2.1: values dedupe, occurrences are their own series. Time in the tuple would
     mean one claim row per unchanged value per snapshot — order 10 M+ rows for sreality
-    alone."""
-    tuple_sql = _CLAIM_FINGERPRINT_SQL
+    alone.
+
+    Read out of migration 386, which is now where the tuple LIVES: the expression used to
+    sit inline in the writer, and promoting it moved the thing this test must guard."""
+    tuple_sql = _fingerprint_fn_body()
+    assert tuple_sql.startswith("select sha256(convert_to(jsonb_build_array(")
     for column in (
-        "t.listing_id", "t.source", "t.source_id_native", "t.claim_type", "t.surface",
-        "t.page_kind", "t.extraction_method", "t.extractor_id", "t.extractor_version",
-        "t.contract_entry_id", "coalesce(t.value_norm, t.value_text, '')", "t.value_num",
-        "ST_AsEWKB(t.geom)", "ST_AsEWKB(t.shape)", "t.value_jsonb", "t.distance_m",
-        "t.travel_mode", "t.target_text", "t.declared_precision_label",
-        "t.declared_confidence", "t.declared_radius_m", "t.legacy_source_column",
+        "p_listing_id", "p_source", "p_source_id_native", "p_claim_type", "p_surface",
+        "p_page_kind", "p_extraction_method", "p_extractor_id", "p_extractor_version",
+        "p_contract_entry_id", "coalesce(p_value_norm, p_value_text, '')", "p_value_num",
+        "ST_AsEWKB(p_geom)", "ST_AsEWKB(p_shape)", "p_value_jsonb", "p_distance_m",
+        "p_travel_mode", "p_target_text", "p_declared_precision_label",
+        "p_declared_confidence", "p_declared_radius_m", "p_legacy_source_column",
     ):
         assert column in tuple_sql, column
     for forbidden in ("first_observed_at", "extracted_at", "payload_sha256", "snapshot_id",
-                      "span_start", "span_end", "batch_id"):
+                      "span_start", "span_end", "batch_id", "now()", "observed_at"):
         assert forbidden not in tuple_sql, forbidden
+
+
+def test_the_fingerprint_function_is_immutable_and_revoked_from_the_browser_roles():
+    """A STABLE fingerprint could not back an expression index and would signal that the
+    value depends on something outside its arguments — it does not (that is the whole
+    point of passing `value_norm` in rather than calling the STABLE `location_value_norm`
+    from inside)."""
+    text = MIGRATION_386.read_text(encoding="utf-8").lower()
+    assert "language sql immutable" in text
+    assert "location_value_norm" not in text.split("$fn$")[1]
+    assert "from public, anon, authenticated;" in text

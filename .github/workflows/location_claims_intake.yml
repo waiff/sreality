@@ -10,9 +10,17 @@ name: "Jobs: Location claim intake (W1)"
 # deploy-time projection). That is idempotent per (portal, contract_version) and fails
 # loudly if a contract file changed without a version bump — which is the point.
 #
-# The lane REFUSES to run unless `mapy_affected` (migration 385) is populated: the Mapy
-# affected-set inventory is a W1 INPUT, not an output, and without it a `carry_forward`
-# coordinate cannot be classified (06 §6.1.2).
+# The lane REFUSES to run unless the Mapy affected-set inventory (migration 385) is
+# TERMINAL AND COMPLETE — a resumable run with status='completed' in the current restart
+# epoch, not merely a non-empty `mapy_affected`. A half-built inventory describes a prefix
+# of `listings`, and absence from a prefix is exactly the verdict that admits a
+# Mapy-derived `carry_forward` coordinate as first-party (06 §6.1.2). It is a W1 INPUT,
+# not an output.
+#
+# A run that hits its budget stamps `outcome='stopped'`, NOT 'ok'. The incremental
+# watermark reads 'ok' only, so a budgeted run leaves the floor where it found it and the
+# next run resumes from the keyset cursor on the batch row (migration 387). 'ok' means one
+# thing: the scan ran out of rows.
 #
 # Shadow-only: nothing here is read by Browse, the API or the extension. Required secret:
 # SUPABASE_DB_URL.
@@ -106,8 +114,10 @@ jobs:
           if [ -n "$MAX_SECONDS" ]; then ARGS="$ARGS --max-seconds $MAX_SECONDS"; fi
           if [ -n "$BATCH_SIZE" ]; then ARGS="$ARGS --batch-size $BATCH_SIZE"; fi
           if [ "$DRY_RUN" = "true" ]; then ARGS="$ARGS --dry-run"; fi
-          # The scheduled run gets a budget under the job timeout so a long full pass
-          # stops cleanly between batches and the next hour resumes from its watermark.
+          # The scheduled run gets a budget under the job timeout so a long pass stops
+          # cleanly between batches. It then stamps `stopped` (never `ok`) and the next
+          # hour resumes from the keyset cursor on that batch row — the watermark does not
+          # move until a scan actually reaches the end of its range.
           if [ -z "$MAX_SECONDS" ] && [ "$GITHUB_EVENT_NAME" = "schedule" ]; then
             ARGS="$ARGS --max-seconds 2700"
           fi

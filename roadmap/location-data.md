@@ -154,6 +154,16 @@ Shipped (shadow-only; nothing reads these tables yet):
   nine sources: keyset pagination, 10–30k batches, watermark-incremental and re-runnable
   full mode, one `location_claim_batches` row per run, `dirty_locations` enqueued inside
   the claim-insert statement.
+- **Migration 386** `location_claim_fingerprint()` — 01 §4.2.1's tuple as ONE named
+  IMMUTABLE function, so W2's re-mine, W3's snapshot backfill and the LLM lane reuse the
+  definition instead of re-transcribing it. `claim_fingerprint` carries a UNIQUE index on
+  an append-only table: a second transcription would not conflict, it would insert.
+- **Migration 387** the resume cursor on `location_claim_batches` (`scan_mode`,
+  `cursor_after_id/ts`, `coverage_since`, `resumable`, outcome `'stopped'`). `'ok'` now
+  means exactly "the scan ran out of rows"; a budget-stopped run stamps `'stopped'`, which
+  the watermark query cannot see. Before this a 30k-row budgeted run over a 650k-row table
+  moved the incremental floor past 620k rows it never opened — permanently for the ~270k
+  delisted ones, whose `last_seen_at` will never move again.
 - `.github/workflows/location_claims_intake.yml` — dispatch + hourly incremental cron on
   its own `location-claims` concurrency group; every run re-projects the contracts first.
 
@@ -162,8 +172,11 @@ Decisions worth carrying forward:
 - **The licence ladder is stronger than `carry_forward`.** W1's blocking gate is
   `claims JOIN <R2 inventory> WHERE claim_type='coordinate'` = 0, so presence in
   `mapy_affected` vetoes a coordinate on **every** substrate, including the three portals
-  whose pin is first-party payload. The lane refuses to start if that inventory is missing
-  or empty.
+  whose pin is first-party payload. The lane refuses to start unless that inventory is
+  TERMINAL AND COMPLETE — a `resumable` run at `status='completed'` in the current
+  `restart_epoch`, not merely `count(*) > 0`. A half-built inventory is worse than none:
+  every listing past its high-water mark reads as *absent*, which is precisely the verdict
+  that admits a Mapy-derived `carry_forward` coordinate as first-party.
 - **`claim_fingerprint` is computed in SQL**, from the same `location_value_norm()` the
   column uses. PostgreSQL's `unaccent` is a dictionary (ß→ss, ø→o, đ→d …) and a Python NFKD
   mirror drifts on exactly the foreign-address cohort — drift there means the unique index
@@ -175,7 +188,13 @@ Decisions worth carrying forward:
   gets a `location_claim_absences` row, and sreality's legacy-shape / 80 KB-truncated rows
   are routed to `location_enrichment_state(lane='sreality_detail_refetch')`.
 
-Open: promoting the fingerprint expression to a named SQL function (it belongs beside
-`location_value_norm` in 382); adding `location_data` to `tests/sql_corpus.RUNTIME_DIRS`
-once the schema migrations are on `main`; the per-portal frozen labelled samples of
-§6.4.0, which gate whether each contract resolves or stays in shadow.
+- **Legacy entries never burn a permanent extractor id.** 02 §2.2.3 fixes
+  `bzs.det.psc` / `bzs.det.link_pin` on the W2 *HTML* parses; the raw_json/`listings.geom`
+  mirrors of the same facts ship as `bzs.det.legacy_psc` / `bzs.det.legacy_link_pin` (the
+  pattern `id.det.legacy_pin` set on idnes), so the two provenances stay distinguishable
+  in `location_claims.extractor_id` when W2 lands.
+
+Open: the per-portal frozen labelled samples of §6.4.0, which gate whether each contract
+resolves or stays in shadow. Closed in this round: the fingerprint is now migration 386's
+`location_claim_fingerprint()`, and `location_data` is in `tests/sql_corpus.RUNTIME_DIRS`
+(so the offline placeholder guard and the CI PREPARE sweep both cover the package).

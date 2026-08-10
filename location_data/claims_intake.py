@@ -32,7 +32,7 @@ THE LICENCE LADDER RUNS FIRST (§6.1.2, and it is a filter, not an audit)
 CLI:
     python -m location_data.claims_intake --mode incremental
     python -m location_data.claims_intake --mode full --source sreality --max-seconds 3000
-Required: SUPABASE_DB_URL. Additionally requires migrations 380-385 and a projected,
+Required: SUPABASE_DB_URL. Additionally requires migrations 380-387 and a projected,
 active portal contract per source (`python -m location_data.contracts --load`).
 """
 
@@ -667,14 +667,19 @@ def _read_declared_quality(entry: Entry, row: ListingRow) -> list[Claim]:
 @reader("declared_bool_quality")
 def _read_declared_bool_quality(entry: Entry, row: ListingRow) -> list[Claim]:
     """mmreality `accurate` — present on 100% of rows, `false` on 37.2%, and stored
-    nowhere today. `false` is the declared-blur label; `true` is a declared-precise one and
-    still writes `blur_evidence='none'` EXPLICITLY (06 §6.6 rule 7)."""
+    nowhere today. The boolean is mapped to a LABEL by the contract (`locator.labels`) and
+    the blur axis is then decided the same way `declared_quality` decides it: membership
+    in the contract's `precision_map.blurred_labels`. Which of the two labels is blurred
+    is a portal fact, so it is data on the entry — re-calibrating it is a contract version
+    bump, not a code change. Either way the axis is written EXPLICITLY, never defaulted
+    (06 §6.6 rule 7)."""
     raw = json_pointer(row.raw_json, str(entry.locator["json_pointer"]))
     if raw is None or not isinstance(raw, bool):
         return []
     labels = entry.locator.get("labels") or {"true": "accurate", "false": "not_accurate"}
     label = str(labels["true" if raw else "false"])
-    blur = "declared" if not raw else "none"
+    blurred = {str(x) for x in (entry.precision_map.get("blurred_labels") or [])}
+    blur = "declared" if label in blurred else "none"
     return [_base(entry, row, value_text=label, declared_precision_label=label,
                   value_num=1.0 if raw else 0.0, blur_evidence=blur)]
 
@@ -801,10 +806,34 @@ def extract_listing(row: ListingRow, entries: list[Entry]) -> IntakeResult:
 _REGCLASS_SQL = "SELECT to_regclass(%(name)s)"
 _MAPY_COUNT_SQL = "SELECT count(*) FROM mapy_affected"
 
+# The inventory is only a W1 INPUT once it is TERMINAL AND COMPLETE. `count(*) > 0` is
+# the wrong gate: the inventory job is batched and resumable, so a run that stopped at
+# its budget leaves a perfectly non-empty table describing a PREFIX of `listings` — and
+# every listing past that prefix would then be read as "absent from the inventory", which
+# is exactly the verdict that admits a carry_forward coordinate as first-party. The
+# question this asks is migration 385's own completeness contract, verbatim: inside the
+# CURRENT restart epoch (a `--restart` opens a new one and the older epoch's completion
+# says nothing about it), is there a run that finished the whole table without an
+# operator-chosen start anchor?
+_INVENTORY_TERMINAL_SQL = """
+    SELECT
+      (SELECT count(*) FROM mapy_inventory_runs),
+      (SELECT coalesce(max(restart_epoch), 0) FROM mapy_inventory_runs),
+      EXISTS (
+        SELECT 1 FROM mapy_inventory_runs r
+        WHERE r.restart_epoch = (SELECT max(restart_epoch) FROM mapy_inventory_runs)
+          AND r.status = 'completed'
+          AND r.resumable),
+      (SELECT string_agg(DISTINCT r.status, ',' ORDER BY r.status)
+       FROM mapy_inventory_runs r
+       WHERE r.restart_epoch = (SELECT max(restart_epoch) FROM mapy_inventory_runs))
+"""
+
 _RELATIONS = (
     "location_claims", "location_claim_observations", "location_claim_absences",
     "location_claim_batches", "location_enrichment_state", "dirty_locations",
     "portal_contracts", "portal_contract_entries", "mapy_affected",
+    "mapy_inventory_runs",
 )
 
 _TIMEOUT_GUARD_SQL = """
@@ -830,23 +859,55 @@ _ACTIVE_CONTRACT_SQL = """
 
 _BATCH_INSERT_SQL = """
     INSERT INTO location_claim_batches
-        (lane, source, extractor_version, contract_id, wave, job_run_id, outcome, note)
+        (lane, source, extractor_version, contract_id, wave, job_run_id, outcome, note,
+         scan_mode, resumable, coverage_since)
     VALUES (%(lane)s, %(source)s, %(extractor_version)s, %(contract_id)s, %(wave)s,
-            %(job_run_id)s, 'running', %(note)s)
-    RETURNING id
+            %(job_run_id)s, 'running', %(note)s, %(scan_mode)s, %(resumable)s,
+            coalesce(%(coverage_since)s::timestamptz, now()))
+    RETURNING id, coverage_since
 """
 
 _BATCH_FINISH_SQL = """
     UPDATE location_claim_batches
     SET finished_at = now(), outcome = %(outcome)s, row_count = %(row_count)s,
+        cursor_after_id = %(cursor_after_id)s, cursor_after_ts = %(cursor_after_ts)s,
         note = concat_ws(' | ', note, %(note)s::text)
     WHERE id = %(batch_id)s
 """
 
+# `outcome = 'ok'` is now load-bearing and narrow: migration 387 splits the terminal
+# states so that 'ok' means "the scan ran out of rows", never "the scan ran out of
+# budget". A budget-stopped run stamps 'stopped' and is INVISIBLE here, so the
+# incremental floor stays where it was and the rows it never opened are still in the
+# next run's window. (The failure this closes: a 30k-row budgeted run over a 650k-row
+# table used to move the floor past 620k unscanned rows — permanently, for the ~270k
+# delisted ones whose `last_seen_at` will never move again.)
+#
+# `coverage_since`, not `started_at`: for a chain of budgeted runs the completing run
+# began long after the scan did, and the claim the watermark makes — "everything written
+# before this instant has been mined" — is only true back to the FIRST run's start.
+# For an unresumed run the two are the same value.
 _WATERMARK_SQL = """
-    SELECT max(started_at)
+    SELECT max(coalesce(coverage_since, started_at))
     FROM location_claim_batches
     WHERE lane = %(lane)s AND outcome = 'ok' AND source IS NOT DISTINCT FROM %(source)s
+"""
+
+# The resume point: the newest TERMINAL batch of this (lane, source, scan_mode) among the
+# resumable ones. `outcome` comes back with it rather than being filtered on, because
+# "the last full pass finished" and "there has never been a full pass" must not look the
+# same to the caller — only a 'stopped' row is resumed from, and an 'ok' row means the
+# next pass legitimately starts over at the beginning of the range.
+_RESUME_SQL = """
+    SELECT outcome, cursor_after_id, cursor_after_ts, coverage_since
+    FROM location_claim_batches
+    WHERE lane = %(lane)s
+      AND source IS NOT DISTINCT FROM %(source)s
+      AND scan_mode = %(scan_mode)s
+      AND resumable
+      AND outcome IN ('ok', 'stopped', 'failed')
+    ORDER BY started_at DESC, id DESC
+    LIMIT 1
 """
 
 # Keyset over the whole table (active AND inactive: a delisted row's payload is exactly the
@@ -880,25 +941,31 @@ _LISTINGS_INCREMENTAL_SQL = """
 # enqueue are atomic together (03 §3.2: the enqueue happens INSIDE the claim-insert
 # transaction; it is the only coupling between intake and resolution).
 #
-# claim_fingerprint is computed HERE, in SQL, deliberately. `value_norm` is written by
-# `location_value_norm()` (migration 382), which is `lower(unaccent(...))` — and
-# PostgreSQL's `unaccent` dictionary is NOT the same function as Python's NFKD
-# combining-mark strip (it additionally expands ß→ss, ø→o, đ→d, ł→l …). A Python mirror
-# would therefore drift on exactly the foreign-address cohort this program exists to
-# detect, and drift in the fingerprint means the unique index stops deduping: silent
-# duplicate claims in an append-only table. One definition, on the side that owns the
-# normalization. The tuple is 01 §4.2.1's, in its order, and is TIME-FREE.
+# claim_fingerprint is computed in SQL, deliberately, and by a NAMED FUNCTION rather than
+# an expression pasted here. Two reasons, and both are about an append-only table whose
+# only dedup mechanism is a UNIQUE index over this value:
+#
+#   * Not Python. `value_norm` is written by `location_value_norm()` (migration 382),
+#     which is `lower(unaccent(...))` — and PostgreSQL's `unaccent` dictionary is NOT
+#     Python's NFKD combining-mark strip (it additionally expands ß→ss, ø→o, đ→d, ł→l …).
+#     A Python mirror would drift on exactly the foreign-address cohort this program
+#     exists to detect, and a drifted fingerprint does not conflict — it inserts.
+#   * Not inline. W1 intake is the FIRST claim producer; W2's HTML re-mine, W3's snapshot
+#     backfill and the LLM lane are the next three. A 22-element tuple transcribed four
+#     times is four chances to lose a byte. `location_claim_fingerprint()` (migration 386)
+#     is the one definition all of them call.
+#
+# The tuple is 01 §4.2.1's, in its order, and is TIME-FREE.
 _CLAIM_FINGERPRINT_SQL = """
-    sha256(convert_to(jsonb_build_array(
+    location_claim_fingerprint(
         t.listing_id, t.source, t.source_id_native,
         t.claim_type, t.surface, t.page_kind, t.extraction_method,
         t.extractor_id, t.extractor_version, t.contract_entry_id,
-        coalesce(t.value_norm, t.value_text, ''),
-        t.value_num, encode(ST_AsEWKB(t.geom), 'hex'), encode(ST_AsEWKB(t.shape), 'hex'),
+        t.value_norm, t.value_text,
+        t.value_num, t.geom, t.shape,
         t.value_jsonb, t.distance_m, t.travel_mode, t.target_text,
         t.declared_precision_label, t.declared_confidence, t.declared_radius_m,
-        t.legacy_source_column
-    )::text, 'UTF8'))
+        t.legacy_source_column)
 """
 
 _CLAIM_WRITE_SQL = f"""
@@ -975,8 +1042,18 @@ _CLAIM_WRITE_SQL = f"""
 """
 
 # snapshot_id is always NULL in this lane (the substrate is latest-wins `listings.raw_json`,
-# 00 §3.3), so the generated `snapshot_key` is always -1; the NOT EXISTS spells that out
-# rather than relying on ON CONFLICT inference over a generated column.
+# 00 §3.3), so the generated `snapshot_key` is always -1 — and it is named explicitly in the
+# conflict target because that is the column migration 382's unique key actually carries.
+#
+# ON CONFLICT, not NOT EXISTS, and the difference is a whole aborted run. A statement's
+# snapshot cannot see rows the SAME statement is inserting, so a NOT EXISTS anti-join
+# arbitrates against the table as it was BEFORE the insert and lets two identical rows in
+# one batch through to the unique index — where the second one raises and takes the entire
+# intake run with it. That is not hypothetical: one sreality listing that is in
+# `mapy_affected` AND has a truncated payload produces the withheld-coordinate absence and
+# the missing-locality absence with the same (listing_id, surface, field) key. The Python
+# dedupe in `write_result` collapses those; ON CONFLICT is the second rail, for the
+# cross-run case the anti-join used to cover.
 _ABSENCE_WRITE_SQL = """
     INSERT INTO location_claim_absences
         (listing_id, snapshot_id, surface, field, reason, extraction_method,
@@ -988,13 +1065,8 @@ _ABSENCE_WRITE_SQL = """
     FROM jsonb_to_recordset(%(rows)s::jsonb) AS i(
         listing_id bigint, surface text, field text, reason text,
         extraction_method text, extractor_version text)
-    WHERE NOT EXISTS (
-        SELECT 1 FROM location_claim_absences a
-        WHERE a.listing_id = i.listing_id
-          AND a.snapshot_key = -1
-          AND a.surface = i.surface::location_claim_surface
-          AND a.field = i.field::location_claim_type
-          AND a.extractor_version = i.extractor_version)
+    ON CONFLICT (listing_id, snapshot_key, surface, field, extractor_version)
+    DO NOTHING
 """
 
 # `input_hash` is the cost gate (01 §9): attempts only advance when the payload actually
@@ -1051,7 +1123,16 @@ def missing_relations(conn: psycopg.Connection) -> list[str]:
 
 def assert_inventory_ready(conn: psycopg.Connection) -> int:
     """06 §6.1.2: the C7.2 R2 inventory is a W1 INPUT. Without it, `carry_forward` cannot
-    be classified and the W1 licence gate cannot be met, so the lane refuses to run."""
+    be classified and the W1 licence gate cannot be met, so the lane refuses to run.
+
+    "Without it" means TERMINAL AND COMPLETE, not merely non-empty. The inventory job is
+    batched and resumable: a run that stopped at its `--limit`/`--max-seconds` budget
+    leaves a populated table that describes a PREFIX of `listings`, and absence from a
+    prefix is indistinguishable from absence from the inventory — which is the exact
+    verdict that admits a Mapy-derived `carry_forward` coordinate as first-party. So the
+    gate is migration 385's own completeness contract: in the CURRENT restart epoch, a
+    run with `status='completed'` that was not anchored at an operator-chosen listing_id
+    (`resumable`)."""
     with conn.cursor() as cur:
         cur.execute(_REGCLASS_SQL, {"name": "mapy_affected"})
         if cur.fetchone()[0] is None:
@@ -1061,12 +1142,28 @@ def assert_inventory_ready(conn: psycopg.Connection) -> int:
                 "`python -m scripts.location_mapy_inventory` first.")
         cur.execute(_MAPY_COUNT_SQL)
         count = int(cur.fetchone()[0])
+        cur.execute(_INVENTORY_TERMINAL_SQL)
+        run_count, epoch, complete, statuses = cur.fetchone()
     if count == 0:
         raise IntakeRefused(
             "mapy_affected is empty: the Mapy affected-set inventory has not been "
             "materialised. Every carry_forward coordinate would be admitted as "
             "first-party and the W1 licence gate would fail (06 §6.1.2). Run "
             "`python -m scripts.location_mapy_inventory` to completion first.")
+    if not int(run_count or 0):
+        raise IntakeRefused(
+            "mapy_inventory_runs has no rows: mapy_affected holds data no run "
+            "accounted for, so its completeness cannot be established. The inventory "
+            "is a W1 INPUT (06 §6.1.2) — run "
+            "`python -m scripts.location_mapy_inventory` to completion first.")
+    if not complete:
+        raise IntakeRefused(
+            f"the Mapy affected-set inventory is INCOMPLETE: restart epoch {int(epoch)} "
+            f"has no resumable run with status='completed' (saw: {statuses or 'none'}). "
+            f"A partial inventory is worse than none — every listing past the scan's "
+            f"high-water mark reads as ABSENT from it, which is exactly the verdict that "
+            f"admits a Mapy-derived carry_forward coordinate as first-party (06 §6.1.2). "
+            f"Run `python -m scripts.location_mapy_inventory` to completion first.")
     return count
 
 
@@ -1102,6 +1199,28 @@ def _row_from_record(record: tuple[Any, ...]) -> ListingRow:
         in_mapy_inventory=bool(in_inventory))
 
 
+def dedupe_absence_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Collapse absence rows onto migration 382's unique key, first-writer-wins.
+
+    `location_claim_absences` is UNIQUE on (listing_id, snapshot_key, surface, field,
+    extractor_version) and `snapshot_key` is constant at -1 in this lane, so two absences
+    for one listing on the same surface+field are the same row. They are produced: a
+    sreality listing that is in `mapy_affected` AND lost its `locality` object to the
+    80 KB truncation emits the withheld-coordinate absence and the missing-locality
+    absence, both `(api_json, coordinate)`. `reason` is intentionally NOT in the key —
+    the first assertion made about a (listing, surface, field) is the one kept, and
+    keeping both was never possible."""
+    seen: set[tuple[Any, ...]] = set()
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        key = (row["listing_id"], row["surface"], row["field"], row["extractor_version"])
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(row)
+    return out
+
+
 def write_result(
     cur: psycopg.Cursor, result: IntakeResult, *, batch_id: int,
 ) -> tuple[int, int, int]:
@@ -1114,13 +1233,49 @@ def write_result(
         inserted, observed, enqueued = (int(x) for x in cur.fetchone())
     if result.absences:
         cur.execute(_ABSENCE_WRITE_SQL, {
-            "rows": Jsonb([a.to_row(INTAKE_VERSION) for a in result.absences]),
+            "rows": Jsonb(dedupe_absence_rows(
+                [a.to_row(INTAKE_VERSION) for a in result.absences])),
         })
     if result.enrichment:
         cur.execute(_ENRICHMENT_WRITE_SQL, {
             "rows": Jsonb([e.to_row(INTAKE_VERSION) for e in result.enrichment]),
         })
     return inserted, observed, enqueued
+
+
+def _resume_point(
+    conn: psycopg.Connection, *, mode: str, source: str | None, watermark: datetime | None,
+) -> dict[str, Any] | None:
+    """Where this scan should pick up, or None to start at the beginning of its range.
+
+    Only a 'stopped' predecessor is resumed from, and only one written by the SAME
+    `scan_mode`: a full cursor is a bare `listings.id` and an incremental one is
+    `(last_seen_at, id)`, so crossing them would skip an arbitrary slice.
+
+    In incremental mode the stored `(after_ts, after_id)` is only usable when it sits at
+    or after the floor this run computed. It normally does — a stopped run does not move
+    the watermark, so the next run recomputes the SAME floor and the stopped run's cursor
+    is exactly how far into that identical window it got. `--overlap-hours` changing
+    between runs is the case where it doesn't, and there the floor wins."""
+    with conn.cursor() as cur:
+        cur.execute(_RESUME_SQL, {"lane": LANE, "source": source, "scan_mode": mode})
+        row = cur.fetchone()
+    if not row:
+        return None
+    outcome, after_id, after_ts, coverage_since = row
+    if outcome != "stopped" or after_id is None:
+        return None
+    if mode == "incremental":
+        if after_ts is None:
+            return None
+        if watermark is not None and after_ts < watermark:
+            return None
+    return {
+        "after_id": int(after_id),
+        "after_ts": after_ts if mode == "incremental" else None,
+        # Coverage is claimed back to where the CHAIN started, not this run's own start.
+        "coverage_since": coverage_since,
+    }
 
 
 # ------------------------------------------------------------------ the run
@@ -1143,7 +1298,7 @@ def run(
     if missing:
         raise IntakeRefused(
             f"location schema not applied; missing {', '.join(missing)} "
-            f"(migrations 380-385)")
+            f"(migrations 380-387)")
     inventory_rows = assert_inventory_ready(conn)
 
     entries_by_source = load_entries(conn)
@@ -1183,6 +1338,23 @@ def run(
                      "incremental degrades to a full pass", source or "*")
             mode = "full"
 
+    # An operator-anchored run does not certify that everything below its anchor was
+    # scanned, so it neither resumes from a stored cursor nor becomes one (the same guard
+    # migration 385 puts on `mapy_inventory_runs.resumable`).
+    anchored = start_after_id > 0
+    after_id = start_after_id
+    after_ts = watermark
+    resumed_from: dict[str, Any] | None = None
+    if not anchored:
+        resumed_from = _resume_point(conn, mode=mode, source=source, watermark=watermark)
+        if resumed_from is not None:
+            after_id = int(resumed_from["after_id"])
+            if mode == "incremental" and resumed_from["after_ts"] is not None:
+                after_ts = resumed_from["after_ts"]
+            LOG.info("INTAKE resuming a budget-stopped %s scan for source=%s from "
+                     "after_id=%d after_ts=%s", mode, source or "*", after_id,
+                     resumed_from["after_ts"])
+
     batch_id: int | None = None
     if not dry_run:
         with guarded(conn, statement_timeout) as cur:
@@ -1190,17 +1362,18 @@ def run(
                 "lane": LANE, "source": source, "extractor_version": INTAKE_VERSION,
                 "contract_id": contract_id, "wave": WAVE,
                 "job_run_id": os.environ.get("GITHUB_RUN_ID"), "note": note,
+                "scan_mode": mode, "resumable": not anchored,
+                "coverage_since": (resumed_from or {}).get("coverage_since"),
             })
             batch_id = int(cur.fetchone()[0])
     LOG.info("INTAKE start mode=%s source=%s batch=%d inventory_rows=%d batch_id=%s",
              mode, source or "*", batch_size, inventory_rows, batch_id)
 
     started = time.monotonic()
-    after_id = start_after_id
-    after_ts = watermark
     stats = {
         "listings": 0, "claims": 0, "claims_inserted": 0, "observations": 0,
         "enqueued": 0, "absences": 0, "refetch_cohort": 0, "stopped_early": False,
+        "reached_end": False, "resumed_from_id": after_id,
     }
     try:
         while True:
@@ -1224,6 +1397,11 @@ def run(
                         "after_id": after_id, "source": source, "batch_size": size})
                 records = cur.fetchall()
                 if not records:
+                    # The ONLY way this scan earns outcome='ok'. Everything else — a
+                    # budget, a limit, an exception — leaves rows unopened behind the
+                    # cursor, and a watermark that moves past unopened rows never comes
+                    # back for them.
+                    stats["reached_end"] = True
                     break
 
                 result = IntakeResult()
@@ -1258,22 +1436,32 @@ def run(
                 cur.execute(_BATCH_FINISH_SQL, {
                     "batch_id": batch_id, "outcome": "failed",
                     "row_count": stats["claims_inserted"],
+                    "cursor_after_id": after_id, "cursor_after_ts": after_ts,
                     "note": f"{type(exc).__name__}: {exc}"[:500],
                 })
         raise
 
+    # 'ok' means ONE thing: the scan ran out of rows. A run that ran out of budget
+    # instead stamps 'stopped', which `_WATERMARK_SQL` does not see — so the incremental
+    # floor stays where it was and everything behind the cursor is still in the next
+    # run's window. The cursor rides on the row either way, so the next same-mode run
+    # picks up exactly where this one left off instead of re-walking the same prefix.
+    outcome = "ok" if stats["reached_end"] else "stopped"
+    stats["outcome"] = outcome
     if batch_id is not None:
         with guarded(conn, statement_timeout) as cur:
             cur.execute(_BATCH_FINISH_SQL, {
                 "batch_id": batch_id,
-                # A run stopped by its own budget is still `ok`: its watermark is honest,
-                # and the next run resumes from it.
-                "outcome": "ok",
+                "outcome": outcome,
                 "row_count": stats["claims_inserted"],
-                "note": f"listings={stats['listings']} stopped_early={stats['stopped_early']}",
+                "cursor_after_id": after_id,
+                "cursor_after_ts": after_ts if mode == "incremental" else None,
+                "note": f"listings={stats['listings']} stopped_early={stats['stopped_early']} "
+                        f"reached_end={stats['reached_end']} through_id={after_id}",
             })
     stats["batch_id"] = batch_id
     stats["mode"] = mode
+    stats["cursor_after_id"] = after_id
     return stats
 
 
