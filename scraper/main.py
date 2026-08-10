@@ -29,6 +29,7 @@ valid when the entire sreality index has been walked.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import sys
@@ -1236,6 +1237,42 @@ def _walk_category_split(
     return union, counts, reported_size, pages, complete
 
 
+def _index_page_archiver(
+    client: SrealityClient, conn: Any, dry_run: bool,
+) -> Any:
+    """Archiving hook for iter_index (location-data W0 item 0n): stage each raw
+    index-page JSON payload as a page_kind='index' row, at most once per
+    INDEX_ARCHIVE_REFRESH_HOURS per page key. The index payload carries
+    signals no other surface has (geohash, POI distances, locality.geometry).
+    An archive failure warns and never interrupts the walk — the walk is the
+    platform's core ingest; the durable archive path is the W2a payload store.
+    """
+    if conn is None or dry_run:
+        return None
+
+    def archive(offset: int, url: str, payload: dict[str, Any]) -> None:
+        district = client.locality_district_id
+        key = (
+            f"{client.category_main}/{client.category_type}/"
+            f"{district if district is not None else 'all'}/{offset}"
+        )
+        try:
+            db.upsert_portal_raw_page(
+                conn,
+                source="sreality",
+                source_id_native=key,
+                source_url=url,
+                page_kind="index",
+                html=json.dumps(payload, ensure_ascii=False),
+                http_status=200,
+                refresh_after_hours=db.INDEX_ARCHIVE_REFRESH_HOURS,
+            )
+        except Exception as exc:  # noqa: BLE001 - archiving must not kill ingest
+            LOG.warning("INDEX archive failed key=%s: %s", key, exc)
+
+    return archive
+
+
 def _walk_category(
     client: SrealityClient,
     conn: Any,
@@ -1261,7 +1298,7 @@ def _walk_category(
         "found_new": 0, "images_discovered": 0, "enqueued": 0,
     }
     index_entries: list[tuple[int, int | None]] = []
-    for estate in client.iter_index():
+    for estate in client.iter_index(on_page=_index_page_archiver(client, conn, dry_run)):
         if cat_limit is not None and len(index_entries) >= cat_limit:
             break
         sid = _extract_id(estate)

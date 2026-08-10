@@ -2602,6 +2602,14 @@ def reclaim_stale_claims(
         return len(cur.fetchall())
 
 
+# Index pages are re-fetched on every walk, but the archive only needs daily
+# grain — the per-page TOAST write was why index archiving was removed in June
+# 2026, so the re-enable (location-data W0 item 0n) refreshes an existing index
+# row at most once per ~day instead of once per walk. 22h leaves headroom for
+# walk-start jitter on the hourly/6h cadences.
+INDEX_ARCHIVE_REFRESH_HOURS: float = 22.0
+
+
 def upsert_portal_raw_page(
     conn: psycopg.Connection,
     *,
@@ -2611,13 +2619,26 @@ def upsert_portal_raw_page(
     page_kind: str,
     html: str,
     http_status: int | None,
-) -> int:
+    refresh_after_hours: float | None = None,
+) -> int | None:
     """Latest-wins upsert of one fetched HTML page into portal_raw_pages.
 
     Decouples fetch from parse so a page can be re-parsed without re-fetching.
     Returns the staging row id; a re-fetch overwrites the HTML and clears the
-    previous parse state.
+    previous parse state. With `refresh_after_hours` set, an existing row
+    younger than that is left untouched and None is returned — the write-cost
+    guard for index-page archiving.
     """
+    guard = ""
+    params: tuple[Any, ...] = (
+        source, source_id_native, source_url, page_kind, html, http_status,
+    )
+    if refresh_after_hours is not None:
+        guard = (
+            " WHERE portal_raw_pages.fetched_at"
+            " < now() - make_interval(secs => %s)"
+        )
+        params = params + (refresh_after_hours * 3600.0,)
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -2632,11 +2653,13 @@ def upsert_portal_raw_page(
                 fetched_at  = now(),
                 parsed_at   = NULL,
                 parse_error = NULL
-            RETURNING id
-            """,
-            (source, source_id_native, source_url, page_kind, html, http_status),
+            """
+            + guard
+            + " RETURNING id",
+            params,
         )
-        return int(cur.fetchone()[0])
+        row = cur.fetchone()
+        return int(row[0]) if row is not None else None
 
 
 def mark_portal_page_parsed(

@@ -88,7 +88,7 @@ class _FakeClient:
     def probe_result_size(self):
         return self.result_size
 
-    def iter_index(self):
+    def iter_index(self, on_page=None):
         if self.locality_district_id is not None:
             d = self.locality_district_id
             n = _FakeClient.district_collected.get(
@@ -264,7 +264,7 @@ def test_run_full_isolates_one_crashing_category_marks_the_rest(
     # Make dum/pronajem (2, 2) raise mid-iteration; its position in the walk
     # order is irrelevant (the run rotates CATEGORIES by hour), so assert on the
     # pairs below by membership, not index.
-    def crashing_iter_index(self):
+    def crashing_iter_index(self, on_page=None):
         if (self.category_main, self.category_type) == (2, 2):
             yield {"hash_id": 99999, "price_czk": 1}
             raise RuntimeError("simulated outage mid-iteration")
@@ -459,7 +459,7 @@ class _IdxClient:
     def __init__(self, ids: list[int]) -> None:
         self._ids = ids
 
-    def iter_index(self):
+    def iter_index(self, on_page=None):
         for i in self._ids:
             yield {"hash_id": i, "price_czk": 1}
 

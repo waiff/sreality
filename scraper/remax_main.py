@@ -47,7 +47,7 @@ from scraper.portal import (
 from scraper.portal_base import ListingGoneError
 from scraper.portal_runner import DrainItem
 from scraper.rate_limit import RateLimiter
-from scraper.remax_client import RemaxClient, detail_url
+from scraper.remax_client import RemaxClient, detail_url, index_url
 from scraper.remax_parser import category_of, index_price, parse_detail, parse_index
 
 LOG = logging.getLogger(__name__)
@@ -143,6 +143,25 @@ class RemaxPortal:
         page = 1
         while True:
             html, status = client.fetch_index(sale=sale, stranka=page)
+            # Location-data W0 item 0n: the index card's data-display-address is
+            # the ONLY house-number-bearing remax surface — archive it (daily
+            # grain via the refresh guard; a failure warns, never kills a walk).
+            if conn is not None:
+                try:
+                    db.upsert_portal_raw_page(
+                        conn,
+                        source=SOURCE,
+                        source_id_native=f"{sale}/{page}",
+                        source_url=index_url(sale, page),
+                        page_kind="index",
+                        html=html,
+                        http_status=status,
+                        refresh_after_hours=db.INDEX_ARCHIVE_REFRESH_HOURS,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    LOG.warning(
+                        "INDEX archive failed sale=%d page=%d: %s", sale, page, exc
+                    )
             parsed = parse_index(html)
             pages += 1
             total = parsed.total if parsed.total is not None else total
