@@ -120,17 +120,43 @@ class _Cur:
     def fetchone(self):
         return (self.conn.result,)
 
+    def fetchall(self):
+        return list(self.conn.rows)
+
+
+class _Tx:
+    """Records the transaction boundary so a test can prove what commits together."""
+
+    def __init__(self, conn):
+        self.conn = conn
+
+    def __enter__(self):
+        self.conn.executed.append(("BEGIN", None))
+        return self
+
+    def __exit__(self, *exc):
+        self.conn.executed.append(("COMMIT", None))
+        return False
+
 
 class _Conn:
-    def __init__(self, result=None):
+    def __init__(self, result=None, rows=()):
         self.result = result
+        self.rows = list(rows)
         self.executed: list[tuple[str, object]] = []
+        self.closed = False
 
     def cursor(self):
         return _Cur(self)
 
     def transaction(self):
-        return _Cur(self)
+        return _Tx(self)
+
+    def close(self):
+        self.closed = True
+
+    def statements(self) -> list[str]:
+        return [sql for sql, _ in self.executed]
 
 
 def test_load_feature_writes_the_three_geometries_and_the_has_polygon_flag():
@@ -190,10 +216,10 @@ def test_a_degenerate_feature_is_counted_not_fatal(monkeypatch):
     recorded: list[dict] = []
     monkeypatch.setattr(rb.loader_db, "record_discrepancy",
                         lambda conn, v, **kw: recorded.append(kw))
-    counts = rb.load_layers(_Conn(), Path("/nonexistent"), levels=("obec",), version_id=1,
-                            with_pip=True)
+    counts, _ = rb.load_layers(_Conn(), Path("/nonexistent"), levels=("obec",), version_id=1,
+                               with_pip=True)
     assert counts == {"loaded": 1, "skipped_no_unit": 0, "degenerate": 1, "failed": 0,
-                      "names": 1}
+                      "names": 1, "resumed": 0}
     assert recorded[0]["discrepancy"] == "degenerate_boundary_geometry"
     assert recorded[0]["entity_code"] == 999
 
@@ -213,10 +239,191 @@ def test_a_failing_feature_is_a_discrepancy_row_not_the_end_of_the_pack(monkeypa
     recorded: list[dict] = []
     monkeypatch.setattr(rb.loader_db, "record_discrepancy",
                         lambda conn, v, **kw: recorded.append(kw))
-    counts = rb.load_layers(_Conn(), Path("/nonexistent"), levels=("obec",), version_id=1,
-                            with_pip=True)
+    counts, _ = rb.load_layers(_Conn(), Path("/nonexistent"), levels=("obec",), version_id=1,
+                               with_pip=True)
     assert (counts["loaded"], counts["failed"]) == (1, 1)
     assert recorded[0]["discrepancy"] == "boundary_load_failed"
+
+
+# --- session death mid-pack: reconnect once, resume, never mask the cause ----------
+#
+# The 2026-08 boundary run died 45 minutes into OBCE_P (obec 576069) when the single
+# long-lived session-pooler connection was dropped ("SSL connection has been closed
+# unexpectedly"), and then reported "the connection is closed" from the discrepancy INSERT
+# it tried to write on that same dead handle.
+
+def _obec_layer(monkeypatch, features, degenerate=()):
+    layer = next(x for x in rb.LAYERS if x.token == "OBCE_P")
+    monkeypatch.setattr(rb, "LAYERS", (layer,))
+    monkeypatch.setattr(rb, "read_layer", lambda d, l: (list(features), list(degenerate)))
+    return layer
+
+
+def _dropped() -> psycopg.OperationalError:
+    return psycopg.OperationalError("consuming input failed: SSL connection has been "
+                                    "closed unexpectedly")
+
+
+def test_a_dropped_session_is_reconnected_and_the_unit_retried_once(monkeypatch):
+    _obec_layer(monkeypatch, [_feature("obec", 1), _feature("obec", 2)])
+    dead, fresh = _Conn(), _Conn()
+    opened: list[object] = []
+    seen: list[tuple[object, int]] = []
+
+    def _load(conn, feature, *a, **k):
+        seen.append((conn, feature.code))
+        if conn is dead:
+            raise _dropped()
+        return True, False
+
+    monkeypatch.setattr(rb, "load_feature", _load)
+    counts, live = rb.load_layers(
+        dead, Path("/nonexistent"), levels=("obec",), version_id=1, with_pip=True,
+        reconnector=rb.Reconnector(lambda: (opened.append(fresh), fresh)[1]),
+    )
+    assert len(opened) == 1                       # ONE reconnect, not one per unit
+    assert dead.closed and live is fresh          # the dead handle is closed, not leaked
+    assert [code for _, code in seen] == [1, 1, 2]  # unit 1 retried, then unit 2 carried on
+    assert (counts["loaded"], counts["failed"]) == (2, 0)
+
+
+def test_a_unit_that_fails_its_retry_is_a_discrepancy_and_the_run_goes_on(monkeypatch):
+    _obec_layer(monkeypatch, [_feature("obec", 1), _feature("obec", 2)])
+    dead, fresh = _Conn(), _Conn()
+
+    def _load(conn, feature, *a, **k):
+        if feature.code == 1:
+            raise _dropped()
+        return True, False
+
+    monkeypatch.setattr(rb, "load_feature", _load)
+    recorded: list[tuple[object, dict]] = []
+    monkeypatch.setattr(rb.loader_db, "record_discrepancy",
+                        lambda conn, v, **kw: recorded.append((conn, kw)))
+    counts, live = rb.load_layers(
+        dead, Path("/nonexistent"), levels=("obec",), version_id=1, with_pip=True,
+        reconnector=rb.Reconnector(lambda: fresh),
+    )
+    assert (counts["loaded"], counts["failed"]) == (1, 1)
+    assert live is fresh
+    conn_arg, kwargs = recorded[0]
+    # The bookkeeping row never rides the handle we just failed on, and it carries the
+    # ORIGINAL error rather than a masking "the connection is closed".
+    assert conn_arg is None and kwargs["own_connection"] is True
+    assert kwargs["discrepancy"] == "boundary_load_failed"
+    assert "SSL connection has been closed" in kwargs["detail"]["error"]
+
+
+def test_a_non_transient_error_is_not_retried(monkeypatch):
+    """A GEOSException is one broken geometry, not a dead session — reconnecting would
+    burn the budget on a unit that will fail identically on any connection."""
+    _obec_layer(monkeypatch, [_feature("obec", 1)])
+    attempts: list[int] = []
+
+    def _load(conn, feature, *a, **k):
+        attempts.append(feature.code)
+        raise psycopg.errors.InternalError_("GEOSException")
+
+    monkeypatch.setattr(rb, "load_feature", _load)
+    monkeypatch.setattr(rb.loader_db, "record_discrepancy", lambda *a, **k: None)
+    reconnects: list[int] = []
+    counts, _ = rb.load_layers(
+        _Conn(), Path("/nonexistent"), levels=("obec",), version_id=1, with_pip=True,
+        reconnector=rb.Reconnector(lambda: reconnects.append(1) or _Conn()),
+    )
+    assert attempts == [1] and reconnects == []
+    assert counts["failed"] == 1
+
+
+def test_the_reconnect_budget_is_bounded_and_aborts_loudly(monkeypatch):
+    """Past the budget the environment is broken, not the pack: stop instead of grinding
+    through 6,258 obce one reconnect at a time and calling the result a load."""
+    _obec_layer(monkeypatch, [_feature("obec", i) for i in range(1, 40)])
+    monkeypatch.setattr(rb, "load_feature",
+                        lambda *a, **k: (_ for _ in ()).throw(_dropped()))
+    monkeypatch.setattr(rb.loader_db, "record_discrepancy", lambda *a, **k: None)
+    opened: list[object] = []
+    with pytest.raises(rb.loader_db.LoadAborted) as exc:
+        rb.load_layers(_Conn(), Path("/nonexistent"), levels=("obec",), version_id=1,
+                       with_pip=True,
+                       reconnector=rb.Reconnector(
+                           lambda: (opened.append(1), _Conn())[1], limit=3))
+    assert len(opened) == 3
+    assert "reconnects exhausted" in str(exc.value)
+
+
+def test_all_three_purposes_and_the_name_upgrade_commit_in_one_transaction():
+    """The resume fast-path's premise: an `authoritative` row for a registry version
+    proves the unit's render + pip rows, its name upgrade and its has_polygon flag
+    committed too, so a unit found there can be skipped WHOLE."""
+    conn = _Conn(7)  # unit_id_for -> 7
+    layer = next(x for x in rb.LAYERS if x.token == "OBCE_P")
+    rb.load_feature(conn, _feature("obec", 554782), layer, 3, with_pip=True)
+    statements = conn.statements()
+    begin, commit = statements.index("BEGIN"), statements.index("COMMIT")
+    inside = statements[begin + 1:commit]
+    assert sum("INSERT INTO ruian_admin_unit_geometries" in s for s in inside) == 3
+    assert any(s.startswith("UPDATE ruian_admin_units u SET name") for s in inside)
+    assert any("has_polygon = true" in s for s in inside)
+    assert any(s.startswith("DELETE FROM ruian_admin_unit_geometries") for s in inside)
+    assert statements.count("BEGIN") == 1  # ONE transaction, so it is all-or-nothing
+
+
+def test_units_already_loaded_for_this_version_are_skipped_on_resume(monkeypatch):
+    _obec_layer(monkeypatch, [_feature("obec", 1), _feature("obec", 2)])
+    conn = _Conn(rows=[(1,)])  # obec 1 already has its authoritative row
+    loaded: list[int] = []
+
+    def _load(c, feature, *a, **k):
+        loaded.append(feature.code)
+        return True, True
+
+    monkeypatch.setattr(rb, "load_feature", _load)
+    counts, _ = rb.load_layers(conn, Path("/nonexistent"), levels=("obec",), version_id=1,
+                               with_pip=True)
+    assert loaded == [2]
+    assert (counts["resumed"], counts["loaded"]) == (1, 1)
+    # ONE done-set query for the layer, not one probe per unit.
+    probes = [s for s in conn.statements() if "EXISTS ( SELECT 1 FROM" in s]
+    assert len(probes) == 1
+
+
+def test_the_done_set_is_scoped_to_the_registry_version_purpose_and_level():
+    sql = " ".join(rb._DONE_CODES.split())
+    assert "g.registry_version_id = %s" in sql
+    assert "g.purpose = 'authoritative'" in sql
+    assert "u.level::text = %s" in sql
+    assert "u.valid_to IS NULL" in sql  # matches unit_id_for's own liveness filter
+    # Params in the order `done_codes` binds them: level first, then the version.
+    assert sql.index("u.level::text = %s") < sql.index("g.registry_version_id = %s")
+
+
+def test_no_resume_reloads_everything(monkeypatch):
+    _obec_layer(monkeypatch, [_feature("obec", 1), _feature("obec", 2)])
+    conn = _Conn(rows=[(1,)])
+    loaded: list[int] = []
+    monkeypatch.setattr(rb, "load_feature",
+                        lambda c, f, *a, **k: (loaded.append(f.code), (True, True))[1])
+    counts, _ = rb.load_layers(conn, Path("/nonexistent"), levels=("obec",), version_id=1,
+                               with_pip=True, resume=False)
+    assert loaded == [1, 2] and counts["resumed"] == 0
+    assert not [s for s in conn.statements() if "EXISTS ( SELECT 1 FROM" in s]
+
+
+def test_a_resumed_run_still_rebuilds_the_gazetteer():
+    """A skipped unit was name-upgraded by the pass that died — which by definition never
+    reached the rebuild, so `names == 0` on the resume must not mean `no rebuild`."""
+    source = inspect.getsource(rb.run)
+    assert 'if (counts["names"] or counts["resumed"]) and not skip_gazetteer' in source
+
+
+def test_the_live_connection_is_the_one_that_gets_closed():
+    """`load_layers` may hand back a different connection than it was given; closing the
+    dead original would leak the fresh session-mode backend it replaced."""
+    source = inspect.getsource(rb.run)
+    assert "counts, conn = load_layers(" in source
+    assert "with loader_db.open_loader_connection() as conn" not in source
+    assert "finally:\n        conn.close()" in source
 
 
 def test_pick_field_is_case_insensitive_and_ordered():

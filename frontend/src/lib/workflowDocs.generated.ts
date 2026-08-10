@@ -2757,6 +2757,14 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
         "type": "boolean",
         "default": "false",
         "options": null
+      },
+      {
+        "name": "no_resume",
+        "description": "boundaries: re-load units already loaded for this registry version",
+        "required": false,
+        "type": "boolean",
+        "default": "false",
+        "options": null
       }
     ],
     "secrets": [

@@ -25,6 +25,15 @@ the placeholder names the CSV loader wrote AND rebuilds the gazetteer afterwards
 gazetteer skips placeholder-named units, so without the rebuild those levels would never be
 searchable no matter which job ran last.
 
+The pack takes ~an hour of per-piece PostGIS work on one session-mode connection, which is
+long enough for the session to be dropped under it (it was, 45 minutes into OBCE_P: an SSL
+EOF at obec 576069). So the per-unit loop is RESUMABLE and RECONNECTING, both bounded:
+a dropped session is reconnected and the unit retried once (`MAX_RECONNECTS` per run, past
+which the environment — not the pack — is what is broken), and a unit whose geometries are
+already committed for this registry version is skipped, so a re-dispatch always moves
+forward. Failure-path bookkeeping opens its own connection: the original incident reported
+"the connection is closed" from the discrepancy INSERT and lost the SSL drop that caused it.
+
 CLI:  python -m location_data.ruian_boundaries [--levels obec,okres] [--dry-run]
 """
 
@@ -36,8 +45,10 @@ import logging
 import sys
 import tempfile
 import zipfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TypeVar
 
 import psycopg
 import pyproj
@@ -47,11 +58,14 @@ import shapely.ops
 from shapely.geometry.base import BaseGeometry
 
 from location_data import krovak, loader_db, name_index, ruian_csv
+from scraper import db
 
 LOG = logging.getLogger("location_data.ruian_boundaries")
 
 STATE_PACK_URL = "https://services.cuzk.gov.cz/shp/stat/epsg-5514/1.zip"
 SUBDIVIDE_MAX_VERTICES = 256
+
+_T = TypeVar("_T")
 
 
 @dataclass(frozen=True, slots=True)
@@ -407,6 +421,136 @@ def _record_degenerate(
         )
 
 
+# A unit already carrying an `authoritative` row for this registry_version was written by
+# `load_feature`'s per-unit transaction, which commits the name upgrade, the DELETE, all
+# THREE geometries and the has_polygon flag together — so its presence is proof the whole
+# unit landed and the unit can be skipped whole. Prefetched ONCE per layer (a per-unit
+# EXISTS probe would add 6,258 round-trips to the obec layer), scoped to the layer's level
+# so the set stays small and a code can never be mistaken for another level's. Driven from
+# the units side so the two indexes migration 381 already ships do the work:
+# `ruian_admin_units_code (level, code)` picks the layer, then the partial
+# `ruian_aug_auth (unit_id) WHERE purpose = 'authoritative'` answers each unit.
+_DONE_CODES = """
+SELECT u.code
+  FROM ruian_admin_units u
+ WHERE u.level::text = %s AND u.valid_to IS NULL
+   AND EXISTS (
+       SELECT 1 FROM ruian_admin_unit_geometries g
+        WHERE g.unit_id = u.id
+          AND g.purpose = 'authoritative'
+          AND g.registry_version_id = %s
+   )
+"""
+
+# A session that dies mid-pack is an environment fault we ride out; a session that dies
+# twenty times is an environment that is broken, and grinding through 6,258 obce one
+# reconnect at a time would hide that behind a green-ish run.
+MAX_RECONNECTS = 20
+
+
+def done_codes(conn: psycopg.Connection, version_id: int, level: str) -> set[int]:
+    """Codes of `level` whose geometries are already committed for this registry version."""
+    with conn.cursor() as cur:
+        cur.execute(_DONE_CODES, (level, version_id))
+        return {int(row[0]) for row in cur.fetchall()}
+
+
+class Reconnector:
+    """Bounded reconnect budget for one run (scraper.db.run_resilient's shape, per-unit).
+
+    `run_resilient` itself does not fit: it discards the connection it opened when the
+    attempts are exhausted, and this loader must keep going on the FRESH connection after
+    a unit finally fails, not be handed back a dead one.
+    """
+
+    def __init__(
+        self,
+        reconnect: Callable[[], psycopg.Connection],
+        *,
+        limit: int = MAX_RECONNECTS,
+    ) -> None:
+        self._reconnect = reconnect
+        self.limit = limit
+        self.count = 0
+
+    def __call__(self, conn: psycopg.Connection | None, exc: BaseException) -> psycopg.Connection:
+        self.count += 1
+        if self.count > self.limit:
+            raise loader_db.LoadAborted(
+                f"boundary load: {self.limit} reconnects exhausted, last error {exc!r} — "
+                "the session keeps dying, which is the environment and not one geometry; "
+                "re-dispatch once it is healthy (loaded units are skipped on resume)"
+            )
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001 - already dead; close is best-effort
+                pass
+        LOG.warning("BOUNDARY reconnecting (%d/%d) after %r", self.count, self.limit, exc)
+        return self._reconnect()
+
+
+def run_resilient(
+    conn: psycopg.Connection,
+    op: Callable[[psycopg.Connection], _T],
+    reconnector: Reconnector,
+) -> tuple[_T, psycopg.Connection]:
+    """`op(conn)` with ONE reconnect-and-retry, returning (result, live_conn).
+
+    For the loader's between-unit work — the per-layer done-set probe, the degenerate
+    rows, the closing ANALYZE + gazetteer rebuild. Reading a 6,258-feature shapefile is
+    minutes of DB silence, which is exactly when a session-mode backend gets recycled out
+    from under an otherwise-healthy load, so these must survive a drop as much as the unit
+    loop does. Every `op` here is idempotent (a read, an ON CONFLICT upsert, ANALYZE, or a
+    delete-and-repopulate), so replaying it costs nothing.
+    """
+    try:
+        return op(conn), conn
+    except psycopg.Error as exc:
+        if not db.is_transient_db_error(exc):
+            raise
+        dropped = exc
+    conn = reconnector(conn, dropped)
+    return op(conn), conn
+
+
+def load_feature_resilient(
+    conn: psycopg.Connection,
+    feature: BoundaryFeature,
+    layer: Layer,
+    version_id: int,
+    *,
+    with_pip: bool,
+    reconnector: Reconnector,
+) -> tuple[bool, bool, psycopg.Connection, psycopg.Error | None]:
+    """`load_feature` with ONE reconnect-and-retry when the session drops mid-unit.
+
+    Returns (loaded, name_upgraded, live_conn, error). The caller MUST rebind its handle
+    (`db.run_resilient`'s contract): `live_conn` may be a fresh session. A failure is
+    RETURNED rather than raised precisely so the fresh session comes back with it — a
+    raise would strand the caller on the dead handle it passed in, which is how the
+    original incident turned one dropped connection into a dead run. The retry is safe to
+    replay because `load_feature` is delete-then-insert inside ONE transaction, so a unit
+    whose transaction died half-written has nothing committed to collide with. A
+    non-psycopg exception is a bug and still propagates.
+    """
+    try:
+        loaded, upgraded = load_feature(conn, feature, layer, version_id, with_pip=with_pip)
+        return loaded, upgraded, conn, None
+    except psycopg.Error as exc:
+        # One unloadable geometry fails identically on any connection: reconnecting for it
+        # would spend the budget on the data instead of on the outage.
+        if not db.is_transient_db_error(exc):
+            return False, False, conn, exc
+        dropped = exc
+    conn = reconnector(conn, dropped)  # raises LoadAborted past the budget
+    try:
+        loaded, upgraded = load_feature(conn, feature, layer, version_id, with_pip=with_pip)
+    except psycopg.Error as exc:
+        return False, False, conn, exc
+    return loaded, upgraded, conn, None
+
+
 def load_layers(
     conn: psycopg.Connection,
     extracted: Path,
@@ -414,37 +558,75 @@ def load_layers(
     levels: tuple[str, ...],
     version_id: int,
     with_pip: bool,
-) -> dict[str, int]:
-    counts = {"loaded": 0, "skipped_no_unit": 0, "degenerate": 0, "failed": 0, "names": 0}
+    reconnector: Reconnector | None = None,
+    resume: bool = True,
+) -> tuple[dict[str, int], psycopg.Connection]:
+    """Load every requested layer. Returns (counts, live_conn) — the connection may have
+    been replaced mid-pack, so the caller MUST rebind its handle."""
+    counts = {"loaded": 0, "skipped_no_unit": 0, "degenerate": 0, "failed": 0, "names": 0,
+              "resumed": 0}
+    reconnector = reconnector or Reconnector(loader_db.open_loader_connection)
+    # Two layers share the `spravni_obvod` level, so a done-set prefetched after the first
+    # of them has run would contain codes THIS run just wrote; subtracting them keeps a
+    # code that collides across the pair from being skipped as if it were already loaded.
+    loaded_here: dict[str, set[int]] = {}
     for layer in LAYERS:
         if layer.level not in levels:
             continue
         features, degenerate = read_layer(extracted, layer)
         assert_feature_counts(layer, features)
-        LOG.info("BOUNDARY layer=%s level=%s features=%d degenerate=%d", layer.token,
-                 layer.level, len(features), len(degenerate))
+        done: set[int] = set()
+        if resume:
+            done, conn = run_resilient(
+                conn, lambda c: done_codes(c, version_id, layer.level), reconnector,
+            )
+            done -= loaded_here.get(layer.level, set())
+        LOG.info("BOUNDARY layer=%s level=%s features=%d degenerate=%d already_loaded=%d",
+                 layer.token, layer.level, len(features), len(degenerate), len(done))
         if degenerate:
             counts["degenerate"] += len(degenerate)
-            _record_degenerate(conn, version_id, layer, degenerate)
+            _, conn = run_resilient(
+                conn, lambda c: _record_degenerate(c, version_id, layer, degenerate),
+                reconnector,
+            )
+        skipped = 0
         for feature in features:
-            try:
-                loaded, upgraded = load_feature(
-                    conn, feature, layer, version_id, with_pip=with_pip
-                )
-            except psycopg.Error as exc:
-                # One unloadable geometry is a discrepancy row, not the end of a 253 MB pack.
+            if feature.code in done:
+                skipped += 1
+                continue
+            loaded, upgraded, conn, error = load_feature_resilient(
+                conn, feature, layer, version_id,
+                with_pip=with_pip, reconnector=reconnector,
+            )
+            if error is not None:
+                # One unloadable geometry is a discrepancy row, not the end of a 253 MB
+                # pack. The row goes on its OWN connection: after a failed retry `conn` is
+                # a fresh handle we have not proven yet, and the 2026-08 run showed what a
+                # bookkeeping INSERT on a dead session does to the error you actually need.
                 counts["failed"] += 1
                 LOG.warning("BOUNDARY level=%s code=%s failed: %s",
-                            feature.level, feature.code, exc)
+                            feature.level, feature.code, error)
                 loader_db.record_discrepancy(
-                    conn, version_id, entity_kind=feature.level, entity_code=feature.code,
+                    None, version_id, entity_kind=feature.level, entity_code=feature.code,
                     discrepancy="boundary_load_failed",
-                    detail={"layer": layer.token, "error": str(exc)[:500]},
+                    detail={"layer": layer.token, "error": str(error)[:500]},
+                    own_connection=True,
                 )
                 continue
             counts["loaded" if loaded else "skipped_no_unit"] += 1
             counts["names"] += int(upgraded)
-    return counts
+            if loaded:
+                loaded_here.setdefault(layer.level, set()).add(feature.code)
+        if skipped:
+            counts["resumed"] += skipped
+            LOG.info("BOUNDARY layer=%s resumed skipped=%d of %d", layer.token, skipped,
+                     len(features))
+    return counts, conn
+
+
+def _analyze(conn: psycopg.Connection) -> None:
+    with conn.cursor() as cur:
+        cur.execute("ANALYZE ruian_admin_unit_geometries")
 
 
 def run(
@@ -455,6 +637,7 @@ def run(
     reuse: bool,
     allow_missing_pip: bool,
     skip_gazetteer: bool = False,
+    resume: bool = True,
 ) -> int:
     with_pip = not allow_missing_pip
     if dry_run:
@@ -468,9 +651,12 @@ def run(
                      layer.level, len(features), len(degenerate))
         return 0
 
-    # `with` on the connection: an assertion failure, a missing registry_version or a
-    # mid-pack exception must not leak a session-mode backend holding statement_timeout=0.
-    with loader_db.open_loader_connection() as conn:
+    # try/finally, not `with`: an assertion failure, a missing registry_version or a
+    # mid-pack exception must not leak a session-mode backend holding statement_timeout=0
+    # — and `load_layers` may hand back a DIFFERENT connection than it was given, so the
+    # handle that gets closed has to be the live one, not the dead original.
+    conn = loader_db.open_loader_connection()
+    try:
         if with_pip:
             check_pip_supported(conn)
         version_id = loader_db.scalar(
@@ -480,17 +666,26 @@ def run(
             LOG.error("BOUNDARY no current registry_version — run the baseline load first")
             return 1
         extracted = _fetch_pack(work_dir, reuse=reuse)
-        counts = load_layers(conn, extracted, levels=levels, version_id=int(version_id),
-                             with_pip=with_pip)
-        with conn.cursor() as cur:
-            cur.execute("ANALYZE ruian_admin_unit_geometries")
+        # ONE reconnect budget for the whole run: a session that keeps dying should abort
+        # the load, not buy itself a fresh allowance at every phase boundary.
+        reconnector = Reconnector(loader_db.open_loader_connection, limit=MAX_RECONNECTS)
+        counts, conn = load_layers(conn, extracted, levels=levels,
+                                   version_id=int(version_id), with_pip=with_pip,
+                                   reconnector=reconnector, resume=resume)
+        _, conn = run_resilient(conn, _analyze, reconnector)
         # The pack is the ONLY name source for kraj / okres / ORP / POU / KÚ / ZSJ, and the
         # gazetteer skips placeholder-named units — so without this rebuild those levels are
-        # never searchable, whatever order the two jobs run in.
-        if counts["names"] and not skip_gazetteer:
-            rebuilt = name_index.rebuild(conn, int(version_id))
-            LOG.info("BOUNDARY gazetteer rebuilt rows=%d after %d name upgrades",
-                     rebuilt, counts["names"])
+        # never searchable, whatever order the two jobs run in. `resumed` counts too: those
+        # units were name-upgraded by the pass that died, which by definition never reached
+        # this rebuild, and `name_index.rebuild` is a full idempotent recompute.
+        if (counts["names"] or counts["resumed"]) and not skip_gazetteer:
+            rebuilt, conn = run_resilient(
+                conn, lambda c: name_index.rebuild(c, int(version_id)), reconnector,
+            )
+            LOG.info("BOUNDARY gazetteer rebuilt rows=%d after %d name upgrades (%d resumed)",
+                     rebuilt, counts["names"], counts["resumed"])
+    finally:
+        conn.close()
     LOG.info("BOUNDARY done %s pip=%s", counts, with_pip)
     return 0
 
@@ -506,6 +701,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--allow-missing-pip", action="store_true",
                         help="load authoritative+render only (PIP falls back to the "
                              "authoritative geometry; state why in the PR)")
+    parser.add_argument("--no-resume", action="store_true",
+                        help="re-load units that already have geometry for the current "
+                             "registry version (default: skip them, so a re-dispatch "
+                             "after a crash makes forward progress)")
     parser.add_argument("--skip-gazetteer", action="store_true",
                         help="do not rebuild ruian_name_index after upgrading names "
                              "(the upgraded levels stay unsearchable until it is run)")
@@ -523,7 +722,7 @@ def main(argv: list[str] | None = None) -> int:
             return run(
                 levels=levels, work_dir=work_dir, dry_run=args.dry_run,
                 reuse=args.reuse_downloads, allow_missing_pip=args.allow_missing_pip,
-                skip_gazetteer=args.skip_gazetteer,
+                skip_gazetteer=args.skip_gazetteer, resume=not args.no_resume,
             )
         except BoundarySchemaError as exc:
             LOG.error("BOUNDARY %s", exc)
