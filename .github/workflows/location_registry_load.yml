@@ -3,22 +3,33 @@ name: "Location: RÚIAN registry load"
 # The registry-group jobs of the location subsystem (design 04 §4.4.2):
 #
 #   mode=full        `ruian_baseline`    — monthly, 1st 10:00 UTC. HEAD-probes the vintage,
-#                                          downloads strukt_ADR + OB_ADR, loads via staging
-#                                          -> blocking assertions -> pointer swap into ONE
-#                                          new registry_version, then rebuilds the gazetteer.
-#   mode=boundaries  `boundary_baseline` — the 253 MB state SHP pack; three geometries per
-#                                          boundary (authoritative / pip / render).
+#                                          archives both zips to R2, loads via staging ->
+#                                          blocking assertions -> gazetteer rebuild ->
+#                                          pointer swap into ONE new registry_version.
+#   mode=boundaries  `boundary_baseline` — monthly, 2nd 02:00 UTC. The 253 MB state SHP
+#                                          pack; three geometries per boundary
+#                                          (authoritative / pip / render), the real names
+#                                          for the levels the CSVs never name, and a
+#                                          gazetteer rebuild for those names.
+#   mode=gazetteer   `name_index`        — rebuild ruian_name_index for the current version.
+#                                          Recovery lane: a full load killed between the
+#                                          pointer swap and the rebuild leaves the current
+#                                          version with zero gazetteer rows.
 #   mode=deltas      `ruian_delta`       — daily VFR change file. Chain verification only:
 #                                          application is deliberately unimplemented and the
 #                                          job exits non-zero so it can never be mistaken for
 #                                          a working freshness lane (see location_data/vfr_delta.py).
 #
 # 10:00 UTC on the 1st is comfortably after the measured generation times (OB_ADR 08:04,
-# strukt_ADR 23:43 the prior day). Everything here is CC BY 4.0 ČÚZK open data — free, no
-# key, no registration.
+# strukt_ADR 23:43 the prior day); the boundary pack runs the NEXT day so it can never
+# overlap the baseline's 180-minute budget — both crons sit in the one `location-registry`
+# concurrency group, which is exclusive and does not cancel in progress. Everything here is
+# CC BY 4.0 ČÚZK open data — free, no key, no registration.
 #
-# Required secret: SUPABASE_DB_URL. Optional: LOCATION_DB_DIRECT_URL (a direct 5432 URL —
-# a registry load wants a session it owns, not the transaction pooler).
+# Required secrets: LOCATION_DB_DIRECT_URL (a direct 5432 URL) or SUPABASE_DB_SESSION_URL —
+# a registry load wants a session it owns, never the transaction pooler — plus the R2_*
+# vars, because the vintage archive (04 §C1.8) is what keeps a past registry_version
+# reproducible after ČÚZK rotates the directory.
 
 on:
   workflow_dispatch:
@@ -31,6 +42,7 @@ on:
         options:
           - full
           - boundaries
+          - gazetteer
           - deltas
       vintage:
         description: "YYYYMMDD (full mode; blank = HEAD-probe the newest published)"
@@ -47,9 +59,18 @@ on:
         required: false
         default: false
         type: boolean
+      allow_unarchived:
+        description: "full: load even if the R2 vintage archive fails (unreproducible)"
+        required: false
+        default: false
+        type: boolean
   schedule:
     # Monthly full baseline, 1st at 10:00 UTC.
     - cron: "0 10 1 * *"
+    # Monthly boundary pack, 2nd at 02:00 UTC — staggered a day behind the baseline so the
+    # two can never contend for the registry group, and so the pack's name upgrades always
+    # land on a freshly published version.
+    - cron: "0 2 2 * *"
 
 concurrency:
   # The design's `registry group`, exclusive: the baseline, the boundary pack and the delta
@@ -67,10 +88,16 @@ jobs:
       SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
       SUPABASE_DB_SESSION_URL: ${{ secrets.SUPABASE_DB_SESSION_URL }}
       LOCATION_DB_DIRECT_URL: ${{ secrets.LOCATION_DB_DIRECT_URL }}
-      MODE: ${{ inputs.mode || 'full' }}
+      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+      # Scheduled runs carry no inputs: the boundary cron IS the mode selector.
+      MODE: ${{ inputs.mode || (github.event.schedule == '0 2 2 * *' && 'boundaries') || 'full' }}
       VINTAGE: ${{ inputs.vintage }}
       DRY_RUN: ${{ inputs.dry_run }}
       ALLOW_MISSING_PIP: ${{ inputs.allow_missing_pip }}
+      ALLOW_UNARCHIVED: ${{ inputs.allow_unarchived }}
     steps:
       - uses: actions/checkout@v6
 
@@ -91,6 +118,7 @@ jobs:
           case "$MODE" in
             full)
               if [ -n "$VINTAGE" ]; then ARGS="$ARGS --vintage $VINTAGE"; fi
+              if [ "$ALLOW_UNARCHIVED" = "true" ]; then ARGS="$ARGS --allow-unarchived"; fi
               echo "python -m location_data.ruian_load $ARGS"
               python -m location_data.ruian_load $ARGS
               ;;
@@ -98,6 +126,10 @@ jobs:
               if [ "$ALLOW_MISSING_PIP" = "true" ]; then ARGS="$ARGS --allow-missing-pip"; fi
               echo "python -m location_data.ruian_boundaries $ARGS"
               python -m location_data.ruian_boundaries $ARGS
+              ;;
+            gazetteer)
+              echo "python -m location_data.name_index"
+              python -m location_data.name_index
               ;;
             deltas)
               echo "python -m location_data.vfr_delta"

@@ -7,6 +7,7 @@ CHECK, a UNIQUE or an FK, so nothing in this file claims the mirror accepted a r
 from __future__ import annotations
 
 import datetime
+import inspect
 import json
 from pathlib import Path
 
@@ -92,7 +93,7 @@ def _artifact(name: str) -> object:
 
 
 def test_ensure_version_inserts_one_version_for_both_products():
-    conn = _FakeConn([("SELECT id, is_current FROM registry_versions", None),
+    conn = _FakeConn([("SELECT id, is_current, artifact_sha256", None),
                       ("INSERT INTO registry_versions", (77,))])
     artifacts = {"csv_ob_adr": _artifact("ob"), "csv_strukt_adr": _artifact("strukt")}
     version_id, current = ruian_load.ensure_version(
@@ -108,8 +109,21 @@ def test_ensure_version_inserts_one_version_for_both_products():
     assert set(urls) == {"csv_ob_adr", "csv_strukt_adr"}
 
 
+def test_ensure_version_records_the_r2_archive_keys_alongside_the_source_urls():
+    conn = _FakeConn([("SELECT id, is_current, artifact_sha256", None),
+                      ("INSERT INTO registry_versions", (3,))])
+    ruian_load.ensure_version(
+        conn, datetime.date(2026, 7, 31), {"csv_ob_adr": _artifact("ob")},
+        {"proj_version": "p", "proj_pipeline": "q"},
+        archive_keys={"csv_ob_adr_archive": "backups/ruian-archive/ruian:2026-07-31/ob.zip"},
+    )
+    urls = json.loads(conn.executed[-1][1][2])
+    assert urls["csv_ob_adr_archive"].startswith("backups/ruian-archive/")
+
+
 def test_ensure_version_resumes_an_unpublished_load():
-    conn = _FakeConn([("SELECT id, is_current FROM registry_versions", (5, False))])
+    conn = _FakeConn([("SELECT id, is_current, artifact_sha256",
+                       (5, False, {"csv_ob_adr": "abc"}, {"csv_ob_adr": 10}))])
     version_id, current = ruian_load.ensure_version(
         conn, datetime.date(2026, 7, 31),
         {"csv_ob_adr": _artifact("ob")},
@@ -117,6 +131,38 @@ def test_ensure_version_resumes_an_unpublished_load():
     )
     assert (version_id, current) == (5, False)
     assert any("UPDATE registry_versions" in sql for sql, _ in conn.executed)
+
+
+def test_a_republished_vintage_aborts_instead_of_overwriting_the_record():
+    """ČÚZK re-cutting a vintage under the same stamp must not silently rewrite the sha256
+    the version's audit trail depends on."""
+    conn = _FakeConn([("SELECT id, is_current, artifact_sha256",
+                       (5, False, {"csv_ob_adr": "OTHER"}, {"csv_ob_adr": 10}))])
+    with pytest.raises(loader_db.LoadAborted):
+        ruian_load.ensure_version(
+            conn, datetime.date(2026, 7, 31), {"csv_ob_adr": _artifact("ob")},
+            {"proj_version": "p", "proj_pipeline": "q"},
+        )
+    assert any("load_aborted" in str(params) for _, params in conn.executed)
+    assert not any(sql.startswith("UPDATE registry_versions SET artifact_urls")
+                   for sql, _ in conn.executed)
+
+
+def test_republished_bytes_can_be_adopted_deliberately():
+    conn = _FakeConn([("SELECT id, is_current, artifact_sha256",
+                       (5, False, {"csv_ob_adr": "OTHER"}, {"csv_ob_adr": 10}))])
+    assert ruian_load.ensure_version(
+        conn, datetime.date(2026, 7, 31), {"csv_ob_adr": _artifact("ob")},
+        {"proj_version": "p", "proj_pipeline": "q"}, allow_republished=True,
+    ) == (5, False)
+
+
+def test_artifact_mismatch_detection_covers_sha_and_bytes():
+    artifacts = {"a": _artifact("a")}  # sha256='abc', bytes=10
+    assert ruian_load.artifact_mismatches({"a": "abc"}, {"a": 10}, artifacts) == {}
+    assert ruian_load.artifact_mismatches(None, None, artifacts) == {}
+    assert "a" in ruian_load.artifact_mismatches({"a": "zzz"}, {"a": 10}, artifacts)
+    assert "a" in ruian_load.artifact_mismatches({}, {"a": 11}, artifacts)
 
 
 def test_prior_load_reads_the_published_version_counts():
@@ -139,6 +185,78 @@ def test_prior_load_is_none_on_a_first_ever_load():
 def test_prior_load_ignores_a_version_that_never_reached_the_assert_phase():
     conn = _FakeConn([("SELECT row_counts, proj_pipeline", ({"_phase": "staged"}, "p"))])
     assert ruian_load.prior_load(conn) is None
+
+
+def test_the_staged_placeholder_flag_is_a_column_the_scd2_predicate_reads():
+    """The close predicate must key on the STAGED row's placeholder flag, never on a
+    comparison between the mirror's real name and a code placeholder."""
+    assert "is_placeholder" in ruian_load._STAGE_DDL
+    assert "NOT s.is_placeholder AND u.name IS DISTINCT FROM s.name" in ruian_load._UNIT_CHANGED
+
+    conn = _FakeConn()
+    ruian_load.upsert_units(conn, ruian_load.Staging.for_version(1), 1,
+                            datetime.date(2026, 7, 31))
+    closes = [sql for sql, _ in conn.executed if sql.startswith("UPDATE ruian_admin_units u SET valid_to")]
+    inserts = [sql for sql, _ in conn.executed if sql.startswith("INSERT INTO ruian_admin_units")]
+    assert len(closes) == len(ruian_load.LEVEL_ORDER)
+    assert len(inserts) == len(ruian_load.LEVEL_ORDER)
+    flat = " ".join(ruian_load._UNIT_CHANGED.split())
+    assert all(flat in sql for sql in closes)
+    assert all("coalesce(prev.name, s.name)" in sql for sql in inserts)
+
+
+def test_a_boundary_name_upgrade_survives_the_next_identical_baseline():
+    """Regression: baseline -> boundary pack upgrades the name -> the SAME baseline again.
+
+    Levels the CSV family never names (kraj, okres, ORP, POU, KÚ, ZSJ) stage as their own
+    code. Before this rule, round 2 compared 'Benešov' against the staged placeholder
+    '3701', closed the row, and re-opened it named '3701' — every monthly baseline reverting
+    every name and rewriting the tree. (CI has no Postgres: `unit_needs_new_version` /
+    `resolve_unit_name` are the Python mirrors of the SQL fragments asserted above.)
+    """
+    staged_name, placeholder, parent_id = "3701", True, 42
+
+    # round 1: nothing in the mirror yet, the placeholder is what lands
+    name_after_baseline = ruian_load.resolve_unit_name(
+        staged_name=staged_name, staged_is_placeholder=placeholder, previous_name=None,
+    )
+    assert name_after_baseline == "3701"
+
+    # the boundary pack upgrades it (only ever touches a unit still named after its code)
+    mirror_name = "Benešov"
+
+    # round 2: the identical baseline stages the identical placeholder
+    assert not ruian_load.unit_needs_new_version(
+        mirror_name=mirror_name, mirror_parent_id=parent_id,
+        staged_name=staged_name, staged_is_placeholder=placeholder,
+        staged_parent_id=parent_id,
+    )
+    # and if anything else DID force a new version, the real name is carried forward
+    assert ruian_load.resolve_unit_name(
+        staged_name=staged_name, staged_is_placeholder=placeholder,
+        previous_name=mirror_name,
+    ) == "Benešov"
+
+
+def test_a_real_name_change_still_opens_a_new_version():
+    assert ruian_load.unit_needs_new_version(
+        mirror_name="Stará Ves", mirror_parent_id=1,
+        staged_name="Nová Ves", staged_is_placeholder=False, staged_parent_id=1,
+    )
+
+
+def test_a_reparent_opens_a_new_version_even_for_a_placeholder_level():
+    assert ruian_load.unit_needs_new_version(
+        mirror_name="Benešov", mirror_parent_id=1,
+        staged_name="3701", staged_is_placeholder=True, staged_parent_id=2,
+    )
+
+
+def test_the_insert_carries_the_existing_name_forward_for_placeholder_levels():
+    from location_data.ruian_load import _UNIT_NAME, _UNIT_NAME_NORM
+
+    assert "coalesce(prev.name, s.name)" in _UNIT_NAME
+    assert "coalesce(prev.name_norm, s.name_norm)" in _UNIT_NAME_NORM
 
 
 def test_publish_is_a_two_statement_pointer_swap():
@@ -171,6 +289,23 @@ def test_abort_records_the_failed_assertion_and_raises():
     assert params[3] == "load_aborted"
     detail = json.loads(params[4])
     assert detail["assertion"] == "golden_point"
+
+
+def test_the_gazetteer_is_rebuilt_before_the_pointer_swap():
+    """Publishing first and dying mid-rebuild leaves the version every resolution binds to
+    with ZERO ruian_name_index rows — and a resume gated on is_current could never fix it."""
+    source = inspect.getsource(ruian_load.run)
+    assert source.index("name_index.rebuild") < source.index("publish(conn, version_id)")
+    assert 'phase_done(progress, "gazetteer")' in source
+    assert 'already_current and loader_db.phase_done(progress, "published")' in source
+
+
+def test_the_vintage_is_archived_before_anything_is_staged():
+    """04 §C1.8: a version that was never archived stops being reproducible the moment
+    ČÚZK rotates the CSV directory, so the upload gates the load."""
+    source = inspect.getsource(ruian_load.run)
+    assert source.index("archive.archive_version") < source.index("open_loader_connection")
+    assert "allow_unarchived" in source
 
 
 def test_staging_relations_are_named_per_version():

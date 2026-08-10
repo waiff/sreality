@@ -2552,6 +2552,10 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
       {
         "cron": "0 10 1 * *",
         "human": "0 10 1 * *"
+      },
+      {
+        "cron": "0 2 2 * *",
+        "human": "0 2 2 * *"
       }
     ],
     "onPush": false,
@@ -2567,6 +2571,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
         "options": [
           "full",
           "boundaries",
+          "gazetteer",
           "deltas"
         ]
       },
@@ -2593,10 +2598,22 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
         "type": "boolean",
         "default": "false",
         "options": null
+      },
+      {
+        "name": "allow_unarchived",
+        "description": "full: load even if the R2 vintage archive fails (unreproducible)",
+        "required": false,
+        "type": "boolean",
+        "default": "false",
+        "options": null
       }
     ],
     "secrets": [
       "LOCATION_DB_DIRECT_URL",
+      "R2_ACCESS_KEY_ID",
+      "R2_ACCOUNT_ID",
+      "R2_BUCKET_NAME",
+      "R2_SECRET_ACCESS_KEY",
       "SUPABASE_DB_SESSION_URL",
       "SUPABASE_DB_URL"
     ],

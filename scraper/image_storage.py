@@ -161,6 +161,26 @@ class R2Client:
         response = self._client.get_object(Bucket=self.bucket, Key=key)
         return response["Body"].read()
 
+    def upload_file(self, key: str, path: str, content_type: str = "application/zip") -> None:
+        """Stream a file from disk (boto3 chunks + multiparts it) — a 253 MB registry
+        artefact must never be read into memory the way upload_bytes would."""
+        with open(path, "rb") as handle:
+            self._client.upload_fileobj(
+                handle, self.bucket, key, ExtraArgs={"ContentType": content_type}
+            )
+
+    def object_size(self, key: str) -> int | None:
+        """Size in bytes, or None ONLY when the object does not exist."""
+        from botocore.exceptions import ClientError
+
+        try:
+            return int(self._client.head_object(Bucket=self.bucket, Key=key)["ContentLength"])
+        except ClientError as exc:
+            code = str((exc.response.get("Error") or {}).get("Code"))
+            if code in ("404", "NoSuchKey", "NotFound"):
+                return None
+            raise
+
     def presigned_get(self, key: str, expires_in: int = 604800) -> str:
         """Time-limited GET URL for one object, so a private bucket can still
         serve image bytes straight to the browser (no proxying through us)."""

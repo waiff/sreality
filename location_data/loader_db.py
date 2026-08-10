@@ -3,9 +3,15 @@
 Connection mode (04 C1.7 rule 1): a registry load wants a session it owns — a 3.02 M-row
 COPY, an index build and a `statement_timeout = 0` are all wrong on the transaction-mode
 pooler, where each statement can land on a different backend. `LOCATION_DB_DIRECT_URL`
-takes precedence when the operator has a direct 5432 URL; otherwise we fall back to
-`scraper.db.connect_session()` (session-mode pooler, dedicated backend), which is the
-closest thing this project has to a direct connection.
+takes precedence when the operator has a direct 5432 URL; otherwise `SUPABASE_DB_SESSION_URL`
+(session-mode pooler, dedicated backend), which is the closest thing this project has to a
+direct connection.
+
+`scraper.db.connect_session()` falls back to the TRANSACTION pooler when the session URL is
+missing; that fallback is deliberately not inherited here — it silently discards the session
+GUCs below and would run the COPY under the pooler's statement timeout. The mode is chosen
+explicitly, the GUCs are read back after they are set, and a load that cannot get a session
+it owns aborts naming the env var it wants.
 """
 
 from __future__ import annotations
@@ -14,6 +20,7 @@ import json
 import logging
 import os
 from typing import Any
+from urllib.parse import urlsplit
 
 import psycopg
 
@@ -34,12 +41,48 @@ class LoadAborted(RuntimeError):
     """A blocking load-time control failed; nothing was published."""
 
 
+def _endpoint(url: str) -> str:
+    """host:port only — never the credentials."""
+    parts = urlsplit(url)
+    return f"{parts.hostname or '?'}:{parts.port or 5432}"
+
+
 def open_loader_connection() -> psycopg.Connection:
     direct = os.environ.get("LOCATION_DB_DIRECT_URL")
-    conn = db.connect(direct) if direct else db.connect_session()
-    with conn.cursor() as cur:
-        for statement in _SESSION_GUC:
-            cur.execute(statement)
+    session = os.environ.get("SUPABASE_DB_SESSION_URL")
+    if direct:
+        mode, url, conn = "direct", direct, db.connect(direct)
+    elif session:
+        mode, url, conn = "session-pooler", session, db.connect_session(session)
+    else:
+        raise LoadAborted(
+            "no session-mode connection: set LOCATION_DB_DIRECT_URL (a direct 5432 URL) or "
+            "SUPABASE_DB_SESSION_URL. SUPABASE_DB_URL alone is the TRANSACTION pooler, which "
+            "rebinds every statement to a different backend — the session GUCs a 3 M-row COPY "
+            "needs would be discarded (04 C1.7 rule 1)."
+        )
+    try:
+        with conn.cursor() as cur:
+            for statement in _SESSION_GUC:
+                cur.execute(statement)
+            cur.execute("SHOW statement_timeout")
+            timeout = str(cur.fetchone()[0])
+            cur.execute("SHOW lock_timeout")
+            lock_timeout = str(cur.fetchone()[0])
+    except Exception:
+        conn.close()
+        raise
+    if timeout not in ("0", "0ms"):
+        conn.close()
+        raise LoadAborted(
+            f"session GUCs did not take on the {mode} connection to {_endpoint(url)}: "
+            f"statement_timeout={timeout!r}, expected '0'. A 3 M-row COPY cannot run under a "
+            "statement timeout; point LOCATION_DB_DIRECT_URL at a direct 5432 URL."
+        )
+    LOG.info(
+        "LOADER connection mode=%s endpoint=%s statement_timeout=%s lock_timeout=%s",
+        mode, _endpoint(url), timeout, lock_timeout,
+    )
     return conn
 
 

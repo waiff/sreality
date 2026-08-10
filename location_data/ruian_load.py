@@ -8,17 +8,20 @@ absent in the other becomes a `registry_load_discrepancies` row, never a silent 
 
 Mechanism, in order (04 C1.7):
   1. HEAD-probe the vintage; download both zips, hashing as they stream.
-  2. COPY into per-version UNLOGGED staging relations, no indexes, no constraints.
-  3. Index + ANALYZE the staging relations.
-  4. Run the blocking assertions AGAINST STAGING (golden point, counts, envelopes).
-  5. Merge into the mirror: admin units, streets, address points + change log.
-  6. Publish = flip `is_current` in one short transaction.
+  2. Archive both zips + a manifest to R2 (04 C1.8) BEFORE touching the database — an
+     unarchived vintage stops being reproducible the moment ČÚZK rotates the directory.
+  3. COPY into per-version UNLOGGED staging relations, no indexes, no constraints.
+  4. Index + ANALYZE the staging relations.
+  5. Run the blocking assertions AGAINST STAGING (golden point, counts, envelopes).
+  6. Merge into the mirror: admin units, streets, address points + change log.
+  7. Rebuild the gazetteer for this version.
+  8. Publish = flip `is_current` in one short transaction.
 
-A load is never partially visible: `is_current` moves only in step 6, and every step is
-idempotent, so a killed run resumes from its checkpoint rather than restarting.
+A load is never partially visible: `is_current` moves only in the last step, and every step
+is idempotent, so a killed run resumes from its checkpoint rather than restarting.
 
 CLI:  python -m location_data.ruian_load [--vintage YYYYMMDD] [--dry-run] [--work-dir DIR]
-Required: SUPABASE_DB_URL (or LOCATION_DB_DIRECT_URL).
+Required: LOCATION_DB_DIRECT_URL or SUPABASE_DB_SESSION_URL, plus the R2_* archive vars.
 """
 
 from __future__ import annotations
@@ -38,7 +41,7 @@ from pathlib import Path
 import psycopg
 import requests
 
-from location_data import krovak, load_assertions, loader_db, name_index, ruian_csv
+from location_data import archive, krovak, load_assertions, loader_db, name_index, ruian_csv
 from location_data.load_assertions import Assertion, PriorLoad, StagingStats
 
 LOG = logging.getLogger("location_data.ruian_load")
@@ -94,7 +97,7 @@ CREATE UNLOGGED TABLE IF NOT EXISTS {momc} (
   vusc_kod bigint, regsoudr_kod bigint, stat_kod bigint);
 CREATE UNLOGGED TABLE IF NOT EXISTS {units} (
   level text, code bigint, name text, name_norm text,
-  parent_level text, parent_code bigint);
+  parent_level text, parent_code bigint, is_placeholder boolean not null default false);
 CREATE UNLOGGED TABLE IF NOT EXISTS {streets} (
   code bigint, name text, name_norm text, obec_kod bigint);
 """
@@ -153,15 +156,41 @@ def version_label(vintage: datetime.date) -> str:
     return f"ruian:{vintage.isoformat()}"
 
 
+def artifact_mismatches(
+    stored_sha: dict[str, str] | None,
+    stored_bytes: dict[str, int] | None,
+    artifacts: dict[str, ruian_csv.Artifact],
+) -> dict[str, dict[str, object]]:
+    """Artefacts whose bytes changed under a label we already recorded.
+
+    A vintage is supposed to be immutable. If ČÚZK republishes one under the same stamp,
+    the recorded sha256 no longer describes what this run holds — and silently overwriting
+    the record would make the version unreproducible and its assertions unauditable.
+    """
+    sha, size = dict(stored_sha or {}), dict(stored_bytes or {})
+    out: dict[str, dict[str, object]] = {}
+    for name, artifact in artifacts.items():
+        previous_sha, previous_bytes = sha.get(name), size.get(name)
+        if previous_sha and previous_sha != artifact.sha256:
+            out[name] = {"stored_sha256": previous_sha, "fetched_sha256": artifact.sha256}
+        elif previous_bytes is not None and int(previous_bytes) != artifact.bytes:
+            out[name] = {"stored_bytes": int(previous_bytes), "fetched_bytes": artifact.bytes}
+    return out
+
+
 def ensure_version(
     conn: psycopg.Connection,
     vintage: datetime.date,
     artifacts: dict[str, ruian_csv.Artifact],
     proj: dict[str, str],
+    *,
+    archive_keys: dict[str, str] | None = None,
+    allow_republished: bool = False,
 ) -> tuple[int, bool]:
     """Get or create the (not yet current) `registry_versions` row for this load event."""
     label = version_label(vintage)
-    urls = {name: a.url for name, a in artifacts.items()}
+    urls: dict[str, str] = {name: a.url for name, a in artifacts.items()}
+    urls.update(archive_keys or {})
     payload = (
         json.dumps(urls),
         json.dumps({name: a.bytes for name, a in artifacts.items()}),
@@ -171,11 +200,28 @@ def ensure_version(
     )
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT id, is_current FROM registry_versions WHERE label = %s", (label,)
+            "SELECT id, is_current, artifact_sha256, artifact_bytes FROM registry_versions "
+            "WHERE label = %s",
+            (label,),
         )
         row = cur.fetchone()
         if row is not None:
             version_id, is_current = int(row[0]), bool(row[1])
+            mismatches = artifact_mismatches(row[2], row[3], artifacts)
+            if mismatches and not allow_republished:
+                loader_db.abort(
+                    conn, version_id,
+                    reason="artifact_republished",
+                    detail={
+                        "assertion": "artifact_bytes_are_immutable",
+                        "label": label,
+                        "artifacts": mismatches,
+                        "hint": "ČÚZK republished this vintage; re-run with "
+                                "--allow-republished to adopt the new bytes",
+                    },
+                )
+            if mismatches:
+                LOG.warning("RUIAN adopting republished artefacts for %s: %s", label, mismatches)
             cur.execute(
                 """
                 UPDATE registry_versions
@@ -202,17 +248,24 @@ def ensure_version(
         return int(cur.fetchone()[0]), False
 
 
-def prior_load(conn: psycopg.Connection) -> PriorLoad | None:
+def prior_load(
+    conn: psycopg.Connection, *, exclude_version_id: int | None = None,
+) -> PriorLoad | None:
     """Statistics of the last successfully published baseline — every growth-sensitive
-    assertion is anchored to it, never to a 2026 constant (04 §4.5.3)."""
+    assertion is anchored to it, never to a 2026 constant (04 §4.5.3).
+
+    `exclude_version_id` keeps a resumed run (published, then killed before the gazetteer)
+    from anchoring its assertions to its own counts."""
     with conn.cursor() as cur:
         cur.execute(
             """
             SELECT row_counts, proj_pipeline
               FROM registry_versions
              WHERE is_current AND kind = 'baseline'
+               AND (%(exclude)s::bigint IS NULL OR id <> %(exclude)s::bigint)
              LIMIT 1
-            """
+            """,
+            {"exclude": exclude_version_id},
         )
         row = cur.fetchone()
     if row is None:
@@ -542,21 +595,67 @@ def build_unit_rows(conn: psycopg.Connection, stage: Staging) -> int:
     with conn.cursor() as cur:
         cur.execute(f"TRUNCATE {stage.units}")
         with cur.copy(
-            f"COPY {stage.units} (level, code, name, name_norm, parent_level, parent_code) "
-            "FROM STDIN"
+            f"COPY {stage.units} (level, code, name, name_norm, parent_level, parent_code, "
+            "is_placeholder) FROM STDIN"
         ) as copy:
             for (level, code), (parent_level, parent_code) in rows.items():
-                name = names.get(level, {}).get(code) or str(code)
+                real_name = names.get(level, {}).get(code)
+                name = real_name or str(code)
                 copy.write_row((
                     level, code, name, name_index.normalize_name(name),
-                    parent_level or None, parent_code,
+                    parent_level or None, parent_code, real_name is None,
                 ))
     return len(rows)
 
 
+# The SCD-2 close predicate, stated once and mirrored by `unit_needs_new_version` (which is
+# what the regression test exercises — CI has no Postgres).
+#
+# `is_placeholder` is the whole point: the CSV family carries no name for stát, region
+# soudržnosti, kraj, okres, ORP, POU, katastrální území or ZSJ, so those rows stage as their
+# own code and the boundary pack (C4) upgrades them to the real name afterwards. Comparing a
+# staged PLACEHOLDER against the upgraded mirror name would close and re-open every one of
+# those units on every monthly baseline, rewriting the tree and reverting the name.
+_UNIT_CHANGED = (
+    "((NOT s.is_placeholder AND u.name IS DISTINCT FROM s.name) "
+    "OR u.parent_id IS DISTINCT FROM p.id)"
+)
+
+# The name a staged row must land with: a placeholder never overwrites a name the mirror
+# already knows, so a parent-driven close+reopen carries the upgraded name forward.
+_UNIT_NAME = "CASE WHEN s.is_placeholder THEN coalesce(prev.name, s.name) ELSE s.name END"
+_UNIT_NAME_NORM = (
+    "CASE WHEN s.is_placeholder THEN coalesce(prev.name_norm, s.name_norm) "
+    "ELSE s.name_norm END"
+)
+
+
+def unit_needs_new_version(
+    *,
+    mirror_name: str,
+    mirror_parent_id: int | None,
+    staged_name: str,
+    staged_is_placeholder: bool,
+    staged_parent_id: int | None,
+) -> bool:
+    """Python mirror of `_UNIT_CHANGED` — same rule, testable without a database."""
+    if mirror_parent_id != staged_parent_id:
+        return True
+    return not staged_is_placeholder and mirror_name != staged_name
+
+
+def resolve_unit_name(
+    *, staged_name: str, staged_is_placeholder: bool, previous_name: str | None,
+) -> str:
+    """Python mirror of `_UNIT_NAME`."""
+    if staged_is_placeholder and previous_name:
+        return previous_name
+    return staged_name
+
+
 def upsert_units(conn: psycopg.Connection, stage: Staging, version_id: int,
                  source_date: datetime.date) -> None:
-    """SCD-2 per level: close a row whose name or parent changed, open the replacement,
+    """SCD-2 per level: close a row whose real name or parent changed, open the replacement,
     and touch `last_version_id` on everything still present."""
     params = {"v": version_id, "d": source_date}
     for level in LEVEL_ORDER:
@@ -572,7 +671,7 @@ def upsert_units(conn: psycopg.Connection, stage: Staging, version_id: int,
                    AND p.code = s.parent_code
                  WHERE s.level = %(lvl)s AND u.level::text = %(lvl)s AND u.code = s.code
                    AND u.valid_to IS NULL AND u.valid_from < %(d)s
-                   AND (u.name IS DISTINCT FROM s.name OR u.parent_id IS DISTINCT FROM p.id)
+                   AND {_UNIT_CHANGED}
                 """,
                 {**params, "lvl": level},
             )
@@ -581,15 +680,21 @@ def upsert_units(conn: psycopg.Connection, stage: Staging, version_id: int,
                 INSERT INTO ruian_admin_units
                        (level, code, name, name_norm, parent_id, path, display_path,
                         valid_from, first_version_id, last_version_id)
-                SELECT %(lvl)s::ruian_level, s.code, s.name, s.name_norm, p.id,
+                SELECT %(lvl)s::ruian_level, s.code, {_UNIT_NAME}, {_UNIT_NAME_NORM}, p.id,
                        (coalesce(p.path::text || '.', '')
                         || %(prefix)s::text || s.code::text)::ltree,
-                       coalesce(p.display_path || ' / ', '') || s.name,
+                       coalesce(p.display_path || ' / ', '') || {_UNIT_NAME},
                        %(d)s, %(v)s, %(v)s
                   FROM {stage.units} s
              LEFT JOIN ruian_admin_units p
                     ON p.valid_to IS NULL AND p.level::text = s.parent_level
                    AND p.code = s.parent_code
+        LEFT JOIN LATERAL (
+                     SELECT c.name, c.name_norm FROM ruian_admin_units c
+                      WHERE c.level::text = %(lvl)s AND c.code = s.code
+                        AND c.name <> c.code::text
+                      ORDER BY c.valid_from DESC, c.id DESC
+                      LIMIT 1) prev ON true
                  WHERE s.level = %(lvl)s
                    AND NOT EXISTS (
                          SELECT 1 FROM ruian_admin_units u
@@ -967,6 +1072,8 @@ def run(
     reuse: bool,
     keep_staging: bool,
     limit: int | None,
+    allow_unarchived: bool = False,
+    allow_republished: bool = False,
 ) -> int:
     sess = ruian_csv.session()
     if vintage is None:
@@ -985,14 +1092,34 @@ def run(
         report(assertions)
         return 1 if load_assertions.blocking_failures(assertions) else 0
 
+    # BEFORE any staging (04 §C1.8): a vintage that is not archived is a registry_version
+    # that stops being reproducible the moment ČÚZK rotates the CSV directory, so a failed
+    # upload aborts the load rather than publishing an unreproducible version.
+    archive_keys: dict[str, str] = {}
+    try:
+        archive_keys = archive.archive_version(version_label(vintage), artifacts)
+    except archive.ArchiveError as exc:
+        if not allow_unarchived:
+            LOG.error("RUIAN %s", exc)
+            return 1
+        LOG.warning("RUIAN loading UNARCHIVED (--allow-unarchived): %s", exc)
+
     with loader_db.open_loader_connection() as conn:
-        version_id, already_current = ensure_version(conn, vintage, artifacts, proj)
-        if already_current:
-            LOG.info("RUIAN version %s is already current — nothing to do", version_id)
-            return 0
+        version_id, already_current = ensure_version(
+            conn, vintage, artifacts, proj,
+            archive_keys=archive_keys, allow_republished=allow_republished,
+        )
         stage = Staging.for_version(version_id)
         progress = loader_db.read_progress(conn, version_id)
-        prior = prior_load(conn)
+        # Resume on the phase checkpoint, NOT on is_current: a run killed between the
+        # pointer swap and the gazetteer rebuild leaves a current version with zero
+        # ruian_name_index rows, and short-circuiting on is_current would make that
+        # unrecoverable without hand-editing the row.
+        if already_current and loader_db.phase_done(progress, "published"):
+            LOG.info("RUIAN version %s is already current and complete — nothing to do",
+                     version_id)
+            return 0
+        prior = prior_load(conn, exclude_version_id=version_id)
 
         create_staging(conn, stage)
         if not loader_db.phase_done(progress, "staged"):
@@ -1052,12 +1179,19 @@ def run(
             loader_db.write_progress(conn, version_id, phase="points", counts=counts)
             LOG.info("RUIAN address points %s", counts)
 
+        # The gazetteer is rebuilt BEFORE the pointer swap: publishing first and dying
+        # mid-rebuild would leave the version every resolution binds to with zero
+        # ruian_name_index rows. The rebuild is delete-then-insert per version, so a
+        # resumed run repeats it harmlessly.
+        if not loader_db.phase_done(progress, "gazetteer"):
+            rebuilt = name_index.rebuild(conn, version_id)
+            loader_db.write_progress(conn, version_id, phase="gazetteer",
+                                     counts={"name_index": rebuilt})
+            LOG.info("RUIAN gazetteer rows=%d", rebuilt)
+
         publish(conn, version_id)
         loader_db.write_progress(conn, version_id, phase="published")
         LOG.info("RUIAN published version=%s label=%s", version_id, version_label(vintage))
-
-        rebuilt = name_index.rebuild(conn, version_id)
-        loader_db.write_progress(conn, version_id, counts={"name_index": rebuilt})
 
         if not keep_staging:
             drop_staging(conn, stage)
@@ -1076,6 +1210,12 @@ def main(argv: list[str] | None = None) -> int:
                         help="keep the per-version staging relations after publish")
     parser.add_argument("--limit", type=int, default=None,
                         help="stage only the first N address points (testing)")
+    parser.add_argument("--allow-unarchived", action="store_true",
+                        help="load even if the R2 vintage archive (04 C1.8) failed — the "
+                             "version becomes unreproducible once ČÚZK rotates; state why")
+    parser.add_argument("--allow-republished", action="store_true",
+                        help="adopt artefact bytes that differ from the ones already "
+                             "recorded under this vintage label")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args(argv)
 
@@ -1084,9 +1224,13 @@ def main(argv: list[str] | None = None) -> int:
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
     if not args.dry_run and not (
-        os.environ.get("SUPABASE_DB_URL") or os.environ.get("LOCATION_DB_DIRECT_URL")
+        os.environ.get("SUPABASE_DB_SESSION_URL") or os.environ.get("LOCATION_DB_DIRECT_URL")
     ):
-        print("ERROR: SUPABASE_DB_URL is not set.", file=sys.stderr)
+        print(
+            "ERROR: set LOCATION_DB_DIRECT_URL (a direct 5432 URL) or SUPABASE_DB_SESSION_URL "
+            "— a registry load needs a session it owns, not the transaction pooler.",
+            file=sys.stderr,
+        )
         return 2
 
     vintage = (
@@ -1099,6 +1243,8 @@ def main(argv: list[str] | None = None) -> int:
             return run(
                 vintage=vintage, work_dir=work_dir, dry_run=args.dry_run,
                 reuse=args.reuse_downloads, keep_staging=args.keep_staging, limit=args.limit,
+                allow_unarchived=args.allow_unarchived,
+                allow_republished=args.allow_republished,
             )
         except loader_db.LoadAborted as exc:
             LOG.error("RUIAN load aborted: %s", exc)
