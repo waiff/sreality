@@ -1399,6 +1399,9 @@ def test_preview_force_refresh_default_is_false(client, monkeypatch):
 # ----------------------------------------------------------------------
 
 def test_post_with_non_sreality_url_persists_provenance(client, monkeypatch):
+    # These exercise the URL-parse path itself; the W0 Mapy kill switch
+    # (default off) would otherwise 422 the submit before the parse.
+    monkeypatch.setenv("MAPY_GEOCODE_ENABLED", "1")
     state = _patch_persistence(monkeypatch)
     _patch_estimate(monkeypatch)
     _patch_dispatcher_returns(monkeypatch, _result(
@@ -1501,6 +1504,9 @@ def test_post_known_portal_url_reuses_scraped_listing(client, monkeypatch):
 
 
 def test_post_non_sreality_url_captures_subject_attributes(client, monkeypatch):
+    # These exercise the URL-parse path itself; the W0 Mapy kill switch
+    # (default off) would otherwise 422 the submit before the parse.
+    monkeypatch.setenv("MAPY_GEOCODE_ENABLED", "1")
     """A fresh (not-in-DB) non-sreality URL parses via the dispatcher and stores
     the parsed typed attributes so the subject still renders its facts."""
     state = _patch_persistence(monkeypatch)
@@ -1528,6 +1534,9 @@ def test_post_non_sreality_url_captures_subject_attributes(client, monkeypatch):
 
 
 def test_post_when_dispatch_fails_persists_failed_row(client, monkeypatch):
+    # These exercise the URL-parse path itself; the W0 Mapy kill switch
+    # (default off) would otherwise 422 the submit before the parse.
+    monkeypatch.setenv("MAPY_GEOCODE_ENABLED", "1")
     state = _patch_persistence(monkeypatch)
 
     def boom(url, **_kw):
@@ -1734,3 +1743,21 @@ def test_latest_rent_estimations_by_listing_empty_ids_skips_query():
     conn = _FakeConn()
     assert er.latest_rent_estimations_by_listing(conn, []) == {}
     assert conn.executions == []
+
+
+def test_post_ungeocodable_url_rejected_before_spend(client, monkeypatch):
+    # W0 Mapy kill switch (R1): with geocoding disabled, a non-sreality URL
+    # that matches no scraped listing is rejected 422 BEFORE the metered gate
+    # and the LLM parse — the review-confirmed fix for "bills the quota, then
+    # dies in _build_target on float(None)".
+    monkeypatch.delenv("MAPY_GEOCODE_ENABLED", raising=False)
+
+    def _boom(*a, **k):
+        raise AssertionError("parse_listing_url must not run for a doomed submit")
+
+    import api.estimation_runs as er
+    monkeypatch.setattr(er.source_dispatcher, "parse_listing_url", _boom)
+    monkeypatch.setattr(er, "_match_listing_by_url", lambda conn, url: None)
+    resp = client.post("/estimations", json={"url": "https://www.bezrealitky.cz/x/123"})
+    assert resp.status_code == 422
+    assert "geocoding" in resp.json()["detail"].lower()

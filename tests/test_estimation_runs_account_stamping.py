@@ -85,6 +85,7 @@ def test_insert_run_omitted_account_id_binds_none_not_default() -> None:
 
 
 def test_create_estimation_run_defaults_to_system_account(monkeypatch: Any) -> None:
+    monkeypatch.setenv("MAPY_GEOCODE_ENABLED", "1")  # not a kill-switch test
     """account_id=None (legacy/unclaimed caller) must stamp the platform
     SYSTEM account, not NULL -- preserving pre-Wave-1 behavior (every run
     used to land on the column DEFAULT, which was the SYSTEM account)."""

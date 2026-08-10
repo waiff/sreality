@@ -104,6 +104,7 @@ def test_job_payload_roundtrips_and_drops_source_html() -> None:
 
 
 def test_lane_on_inserts_pending_with_payload_and_skips_execution(monkeypatch: Any) -> None:
+    monkeypatch.setenv("MAPY_GEOCODE_ENABLED", "1")  # not a kill-switch test
     conn = _FakeConn()
     resolution = _resolution()
     _stub_setup(monkeypatch, resolution)
@@ -122,6 +123,7 @@ def test_lane_on_inserts_pending_with_payload_and_skips_execution(monkeypatch: A
 
 
 def test_lane_on_agent_run_starts_pending_not_running(monkeypatch: Any) -> None:
+    monkeypatch.setenv("MAPY_GEOCODE_ENABLED", "1")  # not a kill-switch test
     """Agent runs normally INSERT 'running'; on the lane they must start
     'pending' so the worker's claim (WHERE status='pending') can see them —
     the worker stamps 'running' + claimed_at at claim time."""
@@ -147,6 +149,7 @@ def test_lane_on_agent_run_starts_pending_not_running(monkeypatch: Any) -> None:
 
 
 def test_lane_off_runs_inline_without_payload(monkeypatch: Any) -> None:
+    monkeypatch.setenv("MAPY_GEOCODE_ENABLED", "1")  # not a kill-switch test
     conn = _FakeConn()
     _stub_setup(monkeypatch, _resolution())
     monkeypatch.setattr(er, "_job_lane_enabled", lambda conn: False)
