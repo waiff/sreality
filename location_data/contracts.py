@@ -470,7 +470,7 @@ def project(
                     "claim_type": entry.claim_type,
                     "extraction_method": entry.extraction_method,
                     "subject_scope": psycopg.types.json.Jsonb(entry.subject_scope),
-                    "transform": entry.transform,
+                    "transform": psycopg.types.json.Jsonb(entry.transform),
                     "precision_map": psycopg.types.json.Jsonb(entry.precision_map),
                     "default_granularity": entry.default_granularity,
                     "default_position_source": entry.default_position_source,

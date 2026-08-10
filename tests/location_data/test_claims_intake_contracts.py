@@ -275,3 +275,68 @@ class _FakeConn:
 
     def transaction(self):
         return _FakeCursor(self)
+
+
+def _column_types_from_382() -> dict[str, dict[str, str]]:
+    """Map table -> column -> type for the two contract tables, parsed from migration 382
+    (the DDL source of truth), so a new jsonb column cannot dodge the bind check below."""
+    sql = (Path(__file__).resolve().parents[2]
+           / "migrations" / "382_location_w1_claims.sql").read_text()
+    out: dict[str, dict[str, str]] = {}
+    for table in ("portal_contracts", "portal_contract_entries"):
+        start = sql.index(f"create table {table} (")
+        body = sql[start:sql.index("\n);", start)]
+        cols: dict[str, str] = {}
+        for line in body.splitlines()[1:]:
+            line = line.strip()
+            if not line or line.startswith("--") or line.split()[0] in (
+                    "unique", "check", "primary", "foreign", "constraint"):
+                continue
+            name, _, rest = line.partition(" ")
+            cols[name] = rest.strip().split()[0].rstrip(",")
+        out[table] = cols
+    return out
+
+
+def test_every_jsonb_column_param_is_bound_as_jsonb():
+    """psycopg adapts a bare Python list as a Postgres ARRAY literal ('{x,y}'), which is
+    invalid input syntax for a jsonb column. The first production projection crashed on
+    exactly this: portal_contract_entries.transform (list[str]) reached jsonb unwrapped
+    (run 31428625090, Token "psc_normalise"). Assert every param bound to a jsonb column
+    is a psycopg Jsonb wrapper, and every text[] column gets a plain list, across ALL
+    nine real contracts."""
+    import psycopg.types.json
+
+    types = _column_types_from_382()
+    checked_jsonb = 0
+    saw_nonempty_transform = False
+    for contract in ALL.values():
+        conn = _FakeConn(existing_sha="")
+        contracts.project(conn, contract, git_ref="deadbeef")
+        for sql, params in conn.executed:
+            if not isinstance(params, dict):
+                continue
+            if "INSERT INTO portal_contract_entries" in sql:
+                cols = types["portal_contract_entries"]
+            elif "INSERT INTO portal_contracts" in sql:
+                cols = types["portal_contracts"]
+            else:
+                continue
+            for key, value in params.items():
+                decl = cols.get(key, "")
+                if decl.startswith("jsonb"):
+                    assert isinstance(value, psycopg.types.json.Jsonb), (
+                        f"{key} targets a jsonb column but was bound as "
+                        f"{type(value).__name__} — psycopg would send an array/text "
+                        f"literal that jsonb rejects")
+                    checked_jsonb += 1
+                    if key == "transform" and value.obj:
+                        saw_nonempty_transform = True
+                elif decl.startswith("text[]"):
+                    assert isinstance(value, list), (
+                        f"{key} targets text[] and must stay a plain list, not "
+                        f"{type(value).__name__}")
+    assert checked_jsonb > 0
+    assert saw_nonempty_transform, (
+        "no contract exercised a non-empty transform — the regression case "
+        "(bazos/sreality psc_normalise) has gone missing")
