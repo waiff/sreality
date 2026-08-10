@@ -262,6 +262,10 @@ cross join (values
 -- 95-percent containment radius would be a false probability statement.
 -- bezrealitky is the stated calibration set; the pass that fixes this writes a
 -- new policy_version, which re-resolves through the campaign runner.
+--
+-- 'declared' + derivation='declared_shape' is reserved for the portals that
+-- actually publish a shape, and always with r95_m NULL. An invented constant
+-- labelled 'declared' would be a third, false statement (01 section 3.3.1).
 ------------------------------------------------------------------
 
 create table location_uncertainty_policy (
