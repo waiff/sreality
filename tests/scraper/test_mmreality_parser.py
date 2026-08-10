@@ -222,3 +222,30 @@ def test_content_hash_stable_and_bridges_to_ingest():
     assert row["category_main"] == "byt"
     assert row["price_czk"] == 3_190_000
     assert row["lat"] == 49.47841185
+
+
+def test_title_street_fallback_from_original_title():
+    # W0 item 0g: structured street absent -> the originalTitle "ul. <Street>"
+    # marker fills it (live-verified payload shape: "Prodej restaurace,
+    # stravování, Bratronice, ul. Hlavní"). Town cross-check still applies.
+    from scraper.mmreality_parser import _title_street
+
+    obj = {"originalTitle": "Prodej restaurace, stravování, Bratronice, ul. Hlavní"}
+    assert _title_street(obj, "Bratronice", None, None, None) == "Hlavní"
+    # A town leaking after "ul." is rejected by the shared guard.
+    obj_town = {"originalTitle": "Prodej domu, ul. Bratronice"}
+    assert _title_street(obj_town, "Bratronice", None, None, None) is None
+    # No marker -> None.
+    assert _title_street({"originalTitle": "Prodej bytu 2+kk, Praha"}, "Praha", None, None, None) is None
+    assert _title_street({}, "Praha", None, None, None) is None
+
+
+def test_title_street_capped_and_anchored():
+    # Review finding: the uncapped capture could ride trailing prose into the
+    # street. Now <=3 tokens, capitalized-or-numeral start.
+    from scraper.mmreality_parser import _title_street
+
+    obj = {"originalTitle": "Prodej domu, Kladno, ul. Dlouhá 15 volejte kdykoliv"}
+    got = _title_street(obj, "Kladno", None, None, None)
+    assert got in ("Dlouhá", "Dlouhá 15", None)  # never the prose tail
+    assert _title_street({"originalTitle": "Prodej, ul. dobrá lokalita"}, "Brno", None, None, None) is None
