@@ -217,8 +217,16 @@ alter table mapy_affected        enable row level security;
 alter table mapy_affected_cache  enable row level security;
 alter table mapy_affected_props  enable row level security;
 
-revoke all on table mapy_inventory_runs, mapy_affected, mapy_affected_cache,
-                    mapy_affected_props
-  from anon, authenticated, public;
-revoke all on sequence mapy_inventory_runs_id_seq from anon, authenticated, public;
-revoke all on function mapy_inventory_immutable() from anon, authenticated, public;
+-- One statement per object, spelled exactly as 380-384 spell it: the location
+-- schema contract test parses these heads per relation, and a comma-list revoke
+-- is invisible to it (a REVOKE that cannot be verified is not a posture).
+revoke all on mapy_inventory_runs   from anon, authenticated;
+revoke all on mapy_affected         from anon, authenticated;
+revoke all on mapy_affected_cache   from anon, authenticated;
+revoke all on mapy_affected_props   from anon, authenticated;
+
+revoke all on sequence mapy_inventory_runs_id_seq from anon, authenticated;
+
+-- `public` first: a function's default ACL is EXECUTE TO PUBLIC, which anon and
+-- authenticated INHERIT, so revoking only the two named roles leaves it callable.
+revoke execute on function mapy_inventory_immutable() from public, anon, authenticated;

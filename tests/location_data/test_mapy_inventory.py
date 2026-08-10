@@ -288,10 +288,15 @@ def test_the_migration_sets_its_timeouts_transaction_locally() -> None:
 def test_new_relations_are_dark_to_browser_roles() -> None:
     body = "\n".join(line.split("--", 1)[0] for line in _migration_sql().lower().splitlines())
     sql = " ".join(body.split())
-    assert "revoke all on table mapy_inventory_runs, mapy_affected, mapy_affected_cache, " \
-           "mapy_affected_props from anon, authenticated, public;" in sql
+    # One statement per relation, not a comma list: test_location_schema_contracts
+    # parses these heads per object, and a comma-list revoke is invisible to it.
+    for table in ("mapy_inventory_runs", "mapy_affected", "mapy_affected_cache",
+                  "mapy_affected_props"):
+        assert re.search(rf"revoke all on {table}\s+from anon, authenticated;", sql), table
     assert "revoke all on sequence mapy_inventory_runs_id_seq from anon, authenticated" in sql
-    assert "revoke all on function mapy_inventory_immutable() from anon, authenticated" in sql
+    # `public` too: a function's default ACL is EXECUTE TO PUBLIC, which anon and
+    # authenticated inherit, so revoking only the named roles leaves it callable.
+    assert "revoke execute on function mapy_inventory_immutable() from public, anon, authenticated" in sql
     for table in ("mapy_affected", "mapy_affected_cache", "mapy_affected_props",
                   "mapy_inventory_runs"):
         assert f"alter table {table} enable row level security" in sql

@@ -15,22 +15,39 @@ interface Props {
   onClose: () => void;
   /* Extra classes on the enlarged <img> (Gallery's inactive-listing desaturation). */
   dim?: string;
+  /* The tag badge for the photo at that position, replacing what the image row's
+   * own CLIP call says. For grids whose tiles show a DIFFERENT tag (the labeling
+   * page's proposed tag) so the enlarged photo can never contradict the tile it
+   * was opened from. */
+  tagAt?: (index: number) => { tag: string | null; confidence: number | null };
 }
 
-export default function ImageLightbox({ images, startIndex, onClose, dim = '' }: Props) {
-  const [i, setI] = useState(startIndex);
+export default function ImageLightbox({
+  images,
+  startIndex,
+  onClose,
+  dim = '',
+  tagAt,
+}: Props) {
+  const [index, setIndex] = useState(startIndex);
   const [errored, setErrored] = useState(false);
   const total = images.length;
   const closeBtnRef = useRef<HTMLButtonElement>(null);
 
+  // The grid behind can shrink while the modal is open (a reviewed tile leaving
+  // its tab), so the stored index is clamped rather than trusted — an
+  // out-of-range one renders nothing while the dialog still holds the page's
+  // scroll lock.
+  const i = total > 0 ? Math.min(index, total - 1) : 0;
+
   const prev = useCallback(() => {
     setErrored(false);
-    setI((x) => (x - 1 + total) % total);
-  }, [total]);
+    setIndex((i - 1 + total) % total);
+  }, [i, total]);
   const next = useCallback(() => {
     setErrored(false);
-    setI((x) => (x + 1) % total);
-  }, [total]);
+    setIndex((i + 1) % total);
+  }, [i, total]);
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -50,6 +67,10 @@ export default function ImageLightbox({ images, startIndex, onClose, dim = '' }:
 
   const current = images[i];
   if (!current) return null;
+  const badge = tagAt?.(i) ?? {
+    tag: current.clip_fine_tag,
+    confidence: current.clip_confidence,
+  };
 
   return (
     <div
@@ -130,8 +151,8 @@ export default function ImageLightbox({ images, startIndex, onClose, dim = '' }:
               ].join(' ')}
             />
             <ImageTagBadge
-              tag={current.clip_fine_tag}
-              confidence={current.clip_confidence}
+              tag={badge.tag}
+              confidence={badge.confidence}
               className="absolute bottom-2 left-2 text-[0.7rem]"
             />
             <ImageRenderBadge

@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<vf:VymennyFormat xmlns:vf="urn:cz:isvs:ruian:schemas:VymennyFormatTypy:v1"
+                  xmlns:com="urn:cz:isvs:ruian:schemas:CommonTypy:v1">
+<vf:Hlavicka><vf:VerzeVFR>3.1</vf:VerzeVFR><vf:TypZaznamu>Platne</vf:TypZaznamu>
+<vf:TypDavky>Prirustek</vf:TypDavky><vf:TypSouboru>ST_ZZSZ</vf:TypSouboru>
+<vf:Datum>2026-08-08T00:00:01</vf:Datum>
+<vf:TransakceOd><com:Id>8217302</com:Id><com:Zapsano>2026-08-07T05:00:46</com:Zapsano></vf:TransakceOd>
+<vf:TransakceDo><com:Id>8220073</com:Id><com:Zapsano>2026-08-07T23:00:48</com:Zapsano></vf:TransakceDo>
+<vf:PredchoziSoubor>20260806_ST_ZZSZ.xml.zip</vf:PredchoziSoubor>
+<vf:PlatnostDatK><com:ISUI>2026-08-07T23:00:48</com:ISUI><com:ISKN>2026-08-07T22:53:09</com:ISKN></vf:PlatnostDatK>
+</vf:Hlavicka>
+<vf:Data><vf:AdresniMisto gml:id="AD.88524604"></vf:AdresniMisto>
+<vf:ZaniklyPrvek><vf:TypPrvkuKod>AD</vf:TypPrvkuKod><vf:PrvekId>12345</vf:PrvekId></vf:ZaniklyPrvek></vf:Data>
+</vf:VymennyFormat>

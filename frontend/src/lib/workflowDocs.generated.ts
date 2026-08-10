@@ -2613,6 +2613,88 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/location_mapy_inventory.yml"
   },
   {
+    "filename": "location_registry_load.yml",
+    "name": "Location: RÚIAN registry load",
+    "description": "The registry-group jobs of the location subsystem (design 04 §4.4.2):",
+    "portal": null,
+    "manual": true,
+    "schedules": [
+      {
+        "cron": "0 10 1 * *",
+        "human": "0 10 1 * *"
+      },
+      {
+        "cron": "0 2 2 * *",
+        "human": "0 2 2 * *"
+      }
+    ],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "mode",
+        "description": "what to load",
+        "required": true,
+        "type": "choice",
+        "default": "full",
+        "options": [
+          "full",
+          "boundaries",
+          "gazetteer",
+          "deltas"
+        ]
+      },
+      {
+        "name": "vintage",
+        "description": "YYYYMMDD (full mode; blank = HEAD-probe the newest published)",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "dry_run",
+        "description": "download + parse + assert, write nothing",
+        "required": false,
+        "type": "boolean",
+        "default": "false",
+        "options": null
+      },
+      {
+        "name": "allow_missing_pip",
+        "description": "boundaries: load authoritative+render only (PIP degrades)",
+        "required": false,
+        "type": "boolean",
+        "default": "false",
+        "options": null
+      },
+      {
+        "name": "allow_unarchived",
+        "description": "full: load even if the R2 vintage archive fails (unreproducible)",
+        "required": false,
+        "type": "boolean",
+        "default": "false",
+        "options": null
+      }
+    ],
+    "secrets": [
+      "LOCATION_DB_DIRECT_URL",
+      "R2_ACCESS_KEY_ID",
+      "R2_ACCOUNT_ID",
+      "R2_BUCKET_NAME",
+      "R2_SECRET_ACCESS_KEY",
+      "SUPABASE_DB_SESSION_URL",
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "location-registry",
+    "cancelInProgress": false,
+    "timeoutMinutes": 180,
+    "permissions": "contents: read",
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/location_registry_load.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/location_registry_load.yml"
+  },
+  {
     "filename": "migrations.yml",
     "name": "CI: schema replay + SQL correctness",
     "description": "Two gates on one throwaway Postgres, hermetic (no secrets, never touches prod):",
