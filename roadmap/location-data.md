@@ -120,6 +120,15 @@ is the tie-breaker). This track records sequencing + shipped state only.
 - Open: the daily VFR delta lane cannot apply deltas until the `ST_ZZSZ` element schema
   and the `TypPrvkuKod` vocabulary are pinned down; until then freshness is the monthly
   baseline (the design's own free degradation path).
+- **R2 Mapy affected-set inventory** (migration 385 + `scripts/location_mapy_inventory.py`
+  + dispatch-only `location_mapy_inventory.yml`), a W1 INPUT shipped ahead of the spine:
+  the five-arm set A materialised into
+  immutable evidence tables (`mapy_affected` / `_cache` / `_props`) — identity and reason
+  codes only, never a coordinate (06 §6.1.5 class-E carve-out). Arm 1 is a deliberate
+  superset: bazos `coords.source` ∈ {street, locality} counts as Mapy-derived per 06
+  §6.1.2 row 5. Arm 3 matches `listings.geom` against the ~1.3k cached coordinates on a
+  1e-5° cell grid with 3×3 expansion (no h3 on this instance). Still to run: dispatch it
+  to completion before the first claim is written.
 
 ## Standing decisions
 
