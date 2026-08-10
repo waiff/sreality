@@ -50,15 +50,19 @@ jobs:
       - name: Install
         run: pip install -e .
 
+      - name: Resolve snapshot date
+        # At DISPATCH time, once, shared by both steps — so a re-run of a job
+        # that crossed UTC midnight resumes the same prefix instead of
+        # silently starting a second full 14 GB export under the new date.
+        id: snap
+        run: |
+          S="${{ inputs.snapshot }}"
+          [ -n "$S" ] || S="$(date -u +%F)"
+          echo "snapshot=$S" >> "$GITHUB_OUTPUT"
+
       - name: Export archive to R2
         if: ${{ !inputs.verify_only }}
-        run: |
-          ARGS=""
-          if [ -n "${{ inputs.snapshot }}" ]; then ARGS="--snapshot ${{ inputs.snapshot }}"; fi
-          python -m scripts.export_portal_raw_pages_archive $ARGS
+        run: python -m scripts.export_portal_raw_pages_archive --snapshot "${{ steps.snap.outputs.snapshot }}"
 
       - name: Verify snapshot manifest against DB
-        run: |
-          ARGS=""
-          if [ -n "${{ inputs.snapshot }}" ]; then ARGS="--snapshot ${{ inputs.snapshot }}"; fi
-          python -m scripts.export_portal_raw_pages_archive --verify $ARGS
+        run: python -m scripts.export_portal_raw_pages_archive --verify --snapshot "${{ steps.snap.outputs.snapshot }}"
