@@ -71,6 +71,17 @@ is the tie-breaker). This track records sequencing + shipped state only.
   (Supabase plan/tier price — blocks W1 sizing), A5 (filter semantics default) —
   surfaced 2026-08-10 with written defaults.
 
+## W1 — inputs shipped ahead of the spine
+
+- **R2 Mapy affected-set inventory** (migration 385 + `scripts/location_mapy_inventory.py`
+  + dispatch-only `location_mapy_inventory.yml`): the five-arm set A materialised into
+  immutable evidence tables (`mapy_affected` / `_cache` / `_props`) — identity and reason
+  codes only, never a coordinate (06 §6.1.5 class-E carve-out). Arm 1 is a deliberate
+  superset: bazos `coords.source` ∈ {street, locality} counts as Mapy-derived per 06
+  §6.1.2 row 5. Arm 3 matches `listings.geom` against the ~1.3k cached coordinates on a
+  1e-5° cell grid with 3×3 expansion (no h3 on this instance). Still to run: dispatch it
+  to completion before the first claim is written.
+
 ## Standing decisions
 
 - The Mapy remediation ladder (R2 inventory → R3 re-resolve → R4 purge) is W1–W4

@@ -2543,6 +2543,76 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/load_obec_population.yml"
   },
   {
+    "filename": "location_mapy_inventory.yml",
+    "name": "Jobs: Mapy affected-set inventory (location W1 / R2)",
+    "description": "DISPATCH-ONLY evidence job for the Mapy.cz licensing remediation. Materialises the five-arm affected set of the location design (04-connectors-ops.md C7.2 R2) into the immutable tables of migration 385: per-listing arm evidence, the geocode_cache identity ledger, and the property closure. It records IDENTITY and REASON CODES only — never a coordinate, matched_type or confidence, which would be the same storage violation the remediation exists to end.",
+    "portal": null,
+    "manual": true,
+    "schedules": [],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "batch_size",
+        "description": "listings per batch (10000-30000; blank = 20000)",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "limit",
+        "description": "max listings scanned this run (blank = the whole table)",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "max_seconds",
+        "description": "wall-clock budget; stops between batches (blank = none)",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "restart",
+        "description": "rescan from the first listing instead of resuming",
+        "required": false,
+        "type": "boolean",
+        "default": "false",
+        "options": null
+      },
+      {
+        "name": "note",
+        "description": "free-text note stamped on the run row",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "dry_run",
+        "description": "scan and report the arm counts without writing anything",
+        "required": false,
+        "type": "boolean",
+        "default": "false",
+        "options": null
+      }
+    ],
+    "secrets": [
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "location-mapy-inventory",
+    "cancelInProgress": false,
+    "timeoutMinutes": 120,
+    "permissions": null,
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/location_mapy_inventory.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/location_mapy_inventory.yml"
+  },
+  {
     "filename": "migrations.yml",
     "name": "CI: schema replay + SQL correctness",
     "description": "Two gates on one throwaway Postgres, hermetic (no secrets, never touches prod):",
