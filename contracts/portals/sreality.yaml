@@ -1,0 +1,478 @@
+# sreality — api_json, index AND detail (02 §2.2.1).
+#
+# The richest location artefact in the database: `locality` is a full geocoding record
+# carrying a declared precision level (inaccuracy_type × entity_type), an uncertainty
+# geometry (bounding box + encoded polyline) and stable portal ids for six admin levels —
+# and none of it is persisted in a column today [db-raw §3.1, live-A §1.2].
+#
+# HTML is not an option: the SSR detail page 302s into a login.seznam.cz autologin chain
+# and then an infinite `cwtkn=` redirect loop; it was not evaded and must not be
+# [live-A §1.1].
+#
+# W1 executes the entries whose `locator.reader` is set — every one of them addresses the
+# detail payload the scraper already persists verbatim into `listings.raw_json`, so no
+# re-fetch is required (02 §2.3.3: `api_json` -> no).
+
+portal: sreality
+contract_version: 1
+extractor_runtime: ">=1.0"
+identity_ladder: [structured_address, portal_precise_coord, text_geocode]
+
+fetch:
+  surfaces:
+    - page_kind: detail
+      method: GET
+      url_template: "https://www.sreality.cz/api/v1/estates/{native_id}"
+      headers: {Accept-Language: cs}
+      min_interval_s: 4
+      archive: true
+      cadence: "on detail-drain claim"
+      robots_note: "JSON API; the SSR page is off-limits (login redirect loop, live-A §1.1)"
+    - page_kind: index
+      method: GET
+      url_template: "https://www.sreality.cz/api/v1/estates/search"
+      headers: {Accept-Language: cs}
+      min_interval_s: 4
+      archive: true
+      cadence: "hourly index walk; categories over 10,000 are walked per okres"
+      robots_note: "same JSON API as the detail surface"
+
+persistence:
+  volatile_paths:
+    - /stats
+    - /_embedded
+    - /advert_images
+    - /panorama_data
+  version_cap: 20
+
+payload_schema_detector:
+  legacy_shape: "raw_json.locality carries {name,value,accuracy} and no entity_type"
+  action: enqueue_detail_refetch
+  note: >
+    The pre-June-2026 shape permanently lacks zip/housenumber/entity_type/inaccuracy_type
+    [live-A §1.4b]. The recon reported 32% of active rows; W0's own measurement
+    (2026-08-10, n=2,110) puts the current share at 8.4%, and that is the number W1's gate
+    uses. A legacy-shape row is a re-FETCH order, never a re-extract (02 §2.3.2 P6): the
+    W1 intake routes it to `location_enrichment_state(lane='sreality_detail_refetch')`.
+
+exclusion_zones:
+  - locator_kind: api_json
+    locator: {json_pointer: /premise}
+    reason: >
+      The estate agency's OFFICE address, including its own gps_lat/gps_lon. A
+      fully-formed decoy in 11 of 12 mined files, and in 3 of them the office is in the
+      same city as the property [mine-syn §1c].
+  - locator_kind: api_json
+    locator: {json_pointer: /labels_extended}
+    reason: "POI names are landmarks, never the subject street."
+
+precision_caps:
+  # 02 §2.1.7 / §2.4 — the NORMATIVE declared-precision -> cap ladder for this portal.
+  granularity_max:
+    gps: address_point
+    address: address_point
+    street: street
+    ward: cast_obce_or_quarter
+    quarter: cast_obce_or_quarter
+    municipality: obec
+  position_source_max:
+    gps: portal_pin
+    address: portal_pin
+    _default: portal_pin_blurred
+  uncertainty_radius_m:
+    rule: from_uncertainty_geometry_else_class_default
+
+precision_priors:
+  granularity: unknown          # legacy-shape rows only; nothing is assumed precise
+  position_source: portal_pin
+  match_confidence: low
+  uncertainty_radius_m: class_default_prefer_locality_geometry_bbox
+
+regressions:
+  - "520268 — inaccuracy_type='street' with a multilinestring bbox spanning ~15 km"
+  - "1588965452 — 80 KB geometry blob truncated raw_json and destroyed the locality object"
+  - "3067969612 — zip:-1 sentinel"
+
+extractions:
+  - id: sr.det.gps
+    locator_kind: api_json
+    extraction_method: portal_structured_field
+    page_kind: detail
+    locator:
+      reader: point_pair
+      lat_pointer: /locality/gps_lat
+      lon_pointer: /locality/gps_lon
+    claim_type: coordinate
+    subject_scope: {kind: root_object}
+    licence_class: portal
+    blur_evidence: none
+    precision_cap:
+      granularity_max: per_inaccuracy_type
+      position_source_max: portal_pin
+      uncertainty_radius_m: {rule: from_uncertainty_geometry_else_class_default}
+    prior: {position_source: portal_pin, match_confidence: low}
+    guards: [reject_outside_cz_bbox]
+    required: when_present
+    notes: >
+      Emitted only from the post-cutover structured `locality`. 79.5% of sreality
+      coordinates are unique [live-A §1.5] — but "treating every sreality coordinate as
+      address-exact is wrong for roughly half the inventory".
+
+  - id: sr.det.inaccuracy_type
+    locator_kind: api_json
+    extraction_method: portal_declared_quality
+    page_kind: detail
+    locator: {reader: declared_quality, json_pointer: /locality/inaccuracy_type}
+    claim_type: precision_declaration
+    subject_scope: {kind: root_object}
+    licence_class: portal
+    blur_evidence: none
+    precision_cap:
+      granularity_max:
+        gps: address_point
+        address: address_point
+        street: street
+        ward: cast_obce_or_quarter
+        quarter: cast_obce_or_quarter
+        municipality: obec
+      blurred_labels: [street, ward, quarter, municipality]
+    prior: {match_confidence: low}
+    guards: [reject_if_in_excluded_zone]
+    required: when_present
+    notes: >
+      The richest precision annotation on any of the nine portals, and stored nowhere
+      today. A cap, never a certification (02 §2.1.2 rule 2). The blurred labels write
+      blur_evidence='declared'; gps/address write 'none' EXPLICITLY (06 §6.6 rule 7).
+
+  - id: sr.det.entity_type
+    locator_kind: api_json
+    extraction_method: portal_declared_quality
+    page_kind: detail
+    locator: {reader: declared_quality, json_pointer: /locality/entity_type}
+    claim_type: precision_declaration
+    subject_scope: {kind: root_object}
+    licence_class: portal
+    blur_evidence: none
+    precision_cap:
+      granularity_max:
+        address: address_point
+        street: street
+        ward: cast_obce_or_quarter
+        quarter: cast_obce_or_quarter
+        municipality: obec
+      blurred_labels: [street, ward, quarter, municipality]
+    prior: {match_confidence: low}
+    required: when_present
+    notes: "Pair with inaccuracy_type; the cross-tab is the real signal [db-raw §3.1]."
+
+  - id: sr.det.geometry
+    locator_kind: api_json
+    extraction_method: portal_structured_field
+    page_kind: detail
+    locator: {reader: bbox_envelope, json_pointer: /locality/geometry/bounding_box}
+    claim_type: uncertainty_geometry
+    subject_scope: {kind: root_object}
+    licence_class: portal
+    blur_evidence: none
+    guards: [reject_outside_cz_bbox]
+    required: when_present
+    notes: >
+      "The bounding box, not the label, is the real precision measure" — 520268 is
+      labelled `street` with a ~15 km bbox [db-raw §3.1]. Empty stub on
+      entity_type=address [live-A §1.2].
+
+  - id: sr.det.street
+    locator_kind: api_json
+    extraction_method: portal_structured_field
+    page_kind: detail
+    locator: {reader: scalar, json_pointer: /locality/street}
+    claim_type: street_name
+    licence_class: portal
+    blur_evidence: none
+    prior: {granularity: street}
+    required: when_present
+
+  - id: sr.det.street_id
+    locator_kind: api_json
+    extraction_method: portal_structured_field
+    page_kind: detail
+    locator: {reader: namespaced_id, json_pointer: /locality/street_id,
+              namespace: sreality.street_id}
+    claim_type: portal_street_id
+    transform: ["sentinel_drop:-1"]
+    licence_class: portal
+    blur_evidence: none
+    required: when_present
+    notes: "street_id:-1 is a sentinel [repo-scr §1(d)]. Provenance, never a query dimension."
+
+  - id: sr.det.housenumber
+    locator_kind: api_json
+    extraction_method: portal_structured_field
+    page_kind: detail
+    locator: {reader: scalar, json_pointer: /locality/housenumber}
+    claim_type: house_number_cp
+    licence_class: portal
+    blur_evidence: none
+    required: when_present
+
+  - id: sr.det.streetnumber
+    locator_kind: api_json
+    extraction_method: portal_structured_field
+    page_kind: detail
+    locator: {reader: scalar, json_pointer: /locality/streetnumber}
+    claim_type: house_number_co
+    licence_class: portal
+    blur_evidence: none
+    required: when_present
+    notes: >
+      čp and čo are a PAIR, not alternatives (2111/10 = "Limuzská 2111/10") [live-A §1.2];
+      the orientation part is dropped today on 4 of 5 house-number rows.
+
+  - id: sr.det.zip
+    locator_kind: api_json
+    extraction_method: portal_structured_field
+    page_kind: detail
+    locator: {reader: scalar, json_pointer: /locality/zip}
+    claim_type: psc
+    transform: ["sentinel_drop:-1", "psc_normalise"]
+    licence_class: portal
+    blur_evidence: none
+    guards: [reject_sentinel]
+    required: when_present
+    notes: "31,046 whole-corpus rows store the literal '-1' [db-cov §5]."
+
+  - id: sr.det.name_city
+    locator_kind: api_json
+    extraction_method: portal_structured_field
+    page_kind: detail
+    locator: {reader: scalar, json_pointer: /locality/city}
+    claim_type: obec_name
+    licence_class: portal
+    blur_evidence: none
+    prior: {granularity: obec}
+    required: when_present
+
+  - id: sr.det.name_citypart
+    locator_kind: api_json
+    extraction_method: portal_structured_field
+    page_kind: detail
+    locator: {reader: scalar, json_pointer: /locality/citypart}
+    claim_type: cast_obce_name
+    licence_class: portal
+    blur_evidence: none
+    prior: {granularity: cast_obce_or_quarter}
+    required: when_present
+    notes: "Present on 75% of rows and uncolumned [db-cov §7.1]; today collapsed into one
+      `locality` string 'City - Citypart' [repo-scr §10.2]."
+
+  - id: sr.det.name_quarter
+    locator_kind: api_json
+    extraction_method: portal_structured_field
+    page_kind: detail
+    locator: {reader: scalar, json_pointer: /locality/quarter}
+    claim_type: quarter_name
+    licence_class: portal
+    blur_evidence: none
+    required: when_present
+
+  - id: sr.det.name_ward
+    locator_kind: api_json
+    extraction_method: portal_structured_field
+    page_kind: detail
+    locator: {reader: scalar, json_pointer: /locality/ward}
+    claim_type: mestsky_obvod_name
+    licence_class: portal
+    blur_evidence: none
+    required: when_present
+
+  - id: sr.det.name_district
+    locator_kind: api_json
+    extraction_method: portal_structured_field
+    page_kind: detail
+    locator: {reader: scalar, json_pointer: /locality/district}
+    claim_type: okres_name
+    licence_class: portal
+    blur_evidence: none
+    required: when_present
+    notes: "sreality's `district` is the okres level; remax's `district` is a quarter —
+      the collision that made `listings.district` meaningless [repo-scr §6(d)]."
+
+  - id: sr.det.name_region
+    locator_kind: api_json
+    extraction_method: portal_structured_field
+    page_kind: detail
+    locator: {reader: scalar, json_pointer: /locality/region}
+    claim_type: kraj_name
+    licence_class: portal
+    blur_evidence: none
+    required: when_present
+
+  - id: sr.det.name_country
+    locator_kind: api_json
+    extraction_method: portal_structured_field
+    page_kind: detail
+    locator: {reader: scalar, json_pointer: /locality/country}
+    claim_type: country
+    licence_class: portal
+    blur_evidence: none
+    required: when_present
+
+  - id: sr.det.municipality_id
+    locator_kind: api_json
+    extraction_method: portal_structured_field
+    page_kind: detail
+    locator: {reader: namespaced_id, json_pointer: /locality/municipality_id,
+              namespace: sreality.municipality_id}
+    claim_type: portal_admin_id
+    licence_class: portal
+    blur_evidence: none
+    required: when_present
+
+  - id: sr.det.quarter_id
+    locator_kind: api_json
+    extraction_method: portal_structured_field
+    page_kind: detail
+    locator: {reader: namespaced_id, json_pointer: /locality/quarter_id,
+              namespace: sreality.quarter_id}
+    claim_type: portal_admin_id
+    licence_class: portal
+    blur_evidence: none
+    required: when_present
+
+  - id: sr.det.ward_id
+    locator_kind: api_json
+    extraction_method: portal_structured_field
+    page_kind: detail
+    locator: {reader: namespaced_id, json_pointer: /locality/ward_id,
+              namespace: sreality.ward_id}
+    claim_type: portal_admin_id
+    licence_class: portal
+    blur_evidence: none
+    required: when_present
+
+  - id: sr.det.district_id
+    locator_kind: api_json
+    extraction_method: portal_structured_field
+    page_kind: detail
+    locator: {reader: namespaced_id, json_pointer: /locality/district_id,
+              namespace: sreality.district_id}
+    claim_type: portal_admin_id
+    licence_class: portal
+    blur_evidence: none
+    required: when_present
+
+  - id: sr.det.region_id
+    locator_kind: api_json
+    extraction_method: portal_structured_field
+    page_kind: detail
+    locator: {reader: namespaced_id, json_pointer: /locality/region_id,
+              namespace: sreality.region_id}
+    claim_type: portal_admin_id
+    licence_class: portal
+    blur_evidence: none
+    required: when_present
+
+  - id: sr.det.country_id
+    locator_kind: api_json
+    extraction_method: portal_structured_field
+    page_kind: detail
+    locator: {reader: namespaced_id, json_pointer: /locality/country_id,
+              namespace: sreality.country_id}
+    claim_type: portal_admin_id
+    licence_class: portal
+    blur_evidence: none
+    required: when_present
+    notes: "The one admin id production drops entirely [live-A §1.2]."
+
+  - id: sr.det.legacy_locality_value
+    locator_kind: api_json
+    extraction_method: portal_structured_field
+    page_kind: detail
+    locator: {reader: scalar, json_pointer: /locality/value}
+    claim_type: address_line_verbatim
+    licence_class: portal
+    blur_evidence: none
+    required: when_present
+    notes: >
+      The RETIRED payload shape's display string ("Klatovy, okres Klatovy"). It is the
+      only location surface a legacy-shape row still has, so it is captured rather than
+      dropped — the row is enqueued for a detail refetch in parallel (02 §2.3.2 P6).
+
+  # ---- declared for W2 / index archiving; no reader, never executed by the W1 lane ----
+
+  - id: sr.idx.gps
+    locator_kind: api_json
+    extraction_method: portal_structured_field
+    page_kind: index
+    locator: {lat_pointer: /locality/gps_lat, lon_pointer: /locality/gps_lon}
+    claim_type: coordinate
+    licence_class: portal
+    blur_evidence: none
+    precision_cap: {granularity_max: per_inaccuracy_type, position_source_max: portal_pin}
+    prior: {position_source: portal_pin, match_confidence: low}
+    required: best_effort
+    notes: "The index row is discarded at the walk today [repo-scr §0.9]; needs P2 index
+      archiving before it can be mined."
+
+  - id: sr.idx.geohash
+    locator_kind: api_json
+    extraction_method: portal_structured_field
+    page_kind: index
+    locator: {json_pointer: /locality/geohash}
+    claim_type: geohash
+    licence_class: portal
+    blur_evidence: none
+    required: best_effort
+    notes: "10-char ≈ 1.2 m cell, INDEX-ONLY — absent from the detail payload [live-A §1.2]."
+
+  - id: sr.idx.poi_distance
+    locator_kind: api_json
+    extraction_method: portal_structured_field
+    page_kind: index
+    locator: {json_pointer_glob: "/poi_*_distance"}
+    claim_type: poi_distance
+    cardinality: many
+    licence_class: portal
+    blur_evidence: none
+    transform: ["sentinel_drop:100000"]
+    required: best_effort
+    notes: "13 distances in metres; 100000 is the 'none nearby' sentinel. Index-only."
+
+  - id: sr.det.labels_extended
+    locator_kind: api_json
+    extraction_method: portal_structured_field
+    page_kind: detail
+    locator: {json_pointer: /labels_extended}
+    claim_type: poi_distance
+    cardinality: many
+    licence_class: portal
+    blur_evidence: none
+    required: best_effort
+    notes: >
+      A free per-listing amenity graph WITH coordinates (18-23 mapy.cz POIs incl. transit
+      lines). Deferred to W2: it needs a list reader and it is a landmark/POI claim, never
+      a position source for the subject (04 C7.3).
+
+  - id: sr.det.micro_position
+    locator_kind: api_json
+    extraction_method: portal_structured_field
+    page_kind: detail
+    locator: {json_pointer: /object_location}
+    claim_type: micro_position
+    licence_class: portal
+    blur_evidence: none
+    required: best_effort
+    notes: "{name,value} enum objects with value:0 meaning unset; the decode table is not
+      established, so no reader ships in W1."
+
+  - id: sr.det.seo_names
+    locator_kind: api_json
+    extraction_method: portal_structured_field
+    page_kind: detail
+    locator: {json_pointer_glob: "/locality/*_seo_name"}
+    claim_type: portal_admin_id
+    cardinality: many
+    licence_class: portal
+    blur_evidence: none
+    required: best_effort
+    notes: "Stable URL-safe join/blocking keys, 8 per row [live-A §1.2]."

@@ -1,0 +1,269 @@
+# ceskereality — html_selector + jsonld + og_meta, plus a bulk MAP surface (02 §2.2.7).
+#
+# The map view /mapa/{sale}/{category}/ is "the single most valuable location signal any of
+# the three portals publishes… currently 100% unused": 500 markers per request, each with
+# an `exact` flag and an `nid` that IS `listings.source_id_native`, so the flag joins
+# straight onto existing rows [live-C §1.5]. It is a W2 surface (a new endpoint, weekly
+# cadence) — W1 cannot reach it.
+#
+# W1 reach is the slim parsed dict {id, title, broker, coords, params, locality_text,
+# image_urls}: coordinate provenance but never the coordinate value [db-raw §3.4]. Provenance
+# is `page` on 11,273 of an 11,474-row window, so most of this portal's coordinates ARE
+# admissible as legacy-column claims.
+#
+# Blur here is DISPLAY-only (the Google embed is forced to zoom=13 while the underlying
+# pair is exact) — do NOT read the embed zoom as precision [live-C §1.4].
+
+portal: ceskereality
+contract_version: 1
+extractor_runtime: ">=1.0"
+identity_ladder: [structured_address, portal_precise_coord, text_geocode]
+
+fetch:
+  surfaces:
+    - page_kind: detail
+      method: GET
+      url_template: "https://www.ceskereality.cz/{sale}/{category}/{facet}/{obec}/{slug}-{native_id}.html"
+      headers: {Accept-Language: cs}
+      min_interval_s: 4
+      archive: true
+      cadence: "6h detail drain"
+    - page_kind: map
+      method: GET
+      url_template: "https://www.ceskereality.cz/mapa/{sale}/{category}/"
+      min_interval_s: 10
+      archive: true
+      cadence: "weekly"
+      robots_note: "500 markers in one request; a bbox partition would also sidestep the
+        12-page anonymous cap that forces the current 7-subdomain fan-out [live-C §1.5]."
+
+persistence:
+  volatile_paths: [/image_urls, /broker]
+  version_cap: 20
+
+payload_schema_detector:
+  retired_selector: ".i-estate__header-locality"
+  action: raise_parse_failure_alarm
+  note: >
+    parse_index reads a class that NO LONGER EXISTS (0 matches on 20 live cards) — "the
+    index-walk currently harvests no locality at all, silently" [live-C §1.3]. Separately,
+    8,432 active rows (12.1%) have description IS NULL while portal_raw_pages holds their
+    full HTML with http_status 200 and parse_error NULL: "the parser returned nothing from
+    a good page and reported success" [db-raw §3.4]. `required: always` entries must raise.
+
+exclusion_zones:
+  - locator_kind: jsonld
+    locator: {type: individualProduct, json_pointer: /offers/offeredby/address}
+    reason: "The agency office (the existing parser already avoids it)."
+  - locator_kind: html_selector
+    locator: {css: "footer"}
+    reason: >
+      "ČESKÝ INTERNET s.r.o. Kostelní 942/46 370 04 České Budějovice" plus five partner
+      addresses — the ONLY PSČ and the only street+house-number pairs on 12 of 12 pages
+      [mine-ceskereality].
+  - locator_kind: html_selector
+    locator: {css: ".similar, .podobne"}
+    reason: "'Podobné nemovitosti' blocks carry up to 20 other listings with quarter+street
+      (17 foreign streets on 3790435)."
+  - locator_kind: html_selector
+    locator: {css: "select[name*='region'], nav a[href*='zahranicni']"}
+    reason: "The region dropdown and the footer nav item 'Zahraniční', on every page."
+
+precision_caps:
+  map_exact_true: {granularity_max: address_point, position_source_max: portal_pin}
+  map_exact_false: {granularity_max: obec, position_source_max: admin_centroid}
+  decimals_ge_11: {family: agency_gps}
+  decimals_le_6: {family: centroid}
+
+precision_priors:
+  granularity: unknown           # never "precise by default" until an `exact` flag is
+  position_source: portal_pin    # actually fetched from the map surface (02 §2.4)
+  match_confidence: low
+  note: "49.3% of active listings share a coordinate with ≥1 other active listing
+    (33,287/67,565; worst pin 188) [live-C §1.4]."
+
+regressions:
+  - "3180041 / 3781182 — full archived HTML, http_status 200, parse_error NULL, and the
+     parser produced nothing"
+  - "3849899 — 'Na Výrovně 2693' in the raw title with house_number NULL and street stored
+     ASCII-folded as 'Na vyrovne'"
+
+extractions:
+  - id: cr.det.legacy_pin
+    locator_kind: legacy_column
+    extraction_method: legacy_column
+    page_kind: none
+    locator: {reader: geom_column, legacy_source_column: listings.geom}
+    claim_type: coordinate
+    licence_class: portal
+    blur_evidence: none
+    precision_cap: {granularity_max: address_point, position_source_max: portal_pin}
+    prior: {granularity: unknown, position_source: portal_pin, match_confidence: low}
+    guards: [reject_outside_cz_bbox]
+    required: when_present
+    notes: >
+      Admitted only for coords.source='page' (read off input#driving_calculator_from's
+      data-coord-lat/lng) or a carry_forward absent from the Mapy inventory. 12-dp values
+      are a DMS→decimal artefact (agency GPS) and ≤6-dp values are a different family
+      (centroid): 64.8% ≥11 decimals, 14.2% ≤6 [live-C §1.4].
+
+  - id: cr.det.coords_stamp
+    locator_kind: legacy_column
+    extraction_method: legacy_column
+    page_kind: none
+    locator: {reader: coords_stamp_quality, legacy_source_column: raw_json.coords}
+    claim_type: precision_declaration
+    licence_class: portal
+    blur_evidence: none
+    required: when_present
+
+  - id: cr.det.locality_text
+    locator_kind: legacy_column
+    extraction_method: legacy_column
+    page_kind: none
+    locator: {reader: scalar, json_pointer: /locality_text,
+              legacy_source_column: raw_json.locality_text}
+    claim_type: address_line_verbatim
+    licence_class: portal
+    blur_evidence: none
+    required: when_present
+    notes: "A variable-depth address line ('Pařížská 1067, Praha Staré Město' degrading to
+      bare 'Jílovice') — stored verbatim, split by the resolver [live-C §1.2]."
+
+  # ---- W2 HTML / map surfaces: declared, no reader ----
+
+  - id: cr.map.exact
+    locator_kind: map_config
+    extraction_method: map_widget_parse
+    page_kind: map
+    locator: {css: "div#mapCanvas", attr: "data-markers",
+              then: "/data", join_key: nid}
+    claim_type: precision_declaration
+    blur_evidence: declared
+    licence_class: portal
+    precision_cap:
+      granularity_max: {exact_true: address_point, exact_false: obec}
+      position_source_max: {exact_true: portal_pin, exact_false: admin_centroid}
+      blurred_labels: [exact_false]
+    required: when_present
+    notes: >
+      "Nezadaná poloha" literally means the agency did not enter a position. 436 exact /
+      64 approximate out of 500 markers (12.8%), and `nid` IS source_id_native
+      [live-C §1.5]. Cadence: weekly.
+
+  - id: cr.map.coordinate
+    locator_kind: map_config
+    extraction_method: map_widget_parse
+    page_kind: map
+    locator: {css: "div#mapCanvas", attr: "data-markers", then: "/data"}
+    claim_type: coordinate
+    licence_class: portal
+    blur_evidence: none
+    precision_cap: {granularity_max: address_point, position_source_max: portal_pin}
+    guards: [reject_outside_cz_bbox]
+    required: best_effort
+
+  - id: cr.det.perex
+    locator_kind: html_selector
+    extraction_method: html_selector_parse
+    page_kind: detail
+    locator: {css: "span.s-estate-detail-intro__perex", text: true}
+    claim_type: street_name
+    licence_class: portal
+    blur_evidence: none
+    required: when_present
+    notes: "Identical to input#driving_calculator_from[value]. Today house_number comes only
+      from JSON-LD streetAddress, absent on both pages -> 1,104/72,267 = 1.5% coverage."
+
+  - id: cr.det.data_city
+    locator_kind: html_selector
+    extraction_method: html_selector_parse
+    page_kind: detail
+    locator: {css: "input#driving_calculator_from", attr: "data-city"}
+    claim_type: obec_name
+    licence_class: portal
+    blur_evidence: none
+    required: when_present
+    notes: "'Praha (okres Praha)' — a portal-DECLARED okres, discarded today while okres is
+      instead derived from geom by trigger [live-C §1.3]."
+
+  - id: cr.det.og_title
+    locator_kind: og_meta
+    extraction_method: html_selector_parse
+    page_kind: detail
+    locator: {property: "og:title"}
+    claim_type: street_name
+    licence_class: portal
+    blur_evidence: none
+    required: when_present
+    notes: >
+      The accented form. ceskereality streets in the DB are 2.1% diacritic-bearing
+      (862/40,147) vs 72.8% realitymix and 82.6% sreality — "effectively every ceskereality
+      street is ASCII-folded… which breaks any exact string join to a RÚIAN street
+      registry" [live-C §1.3]. This entry is how the diacritics come back.
+
+  - id: cr.det.title_line
+    locator_kind: html_selector
+    extraction_method: regex_text
+    page_kind: detail
+    locator: {css: "title", pattern: ", ulice (?P<street>[^,]+),"}
+    claim_type: street_name
+    licence_class: portal
+    blur_evidence: none
+    required: best_effort
+    notes: "okres+obec 12/12, street 3/12 — 'the single most reliable structured locator on
+      this portal' [mine-ceskereality]."
+
+  - id: cr.det.jsonld_area_served
+    locator_kind: jsonld
+    extraction_method: jsonld_parse
+    page_kind: detail
+    locator: {type: individualProduct, json_pointer: /offers/areaServed/address}
+    claim_type: obec_name
+    licence_class: portal
+    blur_evidence: none
+    required: when_present
+
+  - id: cr.det.breadcrumb
+    locator_kind: jsonld
+    extraction_method: breadcrumb_parse
+    page_kind: detail
+    locator: {type: BreadcrumbList, json_pointer: "/itemListElement/1"}
+    claim_type: obec_name
+    licence_class: portal
+    blur_evidence: none
+    required: best_effort
+
+  - id: cr.det.canonical_region
+    locator_kind: url_slug
+    extraction_method: url_slug_parse
+    page_kind: detail
+    locator: {from: canonical, pattern: "^https?://(?P<macro>[a-z]+)\\.ceskereality\\.cz"}
+    claim_type: kraj_name
+    licence_class: portal
+    blur_evidence: none
+    required: best_effort
+    notes: "1 of 7 macro-region subdomains [live-C §1.2]."
+
+  - id: cr.det.slug_street
+    locator_kind: url_slug
+    extraction_method: url_slug_parse
+    page_kind: detail
+    locator: {from: source_url, pattern: "m2-(?P<street>.+?)-\\d{4,}\\.html"}
+    claim_type: street_name
+    licence_class: portal
+    blur_evidence: none
+    required: best_effort
+    notes: "Requires an m2- token; ASCII only. LAST RESORT [live-C §1.3]."
+
+  - id: cr.idx.locality
+    locator_kind: html_selector
+    extraction_method: html_selector_parse
+    page_kind: index
+    locator: {css: ".i-estate__title a", text: true}
+    claim_type: obec_name
+    licence_class: portal
+    blur_evidence: none
+    required: when_present
+    notes: "The locality moved into the title anchor; the old .i-estate__header-locality
+      class matches nothing [live-C §1.3]."

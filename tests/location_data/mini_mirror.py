@@ -400,7 +400,7 @@ def v1_uncertainty_policy() -> tuple[UncertaintyPolicyRow, ...]:
 
 def v1_field_policy_fields() -> set[str]:
     """Every `location_claim_type` that HAS a `location_field_policy` v1 row, read out of
-    the migrations (383 seeds ten; 387 adds the five S7 arbitrates but never had)."""
+    the migrations (383 seeds ten; 388 adds the five S7 arbitrates but never had)."""
     import re
 
     from tests.test_migration_rls_grants import _statements, _strip_comments

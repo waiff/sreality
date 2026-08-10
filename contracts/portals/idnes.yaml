@@ -1,0 +1,243 @@
+# idnes — embedded_json (data-maptiler-json) + html_selector (02 §2.2.4).
+#
+# The index page is NOT a location source: no map JSON, no per-card coordinates
+# [live-B §1.4.4]. Everything worth having is on the detail page, in a typed
+# {coordinates, address} feature keyed by the listing id — "strictly safer than a
+# positional regex" [live-B §1.2].
+#
+# W1 reach is `listings.raw_json`, which for this portal is a slim parsed dict
+# {id, title, broker, coords, params, idnes_ref, price_text, locality_text, image_urls}:
+# the coordinate VALUE is never in it, only the provenance stamp [db-raw §3.4]. So W1
+# migrates `listings.geom` as a legacy column, and only where coords.source='page'
+# (or a carry_forward absent from the Mapy inventory). 6,314 of a 20,423-row window carry
+# `null` provenance — every one of those is class E and gets NO coordinate claim.
+#
+# Pin-collision context, which is why this portal's prior is `unknown`: 119 active rows sit
+# on exactly 49.19186,16.61109 (Brno centre) with street NULL and coords.source='page';
+# 71 rows on ≈ the CZ geographic centroid spanning 56 municipalities; 50.5% of geom rows
+# share a 5-dp pin [live-B §1.3]. Counter-example that forbids a naive rule: 50.12413,
+# 14.12853 carries 58 rows that are a LEGITIMATE development cluster.
+
+portal: idnes
+contract_version: 1
+extractor_runtime: ">=1.0"
+identity_ladder: [portal_precise_coord, text_geocode]
+
+fetch:
+  surfaces:
+    - page_kind: detail
+      method: GET
+      url_template: "https://reality.idnes.cz/detail/{sale}/{type}/{slug}/{native_id}/"
+      headers: {Accept-Language: cs}
+      min_interval_s: 4
+      archive: true
+      cadence: "6h detail drain"
+      robots_note: "Public detail page; no login, no evasion."
+
+persistence:
+  volatile_paths: [/image_urls, /price_text]
+  version_cap: 20
+
+exclusion_zones:
+  - locator_kind: embedded_json
+    locator: {css: "script[data-maptiler-json]", then: "/geojson/features[isSimilar=true]"}
+    reason: "20 neighbour listings with addresses per page [live-B §1.2]."
+  - locator_kind: html_selector
+    locator: {css: ".b-similar, .broker, nav"}
+    reason: "'Podobné' block, broker block, site nav [mine-syn §1c]."
+
+precision_caps:
+  no_exact_disclaimer: {granularity_max: cast_obce_or_quarter}
+  polygon_present: {uncertainty_radius_m: from_polygon}
+
+precision_priors:
+  granularity: unknown
+  position_source: portal_pin
+  match_confidence: low
+  uncertainty_radius_m: class_default
+  pin_collision_detection: mandatory
+
+regressions:
+  - "16,833 active rows outside the CZ bbox with obec/okres/region/ku_id all NULL
+     [db-cov §4.2] — invisible to every admin filter, still on the map"
+  - "the 119-row Brno-centre and 71-row CZ-centroid pin clusters [live-B §1.3]"
+
+extractions:
+  - id: id.det.legacy_pin
+    locator_kind: legacy_column
+    extraction_method: legacy_column
+    page_kind: none
+    locator: {reader: geom_column, legacy_source_column: listings.geom}
+    claim_type: coordinate
+    licence_class: portal
+    blur_evidence: none
+    precision_cap: {granularity_max: street, position_source_max: portal_pin}
+    prior: {granularity: unknown, position_source: portal_pin, match_confidence: low}
+    guards: [reject_outside_cz_bbox]
+    required: when_present
+    notes: >
+      Admitted ONLY for coords.source='page' (read off the portal's own map widget) or a
+      carry_forward absent from `mapy_affected`. `geocode` and the 6,314-row unstamped
+      cohort are class E and produce no claim — W2 recovers those first-party from the
+      archived `data-maptiler-json` (06 §6.1.2 closing note).
+
+  - id: id.det.coords_stamp
+    locator_kind: legacy_column
+    extraction_method: legacy_column
+    page_kind: none
+    locator: {reader: coords_stamp_quality, legacy_source_column: raw_json.coords}
+    claim_type: precision_declaration
+    licence_class: portal
+    blur_evidence: none
+    required: when_present
+    notes: "~74% of idnes rows carry coord provenance [db-cov §7.6]; the stamp grades our
+      own geocoder, so it is only emitted alongside an admitted coordinate."
+
+  - id: id.det.locality_text
+    locator_kind: legacy_column
+    extraction_method: legacy_column
+    page_kind: none
+    locator: {reader: scalar, json_pointer: /locality_text,
+              legacy_source_column: raw_json.locality_text}
+    claim_type: address_line_verbatim
+    licence_class: portal
+    blur_evidence: none
+    required: when_present
+    notes: >
+      Typed as a verbatim address LINE, never as an admin level: the string is
+      'Březno - Nechranice, okres Chomutov' shaped and the middle level is dropped by the
+      current parser [db-raw §3.4]. Splitting it is the resolver's job (03), not the
+      extractor's.
+
+  # ---- W2 HTML / map surfaces: declared, no reader ----
+
+  - id: id.det.subject_feature
+    locator_kind: embedded_json
+    extraction_method: map_widget_parse
+    page_kind: detail
+    locator: {css: "script[type='application/json'][data-maptiler-json]",
+              then: "/geojson/features", match: "properties.id == <native_id>"}
+    claim_type: coordinate
+    licence_class: portal
+    blur_evidence: none
+    precision_cap: {granularity_max: address_point, position_source_max: portal_pin}
+    prior: {position_source: portal_pin, match_confidence: low}
+    subject_scope: {kind: id_match, on_miss: fail}
+    guards: [reject_outside_cz_bbox]
+    required: when_present
+    notes: "A typed {coordinates,address} pair keyed by the listing id [live-B §1.2]. The
+      first-party recovery for every class-E idnes coordinate."
+
+  - id: id.det.subject_address
+    locator_kind: embedded_json
+    extraction_method: map_widget_parse
+    page_kind: detail
+    locator: {css: "script[data-maptiler-json]", then: "/geojson/features/*/properties/address"}
+    claim_type: address_line_verbatim
+    licence_class: portal
+    blur_evidence: none
+    subject_scope: {kind: id_match, on_miss: fail}
+    required: when_present
+
+  - id: id.det.polygon
+    locator_kind: embedded_json
+    extraction_method: map_widget_parse
+    page_kind: detail
+    locator: {css: "script[data-maptiler-json]", then: "/geojson/features", type: Polygon}
+    claim_type: uncertainty_geometry
+    licence_class: portal
+    blur_evidence: none
+    required: when_present
+    notes: "The 'vyznačená oblast' the disclaimer refers to [live-B §1.2]."
+
+  - id: id.det.no_exact_disclaimer
+    locator_kind: html_selector
+    extraction_method: portal_declared_quality
+    page_kind: detail
+    locator: {css: "body", contains: "Nemovitost nemá přesnou adresu, nachází se ve vyznačené oblasti."}
+    claim_type: precision_declaration
+    blur_evidence: declared
+    licence_class: portal
+    precision_cap: {granularity_max: cast_obce_or_quarter,
+                    blurred_labels: ["no_exact_address"]}
+    required: when_present
+    notes: "Verbatim on 5/12 pages INCLUDING all 3 controls, while 'the resolver currently
+      writes street+h.n. on top of it' [mine-syn §4.0 #9]."
+
+  - id: id.det.info_text
+    locator_kind: embedded_json
+    extraction_method: portal_declared_quality
+    page_kind: detail
+    locator: {css: "script[data-maptiler-json]", then: /infoText}
+    claim_type: precision_declaration
+    licence_class: portal
+    blur_evidence: none
+    required: best_effort
+
+  - id: id.det.zoom
+    locator_kind: embedded_json
+    extraction_method: map_widget_parse
+    page_kind: detail
+    locator: {css: "script[data-maptiler-json]", then: /mtMapOptions/zoom}
+    claim_type: map_zoom
+    licence_class: portal
+    blur_evidence: none
+    required: best_effort
+    notes: "16 on both exact-address samples, but the zoom↔precision correlation could NOT
+      be falsified within budget — it caps nothing until OQ3 closes [live-B §1.4.2]."
+
+  - id: id.det.locality_line
+    locator_kind: html_selector
+    extraction_method: html_selector_parse
+    page_kind: detail
+    locator: {css: ".b-detail__info", text: true}
+    claim_type: street_name
+    licence_class: portal
+    blur_evidence: none
+    required: when_present
+    notes: "Format 'Street, City - Quarter[, okres X]', street FIRST [repo-scr §4(a)]."
+
+  - id: id.det.og_url_slug
+    locator_kind: url_slug
+    extraction_method: url_slug_parse
+    page_kind: detail
+    locator: {from: canonical,
+              pattern: "/detail/[^/]+/[^/]+/(?P<town>[^-]+)-(?P<street>[^/]+)/\\d+/"}
+    claim_type: street_name
+    licence_class: portal
+    blur_evidence: none
+    required: best_effort
+
+  - id: id.det.og_description
+    locator_kind: og_meta
+    extraction_method: html_selector_parse
+    page_kind: detail
+    locator: {property: "og:description"}
+    claim_type: address_line_verbatim
+    licence_class: portal
+    blur_evidence: none
+    required: best_effort
+
+  - id: id.det.neighbours
+    locator_kind: embedded_json
+    extraction_method: map_widget_parse
+    page_kind: detail
+    locator: {css: "script[data-maptiler-json]", then: "/geojson/features[isSimilar=true]"}
+    claim_type: neighbour_listing_ref
+    cardinality: many
+    licence_class: portal
+    blur_evidence: none
+    subject_scope: {subject_scoped: false}
+    required: best_effort
+    notes: "NEVER the subject. Free raw material for pin-collision detection (D10)."
+
+  - id: id.desc.country
+    locator_kind: description
+    extraction_method: llm_text
+    page_kind: detail
+    locator: {scope: scoped_payload}
+    claim_type: country
+    licence_class: portal
+    blur_evidence: none
+    required: best_effort
+    notes: "Whole-portal classifier ≈ $4 [mine-syn §4.4]."

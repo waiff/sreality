@@ -1,4 +1,4 @@
--- 387_location_w1_projection_quality_columns.sql
+-- 388_location_w1_projection_quality_columns.sql
 --
 -- Location-data W1, resolver PR remediation. Two additive columns on the
 -- listing serving projection, plus the five location_field_policy v1 rows the

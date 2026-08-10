@@ -1,0 +1,296 @@
+# bezrealitky — graphql, index AND detail, query widened (02 §2.2.2).
+#
+# The best structured location of any source: coordinates, street, house number, ZIP and
+# city district are all first-class fields [db-raw §3.2]. Two portal-specific facts govern
+# this contract:
+#
+#   * A GraphQL payload "is only as wide as the query text" [repo-scr §3(c)] — adding a
+#     selection has NO retroactive effect, so a contract_version bump that widens the
+#     query is also a backfill RE-FETCH order (02 §2.3.3). `ruianId` / `addressInput` /
+#     `regionTree` were requested by W0 (#1001); rows drained before that carry none, and
+#     the W1 lane simply emits no claim for them.
+#   * Shared pins here are real-world 1:many (Rezidence Veletržní 42, River Garden), not
+#     geocoder fallback — "a dedup rule keyed on 'same pin ⇒ suspicious' would be wrong on
+#     this portal" [mine-bezrealitky finding 3]. That seed is loaded into
+#     `location_collision_policy`, NOT read from this file by the resolver.
+#
+# Do NOT run a general LLM miner here: 0/4 street, 0/4 house number, 0 contradictions of
+# any severity, 12/12 agreement on obec, PSČ and lat/lng [mine-syn §4.1].
+
+portal: bezrealitky
+contract_version: 1
+extractor_runtime: ">=1.0"
+identity_ladder: [address_point_id, structured_address, portal_precise_coord]
+pin_collision_semantics: legitimate_multiunit
+
+fetch:
+  surfaces:
+    - page_kind: detail
+      method: POST
+      url_template: "https://api.bezrealitky.cz/graphql/"
+      headers: {Origin: "https://www.bezrealitky.cz", Referer: "https://www.bezrealitky.cz/"}
+      selection: "advert(id:$id){ ruianId houseUnit addressUserInput address(locale:CS)
+                  breadcrumbs(locale:CS){title url}
+                  regionTree(locale:CS){id lvl type subType uri name googleName osmId idPath}
+                  poiData }"
+      min_interval_s: 4
+      archive: true
+      cadence: "on detail-drain claim"
+      robots_note: "Public GraphQL endpoint; introspection open [live-A §2.1]."
+    - page_kind: index
+      method: POST
+      url_template: "https://api.bezrealitky.cz/graphql/"
+      selection: "ruianId gps{lat lng}"
+      min_interval_s: 4
+      archive: true
+      cadence: "6h index walk"
+      robots_note: "The widened selection costs zero extra HTTP requests [live-A §2.6]."
+    - page_kind: gazetteer
+      method: POST
+      url_template: "https://api.bezrealitky.cz/graphql/"
+      selection: "Region(id){ boundaryGeoJson }"
+      min_interval_s: 10
+      archive: true
+      cadence: "on registry re-baseline; NEVER per listing"
+
+persistence:
+  volatile_paths: [/image_urls, /mainImage, /publicImages]
+  version_cap: 20
+
+exclusion_zones:
+  - locator_kind: description
+    locator: {pattern: "Regus|IWG|globální síť"}
+    reason: >
+      Regus/IWG boilerplate ("globální síť … tisíce poboček") reads as foreign to a naive
+      matcher on Karlín/Nusle listings [mine-bezrealitky finding 5].
+
+precision_caps:
+  ruian_id_present: {granularity_max: address_point, position_source_max: registry_point}
+  ruian_id_absent: {granularity_max: obec, position_source_max: portal_pin}
+
+precision_priors:
+  granularity: address_point     # the one optimistic prior in the fleet, and it rests on
+  position_source: registry_point  # a REGISTRY ID, not on a self-assessment (02 §2.4)
+  granularity_without_ruian: obec
+  match_confidence: medium
+  uncertainty_radius_m: 25       # ASSUMPTION — no measurement in the corpus
+
+regressions:
+  - "1037096 — houseNumber '1208' with an EMPTY street: an unresolvable fragment"
+  - "1048084 — '83 m od autobusové zastávky Klikovka' (the L1 transit-distance case)"
+
+extractions:
+  - id: bzr.det.gps
+    locator_kind: graphql
+    extraction_method: portal_structured_field
+    page_kind: detail
+    locator: {reader: point_pair, lat_pointer: /gps/lat, lon_pointer: /gps/lng}
+    claim_type: coordinate
+    licence_class: portal
+    blur_evidence: none
+    precision_cap: {granularity_max: address_point, position_source_max: portal_pin}
+    prior: {position_source: portal_pin, match_confidence: medium}
+    guards: [reject_outside_cz_bbox]
+    required: when_present
+    notes: "97.4% of 698 sampled active rows have a UNIQUE coordinate — highest of the
+      fleet [live-A §2.5]."
+
+  - id: bzr.det.ruian_id
+    locator_kind: graphql
+    extraction_method: portal_structured_field
+    page_kind: detail
+    locator: {reader: scalar, json_pointer: /ruianId}
+    claim_type: address_point_id
+    licence_class: portal
+    blur_evidence: none
+    prior: {granularity: address_point, position_source: registry_point,
+            match_confidence: high}
+    required: when_present
+    notes: >
+      The RÚIAN adresní místo id — the D4 join spine and "the highest-value miss on any of
+      the three portals" [live-A §2.3]. Populated 4/4 on sampled index rows but NOT in
+      raw_json before W0 #1001, so W1 yield is bounded by the re-drain.
+
+  - id: bzr.det.street
+    locator_kind: graphql
+    extraction_method: portal_structured_field
+    page_kind: detail
+    locator: {reader: scalar, json_pointer: /street}
+    claim_type: street_name
+    licence_class: portal
+    blur_evidence: none
+    prior: {granularity: street}
+    required: when_present
+
+  - id: bzr.det.house_number_cp
+    locator_kind: graphql
+    extraction_method: portal_structured_field
+    page_kind: detail
+    locator: {reader: scalar, json_pointer: /houseNumber}
+    claim_type: house_number_cp
+    transform: ["split_cp_co:cp"]
+    licence_class: portal
+    blur_evidence: none
+    required: when_present
+    notes: "'655/31' is a čp/čo PAIR; both halves are separate claims, never alternatives."
+
+  - id: bzr.det.house_number_co
+    locator_kind: graphql
+    extraction_method: portal_structured_field
+    page_kind: detail
+    locator: {reader: scalar, json_pointer: /houseNumber}
+    claim_type: house_number_co
+    transform: ["split_cp_co:co"]
+    licence_class: portal
+    blur_evidence: none
+    required: when_present
+
+  - id: bzr.det.house_unit
+    locator_kind: graphql
+    extraction_method: portal_structured_field
+    page_kind: detail
+    locator: {reader: scalar, json_pointer: /houseUnit}
+    claim_type: house_unit
+    licence_class: portal
+    blur_evidence: none
+    required: when_present
+
+  - id: bzr.det.zip
+    locator_kind: graphql
+    extraction_method: portal_structured_field
+    page_kind: detail
+    locator: {reader: scalar, json_pointer: /zip}
+    claim_type: psc
+    transform: ["psc_normalise"]
+    licence_class: portal
+    blur_evidence: none
+    required: when_present
+    notes: "Inconsistent within the portal: '19000' vs '154 00' [db-raw §3.2]. The
+      normalised form is the claim; the raw string survives in the payload."
+
+  - id: bzr.det.city
+    locator_kind: graphql
+    extraction_method: portal_structured_field
+    page_kind: detail
+    locator: {reader: scalar, json_pointer: /city}
+    claim_type: obec_name
+    licence_class: portal
+    blur_evidence: none
+    prior: {granularity: obec}
+    required: when_present
+    notes: "DO NOT compose with cityDistrict: `_locality()` joins them and dedupes only on
+      exact equality, producing 'Praha - Praha - Libeň' on 41.2% of active rows
+      [live-A §2.4]."
+
+  - id: bzr.det.city_district
+    locator_kind: graphql
+    extraction_method: portal_structured_field
+    page_kind: detail
+    locator: {reader: scalar, json_pointer: /cityDistrict}
+    claim_type: cast_obce_name
+    licence_class: portal
+    blur_evidence: none
+    prior: {granularity: cast_obce_or_quarter}
+    required: when_present
+    notes: "100% present and survives today only concatenated inside `locality`
+      [db-cov §7.5] — the single biggest W1 yield on this portal."
+
+  - id: bzr.det.address_input
+    locator_kind: graphql
+    extraction_method: portal_structured_field
+    page_kind: detail
+    locator: {reader: scalar, json_pointer: /addressUserInput}
+    claim_type: address_line_verbatim
+    licence_class: portal
+    blur_evidence: none
+    required: when_present
+    notes: "Full reverse-geocoded address incl. okres/kraj/PSČ/country [live-A §2.2]."
+
+  - id: bzr.det.address
+    locator_kind: graphql
+    extraction_method: portal_structured_field
+    page_kind: detail
+    locator: {reader: scalar, json_pointer: /address}
+    claim_type: address_line_verbatim
+    licence_class: portal
+    blur_evidence: none
+    on_conflict: emit_both
+    required: when_present
+
+  # ---- declared; require the widened query and a list reader (W1v / W2) ----
+
+  - id: bzr.det.region_tree
+    locator_kind: graphql
+    extraction_method: portal_structured_field
+    page_kind: detail
+    locator: {json_pointer: /regionTree}
+    claim_type: portal_admin_id
+    cardinality: many
+    licence_class: portal
+    blur_evidence: none
+    required: best_effort
+    notes: "Full hierarchy with ancestor path (idPath) [live-A §2.2]."
+
+  - id: bzr.det.region_tree_osm
+    locator_kind: graphql
+    extraction_method: portal_structured_field
+    page_kind: detail
+    locator: {json_pointer: "/regionTree/*/osmId"}
+    claim_type: osm_relation_id
+    cardinality: many
+    licence_class: odbl
+    blur_evidence: none
+    required: best_effort
+    notes: "ODbL follows the geometry, not the republisher (02 §2.1.9)."
+
+  - id: bzr.det.breadcrumbs
+    locator_kind: graphql
+    extraction_method: portal_structured_field
+    page_kind: detail
+    locator: {json_pointer: /breadcrumbs}
+    claim_type: portal_admin_id
+    cardinality: many
+    licence_class: portal
+    blur_evidence: none
+    required: best_effort
+
+  - id: bzr.det.poi_data
+    locator_kind: graphql
+    extraction_method: portal_structured_field
+    page_kind: detail
+    locator: {json_pointer: /poiData}
+    claim_type: poi_distance
+    cardinality: many
+    licence_class: portal
+    blur_evidence: none
+    required: best_effort
+    notes: "'[]' on the sampled advert; shape unknown [live-A §2.2]."
+
+  - id: bzr.gaz.region_boundary
+    locator_kind: graphql
+    extraction_method: portal_structured_field
+    page_kind: gazetteer
+    locator: {json_pointer: /boundaryGeoJson}
+    claim_type: admin_polygon
+    cardinality: many
+    licence_class: portal
+    blur_evidence: none
+    required: best_effort
+    notes: "A FREE admin-polygon feed. Query the regions once, cacheable, never per
+      listing [live-A §2.2, §2.6]."
+
+  - id: bzr.desc.transit_distance
+    locator_kind: description
+    extraction_method: llm_text
+    page_kind: detail
+    locator: {scope: scoped_payload}
+    claim_type: relative_distance
+    cardinality: many
+    licence_class: portal
+    blur_evidence: none
+    required: best_effort
+    notes: >
+      The ONLY sanctioned LLM use on this portal (03 L1): "pouhých 83 m … od autobusové
+      zastávky Klikovka" pins the building to ~50 m against the existing transit_lines
+      mirror [mine-syn §4.1]. Evidence-bearing, so it cannot run before W2a gives spans a
+      retrievable document.

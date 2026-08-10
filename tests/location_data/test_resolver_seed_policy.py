@@ -134,7 +134,7 @@ def test_a_sreality_portal_pin_listing_resolves_under_the_shipped_seed():
 def test_every_survivorship_field_has_a_v1_policy_row():
     """S7 arbitrates thirteen fields; the 383 seed covered ten. A field with no policy row
     is not "unranked" — `_best_policy` returns None, so the claim is skipped and the column
-    is structurally always NULL. Migration 387 adds the five."""
+    is structurally always NULL. Migration 388 adds the five."""
     seeded = mm.v1_field_policy_fields()
     missing = sorted(set(SURVIVORSHIP_FIELDS) - seeded)
     assert not missing, (

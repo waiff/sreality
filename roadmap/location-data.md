@@ -130,15 +130,68 @@ is the tie-breaker). This track records sequencing + shipped state only.
   1e-5° cell grid with 3×3 expansion (no h3 on this instance). Still to run: dispatch it
   to completion before the first claim is written.
 
-## Standing decisions
+### PR-D — portal contracts as data + the claims-intake extractor
 
-- The Mapy remediation ladder (R2 inventory → R3 re-resolve → R4 purge) is W1–W4
-  work; the R2 evidence inventory is a W1 INPUT (first claim must not be written
-  before it exists).
-- W0 discipline held: no new precision columns on `listings`; precision signals ride
-  in raw_json / archived pages until the claims spine exists.
+Shipped (shadow-only; nothing reads these tables yet):
 
-## W1 PR-E — the resolver, the projections and the collision epoch (shipped)
+- `contracts/portals/<portal>.yaml` × 9 — the declarative contracts of 02 §2.1/§2.2, with
+  the permanent extractor-id prefixes (`sr. bzr. bzs. id. mm. rx. cr. rm. mx.`), the §2.4
+  caps/priors and the §2.5 exclusion-zone register. The full contract is declared,
+  including the W2 html/map/slug surfaces; only entries naming a `locator.reader` are
+  executable by W1.
+- `location_data/contracts.py` — YAML → `portal_contracts` + `portal_contract_entries`
+  deploy-time projection, idempotent per `contract_version`, refusing a changed body under
+  a loaded version, plus the §2.1.8 retraction path. Git stays the store of record.
+- `location_data/claims_intake.py` — the batched extractor over `listings.raw_json` for all
+  nine sources: keyset pagination, 10–30k batches, watermark-incremental and re-runnable
+  full mode, one `location_claim_batches` row per run, `dirty_locations` enqueued inside
+  the claim-insert statement.
+- **Migration 386** `location_claim_fingerprint()` — 01 §4.2.1's tuple as ONE named
+  IMMUTABLE function, so W2's re-mine, W3's snapshot backfill and the LLM lane reuse the
+  definition instead of re-transcribing it. `claim_fingerprint` carries a UNIQUE index on
+  an append-only table: a second transcription would not conflict, it would insert.
+- **Migration 387** the resume cursor on `location_claim_batches` (`scan_mode`,
+  `cursor_after_id/ts`, `coverage_since`, `resumable`, outcome `'stopped'`). `'ok'` now
+  means exactly "the scan ran out of rows"; a budget-stopped run stamps `'stopped'`, which
+  the watermark query cannot see. Before this a 30k-row budgeted run over a 650k-row table
+  moved the incremental floor past 620k rows it never opened — permanently for the ~270k
+  delisted ones, whose `last_seen_at` will never move again.
+- `.github/workflows/location_claims_intake.yml` — dispatch + hourly incremental cron on
+  its own `location-claims` concurrency group; every run re-projects the contracts first.
+
+Decisions worth carrying forward:
+
+- **The licence ladder is stronger than `carry_forward`.** W1's blocking gate is
+  `claims JOIN <R2 inventory> WHERE claim_type='coordinate'` = 0, so presence in
+  `mapy_affected` vetoes a coordinate on **every** substrate, including the three portals
+  whose pin is first-party payload. The lane refuses to start unless that inventory is
+  TERMINAL AND COMPLETE — a `resumable` run at `status='completed'` in the current
+  `restart_epoch`, not merely `count(*) > 0`. A half-built inventory is worse than none:
+  every listing past its high-water mark reads as *absent*, which is precisely the verdict
+  that admits a Mapy-derived `carry_forward` coordinate as first-party.
+- **`claim_fingerprint` is computed in SQL**, from the same `location_value_norm()` the
+  column uses. PostgreSQL's `unaccent` is a dictionary (ß→ss, ø→o, đ→d …) and a Python NFKD
+  mirror drifts on exactly the foreign-address cohort — drift there means the unique index
+  stops deduping, silently, in an append-only table. A diagnostic mirror + a parity battery
+  keep the divergence documented.
+- **W1 runs no evidence-bearing method.** `regex_text` / `llm_text` entries are declared but
+  unexecuted until W2a's content-addressed payload store makes a span re-verifiable.
+- Withheld coordinates and unreadable payloads are recorded, never silent: a class-E row
+  gets a `location_claim_absences` row, and sreality's legacy-shape / 80 KB-truncated rows
+  are routed to `location_enrichment_state(lane='sreality_detail_refetch')`.
+
+- **Legacy entries never burn a permanent extractor id.** 02 §2.2.3 fixes
+  `bzs.det.psc` / `bzs.det.link_pin` on the W2 *HTML* parses; the raw_json/`listings.geom`
+  mirrors of the same facts ship as `bzs.det.legacy_psc` / `bzs.det.legacy_link_pin` (the
+  pattern `id.det.legacy_pin` set on idnes), so the two provenances stay distinguishable
+  in `location_claims.extractor_id` when W2 lands.
+
+Open: the per-portal frozen labelled samples of §6.4.0, which gate whether each contract
+resolves or stays in shadow. Closed in this round: the fingerprint is now migration 386's
+`location_claim_fingerprint()`, and `location_data` is in `tests/sql_corpus.RUNTIME_DIRS`
+(so the offline placeholder guard and the CI PREPARE sweep both cover the package).
+
+### PR-E — the resolver, the projections and the collision epoch
 
 `location_data/resolver/` — S1–S9 as a **pure function** plus the three jobs that feed it.
 
@@ -166,7 +219,7 @@ is the tie-breaker). This track records sequencing + shipped state only.
   projection was built from, and scoped to the rules the run actually EVALUATED (a rule
   whose guard never ran did not stop firing; it was not asked).
 
-Review remediation, same PR (migration **387**, additive):
+Review remediation, same PR (migration **388**, additive):
 
 - **A `declared_shape` policy row with no declared shape DEGRADES, it never raises.** With
   the shipped v1 seed every sreality portal-pin listing resolving at `obec` /
@@ -191,7 +244,7 @@ Review remediation, same PR (migration **387**, additive):
   in the epoch classifier, the S6 cap and S9; the queue slice orders by
   `(enqueued_at, listing_id)`; the survivorship sort key uses the canonical UTC convention
   rather than `datetime.timestamp()` on a naive value.
-- **Migration 387**: `listing_location_current.position_quality_class` +
+- **Migration 388**: `listing_location_current.position_quality_class` +
   `collision_epoch_id` (03 §3.10's two change requests — the builder computed both and the
   writer popped them), and the five `location_field_policy` v1 rows S7 arbitrates but the
   383 seed never had (`evidencni`, `postal_town`, `development_name`,
@@ -202,3 +255,11 @@ Open against the schema: `ruian_admin_unit_geometries.purpose` does not admit `'
 (04 C4.3 wants the subdivided geometries; the resolver prefers `'pip'` and degrades to
 `'authoritative'`); `location_uncertainty_policy` has no seed row for a pin capped to an
 admin rung, which the lookup resolves to the unit's own area bound.
+
+## Standing decisions
+
+- The Mapy remediation ladder (R2 inventory → R3 re-resolve → R4 purge) is W1–W4
+  work; the R2 evidence inventory is a W1 INPUT (first claim must not be written
+  before it exists).
+- W0 discipline held: no new precision columns on `listings`; precision signals ride
+  in raw_json / archived pages until the claims spine exists.
