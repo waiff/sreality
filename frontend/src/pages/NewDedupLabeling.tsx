@@ -21,6 +21,7 @@ import { imageSrc } from '@/lib/imageUrl';
 import { pushToast } from '@/lib/toast';
 import Tabs from '@/components/Tabs';
 import ImageTagBadge from '@/components/ImageTagBadge';
+import ImageLightbox from '@/components/ImageLightbox';
 import Spinner from '@/components/Spinner';
 import TaxonomyManageModal from '@/components/TaxonomyManageModal';
 import LabelCombobox, { type LabelOption } from '@/components/LabelCombobox';
@@ -44,6 +45,13 @@ const STATUS_TABS: ReadonlyArray<{ key: TabKey; label: string }> = [
 ];
 
 type ProposalsPage = { data: NewDedupLabelProposal[] };
+
+/* One key shape for everything the page holds per TILE — the staged tag edit,
+ * the in-flight action, the lightbox position. It is label_proposals' own PK:
+ * one image can carry proposals from several models, and they must never share
+ * a slot. Module scope so the hooks that key on it have a stable dependency. */
+const rowKey = (imageId: number, model: string) => `${imageId}:${model}`;
+const draftKey = (p: NewDedupLabelProposal) => rowKey(p.image_id, p.model);
 
 export default function NewDedupLabeling() {
   const qc = useQueryClient();
@@ -73,10 +81,8 @@ export default function NewDedupLabeling() {
   // in order to keep them out of a batch — otherwise "Confirm selected" would
   // silently write the model's label over the operator's fix. Page-level also
   // survives a background refetch replacing the proposals array mid-edit.
-  // Keyed by (image_id, model), matching label_proposals' own PK: one image
-  // can carry proposals from several models, and they must not share a slot.
+  // Keyed by `draftKey` above.
   const [drafts, setDrafts] = useState<ReadonlyMap<string, string>>(new Map());
-  const draftKey = (p: NewDedupLabelProposal) => `${p.image_id}:${p.model}`;
 
   const proposalsKey = useMemo(() => [...PROPOSALS_KEY, tab, labelFilter], [tab, labelFilter]);
   const proposalsQ = useQuery({
@@ -118,9 +124,35 @@ export default function NewDedupLabeling() {
     });
   }, [imagesQ.data]);
 
+  /* The review grid doubles as a gallery: clicking a tile enlarges it in the
+   * SHARED ImageLightbox (the same modal /clip-audit and listing detail open)
+   * and the arrow keys walk the rest of the grid from there — judging a tag
+   * usually needs the photo bigger than a four-up tile. Parallel to
+   * `proposals`, minus rows whose photo hasn't arrived yet (nothing to
+   * enlarge), so one position is one TILE, not one image: two models'
+   * proposals on the same photo are two stops, exactly as they are two tiles,
+   * and each stop can therefore carry its own proposed tag. */
+  const gallery = useMemo(
+    () =>
+      proposals.flatMap((p) => {
+        const image = imageCache.get(p.image_id);
+        return image ? [{ key: draftKey(p), image, proposal: p }] : [];
+      }),
+    [proposals, imageCache],
+  );
+  const galleryImages = useMemo(() => gallery.map((g) => g.image), [gallery]);
+  const galleryIndex = useMemo(
+    () => new Map(gallery.map((g, i) => [g.key, i])),
+    [gallery],
+  );
+  const [lightboxAt, setLightboxAt] = useState<number | null>(null);
+
   useEffect(() => {
     setSelected(new Set());
     setDrafts(new Map());
+    // The modal is a view OF the current grid — a new grid invalidates the
+    // position it was opened at.
+    setLightboxAt(null);
   }, [tab, labelFilter]);
   useEffect(() => {
     const ids = new Set(imageIds);
@@ -305,7 +337,6 @@ export default function NewDedupLabeling() {
 
   // --- proposal review ------------------------------------------------------
 
-  const rowKey = (imageId: number, model: string) => `${imageId}:${model}`;
   const beginAction = (imageId: number, model: string) =>
     setPendingRowKeys((prev) => new Set(prev).add(rowKey(imageId, model)));
   const endAction = (imageId: number, model: string) =>
@@ -687,6 +718,7 @@ export default function NewDedupLabeling() {
               // training set, or dismissed — recedes, so the bright tiles are
               // exactly what's still waiting on the operator.
               dimmed={tab === 'all' && (p.trained_label != null || p.status !== 'pending')}
+              onOpen={() => setLightboxAt(galleryIndex.get(draftKey(p)) ?? null)}
               onConfirm={(label) => {
                 beginAction(p.image_id, p.model);
                 confirmMut.mutate({
@@ -713,6 +745,27 @@ export default function NewDedupLabeling() {
           ))}
         </div>
       </section>
+
+      {lightboxAt != null && (
+        <ImageLightbox
+          images={galleryImages}
+          startIndex={lightboxAt}
+          onClose={() => setLightboxAt(null)}
+          // In "New tag" mode the tiles badge the PROPOSED tag, not the image
+          // row's own CLIP call — the enlarged photo has to say the same thing
+          // or the modal would quietly contradict the grid it was opened from.
+          // In "Original tag" mode that call IS the badge, which is the
+          // lightbox's own default.
+          tagAt={
+            showOriginal
+              ? undefined
+              : (i) => ({
+                  tag: gallery[i]?.proposal.label ?? null,
+                  confidence: gallery[i]?.proposal.confidence ?? null,
+                })
+          }
+        />
+      )}
     </div>
   );
 }
@@ -924,6 +977,7 @@ function ProposalTile({
   onDraftChange,
   corrected,
   dimmed,
+  onOpen,
   onConfirm,
   onDismiss,
   onRelabel,
@@ -942,6 +996,8 @@ function ProposalTile({
   onDraftChange: (label: string) => void;
   corrected: boolean;
   dimmed: boolean;
+  /** Enlarge this tile's photo in the page's lightbox. */
+  onOpen: () => void;
   onConfirm: (label: string) => void;
   onDismiss: () => void;
   onRelabel: (label: string) => void;
@@ -979,13 +1035,22 @@ function ProposalTile({
             aria-label="Select for batch action"
           />
         )}
+        {/* The badge below is pointer-events-none, so this hit area covers the
+          * whole photo including it; the checkbox sits above on z-10. */}
         {image && (
-          <img
-            src={imageSrc(image)}
-            alt=""
-            loading="lazy"
-            className="absolute inset-0 h-full w-full object-cover"
-          />
+          <button
+            type="button"
+            onClick={onOpen}
+            aria-label={`Open photo ${image.id}`}
+            className="absolute inset-0 block h-full w-full cursor-zoom-in focus:outline-none focus-visible:border focus-visible:border-[var(--color-copper)]"
+          >
+            <img
+              src={imageSrc(image)}
+              alt=""
+              loading="lazy"
+              className="h-full w-full object-cover"
+            />
+          </button>
         )}
         <ImageTagBadge
           tag={badgeTag}

@@ -119,6 +119,32 @@ Session handoff points marked ⛳ (good places to end a session; update the ledg
 
 ## Progress ledger (update every session, newest first)
 
+- 2026-08-10 — **Labeling page: click a tile to enlarge it** (operator request, pointing at
+  /clip-audit as the model). Reuses the SHARED `ImageLightbox` — the one full-screen photo modal
+  behind listing detail's gallery and /clip-audit — rather than a second one-off, so keyboard nav,
+  the scroll lock and the badge treatment stay identical across the app. A four-up tile is too
+  small to judge a room tag on; the modal's arrow keys then walk the rest of the grid without
+  going back to it.
+  - **The gallery is parallel to the TILES, not to the images**: a position is one proposal row,
+    so two models' proposals on the same photo are two stops (exactly as they are two tiles) and
+    each stop carries its own proposed tag. Tiles whose photo hasn't arrived yet are skipped, so
+    the index handed to the modal is a position in that gallery and never in `proposals` — a
+    pinned regression, since the two lists differ precisely while images are still streaming in.
+  - **The modal must never contradict the tile it was opened from.** The grid's default view
+    badges the *proposed* tag, which `images_public` knows nothing about, so `ImageLightbox` gained
+    an optional `tagAt(index)` override; on "Original tag" it is omitted and the lightbox's own
+    default (the image row's CLIP call) is already right. Deliberately an override rather than
+    synthesising an `ImagePublic` with the label swapped in — a row must not claim CLIP predicted
+    something it didn't.
+  - Also in the shared component: the position is now **clamped** to the array. The grid behind can
+    shrink (a reviewed tile leaving its tab), and an out-of-range index rendered nothing at all
+    while the dialog kept holding the page's scroll lock. First real `ImageLightbox.test.tsx`
+    (5 tests) pins that plus nav/Escape/badge; both new behaviours were verified to go red when
+    reverted.
+  - Housekeeping: `rowKey`/`draftKey` were the same string built two ways — now one module-scope
+    helper (also what lets the gallery memo drop an `exhaustive-deps` suppression). `cursor-zoom-in`
+    on all three thumbnail surfaces that open the modal, so the affordance reads the same app-wide.
+  - Suites: `vitest run` 513 passed (48 files), `tsc --noEmit` + `eslint` clean.
 - 2026-08-07 (part 2) — **Labeling page review ergonomics** (operator request, four edits): a
   collapsible taxonomy chart, filtering the grid by tag + filtering the tag list by how much
   training data it already has, an **All** tab alongside pending/confirmed/dismissed, and — the
