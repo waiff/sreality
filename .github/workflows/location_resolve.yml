@@ -7,7 +7,8 @@ name: "Location: resolve"
 #   mode=drain         `location_resolve_incremental` — claims dirty_locations in bounded
 #                      slices (FOR UPDATE SKIP LOCKED), resolves S1-S9 and rebuilds the
 #                      projection row in the SAME transaction. Runs every 15 minutes; judge
-#                      the queue by oldest-row AGE, not by length.
+#                      the queue by oldest-row AGE, not by length. The run measures itself:
+#                      every batch logs `BATCH n=… rate=…/s` and the phase split.
 #   mode=epoch         `pin_collision_recompute` — mints a NEW immutable pin_cluster_epochs
 #                      row plus its pin_clusters, then enqueues only the listings whose
 #                      bucket changed. An epoch that never advances silently freezes
@@ -18,9 +19,17 @@ name: "Location: resolve"
 #
 # Both jobs take a lease-row CAS on location_jobs, never a session advisory lock (a lock
 # taken on one transaction-pooler backend and released on another strands), and the
-# concurrency group below is the second guard.
+# concurrency group below is the second guard. The CAS is correct on either pooler mode,
+# which is why the drain can take the SESSION pooler for its prepared-statement throughput.
 #
-# Required secret: SUPABASE_DB_URL.
+# The two budgets are deliberately different. The `*/15` CRON keeps a 600 s budget so a tick
+# always finishes well inside its own cadence; a DISPATCH defaults to 2400 s, which is the
+# corpus-shaped setting (the queue is worked down by dispatching, not by waiting for cron).
+# `timeout-minutes` has to stay above the largest budget plus checkout/install, or the job is
+# killed mid-batch and the slice's rows come back on the next tick.
+#
+# Required secrets: SUPABASE_DB_URL, SUPABASE_DB_SESSION_URL (the session-mode pooler the
+# drain's hot loop wants — without it the drain still runs, several times slower, and says so).
 
 on:
   workflow_dispatch:
@@ -35,14 +44,14 @@ on:
           - epoch
           - full-resolve
       max_seconds:
-        description: "drain budget in seconds (drain / full-resolve)"
+        description: "drain budget in seconds (drain / full-resolve); cron uses 600"
         required: false
-        default: "600"
+        default: "2400"
         type: string
       batch_size:
-        description: "listings claimed per slice"
+        description: "listings claimed per slice (one transaction — bigger is not better)"
         required: false
-        default: "50"
+        default: "250"
         type: string
       sources:
         description: "epoch mode: comma-separated portals; blank = every source"
@@ -68,7 +77,7 @@ concurrency:
 jobs:
   resolve:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     permissions:
       contents: read
     env:
@@ -76,7 +85,7 @@ jobs:
       SUPABASE_DB_SESSION_URL: ${{ secrets.SUPABASE_DB_SESSION_URL }}
       MODE: ${{ inputs.mode || 'drain' }}
       MAX_SECONDS: ${{ inputs.max_seconds || '600' }}
-      BATCH_SIZE: ${{ inputs.batch_size || '50' }}
+      BATCH_SIZE: ${{ inputs.batch_size || '250' }}
       SOURCES: ${{ inputs.sources }}
       DRY_RUN: ${{ inputs.dry_run }}
     steps:

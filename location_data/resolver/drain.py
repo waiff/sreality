@@ -21,6 +21,39 @@ Batch discipline (03 §3.14.3, learned three times):
 * resumable by construction: the queue IS the cursor, and a failed row comes back with a
   backoff rather than blocking the slice.
 
+Throughput discipline (measured, not assumed — the first production drain did ~3 s per
+listing, i.e. ~28 h for the 34 k queue and ~23 days for the ~650 k corpus). The cost is
+POOLER ROUND TRIPS — ~35 per listing: 16 registry lookups from the core and the reconciler,
+plus ~19 reads and writes here — not CPU. So all four levers attack round trips, and every one
+of them is I/O-layer only: the pure core's inputs and answers are unchanged, so deterministic
+replay stays bit-for-bit. A warm listing now costs ~11.
+
+1. **`connect_session()`**, the repo's hot-loop pattern (`scraper/main.py:_run_full`): the
+   SESSION-mode pooler gives a dedicated backend, so psycopg3's default `prepare_threshold`
+   applies and the ~40 recurring statements are server-side prepared once instead of parsed
+   and planned per listing. Falls back to the transaction pooler, loudly, without the secret.
+2. **Corpus constants are loaded ONCE per run** — policies, constants, granularity ranks, the
+   current registry version and the epoch — and the registry/collision views are memoized for
+   the run (`resolve_db.RunCache`), because both mirrors are immutable at the pinned version.
+3. **Per-slice prefetch** of everything a listing needs BEFORE it writes anything (claims,
+   previous consumed inputs, `listings.property_id`, open findings): four queries per slice
+   instead of four per listing. `location_disputed` is deliberately NOT prefetched — it is a
+   read-your-writes read of the contradictions this run just wrote.
+4. **`executemany`** for the per-candidate / per-detection / per-disposition writers.
+
+No `--workers`: a second connection could claim a disjoint slice safely (`FOR UPDATE SKIP
+LOCKED`), but two workers holding two listings of the SAME property would race
+`_rebuild_property` — each reads the member set, then both write `property_location_current`
+— and a stale read could publish the wrong winner. The property rebuild is the drain's one
+cross-listing write, so the drain stays single-connection until that is designed, not bolted
+on.
+
+The slice is a bounded 250 by default rather than "as large as possible": the batch is ONE
+transaction holding `FOR UPDATE` locks on its `dirty_locations` rows, and the claims-intake
+enqueue (`ON CONFLICT (listing_id) DO NOTHING`) blocks on a locked row, so the slice's
+duration is a latency budget for the intake. Beyond ~200 the per-batch fixed cost is already
+under 1 % — a bigger slice buys nothing and lengthens that window.
+
 CLI:  python -m location_data.resolver.drain [--max-seconds N] [--batch-size N]
                                              [--listing-id N] [--dry-run]
 """
@@ -29,15 +62,16 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import psycopg
 
 from location_data.resolver import core, lease, normalize, projection, reconciler, resolve_db
-from location_data.resolver.types import ResolverContext
+from location_data.resolver.types import Claim, ResolverContext
 from location_data.resolver.version import (
     POLICY_VERSION_DEFAULT,
     RECONCILER_VERSION,
@@ -49,7 +83,7 @@ LOG = logging.getLogger("location_data.resolver.drain")
 
 JOB_NAME = "location_resolve_incremental"
 CONCURRENCY_GROUP = "location-resolve"
-DEFAULT_BATCH = 50
+DEFAULT_BATCH = 250
 DEFAULT_MAX_SECONDS = 600
 BACKOFF_SECONDS = (60, 300, 900, 3600, 21600)
 
@@ -76,8 +110,6 @@ _QUEUE_HEALTH_SQL = """
 SELECT count(*), coalesce(extract(epoch from now() - min(enqueued_at)), 0)
   FROM dirty_locations
 """
-
-_PROPERTY_OF_SQL = "SELECT property_id FROM listings WHERE id = %s"
 
 _PROPERTY_MEMBERS_SQL = """
 SELECT listing_id, source, ST_Y(geom), ST_X(geom), granularity::text, position_source::text,
@@ -115,6 +147,34 @@ class DrainStats:
     resolved: int = 0
     failed: int = 0
     batches: int = 0
+    # Phase timings, so the NEXT production run measures itself instead of being re-diagnosed.
+    prefetch_seconds: float = 0.0
+    core_seconds: float = 0.0
+    write_seconds: float = 0.0
+    seconds: float = 0.0
+
+    @property
+    def rate(self) -> float:
+        return 0.0 if self.seconds <= 0 else self.claimed / self.seconds
+
+
+@dataclass(slots=True)
+class _Slice:
+    """Everything the slice's listings need that can be read BEFORE any of them writes."""
+
+    claims: dict[int, list[Claim]] = field(default_factory=dict)
+    previous_inputs: dict[int, tuple[str, int, str, int]] = field(default_factory=dict)
+    property_ids: dict[int, int | None] = field(default_factory=dict)
+    open_keys: dict[int, tuple[tuple[str, str], ...]] = field(default_factory=dict)
+
+
+def _prefetch(conn: psycopg.Connection, listing_ids: list[int]) -> _Slice:
+    return _Slice(
+        claims=resolve_db.load_claims_bulk(conn, listing_ids),
+        previous_inputs=resolve_db.previous_consumed_inputs_bulk(conn, listing_ids),
+        property_ids=resolve_db.property_ids_bulk(conn, listing_ids),
+        open_keys=resolve_db.open_dedupe_keys_bulk(conn, listing_ids),
+    )
 
 
 def run(
@@ -126,6 +186,9 @@ def run(
     dry_run: bool = False,
     only_listing_id: int | None = None,
 ) -> DrainStats:
+    # Corpus constants: read ONCE for the run, never per listing. Everything here is either
+    # pinned by version (registry, epoch) or a small operator-curated table, so a re-read per
+    # listing would buy nothing and cost a round trip each.
     registry_version_id, registry_label = resolve_db.current_registry_version(conn)
     epoch_id = resolve_db.current_epoch(conn)
     if epoch_id is None:
@@ -133,7 +196,8 @@ def run(
             "no pin_cluster_epochs row: mint one with `python -m location_data.resolver."
             "epoch_job` first — collision_epoch_id is NOT NULL and part of the identity"
         )
-    ctx_base = _context(conn, registry_version_id, epoch_id, policy_version)
+    cache = resolve_db.RunCache()
+    ctx_base = _context(conn, registry_version_id, epoch_id, policy_version, cache)
     stats = DrainStats()
     started = time.monotonic()
 
@@ -141,14 +205,18 @@ def run(
         with conn.transaction():
             _resolve_one(
                 conn, only_listing_id, ctx_base, registry_version_id, registry_label,
-                epoch_id, policy_version, dry_run=dry_run,
+                epoch_id, policy_version, _prefetch(conn, [only_listing_id]), stats,
+                dry_run=dry_run,
             )
             stats.claimed = stats.resolved = 1
+        stats.seconds = time.monotonic() - started
         return stats
 
     while time.monotonic() - started < max_seconds:
         depth, oldest = _queue_health(conn)
         LOG.info("QUEUE depth=%d oldest_age_s=%.0f", depth, oldest)
+        batch_started = time.monotonic()
+        batch_before = (stats.resolved, stats.failed)
         with conn.transaction():
             with conn.cursor() as cur:
                 for statement in _BATCH_GUC:
@@ -159,13 +227,17 @@ def run(
                 LOG.info("QUEUE empty")
                 break
             stats.batches += 1
+            prefetch_started = time.monotonic()
+            slice_ = _prefetch(conn, [int(listing_id) for listing_id, _ in rows])
+            stats.prefetch_seconds += time.monotonic() - prefetch_started
             for listing_id, attempts in rows:
                 stats.claimed += 1
                 try:
                     with conn.transaction():  # SAVEPOINT: one bad row, one bad row
                         _resolve_one(
                             conn, int(listing_id), ctx_base, registry_version_id,
-                            registry_label, epoch_id, policy_version, dry_run=dry_run,
+                            registry_label, epoch_id, policy_version, slice_, stats,
+                            dry_run=dry_run,
                         )
                         if not dry_run:
                             with conn.cursor() as cur:
@@ -177,23 +249,54 @@ def run(
                     backoff = BACKOFF_SECONDS[min(int(attempts), len(BACKOFF_SECONDS) - 1)]
                     with conn.cursor() as cur:
                         cur.execute(_FAIL_ROW_SQL, (str(exc)[:500], backoff, listing_id))
+        _log_batch(stats, cache, len(rows), batch_before, time.monotonic() - batch_started)
+    stats.seconds = time.monotonic() - started
     LOG.info(
-        "DRAIN done batches=%d claimed=%d resolved=%d failed=%d",
-        stats.batches, stats.claimed, stats.resolved, stats.failed,
+        "DRAIN done batches=%d claimed=%d resolved=%d failed=%d %.1fs rate=%.1f/s "
+        "prefetch=%.1fs core=%.1fs write=%.1fs registry_q=%d registry_hit=%.0f%%",
+        stats.batches, stats.claimed, stats.resolved, stats.failed, stats.seconds,
+        stats.rate, stats.prefetch_seconds, stats.core_seconds, stats.write_seconds,
+        cache.misses, 100.0 * cache.hit_rate,
     )
     return stats
 
 
+def _log_batch(
+    stats: DrainStats,
+    cache: resolve_db.RunCache,
+    n: int,
+    before: tuple[int, int],
+    elapsed: float,
+) -> None:
+    """Per-batch self-measurement: the next production run reports its own listings/s and
+    where the time went, so nobody has to re-derive it from log timestamps."""
+    LOG.info(
+        "BATCH n=%d ok=%d fail=%d %.1fs rate=%.1f/s cum(prefetch=%.1fs core=%.1fs "
+        "write=%.1fs) registry_q=%d registry_hit=%.0f%% registry_wait=%.1fs",
+        n, stats.resolved - before[0], stats.failed - before[1], elapsed,
+        0.0 if elapsed <= 0 else n / elapsed, stats.prefetch_seconds, stats.core_seconds,
+        stats.write_seconds, cache.misses, 100.0 * cache.hit_rate, cache.seconds,
+    )
+
+
 def _context(
-    conn: psycopg.Connection, registry_version_id: int, epoch_id: int, policy_version: str
+    conn: psycopg.Connection,
+    registry_version_id: int,
+    epoch_id: int,
+    policy_version: str,
+    cache: resolve_db.RunCache,
 ) -> ResolverContext:
     return ResolverContext(
-        registry=resolve_db.SqlRegistryView(conn, registry_version_id),
+        registry=resolve_db.CachedRegistryView(
+            resolve_db.SqlRegistryView(conn, registry_version_id), cache
+        ),
         constants=resolve_db.load_constants(conn),
         field_policy=resolve_db.load_field_policy(conn, policy_version),
         uncertainty_policy=resolve_db.load_uncertainty_policy(conn, policy_version),
         collision_policy=resolve_db.load_collision_policy(conn, policy_version),
-        collision=resolve_db.SqlCollisionEvidence(conn, epoch_id),
+        collision=resolve_db.CachedCollisionEvidence(
+            resolve_db.SqlCollisionEvidence(conn, epoch_id), cache
+        ),
         granularity_rank=resolve_db.load_granularity_rank(conn),
     )
 
@@ -206,13 +309,16 @@ def _resolve_one(
     registry_label: str,
     epoch_id: int,
     policy_version: str,
+    slice_: _Slice,
+    stats: DrainStats,
     *,
     dry_run: bool,
 ) -> None:
-    claims = resolve_db.load_claims(conn, listing_id)
+    claims = slice_.claims.get(listing_id, [])
     if not claims:
         LOG.info("RESOLVE skip listing_id=%s reason=no_claims", listing_id)
         return
+    core_started = time.monotonic()
     resolution = core.resolve(
         claims,
         ctx,
@@ -221,6 +327,7 @@ def _resolve_one(
         policy_version=policy_version,
         collision_epoch_id=epoch_id,
     )
+    stats.core_seconds += time.monotonic() - core_started
     if dry_run:
         LOG.info(
             "RESOLVE dry listing_id=%s status=%s granularity=%s hash=%s",
@@ -229,18 +336,27 @@ def _resolve_one(
         )
         return
 
-    # Read BEFORE the write: the projection still points at the resolution this listing was
-    # last served from, which is what `inputs_changed` compares against.
-    previous_inputs = resolve_db.previous_consumed_inputs(conn, listing_id)
+    # Prefetched with the slice, which is strictly BEFORE this run rewrote any projection:
+    # the row still points at the resolution this listing was last served from, which is what
+    # `inputs_changed` compares against.
+    previous_inputs = slice_.previous_inputs.get(listing_id)
 
+    write_started = time.monotonic()
     resolution_id = resolve_db.write_resolution(conn, resolution)
     resolve_db.write_candidates(conn, resolution_id, resolution)
+    stats.write_seconds += time.monotonic() - write_started
 
+    core_started = time.monotonic()
     detections, evaluated_rules = reconciler.run_with_coverage(
         resolution, claims, normalize.normalize_all(claims), registry=ctx.registry
     )
-    open_before = resolve_db.open_dedupe_keys(conn, listing_id, rules=evaluated_rules)
-    property_id = _property_of(conn, listing_id)
+    stats.core_seconds += time.monotonic() - core_started
+    open_before = resolve_db.filter_open_keys(
+        slice_.open_keys.get(listing_id, ()), rules=evaluated_rules
+    )
+    property_id = slice_.property_ids.get(listing_id)
+
+    write_started = time.monotonic()
     resolve_db.write_contradictions(
         conn, detections, reconciler_version=RECONCILER_VERSION,
         resolver_version=RESOLVER_VERSION, registry_version_id=registry_version_id,
@@ -252,6 +368,7 @@ def _resolve_one(
             open_before, detections, inputs_changed=_inputs_changed(previous_inputs, resolution)
         ),
     )
+    stats.write_seconds += time.monotonic() - write_started
 
     cluster = (
         ctx.collision.for_point(resolution.source, resolution.position.lat, resolution.position.lon)
@@ -259,6 +376,7 @@ def _resolve_one(
         else None
     )
     threshold = ctx.collision_threshold(resolution.source, resolution.admin.obec_kod).threshold_n
+    write_started = time.monotonic()
     row = projection.build_listing_row(
         resolution,
         property_id=property_id,
@@ -267,11 +385,14 @@ def _resolve_one(
         rank=ctx.granularity_rank,
         cluster=cluster,
         threshold_n=threshold,
+        # NOT prefetched with the slice: this reads back the contradictions THIS listing just
+        # wrote a few statements ago, so a batch-start snapshot would miss a fresh major.
         location_disputed=resolve_db.location_disputed(conn, listing_id),
     )
     resolve_db.upsert_listing_projection(conn, row)
     if property_id is not None:
         _rebuild_property(conn, property_id, ctx)
+    stats.write_seconds += time.monotonic() - write_started
     LOG.info(
         "RESOLVE ok listing_id=%s status=%s granularity=%s blockable=%s blocked_fields=%s",
         listing_id, resolution.status, row["granularity"], row["geo_blockable"],
@@ -293,13 +414,6 @@ def _inputs_changed(
         resolution.policy_version,
         resolution.collision_epoch_id,
     )
-
-
-def _property_of(conn: psycopg.Connection, listing_id: int) -> int | None:
-    with conn.cursor() as cur:
-        cur.execute(_PROPERTY_OF_SQL, (listing_id,))
-        row = cur.fetchone()
-    return None if row is None or row[0] is None else int(row[0])
 
 
 def _rebuild_property(conn: psycopg.Connection, property_id: int, ctx: ResolverContext) -> None:
@@ -341,6 +455,19 @@ def enqueue_full_sweep(conn: psycopg.Connection, *, policy_version: str) -> int:
     return enqueued
 
 
+def open_connection() -> psycopg.Connection:
+    """The hot loop wants a SESSION-mode connection so its ~40 recurring statements get
+    server-side prepared (`scraper/main.py:_run_full` is the same pattern). The transaction
+    pooler still WORKS — `connect_session()` falls back to it — it is just several times
+    slower per listing, so the fallback is announced rather than silent."""
+    if not os.environ.get("SUPABASE_DB_SESSION_URL"):
+        LOG.warning(
+            "SUPABASE_DB_SESSION_URL unset: falling back to the TRANSACTION pooler, where "
+            "prepare_threshold=None forces every statement to be re-parsed per listing"
+        )
+    return db.connect_session()
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="drain dirty_locations (S1-S9 + projection)")
     parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH)
@@ -351,7 +478,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    with db.connect() as conn:
+    with open_connection() as conn:
         with lease.held(
             conn,
             JOB_NAME,
