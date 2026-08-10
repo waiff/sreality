@@ -8,12 +8,14 @@ portals do not serve delisted pages again. Migration 099's header called these r
 substrate for the location re-mine wave, deletion is CI-guarded
 (tests/test_portal_raw_pages_guard.py), and this script keeps an off-database copy.
 
-Chunked and resumable: keyset pagination over id, NDJSON.gz chunks uploaded to
+Chunked by BYTE budget (not row count — index-archive rows can be ~60x wider than
+detail rows), resumable: keyset pagination over id, NDJSON.gz chunks uploaded to
 backups/portal-raw-pages/<snapshot>/, a state.json cursor updated after every chunk,
 and a manifest.json written on completion. Re-dispatching the workflow with the same
-snapshot date resumes where the previous run stopped; a new date starts a fresh full
-export under its own prefix. --verify compares manifest totals against the DB count
-at the recorded snapshot boundary.
+snapshot date resumes where the previous run stopped; a transient R2 error reading
+state.json FAILS the run rather than silently restarting from id 0 (a
+review-confirmed hazard). --verify compares manifest totals against the DB count at
+the recorded snapshot boundary.
 """
 
 from __future__ import annotations
@@ -58,11 +60,27 @@ def _json_default(value: Any) -> str:
     raise TypeError(f"unserializable {type(value)!r}")
 
 
+def _is_not_found(exc: Exception) -> bool:
+    code = getattr(exc, "response", None)
+    if isinstance(code, dict):  # botocore ClientError.response
+        err = (code.get("Error") or {}).get("Code")
+        return err in ("NoSuchKey", "404", "NotFound")
+    return False
+
+
 def _download_json(r2: R2Client, key: str) -> dict[str, Any] | None:
+    """The object as JSON, or None ONLY when it does not exist.
+
+    Any other failure (R2 5xx, throttle, stream reset) propagates: treating a
+    transient read error as "no state yet" would silently restart the 14 GB
+    export from id 0 and overwrite the real resume cursor.
+    """
     try:
         return json.loads(r2.download_bytes(key))
-    except Exception:  # noqa: BLE001 - boto raises ClientError subclasses per backend
-        return None
+    except Exception as exc:  # noqa: BLE001 - filtered to not-found right below
+        if _is_not_found(exc):
+            return None
+        raise
 
 
 def _upload_json(r2: R2Client, key: str, payload: dict[str, Any]) -> None:
@@ -77,12 +95,14 @@ def export(
     db_url: str,
     r2: R2Client | None,
     snapshot: str,
-    batch_rows: int,
+    fetch_rows: int,
+    chunk_mb: int,
     max_chunks: int | None = None,
 ) -> int:
     prefix = f"{PREFIX}/{snapshot}"
     state_key = f"{prefix}/state.json"
     state = _download_json(r2, state_key) if r2 is not None else None
+    chunk_budget = chunk_mb * 1024 * 1024
 
     # prepare_threshold=None: safe on both pooler modes (see the `database` skill);
     # the fallback URL is the transaction-mode pooler, where auto-prepare breaks.
@@ -111,7 +131,39 @@ def export(
             )
 
         chunks_this_run = 0
-        while True:
+        buf: list[bytes] = []
+        buf_bytes = 0
+        buf_rows = 0
+        first_id: int | None = None
+        last_id = int(state["last_exported_id"])
+
+        def flush() -> None:
+            nonlocal buf, buf_bytes, buf_rows, first_id, chunks_this_run
+            if not buf:
+                return
+            body = b"".join(buf)
+            gz = gzip.compress(body)
+            chunk_key = f"{prefix}/chunk-{first_id:010d}-{last_id:010d}.ndjson.gz"
+            LOG.info(
+                "CHUNK %s rows=%d raw=%dB gz=%dB",
+                chunk_key, buf_rows, len(body), len(gz),
+            )
+            if r2 is not None:
+                r2.upload_bytes(chunk_key, gz, content_type="application/gzip")
+            state["chunks"].append(
+                {"key": chunk_key, "rows": buf_rows, "gz_bytes": len(gz)}
+            )
+            state["rows"] += buf_rows
+            state["raw_bytes"] += len(body)
+            state["gz_bytes"] += len(gz)
+            state["last_exported_id"] = last_id
+            if r2 is not None:
+                _upload_json(r2, state_key, state)
+            buf, buf_bytes, buf_rows, first_id = [], 0, 0, None
+            chunks_this_run += 1
+
+        done = False
+        while not done:
             if max_chunks is not None and chunks_this_run >= max_chunks:
                 LOG.info("EXPORT pausing after --max-chunks=%d", max_chunks)
                 return 0
@@ -119,42 +171,35 @@ def export(
                 cur.execute(
                     _SELECT_SQL,
                     {
-                        "after": state["last_exported_id"],
+                        "after": last_id,
                         "boundary": state["boundary_id"],
-                        "limit": batch_rows,
+                        "limit": fetch_rows,
                     },
                 )
                 rows = cur.fetchall()
             if not rows:
-                break
-
-            records = [dict(zip(COLUMNS, row)) for row in rows]
-            body = "\n".join(
-                json.dumps(rec, ensure_ascii=False, default=_json_default)
-                for rec in records
-            ).encode()
-            gz = gzip.compress(body)
-            first_id, last_id = records[0]["id"], records[-1]["id"]
-            chunk_key = f"{prefix}/chunk-{first_id:010d}-{last_id:010d}.ndjson.gz"
-            LOG.info(
-                "CHUNK %s rows=%d raw=%dB gz=%dB",
-                chunk_key,
-                len(records),
-                len(body),
-                len(gz),
-            )
-            if r2 is not None:
-                r2.upload_bytes(chunk_key, gz, content_type="application/gzip")
-            state["chunks"].append(
-                {"key": chunk_key, "rows": len(records), "gz_bytes": len(gz)}
-            )
-            state["rows"] += len(records)
-            state["raw_bytes"] += len(body)
-            state["gz_bytes"] += len(gz)
-            state["last_exported_id"] = last_id
-            if r2 is not None:
-                _upload_json(r2, state_key, state)
-            chunks_this_run += 1
+                done = True
+            for row in rows:
+                rec = dict(zip(COLUMNS, row))
+                # Trailing newline per record: concatenated chunks must
+                # decompress to valid NDJSON (the restore path is the
+                # load-bearing path for a preservation artifact).
+                line = (
+                    json.dumps(rec, ensure_ascii=False, default=_json_default)
+                    + "\n"
+                ).encode()
+                if first_id is None:
+                    first_id = rec["id"]
+                buf.append(line)
+                buf_bytes += len(line)
+                buf_rows += 1
+                last_id = rec["id"]
+                if buf_bytes >= chunk_budget:
+                    flush()
+                    if max_chunks is not None and chunks_this_run >= max_chunks:
+                        LOG.info("EXPORT pausing after --max-chunks=%d", max_chunks)
+                        return 0
+        flush()
 
     state["completed_at"] = datetime.now(timezone.utc).isoformat()
     if r2 is not None:
@@ -187,10 +232,7 @@ def verify(db_url: str, r2: R2Client, snapshot: str) -> int:
     chunk_rows = sum(c["rows"] for c in manifest["chunks"])
     LOG.info(
         "VERIFY snapshot=%s db_rows=%d manifest_rows=%d chunk_sum=%d",
-        snapshot,
-        db_rows,
-        manifest["rows"],
-        chunk_rows,
+        snapshot, db_rows, manifest["rows"], chunk_rows,
     )
     if db_rows != manifest["rows"] or chunk_rows != manifest["rows"]:
         LOG.error("VERIFY MISMATCH — do not treat the archive export as complete")
@@ -205,23 +247,28 @@ def main() -> int:
     parser.add_argument(
         "--snapshot",
         default=f"{datetime.now(timezone.utc):%Y-%m-%d}",
-        help="Snapshot prefix date (default: today UTC); reuse to resume",
+        help="Snapshot prefix date (default: today UTC); reuse to resume. The "
+        "workflow resolves this at dispatch time so a re-run across UTC "
+        "midnight cannot silently start a second full export.",
     )
-    parser.add_argument("--batch-rows", type=int, default=1000)
     parser.add_argument(
-        "--max-chunks",
-        type=int,
-        default=None,
+        "--fetch-rows", "--batch-rows", dest="fetch_rows", type=int, default=200,
+        help="Rows per keyset SELECT (memory-bounded; chunking is by bytes)",
+    )
+    parser.add_argument(
+        "--chunk-mb", type=int, default=48,
+        help="Raw NDJSON bytes per uploaded chunk (gz is ~5-10x smaller)",
+    )
+    parser.add_argument(
+        "--max-chunks", type=int, default=None,
         help="Stop after N chunks this run (resumable); default: run to completion",
     )
     parser.add_argument(
-        "--verify",
-        action="store_true",
+        "--verify", action="store_true",
         help="Compare the snapshot manifest against the DB instead of exporting",
     )
     parser.add_argument(
-        "--dry-run",
-        action="store_true",
+        "--dry-run", action="store_true",
         help="Read + chunk without uploading (no state, not resumable)",
     )
     args = parser.parse_args()
@@ -236,7 +283,7 @@ def main() -> int:
     if args.verify:
         return verify(db_url, R2Client.from_env(), args.snapshot)
     r2 = None if args.dry_run else R2Client.from_env()
-    return export(db_url, r2, args.snapshot, args.batch_rows, args.max_chunks)
+    return export(db_url, r2, args.snapshot, args.fetch_rows, args.chunk_mb, args.max_chunks)
 
 
 if __name__ == "__main__":

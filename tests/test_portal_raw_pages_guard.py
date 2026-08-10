@@ -25,12 +25,19 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 
-_SCAN_DIRS = ("migrations", "scraper", "toolkit", "api", "scripts")
-_SCAN_SUFFIXES = {".sql", ".py"}
+_SCAN_DIRS = (
+    "migrations", "scraper", "toolkit", "api", "scripts", ".github/workflows",
+)
+_SCAN_SUFFIXES = {".sql", ".py", ".yml", ".yaml"}
 
+# Covers DELETE FROM [ONLY], TRUNCATE [TABLE] [ONLY] incl. a multi-table
+# target list, DROP TABLE [IF EXISTS], quoted identifiers, and schema
+# qualification (review-hardened: the first cut required the bare table name
+# to immediately follow the verb).
 _FORBIDDEN = re.compile(
-    r"(?is)\b(?:delete\s+from|truncate(?:\s+table)?(?:\s+only)?|"
-    r"drop\s+table(?:\s+if\s+exists)?)\s+(?:public\.)?portal_raw_pages\b"
+    r"(?is)\b(?:delete\s+from(?:\s+only)?|truncate(?:\s+table)?(?:\s+only)?|"
+    r"drop\s+table(?:\s+if\s+exists)?)\s+[^;()]{0,200}?"
+    r"\"?(?:public\.)?\"?portal_raw_pages\"?\b"
 )
 
 
