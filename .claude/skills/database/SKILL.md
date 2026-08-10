@@ -317,13 +317,17 @@ that don't key on street.
   rebuilt engine's Level 0 blocking reuses it (`docs/design/new-dedup/PROGRAM.md`), so a
   normalizer edit still requires the `backfill_street_name_key.yml all=true` re-key and the weekly
   `street_key_parity.yml` job is still the alarm for forgetting it.
-- **RÚIAN address-point resolver** now covers mmreality, ceskereality, and realitymix (PR #750)
-  in addition to its original portals, gated by `matched_type='regional.address'` — a
-  geocoded street/town *centroid* match must never resolve a street, only an exact address
-  point. realitymix additionally gained a `locality_text`-derived arm (PR #756, its index
-  cards carry no structured address). Backfill (`scripts/backfill_portal_streets.py`) gained
-  `--include-inactive` (PR #758, grouping needs delisted streets too) and now bounds its chunk
-  scans to fixed ID windows (PR #759, avoiding pooler-timeout scans on the full table).
+- **RÚIAN address-point resolver — AUTO-WRITE STOPPED (location-data W0 item 0a).** The
+  coord→street resolver (`scripts/backfill_address_point_streets.py`) no longer runs on a
+  weekly cron and a bare invocation/dispatch is a dry run; writes need the explicit
+  `--write` flag. An LLM mining experiment measured ~11 of ~21 text-checkable
+  resolver-derived streets wrong (2 fabricated street+number pairs on control rows).
+  Already-written `street_source='resolver'` rows stay until the location program's
+  migration wave quarantines them; the trigger rails below still govern them. Historical
+  coverage: mmreality/ceskereality/realitymix added by PR #750, gated by
+  `matched_type='regional.address'`; realitymix `locality_text` arm PR #756. The SEPARATE
+  text-derived backfill (`scripts/backfill_portal_streets.py`, parser-grain, dispatch-only)
+  is unaffected by 0a; it gained `--include-inactive` (PR #758) and fixed ID windows (PR #759).
 - **Location/geocode lifecycle** (migration 288, PR #749): a unified `CoordResolver`
   (`scraper/location.py`) now backs idnes/realitymix/maxima/remax/mmreality/ceskereality —
   four of which had no geocode path before. `geocode_cache` persists negative results (don't

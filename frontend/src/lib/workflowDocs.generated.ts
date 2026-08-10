@@ -3162,19 +3162,25 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
   {
     "filename": "resolve_coord_streets.yml",
     "name": "Jobs - resolve streets from coordinates (RÚIAN)",
-    "description": "Resolves listings.street from a trustworthy per-listing coordinate via the RÚIAN address_points mirror — exact-match only, never a town-center geocode (docs/design/street-coverage-ruian.md). Dispatch-driven (+ weekly catch-up for newly-scraped trustworthy-coord rows). Run `-f calibrate=true` first to pick the tolerance from ground truth. NOT a portal ingest workflow — no `# portal:` tag.",
+    "description": "Resolves listings.street from a trustworthy per-listing coordinate via the RÚIAN address_points mirror — exact-match only, never a town-center geocode (docs/design/street-coverage-ruian.md). Run `-f calibrate=true` first to pick the tolerance from ground truth. NOT a portal ingest workflow — no `# portal:` tag.",
     "portal": null,
     "manual": true,
-    "schedules": [
-      {
-        "cron": "0 5 * * 1",
-        "human": "0 5 * * 1"
-      }
-    ],
+    "schedules": [],
     "onPush": false,
     "onPullRequest": false,
     "paths": null,
     "inputs": [
+      {
+        "name": "write",
+        "description": "DANGER: actually write streets (default is dry-run; see W0 item 0a)",
+        "required": false,
+        "type": "choice",
+        "default": "false",
+        "options": [
+          "false",
+          "true"
+        ]
+      },
       {
         "name": "calibrate",
         "description": "Report same-street distance distribution and exit",

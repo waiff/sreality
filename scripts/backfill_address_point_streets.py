@@ -1,5 +1,14 @@
 """Resolve listings.street from a trustworthy per-listing coordinate via RÚIAN.
 
+AUTO-WRITE STOPPED (location-data program, W0 item 0a): a 108-listing LLM
+mining experiment measured ~11 of ~21 text-checkable resolver-derived streets
+WRONG, including two fabricated street+house-number pairs on rows selected as
+controls. Writes now require the explicit `--write` flag (a bare invocation is
+a dry run) and the weekly cron is removed from resolve_coord_streets.yml. The
+replacement is the location program's claims/resolution pipeline (W1+); already-
+written 'resolver' streets stay in place until that program's migration wave
+quarantines them.
+
 Implements docs/design/street-coverage-ruian.md. For listings that publish NO
 street text but DO carry a precise coordinate, look up the street from the local
 `address_points` mirror. EXACT-MATCH ONLY — a street is assigned only when it is
@@ -12,7 +21,13 @@ The no-estimates discipline (the four design guards):
     * NOT a shared geocode-fallback pin — fewer than `--min-share` active
       listings of the same source on the exact rounded coordinate (a real
       building coordinate is ~unique; a town/quarter geocode is shared by many);
-    * sreality: reject `locality.accuracy = 'not_address'` (municipality-level);
+    * sreality: only building-grain declared precision may resolve a street —
+      `locality.inaccuracy_type IN ('gps','address')`, or the key absent
+      (pre-June-2026 legacy payload shape, which falls to the shared rails).
+      The pre-June-2026 legacy payload shape carried `accuracy` instead —
+      that clause is KEPT (ANDed) so legacy `not_address` rows stay
+      rejected; on current payloads it is vacuous and inaccuracy_type
+      rules (the original current-shape guard was dead — W0 0h finding);
     * geocode-PROVENANCED coords (raw coords.source='geocode', stamped by
       scraper.location / the coords backfills) are eligible only at
       matched_type='regional.address' — a street/town centroid is not a
@@ -116,7 +131,9 @@ _CANDIDATE_SQL = """
       AND st_y(l.geom::geometry) BETWEEN 48.0 AND 51.5
       AND st_x(l.geom::geometry) BETWEEN 12.0 AND 19.0
       AND (%(source)s <> 'sreality'
-           OR l.raw_json->'locality'->>'accuracy' IS DISTINCT FROM 'not_address')
+           OR (l.raw_json->'locality'->>'accuracy' IS DISTINCT FROM 'not_address'
+               AND (l.raw_json->'locality'->>'inaccuracy_type' IS NULL
+                    OR l.raw_json->'locality'->>'inaccuracy_type' IN ('gps', 'address'))))
       AND (l.raw_json->'coords'->>'source' IS DISTINCT FROM 'geocode'
            OR l.raw_json->'coords'->>'matched_type' = 'regional.address')
       AND (%(force)s
@@ -377,8 +394,13 @@ def main() -> int:
     parser.add_argument("--limit", type=int, default=200000,
                         help="Max candidates processed per source this run.")
     parser.add_argument("--max-seconds", type=float, default=None)
+    parser.add_argument("--write", action="store_true",
+                        help="Actually write streets. Without it every run is a dry run "
+                             "(W0 item 0a: the auto-write is stopped; see module docstring).")
     parser.add_argument("--dry-run", action="store_true",
-                        help="Match but write nothing (report matched/ambiguous/nomatch).")
+                        help="Match but write nothing (report matched/ambiguous/nomatch). "
+                             "Redundant since 0a: this is already the default; kept so "
+                             "existing invocations stay valid.")
     parser.add_argument("--force-rescan", action="store_true",
                         help="Re-attempt every candidate regardless of its stamp (use after tuning).")
     parser.add_argument("--calibrate-n", type=int, default=20000)
@@ -396,6 +418,10 @@ def main() -> int:
     sources = (args.source,) if args.source else _SOURCES
     start = time.monotonic()
     deadline = start + args.max_seconds if args.max_seconds else None
+
+    dry_run = args.dry_run or not args.write
+    if dry_run and not args.dry_run:
+        LOG.info("DRY RUN (default since W0 item 0a) — pass --write to persist streets")
 
     # A run that deviates from the calibrated defaults is re-testing the guards,
     # so it must bypass the stamp or it would silently no-op on exactly the rows
@@ -416,7 +442,7 @@ def main() -> int:
             if deadline is not None and time.monotonic() > deadline:
                 break
             res = resolve_source(conn, source, args.tolerance, args.limit, version,
-                                 force, reject, deadline, args.dry_run)
+                                 force, reject, deadline, dry_run)
             for k in totals:
                 totals[k] += res[k]
     LOG.info("RESOLVE all-done matched=%d ambiguous=%d nomatch=%d town_pins=%d stamped=%d",
