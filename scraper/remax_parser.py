@@ -174,8 +174,14 @@ _TOTAL_RE = re.compile(r"z\s*celkem\s*([0-9][0-9\s ]*)", re.IGNORECASE)
 # _th350 thumbnail strips to the full-resolution original (verified).
 _IMG_RE = re.compile(r"https://mlsf\.remax-czech\.cz/data/+zs/(\d+)/[^\"'\s]+", re.IGNORECASE)
 _THUMB_SUFFIX_RE = re.compile(r"_th\d+(?=\.\w+$)")
-# The subject listing's price/coords/address come from page attributes; the FIRST
+# The subject listing's price/coords come from page attributes; the FIRST
 # occurrence is the subject's (recommended-listing cards follow it lower down).
+# That holds for data-gps (the subject's #listingMap precedes the carousel) but
+# NOT for data-address: on the real captured page every data-address belongs to
+# a "Podobné nemovitosti" carousel card and the subject has none — the first
+# match is a DIFFERENT listing in a different town (W0 item 0d; it reached
+# listings.street on live rows). The subject's own address line is the
+# `.pd-header__address` h2; data-address is kept only as raw evidence.
 _ADVERT_PRICE_RE = re.compile(r'data-advert-price="(\d+)"')
 _GPS_ATTR_RE = re.compile(r'data-gps="([^"]*)"')
 _ADDRESS_ATTR_RE = re.compile(r'data-address="([^"]*)"')
@@ -633,24 +639,39 @@ def parse_detail(
         lat, lon = _parse_dms_pair(gps_match.group(1))
 
     locality, district = _h1_locality(title)
-    addr_match = _ADDRESS_ATTR_RE.search(html)
-    address = (
-        unescape(addr_match.group(1)).strip(" ,") or None if addr_match else None
-    )
-    if address and not locality:
-        # data-address is "street, city - district, region"; the middle segment
-        # is the locality.
-        parts = [p.strip() for p in address.split(",") if p.strip()]
-        if len(parts) >= 2:
-            locality = parts[1]
-            district = locality.split(" - ")[-1].strip() if " - " in locality else district
+    # W0 item 0d: the subject's own location line. "ulice <Street>, <Town>" when
+    # the portal states a street, else just the town/okres — the header
+    # classifier from the location program's per-portal caps table.
+    header_addr = _text(tree.css_first(".pd-header__address"))
+    if header_addr:
+        # The h2 nests a "mapa" anchor whose text rides along in _text().
+        header_addr = re.sub(r"\s+mapa$", "", header_addr).strip(" ,") or None
+    street = None
+    if header_addr:
+        parts = [p.strip() for p in header_addr.split(",") if p.strip()]
+        first = parts[0] if parts else ""
+        rest = parts
+        if first.lower().startswith("ulice "):
+            street_part = first[len("ulice "):]
+            rest = parts[1:]
+            # The shared extractor needs a town segment for its cross-check (a
+            # single bare segment reads as town-only); the header's own tail or
+            # the h1 locality provides it.
+            context = rest or ([locality] if locality else [])
+            street = street_from_locality(
+                ", ".join([street_part, *context]) if context else street_part,
+                position="first", geo_names=(locality, district), lat=lat, lon=lon,
+            )
+        if not locality and rest:
+            locality = rest[0]
+            if " - " in locality:
+                district = locality.split(" - ")[-1].strip() or district
 
-    # data-address leads with the street ("Na vrcholu, Praha 3 - Žižkov, Praha")
-    # WHEN present, but is often just the municipality ("Roztoky"). The geo
-    # cross-check against the row's own locality/district rejects a town leaking
-    # as parts[0]; town-only listings keep street=NULL.
-    street = street_from_locality(
-        address, position="first", geo_names=(locality, district), lat=lat, lon=lon
+    # Carousel contamination guard (W0 0d): data-address is NOT the subject's —
+    # kept verbatim as evidence only, never parsed into locality/street.
+    addr_match = _ADDRESS_ATTR_RE.search(html)
+    carousel_address = (
+        unescape(addr_match.group(1)).strip(" ,") or None if addr_match else None
     )
 
     usable_text = params.get("uzitna plocha")
@@ -663,7 +684,11 @@ def parse_detail(
         "id": source_id,
         "title": title,
         "price_text": price_attr,
-        "address": address,
+        # The subject's own header line; the old top-level "address" key (the
+        # first data-address, i.e. usually a CAROUSEL card's address) is renamed
+        # so no re-mine can mistake it for the subject's again.
+        "display_address": header_addr,
+        "carousel_address": carousel_address,
         "remax_ref": params.get("cislo zakazky"),
         "broker": _broker(tree),
         "image_urls": image_urls,

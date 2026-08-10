@@ -78,11 +78,16 @@ DETAIL_HTML = """
   Prodej bytu 2+kk v osobním vlastnictví 45 m², Praha 3 - Žižkov
   (ID 259-NP01246)
 </h1>
+<h2 class="pd-header__address">ulice Na vrcholu, Praha 3 - Žižkov</h2>
 <div class="pd-price-box">
   <span class="pd-price" data-advert-price="9962000">9 962 000 Kč</span>
 </div>
-<div class="pd-map" data-gps="50°05&#039;26.1&quot;N,14°29&#039;33.4&quot;E"
-     data-address="Na vrcholu, Praha 3 - Žižkov, Praha"></div>
+<div class="pd-map" data-gps="50°05&#039;26.1&quot;N,14°29&#039;33.4&quot;E"></div>
+<div id="pills-profile" aria-labelledby="podobne-nemovitosti">
+  <div class="area-listings__item" data-gps="49°50&#039;00.0&quot;N,14°50&#039;00.0&quot;E"
+       data-address="Oleška, okres Praha-východ"></div>
+  <div class="area-listings__item" data-address="Jiná ulice, Kolín, Středočeský kraj"></div>
+</div>
 <div class="pd-detail-info">
   <div class="pd-detail-info__row"><div class="pd-detail-info__label">Číslo zakázky:</div><div class="pd-detail-info__value">ID 259-NP01246</div></div>
   <div class="pd-detail-info__row"><div class="pd-detail-info__label">Dispozice:</div><div class="pd-detail-info__value">2+kk</div></div>
@@ -267,12 +272,21 @@ def test_parse_detail_full():
     assert listing.price_unit == "za nemovitost"
     assert listing.area_m2 == 45.0
     assert listing.disposition == "2+kk"
-    # data-gps DMS -> decimal, CZ-bbox-guarded.
+    # data-gps DMS -> decimal, CZ-bbox-guarded — the SUBJECT's #pd-map pair,
+    # never the carousel card's (first-occurrence rule holds for gps only).
     assert listing.lat is not None and 50.08 < listing.lat < 50.10
     assert listing.lon is not None and 14.48 < listing.lon < 14.50
     assert "Žižkov" in (listing.locality or "")
-    # Street is the leading segment of data-address "Na vrcholu, Praha 3 - Žižkov, Praha".
+    # W0 item 0d: street comes from the subject's own pd-header__address
+    # ("ulice Na vrcholu, ..."), NEVER from data-address — every data-address
+    # on the real captured page is a "Podobné nemovitosti" carousel card's.
     assert listing.street == "Na vrcholu"
+    assert listing.raw["display_address"] == "ulice Na vrcholu, Praha 3 - Žižkov"
+    # The carousel value is kept as evidence only, under a name no re-mine can
+    # mistake for the subject's ("Oleška" must never reach street/locality).
+    assert listing.raw["carousel_address"] == "Oleška, okres Praha-východ"
+    assert "address" not in listing.raw
+    assert "Oleška" not in (listing.locality or "")
     assert listing.district == "Žižkov"
     assert listing.floor == 8
     assert listing.total_floors == 8
