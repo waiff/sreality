@@ -62,13 +62,19 @@ tenant-scoped:
   Supavisor rebinds connections between queries, so a cached prepared statement would trip
   `DuplicatePreparedStatement`. Takes `attempts`/`retry_delay` for bounded retry on a flaky
   connect handshake (PR #663).
-- `connect_session()` — **only** for the scraper's hot detail-write loop (the long-lived
-  connection in `scraper/main.py:_run_full`). Points at `SUPABASE_DB_SESSION_URL` (the
-  **Session-mode pooler**, port 5432) and leaves `prepare_threshold` at psycopg3's default,
-  so the repeated upsert + spatial SQL gets server-side **prepared once and reused** across
-  every listing in the run. The session pooler gives each client a dedicated backend, so
-  prepared statements are safe there. Falls back to `connect()` if
-  `SUPABASE_DB_SESSION_URL` is unset.
+- `connect_session()` — **only** for a long-lived hot loop that repeats the same SQL
+  thousands of times: the scraper's detail-write loop (`scraper/main.py:_run_full`), the
+  location resolve drain (`location_data/resolver/drain.py`), and the registry loaders
+  (`location_data/loader_db.py`, which additionally REFUSES the fallback — a 3 M-row COPY
+  needs session GUCs). Points at `SUPABASE_DB_SESSION_URL` (the **Session-mode pooler**,
+  port 5432) and leaves `prepare_threshold` at psycopg3's default, so the repeated upsert +
+  spatial SQL gets server-side **prepared once and reused** across every listing in the run.
+  The session pooler gives each client a dedicated backend, so prepared statements are safe
+  there. Falls back to `connect()` if `SUPABASE_DB_SESSION_URL` is unset — **silently**, so
+  a loop that cares logs the fallback itself (the drain does; a quietly unprepared run is
+  indistinguishable from a merely slow one). Prepared statements alone are not the win:
+  they cut the cost of a round trip, not the COUNT of them, so a hot loop also has to batch
+  its per-row reads and memoize whatever is constant for the run.
 - `tenant_conn` (`api/tenant_pool.py`, FastAPI dependency, Phase 1 increment 3, migration
   293) — the RLS-scoped path for per-account API routes. Connects to
   `TENANT_POOL_DB_URL` as the `tenant_pool` role (`LOGIN NOINHERIT`, zero data access on
