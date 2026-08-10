@@ -21,7 +21,12 @@ The no-estimates discipline (the four design guards):
     * NOT a shared geocode-fallback pin — fewer than `--min-share` active
       listings of the same source on the exact rounded coordinate (a real
       building coordinate is ~unique; a town/quarter geocode is shared by many);
-    * sreality: reject `locality.accuracy = 'not_address'` (municipality-level);
+    * sreality: only building-grain declared precision may resolve a street —
+      `locality.inaccuracy_type IN ('gps','address')`, or the key absent
+      (pre-June-2026 legacy payload shape, which falls to the shared rails).
+      The original guard filtered on `locality.accuracy`, a key the API no
+      longer sends, so it was dead and ward/municipality pins flowed through
+      (W0 item 0h's dead-guard finding);
     * geocode-PROVENANCED coords (raw coords.source='geocode', stamped by
       scraper.location / the coords backfills) are eligible only at
       matched_type='regional.address' — a street/town centroid is not a
@@ -125,7 +130,8 @@ _CANDIDATE_SQL = """
       AND st_y(l.geom::geometry) BETWEEN 48.0 AND 51.5
       AND st_x(l.geom::geometry) BETWEEN 12.0 AND 19.0
       AND (%(source)s <> 'sreality'
-           OR l.raw_json->'locality'->>'accuracy' IS DISTINCT FROM 'not_address')
+           OR l.raw_json->'locality'->>'inaccuracy_type' IS NULL
+           OR l.raw_json->'locality'->>'inaccuracy_type' IN ('gps', 'address'))
       AND (l.raw_json->'coords'->>'source' IS DISTINCT FROM 'geocode'
            OR l.raw_json->'coords'->>'matched_type' = 'regional.address')
       AND (%(force)s
