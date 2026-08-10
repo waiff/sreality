@@ -256,6 +256,12 @@ _TITLE_STREET_RE = re.compile(
 )
 
 
+# Lowercase words that legitimately continue a Czech street name.
+_STREET_PARTICLES: frozenset[str] = frozenset({
+    "nad", "pod", "u", "na", "v", "ve", "z", "ze", "k", "ke", "mezi", "za",
+})
+
+
 def _title_street(
     obj: dict[str, Any], locality: str | None, district: str | None,
     lat: float | None, lon: float | None,
@@ -268,6 +274,22 @@ def _title_street(
         return None
     cand = m.group(1).strip(" .")
     if not cand or not (cand[0].isupper() or cand[0].isdigit()):
+        return None
+    # Truncate a prose tail: a street phrase continues only with capitalized
+    # words, digits (house number), name particles, or the genitive word after
+    # a numeral ("28. října"). "Dlouhá 15 volejte kdykoliv" -> "Dlouhá 15".
+    words = cand.split()
+    kept = [words[0]]
+    for prev, w in zip(words, words[1:]):
+        if (
+            w[0].isupper() or w[0].isdigit()
+            or w.lower() in _STREET_PARTICLES or prev.endswith(".")
+        ):
+            kept.append(w)
+        else:
+            break
+    cand = " ".join(kept).strip(" .")
+    if not cand:
         return None
     ctx = locality or district
     # The shared extractor supplies the don't-fabricate town cross-check.
