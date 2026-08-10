@@ -130,15 +130,7 @@ is the tie-breaker). This track records sequencing + shipped state only.
   1e-5° cell grid with 3×3 expansion (no h3 on this instance). Still to run: dispatch it
   to completion before the first claim is written.
 
-## Standing decisions
-
-- The Mapy remediation ladder (R2 inventory → R3 re-resolve → R4 purge) is W1–W4
-  work; the R2 evidence inventory is a W1 INPUT (first claim must not be written
-  before it exists).
-- W0 discipline held: no new precision columns on `listings`; precision signals ride
-  in raw_json / archived pages until the claims spine exists.
-
-## W1 — PR-D: portal contracts as data + the claims-intake extractor
+### PR-D — portal contracts as data + the claims-intake extractor
 
 Shipped (shadow-only; nothing reads these tables yet):
 
@@ -198,3 +190,76 @@ Open: the per-portal frozen labelled samples of §6.4.0, which gate whether each
 resolves or stays in shadow. Closed in this round: the fingerprint is now migration 386's
 `location_claim_fingerprint()`, and `location_data` is in `tests/sql_corpus.RUNTIME_DIRS`
 (so the offline placeholder guard and the CI PREPARE sweep both cover the package).
+
+### PR-E — the resolver, the projections and the collision epoch
+
+`location_data/resolver/` — S1–S9 as a **pure function** plus the three jobs that feed it.
+
+- **S1–S7 pure core** (`normalize`/`country`/`candidates`/`position`/`admin`/`precision`/
+  `survivorship`, orchestrated by `core.resolve`): no wall clock (`as_of = max(observed_at)`),
+  no network, no randomness — enforced by an AST scan, not by review. The candidate ladder
+  R0–R8 runs against a `RegistryView` PROTOCOL, so the whole core is runnable with no
+  database and the byte-identical replay gate is a normal pytest test.
+- **Five version inputs in the identity**, `collision_epoch_id` included, with a canonical
+  serialization + content hash stamped on the row.
+- **S8 builders** for both projections, with the canonical class-aware `geo_blockable` /
+  `renderable_as_point` and a parity test against migration 384's IMMUTABLE SQL functions;
+  property grain is a reconciliation over children with mandatory disagreement columns —
+  a precise child can never lose to a centroid child.
+- **Collision-epoch producer** (`collision` + `epoch_job`): rounded 4-dp cells with the
+  mandatory 3×3 expansion (h3-pg unavailable), the six-value classification, and
+  bucket-change-only re-enqueue.
+- **`dirty_locations` drain** (`drain`): `FOR UPDATE SKIP LOCKED` slices, one transaction
+  per batch with a per-listing savepoint, lease-row CAS on `location_jobs`, judged by
+  oldest-row age. `.github/workflows/location_resolve.yml` (drain | epoch | full-resolve,
+  `*/15` cron, concurrency group `location-resolve`).
+- **S9 reconciler v1**: the cheap structural rules of 03 §3.11.1 into the append-only
+  ledger, keyed on the version-free `dedupe_key`; auto-close only when the predicate stops
+  firing AND the inputs changed — the inputs compared against the resolution the current
+  projection was built from, and scoped to the rules the run actually EVALUATED (a rule
+  whose guard never ran did not stop firing; it was not asked).
+
+Review remediation, same PR (migration **388**, additive):
+
+- **A `declared_shape` policy row with no declared shape DEGRADES, it never raises.** With
+  the shipped v1 seed every sreality portal-pin listing resolving at `obec` /
+  `cast_obce_or_quarter` / `street` hit `UncertaintyPolicyError` in S4 and got no resolution
+  at all. The lookup now falls through to the `'*'` row and then to the admin geometric
+  bound. Regression tests read the seed out of migration 383, not out of the fixture — the
+  fixture has no per-source rows, which is why nothing caught it.
+- **Admissibility is evaluated ONCE**, in `core.resolve`, and handed to S3 and S4 as well as
+  S7. A `subject_scoped=false` carousel claim used to rank a candidate, carry the admin
+  chain and then flow back out through the preserve-if-null registry fill. It is still
+  stored and still opens `street_from_excluded_block_vs_served`.
+- **The pin is chosen by declared quality, then by claim id** — not "lowest id wins". Every
+  losing coordinate is persisted as a candidate with `distance_to_pin_m` and its own
+  rejection reason, and a blurred sibling no longer blurs the pin it lost to.
+- **Typed slots are unwrapped by claim TYPE**, so a combined `487/40` reaching
+  `house_number_cp` no longer lands in the column verbatim (03 §3.3.2).
+- **`--sources` can no longer mint an epoch** (it forces a dry-run): the minted epoch becomes
+  THE epoch for every portal, so a subset epoch silently drops the unselected sources'
+  evidence. Both epoch reads now join `listings` and filter `is_active`.
+- `declared_precision_vs_assigned` is tested against the rung S6 was HANDED (comparing the
+  post-cap rung could never fire); the `>= threshold` reading of 03 §3.8.4 is now the same
+  in the epoch classifier, the S6 cap and S9; the queue slice orders by
+  `(enqueued_at, listing_id)`; the survivorship sort key uses the canonical UTC convention
+  rather than `datetime.timestamp()` on a naive value.
+- **Migration 388**: `listing_location_current.position_quality_class` +
+  `collision_epoch_id` (03 §3.10's two change requests — the builder computed both and the
+  writer popped them), and the five `location_field_policy` v1 rows S7 arbitrates but the
+  383 seed never had (`evidencni`, `postal_town`, `development_name`,
+  `cadastral_territory_name`, `parcel_number`, all structurally unwinnable without one).
+  S7's own `blocked` set now travels on the resolution and is logged by the drain.
+
+Open against the schema: `location_uncertainty_policy` has no seed row for a pin capped to
+an admin rung, which the lookup resolves to the unit's own area bound. (The earlier `pip`
+item is closed — migration 381 admits the purpose; the resolver prefers `'pip'` rows and
+degrades to `'authoritative'` until the boundary loader populates them.)
+
+## Standing decisions
+
+- The Mapy remediation ladder (R2 inventory → R3 re-resolve → R4 purge) is W1–W4
+  work; the R2 evidence inventory is a W1 INPUT (first claim must not be written
+  before it exists).
+- W0 discipline held: no new precision columns on `listings`; precision signals ride
+  in raw_json / archived pages until the claims spine exists.

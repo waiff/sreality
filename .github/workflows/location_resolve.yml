@@ -1,0 +1,115 @@
+name: "Location: resolve"
+
+# The steady-state resolution lane of the location subsystem (design 03 §3.14.1). Without
+# it a newly scraped listing gets claims and never gets a resolution — no row in
+# listing_location_current, invisible to Browse, map, watchdog and dedup.
+#
+#   mode=drain         `location_resolve_incremental` — claims dirty_locations in bounded
+#                      slices (FOR UPDATE SKIP LOCKED), resolves S1-S9 and rebuilds the
+#                      projection row in the SAME transaction. Runs every 15 minutes; judge
+#                      the queue by oldest-row AGE, not by length.
+#   mode=epoch         `pin_collision_recompute` — mints a NEW immutable pin_cluster_epochs
+#                      row plus its pin_clusters, then enqueues only the listings whose
+#                      bucket changed. An epoch that never advances silently freezes
+#                      precision.
+#   mode=full-resolve  `location_resolve_sweep` — the reconcile backstop: enqueue everything
+#                      whose projection is missing or built at a stale version tuple, then
+#                      drain it.
+#
+# Both jobs take a lease-row CAS on location_jobs, never a session advisory lock (a lock
+# taken on one transaction-pooler backend and released on another strands), and the
+# concurrency group below is the second guard.
+#
+# Required secret: SUPABASE_DB_URL.
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "what to run"
+        required: true
+        default: drain
+        type: choice
+        options:
+          - drain
+          - epoch
+          - full-resolve
+      max_seconds:
+        description: "drain budget in seconds (drain / full-resolve)"
+        required: false
+        default: "600"
+        type: string
+      batch_size:
+        description: "listings claimed per slice"
+        required: false
+        default: "50"
+        type: string
+      sources:
+        description: "epoch mode: comma-separated portals; blank = every source"
+        required: false
+        default: ""
+        type: string
+      dry_run:
+        description: "resolve and log, write nothing"
+        required: false
+        default: false
+        type: boolean
+  schedule:
+    # Continuous-enough for W1: the always-on worker lane is a later wave.
+    - cron: "*/15 * * * *"
+
+concurrency:
+  # 00 §14: the `location-resolve` group. The epoch job declares `location-collision` in its
+  # own lease row; it shares this workflow's group so a recompute never overlaps a drain
+  # that is reading the epoch it is replacing.
+  group: location-resolve
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      SUPABASE_DB_SESSION_URL: ${{ secrets.SUPABASE_DB_SESSION_URL }}
+      MODE: ${{ inputs.mode || 'drain' }}
+      MAX_SECONDS: ${{ inputs.max_seconds || '600' }}
+      BATCH_SIZE: ${{ inputs.batch_size || '50' }}
+      SOURCES: ${{ inputs.sources }}
+      DRY_RUN: ${{ inputs.dry_run }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: pip install -e "."
+
+      - name: Run
+        run: |
+          set -euo pipefail
+          ARGS=""
+          if [ "$DRY_RUN" = "true" ]; then ARGS="$ARGS --dry-run"; fi
+          case "$MODE" in
+            drain)
+              python -m location_data.resolver.drain \
+                --max-seconds "$MAX_SECONDS" --batch-size "$BATCH_SIZE" $ARGS
+              ;;
+            epoch)
+              python -m location_data.resolver.epoch_job --sources "$SOURCES" $ARGS
+              ;;
+            full-resolve)
+              python -m location_data.resolver.drain --full-sweep \
+                --max-seconds "$MAX_SECONDS" --batch-size "$BATCH_SIZE" $ARGS
+              ;;
+            *)
+              echo "unknown mode: $MODE" >&2
+              exit 2
+              ;;
+          esac
