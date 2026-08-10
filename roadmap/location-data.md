@@ -54,11 +54,12 @@ is the tie-breaker). This track records sequencing + shipped state only.
   (5,591 carousel-derived remax streets nulled + dirty-enqueued).
 - Post-merge gate verifications: index rows accumulating ✅ (243 sreality pages in
   2h, week-stamped keys); geocode silent ✅ (last geocode_cache write 2026-07-11);
-  ruianId collecting ✅ (41 rows in 40 min). Still open: resolver-write rate 0 over
-  7 days (structurally true; confirm 2026-08-17); R2 export verify (snapshot
-  2026-08-10b; the cancelled first run's partial `2026-08-10/` prefix in R2 is
-  garbage, safe to delete); bezrealitky ruianId ≥95% of NEW rows (measure after a
-  few drain cycles).
+  ruianId collecting ✅ (41 rows in 40 min). R2 export VERIFIED ✅ 2026-08-10 (snapshot 2026-08-10b:
+  447,510 rows / 801 chunks / 7.69 GB gz; manifest == chunk sum == DB count; the
+  cancelled first run's partial `2026-08-10/` prefix in R2 is garbage, safe to
+  delete). Still open: resolver-write rate 0 over 7 days (structurally true;
+  confirm 2026-08-17); bezrealitky ruianId ≥95% of NEW rows (measure after a few
+  drain cycles).
 - 0k idnes disclaimer + 0l remaining declared-quality signals: forward-preserved
   already (detail HTML archived + raw_json); querying them as claims is the W1
   loader's job — no interim side table needed. ceskereality's `exact` map-endpoint
