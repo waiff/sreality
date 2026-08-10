@@ -30,7 +30,7 @@ from unicodedata import combining, normalize
 from selectolax.parser import HTMLParser, Node
 
 from scraper.scraped_listing import ScrapedListing
-from scraper.street import clean_street
+from scraper.street import clean_street, street_from_locality
 
 SOURCE = "mmreality"
 
@@ -244,6 +244,32 @@ def _locality(obj: dict[str, Any]) -> str | None:
     return None
 
 
+# W0 item 0g (location-data program): the estate's originalTitle carries an
+# explicit street marker ("Prodej restaurace, ..., Bratronice, ul. Hlavní")
+# that the structured `street` field sometimes lacks — measured 5/12 on the
+# mining corpus. First occurrence only; up to the next comma.
+_TITLE_STREET_RE = re.compile(r"\bul\.\s+([^,\n]{2,60})")
+
+
+def _title_street(
+    obj: dict[str, Any], locality: str | None, district: str | None,
+    lat: float | None, lon: float | None,
+) -> str | None:
+    title = obj.get("originalTitle")
+    if not isinstance(title, str):
+        return None
+    m = _TITLE_STREET_RE.search(title)
+    if m is None:
+        return None
+    cand = m.group(1).strip(" .")
+    ctx = locality or district
+    # The shared extractor supplies the don't-fabricate town cross-check.
+    return street_from_locality(
+        f"{cand}, {ctx}" if ctx else cand, position="first",
+        geo_names=(locality, district), lat=lat, lon=lon,
+    )
+
+
 def _image_urls(obj: dict[str, Any]) -> list[str]:
     urls: list[str] = []
     seen: set[str] = set()
@@ -361,6 +387,11 @@ def parse_detail(html: str, *, source_url: str) -> ScrapedListing:
         price_czk = None
 
     lat, lon = _coords(obj)
+    locality = _locality(obj)
+    district = obj.get("district") or None
+    street = clean_street(
+        obj.get("street") if isinstance(obj.get("street"), str) else None
+    ) or _title_street(obj, locality, district, lat, lon)
     accessories = _accessory_names(obj)
     parking_lots = _to_int(obj.get("parkingPlaces"))
     overground = _to_int(obj.get("overgroundFloors"))
@@ -387,10 +418,11 @@ def parse_detail(html: str, *, source_url: str) -> ScrapedListing:
         area_m2=_to_float(obj.get("totalArea")) or _to_float(obj.get("usableArea")),
         usable_area=_to_float(obj.get("usableArea")),
         disposition=_disposition((obj.get("type") or {}).get("name"), obj.get("title")),
-        locality=_locality(obj),
-        district=obj.get("district") or None,
-        # The embedded :property estate object carries a structured `street`.
-        street=clean_street(obj.get("street") if isinstance(obj.get("street"), str) else None),
+        locality=locality,
+        district=district,
+        # Structured street first; else the originalTitle "ul. <Street>"
+        # marker (W0 0g), both through the shared don't-fabricate guard.
+        street=street,
         lat=lat,
         lon=lon,
         floor=_to_int(obj.get("floor")),
