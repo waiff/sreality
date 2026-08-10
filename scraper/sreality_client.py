@@ -13,8 +13,9 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlencode
 
 import requests
 
@@ -138,6 +139,11 @@ class SrealityClient(BasePortalClient):
         self.detail_delay_s = detail_delay_s
         self._last_detail_at = 0.0
         self.pages_fetched = 0
+        # The last successfully fetched index page as (offset, url, payload) —
+        # the raw payload carries index-only signals (geohash, POI distances,
+        # locality.geometry) that the estate dicts alone don't surface to
+        # archiving callers (location-data W0 item 0n).
+        self.last_index_page: tuple[int, str, dict[str, Any]] | None = None
         # Total matching estates as the API reports it (pagination.total).
         # Used by the caller to decide whether a walk was complete enough to
         # drive mark_inactive (a silently-truncated walk must not flip live
@@ -185,8 +191,9 @@ class SrealityClient(BasePortalClient):
         """
         if self._limiter is not None:
             self._limiter.acquire()
+        params = self._index_params(offset)
         try:
-            payload = self._get_json(INDEX_URL, params=self._index_params(offset))
+            payload = self._get_json(INDEX_URL, params=params)
         except requests.HTTPError as exc:
             status = (
                 exc.response.status_code
@@ -205,24 +212,32 @@ class SrealityClient(BasePortalClient):
         if isinstance(total, int):
             self.result_size = total
         results = payload.get("results") or []
+        self.last_index_page = (offset, f"{INDEX_URL}?{urlencode(params)}", payload)
         LOG.info(
             "INDEX offset=%d estates=%d total=%s", offset, len(results),
             self.result_size,
         )
         return results
 
-    def iter_index(self) -> Iterator[dict[str, Any]]:
+    def iter_index(
+        self,
+        on_page: Callable[[int, str, dict[str, Any]], None] | None = None,
+    ) -> Iterator[dict[str, Any]]:
         """Yield every estate dict from every search page until exhausted.
 
         Paged by offset/limit via fetch_index_page. Stops cleanly at the
         deep-pagination cap (HTTP 422), when a page is empty, or when a short
-        page / the reported total signals the walk is done.
+        page / the reported total signals the walk is done. `on_page` is
+        invoked once per non-empty page with (offset, url, raw payload) —
+        the index-archiving hook.
         """
         offset = 0
         while True:
             results = self.fetch_index_page(offset)
             if not results:
                 return
+            if on_page is not None and self.last_index_page is not None:
+                on_page(*self.last_index_page)
             yield from results
             offset += self.per_page
             if self.result_size is not None and offset >= self.result_size:

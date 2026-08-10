@@ -147,7 +147,8 @@ class CeskerealityPortal:
 
     def _walk_slice(
         self, client: CeskerealityClient, host: str, sale_type: str, cat: str,
-        sub_slug: str | None,
+        sub_slug: str | None, conn: Any = None,
+        archive_week: str | None = None, fresh_keys: set[str] | None = None,
     ) -> tuple[list[tuple[str, str, int | None]], int, int | None, bool]:
         """Walk one region×facet slice, ≤12 pages — NEVER requesting page 13 (it
         404s). Returns (rows, pages_fetched, slice_total, complete); complete=False
@@ -162,13 +163,35 @@ class CeskerealityPortal:
                 page=page if page > 1 else None,
             )
             try:
-                html, _ = client.fetch_search(url)
+                html, status = client.fetch_search(url)
             except ListingGoneError:
                 break                       # past the cap / empty slice -> end
             except Exception as exc:        # noqa: BLE001 - one slice must not kill the walk
                 LOG.warning("SLICE error host=%s slug=%s page=%d: %s",
                             host, sub_slug, page, exc)
                 break
+            # Location-data W0 item 0n: search pages carry index-only signals
+            # (map markers). Week-stamped keys accumulate (never roll over);
+            # the caller-preloaded fresh set skips re-uploading bodies the
+            # server-side guard would discard; a failure never kills the walk.
+            if conn is not None and archive_week is not None:
+                key = f"{sale_type}/{cat}/{host}/{sub_slug or 'all'}/{page}/{archive_week}"
+                if fresh_keys is None or key not in fresh_keys:
+                    try:
+                        db.upsert_portal_raw_page(
+                            conn,
+                            source=SOURCE,
+                            source_id_native=key,
+                            source_url=url,
+                            page_kind="index",
+                            html=html,
+                            http_status=status,
+                            refresh_after_hours=db.INDEX_ARCHIVE_REFRESH_HOURS,
+                        )
+                        if fresh_keys is not None:
+                            fresh_keys.add(key)
+                    except Exception as exc:  # noqa: BLE001
+                        LOG.warning("INDEX archive failed url=%s: %s", url, exc)
             parsed = parse_index(html)
             if parsed.total is not None:
                 total = parsed.total
@@ -218,6 +241,16 @@ class CeskerealityPortal:
         client = CeskerealityClient(limiter=limiter)
         hosts = self._regions or REGION_HOSTS
 
+        archive_week = db.index_archive_week() if conn is not None else None
+        fresh_keys: set[str] = set()
+        if conn is not None:
+            try:
+                fresh_keys = db.fresh_index_page_keys(
+                    conn, SOURCE, hours=db.INDEX_ARCHIVE_REFRESH_HOURS
+                )
+            except Exception as exc:  # noqa: BLE001 - optimisation only
+                LOG.warning("INDEX archive preload failed: %s", exc)
+
         native_ids: list[str] = []
         price_map: dict[str, int | None] = {}
         ref_map: dict[str, str] = {}
@@ -232,7 +265,8 @@ class CeskerealityPortal:
             for slug in (None, *facets):
                 slices += 1
                 rows, slice_pages, _slice_total, slice_complete = self._walk_slice(
-                    client, host, sale_type, cat, slug)
+                    client, host, sale_type, cat, slug, conn,
+                    archive_week, fresh_keys)
                 pages += slice_pages
                 # The region-wide backstop (slug=None) is EXPECTED to cap for a big
                 # region — only a capped FACET slice (a dense district still > 240)

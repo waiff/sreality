@@ -41,9 +41,19 @@ walk + mark_inactive + enqueue) feeds the bounded `bazos_detail_drain.yml` (hour
 workflows' dispatch inputs (`-f sale_type=… -f category=…`, or locality + radius) or
 `scraper.bazos_main` locally. **Detail-page** raw HTML is staged in `portal_raw_pages`
 (migration 099) before parsing (the parsed-state ledger + reparse-without-refetch capability); INDEX/search-page
-HTML is NOT staged — it was write-only dead weight (nothing reads `page_kind='index'`) and the per-page TOAST
-write was the dominant cost on slow HTML index walks, so all HTML portals (bazos/idnes/mmreality/remax/maxima)
-skip it. **`portal_raw_pages` is preservation substrate, never pruned** (location-data
+staging was removed repo-wide in June 2026 (per-page TOAST writes dominated slow HTML walks) and is
+selectively RE-ENABLED (location-data W0 item 0n) for the three portals whose index pages carry
+signals no other surface has — sreality (geohash, POI distances, `locality.geometry`; raw JSON body),
+remax (`data-display-address`, the only house-number-bearing remax surface), ceskereality (map
+markers). Index keys are **week-stamped** (`db.index_archive_week`) so the archive ACCUMULATES for
+delisted listings — a position-only key would be a rolling snapshot preserving nothing — and the
+write cost is held down twice: a client-side fresh-key skip set (`db.fresh_index_page_keys`,
+preloaded per walk, so multi-MB bodies aren't even uploaded when fresh) plus the server-side
+`refresh_after_hours` guard on `upsert_portal_raw_page` (max one refresh per key per
+`db.INDEX_ARCHIVE_REFRESH_HOURS` as the racing-writer backstop). remax's page-capped realtime
+probe never archives (a transient probe fetch must not claim a page's daily slot); the slow
+portals with no index-only signals (bazos/idnes/mmreality/maxima) still skip index staging. The
+W2a payload store supersedes this scheme. **`portal_raw_pages` is preservation substrate, never pruned** (location-data
 program, W0 item 0o): migration 099's "safe to delete once parsed" header is superseded —
 the archive is the only surviving copy of delisted pages' location signal (portals don't
 serve delisted pages again), an off-database copy lives in R2 under

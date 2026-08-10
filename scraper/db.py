@@ -17,7 +17,7 @@ import os
 import random
 import time
 from collections.abc import Callable, Collection, Iterable, Sequence
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Any, Literal, Protocol, TypeVar
 
@@ -2602,6 +2602,80 @@ def reclaim_stale_claims(
         return len(cur.fetchall())
 
 
+# Index pages are re-fetched on every walk, but the archive only needs ~daily
+# refresh grain — the per-page TOAST write was why index archiving was removed
+# in June 2026, so the re-enable (location-data W0 item 0n) refreshes an
+# existing index row at most once per ~day instead of once per walk. 22h
+# leaves headroom for walk-start jitter on the hourly/6h cadences.
+INDEX_ARCHIVE_REFRESH_HOURS: float = 22.0
+
+# Both raw-page upsert forms are module-level plain literals ON PURPOSE: the
+# schema-and-sql CI gate (tests/sql_corpus.py) only discovers SQL that appears
+# as an ast.Constant, so a concatenated/f-string variant would silently drop
+# this statement from the PREPARE corpus (a confirmed review finding on the
+# first cut of W0 0n).
+_RAW_PAGE_UPSERT_SQL = """
+    INSERT INTO portal_raw_pages
+        (source, source_id_native, source_url, page_kind,
+         html, http_status, fetched_at, parsed_at, parse_error)
+    VALUES (%s, %s, %s, %s, %s, %s, now(), NULL, NULL)
+    ON CONFLICT (source, source_id_native, page_kind) DO UPDATE SET
+        source_url  = EXCLUDED.source_url,
+        html        = EXCLUDED.html,
+        http_status = EXCLUDED.http_status,
+        fetched_at  = now(),
+        parsed_at   = NULL,
+        parse_error = NULL
+    RETURNING id
+"""
+
+_RAW_PAGE_UPSERT_GUARDED_SQL = """
+    INSERT INTO portal_raw_pages
+        (source, source_id_native, source_url, page_kind,
+         html, http_status, fetched_at, parsed_at, parse_error)
+    VALUES (%s, %s, %s, %s, %s, %s, now(), NULL, NULL)
+    ON CONFLICT (source, source_id_native, page_kind) DO UPDATE SET
+        source_url  = EXCLUDED.source_url,
+        html        = EXCLUDED.html,
+        http_status = EXCLUDED.http_status,
+        fetched_at  = now(),
+        parsed_at   = NULL,
+        parse_error = NULL
+    WHERE portal_raw_pages.fetched_at < now() - make_interval(secs => %s)
+    RETURNING id
+"""
+
+
+def index_archive_week(now: datetime | None = None) -> str:
+    """ISO-week suffix for index-archive keys ('2026w33').
+
+    Index pages have no stable per-page identity — their content shifts with
+    pagination — so a position-only key would make the archive a rolling
+    snapshot of the currently-live index, preserving nothing for delisted
+    listings (the critical review finding on W0 0n's first cut). Week-stamped
+    keys make the archive ACCUMULATE (one row per page position per week)
+    while bounding growth; the W2a payload store supersedes this scheme.
+    """
+    dt = now or datetime.now(timezone.utc)
+    year, week, _ = dt.isocalendar()
+    return f"{year}w{week:02d}"
+
+
+def fresh_index_page_keys(conn: psycopg.Connection, source: str, *, hours: float) -> set[str]:
+    """source_id_native of this source's index pages archived in the last
+    `hours` — the client-side skip set, so a walk doesn't upload multi-MB
+    payloads the ON CONFLICT guard would discard server-side anyway (the
+    guard stays as the racing-writer backstop)."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT source_id_native FROM portal_raw_pages"
+            " WHERE source = %s AND page_kind = 'index'"
+            "   AND fetched_at >= now() - make_interval(secs => %s)",
+            (source, hours * 3600.0),
+        )
+        return {r[0] for r in cur.fetchall()}
+
+
 def upsert_portal_raw_page(
     conn: psycopg.Connection,
     *,
@@ -2611,32 +2685,30 @@ def upsert_portal_raw_page(
     page_kind: str,
     html: str,
     http_status: int | None,
-) -> int:
+    refresh_after_hours: float | None = None,
+) -> int | None:
     """Latest-wins upsert of one fetched HTML page into portal_raw_pages.
 
     Decouples fetch from parse so a page can be re-parsed without re-fetching.
     Returns the staging row id; a re-fetch overwrites the HTML and clears the
-    previous parse state.
+    previous parse state. With `refresh_after_hours` set, an existing row
+    younger than that is left untouched and None is returned — the write-cost
+    guard for index-page archiving.
     """
     with conn.cursor() as cur:
-        cur.execute(
-            """
-            INSERT INTO portal_raw_pages
-                (source, source_id_native, source_url, page_kind,
-                 html, http_status, fetched_at, parsed_at, parse_error)
-            VALUES (%s, %s, %s, %s, %s, %s, now(), NULL, NULL)
-            ON CONFLICT (source, source_id_native, page_kind) DO UPDATE SET
-                source_url  = EXCLUDED.source_url,
-                html        = EXCLUDED.html,
-                http_status = EXCLUDED.http_status,
-                fetched_at  = now(),
-                parsed_at   = NULL,
-                parse_error = NULL
-            RETURNING id
-            """,
-            (source, source_id_native, source_url, page_kind, html, http_status),
-        )
-        return int(cur.fetchone()[0])
+        if refresh_after_hours is None:
+            cur.execute(
+                _RAW_PAGE_UPSERT_SQL,
+                (source, source_id_native, source_url, page_kind, html, http_status),
+            )
+        else:
+            cur.execute(
+                _RAW_PAGE_UPSERT_GUARDED_SQL,
+                (source, source_id_native, source_url, page_kind, html,
+                 http_status, refresh_after_hours * 3600.0),
+            )
+        row = cur.fetchone()
+        return int(row[0]) if row is not None else None
 
 
 def mark_portal_page_parsed(

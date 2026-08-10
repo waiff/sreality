@@ -47,7 +47,7 @@ from scraper.portal import (
 from scraper.portal_base import ListingGoneError
 from scraper.portal_runner import DrainItem
 from scraper.rate_limit import RateLimiter
-from scraper.remax_client import RemaxClient, detail_url
+from scraper.remax_client import RemaxClient, detail_url, index_url
 from scraper.remax_parser import category_of, index_price, parse_detail, parse_index
 
 LOG = logging.getLogger(__name__)
@@ -134,6 +134,23 @@ class RemaxPortal:
             return cached, 0
 
         client = RemaxClient(limiter=limiter)
+        # Location-data W0 item 0n: the index card's data-display-address is
+        # the ONLY house-number-bearing remax surface — archive it. Keys are
+        # week-stamped (accumulate, don't roll over); the preloaded fresh set
+        # skips re-uploading bodies the server-side guard would discard; and a
+        # page-capped walk (self._max_pages — the realtime delta probe every
+        # ~3 min) never archives, so a transient probe fetch can't claim a
+        # page's daily slot ahead of the full 6h walk.
+        archive_ok = conn is not None and not self._max_pages
+        week = db.index_archive_week()
+        fresh: set[str] = set()
+        if archive_ok:
+            try:
+                fresh = db.fresh_index_page_keys(
+                    conn, SOURCE, hours=db.INDEX_ARCHIVE_REFRESH_HOURS
+                )
+            except Exception as exc:  # noqa: BLE001 - optimisation only
+                LOG.warning("INDEX archive preload failed: %s", exc)
         native_ids: list[str] = []
         ref_map: dict[str, str] = {}
         price_map: dict[str, int | None] = {}
@@ -143,6 +160,24 @@ class RemaxPortal:
         page = 1
         while True:
             html, status = client.fetch_index(sale=sale, stranka=page)
+            key = f"{sale}/{page}/{week}"
+            if archive_ok and key not in fresh:
+                try:
+                    db.upsert_portal_raw_page(
+                        conn,
+                        source=SOURCE,
+                        source_id_native=key,
+                        source_url=index_url(sale, page),
+                        page_kind="index",
+                        html=html,
+                        http_status=status,
+                        refresh_after_hours=db.INDEX_ARCHIVE_REFRESH_HOURS,
+                    )
+                    fresh.add(key)
+                except Exception as exc:  # noqa: BLE001
+                    LOG.warning(
+                        "INDEX archive failed sale=%d page=%d: %s", sale, page, exc
+                    )
             parsed = parse_index(html)
             pages += 1
             total = parsed.total if parsed.total is not None else total

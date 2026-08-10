@@ -198,3 +198,20 @@ def test_fetch_index_page_reraises_non_cap_http_error(monkeypatch):
     monkeypatch.setattr(client, "_get_json", fake)
     with pytest.raises(requests.HTTPError):
         client.fetch_index_page(0)
+
+
+def test_iter_index_on_page_receives_raw_payload(monkeypatch):
+    # Location-data W0 item 0n: the archiving hook must see the RAW page
+    # payload (index-only signals like geohash live outside the estate dicts),
+    # once per non-empty page, with the offset and the resolved URL.
+    client = SrealityClient(per_page=2)
+    pages = {
+        0: {"pagination": {"total": 3}, "results": [{"id": 1}, {"id": 2}]},
+        2: {"pagination": {"total": 3}, "results": [{"id": 3}]},
+    }
+    monkeypatch.setattr(client, "_get_json", lambda url, params=None: pages[params["offset"]])
+    seen: list[tuple[int, str, dict]] = []
+    ids = [e["id"] for e in client.iter_index(on_page=lambda o, u, p: seen.append((o, u, p)))]
+    assert ids == [1, 2, 3]
+    assert [(o, p) for o, u, p in seen] == [(0, pages[0]), (2, pages[2])]
+    assert all("offset=" in u and "category_main_cb=" in u for _, u, _p in seen)
