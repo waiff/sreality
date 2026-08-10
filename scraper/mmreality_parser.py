@@ -248,7 +248,12 @@ def _locality(obj: dict[str, Any]) -> str | None:
 # explicit street marker ("Prodej restaurace, ..., Bratronice, ul. Hlavní")
 # that the structured `street` field sometimes lacks — measured 5/12 on the
 # mining corpus. First occurrence only; up to the next comma.
-_TITLE_STREET_RE = re.compile(r"\bul\.\s+([^,\n]{2,60})")
+# Token-capped (<=3 words) and anchored to a capitalized/numeral start —
+# review finding: an uncapped [^,\n]{2,60} capture would ride trailing
+# prose into the street when the marker is not comma-terminated.
+_TITLE_STREET_RE = re.compile(
+    r"\bul\.\s+((?:\d{1,2}\.\s*)?[^\s,]+(?:\s+[^\s,]+){0,2})"
+)
 
 
 def _title_street(
@@ -262,6 +267,8 @@ def _title_street(
     if m is None:
         return None
     cand = m.group(1).strip(" .")
+    if not cand or not (cand[0].isupper() or cand[0].isdigit()):
+        return None
     ctx = locality or district
     # The shared extractor supplies the don't-fabricate town cross-check.
     return street_from_locality(

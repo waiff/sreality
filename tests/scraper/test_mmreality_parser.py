@@ -238,3 +238,14 @@ def test_title_street_fallback_from_original_title():
     # No marker -> None.
     assert _title_street({"originalTitle": "Prodej bytu 2+kk, Praha"}, "Praha", None, None, None) is None
     assert _title_street({}, "Praha", None, None, None) is None
+
+
+def test_title_street_capped_and_anchored():
+    # Review finding: the uncapped capture could ride trailing prose into the
+    # street. Now <=3 tokens, capitalized-or-numeral start.
+    from scraper.mmreality_parser import _title_street
+
+    obj = {"originalTitle": "Prodej domu, Kladno, ul. Dlouhá 15 volejte kdykoliv"}
+    got = _title_street(obj, "Kladno", None, None, None)
+    assert got in ("Dlouhá", "Dlouhá 15", None)  # never the prose tail
+    assert _title_street({"originalTitle": "Prodej, ul. dobrá lokalita"}, "Brno", None, None, None) is None
