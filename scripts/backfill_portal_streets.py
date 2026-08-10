@@ -151,11 +151,14 @@ def derive(source: str, row: dict[str, Any]) -> tuple[str | None, str | None, st
         )
         return s, None, None, s is not None
     if source == "remax":
-        s = street_from_locality(
-            row["address"], position="first",
-            geo_names=(row["locality"], row["district"], *geo),
-        )
-        return s, None, None, s is not None
+        # DISABLED (location-data W0 item 0d): raw_json.address is the first
+        # data-address on the page, which on the captured real page is a
+        # "Podobné nemovitosti" CAROUSEL card's address — a different listing
+        # in a different town. Deriving the subject's street from it imports
+        # the contamination at backfill scale. The subject-anchored substrate
+        # is raw_json.display_address (written by the parser going forward);
+        # re-mining the archived pages is the location program's W2 wave.
+        return None, None, None, False
     if source == "bezrealitky":
         s = clean_street(row["adv_street"])
         hn = (row["adv_house_number"] or "").strip() or None
