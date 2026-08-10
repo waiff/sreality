@@ -2543,6 +2543,87 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/load_obec_population.yml"
   },
   {
+    "filename": "location_claims_intake.yml",
+    "name": "Jobs: Location claim intake (W1)",
+    "description": "Deterministic extraction of location claims from `listings.raw_json`, all nine sources (design 06-migration-backfill.md §6.2.1). No model, no network, no re-fetch: it reads the payloads the scraper already persists and writes `location_claims` (+ observations, absences, refetch cohort) with the §6.1.2 licence ladder applied at the INPUT.",
+    "portal": null,
+    "manual": true,
+    "schedules": [
+      {
+        "cron": "35 * * * *",
+        "human": "Every hour at :35"
+      }
+    ],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "source",
+        "description": "one portal only (blank = all nine)",
+        "required": false,
+        "type": "choice",
+        "default": "",
+        "options": [
+          "",
+          "sreality",
+          "bezrealitky",
+          "bazos",
+          "idnes",
+          "mmreality",
+          "remax",
+          "ceskereality",
+          "realitymix",
+          "maxima"
+        ]
+      },
+      {
+        "name": "mode",
+        "description": "full = walk every listing; incremental = only rows seen since the last ok batch",
+        "required": false,
+        "type": "choice",
+        "default": "incremental",
+        "options": [
+          "incremental",
+          "full"
+        ]
+      },
+      {
+        "name": "max_seconds",
+        "description": "wall-clock budget; stops between batches (blank = none)",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "batch_size",
+        "description": "listings per batch (10000-30000; blank = 20000)",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "dry_run",
+        "description": "extract and report; write nothing",
+        "required": false,
+        "type": "boolean",
+        "default": "false",
+        "options": null
+      }
+    ],
+    "secrets": [
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "location-claims",
+    "cancelInProgress": false,
+    "timeoutMinutes": 55,
+    "permissions": null,
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/location_claims_intake.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/location_claims_intake.yml"
+  },
+  {
     "filename": "migrations.yml",
     "name": "CI: schema replay + SQL correctness",
     "description": "Two gates on one throwaway Postgres, hermetic (no secrets, never touches prod):",

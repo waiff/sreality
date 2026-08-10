@@ -78,3 +78,45 @@ is the tie-breaker). This track records sequencing + shipped state only.
   before it exists).
 - W0 discipline held: no new precision columns on `listings`; precision signals ride
   in raw_json / archived pages until the claims spine exists.
+
+## W1 — PR-D: portal contracts as data + the claims-intake extractor
+
+Shipped (shadow-only; nothing reads these tables yet):
+
+- `contracts/portals/<portal>.yaml` × 9 — the declarative contracts of 02 §2.1/§2.2, with
+  the permanent extractor-id prefixes (`sr. bzr. bzs. id. mm. rx. cr. rm. mx.`), the §2.4
+  caps/priors and the §2.5 exclusion-zone register. The full contract is declared,
+  including the W2 html/map/slug surfaces; only entries naming a `locator.reader` are
+  executable by W1.
+- `location_data/contracts.py` — YAML → `portal_contracts` + `portal_contract_entries`
+  deploy-time projection, idempotent per `contract_version`, refusing a changed body under
+  a loaded version, plus the §2.1.8 retraction path. Git stays the store of record.
+- `location_data/claims_intake.py` — the batched extractor over `listings.raw_json` for all
+  nine sources: keyset pagination, 10–30k batches, watermark-incremental and re-runnable
+  full mode, one `location_claim_batches` row per run, `dirty_locations` enqueued inside
+  the claim-insert statement.
+- `.github/workflows/location_claims_intake.yml` — dispatch + hourly incremental cron on
+  its own `location-claims` concurrency group; every run re-projects the contracts first.
+
+Decisions worth carrying forward:
+
+- **The licence ladder is stronger than `carry_forward`.** W1's blocking gate is
+  `claims JOIN <R2 inventory> WHERE claim_type='coordinate'` = 0, so presence in
+  `mapy_affected` vetoes a coordinate on **every** substrate, including the three portals
+  whose pin is first-party payload. The lane refuses to start if that inventory is missing
+  or empty.
+- **`claim_fingerprint` is computed in SQL**, from the same `location_value_norm()` the
+  column uses. PostgreSQL's `unaccent` is a dictionary (ß→ss, ø→o, đ→d …) and a Python NFKD
+  mirror drifts on exactly the foreign-address cohort — drift there means the unique index
+  stops deduping, silently, in an append-only table. A diagnostic mirror + a parity battery
+  keep the divergence documented.
+- **W1 runs no evidence-bearing method.** `regex_text` / `llm_text` entries are declared but
+  unexecuted until W2a's content-addressed payload store makes a span re-verifiable.
+- Withheld coordinates and unreadable payloads are recorded, never silent: a class-E row
+  gets a `location_claim_absences` row, and sreality's legacy-shape / 80 KB-truncated rows
+  are routed to `location_enrichment_state(lane='sreality_detail_refetch')`.
+
+Open: promoting the fingerprint expression to a named SQL function (it belongs beside
+`location_value_norm` in 382); adding `location_data` to `tests/sql_corpus.RUNTIME_DIRS`
+once the schema migrations are on `main`; the per-portal frozen labelled samples of
+§6.4.0, which gate whether each contract resolves or stays in shadow.
