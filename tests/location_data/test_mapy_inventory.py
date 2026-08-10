@@ -122,7 +122,7 @@ def test_evidence_row_carries_no_coordinate_of_any_kind() -> None:
 # ---------------------------------------------------------------- arm 4
 
 def test_cache_identity_row_is_identity_and_reason_only() -> None:
-    row = inv.cache_identity_row("praha 1, vaclavske namesti 1", _NOW, 7)
+    row = inv.cache_identity_row("praha 1, vaclavske namesti 1", _NOW, 7, True)
     assert row == {
         "query_key": "praha 1, vaclavske namesti 1",
         "query_key_sha256": hashlib.sha256(
@@ -131,6 +131,21 @@ def test_cache_identity_row_is_identity_and_reason_only() -> None:
         "reason_code": "mapy_derived_coordinate",
         "run_id": 7,
     }
+
+
+def test_a_negative_cache_row_is_not_labelled_a_derived_coordinate() -> None:
+    # It is a Mapy query that returned nothing: it never held a coordinate, so
+    # 'mapy_derived_coordinate' would be a false statement in a ledger whose whole
+    # value is being true. 06 6.1.5's vocabulary is closed to two codes.
+    row = inv.cache_identity_row("nowhere at all", _NOW, 7, False)
+    assert row["reason_code"] == "coordinate_provenance_unknown"
+    assert row["query_key"] == "nowhere at all"
+
+
+def test_the_cache_ledger_reason_codes_stay_inside_the_migration_vocabulary() -> None:
+    codes = {inv.cache_identity_row("k", _NOW, 1, flag)["reason_code"]
+             for flag in (True, False)}
+    assert codes == {"mapy_derived_coordinate", "coordinate_provenance_unknown"}
 
 
 # ---------------------------------------------------------------- SQL shape
@@ -178,6 +193,15 @@ def test_the_property_closure_is_the_full_child_intersection() -> None:
 
 def test_the_resume_query_ignores_operator_started_runs() -> None:
     assert "where resumable" in _norm(inv._RESUME_SQL)
+
+
+def test_the_resume_query_is_scoped_to_one_restart_epoch() -> None:
+    # An unscoped max() lets a COMPLETED earlier sweep's end-of-table mark mask an
+    # interrupted --restart, which would then be unresumable and the next dispatch
+    # would print `complete` after scanning nothing.
+    assert "restart_epoch = %(restart_epoch)s" in _norm(inv._RESUME_SQL)
+    assert "max(restart_epoch)" in _norm(inv._EPOCH_SQL)
+    assert "%(restart_epoch)s" in _norm(inv._RUN_INSERT_SQL)
 
 
 def test_timeout_guard_is_transaction_local() -> None:
@@ -248,6 +272,19 @@ def test_no_evidence_table_declares_a_coordinate_column() -> None:
     assert seen >= 15, "the column scanner matched almost nothing — check the regex"
 
 
+def test_the_run_table_carries_restart_lineage() -> None:
+    sql = _migration_sql().lower()
+    assert re.search(r"restart_epoch\s+integer not null default 0", sql)
+
+
+def test_the_migration_sets_its_timeouts_transaction_locally() -> None:
+    # apply_migration wraps the file in a transaction; a bare `set` would leak the
+    # timeout onto whatever the pooled backend serves next.
+    sql = _migration_sql().lower()
+    assert "set local lock_timeout" in sql
+    assert not re.search(r"^\s*set\s+lock_timeout", sql, re.M)
+
+
 def test_new_relations_are_dark_to_browser_roles() -> None:
     body = "\n".join(line.split("--", 1)[0] for line in _migration_sql().lower().splitlines())
     sql = " ".join(body.split())
@@ -285,9 +322,22 @@ class _FakeCursor:
         elif "from geocode_cache" in text:
             self._result = [tuple(r) for r in _CACHE_ROWS]
         elif text.startswith("insert into mapy_inventory_runs"):
-            self._result = [(42,)]
+            run = {
+                "id": len(self.state["runs"]) + 1,
+                "restart_epoch": params["restart_epoch"],
+                "resumable": params["resumable"],
+                "scanned_through_listing_id": 0,
+            }
+            self.state["runs"].append(run)
+            self._result = [(run["id"],)]
+        elif "max(restart_epoch)" in text:
+            self._result = [(max((r["restart_epoch"] for r in self.state["runs"]),
+                                 default=0),)]
         elif "max(scanned_through_listing_id)" in text:
-            self._result = [(self.state["resume_from"],)]
+            epoch = params["restart_epoch"] if params else 0
+            marks = [r["scanned_through_listing_id"] for r in self.state["runs"]
+                     if r["resumable"] and r["restart_epoch"] == epoch]
+            self._result = [(max(marks, default=0),)]
         elif text.startswith("select l.id"):
             after = params["after_id"] if params else 0
             page = [r for r in self.state["listings"] if r[0] > after][:params["batch_size"]]
@@ -297,6 +347,10 @@ class _FakeCursor:
             self.rowcount = 3
         elif text.startswith("update mapy_inventory_runs"):
             self.state["run_updates"].append((text, params))
+            if params and "last_id" in params:
+                for run in self.state["runs"]:
+                    if run["id"] == params["run_id"]:
+                        run["scanned_through_listing_id"] = params["last_id"]
         elif "count(*) filter" in text:
             self._result = [(1, 1, 1, 2)]
         elif text.startswith("select count(*)"):
@@ -344,9 +398,15 @@ def _run(monkeypatch: pytest.MonkeyPatch, argv: list[str], state: dict[str, Any]
 
 
 def _state(listings: list[tuple[Any, ...]], resume_from: int = 0) -> dict[str, Any]:
+    # A prior resumable run in the current (epoch 0) lineage is what a resume mark
+    # actually is — the table has no free-floating high-water mark.
+    runs: list[dict[str, Any]] = []
+    if resume_from:
+        runs.append({"id": 1, "restart_epoch": 0, "resumable": True,
+                     "scanned_through_listing_id": resume_from})
     return {
         "executed": [], "affected_inserts": [], "cache_inserts": [], "run_updates": [],
-        "listings": listings, "resume_from": resume_from, "props": 0, "transactions": 0,
+        "listings": listings, "runs": runs, "props": 0, "transactions": 0,
     }
 
 
@@ -402,6 +462,86 @@ def test_an_explicit_start_marks_the_run_unresumable(monkeypatch: pytest.MonkeyP
     run_insert = [p for t, p in state["executed"]
                   if t.startswith("insert into mapy_inventory_runs")]
     assert run_insert and run_insert[0]["resumable"] is False
+
+
+def _first_scan_after_id(state: dict[str, Any]) -> int:
+    return next(p["after_id"] for t, p in state["executed"] if t.startswith("select l.id"))
+
+
+def test_an_interrupted_restart_resumes_from_its_own_mark_not_the_finished_sweep(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """complete run -> --restart -> interrupted -> plain dispatch resumes the RESTART.
+
+    The bug this pins: with an unscoped `max(scanned_through_listing_id) WHERE
+    resumable`, the completed sweep's end-of-table mark wins over the restart's
+    own mark, so the restart can never be resumed and the next dispatch reports
+    `complete` after scanning nothing — in a ledger whose only job is completeness.
+    """
+    listings = [_listing(i, "geocode") for i in range(1, 31)]
+    state = _state(listings)
+
+    assert _run(monkeypatch, [], state) == 0
+    assert state["runs"][-1]["restart_epoch"] == 0
+    assert state["runs"][-1]["scanned_through_listing_id"] == 30
+
+    # The restart opens a new epoch and is cut short with its own mark at 10. A
+    # SIGKILL leaves exactly this row minus the terminal stamp, which resume
+    # ignores — it reads the mark, not the status.
+    state["executed"] = []
+    assert _run(monkeypatch, ["--restart", "--limit", "10"], state) == 0
+    restart_run = state["runs"][-1]
+    assert restart_run["restart_epoch"] == 1
+    assert _first_scan_after_id(state) == 0, "--restart rescans from the top"
+    assert restart_run["scanned_through_listing_id"] == 10
+
+    state["executed"] = []
+    state["affected_inserts"] = []
+    assert _run(monkeypatch, [], state) == 0
+    assert state["runs"][-1]["restart_epoch"] == 1, "a plain dispatch stays in the epoch"
+    assert _first_scan_after_id(state) == 10, "resumed the finished sweep, not the restart"
+    assert {row["listing_id"] for row in state["affected_inserts"]} == set(range(11, 31))
+
+
+def test_an_operator_started_run_never_becomes_a_restart_epochs_resume_mark(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    listings = [_listing(i, "geocode") for i in range(1, 31)]
+    state = _state(listings)
+    assert _run(monkeypatch, ["--restart", "--limit", "10"], state) == 0
+    assert _run(monkeypatch, ["--start-after-id", "25"], state) == 0
+    assert state["runs"][-1]["resumable"] is False
+
+    state["executed"] = []
+    assert _run(monkeypatch, [], state) == 0
+    assert _first_scan_after_id(state) == 10
+
+
+def test_the_failure_stamp_uses_a_fresh_connection_and_never_masks_the_cause(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The sweep may die BECAUSE the connection died; reusing it would swap the real
+    # traceback for a psycopg error and lose the run's terminal status either way.
+    opened: list[int] = []
+
+    class _DeadConn(_FakeConn):
+        def cursor(self) -> _FakeCursor:
+            raise RuntimeError("connection is closed")
+
+    state = _state([])
+
+    def _fresh(*_a: object, **_k: object) -> _FakeConn:
+        opened.append(1)
+        return _FakeConn(state)
+
+    monkeypatch.setattr(inv.db, "connect", _fresh)
+    inv.record_failure(7, ValueError("boom"))
+    assert opened == [1]
+    fails = [p for t, p in state["executed"] if t.startswith("update mapy_inventory_runs")]
+    assert fails and fails[0]["run_id"] == 7 and "ValueError: boom" in fails[0]["note"]
+
+    monkeypatch.setattr(inv.db, "connect", lambda *a, **k: _DeadConn(state))
+    inv.record_failure(7, ValueError("boom"))  # swallowed, so `raise` re-raises the cause
 
 
 def test_a_dry_run_writes_nothing(monkeypatch: pytest.MonkeyPatch) -> None:

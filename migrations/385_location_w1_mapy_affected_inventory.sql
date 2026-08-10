@@ -42,7 +42,10 @@
 -- are revoked from anon/authenticated (this project's default privileges
 -- auto-GRANT on new tables AND new functions).
 
-set lock_timeout = '5s';
+-- `set local`, not `set`: this file is applied inside a transaction, and a
+-- session-scoped SET would leak the timeout onto whatever the pooled backend
+-- serves next.
+set local lock_timeout = '5s';
 
 ------------------------------------------------------------------
 -- Run bookkeeping. Mutable by design: the job stamps the keyset
@@ -73,6 +76,13 @@ create table mapy_inventory_runs (
   -- query must ignore it or a whole id range would be silently skipped in a
   -- ledger whose only job is completeness.
   resumable                   boolean not null default true,
+  -- Restart lineage. `--restart` means "the payloads moved under us, rescan the
+  -- whole table"; it opens a NEW epoch and the resume high-water mark is read
+  -- only WITHIN the highest epoch. Without this a completed epoch-0 sweep's mark
+  -- (the end of the table) would mask an interrupted restart's own mark, so the
+  -- restart could never be resumed and the next dispatch would scan nothing and
+  -- print `complete` — the one failure this ledger exists to make impossible.
+  restart_epoch               integer not null default 0,
   arm1_rows                   bigint not null default 0,
   arm2_rows                   bigint not null default 0,
   arm3_rows                   bigint not null default 0,
@@ -85,6 +95,10 @@ create table mapy_inventory_runs (
 comment on table mapy_inventory_runs is
   'Run bookkeeping for the C7.2 R2 Mapy affected-set inventory. Mutable (progress '
   'high-water mark + terminal counts); the three evidence tables it stamps are not.';
+comment on column mapy_inventory_runs.restart_epoch is
+  'Restart lineage: a --restart sweep opens epoch max()+1 and resume reads the '
+  'high-water mark only within the highest epoch, so a finished earlier sweep '
+  'cannot mask an interrupted restart.';
 
 ------------------------------------------------------------------
 -- Arm 1-3: listing grain.

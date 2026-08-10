@@ -2608,7 +2608,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "concurrencyGroup": "location-mapy-inventory",
     "cancelInProgress": false,
     "timeoutMinutes": 120,
-    "permissions": null,
+    "permissions": "contents: read",
     "runsUrl": "https://github.com/waiff/sreality/actions/workflows/location_mapy_inventory.yml",
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/location_mapy_inventory.yml"
   },

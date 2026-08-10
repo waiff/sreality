@@ -34,7 +34,10 @@ together, and a re-run continues from there. Re-inserting an already-recorded
 listing is a no-op (ON CONFLICT DO NOTHING — the only write the immutability
 trigger allows). A resumed run does not revisit listings it already scanned, so
 after a payload-changing refetch wave the full sweep is `--restart` (still
-duplicate-free); R1 has stopped new geocodes, so that drift is bounded.
+duplicate-free); R1 has stopped new geocodes, so that drift is bounded. A
+`--restart` opens a new `restart_epoch` and resume is scoped to the highest
+epoch, so a restart that dies mid-sweep resumes from its OWN mark instead of
+inheriting the finished previous sweep's end-of-table mark.
 
 Usage:  python -m scripts.location_mapy_inventory [--batch-size 20000] [--restart]
 Required: SUPABASE_DB_URL.
@@ -98,15 +101,22 @@ _CACHE_INSERT_SQL = """
 """
 
 _RUN_INSERT_SQL = """
-    INSERT INTO mapy_inventory_runs (match_epsilon_deg, note, resumable)
-    VALUES (%(epsilon)s, %(note)s, %(resumable)s)
+    INSERT INTO mapy_inventory_runs
+        (match_epsilon_deg, note, resumable, restart_epoch)
+    VALUES (%(epsilon)s, %(note)s, %(resumable)s, %(restart_epoch)s)
     RETURNING id
 """
+
+# Restart lineage. --restart opens epoch max()+1 and resume reads the high-water
+# mark WITHIN the highest epoch only: a completed earlier sweep's mark is the end
+# of the table, so an unscoped max() would mask an interrupted restart's own mark
+# and the next dispatch would scan nothing and print `complete`.
+_EPOCH_SQL = "SELECT coalesce(max(restart_epoch), 0) FROM mapy_inventory_runs"
 
 _RESUME_SQL = """
     SELECT coalesce(max(scanned_through_listing_id), 0)
     FROM mapy_inventory_runs
-    WHERE resumable
+    WHERE resumable AND restart_epoch = %(restart_epoch)s
 """
 
 # The whole table, active and inactive, by keyset. raw_json is detoasted for the
@@ -262,14 +272,21 @@ def evidence_for_listing(
 
 
 def cache_identity_row(
-    query_key: str, resolved_at: datetime, run_id: int,
+    query_key: str, resolved_at: datetime, run_id: int, has_coordinate: bool,
 ) -> dict[str, Any]:
-    """Arm 4 row: identity + reason, never the cached coordinate (06 6.1.4)."""
+    """Arm 4 row: identity + reason, never the cached coordinate (06 6.1.4).
+
+    A negative-cache row (lat/lng NULL) is a Mapy query that returned nothing, so
+    it never held a Mapy-derived coordinate; within 06 6.1.5's closed two-code
+    vocabulary the honest label is 'coordinate_provenance_unknown'. It is still
+    arm-4 evidence — the query itself was made — and still excluded from arm 3,
+    which needs a coordinate to match against.
+    """
     return {
         "query_key": query_key,
         "query_key_sha256": hashlib.sha256(query_key.encode("utf-8")).hexdigest(),
         "resolved_at": resolved_at,
-        "reason_code": _REASON_MAPY,
+        "reason_code": _REASON_MAPY if has_coordinate else _REASON_UNKNOWN,
         "run_id": run_id,
     }
 
@@ -310,6 +327,23 @@ def _inserted(cur: psycopg.Cursor, attempted: int) -> int:
     return cur.rowcount if cur.rowcount is not None and cur.rowcount >= 0 else attempted
 
 
+def record_failure(run_id: int, exc: BaseException) -> None:
+    """Stamp the run 'failed' on a FRESH connection.
+
+    Whatever broke the sweep may have taken the connection with it (aborted
+    transaction, dead socket), and this stamp must never mask the original
+    exception — so it gets its own connection and swallows its own errors.
+    """
+    try:
+        with db.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(_FAIL_SQL, {
+                    "note": f"{type(exc).__name__}: {exc}"[:500], "run_id": run_id,
+                })
+    except Exception:
+        LOG.exception("INVENTORY could not stamp run=%s as failed", run_id)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--batch-size", type=int, default=20_000,
@@ -321,7 +355,8 @@ def main() -> int:
     parser.add_argument("--start-after-id", type=int, default=None,
                         help="Explicit keyset start; overrides the resume high-water mark.")
     parser.add_argument("--restart", action="store_true",
-                        help="Rescan from the first listing (still never duplicates).")
+                        help="Open a new restart epoch and rescan from the first listing "
+                             "(still never duplicates); an interrupted restart resumes.")
     parser.add_argument("--epsilon-deg", type=float, default=DEFAULT_EPSILON_DEG,
                         help="Arm-3 cell size in degrees (3x3 neighbourhood on top).")
     parser.add_argument("--statement-timeout", type=int, default=600,
@@ -359,11 +394,19 @@ def main() -> int:
 
         run_id: int | None = None
         after_id = 0
+        with conn.cursor() as cur:
+            cur.execute(_EPOCH_SQL)
+            epoch = int(cur.fetchone()[0])
+        # --restart opens a new epoch; resume then reads that epoch's own mark, so
+        # an interrupted restart is resumable and a finished earlier sweep cannot
+        # mask it. A dry run reads nothing and opens nothing.
+        if args.restart and not args.dry_run:
+            epoch += 1
         if args.start_after_id is not None:
             after_id = args.start_after_id
         elif not (args.restart or args.dry_run):
             with conn.cursor() as cur:
-                cur.execute(_RESUME_SQL)
+                cur.execute(_RESUME_SQL, {"restart_epoch": epoch})
                 after_id = int(cur.fetchone()[0])
 
         if not args.dry_run:
@@ -371,17 +414,19 @@ def main() -> int:
                 cur.execute(_RUN_INSERT_SQL, {
                     "epsilon": args.epsilon_deg, "note": args.note,
                     "resumable": args.start_after_id is None,
+                    "restart_epoch": epoch,
                 })
                 run_id = int(cur.fetchone()[0])
                 # Arm 4 first: the cache is the evidence R4 destroys when it drops
                 # geocode_cache, so it is recorded before anything else runs.
                 if cache_rows:
                     cur.executemany(_CACHE_INSERT_SQL, [
-                        cache_identity_row(query_key, resolved_at, run_id)
-                        for query_key, _lat, _lng, resolved_at in cache_rows
+                        cache_identity_row(query_key, resolved_at, run_id,
+                                           lat is not None and lng is not None)
+                        for query_key, lat, lng, resolved_at in cache_rows
                     ])
-            LOG.info("INVENTORY run=%d resuming after listing_id=%d batch=%d",
-                     run_id, after_id, batch_size)
+            LOG.info("INVENTORY run=%d epoch=%d resuming after listing_id=%d batch=%d",
+                     run_id, epoch, after_id, batch_size)
 
         scanned = inserted = props = 0
         arm1 = arm2 = arm3 = 0
@@ -441,10 +486,7 @@ def main() -> int:
                     props = _inserted(cur, 0)
         except Exception as exc:
             if run_id is not None:
-                with conn.cursor() as cur:
-                    cur.execute(_FAIL_SQL, {
-                        "note": f"{type(exc).__name__}: {exc}"[:500], "run_id": run_id,
-                    })
+                record_failure(run_id, exc)
             raise
 
         with conn.cursor() as cur:
