@@ -318,6 +318,65 @@ describe('<NewDedupLabeling>', () => {
     await waitFor(() => expect(screen.getByText('kuchyně')).toBeInTheDocument());
   });
 
+  it('enlarges a tile in the shared lightbox, badged with the tag the tile itself shows', async () => {
+    renderPage();
+    fireEvent.click(await screen.findByRole('button', { name: 'Open photo 101' }));
+    const dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByText('1 / 1')).toBeInTheDocument();
+    // The grid is on "New tag", so the enlarged photo must carry the PROPOSED
+    // tag — not the image row's own CLIP call ('kitchen' → 'kuchyně'), which
+    // is what the lightbox shows by default everywhere else in the app.
+    expect(within(dialog).getByText('interier - kuchyne')).toBeInTheDocument();
+    expect(within(dialog).queryByText('kuchyně')).not.toBeInTheDocument();
+    fireEvent.keyDown(document, { key: 'Escape' });
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+  });
+
+  it('badges the enlarged photo with the original CLIP tag on the "Original tag" view', async () => {
+    renderPage();
+    await screen.findByRole('button', { name: 'Open photo 101' });
+    fireEvent.click(screen.getByText('Original tag'));
+    fireEvent.click(screen.getByRole('button', { name: 'Open photo 101' }));
+    const dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByText('kuchyně')).toBeInTheDocument();
+  });
+
+  it('walks the whole grid from the lightbox, in tile order', async () => {
+    vi.mocked(api.listNewDedupProposals).mockResolvedValue({
+      data: [PROPOSALS[0], { ...PROPOSALS[0], image_id: 102, label: 'exterier - fasada' }],
+    });
+    vi.mocked(queries.fetchImagesByImageIds).mockResolvedValue(
+      new Map([[101, IMAGE], [102, { ...IMAGE, id: 102 }]]),
+    );
+    renderPage();
+    fireEvent.click(await screen.findByRole('button', { name: 'Open photo 101' }));
+    const dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByText('1 / 2')).toBeInTheDocument();
+
+    fireEvent.keyDown(document, { key: 'ArrowRight' });
+    await waitFor(() => expect(within(dialog).getByText('2 / 2')).toBeInTheDocument());
+    // Each stop carries its OWN tile's proposed tag — the gallery is parallel
+    // to the grid, not a bag of images.
+    expect(within(dialog).getByText('exterier - fasada')).toBeInTheDocument();
+  });
+
+  it('opens at the clicked tile even when an earlier tile has no photo yet', async () => {
+    // 101's photo is still in flight, so it is not in the gallery at all —
+    // the index passed to the lightbox is a position in the gallery, never in
+    // the proposals list, or clicking 102 would enlarge someone else.
+    vi.mocked(api.listNewDedupProposals).mockResolvedValue({
+      data: [PROPOSALS[0], { ...PROPOSALS[0], image_id: 102, label: 'exterier - fasada' }],
+    });
+    vi.mocked(queries.fetchImagesByImageIds).mockResolvedValue(
+      new Map([[102, { ...IMAGE, id: 102 }]]),
+    );
+    renderPage();
+    fireEvent.click(await screen.findByRole('button', { name: 'Open photo 102' }));
+    const dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByText('1 / 1')).toBeInTheDocument();
+    expect(within(dialog).getByText('exterier - fasada')).toBeInTheDocument();
+  });
+
   it('confirms a single proposal and drops that tile from Pending WITHOUT refetching the grid', async () => {
     vi.mocked(api.confirmNewDedupProposal).mockResolvedValue({ data: CONFIRM_RESULT });
     renderPage();

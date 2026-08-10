@@ -685,7 +685,7 @@ function TrainingImageCell({
           checked ? 'border-[var(--color-copper)]' : 'border-[var(--color-rule)]',
         ].join(' ')}
       >
-        <button type="button" onClick={onOpen} className="block w-full h-full">
+        <button type="button" onClick={onOpen} className="block w-full h-full cursor-zoom-in">
           <img src={imageSrc(image)} alt="" loading="lazy" className="w-full h-full object-cover" />
         </button>
         <ImageTagBadge
@@ -1077,7 +1077,7 @@ function ImageCell({
       <button
         type="button"
         onClick={onOpen}
-        className="group relative block w-full aspect-square overflow-hidden rounded-[var(--radius-xs)] border border-[var(--color-rule)] bg-[var(--color-inset)]"
+        className="group relative block w-full aspect-square cursor-zoom-in overflow-hidden rounded-[var(--radius-xs)] border border-[var(--color-rule)] bg-[var(--color-inset)]"
       >
         <img
           src={imageSrc(image)}
