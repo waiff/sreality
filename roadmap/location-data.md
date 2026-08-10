@@ -107,6 +107,19 @@ is the tie-breaker). This track records sequencing + shipped state only.
   declared, and most declare nothing). The NOT NULL pair is real on the
   resolution, the candidate and both projections. Recorded in migration 382 at
   the column itself.
+- **PR-B RÚIAN loaders** (`location_data/`, writing migration 381's mirror tables):
+  the `KrovakPositive` value object with ONE audited WGS84 conversion on an
+  explicitly-chosen 1 m PROJ pipeline (the 6 m one is never used); streaming CSV
+  download/parse of both products (`strukt_ADR` + `OB_ADR`, all 19 columns, sha256 +
+  etag + last-modified per artefact); the baseline load (staging → blocking assertions
+  → pointer swap) writing one `registry_version` per load event; the boundary pack
+  loader with three geometries per unit; the gazetteer rebuild; and
+  `location_registry_load.yml` (dispatch `full|boundaries|deltas` + monthly cron,
+  concurrency group `location-registry`). The VFR daily-delta lane ships as
+  chain-verification only and **fails loudly** — see open question below.
+- Open: the daily VFR delta lane cannot apply deltas until the `ST_ZZSZ` element schema
+  and the `TypPrvkuKod` vocabulary are pinned down; until then freshness is the monthly
+  baseline (the design's own free degradation path).
 
 ## Standing decisions
 
