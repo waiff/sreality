@@ -1241,21 +1241,34 @@ def _index_page_archiver(
     client: SrealityClient, conn: Any, dry_run: bool,
 ) -> Any:
     """Archiving hook for iter_index (location-data W0 item 0n): stage each raw
-    index-page JSON payload as a page_kind='index' row, at most once per
-    INDEX_ARCHIVE_REFRESH_HOURS per page key. The index payload carries
-    signals no other surface has (geohash, POI distances, locality.geometry).
-    An archive failure warns and never interrupts the walk — the walk is the
-    platform's core ingest; the durable archive path is the W2a payload store.
+    index-page JSON payload as a page_kind='index' row. The index payload
+    carries signals no other surface has (geohash, POI distances,
+    locality.geometry). Keys are WEEK-STAMPED so the archive accumulates for
+    delisted listings instead of rolling over in place, and a preloaded
+    fresh-key skip set keeps the walk from uploading multi-MB payloads the
+    server-side guard would discard. An archive failure warns and never
+    interrupts the walk — the walk is the platform's core ingest; the durable
+    archive path is the W2a payload store.
     """
     if conn is None or dry_run:
         return None
+    week = db.index_archive_week()
+    try:
+        fresh = db.fresh_index_page_keys(
+            conn, "sreality", hours=db.INDEX_ARCHIVE_REFRESH_HOURS
+        )
+    except Exception as exc:  # noqa: BLE001 - preload is an optimisation only
+        LOG.warning("INDEX archive preload failed: %s", exc)
+        fresh = set()
 
     def archive(offset: int, url: str, payload: dict[str, Any]) -> None:
         district = client.locality_district_id
         key = (
             f"{client.category_main}/{client.category_type}/"
-            f"{district if district is not None else 'all'}/{offset}"
+            f"{district if district is not None else 'all'}/{offset}/{week}"
         )
+        if key in fresh:
+            return
         try:
             db.upsert_portal_raw_page(
                 conn,
@@ -1267,6 +1280,7 @@ def _index_page_archiver(
                 http_status=200,
                 refresh_after_hours=db.INDEX_ARCHIVE_REFRESH_HOURS,
             )
+            fresh.add(key)
         except Exception as exc:  # noqa: BLE001 - archiving must not kill ingest
             LOG.warning("INDEX archive failed key=%s: %s", key, exc)
 
