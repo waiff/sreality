@@ -163,8 +163,11 @@ create table ruian_admin_unit_relations (
 alter table ruian_admin_unit_relations enable row level security;
 
 ------------------------------------------------------------------
--- ruian_admin_unit_geometries - REGISTRY-VERSIONED. Two purposes, two rows,
--- tolerance recorded. A simplified polygon is NEVER the containment authority.
+-- ruian_admin_unit_geometries - REGISTRY-VERSIONED. Three purposes: exactly one
+-- 'authoritative' (unsimplified, the containment authority) and one 'render' row
+-- per (unit, version), plus MANY 'pip' rows per unit - one per ST_Subdivide piece
+-- of the authoritative geometry (04 C4.3; the partial unique below encodes this).
+-- A simplified polygon is NEVER the containment authority.
 --
 -- representative_point and containment_radius_m are A PAIR (01 section 3.3.1):
 -- an admin_centroid position uses the inscribed-circle CENTRE (always inside
@@ -179,7 +182,7 @@ create table ruian_admin_unit_geometries (
   id                         bigserial primary key,
   unit_id                    bigint not null references ruian_admin_units(id),
   registry_version_id        bigint not null references registry_versions(id),
-  purpose                    text not null check (purpose in ('authoritative', 'render')),
+  purpose                    text not null check (purpose in ('authoritative', 'pip', 'render')),
   generalization_tolerance_m numeric not null,
   simplify_algorithm         text,
   geom                       geometry(MultiPolygon, 4326) not null,
@@ -188,12 +191,17 @@ create table ruian_admin_unit_geometries (
   inscribed_radius_m         double precision not null,
   centroid_point             geometry(Point, 4326) not null,
   containment_radius_m       double precision not null,
-  max_radius_m               double precision,
-  unique (unit_id, registry_version_id, purpose)
+  max_radius_m               double precision
 );
 alter table ruian_admin_unit_geometries enable row level security;
 
+-- 'pip' is deliberately outside the unique: one row per subdivided piece.
+create unique index ruian_aug_unique_nonpip on ruian_admin_unit_geometries
+  (unit_id, registry_version_id, purpose) where purpose <> 'pip';
+
 create index ruian_aug_geom_gist on ruian_admin_unit_geometries using gist (geom);
+create index ruian_aug_pip_gist  on ruian_admin_unit_geometries using gist (geom)
+  where purpose = 'pip';
 create index ruian_aug_auth      on ruian_admin_unit_geometries (unit_id)
   where purpose = 'authoritative';
 
