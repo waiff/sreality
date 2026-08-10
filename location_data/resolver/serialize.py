@@ -96,6 +96,14 @@ def _claim_value(claim: Any) -> Any:
     }
 
 
+def epoch_seconds(moment: datetime) -> float:
+    """Seconds since the epoch under the SAME convention `_plain` uses — a naive datetime
+    is UTC, never process-local. `datetime.timestamp()` on a naive value reads the host's
+    timezone, which is a replay divergence with no visible cause."""
+    aware = moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
+    return aware.timestamp()
+
+
 def as_of(claims: Iterable[Any]) -> datetime | None:
     """`as_of = max(observed_at)` over the consumed claims — the resolver's ONLY notion of
     "now" (03 §3.0 rule 2)."""

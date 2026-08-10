@@ -134,8 +134,29 @@ def run(
     per_source_locality_trusted: bool = False,
 ) -> list[Detection]:
     """Rule set v1. Every rule is a pure predicate over (claims, resolution, registry)."""
+    return run_with_coverage(
+        resolution, claims, normalized, registry=registry,
+        per_source_locality_trusted=per_source_locality_trusted,
+    )[0]
+
+
+def run_with_coverage(
+    resolution: Resolution,
+    claims: Sequence[Claim],
+    normalized: dict[int, NormalizedClaim],
+    *,
+    registry: RegistryView,
+    per_source_locality_trusted: bool = False,
+) -> tuple[list[Detection], frozenset[str]]:
+    """`run`, plus the set of rules this run actually EVALUATED.
+
+    Auto-close reads it (00 §8.2): a rule whose guard was not satisfied this time — the
+    street survivorship produced no winner, so `street_not_in_obec` never ran — did not
+    "stop firing". It was not asked. Closing its open finding would record an upstream fix
+    that never happened."""
     listing_id = resolution.listing_id
     out: list[Detection] = []
+    evaluated: set[str] = set(_signal_rules_evaluated(resolution))
     served_street = _served(resolution, "street_name")
     served_obec = resolution.admin.obec_name
     obec_kod = resolution.admin.obec_kod
@@ -160,6 +181,7 @@ def run(
 
     # ---- street_not_in_obec: the winning street must exist in the resolved obec.
     if served_street and obec_kod is not None:
+        evaluated.add("street_not_in_obec")
         key = normalize_match_key(served_street)
         if not any(s.name_norm == key for s in registry.streets_in_obec(obec_kod)):
             out.append(
@@ -171,6 +193,8 @@ def run(
 
     # ---- street_from_excluded_block_vs_served: the remax carousel class. A
     # `subject_scoped=false` extraction is stored, never rankable, and DOES open this.
+    if served_street:
+        evaluated.add("street_from_excluded_block_vs_served")
     for claim in sorted(claims, key=lambda c: c.id):
         if claim.claim_type != "street_name" or claim.subject_scoped is not False:
             continue
@@ -188,6 +212,7 @@ def run(
     # ---- street_claim_vs_derived: a validated text street claim ≠ the derived street.
     derived_street = _derived_street(resolution)
     if derived_street and served_street:
+        evaluated.add("street_claim_vs_derived")
         for claim in sorted(claims, key=lambda c: c.id):
             if claim.claim_type != "street_name" or claim.subject_scoped is False:
                 continue
@@ -204,6 +229,7 @@ def run(
 
     # ---- house_number_disagreement: two claims give different čp. Two portals disagreeing
     # on a house number is a DO-NOT-MERGE signal, not a survivorship tie.
+    evaluated.add("house_number_disagreement")
     numbers: dict[str, list[int]] = {}
     for claim in sorted(claims, key=lambda c: c.id):
         if claim.claim_type != "house_number_cp" or claim.subject_scoped is False:
@@ -224,6 +250,8 @@ def run(
 
     # ---- obec_claim_vs_resolution, AFTER the post-town exclusion (a Czech Post town is not
     # an obec and differs on 57.0 % of bazos rows).
+    if served_obec and per_source_locality_trusted:
+        evaluated.add("obec_claim_vs_resolution")
     if served_obec:
         for claim in sorted(claims, key=lambda c: c.id):
             if claim.claim_type != "obec_name" or claim.subject_scoped is False:
@@ -240,6 +268,8 @@ def run(
                 )
 
     # ---- cadastral_vs_obec: a k.ú. claim that maps to a different obec.
+    if obec_kod is not None:
+        evaluated.add("cadastral_vs_obec")
     for claim in sorted(claims, key=lambda c: c.id):
         if claim.claim_type != "cadastral_territory_name" or claim.subject_scoped is False:
             continue
@@ -261,8 +291,12 @@ def run(
 
     # ---- pin_collapse_with_heterogeneity: a cluster at/over threshold with ≥2 streets.
     collision = resolution.precision.collision
+    if "threshold_n" in collision:
+        evaluated.add("pin_collapse_with_heterogeneity")
     if (
-        int(collision.get("n_exact", 1)) > int(collision.get("threshold_n", 1))
+        # `>=` — 03 §3.11.1 spells the rule "cluster >= threshold with >=2 distinct
+        # streets", the same reading as the S6 cap and the epoch classifier.
+        int(collision.get("n_exact", 1)) >= int(collision.get("threshold_n", 1))
         and int(collision.get("heterogeneity", 0)) >= 2
     ):
         out.append(
@@ -275,15 +309,34 @@ def run(
 
     # ---- postal_city_vs_obec: INFORMATIONAL, never an error.
     postal = _served(resolution, "postal_town")
-    if postal and served_obec and normalize_match_key(postal) != normalize_match_key(served_obec):
-        out.append(
-            _detect(
-                listing_id, "postal_city_vs_obec", "postal_town", "info",
-                stored=served_obec, claimed=postal,
+    if postal and served_obec:
+        evaluated.add("postal_city_vs_obec")
+        if normalize_match_key(postal) != normalize_match_key(served_obec):
+            out.append(
+                _detect(
+                    listing_id, "postal_city_vs_obec", "postal_town", "info",
+                    stored=served_obec, claimed=postal,
+                )
             )
-        )
 
-    return sorted(out, key=lambda d: (SEVERITIES.index(d.severity), d.rule, d.dedupe_key))
+    ordered_out = sorted(out, key=lambda d: (SEVERITIES.index(d.severity), d.rule, d.dedupe_key))
+    return ordered_out, frozenset(evaluated | {d.rule for d in ordered_out})
+
+
+def _signal_rules_evaluated(resolution: Resolution) -> set[str]:
+    """Which of the resolver-side signal rules S2/S4/S6 actually got to test this run.
+
+    `country_dispute` always: S2 runs on every resolution. The other two are conditional on
+    inputs the resolution itself records — a registry point AND a pin for the cross-check,
+    a mapped declared label for the precision comparison."""
+    rules = {"country_dispute"}
+    positions = {c.position_source for c in resolution.candidates}
+    kinds = {c.target_kind for c in resolution.candidates}
+    if "registry_point" in positions and "coordinate_only" in kinds:
+        rules.add("pin_registry_distance")
+    if any(cap.startswith("declared:") for cap in resolution.precision.declared_caps):
+        rules.add("declared_precision_vs_assigned")
+    return rules
 
 
 def member_location_spread(

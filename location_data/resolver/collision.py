@@ -182,7 +182,11 @@ def classify(cluster: ClusterRow, policy: CollisionPolicyRow, foreign_share: flo
         # (740 listings on one Spanish point).
         return "foreign_resort_centroid"
     heterogeneous = cluster.distinct_streets >= policy.min_distinct_streets
-    over_threshold = cluster.listing_count > policy.threshold_n
+    # `>=`, not `>`: 03 §3.8.4 states the rule as "n >= threshold and >= 2 distinct
+    # streets", and `precision.cluster_caps` — the S6 half of the SAME decision — already
+    # reads it that way. Two spellings meant a cluster of exactly `threshold_n` was capped
+    # at `obec` by S6 while the epoch went on calling it `normal`.
+    over_threshold = cluster.listing_count >= policy.threshold_n
     if over_threshold and heterogeneous:
         near_centroid = (
             cluster.distance_to_admin_centroid_m is not None

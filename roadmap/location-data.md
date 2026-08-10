@@ -162,11 +162,43 @@ is the tie-breaker). This track records sequencing + shipped state only.
   `*/15` cron, concurrency group `location-resolve`).
 - **S9 reconciler v1**: the cheap structural rules of 03 §3.11.1 into the append-only
   ledger, keyed on the version-free `dedupe_key`; auto-close only when the predicate stops
-  firing AND the inputs changed.
+  firing AND the inputs changed — the inputs compared against the resolution the current
+  projection was built from, and scoped to the rules the run actually EVALUATED (a rule
+  whose guard never ran did not stop firing; it was not asked).
+
+Review remediation, same PR (migration **387**, additive):
+
+- **A `declared_shape` policy row with no declared shape DEGRADES, it never raises.** With
+  the shipped v1 seed every sreality portal-pin listing resolving at `obec` /
+  `cast_obce_or_quarter` / `street` hit `UncertaintyPolicyError` in S4 and got no resolution
+  at all. The lookup now falls through to the `'*'` row and then to the admin geometric
+  bound. Regression tests read the seed out of migration 383, not out of the fixture — the
+  fixture has no per-source rows, which is why nothing caught it.
+- **Admissibility is evaluated ONCE**, in `core.resolve`, and handed to S3 and S4 as well as
+  S7. A `subject_scoped=false` carousel claim used to rank a candidate, carry the admin
+  chain and then flow back out through the preserve-if-null registry fill. It is still
+  stored and still opens `street_from_excluded_block_vs_served`.
+- **The pin is chosen by declared quality, then by claim id** — not "lowest id wins". Every
+  losing coordinate is persisted as a candidate with `distance_to_pin_m` and its own
+  rejection reason, and a blurred sibling no longer blurs the pin it lost to.
+- **Typed slots are unwrapped by claim TYPE**, so a combined `487/40` reaching
+  `house_number_cp` no longer lands in the column verbatim (03 §3.3.2).
+- **`--sources` can no longer mint an epoch** (it forces a dry-run): the minted epoch becomes
+  THE epoch for every portal, so a subset epoch silently drops the unselected sources'
+  evidence. Both epoch reads now join `listings` and filter `is_active`.
+- `declared_precision_vs_assigned` is tested against the rung S6 was HANDED (comparing the
+  post-cap rung could never fire); the `>= threshold` reading of 03 §3.8.4 is now the same
+  in the epoch classifier, the S6 cap and S9; the queue slice orders by
+  `(enqueued_at, listing_id)`; the survivorship sort key uses the canonical UTC convention
+  rather than `datetime.timestamp()` on a naive value.
+- **Migration 387**: `listing_location_current.position_quality_class` +
+  `collision_epoch_id` (03 §3.10's two change requests — the builder computed both and the
+  writer popped them), and the five `location_field_policy` v1 rows S7 arbitrates but the
+  383 seed never had (`evidencni`, `postal_town`, `development_name`,
+  `cadastral_territory_name`, `parcel_number`, all structurally unwinnable without one).
+  S7's own `blocked` set now travels on the resolution and is logged by the drain.
 
 Open against the schema: `ruian_admin_unit_geometries.purpose` does not admit `'pip'`
 (04 C4.3 wants the subdivided geometries; the resolver prefers `'pip'` and degrades to
-`'authoritative'`); `listing_location_current` carries neither `position_quality_class` nor
-`collision_epoch_id` (03 §3.10 change requests), so the builder computes both and the writer
-drops them; `location_uncertainty_policy` has no seed row for a pin capped to an admin rung,
-which the lookup resolves to the unit's own area bound.
+`'authoritative'`); `location_uncertainty_policy` has no seed row for a pin capped to an
+admin rung, which the lookup resolves to the unit's own area bound.

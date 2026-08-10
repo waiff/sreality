@@ -16,6 +16,8 @@ Batch discipline (03 §3.14.3, learned three times):
   pooler backend and released on another strands;
 * **judge the queue by OLDEST-ROW AGE, not by length** (the repo's standing rule); the run
   log prints it every batch;
+* the slice is ordered `(enqueued_at, listing_id)` — a bare timestamp sort reshuffles on
+  every call, because a batch enqueue shares one `now()` and the tie order is arbitrary;
 * resumable by construction: the queue IS the cursor, and a failed row comes back with a
   backoff rather than blocking the slice.
 
@@ -55,7 +57,7 @@ _CLAIM_SLICE_SQL = """
 SELECT listing_id, attempts
   FROM dirty_locations
  WHERE next_eligible_at <= now()
- ORDER BY enqueued_at
+ ORDER BY enqueued_at, listing_id
  FOR UPDATE SKIP LOCKED
  LIMIT %s
 """
@@ -83,7 +85,8 @@ SELECT listing_id, source, ST_Y(geom), ST_X(geom), granularity::text, position_s
        radius_semantics::text, position_licence_class::text, ruian_adm_kod,
        stavebni_objekt_kod, obec_kod, cast_obce_kod, okres_kod, kraj_kod, admin_path::text,
        admin_assignment_method::text, street_name, psc, display_label, place_search_text,
-       country_code, country_status::text, pin_shared_by_n, geo_blockable, render_as
+       country_code, country_status::text, pin_shared_by_n, geo_blockable, render_as,
+       position_quality_class
   FROM listing_location_current
  WHERE property_id = %s
  ORDER BY listing_id
@@ -226,13 +229,17 @@ def _resolve_one(
         )
         return
 
+    # Read BEFORE the write: the projection still points at the resolution this listing was
+    # last served from, which is what `inputs_changed` compares against.
+    previous_inputs = resolve_db.previous_consumed_inputs(conn, listing_id)
+
     resolution_id = resolve_db.write_resolution(conn, resolution)
     resolve_db.write_candidates(conn, resolution_id, resolution)
 
-    detections = reconciler.run(
+    detections, evaluated_rules = reconciler.run_with_coverage(
         resolution, claims, normalize.normalize_all(claims), registry=ctx.registry
     )
-    open_before = resolve_db.open_dedupe_keys(conn, listing_id)
+    open_before = resolve_db.open_dedupe_keys(conn, listing_id, rules=evaluated_rules)
     property_id = _property_of(conn, listing_id)
     resolve_db.write_contradictions(
         conn, detections, reconciler_version=RECONCILER_VERSION,
@@ -240,7 +247,10 @@ def _resolve_one(
         property_id=property_id,
     )
     resolve_db.append_auto_close(
-        conn, reconciler.auto_close(open_before, detections, inputs_changed=True)
+        conn,
+        reconciler.auto_close(
+            open_before, detections, inputs_changed=_inputs_changed(previous_inputs, resolution)
+        ),
     )
 
     cluster = (
@@ -263,8 +273,25 @@ def _resolve_one(
     if property_id is not None:
         _rebuild_property(conn, property_id, ctx)
     LOG.info(
-        "RESOLVE ok listing_id=%s status=%s granularity=%s blockable=%s",
+        "RESOLVE ok listing_id=%s status=%s granularity=%s blockable=%s blocked_fields=%s",
         listing_id, resolution.status, row["granularity"], row["geo_blockable"],
+        ",".join(resolution.survivorship_blocked) or "-",
+    )
+
+
+def _inputs_changed(
+    previous: tuple[str, int, str, int] | None, resolution: Any
+) -> bool:
+    """00 §8.2: auto-close fires only when the CONSUMED inputs actually changed. With no
+    previous projection there is nothing to compare, so nothing is closed — a finding is
+    never retired on the strength of an assumption."""
+    if previous is None:
+        return False
+    return previous != (
+        resolution.claim_set_hash,
+        resolution.registry_version_id,
+        resolution.policy_version,
+        resolution.collision_epoch_id,
     )
 
 
@@ -283,6 +310,9 @@ def _rebuild_property(conn: psycopg.Connection, property_id: int, ctx: ResolverC
         "cast_obce_kod", "okres_kod", "kraj_kod", "admin_path", "admin_assignment_method",
         "street_name", "psc", "display_label", "place_search_text", "country_code",
         "country_status", "pin_shared_by_n", "geo_blockable", "render_as",
+        # the property winner is chosen partly on this (projection._precision_key); reading
+        # it as NULL for every member flattened the quality term to a constant.
+        "position_quality_class",
     )
     with conn.cursor() as cur:
         cur.execute(_PROPERTY_MEMBERS_SQL, (property_id,))

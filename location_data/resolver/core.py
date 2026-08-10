@@ -80,16 +80,23 @@ def resolve(
     # ---- S1. Two passes: the town-as-street rejection needs the constraining obec, and
     # the constraining obec is read off the first pass. Deterministic either way.
     first_pass = s1.normalize_all(ordered)
-    prelim = s3.collect_constraints(ordered, first_pass)
+    prelim = s3.collect_constraints(_admissible(ordered, first_pass), first_pass)
     obec_kods = _constraining_obec_kods(prelim, ctx)
     normalized = s1.normalize_all(
         ordered,
         is_place_name=lambda key: _is_place_name(key, ctx),
         street_exists=lambda key: _street_exists(key, obec_kods, ctx),
     )
+    # ---- ADMISSIBILITY, evaluated ONCE (§3.2 rule 4, §3.9.1 invariants 5 and 6). A
+    # `subject_scoped=false` extraction — the remax carousel class — is stored evidence and
+    # opens `street_from_excluded_block_vs_served` in S9, but it may not rank a candidate,
+    # drive the admin chain or fill a NULL. S7 applied this filter already; S3/S4 did not,
+    # so the poison won there and then flowed back out through the preserve-if-null fill.
+    admissible = _admissible(ordered, normalized)
+    admissible_ids = frozenset(c.id for c in admissible)
 
     # ---- S2. Runs before everything else; `foreign` skips CZ resolution but keeps the pin.
-    declared = s4.read_declared_precision(ordered)
+    declared = s4.read_declared_precision(admissible)
     pin = prelim.pin
     country = s2.determine_country(
         ordered, normalized, registry=ctx.registry, constants=ctx.constants, pin=pin
@@ -112,12 +119,16 @@ def resolve(
         constraints = prelim
     else:
         candidate_set, constraints = s3.generate(
-            ordered, normalized, ctx, source=source, pin_is_precise=pin_is_precise
+            admissible, normalized, ctx, source=source, pin_is_precise=pin_is_precise
         )
 
-    # ---- S4.
-    outcome = s4.assign(ordered, candidate_set, ctx, source=source)
+    # ---- S4. Sees every claim (a refused coordinate is still stored as a candidate) but
+    # may only WIN with an admissible one.
+    outcome = s4.assign(
+        ordered, candidate_set, ctx, source=source, admissible_claim_ids=admissible_ids
+    )
     signals.extend(outcome.signals)
+    declared = outcome.declared  # narrowed to the coordinate claim that actually won
     position = outcome.position
     if position.licence_class == EPHEMERAL:  # structurally impossible; assert it anyway
         raise ValueError("an ephemeral_display_only coordinate reached the resolution winner")
@@ -147,7 +158,9 @@ def resolve(
         match_components=(winner_candidate.component_match if winner_candidate else {}),
         containment_radius_m=containment,
     )
-    if s6.declared_vs_assigned_conflict(declared, precision, ctx.granularity_rank):
+    # Tested against the rung S6 was HANDED, not against the rung it returned: S6 applies
+    # the declared cap itself, so comparing the post-cap value could never fire.
+    if s6.declared_vs_assigned_conflict(declared, position.granularity, ctx.granularity_rank):
         signals.append(
             ContradictionSignal(
                 rule="declared_precision_vs_assigned",
@@ -202,6 +215,9 @@ def resolve(
             sorted(signals, key=lambda s: (s.rule, s.field, s.severity))
         ),
         rung_trace=candidate_set.rung_trace,
+        # S7's own "this field had claims and still produced no winner" signal. Discarding
+        # it hid the fact that five survivorship fields had no v1 policy row at all.
+        survivorship_blocked=survivorship.blocked,
     )
     return _stamp_content_hash(resolution)
 
@@ -233,6 +249,7 @@ def content_payload(resolution: Resolution) -> dict[str, Any]:
         "position_licence_class": resolution.position_licence_class,
         "contradiction_signals": list(resolution.contradiction_signals),
         "rung_trace": list(resolution.rung_trace),
+        "survivorship_blocked": list(resolution.survivorship_blocked),
     }
 
 
@@ -293,6 +310,13 @@ def _status(
         # failure: it still carries a position, its axes and its collision evidence.
         return "resolved"
     return "resolved"
+
+
+def _admissible(
+    claims: Sequence[Claim], normalized: dict[int, Any]
+) -> tuple[Claim, ...]:
+    """The ONE admissibility gate, shared by S3, S4 and S7 (03 §3.2 rule 4 / §3.9.1)."""
+    return tuple(c for c in claims if s7.admissible(c, normalized.get(c.id)) is None)
 
 
 def _constraining_obec_kods(constraints: s3.Constraints, ctx: ResolverContext) -> tuple[int, ...]:

@@ -238,16 +238,20 @@ def _cap_confidence(value: str, ceiling: str) -> str:
 
 
 def declared_vs_assigned_conflict(
-    declared: DeclaredPrecision, precision: Precision, rank
+    declared: DeclaredPrecision, assigned_granularity: str, rank
 ) -> bool:
     """§3.11.1 `declared_precision_vs_assigned`: the portal declares `municipality` and the
-    resolution nevertheless claims `address_point`."""
+    resolution nevertheless claims `address_point`.
+
+    `assigned_granularity` is the rung REACHED, BEFORE `assess` applies the declared cap.
+    Passing the post-cap `Precision.granularity` here makes the predicate unreachable by
+    construction — `assess` has already coarsened it to at most `capped`."""
     if not declared.label:
         return False
     capped = DECLARED_CAP.get(declared.label)
     if capped is None:
         return False
-    return rank.rank(precision.granularity) > rank.rank(capped)
+    return rank.rank(assigned_granularity) > rank.rank(capped)
 
 
 def caps_from_claims(labels: Sequence[str]) -> tuple[str, ...]:

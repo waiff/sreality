@@ -34,6 +34,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 
+from location_data.resolver import serialize
 from location_data.resolver.types import (
     Claim,
     ContradictionSignal,
@@ -153,7 +154,11 @@ def evaluate_field(
         # Primary order is the POLICY RANK (registry > portal > mined text); the
         # `tie_breaker` column then orders within one rank.
         granularity_rank = ctx.rank.rank(granularity) if granularity else -1
-        key = (row.rank, -granularity_rank, -claim.observed_at.timestamp(), claim.id)
+        # NOT datetime.timestamp(): on a NAIVE datetime that reads the PROCESS's local
+        # timezone, so the same claim set ranks differently on a machine in another zone —
+        # a replay divergence that looks like a resolver bug. One UTC convention, the
+        # canonical serializer's.
+        key = (row.rank, -granularity_rank, -serialize.epoch_seconds(claim.observed_at), claim.id)
         scored.append((key, claim, row, norm))
 
     if not scored:
@@ -268,12 +273,29 @@ def _best_policy(
     return min(rows, key=lambda r: (r.rank, r.source_pattern, r.method_pattern))
 
 
+# Which typed slot S1 parsed OUT of a claim's verbatim text is a function of the claim
+# TYPE, never of which slot happens to be present: a `house_number_cp` claim reading
+# "1023/14" normalizes to {cislo_domovni: 1023, cislo_orientacni: 14}, and keying the unwrap
+# on slot presence writes the combined string into house_number_cp verbatim (03 §3.3.2:
+# three typed slots, never collapsed).
+_SLOT_FOR_FIELD: dict[str, tuple[str, ...]] = {
+    "street_name": ("street",),
+    "psc": ("psc",),
+    "house_number_cp": ("cislo_domovni",),
+    "house_number_co": ("cislo_orientacni",),
+    "evidencni": ("evidencni",),
+}
+
+
 def _value_of(claim: Claim, norm: NormalizedClaim | None) -> object:
     if claim.value_text is not None:
-        if norm is not None and norm.typed_slots:
-            for key in ("street", "psc"):
-                if key in norm.typed_slots:
-                    return norm.typed_slots[key]
+        slots = norm.typed_slots if norm is not None else {}
+        for key in _SLOT_FOR_FIELD.get(claim.claim_type, ()):
+            if key in slots:
+                value = str(slots[key])
+                if claim.claim_type == "house_number_co" and slots.get("znak_orientacniho"):
+                    value = f"{value}{slots['znak_orientacniho']}"
+                return value
         return claim.value_text
     if claim.value_num is not None:
         return claim.value_num

@@ -526,3 +526,6 @@ class Resolution:
     position_licence_class: str
     contradiction_signals: tuple[ContradictionSignal, ...] = ()
     rung_trace: tuple[dict[str, Any], ...] = ()
+    # Fields that HAD claims and still produced no winner (S7's own `blocked` signal).
+    # Observability, not a contradiction card: most causes are legitimate policy refusals.
+    survivorship_blocked: tuple[str, ...] = ()

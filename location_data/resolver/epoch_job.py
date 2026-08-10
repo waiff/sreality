@@ -15,6 +15,18 @@ clusters — every listing then resolves with `classification='normal'` and the 
 carries real evidence. That is self-correcting and deliberate: the alternative (clustering
 raw claims) would cluster coordinates the resolver has not yet accepted as positions.
 
+**An epoch is always corpus-complete.** `--sources` is a DIAGNOSTIC and forces `--dry-run`:
+the minted epoch becomes THE current epoch for every portal (`current_epoch` is a bare
+`ORDER BY computed_at DESC LIMIT 1`), so a subset epoch would silently drop the unselected
+sources' collision evidence and every listing on those portals would then resolve against
+an epoch that contains no cluster for it — reading as `classification='normal'`, which is
+the exact false-negative the collapse detector exists to catch.
+
+**Delisted listings are not evidence.** Both the pin read and the previous-members read
+join `listings` and filter `is_active`: a cluster's `listing_count` must count what is on
+the market, and comparing an all-rows previous membership against an active-only current
+one would enqueue re-resolutions for every listing that merely went inactive.
+
 CLI:  python -m location_data.resolver.epoch_job [--sources a,b] [--dry-run]
 """
 
@@ -37,12 +49,14 @@ JOB_NAME = "pin_collision_recompute"
 CONCURRENCY_GROUP = "location-collision"
 
 _PIN_ROWS_SQL = """
-SELECT listing_id, source, ST_Y(geom), ST_X(geom), street_name, obec_kod,
-       blur_evidence::text IN ('declared', 'both'), is_cz
-  FROM listing_location_current
- WHERE geom IS NOT NULL
-   AND (cardinality(%s::text[]) = 0 OR source = ANY(%s::text[]))
- ORDER BY listing_id
+SELECT p.listing_id, p.source, ST_Y(p.geom), ST_X(p.geom), p.street_name, p.obec_kod,
+       p.blur_evidence::text IN ('declared', 'both'), p.is_cz
+  FROM listing_location_current p
+  JOIN listings l ON l.id = p.listing_id
+ WHERE p.geom IS NOT NULL
+   AND l.is_active
+   AND (cardinality(%s::text[]) = 0 OR p.source = ANY(%s::text[]))
+ ORDER BY p.listing_id
 """
 
 _CENTROID_DISTANCE_SQL = """
@@ -85,10 +99,12 @@ SELECT source, cell_key, ST_Y(geom), ST_X(geom), listing_count, distinct_streets
 """
 
 _PREVIOUS_MEMBERS_SQL = """
-SELECT listing_id, source, ST_Y(geom), ST_X(geom)
-  FROM listing_location_current
- WHERE geom IS NOT NULL
- ORDER BY listing_id
+SELECT p.listing_id, p.source, ST_Y(p.geom), ST_X(p.geom)
+  FROM listing_location_current p
+  JOIN listings l ON l.id = p.listing_id
+ WHERE p.geom IS NOT NULL
+   AND l.is_active
+ ORDER BY p.listing_id
 """
 
 _ENQUEUE_SQL = """
@@ -112,6 +128,14 @@ def run(
     registry_version_id, _ = resolve_db.current_registry_version(conn)
     policy = resolve_db.load_collision_policy(conn, policy_version)
     wanted = sources or []
+    if wanted and not dry_run:
+        LOG.warning(
+            "EPOCH --sources=%s is DIAGNOSTIC ONLY: the minted epoch would become the "
+            "current epoch for every portal and drop the unselected sources' evidence. "
+            "Forcing dry-run; mint a corpus-complete epoch instead.",
+            ",".join(wanted),
+        )
+        dry_run = True
 
     with conn.cursor() as cur:
         cur.execute(_PIN_ROWS_SQL, (wanted, wanted))
@@ -241,7 +265,11 @@ def _reclassified_count(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="mint a pin-collision epoch")
-    parser.add_argument("--sources", default="", help="comma-separated; blank = every source")
+    parser.add_argument(
+        "--sources",
+        default="",
+        help="comma-separated; blank = every source. DIAGNOSTIC ONLY — forces --dry-run",
+    )
     parser.add_argument("--policy-version", default=POLICY_VERSION_DEFAULT)
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)

@@ -14,6 +14,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 
 from location_data.resolver.geo import haversine_m
 from location_data.resolver.types import (
@@ -358,3 +359,58 @@ def claim(
         declared_radius_m=declared_radius_m, blur_evidence=blur_evidence,
         claim_confidence=claim_confidence,
     )
+
+
+# ------------------------------------------------------- the SHIPPED v1 policy seeds
+#
+# `UNCERTAINTY_POLICY` above is a hand-written fixture, and that is exactly why the
+# shipped seed's sreality/maxima `declared_shape` rows — the ones with r95_m NULL —
+# were never exercised: the fixture has no per-source rows at all. Anything that
+# claims to test "the v1 policy" reads the migration instead.
+
+_MIGRATIONS = Path(__file__).resolve().parents[2] / "migrations"
+
+
+def v1_uncertainty_policy() -> tuple[UncertaintyPolicyRow, ...]:
+    """`location_uncertainty_policy`'s v1 seed, parsed out of migration 383."""
+    from tests.location_data.test_location_schema_contracts import _unquote, _values_rows
+    from tests.test_migration_rls_grants import _strip_comments
+
+    sql = _strip_comments(
+        (_MIGRATIONS / "383_location_w1_resolutions.sql").read_text(encoding="utf-8")
+    )
+    rows = _values_rows(sql, "location_uncertainty_policy")
+    out: list[UncertaintyPolicyRow] = []
+    for row in rows:
+        r95 = row[4].strip()
+        out.append(
+            UncertaintyPolicyRow(
+                policy_version=_unquote(row[0]) or "v1",
+                position_source=_unquote(row[1]) or "",
+                granularity=_unquote(row[2]) or "",
+                source=_unquote(row[3]) or "*",
+                r95_m=None if r95 == "null" else float(r95),
+                radius_semantics=_unquote(row[5]) or "",
+                derivation=_unquote(row[6]) or "constant",
+            )
+        )
+    assert out, "migration 383 seeds no location_uncertainty_policy rows"
+    return tuple(out)
+
+
+def v1_field_policy_fields() -> set[str]:
+    """Every `location_claim_type` that HAS a `location_field_policy` v1 row, read out of
+    the migrations (383 seeds ten; 387 adds the five S7 arbitrates but never had)."""
+    import re
+
+    from tests.test_migration_rls_grants import _statements, _strip_comments
+
+    fields: set[str] = set()
+    for path in sorted(_MIGRATIONS.glob("38*_location_w1_*.sql")):
+        sql = _strip_comments(path.read_text(encoding="utf-8")).lower()
+        for stmt in _statements(sql):
+            if not re.match(r"\s*insert into location_field_policy\b", stmt.lower()):
+                continue
+            for block in re.findall(r"array\[(.*?)\]::location_claim_type\[\]", stmt, re.S):
+                fields.update(re.findall(r"'([a-z0-9_]+)'", block))
+    return fields

@@ -21,6 +21,14 @@ Three rules that are not negotiable:
 A coordinate whose claim carries `licence_class='ephemeral_display_only'` (the Mapy.cz
 class) is stored as a candidate and can never win: `loc_res_licence` and `llc_licence`
 make that structural, and this module refuses it before the constraint has to.
+
+**Which coordinate becomes the pin is a decision, not an accident of row order.** A listing
+can carry several `coordinate` claims — a portal-declared exact pin, a blurred fallback, a
+carousel/neighbour pin that is `subject_scoped=false`, a Mapy-derived one. The pin is
+chosen from the ADMISSIBLE ones (§3.2 rule 4 / §3.9.1 invariants 5-6, evaluated once in
+`core.resolve`) ordered by DECLARED QUALITY and only then by claim id; every losing
+coordinate is persisted as a candidate carrying `distance_to_pin_m` and its own rejection
+reason, so the choice is reproducible from stored data.
 """
 
 from __future__ import annotations
@@ -63,6 +71,16 @@ class DeclaredPrecision:
 
 
 @dataclass(frozen=True, slots=True)
+class CoordinateQuality:
+    """One coordinate claim's OWN declared quality — what ranks it against its siblings."""
+
+    label: str | None
+    blurred: bool
+    radius_m: float | None
+    rank: int  # 0 declared-precise, 1 undeclared, 2 declared-blurred
+
+
+@dataclass(frozen=True, slots=True)
 class PositionOutcome:
     position: Position
     candidates: tuple[Candidate, ...]
@@ -72,7 +90,28 @@ class PositionOutcome:
     declared: DeclaredPrecision
 
 
-def read_declared_precision(claims: Sequence[Claim]) -> DeclaredPrecision:
+def declared_for_coordinate(claim: Claim) -> CoordinateQuality:
+    """The declaration hanging off the coordinate claim itself (sreality
+    `locality.inaccuracy_type`, mmreality `accurate`, a portal blur flag)."""
+    raw = (claim.declared_precision_label or "").strip().lower()
+    blurred = raw in BLURRED_DECLARED_LABELS or claim.blur_evidence in ("declared", "both")
+    if raw in PRECISE_DECLARED_LABELS:
+        rank = 0
+    elif blurred:
+        rank = 2
+    else:
+        rank = 1
+    return CoordinateQuality(raw or None, blurred, claim.declared_radius_m, rank)
+
+
+def read_declared_precision(
+    claims: Sequence[Claim],
+    *,
+    coordinate_claim_id: int | None = None,
+) -> DeclaredPrecision:
+    """The listing-wide declaration. `coordinate_claim_id`, once S4 has picked the pin,
+    narrows the coordinate-borne half to THAT pin: a blurred sibling coordinate must not
+    blur the winner it lost to."""
     label: str | None = None
     radius: float | None = None
     blurred = False
@@ -81,6 +120,12 @@ def read_declared_precision(claims: Sequence[Claim]) -> DeclaredPrecision:
     for claim in sorted(claims, key=lambda c: c.id):
         if claim.claim_type not in (
             "precision_declaration", "blur_hint", "uncertainty_geometry", "map_zoom", "coordinate"
+        ):
+            continue
+        if (
+            claim.claim_type == "coordinate"
+            and coordinate_claim_id is not None
+            and claim.id != coordinate_claim_id
         ):
             continue
         if claim.claim_type == "blur_hint":
@@ -124,24 +169,39 @@ def assign(
     ctx: ResolverContext,
     *,
     source: str,
+    admissible_claim_ids: frozenset[int] | None = None,
 ) -> PositionOutcome:
     constants = ctx.constants
     rank = ctx.granularity_rank
-    declared = read_declared_precision(claims)
-    extra: list[Candidate] = []
     signals: list[ContradictionSignal] = []
 
-    pin_claim = next(
-        (
-            c
-            for c in sorted(claims, key=lambda c: c.id)
-            if c.claim_type == "coordinate" and c.has_position
-        ),
-        None,
+    coordinate_claims = [
+        c
+        for c in sorted(claims, key=lambda c: c.id)
+        if c.claim_type == "coordinate" and c.has_position
+    ]
+    eligible = [
+        c
+        for c in coordinate_claims
+        if c.licence_class != EPHEMERAL
+        and (admissible_claim_ids is None or c.id in admissible_claim_ids)
+    ]
+    eligible.sort(key=lambda c: (declared_for_coordinate(c).rank, c.id))
+    pin_claim = eligible[0] if eligible else None
+
+    declared = read_declared_precision(
+        [c for c in claims if admissible_claim_ids is None or c.id in admissible_claim_ids],
+        coordinate_claim_id=(pin_claim.id if pin_claim else None),
     )
+    losers = _losing_coordinates(
+        coordinate_claims, pin_claim, ctx, source=source,
+        admissible_claim_ids=admissible_claim_ids,
+    )
+    extra: list[Candidate] = []
+
     pin = (pin_claim.lat, pin_claim.lon) if pin_claim else None
     pin_licence = pin_claim.licence_class if pin_claim else "portal"
-    pin_admissible = pin_claim is not None and pin_licence != EPHEMERAL
+    pin_admissible = pin_claim is not None
 
     registry_candidate = next(
         (
@@ -179,6 +239,7 @@ def assign(
                     rejected_reason="lost_to_registry_point",
                 )
             )
+        extra.extend(losers)
         radius, semantics = uncertainty.radius_for(
             ctx.uncertainty_policy,
             position_source="registry_point",
@@ -215,8 +276,13 @@ def assign(
             rejected_reason=None, granularity=granularity,
         )
         extra.append(pin_candidate)
+        extra.extend(losers)
         candidates = _merge(candidate_set.candidates, extra, None, None)
-        winner = next(c for c in candidates if c.target_kind == "coordinate_only")
+        winner = next(
+            c
+            for c in candidates
+            if c.target_kind == "coordinate_only" and c.source_claim_ids == (pin_claim.id,)
+        )
         position = Position(
             lat=pin[0], lon=pin[1], position_source=position_source,
             blur_evidence=declared.blur_evidence, licence_class=pin_licence,
@@ -229,14 +295,9 @@ def assign(
                                "portal_pin_blurred" if blurred else "portal_pin",
                                tuple(signals), declared)
 
-    if pin_claim is not None and not pin_admissible:
-        # Stored, never a winner (00 §6.1 artifact 2/3).
-        extra.append(
-            _pin_candidate(
-                pin_claim, ctx, source=source, declared=declared, distance_to_pin_m=0.0,
-                rejected_reason="licence_ephemeral_inadmissible",
-            )
-        )
+    # Every coordinate the resolver refused is still STORED, never a winner (00 §6.1
+    # artifacts 2/3 for the licence class, §3.2 rule 4 for the carousel class).
+    extra.extend(losers)
 
     # ---- 4. admin centroid.
     centroid = next(
@@ -300,6 +361,42 @@ def _pin_granularity(candidate_set: CandidateSet, rank) -> str:
     return candidate_set.candidates[0].granularity
 
 
+def _losing_coordinates(
+    coordinate_claims: Sequence[Claim],
+    pin_claim: Claim | None,
+    ctx: ResolverContext,
+    *,
+    source: str,
+    admissible_claim_ids: frozenset[int] | None,
+) -> list[Candidate]:
+    """Every coordinate claim that is NOT the pin, as a candidate row with its own axes and
+    `distance_to_pin_m` — the stored evidence that makes the choice auditable (§3.6.2)."""
+    pin = (pin_claim.lat, pin_claim.lon) if pin_claim else None
+    out: list[Candidate] = []
+    for claim in coordinate_claims:
+        if pin_claim is not None and claim.id == pin_claim.id:
+            continue
+        if claim.licence_class == EPHEMERAL:
+            reason = "licence_ephemeral_inadmissible"
+        elif admissible_claim_ids is not None and claim.id not in admissible_claim_ids:
+            reason = "claim_inadmissible"
+        else:
+            reason = "lost_to_declared_quality"
+        out.append(
+            _pin_candidate(
+                claim,
+                ctx,
+                source=source,
+                declared=read_declared_precision(
+                    [claim], coordinate_claim_id=claim.id
+                ),
+                distance_to_pin_m=distance_between((claim.lat, claim.lon), pin),  # type: ignore[arg-type]
+                rejected_reason=reason,
+            )
+        )
+    return out
+
+
 def _pin_candidate(
     pin_claim: Claim,
     ctx: ResolverContext,
@@ -310,17 +407,23 @@ def _pin_candidate(
     rejected_reason: str | None,
     granularity: str = "unknown",
 ) -> Candidate:
-    position_source = "portal_pin_blurred" if declared.blurred else "portal_pin"
+    quality = declared_for_coordinate(pin_claim)
+    blurred = declared.blurred or quality.blurred
+    position_source = "portal_pin_blurred" if blurred else "portal_pin"
     radius, semantics = uncertainty.radius_for(
         ctx.uncertainty_policy, position_source=position_source, granularity=granularity,
-        source=source, declared_radius_m=declared.radius_m,
+        source=source,
+        declared_radius_m=(
+            quality.radius_m if quality.radius_m is not None else declared.radius_m
+        ),
     )
     return Candidate(
         rung="S4", rank=0, score=0.0, target_kind="coordinate_only", granularity=granularity,
         position_source=position_source,
         match_confidence=pin_claim.claim_confidence or "medium",
         uncertainty_radius_m=radius, radius_semantics=semantics,
-        licence_class=pin_claim.licence_class, blur_evidence=declared.blur_evidence,
+        licence_class=pin_claim.licence_class,
+        blur_evidence="declared" if blurred else declared.blur_evidence,
         lat=pin_claim.lat, lon=pin_claim.lon, distance_to_pin_m=distance_to_pin_m,
         rejected_reason=rejected_reason, source_claim_ids=(pin_claim.id,),
         component_match={},

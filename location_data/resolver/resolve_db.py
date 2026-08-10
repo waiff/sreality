@@ -623,7 +623,8 @@ INSERT INTO listing_location_current AS llc (
     pin_collision_class, cluster_heterogeneity_ok, render_as, renderable_as_point,
     is_low_precision, geo_blockable, location_disputed, distance_to_nearest_boundary_m,
     history_completeness, field_provenance, geom_claim_id, street_claim_id,
-    addr_block_key, building_block_key, street_block_key, geo_cell_key, h3_r10)
+    addr_block_key, building_block_key, street_block_key, geo_cell_key, h3_r10,
+    position_quality_class, collision_epoch_id)
 VALUES (
     %(listing_id)s, %(property_id)s, %(source)s, %(resolution_id)s, %(registry_version_id)s,
     %(registry_version)s, %(resolver_version)s, %(policy_version)s, now(),
@@ -650,7 +651,8 @@ VALUES (
     %(renderable_as_point)s, %(is_low_precision)s, %(geo_blockable)s, %(location_disputed)s,
     %(distance_to_nearest_boundary_m)s, %(history_completeness)s, %(field_provenance)s::jsonb,
     %(geom_claim_id)s, %(street_claim_id)s, %(addr_block_key)s, %(building_block_key)s,
-    %(street_block_key)s, %(geo_cell_key)s, %(h3_r10)s)
+    %(street_block_key)s, %(geo_cell_key)s, %(h3_r10)s,
+    %(position_quality_class)s, %(collision_epoch_id)s)
 ON CONFLICT (listing_id) DO UPDATE SET
     property_id = EXCLUDED.property_id, source = EXCLUDED.source,
     resolution_id = EXCLUDED.resolution_id,
@@ -702,7 +704,9 @@ ON CONFLICT (listing_id) DO UPDATE SET
     street_claim_id = EXCLUDED.street_claim_id, addr_block_key = EXCLUDED.addr_block_key,
     building_block_key = EXCLUDED.building_block_key,
     street_block_key = EXCLUDED.street_block_key, geo_cell_key = EXCLUDED.geo_cell_key,
-    h3_r10 = EXCLUDED.h3_r10
+    h3_r10 = EXCLUDED.h3_r10,
+    position_quality_class = EXCLUDED.position_quality_class,
+    collision_epoch_id = EXCLUDED.collision_epoch_id
 WHERE llc.listing_id = EXCLUDED.listing_id
 """
 
@@ -788,6 +792,17 @@ _OPEN_KEYS_SQL = """
 SELECT encode(c.dedupe_key, 'hex')
   FROM location_contradictions_open c
  WHERE c.listing_id = %s
+   AND (cardinality(%s::text[]) = 0 OR c.rule = ANY(%s::text[]))
+"""
+
+# What the PREVIOUS projection consumed. `inputs_changed` (00 §8.2) is a comparison against
+# these four, never an assumption — auto-close must not fire on a re-run of the same inputs.
+_PREVIOUS_INPUTS_SQL = """
+SELECT encode(r.claim_set_hash, 'hex'), r.registry_version_id, r.policy_version,
+       r.collision_epoch_id
+  FROM listing_location_current p
+  JOIN location_resolutions r ON r.id = p.resolution_id
+ WHERE p.listing_id = %s
 """
 
 _DISPUTED_SQL = """
@@ -868,8 +883,6 @@ def upsert_listing_projection(conn: psycopg.Connection, row: dict[str, Any]) -> 
     params = dict(row)
     params["match_components"] = json.dumps(params.get("match_components") or {})
     params["field_provenance"] = json.dumps(params.get("field_provenance") or {})
-    params.pop("position_quality_class", None)  # 03 §3.10 change request, not in 01 §7.1 yet
-    params.pop("collision_epoch_id", None)
     with conn.cursor() as cur:
         cur.execute(_UPSERT_LISTING_PROJECTION_SQL, params)
 
@@ -903,10 +916,28 @@ def write_contradictions(
             )
 
 
-def open_dedupe_keys(conn: psycopg.Connection, listing_id: int) -> list[str]:
+def open_dedupe_keys(
+    conn: psycopg.Connection, listing_id: int, *, rules: Sequence[str] = ()
+) -> list[str]:
+    """Open findings for this listing, optionally narrowed to the rules a run EVALUATED —
+    a rule that was never asked cannot have "stopped firing"."""
+    wanted = sorted(set(rules))
     with conn.cursor() as cur:
-        cur.execute(_OPEN_KEYS_SQL, (listing_id,))
+        cur.execute(_OPEN_KEYS_SQL, (listing_id, wanted, wanted))
         return [str(r[0]) for r in cur.fetchall()]
+
+
+def previous_consumed_inputs(
+    conn: psycopg.Connection, listing_id: int
+) -> tuple[str, int, str, int] | None:
+    """(claim_set_hash, registry_version_id, policy_version, collision_epoch_id) of the
+    resolution the CURRENT projection was built from, or None if there is none."""
+    with conn.cursor() as cur:
+        cur.execute(_PREVIOUS_INPUTS_SQL, (listing_id,))
+        row = cur.fetchone()
+    if row is None:
+        return None
+    return (str(row[0]), int(row[1]), str(row[2]), int(row[3]))
 
 
 def append_auto_close(conn: psycopg.Connection, closes: Sequence[Any]) -> None:
