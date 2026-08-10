@@ -1,0 +1,273 @@
+# mmreality — embedded_json Vue prop, id-matched (02 §2.2.5).
+#
+# `parse_detail` sets `raw = dict(obj)`, so `accurate`, `municipalityId`,
+# `municipalityPart`, `point{}` and the POI table ALREADY sit in `listings.raw_json` for
+# all 10,538 active rows and in listing_snapshots history — "the misses are
+# extraction/typing misses, not fetch misses" [live-B §2.2]. This portal is therefore the
+# richest W1 yield per row after sreality, with no re-fetch at all.
+#
+# SUBJECT SCOPING IS A HARD RULE HERE. A detail page carries several `:property` blobs
+# (subject + related cards) and today's parser falls back to "the largest blob by
+# serialized length" [repo-scr §5(a)]. The contract sets id_match / on_miss: fail. W1
+# reads the already-selected blob out of raw_json, so it inherits whatever the parser
+# picked — which is exactly why the W2 entry re-reads the archived page under the strict
+# rule.
+
+portal: mmreality
+contract_version: 1
+extractor_runtime: ">=1.0"
+identity_ladder: [obec_code, structured_address, portal_precise_coord]
+
+fetch:
+  surfaces:
+    - page_kind: detail
+      method: GET
+      url_template: "https://www.mmreality.cz/nemovitosti/{native_id}/"
+      headers: {Accept-Language: cs}
+      min_interval_s: 5
+      archive: true
+      cadence: "6h detail drain"
+      robots_note: >
+        USE_PROXY documents a Cloudflare 403 against GitHub-Actions datacenter IPs, but a
+        direct fetch from a residential host returned 200 with no challenge — "the block is
+        IP-reputation-based… the proxy is an egress-IP requirement, not an anti-bot arms
+        race" [live-B §2].
+
+persistence:
+  volatile_paths: [/images, /image_urls, /price]
+  version_cap: 20
+
+exclusion_zones:
+  - locator_kind: embedded_json
+    locator: {css: "[\\:property]", scope: non_subject_blobs}
+    reason: "Every non-subject :property blob is a different listing's location."
+  - locator_kind: embedded_json
+    locator: {css: "[\\:locations]"}
+    reason: "The neighbour list; never a subject address."
+  - locator_kind: html_selector
+    locator: {css: ".similar, .podobne"}
+    reason: "'Podobné nemovitosti v okolí' — every page lists 1-3 other listings WITH
+      street names (Vrchlického, Dragounská, Řípská…) [mine-mmreality finding 9]."
+  - locator_kind: html_selector
+    locator: {css: "nav a[href*='zahranicni']"}
+    reason: "The site-nav item 'Zahraniční nemovitosti' is on 100% of pages and would flag
+      every listing for a keyword foreign detector [mine-syn §1c]."
+
+precision_caps:
+  accurate_true: {granularity_max: address_point, position_source_max: portal_pin}
+  accurate_false: {granularity_max: obec, position_source_max: portal_pin_blurred}
+
+precision_priors:
+  granularity: obec
+  position_source: portal_pin_blurred
+  match_confidence: low
+  uncertainty_radius_m: admin_unit_extent_when_accurate_false
+
+regressions:
+  - "943671 — description says 'v katastrálním území Polepy u Kolína' while the payload
+     asserts Kolín / 'Kolín I' / 'centrum obce'"
+  - "the accurate:false cohort — 49.8% share a pin vs 13.2%, largest shared false pin = 46"
+
+extractions:
+  - id: mm.det.point
+    locator_kind: embedded_json
+    extraction_method: portal_structured_field
+    page_kind: detail
+    locator: {reader: point_pair, lat_pointer: /point/latitude,
+              lon_pointer: /point/longitude}
+    claim_type: coordinate
+    subject_scope: {kind: id_match, on_miss: fail}
+    licence_class: portal
+    blur_evidence: none
+    precision_cap:
+      granularity_max: {accurate_true: address_point, accurate_false: obec}
+      position_source_max: {accurate_true: portal_pin, accurate_false: portal_pin_blurred}
+    prior: {granularity: obec, position_source: portal_pin_blurred, match_confidence: low}
+    guards: [reject_outside_cz_bbox]
+    required: when_present
+    notes: "9 dp is SPURIOUS precision and must not be read as accuracy [live-B §2.3]."
+
+  - id: mm.det.accurate
+    locator_kind: embedded_json
+    extraction_method: portal_declared_quality
+    page_kind: detail
+    locator: {reader: declared_bool_quality, json_pointer: /accurate,
+              labels: {"true": accurate, "false": not_accurate}}
+    claim_type: precision_declaration
+    licence_class: portal
+    blur_evidence: none
+    precision_cap:
+      granularity_max: {accurate: address_point, not_accurate: obec}
+      position_source_max: {accurate: portal_pin, not_accurate: portal_pin_blurred}
+      blurred_labels: [not_accurate]
+    prior: {match_confidence: low}
+    required: always
+    notes: >
+      Present on 100% of active rows; false on 37.2% (3,917 rows). The obec cap on `false`
+      is NORMATIVE (02 §2.4): that cohort shares a pin 49.8% of the time with a largest
+      shared pin of 46 listings — the profile of a geocoder/centroid fallback. A `street`
+      cap would let the street_segment upgrade fire and re-admit them to geometric dedup
+      blocking. And `accurate` does NOT predict correctness (the one accurate:true sample
+      is wrong, the one correct sample is accurate:false) — it is a ceiling, not a
+      certificate [mine-mmreality finding 2].
+
+  - id: mm.det.municipality_id
+    locator_kind: embedded_json
+    extraction_method: portal_structured_field
+    page_kind: detail
+    locator: {reader: scalar, json_pointer: /municipalityId, value_kind: num}
+    claim_type: obec_code
+    licence_class: portal
+    blur_evidence: none
+    prior: {granularity: obec, match_confidence: high}
+    required: when_present
+    notes: >
+      The official ČSÚ/RÚIAN kód obce (Bochov 555029, Havlíčkův Brod 568414), present on
+      6,618/6,621 + 3,915/3,917 rows and verified to match listings.obec_id on every
+      sample checked. It is a REGISTRY CODE, not a portal id: typing it portal_admin_id
+      would make it non-queryable under 01 §12 and would cost the homonym rungs their
+      strongest disambiguator on 10,538 rows [live-B §0.2, db-raw §3.3].
+
+  - id: mm.det.municipality
+    locator_kind: embedded_json
+    extraction_method: portal_structured_field
+    page_kind: detail
+    locator: {reader: scalar, json_pointer: /municipality}
+    claim_type: obec_name
+    licence_class: portal
+    blur_evidence: none
+    prior: {granularity: obec}
+    required: when_present
+
+  - id: mm.det.municipality_part
+    locator_kind: embedded_json
+    extraction_method: portal_structured_field
+    page_kind: detail
+    locator: {reader: scalar, json_pointer: /municipalityPart}
+    claim_type: cast_obce_name
+    licence_class: portal
+    blur_evidence: none
+    prior: {granularity: cast_obce_or_quarter}
+    required: when_present
+    notes: "Present on 82.4% of rows; today collapsed into one free-text `locality`."
+
+  - id: mm.det.district
+    locator_kind: embedded_json
+    extraction_method: portal_structured_field
+    page_kind: detail
+    locator: {reader: scalar, json_pointer: /district}
+    claim_type: okres_name
+    licence_class: portal
+    blur_evidence: none
+    required: when_present
+
+  - id: mm.det.district_id
+    locator_kind: embedded_json
+    extraction_method: portal_structured_field
+    page_kind: detail
+    locator: {reader: namespaced_id, json_pointer: /districtId,
+              namespace: mmreality.districtId}
+    claim_type: portal_admin_id
+    licence_class: portal
+    blur_evidence: none
+    required: when_present
+    notes: "3403/3601 are PORTAL-INTERNAL, not ČSÚ okres codes (those are CZ0412-style).
+      THIS one is a portal id; municipalityId is not [live-B §2.1, §5.5]."
+
+  - id: mm.det.street
+    locator_kind: embedded_json
+    extraction_method: portal_structured_field
+    page_kind: detail
+    locator: {reader: scalar, json_pointer: /street}
+    claim_type: street_name
+    licence_class: portal
+    blur_evidence: none
+    prior: {granularity: street}
+    required: when_present
+
+  - id: mm.det.country
+    locator_kind: embedded_json
+    extraction_method: portal_structured_field
+    page_kind: detail
+    locator: {reader: scalar, json_pointer: /country}
+    claim_type: country
+    licence_class: portal
+    blur_evidence: none
+    required: when_present
+    notes: "Would type foreign inventory deterministically [live-B §2.2]."
+
+  - id: mm.det.placement
+    locator_kind: embedded_json
+    extraction_method: portal_structured_field
+    page_kind: detail
+    locator: {reader: scalar, json_pointer: /placement}
+    claim_type: micro_position
+    licence_class: portal
+    blur_evidence: none
+    required: when_present
+    notes: "centrum obce / okraj obce / klidná část obce / samota. is_admin_bearing is
+      FALSE permanently (00 §2.1)."
+
+  - id: mm.det.slug
+    locator_kind: embedded_json
+    extraction_method: portal_structured_field
+    page_kind: detail
+    locator: {reader: namespaced_id, json_pointer: /slug, namespace: mmreality.slug}
+    claim_type: portal_admin_id
+    licence_class: portal
+    blur_evidence: none
+    required: best_effort
+
+  # ---- declared; deferred readers ----
+
+  - id: mm.det.poi
+    locator_kind: embedded_json
+    extraction_method: portal_structured_field
+    page_kind: detail
+    locator: {json_pointer: /poi}
+    claim_type: poi_distance
+    cardinality: many
+    licence_class: portal
+    blur_evidence: none
+    required: best_effort
+    notes: "{name, point, category, distance, carTime, pedestrianTime} on 10,511 rows
+      (99.7%). Needs a list reader plus distance_m/target_text; deferred to W2."
+
+  - id: mm.det.original_title_street
+    locator_kind: embedded_json
+    extraction_method: regex_text
+    page_kind: detail
+    locator: {json_pointer: /originalTitle,
+              pattern: ",\\s*ul\\.\\s*(?P<street>[^,]+)$", first_only: true}
+    claim_type: street_name
+    licence_class: portal
+    blur_evidence: none
+    required: best_effort
+    notes: >
+      raw_json.street is populated on 1/12 rows but originalTitle carries 'ul. <Street>' on
+      5/12 — "a deterministic regex, not an LLM, is enough… the single highest-yield fix
+      for this portal" [mine-mmreality finding 1]. Evidence-bearing (regex_text), so it
+      waits for W2a: a span needs a retrievable document (01 §4.2).
+
+  - id: mm.det.neighbours
+    locator_kind: embedded_json
+    extraction_method: portal_structured_field
+    page_kind: detail
+    locator: {css: "[\\:locations]"}
+    claim_type: neighbour_listing_ref
+    cardinality: many
+    licence_class: portal
+    blur_evidence: none
+    subject_scope: {subject_scoped: false}
+    required: best_effort
+
+  - id: mm.desc.cadastral
+    locator_kind: description
+    extraction_method: llm_text
+    page_kind: detail
+    locator: {scope: scoped_payload}
+    claim_type: cadastral_territory_name
+    licence_class: portal
+    blur_evidence: none
+    required: best_effort
+    notes: "3/12 rows; the only signal that catches a wrong obec [mine-mmreality]."

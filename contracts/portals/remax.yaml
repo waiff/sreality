@@ -1,0 +1,242 @@
+# remax — html_selector detail + index carry-through (02 §2.2.6).
+#
+# TWO facts govern this contract and both are licence/contamination facts, not yield facts:
+#
+#   1. remax stamps NO `coords` key at all while its geocoder was enabled, so every stored
+#      remax coordinate is of UNESTABLISHED provenance — class E, no coordinate claim, ever
+#      (06 §6.1.2 last row, db-raw §3.4). The first-party recovery is the detail map in the
+#      archived HTML (W2), not this wave.
+#   2. `raw_json.address` is BANNED as a subject source. The first `data-address` on a
+#      current detail page belongs to a "Nemovitosti v okolí" neighbour card; listing
+#      445781 is stored with street 'V Horní Stromce' (belonging to listing 445034) while
+#      its own page says 'ulice Roháčova, Praha 3 – Žižkov' [live-B §0.3]. 2,144 of 4,918
+#      street-bearing rows (43.6%) have an address whose text does not contain the row's
+#      own locality; the whole-corpus contradiction rate is 54.3% [db-cov §7.4].
+#
+# Rule 2 is NOT "drop it": 03 §3.2 rule 4 stores an excluded-block extraction with
+# subject_scoped = false — inadmissible to survivorship, admissible to the contradiction
+# ledger, which 06 §6.1.4 job 2 seeds from exactly this cohort on day one.
+
+portal: remax
+contract_version: 1
+extractor_runtime: ">=1.0"
+identity_ladder: [structured_address, portal_precise_coord]
+
+fetch:
+  surfaces:
+    - page_kind: detail
+      method: GET
+      url_template: "https://www.remax-czech.cz/reality/detail/{native_id}/{slug}"
+      headers: {Accept-Language: cs}
+      min_interval_s: 4
+      archive: true
+      cadence: "6h detail drain"
+    - page_kind: index
+      method: GET
+      url_template: "https://www.remax-czech.cz/reality/vyhledavani/?sale=1"
+      min_interval_s: 4
+      archive: true
+      cadence: "6h index walk"
+      robots_note: "The index is the only house-number-bearing surface and the walk already
+        fetches those cards — carry-through costs zero extra requests [live-B §3.5.2]."
+
+persistence:
+  volatile_paths: [/image_urls, /price_text]
+  version_cap: 20
+
+exclusion_zones:
+  - locator_kind: html_selector
+    locator: {css: ".area-listings__item[data-address], .area-listings__item[data-gps]"}
+    reason: "Neighbour cards. The first data-address on the page is one of these, and it
+      reached listings.street on 2 rows [mine-syn §1c]."
+  - locator_kind: legacy_column
+    locator: {json_pointer: /address}
+    reason: >
+      The stored raw_json.address IS that neighbour card's on 5 of 8 mined pages
+      [mine-remax finding 1]. Retained as contradiction evidence only.
+  - locator_kind: html_selector
+    locator: {css: ".broker, .office"}
+    reason: "Every page ends with a full broker street + house number + PSČ + 'Česká
+      republika' — the SOLE source of PSČ on all 12 pages [mine-remax finding 5]."
+  - locator_kind: html_selector
+    locator: {css: "footer"}
+    reason: "The footer country list (Austria Belgium Bulgaria … Spain) — a guaranteed
+      false positive for any keyword-based foreign detector."
+
+precision_caps:
+  header_starts_with_ulice: {granularity_max: street, position_source_max: portal_pin}
+  header_okres_form: {granularity_max: obec, position_source_max: admin_centroid}
+  index_street_cp_co_form: {granularity_max: address_point, position_source_max: portal_pin}
+  index_okres_kraj_form: {granularity_max: okres, position_source_max: admin_centroid}
+
+precision_priors:
+  granularity: street
+  position_source: portal_pin
+  match_confidence: low
+  uncertainty_radius_m: 4        # DMS quantisation ≈ 3.1 m lat / 2.0 m lon at 50 °N
+  note: "34.8% share a 5-dp pin, largest cluster 15, 0 rows outside the CZ bbox — far tamer
+    than idnes [live-B §3.4]."
+
+regressions:
+  - "445781 — stored street 'V Horní Stromce' belongs to listing 445034"
+  - "442804 — genuinely in POLAND ('rodinného domu ve Wiechowicích') while the portal files
+     it as Opava – městská část Vávrovice; bbox, locality and coordinates all agree and all
+     are wrong — only the description catches it [mine-syn §2c]"
+  - "443317 / 445753 / 427629 — title vs address disagree (Michle vs Chodov, Braník vs
+     Kunratice, Senomaty vs Skryje); listings.district silently takes one [db-raw §3.4]"
+
+extractions:
+  - id: rx.det.raw_address_conflict
+    locator_kind: legacy_column
+    extraction_method: legacy_column
+    page_kind: none
+    locator: {reader: conflict_signal, json_pointer: /address,
+              legacy_source_column: raw_json.address}
+    claim_type: address_line_verbatim
+    subject_scope: {subject_scoped: false}
+    on_conflict: emit_both
+    licence_class: portal
+    blur_evidence: none
+    required: when_present
+    notes: >
+      CONFLICT SIGNAL ONLY. Written with subject_scoped=false so S7 survivorship can never
+      rank it (03 §3.2 rule 4) while the reconciler still has the material for
+      `street_claim_vs_derived` on the corpus's best-evidenced contamination class.
+
+  - id: rx.det.legacy_pin
+    locator_kind: legacy_column
+    extraction_method: legacy_column
+    page_kind: none
+    locator: {reader: geom_column, legacy_source_column: listings.geom}
+    claim_type: coordinate
+    licence_class: portal
+    blur_evidence: none
+    precision_cap: {granularity_max: unknown, position_source_max: none}
+    prior: {granularity: unknown, position_source: none, match_confidence: low}
+    guards: [reject_outside_cz_bbox]
+    required: best_effort
+    notes: >
+      DECLARED BUT NEVER ADMITTED, deliberately. remax stamps no `coords` key at all, so
+      the ladder classifies every stored remax coordinate as class E and this entry emits
+      nothing (06 §6.1.2). It exists so the withholding is a recorded negative artefact —
+      one `location_claim_absences` row per affected listing — instead of being invisible
+      by omission, and so the day W2 supplies a first-party pin the entry it replaces is
+      already named.
+
+  # ---- W2 HTML surfaces: declared, no reader ----
+
+  - id: rx.det.header_address
+    locator_kind: html_selector
+    extraction_method: html_selector_parse
+    page_kind: detail
+    locator: {css: "h2.pd-header__address", text: true}
+    claim_type: address_line_verbatim
+    licence_class: portal
+    blur_evidence: none
+    subject_scope: {kind: subject_header}
+    required: always
+    notes: "THE SUBJECT'S OWN address, never read today [live-B §3.2]. It is the
+      replacement for the banned raw_json.address."
+
+  - id: rx.det.gps
+    locator_kind: html_selector
+    extraction_method: html_selector_parse
+    page_kind: detail
+    locator: {css: "#printMap[data-gps], #listingMap[data-gps]", attr: "data-gps"}
+    claim_type: coordinate
+    licence_class: portal
+    blur_evidence: none
+    precision_cap: {granularity_max: address_point, position_source_max: portal_pin}
+    prior: {position_source: portal_pin, match_confidence: low}
+    transform: [dms_to_decimal]
+    guards: [reject_outside_cz_bbox]
+    required: when_present
+    notes: "Scoped by element ID, never 'first data-gps in the document' [live-B §3.5.1].
+      Seconds may render as 60 (13°51'60\"E) and the arithmetic absorbs it."
+
+  - id: rx.idx.display_address
+    locator_kind: html_selector
+    extraction_method: html_selector_parse
+    page_kind: index
+    locator: {css: "[data-display-address]", attr: "data-display-address"}
+    claim_type: address_line_verbatim
+    licence_class: portal
+    blur_evidence: none
+    precision_cap: {granularity_max: address_point, position_source_max: portal_pin}
+    required: when_present
+    notes: "'Roháčova 1523 / 1523, Hlavní město Praha, Praha 3, …' on 13/21 page-1 cards;
+      parse_index already parses it and the walk throws it away. Expected house_number
+      coverage 14% -> ~60% [live-B §0.4, §3.5.2]."
+
+  - id: rx.idx.gps
+    locator_kind: html_selector
+    extraction_method: html_selector_parse
+    page_kind: index
+    locator: {css: "[data-gps]", attr: "data-gps"}
+    claim_type: coordinate
+    licence_class: portal
+    blur_evidence: none
+    precision_cap: {granularity_max: address_point, position_source_max: portal_pin}
+    required: when_present
+    notes: "Present on 21/21 cards and identical to the detail subject pin (verified for
+      445781) [live-B §3.1]."
+
+  - id: rx.det.breadcrumbs
+    locator_kind: html_selector
+    extraction_method: breadcrumb_parse
+    page_kind: detail
+    locator: {css: ".breadcrumb a"}
+    claim_type: kraj_name
+    licence_class: portal
+    blur_evidence: none
+    required: best_effort
+    notes: "The ONLY place a kraj is ever named — 11/12 [mine-remax]."
+
+  - id: rx.det.location_line
+    locator_kind: html_selector
+    extraction_method: html_selector_parse
+    page_kind: detail
+    locator: {css: ".pd-header__location", text: true}
+    claim_type: cast_obce_name
+    licence_class: portal
+    blur_evidence: none
+    required: when_present
+    notes: "'<Obec> – část obce <X>' / '<Obec> – městská část <X>' — the highest-yield
+      single string on the page, 9/12; 432678's 'Pstruží u Merklína' exists in NO other
+      surface [mine-remax]."
+
+  - id: rx.det.h1_tail
+    locator_kind: html_selector
+    extraction_method: html_selector_parse
+    page_kind: detail
+    locator: {css: "h1", text: true, after: "m²"}
+    claim_type: quarter_name
+    licence_class: portal
+    blur_evidence: none
+    required: best_effort
+    notes: "Today stored into `district`, which for remax means a QUARTER (Žižkov),
+      colliding with idnes/realitymix where district means okres [repo-scr §6(d)]."
+
+  - id: rx.det.params_umisteni
+    locator_kind: html_selector
+    extraction_method: html_selector_parse
+    page_kind: detail
+    locator: {css: "table.params", key: "umisteni objektu"}
+    claim_type: micro_position
+    licence_class: portal
+    blur_evidence: none
+    required: best_effort
+    notes: "Okraj obce / Centrum obce / Klidná část obce on 12/12 [mine-remax]."
+
+  - id: rx.desc.country
+    locator_kind: description
+    extraction_method: llm_text
+    page_kind: detail
+    locator: {scope: scoped_payload}
+    claim_type: foreign_indicator
+    licence_class: portal
+    blur_evidence: none
+    required: best_effort
+    notes: "LLM tier: run it for REPAIR, not fill — 4 of 12 stored streets (33%) are wrong,
+      including 2 fabricated street+house-number pairs on rows chosen as CONTROLS
+      [mine-remax finding 6, finding 2]."
