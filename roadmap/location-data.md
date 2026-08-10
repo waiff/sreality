@@ -71,6 +71,22 @@ is the tie-breaker). This track records sequencing + shipped state only.
   (Supabase plan/tier price — blocks W1 sizing), A5 (filter semantics default) —
   surfaced 2026-08-10 with written defaults.
 
+## W1 — registry loaders (shipped pieces)
+
+- **PR-B RÚIAN loaders** (`location_data/`): the `KrovakPositive` value object with ONE
+  audited WGS84 conversion on an explicitly-chosen 1 m PROJ pipeline (the 6 m one is
+  never used); streaming CSV download/parse of both products (`strukt_ADR` + `OB_ADR`,
+  all 19 columns, sha256 + etag + last-modified per artefact); the baseline load
+  (staging → blocking assertions → pointer swap) writing one `registry_version` per load
+  event; the boundary pack loader with three geometries per unit; the gazetteer rebuild;
+  and `location_registry_load.yml` (dispatch `full|boundaries|deltas` + monthly cron,
+  concurrency group `location-registry`). The VFR daily-delta lane ships as
+  chain-verification only and **fails loudly** — see open question below.
+- Open: the daily VFR delta lane cannot apply deltas until the `ST_ZZSZ` element schema
+  and the `TypPrvkuKod` vocabulary are pinned down; until then freshness is the monthly
+  baseline (the design's own free degradation path).
+- The wave-status cell flips when the schema PR lands the mirror tables the loaders write.
+
 ## Standing decisions
 
 - The Mapy remediation ladder (R2 inventory → R3 re-resolve → R4 purge) is W1–W4

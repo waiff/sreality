@@ -1,0 +1,110 @@
+name: "Location: RÚIAN registry load"
+
+# The registry-group jobs of the location subsystem (design 04 §4.4.2):
+#
+#   mode=full        `ruian_baseline`    — monthly, 1st 10:00 UTC. HEAD-probes the vintage,
+#                                          downloads strukt_ADR + OB_ADR, loads via staging
+#                                          -> blocking assertions -> pointer swap into ONE
+#                                          new registry_version, then rebuilds the gazetteer.
+#   mode=boundaries  `boundary_baseline` — the 253 MB state SHP pack; three geometries per
+#                                          boundary (authoritative / pip / render).
+#   mode=deltas      `ruian_delta`       — daily VFR change file. Chain verification only:
+#                                          application is deliberately unimplemented and the
+#                                          job exits non-zero so it can never be mistaken for
+#                                          a working freshness lane (see location_data/vfr_delta.py).
+#
+# 10:00 UTC on the 1st is comfortably after the measured generation times (OB_ADR 08:04,
+# strukt_ADR 23:43 the prior day). Everything here is CC BY 4.0 ČÚZK open data — free, no
+# key, no registration.
+#
+# Required secret: SUPABASE_DB_URL. Optional: LOCATION_DB_DIRECT_URL (a direct 5432 URL —
+# a registry load wants a session it owns, not the transaction pooler).
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "what to load"
+        required: true
+        default: full
+        type: choice
+        options:
+          - full
+          - boundaries
+          - deltas
+      vintage:
+        description: "YYYYMMDD (full mode; blank = HEAD-probe the newest published)"
+        required: false
+        default: ""
+        type: string
+      dry_run:
+        description: "download + parse + assert, write nothing"
+        required: false
+        default: false
+        type: boolean
+      allow_missing_pip:
+        description: "boundaries: load authoritative+render only (PIP degrades)"
+        required: false
+        default: false
+        type: boolean
+  schedule:
+    # Monthly full baseline, 1st at 10:00 UTC.
+    - cron: "0 10 1 * *"
+
+concurrency:
+  # The design's `registry group`, exclusive: the baseline, the boundary pack and the delta
+  # lane all touch the same registry_version and must never overlap each other or themselves.
+  group: location-registry
+  cancel-in-progress: false
+
+jobs:
+  load:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    permissions:
+      contents: read
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      SUPABASE_DB_SESSION_URL: ${{ secrets.SUPABASE_DB_SESSION_URL }}
+      LOCATION_DB_DIRECT_URL: ${{ secrets.LOCATION_DB_DIRECT_URL }}
+      MODE: ${{ inputs.mode || 'full' }}
+      VINTAGE: ${{ inputs.vintage }}
+      DRY_RUN: ${{ inputs.dry_run }}
+      ALLOW_MISSING_PIP: ${{ inputs.allow_missing_pip }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: pip install -e ".[geo]"
+
+      - name: Run registry load
+        run: |
+          set -euo pipefail
+          ARGS=""
+          if [ "$DRY_RUN" = "true" ]; then ARGS="$ARGS --dry-run"; fi
+          case "$MODE" in
+            full)
+              if [ -n "$VINTAGE" ]; then ARGS="$ARGS --vintage $VINTAGE"; fi
+              echo "python -m location_data.ruian_load $ARGS"
+              python -m location_data.ruian_load $ARGS
+              ;;
+            boundaries)
+              if [ "$ALLOW_MISSING_PIP" = "true" ]; then ARGS="$ARGS --allow-missing-pip"; fi
+              echo "python -m location_data.ruian_boundaries $ARGS"
+              python -m location_data.ruian_boundaries $ARGS
+              ;;
+            deltas)
+              echo "python -m location_data.vfr_delta"
+              python -m location_data.vfr_delta
+              ;;
+            *)
+              echo "unknown mode: $MODE" >&2
+              exit 2
+              ;;
+          esac
