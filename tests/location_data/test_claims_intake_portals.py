@@ -6,6 +6,8 @@ extractor has no per-portal branches of its own beyond the readers the contract 
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from location_data.claims_intake import extract_listing, sreality_payload_shape
 from tests.location_data.claim_intake_fixtures import (
     BAZOS_LINK,
@@ -176,6 +178,29 @@ def test_mmreality_accurate_false_declares_blur():
     # extractor's (02 §2.1.2 rule 2).
     assert claims_by_type(result)["coordinate"][0].value_geom_wkt.startswith("POINT(")
     assert "cast_obce_name" not in claims_by_type(result)   # municipalityPart is null
+
+
+def test_which_declared_bool_label_is_blurred_comes_from_the_contract():
+    """Which of the two labels means "blurred" is a PORTAL fact, so it is data on the
+    entry (`precision_map.blurred_labels`) exactly as it is for `declared_quality` — a
+    recalibration is a contract version bump, not a code change. Proved by inverting the
+    entry: the same payload then declares blur on `accurate`, not on `not_accurate`."""
+    entries = entries_for("mmreality")
+    inverted = [
+        replace(e, precision_map={**e.precision_map, "blurred_labels": ["accurate"]})
+        if e.entry_id == "mm.det.accurate" else e
+        for e in entries
+    ]
+    assert any(e.precision_map.get("blurred_labels") == ["not_accurate"]
+               for e in entries), "the shipped contract blurs `not_accurate`"
+
+    truthy = listing("mmreality", MMREALITY_ACCURATE, lat=50.0296, lon=15.7712)
+    falsy = listing("mmreality", MMREALITY_NOT_ACCURATE, lat=50.1414, lon=12.9061)
+
+    assert claim_by_extractor(
+        extract_listing(truthy, inverted), "mm.det.accurate").blur_evidence == "declared"
+    assert claim_by_extractor(
+        extract_listing(falsy, inverted), "mm.det.accurate").blur_evidence == "none"
 
 
 def test_mmreality_original_title_street_is_not_mined_in_w1():

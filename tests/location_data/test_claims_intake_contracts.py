@@ -116,6 +116,23 @@ def test_every_legacy_column_entry_names_its_column():
                page_kind="none", locator={"reader": "scalar", "json_pointer": "/x"})
 
 
+def test_a_legacy_entry_never_burns_a_permanent_html_extractor_id():
+    """02 §2.2.3 fixes an id per portal SURFACE, permanently — `bzs.det.psc` is the
+    Lokalita-cell HTML parse and `bzs.det.link_pin` is the maps-anchor HTML parse, both
+    W2 work. Spending those ids on the W1 legacy mirrors of the same facts would mean
+    either that W2 cannot ship its own entry or that one extractor_id names two different
+    acts of extraction with two different provenances — and `location_claims.extractor_id`
+    is how a claim's origin is read back forever. The legacy mirrors take `legacy_`-marked
+    ids of their own (the pattern idnes set with `id.det.legacy_pin`)."""
+    legacy_ids = {e.entry_id for c in ALL.values() for e in c.entries
+                  if e.extraction_method == "legacy_column"}
+    for reserved in ("bzs.det.psc", "bzs.det.link_pin", "id.det.pin", "sr.det.pin"):
+        assert reserved not in legacy_ids, (
+            f"{reserved} is 02 §2.2.3's permanent id for an HTML surface; the legacy "
+            f"entry must mint its own")
+    assert {"bzs.det.legacy_psc", "bzs.det.legacy_link_pin", "id.det.legacy_pin"} <= legacy_ids
+
+
 def test_coordinate_entries_carry_a_cap_and_a_licence_class():
     for contract in ALL.values():
         for entry in contract.entries:
