@@ -659,3 +659,33 @@ def test_lokalita_trailer_yields_street_and_quarter():
     assert _trailer_street_quarter("Byt v klidné lokalitě u parku.", "Brno") == (None, None)
     # Non-street-like word rejected.
     assert _trailer_street_quarter("Lokalita: centrum", "Brno") == (None, None)
+
+
+def test_lokalita_trailer_on_newline_collapsed_text():
+    # Review-confirmed critical on the first cut: parse_detail feeds _text()'d
+    # descriptions — every newline collapsed to a space — so the trailer value
+    # must terminate at a following label ("Kontakt:", "Cena:", ...), never
+    # swallow the rest of the description into street/street_name_key.
+    from scraper.bazos_parser import _trailer_street_quarter as t
+
+    assert t("Prodám byt. Lokalita: Bezručova Kontakt: 777 123 456", "Plzeň") == ("Bezručova", None)
+    assert t("Dispozice: 2+kk Lokalita: Bezručova Cena: dohodou", "Plzeň") == ("Bezručova", None)
+    assert t("Lokalita: Bezručova, Slezské Předměstí Kontakt: Jan", "HK") == ("Bezručova", "Slezské Předměstí")
+    # A >60-char label-less tail after the street still yields the street.
+    assert t(
+        "Lokalita: Bezručova Kontakt: 777 123 456 Volejte kdykoliv po osmnácté hodině děkuji",
+        "Plzeň",
+    ) == ("Bezručova", None)
+
+
+def test_lokalita_trailer_quarter_is_validated():
+    # Review-confirmed major on the first cut: the quarter reached
+    # listings.district unvalidated — and district is a HASHED field, so
+    # garbage there churns a snapshot per affected row.
+    from scraper.bazos_parser import _trailer_street_quarter as t
+
+    # Lowercase prose is not a place name.
+    assert t("Lokalita: Hradec Králové, klidná část u parku", "Hradec Králové") == (None, None)
+    assert t("Lokalita: Praha 9, výborná dostupnost MHD", "Praha 9") == (None, None)
+    # The row's own town never duplicates into the district facet.
+    assert t("Lokalita: Nádražní, Ostrava", "Ostrava") == ("Nádražní", None)
