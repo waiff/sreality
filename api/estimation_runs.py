@@ -843,6 +843,12 @@ def create_estimation_run(
     """
     account_id = account_id or SYSTEM_ACCOUNT_ID
 
+    # W0 Mapy kill switch (R1): with geocoding disabled, a pasted URL that
+    # can't resolve coordinates any other way is doomed at _build_target —
+    # reject it HERE, before the metered gate consumes quota and the LLM
+    # parse spends money, with an error that names the actual cause.
+    _reject_ungeocodable_submit(conn, body)
+
     # Submit-time gates BEFORE any spend (entitlement + monthly budget +
     # concurrency + idempotency). Ungated for admin/legacy/ClickUp/deterministic;
     # a rejected metered submit raises HTTPException here, before the URL parse.
@@ -1419,6 +1425,47 @@ _SUBJECT_ATTR_FIELDS: tuple[str, ...] = (
 )
 
 
+def _reject_ungeocodable_submit(conn: "psycopg.Connection", body: Any) -> None:
+    """422 for a URL-parse submit that cannot yield coordinates while the W0
+    Mapy kill switch is off (scraper.geocoding, remediation step R1).
+
+    Passes untouched: geocoding enabled; no URL (raw-spec bodies); sreality
+    URLs (the API detail carries gps, no geocode involved); URLs matching a
+    scraped listing with a coordinate; explicit lat+lng spec_overrides. The
+    point is failing BEFORE quota/LLM spend with the real cause — without
+    this, the run bills, then dies in _build_target on spec['lat']=None.
+    """
+    from scraper import geocoding
+
+    if geocoding.geocode_enabled():
+        return
+    url = getattr(body, "url", None)
+    if not url:
+        return
+    overrides = getattr(body, "spec_overrides", None) or {}
+    if overrides.get("lat") is not None and overrides.get("lng") is not None:
+        return
+    if source_dispatcher.classify_url(url) == "sreality":
+        return
+    try:
+        if _match_listing_by_url(conn, url) is not None:
+            return
+    except Exception:  # noqa: BLE001 - probe is best-effort: on any error fall
+        # open to the old path (the run then fails in _build_target with the
+        # explicit no-coordinates message instead of being rejected here).
+        return
+    raise HTTPException(
+        status_code=422,
+        detail=(
+            "Cannot estimate from this URL: it does not match a scraped "
+            "listing with coordinates, and Mapy geocoding is disabled "
+            f"({'MAPY_GEOCODE_ENABLED'} — the licensing kill switch). "
+            "Paste a URL from a scraped portal, supply lat/lng overrides, "
+            "or have the operator re-enable geocoding."
+        ),
+    )
+
+
 def _match_listing_by_url(
     conn: "psycopg.Connection", url: str,
 ) -> dict[str, Any] | None:
@@ -1943,6 +1990,13 @@ def _build_target(
 ) -> TargetSpec:
     if spec is None:
         raise ValueError("target_spec is required to build a TargetSpec")
+    if spec.get("lat") is None or spec.get("lng") is None:
+        # Explicit over TypeError-from-float(None): the dominant cause is a
+        # coordinate-less parse under the W0 Mapy geocoding kill switch.
+        raise ValueError(
+            "target has no coordinates — the URL parse could not geocode the "
+            "locality (Mapy geocoding disabled?) and no lat/lng override was given"
+        )
     exclude_ids = list(spec.get("exclude_ids") or [])
     if input_sreality_id is not None and input_sreality_id not in exclude_ids:
         exclude_ids.append(int(input_sreality_id))

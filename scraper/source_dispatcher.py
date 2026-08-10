@@ -190,10 +190,15 @@ def parse_listing_url(
         "parse_confidence_per_field": confidence_per_field,
         "warnings": warnings,
     }
-    _cache_store(
-        conn, url=url, source_kind=kind, parse_result=payload,
-        source_html=html, cost_usd=cost_usd,
-    )
+    # W0 Mapy kill switch (R1): a parse whose coordinates are missing ONLY
+    # because geocoding is disabled must not be cached — the 7-day negative
+    # cache would keep every such URL coordinate-less (and its estimations
+    # failing) long after the operator re-enables the switch.
+    if spec.get("lat") is not None or geocoding.geocode_enabled():
+        _cache_store(
+            conn, url=url, source_kind=kind, parse_result=payload,
+            source_html=html, cost_usd=cost_usd,
+        )
     return ParseResult(
         spec=spec,
         source_kind=kind,

@@ -91,8 +91,14 @@ class CachingGeocoder:
 
 
 def build_geocoder() -> Geocoder | None:
-    """A run-memoised Mapy.cz geocoder, or None when no Mapy.cz key is set so
-    the caller still runs (coords then come from whatever the page carried)."""
+    """A run-memoised Mapy.cz geocoder, or None when geocoding is disabled or
+    no Mapy.cz key is set — the caller still runs (coords then come from
+    whatever the page carried)."""
+    if not geocoding.geocode_enabled():
+        LOG.info(
+            "GEOCODE skipped: %s != 1 (W0 Mapy kill switch)", geocoding.ENABLE_ENV
+        )
+        return None
     if not geocoding.mapy_api_keys():
         LOG.info("GEOCODE skipped: no Mapy.cz API key set")
         return None
