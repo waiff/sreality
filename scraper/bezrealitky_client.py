@@ -55,6 +55,9 @@ query Detail($id: ID!) {
     gps { lat lng }
     address(locale: CS) street houseNumber
     city(locale: CS) cityDistrict(locale: CS) zip
+    ruianId
+    addressInput
+    regionTree(locale: CS) { id lvl type subType name }
     construction condition ownership equipped penb
     etage totalFloors
     parking garage lift

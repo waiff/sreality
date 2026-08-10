@@ -201,3 +201,25 @@ def test_published_at_from_time_activated_when_present():
 ])
 def test_disposition_mapping(enum, expected):
     assert _disposition(enum) == expected
+
+
+def test_ruian_identity_fields_reach_raw():
+    # W0 item 0m (location-data program): the detail query now requests
+    # ruianId (kod ADM — the national address-point id), addressInput and
+    # regionTree; parse_advert stores the advert verbatim, so they must land
+    # in raw_json for the W1 claims loader. Pins the raw = dict(advert)
+    # contract against a future whitelist regression.
+    advert = {
+        "id": 989482, "uri": "x", "offerType": "PRODEJ", "estateType": "BYT",
+        "gps": {"lat": 50.1, "lng": 14.5},
+        "ruianId": 22349995,
+        "addressInput": "Poděbradská, Hloubětín, Praha 14, 194 00, Česko",
+        "regionTree": [
+            {"id": "486", "lvl": 2, "type": "ADMINISTRATIVE",
+             "subType": "REGION", "name": "Praha"},
+        ],
+    }
+    listing = parse_advert(advert)
+    assert listing.raw["ruianId"] == 22349995
+    assert listing.raw["addressInput"].startswith("Poděbradská")
+    assert listing.raw["regionTree"][0]["subType"] == "REGION"
