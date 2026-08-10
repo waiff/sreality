@@ -1155,6 +1155,16 @@ def run(
             f"record and the DB tables are its projection — run "
             f"`python -m location_data.contracts --load` (02 §2.1.8)")
 
+    # Fail fast, before a batch row exists: an unknown reader on one entry would otherwise
+    # abort mid-run and leave the batch `failed` for a config problem.
+    unknown = sorted(
+        f"{e.entry_id}:{e.reader}"
+        for s in wanted for e in entries_by_source[s] if e.reader and e.reader not in READERS)
+    if unknown:
+        raise IntakeRefused(
+            f"active contract declares readers this extractor does not implement: "
+            f"{', '.join(unknown)}")
+
     contract_id: int | None = None
     if source:
         with conn.cursor() as cur:
