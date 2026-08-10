@@ -13,7 +13,7 @@ is the tie-breaker). This track records sequencing + shipped state only.
 | Wave | Scope | Status |
 | --- | --- | --- |
 | W0 "stop the bleeding" | 15 interim fixes + 2 measurements against the CURRENT system | 🟡 in progress (2026-08-10) |
-| W1 registry + claim spine (shadow) | full RÚIAN mirror, claims, resolutions, projection | ⚪ not started (gated on W0 + sizing pilot + A4) |
+| W1 registry + claim spine (shadow) | full RÚIAN mirror, claims, resolutions, projection | 🟡 in progress — schema landed, loaders/writers next (apply still gated on the sizing pilot + A4) |
 | W1v bezrealitky vertical slice | one portal end-to-end + location-quality dashboard | ⚪ not started |
 | W2a payload archive rewrite | append-on-change `portal_raw_payloads` | ⚪ not started (byte-churn measurement is the gate) |
 | W2–W6 | HTML re-mine, history backfill, refetch cohorts, LLM lane, serving flip | ⚪ not started |
@@ -70,6 +70,43 @@ is the tie-breaker). This track records sequencing + shipped state only.
 - Operator action items A1 (ČÚZK helpdesk), A2 (quarterly licence review), A4
   (Supabase plan/tier price — blocks W1 sizing), A5 (filter semantics default) —
   surfaced 2026-08-10 with written defaults.
+
+## W1 — in progress
+
+- **PR-A the W1 schema** (migrations 380–384): every location enum + config seed
+  (380), the RÚIAN mirror (381), the claim spine + portal contracts (382),
+  resolutions + policy (383), the two serving projections + collision/ledger/ops
+  tables (384). Purely additive, backend-only (RLS on + explicit anon/authenticated
+  REVOKEs on every table, sequence and function), nothing reads or writes them yet.
+  `tests/location_data/test_location_schema_contracts.py` is the offline gate for
+  01 §A.2 (enum vocabularies, the forbidden `pin_collision_class IS NULL` form, no
+  ordinal enum comparison in a CHECK/index predicate/generated column, NOT NULL
+  axes on both projections, the three-artifact licence guard, `collision_epoch_id`
+  in the resolution identity, dispositions keyed on `dedupe_key`). Its corpus is
+  every location migration from 380 onward, not a frozen 380–384 list, so the
+  next migration is held to the same rules. §A.2 #2 is implemented here **only
+  for enum casts inside migrations**; the full source-tree literal scan lands
+  with the resolver PR, which is the first code to hold such literals.
+- h3-pg is NOT available on this instance: the stated fallback ships — the rounded
+  4-dp `location_geo_cell_key` with a MANDATORY 3×3 neighbourhood expansion at
+  query time. `h3_r10` stays a nullable additive upgrade slot.
+- **NOT YET APPLIED to production.** The migrations ship as files first; applying
+  them ahead of the merge is what produced the earlier prod/git drift. Apply after
+  merge, then verify.
+- Uncalibrated by design and flagged in the seeds themselves: `threshold_n`
+  (01 OQ3) and every R95 radius (01 OQ4, seeded as `geometric_bound`/`declared`,
+  never `r95_empirical`). Calibration writes a new `policy_version`. The invented
+  500/750/1000 m blur band is `geometric_bound` + `derivation='constant'`; only
+  the portals that genuinely publish a shape (maxima `Circle.radius`, sreality
+  `locality.geometry` bbox) get `derivation='declared_shape'` rows with
+  `r95_m` NULL — one row can never be both (01 §3.3.1).
+- **Erratum to the design corpus:** 00 §1.5 says the `uncertainty_radius_m` +
+  `radius_semantics` pair is NOT NULL "on the claim, the resolution, the
+  candidate and both projections". 01 §4.2 owns the DDL and wins: at claim grain
+  there is only a nullable `declared_radius_m` (a claim records what the portal
+  declared, and most declare nothing). The NOT NULL pair is real on the
+  resolution, the candidate and both projections. Recorded in migration 382 at
+  the column itself.
 
 ## Standing decisions
 
