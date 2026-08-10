@@ -249,7 +249,9 @@ def parse_listing(raw: dict[str, Any]) -> dict[str, Any]:
         # quarter guarded). Structured always wins — no estimation.
         "street": _loc_str(loc, "street") or _street_from_value(loc, lat, lon),
         "house_number": _loc_str(loc, "housenumber") or _loc_str(loc, "streetnumber"),
-        "zip": _loc_str(loc, "zip"),
+        # sreality sends -1 for "unknown" on numeric locality fields; _loc_str
+        # stringifies it, so 31k rows stored a literal '-1' zip (W0 item 0b).
+        "zip": None if (_z := _loc_str(loc, "zip")) == "-1" else _z,
         "street_id": _id_or_none(loc.get("street_id")),
         # sreality exposes no publish date — `edited` (day-granular last-edit,
         # present on ~40% of rows) is the weak fallback bound for publish-to-

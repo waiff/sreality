@@ -599,6 +599,11 @@ def parse_detail(
         total_floors=total_floors,
         locality=locality,
         district=None,
+        # The Lokalita cell's PSČ was parsed into raw_json.psc since day one but
+        # never written to the column — 29,538 of 29,543 active rows had it in
+        # the payload with listings.zip NULL (W0 item 0c). A municipality-grain
+        # anchor far better than bazos's collapsed town pins.
+        zip=psc,
         # The raw extract (with its "ul." prefix) is the better geocoder query;
         # the STORED street is cleaned to a bare, uniform name (prefix stripped,
         # trailing description bleed like "ul. Teplého Nabízíme" trimmed).
