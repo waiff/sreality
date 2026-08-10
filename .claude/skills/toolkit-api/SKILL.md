@@ -292,6 +292,14 @@ LLM + maps (FastAPI service + scoring jobs):
   scoring, and the agent under `provider='anthropic'`.
 - `GEMINI_API_KEY` — Google AI Studio key; required for the agent under `provider='gemini'`.
   A request selecting an unconfigured provider returns 502; missing at boot is not fatal.
+- `MAPY_GEOCODE_ENABLED` — **the W0 Mapy kill switch (location-data program, remediation
+  step R1), default OFF.** Mapy.com's terms prohibit storing/caching API results and every
+  geocode path persisted them, so `scraper.geocoding.geocode()` raises and
+  `location.build_geocoder()` returns `None` unless this is explicitly `1`/`true`/`yes`.
+  Applies to every geocode caller (portal drains, bazos in-parser, realtime worker, URL
+  parser, seed/backfill scripts). Display-only Mapy use (`/maps/suggest`, tiles) is NOT
+  gated — the prohibition is on persistence, not display. Do not enable without an
+  operator decision recorded against the Mapy remediation plan.
 - `MAPY_CZ_API_KEY` — Mapy.cz REST key; geocodes locality strings and powers `/maps/*`.
 - `MAPY2_CZ_API_KEY` (optional backup) — a second Mapy.cz key. `scraper.geocoding` and the
   `/maps/suggest` proxy fail over to it automatically **only** when the primary is rejected

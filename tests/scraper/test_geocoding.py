@@ -10,6 +10,29 @@ import requests
 from scraper import geocoding
 
 
+@pytest.fixture(autouse=True)
+def _enable_geocoding(monkeypatch):
+    # The W0 Mapy kill switch defaults OFF; these tests exercise the client's
+    # behavior WHEN enabled. The default-off gate has its own tests below.
+    monkeypatch.setenv(geocoding.ENABLE_ENV, "1")
+
+
+def test_geocode_disabled_by_default(monkeypatch):
+    monkeypatch.delenv(geocoding.ENABLE_ENV, raising=False)
+    monkeypatch.setenv("MAPY_CZ_API_KEY", "test")
+    with pytest.raises(geocoding.GeocodingError, match="disabled"):
+        geocoding.geocode("Praha", session=object())  # no HTTP: gate fires first
+
+
+def test_geocode_enabled_values(monkeypatch):
+    for value in ("0", "", "no", "false"):
+        monkeypatch.setenv(geocoding.ENABLE_ENV, value)
+        assert not geocoding.geocode_enabled()
+    for value in ("1", "true", "yes", " 1 "):
+        monkeypatch.setenv(geocoding.ENABLE_ENV, value)
+        assert geocoding.geocode_enabled()
+
+
 class _FakeResponse:
     def __init__(
         self,

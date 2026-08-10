@@ -8,10 +8,23 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from scraper import location
+from scraper import geocoding, location
 from scraper.geocoding import GeocodeResult, GeocodingError
 from scraper.location import CachingGeocoder, CoordResolver, build_geocoder, geocode_cached
 from scraper.scraped_listing import ScrapedListing
+
+
+@pytest.fixture(autouse=True)
+def _enable_geocoding(monkeypatch):
+    # The W0 Mapy kill switch defaults OFF; build_geocoder's enabled path is
+    # what most of these tests exercise. The off default has its own test.
+    monkeypatch.setenv(geocoding.ENABLE_ENV, "1")
+
+
+def test_build_geocoder_none_when_kill_switch_off(monkeypatch):
+    monkeypatch.delenv(geocoding.ENABLE_ENV, raising=False)
+    monkeypatch.setenv("MAPY_CZ_API_KEY", "k")
+    assert build_geocoder() is None
 
 
 def _listing(**over):

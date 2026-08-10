@@ -101,6 +101,21 @@ class GeocodingError(RuntimeError):
     """Raised when Mapy.cz returns no usable result for a query."""
 
 
+# Kill switch (location-data program, W0 Mapy remediation step R1). Mapy.com's
+# terms (effective 2025-06-01) prohibit storing or caching API function
+# results, and every historical geocode path persisted them (geocode_cache,
+# listings.geom, parsed_url_cache) — so the client is unreachable unless the
+# operator explicitly opts in. Default OFF: geocode() raises GeocodingError
+# before any HTTP; build_geocoder() returns None so drains skip quietly.
+# Display-only Mapy use (tiles, the /maps suggest proxy) is unaffected — the
+# prohibition is on persistence, not display.
+ENABLE_ENV = "MAPY_GEOCODE_ENABLED"
+
+
+def geocode_enabled() -> bool:
+    return (os.environ.get(ENABLE_ENV) or "").strip().lower() in {"1", "true", "yes"}
+
+
 class _KeyFailover(Exception):
     """Internal signal: this key was rejected/throttled — try the next key."""
 
@@ -151,6 +166,11 @@ def geocode(
     explicit `api_key` overrides env lookup and disables failover. Raises
     GeocodingError if every key fails or the response carries no usable item.
     """
+    if not geocode_enabled():
+        raise GeocodingError(
+            f"Mapy geocoding is disabled ({ENABLE_ENV} != 1) — the W0 kill "
+            "switch for the Mapy ToS storage prohibition"
+        )
     if not isinstance(locality, str) or not locality.strip():
         raise GeocodingError("empty locality")
     keys = [api_key] if api_key else mapy_api_keys()
