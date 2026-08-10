@@ -8,9 +8,9 @@ this file (a lock taken on one backend and released on another silently strands)
 
 The registry view here answers exactly the questions `types.RegistryView` declares, so the
 pure core cannot reach past it into SQL. `purpose IN ('pip','authoritative')` is deliberate:
-04 C4.3 wants the `ST_Subdivide`d `pip` geometries for containment, migration 381's CHECK
-does not admit that purpose yet, and preferring `pip` when it exists degrades to the
-authoritative polygon when it does not (recorded as an open question on this PR).
+04 C4.3 wants the `ST_Subdivide`d `pip` geometries for containment (migration 381 admits the
+purpose and indexes it), and preferring `pip` when rows exist degrades to the authoritative
+polygon when the boundary loader has not yet populated them.
 """
 
 from __future__ import annotations

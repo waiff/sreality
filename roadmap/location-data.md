@@ -251,10 +251,10 @@ Review remediation, same PR (migration **388**, additive):
   `cadastral_territory_name`, `parcel_number`, all structurally unwinnable without one).
   S7's own `blocked` set now travels on the resolution and is logged by the drain.
 
-Open against the schema: `ruian_admin_unit_geometries.purpose` does not admit `'pip'`
-(04 C4.3 wants the subdivided geometries; the resolver prefers `'pip'` and degrades to
-`'authoritative'`); `location_uncertainty_policy` has no seed row for a pin capped to an
-admin rung, which the lookup resolves to the unit's own area bound.
+Open against the schema: `location_uncertainty_policy` has no seed row for a pin capped to
+an admin rung, which the lookup resolves to the unit's own area bound. (The earlier `pip`
+item is closed — migration 381 admits the purpose; the resolver prefers `'pip'` rows and
+degrades to `'authoritative'` until the boundary loader populates them.)
 
 ## Standing decisions
 
