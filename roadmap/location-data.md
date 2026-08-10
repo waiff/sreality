@@ -117,6 +117,15 @@ is the tie-breaker). This track records sequencing + shipped state only.
   `location_registry_load.yml` (dispatch `full|boundaries|deltas` + monthly cron,
   concurrency group `location-registry`). The VFR daily-delta lane ships as
   chain-verification only and **fails loudly** — see open question below.
+- **Boundary loader resilience** (fix, 2026-08-10): the first live `mode=boundaries` run
+  died 45 min into OBCE_P when its single session-pooler connection was dropped (SSL EOF at
+  obec 576069) and then reported "the connection is closed" from the discrepancy INSERT it
+  tried to write on that same dead handle. The per-unit loop now reconnects and retries a
+  unit once (budget `MAX_RECONNECTS=20` per run, then a loud abort), skips units whose
+  geometries are already committed for the current `registry_version` (one done-set query
+  per layer, so a re-dispatch always moves forward), and writes failure-path bookkeeping on
+  its own short-lived connection. ~477 obce from the failed run were durable and are
+  skipped on resume; the pack still needs a re-dispatch to completion.
 - Open: the daily VFR delta lane cannot apply deltas until the `ST_ZZSZ` element schema
   and the `TypPrvkuKod` vocabulary are pinned down; until then freshness is the monthly
   baseline (the design's own free degradation path).

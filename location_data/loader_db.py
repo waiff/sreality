@@ -93,35 +93,62 @@ def scalar(conn: psycopg.Connection, sql: str, params: Any = None) -> Any:
     return None if row is None else row[0]
 
 
+_DISCREPANCY_SQL = """
+INSERT INTO registry_load_discrepancies
+       (registry_version_id, entity_kind, entity_code, discrepancy, detail)
+VALUES (%s, %s::ruian_level, %s, %s, %s::jsonb)
+ON CONFLICT (registry_version_id, entity_kind, entity_code, discrepancy)
+DO UPDATE SET detail = EXCLUDED.detail
+"""
+
+
 def record_discrepancy(
-    conn: psycopg.Connection,
+    conn: psycopg.Connection | None,
     version_id: int,
     *,
     entity_kind: str,
     entity_code: int,
     discrepancy: str,
     detail: dict[str, Any] | None = None,
+    own_connection: bool = False,
 ) -> None:
-    """Append to `registry_load_discrepancies` (01 §3.1). Idempotent on the PK."""
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            INSERT INTO registry_load_discrepancies
-                   (registry_version_id, entity_kind, entity_code, discrepancy, detail)
-            VALUES (%s, %s::ruian_level, %s, %s, %s::jsonb)
-            ON CONFLICT (registry_version_id, entity_kind, entity_code, discrepancy)
-            DO UPDATE SET detail = EXCLUDED.detail
-            """,
-            (version_id, entity_kind, entity_code, discrepancy, json.dumps(detail or {})),
+    """Append to `registry_load_discrepancies` (01 §3.1). Idempotent on the PK.
+
+    `own_connection=True` is the FAILURE-PATH mode and NEVER raises: whatever broke the
+    load may have taken the connection with it, so the row gets a fresh short-lived
+    connection of its own and swallows its own errors. A bookkeeping write must never
+    mask the exception that caused it — the 2026-08 boundary run died reporting "the
+    connection is closed" from this INSERT instead of the SSL drop that actually killed
+    it (same reasoning as `scripts/location_mapy_inventory.record_failure`). `conn` is
+    ignored in that mode; callers on a possibly-dead handle pass None.
+    """
+    params = (version_id, entity_kind, entity_code, discrepancy, json.dumps(detail or {}))
+    if not own_connection:
+        assert conn is not None
+        with conn.cursor() as cur:
+            cur.execute(_DISCREPANCY_SQL, params)
+        return
+    try:
+        # The loader's own opener, not scraper.db.connect(): a load may be configured
+        # with LOCATION_DB_DIRECT_URL alone, and the failure path must not need a second
+        # env var to be able to say why it failed.
+        with open_loader_connection() as fresh:
+            with fresh.cursor() as cur:
+                cur.execute(_DISCREPANCY_SQL, params)
+    except Exception:  # noqa: BLE001 - a failed failure-record must never mask the cause
+        LOG.exception(
+            "LOADER could not record discrepancy version=%s kind=%s code=%s %s",
+            version_id, entity_kind, entity_code, discrepancy,
         )
 
 
 def abort(
-    conn: psycopg.Connection,
+    conn: psycopg.Connection | None,
     version_id: int,
     *,
     reason: str,
     detail: dict[str, Any],
+    own_connection: bool = False,
 ) -> None:
     """Record the aborted load and raise. There is no separate failure table: an aborted
     load is a `registry_load_discrepancies` row with `discrepancy='load_aborted'`
@@ -130,15 +157,23 @@ def abort(
     `entity_kind` is the `ruian_level` enum, so it cannot name an artefact — the failing
     assertion, its expected/actual values and the retained staging relations live in
     `detail`, and the row is anchored at ('stat', 0).
+
+    The bookkeeping row is best-effort in BOTH modes: `LoadAborted` carries the real
+    reason, so a discrepancy write that fails is logged and the abort is raised anyway
+    (`own_connection=True` for callers whose connection may already be dead).
     """
-    record_discrepancy(
-        conn,
-        version_id,
-        entity_kind="stat",
-        entity_code=0,
-        discrepancy="load_aborted",
-        detail={"reason": reason, **detail},
-    )
+    try:
+        record_discrepancy(
+            conn,
+            version_id,
+            entity_kind="stat",
+            entity_code=0,
+            discrepancy="load_aborted",
+            detail={"reason": reason, **detail},
+            own_connection=own_connection,
+        )
+    except Exception:  # noqa: BLE001 - the abort below is the message that matters
+        LOG.exception("LOADER could not record load_aborted version=%s", version_id)
     raise LoadAborted(f"{reason}: {detail}")
 
 

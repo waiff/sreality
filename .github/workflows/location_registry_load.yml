@@ -64,6 +64,11 @@ on:
         required: false
         default: false
         type: boolean
+      no_resume:
+        description: "boundaries: re-load units already loaded for this registry version"
+        required: false
+        default: false
+        type: boolean
   schedule:
     # Monthly full baseline, 1st at 10:00 UTC.
     - cron: "0 10 1 * *"
@@ -98,6 +103,7 @@ jobs:
       DRY_RUN: ${{ inputs.dry_run }}
       ALLOW_MISSING_PIP: ${{ inputs.allow_missing_pip }}
       ALLOW_UNARCHIVED: ${{ inputs.allow_unarchived }}
+      NO_RESUME: ${{ inputs.no_resume }}
     steps:
       - uses: actions/checkout@v6
 
@@ -124,6 +130,9 @@ jobs:
               ;;
             boundaries)
               if [ "$ALLOW_MISSING_PIP" = "true" ]; then ARGS="$ARGS --allow-missing-pip"; fi
+              # Default is resume: a re-dispatch after a dropped session skips the units
+              # already committed for this registry_version and finishes the pack.
+              if [ "$NO_RESUME" = "true" ]; then ARGS="$ARGS --no-resume"; fi
               echo "python -m location_data.ruian_boundaries $ARGS"
               python -m location_data.ruian_boundaries $ARGS
               ;;
