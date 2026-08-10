@@ -2624,6 +2624,158 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/location_claims_intake.yml"
   },
   {
+    "filename": "location_mapy_inventory.yml",
+    "name": "Jobs: Mapy affected-set inventory (location W1 / R2)",
+    "description": "DISPATCH-ONLY evidence job for the Mapy.cz licensing remediation. Materialises the five-arm affected set of the location design (04-connectors-ops.md C7.2 R2) into the immutable tables of migration 385: per-listing arm evidence, the geocode_cache identity ledger, and the property closure. It records IDENTITY and REASON CODES only — never a coordinate, matched_type or confidence, which would be the same storage violation the remediation exists to end.",
+    "portal": null,
+    "manual": true,
+    "schedules": [],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "batch_size",
+        "description": "listings per batch (10000-30000; blank = 20000)",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "limit",
+        "description": "max listings scanned this run (blank = the whole table)",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "max_seconds",
+        "description": "wall-clock budget; stops between batches (blank = none)",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "restart",
+        "description": "rescan from the first listing instead of resuming",
+        "required": false,
+        "type": "boolean",
+        "default": "false",
+        "options": null
+      },
+      {
+        "name": "note",
+        "description": "free-text note stamped on the run row",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "dry_run",
+        "description": "scan and report the arm counts without writing anything",
+        "required": false,
+        "type": "boolean",
+        "default": "false",
+        "options": null
+      }
+    ],
+    "secrets": [
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "location-mapy-inventory",
+    "cancelInProgress": false,
+    "timeoutMinutes": 120,
+    "permissions": "contents: read",
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/location_mapy_inventory.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/location_mapy_inventory.yml"
+  },
+  {
+    "filename": "location_registry_load.yml",
+    "name": "Location: RÚIAN registry load",
+    "description": "The registry-group jobs of the location subsystem (design 04 §4.4.2):",
+    "portal": null,
+    "manual": true,
+    "schedules": [
+      {
+        "cron": "0 10 1 * *",
+        "human": "0 10 1 * *"
+      },
+      {
+        "cron": "0 2 2 * *",
+        "human": "0 2 2 * *"
+      }
+    ],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "mode",
+        "description": "what to load",
+        "required": true,
+        "type": "choice",
+        "default": "full",
+        "options": [
+          "full",
+          "boundaries",
+          "gazetteer",
+          "deltas"
+        ]
+      },
+      {
+        "name": "vintage",
+        "description": "YYYYMMDD (full mode; blank = HEAD-probe the newest published)",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "dry_run",
+        "description": "download + parse + assert, write nothing",
+        "required": false,
+        "type": "boolean",
+        "default": "false",
+        "options": null
+      },
+      {
+        "name": "allow_missing_pip",
+        "description": "boundaries: load authoritative+render only (PIP degrades)",
+        "required": false,
+        "type": "boolean",
+        "default": "false",
+        "options": null
+      },
+      {
+        "name": "allow_unarchived",
+        "description": "full: load even if the R2 vintage archive fails (unreproducible)",
+        "required": false,
+        "type": "boolean",
+        "default": "false",
+        "options": null
+      }
+    ],
+    "secrets": [
+      "LOCATION_DB_DIRECT_URL",
+      "R2_ACCESS_KEY_ID",
+      "R2_ACCOUNT_ID",
+      "R2_BUCKET_NAME",
+      "R2_SECRET_ACCESS_KEY",
+      "SUPABASE_DB_SESSION_URL",
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "location-registry",
+    "cancelInProgress": false,
+    "timeoutMinutes": 180,
+    "permissions": "contents: read",
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/location_registry_load.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/location_registry_load.yml"
+  },
+  {
     "filename": "migrations.yml",
     "name": "CI: schema replay + SQL correctness",
     "description": "Two gates on one throwaway Postgres, hermetic (no secrets, never touches prod):",

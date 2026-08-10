@@ -1,0 +1,5 @@
+Kód ADM;Kód obce;Název obce;Kód MOMC;Název MOMC;Kód obvodu Prahy;Název obvodu Prahy;Kód èásti obce;Název èásti obce;Kód ulice;Název ulice;Typ SO;Èíslo domovní;Èíslo orientaèní;Znak èísla orientaèního;PSÈ;Souøadnice Y;Souøadnice X;Platí Od
+21690278;554782;Praha;500054;Praha 1;19;Praha 1;490075;Hradèany;482536;Hrad I. nádvoøí;è.p.;1;;;11900;744384.54;1042569.73;2017-06-07T00:00:00
+99000001;500011;Testov;;;;;195901;Testov-Sever;123456;Zkušební;è.p.;12;3;a;12345;700000.00;1050000.00;2020-01-01T00:00:00
+99000002;500011;Testov;;;;;195901;Testov-Sever;;;è.ev.;7;;;12345;;;2021-05-05T00:00:00
+99000003;500011;Testov;;;;;195901;Testov-Sever;123456;Zkušební;è.p.;13;;;12345;-700000.00;-1050000.00;2022-02-02T00:00:00
