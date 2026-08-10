@@ -388,17 +388,28 @@ def _slug_street(source_url: str | None) -> str | None:
     return m.group(1).replace("-", " ").strip() or None
 
 
+# W0 item 0j (location-data program): the page <title> states the street with
+# proper diacritics (", ulice Písecká,") and the okres (", okres Strakonice")
+# — live-verified 2026-08-10. Beats the ASCII-folded SEO slug for display.
+_TITLE_STREET_RE = re.compile(r",\s*ulice\s+([^,]{2,60}),")
+# Value stops at a comma or the site-name suffix's SPACED dash (" - ČESKÉ…");
+# an unspaced hyphen is part of the name ("okres Plzeň-sever").
+_TITLE_OKRES_RE = re.compile(r",\s*(okres\s+[^,]{2,40}?)(?=\s+[-–]|\s*,|\s*$)")
+
+
 def _street_fields(
     ld_address: dict[str, Any],
     source_url: str,
     geo_names: list[str | None],
     lat: float | None,
     lon: float | None,
+    title_street: str | None = None,
 ) -> tuple[str | None, str | None]:
     """(street, house_number): JSON-LD streetAddress when present (proper
-    diacritics), else the SEO-slug street (ASCII-folded — fine, the dedup
-    street-key folds diacritics anyway). Both pass the shared fabrication guard."""
-    raw = (ld_address or {}).get("streetAddress")
+    diacritics), else the <title>'s ", ulice X," value (also accented, W0 0j),
+    else the SEO-slug street (ASCII-folded — fine, the dedup street-key folds
+    diacritics anyway). All pass the shared fabrication guard."""
+    raw = (ld_address or {}).get("streetAddress") or title_street
     from_slug = False
     if not raw:
         raw = _slug_street(source_url)
@@ -510,9 +521,16 @@ def parse_detail(
     locality = ", ".join(
         p for p in (address.get("streetAddress"), address.get("addressLocality")) if p
     ) or _text(tree.css_first(".i-estate-detail__locality"))
+    page_title = _text(tree.css_first("title")) or ""
+    tm = _TITLE_STREET_RE.search(page_title)
+    title_street = tm.group(1).strip() if tm else None
+    om = _TITLE_OKRES_RE.search(page_title)
+    title_okres = om.group(1).strip() if om else None
+
     lat, lon, coord_provenance = _resolve_coords(html)
     street_name, house_number = _street_fields(
         address, source_url, geo_names=[address.get("addressLocality")], lat=lat, lon=lon,
+        title_street=title_street,
     )
 
     area_text = params.get("plocha užitná") or params.get("užitná plocha") or params.get("plocha")
@@ -558,7 +576,9 @@ def parse_detail(
         usable_area=usable_area,
         disposition=_parse_disposition(title) or _parse_disposition(params.get("dispozice")),
         locality=locality,
-        district=None,
+        # The <title>'s ", okres X" segment (W0 0j) — matches the "okres ..."
+        # convention the sreality DISTRICTS labels use.
+        district=title_okres,
         street=street_name,
         house_number=house_number,
         lat=lat,
