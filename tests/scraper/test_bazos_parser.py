@@ -625,3 +625,37 @@ def test_parse_detail_records_coord_provenance():
     assert coords["source"] == "link"
     assert coords["link_present"] is True
     assert (listing.lat, listing.lon) == (49.863882, 16.333580)
+
+
+def test_extract_street_numeral_leading_after_keyword():
+    # W0 item 0i: "28. října" (and 1. máje, 17. listopadu, ...) is a very
+    # common Czech street-name class the uppercase-first pattern can't match.
+    # extract_street returns the RAW keyword-anchored form (the geocode query);
+    # clean_street produces the stored bare name.
+    from scraper.street import clean_street
+
+    raw = extract_street("Pronájem bytu, ul. 28. října 15")
+    assert raw == "ul. 28. října 15"
+    assert clean_street(raw) == "28. října"
+    assert extract_street("Byt na ulici 17. listopadu") == "ulici 17. listopadu"
+    # Bare numeral forms stay unmatched — dates and floor ordinals share the
+    # shape ("od 1. ledna 2027", "ve 2. patře"); wrong street worse than NULL.
+    assert extract_street("K nastěhování od 1. ledna 2027") is None
+    assert extract_street("Byt ve 2. patře cihlového domu") is None
+
+
+def test_lokalita_trailer_yields_street_and_quarter():
+    from scraper.bazos_parser import _trailer_street_quarter
+
+    s, q = _trailer_street_quarter("Pěkný byt.\nLokalita: Bezručova, Slezské Předměstí", "Hradec Králové")
+    assert (s, q) == ("Bezručova", "Slezské Předměstí")
+    # Numeral street in the trailer.
+    s, q = _trailer_street_quarter("Lokalita: 28. října, Moravská Ostrava", "Ostrava")
+    assert (s, q) == ("28. října", "Moravská Ostrava")
+    # The town itself is not a street; the quarter still comes through.
+    s, q = _trailer_street_quarter("Lokalita: Brno, Židenice", "Brno")
+    assert (s, q) == (None, "Židenice")
+    # Prose "lokalita" without a colon-anchored value never fires.
+    assert _trailer_street_quarter("Byt v klidné lokalitě u parku.", "Brno") == (None, None)
+    # Non-street-like word rejected.
+    assert _trailer_street_quarter("Lokalita: centrum", "Brno") == (None, None)
