@@ -78,3 +78,36 @@ is the tie-breaker). This track records sequencing + shipped state only.
   before it exists).
 - W0 discipline held: no new precision columns on `listings`; precision signals ride
   in raw_json / archived pages until the claims spine exists.
+
+## W1 PR-E — the resolver, the projections and the collision epoch (shipped)
+
+`location_data/resolver/` — S1–S9 as a **pure function** plus the three jobs that feed it.
+
+- **S1–S7 pure core** (`normalize`/`country`/`candidates`/`position`/`admin`/`precision`/
+  `survivorship`, orchestrated by `core.resolve`): no wall clock (`as_of = max(observed_at)`),
+  no network, no randomness — enforced by an AST scan, not by review. The candidate ladder
+  R0–R8 runs against a `RegistryView` PROTOCOL, so the whole core is runnable with no
+  database and the byte-identical replay gate is a normal pytest test.
+- **Five version inputs in the identity**, `collision_epoch_id` included, with a canonical
+  serialization + content hash stamped on the row.
+- **S8 builders** for both projections, with the canonical class-aware `geo_blockable` /
+  `renderable_as_point` and a parity test against migration 384's IMMUTABLE SQL functions;
+  property grain is a reconciliation over children with mandatory disagreement columns —
+  a precise child can never lose to a centroid child.
+- **Collision-epoch producer** (`collision` + `epoch_job`): rounded 4-dp cells with the
+  mandatory 3×3 expansion (h3-pg unavailable), the six-value classification, and
+  bucket-change-only re-enqueue.
+- **`dirty_locations` drain** (`drain`): `FOR UPDATE SKIP LOCKED` slices, one transaction
+  per batch with a per-listing savepoint, lease-row CAS on `location_jobs`, judged by
+  oldest-row age. `.github/workflows/location_resolve.yml` (drain | epoch | full-resolve,
+  `*/15` cron, concurrency group `location-resolve`).
+- **S9 reconciler v1**: the cheap structural rules of 03 §3.11.1 into the append-only
+  ledger, keyed on the version-free `dedupe_key`; auto-close only when the predicate stops
+  firing AND the inputs changed.
+
+Open against the schema: `ruian_admin_unit_geometries.purpose` does not admit `'pip'`
+(04 C4.3 wants the subdivided geometries; the resolver prefers `'pip'` and degrades to
+`'authoritative'`); `listing_location_current` carries neither `position_quality_class` nor
+`collision_epoch_id` (03 §3.10 change requests), so the builder computes both and the writer
+drops them; `location_uncertainty_policy` has no seed row for a pin capped to an admin rung,
+which the lookup resolves to the unit's own area bound.

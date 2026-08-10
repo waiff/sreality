@@ -2543,6 +2543,78 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/load_obec_population.yml"
   },
   {
+    "filename": "location_resolve.yml",
+    "name": "Location: resolve",
+    "description": "The steady-state resolution lane of the location subsystem (design 03 §3.14.1). Without it a newly scraped listing gets claims and never gets a resolution — no row in listing_location_current, invisible to Browse, map, watchdog and dedup.",
+    "portal": null,
+    "manual": true,
+    "schedules": [
+      {
+        "cron": "*/15 * * * *",
+        "human": "Every 15 minutes"
+      }
+    ],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "mode",
+        "description": "what to run",
+        "required": true,
+        "type": "choice",
+        "default": "drain",
+        "options": [
+          "drain",
+          "epoch",
+          "full-resolve"
+        ]
+      },
+      {
+        "name": "max_seconds",
+        "description": "drain budget in seconds (drain / full-resolve)",
+        "required": false,
+        "type": "string",
+        "default": "600",
+        "options": null
+      },
+      {
+        "name": "batch_size",
+        "description": "listings claimed per slice",
+        "required": false,
+        "type": "string",
+        "default": "50",
+        "options": null
+      },
+      {
+        "name": "sources",
+        "description": "epoch mode: comma-separated portals; blank = every source",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "dry_run",
+        "description": "resolve and log, write nothing",
+        "required": false,
+        "type": "boolean",
+        "default": "false",
+        "options": null
+      }
+    ],
+    "secrets": [
+      "SUPABASE_DB_SESSION_URL",
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "location-resolve",
+    "cancelInProgress": false,
+    "timeoutMinutes": 30,
+    "permissions": "contents: read",
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/location_resolve.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/location_resolve.yml"
+  },
+  {
     "filename": "migrations.yml",
     "name": "CI: schema replay + SQL correctness",
     "description": "Two gates on one throwaway Postgres, hermetic (no secrets, never touches prod):",
