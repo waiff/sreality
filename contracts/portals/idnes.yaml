@@ -67,7 +67,7 @@ extractions:
     locator_kind: legacy_column
     extraction_method: legacy_column
     page_kind: none
-    locator: {reader: geom_column, column: listings.geom}
+    locator: {reader: geom_column, legacy_source_column: listings.geom}
     claim_type: coordinate
     licence_class: portal
     blur_evidence: none

@@ -233,6 +233,15 @@ def parse_entry(raw: dict[str, Any], *, source: str, index: int) -> ContractEntr
     cardinality = _member(raw.get("cardinality", "one"), CARDINALITIES, where, "cardinality")
     required = _member(raw.get("required", "when_present"), REQUIRED_MODES, where, "required")
 
+    # 01 §4.2's `loc_claim_legacy` CHECK forces `legacy_source_column` non-null whenever
+    # extraction_method='legacy_column' — "an anonymous legacy claim is rejected by the
+    # database rather than by convention" (06 §6.6 rule 3). Required here too, so the
+    # rejection lands in CI instead of mid-batch.
+    if method == "legacy_column" and not locator.get("legacy_source_column"):
+        raise ContractError(
+            f"{where}: a legacy_column entry must name its column in "
+            f"locator.legacy_source_column (01 §4.2 loc_claim_legacy)")
+
     reader = locator.get("reader")
     if reader and surface not in W1_SUBSTRATE_SURFACES:
         raise ContractError(

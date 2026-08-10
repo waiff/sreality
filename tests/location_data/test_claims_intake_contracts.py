@@ -103,6 +103,19 @@ def test_the_w2_surfaces_are_still_declared():
         assert missing_today in ids
 
 
+def test_every_legacy_column_entry_names_its_column():
+    """01 §4.2's `loc_claim_legacy` CHECK — "an anonymous legacy claim is rejected by the
+    database rather than by convention" (06 §6.6 rule 3). Caught in CI, not mid-batch."""
+    legacy = [e for c in ALL.values() for e in c.entries
+              if e.extraction_method == "legacy_column"]
+    assert len(legacy) >= 15
+    for entry in legacy:
+        assert entry.locator.get("legacy_source_column"), entry.entry_id
+    with pytest.raises(ContractError, match="loc_claim_legacy"):
+        _entry(locator_kind="legacy_column", extraction_method="legacy_column",
+               page_kind="none", locator={"reader": "scalar", "json_pointer": "/x"})
+
+
 def test_coordinate_entries_carry_a_cap_and_a_licence_class():
     for contract in ALL.values():
         for entry in contract.entries:

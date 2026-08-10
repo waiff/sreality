@@ -543,6 +543,10 @@ def _base(entry: Entry, row: ListingRow, **overrides: Any) -> Claim:
     portal blur flag, and in an append-only table that is unrecoverable.
     """
     anchor = "unanchored_legacy" if entry.surface == "legacy_column" else "unanchored_latest_fetch"
+    # 01 §4.2's `loc_claim_legacy` CHECK: a legacy claim must name its column. The contract
+    # validator requires the key, so this can only be missing if the projection is stale.
+    legacy_column = (str(entry.locator["legacy_source_column"])
+                     if entry.extraction_method == "legacy_column" else None)
     fields: dict[str, Any] = {
         "listing_id": row.listing_id,
         "source": row.source,
@@ -560,6 +564,7 @@ def _base(entry: Entry, row: ListingRow, **overrides: Any) -> Claim:
         "licence_class": entry.default_licence_class,
         "history_completeness": HISTORY_COMPLETENESS[row.source],
         "subject_scoped": entry.subject_scope.get("subject_scoped", True),
+        "legacy_source_column": legacy_column,
     }
     fields.update(overrides)
     return Claim(**fields)

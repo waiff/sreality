@@ -277,6 +277,12 @@ def test_every_claim_writes_blur_evidence_and_history_completeness_explicitly():
         assert result.claims, source
         for claim in result.claims:
             assert claim.blur_evidence in ("none", "declared"), (source, claim.extractor_id)
+            # loc_claim_legacy: a legacy claim must name its column, and no other claim
+            # may claim to be one.
+            if claim.extraction_method == "legacy_column":
+                assert claim.legacy_source_column, claim.extractor_id
+            else:
+                assert claim.legacy_source_column is None, claim.extractor_id
             assert claim.history_completeness == expected_history.get(
                 source, "locality_text_only")
             assert claim.extractor_version == f"contract:{source}@1"
