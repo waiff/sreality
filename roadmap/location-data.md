@@ -222,6 +222,19 @@ resolves or stays in shadow. Closed in this round: the fingerprint is now migrat
   per batch with a per-listing savepoint, lease-row CAS on `location_jobs`, judged by
   oldest-row age. `.github/workflows/location_resolve.yml` (drain | epoch | full-resolve,
   `*/15` cron, concurrency group `location-resolve`).
+- **Drain throughput** (follow-up): the first production drain did **~3 s per listing** —
+  ~28 h for the 34 k queue, ~23 days for the corpus — because the cost is pooler ROUND TRIPS
+  (~35 statements per listing), not work. Four I/O-layer fixes, none of which touch the pure
+  core (replay stays bit-for-bit, tested): the drain takes the **session pooler**
+  (`connect_session`, so the recurring statements are server-side prepared once, with a
+  logged fallback), the registry + collision views are **memoized for the run** (both mirrors
+  are immutable at a pinned version), the four per-listing reads are **prefetched per slice**
+  (`location_disputed` excepted — it is a read-your-writes read of the contradictions the run
+  just wrote), and the per-candidate/detection/disposition writers use `executemany`. A warm
+  listing now costs ~11 statements instead of ~35. Defaults: slice 50 → 250, dispatch budget
+  600 s → 2400 s (cron keeps 600 s), workflow timeout 30 → 60 min. Every batch logs its own
+  `BATCH n=… rate=…/s` + phase split, so the next production run measures itself. No
+  `--workers`: `_rebuild_property` is a cross-listing write two workers would race.
 - **S9 reconciler v1**: the cheap structural rules of 03 §3.11.1 into the append-only
   ledger, keyed on the version-free `dedupe_key`; auto-close only when the predicate stops
   firing AND the inputs changed — the inputs compared against the resolution the current

@@ -2813,18 +2813,18 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
       },
       {
         "name": "max_seconds",
-        "description": "drain budget in seconds (drain / full-resolve)",
+        "description": "drain budget in seconds (drain / full-resolve); cron uses 600",
         "required": false,
         "type": "string",
-        "default": "600",
+        "default": "2400",
         "options": null
       },
       {
         "name": "batch_size",
-        "description": "listings claimed per slice",
+        "description": "listings claimed per slice (one transaction — bigger is not better)",
         "required": false,
         "type": "string",
-        "default": "50",
+        "default": "250",
         "options": null
       },
       {
@@ -2850,7 +2850,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     ],
     "concurrencyGroup": "location-resolve",
     "cancelInProgress": false,
-    "timeoutMinutes": 30,
+    "timeoutMinutes": 60,
     "permissions": "contents: read",
     "runsUrl": "https://github.com/waiff/sreality/actions/workflows/location_resolve.yml",
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/location_resolve.yml"

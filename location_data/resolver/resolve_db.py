@@ -1,21 +1,41 @@
 """The psycopg side of the resolver: load the registry/policy inputs, call the pure core,
 write the resolution + candidates + projection rows.
 
-Connection mode is the repo's default `scraper.db.connect()` — the TRANSACTION pooler,
-autocommit, `prepare_threshold=None` — so every atomic unit is an explicit
-`with conn.transaction():` block and there is not a session advisory lock anywhere near
-this file (a lock taken on one backend and released on another silently strands).
+Connection mode is the drain's `scraper.db.connect_session()` — the SESSION-mode pooler, a
+dedicated backend, psycopg3's default `prepare_threshold` — so the ~40 statements below are
+server-side PREPARED once and reused for every listing in the run instead of being re-parsed
+and re-planned on each of tens of thousands of listings. It stays autocommit ("callers manage
+transactions explicitly"), so every atomic unit is still an explicit `with conn.transaction():`
+block, and there is still not a session advisory lock anywhere near this file — the lease is a
+row-CAS, which is correct on either pooler mode. Nothing here assumes a session: on a
+`SUPABASE_DB_SESSION_URL`-less environment `connect_session()` falls back to the transaction
+pooler and every statement below still runs, just unprepared.
 
 The registry view here answers exactly the questions `types.RegistryView` declares, so the
 pure core cannot reach past it into SQL. `purpose IN ('pip','authoritative')` is deliberate:
 04 C4.3 wants the `ST_Subdivide`d `pip` geometries for containment (migration 381 admits the
 purpose and indexes it), and preferring `pip` when rows exist degrades to the authoritative
 polygon when the boundary loader has not yet populated them.
+
+**Round trips are the drain's cost model**, not CPU: the first production drain measured ~3 s
+per listing, which is dozens of pooler round trips, not work. Three levers live in this file,
+all of them strictly I/O-layer (the pure core's protocol and its answers are untouched, so
+deterministic replay stays bit-for-bit):
+
+* `RunCache` + `CachedRegistryView` / `CachedCollisionEvidence` — the mirror is IMMUTABLE at a
+  pinned `registry_version_id` and the clusters are immutable at a pinned epoch, so a repeated
+  question inside one run has one answer. The resolver asks the same handful over and over
+  (`streets_in_obec(Praha)` twice per Prague listing plus once from the reconciler,
+  `admin_units_by_name('praha')` three times), and across listings the reuse is corpus-scale.
+* the `*_bulk` loaders — one query per SLICE instead of one per listing, grouped in Python.
+* `executemany` for the per-candidate / per-detection writers, which psycopg pipelines into a
+  single round trip.
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import time
+from collections.abc import Callable, Sequence
 from typing import Any
 
 import psycopg
@@ -76,7 +96,9 @@ _CURRENT_REGISTRY_SQL = "SELECT id, label FROM registry_versions WHERE is_curren
 
 _CURRENT_EPOCH_SQL = "SELECT id FROM pin_cluster_epochs ORDER BY computed_at DESC, id DESC LIMIT 1"
 
-_CLAIMS_SQL = """
+# ONE projection, two predicates — the row unpacking in `_claim` is positional, so a second
+# hand-written column list is a silent mis-mapping waiting to happen.
+_CLAIMS_SELECT = """
 SELECT id, listing_id, source, claim_type::text, surface::text, extraction_method::text,
        extractor_id, licence_class::text, first_observed_at, value_text, value_num,
        CASE WHEN value_geom IS NULL THEN NULL ELSE ST_Y(value_geom) END,
@@ -85,9 +107,15 @@ SELECT id, listing_id, source, claim_type::text, surface::text, extraction_metho
        blur_evidence::text, claim_confidence::text, subject_scoped, page_kind::text,
        snapshot_id, distance_m, target_text
   FROM location_claims_live
- WHERE listing_id = %s
- ORDER BY id
 """
+
+_CLAIMS_SQL = _CLAIMS_SELECT + " WHERE listing_id = %s\n ORDER BY id"
+
+# The whole SLICE in one query instead of one per listing; the per-listing order is still
+# `id`, which is what `core.resolve` re-sorts on anyway.
+_CLAIMS_BULK_SQL = (
+    _CLAIMS_SELECT + " WHERE listing_id = ANY(%s::bigint[])\n ORDER BY listing_id, id"
+)
 
 _ADDRESS_POINT_SQL = """
 SELECT ap.kod_adm, ap.obec_unit_id, ap.obec_kod, ap.psc,
@@ -358,26 +386,41 @@ def current_epoch(conn: psycopg.Connection) -> int | None:
     return None if row is None else int(row[0])
 
 
+def _claim(row: Sequence[Any]) -> Claim:
+    return Claim(
+        id=row[0], listing_id=row[1], source=row[2], claim_type=row[3], surface=row[4],
+        extraction_method=row[5], extractor_id=row[6], licence_class=row[7],
+        observed_at=row[8], value_text=row[9],
+        value_num=None if row[10] is None else float(row[10]),
+        lat=None if row[11] is None else float(row[11]),
+        lon=None if row[12] is None else float(row[12]),
+        value_jsonb=row[13] or {}, declared_precision_label=row[14],
+        declared_confidence=row[15],
+        declared_radius_m=None if row[16] is None else float(row[16]),
+        blur_evidence=row[17], claim_confidence=row[18], subject_scoped=row[19],
+        page_kind=row[20], snapshot_id=row[21], distance_m=row[22], target_text=row[23],
+    )
+
+
 def load_claims(conn: psycopg.Connection, listing_id: int) -> list[Claim]:
     with conn.cursor() as cur:
         cur.execute(_CLAIMS_SQL, (listing_id,))
-        rows = cur.fetchall()
-    return [
-        Claim(
-            id=row[0], listing_id=row[1], source=row[2], claim_type=row[3], surface=row[4],
-            extraction_method=row[5], extractor_id=row[6], licence_class=row[7],
-            observed_at=row[8], value_text=row[9],
-            value_num=None if row[10] is None else float(row[10]),
-            lat=None if row[11] is None else float(row[11]),
-            lon=None if row[12] is None else float(row[12]),
-            value_jsonb=row[13] or {}, declared_precision_label=row[14],
-            declared_confidence=row[15],
-            declared_radius_m=None if row[16] is None else float(row[16]),
-            blur_evidence=row[17], claim_confidence=row[18], subject_scoped=row[19],
-            page_kind=row[20], snapshot_id=row[21], distance_m=row[22], target_text=row[23],
-        )
-        for row in rows
-    ]
+        return [_claim(row) for row in cur.fetchall()]
+
+
+def load_claims_bulk(
+    conn: psycopg.Connection, listing_ids: Sequence[int]
+) -> dict[int, list[Claim]]:
+    """Every claim for a whole slice, grouped by listing. Listings with no claims are absent
+    from the mapping, exactly as `load_claims` returns an empty list for them."""
+    out: dict[int, list[Claim]] = {}
+    if not listing_ids:
+        return out
+    with conn.cursor() as cur:
+        cur.execute(_CLAIMS_BULK_SQL, (list(listing_ids),))
+        for row in cur.fetchall():
+            out.setdefault(int(row[1]), []).append(_claim(row))
+    return out
 
 
 def _admin_unit(row: Sequence[Any]) -> AdminUnit:
@@ -553,6 +596,184 @@ class SqlCollisionEvidence:
         )
 
 
+class RunCache:
+    """Memo for the corpus-constant questions of ONE run, plus its own instrumentation.
+
+    Safe because BOTH mirrors it fronts are immutable for the run's lifetime: the RÚIAN
+    registry is pinned to a `registry_version_id` (a load mints a NEW version rather than
+    editing one) and `pin_clusters` is pinned to a `collision_epoch_id` (an epoch is minted,
+    never updated). Same question, same answer — so the pure core sees exactly what an
+    uncached run would and replay stays bit-for-bit.
+
+    `max_entries` is a memory rail, not a hit-rate policy: at the cap the whole memo is
+    dropped and refills. Correctness cannot depend on what is resident.
+    """
+
+    __slots__ = ("_values", "_max", "hits", "misses", "seconds")
+
+    def __init__(self, max_entries: int = 250_000) -> None:
+        self._values: dict[Any, Any] = {}
+        self._max = max_entries
+        self.hits = 0
+        self.misses = 0
+        self.seconds = 0.0
+
+    def get(self, key: Any, compute: Callable[[], Any]) -> Any:
+        try:
+            value = self._values[key]
+        except KeyError:
+            pass
+        else:
+            self.hits += 1
+            return value
+        self.misses += 1
+        started = time.perf_counter()
+        value = compute()
+        self.seconds += time.perf_counter() - started
+        if len(self._values) >= self._max:
+            self._values.clear()
+        self._values[key] = value
+        return value
+
+    @property
+    def hit_rate(self) -> float:
+        asked = self.hits + self.misses
+        return 0.0 if asked == 0 else self.hits / asked
+
+
+class CachedRegistryView:
+    """`types.RegistryView` over a `SqlRegistryView`, memoized for one run (see `RunCache`).
+
+    Every list-returning method hands back a TUPLE, not the cached list: the protocol asks
+    for a `Sequence`, and an immutable one cannot be mutated by a caller into poisoning the
+    next listing's answer.
+    """
+
+    __slots__ = ("_inner", "_cache")
+
+    def __init__(self, inner: Any, cache: RunCache) -> None:
+        self._inner = inner
+        self._cache = cache
+
+    def address_point(self, kod_adm: int) -> AddressPoint | None:
+        return self._cache.get(
+            ("address_point", kod_adm), lambda: self._inner.address_point(kod_adm)
+        )
+
+    def address_points_by_number(
+        self, *, obec_kod: int, street_name_norm: str | None,
+        cislo_domovni: int | None, cislo_orientacni: int | None,
+    ) -> Sequence[AddressPoint]:
+        key = ("address_points_by_number", obec_kod, street_name_norm, cislo_domovni,
+               cislo_orientacni)
+        return self._cache.get(
+            key,
+            lambda: tuple(
+                self._inner.address_points_by_number(
+                    obec_kod=obec_kod, street_name_norm=street_name_norm,
+                    cislo_domovni=cislo_domovni, cislo_orientacni=cislo_orientacni,
+                )
+            ),
+        )
+
+    def streets_in_obec(self, obec_kod: int) -> Sequence[Street]:
+        return self._cache.get(
+            ("streets_in_obec", obec_kod), lambda: tuple(self._inner.streets_in_obec(obec_kod))
+        )
+
+    def admin_units_by_name(
+        self, name_norm: str, *, levels: Sequence[str] = ()
+    ) -> Sequence[AdminUnit]:
+        wanted = tuple(levels)
+        return self._cache.get(
+            ("admin_units_by_name", name_norm, wanted),
+            lambda: tuple(self._inner.admin_units_by_name(name_norm, levels=wanted)),
+        )
+
+    def admin_unit_by_code(self, level: str, code: int) -> AdminUnit | None:
+        return self._cache.get(
+            ("admin_unit_by_code", level, code),
+            lambda: self._inner.admin_unit_by_code(level, code),
+        )
+
+    def admin_unit(self, unit_id: int) -> AdminUnit | None:
+        return self._cache.get(("admin_unit", unit_id), lambda: self._inner.admin_unit(unit_id))
+
+    def admin_chain(self, unit_id: int) -> Sequence[AdminUnit]:
+        return self._cache.get(
+            ("admin_chain", unit_id), lambda: tuple(self._inner.admin_chain(unit_id))
+        )
+
+    def obec_codes_for_psc(self, psc: str) -> Sequence[int]:
+        return self._cache.get(
+            ("obec_codes_for_psc", psc), lambda: tuple(self._inner.obec_codes_for_psc(psc))
+        )
+
+    def parcels(self, *, katuz_name_norm: str, parcel_label_norm: str) -> Sequence[Parcel]:
+        return self._cache.get(
+            ("parcels", katuz_name_norm, parcel_label_norm),
+            lambda: tuple(
+                self._inner.parcels(
+                    katuz_name_norm=katuz_name_norm, parcel_label_norm=parcel_label_norm
+                )
+            ),
+        )
+
+    def containing_obec(self, lat: float, lon: float) -> AdminUnit | None:
+        return self._cache.get(
+            ("containing_obec", lat, lon), lambda: self._inner.containing_obec(lat, lon)
+        )
+
+    def nearest_obec_within(
+        self, lat: float, lon: float, max_m: float
+    ) -> tuple[AdminUnit, float] | None:
+        return self._cache.get(
+            ("nearest_obec_within", lat, lon, max_m),
+            lambda: self._inner.nearest_obec_within(lat, lon, max_m),
+        )
+
+    def distance_to_admin_boundary_m(self, unit_id: int, lat: float, lon: float) -> float | None:
+        return self._cache.get(
+            ("distance_to_admin_boundary_m", unit_id, lat, lon),
+            lambda: self._inner.distance_to_admin_boundary_m(unit_id, lat, lon),
+        )
+
+    def cast_obce_for_point(self, lat: float, lon: float) -> AdminUnit | None:
+        return self._cache.get(
+            ("cast_obce_for_point", lat, lon), lambda: self._inner.cast_obce_for_point(lat, lon)
+        )
+
+    def cast_obce_extent_m(self, cast_obce_kod: int) -> float | None:
+        return self._cache.get(
+            ("cast_obce_extent_m", cast_obce_kod),
+            lambda: self._inner.cast_obce_extent_m(cast_obce_kod),
+        )
+
+    def in_czechia_polygon(self, lat: float, lon: float) -> bool | None:
+        return self._cache.get(
+            ("in_czechia_polygon", lat, lon), lambda: self._inner.in_czechia_polygon(lat, lon)
+        )
+
+
+class CachedCollisionEvidence:
+    """`SqlCollisionEvidence` memoized on the EXACT pin, which is three queries per miss.
+
+    Collapsed portal pins are the reason the epoch exists at all, so a run resolving a bazos
+    cohort asks for the same coordinate hundreds of times.
+    """
+
+    __slots__ = ("_inner", "_cache")
+
+    def __init__(self, inner: Any, cache: RunCache) -> None:
+        self._inner = inner
+        self._cache = cache
+
+    def for_point(self, source: str, lat: float, lon: float) -> ClusterEvidence | None:
+        return self._cache.get(
+            ("collision", source, lat, lon), lambda: self._inner.for_point(source, lat, lon)
+        )
+
+
 # --------------------------------------------------------------------------- writers
 
 _INSERT_RESOLUTION_SQL = """
@@ -597,11 +818,18 @@ VALUES (%s, %s, %s, %s, %s, %s,
         %s::blur_evidence, %s::match_confidence, %s, %s::radius_semantics,
         %s::licence_class, %s::jsonb, %s, %s)
 ON CONFLICT (resolution_id, rank) DO NOTHING
-RETURNING id
 """
 
+# Stamp the winner by its RANK rather than by an id read back from the INSERT: the insert is
+# ON CONFLICT DO NOTHING, so a re-run returns no id at all and the old read-back left
+# `chosen_candidate_id` un-restamped. `(resolution_id, rank)` is the candidate's unique key,
+# so this resolves to the same row either way — and it is one statement instead of one
+# RETURNING read per candidate.
 _SET_CHOSEN_SQL = """
-UPDATE location_resolutions SET chosen_candidate_id = %s WHERE id = %s
+UPDATE location_resolutions r
+   SET chosen_candidate_id = c.id
+  FROM location_resolution_candidates c
+ WHERE r.id = %s AND c.resolution_id = %s AND c.rank = %s
 """
 
 _UPSERT_LISTING_PROJECTION_SQL = """
@@ -795,6 +1023,16 @@ SELECT encode(c.dedupe_key, 'hex')
    AND (cardinality(%s::text[]) = 0 OR c.rule = ANY(%s::text[]))
 """
 
+# The slice's open findings in one query. The rule narrowing stays per listing (each listing
+# evaluated its own rule set) but moves to Python — the same filter, one round trip.
+_OPEN_KEYS_BULK_SQL = """
+SELECT c.listing_id, c.rule, encode(c.dedupe_key, 'hex')
+  FROM location_contradictions_open c
+ WHERE c.listing_id = ANY(%s::bigint[])
+"""
+
+_PROPERTY_IDS_BULK_SQL = "SELECT id, property_id FROM listings WHERE id = ANY(%s::bigint[])"
+
 # What the PREVIOUS projection consumed. `inputs_changed` (00 §8.2) is a comparison against
 # these four, never an assumption — auto-close must not fire on a re-run of the same inputs.
 _PREVIOUS_INPUTS_SQL = """
@@ -803,6 +1041,17 @@ SELECT encode(r.claim_set_hash, 'hex'), r.registry_version_id, r.policy_version,
   FROM listing_location_current p
   JOIN location_resolutions r ON r.id = p.resolution_id
  WHERE p.listing_id = %s
+"""
+
+# Prefetched for the whole slice, which is still strictly BEFORE this run rewrites any of
+# those projections: a listing is claimed once per slice, and no listing's write can change
+# another listing's row.
+_PREVIOUS_INPUTS_BULK_SQL = """
+SELECT p.listing_id, encode(r.claim_set_hash, 'hex'), r.registry_version_id, r.policy_version,
+       r.collision_epoch_id
+  FROM listing_location_current p
+  JOIN location_resolutions r ON r.id = p.resolution_id
+ WHERE p.listing_id = ANY(%s::bigint[])
 """
 
 _DISPUTED_SQL = """
@@ -853,28 +1102,27 @@ def write_resolution(conn: psycopg.Connection, resolution: Resolution) -> int:
 def write_candidates(
     conn: psycopg.Connection, resolution_id: int, resolution: Resolution
 ) -> None:
+    """Two statements for the whole candidate set (psycopg pipelines the `executemany` into
+    one round trip) where the old per-candidate loop paid an INSERT + a RETURNING read each."""
     import json
 
-    chosen_id: int | None = None
+    candidates = list(resolution.candidates)
+    if not candidates:
+        return
+    params = [
+        (resolution_id, c.rank, c.score, c.target_kind, c.ruian_adm_kod,
+         c.stavebni_objekt_kod, c.parcela_id, c.ulice_id, c.admin_unit_id,
+         c.lat, c.lon, c.lat, c.granularity, c.position_source, c.blur_evidence,
+         c.match_confidence, c.uncertainty_radius_m, c.radius_semantics, c.licence_class,
+         json.dumps(c.component_match), c.distance_to_pin_m, c.rejected_reason)
+        for c in candidates
+    ]
     with conn.cursor() as cur:
-        for candidate in resolution.candidates:
+        cur.executemany(_INSERT_CANDIDATE_SQL, params)
+        if resolution.chosen_rank is not None:
             cur.execute(
-                _INSERT_CANDIDATE_SQL,
-                (resolution_id, candidate.rank, candidate.score, candidate.target_kind,
-                 candidate.ruian_adm_kod, candidate.stavebni_objekt_kod, candidate.parcela_id,
-                 candidate.ulice_id, candidate.admin_unit_id,
-                 candidate.lat, candidate.lon, candidate.lat,
-                 candidate.granularity, candidate.position_source, candidate.blur_evidence,
-                 candidate.match_confidence, candidate.uncertainty_radius_m,
-                 candidate.radius_semantics, candidate.licence_class,
-                 json.dumps(candidate.component_match), candidate.distance_to_pin_m,
-                 candidate.rejected_reason),
+                _SET_CHOSEN_SQL, (resolution_id, resolution_id, resolution.chosen_rank)
             )
-            row = cur.fetchone()
-            if row is not None and candidate.rank == resolution.chosen_rank:
-                chosen_id = int(row[0])
-        if chosen_id is not None:
-            cur.execute(_SET_CHOSEN_SQL, (chosen_id, resolution_id))
 
 
 def upsert_listing_projection(conn: psycopg.Connection, row: dict[str, Any]) -> None:
@@ -903,17 +1151,19 @@ def write_contradictions(
 ) -> None:
     import json
 
+    params = [
+        (detection.listing_id, property_id, reconciler_version, resolver_version,
+         registry_version_id, detection.field, detection.rule, detection.severity,
+         json.dumps(detection.stored, default=str),
+         json.dumps(detection.claimed, default=str),
+         list(detection.evidence_claim_ids), detection.distance_m,
+         detection.evidence_quote, detection.auto_action, detection.dedupe_key)
+        for detection in detections
+    ]
+    if not params:
+        return
     with conn.cursor() as cur:
-        for detection in detections:
-            cur.execute(
-                _INSERT_CONTRADICTION_SQL,
-                (detection.listing_id, property_id, reconciler_version, resolver_version,
-                 registry_version_id, detection.field, detection.rule, detection.severity,
-                 json.dumps(detection.stored, default=str),
-                 json.dumps(detection.claimed, default=str),
-                 list(detection.evidence_claim_ids), detection.distance_m,
-                 detection.evidence_quote, detection.auto_action, detection.dedupe_key),
-            )
+        cur.executemany(_INSERT_CONTRADICTION_SQL, params)
 
 
 def open_dedupe_keys(
@@ -925,6 +1175,29 @@ def open_dedupe_keys(
     with conn.cursor() as cur:
         cur.execute(_OPEN_KEYS_SQL, (listing_id, wanted, wanted))
         return [str(r[0]) for r in cur.fetchall()]
+
+
+def open_dedupe_keys_bulk(
+    conn: psycopg.Connection, listing_ids: Sequence[int]
+) -> dict[int, tuple[tuple[str, str], ...]]:
+    """(rule, dedupe_key) pairs per listing, UNNARROWED — the caller applies each listing's
+    own evaluated-rule filter (`filter_open_keys`), because that set differs per listing."""
+    out: dict[int, list[tuple[str, str]]] = {}
+    if not listing_ids:
+        return {}
+    with conn.cursor() as cur:
+        cur.execute(_OPEN_KEYS_BULK_SQL, (list(listing_ids),))
+        for listing_id, rule, key in cur.fetchall():
+            out.setdefault(int(listing_id), []).append((str(rule), str(key)))
+    return {k: tuple(v) for k, v in out.items()}
+
+
+def filter_open_keys(
+    pairs: Sequence[tuple[str, str]], *, rules: Sequence[str] = ()
+) -> list[str]:
+    """`_OPEN_KEYS_SQL`'s `cardinality(...) = 0 OR rule = ANY(...)` predicate, in Python."""
+    wanted = set(rules)
+    return [key for rule, key in pairs if not wanted or rule in wanted]
 
 
 def previous_consumed_inputs(
@@ -940,17 +1213,41 @@ def previous_consumed_inputs(
     return (str(row[0]), int(row[1]), str(row[2]), int(row[3]))
 
 
-def append_auto_close(conn: psycopg.Connection, closes: Sequence[Any]) -> None:
+def previous_consumed_inputs_bulk(
+    conn: psycopg.Connection, listing_ids: Sequence[int]
+) -> dict[int, tuple[str, int, str, int]]:
+    if not listing_ids:
+        return {}
     with conn.cursor() as cur:
-        for close in closes:
-            cur.execute(
-                _APPEND_DISPOSITION_SQL,
-                (close.dedupe_key, close.status, close.decided_by, close.reason),
-            )
-            cur.execute(
-                _LOG_DISPOSITION_SQL,
-                (close.dedupe_key, close.status, close.decided_by, close.reason),
-            )
+        cur.execute(_PREVIOUS_INPUTS_BULK_SQL, (list(listing_ids),))
+        return {
+            int(r[0]): (str(r[1]), int(r[2]), str(r[3]), int(r[4])) for r in cur.fetchall()
+        }
+
+
+def property_ids_bulk(
+    conn: psycopg.Connection, listing_ids: Sequence[int]
+) -> dict[int, int | None]:
+    """`listings.property_id` for a whole slice. Not written by this drain, so prefetching it
+    cannot race the batch's own writes."""
+    if not listing_ids:
+        return {}
+    with conn.cursor() as cur:
+        cur.execute(_PROPERTY_IDS_BULK_SQL, (list(listing_ids),))
+        return {
+            int(r[0]): (None if r[1] is None else int(r[1])) for r in cur.fetchall()
+        }
+
+
+def append_auto_close(conn: psycopg.Connection, closes: Sequence[Any]) -> None:
+    params = [
+        (close.dedupe_key, close.status, close.decided_by, close.reason) for close in closes
+    ]
+    if not params:
+        return
+    with conn.cursor() as cur:
+        cur.executemany(_APPEND_DISPOSITION_SQL, params)
+        cur.executemany(_LOG_DISPOSITION_SQL, params)
 
 
 def location_disputed(conn: psycopg.Connection, listing_id: int) -> bool:

@@ -8,11 +8,14 @@ joins `listings`, and the schema-replay job is the only other place that would n
 
 from __future__ import annotations
 
+import inspect
 from contextlib import contextmanager
 from typing import Any
 
-from location_data.resolver import collision, drain, epoch_job, reconciler, resolve_db
+from location_data.resolver import collision, core, drain, epoch_job, reconciler, resolve_db
 from location_data.resolver.types import Precision
+from location_data.resolver.version import RESOLVER_VERSION
+from tests.location_data import mini_mirror as mm
 
 
 class _FakeCursor:
@@ -109,6 +112,230 @@ def test_the_queue_slice_has_a_unique_tiebreaker():
     another starves."""
     flat = " ".join(drain._CLAIM_SLICE_SQL.split()).lower()
     assert "order by enqueued_at, listing_id" in flat
+
+
+# ------------------------------------------------------------ the drain's round-trip budget
+#
+# The drain's cost is POOLER ROUND TRIPS, not CPU: the first production run measured ~3 s per
+# listing (~28 h for the 34 k queue, ~23 days for the corpus) on ~33 statements per listing.
+# The tests below pin the three structural properties that removed most of them — none of
+# which may change what the pure core is handed.
+
+
+class _DrainCursor:
+    """Answers the drain's reads well enough for the loop to complete a batch."""
+
+    def __init__(self, state: dict[str, Any]) -> None:
+        self.state = state
+        self.rowcount = -1
+        self._result: list[tuple[Any, ...]] = []
+
+    def __enter__(self) -> "_DrainCursor":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+    def execute(self, sql: str, params: Any = None) -> None:
+        text = " ".join(sql.split()).lower()
+        self.state["executed"].append((text, params))
+        self._result = []
+        if text.startswith("select id, label from registry_versions"):
+            self._result = [(7, "2026-07")]
+        elif "from pin_cluster_epochs" in text:
+            self._result = [(11,)]
+        elif "from location_constants" in text:
+            self._result = [("cz_bbox", None, 12.0, 48.0, 19.0, 51.5)]
+        elif "from location_granularity_rank" in text:
+            self._result = [("obec", 3)]
+        elif "from location_collision_policy" in text:
+            self._result = [("v1", "*", None, 4, 0, 2, "suspect")]
+        elif text.startswith("select listing_id, attempts from dirty_locations"):
+            self._result = self.state["slices"].pop(0) if self.state["slices"] else []
+        elif text.startswith("select count(*)") and "dirty_locations" in text:
+            self._result = [(len(self.state["slices"]), 0)]
+
+    def executemany(self, sql: str, params_seq: Any = None) -> None:
+        self.execute(sql, params_seq)
+
+    def fetchone(self) -> tuple[Any, ...] | None:
+        return self._result[0] if self._result else None
+
+    def fetchall(self) -> list[tuple[Any, ...]]:
+        return self._result
+
+
+class _DrainConn:
+    def __init__(self, state: dict[str, Any]) -> None:
+        self.state = state
+
+    def cursor(self) -> _DrainCursor:
+        return _DrainCursor(self.state)
+
+    @contextmanager
+    def transaction(self):
+        self.state["transactions"] += 1
+        yield
+
+
+def _drained(slices: list[list[tuple[int, int]]]) -> dict[str, Any]:
+    state: dict[str, Any] = {"executed": [], "transactions": 0, "slices": list(slices)}
+    state["stats"] = drain.run(_DrainConn(state), batch_size=10, max_seconds=30)
+    return state
+
+
+def _count(state: dict[str, Any], needle: str) -> int:
+    return sum(1 for text, _ in state["executed"] if needle in text)
+
+
+def test_the_corpus_constants_are_read_once_per_run_not_once_per_listing():
+    """Policies, constants, granularity ranks, the current registry version and the epoch are
+    all pinned or operator-curated: they cannot change under a run. Re-reading any of them per
+    listing is a pure round trip, and round trips are the whole cost model here."""
+    state = _drained([[(101, 0), (102, 0), (103, 0)], [(104, 0), (105, 0)]])
+    for needle in (
+        "from registry_versions",
+        "from pin_cluster_epochs",
+        "from location_constants",
+        "from location_granularity_rank",
+        "from location_field_policy",
+        "from location_uncertainty_policy",
+        "from location_collision_policy",
+    ):
+        assert _count(state, needle) == 1, needle
+
+
+def test_the_per_listing_reads_are_prefetched_once_per_slice():
+    """Claims, the previous consumed inputs, `listings.property_id` and the open findings are
+    all readable BEFORE the slice writes anything, so they cost one query per SLICE. Five
+    listings over two slices means two of each — never five."""
+    state = _drained([[(101, 0), (102, 0), (103, 0)], [(104, 0), (105, 0)]])
+    assert state["stats"].claimed == 5
+    for needle in (
+        "from location_claims_live where listing_id = any(",
+        "join location_resolutions r on r.id = p.resolution_id where p.listing_id = any(",
+        "select id, property_id from listings where id = any(",
+        "from location_contradictions_open c where c.listing_id = any(",
+    ):
+        assert _count(state, needle) == 2, needle
+    # ...and never the single-listing forms the prefetch replaced.
+    assert _count(state, "from location_claims_live where listing_id = %s") == 0
+
+
+def test_location_disputed_is_read_after_the_run_writes_its_contradictions():
+    """The ONE per-listing read that may NOT be prefetched: it is a read-your-writes read of
+    the contradictions written a few statements earlier, so a slice-start snapshot would serve
+    a projection that denies a major finding this very run raised."""
+    body = inspect.getsource(drain._resolve_one)
+    assert body.index("write_contradictions") < body.index("location_disputed(")
+    assert "location_disputed" not in inspect.getsource(drain._prefetch)
+
+
+# ------------------------------------------------------------------ the run-scoped registry
+
+
+class _CountingMirror:
+    def __init__(self) -> None:
+        self.inner = mm.default_mirror()
+        self.calls = 0
+
+    def __getattr__(self, name: str) -> Any:
+        attr = getattr(self.inner, name)
+
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            self.calls += 1
+            return attr(*args, **kwargs)
+
+        return wrapper
+
+
+def test_the_cached_view_answers_every_question_the_protocol_declares():
+    """It forwards by explicit method, not by `__getattr__` — so a question added to
+    `RegistryView` and to `SqlRegistryView` but not here would raise AttributeError mid-drain
+    rather than quietly falling through."""
+    from location_data.resolver.types import RegistryView
+
+    declared = {
+        name for name in dir(RegistryView)
+        if not name.startswith("_") and callable(getattr(RegistryView, name, None))
+    }
+    assert declared
+    missing = [name for name in declared if not hasattr(resolve_db.CachedRegistryView, name)]
+    assert not missing, missing
+
+
+def test_the_registry_cache_asks_each_distinct_question_exactly_once():
+    """The mirror is immutable at a pinned `registry_version_id`, so the same question has one
+    answer for the whole run — and the resolver asks `streets_in_obec(Praha)` twice per Prague
+    listing plus once more from the reconciler."""
+    inner = _CountingMirror()
+    view = resolve_db.CachedRegistryView(inner, resolve_db.RunCache())
+    first = view.streets_in_obec(554782)
+    for _ in range(5):
+        assert view.streets_in_obec(554782) == first
+    view.streets_in_obec(599212)
+    view.admin_units_by_name("praha", levels=("obec",))
+    view.admin_units_by_name("praha", levels=("obec",))
+    assert inner.calls == 3
+
+
+def test_a_cached_run_replays_bit_for_bit_against_an_uncached_one():
+    """THE constraint on every optimisation in this file: caching is an I/O-layer concern, so
+    the resolution it produces must be byte-identical to the one the bare mirror produces."""
+    claims = [
+        mm.claim(1, "obec_name", value_text="Praha"),
+        mm.claim(2, "street_name", value_text="Nad Bořislavkou 487/40"),
+        mm.claim(3, "psc", value_text="160 00"),
+        mm.claim(4, "coordinate", lat=50.10102, lon=14.34804,
+                 declared_precision_label="gps"),
+        mm.claim(5, "cast_obce_name", value_text="Vokovice"),
+    ]
+
+    def _resolve(registry: Any) -> Any:
+        return core.resolve(
+            claims, mm.context(registry), resolver_version=RESOLVER_VERSION,
+            registry_version_id=7, policy_version="v1", collision_epoch_id=11,
+        )
+
+    bare = _resolve(mm.default_mirror())
+    cached_view = resolve_db.CachedRegistryView(mm.default_mirror(), resolve_db.RunCache())
+    assert _resolve(cached_view).content_hash == bare.content_hash
+    # And again on the SAME warm cache — a second listing must not see a mutated answer.
+    assert _resolve(cached_view).content_hash == bare.content_hash
+
+
+def test_the_cache_memory_rail_cannot_change_an_answer():
+    """`max_entries` drops the whole memo when it fills. Correctness may not depend on what
+    happens to be resident."""
+    inner = _CountingMirror()
+    view = resolve_db.CachedRegistryView(inner, resolve_db.RunCache(max_entries=1))
+    answers = {code: view.streets_in_obec(code) for code in (554782, 599212)}
+    for code, expected in answers.items():
+        assert view.streets_in_obec(code) == expected
+
+
+# -------------------------------------------------------------------- the connection mode
+
+
+def test_the_drain_opens_the_session_pooler_connection(monkeypatch):
+    """`prepare_threshold=None` on the transaction pooler re-parses and re-plans every one of
+    the ~40 recurring statements on every listing; the session pooler's dedicated backend lets
+    psycopg prepare them once. Same pattern as the scraper's hot detail-write loop."""
+    monkeypatch.setenv("SUPABASE_DB_SESSION_URL", "postgres://session/db")
+    opened: list[str] = []
+    monkeypatch.setattr(drain.db, "connect_session", lambda: opened.append("session") or "conn")
+    assert drain.open_connection() == "conn"
+    assert opened == ["session"]
+
+
+def test_the_transaction_pooler_fallback_is_announced(monkeypatch, caplog):
+    """`connect_session()` falls back silently by design; a drain that has quietly lost its
+    prepared statements looks exactly like a drain that is simply slow."""
+    monkeypatch.delenv("SUPABASE_DB_SESSION_URL", raising=False)
+    monkeypatch.setattr(drain.db, "connect_session", lambda: "conn")
+    with caplog.at_level("WARNING"):
+        drain.open_connection()
+    assert "SUPABASE_DB_SESSION_URL" in caplog.text
 
 
 # ------------------------------------------------------------------- auto-close inputs
