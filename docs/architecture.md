@@ -43,7 +43,13 @@ workflows' dispatch inputs (`-f sale_type=… -f category=…`, or locality + ra
 (migration 099) before parsing (the parsed-state ledger + reparse-without-refetch capability); INDEX/search-page
 HTML is NOT staged — it was write-only dead weight (nothing reads `page_kind='index'`) and the per-page TOAST
 write was the dominant cost on slow HTML index walks, so all HTML portals (bazos/idnes/mmreality/remax/maxima)
-skip it. Coordinates come from the detail page's embedded Google-Maps/Mapy.cz link
+skip it. **`portal_raw_pages` is preservation substrate, never pruned** (location-data
+program, W0 item 0o): migration 099's "safe to delete once parsed" header is superseded —
+the archive is the only surviving copy of delisted pages' location signal (portals don't
+serve delisted pages again), an off-database copy lives in R2 under
+`backups/portal-raw-pages/` (`scripts/export_portal_raw_pages_archive.py`, workflow
+`export_raw_pages_archive.yml`), and `tests/test_portal_raw_pages_guard.py` fails CI on
+any `DELETE`/`TRUNCATE`/`DROP` against the table. Coordinates come from the detail page's embedded Google-Maps/Mapy.cz link
 (page-wide, CZ-bbox-guarded); they are what lets cross-source dedup match bazos against
 sreality.
 

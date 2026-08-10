@@ -1869,6 +1869,49 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/enrich_bazos_batch.yml"
   },
   {
+    "filename": "export_raw_pages_archive.yml",
+    "name": "Export portal_raw_pages archive to R2",
+    "description": "Location-data program W0 item 0o: the ~447k-row / 14 GB portal_raw_pages archive is the only surviving copy of several portals' best location signal, so a full off-database copy goes to R2 under backups/portal-raw-pages/<snapshot>/. Chunked + resumable — re-dispatch with the same snapshot date to continue an interrupted run; the final step verifies the manifest row count against the DB. Deletion of the live table is guarded by tests/test_portal_raw_pages_guard.py. workflow_dispatch only; re-run with a new snapshot date for a fresh export.",
+    "portal": null,
+    "manual": true,
+    "schedules": [],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "snapshot",
+        "description": "Snapshot prefix date YYYY-MM-DD (empty = today UTC); reuse to resume",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "verify_only",
+        "description": "Only verify an existing snapshot's manifest against the DB",
+        "required": false,
+        "type": "boolean",
+        "default": "false",
+        "options": null
+      }
+    ],
+    "secrets": [
+      "R2_ACCESS_KEY_ID",
+      "R2_ACCOUNT_ID",
+      "R2_BUCKET_NAME",
+      "R2_SECRET_ACCESS_KEY",
+      "SUPABASE_DB_SESSION_URL",
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "raw-pages-archive-export",
+    "cancelInProgress": false,
+    "timeoutMinutes": 350,
+    "permissions": "contents: read",
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/export_raw_pages_archive.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/export_raw_pages_archive.yml"
+  },
+  {
     "filename": "fetch-fixtures.yml",
     "name": "Fixtures: source HTML (anonymized)",
     "description": "Manual trigger only. Fetches each listing URL, runs the anonymization in scripts/fetch_and_anonymize_fixtures.py, and commits the resulting fixtures to the current branch. Operator runs this once per source refresh; tests then read the saved files instead of hitting the internet.",
