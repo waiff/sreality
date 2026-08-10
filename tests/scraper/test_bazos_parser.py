@@ -148,6 +148,8 @@ def test_parse_detail_live_three_cell_lokalita_enables_street_geocode():
     # Locality + PSČ now parse from the third cell, in "PSČ Town" order.
     assert listing.locality == "Plzeň"
     assert listing.raw["psc"] == "326 00"
+    # W0 item 0c: the PSČ reaches listings.zip, not just raw_json.
+    assert listing.zip == "326 00"
     # Breadcrumb is authoritative for the category.
     assert (listing.category_main, listing.category_type) == ("byt", "pronajem")
     # The raw extract (used as the geocoder query, where the "ul." prefix helps)

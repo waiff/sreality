@@ -160,6 +160,15 @@ def test_locality_ids_minus_one_sentinel_maps_to_none():
     assert row["locality_ward_id"] is None
 
 
+def test_zip_minus_one_sentinel_maps_to_none():
+    # W0 item 0b: sreality sends zip=-1 for "unknown"; 31k rows stored the
+    # stringified sentinel as a literal '-1' postal code.
+    assert parse_listing(_estate(locality={"zip": -1}))["zip"] is None
+    assert parse_listing(_estate(locality={"zip": "-1"}))["zip"] is None
+    assert parse_listing(_estate(locality={"zip": 72529}))["zip"] == "72529"
+    assert parse_listing(_estate(locality={}))["zip"] is None
+
+
 def test_locality_ids_missing_keys_are_none():
     row = parse_listing(_estate(locality={}))
     assert row["locality_municipality_id"] is None
