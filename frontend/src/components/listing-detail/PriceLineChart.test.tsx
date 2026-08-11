@@ -76,6 +76,35 @@ describe('PriceLineChart', () => {
     expect(container.querySelectorAll('.recharts-line-dots circle')).toHaveLength(3);
   });
 
+  it('breaks the line where activeWindows leaves a gap, and does not bridge it', () => {
+    // A snapshot at 2026-07-17 lands inside the dark stretch between the two
+    // windows, so it's the row that actually forces a null in the middle.
+    const track: PriceSeries[] = [
+      {
+        id: 1,
+        label: 'Price',
+        points: [
+          { t: T('2026-06-27T08:00:00Z'), price: 4_000_000 },
+          { t: T('2026-07-17T08:00:00Z'), price: 3_900_000 },
+        ],
+        endT: T('2026-08-03T08:00:00Z'),
+      },
+    ];
+    const activeWindows: [number, number][] = [
+      [T('2026-06-27T08:00:00Z'), T('2026-07-10T08:00:00Z')],
+      [T('2026-07-25T08:00:00Z'), T('2026-08-03T08:00:00Z')],
+    ];
+    const { container } = render(
+      <PriceLineChart series={track} activeWindows={activeWindows} />,
+    );
+    // recharts draws one SVG <path> per Line even with an internal null run,
+    // but (without connectNulls) the path `d` gets a second "M" (moveto) —
+    // one subpath per contiguous non-null stretch instead of one continuous
+    // curve bridging the gap.
+    const d = container.querySelector('.recharts-line-curve')?.getAttribute('d') ?? '';
+    expect(d.match(/M/g)?.length).toBe(2);
+  });
+
   it('survives a single-observation track (no span to scale)', () => {
     const flat: PriceSeries[] = [
       {

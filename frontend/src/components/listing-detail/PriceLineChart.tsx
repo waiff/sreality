@@ -37,10 +37,20 @@ interface DotProps {
   payload?: Record<string, unknown>;
 }
 
-export default function PriceLineChart({ series }: { series: PriceSeries[] }) {
+export default function PriceLineChart({
+  series,
+  activeWindows,
+}: {
+  series: PriceSeries[];
+  // Property-level "had >=1 active listing" windows (lib/priceHistory.
+  // buildActiveWindows) — outside them every track gaps, regardless of that
+  // track's own [start, endT]. Optional so a caller with no status-events
+  // data yet (e.g. mid-load) draws the pre-existing unconstrained line.
+  activeWindows?: [number, number][];
+}) {
   const colors = useTokenColors(TOKEN_KEYS);
 
-  const data = buildChartRows(series);
+  const data = buildChartRows(series, activeWindows);
   const times = data.map((row) => row.t as number);
   const prices = series.flatMap((s) => s.points.map((p) => p.price));
   const domain: [number, number] = [times[0] ?? 0, times[times.length - 1] ?? 0];
@@ -160,7 +170,10 @@ export default function PriceLineChart({ series }: { series: PriceSeries[] }) {
                 strokeWidth={1.6}
                 dot={renderDot}
                 activeDot={{ r: 4 }}
-                connectNulls
+                // NOT connectNulls: a null run is a deliberate gap (the
+                // property had zero active listings for that stretch, or this
+                // track sits outside its own [start, endT]) — bridging it
+                // would redraw exactly the mismatch this prop exists to fix.
                 isAnimationActive={false}
               />
             );
