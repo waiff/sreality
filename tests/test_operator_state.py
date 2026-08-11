@@ -32,6 +32,7 @@ def test_registry_covers_exactly_the_property_anchored_tables():
         "property_tags",
         "property_notes",
         "notification_dispatches",
+        "property_status_events",
     }
 
 
@@ -61,8 +62,9 @@ def test_append_table_repoints_without_a_collision_delete():
     cur = _Cur()
     carry_operator_state_on_merge(cur, retired_id=20, survivor_id=10)
     sqls = [s for s, _ in cur.executed]
-    assert not any(s.startswith("DELETE FROM property_notes") for s in sqls)
-    assert any("UPDATE property_notes SET property_id" in s for s in sqls)
+    for tbl in ("property_notes", "property_status_events"):
+        assert not any(s.startswith(f"DELETE FROM {tbl}") for s in sqls)
+        assert any(f"UPDATE {tbl} SET property_id" in s for s in sqls)
 
 
 def test_every_statement_repoints_retired_to_survivor():

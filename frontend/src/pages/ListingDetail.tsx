@@ -16,6 +16,7 @@ import {
   fetchPropertyReprNaturalKey,
   fetchPropertySources,
   fetchPropertyMf,
+  fetchPropertyStatusEvents,
   fetchSnapshotsForListings,
   fetchFreshnessChecksByListing,
   fetchImagesByListing,
@@ -41,10 +42,12 @@ import type {
   ListingSnapshotPublic,
   ListingFreshnessCheckPublic,
   PropertySource,
+  PropertyStatusEventPublic,
 } from '@/lib/types';
 import {
   listingUrlRows,
   buildPriceSeries,
+  buildActiveWindows,
   priceChangeEvents,
   summarizePriceHistory,
 } from '@/lib/priceHistory';
@@ -191,6 +194,15 @@ export default function ListingDetail() {
   const propertyMfQ = useQuery<PropertyMf | null, Error>({
     queryKey: ['property-mf', propPid],
     queryFn: () => fetchPropertyMf(propPid as number),
+    enabled: propPid != null,
+    staleTime: 60_000,
+  });
+
+  // Property-grain activity log for the price chart's inactive-period gaps
+  // (migration 392) — see priceHistory.buildActiveWindows for how it's used.
+  const statusEventsQ = useQuery<PropertyStatusEventPublic[], Error>({
+    queryKey: ['property-status-events', propPid],
+    queryFn: () => fetchPropertyStatusEvents(propPid as number),
     enabled: propPid != null,
     staleTime: 60_000,
   });
@@ -343,6 +355,7 @@ export default function ListingDetail() {
   const checks = checksQ.data ?? [];
   const images = imagesQ.data ?? [];
   const sources = sourcesQ.data?.sources ?? [];
+  const statusEvents = statusEventsQ.data ?? [];
 
   // Property-grain figures (MF / estimate) are built on the canonical asking
   // price; flag any ACTIVE sibling advert listed at a different number so the
@@ -426,7 +439,12 @@ export default function ListingDetail() {
         )}
       </Suspense>
       <Hairline />
-      <ListingHistoryBlock listing={listing} sources={sources} snapshots={snapshots} />
+      <ListingHistoryBlock
+        listing={listing}
+        sources={sources}
+        snapshots={snapshots}
+        statusEvents={statusEvents}
+      />
       <Hairline />
       <FreshnessBlock sreality_id={listing.sreality_id} checks={checks} />
     </Page>
@@ -666,10 +684,12 @@ function ListingHistoryBlock({
   listing,
   sources,
   snapshots,
+  statusEvents,
 }: {
   listing: ListingPublic;
   sources: PropertySource[];
   snapshots: ListingSnapshotPublic[];
+  statusEvents: PropertyStatusEventPublic[];
 }) {
   const urls = useMemo(() => listingUrlRows(sources, listing), [sources, listing]);
   // Date.now() is captured once at mount (not per render) and threaded into the
@@ -686,6 +706,19 @@ function ListingHistoryBlock({
   const stats = useMemo(
     () => summarizePriceHistory(urls, snapshots, listing.price_czk, now),
     [urls, snapshots, listing.price_czk, now],
+  );
+  // Property-level "had >=1 active listing" windows — gaps the chart line for
+  // any stretch the whole property went dark, not just a single track. Falls
+  // back to one window spanning [firstSeenT, current-truth end] when
+  // statusEvents is empty (still loading, or a property_id hasn't resolved
+  // yet), i.e. the pre-existing unconstrained line — never worse than before.
+  const activeWindows = useMemo(
+    () =>
+      buildActiveWindows(statusEvents, {
+        start: stats.firstSeenT,
+        end: stats.anyActive ? now : stats.lastSeenT,
+      }),
+    [statusEvents, stats.firstSeenT, stats.anyActive, stats.lastSeenT, now],
   );
   // Dated price moves, from the same series the chart draws. The chart shows
   // the shape; this gives the exact day and size of each step (and stays
@@ -737,7 +770,7 @@ function ListingHistoryBlock({
                 <div className="h-[230px] rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)]" />
               }
             >
-              <PriceLineChart series={series} />
+              <PriceLineChart series={series} activeWindows={activeWindows} />
             </Suspense>
           </ErrorBoundary>
         </div>

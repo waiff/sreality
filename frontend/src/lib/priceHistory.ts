@@ -2,7 +2,12 @@
  * turn a property's URL records + price snapshots into chart series and the
  * summary stats. Kept side-effect-free (now injected, never Date.now()) so the
  * transforms are unit-testable. */
-import type { ListingSnapshotPublic, PropertySource, ListingPublic } from '@/lib/types';
+import type {
+  ListingSnapshotPublic,
+  PropertySource,
+  ListingPublic,
+  PropertyStatusEventPublic,
+} from '@/lib/types';
 import { portalListingUrl } from '@/lib/portals';
 
 const DAY_MS = 86_400_000;
@@ -130,6 +135,44 @@ export function buildPriceSeries(
   return out;
 }
 
+/* Property-grain windows (ms) during which >=1 source was active, derived
+ * from property_status_events (migration 392: a trigger-maintained log of
+ * properties.is_active flips, reusing the SAME aggregate Browse/badges
+ * already trust rather than re-deriving "any active source" from raw listing
+ * data here). `fallback.end` is the caller's best current-truth close point
+ * (now if the property reads active today, else its last-seen instant) —
+ * used both when there are no events at all (nothing seeded/loaded yet) and
+ * to close a trailing window the trigger hasn't stamped a deactivation for.
+ * With no events this returns one window spanning the whole fallback range,
+ * i.e. today's pre-gap-logic behavior exactly — a strict narrowing, never a
+ * regression, once real events are present. */
+export function buildActiveWindows(
+  events: PropertyStatusEventPublic[],
+  fallback: { start: number; end: number },
+): [number, number][] {
+  const sorted = [...events]
+    .map((e) => ({ isActive: e.is_active, t: new Date(e.event_at).getTime() }))
+    .sort((a, b) => a.t - b.t);
+  if (sorted.length === 0) return [[fallback.start, fallback.end]];
+
+  const windows: [number, number][] = [];
+  let openAt: number | null = null;
+  for (const e of sorted) {
+    if (e.isActive) {
+      if (openAt == null) openAt = e.t;
+    } else if (openAt != null) {
+      windows.push([openAt, e.t]);
+      openAt = null;
+    }
+  }
+  if (openAt != null) windows.push([openAt, fallback.end]);
+  return windows;
+}
+
+function withinWindows(t: number, windows: [number, number][]): boolean {
+  return windows.some(([start, end]) => t >= start && t <= end);
+}
+
 /* -------------------------------------------------------------------------- */
 /* Chart-ready shapes                                                         */
 /* -------------------------------------------------------------------------- */
@@ -142,23 +185,38 @@ export const seriesObservedKey = (id: number): string => `o${id}`;
 export type PriceChartRow = Record<string, number | boolean | null>;
 
 /* Every track merged onto one sorted time axis, each carrying its last known
- * price forward (the step) and NULL outside its own [start, endT] window.
- * Lives here rather than in the chart component so the step semantics are
- * unit-tested and the component stays pure rendering. */
-export function buildChartRows(series: PriceSeries[]): PriceChartRow[] {
+ * price forward (the step) and NULL outside its own [start, endT] window OR
+ * outside every property-level active window (activeWindows, from
+ * buildActiveWindows) — a period the property had zero active listings gaps
+ * the line for every track at once, not just the track that went inactive.
+ * activeWindows is optional so existing callers (and this file's chart-row
+ * tests) keep the pre-existing unconstrained behavior. Lives here rather than
+ * in the chart component so the step semantics are unit-tested and the
+ * component stays pure rendering. */
+export function buildChartRows(
+  series: PriceSeries[],
+  activeWindows?: [number, number][],
+): PriceChartRow[] {
   const times = new Set<number>();
   for (const s of series) {
     for (const p of s.points) times.add(p.t);
     if (s.points.length) times.add(s.endT);
   }
+  if (activeWindows) {
+    for (const [start, end] of activeWindows) {
+      times.add(start);
+      times.add(end);
+    }
+  }
   return [...times]
     .sort((a, b) => a - b)
     .map((t) => {
       const row: PriceChartRow = { t };
+      const gapped = !!activeWindows && !withinWindows(t, activeWindows);
       for (const s of series) {
         const vKey = seriesValueKey(s.id);
         const oKey = seriesObservedKey(s.id);
-        if (!s.points.length || t < s.points[0].t || t > s.endT) {
+        if (!s.points.length || t < s.points[0].t || t > s.endT || gapped) {
           row[vKey] = null;
           row[oKey] = false;
           continue;

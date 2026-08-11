@@ -884,6 +884,8 @@ export interface Note {
    * provenance. Null on notes created outside a specific listing context. */
   origin_listing_id: number | null;
   created_at: string;
+  /* Null until the operator edits the note; stamped on every PATCH. */
+  updated_at: string | null;
 }
 
 /* Deal pipeline (migration 205). A property is in the pipeline iff it has a
@@ -1626,4 +1628,13 @@ export interface PropertySource {
   price_czk: number | null;
   first_seen_at: string;
   last_seen_at: string;
+}
+
+/* One row of property_status_events_public — a property-grain log of
+ * properties.is_active flips (migration 392, trigger-populated). Drives the
+ * price-history chart's inactive-period gaps: lib/priceHistory.buildActiveWindows. */
+export interface PropertyStatusEventPublic {
+  property_id: number;
+  is_active: boolean;
+  event_at: string;
 }

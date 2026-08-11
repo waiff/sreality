@@ -198,6 +198,7 @@ def test_merge_carries_operator_state_to_survivor():
     for tbl in (
         "collection_properties", "property_tags",
         "property_notes", "notification_dispatches",
+        "property_status_events",
     ):
         up = _find(conn.executed, f"UPDATE {tbl} SET property_id =")
         assert up is not None, f"{tbl} not re-pointed"

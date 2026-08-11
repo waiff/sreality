@@ -4,15 +4,18 @@ import {
   buildPriceSeries,
   summarizePriceHistory,
   buildChartRows,
+  buildActiveWindows,
   priceChangeEvents,
   seriesValueKey,
   seriesObservedKey,
   type UrlRow,
+  type PriceSeries,
 } from './priceHistory';
 import type {
   ListingPublic,
   ListingSnapshotPublic,
   PropertySource,
+  PropertyStatusEventPublic,
 } from './types';
 
 const NOW = Date.parse('2026-03-01T00:00:00Z');
@@ -285,6 +288,82 @@ describe('buildChartRows', () => {
 
   it('returns no rows for an empty series set', () => {
     expect(buildChartRows([])).toEqual([]);
+  });
+
+  it('gaps every track outside the given active windows, ignoring connectNulls-style bridging', () => {
+    // Property active 10-20 and 30-40, dark 20-30 — even though the track's
+    // OWN [start, endT] window (10-40) would otherwise cover the gap. The
+    // t=25 snapshot lands inside the dark stretch, so it's the row that
+    // actually exercises the gap (window boundaries themselves are inclusive).
+    const s: PriceSeries[] = [
+      {
+        id: 1,
+        label: 'Price',
+        points: [{ t: 10, price: 100 }, { t: 25, price: 150 }],
+        endT: 40,
+      },
+    ];
+    const rows = buildChartRows(s, [[10, 20], [30, 40]]);
+    expect(rows.map((r) => r.t)).toEqual([10, 20, 25, 30, 40]);
+    expect(rows.map((r) => r[seriesValueKey(1)])).toEqual([100, 100, null, 150, 150]);
+  });
+
+  it('is unaffected by activeWindows when omitted (pre-existing behavior)', () => {
+    const s: PriceSeries[] = [
+      { id: 1, label: 'Price', points: [{ t: 10, price: 100 }], endT: 40 },
+    ];
+    expect(buildChartRows(s)).toEqual(buildChartRows(s, undefined));
+  });
+});
+
+describe('buildActiveWindows', () => {
+  const evt = (isActive: boolean, iso: string): PropertyStatusEventPublic => ({
+    property_id: 1,
+    is_active: isActive,
+    event_at: iso,
+  });
+
+  it('falls back to one window spanning the whole range when there are no events', () => {
+    const windows = buildActiveWindows([], { start: 10, end: 100 });
+    expect(windows).toEqual([[10, 100]]);
+  });
+
+  it('builds one window per active stretch, gapping the delisted middle', () => {
+    const windows = buildActiveWindows(
+      [
+        evt(true, '2026-01-01T00:00:00Z'),
+        evt(false, '2026-01-10T00:00:00Z'),
+        evt(true, '2026-01-20T00:00:00Z'),
+      ],
+      { start: 0, end: Date.parse('2026-02-01T00:00:00Z') },
+    );
+    expect(windows).toEqual([
+      [Date.parse('2026-01-01T00:00:00Z'), Date.parse('2026-01-10T00:00:00Z')],
+      [Date.parse('2026-01-20T00:00:00Z'), Date.parse('2026-02-01T00:00:00Z')],
+    ]);
+  });
+
+  it('closes a still-open trailing window at the fallback end', () => {
+    const windows = buildActiveWindows(
+      [evt(true, '2026-01-01T00:00:00Z')],
+      { start: 0, end: Date.parse('2026-03-01T00:00:00Z') },
+    );
+    expect(windows).toEqual([
+      [Date.parse('2026-01-01T00:00:00Z'), Date.parse('2026-03-01T00:00:00Z')],
+    ]);
+  });
+
+  it('sorts out-of-order events before pairing them', () => {
+    const windows = buildActiveWindows(
+      [
+        evt(false, '2026-01-10T00:00:00Z'),
+        evt(true, '2026-01-01T00:00:00Z'),
+      ],
+      { start: 0, end: Date.parse('2026-02-01T00:00:00Z') },
+    );
+    expect(windows).toEqual([
+      [Date.parse('2026-01-01T00:00:00Z'), Date.parse('2026-01-10T00:00:00Z')],
+    ]);
   });
 });
 

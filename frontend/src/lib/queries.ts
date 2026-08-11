@@ -39,6 +39,7 @@ import type {
   MfReferenceRent,
   PortalHealth,
   PropertySource,
+  PropertyStatusEventPublic,
   Ppm2Box,
   ScrapeRun,
   ScraperHealthChecks,
@@ -1388,6 +1389,22 @@ export const fetchSnapshotsForListings = async (
     .order('scraped_at', { ascending: true });
   if (error) throw error;
   return (data ?? []) as unknown as ListingSnapshotPublic[];
+};
+
+/* Property-grain activity log driving the price-history chart's inactive-
+ * period gaps (migration 392's property_status_events, trigger-populated from
+ * the SAME is_active aggregate Browse/badges already trust — see
+ * priceHistory.buildActiveWindows). */
+export const fetchPropertyStatusEvents = async (
+  propertyId: number,
+): Promise<PropertyStatusEventPublic[]> => {
+  const { data, error } = await supabase
+    .from('property_status_events_public')
+    .select('property_id,is_active,event_at')
+    .eq('property_id', propertyId)
+    .order('event_at', { ascending: true });
+  if (error) throw error;
+  return (data ?? []) as unknown as PropertyStatusEventPublic[];
 };
 
 export const fetchFreshnessChecksByListing = async (
