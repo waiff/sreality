@@ -1,0 +1,21 @@
+-- 393: restore security_invoker on property_notes_public.
+--
+-- WHY: 391's `create or replace view property_notes_public as ...` (needed to
+-- append the origin_listing_ref_id/updated_at columns) silently dropped the
+-- security_invoker=true reloption that migration 316 had set — Postgres does
+-- not preserve view options across CREATE OR REPLACE VIEW unless they're
+-- restated in the same statement. Without it the view ran as its postgres
+-- owner and bypassed the property_notes RLS policy entirely: any
+-- authenticated caller could read every account's notes through it, caught
+-- live by tests/test_tenant_isolation_live.py in CI on the PR that shipped
+-- 391 (never reached a merge). The live database was hotfixed via the
+-- Supabase MCP the moment CI caught it; this migration is that same
+-- statement, tracked, so a fresh rebuild reproduces the fix instead of
+-- silently regressing again.
+--
+-- Lesson for future CREATE OR REPLACE VIEW on any of the tenant-scoped
+-- `*_public` views: always re-include `security_invoker = true`) in the same
+-- statement, or follow it with this ALTER — never assume options survive a
+-- replace.
+
+alter view public.property_notes_public set (security_invoker = true);

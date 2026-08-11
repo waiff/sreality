@@ -1193,7 +1193,7 @@ def post_estimate_yield(
 
 
 # --- curation -------------------------------------------------------------
-# Operator-curated lists of listings, append-only notes, and free-form
+# Operator-curated lists of listings, editable journal notes, and free-form
 # coloured tags. Reads also flow through the *_public views in
 # migration 025 (used by the SPA via the anon key); writes always
 # come through these endpoints.
@@ -1362,6 +1362,27 @@ def post_property_note(
 ) -> dict[str, Any]:
     account_id = tenant_pool.resolve_account_id(conn, claims) or deps.SYSTEM_ACCOUNT_ID
     return curation.create_note(conn, property_id, body, account_id=str(account_id))
+
+
+@app.patch("/properties/{property_id}/notes/{note_id}")
+def patch_property_note(
+    property_id: int,
+    note_id: int,
+    body: s.UpdateNoteIn,
+    conn: Any = Depends(tenant_pool.tenant_conn),
+    claims: dict = Depends(deps.verify_jwt),
+) -> dict[str, Any]:
+    return curation.update_note(conn, property_id, note_id, body)
+
+
+@app.delete("/properties/{property_id}/notes/{note_id}")
+def delete_property_note(
+    property_id: int,
+    note_id: int,
+    conn: Any = Depends(tenant_pool.tenant_conn),
+    claims: dict = Depends(deps.verify_jwt),
+) -> dict[str, Any]:
+    return curation.delete_note(conn, property_id, note_id)
 
 
 @app.get("/tags")

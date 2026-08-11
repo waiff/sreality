@@ -41,6 +41,22 @@ export function FunnelIcon({
   );
 }
 
+export function PencilIcon({ className = 'h-4 w-4', strokeWidth = 1 }: IconProps) {
+  return (
+    <svg
+      viewBox="0 0 11 11"
+      className={className}
+      aria-hidden
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={strokeWidth}
+      strokeLinejoin="round"
+    >
+      <path d="M1.5 9.5 L1.5 7.5 L7 2 L9 4 L3.5 9.5 Z" />
+    </svg>
+  );
+}
+
 export function TrashIcon({ className = 'h-4 w-4', strokeWidth = 1.6 }: IconProps) {
   return (
     <svg

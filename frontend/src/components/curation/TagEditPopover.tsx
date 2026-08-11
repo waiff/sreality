@@ -15,6 +15,7 @@ import { deleteTag, updateTag } from '@/lib/api';
 import { curationKeys } from '@/lib/queries';
 import type { Tag, TagColor } from '@/lib/types';
 import TagColorPicker from '@/components/TagColorPicker';
+import { PencilIcon } from '@/components/icons';
 
 interface Props {
   tag: Tag;
@@ -59,7 +60,7 @@ export default function TagEditPopover({ tag, otherNames, onDeleted }: Props) {
         title="Edit tag"
         className="inline-flex items-center justify-center w-5 h-5 rounded-[var(--radius-xs)] text-[var(--color-ink-4)] hover:text-[var(--color-ink-2)] hover:bg-[var(--color-paper-2)] transition-colors"
       >
-        <PencilGlyph />
+        <PencilIcon className="h-[11px] w-[11px]" />
       </button>
       {open && (
         <Popover
@@ -204,18 +205,5 @@ function Popover({
         </button>
       </div>
     </div>
-  );
-}
-
-function PencilGlyph() {
-  return (
-    <svg width="11" height="11" viewBox="0 0 11 11" aria-hidden fill="none">
-      <path
-        d="M1.5 9.5 L1.5 7.5 L7 2 L9 4 L3.5 9.5 Z"
-        stroke="currentColor"
-        strokeWidth="1"
-        strokeLinejoin="round"
-      />
-    </svg>
   );
 }

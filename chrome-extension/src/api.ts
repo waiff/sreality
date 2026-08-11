@@ -256,3 +256,26 @@ export async function addNote(
     body: JSON.stringify({ body, origin_listing_ref_id }),
   });
 }
+
+/* PATCH /properties/:id/notes/:note_id — edit a note's body in place. Same
+ * bearer-gated route the SPA's NoteRow uses. Returns the updated note. */
+export async function updateNote(
+  property_id: number,
+  note_id: number,
+  body: string,
+): Promise<ApiResult<ExtNote>> {
+  return request<ExtNote>(`/properties/${property_id}/notes/${note_id}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ body }),
+  });
+}
+
+/* DELETE /properties/:id/notes/:note_id — remove a note. */
+export async function deleteNote(
+  property_id: number,
+  note_id: number,
+): Promise<ApiResult<{ deleted: true }>> {
+  return request<{ deleted: true }>(`/properties/${property_id}/notes/${note_id}`, {
+    method: 'DELETE',
+  });
+}

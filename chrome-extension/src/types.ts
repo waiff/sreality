@@ -128,6 +128,8 @@ export interface ExtNote {
   body: string;
   origin_listing_id: number | null;
   created_at: string;
+  /* Null until the operator edits the note; stamped on every PATCH. */
+  updated_at: string | null;
 }
 
 /* One entry from POST /listings/lookup — our scraped facts for a portal
@@ -205,6 +207,8 @@ export type ApiMessage =
   | { type: 'remove_from_collection'; collection_id: number; property_id: number }
   | { type: 'list_notes'; property_id: number }
   | { type: 'add_note'; property_id: number; body: string; origin_listing_ref_id: number | null }
+  | { type: 'update_note'; property_id: number; note_id: number; body: string }
+  | { type: 'delete_note'; property_id: number; note_id: number }
   | { type: 'sign_in' }
   | { type: 'sign_out' }
   | { type: 'get_auth_state' }

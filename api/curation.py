@@ -267,12 +267,14 @@ def remove_property_from_collection(
 # --- notes -----------------------------------------------------------------
 
 
+_NOTE_PROJECTION = "id, property_id, body, origin_listing_id, created_at, updated_at"
+
+
 def list_notes(
     conn: "psycopg.Connection", property_id: int,
 ) -> dict[str, Any]:
     sql = (
-        "SELECT id, property_id, body, origin_listing_id, created_at "
-        "FROM property_notes "
+        f"SELECT {_NOTE_PROJECTION} FROM property_notes "
         "WHERE property_id = %s ORDER BY created_at DESC, id DESC"
     )
     with conn.cursor() as cur:
@@ -313,7 +315,7 @@ def create_note(
         "  COALESCE(%s, (SELECT sreality_id FROM listing_natural_key_public WHERE id = %s)), "
         "  COALESCE(%s, (SELECT id FROM listing_natural_key_public WHERE sreality_id = %s)), "
         "  %s) "
-        "RETURNING id, property_id, body, origin_listing_id, created_at"
+        f"RETURNING {_NOTE_PROJECTION}"
     )
     try:
         with conn.transaction(), conn.cursor() as cur:
@@ -331,6 +333,43 @@ def create_note(
         raise HTTPException(404, "property not found")
     assert row is not None
     return _to_note(row)
+
+
+def update_note(
+    conn: "psycopg.Connection",
+    property_id: int,
+    note_id: int,
+    body: s.UpdateNoteIn,
+) -> dict[str, Any]:
+    """Edit a note's body in place. Scoped by (id, property_id) — belt-and-braces
+    on top of RLS so a note can never be edited via the wrong property's route."""
+    if body.body is None:
+        row = _fetch_note(conn, property_id, note_id)
+        if row is None:
+            raise HTTPException(404, "note not found")
+        return row
+    sql = (
+        "UPDATE property_notes SET body = %s, updated_at = now() "
+        "WHERE id = %s AND property_id = %s "
+        f"RETURNING {_NOTE_PROJECTION}"
+    )
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(sql, (body.body, note_id, property_id))
+        row = cur.fetchone()
+    if row is None:
+        raise HTTPException(404, "note not found")
+    return _to_note(row)
+
+
+def delete_note(
+    conn: "psycopg.Connection", property_id: int, note_id: int,
+) -> dict[str, Any]:
+    sql = "DELETE FROM property_notes WHERE id = %s AND property_id = %s"
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(sql, (note_id, property_id))
+        if cur.rowcount == 0:
+            raise HTTPException(404, "note not found")
+    return {"deleted": True}
 
 
 # --- tags ------------------------------------------------------------------
@@ -507,6 +546,18 @@ def _to_collection_full(row: tuple[Any, ...]) -> dict[str, Any]:
     }
 
 
+def _fetch_note(
+    conn: "psycopg.Connection", property_id: int, note_id: int,
+) -> dict[str, Any] | None:
+    sql = f"SELECT {_NOTE_PROJECTION} FROM property_notes WHERE id = %s AND property_id = %s"
+    with conn.cursor() as cur:
+        cur.execute(sql, (note_id, property_id))
+        row = cur.fetchone()
+    if row is None:
+        return None
+    return _to_note(row)
+
+
 def _to_note(row: tuple[Any, ...]) -> dict[str, Any]:
     return {
         "id":                int(row[0]),
@@ -514,6 +565,7 @@ def _to_note(row: tuple[Any, ...]) -> dict[str, Any]:
         "body":              row[2],
         "origin_listing_id": int(row[3]) if row[3] is not None else None,
         "created_at":        _iso(row[4]),
+        "updated_at":        _iso(row[5]),
     }
 
 

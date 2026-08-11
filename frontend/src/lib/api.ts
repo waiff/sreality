@@ -1274,6 +1274,26 @@ export const createPropertyNote = (
     jwt: true,
   });
 
+export const updatePropertyNote = (
+  property_id: number,
+  note_id: number,
+  body: string,
+): Promise<Note> =>
+  request<Note>(`/properties/${property_id}/notes/${note_id}`, {
+    method: 'PATCH',
+    json: { body },
+    jwt: true,
+  });
+
+export const deletePropertyNote = (
+  property_id: number,
+  note_id: number,
+): Promise<{ deleted: true }> =>
+  request<{ deleted: true }>(`/properties/${property_id}/notes/${note_id}`, {
+    method: 'DELETE',
+    jwt: true,
+  });
+
 /* Deal pipeline (migration 205) — bookmark a property into the pipeline
  * (entry stage) / remove it. Membership is read via property_pipeline_public. */
 
