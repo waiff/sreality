@@ -87,6 +87,18 @@ export default function AnchoredPopover({
 
   useLayoutEffect(place, [place]);
 
+  /* The panel's own height changes while it is open (the stage menu swaps its
+   * remove row for a taller confirm). A panel that flipped ABOVE its anchor was
+   * positioned for the old height, so growing it would push it down over the
+   * anchor — re-place instead. Guarded for jsdom, which has no ResizeObserver. */
+  useEffect(() => {
+    const panel = panelRef.current;
+    if (!panel || typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(place);
+    ro.observe(panel);
+    return () => ro.disconnect();
+  }, [place]);
+
   useEffect(() => {
     const onDocPointerDown = (e: PointerEvent) => {
       const target = e.target as Node;

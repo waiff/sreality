@@ -14,7 +14,7 @@
  * 60 cards issues two reads, not 120.
  */
 
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 
 import PipelineMark from '@/components/PipelineMark';
@@ -65,6 +65,14 @@ export default function PipelineFunnelButton({
   const [menuOpen, setMenuOpen] = useState(false);
   /* Stable so the popover's positioning effect doesn't re-subscribe each render. */
   const closeMenu = useCallback(() => setMenuOpen(false), []);
+
+  /* Drop the open flag when the property leaves the pipeline from somewhere else
+   * (the kanban trash, the listing header). The menu unmounts either way — but a
+   * flag left true would spring it open by itself the moment the property was
+   * bookmarked again. */
+  useEffect(() => {
+    if (!inPipeline) setMenuOpen(false);
+  }, [inPipeline]);
 
   const label = inPipeline
     ? `V pipeline (${member.stage_label}) — změnit fázi`
