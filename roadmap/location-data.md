@@ -324,6 +324,18 @@ degrades to `'authoritative'` until the boundary loader populates them.)
   env-overridable (`LOCATION_BOUNDARY_UNIT_TIMEOUT_S`, `LOCATION_RESOLVE_BATCH_TIMEOUT_S`,
   `LOCATION_RESOLVE_SWEEP_TIMEOUT_S`, `LOCATION_INTAKE_TIMEOUT_S`,
   `LOCATION_REGISTRY_PUBLISH_TIMEOUT_S`). Gate: `tests/location_data/test_location_batch_hardening.py`.
+- **The scan batch is not the write size.** A `jsonb_to_recordset` parameter is ONE jsonb
+  value and Postgres caps a jsonb array's elements at 256 MB; one post-cutover sreality
+  listing yields ~18.9 KB of claims, so a 20 000-listing all-sreality batch is ~378 MB in
+  one array — which is how the hourly incremental died on 2026-08-11 (`ProgramLimitExceeded`,
+  Actions run 31482522487) once `last_seen_at` order stopped diluting sreality across nine
+  portals. Every claim/absence/enrichment array is flushed in chunks bounded by BOTH rows
+  and serialized bytes (`LOCATION_INTAKE_CHUNK_ROWS`, `LOCATION_INTAKE_CHUNK_BYTES`),
+  inside the same batch transaction, and chunk boundaries fall only between listings so
+  `DISTINCT ON (claim_fingerprint)` still arbitrates every fingerprint-equal set. A single
+  value over `LOCATION_INTAKE_MAX_VALUE_BYTES` (2 MB) is refused at extraction — never
+  dropped: absence row + refetch-cohort row, the truncated-payload treatment. Gate:
+  `tests/location_data/test_claims_intake_write_bounds.py`.
 - The Mapy remediation ladder (R2 inventory → R3 re-resolve → R4 purge) is W1–W4
   work; the R2 evidence inventory is a W1 INPUT (first claim must not be written
   before it exists).
