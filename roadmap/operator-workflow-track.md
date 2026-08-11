@@ -309,6 +309,44 @@ from Browse, not just from the board.
 - Next: nothing queued here; per-stage columns on the Table and a "days in stage"
   signal are the obvious follow-ups if the scope gets heavy use.
 
+### Phase U-PIPE Phase 3i: The funnel opens a stage menu (done)
+The funnel was a toggle: clicking it on a property already in the pipeline
+REMOVED the card — unconfirmed, undoable, on a grid of 60 — and offered no way
+to advance a deal without opening the listing page. It now opens a shared menu.
+- **Why removal is not a toggle.** `remove_card` DELETEs the row; there is no
+  restore path, and re-adding stamps a fresh `added_at`, so an accidental
+  remove + re-add silently resets "in pipeline since" and every time-in-stage
+  figure the board sorts on. The transition trail survives in
+  `property_pipeline_events` but nothing reads it back. The confirm says so and
+  points at the terminal stages — closing a deal there KEEPS its record.
+  (Operator notes are property-grain, rule #18, and were never at stake;
+  `property_pipeline.note` is a separate column with no writer.)
+- **One menu, three surfaces.** `PipelineStageMenu` (stage list badged from
+  `code`, current stage checked, terminal stages under their own divider, then
+  a two-step remove) is opened by the Browse cards, the Browse table rows AND
+  the listing header — which drops its own `<select>` + bare ✕. Adding stays
+  one click into the entry stage: cheap and reversible. The kanban keeps
+  drag-to-move (rule #22) and its existing trash confirm; the Chrome extension
+  keeps its `<select>` and gains the same confirm on ✕ via a generic
+  `buildConfirmRow` — one destructive-confirm shape for the whole panel.
+- **`AnchoredPopover`** — the missing primitive. The funnel sits inside an
+  `overflow-hidden` card AND inside the card's `<Link>`, so the app's existing
+  `absolute` popovers would be clipped and every click inside one would
+  navigate. Portals to `<body>`, fixed coordinates off the anchor rect, flips
+  up when it would overflow, closes when the anchor scrolls out of view. No new
+  dependency.
+- **`lib/pipelineCache.ts`** — one cache policy for every pipeline write, shared
+  by `usePipelineCard` and the kanban's own bulk mutations. Two bugs fell out:
+  a drag invalidated `board` alone, so every Browse funnel kept badging the
+  pre-drag stage; and the board's rollback lived in `onError`, which opts a
+  mutation out of the app's global error toast (`main.tsx`) — a failed drag
+  snapped back with no explanation. Rollback now rides `onSettled`.
+- **Badge projections fixed.** `fetchPipelineStages` never selected `code` and
+  `fetchPropertyPipeline` never selected `stage_code`, though migration 377
+  exposes both: the same property badged "9" on a card and "5" in its own
+  header, and the stage editor rendered every set code as blank.
+- Rule #22 updated (CLAUDE.md + architecture).
+
 ### Phase U-ME: Manual rental estimates (next)
 
 Capture operator-judgement rent figures as first-class data and
