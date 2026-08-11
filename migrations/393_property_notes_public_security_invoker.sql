@@ -1,4 +1,4 @@
--- 392: restore security_invoker on property_notes_public.
+-- 393: restore security_invoker on property_notes_public.
 --
 -- WHY: 391's `create or replace view property_notes_public as ...` (needed to
 -- append the origin_listing_ref_id/updated_at columns) silently dropped the
