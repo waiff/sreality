@@ -288,7 +288,8 @@ rules. Identify which one a task belongs to before you start.
   (`chrome-extension/README.md`, "Keeping it up to date"). Match patterns are exact-host, so an apex-canonical
   portal (e.g. `realitymix.cz`) needs its apex pattern, not just `www.`. **Detail pages** get a floating
   panel (closed shadow root). For ANY listing we have it shows a **"Přidat do pipeline"**
-  deal-pipeline control (bookmark; once in, change stage via a native `<select>` + remove)
+  deal-pipeline control (bookmark; once in, change stage via a native `<select>`, and remove
+  behind the panel's two-step confirm — rule #22: no surface removes a card on one click)
   + a monitoring/collection toggle (rule #18) + **operator notes** (list existing + add a new
   one via `GET`/`POST /properties/{id}/notes`, property-grain, the viewed advert recorded as
   the note's `origin_listing_id`) + an "Otevřít v aplikaci" deep-link to the SPA page
@@ -832,6 +833,34 @@ renumber.** Navigate by area:
     scope chip + its sidebar stage picker, AND the Chrome-extension panel (the glyph reproduced
     by value in vanilla TS — separate territory, no React import) — so the "into the pipeline"
     concept reads as one icon everywhere.**
+    **And it MEANS the same thing everywhere.** Out of the pipeline, a click adds at the entry
+    stage — cheap, reversible, one keystroke in the middle of triage. Already in it, a click opens
+    the shared `<PipelineStageMenu>`: every live stage (badged, current one checked, terminal stages
+    under their own divider) plus a two-step "Odebrat z pipeline". The funnel is **never** a remove
+    toggle. It was one on Browse, and that was the bug: `remove_card` DELETEs the `property_pipeline`
+    row, there is no restore path in the UI or the API, and re-adding stamps a fresh `added_at` — so
+    a stray click in a 60-card grid, undone the obvious way, silently reset "in pipeline since" and
+    every time-in-stage figure the board sorts on. (The transition trail survives in
+    `property_pipeline_events`; nothing reads it back. Operator notes are property-grain — rule #18 —
+    and were never at risk: `property_pipeline.note` is a separate column with no writer in any
+    surface.) The confirm therefore names that consequence and points at the terminal stages, which
+    close a deal while KEEPING its record — the data-preserving alternative to deletion. The menu
+    also replaced the listing header's own `<select>` + bare ✕, and the Chrome-extension panel gained
+    the same confirm on its ✕ (`buildConfirmRow` — one destructive-confirm shape for the whole panel,
+    not one per action). The kanban is the sanctioned exception, on both counts: moves are
+    drag-and-drop and its trash already carried the confirm.
+    **Menus hang off `<AnchoredPopover>`, which portals to `<body>`.** Not a style choice: the funnel
+    sits inside an `overflow-hidden` card AND inside that card's `<Link>`, so the app's other
+    popovers (`absolute` inside their own container) would be clipped to the photo and every click
+    inside one would navigate. Fixed coordinates off the anchor rect, flip up when the panel would
+    overflow the viewport, reposition on scroll, close when the anchor scrolls out of sight.
+    **Every pipeline write shares one cache policy** (`lib/pipelineCache`): three caches hold "where
+    is this property" in three shapes — `members` (Browse funnels), `card(id)` (listing header),
+    `board` (kanban) — and each surface used to patch only the one it could see, so a kanban drag
+    left every Browse funnel badging the pre-drag stage. Optimistic patch in `onMutate`, rollback +
+    revalidate in `onSettled` — deliberately NOT `onError`, because the global `MutationCache.onError`
+    (`main.tsx`) stays silent for any mutation that defines its own, which is why a failed board drag
+    used to snap back with no explanation.
     **The badge is `pipeline_stages.code` (migration 377), not an ordinal and never a parse of
     the label.** The live board numbers its stages inside the display text ("1. For Review" …
     "9. Passed", "9. Bought", "9. Lost"), so the number is operator data: three stages

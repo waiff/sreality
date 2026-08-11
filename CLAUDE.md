@@ -238,9 +238,12 @@ incident history: `docs/architecture.md` § Architectural rules.
     holds ≤1 card per property at one `pipeline_stages` stage (a TABLE, not an enum); "bookmark" == presence of
     a row at the entry stage. It has its OWN merge reconciler (`reconcile_pipeline_on_merge`, TERMINAL-AWARE — a
     live stage always beats a closed one; snapshots to `property_pipeline_events`) + lossless unmerge. Writes
-    through the bearer-gated API. The affordance is the shared `<PipelineMark>` (funnel + stage badge) on EVERY
-    surface (Browse card, Browse table row, listing header, kanban, Chrome extension); kanban moves are
-    drag-and-drop only; stages are operator-curated (entry/terminal invariants API-enforced). The badge is
+    through the bearer-gated API — one hook (`lib/usePipelineCard`) over ONE cache policy (`lib/pipelineCache`:
+    optimistic, rollback from `onSettled`, never `onError`). The shared `<PipelineMark>` (funnel + stage badge) is
+    the affordance on EVERY surface (Browse card + table row, listing header, kanban, extension) and MEANS one
+    thing: out → a click adds at the entry stage; in → the shared `<PipelineStageMenu>` (move, or remove behind a
+    two-step confirm). **Never a remove toggle** — `remove_card` DELETEs the row, re-adding restamps `added_at`;
+    close deals into a terminal stage. Kanban moves are drag-only; stages operator-curated (API-enforced). The badge is
     `pipeline_stages.code` (migration 377) — operator-owned, nullable, NOT unique, falling back to the stage's
     ordinal at render time; never derived from `position` (the live board codes three closed stages "9") and
     never parsed out of the label. Browse can be scoped to the pipeline (`?pipeline=any|<stage ids>`): a

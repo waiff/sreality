@@ -25,6 +25,13 @@ import {
   matchesDistricts,
   pipelineKeys,
 } from '@/lib/queries';
+import {
+  cachedStage,
+  dropCard,
+  NO_ROLLBACK,
+  placeCard,
+  revalidatePipeline,
+} from '@/lib/pipelineCache';
 import { LocationTypeahead } from '@/components/filter-controls/LocationTypeahead';
 import { type ListingStatus } from '@/lib/filters';
 import { FILTER_REGISTRY } from '@/lib/filterRegistry.generated';
@@ -370,46 +377,36 @@ function Board({
     useSensor(KeyboardSensor),
   );
 
+  /* Optimistic: the card jumps to the new column instantly (Trello feel),
+   * rolled back on error, reconciled on settle — all through the shared cache
+   * policy (lib/pipelineCache), so a drag here repaints the Browse funnels and
+   * the listing header exactly like a click there repaints the board. The
+   * board's own copy patched `board` alone and invalidated `board` alone, which
+   * left every Browse funnel badging the pre-drag stage.
+   *
+   * Rollback rides `onSettled` rather than `onError` on purpose: a mutation
+   * that declares `onError` opts out of the app's global error toast
+   * (main.tsx), so a failed drag used to snap back with no explanation. */
   const move = useMutation({
     mutationFn: ({ propertyId, stageId }: { propertyId: number; stageId: number }) =>
       movePipelineCard(propertyId, stageId),
-    // Optimistic: the card jumps to the new column instantly (Trello feel),
-    // rolled back on error, reconciled on settle.
-    onMutate: async ({ propertyId, stageId }) => {
-      await qc.cancelQueries({ queryKey: pipelineKeys.board });
-      const prev = qc.getQueryData<PipelineBoardCard[]>(pipelineKeys.board);
-      qc.setQueryData<PipelineBoardCard[]>(pipelineKeys.board, (old) =>
-        (old ?? []).map((c) =>
-          c.property_id === propertyId ? { ...c, stage_id: stageId } : c,
-        ),
-      );
-      return { prev };
+    onMutate: ({ propertyId, stageId }) => {
+      const stage = cachedStage(qc, stageId);
+      return stage ? placeCard(qc, propertyId, stage) : NO_ROLLBACK;
     },
-    onError: (_e, _v, ctx) => {
-      if (ctx?.prev) qc.setQueryData(pipelineKeys.board, ctx.prev);
+    onSettled: (_d, err, { propertyId }, rollback) => {
+      if (err) rollback?.();
+      revalidatePipeline(qc, propertyId);
     },
-    onSettled: () => qc.invalidateQueries({ queryKey: pipelineKeys.board }),
   });
 
   // Remove a property from the pipeline entirely (the trash action on a card).
-  // Optimistic: drop it from the board immediately; reconcile board + the
-  // shared members-set (Browse-card funnels) on settle.
   const remove = useMutation({
     mutationFn: (propertyId: number) => removePipelineCard(propertyId),
-    onMutate: async (propertyId) => {
-      await qc.cancelQueries({ queryKey: pipelineKeys.board });
-      const prev = qc.getQueryData<PipelineBoardCard[]>(pipelineKeys.board);
-      qc.setQueryData<PipelineBoardCard[]>(pipelineKeys.board, (old) =>
-        (old ?? []).filter((c) => c.property_id !== propertyId),
-      );
-      return { prev };
-    },
-    onError: (_e, _v, ctx) => {
-      if (ctx?.prev) qc.setQueryData(pipelineKeys.board, ctx.prev);
-    },
-    onSettled: () => {
-      qc.invalidateQueries({ queryKey: pipelineKeys.board });
-      qc.invalidateQueries({ queryKey: pipelineKeys.members });
+    onMutate: (propertyId) => dropCard(qc, propertyId),
+    onSettled: (_d, err, propertyId, rollback) => {
+      if (err) rollback?.();
+      revalidatePipeline(qc, propertyId);
     },
   });
 

@@ -104,6 +104,12 @@ interface PanelState {
   busy: boolean;
   /* True while a pipeline add/remove/move is in flight (disables the control). */
   pipelineBusy: boolean;
+  /* True while the pill shows its "Odebrat z pipeline?" confirm row. Removal is
+   * the one destructive pipeline action and it has no undo — the card's "v
+   * pipeline od" / "ve fázi od" are deleted and re-adding restamps them — so
+   * the ✕ asks first, the same two-step the note rows and the SPA's stage menu
+   * use (rule #22: one pipeline affordance, one behaviour, every surface). */
+  pipelineConfirmRemove: boolean;
   /* Operator-curated stage list for the stage `<select>` (null = not loaded). */
   stages: PipelineStage[] | null;
   /* Operator-curated collection list for the monitoring toggle (null = not loaded). */
@@ -264,6 +270,56 @@ function bellIconSvg(filled: boolean): string {
 // Estimation-editor defaults (mirror the SPA's YieldBlock, but now seeded
 // with the subject listing's own price/area from our lookup).
 // ----------------------------------------------------------------------
+
+/* THE panel's destructive-confirm row — an inline "are you sure" with the
+ * question, one line of consequence, and Confirm / Cancel. Generic on purpose:
+ * the panel should grow exactly one of these, not one per action (the SPA made
+ * the same move with <PipelineStageMenu>'s confirm). */
+function buildConfirmRow(opts: {
+  question: string;
+  detail?: string;
+  confirmLabel: string;
+  busy?: boolean;
+  onConfirm: () => void;
+  onCancel: () => void;
+}): HTMLElement {
+  const row = document.createElement('div');
+  row.className = 'confirm-row';
+  row.setAttribute('role', 'group');
+  row.setAttribute('aria-label', opts.question);
+
+  const q = document.createElement('p');
+  q.className = 'confirm-question';
+  q.textContent = opts.question;
+  row.appendChild(q);
+
+  if (opts.detail != null && opts.detail !== '') {
+    const d = document.createElement('p');
+    d.className = 'confirm-detail';
+    d.textContent = opts.detail;
+    row.appendChild(d);
+  }
+
+  const actions = document.createElement('div');
+  actions.className = 'confirm-actions';
+  const yes = document.createElement('button');
+  yes.type = 'button';
+  yes.className = 'confirm-yes';
+  yes.textContent = opts.confirmLabel;
+  yes.disabled = opts.busy ?? false;
+  yes.onclick = opts.onConfirm;
+  actions.appendChild(yes);
+  const no = document.createElement('button');
+  no.type = 'button';
+  no.className = 'confirm-no';
+  no.textContent = 'Zrušit';
+  no.disabled = opts.busy ?? false;
+  no.onclick = opts.onCancel;
+  actions.appendChild(no);
+  row.appendChild(actions);
+
+  return row;
+}
 
 function subjectArea(state: PanelState): number | null {
   return state.run?.input_spec?.area_m2 ?? state.listing?.area_m2 ?? null;
@@ -761,11 +817,30 @@ function mountPanel(): {
     remove.disabled = state.pipelineBusy;
     remove.title = 'Odebrat z pipeline';
     remove.setAttribute('aria-label', 'Odebrat z pipeline');
+    remove.setAttribute('aria-expanded', String(state.pipelineConfirmRemove));
     remove.textContent = '✕';
-    remove.onclick = () => { void onTogglePipeline(); };
+    remove.onclick = () => onRemovePipelineRequest();
     pill.appendChild(remove);
 
     container.appendChild(pill);
+
+    /* The confirm row (see PanelState.pipelineConfirmRemove): removal is the one
+     * pipeline action that can't be undone, so it asks — and points at the
+     * closed stages, which keep the deal's record instead of deleting it. */
+    if (state.pipelineConfirmRemove) {
+      const closed = (state.stages ?? []).filter((s) => s.is_terminal);
+      container.appendChild(buildConfirmRow({
+        question: 'Odebrat z pipeline?',
+        detail: 'Karta ztratí „v pipeline od“ i „ve fázi od“.'
+          + (closed.length > 0
+            ? ` Uzavřený obchod raději přesuňte do fáze „${closed[0].label}“.`
+            : ''),
+        confirmLabel: state.pipelineBusy ? 'Odebírám…' : 'Odebrat',
+        busy: state.pipelineBusy,
+        onConfirm: () => { void onTogglePipeline(); },
+        onCancel: () => onRemovePipelineCancel(),
+      }));
+    }
   }
 
   /* Collections / monitoring control for the listing's property (rule #18) — a
@@ -1317,6 +1392,16 @@ function applyMembershipIf(
       : prev;
 }
 
+/* Ask before removing (PanelState.pipelineConfirmRemove) — the ✕ opens the
+ * confirm row, it does not write. Adding stays one click: it is reversible. */
+function onRemovePipelineRequest(): void {
+  setState((prev) => ({ ...prev, pipelineConfirmRemove: true, errorMessage: null }));
+}
+
+function onRemovePipelineCancel(): void {
+  setState((prev) => ({ ...prev, pipelineConfirmRemove: false }));
+}
+
 async function onTogglePipeline(): Promise<void> {
   const l = state.listing;
   if (l == null || l.property_id == null) return;
@@ -1345,7 +1430,8 @@ async function onTogglePipeline(): Promise<void> {
             stage_code: prior?.stage_code ?? null, stage_color: prior?.stage_color ?? null }
         : { in_pipeline: false, stage_id: null, stage_key: null, stage_label: null,
             stage_code: null, stage_color: null },
-      { pipelineBusy: false, errorMessage: `Uložení do pipeline selhalo: ${friendlyDetail(res.detail)}` },
+      { pipelineBusy: false, pipelineConfirmRemove: false,
+        errorMessage: `Uložení do pipeline selhalo: ${friendlyDetail(res.detail)}` },
     ));
     return;
   }
@@ -1363,7 +1449,7 @@ async function onTogglePipeline(): Promise<void> {
           stage_code: res.data.stage_code ?? null,
           stage_color: res.data.stage_color ?? null,
         },
-    { pipelineBusy: false },
+    { pipelineBusy: false, pipelineConfirmRemove: false },
   ));
 }
 
@@ -1440,7 +1526,9 @@ async function onMoveStage(stageId: number): Promise<void> {
       stage_code: target?.code ?? null,
       stage_color: target?.color ?? prior.stage_color,
     },
-    { pipelineBusy: true, errorMessage: null },
+    // Moving the card answers the "remove?" question a different way — close
+    // the confirm rather than leaving it hanging over a card that just moved.
+    { pipelineBusy: true, pipelineConfirmRemove: false, errorMessage: null },
   ));
 
   const res = await call<PipelineCardResult>({
@@ -1649,7 +1737,7 @@ export async function openPanel(
     rentTouched: false, costTouched: false, priceTouched: false,
     renovationTouched: false,
     rent: null, costPerM2: null, price: null, renovation: null, busy: false,
-    pipelineBusy: false, stages: cachedStages,
+    pipelineBusy: false, pipelineConfirmRemove: false, stages: cachedStages,
     collections: cachedCollections, collectionBusy: false,
     notes: null, noteBusy: false, quota: null, errorMessage: null,
   };

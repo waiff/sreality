@@ -2275,7 +2275,13 @@ export const fetchPropertyPipeline = async (
 ): Promise<PipelineCard | null> => {
   const { data, error } = await supabase
     .from('property_pipeline_public')
-    .select('property_id, stage_id, stage_key, stage_label, stage_color, is_terminal, stage_position')
+    /* stage_code (migration 377) is what the funnel badges — without it this
+     * surface silently fell back to the stage's ordinal while Browse, which
+     * reads the members map, showed the operator's code: the same property
+     * badged "9" on a card and "5" in its own header. */
+    .select(
+      'property_id, stage_id, stage_key, stage_label, stage_color, stage_code, is_terminal, stage_position',
+    )
     .eq('property_id', property_id)
     .maybeSingle();
   if (error) throw error;
@@ -2285,7 +2291,11 @@ export const fetchPropertyPipeline = async (
 export const fetchPipelineStages = async (): Promise<PipelineStage[]> => {
   const { data, error } = await supabase
     .from('pipeline_stages_public')
-    .select('id, key, label, position, color, is_terminal, is_entry')
+    /* `code` too (migration 377): the stage menu badges every row from this
+     * list, and the stage editor pre-fills its code box from it — omitting the
+     * column rendered every existing code as blank, inviting the operator to
+     * overwrite intentional badges (three stages deliberately share "9"). */
+    .select('id, key, label, position, color, is_terminal, is_entry, code')
     .order('position');
   if (error) throw error;
   return (data ?? []) as PipelineStage[];
