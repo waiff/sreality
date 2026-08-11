@@ -71,15 +71,23 @@ on:
     - cron: "35 * * * *"
 
 concurrency:
-  # Two concurrent intakes would fight over the same watermark and each re-read the other's
-  # window. Never cancel in flight: a cancelled batch rolls back whole, but the batch row
-  # of a cancelled run stays `running` and needs no repair.
-  group: location-claims
+  # OUTER, cross-lane: shared with the registry load, the Mapy inventory and the resolve
+  # drain so at most ONE heavy location lane runs at a time (2026-08-10 incident: four of
+  # them concurrently dropped backends across the shared production instance and killed
+  # this lane's 21:47 run plus both hourly crons with "SSL connection has been closed
+  # unexpectedly"). See location_registry_load.yml for the full note.
+  group: location-batch
   cancel-in-progress: false
 
 jobs:
   intake:
     runs-on: ubuntu-latest
+    concurrency:
+      # INNER, per-lane: two concurrent intakes would fight over the same watermark and each
+      # re-read the other's window. Never cancel in flight: a cancelled batch rolls back
+      # whole, but the batch row of a cancelled run stays `running` and needs no repair.
+      group: location-claims
+      cancel-in-progress: false
     timeout-minutes: 55
     steps:
       - uses: actions/checkout@v6

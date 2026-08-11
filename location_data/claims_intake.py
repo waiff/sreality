@@ -54,6 +54,7 @@ from typing import Any
 import psycopg
 from psycopg.types.json import Jsonb
 
+from location_data import loader_db
 from scraper import db
 
 LOG = logging.getLogger("location_data.claims_intake")
@@ -78,6 +79,13 @@ DEFAULT_BATCH_SIZE = 20_000
 # Re-reading is free — values dedupe on the fingerprint and a re-sight appends at most one
 # observation per (claim, observed_at).
 DEFAULT_OVERLAP_HOURS = 3
+
+# Per-batch statement ceiling (seconds), env-overridable so a lane can be widened without
+# a deploy. `_FAILURE_STAMP_TIMEOUT_S` is deliberately much shorter: a one-row UPDATE on
+# the failure path must fail fast rather than become a second wedge on top of the first.
+STATEMENT_TIMEOUT_ENV = "LOCATION_INTAKE_TIMEOUT_S"
+DEFAULT_STATEMENT_TIMEOUT_S = 600
+_FAILURE_STAMP_TIMEOUT_S = 30
 
 # 02 §2.1.9 + 06 §6.6 rule 6: a signal we may not store produces NO claim row. This lane
 # has exactly one storable lineage, and the guard is asserted at write time.
@@ -1320,16 +1328,20 @@ def run(
             f"active contract declares readers this extractor does not implement: "
             f"{', '.join(unknown)}")
 
+    # The preflight reads are bounded too. They are small by construction, which is exactly
+    # why an unbounded one is dangerous: under the IO pressure of a concurrent registry load
+    # a "small" read still waits for its pages, and a run that hangs before its first batch
+    # row exists leaves nothing at all to diagnose from.
     contract_id: int | None = None
     if source:
-        with conn.cursor() as cur:
+        with guarded(conn, statement_timeout) as cur:
             cur.execute(_ACTIVE_CONTRACT_SQL, {"source": source})
             row = cur.fetchone()
             contract_id = int(row[0]) if row else None
 
     watermark: datetime | None = None
     if mode == "incremental":
-        with conn.cursor() as cur:
+        with guarded(conn, statement_timeout) as cur:
             cur.execute(_WATERMARK_SQL, {"lane": LANE, "source": source})
             row = cur.fetchone()
         watermark = row[0] - timedelta(hours=overlap_hours) if row and row[0] else None
@@ -1432,13 +1444,21 @@ def run(
                      after_id)
     except Exception as exc:
         if batch_id is not None:
-            with conn.cursor() as cur:
-                cur.execute(_BATCH_FINISH_SQL, {
-                    "batch_id": batch_id, "outcome": "failed",
-                    "row_count": stats["claims_inserted"],
-                    "cursor_after_id": after_id, "cursor_after_ts": after_ts,
-                    "note": f"{type(exc).__name__}: {exc}"[:500],
-                })
+            # Guarded like every other write, and for a sharper reason: this is the
+            # FAILURE path. Whatever broke the run may be the same pressure that would
+            # hang this stamp, and a bookkeeping write that hangs replaces the exception
+            # you need with a wedge (the lesson `loader_db.record_discrepancy` already
+            # carries). A short ceiling here fails fast and re-raises the real cause.
+            try:
+                with guarded(conn, _FAILURE_STAMP_TIMEOUT_S) as cur:
+                    cur.execute(_BATCH_FINISH_SQL, {
+                        "batch_id": batch_id, "outcome": "failed",
+                        "row_count": stats["claims_inserted"],
+                        "cursor_after_id": after_id, "cursor_after_ts": after_ts,
+                        "note": f"{type(exc).__name__}: {exc}"[:500],
+                    })
+            except Exception:  # noqa: BLE001 - never mask the exception being reported
+                LOG.exception("INTAKE could not stamp batch %s as failed", batch_id)
         raise
 
     # 'ok' means ONE thing: the scan ran out of rows. A run that ran out of budget
@@ -1474,7 +1494,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-seconds", type=float, default=None)
     parser.add_argument("--start-after-id", type=int, default=0)
     parser.add_argument("--overlap-hours", type=int, default=DEFAULT_OVERLAP_HOURS)
-    parser.add_argument("--statement-timeout", type=int, default=600)
+    parser.add_argument(
+        "--statement-timeout", type=int,
+        default=loader_db.env_timeout_s(STATEMENT_TIMEOUT_ENV, DEFAULT_STATEMENT_TIMEOUT_S))
     parser.add_argument("--dry-run", action="store_true",
                         help="Extract and report; write nothing.")
     parser.add_argument("--note", default=None)

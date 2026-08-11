@@ -1,4 +1,5 @@
-"""Connection + bookkeeping shared by the registry loaders.
+"""Connection + bookkeeping shared by the registry loaders, plus the statement-budget
+helpers (`env_timeout_s`, `bounded`) every location batch lane uses.
 
 Connection mode (04 C1.7 rule 1): a registry load wants a session it owns — a 3.02 M-row
 COPY, an index build and a `statement_timeout = 0` are all wrong on the transaction-mode
@@ -16,9 +17,11 @@ it owns aborts naming the env var it wants.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
+from collections.abc import Iterator
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -35,6 +38,71 @@ _SESSION_GUC = (
     "SET lock_timeout = '5s'",
     "SET idle_in_transaction_session_timeout = '15min'",
 )
+
+# `statement_timeout = 0` above is right for the BULK phases and only for those. On
+# 2026-08-10 a boundary pack ran 2 h 04 min without emitting one line — no error, no
+# reconnect, no lock wait (lock_timeout is 5 s) — inside the per-unit loop, because with
+# no statement timeout there is nothing that can turn a runaway PostGIS statement into an
+# exception the loader's existing skip/reconnect resilience already knows how to handle.
+# So every per-statement phase re-arms a bounded timeout for the length of ONE transaction
+# via `bounded()`, and the session default stays 0 for COPY.
+#
+# `set_config(..., true)` rather than `SET LOCAL <literal>`: the value is a bound
+# parameter, so the budget can come from an env var without string-building SQL. The third
+# argument IS the LOCAL flag — it reverts at transaction end, which is the whole point (a
+# session-level SET would silently outlive the phase and clamp the next COPY).
+_TIMEOUT_GUARD_SQL = """
+SELECT set_config('statement_timeout', %(statement_timeout)s, true),
+       set_config('lock_timeout', %(lock_timeout)s, true)
+"""
+
+DEFAULT_LOCK_TIMEOUT_S = 5
+
+
+def env_timeout_s(name: str, default: int) -> int:
+    """Seconds for a `SET LOCAL statement_timeout`, overridable per environment.
+
+    A non-numeric or non-positive value is the default, not a crash: a typo in a workflow
+    input must not take a lane down, and 0 ("no timeout") is exactly the state this whole
+    mechanism exists to stop, so it is never reachable from an env var.
+    """
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        seconds = int(raw)
+    except ValueError:
+        LOG.warning("LOADER %s=%r is not an integer; using %ds", name, raw, default)
+        return default
+    if seconds <= 0:
+        LOG.warning("LOADER %s=%r is not positive; using %ds", name, raw, default)
+        return default
+    return seconds
+
+
+@contextlib.contextmanager
+def bounded(
+    conn: psycopg.Connection,
+    statement_timeout_s: int,
+    *,
+    lock_timeout_s: int = DEFAULT_LOCK_TIMEOUT_S,
+) -> Iterator[psycopg.Cursor]:
+    """One transaction whose statements are bounded, yielding its cursor.
+
+    Mirrors `scripts/location_mapy_inventory.guarded`. Use it for per-statement /
+    per-unit phases; a genuine bulk phase (COPY, index build, whole-table rebuild) keeps
+    the session's `statement_timeout = 0` and must NOT be wrapped.
+    """
+    with conn.transaction():
+        with conn.cursor() as cur:
+            cur.execute(
+                _TIMEOUT_GUARD_SQL,
+                {
+                    "statement_timeout": f"{statement_timeout_s}s",
+                    "lock_timeout": f"{lock_timeout_s}s",
+                },
+            )
+            yield cur
 
 
 class LoadAborted(RuntimeError):

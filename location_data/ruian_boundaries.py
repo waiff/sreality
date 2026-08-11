@@ -65,6 +65,24 @@ LOG = logging.getLogger("location_data.ruian_boundaries")
 STATE_PACK_URL = "https://services.cuzk.gov.cz/shp/stat/epsg-5514/1.zip"
 SUBDIVIDE_MAX_VERTICES = 256
 
+# Per-unit statement budget. The loader's session runs `statement_timeout = 0` because a
+# 3 M-row COPY needs it — but a per-unit geometry statement does not, and on 2026-08-10 a
+# pack sat inside OBCE_P for 2 h 04 min in total silence (run 31434818469: last line
+# `layer=OBCE_P ... already_loaded=3502`, no failure line, no reconnect line, cancelled by
+# hand). `lock_timeout=5s` proves it was not a lock wait and the libpq keepalives
+# (`tcp_user_timeout=30000`) prove the socket was alive, so the backend was busy inside one
+# statement: `_INSERT_AUTHORITATIVE`'s `ST_MaximumInscribedCircle` / `ST_MaxDistance` are
+# O(n^2)-ish over the RAW vertex set of one obec, and OBCE_P is where the monster polygons
+# live. 180 s is far above the ~0.8 s/unit the healthy pass measured, so a unit that trips
+# it is genuinely pathological — and tripping it is now an ERROR, which
+# `load_feature_resilient` already turns into one `boundary_load_failed` discrepancy row
+# and a move to the next unit.
+DEFAULT_UNIT_TIMEOUT_S = 180
+UNIT_TIMEOUT_ENV = "LOCATION_BOUNDARY_UNIT_TIMEOUT_S"
+
+# One heartbeat line per this many attempted units (see `load_layers`).
+PROGRESS_EVERY = 100
+
 _T = TypeVar("_T")
 
 
@@ -344,26 +362,29 @@ def unit_id_for(conn: psycopg.Connection, level: str, code: int) -> int | None:
     )
 
 
-def upgrade_name(conn: psycopg.Connection, unit_id: int, name: str) -> bool:
+def upgrade_name(cur: psycopg.Cursor, unit_id: int, name: str) -> bool:
     """Replace a code placeholder written by the CSV loader with the pack's real name.
+
+    Takes the CURSOR, not the connection: it runs inside `load_feature`'s bounded
+    transaction and must inherit that transaction's `SET LOCAL statement_timeout`, which a
+    cursor opened here would still get but a second connection would not.
 
     Only ever touches a unit still named after its own code, so a real RÚIAN name can
     never be overwritten by a DBF variant. Descendants keep their `display_path` until the
     next baseline recomputes it — the code path (`path`) is unaffected either way.
     """
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            UPDATE ruian_admin_units u
-               SET name = %s, name_norm = %s,
-                   display_path = coalesce(
-                       (SELECT p.display_path || ' / ' FROM ruian_admin_units p
-                         WHERE p.id = u.parent_id), '') || %s
-             WHERE u.id = %s AND u.name = u.code::text
-            """,
-            (name, name_index.normalize_name(name), name, unit_id),
-        )
-        return bool(cur.rowcount)
+    cur.execute(
+        """
+        UPDATE ruian_admin_units u
+           SET name = %s, name_norm = %s,
+               display_path = coalesce(
+                   (SELECT p.display_path || ' / ' FROM ruian_admin_units p
+                     WHERE p.id = u.parent_id), '') || %s
+         WHERE u.id = %s AND u.name = u.code::text
+        """,
+        (name, name_index.normalize_name(name), name, unit_id),
+    )
+    return bool(cur.rowcount)
 
 
 def load_feature(
@@ -373,27 +394,38 @@ def load_feature(
     version_id: int,
     *,
     with_pip: bool,
+    unit_timeout_s: int | None = None,
 ) -> tuple[bool, bool]:
-    """(loaded, name_upgraded) for one feature; (False, False) when no unit matches."""
+    """(loaded, name_upgraded) for one feature; (False, False) when no unit matches.
+
+    Every statement of the unit runs under a bounded `statement_timeout`, armed with
+    `SET LOCAL` INSIDE this transaction (the loader's session default is 0, for COPY).
+    `upgrade_name` moved inside the guarded cursor for the same reason — it is part of the
+    unit's transaction and must not be the one statement that can hang.
+    """
     unit_id = unit_id_for(conn, feature.level, feature.code)
     if unit_id is None:
         return False, False
-    with conn.transaction():
-        upgraded = upgrade_name(conn, unit_id, feature.name)
-        with conn.cursor() as cur:
-            cur.execute(_DELETE_UNIT, {"unit_id": unit_id, "version_id": version_id})
-            cur.execute(_INSERT_AUTHORITATIVE,
-                        {"wkb": feature.wkb, "unit_id": unit_id, "version_id": version_id})
-            cur.execute(_INSERT_RENDER, {
+    budget = (
+        loader_db.env_timeout_s(UNIT_TIMEOUT_ENV, DEFAULT_UNIT_TIMEOUT_S)
+        if unit_timeout_s is None
+        else unit_timeout_s
+    )
+    with loader_db.bounded(conn, budget) as cur:
+        upgraded = upgrade_name(cur, unit_id, feature.name)
+        cur.execute(_DELETE_UNIT, {"unit_id": unit_id, "version_id": version_id})
+        cur.execute(_INSERT_AUTHORITATIVE,
+                    {"wkb": feature.wkb, "unit_id": unit_id, "version_id": version_id})
+        cur.execute(_INSERT_RENDER, {
+            "unit_id": unit_id, "version_id": version_id,
+            "tolerance_m": layer.render_tolerance_m,
+        })
+        if with_pip:
+            cur.execute(_INSERT_PIP, {
                 "unit_id": unit_id, "version_id": version_id,
-                "tolerance_m": layer.render_tolerance_m,
+                "max_vertices": SUBDIVIDE_MAX_VERTICES,
             })
-            if with_pip:
-                cur.execute(_INSERT_PIP, {
-                    "unit_id": unit_id, "version_id": version_id,
-                    "max_vertices": SUBDIVIDE_MAX_VERTICES,
-                })
-            cur.execute(_MARK_HAS_POLYGON, {"unit_id": unit_id})
+        cur.execute(_MARK_HAS_POLYGON, {"unit_id": unit_id})
     return True, upgraded
 
 
@@ -514,6 +546,19 @@ def run_resilient(
     return op(conn), conn
 
 
+def _is_unit_fault(exc: psycopg.Error) -> bool:
+    """A statement timeout is THIS UNIT's problem, not the environment's.
+
+    `db.is_transient_db_error` answers True for every `OperationalError`, and
+    `QueryCanceled` (what `SET LOCAL statement_timeout` raises) is one — so without this
+    the per-unit budget would burn two reconnects on every pathological geometry and a
+    couple of dozen of them would abort the pack with "reconnects exhausted", blaming the
+    environment for the data. A timed-out unit is a `boundary_load_failed` discrepancy row
+    and the loader moves to the next one, on the same healthy connection.
+    """
+    return isinstance(exc, psycopg.errors.QueryCanceled)
+
+
 def load_feature_resilient(
     conn: psycopg.Connection,
     feature: BoundaryFeature,
@@ -540,7 +585,7 @@ def load_feature_resilient(
     except psycopg.Error as exc:
         # One unloadable geometry fails identically on any connection: reconnecting for it
         # would spend the budget on the data instead of on the outage.
-        if not db.is_transient_db_error(exc):
+        if _is_unit_fault(exc) or not db.is_transient_db_error(exc):
             return False, False, conn, exc
         dropped = exc
     conn = reconnector(conn, dropped)  # raises LoadAborted past the budget
@@ -590,10 +635,20 @@ def load_layers(
                 reconnector,
             )
         skipped = 0
+        attempted = 0
         for feature in features:
             if feature.code in done:
                 skipped += 1
                 continue
+            # A heartbeat, because the 2026-08-10 run's whole diagnosis was "two hours of
+            # silence": the only per-unit lines this loader had were failure lines, so a
+            # healthy-but-slow pass and a wedged one looked identical from the log. The
+            # code being loaded is printed BEFORE the statement runs, so the next silent
+            # run names its own suspect.
+            attempted += 1
+            if attempted % PROGRESS_EVERY == 1:
+                LOG.info("BOUNDARY layer=%s at code=%s (%d/%d attempted)",
+                         layer.token, feature.code, attempted, len(features) - len(done))
             loaded, upgraded, conn, error = load_feature_resilient(
                 conn, feature, layer, version_id,
                 with_pip=with_pip, reconnector=reconnector,

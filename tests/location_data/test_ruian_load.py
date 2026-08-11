@@ -263,8 +263,30 @@ def test_publish_is_a_two_statement_pointer_swap():
     conn = _FakeConn()
     ruian_load.publish(conn, 9)
     statements = [sql for sql, _ in conn.executed]
-    assert statements[0].startswith("UPDATE registry_versions SET is_current = false")
-    assert statements[1].startswith("UPDATE registry_versions SET is_current = true")
+    # The guard is statement zero: the loader's session runs statement_timeout = 0 for
+    # COPY, so the pointer swap has to re-arm one for itself.
+    assert "set_config('statement_timeout'" in statements[0]
+    assert statements[1].startswith("UPDATE registry_versions SET is_current = false")
+    assert statements[2].startswith("UPDATE registry_versions SET is_current = true")
+
+
+def test_publish_arms_a_transaction_local_timeout_from_the_env(monkeypatch):
+    """statement_timeout = 0 is right for the bulk phases and only for them. The swap is
+    two one-row UPDATEs; hanging there leaves the platform on a stale registry version
+    with a fully loaded new one beside it."""
+    conn = _FakeConn()
+    ruian_load.publish(conn, 9)
+    guard, params = conn.executed[0]
+    assert params["statement_timeout"] == f"{ruian_load.DEFAULT_PUBLISH_TIMEOUT_S}s"
+    assert params["lock_timeout"] == "5s"
+    # `true` is the is_local flag — SET LOCAL, so it reverts at commit and the next COPY
+    # is not silently clamped by it.
+    assert guard.count("true") == 2
+
+    monkeypatch.setenv(ruian_load.PUBLISH_TIMEOUT_ENV, "17")
+    conn = _FakeConn()
+    ruian_load.publish(conn, 9)
+    assert conn.executed[0][1]["statement_timeout"] == "17s"
 
 
 def test_progress_checkpoints_accumulate_without_new_ddl():

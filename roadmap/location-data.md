@@ -235,6 +235,18 @@ resolves or stays in shadow. Closed in this round: the fingerprint is now migrat
   600 s → 2400 s (cron keeps 600 s), workflow timeout 30 → 60 min. Every batch logs its own
   `BATCH n=… rate=…/s` + phase split, so the next production run measures itself. No
   `--workers`: `_rebuild_property` is a cross-listing write two workers would race.
+- **Batch-lane hardening** (follow-up, after the 2026-08-10 incident): the four heavy
+  location lanes share the outer `location-batch` concurrency group; the boundary loader's
+  per-unit transaction, the drain's between-batch statements and the intake's failure stamp
+  all arm a bounded `SET LOCAL statement_timeout`; and the drain's two worst registry
+  lookups were query-shape faults, not missing indexes — `address_points_by_number` and
+  `cast_obce_extent_m` addressed `obec_kod` / `cast_obce_kod`, neither of which is indexed,
+  while `ruian_ap_obec_hn` / `ruian_ap_cast_obce` sit on the `*_unit_id` twins (21,494 ms →
+  424 buffers, and 5,059 ms → 167 buffers, measured live). `containing_obec`'s
+  `purpose IN ('pip','authoritative')` defeated the partial pip GiST index; two branches
+  under one LIMIT restore it. Migration **389** adds the three indexes no rewrite can
+  replace (gazetteer name equality, PSC→obec covering, street name equality) — **filed, not
+  yet applied**: two build over 3.02 M rows and want a quiet instance.
 - **S9 reconciler v1**: the cheap structural rules of 03 §3.11.1 into the append-only
   ledger, keyed on the version-free `dedupe_key`; auto-close only when the predicate stops
   firing AND the inputs changed — the inputs compared against the resolution the current
@@ -280,6 +292,19 @@ degrades to `'authoritative'` until the boundary loader populates them.)
 
 ## Standing decisions
 
+- **The four heavy location lanes share ONE outer concurrency group, `location-batch`**
+  (registry load, claim intake, Mapy inventory, resolve), each keeping its own group at
+  the JOB level. Set after the 2026-08-10 incident: four lanes ran concurrently against
+  the shared 75 GB production instance, dropped backends across the fleet (SSL EOF, one
+  AdminShutdown), degraded the live Browse rebuild to multi-minute DataFileReads, and
+  wedged two lanes with no error at all. A new heavy location lane joins the group.
+- **No batch statement runs without a ceiling.** `statement_timeout = 0` is for genuine
+  bulk phases (COPY, index build, whole-table rebuild) and nothing else; per-unit and
+  per-batch work arms `SET LOCAL statement_timeout` inside its own transaction, so a wedge
+  becomes an error the existing per-row / per-unit resilience already handles. Budgets are
+  env-overridable (`LOCATION_BOUNDARY_UNIT_TIMEOUT_S`, `LOCATION_RESOLVE_BATCH_TIMEOUT_S`,
+  `LOCATION_RESOLVE_SWEEP_TIMEOUT_S`, `LOCATION_INTAKE_TIMEOUT_S`,
+  `LOCATION_REGISTRY_PUBLISH_TIMEOUT_S`). Gate: `tests/location_data/test_location_batch_hardening.py`.
 - The Mapy remediation ladder (R2 inventory → R3 re-resolve → R4 purge) is W1–W4
   work; the R2 evidence inventory is a W1 INPUT (first claim must not be written
   before it exists).
