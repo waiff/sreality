@@ -87,6 +87,10 @@ describe('<PipelineStageMenu>', () => {
     fireEvent.click(current);
     await flush();
     expect(api.movePipelineCard).not.toHaveBeenCalled();
+    /* Focusable, not `disabled`: the menu opens ON the current stage, and a
+     * disabled button can't hold focus — the keyboard path would start dead. */
+    expect(current).not.toBeDisabled();
+    expect(document.activeElement).toBe(current);
   });
 
   it('badges each stage from its operator code, not its ordinal', async () => {

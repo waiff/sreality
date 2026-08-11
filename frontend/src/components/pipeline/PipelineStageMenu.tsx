@@ -133,14 +133,17 @@ export default function PipelineStageMenu({
                 role="menuitemradio"
                 aria-checked={current}
                 tabIndex={-1}
-                disabled={pending || current}
+                /* NOT disabled when it is the current stage — a disabled button
+                 * can't hold focus, and this is the item the menu opens on.
+                 * `moveTo` no-ops instead. */
+                disabled={pending}
                 onClick={() => moveTo(stage)}
                 className={[
                   'flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-[0.8rem] transition-colors',
-                  'disabled:cursor-default',
+                  'disabled:cursor-default disabled:opacity-50',
                   current
-                    ? 'font-medium text-[var(--color-ink)]'
-                    : 'text-[var(--color-ink-2)] hover:bg-[var(--color-paper-2)] disabled:opacity-50',
+                    ? 'cursor-default font-medium text-[var(--color-ink)]'
+                    : 'text-[var(--color-ink-2)] hover:bg-[var(--color-paper-2)]',
                 ].join(' ')}
                 style={current ? { background: accent.soft } : undefined}
               >
