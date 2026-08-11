@@ -99,6 +99,11 @@ POSITION_SOURCES = frozenset({
     "portal_pin", "registry_point",
 })
 BLUR_EVIDENCE = frozenset({"none", "declared", "detected", "both"})
+# `match_confidence` (01 §2). It reaches the DB two ways — as the entry's `prior` for the
+# resolver, and as `locator.claim_confidence`, which a legacy-column reader stamps onto
+# `location_claims.claim_confidence` (a typed enum column, so a typo here would fail
+# mid-batch at INSERT time instead of in CI).
+MATCH_CONFIDENCES = frozenset({"low", "medium", "high", "exact"})
 LICENCE_CLASSES = frozenset({
     "portal", "cc_by_ruian", "odbl", "commercial_permanent", "ephemeral_display_only",
     "operator",
@@ -229,6 +234,14 @@ def parse_entry(raw: dict[str, Any], *, source: str, index: int) -> ContractEntr
     if position_source is not None:
         position_source = _member(
             position_source, POSITION_SOURCES, where, "prior.position_source")
+    if prior.get("match_confidence") is not None:
+        _member(prior["match_confidence"], MATCH_CONFIDENCES, where,
+                "prior.match_confidence")
+    if locator.get("claim_confidence") is not None:
+        # 06 §6.1.1: a class-B legacy column is capped at `medium`. The cap is contract
+        # data (the reader never invents one), so it is validated here.
+        _member(locator["claim_confidence"], MATCH_CONFIDENCES, where,
+                "locator.claim_confidence")
 
     cardinality = _member(raw.get("cardinality", "one"), CARDINALITIES, where, "cardinality")
     required = _member(raw.get("required", "when_present"), REQUIRED_MODES, where, "required")

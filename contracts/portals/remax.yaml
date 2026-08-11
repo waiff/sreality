@@ -17,8 +17,16 @@
 # subject_scoped = false — inadmissible to survivorship, admissible to the contradiction
 # ledger, which 06 §6.1.4 job 2 seeds from exactly this cohort on day one.
 
+#
+# VERSION 2 (2026-08-11) — two W1 entries, no edit to any v1 entry (entries are immutable
+# per contract_version; a change is a bump, 02 §2.1.8). Measured cause: 1,763 ACTIVE remax
+# listings carried NO claim of any kind. Both fixes are named in the entries themselves —
+# `rx.det.legacy_display_address` (the subject header the scraper started persisting under
+# a new key after W0 0d, unreadable to v1) and `rx.det.legacy_locality` (06 §6.1.3 class B;
+# remax publishes no locality key at all, so the column is the only copy).
+
 portal: remax
-contract_version: 1
+contract_version: 2
 extractor_runtime: ">=1.0"
 identity_ladder: [structured_address, portal_precise_coord]
 
@@ -102,6 +110,56 @@ extractions:
       CONFLICT SIGNAL ONLY. Written with subject_scoped=false so S7 survivorship can never
       rank it (03 §3.2 rule 4) while the reconciler still has the material for
       `street_claim_vs_derived` on the corpus's best-evidenced contamination class.
+
+  - id: rx.det.legacy_display_address
+    locator_kind: legacy_column
+    extraction_method: legacy_column
+    page_kind: none
+    locator: {reader: scalar, json_pointer: /display_address,
+              legacy_source_column: raw_json.display_address}
+    claim_type: address_line_verbatim
+    subject_scope: {subject_scoped: true, kind: subject_header}
+    licence_class: portal
+    blur_evidence: none
+    on_conflict: emit_both
+    required: when_present
+    notes: >
+      THE SUBJECT'S OWN address line, and the counterpart to the banned `address` key.
+      W0 0d moved the scraper onto `h2.pd-header__address` and renamed the keys: the
+      subject's header is written to `raw_json.display_address` and the first (carousel)
+      `data-address` to `carousel_address`, "so no re-mine can mistake it for the
+      subject's again". v1 only ever read `/address`, so every row re-drained after that
+      fix went from one conflict-signal claim to none at all — 1,763 active rows with zero
+      claims when W1 coverage was measured on 2026-08-11.
+      `subject_scoped: true` is stated rather than defaulted, because this entry is
+      precisely what `rx.det.raw_address_conflict` is not: admissible to survivorship.
+      ID: 02 §2.2.6 fixes `rx.det.header_address` for the W2 HTML parse of this same header
+      and `rx.idx.display_address` for the index card's `data-display-address`. This is the
+      legacy raw_json mirror — a different act with a different provenance — so it mints
+      its own id (the `id.det.legacy_pin` pattern).
+
+  - id: rx.det.legacy_locality
+    locator_kind: legacy_column
+    extraction_method: legacy_column
+    page_kind: none
+    locator: {reader: legacy_text_column, legacy_source_column: listings.locality,
+              claim_confidence: medium, write_path_unknown: true}
+    claim_type: address_line_verbatim
+    licence_class: portal
+    blur_evidence: none
+    prior: {match_confidence: medium}
+    on_conflict: emit_both
+    required: when_present
+    notes: >
+      06 §6.1.3 class B: `listings.locality` is populated on all nine portals and remax
+      publishes NO locality key in raw_json at all, so for this portal the column is the
+      only surviving copy of the string. Typed `address_line_verbatim`, never an admin
+      level — remax stores "<Obec> - <quarter>" and bare obec forms in the same column and
+      splitting it is the resolver's job (03), not the extractor's.
+      `write_path_unknown: true` (§6.6 rule 3): the column carries no provenance stamp and
+      pre-W0-0d rows were parsed off the carousel `data-address`, so a claim that cannot
+      name its writer says so. Confidence is capped at `medium` by §6.1.1 — the cap is
+      contract data, not a constant in the reader.
 
   - id: rx.det.legacy_pin
     locator_kind: legacy_column

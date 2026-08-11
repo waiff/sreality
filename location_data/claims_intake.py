@@ -9,6 +9,9 @@ side effect), 02-portal-contracts.md §2.2 (what each portal publishes).
 
 WHAT THIS LANE IS
   * Pure deterministic extraction. No model, no network, no re-fetch.
+  * The substrate is `listings.raw_json` PLUS the class-B legacy columns of 06 §6.1.3 —
+    `listings.geom` (ladder-gated) and `listings.locality` (the only surviving copy of the
+    locality string wherever the slim-dict payload carries the key with a NULL value).
   * Contract-driven: every claim is stamped with the `portal_contract_entries` row that
     produced it, and the extractor executes exactly those entries whose `locator` names a
     `reader` from the registry below. Entries declared for W2 surfaces (html_selector,
@@ -62,7 +65,7 @@ LOG = logging.getLogger("location_data.claims_intake")
 # Bumped whenever the extraction SEMANTICS change. It rides in every claim's batch row and
 # in `location_claim_observations.extractor_version`; the per-claim `extractor_version` is
 # the contract's own `contract:<portal>@<version>` (02 §2.1.8).
-INTAKE_VERSION = "claims_intake@1"
+INTAKE_VERSION = "claims_intake@2"
 LANE = "location_claims_intake"
 WAVE = "W1"
 
@@ -215,6 +218,11 @@ class ListingRow:
     lon: float | None
     observed_at: datetime
     in_mapy_inventory: bool
+    # The class-B legacy columns (06 §6.1.3), keyed by the SAME string a contract entry
+    # puts in `locator.legacy_source_column` ("listings.locality"), so adding a column is
+    # a contract entry + one SELECT item and never a new reader. `listings.geom` is NOT
+    # here: it has its own reader because the licence ladder gates it.
+    legacy_columns: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -248,6 +256,10 @@ class Claim:
     subject_scoped: bool | None = None
     legacy_source_column: str | None = None
     legacy_write_path_unknown: bool = False
+    # The EXTRACTOR's confidence in this claim (`match_confidence`), not the portal's
+    # declaration — that is `declared_confidence`. NULL on every payload-derived claim;
+    # 06 §6.1.1 caps a class-B legacy column at 'medium' and the contract entry says so.
+    claim_confidence: str | None = None
 
     def to_row(self) -> dict[str, Any]:
         row = {
@@ -274,6 +286,7 @@ class Claim:
             "declared_precision_label": self.declared_precision_label,
             "declared_confidence": self.declared_confidence,
             "declared_radius_m": self.declared_radius_m,
+            "claim_confidence": self.claim_confidence,
             "blur_evidence": self.blur_evidence,
             "licence_class": self.licence_class,
             "legacy_source_column": self.legacy_source_column,
@@ -586,6 +599,34 @@ def _read_scalar(entry: Entry, row: ListingRow) -> list[Claim]:
         return []
     number = _number(value) if entry.locator.get("value_kind") == "num" else None
     return [_base(entry, row, value_text=value, value_num=number)]
+
+
+@reader("legacy_text_column")
+def _read_legacy_text_column(entry: Entry, row: ListingRow) -> list[Claim]:
+    """A class-B `listings` TEXT column, migrated as a claim (06 §6.1.1, §6.1.3).
+
+    The payload is not always the substrate: `listings.locality` is populated on rows whose
+    slim-dict payload carries the locality key with a NULL value (a parse that found
+    nothing, a portal that never published the string at all — remax has no locality key),
+    and for those rows the column is the only surviving copy. Class B is exactly that case:
+    `extraction_method='legacy_column'`, `surface='legacy_column'`,
+    `snapshot_anchor='unanchored_legacy'` (all three from `_base`), `licence_class='portal'`,
+    `blur_evidence='none'` written explicitly (§6.6 rule 7) and confidence capped at
+    `medium` by the CONTRACT (`locator.claim_confidence`), never by this function.
+
+    `legacy_write_path_unknown` is the entry's own declaration (§6.6 rule 3): these columns
+    have no provenance stamp, and on realitymix the geocode backfill synthesised some of
+    them ('Hranicka, Prerov' where the payload's own `locality_text` is null), so a claim
+    that cannot name its writer says so rather than passing as portal-published.
+    """
+    column = str(entry.locator["legacy_source_column"])
+    value = apply_transforms(_text(row.legacy_columns.get(column)), entry.transform)
+    if value is None:
+        return []
+    return [_base(entry, row, value_text=value,
+                  claim_confidence=entry.locator.get("claim_confidence"),
+                  legacy_write_path_unknown=bool(
+                      entry.locator.get("write_path_unknown", False)))]
 
 
 @reader("conflict_signal")
@@ -923,7 +964,7 @@ _RESUME_SQL = """
 _LISTINGS_FULL_SQL = """
     SELECT l.id, l.source, l.source_id_native, l.raw_json, l.last_seen_at,
            ST_Y(l.geom::geometry), ST_X(l.geom::geometry),
-           (a.listing_id IS NOT NULL)
+           (a.listing_id IS NOT NULL), l.locality
     FROM listings l
     LEFT JOIN mapy_affected a ON a.listing_id = l.id
     WHERE l.id > %(after_id)s
@@ -935,7 +976,7 @@ _LISTINGS_FULL_SQL = """
 _LISTINGS_INCREMENTAL_SQL = """
     SELECT l.id, l.source, l.source_id_native, l.raw_json, l.last_seen_at,
            ST_Y(l.geom::geometry), ST_X(l.geom::geometry),
-           (a.listing_id IS NOT NULL)
+           (a.listing_id IS NOT NULL), l.locality
     FROM listings l
     LEFT JOIN mapy_affected a ON a.listing_id = l.id
     WHERE l.last_seen_at >= %(watermark)s
@@ -986,7 +1027,8 @@ _CLAIM_WRITE_SQL = f"""
             value_text text, value_num numeric, value_geom_wkt text, value_shape_wkt text,
             value_jsonb jsonb, distance_m integer, travel_mode text, target_text text,
             declared_precision_label text, declared_confidence text,
-            declared_radius_m numeric, blur_evidence text, licence_class text,
+            declared_radius_m numeric, claim_confidence text,
+            blur_evidence text, licence_class text,
             legacy_source_column text, legacy_write_path_unknown boolean,
             history_completeness text, subject_scoped boolean)
     ), typed AS (
@@ -1008,8 +1050,9 @@ _CLAIM_WRITE_SQL = f"""
             extractor_version, contract_entry_id, batch_id, value_text, value_norm,
             value_num, value_geom, value_shape, value_jsonb, distance_m, travel_mode,
             target_text, declared_precision_label, declared_confidence, declared_radius_m,
-            blur_evidence, licence_class, legacy_source_column, legacy_write_path_unknown,
-            history_completeness, subject_scoped, claim_fingerprint)
+            claim_confidence, blur_evidence, licence_class, legacy_source_column,
+            legacy_write_path_unknown, history_completeness, subject_scoped,
+            claim_fingerprint)
         SELECT d.listing_id, d.source, d.source_id_native, d.snapshot_anchor,
                d.first_observed_at, d.claim_type::location_claim_type,
                d.surface::location_claim_surface, d.page_kind::location_page_kind,
@@ -1018,6 +1061,7 @@ _CLAIM_WRITE_SQL = f"""
                d.value_norm, d.value_num, d.geom, d.shape, d.value_jsonb, d.distance_m,
                d.travel_mode, d.target_text, d.declared_precision_label,
                d.declared_confidence, d.declared_radius_m,
+               d.claim_confidence::match_confidence,
                d.blur_evidence::blur_evidence, d.licence_class::licence_class,
                d.legacy_source_column, d.legacy_write_path_unknown,
                d.history_completeness, d.subject_scoped, d.claim_fingerprint
@@ -1193,7 +1237,8 @@ def load_entries(conn: psycopg.Connection) -> dict[str, list[Entry]]:
 
 
 def _row_from_record(record: tuple[Any, ...]) -> ListingRow:
-    listing_id, source, native, raw_json, last_seen_at, lat, lon, in_inventory = record
+    (listing_id, source, native, raw_json, last_seen_at, lat, lon, in_inventory,
+     locality) = record
     return ListingRow(
         listing_id=int(listing_id),
         source=source,
@@ -1204,7 +1249,8 @@ def _row_from_record(record: tuple[Any, ...]) -> ListingRow:
         # 06 §6.6 rule 1: a claim mined from `listings.raw_json` keeps the payload's own
         # observation time — the listing's last sighting — never the migration date.
         observed_at=last_seen_at,
-        in_mapy_inventory=bool(in_inventory))
+        in_mapy_inventory=bool(in_inventory),
+        legacy_columns={"listings.locality": locality})
 
 
 def dedupe_absence_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:

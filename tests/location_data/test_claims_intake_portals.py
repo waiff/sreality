@@ -12,13 +12,17 @@ from location_data.claims_intake import extract_listing, sreality_payload_shape
 from tests.location_data.claim_intake_fixtures import (
     BAZOS_LINK,
     BEZREALITKY,
+    CESKEREALITY_NULL_LOCALITY,
     CESKEREALITY_PAGE,
     IDNES_PAGE,
     MAXIMA_PAGE,
     MMREALITY_ACCURATE,
     MMREALITY_NOT_ACCURATE,
+    REALITYMIX_NULL_LOCALITY,
     REALITYMIX_PAGE,
     REMAX,
+    REMAX_BOTH_ADDRESS_KEYS,
+    REMAX_DISPLAY_ADDRESS,
     SREALITY_LEGACY,
     SREALITY_POST_CUTOVER,
     SREALITY_TRUNCATED,
@@ -281,6 +285,106 @@ def test_remax_address_is_stored_only_as_a_conflict_signal():
     assert "coordinate" not in by_type               # remax stamps no provenance at all
 
 
+# -------------------------------------- the zero-claim cohorts measured on 2026-08-11
+#
+# W1's gate is ">=99% of active listings carry >=1 claim"; production sat at 97.66%, and
+# three portals owned 8,720 of the ~9,000 missing rows. Each test below is one of those
+# cohorts, keyed off the payload keyset actually sampled from it.
+
+def test_remax_display_address_is_the_subject_claim_v1_could_not_read():
+    """W0 0d renamed the subject's own `h2.pd-header__address` into
+    `raw_json.display_address` and the carousel value into `carousel_address`. v1 read only
+    `/address`, so every re-drained row lost its single claim — 1,763 active rows with
+    none at all."""
+    row = listing("remax", REMAX_DISPLAY_ADDRESS, lat=50.0810, lon=14.4508,
+                  locality="Praha 3 - Žižkov")
+    result = extract_listing(row, entries_for("remax"))
+
+    claim = claim_by_extractor(result, "rx.det.legacy_display_address")
+    assert claim.value_text == "ulice Roháčova, Praha 3 - Žižkov"
+    assert claim.claim_type == "address_line_verbatim"
+    assert claim.subject_scoped is True            # admissible to survivorship
+    assert claim.legacy_source_column == "raw_json.display_address"
+    assert claim.snapshot_anchor == "unanchored_legacy"
+    # The carousel value is not read on this shape at all — no entry points at it.
+    assert all("V Horní Stromce" not in (c.value_text or "") for c in result.claims)
+
+
+def test_remax_reads_display_address_without_promoting_the_banned_address_key():
+    """The mixed row: both keys present. `raw_json.address` stays what 02 §2.2.6 made it —
+    a conflict signal, `subject_scoped=false`, inadmissible to survivorship — even with the
+    subject's own line sitting beside it."""
+    row = listing("remax", REMAX_BOTH_ADDRESS_KEYS, lat=50.0810, lon=14.4508)
+    result = extract_listing(row, entries_for("remax"))
+
+    banned = [c for c in result.claims
+              if (c.value_text or "").startswith("V Horní Stromce")]
+    assert [c.extractor_id for c in banned] == ["rx.det.raw_address_conflict"]
+    assert banned[0].subject_scoped is False
+    # Exactly one subject-scoped location claim, and it is the header line.
+    subject = [c for c in result.claims if c.subject_scoped]
+    assert [c.extractor_id for c in subject] == ["rx.det.legacy_display_address"]
+    assert subject[0].value_text == "ulice Roháčova, Praha 3 - Žižkov"
+
+
+def test_the_legacy_locality_column_reaches_a_null_payload_locality():
+    """ceskereality/realitymix zero-claim rows have `locality_text` PRESENT and NULL — a
+    keyset sample cannot tell that from a populated one. 06 §6.1.3 class B: the column is
+    then the only surviving copy, migrated with the method, the cap and the write-path
+    flag all stated."""
+    cases = (
+        ("ceskereality", CESKEREALITY_NULL_LOCALITY, "cr.det.legacy_locality",
+         "České Budějovice 4, U Smaltovny"),
+        ("realitymix", REALITYMIX_NULL_LOCALITY, "rm.det.legacy_locality",
+         "Hranicka, Prerov"),
+        ("remax", REMAX_DISPLAY_ADDRESS, "rx.det.legacy_locality", "Praha 3 - Žižkov"),
+    )
+    for source, payload, extractor_id, value in cases:
+        result = extract_listing(listing(source, payload, locality=value),
+                                 entries_for(source))
+        claim = claim_by_extractor(result, extractor_id)
+        assert claim is not None, source
+        assert claim.value_text == value, source
+        assert claim.claim_type == "address_line_verbatim", source
+        assert claim.extraction_method == "legacy_column", source
+        assert claim.surface == "legacy_column", source
+        assert claim.legacy_source_column == "listings.locality", source
+        assert claim.snapshot_anchor == "unanchored_legacy", source
+        assert claim.licence_class == "portal", source
+        assert claim.blur_evidence == "none", source
+        # 06 §6.1.1 caps class B at `medium`, and §6.6 rule 3 makes an unnameable writer
+        # say so — both are contract data, not constants in the reader.
+        assert claim.claim_confidence == "medium", source
+        assert claim.legacy_write_path_unknown is True, source
+        # `payload_only`/`full` history is a per-source constant and is unaffected.
+        assert claim.history_completeness == "locality_text_only", source
+
+
+def test_a_null_legacy_column_invents_nothing():
+    """The column is absent as often as it is present; a missing legacy value must produce
+    no claim, not an empty one (and no absence either — W1 records only the two negatives
+    of 06 §6.1.5)."""
+    for source, payload in (("ceskereality", CESKEREALITY_NULL_LOCALITY),
+                            ("realitymix", REALITYMIX_NULL_LOCALITY)):
+        result = extract_listing(listing(source, payload, locality=None),
+                                 entries_for(source))
+        assert result.claims == [], source
+
+
+def test_the_payload_claim_and_the_legacy_claim_coexist_when_both_have_a_value():
+    """Not a fill: where the payload string survives, both claims are emitted (evidence
+    that agrees), with distinct extractor ids so their provenance stays readable."""
+    result = extract_listing(
+        listing("ceskereality", CESKEREALITY_PAGE, lat=50.0446, lon=14.3204,
+                locality="Praha Stodůlky"),
+        entries_for("ceskereality"))
+    lines = {c.extractor_id: c for c in claims_by_type(result)["address_line_verbatim"]}
+    assert set(lines) == {"cr.det.locality_text", "cr.det.legacy_locality"}
+    assert lines["cr.det.locality_text"].legacy_source_column == "raw_json.locality_text"
+    assert lines["cr.det.locality_text"].claim_confidence is None
+    assert lines["cr.det.legacy_locality"].legacy_source_column == "listings.locality"
+
+
 def test_every_claim_writes_blur_evidence_and_history_completeness_explicitly():
     cases = (
         ("sreality", SREALITY_POST_CUTOVER, 50.0, 14.4),
@@ -296,6 +400,9 @@ def test_every_claim_writes_blur_evidence_and_history_completeness_explicitly():
     expected_history = {
         "sreality": "full", "bezrealitky": "payload_only", "mmreality": "payload_only",
     }
+    # The three portals whose contract was bumped to close the 2026-08-11 coverage gap;
+    # every other portal is still on its original version.
+    expected_version = {"remax": 2, "ceskereality": 2, "realitymix": 2}
     for source, payload, lat, lon in cases:
         result = extract_listing(listing(source, payload, lat=lat, lon=lon),
                                  entries_for(source))
@@ -310,5 +417,6 @@ def test_every_claim_writes_blur_evidence_and_history_completeness_explicitly():
                 assert claim.legacy_source_column is None, claim.extractor_id
             assert claim.history_completeness == expected_history.get(
                 source, "locality_text_only")
-            assert claim.extractor_version == f"contract:{source}@1"
+            assert claim.extractor_version == (
+                f"contract:{source}@{expected_version.get(source, 1)}")
             assert claim.first_observed_at == result.claims[0].first_observed_at
