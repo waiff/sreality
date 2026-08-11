@@ -90,6 +90,33 @@ STATEMENT_TIMEOUT_ENV = "LOCATION_INTAKE_TIMEOUT_S"
 DEFAULT_STATEMENT_TIMEOUT_S = 600
 _FAILURE_STAMP_TIMEOUT_S = 30
 
+# THE SCAN BATCH IS NOT THE WRITE SIZE.
+#
+# Every write in this module passes ONE jsonb array as ONE parameter to
+# `jsonb_to_recordset`, and Postgres caps the total size of a jsonb array's elements at
+# 256 MB: `total size of jsonb array elements exceeds the maximum of 268435455 bytes`
+# (ProgramLimitExceeded). A 20 000-listing batch crossed it in production (Actions run
+# 31482522487, the hourly incremental) — the incremental scan orders by `last_seen_at`, not
+# `id`, which concentrated the geometry-heavy sreality rows into one batch where the earlier
+# id-ordered full pass had diluted them across nine portals. There is nothing exotic about
+# the arithmetic: one post-cutover sreality listing yields 21 claims ~= 18.9 KB, so a
+# 20 000-listing all-sreality batch is ~378 MB in ONE array. The cap is a property of the
+# WRITE, not of the scan, so shrinking the batch would only move the cliff: the arrays are
+# flushed in chunks bounded by BOTH a row count and a cumulative serialized-byte budget,
+# whichever trips first, all inside the same batch transaction as before.
+WRITE_CHUNK_ROWS_ENV = "LOCATION_INTAKE_CHUNK_ROWS"
+WRITE_CHUNK_BYTES_ENV = "LOCATION_INTAKE_CHUNK_BYTES"
+DEFAULT_WRITE_CHUNK_ROWS = 5_000
+DEFAULT_WRITE_CHUNK_BYTES = 32 * 1024 * 1024  # ~8x under the hard limit, per statement.
+
+# The second rail, and the one that survives a pathological single row: no chunk budget can
+# split ONE array element, so a claim whose value alone dwarfs the budget would still be
+# handed to Postgres verbatim. A value this large is not a location claim — it is a portal
+# geometry blob that landed in `raw_json` — so it is refused at extraction time and the
+# listing is routed to the refetch cohort instead (see `_refuse_oversized`).
+MAX_CLAIM_VALUE_BYTES_ENV = "LOCATION_INTAKE_MAX_VALUE_BYTES"
+DEFAULT_MAX_CLAIM_VALUE_BYTES = 2 * 1024 * 1024
+
 # 02 §2.1.9 + 06 §6.6 rule 6: a signal we may not store produces NO claim row. This lane
 # has exactly one storable lineage, and the guard is asserted at write time.
 EMITTABLE_LICENCE_CLASSES = frozenset({"portal"})
@@ -169,6 +196,27 @@ def cz_bbox() -> tuple[float, float, float, float]:
     except ImportError:
         return _CZ_BBOX_FALLBACK
     return CZ_LAT_MIN, CZ_LAT_MAX, CZ_LON_MIN, CZ_LON_MAX
+
+
+def env_positive_int(name: str, default: int) -> int:
+    """A positive-integer knob, overridable per environment.
+
+    Same discipline as `loader_db.env_timeout_s`: a typo or a non-positive value is the
+    default, not a crash — and for these two knobs 0 would mean "no bound at all", which is
+    exactly the state they exist to stop.
+    """
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        LOG.warning("INTAKE %s=%r is not an integer; using %d", name, raw, default)
+        return default
+    if value <= 0:
+        LOG.warning("INTAKE %s=%r is not positive; using %d", name, raw, default)
+        return default
+    return value
 
 
 class IntakeRefused(RuntimeError):
@@ -347,11 +395,15 @@ class IntakeResult:
     claims: list[Claim] = field(default_factory=list)
     absences: list[Absence] = field(default_factory=list)
     enrichment: list[EnrichmentTask] = field(default_factory=list)
+    # Claims refused by the value-size cap. Counted, never silently dropped: each one also
+    # produced an absence row and a refetch-cohort row (`_refuse_oversized`).
+    oversized: int = 0
 
     def extend(self, other: IntakeResult) -> None:
         self.claims.extend(other.claims)
         self.absences.extend(other.absences)
         self.enrichment.extend(other.enrichment)
+        self.oversized += other.oversized
 
 
 @dataclass(frozen=True, slots=True)
@@ -785,10 +837,90 @@ def _read_coords_stamp_quality(entry: Entry, row: ListingRow) -> list[Claim]:
                   legacy_source_column="raw_json.coords")]
 
 
+# ------------------------------------------------------------------ the value-size cap
+
+def claim_value_bytes(claim: Claim) -> int:
+    """Serialized size of a claim's VALUE payload — the only unbounded part of a claim row.
+
+    Everything else on the row is identity and provenance: bounded by the contract. The
+    value is not: `raw_json` on the legacy-shape sreality cohort carries whole geometry
+    objects (the same blobs that truncated one row's payload at 80 KB — sreality.yaml
+    §caveats), and a reader that stores its node verbatim into `value_jsonb` inherits that
+    size. Measured with `default=str` for the same reason `payload_hash` uses it: the
+    payload can hold a Decimal or a datetime that plain `json.dumps` refuses.
+    """
+    total = 0
+    if claim.value_jsonb is not None:
+        total += len(json.dumps(claim.value_jsonb, ensure_ascii=False,
+                                default=str).encode("utf-8"))
+    for text in (claim.value_text, claim.value_geom_wkt, claim.value_shape_wkt,
+                 claim.target_text):
+        if text is not None:
+            total += len(text.encode("utf-8"))
+    return total
+
+
+def _refuse_oversized(
+    row: ListingRow, claims: list[Claim], *, max_value_bytes: int,
+) -> tuple[list[Claim], list[Absence], list[EnrichmentTask]]:
+    """Partition off claims whose value exceeds the cap. NOTHING is silently dropped.
+
+    A dropped claim and a claim that was never produced are indistinguishable in an
+    append-only store, which is the exact failure 03 §3.2 forbids ("every attempt is
+    recorded, including negatives" — without it "recall and honesty are indistinguishable").
+    So a refusal writes the same two artefacts the truncated-payload path writes:
+
+      * `location_claim_absences` — reason `not_attempted`. The vocabulary is CHECK-
+        constrained to ('not_stated','stated_but_ambiguous','only_in_excluded_block',
+        'not_attempted') by migration 382 / 01 §4.4, so there is no `oversized_payload`
+        label to add without DDL, and the other three would misreport what happened:
+        the portal DID state the value (`not_stated` is false), the value is not
+        semantically ambiguous (01 §4.4 binds `stated_but_ambiguous` to the extraction
+        schema's `ambiguity_flags`), and no contract `exclusion_zone` was involved
+        (03 §3.2 rule 4 binds `only_in_excluded_block` to that mechanism). `not_attempted`
+        is this module's own precedent for "the substrate was there and this lane declined
+        to complete the extraction into a stored value" — it is what the licence ladder
+        already writes for a withheld coordinate.
+      * `location_enrichment_state` — the per-method refetch cohort (02 P6), exactly as the
+        truncated-locality path routes. `last_error` is the only free-text field persisted
+        anywhere on this path (`location_claim_absences` has no note column), so it carries
+        the detail the absence row cannot: which claim type, and how many bytes.
+    """
+    kept: list[Claim] = []
+    absences: list[Absence] = []
+    enrichment: list[EnrichmentTask] = []
+    for claim in claims:
+        size = claim_value_bytes(claim)
+        if size <= max_value_bytes:
+            kept.append(claim)
+            continue
+        detail = (f"{claim.claim_type} value from {claim.extractor_id} is {size} bytes "
+                  f"(cap {max_value_bytes}); refused so the claim array cannot exceed "
+                  f"Postgres's 256 MB jsonb limit")
+        LOG.warning("INTAKE oversized value refused listing_id=%d source=%s claim_type=%s "
+                    "extractor_id=%s bytes=%d cap=%d",
+                    row.listing_id, row.source, claim.claim_type, claim.extractor_id,
+                    size, max_value_bytes)
+        absences.append(Absence(
+            listing_id=row.listing_id, surface=claim.surface, field_=claim.claim_type,
+            reason="not_attempted", extraction_method=claim.extraction_method,
+            detail=detail))
+        enrichment.append(EnrichmentTask(
+            listing_id=row.listing_id, method=claim.extraction_method,
+            lane=f"{row.source}_detail_refetch", outcome="error",
+            input_hash=payload_hash(row.raw_json), error=detail))
+    return kept, absences, enrichment
+
+
 # ------------------------------------------------------------------ extraction
 
-def extract_listing(row: ListingRow, entries: list[Entry]) -> IntakeResult:
+def extract_listing(
+    row: ListingRow, entries: list[Entry], *, max_value_bytes: int | None = None,
+) -> IntakeResult:
     """Everything this lane knows about one listing. Pure — no DB, no clock, no network."""
+    if max_value_bytes is None:
+        max_value_bytes = env_positive_int(MAX_CLAIM_VALUE_BYTES_ENV,
+                                           DEFAULT_MAX_CLAIM_VALUE_BYTES)
     result = IntakeResult()
     coordinate_entry: Entry | None = None
 
@@ -809,6 +941,17 @@ def extract_listing(row: ListingRow, entries: list[Entry]) -> IntakeResult:
                     f"this lane may only emit {sorted(EMITTABLE_LICENCE_CLASSES)} "
                     f"(06 §6.6 rule 6)")
             result.claims.append(claim)
+
+    # Before anything else reads `result.claims`: a value too large to write is not a claim
+    # this lane can make. Runs FIRST among the negative-artefact producers so that when a
+    # legacy-shape sreality row is BOTH oversized and refetch-worthy for its shape, the
+    # refusal's `last_error` is the enrichment row that survives `dedupe_enrichment_rows`
+    # (first-writer-wins on the same (listing, method, lane) key).
+    result.claims, refused_absences, refused_enrichment = _refuse_oversized(
+        row, result.claims, max_value_bytes=max_value_bytes)
+    result.absences.extend(refused_absences)
+    result.enrichment.extend(refused_enrichment)
+    result.oversized = len(refused_absences)
 
     withheld = (row.lat is not None and row.lon is not None
                 and not any(c.claim_type == "coordinate" for c in result.claims))
@@ -1275,25 +1418,92 @@ def dedupe_absence_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
+def dedupe_enrichment_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Collapse refetch-cohort rows onto migration 384's primary key, first-writer-wins.
+
+    `location_enrichment_state` is `PRIMARY KEY (listing_id, method, lane)` and the write is
+    `ON CONFLICT ... DO UPDATE`, which Postgres refuses to apply twice to the same row in
+    one statement ("cannot affect row a second time") — so two rows sharing that key inside
+    one array is not a duplicate, it is an aborted run. One listing produces them: a
+    legacy-shape sreality row routes to `sreality_detail_refetch` for its SHAPE and, if one
+    of its geometry values is over the cap, again for the REFUSAL — same method, same lane.
+    `_refuse_oversized` runs first precisely so the surviving row is the one whose
+    `last_error` names the refusal.
+    """
+    seen: set[tuple[Any, ...]] = set()
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        key = (row["listing_id"], row["method"], row["lane"])
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(row)
+    return out
+
+
+def chunk_rows(
+    rows: list[dict[str, Any]], *, max_rows: int, max_bytes: int,
+) -> Iterator[list[dict[str, Any]]]:
+    """Split one jsonb array into statement-sized arrays, WITHOUT splitting a listing.
+
+    Two bounds, whichever trips first — a row count (cheap, predictable) and a cumulative
+    serialized-byte budget (the one that actually matters, because a batch's row count says
+    nothing about its bytes: legacy-shape sreality rows carry geometry an order of magnitude
+    larger than a street name).
+
+    The listing boundary is what makes chunking SEMANTICS-PRESERVING, not merely smaller.
+    `claim_fingerprint` is computed in SQL and its tuple (01 §4.2.1) begins with
+    `listing_id, source, source_id_native`, so two fingerprint-equal claims are necessarily
+    the same listing's. Keeping a listing's rows in one array therefore keeps every
+    fingerprint-equal set inside ONE statement, where `DISTINCT ON (claim_fingerprint)`
+    still arbitrates it. Split them across two statements instead and the second copy stops
+    being a same-statement duplicate: the first chunk's INSERT is visible to the second
+    chunk's snapshot, so it would join the `resighted` cohort and append a spurious
+    "re-sighting" observation for a claim this batch had just created. `extract_listing`
+    appends per listing, so a listing's rows are contiguous and grouping is a single pass.
+
+    A group that exceeds `max_bytes` on its own is still emitted (a budget cannot split an
+    array element) — that case is what `_refuse_oversized` exists to keep out of reach.
+    """
+    chunk: list[dict[str, Any]] = []
+    size = 0
+    for index, row in enumerate(rows):
+        row_bytes = len(json.dumps(row, ensure_ascii=False, default=str).encode("utf-8"))
+        starts_group = index == 0 or row["listing_id"] != rows[index - 1]["listing_id"]
+        if chunk and starts_group and (len(chunk) >= max_rows or size + row_bytes > max_bytes):
+            yield chunk
+            chunk, size = [], 0
+        chunk.append(row)
+        size += row_bytes
+    if chunk:
+        yield chunk
+
+
 def write_result(
     cur: psycopg.Cursor, result: IntakeResult, *, batch_id: int,
 ) -> tuple[int, int, int]:
+    """Write one scan batch. Same transaction as before; several statements per array.
+
+    The caller's transaction is unchanged — every chunk of every array is flushed inside it,
+    so the batch is still all-or-nothing and a failure still rolls the whole batch back.
+    """
+    max_rows = env_positive_int(WRITE_CHUNK_ROWS_ENV, DEFAULT_WRITE_CHUNK_ROWS)
+    max_bytes = env_positive_int(WRITE_CHUNK_BYTES_ENV, DEFAULT_WRITE_CHUNK_BYTES)
     inserted = observed = enqueued = 0
-    if result.claims:
-        cur.execute(_CLAIM_WRITE_SQL, {
-            "rows": Jsonb([c.to_row() for c in result.claims]),
-            "batch_id": batch_id,
-        })
-        inserted, observed, enqueued = (int(x) for x in cur.fetchone())
-    if result.absences:
-        cur.execute(_ABSENCE_WRITE_SQL, {
-            "rows": Jsonb(dedupe_absence_rows(
-                [a.to_row(INTAKE_VERSION) for a in result.absences])),
-        })
-    if result.enrichment:
-        cur.execute(_ENRICHMENT_WRITE_SQL, {
-            "rows": Jsonb([e.to_row(INTAKE_VERSION) for e in result.enrichment]),
-        })
+    claim_rows = [c.to_row() for c in result.claims]
+    for chunk in chunk_rows(claim_rows, max_rows=max_rows, max_bytes=max_bytes):
+        cur.execute(_CLAIM_WRITE_SQL, {"rows": Jsonb(chunk), "batch_id": batch_id})
+        chunk_inserted, chunk_observed, chunk_enqueued = (int(x) for x in cur.fetchone())
+        inserted += chunk_inserted
+        observed += chunk_observed
+        enqueued += chunk_enqueued
+    absence_rows = dedupe_absence_rows([a.to_row(INTAKE_VERSION) for a in result.absences])
+    for chunk in chunk_rows(absence_rows, max_rows=max_rows, max_bytes=max_bytes):
+        cur.execute(_ABSENCE_WRITE_SQL, {"rows": Jsonb(chunk)})
+    enrichment_rows = dedupe_enrichment_rows(
+        [e.to_row(INTAKE_VERSION) for e in result.enrichment])
+    for chunk in chunk_rows(enrichment_rows, max_rows=max_rows, max_bytes=max_bytes):
+        cur.execute(_ENRICHMENT_WRITE_SQL, {"rows": Jsonb(chunk)})
     return inserted, observed, enqueued
 
 
@@ -1428,10 +1638,13 @@ def run(
              mode, source or "*", batch_size, inventory_rows, batch_id)
 
     started = time.monotonic()
+    # Resolved once, not per listing: the extractor is called 20 000 times a batch.
+    max_value_bytes = env_positive_int(MAX_CLAIM_VALUE_BYTES_ENV,
+                                       DEFAULT_MAX_CLAIM_VALUE_BYTES)
     stats = {
         "listings": 0, "claims": 0, "claims_inserted": 0, "observations": 0,
-        "enqueued": 0, "absences": 0, "refetch_cohort": 0, "stopped_early": False,
-        "reached_end": False, "resumed_from_id": after_id,
+        "enqueued": 0, "absences": 0, "refetch_cohort": 0, "oversized_values": 0,
+        "stopped_early": False, "reached_end": False, "resumed_from_id": after_id,
     }
     try:
         while True:
@@ -1468,7 +1681,8 @@ def run(
                     entries = entries_by_source.get(row.source)
                     if not entries:
                         continue
-                    result.extend(extract_listing(row, entries))
+                    result.extend(extract_listing(
+                        row, entries, max_value_bytes=max_value_bytes))
 
                 after_id = int(records[-1][0])
                 if mode == "incremental":
@@ -1477,6 +1691,7 @@ def run(
                 stats["claims"] += len(result.claims)
                 stats["absences"] += len(result.absences)
                 stats["refetch_cohort"] += len(result.enrichment)
+                stats["oversized_values"] += result.oversized
                 if not dry_run and batch_id is not None:
                     inserted, observed, enqueued = write_result(
                         cur, result, batch_id=batch_id)
@@ -1484,10 +1699,10 @@ def run(
                     stats["observations"] += observed
                     stats["enqueued"] += enqueued
             LOG.info("INTAKE progress listings=%d claims=%d inserted=%d observed=%d "
-                     "absences=%d refetch=%d through_id=%d",
+                     "absences=%d refetch=%d oversized=%d through_id=%d",
                      stats["listings"], stats["claims"], stats["claims_inserted"],
                      stats["observations"], stats["absences"], stats["refetch_cohort"],
-                     after_id)
+                     stats["oversized_values"], after_id)
     except Exception as exc:
         if batch_id is not None:
             # Guarded like every other write, and for a sharper reason: this is the
@@ -1523,7 +1738,8 @@ def run(
                 "cursor_after_id": after_id,
                 "cursor_after_ts": after_ts if mode == "incremental" else None,
                 "note": f"listings={stats['listings']} stopped_early={stats['stopped_early']} "
-                        f"reached_end={stats['reached_end']} through_id={after_id}",
+                        f"reached_end={stats['reached_end']} through_id={after_id} "
+                        f"oversized_values={stats['oversized_values']}",
             })
     stats["batch_id"] = batch_id
     stats["mode"] = mode
