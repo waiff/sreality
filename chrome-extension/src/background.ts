@@ -8,6 +8,7 @@ import {
   addPipelineCard,
   addToCollection,
   createEstimation,
+  deleteNote,
   getBillingMe,
   getEstimation,
   listCollections,
@@ -18,6 +19,7 @@ import {
   patchScenario,
   removeFromCollection,
   removePipelineCard,
+  updateNote,
 } from './api';
 import { getAuthState, refreshIfSignedIn, signInWithGoogle, signOut } from './auth';
 import { PORTALS } from './portals';
@@ -112,6 +114,10 @@ async function handleMessage(
       return listNotes(message.property_id);
     case 'add_note':
       return addNote(message.property_id, message.body, message.origin_listing_ref_id);
+    case 'update_note':
+      return updateNote(message.property_id, message.note_id, message.body);
+    case 'delete_note':
+      return deleteNote(message.property_id, message.note_id);
     case 'sign_in': {
       const res = await signInWithGoogle();
       return res.ok

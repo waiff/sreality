@@ -120,6 +120,13 @@ interface PanelState {
   notes: ExtNote[] | null;
   /* True while a note save is in flight (disables the add box). */
   noteBusy: boolean;
+  /* id of the note currently open for inline edit, or null. Only one at a time. */
+  noteEditingId: number | null;
+  /* id of the note showing its "Delete this note?" confirm row, or null. */
+  noteConfirmDeleteId: number | null;
+  /* True while an edit-save or delete is in flight for noteEditingId /
+   * noteConfirmDeleteId (disables that row's buttons). */
+  noteRowBusy: boolean;
   /* The caller's agent-estimation allowance (null = not loaded / fetch failed —
    * the counter is simply hidden, never blocking the estimate button). */
   quota: AgentQuota | null;
@@ -192,6 +199,20 @@ function funnelIconSvg(filled: boolean): string {
     `<path d="M4 8 H20 L13.5 15 V21 H10.5 V15 Z" fill="${f}"/></svg>`
   );
 }
+
+/* The SPA's <PencilIcon>/<TrashIcon> (icons.tsx), same hand-reproduction as
+ * funnelIconSvg above — used on the note edit/delete row buttons. */
+const PENCIL_ICON_SVG =
+  '<svg viewBox="0 0 11 11" fill="none" stroke="currentColor" stroke-width="1" ' +
+  'stroke-linejoin="round" aria-hidden="true">' +
+  '<path d="M1.5 9.5 L1.5 7.5 L7 2 L9 4 L3.5 9.5 Z"/></svg>';
+
+const TRASH_ICON_SVG =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" ' +
+  'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+  '<path d="M3 6h18"/><path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2"/>' +
+  '<path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>' +
+  '<line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>';
 
 /* The stage's accent, mirroring the SPA's lib/pipelineStage.ts:stageAccent —
  * the operator's stage colour, copper when the stage has none (copper is THE
@@ -462,7 +483,7 @@ function mountPanel(): {
   panel.className = 'panel';
   shadow.appendChild(panel);
 
-  let lastFocusedKey: 'rent' | 'cost' | 'price' | 'renovation' | 'note' | null = null;
+  let lastFocusedKey: 'rent' | 'cost' | 'price' | 'renovation' | 'note' | 'note-edit' | null = null;
 
   /* The ledger header band: a small copper index-mark + product wordmark, and
    * the close control. The wordmark is the shared product brand (APP_NAME) —
@@ -918,18 +939,11 @@ function mountPanel(): {
       const list = document.createElement('div');
       list.className = 'notes-list';
       for (const n of state.notes) {
-        const item = document.createElement('div');
-        item.className = 'note-item';
-        const bodyEl = document.createElement('p');
-        bodyEl.className = 'note-body';
-        bodyEl.textContent = n.body;
-        const date = document.createElement('span');
-        date.className = 'note-date';
-        date.textContent = fmtNoteDate(n.created_at);
-        date.title = n.created_at;
-        item.appendChild(bodyEl);
-        item.appendChild(date);
-        list.appendChild(item);
+        list.appendChild(
+          n.id === state.noteEditingId
+            ? buildNoteEditItem(n, state)
+            : buildNoteItem(n, state),
+        );
       }
       sec.appendChild(list);
     }
@@ -958,6 +972,116 @@ function mountPanel(): {
     sec.appendChild(btn);
 
     body.appendChild(sec);
+  }
+
+  /* A note in normal display mode: body + date/edited marker, an edit/delete
+   * icon pair, and (when this note is the one pending delete) a confirm row
+   * in place of the date — mirrors the SPA NoteRow's two-step confirm. */
+  function buildNoteItem(n: ExtNote, state: PanelState): HTMLElement {
+    const item = document.createElement('div');
+    item.className = 'note-item';
+
+    const top = document.createElement('div');
+    top.className = 'note-item-top';
+    const bodyEl = document.createElement('p');
+    bodyEl.className = 'note-body';
+    bodyEl.textContent = n.body;
+    top.appendChild(bodyEl);
+
+    const actions = document.createElement('div');
+    actions.className = 'note-actions';
+    const editBtn = document.createElement('button');
+    editBtn.type = 'button';
+    editBtn.className = 'note-action-btn';
+    editBtn.setAttribute('aria-label', 'Upravit poznámku');
+    editBtn.title = 'Upravit poznámku';
+    editBtn.innerHTML = PENCIL_ICON_SVG;
+    editBtn.onclick = () => onEditNoteStart(n);
+    actions.appendChild(editBtn);
+    const delBtn = document.createElement('button');
+    delBtn.type = 'button';
+    delBtn.className = 'note-action-btn note-action-btn--danger';
+    delBtn.setAttribute('aria-label', 'Smazat poznámku');
+    delBtn.title = 'Smazat poznámku';
+    delBtn.innerHTML = TRASH_ICON_SVG;
+    delBtn.onclick = () => onDeleteNoteRequest(n.id);
+    actions.appendChild(delBtn);
+    top.appendChild(actions);
+    item.appendChild(top);
+
+    if (state.noteConfirmDeleteId === n.id) {
+      const confirm = document.createElement('div');
+      confirm.className = 'note-confirm-delete';
+      const label = document.createElement('span');
+      label.textContent = 'Smazat tuto poznámku?';
+      confirm.appendChild(label);
+      const yes = document.createElement('button');
+      yes.type = 'button';
+      yes.className = 'note-confirm-yes';
+      yes.textContent = state.noteRowBusy ? 'Mažu…' : 'Smazat';
+      yes.disabled = state.noteRowBusy;
+      yes.onclick = () => { void onDeleteNoteConfirm(n.id); };
+      confirm.appendChild(yes);
+      const no = document.createElement('button');
+      no.type = 'button';
+      no.className = 'note-confirm-no';
+      no.textContent = 'Zrušit';
+      no.disabled = state.noteRowBusy;
+      no.onclick = () => onDeleteNoteCancel();
+      confirm.appendChild(no);
+      item.appendChild(confirm);
+    } else {
+      const date = document.createElement('span');
+      date.className = 'note-date';
+      date.textContent = fmtNoteDate(n.created_at) + (n.updated_at != null ? ' (upraveno)' : '');
+      date.title = n.updated_at != null
+        ? `Napsáno ${n.created_at} · upraveno ${n.updated_at}`
+        : n.created_at;
+      item.appendChild(date);
+    }
+    return item;
+  }
+
+  /* A note in inline-edit mode: textarea (seeded from + writing to the module
+   * global noteEditDraft, same non-rerendering-per-keystroke pattern as the
+   * add-note box) + Save/Cancel. */
+  function buildNoteEditItem(n: ExtNote, state: PanelState): HTMLElement {
+    const item = document.createElement('div');
+    item.className = 'note-item note-item--editing';
+
+    const ta = document.createElement('textarea');
+    ta.className = 'note-input';
+    ta.rows = 2;
+    ta.maxLength = 4000;
+    ta.value = noteEditDraft;
+    ta.dataset.key = 'note-edit';
+    ta.disabled = state.noteRowBusy;
+    ta.addEventListener('focus', () => { lastFocusedKey = 'note-edit'; });
+    ta.addEventListener('blur', () => { if (lastFocusedKey === 'note-edit') lastFocusedKey = null; });
+    ta.addEventListener('input', (e) => {
+      noteEditDraft = (e.target as HTMLTextAreaElement).value;
+    });
+    item.appendChild(ta);
+
+    const row = document.createElement('div');
+    row.className = 'note-edit-actions';
+    const cancel = document.createElement('button');
+    cancel.type = 'button';
+    cancel.className = 'note-confirm-no';
+    cancel.textContent = 'Zrušit';
+    cancel.disabled = state.noteRowBusy;
+    cancel.onclick = () => onEditNoteCancel();
+    row.appendChild(cancel);
+    const save = document.createElement('button');
+    save.type = 'button';
+    save.className = 'btn-primary note-edit-save';
+    save.textContent = state.noteRowBusy ? 'Ukládám…' : 'Uložit';
+    save.disabled = state.noteRowBusy;
+    save.onclick = () => { void onEditNoteSave(n.id); };
+    row.appendChild(save);
+    item.appendChild(row);
+
+    return item;
   }
 
   /* The stamped valuation: eyebrow → big copper yield figure → a hairline-ruled
@@ -1635,6 +1759,12 @@ async function loadQuota(): Promise<void> {
  * reset per panel open so one listing's draft never bleeds onto another. */
 let noteDraft = '';
 
+/* Same pattern as noteDraft, for whichever note is currently open for inline
+ * edit (state.noteEditingId names WHICH note; this module global holds ITS
+ * draft text so typing doesn't re-render). Reset per panel open + whenever
+ * edit mode opens/closes so it never bleeds onto a different note or listing. */
+let noteEditDraft = '';
+
 /* Notes are PER-PROPERTY (not global like stages/collections), so they're fetched
  * fresh per panel open and held in panel state — never module-cached. The dedup
  * is the per-panel `state.notes == null` guard, NOT a page-wide in-flight flag: a
@@ -1693,6 +1823,76 @@ async function onAddNote(): Promise<void> {
       : { ...prev, noteBusy: false });
 }
 
+/* Open a note for inline edit — seeds the edit draft with its current body and
+ * closes any delete-confirm row (a note can't be mid-edit and mid-confirm). */
+function onEditNoteStart(note: ExtNote): void {
+  noteEditDraft = note.body;
+  setState((prev) => ({ ...prev, noteEditingId: note.id, noteConfirmDeleteId: null }));
+}
+
+function onEditNoteCancel(): void {
+  setState((prev) => ({ ...prev, noteEditingId: null }));
+}
+
+/* Save the edit draft as the note's new body via PATCH. Identity-guarded like
+ * the other note writes; leaves edit mode on success, keeps it open (with the
+ * server error surfaced) on failure so the operator doesn't lose the draft. */
+async function onEditNoteSave(noteId: number): Promise<void> {
+  const l = state.listing;
+  if (l == null || l.property_id == null) return;
+  const body = noteEditDraft.trim();
+  if (body === '') return;
+  const propertyId = l.property_id;
+  setState((prev) => ({ ...prev, noteRowBusy: true, errorMessage: null }));
+  const res = await call<ExtNote>({ type: 'update_note', property_id: propertyId, note_id: noteId, body });
+  if (!res.ok) {
+    setState((prev) => ({
+      ...prev, noteRowBusy: false,
+      errorMessage: `Úprava poznámky selhala: ${friendlyDetail(res.detail)}`,
+    }));
+    return;
+  }
+  setState((prev) =>
+    prev.listing?.property_id === propertyId
+      ? {
+          ...prev, noteRowBusy: false, noteEditingId: null,
+          notes: (prev.notes ?? []).map((n) => (n.id === noteId ? res.data : n)),
+        }
+      : { ...prev, noteRowBusy: false });
+}
+
+/* Show the "Delete this note?" confirm row — closes any open edit (mirrors
+ * onEditNoteStart's mutual exclusion the other way). */
+function onDeleteNoteRequest(noteId: number): void {
+  setState((prev) => ({ ...prev, noteConfirmDeleteId: noteId, noteEditingId: null }));
+}
+
+function onDeleteNoteCancel(): void {
+  setState((prev) => ({ ...prev, noteConfirmDeleteId: null }));
+}
+
+async function onDeleteNoteConfirm(noteId: number): Promise<void> {
+  const l = state.listing;
+  if (l == null || l.property_id == null) return;
+  const propertyId = l.property_id;
+  setState((prev) => ({ ...prev, noteRowBusy: true, errorMessage: null }));
+  const res = await call<{ deleted: true }>({ type: 'delete_note', property_id: propertyId, note_id: noteId });
+  if (!res.ok) {
+    setState((prev) => ({
+      ...prev, noteRowBusy: false,
+      errorMessage: `Smazání poznámky selhalo: ${friendlyDetail(res.detail)}`,
+    }));
+    return;
+  }
+  setState((prev) =>
+    prev.listing?.property_id === propertyId
+      ? {
+          ...prev, noteRowBusy: false, noteConfirmDeleteId: null,
+          notes: (prev.notes ?? []).filter((n) => n.id !== noteId),
+        }
+      : { ...prev, noteRowBusy: false });
+}
+
 /* Trigger the extension's own PKCE sign-in (Wave 1) — the background worker
  * owns chrome.identity (a content script can't call it directly), so this
  * just relays a message and re-runs openPanel() on success to reload
@@ -1732,6 +1932,7 @@ export async function openPanel(
   render = panel.render;
   panelShadow = panel.shadow;
   noteDraft = '';  // a fresh panel starts with an empty note draft
+  noteEditDraft = '';
   state = {
     phase: 'loading', authEmail: null, listing: null, isSaleApt: null, run: null,
     rentTouched: false, costTouched: false, priceTouched: false,
@@ -1740,6 +1941,7 @@ export async function openPanel(
     pipelineBusy: false, pipelineConfirmRemove: false, stages: cachedStages,
     collections: cachedCollections, collectionBusy: false,
     notes: null, noteBusy: false, quota: null, errorMessage: null,
+    noteEditingId: null, noteConfirmDeleteId: null, noteRowBusy: false,
   };
   await minimizedReady;  // persisted minimized pref before first paint → no flash
   if (epoch !== renderEpoch) return;

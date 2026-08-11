@@ -27,11 +27,13 @@ import {
   attachTag,
   createPropertyNote,
   createTag,
+  deletePropertyNote,
   detachTag,
   listCollections,
   listPropertyNotes,
   listTags,
   removePropertyFromCollection,
+  updatePropertyNote,
 } from '@/lib/api';
 import {
   curationKeys,
@@ -42,6 +44,7 @@ import { fmtAbsolute, fmtRelative } from '@/lib/format';
 import type { Collection, Note, Tag, TagColor } from '@/lib/types';
 import TagColorPicker from '@/components/TagColorPicker';
 import TagEditPopover from '@/components/curation/TagEditPopover';
+import { PencilIcon, TrashIcon } from '@/components/icons';
 
 export default function CurationBlock({
   property_id,
@@ -586,7 +589,23 @@ function NotesRow({
         <ul className="mt-4 space-y-3">
           {notes.map((n) => (
             <li key={n.id}>
-              <NoteRow note={n} />
+              <NoteRow
+                note={n}
+                onSave={(text) =>
+                  updatePropertyNote(property_id, n.id, text).then(() => {
+                    qc.invalidateQueries({
+                      queryKey: curationKeys.propertyNotes(property_id),
+                    });
+                  })
+                }
+                onDelete={() =>
+                  deletePropertyNote(property_id, n.id).then(() => {
+                    qc.invalidateQueries({
+                      queryKey: curationKeys.propertyNotes(property_id),
+                    });
+                  })
+                }
+              />
             </li>
           ))}
         </ul>
@@ -595,18 +614,154 @@ function NotesRow({
   );
 }
 
-function NoteRow({ note }: { note: Note }) {
+function NoteRow({
+  note,
+  onSave,
+  onDelete,
+}: {
+  note: Note;
+  onSave: (body: string) => Promise<unknown>;
+  onDelete: () => Promise<unknown>;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(note.body);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const trimmed = draft.trim();
+
+  if (editing) {
+    return (
+      <div className="border-l-2 border-[var(--color-copper)]/40 pl-3">
+        <textarea
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          rows={2}
+          maxLength={4000}
+          autoFocus
+          className="w-full px-3 py-2 text-sm rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)] focus:outline-none focus:border-[var(--color-rule-strong)] resize-y"
+        />
+        <div className="mt-1.5 flex items-center justify-between gap-3">
+          <p className="text-[0.7rem] text-[var(--color-ink-4)] tabular-nums">
+            {draft.length} / 4000
+          </p>
+          <div className="flex items-center gap-1.5">
+            <button
+              type="button"
+              onClick={() => {
+                setEditing(false);
+                setDraft(note.body);
+                setError(null);
+              }}
+              disabled={busy}
+              className="px-2 py-1 text-[0.75rem] text-[var(--color-ink-3)] hover:text-[var(--color-ink-2)] disabled:opacity-50"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                if (trimmed.length === 0 || trimmed === note.body) {
+                  setEditing(false);
+                  setDraft(note.body);
+                  return;
+                }
+                setBusy(true);
+                setError(null);
+                onSave(trimmed)
+                  .then(() => setEditing(false))
+                  .catch((err: ApiError | Error) =>
+                    setError(err.message || 'Failed to save note'))
+                  .finally(() => setBusy(false));
+              }}
+              disabled={busy || trimmed.length === 0}
+              className="px-3 py-1 text-[0.75rem] rounded-[var(--radius-sm)] bg-[var(--color-copper)] text-white hover:bg-[var(--color-copper-2)] disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+            >
+              {busy ? 'Saving…' : 'Save'}
+            </button>
+          </div>
+        </div>
+        {error && (
+          <p className="mt-1.5 text-[0.7rem] text-[var(--color-brick)]">{error}</p>
+        )}
+      </div>
+    );
+  }
+
   return (
-    <div className="border-l-2 border-[var(--color-copper)]/40 pl-3">
-      <p className="text-sm text-[var(--color-ink)] whitespace-pre-wrap break-words">
-        {note.body}
-      </p>
-      <p
-        className="mt-1 text-[0.7rem] tracking-wide text-[var(--color-ink-4)] cursor-help"
-        title={fmtAbsolute(note.created_at)}
-      >
-        {fmtRelative(note.created_at)}
-      </p>
+    <div className="group border-l-2 border-[var(--color-copper)]/40 pl-3">
+      <div className="flex items-start justify-between gap-3">
+        <p className="text-sm text-[var(--color-ink)] whitespace-pre-wrap break-words">
+          {note.body}
+        </p>
+        <div className="flex items-center gap-0.5 shrink-0 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
+          <button
+            type="button"
+            onClick={() => {
+              setDraft(note.body);
+              setEditing(true);
+            }}
+            aria-label="Edit note"
+            title="Edit note"
+            className="inline-flex items-center justify-center w-5 h-5 rounded-[var(--radius-xs)] text-[var(--color-ink-4)] hover:text-[var(--color-ink-2)] hover:bg-[var(--color-paper-2)] transition-colors"
+          >
+            <PencilIcon className="h-[11px] w-[11px]" />
+          </button>
+          <button
+            type="button"
+            onClick={() => setConfirmingDelete(true)}
+            aria-label="Delete note"
+            title="Delete note"
+            className="inline-flex items-center justify-center w-5 h-5 rounded-[var(--radius-xs)] text-[var(--color-ink-4)] hover:text-[var(--color-brick)] hover:bg-[var(--color-paper-2)] transition-colors"
+          >
+            <TrashIcon className="h-[11px] w-[11px]" />
+          </button>
+        </div>
+      </div>
+      {confirmingDelete ? (
+        <div className="mt-1.5 flex items-center gap-2">
+          <span className="text-[0.7rem] text-[var(--color-brick)]">Delete this note?</span>
+          <button
+            type="button"
+            onClick={() => {
+              setBusy(true);
+              onDelete().catch((err: ApiError | Error) => {
+                setError(err.message || 'Failed to delete note');
+                setBusy(false);
+                setConfirmingDelete(false);
+              });
+            }}
+            disabled={busy}
+            className="px-2 py-0.5 text-[0.7rem] tracking-wide rounded-[var(--radius-sm)] bg-[var(--color-brick-soft)] text-[var(--color-brick)] hover:bg-[var(--color-brick)]/15 disabled:opacity-50 transition-colors"
+          >
+            {busy ? 'Deleting…' : 'Delete'}
+          </button>
+          <button
+            type="button"
+            onClick={() => setConfirmingDelete(false)}
+            disabled={busy}
+            className="text-[0.7rem] tracking-wide text-[var(--color-ink-3)] hover:text-[var(--color-ink-2)] disabled:opacity-50"
+          >
+            Cancel
+          </button>
+        </div>
+      ) : (
+        <p
+          className="mt-1 text-[0.7rem] tracking-wide text-[var(--color-ink-4)] cursor-help"
+          title={
+            note.updated_at
+              ? `Written ${fmtAbsolute(note.created_at)} · edited ${fmtAbsolute(note.updated_at)}`
+              : fmtAbsolute(note.created_at)
+          }
+        >
+          {fmtRelative(note.created_at)}
+          {note.updated_at && ' (edited)'}
+        </p>
+      )}
+      {error && !confirmingDelete && (
+        <p className="mt-1.5 text-[0.7rem] text-[var(--color-brick)]">{error}</p>
+      )}
     </div>
   );
 }

@@ -37,7 +37,7 @@ class _Cur:
         self._conn.executed.append((" ".join(sql.split()), params))
 
     def fetchone(self) -> Any:
-        return (7, 99, "note body", None, "2026-07-21T00:00:00Z")
+        return (7, 99, "note body", None, "2026-07-21T00:00:00Z", None)
 
 
 class _FakeConn:

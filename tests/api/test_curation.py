@@ -630,8 +630,8 @@ def test_create_tag_helper_409_on_unique_violation():
 
 def test_list_notes_helper_orders_newest_first():
     conn = _FakeConn(results=[[
-        (2, 42, "second", None, "2026-05-10T00:00:02+00:00"),
-        (1, 42, "first",  777,  "2026-05-10T00:00:01+00:00"),
+        (2, 42, "second", None, "2026-05-10T00:00:02+00:00", None),
+        (1, 42, "first",  777,  "2026-05-10T00:00:01+00:00", None),
     ]])
     out = curation.list_notes(conn, property_id=42)
     assert [n["body"] for n in out["data"]] == ["second", "first"]
@@ -699,7 +699,7 @@ def test_create_note_redirects_merged_away_to_survivor():
     conn = _ScriptConn([
         (lambda q: "RECURSIVE chain" in q, [(99, 42)]),  # 99 merged into active 42
         (lambda q: "INSERT INTO property_notes" in q,
-         [(1, 42, "hi", None, datetime(2026, 1, 1))]),
+         [(1, 42, "hi", None, datetime(2026, 1, 1), None)]),
     ])
     out = curation.create_note(conn, 99, _s.CreateNoteIn(body="hi"))
     assert out["property_id"] == 42

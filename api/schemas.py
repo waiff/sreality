@@ -544,6 +544,10 @@ class CreateTagIn(BaseModel):
     color: TagColor
 
 
+class UpdateNoteIn(BaseModel):
+    body: str | None = Field(default=None, min_length=1, max_length=4000)
+
+
 class UpdateTagIn(BaseModel):
     name:  str | None = Field(default=None, min_length=1, max_length=50)
     color: TagColor | None = None
