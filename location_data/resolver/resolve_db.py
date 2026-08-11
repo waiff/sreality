@@ -17,9 +17,17 @@ pure core cannot reach past it into SQL. `purpose IN ('pip','authoritative')` is
 purpose and indexes it), and preferring `pip` when rows exist degrades to the authoritative
 polygon when the boundary loader has not yet populated them.
 
-**Round trips are the drain's cost model**, not CPU: the first production drain measured ~3 s
-per listing, which is dozens of pooler round trips, not work. Three levers live in this file,
-all of them strictly I/O-layer (the pure core's protocol and its answers are untouched, so
+**Round trips are the drain's cost model**, not CPU — and round 2 measured the constant.
+Production run 31480587021 (after round 1) resolved 2,750 listings in 3,366 s with
+`core=1385.7s registry_q=17763 registry_wait=1373.5s`: 77 ms per registry MISS, while the
+same run's un-instrumented per-listing statements (SAVEPOINT, RELEASE SAVEPOINT, one DELETE
+by primary key — statements with no server-side work at all) account for 225 ms per listing,
+i.e. **~75 ms of pure network round trip** from a GitHub-hosted runner to the Frankfurt
+pooler. Re-measured server-side on the live mirror, the same registry questions cost
+0.02-0.5 ms each. So the wall clock is ~99 % latency and ~1 % query: the lever is the NUMBER
+of round trips, never the plan — with two measured exceptions, fixed below.
+
+Levers, all strictly I/O-layer (the pure core's protocol and its answers are untouched, so
 deterministic replay stays bit-for-bit):
 
 * `RunCache` + `CachedRegistryView` / `CachedCollisionEvidence` — the mirror is IMMUTABLE at a
@@ -27,9 +35,34 @@ deterministic replay stays bit-for-bit):
   question inside one run has one answer. The resolver asks the same handful over and over
   (`streets_in_obec(Praha)` twice per Prague listing plus once from the reconciler,
   `admin_units_by_name('praha')` three times), and across listings the reuse is corpus-scale.
+* `warm_points` — the memo PRE-FILLED for a whole slice. The ~62 % hit rate that survives the
+  cache is not a granularity bug: the misses are the five questions keyed on the listing's own
+  coordinate, which is unique per listing by construction. Those cannot be shared BETWEEN
+  listings, but they can all be asked in ONE round trip FOR the whole slice, which is what the
+  `*_BULK` shapes below do. Warming writes the same key the `Cached*` view would compute, so
+  the core still sees one answer per question.
 * the `*_bulk` loaders — one query per SLICE instead of one per listing, grouped in Python.
-* `executemany` for the per-candidate / per-detection writers, which psycopg pipelines into a
-  single round trip.
+* `executemany` for every per-listing writer, batched ACROSS the slice by `drain._write_slice`,
+  which psycopg pipelines into a single round trip.
+
+The two genuine plan offenders (measured on the live mirror, EXPLAIN ANALYZE):
+
+* `cast_obce_for_point` — a KNN `<->` scan whose only bound was a `::geography` ST_DWithin
+  FILTER, so a point with no address point inside 250 m walked the whole 3 M-row index:
+  2,944 ms/point averaged over a sample, 23 ms even on a dense urban hit (the plan also
+  seq-scanned + materialised all 18,627 `ruian_admin_units` rows per call). With a `&&`
+  bbox that the GiST index takes as an Index Cond, plus the nearest-point subquery resolved
+  BEFORE the unit join (safe: `cast_obce_unit_id` is a FOREIGN KEY, so the first row always
+  joins): **0.15 ms/point, ~20,000x**.
+* `nearest_obec_within` — `ST_DWithin(g.geom::geography, …)` cannot use the geometry GiST
+  index, so every call cast all 127 k boundary rows (state and kraj polygons included) to
+  geography: **6,752 ms/point**. With the `&&` bbox and the subdivided `pip` pieces preferred
+  the same way `containing_obec` prefers them: **2.95 ms/point, ~2,300x**. It is reached only
+  when containment misses (~1 % of listings), but at 6.7 s it was also a live timeout hazard
+  against the batch's 30 s budget.
+
+Neither needed an index — both are query shapes over indexes that already exist (migration
+389's included). No migration 390.
 """
 
 from __future__ import annotations
@@ -253,6 +286,30 @@ SELECT p.id, p.code, p.katuz_unit_id, p.parcel_label_norm,
  LIMIT 20
 """
 
+# ------------------------------------------------------- the five point-keyed questions
+#
+# Every question below is keyed on the LISTING'S OWN coordinate, so the run cache can never
+# share an answer between two listings — and at ~75 ms of round trip each they were 5 of the
+# drain's ~16 trips per listing. Each therefore has exactly ONE shape, taking parallel
+# `(idx[], lat[], lon[])` arrays: `warm_points` calls it with the whole slice's points (one
+# trip for 250 listings) and `SqlRegistryView` calls the SAME text with a one-element array
+# when a point was not warmed. One shape, so the lazy path can never drift from the warmed
+# one — which is the property replay depends on.
+#
+# `%(pt)s` expands to the point built from the lateral row, so a branch reads like the
+# single-point form it replaced.
+_PT = "ST_SetSRID(ST_MakePoint(p.lon, p.lat), 4326)"
+
+# The unit column list `_admin_unit` unpacks positionally, as a lateral's output.
+_ADMIN_COLUMNS = """
+       u.id, u.level::text AS lvl, u.code, u.name, u.name_norm, u.path::text AS pth,
+       u.display_path, u.parent_id,
+       CASE WHEN u.definition_point IS NULL THEN NULL ELSE ST_Y(u.definition_point) END AS dlat,
+       CASE WHEN u.definition_point IS NULL THEN NULL ELSE ST_X(u.definition_point) END AS dlon,
+       NULL::text AS qualifier, 1 AS homonym_count, NULL::char(5)[] AS psc_set"""
+
+_POINTS = "unnest(%s::int[], %s::double precision[], %s::double precision[]) AS p(idx, lat, lon)"
+
 # `purpose IN ('pip','authoritative')` cannot use `ruian_aug_pip_gist (geom) WHERE purpose
 # = 'pip'` — an IN-list does not imply the partial index's predicate — so the planner fell
 # back to the unpartitioned `ruian_aug_geom_gist` and ran ST_Covers against RAW obec
@@ -262,69 +319,104 @@ SELECT p.id, p.code, p.katuz_unit_id, p.parcel_label_norm,
 # Split into two branches under one LIMIT instead. `Limit -> Append` stops at the first
 # row, so the authoritative branch is `never executed` whenever a pip piece covers the
 # point — which is the same preference `ORDER BY (purpose = 'pip') DESC LIMIT 1` expressed,
-# just without paying for the losing side first. Measured: 19 ms, 25 buffers. The
-# authoritative branch stays because boundaries load per unit and a partially loaded pack
-# has units with no pip rows yet.
-_CONTAINING_OBEC_COLUMNS = """
-SELECT u.id, u.level::text, u.code, u.name, u.name_norm, u.path::text, u.display_path,
-       u.parent_id,
-       CASE WHEN u.definition_point IS NULL THEN NULL ELSE ST_Y(u.definition_point) END,
-       CASE WHEN u.definition_point IS NULL THEN NULL ELSE ST_X(u.definition_point) END,
-       NULL::text, 1, NULL::char(5)[], g.containment_radius_m
-  FROM ruian_admin_unit_geometries g
-  JOIN ruian_admin_units u ON u.id = g.unit_id
- WHERE g.registry_version_id = %s
-   AND g.purpose = '{purpose}'
-   AND u.level = 'obec'
-   AND ST_Covers(g.geom, ST_SetSRID(ST_MakePoint(%s, %s), 4326))
- LIMIT 1
+# just without paying for the losing side first. Measured: 0.24 ms/point across a 50-point
+# batch. The authoritative branch stays because boundaries load per unit and a partially
+# loaded pack has units with no pip rows yet.
+_CONTAINING_OBEC_BRANCH = f"""
+    SELECT {_ADMIN_COLUMNS}, g.containment_radius_m AS crad
+      FROM ruian_admin_unit_geometries g
+      JOIN ruian_admin_units u ON u.id = g.unit_id
+     WHERE g.registry_version_id = %s
+       AND g.purpose = '{{purpose}}'
+       AND u.level = 'obec'
+       AND ST_Covers(g.geom, {_PT})
+     LIMIT 1
 """
 
-_CONTAINING_OBEC_SQL = (
-    "(" + _CONTAINING_OBEC_COLUMNS.format(purpose="pip") + ")\n"
-    "UNION ALL\n"
-    "(" + _CONTAINING_OBEC_COLUMNS.format(purpose="authoritative") + ")\n"
-    "LIMIT 1\n"
-)
-
-_NEAREST_OBEC_SQL = """
-SELECT u.id, u.level::text, u.code, u.name, u.name_norm, u.path::text, u.display_path,
-       u.parent_id,
-       CASE WHEN u.definition_point IS NULL THEN NULL ELSE ST_Y(u.definition_point) END,
-       CASE WHEN u.definition_point IS NULL THEN NULL ELSE ST_X(u.definition_point) END,
-       NULL::text, 1, NULL::char(5)[], g.containment_radius_m,
-       ST_Distance(g.geom::geography, ST_SetSRID(ST_MakePoint(%s, %s), 4326)::geography)
-  FROM ruian_admin_unit_geometries g
-  JOIN ruian_admin_units u ON u.id = g.unit_id
- WHERE g.registry_version_id = %s
-   AND g.purpose = 'authoritative'
-   AND u.level = 'obec'
-   AND ST_DWithin(g.geom::geography, ST_SetSRID(ST_MakePoint(%s, %s), 4326)::geography, %s)
- ORDER BY 15
- LIMIT 1
+_CONTAINING_OBEC_SQL = f"""
+SELECT p.idx, c.*
+  FROM {_POINTS}
+  CROSS JOIN LATERAL (
+    ({_CONTAINING_OBEC_BRANCH.format(purpose="pip")})
+    UNION ALL
+    ({_CONTAINING_OBEC_BRANCH.format(purpose="authoritative")})
+    LIMIT 1
+  ) c
 """
 
+# `ST_DWithin(g.geom::geography, …)` cannot use `ruian_aug_geom_gist (geom)` — the cast is
+# not the indexed expression — so this used to read and cast EVERY boundary row whose bbox
+# reached the point, the state and kraj polygons included: 6,752 ms per point on the live
+# mirror. Two changes, both semantics-preserving:
+#
+# * `g.geom && ST_Expand(pt, %s / 60000.0)` is an Index Cond on that GiST index. 60,000 is a
+#   deliberate under-estimate of metres per degree of longitude (69,900 at CZ's northernmost
+#   51.1°), so the box strictly CONTAINS the geodesic circle and cannot hide a row the exact
+#   `ST_DWithin` would have kept.
+# * the subdivided `pip` pieces preferred over the raw polygon, same two-branch form and same
+#   reason as `containing_obec`: the pieces TILE the polygon, so the minimum distance over
+#   them is the distance to the polygon — with the small pieces the geography cast is cheap.
+#   All 6,258 obce carry pip rows today (verified), so the authoritative branch is the
+#   partially-loaded-pack fallback only. Measured: 2.95 ms/point.
+_NEAREST_OBEC_BRANCH = f"""
+    SELECT {_ADMIN_COLUMNS}, g.containment_radius_m AS crad,
+           ST_Distance(g.geom::geography, {_PT}::geography) AS d
+      FROM ruian_admin_unit_geometries g
+      JOIN ruian_admin_units u ON u.id = g.unit_id
+     WHERE g.registry_version_id = %s
+       AND g.purpose = '{{purpose}}'
+       AND u.level = 'obec'
+       AND g.geom && ST_Expand({_PT}, %s / 60000.0)
+       AND ST_DWithin(g.geom::geography, {_PT}::geography, %s)
+     ORDER BY 15
+     LIMIT 1
+"""
+
+_NEAREST_OBEC_SQL = f"""
+SELECT p.idx, c.*
+  FROM {_POINTS}
+  CROSS JOIN LATERAL (
+    ({_NEAREST_OBEC_BRANCH.format(purpose="pip")})
+    UNION ALL
+    ({_NEAREST_OBEC_BRANCH.format(purpose="authoritative")})
+    LIMIT 1
+  ) c
+"""
+
+# Keyed on (unit_id, lat, lon), so its point array carries the unit too.
 _BOUNDARY_DISTANCE_SQL = """
-SELECT ST_Distance(ST_Boundary(g.geom)::geography,
-                   ST_SetSRID(ST_MakePoint(%s, %s), 4326)::geography)
-  FROM ruian_admin_unit_geometries g
- WHERE g.unit_id = %s AND g.registry_version_id = %s AND g.purpose = 'authoritative'
- LIMIT 1
+SELECT p.idx,
+       ST_Distance(ST_Boundary(g.geom)::geography,
+                   ST_SetSRID(ST_MakePoint(p.lon, p.lat), 4326)::geography)
+  FROM unnest(%s::int[], %s::bigint[], %s::double precision[], %s::double precision[])
+       AS p(idx, unit_id, lat, lon)
+  CROSS JOIN LATERAL (
+    SELECT g.geom FROM ruian_admin_unit_geometries g
+     WHERE g.unit_id = p.unit_id AND g.registry_version_id = %s
+       AND g.purpose = 'authoritative'
+     LIMIT 1) g
 """
 
-_CAST_OBCE_FOR_POINT_SQL = """
-SELECT u.id, u.level::text, u.code, u.name, u.name_norm, u.path::text, u.display_path,
-       u.parent_id,
-       CASE WHEN u.definition_point IS NULL THEN NULL ELSE ST_Y(u.definition_point) END,
-       CASE WHEN u.definition_point IS NULL THEN NULL ELSE ST_X(u.definition_point) END,
-       NULL::text, 1, NULL::char(5)[], NULL::double precision
-  FROM ruian_address_points ap
-  JOIN ruian_admin_units u ON u.id = ap.cast_obce_unit_id
- WHERE ap.cast_obce_unit_id IS NOT NULL
-   AND ap.valid_to IS NULL
-   AND ST_DWithin(ap.geom::geography, ST_SetSRID(ST_MakePoint(%s, %s), 4326)::geography, %s)
- ORDER BY ap.geom <-> ST_SetSRID(ST_MakePoint(%s, %s), 4326)
- LIMIT 1
+# The KNN `<->` scan had no index-usable bound at all: `ST_DWithin(ap.geom::geography, …)`
+# is a FILTER, so a point with no address point inside 250 m walked the entire 3,020,222-row
+# geometry index before answering NULL — 2,944 ms per point averaged over a live sample. The
+# `&&` box (see `_NEAREST_OBEC_BRANCH` for why 60,000) bounds the scan; resolving the nearest
+# point in a subquery BEFORE joining `ruian_admin_units` drops the old plan's seq scan +
+# Materialize of all 18,627 unit rows, and is exact because `cast_obce_unit_id` is a FOREIGN
+# KEY — the first row out of the subquery always finds its unit. Measured: 0.15 ms/point.
+_CAST_OBCE_FOR_POINT_SQL = f"""
+SELECT p.idx, {_ADMIN_COLUMNS}, NULL::double precision
+  FROM {_POINTS}
+  CROSS JOIN LATERAL (
+    SELECT ap.cast_obce_unit_id AS unit_id
+      FROM ruian_address_points ap
+     WHERE ap.cast_obce_unit_id IS NOT NULL
+       AND ap.valid_to IS NULL
+       AND ap.geom && ST_Expand({_PT}, %s / 60000.0)
+       AND ST_DWithin(ap.geom::geography, {_PT}::geography, %s)
+     ORDER BY ap.geom <-> {_PT}
+     LIMIT 1) nearest
+  JOIN ruian_admin_units u ON u.id = nearest.unit_id
 """
 
 # Same shape, same reason: `cast_obce_kod` is unindexed while `ruian_ap_cast_obce
@@ -341,26 +433,51 @@ SELECT ST_MaxDistance(ST_Collect(ap.geom), ST_Centroid(ST_Collect(ap.geom))) * 1
    AND ap.valid_to IS NULL AND ap.geom IS NOT NULL
 """
 
-_IN_CZ_SQL = """
-SELECT ST_Covers(g.geom, ST_SetSRID(ST_MakePoint(%s, %s), 4326))
-  FROM ruian_admin_unit_geometries g
-  JOIN ruian_admin_units u ON u.id = g.unit_id
- WHERE g.registry_version_id = %s AND g.purpose = 'authoritative' AND u.level = 'stat'
- LIMIT 1
+_IN_CZ_SQL = f"""
+SELECT p.idx, ST_Covers(cz.geom, {_PT})
+  FROM {_POINTS}
+  CROSS JOIN LATERAL (
+    SELECT g.geom FROM ruian_admin_unit_geometries g
+      JOIN ruian_admin_units u ON u.id = g.unit_id
+     WHERE g.registry_version_id = %s AND g.purpose = 'authoritative' AND u.level = 'stat'
+     LIMIT 1) cz
 """
 
-_CLUSTER_FOR_POINT_SQL = """
-SELECT c.id, c.source, c.cell_key, c.listing_count, c.distinct_streets, c.distinct_obec_kods,
-       c.classification, c.distance_to_admin_centroid_m, c.declared_blur_share
-  FROM pin_clusters c
- WHERE c.epoch_id = %s AND c.source = %s AND c.cell_key = %s
-"""
-
-_CLUSTER_NEIGHBOUR_COUNT_SQL = """
-SELECT coalesce(sum(c.listing_count), 0)
-  FROM pin_clusters c
- WHERE c.epoch_id = %s AND c.source = %s AND c.cell_key = ANY(%s::text[])
-   AND ST_DWithin(c.geom::geography, ST_SetSRID(ST_MakePoint(%s, %s), 4326)::geography, %s)
+# The cluster row and BOTH neighbourhood sums in one statement — the old three-statement
+# form cost three round trips for every distinct pin, and the two sums are scalar
+# subqueries over the same nine cells. The `JOIN` (not LEFT JOIN) reproduces
+# `if row is None: return None`: a point whose own cell has no cluster yields no row.
+#
+# The 3x3 expansion is `collision.neighbourhood`, i.e. PYTHON — passed in as a flat
+# (idx, cell) pair array rather than reimplemented in SQL, so there is still exactly one
+# definition of a cell.
+_CLUSTER_SQL = """
+WITH pts AS (
+  SELECT * FROM unnest(%s::int[], %s::text[], %s::text[],
+                       %s::double precision[], %s::double precision[])
+              AS t(idx, source, cell, lat, lon)
+), nbc AS (
+  SELECT * FROM unnest(%s::int[], %s::text[]) AS t(idx, cell)
+)
+SELECT p.idx, c.id, c.source, c.cell_key, c.listing_count, c.distinct_streets,
+       c.distinct_obec_kods, c.classification, c.distance_to_admin_centroid_m,
+       c.declared_blur_share,
+       coalesce((SELECT sum(n.listing_count) FROM nbc
+                   JOIN pin_clusters n ON n.epoch_id = %s AND n.source = p.source
+                                      AND n.cell_key = nbc.cell
+                  WHERE nbc.idx = p.idx
+                    AND ST_DWithin(n.geom::geography,
+                                   ST_SetSRID(ST_MakePoint(p.lon, p.lat), 4326)::geography,
+                                   25.0)), 0),
+       coalesce((SELECT sum(n.listing_count) FROM nbc
+                   JOIN pin_clusters n ON n.epoch_id = %s AND n.source = p.source
+                                      AND n.cell_key = nbc.cell
+                  WHERE nbc.idx = p.idx
+                    AND ST_DWithin(n.geom::geography,
+                                   ST_SetSRID(ST_MakePoint(p.lon, p.lat), 4326)::geography,
+                                   100.0)), 0)
+  FROM pts p
+  JOIN pin_clusters c ON c.epoch_id = %s AND c.source = p.source AND c.cell_key = p.cell
 """
 
 
@@ -508,20 +625,61 @@ def _address_point(row: Sequence[Any]) -> AddressPoint:
     )
 
 
+class QueryStats:
+    """Per-query-KIND round trips and wall clock for one run.
+
+    Round 1's instrumentation logged aggregates only (`registry_q`, `registry_hit`), which
+    said the registry cost 77 ms a question but not WHICH question — so round 2 had to
+    re-derive the offenders by hand against production. This names them in the run's own log.
+    """
+
+    __slots__ = ("queries", "seconds", "rows")
+
+    def __init__(self) -> None:
+        self.queries: dict[str, int] = {}
+        self.seconds: dict[str, float] = {}
+        self.rows: dict[str, int] = {}
+
+    def record(self, kind: str, elapsed: float, rows: int) -> None:
+        self.queries[kind] = self.queries.get(kind, 0) + 1
+        self.seconds[kind] = self.seconds.get(kind, 0.0) + elapsed
+        self.rows[kind] = self.rows.get(kind, 0) + rows
+
+    def report(self, limit: int = 8) -> str:
+        """The slowest kinds first — total seconds is what a budget is spent in, not the
+        per-call average (a 3 ms question asked 20,000 times outranks a 700 ms one asked
+        twice)."""
+        ranked = sorted(self.seconds.items(), key=lambda kv: -kv[1])[:limit]
+        return " ".join(
+            f"{kind}(q={self.queries[kind]},{total:.1f}s,"
+            f"{1000.0 * total / max(self.queries[kind], 1):.0f}ms)"
+            for kind, total in ranked
+        )
+
+
 class SqlRegistryView:
     """`types.RegistryView` over the mirror, pinned to one `registry_version_id`."""
 
-    def __init__(self, conn: psycopg.Connection, registry_version_id: int) -> None:
+    def __init__(
+        self,
+        conn: psycopg.Connection,
+        registry_version_id: int,
+        stats: QueryStats | None = None,
+    ) -> None:
         self._conn = conn
         self._version = registry_version_id
+        self.stats = stats if stats is not None else QueryStats()
 
-    def _rows(self, sql: str, params: tuple) -> list[tuple]:
+    def _rows(self, kind: str, sql: str, params: tuple) -> list[tuple]:
+        started = time.perf_counter()
         with self._conn.cursor() as cur:
             cur.execute(sql, params)
-            return cur.fetchall()
+            rows = cur.fetchall()
+        self.stats.record(kind, time.perf_counter() - started, len(rows))
+        return rows
 
     def address_point(self, kod_adm: int) -> AddressPoint | None:
-        rows = self._rows(_ADDRESS_POINT_SQL, (kod_adm,))
+        rows = self._rows("address_point", _ADDRESS_POINT_SQL, (kod_adm,))
         return _address_point(rows[0]) if rows else None
 
     def address_points_by_number(
@@ -529,6 +687,7 @@ class SqlRegistryView:
         cislo_domovni: int | None, cislo_orientacni: int | None,
     ) -> list[AddressPoint]:
         rows = self._rows(
+            "address_points_by_number",
             _ADDRESS_POINTS_BY_NUMBER_SQL,
             (obec_kod, street_name_norm, street_name_norm, cislo_domovni, cislo_domovni,
              cislo_orientacni, cislo_orientacni),
@@ -539,7 +698,7 @@ class SqlRegistryView:
         return [
             Street(street_id=int(r[0]), code=int(r[1]), name=str(r[2]), name_norm=str(r[3]),
                    obec_unit_id=int(r[4]), obec_kod=int(r[5]))
-            for r in self._rows(_STREETS_IN_OBEC_SQL, (obec_kod,))
+            for r in self._rows("streets_in_obec", _STREETS_IN_OBEC_SQL, (obec_kod,))
         ]
 
     def admin_units_by_name(self, name_norm: str, *, levels: Sequence[str] = ()) -> list[AdminUnit]:
@@ -547,26 +706,29 @@ class SqlRegistryView:
         return [
             _admin_unit(r)
             for r in self._rows(
+                "admin_units_by_name",
                 _ADMIN_BY_NAME_SQL, (self._version, self._version, name_norm, wanted, wanted)
             )
         ]
 
     def admin_unit_by_code(self, level: str, code: int) -> AdminUnit | None:
-        rows = self._rows(_ADMIN_BY_CODE_SQL, (self._version, level, code))
+        rows = self._rows("admin_unit_by_code", _ADMIN_BY_CODE_SQL, (self._version, level, code))
         return _admin_unit(rows[0]) if rows else None
 
     def admin_unit(self, unit_id: int) -> AdminUnit | None:
-        rows = self._rows(_ADMIN_BY_ID_SQL, (self._version, unit_id))
+        rows = self._rows("admin_unit", _ADMIN_BY_ID_SQL, (self._version, unit_id))
         return _admin_unit(rows[0]) if rows else None
 
     def admin_chain(self, unit_id: int) -> list[AdminUnit]:
         return [
             _admin_unit(r)
-            for r in self._rows(_ADMIN_CHAIN_SQL, (unit_id, self._version, unit_id))
+            for r in self._rows(
+                "admin_chain", _ADMIN_CHAIN_SQL, (unit_id, self._version, unit_id)
+            )
         ]
 
     def obec_codes_for_psc(self, psc: str) -> list[int]:
-        return [int(r[0]) for r in self._rows(_PSC_OBEC_SQL, (psc,))]
+        return [int(r[0]) for r in self._rows("obec_codes_for_psc", _PSC_OBEC_SQL, (psc,))]
 
     def parcels(self, *, katuz_name_norm: str, parcel_label_norm: str) -> list[Parcel]:
         return [
@@ -576,77 +738,163 @@ class SqlRegistryView:
                 lat=None if r[4] is None else float(r[4]),
                 lon=None if r[5] is None else float(r[5]),
             )
-            for r in self._rows(_PARCELS_SQL, (katuz_name_norm, parcel_label_norm))
+            for r in self._rows("parcels", _PARCELS_SQL, (katuz_name_norm, parcel_label_norm))
         ]
 
-    def containing_obec(self, lat: float, lon: float) -> AdminUnit | None:
-        # Two branches, so the (version, lon, lat) triple is bound twice.
+    # ---- the five point-keyed questions: ONE array-shaped statement, called here with one
+    # point and by `warm_points` with the whole slice. `_bulk` returns {idx: answer}.
+
+    def containing_obec_bulk(
+        self, points: Sequence[tuple[float, float]]
+    ) -> dict[int, AdminUnit]:
+        if not points:
+            return {}
+        idx, lats, lons = _point_arrays(points)
         rows = self._rows(
-            _CONTAINING_OBEC_SQL, (self._version, lon, lat, self._version, lon, lat)
+            "containing_obec", _CONTAINING_OBEC_SQL,
+            (idx, lats, lons, self._version, self._version),
         )
-        return _admin_unit(rows[0]) if rows else None
+        return {int(r[0]): _admin_unit(r[1:]) for r in rows}
+
+    def containing_obec(self, lat: float, lon: float) -> AdminUnit | None:
+        return self.containing_obec_bulk([(lat, lon)]).get(0)
 
     def nearest_obec_within(
         self, lat: float, lon: float, max_m: float
     ) -> tuple[AdminUnit, float] | None:
-        rows = self._rows(_NEAREST_OBEC_SQL, (lon, lat, self._version, lon, lat, max_m))
+        idx, lats, lons = _point_arrays([(lat, lon)])
+        rows = self._rows(
+            "nearest_obec_within", _NEAREST_OBEC_SQL,
+            (idx, lats, lons,
+             self._version, max_m, max_m, self._version, max_m, max_m),
+        )
         if not rows:
             return None
-        return _admin_unit(rows[0]), float(rows[0][14])
+        return _admin_unit(rows[0][1:]), float(rows[0][15])
+
+    def distance_to_admin_boundary_m_bulk(
+        self, keys: Sequence[tuple[int, float, float]]
+    ) -> dict[int, float]:
+        if not keys:
+            return {}
+        rows = self._rows(
+            "distance_to_admin_boundary_m", _BOUNDARY_DISTANCE_SQL,
+            (list(range(len(keys))), [int(k[0]) for k in keys],
+             [float(k[1]) for k in keys], [float(k[2]) for k in keys], self._version),
+        )
+        return {int(r[0]): float(r[1]) for r in rows if r[1] is not None}
 
     def distance_to_admin_boundary_m(self, unit_id: int, lat: float, lon: float) -> float | None:
-        rows = self._rows(_BOUNDARY_DISTANCE_SQL, (lon, lat, unit_id, self._version))
-        return None if not rows or rows[0][0] is None else float(rows[0][0])
+        return self.distance_to_admin_boundary_m_bulk([(unit_id, lat, lon)]).get(0)
+
+    def cast_obce_for_point_bulk(
+        self, points: Sequence[tuple[float, float]]
+    ) -> dict[int, AdminUnit]:
+        if not points:
+            return {}
+        idx, lats, lons = _point_arrays(points)
+        rows = self._rows(
+            "cast_obce_for_point", _CAST_OBCE_FOR_POINT_SQL,
+            (idx, lats, lons, CAST_OBCE_RADIUS_M, CAST_OBCE_RADIUS_M),
+        )
+        return {int(r[0]): _admin_unit(r[1:]) for r in rows}
 
     def cast_obce_for_point(self, lat: float, lon: float) -> AdminUnit | None:
-        rows = self._rows(_CAST_OBCE_FOR_POINT_SQL, (lon, lat, 250.0, lon, lat))
-        return _admin_unit(rows[0]) if rows else None
+        return self.cast_obce_for_point_bulk([(lat, lon)]).get(0)
 
     def cast_obce_extent_m(self, cast_obce_kod: int) -> float | None:
-        rows = self._rows(_CAST_OBCE_EXTENT_SQL, (cast_obce_kod,))
+        rows = self._rows("cast_obce_extent_m", _CAST_OBCE_EXTENT_SQL, (cast_obce_kod,))
         return None if not rows or rows[0][0] is None else float(rows[0][0])
 
+    def in_czechia_polygon_bulk(
+        self, points: Sequence[tuple[float, float]]
+    ) -> dict[int, bool]:
+        if not points:
+            return {}
+        idx, lats, lons = _point_arrays(points)
+        rows = self._rows("in_czechia_polygon", _IN_CZ_SQL, (idx, lats, lons, self._version))
+        return {int(r[0]): bool(r[1]) for r in rows if r[1] is not None}
+
     def in_czechia_polygon(self, lat: float, lon: float) -> bool | None:
-        rows = self._rows(_IN_CZ_SQL, (lon, lat, self._version))
-        return None if not rows else bool(rows[0][0])
+        return self.in_czechia_polygon_bulk([(lat, lon)]).get(0)
+
+
+CAST_OBCE_RADIUS_M = 250.0
+
+
+def _point_arrays(
+    points: Sequence[tuple[float, float]]
+) -> tuple[list[int], list[float], list[float]]:
+    return (
+        list(range(len(points))),
+        [float(p[0]) for p in points],
+        [float(p[1]) for p in points],
+    )
 
 
 class SqlCollisionEvidence:
     """`pin_clusters` at ONE stamped epoch — the corpus-wide input that makes
     `collision_epoch_id` the fifth version in the resolution's identity."""
 
-    def __init__(self, conn: psycopg.Connection, epoch_id: int | None) -> None:
+    def __init__(
+        self,
+        conn: psycopg.Connection,
+        epoch_id: int | None,
+        stats: QueryStats | None = None,
+    ) -> None:
         self._conn = conn
         self._epoch = epoch_id
+        self.stats = stats if stats is not None else QueryStats()
 
-    def for_point(self, source: str, lat: float, lon: float) -> ClusterEvidence | None:
-        if self._epoch is None:
-            return None
+    def for_point_bulk(
+        self, points: Sequence[tuple[str, float, float]]
+    ) -> dict[int, ClusterEvidence]:
+        if self._epoch is None or not points:
+            return {}
         from location_data.resolver.collision import cell_of, neighbourhood
 
-        cell = cell_of(lat, lon)
+        idx: list[int] = []
+        sources: list[str] = []
+        cells: list[str] = []
+        lats: list[float] = []
+        lons: list[float] = []
+        nb_idx: list[int] = []
+        nb_cells: list[str] = []
+        for i, (source, lat, lon) in enumerate(points):
+            cell = cell_of(lat, lon)
+            idx.append(i)
+            sources.append(source)
+            cells.append(cell)
+            lats.append(float(lat))
+            lons.append(float(lon))
+            for neighbour in neighbourhood(cell):
+                nb_idx.append(i)
+                nb_cells.append(neighbour)
+        started = time.perf_counter()
         with self._conn.cursor() as cur:
-            cur.execute(_CLUSTER_FOR_POINT_SQL, (self._epoch, source, cell))
-            row = cur.fetchone()
-            if row is None:
-                return None
-            cells = list(neighbourhood(cell))
             cur.execute(
-                _CLUSTER_NEIGHBOUR_COUNT_SQL, (self._epoch, source, cells, lon, lat, 25.0)
+                _CLUSTER_SQL,
+                (idx, sources, cells, lats, lons, nb_idx, nb_cells,
+                 self._epoch, self._epoch, self._epoch),
             )
-            n25 = int((cur.fetchone() or [row[3]])[0] or row[3])
-            cur.execute(
-                _CLUSTER_NEIGHBOUR_COUNT_SQL, (self._epoch, source, cells, lon, lat, 100.0)
+            rows = cur.fetchall()
+        self.stats.record("collision_for_point", time.perf_counter() - started, len(rows))
+        out: dict[int, ClusterEvidence] = {}
+        for row in rows:
+            count = int(row[4])
+            out[int(row[0])] = ClusterEvidence(
+                cluster_id=int(row[1]), source=str(row[2]), cell_key=str(row[3]),
+                listing_count=count, distinct_streets=int(row[5]),
+                distinct_obec_kods=int(row[6]), classification=str(row[7]),
+                n_25m=max(int(row[10] or count), count),
+                n_100m=max(int(row[11] or count), count),
+                distance_to_admin_centroid_m=None if row[8] is None else float(row[8]),
+                declared_blur_share=None if row[9] is None else float(row[9]),
             )
-            n100 = int((cur.fetchone() or [row[3]])[0] or row[3])
-        return ClusterEvidence(
-            cluster_id=int(row[0]), source=str(row[1]), cell_key=str(row[2]),
-            listing_count=int(row[3]), distinct_streets=int(row[4]),
-            distinct_obec_kods=int(row[5]), classification=str(row[6]),
-            n_25m=max(n25, int(row[3])), n_100m=max(n100, int(row[3])),
-            distance_to_admin_centroid_m=None if row[7] is None else float(row[7]),
-            declared_blur_share=None if row[8] is None else float(row[8]),
-        )
+        return out
+
+    def for_point(self, source: str, lat: float, lon: float) -> ClusterEvidence | None:
+        return self.for_point_bulk([(source, lat, lon)]).get(0)
 
 
 class RunCache:
@@ -662,7 +910,8 @@ class RunCache:
     dropped and refills. Correctness cannot depend on what is resident.
     """
 
-    __slots__ = ("_values", "_max", "hits", "misses", "seconds")
+    __slots__ = ("_values", "_max", "hits", "misses", "seconds", "asked_by_kind",
+                 "missed_by_kind")
 
     def __init__(self, max_entries: int = 250_000) -> None:
         self._values: dict[Any, Any] = {}
@@ -670,6 +919,16 @@ class RunCache:
         self.hits = 0
         self.misses = 0
         self.seconds = 0.0
+        # Every key is a tuple whose head is the question's name, so the per-KIND hit rate
+        # comes for free — and it is the number that says whether a key is too narrow.
+        self.asked_by_kind: dict[str, int] = {}
+        self.missed_by_kind: dict[str, int] = {}
+
+    def _count(self, key: Any, missed: bool) -> None:
+        kind = key[0] if isinstance(key, tuple) and key else str(key)
+        self.asked_by_kind[kind] = self.asked_by_kind.get(kind, 0) + 1
+        if missed:
+            self.missed_by_kind[kind] = self.missed_by_kind.get(kind, 0) + 1
 
     def get(self, key: Any, compute: Callable[[], Any]) -> Any:
         try:
@@ -678,20 +937,36 @@ class RunCache:
             pass
         else:
             self.hits += 1
+            self._count(key, missed=False)
             return value
         self.misses += 1
+        self._count(key, missed=True)
         started = time.perf_counter()
         value = compute()
         self.seconds += time.perf_counter() - started
+        self.put(key, value)
+        return value
+
+    def put(self, key: Any, value: Any) -> None:
+        """Pre-seed an answer (`warm_points`). Identical to what `get` would have stored, so
+        a warmed run and a cold one hand the core the same bytes."""
         if len(self._values) >= self._max:
             self._values.clear()
         self._values[key] = value
-        return value
 
     @property
     def hit_rate(self) -> float:
         asked = self.hits + self.misses
         return 0.0 if asked == 0 else self.hits / asked
+
+    def report(self, limit: int = 8) -> str:
+        """The kinds that MISS most — a kind with a low hit rate is either keyed on something
+        per-listing (warm it per slice) or keyed too narrowly (widen it)."""
+        ranked = sorted(self.missed_by_kind.items(), key=lambda kv: -kv[1])[:limit]
+        return " ".join(
+            f"{kind}(asked={self.asked_by_kind.get(kind, 0)},miss={missed})"
+            for kind, missed in ranked
+        )
 
 
 class CachedRegistryView:
@@ -737,11 +1012,24 @@ class CachedRegistryView:
     def admin_units_by_name(
         self, name_norm: str, *, levels: Sequence[str] = ()
     ) -> Sequence[AdminUnit]:
-        wanted = tuple(levels)
-        return self._cache.get(
-            ("admin_units_by_name", name_norm, wanted),
-            lambda: tuple(self._inner.admin_units_by_name(name_norm, levels=wanted)),
+        """Keyed on the NAME only, with the level narrowing applied in Python.
+
+        The level tuple was part of the key, so one name asked four different ways — S3 asks
+        for `('obec',)`, then `('obec','cast_obce','momc','zsj')`, S9 for
+        `('katastralni_uzemi',)`, `_is_place_name` for all levels — was four cache entries and
+        four round trips for one immutable answer. The unnarrowed query is the SUPERSET of
+        every narrowing (`cardinality(levels) = 0 OR level = ANY(levels)`) and its
+        `ORDER BY u.level, u.code` survives a stable filter, so the narrowed list is
+        element-for-element what the narrowed query returned.
+        """
+        wanted = frozenset(levels)
+        every = self._cache.get(
+            ("admin_units_by_name", name_norm),
+            lambda: tuple(self._inner.admin_units_by_name(name_norm)),
         )
+        if not wanted:
+            return every
+        return tuple(unit for unit in every if unit.level in wanted)
 
     def admin_unit_by_code(self, level: str, code: int) -> AdminUnit | None:
         return self._cache.get(
@@ -827,6 +1115,53 @@ class CachedCollisionEvidence:
         )
 
 
+def warm_points(
+    registry: SqlRegistryView,
+    collision: SqlCollisionEvidence,
+    cache: RunCache,
+    points: Sequence[tuple[str, float, float]],
+) -> None:
+    """Answer the five point-keyed questions for a WHOLE SLICE in five round trips.
+
+    These are the questions the run cache can never share between listings — the key IS the
+    listing's coordinate — and they were 5 of the drain's ~16 round trips per listing. Asking
+    them ahead of the slice does not change a single answer: `warm_points` writes exactly the
+    key/value `CachedRegistryView` would have computed lazily, from the SAME statement text
+    (the `*_bulk` methods are the single-point methods with a longer array), so the pure core
+    is handed identical bytes and replay is unaffected. A point that was NOT warmed — a
+    position that came from a registry match rather than from the portal's pin — simply misses
+    and asks for itself, exactly as before.
+
+    A NULL answer is an answer: it is cached too, or every rural point would re-ask per call.
+    """
+    if not points:
+        return
+    coords = sorted({(lat, lon) for _, lat, lon in points})
+    covering = registry.containing_obec_bulk(coords)
+    for i, (lat, lon) in enumerate(coords):
+        cache.put(("containing_obec", lat, lon), covering.get(i))
+    in_cz = registry.in_czechia_polygon_bulk(coords)
+    for i, (lat, lon) in enumerate(coords):
+        cache.put(("in_czechia_polygon", lat, lon), in_cz.get(i))
+    cast_obce = registry.cast_obce_for_point_bulk(coords)
+    for i, (lat, lon) in enumerate(coords):
+        cache.put(("cast_obce_for_point", lat, lon), cast_obce.get(i))
+    # The boundary distance is keyed on (unit, point) and the unit is the one PIP just
+    # returned — admin.py asks for exactly that pair right after `containing_obec`.
+    pairs = [
+        (covering[i].unit_id, lat, lon)
+        for i, (lat, lon) in enumerate(coords)
+        if i in covering
+    ]
+    distances = registry.distance_to_admin_boundary_m_bulk(pairs)
+    for i, (unit_id, lat, lon) in enumerate(pairs):
+        cache.put(("distance_to_admin_boundary_m", unit_id, lat, lon), distances.get(i))
+    triples = sorted(set(points))
+    clusters = collision.for_point_bulk(triples)
+    for i, (source, lat, lon) in enumerate(triples):
+        cache.put(("collision", source, lat, lon), clusters.get(i))
+
+
 # --------------------------------------------------------------------------- writers
 
 _INSERT_RESOLUTION_SQL = """
@@ -848,13 +1183,23 @@ VALUES (%s, decode(%s, 'hex'), %s, %s, %s,
         %s::licence_class, %s)
 ON CONFLICT (listing_id, claim_set_hash, resolver_version, registry_version_id,
              policy_version, collision_epoch_id) DO NOTHING
-RETURNING id
 """
 
-_SELECT_RESOLUTION_SQL = """
-SELECT id FROM location_resolutions
- WHERE listing_id = %s AND claim_set_hash = decode(%s, 'hex') AND resolver_version = %s
-   AND registry_version_id = %s AND policy_version = %s AND collision_epoch_id = %s
+# The slice's ids read back on the SAME six-column identity, one row per listing. The whole
+# tuple travels per row rather than as run constants: they ARE constant for one run today,
+# and a join that quietly assumed so would return the wrong row the day they are not.
+_SELECT_RESOLUTIONS_BULK_SQL = """
+SELECT w.listing_id, r.id
+  FROM unnest(%s::bigint[], %s::text[], %s::text[], %s::bigint[], %s::text[], %s::bigint[])
+       AS w(listing_id, hash_hex, resolver_version, registry_version_id, policy_version,
+            collision_epoch_id)
+  JOIN location_resolutions r
+    ON r.listing_id = w.listing_id
+   AND r.claim_set_hash = decode(w.hash_hex, 'hex')
+   AND r.resolver_version = w.resolver_version
+   AND r.registry_version_id = w.registry_version_id
+   AND r.policy_version = w.policy_version
+   AND r.collision_epoch_id = w.collision_epoch_id
 """
 
 _INSERT_CANDIDATE_SQL = """
@@ -1107,21 +1452,21 @@ SELECT p.listing_id, encode(r.claim_set_hash, 'hex'), r.registry_version_id, r.p
  WHERE p.listing_id = ANY(%s::bigint[])
 """
 
-_DISPUTED_SQL = """
-SELECT EXISTS (
-  SELECT 1 FROM location_contradictions_open c
-   WHERE c.listing_id = %s AND c.severity = 'major')
+# Same read, one round trip for the slice. It is STILL a read-your-writes read — the caller
+# runs it after the slice's contradictions and auto-closes are written, never at slice start.
+_DISPUTED_BULK_SQL = """
+SELECT DISTINCT c.listing_id
+  FROM location_contradictions_open c
+ WHERE c.listing_id = ANY(%s::bigint[]) AND c.severity = 'major'
 """
 
 
-def write_resolution(conn: psycopg.Connection, resolution: Resolution) -> int:
-    """INSERT the resolution; re-running with identical inputs is a no-op that returns the
-    existing id (the UNIQUE key IS the resolver's signature)."""
+def _resolution_params(resolution: Resolution) -> tuple:
     import json
 
     position = resolution.position
     precision = resolution.precision
-    params = (
+    return (
         resolution.listing_id, resolution.claim_set_hash, resolution.resolver_version,
         resolution.registry_version_id, resolution.policy_version,
         resolution.collision_epoch_id, resolution.status, resolution.chosen_rule,
@@ -1135,73 +1480,108 @@ def write_resolution(conn: psycopg.Connection, resolution: Resolution) -> int:
         position.lat, position.lon, position.lat,
         resolution.position_licence_class, list(resolution.input_claim_ids),
     )
+
+
+def write_resolutions_bulk(
+    conn: psycopg.Connection, resolutions: Sequence[Resolution]
+) -> dict[int, int]:
+    """One INSERT (pipelined by `executemany`) plus ONE read-back for the whole slice.
+
+    The read-back is a join on the resolver's own UNIQUE key rather than a `RETURNING`
+    harvest: the insert is `ON CONFLICT DO NOTHING`, so a listing whose inputs are unchanged
+    returns no id at all, and the id it needs is the EXISTING row's — which is precisely what
+    the per-listing writer's fallback SELECT did, once per listing.
+    """
+    if not resolutions:
+        return {}
     with conn.cursor() as cur:
-        cur.execute(_INSERT_RESOLUTION_SQL, params)
-        row = cur.fetchone()
-        if row is not None:
-            return int(row[0])
+        cur.executemany(_INSERT_RESOLUTION_SQL, [_resolution_params(r) for r in resolutions])
         cur.execute(
-            _SELECT_RESOLUTION_SQL,
-            (resolution.listing_id, resolution.claim_set_hash, resolution.resolver_version,
-             resolution.registry_version_id, resolution.policy_version,
-             resolution.collision_epoch_id),
+            _SELECT_RESOLUTIONS_BULK_SQL,
+            ([r.listing_id for r in resolutions],
+             [r.claim_set_hash for r in resolutions],
+             [r.resolver_version for r in resolutions],
+             [r.registry_version_id for r in resolutions],
+             [r.policy_version for r in resolutions],
+             [r.collision_epoch_id for r in resolutions]),
         )
-        existing = cur.fetchone()
-    if existing is None:  # pragma: no cover - only reachable on a concurrent delete
-        raise RuntimeError("resolution vanished between INSERT and SELECT")
-    return int(existing[0])
+        found = {int(listing_id): int(row_id) for listing_id, row_id in cur.fetchall()}
+    missing = [r.listing_id for r in resolutions if r.listing_id not in found]
+    if missing:  # pragma: no cover - only reachable on a concurrent delete
+        raise RuntimeError(f"resolutions vanished between INSERT and SELECT: {missing[:5]}")
+    return found
 
 
-def write_candidates(
-    conn: psycopg.Connection, resolution_id: int, resolution: Resolution
-) -> None:
-    """Two statements for the whole candidate set (psycopg pipelines the `executemany` into
-    one round trip) where the old per-candidate loop paid an INSERT + a RETURNING read each."""
+def _candidate_params(resolution_id: int, resolution: Resolution) -> list[tuple]:
     import json
 
-    candidates = list(resolution.candidates)
-    if not candidates:
-        return
-    params = [
+    return [
         (resolution_id, c.rank, c.score, c.target_kind, c.ruian_adm_kod,
          c.stavebni_objekt_kod, c.parcela_id, c.ulice_id, c.admin_unit_id,
          c.lat, c.lon, c.lat, c.granularity, c.position_source, c.blur_evidence,
          c.match_confidence, c.uncertainty_radius_m, c.radius_semantics, c.licence_class,
          json.dumps(c.component_match), c.distance_to_pin_m, c.rejected_reason)
-        for c in candidates
+        for c in resolution.candidates
     ]
+
+
+def write_candidates_bulk(
+    conn: psycopg.Connection, items: Sequence[tuple[int, Resolution]]
+) -> None:
+    """The same two statements for a whole SLICE's candidates."""
+    params: list[tuple] = []
+    chosen: list[tuple] = []
+    for resolution_id, resolution in items:
+        params.extend(_candidate_params(resolution_id, resolution))
+        if resolution.chosen_rank is not None:
+            chosen.append((resolution_id, resolution_id, resolution.chosen_rank))
+    if not params:
+        return
     with conn.cursor() as cur:
         cur.executemany(_INSERT_CANDIDATE_SQL, params)
-        if resolution.chosen_rank is not None:
-            cur.execute(
-                _SET_CHOSEN_SQL, (resolution_id, resolution_id, resolution.chosen_rank)
-            )
+        if chosen:
+            cur.executemany(_SET_CHOSEN_SQL, chosen)
 
 
-def upsert_listing_projection(conn: psycopg.Connection, row: dict[str, Any]) -> None:
+def _listing_projection_params(row: dict[str, Any]) -> dict[str, Any]:
     import json
 
     params = dict(row)
     params["match_components"] = json.dumps(params.get("match_components") or {})
     params["field_provenance"] = json.dumps(params.get("field_provenance") or {})
+    return params
+
+
+def upsert_listing_projections_bulk(
+    conn: psycopg.Connection, rows: Sequence[dict[str, Any]]
+) -> None:
+    if not rows:
+        return
     with conn.cursor() as cur:
-        cur.execute(_UPSERT_LISTING_PROJECTION_SQL, params)
+        cur.executemany(
+            _UPSERT_LISTING_PROJECTION_SQL, [_listing_projection_params(r) for r in rows]
+        )
 
 
-def upsert_property_projection(conn: psycopg.Connection, row: dict[str, Any]) -> None:
+def upsert_property_projections_bulk(
+    conn: psycopg.Connection, rows: Sequence[dict[str, Any]]
+) -> None:
+    if not rows:
+        return
     with conn.cursor() as cur:
-        cur.execute(_UPSERT_PROPERTY_PROJECTION_SQL, row)
+        cur.executemany(_UPSERT_PROPERTY_PROJECTION_SQL, list(rows))
 
 
-def write_contradictions(
+def write_contradictions_bulk(
     conn: psycopg.Connection,
-    detections: Sequence[Any],
+    items: Sequence[tuple[Sequence[Any], int | None]],
     *,
     reconciler_version: str,
     resolver_version: str,
     registry_version_id: int,
-    property_id: int | None,
 ) -> None:
+    """Every listing's detections in one `executemany`. The property_id travels WITH each
+    listing's detections — it is a per-listing column, not a run constant."""
     import json
 
     params = [
@@ -1211,6 +1591,7 @@ def write_contradictions(
          json.dumps(detection.claimed, default=str),
          list(detection.evidence_claim_ids), detection.distance_m,
          detection.evidence_quote, detection.auto_action, detection.dedupe_key)
+        for detections, property_id in items
         for detection in detections
     ]
     if not params:
@@ -1303,8 +1684,14 @@ def append_auto_close(conn: psycopg.Connection, closes: Sequence[Any]) -> None:
         cur.executemany(_LOG_DISPOSITION_SQL, params)
 
 
-def location_disputed(conn: psycopg.Connection, listing_id: int) -> bool:
+def location_disputed_bulk(
+    conn: psycopg.Connection, listing_ids: Sequence[int]
+) -> set[int]:
+    """The listings of the slice that carry an OPEN major finding. Must be called AFTER the
+    slice's contradictions and auto-closes are written — it is a read of what this run just
+    wrote, which is why it is not part of `drain._prefetch`."""
+    if not listing_ids:
+        return set()
     with conn.cursor() as cur:
-        cur.execute(_DISPUTED_SQL, (listing_id,))
-        row = cur.fetchone()
-    return bool(row[0]) if row else False
+        cur.execute(_DISPUTED_BULK_SQL, (list(listing_ids),))
+        return {int(row[0]) for row in cur.fetchall()}

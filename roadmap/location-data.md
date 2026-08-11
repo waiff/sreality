@@ -240,7 +240,10 @@ resolves or stays in shadow. Closed in this round: the fingerprint is now migrat
 - **`dirty_locations` drain** (`drain`): `FOR UPDATE SKIP LOCKED` slices, one transaction
   per batch with a per-listing savepoint, lease-row CAS on `location_jobs`, judged by
   oldest-row age. `.github/workflows/location_resolve.yml` (drain | epoch | full-resolve,
-  `*/15` cron, concurrency group `location-resolve`).
+  concurrency group `location-resolve`). The `*/15` cron is **removed for the duration of
+  the W1 backfill** — the outer `location-batch` group holds one pending slot, so a tick
+  superseded the backfill driver's own next dispatch while adding nothing to a 630 k queue.
+  It returns at steady state, or when the always-on worker lane takes the cadence over.
 - **Drain throughput** (follow-up): the first production drain did **~3 s per listing** —
   ~28 h for the 34 k queue, ~23 days for the corpus — because the cost is pooler ROUND TRIPS
   (~35 statements per listing), not work. Four I/O-layer fixes, none of which touch the pure
@@ -266,6 +269,29 @@ resolves or stays in shadow. Closed in this round: the fingerprint is now migrat
   under one LIMIT restore it. Migration **389** adds the three indexes no rewrite can
   replace (gazetteer name equality, PSC→obec covering, street name equality) — **filed, not
   yet applied**: two build over 3.02 M rows and want a quiet instance.
+- **Drain throughput, round 2** (follow-up): round 1 left the drain at **0.8 listings/s**
+  (production run 31480587021: 2,750 in 3,366 s), and round 2 measured WHY. The run spent
+  225 ms per listing on three statements with no server-side work at all — SAVEPOINT,
+  RELEASE SAVEPOINT, one DELETE by primary key — which prices a GitHub-runner↔Frankfurt
+  round trip at **~75 ms**, while the same registry questions cost **0.02-0.5 ms**
+  server-side. The rate was `1 / (75 ms x ~16 trips per listing)` and nothing else, so no
+  index could have helped and none was added (no migration 390). Three I/O-layer fixes, the
+  pure core untouched and replay still bit-for-bit: **slice-batched writes** (compute split
+  from write; resolutions/candidates/contradictions/dispositions/projections/property
+  rebuilds become ~10 statements per 250-listing slice instead of ~7 per listing, optimistic
+  under ONE savepoint with the per-listing SAVEPOINT path as the retry), **per-slice warming**
+  of the five coordinate-keyed registry questions (that key is unique per listing by
+  construction — which is what the 62 % cache plateau actually was, not a too-narrow key),
+  and `admin_units_by_name` **keyed on the name alone** with the level narrowing moved into
+  Python (one name asked four ways was four round trips for one immutable answer). Two
+  genuine plan faults surfaced on the way and were fixed as query shapes:
+  `cast_obce_for_point` **2,944 → 0.15 ms/point** (an unbounded KNN walk of all 3.02 M
+  address points, plus a seq scan + Materialize of all 18,627 unit rows per call) and
+  `nearest_obec_within` **6,752 → 2.95 ms/point** (`ST_DWithin(geom::geography, …)` cannot
+  use the geometry GiST index, so every call cast all 127 k boundary rows — the state
+  polygon included — to geography). Both now carry an `&&` bbox the index takes as an Index
+  Cond. Per-query-KIND counters replace round 1's single aggregate, so the next run names
+  its own offenders (`BATCH queries …`, `DRAIN cache misses …`).
 - **S9 reconciler v1**: the cheap structural rules of 03 §3.11.1 into the append-only
   ledger, keyed on the version-free `dedupe_key`; auto-close only when the predicate stops
   firing AND the inputs changed — the inputs compared against the resolution the current
