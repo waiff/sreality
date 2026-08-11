@@ -342,21 +342,55 @@ def test_containing_obec_lets_the_partial_pip_index_do_its_job():
     """`purpose IN ('pip','authoritative')` cannot use `ruian_aug_pip_gist ... WHERE
     purpose = 'pip'`, so ST_Covers ran against raw obec polygons (194 ms, 1,225 buffers).
     Two branches under one LIMIT keep the same preference and let Append stop at the
-    first row (19 ms, 25 buffers)."""
+    first row (0.24 ms/point measured across a 50-point batch)."""
     flat = _flat(resolve_db._CONTAINING_OBEC_SQL)
     assert "purpose in ('pip', 'authoritative')" not in flat
     assert "g.purpose = 'pip'" in flat
     assert "g.purpose = 'authoritative'" in flat
     assert flat.count("union all") == 1
-    assert flat.rstrip().endswith("limit 1")
 
 
-def test_containing_obec_binds_its_parameters_once_per_branch():
-    """Two branches, six placeholders — a mismatch here is a runtime error on the first
-    coordinate the drain resolves, not a test-time one."""
-    assert resolve_db._CONTAINING_OBEC_SQL.count("%s") == 6
-    source = inspect.getsource(resolve_db.SqlRegistryView.containing_obec)
-    assert "(self._version, lon, lat, self._version, lon, lat)" in source
+def test_every_point_keyed_question_binds_one_array_shape():
+    """The five coordinate-keyed questions have ONE statement each, taking parallel arrays,
+    so `warm_points` (whole slice, one round trip) and the lazy single-point path cannot
+    drift — which is what makes warming invisible to the pure core. A placeholder mismatch
+    here is a runtime error on the first coordinate the drain resolves."""
+    for sql, expected in (
+        (resolve_db._CONTAINING_OBEC_SQL, 5),      # 3 arrays + a version per branch
+        (resolve_db._NEAREST_OBEC_SQL, 9),         # 3 arrays + (version, box, radius) x2
+        (resolve_db._CAST_OBCE_FOR_POINT_SQL, 5),  # 3 arrays + box + radius
+        (resolve_db._IN_CZ_SQL, 4),                # 3 arrays + a version
+        (resolve_db._BOUNDARY_DISTANCE_SQL, 5),    # 4 arrays + a version
+    ):
+        assert sql.count("%s") == expected, _flat(sql)
+    for name in ("containing_obec", "cast_obce_for_point", "in_czechia_polygon"):
+        single = inspect.getsource(getattr(resolve_db.SqlRegistryView, name))
+        assert f"self.{name}_bulk([(lat, lon)]).get(0)" in single
+
+
+def test_the_geography_predicates_carry_an_index_usable_bbox():
+    """`ST_DWithin(geom::geography, ...)` is a FILTER against a geometry GiST index, so the
+    unbounded forms scanned everything: 6,752 ms/point for `nearest_obec_within` (every
+    boundary row cast to geography, the state polygon included) and 2,944 ms/point for
+    `cast_obce_for_point` (a KNN walk of all 3.02 M address points when nothing is near).
+    The `&&` box is the Index Cond that bounds both; 60,000 under-estimates metres per
+    degree at CZ latitudes, so the box strictly CONTAINS the geodesic circle."""
+    for sql in (resolve_db._NEAREST_OBEC_SQL, resolve_db._CAST_OBCE_FOR_POINT_SQL):
+        flat = _flat(sql)
+        assert "&& st_expand(" in flat, flat
+        assert "/ 60000.0)" in flat, flat
+        assert "st_dwithin(" in flat, flat
+
+
+def test_nearest_obec_prefers_the_subdivided_pieces_like_containment_does():
+    """The pip pieces TILE the authoritative polygon, so the minimum distance over them IS
+    the distance to the polygon — and they are small enough that the geography cast is
+    cheap (2.95 ms/point vs 6,752). The authoritative branch stays for a partially loaded
+    boundary pack, exactly as in `_CONTAINING_OBEC_SQL`."""
+    flat = _flat(resolve_db._NEAREST_OBEC_SQL)
+    assert "g.purpose = 'pip'" in flat
+    assert "g.purpose = 'authoritative'" in flat
+    assert flat.count("union all") == 1
 
 
 def test_the_registry_lookup_index_migration_ships_as_a_file():
