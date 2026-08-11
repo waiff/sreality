@@ -1,57 +1,82 @@
-/* The one place a deal-pipeline card is written from (rule #22).
+/* The one place a deal-pipeline card is written from for a SINGLE property
+ * (rule #22) — the Browse funnels, the listing header, and the stage menu they
+ * share.
  *
- * Add / remove / move were duplicated across the Browse cards, the listing
- * header and the kanban board — three copies of the same three mutations, each
- * with its own idea of which caches to invalidate (the board forgot the members
- * set, the cards forgot the board). They are one hook now: same audited API
- * calls, one invalidation policy.
+ * Add / remove / move were duplicated across those surfaces, each with its own
+ * idea of which caches to invalidate (the board forgot the members set, the
+ * cards forgot the board). They are one hook now: same audited API calls, one
+ * cache policy — `lib/pipelineCache.ts`, which the kanban's own bulk mutations
+ * share, so "what a pipeline write does to the client state" has one answer
+ * whether the operator clicked a funnel or dragged a card.
  *
- * `cohortScoped` is the one caller-supplied knob. When the Browse pipeline
- * scope is ON, membership IS the cohort — un-bookmarking a property must drop
- * it from the list — so the Browse read surfaces have to be invalidated too.
- * When the scope is off, membership changes nothing about which properties
- * match, and refetching the whole cohort (map + every loaded card page + count
- * + stats) on a bookmark click would be pure waste.
+ * Every write is optimistic. A funnel click has to repaint before the round
+ * trip to Frankfurt or the menu closes onto a stale badge; on failure the
+ * rollback fires from `onSettled` (not `onError`, which would silence the app's
+ * global error toast — see pipelineCache's header) and the revalidation
+ * reconciles with the server either way.
  */
 
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 
 import { addPipelineCard, movePipelineCard, removePipelineCard } from '@/lib/api';
-import { invalidateBrowseQueries } from '@/lib/browseInvalidation';
-import { pipelineKeys } from '@/lib/queries';
+import {
+  cachedStage,
+  dropCard,
+  NO_ROLLBACK,
+  placeCard,
+  revalidatePipeline,
+  type PipelineRollback,
+} from '@/lib/pipelineCache';
 
 export interface UsePipelineCardOptions {
   /* True when the caller's cohort is itself filtered by pipeline membership. */
   cohortScoped?: boolean;
-  /* Extra work after any successful write (e.g. the board's optimistic reset). */
-  onWritten?: () => void;
 }
 
 export function usePipelineCard(
   property_id: number,
-  { cohortScoped = false, onWritten }: UsePipelineCardOptions = {},
+  { cohortScoped = false }: UsePipelineCardOptions = {},
 ) {
   const qc = useQueryClient();
 
-  const syncSurfaces = () => {
-    qc.invalidateQueries({ queryKey: pipelineKeys.card(property_id) });
-    qc.invalidateQueries({ queryKey: pipelineKeys.members });
-    qc.invalidateQueries({ queryKey: pipelineKeys.board });
-    if (cohortScoped) invalidateBrowseQueries(qc);
-    onWritten?.();
+  /* Same tail for all three: undo the optimistic patch if the write failed,
+   * then re-read the truth. Typed loosely because each mutation's variables
+   * differ; only the rollback context matters here. */
+  const settle = <V,>(
+    _data: unknown,
+    error: unknown,
+    _vars: V,
+    rollback: PipelineRollback | undefined,
+  ) => {
+    if (error) rollback?.();
+    revalidatePipeline(qc, property_id, { cohortScoped });
   };
 
   const add = useMutation({
     mutationFn: () => addPipelineCard(property_id),
-    onSuccess: syncSurfaces,
+    onMutate: () => {
+      // The entry stage IS the bookmark (rule #22). Unknown until the stage
+      // list has loaded — then the patch is skipped and the funnel fills when
+      // the revalidation lands.
+      const entry = cachedStage(qc, 'entry');
+      return entry ? placeCard(qc, property_id, entry) : NO_ROLLBACK;
+    },
+    onSettled: settle,
   });
+
   const remove = useMutation({
     mutationFn: () => removePipelineCard(property_id),
-    onSuccess: syncSurfaces,
+    onMutate: () => dropCard(qc, property_id),
+    onSettled: settle,
   });
+
   const move = useMutation({
     mutationFn: (stageId: number) => movePipelineCard(property_id, stageId),
-    onSuccess: syncSurfaces,
+    onMutate: (stageId: number) => {
+      const stage = cachedStage(qc, stageId);
+      return stage ? placeCard(qc, property_id, stage) : NO_ROLLBACK;
+    },
+    onSettled: settle,
   });
 
   return {

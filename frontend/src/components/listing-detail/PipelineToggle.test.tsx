@@ -2,8 +2,9 @@
  *
  * Hermetic: mock the two reads (card + stages) and the three writes (add / move
  * / remove). Pins the three behaviours: add when out of pipeline, change stage
- * via the <select> (the new capability), and remove. The real write is verified
- * by api/test_pipeline.py; here we only assert the right wrapper is called.
+ * through the SHARED stage menu (which replaced this surface's own <select>),
+ * and remove only behind that menu's confirm. The real write is verified by
+ * api/test_pipeline.py; here we only assert the right wrapper is called.
  */
 
 import { describe, expect, it, vi, beforeEach } from 'vitest';
@@ -51,6 +52,8 @@ const CARD: PipelineCard = {
   stage_position: 1,
 };
 
+const flush = () => new Promise((r) => setTimeout(r, 0));
+
 function renderToggle() {
   const qc = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
@@ -64,6 +67,7 @@ function renderToggle() {
 
 describe('<PipelineToggle>', () => {
   beforeEach(() => {
+    vi.clearAllMocks();
     vi.mocked(queries.fetchPipelineStages).mockResolvedValue(STAGES);
     vi.mocked(api.addPipelineCard).mockResolvedValue({ property_id: 42, stage_key: 'interested', added: true });
     vi.mocked(api.movePipelineCard).mockResolvedValue({ property_id: 42, stage_id: 3, stage_key: 'offer' });
@@ -78,20 +82,23 @@ describe('<PipelineToggle>', () => {
     await waitFor(() => expect(api.addPipelineCard).toHaveBeenCalledWith(42));
   });
 
-  it('changes the stage via the select (the new capability)', async () => {
+  it('changes the stage through the shared menu', async () => {
     vi.mocked(queries.fetchPropertyPipeline).mockResolvedValue(CARD);
     renderToggle();
-    const select = await screen.findByLabelText('Fáze v pipeline');
-    expect((select as HTMLSelectElement).value).toBe('1');
-    fireEvent.change(select, { target: { value: '3' } });
+    fireEvent.click(await screen.findByRole('button', { name: /V pipeline/ }));
+    fireEvent.click(await screen.findByRole('menuitemradio', { name: /Nabídka/ }));
     await waitFor(() => expect(api.movePipelineCard).toHaveBeenCalledWith(42, 3));
   });
 
-  it('removes the property from the pipeline', async () => {
+  it('removes only after the menu confirm', async () => {
     vi.mocked(queries.fetchPropertyPipeline).mockResolvedValue(CARD);
     renderToggle();
-    const rm = await screen.findByLabelText('Odebrat z pipeline');
-    fireEvent.click(rm);
+    fireEvent.click(await screen.findByRole('button', { name: /V pipeline/ }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Odebrat z pipeline' }));
+    await flush();
+    expect(api.removePipelineCard).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Odebrat' }));
     await waitFor(() => expect(api.removePipelineCard).toHaveBeenCalledWith(42));
   });
 });

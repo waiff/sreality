@@ -433,6 +433,70 @@
 .pipeline-remove:hover { color: #b34730; }  /* brick — destructive hint */
 .pipeline-remove:disabled { cursor: wait; opacity: 0.6; }
 
+/* ---- destructive confirm row ---------------------------------------- */
+/* THE panel's "are you sure" (buildConfirmRow) — one shape for every
+   irreversible action, mirroring the SPA's stage-menu confirm: question,
+   consequence, then Confirm / Cancel. Brick-tinted, never copper: copper is
+   the accent for the thing you WANT to do. */
+
+.confirm-row {
+  margin-top: 0.35rem;
+  padding: 0.4rem 0.5rem;
+  border: 1px solid rgba(179, 71, 48, 0.35);
+  border-radius: 3px;
+  background: rgba(179, 71, 48, 0.06);
+}
+
+.confirm-question {
+  margin: 0;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.confirm-detail {
+  margin: 0.15rem 0 0;
+  font-size: 0.68rem;
+  line-height: 1.35;
+  color: var(--ink-3);
+}
+
+.confirm-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin-top: 0.4rem;
+}
+
+.confirm-yes,
+.confirm-no {
+  padding: 0.15rem 0.45rem;
+  font: inherit;
+  font-size: 0.68rem;
+  border-radius: 3px;
+  cursor: pointer;
+  transition: background-color 120ms ease, color 120ms ease;
+}
+
+.confirm-yes {
+  color: #b34730;
+  background: transparent;
+  border: 1px solid #b34730;
+}
+
+.confirm-yes:hover:not(:disabled) { color: var(--paper); background: #b34730; }
+
+.confirm-no {
+  color: var(--ink-3);
+  background: transparent;
+  border: 1px solid var(--rule);
+}
+
+.confirm-no:hover:not(:disabled) { color: var(--ink); border-color: var(--ink-4); }
+
+.confirm-yes:disabled,
+.confirm-no:disabled { cursor: wait; opacity: 0.6; }
+
 /* ---- monitoring toggle (collections) -------------------------------- */
 /* A SEPARATE, adjacent affordance to the pipeline funnel (rule #22). Mirrors
    the .pipeline-toggle / .pipeline-pill rules by value — same copper accent +

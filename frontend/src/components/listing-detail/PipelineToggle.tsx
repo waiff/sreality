@@ -3,28 +3,27 @@
  *
  * "Bookmark / interested" == the entry stage (rule #22): presence of a card ==
  * the property is in the pipeline. Out of pipeline → a copper funnel "Přidat do
- * pipeline" (the app's one accent, marking THE deal-tracking verb). In pipeline →
- * a pill tinted with the current stage's colour that lets the operator CHANGE the
- * stage (a native <select>, the app's single-choice control — the kanban moves by
- * drag, but a record page has no board to drag onto) and remove the property.
+ * pipeline" (the app's one accent, marking THE deal-tracking verb). In pipeline
+ * → a pill tinted with the current stage's colour that opens the shared
+ * `<PipelineStageMenu>`: change stage, or remove behind the confirm.
  *
- * Stage change goes through the SAME `movePipelineCard` PATCH the kanban uses, so
- * it stamps `entered_stage_at` + logs a `moved` event to `property_pipeline_events`
- * — one audited write path for every surface. Membership reads differ per surface
- * (this reads the single card; Browse cards read a shared members-set), so writes
- * here invalidate the other surfaces' keys to keep them in sync.
+ * That menu is the same component the Browse funnels open. It replaced a native
+ * <select> plus a bare ✕ here — three surfaces had grown three different
+ * answers to "the property is in the pipeline, now what", and only one of them
+ * (the kanban) asked before dropping a card. Writes still go through the shared
+ * `usePipelineCard` hook, so every surface issues the same audited PATCH and
+ * gets the same cache policy.
  */
 
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useCallback, useRef, useState } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import { fetchPipelineStages, fetchPropertyPipeline, pipelineKeys } from '@/lib/queries';
 import PipelineMark from '@/components/PipelineMark';
+import PipelineStageMenu from '@/components/pipeline/PipelineStageMenu';
 import { stageAccent, stageBadge } from '@/lib/pipelineStage';
 import { usePipelineCard } from '@/lib/usePipelineCard';
-import type { PipelineCard } from '@/lib/types';
 
 export default function PipelineToggle({ property_id }: { property_id: number }) {
-  const qc = useQueryClient();
-
   const cardQ = useQuery({
     queryKey: pipelineKeys.card(property_id),
     queryFn: () => fetchPropertyPipeline(property_id),
@@ -39,33 +38,13 @@ export default function PipelineToggle({ property_id }: { property_id: number })
   const stages = stagesQ.data ?? [];
   const inPipeline = card != null;
 
-  // Writes — and the cache invalidation every other surface depends on — live
-  // in the shared hook. A listing page is never itself a pipeline-scoped
-  // cohort, so it has no reason to invalidate the Browse read surfaces.
-  const { add, remove, move, pending } = usePipelineCard(property_id);
-
-  /* Optimistic stage change: recolour the pill + reselect instantly, like the
-   * kanban board. It stays here rather than in the hook because it patches THIS
-   * surface's single-card query, which no list surface reads. */
-  const moveTo = (stageId: number) => {
-    const prev = qc.getQueryData<PipelineCard | null>(pipelineKeys.card(property_id));
-    const s = stages.find((st) => st.id === stageId);
-    if (prev && s) {
-      qc.setQueryData<PipelineCard | null>(pipelineKeys.card(property_id), {
-        ...prev,
-        stage_id: s.id,
-        stage_key: s.key,
-        stage_label: s.label,
-        stage_color: s.color,
-        stage_code: s.code,
-        is_terminal: s.is_terminal,
-        stage_position: s.position,
-      });
-    }
-    move.mutate(stageId, {
-      onError: () => qc.setQueryData(pipelineKeys.card(property_id), prev ?? null),
-    });
-  };
+  // Writes — and the cache policy every other surface depends on — live in the
+  // shared hook. A listing page is never itself a pipeline-scoped cohort, so it
+  // has no reason to invalidate the Browse read surfaces.
+  const { add, pending } = usePipelineCard(property_id);
+  const pillRef = useRef<HTMLButtonElement>(null);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const closeMenu = useCallback(() => setMenuOpen(false), []);
 
   if (cardQ.isLoading) {
     return (
@@ -98,36 +77,33 @@ export default function PipelineToggle({ property_id }: { property_id: number })
   const badge = stageBadge(look, stages);
 
   return (
-    <div
-      className="inline-flex items-center gap-1 rounded-[var(--radius-sm)] border py-0.5 pl-2.5 pr-1 text-[0.8rem]"
-      style={{ background: bg, color: fg, borderColor: fg, opacity: pending ? 0.6 : undefined }}
-    >
-      <PipelineMark filled badge={badge} iconClassName="h-4 w-4" badgeClassName="text-[0.7rem]" />
-      <select
-        value={card.stage_id}
-        onChange={(e) => moveTo(Number(e.target.value))}
-        disabled={pending}
-        aria-label="Fáze v pipeline"
-        title="Změnit fázi"
-        className="cursor-pointer border-0 bg-transparent py-0.5 pr-1 font-medium focus:outline-none disabled:cursor-default"
-        style={{ color: fg }}
-      >
-        {stages.map((s) => (
-          <option key={s.id} value={s.id} style={{ color: 'var(--color-ink)' }}>
-            {s.label}
-          </option>
-        ))}
-      </select>
+    <>
       <button
+        ref={pillRef}
         type="button"
-        onClick={() => remove.mutate()}
+        onClick={() => setMenuOpen((v) => !v)}
         disabled={pending}
-        aria-label="Odebrat z pipeline"
-        title="Odebrat z pipeline"
-        className="shrink-0 rounded-[var(--radius-xs)] px-1 leading-none hover:text-[var(--color-brick)] focus-visible:outline focus-visible:outline-1 focus-visible:outline-offset-1 focus-visible:outline-current"
+        aria-haspopup="menu"
+        aria-expanded={menuOpen}
+        aria-label={`V pipeline (${card.stage_label}) — změnit fázi`}
+        title="Změnit fázi nebo odebrat z pipeline"
+        className="inline-flex items-center gap-1.5 rounded-[var(--radius-sm)] border py-1.5 pl-2.5 pr-2 text-[0.8rem] transition-opacity disabled:opacity-60"
+        style={{ background: bg, color: fg, borderColor: fg }}
       >
-        ✕
+        <PipelineMark filled badge={badge} iconClassName="h-4 w-4" badgeClassName="text-[0.7rem]" />
+        <span className="font-medium">{card.stage_label}</span>
+        <span className="text-[0.6rem] leading-none opacity-70" aria-hidden>
+          ▾
+        </span>
       </button>
-    </div>
+      {menuOpen && (
+        <PipelineStageMenu
+          property_id={property_id}
+          stageId={card.stage_id}
+          anchorRef={pillRef}
+          onClose={closeMenu}
+        />
+      )}
+    </>
   );
 }
