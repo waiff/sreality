@@ -42,8 +42,10 @@ class _Listing:
         self.last_seen_at = last_seen_at
 
     def record(self) -> tuple[Any, ...]:
+        # The batch queries' column order, verbatim: identity, payload, sighting, the two
+        # geom ordinates, inventory membership, then the class-B legacy columns.
         return (self.id, "sreality", f"n{self.id}", dict(SREALITY_POST_CUTOVER),
-                self.last_seen_at, None, None, False)
+                self.last_seen_at, None, None, False, None)
 
 
 class _Cursor:

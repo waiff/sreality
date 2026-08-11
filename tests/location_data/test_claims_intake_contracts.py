@@ -126,11 +126,64 @@ def test_a_legacy_entry_never_burns_a_permanent_html_extractor_id():
     ids of their own (the pattern idnes set with `id.det.legacy_pin`)."""
     legacy_ids = {e.entry_id for c in ALL.values() for e in c.entries
                   if e.extraction_method == "legacy_column"}
-    for reserved in ("bzs.det.psc", "bzs.det.link_pin", "id.det.pin", "sr.det.pin"):
+    for reserved in ("bzs.det.psc", "bzs.det.link_pin", "id.det.pin", "sr.det.pin",
+                     # 02 §2.2.6 fixes both of these on remax HTML surfaces: the detail
+                     # header parse and the index card's data-display-address. The W1
+                     # raw_json mirror of the same string is a different act.
+                     "rx.det.header_address", "rx.idx.display_address"):
         assert reserved not in legacy_ids, (
             f"{reserved} is 02 §2.2.3's permanent id for an HTML surface; the legacy "
             f"entry must mint its own")
-    assert {"bzs.det.legacy_psc", "bzs.det.legacy_link_pin", "id.det.legacy_pin"} <= legacy_ids
+    assert {"bzs.det.legacy_psc", "bzs.det.legacy_link_pin", "id.det.legacy_pin",
+            "rx.det.legacy_display_address"} <= legacy_ids
+    # The W2 entries whose ids the legacy mirrors deliberately did not spend are still
+    # declared — a mirror that quietly replaced its HTML counterpart would be a regression.
+    html_ids = {e.entry_id for c in ALL.values() for e in c.entries
+                if e.surface == "html_selector"}
+    assert {"rx.det.header_address", "rx.idx.display_address"} <= html_ids
+
+
+def test_the_class_b_legacy_columns_are_capped_and_flagged():
+    """06 §6.1.1: a class-B column becomes a claim with `extraction_method='legacy_column'`,
+    `licence_class='portal'`, blur written explicitly and confidence capped at `medium`.
+    The cap is CONTRACT data — `legacy_text_column` stamps whatever the entry declares —
+    so a future entry that forgets it would silently mint a full-confidence claim out of a
+    column with no provenance at all."""
+    entries = [(c.source, e) for c in ALL.values() for e in c.entries
+               if e.reader == "legacy_text_column"]
+    assert {source for source, _ in entries} == {"remax", "ceskereality", "realitymix"}
+    for source, entry in entries:
+        assert entry.locator["legacy_source_column"].startswith("listings."), entry.entry_id
+        assert entry.extraction_method == "legacy_column", entry.entry_id
+        assert entry.surface == "legacy_column", entry.entry_id
+        assert entry.page_kind == "none", entry.entry_id
+        assert entry.default_licence_class == "portal", entry.entry_id
+        assert entry.default_blur_evidence == "none", entry.entry_id
+        assert entry.locator["claim_confidence"] == "medium", entry.entry_id
+        assert entry.locator["write_path_unknown"] is True, entry.entry_id
+        assert entry.precision_map["prior"]["match_confidence"] == "medium", entry.entry_id
+
+
+def test_the_three_bumped_contracts_added_entries_and_kept_their_v1_ones():
+    """02 §2.1.8: entries are immutable per `contract_version`, so closing the 2026-08-11
+    coverage gap is a VERSION BUMP that appends. The v1 ids must all still be there — an
+    entry that disappeared would orphan every claim already stamped with it."""
+    assert {s: c.version for s, c in ALL.items()} == {
+        "remax": 2, "ceskereality": 2, "realitymix": 2,
+        "sreality": 1, "bezrealitky": 1, "bazos": 1, "idnes": 1, "mmreality": 1,
+        "maxima": 1,
+    }
+    for source, new_ids, v1_ids in (
+        ("remax", {"rx.det.legacy_display_address", "rx.det.legacy_locality"},
+         {"rx.det.raw_address_conflict", "rx.det.legacy_pin"}),
+        ("ceskereality", {"cr.det.legacy_locality"},
+         {"cr.det.locality_text", "cr.det.legacy_pin", "cr.det.coords_stamp"}),
+        ("realitymix", {"rm.det.legacy_locality"},
+         {"rm.det.locality_text", "rm.det.legacy_pin", "rm.det.coords_block"}),
+    ):
+        ids = {e.entry_id for e in ALL[source].entries}
+        assert new_ids <= ids, source
+        assert v1_ids <= ids, source
 
 
 def test_coordinate_entries_carry_a_cap_and_a_licence_class():
@@ -192,6 +245,16 @@ def test_the_forbidden_licence_class_and_detected_blur_are_rejected():
         _entry(licence_class="ephemeral_display_only")
     with pytest.raises(ContractError, match="collision detector"):
         _entry(blur_evidence="detected")
+
+
+def test_a_non_enum_confidence_is_rejected_on_both_of_its_spellings():
+    """`claim_confidence` lands in a typed `match_confidence` column, so a typo caught here
+    is a CI failure instead of a mid-batch INSERT error that takes a whole run down."""
+    with pytest.raises(ContractError, match="prior.match_confidence"):
+        _entry(prior={"match_confidence": "certain"})
+    with pytest.raises(ContractError, match="locator.claim_confidence"):
+        _entry(locator={"reader": "scalar", "json_pointer": "/x",
+                        "claim_confidence": "very-high"})
 
 
 def test_a_wrong_prefix_is_rejected():

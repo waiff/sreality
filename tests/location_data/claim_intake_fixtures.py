@@ -58,7 +58,10 @@ def listing(
     lat: float | None = None,
     lon: float | None = None,
     in_mapy_inventory: bool = False,
+    locality: str | None = None,
 ) -> ListingRow:
+    """`locality` is the class-B `listings.locality` column (06 §6.1.3), which the batch
+    query selects alongside `raw_json` — NOT a payload key."""
     return ListingRow(
         listing_id=listing_id,
         source=source,
@@ -68,6 +71,7 @@ def listing(
         lon=lon,
         observed_at=OBSERVED_AT,
         in_mapy_inventory=in_mapy_inventory,
+        legacy_columns={"listings.locality": locality},
     )
 
 
@@ -308,4 +312,51 @@ REMAX: dict[str, Any] = {
     "address": "V Horní Stromce, Praha 3, Vinohrady, okres Hlavní město Praha",
     "remax_ref": "445781",
     "params": {"umisteni objektu": "Centrum obce"},
+}
+
+
+# ---------------------------------------- the zero-claim keysets measured on 2026-08-11
+#
+# Sampled from ACTIVE production rows that carried NO location claim under contract v1.
+# Each one is the reason a contract version was bumped, so each is a fixture.
+
+# Post-W0-0d remax: the subject's own header moved to `display_address` and the carousel
+# value to `carousel_address`; the v1-readable `address` key is simply gone.
+REMAX_DISPLAY_ADDRESS: dict[str, Any] = {
+    "id": "446190",
+    "title": "Prodej bytu 3+kk 78 m², Praha 3 - Žižkov",
+    "price_text": "9 450 000 Kč",
+    "display_address": "ulice Roháčova, Praha 3 - Žižkov",
+    "carousel_address": "V Horní Stromce, Praha 3, Vinohrady, okres Hlavní město Praha",
+    "remax_ref": "446190",
+    "params": {"umisteni objektu": "Centrum obce"},
+}
+
+# The mixed row: BOTH keys present. The banned one must stay a conflict signal even when
+# the subject's own line is right there beside it.
+REMAX_BOTH_ADDRESS_KEYS: dict[str, Any] = {
+    "id": "445781",
+    "title": "Prodej bytu 2+kk 54 m², Praha 3 - Žižkov",
+    "display_address": "ulice Roháčova, Praha 3 - Žižkov",
+    "address": "V Horní Stromce, Praha 3, Vinohrady, okres Hlavní město Praha",
+    "remax_ref": "445781",
+    "params": {"umisteni objektu": "Centrum obce"},
+}
+
+# ceskereality's silent-parse signature: the key is PRESENT and null (a keyset sample
+# cannot tell the two apart), sometimes beside the address-point backfill's marker.
+CESKEREALITY_NULL_LOCALITY: dict[str, Any] = {
+    "id": "3180041",
+    "title": "Prodej bytu 2+1 62 m²",
+    "locality_text": None,
+    "coord_street_resolved": True,
+    "coords": {"source": "geocode", "confidence": "medium"},
+    "params": {},
+}
+
+REALITYMIX_NULL_LOCALITY: dict[str, Any] = {
+    "id": "8590773",
+    "locality_text": None,
+    "coords": {"source": "geocode", "confidence": "medium",
+               "matched_type": "regional.street"},
 }

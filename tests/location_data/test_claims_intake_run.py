@@ -7,6 +7,8 @@ keyset/watermark contract of the two batch queries.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
 
 from location_data.claims_intake import (
@@ -26,6 +28,7 @@ from location_data.claims_intake import (
     EnrichmentTask,
     IntakeRefused,
     IntakeResult,
+    _row_from_record,
     assert_inventory_ready,
     dedupe_absence_rows,
     extract_listing,
@@ -203,6 +206,30 @@ def test_batch_queries_are_keyset_and_bounded():
     # and nothing is ever deleted (CLAUDE.md rule 3).
     assert "is_active" not in full and "is_active" not in incremental
     assert MIN_BATCH_SIZE == 10_000 and MAX_BATCH_SIZE == 30_000
+
+
+def test_the_batch_queries_select_the_legacy_columns_the_readers_consume():
+    """06 §6.1.3's class-B columns are a second substrate beside `raw_json`, so they ride
+    on the SAME keyset query — one extra SELECT item, never a per-row lookup. The record
+    unpack is positional, so a column added to one query and not to `_row_from_record` (or
+    to only one of the two queries) has to fail here rather than mid-run."""
+    for sql in (_LISTINGS_FULL_SQL, _LISTINGS_INCREMENTAL_SQL):
+        assert "l.locality" in " ".join(sql.split())
+
+    row = _row_from_record((7, "remax", "445781", {"id": "445781"},
+                            datetime(2026, 8, 11, 6, 0, tzinfo=UTC), None, None,
+                            False, "Praha 3 - Žižkov"))
+    assert row.legacy_columns == {"listings.locality": "Praha 3 - Žižkov"}
+    assert row.lat is None and row.in_mapy_inventory is False
+
+
+def test_the_claim_write_carries_the_class_b_confidence_as_a_typed_enum():
+    """`claim_confidence` is a `match_confidence` column (migration 382), and the resolver's
+    survivorship reads it. Binding it as bare text would fail the INSERT; leaving it out of
+    the recordset would silently drop 06 §6.1.1's cap."""
+    one = " ".join(_CLAIM_WRITE_SQL.split())
+    assert "claim_confidence text" in one
+    assert "d.claim_confidence::match_confidence" in one
 
 
 def test_one_listing_can_produce_two_absences_with_the_same_unique_key():

@@ -195,6 +195,25 @@ Decisions worth carrying forward:
   pattern `id.det.legacy_pin` set on idnes), so the two provenances stay distinguishable
   in `location_claims.extractor_id` when W2 lands.
 
+**Coverage repair, contracts v2 (2026-08-11).** W1's gate is "≥99% of ACTIVE listings carry
+≥1 claim"; production measured **97.66%**, with realitymix (3,539), ceskereality (3,418) and
+remax (1,763) owning 8,720 of the ~9,000 zero-claim rows. Three contract **version bumps**
+(entries are immutable — 02 §2.1.8), no v1 entry edited:
+
+- `rx.det.legacy_display_address` — W0 0d moved remax's subject header into
+  `raw_json.display_address` (carousel value → `carousel_address`), and v1 only read the
+  banned `/address`, so every re-drained row went from one conflict signal to nothing. The
+  banned key stays `subject_scoped=false`.
+- `rx./cr./rm..det.legacy_locality` — 06 §6.1.3 class B via a new `legacy_text_column`
+  reader: `listings.locality` rides on the same keyset batch query as `raw_json`, capped at
+  `claim_confidence='medium'` and flagged `legacy_write_path_unknown` **from the contract**.
+  It reaches the rows whose payload carries `locality_text` PRESENT and NULL (a keyset
+  sample cannot tell those apart) — ceskereality's silent-parse cohort and realitymix's
+  backfill-synthesised one, where the deviation from `rm.det.locality_text`'s class-D note
+  is recorded in the entry itself rather than hidden.
+
+Expected: ~99.9% coverage after the next projection + intake re-run (both post-merge).
+
 Open: the per-portal frozen labelled samples of §6.4.0, which gate whether each contract
 resolves or stays in shadow. Closed in this round: the fingerprint is now migration 386's
 `location_claim_fingerprint()`, and `location_data` is in `tests/sql_corpus.RUNTIME_DIRS`
