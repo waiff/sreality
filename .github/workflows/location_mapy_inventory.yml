@@ -52,16 +52,23 @@ on:
         type: boolean
 
 concurrency:
-  # Its own group: two concurrent inventory runs would fight over the same keyset
-  # high-water mark and each re-scan the other's batches. Never cancel a run
-  # in-flight — a cancelled run keeps its progress, but a cancelled batch is
-  # rolled back whole.
-  group: location-mapy-inventory
+  # OUTER, cross-lane: shared with the registry load, the claim intake and the resolve
+  # drain so at most ONE heavy location lane runs at a time (2026-08-10 incident — four
+  # concurrent lanes against the shared production instance). See
+  # location_registry_load.yml for the full note.
+  group: location-batch
   cancel-in-progress: false
 
 jobs:
   inventory:
     runs-on: ubuntu-latest
+    concurrency:
+      # INNER, per-lane: two concurrent inventory runs would fight over the same keyset
+      # high-water mark and each re-scan the other's batches. Never cancel a run
+      # in-flight — a cancelled run keeps its progress, but a cancelled batch is
+      # rolled back whole.
+      group: location-mapy-inventory
+      cancel-in-progress: false
     timeout-minutes: 120
     permissions:
       contents: read

@@ -127,14 +127,38 @@ SELECT ap.kod_adm, ap.obec_unit_id, ap.obec_kod, ap.psc,
  WHERE ap.kod_adm = %s AND ap.valid_to IS NULL
 """
 
-_ADDRESS_POINTS_BY_NUMBER_SQL = """
+# The obec is addressed by UNIT ID, not by `obec_kod`. Both columns exist on every row and
+# are 1:1 (6,256 distinct each, no NULLs, no retired rows), but only `obec_unit_id` is
+# indexed: `ruian_ap_obec_hn (obec_unit_id, cislo_domovni)` is exactly this lookup's index
+# and `obec_kod` has none at all. Measured on the live 3,020,222-row mirror, house number
+# only, no street: `obec_kod` planned a parallel scan of the whole PK — 21,494 ms,
+# 2,954,453 buffers, 1.5 M rows discarded per worker. The form below touches 424 buffers
+# (6,969x fewer) for the same answer; wall clock was 25-185 ms across runs, all of it page
+# reads, because buffer count is the honest number on an instance under IO pressure.
+# `u.level = %s::ruian_level` casts the PARAMETER (not the column), so
+# `ruian_admin_units_code (level, code)` keeps both of its columns — `u.level::text = %s`
+# would cast the column and throw the leading one away.
+#
+# `IN (...)` over EVERY unit row carrying that code, not `= (SELECT ... valid_to IS NULL
+# LIMIT 1)`: `ruian_admin_units` is SCD-2, so a code can have a closed row and an open one,
+# and an address point still points at the row that was current when it was loaded.
+# Restricting the hop to the open row would silently return nothing for exactly those rows
+# — a narrower answer than `obec_kod = %s` gave. The IN form is the same index scan
+# (verified: `Index Cond: (level = 'obec' AND code = ...)` then
+# `(obec_unit_id = u.id AND cislo_domovni = ...)`).
+_OBEC_UNIT_ID_SUBQUERY = """
+    (SELECT u.id FROM ruian_admin_units u
+      WHERE u.level = 'obec'::ruian_level AND u.code = %s)
+"""
+
+_ADDRESS_POINTS_BY_NUMBER_SQL = f"""
 SELECT ap.kod_adm, ap.obec_unit_id, ap.obec_kod, ap.psc,
        ST_Y(ap.geom), ST_X(ap.geom), ap.street_id, ap.ulice_kod, s.name_norm,
        ap.cislo_domovni, ap.cislo_orientacni, ap.znak_orientacniho,
        ap.stavebni_objekt_code, ap.cast_obce_unit_id, ap.cast_obce_kod, ap.momc_unit_id
   FROM ruian_address_points ap
   LEFT JOIN ruian_streets s ON s.id = ap.street_id
- WHERE ap.obec_kod = %s
+ WHERE ap.obec_unit_id IN {_OBEC_UNIT_ID_SUBQUERY.strip()}
    AND ap.valid_to IS NULL
    AND (%s::text IS NULL OR s.name_norm = %s::text)
    AND (%s::integer IS NULL OR ap.cislo_domovni = %s::integer)
@@ -177,7 +201,7 @@ SELECT u.id, u.level::text, u.code, u.name, u.name_norm, u.path::text, u.display
   FROM ruian_admin_units u
   LEFT JOIN ruian_admin_unit_geometries g
          ON g.unit_id = u.id AND g.registry_version_id = %s AND g.purpose = 'authoritative'
- WHERE u.level::text = %s AND u.code = %s AND u.valid_to IS NULL
+ WHERE u.level = %s::ruian_level AND u.code = %s AND u.valid_to IS NULL
  ORDER BY u.valid_from DESC
  LIMIT 1
 """
@@ -229,7 +253,19 @@ SELECT p.id, p.code, p.katuz_unit_id, p.parcel_label_norm,
  LIMIT 20
 """
 
-_CONTAINING_OBEC_SQL = """
+# `purpose IN ('pip','authoritative')` cannot use `ruian_aug_pip_gist (geom) WHERE purpose
+# = 'pip'` — an IN-list does not imply the partial index's predicate — so the planner fell
+# back to the unpartitioned `ruian_aug_geom_gist` and ran ST_Covers against RAW obec
+# polygons: 194 ms and 1,225 buffers on the live mirror, nearly all of it detoasting
+# geometry the pip pieces exist precisely to avoid.
+#
+# Split into two branches under one LIMIT instead. `Limit -> Append` stops at the first
+# row, so the authoritative branch is `never executed` whenever a pip piece covers the
+# point — which is the same preference `ORDER BY (purpose = 'pip') DESC LIMIT 1` expressed,
+# just without paying for the losing side first. Measured: 19 ms, 25 buffers. The
+# authoritative branch stays because boundaries load per unit and a partially loaded pack
+# has units with no pip rows yet.
+_CONTAINING_OBEC_COLUMNS = """
 SELECT u.id, u.level::text, u.code, u.name, u.name_norm, u.path::text, u.display_path,
        u.parent_id,
        CASE WHEN u.definition_point IS NULL THEN NULL ELSE ST_Y(u.definition_point) END,
@@ -238,12 +274,18 @@ SELECT u.id, u.level::text, u.code, u.name, u.name_norm, u.path::text, u.display
   FROM ruian_admin_unit_geometries g
   JOIN ruian_admin_units u ON u.id = g.unit_id
  WHERE g.registry_version_id = %s
-   AND g.purpose IN ('pip', 'authoritative')
+   AND g.purpose = '{purpose}'
    AND u.level = 'obec'
    AND ST_Covers(g.geom, ST_SetSRID(ST_MakePoint(%s, %s), 4326))
- ORDER BY (g.purpose = 'pip') DESC
  LIMIT 1
 """
+
+_CONTAINING_OBEC_SQL = (
+    "(" + _CONTAINING_OBEC_COLUMNS.format(purpose="pip") + ")\n"
+    "UNION ALL\n"
+    "(" + _CONTAINING_OBEC_COLUMNS.format(purpose="authoritative") + ")\n"
+    "LIMIT 1\n"
+)
 
 _NEAREST_OBEC_SQL = """
 SELECT u.id, u.level::text, u.code, u.name, u.name_norm, u.path::text, u.display_path,
@@ -285,10 +327,18 @@ SELECT u.id, u.level::text, u.code, u.name, u.name_norm, u.path::text, u.display
  LIMIT 1
 """
 
+# Same shape, same reason: `cast_obce_kod` is unindexed while `ruian_ap_cast_obce
+# (cast_obce_unit_id) WHERE cast_obce_unit_id IS NOT NULL` is right there. Measured live:
+# 5,059 ms / 79,905 buffers as a parallel seq scan of all 3 M rows, versus 35 ms / 167
+# buffers through the index. The remaining cost is the ST_Collect over the part's own
+# points, which is the work the question actually asks for.
 _CAST_OBCE_EXTENT_SQL = """
 SELECT ST_MaxDistance(ST_Collect(ap.geom), ST_Centroid(ST_Collect(ap.geom))) * 111320.0
   FROM ruian_address_points ap
- WHERE ap.cast_obce_kod = %s AND ap.valid_to IS NULL AND ap.geom IS NOT NULL
+ WHERE ap.cast_obce_unit_id IN (
+         SELECT u.id FROM ruian_admin_units u
+          WHERE u.level = 'cast_obce'::ruian_level AND u.code = %s)
+   AND ap.valid_to IS NULL AND ap.geom IS NOT NULL
 """
 
 _IN_CZ_SQL = """
@@ -530,7 +580,10 @@ class SqlRegistryView:
         ]
 
     def containing_obec(self, lat: float, lon: float) -> AdminUnit | None:
-        rows = self._rows(_CONTAINING_OBEC_SQL, (self._version, lon, lat))
+        # Two branches, so the (version, lon, lat) triple is bound twice.
+        rows = self._rows(
+            _CONTAINING_OBEC_SQL, (self._version, lon, lat, self._version, lon, lat)
+        )
         return _admin_unit(rows[0]) if rows else None
 
     def nearest_obec_within(

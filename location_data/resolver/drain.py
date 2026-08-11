@@ -61,15 +61,18 @@ CLI:  python -m location_data.resolver.drain [--max-seconds N] [--batch-size N]
 from __future__ import annotations
 
 import argparse
+import contextlib
 import logging
 import os
 import sys
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
 import psycopg
 
+from location_data import loader_db
 from location_data.resolver import core, lease, normalize, projection, reconciler, resolve_db
 from location_data.resolver.types import Claim, ResolverContext
 from location_data.resolver.version import (
@@ -124,7 +127,51 @@ SELECT listing_id, source, ST_Y(geom), ST_X(geom), granularity::text, position_s
  ORDER BY listing_id
 """
 
-_BATCH_GUC = ("SET LOCAL statement_timeout = '30s'", "SET LOCAL lock_timeout = '5s'")
+# Statement budgets, all applied with `SET LOCAL` INSIDE a transaction (outside one, on
+# this codebase's autocommit connections, `SET LOCAL` is a silent no-op).
+#
+# The BATCH budget already existed and did its job — the 2026-08-10 stall (run 31439340945,
+# 30 minutes of silence after `RESOLVE ok listing_id=93951`) was not an unguarded statement
+# inside the batch. What WAS unguarded is everything the drain runs OUTSIDE a batch
+# transaction: the per-batch `_QUEUE_HEALTH_SQL` count, the run-start constant loads, and
+# the full-sweep INSERT. Those ran on the pooler default (no ceiling), so any one of them
+# could wait indefinitely under the IO pressure four concurrent location lanes were putting
+# on the instance. Each now runs in its own bounded transaction.
+#
+# 30 s stays the batch default rather than the loosen-to-90 s the incident write-up
+# floated: a per-listing statement that has not answered in 30 s has already blown the
+# ~1.2 s/listing budget by 25x, and a QueryCanceled here is caught by the per-listing
+# SAVEPOINT and costs one row, not the batch. Overridable per environment for the one case
+# the default cannot serve — a deliberately slow backfill on a quiet instance.
+BATCH_TIMEOUT_ENV = "LOCATION_RESOLVE_BATCH_TIMEOUT_S"
+DEFAULT_BATCH_TIMEOUT_S = 30
+# The sweep is ONE `INSERT ... SELECT` over the whole claims corpus anti-joined against the
+# projection; minutes is normal for it and only for it.
+SWEEP_TIMEOUT_ENV = "LOCATION_RESOLVE_SWEEP_TIMEOUT_S"
+DEFAULT_SWEEP_TIMEOUT_S = 900
+LOCK_TIMEOUT_S = 5
+
+
+def _batch_guc(seconds: int) -> tuple[str, ...]:
+    return (
+        f"SET LOCAL statement_timeout = '{int(seconds)}s'",
+        f"SET LOCAL lock_timeout = '{LOCK_TIMEOUT_S}s'",
+    )
+
+
+def _batch_timeout_s() -> int:
+    return loader_db.env_timeout_s(BATCH_TIMEOUT_ENV, DEFAULT_BATCH_TIMEOUT_S)
+
+
+@contextlib.contextmanager
+def _bounded(conn: psycopg.Connection, seconds: int) -> Iterator[psycopg.Cursor]:
+    """One bounded transaction for work that would otherwise run bare on autocommit."""
+    with conn.transaction():
+        with conn.cursor() as cur:
+            for statement in _batch_guc(seconds):
+                cur.execute(statement)
+            yield cur
+
 
 # `location_resolve_sweep` — the daily reconcile backstop for lost enqueues. Everything
 # whose projection is missing or was built at a version tuple that is no longer current.
@@ -186,23 +233,35 @@ def run(
     dry_run: bool = False,
     only_listing_id: int | None = None,
 ) -> DrainStats:
+    batch_timeout_s = _batch_timeout_s()
     # Corpus constants: read ONCE for the run, never per listing. Everything here is either
     # pinned by version (registry, epoch) or a small operator-curated table, so a re-read per
-    # listing would buy nothing and cost a round trip each.
-    registry_version_id, registry_label = resolve_db.current_registry_version(conn)
-    epoch_id = resolve_db.current_epoch(conn)
+    # listing would buy nothing and cost a round trip each. Bounded as one transaction —
+    # these are the run's FIRST statements, and a run that hangs here never logs anything at
+    # all, which is the least diagnosable failure the lane has.
+    with _bounded(conn, batch_timeout_s):
+        registry_version_id, registry_label = resolve_db.current_registry_version(conn)
+        epoch_id = resolve_db.current_epoch(conn)
     if epoch_id is None:
         raise RuntimeError(
             "no pin_cluster_epochs row: mint one with `python -m location_data.resolver."
             "epoch_job` first — collision_epoch_id is NOT NULL and part of the identity"
         )
     cache = resolve_db.RunCache()
-    ctx_base = _context(conn, registry_version_id, epoch_id, policy_version, cache)
+    with _bounded(conn, batch_timeout_s):
+        ctx_base = _context(conn, registry_version_id, epoch_id, policy_version, cache)
     stats = DrainStats()
     started = time.monotonic()
+    LOG.info(
+        "DRAIN start batch_size=%d max_seconds=%d statement_timeout=%ds registry_version=%s",
+        batch_size, max_seconds, batch_timeout_s, registry_label,
+    )
 
     if only_listing_id is not None:
         with conn.transaction():
+            with conn.cursor() as cur:
+                for statement in _batch_guc(batch_timeout_s):
+                    cur.execute(statement)
             _resolve_one(
                 conn, only_listing_id, ctx_base, registry_version_id, registry_label,
                 epoch_id, policy_version, _prefetch(conn, [only_listing_id]), stats,
@@ -213,13 +272,13 @@ def run(
         return stats
 
     while time.monotonic() - started < max_seconds:
-        depth, oldest = _queue_health(conn)
+        depth, oldest = _queue_health(conn, batch_timeout_s)
         LOG.info("QUEUE depth=%d oldest_age_s=%.0f", depth, oldest)
         batch_started = time.monotonic()
         batch_before = (stats.resolved, stats.failed)
         with conn.transaction():
             with conn.cursor() as cur:
-                for statement in _BATCH_GUC:
+                for statement in _batch_guc(batch_timeout_s):
                     cur.execute(statement)
                 cur.execute(_CLAIM_SLICE_SQL, (batch_size,))
                 rows = cur.fetchall()
@@ -436,8 +495,11 @@ def _rebuild_property(conn: psycopg.Connection, property_id: int, ctx: ResolverC
         resolve_db.upsert_property_projection(conn, row)
 
 
-def _queue_health(conn: psycopg.Connection) -> tuple[int, float]:
-    with conn.cursor() as cur:
+def _queue_health(conn: psycopg.Connection, timeout_s: int) -> tuple[int, float]:
+    """Bounded: this runs BETWEEN batches, i.e. on the autocommit connection where the
+    batch transaction's `SET LOCAL` no longer applies. It is an observability read — the
+    drain must never be unable to start a batch because counting the queue hung."""
+    with _bounded(conn, timeout_s) as cur:
         cur.execute(_QUEUE_HEALTH_SQL)
         depth, oldest = cur.fetchone() or (0, 0)
     return int(depth), float(oldest)
@@ -446,12 +508,18 @@ def _queue_health(conn: psycopg.Connection) -> tuple[int, float]:
 def enqueue_full_sweep(conn: psycopg.Connection, *, policy_version: str) -> int:
     """`location_resolve_sweep`: the backstop for lost enqueues. The incremental lane stays
     the primary path — this only re-enqueues what a version bump or a dropped enqueue left
-    behind."""
-    registry_version_id, _ = resolve_db.current_registry_version(conn)
-    with conn.cursor() as cur:
+    behind.
+
+    Its own (much larger) budget: one corpus-wide anti-join is minutes of honest work, so
+    the batch ceiling would fail it every time — but "minutes" is not "forever", and this
+    used to run with no ceiling at all.
+    """
+    seconds = loader_db.env_timeout_s(SWEEP_TIMEOUT_ENV, DEFAULT_SWEEP_TIMEOUT_S)
+    with _bounded(conn, seconds) as cur:
+        registry_version_id, _ = resolve_db.current_registry_version(conn)
         cur.execute(_FULL_SWEEP_SQL, (RESOLVER_VERSION, policy_version, registry_version_id))
         enqueued = cur.rowcount
-    LOG.info("SWEEP enqueued=%d", enqueued)
+    LOG.info("SWEEP enqueued=%d timeout=%ds", enqueued, seconds)
     return enqueued
 
 

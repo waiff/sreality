@@ -2616,7 +2616,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "secrets": [
       "SUPABASE_DB_URL"
     ],
-    "concurrencyGroup": "location-claims",
+    "concurrencyGroup": "location-batch",
     "cancelInProgress": false,
     "timeoutMinutes": 55,
     "permissions": null,
@@ -2686,7 +2686,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "secrets": [
       "SUPABASE_DB_URL"
     ],
-    "concurrencyGroup": "location-mapy-inventory",
+    "concurrencyGroup": "location-batch",
     "cancelInProgress": false,
     "timeoutMinutes": 120,
     "permissions": "contents: read",
@@ -2776,7 +2776,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
       "SUPABASE_DB_SESSION_URL",
       "SUPABASE_DB_URL"
     ],
-    "concurrencyGroup": "location-registry",
+    "concurrencyGroup": "location-batch",
     "cancelInProgress": false,
     "timeoutMinutes": 180,
     "permissions": "contents: read",
@@ -2848,7 +2848,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
       "SUPABASE_DB_SESSION_URL",
       "SUPABASE_DB_URL"
     ],
-    "concurrencyGroup": "location-resolve",
+    "concurrencyGroup": "location-batch",
     "cancelInProgress": false,
     "timeoutMinutes": 60,
     "permissions": "contents: read",

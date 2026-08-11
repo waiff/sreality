@@ -73,6 +73,11 @@ LEVEL_ORDER: tuple[str, ...] = (
 MAX_DISCREPANCY_ROWS = 1000
 MAX_RETIRE_FRACTION = 0.005
 
+# The pointer swap's statement ceiling. See `publish` for why this phase is the one that
+# gets one and the bulk phases do not.
+PUBLISH_TIMEOUT_ENV = "LOCATION_REGISTRY_PUBLISH_TIMEOUT_S"
+DEFAULT_PUBLISH_TIMEOUT_S = 60
+
 _STAGE_DDL = """
 CREATE UNLOGGED TABLE IF NOT EXISTS {adr} (
   kod_adm bigint, obec_kod bigint, obec_nazev text, momc_kod bigint, momc_nazev text,
@@ -982,8 +987,19 @@ def unloadable_rows(conn: psycopg.Connection, stage: Staging) -> int:
 
 
 def publish(conn: psycopg.Connection, version_id: int) -> None:
-    """The only step that changes what the platform reads. Short, transactional, last."""
-    with conn.cursor() as cur, conn.transaction():
+    """The only step that changes what the platform reads. Short, transactional, last.
+
+    BOUNDED, unlike everything above it. The loader's session runs `statement_timeout = 0`
+    because a 3 M-row COPY needs it (`loader_db._SESSION_GUC`), and every bulk phase —
+    `copy_address_points`, `copy_strukt`, `index_staging`, `build_unit_rows`,
+    `load_address_points`, `upsert_streets`'s COPY, and the per-level set operations in
+    `upsert_units` / `upsert_relations`, which are whole-level rewrites against staging —
+    genuinely needs that. These two one-row UPDATEs do not: they are the pointer swap, and
+    hanging here would leave the platform reading a stale registry version with a fully
+    loaded new one sitting next to it. Two rows in 60 s or something is wrong.
+    """
+    seconds = loader_db.env_timeout_s(PUBLISH_TIMEOUT_ENV, DEFAULT_PUBLISH_TIMEOUT_S)
+    with loader_db.bounded(conn, seconds) as cur:
         cur.execute(
             "UPDATE registry_versions SET is_current = false WHERE is_current AND id <> %s",
             (version_id,),

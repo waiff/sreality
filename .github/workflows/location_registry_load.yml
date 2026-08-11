@@ -78,14 +78,28 @@ on:
     - cron: "0 2 2 * *"
 
 concurrency:
-  # The design's `registry group`, exclusive: the baseline, the boundary pack and the delta
-  # lane all touch the same registry_version and must never overlap each other or themselves.
-  group: location-registry
+  # OUTER, cross-lane: every heavy location batch lane (registry load, claim intake, Mapy
+  # inventory, resolve) shares ONE group so at most one of them runs at a time. On
+  # 2026-08-10 four of them ran concurrently against the shared 75 GB production instance
+  # and took the whole database with them — backends dropped ("SSL connection has been
+  # closed unexpectedly" plus one AdminShutdown), two lanes wedged mid-statement for hours,
+  # and the live Browse rebuild degraded to multi-minute DataFileReads. These lanes are IO
+  # hogs by construction (a 3 M-row COPY, per-unit PostGIS, a full-corpus raw_json scan),
+  # so they queue instead of competing. `cancel-in-progress: false` keeps the running lane;
+  # GitHub keeps one pending run per group and supersedes older pending ones, so a cadenced
+  # lane collapses to its newest tick rather than piling up.
+  group: location-batch
   cancel-in-progress: false
 
 jobs:
   load:
     runs-on: ubuntu-latest
+    concurrency:
+      # INNER, per-lane: the design's `registry group`, exclusive — the baseline, the
+      # boundary pack and the delta lane all touch the same registry_version and must never
+      # overlap each other or themselves. Kept under the outer group, not replaced by it.
+      group: location-registry
+      cancel-in-progress: false
     timeout-minutes: 180
     permissions:
       contents: read

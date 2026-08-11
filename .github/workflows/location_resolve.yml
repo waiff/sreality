@@ -68,15 +68,25 @@ on:
     - cron: "*/15 * * * *"
 
 concurrency:
-  # 00 §14: the `location-resolve` group. The epoch job declares `location-collision` in its
-  # own lease row; it shares this workflow's group so a recompute never overlaps a drain
-  # that is reading the epoch it is replacing.
-  group: location-resolve
+  # OUTER, cross-lane: shared with the registry load, the claim intake and the Mapy
+  # inventory so at most ONE heavy location lane runs at a time. On 2026-08-10 this drain
+  # (run 31439340945) wedged mid-batch for 30 minutes with no error while a registry
+  # boundary pack, a claims intake and an inventory scan hammered the same instance. The
+  # drain is cadenced, so queueing behind a long registry load is the intended trade: the
+  # queue IS the cursor, a skipped tick costs nothing, and GitHub supersedes an older
+  # pending run so ticks collapse instead of piling up. See location_registry_load.yml.
+  group: location-batch
   cancel-in-progress: false
 
 jobs:
   resolve:
     runs-on: ubuntu-latest
+    concurrency:
+      # INNER, per-lane: 00 §14's `location-resolve` group. The epoch job declares
+      # `location-collision` in its own lease row; it shares this group so a recompute never
+      # overlaps a drain that is reading the epoch it is replacing.
+      group: location-resolve
+      cancel-in-progress: false
     timeout-minutes: 60
     permissions:
       contents: read
