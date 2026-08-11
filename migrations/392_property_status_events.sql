@@ -24,9 +24,13 @@
 -- instrumentation to maintain.
 --
 -- Already APPLIED to production under this shape (via MCP, verified with a
--- SELECT: 953,599 seeded rows, anon can read the view but not the base
--- table). This file just gives it its permanent tracked number — a
--- concurrent branch had already claimed 390 locally when this was renumbered.
+-- SELECT: 953,599 seeded rows). The initial apply granted the view to `anon`
+-- following the pattern on listings_public/property_sources_public — those
+-- are grandfathered pre-migration-299 exceptions, not the current posture
+-- (CI's test_anon_holds_no_relation_grants caught the drift); corrected to
+-- `authenticated` here and re-applied to production to match. This file just
+-- gives it its permanent tracked number — a concurrent branch claimed 390,
+-- then 391, locally while this was in flight, hence 392.
 
 create table property_status_events (
   id          bigserial primary key,
@@ -87,4 +91,10 @@ create view property_status_events_public as
 select property_id, is_active, event_at
 from property_status_events;
 
-grant select on property_status_events_public to anon;
+-- anon holds NO relation grants (migration 299's settled Phase 0 posture — the
+-- SPA is fully login-gated and reads as authenticated; CI's
+-- test_anon_holds_no_relation_grants enforces this on every new view). This is
+-- a brand-new view, so unlike the grandfathered pre-299 anon grants on
+-- listings_public/property_sources_public it follows the current posture from
+-- day one.
+grant select on property_status_events_public to authenticated;
