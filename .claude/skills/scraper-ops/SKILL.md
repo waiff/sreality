@@ -324,14 +324,24 @@ the only alarm was a failing GH Actions cron the operator happened to miss. The 
 `llm_errors`, `llm_liveness`, `llm_burn_rate`, `db_saturation`, `worker_liveness`,
 `dual_write_parity`, `property_maintenance` (last-complete-sweep stamp age + oldest
 dirty-queue row — the 2026-08-06 sweep-death/stranded-lease incident; both axes O(1) reads,
-never a properties scan) and `broker_resolution_freshness` (the same two axes over
-`app_settings.broker_resolution_last_complete` + `dirty_broker_listings` — the 2026-08-12
+never a properties scan) and `broker_resolution_freshness` (**three** axes over
+`app_settings.broker_resolution_last_complete`, `broker_resolution_runs.ended_at` and
+`dirty_broker_listings` — the 2026-08-12
 E2E review found the daily broker sweep truncating on its budget every day while exiting 0).
 Note the broker sweep axis measures a rotation **lap**, not one run: attribution routinely
 spends its whole `--max-seconds` budget, so `resolve_brokers` carries cumulative coverage in
 `app_settings.broker_sweep_cursor` (`last_id` / `lap_swept` / `lap_started_at`) and stamps
 completion when the lap closes; with no lap closed yet the check ages the OPEN lap, so a
 rotation that never gets round reds instead of parking on the missing-stamp warn.
+The third axis exists because that lap stamp is written right after attribution, ~17-25 min
+BEFORE the tail (cross-source merge, the three rollups, the matview, candidates,
+`_finalize`'s dirty-clear), so a sweep whose tail dies still leaves a minutes-old stamp while
+the leaderboard and rollups silently stop: `broker_finished_{warn,fail}_hours` (30/60) age the
+last full run that actually reached `ended_at`, tighter than the lap's deliberately wide 52/84
+because the tail runs on every sweep. Fail sits between ONE missed night (48h + the ~2.5h
+spread in when a run finishes = ~50.5h, deliberately only a warn — the skipped sweep's own red
+run already emails) and TWO (~69.5h). A NULL (no finished full run on record) is skipped, not
+red — only the missing LAP stamp is the deploy-day warn.
 The six dedup-specific checks (street/geo debt, eligibility funnel,
 merge latency, engine health, merge-precision sample) went with the engine, along with their
 `pipeline_check_thresholds` rows.

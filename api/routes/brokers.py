@@ -72,7 +72,11 @@ def get_search(
     conn: Any = Depends(deps.get_db_conn),
     claims: dict = Depends(deps.verify_jwt),
 ) -> dict[str, Any]:
-    return _policy(brokers.search(conn, q, limit=limit), claims)
+    # The only read whose PREDICATE is caller-supplied, so the policy has to reach
+    # the query itself: masking the projection alone left the ILIKE matching text
+    # the response redacted, i.e. a guess-confirming oracle over it.
+    admin = _is_admin(claims)
+    return _policy(brokers.search(conn, q, limit=limit, include_pii=admin), claims)
 
 
 @router.get("/geo-options")

@@ -231,6 +231,10 @@ class _ResilientCur:
             self._rows = [(10,), (11,)]
         elif "SELECT value FROM app_settings" in s:
             self._rows = [] if self._conn.setting_missing else [(self._conn.setting_value,)]
+        elif "SELECT id, broker_id FROM broker_identities WHERE broker_id = ANY" in s:
+            wanted = set(params[0])
+            self._rows = [(i, b) for i, b in sorted(self._conn.broker_of.items())
+                          if b in wanted]
         elif "SELECT id, broker_id FROM broker_identities" in s:
             self._rows = list(self._conn.broker_of.items())
         elif "count(DISTINCT source) FROM broker_identities" in s:
@@ -691,6 +695,114 @@ def test_sweep_state_reads_tolerate_a_missing_or_junk_setting() -> None:
     empty = _ResilientConn("cursor")
     empty.setting_missing = True
     assert _sweep_state(empty) == (None, 0, None)
+
+
+# --- applying merges at broker grain -----------------------------------------
+
+
+def _merge_plan(conn: _ResilientConn) -> dict[str, Any]:
+    events = _params(conn, "INSERT INTO broker_merge_events")
+    update = _params(conn, "UPDATE brokers b SET status = 'merged_away'")
+    return {
+        "ledger": sorted(zip(events["r"], events["s"], events["i"])),
+        "retired": dict(zip(update["l"], update["s"])),
+        "moved": dict(zip(events["i"], events["s"])),
+    }
+
+
+def test_a_broker_is_retired_into_exactly_one_survivor_per_run() -> None:
+    """Two components disjoint in IDENTITY space can both touch one broker: an
+    already-merged broker holds several identities, and a bridge between two of its
+    own can lapse (contacts are never deleted, so a value gets freq-demoted or a
+    display_name changes). Keyed on the retired id, `losers` then kept whichever
+    component came last while broker_merge_events had logged the broker retired into
+    BOTH — a ledger the unmerge replay cannot reconcile with the surviving row."""
+    import scripts.resolve_brokers as rb
+
+    conn = _ResilientConn("merge")
+    # broker 30 holds identities 1 and 2; component A = {1, 5}, component B = {2, 6}
+    conn.broker_of = {1: 30, 5: 10, 2: 30, 6: 20}
+    assert rb._apply_merges(conn, [[1, 5], [2, 6]]) == 2
+
+    plan = _merge_plan(conn)
+    # one survivor for the whole broker component, and 30 is retired ONCE
+    assert plan["retired"] == {20: 10, 30: 10}
+    assert sorted(plan["ledger"]) == [(20, 10, 6), (30, 10, 1), (30, 10, 2)]
+    # ...and the ledger agrees with the brokers UPDATE on every retired broker
+    for retired_id, survivor_id, _ in plan["ledger"]:
+        assert plan["retired"][retired_id] == survivor_id
+
+
+def test_a_retired_broker_keeps_no_identities() -> None:
+    """The strictly more reachable sibling of the same gap, and it needs only ONE
+    new edge: the identity UPDATE moved just the component's identities while the
+    brokers UPDATE retired the whole broker, so a broker could end up merged_away
+    while still holding one. _BROKER_ROLLUP only touches status='active', so that
+    identity's rollups freeze, the dossier 404s it, and the next sweep can elect the
+    merged_away broker as a SURVIVOR. api/broker_review.py::merge_brokers always
+    moved the losers' whole identity set; this is the divergent path."""
+    import scripts.resolve_brokers as rb
+
+    conn = _ResilientConn("merge")
+    # broker 40 holds identities 2 and 3; only 2 is bridged to broker 10's identity 1
+    conn.broker_of = {1: 10, 2: 40, 3: 40}
+    assert rb._apply_merges(conn, [[1, 2]]) == 1
+
+    plan = _merge_plan(conn)
+    assert plan["retired"] == {40: 10}
+    # identity 3 rides along even though no edge named it
+    assert plan["moved"] == {2: 10, 3: 10}
+
+
+def test_merge_components_are_unioned_transitively_in_broker_space() -> None:
+    """A chain A-B, B-C over identities of three brokers is ONE merge, not two
+    overlapping ones — otherwise the middle broker is both a survivor and a loser."""
+    import scripts.resolve_brokers as rb
+
+    assert rb._broker_components([[1, 2], [3, 4]], {1: 5, 2: 7, 3: 7, 4: 9}) == [[5, 7, 9]]
+    # ...and genuinely disjoint components stay separate, lowest id surviving each
+    assert rb._broker_components(
+        [[1, 2], [3, 4]], {1: 5, 2: 7, 3: 8, 4: 9}) == [[5, 7], [8, 9]]
+    # a component already on one broker is not a merge (idempotent re-run)
+    assert rb._broker_components([[1, 2]], {1: 5, 2: 5}) == []
+    # an identity with no broker contributes nothing
+    assert rb._broker_components([[1, 2]], {1: 5}) == []
+
+
+def test_a_component_chaining_two_groups_is_logged(caplog: Any) -> None:
+    """Merging at broker grain widens what one run can fuse: decide_merges caps a
+    group at MAX_AUTO_MERGE_COMPONENT identities, but two capped groups chained
+    through a broker that holds an identity in each now apply as ONE merge, and the
+    sweep log's `auto` is a bare count that cannot tell that from a pair merge. The
+    chaining edge is a merge already recorded, so it is not auto-merging on evidence
+    it lacks — but the chain is unbounded, so it must be visible in the log the
+    operator reads rather than only in the leaderboard moving."""
+    import logging
+
+    import scripts.resolve_brokers as rb
+
+    # broker 7 holds identity 2 (group A) and identity 3 (group B) — one component
+    with caplog.at_level(logging.WARNING, logger="resolve_brokers"):
+        assert rb._broker_components(
+            [[1, 2], [3, 4]], {1: 5, 2: 7, 3: 7, 4: 9}) == [[5, 7, 9]]
+    assert "chains 2 auto-merge groups: 3 brokers onto survivor 5" in caplog.text
+
+    # ...and an ordinary single-group component stays quiet
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="resolve_brokers"):
+        assert rb._broker_components([[1, 2]], {1: 5, 2: 7}) == [[5, 7]]
+    assert caplog.text == ""
+
+
+def test_apply_merges_skips_a_group_already_on_one_broker() -> None:
+    """Idempotence: a re-run after a committed apply must write nothing."""
+    import scripts.resolve_brokers as rb
+
+    conn = _ResilientConn("merge")
+    conn.broker_of = {1: 10, 2: 10}
+    assert rb._apply_merges(conn, [[1, 2]]) == 0
+    assert not any("broker_merge_events" in s for s in conn.executed)
+    assert rb._apply_merges(conn, []) == 0
 
 
 # --- review pairs reach the operator queue -----------------------------------

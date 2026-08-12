@@ -115,6 +115,47 @@ def test_search_still_short_circuits_a_one_character_query() -> None:
     assert conn.cur.seen == []
 
 
+def test_search_is_not_an_oracle_over_what_the_mask_redacts() -> None:
+    """Three live brokers' display_name IS their email address, which _redact_shaped
+    hides from a non-admin — but the ILIKE ran over the RAW column, so presence or
+    absence of a row confirmed each guess and the address came back one character at
+    a time. Every route test stubs `search`, so only a toolkit-level test sees this.
+    """
+    row = {"broker_id": 19344, "display_name": "petr.novak@pjreality.cz"}
+
+    hidden = brokers.search(_Conn([dict(row)]), "el@pj")
+    assert hidden["data"] == [] and hidden["metadata"]["result_count"] == 0
+    # ...while an admin, who gets the value anyway, still searches it
+    assert brokers.search(_Conn([dict(row)]), "el@pj",
+                          include_pii=True)["data"][0]["broker_id"] == 19344
+
+
+def test_search_still_finds_the_unredacted_part_of_a_name() -> None:
+    """The fix must not make a broker unfindable: only the redacted SPAN stops
+    matching, so the human-readable half of the name still answers for everyone."""
+    row = {"broker_id": 10444,
+           "display_name": "Realitní kancelář Honzík <info@honzik.cz>"}
+    assert brokers.search(_Conn([dict(row)]), "Honzík")["data"][0]["broker_id"] == 10444
+    assert brokers.search(_Conn([dict(row)]), "honzÍk")["data"] != []
+    # an ordinary name is untouched by the mask and behaves exactly as before
+    plain = {"broker_id": 1, "display_name": "Jan Novák"}
+    assert brokers.search(_Conn([dict(plain)]), "nov")["data"][0]["broker_id"] == 1
+
+
+def test_search_escapes_like_metacharacters_in_the_bound_term() -> None:
+    """psycopg binds the value as data, but LIKE still reads `%` and `_` inside it
+    as wildcards: `@_` was a ONE-character probe under the two-char minimum, and a
+    bare `%` seq-scanned brokers_public on every request."""
+    conn = _Conn([])
+    brokers.search(conn, "@_")
+    # backslash is LIKE's own default escape, so no ESCAPE clause is needed — and
+    # writing one would put a literal backslash in the SQL TEXT
+    assert conn.cur.seen[0][1] == ("%@\\_%", 12)
+    conn = _Conn([])
+    brokers.search(conn, "100%")
+    assert conn.cur.seen[0][1] == ("%100\\%%", 12)
+
+
 def test_policy_masks_a_dossier_but_leaves_an_admin_alone() -> None:
     envelope = {
         "data": {"broker": {"broker_id": 1, "display_name": "RK Alfa",

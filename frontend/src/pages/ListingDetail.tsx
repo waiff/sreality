@@ -535,7 +535,14 @@ function LatestActiveLink({
 }
 
 /* The resolved broker behind this listing → its broker-intelligence detail.
-   Renders nothing for listings whose broker isn't resolved yet. */
+   Renders nothing for listings whose broker isn't resolved yet — but a FAILED read
+   is not that answer. fetchListingBroker returns null only for the two 404 bodies
+   that mean "nothing is attributed here" and rethrows everything else (an expired
+   session, a drifted VITE_API_BASE_URL, a 5xx), so a bare `if (!b) return null`
+   asserted "no broker" for every outage. That is how the PostgREST revocation hid
+   here from 2026-07-12 to 2026-08-12; every other repointed broker surface now
+   says so out loud. Gated on `!q.data` too, so a failed background refetch never
+   replaces a good chip with an error. */
 function BrokerChip({ listingId }: { listingId: number }) {
   const q = useQuery({
     queryKey: ['listing-broker', listingId],
@@ -543,6 +550,12 @@ function BrokerChip({ listingId }: { listingId: number }) {
     staleTime: 60_000,
   });
   const b = q.data;
+  if (q.isError && !b)
+    return (
+      <span className="inline-flex items-center gap-1.5 rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-3)] px-3 py-1.5 text-[0.8rem] text-[var(--color-brick)]">
+        Makléře se nepodařilo načíst
+      </span>
+    );
   if (!b) return null;
   return (
     <Link
