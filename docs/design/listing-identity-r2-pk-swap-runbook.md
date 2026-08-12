@@ -60,6 +60,20 @@ Two bugs were caught during Phase A that are worth remembering:
    cross-check the surrogate against). Same fix in `check_merge_latency`: it now joins
    `dedup_pair_audit` on `left_listing_id`/`right_listing_id` (populated for every row,
    legacy or not) instead of `left_sreality_id`/`right_sreality_id`.
+4. **(2026-08-12) The `orphans` bucket needed a carrier that is only PARTLY
+   listing-anchored to be told so.** `notification_dispatches` carries a third producer,
+   `system_health` — bell rows for red checks — whose NULL/NULL is correct by
+   construction (`notification_dispatches_source_ck` forbids it a subscription or a
+   collection, and neither writer names an id column). The bucket counted them, so the
+   check went red on 2026-08-02 08:39 UTC and could never clear: whenever the 7-day
+   window aged past the last alert, the run went `ok` and its OWN recovery alert inserted
+   a fresh NULL/NULL row that re-broke the next run (03:57 → 03:58 → 08:38 on 2026-08-02
+   is the whole cycle in `pipeline_check_results`). Fail→fail is silent by design and the
+   6-hourly job never passes `--exit-nonzero-on-fail`, so it stayed red and unheard for
+   42 runs. Fixed with the registry's existing `skip` extension point
+   (`t.source_kind = 'system_health'`), which the parity counter and the backfill
+   predicate both honour. Across all 92 runs of this check the ONLY non-empty bucket was
+   ever this false positive — zero real gaps, zero mismatches.
 
 **A4 backfill — CONVERGED (2026-07-20).** 10.7M rows filled across 22 carriers in ~30
 minutes of runtime (images 8.26M, listing_snapshots 1.41M, properties 544k). Every
