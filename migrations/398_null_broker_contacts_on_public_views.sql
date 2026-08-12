@@ -66,11 +66,18 @@
 -- view has 81 columns and stops at `l.source_id_native` — prod applied that file
 -- under the ledger name `374_home_city_precompute` without the view's last column,
 -- while `properties.home_city_id` and `recompute_home_city()` both exist live. A
--- from-zero replay therefore has 82 columns and prod has 81. CREATE OR REPLACE
--- cannot drop a column, so restating the 81-column shape would FAIL the CI schema
--- replay. This file restates migration 375's canonical 82-column body; applying it
--- to production additionally re-adds the missing trailing `home_city_id` column,
--- which is purely additive and converges prod back onto git.
+-- from-zero replay therefore has 82 columns and prod has 81. That drift is NOT
+-- cosmetic: api/notifications.py scans `FROM properties_public l` and
+-- toolkit/comparables._city_quality_clauses emits `l.home_city_id`, so every
+-- watchdog subscription carrying a city-index rule (and the near-city proximity
+-- branch) currently fails live with SQLSTATE 42703 — verified read-only:
+--   select 1 from properties_public l where l.home_city_id is not null limit 0;
+--   ERROR: 42703: column l.home_city_id does not exist
+-- CREATE OR REPLACE cannot drop a column, so restating the 81-column shape would
+-- FAIL the CI schema replay. This file restates migration 375's canonical
+-- 82-column body; applying it to production additionally re-adds the missing
+-- trailing `home_city_id` column, which is purely additive, converges prod back
+-- onto git, and fixes that watchdog break as a side effect.
 --
 -- Permission/definition-only. No data is modified and nothing is dropped.
 
