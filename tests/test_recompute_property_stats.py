@@ -19,6 +19,28 @@ from scripts.recompute_property_stats import (
 )
 
 
+_INTERVAL_UNITS = {"s": 1, "sec": 1, "second": 1, "seconds": 1,
+                   "min": 60, "mins": 60, "minute": 60, "minutes": 60,
+                   "h": 3600, "hour": 3600, "hours": 3600}
+
+
+def _interval_seconds(interval: str) -> int:
+    """Parse the PG interval literals this module ships as constants
+    (`"10min"`, `"15 minutes"`) so the sizing guards can DERIVE their arithmetic
+    from them instead of restating the number and drifting."""
+    import re
+
+    m = re.fullmatch(r"(\d+)\s*([a-z]+)", interval.strip())
+    assert m, f"unparseable interval literal {interval!r}"
+    return int(m[1]) * _INTERVAL_UNITS[m[2]]
+
+
+def test_interval_parser_reads_both_spellings_used_in_the_module():
+    assert _interval_seconds("10min") == 600
+    assert _interval_seconds("15 minutes") == 900
+    assert _interval_seconds("2h") == 7200
+
+
 def test_empty_when_no_properties():
     assert list(_batch_ranges(0, 2000)) == []
 
@@ -449,7 +471,8 @@ class _SweepConn(_FakeConn):
 
 
 def _run_sweep(monkeypatch: Any, conn: _SweepConn, argv: list[str],
-               clock: list[float] | None = None) -> int:
+               clock: list[float] | None = None,
+               then: list[Any] | None = None) -> int:
     import sys
 
     import scripts.recompute_property_stats as rps
@@ -457,7 +480,12 @@ def _run_sweep(monkeypatch: Any, conn: _SweepConn, argv: list[str],
     monkeypatch.setenv("SUPABASE_DB_URL", "postgres://test")
     monkeypatch.setattr(sys, "argv", ["recompute_property_stats", *argv])
     # See _run_main: the sweep opens its connection via scraper.db.connect now.
-    monkeypatch.setattr(rps.db, "connect", lambda *a, **k: conn)
+    # `then` makes db.connect a QUEUE rather than a constant, so reconnect()
+    # hands back a genuinely DIFFERENT connection (the same-object stub could
+    # never prove the rebind).
+    queue = [conn, *(then or [])]
+    monkeypatch.setattr(rps.db, "connect",
+                        lambda *a, **k: queue.pop(0) if len(queue) > 1 else queue[0])
     monkeypatch.setattr(rps.signal, "signal", lambda *a: None)
     if clock is not None:
         ticks = iter(clock)
@@ -560,6 +588,65 @@ def test_batch_retry_renews_the_lease_on_every_attempt(monkeypatch: Any) -> None
     assert _find(conn, "property_sweep_last_complete")
 
 
+class _DroppingCur(_Cur):
+    """Fails the FIRST recompute statement with a drop that KILLS the connection,
+    so run_resilient takes its reconnect arm rather than replaying in place."""
+
+    def execute(self, sql: str, params: Any = None) -> None:
+        import psycopg
+
+        s = " ".join(sql.split())
+        if "WITH batch AS" in s and self._conn.fail_once:
+            self._conn.fail_once = False
+            self._conn.broken = True
+            raise psycopg.OperationalError("SSL connection has been closed unexpectedly")
+        super().execute(sql, params)
+
+
+class _DroppingSweepConn(_SweepConn):
+    def __init__(self, max_id: int, fail_once: bool = False) -> None:
+        super().__init__(max_id)
+        self.fail_once = fail_once
+        self.broken = False
+        self.closed = False
+
+    def cursor(self) -> Any:
+        return _DroppingCur(self)
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_full_sweep_finishes_on_the_fresh_conn_after_a_pooler_drop(
+    monkeypatch: Any,
+) -> None:
+    """`step`'s `nonlocal conn` rebind is what carries a reconnect through the
+    REST of the sweep. Nothing exercised it: the existing flaky fake never sets
+    `broken`, so run_resilient always took the same-connection arm. If the rebind
+    ever regresses the symptom is silent — the finalize + `_release_lease` land on
+    a dead socket, the release is swallowed into a WARNING by design, and the run
+    exits GREEN with the lease stranded for a full TTL."""
+    import scripts.recompute_property_stats as rps
+
+    monkeypatch.setattr(rps.db.time, "sleep", lambda s: None)
+    first = _DroppingSweepConn(max_id=4000, fail_once=True)  # 2 batches
+    fresh = _DroppingSweepConn(max_id=4000)
+
+    assert _run_sweep(monkeypatch, first, [], then=[fresh]) == 0
+
+    # the dead original is closed by run_resilient and never written to again
+    assert first.broken and first.closed
+    assert not _find(first, "property_sweep_last_complete")
+    assert not _find(first, "SET holder = NULL")
+    # ...and the whole remaining sweep ran on the replacement: the replayed batch,
+    # the SECOND batch (proving the rebind outlived one step()), the completion
+    # stamp, and — load-bearing — the lease release from main()'s `finally:`.
+    recomputes = [p for s, p in fresh.executed if "WITH batch AS" in s]
+    assert [(p["lo"], p["hi"]) for p in recomputes] == [(1, 2001), (2001, 4001)]
+    assert _find(fresh, "property_sweep_last_complete")
+    assert _find(fresh, "SET holder = NULL")
+
+
 # --- connection / lease resilience + budget headroom --------------------------
 
 
@@ -577,7 +664,48 @@ def test_release_lease_survives_a_dead_connection(caplog: Any) -> None:
 
     with caplog.at_level(logging.WARNING):
         _release_lease(_DeadConn(), "full:abc")  # must not raise
-    assert any("lease release failed" in r.message for r in caplog.records)
+    failed = [r for r in caplog.records if "lease release failed" in r.message]
+    assert failed
+    # ...carrying the exception: the warning used to discard it entirely, leaving
+    # a green run and a log line with zero diagnostic content.
+    assert failed[-1].exc_info is not None
+
+
+def test_release_lease_falls_back_to_a_fresh_connection() -> None:
+    """`nonlocal conn` narrows this but cannot close it: when run_resilient
+    exhausts its budget on a DROPPED socket it closes both the original and its
+    replacement, so no live handle survives for the release. The holder-guarded
+    CAS is safe from any connection, so open one rather than strand the lease for
+    a whole TTL and freeze every maintenance lane."""
+    from scripts.recompute_property_stats import _release_lease
+
+    class _DeadConn:
+        def cursor(self) -> Any:
+            raise RuntimeError("the connection is closed")
+
+    class _ClosableConn(_FakeConn):
+        closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    fresh = _ClosableConn()
+    _release_lease(_DeadConn(), "full:abc", reconnect=lambda: fresh)
+    assert _find(fresh, "SET holder = NULL")
+    # the release owns the connection it opened, so it must close it
+    assert fresh.closed
+
+
+def test_release_lease_does_not_reconnect_when_the_handle_is_live() -> None:
+    """The fallback is a last resort, not a second write."""
+    from scripts.recompute_property_stats import _release_lease
+
+    live = _FakeConn()
+    opened: list[int] = []
+    _release_lease(live, "full:abc",
+                   reconnect=lambda: opened.append(1) or _FakeConn())
+    assert _find(live, "SET holder = NULL")
+    assert opened == []
 
 
 def test_workflow_timeout_covers_the_budget_ceiling() -> None:
@@ -597,9 +725,19 @@ def test_workflow_timeout_covers_the_budget_ceiling() -> None:
     timeout_s = wf["jobs"]["recompute"]["timeout-minutes"] * 60
     # One in-flight batch = _BATCH_STATEMENT_TIMEOUT x its retry budget (the
     # deadline is only checked at a batch boundary, so a batch that starts just
-    # under the wire runs its full retried worst case past it).
-    in_flight_batch_s = 10 * 60 * rps._BATCH_RESILIENT_ATTEMPTS
+    # under the wire runs its full retried worst case past it). DERIVED from the
+    # constant, not the literal 10 it happens to hold: with the number hardcoded,
+    # raising _BATCH_STATEMENT_TIMEOUT to 30min left this guard passing while the
+    # real worst case (9720s) had already outgrown the 7800s backstop — a SIGKILL
+    # mid-sweep, reported by GH as `cancelled`, emailing nobody.
+    batch_ceiling_s = _interval_seconds(rps._BATCH_STATEMENT_TIMEOUT)
+    in_flight_batch_s = batch_ceiling_s * rps._BATCH_RESILIENT_ATTEMPTS
     assert timeout_s >= rps._MAX_BUDGET_SECONDS + in_flight_batch_s + 120
+    # The module's other, previously unguarded invariant (see the comment above
+    # _BATCH_STATEMENT_TIMEOUT): renewal fires as the first statement of each
+    # batch ATTEMPT, so one statement's ceiling is the longest possible renewal
+    # gap and must stay comfortably under the lease TTL.
+    assert batch_ceiling_s < _interval_seconds(rps._LEASE_TTL)
 
     # The dispatch default must be dispatchable — i.e. at or under the clamp,
     # never silently truncated to it. (YAML 1.1 parses the bare key `on` as the

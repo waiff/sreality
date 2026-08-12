@@ -42,14 +42,21 @@ concurrency:
 jobs:
   resolve:
     runs-on: ubuntu-latest
-    # Headroom for the worst case: the attribution scan can use its full
-    # --max-seconds 3000 (50 min) budget AND the rollup/merge/matview tail
-    # (~15-20 min over the full corpus) still finishes. The job is serialized by
-    # the DB advisory lock and idempotent, so extra wall-clock has no downside.
-    # 90 -> 110 in 2026-08: the sweeps to 08-10 ran 68-78 min (only 12-22 min of
-    # slack), and every phase now retries + reconnects through db.run_resilient
-    # rather than dying on a pooler drop — a replayed phase must fit inside the
-    # backstop or the fix would just trade a red run for a silent `cancelled`.
+    # Headroom for the worst case, re-derived with the retry bounds:
+    #   prefix  ~53 min — lock wait (<= _LOCK_WAIT_MAX_SECONDS, 21 min) and
+    #                     attribution share the --max-seconds 3000 (50 min) budget,
+    #                     which is anchored at process start and checked at a chunk
+    #                     boundary, so one chunk can overshoot it (measured 53.3 min).
+    #   tail    ~50 min — merge + rollups + matview + candidates measured 17-25 min,
+    #                     each phase capped at attempts=2 by resolve_brokers.py.
+    #   ------------------
+    #   ~103 min, inside 110 with ~7 min of slack.
+    # Before the attempts=2 caps the same tail could burn 4 attempts (~100 min) and
+    # bust the backstop, which would trade a red run for a silent `cancelled` — the
+    # exact mode the resilience wave exists to eliminate. The job is serialized by
+    # the DB lock and idempotent, so extra wall-clock has no downside; raise
+    # timeout-minutes together with --max-seconds or the tail's retry budget, never
+    # one alone.
     timeout-minutes: 110
     permissions:
       contents: read

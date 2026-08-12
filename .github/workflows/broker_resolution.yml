@@ -27,6 +27,10 @@ concurrency:
 jobs:
   resolve:
     runs-on: ubuntu-latest
+    # <= resolve_brokers._LOCK_STALE_MIN (20). The pass heartbeats the lock inside
+    # every retried phase, so this kill lands no later than the lock's own staleness
+    # window: a live incremental can never be declared stale and have its lock stolen,
+    # and its heartbeat can never raise the lost-lock abort. Keep the two equal.
     timeout-minutes: 20
     permissions:
       contents: read
