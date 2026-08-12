@@ -645,6 +645,56 @@ def _broker_of(conn: Any, identity_ids: list[int]) -> dict[int, int]:
         return {int(i): int(b) for i, b in cur.fetchall() if b is not None}
 
 
+def _identities_of(conn: Any, broker_ids: list[int]) -> dict[int, list[int]]:
+    """brokers.id -> EVERY identity it currently holds, not just the merging ones."""
+    if not broker_ids:
+        return {}
+    out: dict[int, list[int]] = {}
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT id, broker_id FROM broker_identities WHERE broker_id = ANY(%s) "
+            "ORDER BY id", (broker_ids,))
+        for iid, bid in cur.fetchall():
+            out.setdefault(int(bid), []).append(int(iid))
+    return out
+
+
+def _broker_components(groups: list[list[int]],
+                       broker_of: dict[int, int]) -> list[list[int]]:
+    """Union-find the identity components in BROKER space, ascending survivor first.
+
+    decide_merges' components are disjoint over IDENTITIES, not over brokers: an
+    already-merged broker holds several identities, and contacts are never deleted,
+    so a bridge between two of its own identities can lapse (a freq demotion, a
+    display_name change) and leave them in two different components. Left as-is
+    that broker would be retired into two survivors in one run — `losers` is keyed
+    on the retired id, so the ledger logged both while the brokers UPDATE kept
+    whichever came last. Merging at broker grain makes the collision unrepresentable
+    instead of detecting it after the fact."""
+    parent: dict[int, int] = {}
+
+    def find(b: int) -> int:
+        root = b
+        while parent[root] != root:
+            root = parent[root]
+        while parent[b] != root:
+            parent[b], b = root, parent[b]
+        return root
+
+    for group in groups:
+        brokers_in = sorted({broker_of[i] for i in group if i in broker_of})
+        for b in brokers_in:
+            parent.setdefault(b, b)
+        for b in brokers_in[1:]:
+            ra, rb = find(brokers_in[0]), find(b)
+            if ra != rb:
+                parent[max(ra, rb)] = min(ra, rb)
+    comps: dict[int, list[int]] = {}
+    for b in parent:
+        comps.setdefault(find(b), []).append(b)
+    return sorted((sorted(c) for c in comps.values() if len(c) > 1))
+
+
 def _queue_review_pairs(conn: Any, pairs: list[tuple[int, int]],
                         identities: dict[int, R.Identity],
                         bridge_values: dict[tuple[int, int], set[str]],
@@ -698,40 +748,45 @@ def _queue_review_pairs(conn: Any, pairs: list[tuple[int, int]],
 
 
 def _apply_merges(conn: Any, groups: list[list[int]]) -> int:
-    """Unify each group's identities onto one survivor broker, set-based.
+    """Unify each BROKER component onto one survivor broker, set-based.
 
-    One query fetches every group member's current broker, the plan is built in
-    Python (cheap — the groups are union-find output), and the whole thing applies
-    in three array-driven statements. Per-group transactions were ~4 pooler
-    round-trips each and overran the job timeout once a second source produced
-    thousands of merges. Idempotent — a group already sharing one broker is
-    skipped, so a re-run after a partial apply converges. Reversible via
-    broker_merge_events."""
+    Two queries fetch every group member's current broker and then every identity
+    those brokers hold, the plan is built in Python (cheap — the groups are
+    union-find output), and the whole thing applies in three array-driven
+    statements. Per-group transactions were ~4 pooler round-trips each and overran
+    the job timeout once a second source produced thousands of merges.
+
+    The merge unit is the broker, not the identity component, and the loser's WHOLE
+    identity set moves — the same invariant api/broker_review.py::merge_brokers
+    enforces. Retiring a broker while leaving it some identities would freeze their
+    rollups (_BROKER_ROLLUP only touches status='active'), hide them from the
+    dossier, and let the next sweep elect the merged_away broker as a survivor.
+    Idempotent — a component already on one broker is skipped, so a re-run after a
+    partial apply converges. Reversible via broker_merge_events."""
     if not groups:
         return 0
     broker_of = _broker_of(conn, sorted({iid for g in groups for iid in g}))
+    components = _broker_components(groups, broker_of)
+    if not components:
+        return 0
+    held = _identities_of(conn, sorted({b for c in components for b in c}))
 
     gids: list[str] = []
     survivors: list[int] = []
     retired: list[int] = []
     idents: list[int] = []
     losers: dict[int, int] = {}
-    for group in groups:
-        brokers_in = {broker_of[i] for i in group if i in broker_of}
-        if len(brokers_in) <= 1:
-            continue
-        survivor = min(brokers_in)
+    for component in components:
+        survivor, *rest = component
         gid = str(uuid.uuid4())
-        for iid in group:
-            prev = broker_of.get(iid)
-            if prev is None or prev == survivor:
-                continue
-            gids.append(gid)
-            survivors.append(survivor)
-            retired.append(prev)
-            idents.append(iid)
-            losers[prev] = survivor
-    if not idents:
+        for loser in rest:
+            losers[loser] = survivor
+            for iid in held.get(loser, ()):
+                gids.append(gid)
+                survivors.append(survivor)
+                retired.append(loser)
+                idents.append(iid)
+    if not losers:
         return 0
 
     with conn.transaction(), conn.cursor() as cur:
@@ -1095,9 +1150,9 @@ def _run_full(conn: Any, free: list[str], franchise: list[str], auto: list[str],
     # Merge BEFORE the rollups so dsc / listing_count / membership reflect the unified
     # broker groupings (a merge re-points broker_identities.broker_id). _cross_source_merge
     # no-ops with one source and is gated per-source by broker_auto_merge_sources.
-    # Replay-safe: _apply_merges skips a group whose identities already share one
-    # broker, so a retry after a committed apply converges (the only residue is an
-    # UNDERCOUNTED auto_merges on the retried attempt — bookkeeping, not data).
+    # Replay-safe: _apply_merges skips a component already on one broker, so a retry
+    # after a committed apply converges (the only residue is an UNDERCOUNTED
+    # auto_merges on the retried attempt — bookkeeping, not data).
     #
     # attempts=2 from here to the end of the sweep: every phase below lifts the
     # statement timeout (SET LOCAL statement_timeout = 0) or is otherwise unbounded,
