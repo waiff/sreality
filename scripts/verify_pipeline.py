@@ -1,7 +1,8 @@
 """verify_pipeline.py — scheduled pipeline-health harness.
 
 Computes a fixed set of pipeline-health metrics (LLM error rate + liveness + burn
-rate, DB saturation, worker liveness, dual-write parity, property maintenance),
+rate, DB saturation, worker liveness, dual-write parity, property maintenance,
+broker-resolution freshness),
 writes one `pipeline_check_results` row per check, and rings the in-app bell on
 STATE TRANSITIONS only (toolkit.system_alerts.emit_transition_alerts): once when a check
 goes red, once when it recovers — not on every red run.
@@ -66,6 +67,21 @@ DEFAULT_THRESHOLDS: dict[str, float] = {
     "property_sweep_fail_hours": 30,
     "property_dirty_warn_hours": 2.5,
     "property_dirty_fail_hours": 3,
+    # Broker resolution. Same two axes as property maintenance, different cadence:
+    # the full sweep is daily (04:35) but resolve_brokers_full.yml's backstop is
+    # 110 min (vs recompute's 100), so completion time drifts up to 1.9h and the
+    # sweep axis needs the wider warn. Fail at 32h = one missed sweep plus ~6h,
+    # comfortably inside the 48h that a second miss would take to show.
+    "broker_sweep_warn_hours": 27,
+    "broker_sweep_fail_hours": 32,
+    # The full sweep holds broker_resolution_lock for its whole run — every */10
+    # incremental skips cleanly meanwhile — and clears dirty_broker_listings only at
+    # finalize, so oldest-dirt ages 1:1 with the sweep and can legitimately reach
+    # that same 1.9h backstop. Warn above it or a healthy long sweep turns the axis
+    # amber; the extra headroom covers the post-sweep catch-up drain (the
+    # incremental claims --batch-size 5000 per */10 tick = 30k/h).
+    "broker_dirty_warn_hours": 3,
+    "broker_dirty_fail_hours": 4,
 }
 
 # --- pure status derivation (unit-tested without a DB) ---------------------
@@ -155,17 +171,53 @@ def _status_for_property_maintenance(
     properties measured ~3.5 min live and would blow the hourly acute lane's
     own 5-min job timeout — recreating the silent-`cancelled` mode this check
     exists to catch."""
-    axes = [
-        ("last complete sweep", sweep_age_hours,
-         thresholds["property_sweep_warn_hours"],
-         thresholds["property_sweep_fail_hours"]),
-        ("oldest dirty-queue row", oldest_dirty_hours,
-         thresholds["property_dirty_warn_hours"],
-         thresholds["property_dirty_fail_hours"]),
-    ]
+    return _status_over_age_axes(
+        [("last complete sweep", sweep_age_hours,
+          thresholds["property_sweep_warn_hours"],
+          thresholds["property_sweep_fail_hours"]),
+         ("oldest dirty-queue row", oldest_dirty_hours,
+          thresholds["property_dirty_warn_hours"],
+          thresholds["property_dirty_fail_hours"])],
+        stamp_missing=sweep_age_hours is None,
+    )
+
+
+def _status_for_broker_resolution(
+    sweep_age_hours: float | None,
+    oldest_dirty_hours: float | None,
+    thresholds: dict[str, Any],
+) -> tuple[str, list[str]]:
+    """Worst-of over the two broker-resolution liveness axes (rule-20 shape).
+
+    `sweep_age_hours` is the age of app_settings.broker_resolution_last_complete,
+    which the daily sweep stamps ONLY when attribution covered every broker-bearing
+    id. That is the axis that matters: the sweep breaks out on --max-seconds and,
+    before the rotation cursor, silently re-walked the same head every day — a green
+    exit code over a permanently unattributed tail. `oldest_dirty_hours` watches the
+    */10 incremental drain of dirty_broker_listings, which is what attributes a new
+    or re-brokered listing inside the day."""
+    return _status_over_age_axes(
+        [("last complete broker sweep", sweep_age_hours,
+          thresholds["broker_sweep_warn_hours"],
+          thresholds["broker_sweep_fail_hours"]),
+         ("oldest broker dirty-queue row", oldest_dirty_hours,
+          thresholds["broker_dirty_warn_hours"],
+          thresholds["broker_dirty_fail_hours"])],
+        stamp_missing=sweep_age_hours is None,
+    )
+
+
+def _status_over_age_axes(
+    axes: list[tuple[str, float | None, float, float]], *, stamp_missing: bool,
+) -> tuple[str, list[str]]:
+    """Worst-of over (label, age_hours, warn_h, fail_h) axes; a None age is skipped.
+
+    A missing completion stamp is a warn, not a fail: it is the expected state
+    between deploying a check and the first complete sweep, and permanently red
+    would train the operator to ignore the check."""
     status = "ok"
     offenders: list[str] = []
-    if sweep_age_hours is None:
+    if stamp_missing:
         status = "warn"
         offenders.append(
             "no complete-sweep stamp on record (first sweep since deploy "
@@ -567,6 +619,68 @@ def check_property_maintenance(conn: Any, thresholds: dict[str, Any]) -> dict[st
     }
 
 
+# The broker analogue of _PROPERTY_MAINTENANCE_SQL, and O(1) for the same reason:
+# a per-row scan for unattributed listings is exactly the query resolve_brokers
+# deleted from its incremental (broker_identity_id IS NULL is a permanent state for
+# ~110k listings, so it detoasted the whole raw_json corpus for ~7 stragglers).
+_BROKER_RESOLUTION_SQL = """
+select
+  (select extract(epoch from (now() - (value->>'completed_at')::timestamptz)) / 3600.0
+     from app_settings where key = 'broker_resolution_last_complete')
+    as sweep_age_hours,
+  (select extract(epoch from (now() - min(d.marked_at))) / 3600.0
+     from dirty_broker_listings d) as oldest_dirty_hours,
+  (select count(*) from dirty_broker_listings) as dirty_depth
+"""
+
+
+def check_broker_resolution_freshness(
+    conn: Any, thresholds: dict[str, Any],
+) -> dict[str, Any]:
+    """Watch the broker-resolution loop — the daily full sweep and the */10
+    incremental drain. Born from the 2026-08-12 E2E review: the sweep broke out of
+    attribution on its budget, wiped the whole dirty queue anyway and restarted at
+    the same low id next time, so the newest ~10% of broker-bearing listings were
+    skipped every single day — and nothing watched it, because the job still exited
+    0. The sweep axis reads the completion stamp the (fixed) sweep writes on
+    complete walks only, so a chronically truncated sweep now surfaces as a stale
+    stamp within hours."""
+    row = _fetchone(conn, _BROKER_RESOLUTION_SQL)
+    sweep_age, oldest_dirty, dirty_depth = (
+        (None, None, 0) if row is None else (
+            float(row[0]) if row[0] is not None else None,
+            float(row[1]) if row[1] is not None else None,
+            int(row[2] or 0),
+        )
+    )
+    status, offenders = _status_for_broker_resolution(
+        sweep_age, oldest_dirty, thresholds)
+    if offenders:
+        message = (
+            "Broker resolution is falling behind: " + "; ".join(offenders)
+            + " — check the daily sweep's runs (a budget-truncated sweep logs "
+            "'time budget reached during attribution' and still exits 0) and "
+            "broker_resolution_lock."
+        )
+    else:
+        message = (
+            f"Broker resolution healthy (last complete sweep "
+            f"{sweep_age:.1f}h ago, dirty queue {dirty_depth})."
+        )
+    return {
+        "check_key": "broker_resolution_freshness",
+        "status": status,
+        "value": round(sweep_age, 2) if sweep_age is not None else None,
+        "details": {
+            "sweep_age_hours": sweep_age,
+            "oldest_dirty_hours": oldest_dirty,
+            "dirty_depth": dirty_depth,
+            "offenders": offenders,
+        },
+        "message": message,
+    }
+
+
 # Keep every parity scan bounded so the 6-hourly run never degenerates into a seq
 # scan of 8M images rows: look only at the newest slice above the watermark. A live
 # writer gap shows up continuously, so the recent window catches it just as well as
@@ -735,6 +849,7 @@ _CHECKS: list[tuple[str, Callable[[Any, dict[str, Any]], dict[str, Any]]]] = [
     ("worker_liveness", check_worker_liveness),
     ("dual_write_parity", check_dual_write_parity),
     ("property_maintenance", check_property_maintenance),
+    ("broker_resolution_freshness", check_broker_resolution_freshness),
 ]
 
 # --weekly stays a valid (currently empty) lane so the scheduled invocation keeps

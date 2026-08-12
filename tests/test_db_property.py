@@ -293,6 +293,115 @@ def test_ingest_skips_broker_enqueue_when_unchanged(monkeypatch):
     assert _find(conn.executed, "INSERT INTO dirty_broker_listings") is None
 
 
+# --- broker-only changes on the HTML portals (content hash can't see them) ---
+
+
+def _broker_conn(stored: dict[str, Any] | None) -> _FakeConn:
+    """A seen listing whose stored raw_json->'broker' block is `stored`."""
+    return _FakeConn([
+        (lambda s: "SELECT id, sreality_id FROM listings WHERE source" in s, [(8009, -9)]),
+        (lambda s: "SELECT raw_json->'broker' FROM listings WHERE id" in s, [(stored,)]),
+        (lambda s: "SELECT property_id FROM listings WHERE id" in s, [(3,)]),
+    ])
+
+
+def test_ingest_enqueues_broker_work_when_only_the_broker_block_changed(monkeypatch):
+    """The regression this exists for: the four HTML portals hash a fixed field
+    allowlist (ScrapedListing._HASH_FIELDS) that excludes raw_json, so a page whose
+    ONLY change is its broker block computes result == 'unchanged' and the
+    result-gated enqueue never fired — those portals could not re-attribute a broker
+    change at all. The check must be INDEPENDENT of the content hash."""
+    _stub_upsert(monkeypatch, "unchanged")
+    conn = _broker_conn({"account_oid": "aaa", "name": "Jan Novák"})
+
+    db.ingest_scraped_listing(conn, _listing(
+        source="idnes", raw={"broker": {"account_oid": "bbb", "name": "Petr Svoboda"}}))
+
+    enq = _find(conn.executed, "INSERT INTO dirty_broker_listings")
+    assert enq is not None and enq[1] == (8009,)
+
+
+def test_ingest_detects_a_broker_change_on_every_html_portal_key(monkeypatch):
+    """Each portal keys its broker block differently (account_oid on idnes,
+    broker_id elsewhere) and carries a different firm key (agency_name /
+    agency_slug / agency_id). A fingerprint covering only one portal's shape would
+    silently no-op on the other three."""
+    cases = [
+        ("idnes", {"account_oid": "a"}, {"account_oid": "b"}),
+        ("remax", {"broker_id": "1", "email": "a@x.cz"}, {"broker_id": "1", "email": "b@x.cz"}),
+        ("ceskereality", {"broker_id": "1", "phone": "111"}, {"broker_id": "1", "phone": "222"}),
+        ("realitymix", {"broker_id": "1", "agency_id": "7"}, {"broker_id": "1", "agency_id": "8"}),
+        ("idnes", {"account_oid": "a", "agency_name": "X"},
+         {"account_oid": "a", "agency_name": "Y"}),
+    ]
+    for source, stored, incoming in cases:
+        _stub_upsert(monkeypatch, "unchanged")
+        conn = _broker_conn(stored)
+        db.ingest_scraped_listing(conn, _listing(source=source, raw={"broker": incoming}))
+        assert _find(conn.executed, "INSERT INTO dirty_broker_listings") is not None, source
+
+
+def test_ingest_does_not_enqueue_when_the_broker_block_is_identical(monkeypatch):
+    """Whitespace-only drift must not churn the queue every drain — the resolver
+    would re-attribute the whole HTML corpus on every refetch."""
+    _stub_upsert(monkeypatch, "unchanged")
+    conn = _broker_conn({"account_oid": "aaa", "name": "Jan Novák", "email": None})
+
+    db.ingest_scraped_listing(conn, _listing(
+        source="idnes", raw={"broker": {"account_oid": " aaa ", "name": "Jan Novák "}}))
+
+    assert _find(conn.executed, "INSERT INTO dirty_broker_listings") is None
+
+
+def test_ingest_enqueues_once_when_content_and_broker_both_changed(monkeypatch):
+    """The two arms share ONE enqueue site; a second INSERT would be pure churn."""
+    _stub_upsert(monkeypatch, "updated")
+    conn = _broker_conn({"account_oid": "aaa"})
+
+    db.ingest_scraped_listing(conn, _listing(
+        source="idnes", raw={"broker": {"account_oid": "bbb"}}))
+
+    enqueues = [e for e in conn.executed if "INSERT INTO dirty_broker_listings" in e[0]]
+    assert len(enqueues) == 1
+
+
+def test_ingest_never_reads_the_broker_block_for_an_unattributed_source(monkeypatch):
+    """The read is a raw_json detoast on the live drain path. bazos/bezrealitky/
+    mmreality/maxima have no broker to attribute, so they must not pay for it."""
+    _stub_upsert(monkeypatch, "unchanged")
+    conn = _broker_conn({"account_oid": "aaa"})
+
+    db.ingest_scraped_listing(conn, _listing(source="bazos", raw={"broker": {"x": 1}}))
+
+    assert _find(conn.executed, "SELECT raw_json->'broker'") is None
+    assert _find(conn.executed, "INSERT INTO dirty_broker_listings") is None
+
+
+def test_broker_fingerprint_survives_a_malformed_block():
+    """This runs inside the live ingest transaction: a portal that emits a list, a
+    scalar or nothing must degrade to daily-sweep-only attribution, never abort the
+    ingestion of an otherwise-valid listing."""
+    assert db._broker_fingerprint(None) == ()
+    assert db._broker_fingerprint([{"name": "x"}]) == ()
+    assert db._broker_fingerprint("broker") == ()
+    # ...and a block whose values are not strings still fingerprints
+    assert db._broker_fingerprint({"broker_id": 17})[1] == "17"
+
+
+def test_broker_fields_stay_out_of_the_content_hash():
+    """Rule 2: listing_snapshots is for CONTENT changes. Folding the broker block
+    into the hash would append a snapshot row per pure attribution change — the
+    reason this enqueue is an independent check and not an extra _HASH_FIELDS entry."""
+    from scraper.scraped_listing import _HASH_FIELDS, ScrapedListing
+
+    assert not {f for f in _HASH_FIELDS if "broker" in f or f == "raw"}
+    a = ScrapedListing(source="idnes", source_id_native="1", source_url="u",
+                       raw={"broker": {"account_oid": "a"}})
+    b = ScrapedListing(source="idnes", source_id_native="1", source_url="u",
+                       raw={"broker": {"account_oid": "b"}})
+    assert a.content_hash() == b.content_hash()
+
+
 # --- property-stats work enqueue (the incremental recompute's ingest feed) ---
 
 

@@ -18,6 +18,7 @@ const CHECK_LABELS: Record<string, string> = {
   worker_liveness: 'Worker liveness',
   dual_write_parity: 'Dual-write parity',
   property_maintenance: 'Property maintenance',
+  broker_resolution_freshness: 'Broker resolution',
 };
 
 export function pipelineCheckLabel(key: string): string {

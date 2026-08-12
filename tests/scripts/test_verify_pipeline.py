@@ -179,6 +179,96 @@ def test_property_maintenance_sql_is_o1() -> None:
     assert "listings" not in sql.lower()
 
 
+# --- broker resolution freshness (2026-08-12 E2E review) --------------------
+
+
+def test_broker_resolution_healthy_day_is_ok() -> None:
+    """~24-25h sweep age just before the next daily sweep is the steady state."""
+    from scripts.verify_pipeline import _status_for_broker_resolution
+
+    assert _status_for_broker_resolution(24.5, 0.2, DEFAULT_THRESHOLDS) == ("ok", [])
+    assert _status_for_broker_resolution(2.0, None, DEFAULT_THRESHOLDS) == ("ok", [])
+
+
+def test_broker_resolution_missing_stamp_warns_not_fails() -> None:
+    """The state between deploying this check and the first complete sweep."""
+    from scripts.verify_pipeline import _status_for_broker_resolution
+
+    status, offenders = _status_for_broker_resolution(None, 0.1, DEFAULT_THRESHOLDS)
+    assert status == "warn"
+    assert any("no complete-sweep stamp" in o for o in offenders)
+
+
+def test_broker_resolution_catches_the_chronically_truncated_sweep() -> None:
+    """The bug this check exists for: the sweep broke out on its budget every day
+    and still exited 0, so the tail above the break was never attributed. It now
+    stamps completion ONLY on a full walk, so days of truncation read as a stale
+    stamp — the one signal that was missing."""
+    from scripts.verify_pipeline import _status_for_broker_resolution
+
+    status, offenders = _status_for_broker_resolution(49.0, 0.1, DEFAULT_THRESHOLDS)
+    assert status == "fail"
+    assert any("last complete broker sweep" in o for o in offenders)
+    # ...and the two axes are independent: a frozen incremental drain alone reds.
+    status, offenders = _status_for_broker_resolution(2.0, 5.0, DEFAULT_THRESHOLDS)
+    assert status == "fail"
+    assert any("broker dirty-queue" in o for o in offenders)
+
+
+def test_broker_thresholds_clear_the_workflow_backstop() -> None:
+    """The full sweep holds broker_resolution_lock for its whole run (every */10
+    incremental skips meanwhile) and clears dirty_broker_listings only at finalize,
+    so both axes age 1:1 with the sweep — bounded by resolve_brokers_full.yml's
+    timeout-minutes. Warn must sit ABOVE that or a perfectly healthy long sweep
+    turns the check amber and trains the operator to ignore it. Raising the
+    workflow backstop means raising these in the same change."""
+    import pathlib
+    import re
+
+    from scripts.verify_pipeline import _status_for_broker_resolution
+
+    yml = pathlib.Path(__file__).resolve().parents[2] / (
+        ".github/workflows/resolve_brokers_full.yml")
+    backstop_h = int(re.search(r"^\s*timeout-minutes:\s*(\d+)", yml.read_text(),
+                               re.MULTILINE)[1]) / 60
+    assert DEFAULT_THRESHOLDS["broker_dirty_warn_hours"] > backstop_h
+    assert DEFAULT_THRESHOLDS["broker_sweep_warn_hours"] > 24 + backstop_h
+    # ...and a sweep running its full backstop stays green on both axes.
+    assert _status_for_broker_resolution(
+        24 + backstop_h, backstop_h, DEFAULT_THRESHOLDS) == ("ok", [])
+
+
+def test_broker_resolution_sql_is_o1() -> None:
+    """The hourly acute lane's 5-min job timeout. resolve_brokers deleted exactly
+    this scan from its own incremental: `broker_identity_id IS NULL` is a permanent
+    state for ~110k listings, so it detoasted the whole raw_json corpus for ~7
+    genuine stragglers and timed out."""
+    from scripts.verify_pipeline import _BROKER_RESOLUTION_SQL as sql
+
+    assert "broker_resolution_last_complete" in sql
+    assert "dirty_broker_listings" in sql
+    assert "listings l" not in sql.lower() and "broker_identity_id" not in sql.lower()
+
+
+def test_broker_completion_stamp_key_matches_the_writer() -> None:
+    """The check and the sweep are one contract across two modules — a rename on
+    either side would silently produce a permanently-missing stamp (a soft warn),
+    not an error."""
+    import scripts.resolve_brokers as rb
+    from scripts.verify_pipeline import _BROKER_RESOLUTION_SQL
+
+    assert rb._SWEEP_COMPLETE_KEY == "broker_resolution_last_complete"
+    assert f"'{rb._SWEEP_COMPLETE_KEY}'" in _BROKER_RESOLUTION_SQL
+    assert "completed_at" in rb._STAMP_SWEEP_COMPLETE_SQL
+
+
+def test_broker_check_is_registered() -> None:
+    """An unregistered check is dead code that never writes a row."""
+    from scripts.verify_pipeline import _CHECKS, check_broker_resolution_freshness
+
+    assert ("broker_resolution_freshness", check_broker_resolution_freshness) in _CHECKS
+
+
 # --- thresholds ------------------------------------------------------------
 
 

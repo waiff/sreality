@@ -13,10 +13,14 @@ that runs OFF the scrape hot path. Three modes:
     broker block (index-only stubs, FSBO, other portals), so scanning for it every
     run cost a full raw_json detoast pass for ~7 genuine stragglers and timed out.
     Anything the queue misses is reconciled by the daily full sweep below.
-  * full (default, daily reconcile): re-attribute EVERY sreality listing (batched by
-    id range), recompute all rollups, rebuild memberships + firm counts, run the
-    cross-source merge step, REFRESH the leaderboard matview, clear the queue. The
-    self-healing backstop.
+  * full (default, daily reconcile): re-attribute EVERY broker-bearing listing
+    (batched by id), recompute all rollups, rebuild memberships + firm counts, run
+    the cross-source merge step, REFRESH the leaderboard matview, clear the queue.
+    The self-healing backstop. Attribution resumes from `broker_sweep_cursor` and
+    rotates, so a run truncated by --max-seconds advances through the corpus instead
+    of re-walking the same head; only a walk that covered EVERY id clears the whole
+    queue and stamps `broker_resolution_last_complete` (verify_pipeline's
+    broker_resolution_freshness check reads that stamp).
   * --backfill: alias for full (the one-shot first population from existing
     raw_json). Run in Actions after merge — local has no psycopg, and a raw_json
     scan over the pooler times out, so it is keyset-batched here.
@@ -37,6 +41,8 @@ Required env: SUPABASE_DB_URL.
 from __future__ import annotations
 
 import argparse
+import bisect
+import json
 import logging
 import os
 import sys
@@ -572,6 +578,55 @@ _CLAIM_DIRTY = "SELECT listing_id FROM dirty_broker_listings WHERE marked_at <= 
 _DELETE_DIRTY = "DELETE FROM dirty_broker_listings WHERE listing_id = ANY(%(ids)s) AND marked_at <= %(cutoff)s"
 _CLEAR_DIRTY = "DELETE FROM dirty_broker_listings WHERE marked_at <= %(cutoff)s"
 
+# The budget-exhausted variants (recompute_property_stats._CLEAR_DIRTY_SWEPT_SQL's
+# analogue). A sweep that breaks out on --max-seconds re-attributed only the ids in
+# the window it actually walked, so the GLOBAL clear above erased the queue's signal
+# for every id it never reached — and, before the rotation cursor, it never reached
+# the same tail again on any subsequent day. Scope the delete to the swept window;
+# it is contiguous in id order but WRAPS when the rotation crossed the end of the
+# corpus, hence the second form.
+_CLEAR_DIRTY_SWEPT_SQL = (
+    "DELETE FROM dirty_broker_listings WHERE marked_at <= %(cutoff)s "
+    "AND listing_id >= %(lo)s AND listing_id <= %(hi)s"
+)
+_CLEAR_DIRTY_SWEPT_WRAPPED_SQL = (
+    "DELETE FROM dirty_broker_listings WHERE marked_at <= %(cutoff)s "
+    "AND (listing_id >= %(lo)s OR listing_id <= %(hi)s)"
+)
+
+# Full-sweep rotation cursor: the id attribution last stopped at. The sweep walks
+# broker-bearing ids ASCENDING and breaks on --max-seconds, so without a cursor it
+# restarted at the minimum id every day and the tail above the break — the NEWEST
+# listings — was never attributed by any sweep, ever, while the job still exited 0.
+_SWEEP_CURSOR_KEY = "broker_sweep_cursor"
+# Written ONLY when attribution covered every id, exactly like
+# property_sweep_last_complete: a chronically-truncated sweep then surfaces as a
+# stale stamp on verify_pipeline's `broker_resolution_freshness` check instead of
+# as a green run. Read by that check — rename in both places or not at all.
+_SWEEP_COMPLETE_KEY = "broker_resolution_last_complete"
+
+_READ_SETTING_SQL = "SELECT value FROM app_settings WHERE key = %s"
+
+_WRITE_SWEEP_CURSOR_SQL = """
+INSERT INTO app_settings (key, value, updated_by)
+VALUES (%(key)s,
+        jsonb_build_object('last_id', %(last_id)s::bigint, 'updated_at', now()),
+        'resolve_brokers')
+ON CONFLICT (key) DO UPDATE
+  SET value = excluded.value, updated_at = now(), updated_by = excluded.updated_by
+"""
+
+_STAMP_SWEEP_COMPLETE_SQL = """
+INSERT INTO app_settings (key, value, updated_by)
+VALUES (%(key)s,
+        jsonb_build_object('completed_at', now(),
+                           'listings_swept', %(swept)s::int,
+                           'elapsed_s', %(elapsed_s)s::numeric),
+        'resolve_brokers')
+ON CONFLICT (key) DO UPDATE
+  SET value = excluded.value, updated_at = now(), updated_by = excluded.updated_by
+"""
+
 
 def _settings(conn: Any) -> tuple[list[str], list[str], list[str]]:
     with conn.cursor() as cur:
@@ -810,8 +865,10 @@ def _attach_singletons(conn: Any) -> int:
 def _cross_source_merge(conn: Any, auto_merge_sources: list[str], run_id: int) -> tuple[int, int]:
     """Form corroborated cross-source broker groups and apply reversible merges.
 
-    No-op while only one source is attributed (no cross-source bridges). Review
-    pairs are counted only — the operator review queue lands with Phase 5.
+    No-op while only one source is attributed (no cross-source bridges). Everything
+    the conservative guard refuses to auto-merge is persisted for operator review
+    (_queue_review_pairs); the returned count is the pairs DECIDED, which is what
+    broker_resolution_runs.queued_for_review has always meant.
     """
     # Cross-source bridges need >=2 sources; with one source the freq scan is
     # guaranteed empty, so skip it entirely (the Phase-1 reality — avoids a costly
@@ -850,7 +907,60 @@ def _cross_source_merge(conn: Any, auto_merge_sources: list[str], run_id: int) -
 
     decision = R.decide_merges(list(identities.values()), bridges, auto_merge_sources)
     auto = _apply_merges(conn, decision.auto_merge_groups)
+    # AFTER the merges: they re-point broker_identities.broker_id, so a pair read
+    # before them could propose a broker that no longer survives.
+    proposed = _queue_review_pairs(conn, decision.review_pairs, identities, run_id)
+    LOG.info("RESOLVE merge review pairs decided=%d proposed=%d",
+             len(decision.review_pairs), proposed)
     return auto, len(decision.review_pairs)
+
+
+def _broker_of(conn: Any, identity_ids: list[int]) -> dict[int, int]:
+    """identity id -> its current brokers.id; identities with none are absent."""
+    if not identity_ids:
+        return {}
+    with conn.cursor() as cur:
+        cur.execute("SELECT id, broker_id FROM broker_identities WHERE id = ANY(%s)",
+                    (identity_ids,))
+        return {int(i): int(b) for i, b in cur.fetchall() if b is not None}
+
+
+def _queue_review_pairs(conn: Any, pairs: list[tuple[int, int]],
+                        identities: dict[int, R.Identity], run_id: int) -> int:
+    """Persist decide_merges' review pairs as operator-reviewable merge candidates.
+
+    They were computed and dropped on the floor every sweep (9,377/day at the
+    2026-08-12 review), so the only output of the deliberately conservative
+    auto-merge guard never reached the operator. Keyed on the BROKER pair, not the
+    identity pair: the operator merges brokers, so two identity pairs resolving to
+    the same two brokers are one proposal, and the key stays stable across sweeps."""
+    if not pairs:
+        return 0
+    broker_of = _broker_of(conn, sorted({i for pair in pairs for i in pair}))
+    rows: dict[str, tuple[int, int, str]] = {}
+    for a, b in pairs:
+        left, right = broker_of.get(a), broker_of.get(b)
+        if left is None or right is None or left == right:
+            continue
+        lo, hi = (left, right) if left < right else (right, left)
+        ia, ib = identities.get(a), identities.get(b)
+        rows[f"contactbridge:{lo}:{hi}"] = (lo, hi, json.dumps({
+            "identity_ids": [a, b],
+            "sources": [ia.source if ia else None, ib.source if ib else None],
+            "names": [ia.name if ia else None, ib.name if ib else None],
+            "run_id": run_id,
+        }, ensure_ascii=False))
+    if not rows:
+        return 0
+    keys = sorted(rows)
+    with conn.cursor() as cur:
+        cur.execute(_REVIEW_PAIR_UPSERT_SQL, {
+            "gk": keys,
+            "lo": [rows[k][0] for k in keys],
+            "hi": [rows[k][1] for k in keys],
+            "ev": [rows[k][2] for k in keys],
+        })
+    return len(keys)
 
 
 def _apply_merges(conn: Any, groups: list[list[int]]) -> int:
@@ -865,10 +975,7 @@ def _apply_merges(conn: Any, groups: list[list[int]]) -> int:
     broker_merge_events."""
     if not groups:
         return 0
-    ident_ids = sorted({iid for g in groups for iid in g})
-    with conn.cursor() as cur:
-        cur.execute("SELECT id, broker_id FROM broker_identities WHERE id = ANY(%s)", (ident_ids,))
-        broker_of = {int(i): int(b) for i, b in cur.fetchall() if b is not None}
+    broker_of = _broker_of(conn, sorted({iid for g in groups for iid in g}))
 
     gids: list[str] = []
     survivors: list[int] = []
@@ -959,6 +1066,22 @@ ON CONFLICT (group_key) DO UPDATE SET
   WHERE broker_merge_candidates.status = 'proposed'
 """
 
+# Same ON CONFLICT gate as _CANDIDATE_UPSERT (a resolved group is never revived),
+# but set-based: a sweep decides ~9.4k review pairs and one execute per pair is
+# ~9.4k pooler round trips inside a run that already spends its whole budget.
+# A pair is exactly two brokers, so parallel lo/hi arrays build broker_ids inline
+# — unnest() flattens a bigint[][] and could not carry per-row arrays. Evidence
+# rides as text[] then casts: there is no text[] -> jsonb[] cast to lean on.
+_REVIEW_PAIR_UPSERT_SQL = """
+INSERT INTO broker_merge_candidates (group_key, broker_ids, reason, evidence)
+SELECT d.gk, ARRAY[d.lo, d.hi], 'contact_bridge_review', d.ev::jsonb
+FROM unnest(%(gk)s::text[], %(lo)s::bigint[], %(hi)s::bigint[], %(ev)s::text[])
+     AS d(gk, lo, hi, ev)
+ON CONFLICT (group_key) DO UPDATE SET
+  broker_ids = EXCLUDED.broker_ids, evidence = EXCLUDED.evidence
+  WHERE broker_merge_candidates.status = 'proposed'
+"""
+
 
 def _generate_merge_candidates(conn: Any) -> int:
     """Propose Phase-5 review groups: active brokers that share a normalized name AND
@@ -1032,6 +1155,33 @@ def _broker_bearing_ids(conn: Any, page_size: int) -> list[int]:
     return ids
 
 
+def _sweep_cursor(conn: Any) -> int | None:
+    """The id the last full sweep's attribution stopped at, or None on first run."""
+    with conn.cursor() as cur:
+        cur.execute(_READ_SETTING_SQL, (_SWEEP_CURSOR_KEY,))
+        row = cur.fetchone()
+    value = row[0] if row else None
+    try:
+        return int(value["last_id"])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _rotate_from_cursor(ids: list[int], last_id: int | None) -> list[int]:
+    """`ids` re-ordered to resume just past the previous sweep's stopping point.
+
+    A rotation, NOT a filter: the tail the last sweep never reached is walked first
+    and the head it already covered follows, so a budget-truncated sweep advances
+    through the corpus day by day and wraps — every id stays reachable, which a bare
+    `id > cursor` resume would not guarantee (the head would starve instead)."""
+    if last_id is None or not ids:
+        return ids
+    start = bisect.bisect_right(ids, last_id)
+    if start >= len(ids):
+        return ids
+    return ids[start:] + ids[:start]
+
+
 def _resilient_step(
     conn: Any, reconnect: Callable[[], Any], holder: str = "",
 ) -> tuple[Callable[..., Any], Callable[[], Any]]:
@@ -1103,14 +1253,32 @@ def _run_full(conn: Any, free: list[str], franchise: list[str], auto: list[str],
     # the pooler's ~2-min statement timeout, which run_resilient classifies transient,
     # so the default 4 burns ~8 min on a chunk that is simply poisoned.
     all_ids = step(lambda c: _broker_bearing_ids(c, batch_size), "resolve.ids")
-    for i in range(0, len(all_ids), batch_size):
-        chunk = all_ids[i:i + batch_size]
+    # Resume where the last sweep stopped instead of at the corpus floor. Attribution
+    # regularly spends the whole budget (the 08-09 and 08-10 sweeps both logged it),
+    # so an ascending-from-zero walk re-attributed the same head every day and never
+    # reached the tail — the newest listings — at all.
+    walk = _rotate_from_cursor(
+        all_ids, step(_sweep_cursor, "resolve.sweep_cursor"))
+    first_swept = walk[0] if walk else None
+    last_swept: int | None = None
+    swept = 0
+    complete = True
+    for i in range(0, len(walk), batch_size):
+        chunk = walk[i:i + batch_size]
         step(lambda c, ids=chunk: _attribute(c, "l.id = ANY(%(ids)s)", {"ids": ids}),
              "resolve.attribute", attempts=2)
-        if deadline and time.monotonic() > deadline:
+        last_swept = chunk[-1]
+        swept += len(chunk)
+        # `i + batch_size < len(walk)`: a deadline crossed while finishing the LAST
+        # chunk is a complete walk, not a truncated one — flagging it incomplete
+        # would withhold the completion stamp from a sweep that swept everything.
+        if deadline and time.monotonic() > deadline and i + batch_size < len(walk):
             LOG.warning("RESOLVE full: time budget reached during attribution at %d/%d ids",
-                        i, len(all_ids))
+                        swept, len(walk))
+            complete = False
             break
+    LOG.info("RESOLVE full attribution swept=%d/%d complete=%s resume_at=%s",
+             swept, len(all_ids), complete, last_swept)
 
     step(lambda c: _resolve_firms(c, free, franchise), "resolve.firms")
     # Batch the listings->firm link over the same id chunks — a single global UPDATE
@@ -1217,7 +1385,21 @@ def _run_full(conn: Any, free: list[str], franchise: list[str], auto: list[str],
 
     def _finalize(c: Any) -> None:
         with c.cursor() as cur:
-            cur.execute(_CLEAR_DIRTY, {"cutoff": cutoff})
+            if complete:
+                cur.execute(_CLEAR_DIRTY, {"cutoff": cutoff})
+                cur.execute(_STAMP_SWEEP_COMPLETE_SQL, {
+                    "key": _SWEEP_COMPLETE_KEY, "swept": swept,
+                    "elapsed_s": round(time.monotonic() - t0, 1),
+                })
+            elif first_swept is not None and last_swept is not None:
+                cur.execute(
+                    _CLEAR_DIRTY_SWEPT_SQL if first_swept <= last_swept
+                    else _CLEAR_DIRTY_SWEPT_WRAPPED_SQL,
+                    {"cutoff": cutoff, "lo": first_swept, "hi": last_swept},
+                )
+            if last_swept is not None:
+                cur.execute(_WRITE_SWEEP_CURSOR_SQL,
+                            {"key": _SWEEP_CURSOR_KEY, "last_id": last_swept})
             cur.execute(
                 "UPDATE broker_resolution_runs SET ended_at = now(), brokers_recomputed = "
                 "(SELECT count(*) FROM brokers WHERE status='active'), identities_upserted = "
