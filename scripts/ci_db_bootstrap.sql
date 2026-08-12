@@ -13,6 +13,8 @@ create extension if not exists pg_trgm;
 create role anon nologin;
 create role authenticated nologin;
 create role service_role nologin bypassrls;
+-- PostgREST's connection role: migration 394 pins pgrst.db_max_rows on it.
+create role authenticator nologin;
 
 -- Supabase provides the `auth` schema + `auth.users` in production. A vanilla
 -- container does not, so migrations that FK-reference or trigger on auth.users

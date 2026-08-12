@@ -218,6 +218,18 @@ rules. Identify which one a task belongs to before you start.
   rely on anon's existing SELECT grant on the public views — they don't escalate. New
   public-data RPCs follow the same pattern; new private RPCs go through the FastAPI
   service.
+- **Every PostgREST read is one of three shapes** (the 2026-08 cap-drift audit): a
+  *keyed* read (`.eq` on a key, cardinality bounded by the domain — snapshots per
+  listing, images per listing); an *exhaustive* read whose whole meaning is "the
+  complete set" (membership maps, prefilter id-lists, choropleths, curated
+  registries) — these MUST go through `frontend/src/lib/fetchAllRows.ts`
+  (complete-or-throw paging, correct under any `db-max-rows`; ESLint bans `.range()`
+  everywhere else); or a *bounded* read with an explicit `.limit()` and, where "more
+  exists" matters, a communicated flag (the map's `MAP_CAP` + `capped` pattern).
+  PostgREST's server clamp is itself VERSIONED config — migration 394 pins
+  `pgrst.db_max_rows = 50000` (= `MAP_CAP`) on the `authenticator` role, after the
+  unversioned dashboard value shipped two silent-truncation bugs at 1,000 and was then
+  lifted out-of-band; keep the dashboard "Max Rows" field agreeing with the migration.
 - **No write path from the browser.** Any UI action that needs a write goes through the
   bearer-token-gated FastAPI service, not direct Postgres. The toolkit's write-allowed
   exceptions (see Toolkit rule #5) are reachable only via the API.

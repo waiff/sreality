@@ -1,4 +1,5 @@
 import { supabase } from './supabase';
+import { fetchAllRows } from './fetchAllRows';
 import { imageSrc } from './imageUrl';
 import { type TaggedImageUrl } from './imageTags';
 import { fetchListingBrokersByIds, fetchBrokersByIds } from './brokers';
@@ -513,20 +514,18 @@ async function resolveTagPrefilter(
   f: ListingFilters,
 ): Promise<number[] | null> {
   if (f.tags.length === 0) return null;
-  /* PostgREST applies a server-configured `db-max-rows` cap on every
-   * response — Supabase's default is 1,000. With ~62k listings in
-   * the table, a tag matched widely enough would silently truncate
-   * the prefilter id list and bleed listings the operator asked to
-   * exclude back into the cohort. `.range(0, 99999)` bypasses the
-   * cap; the result is capped client-side instead, headroom for any
-   * conceivable future cohort. */
-  const { data, error } = await supabase
-    .rpc('properties_with_tags', { tag_ids: f.tags })
-    .range(0, 99999);
-  if (error) throw error;
-  return ((data ?? []) as Array<{ property_id: number }>).map(
-    (r) => r.property_id,
-  );
+  /* Exhaustive by contract: a truncated allowlist would silently bleed
+   * listings the operator asked to exclude back into the cohort — so the read
+   * pages via fetchAllRows (complete-or-throw, correct under any db-max-rows;
+   * see its header for the cap-drift history). */
+  const rows = await fetchAllRows<{ property_id: number }>({
+    relation: 'properties_with_tags',
+    build: () => supabase.rpc('properties_with_tags', { tag_ids: f.tags }),
+    orderBy: [{ column: 'property_id' }],
+    key: ['property_id'],
+    expectMax: 100_000,
+  });
+  return rows.map((r) => r.property_id);
 }
 
 /* Phase QUAL — `listings_with_city_quality` RPC prefilter. Same
@@ -552,27 +551,28 @@ async function resolveCityQualityPrefilter(
   f: ListingFilters,
 ): Promise<number[] | null> {
   if (!hasCityQualityFilter(f)) return null;
-  /* Filters carry the wire shape (snake_case) directly so no
-   * translation layer is needed before calling the RPC. `.range`
-   * bypasses PostgREST's default 1,000-row cap on the SETOF
-   * response — same reason `resolveTagPrefilter` does it. */
-  const { data, error } = await supabase
-    .rpc('listings_with_city_quality', {
-      p_index_rules: f.cityIndexRules.length === 0 ? null : f.cityIndexRules,
-      /* pop bounds moved to the home_obec_pop column filter (migration 142);
-       * never sent through this RPC anymore. */
-      p_pop_min: null,
-      p_pop_max: null,
-      p_proximity: f.nearCityProximity,
-    })
-    .range(0, 99999);
-  if (error) throw error;
-  /* The RPC returns the surrogate `listing_id` (migration 351); the cast type
-   * pins that so a stray `r.sreality_id` can't silently reintroduce the
-   * id-space half-swap. Applied downstream via `.in('listing_id', ids)`. */
-  return ((data ?? []) as Array<{ listing_id: number }>).map(
-    (r) => r.listing_id,
-  );
+  /* Filters carry the wire shape (snake_case) directly so no translation layer
+   * is needed before calling the RPC. Exhaustive by contract, same reason as
+   * `resolveTagPrefilter`. */
+  const rows = await fetchAllRows<{ listing_id: number }>({
+    relation: 'listings_with_city_quality',
+    build: () =>
+      supabase.rpc('listings_with_city_quality', {
+        p_index_rules: f.cityIndexRules.length === 0 ? null : f.cityIndexRules,
+        /* pop bounds moved to the home_obec_pop column filter (migration 142);
+         * never sent through this RPC anymore. */
+        p_pop_min: null,
+        p_pop_max: null,
+        p_proximity: f.nearCityProximity,
+      }),
+    /* The RPC returns the surrogate `listing_id` (migration 351); the row type
+     * pins that so a stray `r.sreality_id` can't silently reintroduce the
+     * id-space half-swap. Applied downstream via `.in('listing_id', ids)`. */
+    orderBy: [{ column: 'listing_id' }],
+    key: ['listing_id'],
+    expectMax: 100_000,
+  });
+  return rows.map((r) => r.listing_id);
 }
 
 /* Market-growth (price-stats datasets) prefilter. For each active rule the
@@ -620,14 +620,14 @@ async function resolveEstimatesPrefilter(
   f: ListingFilters,
 ): Promise<number[] | null> {
   if (!f.withEstimates) return null;
-  const { data, error } = await supabase
-    .from('property_estimates_public')
-    .select('property_id')
-    .range(0, 99999);
-  if (error) throw error;
-  return ((data ?? []) as Array<{ property_id: number }>).map(
-    (r) => r.property_id,
-  );
+  const rows = await fetchAllRows<{ property_id: number }>({
+    relation: 'property_estimates_public',
+    build: () => supabase.from('property_estimates_public').select('property_id'),
+    orderBy: [{ column: 'property_id' }],
+    key: ['property_id'],
+    expectMax: 100_000,
+  });
+  return rows.map((r) => r.property_id);
 }
 
 /* Deal-pipeline scope prefilter (rule #22, migration 205). Same composition
@@ -1703,13 +1703,18 @@ export interface TrainingLabelCount {
  * underlying read as fetchDistinctTrainingLabels (see its comment re: bound), just
  * aggregated client-side instead of deduped, since the table is still small. */
 export const fetchTrainingLabelCounts = async (): Promise<TrainingLabelCount[]> => {
-  const { data, error } = await supabase
-    .from('image_training_examples_public')
-    .select('label')
-    .limit(2000);
-  if (error) throw error;
+  /* Exhaustive — the labeling program grows this daily (1,198 rows when the
+   * old silent `.limit(2000)` was replaced; it was the nearest-term casualty). */
+  const rows = await fetchAllRows<{ image_id: number; label: string }>({
+    relation: 'image_training_examples_public',
+    build: () =>
+      supabase.from('image_training_examples_public').select('image_id,label'),
+    orderBy: [{ column: 'image_id' }],
+    key: ['image_id'],
+    expectMax: 250_000,
+  });
   const counts = new Map<string, number>();
-  for (const row of (data ?? []) as { label: string }[]) {
+  for (const row of rows) {
     counts.set(row.label, (counts.get(row.label) ?? 0) + 1);
   }
   return [...counts.entries()]
@@ -1923,54 +1928,42 @@ export const cityQualityKeys = {
 };
 
 export const fetchCuratedCities = async (): Promise<CuratedCity[]> => {
-  /* `.range` bypasses PostgREST's default 1,000-row cap. 205 rows
-   * today, headroom for future operator uploads that grow the set. */
-  const { data, error } = await supabase
-    .from('curated_cities_public')
-    .select('*')
-    .order('name')
-    .range(0, 4999);
-  if (error) throw error;
-  return (data ?? []) as CuratedCity[];
+  /* 205 rows today; operator uploads grow the set. Two obce can share a name
+   * (see the same-name-obce price-stats fix), hence the city_id tiebreak. */
+  return await fetchAllRows<CuratedCity>({
+    relation: 'curated_cities_public',
+    build: () => supabase.from('curated_cities_public').select('*'),
+    orderBy: [{ column: 'name' }, { column: 'city_id' }],
+    key: ['city_id'],
+    expectMax: 25_000,
+  });
 };
 
 export const fetchCityIndexDefinitions = async (): Promise<CityIndexDefinition[]> => {
-  /* `.range` bypasses PostgREST's default 1,000-row cap. 33 rows
-   * today, but defensive against future index additions. */
-  const { data, error } = await supabase
-    .from('city_index_definitions_public')
-    .select('*')
-    .range(0, 999);
-  if (error) throw error;
-  return (data ?? []) as CityIndexDefinition[];
+  /* ~33 rows today, operator additions grow it. Display order is sort_order,
+   * applied by the consumers — the fetch orders by the unique name for paging. */
+  return await fetchAllRows<CityIndexDefinition>({
+    relation: 'city_index_definitions_public',
+    build: () => supabase.from('city_index_definitions_public').select('*'),
+    orderBy: [{ column: 'index_name' }],
+    key: ['index_name'],
+    expectMax: 25_000,
+  });
 };
 
 export const fetchCityIndexValues = async (): Promise<CityIndexValue[]> => {
-  /* The view has 205 cities × 33 indexes = 6,765 rows, but PostgREST
-   * hard-caps every response at 1,000 rows on this project (db-max-rows)
-   * — `.range(0, 49999)` does NOT lift it: it's a server-side ceiling,
-   * not a page size. The old single-shot fetch therefore returned only
-   * the first ~32 cities (1,000 ÷ 33), so every city past that point
-   * (Dobříš included) showed em-dashes for every index in the popup and
-   * a grey, value-less pin in the choropleth. Page through with a stable
-   * order until a short page signals the end — the same fix
-   * fetchRentMapChoropleth already uses. Cached (staleTime: Infinity),
-   * so the ~7 round-trips only happen on first load. */
-  const PAGE = 1000;
-  const out: CityIndexValue[] = [];
-  for (let from = 0; ; from += PAGE) {
-    const { data, error } = await supabase
-      .from('city_index_values_public')
-      .select('city_id,index_name,value')
-      .order('city_id', { ascending: true })
-      .order('index_name', { ascending: true })
-      .range(from, from + PAGE - 1);
-    if (error) throw error;
-    const rows = (data ?? []) as CityIndexValue[];
-    out.push(...rows);
-    if (rows.length < PAGE) break;
-  }
-  return out;
+  /* 205 cities × 33 indexes = 6,798 rows. This read shipped THE truncation bug
+   * fetchAllRows exists to kill (only the first ~32 cities came back under the
+   * then-1,000-row db-max-rows; Dobříš showed em-dashes for every index).
+   * Cached (staleTime: Infinity), so the handful of pages is first-load only. */
+  return await fetchAllRows<CityIndexValue>({
+    relation: 'city_index_values_public',
+    build: () =>
+      supabase.from('city_index_values_public').select('city_id,index_name,value'),
+    orderBy: [{ column: 'city_id' }, { column: 'index_name' }],
+    key: ['city_id', 'index_name'],
+    expectMax: 100_000,
+  });
 };
 
 export interface CityPolygon {
@@ -1979,19 +1972,19 @@ export interface CityPolygon {
 }
 
 export const fetchCuratedCityPolygons = async (): Promise<CityPolygon[]> => {
-  /* One simplified municipality boundary per curated city (205 rows,
-   * comfortably under the 1,000-row db-max-rows cap, so a single page
-   * suffices). `geojson` is the raw ST_AsGeoJSON string the map
-   * JSON.parses into a Feature geometry — the same contract as
-   * rent_map_choropleth_public. Fetched once and cached
-   * (staleTime: Infinity), and only when the map tab is active. */
-  const { data, error } = await supabase
-    .from('curated_city_polygons_public')
-    .select('city_id,geojson')
-    .order('city_id', { ascending: true })
-    .range(0, 4999);
-  if (error) throw error;
-  return (data ?? []) as CityPolygon[];
+  /* One simplified municipality boundary per curated city (205 rows).
+   * `geojson` is the raw ST_AsGeoJSON string the map JSON.parses into a
+   * Feature geometry — the same contract as rent_map_choropleth_public.
+   * Fetched once and cached (staleTime: Infinity), and only when the map tab
+   * is active. */
+  return await fetchAllRows<CityPolygon>({
+    relation: 'curated_city_polygons_public',
+    build: () =>
+      supabase.from('curated_city_polygons_public').select('city_id,geojson'),
+    orderBy: [{ column: 'city_id' }],
+    key: ['city_id'],
+    expectMax: 25_000,
+  });
 };
 
 /* -------------------------------------------------------------------------- */
@@ -2022,36 +2015,28 @@ export interface RentMapKraj {
 }
 
 export const fetchRentMapChoropleth = async (): Promise<RentMapPolygon[]> => {
-  /* The view has ~7,630 rows (one per obec / katastrální území), but
-   * PostgREST hard-caps every response at 1,000 rows on this project
-   * (db-max-rows) — neither `.range(0, 9999)` nor `.limit()` lifts it.
-   * So page through with a stable `order` until a short page signals
-   * the end. Fetched once and cached (staleTime: Infinity), so the ~8
-   * requests only happen when the operator first enables the layer. */
-  const PAGE = 1000;
-  const out: RentMapPolygon[] = [];
-  for (let from = 0; ; from += PAGE) {
-    const { data, error } = await supabase
-      .from('rent_map_choropleth_public')
-      .select('*')
-      .order('ruian_code', { ascending: true })
-      .range(from, from + PAGE - 1);
-    if (error) throw error;
-    const rows = (data ?? []) as RentMapPolygon[];
-    out.push(...rows);
-    if (rows.length < PAGE) break;
-  }
-  return out;
+  /* ~7,630 rows (one per obec / katastrální území) — the OTHER read that
+   * shipped the db-max-rows truncation bug (see fetchAllRows' header).
+   * Fetched once and cached (staleTime: Infinity), so the handful of pages
+   * only happens when the operator first enables the layer. */
+  return await fetchAllRows<RentMapPolygon>({
+    relation: 'rent_map_choropleth_public',
+    build: () => supabase.from('rent_map_choropleth_public').select('*'),
+    orderBy: [{ column: 'ruian_code' }],
+    key: ['ruian_code'],
+    expectMax: 100_000,
+  });
 };
 
 export const fetchRentMapKraje = async (): Promise<RentMapKraj[]> => {
-  /* 14 kraje; `.range` kept for symmetry / headroom. */
-  const { data, error } = await supabase
-    .from('rent_map_kraje_public')
-    .select('*')
-    .range(0, 999);
-  if (error) throw error;
-  return (data ?? []) as RentMapKraj[];
+  /* 14 kraje — fixed by geography. */
+  return await fetchAllRows<RentMapKraj>({
+    relation: 'rent_map_kraje_public',
+    build: () => supabase.from('rent_map_kraje_public').select('*'),
+    orderBy: [{ column: 'ruian_code' }],
+    key: ['ruian_code'],
+    expectMax: 1_000,
+  });
 };
 
 /* -------------------------------------------------------------------------- */
@@ -2186,16 +2171,16 @@ export const fetchPropertyCollectionIds = async (
 export const fetchPropertyCollectionMemberSet = async (): Promise<
   Map<number, number[]>
 > => {
-  const { data, error } = await supabase
-    .from('collection_properties_public')
-    .select('property_id, collection_id')
-    .range(0, 99999);
-  if (error) throw error;
+  const rows = await fetchAllRows<{ property_id: number; collection_id: number }>({
+    relation: 'collection_properties_public',
+    build: () =>
+      supabase.from('collection_properties_public').select('property_id, collection_id'),
+    orderBy: [{ column: 'property_id' }, { column: 'collection_id' }],
+    key: ['property_id', 'collection_id'],
+    expectMax: 100_000,
+  });
   const map = new Map<number, number[]>();
-  for (const r of (data ?? []) as Array<{
-    property_id: number;
-    collection_id: number;
-  }>) {
+  for (const r of rows) {
     const arr = map.get(r.property_id);
     if (arr) arr.push(r.collection_id);
     else map.set(r.property_id, [r.collection_id]);
@@ -2258,10 +2243,9 @@ export const pipelineKeys = {
  * read. `property_pipeline_public` is RLS-scoped + security_invoker (migration
  * 316), so this returns the caller's own board and nothing else.
  *
- * `.range(0, 99999)` for the same reason the tag prefilter does it: PostgREST
- * caps responses at 1,000 rows by default, and a silently truncated membership
- * map would both blank funnels and, once the pipeline scope is on, drop
- * properties the operator explicitly asked to see. */
+ * Exhaustive via fetchAllRows for the same reason the tag prefilter is: a
+ * silently truncated membership map would both blank funnels and, once the
+ * pipeline scope is on, drop properties the operator explicitly asked to see. */
 export interface PipelineMembership {
   property_id: number;
   stage_id: number;
@@ -2275,16 +2259,19 @@ export interface PipelineMembership {
 export type PipelineMembers = Map<number, PipelineMembership>;
 
 export const fetchPipelineMembers = async (): Promise<PipelineMembers> => {
-  const { data, error } = await supabase
-    .from('property_pipeline_public')
-    .select(
-      'property_id, stage_id, stage_label, stage_color, stage_code, stage_position, is_terminal',
-    )
-    .range(0, 99999);
-  if (error) throw error;
-  return new Map(
-    ((data ?? []) as PipelineMembership[]).map((r) => [r.property_id, r]),
-  );
+  const rows = await fetchAllRows<PipelineMembership>({
+    relation: 'property_pipeline_public',
+    build: () =>
+      supabase
+        .from('property_pipeline_public')
+        .select(
+          'property_id, stage_id, stage_label, stage_color, stage_code, stage_position, is_terminal',
+        ),
+    orderBy: [{ column: 'property_id' }],
+    key: ['property_id'],
+    expectMax: 100_000,
+  });
+  return new Map(rows.map((r) => [r.property_id, r]));
 };
 
 export const fetchPropertyPipeline = async (
@@ -2322,25 +2309,28 @@ export const fetchPipelineStages = async (): Promise<PipelineStage[]> => {
  * anon reads (property_pipeline_public + properties_public) joined client-side
  * by property_id — the same batched-hydration pattern Browse uses. */
 export const fetchPipelineBoard = async (): Promise<PipelineBoardCard[]> => {
-  const { data: cards, error: cErr } = await supabase
-    .from('property_pipeline_public')
-    .select('property_id, stage_id, board_position, entered_stage_at, added_at')
-    /* board_position is the MANUAL order and stays the default sort, but it is
-     * not unique — it is assigned max+1 within the entry stage at bookmark time
-     * and never renumbered on a stage move, so live data has collisions WITHIN
-     * a stage. property_id is the deterministic tiebreak; without it equal
-     * positions reshuffle between refetches. Any explicit sort re-sorts
-     * client-side (lib/pipelineSort) and tiebreaks the same way. */
-    .order('board_position')
-    .order('property_id');
-  if (cErr) throw cErr;
-  const rows = (cards ?? []) as Array<{
+  /* board_position is the MANUAL order and stays the default sort, but it is
+   * not unique — it is assigned max+1 within the entry stage at bookmark time
+   * and never renumbered on a stage move, so live data has collisions WITHIN
+   * a stage. property_id is the deterministic tiebreak; without it equal
+   * positions reshuffle between refetches. Any explicit sort re-sorts
+   * client-side (lib/pipelineSort) and tiebreaks the same way. */
+  const rows = await fetchAllRows<{
     property_id: number;
     stage_id: number;
     board_position: number;
     entered_stage_at: string;
     added_at: string;
-  }>;
+  }>({
+    relation: 'property_pipeline_public',
+    build: () =>
+      supabase
+        .from('property_pipeline_public')
+        .select('property_id, stage_id, board_position, entered_stage_at, added_at'),
+    orderBy: [{ column: 'board_position' }, { column: 'property_id' }],
+    key: ['property_id'],
+    expectMax: 100_000,
+  });
   if (rows.length === 0) return [];
 
   const ids = rows.map((r) => r.property_id);
