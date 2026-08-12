@@ -136,6 +136,42 @@ def test_attach_stragglers_incremental_skips_native_id_backfill():
     assert any("INSERT INTO properties" in s for s in order)
 
 
+class _TxnMarkingConn(_FakeConn):
+    """_FakeConn that records BEGIN/COMMIT markers, so a test can assert which
+    statements share one transaction."""
+
+    def transaction(self) -> Any:
+        conn = self
+
+        class _Txn:
+            def __enter__(self) -> Any:
+                conn.executed.append(("BEGIN", None))
+                return self
+
+            def __exit__(self, *exc: Any) -> None:
+                conn.executed.append(("COMMIT", None))
+
+        return _Txn()
+
+
+def test_attach_stragglers_insert_and_link_are_one_transaction() -> None:
+    """The INSERT and the LINK are only JOINTLY idempotent: committing the
+    INSERT alone leaves listings still unlinked, so the next attempt inserts a
+    SECOND singleton each and orphans one. db.run_resilient now REPLAYS this op
+    on a transient error, so the pair must be all-or-nothing — and the
+    whole-table native-id backfill must stay outside that transaction."""
+    conn = _TxnMarkingConn()
+    _attach_stragglers(conn)
+    order = _sqls(conn)
+    backfill = next(i for i, s in enumerate(order)
+                    if "source_id_native = sreality_id::text" in s)
+    begin = order.index("BEGIN")
+    insert = next(i for i, s in enumerate(order) if "INSERT INTO properties" in s)
+    link = next(i for i, s in enumerate(order) if "p.repr_listing_ref_id = l.id" in s)
+    commit = order.index("COMMIT")
+    assert backfill < begin < insert < link < commit
+
+
 class _DrainCur:
     def __init__(self, conn: "_DrainConn") -> None:
         self._conn = conn
@@ -475,6 +511,53 @@ def test_full_sweep_budget_exhaustion_is_red_and_scopes_the_dirty_clear(
     assert not _find(conn, "property_sweep_last_complete")
     # the lease is still released
     assert _find(conn, "SET holder = NULL")
+
+
+class _FlakyCur(_Cur):
+    """Fails the FIRST recompute statement with a transient drop, then behaves."""
+
+    def execute(self, sql: str, params: Any = None) -> None:
+        import psycopg
+
+        s = " ".join(sql.split())
+        if "WITH batch AS" in s and self._conn.fail_once:
+            self._conn.fail_once = False
+            raise psycopg.OperationalError("SSL connection has been closed unexpectedly")
+        super().execute(sql, params)
+
+
+class _FlakySweepConn(_SweepConn):
+    def __init__(self, max_id: int) -> None:
+        super().__init__(max_id)
+        self.fail_once = True
+
+    def cursor(self) -> Any:
+        return _FlakyCur(self)
+
+
+def test_batch_retry_renews_the_lease_on_every_attempt(monkeypatch: Any) -> None:
+    """A retried batch can occupy 2 x _BATCH_STATEMENT_TIMEOUT (20 min), past
+    the 15-min _LEASE_TTL. So the renewal must be the first statement of the
+    RETRIED op — renewing once per loop iteration would let the replay outlive
+    its own lease, handing maintenance to another writer mid-batch and reding
+    the sweep on the next renewal."""
+    import scripts.recompute_property_stats as rps
+
+    monkeypatch.setattr(rps.db.time, "sleep", lambda s: None)
+    conn = _FlakySweepConn(max_id=2000)  # exactly one batch
+    assert _run_sweep(monkeypatch, conn, []) == 0
+    order = _sqls(conn)
+    grants = [i for i, s in enumerate(order)
+              if "property_maintenance_lease" in s and "RETURNING" in s]
+    recomputes = [i for i, s in enumerate(order) if "WITH batch AS" in s]
+    # acquisition + one renewal per ATTEMPT (2), not per loop iteration (1)
+    assert len(grants) == 3
+    # the failed attempt never recorded its statement; the replay did, and its
+    # own renewal came first
+    assert len(recomputes) == 1
+    assert grants[-1] < recomputes[-1]
+    # the sweep still completed normally on the replay
+    assert _find(conn, "property_sweep_last_complete")
 
 
 # --- connection / lease resilience + budget headroom --------------------------

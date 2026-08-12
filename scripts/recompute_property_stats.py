@@ -566,9 +566,21 @@ def _attach_stragglers(conn: Any, *, skip_native_backfill: bool = False) -> int:
     operator-ordered only (CLAUDE.md rule 15). Fresh singletons are inserted already-correct (one child, no price history),
     so they need no recompute and are not enqueued dirty.
     """
-    with conn.cursor() as cur:
-        if not skip_native_backfill:
+    if not skip_native_backfill:
+        with conn.cursor() as cur:
             cur.execute(_ATTACH_BACKFILL_NATIVE_ID_SQL)
+    # INSERT + LINK in ONE transaction: the pair is only JOINTLY idempotent.
+    # Under autocommit a failure between them commits properties rows whose
+    # listings still carry property_id NULL, so the next attempt INSERTs a
+    # SECOND singleton per straggler and the LINK picks one arbitrarily — the
+    # other is a childless orphan nothing but _reconcile_childless's
+    # is_active=false ever touches. That window used to cost one duplicate per
+    # dead run; now that db.run_resilient REPLAYS this op it can cost one per
+    # attempt (a pooler statement-timeout on the un-scoped LINK is the realistic
+    # trigger). All-or-nothing makes the replay a true no-op re-run. The
+    # whole-table native-id backfill stays outside — it is independent and
+    # idempotent on its own, and nothing should hold its locks for the pair.
+    with conn.transaction(), conn.cursor() as cur:
         cur.execute(_ATTACH_INSERT_SQL)
         inserted = cur.rowcount or 0
         cur.execute(_ATTACH_LINK_SQL)
@@ -670,9 +682,11 @@ _MAX_BUDGET_SECONDS = 6000.0
 # proved too tight for the post-#971 batch SQL on deep-history batches: the
 # 2026-08-06 10:09Z run's FIRST batch (ids 1-2001, the oldest sreality
 # listings) was killed at ~3.5 min while later-id batches run in seconds.
-# MUST stay comfortably under _LEASE_TTL (15 min): renewal only fires between
-# statements, so one statement's worst case is the longest possible renewal
-# gap.
+# MUST stay comfortably under _LEASE_TTL (15 min): renewal fires as the first
+# statement of each batch attempt, so ONE statement's worst case is the longest
+# possible renewal gap. (Per ATTEMPT, deliberately — see
+# _BATCH_RESILIENT_ATTEMPTS: renewing only once per loop iteration would let a
+# retried batch outlive its own lease.)
 _BATCH_STATEMENT_TIMEOUT = "10min"
 
 # Retry budget for ONE recompute batch (db.run_resilient defaults to 4). A batch
@@ -683,7 +697,9 @@ _BATCH_STATEMENT_TIMEOUT = "10min"
 # useful part of the budget (a dropped connection or a passing lock wait replays
 # once) and bounds the in-flight worst case at 2 x _BATCH_STATEMENT_TIMEOUT,
 # which is what the workflow's timeout-minutes is sized for. A range that times
-# out twice is the poisoned range the error log names, not a blip.
+# out twice is the poisoned range the error log names, not a blip. 20 min also
+# exceeds _LEASE_TTL, which is why the lease renewal runs INSIDE the retried op
+# (main()'s _renew_and_recompute) rather than once per loop iteration.
 _BATCH_RESILIENT_ATTEMPTS = 2
 
 _TRY_LEASE_SQL = """
@@ -943,16 +959,25 @@ def main() -> int:
                 if batch_started >= deadline:
                     incomplete_at = lo
                     break
-                # Renewal (not acquisition) through step() too: it is a sticky-holder
-                # CAS, idempotent on retry, and on a dead connection the raw call
-                # raises BEFORE the wrapped batch below can reconnect. A genuine
-                # lost lease still raises RuntimeError, which run_resilient re-raises
-                # immediately (not an OperationalError -> not transient).
-                step(lambda c: _renew_lease(c, holder), "sweep.renew")
+                # Renewal is the FIRST statement of the retried op, not a
+                # separate step before it. _BATCH_RESILIENT_ATTEMPTS lets one
+                # batch occupy up to 2 x _BATCH_STATEMENT_TIMEOUT (20 min),
+                # which would blow past the 15-min _LEASE_TTL and break this
+                # module's invariant that one statement's worst case is the
+                # longest possible renewal gap — another writer would take the
+                # lease mid-batch and the next renewal would red the sweep.
+                # Re-asserting per attempt also re-takes the lease on the FRESH
+                # connection after a pooler drop. Idempotent (sticky-holder CAS);
+                # a genuinely lost lease raises RuntimeError, which run_resilient
+                # re-raises immediately (not an OperationalError -> not transient).
+                def _renew_and_recompute(c: Any, lo: int = lo, hi: int = hi) -> None:
+                    _renew_lease(c, holder)
+                    _run_recompute_statement(
+                        c, _RECOMPUTE_BATCH_SQL, {"lo": lo, "hi": hi})
+
                 try:
-                    step(lambda c: _run_recompute_statement(
-                        c, _RECOMPUTE_BATCH_SQL, {"lo": lo, "hi": hi}), "sweep.batch",
-                        attempts=_BATCH_RESILIENT_ATTEMPTS)
+                    step(_renew_and_recompute, "sweep.batch",
+                         attempts=_BATCH_RESILIENT_ATTEMPTS)
                 except Exception:
                     # Name the poisoned range before dying — the 10:09Z run's
                     # log showed only a bare QueryCanceled with no way to tell
