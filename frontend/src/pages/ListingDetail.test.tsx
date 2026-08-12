@@ -15,6 +15,7 @@ import { MemoryRouter, Route, Routes } from 'react-router-dom';
 
 import ListingDetail, { FreshnessBlock } from './ListingDetail';
 import * as api from '@/lib/api';
+import * as brokers from '@/lib/brokers';
 import * as queries from '@/lib/queries';
 import type { ListingPublic } from '@/lib/types';
 
@@ -246,5 +247,51 @@ describe('<ListingDetail> resolver chain', () => {
     );
     expect(queries.fetchImagesByListing).toHaveBeenCalledWith(105053);
     expect(queries.fetchFreshnessChecksByListing).toHaveBeenCalledWith(-11876);
+  });
+});
+
+describe('<BrokerChip>', () => {
+  beforeEach(() => {
+    vi.mocked(queries.fetchListingBySreality).mockReset();
+    vi.mocked(queries.fetchListingBySreality).mockResolvedValue(RESOLVER_LISTING);
+    vi.mocked(brokers.fetchListingBroker).mockReset();
+  });
+
+  function renderListing() {
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    return render(
+      <QueryClientProvider client={qc}>
+        <MemoryRouter initialEntries={['/listing/-11876']}>
+          <Routes>
+            <Route path="listing/:sreality_id" element={<ListingDetail />} />
+          </Routes>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+  }
+
+  /* fetchListingBroker returns null ONLY for the two 404 bodies that mean "nothing
+     is attributed here"; every other error rethrows. Rendering both as an absent
+     chip asserted "no broker" for every outage — the dark state that hid the
+     PostgREST revocation on this surface for a month. */
+  it('says so when the read fails instead of looking like an unattributed listing', async () => {
+    vi.mocked(brokers.fetchListingBroker).mockRejectedValue(
+      new api.ApiError('Invalid token', 401, null),
+    );
+
+    renderListing();
+
+    await waitFor(() =>
+      expect(screen.getByText('Makléře se nepodařilo načíst')).toBeTruthy(),
+    );
+  });
+
+  it('still renders nothing for a genuinely unattributed listing', async () => {
+    vi.mocked(brokers.fetchListingBroker).mockResolvedValue(null);
+
+    renderListing();
+
+    await waitFor(() => expect(brokers.fetchListingBroker).toHaveBeenCalled());
+    expect(screen.queryByText('Makléře se nepodařilo načíst')).toBeNull();
   });
 });

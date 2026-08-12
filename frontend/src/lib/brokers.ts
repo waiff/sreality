@@ -27,7 +27,6 @@ export function prettyPhone(p: string): string {
  * looks like an absent one.
  */
 
-export type GeoLevel = 'region' | 'okres';
 export type LeaderMetric =
   | 'active_property_count'
   | 'property_count'
@@ -42,14 +41,6 @@ export interface BrokerContactFields {
   primary_phone?: string | null;
   has_email?: boolean;
   has_phone?: boolean;
-}
-
-export interface BrokerGeoOption {
-  geo_level: GeoLevel;
-  geo_id: number;
-  name: string;
-  parent_id: number | null;
-  broker_count: number;
 }
 
 export interface BrokerLeaderRow extends BrokerContactFields {
@@ -239,20 +230,13 @@ function chunk<T>(xs: ReadonlyArray<T>, size: number): T[][] {
   return out;
 }
 
-/* Region / okres picker metadata. Omit `geoLevel` for both levels — the route
- * 422s on any value outside GeoLevel rather than silently unfiltering. The only
- * browser path to broker_geo_options, which is dark to `authenticated`. */
-export async function fetchBrokerGeoOptions(
-  geoLevel?: GeoLevel,
-): Promise<BrokerGeoOption[]> {
-  const r = await apiGet<Envelope<BrokerGeoOption[]>>(
-    '/brokers/geo-options',
-    geoLevel ? { geo_level: geoLevel } : undefined,
-    undefined,
-    JWT,
-  );
-  return r.data ?? [];
-}
+/* No wrapper for GET /brokers/geo-options: this module's caller (BrokerDetail's
+ * region-name map) went away when the dossier started joining region_shares[].name
+ * server-side, and the page's location control is the shared LocationTypeahead +
+ * chipsToGeoArrays, which matches on stable admin ids like Browse and Datasets do.
+ * A broker-specific geo vocabulary would fork that contract for one page. The
+ * route stays — it is the only path to broker_geo_options, which is dark to
+ * `authenticated` — so re-adding a wrapper is a few lines if a consumer appears. */
 
 export async function fetchBrokerLeaderboard(
   p: LeaderboardParams,

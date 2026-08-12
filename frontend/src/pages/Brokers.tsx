@@ -2,6 +2,8 @@ import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { listBrokerMergeCandidates } from '../lib/api';
+import { useAuth } from '@/lib/auth';
+import { isSupabaseConfigured } from '@/lib/supabase';
 import {
   chipsToGeoArrays,
   contactState,
@@ -52,10 +54,21 @@ export default function Brokers() {
   // reason_counts is the whole queue; `count` is only the page, so the badge used
   // to pin at its own 100-row limit (and paid for 100 enriched rows to show one
   // number). Ask for a single row and read the counts.
+  //
+  // /broker-review/candidates is require_admin while this page is only agenda-
+  // gated, so an ungated query is two guaranteed 403s per non-admin page view
+  // (retry: 1, and react-query refetches an errored query on every remount) —
+  // each one opening a Postgres connection before the auth check runs. The badge
+  // links to /brokers/review, which a non-admin cannot open anyway. The
+  // `!isSupabaseConfigured()` arm mirrors Shell's `showAdmin` and guards.tsx so
+  // the badge isn't the one admin affordance that stays dark in local dev.
+  const { isAdmin } = useAuth();
+  const canReview = isAdmin || !isSupabaseConfigured();
   const reviewQ = useQuery({
     queryKey: ['broker-merge-candidates-count'],
     queryFn: () => listBrokerMergeCandidates(1),
     staleTime: 300_000,
+    enabled: canReview,
   });
   const reviewCount = Object.values(reviewQ.data?.reason_counts ?? {})
     .reduce((a, b) => a + b, 0);

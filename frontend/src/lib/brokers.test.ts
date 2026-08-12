@@ -92,7 +92,7 @@ describe('auth mode', () => {
   it('sends the session JWT on every repointed read, never the bundle token', async () => {
     const calls = stubFetch(() => ({ body: { data: [] } }));
     const b = await loadBrokers();
-    await b.fetchBrokerGeoOptions();
+    await b.fetchListingBroker(1);
     await b.fetchBrokerLeaderboard({
       regionIds: [],
       okresIds: [],
@@ -150,17 +150,6 @@ describe('fetchBrokerLeaderboard', () => {
     expect(contactState(rows[0].primary_phone, rows[0].has_phone)).toEqual({
       state: 'none',
     });
-  });
-});
-
-describe('fetchBrokerGeoOptions', () => {
-  it('omits geo_level entirely when unset (the route 422s on anything else)', async () => {
-    const calls = stubFetch(() => ({ body: { data: [] } }));
-    const { fetchBrokerGeoOptions } = await loadBrokers();
-    await fetchBrokerGeoOptions();
-    expect(new URL(calls[0].url).search).toBe('');
-    await fetchBrokerGeoOptions('okres');
-    expect(new URL(calls[1].url).searchParams.get('geo_level')).toBe('okres');
   });
 });
 
