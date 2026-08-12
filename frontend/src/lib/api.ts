@@ -3,7 +3,8 @@
  * Two auth shapes, matching the backend gate each route actually uses:
  *  - `jwt: true` (require_admin / verify_jwt routes — Settings, labeling,
  *    property merge mechanics, Outreach, broker-review, skill-refinements,
- *    Collections list, Pipeline, Watchdog subscriptions, /estimations) sends
+ *    Collections list, Pipeline, Watchdog subscriptions, /estimations,
+ *    and every `/brokers/*` read since 2026-08-12) sends
  *    the caller's real Supabase session access_token. The backend no longer
  *    accepts anything else here (api/dependencies.py:verify_jwt) — admin
  *    status rides in the JWT's app_metadata.is_admin claim, never a shared

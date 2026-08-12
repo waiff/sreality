@@ -79,9 +79,15 @@ def test_batch_reads_are_bounded() -> None:
     assert len(conn.cur.seen[0][1][0]) == 1000
 
 
-def test_geo_options_ignores_an_unknown_level() -> None:
+def test_geo_options_rejects_an_unknown_level() -> None:
+    """Falling back to "no filter" answered `obec` with every region AND okres."""
+    with pytest.raises(ValueError):
+        brokers.geo_options(_Conn(), geo_level="planet")
+
+
+def test_geo_options_without_a_level_returns_every_level() -> None:
     conn = _Conn([{"geo_level": "region", "geo_id": 27}])
-    out = brokers.geo_options(conn, geo_level="planet")
+    out = brokers.geo_options(conn)
     assert conn.cur.seen[0][1] == (None, None)
     assert out["metadata"]["filters_used"]["geo_level"] is None
 
@@ -106,6 +112,37 @@ def test_policy_masks_a_dossier_but_leaves_an_admin_alone() -> None:
     full = brokers.apply_pii_policy(envelope, include_pii=True)
     assert full["data"] == envelope["data"]
     assert full["metadata"]["pii_masked"] is False
+
+
+def test_policy_redacts_a_contact_hiding_under_a_non_contact_column() -> None:
+    """The name rule can't see PII under a name it doesn't recognise, and two live
+    brokers' display_name IS their email address — `pii_masked: true` must not be a
+    stronger promise than what the mask delivers."""
+    out = brokers.apply_pii_policy(
+        {"data": [{"broker_id": 1, "display_name": "jan.novak@rk.cz"},
+                  {"broker_id": 2, "display_name": "+420 777 123 456"},
+                  {"broker_id": 3, "display_name": "Jan Novák (jan@rk.cz)"}],
+         "metadata": {}}, include_pii=False)
+    assert [r["display_name"] for r in out["data"]] == [
+        "[redacted]", "[redacted]", "Jan Novák ([redacted])"]
+
+
+def test_policy_leaves_a_url_and_a_timestamp_intact() -> None:
+    """A whole-string-only phone rule: source_url carries a 9-digit listing id."""
+    url = "https://www.sreality.cz/detail/prodej/byt/praha/123456789"
+    out = brokers.apply_pii_policy(
+        {"data": [{"source_url": url, "last_seen_at": "2026-08-12T09:00:00+00:00",
+                   "locality": "Praha 8 - Libeň", "area_m2": 74.5}],
+         "metadata": {}}, include_pii=False)
+    assert out["data"][0] == {"source_url": url, "locality": "Praha 8 - Libeň",
+                              "last_seen_at": "2026-08-12T09:00:00+00:00",
+                              "area_m2": 74.5}
+
+
+def test_policy_leaves_an_admin_envelope_untouched_by_the_shape_rule() -> None:
+    envelope = {"data": [{"display_name": "jan.novak@rk.cz"}], "metadata": {}}
+    assert brokers.apply_pii_policy(
+        envelope, include_pii=True)["data"][0]["display_name"] == "jan.novak@rk.cz"
 
 
 def test_policy_masks_a_contact_column_no_denylist_would_know() -> None:

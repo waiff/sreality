@@ -104,6 +104,17 @@ it (`api/`). They do not apply to the scraper.
    `has_email` / `has_phone` (matched on the column NAME, so a widened view can't leak)
    and stamps `metadata.pii_masked`, unless the caller is admin; `GET
    /brokers/{id}/contacts` is `require_admin` outright — there is no masked variant.
+   Under the name rule sits a **shape rule**: a string value that is an email, or that is
+   wholly a phone number, is redacted whichever column it arrives in (live brokers whose
+   `display_name` IS their email address). `has_email` / `has_phone` mean "a current
+   primary contact is on file" (the `brokers` rollup's `primary_email`/`primary_phone`),
+   not "every address ever seen" — that fuller set is `broker_identity_contacts`, admin-only
+   via `/contacts`. Both batch reads bound their input at `toolkit.brokers.MAX_BATCH`
+   (1000) at the HTTP layer, so an over-cap batch is a 422 rather than a silently
+   truncated 200, and `?geo_level=` accepts only `region`/`okres` (`GEO_LEVELS`).
+   `tests/api/test_broker_routes.py` holds two standing gates: no `/brokers` route may
+   ride `require_token`, and every non-admin one must stamp `pii_masked` — a new route
+   must be added to that table.
    **The old coexistence window is gone for `require_admin`/`verify_jwt`**: the static
    `API_TOKEN`, extractable from the shipped SPA bundle via devtools, used to also satisfy
    `verify_jwt` as a synthetic `is_admin: True` identity — a live CRITICAL finding closed

@@ -14,7 +14,7 @@ Thin HTTP layer over `toolkit.brokers`; every response is the standard envelope.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -26,7 +26,7 @@ router = APIRouter(prefix="/brokers", tags=["brokers"])
 
 
 class ListingIdsIn(BaseModel):
-    listing_ids: list[int] = Field(default_factory=list, max_length=1000)
+    listing_ids: list[int] = Field(default_factory=list, max_length=brokers.MAX_BATCH)
 
 
 def _is_admin(claims: dict[str, Any]) -> bool:
@@ -40,7 +40,7 @@ def _policy(envelope: dict[str, Any], claims: dict[str, Any]) -> dict[str, Any]:
 
 @router.get("")
 def get_brokers_by_ids(
-    ids: list[int] = Query(default=[]),
+    ids: list[int] = Query(default=[], max_length=brokers.MAX_BATCH),
     conn: Any = Depends(deps.get_db_conn),
     claims: dict = Depends(deps.verify_jwt),
 ) -> dict[str, Any]:
@@ -77,7 +77,7 @@ def get_search(
 
 @router.get("/geo-options")
 def get_geo_options(
-    geo_level: str | None = Query(default=None),
+    geo_level: Literal["region", "okres"] | None = Query(default=None),
     conn: Any = Depends(deps.get_db_conn),
     claims: dict = Depends(deps.verify_jwt),
 ) -> dict[str, Any]:
