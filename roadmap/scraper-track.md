@@ -136,7 +136,8 @@ scale to 5–10 portals.
   batch/slice (the mig-366 sticky-holder pattern; a SIGKILL now strands
   minutes, not hours), acquisition inside the try, `_wait_lease` bounded
   (fail RED, not a 30-min retry burn), the full sweep clean-stops at
-  `--max-seconds` (default 3600, `timeout-minutes: 75` backstop) and exits
+  `--max-seconds` (default 6000, `timeout-minutes: 130` backstop — raised from
+  3600/75 in 2026-08 after six sweeps measured 83-96% of the old ceiling) and exits
   RED with a swept-range-scoped dirty clear, and a `property_maintenance`
   check in `verify_pipeline` (hourly acute lane) alarms on the
   `property_sweep_last_complete` stamp age (written on complete walks only —

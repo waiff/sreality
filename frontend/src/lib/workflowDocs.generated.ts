@@ -3233,10 +3233,10 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
       },
       {
         "name": "max_seconds",
-        "description": "Wall-clock sweep budget in seconds (clean-stop + RED past it; clamped to 4200 — timeout-minutes is sized for that ceiling, raise both together in the yml)",
+        "description": "Wall-clock sweep budget in seconds (clean-stop + RED past it; clamped to 6000 — timeout-minutes is sized for that ceiling, raise both together in the yml)",
         "required": false,
         "type": "string",
-        "default": "4200",
+        "default": "6000",
         "options": null
       }
     ],
@@ -3245,7 +3245,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     ],
     "concurrencyGroup": "sreality-property-maintenance",
     "cancelInProgress": false,
-    "timeoutMinutes": 75,
+    "timeoutMinutes": 130,
     "permissions": "contents: read",
     "runsUrl": "https://github.com/waiff/sreality/actions/workflows/recompute_property_stats.yml",
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/recompute_property_stats.yml"
@@ -3462,7 +3462,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     ],
     "concurrencyGroup": "broker-resolution-full",
     "cancelInProgress": false,
-    "timeoutMinutes": 90,
+    "timeoutMinutes": 110,
     "permissions": "contents: read",
     "runsUrl": "https://github.com/waiff/sreality/actions/workflows/resolve_brokers_full.yml",
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/resolve_brokers_full.yml"
