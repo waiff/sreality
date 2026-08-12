@@ -106,7 +106,15 @@ it (`api/`). They do not apply to the scraper.
    /brokers/{id}/contacts` is `require_admin` outright — there is no masked variant.
    Under the name rule sits a **shape rule**: a string value that is an email, or that is
    wholly a phone number, is redacted whichever column it arrives in (live brokers whose
-   `display_name` IS their email address). `has_email` / `has_phone` mean "a current
+   `display_name` IS their email address). The shape rule also reaches the PREDICATE, not
+   just the projection: `GET /brokers/search` passes the caller's `include_pii` into
+   `toolkit.brokers.search`, which for a non-admin keeps only rows still matching once
+   `_redact_shaped` has been applied — an ILIKE over the raw column was a guess-confirming
+   oracle that recovered a redacted address one character at a time. The bound term is also
+   LIKE-escaped with backslash, LIKE's default escape (`%` / `_` in a bound value are still
+   wildcards, so `@_` walked under the two-character minimum). Firm identifiers (`firm_name`, `firm_domain`) are deliberately
+   NOT masked — `pii_masked` promises that contact VALUES are masked, not that the row is
+   unattributable. `has_email` / `has_phone` mean "a current
    primary contact is on file" (the `brokers` rollup's `primary_email`/`primary_phone`),
    not "every address ever seen" — that fuller set is `broker_identity_contacts`, admin-only
    via `/contacts`. Both batch reads bound their input at `toolkit.brokers.MAX_BATCH`

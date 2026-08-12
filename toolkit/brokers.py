@@ -83,6 +83,34 @@ def _redact_shaped(text: str) -> str:
     return _EMAIL_RE.sub(_REDACTED, text)
 
 
+def _like_escape(term: str) -> str:
+    """`%` and `_` inside a BOUND LIKE value are still wildcards — psycopg passes
+    the value as data and LIKE, correctly, interprets what is in it. Unescaped,
+    `@_` was a one-character probe that walked straight under search()'s two-char
+    minimum, and a bare `%` seq-scanned brokers_public on every request. Backslash
+    is LIKE's own default escape character, so no ESCAPE clause is needed (and none
+    is written: a literal backslash in the SQL TEXT would depend on
+    standard_conforming_strings, while the bound value never does)."""
+    for ch in ("\\", "%", "_"):
+        term = term.replace(ch, "\\" + ch)
+    return term
+
+
+def _matches_masked(display_name: Any, term: str) -> bool:
+    """Does `term` still match once the row is masked the way it will be returned?
+
+    A non-admin's PREDICATE must not see what their PROJECTION hides, or search is
+    an oracle: probe, and the presence of a row (with its broker_id) confirms the
+    guess, recovering an email `_redact_shaped` redacted one character at a time.
+    Filtering on the masked text — the same function that builds the response —
+    keeps every ordinary name findable (only the redacted SPAN stops matching, so
+    "Kancelář Honzík <info@honzik.cz>" is still found by "Honzík") and generalises
+    to whatever the shape rule learns to redact next."""
+    if not isinstance(display_name, str):
+        return False
+    return term.casefold() in _redact_shaped(display_name).casefold()
+
+
 def _mask(value: Any) -> Any:
     """Swap every contact column for a has_* flag, recursing into the dossier.
 
@@ -92,7 +120,14 @@ def _mask(value: Any) -> Any:
     The dossier's contact list carries its PII in a generic `value` column no name
     rule can catch, so it is dropped whole — /brokers/{id}/contacts is admin-only.
     `has_email` / `has_phone` mean "a current primary contact is on file", i.e. the
-    brokers rollup's primary_email / primary_phone, not every address ever seen.
+    brokers rollup's primary_email / primary_phone, not every address ever seen —
+    and primary_email is picked from the most-recently-seen IDENTITY while
+    primary_phone is a max over all of a broker's identities, so a group spanning an
+    email-less source can report has_email=false while the dossier still holds the
+    address. Firm identifiers (firm_name, firm_domain) are deliberately NOT masked:
+    a company's web domain is a business identifier printed on every listing page,
+    so `pii_masked` promises that CONTACT VALUES are masked, not that nothing about
+    the row is attributable.
     """
     if isinstance(value, list):
         return [_mask(v) for v in value]
@@ -141,13 +176,20 @@ def leaderboard(conn: Any, *, region_ids: list[int] | None = None,
         len(rows), None)
 
 
-def search(conn: Any, query: str, *, limit: int = 12) -> dict[str, Any]:
+def search(conn: Any, query: str, *, limit: int = 12,
+           include_pii: bool = False) -> dict[str, Any]:
     """Brokers whose display name matches `query` (>=2 chars), busiest first.
 
     Ranked on the CZ-scoped count (migration 396), like every other broker
     ranking: two idnes syndication feeds carry ~26k foreign listings between them
     and would otherwise head the results for any query they matched. Both counts
-    are returned, so the row still shows the broker's whole book."""
+    are returned, so the row still shows the broker's whole book.
+
+    `include_pii` is the caller's identity, not a formatting flag: without it the
+    ILIKE ran over the RAW display_name while the response redacted it, so a
+    non-admin could binary-search the redacted content back out. Defaults closed,
+    so an agent or a new route gets the masked predicate unless it says otherwise.
+    """
     term = (query or "").strip()
     limit = max(1, min(int(limit), 100))
     if len(term) < 2:
@@ -156,8 +198,10 @@ def search(conn: Any, query: str, *, limit: int = 12) -> dict[str, Any]:
         cur.execute(
             "SELECT * FROM brokers_public WHERE display_name ILIKE %s "
             "ORDER BY cz_active_property_count DESC NULLS LAST LIMIT %s",
-            (f"%{term}%", limit))
+            (f"%{_like_escape(term)}%", limit))
         rows = cur.fetchall()
+    if not include_pii:
+        rows = [r for r in rows if _matches_masked(r.get("display_name"), term)]
     fresh = max((r["last_seen_at"] for r in rows if r.get("last_seen_at")), default=None)
     for r in rows:
         r["first_seen_at"], r["last_seen_at"] = _iso(r.get("first_seen_at")), _iso(r.get("last_seen_at"))
@@ -262,9 +306,13 @@ def geo_options(conn: Any, *, geo_level: str | None = None) -> dict[str, Any]:
     """Region / okres picker metadata with per-area broker counts.
 
     Not PII, but broker_geo_options is dark to anon AND authenticated (migration
-    361), so the server-side route is the only way a browser can read it. An
-    unrecognized level raises rather than falling back to "no filter" — silently
-    answering `geo_level=obec` with every region AND okres is worse than a 422."""
+    361), so the server-side route is the only way a browser COULD read it — no
+    browser caller exists today: BrokerDetail's region-name map went away when the
+    dossier started joining region_shares[].name, and the leaderboard page scopes
+    itself through the shared LocationTypeahead. Kept as the capability, not as a
+    live SPA path. An unrecognized level raises rather than falling back to "no
+    filter" — silently answering `geo_level=obec` with every region AND okres is
+    worse than a 422."""
     if geo_level is not None and geo_level not in GEO_LEVELS:
         raise ValueError(f"geo_level must be one of {sorted(GEO_LEVELS)}")
     with conn.cursor(row_factory=dict_row) as cur:

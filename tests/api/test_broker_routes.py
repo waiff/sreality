@@ -209,13 +209,35 @@ def test_batch_routes_accept_an_empty_selection(client, monkeypatch):
 
 def test_search_masks_contacts_for_a_plain_user(client, monkeypatch):
     monkeypatch.setattr(broker_routes.brokers, "search",
-                        lambda conn, q, *, limit=12: {"data": [dict(_LEADER_ROW)],
-                                                      "metadata": {}})
+                        lambda conn, q, *, limit=12, include_pii=False: {
+                            "data": [dict(_LEADER_ROW)], "metadata": {}})
     body = client.get("/brokers/search", params={"q": "alfa"}).json()
     assert body["data"][0] == {"broker_id": 1, "display_name": "RK Alfa",
                                "active_property_count": 9,
                                "has_email": True, "has_phone": True}
     assert body["metadata"]["pii_masked"] is True
+
+
+def _search_include_pii(client, monkeypatch) -> bool:
+    seen = {}
+    monkeypatch.setattr(broker_routes.brokers, "search",
+                        lambda conn, q, *, limit=12, include_pii=False:
+                        seen.update(include_pii=include_pii)
+                        or {"data": [], "metadata": {}})
+    assert client.get("/brokers/search", params={"q": "alfa"}).status_code == 200
+    return seen["include_pii"]
+
+
+def test_search_pushes_the_non_admin_identity_into_the_query(client, monkeypatch):
+    """Search is the one read whose PREDICATE is caller-supplied, so masking the
+    projection alone left the ILIKE matching text the response redacted — a
+    guess-confirming oracle over exactly what _redact_shaped hides. The policy has
+    to reach the query, not just the envelope."""
+    assert _search_include_pii(client, monkeypatch) is False
+
+
+def test_search_still_matches_the_raw_name_for_an_admin(admin_client, monkeypatch):
+    assert _search_include_pii(admin_client, monkeypatch) is True
 
 
 def test_geo_options(client, monkeypatch):
