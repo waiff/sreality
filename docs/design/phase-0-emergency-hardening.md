@@ -309,7 +309,7 @@ def test_gate_actually_scans_migrations():
     assert len(_enforced_migrations()) >= 1, f"no migrations at/after {MIN_ENFORCED}"
 ```
 
-**Caveat the reviewer flagged:** `scripts/ci_db_bootstrap.sql` creates the roles but does **not** replicate Supabase's default ACL, so Part 1/Part 2 are no-ops in the CI replay — this gate is a *regression* guard, not a live-state assertion. The real cross-tenant/grant verification lands in Phase 1's `TEST_DATABASE_URL` lane.
+**Caveat the reviewer flagged (CLOSED 2026-08-12, migration 398's PR):** `scripts/ci_db_bootstrap.sql` created the roles but did **not** replicate Supabase's default ACL, so Part 1/Part 2 were no-ops in the CI replay and every `has_table_privilege('authenticated', …)` assertion in the `TEST_DATABASE_URL` lane was vacuously satisfied — the default-ACL reachability class (how `firms_public` and `listings_public`/`properties_public` became browser-readable with no `grant` statement behind them) was structurally unassertable. The bootstrap now seeds `alter default privileges for role postgres in schema public grant select on tables to anon, authenticated` before the chain runs, so 299 PART A trims it to production's live `authenticated=r` and post-299 relations inherit the browser-role SELECT exactly as production does. Measured: the reachability guard's candidate set went from 0 rows to the 2 real offenders, and the full replay + both `migrations.yml` pytest steps stayed green. Write privileges are still not seeded, so the *write*-revoke half of Part 2 remains a regression guard rather than a live-state assertion.
 
 ---
 

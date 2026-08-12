@@ -159,12 +159,29 @@ _BROKER_PII_RELATIONS: list[str] = [
 # real value. The names cannot be dropped — CREATE OR REPLACE VIEW cannot remove a
 # column and five matviews depend on listings_public, so DROP ... CASCADE is not
 # available — so a name-based scan alone cannot tell "nulled" from "served".
-# `test_public_market_views_project_no_broker_contact` is the half that proves the
-# projection really is NULL; entries here are only exempt because of it.
+#
+# Listing a column here does NOT exempt it. `_null_projected_columns` re-derives the
+# exemption from the deparsed view body on every run, so a CREATE OR REPLACE that
+# restores the source expression fails BOTH guards below rather than being waved
+# through by its own allowlist entry.
 _NULLED_CONTACT_COLUMNS: dict[str, tuple[str, ...]] = {
     "listings_public": ("broker_email", "broker_phone"),
     "properties_public": ("broker_email", "broker_phone"),
 }
+
+
+def _null_projected_columns(cur: Any, rel: str) -> set[str]:
+    """Which of `rel`'s registered contact columns the LIVE view body really
+    projects as a NULL constant. `pg_get_viewdef` returns NULL for a base table or
+    a missing relation, so a non-view earns no exemption at all."""
+    cols = _NULLED_CONTACT_COLUMNS.get(rel, ())
+    if not cols:
+        return set()
+    cur.execute("SELECT pg_get_viewdef(to_regclass(%s), true)", (f"public.{rel}",))
+    viewdef = cur.fetchone()[0]
+    if not viewdef:
+        return set()
+    return {c for c in cols if re.search(rf"NULL::text\s+AS\s+{c}\b", viewdef)}
 
 
 @pytest.fixture(scope="module")
@@ -1175,13 +1192,8 @@ def test_public_market_views_project_no_broker_contact(svc: Any) -> None:
             cur.execute("SELECT to_regclass(%s)", (f"public.{rel}",))
             if cur.fetchone()[0] is None:
                 continue
-            cur.execute("SELECT pg_get_viewdef(%s::regclass, true)", (f"public.{rel}",))
-            viewdef = cur.fetchone()[0]
-            offenders += [
-                f"{rel}.{col}"
-                for col in cols
-                if not re.search(rf"NULL::text\s+AS\s+{col}\b", viewdef)
-            ]
+            nulled = _null_projected_columns(cur, rel)
+            offenders += [f"{rel}.{col}" for col in cols if col not in nulled]
     assert not offenders, (
         f"view column(s) no longer project NULL — real agent contact PII is being "
         f"served to every logged-in session again (migration 398): {offenders}"
@@ -1205,7 +1217,13 @@ def test_no_reachable_relation_exposes_contact_pii(svc: Any) -> None:
       * an owner-rights view or a matview reads with postgres's rolbypassrls and
         DOES count — that is precisely how 398's leak worked.
 
-    Extension-owned relations (PostGIS lands some in `public`) are not ours."""
+    Extension-owned relations (PostGIS lands some in `public`) are not ours.
+
+    DEPENDS ON the default-ACL baseline `scripts/ci_db_bootstrap.sql` seeds. The two
+    views hold their `authenticated` SELECT through Supabase's public-schema default
+    ACL, not through any `grant` a migration writes; without that baseline the
+    privilege predicate is false for every relation, the candidate set is empty, and
+    this test cannot fail. Do not drop the seed without replacing the predicate."""
     with svc.cursor() as cur:
         cur.execute(
             "SELECT c.relname, a.attname FROM pg_class c "
@@ -1229,10 +1247,12 @@ def test_no_reachable_relation_exposes_contact_pii(svc: Any) -> None:
             "ORDER BY c.relname, a.attname",
             (["%email%", "%phone%"],),
         )
+        hits = cur.fetchall()
+        exempt: dict[str, set[str]] = {
+            rel: _null_projected_columns(cur, rel) for rel in {r for r, _ in hits}
+        }
         reachable = [
-            f"{rel}.{col}"
-            for rel, col in cur.fetchall()
-            if col not in _NULLED_CONTACT_COLUMNS.get(rel, ())
+            f"{rel}.{col}" for rel, col in hits if col not in exempt.get(rel, set())
         ]
     assert not reachable, (
         f"contact-PII column(s) readable by any logged-in session: {reachable}. "
