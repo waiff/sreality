@@ -92,6 +92,29 @@ def test_geo_options_without_a_level_returns_every_level() -> None:
     assert out["metadata"]["filters_used"]["geo_level"] is None
 
 
+def test_search_ranks_on_the_cz_scoped_count() -> None:
+    """D4 / migration 396. `brokers.active_property_count` counts foreign
+    syndication: two idnes feeds (ibero-casa.com 15,028 active, a Croatian one
+    5,007) led every name search they matched, 8x the busiest genuinely Czech
+    broker at 1,862. Ranking moves to the CZ-scoped column; NOTHING is filtered
+    out, so a foreign-heavy broker is still findable and still shows its whole
+    book in the unscoped columns the same `select *` returns."""
+    conn = _Conn([{"broker_id": 1}])
+    brokers.search(conn, "novak")
+    sql, params = conn.cur.seen[0]
+    assert "ORDER BY cz_active_property_count DESC NULLS LAST" in sql
+    assert "ORDER BY active_property_count" not in sql
+    # Still a plain `select *` over the whole row — no column was dropped.
+    assert sql.startswith("SELECT * FROM brokers_public")
+    assert "WHERE" in sql and params == ("%novak%", 12)
+
+
+def test_search_still_short_circuits_a_one_character_query() -> None:
+    conn = _Conn()
+    assert brokers.search(conn, "a")["data"] == []
+    assert conn.cur.seen == []
+
+
 def test_policy_masks_a_dossier_but_leaves_an_admin_alone() -> None:
     envelope = {
         "data": {"broker": {"broker_id": 1, "display_name": "RK Alfa",

@@ -170,8 +170,8 @@ sreality vocabulary: `Zděná→cihla`, `Bezvadný→velmi_dobry`, `K rekonstruk
 the SEO detail-URL slug (`…-{street}-{id}.html`) — the broker's `offeredby.address` (the agency office)
 is deliberately never used; both route through the shared `scraper/street.py` guard. **Broker** carries
 a stable identity — the `/realitni-makleri/{slug}-{id}/` profile id — stored idnes-shaped in
-`raw["broker"]`, so ceskereality is in `BROKER_ATTRIBUTED_SOURCES` and `resolve_brokers` has a
-per-source attribution block (phone-only; no email → no firm). Per-category search pages carry a result
+`raw["broker"]`, so ceskereality is in `BROKER_ATTRIBUTED_SOURCES` and has a `toolkit/broker_sources.py`
+registry row (phone-only; no email → no firm). Per-category search pages carry a result
 total ("Máme tady N…") with no deep-pagination cap, so a per-category walk is provable-complete
 (`supports_complete_walk=true`; the runner marks delistings inactive under the completeness guard,
 source-scoped). The detail URL carries the category, so the drain derives each listing's category from

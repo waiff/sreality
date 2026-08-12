@@ -27,6 +27,7 @@ from psycopg.types.json import Jsonb, set_json_dumps
 from scraper import media
 from scraper.scraped_listing import ScrapedListing
 from scraper.street import street_name_key
+from toolkit.broker_sources import BROKER_FINGERPRINT_KEYS, BROKER_SOURCE_NAMES
 
 LOG = logging.getLogger(__name__)
 
@@ -688,29 +689,22 @@ def upsert_listing_with_property(
 
 
 # Sources whose listings carry a broker block that scripts.resolve_brokers
-# attributes (raw_json->'user' for sreality, raw_json->'broker' for idnes). A
-# content-changed listing of one of these sources is enqueued into
+# attributes. A content-changed listing of one of these is enqueued into
 # dirty_broker_listings so the incremental resolver re-attributes it within its
-# cadence (it has no full-table straggler scan). Keep this in sync with the
-# resolver's attribution coverage (scripts.resolve_brokers._attribute and the
-# `source IN (...)` scan in its full sweep); a missed source degrades gracefully
-# to daily-sweep-only attribution rather than breaking. sreality flows through
-# write_detail_batch (which enqueues directly), not this path, but is listed for
-# completeness so the set reads as the full broker-attributed source list.
-BROKER_ATTRIBUTED_SOURCES = frozenset(
-    {"sreality", "idnes", "ceskereality", "realitymix", "remax"}
-)
+# cadence (it has no full-table straggler scan); a missed source degrades
+# gracefully to daily-sweep-only attribution rather than breaking. Both this set
+# and the fingerprint allowlist below are DERIVED from the one registry that also
+# generates the resolver's SQL, so onboarding a portal can no longer half-land.
+# sreality flows through write_detail_batch (which enqueues directly), not this
+# path, but is in the set so it reads as the full broker-attributed source list.
+BROKER_ATTRIBUTED_SOURCES = frozenset(BROKER_SOURCE_NAMES)
 
-# The union of every key the four HTML portals put in raw["broker"] and that
-# scripts.resolve_brokers attributes from: the per-broker key (account_oid on
-# idnes, broker_id elsewhere), the contacts, and the firm key (agency_name on
-# idnes, agency_slug on ceskereality/remax, agency_id on realitymix). An
-# allowlist, not a hash of the whole block, so a parser adding an incidental
-# field can't churn the queue.
-_BROKER_FINGERPRINT_KEYS: tuple[str, ...] = (
-    "account_oid", "broker_id", "name", "email", "phone",
-    "agency_name", "agency_slug", "agency_id",
-)
+# Every attribution-relevant key the HTML portals put in raw["broker"]: the
+# per-broker key (account_oid on idnes, broker_id elsewhere), the contacts, and
+# the firm key (agency_name on idnes, agency_slug on ceskereality/remax,
+# agency_id on realitymix). An allowlist, not a hash of the whole block, so a
+# parser adding an incidental field can't churn the queue.
+_BROKER_FINGERPRINT_KEYS: tuple[str, ...] = BROKER_FINGERPRINT_KEYS
 
 _STORED_BROKER_BLOCK_SQL = "SELECT raw_json->'broker' FROM listings WHERE id = %s"
 

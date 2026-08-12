@@ -384,8 +384,11 @@ def test_broker_fingerprint_survives_a_malformed_block():
     assert db._broker_fingerprint(None) == ()
     assert db._broker_fingerprint([{"name": "x"}]) == ()
     assert db._broker_fingerprint("broker") == ()
-    # ...and a block whose values are not strings still fingerprints
-    assert db._broker_fingerprint({"broker_id": 17})[1] == "17"
+    # ...and a block whose values are not strings still fingerprints. Indexed by
+    # key, not position: the allowlist is now derived from the source registry, so
+    # a new portal can legitimately shift the tuple's order.
+    at = db._BROKER_FINGERPRINT_KEYS.index("broker_id")
+    assert db._broker_fingerprint({"broker_id": 17})[at] == "17"
 
 
 def test_broker_fields_stay_out_of_the_content_hash():
