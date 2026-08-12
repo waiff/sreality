@@ -410,10 +410,19 @@ def is_transient_db_error(exc: BaseException) -> bool:
     as transient — connection drops (SSL EOF, pooler recycle, admin shutdown,
     idle-session timeout), deadlock / serialization rollbacks, and even the
     bounded resource/timeout classes (a statement-timeout or pool saturation is
-    usually a passing lock/pooler condition in this drain's small per-batch ops,
-    and the worst case is ~3.5 s of backoff before the run reds anyway). A real
-    bug (IntegrityError, ProgrammingError, DataError) is NOT an OperationalError,
-    so it fails loud immediately rather than spinning.
+    usually a passing lock/pooler condition, since statement_timeout is wall-clock
+    from statement start and so includes lock waits). A real bug (IntegrityError,
+    ProgrammingError, DataError) is NOT an OperationalError, so it fails loud
+    immediately rather than spinning.
+
+    Deliberately SQLSTATE-BLIND, which makes bounding the retry the CALL SITE's
+    job. `QueryCanceled` (57014) is an OperationalError, so a statement killed by
+    its own timeout is replayed in full: cheap on the drain's small per-batch ops
+    that this budget was sized for, but a whole `attempts` x ceiling on anything
+    long. Any caller whose statements can run for minutes MUST pass its own
+    `attempts` — recompute_property_stats' `sweep.batch`/`sweep.attach` and
+    resolve_brokers' chunk loops + timeout-lifted tail all cap at 2 for exactly
+    this reason, and their workflow `timeout-minutes` are sized off that product.
     """
     return isinstance(exc, psycopg.OperationalError)
 
