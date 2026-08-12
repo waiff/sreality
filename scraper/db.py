@@ -701,6 +701,40 @@ BROKER_ATTRIBUTED_SOURCES = frozenset(
     {"sreality", "idnes", "ceskereality", "realitymix", "remax"}
 )
 
+# The union of every key the four HTML portals put in raw["broker"] and that
+# scripts.resolve_brokers attributes from: the per-broker key (account_oid on
+# idnes, broker_id elsewhere), the contacts, and the firm key (agency_name on
+# idnes, agency_slug on ceskereality/remax, agency_id on realitymix). An
+# allowlist, not a hash of the whole block, so a parser adding an incidental
+# field can't churn the queue.
+_BROKER_FINGERPRINT_KEYS: tuple[str, ...] = (
+    "account_oid", "broker_id", "name", "email", "phone",
+    "agency_name", "agency_slug", "agency_id",
+)
+
+_STORED_BROKER_BLOCK_SQL = "SELECT raw_json->'broker' FROM listings WHERE id = %s"
+
+
+def _stored_broker_block(conn: psycopg.Connection, listing_id: int) -> Any:
+    with conn.cursor() as cur:
+        cur.execute(_STORED_BROKER_BLOCK_SQL, (listing_id,))
+        row = cur.fetchone()
+    return row[0] if row else None
+
+
+def _broker_fingerprint(block: Any) -> tuple[str | None, ...]:
+    """The attribution-relevant identity of a raw["broker"] block.
+
+    Total by construction — a portal that emits a list, a string or a missing block
+    yields the empty fingerprint rather than raising, because this runs inside the
+    live ingest transaction and must never abort an otherwise-valid listing."""
+    if not isinstance(block, dict):
+        return ()
+    return tuple(
+        None if block.get(k) is None else str(block[k]).strip()
+        for k in _BROKER_FINGERPRINT_KEYS
+    )
+
 
 # The Gate-2 flip-writer scaffold (wave-5 item 7): OFF by default, so the
 # nextval draw below is unconditional until an operator explicitly opts in.
@@ -756,10 +790,11 @@ def ingest_scraped_listing(
     it, so nothing depends on a sreality_id that may be NULL. The listing write +
     source identity + Tier-1 property matching commit in one transaction.
 
-    A content-changed write of a broker-attributed source also enqueues the row
-    into dirty_broker_listings (the incremental resolver's sole feed — same role
-    write_detail_batch plays for sreality), so e.g. new idnes listings are
-    attributed within the resolver's cadence, not only by the daily full sweep.
+    A write of a broker-attributed source enqueues the row into
+    dirty_broker_listings (the incremental resolver's sole feed — same role
+    write_detail_batch plays for sreality) when its CONTENT changed or when only its
+    broker block did, so e.g. new idnes listings are attributed within the
+    resolver's cadence, not only by the daily full sweep.
     """
     with conn.cursor() as cur:
         cur.execute(
@@ -775,7 +810,15 @@ def ingest_scraped_listing(
         # rewrites it, so the value is inert on this path.
         listing_id: int | None = int(found[0])
         legacy_sreality_id: int | None = found[1]
+        # Read BEFORE the upsert overwrites raw_json, and only for the sources whose
+        # brokers are attributed — elsewhere it would buy a raw_json detoast per
+        # ingest for nothing. First sight needs no read: it enqueues on result anyway.
+        stored_broker = (
+            _stored_broker_block(conn, listing_id)
+            if listing.source in BROKER_ATTRIBUTED_SOURCES else None
+        )
     else:
+        stored_broker = None
         listing_id = None  # sequence-generated in the INSERT; resolved post-upsert
         if _gate2_null_sreality_id_enabled(conn):
             legacy_sreality_id = None
@@ -832,7 +875,18 @@ def ingest_scraped_listing(
                     "ON CONFLICT (property_id) DO UPDATE SET marked_at = now()",
                     (listing_id,),
                 )
-        if result != "unchanged" and listing.source in BROKER_ATTRIBUTED_SOURCES:
+        # The second arm is INDEPENDENT of the content hash on purpose. The four
+        # HTML portals hash a fixed field allowlist (ScrapedListing._HASH_FIELDS)
+        # that excludes raw_json, so a page whose ONLY change is its broker block
+        # computes result == 'unchanged' and used to never enqueue — those portals
+        # could not re-attribute a broker change at all. Folding the broker fields
+        # into the content hash instead would append a listing_snapshots row for a
+        # pure attribution change, which rule 2 reserves for CONTENT changes.
+        if listing.source in BROKER_ATTRIBUTED_SOURCES and (
+            result != "unchanged"
+            or _broker_fingerprint(stored_broker) != _broker_fingerprint(
+                listing.raw.get("broker") if isinstance(listing.raw, dict) else None)
+        ):
             with conn.cursor() as cur:
                 # Keyed on the surrogate (dirty_broker_listings_pkey is listing_id;
                 # its sreality_id column is legacy/nullable). The upsert above ran

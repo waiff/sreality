@@ -48,12 +48,16 @@ export default function Brokers() {
 
   const geo = useMemo(() => chipsToGeoArrays(districts), [districts]);
 
+  // reason_counts is the whole queue; `count` is only the page, so the badge used
+  // to pin at its own 100-row limit (and paid for 100 enriched rows to show one
+  // number). Ask for a single row and read the counts.
   const reviewQ = useQuery({
     queryKey: ['broker-merge-candidates-count'],
-    queryFn: () => listBrokerMergeCandidates(100),
+    queryFn: () => listBrokerMergeCandidates(1),
     staleTime: 300_000,
   });
-  const reviewCount = reviewQ.data?.count ?? 0;
+  const reviewCount = Object.values(reviewQ.data?.reason_counts ?? {})
+    .reduce((a, b) => a + b, 0);
 
   const boardQ = useQuery({
     queryKey: [

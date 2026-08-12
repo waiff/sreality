@@ -154,7 +154,8 @@ distinguishes a never-started supersession cancel from a genuine failure so canc
 doesn't inflate the failure count, and captures the run's cursor + whether it was killed by
 timeout, PR #767/#738) and `llm_health.yml` ("Monitoring: acute health", hourly — runs
 verify_pipeline's acute lane: `llm_errors`, `llm_liveness`, `llm_burn_rate`, `db_saturation`,
-`worker_liveness`, `property_maintenance`, with `--exit-nonzero-on-fail` so any `fail` goes red
+`worker_liveness`, `property_maintenance`, `broker_resolution_freshness`, with
+`--exit-nonzero-on-fail` so any `fail` goes red
 and emails; it replaced the standalone `check_llm_health.py` in the WS4 alerting rebuild). A
 credit-balance error alarms immediately; the LLM failure probe is INDEPENDENT of pending work — it closes
 the blind spot where a credit-exhausted account stayed green for ~8h because condition scoring
@@ -321,9 +322,17 @@ running (the migration-136 exception-guarded pg_cron pattern). This exists becau
 stalled silently for two days in 2026-07 (Anthropic credit exhaustion, 38k+ failed LLM calls) and
 the only alarm was a failing GH Actions cron the operator happened to miss. The live checks are
 `llm_errors`, `llm_liveness`, `llm_burn_rate`, `db_saturation`, `worker_liveness`,
-`dual_write_parity` and `property_maintenance` (last-complete-sweep stamp age + oldest
+`dual_write_parity`, `property_maintenance` (last-complete-sweep stamp age + oldest
 dirty-queue row — the 2026-08-06 sweep-death/stranded-lease incident; both axes O(1) reads,
-never a properties scan); the six dedup-specific checks (street/geo debt, eligibility funnel,
+never a properties scan) and `broker_resolution_freshness` (the same two axes over
+`app_settings.broker_resolution_last_complete` + `dirty_broker_listings` — the 2026-08-12
+E2E review found the daily broker sweep truncating on its budget every day while exiting 0).
+Note the broker sweep axis measures a rotation **lap**, not one run: attribution routinely
+spends its whole `--max-seconds` budget, so `resolve_brokers` carries cumulative coverage in
+`app_settings.broker_sweep_cursor` (`last_id` / `lap_swept` / `lap_started_at`) and stamps
+completion when the lap closes; with no lap closed yet the check ages the OPEN lap, so a
+rotation that never gets round reds instead of parking on the missing-stamp warn.
+The six dedup-specific checks (street/geo debt, eligibility funnel,
 merge latency, engine health, merge-precision sample) went with the engine, along with their
 `pipeline_check_thresholds` rows.
 
