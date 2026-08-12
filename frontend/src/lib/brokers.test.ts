@@ -205,6 +205,16 @@ describe('fetchListingBroker', () => {
     const { fetchListingBroker } = await loadBrokers();
     await expect(fetchListingBroker(55)).rejects.toThrow('boom');
   });
+
+  /* A 404 that did NOT come from the route saying "nothing attributed" —
+     Railway's edge on an unrouted host, a stale VITE_API_BASE_URL, a renamed
+     path — must not read as "this listing has no broker", or the whole corpus
+     goes silently dark again exactly as it did under PostgREST. */
+  it('propagates a routing 404 instead of swallowing it as "unattributed"', async () => {
+    stubFetch(() => ({ status: 404, body: { detail: 'Not Found' } }));
+    const { fetchListingBroker } = await loadBrokers();
+    await expect(fetchListingBroker(55)).rejects.toThrow('Not Found');
+  });
 });
 
 describe('batched hydration', () => {
@@ -231,6 +241,40 @@ describe('batched hydration', () => {
     expect((await fetchListingBrokersByIds([])).size).toBe(0);
     expect((await fetchBrokersByIds([])).size).toBe(0);
     expect(calls).toHaveLength(0);
+  });
+
+  /* Both routes cap their input at toolkit.brokers.MAX_BATCH (1000) with a 422,
+     not a truncated 200 — one oversized call would drop EVERY card's broker, not
+     just the overflow. The old supabase-js `.in()` had no such cap, so this cliff
+     arrived with the repoint. */
+  it('chunks the POST below the 1000-id route cap and covers every id', async () => {
+    const calls = stubFetch(() => ({ body: { data: [] } }));
+    const { fetchListingBrokersByIds } = await loadBrokers();
+    const ids = Array.from({ length: 2_500 }, (_, i) => i + 1);
+    await fetchListingBrokersByIds(ids);
+    const bodies = calls.map(
+      (c) => (JSON.parse(String(c.init?.body)) as { listing_ids: number[] }).listing_ids,
+    );
+    expect(bodies).toHaveLength(3);
+    for (const b of bodies) expect(b.length).toBeLessThanOrEqual(1000);
+    expect(bodies.flat()).toEqual(ids);
+  });
+
+  it('chunks the GET id list and merges every page into one map', async () => {
+    const calls = stubFetch((url) => ({
+      body: {
+        data: new URL(url).searchParams
+          .getAll('ids')
+          .map((id) => ({ broker_id: Number(id) })),
+      },
+    }));
+    const { fetchBrokersByIds } = await loadBrokers();
+    const ids = Array.from({ length: 450 }, (_, i) => i + 1);
+    const map = await fetchBrokersByIds(ids);
+    expect(calls.length).toBeGreaterThan(1);
+    expect(map.size).toBe(450);
+    expect(map.get(1)).toBeDefined();
+    expect(map.get(450)).toBeDefined();
   });
 
   it('sends broker ids as repeated `ids` params', async () => {
@@ -290,5 +334,22 @@ describe('fetchBrokerDossier', () => {
     stubFetch(() => ({ status: 403, body: { detail: 'forbidden' } }));
     const again = await loadBrokers();
     await expect(again.fetchBrokerDossier(7)).rejects.toThrow('forbidden');
+  });
+
+  /* The whole-corpus outage shape: an unroutable API host (dead Railway service,
+     stale VITE_API_BASE_URL) 404s every path. Reading that as "no such broker"
+     would render "Makléř nenalezen." for every id with no error anywhere. */
+  it('rethrows a 404 that did not come from the broker route itself', async () => {
+    stubFetch(() => ({ status: 404, body: { detail: 'Not Found' } }));
+    const { fetchBrokerDossier } = await loadBrokers();
+    await expect(fetchBrokerDossier(7)).rejects.toThrow('Not Found');
+  });
+
+  /* An SPA-fallback HTML page answers 200 with no envelope; spreading it would
+     yield a broker-less dossier that also renders as "Makléř nenalezen.". */
+  it('throws on a 200 that carries no envelope', async () => {
+    stubFetch(() => ({ body: '<!doctype html><title>app</title>' }));
+    const { fetchBrokerDossier } = await loadBrokers();
+    await expect(fetchBrokerDossier(7)).rejects.toThrow(/malformed/);
   });
 });

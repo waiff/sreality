@@ -206,8 +206,30 @@ interface Envelope<T> {
 
 const JWT = true;
 
-const isNotFound = (err: unknown): boolean =>
-  err instanceof ApiError && err.status === 404;
+/* The two `detail` strings the /brokers routes send when 404 is an ANSWER
+ * ("nothing is attributed here"), from api/routes/brokers.py. Status alone is
+ * not enough: Railway's edge answers an unrouted domain with 404, a stale
+ * VITE_API_BASE_URL 404s every path, and FastAPI 404s a renamed route with a
+ * generic "Not Found" — swallowing any of those would put the whole corpus back
+ * in the silent "Makléř nenalezen." dark state this module was repointed to end.
+ * An unrecognised 404 therefore propagates and the page shows a real error. */
+const ANSWERED_404 = /broker not found|listing has no attributed broker/;
+
+const isAnsweredNotFound = (err: unknown): boolean =>
+  err instanceof ApiError && err.status === 404 && ANSWERED_404.test(err.message);
+
+/* Both batch routes bound their input at toolkit.brokers.MAX_BATCH (1000) and
+ * answer a 422 rather than a truncated 200 beyond it, so one oversized call
+ * would lose EVERY row instead of the overflow. Chunk below the cap; the GET
+ * slice is smaller because 1000 repeated `ids=` params is an ~8 KB URL. */
+const POST_ID_BATCH = 1000;
+const GET_ID_BATCH = 200;
+
+function chunk<T>(xs: ReadonlyArray<T>, size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < xs.length; i += size) out.push(xs.slice(i, i + size));
+  return out;
+}
 
 /* Region / okres picker metadata. Omit `geoLevel` for both levels — the route
  * 422s on any value outside GeoLevel rather than silently unfiltering. The only
@@ -276,7 +298,7 @@ export async function fetchListingBroker(
     );
     return r.data ?? null;
   } catch (err) {
-    if (isNotFound(err)) return null;
+    if (isAnsweredNotFound(err)) return null;
     throw err;
   }
 }
@@ -287,14 +309,17 @@ export async function fetchListingBroker(
 export async function fetchListingBrokersByIds(
   listingIds: ReadonlyArray<number>,
 ): Promise<Map<number, ListingBroker>> {
-  if (listingIds.length === 0) return new Map();
-  const r = await apiPost<Envelope<ListingBroker[]>>(
-    '/brokers/by-listings',
-    { listing_ids: [...listingIds] },
-    undefined,
-    JWT,
-  );
-  return new Map((r.data ?? []).map((row) => [row.listing_id, row]));
+  const out = new Map<number, ListingBroker>();
+  for (const slice of chunk(listingIds, POST_ID_BATCH)) {
+    const r = await apiPost<Envelope<ListingBroker[]>>(
+      '/brokers/by-listings',
+      { listing_ids: slice },
+      undefined,
+      JWT,
+    );
+    for (const row of r.data ?? []) out.set(row.listing_id, row);
+  }
+  return out;
 }
 
 // Batched canonical-broker lookup by broker_id (primary contact + firm) — pairs
@@ -302,14 +327,17 @@ export async function fetchListingBrokersByIds(
 export async function fetchBrokersByIds(
   brokerIds: ReadonlyArray<number>,
 ): Promise<Map<number, BrokerPublic>> {
-  if (brokerIds.length === 0) return new Map();
-  const r = await apiGet<Envelope<BrokerPublic[]>>(
-    '/brokers',
-    { ids: [...brokerIds] },
-    undefined,
-    JWT,
-  );
-  return new Map((r.data ?? []).map((row) => [row.broker_id, row]));
+  const out = new Map<number, BrokerPublic>();
+  for (const slice of chunk(brokerIds, GET_ID_BATCH)) {
+    const r = await apiGet<Envelope<BrokerPublic[]>>(
+      '/brokers',
+      { ids: slice },
+      undefined,
+      JWT,
+    );
+    for (const row of r.data ?? []) out.set(row.broker_id, row);
+  }
+  return out;
 }
 
 export async function fetchBrokerDossier(
@@ -322,11 +350,15 @@ export async function fetchBrokerDossier(
       undefined,
       JWT,
     );
+    // A 200 that carries no envelope is not an empty dossier — it's an HTML
+    // SPA-fallback or a proxy page. Spreading it would yield a broker-less object
+    // that renders as "Makléř nenalezen." for every id.
+    if (!r?.data) throw new ApiError('malformed /brokers response', 0, r);
     // Absent metadata means we can't prove the caller is an admin — assume masked
     // so a missing flag under-promises rather than showing a blank as "no contact".
     return { ...r.data, pii_masked: r.metadata?.pii_masked ?? true };
   } catch (err) {
-    if (isNotFound(err)) return null;
+    if (isAnsweredNotFound(err)) return null;
     throw err;
   }
 }

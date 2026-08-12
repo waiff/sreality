@@ -58,6 +58,18 @@ function isPathActive(pathname: string, to: string): boolean {
   return pathname === to || pathname.startsWith(`${to}/`);
 }
 
+/* Which nav entry owns the current path when one nests inside another
+ * (`/brokers/review` under `/brokers`). NavLink's default prefix matching would
+ * light both at once; the longest match wins instead, so `/brokers/123` still
+ * highlights Brokers while `/brokers/review` highlights only itself. */
+export function activeNavTo(pathname: string, tos: ReadonlyArray<string>): string | null {
+  return tos.reduce<string | null>(
+    (best, to) =>
+      isPathActive(pathname, to) && (best === null || to.length > best.length) ? to : best,
+    null,
+  );
+}
+
 export default function Shell() {
   return (
     <NewEstimationProvider>
@@ -98,6 +110,7 @@ function TopBar() {
     }
     return true;
   });
+  const ownerTo = activeNavTo(location.pathname, items.map((i) => i.to));
   const settingsActive = settingsItems.some((s) => isPathActive(location.pathname, s.to));
   const newDedupActive = newDedupItems.some((s) => isPathActive(location.pathname, s.to));
   return (
@@ -122,6 +135,10 @@ function TopBar() {
               <NavLink
                 key={item.to}
                 to={item.to}
+                /* Exact matching for every entry that is NOT the current path's
+                   owner, so a parent (/brokers) can't stay lit on a nested
+                   sibling (/brokers/review). aria-current follows the same rule. */
+                end={item.to !== ownerTo}
                 className={({ isActive }) =>
                   [
                     'relative px-3 py-1.5 text-sm tracking-wide rounded-[var(--radius-xs)] transition-colors',

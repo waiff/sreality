@@ -55,8 +55,14 @@ _TENANT_TABLES = frozenset({
     "property_pipeline_events", "entitlements",
 })
 
-# Amendment A6: these broker-directory PII surfaces stay dark to browser roles
-# until Wave 4 ships masked columns. A migration must not re-grant them.
+# Amendment A6: these broker-directory PII surfaces stay dark to browser roles;
+# the SPA reads them only through the PII-masking /brokers API. A migration must
+# not re-grant them.
+#
+# MIRRORS tests/test_tenant_isolation_live.py::_BROKER_PII_RELATIONS -- add a new
+# broker surface to BOTH. This gate scans migration SQL text, so it sees only
+# literal `grant` statements; the live one probes the effective privilege and is
+# what catches default-ACL drift or a blanket `grant ... on all tables`.
 _BROKER_A6_SURFACES = frozenset({
     "brokers_public", "broker_leaderboard", "broker_firm_memberships_public",
     "broker_listings_public", "listing_broker_public", "broker_geo_options",

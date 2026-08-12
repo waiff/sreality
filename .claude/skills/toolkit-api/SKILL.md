@@ -118,6 +118,12 @@ it (`api/`). They do not apply to the scraper.
    (`frontend/src/lib/brokers.ts`, every call `jwt: true`); it previously read the
    underlying views straight off PostgREST and had been dark since migration 299 revoked
    them. Migration 395 revoked the last one A6 missed (`firms_public`, default-ACL drift).
+   Because the cap is a 422 on the WHOLE batch, `fetchListingBrokersByIds` /
+   `fetchBrokersByIds` chunk client-side (supabase-js `.in()` had no such cap, so an
+   oversized board would otherwise lose every card's broker, not just the overflow); and
+   the client treats 404 as an answer only when the body carries this module's own
+   `broker not found` / `listing has no attributed broker` detail — any other 404 (edge,
+   stale base URL, renamed route) must surface as an error, not as "no broker".
    **The old coexistence window is gone for `require_admin`/`verify_jwt`**: the static
    `API_TOKEN`, extractable from the shipped SPA bundle via devtools, used to also satisfy
    `verify_jwt` as a synthetic `is_admin: True` identity — a live CRITICAL finding closed

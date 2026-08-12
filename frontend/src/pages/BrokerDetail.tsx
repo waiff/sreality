@@ -126,6 +126,7 @@ export default function BrokerDetail() {
           <Inventory
             rows={listingsQ.data ?? []}
             loading={listingsQ.isLoading}
+            error={listingsQ.isError ? (listingsQ.error as Error) : null}
             total={b.listing_count}
           />
         </>
@@ -310,10 +311,12 @@ function Firms({ rows }: { rows: BrokerMembership[] }) {
 function Inventory({
   rows,
   loading,
+  error,
   total,
 }: {
   rows: BrokerListing[];
   loading: boolean;
+  error: Error | null;
   total: number;
 }) {
   const [categoryMain, setCategoryMain] = useState<string | null>(null);
@@ -357,6 +360,14 @@ function Inventory({
       <div className="mt-3 overflow-x-auto border border-[var(--color-rule)] rounded-[var(--radius-md)]">
         {loading ? (
           <p className="px-4 py-6 text-sm text-[var(--color-ink-3)]">Načítám inzeráty…</p>
+        ) : error ? (
+          /* The stats strip above already asserts a listing count from the
+             dossier, which now succeeds independently — so a failed inventory
+             read rendered as "Žádné inzeráty." would make the page contradict
+             itself and read as a delisted broker. */
+          <p className="px-4 py-6 text-sm text-[var(--color-brick)]">
+            Inzeráty se nepodařilo načíst: {error.message}
+          </p>
         ) : rows.length === 0 ? (
           <p className="px-4 py-6 text-sm text-[var(--color-ink-4)]">Žádné inzeráty.</p>
         ) : filtered.length === 0 ? (

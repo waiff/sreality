@@ -927,8 +927,11 @@ renumber.** Navigate by area:
     so a logged-in caller gets HTTP 200 with either the values or `has_email`/`has_phone` — there is
     no longer an *expected* failure, and the 42501 special case is gone. The two reads stay isolated
     from the board (broker data is an enrichment; a failure must not take stages/cards/images down)
-    but every failure is now `console.error`'d, never silently expected. A masked card keeps its
-    broker name + firm and its hover box says the contact is admin-only rather than omitting it.
+    but every failure is now `console.error`'d, never silently expected (pinned by
+    `frontend/src/lib/pipelineBoard.test.ts`). A masked card keeps its broker name + firm and its
+    hover box says the contact is admin-only rather than omitting it. Both helpers chunk their id
+    list below the routes' `MAX_BATCH` (1000) cap, which is a 422 on the whole batch — unchunked,
+    a board past that size would lose EVERY card's broker rather than the overflow.
     The board offers basic **property-type
     filtering** — multi-select `category_main` chips (Byty / Domy / Komerční / …) whose labels come
     from the SAME generated filter registry as Browse's TYPE tabs (`FILTER_REGISTRY`, never a parallel
