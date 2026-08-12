@@ -32,10 +32,12 @@ def get_candidates(
     status: str = "proposed",
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
+    reason: str | None = Query(default=None),
     conn: Any = Depends(deps.get_db_conn),
     _: dict = Depends(deps.require_admin),
 ) -> dict[str, Any]:
-    return review.list_candidates(conn, status=status, limit=limit, offset=offset)
+    return review.list_candidates(conn, status=status, limit=limit, offset=offset,
+                                  reason=reason)
 
 
 @router.post("/candidates/{candidate_id}/merge")

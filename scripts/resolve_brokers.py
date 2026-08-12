@@ -18,9 +18,10 @@ that runs OFF the scrape hot path. Three modes:
     the cross-source merge step, REFRESH the leaderboard matview, clear the queue.
     The self-healing backstop. Attribution resumes from `broker_sweep_cursor` and
     rotates, so a run truncated by --max-seconds advances through the corpus instead
-    of re-walking the same head; only a walk that covered EVERY id clears the whole
-    queue and stamps `broker_resolution_last_complete` (verify_pipeline's
-    broker_resolution_freshness check reads that stamp).
+    of re-walking the same head; only a walk that covered EVERY id in one run clears
+    the whole queue, and closing a rotation LAP (cumulative coverage across however
+    many runs it took) stamps `broker_resolution_last_complete` — the stamp
+    verify_pipeline's broker_resolution_freshness check ages.
   * --backfill: alias for full (the one-shot first population from existing
     raw_json). Run in Actions after merge — local has no psycopg, and a raw_json
     scan over the pooler times out, so it is keyset-batched here.
@@ -594,23 +595,36 @@ _CLEAR_DIRTY_SWEPT_WRAPPED_SQL = (
     "AND (listing_id >= %(lo)s OR listing_id <= %(hi)s)"
 )
 
-# Full-sweep rotation cursor: the id attribution last stopped at. The sweep walks
-# broker-bearing ids ASCENDING and breaks on --max-seconds, so without a cursor it
-# restarted at the minimum id every day and the tail above the break — the NEWEST
-# listings — was never attributed by any sweep, ever, while the job still exited 0.
+# Full-sweep rotation cursor: the id attribution last stopped at, plus the open
+# LAP's accounting. The sweep walks broker-bearing ids ASCENDING and breaks on
+# --max-seconds, so without a cursor it restarted at the minimum id every day and
+# the tail above the break — the NEWEST listings — was never attributed by any
+# sweep, ever, while the job still exited 0.
 _SWEEP_CURSOR_KEY = "broker_sweep_cursor"
-# Written ONLY when attribution covered every id, exactly like
-# property_sweep_last_complete: a chronically-truncated sweep then surfaces as a
-# stale stamp on verify_pipeline's `broker_resolution_freshness` check instead of
-# as a green run. Read by that check — rename in both places or not at all.
+# Stamped when the ROTATION closes a lap — cumulative ids swept since the lap
+# opened reach the corpus size — NOT when one run walks everything. Truncation is
+# the designed steady state here (the 2026-08-10 sweep attributed 480,000 of
+# 535,007 ids inside its 3000s budget), so a single-run condition would essentially
+# never hold: the stamp would never land and the freshness check would park forever
+# on the amber a missing stamp gives it, while the one light day that did fit would
+# then age past the fail threshold with the rotation working exactly as designed.
+# Read by verify_pipeline's `broker_resolution_freshness` — rename in both places
+# or not at all.
 _SWEEP_COMPLETE_KEY = "broker_resolution_last_complete"
 
 _READ_SETTING_SQL = "SELECT value FROM app_settings WHERE key = %s"
 
+# lap_started_at falls back to now() so the very first sweep opens a lap: the check
+# ages the sweep axis from it until a lap actually closes, which is what makes a
+# rotation that never closes one reachable as `fail` instead of a permanent warn.
 _WRITE_SWEEP_CURSOR_SQL = """
 INSERT INTO app_settings (key, value, updated_by)
 VALUES (%(key)s,
-        jsonb_build_object('last_id', %(last_id)s::bigint, 'updated_at', now()),
+        jsonb_build_object('last_id', %(last_id)s::bigint,
+                           'lap_swept', %(lap_swept)s::int,
+                           'lap_started_at',
+                           coalesce(%(lap_started_at)s::timestamptz, now()),
+                           'updated_at', now()),
         'resolve_brokers')
 ON CONFLICT (key) DO UPDATE
   SET value = excluded.value, updated_at = now(), updated_by = excluded.updated_by
@@ -625,6 +639,18 @@ VALUES (%(key)s,
         'resolve_brokers')
 ON CONFLICT (key) DO UPDATE
   SET value = excluded.value, updated_at = now(), updated_by = excluded.updated_by
+"""
+
+# A proposal whose brokers were merged by another route (the operator resolving an
+# overlapping pair, or the auto-merge step) can never be acted on: merge_brokers
+# raises "fewer than two of the given brokers are active" and the row occupies the
+# queue forever, because the generators only ever touch keys they re-propose.
+_RETIRE_DEAD_CANDIDATES_SQL = """
+UPDATE broker_merge_candidates c
+   SET status = 'merged', resolved_at = now(), resolved_by = 'resolve_brokers'
+ WHERE c.status = 'proposed'
+   AND (SELECT count(*) FROM brokers b
+         WHERE b.id = ANY(c.broker_ids) AND b.status = 'active') < 2
 """
 
 
@@ -905,11 +931,16 @@ def _cross_source_merge(conn: Any, auto_merge_sources: list[str], run_id: int) -
                 if a[1] != b[1]:
                     bridges.append(R.Bridge(a[0], b[0], kind, value))
 
+    bridge_values: dict[tuple[int, int], set[str]] = {}
+    for bridge in bridges:
+        bridge_values.setdefault(bridge.pair(), set()).add(f"{bridge.kind}:{bridge.value}")
+
     decision = R.decide_merges(list(identities.values()), bridges, auto_merge_sources)
     auto = _apply_merges(conn, decision.auto_merge_groups)
     # AFTER the merges: they re-point broker_identities.broker_id, so a pair read
     # before them could propose a broker that no longer survives.
-    proposed = _queue_review_pairs(conn, decision.review_pairs, identities, run_id)
+    proposed = _queue_review_pairs(conn, decision.review_pairs, identities,
+                                   bridge_values, run_id)
     LOG.info("RESOLVE merge review pairs decided=%d proposed=%d",
              len(decision.review_pairs), proposed)
     return auto, len(decision.review_pairs)
@@ -926,14 +957,24 @@ def _broker_of(conn: Any, identity_ids: list[int]) -> dict[int, int]:
 
 
 def _queue_review_pairs(conn: Any, pairs: list[tuple[int, int]],
-                        identities: dict[int, R.Identity], run_id: int) -> int:
+                        identities: dict[int, R.Identity],
+                        bridge_values: dict[tuple[int, int], set[str]],
+                        run_id: int) -> int:
     """Persist decide_merges' review pairs as operator-reviewable merge candidates.
 
     They were computed and dropped on the floor every sweep (9,377/day at the
     2026-08-12 review), so the only output of the deliberately conservative
     auto-merge guard never reached the operator. Keyed on the BROKER pair, not the
     identity pair: the operator merges brokers, so two identity pairs resolving to
-    the same two brokers are one proposal, and the key stays stable across sweeps."""
+    the same two brokers are one proposal, and the key stays stable across sweeps.
+
+    Only pairs that share an ACTUAL contact are proposed. decide_merges also
+    downgrades an oversized component by expanding it pairwise, which is n(n-1)/2
+    rows describing a chain the guard already called untrustworthy — a one-click
+    merge of two agents connected only through a shared switchboard several hops
+    away is exactly what it refused. The component's real edges survive that filter,
+    so nothing actionable is lost; the evidence carries the bridge so the operator
+    judges the same fact the engine did."""
     if not pairs:
         return 0
     broker_of = _broker_of(conn, sorted({i for pair in pairs for i in pair}))
@@ -942,12 +983,16 @@ def _queue_review_pairs(conn: Any, pairs: list[tuple[int, int]],
         left, right = broker_of.get(a), broker_of.get(b)
         if left is None or right is None or left == right:
             continue
+        shared = sorted(bridge_values.get((a, b) if a < b else (b, a), ()))
+        if not shared:
+            continue
         lo, hi = (left, right) if left < right else (right, left)
         ia, ib = identities.get(a), identities.get(b)
         rows[f"contactbridge:{lo}:{hi}"] = (lo, hi, json.dumps({
             "identity_ids": [a, b],
             "sources": [ia.source if ia else None, ib.source if ib else None],
             "names": [ia.name if ia else None, ib.name if ib else None],
+            "bridges": shared,
             "run_id": run_id,
         }, ensure_ascii=False))
     if not rows:
@@ -1155,16 +1200,52 @@ def _broker_bearing_ids(conn: Any, page_size: int) -> list[int]:
     return ids
 
 
-def _sweep_cursor(conn: Any) -> int | None:
-    """The id the last full sweep's attribution stopped at, or None on first run."""
+def _sweep_state(conn: Any) -> tuple[int | None, int, str | None]:
+    """(resume id, ids swept so far in the open lap, when that lap opened).
+
+    Every field degrades to its first-run default on a missing row, a NULL or a
+    hand-edited value — the daily sweep resumes from the corpus floor rather than
+    crashing."""
     with conn.cursor() as cur:
         cur.execute(_READ_SETTING_SQL, (_SWEEP_CURSOR_KEY,))
         row = cur.fetchone()
     value = row[0] if row else None
+    if not isinstance(value, dict):
+        return None, 0, None
+    lap_started = value.get("lap_started_at")
+    return (_as_int(value.get("last_id")), _as_int(value.get("lap_swept")) or 0,
+            lap_started if isinstance(lap_started, str) else None)
+
+
+def _as_int(value: Any) -> int | None:
     try:
-        return int(value["last_id"])
-    except (KeyError, TypeError, ValueError):
+        return int(value)
+    except (TypeError, ValueError):
         return None
+
+
+def _record_sweep_progress(conn: Any, *, last_id: int, lap_swept: int,
+                           lap_started_at: str | None, lap_complete: bool,
+                           elapsed_s: float) -> None:
+    """Advance the rotation cursor and, when the lap closed, stamp completion.
+
+    Written right after attribution rather than in _finalize: the 17-25 min tail
+    (cross-source merge, rollups, matview, candidates) fails often enough that
+    leaving the cursor behind it threw away a whole run's rotation advance and
+    re-walked the same window the next day — the exact starvation the cursor
+    exists to remove. Both statements are idempotent upserts that depend on
+    nothing the tail does."""
+    with conn.cursor() as cur:
+        cur.execute(_WRITE_SWEEP_CURSOR_SQL, {
+            "key": _SWEEP_CURSOR_KEY, "last_id": last_id,
+            "lap_swept": 0 if lap_complete else lap_swept,
+            "lap_started_at": None if lap_complete else lap_started_at,
+        })
+        if lap_complete:
+            cur.execute(_STAMP_SWEEP_COMPLETE_SQL, {
+                "key": _SWEEP_COMPLETE_KEY, "swept": lap_swept,
+                "elapsed_s": round(elapsed_s, 1),
+            })
 
 
 def _rotate_from_cursor(ids: list[int], last_id: int | None) -> list[int]:
@@ -1257,8 +1338,8 @@ def _run_full(conn: Any, free: list[str], franchise: list[str], auto: list[str],
     # regularly spends the whole budget (the 08-09 and 08-10 sweeps both logged it),
     # so an ascending-from-zero walk re-attributed the same head every day and never
     # reached the tail — the newest listings — at all.
-    walk = _rotate_from_cursor(
-        all_ids, step(_sweep_cursor, "resolve.sweep_cursor"))
+    last_id, lap_swept, lap_started_at = step(_sweep_state, "resolve.sweep_cursor")
+    walk = _rotate_from_cursor(all_ids, last_id)
     first_swept = walk[0] if walk else None
     last_swept: int | None = None
     swept = 0
@@ -1271,14 +1352,24 @@ def _run_full(conn: Any, free: list[str], franchise: list[str], auto: list[str],
         swept += len(chunk)
         # `i + batch_size < len(walk)`: a deadline crossed while finishing the LAST
         # chunk is a complete walk, not a truncated one — flagging it incomplete
-        # would withhold the completion stamp from a sweep that swept everything.
+        # would scope the dirty clear on a sweep that re-attributed everything.
         if deadline and time.monotonic() > deadline and i + batch_size < len(walk):
             LOG.warning("RESOLVE full: time budget reached during attribution at %d/%d ids",
                         swept, len(walk))
             complete = False
             break
-    LOG.info("RESOLVE full attribution swept=%d/%d complete=%s resume_at=%s",
-             swept, len(all_ids), complete, last_swept)
+    # The lap — one full trip around the rotation, however many runs it takes — is
+    # what "a complete sweep" means once truncation is the designed steady state.
+    lap_swept += swept
+    lap_complete = bool(all_ids) and lap_swept >= len(all_ids)
+    LOG.info("RESOLVE full attribution swept=%d/%d lap=%d/%d complete=%s lap_complete=%s "
+             "resume_at=%s", swept, len(all_ids), lap_swept, len(all_ids), complete,
+             lap_complete, last_swept)
+    if last_swept is not None:
+        step(lambda c, last=last_swept: _record_sweep_progress(
+            c, last_id=last, lap_swept=lap_swept, lap_started_at=lap_started_at,
+            lap_complete=lap_complete, elapsed_s=time.monotonic() - t0),
+            "resolve.sweep_progress")
 
     step(lambda c: _resolve_firms(c, free, franchise), "resolve.firms")
     # Batch the listings->firm link over the same id chunks — a single global UPDATE
@@ -1295,14 +1386,19 @@ def _run_full(conn: Any, free: list[str], franchise: list[str], auto: list[str],
     # chunks each timing out once, then succeeding, with nothing watching the clock),
     # it just refuses to trade a phase that normally finishes for that bound. An
     # overrun degrades to a partial link + a warning, and the next sweep redoes it.
+    #
+    # Walks `walk`, not `all_ids`: on the day this phase does overrun, an
+    # ascending-from-the-floor walk would break at the same low id every time and
+    # leave every id above it un-reconciled forever — the identical starvation the
+    # rotation cursor fixes for attribution.
     firm_deadline = max(deadline, time.monotonic() + _FIRM_LINK_MIN_SECONDS) if deadline else None
-    for i in range(0, len(all_ids), batch_size):
-        chunk = all_ids[i:i + batch_size]
+    for i in range(0, len(walk), batch_size):
+        chunk = walk[i:i + batch_size]
         step(lambda c, ids=chunk: _link_listings_firm(c, "AND l.id = ANY(%(ids)s)", {"ids": ids}),
              "resolve.link_firm", attempts=2)
         if firm_deadline and time.monotonic() > firm_deadline:
             LOG.warning("RESOLVE full: time budget reached during firm linking at %d/%d ids",
-                        i, len(all_ids))
+                        i, len(walk))
             break
     attached = step(_attach_singletons, "resolve.singletons")
     LOG.info("RESOLVE full attribution+firms done elapsed=%.1fs", time.monotonic() - t0)
@@ -1387,19 +1483,13 @@ def _run_full(conn: Any, free: list[str], franchise: list[str], auto: list[str],
         with c.cursor() as cur:
             if complete:
                 cur.execute(_CLEAR_DIRTY, {"cutoff": cutoff})
-                cur.execute(_STAMP_SWEEP_COMPLETE_SQL, {
-                    "key": _SWEEP_COMPLETE_KEY, "swept": swept,
-                    "elapsed_s": round(time.monotonic() - t0, 1),
-                })
             elif first_swept is not None and last_swept is not None:
                 cur.execute(
                     _CLEAR_DIRTY_SWEPT_SQL if first_swept <= last_swept
                     else _CLEAR_DIRTY_SWEPT_WRAPPED_SQL,
                     {"cutoff": cutoff, "lo": first_swept, "hi": last_swept},
                 )
-            if last_swept is not None:
-                cur.execute(_WRITE_SWEEP_CURSOR_SQL,
-                            {"key": _SWEEP_CURSOR_KEY, "last_id": last_swept})
+            cur.execute(_RETIRE_DEAD_CANDIDATES_SQL)
             cur.execute(
                 "UPDATE broker_resolution_runs SET ended_at = now(), brokers_recomputed = "
                 "(SELECT count(*) FROM brokers WHERE status='active'), identities_upserted = "

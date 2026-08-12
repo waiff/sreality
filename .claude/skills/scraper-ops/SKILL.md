@@ -326,8 +326,13 @@ the only alarm was a failing GH Actions cron the operator happened to miss. The 
 dirty-queue row — the 2026-08-06 sweep-death/stranded-lease incident; both axes O(1) reads,
 never a properties scan) and `broker_resolution_freshness` (the same two axes over
 `app_settings.broker_resolution_last_complete` + `dirty_broker_listings` — the 2026-08-12
-E2E review found the daily broker sweep truncating on its budget every day while exiting 0);
-the six dedup-specific checks (street/geo debt, eligibility funnel,
+E2E review found the daily broker sweep truncating on its budget every day while exiting 0).
+Note the broker sweep axis measures a rotation **lap**, not one run: attribution routinely
+spends its whole `--max-seconds` budget, so `resolve_brokers` carries cumulative coverage in
+`app_settings.broker_sweep_cursor` (`last_id` / `lap_swept` / `lap_started_at`) and stamps
+completion when the lap closes; with no lap closed yet the check ages the OPEN lap, so a
+rotation that never gets round reds instead of parking on the missing-stamp warn.
+The six dedup-specific checks (street/geo debt, eligibility funnel,
 merge latency, engine health, merge-precision sample) went with the engine, along with their
 `pipeline_check_thresholds` rows.
 

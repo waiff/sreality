@@ -13,12 +13,44 @@ import {
 import { prettyPhone } from '../lib/brokers';
 import { fmtCount, fmtRelative } from '../lib/format';
 
+const PAGE_SIZE = 100;
+
+// The two generators write to one table at very different volumes, so the queue is
+// only navigable segmented: an unfiltered page ordered by group size then recency
+// lets a sweep's contact-bridge regeneration bury the whole name_firm backlog.
+const REASONS = [
+  {
+    key: 'name_firm',
+    tab: 'Stejné jméno a firma',
+    blurb:
+      'Záznamy se stejným jménem a firmou, které automat nesloučil (nemají ' +
+      'společný osobní kontakt — typicky firemní účty za přepojovacím číslem).',
+  },
+  {
+    key: 'contact_bridge_review',
+    tab: 'Sdílený kontakt',
+    blurb:
+      'Záznamy z různých portálů, které sdílejí telefon nebo e-mail, ale ' +
+      'automat je nesloučil (jediný nepotvrzený kontakt, nesouhlasící jméno, nebo ' +
+      'portál bez automatického slučování). Zkontrolujte uvedený kontakt.',
+  },
+] as const;
+
 export default function BrokerReview() {
+  const [reason, setReason] = useState<string>(REASONS[0].key);
+  const [page, setPage] = useState(0);
   const candQ = useQuery({
-    queryKey: ['broker-merge-candidates'],
-    queryFn: () => listBrokerMergeCandidates(100),
+    queryKey: ['broker-merge-candidates', reason, page],
+    queryFn: () => listBrokerMergeCandidates(PAGE_SIZE, reason, page * PAGE_SIZE),
   });
   const candidates = candQ.data?.candidates ?? [];
+  const counts = candQ.data?.reason_counts ?? {};
+  const total = counts[reason] ?? 0;
+  const active = REASONS.find((r) => r.key === reason) ?? REASONS[0];
+  const select = (key: string) => {
+    setReason(key);
+    setPage(0);
+  };
 
   return (
     <div className="px-6 py-8 max-w-4xl mx-auto text-[var(--color-ink)]">
@@ -29,11 +61,23 @@ export default function BrokerReview() {
         <p className="text-xs tracking-[0.18em] uppercase text-[var(--color-ink-3)]">broker intelligence</p>
         <h1 className="mt-1 text-2xl font-[family-name:var(--font-display)]">Sloučit duplicity</h1>
         <p className="mt-1 text-sm text-[var(--color-ink-3)] max-w-2xl">
-          Záznamy se stejným jménem a&nbsp;firmou, které automat nesloučil (nemají
-          společný osobní kontakt — typicky firemní účty za přepojovacím číslem).
-          Zkontrolujte a&nbsp;slučte ručně. Sloučení je vratné.
+          {active.blurb} Zkontrolujte a&nbsp;slučte ručně. Sloučení je vratné.
         </p>
       </header>
+
+      <div className="mt-4 flex flex-wrap items-center gap-2">
+        {REASONS.map((r) => (
+          <button key={r.key} type="button" onClick={() => select(r.key)}
+            aria-pressed={r.key === reason}
+            className={`text-xs rounded-[var(--radius-sm)] border px-3 py-1.5 transition-colors ${
+              r.key === reason
+                ? 'border-[var(--color-copper)] bg-[var(--color-copper-soft)]'
+                : 'border-[var(--color-rule)] text-[var(--color-ink-3)] hover:border-[var(--color-copper)]'
+            }`}>
+            {r.tab} ({fmtCount(counts[r.key] ?? 0)})
+          </button>
+        ))}
+      </div>
 
       <div className="mt-6">
         {candQ.isLoading ? (
@@ -54,6 +98,23 @@ export default function BrokerReview() {
           </ul>
         )}
       </div>
+
+      {total > PAGE_SIZE && (
+        <div className="mt-4 flex items-center gap-3 text-xs text-[var(--color-ink-3)]">
+          <button type="button" disabled={page === 0} onClick={() => setPage((p) => p - 1)}
+            className="rounded-[var(--radius-sm)] border border-[var(--color-rule)] px-3 py-1.5 hover:border-[var(--color-copper)] disabled:opacity-40 disabled:cursor-not-allowed">
+            ← Předchozí
+          </button>
+          <span className="tabular-nums">
+            {page * PAGE_SIZE + 1}–{page * PAGE_SIZE + candidates.length} z&nbsp;{fmtCount(total)}
+          </span>
+          <button type="button" disabled={(page + 1) * PAGE_SIZE >= total}
+            onClick={() => setPage((p) => p + 1)}
+            className="rounded-[var(--radius-sm)] border border-[var(--color-rule)] px-3 py-1.5 hover:border-[var(--color-copper)] disabled:opacity-40 disabled:cursor-not-allowed">
+            Další →
+          </button>
+        </div>
+      )}
 
       <RecentMerges />
     </div>
@@ -83,13 +144,22 @@ function CandidateCard({ c }: { c: BrokerMergeCandidate }) {
     onSuccess: invalidate,
   });
 
-  const firm = c.evidence.firm_name ?? c.evidence.firm_domain ?? '—';
+  // The two generators write disjoint evidence shapes; a name_firm group is one
+  // name + firm, a contact bridge is two names plus the contact that linked them —
+  // and without that contact the operator cannot judge the pair at all.
+  const bridges = c.evidence.bridges ?? [];
+  const title = bridges.length
+    ? (c.evidence.names ?? []).map((n) => n || '—').join(' · ')
+    : (c.evidence.name ?? '—');
+  const subtitle = bridges.length
+    ? `${bridges.join(', ')} · ${(c.evidence.sources ?? []).filter(Boolean).join(' + ')}`
+    : (c.evidence.firm_name ?? c.evidence.firm_domain ?? '—');
 
   return (
     <div className="border border-[var(--color-rule)] rounded-[var(--radius-md)] bg-[var(--color-paper-2)]">
       <div className="border-b border-[var(--color-rule-soft)] px-4 py-2.5">
-        <span className="text-sm text-[var(--color-ink)]">{c.evidence.name ?? '—'}</span>
-        <span className="text-xs text-[var(--color-ink-3)]"> · {firm} · {c.broker_ids.length} záznamy</span>
+        <span className="text-sm text-[var(--color-ink)]">{title}</span>
+        <span className="text-xs text-[var(--color-ink-3)]"> · {subtitle} · {c.broker_ids.length} záznamy</span>
       </div>
 
       <ul className="divide-y divide-[var(--color-rule-soft)]">

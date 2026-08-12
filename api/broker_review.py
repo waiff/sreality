@@ -4,10 +4,13 @@ The auto-merge engine only unifies brokers sharing a PERSONAL contact. Corporate
 developer accounts behind role inboxes + a switchboard have no personal bridge and
 are left apart (name-alone is never auto-merged). This module surfaces those
 "same name + same firm" groups (proposed by the resolver into
-broker_merge_candidates) and lets the operator merge or dismiss them.
+broker_merge_candidates) and lets the operator merge or dismiss them. The sweep's
+cross-source step feeds the same table under reason='contact_bridge_review' — pairs
+that DO share a contact but failed the corroboration guard — so callers segment the
+queue by `reason` rather than reading one mixed page.
 
 Merges are reversible: every re-pointed identity is logged to broker_merge_events
-(source='manual'), and unmerge replays it. Affected brokers' rollups are recomputed
+(source='operator'), and unmerge replays it. Affected brokers' rollups are recomputed
 inline (reusing the resolver's rollup SQL); the leaderboard matview catches up on
 the next daily sweep, but a merged loser drops off the leaderboard immediately
 (brokers_public is active-only). Writes live here in api/, not toolkit (rule #5).
@@ -28,16 +31,29 @@ from scripts.resolve_brokers import (
 
 
 def list_candidates(conn: Any, *, status: str = "proposed", limit: int = 100,
-                    offset: int = 0) -> dict[str, Any]:
+                    offset: int = 0, reason: str | None = None) -> dict[str, Any]:
     """Proposed merge groups, each enriched with its brokers' current public rows
-    (name, firm, counts, primary contact) so the operator can judge the group."""
+    (name, firm, counts, primary contact) so the operator can judge the group.
+
+    `reason` segments the queue. It has to: the two generators run at wildly
+    different volumes (thousands of contact-bridge pairs per sweep against a few
+    thousand name_firm groups) and the ordering is group size then recency, so an
+    unfiltered page would let one generator's regeneration bury the other's backlog
+    below a page the UI has no way to scroll past. `reason_counts` is over the whole
+    status, not the page, so a caller can size the queue it is not showing."""
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
             "SELECT id, group_key, broker_ids, reason, evidence, status, created_at "
-            "FROM broker_merge_candidates WHERE status = %s "
-            "ORDER BY array_length(broker_ids, 1) DESC, id DESC LIMIT %s OFFSET %s",
-            (status, limit, offset))
+            "FROM broker_merge_candidates WHERE status = %(status)s "
+            "AND (%(reason)s::text IS NULL OR reason = %(reason)s) "
+            "ORDER BY array_length(broker_ids, 1) DESC, id DESC "
+            "LIMIT %(limit)s OFFSET %(offset)s",
+            {"status": status, "reason": reason, "limit": limit, "offset": offset})
         rows = cur.fetchall()
+        cur.execute(
+            "SELECT reason, count(*) AS n FROM broker_merge_candidates "
+            "WHERE status = %s GROUP BY reason", (status,))
+        reason_counts = {r["reason"]: int(r["n"]) for r in cur.fetchall()}
         all_ids = sorted({b for r in rows for b in r["broker_ids"]})
         brokers: dict[int, dict[str, Any]] = {}
         if all_ids:
@@ -50,7 +66,7 @@ def list_candidates(conn: Any, *, status: str = "proposed", limit: int = 100,
     for r in rows:
         r["created_at"] = _iso(r["created_at"])
         r["brokers"] = [brokers[b] for b in r["broker_ids"] if b in brokers]
-    return {"candidates": rows, "count": len(rows)}
+    return {"candidates": rows, "count": len(rows), "reason_counts": reason_counts}
 
 
 def merge_candidate(conn: Any, candidate_id: int, *, broker_ids: list[int] | None = None,
@@ -99,7 +115,10 @@ def merge_brokers(conn: Any, broker_ids: list[int], *, reason: str = "manual",
         cur.execute(
             "INSERT INTO broker_merge_events (merge_group_id, survivor_broker_id, "
             "retired_broker_id, identity_id, prev_broker_id, reason, source) "
-            "SELECT %(g)s, %(s)s, bi.broker_id, bi.id, bi.broker_id, %(reason)s, 'manual' "
+            # 'operator', not 'manual': migration 186 constrains source to
+            # ('auto','operator') and every operator merge through this queue died
+            # on that CHECK as an unmapped 500 (zero manual rows exist in prod).
+            "SELECT %(g)s, %(s)s, bi.broker_id, bi.id, bi.broker_id, %(reason)s, 'operator' "
             "FROM broker_identities bi WHERE bi.broker_id = ANY(%(losers)s)",
             {"g": group, "s": survivor, "reason": reason, "losers": losers})
         cur.execute(

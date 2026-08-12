@@ -1925,10 +1925,25 @@ export interface BrokerMergeCandidate {
   group_key: string;
   broker_ids: number[];
   reason: string;
-  evidence: { name?: string; firm_name?: string | null; firm_domain?: string | null; broker_count?: number };
+  evidence: {
+    name?: string;
+    firm_name?: string | null;
+    firm_domain?: string | null;
+    broker_count?: number;
+    // reason='contact_bridge_review' instead carries the pair that bridged them
+    names?: (string | null)[];
+    sources?: (string | null)[];
+    bridges?: string[];
+  };
   status: string;
   created_at: string | null;
   brokers: BrokerMergeBroker[];
+}
+
+export interface BrokerMergeCandidatePage {
+  candidates: BrokerMergeCandidate[];
+  count: number;
+  reason_counts: Record<string, number>;
 }
 
 export interface BrokerMergeRecord {
@@ -1943,10 +1958,12 @@ export interface BrokerMergeRecord {
 
 export const listBrokerMergeCandidates = (
   limit = 100,
-): Promise<{ candidates: BrokerMergeCandidate[]; count: number }> =>
-  request<{ candidates: BrokerMergeCandidate[]; count: number }>(
+  reason?: string,
+  offset = 0,
+): Promise<BrokerMergeCandidatePage> =>
+  request<BrokerMergeCandidatePage>(
     '/broker-review/candidates',
-    { query: { limit }, jwt: true },
+    { query: { limit, offset, ...(reason ? { reason } : {}) }, jwt: true },
   );
 
 export const mergeBrokerCandidate = (

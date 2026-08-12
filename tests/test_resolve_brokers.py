@@ -9,7 +9,10 @@ so these tests assert that EVERY page stays bounded (the regression guard).
 
 from __future__ import annotations
 
+import json
 from typing import Any
+
+import pytest
 
 from scripts.resolve_brokers import _BROKER_SOURCES, _broker_bearing_ids
 
@@ -444,14 +447,16 @@ def test_firm_linking_gets_its_own_floor_when_attribution_ate_the_budget(
 
 
 def _stub_full_sweep(monkeypatch: Any, all_ids: list[int],
-                     cursor: int | None = None) -> list[list[int]]:
+                     cursor: int | None = None, lap_swept: int = 0,
+                     lap_started_at: str | None = None) -> list[list[int]]:
     """Neutralise every phase of _run_full except attribution; return the chunks
     attribution actually walked, in walk order."""
     import scripts.resolve_brokers as rb
 
     attributed: list[list[int]] = []
     monkeypatch.setattr(rb, "_broker_bearing_ids", lambda c, n: all_ids)
-    monkeypatch.setattr(rb, "_sweep_cursor", lambda c: cursor)
+    monkeypatch.setattr(rb, "_sweep_state",
+                        lambda c: (cursor, lap_swept, lap_started_at))
     monkeypatch.setattr(rb, "_attribute",
                         lambda c, sel, params: attributed.append(params["ids"]))
     monkeypatch.setattr(rb, "_resolve_firms", lambda c, free, franchise: None)
@@ -524,17 +529,55 @@ def test_truncated_sweep_scopes_the_clear_and_withholds_the_completion_stamp(
                    for s in conn.executed)
     clear = _params(conn, "DELETE FROM dirty_broker_listings")
     assert clear == {"cutoff": "CUTOFF", "lo": 1, "hi": 2}
-    # ...the resume cursor advances past the last swept id...
+    # ...the resume cursor advances past the last swept id, carrying the open lap...
     cursor = _params(conn, "jsonb_build_object('last_id'")
-    assert cursor == {"key": "broker_sweep_cursor", "last_id": 2}
-    # ...and an incomplete walk leaves the completion stamp stale ON PURPOSE — that
-    # staleness IS verify_pipeline's broker_resolution_freshness alarm.
+    assert cursor == {"key": "broker_sweep_cursor", "last_id": 2,
+                      "lap_swept": 2, "lap_started_at": None}
+    # ...and a lap that has not gone all the way round stamps nothing.
     assert not any("completed_at" in s for s in conn.executed)
 
 
+def test_lap_closes_across_truncated_sweeps_and_only_then_stamps(
+    monkeypatch: Any,
+) -> None:
+    """The composing assertion the two halves were missing. Truncation is the
+    DESIGNED steady state (the 2026-08-10 sweep attributed 480,000 of 535,007 ids
+    inside its budget), so a stamp that needs one run to walk everything would never
+    be written at all — a permanently amber check that never rings — while the one
+    light day that did fit would age past the fail threshold two days later with the
+    rotation working perfectly. Coverage is therefore tracked across runs and the
+    stamp lands when the LAP closes."""
+    import time
+
+    import scripts.resolve_brokers as rb
+
+    ids = list(range(1, 11))
+    cursor: int | None = None
+    lap_swept = 0
+    covered: set[int] = set()
+    stamps: list[Any] = []
+    for _ in range(5):  # budget for one 2-id chunk per run
+        conn = _ResilientConn("full")
+        attributed = _stub_full_sweep(monkeypatch, ids, cursor=cursor,
+                                      lap_swept=lap_swept, lap_started_at="T0")
+        rb._run_full(conn, [], [], [], 2, time.monotonic() - 1, reconnect=lambda: conn)
+        covered.update(i for chunk in attributed for i in chunk)
+        written = _params(conn, "jsonb_build_object('last_id'")
+        cursor, lap_swept = written["last_id"], written["lap_swept"]
+        stamps.append(_params(conn, "completed_at"))
+
+    assert covered == set(ids)
+    # nothing stamped until the rotation had actually been all the way round...
+    assert stamps[:4] == [None, None, None, None]
+    assert stamps[4]["key"] == "broker_resolution_last_complete"
+    assert stamps[4]["swept"] == len(ids)
+    # ...and closing the lap reopens a fresh one from zero.
+    assert lap_swept == 0
+
+
 def test_complete_sweep_clears_globally_and_stamps_completion(monkeypatch: Any) -> None:
-    """A walk that covered every id is the only one allowed to wipe the whole queue
-    (it re-attributed everything) and to stamp the health check's liveness signal."""
+    """A walk that covered every id in ONE run is the only one allowed to wipe the
+    whole queue (it re-attributed everything), and it closes the lap in one go."""
     import scripts.resolve_brokers as rb
 
     conn = _ResilientConn("full")
@@ -546,6 +589,24 @@ def test_complete_sweep_clears_globally_and_stamps_completion(monkeypatch: Any) 
     assert _params(conn, "DELETE FROM dirty_broker_listings") == {"cutoff": "CUTOFF"}
     stamp = _params(conn, "completed_at")
     assert stamp["key"] == "broker_resolution_last_complete" and stamp["swept"] == 4
+
+
+def test_cursor_is_written_before_the_failure_prone_tail(monkeypatch: Any) -> None:
+    """The 17-25 min tail (merge, rollups, matview, candidates) dies often enough —
+    an SSL drop past the retry budget, an AdminShutdown, the 110-min SIGKILL — that
+    persisting the cursor behind it threw away the whole run's rotation advance and
+    re-walked the identical window the next day."""
+    import scripts.resolve_brokers as rb
+
+    conn = _ResilientConn("full")
+    _stub_full_sweep(monkeypatch, [1, 2, 3, 4])
+    monkeypatch.setattr(rb, "_refresh_matview",
+                        lambda c: (_ for _ in ()).throw(RuntimeError("tail died")))
+
+    with pytest.raises(RuntimeError):
+        rb._run_full(conn, [], [], [], 2, None, reconnect=lambda: conn)
+
+    assert _params(conn, "jsonb_build_object('last_id'")["last_id"] == 4
 
 
 def test_sweep_resumes_from_the_stored_cursor(monkeypatch: Any) -> None:
@@ -609,21 +670,27 @@ def test_deadline_on_the_final_chunk_is_still_a_complete_walk(monkeypatch: Any) 
     assert _params(conn, "DELETE FROM dirty_broker_listings") == {"cutoff": "CUTOFF"}
 
 
-def test_sweep_cursor_reads_tolerate_a_missing_or_junk_setting() -> None:
+def test_sweep_state_reads_tolerate_a_missing_or_junk_setting() -> None:
     """A first run (no row), a hand-edited value, or a NULL must resume from the
-    floor rather than crash the daily sweep."""
-    from scripts.resolve_brokers import _sweep_cursor
+    floor with a fresh lap rather than crash the daily sweep."""
+    from scripts.resolve_brokers import _sweep_state
 
     for value, expected in [
-        (None, None), ({}, None), ({"last_id": None}, None),
-        ({"last_id": "nope"}, None), ({"last_id": "42"}, 42), ({"last_id": 42}, 42),
+        (None, (None, 0, None)),
+        ({}, (None, 0, None)),
+        ({"last_id": None}, (None, 0, None)),
+        ({"last_id": "nope"}, (None, 0, None)),
+        ({"last_id": "42"}, (42, 0, None)),
+        ({"last_id": 42, "lap_swept": 7, "lap_started_at": "2026-08-12T04:35:00Z"},
+         (42, 7, "2026-08-12T04:35:00Z")),
+        ({"last_id": 42, "lap_swept": "junk", "lap_started_at": 5}, (42, 0, None)),
     ]:
         conn = _ResilientConn("cursor")
         conn.setting_value = value
-        assert _sweep_cursor(conn) == expected
+        assert _sweep_state(conn) == expected
     empty = _ResilientConn("cursor")
     empty.setting_missing = True
-    assert _sweep_cursor(empty) is None
+    assert _sweep_state(empty) == (None, 0, None)
 
 
 # --- review pairs reach the operator queue -----------------------------------
@@ -643,7 +710,9 @@ def test_review_pairs_are_persisted_as_broker_merge_candidates() -> None:
         3: rb.R.Identity(3, "remax", None),
     }
 
-    assert rb._queue_review_pairs(conn, [(1, 2), (2, 3)], identities, run_id=7) == 2
+    bridges = {(1, 2): {"phone:+420111"}, (2, 3): {"email:a@x.cz"}}
+    assert rb._queue_review_pairs(conn, [(1, 2), (2, 3)], identities, bridges,
+                                  run_id=7) == 2
     sql = next(s for s in conn.executed if "broker_merge_candidates" in s)
     assert "'contact_bridge_review'" in sql
     # the SAME gate the existing name_firm populator uses: a resolved group is
@@ -653,6 +722,29 @@ def test_review_pairs_are_persisted_as_broker_merge_candidates() -> None:
     params = _params(conn, "broker_merge_candidates")
     # identity ids are mapped to BROKER ids (the grain the operator merges at)
     assert params["lo"] == [100, 200] and params["hi"] == [200, 300]
+    assert params["gk"] == ["contactbridge:100:200", "contactbridge:200:300"]
+    # the bridging contact rides along: without it the card shows the operator two
+    # names and no reason the engine hesitated, which is not a reviewable decision
+    assert json.loads(params["ev"][0])["bridges"] == ["phone:+420111"]
+
+
+def test_review_pairs_drop_the_oversized_component_expansion() -> None:
+    """decide_merges downgrades a component larger than MAX_AUTO_MERGE_COMPONENT by
+    expanding it PAIRWISE — n(n-1)/2 rows for a chain it already called
+    untrustworthy. Persisting those would bury the queue (9,377 decided pairs on the
+    2026-08-12 sweep) under one-click merges of agents joined only through a shared
+    switchboard several hops away. The component's real edges still land."""
+    import scripts.resolve_brokers as rb
+
+    conn = _ResilientConn("merge")
+    conn.broker_of = {1: 100, 2: 200, 3: 300}
+    identities = {i: rb.R.Identity(i, "s", None) for i in (1, 2, 3)}
+
+    # 1-2 and 2-3 are real edges; 1-3 is only the expansion's transitive closure
+    bridges = {(1, 2): {"phone:+420111"}, (2, 3): {"phone:+420111"}}
+    assert rb._queue_review_pairs(conn, [(1, 2), (1, 3), (2, 3)], identities,
+                                  bridges, run_id=1) == 2
+    params = _params(conn, "broker_merge_candidates")
     assert params["gk"] == ["contactbridge:100:200", "contactbridge:200:300"]
 
 
@@ -667,7 +759,9 @@ def test_review_pair_group_keys_are_idempotent_across_sweeps() -> None:
     identities = {i: rb.R.Identity(i, "s", None) for i in (1, 2, 3)}
 
     # (1,2) and (1,3) both resolve to the broker pair {100, 200}
-    assert rb._queue_review_pairs(conn, [(1, 2), (1, 3)], identities, run_id=1) == 1
+    bridges = {(1, 2): {"phone:+420111"}, (1, 3): {"phone:+420111"}}
+    assert rb._queue_review_pairs(conn, [(1, 2), (1, 3)], identities, bridges,
+                                  run_id=1) == 1
     params = _params(conn, "broker_merge_candidates")
     assert params["gk"] == ["contactbridge:100:200"]
     assert params["lo"] == [100] and params["hi"] == [200]
@@ -682,10 +776,12 @@ def test_review_pairs_skip_identities_without_a_distinct_broker() -> None:
     conn = _ResilientConn("merge")
     conn.broker_of = {1: 100, 2: 100}  # 3 has no broker
     identities = {i: rb.R.Identity(i, "s", None) for i in (1, 2, 3)}
+    bridges = {(1, 2): {"phone:+420111"}, (1, 3): {"phone:+420111"}}
 
-    assert rb._queue_review_pairs(conn, [(1, 2), (1, 3)], identities, run_id=1) == 0
+    assert rb._queue_review_pairs(conn, [(1, 2), (1, 3)], identities, bridges,
+                                  run_id=1) == 0
     assert not any("broker_merge_candidates" in s for s in conn.executed)
-    assert rb._queue_review_pairs(conn, [], identities, run_id=1) == 0
+    assert rb._queue_review_pairs(conn, [], identities, bridges, run_id=1) == 0
 
 
 def test_cross_source_merge_queues_review_pairs_after_applying_merges(
@@ -696,12 +792,14 @@ def test_cross_source_merge_queues_review_pairs_after_applying_merges(
     import scripts.resolve_brokers as rb
 
     calls: list[str] = []
+    seen: dict[str, Any] = {}
     monkeypatch.setattr(rb.R, "decide_merges",
-                        lambda i, b, a: rb.R.MergeDecision([[1, 2]], [(3, 4)]))
+                        lambda i, b, a: rb.R.MergeDecision([[1, 2]], [(1, 2)]))
     monkeypatch.setattr(rb, "_apply_merges",
                         lambda c, g: calls.append("apply") or 1)
     monkeypatch.setattr(rb, "_queue_review_pairs",
-                        lambda c, p, i, r: calls.append("queue") or len(p))
+                        lambda c, p, i, bv, r: calls.append("queue")
+                        or seen.update(bridges=bv) or len(p))
 
     conn = _ResilientConn("merge")
     conn.bridge_rows = [(1, "sreality", "email", "a@x.cz"),
@@ -711,3 +809,25 @@ def test_cross_source_merge_queues_review_pairs_after_applying_merges(
     assert calls == ["apply", "queue"]
     # queued_for_review keeps meaning "pairs DECIDED", unchanged by persistence
     assert (auto, queued) == (1, 1)
+    # the bridge index is keyed the same way decide_merges normalises a pair
+    assert seen["bridges"] == {(1, 2): {"email:a@x.cz"}}
+
+
+def test_sweep_retires_proposals_whose_brokers_no_longer_survive(
+    monkeypatch: Any,
+) -> None:
+    """Overlapping pairs are the norm at these volumes: merging {A,B} retires B, and
+    the {B,C} proposal keyed on it can then only ever answer 409 'fewer than two of
+    the given brokers are active'. Neither generator revisits a key it does not
+    re-propose, so without this the dead rows accumulate forever in the 100-row
+    page the operator actually looks at."""
+    import scripts.resolve_brokers as rb
+
+    conn = _ResilientConn("full")
+    _stub_full_sweep(monkeypatch, [1, 2])
+
+    rb._run_full(conn, [], [], [], 2, None, reconnect=lambda: conn)
+
+    sql = next(s for s in conn.executed if "UPDATE broker_merge_candidates" in s)
+    assert "status = 'proposed'" in sql
+    assert "b.status = 'active'" in sql and ") < 2" in sql

@@ -183,10 +183,12 @@ def test_property_maintenance_sql_is_o1() -> None:
 
 
 def test_broker_resolution_healthy_day_is_ok() -> None:
-    """~24-25h sweep age just before the next daily sweep is the steady state."""
+    """A lap that closed on the second daily run — the measured steady state, since
+    attribution truncates on its budget on most days — is the healthy case."""
     from scripts.verify_pipeline import _status_for_broker_resolution
 
     assert _status_for_broker_resolution(24.5, 0.2, DEFAULT_THRESHOLDS) == ("ok", [])
+    assert _status_for_broker_resolution(49.0, 0.2, DEFAULT_THRESHOLDS) == ("ok", [])
     assert _status_for_broker_resolution(2.0, None, DEFAULT_THRESHOLDS) == ("ok", [])
 
 
@@ -199,14 +201,15 @@ def test_broker_resolution_missing_stamp_warns_not_fails() -> None:
     assert any("no complete-sweep stamp" in o for o in offenders)
 
 
-def test_broker_resolution_catches_the_chronically_truncated_sweep() -> None:
+def test_broker_resolution_catches_the_rotation_that_stopped_advancing() -> None:
     """The bug this check exists for: the sweep broke out on its budget every day
-    and still exited 0, so the tail above the break was never attributed. It now
-    stamps completion ONLY on a full walk, so days of truncation read as a stale
-    stamp — the one signal that was missing."""
+    and still exited 0, so the tail above the break was never attributed. The signal
+    is now the ROTATION's lap age — a rotation that stops getting round the corpus
+    (a cursor that stops advancing, a lock never won, a sweep that dies before its
+    first chunk) ages past the fail line even though every individual run is red-free."""
     from scripts.verify_pipeline import _status_for_broker_resolution
 
-    status, offenders = _status_for_broker_resolution(49.0, 0.1, DEFAULT_THRESHOLDS)
+    status, offenders = _status_for_broker_resolution(90.0, 0.1, DEFAULT_THRESHOLDS)
     assert status == "fail"
     assert any("last complete broker sweep" in o for o in offenders)
     # ...and the two axes are independent: a frozen incremental drain alone reds.
@@ -215,13 +218,29 @@ def test_broker_resolution_catches_the_chronically_truncated_sweep() -> None:
     assert any("broker dirty-queue" in o for o in offenders)
 
 
+def test_broker_sweep_axis_is_reachable_as_fail_before_any_lap_closes() -> None:
+    """Without the open-lap fallback a rotation that NEVER completes a lap would sit
+    on the missing-stamp warn forever, and warn rings nothing: emit_transition_alerts
+    only fires on fail, and --exit-nonzero-on-fail only exits on fail. The check
+    would have been inert for exactly the condition it was written for."""
+    from scripts.verify_pipeline import _status_for_broker_resolution
+
+    label = "open rotation lap (no lap closed yet)"
+    status, offenders = _status_for_broker_resolution(
+        200.0, 0.1, DEFAULT_THRESHOLDS, sweep_label=label)
+    assert status == "fail"
+    assert any(label in o for o in offenders)
+
+
 def test_broker_thresholds_clear_the_workflow_backstop() -> None:
     """The full sweep holds broker_resolution_lock for its whole run (every */10
     incremental skips meanwhile) and clears dirty_broker_listings only at finalize,
-    so both axes age 1:1 with the sweep — bounded by resolve_brokers_full.yml's
-    timeout-minutes. Warn must sit ABOVE that or a perfectly healthy long sweep
-    turns the check amber and trains the operator to ignore it. Raising the
-    workflow backstop means raising these in the same change."""
+    so the dirty axis ages 1:1 with the sweep — bounded by resolve_brokers_full.yml's
+    timeout-minutes. The sweep axis measures a rotation LAP, which takes one or two
+    daily runs at the measured attribution throughput, so warn must clear two runs
+    plus that backstop and fail must clear three: below either, a healthy rotation
+    turns the check amber (or emails hourly) and trains the operator to ignore it.
+    Raising the workflow backstop means raising these in the same change."""
     import pathlib
     import re
 
@@ -232,10 +251,11 @@ def test_broker_thresholds_clear_the_workflow_backstop() -> None:
     backstop_h = int(re.search(r"^\s*timeout-minutes:\s*(\d+)", yml.read_text(),
                                re.MULTILINE)[1]) / 60
     assert DEFAULT_THRESHOLDS["broker_dirty_warn_hours"] > backstop_h
-    assert DEFAULT_THRESHOLDS["broker_sweep_warn_hours"] > 24 + backstop_h
-    # ...and a sweep running its full backstop stays green on both axes.
+    assert DEFAULT_THRESHOLDS["broker_sweep_warn_hours"] > 2 * 24 + backstop_h
+    assert DEFAULT_THRESHOLDS["broker_sweep_fail_hours"] > 3 * 24 + backstop_h
+    # ...and a two-run lap finishing at its full backstop stays green on both axes.
     assert _status_for_broker_resolution(
-        24 + backstop_h, backstop_h, DEFAULT_THRESHOLDS) == ("ok", [])
+        48 + backstop_h, backstop_h, DEFAULT_THRESHOLDS) == ("ok", [])
 
 
 def test_broker_resolution_sql_is_o1() -> None:
@@ -253,13 +273,16 @@ def test_broker_resolution_sql_is_o1() -> None:
 def test_broker_completion_stamp_key_matches_the_writer() -> None:
     """The check and the sweep are one contract across two modules — a rename on
     either side would silently produce a permanently-missing stamp (a soft warn),
-    not an error."""
+    not an error. Both keys count: the stamp AND the cursor the open-lap fallback
+    ages when no lap has closed."""
     import scripts.resolve_brokers as rb
     from scripts.verify_pipeline import _BROKER_RESOLUTION_SQL
 
     assert rb._SWEEP_COMPLETE_KEY == "broker_resolution_last_complete"
     assert f"'{rb._SWEEP_COMPLETE_KEY}'" in _BROKER_RESOLUTION_SQL
+    assert f"'{rb._SWEEP_CURSOR_KEY}'" in _BROKER_RESOLUTION_SQL
     assert "completed_at" in rb._STAMP_SWEEP_COMPLETE_SQL
+    assert "lap_started_at" in rb._WRITE_SWEEP_CURSOR_SQL
 
 
 def test_broker_check_is_registered() -> None:
@@ -267,6 +290,26 @@ def test_broker_check_is_registered() -> None:
     from scripts.verify_pipeline import _CHECKS, check_broker_resolution_freshness
 
     assert ("broker_resolution_freshness", check_broker_resolution_freshness) in _CHECKS
+
+
+def test_acute_lane_only_list_resolves_to_registered_checks() -> None:
+    """Registration in _CHECKS alone only buys the 6-hourly full run, which rings
+    the in-app bell and nothing else. `--exit-nonzero-on-fail` — the channel that
+    actually emails the operator — runs in llm_health.yml's hourly lane, and its
+    `--only` list is a string in a yml nothing pinned: dropping a key from it left
+    the whole suite green while the check silently fell back to bell-only."""
+    import pathlib
+    import re
+
+    from scripts.verify_pipeline import _CHECKS
+
+    yml = (pathlib.Path(__file__).resolve().parents[2]
+           / ".github/workflows/llm_health.yml").read_text()
+    only = re.search(r"--only\s+([\w,]+)", yml)[1].split(",")
+    registered = {key for key, _ in _CHECKS}
+    assert set(only) <= registered, set(only) - registered
+    assert "broker_resolution_freshness" in only
+    assert "--exit-nonzero-on-fail" in yml
 
 
 # --- thresholds ------------------------------------------------------------
