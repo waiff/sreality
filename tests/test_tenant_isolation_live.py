@@ -154,6 +154,18 @@ _BROKER_PII_RELATIONS: list[str] = [
     "firms_public",
 ]
 
+# Migration 398: contact-PII columns allowed to REMAIN on a browser-readable
+# relation, because that relation projects them as a NULL constant rather than the
+# real value. The names cannot be dropped — CREATE OR REPLACE VIEW cannot remove a
+# column and five matviews depend on listings_public, so DROP ... CASCADE is not
+# available — so a name-based scan alone cannot tell "nulled" from "served".
+# `test_public_market_views_project_no_broker_contact` is the half that proves the
+# projection really is NULL; entries here are only exempt because of it.
+_NULLED_CONTACT_COLUMNS: dict[str, tuple[str, ...]] = {
+    "listings_public": ("broker_email", "broker_phone"),
+    "properties_public": ("broker_email", "broker_phone"),
+}
+
 
 @pytest.fixture(scope="module")
 def svc() -> "Iterator[Any]":
@@ -1145,6 +1157,88 @@ def test_broker_pii_dark_to_browser_roles(svc: Any) -> None:
             if auth_x:
                 leaks.append("authenticated can EXECUTE broker_leaderboard")
     assert not leaks, f"broker PII reachable by a browser role (A6 violated): {leaks}"
+
+
+def test_public_market_views_project_no_broker_contact(svc: Any) -> None:
+    """Migration 398: the advertised agent's email/phone must not leave the two
+    owner-rights market views. They ran without security_invoker and with a live
+    `authenticated` SELECT grant, so until 398 any logged-in session could read
+    48,489 emails / 48,457 phones (8,023 / 7,968 distinct) straight off PostgREST —
+    ~70% of the very directory the /brokers API masks into has_email/has_phone.
+
+    Asserted on the DEPARSED definition rather than on data, so it is armed on the
+    empty CI replay DB too: this is the gate that catches a future CREATE OR REPLACE
+    quietly restoring the source expression."""
+    with svc.cursor() as cur:
+        offenders: list[str] = []
+        for rel, cols in _NULLED_CONTACT_COLUMNS.items():
+            cur.execute("SELECT to_regclass(%s)", (f"public.{rel}",))
+            if cur.fetchone()[0] is None:
+                continue
+            cur.execute("SELECT pg_get_viewdef(%s::regclass, true)", (f"public.{rel}",))
+            viewdef = cur.fetchone()[0]
+            offenders += [
+                f"{rel}.{col}"
+                for col in cols
+                if not re.search(rf"NULL::text\s+AS\s+{col}\b", viewdef)
+            ]
+    assert not offenders, (
+        f"view column(s) no longer project NULL — real agent contact PII is being "
+        f"served to every logged-in session again (migration 398): {offenders}"
+    )
+
+
+def test_no_reachable_relation_exposes_contact_pii(svc: Any) -> None:
+    """The generalisation of the test above: no relation an `authenticated` session
+    can actually READ may carry an email/phone column.
+
+    RLS-AWARE ON PURPOSE. A bare "authenticated holds SELECT + the column name looks
+    like contact PII" rule fires on four legitimate base tables — listings, brokers,
+    broker_identities, firm_identities — whose default-ACL grants are INERT because
+    they are relrowsecurity=true with zero policies (deny-all to every non-BYPASSRLS
+    role; migration 299 PART F reasoned about exactly this). Muting four permanent
+    false positives would mute the rule. So reachability is modelled instead:
+
+      * base tables count only with RLS off, or with at least one policy;
+      * a `security_invoker` view runs as the caller and inherits the base table's
+        RLS denial, so it does not count;
+      * an owner-rights view or a matview reads with postgres's rolbypassrls and
+        DOES count — that is precisely how 398's leak worked.
+
+    Extension-owned relations (PostGIS lands some in `public`) are not ours."""
+    with svc.cursor() as cur:
+        cur.execute(
+            "SELECT c.relname, a.attname FROM pg_class c "
+            "JOIN pg_namespace n ON n.oid = c.relnamespace "
+            "JOIN pg_attribute a ON a.attrelid = c.oid "
+            "  AND a.attnum > 0 AND NOT a.attisdropped "
+            "WHERE n.nspname = 'public' AND c.relkind IN ('r','v','m','p') "
+            # bound, not inlined: psycopg3 skips placeholder processing entirely
+            # when params is None, so a literal '%...%' would mean different things
+            # depending on whether the call happens to pass arguments.
+            "AND a.attname ILIKE ANY(%s) "
+            "AND has_table_privilege('authenticated', c.oid, 'SELECT') "
+            "AND NOT EXISTS (SELECT 1 FROM pg_depend d "
+            "  WHERE d.classid = 'pg_class'::regclass AND d.objid = c.oid "
+            "  AND d.deptype = 'e') "
+            "AND NOT (c.relkind IN ('r','p') AND c.relrowsecurity "
+            "  AND NOT EXISTS (SELECT 1 FROM pg_policy p WHERE p.polrelid = c.oid)) "
+            "AND NOT (c.relkind = 'v' AND EXISTS ("
+            "  SELECT 1 FROM pg_options_to_table(c.reloptions) o "
+            "  WHERE o.option_name = 'security_invoker' AND o.option_value = 'true')) "
+            "ORDER BY c.relname, a.attname",
+            (["%email%", "%phone%"],),
+        )
+        reachable = [
+            f"{rel}.{col}"
+            for rel, col in cur.fetchall()
+            if col not in _NULLED_CONTACT_COLUMNS.get(rel, ())
+        ]
+    assert not reachable, (
+        f"contact-PII column(s) readable by any logged-in session: {reachable}. "
+        f"Either mask the value (project NULL and register it in "
+        f"_NULLED_CONTACT_COLUMNS) or revoke the browser-role SELECT."
+    )
 
 
 def test_user_state_tables_have_account_id_and_policy(svc: Any) -> None:

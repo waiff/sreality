@@ -919,7 +919,13 @@ renumber.** Navigate by area:
     `fetchImagesByListingIds` + `imageSrc()` Browse helpers; the **canonical broker** per card via
     two batched reads — `fetchListingBrokersByIds` (`POST /brokers/by-listings`) + `fetchBrokersByIds`
     (`GET /brokers?ids=`), NOT the raw drift-prone `properties_public.broker_*` — the name links
-    to `/brokers/{id}`, contact in a native-title hover. **Both went through PostgREST until
+    to `/brokers/{id}`, contact in a native-title hover. **Migration 398 settles that for good:**
+    `listings_public`/`properties_public` still carry `broker_email`/`broker_phone` as columns
+    (so PostgREST answers `?select=` with nulls instead of a 400, and the five matviews depending
+    on `listings_public` survive) but project them as `null::text` — they were owner-rights views
+    with a live `authenticated` SELECT grant, i.e. a bulk contact-PII read for any logged-in
+    session. The masked `/brokers` API is now the only broker-contact path; `broker_name` stays
+    (a label, not a contact). **Both went through PostgREST until
     2026-08-12 and were dark the whole time:** Phase 0's A6 revoked `listing_broker_public` +
     `brokers_public` from `anon` AND `authenticated`, so every read returned SQLSTATE `42501` and
     every card degraded to "no broker shown". `frontend/src/lib/brokers.ts` is now repointed wholesale
