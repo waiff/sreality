@@ -141,6 +141,12 @@ data failed the *entire* board query. Fixed: both broker fetches now degrade to 
 shown" on error instead of failing the board — consistent with A6's intent (broker data stays
 dark until Wave 4), stages/cards/properties/images all still load. No other caller of these
 two fetch helpers exists in the app (grep-verified) — this was the only broken surface.
+**Superseded 2026-08-12 (brokers B2):** `lib/brokers.ts` no longer reads PostgREST at all —
+every broker read goes through the identity-gated, PII-masking `/brokers/*` API, so the 42501
+"expected mask" branch is gone and each remaining failure is a real fault (still isolated from
+the board, but always logged). A non-admin now sees the broker's name and firm with the contact
+marked admin-only, instead of the card claiming there is no broker. Migration 395 closed the
+one A6 surface 299 missed (`firms_public`, default-ACL drift) and added it to the CI registry.
 
 **Post-ship review verified, 2026-07-20 (evening):** a 14-finding code review of the deployed
 316–319 batch was adversarially re-verified against the live DB (6-agent workflow): 11

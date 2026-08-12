@@ -1,4 +1,4 @@
-import { supabase } from './supabase';
+import { ApiError, apiGet, apiPost } from './api';
 import type { DistrictChip } from './filters';
 
 // 420731404040 -> +420 731 404 040 (display only; storage stays digit-normalized).
@@ -10,8 +10,22 @@ export function prettyPhone(p: string): string {
   return p;
 }
 
-// Broker intelligence read layer. All reads go through the anon-public views +
-// the broker_leaderboard RPC (migrations 187 / 189). No writes from the browser.
+/* Broker intelligence read layer — every read goes through the FastAPI service
+ * (`/brokers/*`) on the caller's real Supabase session JWT, never PostgREST.
+ *
+ * WHY not supabase-js, as this module did until 2026-08-12: migration 299's
+ * Amendment A6 revoked every broker view/RPC from `authenticated`, so the direct
+ * reads had been silently dark since 2026-07-12 — each one degraded to "no
+ * broker" instead of failing. The API's service-role path is now the only one
+ * that answers, and it rejects the static VITE_API_TOKEN outright, so `jwt: true`
+ * is mandatory on every call below.
+ *
+ * Contact PII is masked server-side per caller (toolkit.brokers.apply_pii_policy):
+ * a non-admin's rows carry `has_email` / `has_phone` flags INSTEAD of the value
+ * columns — the keys themselves differ — and the dossier's raw `contacts` array is
+ * dropped whole. Render that through `contactState` so a hidden contact never
+ * looks like an absent one.
+ */
 
 export type GeoLevel = 'region' | 'okres';
 export type LeaderMetric =
@@ -19,6 +33,16 @@ export type LeaderMetric =
   | 'property_count'
   | 'listing_count'
   | 'active_listing_count';
+
+/* The masked pair. `primary_*` is present only for an admin session; a non-admin
+ * gets `has_*` in its place. Both are optional because which one arrives is a
+ * property of the CALLER, not of the row. */
+export interface BrokerContactFields {
+  primary_email?: string | null;
+  primary_phone?: string | null;
+  has_email?: boolean;
+  has_phone?: boolean;
+}
 
 export interface BrokerGeoOption {
   geo_level: GeoLevel;
@@ -28,11 +52,9 @@ export interface BrokerGeoOption {
   broker_count: number;
 }
 
-export interface BrokerLeaderRow {
+export interface BrokerLeaderRow extends BrokerContactFields {
   broker_id: number;
   display_name: string | null;
-  primary_email: string | null;
-  primary_phone: string | null;
   firm_name: string | null;
   firm_domain: string | null;
   listing_count: number;
@@ -41,11 +63,9 @@ export interface BrokerLeaderRow {
   active_property_count: number;
 }
 
-export interface BrokerPublic {
+export interface BrokerPublic extends BrokerContactFields {
   broker_id: number;
   display_name: string | null;
-  primary_email: string | null;
-  primary_phone: string | null;
   firm_id: number | null;
   firm_domain: string | null;
   firm_name: string | null;
@@ -94,10 +114,31 @@ export interface BrokerListing {
 
 export interface BrokerRegionShare {
   geo_id: number;
-  name: string;
+  name: string | null;
   property_count: number;
   active_property_count: number;
   listing_count: number;
+}
+
+/* One distinct (kind, value) contact across a broker's identities. Admin-only —
+ * the dossier omits the whole array for everyone else. */
+export interface BrokerContact {
+  kind: string;
+  value: string;
+  sources: string[];
+  last_seen_at: string | null;
+}
+
+/* GET /brokers/{id} returns identity + memberships + regional footprint (+ the
+ * full contact set for an admin) in ONE call, so the detail page doesn't fan out
+ * four queries and doesn't need the region-name lookup the old client-side
+ * aggregation depended on — `region_shares[].name` is joined server-side. */
+export interface BrokerDossier {
+  broker: BrokerPublic;
+  memberships: BrokerMembership[];
+  region_shares: BrokerRegionShare[];
+  contacts?: BrokerContact[];
+  pii_masked: boolean;
 }
 
 export interface LeaderboardParams {
@@ -120,6 +161,22 @@ export interface ListingBroker {
   broker_firm_label: string | null;
 }
 
+/* Three distinguishable states for one contact field. Collapsing `masked` into
+ * `none` would render "this broker has no phone" for a viewer who simply isn't
+ * allowed to see it. */
+export type ContactState =
+  | { state: 'value'; value: string }
+  | { state: 'masked' }
+  | { state: 'none' };
+
+export function contactState(
+  value: string | null | undefined,
+  has: boolean | undefined,
+): ContactState {
+  if (value) return { state: 'value', value };
+  return has ? { state: 'masked' } : { state: 'none' };
+}
+
 // Split Browse location chips into per-level admin-id arrays for the leaderboard
 // RPC. Only resolved, non-excluded chips contribute; a 'locality' chip's id is its
 // containing obec.
@@ -140,54 +197,110 @@ export function chipsToGeoArrays(chips: DistrictChip[]): {
   return { regionIds, okresIds, obecIds };
 }
 
-export async function fetchBrokerGeoOptions(): Promise<BrokerGeoOption[]> {
-  const { data, error } = await supabase
-    .from('broker_geo_options')
-    .select('geo_level, geo_id, name, parent_id, broker_count');
-  if (error) throw error;
-  return (data ?? []) as BrokerGeoOption[];
+/* The standard toolkit envelope. `pii_masked` is stamped on every /brokers
+ * response, masked or not. */
+interface Envelope<T> {
+  data: T;
+  metadata?: { pii_masked?: boolean };
+}
+
+const JWT = true;
+
+/* The two `detail` strings the /brokers routes send when 404 is an ANSWER
+ * ("nothing is attributed here"), from api/routes/brokers.py. Status alone is
+ * not enough: Railway's edge answers an unrouted domain with 404, a stale
+ * VITE_API_BASE_URL 404s every path, and FastAPI 404s a renamed route with a
+ * generic "Not Found" — swallowing any of those would put the whole corpus back
+ * in the silent "Makléř nenalezen." dark state this module was repointed to end.
+ * An unrecognised 404 therefore propagates and the page shows a real error. */
+const ANSWERED_404 = /broker not found|listing has no attributed broker/;
+
+const isAnsweredNotFound = (err: unknown): boolean =>
+  err instanceof ApiError && err.status === 404 && ANSWERED_404.test(err.message);
+
+/* Both batch routes bound their input at toolkit.brokers.MAX_BATCH (1000) and
+ * answer a 422 rather than a truncated 200 beyond it, so one oversized call
+ * would lose EVERY row instead of the overflow. Chunk below the cap; the GET
+ * slice is smaller because 1000 repeated `ids=` params is an ~8 KB URL. */
+const POST_ID_BATCH = 1000;
+const GET_ID_BATCH = 200;
+
+function chunk<T>(xs: ReadonlyArray<T>, size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < xs.length; i += size) out.push(xs.slice(i, i + size));
+  return out;
+}
+
+/* Region / okres picker metadata. Omit `geoLevel` for both levels — the route
+ * 422s on any value outside GeoLevel rather than silently unfiltering. The only
+ * browser path to broker_geo_options, which is dark to `authenticated`. */
+export async function fetchBrokerGeoOptions(
+  geoLevel?: GeoLevel,
+): Promise<BrokerGeoOption[]> {
+  const r = await apiGet<Envelope<BrokerGeoOption[]>>(
+    '/brokers/geo-options',
+    geoLevel ? { geo_level: geoLevel } : undefined,
+    undefined,
+    JWT,
+  );
+  return r.data ?? [];
 }
 
 export async function fetchBrokerLeaderboard(
   p: LeaderboardParams,
 ): Promise<BrokerLeaderRow[]> {
-  const { data, error } = await supabase.rpc('broker_leaderboard', {
-    p_region_ids: p.regionIds.length ? p.regionIds : null,
-    p_okres_ids: p.okresIds.length ? p.okresIds : null,
-    p_obec_ids: p.obecIds.length ? p.obecIds : null,
-    p_category_main: p.categoryMain,
-    p_category_type: p.categoryType,
-    p_metric: p.metric,
-    p_limit: p.limit ?? 100,
-  });
-  if (error) throw error;
-  return (data ?? []) as BrokerLeaderRow[];
+  const r = await apiGet<Envelope<BrokerLeaderRow[]>>(
+    '/brokers/leaderboard',
+    {
+      region_ids: p.regionIds,
+      okres_ids: p.okresIds,
+      obec_ids: p.obecIds,
+      category_main: p.categoryMain,
+      category_type: p.categoryType,
+      metric: p.metric,
+      limit: p.limit ?? 100,
+    },
+    undefined,
+    JWT,
+  );
+  return r.data ?? [];
 }
 
-export async function searchBrokersByName(q: string): Promise<BrokerPublic[]> {
+export async function searchBrokersByName(
+  q: string,
+  limit = 12,
+): Promise<BrokerPublic[]> {
   const term = q.trim();
+  // The route requires a non-empty q; below 2 chars the result is noise anyway.
   if (term.length < 2) return [];
-  const { data, error } = await supabase
-    .from('brokers_public')
-    .select('*')
-    .ilike('display_name', `%${term}%`)
-    .order('active_property_count', { ascending: false })
-    .limit(12);
-  if (error) throw error;
-  return (data ?? []) as BrokerPublic[];
+  const r = await apiGet<Envelope<BrokerPublic[]>>(
+    '/brokers/search',
+    { q: term, limit },
+    undefined,
+    JWT,
+  );
+  return r.data ?? [];
 }
 
-// Keyed on the surrogate `listing_id` (listing_broker_public.listing_id,
-// migration 343), NOT sreality_id — a post-Gate-2 non-sreality listing has a
-// NULL sreality_id, so a sreality-keyed lookup would silently find nothing.
-export async function fetchListingBroker(listingId: number): Promise<ListingBroker | null> {
-  const { data, error } = await supabase
-    .from('listing_broker_public')
-    .select('*')
-    .eq('listing_id', listingId)
-    .maybeSingle();
-  if (error) throw error;
-  return (data as ListingBroker) ?? null;
+// Keyed on the surrogate `listing_id` (migration 343), NOT sreality_id — a
+// post-Gate-2 non-sreality listing has a NULL sreality_id, so a sreality-keyed
+// lookup would silently find nothing. An unattributed listing is a 404, which is
+// an answer ("no broker resolved"), not a failure.
+export async function fetchListingBroker(
+  listingId: number,
+): Promise<ListingBroker | null> {
+  try {
+    const r = await apiGet<Envelope<ListingBroker>>(
+      '/brokers/by-listing',
+      { listing_id: listingId },
+      undefined,
+      JWT,
+    );
+    return r.data ?? null;
+  } catch (err) {
+    if (isAnsweredNotFound(err)) return null;
+    throw err;
+  }
 }
 
 // Batched canonical-broker lookup for many listings at once (the pipeline board
@@ -196,99 +309,69 @@ export async function fetchListingBroker(listingId: number): Promise<ListingBrok
 export async function fetchListingBrokersByIds(
   listingIds: ReadonlyArray<number>,
 ): Promise<Map<number, ListingBroker>> {
-  if (listingIds.length === 0) return new Map();
-  const { data, error } = await supabase
-    .from('listing_broker_public')
-    .select('sreality_id, listing_id, broker_id, broker_display_name, broker_firm_label')
-    .in('listing_id', listingIds as number[]);
-  if (error) throw error;
   const out = new Map<number, ListingBroker>();
-  for (const r of (data ?? []) as ListingBroker[]) out.set(r.listing_id, r);
+  for (const slice of chunk(listingIds, POST_ID_BATCH)) {
+    const r = await apiPost<Envelope<ListingBroker[]>>(
+      '/brokers/by-listings',
+      { listing_ids: slice },
+      undefined,
+      JWT,
+    );
+    for (const row of r.data ?? []) out.set(row.listing_id, row);
+  }
   return out;
 }
 
-// Batched canonical-broker contact lookup by broker_id (primary email/phone +
-// firm) — pairs with fetchListingBrokersByIds to fill a card's hover contact box.
+// Batched canonical-broker lookup by broker_id (primary contact + firm) — pairs
+// with fetchListingBrokersByIds to fill a card's hover contact box.
 export async function fetchBrokersByIds(
   brokerIds: ReadonlyArray<number>,
 ): Promise<Map<number, BrokerPublic>> {
-  if (brokerIds.length === 0) return new Map();
-  const { data, error } = await supabase
-    .from('brokers_public')
-    .select('*')
-    .in('broker_id', brokerIds as number[]);
-  if (error) throw error;
   const out = new Map<number, BrokerPublic>();
-  for (const r of (data ?? []) as BrokerPublic[]) out.set(r.broker_id, r);
+  for (const slice of chunk(brokerIds, GET_ID_BATCH)) {
+    const r = await apiGet<Envelope<BrokerPublic[]>>(
+      '/brokers',
+      { ids: slice },
+      undefined,
+      JWT,
+    );
+    for (const row of r.data ?? []) out.set(row.broker_id, row);
+  }
   return out;
 }
 
-export async function fetchBroker(brokerId: number): Promise<BrokerPublic | null> {
-  const { data, error } = await supabase
-    .from('brokers_public')
-    .select('*')
-    .eq('broker_id', brokerId)
-    .maybeSingle();
-  if (error) throw error;
-  return (data as BrokerPublic) ?? null;
-}
-
-export async function fetchBrokerMemberships(
+export async function fetchBrokerDossier(
   brokerId: number,
-): Promise<BrokerMembership[]> {
-  const { data, error } = await supabase
-    .from('broker_firm_memberships_public')
-    .select('*')
-    .eq('broker_id', brokerId)
-    .order('last_seen_at', { ascending: false });
-  if (error) throw error;
-  return (data ?? []) as BrokerMembership[];
-}
-
-export async function fetchBrokerListings(brokerId: number): Promise<BrokerListing[]> {
-  const { data, error } = await supabase
-    .from('broker_listings_public')
-    .select('*')
-    .eq('broker_id', brokerId)
-    .order('is_active', { ascending: false })
-    .order('last_seen_at', { ascending: false })
-    .limit(500);
-  if (error) throw error;
-  return (data ?? []) as BrokerListing[];
-}
-
-// The broker's regional footprint: the leaderboard matview at region grain, summed
-// across categories (disjoint per property), with region names from the geo options.
-export async function fetchBrokerRegionShares(
-  brokerId: number,
-  regionNames: Map<number, string>,
-): Promise<BrokerRegionShare[]> {
-  const { data, error } = await supabase
-    .from('broker_region_type_stats')
-    .select('geo_id, property_count, active_property_count, listing_count')
-    .eq('broker_id', brokerId)
-    .eq('geo_level', 'region');
-  if (error) throw error;
-  const byRegion = new Map<number, BrokerRegionShare>();
-  for (const r of (data ?? []) as Array<{
-    geo_id: number;
-    property_count: number;
-    active_property_count: number;
-    listing_count: number;
-  }>) {
-    const cur = byRegion.get(r.geo_id) ?? {
-      geo_id: r.geo_id,
-      name: regionNames.get(r.geo_id) ?? '—',
-      property_count: 0,
-      active_property_count: 0,
-      listing_count: 0,
-    };
-    cur.property_count += r.property_count;
-    cur.active_property_count += r.active_property_count;
-    cur.listing_count += r.listing_count;
-    byRegion.set(r.geo_id, cur);
+): Promise<BrokerDossier | null> {
+  try {
+    const r = await apiGet<Envelope<Omit<BrokerDossier, 'pii_masked'>>>(
+      `/brokers/${brokerId}`,
+      undefined,
+      undefined,
+      JWT,
+    );
+    // A 200 that carries no envelope is not an empty dossier — it's an HTML
+    // SPA-fallback or a proxy page. Spreading it would yield a broker-less object
+    // that renders as "Makléř nenalezen." for every id.
+    if (!r?.data) throw new ApiError('malformed /brokers response', 0, r);
+    // Absent metadata means we can't prove the caller is an admin — assume masked
+    // so a missing flag under-promises rather than showing a blank as "no contact".
+    return { ...r.data, pii_masked: r.metadata?.pii_masked ?? true };
+  } catch (err) {
+    if (isAnsweredNotFound(err)) return null;
+    throw err;
   }
-  return [...byRegion.values()].sort(
-    (a, b) => b.active_property_count - a.active_property_count,
+}
+
+export async function fetchBrokerListings(
+  brokerId: number,
+  limit = 500,
+): Promise<BrokerListing[]> {
+  const r = await apiGet<Envelope<BrokerListing[]>>(
+    `/brokers/${brokerId}/listings`,
+    { limit },
+    undefined,
+    JWT,
   );
+  return r.data ?? [];
 }

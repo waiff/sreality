@@ -4,6 +4,7 @@ import { useQuery } from '@tanstack/react-query';
 import { listBrokerMergeCandidates } from '../lib/api';
 import {
   chipsToGeoArrays,
+  contactState,
   fetchBrokerLeaderboard,
   prettyPhone,
   searchBrokersByName,
@@ -178,6 +179,12 @@ function NameSearch({ onPick }: { onPick: (brokerId: number) => void }) {
         <div className="absolute z-20 mt-1 w-full border border-[var(--color-rule)] rounded-[var(--radius-md)] bg-[var(--color-paper-3)] shadow-sm max-h-80 overflow-y-auto">
           {resultsQ.isLoading ? (
             <p className="px-3 py-2 text-sm text-[var(--color-ink-3)]">Hledám…</p>
+          ) : resultsQ.isError ? (
+            /* A failed search is not an empty one — "Nic nenalezeno." for both is
+               exactly how the dark PostgREST reads stayed invisible for a month. */
+            <p className="px-3 py-2 text-sm text-[var(--color-brick)]">
+              Hledání selhalo: {(resultsQ.error as Error).message}
+            </p>
           ) : results.length === 0 ? (
             <p className="px-3 py-2 text-sm text-[var(--color-ink-4)]">Nic nenalezeno.</p>
           ) : (
@@ -290,9 +297,7 @@ function Ledger({
                   {r.firm_name ?? r.firm_domain ?? 'nezávislý / neznámá kancelář'}
                 </span>
               </span>
-              <span className="hidden sm:block w-40 shrink-0 text-xs font-[family-name:var(--font-mono)] text-[var(--color-ink-2)] tabular-nums">
-                {r.primary_phone ? prettyPhone(r.primary_phone) : '—'}
-              </span>
+              <PhoneCell row={r} />
               <Count
                 value={r.active_property_count}
                 total={r.property_count}
@@ -310,6 +315,26 @@ function Ledger({
         ))}
       </ol>
     </div>
+  );
+}
+
+/* The API hands a non-admin `has_phone` instead of the number itself, so an
+   em-dash here would read as "this broker has no phone on file". */
+function PhoneCell({ row }: { row: BrokerLeaderRow }) {
+  const phone = contactState(row.primary_phone, row.has_phone);
+  return (
+    <span
+      className="hidden sm:block w-40 shrink-0 text-xs font-[family-name:var(--font-mono)] text-[var(--color-ink-2)] tabular-nums"
+      title={phone.state === 'masked' ? 'Kontakt je viditelný jen pro administrátory.' : undefined}
+    >
+      {phone.state === 'value' ? (
+        prettyPhone(phone.value)
+      ) : phone.state === 'masked' ? (
+        <span className="text-[var(--color-ink-4)]">na vyžádání</span>
+      ) : (
+        '—'
+      )}
+    </span>
   );
 }
 

@@ -72,6 +72,8 @@ const CARDS: PipelineBoardCard[] = [
       firm_label: 'RE/MAX',
       email: 'jan@remax.cz',
       phone: '+420 777 123 456',
+      has_email: true,
+      has_phone: true,
     },
   },
 ];
@@ -199,6 +201,36 @@ describe('<Pipeline> board', () => {
     const broker = screen.getByText('Jan Novák');
     expect(broker).toBeInTheDocument();
     expect(broker.closest('a')).toHaveAttribute('href', '/brokers/7');
+    expect(broker.closest('a')).toHaveAttribute(
+      'title',
+      expect.stringContaining('jan@remax.cz'),
+    );
+  });
+
+  /* The non-admin shape: the API sends has_email/has_phone INSTEAD of the
+     values. The card must keep the broker and say the contact is admin-only —
+     dropping it renders identically to a broker with no contact at all. */
+  it('marks a masked contact as admin-only instead of omitting it', async () => {
+    vi.mocked(queries.fetchPipelineBoard).mockResolvedValue([
+      {
+        ...CARDS[0],
+        broker: {
+          broker_id: 7,
+          display_name: 'Jan Novák',
+          firm_label: 'RE/MAX',
+          email: null,
+          phone: null,
+          has_email: true,
+          has_phone: true,
+        },
+      },
+    ]);
+    renderBoard();
+    const broker = await screen.findByText('Jan Novák');
+    expect(broker.closest('a')).toHaveAttribute(
+      'title',
+      'Jan Novák · RE/MAX · kontakt jen pro adminy',
+    );
   });
 
   it('filters the board by property type', async () => {

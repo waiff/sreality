@@ -38,6 +38,7 @@ import type {
   ListingPublic,
   ListingSnapshotPublic,
   MfReferenceRent,
+  PipelineCardBroker,
   PortalHealth,
   PropertySource,
   PropertyStatusEventPublic,
@@ -2361,19 +2362,16 @@ export const fetchPipelineBoard = async (): Promise<PipelineBoardCard[]> => {
   // Canonical broker per card (name + firm + contact for the hover box), two
   // batched reads (listing→broker, then broker→contact) — no N+1, keyed on the
   // same surrogate listing_id for the same NULL-safety reason as the images
-  // above. Both surfaces are dark to `authenticated` since Phase 0's A6
-  // (broker PII stays masked until Wave 4): the grant is revoked outright, so
-  // PostgREST answers with SQLSTATE 42501 and every card degrades to "no
-  // broker" until the mask lifts. Only that signature is expected — anything
-  // else (schema drift, network, 5xx, expired session) is a real fault, so log
-  // it before degrading, or the board silently shows "no broker" forever with
-  // no signal that broker data regressed.
-  const brokerMaskExpected = (err: unknown): boolean =>
-    (err as { code?: string } | null)?.code === '42501';
+  // above. Both now go through the identity-gated /brokers API, which answers a
+  // logged-in caller with HTTP 200 and either full or has_email/has_phone-masked
+  // rows. So there is no longer an "expected" failure to swallow: the old
+  // SQLSTATE-42501 branch (PostgREST refusing the A6-revoked views) can't happen
+  // and every error here is a real fault. Still isolated from the board — broker
+  // data is an enrichment and must not fail stages/cards/images (the 2026-07-20
+  // incident) — but now always logged, never silently expected.
   const listingBrokers = await fetchListingBrokersByIds(listingIds).catch(
     (err): Map<number, ListingBroker> => {
-      if (!brokerMaskExpected(err))
-        console.error('fetchPipelineBoard: listing_broker_public read failed', err);
+      console.error('fetchPipelineBoard: POST /brokers/by-listings failed', err);
       return new Map();
     },
   );
@@ -2382,8 +2380,7 @@ export const fetchPipelineBoard = async (): Promise<PipelineBoardCard[]> => {
   const brokerContacts = await fetchBrokersByIds([
     ...new Set([...listingBrokers.values()].map((b) => b.broker_id)),
   ]).catch((err): Map<number, BrokerPublic> => {
-    if (!brokerMaskExpected(err))
-      console.error('fetchPipelineBoard: brokers_public read failed', err);
+    console.error('fetchPipelineBoard: GET /brokers failed', err);
     return new Map();
   });
 
@@ -2428,18 +2425,33 @@ export const fetchPipelineBoard = async (): Promise<PipelineBoardCard[]> => {
       region: (p?.region as string | null) ?? null,
       is_active: (p?.is_active as boolean | null) ?? true,
       image_url: firstImage ? imageSrc(firstImage) : null,
-      broker: lb
-        ? {
-            broker_id: lb.broker_id,
-            display_name: lb.broker_display_name,
-            firm_label: lb.broker_firm_label,
-            email: contact?.primary_email ?? null,
-            phone: contact?.primary_phone ?? null,
-          }
-        : null,
+      broker: pipelineCardBroker(lb, contact),
     };
   });
 };
+
+/* Project the two batched broker reads onto one card's broker block.
+ *
+ * `has_email`/`has_phone` arrive INSTEAD of the values for a non-admin caller and
+ * are absent for an admin — so derive the flag from whichever the API sent, and
+ * the card can then say "contact exists, admin only" rather than showing nothing.
+ * A card with no resolved broker (private bazos seller, or a failed enrichment
+ * read) stays null. */
+export const pipelineCardBroker = (
+  lb: ListingBroker | undefined,
+  contact: BrokerPublic | undefined,
+): PipelineCardBroker | null =>
+  lb
+    ? {
+        broker_id: lb.broker_id,
+        display_name: lb.broker_display_name,
+        firm_label: lb.broker_firm_label,
+        email: contact?.primary_email ?? null,
+        phone: contact?.primary_phone ?? null,
+        has_email: contact?.has_email ?? Boolean(contact?.primary_email),
+        has_phone: contact?.has_phone ?? Boolean(contact?.primary_phone),
+      }
+    : null;
 
 /* ---- LLM cost dashboard (/costs) -------------------------------------- */
 

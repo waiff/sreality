@@ -132,9 +132,17 @@ _TENANT_TABLES: list[str] = [
 ]
 
 # Amendment A6 (Phase 0): the broker-directory PII surfaces stay dark to BOTH
-# browser roles until Wave 4 ships masked columns. These are SECURITY DEFINER
-# views/matview (the broker base tables are already RLS-on-no-policy), so the
-# effective gate is the absence of a browser-role SELECT grant on each.
+# browser roles; the SPA reads them only through the identity-gated, PII-masking
+# /brokers API. These are SECURITY DEFINER views/matview (the broker base tables
+# are already RLS-on-no-policy), so the effective gate is the absence of a
+# browser-role SELECT grant on each.
+#
+# MIRRORS tests/test_migration_rls_grants.py::_BROKER_A6_SURFACES -- add a new
+# broker surface to BOTH. That one scans migration SQL text for a re-grant; this
+# one probes the EFFECTIVE privilege on the replayed schema, which is the only
+# gate that catches drift with no `grant` statement behind it (firms_public
+# inherited its `authenticated` SELECT from the public-schema default ACL at
+# CREATE time, which is exactly how it survived 299's sweep until 395).
 _BROKER_PII_RELATIONS: list[str] = [
     "brokers_public",
     "broker_firm_memberships_public",
@@ -143,6 +151,7 @@ _BROKER_PII_RELATIONS: list[str] = [
     "broker_geo_options",
     "broker_resolution_runs_public",
     "broker_region_type_stats",
+    "firms_public",
 ]
 
 

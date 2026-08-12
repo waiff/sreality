@@ -55,12 +55,22 @@ _TENANT_TABLES = frozenset({
     "property_pipeline_events", "entitlements",
 })
 
-# Amendment A6: these broker-directory PII surfaces stay dark to browser roles
-# until Wave 4 ships masked columns. A migration must not re-grant them.
+# Amendment A6: these broker-directory PII surfaces stay dark to browser roles;
+# the SPA reads them only through the PII-masking /brokers API. A migration must
+# not re-grant them.
+#
+# MIRRORS tests/test_tenant_isolation_live.py::_BROKER_PII_RELATIONS -- add a new
+# broker surface to BOTH. This gate scans migration SQL text, so it sees only
+# literal `grant` statements; the live one probes the effective privilege and is
+# what catches default-ACL drift or a blanket `grant ... on all tables`.
 _BROKER_A6_SURFACES = frozenset({
     "brokers_public", "broker_leaderboard", "broker_firm_memberships_public",
     "broker_listings_public", "listing_broker_public", "broker_geo_options",
     "broker_resolution_runs_public", "broker_region_type_stats",
+    # 299's PART F missed this one; its `authenticated` SELECT came from the
+    # default ACL at CREATE time, not from any grant statement, so it survived the
+    # sweep and stayed live until migration 395 revoked it.
+    "firms_public",
 })
 
 
@@ -223,6 +233,18 @@ def _offending_write_grants(sql: str) -> list[str]:
             if not objs or any(o not in _TENANT_TABLES for o in objs):
                 out.append(f"WRITE to authenticated on non-tenant table: {collapsed}")
     return out
+
+
+def _revokes(stmt: str, obj: str, role: str) -> bool:
+    """True for a `revoke <privs> on <obj> from <... role ...>` naming both."""
+    low = re.sub(r"\s+", " ", stmt.lower()).strip()
+    m = re.match(r"revoke (?:grant option for )?(?:.+?) on (.+?) from (.+)$", low)
+    if not m:
+        return False
+    raw = re.sub(r"^(table|sequence|function)\s+", "", m.group(1).strip())
+    objs = {o.strip().strip('"').replace("public.", "") for o in raw.split(",")}
+    roles = {r.strip() for r in re.split(r"[,\s]+", m.group(2)) if r.strip()}
+    return obj in objs and role in roles
 
 
 def _broker_regrants(sql: str) -> list[str]:
@@ -430,6 +452,31 @@ def test_no_broker_a6_regrants():
         "These stay dark to browser roles until Wave 4 ships masked columns "
         "(Amendment A6). Remove the grant or gate it behind the Wave-4 masking:\n"
         + "\n".join(offenders)
+    )
+
+
+def test_firms_public_is_revoked_and_registered():
+    """firms_public is the A6 surface migration 299 missed.
+
+    Its `authenticated` SELECT came from Supabase's default ACL at CREATE time
+    (migration 187) rather than from a grant statement, so PART F's relation list
+    never covered it and it stayed browser-readable while every sibling broker
+    surface went dark. Two halves, both required: a migration that actually revokes
+    it, and its presence in the registry above so `test_no_broker_a6_regrants`
+    blocks a future re-grant.
+    """
+    assert "firms_public" in _BROKER_A6_SURFACES
+
+    revoking = [
+        p.name
+        for p in sorted(MIGRATIONS_DIR.glob("*.sql"))
+        for stmt in _statements(p.read_text(encoding="utf-8"))
+        if _revokes(stmt, "firms_public", "authenticated")
+    ]
+    assert revoking, (
+        "No migration revokes firms_public from `authenticated`. The grant is live "
+        "in production (default-ACL drift, verified 2026-08-12) — a migration must "
+        "revoke it, or a fresh rebuild silently republishes the firm rollup."
     )
 
 

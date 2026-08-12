@@ -20,6 +20,7 @@ import {
   keysetTiebreak,
   matchesDistricts,
   parseSort,
+  pipelineCardBroker,
   pipelineIdsForScope,
   portalMirrorSource,
   priceNullTolerantOr,
@@ -27,6 +28,7 @@ import {
   type BrowsePrefilters,
   type DistrictMatchRow,
 } from './queries';
+import type { BrokerPublic, ListingBroker } from './brokers';
 import type { DistrictChip } from './filters';
 
 describe('priceNullTolerantOr', () => {
@@ -423,5 +425,58 @@ describe('portal-mirror mode selection', () => {
   it('keeps portal_sort_key out of the user-selectable sorts, so no URL can pin it', () => {
     /* It is derived from the filter state, never round-tripped through ?sort=. */
     expect(parseSort('-portal_sort_key')).toEqual(DEFAULT_SORT);
+  });
+});
+
+/* Pipeline board broker hydration.
+ *
+ * Both broker reads moved onto the identity-gated /brokers API (2026-08-12). The
+ * board used to swallow a PostgREST 42501 as an EXPECTED masked state and show no
+ * broker at all; the API instead answers 200 with contact columns replaced by
+ * has_email / has_phone. The card must therefore be able to say "a contact exists,
+ * you just can't see it" — which only works if the flags survive the projection. */
+describe('pipelineCardBroker', () => {
+  const lb: ListingBroker = {
+    sreality_id: null,
+    listing_id: 10,
+    broker_id: 7,
+    broker_display_name: 'Jan Novák',
+    broker_firm_label: 'RE/MAX',
+  };
+  const contact = (over: Partial<BrokerPublic>): BrokerPublic =>
+    ({ broker_id: 7, ...over }) as BrokerPublic;
+
+  it('is null when the listing has no resolved broker', () => {
+    expect(pipelineCardBroker(undefined, undefined)).toBeNull();
+    expect(pipelineCardBroker(undefined, contact({ primary_email: 'a@b.cz' }))).toBeNull();
+  });
+
+  it('keeps an admin session real values and derives both flags from them', () => {
+    expect(
+      pipelineCardBroker(lb, contact({ primary_email: 'jan@remax.cz', primary_phone: null })),
+    ).toEqual({
+      broker_id: 7,
+      display_name: 'Jan Novák',
+      firm_label: 'RE/MAX',
+      email: 'jan@remax.cz',
+      phone: null,
+      has_email: true,
+      has_phone: false,
+    });
+  });
+
+  it('carries a non-admin masked row through as flags with no values', () => {
+    const b = pipelineCardBroker(lb, contact({ has_email: true, has_phone: false }));
+    expect(b).toMatchObject({ email: null, phone: null, has_email: true, has_phone: false });
+  });
+
+  /* A failed broker read degrades the CARD, never the board — but "no contact"
+     must not be claimed for a broker we simply failed to hydrate. */
+  it('reports no contact when the contact read produced nothing', () => {
+    expect(pipelineCardBroker(lb, undefined)).toMatchObject({
+      display_name: 'Jan Novák',
+      has_email: false,
+      has_phone: false,
+    });
   });
 });
