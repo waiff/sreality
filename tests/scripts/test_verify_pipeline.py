@@ -514,3 +514,31 @@ def test_parity_registry_is_the_shared_one() -> None:
     from toolkit.listing_identity import R2_CARRIERS
 
     assert _PARITY_CARRIERS is R2_CARRIERS
+
+
+def test_notification_dispatches_skips_system_health_rows() -> None:
+    """A system_health bell row anchors on no listing by construction, so its NULL/NULL
+    is correct — counting it as an orphan pinned the check red from 2026-08-02, and its
+    own recovery alert re-broke it one run after every recovery."""
+    from scripts.verify_pipeline import _parity_carrier_sql
+    from toolkit.listing_identity import R2_CARRIERS_BY_TABLE
+
+    carrier = R2_CARRIERS_BY_TABLE["notification_dispatches"]
+    assert carrier["skip"] == "t.source_kind = 'system_health'"
+    sql = _parity_carrier_sql(carrier)
+    assert sql.count("not (t.source_kind = 'system_health')") == 3
+
+
+def test_carrier_skip_is_applied_by_counting_and_by_updating() -> None:
+    """Skip one side but not the other and `remaining` never reaches zero, which
+    re-dispatches the self-chaining backfill workflow forever."""
+    from scripts.backfill_child_listing_ids import _predicate
+    from toolkit.listing_identity import R2_CARRIERS
+
+    for carrier in R2_CARRIERS:
+        skip = carrier.get("skip")
+        if not skip:
+            continue
+        for legacy, new in carrier["cols"]:
+            for repair in (False, True):
+                assert f"NOT ({skip})" in _predicate(new, legacy, repair, skip)
