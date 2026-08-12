@@ -308,6 +308,75 @@ describe('buildChartRows', () => {
     expect(rows.map((r) => r[seriesValueKey(1)])).toEqual([100, 100, null, 150, 150]);
   });
 
+  it('resamples the step so a hover reads the price at that instant, not the nearest change', () => {
+    // The reported bug, to scale: first seen 9. 5. at 16M, one step to 21M on
+    // 30. 7., still live on 11. 8. Recharts picks the tooltip row by nearest
+    // midpoint, so with only those three rows everything after ~19. 6. read
+    // 21M — the cursor sat on 1. 7. and the banner said 30. 7. / 21M.
+    const first = Date.parse('2026-05-09T00:00:00Z');
+    const step = Date.parse('2026-07-30T00:00:00Z');
+    const now = Date.parse('2026-08-11T00:00:00Z');
+    const s: PriceSeries[] = [
+      {
+        id: 1,
+        label: 'Price',
+        points: [{ t: first, price: 16_000_000 }, { t: step, price: 21_000_000 }],
+        endT: now,
+      },
+    ];
+    const rows = buildChartRows(s, undefined, 400);
+
+    const nearestTo = (t: number) =>
+      rows.reduce((best, r) =>
+        Math.abs((r.t as number) - t) < Math.abs((best.t as number) - t) ? r : best,
+      );
+    const july1 = Date.parse('2026-07-01T00:00:00Z');
+    expect(nearestTo(july1)[seriesValueKey(1)]).toBe(16_000_000);
+    // and the row a hover lands on is genuinely near the cursor, not weeks off
+    expect(Math.abs((nearestTo(july1).t as number) - july1)).toBeLessThan(
+      (now - first) / 400,
+    );
+    // the step itself still reads correctly on either side (a day out — the
+    // grid is ~6h here, so anything closer legitimately snaps to the step row)
+    const DAY = 86_400_000;
+    expect(nearestTo(step - DAY)[seriesValueKey(1)]).toBe(16_000_000);
+    expect(nearestTo(step + DAY)[seriesValueKey(1)]).toBe(21_000_000);
+    // hovering the change instant still reports it as a real observation, so
+    // the emphasised dot and the tooltip's delta badge keep working
+    expect(rows.find((r) => r.t === step)?.[seriesObservedKey(1)]).toBe(true);
+  });
+
+  it('keeps every real observation exact and flags only those as observed', () => {
+    const s: PriceSeries[] = [
+      { id: 1, label: 'Price', points: [{ t: 0, price: 100 }, { t: 700, price: 90 }], endT: 1000 },
+    ];
+    const rows = buildChartRows(s, undefined, 50);
+    // the resampled grid never displaces a real observation...
+    for (const t of [0, 700]) {
+      const row = rows.find((r) => r.t === t);
+      expect(row, `observation at ${t} missing`).toBeDefined();
+      expect(row?.[seriesObservedKey(1)]).toBe(true);
+    }
+    // ...and adds no phantom ones (grid rows are hover targets, not data)
+    expect(rows.filter((r) => r[seriesObservedKey(1)] === true)).toHaveLength(2);
+    expect(rows.length).toBeGreaterThan(45);
+  });
+
+  it('resamples within the domain only, leaving the drawn line identical', () => {
+    const s: PriceSeries[] = [
+      { id: 1, label: 'Price', points: [{ t: 10, price: 100 }, { t: 20, price: 200 }], endT: 30 },
+    ];
+    const dense = buildChartRows(s, undefined, 100);
+    const times = dense.map((r) => r.t as number);
+    expect(Math.min(...times)).toBe(10);
+    expect(Math.max(...times)).toBe(30);
+    // every sampled value is one the sparse step already held at that instant
+    for (const r of dense) {
+      const t = r.t as number;
+      expect(r[seriesValueKey(1)]).toBe(t < 20 ? 100 : 200);
+    }
+  });
+
   it('is unaffected by activeWindows when omitted (pre-existing behavior)', () => {
     const s: PriceSeries[] = [
       { id: 1, label: 'Price', points: [{ t: 10, price: 100 }], endT: 40 },

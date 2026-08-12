@@ -192,10 +192,22 @@ export type PriceChartRow = Record<string, number | boolean | null>;
  * activeWindows is optional so existing callers (and this file's chart-row
  * tests) keep the pre-existing unconstrained behavior. Lives here rather than
  * in the chart component so the step semantics are unit-tested and the
- * component stays pure rendering. */
+ * component stays pure rendering.
+ *
+ * `sampleCount` resamples the step onto that many evenly spaced instants
+ * across the domain, ON TOP OF every real observation (which stay exact, and
+ * stay the only rows flagged `observed`). It exists for HOVER, not for
+ * drawing: recharts picks the tooltip's row by nearest-midpoint over the rows
+ * it is given, so with only a handful of real observations the readout snaps
+ * to a price change weeks away from the cursor — hovering early July on a
+ * 9.5.→30.7. series showed 30.7.'s price. Resampling makes "nearest row" and
+ * "the value the line has under the cursor" the same thing. It cannot change
+ * the rendered line: a stepAfter curve through held-forward values is the
+ * same curve however finely it is sampled. */
 export function buildChartRows(
   series: PriceSeries[],
   activeWindows?: [number, number][],
+  sampleCount = 0,
 ): PriceChartRow[] {
   const times = new Set<number>();
   for (const s of series) {
@@ -208,31 +220,38 @@ export function buildChartRows(
       times.add(end);
     }
   }
-  return [...times]
-    .sort((a, b) => a - b)
-    .map((t) => {
-      const row: PriceChartRow = { t };
-      const gapped = !!activeWindows && !withinWindows(t, activeWindows);
-      for (const s of series) {
-        const vKey = seriesValueKey(s.id);
-        const oKey = seriesObservedKey(s.id);
-        if (!s.points.length || t < s.points[0].t || t > s.endT || gapped) {
-          row[vKey] = null;
-          row[oKey] = false;
-          continue;
-        }
-        let v = s.points[0].price;
-        let observed = false;
-        for (const p of s.points) {
-          if (p.t > t) break;
-          v = p.price;
-          if (p.t === t) observed = true;
-        }
-        row[vKey] = v;
-        row[oKey] = observed;
+  if (sampleCount > 1 && times.size > 1) {
+    const known = [...times];
+    const from = Math.min(...known);
+    const to = Math.max(...known);
+    for (let i = 0; i < sampleCount; i++) {
+      times.add(Math.round(from + ((to - from) * i) / (sampleCount - 1)));
+    }
+  }
+  const axis = [...times].sort((a, b) => a - b);
+  const gapped = axis.map((t) => !!activeWindows && !withinWindows(t, activeWindows));
+  const rows: PriceChartRow[] = axis.map((t) => ({ t }));
+  // Track-major with a forward-only cursor into that track's points: both the
+  // axis and each track's points are sorted, so the whole grid fills in one
+  // linear pass instead of rescanning every point for every row (which the
+  // resampling above would otherwise make quadratic).
+  for (const s of series) {
+    const vKey = seriesValueKey(s.id);
+    const oKey = seriesObservedKey(s.id);
+    let cursor = 0;
+    for (let i = 0; i < axis.length; i++) {
+      const t = axis[i];
+      while (cursor + 1 < s.points.length && s.points[cursor + 1].t <= t) cursor++;
+      if (!s.points.length || t < s.points[0].t || t > s.endT || gapped[i]) {
+        rows[i][vKey] = null;
+        rows[i][oKey] = false;
+        continue;
       }
-      return row;
-    });
+      rows[i][vKey] = s.points[cursor].price;
+      rows[i][oKey] = s.points[cursor].t === t;
+    }
+  }
+  return rows;
 }
 
 export interface PriceChangeEvent {

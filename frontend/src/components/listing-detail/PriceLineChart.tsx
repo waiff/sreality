@@ -27,6 +27,14 @@ import {
  * so a five-week window is dated to the day instead of printing "červenec 26"
  * twice. */
 
+/* Hover resolution: how many instants the step is resampled onto so the
+ * tooltip reads the price UNDER the cursor rather than the nearest price
+ * change (see buildChartRows). Comfortably above the widest this chart ever
+ * renders in CSS px, so the row recharts snaps to is within a pixel or so of
+ * the pointer at any viewport; the constant is bounded, so a listing with
+ * years of history costs no more than one with weeks. */
+const HOVER_SAMPLES = 400;
+
 // Palette mirrors the civic-archive tokens; primary track = copper.
 const PALETTE = ['--color-copper', '--color-brick', '--color-sage', '--color-ink-2'];
 const TOKEN_KEYS = ['--color-ink-3', '--color-rule', '--color-paper-2', ...PALETTE];
@@ -50,7 +58,7 @@ export default function PriceLineChart({
 }) {
   const colors = useTokenColors(TOKEN_KEYS);
 
-  const data = buildChartRows(series, activeWindows);
+  const data = buildChartRows(series, activeWindows, HOVER_SAMPLES);
   const times = data.map((row) => row.t as number);
   const prices = series.flatMap((s) => s.points.map((p) => p.price));
   const domain: [number, number] = [times[0] ?? 0, times[times.length - 1] ?? 0];
