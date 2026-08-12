@@ -2,24 +2,33 @@
 
 Mirrors the browser read layer (frontend/src/lib/brokers.ts) server-side so the
 agent, API consumers, and outreach (Phase 4) all hit the SAME public views +
-broker_leaderboard RPC — one definition of "who has what". Bearer-gated routes
+broker_leaderboard RPC — one definition of "who has what". Identity-gated routes
 live in api/routes/brokers.py. A broker's full contact set is NOT exposed by the
-anon public views (PII), so broker_contacts here is the only path to it.
+anon public views (PII), so broker_contacts here is the only path to it —
+`apply_pii_policy` is what the route layer runs over every other envelope so a
+non-admin caller gets has_email / has_phone flags instead of the values.
 
 Read-only — no toolkit write exception (rule #5) is added.
 """
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from psycopg.rows import dict_row
 
-from toolkit import _now_iso
+from toolkit import _listing_id_clause, _now_iso
 
 _VALID_METRICS = {
     "active_property_count", "property_count", "listing_count", "active_listing_count",
 }
+GEO_LEVELS = ("region", "okres")
+MAX_BATCH = 1000
+_REDACTED = "[redacted]"
+_EMAIL_RE = re.compile(r"[^@\s<>,;()\[\]\"']+@[^@\s<>,;()\[\]\"']+\.[a-z]{2,}",
+                       re.IGNORECASE)
+_PHONE_RE = re.compile(r"^\+?\d[\d\s./()-]{7,17}$")
 
 
 def _envelope(tool: str, data: Any, filters_used: dict[str, Any], result_count: int,
@@ -38,6 +47,72 @@ def _envelope(tool: str, data: Any, filters_used: dict[str, Any], result_count: 
 
 def _iso(v: Any) -> str | None:
     return v.isoformat() if v is not None and hasattr(v, "isoformat") else v
+
+
+def _bounded(ids: list[int]) -> list[int]:
+    """Deduped, sorted, capped. The HTTP layer rejects an over-cap batch outright
+    (both batch routes bound the input); this slice is only the backstop for a
+    direct toolkit/agent caller, which must never silently spill into a huge IN."""
+    return sorted({int(i) for i in ids})[:MAX_BATCH]
+
+
+def apply_pii_policy(envelope: dict[str, Any], *, include_pii: bool) -> dict[str, Any]:
+    """Keep or mask broker contact PII, always stamping metadata.pii_masked.
+
+    D1/D2 (2026-08-12 broker E2E review): these reads moved off the static shared
+    secret — which ships inside the SPA bundle — onto real user identity, so an
+    ordinary logged-in caller must not receive 2000 brokers' email + phone.
+    """
+    masked = envelope if include_pii else {**envelope, "data": _mask(envelope.get("data"))}
+    return {**masked,
+            "metadata": {**(masked.get("metadata") or {}), "pii_masked": not include_pii}}
+
+
+def _pii_kind(key: str) -> str | None:
+    lowered = key.lower()
+    return next((k for k in ("email", "phone") if k in lowered), None)
+
+
+def _redact_shaped(text: str) -> str:
+    """Shape rule under the name rule: contact PII also arrives under non-contact
+    columns — two live brokers' display_name IS their email address, and the portal
+    name field is free text — so a name-only mask promises more than it delivers.
+    A phone is matched whole-string only, or a source_url's numeric id would go."""
+    if _PHONE_RE.match(text) and sum(c.isdigit() for c in text) >= 9:
+        return _REDACTED
+    return _EMAIL_RE.sub(_REDACTED, text)
+
+
+def _mask(value: Any) -> Any:
+    """Swap every contact column for a has_* flag, recursing into the dossier.
+
+    Matched on the column NAME, not a fixed list of today's columns: these queries
+    are `select *` over views a migration can widen (broker_listings_public has
+    already grown twice), so a denylist would leak a new *_email the day it lands.
+    The dossier's contact list carries its PII in a generic `value` column no name
+    rule can catch, so it is dropped whole — /brokers/{id}/contacts is admin-only.
+    `has_email` / `has_phone` mean "a current primary contact is on file", i.e. the
+    brokers rollup's primary_email / primary_phone, not every address ever seen.
+    """
+    if isinstance(value, list):
+        return [_mask(v) for v in value]
+    if isinstance(value, str):
+        return _redact_shaped(value)
+    if not isinstance(value, dict):
+        return value
+    out: dict[str, Any] = {}
+    flags: dict[str, bool] = {}
+    for key, val in value.items():
+        if key == "contacts":
+            continue
+        kind = _pii_kind(key)
+        if kind is None:
+            out[key] = _mask(val)
+        else:
+            flags[kind] = flags.get(kind, False) or bool(val)
+    for kind, present in flags.items():
+        out[f"has_{kind}"] = present
+    return out
 
 
 def leaderboard(conn: Any, *, region_ids: list[int] | None = None,
@@ -132,14 +207,68 @@ def broker_listings(conn: Any, broker_id: int, *, limit: int = 500) -> dict[str,
                      len(rows), _iso(fresh))
 
 
-def listing_broker(conn: Any, sreality_id: int) -> dict[str, Any] | None:
-    """The broker behind one listing (listing_broker_public), or None if unattributed."""
+def listing_broker(conn: Any, sreality_id: int | None = None, *,
+                   listing_id: int | None = None) -> dict[str, Any] | None:
+    """The broker behind one listing (listing_broker_public), or None if unattributed.
+
+    Addressable by EITHER id, surrogate wins (`_listing_id_clause`): sreality_id is
+    NULL on the eight non-sreality portals, so a sreality-keyed lookup silently
+    found nothing for most of the corpus.
+    """
+    id_clause, id_val = _listing_id_clause(sreality_id, listing_id, lid_col="listing_id")
     with conn.cursor(row_factory=dict_row) as cur:
-        cur.execute("SELECT * FROM listing_broker_public WHERE sreality_id = %s", (sreality_id,))
+        cur.execute(f"SELECT * FROM listing_broker_public WHERE {id_clause}", (id_val,))
         row = cur.fetchone()
     if row is None:
         return None
-    return _envelope("listing_broker", row, {"sreality_id": sreality_id}, 1, None)
+    return _envelope("listing_broker", row,
+                     {"sreality_id": sreality_id, "listing_id": listing_id}, 1, None)
+
+
+def listing_brokers(conn: Any, listing_ids: list[int]) -> dict[str, Any]:
+    """The brokers behind many listings in one round-trip, keyed on the surrogate
+    listing_id — the board/table hydration path that would otherwise be an N+1."""
+    ids = _bounded(listing_ids)
+    rows: list[dict[str, Any]] = []
+    if ids:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                "SELECT * FROM listing_broker_public WHERE listing_id = ANY(%s)", (ids,))
+            rows = cur.fetchall()
+    return _envelope("listing_brokers", rows, {"listing_ids": ids}, len(rows), None)
+
+
+def brokers_by_ids(conn: Any, broker_ids: list[int]) -> dict[str, Any]:
+    """Canonical broker rows for an explicit id set (the contact-box hydration
+    pair to listing_brokers)."""
+    ids = _bounded(broker_ids)
+    rows: list[dict[str, Any]] = []
+    if ids:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("SELECT * FROM brokers_public WHERE broker_id = ANY(%s)", (ids,))
+            rows = cur.fetchall()
+    fresh = max((r["last_seen_at"] for r in rows if r.get("last_seen_at")), default=None)
+    for r in rows:
+        r["first_seen_at"], r["last_seen_at"] = _iso(r.get("first_seen_at")), _iso(r.get("last_seen_at"))
+    return _envelope("brokers_by_ids", rows, {"broker_ids": ids}, len(rows), _iso(fresh))
+
+
+def geo_options(conn: Any, *, geo_level: str | None = None) -> dict[str, Any]:
+    """Region / okres picker metadata with per-area broker counts.
+
+    Not PII, but broker_geo_options is dark to anon AND authenticated (migration
+    361), so the server-side route is the only way a browser can read it. An
+    unrecognized level raises rather than falling back to "no filter" — silently
+    answering `geo_level=obec` with every region AND okres is worse than a 422."""
+    if geo_level is not None and geo_level not in GEO_LEVELS:
+        raise ValueError(f"geo_level must be one of {sorted(GEO_LEVELS)}")
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT geo_level, geo_id, name, parent_id, broker_count "
+            "FROM broker_geo_options WHERE (%s::text IS NULL OR geo_level = %s) "
+            "ORDER BY geo_level, name", (geo_level, geo_level))
+        rows = cur.fetchall()
+    return _envelope("broker_geo_options", rows, {"geo_level": geo_level}, len(rows), None)
 
 
 def broker_contacts(conn: Any, broker_id: int) -> dict[str, Any]:

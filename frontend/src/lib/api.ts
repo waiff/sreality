@@ -3,7 +3,8 @@
  * Two auth shapes, matching the backend gate each route actually uses:
  *  - `jwt: true` (require_admin / verify_jwt routes — Settings, labeling,
  *    property merge mechanics, Outreach, broker-review, skill-refinements,
- *    Collections list, Pipeline, Watchdog subscriptions, /estimations) sends
+ *    Collections list, Pipeline, Watchdog subscriptions, /estimations,
+ *    and every `/brokers/*` read since 2026-08-12) sends
  *    the caller's real Supabase session access_token. The backend no longer
  *    accepts anything else here (api/dependencies.py:verify_jwt) — admin
  *    status rides in the JWT's app_metadata.is_admin claim, never a shared
@@ -120,7 +121,11 @@ export class ApiError extends Error {
   }
 }
 
-export type QueryValue = string | number | boolean | undefined | null;
+export type QueryScalar = string | number | boolean;
+/* An array value is serialized as REPEATED params (ids=1&ids=2) — the shape a
+ * FastAPI `list[int] = Query(default=[])` route parses. Comma-joining would
+ * arrive server-side as one unparseable value, so callers must not hand-roll it. */
+export type QueryValue = QueryScalar | readonly QueryScalar[] | undefined | null;
 
 interface RequestOptions extends Omit<RequestInit, 'body'> {
   query?: Record<string, QueryValue>;
@@ -156,7 +161,14 @@ async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
   const url = new URL(BASE_URL + path);
   if (query) {
     for (const [k, v] of Object.entries(query)) {
-      if (v != null) url.searchParams.set(k, String(v));
+      if (v == null) continue;
+      if (Array.isArray(v)) {
+        for (const item of v as readonly QueryScalar[]) {
+          if (item != null) url.searchParams.append(k, String(item));
+        }
+      } else {
+        url.searchParams.set(k, String(v));
+      }
     }
   }
 
@@ -205,11 +217,10 @@ async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
  * (see the file-header comment). */
 export const apiGet = <T>(
   path: string,
-  params?: Record<string, string | number | undefined>,
+  params?: Record<string, QueryValue>,
   signal?: AbortSignal,
   jwt?: boolean,
-): Promise<T> =>
-  request<T>(path, { query: params as Record<string, QueryValue> | undefined, signal, jwt });
+): Promise<T> => request<T>(path, { query: params, signal, jwt });
 
 export const apiPost = <T>(
   path: string,

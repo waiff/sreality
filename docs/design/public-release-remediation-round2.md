@@ -260,6 +260,10 @@ Operator note, no action taken: `GET /brokers/{id}/contacts` (broker PII) is
 `require_token`-gated while broker mutations are `require_admin`. Deliberate per the
 router header and not an escalation path (the static token is strictly narrower than admin
 for JWTs) — the allowlist records it explicitly so it stays a visible decision.
+**Superseded 2026-08-12** (broker E2E review D1/D2): every `/brokers/*` read moved to
+`verify_jwt` with contact PII masked for non-admins, and `/contacts` to `require_admin`.
+The token being "strictly narrower than admin" missed that it is bundle-extractable, so
+the leaderboard's unmasked email + phone for 2000 brokers was effectively public.
 
 ## PR-F — docs + skill corrections (G8, G10, G11)
 

@@ -248,7 +248,8 @@ app.include_router(property_merge_router)
 # cases, tag annotations, image-pair notes) — admin-gated (require_admin).
 app.include_router(labeling_router)
 # /brokers/* (broker intelligence reads: leaderboard, detail, listings, contacts)
-# — standard bearer gate; contacts are PII not exposed by the anon public views.
+# — real user identity (verify_jwt) with contact PII masked to has_email/has_phone
+# for non-admins; /contacts is admin-only. The static token is bundle-extractable.
 app.include_router(brokers_router)
 # /outreach/* (broker outreach CRM: campaigns, LLM-drafted messages, suppression)
 # — operator write actions over PII, admin-gated (require_admin). Human-in-the-loop send.
