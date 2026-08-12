@@ -253,6 +253,11 @@ class _ResilientConn:
     def cursor(self) -> _ResilientCur:
         return _ResilientCur(self)
 
+    def transaction(self) -> Any:
+        import contextlib
+
+        return contextlib.nullcontext()
+
     def close(self) -> None:
         self.closed = True
 
@@ -374,3 +379,44 @@ def test_release_lock_does_not_reconnect_when_the_handle_is_live() -> None:
                      reconnect=lambda: opened.append(1) or _ResilientConn("spare"))
     assert [s for s in live.executed if s.startswith(_RELEASE)]
     assert opened == []
+
+
+def test_firm_linking_gets_its_own_floor_when_attribution_ate_the_budget(
+    monkeypatch: Any,
+) -> None:
+    """The firm-link loop runs AFTER attribution, which routinely spends the whole
+    --max-seconds budget (the 2026-08-09 and 08-10 sweeps both logged "time budget
+    reached during attribution"). Guarding it with the SAME deadline trips on its
+    first check and skips the global firm reconcile outright — a phase measured at
+    43-186s for the full corpus, traded away on roughly half the sweeps. It gets
+    _FIRM_LINK_MIN_SECONDS of its own instead, which still bounds the accumulation
+    case the guard exists for."""
+    import time
+
+    import scripts.resolve_brokers as rb
+
+    conn = _ResilientConn("full")
+    all_ids = [1, 2, 3, 4, 5, 6]  # 3 chunks at batch_size=2
+    attributed: list[list[int]] = []
+    linked: list[list[int]] = []
+
+    monkeypatch.setattr(rb, "_broker_bearing_ids", lambda c, n: all_ids)
+    monkeypatch.setattr(rb, "_attribute",
+                        lambda c, sel, params: attributed.append(params["ids"]))
+    monkeypatch.setattr(rb, "_resolve_firms", lambda c, free, franchise: None)
+    monkeypatch.setattr(rb, "_link_listings_firm",
+                        lambda c, extra="", params=None: linked.append(params["ids"]))
+    monkeypatch.setattr(rb, "_attach_singletons", lambda c: 0)
+    monkeypatch.setattr(rb, "_cross_source_merge", lambda c, auto, run_id: (0, 0))
+    monkeypatch.setattr(rb, "_max_id", lambda c, table: 0)
+    monkeypatch.setattr(rb, "_refresh_matview", lambda c: None)
+    monkeypatch.setattr(rb, "_generate_merge_candidates", lambda c: 0)
+
+    # the budget is already spent when the sweep starts, i.e. the worst real shape
+    rb._run_full(conn, [], [], [], 2, time.monotonic() - 1,
+                 reconnect=lambda: conn)
+
+    # attribution stops at its first chunk boundary, as designed...
+    assert attributed == [[1, 2]]
+    # ...and firm linking still walks the whole corpus on its own floor
+    assert linked == [[1, 2], [3, 4], [5, 6]]

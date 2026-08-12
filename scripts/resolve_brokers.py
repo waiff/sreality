@@ -605,6 +605,13 @@ _LOCK_POLL_SECONDS = 10
 # rather than extending the job.
 _LOCK_WAIT_MAX_SECONDS = 1260
 
+# Minimum share of the full sweep's wall-clock budget reserved for the firm-link
+# loop, which runs AFTER attribution has usually spent all of --max-seconds. Sized
+# from the measured phase (43s on 2026-08-10, 186s on 08-09, both over the full
+# ~107-chunk corpus) with ~1.6x headroom for corpus growth. Counts on top of
+# --max-seconds, so resolve_brokers_full.yml's timeout-minutes covers both.
+_FIRM_LINK_MIN_SECONDS = 300
+
 
 def _try_acquire_lock(conn: Any, holder: str, mode: str) -> bool:
     with conn.cursor() as cur:
@@ -1110,15 +1117,22 @@ def _run_full(conn: Any, free: list[str], franchise: list[str], auto: list[str],
     # joining every linked listing to its firm exceeds the pooler statement timeout
     # now that idnes adds ~125k linkable rows. sreality_id is sparse, so chunk the
     # actual ids (the PR #470 lesson), not a numeric range.
+    #
+    # Its own FLOOR on top of the shared deadline, not the bare deadline: attribution
+    # routinely spends the whole --max-seconds budget (the 08-09 and 08-10 sweeps both
+    # logged "time budget reached during attribution"), so reusing `deadline` here
+    # would trip on the FIRST check and skip the global firm reconcile outright — and
+    # this is the cheap half, 43-186s for the whole ~107-chunk corpus on those same
+    # runs. The floor still bounds the accumulation case the guard exists for (~100
+    # chunks each timing out once, then succeeding, with nothing watching the clock),
+    # it just refuses to trade a phase that normally finishes for that bound. An
+    # overrun degrades to a partial link + a warning, and the next sweep redoes it.
+    firm_deadline = max(deadline, time.monotonic() + _FIRM_LINK_MIN_SECONDS) if deadline else None
     for i in range(0, len(all_ids), batch_size):
         chunk = all_ids[i:i + batch_size]
         step(lambda c, ids=chunk: _link_listings_firm(c, "AND l.id = ANY(%(ids)s)", {"ids": ids}),
              "resolve.link_firm", attempts=2)
-        # Same budget guard the attribution loop has. Without it ~100 chunks that each
-        # time out ONCE and then succeed accumulate unbounded retry time with nothing
-        # watching the clock — the one path here that can reach timeout-minutes and
-        # produce the silent `cancelled` this wave exists to eliminate.
-        if deadline and time.monotonic() > deadline:
+        if firm_deadline and time.monotonic() > firm_deadline:
             LOG.warning("RESOLVE full: time budget reached during firm linking at %d/%d ids",
                         i, len(all_ids))
             break

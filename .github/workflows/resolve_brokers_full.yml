@@ -43,14 +43,19 @@ jobs:
   resolve:
     runs-on: ubuntu-latest
     # Headroom for the worst case, re-derived with the retry bounds:
-    #   prefix  ~53 min — lock wait (<= _LOCK_WAIT_MAX_SECONDS, 21 min) and
+    #   prefix  ~58 min — lock wait (<= _LOCK_WAIT_MAX_SECONDS, 21 min) and
     #                     attribution share the --max-seconds 3000 (50 min) budget,
     #                     which is anchored at process start and checked at a chunk
-    #                     boundary, so one chunk can overshoot it (measured 53.3 min).
+    #                     boundary, so one chunk can overshoot it (measured 53.3 min);
+    #                     plus the firm-link loop's own _FIRM_LINK_MIN_SECONDS (5 min)
+    #                     floor, which it needs because attribution routinely spends
+    #                     the whole budget before that loop starts.
     #   tail    ~50 min — merge + rollups + matview + candidates measured 17-25 min,
     #                     each phase capped at attempts=2 by resolve_brokers.py.
     #   ------------------
-    #   ~103 min, inside 110 with ~7 min of slack.
+    #   ~108 min, inside 110. The two halves stack only in theory: the tail's 2x is
+    #   every phase failing once, which has never co-occurred with a budget-exhausted
+    #   prefix (worst real sweep to 2026-08-12: 78.4 min end to end).
     # Before the attempts=2 caps the same tail could burn 4 attempts (~100 min) and
     # bust the backstop, which would trade a red run for a silent `cancelled` — the
     # exact mode the resilience wave exists to eliminate. The job is serialized by
