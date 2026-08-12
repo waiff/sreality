@@ -264,6 +264,13 @@ for JWTs) — the allowlist records it explicitly so it stays a visible decision
 `verify_jwt` with contact PII masked for non-admins, and `/contacts` to `require_admin`.
 The token being "strictly narrower than admin" missed that it is bundle-extractable, so
 the leaderboard's unmasked email + phone for 2000 brokers was effectively public.
+**Browser side repointed the same day (B2):** `frontend/src/lib/brokers.ts` read the
+A6-revoked PostgREST views directly and had therefore been silently dark since migration
+299 — every broker surface degraded to "no broker" / "Makléř nenalezen" rather than
+erroring. All ten reads now go through the API with `jwt: true`, masked contacts render as
+"kontakt na vyžádání" instead of a blank, and migration 395 revokes `firms_public` from
+`authenticated` (default-ACL drift 299's relation list missed) + registers it in
+`tests/test_migration_rls_grants.py::_BROKER_A6_SURFACES`.
 
 ## PR-F — docs + skill corrections (G8, G10, G11)
 

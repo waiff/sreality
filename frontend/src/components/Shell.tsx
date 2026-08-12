@@ -23,6 +23,10 @@ const navItems: ReadonlyArray<NavItem> = [
   { to: '/watchdog',    label: 'Watchdogs', agenda: 'watchdogs' },
   { to: '/notifications', label: 'Notifications', agenda: 'notifications' },
   { to: '/brokers',     label: 'Brokers', agenda: 'brokers' },
+  // The merge-review queue is a real admin surface (routes.tsx wraps it in
+  // AdminPage) that was only reachable from a conditional chip on /brokers —
+  // invisible whenever the queue happened to be empty.
+  { to: '/brokers/review', label: 'Broker Review', admin: true },
   { to: '/datasets',    label: 'Datasets', admin: true },
   { to: '/outreach',    label: 'Outreach', disabled: true, admin: true,
     title: 'Outreach is paused — not available yet.' },

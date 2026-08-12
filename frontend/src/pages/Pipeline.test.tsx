@@ -72,6 +72,8 @@ const CARDS: PipelineBoardCard[] = [
       firm_label: 'RE/MAX',
       email: 'jan@remax.cz',
       phone: '+420 777 123 456',
+      has_email: true,
+      has_phone: true,
     },
   },
 ];

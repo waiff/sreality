@@ -925,8 +925,14 @@ export interface PipelineCardBroker {
   broker_id: number;
   display_name: string | null;
   firm_label: string | null;
+  /* NULL both when no contact exists AND when the caller isn't an admin — the
+   * /brokers API masks the value columns per session. `has_*` is the un-masked
+   * signal that separates the two, so the card can say "admin only" instead of
+   * implying the broker is unreachable. */
   email: string | null;
   phone: string | null;
+  has_email: boolean;
+  has_phone: boolean;
 }
 
 /* A board card = the property_pipeline row joined to its property's display

@@ -917,17 +917,19 @@ renumber.** Navigate by area:
     `property_pipeline_public` + `pipeline_stages_public` hydrated against `properties_public`
     (street + `mf_gross_yield_pct` from the view; one thumbnail per card via the shared
     `fetchImagesByListingIds` + `imageSrc()` Browse helpers; the **canonical broker** per card via
-    two batched reads — `fetchListingBrokersByIds` (`listing_broker_public`) + `fetchBrokersByIds`
-    (`brokers_public` contact), NOT the raw drift-prone `properties_public.broker_*` — the name links
-    to `/brokers/{id}`, contact in a native-title hover. **The broker box is dark in practice today:**
-    Phase 0's A6 revoked both views from `anon` AND `authenticated` until Wave 4 masks broker PII, so
-    both reads return SQLSTATE `42501` and every card degrades to "no broker shown" — deliberate, and
-    the rest of the card still loads. The masked server-side replacement exists since 2026-08-12
-    (`/brokers/*` on `verify_jwt`, contact columns swapped for `has_email`/`has_phone` unless the
-    caller is admin, batched via `GET /brokers?ids=` + `POST /brokers/by-listings`), but no browser
-    caller has been repointed onto it yet. Only that 42501 degrades silently; any other error (schema
-    drift, network, 5xx, expired session) is logged via `console.error` first, so a genuine
-    regression is not indistinguishable from the mask). The board offers basic **property-type
+    two batched reads — `fetchListingBrokersByIds` (`POST /brokers/by-listings`) + `fetchBrokersByIds`
+    (`GET /brokers?ids=`), NOT the raw drift-prone `properties_public.broker_*` — the name links
+    to `/brokers/{id}`, contact in a native-title hover. **Both went through PostgREST until
+    2026-08-12 and were dark the whole time:** Phase 0's A6 revoked `listing_broker_public` +
+    `brokers_public` from `anon` AND `authenticated`, so every read returned SQLSTATE `42501` and
+    every card degraded to "no broker shown". `frontend/src/lib/brokers.ts` is now repointed wholesale
+    onto the identity-gated API (every call `jwt: true`; the routes reject the static bundle token),
+    so a logged-in caller gets HTTP 200 with either the values or `has_email`/`has_phone` — there is
+    no longer an *expected* failure, and the 42501 special case is gone. The two reads stay isolated
+    from the board (broker data is an enrichment; a failure must not take stages/cards/images down)
+    but every failure is now `console.error`'d, never silently expected. A masked card keeps its
+    broker name + firm and its hover box says the contact is admin-only rather than omitting it.
+    The board offers basic **property-type
     filtering** — multi-select `category_main` chips (Byty / Domy / Komerční / …) whose labels come
     from the SAME generated filter registry as Browse's TYPE tabs (`FILTER_REGISTRY`, never a parallel
     hardcode); only the types actually present in the pipeline get a chip, and the filter is

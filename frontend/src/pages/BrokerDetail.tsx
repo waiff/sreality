@@ -2,15 +2,15 @@ import { useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import {
-  fetchBroker,
-  fetchBrokerGeoOptions,
+  contactState,
+  fetchBrokerDossier,
   fetchBrokerListings,
-  fetchBrokerMemberships,
-  fetchBrokerRegionShares,
   prettyPhone,
   type BrokerListing,
+  type BrokerPublic,
   type BrokerRegionShare,
   type BrokerMembership,
+  type ContactState,
 } from '../lib/brokers';
 import { fmtCount, fmtCzk, fmtArea, fmtRelative } from '../lib/format';
 import { portalShort } from '../lib/portals';
@@ -39,31 +39,13 @@ export default function BrokerDetail() {
   const { id } = useParams<{ id: string }>();
   const brokerId = Number(id);
 
-  const brokerQ = useQuery({
-    queryKey: ['broker', brokerId],
-    queryFn: () => fetchBroker(brokerId),
+  // One call: identity + firms + regional footprint (+ contacts for an admin).
+  // Region names arrive joined, so the old geo-options query and the
+  // regionNames-dependent `enabled` gate on the shares query are both gone.
+  const dossierQ = useQuery({
+    queryKey: ['broker-dossier', brokerId],
+    queryFn: () => fetchBrokerDossier(brokerId),
     enabled: Number.isFinite(brokerId),
-  });
-  const geoQ = useQuery({
-    queryKey: ['broker-geo-options'],
-    queryFn: fetchBrokerGeoOptions,
-    staleTime: 5 * 60_000,
-  });
-  const regionNames = useMemo(() => {
-    const m = new Map<number, string>();
-    for (const o of geoQ.data ?? []) if (o.geo_level === 'region') m.set(o.geo_id, o.name);
-    return m;
-  }, [geoQ.data]);
-
-  const membershipsQ = useQuery({
-    queryKey: ['broker-memberships', brokerId],
-    queryFn: () => fetchBrokerMemberships(brokerId),
-    enabled: Number.isFinite(brokerId),
-  });
-  const sharesQ = useQuery({
-    queryKey: ['broker-region-shares', brokerId, regionNames.size],
-    queryFn: () => fetchBrokerRegionShares(brokerId, regionNames),
-    enabled: Number.isFinite(brokerId) && regionNames.size > 0,
   });
   const listingsQ = useQuery({
     queryKey: ['broker-listings', brokerId],
@@ -71,7 +53,8 @@ export default function BrokerDetail() {
     enabled: Number.isFinite(brokerId),
   });
 
-  const b = brokerQ.data;
+  const dossier = dossierQ.data;
+  const b = dossier?.broker;
   usePageTitle(b?.display_name ?? null);
 
   return (
@@ -83,9 +66,15 @@ export default function BrokerDetail() {
         ← Žebříček makléřů
       </Link>
 
-      {brokerQ.isLoading ? (
+      {dossierQ.isLoading ? (
         <p className="mt-8 text-sm text-[var(--color-ink-3)]">Načítám…</p>
-      ) : !b ? (
+      ) : dossierQ.isError ? (
+        /* A failed read is NOT "no such broker" — the old page rendered both as
+           "Makléř nenalezen." and hid every outage behind an empty-state. */
+        <p className="mt-8 text-sm text-[var(--color-brick)]">
+          Makléře se nepodařilo načíst: {(dossierQ.error as Error).message}
+        </p>
+      ) : !b || !dossier ? (
         <p className="mt-8 text-sm text-[var(--color-ink-3)]">Makléř nenalezen.</p>
       ) : (
         <>
@@ -108,7 +97,7 @@ export default function BrokerDetail() {
                 )}
               </div>
             </div>
-            <ContactCard email={b.primary_email} phone={b.primary_phone} />
+            <ContactCard broker={b} />
           </header>
 
           {/* Stats strip */}
@@ -125,13 +114,13 @@ export default function BrokerDetail() {
               total={b.listing_count}
               hint="aktivní / celkem"
             />
-            <Stat label="Kanceláře" value={membershipsQ.data?.length ?? 0} hint="historicky" />
-            <Stat label="Regiony" value={sharesQ.data?.length ?? 0} hint="kde inzeruje" />
+            <Stat label="Kanceláře" value={dossier.memberships.length} hint="historicky" />
+            <Stat label="Regiony" value={dossier.region_shares.length} hint="kde inzeruje" />
           </div>
 
           <div className="mt-7 grid gap-7 md:grid-cols-2">
-            <Footprint shares={sharesQ.data ?? []} loading={sharesQ.isLoading} />
-            <Firms rows={membershipsQ.data ?? []} loading={membershipsQ.isLoading} />
+            <Footprint shares={dossier.region_shares} />
+            <Firms rows={dossier.memberships} />
           </div>
 
           <Inventory
@@ -145,7 +134,7 @@ export default function BrokerDetail() {
   );
 }
 
-function ContactCard({ email, phone }: { email: string | null; phone: string | null }) {
+function ContactCard({ broker }: { broker: BrokerPublic }) {
   return (
     <div className="border border-[var(--color-rule)] rounded-[var(--radius-md)] bg-[var(--color-paper-3)] px-4 py-3 min-w-[15rem]">
       <p className="text-[0.6rem] tracking-[0.16em] uppercase text-[var(--color-ink-3)]">
@@ -154,32 +143,48 @@ function ContactCard({ email, phone }: { email: string | null; phone: string | n
       <div className="mt-2 space-y-1.5">
         <ContactRow
           kind="tel"
-          value={phone}
-          display={phone ? prettyPhone(phone) : null}
+          state={contactState(broker.primary_phone, broker.has_phone)}
+          format={prettyPhone}
         />
-        <ContactRow kind="mailto" value={email} display={email} />
+        <ContactRow
+          kind="mailto"
+          state={contactState(broker.primary_email, broker.has_email)}
+          format={(v) => v}
+        />
       </div>
     </div>
   );
 }
 
+const CONTACT_LABEL: Record<'tel' | 'mailto', string> = {
+  tel: 'telefon',
+  mailto: 'e-mail',
+};
+
 function ContactRow({
   kind,
-  value,
-  display,
+  state,
+  format,
 }: {
   kind: 'tel' | 'mailto';
-  value: string | null;
-  display: string | null;
+  state: ContactState;
+  format: (v: string) => string;
 }) {
   const [copied, setCopied] = useState(false);
-  if (!value) {
+  if (state.state !== 'value') {
+    // "masked" means a contact IS on file but this session may not see it —
+    // rendering it as the empty dash would claim the broker has none.
+    const masked = state.state === 'masked';
     return (
-      <p className="text-sm text-[var(--color-ink-4)] font-[family-name:var(--font-mono)]">
-        {kind === 'tel' ? 'telefon —' : 'e-mail —'}
+      <p
+        className="text-sm text-[var(--color-ink-4)] font-[family-name:var(--font-mono)]"
+        title={masked ? 'Kontakt je viditelný jen pro administrátory.' : undefined}
+      >
+        {CONTACT_LABEL[kind]} {masked ? '· kontakt na vyžádání' : '—'}
       </p>
     );
   }
+  const { value } = state;
   const copy = () => {
     navigator.clipboard?.writeText(value).then(() => {
       setCopied(true);
@@ -192,7 +197,7 @@ function ContactRow({
         href={`${kind}:${value}`}
         className="text-sm font-[family-name:var(--font-mono)] text-[var(--color-copper-2)] hover:underline underline-offset-2 truncate"
       >
-        {display}
+        {format(value)}
       </a>
       <button
         type="button"
@@ -232,7 +237,7 @@ function Stat({
   );
 }
 
-function Footprint({ shares, loading }: { shares: BrokerRegionShare[]; loading: boolean }) {
+function Footprint({ shares }: { shares: BrokerRegionShare[] }) {
   const max = shares.reduce((m, s) => Math.max(m, s.active_property_count), 0) || 1;
   return (
     <section>
@@ -240,16 +245,14 @@ function Footprint({ shares, loading }: { shares: BrokerRegionShare[]; loading: 
         Kde inzeruje
       </h2>
       <div className="mt-3 border border-[var(--color-rule)] rounded-[var(--radius-md)] bg-[var(--color-paper-2)] px-4 py-3">
-        {loading ? (
-          <p className="text-sm text-[var(--color-ink-3)]">Načítám…</p>
-        ) : shares.length === 0 ? (
+        {shares.length === 0 ? (
           <p className="text-sm text-[var(--color-ink-4)]">Bez aktivního regionu.</p>
         ) : (
           <ul className="space-y-2">
             {shares.slice(0, 8).map((s) => (
               <li key={s.geo_id} className="flex items-center gap-3">
                 <span className="w-40 shrink-0 truncate text-sm text-[var(--color-ink-2)]">
-                  {s.name}
+                  {s.name ?? '—'}
                 </span>
                 <span className="flex-1 h-1.5 rounded-full bg-[var(--color-inset)] overflow-hidden">
                   <span
@@ -269,16 +272,14 @@ function Footprint({ shares, loading }: { shares: BrokerRegionShare[]; loading: 
   );
 }
 
-function Firms({ rows, loading }: { rows: BrokerMembership[]; loading: boolean }) {
+function Firms({ rows }: { rows: BrokerMembership[] }) {
   return (
     <section>
       <h2 className="text-xs tracking-[0.14em] uppercase text-[var(--color-ink-3)]">
         Kanceláře
       </h2>
       <div className="mt-3 border border-[var(--color-rule)] rounded-[var(--radius-md)] bg-[var(--color-paper-2)] px-4 py-3">
-        {loading ? (
-          <p className="text-sm text-[var(--color-ink-3)]">Načítám…</p>
-        ) : rows.length === 0 ? (
+        {rows.length === 0 ? (
           <p className="text-sm text-[var(--color-ink-4)]">Žádná kancelář (nezávislý).</p>
         ) : (
           <ul className="space-y-2">

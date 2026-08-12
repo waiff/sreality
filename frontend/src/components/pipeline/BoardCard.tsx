@@ -46,12 +46,16 @@ function CardThumb({ url, inactive }: { url: string | null; inactive: boolean })
 
 /* Native-title hover box for a card's broker — name, firm, and contact on one
  * line (the codebase's tooltip convention). The name itself links to the broker
- * page for the full record. */
-function brokerHoverTitle(b: PipelineCardBroker): string {
-  return (
-    [b.display_name, b.firm_label, b.phone, b.email].filter(Boolean).join(' · ') ||
-    'Zobrazit makléře'
-  );
+ * page for the full record.
+ *
+ * A non-admin session gets has_email/has_phone instead of the values, so the
+ * tooltip says the contact exists but is admin-only rather than omitting it and
+ * implying the broker has none. Exported for its test. */
+export function brokerHoverTitle(b: PipelineCardBroker): string {
+  const parts = [b.display_name, b.firm_label, b.phone, b.email].filter(Boolean);
+  const hidden = (b.has_phone && !b.phone) || (b.has_email && !b.email);
+  if (hidden) parts.push('kontakt jen pro adminy');
+  return parts.join(' · ') || 'Zobrazit makléře';
 }
 
 /* The card's visible content — reused by the in-column card and the drag ghost. */
