@@ -347,6 +347,33 @@ to advance a deal without opening the listing page. It now opens a shared menu.
   header, and the stage editor rendered every set code as blank.
 - Rule #22 updated (CLAUDE.md + architecture).
 
+### Phase U-COL: One save-to-collection control (done)
+"Uložit do kolekce" existed only on the Browse card; the listing page hid the
+same capability in a `CurationBlock` chip row below the estimates — the exact
+burial the pipeline bookmark was hoisted out of in Phase 3d. It is now the
+shared `<CollectionSaveButton>` in the listing-detail header next to
+`PipelineToggle`, and the `CurationBlock` row is gone (that block keeps tags +
+notes). Unifying it surfaced three defects in code that was already shipped:
+- **Three write paths, three different invalidation lists**, each forgetting a
+  different cache: the Browse card forgot `collection(id)`, while the listing
+  page AND the collection page both forgot the shared members map — so filing a
+  property on one screen left the card glyph on another still showing it
+  unfiled. Now one `useCollectionMembership` over `lib/collectionCache.ts`,
+  mirroring `usePipelineCard`/`pipelineCache` (rollback on `onSettled`, so the
+  global error toast still fires). Writes are optimistic, which is what makes a
+  multi-select picker usable — before, each tick stalled on a round trip with
+  the whole list disabled.
+- **The card's popover was clipped.** It was `absolute` inside the card's
+  `overflow-hidden` wrapper — the bug `AnchoredPopover` was built for in Phase
+  3i, which fixed only the pipeline funnel beside it. The picker now portals too.
+- **Menu keyboard behaviour was about to be duplicated**; extracted as
+  `lib/useMenuKeyboard.ts` and adopted by `PipelineStageMenu`, so both menus
+  these controls open rove identically.
+- Membership reads are now explicit per surface (`source="shared" | "single"`):
+  a record page no longer has to download every membership in the account to
+  answer a question about one property.
+- Rule #18 updated (architecture).
+
 ### Phase U-ME: Manual rental estimates (next)
 
 Capture operator-judgement rent figures as first-class data and

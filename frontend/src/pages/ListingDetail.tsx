@@ -55,6 +55,7 @@ import { timeLabelFull } from '@/lib/chartAxis';
 import { portalShort, srealityListingUrl } from '@/lib/portals';
 import ErrorBoundary from '@/components/ErrorBoundary';
 import { ListingOverview } from '@/components/listing-detail/ListingOverview';
+import CollectionSaveButton from '@/components/CollectionSaveButton';
 import PipelineToggle from '@/components/listing-detail/PipelineToggle';
 import { listingCanonicalPath, listingRowPath } from '@/lib/listingUrl';
 
@@ -380,15 +381,26 @@ export default function ListingDetail() {
 
   return (
     <Page>
-      <div className="flex items-center justify-between gap-3">
+      {/* Wraps rather than overflowing: three action controls plus the crumb no
+          longer fit every viewport on one line. */}
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <Crumb />
-        {/* The two page-level deal verbs, grouped top-right: track this deal in
-            the pipeline (the ★, same contract as the Browse-card bookmark) and
-            run a new estimation. The pipeline toggle needs the property_id,
-            which resolves from the sources query. */}
-        <div className="flex items-center gap-2">
+        {/* The page-level property verbs, grouped top-right: file it into a
+            collection, track the deal in the pipeline (the ★, same contract as
+            the Browse-card bookmark), and run a new estimation. Both curation
+            controls are property-grain (rules #18/#22) and need the
+            property_id, which resolves from the sources query. */}
+        <div className="flex flex-wrap items-center justify-end gap-2">
           {sourcesQ.data?.property_id != null && (
-            <PipelineToggle property_id={sourcesQ.data.property_id} />
+            <>
+              <CollectionSaveButton
+                property_id={sourcesQ.data.property_id}
+                variant="header"
+                source="single"
+                stopPropagation={false}
+              />
+              <PipelineToggle property_id={sourcesQ.data.property_id} />
+            </>
           )}
           <NewEstimationButton prefill={newEstimationPrefill} />
         </div>

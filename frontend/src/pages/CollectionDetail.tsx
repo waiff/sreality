@@ -9,10 +9,10 @@ import {
   ApiError,
   deleteCollection,
   getCollection,
-  removePropertyFromCollection,
   updateCollection,
 } from '@/lib/api';
 import { curationKeys } from '@/lib/queries';
+import { useCollectionMembership } from '@/lib/useCollectionMembership';
 import { listingPath } from '@/lib/listingUrl';
 import { usePageTitle } from '@/lib/pageTitle';
 import { DeliveryChannelsPicker } from '@/components/DeliveryChannelsPicker';
@@ -430,18 +430,10 @@ function PropertyRowView({
   row: CollectionPropertyRow;
   collectionId: number;
 }) {
-  const qc = useQueryClient();
-
-  const remove = useMutation({
-    mutationFn: () => removePropertyFromCollection(collectionId, row.property_id),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: curationKeys.collection(collectionId) });
-      qc.invalidateQueries({ queryKey: curationKeys.collections });
-      qc.invalidateQueries({
-        queryKey: curationKeys.propertyCollections(row.property_id),
-      });
-    },
-  });
+  /* The same audited write + invalidation policy every other surface uses —
+   * before this, removing here left the Browse cards' shared members map (and
+   * so their save glyphs) showing the property as still filed. */
+  const { remove } = useCollectionMembership(row.property_id);
 
   return (
     <tr className="border-b border-[var(--color-rule-soft)] last:border-b-0 hover:bg-[var(--color-copper-soft)]/40 transition-colors">
@@ -485,7 +477,7 @@ function PropertyRowView({
       <td className="px-3 py-2.5 align-middle text-right">
         <button
           type="button"
-          onClick={() => remove.mutate()}
+          onClick={() => remove.mutate(collectionId)}
           disabled={remove.isPending}
           aria-label="Remove listing from collection"
           title="Remove from collection"

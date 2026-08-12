@@ -691,9 +691,26 @@ renumber.** Navigate by area:
     `monitoring_enabled` opts a collection into change alerts (the collection-monitor producer,
     rule #16) and `notify_channels` is its delivery-channel pick (folded into the dispatch's
     `target_channels`); a protected default "monitoring" collection (`is_system=true`, can't be
-    renamed or deleted) ships monitoring on. The "add to collection" affordance lives on the
-    Browse card (a layers control ADJACENT to the pipeline funnel — rule #22 keeps the funnel the
-    sole pipeline affordance), the listing-detail `CurationBlock`, and the Chrome-extension panel.**
+    renamed or deleted) ships monitoring on. The "add to collection" affordance is ONE shared
+    component (`components/CollectionSaveButton.tsx`) — a layers control ADJACENT to the pipeline
+    affordance (rule #22 keeps the funnel the sole pipeline affordance) — rendered on the Browse
+    card and in the listing-detail header action bar next to `PipelineToggle`, hoisted out of
+    `CurationBlock` for the same reason the pipeline bookmark was (a buried curation row doesn't
+    get found). It reads membership from the shared all-properties map on list surfaces and from
+    the single-property key on a record page (`source="shared" | "single"`) — a record page must
+    not download every membership in the account to answer a question about one property. Its
+    multi-select menu is an `AnchoredPopover` for the same reason the stage menu is: on a Browse
+    card the control sits inside an `overflow-hidden` wrapper AND inside the card's `<Link>`, so
+    an `absolute` panel is clipped to the photo and every click inside it navigates (the pre-
+    unification card popover had exactly that bug). **Every membership write, on every surface —
+    Browse card, listing header, and the collection page's row removal — goes through
+    `lib/useCollectionMembership.ts` over `lib/collectionCache.ts`**, one audited path with one
+    optimistic-patch + revalidation policy (the collection twin of `usePipelineCard` /
+    `pipelineCache`). The three hand-typed copies it replaced had each forgotten a different read
+    surface, so a save made on one screen left the others stale; the patch is what makes a
+    multi-select usable, and rollback rides `onSettled` so the global error toast still fires.
+    The Chrome-extension panel exposes a deliberately narrower one-click monitoring toggle (the
+    `is_system` monitoring collection), not the full picker.**
     **Adding notes is reachable from the Chrome-extension panel too** — it lists the property's
     existing notes + an add box, writing through the SAME `POST /properties/{id}/notes` the
     `CurationBlock` uses (the viewed advert's `sreality_id` as `origin_listing_id`); notes are
