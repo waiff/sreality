@@ -340,10 +340,15 @@ def _upsert_message(conn: Any, campaign_id: int, leader: dict[str, Any],
 
 
 def _leader_row(conn: Any, broker_id: int) -> dict[str, Any] | None:
+    # CZ-scoped counts (migration 396): the target was picked off the geo-scoped
+    # leaderboard, so the drafted message must quote the same book. Citing the
+    # unscoped total at a broker who also syndicates foreign stock would put a
+    # number in the email that no surface the operator sees agrees with.
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
             "SELECT broker_id, display_name, primary_email, primary_phone, firm_name, "
-            "  firm_domain, listing_count AS property_count, active_listing_count AS active_property_count "
+            "  firm_domain, cz_listing_count AS property_count, "
+            "  cz_active_listing_count AS active_property_count "
             "FROM brokers_public WHERE broker_id = %s", (broker_id,))
         return cur.fetchone()
 

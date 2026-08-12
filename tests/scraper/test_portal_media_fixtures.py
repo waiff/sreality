@@ -274,12 +274,15 @@ def test_remax_broker_profile_link_is_absolute():
 
 
 def test_remax_is_wired_end_to_end_for_broker_attribution():
-    """Three registries must agree or nothing is ever attributed: the ingest enqueue
-    allow-list, the resolver's source list, and the per-source SQL in _attribute()."""
+    """Three registries had to agree or nothing was ever attributed: the ingest
+    enqueue allow-list, the resolver's source list, and the per-source SQL in
+    _attribute(). They are now ONE config row (toolkit.broker_sources) that all
+    three derive from — this asserts the derivation actually reaches all three."""
     import importlib.util
     import sys
 
     from scraper.db import BROKER_ATTRIBUTED_SOURCES
+    from toolkit.broker_sources import BROKER_SOURCES
 
     assert "remax" in BROKER_ATTRIBUTED_SOURCES
 
@@ -292,6 +295,7 @@ def test_remax_is_wired_end_to_end_for_broker_attribution():
     spec.loader.exec_module(module)
 
     assert "remax" in module._BROKER_SOURCES
-    import inspect
-
-    assert inspect.getsource(module._attribute).count("_REMAX_") == 3
+    # identity upsert + email contact + listing link — remax publishes no phone.
+    (remax,) = [c for c in BROKER_SOURCES if c.source == "remax"]
+    assert len(remax.statements()) == 3
+    assert sum("l.source = 'remax'" in s for s in module._ATTRIBUTION_SQL) == 3

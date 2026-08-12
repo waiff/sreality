@@ -119,10 +119,13 @@ jobs:
       - name: Install Python deps (for import-resolved SQL + the sweep)
         run: pip install -e ".[dev,api,geo]"
 
+      # test_broker_sources joins the sweep because its statements are GENERATED
+      # from the source registry, so no `*_SQL` constant exists for sql_corpus to
+      # discover — they would be the one executed-SQL family nothing type-checks.
       - name: PREPARE every SQL statement against the replayed schema
         env:
           TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
-        run: pytest tests/test_sql_schema_prepare.py -q
+        run: pytest tests/test_sql_schema_prepare.py tests/test_broker_sources.py -q
 
       - name: Tenant-isolation sweep (RLS cross-tenant denial, Phase 1)
         env:

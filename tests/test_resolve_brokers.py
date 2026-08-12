@@ -831,3 +831,90 @@ def test_sweep_retires_proposals_whose_brokers_no_longer_survive(
     sql = next(s for s in conn.executed if "UPDATE broker_merge_candidates" in s)
     assert "status = 'proposed'" in sql
     assert "b.status = 'active'" in sql and ") < 2" in sql
+
+
+# --- C1: registry-driven attribution + CZ-scoped rollups ----------------------
+
+
+class _AttributeCur:
+    """Records every statement `_attribute` issues over one chunk."""
+
+    def __init__(self) -> None:
+        self.executed: list[tuple[str, Any]] = []
+
+    def __enter__(self) -> "_AttributeCur":
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        return None
+
+    def execute(self, sql: str, params: Any = None) -> None:
+        self.executed.append((" ".join(sql.split()), params))
+
+
+class _AttributeConn:
+    def __init__(self) -> None:
+        self.cur = _AttributeCur()
+
+    def cursor(self) -> _AttributeCur:
+        return self.cur
+
+
+def test_attribute_runs_every_registered_statement_once_per_chunk() -> None:
+    """The dispatcher was 16 hand-written `cur.execute` lines; onboarding a portal
+    meant remembering to add 2-4 more. It is now driven by the registry, so a
+    config row that lands is a statement that runs."""
+    from toolkit.broker_sources import attribution_statements
+
+    from scripts.resolve_brokers import _attribute
+
+    conn = _AttributeConn()
+    _attribute(conn, "l.id = ANY(%(ids)s)", {"ids": [7, 8]})
+
+    assert len(conn.cur.executed) == len(attribution_statements())
+    assert all(p == {"ids": [7, 8]} for _, p in conn.cur.executed)
+    # Every statement is bound to the chunk — none scans the whole corpus.
+    assert all("%(ids)s" in s for s, _ in conn.cur.executed)
+    assert all("{sel}" not in s for s, _ in conn.cur.executed)
+    for source in _BROKER_SOURCES:
+        assert any(f"l.source = '{source}'" in s for s, _ in conn.cur.executed)
+
+
+def test_the_sweep_id_scan_covers_every_registered_source() -> None:
+    """The full sweep enumerates ids by source; a portal missing here is never
+    reconciled by the daily sweep no matter what _attribute would do with it."""
+    conn = _KeysetConn([1, 2, 3])
+    _broker_bearing_ids(conn, page_size=10)
+    assert conn.executed[0][1]["srcs"] == list(_BROKER_SOURCES)
+
+
+def test_broker_rollup_writes_cz_counts_from_the_domestic_predicate() -> None:
+    """D4: the leaderboard's stored counts. Two idnes syndication feeds carry ~26k
+    foreign listings and ranked #1 and #2 nationally, 8x the busiest genuinely
+    Czech broker, because these columns counted every attributed row."""
+    from scripts.resolve_brokers import _BROKER_ROLLUP, _DOMESTIC
+
+    sql = " ".join(_BROKER_ROLLUP.format(bscope="").split())
+    assert _DOMESTIC == "l.obec_id IS NOT NULL"
+    # The predicate is bound at import, not left for the caller to remember.
+    assert "{domestic}" not in sql
+    for col in ("cz_listing_count", "cz_property_count",
+                "cz_active_listing_count", "cz_active_property_count"):
+        assert f"{col} = coalesce(ls.cz_" in sql
+    assert sql.count(f"FILTER (WHERE {_DOMESTIC}") == 4
+    # ...and the unscoped columns still count everything (rule #3: scope, not delete).
+    assert "listing_count = coalesce(ls.lc, 0)" in sql
+    assert "active_property_count = coalesce(ls.apc, 0)" in sql
+
+
+def test_manual_merge_recompute_writes_the_cz_columns_too() -> None:
+    """api.broker_review imports the same constant for its post-merge recompute;
+    if it wrote only the unscoped counts, a merged broker's ranking would silently
+    fall back to zero until the next daily sweep."""
+    from api.broker_review import _BROKER_ROLLUP as imported
+
+    from scripts.resolve_brokers import _BROKER_ROLLUP
+
+    assert imported is _BROKER_ROLLUP
+    assert "cz_active_property_count" in imported.format(
+        bscope="AND broker_id = ANY(%(bids)s)")
