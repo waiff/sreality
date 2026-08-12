@@ -258,6 +258,88 @@ def test_broker_thresholds_clear_the_workflow_backstop() -> None:
         48 + backstop_h, backstop_h, DEFAULT_THRESHOLDS) == ("ok", [])
 
 
+def test_a_dead_sweep_tail_is_caught_by_the_finished_run_axis() -> None:
+    """_record_sweep_progress stamps lap completion right after attribution, ~17-25
+    min before the tail (cross-source merge, rollups, matview, candidates, the
+    dirty-clear) that _finalize closes with ended_at. So a sweep whose tail dies
+    leaves a MINUTES-old lap stamp, and the */10 incrementals keep the dirty queue
+    young — both of the original axes report healthy while the leaderboard and
+    rollups have silently stopped. Only the finished-run axis sees it."""
+    from scripts.verify_pipeline import _status_for_broker_resolution
+
+    # the exact shape: lap just stamped, dirty queue fresh, tail dead for 2 days
+    assert _status_for_broker_resolution(0.4, 0.3, DEFAULT_THRESHOLDS) == ("ok", [])
+    status, offenders = _status_for_broker_resolution(
+        0.4, 0.3, DEFAULT_THRESHOLDS, finished_age_hours=60.0)
+    assert status == "fail"
+    assert any("last finished full sweep" in o for o in offenders)
+    status, offenders = _status_for_broker_resolution(
+        0.4, 0.3, DEFAULT_THRESHOLDS, finished_age_hours=36.0)
+    assert status == "warn"
+    assert any("last finished full sweep" in o for o in offenders)
+
+
+def test_finished_run_axis_grades_tighter_than_the_lap_axis() -> None:
+    """The lap spans one to three daily runs, so 52/84 is deliberately slack. The
+    tail runs on EVERY sweep regardless of lap closure, so steady state is ~24h and
+    reusing the lap thresholds would let two dead nights pass as healthy."""
+    assert (DEFAULT_THRESHOLDS["broker_finished_warn_hours"]
+            < DEFAULT_THRESHOLDS["broker_sweep_warn_hours"])
+    assert (DEFAULT_THRESHOLDS["broker_finished_fail_hours"]
+            < DEFAULT_THRESHOLDS["broker_sweep_fail_hours"])
+    # ...and one ordinary daily sweep plus the workflow backstop stays green.
+    assert DEFAULT_THRESHOLDS["broker_finished_warn_hours"] > 24 + 1.9
+
+
+def test_a_missing_finished_run_is_skipped_not_a_fail() -> None:
+    """A fresh DB (or a rename on broker_resolution_runs) yields NULL. Only the LAP
+    stamp's absence is the deploy-day warn; a third axis that red on NULL would ring
+    the operator's hourly email lane for a database that has simply never run."""
+    from scripts.verify_pipeline import _status_for_broker_resolution
+
+    assert _status_for_broker_resolution(
+        24.0, 0.2, DEFAULT_THRESHOLDS, finished_age_hours=None) == ("ok", [])
+    status, offenders = _status_for_broker_resolution(
+        None, 0.2, DEFAULT_THRESHOLDS, finished_age_hours=None)
+    assert status == "warn"
+    assert all("last finished full sweep" not in o for o in offenders)
+
+
+def test_broker_resolution_check_reads_all_three_axes_off_one_row() -> None:
+    """One O(1) round trip: the finished-run axis is another scalar in the same
+    single-row query, not a second read in the hourly lane's 5-min budget."""
+    from scripts.verify_pipeline import check_broker_resolution_freshness
+
+    class _Row:
+        def __init__(self, row: tuple[Any, ...]) -> None:
+            self.row, self.executed = row, []
+
+        def cursor(self) -> "_Row":
+            return self
+
+        def transaction(self) -> "_Row":
+            return self
+
+        def __enter__(self) -> "_Row":
+            return self
+
+        def __exit__(self, *exc: Any) -> None:
+            return None
+
+        def execute(self, sql: str, params: Any = None) -> None:
+            self.executed.append(sql)
+
+        def fetchone(self) -> Any:
+            return self.row
+
+    conn = _Row((0.4, 0.4, 61.0, 0.3, 12))
+    out = check_broker_resolution_freshness(conn, DEFAULT_THRESHOLDS)
+    assert len([s for s in conn.executed if "select" in s.lower()]) == 1
+    assert out["status"] == "fail"
+    assert out["details"]["finished_age_hours"] == 61.0
+    assert out["details"]["dirty_depth"] == 12
+
+
 def test_broker_resolution_sql_is_o1() -> None:
     """The hourly acute lane's 5-min job timeout. resolve_brokers deleted exactly
     this scan from its own incremental: `broker_identity_id IS NULL` is a permanent
@@ -267,6 +349,10 @@ def test_broker_resolution_sql_is_o1() -> None:
 
     assert "broker_resolution_last_complete" in sql
     assert "dirty_broker_listings" in sql
+    # the completion axis reads only FINISHED full runs — an unfinished run has a
+    # NULL ended_at and must not be mistaken for a sweep that got to the end
+    assert "broker_resolution_runs" in sql
+    assert "r.mode = 'full' and r.ended_at is not null" in sql
     assert "listings l" not in sql.lower() and "broker_identity_id" not in sql.lower()
 
 

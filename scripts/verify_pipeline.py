@@ -76,6 +76,18 @@ DEFAULT_THRESHOLDS: dict[str, float] = {
     # stopped reconciling rather than one having a slow week.
     "broker_sweep_warn_hours": 52,
     "broker_sweep_fail_hours": 84,
+    # A third, independent axis on the RUN rather than the rotation.
+    # _record_sweep_progress stamps lap completion straight after attribution,
+    # ~17-25 min ahead of the tail (cross-source merge, the three rollups, the
+    # matview, the candidate generator, _finalize's dirty-clear) — so a sweep
+    # whose tail dies still leaves a minutes-old lap stamp and the lap axis
+    # certifies it. Deferring the stamp would only move the wrongness (a lap that
+    # HAS closed would then age from the previous one), so completion gets its own
+    # axis: the age of the last full run that reached _finalize's ended_at. That
+    # tail runs on every sweep regardless of lap closure, so steady state is ~24h
+    # and the lap's deliberately wide 52/84 would be far too slack here.
+    "broker_finished_warn_hours": 30,
+    "broker_finished_fail_hours": 50,
     # The full sweep holds broker_resolution_lock for its whole run — every */10
     # incremental skips cleanly meanwhile — and clears dirty_broker_listings only at
     # finalize, so oldest-dirt ages 1:1 with the sweep and can legitimately reach
@@ -189,9 +201,10 @@ def _status_for_broker_resolution(
     oldest_dirty_hours: float | None,
     thresholds: dict[str, Any],
     *,
+    finished_age_hours: float | None = None,
     sweep_label: str = "last complete broker sweep",
 ) -> tuple[str, list[str]]:
-    """Worst-of over the two broker-resolution liveness axes (rule-20 shape).
+    """Worst-of over the three broker-resolution liveness axes (rule-20 shape).
 
     `sweep_age_hours` is how long ago the rotation last covered the whole corpus —
     app_settings.broker_resolution_last_complete, which the sweep stamps when a LAP
@@ -199,13 +212,20 @@ def _status_for_broker_resolution(
     one still ages into `fail` instead of parking on the missing-stamp warn. That is
     the axis that matters: attribution breaks out on --max-seconds and, before the
     rotation cursor, silently re-walked the same head every day — a green exit code
-    over a permanently unattributed tail. `oldest_dirty_hours` watches the */10
+    over a permanently unattributed tail. `finished_age_hours` is the independent
+    completion axis: the lap stamp lands before the sweep's whole tail, so it says
+    nothing about whether the merges, rollups, matview and dirty-clear ever ran —
+    only broker_resolution_runs.ended_at does. `oldest_dirty_hours` watches the */10
     incremental drain of dirty_broker_listings, which is what attributes a new or
-    re-brokered listing inside the day."""
+    re-brokered listing inside the day. A missing completion axis is skipped, never
+    a fail: only the LAP stamp's absence is the deploy-day warn."""
     return _status_over_age_axes(
         [(sweep_label, sweep_age_hours,
           thresholds["broker_sweep_warn_hours"],
           thresholds["broker_sweep_fail_hours"]),
+         ("last finished full sweep", finished_age_hours,
+          thresholds["broker_finished_warn_hours"],
+          thresholds["broker_finished_fail_hours"]),
          ("oldest broker dirty-queue row", oldest_dirty_hours,
           thresholds["broker_dirty_warn_hours"],
           thresholds["broker_dirty_fail_hours"])],
@@ -636,6 +656,9 @@ select
     as sweep_age_hours,
   (select extract(epoch from (now() - (value->>'lap_started_at')::timestamptz)) / 3600.0
      from app_settings where key = 'broker_sweep_cursor') as lap_age_hours,
+  (select extract(epoch from (now() - max(r.ended_at))) / 3600.0
+     from broker_resolution_runs r where r.mode = 'full' and r.ended_at is not null)
+    as finished_age_hours,
   (select extract(epoch from (now() - min(d.marked_at))) / 3600.0
      from dirty_broker_listings d) as oldest_dirty_hours,
   (select count(*) from dirty_broker_listings) as dirty_depth
@@ -652,32 +675,39 @@ def check_broker_resolution_freshness(
     skipped every single day — and nothing watched it, because the job still exited
     0. The sweep axis ages the rotation's last closed LAP; before any lap has
     closed it ages the open one, so a rotation that never gets around the corpus
-    reds instead of hiding behind a missing stamp."""
+    reds instead of hiding behind a missing stamp. The lap stamp lands before the
+    sweep's 17-25 min tail, so a separate axis ages the last run that actually
+    reached ended_at — a tail that dies is invisible to the other two."""
     row = _fetchone(conn, _BROKER_RESOLUTION_SQL)
-    stamp_age, lap_age, oldest_dirty, dirty_depth = (
-        (None, None, None, 0) if row is None else (
+    stamp_age, lap_age, finished_age, oldest_dirty, dirty_depth = (
+        (None, None, None, None, 0) if row is None else (
             float(row[0]) if row[0] is not None else None,
             float(row[1]) if row[1] is not None else None,
             float(row[2]) if row[2] is not None else None,
-            int(row[3] or 0),
+            float(row[3]) if row[3] is not None else None,
+            int(row[4] or 0),
         )
     )
     sweep_age = stamp_age if stamp_age is not None else lap_age
     status, offenders = _status_for_broker_resolution(
-        sweep_age, oldest_dirty, thresholds,
+        sweep_age, oldest_dirty, thresholds, finished_age_hours=finished_age,
         sweep_label=("last complete broker sweep" if stamp_age is not None
                      else "open rotation lap (no lap closed yet)"))
     if offenders:
         message = (
             "Broker resolution is falling behind: " + "; ".join(offenders)
             + " — check the daily sweep's runs (a budget-truncated sweep logs "
-            "'time budget reached during attribution' and still exits 0) and "
+            "'time budget reached during attribution' and still exits 0, and a "
+            "sweep whose tail dies still stamps its lap) and "
             "broker_resolution_lock."
         )
     else:
+        finished_txt = (f"{finished_age:.1f}h ago" if finished_age is not None
+                        else "none on record")
         message = (
             f"Broker resolution healthy (last complete sweep "
-            f"{sweep_age:.1f}h ago, dirty queue {dirty_depth})."
+            f"{sweep_age:.1f}h ago, last finished run {finished_txt}, "
+            f"dirty queue {dirty_depth})."
         )
     return {
         "check_key": "broker_resolution_freshness",
@@ -687,6 +717,7 @@ def check_broker_resolution_freshness(
             "sweep_age_hours": sweep_age,
             "stamp_age_hours": stamp_age,
             "lap_age_hours": lap_age,
+            "finished_age_hours": finished_age,
             "oldest_dirty_hours": oldest_dirty,
             "dirty_depth": dirty_depth,
             "offenders": offenders,
