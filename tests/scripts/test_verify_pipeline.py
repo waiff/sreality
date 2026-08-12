@@ -136,8 +136,34 @@ def test_property_maintenance_worst_axis_wins() -> None:
     assert status == "fail"
     assert any("dirty-queue" in o for o in offenders)
     # The 2026-08-06 incident shape: sweep dead for days + frozen dirt.
-    status, offenders = _status_for_property_maintenance(49.0, 2.5, t)
+    status, offenders = _status_for_property_maintenance(49.0, 2.8, t)
     assert status == "fail" and len(offenders) == 2
+
+
+def test_property_dirty_warn_clears_a_full_length_sweep() -> None:
+    """The daily sweep holds the maintenance lease for its whole budget
+    (_MAX_BUDGET_SECONDS, 100 min) and only clears dirty_properties at the end,
+    so oldest-dirt ages 1:1 with sweep elapsed. The warn threshold must sit
+    ABOVE that hold or a perfectly healthy long sweep turns the axis amber and
+    trains the operator to ignore it — the anti-pattern this module warns about.
+    Raising the sweep budget means raising this threshold in the same change."""
+    import scripts.recompute_property_stats as rps
+    from scripts.verify_pipeline import _status_for_property_maintenance
+
+    max_hold_h = rps._MAX_BUDGET_SECONDS / 3600
+    assert DEFAULT_THRESHOLDS["property_dirty_warn_hours"] > max_hold_h
+    # ...and a sweep running its full budget stays green on the dirty axis.
+    assert _status_for_property_maintenance(1.0, max_hold_h, DEFAULT_THRESHOLDS) == ("ok", [])
+
+
+def test_property_maintenance_offenders_do_not_round_a_fractional_threshold() -> None:
+    """`(warn > 2h)` next to `2.6h` reads as a contradiction. The dirty
+    thresholds are fractional, so the rendering must not round them away."""
+    from scripts.verify_pipeline import _status_for_property_maintenance
+
+    t = dict(DEFAULT_THRESHOLDS, property_dirty_warn_hours=2.5)
+    _, offenders = _status_for_property_maintenance(1.0, 2.6, t)
+    assert offenders == ["oldest dirty-queue row 2.6h (warn > 2.5h)"]
 
 
 def test_property_maintenance_sql_is_o1() -> None:

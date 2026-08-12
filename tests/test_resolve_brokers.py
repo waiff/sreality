@@ -117,13 +117,23 @@ def test_release_lock_survives_a_dead_connection(caplog: Any) -> None:
 
     with caplog.at_level(logging.WARNING):
         _release_lock(_DeadConn(), "full:abc")  # must not raise
-    assert any("lock release failed" in r.message for r in caplog.records)
+    failed = [r for r in caplog.records if "lock release failed" in r.message]
+    assert failed
+    # ...carrying the exception. The warning used to discard it entirely, so the
+    # one scenario worth investigating produced a green run and a log line with
+    # zero diagnostic content.
+    assert failed[-1].exc_info is not None
 
 
 def test_firm_link_takes_row_locks_in_ascending_id_order() -> None:
     """Deadlock guard: this UPDATE and the detail drain's batch upsert write the
     same `listings` rows, so this side must have ONE fixed lock order regardless
-    of the plan the join would otherwise pick."""
+    of the plan the join would otherwise pick.
+
+    PARTIAL and one-sided by design: the drain still locks in fetch-completion
+    order and keys on a different column, so a cycle stays possible. What covers
+    the residual is db.run_resilient retrying the DeadlockDetected victim on both
+    sides; ordering here only makes the collision rarer."""
     from scripts.resolve_brokers import _LINK_LISTINGS_FIRM
 
     sql = " ".join(_LINK_LISTINGS_FIRM.format(extra="AND l.id = ANY(%(ids)s)").split())
@@ -182,6 +192,10 @@ def test_main_opens_the_connection_through_db_connect(monkeypatch: Any) -> None:
     assert opened == ["postgres://test"]
 
 
+_BEAT = "UPDATE broker_resolution_lock SET heartbeat_at=now()"
+_RELEASE = "UPDATE broker_resolution_lock SET holder=NULL"
+
+
 class _ResilientCur:
     """Cursor that can inject ONE pooler drop, then serves the scripted rows."""
 
@@ -214,6 +228,10 @@ class _ResilientCur:
         else:
             self._rows = []
         self.rowcount = len(self._rows)
+        if _BEAT in s:
+            # The heartbeat's holder-guarded CAS matches our row (1) unless the
+            # lock was declared stale and re-claimed by another run (0).
+            self.rowcount = self._conn.lock_rows
 
     def fetchone(self) -> Any:
         return self._rows[0] if self._rows else None
@@ -223,15 +241,22 @@ class _ResilientCur:
 
 
 class _ResilientConn:
-    def __init__(self, name: str, fail_on: str | None = None) -> None:
+    def __init__(self, name: str, fail_on: str | None = None,
+                 lock_rows: int = 1) -> None:
         self.name = name
         self.fail_on = fail_on
+        self.lock_rows = lock_rows
         self.broken = False
         self.closed = False
         self.executed: list[str] = []
 
     def cursor(self) -> _ResilientCur:
         return _ResilientCur(self)
+
+    def transaction(self) -> Any:
+        import contextlib
+
+        return contextlib.nullcontext()
 
     def close(self) -> None:
         self.closed = True
@@ -260,3 +285,138 @@ def test_run_incremental_reconnects_and_rebinds_after_a_pooler_drop(monkeypatch:
     assert any("INSERT INTO broker_identities" in s for s in fresh.executed)
     assert any("DELETE FROM dirty_broker_listings" in s for s in fresh.executed)
     assert any("listings_attributed" in s for s in fresh.executed)
+
+
+def test_heartbeat_runs_once_per_attempt_not_once_per_phase(monkeypatch: Any) -> None:
+    """The beat must be the FIRST statement of every retried ATTEMPT, not a step
+    of its own before each phase. A phase re-runs from the top on retry, so a beat
+    outside the retried op leaves the lock unrefreshed for the whole replay — the
+    2026-08-09 sweep's merge phase alone ran 8.4 min on ONE attempt, so a single
+    replay used to exceed the staleness window and let a `*/10` incremental steal
+    the lock out from under a live sweep."""
+    import scripts.resolve_brokers as rb
+
+    monkeypatch.setattr(rb.db.time, "sleep", lambda s: None)
+    first = _ResilientConn("first", fail_on="INSERT INTO broker_identities")
+    fresh = _ResilientConn("fresh")
+
+    rb._run_incremental(first, [], [], 500, "incremental:abc",
+                        reconnect=lambda: fresh)
+
+    # the dropped attempt beat before it ran, and it was that attempt's LAST
+    # statement (nothing of the phase itself landed)
+    assert first.executed[-1].startswith(_BEAT)
+    # ...and the replay beat AGAIN, first thing, on the FRESH connection
+    assert fresh.executed[0].startswith(_BEAT)
+    beats = [i for i, s in enumerate(fresh.executed) if s.startswith(_BEAT)]
+    phases = ["INSERT INTO broker_identities", "UPDATE broker_identities bi SET firm_identity_id",
+              "WITH targets AS MATERIALIZED", "INSERT INTO brokers",
+              "DELETE FROM dirty_broker_listings"]
+    # one beat per phase re-run on the fresh conn, each preceding its phase
+    assert len(beats) >= len(phases)
+    for needle in phases:
+        at = next(i for i, s in enumerate(fresh.executed) if needle in s)
+        assert any(b < at for b in beats)
+    # beats are counted per ATTEMPT, not per phase: the dropped attempt of
+    # resolve.attribute contributed exactly one beat of its own on top of the
+    # one-per-phase set the replay produced.
+    dropped = [s for s in first.executed if s.startswith(_BEAT)]
+    assert len(dropped) == 1
+
+
+def test_lost_lock_aborts_the_run_instead_of_resolving_concurrently(
+    monkeypatch: Any,
+) -> None:
+    """A heartbeat CAS that matches 0 rows means our lock went stale and another
+    run took it over. Continuing would resolve concurrently while _release_lock's
+    own CAS silently no-ops. Fail loud — and RuntimeError is not an
+    OperationalError, so db.run_resilient re-raises it immediately rather than
+    replaying three more times into the race."""
+    import pytest
+
+    import scripts.resolve_brokers as rb
+
+    monkeypatch.setattr(rb.db.time, "sleep", lambda s: None)
+    stolen = _ResilientConn("stolen", lock_rows=0)
+
+    with pytest.raises(RuntimeError, match="lock lost mid-run"):
+        rb._run_incremental(stolen, [], [], 500, "incremental:abc",
+                            reconnect=lambda: stolen)
+
+    # exactly ONE beat: non-transient, so no retry churn...
+    assert len([s for s in stolen.executed if s.startswith(_BEAT)]) == 1
+    # ...and no attribution write landed after the lock was lost
+    assert not any("INSERT INTO broker_identities" in s for s in stolen.executed)
+
+
+def test_release_lock_falls_back_to_a_fresh_connection() -> None:
+    """main()'s `conn` is only rebound on a NORMAL return, so a run that
+    reconnected and then died non-transiently releases on the socket
+    run_resilient already closed — stranding the lock for a full staleness TTL
+    even though the process had a healthy path to the DB. The holder-guarded CAS
+    is safe from any connection, so the release opens one of its own."""
+    import scripts.resolve_brokers as rb
+
+    class _DeadConn:
+        def cursor(self) -> Any:
+            raise RuntimeError("the connection is closed")
+
+    fresh = _ResilientConn("fresh")
+    rb._release_lock(_DeadConn(), "full:abc", reconnect=lambda: fresh)
+    assert any(s.startswith(_RELEASE) for s in fresh.executed)
+    # the release owns the connection it opened, so it must close it
+    assert fresh.closed
+
+
+def test_release_lock_does_not_reconnect_when_the_handle_is_live() -> None:
+    """The fallback is a last resort, not a second write: a working connection
+    must release on itself and never open a spare."""
+    import scripts.resolve_brokers as rb
+
+    live = _ResilientConn("live")
+    opened: list[int] = []
+    rb._release_lock(live, "full:abc",
+                     reconnect=lambda: opened.append(1) or _ResilientConn("spare"))
+    assert [s for s in live.executed if s.startswith(_RELEASE)]
+    assert opened == []
+
+
+def test_firm_linking_gets_its_own_floor_when_attribution_ate_the_budget(
+    monkeypatch: Any,
+) -> None:
+    """The firm-link loop runs AFTER attribution, which routinely spends the whole
+    --max-seconds budget (the 2026-08-09 and 08-10 sweeps both logged "time budget
+    reached during attribution"). Guarding it with the SAME deadline trips on its
+    first check and skips the global firm reconcile outright — a phase measured at
+    43-186s for the full corpus, traded away on roughly half the sweeps. It gets
+    _FIRM_LINK_MIN_SECONDS of its own instead, which still bounds the accumulation
+    case the guard exists for."""
+    import time
+
+    import scripts.resolve_brokers as rb
+
+    conn = _ResilientConn("full")
+    all_ids = [1, 2, 3, 4, 5, 6]  # 3 chunks at batch_size=2
+    attributed: list[list[int]] = []
+    linked: list[list[int]] = []
+
+    monkeypatch.setattr(rb, "_broker_bearing_ids", lambda c, n: all_ids)
+    monkeypatch.setattr(rb, "_attribute",
+                        lambda c, sel, params: attributed.append(params["ids"]))
+    monkeypatch.setattr(rb, "_resolve_firms", lambda c, free, franchise: None)
+    monkeypatch.setattr(rb, "_link_listings_firm",
+                        lambda c, extra="", params=None: linked.append(params["ids"]))
+    monkeypatch.setattr(rb, "_attach_singletons", lambda c: 0)
+    monkeypatch.setattr(rb, "_cross_source_merge", lambda c, auto, run_id: (0, 0))
+    monkeypatch.setattr(rb, "_max_id", lambda c, table: 0)
+    monkeypatch.setattr(rb, "_refresh_matview", lambda c: None)
+    monkeypatch.setattr(rb, "_generate_merge_candidates", lambda c: 0)
+
+    # the budget is already spent when the sweep starts, i.e. the worst real shape
+    rb._run_full(conn, [], [], [], 2, time.monotonic() - 1,
+                 reconnect=lambda: conn)
+
+    # attribution stops at its first chunk boundary, as designed...
+    assert attributed == [[1, 2]]
+    # ...and firm linking still walks the whole corpus on its own floor
+    assert linked == [[1, 2], [3, 4], [5, 6]]

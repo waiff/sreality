@@ -54,12 +54,17 @@ DEFAULT_THRESHOLDS: dict[str, float] = {
     # stamps app_settings.property_sweep_last_complete ONLY on a complete
     # walk; healthy age is ~24h (daily 04:15 cadence), so fail at 30h fires
     # ~5-6h after a dead/killed/incomplete sweep — however the process died.
-    # Dirty rows drain within ~2 min of the worker lane's tick; the daily
-    # sweep holds the lease ~30-60 min, so oldest-dirt beyond ~1.5h only
-    # appears when maintenance is frozen.
+    # Dirty rows drain within ~2 min of the worker lane's tick — EXCEPT while the
+    # daily full sweep holds the maintenance lease, which blocks every incremental
+    # pass and only clears dirty_properties at the very end, so oldest-dirt ages
+    # 1:1 with sweep elapsed. That hold is bounded by the sweep's own budget
+    # (recompute_property_stats._MAX_BUDGET_SECONDS, raised to 6000s = 100 min in
+    # #1026) plus lease wait + finalize, so warn must sit ABOVE it or a perfectly
+    # healthy long sweep turns this axis amber and trains the operator to ignore
+    # it. 1.5h -> 2.5h; fail stays 3h. Raise this together with the sweep budget.
     "property_sweep_warn_hours": 26,
     "property_sweep_fail_hours": 30,
-    "property_dirty_warn_hours": 1.5,
+    "property_dirty_warn_hours": 2.5,
     "property_dirty_fail_hours": 3,
 }
 
@@ -168,13 +173,15 @@ def _status_for_property_maintenance(
     for name, hours, warn_h, fail_h in axes:
         if hours is None:
             continue
+        # :g, not :.0f — the dirty thresholds are fractional, and rounding 2.5 down
+        # to "2" renders self-contradictory offenders like "2.6h (warn > 2h)".
         if hours > fail_h:
             status = "fail"
-            offenders.append(f"{name} {hours:.1f}h (fail > {fail_h:.0f}h)")
+            offenders.append(f"{name} {hours:.1f}h (fail > {fail_h:g}h)")
         elif hours > warn_h:
             if status == "ok":
                 status = "warn"
-            offenders.append(f"{name} {hours:.1f}h (warn > {warn_h:.0f}h)")
+            offenders.append(f"{name} {hours:.1f}h (warn > {warn_h:g}h)")
     return status, offenders
 
 

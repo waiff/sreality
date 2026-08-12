@@ -556,6 +556,15 @@ def _batch_ranges(max_id: int, batch_size: int) -> Iterator[tuple[int, int]]:
         yield lo, lo + batch_size
 
 
+def _backfill_native_ids(conn: Any) -> None:
+    """One-time legacy whole-table fix (migration 091 era; every writer sets
+    source_id_native now, so it matches ~0 rows). Independent of the attach pair and
+    idempotent on its own, so the full sweep runs it as its OWN retried step rather
+    than re-running the whole-table scan on each replay of the attach."""
+    with conn.cursor() as cur:
+        cur.execute(_ATTACH_BACKFILL_NATIVE_ID_SQL)
+
+
 def _attach_stragglers(conn: Any, *, skip_native_backfill: bool = False) -> int:
     """Give every property_id-NULL listing its own singleton property.
 
@@ -567,8 +576,7 @@ def _attach_stragglers(conn: Any, *, skip_native_backfill: bool = False) -> int:
     so they need no recompute and are not enqueued dirty.
     """
     if not skip_native_backfill:
-        with conn.cursor() as cur:
-            cur.execute(_ATTACH_BACKFILL_NATIVE_ID_SQL)
+        _backfill_native_ids(conn)
     # INSERT + LINK in ONE transaction: the pair is only JOINTLY idempotent.
     # Under autocommit a failure between them commits properties rows whose
     # listings still carry property_id NULL, so the next attempt INSERTs a
@@ -765,18 +773,48 @@ def _wait_lease(
         time.sleep(_LEASE_RETRY_SECONDS)
 
 
-def _release_lease(conn: Any, holder: str) -> None:
-    """Best-effort release. Callers run this from a `finally:`, so a raise here (a
-    dead connection makes even `conn.cursor()` throw) would replace the real failure
-    with a crash-during-cleanup. The lease's correctness never rested on the release
-    landing: the holder-guarded CAS plus the short renewed TTL are the guarantee, and
-    a missed release costs at most one TTL of frozen maintenance."""
+def _release_lease_cas(conn: Any, holder: str) -> None:
+    with conn.cursor() as cur:
+        cur.execute(_RELEASE_LEASE_SQL, {"holder": holder})
+
+
+def _release_lease(conn: Any, holder: str,
+                   reconnect: Callable[[], Any] | None = None) -> None:
+    """Best-effort release, with ONE reconnect fallback. Callers run this from a
+    `finally:`, so a raise here (a dead connection makes even `conn.cursor()` throw)
+    would replace the real failure with a crash-during-cleanup. The lease's
+    correctness never rested on the release landing: the holder-guarded CAS plus the
+    short renewed TTL are the guarantee, and a missed release costs at most one TTL
+    of frozen maintenance.
+
+    The fallback covers the case `step`'s `nonlocal conn` narrows but cannot remove:
+    when run_resilient exhausts its budget on a DROPPED connection it closes both the
+    original and its replacement, so there is no live handle left to release on. One
+    fresh connection, one holder-guarded CAS, close it again."""
+    exc: BaseException | None = None
     try:
-        with conn.cursor() as cur:
-            cur.execute(_RELEASE_LEASE_SQL, {"holder": holder})
-    except Exception:  # noqa: BLE001 - best-effort; the TTL is the real guarantee
-        LOG.warning("MAINTENANCE: lease release failed (holder=%s) — self-heals when "
-                    "the %s TTL expires", holder, _LEASE_TTL)
+        _release_lease_cas(conn, holder)
+        return
+    except Exception as e:  # noqa: BLE001 - best-effort; the TTL is the real guarantee
+        exc = e
+    if reconnect is not None:
+        fresh: Any = None
+        try:
+            fresh = reconnect()
+            _release_lease_cas(fresh, holder)
+            return
+        except Exception as e:  # noqa: BLE001 - still best-effort
+            exc = e
+        finally:
+            if fresh is not None:
+                try:
+                    fresh.close()
+                except Exception:  # noqa: BLE001
+                    pass
+    # exc_info=exc, not True: we are outside the except block here, so sys.exc_info()
+    # would be empty and the traceback lost.
+    LOG.warning("MAINTENANCE: lease release failed (holder=%s) — self-heals when "
+                "the %s TTL expires", holder, _LEASE_TTL, exc_info=exc)
 
 
 def run_incremental_pass(conn: Any, batch_size: int = 2000) -> dict[str, Any]:
@@ -936,7 +974,13 @@ def main() -> int:
             # Lease ACQUISITION stays unwrapped: its CAS/backoff semantics are its
             # own, and nothing has been done yet when it fails.
             _wait_lease(conn, holder, _LEASE_TTL)
-            attached = step(_attach_stragglers, "sweep.attach")
+            # Hoisted out of the attach op: the whole-table native-id scan is
+            # independent and idempotent, so replaying the attach must not re-run it.
+            step(_backfill_native_ids, "sweep.backfill")
+            # attempts=2, like sweep.batch: the attach's LINK is un-scoped and
+            # whole-table, so a doomed attach reds in ~4 min instead of ~8.
+            attached = step(lambda c: _attach_stragglers(c, skip_native_backfill=True),
+                            "sweep.attach", attempts=2)
             LOG.info("RECOMPUTE stragglers attached=%d", attached)
 
             budget = min(args.max_seconds, _MAX_BUDGET_SECONDS)
@@ -1036,7 +1080,11 @@ def main() -> int:
 
                 step(_clear_swept, "sweep.clear_swept")
         finally:
-            _release_lease(conn, holder)
+            # `nonlocal conn` keeps this pointing at the last SUCCESSFULLY returned
+            # connection, but run_resilient closes both the original and its
+            # replacement when it exhausts its budget on a dropped socket — so the
+            # release still needs a way to open one of its own.
+            _release_lease(conn, holder, reconnect)
 
     elapsed = time.monotonic() - started_at
     if incomplete_at is not None:
