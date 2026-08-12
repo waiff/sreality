@@ -216,16 +216,17 @@ class _MainConn(_FakeConn):
 
 def _run_main(monkeypatch: Any, argv: list[str]) -> list[str]:
     import sys
-    import types
 
     import scripts.recompute_property_stats as rps
 
     calls: list[str] = []
     monkeypatch.setenv("SUPABASE_DB_URL", "postgres://test")
     monkeypatch.setattr(sys, "argv", ["recompute_property_stats", *argv])
-    monkeypatch.setitem(
-        sys.modules, "psycopg",
-        types.SimpleNamespace(connect=lambda *a, **k: _MainConn()))
+    # Patch db.connect, not sys.modules["psycopg"]: main() now opens the
+    # connection through scraper.db.connect (keepalives + handshake retry), which
+    # captured psycopg at ITS import time, so a sys.modules swap no longer
+    # intercepts it — it would reach the network and burn the retry budget.
+    monkeypatch.setattr(rps.db, "connect", lambda *a, **k: _MainConn())
     monkeypatch.setattr(
         rps, "_attach_stragglers", lambda c, **k: calls.append("attach") or 0)
     monkeypatch.setattr(
@@ -414,15 +415,13 @@ class _SweepConn(_FakeConn):
 def _run_sweep(monkeypatch: Any, conn: _SweepConn, argv: list[str],
                clock: list[float] | None = None) -> int:
     import sys
-    import types
 
     import scripts.recompute_property_stats as rps
 
     monkeypatch.setenv("SUPABASE_DB_URL", "postgres://test")
     monkeypatch.setattr(sys, "argv", ["recompute_property_stats", *argv])
-    monkeypatch.setitem(
-        sys.modules, "psycopg",
-        types.SimpleNamespace(connect=lambda *a, **k: conn))
+    # See _run_main: the sweep opens its connection via scraper.db.connect now.
+    monkeypatch.setattr(rps.db, "connect", lambda *a, **k: conn)
     monkeypatch.setattr(rps.signal, "signal", lambda *a: None)
     if clock is not None:
         ticks = iter(clock)
@@ -476,3 +475,53 @@ def test_full_sweep_budget_exhaustion_is_red_and_scopes_the_dirty_clear(
     assert not _find(conn, "property_sweep_last_complete")
     # the lease is still released
     assert _find(conn, "SET holder = NULL")
+
+
+# --- connection / lease resilience + budget headroom --------------------------
+
+
+def test_release_lease_survives_a_dead_connection(caplog: Any) -> None:
+    """Both callers release from a `finally:`; a dead connection makes even
+    `conn.cursor()` raise, which would bury the real failure under a
+    crash-during-cleanup. Warn and move on — the renewed TTL is the guarantee."""
+    import logging
+
+    from scripts.recompute_property_stats import _release_lease
+
+    class _DeadConn:
+        def cursor(self) -> Any:
+            raise RuntimeError("the connection is closed")
+
+    with caplog.at_level(logging.WARNING):
+        _release_lease(_DeadConn(), "full:abc")  # must not raise
+    assert any("lease release failed" in r.message for r in caplog.records)
+
+
+def test_workflow_timeout_covers_the_budget_ceiling() -> None:
+    """`_MAX_BUDGET_SECONDS` and the workflow's `timeout-minutes` are ONE
+    decision: the clean-stop only beats the runner's SIGKILL while the outer
+    timeout leaves room for the budget PLUS one in-flight batch (bounded by
+    `_BATCH_STATEMENT_TIMEOUT`) plus prelude/finalize. Raising one alone
+    re-creates the silent `cancelled` this script exists to eliminate."""
+    from pathlib import Path
+
+    import scripts.recompute_property_stats as rps
+
+    yaml = pytest.importorskip("yaml")
+    root = Path(__file__).resolve().parent.parent
+    wf = yaml.safe_load(
+        (root / ".github/workflows/recompute_property_stats.yml").read_text())
+    timeout_s = wf["jobs"]["recompute"]["timeout-minutes"] * 60
+    # One in-flight batch = _BATCH_STATEMENT_TIMEOUT x its retry budget (the
+    # deadline is only checked at a batch boundary, so a batch that starts just
+    # under the wire runs its full retried worst case past it).
+    in_flight_batch_s = 10 * 60 * rps._BATCH_RESILIENT_ATTEMPTS
+    assert timeout_s >= rps._MAX_BUDGET_SECONDS + in_flight_batch_s + 120
+
+    # The dispatch default must be dispatchable — i.e. at or under the clamp,
+    # never silently truncated to it. (YAML 1.1 parses the bare key `on` as the
+    # boolean True, hence the two-key lookup.)
+    triggers = wf.get("on", wf.get(True))
+    default_budget = float(
+        triggers["workflow_dispatch"]["inputs"]["max_seconds"]["default"])
+    assert default_budget <= rps._MAX_BUDGET_SECONDS

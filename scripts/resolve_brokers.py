@@ -42,11 +42,15 @@ import os
 import sys
 import time
 import uuid
-from typing import Any
+from collections.abc import Callable
+from typing import Any, TypeVar
 
+from scraper import db
 from toolkit import broker_resolver as R
 
 LOG = logging.getLogger("resolve_brokers")
+
+_T = TypeVar("_T")
 
 _FREE_KEY = "broker_free_email_domains"
 _FRANCHISE_KEY = "broker_franchise_domains"
@@ -355,11 +359,28 @@ WHERE fi.source = bi.source AND fi.source_firm_native = bi.email_domain
   AND bi.email_domain IS NOT NULL AND bi.firm_identity_id IS DISTINCT FROM fi.id
 """
 
+# Deterministic LOCK ORDER, not just a deterministic result. The plain
+# `UPDATE listings ... FROM broker_identities JOIN firm_identities` form let the
+# planner lock listings rows in whatever order the join emitted them (identity
+# order, i.e. effectively broker-clustered) while the detail drain's batch upsert
+# locks the same rows in fetch-completion order — two writers walking one table in
+# unrelated orders, which is the textbook deadlock recipe (and what the CI census
+# saw twice in 30 days). The MATERIALIZED CTE takes every row lock up front in
+# ascending listings.id order (PG puts LockRows above the Sort, so the locks are
+# acquired in sorted order) before the UPDATE re-touches the already-locked rows,
+# so this side of the race now has ONE fixed order regardless of the plan.
 _LINK_LISTINGS_FIRM = """
-UPDATE listings l SET broker_firm_id = fi.firm_id
-FROM broker_identities bi
-JOIN firm_identities fi ON fi.id = bi.firm_identity_id
-WHERE l.broker_identity_id = bi.id AND l.broker_firm_id IS DISTINCT FROM fi.firm_id {extra}
+WITH targets AS MATERIALIZED (
+  SELECT l.id AS listing_id, fi.firm_id
+  FROM listings l
+  JOIN broker_identities bi ON bi.id = l.broker_identity_id
+  JOIN firm_identities fi ON fi.id = bi.firm_identity_id
+  WHERE l.broker_firm_id IS DISTINCT FROM fi.firm_id {extra}
+  ORDER BY l.id
+  FOR UPDATE OF l
+)
+UPDATE listings l SET broker_firm_id = t.firm_id
+FROM targets t WHERE l.id = t.listing_id
 """
 
 # Robust set-based singleton attach: RETURNING carries the seed identity id, so new
@@ -588,9 +609,19 @@ def _heartbeat_lock(conn: Any, holder: str) -> None:
 
 
 def _release_lock(conn: Any, holder: str) -> None:
-    with conn.cursor() as cur:
-        cur.execute("UPDATE broker_resolution_lock SET holder=NULL WHERE id=1 AND holder=%(h)s",
-                    {"h": holder})
+    """Best-effort release. The caller runs this from a `finally:`, so a raise here
+    replaces the real failure with a crash-during-cleanup (2026-08-10 23:10: an SSL
+    drop mid-rollup surfaced as `the connection is closed` raised by THIS function's
+    cursor open, burying the original error). Correctness never depended on the
+    release landing — the CAS guard below plus the lock's staleness TTL are what
+    make takeover safe."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE broker_resolution_lock SET holder=NULL WHERE id=1 AND holder=%(h)s",
+                        {"h": holder})
+    except Exception:  # noqa: BLE001 - best-effort; the staleness TTL is the real guarantee
+        LOG.warning("RESOLVE: lock release failed (holder=%s) — self-heals via the %d-min "
+                    "staleness TTL", holder, _LOCK_STALE_MIN)
 
 
 def _attribute(conn: Any, sel: str, params: dict[str, Any]) -> None:
@@ -927,8 +958,39 @@ def _broker_bearing_ids(conn: Any, page_size: int) -> list[int]:
     return ids
 
 
+def _resilient_step(
+    conn: Any, reconnect: Callable[[], Any],
+) -> tuple[Callable[[Callable[[Any], _T], str], _T], Callable[[], Any]]:
+    """Return (`step`, `live`) — `step(op, label)` runs op through db.run_resilient
+    and REBINDS the live connection internally (run_resilient may hand back a FRESH
+    one after a pooler drop), `live()` reads it back out for the caller.
+
+    Factored once per driver instead of repeating the `res, conn = db.run_resilient(...)`
+    rebinding at each of a dozen phases: this sweep holds ONE connection for 60-90
+    minutes, so a forgotten rebind is a latent 'connection is closed' at the next
+    phase — the exact failure this wave exists to remove. Every op passed in must be
+    idempotent; it is re-run from the top on retry."""
+    state = {"conn": conn}
+
+    def step(op: Callable[[Any], _T], label: str) -> _T:
+        result, state["conn"] = db.run_resilient(
+            state["conn"], op, reconnect=reconnect, label=label)
+        return result
+
+    return step, lambda: state["conn"]
+
+
 def _run_full(conn: Any, free: list[str], franchise: list[str], auto: list[str],
-              batch_size: int, deadline: float | None, holder: str = "") -> dict[str, int]:
+              batch_size: int, deadline: float | None, holder: str = "", *,
+              reconnect: Callable[[], Any]) -> tuple[dict[str, int], Any]:
+    """Run the daily reconcile. Returns (stats, live_conn) — the connection may be a
+    FRESH one if a phase rode out a pooler drop, so main() must rebind before
+    releasing the lock on it."""
+    step, live = _resilient_step(conn, reconnect)
+
+    # NOT wrapped: the run-row INSERT is the one non-idempotent statement here (a
+    # replay would open a second broker_resolution_runs row) and it is the first
+    # thing the sweep does, so a drop here costs nothing but the retry-free red.
     with conn.cursor() as cur:
         cur.execute("SELECT now()")
         cutoff = cur.fetchone()[0]
@@ -938,38 +1000,48 @@ def _run_full(conn: Any, free: list[str], franchise: list[str], auto: list[str],
         run_id = int(cur.fetchone()[0])
     t0 = time.monotonic()
 
+    def _beat() -> None:
+        # Through step() too: on a dead connection the raw heartbeat raises BEFORE
+        # the wrapped phase below ever gets its chance to reconnect.
+        if holder:
+            step(lambda c: _heartbeat_lock(c, holder), "resolve.heartbeat")
+
     # Chunk the ACTUAL listing ids of every broker-bearing source (sreality_id is the
     # sparse PK — a numeric-range loop would walk huge empty gaps). Keyset-paginated
     # in bounded pages so no single statement is unbounded; attribution then runs per
     # id-chunk, source-filtered inside.
-    all_ids = _broker_bearing_ids(conn, batch_size)
+    all_ids = step(lambda c: _broker_bearing_ids(c, batch_size), "resolve.ids")
     for i in range(0, len(all_ids), batch_size):
-        if holder:
-            _heartbeat_lock(conn, holder)
-        _attribute(conn, "l.id = ANY(%(ids)s)", {"ids": all_ids[i:i + batch_size]})
+        _beat()
+        chunk = all_ids[i:i + batch_size]
+        step(lambda c, ids=chunk: _attribute(c, "l.id = ANY(%(ids)s)", {"ids": ids}),
+             "resolve.attribute")
         if deadline and time.monotonic() > deadline:
             LOG.warning("RESOLVE full: time budget reached during attribution at %d/%d ids",
                         i, len(all_ids))
             break
 
-    _resolve_firms(conn, free, franchise)
+    step(lambda c: _resolve_firms(c, free, franchise), "resolve.firms")
     # Batch the listings->firm link over the same id chunks — a single global UPDATE
     # joining every linked listing to its firm exceeds the pooler statement timeout
     # now that idnes adds ~125k linkable rows. sreality_id is sparse, so chunk the
     # actual ids (the PR #470 lesson), not a numeric range.
     for i in range(0, len(all_ids), batch_size):
-        if holder:
-            _heartbeat_lock(conn, holder)
-        _link_listings_firm(conn, "AND l.id = ANY(%(ids)s)", {"ids": all_ids[i:i + batch_size]})
-    attached = _attach_singletons(conn)
+        _beat()
+        chunk = all_ids[i:i + batch_size]
+        step(lambda c, ids=chunk: _link_listings_firm(c, "AND l.id = ANY(%(ids)s)", {"ids": ids}),
+             "resolve.link_firm")
+    attached = step(_attach_singletons, "resolve.singletons")
     LOG.info("RESOLVE full attribution+firms done elapsed=%.1fs", time.monotonic() - t0)
 
     # Merge BEFORE the rollups so dsc / listing_count / membership reflect the unified
     # broker groupings (a merge re-points broker_identities.broker_id). _cross_source_merge
     # no-ops with one source and is gated per-source by broker_auto_merge_sources.
-    if holder:
-        _heartbeat_lock(conn, holder)
-    auto_merges, queued = _cross_source_merge(conn, auto, run_id)
+    # Replay-safe: _apply_merges skips a group whose identities already share one
+    # broker, so a retry after a committed apply converges (the only residue is an
+    # UNDERCOUNTED auto_merges on the retried attempt — bookkeeping, not data).
+    _beat()
+    auto_merges, queued = step(lambda c: _cross_source_merge(c, auto, run_id), "resolve.merge")
     LOG.info("RESOLVE full merge done auto=%d queued=%d elapsed=%.1fs",
              auto_merges, queued, time.monotonic() - t0)
 
@@ -980,11 +1052,14 @@ def _run_full(conn: Any, free: list[str], franchise: list[str], auto: list[str],
     # did ~500 mostly-EMPTY batches per sweep (each a round-trip), climbing forever.
     # The global form is a single seq-scan + hashaggregate over the linked corpus
     # (no join blow-up), so it does NOT need the broker rollup's per-batch granularity.
-    if holder:
-        _heartbeat_lock(conn, holder)
-    with conn.transaction(), conn.cursor() as cur:
-        cur.execute("SET LOCAL statement_timeout = 0")
-        cur.execute(_IDENTITY_ROLLUP.format(extra=""))
+    _beat()
+
+    def _identity_rollup(c: Any) -> None:
+        with c.transaction(), c.cursor() as cur:
+            cur.execute("SET LOCAL statement_timeout = 0")
+            cur.execute(_IDENTITY_ROLLUP.format(extra=""))
+
+    step(_identity_rollup, "resolve.identity_rollup")
     # Broker rollup + membership: batched by brokers.id, which IS dense (~7 batches),
     # so each batch commits independently (crash-safe) and the lock heartbeats between
     # batches. The id-batch bounds MEMORY + lock granularity, NOT runtime: each batch
@@ -996,10 +1071,8 @@ def _run_full(conn: Any, free: list[str], franchise: list[str], auto: list[str],
     # already do; the job's real bounds are the advisory lock + the job timeout.
     # (Shrinking the batch to dodge the 2-min wall would just move the wall — the cost
     # is per-listing-read, not per-broker.)
-    for lo in range(1, _max_id(conn, "brokers") + 1, batch_size):
-        if holder:
-            _heartbeat_lock(conn, holder)
-        with conn.transaction(), conn.cursor() as cur:
+    def _broker_rollup_batch(c: Any, lo: int) -> None:
+        with c.transaction(), c.cursor() as cur:
             cur.execute("SET LOCAL statement_timeout = 0")
             cur.execute(_BROKER_ROLLUP.format(
                 bscope="AND broker_id >= %(lo)s AND broker_id < %(hi)s"),
@@ -1008,33 +1081,49 @@ def _run_full(conn: Any, free: list[str], franchise: list[str], auto: list[str],
                 bscope="AND bi.broker_id >= %(lo)s AND bi.broker_id < %(hi)s",
                 mscope="m.broker_id >= %(lo)s AND m.broker_id < %(hi)s AND"),
                 {"lo": lo, "hi": lo + batch_size})
+
+    max_broker_id = step(lambda c: _max_id(c, "brokers"), "resolve.max_broker_id")
+    for lo in range(1, max_broker_id + 1, batch_size):
+        _beat()
+        step(lambda c, lo=lo: _broker_rollup_batch(c, lo), "resolve.broker_rollup")
+
     # Global firm rollup aggregates the whole linked-listings corpus in one pass;
     # like the matview refresh, lift the statement timeout for this once-per-sweep
     # analytical statement rather than batch it (firms are few, so a firm-id window
     # would just re-scan the same listings).
-    with conn.transaction(), conn.cursor() as cur:
-        cur.execute("SET LOCAL statement_timeout = 0")
-        cur.execute(_FIRM_ROLLUP)
-        cur.execute(_FIRM_DISPLAY_NAMES)
+    def _firm_rollup(c: Any) -> None:
+        with c.transaction(), c.cursor() as cur:
+            cur.execute("SET LOCAL statement_timeout = 0")
+            cur.execute(_FIRM_ROLLUP)
+            cur.execute(_FIRM_DISPLAY_NAMES)
+
+    step(_firm_rollup, "resolve.firm_rollup")
     LOG.info("RESOLVE full rollups done elapsed=%.1fs", time.monotonic() - t0)
-    _refresh_matview(conn)
-    candidates = _generate_merge_candidates(conn)
+    step(_refresh_matview, "resolve.matview")
+    candidates = step(_generate_merge_candidates, "resolve.candidates")
     LOG.info("RESOLVE full merge candidates proposed=%d elapsed=%.1fs",
              candidates, time.monotonic() - t0)
-    with conn.cursor() as cur:
-        cur.execute(_CLEAR_DIRTY, {"cutoff": cutoff})
-        cur.execute(
-            "UPDATE broker_resolution_runs SET ended_at = now(), brokers_recomputed = "
-            "(SELECT count(*) FROM brokers WHERE status='active'), identities_upserted = "
-            "(SELECT count(*) FROM broker_identities), firms_recomputed = (SELECT count(*) FROM firms), "
-            "auto_merges = %s, queued_for_review = %s WHERE id = %s",
-            (auto_merges, queued, run_id),
-        )
-    return {"attached": attached, "auto_merges": auto_merges, "queued": queued}
+
+    def _finalize(c: Any) -> None:
+        with c.cursor() as cur:
+            cur.execute(_CLEAR_DIRTY, {"cutoff": cutoff})
+            cur.execute(
+                "UPDATE broker_resolution_runs SET ended_at = now(), brokers_recomputed = "
+                "(SELECT count(*) FROM brokers WHERE status='active'), identities_upserted = "
+                "(SELECT count(*) FROM broker_identities), firms_recomputed = (SELECT count(*) FROM firms), "
+                "auto_merges = %s, queued_for_review = %s WHERE id = %s",
+                (auto_merges, queued, run_id),
+            )
+
+    step(_finalize, "resolve.finalize")
+    return {"attached": attached, "auto_merges": auto_merges, "queued": queued}, live()
 
 
 def _run_incremental(conn: Any, free: list[str], franchise: list[str],
-                     batch_size: int) -> dict[str, int]:
+                     batch_size: int, *,
+                     reconnect: Callable[[], Any]) -> tuple[dict[str, int], Any]:
+    """Drain the dirty queue. Returns (stats, live_conn) — see _run_full."""
+    step, live = _resilient_step(conn, reconnect)
     with conn.cursor() as cur:
         cur.execute("SELECT now()")
         cutoff = cur.fetchone()[0]
@@ -1051,28 +1140,37 @@ def _run_incremental(conn: Any, free: list[str], franchise: list[str],
     if not claimed:
         with conn.cursor() as cur:
             cur.execute("UPDATE broker_resolution_runs SET ended_at = now() WHERE id = %s", (run_id,))
-        return {"attributed": 0, "brokers": 0}
+        return {"attributed": 0, "brokers": 0}, live()
 
-    ids = list(claimed)
-    _attribute(conn, "l.id = ANY(%(ids)s)", {"ids": ids})
-    _resolve_firms(conn, free, franchise)
-    _link_listings_firm(conn, "AND l.id = ANY(%(ids)s)", {"ids": ids})
-    _attach_singletons(conn)
-    bids = _affected(conn, ids)
-    with conn.cursor() as cur:
-        if bids:
-            cur.execute(_IDENTITY_ROLLUP.format(extra="AND broker_identity_id IN "
-                        "(SELECT id FROM broker_identities WHERE broker_id = ANY(%(bids)s))"), {"bids": bids})
-            cur.execute(_BROKER_ROLLUP.format(bscope="AND broker_id = ANY(%(bids)s)"), {"bids": bids})
-            cur.execute(_MEMBERSHIP_RECOMPUTE.format(bscope="AND bi.broker_id = ANY(%(bids)s)",
-                        mscope="m.broker_id = ANY(%(bids)s) AND"), {"bids": bids})
-        cur.execute(_DELETE_DIRTY, {"ids": ids, "cutoff": cutoff})
-        cur.execute(
-            "UPDATE broker_resolution_runs SET ended_at = now(), listings_attributed = %s, "
-            "brokers_recomputed = %s WHERE id = %s",
-            (len(ids), len(bids), run_id),
-        )
-    return {"attributed": len(ids), "brokers": len(bids)}
+    # Everything below is idempotent (latest-wins upserts + scoped rollups) and the
+    # queue rows stay claimed until the _DELETE_DIRTY at the end, so a replay after a
+    # pooler drop redoes exactly the same work rather than losing it. The 2026-08-10
+    # 23:10 red died on the rollup below with 'SSL connection has been closed'.
+    ids = sorted(claimed)
+    step(lambda c: _attribute(c, "l.id = ANY(%(ids)s)", {"ids": ids}), "resolve.attribute")
+    step(lambda c: _resolve_firms(c, free, franchise), "resolve.firms")
+    step(lambda c: _link_listings_firm(c, "AND l.id = ANY(%(ids)s)", {"ids": ids}),
+         "resolve.link_firm")
+    step(_attach_singletons, "resolve.singletons")
+    bids = step(lambda c: _affected(c, ids), "resolve.affected")
+
+    def _rollups_and_finalize(c: Any) -> None:
+        with c.cursor() as cur:
+            if bids:
+                cur.execute(_IDENTITY_ROLLUP.format(extra="AND broker_identity_id IN "
+                            "(SELECT id FROM broker_identities WHERE broker_id = ANY(%(bids)s))"), {"bids": bids})
+                cur.execute(_BROKER_ROLLUP.format(bscope="AND broker_id = ANY(%(bids)s)"), {"bids": bids})
+                cur.execute(_MEMBERSHIP_RECOMPUTE.format(bscope="AND bi.broker_id = ANY(%(bids)s)",
+                            mscope="m.broker_id = ANY(%(bids)s) AND"), {"bids": bids})
+            cur.execute(_DELETE_DIRTY, {"ids": ids, "cutoff": cutoff})
+            cur.execute(
+                "UPDATE broker_resolution_runs SET ended_at = now(), listings_attributed = %s, "
+                "brokers_recomputed = %s WHERE id = %s",
+                (len(ids), len(bids), run_id),
+            )
+
+    step(_rollups_and_finalize, "resolve.rollups")
+    return {"attributed": len(ids), "brokers": len(bids)}, live()
 
 
 def main() -> int:
@@ -1088,19 +1186,26 @@ def main() -> int:
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                         format="%(asctime)s %(levelname)s %(name)s %(message)s")
 
+    # Explicit check before db.connect(): database_url() would raise a bare
+    # RuntimeError instead of this friendly message + exit 2.
     db_url = os.environ.get("SUPABASE_DB_URL")
     if not db_url:
         print("ERROR: SUPABASE_DB_URL is not set.", file=sys.stderr)
         return 2
-
-    import psycopg
 
     mode = "incremental" if args.incremental else "full"
     LOG.info("RESOLVE config mode=%s batch_size=%d", mode, args.batch_size)
     started = time.monotonic()
     deadline = started + args.max_seconds if args.max_seconds else None
 
-    with psycopg.connect(db_url, autocommit=True, prepare_threshold=None) as conn:
+    def reconnect() -> Any:
+        return db.connect(db_url)
+
+    # db.connect() instead of a bare psycopg.connect(): same autocommit +
+    # prepare_threshold=None, PLUS TCP keepalives and a 3-attempt handshake retry.
+    # This connection is held for the whole 60-90 minute sweep, so a pooler idle
+    # reaper or a Supabase restart used to kill the run outright.
+    with db.connect(db_url) as conn:
         free, franchise, auto = _settings(conn)
         if args.dry_run:
             with conn.cursor() as cur:
@@ -1123,12 +1228,16 @@ def main() -> int:
             return 1
 
         try:
+            # Rebind conn: a phase that rode out a pooler drop hands back a FRESH
+            # connection, and the release below must run on the live one.
             if args.incremental:
-                res = _run_incremental(conn, free, franchise, args.batch_size)
+                res, conn = _run_incremental(conn, free, franchise, args.batch_size,
+                                             reconnect=reconnect)
                 LOG.info("RESOLVE incremental done attributed=%d brokers=%d elapsed=%.1fs",
                          res["attributed"], res["brokers"], time.monotonic() - started)
             else:
-                res = _run_full(conn, free, franchise, auto, args.batch_size, deadline, holder)
+                res, conn = _run_full(conn, free, franchise, auto, args.batch_size,
+                                      deadline, holder, reconnect=reconnect)
                 LOG.info("RESOLVE full done attached=%d auto_merges=%d queued=%d elapsed=%.1fs",
                          res["attached"], res["auto_merges"], res["queued"], time.monotonic() - started)
         finally:

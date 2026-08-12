@@ -84,8 +84,10 @@ import os
 import signal
 import sys
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from typing import Any
+
+from scraper import db
 
 LOG = logging.getLogger("recompute_property_stats")
 
@@ -646,13 +648,21 @@ _LEASE_RETRY_SECONDS = 10.0
 # is genuinely wrong, not merely slow.
 _MAX_LEASE_WAIT_SECONDS = 1200.0
 
-# Ceiling for --max-seconds. The workflow's timeout-minutes (75) is sized as
+# Ceiling for --max-seconds. The workflow's timeout-minutes (130) is sized as
 # budget + one in-flight batch + prelude + finalize headroom FOR THIS
-# CEILING; an unclamped dispatch input above ~4200s would let the runner
+# CEILING; an unclamped dispatch input above it would let the runner
 # SIGKILL a healthy sweep before its clean-stop fires — a silent `cancelled`,
 # the exact mode this script exists to eliminate. Raising the ceiling means
 # raising timeout-minutes in the same change.
-_MAX_BUDGET_SECONDS = 4200.0
+#
+# 6000s (100 min), raised from 4200s: the six sweeps to 2026-08-10 measured
+# 3502/3777/4044/3890/3626s — 83-96% of the old 4200s ceiling, i.e. one bad day
+# from clean-stopping RED with the corpus still growing (~2k properties/day).
+# 6000s puts the observed worst case (4044s) at ~67% and leaves a full 30 min of
+# growth headroom. Sized against that regime deliberately: the 2026-08-12 sweep
+# finished in 508s (avg batch 1.6s vs 11-13s) after the 08-11 Supabase restart,
+# but one post-restart datapoint is not a new baseline.
+_MAX_BUDGET_SECONDS = 6000.0
 
 # Per-recompute-statement ceiling, applied via SET LOCAL inside an explicit
 # transaction (the repo's layered-timeout pattern; SET LOCAL no-ops without
@@ -664,6 +674,17 @@ _MAX_BUDGET_SECONDS = 4200.0
 # statements, so one statement's worst case is the longest possible renewal
 # gap.
 _BATCH_STATEMENT_TIMEOUT = "10min"
+
+# Retry budget for ONE recompute batch (db.run_resilient defaults to 4). A batch
+# runs under the 10-min ceiling above, so four attempts could burn 40 minutes
+# inside a single loop iteration — the deadline is only checked at a batch
+# BOUNDARY, so that would sail past the workflow's outer timeout and re-create
+# the silent `cancelled` this script exists to eliminate. Two attempts keeps the
+# useful part of the budget (a dropped connection or a passing lock wait replays
+# once) and bounds the in-flight worst case at 2 x _BATCH_STATEMENT_TIMEOUT,
+# which is what the workflow's timeout-minutes is sized for. A range that times
+# out twice is the poisoned range the error log names, not a blip.
+_BATCH_RESILIENT_ATTEMPTS = 2
 
 _TRY_LEASE_SQL = """
     UPDATE property_maintenance_lease
@@ -729,8 +750,17 @@ def _wait_lease(
 
 
 def _release_lease(conn: Any, holder: str) -> None:
-    with conn.cursor() as cur:
-        cur.execute(_RELEASE_LEASE_SQL, {"holder": holder})
+    """Best-effort release. Callers run this from a `finally:`, so a raise here (a
+    dead connection makes even `conn.cursor()` throw) would replace the real failure
+    with a crash-during-cleanup. The lease's correctness never rested on the release
+    landing: the holder-guarded CAS plus the short renewed TTL are the guarantee, and
+    a missed release costs at most one TTL of frozen maintenance."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute(_RELEASE_LEASE_SQL, {"holder": holder})
+    except Exception:  # noqa: BLE001 - best-effort; the TTL is the real guarantee
+        LOG.warning("MAINTENANCE: lease release failed (holder=%s) — self-heals when "
+                    "the %s TTL expires", holder, _LEASE_TTL)
 
 
 def run_incremental_pass(conn: Any, batch_size: int = 2000) -> dict[str, Any]:
@@ -778,8 +808,8 @@ def main() -> int:
         help="Report straggler + dirty + property counts and exit without writing.",
     )
     parser.add_argument(
-        "--max-seconds", type=float, default=3600.0,
-        help="Full-sweep wall-clock budget (default 3600). On exhaustion the "
+        "--max-seconds", type=float, default=6000.0,
+        help="Full-sweep wall-clock budget (default 6000). On exhaustion the "
              "sweep clean-stops at a batch boundary, finalizes only what it "
              "covered, releases the lease, and exits RED (1) — a visible "
              "failure instead of a silent timeout-minutes `cancelled` kill. "
@@ -806,12 +836,12 @@ def main() -> int:
         print("ERROR: --batch-size must be >= 1.", file=sys.stderr)
         return 2
 
+    # Explicit check before db.connect(): database_url() would raise a bare
+    # RuntimeError instead of this friendly message + exit 2.
     db_url = os.environ.get("SUPABASE_DB_URL")
     if not db_url:
         print("ERROR: SUPABASE_DB_URL is not set.", file=sys.stderr)
         return 2
-
-    import psycopg
 
     mode = "incremental" if args.incremental else "full"
     LOG.info(
@@ -819,8 +849,16 @@ def main() -> int:
         mode, args.batch_size, args.dry_run,
     )
 
+    def reconnect() -> Any:
+        return db.connect(db_url)
+
     started_at = time.monotonic()
-    with psycopg.connect(db_url, autocommit=True, prepare_threshold=None) as conn:
+    # db.connect() instead of a bare psycopg.connect(): same autocommit +
+    # prepare_threshold=None, PLUS TCP keepalives and a 3-attempt handshake retry.
+    # The full sweep holds this ONE connection for up to the whole budget, so a
+    # pooler recycle or a Supabase restart (2026-08-11, an AdminShutdown 338s in)
+    # used to kill the run outright.
+    with db.connect(db_url) as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT now()")
             cutoff = cur.fetchone()[0]
@@ -865,9 +903,24 @@ def main() -> int:
         # never succeeded, so this ordering is safe.
         holder = _new_holder("full")
         incomplete_at: int | None = None
+
+        def step(op: Callable[[Any], Any], label: str,
+                 attempts: int | None = None) -> Any:
+            """db.run_resilient with the conn rebinding its docstring demands (it may
+            hand back a FRESH connection after a pooler drop). Every op below is
+            idempotent — recompute statements are pure latest-wins recomputes and the
+            dirty-clear / stamp are keyed writes, so a replay re-commits identically."""
+            nonlocal conn
+            budget = {} if attempts is None else {"attempts": attempts}
+            result, conn = db.run_resilient(
+                conn, op, reconnect=reconnect, label=label, **budget)
+            return result
+
         try:
+            # Lease ACQUISITION stays unwrapped: its CAS/backoff semantics are its
+            # own, and nothing has been done yet when it fails.
             _wait_lease(conn, holder, _LEASE_TTL)
-            attached = _attach_stragglers(conn)
+            attached = step(_attach_stragglers, "sweep.attach")
             LOG.info("RECOMPUTE stragglers attached=%d", attached)
 
             budget = min(args.max_seconds, _MAX_BUDGET_SECONDS)
@@ -879,7 +932,7 @@ def main() -> int:
                     args.max_seconds, budget,
                 )
             deadline = started_at + budget
-            max_id = _max_property_id(conn)
+            max_id = step(_max_property_id, "sweep.max_id")
             total_batches = -(-max_id // args.batch_size) if max_id else 0
             batches = 0
             for lo, hi in _batch_ranges(max_id, args.batch_size):
@@ -890,10 +943,16 @@ def main() -> int:
                 if batch_started >= deadline:
                     incomplete_at = lo
                     break
-                _renew_lease(conn, holder)
+                # Renewal (not acquisition) through step() too: it is a sticky-holder
+                # CAS, idempotent on retry, and on a dead connection the raw call
+                # raises BEFORE the wrapped batch below can reconnect. A genuine
+                # lost lease still raises RuntimeError, which run_resilient re-raises
+                # immediately (not an OperationalError -> not transient).
+                step(lambda c: _renew_lease(c, holder), "sweep.renew")
                 try:
-                    _run_recompute_statement(
-                        conn, _RECOMPUTE_BATCH_SQL, {"lo": lo, "hi": hi})
+                    step(lambda c: _run_recompute_statement(
+                        c, _RECOMPUTE_BATCH_SQL, {"lo": lo, "hi": hi}), "sweep.batch",
+                        attempts=_BATCH_RESILIENT_ATTEMPTS)
                 except Exception:
                     # Name the poisoned range before dying — the 10:09Z run's
                     # log showed only a bare QueryCanceled with no way to tell
@@ -913,35 +972,44 @@ def main() -> int:
                     batches, total_batches,
                 )
 
+            # The finalize block is wrapped too: a drop here would throw away an
+            # otherwise-complete sweep's completion stamp and red the health check.
             if incomplete_at is None:
-                reconciled = _reconcile_childless(conn)
+                reconciled = step(_reconcile_childless, "sweep.reconcile")
                 if reconciled:
                     LOG.info(
                         "RECOMPUTE reconciled childless=%d (set is_active=false)",
                         reconciled,
                     )
-                # The full sweep recomputed every property, so clear the dirt
-                # that existed at its start; anything dirtied mid-sweep survives
-                # for the next incremental pass.
-                with conn.cursor() as cur:
-                    cur.execute(_CLEAR_DIRTY_SQL, {"cutoff": cutoff})
-                # Completion stamp — the health check's O(1) liveness signal.
-                # Complete walks only: an incomplete sweep leaving the stamp
-                # stale IS the alarm condition.
-                with conn.cursor() as cur:
-                    cur.execute(_STAMP_SWEEP_COMPLETE_SQL, {
-                        "max_id": max_id, "batches": batches,
-                        "elapsed_s": round(time.monotonic() - started_at, 1),
-                    })
+
+                def _finalize(c: Any) -> None:
+                    # The full sweep recomputed every property, so clear the dirt
+                    # that existed at its start; anything dirtied mid-sweep survives
+                    # for the next incremental pass.
+                    with c.cursor() as cur:
+                        cur.execute(_CLEAR_DIRTY_SQL, {"cutoff": cutoff})
+                    # Completion stamp — the health check's O(1) liveness signal.
+                    # Complete walks only: an incomplete sweep leaving the stamp
+                    # stale IS the alarm condition.
+                    with c.cursor() as cur:
+                        cur.execute(_STAMP_SWEEP_COMPLETE_SQL, {
+                            "max_id": max_id, "batches": batches,
+                            "elapsed_s": round(time.monotonic() - started_at, 1),
+                        })
+
+                step(_finalize, "sweep.finalize")
             else:
                 # Only ids < incomplete_at were recomputed — clear their dirt
                 # only, and skip _reconcile_childless (next complete sweep runs
                 # it; its targets are near-zero in practice).
-                with conn.cursor() as cur:
-                    cur.execute(
-                        _CLEAR_DIRTY_SWEPT_SQL,
-                        {"cutoff": cutoff, "hi": incomplete_at},
-                    )
+                def _clear_swept(c: Any) -> None:
+                    with c.cursor() as cur:
+                        cur.execute(
+                            _CLEAR_DIRTY_SWEPT_SQL,
+                            {"cutoff": cutoff, "hi": incomplete_at},
+                        )
+
+                step(_clear_swept, "sweep.clear_swept")
         finally:
             _release_lease(conn, holder)
 

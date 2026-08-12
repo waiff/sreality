@@ -25,10 +25,12 @@ name: "Jobs: recompute property stats (daily full reconcile)"
 # Budget + liveness (2026-08-06 incident — sweeps outgrew a 30-min
 # timeout-minutes; every kill stranded a 3h maintenance lease, freezing the
 # worker lane + both crons, and reported as `cancelled`, which alerts nobody):
-#   * the script CLEAN-STOPS at --max-seconds (default 4200, the clamp: the
-#     first post-#971 sweep measured 58.4 min against the old 60-min default —
-#     ~90s of headroom with the table growing ~30s/day) and exits RED so an
-#     overrun is a visible scheduled-run failure, not a silent kill;
+#   * the script CLEAN-STOPS at --max-seconds (default 6000, the clamp) and
+#     exits RED so an overrun is a visible scheduled-run failure, not a silent
+#     kill. Raised from 4200 in 2026-08: the six sweeps to 08-10 ran
+#     3502-4044s, i.e. 83-96% of that ceiling with the corpus growing ~2k
+#     properties/day — one slow day from a false RED. 6000s puts the observed
+#     worst case at ~67%;
 #   * timeout-minutes below is only the outer backstop, sized budget+headroom;
 #   * the lease is a 15-min TTL renewed every batch — a SIGKILL freezes
 #     maintenance for minutes, not hours;
@@ -62,9 +64,9 @@ on:
           - "false"
           - "true"
       max_seconds:
-        description: Wall-clock sweep budget in seconds (clean-stop + RED past it; clamped to 4200 — timeout-minutes is sized for that ceiling, raise both together in the yml)
+        description: Wall-clock sweep budget in seconds (clean-stop + RED past it; clamped to 6000 — timeout-minutes is sized for that ceiling, raise both together in the yml)
         required: false
-        default: "4200"
+        default: "6000"
         type: string
 
 concurrency:
@@ -74,9 +76,14 @@ concurrency:
 jobs:
   recompute:
     runs-on: ubuntu-latest
-    # Outer backstop only: the script clean-stops RED at --max-seconds (60 min
-    # default), so this fires only if the process wedges entirely.
-    timeout-minutes: 75
+    # Outer backstop only: the script clean-stops RED at --max-seconds (6000s =
+    # 100 min, the clamp), so this fires only if the process wedges entirely.
+    # Sized on the same "budget + one in-flight batch + prelude/finalize"
+    # relationship as the old 4200/75 pair: 100 min budget + 20 min for one
+    # in-flight batch (the clean-stop only checks at a batch BOUNDARY; a batch
+    # runs under the 10-min _BATCH_STATEMENT_TIMEOUT and now gets
+    # _BATCH_RESILIENT_ATTEMPTS=2 tries at it) + ~10 min prelude/finalize/release.
+    timeout-minutes: 130
     permissions:
       contents: read
     env:
@@ -96,7 +103,7 @@ jobs:
       - name: Run recompute
         run: |
           ARGS="--batch-size ${{ inputs.batch_size || '2000' }}"
-          ARGS="$ARGS --max-seconds ${{ inputs.max_seconds || '4200' }}"
+          ARGS="$ARGS --max-seconds ${{ inputs.max_seconds || '6000' }}"
           if [ "${{ inputs.dry_run }}" = "true" ]; then
             ARGS="$ARGS --dry-run"
           fi

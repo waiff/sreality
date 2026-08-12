@@ -46,7 +46,11 @@ jobs:
     # --max-seconds 3000 (50 min) budget AND the rollup/merge/matview tail
     # (~15-20 min over the full corpus) still finishes. The job is serialized by
     # the DB advisory lock and idempotent, so extra wall-clock has no downside.
-    timeout-minutes: 90
+    # 90 -> 110 in 2026-08: the sweeps to 08-10 ran 68-78 min (only 12-22 min of
+    # slack), and every phase now retries + reconnects through db.run_resilient
+    # rather than dying on a pooler drop — a replayed phase must fit inside the
+    # backstop or the fix would just trade a red run for a silent `cancelled`.
+    timeout-minutes: 110
     permissions:
       contents: read
     env:

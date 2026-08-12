@@ -745,7 +745,8 @@ renumber.** Navigate by area:
     **daily full sweep** (`recompute_property_stats.yml`, no `--incremental`, 04:15 UTC) is the
     reconcile backstop — it recomputes every property and clears the queue, so a missed enqueue
     self-heals within 24h *provided the sweep completes*: since the 2026-08-06 incident it runs
-    under a `--max-seconds` budget (default 3600s) and on exhaustion clean-stops at a batch
+    under a `--max-seconds` budget (default 6000s, clamped to the same ceiling the workflow's
+    `timeout-minutes: 130` is sized for) and on exhaustion clean-stops at a batch
     boundary, clears only the swept id range, exits RED, and does NOT write the
     `property_sweep_last_complete` stamp — so chronic exhaustion surfaces as a red run daily plus
     the `property_maintenance` health check failing on stamp age, and the unswept id tail keeps
