@@ -93,10 +93,17 @@ it (`api/`). They do not apply to the scraper.
    `/outreach/*`, `/broker-review/*`,
    `/skill-refinements/*`, `/location-audit/*`, and dataset-write/dispatch routes on
    price-stats use `require_admin` (JWT-gated, see below) instead of plain `require_token`;
-   `/pipeline/*`, `/collections` (GET), `/estimations` create/read/scenario, notes, and
-   `/listings/lookup` use `verify_jwt`/`tenant_conn` for per-account identity without the
-   admin claim; every other route is still `require_token`-only (a shared secret, no
-   identity — `POST /collections`, tags, buildings, manual estimates, filter-presets).
+   `/pipeline/*`, `/collections` (GET), `/estimations` create/read/scenario, notes,
+   `/listings/lookup`, and `/brokers/*` use `verify_jwt`/`tenant_conn` for per-account
+   identity without the admin claim; every other route is still `require_token`-only (a
+   shared secret, no identity — `POST /collections`, tags, buildings, manual estimates,
+   filter-presets). `/brokers/*` moved off `require_token` on 2026-08-12 (D1/D2 of the
+   broker E2E review): the leaderboard returned up to 2000 brokers' unmasked email +
+   phone behind the bundle-extractable token. Every `/brokers/*` envelope now runs
+   through `toolkit.brokers.apply_pii_policy`, which swaps any contact column for
+   `has_email` / `has_phone` (matched on the column NAME, so a widened view can't leak)
+   and stamps `metadata.pii_masked`, unless the caller is admin; `GET
+   /brokers/{id}/contacts` is `require_admin` outright — there is no masked variant.
    **The old coexistence window is gone for `require_admin`/`verify_jwt`**: the static
    `API_TOKEN`, extractable from the shipped SPA bundle via devtools, used to also satisfy
    `verify_jwt` as a synthetic `is_admin: True` identity — a live CRITICAL finding closed
