@@ -78,6 +78,14 @@ export interface BrokerPublic extends BrokerContactFields {
   active_property_count: number;
   first_seen_at: string | null;
   last_seen_at: string | null;
+  /* The same counts restricted to listings that resolved to a Czech obec
+   * (migration 396). The ranking columns — broker search orders on
+   * cz_active_property_count, so a surface that renders a broker row must show
+   * this number, not the unscoped twin, or the order looks arbitrary. */
+  cz_listing_count: number;
+  cz_property_count: number;
+  cz_active_listing_count: number;
+  cz_active_property_count: number;
 }
 
 export interface BrokerMembership {

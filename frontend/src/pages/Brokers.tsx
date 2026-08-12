@@ -204,8 +204,15 @@ function NameSearch({ onPick }: { onPick: (brokerId: number) => void }) {
                     {b.firm_name ?? b.firm_domain ?? 'nezávislý'}
                   </span>
                 </span>
+                {/* The CZ-scoped count is what the list is ordered by (migration
+                    396), so it has to be the number shown; the whole book stays
+                    visible as the dimmed total whenever the broker also carries
+                    foreign or ungeocoded stock. */}
                 <span className="shrink-0 text-xs font-[family-name:var(--font-mono)] tabular-nums text-[var(--color-ink-3)]">
-                  {fmtCount(b.active_property_count)}
+                  {fmtCount(b.cz_active_property_count)}
+                  {b.active_property_count > b.cz_active_property_count && (
+                    <span className="text-[var(--color-ink-4)]"> / {fmtCount(b.active_property_count)}</span>
+                  )}
                 </span>
               </button>
             ))
