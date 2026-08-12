@@ -2,6 +2,7 @@
  * Reads only the *_public views (anon SELECT); writes go through the API
  * (src/lib/api.ts). Mirrors the fetch* conventions in src/lib/queries.ts. */
 import { supabase } from './supabase';
+import { fetchAllRows } from './fetchAllRows';
 
 export interface PriceStatDataset {
   id: number;
@@ -117,26 +118,41 @@ export const fetchDatasets = async (): Promise<PriceStatDataset[]> => {
 export const fetchCityMetrics = async (
   datasetId: number,
 ): Promise<PriceStatCityMetric[]> => {
-  const { data, error } = await supabase
-    .from('price_stat_city_metrics_public')
-    .select('*')
-    .eq('dataset_id', datasetId)
-    .order('locality_name')
-    .range(0, 9999);
-  if (error) throw error;
-  return (data ?? []) as unknown as PriceStatCityMetric[];
+  /* 4,044 rows on the obec-grain datasets — exhaustive by contract (a missing
+   * obec is a wrong table/choropleth, not a shorter one). locality_name leads
+   * for the display order but is not unique (same-name obce), hence the
+   * entity tiebreaks. */
+  return await fetchAllRows<PriceStatCityMetric>({
+    relation: 'price_stat_city_metrics_public',
+    build: () =>
+      supabase
+        .from('price_stat_city_metrics_public')
+        .select('*')
+        .eq('dataset_id', datasetId),
+    orderBy: [
+      { column: 'locality_name' },
+      { column: 'entity_type' },
+      { column: 'entity_id' },
+    ],
+    key: ['entity_type', 'entity_id'],
+    expectMax: 100_000,
+  });
 };
 
 export const fetchChoropleth = async (
   datasetId: number,
 ): Promise<PriceStatPolygon[]> => {
-  const { data, error } = await supabase
-    .from('price_stat_choropleth_public')
-    .select('*')
-    .eq('dataset_id', datasetId)
-    .range(0, 9999);
-  if (error) throw error;
-  return (data ?? []) as unknown as PriceStatPolygon[];
+  return await fetchAllRows<PriceStatPolygon>({
+    relation: 'price_stat_choropleth_public',
+    build: () =>
+      supabase
+        .from('price_stat_choropleth_public')
+        .select('*')
+        .eq('dataset_id', datasetId),
+    orderBy: [{ column: 'obec_id' }],
+    key: ['obec_id'],
+    expectMax: 100_000,
+  });
 };
 
 /* Live per-obec growth for any [from,to] window via the price_stat_growth RPC
@@ -205,13 +221,19 @@ export interface ObecNode {
 }
 
 export const fetchObecTree = async (): Promise<ObecNode[]> => {
-  const { data, error } = await supabase
-    .from('price_stat_obce_picker_public')
-    .select('id,level,name,parent_id,population,sreality_id')
-    .order('name')
-    .range(0, 9999);
-  if (error) throw error;
-  return (data ?? []) as unknown as ObecNode[];
+  /* 6,349 rows (every kraj/okres/obec) — an incomplete tree silently hides
+   * municipalities from the picker. Names collide (same-name obce), hence the
+   * id tiebreak. */
+  return await fetchAllRows<ObecNode>({
+    relation: 'price_stat_obce_picker_public',
+    build: () =>
+      supabase
+        .from('price_stat_obce_picker_public')
+        .select('id,level,name,parent_id,population,sreality_id'),
+    orderBy: [{ column: 'name' }, { column: 'id' }],
+    key: ['id'],
+    expectMax: 100_000,
+  });
 };
 
 /* Municipalities the scraper checked and found INSUFFICIENT data for (no
@@ -223,13 +245,17 @@ export interface NoDataObec {
 }
 
 export const fetchNoData = async (datasetId: number): Promise<NoDataObec[]> => {
-  const { data, error } = await supabase
-    .from('price_stat_no_data_public')
-    .select('obec_id,locality_name')
-    .eq('dataset_id', datasetId)
-    .range(0, 9999);
-  if (error) throw error;
-  return (data ?? []) as unknown as NoDataObec[];
+  return await fetchAllRows<NoDataObec>({
+    relation: 'price_stat_no_data_public',
+    build: () =>
+      supabase
+        .from('price_stat_no_data_public')
+        .select('obec_id,locality_name')
+        .eq('dataset_id', datasetId),
+    orderBy: [{ column: 'obec_id' }],
+    key: ['obec_id'],
+    expectMax: 100_000,
+  });
 };
 
 /* Just the count (head request, no rows) — for the Browse market-growth note. */
@@ -247,17 +273,21 @@ export const fetchCitySeries = async (
   entityType: string,
   entityId: number,
 ): Promise<PriceStatObservation[]> => {
-  const { data, error } = await supabase
-    .from('price_stat_observations_public')
-    .select(
-      'category_type_cb,year,month,price,active_count,new_count,deleted_count',
-    )
-    .eq('dataset_id', datasetId)
-    .eq('entity_type', entityType)
-    .eq('entity_id', entityId)
-    .order('year')
-    .order('month')
-    .range(0, 9999);
-  if (error) throw error;
-  return (data ?? []) as unknown as PriceStatObservation[];
+  /* Consumers rely on year,month ascending; category_type_cb only tiebreaks
+   * within a month, completing the total order paging needs. */
+  return await fetchAllRows<PriceStatObservation>({
+    relation: 'price_stat_observations_public',
+    build: () =>
+      supabase
+        .from('price_stat_observations_public')
+        .select(
+          'category_type_cb,year,month,price,active_count,new_count,deleted_count',
+        )
+        .eq('dataset_id', datasetId)
+        .eq('entity_type', entityType)
+        .eq('entity_id', entityId),
+    orderBy: [{ column: 'year' }, { column: 'month' }, { column: 'category_type_cb' }],
+    key: ['year', 'month', 'category_type_cb'],
+    expectMax: 100_000,
+  });
 };

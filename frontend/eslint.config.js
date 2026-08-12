@@ -15,4 +15,22 @@ export default [
       'react-hooks/exhaustive-deps': 'warn',
     },
   },
+  {
+    // `.range()` on a PostgREST builder asks for a WINDOW; it does not lift the
+    // server's db-max-rows clamp, and treating it as a fetch-all shipped two
+    // silent-truncation bugs (see lib/fetchAllRows.ts's header). Exhaustive
+    // reads go through fetchAllRows — the one file allowed to call .range().
+    files: ['src/**/*.{ts,tsx}'],
+    ignores: ['src/lib/fetchAllRows.ts'],
+    rules: {
+      'no-restricted-syntax': [
+        'error',
+        {
+          selector: "CallExpression[callee.property.name='range']",
+          message:
+            'Do not fetch-all with .range() — it does not lift PostgREST\'s db-max-rows clamp. Use fetchAllRows (lib/fetchAllRows.ts) for exhaustive reads, or an explicit .limit() for bounded ones.',
+        },
+      ],
+    },
+  },
 ];

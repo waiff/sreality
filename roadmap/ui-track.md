@@ -341,6 +341,32 @@ place and we know which detail interactions stay shallow.
 adding new detail-page content, restyling list pages. Pure IA +
 navigation work.
 
+### Phase U-CAP: Exhaustive-read contract + versioned db-max-rows (done)
+The 2026-08 cap-drift audit: PostgREST's `db-max-rows` clamp shipped two real
+silent-truncation bugs at Supabase's 1,000 default (city-index popup, rent-map
+choropleth), was then lifted OUT-OF-BAND in the dashboard for the 50k-point
+map — stranding two generations of wrong comments (".range bypasses the cap"
+never true; "hard-capped at 1,000" stale) and leaving ~15 fetch-all sites'
+correctness resting on an invisible setting. Verified empirically against prod
+(wire probes as the smoke-test user), then fixed as two independent layers:
+- **`lib/fetchAllRows.ts`** — the one exhaustive read: complete-or-throw
+  paging that terminates on the EMPTY page advancing by rows received (correct
+  under ANY cap value, including one below the page size), a verified-unique
+  key tuple per site (checked against live data), dedupe across page
+  boundaries, and a loud `expectMax` overflow error instead of a partial set.
+  All 15 fetch-all sites converted (both hand-rolled pagers deleted; the
+  nearest-term casualty was `fetchTrainingLabelCounts`, 1,198 rows growing
+  daily under a silent `.limit(2000)`). ESLint bans `.range()` outside the
+  helper.
+- **Migration 394** — `pgrst.db_max_rows = '50000'` (= `MAP_CAP`, the largest
+  sanctioned single request) pinned on the `authenticator` role in git, so a
+  project restore / Supabase preview branch can't silently revert the cap to
+  1,000. Live-verified: 60k ask → exactly 50k; map single-shot unaffected.
+- Reported, not fixed: prefilter id-lists ride back on GET `.in()` (~1–2k-id
+  URL ceiling, fails loud, server-side predicate is the strategic fix when
+  cohorts grow); `fetchBrokerListings` shows ≤500 of a 20k-listing mega-broker
+  (brokers rebuild owns it).
+
 ### Phase U3: Toolkit-backed views (later)
 Surfacing `describe_neighborhood`, `find_distribution_outliers`, and
 the velocity tools through the UI. Auth-gated; specific shape decided
