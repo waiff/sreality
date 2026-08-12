@@ -86,8 +86,20 @@ DEFAULT_THRESHOLDS: dict[str, float] = {
     # axis: the age of the last full run that reached _finalize's ended_at. That
     # tail runs on every sweep regardless of lap closure, so steady state is ~24h
     # and the lap's deliberately wide 52/84 would be far too slack here.
+    #
+    # Sized on the GAP between consecutive ended_at, which is a whole number of
+    # daily runs PLUS the spread in when a run finishes — GH's scheduled-run delay,
+    # the <=21-min lock wait and the run itself, ~2.5h live to 2026-08-12 (06:25 to
+    # 08:52 UTC on a 04:35 cron). So one ordinary night reaches ~26.5h (warn 30
+    # clears it), one MISSED night ~50.5h and two ~69.5h. Fail therefore has to sit
+    # between those last two: 50 sat below one missed night's worst case, which reds
+    # the hourly acute lane — an onset alert plus llm_health.yml's
+    # --exit-nonzero-on-fail emailing a second time — for a single miss the sweep's
+    # own red run already emailed about. 60 keeps one miss a warn and still fails
+    # two, and costs ~10h of detection latency on the nightly-dead tail this axis
+    # exists for, which warn already ambers within ~30h.
     "broker_finished_warn_hours": 30,
-    "broker_finished_fail_hours": 50,
+    "broker_finished_fail_hours": 60,
     # The full sweep holds broker_resolution_lock for its whole run — every */10
     # incremental skips cleanly meanwhile — and clears dirty_broker_listings only at
     # finalize, so oldest-dirt ages 1:1 with the sweep and can legitimately reach

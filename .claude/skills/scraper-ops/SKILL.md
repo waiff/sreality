@@ -336,9 +336,11 @@ rotation that never gets round reds instead of parking on the missing-stamp warn
 The third axis exists because that lap stamp is written right after attribution, ~17-25 min
 BEFORE the tail (cross-source merge, the three rollups, the matview, candidates,
 `_finalize`'s dirty-clear), so a sweep whose tail dies still leaves a minutes-old stamp while
-the leaderboard and rollups silently stop: `broker_finished_{warn,fail}_hours` (30/50) age the
+the leaderboard and rollups silently stop: `broker_finished_{warn,fail}_hours` (30/60) age the
 last full run that actually reached `ended_at`, tighter than the lap's deliberately wide 52/84
-because the tail runs on every sweep. A NULL (no finished full run on record) is skipped, not
+because the tail runs on every sweep. Fail sits between ONE missed night (48h + the ~2.5h
+spread in when a run finishes = ~50.5h, deliberately only a warn — the skipped sweep's own red
+run already emails) and TWO (~69.5h). A NULL (no finished full run on record) is skipped, not
 red — only the missing LAP stamp is the deploy-day warn.
 The six dedup-specific checks (street/geo debt, eligibility funnel,
 merge latency, engine health, merge-precision sample) went with the engine, along with their

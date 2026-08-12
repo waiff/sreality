@@ -267,10 +267,10 @@ def test_a_dead_sweep_tail_is_caught_by_the_finished_run_axis() -> None:
     rollups have silently stopped. Only the finished-run axis sees it."""
     from scripts.verify_pipeline import _status_for_broker_resolution
 
-    # the exact shape: lap just stamped, dirty queue fresh, tail dead for 2 days
+    # the exact shape: lap just stamped, dirty queue fresh, tail dead for 3 days
     assert _status_for_broker_resolution(0.4, 0.3, DEFAULT_THRESHOLDS) == ("ok", [])
     status, offenders = _status_for_broker_resolution(
-        0.4, 0.3, DEFAULT_THRESHOLDS, finished_age_hours=60.0)
+        0.4, 0.3, DEFAULT_THRESHOLDS, finished_age_hours=72.0)
     assert status == "fail"
     assert any("last finished full sweep" in o for o in offenders)
     status, offenders = _status_for_broker_resolution(
@@ -289,6 +289,52 @@ def test_finished_run_axis_grades_tighter_than_the_lap_axis() -> None:
             < DEFAULT_THRESHOLDS["broker_sweep_fail_hours"])
     # ...and one ordinary daily sweep plus the workflow backstop stays green.
     assert DEFAULT_THRESHOLDS["broker_finished_warn_hours"] > 24 + 1.9
+
+
+# The gap between consecutive ended_at is a whole number of daily runs plus the
+# spread in when a run finishes: GH's scheduled-run delay, the <=21-min lock wait
+# and the run itself. Live spread to 2026-08-12 is ~2.5h (06:25 to 08:52 UTC on a
+# 04:35 cron), and the workflow backstop bounds only the last of those three.
+_FINISH_SPREAD_H = 2.5
+
+
+def test_one_missed_night_warns_and_two_fail() -> None:
+    """The calibration this axis was sized for, pinned on BOTH sides. A single
+    missed night is 48h plus the finish spread — up to ~50.5h — so a fail line at
+    50 fired the hourly acute lane for it: an onset alert from
+    emit_transition_alerts plus a non-zero exit from --exit-nonzero-on-fail, a
+    second email for the night the sweep's own red run already reported. Two missed
+    nights are >=69.5h even when the recovery run finishes at its earliest, so the
+    fail line has to live strictly between the two — which is what makes the axis
+    mean 'the tail has stopped', not 'a night was skipped'."""
+    import pathlib
+    import re
+
+    from scripts.verify_pipeline import _status_for_broker_resolution
+
+    yml = pathlib.Path(__file__).resolve().parents[2] / (
+        ".github/workflows/resolve_brokers_full.yml")
+    backstop_h = int(re.search(r"^\s*timeout-minutes:\s*(\d+)", yml.read_text(),
+                               re.MULTILINE)[1]) / 60
+    fail_h = DEFAULT_THRESHOLDS["broker_finished_fail_hours"]
+    # the same convention the lap axis uses (N runs + the backstop drift), then the
+    # wider real spread, which the backstop alone does not bound
+    assert fail_h > 2 * 24 + backstop_h
+    assert fail_h > 2 * 24 + _FINISH_SPREAD_H
+    assert fail_h < 3 * 24 - _FINISH_SPREAD_H
+
+    # ...and the graded axis agrees: worst single miss ambers, best double miss reds.
+    status, offenders = _status_for_broker_resolution(
+        0.4, 0.3, DEFAULT_THRESHOLDS, finished_age_hours=2 * 24 + _FINISH_SPREAD_H)
+    assert status == "warn"
+    assert any("last finished full sweep" in o for o in offenders)
+    status, _ = _status_for_broker_resolution(
+        0.4, 0.3, DEFAULT_THRESHOLDS, finished_age_hours=3 * 24 - _FINISH_SPREAD_H)
+    assert status == "fail"
+    # an ordinary night, finish spread included, stays green
+    assert _status_for_broker_resolution(
+        0.4, 0.3, DEFAULT_THRESHOLDS,
+        finished_age_hours=24 + _FINISH_SPREAD_H) == ("ok", [])
 
 
 def test_a_missing_finished_run_is_skipped_not_a_fail() -> None:

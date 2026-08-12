@@ -670,7 +670,15 @@ def _broker_components(groups: list[list[int]],
     that broker would be retired into two survivors in one run — `losers` is keyed
     on the retired id, so the ledger logged both while the brokers UPDATE kept
     whichever came last. Merging at broker grain makes the collision unrepresentable
-    instead of detecting it after the fact."""
+    instead of detecting it after the fact.
+
+    This deliberately widens what ONE run can fuse: decide_merges caps a group at
+    MAX_AUTO_MERGE_COMPONENT identities, and two capped groups chained through a
+    shared broker now apply as one merge instead of colliding. The fusing edge is a
+    merge already recorded (that broker holds both identities), not a new bridge, so
+    the union is implied rather than invented — but nothing bounds the chain, so
+    every multi-group component is logged for the operator rather than passing as an
+    ordinary pair merge."""
     parent: dict[int, int] = {}
 
     def find(b: int) -> int:
@@ -692,6 +700,19 @@ def _broker_components(groups: list[list[int]],
     comps: dict[int, list[int]] = {}
     for b in parent:
         comps.setdefault(find(b), []).append(b)
+    spanned: dict[int, int] = {}
+    for group in groups:
+        roots = {find(broker_of[i]) for i in group if i in broker_of}
+        for root in roots:
+            spanned[root] = spanned.get(root, 0) + 1
+    for root, members in sorted(comps.items()):
+        if len(members) > 1 and spanned.get(root, 0) > 1:
+            LOG.warning(
+                "RESOLVE merge component chains %d auto-merge groups: %d brokers "
+                "onto survivor %d (decide_merges caps ONE group at %d identities; "
+                "the chaining broker holds identities in more than one)",
+                spanned[root], len(members), min(members),
+                R.MAX_AUTO_MERGE_COMPONENT)
     return sorted((sorted(c) for c in comps.values() if len(c) > 1))
 
 

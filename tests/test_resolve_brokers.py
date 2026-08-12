@@ -769,6 +769,31 @@ def test_merge_components_are_unioned_transitively_in_broker_space() -> None:
     assert rb._broker_components([[1, 2]], {1: 5}) == []
 
 
+def test_a_component_chaining_two_groups_is_logged(caplog: Any) -> None:
+    """Merging at broker grain widens what one run can fuse: decide_merges caps a
+    group at MAX_AUTO_MERGE_COMPONENT identities, but two capped groups chained
+    through a broker that holds an identity in each now apply as ONE merge, and the
+    sweep log's `auto` is a bare count that cannot tell that from a pair merge. The
+    chaining edge is a merge already recorded, so it is not auto-merging on evidence
+    it lacks — but the chain is unbounded, so it must be visible in the log the
+    operator reads rather than only in the leaderboard moving."""
+    import logging
+
+    import scripts.resolve_brokers as rb
+
+    # broker 7 holds identity 2 (group A) and identity 3 (group B) — one component
+    with caplog.at_level(logging.WARNING, logger="resolve_brokers"):
+        assert rb._broker_components(
+            [[1, 2], [3, 4]], {1: 5, 2: 7, 3: 7, 4: 9}) == [[5, 7, 9]]
+    assert "chains 2 auto-merge groups: 3 brokers onto survivor 5" in caplog.text
+
+    # ...and an ordinary single-group component stays quiet
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="resolve_brokers"):
+        assert rb._broker_components([[1, 2]], {1: 5, 2: 7}) == [[5, 7]]
+    assert caplog.text == ""
+
+
 def test_apply_merges_skips_a_group_already_on_one_broker() -> None:
     """Idempotence: a re-run after a committed apply must write nothing."""
     import scripts.resolve_brokers as rb
