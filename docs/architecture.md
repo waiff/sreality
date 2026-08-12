@@ -124,6 +124,14 @@ walk can't be gated per-(category_main, category_type) the way the source-scoped
 rule #21): the runner never flips its listings inactive from index absence (rule #3) —
 delistings surface via a gone detail fetch (immediate per-listing flip via
 `mark_listing_inactive_native`) + the toolkit's "active = seen within 7 days" rule.
+**Broker**: the Vue object's own `broker` block (`parse_detail` does `raw = dict(obj)`, so it
+lands verbatim at `raw_json->'broker'` — no parser code) keys on `id`, not the `broker_id` every
+other HTML portal uses. Attributed since the `toolkit/broker_sources.py` registry landed.
+IDENTITY-ONLY: all ~1,021 M&M brokers publish ONE shared switchboard email and phone (verified:
+1 distinct value each across 10,652 listings), so no `broker_identity_contacts` rows are written —
+they would stamp the switchboard onto every M&M broker's `primary_phone` and the bridge frequency
+guard discards them anyway. The identity keeps the email because `email_domain` is the only firm
+key and `mmreality.cz` is already an `is_franchise` firm.
 Registered as a scraper portal (migration 117, sort 35).
 
 **Data source (remax-czech.cz).** A scheduled scraper (`scraper/remax_client.py`,
@@ -170,8 +178,8 @@ sreality vocabulary: `Zděná→cihla`, `Bezvadný→velmi_dobry`, `K rekonstruk
 the SEO detail-URL slug (`…-{street}-{id}.html`) — the broker's `offeredby.address` (the agency office)
 is deliberately never used; both route through the shared `scraper/street.py` guard. **Broker** carries
 a stable identity — the `/realitni-makleri/{slug}-{id}/` profile id — stored idnes-shaped in
-`raw["broker"]`, so ceskereality is in `BROKER_ATTRIBUTED_SOURCES` and `resolve_brokers` has a
-per-source attribution block (phone-only; no email → no firm). Per-category search pages carry a result
+`raw["broker"]`, so ceskereality is in `BROKER_ATTRIBUTED_SOURCES` and has a `toolkit/broker_sources.py`
+registry row (phone-only; no email → no firm). Per-category search pages carry a result
 total ("Máme tady N…") with no deep-pagination cap, so a per-category walk is provable-complete
 (`supports_complete_walk=true`; the runner marks delistings inactive under the completeness guard,
 source-scoped). The detail URL carries the category, so the drain derives each listing's category from

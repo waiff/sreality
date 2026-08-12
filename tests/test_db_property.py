@@ -367,7 +367,8 @@ def test_ingest_enqueues_once_when_content_and_broker_both_changed(monkeypatch):
 
 def test_ingest_never_reads_the_broker_block_for_an_unattributed_source(monkeypatch):
     """The read is a raw_json detoast on the live drain path. bazos/bezrealitky/
-    mmreality/maxima have no broker to attribute, so they must not pay for it."""
+    maxima have no broker to attribute, so they must not pay for it. (mmreality
+    left this set when its registry row landed — it now enqueues like the rest.)"""
     _stub_upsert(monkeypatch, "unchanged")
     conn = _broker_conn({"account_oid": "aaa"})
 
@@ -384,8 +385,11 @@ def test_broker_fingerprint_survives_a_malformed_block():
     assert db._broker_fingerprint(None) == ()
     assert db._broker_fingerprint([{"name": "x"}]) == ()
     assert db._broker_fingerprint("broker") == ()
-    # ...and a block whose values are not strings still fingerprints
-    assert db._broker_fingerprint({"broker_id": 17})[1] == "17"
+    # ...and a block whose values are not strings still fingerprints. Indexed by
+    # key, not position: the allowlist is now derived from the source registry, so
+    # a new portal can legitimately shift the tuple's order.
+    at = db._BROKER_FINGERPRINT_KEYS.index("broker_id")
+    assert db._broker_fingerprint({"broker_id": 17})[at] == "17"
 
 
 def test_broker_fields_stay_out_of_the_content_hash():

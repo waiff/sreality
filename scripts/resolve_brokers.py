@@ -26,15 +26,23 @@ that runs OFF the scrape hot path. Three modes:
     raw_json). Run in Actions after merge — local has no psycopg, and a raw_json
     scan over the pooler times out, so it is keyset-batched here.
 
-Attribution is the only source-specific step (sreality reads raw_json->'user';
-idnes + ceskereality read raw_json->'broker'); everything downstream (firms,
-singletons, rollups, grouping, merges) is source-agnostic, so a future portal adds
-an attribution step and reuses the rest (rule #21).
+Attribution is the only source-specific step, and it is CONFIG, not code: one row
+per portal in toolkit/broker_sources.py (JSON block path, id/name/email/phone keys,
+three quirks) generates all four statement shapes. Everything downstream (firms,
+singletons, rollups, grouping, merges) is source-agnostic, so onboarding a portal
+is that row plus nothing here (rule #21). scraper/db.py derives its dirty-queue
+allowlist from the same registry, so an onboarding can no longer half-land.
+
+Ranking is CZ-scoped (migration 396): `brokers.cz_*` counts only listings that
+resolved to a Czech obec, so the two idnes syndication feeds advertising ~26k
+Spanish/Croatian properties stay fully attributed but stop heading the leaderboard.
+Nothing is filtered out of the corpus — `_DOMESTIC` is a rollup predicate.
 
 Identity keystone: cross-source merges only via contacts personal on BOTH sides
-(frequency==1 each source), corroborated (toolkit.broker_resolver). With only
-sreality live, the merge step finds no cross-source bridges and is a no-op — it is
-built + unit-tested now so the second portal activates it without new code.
+(frequency==1 each source), corroborated (toolkit.broker_resolver), and only
+between sources BOTH listed in app_settings.broker_auto_merge_sources — today
+sreality + idnes + remax (migration 397). Everything the guard refuses is queued
+for the operator as a `contact_bridge_review` candidate, never dropped.
 
 Required env: SUPABASE_DB_URL.
 """
@@ -54,6 +62,7 @@ from typing import Any, TypeVar
 
 from scraper import db
 from toolkit import broker_resolver as R
+from toolkit.broker_sources import BROKER_SOURCE_NAMES, attribution_statements
 
 LOG = logging.getLogger("resolve_brokers")
 
@@ -63,280 +72,21 @@ _FREE_KEY = "broker_free_email_domains"
 _FRANCHISE_KEY = "broker_franchise_domains"
 _AUTO_MERGE_KEY = "broker_auto_merge_sources"
 
-# Sources whose listings carry a broker block (one attribution path each in
-# _attribute). The full sweep enumerates exactly these for re-attribution; add a
-# source here when its attribution lands so the daily sweep reconciles it.
-_BROKER_SOURCES = ("sreality", "idnes", "ceskereality", "realitymix", "remax")
+# Sources whose listings carry a broker block, and the SQL that attributes them —
+# both derived from the ONE registry (toolkit.broker_sources), which scraper.db
+# also reads for the dirty-queue allowlist. Onboarding a portal is a config row
+# there; nothing in this file changes.
+_BROKER_SOURCES = BROKER_SOURCE_NAMES
+_ATTRIBUTION_SQL = attribution_statements()
 
-# --- Attribution (sreality, set-based from raw_json). {sel} = a listings selector. ---
-
-_IDENTITIES_UPSERT = """
-WITH src AS (
-  SELECT
-    (l.raw_json->'user'->>'user_id')                           AS uid,
-    nullif(l.raw_json->'user'->>'user_name', '')               AS name,
-    lower(nullif(l.raw_json->'user'->>'user_email', ''))       AS email,
-    nullif(l.raw_json->'user'->>'broker_rating', '')::numeric  AS rating,
-    nullif(l.raw_json->'user'->>'broker_review_count', '')::int AS reviews,
-    l.first_seen_at, l.last_seen_at
-  FROM listings l
-  WHERE l.source = 'sreality' AND l.raw_json ? 'user'
-    AND (l.raw_json->'user'->>'user_id') IS NOT NULL
-    AND {sel}
-),
-agg AS (SELECT uid, min(first_seen_at) AS fseen, max(last_seen_at) AS lseen FROM src GROUP BY uid),
-latest AS (
-  SELECT DISTINCT ON (uid) uid, name, email, rating, reviews
-  FROM src ORDER BY uid, last_seen_at DESC NULLS LAST
-)
-INSERT INTO broker_identities
-  (source, source_broker_id_native, display_name, email, rating, review_count,
-   first_seen_at, last_seen_at, attrs_computed_at)
-SELECT 'sreality', a.uid, lt.name, lt.email, lt.rating, lt.reviews, a.fseen, a.lseen, now()
-FROM agg a JOIN latest lt USING (uid)
-ON CONFLICT (source, source_broker_id_native) DO UPDATE SET
-  display_name = CASE WHEN EXCLUDED.last_seen_at >= broker_identities.last_seen_at
-                      THEN EXCLUDED.display_name ELSE broker_identities.display_name END,
-  email        = CASE WHEN EXCLUDED.last_seen_at >= broker_identities.last_seen_at
-                      THEN EXCLUDED.email ELSE broker_identities.email END,
-  rating       = CASE WHEN EXCLUDED.last_seen_at >= broker_identities.last_seen_at
-                      THEN EXCLUDED.rating ELSE broker_identities.rating END,
-  review_count = CASE WHEN EXCLUDED.last_seen_at >= broker_identities.last_seen_at
-                      THEN EXCLUDED.review_count ELSE broker_identities.review_count END,
-  first_seen_at = least(broker_identities.first_seen_at, EXCLUDED.first_seen_at),
-  last_seen_at  = greatest(broker_identities.last_seen_at, EXCLUDED.last_seen_at),
-  attrs_computed_at = now()
-"""
-
-_CONTACTS_EMAIL_UPSERT = """
-INSERT INTO broker_identity_contacts (broker_identity_id, source, kind, value, first_seen_at, last_seen_at)
-SELECT bi.id, 'sreality', 'email', lower(nullif(l.raw_json->'user'->>'user_email', '')),
-       min(l.first_seen_at), max(l.last_seen_at)
-FROM listings l
-JOIN broker_identities bi
-  ON bi.source = 'sreality' AND bi.source_broker_id_native = (l.raw_json->'user'->>'user_id')
-WHERE l.source = 'sreality' AND l.raw_json ? 'user'
-  AND nullif(l.raw_json->'user'->>'user_email', '') IS NOT NULL AND {sel}
-GROUP BY bi.id, lower(nullif(l.raw_json->'user'->>'user_email', ''))
-ON CONFLICT (broker_identity_id, kind, value) DO UPDATE SET
-  last_seen_at = greatest(broker_identity_contacts.last_seen_at, EXCLUDED.last_seen_at)
-"""
-
-_CONTACTS_PHONE_UPSERT = """
-INSERT INTO broker_identity_contacts (broker_identity_id, source, kind, value, first_seen_at, last_seen_at)
-SELECT bi.id, 'sreality', 'phone', ph.norm, min(l.first_seen_at), max(l.last_seen_at)
-FROM listings l
-JOIN broker_identities bi
-  ON bi.source = 'sreality' AND bi.source_broker_id_native = (l.raw_json->'user'->>'user_id')
-CROSS JOIN LATERAL (
-  SELECT CASE WHEN length(d.digits) = 9 THEN '420' || d.digits ELSE d.digits END AS norm
-  FROM (
-    SELECT regexp_replace(p->>'phone', '[^0-9]', '', 'g') AS digits
-    FROM jsonb_array_elements(coalesce(l.raw_json->'user'->'user_phones', '[]'::jsonb)) p
-  ) d
-  WHERE length(d.digits) >= 9
-) ph
-WHERE l.source = 'sreality' AND l.raw_json ? 'user' AND {sel}
-GROUP BY bi.id, ph.norm
-ON CONFLICT (broker_identity_id, kind, value) DO UPDATE SET
-  last_seen_at = greatest(broker_identity_contacts.last_seen_at, EXCLUDED.last_seen_at)
-"""
-
-_LINK_LISTINGS_IDENTITY = """
-UPDATE listings l SET broker_identity_id = bi.id
-FROM broker_identities bi
-WHERE bi.source = 'sreality' AND bi.source_broker_id_native = (l.raw_json->'user'->>'user_id')
-  AND l.source = 'sreality' AND l.raw_json ? 'user'
-  AND (l.raw_json->'user'->>'user_id') IS NOT NULL
-  AND l.broker_identity_id IS DISTINCT FROM bi.id AND {sel}
-"""
-
-# --- idnes attribution (from raw_json->'broker'; account_oid is the per-broker key,
-#     name from the contact heading, email/phone from the contact links). Same shape
-#     as sreality but a different JSON path + a scalar phone. ---
-
-_IDNES_IDENTITIES_UPSERT = """
-WITH src AS (
-  SELECT
-    (l.raw_json->'broker'->>'account_oid')            AS uid,
-    nullif(l.raw_json->'broker'->>'name', '')          AS name,
-    lower(nullif(l.raw_json->'broker'->>'email', ''))  AS email,
-    l.first_seen_at, l.last_seen_at
-  FROM listings l
-  WHERE l.source = 'idnes' AND l.raw_json ? 'broker'
-    AND (l.raw_json->'broker'->>'account_oid') IS NOT NULL
-    AND {sel}
-),
-agg AS (SELECT uid, min(first_seen_at) AS fseen, max(last_seen_at) AS lseen FROM src GROUP BY uid),
-latest AS (SELECT DISTINCT ON (uid) uid, name, email FROM src ORDER BY uid, last_seen_at DESC NULLS LAST)
-INSERT INTO broker_identities
-  (source, source_broker_id_native, display_name, email, first_seen_at, last_seen_at, attrs_computed_at)
-SELECT 'idnes', a.uid, lt.name, lt.email, a.fseen, a.lseen, now()
-FROM agg a JOIN latest lt USING (uid)
-ON CONFLICT (source, source_broker_id_native) DO UPDATE SET
-  display_name = CASE WHEN EXCLUDED.last_seen_at >= broker_identities.last_seen_at
-                      THEN EXCLUDED.display_name ELSE broker_identities.display_name END,
-  email        = CASE WHEN EXCLUDED.last_seen_at >= broker_identities.last_seen_at
-                      THEN EXCLUDED.email ELSE broker_identities.email END,
-  first_seen_at = least(broker_identities.first_seen_at, EXCLUDED.first_seen_at),
-  last_seen_at  = greatest(broker_identities.last_seen_at, EXCLUDED.last_seen_at),
-  attrs_computed_at = now()
-"""
-
-# The chunk CTE is MATERIALIZED so the listings scan is bounded by {sel} (the chunk
-# ids) BEFORE the join to broker_identities — otherwise, with cold idnes stats on the
-# first sweep, the planner inverts the join and detoasts far more idnes raw_json than
-# the chunk, blowing the statement timeout.
-_IDNES_CONTACTS_EMAIL_UPSERT = """
-WITH chunk AS MATERIALIZED (
-  SELECT (l.raw_json->'broker'->>'account_oid') AS uid,
-         lower(nullif(l.raw_json->'broker'->>'email', '')) AS email,
-         l.first_seen_at, l.last_seen_at
-  FROM listings l
-  WHERE l.source = 'idnes' AND l.raw_json ? 'broker'
-    AND nullif(l.raw_json->'broker'->>'email', '') IS NOT NULL AND {sel}
-)
-INSERT INTO broker_identity_contacts (broker_identity_id, source, kind, value, first_seen_at, last_seen_at)
-SELECT bi.id, 'idnes', 'email', c.email, min(c.first_seen_at), max(c.last_seen_at)
-FROM chunk c
-JOIN broker_identities bi ON bi.source = 'idnes' AND bi.source_broker_id_native = c.uid
-GROUP BY bi.id, c.email
-ON CONFLICT (broker_identity_id, kind, value) DO UPDATE SET
-  last_seen_at = greatest(broker_identity_contacts.last_seen_at, EXCLUDED.last_seen_at)
-"""
-
-_IDNES_CONTACTS_PHONE_UPSERT = """
-WITH chunk AS MATERIALIZED (
-  SELECT (l.raw_json->'broker'->>'account_oid') AS uid,
-         regexp_replace(l.raw_json->'broker'->>'phone', '[^0-9]', '', 'g') AS phone,
-         l.first_seen_at, l.last_seen_at
-  FROM listings l
-  WHERE l.source = 'idnes' AND l.raw_json ? 'broker'
-    AND length(regexp_replace(coalesce(l.raw_json->'broker'->>'phone', ''), '[^0-9]', '', 'g')) >= 9
-    AND {sel}
-)
-INSERT INTO broker_identity_contacts (broker_identity_id, source, kind, value, first_seen_at, last_seen_at)
-SELECT bi.id, 'idnes', 'phone', c.phone, min(c.first_seen_at), max(c.last_seen_at)
-FROM chunk c
-JOIN broker_identities bi ON bi.source = 'idnes' AND bi.source_broker_id_native = c.uid
-GROUP BY bi.id, c.phone
-ON CONFLICT (broker_identity_id, kind, value) DO UPDATE SET
-  last_seen_at = greatest(broker_identity_contacts.last_seen_at, EXCLUDED.last_seen_at)
-"""
-
-_IDNES_LINK_LISTINGS_IDENTITY = """
-UPDATE listings l SET broker_identity_id = bi.id
-FROM broker_identities bi
-WHERE bi.source = 'idnes' AND bi.source_broker_id_native = (l.raw_json->'broker'->>'account_oid')
-  AND l.source = 'idnes' AND l.raw_json ? 'broker'
-  AND (l.raw_json->'broker'->>'account_oid') IS NOT NULL
-  AND l.broker_identity_id IS DISTINCT FROM bi.id AND {sel}
-"""
-
-# --- ceskereality attribution (from raw_json->'broker'; broker_id is the stable
-#     /realitni-makleri/…-{id}/ profile key, name from the contact heading). Same
-#     shape as idnes but PHONE-ONLY (the site hides broker email behind a form), so
-#     there is no email upsert: no email -> no email_domain -> no firm linkage (an
-#     accepted gap; the singleton broker + phone contact still resolve, and the
-#     phone feeds cross-source bridges). Phone is 420-normalised to match sreality's
-#     contact format (idnes stores bare digits — a pre-existing divergence). ---
-
-_CESKEREALITY_IDENTITIES_UPSERT = """
-WITH src AS (
-  SELECT
-    (l.raw_json->'broker'->>'broker_id')       AS uid,
-    nullif(l.raw_json->'broker'->>'name', '')   AS name,
-    l.first_seen_at, l.last_seen_at
-  FROM listings l
-  WHERE l.source = 'ceskereality' AND l.raw_json ? 'broker'
-    AND (l.raw_json->'broker'->>'broker_id') IS NOT NULL
-    AND {sel}
-),
-agg AS (SELECT uid, min(first_seen_at) AS fseen, max(last_seen_at) AS lseen FROM src GROUP BY uid),
-latest AS (SELECT DISTINCT ON (uid) uid, name FROM src ORDER BY uid, last_seen_at DESC NULLS LAST)
-INSERT INTO broker_identities
-  (source, source_broker_id_native, display_name, first_seen_at, last_seen_at, attrs_computed_at)
-SELECT 'ceskereality', a.uid, lt.name, a.fseen, a.lseen, now()
-FROM agg a JOIN latest lt USING (uid)
-ON CONFLICT (source, source_broker_id_native) DO UPDATE SET
-  display_name = CASE WHEN EXCLUDED.last_seen_at >= broker_identities.last_seen_at
-                      THEN EXCLUDED.display_name ELSE broker_identities.display_name END,
-  first_seen_at = least(broker_identities.first_seen_at, EXCLUDED.first_seen_at),
-  last_seen_at  = greatest(broker_identities.last_seen_at, EXCLUDED.last_seen_at),
-  attrs_computed_at = now()
-"""
-
-_CESKEREALITY_CONTACTS_PHONE_UPSERT = """
-WITH chunk AS MATERIALIZED (
-  SELECT (l.raw_json->'broker'->>'broker_id') AS uid,
-         regexp_replace(l.raw_json->'broker'->>'phone', '[^0-9]', '', 'g') AS digits,
-         l.first_seen_at, l.last_seen_at
-  FROM listings l
-  WHERE l.source = 'ceskereality' AND l.raw_json ? 'broker'
-    AND length(regexp_replace(coalesce(l.raw_json->'broker'->>'phone', ''), '[^0-9]', '', 'g')) >= 9
-    AND {sel}
-)
-INSERT INTO broker_identity_contacts (broker_identity_id, source, kind, value, first_seen_at, last_seen_at)
-SELECT bi.id, 'ceskereality', 'phone',
-       CASE WHEN length(c.digits) = 9 THEN '420' || c.digits ELSE c.digits END,
-       min(c.first_seen_at), max(c.last_seen_at)
-FROM chunk c
-JOIN broker_identities bi ON bi.source = 'ceskereality' AND bi.source_broker_id_native = c.uid
-GROUP BY bi.id, CASE WHEN length(c.digits) = 9 THEN '420' || c.digits ELSE c.digits END
-ON CONFLICT (broker_identity_id, kind, value) DO UPDATE SET
-  last_seen_at = greatest(broker_identity_contacts.last_seen_at, EXCLUDED.last_seen_at)
-"""
-
-_CESKEREALITY_LINK_LISTINGS_IDENTITY = """
-UPDATE listings l SET broker_identity_id = bi.id
-FROM broker_identities bi
-WHERE bi.source = 'ceskereality' AND bi.source_broker_id_native = (l.raw_json->'broker'->>'broker_id')
-  AND l.source = 'ceskereality' AND l.raw_json ? 'broker'
-  AND (l.raw_json->'broker'->>'broker_id') IS NOT NULL
-  AND l.broker_identity_id IS DISTINCT FROM bi.id AND {sel}
-"""
-
-# --- realitymix attribution (from raw_json->'broker'; broker_id is the stable
-#     /profil-realitniho-maklere/…-{id} profile key, name best-effort). IDENTITY-
-#     ONLY: realitymix hides the broker phone behind a /trackredir click and the
-#     email behind a form, so there is no contact upsert here — no email -> no
-#     email_domain -> no firm linkage (accepted gap; the singleton broker + the
-#     agency_id still resolve the listing to a stable identity). Same shape as
-#     ceskereality otherwise. ---
-
-_REALITYMIX_IDENTITIES_UPSERT = """
-WITH src AS (
-  SELECT
-    (l.raw_json->'broker'->>'broker_id')       AS uid,
-    nullif(l.raw_json->'broker'->>'name', '')   AS name,
-    l.first_seen_at, l.last_seen_at
-  FROM listings l
-  WHERE l.source = 'realitymix' AND l.raw_json ? 'broker'
-    AND (l.raw_json->'broker'->>'broker_id') IS NOT NULL
-    AND {sel}
-),
-agg AS (SELECT uid, min(first_seen_at) AS fseen, max(last_seen_at) AS lseen FROM src GROUP BY uid),
-latest AS (SELECT DISTINCT ON (uid) uid, name FROM src ORDER BY uid, last_seen_at DESC NULLS LAST)
-INSERT INTO broker_identities
-  (source, source_broker_id_native, display_name, first_seen_at, last_seen_at, attrs_computed_at)
-SELECT 'realitymix', a.uid, lt.name, a.fseen, a.lseen, now()
-FROM agg a JOIN latest lt USING (uid)
-ON CONFLICT (source, source_broker_id_native) DO UPDATE SET
-  display_name = CASE WHEN EXCLUDED.last_seen_at >= broker_identities.last_seen_at
-                      THEN EXCLUDED.display_name ELSE broker_identities.display_name END,
-  first_seen_at = least(broker_identities.first_seen_at, EXCLUDED.first_seen_at),
-  last_seen_at  = greatest(broker_identities.last_seen_at, EXCLUDED.last_seen_at),
-  attrs_computed_at = now()
-"""
-
-_REALITYMIX_LINK_LISTINGS_IDENTITY = """
-UPDATE listings l SET broker_identity_id = bi.id
-FROM broker_identities bi
-WHERE bi.source = 'realitymix' AND bi.source_broker_id_native = (l.raw_json->'broker'->>'broker_id')
-  AND l.source = 'realitymix' AND l.raw_json ? 'broker'
-  AND (l.raw_json->'broker'->>'broker_id') IS NOT NULL
-  AND l.broker_identity_id IS DISTINCT FROM bi.id AND {sel}
-"""
+# Domestic = the listing resolved to a Czech obec. The admin hierarchy is derived
+# from `geom` by a BEFORE trigger, so a foreign pin lands outside every CZ boundary
+# and all three of region/okres/obec stay NULL (verified: 0 of the 38,197
+# obec-less attributed listings carry a region_id). Matches the split
+# docs/design/media-integrity-architecture.md §Q4 already committed the platform
+# to, and the guard broker_region_type_stats applies at refresh time — one
+# definition of "foreign", not three.
+_DOMESTIC = "l.obec_id IS NOT NULL"
 
 # --- Firm resolution (global; %(free)s / %(franchise)s are text[] params). ---
 
@@ -443,6 +193,12 @@ lst AS (
     count(*) FILTER (WHERE l.is_active AND l.last_seen_at > now() - interval '7 days') AS alc,
     count(DISTINCT coalesce(l.property_id, -l.id))
       FILTER (WHERE l.is_active AND l.last_seen_at > now() - interval '7 days') AS apc,
+    count(*) FILTER (WHERE {domestic}) AS cz_lc,
+    count(DISTINCT coalesce(l.property_id, -l.id)) FILTER (WHERE {domestic}) AS cz_pc,
+    count(*) FILTER (WHERE {domestic}
+      AND l.is_active AND l.last_seen_at > now() - interval '7 days') AS cz_alc,
+    count(DISTINCT coalesce(l.property_id, -l.id)) FILTER (WHERE {domestic}
+      AND l.is_active AND l.last_seen_at > now() - interval '7 days') AS cz_apc,
     min(l.first_seen_at) AS fseen, max(l.last_seen_at) AS lseen
   FROM listings l JOIN broker_identities bi ON bi.id = l.broker_identity_id
   WHERE bi.broker_id IS NOT NULL {bscope}
@@ -471,6 +227,10 @@ UPDATE brokers b SET
   property_count = coalesce(ls.pc, 0),
   active_listing_count = coalesce(ls.alc, 0),
   active_property_count = coalesce(ls.apc, 0),
+  cz_listing_count = coalesce(ls.cz_lc, 0),
+  cz_property_count = coalesce(ls.cz_pc, 0),
+  cz_active_listing_count = coalesce(ls.cz_alc, 0),
+  cz_active_property_count = coalesce(ls.cz_apc, 0),
   first_seen_at = coalesce(ls.fseen, b.first_seen_at),
   last_seen_at = coalesce(ls.lseen, b.last_seen_at),
   stats_computed_at = now()
@@ -481,6 +241,11 @@ LEFT JOIN pfirm pf ON pf.broker_id = il.broker_id
 LEFT JOIN pphone pp ON pp.broker_id = il.broker_id
 WHERE b.id = il.broker_id AND b.status = 'active'
 """
+
+# Bound once, here, so every caller — including api.broker_review's per-broker
+# recompute after a manual merge/unmerge — writes the cz_* columns from the SAME
+# predicate without threading it through .format(). {bscope} stays open.
+_BROKER_ROLLUP = _BROKER_ROLLUP.replace("{domestic}", _DOMESTIC)
 
 _MEMBERSHIP_RECOMPUTE = """
 WITH agg AS (
@@ -780,90 +545,15 @@ def _release_lock(conn: Any, holder: str,
 
 
 def _attribute(conn: Any, sel: str, params: dict[str, Any]) -> None:
-    """Run per-source attribution (sreality raw_json.user + idnes/ceskereality
-    raw_json.broker)."""
+    """Run every registered source's attribution over one listings selector.
+
+    Source selection is a literal inside each statement, so a single-portal chunk
+    still issues all of them; the ones that match nothing are bounded by the same
+    {sel} id list and cost ~nothing. That is what lets the sweep be ONE ascending
+    id rotation over every portal rather than a cursor per source."""
     with conn.cursor() as cur:
-        cur.execute(_IDENTITIES_UPSERT.format(sel=sel), params)
-        cur.execute(_CONTACTS_EMAIL_UPSERT.format(sel=sel), params)
-        cur.execute(_CONTACTS_PHONE_UPSERT.format(sel=sel), params)
-        cur.execute(_LINK_LISTINGS_IDENTITY.format(sel=sel), params)
-        cur.execute(_IDNES_IDENTITIES_UPSERT.format(sel=sel), params)
-        cur.execute(_IDNES_CONTACTS_EMAIL_UPSERT.format(sel=sel), params)
-        cur.execute(_IDNES_CONTACTS_PHONE_UPSERT.format(sel=sel), params)
-        cur.execute(_IDNES_LINK_LISTINGS_IDENTITY.format(sel=sel), params)
-        cur.execute(_CESKEREALITY_IDENTITIES_UPSERT.format(sel=sel), params)
-        cur.execute(_CESKEREALITY_CONTACTS_PHONE_UPSERT.format(sel=sel), params)
-        cur.execute(_CESKEREALITY_LINK_LISTINGS_IDENTITY.format(sel=sel), params)
-        cur.execute(_REALITYMIX_IDENTITIES_UPSERT.format(sel=sel), params)
-        cur.execute(_REALITYMIX_LINK_LISTINGS_IDENTITY.format(sel=sel), params)
-        cur.execute(_REMAX_IDENTITIES_UPSERT.format(sel=sel), params)
-        cur.execute(_REMAX_CONTACTS_EMAIL_UPSERT.format(sel=sel), params)
-        cur.execute(_REMAX_LINK_LISTINGS_IDENTITY.format(sel=sel), params)
-
-# --- remax attribution (from raw_json->'broker'; broker_id is the `uzivatele/{id}`
-#     photo-directory key, name from the sidebar heading, email from its mailto).
-#     Same shape as idnes but EMAIL-ONLY: `broker_phone` is an intentional zero on every
-#     portal, so there is no phone upsert. Email matters here beyond contact detail —
-#     broker_identities.email_domain is the ONLY firm key, and re-max.cz already exists
-#     as an is_franchise firm, so these identities join it rather than minting a new one. ---
-
-_REMAX_IDENTITIES_UPSERT = """
-WITH src AS (
-  SELECT
-    (l.raw_json->'broker'->>'broker_id')               AS uid,
-    nullif(l.raw_json->'broker'->>'name', '')          AS name,
-    lower(nullif(l.raw_json->'broker'->>'email', ''))  AS email,
-    l.first_seen_at, l.last_seen_at
-  FROM listings l
-  WHERE l.source = 'remax' AND l.raw_json ? 'broker'
-    AND (l.raw_json->'broker'->>'broker_id') IS NOT NULL
-    AND {sel}
-),
-agg AS (SELECT uid, min(first_seen_at) AS fseen, max(last_seen_at) AS lseen FROM src GROUP BY uid),
-latest AS (SELECT DISTINCT ON (uid) uid, name, email FROM src ORDER BY uid, last_seen_at DESC NULLS LAST)
-INSERT INTO broker_identities
-  (source, source_broker_id_native, display_name, email, first_seen_at, last_seen_at, attrs_computed_at)
-SELECT 'remax', a.uid, lt.name, lt.email, a.fseen, a.lseen, now()
-FROM agg a JOIN latest lt USING (uid)
-ON CONFLICT (source, source_broker_id_native) DO UPDATE SET
-  display_name = CASE WHEN EXCLUDED.last_seen_at >= broker_identities.last_seen_at
-                      THEN EXCLUDED.display_name ELSE broker_identities.display_name END,
-  email        = CASE WHEN EXCLUDED.last_seen_at >= broker_identities.last_seen_at
-                      THEN EXCLUDED.email ELSE broker_identities.email END,
-  first_seen_at = least(broker_identities.first_seen_at, EXCLUDED.first_seen_at),
-  last_seen_at  = greatest(broker_identities.last_seen_at, EXCLUDED.last_seen_at),
-  attrs_computed_at = now()
-"""
-
-# MATERIALIZED for the same reason as the idnes variant: bound the listings scan by
-# {sel} BEFORE joining broker_identities, or the planner detoasts far more raw_json
-# than the chunk and blows the statement timeout on a cold first sweep.
-_REMAX_CONTACTS_EMAIL_UPSERT = """
-WITH chunk AS MATERIALIZED (
-  SELECT (l.raw_json->'broker'->>'broker_id') AS uid,
-         lower(nullif(l.raw_json->'broker'->>'email', '')) AS email,
-         l.first_seen_at, l.last_seen_at
-  FROM listings l
-  WHERE l.source = 'remax' AND l.raw_json ? 'broker'
-    AND nullif(l.raw_json->'broker'->>'email', '') IS NOT NULL AND {sel}
-)
-INSERT INTO broker_identity_contacts (broker_identity_id, source, kind, value, first_seen_at, last_seen_at)
-SELECT bi.id, 'remax', 'email', c.email, min(c.first_seen_at), max(c.last_seen_at)
-FROM chunk c
-JOIN broker_identities bi ON bi.source = 'remax' AND bi.source_broker_id_native = c.uid
-GROUP BY bi.id, c.email
-ON CONFLICT (broker_identity_id, kind, value) DO UPDATE SET
-  last_seen_at = greatest(broker_identity_contacts.last_seen_at, EXCLUDED.last_seen_at)
-"""
-
-_REMAX_LINK_LISTINGS_IDENTITY = """
-UPDATE listings l SET broker_identity_id = bi.id
-FROM broker_identities bi
-WHERE bi.source = 'remax' AND bi.source_broker_id_native = (l.raw_json->'broker'->>'broker_id')
-  AND l.source = 'remax' AND l.raw_json ? 'broker'
-  AND (l.raw_json->'broker'->>'broker_id') IS NOT NULL
-  AND l.broker_identity_id IS DISTINCT FROM bi.id AND {sel}
-"""
+        for sql in _ATTRIBUTION_SQL:
+            cur.execute(sql.format(sel=sel), params)
 
 
 def _resolve_firms(conn: Any, free: list[str], franchise: list[str]) -> None:

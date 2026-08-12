@@ -831,3 +831,158 @@ def test_sweep_retires_proposals_whose_brokers_no_longer_survive(
     sql = next(s for s in conn.executed if "UPDATE broker_merge_candidates" in s)
     assert "status = 'proposed'" in sql
     assert "b.status = 'active'" in sql and ") < 2" in sql
+
+
+# --- C1: registry-driven attribution, CZ-scoped rollups, remax auto-merge -----
+
+
+class _AttributeCur:
+    """Records every statement `_attribute` issues over one chunk."""
+
+    def __init__(self) -> None:
+        self.executed: list[tuple[str, Any]] = []
+
+    def __enter__(self) -> "_AttributeCur":
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        return None
+
+    def execute(self, sql: str, params: Any = None) -> None:
+        self.executed.append((" ".join(sql.split()), params))
+
+
+class _AttributeConn:
+    def __init__(self) -> None:
+        self.cur = _AttributeCur()
+
+    def cursor(self) -> _AttributeCur:
+        return self.cur
+
+
+def test_attribute_runs_every_registered_statement_once_per_chunk() -> None:
+    """The dispatcher was 16 hand-written `cur.execute` lines; onboarding a portal
+    meant remembering to add 2-4 more. It is now driven by the registry, so a
+    config row that lands is a statement that runs."""
+    from toolkit.broker_sources import attribution_statements
+
+    from scripts.resolve_brokers import _attribute
+
+    conn = _AttributeConn()
+    _attribute(conn, "l.id = ANY(%(ids)s)", {"ids": [7, 8]})
+
+    assert len(conn.cur.executed) == len(attribution_statements())
+    assert all(p == {"ids": [7, 8]} for _, p in conn.cur.executed)
+    # Every statement is bound to the chunk — none scans the whole corpus.
+    assert all("%(ids)s" in s for s, _ in conn.cur.executed)
+    assert all("{sel}" not in s for s, _ in conn.cur.executed)
+    # ...and every registered source is represented, mmreality included.
+    for source in ("sreality", "idnes", "ceskereality", "realitymix", "remax",
+                   "mmreality"):
+        assert any(f"l.source = '{source}'" in s for s, _ in conn.cur.executed)
+
+
+def test_broker_bearing_ids_scan_includes_mmreality() -> None:
+    """The full sweep enumerates ids by source; a portal missing here is never
+    reconciled by the daily sweep no matter what _attribute would do with it."""
+    conn = _KeysetConn([1, 2, 3])
+    _broker_bearing_ids(conn, page_size=10)
+    assert "mmreality" in conn.executed[0][1]["srcs"]
+
+
+def test_broker_rollup_writes_cz_counts_from_the_domestic_predicate() -> None:
+    """D4: the leaderboard's stored counts. Two idnes syndication feeds carry
+    ~26k foreign listings and ranked #1 and #2 nationally, 8x the busiest genuinely
+    Czech broker, because these columns counted every attributed row."""
+    from scripts.resolve_brokers import _BROKER_ROLLUP, _DOMESTIC
+
+    sql = " ".join(_BROKER_ROLLUP.format(bscope="").split())
+    assert _DOMESTIC == "l.obec_id IS NOT NULL"
+    # The predicate is bound at import, not left for the caller to remember.
+    assert "{domestic}" not in sql
+    for col in ("cz_listing_count", "cz_property_count",
+                "cz_active_listing_count", "cz_active_property_count"):
+        assert f"{col} = coalesce(ls.cz_" in sql
+    assert sql.count(f"FILTER (WHERE {_DOMESTIC}") == 4
+    # ...and the unscoped columns still count everything (rule #3: scope, not delete).
+    assert "listing_count = coalesce(ls.lc, 0)" in sql
+    assert "active_property_count = coalesce(ls.apc, 0)" in sql
+
+
+def test_manual_merge_recompute_writes_the_cz_columns_too() -> None:
+    """api.broker_review imports the same constant for its post-merge recompute;
+    if it wrote only the unscoped counts, a merged broker's ranking would silently
+    fall back to zero until the next daily sweep."""
+    from api.broker_review import _BROKER_ROLLUP as imported
+
+    from scripts.resolve_brokers import _BROKER_ROLLUP
+
+    assert imported is _BROKER_ROLLUP
+    assert "cz_active_property_count" in imported.format(
+        bscope="AND broker_id = ANY(%(bids)s)")
+
+
+def test_auto_merge_gate_now_corroborates_a_remax_pair() -> None:
+    """D5. The gate needs BOTH sides enabled, so before this change every remax
+    pair fell through to operator review. Measured on prod: 1,055 broker pairs,
+    99.8% with an exactly-matching name key, max component 3 identities."""
+    from toolkit import broker_resolver as R
+
+    identities = [R.Identity(1, "remax", "Jan Novák"),
+                  R.Identity(2, "sreality", "Novák Jan"),
+                  R.Identity(3, "idnes", "Jan Novák")]
+    bridges = [R.Bridge(1, 2, "email", "j.novak@re-max.cz"),
+               R.Bridge(1, 3, "email", "j.novak@re-max.cz")]
+
+    before = R.decide_merges(identities, bridges, ["sreality", "idnes"])
+    assert before.auto_merge_groups == []
+    assert before.review_pairs == [(1, 2), (1, 3)]
+
+    after = R.decide_merges(identities, bridges, ["sreality", "idnes", "remax"])
+    assert after.auto_merge_groups == [[1, 2, 3]]
+    assert after.review_pairs == []
+
+
+def test_remax_auto_merge_still_needs_a_matching_name() -> None:
+    """remax publishes no phone (1,079 emails, 0 phones on prod), so a remax pair
+    can never reach the '>=2 independent bridges' rung — the name is the ONLY
+    corroboration. A disagreeing name must still fall through to review."""
+    from toolkit import broker_resolver as R
+
+    identities = [R.Identity(1, "remax", "Jan Novák"),
+                  R.Identity(2, "sreality", "Petra Svobodová")]
+    bridges = [R.Bridge(1, 2, "email", "office@re-max.cz")]
+
+    decision = R.decide_merges(identities, bridges, ["sreality", "idnes", "remax"])
+    assert decision.auto_merge_groups == []
+    assert decision.review_pairs == [(1, 2)]
+
+
+def test_settings_reader_lowercases_the_auto_merge_source_list() -> None:
+    """_settings feeds decide_merges directly, and the gate compares lowercased —
+    an operator hand-editing the JSON to "ReMax" must still enable it."""
+    import scripts.resolve_brokers as rb
+
+    class _SettingsCur(_AttributeCur):
+        def fetchall(self) -> list[tuple[str, Any]]:
+            return [("broker_auto_merge_sources", ["Sreality", "IDNES", "ReMax"])]
+
+    class _SettingsConn:
+        def cursor(self) -> _SettingsCur:
+            return _SettingsCur()
+
+    _free, _franchise, auto = rb._settings(_SettingsConn())
+    assert auto == ["sreality", "idnes", "remax"]
+
+
+def test_migration_397_adds_remax_to_the_live_auto_merge_setting() -> None:
+    """The flag is runtime data, so the migration is how the change reaches both
+    git and prod. Idempotent by the `not (value ? ...)` guard — a replay of an
+    already-updated row is a no-op, and the operator can revert with one UPDATE."""
+    from pathlib import Path
+
+    sql = (Path(__file__).resolve().parent.parent / "migrations"
+           / "397_broker_auto_merge_remax.sql").read_text(encoding="utf-8")
+    assert "broker_auto_merge_sources" in sql
+    assert """value || '["remax"]'::jsonb""" in sql
+    assert "not (value ? 'remax')" in sql

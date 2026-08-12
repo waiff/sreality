@@ -142,7 +142,12 @@ def leaderboard(conn: Any, *, region_ids: list[int] | None = None,
 
 
 def search(conn: Any, query: str, *, limit: int = 12) -> dict[str, Any]:
-    """Brokers whose display name matches `query` (>=2 chars), busiest first."""
+    """Brokers whose display name matches `query` (>=2 chars), busiest first.
+
+    Ranked on the CZ-scoped count (migration 396), like every other broker
+    ranking: two idnes syndication feeds carry ~26k foreign listings between them
+    and would otherwise head the results for any query they matched. Both counts
+    are returned, so the row still shows the broker's whole book."""
     term = (query or "").strip()
     limit = max(1, min(int(limit), 100))
     if len(term) < 2:
@@ -150,7 +155,7 @@ def search(conn: Any, query: str, *, limit: int = 12) -> dict[str, Any]:
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
             "SELECT * FROM brokers_public WHERE display_name ILIKE %s "
-            "ORDER BY active_property_count DESC NULLS LAST LIMIT %s",
+            "ORDER BY cz_active_property_count DESC NULLS LAST LIMIT %s",
             (f"%{term}%", limit))
         rows = cur.fetchall()
     fresh = max((r["last_seen_at"] for r in rows if r.get("last_seen_at")), default=None)
