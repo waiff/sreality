@@ -1,0 +1,148 @@
+name: "Jobs: Payload archive pruner (location W2a)"
+
+# The scheduled half of the payload archive's P4 retention policy. The writer already
+# re-pins and caps the one group it just wrote; this lane sweeps the whole store, so a
+# listing that stopped being re-appended still gets its version cap re-asserted, and adds
+# the time-based rule the writer has no expression for: unpinned bodies outside the hot
+# window are dropped. First version, latest version, any body a claim points at and any
+# body a disputed claim names are pinned and survive every path regardless of age or depth.
+#
+# SHIPS DISABLED, WITH A LIVE CRON. The schedule below really does fire weekly from the
+# moment this merges — which is safe because the safety property is in the job, not in the
+# trigger: `location_data.payload_prune` creates its `location_jobs` ops-calendar row
+# DISABLED, reads `enabled` for the lane, and returns before taking a lease and before
+# reading the archive at all. Enabling it is BUILD-PLAN §6 item 5, gated on the W2a storage
+# sign-off and on a decided LOCATION_PAYLOAD_HOT_WINDOW_DAYS:
+#
+#   UPDATE location_jobs SET enabled = true WHERE job_name = 'payload_archive_prune';
+#
+# Scoped exclusively to `portal_raw_payloads`. Claims and resolutions are never pruned
+# (02 section 2.3.2 P4), the legacy staging archive is never a target, and a static test
+# asserts that this module's only removal target is the payload store.
+#
+# Required secret: SUPABASE_DB_URL.
+
+on:
+  schedule:
+    # Weekly Sun 04:00 UTC — the cadence 02 section 2.3.2 P4.2 proposes for
+    # `payload_archive_prune` and what the lane's `location_jobs.cadence` of 7 days is
+    # measured against by the staleness monitor. Sunday 04:00 is the quietest window on
+    # the shared instance: no registry baseline (1st/2nd of the month), no claims intake
+    # peak, and the nightly property sweep has long finished.
+    - cron: "0 4 * * 0"
+  workflow_dispatch:
+    inputs:
+      source:
+        description: "one portal only (blank = the whole archive)"
+        required: false
+        default: ""
+        type: choice
+        options:
+          - ""
+          - sreality
+          - bezrealitky
+          - bazos
+          - idnes
+          - mmreality
+          - remax
+          - ceskereality
+          - realitymix
+          - maxima
+      hot_window_days:
+        description: "drop unpinned bodies last observed longer ago than this (blank = $LOCATION_PAYLOAD_HOT_WINDOW_DAYS or 90)"
+        required: false
+        default: ""
+        type: string
+      version_cap:
+        description: "versions kept per listing/page_kind (blank = $LOCATION_PAYLOAD_VERSION_CAP or 20)"
+        required: false
+        default: ""
+        type: string
+      max_seconds:
+        description: "wall-clock budget, stops between pages (blank = 2700)"
+        required: false
+        default: ""
+        type: string
+      max_groups:
+        description: "stop after visiting this many groups (blank = no limit)"
+        required: false
+        default: ""
+        type: string
+      start_after_source:
+        description: "resume anchor — skip keys at or before (source, native)"
+        required: false
+        default: ""
+        type: string
+      start_after_native:
+        description: "resume anchor — the source_id_native half of the pair"
+        required: false
+        default: ""
+        type: string
+      dry_run:
+        description: "count the groups that would be visited; remove nothing, open no batch row, take no lease"
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  # OUTER, cross-lane: shared with the registry load, the claim intake, the Mapy inventory,
+  # the resolve drain, the churn probe and the payload backfill so at most ONE heavy
+  # location lane runs at a time (2026-08-10 incident — four concurrent lanes against the
+  # shared production instance). See location_registry_load.yml for the full note.
+  group: location-batch
+  cancel-in-progress: false
+
+jobs:
+  prune:
+    runs-on: ubuntu-latest
+    concurrency:
+      # INNER, per-lane: two sweeps would walk the same keyset and re-pin the same groups
+      # against each other. Never cancel in flight — a cancelled group's transaction rolls
+      # back whole, but the `location_jobs` lease of a cancelled run strands until its TTL
+      # expires and locks the lane out of a re-dispatch for an hour.
+      group: location-payload-prune
+      cancel-in-progress: false
+    timeout-minutes: 55
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: pip install -e .
+
+      - name: Re-assert the version cap and evict outside the hot window
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          SOURCE: ${{ inputs.source }}
+          HOT_WINDOW_DAYS: ${{ inputs.hot_window_days }}
+          VERSION_CAP: ${{ inputs.version_cap }}
+          MAX_SECONDS: ${{ inputs.max_seconds }}
+          MAX_GROUPS: ${{ inputs.max_groups }}
+          START_AFTER_SOURCE: ${{ inputs.start_after_source }}
+          START_AFTER_NATIVE: ${{ inputs.start_after_native }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        # A bash ARRAY, not a string: an unquoted "$ARGS" word-splits, and a value that
+        # arrives with a stray space would reach argparse as a separate positional. On the
+        # schedule trigger every `inputs.*` is empty, so the cron run is the plain form.
+        run: |
+          ARGS=()
+          if [ -n "$SOURCE" ]; then ARGS+=(--source "$SOURCE"); fi
+          if [ -n "$HOT_WINDOW_DAYS" ]; then ARGS+=(--hot-window-days "$HOT_WINDOW_DAYS"); fi
+          if [ -n "$VERSION_CAP" ]; then ARGS+=(--version-cap "$VERSION_CAP"); fi
+          if [ -n "$MAX_GROUPS" ]; then ARGS+=(--max-groups "$MAX_GROUPS"); fi
+          if [ -n "$START_AFTER_SOURCE" ]; then ARGS+=(--start-after-source "$START_AFTER_SOURCE"); fi
+          if [ -n "$START_AFTER_NATIVE" ]; then ARGS+=(--start-after-native "$START_AFTER_NATIVE"); fi
+          if [ "$DRY_RUN" = "true" ]; then ARGS+=(--dry-run); fi
+          # Default the budget under the job ceiling so the run stops cleanly BETWEEN
+          # pages and stamps a terminal batch row, rather than being killed mid-group by
+          # the runner and leaving its batch row `running`.
+          ARGS+=(--max-seconds "${MAX_SECONDS:-2700}")
+          echo "python -m location_data.payload_prune ${ARGS[*]}"
+          python -m location_data.payload_prune "${ARGS[@]}"

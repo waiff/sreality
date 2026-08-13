@@ -41,6 +41,7 @@ from __future__ import annotations
 import gzip
 import logging
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Protocol
@@ -342,6 +343,58 @@ SELECT DISTINCT k.key
                     WHERE p.body_r2_key = k.key)
 """
 
+def repin_group(
+    cur: psycopg.Cursor,
+    *,
+    source: str,
+    source_id_native: str,
+    page_kind: str,
+) -> None:
+    """Recompute `pinned` authoritatively across one (listing, page_kind) group.
+
+    * The ONE definition of pinned: first version, latest version, a body a claim
+      points at, a body a disputed claim's content address names.
+    * Shared with `payload_prune`, which re-asserts it on a cadence — a contradiction
+      that opens or closes without a new fetch changes the answer, and no append comes
+      along to notice.
+    """
+    cur.execute(_REPIN_SQL, {
+        "source": source,
+        "source_id_native": source_id_native,
+        "page_kind": page_kind,
+    })
+
+
+def prune_group(
+    cur: psycopg.Cursor,
+    *,
+    source: str,
+    source_id_native: str,
+    page_kind: str,
+    version_cap: int,
+) -> list[tuple[int, str | None]]:
+    """Evict unpinned bodies ranked beyond the cap; returns the (id, r2 key) evicted.
+
+    * Reads `pinned`, never recomputes it: call `repin_group` FIRST, in the same
+      transaction, or the cap ranks against a stale pin set.
+    """
+    cur.execute(_PRUNE_SQL, {
+        "source": source,
+        "source_id_native": source_id_native,
+        "page_kind": page_kind,
+        "version_cap": version_cap,
+    })
+    return [(int(row[0]), row[1]) for row in cur.fetchall()]
+
+
+def orphaned_r2_keys(cur: psycopg.Cursor, keys: Sequence[str]) -> tuple[str, ...]:
+    """Of `keys`, the ones no surviving payload row still points at."""
+    if not keys:
+        return ()
+    cur.execute(_ORPHANED_KEYS_SQL, {"keys": list(keys)})
+    return tuple(str(row[0]) for row in cur.fetchall())
+
+
 _STORE: ObjectStore | None = None
 
 
@@ -486,14 +539,10 @@ def append_payload(
         evicted_ids: tuple[int, ...] = ()
         evicted_keys: tuple[str, ...] = ()
         if inserted:
-            cur.execute(_REPIN_SQL, group)
-            cur.execute(_PRUNE_SQL, {**group, "version_cap": cap})
-            evicted = cur.fetchall()
-            evicted_ids = tuple(int(r[0]) for r in evicted)
-            evicted_keys = tuple(r[1] for r in evicted if r[1])
-            if evicted_keys:
-                cur.execute(_ORPHANED_KEYS_SQL, {"keys": list(evicted_keys)})
-                evicted_keys = tuple(r[0] for r in cur.fetchall())
+            repin_group(cur, **group)
+            evicted = prune_group(cur, **group, version_cap=cap)
+            evicted_ids = tuple(row_id for row_id, _ in evicted)
+            evicted_keys = orphaned_r2_keys(cur, [key for _, key in evicted if key])
 
     if evicted_ids:
         # The orphaned R2 objects are handed to W2a-5's pruner, which owns "report

@@ -171,3 +171,14 @@ jobs:
         env:
           TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
         run: pytest tests/test_payload_dual_write_live.py -q
+
+      # W2a-5's pruner sweeps the same store on a cadence, and every property that
+      # matters about it is a property of real constraints: that the cap re-asserts
+      # over a group no append is coming to fix, that the edge pins and the claim FK
+      # survive an age-based removal as well as a count-based one, and that the
+      # ops-calendar row is created DISABLED on a fresh schema. A fake connection can
+      # show the statement ran; only this can show the row is still there.
+      - name: Payload archive pruner semantics (executed, not just PREPAREd)
+        env:
+          TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+        run: pytest tests/location_data/test_payload_prune.py -q
