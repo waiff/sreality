@@ -36,6 +36,13 @@ class _Cur:
 
     def fetchone(self) -> tuple[Any, ...] | None:
         last = self._conn.executed[-1][0]
+        # The portal registry, for W2a-2's payload_dual_write limit read: no
+        # operational override, so the limit resolves to its baked-in False and
+        # the archive stays out of this instrument's way.
+        if "scraper_limits_global" in last:
+            return None
+        if "FROM portals" in last:
+            return (True, [], None, {})
         if "FROM app_settings" in last:
             return None if self._conn.flag is None else (self._conn.flag,)
         return (1,)
@@ -104,15 +111,21 @@ def test_flag_off_writes_no_churn_row() -> None:
     assert "portal_raw_pages" in writes[0][0]
 
 
-def test_flag_off_costs_one_app_settings_lookup_and_nothing_else() -> None:
-    # Pin the shape so the flag-off path can't grow anything more.
+def test_both_gates_off_cost_one_lookup_each_and_nothing_more() -> None:
+    # Pin the shape so the gates-off path can't grow anything more. Two gates
+    # ride this chokepoint now: the shadow-hash flag (one app_settings read) and
+    # W2a-2's payload_dual_write limit (the standard two-SELECT limit
+    # resolution). Both are cached per process — see the next test.
     conn = _FakeConn(flag=None)
 
     _archive(conn)
 
-    assert len(conn.executed) == 2
+    assert len(conn.executed) == 4
     assert "FROM app_settings" in conn.executed[0][0]
     assert conn.executed[0][1] == ("location_payload_shadow_hash",)
+    assert "INSERT INTO portal_raw_pages" in conn.executed[1][0]
+    assert "scraper_limits_global" in conn.executed[2][0]
+    assert "FROM portals" in conn.executed[3][0]
 
 
 def test_flag_is_read_once_per_process_not_once_per_item() -> None:
@@ -124,8 +137,13 @@ def test_flag_is_read_once_per_process_not_once_per_item() -> None:
     for _ in range(50):
         _archive(conn)
 
-    lookups = [e for e in conn.executed if "FROM app_settings" in e[0]]
-    assert len(lookups) == 1
+    gate_reads = [
+        e for e in conn.executed
+        if "FROM app_settings" in e[0] or "FROM portals" in e[0]
+    ]
+    # One shadow-hash flag read + the two SELECTs behind the payload limit.
+    assert len(gate_reads) == 3
+    assert len([e for e in conn.executed if "INSERT INTO" in e[0]]) == 50
 
 
 def test_flag_cache_expires_so_a_flip_reaches_the_always_on_worker() -> None:
@@ -185,8 +203,13 @@ def test_record_churn_false_suppresses_the_hook_entirely() -> None:
 
     _archive(conn, record_churn=False)
 
-    assert conn.executed == [e for e in conn.executed if "portal_raw_pages" in e[0]]
-    assert len(conn.executed) == 1
+    # Not even the flag read: the churn hook is skipped whole. (The two limit
+    # SELECTs behind W2a-2's payload gate are a different gate and still run.)
+    assert _churn_statements(conn) == []
+    assert not [e for e in conn.executed if e[1] == ("location_payload_shadow_hash",)]
+    assert [e for e in conn.executed if "INSERT INTO" in e[0]][0][0].startswith(
+        "INSERT INTO portal_raw_pages"
+    )
 
 
 def test_hook_failure_never_propagates(monkeypatch: pytest.MonkeyPatch) -> None:

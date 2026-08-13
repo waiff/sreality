@@ -16,6 +16,7 @@ portal listings to the cross-source dedup engine.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from typing import Any
 
@@ -69,9 +70,29 @@ query Detail($id: ID!) {
 """
 
 
+_DETAIL_QUERY_SHA256 = hashlib.sha256(_DETAIL_QUERY.encode("utf-8")).hexdigest()
+
+
 def detail_url(uri: str) -> str:
     """Public listing URL for a bezrealitky advert `uri`."""
     return f"{BASE_URL}/nemovitosti-byty-domy/{uri}"
+
+
+def detail_payload_body(advert: dict[str, Any]) -> dict[str, Any]:
+    """The archivable form of one detail response (02 section 2.3.2 P3).
+
+    A GraphQL payload is only as wide as the query that asked for it, so the
+    archive stores the exact query text and its sha256 beside the data —
+    otherwise "what could this row possibly contain" is answerable only by
+    archaeology, and a field the query never requested reads as absent from the
+    portal. It lives here, next to the query, so editing the field list cannot
+    silently desync the archived query from the archived data.
+    """
+    return {
+        "query": _DETAIL_QUERY,
+        "query_sha256": _DETAIL_QUERY_SHA256,
+        "data": advert,
+    }
 
 
 class BezrealitkyClient(BasePortalClient):

@@ -27,7 +27,7 @@ import logging
 from typing import Any
 
 from scraper import db, portal_runner
-from scraper.bezrealitky_client import BezrealitkyClient
+from scraper.bezrealitky_client import BezrealitkyClient, detail_payload_body
 from scraper.bezrealitky_parser import (
     ESTATE_TYPE,
     OFFER_TYPE,
@@ -229,7 +229,13 @@ class BezrealitkyPortal:
             listing = parse_advert(advert)
         except Exception as exc:
             return DrainItem(native_id=native_id, kind="error", error=str(exc))
-        return DrainItem(native_id=native_id, kind="ok", payload={"listing": listing})
+        # The VERBATIM advert rides along for W2a-2's archive: listing.raw is the
+        # advert plus the parser's derived image_urls, and an evidence substrate
+        # that carries a field the portal never sent is not a substrate.
+        return DrainItem(
+            native_id=native_id, kind="ok",
+            payload={"listing": listing, "advert": advert},
+        )
 
     def write_details(self, conn: Any, items: list[DrainItem]) -> dict[str, int]:
         counts = {"new": 0, "updated": 0, "unchanged": 0, "images_discovered": 0}
@@ -251,6 +257,24 @@ class BezrealitkyPortal:
                 content_type="application/json",
                 observation=it.observation_id,
             )
+            # W2a-2: the same gap on the archive side, with the body 02 section
+            # 2.3.2 P3 specifies for a graphql portal — the response data plus
+            # the exact query text and its sha256. `advert` is absent only for an
+            # item this portal's fetch_detail did not build (a hand-made drain
+            # item in a test); falling back to listing.raw would archive the
+            # parser's derived keys as if the portal had sent them.
+            advert = it.payload.get("advert")
+            if advert is not None:
+                db.append_payload_if_enabled(
+                    conn,
+                    source=SOURCE,
+                    source_id_native=listing.source_id_native,
+                    page_kind="detail",
+                    body=lambda: json.dumps(
+                        detail_payload_body(advert), ensure_ascii=False,
+                    ).encode("utf-8"),
+                    content_type="application/json",
+                )
             pk, result = db.ingest_scraped_listing(
                 conn, listing, discovery_seq=it.discovery_seq)
             image_urls = listing.raw.get("image_urls") or []

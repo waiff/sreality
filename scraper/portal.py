@@ -52,6 +52,7 @@ _LIMIT_COERCERS: dict[str, Any] = {
     "suspicious_stop_threshold": float,
     "price_change_min_pct": float,
     "shared_rate_limiter": _as_bool,
+    "payload_dual_write": _as_bool,
 }
 
 
@@ -92,6 +93,13 @@ class PortalLimits:
     # portal (operational_limits) or globally (scraper_limits_global) once the
     # Railway worker lane runs beside the Actions walks.
     shared_rate_limiter: bool = False
+    # Location-data W2a-2: archive every fetched body into the append-on-change
+    # payload store (location_data/payloads.py) alongside the latest-wins
+    # portal_raw_pages staging row. OFF everywhere = zero behavior change; it is
+    # a per-portal knob rather than one app_settings flag because enabling it is
+    # a per-portal STORAGE decision (02 section 2.3.2's churn gate is measured
+    # per portal, and mmreality's 245 KB pages cost 6x bazos's 41 KB ones).
+    payload_dual_write: bool = False
 
     def merged(self, overrides: Any) -> "PortalLimits":
         """Return a copy with each present key from `overrides` (a dict, or None)

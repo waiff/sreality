@@ -2757,10 +2757,17 @@ PAYLOAD_SHADOW_HASH_SETTING = "location_payload_shadow_hash"
 _FLAG_CACHE_TTL = 60.0
 _FLAG_CACHE: dict[str, tuple[float, bool]] = {}
 
+# Same TTL, keyed by SOURCE: the W2a-2 dual-write is a per-portal limit
+# (PortalLimits.payload_dual_write), not one global flag, because enabling the
+# archive is a per-portal storage decision.
+_LIMIT_CACHE: dict[str, tuple[float, bool]] = {}
+
 
 def clear_app_settings_flag_cache() -> None:
-    """Drop the cached flag values (tests; a process that must re-read at once)."""
+    """Drop every cached gate value — app_settings flags AND the per-portal
+    payload-archive limit (tests; a process that must re-read at once)."""
     _FLAG_CACHE.clear()
+    _LIMIT_CACHE.clear()
 
 
 def _app_settings_flag_cached(
@@ -2917,6 +2924,109 @@ def record_payload_churn_if_enabled(
         )
 
 
+def _payload_dual_write_enabled(
+    conn: psycopg.Connection, source: str, *, ttl: float = _FLAG_CACHE_TTL,
+) -> bool:
+    """Is the W2a-2 payload archive switched on for this portal?
+
+    Resolved through the standard limit precedence (baked default < global
+    `app_settings.scraper_limits_global` < `portals.operational_limits`), so
+    enabling it needs no migration and no deploy — the `shared_rate_limiter`
+    precedent. Cached per source for the same reason the shadow-hash flag is:
+    the read is two SELECTs and this sits on a per-page path.
+
+    A failed read is cached as OFF for the same TTL. Off is the safe direction
+    (the archive is an addition, never a dependency of the scrape), and caching
+    the failure is what keeps an unreadable registry row from re-asking twice
+    per fetched page for the rest of a walk.
+    """
+    now = time.monotonic()
+    cached = _LIMIT_CACHE.get(source)
+    if cached is not None and cached[0] > now:
+        return cached[1]
+    # Deferred: scraper.portal must stay free to import scraper.db.
+    from scraper.portal import load_portal_config
+
+    value = False
+    try:
+        if getattr(conn, "autocommit", True):
+            value = bool(load_portal_config(conn, source).limits.payload_dual_write)
+        else:
+            # A caller already inside a transaction gets the read wrapped in a
+            # savepoint: a gate this optional must never poison the ingest
+            # transaction it is riding in.
+            with conn.transaction():
+                value = bool(load_portal_config(conn, source).limits.payload_dual_write)
+    except Exception as exc:  # noqa: BLE001 - the gate must not kill ingest
+        LOG.warning("payload dual-write limit read failed source=%s: %s", source, exc)
+    _LIMIT_CACHE[source] = (now + ttl, value)
+    return value
+
+
+def append_payload_if_enabled(
+    conn: psycopg.Connection,
+    *,
+    source: str,
+    source_id_native: str,
+    page_kind: str,
+    body: bytes | Callable[[], bytes],
+    content_type: str | None = None,
+    http_status: int | None = None,
+) -> None:
+    """Limit-gated, never-raising dual-write into the payload archive (W2a-2).
+
+    `portal_raw_pages` is latest-wins, so the body a claim's evidence span
+    points into is gone the moment the page is refetched;
+    `location_data.payloads.append_payload` is the append-on-change store that
+    ends that, and this is the ONLY form scrapers should call it in. Every
+    failure — limit read, normaliser, append — warns and returns: the archive
+    is downstream of the scrape and must never be able to stop it.
+
+    `body` should be a THUNK wherever producing the bytes costs anything (the
+    churn hook's reasoning: sreality's index payload is multi-MB and this rides
+    the hourly walk), and `content_type` None sniffs it, for the chokepoint that
+    is handed both HTML and JSON through one `html` parameter.
+
+    No idempotency token, unlike the churn counters: the append is
+    content-addressed, so a `_flush_drain_batch` replay after a pooler drop
+    collides on the same `payload_sha256` and bumps `last_observed_at` instead
+    of writing a second row.
+    """
+    try:
+        if not _payload_dual_write_enabled(conn, source):
+            return
+        payload = body() if callable(body) else body
+        if content_type is None:
+            from location_data.payload_norm import sniff_content_type
+            content_type = sniff_content_type(payload)
+        # Deferred like the churn hook's: with the limit off (the default) the
+        # scrape never imports the archive at all.
+        from location_data.payloads import append_payload
+
+        append_payload(
+            conn,
+            source=source,
+            source_id_native=source_id_native,
+            page_kind=page_kind,
+            # The chokepoint knows the portal's own key, not our pk — the row is
+            # reachable by (source, source_id_native, page_kind) either way, and
+            # inventing a listing_id here would mean an extra lookup per page.
+            listing_id=None,
+            body=payload,
+            content_type=content_type,
+            http_status=http_status,
+            # No contract governs a live-ingest body yet; W2's per-portal
+            # contracts are what stamp a version on a mined payload.
+            contract_version=None,
+            observed_at=datetime.now(timezone.utc),
+        )
+    except Exception as exc:  # noqa: BLE001 - the archive must not kill ingest
+        LOG.warning(
+            "payload archive append failed source=%s key=%s: %s",
+            source, source_id_native, exc,
+        )
+
+
 def upsert_portal_raw_page(
     conn: psycopg.Connection,
     *,
@@ -2945,14 +3055,32 @@ def upsert_portal_raw_page(
     `churn_observation` is the caller's per-fetch idempotency token; the drain's
     write_details MUST pass DrainItem.observation_id, because that whole call is
     replayed on a transient pooler drop.
+
+    W2a-2's payload dual-write hangs off the END of this function, so ONE edit
+    covers every HTML detail writer and every index archiver with no per-portal
+    branch (rule #21). It is deliberately NOT gated on the staging row: a
+    `refresh_after_hours` skip means portal_raw_pages already holds a body young
+    enough, which says nothing about whether the CONTENT moved — and an
+    append-on-change archive that drops a genuinely changed body is the one
+    failure it cannot recover from. An unchanged one costs a no-op DO UPDATE.
     """
+    encoded: bytes | None = None
+
+    def _body() -> bytes:
+        # Memoised: with both gates on, a multi-MB index payload is encoded once
+        # for the churn hook and the archive, not twice.
+        nonlocal encoded
+        if encoded is None:
+            encoded = html.encode("utf-8")
+        return encoded
+
     if record_churn:
         record_payload_churn_if_enabled(
             conn,
             source=source,
             source_id_native=source_id_native,
             page_kind=page_kind,
-            body=lambda: html.encode("utf-8"),
+            body=_body,
             observation=churn_observation,
         )
     with conn.cursor() as cur:
@@ -2968,7 +3096,16 @@ def upsert_portal_raw_page(
                  http_status, refresh_after_hours * 3600.0),
             )
         row = cur.fetchone()
-        return int(row[0]) if row is not None else None
+        page_id = int(row[0]) if row is not None else None
+    append_payload_if_enabled(
+        conn,
+        source=source,
+        source_id_native=source_id_native,
+        page_kind=page_kind,
+        body=_body,
+        http_status=http_status,
+    )
+    return page_id
 
 
 def mark_portal_page_parsed(
