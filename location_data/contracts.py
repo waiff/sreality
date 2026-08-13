@@ -10,10 +10,12 @@ Two tables, one header + its immutable entries (migration 382):
   portal_contract_entries (contract_id, entry_id, surface, page_kind, locator, claim_type,
                            extraction_method, …)
 
-`is_active` lives on the HEADER (the partial unique index is per source), and it is the
-only mutable column: a change to any entry is a new `contract_version`, never an edit.
-Projecting a contract whose bytes changed under an already-loaded version is refused —
-that is the whole point of `contract_sha256`.
+`is_active` lives on the HEADER (the partial unique index is per source), and it and
+`shadow` (migration 404) are the only mutable columns: a change to any entry is a new
+`contract_version`, never an edit. Projecting a contract whose bytes changed under an
+already-loaded version is refused — that is the whole point of `contract_sha256`. Both
+mutable columns are operational state, not extraction: `is_active` says which version the
+extractor runs, `shadow` says whether what it mined is admissible to the resolver yet.
 
 PyYAML is a DEV/CI dependency (pyproject `[dev]`, already present for
 scripts/generate_workflow_docs.py) and is imported lazily: this module is a deploy-time
@@ -26,6 +28,7 @@ CLI:
     python -m location_data.contracts --load --git-ref <sha>      # project + activate
     python -m location_data.contracts --retract sreality@1 --reason contract_misread \\
         --by operator [--extractor-id sr.det.gps]
+    python -m location_data.contracts --unshadow sreality@2      # its sample passed
 """
 
 from __future__ import annotations
@@ -300,6 +303,12 @@ class PortalContract:
     exclusion_zones: list[dict[str, Any]]
     precision_priors: dict[str, Any]
     fetch_config: dict[str, Any]
+    # 06 §6.4.0(2): a contract that cannot meet its frozen-sample precision floors
+    # ships in shadow — claims mined and stored, excluded from location_claims_live
+    # (migration 404) and therefore never a resolver input. The YAML key sets the
+    # value a FRESH projection lands with; clearing it afterwards is an operational
+    # UPDATE on the header, not a contract_version bump.
+    shadow: bool = False
     entries: list[ContractEntry] = field(default_factory=list)
     path: Path | None = None
 
@@ -580,6 +589,7 @@ def parse_contract(path: Path) -> PortalContract:
             "regressions": doc.get("regressions") or [],
             "extractor_runtime": doc.get("extractor_runtime"),
         },
+        shadow=bool(doc.get("shadow", False)),
         entries=entries,
         path=path,
     )
@@ -610,10 +620,10 @@ _HEADER_SELECT_SQL = """
 _HEADER_INSERT_SQL = """
     INSERT INTO portal_contracts
         (source, version, contract_sha256, git_ref, identity_ladder, exclusion_zones,
-         precision_priors, fetch_config, is_active)
+         precision_priors, fetch_config, is_active, shadow)
     VALUES (%(source)s, %(version)s, decode(%(sha256)s, 'hex'), %(git_ref)s,
             %(identity_ladder)s, %(exclusion_zones)s, %(precision_priors)s,
-            %(fetch_config)s, false)
+            %(fetch_config)s, false, %(shadow)s)
     RETURNING id
 """
 
@@ -655,6 +665,17 @@ _RETIRE_SQL = """
     WHERE source = %(source)s AND version = %(version)s
 """
 
+# RETURNING reports the NEW row, so the previous value is read from a FROM sub-select:
+# "already shadowed" and "no such contract version" are different operator answers and a
+# bare UPDATE cannot tell them apart.
+_SET_SHADOW_SQL = """
+    UPDATE portal_contracts c SET shadow = %(shadow)s
+    FROM (SELECT id, shadow FROM portal_contracts
+           WHERE source = %(source)s AND version = %(version)s) was
+    WHERE c.id = was.id
+    RETURNING was.shadow
+"""
+
 _RELATIONS = ("portal_contracts", "portal_contract_entries", "location_claim_retractions")
 _REGCLASS_SQL = "SELECT to_regclass(%(name)s)"
 
@@ -680,6 +701,11 @@ def project(
 
     Re-running with the same bytes is a no-op; re-running with DIFFERENT bytes under the
     same version raises — entries are immutable and a change is a new version (02 §2.1.8).
+
+    `contract.shadow` is an INITIAL value, written only on the header INSERT: an operator
+    who un-shadowed a version after its sample passed must not have that decision reverted
+    by the next deploy re-projecting the same unchanged YAML (06 §6.4.0(2)). Re-shadowing
+    goes through `set_shadow`.
     """
     sha_hex = contract.sha256.hex()
     inserted = 0
@@ -698,6 +724,7 @@ def project(
                     "exclusion_zones": psycopg.types.json.Jsonb(contract.exclusion_zones),
                     "precision_priors": psycopg.types.json.Jsonb(contract.precision_priors),
                     "fetch_config": psycopg.types.json.Jsonb(contract.fetch_config),
+                    "shadow": contract.shadow,
                 })
                 contract_id = int(cur.fetchone()[0])
             else:
@@ -778,6 +805,30 @@ def retract(
     return retraction_id
 
 
+def set_shadow(
+    conn: psycopg.Connection,
+    *,
+    source: str,
+    version: int,
+    shadow: bool,
+) -> bool:
+    """06 §6.4.0(2) — flip a contract version between shadow and live. Returns True if the
+    flag moved; raises if that version was never projected.
+
+    Un-shadowing needs NO backfill: the claims have been in `location_claims` since the
+    sweep ran, and migration 404's view excludes them by joining the header, so clearing
+    the flag makes exactly those rows resolver inputs. Nothing is written or rewritten.
+    """
+    with conn.transaction():
+        with conn.cursor() as cur:
+            cur.execute(_SET_SHADOW_SQL,
+                        {"source": source, "version": version, "shadow": shadow})
+            row = cur.fetchone()
+            if row is None:
+                raise ContractError(f"{source}@{version} is not projected — nothing to flip")
+            return bool(row[0]) != shadow
+
+
 # ------------------------------------------------------------------ CLI
 
 def _parse_target(target: str) -> tuple[str, int]:
@@ -792,7 +843,8 @@ def _parse_target(target: str) -> tuple[str, int]:
 def _summarise(contracts: Iterable[PortalContract]) -> str:
     return json.dumps(
         {c.source: {"version": c.version, "entries": len(c.entries),
-                    "w1_readers": sum(1 for e in c.entries if e.reader)}
+                    "w1_readers": sum(1 for e in c.entries if e.reader),
+                    "shadow": c.shadow}
          for c in contracts},
         ensure_ascii=False, sort_keys=True)
 
@@ -807,6 +859,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--git-ref", default=os.environ.get("GITHUB_SHA", "local"))
     parser.add_argument("--no-activate", action="store_true")
     parser.add_argument("--retract", metavar="PORTAL@VERSION")
+    parser.add_argument("--shadow", metavar="PORTAL@VERSION",
+                        help="Exclude this version's claims from location_claims_live.")
+    parser.add_argument("--unshadow", metavar="PORTAL@VERSION",
+                        help="Its frozen sample passed: make its claims resolver inputs.")
     parser.add_argument("--extractor-id", default=None)
     parser.add_argument("--reason", default="operator_judgement")
     parser.add_argument("--note", default=None)
@@ -831,6 +887,22 @@ def main(argv: list[str] | None = None) -> int:
                 retracted_by=args.by, extractor_id=args.extractor_id, note=args.note)
         LOG.info("CONTRACT retracted %s@%s entry=%s id=%d",
                  source, version, args.extractor_id or "*", retraction_id)
+        return 0
+
+    if args.shadow or args.unshadow:
+        if args.shadow and args.unshadow:
+            print("ERROR: --shadow and --unshadow are mutually exclusive", file=sys.stderr)
+            return 2
+        want = bool(args.shadow)
+        source, version = _parse_target(args.shadow or args.unshadow)
+        with db.connect() as conn:
+            missing = missing_relations(conn)
+            if missing:
+                print(f"ERROR: schema not applied; missing {', '.join(missing)}",
+                      file=sys.stderr)
+                return 2
+            moved = set_shadow(conn, source=source, version=version, shadow=want)
+        LOG.info("CONTRACT shadow=%s %s@%s moved=%s", want, source, version, moved)
         return 0
 
     contracts = load_all(args.dir)

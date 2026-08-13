@@ -141,3 +141,14 @@ jobs:
         env:
           TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
         run: pytest tests/test_payload_churn_live.py -q
+
+      # The W2 contract SHADOW gate is one predicate inside one view: a contract
+      # that fails its frozen-sample floors writes claims that the resolver must
+      # not see, and un-shadowing must bring the SAME rows back with no backfill.
+      # PREPARE proves the view compiles; only executing it proves the predicate
+      # excludes what it should, composes with the retraction predicate, and
+      # leaves contract-less claims alone.
+      - name: Contract-shadow view predicate (executed, not just PREPAREd)
+        env:
+          TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+        run: pytest tests/location_data/test_contract_shadow_live.py -q

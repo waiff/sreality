@@ -655,6 +655,27 @@ def test_dispositions_key_on_dedupe_key():
     ), "location_contradictions must keep its version-tuple UNIQUE"
 
 
+def test_the_contract_header_carries_the_shadow_gate():
+    """06 section 6.4.0(2): a contract that cannot meet its frozen-sample precision floors
+    ships in SHADOW — claims written, excluded from resolution. The flag is header state
+    (migration 404), and `location_claims_live` — the one relation 03 reads (A.2 check 9) —
+    is where it is enforced, so no resolver read can forget to ask."""
+    sql = _clean()
+    assert re.search(
+        r"alter table portal_contracts\s+add column (if not exists )?shadow\s+"
+        r"boolean not null default false", sql), (
+        "portal_contracts.shadow must be a NOT NULL DEFAULT false header column")
+    # rindex: the corpus is every location migration concatenated, so the LAST
+    # definition is the one a replay leaves standing.
+    view = sql[sql.rindex("view location_claims_live as"):]
+    view = view[:view.index(";")]
+    assert "pc.shadow" in view, (
+        "location_claims_live must exclude shadowed contracts; enforcing shadow anywhere "
+        "else leaves every future resolver read to remember it")
+    assert "location_claim_retractions" in view, (
+        "the shadow predicate must COMPOSE with the retraction predicate, not replace it")
+
+
 def _revoked_roles(sql: str, head: str) -> set[str] | None:
     """Roles named by the REVOKE whose head matches `head`, or None if there is
     no such REVOKE. A REVOKE that names the wrong roles is worse than none: it
