@@ -2976,6 +2976,108 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/location_payload_churn.yml"
   },
   {
+    "filename": "location_payload_prune.yml",
+    "name": "Jobs: Payload archive pruner (location W2a)",
+    "description": "The scheduled half of the payload archive's P4 retention policy. The writer already re-pins and caps the one group it just wrote; this lane sweeps the whole store, so a listing that stopped being re-appended still gets its version cap re-asserted, and adds the time-based rule the writer has no expression for: unpinned bodies outside the hot window are dropped. First version, latest version, any body a claim points at and any body a disputed claim names are pinned and survive every path regardless of age or depth.",
+    "portal": null,
+    "manual": true,
+    "schedules": [
+      {
+        "cron": "0 4 * * 0",
+        "human": "0 4 * * 0"
+      }
+    ],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "source",
+        "description": "one portal only (blank = the whole archive)",
+        "required": false,
+        "type": "choice",
+        "default": "",
+        "options": [
+          "",
+          "sreality",
+          "bezrealitky",
+          "bazos",
+          "idnes",
+          "mmreality",
+          "remax",
+          "ceskereality",
+          "realitymix",
+          "maxima"
+        ]
+      },
+      {
+        "name": "hot_window_days",
+        "description": "drop unpinned bodies last observed longer ago than this (blank = $LOCATION_PAYLOAD_HOT_WINDOW_DAYS or 90)",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "version_cap",
+        "description": "versions kept per listing/page_kind (blank = $LOCATION_PAYLOAD_VERSION_CAP or 20)",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "max_seconds",
+        "description": "wall-clock budget, stops between pages (blank = 2700)",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "max_groups",
+        "description": "stop after visiting this many groups (blank = no limit)",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "start_after_source",
+        "description": "resume anchor — skip keys at or before (source, native)",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "start_after_native",
+        "description": "resume anchor — the source_id_native half of the pair",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "dry_run",
+        "description": "count the groups that would be visited; remove nothing, open no batch row, take no lease",
+        "required": false,
+        "type": "boolean",
+        "default": "false",
+        "options": null
+      }
+    ],
+    "secrets": [
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "location-batch",
+    "cancelInProgress": false,
+    "timeoutMinutes": 55,
+    "permissions": "contents: read",
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/location_payload_prune.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/location_payload_prune.yml"
+  },
+  {
     "filename": "location_registry_load.yml",
     "name": "Location: RÚIAN registry load",
     "description": "The registry-group jobs of the location subsystem (design 04 §4.4.2):",

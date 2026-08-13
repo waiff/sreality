@@ -47,6 +47,10 @@ LOCATION_BATCH_WORKFLOWS = (
     # of a 14 GB table and back in gzipped — so it queues behind the other lanes rather
     # than putting that IO on the instance alongside a registry COPY.
     "location_payload_backfill.yml",
+    # W2a-5. The only member with a real `schedule`, so it is also the only one that can
+    # arrive unannounced: a weekly sweep of the whole payload archive landing on top of a
+    # monthly registry baseline is exactly the overlap the outer group exists to prevent.
+    "location_payload_prune.yml",
 )
 OUTER_GROUP = "location-batch"
 
