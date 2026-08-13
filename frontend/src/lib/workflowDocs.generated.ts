@@ -2756,6 +2756,97 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/location_mapy_inventory.yml"
   },
   {
+    "filename": "location_payload_churn.yml",
+    "name": "Jobs: Payload churn readout + refetch probe (location W2a)",
+    "description": "The read side of the W2a shadow-hash churn instrument (migration 402), and the 200 x 3 confirmation probe that backs it. `report` prints the per-portal, per-page-kind change rates, body sizes and the projected GB per refetch cycle and per month — the artefact the W2a storage gate is signed from. `probe` runs 02-portal-contracts.md section 2.3.2's protocol: 200 listings x 3 fetches per portal, minutes apart, so the raw-vs-normalised gap is measured against a listing that provably did not change.",
+    "portal": null,
+    "manual": true,
+    "schedules": [],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "mode",
+        "description": "what to run",
+        "required": true,
+        "type": "choice",
+        "default": "report",
+        "options": [
+          "report",
+          "probe",
+          "probe_then_report"
+        ]
+      },
+      {
+        "name": "source",
+        "description": "probe only — comma-separated portals (blank = all nine, which will not fit one job)",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "listings",
+        "description": "probe only — listings sampled per portal (blank = 200)",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "rounds",
+        "description": "probe only — fetches per listing (blank = 3)",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "rate_per_s",
+        "description": "probe only — requests per second (blank = 1.0; the portal's own limit wins when politer)",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "max_seconds",
+        "description": "probe only — wall-clock budget, stops between fetches (blank = 2700)",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "dry_run",
+        "description": "probe only — no network and no writes",
+        "required": false,
+        "type": "boolean",
+        "default": "false",
+        "options": null
+      },
+      {
+        "name": "json_output",
+        "description": "emit JSON instead of the tables",
+        "required": false,
+        "type": "boolean",
+        "default": "false",
+        "options": null
+      }
+    ],
+    "secrets": [
+      "SCRAPER_PROXY_URL",
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "location-batch",
+    "cancelInProgress": false,
+    "timeoutMinutes": 55,
+    "permissions": "contents: read",
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/location_payload_churn.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/location_payload_churn.yml"
+  },
+  {
     "filename": "location_registry_load.yml",
     "name": "Location: RÚIAN registry load",
     "description": "The registry-group jobs of the location subsystem (design 04 §4.4.2):",
