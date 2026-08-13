@@ -67,10 +67,16 @@ function ContactRow({
   }
   const { value } = state;
   const copy = () => {
-    navigator.clipboard?.writeText(value).then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1200);
-    });
+    // writeText rejects on a denied permission or a non-secure context (any
+    // non-HTTPS host, e.g. a LAN preview) — without a catch that's an unhandled
+    // rejection and a button that silently does nothing.
+    navigator.clipboard
+      ?.writeText(value)
+      .then(() => {
+        setCopied(true);
+        setTimeout(() => setCopied(false), 1200);
+      })
+      .catch(() => {});
   };
   return (
     <div className="flex items-center justify-between gap-3">
@@ -83,6 +89,7 @@ function ContactRow({
       <button
         type="button"
         onClick={copy}
+        aria-label={`kopírovat ${CONTACT_LABEL[kind]}`}
         className="shrink-0 text-[0.6rem] tracking-[0.1em] uppercase text-[var(--color-ink-3)] hover:text-[var(--color-ink)] transition-colors"
       >
         {copied ? 'zkopírováno' : 'kopírovat'}

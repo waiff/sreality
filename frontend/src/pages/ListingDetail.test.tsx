@@ -322,6 +322,34 @@ describe('<BrokerVizitka>', () => {
     // the by-listing route carries no contact fields to render.
     expect(brokers.fetchListingBroker).toHaveBeenCalledWith(105053);
     expect(brokers.fetchBrokersByIds).toHaveBeenCalledWith([7]);
+    // ATTRIBUTION deliberately gives broker_id (7) and listing_id (105053)
+    // different values — pins the link to the BROKER dossier, not a
+    // listing-id-shaped route that would 404 on every click.
+    expect(screen.getByRole('link', { name: /Jan Novák/ })).toHaveAttribute(
+      'href',
+      '/brokers/7',
+    );
+  });
+
+  it('shows a loading placeholder while the contact read is in flight, never the error line', async () => {
+    vi.mocked(brokers.fetchBrokersByIds).mockReturnValue(new Promise(() => {}));
+
+    renderListing();
+
+    expect(await screen.findByText('Jan Novák')).toBeInTheDocument();
+    expect(screen.getByText('Načítám kontakt…')).toBeInTheDocument();
+    expect(screen.queryByText('Kontakt se nepodařilo načíst')).toBeNull();
+  });
+
+  /* The beforeEach default: fetchBrokersByIds resolves (succeeds) with an empty
+     Map — the broker just isn't in this batch (filtered by status, merged away
+     mid-request). A SUCCESSFUL empty result must not read as a failed one. */
+  it('shows a neutral message, not the error line, when the contact batch succeeds with no row for this broker', async () => {
+    renderListing();
+
+    expect(await screen.findByText('Jan Novák')).toBeInTheDocument();
+    expect(screen.getByText('Kontakt není k dispozici')).toBeInTheDocument();
+    expect(screen.queryByText('Kontakt se nepodařilo načíst')).toBeNull();
   });
 
   /* A non-admin gets has_* instead of the values; an em-dash there would claim
