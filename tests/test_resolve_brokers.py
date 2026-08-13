@@ -432,7 +432,7 @@ def test_firm_linking_gets_its_own_floor_when_attribution_ate_the_budget(
     monkeypatch.setattr(rb, "_link_listings_firm",
                         lambda c, extra="", params=None: linked.append(params["ids"]))
     monkeypatch.setattr(rb, "_attach_singletons", lambda c: 0)
-    monkeypatch.setattr(rb, "_cross_source_merge", lambda c, auto, run_id: (0, 0))
+    monkeypatch.setattr(rb, "_cross_source_merge", lambda c, auto, run_id: (0, 0, 0))
     monkeypatch.setattr(rb, "_max_id", lambda c, table: 0)
     monkeypatch.setattr(rb, "_refresh_matview", lambda c: None)
     monkeypatch.setattr(rb, "_generate_merge_candidates", lambda c: 0)
@@ -466,7 +466,7 @@ def _stub_full_sweep(monkeypatch: Any, all_ids: list[int],
     monkeypatch.setattr(rb, "_resolve_firms", lambda c, free, franchise: None)
     monkeypatch.setattr(rb, "_link_listings_firm", lambda c, extra="", params=None: None)
     monkeypatch.setattr(rb, "_attach_singletons", lambda c: 0)
-    monkeypatch.setattr(rb, "_cross_source_merge", lambda c, auto, run_id: (0, 0))
+    monkeypatch.setattr(rb, "_cross_source_merge", lambda c, auto, run_id: (0, 0, 0))
     monkeypatch.setattr(rb, "_max_id", lambda c, table: 0)
     monkeypatch.setattr(rb, "_refresh_matview", lambda c: None)
     monkeypatch.setattr(rb, "_generate_merge_candidates", lambda c: 0)
@@ -722,7 +722,7 @@ def test_a_broker_is_retired_into_exactly_one_survivor_per_run() -> None:
     conn = _ResilientConn("merge")
     # broker 30 holds identities 1 and 2; component A = {1, 5}, component B = {2, 6}
     conn.broker_of = {1: 30, 5: 10, 2: 30, 6: 20}
-    assert rb._apply_merges(conn, [[1, 5], [2, 6]]) == 2
+    assert rb._apply_merges(conn, [[1, 5], [2, 6]]) == (2, 0)
 
     plan = _merge_plan(conn)
     # one survivor for the whole broker component, and 30 is retired ONCE
@@ -746,7 +746,7 @@ def test_a_retired_broker_keeps_no_identities() -> None:
     conn = _ResilientConn("merge")
     # broker 40 holds identities 2 and 3; only 2 is bridged to broker 10's identity 1
     conn.broker_of = {1: 10, 2: 40, 3: 40}
-    assert rb._apply_merges(conn, [[1, 2]]) == 1
+    assert rb._apply_merges(conn, [[1, 2]]) == (1, 0)
 
     plan = _merge_plan(conn)
     assert plan["retired"] == {40: 10}
@@ -800,9 +800,154 @@ def test_apply_merges_skips_a_group_already_on_one_broker() -> None:
 
     conn = _ResilientConn("merge")
     conn.broker_of = {1: 10, 2: 10}
-    assert rb._apply_merges(conn, [[1, 2]]) == 0
+    assert rb._apply_merges(conn, [[1, 2]]) == (0, 0)
     assert not any("broker_merge_events" in s for s in conn.executed)
-    assert rb._apply_merges(conn, []) == 0
+    assert rb._apply_merges(conn, []) == (0, 0)
+
+
+# --- the apply-time suppression backstop (migration 399) ----------------------
+#
+# NOTE: _ResilientConn enforces no CHECK / FK / UNIQUE constraint (see
+# [[adversarial-review-fake-conn-db-constraints]]), so these tests assert the PLAN
+# — which components apply and what the ledger arrays carry — not that the DB would
+# accept it. The schema-replay job (migrations.yml) PREPAREs the statements.
+
+
+def test_a_component_that_would_reunite_a_suppressed_pair_is_dropped_whole(
+    caplog: Any,
+) -> None:
+    """The transitive chain decide_merges structurally cannot see. It removes the
+    suppressed EDGE (A,B), but _broker_components then fuses components through any
+    broker holding an identity in both — so A and B still land on one broker via C,
+    re-creating exactly the merge the operator undid, with no suppressed edge
+    anywhere in the input. The backstop drops the whole component and says so."""
+    import logging
+
+    import scripts.resolve_brokers as rb
+
+    conn = _ResilientConn("merge")
+    # identity 1 -> broker 10 (A), 2 -> broker 20 (B), 3 -> broker 30 (C);
+    # corroborated edges A-C and C-B, with (1, 2) suppressed.
+    conn.broker_of = {1: 10, 2: 20, 3: 30}
+    with caplog.at_level(logging.WARNING, logger="resolve_brokers"):
+        assert rb._apply_merges(conn, [[1, 3], [2, 3]],
+                                suppressed_pairs={(1, 2)}) == (0, 1)
+    assert not any("broker_merge_events" in s for s in conn.executed)
+    assert "identities 1/2 are an active broker_merge_suppressions pair" in caplog.text
+
+
+def test_an_already_co_located_suppressed_pair_does_not_block_the_merge() -> None:
+    """The backstop fires on NEW co-location only. If the two identities already
+    share a broker (a stale suppression, or one lifted out of band), dropping the
+    component would freeze unrelated merges forever without fixing anything."""
+    import scripts.resolve_brokers as rb
+
+    conn = _ResilientConn("merge")
+    # identities 1 and 2 are BOTH on broker 10 already; 3 is on broker 20
+    conn.broker_of = {1: 10, 2: 10, 3: 20}
+    assert rb._apply_merges(conn, [[1, 3]], suppressed_pairs={(1, 2)}) == (1, 0)
+    plan = _merge_plan(conn)
+    assert plan["retired"] == {20: 10}
+
+
+def test_an_unrelated_component_still_applies_alongside_a_dropped_one() -> None:
+    """Suppression is per component, not a kill switch for the whole run."""
+    import scripts.resolve_brokers as rb
+
+    conn = _ResilientConn("merge")
+    conn.broker_of = {1: 10, 2: 20, 3: 30, 4: 40, 5: 50}
+    merged, dropped = rb._apply_merges(conn, [[1, 3], [2, 3], [4, 5]],
+                                       suppressed_pairs={(1, 2)})
+    assert (merged, dropped) == (1, 1)
+    assert _merge_plan(conn)["retired"] == {50: 40}
+
+
+def test_no_suppressions_is_the_unchanged_hot_path() -> None:
+    """The table starts empty and stays tiny; an empty set must not change a single
+    merge decision (the rail is opt-in per pair, never a global damper)."""
+    import scripts.resolve_brokers as rb
+
+    conn = _ResilientConn("merge")
+    conn.broker_of = {1: 10, 2: 20}
+    assert rb._apply_merges(conn, [[1, 2]], suppressed_pairs=set()) == (1, 0)
+    assert rb._apply_merges(_fresh_merge_conn({1: 10, 2: 20}), [[1, 2]]) == (1, 0)
+
+
+def _fresh_merge_conn(broker_of: dict[int, int]) -> _ResilientConn:
+    conn = _ResilientConn("merge")
+    conn.broker_of = broker_of
+    return conn
+
+
+def test_the_sweep_loads_active_suppressions_and_passes_them_both_ways(
+    monkeypatch: Any,
+) -> None:
+    """One indexed SELECT per sweep, and the SAME set reaches the pure decision AND
+    the apply-time backstop — the two halves of the rail must never disagree about
+    what the operator rejected."""
+    import scripts.resolve_brokers as rb
+
+    seen: dict[str, Any] = {}
+    monkeypatch.setattr(rb.R, "decide_merges",
+                        lambda i, b, a, **kw: seen.update(decide=kw["suppressed_pairs"])
+                        or rb.R.MergeDecision([[1, 2]], [], [(1, 2)]))
+    monkeypatch.setattr(rb, "_apply_merges",
+                        lambda c, g, **kw: seen.update(apply=kw["suppressed_pairs"]) or (0, 1))
+    monkeypatch.setattr(rb, "_queue_review_pairs", lambda c, p, i, bv, r: 0)
+    monkeypatch.setattr(rb, "_suppressed_pairs", lambda c: {(1, 2)})
+
+    conn = _ResilientConn("merge")
+    conn.bridge_rows = [(1, "sreality", "email", "a@x.cz"),
+                        (2, "idnes", "email", "a@x.cz")]
+    auto, queued, suppressed = rb._cross_source_merge(conn, ["sreality", "idnes"],
+                                                      run_id=5)
+    assert seen["decide"] == seen["apply"] == {(1, 2)}
+    # the run's suppressed_merges is edge-level suppressions PLUS whole components
+    # the backstop dropped — a rail that only counted one of the two would report a
+    # silent zero on exactly the transitive case it exists for
+    assert (auto, queued, suppressed) == (0, 0, 2)
+
+
+def test_the_suppression_load_reads_only_active_rows() -> None:
+    """Lifting never deletes (the lift columns are the audit trail), so the query
+    that feeds the rail has to filter or every overridden NO would come back."""
+    import scripts.resolve_brokers as rb
+
+    assert "broker_merge_suppressions" in rb._SUPPRESSED_PAIRS_SQL
+    assert "lifted_at IS NULL" in rb._SUPPRESSED_PAIRS_SQL
+    conn = _ResilientConn("merge")
+    assert rb._suppressed_pairs(conn) == set()
+
+
+def test_an_unambiguous_auto_merge_records_the_contact_that_caused_it() -> None:
+    """bridge_kind/bridge_value are NULL on all 7,689 live rows, so the future remax
+    validation has no evidence trail. Stamp the simple dominant case; anything
+    ambiguous stays NULL rather than naming a contact that may not be the reason."""
+    import scripts.resolve_brokers as rb
+
+    conn = _ResilientConn("merge")
+    conn.broker_of = {1: 10, 2: 20}
+    assert rb._apply_merges(conn, [[1, 2]],
+                            group_bridges={(1, 2): ("email", "jan@re-max.cz")}) == (1, 0)
+    events = _params(conn, "INSERT INTO broker_merge_events")
+    assert events["k"] == ["email"] and events["v"] == ["jan@re-max.cz"]
+
+    plain = _fresh_merge_conn({1: 10, 2: 20})
+    assert rb._apply_merges(plain, [[1, 2]]) == (1, 0)
+    assert _params(plain, "INSERT INTO broker_merge_events")["k"] == [None]
+
+
+def test_a_chained_component_is_not_stamped_with_one_groups_bridge() -> None:
+    """Two groups fused in broker space is exactly the case where no single contact
+    explains the merge (_broker_components' documented widening)."""
+    import scripts.resolve_brokers as rb
+
+    conn = _ResilientConn("merge")
+    conn.broker_of = {1: 10, 2: 30, 3: 30, 4: 20}
+    assert rb._apply_merges(conn, [[1, 2], [3, 4]],
+                            group_bridges={(1, 2): ("email", "a@x.cz"),
+                                           (3, 4): ("phone", "420600111222")})[0] == 2
+    assert set(_params(conn, "INSERT INTO broker_merge_events")["k"]) == {None}
 
 
 # --- review pairs reach the operator queue -----------------------------------
@@ -906,9 +1051,9 @@ def test_cross_source_merge_queues_review_pairs_after_applying_merges(
     calls: list[str] = []
     seen: dict[str, Any] = {}
     monkeypatch.setattr(rb.R, "decide_merges",
-                        lambda i, b, a: rb.R.MergeDecision([[1, 2]], [(1, 2)]))
+                        lambda i, b, a, **kw: rb.R.MergeDecision([[1, 2]], [(1, 2)]))
     monkeypatch.setattr(rb, "_apply_merges",
-                        lambda c, g: calls.append("apply") or 1)
+                        lambda c, g, **kw: calls.append("apply") or (1, 0))
     monkeypatch.setattr(rb, "_queue_review_pairs",
                         lambda c, p, i, bv, r: calls.append("queue")
                         or seen.update(bridges=bv) or len(p))
@@ -916,11 +1061,12 @@ def test_cross_source_merge_queues_review_pairs_after_applying_merges(
     conn = _ResilientConn("merge")
     conn.bridge_rows = [(1, "sreality", "email", "a@x.cz"),
                         (2, "idnes", "email", "a@x.cz")]
-    auto, queued = rb._cross_source_merge(conn, ["sreality", "idnes"], run_id=5)
+    auto, queued, suppressed = rb._cross_source_merge(conn, ["sreality", "idnes"],
+                                                      run_id=5)
 
     assert calls == ["apply", "queue"]
     # queued_for_review keeps meaning "pairs DECIDED", unchanged by persistence
-    assert (auto, queued) == (1, 1)
+    assert (auto, queued, suppressed) == (1, 1, 0)
     # the bridge index is keyed the same way decide_merges normalises a pair
     assert seen["bridges"] == {(1, 2): {"email:a@x.cz"}}
 

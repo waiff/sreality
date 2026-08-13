@@ -56,7 +56,7 @@ import os
 import sys
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Set as AbstractSet
 from typing import Any, TypeVar
 
 from scraper import db
@@ -335,6 +335,13 @@ SELECT p.broker_identity_id, p.source, p.kind, p.value
 FROM personal p JOIN multi m ON m.kind = p.kind AND m.value = p.value
 """
 
+# The operator's standing NO (migration 399). One indexed read per sweep: the merge
+# step already runs ~8.4 min against a 20-min lock-stale window, so the rail is a
+# single set load, never a per-candidate lookup.
+_SUPPRESSED_PAIRS_SQL = """
+SELECT identity_lo, identity_hi FROM broker_merge_suppressions WHERE lifted_at IS NULL
+"""
+
 # Claim/delete by listing_id: it is this queue's PRIMARY KEY since the R2 Phase D
 # swap, and the only column guaranteed non-NULL post-Gate-2 — a NULL sreality_id
 # would make the claim return NULL and the DELETE match nothing, silently stopping
@@ -577,13 +584,23 @@ def _attach_singletons(conn: Any) -> int:
         return cur.rowcount or 0
 
 
-def _cross_source_merge(conn: Any, auto_merge_sources: list[str], run_id: int) -> tuple[int, int]:
+def _suppressed_pairs(conn: Any) -> set[tuple[int, int]]:
+    """The identity pairs the operator has rejected and not since overridden."""
+    with conn.cursor() as cur:
+        cur.execute(_SUPPRESSED_PAIRS_SQL)
+        return {(int(lo), int(hi)) for lo, hi in cur.fetchall()}
+
+
+def _cross_source_merge(conn: Any, auto_merge_sources: list[str],
+                        run_id: int) -> tuple[int, int, int]:
     """Form corroborated cross-source broker groups and apply reversible merges.
 
     No-op while only one source is attributed (no cross-source bridges). Everything
     the conservative guard refuses to auto-merge is persisted for operator review
-    (_queue_review_pairs); the returned count is the pairs DECIDED, which is what
-    broker_resolution_runs.queued_for_review has always meant.
+    (_queue_review_pairs); the second returned count is the pairs DECIDED, which is
+    what broker_resolution_runs.queued_for_review has always meant. The third is
+    what the operator's standing NO blocked this run — suppressed edges plus whole
+    components the apply-time backstop dropped.
     """
     # Cross-source bridges need >=2 sources; with one source the freq scan is
     # guaranteed empty, so skip it entirely (the Phase-1 reality — avoids a costly
@@ -592,13 +609,13 @@ def _cross_source_merge(conn: Any, auto_merge_sources: list[str], run_id: int) -
     with conn.cursor() as cur:
         cur.execute("SELECT count(DISTINCT source) FROM broker_identities")
         if int(cur.fetchone()[0]) < 2:
-            return 0, 0
+            return 0, 0, 0
     with conn.transaction(), conn.cursor() as cur:
         cur.execute("SET LOCAL statement_timeout = 0")
         cur.execute(_BRIDGE_CANDIDATES)
         rows = cur.fetchall()
     if not rows:
-        return 0, 0
+        return 0, 0, 0
 
     by_value: dict[tuple[str, str], list[tuple[int, str]]] = {}
     identities: dict[int, R.Identity] = {}
@@ -624,15 +641,21 @@ def _cross_source_merge(conn: Any, auto_merge_sources: list[str], run_id: int) -
     for bridge in bridges:
         bridge_values.setdefault(bridge.pair(), set()).add(f"{bridge.kind}:{bridge.value}")
 
-    decision = R.decide_merges(list(identities.values()), bridges, auto_merge_sources)
-    auto = _apply_merges(conn, decision.auto_merge_groups)
+    blocked = _suppressed_pairs(conn)
+    decision = R.decide_merges(list(identities.values()), bridges, auto_merge_sources,
+                               suppressed_pairs=blocked)
+    auto, dropped = _apply_merges(conn, decision.auto_merge_groups,
+                                  suppressed_pairs=blocked,
+                                  group_bridges=decision.group_bridges)
     # AFTER the merges: they re-point broker_identities.broker_id, so a pair read
     # before them could propose a broker that no longer survives.
     proposed = _queue_review_pairs(conn, decision.review_pairs, identities,
                                    bridge_values, run_id)
-    LOG.info("RESOLVE merge review pairs decided=%d proposed=%d",
-             len(decision.review_pairs), proposed)
-    return auto, len(decision.review_pairs)
+    LOG.info("RESOLVE merge review pairs decided=%d proposed=%d suppressed_edges=%d "
+             "suppressed_components=%d active_suppressions=%d",
+             len(decision.review_pairs), proposed, len(decision.suppressed), dropped,
+             len(blocked))
+    return auto, len(decision.review_pairs), len(decision.suppressed) + dropped
 
 
 def _broker_of(conn: Any, identity_ids: list[int]) -> dict[int, int]:
@@ -768,7 +791,20 @@ def _queue_review_pairs(conn: Any, pairs: list[tuple[int, int]],
     return len(keys)
 
 
-def _apply_merges(conn: Any, groups: list[list[int]]) -> int:
+def _blocked_component(identities_in: set[int], owner: dict[int, int],
+                       by_identity: dict[int, set[int]]) -> tuple[int, int] | None:
+    """The first active suppression this component would newly co-locate, if any."""
+    for iid in sorted(identities_in):
+        for other in sorted(by_identity.get(iid, ())):
+            if other in identities_in and owner[iid] != owner[other]:
+                return (iid, other) if iid < other else (other, iid)
+    return None
+
+
+def _apply_merges(conn: Any, groups: list[list[int]], *,
+                  suppressed_pairs: AbstractSet[tuple[int, int]] | None = None,
+                  group_bridges: dict[tuple[int, ...], tuple[str, str]] | None = None,
+                  ) -> tuple[int, int]:
     """Unify each BROKER component onto one survivor broker, set-based.
 
     Two queries fetch every group member's current broker and then every identity
@@ -783,21 +819,53 @@ def _apply_merges(conn: Any, groups: list[list[int]]) -> int:
     rollups (_BROKER_ROLLUP only touches status='active'), hide them from the
     dossier, and let the next sweep elect the merged_away broker as a survivor.
     Idempotent — a component already on one broker is skipped, so a re-run after a
-    partial apply converges. Reversible via broker_merge_events."""
+    partial apply converges. Reversible via broker_merge_events.
+
+    `suppressed_pairs` is the apply-time BACKSTOP for the rail decide_merges cannot
+    fully enforce: it removes the suppressed EDGE, but _broker_components then fuses
+    components through any broker holding an identity in both, so A and B can still
+    land on one broker via C without their edge existing. Any component that would
+    newly co-locate an active suppressed pair is dropped WHOLE this run and logged —
+    over-suppression of a chained component is the accepted trade (the operator can
+    still merge explicitly, which lifts the suppression).
+
+    Returns (brokers retired, components dropped by the backstop)."""
     if not groups:
-        return 0
+        return 0, 0
     broker_of = _broker_of(conn, sorted({iid for g in groups for iid in g}))
     components = _broker_components(groups, broker_of)
     if not components:
-        return 0
+        return 0, 0
     held = _identities_of(conn, sorted({b for c in components for b in c}))
+    owner = {iid: bid for bid, iids in held.items() for iid in iids}
+    by_identity: dict[int, set[int]] = {}
+    for lo, hi in (suppressed_pairs or ()):
+        if lo in owner and hi in owner:
+            by_identity.setdefault(lo, set()).add(hi)
+            by_identity.setdefault(hi, set()).add(lo)
 
     gids: list[str] = []
     survivors: list[int] = []
     retired: list[int] = []
     idents: list[int] = []
+    kinds: list[str | None] = []
+    values: list[str | None] = []
     losers: dict[int, int] = {}
+    dropped = 0
     for component in components:
+        identities_in = {iid for b in component for iid in held.get(b, ())}
+        blocked = _blocked_component(identities_in, owner, by_identity) if by_identity else None
+        if blocked is not None:
+            dropped += 1
+            LOG.warning(
+                "RESOLVE merge component DROPPED by suppression: identities %d/%d "
+                "are an active broker_merge_suppressions pair; brokers %s not merged",
+                blocked[0], blocked[1], component)
+            continue
+        spanning = [g for g in groups
+                    if any(broker_of.get(i) in set(component) for i in g)]
+        bridge = ((group_bridges or {}).get(tuple(spanning[0]))
+                  if len(spanning) == 1 else None)
         survivor, *rest = component
         gid = str(uuid.uuid4())
         for loser in rest:
@@ -807,17 +875,22 @@ def _apply_merges(conn: Any, groups: list[list[int]]) -> int:
                 survivors.append(survivor)
                 retired.append(loser)
                 idents.append(iid)
+                kinds.append(bridge[0] if bridge else None)
+                values.append(bridge[1] if bridge else None)
     if not losers:
-        return 0
+        return 0, dropped
 
     with conn.transaction(), conn.cursor() as cur:
         cur.execute("SET LOCAL statement_timeout = 0")
         cur.execute(
             "INSERT INTO broker_merge_events (merge_group_id, survivor_broker_id, "
-            "retired_broker_id, identity_id, prev_broker_id, reason, source) "
-            "SELECT g, s, r, i, r, 'contact_bridge', 'auto' "
-            "FROM unnest(%(g)s::uuid[], %(s)s::bigint[], %(r)s::bigint[], %(i)s::bigint[]) AS d(g, s, r, i)",
-            {"g": gids, "s": survivors, "r": retired, "i": idents},
+            "retired_broker_id, identity_id, prev_broker_id, reason, source, "
+            "bridge_kind, bridge_value) "
+            "SELECT g, s, r, i, r, 'contact_bridge', 'auto', k, v "
+            "FROM unnest(%(g)s::uuid[], %(s)s::bigint[], %(r)s::bigint[], %(i)s::bigint[], "
+            "%(k)s::text[], %(v)s::text[]) AS d(g, s, r, i, k, v)",
+            {"g": gids, "s": survivors, "r": retired, "i": idents,
+             "k": kinds, "v": values},
         )
         cur.execute(
             "UPDATE broker_identities bi SET broker_id = d.s "
@@ -829,7 +902,7 @@ def _apply_merges(conn: Any, groups: list[list[int]]) -> int:
             "FROM unnest(%(l)s::bigint[], %(s)s::bigint[]) AS d(l, s) WHERE b.id = d.l",
             {"l": list(losers), "s": list(losers.values())},
         )
-    return len(losers)
+    return len(losers), dropped
 
 
 def _affected(conn: Any, listing_ids: list[int]) -> list[int]:
@@ -1182,10 +1255,10 @@ def _run_full(conn: Any, free: list[str], franchise: list[str], auto: list[str],
     # min of tail on top of a ~53-min prefix — past the 110-min backstop. Two keeps
     # the useful replay (a pooler drop, a passing lock wait) and bounds the tail at
     # ~50 min. Same reasoning, same number as recompute's _BATCH_RESILIENT_ATTEMPTS.
-    auto_merges, queued = step(lambda c: _cross_source_merge(c, auto, run_id),
-                               "resolve.merge", attempts=2)
-    LOG.info("RESOLVE full merge done auto=%d queued=%d elapsed=%.1fs",
-             auto_merges, queued, time.monotonic() - t0)
+    auto_merges, queued, suppressed = step(lambda c: _cross_source_merge(c, auto, run_id),
+                                           "resolve.merge", attempts=2)
+    LOG.info("RESOLVE full merge done auto=%d queued=%d suppressed=%d elapsed=%.1fs",
+             auto_merges, queued, suppressed, time.monotonic() - t0)
 
     # Identity rollup: ONE global timeout-lifted statement, like the firm rollup
     # below. broker_identities.id is NOT a dense serial — every full-sweep upsert
@@ -1259,12 +1332,13 @@ def _run_full(conn: Any, free: list[str], franchise: list[str], auto: list[str],
                 "UPDATE broker_resolution_runs SET ended_at = now(), brokers_recomputed = "
                 "(SELECT count(*) FROM brokers WHERE status='active'), identities_upserted = "
                 "(SELECT count(*) FROM broker_identities), firms_recomputed = (SELECT count(*) FROM firms), "
-                "auto_merges = %s, queued_for_review = %s WHERE id = %s",
-                (auto_merges, queued, run_id),
+                "auto_merges = %s, queued_for_review = %s, suppressed_merges = %s WHERE id = %s",
+                (auto_merges, queued, suppressed, run_id),
             )
 
     step(_finalize, "resolve.finalize")
-    return {"attached": attached, "auto_merges": auto_merges, "queued": queued}, live()
+    return {"attached": attached, "auto_merges": auto_merges, "queued": queued,
+            "suppressed": suppressed}, live()
 
 
 def _run_incremental(conn: Any, free: list[str], franchise: list[str],
@@ -1396,8 +1470,10 @@ def main() -> int:
             else:
                 res, conn = _run_full(conn, free, franchise, auto, args.batch_size,
                                       deadline, holder, reconnect=reconnect)
-                LOG.info("RESOLVE full done attached=%d auto_merges=%d queued=%d elapsed=%.1fs",
-                         res["attached"], res["auto_merges"], res["queued"], time.monotonic() - started)
+                LOG.info("RESOLVE full done attached=%d auto_merges=%d queued=%d "
+                         "suppressed=%d elapsed=%.1fs",
+                         res["attached"], res["auto_merges"], res["queued"],
+                         res["suppressed"], time.monotonic() - started)
         finally:
             # `conn` is only rebound on a normal return, so on a raise it can be the
             # socket run_resilient already closed — hence the reconnect fallback.
