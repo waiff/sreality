@@ -43,20 +43,28 @@ def conn() -> Iterator[psycopg.Connection]:
         yield c
 
 
-def _set_dual_write(conn: psycopg.Connection, enabled: bool) -> None:
+def _set_dual_write(
+    conn: psycopg.Connection, enabled: bool, *, index_archive: bool = False,
+) -> None:
     """Flip the archive on through the GLOBAL limit layer.
 
-    The global layer, not `portals.operational_limits`, so the test does not
-    depend on the registry carrying a row for this source in the replayed
-    schema; the per-portal layer and its precedence are unit-tested in
-    tests/scraper/test_portal.py.
+    * the global layer, not `portals.operational_limits`, so the test does not
+      depend on the registry carrying a row for this source in the replayed
+      schema; the per-portal layer and its precedence are unit-tested in
+      tests/scraper/test_portal.py;
+    * `index_archive` is W2a-6's second gate, which a `page_kind='index'` write
+      needs on TOP of this one — default off, so a detail-page test says nothing
+      about it either way.
     """
     with conn.cursor() as cur:
         cur.execute(
             "INSERT INTO app_settings (key, value) VALUES "
             "('scraper_limits_global', %s::jsonb) "
             "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
-            (json.dumps({"payload_dual_write": enabled}),),
+            (json.dumps({
+                "payload_dual_write": enabled,
+                "payload_index_archive": index_archive,
+            }),),
         )
     db.clear_app_settings_flag_cache()
 
@@ -184,9 +192,10 @@ def test_an_index_page_archives_under_its_own_page_kind(
     conn: psycopg.Connection,
 ) -> None:
     # The index archivers ride the same chokepoint; 'index' has to be a legal
-    # location_page_kind label, which only real SQL can answer.
+    # location_page_kind label, which only real SQL can answer. Needs BOTH gates
+    # since W2a-6 — an index body passes payload_index_archive as well.
     key = f"live-{uuid.uuid4().hex}/0/2026w33"
-    _set_dual_write(conn, True)
+    _set_dual_write(conn, True, index_archive=True)
 
     _archive(conn, key, '{"_embedded": {"estates": []}}', page_kind="index")
 
@@ -194,3 +203,51 @@ def test_an_index_page_archives_under_its_own_page_kind(
     assert len(rows) == 1
     assert rows[0]["page_kind"] == "index"
     assert rows[0]["content_type"] == "application/json"
+
+
+def test_the_index_gate_alone_holds_an_index_body_back(conn: psycopg.Connection) -> None:
+    # The same write with only payload_dual_write on must reach portal_raw_pages
+    # and NOT the archive — the split flag's whole point, against the real schema.
+    key = f"live-{uuid.uuid4().hex}/0/2026w33"
+    _set_dual_write(conn, True, index_archive=False)
+
+    _archive(conn, key, '{"_embedded": {"estates": []}}', page_kind="index")
+
+    assert _payloads(conn, key) == []
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM portal_raw_pages "
+            " WHERE source = %s AND source_id_native = %s",
+            (_SOURCE, key),
+        )
+        assert cur.fetchone()[0] == 1
+
+
+def test_a_map_body_is_held_back_by_the_index_gate_and_is_a_legal_page_kind(
+    conn: psycopg.Connection,
+) -> None:
+    # ceskereality's /mapa/ surface is SURFACE grain and declares `archive: true`,
+    # so W2a-6 puts it behind the second gate too. It can only reach the archive
+    # through the direct call: portal_raw_pages CHECKs page_kind in
+    # ('index','detail') (migration 099), so a map body has no staging row at all
+    # — and 'map' still has to satisfy the location_page_kind enum, which is the
+    # half only real SQL can answer.
+    key = f"live-map-{uuid.uuid4().hex}"
+    _set_dual_write(conn, True, index_archive=False)
+
+    db.append_payload_if_enabled(
+        conn, source=_SOURCE, source_id_native=key, page_kind="map",
+        body=b'{"markers": []}', content_type="application/json",
+    )
+    assert _payloads(conn, key) == []
+
+    _set_dual_write(conn, True, index_archive=True)
+    db.clear_app_settings_flag_cache()
+    db.append_payload_if_enabled(
+        conn, source=_SOURCE, source_id_native=key, page_kind="map",
+        body=b'{"markers": []}', content_type="application/json",
+    )
+
+    rows = _payloads(conn, key)
+    assert len(rows) == 1
+    assert rows[0]["page_kind"] == "map"

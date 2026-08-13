@@ -65,8 +65,20 @@ batch collides instead of duplicating; retention (version cap + pins) runs in th
 transaction. It is gated per portal by `PortalLimits.payload_dual_write` (baked default
 **False**, overridable via `app_settings.scraper_limits_global` / `portals.operational_limits`
 — no migration), cached ~60 s per source, and every failure warns rather than touching the
-scrape. **OFF everywhere until the operator signs off the churn measurement + storage
-projection** (02 §2.3.2's gate; the numbers come from `scripts/location_payload_churn_report.py`).
+scrape. **Every `page_kind` except `detail`** passes a SECOND gate on top of it,
+`PortalLimits.payload_index_archive` (W2a-6, same precedence, also baked **False**). The split is
+by GRAIN: a `detail` body is one listing fetched when that listing is enqueued, while index, map,
+gazetteer, snapshot and archive bodies are whole-SURFACE artefacts refetched on the walk cadence
+(sreality's index 24×/day; ceskereality's `/mapa/` and bezrealitky's `Region.boundaryGeoJson`
+already declare `archive: true`), which is the churn 02 §2.3.2 P2 gates — so a gate naming only
+`'index'` would have let map and gazetteer bodies archive on every walk. It only ever narrows what
+`payload_dual_write` allows. **OFF everywhere until the operator signs off the churn measurement
++ storage projection** (02 §2.3.2's gate; the numbers come from
+`scripts/location_payload_churn_report.py`). All three index archivers are additionally **gated
+by their own client-side freshness skip**, which returns before `upsert_portal_raw_page` and so
+suppresses the dual-write for an index page that genuinely changed inside the 22 h window — a
+KNOWN GAP commented at each call site, measured by `scripts/location_index_archive_audit.py`
+(W2a-6) and left for P2 to fix.
 **`portal_raw_pages` is preservation substrate, never pruned** (location-data
 program, W0 item 0o): migration 099's "safe to delete once parsed" header is superseded —
 the archive is the only surviving copy of delisted pages' location signal (portals don't
