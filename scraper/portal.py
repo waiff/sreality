@@ -53,6 +53,7 @@ _LIMIT_COERCERS: dict[str, Any] = {
     "price_change_min_pct": float,
     "shared_rate_limiter": _as_bool,
     "payload_dual_write": _as_bool,
+    "payload_index_archive": _as_bool,
 }
 
 
@@ -100,6 +101,17 @@ class PortalLimits:
     # a per-portal STORAGE decision (02 section 2.3.2's churn gate is measured
     # per portal, and mmreality's 245 KB pages cost 6x bazos's 41 KB ones).
     payload_dual_write: bool = False
+    # Location-data W2a-6: the SECOND gate an index-page body must pass, on top of
+    # payload_dual_write. Split from it because index pages are a different
+    # storage decision, not a different portal's: they re-order on every walk, so
+    # they are the highest-churn artefact in the system (02 section 2.3.2 P2), and
+    # sreality walks them 24x/day against ~4x/day for the 6h portals. A portal
+    # whose detail churn signs off cheaply can still have index churn that does
+    # not, and with one flag the only way to say so would be to hold the whole
+    # portal back. AND, never OR: index bodies ride the same
+    # append_payload_if_enabled chokepoint, so this narrows what dual-write lets
+    # through and can never open a path dual-write has closed.
+    payload_index_archive: bool = False
 
     def merged(self, overrides: Any) -> "PortalLimits":
         """Return a copy with each present key from `overrides` (a dict, or None)

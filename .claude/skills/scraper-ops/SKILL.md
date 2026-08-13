@@ -77,12 +77,12 @@ so that is a deliberate choice. Hashed fields are written with a targeted single
 never by replaying a whole `ScrapedListing`, which would rewrite every other column from a
 possibly-stale stored page and could regress a price the portal has since changed.
 
-## The two location-data gates riding the ingest path
+## The three location-data gates riding the ingest path
 
-Both are OFF by default, cached ~60 s per process (so a flip reaches the always-on worker within
-a minute, a cron run instantly), and wrapped so any failure warns and returns — an instrument or
-an archive must never break the scrape it rides in. **Neither may be enabled before the
-operator's churn + storage sign-off** (design 02 §2.3.2's gate; read out with
+All three are OFF by default, cached ~60 s per process (so a flip reaches the always-on worker
+within a minute, a cron run instantly), and wrapped so any failure warns and returns — an
+instrument or an archive must never break the scrape it rides in. **None may be enabled before
+the operator's churn + storage sign-off** (design 02 §2.3.2's gate; read out with
 `python -m scripts.location_payload_churn_report`).
 
 - **`app_settings.location_payload_shadow_hash`** (W2a-0) — the *instrument*. Counts fetches and
@@ -92,12 +92,21 @@ operator's churn + storage sign-off** (design 02 §2.3.2's gate; read out with
   `upsert_portal_raw_page` stages (7 HTML detail writers + 3 index archivers), plus sreality's
   estate JSON and bezrealitky's advert-with-query from their own call sites, into
   `portal_raw_payloads`. A per-portal **operational limit**, not an app_settings flag (enabling it
-  is a per-portal storage decision), so it needs no migration:
+  is a per-portal storage decision), so it needs no migration.
+- **`PortalLimits.payload_index_archive`** (W2a-6) — the *index-only second gate*, ANDed on top
+  of `payload_dual_write` for `page_kind='index'` writes only. Split because index pages re-order
+  on every walk and sreality walks them 24×/day, so they are the highest-churn artefact in the
+  system (02 §2.3.2 P2) and may not sign off at the same time as a portal's detail bodies. It can
+  only narrow what dual-write allows, never widen it: with `payload_dual_write` off this flag
+  does nothing. Same precedence, also no migration.
 
 ```sql
 update portals set operational_limits =                       -- one portal
   coalesce(operational_limits, '{}'::jsonb) || '{"payload_dual_write": true}'::jsonb
  where source = 'idnes';
+update portals set operational_limits =                       -- + its index pages
+  coalesce(operational_limits, '{}'::jsonb) || '{"payload_index_archive": true}'::jsonb
+ where source = 'sreality';
 insert into app_settings (key, value) values                  -- or the global underlay
   ('scraper_limits_global', '{"payload_dual_write": true}'::jsonb)
   on conflict (key) do update set value = app_settings.value || excluded.value;
@@ -105,8 +114,18 @@ insert into app_settings (key, value) values                  -- or the global u
 
 Verify with `select source, page_kind, count(*), max(version_seq) from portal_raw_payloads
 group by 1,2;` — the store is append-on-CHANGE, so an unchanged refetch must add no row.
-Failures read `payload archive append failed source=… key=…` / `payload dual-write limit read
+Failures read `payload archive append failed source=… key=…` / `payload archive limit read
 failed source=…` in the walk or drain log and are never fatal.
+
+**Before flipping `payload_index_archive`, run
+`python -m scripts.location_index_archive_audit`** (`--skip-db` for the code/contract half
+alone). It reports each portal on three axes — what the contract asks, whether the code has an
+index-archiving call site that is `wired`/`gated`/`absent`, and whether rows are actually
+accumulating. Today all three call sites (sreality, remax, ceskereality) are **gated**: their
+client-side freshness skip returns before `upsert_portal_raw_page`, so enabling the flag archives
+an index body at most once per `INDEX_ARCHIVE_REFRESH_HOURS` (22 h) per page position and drops
+every intra-window change. That is a KNOWN GAP with a comment at each call site, and reworking the
+skip is an open P2 design question — the audit measures it, it does not fix it.
 
 ## How to manually trigger the scrapers
 

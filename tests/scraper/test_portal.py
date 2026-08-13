@@ -276,6 +276,49 @@ def test_payload_dual_write_rejects_non_bool_leaf():
     assert cfg.limits.payload_dual_write is False
 
 
+# --- payload_index_archive (location-data W2a-6 index-only second gate) ---
+
+def test_payload_index_archive_defaults_off_everywhere():
+    # Split from payload_dual_write because index pages are their own storage
+    # decision (02 section 2.3.2 P2: they re-order on every walk, and sreality
+    # walks them 24x/day), so it ships off on every portal for the same reason.
+    assert PortalLimits().payload_index_archive is False
+    for source in ("sreality", "bazos", "idnes", "bezrealitky", "maxima",
+                   "mmreality", "remax", "ceskereality", "realitymix"):
+        assert default_config(source).limits.payload_index_archive is False
+
+
+def test_payload_index_archive_is_independent_of_dual_write():
+    # Enabling the archive for a portal must not enable its index surface, and
+    # the two must be separately settable in one operator edit.
+    row = (True, [{"x": 1}], None, {"payload_dual_write": True})
+    cfg = load_portal_config(_Conn(row), "sreality")
+    assert cfg.limits.payload_dual_write is True
+    assert cfg.limits.payload_index_archive is False
+
+    row = (True, [{"x": 1}], None,
+           {"payload_dual_write": True, "payload_index_archive": True})
+    cfg = load_portal_config(_Conn(row), "sreality")
+    assert cfg.limits.payload_index_archive is True
+
+
+def test_payload_index_archive_global_underlay():
+    portal_row = (True, [{"x": 1}], None, None)
+    global_row = ({"payload_index_archive": True},)
+    cfg = load_portal_config(_Conn(portal_row, global_row), "sreality")
+    assert cfg.limits.payload_index_archive is True
+    # ... and one portal can still be held back from a global enable.
+    portal_row = (True, [{"x": 1}], None, {"payload_index_archive": False})
+    cfg = load_portal_config(_Conn(portal_row, global_row), "sreality")
+    assert cfg.limits.payload_index_archive is False
+
+
+def test_payload_index_archive_rejects_non_bool_leaf():
+    row = (True, [{"x": 1}], None, {"payload_index_archive": "true"})
+    cfg = load_portal_config(_Conn(row), "sreality")
+    assert cfg.limits.payload_index_archive is False
+
+
 # --- price_changed (index-walk price-diff jitter tolerance) ---
 
 def test_price_changed_exact_compare_by_default():
