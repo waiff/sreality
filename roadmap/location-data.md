@@ -14,7 +14,7 @@ is the tie-breaker). This track records sequencing + shipped state only.
 | --- | --- | --- |
 | W0 "stop the bleeding" | 15 interim fixes + 2 measurements against the CURRENT system | 🟡 in progress (2026-08-10) |
 | W1 registry + claim spine (shadow) | full RÚIAN mirror, claims, resolutions, projection | ✅ shipped 2026-08-12 (migrations 380–389 applied; shadow-only, no consumer reads it) |
-| W1v bezrealitky vertical slice | one portal end-to-end + location-quality dashboard | 🟡 in progress (2026-08-13) — spine + API landing; labelling stays operator work |
+| W1v bezrealitky vertical slice | one portal end-to-end + location-quality dashboard | ✅ shipped 2026-08-13 (every layer exercised in prod; gate answered — portal-inventory-capped, not pipeline-capped) |
 | W2a payload archive rewrite | append-on-change `portal_raw_payloads` | ⚪ not started (byte-churn measurement is the gate) |
 | W2–W6 | HTML re-mine, history backfill, refetch cohorts, LLM lane, serving flip | ⚪ not started |
 
@@ -196,30 +196,96 @@ re-scan bloat — a same-day observation dedup guard is queued follow-up work).
 
 ### Open, carried forward
 
-- **The per-portal frozen labelled samples (n ≥ 100/portal) are the gate on W1v's value** — they
-  decide whether each contract resolves or stays in shadow. The MACHINERY ships in W1v
-  (migration 399 tables + `scripts/location_draw_labelled_sample` +
-  `location_labelled_sample.yml` + the labelling surface on the Location quality page);
-  the 2–4 h of hand-labelling per portal stays operator work.
+- **The per-portal frozen labelled samples (n ≥ 100/portal) are the gate on each CONTRACT** —
+  they decide whether it resolves or stays in shadow. The machinery shipped in W1v (migration
+  399 + `scripts/location_draw_labelled_sample` + `location_labelled_sample.yml` + the
+  labelling surface and live floor scoring on the Location quality page). **bezrealitky's
+  sample is drawn and frozen: 120 rows, 0 labelled.** Each remaining portal needs its sample
+  drawn BEFORE its W2 sweep (one dispatch, seconds); the 2–4 h of hand-labelling per portal
+  stays operator work and can trail the sweep — an unlabelled contract sweeps in shadow.
 
-## W1v — in progress (bezrealitky vertical slice)
+## W1v — shipped (bezrealitky vertical slice)
 
-PR-1 (spine + API): migration 399 (frozen labelled samples, 06 §6.4.0: membership frozen
-at draw, legacy serving values snapshotted at draw time, one is_current sample per source),
-migration 400 (operator survivorship rows in policy v1 — rank 50, `may_overwrite_non_null`;
-without them an operator claim wins the pin but silently loses every FIELD),
-`location_data/operator_corrections.py` (the operator claim producer: append-only claim +
-UNCONDITIONAL `dirty_locations` enqueue — the time-free fingerprint means a restated
-correction inserts nothing, so an `ins`-gated enqueue would be a dead button — then a
-synchronous single-listing resolve, 05 §5.5.5 read-your-writes), and the admin-gated
-`/location/*` API (quality panels from the projection ONLY, W1v gate measurement,
-listing inspector, sample labelling CRUD + precision scoring vs both systems).
+**The first consumer of the location stack is live in production.** Four PRs on 2026-08-13:
+**#1041** the spine (migrations 399–400 + the operator claim producer + the admin-gated
+`/location/*` API), **#1043** the Location quality page (Settings → Location Quality),
+**#1044** + **#1046** two production defects the live round-trip caught (below).
 
-Sequencing (order is load-bearing): draw + freeze the bezrealitky sample FIRST (06 §6.4.0
-"drawn before the sweep"), then the one-off refetch of ~5.2k active rows whose `raw_json`
-predates the widened GraphQL query (queue insert at `priority = -1`, drained by the
-realtime worker at production politeness; the hourly intake + */15 resolve drain then
-converge with no further orders). Gate measured live at `/location/quality/w1v-gate`.
+- **Migration 399** — frozen labelled samples (06 §6.4.0): membership frozen at draw, the
+  OLD system's serving values snapshotted at draw time (the refetch that follows a draw
+  rewrites `listings.street`, so scoring "the old system as it stood" needs them as they
+  stood), one `is_current` sample per source. No coordinate is ever copied (class-E carve-out).
+- **Migration 400** — operator rows in `location_field_policy` v1 (rank 50,
+  `may_overwrite_non_null`). The v1 seed had no operator producer and `evaluate_field` SKIPS
+  a claim with no policy row, so an operator correction would have won the pin and silently
+  lost every FIELD. W1 could not observe the gap: no operator write path existed.
+- **`location_data/operator_corrections.py`** — the append-only operator claim + an
+  **UNCONDITIONAL** `dirty_locations` enqueue (the fingerprint is time-free, so an A→B→A
+  restatement inserts nothing and an `ins`-gated enqueue would be a dead button), then a
+  synchronous single-listing resolve for 05 §5.5.5 read-your-writes.
+- **The dashboard** reads the projection ONLY, every panel grain-labelled.
+
+Sequencing executed (order is load-bearing): sample drawn and frozen FIRST (120 rows,
+06 §6.4.0 "drawn before the sweep") → 5,233-row refetch cohort enqueued at `priority = -1`
+(strictly behind real-time discovery; source-scoped claims mean no cross-portal starvation)
+→ realtime worker drained it at production politeness, zero failures → hourly intake →
+`*/15` resolve drain.
+
+### The gate — answered honestly, and OQ2 with it
+
+| Measure | Result |
+| --- | --- |
+| Published `ruianId` resolving to **exactly one** current address point | **2,775 / 2,781 = 99.78 %** |
+| Residual | 6 rows (0.22 %) whose kód ADM is in **no** mirror vintage — portal keys ahead of `ruian:2026-07-31`; the resolver's own `kod_adm_not_in_mirror` trace |
+| Active rows carrying a published `ruianId` | **2,781 / 5,746 = 48.4 %** |
+| Structural ceiling for `address_point`/`building` | ≈ **67 %** (2,781 R0-eligible + 1,075 R1-eligible) |
+
+**OQ2 is answered and the recon's expectation is corrected.** bezrealitky publishes `ruianId`
+on **48.4 %** of active adverts, not ~100 % — the live-probe sample was 4/4 rows and the
+field is JSON `null` on street-less/approximate adverts. That was flagged DOC-CLAIM-ONLY and
+the risk was real. **Both numeric gate arms therefore fail on portal inventory, not on the
+pipeline**: every key the portal publishes resolves, essentially perfectly. The design
+anticipated exactly this ("the slice still ships, and OQ2 is answered either way"), and
+W1v's actual deliverable — every layer exercised against real data in production with a
+visible artefact — is met.
+
+### Read-your-writes, verified live (listing 156144, nám. Budovatelů 1415/5, Karviná)
+
+`street_segment` / `portal_pin` / `medium` / r=100 m / no kód ADM →
+**`address_point` / `registry_point` / `exact` / r=10 m / kód ADM 24252301**, plus číslo
+orientační `5` and PSČ recovered — the čo the old pipeline drops on 4 of 5 rows that have one.
+
+### What the live check caught that no offline gate could
+
+Two production defects, both invisible to CI, and the argument for keeping the live
+round-trip as a gate rather than a nicety:
+
+- **#1044** — `location_data/` was never COPY'd into the service image. W1 was shadow-only,
+  so nothing on the API had ever imported it; the route's lazy import kept boot alive and
+  turned it into a 500 on first use instead of a boot crash.
+- **#1046** — the operator claim INSERT passed `NULL::boolean` for
+  `legacy_write_path_unknown` (`NOT NULL DEFAULT false`). PREPARE type-checks without
+  executing and a fake connection cannot raise a constraint, so both offline gates passed it.
+  The fix ships a regression test that parses the 382 DDL for NOT-NULL-with-default columns
+  and forbids NULL overrides.
+
+### Finding carried to W2/W6: the registry's canonical street form is available but not adopted
+
+On R0-bound rows the mirror's own street name is one join away, yet **153 of 3,121 (4.9 %)**
+registry-bound bezrealitky rows serve a different string, and **344** bezrealitky
+`street_not_in_obec` contradictions stand open. Characterised, the two populations are:
+
+- **Case convention** (the bulk): the portal title-cases the non-initial word where RÚIAN
+  lowercases it — `Na Strži` vs `Na strži`, `V Zahradách` vs `V zahradách`. Plus one Unicode
+  Roman numeral (`Ⅰ` U+2160 vs `I`) and one genuine typo (`Jungmannová`/`Jungmannova`).
+- **Dropped prefix** (what fires `street_not_in_obec`): the portal omits `nám.` / `tř.`, so
+  the normalized gazetteer join misses — listing 156144's `Budovatelů` vs `nám. Budovatelů`.
+
+Root cause: S7's registry fill is preserve-if-null, so no registry-derived `street_name`
+claim is emitted and policy v1's `('ruian','registry_derived',100)` row — which would beat
+the portal's 300 — never gets a chance. **Not fixed in W1v on purpose**: it changes
+resolution output for every registry-bound row corpus-wide (sreality is 26.9 % kód ADM), so
+it is a W2/W6 decision, and the contradiction ledger is meanwhile doing exactly its job.
 - **Operator items:** **A1** (ČÚZK helpdesk) — letter drafted, awaiting send. **A5** (filter
   semantics default) — still undecided, and it is a serving-layer decision W6 needs. **A2**
   (quarterly licence review) standing. **A4** (Supabase plan/tier) no longer blocks: W1 is applied
