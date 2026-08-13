@@ -63,19 +63,18 @@ on:
         required: false
         default: false
         type: boolean
-  # NO `schedule:` WHILE THE W1 BACKFILL IS RUNNING — deliberate, and temporary.
-  #
-  # The outer `location-batch` concurrency group holds ONE pending slot. A `*/15` tick is a
-  # new pending run, and GitHub SUPERSEDES the older pending entry — which, while the backfill
-  # driver is dispatching back-to-back runs, is the driver's own next dispatch. The cron was
-  # not adding throughput to a 630 k queue that a 55-minute dispatch works down 2,750 rows at
-  # a time; it was displacing it. And it is redundant besides: the backfill is draining the
-  # same `dirty_locations` queue the cron would, from the front.
-  #
-  # Put it back when the backfill finishes and the lane returns to steady state (a few
-  # hundred newly scraped listings per tick), or when the always-on worker lane lands and
-  # takes the cadence over — 00 §14 has it as a later wave. `workflow_dispatch` is unchanged,
-  # so both the driver and a manual run work exactly as before.
+  schedule:
+    # Steady state: every 15 minutes, `mode=drain` on the cron budget (the env block below
+    # falls back to 600 s / batch 250 when a run carries no dispatch inputs). The queue is a
+    # few hundred newly scraped listings per tick; judge it by oldest-row AGE, not length.
+    #
+    # This cron was REMOVED for the duration of the W1 backfill and restored when the corpus
+    # sweep finished. The reason it had to go, in case a future backfill needs the same move:
+    # the outer `location-batch` group holds ONE pending slot, GitHub supersedes the older
+    # pending entry, and while a driver dispatches back-to-back 55-minute runs the entry a
+    # tick displaces is the driver's own next dispatch. A `*/15` tick added nothing to a
+    # 630 k queue it was draining from the same front — it only took the slot.
+    - cron: "*/15 * * * *"
 
 concurrency:
   # OUTER, cross-lane: shared with the registry load, the claim intake and the Mapy

@@ -356,6 +356,17 @@ that don't key on street.
   (derived from the old point → may be wrong → "wrong street worse than NULL"), and its existing
   tail block then re-opens the resolver for the new coords. Parser streets are untouched by the
   guard (the page re-derives them every fetch).
+- **Location-data W1 relations (`location_*`, `ruian_*`, `mapy_*`, `portal_contract*`, `pin_*`;
+  migrations 380–389) are service-role-only and shadow-only** — RLS on plus explicit
+  `anon`/`authenticated` REVOKEs on every table, sequence and function, and nothing outside
+  `location_data/` reads them before W6 (Browse/map/watchdog/dedup still use `listings.geom` and the
+  geo-derived admin columns). Three disciplines when you touch them: the claim layer is
+  **append-only** — a wrong claim is retracted and a new one inserted, never UPDATEd, and the Mapy
+  licence-evidence tables are trigger-immutable (42501 on UPDATE/DELETE/TRUNCATE); every heavy batch
+  lane shares the ONE `location-batch` Actions concurrency group and arms a `SET LOCAL
+  statement_timeout`; and the RÚIAN loaders + the resolve drain run on **`connect_session()`** (the
+  loader refuses the transaction-pooler fallback — a 3 M-row COPY needs session GUCs). Rationale:
+  `docs/architecture.md` § Location data (W1); sequencing: `roadmap/location-data.md`.
 
 ## See also
 

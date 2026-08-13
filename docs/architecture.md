@@ -975,6 +975,78 @@ renumber.** Navigate by area:
     controls carry `<InfoIcon>` (i) hints (native `title=`, the codebase's tooltip convention).
 
 
+## Location data (W1) — the greenfield location SSOT
+
+W1 (migrations 380–389, PRs #1008–#1013 + fixes) shipped a **parallel** truth model for where a
+listing is — not a change to the existing one. It is **shadow-only**: `listings.geom`, the geo-derived
+admin columns and `scraper/street.py` still back Browse, the map, the watchdog and dedup, and **no
+consumer flips before W6**. The authoritative plan is operator-held outside this repo —
+`~/location-data-architecture-2026-08-10/design/final/MASTER.md`, `00-shared-contracts.md` the
+tie-breaker (the `00 §…` / `03 §…` citations in the code are that corpus); shipped state and
+sequencing live in `roadmap/location-data.md`.
+
+**Three layers, one direction.** `location_claims` is **append-only evidence** — what a payload
+asserted, with an extractor id, a surface, a licence class and a `claim_fingerprint` (migration 386's
+IMMUTABLE `location_claim_fingerprint()`, computed in SQL so W2's re-mine and W3's backfill reuse the
+definition instead of re-transcribing it). Nothing is corrected in place: a wrong claim is retracted
+and a new one inserted. `location_resolutions` + `location_resolution_candidates` are the output of a
+**pure function** — S1–S9 in `location_data/resolver/`, no wall clock (`as_of = max(observed_at)`),
+no network, no randomness, enforced by an AST scan — so a resolution replays byte-identically from
+its inputs and the five version ids stamped on it. `listing_location_current` +
+`property_location_current` are **rebuildable caches**, never a store of record: the
+`dirty_locations` drain rebuilds a row from its resolution, the full sweep anything built at a stale
+version tuple.
+
+**Four precision axes, mandatory next to every coordinate** (D3): `granularity` (ordinal enum,
+country → … → address_point), `position_source` (admin_centroid → carried_forward →
+portal_pin_blurred → portal_pin → registry_point), `match_confidence`, and `uncertainty_radius_m`
+**paired with** `radius_semantics` — NOT NULL on the resolution, the candidate and both projections
+(at claim grain only a nullable `declared_radius_m`; most portals declare nothing). `blur_evidence`
+and `position_licence_class` ride alongside as separate NOT NULL facts: W6's consumers must know how
+much to trust a pin, not just where it is. Radii ship uncalibrated by design (never `r95_empirical`);
+calibrating writes a new `policy_version`, it never edits a row.
+
+**Licence enforcement is structural.** `licence_class` is the program's single licence vocabulary and
+`ephemeral_display_only` (Mapy.cz-class) its poison value. Three CHECKs — `loc_res_licence` on
+`location_resolutions`, `llc_licence`/`plc_licence` on the projections — make such a position
+impossible to mint or to land in a store of record, and a partial index on `location_claims` keeps
+the remediation set one indexed predicate away. The claim lane's blocking gate is `claims JOIN
+mapy_affected WHERE claim_type='coordinate'` = 0, and it refuses to start unless the Mapy affected-set
+inventory (migration 385 — five arms, identity and reason codes, **never** a coordinate, and
+trigger-immutable: 42501 on UPDATE/DELETE/TRUNCATE) is TERMINAL *and* COMPLETE. Half-built is worse
+than none, because every listing past its high-water mark reads as absent — the verdict that admits a
+Mapy coordinate as first-party.
+
+**The RÚIAN mirror is versioned, not mutated.** `ruian_*` (migration 381) holds ČÚZK's address points,
+streets, parcels, building objects, admin units and a typo-tolerant gazetteer. Every load stamps one
+`registry_versions` row (`ruian:YYYY-MM-DD`) and publishes by **pointer swap** behind blocking
+assertions, so it never half-changes the world underneath a resolution that pinned a version. Křovák
+S-JTSK → WGS84 goes through ONE audited conversion on an explicitly chosen 1 m PROJ pipeline
+(`location_data/krovak.py`; the 6 m one is never used), guarded by a golden-point test; boundary packs
+carry three geometries per unit (authoritative, subdivided pip, render). Freshness is the monthly
+baseline — the VFR daily-delta lane ships as chain-verification only and fails loudly until the
+`ST_ZZSZ` element schema is pinned down.
+
+**Portal contracts are data; git stays the store of record.** `contracts/portals/<portal>.yaml` × 9
+declares every extractor (permanent id, surface, licence class, caps, priors, exclusion zones) and
+`location_data/contracts.py` projects them into `portal_contracts`/`portal_contract_entries`,
+idempotent per `contract_version`, refusing a changed body under a loaded version. **Entries are
+immutable** — a fix is a version bump, never an edit, so a claim's `extractor_id` always names the
+rule that produced it. Hence no per-portal branch in the intake: a new signal is a YAML entry, not code.
+
+**Ops rules the incidents wrote.** All four heavy lanes — registry load, claim intake, Mapy inventory,
+resolve — share the OUTER `location-batch` concurrency group so **at most one runs at a time** (each
+keeps its own inner group at job level); a new heavy lane joins it. On 2026-08-10 four concurrent
+lanes dropped backends across the fleet, degraded the live Browse rebuild to multi-minute
+DataFileReads and wedged two lanes with no error at all. **No batch statement runs without a ceiling**:
+`statement_timeout = 0` is for genuine bulk phases (COPY, index build, whole-table rebuild) and
+nothing else; per-unit and per-batch work arms `SET LOCAL statement_timeout` in its own transaction
+(budgets env-overridable, `LOCATION_*_TIMEOUT_S`; gate
+`tests/location_data/test_location_batch_hardening.py`). And the drain's cost is **round trips, not
+work**: from Actions it is network-RTT-bound at ~5–17 listings/s (~75 ms per GitHub↔Frankfurt trip
+against 0.02–0.5 ms of server-side work), so the slice-batching, memoization and prefetching that got
+it there compound if the lane ever moves onto the always-on Railway worker (~1–2 ms RTT).
+
 ## Cross-reference map
 
 | Topic | Operational how-to |
@@ -983,6 +1055,7 @@ renumber.** Navigate by area:
 | Toolkit tools, FastAPI, auth, versioned trace, env-vars & secrets | `.claude/skills/toolkit-api` |
 | LLM URL parsing, cached analysis tools, vision tiers, MF rent map | `.claude/skills/llm-pipelines` |
 | Running/debugging scrapers, adding a field, fixtures, reading logs | `.claude/skills/scraper-ops` |
+| Location-data program (claim spine, RÚIAN mirror, contracts) | `roadmap/location-data.md` + the operator-held design corpus |
 | Roadmap / sequencing | `ROADMAP.md` + `roadmap/<track>.md` |
 
 **Two "skills" namespaces (don't conflate):** repo-root `skills/` holds **agent** skills
