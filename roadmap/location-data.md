@@ -343,7 +343,10 @@ all closed, several proven against a throwaway PostgreSQL 18 built from `.deb` f
 - **W2-2 evidence-bearing claims + the re-mine lane** (no migration — 382 already carries every
   evidence column and CHECK). `location_claims.Claim` gains the D7 evidence set
   (`payload_id`, `payload_sha256`, `evidence_quote`, `span_start`, `span_end`,
-  `payload_scope_version`), carried through `to_row()` and `_CLAIM_WRITE_SQL` in lockstep and on
+  `payload_scope_version`) plus `model` / `prompt_version` — `loc_claim_llm_model` forces both
+  non-null on an `llm_text` claim, so without them the lane could SPELL a claim the schema
+  refuses and the first one ever written would take its whole batch down. All eight carried
+  through `to_row()` and `_CLAIM_WRITE_SQL` in lockstep, and the evidence triple on
   into `location_claim_observations` so a re-sighting names the body that re-observed it;
   `claim_fingerprint` stays SQL-only (migration 386) and stays time- AND evidence-free.
   `location_data/claims_remine_archive.py` is the lane — the disambiguated name the W3 erratum
@@ -367,7 +370,17 @@ all closed, several proven against a throwaway PostgreSQL 18 built from `.deb` f
   substrate branch — 06 §6.4's gate joins on `listing_id`, not on `surface`, so re-reading the
   same position out of an archived page is the same position. C6 is encoded as data:
   a first-party detail-map pin is `'portal'`, realitymix's absent-`data-gps` Nominatim branch is
-  `'odbl'`, and the reader declares which branch it read while the LADDER stamps the class.
+  `'odbl'`, and the reader declares which branch it read while the LADDER stamps the class —
+  as a REQUIRED `ArchiveRead.position_branch`, never inferred from what the reader happened to
+  stamp, because a Nominatim reader that forgot to say so would otherwise inherit the entry's
+  `licence_class: portal` default and file republished OSM as first-party.
+- **A permanent gate on lane identifiers** (`tests/location_data/test_lane_identifiers.py`): every
+  module-level `LANE` / `JOB_NAME` / `CONCURRENCY_GROUP` / extractor-version constant across
+  `location_data/**` and `scripts/location_*.py` must be globally unique. The W2/W3 collision was
+  caught by two sessions comparing notes, which is not a mechanism — these strings are primary
+  keys in `location_claim_batches` and `location_jobs`, and sharing one is a silent coverage hole,
+  not an error. A module declaring `LANE` must also declare a version constant the gate knows, so
+  a new spelling fails loudly instead of dropping out of the scan.
 - **C7 fixed before the first sweep** (same PR): `requires_independent_agreement` now counts
   distinct **sources**, not distinct `(source, extraction_method)` producers
   (`resolver/survivorship.py::_independently_agreed`). `claim_fingerprint` hashes `surface`, so

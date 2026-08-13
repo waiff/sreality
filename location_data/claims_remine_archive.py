@@ -57,11 +57,21 @@ THE THREE RULINGS THIS LANE IMPLEMENTS (BUILD-PLAN §1)
     same row, not an anchor KIND, and it is what makes a post-W2a body replayable.
 
 EVIDENCE IS REFUSED IN PYTHON, NOT BY THE CHECK
-  Migration 382's `loc_claim_text_evidence` / `loc_claim_evidence_payload` are the last
-  line of defence, never the first: a batch is one transaction, so a single malformed
-  `regex_text` claim would roll back every good claim beside it, and the error would name a
-  constraint rather than the entry that produced it. `assert_evidence_complete` raises
-  before the write, naming the extractor.
+  Migration 382's `loc_claim_text_evidence` / `loc_claim_evidence_payload` /
+  `loc_claim_llm_model` are the last line of defence, never the first: a batch is one
+  transaction, so a single malformed `regex_text` claim would roll back every good claim
+  beside it, and the error would name a constraint rather than the entry that produced it.
+  `assert_evidence_complete` raises before the write, naming the extractor — and it covers
+  all three, including the `llm_text` model attribution that has no reader yet, because a
+  claim shape that can be spelled but not written is a trap laid for whoever builds one.
+
+A READER STATES WHAT IT READ; IT DOES NOT STAMP WHAT THAT MEANS
+  Readers return `ArchiveRead`, not a bare `Claim`, for one reason: a coordinate's licence
+  class is decided by WHICH branch of the portal's map produced it (C6), only the reader
+  knows that, and the claim's own `licence_class` arrives pre-filled from the contract
+  entry's default — so a reader that says nothing looks exactly like one that read the
+  first-party pin. `position_branch` is required on a coordinate read and refused on
+  anything else; the ladder, not the reader, then stamps the class.
 
 CLI:
     python -m location_data.claims_remine_archive --mode full --max-seconds 2400
@@ -151,8 +161,21 @@ GEOCODED_LICENCE_CLASS = "odbl"
 ARCHIVE_EMITTABLE_LICENCE_CLASSES = EMITTABLE_LICENCE_CLASSES | {GEOCODED_LICENCE_CLASS}
 
 # 01 §4.2's `loc_claim_text_evidence` names these two methods; every other method may carry
-# evidence but is not required to.
+# evidence but is not required to. `llm_text` additionally has to satisfy
+# `loc_claim_llm_model` — a model assertion that cannot name the model that made it is not
+# evidence — which is why `LLM_METHOD` is checked separately below rather than folded in.
 EVIDENCE_METHODS = frozenset({"llm_text", "regex_text"})
+LLM_METHOD = "llm_text"
+
+# Which branch of a portal's detail map a coordinate was read from. The READER states this;
+# it is never inferred from what the reader happened to stamp on the claim. Inferring it
+# (say, from `licence_class != 'odbl'`) has one silent failure mode and it is the expensive
+# one: a Nominatim-fallback reader that simply forgets to say so inherits the entry's
+# `licence_class: portal` default and a republished OSM position is filed as first-party,
+# with nothing anywhere to catch it. A required argument cannot be forgotten quietly.
+POSITION_BRANCH_PORTAL_PIN = "portal_pin"
+POSITION_BRANCH_PORTAL_GEOCODED = "portal_geocoded"
+POSITION_BRANCHES = frozenset({POSITION_BRANCH_PORTAL_PIN, POSITION_BRANCH_PORTAL_GEOCODED})
 
 # The archived body is one fetch, not a series: pre-W2a `portal_raw_pages` was latest-wins
 # (`ON CONFLICT DO UPDATE SET html`) and every body older than the last fetch is simply
@@ -188,7 +211,24 @@ class ArchivedPayload:
     body: bytes | None = None
 
 
-ArchiveReaderFn = Callable[[Entry, ListingRow, ArchivedPayload, ScopedDocument], list[Claim]]
+@dataclass(frozen=True, slots=True)
+class ArchiveRead:
+    """One thing a reader found, plus the one fact about HOW it found it that the claim
+    itself cannot carry.
+
+    `position_branch` is required on a `claim_type='coordinate'` read and refused on any
+    other. It exists because the licence class of a coordinate is decided by which branch of
+    the portal's map markup produced it (C6), and only the reader knows that — while the
+    claim's own `licence_class` arrives pre-filled from the contract entry's default, so a
+    reader that says nothing is indistinguishable from one that read the pin. Making it an
+    argument rather than an inference converts "forgot to declare the fallback branch" from
+    a silent mis-licensing into a refusal that names the entry."""
+    claim: Claim
+    position_branch: str | None = None
+
+
+ArchiveReaderFn = Callable[
+    [Entry, ListingRow, ArchivedPayload, ScopedDocument], list[ArchiveRead]]
 
 # EMPTY until W2-6…W2-12. See the module docstring: this is what makes the lane inert, and
 # it is deliberately a second registry rather than an extension of `claims_intake.READERS`.
@@ -252,6 +292,17 @@ def assert_evidence_complete(claim: Claim) -> None:
             f"{claim.extractor_id} produced an evidence quote with no payload_sha256; "
             f"01 §4.2's loc_claim_evidence_payload is D7's rule that a span is meaningless "
             f"without the document it indexes into")
+    if claim.extraction_method == LLM_METHOD:
+        unattributed = [
+            name for name, value in (("model", claim.model),
+                                     ("prompt_version", claim.prompt_version))
+            if value is None
+        ]
+        if unattributed:
+            raise IntakeRefused(
+                f"{claim.extractor_id} produced an llm_text claim without "
+                f"{', '.join(unattributed)}; 01 §4.2's loc_claim_llm_model refuses a model "
+                f"assertion that cannot name the model that made it")
 
 
 def assert_stampable(claim: Claim) -> None:
@@ -295,19 +346,26 @@ def stamp_archive_claim(
 
 
 def _licensed_coordinate(
-    claim: Claim, row: ListingRow, entry: Entry,
+    claim: Claim, row: ListingRow, entry: Entry, branch: str | None,
 ) -> tuple[Claim | None, str]:
     """The archived arm of the licence ladder, applied to a coordinate claim.
 
-    The READER declares which branch of the page it read — a portal pin, or the portal's
-    own geocode — and the LADDER stamps the class. That order matters: a reader that
-    guessed `licence_class` would be re-litigating C6 once per portal, whereas here the only
-    thing a reader can influence is which row of `ARCHIVED_COORDINATE_RULES` applies, and
-    an entry with no row gets no coordinate at all."""
+    The READER declares which branch of the page it read (`ArchiveRead.position_branch`)
+    and the LADDER stamps the class — never the other way round. Whatever `licence_class`
+    the reader left on the claim is DISCARDED here: a reader that stamps `'portal'` on the
+    Nominatim branch gets `'odbl'` anyway, so C6 is decided once, in
+    `ARCHIVED_COORDINATE_RULES`, instead of re-litigated in nine portal readers."""
+    if branch not in POSITION_BRANCHES:
+        raise IntakeRefused(
+            f"{entry.entry_id} returned a coordinate without a position_branch "
+            f"(got {branch!r}, expected one of {sorted(POSITION_BRANCHES)}). Which branch "
+            f"of the portal's map produced a position IS its licence class (C6) and only "
+            f"the reader knows it — it is never inferred from what the claim was stamped "
+            f"with")
     verdict = coordinate_verdict(
         row.source, None, in_mapy_inventory=row.in_mapy_inventory,
         substrate=SUBSTRATE_ARCHIVED_HTML, entry_id=entry.entry_id,
-        portal_pin_present=claim.licence_class != GEOCODED_LICENCE_CLASS)
+        portal_pin_present=branch == POSITION_BRANCH_PORTAL_PIN)
     if not verdict.admitted or verdict.licence_class is None:
         return None, verdict.reason
     return replace(claim, licence_class=verdict.licence_class), verdict.reason
@@ -342,10 +400,17 @@ def extract_payload(
         return result
 
     for entry in applicable:
-        for claim in ARCHIVE_READERS[str(entry.reader)](entry, row, payload, document):
-            claim = stamp_archive_claim(claim, payload, scope_version=document.scope_version)
+        for read in ARCHIVE_READERS[str(entry.reader)](entry, row, payload, document):
+            claim = stamp_archive_claim(
+                read.claim, payload, scope_version=document.scope_version)
+            if claim.claim_type != "coordinate" and read.position_branch is not None:
+                raise IntakeRefused(
+                    f"{entry.entry_id} declared position_branch="
+                    f"'{read.position_branch}' on a {claim.claim_type} read; the branch is "
+                    f"a fact about a POSITION's licence lineage and means nothing here")
             if claim.claim_type == "coordinate":
-                claim, reason = _licensed_coordinate(claim, row, entry)
+                claim, reason = _licensed_coordinate(
+                    claim, row, entry, read.position_branch)
                 if claim is None:
                     result.absences.append(Absence(
                         listing_id=row.listing_id, surface=ARCHIVE_SURFACE,

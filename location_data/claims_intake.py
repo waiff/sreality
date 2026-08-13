@@ -389,6 +389,13 @@ class Claim:
     span_start: int | None = None
     span_end: int | None = None
     payload_scope_version: str | None = None
+    # The SECOND CHECK an evidence-bearing claim has to satisfy, and it binds `llm_text`
+    # alone: `loc_claim_llm_model` forces both non-null there. They ship with the evidence
+    # set rather than with the LLM lane because a `Claim` that can be spelled but not
+    # written is a trap — the row would pass every Python guard and take the whole batch
+    # down at the constraint, once, in production, on whoever builds the lane.
+    model: str | None = None
+    prompt_version: str | None = None
 
     def to_row(self) -> dict[str, Any]:
         row = {
@@ -429,6 +436,8 @@ class Claim:
             "span_start": self.span_start,
             "span_end": self.span_end,
             "payload_scope_version": self.payload_scope_version,
+            "model": self.model,
+            "prompt_version": self.prompt_version,
         }
         return row
 
@@ -1439,7 +1448,8 @@ _CLAIM_WRITE_SQL = f"""
             legacy_source_column text, legacy_write_path_unknown boolean,
             history_completeness text, subject_scoped boolean,
             payload_id bigint, payload_sha256 text, evidence_quote text,
-            span_start integer, span_end integer, payload_scope_version text)
+            span_start integer, span_end integer, payload_scope_version text,
+            model text, prompt_version text)
     ), typed AS (
         SELECT i.*,
                location_value_norm(i.value_text) AS value_norm,
@@ -1462,7 +1472,7 @@ _CLAIM_WRITE_SQL = f"""
             declared_radius_m, claim_confidence, blur_evidence, licence_class,
             legacy_source_column, legacy_write_path_unknown, history_completeness,
             subject_scoped, payload_id, payload_sha256, evidence_quote, span_start,
-            span_end, payload_scope_version, claim_fingerprint)
+            span_end, payload_scope_version, model, prompt_version, claim_fingerprint)
         SELECT d.listing_id, d.source, d.source_id_native, d.snapshot_id,
                d.snapshot_anchor, d.first_observed_at, d.claim_type::location_claim_type,
                d.surface::location_claim_surface, d.page_kind::location_page_kind,
@@ -1476,7 +1486,8 @@ _CLAIM_WRITE_SQL = f"""
                d.legacy_source_column, d.legacy_write_path_unknown,
                d.history_completeness, d.subject_scoped, d.payload_id,
                decode(d.payload_sha256, 'hex'), d.evidence_quote, d.span_start,
-               d.span_end, d.payload_scope_version, d.claim_fingerprint
+               d.span_end, d.payload_scope_version, d.model, d.prompt_version,
+               d.claim_fingerprint
         FROM deduped d
         ON CONFLICT (claim_fingerprint) DO NOTHING
         RETURNING id, listing_id
