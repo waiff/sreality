@@ -4,6 +4,10 @@ Mounted under `/broker-review/*` (own prefix so it never collides with the
 `/brokers/{broker_id}` read routes), admin-gated via `require_admin` — mutating
 operator actions (merge / dismiss / unmerge). Thin HTTP layer over
 `api.broker_review`. Reversible: every merge logs to broker_merge_events.
+
+`require_admin` returns the verified JWT claims; every mutating route binds them and
+threads WHO acted into the ledger. They were discarded before, so undone_by /
+resolved_by are NULL on every row written to date.
 """
 
 from __future__ import annotations
@@ -17,6 +21,12 @@ from api import broker_review as review
 from api import dependencies as deps
 
 router = APIRouter(prefix="/broker-review", tags=["broker-review"])
+
+
+def _actor(claims: dict) -> str | None:
+    """Who is acting, for the ledger's *_by columns. Email is the readable handle;
+    `sub` (the Supabase user uuid) is the fallback for a token without one."""
+    return claims.get("email") or claims.get("sub")
 
 
 class MergeCandidateIn(BaseModel):
@@ -45,10 +55,11 @@ def merge_candidate(
     candidate_id: int,
     body: MergeCandidateIn,
     conn: Any = Depends(deps.get_db_conn),
-    _: dict = Depends(deps.require_admin),
+    claims: dict = Depends(deps.require_admin),
 ) -> dict[str, Any]:
     try:
-        result = review.merge_candidate(conn, candidate_id, broker_ids=body.broker_ids)
+        result = review.merge_candidate(conn, candidate_id, broker_ids=body.broker_ids,
+                                        created_by=_actor(claims))
     except review.MergeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     if result is None:
@@ -60,9 +71,9 @@ def merge_candidate(
 def dismiss_candidate(
     candidate_id: int,
     conn: Any = Depends(deps.get_db_conn),
-    _: dict = Depends(deps.require_admin),
+    claims: dict = Depends(deps.require_admin),
 ) -> dict[str, Any]:
-    result = review.dismiss_candidate(conn, candidate_id)
+    result = review.dismiss_candidate(conn, candidate_id, resolved_by=_actor(claims))
     if result is None:
         raise HTTPException(status_code=404, detail="candidate not found or not proposed")
     return result
@@ -72,10 +83,10 @@ def dismiss_candidate(
 def merge_brokers(
     body: MergeBrokersIn,
     conn: Any = Depends(deps.get_db_conn),
-    _: dict = Depends(deps.require_admin),
+    claims: dict = Depends(deps.require_admin),
 ) -> dict[str, Any]:
     try:
-        return review.merge_brokers(conn, body.broker_ids)
+        return review.merge_brokers(conn, body.broker_ids, created_by=_actor(claims))
     except review.MergeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
@@ -93,9 +104,9 @@ def list_merges(
 def unmerge(
     merge_group_id: str,
     conn: Any = Depends(deps.get_db_conn),
-    _: dict = Depends(deps.require_admin),
+    claims: dict = Depends(deps.require_admin),
 ) -> dict[str, Any]:
-    result = review.unmerge_group(conn, merge_group_id)
+    result = review.unmerge_group(conn, merge_group_id, undone_by=_actor(claims))
     if result is None:
         raise HTTPException(status_code=404, detail="merge group not found or already undone")
     return result

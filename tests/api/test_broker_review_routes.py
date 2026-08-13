@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 fastapi = pytest.importorskip("fastapi")
@@ -117,6 +119,44 @@ def test_candidate_list_filters_by_reason_and_counts_the_whole_queue():
     # counts span the whole status, not the page — that is what sizes the tab the
     # operator is NOT currently looking at
     assert out["reason_counts"] == {"name_firm": 3187, "contact_bridge_review": 9377}
+
+
+def test_every_mutating_route_threads_the_admin_identity(client, monkeypatch):
+    """require_admin returns the verified JWT claims and the routes bound them to
+    `_`, so undone_by / resolved_by / created_by are NULL on every row written to
+    date — and the suppression rows the rail now writes would have been anonymous
+    too. Email is the readable handle; `sub` is the fallback."""
+    captured: dict[str, Any] = {}
+    api_main.app.dependency_overrides[deps.require_admin] = (
+        lambda: {"is_admin": True, "email": "op@example.com", "sub": "uuid-1"}
+    )
+    monkeypatch.setattr(routes.review, "unmerge_group",
+                        lambda conn, g, **kw: captured.update(unmerge=kw)
+                        or {"merge_group_id": g, "survivor_broker_id": 1,
+                            "restored_broker_ids": [2]})
+    monkeypatch.setattr(routes.review, "dismiss_candidate",
+                        lambda conn, cid, **kw: captured.update(dismiss=kw)
+                        or {"id": cid, "status": "dismissed"})
+    monkeypatch.setattr(routes.review, "merge_brokers",
+                        lambda conn, ids, **kw: captured.update(merge=kw) or {"ok": 1})
+    monkeypatch.setattr(routes.review, "merge_candidate",
+                        lambda conn, cid, **kw: captured.update(candidate=kw) or {"ok": 1})
+
+    client.post("/broker-review/merges/abc/unmerge")
+    client.post("/broker-review/candidates/3/dismiss")
+    client.post("/broker-review/merge", json={"broker_ids": [1, 2]})
+    client.post("/broker-review/candidates/3/merge", json={})
+
+    assert captured["unmerge"]["undone_by"] == "op@example.com"
+    assert captured["dismiss"]["resolved_by"] == "op@example.com"
+    assert captured["merge"]["created_by"] == "op@example.com"
+    assert captured["candidate"]["created_by"] == "op@example.com"
+
+
+def test_the_actor_falls_back_to_the_subject_when_there_is_no_email():
+    assert routes._actor({"sub": "uuid-1"}) == "uuid-1"
+    assert routes._actor({"email": "op@example.com", "sub": "uuid-1"}) == "op@example.com"
+    assert routes._actor({}) is None
 
 
 def test_operator_merge_source_satisfies_the_events_check_constraint():
