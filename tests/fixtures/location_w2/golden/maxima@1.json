@@ -1,0 +1,120 @@
+{
+  "portal": "maxima",
+  "contract_version": 1,
+  "regression_listing_ids": [
+    "d40026367",
+    "d40031686",
+    "f60012522",
+    "f60012682"
+  ],
+  "listings_without_a_fixture_body": [
+    "d40026367",
+    "f60012522",
+    "f60012682"
+  ],
+  "fixtures": [
+    {
+      "listing": "d40031686",
+      "body": "claim_intake_fixtures.MAXIMA_PAGE",
+      "row": {
+        "lat": 50.7663,
+        "lon": 15.0562,
+        "in_mapy_inventory": false,
+        "listings.locality": null,
+        "listings.street": null,
+        "listings.street_source": null
+      },
+      "claims": [
+        {
+          "extractor_id": "mx.det.legacy_pin",
+          "claim_type": "coordinate",
+          "surface": "legacy_column",
+          "page_kind": "none",
+          "extraction_method": "legacy_column",
+          "snapshot_anchor": "unanchored_legacy",
+          "value_text": null,
+          "value_norm": null,
+          "value_num": null,
+          "value_geom_wkt": "POINT(15.0562 50.7663)",
+          "value_shape_wkt": null,
+          "value_jsonb": {
+            "coords_source": "page",
+            "ladder": "first_party_page"
+          },
+          "distance_m": null,
+          "travel_mode": null,
+          "target_text": null,
+          "declared_precision_label": null,
+          "declared_confidence": null,
+          "declared_radius_m": null,
+          "claim_confidence": null,
+          "blur_evidence": "none",
+          "licence_class": "portal",
+          "history_completeness": "locality_text_only",
+          "subject_scoped": true,
+          "legacy_source_column": "listings.geom",
+          "legacy_write_path_unknown": false
+        },
+        {
+          "extractor_id": "mx.det.coords_stamp",
+          "claim_type": "precision_declaration",
+          "surface": "legacy_column",
+          "page_kind": "none",
+          "extraction_method": "legacy_column",
+          "snapshot_anchor": "unanchored_legacy",
+          "value_text": "page",
+          "value_norm": "page",
+          "value_num": null,
+          "value_geom_wkt": null,
+          "value_shape_wkt": null,
+          "value_jsonb": {
+            "source": "page"
+          },
+          "distance_m": null,
+          "travel_mode": null,
+          "target_text": null,
+          "declared_precision_label": null,
+          "declared_confidence": null,
+          "declared_radius_m": null,
+          "claim_confidence": null,
+          "blur_evidence": "none",
+          "licence_class": "portal",
+          "history_completeness": "locality_text_only",
+          "subject_scoped": true,
+          "legacy_source_column": "raw_json.coords",
+          "legacy_write_path_unknown": false
+        },
+        {
+          "extractor_id": "mx.det.locality_text",
+          "claim_type": "address_line_verbatim",
+          "surface": "legacy_column",
+          "page_kind": "none",
+          "extraction_method": "legacy_column",
+          "snapshot_anchor": "unanchored_legacy",
+          "value_text": "Liberec, Liberec XIV-Ruprechtice, Baltská",
+          "value_norm": "liberec liberec xiv ruprechtice baltska",
+          "value_num": null,
+          "value_geom_wkt": null,
+          "value_shape_wkt": null,
+          "value_jsonb": null,
+          "distance_m": null,
+          "travel_mode": null,
+          "target_text": null,
+          "declared_precision_label": null,
+          "declared_confidence": null,
+          "declared_radius_m": null,
+          "claim_confidence": null,
+          "blur_evidence": "none",
+          "licence_class": "portal",
+          "history_completeness": "locality_text_only",
+          "subject_scoped": true,
+          "legacy_source_column": "raw_json.locality_text",
+          "legacy_write_path_unknown": false
+        }
+      ],
+      "absences": [],
+      "enrichment": [],
+      "oversized": 0
+    }
+  ]
+}
