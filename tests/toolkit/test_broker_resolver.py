@@ -104,3 +104,167 @@ def test_no_bridges_is_noop():
     d = R.decide_merges(ids, [], ["sreality", "idnes"])
     assert d.auto_merge_groups == []
     assert d.review_pairs == []
+
+
+# --- the suppression rail (migration 401) -------------------------------------
+
+
+def test_a_suppressed_pair_reaches_neither_auto_merge_nor_review():
+    """The gap D5 closes: the sweep re-derives every bridge from scratch, so an
+    unmerged pair came back the next night. It must not fall through to REVIEW
+    either — re-proposing a pair the operator already rejected asks them the same
+    question every sweep, which is the same failure wearing a queue row."""
+    ids = _ids((1, "sreality", "Jan Novak"), (2, "idnes", "Jan Novak"))
+    bridges = [R.Bridge(1, 2, "email", "jan@x.cz"), R.Bridge(1, 2, "phone", "420600111222")]
+    d = R.decide_merges(ids, bridges, ["sreality", "idnes"], suppressed_pairs={(1, 2)})
+    assert d.auto_merge_groups == []
+    assert d.review_pairs == []
+    assert d.suppressed == [(1, 2)]
+
+
+def test_the_same_evidence_still_auto_merges_when_not_suppressed():
+    """The control: suppression is the ONLY difference between these two runs."""
+    ids = _ids((1, "sreality", "Jan Novak"), (2, "idnes", "Jan Novak"))
+    bridges = [R.Bridge(1, 2, "email", "jan@x.cz"), R.Bridge(1, 2, "phone", "420600111222")]
+    d = R.decide_merges(ids, bridges, ["sreality", "idnes"], suppressed_pairs=set())
+    assert d.auto_merge_groups == [[1, 2]] and d.suppressed == []
+
+
+def test_suppressing_one_pair_leaves_the_others_alone():
+    ids = _ids((1, "sreality", "Jan Novak"), (2, "idnes", "Jan Novak"),
+               (3, "sreality", "Petr Svoboda"), (4, "idnes", "Petr Svoboda"))
+    bridges = [R.Bridge(1, 2, "phone", "420600111222"),
+               R.Bridge(3, 4, "phone", "420600333444")]
+    d = R.decide_merges(ids, bridges, ["sreality", "idnes"], suppressed_pairs={(1, 2)})
+    assert d.auto_merge_groups == [[3, 4]]
+    assert d.suppressed == [(1, 2)]
+
+
+def test_the_pair_key_is_normalized_like_bridge_pair():
+    """Bridges arrive in whichever order the contact scan emitted them; the
+    suppression set is stored lo<hi, so a hi-first bridge must still be caught."""
+    ids = _ids((7, "sreality", "Jan Novak"), (3, "idnes", "Jan Novak"))
+    d = R.decide_merges(ids, [R.Bridge(7, 3, "phone", "420600111222")],
+                        ["sreality", "idnes"], suppressed_pairs={(3, 7)})
+    assert d.auto_merge_groups == [] and d.suppressed == [(3, 7)]
+
+
+def test_single_rung_email_only_pair_remax_shaped():
+    """remax identities carry an email and NEVER a phone (toolkit/broker_sources.py
+    — deliberate, RE/MAX pages publish no broker phone), so one email plus a name
+    match is the entire case for a merge. That single-rung class is what D5 gates:
+    it auto-merges the moment remax is enabled, and the rail must be able to stop
+    it before that switch is flipped."""
+    ids = _ids((1, "sreality", "Jan Novak"), (2, "remax", "Novak Jan"))
+    bridges = [R.Bridge(1, 2, "email", "jan.novak@re-max.cz")]
+    assert R.decide_merges(ids, bridges, ["sreality", "remax"]).auto_merge_groups == [[1, 2]]
+    d = R.decide_merges(ids, bridges, ["sreality", "remax"], suppressed_pairs={(1, 2)})
+    assert d.auto_merge_groups == [] and d.review_pairs == [] and d.suppressed == [(1, 2)]
+
+
+def test_single_rung_phone_only_pair_ceskereality_shaped():
+    """The mirror image: ceskereality publishes a phone and no broker email."""
+    ids = _ids((1, "sreality", "Jan Novak"), (2, "ceskereality", "Novak Jan"))
+    bridges = [R.Bridge(1, 2, "phone", "420600111222")]
+    assert R.decide_merges(ids, bridges,
+                           ["sreality", "ceskereality"]).auto_merge_groups == [[1, 2]]
+    d = R.decide_merges(ids, bridges, ["sreality", "ceskereality"],
+                        suppressed_pairs={(1, 2)})
+    assert d.auto_merge_groups == [] and d.review_pairs == [] and d.suppressed == [(1, 2)]
+
+
+def test_two_emails_reach_strong_without_a_name_match():
+    """An email-only source does NOT imply exactly one rung: broker_identity_contacts
+    is unique per (identity, kind, value), so two identities can share TWO distinct
+    personal emails and clear the >=2-values bar with no name agreement at all.
+    (Migration 397's header overclaims here — do not encode 'email-only == one
+    rung' as an invariant.)"""
+    ids = _ids((1, "sreality", "Jan Novak"), (2, "remax", "J. Novak"))
+    bridges = [R.Bridge(1, 2, "email", "jan.novak@re-max.cz"),
+               R.Bridge(1, 2, "email", "j.novak@re-max.cz")]
+    assert R.names_match("Jan Novak", "J. Novak") is False
+    assert R.decide_merges(ids, bridges, ["sreality", "remax"]).auto_merge_groups == [[1, 2]]
+    d = R.decide_merges(ids, bridges, ["sreality", "remax"], suppressed_pairs={(1, 2)})
+    assert d.auto_merge_groups == [] and d.suppressed == [(1, 2)]
+
+
+def test_suppression_defaults_to_off_for_every_existing_caller():
+    ids = _ids((1, "sreality", "Jan Novak"), (2, "idnes", "Jan Novak"))
+    bridges = [R.Bridge(1, 2, "email", "jan@x.cz"), R.Bridge(1, 2, "phone", "420600111222")]
+    d = R.decide_merges(ids, bridges, ["sreality", "idnes"])
+    assert d.auto_merge_groups == [[1, 2]] and d.suppressed == []
+
+
+def test_group_bridges_names_the_single_edge_that_merged_a_pair():
+    """broker_merge_events.bridge_kind/bridge_value are NULL on all 7,689 live rows.
+    The dominant shape — one pair, one contact — can carry its evidence forward,
+    which is what the future remax validation (the D5 gate) has to audit."""
+    ids = _ids((1, "sreality", "Jan Novak"), (2, "remax", "Novak Jan"))
+    d = R.decide_merges(ids, [R.Bridge(1, 2, "email", "jan@re-max.cz")],
+                        ["sreality", "remax"])
+    assert d.group_bridges == {(1, 2): ("email", "jan@re-max.cz")}
+
+
+def test_group_bridges_stays_empty_when_the_evidence_is_ambiguous():
+    """Two values on one edge, or a multi-edge component: no single contact is THE
+    reason, so nothing is stamped rather than picking one arbitrarily."""
+    ids = _ids((1, "sreality", "Jan Novak"), (2, "idnes", "Jan Novak"))
+    two_values = [R.Bridge(1, 2, "email", "jan@x.cz"), R.Bridge(1, 2, "phone", "420600111222")]
+    assert R.decide_merges(ids, two_values, ["sreality", "idnes"]).group_bridges == {}
+
+    chain = _ids((1, "sreality", "Jan Novak"), (2, "idnes", "Jan Novak"),
+                 (3, "bazos", "Jan Novak"))
+    edges = [R.Bridge(1, 2, "phone", "420600111222"), R.Bridge(2, 3, "phone", "420600333444")]
+    d = R.decide_merges(chain, edges, ["sreality", "idnes", "bazos"])
+    assert d.auto_merge_groups == [[1, 2, 3]] and d.group_bridges == {}
+
+
+def test_a_suppressed_pair_never_reaches_review_through_an_oversized_component():
+    """decide_merges downgrades a component over MAX_AUTO_MERGE_COMPONENT by
+    expanding it pairwise — a path that never passes through the per-pair edge loop
+    where the rail was enforced. An unmerge-origin suppression therefore came back as
+    a BRAND-NEW review card every sweep (no prior candidate row blocks it: the
+    status='proposed' guard only stops re-proposing a row that already exists), and
+    was counted in queued_for_review and suppressed at the same time."""
+    sources = ["sreality", "idnes"]
+    ids = _ids(*((i, sources[i % 2], f"Person {i}") for i in range(1, 8)))
+    bridges = []
+    for a in range(1, 7):  # a 7-identity chain: one over the cap
+        bridges += [R.Bridge(a, a + 1, "email", f"e{a}@x.cz"),
+                    R.Bridge(a, a + 1, "phone", f"42060011122{a}")]
+    plain = R.decide_merges(ids, bridges, sources)
+    assert plain.auto_merge_groups == [] and len(plain.review_pairs) == 21
+
+    # (1, 4) is cross-source and shares no bridge — it exists only as a transitive
+    # pair of the downgraded component
+    d = R.decide_merges(ids, bridges, sources, suppressed_pairs={(1, 4)})
+    assert (1, 4) not in d.review_pairs
+    assert d.suppressed == [(1, 4)]
+    assert len(d.review_pairs) == 20
+    assert len(d.review_pairs) + len(d.suppressed) == 21   # counted once, not twice
+
+
+def test_a_suppressed_edge_is_not_re_queued_for_review_either():
+    """The direct case, same guarantee: the pair the operator rejected is on record,
+    so asking again — as an auto-merge or as a review card — is the same failure."""
+    ids = _ids((1, "sreality", "Jan Novak"), (2, "idnes", "Jan Novak"))
+    d = R.decide_merges(ids, [R.Bridge(1, 2, "email", "jan@x.cz")], ["sreality"],
+                        suppressed_pairs={(1, 2)})
+    # both_enabled is False here, so without the rail this pair lands in review
+    assert d.review_pairs == [] and d.suppressed == [(1, 2)]
+
+
+def test_removing_an_edge_does_not_stop_the_group_forming_around_it():
+    """The responsibility split, pinned: the pure layer only removes the suppressed
+    EDGE. With A-C and C-B corroborated, union-find still emits [A, B, C] — A and B
+    land on one broker with no suppressed edge anywhere in the input. That is why the
+    apply-time backstop exists, and why it is not redundant with this filter."""
+    ids = _ids((1, "sreality", "Jan Novak"), (2, "idnes", "Jan Novak"),
+               (3, "bazos", "Jan Novak"))
+    bridges = [R.Bridge(1, 2, "email", "a@x.cz"), R.Bridge(1, 2, "phone", "420600111222"),
+               R.Bridge(1, 3, "email", "b@x.cz"), R.Bridge(1, 3, "phone", "420600333444"),
+               R.Bridge(3, 2, "email", "c@x.cz"), R.Bridge(3, 2, "phone", "420600555666")]
+    d = R.decide_merges(ids, bridges, ["sreality", "idnes", "bazos"],
+                        suppressed_pairs={(1, 2)})
+    assert d.auto_merge_groups == [[1, 2, 3]]      # emitted DESPITE the suppression
+    assert d.suppressed == [(1, 2)] and d.review_pairs == []

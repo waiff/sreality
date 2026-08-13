@@ -18,12 +18,17 @@ enabled. Everything else (single weak bridge, name disagreement, oversized
 component) is left for operator review. Connected components are formed over the
 corroborated edges only, with a size cap, so one recycled phone number cannot
 transitively fuse a chain of distinct people.
+
+Operator decisions are durable: `suppressed_pairs` carries the identity pairs an
+unmerge or a dismissal already rejected (broker_merge_suppressions, migration 401).
+Without it the sweep re-derives the same bridges nightly and re-applies a merge the
+operator undid.
 """
 
 from __future__ import annotations
 
 import unicodedata
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Sequence, Set as AbstractSet
 from dataclasses import dataclass, field
 
 # A component larger than this is suspicious (a contact slipped the freq guard, or
@@ -59,6 +64,9 @@ class MergeDecision:
 
     auto_merge_groups: list[list[int]] = field(default_factory=list)  # each = identity ids to unify
     review_pairs: list[tuple[int, int]] = field(default_factory=list)  # cross-source pairs for the operator
+    suppressed: list[tuple[int, int]] = field(default_factory=list)  # pairs the operator already rejected
+    # group tuple -> the single (kind, value) it traces to, when unambiguous.
+    group_bridges: dict[tuple[int, ...], tuple[str, str]] = field(default_factory=dict)
 
 
 def normalize_email(raw: str | None) -> str | None:
@@ -142,6 +150,8 @@ def decide_merges(
     identities: Sequence[Identity],
     bridges: Sequence[Bridge],
     auto_merge_sources: Iterable[str],
+    *,
+    suppressed_pairs: AbstractSet[tuple[int, int]] | None = None,
 ) -> MergeDecision:
     """Turn personal-contact bridges into corroborated auto-merge groups + review pairs.
 
@@ -149,9 +159,17 @@ def decide_merges(
     there are ≥2 distinct bridge values OR 1 bridge value plus a matching name —
     and both identities' sources are auto-merge-enabled. Components are built over
     corroborated edges only; an oversized component is downgraded entirely to review.
+
+    `suppressed_pairs` (normalized lo<hi identity ids, the same key `Bridge.pair()`
+    produces) are decisions the operator already made — an undone merge or a
+    dismissed review candidate. A suppressed pair reaches NEITHER the corroborated
+    edges NOR the review queue: re-proposing it would ask the operator the same
+    question every night, and the whole point of the rail is that the answer is on
+    record. Lifting is an explicit operator merge, which the writer handles.
     """
     by_id = {i.id: i for i in identities}
     enabled = {s.lower() for s in auto_merge_sources}
+    blocked = suppressed_pairs if suppressed_pairs is not None else frozenset()
     decision = MergeDecision()
 
     # Aggregate the distinct bridge values per unordered cross-source pair.
@@ -165,6 +183,9 @@ def decide_merges(
 
     corroborated_edges: list[tuple[int, int]] = []
     for (a, b), values in per_pair.items():
+        if (a, b) in blocked:
+            decision.suppressed.append((a, b))
+            continue
         ia, ib = by_id[a], by_id[b]
         both_enabled = ia.source.lower() in enabled and ib.source.lower() in enabled
         strong = len(values) >= 2 or (len(values) >= 1 and names_match(ia.name, ib.name))
@@ -184,8 +205,26 @@ def decide_merges(
                 for j in range(i + 1, len(ms)):
                     decision.review_pairs.append((ms[i], ms[j]))
             continue
-        decision.auto_merge_groups.append(sorted(members))
+        group = sorted(members)
+        decision.auto_merge_groups.append(group)
+        # The dominant case is a two-identity group over one edge carrying one
+        # contact: name the bridge so broker_merge_events can record WHAT merged
+        # them (NULL on all 7,689 rows written before this). Anything ambiguous
+        # (a multi-edge component, an edge with two values) stays unstamped rather
+        # than guessing which contact was decisive.
+        edges_in = [e for e in corroborated_edges if e[0] in members and e[1] in members]
+        if len(edges_in) == 1 and len(per_pair[edges_in[0]]) == 1:
+            kind, _, value = next(iter(per_pair[edges_in[0]])).partition(":")
+            decision.group_bridges[tuple(group)] = (kind, value)
 
-    # Stable, de-duplicated review output.
-    decision.review_pairs = sorted({p if p[0] < p[1] else (p[1], p[0]) for p in decision.review_pairs})
+    # Stable, de-duplicated review + suppression output. The blocked filter runs HERE,
+    # not only on the per-pair edge loop: the oversized-component downgrade above
+    # expands a component pairwise, and those transitive pairs never passed through
+    # `per_pair`. Left unfiltered, an unmerge-origin suppression became a brand-new
+    # review card every single sweep (no prior candidate row blocks it — the
+    # status='proposed' guard only stops re-proposing a row that already exists) and
+    # was counted in queued_for_review AND suppressed at the same time.
+    review = {p if p[0] < p[1] else (p[1], p[0]) for p in decision.review_pairs}
+    decision.review_pairs = sorted(p for p in review if p not in blocked)
+    decision.suppressed = sorted(set(decision.suppressed) | {p for p in review if p in blocked})
     return decision

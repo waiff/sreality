@@ -351,34 +351,37 @@ def test_a_missing_finished_run_is_skipped_not_a_fail() -> None:
     assert all("last finished full sweep" not in o for o in offenders)
 
 
+class _OneRow:
+    """Minimal single-row connection, for the checks that are one O(1) scalar query."""
+
+    def __init__(self, row: tuple[Any, ...]) -> None:
+        self.row, self.executed = row, []
+
+    def cursor(self) -> "_OneRow":
+        return self
+
+    def transaction(self) -> "_OneRow":
+        return self
+
+    def __enter__(self) -> "_OneRow":
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        return None
+
+    def execute(self, sql: str, params: Any = None) -> None:
+        self.executed.append(sql)
+
+    def fetchone(self) -> Any:
+        return self.row
+
+
 def test_broker_resolution_check_reads_all_three_axes_off_one_row() -> None:
     """One O(1) round trip: the finished-run axis is another scalar in the same
     single-row query, not a second read in the hourly lane's 5-min budget."""
     from scripts.verify_pipeline import check_broker_resolution_freshness
 
-    class _Row:
-        def __init__(self, row: tuple[Any, ...]) -> None:
-            self.row, self.executed = row, []
-
-        def cursor(self) -> "_Row":
-            return self
-
-        def transaction(self) -> "_Row":
-            return self
-
-        def __enter__(self) -> "_Row":
-            return self
-
-        def __exit__(self, *exc: Any) -> None:
-            return None
-
-        def execute(self, sql: str, params: Any = None) -> None:
-            self.executed.append(sql)
-
-        def fetchone(self) -> Any:
-            return self.row
-
-    conn = _Row((0.4, 0.4, 61.0, 0.3, 12))
+    conn = _OneRow((0.4, 0.4, 61.0, 0.3, 12))
     out = check_broker_resolution_freshness(conn, DEFAULT_THRESHOLDS)
     assert len([s for s in conn.executed if "select" in s.lower()]) == 1
     assert out["status"] == "fail"
@@ -417,6 +420,49 @@ def test_broker_completion_stamp_key_matches_the_writer() -> None:
     assert "lap_started_at" in rb._WRITE_SWEEP_CURSOR_SQL
 
 
+def test_broker_merge_suppression_is_ok_on_an_empty_rail() -> None:
+    """The table starts empty and only grows by operator action, so "no rows" is the
+    healthy steady state, not a missing signal."""
+    from scripts.verify_pipeline import check_broker_merge_suppression
+
+    out = check_broker_merge_suppression(_OneRow((0, 0, 0)), DEFAULT_THRESHOLDS)
+    assert out["status"] == "ok"
+    assert out["details"] == {"active_suppressions": 0, "lifted": 0, "violations": 0}
+
+
+def test_a_single_bypassed_suppression_fails_the_check() -> None:
+    """THE invariant of the rail: an active suppression whose two identities sit
+    under one broker means an operator NO was bypassed. There is no warn tier — the
+    pair is either separated or it is not."""
+    from scripts.verify_pipeline import check_broker_merge_suppression
+
+    out = check_broker_merge_suppression(_OneRow((4, 2, 1)), DEFAULT_THRESHOLDS)
+    assert out["status"] == "fail" and out["value"] == 1
+    assert out["details"] == {"active_suppressions": 4, "lifted": 2, "violations": 1}
+    assert "bypassed" in out["message"]
+
+
+def test_a_lifted_suppression_is_not_a_violation() -> None:
+    """An explicit operator merge lifts the suppression and the two identities then
+    legitimately share a broker — the query has to exclude lifted rows or every
+    override would red the check."""
+    from scripts.verify_pipeline import _BROKER_SUPPRESSION_SQL as sql
+    from scripts.verify_pipeline import check_broker_merge_suppression
+
+    assert "s.lifted_at is null" in sql
+    assert sql.count("join broker_identities") == 2
+    assert "lo.broker_id = hi.broker_id" in sql
+    out = check_broker_merge_suppression(_OneRow((3, 9, 0)), DEFAULT_THRESHOLDS)
+    assert out["status"] == "ok" and out["details"]["lifted"] == 9
+
+
+def test_broker_suppression_check_is_registered() -> None:
+    """An unregistered check is dead code that never writes a row."""
+    from scripts.verify_pipeline import _CHECKS, check_broker_merge_suppression
+
+    assert ("broker_merge_suppression", check_broker_merge_suppression) in _CHECKS
+
+
 def test_broker_check_is_registered() -> None:
     """An unregistered check is dead code that never writes a row."""
     from scripts.verify_pipeline import _CHECKS, check_broker_resolution_freshness
@@ -441,6 +487,9 @@ def test_acute_lane_only_list_resolves_to_registered_checks() -> None:
     registered = {key for key, _ in _CHECKS}
     assert set(only) <= registered, set(only) - registered
     assert "broker_resolution_freshness" in only
+    # the suppression invariant is O(1) and binary: registration alone would leave it
+    # ringing the in-app bell only, and a bypassed operator NO never emails anyone
+    assert "broker_merge_suppression" in only
     assert "--exit-nonzero-on-fail" in yml
 
 

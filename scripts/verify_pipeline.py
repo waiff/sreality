@@ -108,6 +108,10 @@ DEFAULT_THRESHOLDS: dict[str, float] = {
     # incremental claims --batch-size 5000 per */10 tick = 30k/h).
     "broker_dirty_warn_hours": 3,
     "broker_dirty_fail_hours": 4,
+    # The suppression rail is a binary invariant, not a gradient: one active
+    # suppression whose two identities sit under the same broker means a NO the
+    # operator recorded was bypassed. No warn tier — there is no "slightly merged".
+    "broker_suppression_violations_fail": 1,
 }
 
 # --- pure status derivation (unit-tested without a DB) ---------------------
@@ -898,6 +902,52 @@ def arm_dual_write_parity(conn: Any) -> list[str]:
     return armed
 
 
+_BROKER_SUPPRESSION_SQL = """
+select
+  (select count(*) from broker_merge_suppressions where lifted_at is null) as active,
+  (select count(*) from broker_merge_suppressions where lifted_at is not null) as lifted,
+  (select count(*) from broker_merge_suppressions s
+     join broker_identities lo on lo.id = s.identity_lo
+     join broker_identities hi on hi.id = s.identity_hi
+    where s.lifted_at is null and lo.broker_id is not null
+      and lo.broker_id = hi.broker_id) as violations
+"""
+
+
+def check_broker_merge_suppression(
+    conn: Any, thresholds: dict[str, Any],
+) -> dict[str, Any]:
+    """Assert the one invariant the suppression rail exists to hold: two identities
+    the operator separated (unmerge) or refused (dismiss) never end up under one
+    broker again while the suppression is active. The nightly sweep re-derives its
+    whole candidate set from broker_identity_contacts, so before the rail an undone
+    merge simply came back the next night; a violation here means it was bypassed —
+    a lift that should have been recorded, a merge path that skips the rail, or the
+    apply-time backstop failing. An explicit operator merge LIFTS the suppression,
+    so a legitimate override never shows up as one."""
+    row = _fetchone(conn, _BROKER_SUPPRESSION_SQL)
+    active, lifted, violations = (
+        (0, 0, 0) if row is None
+        else (int(row[0] or 0), int(row[1] or 0), int(row[2] or 0)))
+    fail_at = int(thresholds["broker_suppression_violations_fail"])
+    status = "fail" if violations >= fail_at else "ok"
+    message = (
+        f"{violations} active broker merge suppression(s) are co-located under one "
+        "broker — an operator NO was bypassed; check broker_merge_suppressions "
+        "against broker_identities.broker_id and the sweep's suppressed_pairs count."
+        if status == "fail"
+        else f"Broker merge suppressions holding ({active} active, {lifted} lifted)."
+    )
+    return {
+        "check_key": "broker_merge_suppression",
+        "status": status,
+        "value": violations,
+        "details": {"active_suppressions": active, "lifted": lifted,
+                    "violations": violations},
+        "message": message,
+    }
+
+
 _CHECKS: list[tuple[str, Callable[[Any, dict[str, Any]], dict[str, Any]]]] = [
     ("llm_errors", check_llm_errors),
     ("llm_liveness", check_llm_liveness),
@@ -907,6 +957,7 @@ _CHECKS: list[tuple[str, Callable[[Any, dict[str, Any]], dict[str, Any]]]] = [
     ("dual_write_parity", check_dual_write_parity),
     ("property_maintenance", check_property_maintenance),
     ("broker_resolution_freshness", check_broker_resolution_freshness),
+    ("broker_merge_suppression", check_broker_merge_suppression),
 ]
 
 # --weekly stays a valid (currently empty) lane so the scheduled invocation keeps
