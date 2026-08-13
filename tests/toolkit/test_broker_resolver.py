@@ -217,3 +217,54 @@ def test_group_bridges_stays_empty_when_the_evidence_is_ambiguous():
     edges = [R.Bridge(1, 2, "phone", "420600111222"), R.Bridge(2, 3, "phone", "420600333444")]
     d = R.decide_merges(chain, edges, ["sreality", "idnes", "bazos"])
     assert d.auto_merge_groups == [[1, 2, 3]] and d.group_bridges == {}
+
+
+def test_a_suppressed_pair_never_reaches_review_through_an_oversized_component():
+    """decide_merges downgrades a component over MAX_AUTO_MERGE_COMPONENT by
+    expanding it pairwise — a path that never passes through the per-pair edge loop
+    where the rail was enforced. An unmerge-origin suppression therefore came back as
+    a BRAND-NEW review card every sweep (no prior candidate row blocks it: the
+    status='proposed' guard only stops re-proposing a row that already exists), and
+    was counted in queued_for_review and suppressed at the same time."""
+    sources = ["sreality", "idnes"]
+    ids = _ids(*((i, sources[i % 2], f"Person {i}") for i in range(1, 8)))
+    bridges = []
+    for a in range(1, 7):  # a 7-identity chain: one over the cap
+        bridges += [R.Bridge(a, a + 1, "email", f"e{a}@x.cz"),
+                    R.Bridge(a, a + 1, "phone", f"42060011122{a}")]
+    plain = R.decide_merges(ids, bridges, sources)
+    assert plain.auto_merge_groups == [] and len(plain.review_pairs) == 21
+
+    # (1, 4) is cross-source and shares no bridge — it exists only as a transitive
+    # pair of the downgraded component
+    d = R.decide_merges(ids, bridges, sources, suppressed_pairs={(1, 4)})
+    assert (1, 4) not in d.review_pairs
+    assert d.suppressed == [(1, 4)]
+    assert len(d.review_pairs) == 20
+    assert len(d.review_pairs) + len(d.suppressed) == 21   # counted once, not twice
+
+
+def test_a_suppressed_edge_is_not_re_queued_for_review_either():
+    """The direct case, same guarantee: the pair the operator rejected is on record,
+    so asking again — as an auto-merge or as a review card — is the same failure."""
+    ids = _ids((1, "sreality", "Jan Novak"), (2, "idnes", "Jan Novak"))
+    d = R.decide_merges(ids, [R.Bridge(1, 2, "email", "jan@x.cz")], ["sreality"],
+                        suppressed_pairs={(1, 2)})
+    # both_enabled is False here, so without the rail this pair lands in review
+    assert d.review_pairs == [] and d.suppressed == [(1, 2)]
+
+
+def test_removing_an_edge_does_not_stop_the_group_forming_around_it():
+    """The responsibility split, pinned: the pure layer only removes the suppressed
+    EDGE. With A-C and C-B corroborated, union-find still emits [A, B, C] — A and B
+    land on one broker with no suppressed edge anywhere in the input. That is why the
+    apply-time backstop exists, and why it is not redundant with this filter."""
+    ids = _ids((1, "sreality", "Jan Novak"), (2, "idnes", "Jan Novak"),
+               (3, "bazos", "Jan Novak"))
+    bridges = [R.Bridge(1, 2, "email", "a@x.cz"), R.Bridge(1, 2, "phone", "420600111222"),
+               R.Bridge(1, 3, "email", "b@x.cz"), R.Bridge(1, 3, "phone", "420600333444"),
+               R.Bridge(3, 2, "email", "c@x.cz"), R.Bridge(3, 2, "phone", "420600555666")]
+    d = R.decide_merges(ids, bridges, ["sreality", "idnes", "bazos"],
+                        suppressed_pairs={(1, 2)})
+    assert d.auto_merge_groups == [[1, 2, 3]]      # emitted DESPITE the suppression
+    assert d.suppressed == [(1, 2)] and d.review_pairs == []

@@ -827,7 +827,10 @@ def _apply_merges(conn: Any, groups: list[list[int]], *,
     land on one broker via C without their edge existing. Any component that would
     newly co-locate an active suppressed pair is dropped WHOLE this run and logged —
     over-suppression of a chained component is the accepted trade (the operator can
-    still merge explicitly, which lifts the suppression).
+    still merge explicitly, which lifts the suppression). The set passed in is a
+    snapshot taken at the top of a merge step that runs ~8.4 min, so it is UNIONED
+    with a fresh read inside this write transaction: an operator NO landing mid-sweep
+    must not be applied over.
 
     Returns (brokers retired, components dropped by the backstop)."""
     if not groups:
@@ -838,11 +841,15 @@ def _apply_merges(conn: Any, groups: list[list[int]], *,
         return 0, 0
     held = _identities_of(conn, sorted({b for c in components for b in c}))
     owner = {iid: bid for bid, iids in held.items() for iid in iids}
-    by_identity: dict[int, set[int]] = {}
-    for lo, hi in (suppressed_pairs or ()):
-        if lo in owner and hi in owner:
-            by_identity.setdefault(lo, set()).add(hi)
-            by_identity.setdefault(hi, set()).add(lo)
+    # broker -> the auto-merge groups that touch it, built ONCE. The per-component
+    # rescan this replaces was O(components x groups x group size) with a set()
+    # rebuilt per identity — 0.02s -> 7.02s at 5,000 groups.
+    groups_by_broker: dict[int, set[int]] = {}
+    for gi, group in enumerate(groups):
+        for iid in group:
+            bid = broker_of.get(iid)
+            if bid is not None:
+                groups_by_broker.setdefault(bid, set()).add(gi)
 
     gids: list[str] = []
     survivors: list[int] = []
@@ -852,36 +859,52 @@ def _apply_merges(conn: Any, groups: list[list[int]], *,
     values: list[str | None] = []
     losers: dict[int, int] = {}
     dropped = 0
-    for component in components:
-        identities_in = {iid for b in component for iid in held.get(b, ())}
-        blocked = _blocked_component(identities_in, owner, by_identity) if by_identity else None
-        if blocked is not None:
-            dropped += 1
-            LOG.warning(
-                "RESOLVE merge component DROPPED by suppression: identities %d/%d "
-                "are an active broker_merge_suppressions pair; brokers %s not merged",
-                blocked[0], blocked[1], component)
-            continue
-        spanning = [g for g in groups
-                    if any(broker_of.get(i) in set(component) for i in g)]
-        bridge = ((group_bridges or {}).get(tuple(spanning[0]))
-                  if len(spanning) == 1 else None)
-        survivor, *rest = component
-        gid = str(uuid.uuid4())
-        for loser in rest:
-            losers[loser] = survivor
-            for iid in held.get(loser, ()):
-                gids.append(gid)
-                survivors.append(survivor)
-                retired.append(loser)
-                idents.append(iid)
-                kinds.append(bridge[0] if bridge else None)
-                values.append(bridge[1] if bridge else None)
-    if not losers:
-        return 0, dropped
-
     with conn.transaction(), conn.cursor() as cur:
         cur.execute("SET LOCAL statement_timeout = 0")
+        cur.execute(_SUPPRESSED_PAIRS_SQL)
+        active = {(int(lo), int(hi)) for lo, hi in cur.fetchall()}
+        active |= set(suppressed_pairs or ())
+        by_identity: dict[int, set[int]] = {}
+        for lo, hi in active:
+            if lo in owner and hi in owner:
+                by_identity.setdefault(lo, set()).add(hi)
+                by_identity.setdefault(hi, set()).add(lo)
+
+        for component in components:
+            in_component = set(component)
+            identities_in = {iid for b in component for iid in held.get(b, ())}
+            blocked = (_blocked_component(identities_in, owner, by_identity)
+                       if by_identity else None)
+            if blocked is not None:
+                dropped += 1
+                LOG.warning(
+                    "RESOLVE merge component DROPPED by suppression: identities %d/%d "
+                    "are an active broker_merge_suppressions pair; brokers %s not merged",
+                    blocked[0], blocked[1], component)
+                continue
+            spanning = {gi for b in in_component for gi in groups_by_broker.get(b, ())}
+            # Only an unambiguous single-group component carries a stamp, and only
+            # the identities of THAT group are stamped: the loser broker's other
+            # identities were carried along by the broker-grain merge, not by this
+            # contact, and stamping them would invent evidence.
+            bridge = ((group_bridges or {}).get(tuple(groups[next(iter(spanning))]))
+                      if len(spanning) == 1 else None)
+            bridged = set(groups[next(iter(spanning))]) if bridge else set()
+            survivor, *rest = component
+            gid = str(uuid.uuid4())
+            for loser in rest:
+                losers[loser] = survivor
+                for iid in held.get(loser, ()):
+                    gids.append(gid)
+                    survivors.append(survivor)
+                    retired.append(loser)
+                    idents.append(iid)
+                    stamped = bridge if iid in bridged else None
+                    kinds.append(stamped[0] if stamped else None)
+                    values.append(stamped[1] if stamped else None)
+        if not losers:
+            return 0, dropped
+
         cur.execute(
             "INSERT INTO broker_merge_events (merge_group_id, survivor_broker_id, "
             "retired_broker_id, identity_id, prev_broker_id, reason, source, "
@@ -1332,7 +1355,7 @@ def _run_full(conn: Any, free: list[str], franchise: list[str], auto: list[str],
                 "UPDATE broker_resolution_runs SET ended_at = now(), brokers_recomputed = "
                 "(SELECT count(*) FROM brokers WHERE status='active'), identities_upserted = "
                 "(SELECT count(*) FROM broker_identities), firms_recomputed = (SELECT count(*) FROM firms), "
-                "auto_merges = %s, queued_for_review = %s, suppressed_merges = %s WHERE id = %s",
+                "auto_merges = %s, queued_for_review = %s, suppressed_pairs = %s WHERE id = %s",
                 (auto_merges, queued, suppressed, run_id),
             )
 

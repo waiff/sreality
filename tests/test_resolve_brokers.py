@@ -237,6 +237,8 @@ class _ResilientCur:
                           if b in wanted]
         elif "SELECT id, broker_id FROM broker_identities" in s:
             self._rows = list(self._conn.broker_of.items())
+        elif "FROM broker_merge_suppressions" in s:
+            self._rows = list(self._conn.suppression_rows)
         elif "count(DISTINCT source) FROM broker_identities" in s:
             self._rows = [(2,)]
         elif "p.broker_identity_id" in s:
@@ -274,6 +276,8 @@ class _ResilientConn:
         self.setting_missing = False
         self.broker_of: dict[int, int] = {}
         self.bridge_rows: list[tuple[Any, ...]] = []
+        # active broker_merge_suppressions, as (identity_lo, identity_hi) rows
+        self.suppression_rows: list[tuple[Any, ...]] = []
 
     def cursor(self) -> _ResilientCur:
         return _ResilientCur(self)
@@ -452,9 +456,14 @@ def test_firm_linking_gets_its_own_floor_when_attribution_ate_the_budget(
 
 def _stub_full_sweep(monkeypatch: Any, all_ids: list[int],
                      cursor: int | None = None, lap_swept: int = 0,
-                     lap_started_at: str | None = None) -> list[list[int]]:
+                     lap_started_at: str | None = None,
+                     merge_result: tuple[int, int, int] = (0, 0, 0)) -> list[list[int]]:
     """Neutralise every phase of _run_full except attribution; return the chunks
-    attribution actually walked, in walk order."""
+    attribution actually walked, in walk order.
+
+    `merge_result` is what _cross_source_merge reports — the three counts the run row
+    then records. Parameterised so a test can prove they are stamped in the right
+    order instead of every stub returning an indistinguishable (0, 0, 0)."""
     import scripts.resolve_brokers as rb
 
     attributed: list[list[int]] = []
@@ -466,7 +475,7 @@ def _stub_full_sweep(monkeypatch: Any, all_ids: list[int],
     monkeypatch.setattr(rb, "_resolve_firms", lambda c, free, franchise: None)
     monkeypatch.setattr(rb, "_link_listings_firm", lambda c, extra="", params=None: None)
     monkeypatch.setattr(rb, "_attach_singletons", lambda c: 0)
-    monkeypatch.setattr(rb, "_cross_source_merge", lambda c, auto, run_id: (0, 0, 0))
+    monkeypatch.setattr(rb, "_cross_source_merge", lambda c, auto, run_id: merge_result)
     monkeypatch.setattr(rb, "_max_id", lambda c, table: 0)
     monkeypatch.setattr(rb, "_refresh_matview", lambda c: None)
     monkeypatch.setattr(rb, "_generate_merge_candidates", lambda c: 0)
@@ -593,6 +602,25 @@ def test_complete_sweep_clears_globally_and_stamps_completion(monkeypatch: Any) 
     assert _params(conn, "DELETE FROM dirty_broker_listings") == {"cutoff": "CUTOFF"}
     stamp = _params(conn, "completed_at")
     assert stamp["key"] == "broker_resolution_last_complete" and stamp["swept"] == 4
+
+
+def test_the_run_row_records_the_three_merge_counts_in_order(monkeypatch: Any) -> None:
+    """auto_merges / queued_for_review / suppressed_pairs are three same-typed
+    integers bound positionally. Every stub returned (0, 0, 0), so swapping any two
+    of them — which silently reports the rail's work as auto-merges, or hides a
+    broken rail behind a healthy-looking count — changed nothing anywhere."""
+    import scripts.resolve_brokers as rb
+
+    conn = _ResilientConn("full")
+    _stub_full_sweep(monkeypatch, [1, 2], merge_result=(3, 5, 7))
+
+    stats, _ = rb._run_full(conn, [], [], [], 2, None, reconnect=lambda: conn)
+
+    sql = next(s for s in conn.executed if "UPDATE broker_resolution_runs SET ended_at" in s)
+    assert sql.index("auto_merges") < sql.index("queued_for_review") < sql.index(
+        "suppressed_pairs")
+    assert _params(conn, "UPDATE broker_resolution_runs SET ended_at") == (3, 5, 7, 1)
+    assert (stats["auto_merges"], stats["queued"], stats["suppressed"]) == (3, 5, 7)
 
 
 def test_cursor_is_written_before_the_failure_prone_tail(monkeypatch: Any) -> None:
@@ -836,6 +864,19 @@ def test_a_component_that_would_reunite_a_suppressed_pair_is_dropped_whole(
     assert "identities 1/2 are an active broker_merge_suppressions pair" in caplog.text
 
 
+def test_the_group_the_pure_layer_still_emits_is_dropped_here() -> None:
+    """The other half of the responsibility split (see the resolver's
+    test_removing_an_edge_does_not_stop_the_group_forming_around_it): decide_merges
+    emits [A, B, C] even with (A, B) suppressed, because it only removes the EDGE.
+    The backstop is what actually refuses it."""
+    import scripts.resolve_brokers as rb
+
+    conn = _ResilientConn("merge")
+    conn.broker_of = {1: 10, 2: 20, 3: 30}
+    assert rb._apply_merges(conn, [[1, 2, 3]], suppressed_pairs={(1, 2)}) == (0, 1)
+    assert not any("broker_merge_events" in s for s in conn.executed)
+
+
 def test_an_already_co_located_suppressed_pair_does_not_block_the_merge() -> None:
     """The backstop fires on NEW co-location only. If the two identities already
     share a broker (a stale suppression, or one lifted out of band), dropping the
@@ -917,6 +958,87 @@ def test_the_suppression_load_reads_only_active_rows() -> None:
     assert "lifted_at IS NULL" in rb._SUPPRESSED_PAIRS_SQL
     conn = _ResilientConn("merge")
     assert rb._suppressed_pairs(conn) == set()
+
+
+def test_the_suppression_load_returns_the_pairs_it_read() -> None:
+    """The whole rail is one set: a loader that returns an empty set no matter what
+    the table holds disables auto-merge suppression completely and every other test
+    here still passes (they pass their own set in). This is the only assertion that
+    the DB rows become that set — including the int() coercion, because psycopg
+    hands back whatever the driver decided the bigint was."""
+    import scripts.resolve_brokers as rb
+
+    conn = _ResilientConn("merge")
+    conn.suppression_rows = [("1", "2"), (3, 4)]
+    assert rb._suppressed_pairs(conn) == {(1, 2), (3, 4)}
+
+
+def test_a_suppression_written_mid_sweep_still_blocks_the_apply() -> None:
+    """The merge step runs ~8.4 min and the set is snapshotted at its top, so an
+    operator NO landing while it runs would be applied straight over. _apply_merges
+    re-reads the active set inside its own write transaction and unions it in."""
+    import scripts.resolve_brokers as rb
+
+    conn = _ResilientConn("merge")
+    conn.broker_of = {1: 10, 2: 20}
+    conn.suppression_rows = [(1, 2)]        # landed after the sweep's own load
+    assert rb._apply_merges(conn, [[1, 2]], suppressed_pairs=set()) == (0, 1)
+    assert not any("broker_merge_events" in s for s in conn.executed)
+    # ...and the read happens in the same transaction as the writes it guards
+    order = [s for s in conn.executed]
+    assert any("FROM broker_merge_suppressions" in s for s in order)
+
+
+def test_the_events_insert_pins_every_column_to_its_projection() -> None:
+    """bridge_kind/bridge_value are two same-typed text columns fed from two
+    same-typed arrays: swapping them survives pytest AND the PREPARE gate, and every
+    auto-merge from then on records the phone number as the contact KIND."""
+    import scripts.resolve_brokers as rb
+
+    conn = _ResilientConn("merge")
+    conn.broker_of = {1: 10, 2: 20}
+    rb._apply_merges(conn, [[1, 2]], group_bridges={(1, 2): ("email", "jan@x.cz")})
+    sql = next(s for s in conn.executed if "INSERT INTO broker_merge_events" in s)
+    columns = ("(merge_group_id, survivor_broker_id, retired_broker_id, identity_id, "
+               "prev_broker_id, reason, source, bridge_kind, bridge_value)")
+    projection = "SELECT g, s, r, i, r, 'contact_bridge', 'auto', k, v"
+    unnest = ("FROM unnest(%(g)s::uuid[], %(s)s::bigint[], %(r)s::bigint[], "
+              "%(i)s::bigint[], %(k)s::text[], %(v)s::text[]) AS d(g, s, r, i, k, v)")
+    assert columns in sql and projection in sql and unnest in sql
+    assert sql.index(columns) < sql.index(projection) < sql.index(unnest)
+
+
+def test_only_the_bridged_identities_carry_the_stamp() -> None:
+    """The merge unit is the BROKER, so a loser's whole identity set moves — but the
+    bridge explains only the identities of the group that produced it. Stamping the
+    rest would invent evidence the future remax validation would then audit against."""
+    import scripts.resolve_brokers as rb
+
+    conn = _ResilientConn("merge")
+    # broker 20 holds identity 2 (bridged to 1) AND identity 3 (carried along)
+    conn.broker_of = {1: 10, 2: 20, 3: 20}
+    assert rb._apply_merges(conn, [[1, 2]],
+                            group_bridges={(1, 2): ("email", "jan@x.cz")}) == (1, 0)
+    events = _params(conn, "INSERT INTO broker_merge_events")
+    stamped = dict(zip(events["i"], events["k"]))
+    assert stamped == {2: "email", 3: None}
+
+
+def test_the_bridge_lookup_does_not_rescan_the_group_list_per_component() -> None:
+    """The stamping pass was two nested scans over every group for every component
+    (0.02s -> 7.02s at 5,000 groups). The map is built once; this pins the OUTPUT of
+    the cheap form on a fan-out big enough that the quadratic one is unusable."""
+    import scripts.resolve_brokers as rb
+
+    conn = _ResilientConn("merge")
+    groups = [[i, i + 1] for i in range(1, 4000, 2)]
+    conn.broker_of = {i: i for g in groups for i in g}
+    merged, dropped = rb._apply_merges(
+        conn, groups, group_bridges={(1, 2): ("email", "jan@x.cz")})
+    assert (merged, dropped) == (len(groups), 0)
+    events = _params(conn, "INSERT INTO broker_merge_events")
+    # exactly the one group with a bridge is stamped, out of 2,000
+    assert [k for k in events["k"] if k] == ["email"]
 
 
 def test_an_unambiguous_auto_merge_records_the_contact_that_caused_it() -> None:

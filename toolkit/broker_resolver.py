@@ -217,7 +217,14 @@ def decide_merges(
             kind, _, value = next(iter(per_pair[edges_in[0]])).partition(":")
             decision.group_bridges[tuple(group)] = (kind, value)
 
-    # Stable, de-duplicated review + suppression output.
-    decision.review_pairs = sorted({p if p[0] < p[1] else (p[1], p[0]) for p in decision.review_pairs})
-    decision.suppressed = sorted(set(decision.suppressed))
+    # Stable, de-duplicated review + suppression output. The blocked filter runs HERE,
+    # not only on the per-pair edge loop: the oversized-component downgrade above
+    # expands a component pairwise, and those transitive pairs never passed through
+    # `per_pair`. Left unfiltered, an unmerge-origin suppression became a brand-new
+    # review card every single sweep (no prior candidate row blocks it — the
+    # status='proposed' guard only stops re-proposing a row that already exists) and
+    # was counted in queued_for_review AND suppressed at the same time.
+    review = {p if p[0] < p[1] else (p[1], p[0]) for p in decision.review_pairs}
+    decision.review_pairs = sorted(p for p in review if p not in blocked)
+    decision.suppressed = sorted(set(decision.suppressed) | {p for p in review if p in blocked})
     return decision

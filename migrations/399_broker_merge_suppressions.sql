@@ -35,7 +35,11 @@
 --   * The natural-key + display columns are denormalized on purpose: a pair of
 --     bare identity ids is unreadable in an audit six months later.
 --
--- Additive only. Nothing reads the table until the resolver ships with it.
+-- Additive only, but NOT independent of the code: the branch that adds this file also
+-- ships the reader (scripts/resolve_brokers.py loads the active pairs on every sweep,
+-- api/broker_review.py writes them, _finalize stamps suppressed_pairs on the run row).
+-- So 399 must be applied BEFORE that branch merges — the ship stage does it, and a
+-- merge-first order would break the very next nightly sweep on a missing relation.
 
 CREATE TABLE broker_merge_suppressions (
   id            bigserial PRIMARY KEY,
@@ -63,7 +67,25 @@ CREATE UNIQUE INDEX broker_merge_suppressions_active_pair_idx
 
 -- Observability parity with auto_merges / queued_for_review: a sweep that
 -- suppressed nothing and a sweep whose rail is broken must not look identical.
-ALTER TABLE broker_resolution_runs ADD COLUMN suppressed_merges integer;
+-- Named for PAIRS, not merges: the rail blocks a pair before it is graded, so the
+-- count mixes pairs that would have auto-merged with pairs that would only have been
+-- queued for review, plus the pairs inside whole components the apply-time backstop
+-- dropped. Reading it as "merges prevented" would overstate it.
+ALTER TABLE broker_resolution_runs ADD COLUMN suppressed_pairs integer;
+COMMENT ON COLUMN broker_resolution_runs.suppressed_pairs IS
+  'Cross-source identity pairs an active broker_merge_suppressions row blocked this '
+  'run (auto-grade and review-grade together), plus components dropped by the '
+  'apply-time backstop.';
+
+-- The same PR starts stamping these two (NULL on all 7,689 rows written before it).
+-- They describe the auto-merge GROUP's evidence — the single corroborated edge the
+-- group traces to — and are stamped only on the identities of that group, never on
+-- the loser broker's other identities, which the broker-grain merge carried along.
+COMMENT ON COLUMN broker_merge_events.bridge_kind IS
+  'For source=''auto'': the contact kind of the single edge the merge group traces '
+  'to, when unambiguous. NULL for a multi-edge/multi-value group or an operator merge.';
+COMMENT ON COLUMN broker_merge_events.bridge_value IS
+  'For source=''auto'': the contact value of that single edge. NULL when ambiguous.';
 
 -- Service-role only, exactly like broker_merge_events: RLS on with zero policies
 -- already denies anon/authenticated, and the REVOKE closes Supabase's default ACL
