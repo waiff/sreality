@@ -33,6 +33,23 @@ UNQUALIFIED CSS zone is a DOM strip, and a qualified one is `deferred` — carri
 on the result for the reader that CAN address a sub-document, never silently
 dropped and never used to justify deleting the node.
 
+FAIL CLOSED IS THE WHOLE POINT. Every state in which a declared zone was NOT
+applied — a body that would not parse, a selector the engine will not compile, a
+`decompose()` that raised, a narrowing expression no pop can honour — makes the
+result `is_complete = False`, and an incomplete result ADMITS NOTHING. "The
+scoper broke" must never read as "no zones matched, extract freely". The one
+state that is deliberately NOT incompleteness is a zone that compiled and matched
+zero nodes: a page may legitimately not carry the block. That is counted instead
+(`zone_matches` / `zones_unmatched`) so the re-mine lane can alarm on a zone that
+matches nothing across a whole corpus, which is a register bug, not a page fact.
+
+DECODED VALUES ARE COMPARED WITH DECODED VALUES. A claim's value arrives the way
+a reader read it — `node.text()` and `node.attributes[...]` both come back with
+entities resolved — so reachability is tested against a decoded projection of the
+document (its text plus every attribute value), never against the serialisation.
+Comparing a decoded value to re-escaped markup is how a boundary silently opens:
+every remax coordinate contains a `"`, which the serialisation spells `&quot;`.
+
 `payload_scope_version` is what makes a scoping decision auditable after the fact:
 it hashes the portal's whole register block plus SCOPER_VERSION, so a claim
 written under one register can be told apart from the same claim written under
@@ -83,10 +100,22 @@ _SUBDOCUMENT_KEYS = frozenset({
 # `\s` already covers NBSP under Unicode; the zero-width space does not, and a
 # scrubbed archive body carries both.
 _WS_RE = re.compile("[\\s\u00a0\u200b]+")
+_WS_SPLIT_RE = re.compile("([\\s\u00a0\u200b]+)")
+
+# The serialisation an evidence span indexes into still carries entities, and the
+# quote it has to match came back decoded. One span search bridges the two.
+_ENTITY_FORMS: dict[str, tuple[str, ...]] = {
+    "&": ("&amp;", "&#38;"),
+    "<": ("&lt;", "&#60;"),
+    ">": ("&gt;", "&#62;"),
+    "\"": ("&quot;", "&#34;"),
+    "'": ("&#39;", "&apos;", "&#x27;"),
+}
+_WS_SPAN_SOURCE = "(?:[\\s\u00a0\u200b]|&nbsp;|&#160;|&#xa0;)+"
 
 
 class ScopeError(ValueError):
-    """A register entry cannot be classified at all."""
+    """A register entry cannot be classified, or a selector cannot be compiled."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,9 +127,15 @@ class ExclusionZone:
     disposition: str
     selector: str | None = None
     json_pointer: str | None = None
+    narrowing: str | None = None
     pattern: str | None = None
     reason: str | None = None
     note: str | None = None
+
+    @property
+    def label(self) -> str:
+        """How this zone names itself in a completeness report."""
+        return self.json_pointer or self.narrowing or self.selector or f"zone #{self.index}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,10 +165,29 @@ class ScopeRegister:
 
     @property
     def payload_pointers(self) -> tuple[str, ...]:
+        """Only the zones a pop can actually honour — RFC 6901 and nothing else."""
         return tuple(
             z.json_pointer for z in self.zones
             if z.disposition == PAYLOAD and z.json_pointer
         )
+
+    @property
+    def unhonourable_payload_zones(self) -> tuple[ExclusionZone, ...]:
+        """Payload zones narrowed below what a pointer can address.
+
+        idnes's `then: /geojson/features[isSimilar=true]` is a predicate, not a
+        pointer, and mmreality's `scope: non_subject_blobs` is a rule about which
+        blob is the subject. Neither can be executed by `scope_json`, so a payload
+        scoped by a register carrying one is INCOMPLETE and admits nothing — the
+        reader that can address the sub-document has to apply it first.
+        """
+        return tuple(
+            z for z in self.zones if z.disposition == PAYLOAD and not z.json_pointer
+        )
+
+    @property
+    def narrowings(self) -> tuple[str, ...]:
+        return tuple(z.narrowing for z in self.zones if z.narrowing)
 
     @property
     def text_patterns(self) -> tuple[str, ...]:
@@ -185,9 +239,12 @@ def _classify(index: int, zone: Mapping[str, Any]) -> ExclusionZone:
             index=index, locator_kind=locator_kind, disposition=DOM,
             selector=str(css), reason=reason)
     if css and qualifiers:
+        pointer = _pointer_of(locator)
         return ExclusionZone(
             index=index, locator_kind=locator_kind, disposition=PAYLOAD,
-            selector=str(css), json_pointer=_pointer_of(locator), reason=reason,
+            selector=str(css), json_pointer=pointer,
+            narrowing=None if pointer else _narrowing_of(locator, qualifiers),
+            reason=reason,
             note=(f"narrowed by {', '.join(qualifiers)}; the node carries subject data "
                   f"too and must survive the strip"))
     pointer = _pointer_of(locator)
@@ -215,8 +272,30 @@ def _classify(index: int, zone: Mapping[str, Any]) -> ExclusionZone:
 
 
 def _pointer_of(locator: Mapping[str, Any]) -> str | None:
+    """The `then`/`json_pointer` value, but ONLY when a pop could honour it.
+
+    `/geojson/features[isSimilar=true]` is a predicate wearing a pointer's clothes.
+    Classifying it as poppable is what let `scope_json` return a payload that had
+    silently kept its decoys while reporting a clean scope.
+    """
     pointer = locator.get("json_pointer") or locator.get("then")
-    return str(pointer) if pointer else None
+    if not pointer:
+        return None
+    text = str(pointer)
+    return text if _is_rfc6901(text) else None
+
+
+def _is_rfc6901(pointer: str) -> bool:
+    return pointer.startswith("/") and "[" not in pointer and "]" not in pointer
+
+
+def _narrowing_of(locator: Mapping[str, Any], qualifiers: Sequence[str]) -> str:
+    """A stable label for a narrowing this engine cannot execute."""
+    for key in qualifiers:
+        value = locator.get(key)
+        if value:
+            return f"{key}={value}"
+    return ",".join(qualifiers)
 
 
 # ------------------------------------------------------------------ HTML scoping
@@ -228,7 +307,8 @@ class ScopedDocument:
 
     `html` is THE scoped payload: `span_start` / `span_end` on a claim are
     character offsets into it, which is what makes migration 382's "the quote is a
-    substring of the SCOPED payload" check repeatable.
+    substring of the SCOPED payload" check repeatable. It is the payload, not the
+    search index — reachability runs over `_haystacks`, the decoded projection.
     """
 
     register: ScopeRegister
@@ -239,7 +319,10 @@ class ScopedDocument:
     unsupported_selectors: tuple[str, ...]
     parse_failed: bool
     strip_failures: int = 0
+    zone_matches: tuple[tuple[str, int], ...] = ()
     _tree: Any = None
+    _haystacks: tuple[str, ...] = ()
+    _removed_haystacks: tuple[str, ...] = ()
 
     @property
     def source(self) -> str:
@@ -251,50 +334,97 @@ class ScopedDocument:
 
     @property
     def is_complete(self) -> bool:
-        """False when a zone could not be applied — the boundary has a hole in it."""
+        """False when a zone could not be APPLIED — the boundary has a hole in it.
+
+        A zone that compiled and matched nothing is not a hole: plenty of pages do
+        not carry the block. That case is `zones_unmatched`, an alarm for the
+        re-mine lane, not a reason to refuse this page's claims.
+        """
         return (not self.parse_failed and not self.unsupported_selectors
                 and not self.strip_failures)
 
+    @property
+    def zones_unmatched(self) -> tuple[str, ...]:
+        """Declared zone selectors that matched NOTHING on this page.
+
+        One page proves nothing; a whole corpus does. "Declared zone, 0 matches
+        across N pages" is a register bug — the selector names markup the portal
+        does not emit — and it is the metric that finds one without a human
+        re-reading nine registers against nine archived pages. A selector that
+        would not COMPILE is not counted here; that one is already a hole
+        (`unsupported_selectors`), not a metric.
+        """
+        return tuple(selector for selector, count in self.zone_matches if count == 0)
+
     def css(self, selector: str) -> list[LexborNode]:
-        """The ONLY selector surface. A stripped subtree is not in this tree."""
+        """The ONLY selector surface. A stripped subtree is not in this tree.
+
+        An uncompilable EXTRACTION selector raises. Swallowing it into `[]` would
+        read downstream as "the field is absent on this page" when what happened
+        is "the extractor is broken", and the fixture-diff gate cannot tell those
+        two apart. A REGISTER selector is the opposite call — that one is recorded
+        in `unsupported_selectors` so one bad zone cannot make a page unscopeable,
+        and it already forces the guard closed.
+        """
         if self._tree is None:
             return []
         try:
             return self._tree.css(selector)
-        except Exception:
-            return []
+        except Exception as exc:
+            raise ScopeError(f"selector will not compile: {selector!r} ({exc})") from exc
 
     def css_first(self, selector: str) -> LexborNode | None:
         nodes = self.css(selector)
         return nodes[0] if nodes else None
 
     def owns(self, node: LexborNode) -> bool:
-        """`reject_if_in_excluded_zone` at node grain: did this node survive the strip?
+        """Did this node come out of the scoped tree?
 
-        The literal form of the rule — a value whose source node sat inside an
-        excluded subtree is refused — because a node that came out of THIS tree
-        provably did not. A reader holding a node from its own parse of the raw
-        body gets False, which is the point: the raw body is not the substrate.
+        Narrow by construction, and deliberately so: every node a reader can
+        obtain from `css()` is owned, because a node inside a stripped subtree no
+        longer exists to be handed back. What `owns()` refuses is a node from a
+        SEPARATE parse of the raw body — the substitution that would put the decoy
+        back within reach. The strip is the enforcement; this is the assertion
+        that a reader did not go around it.
         """
         return self._tree is not None and getattr(node, "parser", None) is self._tree
 
     def contains(self, value: str) -> bool:
         """Is `value` reachable in the scoped payload at all?
 
-        Checked against the serialised HTML *and* the text: an attribute value
-        (remax's `data-gps`) exists only in the former, and an entity-escaped one
-        (`&amp;`) reads back only from the latter.
+        Tested against the DECODED projection — the document's text plus every
+        surviving attribute value — because that is the form a reader's value
+        arrives in. remax's `data-gps` is `50°03'46.7"N,...`; the serialisation
+        spells that `&quot;` and would never match itself.
         """
-        return _reachable(value, self.html, self.text)
+        return _in_any(_collapse(value), self._haystacks)
 
     def admits(self, value: str) -> bool:
         return _admits(
-            value, register=self.register, degraded=self.parse_failed,
-            reachable=(self.html, self.text), removed=self.removed_html)
+            value, register=self.register, degraded=not self.is_complete,
+            reachable=self._haystacks, removed=self._removed_haystacks)
 
-    def find_span(self, value: str) -> tuple[int, int] | None:
-        """Character span of `value` in `html`, whitespace-tolerantly."""
-        return _find_span(value, self.html)
+    def find_span(
+        self, value: str, *, within: LexborNode | None = None,
+    ) -> tuple[int, int] | None:
+        """Character span of `value` in `html`, whitespace- and entity-tolerantly.
+
+        `within` anchors the search to one node's own serialisation, so a quote
+        that also occurs in the `<title>` gets the span of the node the claim was
+        actually read from. An anchored miss is None, never a document-wide
+        second guess: a span pointing at the wrong occurrence still satisfies
+        382's substring check and is therefore worse than no span at all. Two
+        byte-identical siblings still resolve to the first — the anchor narrows
+        the search, it does not carry an offset lexbor never exposed.
+        """
+        if within is None:
+            return _find_span(value, self.html)
+        fragment = getattr(within, "html", None) or ""
+        offset = self.html.find(fragment) if fragment else -1
+        if offset < 0:
+            return None
+        span = _find_span(value, fragment)
+        return (offset + span[0], offset + span[1]) if span else None
 
 
 def scope_html(
@@ -314,12 +444,14 @@ def scope_html(
     matched: list[LexborNode] = []
     seen: set[int] = set()
     unsupported: list[str] = []
+    zone_matches: list[tuple[str, int]] = []
     for selector in register.dom_selectors:
         try:
             nodes = tree.css(selector)
         except Exception:
             unsupported.append(selector)
             continue
+        zone_matches.extend(_component_counts(tree, selector, len(nodes)))
         for node in nodes:
             # Dedupe by identity BEFORE anything is freed: remax's zone selects the
             # same carousel card through `[data-address]` and through `[data-gps]`,
@@ -336,6 +468,7 @@ def scope_html(
     # through overlapping registers instead of overlapping selectors.
     outermost = [node for node in matched if not _has_matched_ancestor(node, seen)]
     removed: list[str] = []
+    removed_haystacks: list[str] = []
     failures = 0
     for node in outermost:
         try:
@@ -344,6 +477,9 @@ def scope_html(
             # Quoting what was removed is evidence, not the removal itself — the
             # strip below still has to happen or the zone stays in the tree.
             removed.append("")
+        # Harvested while the subtree still exists, and DECODED: the guard has to
+        # compare a reader's value with the same value as the reader would read it.
+        removed_haystacks.extend(_node_haystacks(node))
         try:
             node.decompose()
         except Exception:
@@ -363,7 +499,10 @@ def scope_html(
         unsupported_selectors=tuple(unsupported),
         parse_failed=False,
         strip_failures=failures,
+        zone_matches=tuple(zone_matches),
         _tree=tree,
+        _haystacks=_document_haystacks(tree, text),
+        _removed_haystacks=tuple(removed_haystacks),
     )
 
 
@@ -400,6 +539,65 @@ def _has_matched_ancestor(node: LexborNode, matched_ids: set[int]) -> bool:
     return False
 
 
+def _component_counts(
+    tree: Any, selector: str, whole: int,
+) -> tuple[tuple[str, int], ...]:
+    """Per-component match counts for one declared zone selector.
+
+    A selector LIST is a union of zones, and `.b-similar, .broker, nav` matching
+    twice hides that `.broker` matched zero — which is exactly the register hole
+    the counter exists to surface. Reported at the register's own grain whenever
+    the split cannot be proved safe.
+    """
+    components = _selector_components(selector)
+    if len(components) < 2:
+        return ((selector, whole),)
+    counts: list[tuple[str, int]] = []
+    for component in components:
+        try:
+            counts.append((component, len(tree.css(component))))
+        except Exception:
+            return ((selector, whole),)
+    return tuple(counts)
+
+
+def _selector_components(selector: str) -> tuple[str, ...]:
+    """Split a selector list at TOP-LEVEL commas; `:is(a, b)` stays one component."""
+    parts: list[str] = []
+    current: list[str] = []
+    depth = 0
+    quote = ""
+    escaped = False
+    for char in selector:
+        if escaped:
+            current.append(char)
+            escaped = False
+            continue
+        if char == "\\":
+            current.append(char)
+            escaped = True
+            continue
+        if quote:
+            current.append(char)
+            if char == quote:
+                quote = ""
+            continue
+        if char in "\"'":
+            quote = char
+        elif char in "([":
+            depth += 1
+        elif char in ")]":
+            depth = max(0, depth - 1)
+        elif char == "," and depth == 0:
+            parts.append("".join(current))
+            current = []
+            continue
+        current.append(char)
+    parts.append("".join(current))
+    stripped = tuple(part.strip() for part in parts if part.strip())
+    return stripped or (selector,)
+
+
 # ------------------------------------------------------------------ JSON scoping
 
 
@@ -411,6 +609,9 @@ class ScopedPayload:
     data: Any
     removed_pointers: tuple[str, ...]
     removed_json: tuple[str, ...]
+    unsupported_pointers: tuple[str, ...] = ()
+    _haystacks: tuple[str, ...] = ()
+    _removed_haystacks: tuple[str, ...] = ()
 
     @property
     def source(self) -> str:
@@ -421,32 +622,49 @@ class ScopedPayload:
         return self.register.scope_version
 
     @property
+    def is_complete(self) -> bool:
+        """False when the register declares a zone no pop can honour.
+
+        A pointer that is absent from THIS payload is complete — there was nothing
+        to remove. A pointer that is not a pointer at all (idnes's
+        `/geojson/features[isSimilar=true]`, mmreality's `non_subject_blobs`) is a
+        declared zone still standing, and the guard must not pretend otherwise.
+        """
+        return not self.unsupported_pointers
+
+    @property
     def text(self) -> str:
         return json.dumps(self.data, ensure_ascii=False, sort_keys=True, default=str)
 
     def contains(self, value: str) -> bool:
-        return _reachable(value, self.text)
+        return _in_any(_collapse(value), self._haystacks)
 
     def admits(self, value: str) -> bool:
         return _admits(
-            value, register=self.register, degraded=False,
-            reachable=(self.text,), removed=self.removed_json)
+            value, register=self.register, degraded=not self.is_complete,
+            reachable=self._haystacks, removed=self._removed_haystacks)
 
 
 def scope_json(payload: Any, *, register: ScopeRegister) -> ScopedPayload:
-    """Remove every `payload`-disposition pointer. The input is never mutated."""
+    """Remove every honourable pointer; report the ones no pop can. Never mutates."""
     data = copy.deepcopy(payload)
     pointers: list[str] = []
     removed: list[str] = []
+    removed_haystacks: list[str] = []
     for pointer in register.payload_pointers:
         popped = _pop_pointer(data, _pointer_tokens(pointer))
         if popped is _MISSING:
             continue
         pointers.append(pointer)
         removed.append(json.dumps(popped, ensure_ascii=False, sort_keys=True, default=str))
+        removed_haystacks.extend(_payload_haystacks(popped))
     return ScopedPayload(
         register=register, data=data,
-        removed_pointers=tuple(pointers), removed_json=tuple(removed))
+        removed_pointers=tuple(pointers), removed_json=tuple(removed),
+        unsupported_pointers=tuple(
+            zone.label for zone in register.unhonourable_payload_zones),
+        _haystacks=_payload_haystacks(data),
+        _removed_haystacks=tuple(removed_haystacks))
 
 
 class _Missing:
@@ -496,7 +714,8 @@ def excluded_zone_admits(scoped: ScopedDocument | ScopedPayload, value: str) -> 
 
     True admits. False means the value could only have come from a zone this
     register removes — the remax carousel street, the broker footer's PSČ, the
-    `Zahraniční nemovitosti` nav item.
+    `Zahraniční nemovitosti` nav item — or that the boundary could not be fully
+    applied, in which case nothing is admitted at all.
     """
     return scoped.admits(value)
 
@@ -506,42 +725,127 @@ def _admits(
     *,
     register: ScopeRegister,
     degraded: bool,
-    reachable: tuple[str, ...],
+    reachable: Sequence[str],
     removed: Sequence[str],
 ) -> bool:
+    """`reachable` / `removed` are ALREADY-COLLAPSED haystacks (see `_collapse`)."""
     if not value or not value.strip():
         return True
     if not register.text_admits(value):
         return False
     if degraded:
-        # No scoped document exists, so nothing can be SHOWN to be outside a zone.
+        # A zone that was not applied is a zone still standing, so nothing in this
+        # document can be SHOWN to be outside one.
         return False
-    if _reachable(value, *reachable):
-        return True
-    return not any(_reachable(value, fragment) for fragment in removed)
-
-
-def _reachable(value: str, *documents: str) -> bool:
     needle = _collapse(value)
     if not needle:
-        return False
-    return any(needle in _collapse(document) for document in documents)
+        return True
+    if _in_any(needle, reachable):
+        return True
+    return not _in_any(needle, removed)
+
+
+def _in_any(needle: str, haystacks: Sequence[str]) -> bool:
+    return bool(needle) and any(needle in haystack for haystack in haystacks)
 
 
 def _collapse(value: str) -> str:
     return _WS_RE.sub(" ", value).strip()
 
 
+def _document_haystacks(tree: Any, text: str) -> tuple[str, ...]:
+    """Everything a reader could DECODE out of the surviving tree.
+
+    Collapsed once here rather than per guard call: a batch drain asks ~25 claims
+    per page about a 90k-character document, and re-normalising both on every
+    question cost ~2 ms per claim over the whole archive.
+    """
+    return tuple(
+        _collapse(value)
+        for value in (text, *_attribute_values(getattr(tree, "root", None)))
+        if value
+    )
+
+
+def _node_haystacks(node: LexborNode) -> tuple[str, ...]:
+    """The same decoded projection over a subtree about to be removed."""
+    try:
+        text = node.text() or ""
+    except Exception:
+        text = ""
+    return tuple(
+        _collapse(value) for value in (text, *_attribute_values(node)) if value
+    )
+
+
+def _attribute_values(node: Any) -> list[str]:
+    if node is None:
+        return []
+    values: list[str] = []
+    try:
+        for element in node.traverse(include_text=False):
+            for value in (element.attributes or {}).values():
+                if value:
+                    values.append(value)
+    except Exception:
+        return values
+    return values
+
+
+def _payload_haystacks(data: Any) -> tuple[str, ...]:
+    """The serialised payload plus every string it carries, decoded.
+
+    The dump alone would miss a value spelled with a `"` (JSON escapes it) and the
+    scalars alone would miss a number a claim quotes as text; both are cheap.
+    """
+    dumped = json.dumps(data, ensure_ascii=False, sort_keys=True, default=str)
+    return tuple(_collapse(value) for value in (dumped, *_json_strings(data)) if value)
+
+
+def _json_strings(data: Any) -> list[str]:
+    strings: list[str] = []
+    stack: list[Any] = [data]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, str):
+            strings.append(item)
+        elif isinstance(item, Mapping):
+            for key, value in item.items():
+                if isinstance(key, str):
+                    strings.append(key)
+                stack.append(value)
+        elif isinstance(item, (list, tuple)):
+            stack.extend(item)
+    return strings
+
+
 def _find_span(value: str, document: str) -> tuple[int, int] | None:
-    if not value:
+    if not value or not document:
         return None
     start = document.find(value)
     if start >= 0:
         return start, start + len(value)
-    # The quote came out of `node.text()`, whose whitespace runs no longer look
-    # like the source's; the span still has to point at the source.
-    parts = [re.escape(part) for part in value.split() if part]
-    if not parts:
-        return None
-    match = re.search(r"\s+".join(parts), document)
+    # The quote came out of `node.text()`, so its whitespace runs no longer look
+    # like the source's and its `&`, `"` and NBSP came back decoded; the span
+    # still has to point at the source.
+    match = re.search(_span_pattern(value), document)
     return (match.start(), match.end()) if match else None
+
+
+def _span_pattern(value: str) -> str:
+    parts: list[str] = []
+    for run in _WS_SPLIT_RE.split(value):
+        if not run:
+            continue
+        parts.append(
+            _WS_SPAN_SOURCE if _WS_RE.fullmatch(run)
+            else "".join(_char_pattern(char) for char in run)
+        )
+    return "".join(parts)
+
+
+def _char_pattern(char: str) -> str:
+    forms = _ENTITY_FORMS.get(char)
+    if not forms:
+        return re.escape(char)
+    return "(?:" + "|".join(re.escape(form) for form in (char, *forms)) + ")"
