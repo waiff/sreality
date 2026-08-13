@@ -76,6 +76,16 @@ it (`api/`). They do not apply to the scraper.
    function may write. The API service should still connect with a read-only role if Postgres
    permits; these ten paths then need a separately-elevated route. For now we ship with one
    role and discipline.
+   **Broker merge-review writes are durable decisions, not just status flips** (`api/broker_review.py`,
+   migration 399). The nightly sweep re-derives every cross-source bridge from scratch, so an unmerge
+   used to be re-applied the same night. `unmerge_group` now derives, inside its own transaction and
+   BEFORE the re-point, every cross-owner + cross-source identity pair it pulled apart and records it
+   in `broker_merge_suppressions`; dismissing a `contact_bridge_review` candidate records the pair from
+   its evidence (a `name_firm` candidate has no identity evidence — dismiss only). `merge_brokers`
+   LIFTS (never deletes) every active suppression whose two identities both belong to the brokers being
+   merged: an explicit operator merge always beats the rail, which gates the AUTO path only. Every
+   mutating `/broker-review/*` route binds `require_admin`'s claims and threads
+   `claims.get("email") or claims.get("sub")` into `undone_by` / `resolved_by` / `created_by`.
 6. **Spatial queries use `geography(point, 4326)`.** Always `ST_DWithin(geom, target_geom,
    radius_m)`. Never compute distance in Python.
 7. **psycopg directly, not supabase-py.** Same reasoning as the scraper.

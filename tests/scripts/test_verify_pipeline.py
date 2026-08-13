@@ -417,6 +417,79 @@ def test_broker_completion_stamp_key_matches_the_writer() -> None:
     assert "lap_started_at" in rb._WRITE_SWEEP_CURSOR_SQL
 
 
+def test_broker_merge_suppression_is_ok_on_an_empty_rail() -> None:
+    """The table starts empty and only grows by operator action, so "no rows" is the
+    healthy steady state, not a missing signal."""
+    from scripts.verify_pipeline import check_broker_merge_suppression
+
+    out = check_broker_merge_suppression(_OneRow((0, 0, 0)), DEFAULT_THRESHOLDS)
+    assert out["status"] == "ok"
+    assert out["details"] == {"active_suppressions": 0, "lifted": 0, "violations": 0}
+
+
+def test_a_single_bypassed_suppression_fails_the_check() -> None:
+    """THE invariant of the rail: an active suppression whose two identities sit
+    under one broker means an operator NO was bypassed. There is no warn tier — the
+    pair is either separated or it is not."""
+    from scripts.verify_pipeline import check_broker_merge_suppression
+
+    out = check_broker_merge_suppression(_OneRow((4, 2, 1)), DEFAULT_THRESHOLDS)
+    assert out["status"] == "fail" and out["value"] == 1
+    assert out["details"] == {"active_suppressions": 4, "lifted": 2, "violations": 1}
+    assert "bypassed" in out["message"]
+
+
+def test_a_lifted_suppression_is_not_a_violation() -> None:
+    """An explicit operator merge lifts the suppression and the two identities then
+    legitimately share a broker — the query has to exclude lifted rows or every
+    override would red the check."""
+    from scripts.verify_pipeline import _BROKER_SUPPRESSION_SQL as sql
+
+    assert "s.lifted_at is null" in sql
+    assert sql.count("join broker_identities") == 2
+    assert "lo.broker_id = hi.broker_id" in sql
+    out = check_broker_merge_suppression_ok()
+    assert out["status"] == "ok" and out["details"]["lifted"] == 9
+
+
+def check_broker_merge_suppression_ok() -> Any:
+    from scripts.verify_pipeline import check_broker_merge_suppression
+
+    return check_broker_merge_suppression(_OneRow((3, 9, 0)), DEFAULT_THRESHOLDS)
+
+
+class _OneRow:
+    """Minimal single-row connection (the check is one O(1) scalar query)."""
+
+    def __init__(self, row: tuple[Any, ...]) -> None:
+        self.row, self.executed = row, []
+
+    def cursor(self) -> "_OneRow":
+        return self
+
+    def transaction(self) -> "_OneRow":
+        return self
+
+    def __enter__(self) -> "_OneRow":
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        return None
+
+    def execute(self, sql: str, params: Any = None) -> None:
+        self.executed.append(sql)
+
+    def fetchone(self) -> Any:
+        return self.row
+
+
+def test_broker_suppression_check_is_registered() -> None:
+    """An unregistered check is dead code that never writes a row."""
+    from scripts.verify_pipeline import _CHECKS, check_broker_merge_suppression
+
+    assert ("broker_merge_suppression", check_broker_merge_suppression) in _CHECKS
+
+
 def test_broker_check_is_registered() -> None:
     """An unregistered check is dead code that never writes a row."""
     from scripts.verify_pipeline import _CHECKS, check_broker_resolution_freshness

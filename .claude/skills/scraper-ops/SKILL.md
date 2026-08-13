@@ -327,7 +327,17 @@ dirty-queue row — the 2026-08-06 sweep-death/stranded-lease incident; both axe
 never a properties scan) and `broker_resolution_freshness` (**three** axes over
 `app_settings.broker_resolution_last_complete`, `broker_resolution_runs.ended_at` and
 `dirty_broker_listings` — the 2026-08-12
-E2E review found the daily broker sweep truncating on its budget every day while exiting 0).
+E2E review found the daily broker sweep truncating on its budget every day while exiting 0)
+and `broker_merge_suppression` (migration 399): active `broker_merge_suppressions` rows whose two
+identities share one broker — the invariant the suppression rail exists to hold. `fail` on the
+first violation, no warn tier. An operator NO (unmerge / dismissing a `contact_bridge_review`
+candidate) writes a suppression row keyed on the durable identity pair; the sweep loads the active
+set once and it gates BOTH `decide_merges` (the pair reaches neither auto-merge nor review) and
+`_apply_merges` (a whole component that would newly co-locate a suppressed pair is dropped and
+logged — the transitive chain the pure layer cannot see). An explicit operator merge LIFTS the
+suppressions it covers (never deletes), so a legitimate override is not a violation. Per-sweep
+counts land in `broker_resolution_runs.suppressed_merges` and the `RESOLVE full merge done
+… suppressed=N` log line.
 Note the broker sweep axis measures a rotation **lap**, not one run: attribution routinely
 spends its whole `--max-seconds` budget, so `resolve_brokers` carries cumulative coverage in
 `app_settings.broker_sweep_cursor` (`last_id` / `lap_swept` / `lap_started_at`) and stamps
