@@ -100,7 +100,7 @@ _OPERATOR_CLAIM_SQL = """
                NULL::text AS declared_confidence, NULL::numeric AS declared_radius_m,
                'exact'::text AS claim_confidence,
                'none'::text AS blur_evidence, 'operator'::text AS licence_class,
-               NULL::text AS legacy_source_column, NULL::boolean AS legacy_write_path_unknown,
+               NULL::text AS legacy_source_column, false AS legacy_write_path_unknown,
                NULL::text AS history_completeness, true AS subject_scoped
     ), typed AS (
         SELECT i.*,
