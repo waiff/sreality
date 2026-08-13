@@ -47,7 +47,7 @@ _PUBLIC_ALLOWLIST: frozenset[tuple[str, str]] = frozenset({
 # /merges and /merged.
 _ADMIN_PREFIXES: tuple[str, ...] = (
     "/admin", "/properties/merge", "/properties/assets", "/labeling",
-    "/outreach", "/broker-review", "/skill-refinements",
+    "/outreach", "/broker-review", "/skill-refinements", "/location",
 )
 
 # Sentinels proving those routers actually mounted. Without this, a mis-mounted router

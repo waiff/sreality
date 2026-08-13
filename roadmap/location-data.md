@@ -14,7 +14,7 @@ is the tie-breaker). This track records sequencing + shipped state only.
 | --- | --- | --- |
 | W0 "stop the bleeding" | 15 interim fixes + 2 measurements against the CURRENT system | 🟡 in progress (2026-08-10) |
 | W1 registry + claim spine (shadow) | full RÚIAN mirror, claims, resolutions, projection | ✅ shipped 2026-08-12 (migrations 380–389 applied; shadow-only, no consumer reads it) |
-| W1v bezrealitky vertical slice | one portal end-to-end + location-quality dashboard | ⚪ next — gated on the per-portal frozen labelled samples (operator) |
+| W1v bezrealitky vertical slice | one portal end-to-end + location-quality dashboard | 🟡 in progress (2026-08-13) — spine + API landing; labelling stays operator work |
 | W2a payload archive rewrite | append-on-change `portal_raw_payloads` | ⚪ not started (byte-churn measurement is the gate) |
 | W2–W6 | HTML re-mine, history backfill, refetch cohorts, LLM lane, serving flip | ⚪ not started |
 
@@ -197,7 +197,29 @@ re-scan bloat — a same-day observation dedup guard is queued follow-up work).
 ### Open, carried forward
 
 - **The per-portal frozen labelled samples (n ≥ 100/portal) are the gate on W1v's value** — they
-  decide whether each contract resolves or stays in shadow. Operator work, not yet started.
+  decide whether each contract resolves or stays in shadow. The MACHINERY ships in W1v
+  (migration 399 tables + `scripts/location_draw_labelled_sample` +
+  `location_labelled_sample.yml` + the labelling surface on the Location quality page);
+  the 2–4 h of hand-labelling per portal stays operator work.
+
+## W1v — in progress (bezrealitky vertical slice)
+
+PR-1 (spine + API): migration 399 (frozen labelled samples, 06 §6.4.0: membership frozen
+at draw, legacy serving values snapshotted at draw time, one is_current sample per source),
+migration 400 (operator survivorship rows in policy v1 — rank 50, `may_overwrite_non_null`;
+without them an operator claim wins the pin but silently loses every FIELD),
+`location_data/operator_corrections.py` (the operator claim producer: append-only claim +
+UNCONDITIONAL `dirty_locations` enqueue — the time-free fingerprint means a restated
+correction inserts nothing, so an `ins`-gated enqueue would be a dead button — then a
+synchronous single-listing resolve, 05 §5.5.5 read-your-writes), and the admin-gated
+`/location/*` API (quality panels from the projection ONLY, W1v gate measurement,
+listing inspector, sample labelling CRUD + precision scoring vs both systems).
+
+Sequencing (order is load-bearing): draw + freeze the bezrealitky sample FIRST (06 §6.4.0
+"drawn before the sweep"), then the one-off refetch of ~5.2k active rows whose `raw_json`
+predates the widened GraphQL query (queue insert at `priority = -1`, drained by the
+realtime worker at production politeness; the hourly intake + */15 resolve drain then
+converge with no further orders). Gate measured live at `/location/quality/w1v-gate`.
 - **Operator items:** **A1** (ČÚZK helpdesk) — letter drafted, awaiting send. **A5** (filter
   semantics default) — still undecided, and it is a serving-layer decision W6 needs. **A2**
   (quarterly licence review) standing. **A4** (Supabase plan/tier) no longer blocks: W1 is applied

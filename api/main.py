@@ -66,6 +66,7 @@ from api.routes.outreach import router as outreach_router
 from api.routes.filter_presets import router as filter_presets_router
 from api.routes.images import router as images_router
 from api.new_dedup_labeling import router as new_dedup_labeling_router
+from api.routes.location_quality import router as location_quality_router
 from api.routes.new_dedup import router as new_dedup_router
 from api.routes.notifications import router as notifications_router
 from scraper import image_storage
@@ -272,6 +273,12 @@ app.include_router(new_dedup_router)
 # review) — the Labeling page's backend, admin-gated. See
 # toolkit/dedup_sim_labeling.py and docs/design/new-dedup/PROGRAM.md (Wave 1).
 app.include_router(new_dedup_labeling_router)
+# /location/* (location-quality dashboard, frozen labelled samples, operator
+# corrections) — the FIRST consumer of the location serving projection
+# (location program W1v), admin-gated (require_admin). Reads via
+# toolkit/location_quality.py + toolkit/location_labels.py; the corrections
+# POST appends an operator claim and resolves synchronously (05 5.5.5).
+app.include_router(location_quality_router)
 
 
 @app.get("/health")
