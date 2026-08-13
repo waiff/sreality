@@ -997,12 +997,31 @@ keyed on the **identity** pair — durable (`broker_identities.id` is never dele
 pair, which stops describing the same cohort after any later merge. Written by `unmerge_group` (every
 cross-owner, cross-source pair it pulled apart) and by dismissing a `contact_bridge_review` candidate;
 read once per sweep and enforced twice — in `decide_merges` (a suppressed pair reaches neither
-auto-merge nor review) and as an apply-time backstop that drops any component which would newly
-co-locate a suppressed pair, catching the transitive chain the pure layer cannot see. Lifting never
-deletes: an explicit operator merge stamps `lifted_at`/`lifted_by`/`lift_reason` and wins outright.
-`verify_pipeline`'s `broker_merge_suppression` check fails on any active suppression whose identities
-share a broker. This exists BEFORE remax is enabled because remax contacts are email-only and
-ceskereality's phone-only, so one bridge plus a name match is the entire case for those merges.
+auto-merge nor review, the oversized-component downgrade included) and as an apply-time backstop that
+drops any component which would newly co-locate a suppressed pair, catching the transitive chain the
+pure layer cannot see. The backstop re-reads the active set inside its own write transaction, because
+the merge step runs ~8.4 min and an operator NO landing inside that window must still bind.
+
+Both writers derive from a **cohort read, never a remembered id**. The unmerge anchors on where the
+restored identities live NOW: survivor = `min(id)`, so a later merge can retire the survivor of an
+earlier one, and deriving ownership from the id stamped on the event rows then returns nothing —
+every identity reads as one owner, zero suppressions are written and the sweep re-applies the merge
+that night (the exact failure the table exists for). A dismissal anchors on the candidate's BROKER
+pair and suppresses every cross-source pair between them: the card is keyed `contactbridge:{lo}:{hi}`
+and `_queue_review_pairs` last-write-wins its evidence, so `evidence.identity_ids` is a sample of the
+decision, not its extent. Pairs already sharing a broker are skipped by construction — a proposed
+candidate outlives its brokers being merged, and an active suppression over co-located identities is
+an instant, permanent invariant violation.
+
+Lifting never deletes: an explicit operator merge stamps `lifted_at`/`lifted_by`/`lift_reason` and
+wins outright — but only for pairs it actually brings together (`lo.broker_id <> hi.broker_id`);
+lifting an already-co-located pair would silently clear the evidence of a bypass rather than overrule
+a decision. `GET /broker-review/suppressions` (active first) and `POST
+/broker-review/suppressions/{id}/lift` make the ledger readable and clearable through the product.
+`verify_pipeline`'s `broker_merge_suppression` check — in the hourly emailing lane, O(1) — fails on
+any active suppression whose identities share a broker. This exists BEFORE remax is enabled because
+remax contacts are email-only and ceskereality's phone-only, so one bridge plus a name match is the
+entire case for those merges.
 
 ## Location data (W1) — the greenfield location SSOT
 

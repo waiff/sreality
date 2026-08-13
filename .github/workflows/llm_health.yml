@@ -2,8 +2,9 @@ name: "Monitoring: acute health (hourly)"
 
 # The fast lane of verify_pipeline: runs the ACUTE checks — LLM errors, LLM silence,
 # DB saturation (pg_cron failure rate), realtime-worker liveness, property-
-# maintenance staleness (sweep death / stranded lease) and broker-resolution
-# freshness (budget-truncated daily sweep / frozen dirty drain) — hourly, and exits
+# maintenance staleness (sweep death / stranded lease), broker-resolution
+# freshness (budget-truncated daily sweep / frozen dirty drain) and the broker
+# merge-suppression invariant (an operator NO bypassed; O(1)) — hourly, and exits
 # non-zero when any is `fail` so GitHub emails the operator on a red scheduled run. This
 # is the belt-and-braces channel for when the in-app bell path itself is down; the bell
 # is rung (edge-triggered) by the checks via emit_transition_alerts, so an incident
@@ -51,6 +52,6 @@ jobs:
           pip install -e .
 
       - name: Check acute health (LLM errors + silence + burn rate, DB saturation, worker + property maintenance)
-        run: python -m scripts.verify_pipeline --only llm_errors,llm_liveness,llm_burn_rate,db_saturation,worker_liveness,property_maintenance,broker_resolution_freshness --exit-nonzero-on-fail
+        run: python -m scripts.verify_pipeline --only llm_errors,llm_liveness,llm_burn_rate,db_saturation,worker_liveness,property_maintenance,broker_resolution_freshness,broker_merge_suppression --exit-nonzero-on-fail
         # property_maintenance is O(1) by design (completion stamp + dirty-queue
         # age) — never add a properties-scale scan to this 5-min-timeout lane.

@@ -934,7 +934,7 @@ def check_broker_merge_suppression(
     message = (
         f"{violations} active broker merge suppression(s) are co-located under one "
         "broker — an operator NO was bypassed; check broker_merge_suppressions "
-        "against broker_identities.broker_id and the sweep's suppressed_merges count."
+        "against broker_identities.broker_id and the sweep's suppressed_pairs count."
         if status == "fail"
         else f"Broker merge suppressions holding ({active} active, {lifted} lifted)."
     )

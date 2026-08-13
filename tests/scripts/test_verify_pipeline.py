@@ -351,34 +351,37 @@ def test_a_missing_finished_run_is_skipped_not_a_fail() -> None:
     assert all("last finished full sweep" not in o for o in offenders)
 
 
+class _OneRow:
+    """Minimal single-row connection, for the checks that are one O(1) scalar query."""
+
+    def __init__(self, row: tuple[Any, ...]) -> None:
+        self.row, self.executed = row, []
+
+    def cursor(self) -> "_OneRow":
+        return self
+
+    def transaction(self) -> "_OneRow":
+        return self
+
+    def __enter__(self) -> "_OneRow":
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        return None
+
+    def execute(self, sql: str, params: Any = None) -> None:
+        self.executed.append(sql)
+
+    def fetchone(self) -> Any:
+        return self.row
+
+
 def test_broker_resolution_check_reads_all_three_axes_off_one_row() -> None:
     """One O(1) round trip: the finished-run axis is another scalar in the same
     single-row query, not a second read in the hourly lane's 5-min budget."""
     from scripts.verify_pipeline import check_broker_resolution_freshness
 
-    class _Row:
-        def __init__(self, row: tuple[Any, ...]) -> None:
-            self.row, self.executed = row, []
-
-        def cursor(self) -> "_Row":
-            return self
-
-        def transaction(self) -> "_Row":
-            return self
-
-        def __enter__(self) -> "_Row":
-            return self
-
-        def __exit__(self, *exc: Any) -> None:
-            return None
-
-        def execute(self, sql: str, params: Any = None) -> None:
-            self.executed.append(sql)
-
-        def fetchone(self) -> Any:
-            return self.row
-
-    conn = _Row((0.4, 0.4, 61.0, 0.3, 12))
+    conn = _OneRow((0.4, 0.4, 61.0, 0.3, 12))
     out = check_broker_resolution_freshness(conn, DEFAULT_THRESHOLDS)
     assert len([s for s in conn.executed if "select" in s.lower()]) == 1
     assert out["status"] == "fail"
@@ -444,43 +447,13 @@ def test_a_lifted_suppression_is_not_a_violation() -> None:
     legitimately share a broker — the query has to exclude lifted rows or every
     override would red the check."""
     from scripts.verify_pipeline import _BROKER_SUPPRESSION_SQL as sql
+    from scripts.verify_pipeline import check_broker_merge_suppression
 
     assert "s.lifted_at is null" in sql
     assert sql.count("join broker_identities") == 2
     assert "lo.broker_id = hi.broker_id" in sql
-    out = check_broker_merge_suppression_ok()
+    out = check_broker_merge_suppression(_OneRow((3, 9, 0)), DEFAULT_THRESHOLDS)
     assert out["status"] == "ok" and out["details"]["lifted"] == 9
-
-
-def check_broker_merge_suppression_ok() -> Any:
-    from scripts.verify_pipeline import check_broker_merge_suppression
-
-    return check_broker_merge_suppression(_OneRow((3, 9, 0)), DEFAULT_THRESHOLDS)
-
-
-class _OneRow:
-    """Minimal single-row connection (the check is one O(1) scalar query)."""
-
-    def __init__(self, row: tuple[Any, ...]) -> None:
-        self.row, self.executed = row, []
-
-    def cursor(self) -> "_OneRow":
-        return self
-
-    def transaction(self) -> "_OneRow":
-        return self
-
-    def __enter__(self) -> "_OneRow":
-        return self
-
-    def __exit__(self, *exc: Any) -> None:
-        return None
-
-    def execute(self, sql: str, params: Any = None) -> None:
-        self.executed.append(sql)
-
-    def fetchone(self) -> Any:
-        return self.row
 
 
 def test_broker_suppression_check_is_registered() -> None:
@@ -514,6 +487,9 @@ def test_acute_lane_only_list_resolves_to_registered_checks() -> None:
     registered = {key for key, _ in _CHECKS}
     assert set(only) <= registered, set(only) - registered
     assert "broker_resolution_freshness" in only
+    # the suppression invariant is O(1) and binary: registration alone would leave it
+    # ringing the in-app bell only, and a bypassed operator NO never emails anyone
+    assert "broker_merge_suppression" in only
     assert "--exit-nonzero-on-fail" in yml
 
 

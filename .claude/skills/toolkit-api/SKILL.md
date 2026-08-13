@@ -80,12 +80,20 @@ it (`api/`). They do not apply to the scraper.
    migration 399). The nightly sweep re-derives every cross-source bridge from scratch, so an unmerge
    used to be re-applied the same night. `unmerge_group` now derives, inside its own transaction and
    BEFORE the re-point, every cross-owner + cross-source identity pair it pulled apart and records it
-   in `broker_merge_suppressions`; dismissing a `contact_bridge_review` candidate records the pair from
-   its evidence (a `name_firm` candidate has no identity evidence — dismiss only). `merge_brokers`
-   LIFTS (never deletes) every active suppression whose two identities both belong to the brokers being
-   merged: an explicit operator merge always beats the rail, which gates the AUTO path only. Every
-   mutating `/broker-review/*` route binds `require_admin`'s claims and threads
-   `claims.get("email") or claims.get("sub")` into `undone_by` / `resolved_by` / `created_by`.
+   in `broker_merge_suppressions`. Both derivations read a **cohort**, never a remembered id: the
+   unmerge anchors on where the restored identities live NOW (the survivor on the event rows may itself
+   have been merged away since — that read returns nothing and the unmerge silently writes zero rows),
+   and a dismissal anchors on the candidate's BROKER pair, suppressing every cross-source pair between
+   them (the card is keyed `contactbridge:{lo}:{hi}` and the evidence is last-write-wins, so sibling
+   identity pairs would otherwise stay live). Pairs already under one broker are skipped — an active
+   suppression over co-located identities is an instant `verify_pipeline` violation. A `name_firm`
+   candidate has no identity evidence: dismiss only. `merge_brokers` LIFTS (never deletes) every active
+   suppression whose two identities sit under DIFFERENT brokers being merged — an explicit operator
+   merge always beats the rail, which gates the AUTO path only; `GET /broker-review/suppressions` +
+   `POST /broker-review/suppressions/{id}/lift` (409 on a re-lift) are the ledger and the manual
+   override. Every mutating `/broker-review/*` route binds `require_admin`'s claims and threads
+   `claims.get("email") or claims.get("sub")` into `undone_by` / `resolved_by` / `created_by` /
+   `lifted_by`.
 6. **Spatial queries use `geography(point, 4326)`.** Always `ST_DWithin(geom, target_geom,
    radius_m)`. Never compute distance in Python.
 7. **psycopg directly, not supabase-py.** Same reasoning as the scraper.
