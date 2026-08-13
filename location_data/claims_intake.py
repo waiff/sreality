@@ -20,9 +20,11 @@ WHAT THIS LANE IS
     produced it, and the extractor executes exactly those entries whose `locator` names a
     `reader` from the registry below. Entries declared for W2 surfaces (html_selector,
     map_config, url_slug, og_meta, jsonld, description) carry no reader and are inert here.
-    Which surfaces a given reader may be declared on is `contracts.READER_SUBSTRATES`, and
-    the `TRANSFORMS` / `GUARDS` registries below are the vocabularies an entry that DOES
-    name a reader may draw on — all three are enforced when the contract is projected.
+    What a given reader may be declared on — surfaces, extraction methods, the locator
+    keys it indexes, whether it consults `transform` / `guards` at all — is
+    `contracts.READER_CONTRACTS`, and the `TRANSFORMS` / `GUARDS` registries below are the
+    vocabularies an entry that DOES name a reader may draw on. All of it is enforced when
+    the contract is projected, so an entry cannot declare something this lane ignores.
   * NO evidence-bearing method runs in W1. `regex_text` / `llm_text` claims need a span
     into a retrievable document, and the content-addressed body store
     (`portal_raw_payloads`) does not fill until W2a — a span into a latest-wins body is a
@@ -592,17 +594,27 @@ def in_cz_bbox(lat: float, lon: float) -> bool:
 # the rest of the vocabulary (`reject_if_in_excluded_zone`, `require_czech_street_morphology`,
 # `reject_empty_geometry`, …) needs substrates this lane does not have. A guard the runtime
 # does not implement rejects nothing, silently, so `contracts.IMPLEMENTED_GUARDS` mirrors
-# this registry and refuses one on an entry that actually executes.
+# this registry and refuses one on an entry that actually executes. Only the three readers
+# below that CALL `guard_admits` consult them at all, which the same gate enforces
+# (`contracts.READER_CONTRACTS[...].consults_guards`) — being implemented is not enough.
 GuardFn = Callable[[float, float], bool]
 GUARD_CZ_BBOX = "reject_outside_cz_bbox"
 GUARDS: dict[str, GuardFn] = {GUARD_CZ_BBOX: in_cz_bbox}
 
 
 def guard_admits(entry: Entry, name: str, *points: tuple[float, float]) -> bool:
-    """False only when the entry declares guard `name` and a point fails it."""
+    """False only when the entry declares guard `name` and a point fails it.
+
+    An unknown name admits, for the same reason `apply_transforms` no-ops one: the
+    projection in the DB can be older than this image (a rollback), and a whole batch must
+    not die over a guard. The gate that stops one reaching a live entry — implemented or
+    not, consulted by this reader or not — is `contracts._check_executable`.
+    """
     if name not in entry.guards:
         return True
-    predicate = GUARDS[name]
+    predicate = GUARDS.get(name)
+    if predicate is None:
+        return True
     return all(predicate(lat, lon) for lat, lon in points)
 
 

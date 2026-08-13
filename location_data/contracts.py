@@ -119,24 +119,56 @@ RETRACTION_REASONS = frozenset({
     "superseded_backfill", "operator_judgement",
 })
 
-# Substrate legality is PER READER, not per wave.
+# What each reader WILL DO with an entry, as data. The contract gate refuses an entry that
+# declares anything this record does not cover, because the runtime would ignore it in
+# silence — a contract entry may not state something the claim never carries.
 #
 # W1 gated readers fleet-wide: any reader was legal on any raw_json-reachable surface
 # (api_json / graphql / embedded_json / legacy_column) and illegal everywhere else. That
-# gate is one wave wide — it says nothing once W2's HTML readers land — and it leaves two
-# holes open inside its own wave: `legacy_text_column` on `api_json` would pass validation
-# and then KeyError on `locator.legacy_source_column`, and `geom_column` on `graphql`
-# would read `listings.geom` while stamping the claim as portal payload (wrong surface,
-# and `_base` would anchor it `unanchored_latest_fetch` instead of `unanchored_legacy`).
-# Each reader mines exactly ONE kind of substrate, so what it may be declared on is a
-# property of the reader.
+# gate is one wave wide — it says nothing once W2's HTML readers land — and it checked one
+# axis of five. `legacy_text_column` on `api_json` passed validation and then KeyError'd on
+# `locator.legacy_source_column`; a `namespaced_id` entry without `locator.namespace` did
+# the same; a `scalar` entry could declare `guards: [reject_outside_cz_bbox]` that
+# `_read_scalar` never evaluates; a `point_pair` entry could declare a `transform` no
+# coordinate reader applies; a `geom_column` entry could declare a `legacy_source_column`
+# the reader overwrites with `listings.geom`. Each reader mines exactly ONE substrate by
+# ONE method, addresses it through a fixed set of locator keys, and consults `transform` /
+# `guards` or does not — so all five are properties of the READER.
 #
 # Pure DATA on purpose: this module is the deploy-time/CI lane and must not import
 # `location_data.claims_intake` (the runtime extractor, which pulls in the loader and the
-# DB). The two tables are held in sync by tests/location_data/test_claims_intake_contracts.
+# DB). Every field is derived back out of the reader bodies by
+# tests/location_data/test_claims_intake_contracts, so the record cannot drift from the
+# call sites it describes.
 _PAYLOAD_SURFACES = frozenset({"api_json", "graphql", "embedded_json"})
+_LEGACY_SURFACE = frozenset({"legacy_column"})
+_STRUCTURED = frozenset({"portal_structured_field"})
+_LEGACY_METHOD = frozenset({"legacy_column"})
+_DECLARED_QUALITY = frozenset({"portal_declared_quality"})
 
-# The surfaces each `location_data.claims_intake` reader may legally execute on.
+
+@dataclass(frozen=True, slots=True)
+class ReaderContract:
+    """One `claims_intake` reader's appetite: what it reads, and what it consults.
+
+    `substrates` and `methods` are 00 §3's two separate provenance axes — a reader that
+    mines a `listings` column while the entry stamps `portal_structured_field` records a
+    provenance the value never had. `locator_keys` are the keys the reader indexes
+    UNGUARDED (a missing one is a mid-batch `KeyError` that takes the whole intake down,
+    not a no-op). `stamps_legacy_column` is a provenance the reader writes itself, which an
+    entry may not contradict. The two `consults_*` flags say whether the reader ever asks
+    about `transform` / `guards`; a declaration on a reader that does not is inert.
+    """
+
+    substrates: frozenset[str]
+    methods: frozenset[str]
+    locator_keys: frozenset[str] = frozenset()
+    consults_transforms: bool = False
+    consults_guards: bool = False
+    stamps_legacy_column: str | None = None
+
+
+# One row per `location_data.claims_intake` reader.
 #   * payload readers address `raw_json` by JSON pointer -> the three surfaces whose bytes
 #     ARE the payload. `scalar` and `conflict_signal` additionally run on `legacy_column`,
 #     where the pointer addresses a key OUR OWN scraper wrote into the payload (bazos
@@ -146,18 +178,55 @@ _PAYLOAD_SURFACES = frozenset({"api_json", "graphql", "embedded_json"})
 #     (`raw_json.coords`), which is never portal payload -> `legacy_column` only.
 #   * `geom_column` (reads `listings.geom`) and `legacy_text_column` (reads a class-B
 #     `listings` TEXT column) touch no payload at all -> `legacy_column` only.
-READER_SUBSTRATES: dict[str, frozenset[str]] = {
-    "scalar": _PAYLOAD_SURFACES | {"legacy_column"},
-    "namespaced_id": _PAYLOAD_SURFACES,
-    "point_pair": _PAYLOAD_SURFACES,
-    "bbox_envelope": _PAYLOAD_SURFACES,
-    "declared_quality": _PAYLOAD_SURFACES,
-    "declared_bool_quality": _PAYLOAD_SURFACES,
-    "conflict_signal": _PAYLOAD_SURFACES | {"legacy_column"},
-    "coords_stamp_quality": frozenset({"legacy_column"}),
-    "geom_column": frozenset({"legacy_column"}),
-    "legacy_text_column": frozenset({"legacy_column"}),
+READER_CONTRACTS: dict[str, ReaderContract] = {
+    "scalar": ReaderContract(
+        substrates=_PAYLOAD_SURFACES | _LEGACY_SURFACE,
+        methods=_STRUCTURED | _LEGACY_METHOD,
+        locator_keys=frozenset({"json_pointer"}),
+        consults_transforms=True),
+    "namespaced_id": ReaderContract(
+        substrates=_PAYLOAD_SURFACES, methods=_STRUCTURED,
+        locator_keys=frozenset({"json_pointer", "namespace"}),
+        consults_transforms=True),
+    "point_pair": ReaderContract(
+        substrates=_PAYLOAD_SURFACES, methods=_STRUCTURED,
+        locator_keys=frozenset({"lat_pointer", "lon_pointer"}),
+        consults_guards=True),
+    "bbox_envelope": ReaderContract(
+        substrates=_PAYLOAD_SURFACES, methods=_STRUCTURED,
+        locator_keys=frozenset({"json_pointer"}),
+        consults_guards=True),
+    "declared_quality": ReaderContract(
+        substrates=_PAYLOAD_SURFACES, methods=_DECLARED_QUALITY,
+        locator_keys=frozenset({"json_pointer"})),
+    "declared_bool_quality": ReaderContract(
+        substrates=_PAYLOAD_SURFACES, methods=_DECLARED_QUALITY,
+        locator_keys=frozenset({"json_pointer"})),
+    "conflict_signal": ReaderContract(
+        substrates=_PAYLOAD_SURFACES | _LEGACY_SURFACE,
+        methods=_STRUCTURED | _LEGACY_METHOD,
+        locator_keys=frozenset({"json_pointer"})),
+    "coords_stamp_quality": ReaderContract(
+        substrates=_LEGACY_SURFACE, methods=_LEGACY_METHOD,
+        stamps_legacy_column="raw_json.coords"),
+    "geom_column": ReaderContract(
+        substrates=_LEGACY_SURFACE, methods=_LEGACY_METHOD,
+        consults_guards=True, stamps_legacy_column="listings.geom"),
+    "legacy_text_column": ReaderContract(
+        substrates=_LEGACY_SURFACE, methods=_LEGACY_METHOD,
+        locator_keys=frozenset({"legacy_source_column"}),
+        consults_transforms=True),
 }
+
+# The substrate axis on its own — what `claims_intake`'s module docstring points at, and
+# the property the fleet-wide W1 gate used to assert directly.
+READER_SUBSTRATES: dict[str, frozenset[str]] = {
+    name: spec.substrates for name, spec in READER_CONTRACTS.items()
+}
+_TRANSFORM_READERS = ", ".join(
+    sorted(r for r, spec in READER_CONTRACTS.items() if spec.consults_transforms))
+_GUARD_READERS = ", ".join(
+    sorted(r for r, spec in READER_CONTRACTS.items() if spec.consults_guards))
 
 # The `transform` / `guards` vocabularies the extractor actually IMPLEMENTS
 # (`claims_intake.TRANSFORMS` / `.GUARDS`; a transform is named before its `:arg`). 02
@@ -165,20 +234,27 @@ READER_SUBSTRATES: dict[str, frozenset[str]] = {
 # will run them — and an unimplemented name is a silent no-op wherever it is executed:
 # `guards: [reject_outside_cz_bbox]` misspelled once would drop the CZ bbox check with no
 # error anywhere. So the names are enum-checked on an EXECUTABLE entry (one naming a
-# reader) and left free on an inert one, which nothing executes.
+# reader) and left free on an inert one, which nothing executes. Implementedness is only
+# half the question: the entry's own reader has to CONSULT the axis
+# (`READER_CONTRACTS[...].consults_transforms` / `.consults_guards`), or an implemented
+# name is exactly as inert as a misspelt one.
 IMPLEMENTED_TRANSFORMS = frozenset({
     "sentinel_drop", "psc_normalise", "split_cp_co", "strip_prefix",
 })
 IMPLEMENTED_GUARDS = frozenset({"reject_outside_cz_bbox"})
 
-# The two executable entries that named a guard the runtime never implemented, from before
-# the check existed. Both are inert-by-accident rather than wrong: `reject_sentinel`
-# duplicates sr.det.zip's own `sentinel_drop:-1` transform, and `reject_if_in_excluded_zone`
-# asks a question about HTML/description blocks that a `/locality/inaccuracy_type` read
-# cannot answer. Entries are immutable (02 §2.1.8), so clearing them is a contract version
-# bump, not an edit — until then they are named HERE rather than silently tolerated.
-# SHRINK-ONLY: a new executable entry naming an unimplemented guard is a CI failure.
-GUARDS_PENDING_IMPLEMENTATION: dict[str, frozenset[str]] = {
+# The two executable entries that named a guard from before the check existed. Neither is
+# "pending": each sits on a reader that never evaluates guards at all (`declared_quality`
+# and `scalar`), so implementing the name in `claims_intake.GUARDS` would not make either
+# one run. They are inert, permanently, and both are inert-by-accident rather than wrong:
+# `reject_sentinel` duplicates sr.det.zip's own `sentinel_drop:-1` transform, and
+# `reject_if_in_excluded_zone` asks a question about HTML/description blocks that a
+# `/locality/inaccuracy_type` read cannot answer. Entries are immutable (02 §2.1.8), so
+# clearing them is a contract version bump, not an edit — until then they are named HERE
+# rather than silently tolerated. SHRINK-ONLY, and it shrinks by version bump only: a NEW
+# executable entry naming a guard its reader ignores (or one the runtime does not
+# implement) is a CI failure.
+GRANDFATHERED_INERT_GUARDS: dict[str, frozenset[str]] = {
     "sr.det.inaccuracy_type": frozenset({"reject_if_in_excluded_zone"}),
     "sr.det.zip": frozenset({"reject_sentinel"}),
 }
@@ -249,6 +325,8 @@ def _check_executable(
     reader: str,
     *,
     surface: str,
+    method: str,
+    locator: dict[str, Any],
     transforms: list[str],
     guards: list[str],
     entry_id: str,
@@ -259,28 +337,59 @@ def _check_executable(
     An entry with a reader is executed by `claims_intake` on every listing of its portal;
     one without a reader is declared ahead for a later wave and executes nowhere. So this
     is the whole difference between "a name the runtime does not know is a silent no-op"
-    and "a name the runtime does not know fails CI".
+    and "a name the runtime does not know fails CI". Every clause below is one thing the
+    reader in `READER_CONTRACTS` actually does with the entry: declaring past it is either
+    a silent no-op or a provenance the claim will not carry.
     """
-    substrates = READER_SUBSTRATES.get(reader)
-    if substrates is None:
+    spec = READER_CONTRACTS.get(reader)
+    if spec is None:
         raise ContractError(
             f"{where}: locator.reader='{reader}' is not a registered reader "
-            f"({', '.join(sorted(READER_SUBSTRATES))})")
-    if surface not in substrates:
+            f"({', '.join(sorted(READER_CONTRACTS))})")
+    if surface not in spec.substrates:
         raise ContractError(
-            f"{where}: reader '{reader}' reads {', '.join(sorted(substrates))}; "
+            f"{where}: reader '{reader}' reads {', '.join(sorted(spec.substrates))}; "
             f"'{surface}' is not one of its substrates")
+    if method not in spec.methods:
+        raise ContractError(
+            f"{where}: reader '{reader}' extracts by {', '.join(sorted(spec.methods))}; "
+            f"extraction_method='{method}' would stamp every claim with a provenance the "
+            f"reader does not perform (00 §3)")
+    for key in sorted(spec.locator_keys):
+        if not locator.get(key):
+            raise ContractError(
+                f"{where}: reader '{reader}' addresses its value through "
+                f"locator.{key}, which this entry does not name; the extractor indexes it "
+                f"unguarded and would KeyError on the first row of this portal")
+    if spec.stamps_legacy_column is not None:
+        declared = locator.get("legacy_source_column")
+        if declared is not None and str(declared) != spec.stamps_legacy_column:
+            raise ContractError(
+                f"{where}: reader '{reader}' stamps "
+                f"legacy_source_column='{spec.stamps_legacy_column}' on every claim it "
+                f"emits; declaring '{declared}' would record a provenance the claim never "
+                f"carries")
 
-    for spec in transforms:
-        name = spec.partition(":")[0]
+    for transform_spec in transforms:
+        name = transform_spec.partition(":")[0]
+        if not spec.consults_transforms:
+            raise ContractError(
+                f"{where}: reader '{reader}' never applies transforms, so '{name}' would "
+                f"silently not run; only {_TRANSFORM_READERS} normalise their value")
         if name not in IMPLEMENTED_TRANSFORMS:
             raise ContractError(
                 f"{where}: transform '{name}' is not implemented by the extractor "
                 f"({', '.join(sorted(IMPLEMENTED_TRANSFORMS))}); an executable entry may "
                 f"not declare a normaliser that would silently not run")
-    pending = GUARDS_PENDING_IMPLEMENTATION.get(entry_id, frozenset())
+    inert = GRANDFATHERED_INERT_GUARDS.get(entry_id, frozenset())
     for guard in guards:
-        if guard not in IMPLEMENTED_GUARDS and guard not in pending:
+        if guard in inert:
+            continue
+        if not spec.consults_guards:
+            raise ContractError(
+                f"{where}: reader '{reader}' never evaluates guards, so '{guard}' would "
+                f"silently not reject; only {_GUARD_READERS} admit a point through one")
+        if guard not in IMPLEMENTED_GUARDS:
             raise ContractError(
                 f"{where}: guard '{guard}' is not implemented by the extractor "
                 f"({', '.join(sorted(IMPLEMENTED_GUARDS))}); an executable entry may not "
@@ -388,8 +497,9 @@ def parse_entry(raw: dict[str, Any], *, source: str, index: int) -> ContractEntr
 
     reader = locator.get("reader")
     if reader:
-        _check_executable(str(reader), surface=surface, transforms=transforms,
-                          guards=guards, entry_id=entry_id, where=where)
+        _check_executable(str(reader), surface=surface, method=method, locator=locator,
+                          transforms=transforms, guards=guards, entry_id=entry_id,
+                          where=where)
 
     precision_map: dict[str, Any] = {}
     if precision_cap:

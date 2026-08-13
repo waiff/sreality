@@ -8,20 +8,22 @@ not at INSERT time, and never at resolution time.
 
 from __future__ import annotations
 
+import ast
 from collections import Counter
 from pathlib import Path
 
 import pytest
 
-from location_data import contracts
+from location_data import claims_intake, contracts
 from location_data.claims_intake import GUARDS, LEGACY_COLUMNS, READERS, SOURCES, TRANSFORMS
 from location_data.contracts import (
     CLAIM_TYPES,
     EXTRACTION_METHODS,
     EXTRACTOR_PREFIXES,
-    GUARDS_PENDING_IMPLEMENTATION,
+    GRANDFATHERED_INERT_GUARDS,
     IMPLEMENTED_GUARDS,
     IMPLEMENTED_TRANSFORMS,
+    READER_CONTRACTS,
     READER_SUBSTRATES,
     ContractError,
     parse_entry,
@@ -37,12 +39,57 @@ MINIMAL = {
     "locator": {"json_pointer": "/locality/street"},
     "claim_type": "street_name",
 }
+COORDINATE = {
+    "claim_type": "coordinate",
+    "precision_cap": {"granularity_max": {"_default": "address_point"}},
+}
+POINT_PAIR = {"reader": "point_pair", "lat_pointer": "/lat", "lon_pointer": "/lon"}
 
 
 def _entry(**overrides):
     raw = dict(MINIMAL)
     raw.update(overrides)
     return parse_entry(raw, source="sreality", index=0)
+
+
+# ------------------------------------------------------------ the reader bodies, as data
+
+_INTAKE_AST = ast.parse(Path(claims_intake.__file__).read_text(encoding="utf-8"))
+
+
+def _reader_bodies() -> dict[str, ast.FunctionDef]:
+    """Every `@reader("name")`-decorated function in the extractor, keyed by its name."""
+    bodies: dict[str, ast.FunctionDef] = {}
+    for node in _INTAKE_AST.body:
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        for dec in node.decorator_list:
+            if (isinstance(dec, ast.Call) and isinstance(dec.func, ast.Name)
+                    and dec.func.id == "reader" and dec.args
+                    and isinstance(dec.args[0], ast.Constant)):
+                bodies[str(dec.args[0].value)] = node
+    return bodies
+
+
+def _called_names(fn: ast.FunctionDef) -> set[str]:
+    return {node.func.id for node in ast.walk(fn)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)}
+
+
+def _indexed_locator_keys(fn: ast.FunctionDef) -> set[str]:
+    """`entry.locator["key"]` — the UNGUARDED reads, i.e. the ones that raise KeyError.
+    A `.get()` is a different thing and is deliberately not collected."""
+    return {str(node.slice.value) for node in ast.walk(fn)
+            if isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Constant)
+            and isinstance(node.value, ast.Attribute) and node.value.attr == "locator"}
+
+
+def _constant_legacy_stamps(fn: ast.FunctionDef) -> set[str]:
+    """`legacy_source_column="…"` passed as a literal, i.e. a provenance the READER fixes
+    rather than one the entry supplies."""
+    return {str(kw.value.value) for node in ast.walk(fn) if isinstance(node, ast.Call)
+            for kw in node.keywords
+            if kw.arg == "legacy_source_column" and isinstance(kw.value, ast.Constant)}
 
 
 # ------------------------------------------------------------------ the nine contracts
@@ -81,27 +128,72 @@ def test_every_reader_named_in_a_contract_exists_in_the_registry():
                 assert entry.reader in READERS, entry.entry_id
 
 
-def test_every_executable_entry_sits_on_one_of_its_readers_substrates():
-    """Substrate legality is per READER, not fleet-wide: `geom_column` reads
+def test_every_executable_entry_matches_its_readers_contract():
+    """Legality is per READER on every axis, not fleet-wide: `geom_column` reads
     `listings.geom` and `legacy_text_column` reads a class-B `listings` column, so neither
-    can sit on a payload surface even though the old W1 gate allowed it."""
+    can sit on a payload surface or claim a portal extraction method even though the old
+    W1 gate allowed both; and every locator key its reader indexes must be there, because
+    the extractor indexes them unguarded."""
     for contract in ALL.values():
         for entry in contract.entries:
-            if entry.reader:
-                assert entry.surface in READER_SUBSTRATES[entry.reader], entry.entry_id
+            if not entry.reader:
+                continue
+            spec = READER_CONTRACTS[entry.reader]
+            assert entry.surface in spec.substrates, entry.entry_id
+            assert entry.extraction_method in spec.methods, entry.entry_id
+            assert spec.locator_keys <= set(entry.locator), entry.entry_id
+            if spec.stamps_legacy_column is not None:
+                declared = entry.locator.get("legacy_source_column")
+                assert declared in (None, spec.stamps_legacy_column), entry.entry_id
+            if entry.transform:
+                assert spec.consults_transforms, entry.entry_id
+            inert = GRANDFATHERED_INERT_GUARDS.get(entry.entry_id, frozenset())
+            if set(entry.guards) - inert:
+                assert spec.consults_guards, entry.entry_id
 
 
 def test_reader_substrates_stay_in_sync_with_the_runtime_registry():
-    """`contracts.READER_SUBSTRATES` is pure data — the deploy-time lane must not import
-    the extractor — so a reader added to `claims_intake` without a substrate set (or one
-    left behind after a reader is deleted) is caught HERE, by the one test that imports
-    both. Otherwise the projection would reject every entry naming the new reader."""
-    assert set(READER_SUBSTRATES) == set(READERS)
+    """`contracts.READER_CONTRACTS` is pure data — the deploy-time lane must not import
+    the extractor — so a reader added to `claims_intake` without a record (or one left
+    behind after a reader is deleted) is caught HERE, by the one test that imports both.
+    Otherwise the projection would reject every entry naming the new reader."""
+    assert set(READER_CONTRACTS) == set(READERS)
+    assert READER_SUBSTRATES == {n: s.substrates for n, s in READER_CONTRACTS.items()}
     surfaces = {s for legal in READER_SUBSTRATES.values() for s in legal}
     assert surfaces <= contracts.CLAIM_SURFACES
     # No reader may be declared on a W2 surface until W2 gives it one — the property the
     # fleet-wide gate used to assert directly.
     assert surfaces == {"api_json", "graphql", "embedded_json", "legacy_column"}
+    methods = {m for spec in READER_CONTRACTS.values() for m in spec.methods}
+    assert methods <= EXTRACTION_METHODS
+    assert methods == {"portal_structured_field", "portal_declared_quality", "legacy_column"}
+
+
+def test_the_reader_contracts_state_exactly_what_the_reader_bodies_do():
+    """The half of the sync that a set-equality cannot reach: knowing a reader EXISTS says
+    nothing about whether it consults what an entry declares. Only three readers call
+    `apply_transforms` and three call `guard_admits`, so a `transform` on `point_pair` or a
+    `guard` on `scalar` is inert — validating the NAME while the entry's own reader never
+    asks for it is exactly the silent no-op this gate exists to stop. So every consulted
+    axis is read back out of the reader bodies rather than asserted by hand."""
+    bodies = _reader_bodies()
+    assert set(bodies) == set(READERS)
+    for name, fn in bodies.items():
+        spec = READER_CONTRACTS[name]
+        calls = _called_names(fn)
+        assert spec.consults_transforms == ("apply_transforms" in calls), name
+        assert spec.consults_guards == ("guard_admits" in calls), name
+        assert spec.locator_keys == _indexed_locator_keys(fn), name
+        stamped = _constant_legacy_stamps(fn)
+        assert stamped == ({spec.stamps_legacy_column} if spec.stamps_legacy_column
+                           else set()), name
+    # The scan reads each reader's OWN body, so a helper that applied transforms or
+    # evaluated guards on a reader's behalf would let the table lie about it. There is no
+    # such helper: the two entry points are called from reader bodies and nowhere else.
+    reader_names = {fn.name for fn in bodies.values()} | {"apply_transforms", "guard_admits"}
+    for node in _INTAKE_AST.body:
+        if isinstance(node, ast.FunctionDef) and node.name not in reader_names:
+            assert not ({"apply_transforms", "guard_admits"} & _called_names(node)), node.name
 
 
 def test_the_transform_and_guard_vocabularies_stay_in_sync_with_the_runtime():
@@ -429,12 +521,73 @@ def test_an_executable_entry_may_not_name_an_unimplemented_transform_or_guard():
         _entry(locator={"reader": "scalar", "json_pointer": "/x"},
                transform=["dms_to_decimal"])
     with pytest.raises(ContractError, match="guard 'reject_empty_geometry' is not implemented"):
-        _entry(locator={"reader": "scalar", "json_pointer": "/x"},
-               guards=["reject_empty_geometry"])
+        _entry(**COORDINATE, locator=POINT_PAIR, guards=["reject_empty_geometry"])
     # A misspelling of an implemented name is the case that motivates the check.
     with pytest.raises(ContractError, match="not implemented"):
+        _entry(**COORDINATE, locator=POINT_PAIR, guards=["reject_outside_cz_bbo"])
+
+
+def test_an_executable_entry_may_not_declare_what_its_own_reader_never_consults():
+    """Being implemented is not enough — the entry's OWN reader has to ask. `_read_scalar`
+    never calls `guard_admits` and `_read_point_pair` never calls `apply_transforms`, so
+    either declaration passes an implementedness check and then does nothing: a coordinate
+    entry that reads as bbox-checked and never was, which is the whole defect class."""
+    with pytest.raises(ContractError, match="reader 'scalar' never evaluates guards"):
         _entry(locator={"reader": "scalar", "json_pointer": "/x"},
-               guards=["reject_outside_cz_bbo"])
+               guards=["reject_outside_cz_bbox"])
+    with pytest.raises(ContractError, match="reader 'point_pair' never applies transforms"):
+        _entry(**COORDINATE, locator=POINT_PAIR, transform=["psc_normalise"])
+    # And the two readers that DO consult them keep taking an implemented name.
+    assert _entry(**COORDINATE, locator=POINT_PAIR,
+                  guards=["reject_outside_cz_bbox"]).guards == ["reject_outside_cz_bbox"]
+    assert _entry(locator={"reader": "scalar", "json_pointer": "/x"},
+                  transform=["psc_normalise"]).transform == ["psc_normalise"]
+
+
+def test_a_reader_may_not_be_declared_with_an_extraction_method_it_does_not_perform():
+    """Surface and method are separate axes (00 §3) and the entry states both, but a reader
+    performs exactly one act: `legacy_text_column` reads a `listings` column whatever the
+    entry says, and `extraction_method='portal_structured_field'` would stamp every one of
+    its claims as portal-published — while `_base` keys `legacy_source_column` off the
+    METHOD and would leave the column NULL, so 01 §4.2's CHECK never sees it either."""
+    with pytest.raises(ContractError, match="reader 'legacy_text_column' extracts by"):
+        _entry(locator_kind="legacy_column", extraction_method="portal_structured_field",
+               page_kind="none",
+               locator={"reader": "legacy_text_column",
+                        "legacy_source_column": "listings.locality"})
+    with pytest.raises(ContractError, match="reader 'declared_quality' extracts by"):
+        _entry(claim_type="precision_declaration",
+               locator={"reader": "declared_quality", "json_pointer": "/x"})
+
+
+def test_an_executable_entry_must_name_every_locator_key_its_reader_indexes():
+    """The readers index their locator keys unguarded, so a missing one is not a no-op: it
+    is a bare KeyError out of `extract_listing`, which has no per-entry try/except, on the
+    first row of that portal — one bad entry aborting a whole intake batch."""
+    with pytest.raises(ContractError, match="locator.namespace"):
+        _entry(locator={"reader": "namespaced_id", "json_pointer": "/x"})
+    with pytest.raises(ContractError, match="locator.lon_pointer"):
+        _entry(**COORDINATE, locator={"reader": "point_pair", "lat_pointer": "/lat"})
+    with pytest.raises(ContractError, match="locator.json_pointer"):
+        _entry(locator={"reader": "scalar"})
+
+
+def test_a_reader_that_stamps_its_own_provenance_refuses_a_contradicting_entry():
+    """`_read_geom_column` overrides `legacy_source_column` with `listings.geom` and
+    `_read_coords_stamp_quality` with `raw_json.coords`, so an entry naming a different
+    column states one provenance while the claim rows record another."""
+    legacy = {"locator_kind": "legacy_column", "extraction_method": "legacy_column",
+              "page_kind": "none"}
+    with pytest.raises(ContractError, match="stamps legacy_source_column='listings.geom'"):
+        _entry(**legacy, **COORDINATE,
+               locator={"reader": "geom_column", "legacy_source_column": "listings.locality"})
+    with pytest.raises(ContractError, match="stamps legacy_source_column='raw_json.coords'"):
+        _entry(**legacy, claim_type="precision_declaration",
+               locator={"reader": "coords_stamp_quality",
+                        "legacy_source_column": "listings.geom"})
+    assert _entry(**legacy, **COORDINATE,
+                  locator={"reader": "geom_column",
+                           "legacy_source_column": "listings.geom"}).reader == "geom_column"
 
 
 def test_a_declared_ahead_entry_may_name_a_guard_the_runtime_has_not_implemented():
@@ -451,18 +604,20 @@ def test_a_declared_ahead_entry_may_name_a_guard_the_runtime_has_not_implemented
     assert entry.guards == ["require_czech_street_morphology", "reject_empty_geometry"]
 
 
-def test_the_pending_guards_are_real_executable_entries_and_shrink_only():
-    """Two live entries named a guard the runtime never implemented, from before the check
-    existed. They are enumerated rather than tolerated: the table may only shrink, every
-    row must still describe a real executable entry, and a guard that gets implemented
-    must drop out of it."""
-    assert set(GUARDS_PENDING_IMPLEMENTATION) == {"sr.det.inaccuracy_type", "sr.det.zip"}
+def test_the_grandfathered_guards_are_inert_by_reader_and_shrink_only():
+    """Two live entries named a guard from before the check existed. Neither is "pending":
+    each sits on a reader that never evaluates guards at all, so implementing the name
+    would not make it run — the exemption is enumerated against THAT property, not against
+    implementedness. (Keying it on implementedness would force the row out the day someone
+    adds `reject_sentinel` to `GUARDS`, certifying as resolved a guard that still never
+    executes.) The table may only shrink, and only by a contract version bump."""
+    assert set(GRANDFATHERED_INERT_GUARDS) == {"sr.det.inaccuracy_type", "sr.det.zip"}
     by_id = {e.entry_id: e for c in ALL.values() for e in c.entries}
-    for entry_id, pending in GUARDS_PENDING_IMPLEMENTATION.items():
+    for entry_id, inert in GRANDFATHERED_INERT_GUARDS.items():
         entry = by_id[entry_id]
         assert entry.reader, entry_id          # an inert entry needs no exemption
-        assert pending <= set(entry.guards), entry_id
-        assert not (pending & IMPLEMENTED_GUARDS), entry_id
+        assert inert <= set(entry.guards), entry_id
+        assert not READER_CONTRACTS[entry.reader].consults_guards, entry_id
     # Why tolerating them is safe: sr.det.zip's `reject_sentinel` duplicates its own
     # transform, and sr.det.inaccuracy_type's `reject_if_in_excluded_zone` asks about
     # HTML/description blocks that a `/locality/inaccuracy_type` read never touches.
