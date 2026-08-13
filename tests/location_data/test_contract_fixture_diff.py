@@ -1,36 +1,18 @@
-"""The fixture-diff gate — permanent CI, not a wave gate (02 §2.1.8.3, §2.7 item 0(b)).
+"""The fixture-diff gate: a contract change that alters claims fails the build.
 
-`location_claims` is append-only: a mis-pointed locator writes tens of thousands of wrong
-claims that can never be deleted, only retracted. Two mechanisms guard that, and 02 §2.7
-item 0(b) requires BOTH standing before the first contract writes a production claim.
-`location_claim_retractions` is the first (migration 382 + `contracts.retract()`); this
-module is the second.
-
-What it does: for every portal contract, take the listing ids its `regressions:` block
-names, run each one that has a frozen fixture body through the real extractor
-(`claims_intake.extract_listing`, dispatching whatever readers that portal's YAML declares
-today), and compare the resulting claims / absences / enrichment tasks against a committed
-golden. A change fails the build with a claim-level diff — which extractor, which field,
-old value vs new — and is accepted by committing the re-blessed golden:
-
-    python -m tests.location_data.test_contract_fixture_diff --bless
-
-It rides `.github/workflows/test.yml` rather than a workflow of its own, so it runs on
-every push including the ones that only touch `contracts/`.
-
-Two things it deliberately does NOT gate. Contract prose: a `regressions:` line can be
-reworded freely — only the listing ids it names are golden. And the contract bytes: 02
-§2.1.8.3 makes the failure condition "a contract change that alters claims", so a comment
-or a `volatile_paths` edit stays green. A `contract_version` bump does red the build,
-because the golden is per version and a bump is exactly when a human should look; the
-superseded golden is kept rather than deleted, both so that failure can show the diff
-across the bump and because a retraction (02 §2.1.8 mechanism 2) needs to know what the
-retracted version claimed.
-
-Coverage is a subset today by design: most W2 entries carry no `reader` yet (they land in
-W2-6…W2-12), and most pinned listing ids have no captured body in this repo. Both gaps are
-written into the golden — `listings_without_a_fixture_body` — so coverage arriving later
-is itself a reviewed diff rather than a silent change.
+- 02 §2.7 item 0(b): this and `location_claim_retractions` (mig 382 + `contracts.retract()`)
+  must BOTH stand before the first contract writes a production claim, because
+  `location_claims` is append-only and a mis-pointed locator can only be retracted.
+- Each contract's `regressions:` listings run through `claims_intake.extract_listing` and
+  are diffed against `tests/fixtures/location_w2/golden/<portal>@<version>.json`.
+- Re-bless a reviewed change:
+  `python -m tests.location_data.test_contract_fixture_diff --bless`.
+- pytest, not a workflow, so it rides `test.yml` on every push — 02 §2.1.8.3 makes it
+  permanent CI that does not expire when W2 closes.
+- It gates claims, not bytes: prose and comments are free, a `contract_version` bump is not
+  (the golden is per version; the superseded one is kept so a retraction can read it).
+- Coverage is a subset today — a listing with no frozen body is recorded in the golden as
+  `listings_without_a_fixture_body`, so coverage arriving later is itself a reviewed diff.
 """
 
 from __future__ import annotations
@@ -103,11 +85,7 @@ def contract_regression_ids(contract: contracts.PortalContract) -> list[str]:
 
 @dataclass(frozen=True, slots=True)
 class Body:
-    """One frozen input row for one regression listing.
-
-    `name` is what the golden records as the body's provenance, so a reviewer reading a
-    diff can find the bytes that produced it.
-    """
+    """One frozen input row for a regression listing; `name` is its provenance."""
     name: str
     raw_json: dict[str, Any]
     lat: float | None = None
@@ -183,11 +161,7 @@ _COMMITTED_BODIES: dict[str, dict[str, tuple[Body, ...]]] = {
 
 
 def disk_bodies(source: str, root: Path = _BODY_DIR) -> dict[str, tuple[Body, ...]]:
-    """Captured bodies dropped on disk as `<root>/<portal>/<listing-id>[.variant].json`.
-
-    The extension point W2-6…W2-12 use: a portal PR adds a captured payload here and
-    re-blesses, and the gate scores it from then on with no change to this module.
-    """
+    """Captured bodies at `<root>/<portal>/<id>[.variant].json`; W2-6…W2-12's hook."""
     directory = root / source
     found: dict[str, list[Body]] = {}
     for path in sorted(directory.glob("*.json")) if directory.is_dir() else []:
@@ -286,9 +260,10 @@ def golden_path(source: str, version: int) -> Path:
 
 
 def previous_golden(source: str, version: int) -> Path | None:
-    older = [(int(p.stem.split("@")[1]), p) for p in _GOLDEN_DIR.glob(f"{source}@*.json")
-             if int(p.stem.split("@")[1]) < version]
-    return max(older)[1] if older else None
+    found = ((int(p.stem.split("@")[1]), p)
+             for p in _GOLDEN_DIR.glob(f"{source}@*.json"))
+    older = [pair for pair in found if pair[0] < version]
+    return max(older, key=lambda pair: pair[0])[1] if older else None
 
 
 def write_golden(contract: contracts.PortalContract) -> Path:
@@ -306,25 +281,17 @@ def _fixture_key(fixture: dict[str, Any]) -> tuple[str, str]:
     return str(fixture["listing"]), str(fixture["body"])
 
 
-def _keyed(items: list[dict[str, Any]],
-           *fields: str) -> dict[tuple[Any, ...], dict[str, Any]]:
-    """Key each item on its identity fields plus an ordinal, so a repeated (cardinality:
-    many) emission stays distinguishable and a VALUE edit reads as a change rather than as
-    a removal beside an unrelated addition."""
-    seen: dict[tuple[Any, ...], int] = {}
-    keyed: dict[tuple[Any, ...], dict[str, Any]] = {}
+def _grouped(items: list[dict[str, Any]],
+             fields: tuple[str, ...]) -> dict[tuple[Any, ...], list[dict[str, Any]]]:
+    grouped: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
     for item in items:
-        identity = tuple(item.get(f) for f in fields)
-        ordinal = seen.get(identity, 0)
-        seen[identity] = ordinal + 1
-        keyed[(*identity, ordinal)] = item
-    return keyed
+        grouped.setdefault(tuple(item.get(f) for f in fields), []).append(item)
+    return grouped
 
 
-def _label(kind: str, key: tuple[Any, ...]) -> str:
-    parts = [str(p) for p in key[:-1]]
-    suffix = f" #{key[-1] + 1}" if key[-1] else ""
-    return f"{kind} {' / '.join(parts)}{suffix}"
+def _label(kind: str, identity: tuple[Any, ...], ordinal: int, group_size: int) -> str:
+    suffix = f" #{ordinal + 1}" if group_size > 1 else ""
+    return f"{kind} {' / '.join(str(p) for p in identity)}{suffix}"
 
 
 def _short(value: Any) -> str:
@@ -333,32 +300,53 @@ def _short(value: Any) -> str:
     return text if len(text) <= 88 else text[:85] + "…"
 
 
+def _diff_group(kind: str, identity: tuple[Any, ...], olds: list[dict[str, Any]],
+                news: list[dict[str, Any]], fields: tuple[str, ...]) -> list[str]:
+    """One identity's items. Byte-identical items are matched by CONTENT before anything is
+    paired positionally: an entry with `cardinality: many` emits several claims under one
+    extractor_id and claim_type (sreality's 13 `sr.idx.poi_distance` values, told apart only
+    by target_text/distance_m — inert until a W2 reader wires it up), and pairing those by
+    position alone would report a harmless reorder as N field changes and force a needless
+    re-bless."""
+    rest_old, rest_new = list(olds), list(news)
+    for item in list(rest_new):
+        if item in rest_old:
+            rest_old.remove(item)
+            rest_new.remove(item)
+
+    if not rest_old and not rest_new:
+        return ([] if olds == news else
+                [f"    ~ reordered {_label(kind, identity, 0, 1)}: "
+                 f"{len(olds)} identical items in a different order"])
+
+    lines: list[str] = []
+    for ordinal, (was, now) in enumerate(zip(rest_old, rest_new)):
+        changed = [(k, was.get(k), now[k]) for k in now if was.get(k) != now[k]]
+        changed += [(k, v, None) for k, v in was.items() if k not in now]
+        if changed:
+            lines.append(f"    ~ changed  {_label(kind, identity, ordinal, len(rest_new))}")
+            lines.extend(f"                  {k}: {_short(o)} -> {_short(n)}"
+                         for k, o, n in changed)
+    for ordinal, item in enumerate(rest_old[len(rest_new):], start=len(rest_new)):
+        lines.append(f"    - removed  {_label(kind, identity, ordinal, len(rest_old))}")
+        lines.extend(f"                  {k} = {_short(v)}"
+                     for k, v in item.items() if k not in fields and v is not None)
+    for ordinal, item in enumerate(rest_new[len(rest_old):], start=len(rest_old)):
+        lines.append(f"    + added    {_label(kind, identity, ordinal, len(rest_new))}")
+        lines.extend(f"                  {k} = {_short(v)}"
+                     for k, v in item.items() if k not in fields and v is not None)
+    return lines
+
+
 def _diff_section(kind: str, golden: list[dict[str, Any]], actual: list[dict[str, Any]],
                   *fields: str) -> list[str]:
-    old, new = _keyed(golden, *fields), _keyed(actual, *fields)
+    old, new = _grouped(golden, fields), _grouped(actual, fields)
     lines: list[str] = []
-    for key in old:
-        if key not in new:
-            lines.append(f"    - removed  {_label(kind, key)}")
-            lines.extend(f"                  {k} = {_short(v)}"
-                         for k, v in old[key].items() if k not in fields and v is not None)
-    for key in new:
-        if key not in old:
-            lines.append(f"    + added    {_label(kind, key)}")
-            lines.extend(f"                  {k} = {_short(v)}"
-                         for k, v in new[key].items() if k not in fields and v is not None)
-    for key in new:
-        if key not in old:
-            continue
-        changed = [(k, old[key].get(k), new[key][k]) for k in new[key]
-                   if old[key].get(k) != new[key][k]]
-        changed += [(k, v, None) for k, v in old[key].items() if k not in new[key]]
-        if changed:
-            lines.append(f"    ~ changed  {_label(kind, key)}")
-            lines.extend(f"                  {k}: {_short(was)} -> {_short(now)}"
-                         for k, was, now in changed)
-    # Emission order is contract entry order, and 02 §2.1.8 forbids reordering entries
-    # (ids are never reused). A pure reorder changes no key, so it is checked separately.
+    for identity in list(old) + [i for i in new if i not in old]:
+        lines += _diff_group(kind, identity, old.get(identity, []),
+                             new.get(identity, []), fields)
+    # Emission order is contract entry order, and 02 §2.1.8 forbids reordering entries (ids
+    # are never reused). Reordering whole groups changes no group, so it is checked here.
     was_order = [i.get(fields[0]) for i in golden]
     now_order = [i.get(fields[0]) for i in actual]
     if not lines and was_order != now_order:
@@ -486,6 +474,40 @@ def test_a_captured_body_on_disk_is_scored_like_a_committed_one(tmp_path: Path) 
     assert scored["body"].endswith("999999.json")
     assert any(c["extractor_id"] == "sr.det.street" and c["value_text"] ==
                "náměstí Jiřího z Poděbrad" for c in scored["claims"])
+
+
+def _poi_golden(pois: list[tuple[str, int]]) -> dict[str, Any]:
+    return {
+        "portal": "sreality", "contract_version": 1, "regression_listing_ids": [],
+        "listings_without_a_fixture_body": [],
+        "fixtures": [{
+            "listing": "520268", "body": "synthetic", "row": {}, "oversized": 0,
+            "absences": [], "enrichment": [],
+            "claims": [{"extractor_id": "sr.idx.poi_distance", "claim_type": "poi_distance",
+                        "target_text": name, "distance_m": metres}
+                       for name, metres in pois],
+        }],
+    }
+
+
+def test_a_cardinality_many_reorder_is_not_read_as_a_field_change() -> None:
+    """`sr.idx.poi_distance` emits 13 claims under ONE extractor_id and claim_type, told
+    apart only by target_text/distance_m. Positional pairing would render a reorder as N
+    changed fields and force a re-bless that reviews nothing. Inert until W2 wires the
+    reader — the shape is asserted now so it is not rediscovered the hard way."""
+    pois = [("Park Riegrovy sady", 220), ("Náměstí Míru", 450), ("Vinohradská", 90)]
+
+    assert diff_golden(_poi_golden(pois), _poi_golden(pois)) == []
+
+    rendered = "\n".join(diff_golden(_poi_golden(pois), _poi_golden(pois[::-1])))
+    assert "changed" not in rendered and "removed" not in rendered
+    assert "~ reordered claim sr.idx.poi_distance / poi_distance" in rendered
+
+    # …and a real edit inside a reordered group is still caught, per item.
+    moved_and_edited = [pois[2], pois[1], ("Park Riegrovy sady", 999)]
+    rendered = "\n".join(diff_golden(_poi_golden(pois), _poi_golden(moved_and_edited)))
+    assert "~ changed  claim sr.idx.poi_distance / poi_distance" in rendered
+    assert "distance_m: 220 -> 999" in rendered
 
 
 def test_the_diff_names_the_field_and_both_values() -> None:
