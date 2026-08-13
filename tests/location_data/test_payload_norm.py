@@ -244,14 +244,67 @@ def test_default_profiles_apply_cleanly_to_their_portal_body_kind() -> None:
 
 
 def test_sreality_profile_strips_the_hashing_module_volatile_keys() -> None:
-    from scraper.hashing import VOLATILE_TOP_KEYS
+    """Every volatile key set scraper.hashing proved against live sreality churn
+    must have a pointer here. Under-stripping inflates the measured change rate,
+    which is the direction that corrupts the P2 storage decision."""
+    from scraper import hashing
 
     pointers = set(DEFAULT_VOLATILE_PROFILES["sreality"].json_pointers)
     # `rusReply` is the legacy camelCase alias of `rus_reply`, only ever present
     # in pre-v1 archived raw_json; the live API never emits it.
-    expected = {f"/{key}" for key in VOLATILE_TOP_KEYS - {"rusReply"}}
+    expected = (
+        {f"/{k}" for k in hashing.VOLATILE_TOP_KEYS - {"rusReply"}}
+        | {f"/params/{k}" for k in hashing.VOLATILE_PARAM_KEYS}
+        | {f"/_embedded/{k}" for k in hashing.VOLATILE_EMBEDDED_KEYS}
+        | {f"/user/{k}" for k in hashing.VOLATILE_USER_KEYS}
+        | {f"/premise/{k}" for k in hashing.VOLATILE_PREMISE_KEYS}
+        | {f"/premise/company/{k}" for k in hashing.VOLATILE_PREMISE_COMPANY_KEYS}
+    )
 
     assert expected <= pointers
+    # The sdn_*_attachment_url family, as hashing.py's prefix+suffix rule rather
+    # than the one member that happens to be in today's fixtures.
+    glob = f"/{hashing._ATTACHMENT_URL_PREFIX}*{hashing._ATTACHMENT_URL_SUFFIX}"
+    assert glob in pointers
+    # hashing.VOLATILE_ITEM_NAMES is a value predicate (drop the `items` entry
+    # NAMED "Aktualizace") that a JSON pointer cannot express; its sibling — the
+    # per-item `topped` flag — is covered by the array wildcard.
+    assert "/items/-/topped" in pointers
+
+
+def test_key_glob_strips_the_whole_attachment_url_family() -> None:
+    body = json.dumps({
+        "sdn_energy_performance_attachment_url": "https://sdn.cz/a?sig=1",
+        "sdn_floorplan_attachment_url": "https://sdn.cz/b?sig=1",
+        "sdn_keep_me": "not an attachment",
+        "name": "Byt 3+1",
+    }).encode("utf-8")
+    other = json.dumps({
+        "sdn_energy_performance_attachment_url": "https://sdn.cz/a?sig=2",
+        "sdn_floorplan_attachment_url": "https://sdn.cz/b?sig=2",
+        "sdn_keep_me": "not an attachment",
+        "name": "Byt 3+1",
+    }).encode("utf-8")
+    profile = DEFAULT_VOLATILE_PROFILES["sreality"]
+
+    a = normalise(body, content_type=_JSON, volatile=profile)
+    b = normalise(other, content_type=_JSON, volatile=profile)
+
+    assert a.raw_sha256 != b.raw_sha256
+    assert a.norm_sha256 == b.norm_sha256
+    assert b"sdn_keep_me" in a.norm_bytes
+    assert b"attachment_url" not in a.norm_bytes
+
+
+def test_key_glob_only_matches_both_ends() -> None:
+    profile = VolatileProfile(json_pointers=("/a*z",))
+    doc = {"az": 1, "abz": 2, "abc": 3, "xbz": 4, "a": 5}
+
+    result = normalise(
+        json.dumps(doc).encode("utf-8"), content_type=_JSON, volatile=profile,
+    )
+
+    assert json.loads(result.norm_bytes) == {"abc": 3, "xbz": 4, "a": 5}
 
 
 def test_normaliser_is_pure() -> None:

@@ -16,6 +16,7 @@ import logging
 import os
 import random
 import time
+import uuid
 from collections.abc import Callable, Collection, Iterable, Sequence
 from datetime import date, datetime, timezone
 from decimal import Decimal
@@ -2740,21 +2741,52 @@ def fresh_index_page_keys(conn: psycopg.Connection, source: str, *, hours: float
 
 
 # The W2a-0 shadow-hash churn instrument (design 02 section 2.3.2 P1, 06 section
-# 6.9 OQ9): OFF by default, app_settings-backed for the same reason as the Gate-2
-# flag — the always-on worker and the cron drains pick a flip up on their next
-# batch, not after a restart.
+# 6.9 OQ9): OFF by default, app_settings-backed so a flip reaches the always-on
+# worker without a redeploy.
 PAYLOAD_SHADOW_HASH_SETTING = "location_payload_shadow_hash"
+
+# The flag is read at most once per process per TTL, NOT once per item. The
+# Gate-2 precedent reads live, but it sits in ingest_scraped_listing — a per-item
+# write path that already round-trips several times. This instrument hangs off
+# write_detail_batch, whose whole design is ~4 round-trips per 100-listing batch;
+# a live read per item would make that ~104, i.e. 1-3 s of pure Frankfurt-pooler
+# RTT added to every flush inside the realtime worker's time-budgeted drain lane,
+# to read a flag that is off. The bound this buys back: a flip is picked up
+# within _FLAG_CACHE_TTL seconds by the always-on worker, and immediately by
+# every cron run (a fresh process starts with an empty cache).
+_FLAG_CACHE_TTL = 60.0
+_FLAG_CACHE: dict[str, tuple[float, bool]] = {}
+
+
+def clear_app_settings_flag_cache() -> None:
+    """Drop the cached flag values (tests; a process that must re-read at once)."""
+    _FLAG_CACHE.clear()
+
+
+def _app_settings_flag_cached(
+    conn: psycopg.Connection, key: str, *, ttl: float = _FLAG_CACHE_TTL,
+) -> bool:
+    now = time.monotonic()
+    cached = _FLAG_CACHE.get(key)
+    if cached is not None and cached[0] > now:
+        return cached[1]
+    value = _app_settings_flag(conn, key)
+    _FLAG_CACHE[key] = (now + ttl, value)
+    return value
+
 
 _PAYLOAD_CHURN_UPSERT_SQL = """
     INSERT INTO portal_payload_churn
-        (source, source_id_native, page_kind, first_seen_at, last_seen_at,
+        (source, source_id_native, page_kind, normalizer_version,
+         first_seen_at, last_seen_at,
          fetches, raw_changes, norm_changes,
          last_raw_sha256, last_norm_sha256, last_byte_size, last_norm_byte_size,
-         normalizer_version)
-    VALUES (%s, %s, %s::location_page_kind,
+         last_observation)
+    VALUES (%s, %s, %s::location_page_kind, %s,
             coalesce(%s::timestamptz, now()), coalesce(%s::timestamptz, now()),
             1, 0, 0, %s, %s, %s, %s, %s)
-    ON CONFLICT (source, source_id_native, page_kind) DO UPDATE SET
+    ON CONFLICT (source, source_id_native, page_kind, normalizer_version)
+    DO UPDATE SET
         last_seen_at        = greatest(portal_payload_churn.last_seen_at,
                                        EXCLUDED.last_seen_at),
         fetches             = portal_payload_churn.fetches + 1,
@@ -2768,7 +2800,9 @@ _PAYLOAD_CHURN_UPSERT_SQL = """
         last_norm_sha256    = EXCLUDED.last_norm_sha256,
         last_byte_size      = EXCLUDED.last_byte_size,
         last_norm_byte_size = EXCLUDED.last_norm_byte_size,
-        normalizer_version  = EXCLUDED.normalizer_version
+        last_observation    = EXCLUDED.last_observation
+    WHERE portal_payload_churn.last_observation
+          IS DISTINCT FROM EXCLUDED.last_observation
 """
 
 
@@ -2780,14 +2814,24 @@ def record_payload_churn(
     page_kind: str,
     body: bytes,
     content_type: str,
+    observation: str,
     fetched_at: datetime | None = None,
 ) -> None:
     """Bump this artefact's raw-vs-normalised churn counters. Stores NO body.
 
     The measurement 02 section 2.3.2 makes a gate on P2 (index archiving): one
-    bounded row per (source, source_id_native, page_kind) carrying both hashes,
-    both sizes and three counters, so the change RATE is a number instead of the
-    assumption the storage projection currently rests on.
+    bounded row per (source, source_id_native, page_kind, normalizer_version)
+    carrying both hashes, both sizes and three counters, so the change RATE is a
+    number instead of the assumption the storage projection currently rests on.
+
+    `observation` identifies the FETCH, not the call: replaying it is a no-op
+    (migration 402's WHERE guard), which is what makes this safe to run inside
+    the drain's run_resilient-retried batch write.
+
+    PRECONDITION: an autocommit connection (scraper.db.connect). The statement is
+    self-contained, so a caller already inside `with conn.transaction():` gets it
+    wrapped in a savepoint instead — a churn failure must never poison the
+    caller's transaction and take the ingest write down with it.
     """
     # Deferred: location_data is not on the scraper's import path (and not in the
     # API image before this wave), so the flag-off scrape never pays for it.
@@ -2800,13 +2844,18 @@ def record_payload_churn(
         content_type=content_type,
         volatile=DEFAULT_VOLATILE_PROFILES.get(source, VolatileProfile()),
     )
-    with conn.cursor() as cur:
-        cur.execute(
-            _PAYLOAD_CHURN_UPSERT_SQL,
-            (source, source_id_native, page_kind, fetched_at, fetched_at,
-             result.raw_sha256, result.norm_sha256,
-             result.byte_size, result.norm_byte_size, NORMALIZER_VERSION),
-        )
+    params = (
+        source, source_id_native, page_kind, NORMALIZER_VERSION,
+        fetched_at, fetched_at,
+        result.raw_sha256, result.norm_sha256,
+        result.byte_size, result.norm_byte_size, observation,
+    )
+    if getattr(conn, "autocommit", True):
+        with conn.cursor() as cur:
+            cur.execute(_PAYLOAD_CHURN_UPSERT_SQL, params)
+        return
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(_PAYLOAD_CHURN_UPSERT_SQL, params)
 
 
 def record_payload_churn_if_enabled(
@@ -2815,8 +2864,9 @@ def record_payload_churn_if_enabled(
     source: str,
     source_id_native: str,
     page_kind: str,
-    body: bytes,
+    body: bytes | Callable[[], bytes],
     content_type: str | None = None,
+    observation: str | None = None,
     fetched_at: datetime | None = None,
 ) -> None:
     """Flag-gated, never-raising wrapper — the ONLY form callers should use.
@@ -2825,20 +2875,33 @@ def record_payload_churn_if_enabled(
     failure (flag read, normaliser, upsert) warns and returns. `content_type`
     None sniffs the body, for the archive path that is handed both HTML and JSON
     through one `html` parameter.
+
+    `body` should be a THUNK wherever producing the bytes costs anything: the
+    flag is read first and a disabled instrument must do no serialisation work at
+    all (sreality's index payload is multi-MB and this sits in the hourly walk).
+    Serialising inside the try/except is also what keeps a non-JSON-serialisable
+    value in a raw dict from killing a 100-item flush.
+
+    `observation` identifies the logical FETCH. Callers inside a retried op MUST
+    pass one that survives the replay (DrainItem.observation_id); anything else
+    gets a fresh token per call, which is the pre-existing count-every-call
+    behaviour.
     """
     try:
-        if not _app_settings_flag(conn, PAYLOAD_SHADOW_HASH_SETTING):
+        if not _app_settings_flag_cached(conn, PAYLOAD_SHADOW_HASH_SETTING):
             return
+        payload = body() if callable(body) else body
         if content_type is None:
             from location_data.payload_norm import sniff_content_type
-            content_type = sniff_content_type(body)
+            content_type = sniff_content_type(payload)
         record_payload_churn(
             conn,
             source=source,
             source_id_native=source_id_native,
             page_kind=page_kind,
-            body=body,
+            body=payload,
             content_type=content_type,
+            observation=observation or uuid.uuid4().hex,
             fetched_at=fetched_at,
         )
     except Exception as exc:  # noqa: BLE001 - instrumentation must not kill ingest
@@ -2859,6 +2922,7 @@ def upsert_portal_raw_page(
     http_status: int | None,
     refresh_after_hours: float | None = None,
     record_churn: bool = True,
+    churn_observation: str | None = None,
 ) -> int | None:
     """Latest-wins upsert of one fetched HTML page into portal_raw_pages.
 
@@ -2868,10 +2932,13 @@ def upsert_portal_raw_page(
     younger than that is left untouched and None is returned — the write-cost
     guard for index-page archiving.
 
-    `record_churn=False` is for the one caller that already recorded the fetch
-    itself (sreality's index archiver, which measures pages its client-side
-    freshness skip never hands to this function) — without it that surface would
-    double-count exactly the fetches that do get archived.
+    `record_churn=False` is for the callers that already recorded the fetch
+    themselves (the index archivers, which measure pages their client-side
+    freshness skip never hands to this function) — without it those surfaces
+    would double-count exactly the fetches that do get archived.
+    `churn_observation` is the caller's per-fetch idempotency token; the drain's
+    write_details MUST pass DrainItem.observation_id, because that whole call is
+    replayed on a transient pooler drop.
     """
     if record_churn:
         record_payload_churn_if_enabled(
@@ -2879,7 +2946,8 @@ def upsert_portal_raw_page(
             source=source,
             source_id_native=source_id_native,
             page_kind=page_kind,
-            body=html.encode("utf-8"),
+            body=lambda: html.encode("utf-8"),
+            observation=churn_observation,
         )
     with conn.cursor() as cur:
         if refresh_after_hours is None:

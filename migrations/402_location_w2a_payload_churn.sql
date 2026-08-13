@@ -14,8 +14,18 @@
 -- payload store (portal_raw_payloads, migration 382) is what this measurement
 -- decides the volatile_paths and the P2 index-archiving switch for.
 --
--- Bounded by construction: the natural PK is (source, source_id_native, page_kind),
--- so a portal refetched four times a day for a week writes ONE row, not 28.
+-- ONE ROW PER (source, source_id_native, page_kind, normalizer_version): a portal
+-- refetched four times a day for a week writes ONE row, not 28. Two caveats on
+-- that bound, both deliberate:
+--   * index keys are WEEK-STAMPED upstream (…/{offset}/{week}), so the index
+--     surface adds O(index pages) rows per week for as long as the flag is on.
+--     This table is observability, not history (the same posture rule 9 gives
+--     listing_freshness_checks): once a readout is taken, rows whose last_seen_at
+--     is older than the window being reported are safe to DELETE, and the whole
+--     table is safe to TRUNCATE when the instrument is switched off. There is no
+--     auto-prune and nothing reads it but the operator's readout query.
+--   * a normaliser change starts a NEW row per key rather than relabelling the
+--     old one (see normalizer_version below).
 --
 -- Backend/service-role only: RLS on, Supabase's default anon/authenticated ACL
 -- revoked at the foot of the file. No sequence to revoke (natural PK, no serial).
@@ -23,7 +33,7 @@
 begin;
 
 ------------------------------------------------------------------
--- portal_payload_churn - one counter row per fetched artefact.
+-- portal_payload_churn - one counter row per fetched artefact per normaliser.
 --
 -- `fetches` counts every fetch the instrument saw; `raw_changes` / `norm_changes`
 -- count the fetches whose hash DIFFERED from the previously recorded one, so the
@@ -32,15 +42,33 @@ begin;
 -- number 02 section 2.3.2's storage projection is missing, and the raw-vs-norm
 -- gap is what tells us whether a volatile profile is worth its complexity.
 --
--- `normalizer_version` stamps which normaliser produced last_norm_sha256, so a
--- profile change is visible as a version bump rather than as a phantom change
--- spike (rows carrying the old version are simply excluded from the readout).
+-- The denominator is FETCHES, uniformly, on every surface — never archive writes.
+-- Several index archivers skip re-staging a body their freshness guard would
+-- discard; those fetches are still counted, because a per-fetch rate plus the
+-- row's own observed interval ((last_seen_at - first_seen_at) / (fetches - 1))
+-- can be scaled to any archiving cadence, while fetches never counted cannot be
+-- recovered.
+--
+-- `normalizer_version` is part of the PK, not an updated-in-place stamp: a profile
+-- change must start a CLEAN cohort. Relabelling in place would blend @1-era
+-- counters into the @2 readout and register one phantom change per key on its
+-- first @2 fetch (the hash moved because the normaliser moved). Old-version rows
+-- are simply left behind for comparison, or deleted.
+--
+-- `last_observation` is the idempotency key, NOT data. The drain's batch write is
+-- retried whole on a transient pooler drop (scraper.portal_runner._flush_drain_batch
+-- -> db.run_resilient) and the connection is autocommit, so a replay re-presents
+-- bodies already counted. Every write carries a per-FETCH token that survives the
+-- replay unchanged, and the DO UPDATE is gated on it moving — so a replayed batch
+-- bumps nothing. Without it `fetches` would inflate while the hashes stayed put,
+-- biasing the published rate LOW exactly when the drain is flaky.
 ------------------------------------------------------------------
 
 create table portal_payload_churn (
   source              text not null,
   source_id_native    text not null,
   page_kind           location_page_kind not null,
+  normalizer_version  text not null,
   first_seen_at       timestamptz not null,
   last_seen_at        timestamptz not null,
   fetches             int not null default 0,
@@ -50,14 +78,15 @@ create table portal_payload_churn (
   last_norm_sha256    bytea,
   last_byte_size      int,
   last_norm_byte_size int,
-  normalizer_version  text,
-  primary key (source, source_id_native, page_kind)
+  last_observation    text not null,
+  primary key (source, source_id_native, page_kind, normalizer_version)
 );
 alter table portal_payload_churn enable row level security;
 
 -- The readout is always per (source, page_kind) over the whole table; the PK's
--- leading column already serves it, so this index exists only to keep the
--- normalizer_version cohort split cheap while a profile change is rolling out.
+-- leading column serves only the source prefix, so this index is what keeps the
+-- per-surface aggregate — and the normalizer_version cohort split while a profile
+-- change is rolling out — from scanning the table.
 create index ppc_by_surface on portal_payload_churn (source, page_kind, normalizer_version);
 
 revoke all on portal_payload_churn from anon, authenticated;

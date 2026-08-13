@@ -239,14 +239,17 @@ class BezrealitkyPortal:
             # portal_raw_pages (the GraphQL advert goes straight into raw_json),
             # so the fetch is recorded here or the portal is absent from the
             # measurement. listing.raw IS the advert dict plus the parser's
-            # derived image_urls, which is deterministic in the advert.
+            # derived image_urls, which is deterministic in the advert. The
+            # serialisation is a thunk (nothing is dumped with the flag off) and
+            # the observation token makes a replayed flush a no-op.
             db.record_payload_churn_if_enabled(
                 conn,
                 source=SOURCE,
                 source_id_native=listing.source_id_native,
                 page_kind="detail",
-                body=json.dumps(listing.raw, ensure_ascii=False).encode("utf-8"),
+                body=lambda: json.dumps(listing.raw, ensure_ascii=False).encode("utf-8"),
                 content_type="application/json",
+                observation=it.observation_id,
             )
             pk, result = db.ingest_scraped_listing(
                 conn, listing, discovery_seq=it.discovery_seq)

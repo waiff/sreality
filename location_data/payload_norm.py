@@ -44,6 +44,13 @@ _WS_RE = re.compile(rb"[ \t\r\n\f\v]+")
 # sreality's advert_images without knowing how many photos a listing has.
 _WILDCARD = "-"
 
+# The second extension: a `*` inside an OBJECT-key token globs that key, so a
+# profile can express scraper.hashing's prefix+suffix rules (sdn_*_attachment_url)
+# instead of enumerating the members it happens to have seen. Exactly one `*` per
+# token, matched as prefix + suffix; a literal `*` in a portal's key is
+# unreachable, which is the same trade RFC 6901 already makes for `-`.
+_KEY_GLOB = "*"
+
 
 @dataclass(frozen=True)
 class VolatileProfile:
@@ -173,10 +180,28 @@ def _delete_pointer(node: Any, tokens: tuple[str, ...]) -> None:
         for item in node:
             _delete_pointer(item, rest)
         return
+    if _KEY_GLOB in head and isinstance(node, dict):
+        for key in _glob_keys(node, head):
+            if rest:
+                _delete_pointer(node[key], rest)
+            else:
+                node.pop(key, None)
+        return
     if not rest:
         _drop(node, head)
         return
     _delete_pointer(_child(node, head), rest)
+
+
+def _glob_keys(node: dict[str, Any], token: str) -> list[str]:
+    prefix, _, suffix = token.partition(_KEY_GLOB)
+    return [
+        key for key in list(node)
+        if isinstance(key, str)
+        and len(key) >= len(prefix) + len(suffix)
+        and key.startswith(prefix)
+        and key.endswith(suffix)
+    ]
 
 
 def _child(node: Any, token: str) -> Any:
@@ -266,8 +291,13 @@ DEFAULT_VOLATILE_PROFILES: dict[str, VolatileProfile] = {
     # blocks, the firmy.cz review counters) plus the re-signed sdn.cz media URLs,
     # which that module documents as "re-signs wholesale ... same image id,
     # different path" — the single largest source of sreality byte churn.
+    # One member of that set is deliberately absent: hashing.py also drops the
+    # `items` entry NAMED "Aktualizace", a value predicate a JSON pointer cannot
+    # express. It is a timestamp item, so it inflates the measured rate slightly
+    # — the safe direction (over-, not under-stating churn).
     "sreality": VolatileProfile(json_pointers=(
         "/stats",
+        "/params/stats",  # legacy camelCase raw_json puts the view counter here
         "/edited",
         "/labels",
         "/labels_extended",
@@ -282,12 +312,17 @@ DEFAULT_VOLATILE_PROFILES: dict[str, VolatileProfile] = {
         "/premise/review_count",
         "/premise/review_score",
         "/premise/premise_paid_firmy",
+        "/premise/company/sos_custom_advert_card",  # flips false<->true portal-side
         "/advert_images/-/url",
         "/advert_images/-/kind",
         "/advert_images/-/width",
         "/advert_images/-/height",
         "/videos/-/url",
-        "/sdn_energy_performance_attachment_url",
+        "/items/-/topped",
+        # hashing.py's _ATTACHMENT_URL_PREFIX/_SUFFIX rule, as a key glob: the
+        # energy-certificate PDFs re-sign the same way the image URLs do, and
+        # enumerating today's members would miss tomorrow's.
+        "/sdn_*_attachment_url",
         "/_embedded/favourite",
         "/_embedded/note",
     )),

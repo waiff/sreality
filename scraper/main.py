@@ -1010,7 +1010,7 @@ class SrealityPortal:
         for it in items:
             if it.payload is not None:
                 it.payload.discovery_seq = it.discovery_seq
-                _record_detail_churn(conn, it.payload)
+                _record_detail_churn(conn, it.payload, it.observation_id)
         return db.write_detail_batch(conn, [it.payload for it in items])
 
     def mark_gone(self, conn: Any, native_id: str) -> None:
@@ -1238,7 +1238,7 @@ def _walk_category_split(
     return union, counts, reported_size, pages, complete
 
 
-def _record_detail_churn(conn: Any, result: FetchResult) -> None:
+def _record_detail_churn(conn: Any, result: FetchResult, observation: str) -> None:
     """W2a-0 churn instrument for sreality's detail surface.
 
     The seven HTML portals are covered where they stage their body
@@ -1248,6 +1248,10 @@ def _record_detail_churn(conn: Any, result: FetchResult) -> None:
     missing from the measurement. Re-serialised rather than byte-exact: the hash
     is only ever compared against another hash produced the same way, so this
     only removes wire-formatting noise the JSON API does not have anyway.
+
+    The serialisation is a THUNK: with the flag off (the default) not one estate
+    dict is ever dumped, and a value json.dumps cannot encode surfaces as a
+    swallowed warning rather than killing the 100-item flush.
     """
     if result.kind != "ok" or result.raw is None:
         return
@@ -1256,8 +1260,9 @@ def _record_detail_churn(conn: Any, result: FetchResult) -> None:
         source="sreality",
         source_id_native=str(result.sid),
         page_kind="detail",
-        body=json.dumps(result.raw, ensure_ascii=False).encode("utf-8"),
+        body=lambda: json.dumps(result.raw, ensure_ascii=False).encode("utf-8"),
         content_type="application/json",
+        observation=observation,
     )
 
 
@@ -1291,7 +1296,18 @@ def _index_page_archiver(
             f"{client.category_main}/{client.category_type}/"
             f"{district if district is not None else 'all'}/{offset}/{week}"
         )
-        body = json.dumps(payload, ensure_ascii=False)
+        # LAZY: with the instrument off (the default) a walk must be byte-for-byte
+        # the work it was before — and this payload is multi-MB, on the platform's
+        # hottest loop, for pages the freshness skip below discards without ever
+        # serialising them.
+        serialised: str | None = None
+
+        def _body() -> str:
+            nonlocal serialised
+            if serialised is None:
+                serialised = json.dumps(payload, ensure_ascii=False)
+            return serialised
+
         # Ahead of the freshness skip: the instrument counts FETCHES, and the
         # index page — the highest-churn artefact in the system, and the whole
         # reason 02 section 2.3.2 P2 is gated — is archived at most once a day
@@ -1302,7 +1318,7 @@ def _index_page_archiver(
             source="sreality",
             source_id_native=key,
             page_kind="index",
-            body=body.encode("utf-8"),
+            body=lambda: _body().encode("utf-8"),
             content_type="application/json",
         )
         if key in fresh:
@@ -1314,7 +1330,7 @@ def _index_page_archiver(
                 source_id_native=key,
                 source_url=url,
                 page_kind="index",
-                html=body,
+                html=_body(),
                 http_status=200,
                 refresh_after_hours=db.INDEX_ARCHIVE_REFRESH_HOURS,
                 record_churn=False,

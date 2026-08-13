@@ -45,12 +45,24 @@ class _Cur:
 
 
 class _FakeConn:
+    autocommit = True
+
     def __init__(self, flag: Any = None) -> None:
         self.executed: list[tuple[str, Any]] = []
         self.flag = flag
 
     def cursor(self) -> _Cur:
         return _Cur(self)
+
+
+@pytest.fixture(autouse=True)
+def _no_cached_flag() -> Any:
+    # The flag is cached per process for _FLAG_CACHE_TTL seconds (the per-item
+    # SELECT would defeat write_detail_batch's ~4-round-trip design), so every
+    # test here must start from a cold cache or it reads the previous test's flag.
+    db.clear_app_settings_flag_cache()
+    yield
+    db.clear_app_settings_flag_cache()
 
 
 def _churn_statements(conn: _FakeConn) -> list[tuple[str, Any]]:
@@ -93,10 +105,7 @@ def test_flag_off_writes_no_churn_row() -> None:
 
 
 def test_flag_off_costs_one_app_settings_lookup_and_nothing_else() -> None:
-    # The Gate-2 precedent (_gate2_null_sreality_id_enabled) reads app_settings
-    # live rather than caching, so a flip reaches the always-on worker on its
-    # next batch instead of after a restart; the instrument pays the same PK
-    # lookup. Pin the shape so the flag-off path can't grow anything more.
+    # Pin the shape so the flag-off path can't grow anything more.
     conn = _FakeConn(flag=None)
 
     _archive(conn)
@@ -104,6 +113,31 @@ def test_flag_off_costs_one_app_settings_lookup_and_nothing_else() -> None:
     assert len(conn.executed) == 2
     assert "FROM app_settings" in conn.executed[0][0]
     assert conn.executed[0][1] == ("location_payload_shadow_hash",)
+
+
+def test_flag_is_read_once_per_process_not_once_per_item() -> None:
+    # write_detail_batch is ~4 round-trips per 100-listing batch by design; a
+    # live read per item would make it ~104, i.e. seconds of Frankfurt-pooler RTT
+    # per flush inside the realtime worker's time-budgeted drain lane.
+    conn = _FakeConn(flag=None)
+
+    for _ in range(50):
+        _archive(conn)
+
+    lookups = [e for e in conn.executed if "FROM app_settings" in e[0]]
+    assert len(lookups) == 1
+
+
+def test_flag_cache_expires_so_a_flip_reaches_the_always_on_worker() -> None:
+    # The bound the cache trades for: an operator flipping the flag is picked up
+    # by the always-on worker within _FLAG_CACHE_TTL seconds (a cron run starts
+    # with an empty cache, so it always reads live).
+    assert db._FLAG_CACHE_TTL <= 60.0
+    conn = _FakeConn(flag=None)
+
+    assert db._app_settings_flag_cached(conn, "k", ttl=-1.0) is False
+    conn.flag = True
+    assert db._app_settings_flag_cached(conn, "k", ttl=-1.0) is True
 
 
 @pytest.mark.parametrize("falsey", [None, False, "false", "off", "0", ""])
@@ -125,9 +159,9 @@ def test_flag_on_writes_exactly_one_churn_row_per_call(truthy: Any) -> None:
     assert len(churn) == 1
     sql, params = churn[0]
     assert sql.startswith("INSERT INTO portal_payload_churn")
-    source, native, page_kind = params[0], params[1], params[2]
-    raw_sha, norm_sha = params[5], params[6]
-    byte_size, norm_size, version = params[7], params[8], params[9]
+    source, native, page_kind, version = params[0], params[1], params[2], params[3]
+    raw_sha, norm_sha = params[6], params[7]
+    byte_size, norm_size, observation = params[8], params[9], params[10]
     assert (source, native, page_kind) == ("idnes", "123", "detail")
     assert len(raw_sha) == 32 and len(norm_sha) == 32
     assert raw_sha != norm_sha
@@ -136,6 +170,7 @@ def test_flag_on_writes_exactly_one_churn_row_per_call(truthy: Any) -> None:
     # so the normalised projection is strictly smaller than the fetched page.
     assert 0 < norm_size < byte_size
     assert version.startswith("payload_norm@")
+    assert observation
 
 
 def test_flag_on_still_writes_the_raw_page() -> None:
@@ -178,6 +213,35 @@ def test_flag_read_failure_never_propagates(monkeypatch: pytest.MonkeyPatch) -> 
     assert _churn_statements(conn) == []
 
 
+def test_flag_off_never_touches_the_body() -> None:
+    # sreality's index payload is multi-MB and this hook sits in the hourly walk:
+    # a disabled instrument must not serialise, encode or even read it.
+    conn = _FakeConn(flag=None)
+    calls: list[int] = []
+
+    db.record_payload_churn_if_enabled(
+        conn, source="sreality", source_id_native="k", page_kind="index",
+        body=lambda: calls.append(1) or b"{}",
+    )
+
+    assert calls == []
+
+
+def test_a_body_thunk_that_raises_is_swallowed_like_any_other_failure() -> None:
+    # Serialisation happens INSIDE the guard, so a value json.dumps cannot encode
+    # warns instead of killing the 100-item flush it is riding in.
+    conn = _FakeConn(flag=True)
+
+    def boom() -> bytes:
+        raise TypeError("Object of type Decimal is not JSON serializable")
+
+    db.record_payload_churn_if_enabled(
+        conn, source="sreality", source_id_native="k", page_kind="detail", body=boom,
+    )
+
+    assert _churn_statements(conn) == []
+
+
 def test_json_and_html_bodies_take_different_normalisation_paths() -> None:
     # The archive path is handed both through one `html` parameter, so the
     # instrument sniffs; a JSON body that only reorders keys must not register
@@ -190,8 +254,8 @@ def test_json_and_html_bodies_take_different_normalisation_paths() -> None:
         )
 
     pa, pb = _churn_statements(a)[0][1], _churn_statements(b)[0][1]
-    assert pa[5] != pb[5]
-    assert pa[6] == pb[6]
+    assert pa[6] != pb[6]
+    assert pa[7] == pb[7]
 
 
 def test_sreality_detail_drain_records_only_successful_fetches(
@@ -216,6 +280,79 @@ def test_sreality_detail_drain_records_only_successful_fetches(
     churn = _churn_statements(conn)
     assert len(churn) == 1
     assert churn[0][1][:3] == ("sreality", "1", "detail")
+
+
+def test_a_replayed_batch_carries_the_same_observation_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # _flush_drain_batch retries the WHOLE write op on a transient pooler drop
+    # and the connection is autocommit, so the first attempt's churn upserts are
+    # already committed. The counter bump is only safe inside that op because the
+    # token identifying the FETCH is minted on the DrainItem, not per call —
+    # migration 402's `WHERE ... last_observation IS DISTINCT FROM ...` then makes
+    # the replay a no-op instead of a second `fetches + 1`.
+    from scraper import main as scraper_main
+    from scraper.portal_runner import DrainItem
+
+    monkeypatch.setattr(scraper_main.db, "write_detail_batch", lambda *a, **k: {})
+    items = [DrainItem("1", "ok", scraper_main.FetchResult(1, "ok", raw={"a": 1}))]
+
+    conn = _FakeConn(flag=True)
+    scraper_main.SrealityPortal().write_details(conn, items)
+    scraper_main.SrealityPortal().write_details(conn, items)
+
+    tokens = [e[1][10] for e in _churn_statements(conn)]
+    assert len(tokens) == 2
+    assert tokens[0] == tokens[1]
+
+
+_BATCHED_HTML_PORTALS = [
+    ("bazos", "BazosPortal"),
+    ("idnes", "IdnesPortal"),
+    ("remax", "RemaxPortal"),
+    ("maxima", "MaximaPortal"),
+    ("mmreality", "MmRealityPortal"),
+    ("realitymix", "RealitymixPortal"),
+    ("ceskereality", "CeskerealityPortal"),
+]
+
+
+@pytest.mark.parametrize("module_name,class_name", _BATCHED_HTML_PORTALS)
+def test_every_html_portal_writer_threads_the_observation_token(
+    module_name: str, class_name: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # All seven stage their detail body through upsert_portal_raw_page, inside a
+    # write_details that _flush_drain_batch replays wholesale on a transient drop.
+    import importlib
+
+    from scraper.portal_runner import DrainItem
+
+    module = importlib.import_module(f"scraper.{module_name}_main")
+    monkeypatch.setattr(module.db, "ingest_scraped_listing", lambda *a, **k: (7, "new"))
+    monkeypatch.setattr(module.db, "record_media", lambda *a, **k: 0)
+    monkeypatch.setattr(module.db, "mark_portal_page_parsed", lambda *a, **k: None)
+
+    class _Listing:
+        raw = {"image_urls": []}
+
+    item = DrainItem("42", "ok", {
+        "url": "https://x/y", "html": _PAGE, "status": 200, "listing": _Listing(),
+    })
+    conn = _FakeConn(flag=True)
+    # write_details reads only module-level SOURCE, so skip the PortalConfig.
+    object.__new__(getattr(module, class_name)).write_details(conn, [item])
+
+    churn = _churn_statements(conn)
+    assert len(churn) == 1
+    assert churn[0][1][10] == item.observation_id
+
+
+def test_two_fetches_of_the_same_listing_carry_different_tokens() -> None:
+    # The flip side: a genuine refetch must still count, so the token is per
+    # DrainItem (one fetch), not per listing.
+    from scraper.portal_runner import DrainItem
+
+    assert DrainItem("1", "ok").observation_id != DrainItem("1", "ok").observation_id
 
 
 def test_sreality_index_archiver_counts_fetches_the_freshness_skip_hides(
@@ -271,6 +408,92 @@ def test_sreality_index_archiver_records_even_when_the_archive_is_skipped(
     assert not [e for e in conn.executed if "portal_raw_pages" in e[0]]
 
 
+def test_remax_index_walk_records_the_fetch_its_freshness_skip_hides(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Uniform semantics across portals: the denominator is FETCHES, never archive
+    # writes. remax skips re-staging a body its freshness guard would discard —
+    # counting only what it stages would measure this portal's index rate over a
+    # different denominator than sreality's, and the two would not be comparable.
+    from types import SimpleNamespace
+
+    from scraper import remax_main
+    from scraper.portal import PortalConfig
+
+    category = {"category_main": "byt", "category_type": "prodej", "sale": 1}
+
+    class _Client:
+        def __init__(self, *a: Any, **k: Any) -> None: ...
+
+        def fetch_index(self, *, sale: Any = None, stranka: Any = None) -> Any:
+            return ("<html><body>x</body></html>", 200)
+
+    class _Limiter:
+        def acquire(self) -> None: ...
+        def penalize(self) -> None: ...
+
+    monkeypatch.setattr(
+        remax_main, "parse_index",
+        lambda _h: SimpleNamespace(total=0, next_offset=None, items=[]),
+    )
+    monkeypatch.setattr(remax_main, "RemaxClient", _Client)
+    monkeypatch.setattr(remax_main.db, "index_summary_native", lambda *a, **k: {})
+    monkeypatch.setattr(remax_main.db, "enqueue_detail", lambda *a, **k: 0)
+    monkeypatch.setattr(remax_main.db, "touch_listings", lambda *a, **k: None)
+    monkeypatch.setattr(remax_main.db, "index_archive_week", lambda: "2026w33")
+    monkeypatch.setattr(
+        remax_main.db, "fresh_index_page_keys", lambda *a, **k: {"1/1/2026w33"},
+    )
+
+    conn = _FakeConn(flag=True)
+    portal = remax_main.RemaxPortal(PortalConfig(
+        source="remax", supports_complete_walk=True,
+        categories=[category], split_threshold=None,
+    ))
+    portal.walk_category(category, conn, False, _Limiter())
+
+    churn = _churn_statements(conn)
+    assert [(e[1][0], e[1][1], e[1][2]) for e in churn] == [
+        ("remax", "1/1/2026w33", "index"),
+    ]
+    assert not [e for e in conn.executed if "portal_raw_pages" in e[0]]
+
+
+def test_ceskereality_index_walk_records_the_fetch_its_freshness_skip_hides(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    from scraper import ceskereality_main
+    from scraper.portal import PortalConfig
+
+    monkeypatch.setattr(
+        ceskereality_main, "parse_index",
+        lambda _h: SimpleNamespace(total=0, items=[]),
+    )
+
+    class _Client:
+        def fetch_search(self, url: str) -> Any:
+            return ("<html><body>x</body></html>", 200)
+
+    conn = _FakeConn(flag=True)
+    portal = ceskereality_main.CeskerealityPortal(PortalConfig(
+        source="ceskereality", supports_complete_walk=True,
+        categories=[], split_threshold=None,
+    ))
+    key = "prodej/byty/praha/all/1/2026w33"
+    portal._walk_slice(
+        _Client(), "praha", "prodej", "byty", None,
+        conn=conn, archive_week="2026w33", fresh_keys={key},
+    )
+
+    churn = _churn_statements(conn)
+    assert [(e[1][0], e[1][1], e[1][2]) for e in churn] == [
+        ("ceskereality", key, "index"),
+    ]
+    assert not [e for e in conn.executed if "portal_raw_pages" in e[0]]
+
+
 def test_bezrealitky_detail_drain_records_the_graphql_advert(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -317,7 +540,7 @@ def test_churn_upsert_sql_is_a_plain_literal_with_the_counter_arithmetic() -> No
     sql = " ".join(db._PAYLOAD_CHURN_UPSERT_SQL.split())
     # First sighting of a key = one fetch, zero changes; every later fetch adds
     # a change only when the corresponding hash actually moved.
-    assert "VALUES (%s, %s, %s::location_page_kind, coalesce" in sql
+    assert "VALUES (%s, %s, %s::location_page_kind, %s, coalesce" in sql
     assert "1, 0, 0," in sql
     assert "fetches = portal_payload_churn.fetches + 1" in sql
     for column in ("raw", "norm"):
@@ -326,4 +549,15 @@ def test_churn_upsert_sql_is_a_plain_literal_with_the_counter_arithmetic() -> No
             f"(portal_payload_churn.last_{column}_sha256 "
             f"IS DISTINCT FROM EXCLUDED.last_{column}_sha256)::int"
         ) in sql
-    assert sql.count("%s") == 10
+    # normalizer_version is part of the conflict target, not an in-place stamp:
+    # a profile change must open a clean cohort, not relabel accumulated counters.
+    assert (
+        "ON CONFLICT (source, source_id_native, page_kind, normalizer_version)"
+    ) in sql
+    assert "normalizer_version = EXCLUDED.normalizer_version" not in sql
+    # ... and the replay guard that keeps a retried batch from double-counting.
+    assert (
+        "WHERE portal_payload_churn.last_observation "
+        "IS DISTINCT FROM EXCLUDED.last_observation"
+    ) in sql
+    assert sql.count("%s") == 11

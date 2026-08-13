@@ -176,6 +176,17 @@ class CeskerealityPortal:
             # server-side guard would discard; a failure never kills the walk.
             if conn is not None and archive_week is not None:
                 key = f"{sale_type}/{cat}/{host}/{sub_slug or 'all'}/{page}/{archive_week}"
+                # W2a-0: the instrument's denominator is FETCHES, never archive
+                # writes — recorded ahead of the client-side freshness skip, the
+                # same shape as sreality's and remax's archivers.
+                db.record_payload_churn_if_enabled(
+                    conn,
+                    source=SOURCE,
+                    source_id_native=key,
+                    page_kind="index",
+                    body=lambda: html.encode("utf-8"),
+                    content_type="text/html",
+                )
                 if fresh_keys is None or key not in fresh_keys:
                     try:
                         db.upsert_portal_raw_page(
@@ -187,6 +198,7 @@ class CeskerealityPortal:
                             html=html,
                             http_status=status,
                             refresh_after_hours=db.INDEX_ARCHIVE_REFRESH_HOURS,
+                            record_churn=False,
                         )
                         if fresh_keys is not None:
                             fresh_keys.add(key)
@@ -471,6 +483,10 @@ class CeskerealityPortal:
                 conn, source=SOURCE, source_id_native=it.native_id,
                 source_url=p["url"], page_kind="detail",
                 html=p["html"], http_status=p["status"],
+                # W2a-0 churn instrument: this whole write_details is replayed on
+                # a transient pooler drop, so the counter bump inside needs the
+                # item's per-fetch token to make the replay a no-op.
+                churn_observation=it.observation_id,
             )
             pk, result = db.ingest_scraped_listing(
                 conn, p["listing"], discovery_seq=it.discovery_seq)
