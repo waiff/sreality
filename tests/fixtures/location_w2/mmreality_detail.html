@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<!-- Modelled on contracts/portals/mmreality.yaml. Two zone shapes in one page:
+     `[\:locations]` is unqualified (the neighbour list, never a subject address)
+     and is a DOM strip; `[\:property]` is qualified `scope: non_subject_blobs`
+     and must SURVIVE, because the subject blob is one of the `:property` blobs
+     and carries mm.det.point / mm.det.street / mm.det.municipality_id.
+     The foreign-property nav item is on 100% of pages [mine-syn §1c] and the
+     neighbour-block streets are [mine-mmreality finding 9]. Nothing a test
+     asserts on may appear in this comment: a comment is part of the serialised
+     document, so a decoy named here would read back as reachable. -->
+<html lang="cs">
+<head><title>Prodej bytu 3+kk, ul. Křižíkova, Praha 8 - Karlín | M&amp;M Reality</title></head>
+<body>
+
+<nav>
+  <a href="/">Nemovitosti</a>
+  <a href="/zahranicni-nemovitosti/">Zahraniční nemovitosti</a>
+</nav>
+
+<div id="detail"
+     :property='{"originalTitle":"Prodej bytu 3+kk 68 m2, ul. Křižíkova","street":"Křižíkova","municipality":"Praha","municipalityId":554782,"municipalityPart":"Karlín","district":"Hlavní město Praha","accurate":true,"point":{"latitude":50.09239,"longitude":14.45118}}'>
+  <h1>Prodej bytu 3+kk 68 m2, ul. Křižíkova</h1>
+</div>
+
+<div id="okoli"
+     :locations='[{"street":"Vrchlického","municipality":"Praha","point":{"latitude":50.0651,"longitude":14.3766}},{"street":"Dragounská","municipality":"Cheb","point":{"latitude":50.0796,"longitude":12.3701}}]'></div>
+
+<div class="podobne">
+  <h3>Podobné nemovitosti v okolí</h3>
+  <ul>
+    <li><a href="/detail/1/">Byt 2+kk, Řípská 20, Brno-Slatina</a></li>
+    <li><a href="/detail/2/">Byt 1+1, Dragounská 8, Cheb</a></li>
+  </ul>
+</div>
+
+</body>
+</html>
