@@ -61,9 +61,17 @@ class _Conn:
     entirely for the "never migrated" case.
     """
 
-    def __init__(self, pages: dict[int, bytes], payloads: dict[int, dict[str, Any]]) -> None:
+    def __init__(
+        self, pages: dict[int, bytes], payloads: dict[int, dict[str, Any]],
+        sources: dict[int, str] | None = None,
+    ) -> None:
         self.pages = pages
         self.payloads = payloads
+        self.sources = sources or {}
+        self.payload_queries = 0
+
+    def _source(self, page_id: int) -> str:
+        return self.sources.get(page_id, "bazos")
 
     def cursor(self) -> _Cursor:
         return _Cursor(self)
@@ -75,32 +83,33 @@ class _Conn:
         cur._result = []
         if "set_config" in sql:
             return
-        if sql.startswith("SELECT min(id), max(id), count(*)"):
-            ids = sorted(self.pages)
-            cur._result = [(min(ids), max(ids), len(ids))] if ids else [(None, None, 0)]
-            return
         if sql.startswith("SELECT id FROM portal_raw_pages"):
-            wanted = params["ids"]
-            cur._result = [(i,) for i in sorted(self.pages)
-                           if wanted is None or i in set(wanted)]
+            scope = [i for i in sorted(self.pages)
+                     if params["source"] is None or self._source(i) == params["source"]]
+            cur._result = [(i,) for i in scope[:params["max_ids"]]]
             return
         if "convert_to(html" in sql:
             wanted = set(params["ids"])
             cur._result = [
-                (i, "bazos", f"n{i}", "detail", self.pages[i], BASE_TS)
+                (i, self._source(i), f"n{i}", "detail", self.pages[i], BASE_TS)
                 for i in sorted(self.pages) if i in wanted
             ]
             return
-        if sql.startswith("SELECT id, content_encoding"):
-            page_id = int(params["source_id_native"][1:])
-            row = self.payloads.get(page_id)
-            if row is None:
-                return
-            cur._result = [(
-                row.get("id", page_id), row.get("content_encoding", "gzip"),
-                row.get("body"), row.get("body_r2_key"), row.get("byte_size"),
-                row.get("body_sha256") == params["body_sha256"], 1, BASE_TS,
-            )]
+        if sql.startswith("SELECT k.page_id, p.id"):
+            self.payload_queries += 1
+            out: list[tuple[Any, ...]] = []
+            for pos, page_id in enumerate(params["page_id"]):
+                row = self.payloads.get(int(page_id))
+                if row is None:
+                    # The LATERAL missed: an all-NULL right side, not an absent row.
+                    out.append((page_id, None, None, None, None, None, None, None, None))
+                    continue
+                out.append((
+                    page_id, row.get("id", page_id), row.get("content_encoding", "gzip"),
+                    row.get("body"), row.get("body_r2_key"), row.get("byte_size"),
+                    row.get("body_sha256") == params["body_sha256"][pos], 1, BASE_TS,
+                ))
+            cur._result = out
             return
         raise AssertionError(f"unhandled SQL: {sql[:140]}")
 
@@ -251,12 +260,14 @@ def test_an_empty_archive_never_reports_a_pass() -> None:
 
 def test_the_sample_is_drawn_across_the_id_space_not_off_the_front() -> None:
     """Ids run in insert order, which on this table runs portal by portal. Taking the first
-    N candidate ids would sample the earliest portals and none of the latest."""
+    N would sample the earliest portals and none of the latest."""
     conn = _Conn({i: b"<html>x</html>" for i in range(1, 1001)}, {})
 
-    drawn = verifier.sample_ids(conn, source=None, size=50, seed=7, statement_timeout=60)
+    drawn, pool, truncated = verifier.sample_ids(
+        conn, source=None, size=50, seed=7, statement_timeout=60)
 
     assert len(drawn) == 50
+    assert (pool, truncated) == (1000, False)
     assert drawn == sorted(drawn)
     assert max(drawn) > 500, "the draw never reached the second half of the id space"
 
@@ -264,8 +275,10 @@ def test_the_sample_is_drawn_across_the_id_space_not_off_the_front() -> None:
 def test_the_same_seed_draws_the_same_sample() -> None:
     conn = _Conn({i: b"<html>x</html>" for i in range(1, 1001)}, {})
 
-    first = verifier.sample_ids(conn, source=None, size=25, seed=11, statement_timeout=60)
-    second = verifier.sample_ids(conn, source=None, size=25, seed=11, statement_timeout=60)
+    first, _, _ = verifier.sample_ids(conn, source=None, size=25, seed=11,
+                                      statement_timeout=60)
+    second, _, _ = verifier.sample_ids(conn, source=None, size=25, seed=11,
+                                       statement_timeout=60)
 
     assert first == second
 
@@ -273,9 +286,61 @@ def test_the_same_seed_draws_the_same_sample() -> None:
 def test_an_archive_smaller_than_the_sample_is_verified_whole() -> None:
     conn = _Conn({i: b"<html>x</html>" for i in range(1, 6)}, {})
 
-    drawn = verifier.sample_ids(conn, source=None, size=1000, seed=1, statement_timeout=60)
+    drawn, pool, _ = verifier.sample_ids(conn, source=None, size=1000, seed=1,
+                                         statement_timeout=60)
 
     assert drawn == [1, 2, 3, 4, 5]
+    assert pool == 5
+
+
+def test_a_sparse_source_scope_still_draws_the_full_requested_size() -> None:
+    """The bug this closes: one portal's rows are sparsely interleaved across a sequence
+    shared by nine, so an id-SPACE draw with a fixed oversample returned a fraction of what
+    was asked for — silently. The draw is over ROWS in scope, so it cannot come up short
+    while the scope holds enough of them."""
+    # 200 bazos rows scattered 1-in-50 through a 10,000-wide id space.
+    sources = {i: ("bazos" if i % 50 == 0 else "idnes") for i in range(1, 10_001)}
+    conn = _Conn({i: b"<html>x</html>" for i in range(1, 10_001)}, {}, sources)
+
+    drawn, pool, _ = verifier.sample_ids(conn, source="bazos", size=150, seed=3,
+                                         statement_timeout=60)
+
+    assert len(drawn) == 150
+    assert pool == 200
+    assert all(sources[i] == "bazos" for i in drawn)
+
+
+def test_a_short_sample_is_reported_loudly_and_never_hidden_by_a_bare_pass() -> None:
+    bodies = {i: b"<html>x</html>" for i in range(1, 4)}
+    conn = _conn(bodies)
+
+    report = verifier.verify(conn, size=1000)
+
+    # It is still a PASS on what it verified — and the report says, in its own field, that
+    # it verified three pages rather than the thousand the operator asked for.
+    assert report.passed is True
+    assert (report.requested, report.sampled, report.shortfall) == (1000, 3, 997)
+    assert report.as_dict()["shortfall"] == 997
+
+
+def test_a_full_sample_reports_no_shortfall() -> None:
+    conn = _conn({i: b"<html>x</html>" for i in range(1, 21)})
+
+    report = verifier.verify(conn, size=20)
+
+    assert report.shortfall == 0
+    assert report.as_dict()["requested"] == 20
+
+
+def test_the_payload_lookup_is_batched_not_one_query_per_page() -> None:
+    """~4,000 round trips for a 1,000-row sample was the shape before; one statement per
+    chunk is the shape now."""
+    conn = _conn({i: b"<html>x</html>" for i in range(1, 251)})
+
+    report = verifier.verify(conn, size=250)
+
+    assert report.sampled == 250
+    assert conn.payload_queries == 3, "expected one payload query per 100-row chunk"
 
 
 def test_the_verifier_issues_no_write_statement() -> None:

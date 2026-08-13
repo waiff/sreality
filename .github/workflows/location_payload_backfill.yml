@@ -87,6 +87,11 @@ on:
         required: false
         default: false
         type: boolean
+      force:
+        description: "backfill only — re-walk ground already migrated under a DIFFERENT normaliser, accepting a permanent second pinned row per page"
+        required: false
+        default: false
+        type: boolean
       json_output:
         description: "verify only — emit JSON instead of the table"
         required: false
@@ -137,6 +142,7 @@ jobs:
           LIMIT: ${{ inputs.limit }}
           START_AFTER_ID: ${{ inputs.start_after_id }}
           DRY_RUN: ${{ inputs.dry_run }}
+          FORCE: ${{ inputs.force }}
         # A bash ARRAY, not a string: an unquoted "$ARGS" word-splits, and a value that
         # arrives with a stray space would reach argparse as a separate positional.
         run: |
@@ -146,6 +152,7 @@ jobs:
           if [ -n "$LIMIT" ]; then ARGS+=(--limit "$LIMIT"); fi
           if [ -n "$START_AFTER_ID" ]; then ARGS+=(--start-after-id "$START_AFTER_ID"); fi
           if [ "$DRY_RUN" = "true" ]; then ARGS+=(--dry-run); fi
+          if [ "$FORCE" = "true" ]; then ARGS+=(--force); fi
           # Default the budget under the job ceiling so the run stops cleanly BETWEEN
           # batches and stamps a resumable `stopped` row, rather than being killed
           # mid-batch by the runner and leaving its batch row `running`.

@@ -36,7 +36,6 @@ O3/O4). The workflow is `workflow_dispatch`-only with no `schedule` for exactly 
 from __future__ import annotations
 
 import argparse
-import gzip
 import json
 import logging
 import os
@@ -63,6 +62,14 @@ BACKFILL_VERSION = "payload_backfill@1"
 LANE = "location_payload_backfill"
 WAVE = "W2a"
 
+# The normaliser is PART of this lane's identity, not an implementation detail of it.
+# `payload_sha256` is taken over the normalised body, so a `NORMALIZER_VERSION` bump moves
+# the content address of unchanged content — and this lane is designed to be re-dispatched
+# until it reports `reached_end`. Stamping the pair on the batch row is what lets a later
+# run see that the ground in front of it was migrated under a different normaliser and
+# refuse to duplicate it (see `_prior_progress`).
+EXTRACTOR_VERSION = f"{BACKFILL_VERSION}+{NORMALIZER_VERSION}"
+
 # A bare `portal_raw_pages.id` keyset, which is what migration 387 calls 'full'. The
 # `scan_mode` is stored so a cursor can never be resumed by a scan that means something
 # different by it; this lane only has the one mode, and stamping it keeps the guard honest
@@ -87,7 +94,13 @@ STATEMENT_TIMEOUT_ENV = "LOCATION_PAYLOAD_BACKFILL_TIMEOUT_S"
 # the observed cost of reading and inserting a default batch of large TOASTed bodies, so it
 # only fires when something is genuinely wrong.
 DEFAULT_STATEMENT_TIMEOUT_S = 300
-_FAILURE_STAMP_TIMEOUT_S = 30
+
+# Both TERMINAL stamps run under this, not under the batch budget. A one-row UPDATE by
+# primary key never legitimately needs five minutes, and the ceiling has to be short for
+# the same reason the failure stamp's is: whatever pressure is delaying it is exactly what
+# would turn a hung bookkeeping write into a batch row stranded at 'running' — invisible to
+# `_RESUME_SQL`, so the next dispatch silently restarts the whole scan from id 0.
+_STAMP_TIMEOUT_S = 30
 
 # Bodies here are whole pages (bazos 41 KB ... mmreality 245 KB), so a batch is sized in
 # megabytes rather than rows: 200 x 245 KB is a ~49 MB worst-case round trip, which is a
@@ -145,11 +158,13 @@ SELECT id, source, source_id_native, page_kind, convert_to(html, 'UTF8'),
 # version_seq 1 and `payloads._REPIN_SQL` pins both as first and latest. Over-pinned, never
 # under-pinned: the cap can still never evict real history.)
 #
-# `content_encoding = 'gzip'` unconditionally, where the live writer's `encode_body` leaves
-# bodies under 4 KB verbatim. These are whole pages, not fragments, so the branch would
-# almost never be taken — and one encoding across all 445,191 rows makes the storage
-# projection the operator signs a single number instead of a mixture. `decode_body`
-# round-trips either way.
+# `content_encoding` rides in as a column rather than as a literal: it comes back from
+# `payloads.encode_body(..., gzip_min_bytes=0)`, the SAME encoder the live writer uses, so
+# the two paths cannot drift on compression level or reproducibility. At that threshold
+# every non-empty body gzips — these are whole pages, not fragments, so the storage
+# projection the operator signs is still effectively one number — but a zero-length body
+# honestly reports 'identity' instead of being labelled as a gzip member that
+# `decode_body` would then refuse to inflate.
 #
 # ON CONFLICT DO NOTHING, never DO UPDATE: a re-run after a crash between the INSERT and
 # the cursor stamp must be a no-op, and if a live-path row already holds this exact
@@ -163,15 +178,16 @@ INSERT INTO portal_raw_payloads
      normalizer_version, snapshot_id, pinned, version_seq,
      first_observed_at, last_observed_at, fetched_at)
 SELECT r.source, r.source_id_native, NULL::bigint, r.page_kind::location_page_kind,
-       r.payload_sha256, r.body_sha256, r.content_type, 'gzip'::text, r.body, r.byte_size,
-       r.http_status, NULL::integer, %(normalizer_version)s::text, NULL::bigint, true, 1,
-       r.fetched_at, r.fetched_at, r.fetched_at
+       r.payload_sha256, r.body_sha256, r.content_type, r.content_encoding, r.body,
+       r.byte_size, r.http_status, NULL::integer, %(normalizer_version)s::text,
+       NULL::bigint, true, 1, r.fetched_at, r.fetched_at, r.fetched_at
   FROM unnest(%(source)s::text[], %(source_id_native)s::text[], %(page_kind)s::text[],
               %(payload_sha256)s::bytea[], %(body_sha256)s::bytea[],
-              %(content_type)s::text[], %(body)s::bytea[], %(byte_size)s::integer[],
-              %(http_status)s::integer[], %(fetched_at)s::timestamptz[])
+              %(content_type)s::text[], %(content_encoding)s::text[], %(body)s::bytea[],
+              %(byte_size)s::integer[], %(http_status)s::integer[],
+              %(fetched_at)s::timestamptz[])
     AS r(source, source_id_native, page_kind, payload_sha256, body_sha256, content_type,
-         body, byte_size, http_status, fetched_at)
+         content_encoding, body, byte_size, http_status, fetched_at)
 ON CONFLICT (source, source_id_native, page_kind, payload_sha256) DO NOTHING
 RETURNING id
 """
@@ -209,6 +225,22 @@ SELECT outcome, cursor_after_id
  LIMIT 1
 """
 
+# Has this (lane, source, scan_mode) already put rows in the store, and under which
+# normaliser? Unlike `_RESUME_SQL` this ignores `resumable`: an operator-anchored run wrote
+# real rows too, and the question here is "what is already in the store", not "where may I
+# pick up". `row_count > 0` keeps a run that stopped before writing anything out of it.
+_PRIOR_PROGRESS_SQL = """
+SELECT extractor_version, row_count
+  FROM location_claim_batches
+ WHERE lane = %(lane)s
+   AND source IS NOT DISTINCT FROM %(source)s
+   AND scan_mode = %(scan_mode)s
+   AND outcome IN ('ok', 'stopped')
+   AND row_count > 0
+ ORDER BY started_at DESC, id DESC
+ LIMIT 1
+"""
+
 
 class BackfillRefused(RuntimeError):
     """A precondition failed; no batch row was opened and nothing was written."""
@@ -219,16 +251,29 @@ def encode_for_archive(body: bytes, *, source: str) -> dict[str, Any]:
 
     Pure — no DB, no network, no clock — so the whole value of a migrated row can be
     asserted from a fixture body alone.
+
+    The compression goes through `payloads.encode_body`, the live writer's own encoder,
+    rather than a second `gzip.compress` call here. The two produce identical bytes today;
+    the point is that they cannot stop doing so. If `encode_body`'s level or its
+    `mtime=0` reproducibility guarantee is ever tightened, a hand-rolled copy would
+    silently start writing different stored bytes for the same content than the live path
+    writes — which is precisely the divergence the round-trip verifier exists to catch, and
+    it would be invisible to it, because the verifier decodes both through `decode_body`.
     """
     content_type = sniff_content_type(body)
     profile = DEFAULT_VOLATILE_PROFILES.get(source, VolatileProfile())
     norm = normalise(body, content_type=content_type, volatile=profile)
+    # gzip_min_bytes=0: a legacy page is a whole document, so the writer's 4 KB "leave it
+    # verbatim" branch is dead weight here — but it stays honest for the degenerate
+    # zero-length body, which comes back 'identity' rather than as an empty gzip member.
+    stored, encoding = payloads.encode_body(body, gzip_min_bytes=0)
     return {
         "content_type": content_type,
         "payload_sha256": norm.norm_sha256,
         "body_sha256": norm.raw_sha256,
         "byte_size": norm.byte_size,
-        "stored": gzip.compress(body, mtime=0),
+        "stored": stored,
+        "content_encoding": encoding,
     }
 
 
@@ -258,6 +303,17 @@ def _resume_point(
     return int(cursor_after_id)
 
 
+def _prior_progress(
+    conn: psycopg.Connection, *, source: str | None, statement_timeout: int
+) -> tuple[str, int] | None:
+    """(extractor_version, row_count) of the newest run that actually wrote rows."""
+    with loader_db.bounded(conn, statement_timeout) as cur:
+        cur.execute(_PRIOR_PROGRESS_SQL,
+                    {"lane": LANE, "source": source, "scan_mode": SCAN_MODE})
+        row = cur.fetchone()
+    return (str(row[0]), int(row[1])) if row else None
+
+
 def run(
     conn: psycopg.Connection,
     *,
@@ -269,6 +325,7 @@ def run(
     statement_timeout: int,
     dry_run: bool,
     note: str | None,
+    force: bool = False,
 ) -> dict[str, Any]:
     missing = missing_relations(conn)
     if missing:
@@ -296,11 +353,37 @@ def run(
             LOG.info("BACKFILL resuming a budget-stopped scan for source=%s from id>%d",
                      source or "*", after_id)
 
+    # A NORMALIZER_VERSION bump moves `payload_sha256` for unchanged content, so ON CONFLICT
+    # DO NOTHING stops firing and a re-walk appends a SECOND version_seq=1 pinned row per
+    # page. Nothing evicts those: this lane never runs `payloads`' re-pin/cap, and a pinned
+    # row is exempt from the cap by definition — the duplicate cohort is permanent, and it
+    # inflates exactly the storage number the W2a gate exists to bound. RESUMING is safe
+    # (it walks only ground no earlier run reached); re-walking is not.
+    prior = _prior_progress(conn, source=source, statement_timeout=statement_timeout)
+    if prior is not None and prior[0] != EXTRACTOR_VERSION:
+        if resumed:
+            LOG.warning(
+                "BACKFILL mixed cohort: rows already migrated under %s, this run writes "
+                "%s. No page is duplicated (the resume cursor only walks new ground), but "
+                "the archive now spans two normaliser cohorts — portal_raw_payloads."
+                "normalizer_version is what tells them apart.", prior[0], EXTRACTOR_VERSION)
+        elif not force:
+            raise BackfillRefused(
+                f"source={source or '*'} already has {prior[1]} rows migrated under "
+                f"extractor_version={prior[0]!r}, and this run writes {EXTRACTOR_VERSION!r} "
+                f"starting from id>{after_id}. Re-walking that ground under a different "
+                f"normaliser appends a SECOND pinned version_seq=1 row for every page — "
+                f"content that normalises differently now hashes differently, so the "
+                f"ON CONFLICT that makes a re-run a no-op will not fire, and no pruner can "
+                f"ever evict a pinned row. Resume instead (dispatch with no start_after_id, "
+                f"so a 'stopped' cursor is picked up), or pass --force if a second cohort "
+                f"is genuinely intended.")
+
     batch_id: int | None = None
     if not dry_run:
         with loader_db.bounded(conn, statement_timeout) as cur:
             cur.execute(_BATCH_INSERT_SQL, {
-                "lane": LANE, "source": source, "extractor_version": BACKFILL_VERSION,
+                "lane": LANE, "source": source, "extractor_version": EXTRACTOR_VERSION,
                 "wave": WAVE, "job_run_id": os.environ.get("GITHUB_RUN_ID"), "note": note,
                 "scan_mode": SCAN_MODE, "resumable": not anchored,
             })
@@ -365,13 +448,37 @@ def run(
                      stats["pages"], stats["inserted"], stats["skipped_existing"],
                      stats["unmapped_page_kind"], stats["bytes_read"] / 1e6,
                      stats["bytes_stored"] / 1e6, after_id)
+        # The TERMINAL stamp lives inside the try, not after it. Outside, a transient error
+        # on this one UPDATE would propagate with the row still at 'running' — a state
+        # `_RESUME_SQL` cannot see, so the next dispatch would silently restart the whole
+        # scan from id 0 and re-walk everything already migrated. Inside, the same error
+        # falls through to the failure stamp below and the row ends terminal either way.
+        outcome = "ok" if stats["reached_end"] else "stopped"
+        stats["outcome"] = outcome
+        if unmapped_kinds:
+            LOG.warning("BACKFILL skipped %d row(s) whose page_kind is not a "
+                        "location_page_kind label: %s — widen PAGE_KIND_MAP",
+                        stats["unmapped_page_kind"], ", ".join(sorted(unmapped_kinds)))
+        if batch_id is not None:
+            with loader_db.bounded(conn, _STAMP_TIMEOUT_S) as cur:
+                cur.execute(_BATCH_FINISH_SQL, {
+                    "batch_id": batch_id,
+                    "outcome": outcome,
+                    "row_count": stats["inserted"],
+                    "cursor_after_id": after_id,
+                    "note": f"pages={stats['pages']} inserted={stats['inserted']} "
+                            f"existing={stats['skipped_existing']} "
+                            f"unmapped_page_kind={stats['unmapped_page_kind']} "
+                            f"oversized={stats['oversized']} "
+                            f"reached_end={stats['reached_end']} through_id={after_id}",
+                })
     except Exception as exc:
         if batch_id is not None:
             # Guarded on the FAILURE path too, and on a short ceiling: whatever broke the
             # run may be the same pressure that would hang this stamp, and a bookkeeping
             # write that wedges replaces the exception the operator needs with silence.
             try:
-                with loader_db.bounded(conn, _FAILURE_STAMP_TIMEOUT_S) as cur:
+                with loader_db.bounded(conn, _STAMP_TIMEOUT_S) as cur:
                     cur.execute(_BATCH_FINISH_SQL, {
                         "batch_id": batch_id, "outcome": "failed",
                         "row_count": stats["inserted"], "cursor_after_id": after_id,
@@ -390,27 +497,8 @@ def run(
                       "cursor of its own).", after_id, stats["pages"], after_id)
         raise
 
-    outcome = "ok" if stats["reached_end"] else "stopped"
-    stats["outcome"] = outcome
     stats["cursor_after_id"] = after_id
     stats["batch_id"] = batch_id
-    if unmapped_kinds:
-        LOG.warning("BACKFILL skipped %d row(s) whose page_kind is not a location_page_kind "
-                    "label: %s — widen PAGE_KIND_MAP",
-                    stats["unmapped_page_kind"], ", ".join(sorted(unmapped_kinds)))
-    if batch_id is not None:
-        with loader_db.bounded(conn, statement_timeout) as cur:
-            cur.execute(_BATCH_FINISH_SQL, {
-                "batch_id": batch_id,
-                "outcome": outcome,
-                "row_count": stats["inserted"],
-                "cursor_after_id": after_id,
-                "note": f"pages={stats['pages']} inserted={stats['inserted']} "
-                        f"existing={stats['skipped_existing']} "
-                        f"unmapped_page_kind={stats['unmapped_page_kind']} "
-                        f"oversized={stats['oversized']} "
-                        f"reached_end={stats['reached_end']} through_id={after_id}",
-            })
     return stats
 
 
@@ -424,8 +512,8 @@ def _columns(
     """Column-major arrays for `_INSERT_SQL`, one entry per migratable row."""
     out: dict[str, list[Any]] = {
         "source": [], "source_id_native": [], "page_kind": [], "payload_sha256": [],
-        "body_sha256": [], "content_type": [], "body": [], "byte_size": [],
-        "http_status": [], "fetched_at": [],
+        "body_sha256": [], "content_type": [], "content_encoding": [], "body": [],
+        "byte_size": [], "http_status": [], "fetched_at": [],
     }
     for _id, source, source_id_native, page_kind, body, http_status, fetched_at in records:
         kind = PAGE_KIND_MAP.get(page_kind)
@@ -448,6 +536,7 @@ def _columns(
         out["payload_sha256"].append(derived["payload_sha256"])
         out["body_sha256"].append(derived["body_sha256"])
         out["content_type"].append(derived["content_type"])
+        out["content_encoding"].append(derived["content_encoding"])
         out["body"].append(stored)
         out["byte_size"].append(derived["byte_size"])
         out["http_status"].append(http_status)
@@ -475,6 +564,9 @@ def main(argv: list[str] | None = None) -> int:
         default=loader_db.env_timeout_s(STATEMENT_TIMEOUT_ENV, DEFAULT_STATEMENT_TIMEOUT_S))
     parser.add_argument("--dry-run", action="store_true",
                         help="read and encode; write no payload row and no batch row")
+    parser.add_argument("--force", action="store_true",
+                        help="re-walk ground already migrated under a different normaliser, "
+                             "accepting a permanent second pinned row per page")
     parser.add_argument("--note", default=None)
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args(argv)
@@ -492,7 +584,7 @@ def main(argv: list[str] | None = None) -> int:
         "source": args.source, "batch_size": batch_size, "max_seconds": args.max_seconds,
         "limit": args.limit, "start_after_id": args.start_after_id,
         "statement_timeout": args.statement_timeout, "dry_run": args.dry_run,
-        "note": args.note,
+        "note": args.note, "force": args.force,
     }
     with db.connect() as conn:
         try:

@@ -2854,6 +2854,14 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
         "options": null
       },
       {
+        "name": "force",
+        "description": "backfill only — re-walk ground already migrated under a DIFFERENT normaliser, accepting a permanent second pinned row per page",
+        "required": false,
+        "type": "boolean",
+        "default": "false",
+        "options": null
+      },
+      {
         "name": "json_output",
         "description": "verify only — emit JSON instead of the table",
         "required": false,

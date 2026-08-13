@@ -24,7 +24,7 @@ from typing import Any
 
 import pytest
 
-from location_data import payload_backfill
+from location_data import payload_backfill, payloads
 from location_data.payload_backfill import PAGE_KIND_MAP, encode_for_archive, run
 from location_data.payload_norm import NORMALIZER_VERSION
 
@@ -103,11 +103,25 @@ class _Conn:
             batch = {
                 "id": len(self.batches) + 1, "started_at": self.now,
                 "lane": params["lane"], "source": params["source"],
+                "extractor_version": params["extractor_version"],
                 "scan_mode": params["scan_mode"], "resumable": params["resumable"],
                 "outcome": "running", "cursor_after_id": None, "row_count": 0,
             }
             self.batches.append(batch)
             cur._result = [(batch["id"],)]
+            return
+        if sql.startswith("SELECT extractor_version, row_count"):
+            candidates = [
+                b for b in self.batches
+                if b["lane"] == params["lane"]
+                and b["source"] == params["source"]
+                and b["scan_mode"] == params["scan_mode"]
+                and b["outcome"] in ("ok", "stopped")
+                and b["row_count"] > 0
+            ]
+            if candidates:
+                last = max(candidates, key=lambda b: (b["started_at"], b["id"]))
+                cur._result = [(last["extractor_version"], last["row_count"])]
             return
         if sql.startswith("UPDATE location_claim_batches"):
             batch = self.batches[params["batch_id"] - 1]
@@ -156,7 +170,7 @@ class _Conn:
                 "payload_sha256": params["payload_sha256"][i],
                 "body_sha256": params["body_sha256"][i],
                 "content_type": params["content_type"][i],
-                "content_encoding": "gzip",
+                "content_encoding": params["content_encoding"][i],
                 "body": params["body"][i],
                 "byte_size": params["byte_size"][i],
                 "http_status": params["http_status"][i],
@@ -176,6 +190,7 @@ def _run(conn: _Conn, **kwargs: Any) -> dict[str, Any]:
     defaults: dict[str, Any] = {
         "source": None, "batch_size": 10, "max_seconds": None, "limit": None,
         "start_after_id": 0, "statement_timeout": 60, "dry_run": False, "note": None,
+        "force": False,
     }
     defaults.update(kwargs)
     return run(conn, **defaults)
@@ -250,6 +265,32 @@ def test_the_identity_hash_is_the_normalised_one_so_volatile_bytes_do_not_split_
     assert (da["byte_size"], dbb["byte_size"]) == (len(a), len(b))
 
 
+def test_the_encoder_is_the_live_writers_so_the_two_paths_cannot_drift() -> None:
+    """A hand-rolled `gzip.compress` here would keep working while silently diverging from
+    what the live writer stores for the same content — and the round-trip verifier decodes
+    both through `decode_body`, so it could never see the difference."""
+    body = b"<html>" + b"x" * 9000 + b"</html>"
+
+    derived = encode_for_archive(body, source="bazos")
+
+    assert (derived["stored"], derived["content_encoding"]) == payloads.encode_body(
+        body, gzip_min_bytes=0)
+    assert payloads.decode_body(derived["stored"], derived["content_encoding"]) == body
+
+
+def test_a_zero_length_body_is_labelled_identity_not_an_empty_gzip_member() -> None:
+    conn = _Conn([_Page(1, body=b"")])
+
+    _run(conn)
+
+    row = conn.payloads[0]
+    assert row["content_encoding"] == "identity"
+    assert row["byte_size"] == 0
+    # The label has to be honest or the verifier would try to inflate empty bytes and
+    # report a corrupt member on a page that migrated perfectly.
+    assert payloads.decode_body(row["body"], row["content_encoding"]) == b""
+
+
 def test_the_content_type_is_sniffed_because_portal_raw_pages_never_recorded_one() -> None:
     """Seven HTML portals and two JSON archivers all wrote into a column called `html`."""
     assert encode_for_archive(b"<html></html>", source="bazos")["content_type"] == "text/html"
@@ -270,13 +311,19 @@ def test_a_dry_run_opens_no_batch_row_and_writes_no_payload() -> None:
 
 def test_every_statement_runs_under_a_bounded_timeout() -> None:
     """`statement_timeout = 0` is right for a COPY and wrong for a batched migration: it is
-    how a lane wedges for two hours without emitting a line."""
+    how a lane wedges for two hours without emitting a line.
+
+    Two budgets, deliberately: the batch statements get the run's, and the terminal stamp
+    gets a short ceiling of its own — a one-row UPDATE by primary key that hangs would
+    strand the batch row at 'running'.
+    """
     conn = _Conn([_Page(i) for i in range(1, 6)])
 
     _run(conn, statement_timeout=45)
 
     assert conn.timeouts
-    assert set(conn.timeouts) == {"45s"}
+    assert set(conn.timeouts) == {"45s", f"{payload_backfill._STAMP_TIMEOUT_S}s"}
+    assert conn.timeouts[-1] == f"{payload_backfill._STAMP_TIMEOUT_S}s"
 
 
 # ---------------------------------------------------------------- page_kind mapping
@@ -429,6 +476,87 @@ def test_an_unknown_source_is_refused_rather_than_stamped_ok_over_an_untouched_p
         _run(conn, source="bzos")
 
     assert conn.batches == []
+
+
+# ---------------------------------------------------------------- normaliser cohorts
+
+
+def test_a_rewalk_under_a_different_normaliser_is_refused_without_force() -> None:
+    """The duplicate this closes is PERMANENT. `payload_sha256` is the normalised hash, so
+    a NORMALIZER_VERSION bump stops ON CONFLICT from firing and every re-walked page
+    appends a SECOND version_seq=1 pinned row — and this lane never runs the re-pin/cap,
+    so nothing can ever evict it."""
+    conn = _Conn([_Page(i) for i in range(1, 11)])
+    first = _run(conn)
+    assert first["outcome"] == "ok"
+    conn.batches[0]["extractor_version"] = "payload_backfill@1+payload_norm@0"
+
+    with pytest.raises(payload_backfill.BackfillRefused) as excinfo:
+        _run(conn)
+
+    assert "payload_norm@0" in str(excinfo.value)
+    assert len(conn.payloads) == 10, "the refused run must not have written anything"
+    # Same normaliser is still the tested idempotent no-op, not a refusal.
+    conn.batches[0]["extractor_version"] = payload_backfill.EXTRACTOR_VERSION
+    assert _run(conn)["inserted"] == 0
+
+
+def test_force_allows_the_rewalk_once_the_operator_owns_the_decision() -> None:
+    conn = _Conn([_Page(i) for i in range(1, 6)])
+    _run(conn)
+    conn.batches[0]["extractor_version"] = "payload_backfill@1+payload_norm@0"
+
+    stats = _run(conn, force=True)
+
+    assert stats["outcome"] == "ok"
+
+
+def test_resuming_across_a_normaliser_bump_is_allowed_because_no_page_is_revisited() -> None:
+    """A resume walks only ground no earlier run reached, so it cannot duplicate a page —
+    it just leaves the archive spanning two cohorts, which `normalizer_version` records."""
+    conn = _Conn([_Page(i) for i in range(1, 26)])
+    _run(conn, limit=10)
+    conn.batches[0]["extractor_version"] = "payload_backfill@1+payload_norm@0"
+
+    stats = _run(conn, limit=10)
+
+    assert stats["resumed"] is True
+    assert conn.read_ids == list(range(1, 21))
+
+
+def test_the_batch_row_records_the_normaliser_it_wrote_under() -> None:
+    conn = _Conn([_Page(1)])
+
+    _run(conn)
+
+    assert conn.batches[0]["extractor_version"] == payload_backfill.EXTRACTOR_VERSION
+    assert NORMALIZER_VERSION in conn.batches[0]["extractor_version"]
+
+
+# ---------------------------------------------------------------- terminal stamping
+
+
+def test_a_failing_terminal_stamp_never_leaves_the_row_at_running() -> None:
+    """Stranded at 'running' the row is invisible to the resume lookup, so the next
+    dispatch would silently restart the whole scan from id 0."""
+    conn = _Conn([_Page(i) for i in range(1, 6)])
+    calls = {"n": 0}
+    original = _Conn.dispatch
+
+    def flaky(self: _Conn, cur: _Cursor, sql: str, params: Any) -> None:
+        if sql.startswith("UPDATE location_claim_batches") and params["outcome"] == "ok":
+            calls["n"] += 1
+            raise RuntimeError("connection reset during the terminal stamp")
+        original(self, cur, sql, params)
+
+    conn.dispatch = flaky.__get__(conn, _Conn)  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError):
+        _run(conn)
+
+    assert calls["n"] == 1
+    assert conn.batches[0]["outcome"] == "failed"
+    assert conn.batches[0]["cursor_after_id"] == 5
 
 
 # ---------------------------------------------------------------- the source table
