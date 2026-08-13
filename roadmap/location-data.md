@@ -16,7 +16,8 @@ is the tie-breaker). This track records sequencing + shipped state only.
 | W1 registry + claim spine (shadow) | full RÚIAN mirror, claims, resolutions, projection | ✅ shipped 2026-08-12 (migrations 380–389 applied; shadow-only, no consumer reads it) |
 | W1v bezrealitky vertical slice | one portal end-to-end + location-quality dashboard | ✅ shipped 2026-08-13 (every layer exercised in prod; gate answered — portal-inventory-capped, not pipeline-capped) |
 | W2a payload archive rewrite | append-on-change `portal_raw_payloads` | 🟡 in progress (2026-08-13) — instrument live and measuring; store + writer landed, dual-write NOT enabled (churn sign-off is the gate) |
-| W2, W4–W6 | HTML re-mine, refetch cohorts, LLM lane, serving flip | ⚪ not started |
+| W2 HTML re-mine | claims from archived `portal_raw_payloads` bodies | 🟡 build started (2026-08-13) — scoper, shadow, denominator, substrate legality and the re-mine lane itself have landed; **inert** until the first per-portal contract PR gives it a reader |
+| W4–W6 | refetch cohorts, LLM lane, serving flip | ⚪ not started |
 | W3 history backfill | claims from `listing_snapshots.raw_json` (1,574,313 rows) | 🟡 build started (2026-08-13) — module + tests shipped in a PR; NOT dispatched against production (operator go-ahead required, see W3 section) |
 
 ## W0 — done
@@ -339,6 +340,40 @@ all closed, several proven against a throwaway PostgreSQL 18 built from `.deb` f
 - **W2-1 / W2-0** (#1045, #1048): per-reader substrate legality (a contract entry can no longer
   declare a transform or guard its reader will never consult) and the archive denominator every
   W2 gate is a share of.
+- **W2-2 evidence-bearing claims + the re-mine lane** (no migration — 382 already carries every
+  evidence column and CHECK). `location_claims.Claim` gains the D7 evidence set
+  (`payload_id`, `payload_sha256`, `evidence_quote`, `span_start`, `span_end`,
+  `payload_scope_version`), carried through `to_row()` and `_CLAIM_WRITE_SQL` in lockstep and on
+  into `location_claim_observations` so a re-sighting names the body that re-observed it;
+  `claim_fingerprint` stays SQL-only (migration 386) and stays time- AND evidence-free.
+  `location_data/claims_remine_archive.py` is the lane — the disambiguated name the W3 erratum
+  below prescribes. **Inert on merge, structurally:** an entry runs only when its locator names a
+  reader from `ARCHIVE_READERS`, which is empty, and a run with no reader returns *before* it
+  opens a batch row (a batch that reaches the end of the scan is stamped `'ok'`, and `'ok'` is
+  what the incremental watermark reads — so an inert lane must never claim coverage). Every claim
+  it will write is stamped `surface='archived_html'` (C9 — a runtime mapping, not a rewrite of 70
+  immutable entry ids), the page's own `page_kind` (C10 — the `archive` enum member stays unused),
+  `snapshot_id` NULL + `snapshot_anchor='unanchored_latest_fetch'` (C4 / 06 §6.6 Rule 2),
+  `observed_at = payload.first_observed_at` (Rule 1), and `blur_evidence` / `licence_class`
+  explicitly (Rules 6–7; `'detected'`/`'both'` are refused outright). The scan takes the latest
+  body per `(source, source_id_native, page_kind)` via a `(first_observed_at, id)` anti-join —
+  never `version_seq` (403 added it with no backfill, so NULL there would rank an older row
+  latest) and never `last_observed_at` (an unchanged refetch moves it) — and projects **no body
+  and no `raw_json`**, fetching bodies only for rows an entry actually applies to.
+- **The archived arm of the coordinate ladder** (same PR): `ARCHIVED_COORDINATE_RULES` names the
+  one detail-map entry per portal (`rx.det.gps`, `rm.det.gps`, `id.det.subject_feature`,
+  `mm.det.point`, `mx.det.map_features`), so a later per-portal PR cannot license a second
+  locator by declaring `claim_type: coordinate`. The `mapy_affected` veto sits ABOVE the
+  substrate branch — 06 §6.4's gate joins on `listing_id`, not on `surface`, so re-reading the
+  same position out of an archived page is the same position. C6 is encoded as data:
+  a first-party detail-map pin is `'portal'`, realitymix's absent-`data-gps` Nominatim branch is
+  `'odbl'`, and the reader declares which branch it read while the LADDER stamps the class.
+- **C7 fixed before the first sweep** (same PR): `requires_independent_agreement` now counts
+  distinct **sources**, not distinct `(source, extraction_method)` producers
+  (`resolver/survivorship.py::_independently_agreed`). `claim_fingerprint` hashes `surface`, so
+  the same fact mined from `raw_json` and re-mined from the archived body is two rows, both live
+  in `location_claims_live` — and the old rule read one portal agreeing with itself across two
+  substrates as D7's second voice. One portal is one voice, however many ways we read it.
 
 ### First churn numbers (2026-08-13, ~4h of live traffic — early, not the sign-off)
 

@@ -205,6 +205,53 @@ COORDINATE_RULES: dict[str, CoordinateRule] = {
     "remax": CoordinateRule("none"),
 }
 
+# The two substrates the ladder can be asked about. `COORDINATE_RULES` above describes the
+# first one ONLY — the payload we already hold plus the class-B `listings` columns — which
+# is every W1/W3 caller. W2's archived body is a different question with different answers
+# (remax publishes NO first-party coordinate in `raw_json` and DOES publish one in
+# `#printMap[data-gps]`), so it gets its own table rather than a substrate flag smuggled
+# into the existing rows.
+SUBSTRATE_PAYLOAD = "raw_json"
+SUBSTRATE_ARCHIVED_HTML = "archived_html"
+
+
+@dataclass(frozen=True, slots=True)
+class ArchivedCoordinateRule:
+    """Where a portal's coordinate legitimately comes from on the ARCHIVED body (C6).
+
+    `entry_id` is the ONE contract entry whose locator addresses the portal's own detail
+    map. Naming it — rather than admitting any coordinate-typed entry — is what stops a
+    later per-portal PR from licensing a second, unruled locator by simply declaring
+    `claim_type: coordinate`: an unrecognised entry gets no coordinate, and the PR that
+    wants one has to add a row here and argue for it.
+
+    `geocoded_licence_class` is realitymix's second branch, and it is the whole of C6:
+    `/build/maps.913b4199.js` falls back to `nominatim.openstreetmap.org` when `data-gps-*`
+    is absent and labels the pin *"Pozice na mapě je pouze orientační"* [live-C §2.3]. ODbL
+    follows the geometry, not the republisher (00 §6.2), so that branch is `'odbl'` — never
+    `'portal'`, and never the retired `portal_osm_derived` spelling. A portal with no such
+    branch leaves it None, and a coordinate recovered without the portal's own pin is
+    refused rather than guessed at.
+    """
+    entry_id: str
+    licence_class: str
+    geocoded_licence_class: str | None = None
+
+
+ARCHIVED_COORDINATE_RULES: dict[str, ArchivedCoordinateRule] = {
+    # `#printMap[data-gps], #listingMap[data-gps]`, scoped by element id — never "the first
+    # data-gps in the document", which is the neighbour carousel [live-B §3.5.1].
+    "remax": ArchivedCoordinateRule("rx.det.gps", "portal"),
+    "realitymix": ArchivedCoordinateRule("rm.det.gps", "portal",
+                                         geocoded_licence_class="odbl"),
+    # A typed {coordinates,address} pair keyed by the listing id, inside the MapTiler blob.
+    "idnes": ArchivedCoordinateRule("id.det.subject_feature", "portal"),
+    # The same Vue `point{}` W1 reads out of raw_json, re-read from the archived body.
+    "mmreality": ArchivedCoordinateRule("mm.det.point", "portal"),
+    # The OpenLayers config's `/features/0`.
+    "maxima": ArchivedCoordinateRule("mx.det.map_features", "portal"),
+}
+
 # Same envelope as `location_constants.cz_bbox` (migration 380) and as
 # location_data/krovak.py, which is the module that owns it. The literal below is the
 # import fallback only — it exists so this module still imports while PR #1010 (the RÚIAN
@@ -327,6 +374,21 @@ class Claim:
     # 00 §3.3). Present here, not on a W3-only subclass, so `location_claims_intake` and
     # `location_claims_remine` share one `Claim` shape, one `to_row()`, and one writer.
     snapshot_id: int | None = None
+    # D7 evidence (01 §4.2's `loc_claim_text_evidence` + `loc_claim_evidence_payload`).
+    # NULL on every W1 and W3 claim: both substrates are latest-wins or snapshot JSON, and
+    # a span into a document nobody archived is a one-shot check. W2's archived-HTML lane
+    # (`location_data.claims_remine_archive`) is the first writer that fills them, and for
+    # an `llm_text`/`regex_text` claim the DB REQUIRES the whole set — quote, both offsets,
+    # `payload_scope_version`, `subject_scoped` — plus `payload_sha256` whenever there is a
+    # quote at all. `payload_sha256` is hex TEXT here, not `bytes`: the write path carries
+    # rows through `jsonb_to_recordset`, which has no bytea literal, so the SQL decodes it
+    # (the same `decode(..., 'hex')` shape `_ENRICHMENT_WRITE_SQL` already uses).
+    payload_id: int | None = None
+    payload_sha256: str | None = None
+    evidence_quote: str | None = None
+    span_start: int | None = None
+    span_end: int | None = None
+    payload_scope_version: str | None = None
 
     def to_row(self) -> dict[str, Any]:
         row = {
@@ -361,6 +423,12 @@ class Claim:
             "legacy_write_path_unknown": self.legacy_write_path_unknown,
             "history_completeness": self.history_completeness,
             "subject_scoped": self.subject_scoped,
+            "payload_id": self.payload_id,
+            "payload_sha256": self.payload_sha256,
+            "evidence_quote": self.evidence_quote,
+            "span_start": self.span_start,
+            "span_end": self.span_end,
+            "payload_scope_version": self.payload_scope_version,
         }
         return row
 
@@ -444,9 +512,23 @@ class CoordinateVerdict:
 
 def coordinate_verdict(
     source: str, coords_source: str | None, *, in_mapy_inventory: bool,
+    substrate: str = SUBSTRATE_PAYLOAD, entry_id: str | None = None,
+    portal_pin_present: bool = True,
 ) -> CoordinateVerdict:
-    """06 §6.1.2, applied to the INPUT. Never returns a non-`portal` licence class:
-    a class-E coordinate produces no claim at all (§6.6 rule 6)."""
+    """06 §6.1.2, applied to the INPUT. On the payload substrate it never returns a
+    non-`portal` licence class: a class-E coordinate produces no claim at all (§6.6 rule 6).
+
+    `substrate` defaults to the payload one, so every W1/W3 call site is unchanged.
+    `SUBSTRATE_ARCHIVED_HTML` asks the same ladder about a body W2 re-mines, and the two
+    arms deliberately share their FIRST rung: the `mapy_affected` veto sits above the
+    branch, because §6.4's gate is about the listing, not about which of our copies of its
+    coordinate we happened to read. `entry_id` / `portal_pin_present` are only consulted on
+    the archived arm.
+    """
+    if substrate == SUBSTRATE_ARCHIVED_HTML:
+        return _archived_coordinate_verdict(
+            source, in_mapy_inventory=in_mapy_inventory, entry_id=entry_id,
+            portal_pin_present=portal_pin_present)
     rule = COORDINATE_RULES.get(source)
     if rule is None:
         return CoordinateVerdict(False, None, "unknown_source")
@@ -473,6 +555,29 @@ def coordinate_verdict(
     if coords_source in rule.first_party_sources:
         return CoordinateVerdict(True, "portal", f"first_party_{coords_source}")
     return CoordinateVerdict(False, None, "unrecognised_coordinate_provenance")
+
+
+def _archived_coordinate_verdict(
+    source: str, *, in_mapy_inventory: bool, entry_id: str | None,
+    portal_pin_present: bool,
+) -> CoordinateVerdict:
+    """The archived-body arm of the ladder. The Mapy veto is FIRST here too — the R2
+    inventory names a LISTING whose coordinate we may not hold, and re-reading the same
+    position out of an archived page is the same position (§6.4's gate joins on
+    `listing_id`, not on `surface`)."""
+    if in_mapy_inventory:
+        return CoordinateVerdict(False, None, "listing_in_mapy_affected_inventory")
+    rule = ARCHIVED_COORDINATE_RULES.get(source)
+    if rule is None:
+        return CoordinateVerdict(False, None, "no_archived_coordinate_locator_on_this_portal")
+    if entry_id != rule.entry_id:
+        return CoordinateVerdict(False, None, "unrecognised_archived_coordinate_locator")
+    if portal_pin_present:
+        return CoordinateVerdict(True, rule.licence_class, f"archived_{rule.entry_id}")
+    if rule.geocoded_licence_class is None:
+        return CoordinateVerdict(False, None, "coordinate_provenance_unestablished")
+    return CoordinateVerdict(
+        True, rule.geocoded_licence_class, f"archived_{rule.entry_id}_portal_geocoded")
 
 
 # ------------------------------------------------------------------ payload helpers
@@ -1332,7 +1437,9 @@ _CLAIM_WRITE_SQL = f"""
             declared_radius_m numeric, claim_confidence text,
             blur_evidence text, licence_class text,
             legacy_source_column text, legacy_write_path_unknown boolean,
-            history_completeness text, subject_scoped boolean)
+            history_completeness text, subject_scoped boolean,
+            payload_id bigint, payload_sha256 text, evidence_quote text,
+            span_start integer, span_end integer, payload_scope_version text)
     ), typed AS (
         SELECT i.*,
                location_value_norm(i.value_text) AS value_norm,
@@ -1354,7 +1461,8 @@ _CLAIM_WRITE_SQL = f"""
             travel_mode, target_text, declared_precision_label, declared_confidence,
             declared_radius_m, claim_confidence, blur_evidence, licence_class,
             legacy_source_column, legacy_write_path_unknown, history_completeness,
-            subject_scoped, claim_fingerprint)
+            subject_scoped, payload_id, payload_sha256, evidence_quote, span_start,
+            span_end, payload_scope_version, claim_fingerprint)
         SELECT d.listing_id, d.source, d.source_id_native, d.snapshot_id,
                d.snapshot_anchor, d.first_observed_at, d.claim_type::location_claim_type,
                d.surface::location_claim_surface, d.page_kind::location_page_kind,
@@ -1366,7 +1474,9 @@ _CLAIM_WRITE_SQL = f"""
                d.claim_confidence::match_confidence,
                d.blur_evidence::blur_evidence, d.licence_class::licence_class,
                d.legacy_source_column, d.legacy_write_path_unknown,
-               d.history_completeness, d.subject_scoped, d.claim_fingerprint
+               d.history_completeness, d.subject_scoped, d.payload_id,
+               decode(d.payload_sha256, 'hex'), d.evidence_quote, d.span_start,
+               d.span_end, d.payload_scope_version, d.claim_fingerprint
         FROM deduped d
         ON CONFLICT (claim_fingerprint) DO NOTHING
         RETURNING id, listing_id
@@ -1375,13 +1485,22 @@ _CLAIM_WRITE_SQL = f"""
         -- claims that already existed: the re-sight cohort. `snapshot_id` rides along so
         -- a W3 re-sighting of an already-known value still names WHICH snapshot re-observed
         -- it (lco_snapshot, migration 382) — NULL for a W1 re-sighting, exactly as before.
-        SELECT c.id, d.first_observed_at, d.snapshot_id, d.extractor_version
+        -- The evidence triple rides along for the same reason one layer over (01 §4.3):
+        -- when W2's archived-HTML lane re-sights a value it already knows, the claim row
+        -- keeps the body it was FIRST mined from, so without this the observation series
+        -- could not name which archived body re-observed it — and 06 §6.6 Rule 2's
+        -- "replayable, because that non-null payload_sha256 addresses an immutable body"
+        -- would hold for the claim and not for its re-sightings.
+        SELECT c.id, d.first_observed_at, d.snapshot_id, d.payload_sha256, d.span_start,
+               d.span_end, d.extractor_version
         FROM deduped d
         JOIN location_claims c ON c.claim_fingerprint = d.claim_fingerprint
     ), obs AS (
         INSERT INTO location_claim_observations
-            (claim_id, observed_at, snapshot_id, extractor_version)
-        SELECT r.id, r.first_observed_at, r.snapshot_id, r.extractor_version
+            (claim_id, observed_at, snapshot_id, payload_sha256, span_start, span_end,
+             extractor_version)
+        SELECT r.id, r.first_observed_at, r.snapshot_id, decode(r.payload_sha256, 'hex'),
+               r.span_start, r.span_end, r.extractor_version
         FROM resighted r
         WHERE NOT EXISTS (
             SELECT 1 FROM location_claim_observations o
