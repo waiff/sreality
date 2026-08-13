@@ -2,8 +2,9 @@
 
 Mounted under `/broker-review/*` (own prefix so it never collides with the
 `/brokers/{broker_id}` read routes), admin-gated via `require_admin` — mutating
-operator actions (merge / dismiss / unmerge). Thin HTTP layer over
-`api.broker_review`. Reversible: every merge logs to broker_merge_events.
+operator actions (merge / dismiss / unmerge) plus the standing-NO ledger those
+actions write (`/suppressions`, migration 399, listable and liftable). Thin HTTP
+layer over `api.broker_review`. Reversible: every merge logs to broker_merge_events.
 
 `require_admin` returns the verified JWT claims; every mutating route binds them and
 threads WHO acted into the ledger. They were discarded before, so undone_by /
@@ -35,6 +36,10 @@ class MergeCandidateIn(BaseModel):
 
 class MergeBrokersIn(BaseModel):
     broker_ids: list[int]
+
+
+class SuppressionLiftIn(BaseModel):
+    reason: str | None = None
 
 
 @router.get("/candidates")
@@ -109,4 +114,37 @@ def unmerge(
     result = review.unmerge_group(conn, merge_group_id, undone_by=_actor(claims))
     if result is None:
         raise HTTPException(status_code=404, detail="merge group not found or already undone")
+    return result
+
+
+@router.get("/suppressions")
+def list_suppressions(
+    limit: int = Query(default=50, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    include_lifted: bool = Query(default=False),
+    conn: Any = Depends(deps.get_db_conn),
+    _: dict = Depends(deps.require_admin),
+) -> dict[str, Any]:
+    """The standing-NO ledger (migration 399), active rows first."""
+    return review.list_suppressions(conn, limit=limit, offset=offset,
+                                    include_lifted=include_lifted)
+
+
+@router.post("/suppressions/{suppression_id}/lift")
+def lift_suppression(
+    suppression_id: int,
+    body: SuppressionLiftIn | None = None,
+    conn: Any = Depends(deps.get_db_conn),
+    claims: dict = Depends(deps.require_admin),
+) -> dict[str, Any]:
+    """Clear one standing NO. The rail is otherwise one-way: a suppression written
+    against a pair that later legitimately belongs together (or one violating the
+    verify_pipeline invariant) had no in-product route back."""
+    try:
+        result = review.lift_suppression(conn, suppression_id, lifted_by=_actor(claims),
+                                         reason=body.reason if body else None)
+    except review.MergeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if result is None:
+        raise HTTPException(status_code=404, detail="suppression not found")
     return result

@@ -24,6 +24,7 @@ merge LIFTS every suppression it covers: the rail gates the auto path only.
 
 from __future__ import annotations
 
+import logging
 import uuid
 from typing import Any
 
@@ -35,12 +36,28 @@ from scripts.resolve_brokers import (
     _MEMBERSHIP_RECOMPUTE,
 )
 
-_IDENTITY_META_SQL = (
-    "SELECT id, source, source_broker_id_native, display_name "
-    "FROM broker_identities WHERE id = ANY(%(ids)s)"
+LOG = logging.getLogger("broker_review")
+
+# Where the identities coming back from an unmerge CURRENTLY live, with everything
+# the audit columns need. Anchored on the restored ids, NOT on the survivor recorded
+# on the event rows: that survivor may itself have been merged away since (survivor =
+# min(id), so a later merge can retire it), in which case it holds nothing, the whole
+# cohort reads as one owner and the unmerge writes zero suppressions — the sweep then
+# re-applies the merge that night, which is the exact failure this table exists for.
+_CURRENT_COHORT_SQL = (
+    "SELECT id, source, source_broker_id_native, display_name, broker_id "
+    "FROM broker_identities WHERE broker_id IN ("
+    "SELECT DISTINCT broker_id FROM broker_identities WHERE id = ANY(%(restored)s))"
 )
 
-_BROKER_IDENTITY_IDS_SQL = "SELECT id FROM broker_identities WHERE broker_id = %(broker)s"
+# The same cohort read for a dismissal, anchored on the candidate's BROKER pair —
+# `contactbridge:{lo}:{hi}` is keyed on the brokers, and _queue_review_pairs
+# last-write-wins the evidence, so the one identity pair in `evidence` is a sample of
+# the decision, not its extent.
+_BROKER_COHORT_SQL = (
+    "SELECT id, source, source_broker_id_native, display_name, broker_id "
+    "FROM broker_identities WHERE broker_id = ANY(%(brokers)s)"
+)
 
 _UNDONE_GROUP_EVENTS_SQL = (
     "SELECT identity_id, prev_broker_id FROM broker_merge_events "
@@ -73,7 +90,36 @@ FROM broker_identities lo, broker_identities hi
 WHERE s.lifted_at IS NULL
   AND lo.id = s.identity_lo AND hi.id = s.identity_hi
   AND lo.broker_id = ANY(%(ids)s) AND hi.broker_id = ANY(%(ids)s)
+  AND lo.broker_id <> hi.broker_id
 """
+
+# Active first, then newest — the operator reads this to answer "why is the sweep not
+# merging these two?", and a lifted row is history. LEFT JOIN because an identity row
+# is never deleted but the join must not be able to hide a suppression either way.
+_SUPPRESSION_LIST_SQL = """
+SELECT s.id, s.identity_lo, s.identity_hi, s.source_lo, s.native_lo, s.source_hi,
+       s.native_hi, s.display_lo, s.display_hi, s.origin, s.merge_group_id,
+       s.candidate_id, s.created_by, s.created_at, s.lifted_at, s.lifted_by,
+       s.lift_reason, lo.broker_id AS broker_lo, hi.broker_id AS broker_hi
+FROM broker_merge_suppressions s
+LEFT JOIN broker_identities lo ON lo.id = s.identity_lo
+LEFT JOIN broker_identities hi ON hi.id = s.identity_hi
+WHERE (%(include_lifted)s::boolean OR s.lifted_at IS NULL)
+ORDER BY (s.lifted_at IS NOT NULL), s.created_at DESC, s.id DESC
+LIMIT %(limit)s OFFSET %(offset)s
+"""
+
+_SUPPRESSION_ROW_SQL = (
+    "SELECT id, lifted_at FROM broker_merge_suppressions WHERE id = %(id)s"
+)
+
+# The manual counterpart of the merge-time lift: the ONLY way to clear a violating
+# suppression through the product. Guarded on lifted_at so a double POST is a 409,
+# not a silent re-stamp of who lifted it.
+_SUPPRESSION_MANUAL_LIFT_SQL = (
+    "UPDATE broker_merge_suppressions SET lifted_at = now(), lifted_by = %(by)s, "
+    "lift_reason = %(reason)s WHERE id = %(id)s AND lifted_at IS NULL RETURNING id"
+)
 
 
 def list_candidates(conn: Any, *, status: str = "proposed", limit: int = 100,
@@ -142,24 +188,52 @@ def dismiss_candidate(conn: Any, candidate_id: int, *, resolved_by: str | None =
 
     Only reason='contact_bridge_review' carries identity evidence. A name_firm
     candidate is a different mechanism (same name + firm, no bridge at all) with no
-    identity ids to key on — it is dismissed and nothing more."""
+    identity ids to key on — it is dismissed and nothing more.
+
+    The suppression spans the candidate's two BROKERS, not just the identity pair in
+    `evidence`: the group key is `contactbridge:{lo}:{hi}` and _queue_review_pairs
+    last-write-wins the evidence, so several identity pairs resolving to the same two
+    brokers are ONE card and dismissing it must reject all of them — otherwise the
+    sibling pairs auto-merge the two brokers together anyway. `evidence.identity_ids`
+    stays what it always was: provenance for which pair produced the card.
+
+    A pair whose two identities already sit under one broker is skipped (that is what
+    suppression_pairs' cross-owner filter does): a proposed candidate outlives its
+    brokers being merged, and an ACTIVE suppression over co-located identities is an
+    instant, permanent verify_pipeline violation with nothing to undo it."""
     with conn.transaction():
         with conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
                 "UPDATE broker_merge_candidates SET status='dismissed', resolved_at=now(), "
                 "resolved_by=%s WHERE id=%s AND status='proposed' "
-                "RETURNING id, status, reason, evidence",
+                "RETURNING id, status, reason, evidence, broker_ids",
                 (resolved_by, candidate_id))
             row = cur.fetchone()
         if row is None:
             return None
         pair = (_evidence_pair(row.get("evidence"))
                 if row.get("reason") == "contact_bridge_review" else None)
-        if pair is not None:
-            meta = _identity_meta(conn, list(pair))
-            _write_suppressions(conn, [pair], meta, origin="dismiss",
-                                candidate_id=candidate_id, created_by=resolved_by)
-    return {"id": row["id"], "status": row["status"]}
+        brokers = _candidate_brokers(row.get("broker_ids")) if pair is not None else []
+        written = 0
+        if brokers:
+            with conn.cursor() as cur:
+                cur.execute(_BROKER_COHORT_SQL, {"brokers": brokers})
+                owner, meta = _cohort(cur.fetchall())
+            written = _write_suppressions(
+                conn, suppression_pairs(owner, {i: m[0] for i, m in meta.items()}), meta,
+                origin="dismiss", candidate_id=candidate_id, created_by=resolved_by)
+    return {"id": row["id"], "status": row["status"], "suppressions_written": written}
+
+
+def _candidate_brokers(raw: Any) -> list[int]:
+    """The candidate's broker pair, or [] if it cannot be read as one."""
+    if not isinstance(raw, (list, tuple)):
+        return []
+    try:
+        ids = sorted({int(b) for b in raw})
+    except (TypeError, ValueError):
+        return []
+    return ids if len(ids) >= 2 else []
 
 
 def _evidence_pair(evidence: Any) -> tuple[int, int] | None:
@@ -242,20 +316,29 @@ def unmerge_group(conn: Any, merge_group_id: str, *, undone_by: str | None = Non
         return None
     survivor, retired = int(row[0]), [int(x) for x in row[1]]
     with conn.transaction(), conn.cursor() as cur:
-        # Derive the post-unmerge ownership BEFORE the re-point, while the survivor
+        # Derive the post-unmerge ownership BEFORE the re-point, while the cohort
         # still holds both the identities coming back and the ones staying: after
-        # the UPDATE the two cohorts are indistinguishable. Without this the sweep
-        # re-derives the same bridges tonight and re-applies the merge just undone.
+        # the UPDATE the two are indistinguishable. Without this the sweep re-derives
+        # the same bridges tonight and re-applies the merge just undone.
         cur.execute(_UNDONE_GROUP_EVENTS_SQL, {"group": merge_group_id})
         restored = {int(i): int(prev) for i, prev in cur.fetchall()}
-        cur.execute(_BROKER_IDENTITY_IDS_SQL, {"broker": survivor})
-        owner: dict[int, int] = {int(r[0]): survivor for r in cur.fetchall()
-                                 if int(r[0]) not in restored}
-        owner.update(restored)
-        meta = _identity_meta(conn, list(owner))
+        cur.execute(_CURRENT_COHORT_SQL, {"restored": sorted(restored)})
+        owner, meta = _cohort(cur.fetchall())
+        owner.update({i: prev for i, prev in restored.items() if i in meta})
+        pairs = suppression_pairs(owner, {i: m[0] for i, m in meta.items()})
         written = _write_suppressions(
-            conn, suppression_pairs(owner, {i: m[0] for i, m in meta.items()}), meta,
-            origin="unmerge", merge_group_id=merge_group_id, created_by=undone_by)
+            conn, pairs, meta, origin="unmerge",
+            merge_group_id=merge_group_id, created_by=undone_by)
+        note = None
+        if restored and not pairs:
+            # A silent no-op here is the rail failing open: the merge comes back on
+            # the next sweep and the operator is never told why. (Legitimately empty
+            # when every separated pair is same-source — such a pair can never
+            # auto-merge back, so there is nothing to suppress.)
+            note = ("no cross-owner, cross-source identity pair was derived — no "
+                    "suppression recorded for this unmerge")
+            LOG.warning("UNMERGE %s restored %d identities but derived 0 suppressions: %s",
+                        merge_group_id, len(restored), note)
         cur.execute(
             "UPDATE broker_identities bi SET broker_id = ev.prev_broker_id "
             "FROM broker_merge_events ev "
@@ -269,7 +352,8 @@ def unmerge_group(conn: Any, merge_group_id: str, *, undone_by: str | None = Non
             "WHERE merge_group_id=%s AND undone_at IS NULL", (undone_by, merge_group_id))
     _recompute_brokers(conn, [survivor, *retired])
     return {"merge_group_id": merge_group_id, "survivor_broker_id": survivor,
-            "restored_broker_ids": retired, "suppressions_written": written}
+            "restored_broker_ids": retired, "suppressions_written": written,
+            "suppression_note": note}
 
 
 def suppression_pairs(owner: dict[int, int],
@@ -288,21 +372,28 @@ def suppression_pairs(owner: dict[int, int],
             if owner[a] != owner[b] and source_of.get(a) != source_of.get(b)]
 
 
-def _identity_meta(conn: Any, identity_ids: list[int]) -> dict[int, tuple[str, str, str | None]]:
-    """identity id -> (source, native id, display name) for the audit columns."""
-    if not identity_ids:
-        return {}
-    with conn.cursor() as cur:
-        cur.execute(_IDENTITY_META_SQL, {"ids": sorted(identity_ids)})
-        return {int(r[0]): (r[1], r[2], r[3]) for r in cur.fetchall()}
+def _cohort(rows: list[Any]) -> tuple[dict[int, int], dict[int, tuple[str, str, str | None]]]:
+    """A cohort read -> (identity id -> current broker, identity id -> audit columns)."""
+    owner: dict[int, int] = {}
+    meta: dict[int, tuple[str, str, str | None]] = {}
+    for iid, source, native, display, broker in rows:
+        if broker is None:
+            continue
+        owner[int(iid)] = int(broker)
+        meta[int(iid)] = (source, native, display)
+    return owner, meta
 
 
 def _write_suppressions(conn: Any, pairs: list[tuple[int, int]],
                         meta: dict[int, tuple[str, str, str | None]], *, origin: str,
                         merge_group_id: str | None = None, candidate_id: int | None = None,
                         created_by: str | None = None) -> int:
-    """Record the operator's NO for each pair. Identities we cannot describe are
-    skipped rather than written with a placeholder natural key."""
+    """Record the operator's NO for each pair, returning the rows actually INSERTED.
+
+    Identities we cannot describe are skipped rather than written with a placeholder
+    natural key. The count is `rowcount`, not len(pairs): ON CONFLICT DO NOTHING skips
+    an already-active pair, and reporting an attempt as a write would tell the operator
+    a decision was recorded by THIS action when it was not."""
     rows = [(lo, hi) for lo, hi in pairs if lo in meta and hi in meta]
     if not rows:
         return 0
@@ -315,7 +406,47 @@ def _write_suppressions(conn: Any, pairs: list[tuple[int, int]],
             "shi": [meta[hi][0] for _, hi in rows], "nhi": [meta[hi][1] for _, hi in rows],
             "dlo": [meta[lo][2] for lo, _ in rows], "dhi": [meta[hi][2] for _, hi in rows],
         })
-    return len(rows)
+        return cur.rowcount or 0
+
+
+def list_suppressions(conn: Any, *, limit: int = 50, offset: int = 0,
+                      include_lifted: bool = False) -> dict[str, Any]:
+    """The standing-NO ledger. Without a read surface the rail is a table only the
+    sweep can see: a suppression the operator wants back is unfindable, and a
+    violating row makes verify_pipeline permanently red with no way to clear it
+    through the product."""
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(_SUPPRESSION_LIST_SQL, {"include_lifted": bool(include_lifted),
+                                            "limit": limit, "offset": offset})
+        rows = cur.fetchall()
+    for r in rows:
+        r["created_at"] = _iso(r["created_at"])
+        r["lifted_at"] = _iso(r["lifted_at"])
+        r["merge_group_id"] = None if r["merge_group_id"] is None else str(r["merge_group_id"])
+        r["active"] = r["lifted_at"] is None
+    return {"suppressions": rows, "count": len(rows)}
+
+
+def lift_suppression(conn: Any, suppression_id: int, *, lifted_by: str | None = None,
+                     reason: str | None = None) -> dict[str, Any] | None:
+    """Clear one standing NO by operator action. Never a DELETE (rule #3) — the lift
+    columns are the audit trail, exactly as the merge-time lift leaves them."""
+    with conn.transaction():
+        with conn.cursor() as cur:
+            cur.execute(_SUPPRESSION_ROW_SQL, {"id": suppression_id})
+            row = cur.fetchone()
+            if row is None:
+                return None
+            if row[1] is not None:
+                raise MergeError("suppression already lifted")
+            cur.execute(_SUPPRESSION_MANUAL_LIFT_SQL, {
+                "id": suppression_id, "by": lifted_by,
+                "reason": reason or "operator_lift"})
+            lifted = cur.fetchone()
+    if lifted is None:  # lost a race with another lift
+        raise MergeError("suppression already lifted")
+    return {"id": int(lifted[0]), "lifted": True,
+            "lift_reason": reason or "operator_lift", "lifted_by": lifted_by}
 
 
 def _recompute_brokers(conn: Any, broker_ids: list[int]) -> None:

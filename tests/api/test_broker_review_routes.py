@@ -142,11 +142,16 @@ def test_every_mutating_route_threads_the_admin_identity(client, monkeypatch):
     monkeypatch.setattr(routes.review, "merge_candidate",
                         lambda conn, cid, **kw: captured.update(candidate=kw) or {"ok": 1})
 
-    client.post("/broker-review/merges/abc/unmerge")
-    client.post("/broker-review/candidates/3/dismiss")
-    client.post("/broker-review/merge", json={"broker_ids": [1, 2]})
-    client.post("/broker-review/candidates/3/merge", json={})
+    posted = [
+        client.post("/broker-review/merges/abc/unmerge"),
+        client.post("/broker-review/candidates/3/dismiss"),
+        client.post("/broker-review/merge", json={"broker_ids": [1, 2]}),
+        client.post("/broker-review/candidates/3/merge", json={}),
+    ]
 
+    # a route that 4xx'd would "thread" nothing and the identity asserts below would
+    # read a stale `captured` entry from an earlier post
+    assert [r.status_code for r in posted] == [200, 200, 200, 200]
     assert captured["unmerge"]["undone_by"] == "op@example.com"
     assert captured["dismiss"]["resolved_by"] == "op@example.com"
     assert captured["merge"]["created_by"] == "op@example.com"
@@ -157,6 +162,67 @@ def test_the_actor_falls_back_to_the_subject_when_there_is_no_email():
     assert routes._actor({"sub": "uuid-1"}) == "uuid-1"
     assert routes._actor({"email": "op@example.com", "sub": "uuid-1"}) == "op@example.com"
     assert routes._actor({}) is None
+
+
+def test_suppression_ledger_is_listable_with_paging_and_the_lifted_flag(client, monkeypatch):
+    """Without a read surface the rail is a table only the nightly sweep can see."""
+    captured = {}
+    monkeypatch.setattr(routes.review, "list_suppressions",
+                        lambda conn, **kw: captured.update(kw)
+                        or {"suppressions": [{"id": 1}], "count": 1})
+    res = client.get("/broker-review/suppressions")
+    assert res.status_code == 200 and res.json()["count"] == 1
+    assert captured == {"limit": 50, "offset": 0, "include_lifted": False}
+
+    assert client.get(
+        "/broker-review/suppressions?limit=10&offset=20&include_lifted=true"
+    ).status_code == 200
+    assert captured == {"limit": 10, "offset": 20, "include_lifted": True}
+
+
+def test_lifting_a_suppression_threads_the_operator_and_the_reason(client, monkeypatch):
+    captured = {}
+    monkeypatch.setattr(routes.review, "lift_suppression",
+                        lambda conn, sid, **kw: captured.update(id=sid, **kw)
+                        or {"id": sid, "lifted": True})
+    api_main.app.dependency_overrides[deps.require_admin] = (
+        lambda: {"is_admin": True, "email": "op@example.com"}
+    )
+    res = client.post("/broker-review/suppressions/5/lift",
+                      json={"reason": "same person after all"})
+    assert res.status_code == 200 and res.json()["lifted"] is True
+    assert captured == {"id": 5, "lifted_by": "op@example.com",
+                        "reason": "same person after all"}
+
+    # the body is optional — the affordance is one click
+    assert client.post("/broker-review/suppressions/5/lift").status_code == 200
+    assert captured["reason"] is None
+
+
+def test_lifting_an_unknown_suppression_is_404_and_a_relift_is_409(client, monkeypatch):
+    monkeypatch.setattr(routes.review, "lift_suppression", lambda conn, sid, **kw: None)
+    assert client.post("/broker-review/suppressions/9/lift").status_code == 404
+
+    def boom(conn, sid, **kw):
+        raise routes.review.MergeError("suppression already lifted")
+
+    monkeypatch.setattr(routes.review, "lift_suppression", boom)
+    res = client.post("/broker-review/suppressions/9/lift")
+    assert res.status_code == 409 and "already lifted" in res.json()["detail"]
+
+
+def test_the_suppression_routes_are_gated_like_every_other_broker_review_route():
+    """The ledger names identities, brokers and the operator who decided; lifting a
+    row re-opens an auto-merge. Asserted through the real dependency (only the DB
+    handle is overridden) — a route defined without `require_admin` answers 200."""
+    api_main.app.dependency_overrides[deps.get_db_conn] = lambda: object()
+    unauthenticated = TestClient(api_main.app)
+    try:
+        assert unauthenticated.get("/broker-review/suppressions").status_code == 401
+        assert unauthenticated.post(
+            "/broker-review/suppressions/5/lift").status_code == 401
+    finally:
+        api_main.app.dependency_overrides.clear()
 
 
 def test_operator_merge_source_satisfies_the_events_check_constraint():
