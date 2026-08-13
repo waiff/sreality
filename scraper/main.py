@@ -1010,6 +1010,7 @@ class SrealityPortal:
         for it in items:
             if it.payload is not None:
                 it.payload.discovery_seq = it.discovery_seq
+                _record_detail_churn(conn, it.payload)
         return db.write_detail_batch(conn, [it.payload for it in items])
 
     def mark_gone(self, conn: Any, native_id: str) -> None:
@@ -1237,6 +1238,29 @@ def _walk_category_split(
     return union, counts, reported_size, pages, complete
 
 
+def _record_detail_churn(conn: Any, result: FetchResult) -> None:
+    """W2a-0 churn instrument for sreality's detail surface.
+
+    The seven HTML portals are covered where they stage their body
+    (db.upsert_portal_raw_page); sreality never stages a detail body at all —
+    the estate JSON goes straight into listings.raw_json — so the fetch has to
+    be recorded here or the portal with the heaviest cadence is the one portal
+    missing from the measurement. Re-serialised rather than byte-exact: the hash
+    is only ever compared against another hash produced the same way, so this
+    only removes wire-formatting noise the JSON API does not have anyway.
+    """
+    if result.kind != "ok" or result.raw is None:
+        return
+    db.record_payload_churn_if_enabled(
+        conn,
+        source="sreality",
+        source_id_native=str(result.sid),
+        page_kind="detail",
+        body=json.dumps(result.raw, ensure_ascii=False).encode("utf-8"),
+        content_type="application/json",
+    )
+
+
 def _index_page_archiver(
     client: SrealityClient, conn: Any, dry_run: bool,
 ) -> Any:
@@ -1267,6 +1291,20 @@ def _index_page_archiver(
             f"{client.category_main}/{client.category_type}/"
             f"{district if district is not None else 'all'}/{offset}/{week}"
         )
+        body = json.dumps(payload, ensure_ascii=False)
+        # Ahead of the freshness skip: the instrument counts FETCHES, and the
+        # index page — the highest-churn artefact in the system, and the whole
+        # reason 02 section 2.3.2 P2 is gated — is archived at most once a day
+        # while it is walked hourly. record_churn=False below keeps the archived
+        # fetch from being counted twice.
+        db.record_payload_churn_if_enabled(
+            conn,
+            source="sreality",
+            source_id_native=key,
+            page_kind="index",
+            body=body.encode("utf-8"),
+            content_type="application/json",
+        )
         if key in fresh:
             return
         try:
@@ -1276,9 +1314,10 @@ def _index_page_archiver(
                 source_id_native=key,
                 source_url=url,
                 page_kind="index",
-                html=json.dumps(payload, ensure_ascii=False),
+                html=body,
                 http_status=200,
                 refresh_after_hours=db.INDEX_ARCHIVE_REFRESH_HOURS,
+                record_churn=False,
             )
             fresh.add(key)
         except Exception as exc:  # noqa: BLE001 - archiving must not kill ingest

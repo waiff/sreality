@@ -738,13 +738,13 @@ def _broker_fingerprint(block: Any) -> tuple[str | None, ...]:
 GATE2_NULL_SREALITY_ID_SETTING = "gate2_null_sreality_id_enabled"
 
 
-def _gate2_null_sreality_id_enabled(conn: psycopg.Connection) -> bool:
-    """Live read of the flip-writer flag. Missing row or NULL value -> False
-    (fresh-deploy-safe default: keep minting synthetic negative sreality_ids)."""
+def _app_settings_flag(conn: psycopg.Connection, key: str) -> bool:
+    """Live read of one boolean app_settings flag. Missing row or NULL -> False
+    (fresh-deploy-safe: a flag that isn't seeded yet reads as OFF)."""
     with conn.cursor() as cur:
         cur.execute(
             "SELECT value FROM app_settings WHERE key = %s",
-            (GATE2_NULL_SREALITY_ID_SETTING,),
+            (key,),
         )
         row = cur.fetchone()
     if row is None or row[0] is None:
@@ -755,6 +755,12 @@ def _gate2_null_sreality_id_enabled(conn: psycopg.Connection) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in ("true", "1", "yes", "on")
     return bool(value)
+
+
+def _gate2_null_sreality_id_enabled(conn: psycopg.Connection) -> bool:
+    """Live read of the flip-writer flag (default: keep minting synthetic
+    negative sreality_ids)."""
+    return _app_settings_flag(conn, GATE2_NULL_SREALITY_ID_SETTING)
 
 
 def ingest_scraped_listing(
@@ -2733,6 +2739,115 @@ def fresh_index_page_keys(conn: psycopg.Connection, source: str, *, hours: float
         return {r[0] for r in cur.fetchall()}
 
 
+# The W2a-0 shadow-hash churn instrument (design 02 section 2.3.2 P1, 06 section
+# 6.9 OQ9): OFF by default, app_settings-backed for the same reason as the Gate-2
+# flag — the always-on worker and the cron drains pick a flip up on their next
+# batch, not after a restart.
+PAYLOAD_SHADOW_HASH_SETTING = "location_payload_shadow_hash"
+
+_PAYLOAD_CHURN_UPSERT_SQL = """
+    INSERT INTO portal_payload_churn
+        (source, source_id_native, page_kind, first_seen_at, last_seen_at,
+         fetches, raw_changes, norm_changes,
+         last_raw_sha256, last_norm_sha256, last_byte_size, last_norm_byte_size,
+         normalizer_version)
+    VALUES (%s, %s, %s::location_page_kind,
+            coalesce(%s::timestamptz, now()), coalesce(%s::timestamptz, now()),
+            1, 0, 0, %s, %s, %s, %s, %s)
+    ON CONFLICT (source, source_id_native, page_kind) DO UPDATE SET
+        last_seen_at        = greatest(portal_payload_churn.last_seen_at,
+                                       EXCLUDED.last_seen_at),
+        fetches             = portal_payload_churn.fetches + 1,
+        raw_changes         = portal_payload_churn.raw_changes
+                              + (portal_payload_churn.last_raw_sha256
+                                 IS DISTINCT FROM EXCLUDED.last_raw_sha256)::int,
+        norm_changes        = portal_payload_churn.norm_changes
+                              + (portal_payload_churn.last_norm_sha256
+                                 IS DISTINCT FROM EXCLUDED.last_norm_sha256)::int,
+        last_raw_sha256     = EXCLUDED.last_raw_sha256,
+        last_norm_sha256    = EXCLUDED.last_norm_sha256,
+        last_byte_size      = EXCLUDED.last_byte_size,
+        last_norm_byte_size = EXCLUDED.last_norm_byte_size,
+        normalizer_version  = EXCLUDED.normalizer_version
+"""
+
+
+def record_payload_churn(
+    conn: psycopg.Connection,
+    *,
+    source: str,
+    source_id_native: str,
+    page_kind: str,
+    body: bytes,
+    content_type: str,
+    fetched_at: datetime | None = None,
+) -> None:
+    """Bump this artefact's raw-vs-normalised churn counters. Stores NO body.
+
+    The measurement 02 section 2.3.2 makes a gate on P2 (index archiving): one
+    bounded row per (source, source_id_native, page_kind) carrying both hashes,
+    both sizes and three counters, so the change RATE is a number instead of the
+    assumption the storage projection currently rests on.
+    """
+    # Deferred: location_data is not on the scraper's import path (and not in the
+    # API image before this wave), so the flag-off scrape never pays for it.
+    from location_data.payload_norm import (
+        DEFAULT_VOLATILE_PROFILES, NORMALIZER_VERSION, VolatileProfile, normalise,
+    )
+
+    result = normalise(
+        body,
+        content_type=content_type,
+        volatile=DEFAULT_VOLATILE_PROFILES.get(source, VolatileProfile()),
+    )
+    with conn.cursor() as cur:
+        cur.execute(
+            _PAYLOAD_CHURN_UPSERT_SQL,
+            (source, source_id_native, page_kind, fetched_at, fetched_at,
+             result.raw_sha256, result.norm_sha256,
+             result.byte_size, result.norm_byte_size, NORMALIZER_VERSION),
+        )
+
+
+def record_payload_churn_if_enabled(
+    conn: psycopg.Connection,
+    *,
+    source: str,
+    source_id_native: str,
+    page_kind: str,
+    body: bytes,
+    content_type: str | None = None,
+    fetched_at: datetime | None = None,
+) -> None:
+    """Flag-gated, never-raising wrapper — the ONLY form callers should use.
+
+    An instrument that can break the thing it measures is worthless, so every
+    failure (flag read, normaliser, upsert) warns and returns. `content_type`
+    None sniffs the body, for the archive path that is handed both HTML and JSON
+    through one `html` parameter.
+    """
+    try:
+        if not _app_settings_flag(conn, PAYLOAD_SHADOW_HASH_SETTING):
+            return
+        if content_type is None:
+            from location_data.payload_norm import sniff_content_type
+            content_type = sniff_content_type(body)
+        record_payload_churn(
+            conn,
+            source=source,
+            source_id_native=source_id_native,
+            page_kind=page_kind,
+            body=body,
+            content_type=content_type,
+            fetched_at=fetched_at,
+        )
+    except Exception as exc:  # noqa: BLE001 - instrumentation must not kill ingest
+        LOG.warning(
+            "payload churn record failed source=%s key=%s: %s",
+            source, source_id_native, exc,
+        )
+
+
 def upsert_portal_raw_page(
     conn: psycopg.Connection,
     *,
@@ -2743,6 +2858,7 @@ def upsert_portal_raw_page(
     html: str,
     http_status: int | None,
     refresh_after_hours: float | None = None,
+    record_churn: bool = True,
 ) -> int | None:
     """Latest-wins upsert of one fetched HTML page into portal_raw_pages.
 
@@ -2751,7 +2867,20 @@ def upsert_portal_raw_page(
     previous parse state. With `refresh_after_hours` set, an existing row
     younger than that is left untouched and None is returned — the write-cost
     guard for index-page archiving.
+
+    `record_churn=False` is for the one caller that already recorded the fetch
+    itself (sreality's index archiver, which measures pages its client-side
+    freshness skip never hands to this function) — without it that surface would
+    double-count exactly the fetches that do get archived.
     """
+    if record_churn:
+        record_payload_churn_if_enabled(
+            conn,
+            source=source,
+            source_id_native=source_id_native,
+            page_kind=page_kind,
+            body=html.encode("utf-8"),
+        )
     with conn.cursor() as cur:
         if refresh_after_hours is None:
             cur.execute(

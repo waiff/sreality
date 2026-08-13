@@ -22,6 +22,7 @@ without the queue-encodes-category limitation that constrains bazos.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 from typing import Any
 
@@ -234,6 +235,19 @@ class BezrealitkyPortal:
         counts = {"new": 0, "updated": 0, "unchanged": 0, "images_discovered": 0}
         for it in items:
             listing = it.payload["listing"]
+            # W2a-0 churn instrument: bezrealitky stages no body in
+            # portal_raw_pages (the GraphQL advert goes straight into raw_json),
+            # so the fetch is recorded here or the portal is absent from the
+            # measurement. listing.raw IS the advert dict plus the parser's
+            # derived image_urls, which is deterministic in the advert.
+            db.record_payload_churn_if_enabled(
+                conn,
+                source=SOURCE,
+                source_id_native=listing.source_id_native,
+                page_kind="detail",
+                body=json.dumps(listing.raw, ensure_ascii=False).encode("utf-8"),
+                content_type="application/json",
+            )
             pk, result = db.ingest_scraped_listing(
                 conn, listing, discovery_seq=it.discovery_seq)
             image_urls = listing.raw.get("image_urls") or []
