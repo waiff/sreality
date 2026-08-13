@@ -1010,7 +1010,7 @@ class SrealityPortal:
         for it in items:
             if it.payload is not None:
                 it.payload.discovery_seq = it.discovery_seq
-                _record_detail_churn(conn, it.payload, it.observation_id)
+                _record_detail_fetch(conn, it.payload, it.observation_id)
         return db.write_detail_batch(conn, [it.payload for it in items])
 
     def mark_gone(self, conn: Any, native_id: str) -> None:
@@ -1238,31 +1238,57 @@ def _walk_category_split(
     return union, counts, reported_size, pages, complete
 
 
-def _record_detail_churn(conn: Any, result: FetchResult, observation: str) -> None:
-    """W2a-0 churn instrument for sreality's detail surface.
+def _record_detail_fetch(conn: Any, result: FetchResult, observation: str) -> None:
+    """W2a-0 churn instrument + W2a-2 payload archive for sreality's detail surface.
 
     The seven HTML portals are covered where they stage their body
     (db.upsert_portal_raw_page); sreality never stages a detail body at all —
     the estate JSON goes straight into listings.raw_json — so the fetch has to
     be recorded here or the portal with the heaviest cadence is the one portal
-    missing from the measurement. Re-serialised rather than byte-exact: the hash
-    is only ever compared against another hash produced the same way, so this
-    only removes wire-formatting noise the JSON API does not have anyway.
+    missing from both. Re-serialised rather than byte-exact: the hash is only
+    ever compared against another hash produced the same way, so this only
+    removes wire-formatting noise the JSON API does not have anyway. The body is
+    the estate JSON UNWRAPPED and UNTRIMMED (02 section 2.3.2 P3), which is what
+    makes sreality re-minable from the archive alone.
 
-    The serialisation is a THUNK: with the flag off (the default) not one estate
-    dict is ever dumped, and a value json.dumps cannot encode surfaces as a
-    swallowed warning rather than killing the 100-item flush.
+    The serialisation is a shared memoised THUNK: with both gates off (the
+    default) not one estate dict is ever dumped, with both on it is dumped once,
+    and a value json.dumps cannot encode surfaces as a swallowed warning rather
+    than killing the 100-item flush.
+
+    No archive-side observation token — the append is content-addressed, so the
+    drain's replay collides instead of duplicating.
     """
     if result.kind != "ok" or result.raw is None:
         return
+    encoded: bytes | None = None
+
+    def _body() -> bytes:
+        nonlocal encoded
+        if encoded is None:
+            encoded = json.dumps(result.raw, ensure_ascii=False).encode("utf-8")
+        return encoded
+
     db.record_payload_churn_if_enabled(
         conn,
         source="sreality",
         source_id_native=str(result.sid),
         page_kind="detail",
-        body=lambda: json.dumps(result.raw, ensure_ascii=False).encode("utf-8"),
+        body=_body,
         content_type="application/json",
         observation=observation,
+    )
+    db.append_payload_if_enabled(
+        conn,
+        source="sreality",
+        source_id_native=str(result.sid),
+        page_kind="detail",
+        body=_body,
+        content_type="application/json",
+        # The client raises on anything but a success, so an "ok" result is 2xx
+        # — but FetchResult carries no code, and NULL ranks WITH the successes
+        # in the retention order, so it is the honest value rather than a
+        # fabricated 200.
     )
 
 
@@ -1321,6 +1347,12 @@ def _index_page_archiver(
             body=lambda: _body().encode("utf-8"),
             content_type="application/json",
         )
+        # KNOWN GAP (W2a-2): this skip returns BEFORE upsert_portal_raw_page, so
+        # it also suppresses the payload dual-write for an index page that changed
+        # inside the freshness window — the one thing that function's own docstring
+        # says the archive must never do, on the highest-churn surface there is.
+        # Left as-is deliberately: reworking the skip is a P2 design question, and
+        # W2a-6's index-coverage audit is what measures the gap first.
         if key in fresh:
             return
         try:

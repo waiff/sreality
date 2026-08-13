@@ -162,3 +162,12 @@ jobs:
         env:
           TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
         run: pytest tests/location_data/test_payloads.py -q
+
+      # W2a-2 wires that store into the scrape chokepoint. The hermetic suite
+      # proves WHICH fetches reach it; only real SQL proves the parameters it
+      # passes satisfy the enum + CHECK + UNIQUE constraints, and that a replayed
+      # drain batch collides instead of appending a second version.
+      - name: Payload dual-write through the scrape chokepoint (executed)
+        env:
+          TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+        run: pytest tests/test_payload_dual_write_live.py -q

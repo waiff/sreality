@@ -115,7 +115,7 @@ PROBE_CLIENTS: dict[str, tuple[str, str]] = {
 }
 
 # The two portals whose detail body is JSON, not a page. Their passive call sites
-# (main._record_detail_churn, bezrealitky_main.write_details) declare
+# (main._record_detail_fetch, bezrealitky_main.write_details) declare
 # 'application/json' explicitly; the seven HTML portals reach the instrument through
 # db.upsert_portal_raw_page, which sniffs — so the probe sniffs for them too, and the
 # two paths hash the same projection of the same bytes.
@@ -320,7 +320,7 @@ def fetch_body(source: str, client: Any, key: SampleKey) -> Fetched:
 
     Three shapes, because the instrument already has three call sites: the seven HTML
     portals stage a page body through `db.upsert_portal_raw_page`; sreality hashes the
-    unwrapped estate JSON in `main._record_detail_churn`; bezrealitky hashes the parsed
+    unwrapped estate JSON in `main._record_detail_fetch`; bezrealitky hashes the parsed
     listing's `raw` (the GraphQL advert plus the parser's derived `image_urls`) in
     `bezrealitky_main.write_details`. A probe that hashed a different projection would
     measure a different thing from the passive cohort it exists to confirm.

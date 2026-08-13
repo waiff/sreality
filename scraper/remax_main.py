@@ -174,6 +174,10 @@ class RemaxPortal:
                     body=lambda: html.encode("utf-8"),
                     content_type="text/html",
                 )
+            # KNOWN GAP (W2a-2): `key not in fresh` guards upsert_portal_raw_page, so
+            # it also suppresses the payload dual-write for an index page that changed
+            # inside the freshness window. Deliberately unchanged here — W2a-6's
+            # index-coverage audit measures the gap before P2 reworks it.
             if archive_ok and key not in fresh:
                 try:
                     db.upsert_portal_raw_page(

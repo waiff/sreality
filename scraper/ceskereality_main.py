@@ -187,6 +187,10 @@ class CeskerealityPortal:
                     body=lambda: html.encode("utf-8"),
                     content_type="text/html",
                 )
+                # KNOWN GAP (W2a-2): this skip guards upsert_portal_raw_page, so it
+                # also suppresses the payload dual-write for an index page that
+                # changed inside the freshness window. Deliberately unchanged here —
+                # W2a-6's index-coverage audit measures the gap before P2 reworks it.
                 if fresh_keys is None or key not in fresh_keys:
                     try:
                         db.upsert_portal_raw_page(

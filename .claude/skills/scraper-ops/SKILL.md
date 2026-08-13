@@ -77,6 +77,37 @@ so that is a deliberate choice. Hashed fields are written with a targeted single
 never by replaying a whole `ScrapedListing`, which would rewrite every other column from a
 possibly-stale stored page and could regress a price the portal has since changed.
 
+## The two location-data gates riding the ingest path
+
+Both are OFF by default, cached ~60 s per process (so a flip reaches the always-on worker within
+a minute, a cron run instantly), and wrapped so any failure warns and returns — an instrument or
+an archive must never break the scrape it rides in. **Neither may be enabled before the
+operator's churn + storage sign-off** (design 02 §2.3.2's gate; read out with
+`python -m scripts.location_payload_churn_report`).
+
+- **`app_settings.location_payload_shadow_hash`** (W2a-0) — the *instrument*. Counts fetches and
+  raw-vs-normalised changes into `portal_payload_churn`, one row per
+  `(source, source_id_native, page_kind, normalizer_version)`, **no body ever stored**.
+- **`PortalLimits.payload_dual_write`** (W2a-2) — the *archive*. Appends every body
+  `upsert_portal_raw_page` stages (7 HTML detail writers + 3 index archivers), plus sreality's
+  estate JSON and bezrealitky's advert-with-query from their own call sites, into
+  `portal_raw_payloads`. A per-portal **operational limit**, not an app_settings flag (enabling it
+  is a per-portal storage decision), so it needs no migration:
+
+```sql
+update portals set operational_limits =                       -- one portal
+  coalesce(operational_limits, '{}'::jsonb) || '{"payload_dual_write": true}'::jsonb
+ where source = 'idnes';
+insert into app_settings (key, value) values                  -- or the global underlay
+  ('scraper_limits_global', '{"payload_dual_write": true}'::jsonb)
+  on conflict (key) do update set value = app_settings.value || excluded.value;
+```
+
+Verify with `select source, page_kind, count(*), max(version_seq) from portal_raw_payloads
+group by 1,2;` — the store is append-on-CHANGE, so an unchanged refetch must add no row.
+Failures read `payload archive append failed source=… key=…` / `payload dual-write limit read
+failed source=…` in the walk or drain log and are never fatal.
+
 ## How to manually trigger the scrapers
 
 The sreality pipeline is **split by cadence (Phase 2)**: `index_walk.yml` ("Scraping: Sreality

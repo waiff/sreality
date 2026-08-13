@@ -52,8 +52,22 @@ preloaded per walk, so multi-MB bodies aren't even uploaded when fresh) plus the
 `refresh_after_hours` guard on `upsert_portal_raw_page` (max one refresh per key per
 `db.INDEX_ARCHIVE_REFRESH_HOURS` as the racing-writer backstop). remax's page-capped realtime
 probe never archives (a transient probe fetch must not claim a page's daily slot); the slow
-portals with no index-only signals (bazos/idnes/mmreality/maxima) still skip index staging. The
-W2a payload store supersedes this scheme. **`portal_raw_pages` is preservation substrate, never pruned** (location-data
+portals with no index-only signals (bazos/idnes/mmreality/maxima) still skip index staging.
+The W2a payload store supersedes this scheme, and the path is BUILT (location-data W2a-2):
+`upsert_portal_raw_page` dual-writes every body it stages into `portal_raw_payloads` via
+`location_data.payloads.append_payload` — one chokepoint edit covering all seven HTML detail
+writers and all three index archivers with no per-portal branch (rule #21) — plus a call site
+each in `scraper/main.py` (`_record_detail_fetch`: the unwrapped, untrimmed estate JSON) and
+`scraper/bezrealitky_main.py` (the advert **plus the exact GraphQL query text and its sha256**,
+design 02 §2.3.2 P3), the two portals that stage no body. That store is content-addressed on
+the NORMALISED body, so a refetch that changed nothing appends nothing and a replayed drain
+batch collides instead of duplicating; retention (version cap + pins) runs in the append's own
+transaction. It is gated per portal by `PortalLimits.payload_dual_write` (baked default
+**False**, overridable via `app_settings.scraper_limits_global` / `portals.operational_limits`
+— no migration), cached ~60 s per source, and every failure warns rather than touching the
+scrape. **OFF everywhere until the operator signs off the churn measurement + storage
+projection** (02 §2.3.2's gate; the numbers come from `scripts/location_payload_churn_report.py`).
+**`portal_raw_pages` is preservation substrate, never pruned** (location-data
 program, W0 item 0o): migration 099's "safe to delete once parsed" header is superseded —
 the archive is the only surviving copy of delisted pages' location signal (portals don't
 serve delisted pages again), an off-database copy lives in R2 under

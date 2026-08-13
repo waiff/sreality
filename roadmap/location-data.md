@@ -324,6 +324,14 @@ all closed, several proven against a throwaway PostgreSQL 18 built from `.deb` f
   `location_data/payloads.py`. Content-addressed on the NORMALISED hash; P4 retention runs in
   the same bounded transaction as the append. **No caller anywhere** — the library is inert
   until W2a-2 wires it in, which is gated on the churn sign-off.
+- **W2a-2 the dual-write** (no migration): `upsert_portal_raw_page` appends every body it stages
+  into the payload store — one chokepoint edit covering all 7 HTML detail writers and all 3 index
+  archivers with no per-portal branch — plus a call site each for the two portals that stage no
+  body: sreality's estate JSON (unwrapped, untrimmed) and bezrealitky's advert **with the exact
+  GraphQL query text + sha256** beside it (02 §2.3.2 P3). Gated per portal by
+  `PortalLimits.payload_dual_write` (baked default False, operator-overridable through
+  `portals.operational_limits` / `scraper_limits_global`, no migration), **OFF everywhere**.
+  Idempotent by content addressing, so a replayed drain batch collides instead of duplicating.
 - **W2a-3 the churn readout** (#1052): `scripts/location_payload_churn_report.py` (the artefact
   the storage gate is signed from) + the 200×3 confirmation probe, dispatch-only in the
   `location-batch` group.
@@ -356,7 +364,8 @@ actually moves — a profile-improvement pass (diff genuinely-unchanged page pai
 before W2a-3b writes the measured `volatile_paths` into the contracts. remax and bazos had no
 repeat fetches yet.
 
-**Not enabled, deliberately:** `payload_dual_write` and `payload_index_archive` are OFF, the
+**Not enabled, deliberately:** `payload_dual_write` is OFF on every portal (and its
+index-only sibling `payload_index_archive` is not built yet — W2a-6), the
 445k-row backfill has not run, and no per-portal W2 contract exists yet. Those wait on the
 operator's O3/O4 sign-off of `volatile_paths` + the storage projection.
 

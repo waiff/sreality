@@ -240,6 +240,42 @@ def test_shared_rate_limiter_rejects_non_bool_leaf():
     assert cfg.limits.shared_rate_limiter is False
 
 
+# --- payload_dual_write (location-data W2a-2 payload archive gate) ---
+
+def test_payload_dual_write_defaults_off_everywhere():
+    # Enabling it is gated on the churn sign-off (02 section 2.3.2's storage
+    # question), so no portal may ship with the archive already writing.
+    assert PortalLimits().payload_dual_write is False
+    for source in ("sreality", "bazos", "idnes", "bezrealitky", "maxima",
+                   "mmreality", "remax", "ceskereality", "realitymix"):
+        assert default_config(source).limits.payload_dual_write is False
+
+
+def test_payload_dual_write_per_portal_override():
+    # Per portal on purpose: the storage cost of archiving mmreality's 245 KB
+    # pages is not bazos's 41 KB one, so the decision is taken per portal.
+    row = (True, [{"x": 1}], None, {"payload_dual_write": True})
+    cfg = load_portal_config(_Conn(row), "idnes")
+    assert cfg.limits.payload_dual_write is True
+
+
+def test_payload_dual_write_global_underlay():
+    portal_row = (True, [{"x": 1}], None, None)
+    global_row = ({"payload_dual_write": True},)
+    cfg = load_portal_config(_Conn(portal_row, global_row), "idnes")
+    assert cfg.limits.payload_dual_write is True
+    # ... and one portal can still be held back from a global enable.
+    portal_row = (True, [{"x": 1}], None, {"payload_dual_write": False})
+    cfg = load_portal_config(_Conn(portal_row, global_row), "idnes")
+    assert cfg.limits.payload_dual_write is False
+
+
+def test_payload_dual_write_rejects_non_bool_leaf():
+    row = (True, [{"x": 1}], None, {"payload_dual_write": "true"})
+    cfg = load_portal_config(_Conn(row), "idnes")
+    assert cfg.limits.payload_dual_write is False
+
+
 # --- price_changed (index-walk price-diff jitter tolerance) ---
 
 def test_price_changed_exact_compare_by_default():
