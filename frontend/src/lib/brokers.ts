@@ -327,7 +327,12 @@ export async function fetchBrokersByIds(
       undefined,
       JWT,
     );
-    for (const row of r.data ?? []) out.set(row.broker_id, row);
+    // A 200 with no envelope is a malformed response (SPA-fallback HTML, a proxy
+    // page) — same guard as fetchBrokerDossier, so a caller can't mistake an
+    // outage for a successful empty batch. A genuinely empty `data: []` (none of
+    // the requested ids matched) is not this case and still returns cleanly.
+    if (!r?.data) throw new ApiError('malformed /brokers response', 0, r);
+    for (const row of r.data) out.set(row.broker_id, row);
   }
   return out;
 }

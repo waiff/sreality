@@ -273,6 +273,25 @@ describe('batched hydration', () => {
     expect(new URL(calls[0].url).searchParams.getAll('ids')).toEqual(['3', '4']);
     expect(map.get(3)).toBeDefined();
   });
+
+  /* A genuinely empty batch (none of the requested ids matched, e.g. filtered by
+     status) is a real, successful `data: []` — must resolve to an empty map, not
+     throw. Distinguishes this from the malformed-response case right below. */
+  it('resolves an empty map for a successful empty batch', async () => {
+    stubFetch(() => ({ body: { data: [] } }));
+    const { fetchBrokersByIds } = await loadBrokers();
+    await expect(fetchBrokersByIds([3])).resolves.toEqual(new Map());
+  });
+
+  /* An SPA-fallback HTML page (or a proxy page) answers 200 with no envelope.
+     Silently returning an empty map here reads, one layer up, as "the contact
+     read succeeded and found nothing" — indistinguishable from the case above —
+     when what actually happened is the read never reached the API at all. */
+  it('throws on a 200 that carries no envelope', async () => {
+    stubFetch(() => ({ body: '<!doctype html><title>app</title>' }));
+    const { fetchBrokersByIds } = await loadBrokers();
+    await expect(fetchBrokersByIds([3])).rejects.toThrow(/malformed/);
+  });
 });
 
 describe('fetchBrokerDossier', () => {
