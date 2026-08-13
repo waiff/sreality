@@ -21,8 +21,11 @@ Three properties define the write, and each one is load-bearing:
     `06` W2a gate (b), tested in both directions.
   * **Retention runs in the same transaction as the append** (`02 §2.3.2 P4`), not in
     a job that may never be scheduled: re-pin first (first version, latest version,
-    and any body a disputed claim points at), then delete unpinned rows beyond the
-    version cap. Growth is bounded by row count rather than by operator diligence.
+    any body a claim references, and any body a disputed claim points at), then
+    delete unpinned rows beyond the version cap — ranked newest-first, with
+    unsuccessful fetches behind successful ones so a portal outage evicts itself
+    rather than the listing's real history. Growth is bounded by row count rather
+    than by operator diligence.
 
 NOT WIRED. Nothing in the scrape calls this yet — W2a-2 adds the dual-write at
 `scraper.db.upsert_portal_raw_page` behind its own flag, and enabling it is gated on
@@ -79,11 +82,16 @@ DEFAULT_R2_THRESHOLD_BYTES = 262_144
 
 R2_PREFIX = "payloads"
 
-# The key is derived from the hash, so no listing is ever needed to find a body and
-# no list_objects is ever needed to enumerate one. `source` is the only free-form
-# component, and it comes from our own portal registry — validated anyway, because a
-# key built from unvalidated input is how a path escape gets written (the images
-# lane's _KEY_RE is the same boundary).
+# The key is derived from the hash of the bytes the object HOLDS — `body_sha256`, the
+# raw body, never `payload_sha256` — so no listing is ever needed to find a body and no
+# list_objects is ever needed to enumerate one. Keying on the normalised hash instead
+# would hand one key to two rows whose normalised bodies coincide while their raw bytes
+# differ (the same interstitial page under two listings, once the per-request nonce is
+# stripped): the second row's own bytes would never be uploaded and its `body_sha256`
+# would not match the object it points at. `source` is the only free-form component,
+# and it comes from our own portal registry — validated anyway, because a key built
+# from unvalidated input is how a path escape gets written (the images lane's _KEY_RE
+# is the same boundary).
 _SOURCE_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
 
 _CONTENT_ENCODINGS = ("identity", "gzip")
@@ -107,7 +115,18 @@ class ObjectStore(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class PayloadRef:
-    """What the caller needs to know about the row it just wrote."""
+    """What the caller needs to know about the row that is now stored.
+
+    Every field describes the ROW, not the fetch: on a collision (`inserted` False)
+    the stored body is the one an earlier fetch wrote, so `body_sha256`,
+    `content_encoding`, `byte_size` and `body_r2_key` come back from the row. A
+    caller that trusted the just-fetched values would GET an R2 object that was
+    never uploaded.
+
+    `stored_bytes` is None exactly when that cannot be answered from the row: a
+    spilled body this call did not write, whose object size Postgres does not carry
+    and which is not worth an R2 round trip on the unchanged path.
+    """
 
     id: int
     payload_sha256: bytes
@@ -115,18 +134,22 @@ class PayloadRef:
     version_seq: int
     inserted: bool
     byte_size: int
-    stored_bytes: int
+    stored_bytes: int | None
     content_encoding: str
     body_r2_key: str | None
     evicted_ids: tuple[int, ...]
     evicted_r2_keys: tuple[str, ...]
 
 
-def r2_key(source: str, payload_sha256: bytes) -> str:
-    """`payloads/<source>/<sha[:2]>/<sha>.gz` — derivable from the row alone."""
+def r2_key(source: str, body_sha256: bytes) -> str:
+    """`payloads/<source>/<sha[:2]>/<sha>.gz` — derivable from the row alone.
+
+    `body_sha256`, because that is the hash of what the object holds (the RAW body,
+    gzipped); see the note on `_SOURCE_RE`.
+    """
     if not _SOURCE_RE.match(source):
         raise PayloadError(f"refusing to build an R2 key for source={source!r}")
-    digest = payload_sha256.hex()
+    digest = body_sha256.hex()
     return f"{R2_PREFIX}/{source}/{digest[:2]}/{digest}.gz"
 
 
@@ -161,34 +184,46 @@ def decode_body(stored: bytes, content_encoding: str) -> bytes:
 # payload_sha256, not on version_seq), which is cosmetic: the cap orders by
 # version_seq with `id` as the tiebreaker.
 #
-# `first_observed_at` uses least(), not the insert value: bodies do not always arrive
-# in observation order (W2a-4 backfills `portal_raw_pages.fetched_at` into a store
-# the live path may already have written), and "first observed" must mean the
-# earliest observation, not the earliest write.
+# `first_observed_at` / `fetched_at` use least(), not the insert value: bodies do not
+# always arrive in observation order (W2a-4 backfills `portal_raw_pages.fetched_at`
+# into a store the live path may already have written), and "first observed" must mean
+# the earliest observation, not the earliest write.
+#
+# `snapshot_id` fills in but never overwrites: a body first archived without an anchor
+# (the unanchored live path, or W2a-4's backfill of a page that predates its snapshot)
+# gains one the moment an anchored fetch of the SAME body arrives, and an anchored row
+# is never re-anchored by a later unanchored sighting.
+#
+# The RETURNING list is the stored row, not the fetch: see PayloadRef.
 _APPEND_SQL = """
 INSERT INTO portal_raw_payloads
     (source, source_id_native, listing_id, page_kind, payload_sha256, body_sha256,
      content_type, content_encoding, body, body_r2_key, byte_size, http_status,
-     contract_version, normalizer_version, pinned, version_seq,
-     first_observed_at, last_observed_at)
+     contract_version, normalizer_version, snapshot_id, pinned, version_seq,
+     first_observed_at, last_observed_at, fetched_at)
 VALUES
     (%(source)s, %(source_id_native)s, %(listing_id)s,
      %(page_kind)s::location_page_kind, %(payload_sha256)s, %(body_sha256)s,
      %(content_type)s, %(content_encoding)s, %(body)s, %(body_r2_key)s,
      %(byte_size)s, %(http_status)s, %(contract_version)s,
-     %(normalizer_version)s, true,
+     %(normalizer_version)s, %(snapshot_id)s, true,
      (SELECT coalesce(max(prior.version_seq), 0) + 1
         FROM portal_raw_payloads prior
        WHERE prior.source = %(source)s
          AND prior.source_id_native = %(source_id_native)s
          AND prior.page_kind = %(page_kind)s::location_page_kind),
-     %(observed_at)s, %(observed_at)s)
+     %(observed_at)s, %(observed_at)s, %(observed_at)s)
 ON CONFLICT (source, source_id_native, page_kind, payload_sha256) DO UPDATE
    SET last_observed_at  = greatest(EXCLUDED.last_observed_at,
                                     portal_raw_payloads.last_observed_at),
        first_observed_at = least(EXCLUDED.first_observed_at,
-                                 portal_raw_payloads.first_observed_at)
-RETURNING id, version_seq, (xmax = 0) AS inserted
+                                 portal_raw_payloads.first_observed_at),
+       fetched_at        = least(EXCLUDED.fetched_at,
+                                 portal_raw_payloads.fetched_at),
+       snapshot_id       = coalesce(portal_raw_payloads.snapshot_id,
+                                    EXCLUDED.snapshot_id)
+RETURNING id, version_seq, (xmax = 0) AS inserted, body_sha256, byte_size,
+          content_encoding, body_r2_key, octet_length(body) AS inline_bytes
 """
 
 # P4's pin predicate, recomputed AUTHORITATIVELY over the whole group rather than
@@ -205,9 +240,19 @@ RETURNING id, version_seq, (xmax = 0) AS inserted
 # scoped BOTH ways: to this group's hashes, so it reads through the partial index
 # `location_claims_payload` instead of scanning the claim store, and to this group's
 # (source, source_id_native), because a hash alone is not a listing — two listings
-# whose normalised bodies coincide would otherwise pin each other's history. The FK
-# `payload_id` is deliberately not consulted: it carries no index, so joining on it
-# would put a seq scan of the claim store in the ingest path.
+# whose normalised bodies coincide would otherwise pin each other's history.
+#
+# The payload_id arm is not a policy choice, it is the FK: 382 declares
+# `location_claims.payload_id references portal_raw_payloads(id)` with NO ACTION, so a
+# referenced body CANNOT be deleted — the cap either pins it or the DELETE raises
+# ForeignKeyViolation and rolls back the whole bounded transaction, losing the body
+# just appended and every later append for that group with it. It is also the right
+# answer on the merits: an evidence span that indexes into a deleted body is exactly
+# the unverifiability this store exists to end. It costs nothing at read time because
+# 403 ships the partial index on payload_id that makes it an index probe rather than
+# the seq scan of the claim store an unindexed FK would have been. The pin set stays
+# small: claims dedupe on a TIME-FREE fingerprint (01 §4.2.1), so a listing has one
+# claim per distinct VALUE, not one per fetched version.
 _REPIN_SQL = """
 WITH grp AS (
     SELECT id, payload_sha256, version_seq
@@ -236,6 +281,7 @@ want AS (
     SELECT g.id,
            (coalesce(g.version_seq = e.first_seq, false)
             OR coalesce(g.version_seq = e.latest_seq, false)
+            OR EXISTS (SELECT 1 FROM location_claims c WHERE c.payload_id = g.id)
             OR EXISTS (SELECT 1 FROM disputed d
                         WHERE d.payload_sha256 = g.payload_sha256)) AS pinned
       FROM grp g CROSS JOIN edges e
@@ -251,13 +297,26 @@ UPDATE portal_raw_payloads p
 # ordinary versions survive. A pin OUTSIDE the cap (the first version, once the group
 # is deeper than the cap) survives regardless — that is what "exempt" means.
 #
+# UNSUCCESSFUL FETCHES RANK LAST. `http_status` was written and never read, which made
+# an error body cost a version: a portal outage lasting `version_cap` refetches (idnes
+# serving a 503 interstitial whose request id is not in the volatile profile appends
+# one row per 6-hourly fetch) evicted the listing's ENTIRE real history except the
+# first-version pin, irreversibly — `portal_raw_pages` is latest-wins, so there is
+# nothing to restore from. Ranking non-2xx bodies behind 2xx ones makes the outage
+# evict itself instead. A NULL status ranks WITH the successes on purpose: W2a-4's
+# backfill from `portal_raw_pages` has no status to carry, and those bodies are the
+# oldest real history in the store.
+#
 # `NULLS LAST` and the `id` tiebreaker: DESC sorts NULLs first in Postgres, which
 # would let a version_seq-less row masquerade as the newest and shield the real
 # newest from the cap; and ties in version_seq must not reshuffle between runs.
 _PRUNE_SQL = """
 WITH ranked AS (
     SELECT id, pinned,
-           row_number() OVER (ORDER BY version_seq DESC NULLS LAST, id DESC) AS rn
+           row_number() OVER (
+               ORDER BY (http_status IS NULL
+                         OR http_status BETWEEN 200 AND 299) DESC,
+                        version_seq DESC NULLS LAST, id DESC) AS rn
       FROM portal_raw_payloads
      WHERE source = %(source)s
        AND source_id_native = %(source_id_native)s
@@ -269,6 +328,18 @@ DELETE FROM portal_raw_payloads p
    AND NOT r.pinned
    AND r.rn > %(version_cap)s::integer
 RETURNING p.id, p.body_r2_key
+"""
+
+# An R2 key is content-addressed, so two rows in DIFFERENT groups that fetched
+# byte-identical bodies (one portal's "listing removed" page under two listings) share
+# one object. Handing an evicted row's key to W2a-5's deleter unfiltered would then
+# destroy the body of a live row. Only keys no surviving row still points at are
+# reported as reclaimable.
+_ORPHANED_KEYS_SQL = """
+SELECT DISTINCT k.key
+  FROM unnest(%(keys)s::text[]) AS k(key)
+ WHERE NOT EXISTS (SELECT 1 FROM portal_raw_payloads p
+                    WHERE p.body_r2_key = k.key)
 """
 
 _STORE: ObjectStore | None = None
@@ -309,6 +380,7 @@ def append_payload(
     http_status: int | None,
     contract_version: int | None,
     observed_at: datetime,
+    snapshot_id: int | None = None,
     volatile: VolatileProfile | None = None,
     version_cap: int | None = None,
     store: ObjectStore | None = None,
@@ -317,8 +389,14 @@ def append_payload(
     """Archive one fetched body, appending only if its normalised content changed.
 
     `observed_at` is the PAYLOAD's own observation time and lands in
-    `first_observed_at` (06 Rule 1) — never `now()`, so a backfilled body keeps the
-    time it was actually fetched.
+    `first_observed_at` AND `fetched_at` (06 Rule 1) — never `now()`, so a backfilled
+    body keeps the time it was actually fetched instead of reading as having appeared
+    on migration day.
+
+    `snapshot_id` anchors the body to the `listing_snapshots` row it belongs to, which
+    is what `location_claims.snapshot_anchor='snapshot'` — the default anchor — needs
+    on the other side of the join. None is the honest value for a fetch with no
+    snapshot yet; a later anchored fetch of the same body fills it in.
 
     `volatile` None resolves the measurement-phase profile for `source`; W2a-3b
     replaces those with the contract's declared `persistence.volatile_paths`.
@@ -356,7 +434,7 @@ def append_payload(
                 source, source_id_native, len(stored),
             )
         else:
-            key = r2_key(source, norm.norm_sha256)
+            key = r2_key(source, norm.raw_sha256)
 
     params: dict[str, Any] = {
         "source": source,
@@ -373,6 +451,7 @@ def append_payload(
         "http_status": http_status,
         "contract_version": contract_version,
         "normalizer_version": NORMALIZER_VERSION,
+        "snapshot_id": snapshot_id,
         "observed_at": observed_at,
     }
     group = {
@@ -387,6 +466,13 @@ def append_payload(
         if row is None:  # pragma: no cover - RETURNING always yields on upsert
             raise PayloadError(f"payload append returned no row for {source}/{source_id_native}")
         payload_id, version_seq, inserted = int(row[0]), int(row[1]), bool(row[2])
+        # The row as stored. On a collision this is what an EARLIER fetch wrote, and
+        # it is what the caller must be told about — `inline_bytes` is NULL only when
+        # that body lives in R2, the one question the row cannot answer and the
+        # unchanged path must not pay an R2 HEAD to learn.
+        row_body_sha256, row_byte_size = bytes(row[3]), int(row[4])
+        row_encoding, row_key = str(row[5]), row[6]
+        row_stored_bytes = None if row[7] is None else int(row[7])
 
         # INSIDE the transaction and only for a genuinely new body: an upload that
         # fails must roll the row back, because a committed row whose body_r2_key
@@ -397,32 +483,41 @@ def append_payload(
             if store.object_size(key) is None:
                 store.upload_bytes(key, stored, "application/gzip")
 
-        evicted: list[tuple[int, str | None]] = []
+        evicted_ids: tuple[int, ...] = ()
+        evicted_keys: tuple[str, ...] = ()
         if inserted:
             cur.execute(_REPIN_SQL, group)
             cur.execute(_PRUNE_SQL, {**group, "version_cap": cap})
-            evicted = [(int(r[0]), r[1]) for r in cur.fetchall()]
+            evicted = cur.fetchall()
+            evicted_ids = tuple(int(r[0]) for r in evicted)
+            evicted_keys = tuple(r[1] for r in evicted if r[1])
+            if evicted_keys:
+                cur.execute(_ORPHANED_KEYS_SQL, {"keys": list(evicted_keys)})
+                evicted_keys = tuple(r[0] for r in cur.fetchall())
 
-    if evicted:
+    if evicted_ids:
         # The orphaned R2 objects are handed to W2a-5's pruner, which owns "report
         # bytes reclaimed"; deleting them here would need a delete verb this store
         # protocol deliberately does not have.
         LOG.info(
             "PAYLOAD evicted source=%s key=%s rows=%d r2=%d cap=%d",
-            source, source_id_native, len(evicted),
-            sum(1 for _, k in evicted if k), cap,
+            source, source_id_native, len(evicted_ids), len(evicted_keys), cap,
         )
 
     return PayloadRef(
         id=payload_id,
         payload_sha256=norm.norm_sha256,
-        body_sha256=norm.raw_sha256,
+        # The four below come from the ROW, which on the insert path is what this
+        # call wrote and on a collision is what an EARLIER fetch wrote — the encode
+        # pass above was discarded, so reporting it would advertise an R2 object that
+        # was never uploaded and a byte_size the store does not have.
+        body_sha256=row_body_sha256,
         version_seq=version_seq,
         inserted=inserted,
-        byte_size=norm.byte_size,
-        stored_bytes=len(stored),
-        content_encoding=encoding,
-        body_r2_key=key,
-        evicted_ids=tuple(i for i, _ in evicted),
-        evicted_r2_keys=tuple(k for _, k in evicted if k),
+        byte_size=row_byte_size,
+        stored_bytes=len(stored) if inserted else row_stored_bytes,
+        content_encoding=row_encoding,
+        body_r2_key=row_key,
+        evicted_ids=evicted_ids,
+        evicted_r2_keys=evicted_keys,
     )

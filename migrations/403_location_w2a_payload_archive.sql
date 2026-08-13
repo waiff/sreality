@@ -1,7 +1,8 @@
 -- 403_location_w2a_payload_archive.sql
 --
 -- Location-data program, Wave W2a, PR W2a-1: the write-path columns the
--- append-on-change payload archive needs, plus its retention index.
+-- append-on-change payload archive needs, plus the two indexes its retention
+-- statements read through.
 --
 -- Design: design/final/02-portal-contracts.md section 2.3.2 P1 (content-addressed
 -- on a NORMALISED body; the raw-byte hash is kept "for forensics but is NOT the
@@ -47,27 +48,56 @@ alter table portal_raw_payloads
   add column if not exists pinned             boolean not null default false,
   add column if not exists normalizer_version text;
 
-alter table portal_raw_payloads
-  add constraint prp_content_encoding
-  check (content_encoding in ('identity', 'gzip'));
+-- Guarded like the ADD COLUMNs above, so the file is uniformly re-appliable. This
+-- is not hypothetical here: the Supabase MCP's execute_sql has timed out AFTER
+-- committing, and the recovery is to re-run the file.
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint
+     where conname = 'prp_content_encoding'
+       and conrelid = 'portal_raw_payloads'::regclass
+  ) then
+    alter table portal_raw_payloads
+      add constraint prp_content_encoding
+      check (content_encoding in ('identity', 'gzip'));
+  end if;
+end $$;
 
 ------------------------------------------------------------------
--- The P4 retention index.
+-- The two indexes the writer's retention statements actually need.
 --
--- The pruner's question is always "within ONE (source, source_id_native,
--- page_kind) group, which unpinned bodies fall outside the newest `version_cap`
--- versions" - so the key is the group's three columns followed by version_seq
--- DESC, and the partial predicate keeps the first/latest/disputed rows (which are
--- never eviction candidates) out of the index entirely. The three indexes 382
--- already ships all lead on first_observed_at, which orders by OBSERVATION rather
--- than by version and would make the cap a sort instead of a range scan.
+-- NO version_seq INDEX. An earlier cut of this file carried
+-- (source, source_id_native, page_kind, version_seq desc) where not pinned, on the
+-- theory that it made the cap "a range scan instead of a sort". It did not, and
+-- could not: the pruner has to RANK the whole group (a pinned row still occupies a
+-- rank), so its scan never carries the `not pinned` predicate the partial index is
+-- defined by. EXPLAIN on a replayed schema shows the group read served by 382's
+-- identity UNIQUE (source, source_id_native, page_kind, payload_sha256) with a sort
+-- on top - a sort over ONE group, bounded to roughly the version cap by the very
+-- retention that reads it. A dead index that every append still has to maintain is
+-- worse than no index.
 --
--- `where not pinned` is index-legal because `pinned` is NOT NULL DEFAULT false.
+-- location_claims_payload_id is a CORRECTNESS dependency, not a speed-up.
+-- location_claims.payload_id (382) references portal_raw_payloads(id) with NO
+-- ACTION, so the cap's DELETE raises a foreign-key violation the moment a claim
+-- points at an out-of-cap body - taking the whole append transaction, and every
+-- later append for that listing, down with it. The writer therefore PINS every
+-- referenced body, and 382 indexes only payload_sha256, which would have left that
+-- lookup a sequential scan of the claim store inside the drain's batch write.
+--
+-- prp_r2_key backs the reclaim check: an R2 key is content-addressed, so an evicted
+-- row's object may still be the body of a LIVE row in another group, and only keys
+-- nothing points at may be handed to W2a-5's deleter. Partial because a spilled body
+-- is the pathological case, not the routine one - at the shipped 256 KB threshold no
+-- portal's page spills at all, so the index stays empty until one does.
 ------------------------------------------------------------------
 
-create index if not exists prp_retention on portal_raw_payloads
-  (source, source_id_native, page_kind, version_seq desc)
-  where not pinned;
+create index if not exists location_claims_payload_id on location_claims (payload_id)
+  where payload_id is not null;
+
+create index if not exists prp_r2_key on portal_raw_payloads (body_r2_key)
+  where body_r2_key is not null;
 
 ------------------------------------------------------------------
 -- Column semantics that are NOT self-evident from the names.
@@ -101,6 +131,15 @@ comment on column portal_raw_payloads.content_encoding is
   'always the DECODED length, so a round-trip verifier decodes by this column and '
   'compares against byte_size.';
 
+comment on column portal_raw_payloads.body_r2_key is
+  'payloads/<source>/<sha[:2]>/<sha>.gz where sha is BODY_SHA256 - the hash of the '
+  'bytes the object actually holds (the raw body, gzipped), never payload_sha256. '
+  'Keying on the normalised hash would give one key to two rows whose normalised '
+  'bodies coincide while their raw bytes differ, and the second row would point at '
+  'the first row''s bytes. Derivable from the row alone, so no list_objects is ever '
+  'needed; shared across rows by construction, so an evicted row''s object may only '
+  'be reclaimed once no surviving row points at it.';
+
 comment on column portal_raw_payloads.byte_size is
   'Length of the DECODED body in bytes - the artefact as fetched, independent of '
   'content_encoding and of whether the body sits inline or in R2.';
@@ -113,14 +152,19 @@ comment on column portal_raw_payloads.version_seq is
 
 comment on column portal_raw_payloads.pinned is
   'P4 (02 section 2.3.2): this body is exempt from the version cap because it is '
-  'the FIRST version, the LATEST version, or is referenced by a claim carried by '
-  'an open location_contradictions row. Recomputed authoritatively by the writer on '
-  'every append - a row that stops being the latest must lose its pin, or the cap '
-  'never bites.';
+  'the FIRST version, the LATEST version, is referenced by ANY location_claims row '
+  'via payload_id (the FK is NO ACTION - an unpinned referenced body would make the '
+  'cap''s DELETE raise), or is referenced by a claim carried by an open '
+  'location_contradictions row. Recomputed authoritatively by the writer on every '
+  'append - a row that stops being the latest must lose its pin, or the cap never '
+  'bites.';
 
 comment on column portal_raw_payloads.http_status is
   'HTTP status of the fetch that produced this body. A non-200 body is still a '
-  'body: it is what a span mined from it indexes into.';
+  'body: it is what a span mined from it indexes into - but it ranks BEHIND every '
+  '2xx body in the version cap, so an outage streak evicts itself instead of the '
+  'listing''s real history. NULL ranks with the successes (a body backfilled from '
+  'portal_raw_pages carries no status).';
 
 comment on column portal_raw_payloads.normalizer_version is
   'location_data.payload_norm.NORMALIZER_VERSION at write time. A profile change '
