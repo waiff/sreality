@@ -41,6 +41,7 @@ const settingsItems: ReadonlyArray<MenuItem> = [
   { to: '/clip-audit', label: 'CLIP Audit' },
   { to: '/health',   label: 'Health' },
   { to: '/costs',    label: 'LLM Costs' },
+  { to: '/location-quality', label: 'Location Quality' },
   { to: '/scrapers', label: 'Scrapers' },
   { to: '/settings', label: 'General Settings' },
 ];

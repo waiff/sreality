@@ -100,7 +100,7 @@ def sample_members(
                    m.label_okres, m.label_okres_nd,
                    m.label_precision_class::text, m.label_precision_nd,
                    m.label_note, m.labelled_at,
-                   l.is_active
+                   l.is_active, l.source_url
             FROM location_labelled_sample_members m
             JOIN location_labelled_samples s ON s.id = m.sample_id
             LEFT JOIN listings l ON l.id = m.listing_id
