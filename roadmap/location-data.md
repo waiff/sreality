@@ -104,9 +104,20 @@ run on `listings.geom` and the geo-derived admin columns. The consumer flip is W
 - **Refetch cohort** — **38,612** sreality rows (legacy-shape or 80 KB-truncated payloads) parked
   in `location_enrichment_state(lane='sreality_detail_refetch')`. **W4 work.**
 
-**Gate outcomes: final numbers in the W1 report.** The coverage, precision-distribution and
-replay gates were measured against the live corpus during the sweep; this track carries the
-sequencing, not the measurements.
+**Gate outcomes (final, measured 2026-08-13, all PASS):**
+
+| Gate | Requirement | Measured |
+| --- | --- | --- |
+| Registry + sign trap | national CSV, 19 cols; golden-point round trip | 3,020,222 points; kód ADM 21690278 at **0.03 m** (pinned PROJ pipeline) |
+| Claim coverage | ≥99 % of active listings ≥1 claim | **99.18 %** (382,901+/386,065; 4.91 M claims) |
+| Licence (blocking) | 0 ephemeral claims; 0 coordinate claims on the inventory | **0 / 0** (inventory: 57,204 listings, terminal) |
+| D3 axes | ≥98 % sreality post-cutover; 100 % mmreality | **100 %** (94,113/94,113) / **100 %** (10,731/10,731) |
+| Deterministic replay | byte-identical on unchanged inputs | **PASS** — 1,000-listing production sample, before/after hash identical, 0 new resolutions; + hermetic CI test |
+| PIP latency (Q7) | p95 < 5 ms | containing 0.24 ms / nearest-within 2.95 ms |
+
+Corpus state at gate time: 725,164 resolutions (zero failed listings), 3,903 contradiction
+detections, epoch 2 current, subsystem ≈16 GB (observations carry ~7 GB of one-time
+re-scan bloat — a same-day observation dedup guard is queued follow-up work).
 
 ### Decisions worth carrying forward
 
