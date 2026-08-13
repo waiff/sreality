@@ -43,6 +43,10 @@ LOCATION_BATCH_WORKFLOWS = (
     # rails are the same ones, and a probe overlapping a claims intake would put the
     # scrape's egress and a corpus-wide sweep on the instance at once.
     "location_payload_churn.yml",
+    # W3. A one-pass backfill over 1,574,313 `listing_snapshots` rows sharing the SAME
+    # instance a claims intake or a registry load hits — exactly the corpus-wide-sweep
+    # collision the outer group exists to serialize away.
+    "location_claims_remine.yml",
 )
 OUTER_GROUP = "location-batch"
 

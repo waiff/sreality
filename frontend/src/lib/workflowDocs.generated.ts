@@ -2624,6 +2624,82 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/location_claims_intake.yml"
   },
   {
+    "filename": "location_claims_remine.yml",
+    "name": "Jobs: Location history backfill (W3)",
+    "description": "Re-mines location claims from `listing_snapshots.raw_json` — the 1,574,313-row history substrate (design 06-migration-backfill.md §6.2.2, §6.4 W3). Gives the claims layer a real per-listing precision/coordinate time series for sreality (the only portal whose `_HASH_FIELDS` allowlist includes a location-adjacent signal) and locality/district TEXT history for the other eight — never a coordinate for them (see location_data/claims_remine.py's module docstring for the full ground-truth argument).",
+    "portal": null,
+    "manual": true,
+    "schedules": [],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "source",
+        "description": "one portal only (blank = all nine)",
+        "required": false,
+        "type": "choice",
+        "default": "",
+        "options": [
+          "",
+          "sreality",
+          "bezrealitky",
+          "bazos",
+          "idnes",
+          "mmreality",
+          "remax",
+          "ceskereality",
+          "realitymix",
+          "maxima"
+        ]
+      },
+      {
+        "name": "mode",
+        "description": "full = walk every snapshot; incremental = only snapshots since the last ok batch",
+        "required": false,
+        "type": "choice",
+        "default": "full",
+        "options": [
+          "full",
+          "incremental"
+        ]
+      },
+      {
+        "name": "max_seconds",
+        "description": "wall-clock budget; stops between batches (blank = none — DANGEROUS unbounded, prefer a number)",
+        "required": false,
+        "type": "string",
+        "default": "2700",
+        "options": null
+      },
+      {
+        "name": "batch_size",
+        "description": "snapshots per batch (10000-30000; blank = 20000)",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "dry_run",
+        "description": "extract and report; write nothing",
+        "required": false,
+        "type": "boolean",
+        "default": "false",
+        "options": null
+      }
+    ],
+    "secrets": [
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "location-batch",
+    "cancelInProgress": false,
+    "timeoutMinutes": 55,
+    "permissions": "contents: read",
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/location_claims_remine.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/location_claims_remine.yml"
+  },
+  {
     "filename": "location_labelled_sample.yml",
     "name": "Jobs: location labelled-sample draw (06 6.4.0)",
     "description": "DISPATCH-ONLY. Draws the frozen random labelled sample for one portal (migration 399): n >= 100 active listings, uniform random, snapshotting the OLD system's serving values at draw time. The sample MUST be drawn BEFORE that portal's extraction sweep / refetch wave (06 6.4.0: \"drawn before the sweep, randomly\"), and is then hand-labelled by the operator; contract acceptance is precision on this sample, not yield.",

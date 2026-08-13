@@ -16,7 +16,8 @@ is the tie-breaker). This track records sequencing + shipped state only.
 | W1 registry + claim spine (shadow) | full RÚIAN mirror, claims, resolutions, projection | ✅ shipped 2026-08-12 (migrations 380–389 applied; shadow-only, no consumer reads it) |
 | W1v bezrealitky vertical slice | one portal end-to-end + location-quality dashboard | ✅ shipped 2026-08-13 (every layer exercised in prod; gate answered — portal-inventory-capped, not pipeline-capped) |
 | W2a payload archive rewrite | append-on-change `portal_raw_payloads` | 🟡 in progress (2026-08-13) — instrument live and measuring; store + writer landed, dual-write NOT enabled (churn sign-off is the gate) |
-| W2–W6 | HTML re-mine, history backfill, refetch cohorts, LLM lane, serving flip | ⚪ not started |
+| W2, W4–W6 | HTML re-mine, refetch cohorts, LLM lane, serving flip | ⚪ not started |
+| W3 history backfill | claims from `listing_snapshots.raw_json` (1,574,313 rows) | 🟡 build started (2026-08-13) — module + tests shipped in a PR; NOT dispatched against production (operator go-ahead required, see W3 section) |
 
 ## W0 — done
 
@@ -359,6 +360,97 @@ repeat fetches yet.
 **Not enabled, deliberately:** `payload_dual_write` and `payload_index_archive` are OFF, the
 445k-row backfill has not run, and no per-portal W2 contract exists yet. Those wait on the
 operator's O3/O4 sign-off of `volatile_paths` + the storage projection.
+
+## W3 — build started (history backfill from `listing_snapshots`)
+
+Built in a separate git worktree off `origin/main` (never on the main checkout's branch), on a
+DIFFERENT substrate from W2/W2a (`listing_snapshots.raw_json`, not archived HTML), so it does not
+wait on that in-progress work — coordinated with the session building W2a/W2 to avoid touching the
+same files without visibility into each other's changes.
+
+**What shipped, in one PR:**
+
+- **`location_data/claims_remine.py`** — reuses W1's (`location_data.claims_intake`) readers,
+  `Entry`/`ListingRow`/`Claim`/`Absence` shapes, licence ladder (`coordinate_verdict`) and
+  batch/write SQL wholesale rather than re-deriving them: a snapshot's `raw_json` is a verbatim
+  historical copy of the SAME payload shape `listings.raw_json` holds today, so the SAME
+  contract-entry readers apply unchanged. The module's own job is the snapshot scan/keyset over
+  `listing_snapshots` instead of `listings`, which claim types are admissible from that substrate
+  per source, and the snapshot-anchor / observation-time plumbing.
+- **Small additive changes to `location_data/claims_intake.py`** so the two lanes share one write
+  path: `Claim.snapshot_id` / `Absence.snapshot_id` (both `None` by default — W1 unaffected),
+  `_CLAIM_WRITE_SQL` / `_ABSENCE_WRITE_SQL` and the `resighted`/`obs` observation CTE now carry
+  `snapshot_id` through to `location_claims` / `location_claim_absences` /
+  `location_claim_observations`, `dedupe_absence_rows`'s in-batch key includes it (a W3 batch
+  routinely holds several snapshots of ONE listing, unlike W1), `write_result()` takes an
+  `extractor_version` parameter (default unchanged) so a re-mined absence is never misattributed to
+  the W1 lane, and `extract_listing()` gains `route_legacy_shape_to_refetch` (default `True`,
+  unchanged for W1) so a historical legacy-shape snapshot — an accurate fact about the past, not a
+  gap a live refetch could close — never enrolls in the refetch cohort, while the truncation
+  ABSENCE itself still gets recorded (03 §3.2 rule 4: every attempt is recorded, including
+  negatives). **No new migration** — every construct this needed (`snapshot_anchor`, `snapshot_id`,
+  `history_completeness`) was already on the schema per 06 §6.6.6; only the write path had to learn
+  to populate them.
+- **Coordinate-history scoping, resolved against ground truth, not just the design table's
+  hedge.** 06 §6.2.2 hedges mmreality's coordinate with "but only where those fields participated
+  in the hash" — flagged uncertainty in the design corpus. `scraper/scraped_listing.py`'s
+  `_HASH_FIELDS` (the ONE allowlist all eight non-sreality portals share, confirmed live in both
+  `bezrealitky_parser.py` and `mmreality_parser.py`) excludes `lat`/`lon`/`street`/`house_number`/
+  `zip` for ALL eight — so a coordinate-only change never appends a snapshot for any of them,
+  mmreality and bezrealitky included, and a snapshot's mere existence is not evidence a coordinate
+  was checked. Worse for the six `geom_column`-substrate portals (bazos/idnes/ceskereality/
+  realitymix/maxima/remax): `listing_snapshots` carries no `geom`/`lat`/`lon` column at all
+  (migration 001 + 320), and 06 §6.1.3 states their raw_json never carried the coordinate VALUE to
+  begin with, only the provenance method — no historical value to read, full stop. **Only sreality
+  gets `claim_type='coordinate'` claims from this lane.** Every OTHER claim type the contract
+  yields for the eight (obec_code, cast_obce_name, precision_declaration, locality/district text,
+  ...) is still mined; only the coordinate type is filtered out of the entries handed to the
+  reader loop. `history_completeness` is `'full'` for sreality and `'locality_text_only'` for the
+  other eight uniformly, matching 06 §6.4's W3 gate verbatim — deliberately NOT
+  `claims_intake.HISTORY_COMPLETENESS`'s richer `payload_only` split for mmreality/bezrealitky,
+  which answers a different question (W1's "is the CURRENT payload present", not W3's "does a
+  snapshot's existence mean this field was checked").
+- **Batching discipline matches §6.7's W3 risk note** (a prior single-transaction backfill
+  deadlocked against live ingest writers — `repo-known-issues.md` #25): bounded batches with
+  per-batch commit (`guarded()`, reused from `claims_intake`, 5 s lock timeout), keyset pagination
+  over `listing_snapshots.id` (full mode) or `(scraped_at, id)` (incremental), a resumable cursor
+  stamped on `location_claim_batches` (lane `location_claims_remine`, wave `W3`) exactly like W1's
+  `outcome='stopped'` vs `'ok'` split, and an attempt row for every candidate including negatives
+  (a licence-refused or truncated snapshot still writes an absence row, snapshot-scoped).
+- **Lease-row CAS + concurrency group.** `.github/workflows/location_claims_remine.yml` joins the
+  outer `location-batch` GH concurrency group (shared with registry load / claim intake / Mapy
+  inventory / resolve — the 2026-08-10 incident's guard) plus its own inner `location-remine`
+  group, AND takes a `location_jobs` lease-row CAS (`location_data.resolver.lease`, job name
+  `location_claims_remine`) — never an advisory lock, since the transaction-mode pooler would
+  strand one. The lease is a second, orthogonal guard that also catches a manual local invocation
+  racing the scheduled workflow, which a GH-only concurrency group cannot.
+- **`workflowDocs.generated.ts` regenerated** (`python scripts/generate_workflow_docs.py`) so the
+  new workflow's docs stay in sync (CI gate).
+- **Tests** (`tests/location_data/test_claims_remine.py`, 27 cases) cover: coordinate-entry
+  scoping per source, snapshot anchoring (`snapshot_anchor='snapshot'` + the right `snapshot_id` on
+  every claim AND absence), `history_completeness` per the W3 mapping, the refetch-cohort
+  suppression (with the truncation absence still recorded), and — the gate's own language made
+  concrete — that a genuinely changed coordinate across two snapshots produces two Claim objects
+  with different values while a repeated one produces the same value (the corpus-level "one claim
+  row per distinct value, an observation row per re-sighting" guarantee itself is a SQL/DB-level
+  fact exercised by `test_claims_intake_fingerprint.py`'s sibling coverage, not re-derived here).
+  Full existing suite re-run clean after every additive `claims_intake.py` change (3,901 passed,
+  74 skipped, 0 failures).
+
+**Deliberately NOT done in this PR — dispatch is a separate, operator-gated step.** The workflow
+is `workflow_dispatch`-only, no `schedule:` trigger, so merging cannot start the backfill on its
+own. Per standing instruction: before dispatching the ~1.57M-row backfill against production, check
+with the operator — this is a shared instance that four concurrent location lanes have already
+knocked over once (2026-08-10 incident, below). A follow-up PR can add an `incremental` schedule
+(mirroring W1 intake's hourly cron) once the initial full pass has completed.
+
+**Open for the next session / operator sign-off:**
+
+- Dispatch the initial `mode=full` backfill (budgeted `--max-seconds`, resumable if it stops).
+- After it completes: verify the W3 gate (06 §6.4) — a per-listing sreality coordinate/precision
+  time series with VISIBLE oscillation, the 8-portal `locality_text_only` stamp holding, zero
+  coordinate claims from the R2 Mapy inventory on ANY substrate including historical.
+- Decide whether to add the `incremental` cron once the full pass is done.
 
 ## Standing decisions
 
