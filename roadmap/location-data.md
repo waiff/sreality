@@ -452,6 +452,25 @@ knocked over once (2026-08-10 incident, below). A follow-up PR can add an `incre
   coordinate claims from the R2 Mapy inventory on ANY substrate including historical.
 - Decide whether to add the `incremental` cron once the full pass is done.
 
+**Erratum to the design corpus, discovered coordinating with the concurrent W2/W2a session
+(2026-08-13): the module name `location_data/claims_remine.py` is independently assigned to TWO
+different waves.** This section's module re-mines `listing_snapshots` (history, this wave); the
+W2-2 plan (`~/location-data-architecture-2026-08-10/BUILD-PLAN-w2a-w2.md`, "Evidence-bearing
+claims + the re-mine lane") independently assigns the SAME file path, `LANE =
+"location_claims_remine"` and `REMINE_VERSION = "claims_remine@1"` to a module re-mining
+`portal_raw_payloads` (archived HTML, W2) — same naming convention, baked into two design-corpus
+sections for two different substrates. Not cosmetic: `location_claim_batches`'s resume/watermark
+queries key on `(lane, source, scan_mode)` only, so two waves sharing one `lane` string would read
+and corrupt each other's resume cursors the moment both ran for real. Resolution (this wave ships
+first and is already tested): **W3 keeps `location_data/claims_remine.py` / `LANE =
+"location_claims_remine"` / `REMINE_VERSION = "claims_remine@1"` / workflow
+`location_claims_remine.yml` / concurrency group `location-remine`, exactly as shipped here.** W2-2
+(and W2-13's eventual dispatch workflow) must use a disambiguated name instead —
+`location_data/claims_remine_archive.py`, `LANE = "location_claims_remine_archive"`,
+`REMINE_VERSION = "claims_remine_archive@1"`, workflow `location_claims_remine_archive.yml`, group
+`location-remine-archive` — so a future reader hits this note instead of rediscovering the
+collision by watching a resume cursor jump between two substrates.
+
 ## Standing decisions
 
 - **The four heavy location lanes share ONE outer concurrency group, `location-batch`**
