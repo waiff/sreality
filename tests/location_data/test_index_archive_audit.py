@@ -353,6 +353,28 @@ def test_a_portal_with_a_call_site_and_no_rows_at_all_is_marked() -> None:
     assert audit.data_note == aud.NO_ROWS
 
 
+def test_fresh_rows_with_no_call_site_found_are_flagged_as_a_missed_writer() -> None:
+    # The one direction the static classification cannot self-check: if bodies are
+    # still landing for a portal the audit calls `absent`, the audit is wrong.
+    landing = aud.StagingRows(
+        pages=900, oldest=_NOW - datetime.timedelta(days=30),
+        newest=_NOW - datetime.timedelta(hours=2),
+    )
+    audit = _portal(observed=aud.STATE_ABSENT, staging=landing)
+    assert audit.data_note == aud.UNEXPECTED_ROWS
+
+
+def test_an_absent_portal_with_only_old_rows_is_not_flagged() -> None:
+    # Six of nine portals hold pre-June-2026 index rows; that is history, not a
+    # missed writer, and flagging it would bury the one case that matters.
+    historic = aud.StagingRows(
+        pages=900, oldest=_NOW - datetime.timedelta(days=120),
+        newest=_NOW - datetime.timedelta(days=70),
+    )
+    audit = _portal(observed=aud.STATE_ABSENT, staging=historic)
+    assert audit.data_note is None
+
+
 def test_an_absent_portal_with_no_rows_needs_no_data_marker() -> None:
     # Its verdict already says there is no call site; a NO ROWS line beside it is
     # noise on six of nine portals.

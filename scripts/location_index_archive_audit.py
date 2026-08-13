@@ -85,6 +85,10 @@ VERDICT_DECLARED_OFF = "n/a — fetch config declares archive: false (intentiona
 DRIFT = "DRIFT: registry says {declared}, the module reads {observed}"
 STALE = "STALE: newest index row is {hours:.0f} h old (> {limit:.0f} h)"
 NO_ROWS = "NO ROWS: portal_raw_pages holds no index page for this portal"
+UNEXPECTED_ROWS = (
+    "UNEXPECTED: index rows are still landing with no call site found — "
+    "a writer this audit does not know about"
+)
 
 
 @dataclass(frozen=True)
@@ -297,8 +301,13 @@ class PortalAudit:
     @property
     def data_note(self) -> str | None:
         """Why the DATA axis disagrees with the CODE axis, when it does."""
-        if self.staging is None or self.state == STATE_ABSENT:
+        if self.staging is None:
             return None
+        if self.state == STATE_ABSENT:
+            # Fresh rows with no call site in sight means the static classification
+            # missed a writer — the ONE direction this audit cannot self-check, so
+            # the data axis is where it has to surface.
+            return UNEXPECTED_ROWS if self.accumulating else None
         if not self.staging.pages:
             return NO_ROWS
         age = self.staging_age_hours
