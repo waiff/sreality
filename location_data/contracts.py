@@ -28,7 +28,11 @@ CLI:
     python -m location_data.contracts --load --git-ref <sha>      # project + activate
     python -m location_data.contracts --retract sreality@1 --reason contract_misread \\
         --by operator [--extractor-id sr.det.gps]
+    python -m location_data.contracts --shadow sreality@2        # take it out of serving
     python -m location_data.contracts --unshadow sreality@2      # its sample passed
+
+Exactly one lifecycle verb per invocation: `--retract`, `--shadow` and `--unshadow` are
+mutually exclusive, because two of them mean opposite things and one is irreversible.
 """
 
 from __future__ import annotations
@@ -38,6 +42,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import sys
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -548,6 +553,34 @@ def parse_entry(raw: dict[str, Any], *, source: str, index: int) -> ContractEntr
     )
 
 
+# Every top-level key `parse_contract` understands. An unknown key is a REFUSAL, not a
+# shrug: `shaddow: true` would ship a contract LIVE, which is exactly the state the shadow
+# mechanism exists to prevent, and every other key fails open the same way (a typo'd
+# `extractoins:` projects a header with no entries and a silent hash change). Adding a key
+# to the format means adding it here — CI's `--check` run is the gate.
+_TOP_LEVEL_KEYS = frozenset({
+    "portal", "contract_version", "contract_sha256", "shadow",
+    "identity_ladder", "exclusion_zones", "precision_priors", "precision_caps",
+    "extractions", "extractor_runtime", "fetch", "persistence", "regressions",
+    "payload_schema_detector", "pin_collision_semantics",
+})
+
+# `shadow` is operational state, not extraction (migration 404), so it is excluded from
+# `contract_sha256`. Hashing it makes the flag a version-bumping change in git while the
+# migration calls it "an operational UPDATE, not a contract_version bump": deleting the
+# now-obsolete `shadow: true` line after a sample passes would make `project()` refuse the
+# contract with "bump contract_version" — and bumping it would RE-SHADOW the contract and
+# discard the passed sample. A top-level key is never indented, so this anchored line
+# filter cannot reach a nested `shadow:` inside an extraction, and a file without the key
+# hashes to exactly what it hashed to before (asserted over all nine shipped contracts).
+_SHADOW_LINE = re.compile(rb"^shadow[ \t]*:.*(?:\r?\n|$)", re.MULTILINE)
+
+
+def contract_body_hash(body: bytes) -> bytes:
+    """The bytes `contract_sha256` is taken over: the file, minus its `shadow:` line."""
+    return hashlib.sha256(_SHADOW_LINE.sub(b"", body)).digest()
+
+
 def parse_contract(path: Path) -> PortalContract:
     import yaml  # dev/CI-only dependency; see the module docstring.
 
@@ -555,6 +588,12 @@ def parse_contract(path: Path) -> PortalContract:
     doc = yaml.safe_load(body.decode("utf-8"))
     if not isinstance(doc, dict):
         raise ContractError(f"{path}: not a YAML mapping")
+    unknown = sorted(set(doc) - _TOP_LEVEL_KEYS)
+    if unknown:
+        raise ContractError(
+            f"{path}: unknown top-level key(s) {', '.join(unknown)}; known keys are "
+            + ", ".join(sorted(_TOP_LEVEL_KEYS))
+        )
     source = str(_require(doc, "portal", str(path)))
     if source not in EXTRACTOR_PREFIXES:
         raise ContractError(f"{path}: unknown portal '{source}'")
@@ -577,8 +616,9 @@ def parse_contract(path: Path) -> PortalContract:
         version=version,
         # The file's `contract_sha256` field is documentation only — a file cannot carry
         # its own hash. The projection hashes the bytes on disk, which is what makes the
-        # git artefact and the DB row provably identical (02 §2.1.8 mechanism 1).
-        sha256=hashlib.sha256(body).digest(),
+        # git artefact and the DB row provably identical (02 §2.1.8 mechanism 1) — minus
+        # the one line that is operational state rather than extraction (`_SHADOW_LINE`).
+        sha256=contract_body_hash(body),
         identity_ladder=[str(x) for x in (doc.get("identity_ladder") or [])],
         exclusion_zones=list(doc.get("exclusion_zones") or []),
         precision_priors=dict(doc.get("precision_priors") or {}),
@@ -673,10 +713,38 @@ _SET_SHADOW_SQL = """
     FROM (SELECT id, shadow FROM portal_contracts
            WHERE source = %(source)s AND version = %(version)s) was
     WHERE c.id = was.id
-    RETURNING was.shadow
+    RETURNING was.id, was.shadow
 """
 
-_RELATIONS = ("portal_contracts", "portal_contract_entries", "location_claim_retractions")
+# The flip alone would change NOTHING a consumer can see. `location_claims_live` is a view,
+# so the claims appear or vanish instantly — but every consumer, the dashboard and the
+# frozen-sample scorecard read `listing_location_current`, and nothing would ever rebuild
+# it: the claim rows are untouched (claims_intake enqueues only NEWLY INSERTED claims) and
+# the daily backstop re-queues only a missing projection or a stale version tuple
+# (resolver/drain._FULL_SWEEP_SQL), neither of which a flag flip moves. So the flip queues
+# the contract's listings itself, inside the same transaction — the precedent is
+# operator_corrections._OPERATOR_CLAIM_SQL, and it is UNCONDITIONAL for the same
+# read-your-writes reason: an operator re-running `--unshadow` after a failed drain must
+# not get a dead button because the flag already held the target value.
+_SHADOW_ENQUEUE_SQL = """
+    INSERT INTO dirty_locations (listing_id, reason)
+    SELECT DISTINCT c.listing_id, 'contract_shadow'
+      FROM location_claims c
+      JOIN portal_contract_entries pce ON pce.id = c.contract_entry_id
+     WHERE pce.contract_id = %(contract_id)s
+    ON CONFLICT (listing_id) DO NOTHING
+"""
+
+# The enqueue is one indexed scan of the contract's claims, but "the contract's claims" is
+# every listing the portal has ever had — bound it so a flip fails loudly instead of
+# hanging a pooler backend, and so the flag and the queue stay atomic either way.
+_SHADOW_TIMEOUT_SQL = "SET LOCAL statement_timeout = '300s'"
+
+# `location_claims` + `dirty_locations` are here because `set_shadow` writes the second
+# from the first: a pre-flight that only checked the contract tables would let a flip fail
+# halfway with a bare UndefinedTable instead of the schema-not-applied message.
+_RELATIONS = ("portal_contracts", "portal_contract_entries", "location_claim_retractions",
+              "location_claims", "dirty_locations")
 _REGCLASS_SQL = "SELECT to_regclass(%(name)s)"
 
 
@@ -805,28 +873,44 @@ def retract(
     return retraction_id
 
 
+@dataclass(frozen=True, slots=True)
+class ShadowFlip:
+    """What `set_shadow` did. `moved` is False when the flag already held the target value;
+    `enqueued` is how many listings this call newly queued for re-resolution (a listing the
+    queue already holds is not counted twice — it is already going to be rebuilt)."""
+
+    moved: bool
+    enqueued: int
+
+
 def set_shadow(
     conn: psycopg.Connection,
     *,
     source: str,
     version: int,
     shadow: bool,
-) -> bool:
-    """06 §6.4.0(2) — flip a contract version between shadow and live. Returns True if the
-    flag moved; raises if that version was never projected.
+) -> ShadowFlip:
+    """06 §6.4.0(2) — flip a contract version between shadow and live. Raises if that
+    version was never projected.
 
-    Un-shadowing needs NO backfill: the claims have been in `location_claims` since the
-    sweep ran, and migration 404's view excludes them by joining the header, so clearing
-    the flag makes exactly those rows resolver inputs. Nothing is written or rewritten.
+    Un-shadowing REWRITES NO CLAIM: they have been in `location_claims` since the sweep
+    ran, and migration 404's view excludes them by joining the header, so clearing the flag
+    makes exactly those rows resolver inputs. But the *projection* those consumers read is
+    stale until something re-resolves the listings, and nothing else ever would — so the
+    same transaction queues them (`_SHADOW_ENQUEUE_SQL`) and the `*/15` drain rebuilds
+    them. Both directions: re-shadowing a live contract has to un-build them again.
     """
     with conn.transaction():
         with conn.cursor() as cur:
+            cur.execute(_SHADOW_TIMEOUT_SQL)
             cur.execute(_SET_SHADOW_SQL,
                         {"source": source, "version": version, "shadow": shadow})
             row = cur.fetchone()
             if row is None:
                 raise ContractError(f"{source}@{version} is not projected — nothing to flip")
-            return bool(row[0]) != shadow
+            contract_id, was = int(row[0]), bool(row[1])
+            cur.execute(_SHADOW_ENQUEUE_SQL, {"contract_id": contract_id})
+            return ShadowFlip(moved=was != shadow, enqueued=max(cur.rowcount, 0))
 
 
 # ------------------------------------------------------------------ CLI
@@ -874,6 +958,15 @@ def main(argv: list[str] | None = None) -> int:
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s")
 
+    # ONE lifecycle verb per invocation. `--retract` used to win silently over `--shadow`
+    # while `--shadow`+`--unshadow` was refused; retraction is the irreversible one, so
+    # guessing which the operator meant is the worst possible resolution.
+    verbs = [f"--{name}" for name in ("retract", "shadow", "unshadow")
+             if getattr(args, name)]
+    if len(verbs) > 1:
+        print(f"ERROR: {', '.join(verbs)} are mutually exclusive", file=sys.stderr)
+        return 2
+
     if args.retract:
         source, version = _parse_target(args.retract)
         with db.connect() as conn:
@@ -890,9 +983,6 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.shadow or args.unshadow:
-        if args.shadow and args.unshadow:
-            print("ERROR: --shadow and --unshadow are mutually exclusive", file=sys.stderr)
-            return 2
         want = bool(args.shadow)
         source, version = _parse_target(args.shadow or args.unshadow)
         with db.connect() as conn:
@@ -901,8 +991,9 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"ERROR: schema not applied; missing {', '.join(missing)}",
                       file=sys.stderr)
                 return 2
-            moved = set_shadow(conn, source=source, version=version, shadow=want)
-        LOG.info("CONTRACT shadow=%s %s@%s moved=%s", want, source, version, moved)
+            flip = set_shadow(conn, source=source, version=version, shadow=want)
+        LOG.info("CONTRACT shadow=%s %s@%s moved=%s enqueued=%d",
+                 want, source, version, flip.moved, flip.enqueued)
         return 0
 
     contracts = load_all(args.dir)

@@ -11,6 +11,17 @@ scores both systems against them:
 * OLD system = the legacy_* columns snapshotted at draw time (6.4.0 #4 - the
   refetch that follows a draw may rewrite listings.street, so the old system
   is scored as it stood).
+* SHADOW contract = `location_claims_shadow` (migration 404). A contract that
+  cannot meet the floors ships dark - claims mined and stored, excluded from
+  `location_claims_live` - and those same floors are what decides when it may
+  serve, so a shadowed contract nothing can score is a one-way door.
+  `score_shadow_claims` reads that relation directly and scores the CONTRACT's
+  own assertions against the same labels, the same normalizer and the same
+  floors. It covers the three EXTRACTION floors; the fourth, precision class, is
+  a resolver-derived granularity that only exists once the claims are resolver
+  inputs, so it is measured by `score_sample` after un-shadowing - which is safe
+  because un-shadowing is reversible and re-queues the same listings either way
+  (`contracts.set_shadow`).
 
 Text comparison normalizes BOTH sides through migration 382's
 `location_value_norm()` - the one canonical normalizer - so a diacritics or
@@ -231,6 +242,43 @@ _SCORE_SQL = """
 """
 
 
+def _block(
+    raw: dict[str, Any], prefix: str, floor_key: str, *, has_old: bool = True
+) -> dict[str, Any]:
+    """One field's precision/yield block. Shared by both scorecards so the shadow
+    numbers and the served numbers are the same arithmetic on the same floors —
+    two copies would eventually disagree about which denominator is which."""
+    det = raw[f"{prefix}_determinable"] or 0
+    new_asserted = raw[f"{prefix}_new_asserted"] or 0
+    new_match = raw[f"{prefix}_new_match"] or 0
+    out: dict[str, Any] = {
+        "determinable": det,
+        "new": {
+            "asserted": new_asserted,
+            "matches": new_match,
+            "precision_pct": round(100.0 * new_match / new_asserted, 2)
+            if new_asserted else None,
+            "yield_pct": round(100.0 * new_asserted / det, 2) if det else None,
+        },
+        "floor_pct": FLOORS[floor_key],
+    }
+    out["new"]["floor_pass"] = (
+        out["new"]["precision_pct"] is not None
+        and out["new"]["precision_pct"] >= FLOORS[floor_key]
+    )
+    if has_old:
+        old_asserted = raw[f"{prefix}_old_asserted"] or 0
+        old_match = raw[f"{prefix}_old_match"] or 0
+        out["old"] = {
+            "asserted": old_asserted,
+            "matches": old_match,
+            "precision_pct": round(100.0 * old_match / old_asserted, 2)
+            if old_asserted else None,
+            "yield_pct": round(100.0 * old_asserted / det, 2) if det else None,
+        }
+    return out
+
+
 def score_sample(conn: psycopg.Connection, source: str) -> dict[str, Any]:
     with conn.transaction():
         conn.execute("SET LOCAL statement_timeout = '20s'")
@@ -239,35 +287,7 @@ def score_sample(conn: psycopg.Connection, source: str) -> dict[str, Any]:
             raw = cur.fetchone()
 
     def block(prefix: str, floor_key: str, has_old: bool = True) -> dict[str, Any]:
-        det = raw[f"{prefix}_determinable"] or 0
-        new_asserted = raw[f"{prefix}_new_asserted"] or 0
-        new_match = raw[f"{prefix}_new_match"] or 0
-        out: dict[str, Any] = {
-            "determinable": det,
-            "new": {
-                "asserted": new_asserted,
-                "matches": new_match,
-                "precision_pct": round(100.0 * new_match / new_asserted, 2)
-                if new_asserted else None,
-                "yield_pct": round(100.0 * new_asserted / det, 2) if det else None,
-            },
-            "floor_pct": FLOORS[floor_key],
-        }
-        out["new"]["floor_pass"] = (
-            out["new"]["precision_pct"] is not None
-            and out["new"]["precision_pct"] >= FLOORS[floor_key]
-        )
-        if has_old:
-            old_asserted = raw[f"{prefix}_old_asserted"] or 0
-            old_match = raw[f"{prefix}_old_match"] or 0
-            out["old"] = {
-                "asserted": old_asserted,
-                "matches": old_match,
-                "precision_pct": round(100.0 * old_match / old_asserted, 2)
-                if old_asserted else None,
-                "yield_pct": round(100.0 * old_asserted / det, 2) if det else None,
-            }
-        return out
+        return _block(raw, prefix, floor_key, has_old=has_old)
 
     return {
         "data": {
@@ -283,5 +303,133 @@ def score_sample(conn: psycopg.Connection, source: str) -> dict[str, Any]:
             "tool": "location_labels.score_sample",
             "queried_at": _utcnow(),
             "grain": "listing",
+        },
+    }
+
+
+_SHADOWED_VERSIONS_SQL = """
+    SELECT version FROM portal_contracts
+     WHERE source = %(source)s AND shadow
+     ORDER BY version
+"""
+
+# The shadow scorecard: the same frozen labels and the same normalizer as _SCORE_SQL, but
+# the asserted value comes from the CONTRACT's own claim rather than from the resolved
+# projection — because a shadowed contract has no projection, which is the whole point.
+#
+# `DISTINCT ON` picks the newest claim per (listing, claim_type): a contract re-sights the
+# same listing over time and a re-mine at a new extractor_version appends rather than
+# updates, so "what does this contract say about this listing" is the latest row.
+#
+# `location_claims_shadow` is migration 404's scoring relation — unretracted claims whose
+# contract version is shadowed. A retracted claim is excluded there exactly as it is from
+# `location_claims_live`, so a contract cannot score itself out of a hole with claims the
+# operator has already declared wrong.
+_SHADOW_SCORE_SQL = """
+    WITH member AS (
+      SELECT m.listing_id, m.label_street, m.label_street_nd,
+             m.label_obec, m.label_obec_nd, m.label_okres, m.label_okres_nd
+      FROM location_labelled_sample_members m
+      JOIN location_labelled_samples s ON s.id = m.sample_id
+      WHERE s.source = %(source)s AND s.is_current AND m.labelled_at IS NOT NULL
+    ), claim AS (
+      SELECT DISTINCT ON (c.listing_id, c.claim_type)
+             c.listing_id, c.claim_type::text AS claim_type, c.value_norm
+      FROM location_claims_shadow c
+      JOIN member mm ON mm.listing_id = c.listing_id
+      WHERE c.claim_type IN ('street_name', 'obec_name', 'okres_name')
+      ORDER BY c.listing_id, c.claim_type, c.first_observed_at DESC, c.id DESC
+    ), scored AS (
+      SELECT m.*,
+             (SELECT k.value_norm FROM claim k
+               WHERE k.listing_id = m.listing_id AND k.claim_type = 'street_name')
+                 AS street_claim,
+             (SELECT k.value_norm FROM claim k
+               WHERE k.listing_id = m.listing_id AND k.claim_type = 'obec_name')
+                 AS obec_claim,
+             (SELECT k.value_norm FROM claim k
+               WHERE k.listing_id = m.listing_id AND k.claim_type = 'okres_name')
+                 AS okres_claim
+      FROM member m
+    )
+    SELECT
+      count(*) AS labelled,
+
+      count(*) FILTER (WHERE label_street IS NOT NULL AND NOT label_street_nd)
+          AS street_determinable,
+      count(*) FILTER (WHERE label_street IS NOT NULL AND NOT label_street_nd
+                         AND street_claim IS NOT NULL) AS street_new_asserted,
+      count(*) FILTER (WHERE label_street IS NOT NULL AND NOT label_street_nd
+                         AND street_claim IS NOT NULL
+                         AND street_claim = location_value_norm(label_street))
+          AS street_new_match,
+
+      count(*) FILTER (WHERE label_obec IS NOT NULL AND NOT label_obec_nd)
+          AS obec_determinable,
+      count(*) FILTER (WHERE label_obec IS NOT NULL AND NOT label_obec_nd
+                         AND obec_claim IS NOT NULL) AS obec_new_asserted,
+      count(*) FILTER (WHERE label_obec IS NOT NULL AND NOT label_obec_nd
+                         AND obec_claim IS NOT NULL
+                         AND obec_claim = location_value_norm(label_obec))
+          AS obec_new_match,
+
+      count(*) FILTER (WHERE label_okres IS NOT NULL AND NOT label_okres_nd)
+          AS okres_determinable,
+      count(*) FILTER (WHERE label_okres IS NOT NULL AND NOT label_okres_nd
+                         AND okres_claim IS NOT NULL) AS okres_new_asserted,
+      count(*) FILTER (WHERE label_okres IS NOT NULL AND NOT label_okres_nd
+                         AND okres_claim IS NOT NULL
+                         AND okres_claim = location_value_norm(label_okres))
+          AS okres_new_match
+    FROM scored
+"""
+
+# The floors precision class would be scored against; kept out of `gate_pass` because a
+# granularity is minted by the resolver, and a shadowed contract has no resolution.
+SHADOW_SCORED_FLOORS = ("street", "obec", "okres")
+SHADOW_DEFERRED_FLOORS = ("precision_class",)
+
+
+def score_shadow_claims(conn: psycopg.Connection, source: str) -> dict[str, Any]:
+    """06 §6.4.0(2) — score a SHADOWED contract against the frozen sample.
+
+    The un-shadow decision needs a measurement of the dark contract, and the served
+    projection cannot give one: the contract is excluded from `location_claims_live`
+    precisely so it cannot move it. So this scores the contract's own claims, through
+    migration 404's `location_claims_shadow`.
+
+    `shadowed_versions` is empty when nothing is shadowed for this source — then the
+    numbers are all zero by construction and `gate_pass` is None, never False.
+    """
+    with conn.transaction():
+        conn.execute("SET LOCAL statement_timeout = '20s'")
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(_SHADOWED_VERSIONS_SQL, {"source": source})
+            versions = [int(row["version"]) for row in cur.fetchall()]
+            cur.execute(_SHADOW_SCORE_SQL, {"source": source})
+            raw = cur.fetchone()
+
+    blocks = {name: _block(raw, name, name, has_old=False)
+              for name in SHADOW_SCORED_FLOORS}
+    gate_pass: bool | None = None
+    if versions:
+        gate_pass = all(b["new"]["floor_pass"] for b in blocks.values())
+
+    return {
+        "data": {
+            "source": source,
+            "grain": "listing",
+            "shadowed_versions": versions,
+            "labelled": raw["labelled"],
+            **blocks,
+            "floors_scored": list(SHADOW_SCORED_FLOORS),
+            "floors_deferred": list(SHADOW_DEFERRED_FLOORS),
+            "gate_pass": gate_pass,
+        },
+        "metadata": {
+            "tool": "location_labels.score_shadow_claims",
+            "queried_at": _utcnow(),
+            "grain": "listing",
+            "reads": "location_claims_shadow",
         },
     }
