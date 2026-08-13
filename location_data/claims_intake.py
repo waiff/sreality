@@ -1175,6 +1175,7 @@ def _refuse_oversized(
 def extract_listing(
     row: ListingRow, entries: list[Entry], *, max_value_bytes: int | None = None,
     route_legacy_shape_to_refetch: bool = True,
+    record_legacy_shape_absence: bool = False,
 ) -> IntakeResult:
     """Everything this lane knows about one listing. Pure — no DB, no clock, no network.
 
@@ -1185,6 +1186,17 @@ def extract_listing(
     that historical instant — legacy-shape there is an accurate historical fact, not a gap
     a refetch could ever close, and routing it into `location_enrichment_state` would flood
     the real refetch cohort with attempts against rows that were never wrong, only old.
+
+    `record_legacy_shape_absence` defaults False, preserving W1's exact shipped/gated
+    behaviour: the sreality D3-coverage gate (06 §6.4 W1) explicitly scopes the legacy-shape
+    cohort OUT ("gated in W4"), and W1 already surfaces it via the refetch-cohort
+    enrollment above, so adding an absence there too would be new, ungated surface on an
+    already-measured gate. `claims_remine` (W3) passes True: with the refetch routing
+    disabled (the flag above), a `shape == 'legacy'` snapshot would otherwise produce
+    NEITHER a coordinate claim (`_read_point_pair`'s own shape guard) NOR an absence — a
+    silent hole indistinguishable from "not yet re-mined", which is exactly the honesty
+    failure 03 §3.2 rule 4 exists to prevent. `shape == 'absent'` (truncated) already
+    always gets one, independent of this flag.
     """
     if max_value_bytes is None:
         max_value_bytes = env_positive_int(MAX_CLAIM_VALUE_BYTES_ENV,
@@ -1263,6 +1275,12 @@ def extract_listing(
                     listing_id=row.listing_id, surface="api_json", field_="coordinate",
                     reason="not_attempted", extraction_method="portal_structured_field",
                     detail="sreality locality object absent (payload truncation)"))
+            elif shape == "legacy" and record_legacy_shape_absence:
+                result.absences.append(Absence(
+                    listing_id=row.listing_id, surface="api_json", field_="coordinate",
+                    reason="not_attempted", extraction_method="portal_structured_field",
+                    detail="sreality pre-cutover legacy payload shape carries no "
+                           "gps_lat/gps_lon at the post-cutover locator (06 §6.2.1)"))
     return result
 
 

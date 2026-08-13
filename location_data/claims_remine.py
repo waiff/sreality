@@ -75,6 +75,16 @@ WHAT THIS LANE NEVER WRITES
     `IntakeResult.enrichment` outright after extraction (the oversized-value guard inside
     `extract_listing()` is not flag-gated, since a value too large to write is a W1
     concern too — the drop here is the second rail).
+  * A SILENT hole where a legacy-shape sreality snapshot should be. `_read_point_pair`
+    refuses to read a pre-cutover payload at all (it has no `gps_lat`/`gps_lon` at the
+    post-cutover locator), so with the refetch routing above disabled, a `shape='legacy'`
+    snapshot would otherwise produce NEITHER a coordinate claim NOR an absence —
+    indistinguishable from "not yet re-mined". `extract_listing(...,
+    record_legacy_shape_absence=True)` closes that: every legacy-shape snapshot gets an
+    explicit `not_attempted` coordinate absence (03 §3.2 rule 4). W1 does not set this flag
+    (it stays False there) — the sreality D3-coverage gate (06 §6.4 W1) already scopes the
+    legacy-shape cohort out explicitly ("gated in W4"), and adding a new absence shape to
+    an already-measured, already-passed gate is out of scope for this module.
   * A `legacy_column` claim of any kind. `listings.locality` / `.street` /
     `.street_source` are current-state-only columns with no historical shadow, so every
     `SnapshotRow` carries a dummy `legacy_columns` mapping (every `LEGACY_COLUMNS` key
@@ -231,7 +241,7 @@ def remine_snapshot(
     scoped_entries = _entries_for_remine(entries, row.source)
     result = extract_listing(
         row, scoped_entries, max_value_bytes=max_value_bytes,
-        route_legacy_shape_to_refetch=False)
+        route_legacy_shape_to_refetch=False, record_legacy_shape_absence=True)
     completeness = W3_HISTORY_COMPLETENESS[row.source]
     result.claims = [
         replace(c, snapshot_id=snapshot_id, snapshot_anchor="snapshot",
@@ -450,8 +460,16 @@ def run(
                     entries = entries_by_source.get(row.source)
                     if not entries:
                         continue
-                    lat, lon = _payload_lat_lon(row.raw_json, entries)
-                    row = replace(row, lat=lat, lon=lon)
+                    # Only sreality's coordinate entry ever survives `_entries_for_remine`'s
+                    # scoping (see COORDINATE-HISTORY SCOPING above), so `row.lat`/`row.lon`
+                    # are read by `extract_listing()`'s withheld-coordinate heuristic ONLY
+                    # for sreality — peeking at them for every other source (mmreality and
+                    # bezrealitky's contracts carry a real `point_pair` reader too, so the
+                    # peek is not a cheap no-op there) is real JSON-pointer traversal whose
+                    # result is unconditionally discarded across the whole 1.57M-row scan.
+                    if row.source in COORDINATE_HISTORY_SOURCES:
+                        lat, lon = _payload_lat_lon(row.raw_json, entries)
+                        row = replace(row, lat=lat, lon=lon)
                     result.extend(remine_snapshot(snapshot_id, row, entries))
 
                 after_id = int(records[-1][0])

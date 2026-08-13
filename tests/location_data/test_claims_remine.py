@@ -185,6 +185,22 @@ def test_truncated_snapshot_still_records_the_absence():
                for a in result.absences)
 
 
+def test_legacy_shape_snapshot_also_records_the_absence():
+    """W1's own `extract_listing()` records NO absence at all for `shape == 'legacy'`
+    (only 'absent'/truncated) — fine for W1, where the refetch-cohort enrollment already
+    surfaces the row. W3 disables that enrollment (the tests above), so without this the
+    legacy-shape cohort would be a SILENT hole, indistinguishable from "not yet re-mined".
+    `remine_snapshot` must close it: `_read_point_pair` never yields a coordinate claim for
+    a legacy-shape payload (no `gps_lat`/`gps_lon` at the post-cutover locator), and this
+    asserts the compensating absence exists instead."""
+    row, entries = snapshot_row("sreality", SREALITY_LEGACY)
+    result = remine_snapshot(1, row, entries)
+    assert "coordinate" not in claims_by_type(result)
+    coordinate_absences = [a for a in result.absences if a.field_ == "coordinate"]
+    assert coordinate_absences, "a legacy-shape snapshot must not be a silent hole"
+    assert all(a.snapshot_id == 1 for a in coordinate_absences)
+
+
 def test_enrichment_is_always_empty_even_with_an_oversized_value():
     """The oversized-value guard inside `extract_listing()` is NOT flag-gated (it protects
     W1 too), so this asserts the second rail: `remine_snapshot` drops `result.enrichment`
