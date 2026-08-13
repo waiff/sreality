@@ -15,6 +15,11 @@ COPY scraper/ ./scraper/
 COPY toolkit/ ./toolkit/
 COPY api/ ./api/
 COPY scripts/ ./scripts/
+# location_data/ backs the W1v operator-correction route (/location/corrections
+# lazily imports the claim producer + the resolver's single-listing drain for
+# the synchronous 5.5.5 read-your-writes). The resolve path is deliberately
+# pyproj-free (location_data/resolver/geo.py), so the [api] extra covers it.
+COPY location_data/ ./location_data/
 # data/ carries runtime-read files (clip_taxonomy.json for the dedup engine's CLIP
 # settings, condition rubrics/markers). load_taxonomy() reads data/clip_taxonomy.json
 # from the image root, so the realtime-worker dedup lane FileNotFoundError'd without it.
