@@ -349,8 +349,12 @@ def test_sreality_index_pages_are_archived_week_stamped(
 def test_a_freshness_skipped_index_page_is_not_archived(
     appended: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # The client-side skip is what keeps the highest-churn artefact in the system
-    # from being archived on every hourly walk; it must gate the archive too.
+    # Pins today's behaviour, and it is a KNOWN GAP, not a preference: the skip
+    # keeps the highest-churn artefact in the system from being archived on every
+    # hourly walk, but it also drops an index page that genuinely CHANGED inside
+    # the freshness window — which is exactly what upsert_portal_raw_page refuses
+    # to do everywhere it controls. W2a-6's index-coverage audit measures it before
+    # P2 decides the fix; this test is where that decision will show up.
     from scraper import main as scraper_main
 
     monkeypatch.setattr(scraper_main.db, "index_archive_week", lambda: "2026w33")

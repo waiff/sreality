@@ -1347,6 +1347,12 @@ def _index_page_archiver(
             body=lambda: _body().encode("utf-8"),
             content_type="application/json",
         )
+        # KNOWN GAP (W2a-2): this skip returns BEFORE upsert_portal_raw_page, so
+        # it also suppresses the payload dual-write for an index page that changed
+        # inside the freshness window — the one thing that function's own docstring
+        # says the archive must never do, on the highest-churn surface there is.
+        # Left as-is deliberately: reworking the skip is a P2 design question, and
+        # W2a-6's index-coverage audit is what measures the gap first.
         if key in fresh:
             return
         try:

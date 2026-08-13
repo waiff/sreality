@@ -2944,7 +2944,11 @@ def _payload_dual_write_enabled(
     cached = _LIMIT_CACHE.get(source)
     if cached is not None and cached[0] > now:
         return cached[1]
-    # Deferred: scraper.portal must stay free to import scraper.db.
+    # `autocommit` is a PROXY for "not inside a transaction", exact for every
+    # caller today (the drain and the index archivers all hold an autocommit
+    # connection). It would under-protect only an autocommit connection read from
+    # inside an explicit `with conn.transaction():` — no such caller exists.
+    # Deferred import: scraper.portal must stay free to import scraper.db.
     from scraper.portal import load_portal_config
 
     value = False
