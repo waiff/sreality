@@ -190,9 +190,55 @@ def test_a_disabled_lane_reads_nothing_takes_no_lease_and_exits_clean(
     assert "location_claim_batches" not in executed, "a batch row was opened while disabled"
     assert "delete" not in executed
     # Exactly the two statements the gate needs, each inside its own bounded transaction.
+    # Exactly the preflight plus the two statements the gate needs. The preflight is three
+    # `to_regclass` catalog probes — it reads no row of any of them.
     assert [sql for sql, _ in conn.executed if "set_config" not in sql] == [
+        payload_prune._REGCLASS_SQL, payload_prune._REGCLASS_SQL,
+        payload_prune._REGCLASS_SQL,
         payload_prune._ENSURE_LANE_SQL, payload_prune._LANE_ENABLED_SQL,
     ]
+
+
+def test_an_unmigrated_database_refuses_instead_of_crashing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`ensure_lane` WRITES to `location_jobs`, one of the checked relations, so the
+    preflight has to lead. Before it did, an unmigrated database got an UndefinedTable
+    traceback out of the seed instead of the refusal this message exists to be."""
+    conn = _RecordingConn(enabled=False, relations_present=False)
+    monkeypatch.setenv("SUPABASE_DB_URL", "postgresql://unused")
+    monkeypatch.setattr(payload_prune.db, "connect", lambda: _Ctx(conn))
+    monkeypatch.setattr(payload_prune.lease, "held", _never_leased)
+
+    assert payload_prune.main([]) == 2
+
+    executed = [sql for sql, _ in conn.executed if "set_config" not in sql]
+    assert executed == [payload_prune._REGCLASS_SQL] * 3, (
+        "the lane seed ran against a database that has no location schema")
+
+
+@pytest.mark.parametrize("flag", ["--version-cap", "--hot-window-days"])
+@pytest.mark.parametrize("value", ["0", "-1"])
+def test_a_non_positive_retention_budget_is_refused_not_silently_replaced(
+    monkeypatch: pytest.MonkeyPatch, flag: str, value: str,
+) -> None:
+    """`value or fallback` silently swallowed an explicit 0, running the sweep under the
+    default instead. Refused rather than floored: this lane deletes rows, so a typo'd
+    budget must fail loudly instead of quietly meaning something else."""
+    conn = _RecordingConn(enabled=False)
+    monkeypatch.setenv("SUPABASE_DB_URL", "postgresql://unused")
+    monkeypatch.setattr(payload_prune.db, "connect", lambda: _Ctx(conn))
+
+    assert payload_prune.main([flag, value]) == 2
+    assert conn.executed == [], "the database was touched before the budget was validated"
+
+
+def test_an_explicit_budget_beats_the_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(payload_prune.HOT_WINDOW_ENV, "45")
+    assert payload_prune._explicit_or_env(
+        "--hot-window-days", 7, payload_prune.HOT_WINDOW_ENV, 90) == 7
+    assert payload_prune._explicit_or_env(
+        "--hot-window-days", None, payload_prune.HOT_WINDOW_ENV, 90) == 45
 
 
 def test_an_enabled_lane_does_reach_the_lease(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -490,6 +536,48 @@ def test_the_sweep_reports_the_bytes_it_reclaimed(conn: psycopg.Connection) -> N
 
 
 @requires_db
+def test_cap_evictions_are_counted_in_the_bytes_reported(
+    conn: psycopg.Connection,
+) -> None:
+    """The cap is the majority of a first sweep — a listing's fetch history is far deeper
+    than 20 versions — and its statement returned only (id, key), so every capped row was
+    invisible to the one number the storage sign-off is read from."""
+    native = _key()
+    body = b'{"filler": "' + b"x" * 50_000 + b'"}'
+    for i in range(5):
+        _append(conn, native, body.replace(b"filler", f"f{i}".encode()))
+
+    # Nothing is cold: this is purely the count-based path.
+    result = _sweep(conn, native, version_cap=2, hot_window=10_000)
+
+    assert (result["capped"], result["cold"]) == (2, 0)
+    assert result["bytes_freed"] > 0
+    assert result["bytes_uncompressed"] > 100_000
+
+
+@requires_db
+def test_a_group_whose_only_old_body_is_its_first_version_is_not_visited(
+    conn: psycopg.Connection,
+) -> None:
+    """Steady state for any listing tracked longer than the hot window. The first version
+    is always pinned, so selecting the group would open a transaction that removes
+    nothing — the discovery predicate excludes the edge pins from its cold count."""
+    source, native = _isolated_source(), _key()
+    for i in range(3):
+        _append(conn, native, f'{{"v": {i}}}'.encode(), source=source)
+    _backdate(conn, native, [1], days=400)
+
+    stats = payload_prune.run(
+        conn, source=source, version_cap=10_000, hot_window=90, key_page=10_000,
+        max_seconds=None, max_groups=None, start_after_source="", start_after_native="",
+        statement_timeout=60, dry_run=True, note=None)
+
+    assert stats["keys_scanned"] == 1
+    assert stats["groups_examined"] == 0
+    assert _versions(conn, native) == [1, 2, 3]
+
+
+@requires_db
 def test_a_single_version_group_is_never_a_candidate(conn: psycopg.Connection) -> None:
     """After W2a-4's migration every backfilled page is a one-row group whose only body is
     simultaneously first and latest. Visiting all 445k to delete nothing is the difference
@@ -592,7 +680,7 @@ class _Cursor:
 
     def fetchone(self) -> tuple[Any, ...] | None:
         if "to_regclass" in self._last:
-            return ("present",)
+            return ("present",) if self.conn.relations_present else (None,)
         if "enabled from location_jobs" in " ".join(self._last.split()).lower():
             return (self.conn.enabled,)
         return None
@@ -615,9 +703,10 @@ class _Tx:
 class _RecordingConn:
     """Records every statement. `enabled` is what `location_jobs` reports for the lane."""
 
-    def __init__(self, enabled: bool) -> None:
+    def __init__(self, enabled: bool, relations_present: bool = True) -> None:
         self.executed: list[tuple[str, object]] = []
         self.enabled = enabled
+        self.relations_present = relations_present
 
     def cursor(self) -> _Cursor:
         return _Cursor(self)

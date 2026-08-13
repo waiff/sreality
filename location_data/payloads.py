@@ -44,7 +44,7 @@ import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Protocol
+from typing import Any, NamedTuple, Protocol
 
 import psycopg
 
@@ -100,6 +100,23 @@ _CONTENT_ENCODINGS = ("identity", "gzip")
 
 class PayloadError(RuntimeError):
     """The body could not be archived; the caller decides whether that is fatal."""
+
+
+class EvictedBody(NamedTuple):
+    """One row a retention statement removed, and what it was holding.
+
+    * `byte_size` is the body as fetched; `stored_bytes` is what Postgres was holding
+      after compression, and is None exactly when the body lived in R2.
+    * Both retention statements RETURN this column order — the cap here and the hot
+      window in `payload_prune` — so the two paths report one set of figures. The cap
+      used to return only (id, key), which silently left every capped row out of the
+      bytes-reclaimed number the storage sign-off is read from.
+    """
+
+    id: int
+    r2_key: str | None
+    byte_size: int
+    stored_bytes: int | None
 
 
 class ObjectStore(Protocol):
@@ -328,7 +345,7 @@ DELETE FROM portal_raw_payloads p
  WHERE p.id = r.id
    AND NOT r.pinned
    AND r.rn > %(version_cap)s::integer
-RETURNING p.id, p.body_r2_key
+RETURNING p.id, p.body_r2_key, p.byte_size, octet_length(p.body)
 """
 
 # An R2 key is content-addressed, so two rows in DIFFERENT groups that fetched
@@ -372,8 +389,8 @@ def prune_group(
     source_id_native: str,
     page_kind: str,
     version_cap: int,
-) -> list[tuple[int, str | None]]:
-    """Evict unpinned bodies ranked beyond the cap; returns the (id, r2 key) evicted.
+) -> list[EvictedBody]:
+    """Evict unpinned bodies ranked beyond the cap; returns what was removed.
 
     * Reads `pinned`, never recomputes it: call `repin_group` FIRST, in the same
       transaction, or the cap ranks against a stale pin set.
@@ -384,7 +401,7 @@ def prune_group(
         "page_kind": page_kind,
         "version_cap": version_cap,
     })
-    return [(int(row[0]), row[1]) for row in cur.fetchall()]
+    return [EvictedBody(*row) for row in cur.fetchall()]
 
 
 def orphaned_r2_keys(cur: psycopg.Cursor, keys: Sequence[str]) -> tuple[str, ...]:
@@ -541,8 +558,9 @@ def append_payload(
         if inserted:
             repin_group(cur, **group)
             evicted = prune_group(cur, **group, version_cap=cap)
-            evicted_ids = tuple(row_id for row_id, _ in evicted)
-            evicted_keys = orphaned_r2_keys(cur, [key for _, key in evicted if key])
+            evicted_ids = tuple(row.id for row in evicted)
+            evicted_keys = orphaned_r2_keys(
+                cur, [row.r2_key for row in evicted if row.r2_key])
 
     if evicted_ids:
         # The orphaned R2 objects are handed to W2a-5's pruner, which owns "report

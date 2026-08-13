@@ -126,17 +126,35 @@ SELECT source, source_id_native
 #
 # The cold count is computed here rather than inferred from `min(last_observed_at)` so the
 # same cutoff decides discovery and deletion; two spellings of "old" could disagree.
+#
+# `evictable` excludes the EDGE pins, and that exclusion is what keeps the sweep cheap in
+# steady state: any listing tracked longer than the hot window has an old first version, so
+# counting it as cold would select the group for a full transaction — re-pin, two DELETEs,
+# an orphan lookup — that then removes nothing, because `repin_group` pins that row. The
+# claim / contradiction pins are deliberately NOT modelled here: they need the claim store,
+# they are rare, and over-selecting is only wasted work, never a wrong result.
+#
+# A NULL `version_seq` counts as evictable, matching `_REPIN_SQL`'s `coalesce(..., false)`
+# treatment of it as unpinned — otherwise a version-less row could never be discovered.
 _GROUPS_SQL = """
+WITH scoped AS (
+    SELECT source, source_id_native, page_kind,
+           (last_observed_at < %(cutoff)s
+            AND coalesce(version_seq NOT IN (min(version_seq) OVER grp,
+                                             max(version_seq) OVER grp), true)) AS evictable
+      FROM portal_raw_payloads
+     WHERE (source, source_id_native) > (%(after_source)s::text, %(after_native)s::text)
+       AND (source, source_id_native) <= (%(through_source)s::text,
+                                          %(through_native)s::text)
+       AND (%(source_filter)s::text IS NULL OR source = %(source_filter)s)
+    WINDOW grp AS (PARTITION BY source, source_id_native, page_kind)
+)
 SELECT source, source_id_native, page_kind::text, count(*) AS versions,
-       count(*) FILTER (WHERE last_observed_at < %(cutoff)s) AS cold
-  FROM portal_raw_payloads
- WHERE (source, source_id_native) > (%(after_source)s::text, %(after_native)s::text)
-   AND (source, source_id_native) <= (%(through_source)s::text, %(through_native)s::text)
-   AND (%(source_filter)s::text IS NULL OR source = %(source_filter)s)
+       count(*) FILTER (WHERE evictable) AS cold
+  FROM scoped
  GROUP BY source, source_id_native, page_kind
 HAVING count(*) > 1
-   AND (count(*) > %(version_cap)s::integer
-        OR count(*) FILTER (WHERE last_observed_at < %(cutoff)s) > 0)
+   AND (count(*) > %(version_cap)s::integer OR count(*) FILTER (WHERE evictable) > 0)
  ORDER BY source, source_id_native, page_kind
 """
 
@@ -206,6 +224,20 @@ def missing_relations(conn: psycopg.Connection) -> list[str]:
     return missing
 
 
+def require_relations(conn: psycopg.Connection) -> None:
+    """Refuse cleanly on an unmigrated database, BEFORE anything else touches it.
+
+    * `location_jobs` is one of the three checked relations, and the lane seed writes to
+      it — so this has to run ahead of `ensure_lane`, or the INSERT raises `UndefinedTable`
+      and the operator gets a traceback instead of the refusal this message exists to be.
+    """
+    missing = missing_relations(conn)
+    if missing:
+        raise PruneRefused(
+            f"location schema not applied; missing {', '.join(missing)} "
+            f"(migrations 380-387 and 403)")
+
+
 def ensure_lane(conn: psycopg.Connection, *, statement_timeout: int) -> None:
     """Create the ops-calendar row DISABLED if it does not exist yet.
 
@@ -259,18 +291,22 @@ def prune_one_group(
             "page_kind": page_kind,
             "cutoff": cutoff,
         })
-        cold = cur.fetchall()
-        keys = [key for _, key in capped if key]
-        keys += [row[1] for row in cold if row[1]]
-        orphaned = payloads.orphaned_r2_keys(cur, keys)
+        cold = [payloads.EvictedBody(*row) for row in cur.fetchall()]
+        # BOTH paths, not just the window. The cap is the majority of a first sweep — a
+        # listing's fetch history is far deeper than 20 versions — so summing only the
+        # cold rows understated the one number this lane exists to report.
+        evicted = capped + cold
+        orphaned = payloads.orphaned_r2_keys(
+            cur, [row.r2_key for row in evicted if row.r2_key])
     return {
         "capped": len(capped),
         "cold": len(cold),
-        # `byte_size` is the body as fetched; `octet_length` is what Postgres was holding
+        # `byte_size` is the body as fetched; `stored_bytes` is what Postgres was holding
         # after compression. Reporting both is the difference between "how much archive was
         # dropped" and "how much disk came back".
-        "bytes_uncompressed": sum(int(row[2]) for row in cold),
-        "bytes_freed": sum(int(row[3]) for row in cold if row[3] is not None),
+        "bytes_uncompressed": sum(row.byte_size for row in evicted),
+        "bytes_freed": sum(
+            row.stored_bytes for row in evicted if row.stored_bytes is not None),
         "r2_keys_orphaned": orphaned,
     }
 
@@ -290,11 +326,7 @@ def run(
     dry_run: bool,
     note: str | None,
 ) -> dict[str, Any]:
-    missing = missing_relations(conn)
-    if missing:
-        raise PruneRefused(
-            f"location schema not applied; missing {', '.join(missing)} "
-            f"(migrations 380-387 and 403)")
+    require_relations(conn)
 
     cutoff = hot_window_cutoff(hot_window)
     batch_id: int | None = None
@@ -428,6 +460,29 @@ def run(
     return stats
 
 
+def _explicit_or_env(flag: str, value: int | None, env: str, default: int) -> int:
+    """An explicitly passed retention budget wins over the env; a non-positive one is refused.
+
+    * `is not None`, never `or`: 0 is falsy, so `value or fallback` would silently replace
+      an operator's explicit zero with the default and run under a budget they did not ask
+      for — the pattern `payloads.append_payload` already avoids.
+    * Non-positive is REFUSED rather than floored the way `env_positive_int` floors an
+      ambient env var. This lane removes rows, so a typo'd budget has to fail loudly
+      instead of quietly running under a different one, and nothing is lost by refusing:
+      `--version-cap 1` already means "keep only the pins", because rank 1 is the latest
+      version and the latest version is always pinned.
+    """
+    if value is None:
+        return loader_db.env_positive_int(env, default)
+    if value <= 0:
+        raise PruneRefused(
+            f"{flag}={value} is not positive. This lane deletes rows, so a non-positive "
+            f"budget is refused rather than quietly replaced by ${env}. For the strictest "
+            f"legal retention pass `{flag} 1` — the pins (first version, latest version, "
+            f"claim-referenced and disputed bodies) survive either way.")
+    return value
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Re-assert the payload archive's version cap and evict unpinned "
@@ -461,9 +516,17 @@ def main(argv: list[str] | None = None) -> int:
         print("ERROR: SUPABASE_DB_URL is not set.", file=sys.stderr)
         return 2
 
-    version_cap = args.version_cap or loader_db.env_positive_int(
-        payloads.VERSION_CAP_ENV, payloads.DEFAULT_VERSION_CAP)
-    hot_window = args.hot_window_days or hot_window_days()
+    try:
+        version_cap = _explicit_or_env(
+            "--version-cap", args.version_cap,
+            payloads.VERSION_CAP_ENV, payloads.DEFAULT_VERSION_CAP)
+        hot_window = _explicit_or_env(
+            "--hot-window-days", args.hot_window_days,
+            HOT_WINDOW_ENV, DEFAULT_HOT_WINDOW_DAYS)
+    except PruneRefused as exc:
+        print(f"REFUSED: {exc}", file=sys.stderr)
+        return 2
+
     kwargs: dict[str, Any] = {
         "source": args.source, "version_cap": version_cap, "hot_window": hot_window,
         "key_page": max(MIN_KEY_PAGE, min(MAX_KEY_PAGE, args.key_page)),
@@ -475,20 +538,25 @@ def main(argv: list[str] | None = None) -> int:
     }
 
     with db.connect() as conn:
-        # THE SAFETY SEQUENCE, and the reason a live weekly cron is safe to ship. The
-        # ops-calendar row is created disabled, the flag is read, and a disabled lane
-        # returns HERE — before the lease, before the keyset, before the archive is read at
-        # all. `lease._ACQUIRE_SQL` carries `AND enabled` as the second, independent rail:
-        # even if this gate were bypassed, a disabled lane cannot take the lease and `run`
-        # is never reached.
-        ensure_lane(conn, statement_timeout=args.statement_timeout)
-        if not lane_enabled(conn, statement_timeout=args.statement_timeout):
-            LOG.info("PRUNE lane %s is disabled; nothing scanned, nothing removed. "
-                     "Enable it with UPDATE location_jobs SET enabled = true WHERE "
-                     "job_name = '%s' once the W2a storage gate is signed and "
-                     "%s is decided.", JOB_NAME, JOB_NAME, HOT_WINDOW_ENV)
-            return 0
         try:
+            # THE SAFETY SEQUENCE, and the reason a live weekly cron is safe to ship. The
+            # schema is checked, the ops-calendar row is created disabled, the flag is
+            # read, and a disabled lane returns HERE — before the lease, before the keyset,
+            # before the archive is read at all. `lease._ACQUIRE_SQL` carries `AND enabled`
+            # as the second, independent rail: even if this gate were bypassed, a disabled
+            # lane cannot take the lease and `run` is never reached.
+            #
+            # The preflight leads, because the seed below WRITES to one of the relations it
+            # checks: on an unmigrated database its INSERT would raise UndefinedTable and
+            # replace the refusal with a traceback.
+            require_relations(conn)
+            ensure_lane(conn, statement_timeout=args.statement_timeout)
+            if not lane_enabled(conn, statement_timeout=args.statement_timeout):
+                LOG.info("PRUNE lane %s is disabled; nothing scanned, nothing removed. "
+                         "Enable it with UPDATE location_jobs SET enabled = true WHERE "
+                         "job_name = '%s' once the W2a storage gate is signed and "
+                         "%s is decided.", JOB_NAME, JOB_NAME, HOT_WINDOW_ENV)
+                return 0
             if args.dry_run:
                 # No lease on a dry run: it removes nothing, so there is nothing to
                 # serialise against, and releasing the lease as 'ok' would stamp
