@@ -8,12 +8,19 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from location_data.claims_intake import extract_listing, sreality_payload_shape
+import pytest
+
+from location_data.claims_intake import (
+    IntakeRefused,
+    extract_listing,
+    sreality_payload_shape,
+)
 from tests.location_data.claim_intake_fixtures import (
     BAZOS_LINK,
     BEZREALITKY,
     CESKEREALITY_NULL_LOCALITY,
     CESKEREALITY_PAGE,
+    CESKEREALITY_STREET_ONLY,
     IDNES_PAGE,
     MAXIMA_PAGE,
     MMREALITY_ACCURATE,
@@ -385,6 +392,100 @@ def test_the_payload_claim_and_the_legacy_claim_coexist_when_both_have_a_value()
     assert lines["cr.det.legacy_locality"].legacy_source_column == "listings.locality"
 
 
+# ------------------------------- the residual zero-claim cohort measured on 2026-08-13
+#
+# After the v2 locality recovery the gate sat at 98.94% (4,109 ACTIVE rows with no claim).
+# On 957 of them — ceskereality's silent-parse cohort — `listings.street` is the last
+# signal W1 can read, and 06 §6.1.3 admits it only for the writer that is the portal.
+
+def test_a_parser_street_is_the_last_signal_the_silent_parse_cohort_has():
+    """`locality_text` present and NULL, `listings.locality` NULL as well, no street key
+    anywhere in the slim dict — so `cr.det.legacy_locality` yields nothing and the column
+    is the only substrate left. Class B: method, surface, anchor, licence, blur, the
+    `medium` cap and the write-path flag are all stated, none defaulted."""
+    result = extract_listing(
+        listing("ceskereality", CESKEREALITY_STREET_ONLY,
+                locality=None, street="Svatoplukova", street_source="parser"),
+        entries_for("ceskereality"))
+
+    assert [c.extractor_id for c in result.claims] == ["cr.det.legacy_street"]
+    claim = result.claims[0]
+    assert claim.value_text == "Svatoplukova"
+    assert claim.claim_type == "street_name"
+    assert claim.extraction_method == "legacy_column"
+    assert claim.surface == "legacy_column"
+    assert claim.page_kind == "none"
+    assert claim.legacy_source_column == "listings.street"
+    assert claim.snapshot_anchor == "unanchored_legacy"
+    assert claim.licence_class == "portal"
+    assert claim.blur_evidence == "none"
+    assert claim.claim_confidence == "medium"
+    # The guard NAMES the writer, which is the one thing `cr.det.legacy_locality` cannot
+    # do — so this entry declares the write path known (§6.6 rule 3).
+    assert claim.legacy_write_path_unknown is False
+    assert claim.history_completeness == "locality_text_only"
+    assert claim.extractor_version == "contract:ceskereality@3"
+
+
+def test_a_resolver_or_unattributed_street_is_never_a_claim():
+    """06 §6.1.3 classes the SAME column D under the other two stamps: `resolver` is a
+    RÚIAN address-point inference (~11 of ~21 text-checkable ones wrong) and NULL is the
+    unattributable legacy-write cohort. Quarantine, never a claim — and no absence either,
+    because W1 records only the two negatives of §6.1.5."""
+    for source, payload in (("ceskereality", CESKEREALITY_STREET_ONLY),
+                            ("realitymix", REALITYMIX_NULL_LOCALITY)):
+        for stamp in ("resolver", None, "", "PARSER"):
+            result = extract_listing(
+                listing(source, payload, locality=None,
+                        street="Svatoplukova", street_source=stamp),
+                entries_for(source))
+            assert result.claims == [], (source, stamp)
+            assert result.absences == [], (source, stamp)
+
+
+def test_the_street_guard_is_the_only_thing_standing_between_the_two_verdicts():
+    """One row, one column, two stamps: the value is identical and the verdict is not.
+    That is the whole mechanic — the split is provenance, never the string."""
+    def claims(stamp: str | None) -> list[str]:
+        result = extract_listing(
+            listing("realitymix", REALITYMIX_NULL_LOCALITY, locality=None,
+                    street="Křimická", street_source=stamp),
+            entries_for("realitymix"))
+        return [c.extractor_id for c in result.claims]
+
+    assert claims("parser") == ["rm.det.legacy_street"]
+    assert claims("resolver") == []
+
+
+def test_a_guarded_entry_refuses_a_row_the_scan_did_not_select_the_guard_column_for():
+    """A guard column missing from the row is a scan/contract mismatch — a deploy error.
+    Reading it as NULL would silently block every claim the entry could ever make, so it
+    raises instead (the same treatment an unknown reader gets)."""
+    row = listing("ceskereality", CESKEREALITY_STREET_ONLY,
+                  street="Svatoplukova", street_source="parser")
+    starved = replace(row, legacy_columns={"listings.locality": None,
+                                           "listings.street": "Svatoplukova"})
+    with pytest.raises(IntakeRefused, match="listings.street_source"):
+        extract_listing(starved, entries_for("ceskereality"))
+
+
+def test_the_street_claim_and_the_locality_claim_are_independent_axes():
+    """Where both columns survive, both are emitted with distinct ids and distinct claim
+    types — a street_name beside an address_line_verbatim is evidence, not duplication."""
+    result = extract_listing(
+        listing("ceskereality", CESKEREALITY_NULL_LOCALITY,
+                locality="České Budějovice 4, U Smaltovny",
+                street="U Smaltovny", street_source="parser"),
+        entries_for("ceskereality"))
+    by_id = {c.extractor_id: c for c in result.claims}
+
+    assert set(by_id) == {"cr.det.legacy_locality", "cr.det.legacy_street"}
+    assert by_id["cr.det.legacy_locality"].claim_type == "address_line_verbatim"
+    assert by_id["cr.det.legacy_street"].claim_type == "street_name"
+    assert by_id["cr.det.legacy_locality"].legacy_write_path_unknown is True
+    assert by_id["cr.det.legacy_street"].legacy_write_path_unknown is False
+
+
 def test_every_claim_writes_blur_evidence_and_history_completeness_explicitly():
     cases = (
         ("sreality", SREALITY_POST_CUTOVER, 50.0, 14.4),
@@ -400,9 +501,10 @@ def test_every_claim_writes_blur_evidence_and_history_completeness_explicitly():
     expected_history = {
         "sreality": "full", "bezrealitky": "payload_only", "mmreality": "payload_only",
     }
-    # The three portals whose contract was bumped to close the 2026-08-11 coverage gap;
+    # The portals whose contract was bumped to close a measured coverage gap — remax once
+    # (2026-08-11), ceskereality and realitymix twice (the street column, 2026-08-13);
     # every other portal is still on its original version.
-    expected_version = {"remax": 2, "ceskereality": 2, "realitymix": 2}
+    expected_version = {"remax": 2, "ceskereality": 3, "realitymix": 3}
     for source, payload, lat, lon in cases:
         result = extract_listing(listing(source, payload, lat=lat, lon=lon),
                                  entries_for(source))

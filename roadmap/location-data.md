@@ -99,8 +99,8 @@ run on `listings.geom` and the geo-derived admin columns. The consumer flip is W
   Křovák→WGS84 check **0.03 m** on the pinned PROJ pipeline), **20,034** polygonal units each
   carrying three geometries (authoritative + subdivided pip + render), gazetteer **217,515** names.
   Boundary packs resume through per-layer done-sets; monthly baseline cron + the boundaries lane.
-- **Contracts** — 9 portal YAMLs projected, **v2** for remax / ceskereality / realitymix; intake
-  runs hourly-incremental with byte-bounded chunked writes.
+- **Contracts** — 9 portal YAMLs projected, **v2** for remax and **v3** for ceskereality /
+  realitymix; intake runs hourly-incremental with byte-bounded chunked writes.
 - **Refetch cohort** — **38,612** sreality rows (legacy-shape or 80 KB-truncated payloads) parked
   in `location_enrichment_state(lane='sreality_detail_refetch')`. **W4 work.**
 
@@ -138,6 +138,18 @@ sequencing, not the measurements.
   and v1 only read the banned `/address`) and `rx./cr./rm..det.legacy_locality` (a new
   `legacy_text_column` reader over `listings.locality`, capped at `claim_confidence='medium'` and
   flagged `legacy_write_path_unknown` **from the contract**).
+- **v3 guards a legacy column on its PROVENANCE, not on NOT NULL** (2026-08-13). v2 left the gate
+  at 98.94% (4,109 zero-claim ACTIVE rows), and on ceskereality's 3,280 the payload
+  `locality_text` *and* `listings.locality` are both NULL — `listings.street` is the last
+  W1-readable signal. 06 §6.1.3 classes that column per **writer**, so `cr./rm..det.legacy_street`
+  read it through a generic `locator.require_column_equals: {listings.street_source: parser}`:
+  the class-B parser arm is admitted, the class-D `resolver` (RÚIAN inference) and NULL (legacy
+  writes) arms are refused before they can become claims. The guard is contract DATA, not a portal
+  branch, and it is the reason those two entries declare `write_path_unknown: false` — a guard
+  that names the writer answers §6.6 rule 3. Measured recovery: **+957** ceskereality rows →
+  **99.18%**, clearing the ≥99% gate; realitymix contributes **0** (all 243 of its street-bearing
+  zero-claim rows are `street_source IS NULL`) and gains ~10k street claims on already-covered
+  rows instead. A `street IS NOT NULL` guard would have bought those 243 by admitting class D.
 - **Throughput was round trips, not indexes.** The drain went 3 s/listing → the current rate in
   two rounds, and round 2 measured the floor: a GitHub-runner↔Frankfurt round trip prices at
   **~75 ms** while the same registry questions cost **0.02–0.5 ms** server-side, so the rate was
