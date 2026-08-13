@@ -119,10 +119,69 @@ RETRACTION_REASONS = frozenset({
     "superseded_backfill", "operator_judgement",
 })
 
-# Surfaces reachable from `listings.raw_json` — the only substrate W1 mines (06 §6.2.1).
-# A `reader` may only be declared on one of these; every other entry is declared for W2
-# and carries no reader, so `claims_intake` cannot execute it by accident.
-W1_SUBSTRATE_SURFACES = frozenset({"api_json", "graphql", "embedded_json", "legacy_column"})
+# Substrate legality is PER READER, not per wave.
+#
+# W1 gated readers fleet-wide: any reader was legal on any raw_json-reachable surface
+# (api_json / graphql / embedded_json / legacy_column) and illegal everywhere else. That
+# gate is one wave wide — it says nothing once W2's HTML readers land — and it leaves two
+# holes open inside its own wave: `legacy_text_column` on `api_json` would pass validation
+# and then KeyError on `locator.legacy_source_column`, and `geom_column` on `graphql`
+# would read `listings.geom` while stamping the claim as portal payload (wrong surface,
+# and `_base` would anchor it `unanchored_latest_fetch` instead of `unanchored_legacy`).
+# Each reader mines exactly ONE kind of substrate, so what it may be declared on is a
+# property of the reader.
+#
+# Pure DATA on purpose: this module is the deploy-time/CI lane and must not import
+# `location_data.claims_intake` (the runtime extractor, which pulls in the loader and the
+# DB). The two tables are held in sync by tests/location_data/test_claims_intake_contracts.
+_PAYLOAD_SURFACES = frozenset({"api_json", "graphql", "embedded_json"})
+
+# The surfaces each `location_data.claims_intake` reader may legally execute on.
+#   * payload readers address `raw_json` by JSON pointer -> the three surfaces whose bytes
+#     ARE the payload. `scalar` and `conflict_signal` additionally run on `legacy_column`,
+#     where the pointer addresses a key OUR OWN scraper wrote into the payload (bazos
+#     `raw_json.locality_text`, the remax carousel address) — 06 §6.1.3's class-B mirrors
+#     that happen to live inside the JSON rather than in a column.
+#   * `coords_stamp_quality` grades our own geocoder's provenance block
+#     (`raw_json.coords`), which is never portal payload -> `legacy_column` only.
+#   * `geom_column` (reads `listings.geom`) and `legacy_text_column` (reads a class-B
+#     `listings` TEXT column) touch no payload at all -> `legacy_column` only.
+READER_SUBSTRATES: dict[str, frozenset[str]] = {
+    "scalar": _PAYLOAD_SURFACES | {"legacy_column"},
+    "namespaced_id": _PAYLOAD_SURFACES,
+    "point_pair": _PAYLOAD_SURFACES,
+    "bbox_envelope": _PAYLOAD_SURFACES,
+    "declared_quality": _PAYLOAD_SURFACES,
+    "declared_bool_quality": _PAYLOAD_SURFACES,
+    "conflict_signal": _PAYLOAD_SURFACES | {"legacy_column"},
+    "coords_stamp_quality": frozenset({"legacy_column"}),
+    "geom_column": frozenset({"legacy_column"}),
+    "legacy_text_column": frozenset({"legacy_column"}),
+}
+
+# The `transform` / `guards` vocabularies the extractor actually IMPLEMENTS
+# (`claims_intake.TRANSFORMS` / `.GUARDS`; a transform is named before its `:arg`). 02
+# §2.1.2's vocabulary is deliberately larger — entries are declared ahead of the wave that
+# will run them — and an unimplemented name is a silent no-op wherever it is executed:
+# `guards: [reject_outside_cz_bbox]` misspelled once would drop the CZ bbox check with no
+# error anywhere. So the names are enum-checked on an EXECUTABLE entry (one naming a
+# reader) and left free on an inert one, which nothing executes.
+IMPLEMENTED_TRANSFORMS = frozenset({
+    "sentinel_drop", "psc_normalise", "split_cp_co", "strip_prefix",
+})
+IMPLEMENTED_GUARDS = frozenset({"reject_outside_cz_bbox"})
+
+# The two executable entries that named a guard the runtime never implemented, from before
+# the check existed. Both are inert-by-accident rather than wrong: `reject_sentinel`
+# duplicates sr.det.zip's own `sentinel_drop:-1` transform, and `reject_if_in_excluded_zone`
+# asks a question about HTML/description blocks that a `/locality/inaccuracy_type` read
+# cannot answer. Entries are immutable (02 §2.1.8), so clearing them is a contract version
+# bump, not an edit — until then they are named HERE rather than silently tolerated.
+# SHRINK-ONLY: a new executable entry naming an unimplemented guard is a CI failure.
+GUARDS_PENDING_IMPLEMENTATION: dict[str, frozenset[str]] = {
+    "sr.det.inaccuracy_type": frozenset({"reject_if_in_excluded_zone"}),
+    "sr.det.zip": frozenset({"reject_sentinel"}),
+}
 
 
 class ContractError(RuntimeError):
@@ -184,6 +243,48 @@ def _member(value: Any, allowed: frozenset[str], where: str, key: str) -> str:
             f"{where}: {key}='{text}' is not a member of the enum "
             f"({', '.join(sorted(allowed))})")
     return text
+
+
+def _check_executable(
+    reader: str,
+    *,
+    surface: str,
+    transforms: list[str],
+    guards: list[str],
+    entry_id: str,
+    where: str,
+) -> None:
+    """What an entry that NAMES A READER may say — checked at projection time.
+
+    An entry with a reader is executed by `claims_intake` on every listing of its portal;
+    one without a reader is declared ahead for a later wave and executes nowhere. So this
+    is the whole difference between "a name the runtime does not know is a silent no-op"
+    and "a name the runtime does not know fails CI".
+    """
+    substrates = READER_SUBSTRATES.get(reader)
+    if substrates is None:
+        raise ContractError(
+            f"{where}: locator.reader='{reader}' is not a registered reader "
+            f"({', '.join(sorted(READER_SUBSTRATES))})")
+    if surface not in substrates:
+        raise ContractError(
+            f"{where}: reader '{reader}' reads {', '.join(sorted(substrates))}; "
+            f"'{surface}' is not one of its substrates")
+
+    for spec in transforms:
+        name = spec.partition(":")[0]
+        if name not in IMPLEMENTED_TRANSFORMS:
+            raise ContractError(
+                f"{where}: transform '{name}' is not implemented by the extractor "
+                f"({', '.join(sorted(IMPLEMENTED_TRANSFORMS))}); an executable entry may "
+                f"not declare a normaliser that would silently not run")
+    pending = GUARDS_PENDING_IMPLEMENTATION.get(entry_id, frozenset())
+    for guard in guards:
+        if guard not in IMPLEMENTED_GUARDS and guard not in pending:
+            raise ContractError(
+                f"{where}: guard '{guard}' is not implemented by the extractor "
+                f"({', '.join(sorted(IMPLEMENTED_GUARDS))}); an executable entry may not "
+                f"declare a reject rule that would silently not reject")
 
 
 def parse_entry(raw: dict[str, Any], *, source: str, index: int) -> ContractEntry:
@@ -282,11 +383,13 @@ def parse_entry(raw: dict[str, Any], *, source: str, index: int) -> ContractEntr
                     f"scalar — the guard is one equality against a provenance stamp, not "
                     f"a predicate language")
 
+    transforms = [str(t) for t in (raw.get("transform") or [])]
+    guards = [str(g) for g in (raw.get("guards") or [])]
+
     reader = locator.get("reader")
-    if reader and surface not in W1_SUBSTRATE_SURFACES:
-        raise ContractError(
-            f"{where}: locator.reader is only legal on a raw_json-reachable surface "
-            f"({', '.join(sorted(W1_SUBSTRATE_SURFACES))}); '{surface}' is a W2 surface")
+    if reader:
+        _check_executable(str(reader), surface=surface, transforms=transforms,
+                          guards=guards, entry_id=entry_id, where=where)
 
     precision_map: dict[str, Any] = {}
     if precision_cap:
@@ -312,7 +415,7 @@ def parse_entry(raw: dict[str, Any], *, source: str, index: int) -> ContractEntr
         claim_type=claim_type,
         extraction_method=method,
         subject_scope=dict(raw.get("subject_scope") or {}),
-        transform=[str(t) for t in (raw.get("transform") or [])],
+        transform=transforms,
         precision_map=precision_map,
         default_granularity=granularity,
         default_position_source=position_source,
@@ -321,7 +424,7 @@ def parse_entry(raw: dict[str, Any], *, source: str, index: int) -> ContractEntr
         cardinality=cardinality,
         required=required,
         on_conflict=str(raw.get("on_conflict", "emit_both")),
-        guards=[str(g) for g in (raw.get("guards") or [])],
+        guards=guards,
         notes=raw.get("notes"),
     )
 

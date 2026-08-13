@@ -20,6 +20,9 @@ WHAT THIS LANE IS
     produced it, and the extractor executes exactly those entries whose `locator` names a
     `reader` from the registry below. Entries declared for W2 surfaces (html_selector,
     map_config, url_slug, og_meta, jsonld, description) carry no reader and are inert here.
+    Which surfaces a given reader may be declared on is `contracts.READER_SUBSTRATES`, and
+    the `TRANSFORMS` / `GUARDS` registries below are the vocabularies an entry that DOES
+    name a reader may draw on — all three are enforced when the contract is projected.
   * NO evidence-bearing method runs in W1. `regex_text` / `llm_text` claims need a span
     into a retrievable document, and the content-addressed body store
     (`portal_raw_payloads`) does not fill until W2a — a span into a latest-wins body is a
@@ -505,27 +508,64 @@ def _number(value: Any) -> float | None:
         return None
 
 
+# ------------------------------------------------------------------ transforms
+
+# The ordered normalisers a contract entry may declare (02 §2.1.2), as a REGISTRY rather
+# than an if/elif chain: `contracts.IMPLEMENTED_TRANSFORMS` refuses an executable entry
+# naming a transform that is not here, and that gate needs a name it can enumerate.
+# A transform is `name[:arg]` and sees the value only when it is non-None.
+TransformFn = Callable[[str, str], str | None]
+TRANSFORMS: dict[str, TransformFn] = {}
+
+
+def transform(name: str) -> Callable[[TransformFn], TransformFn]:
+    def register(fn: TransformFn) -> TransformFn:
+        TRANSFORMS[name] = fn
+        return fn
+    return register
+
+
+@transform("sentinel_drop")
+def _sentinel_drop(value: str, arg: str) -> str | None:
+    return None if value == arg else value
+
+
+@transform("psc_normalise")
+def _psc_normalise(value: str, arg: str) -> str | None:
+    digits = "".join(ch for ch in value if ch.isdigit())
+    return digits if len(digits) == 5 else None
+
+
+@transform("split_cp_co")
+def _split_cp_co(value: str, arg: str) -> str | None:
+    """Czech `čp/čo` pairs arrive as "655/31"; the pair is not two alternatives."""
+    head, sep, tail = value.partition("/")
+    if arg == "cp":
+        return head.strip() or None
+    if arg == "co":
+        return (tail.strip() or None) if sep else None
+    return value
+
+
+@transform("strip_prefix")
+def _strip_prefix(value: str, arg: str) -> str | None:
+    return value[len(arg):].strip() if value.startswith(arg) else value
+
+
 def apply_transforms(value: str | None, transforms: tuple[str, ...]) -> str | None:
-    """The ordered normalisers a contract entry declares (02 §2.1.2)."""
-    for transform in transforms:
+    """The ordered normalisers a contract entry declares (02 §2.1.2).
+
+    An unknown name is a no-op here rather than a refusal: the projection in the DB can be
+    older than this image (a rollback), and a whole batch must not die over a normaliser.
+    The gate that stops it reaching a live entry at all is `contracts._check_executable`.
+    """
+    for spec in transforms:
         if value is None:
             return None
-        name, _, arg = transform.partition(":")
-        if name == "sentinel_drop":
-            if value == arg:
-                return None
-        elif name == "psc_normalise":
-            digits = "".join(ch for ch in value if ch.isdigit())
-            value = digits if len(digits) == 5 else None
-        elif name == "split_cp_co":
-            # Czech `čp/čo` pairs arrive as "655/31"; the pair is not two alternatives.
-            head, sep, tail = value.partition("/")
-            if arg == "cp":
-                value = head.strip() or None
-            elif arg == "co":
-                value = (tail.strip() or None) if sep else None
-        elif name == "strip_prefix":
-            value = value[len(arg):].strip() if value.startswith(arg) else value
+        name, _, arg = spec.partition(":")
+        fn = TRANSFORMS.get(name)
+        if fn is not None:
+            value = fn(value, arg)
     return value.strip() if isinstance(value, str) and value.strip() else value or None
 
 
@@ -544,6 +584,26 @@ def envelope_wkt(lat_min: float, lon_min: float, lat_max: float, lon_max: float)
 def in_cz_bbox(lat: float, lon: float) -> bool:
     lat_min, lat_max, lon_min, lon_max = cz_bbox()
     return lat_min <= lat <= lat_max and lon_min <= lon <= lon_max
+
+
+# ------------------------------------------------------------------ guards
+
+# The reject rules a contract entry may declare (02 §2.1.2). W1 implements exactly one —
+# the rest of the vocabulary (`reject_if_in_excluded_zone`, `require_czech_street_morphology`,
+# `reject_empty_geometry`, …) needs substrates this lane does not have. A guard the runtime
+# does not implement rejects nothing, silently, so `contracts.IMPLEMENTED_GUARDS` mirrors
+# this registry and refuses one on an entry that actually executes.
+GuardFn = Callable[[float, float], bool]
+GUARD_CZ_BBOX = "reject_outside_cz_bbox"
+GUARDS: dict[str, GuardFn] = {GUARD_CZ_BBOX: in_cz_bbox}
+
+
+def guard_admits(entry: Entry, name: str, *points: tuple[float, float]) -> bool:
+    """False only when the entry declares guard `name` and a point fails it."""
+    if name not in entry.guards:
+        return True
+    predicate = GUARDS[name]
+    return all(predicate(lat, lon) for lat, lon in points)
 
 
 def sreality_payload_shape(raw: dict[str, Any]) -> str:
@@ -793,7 +853,7 @@ def _read_point_pair(entry: Entry, row: ListingRow) -> list[Claim]:
     verdict = coordinate_verdict(row.source, None, in_mapy_inventory=row.in_mapy_inventory)
     if not verdict.admitted:
         return []
-    if "reject_outside_cz_bbox" in entry.guards and not in_cz_bbox(lat, lon):
+    if not guard_admits(entry, GUARD_CZ_BBOX, (lat, lon)):
         return []
     return [_base(entry, row, value_geom_wkt=point_wkt(lat, lon),
                   licence_class=verdict.licence_class or "portal")]
@@ -811,7 +871,7 @@ def _read_geom_column(entry: Entry, row: ListingRow) -> list[Claim]:
                                  in_mapy_inventory=row.in_mapy_inventory)
     if not verdict.admitted:
         return []
-    if "reject_outside_cz_bbox" in entry.guards and not in_cz_bbox(row.lat, row.lon):
+    if not guard_admits(entry, GUARD_CZ_BBOX, (row.lat, row.lon)):
         return []
     return [_base(entry, row, value_geom_wkt=point_wkt(row.lat, row.lon),
                   licence_class=verdict.licence_class or "portal",
@@ -873,8 +933,7 @@ def _read_bbox_envelope(entry: Entry, row: ListingRow) -> list[Claim]:
     assert lat_max is not None and lon_max is not None
     if lat_max < lat_min or lon_max < lon_min:
         return []
-    if "reject_outside_cz_bbox" in entry.guards and not (
-            in_cz_bbox(lat_min, lon_min) and in_cz_bbox(lat_max, lon_max)):
+    if not guard_admits(entry, GUARD_CZ_BBOX, (lat_min, lon_min), (lat_max, lon_max)):
         return []
     return [_base(entry, row,
                   value_shape_wkt=envelope_wkt(lat_min, lon_min, lat_max, lon_max),

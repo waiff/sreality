@@ -8,17 +8,21 @@ not at INSERT time, and never at resolution time.
 
 from __future__ import annotations
 
+from collections import Counter
 from pathlib import Path
 
 import pytest
 
 from location_data import contracts
-from location_data.claims_intake import LEGACY_COLUMNS, READERS, SOURCES
+from location_data.claims_intake import GUARDS, LEGACY_COLUMNS, READERS, SOURCES, TRANSFORMS
 from location_data.contracts import (
     CLAIM_TYPES,
     EXTRACTION_METHODS,
     EXTRACTOR_PREFIXES,
-    W1_SUBSTRATE_SURFACES,
+    GUARDS_PENDING_IMPLEMENTATION,
+    IMPLEMENTED_GUARDS,
+    IMPLEMENTED_TRANSFORMS,
+    READER_SUBSTRATES,
     ContractError,
     parse_entry,
 )
@@ -70,13 +74,72 @@ def test_every_entry_states_both_axes_and_a_canonical_claim_type():
             assert entry.surface != "portal_json"
 
 
-def test_readers_exist_and_only_on_raw_json_reachable_surfaces():
+def test_every_reader_named_in_a_contract_exists_in_the_registry():
     for contract in ALL.values():
         for entry in contract.entries:
-            if not entry.reader:
-                continue
-            assert entry.reader in READERS, entry.entry_id
-            assert entry.surface in W1_SUBSTRATE_SURFACES, entry.entry_id
+            if entry.reader:
+                assert entry.reader in READERS, entry.entry_id
+
+
+def test_every_executable_entry_sits_on_one_of_its_readers_substrates():
+    """Substrate legality is per READER, not fleet-wide: `geom_column` reads
+    `listings.geom` and `legacy_text_column` reads a class-B `listings` column, so neither
+    can sit on a payload surface even though the old W1 gate allowed it."""
+    for contract in ALL.values():
+        for entry in contract.entries:
+            if entry.reader:
+                assert entry.surface in READER_SUBSTRATES[entry.reader], entry.entry_id
+
+
+def test_reader_substrates_stay_in_sync_with_the_runtime_registry():
+    """`contracts.READER_SUBSTRATES` is pure data — the deploy-time lane must not import
+    the extractor — so a reader added to `claims_intake` without a substrate set (or one
+    left behind after a reader is deleted) is caught HERE, by the one test that imports
+    both. Otherwise the projection would reject every entry naming the new reader."""
+    assert set(READER_SUBSTRATES) == set(READERS)
+    surfaces = {s for legal in READER_SUBSTRATES.values() for s in legal}
+    assert surfaces <= contracts.CLAIM_SURFACES
+    # No reader may be declared on a W2 surface until W2 gives it one — the property the
+    # fleet-wide gate used to assert directly.
+    assert surfaces == {"api_json", "graphql", "embedded_json", "legacy_column"}
+
+
+def test_the_transform_and_guard_vocabularies_stay_in_sync_with_the_runtime():
+    """Same pure-data contract as the reader table, for the two smaller vocabularies. A
+    transform implemented but not listed would be refused on every entry that names it;
+    one listed but not implemented would be a silent no-op — the thing the check exists
+    to stop."""
+    assert IMPLEMENTED_TRANSFORMS == frozenset(TRANSFORMS)
+    assert IMPLEMENTED_GUARDS == frozenset(GUARDS)
+
+
+def test_the_executable_and_inert_split_is_exactly_what_w1_ran():
+    """Per-reader substrates replaced a fleet-wide gate, and a refactor of a validator is
+    only safe if the set of entries the extractor RUNS does not move. 69 executable / 70
+    declared-ahead, per portal, as of the W1 gate outcomes."""
+    split = {source: (sum(1 for e in c.entries if e.reader),
+                      sum(1 for e in c.entries if not e.reader))
+             for source, c in ALL.items()}
+    assert split == {
+        "bazos": (4, 8),
+        "bezrealitky": (11, 6),
+        "ceskereality": (5, 11),
+        "idnes": (3, 11),
+        "maxima": (3, 7),
+        "mmreality": (11, 4),
+        "realitymix": (5, 8),
+        "remax": (4, 9),
+        "sreality": (23, 6),
+    }
+    assert sum(e for e, _ in split.values()) == 69
+    assert sum(i for _, i in split.values()) == 70
+    # The same 69 entries seen down the other axis, so a swap could not preserve both.
+    per_reader = Counter(e.reader for c in ALL.values() for e in c.entries if e.reader)
+    assert per_reader == Counter({
+        "scalar": 36, "namespaced_id": 9, "geom_column": 6, "coords_stamp_quality": 5,
+        "legacy_text_column": 5, "point_pair": 3, "declared_quality": 2,
+        "bbox_envelope": 1, "conflict_signal": 1, "declared_bool_quality": 1,
+    })
 
 
 def test_w1_executes_no_evidence_bearing_method():
@@ -333,10 +396,78 @@ def test_a_wrong_prefix_is_rejected():
         parse_entry(dict(MINIMAL, id="bz.det.thing"), source="sreality", index=0)
 
 
-def test_a_reader_on_an_html_surface_is_rejected():
-    with pytest.raises(ContractError, match="W2 surface"):
+def test_a_reader_outside_its_registered_substrates_is_rejected():
+    """The reader IS the substrate declaration. An HTML surface has no reader at all yet;
+    a payload reader on a legacy column (or the reverse) reads the wrong thing while
+    stamping the claim's provenance as the other one."""
+    with pytest.raises(ContractError, match="not one of its substrates"):
         _entry(locator_kind="html_selector", extraction_method="html_selector_parse",
                locator={"reader": "scalar", "css": "h1"})
+    # `legacy_text_column` reads `row.legacy_columns`, never the payload — the old
+    # fleet-wide gate accepted this and the extractor would KeyError on the first row.
+    with pytest.raises(ContractError, match="not one of its substrates"):
+        _entry(locator={"reader": "legacy_text_column",
+                        "legacy_source_column": "listings.locality"})
+    # `geom_column` reads `listings.geom` whatever the entry says its surface is.
+    with pytest.raises(ContractError, match="not one of its substrates"):
+        _entry(claim_type="coordinate", precision_cap={"granularity_max": {"_default": "obec"}},
+               locator={"reader": "geom_column"})
+    # And a payload reader stays legal on the payload surfaces it is registered for.
+    assert _entry(locator={"reader": "scalar", "json_pointer": "/x"}).reader == "scalar"
+
+
+def test_a_reader_that_does_not_exist_is_rejected():
+    with pytest.raises(ContractError, match="not a registered reader"):
+        _entry(locator={"reader": "html_text", "json_pointer": "/x"})
+
+
+def test_an_executable_entry_may_not_name_an_unimplemented_transform_or_guard():
+    """02 §2.1.2's vocabularies are larger than what W1 implements, and an unimplemented
+    name does nothing — silently. On an entry the extractor RUNS that is the difference
+    between a coordinate checked against the CZ bbox and one that never was."""
+    with pytest.raises(ContractError, match="transform 'dms_to_decimal' is not implemented"):
+        _entry(locator={"reader": "scalar", "json_pointer": "/x"},
+               transform=["dms_to_decimal"])
+    with pytest.raises(ContractError, match="guard 'reject_empty_geometry' is not implemented"):
+        _entry(locator={"reader": "scalar", "json_pointer": "/x"},
+               guards=["reject_empty_geometry"])
+    # A misspelling of an implemented name is the case that motivates the check.
+    with pytest.raises(ContractError, match="not implemented"):
+        _entry(locator={"reader": "scalar", "json_pointer": "/x"},
+               guards=["reject_outside_cz_bbo"])
+
+
+def test_a_declared_ahead_entry_may_name_a_guard_the_runtime_has_not_implemented():
+    """02 §2.2 declares the full contract, not just what today's wave can run — "a signal
+    that exists on the wire and has no contract entry is a diff, not an archaeology
+    project". An entry with no reader executes nowhere, so its transforms and guards are a
+    specification for the wave that will implement them, not a silent no-op."""
+    entry = _entry(locator_kind="html_selector", extraction_method="html_selector_parse",
+                   locator={"css": ".lokalita"},
+                   transform=["dms_to_decimal"],
+                   guards=["require_czech_street_morphology", "reject_empty_geometry"])
+    assert entry.reader is None
+    assert entry.transform == ["dms_to_decimal"]
+    assert entry.guards == ["require_czech_street_morphology", "reject_empty_geometry"]
+
+
+def test_the_pending_guards_are_real_executable_entries_and_shrink_only():
+    """Two live entries named a guard the runtime never implemented, from before the check
+    existed. They are enumerated rather than tolerated: the table may only shrink, every
+    row must still describe a real executable entry, and a guard that gets implemented
+    must drop out of it."""
+    assert set(GUARDS_PENDING_IMPLEMENTATION) == {"sr.det.inaccuracy_type", "sr.det.zip"}
+    by_id = {e.entry_id: e for c in ALL.values() for e in c.entries}
+    for entry_id, pending in GUARDS_PENDING_IMPLEMENTATION.items():
+        entry = by_id[entry_id]
+        assert entry.reader, entry_id          # an inert entry needs no exemption
+        assert pending <= set(entry.guards), entry_id
+        assert not (pending & IMPLEMENTED_GUARDS), entry_id
+    # Why tolerating them is safe: sr.det.zip's `reject_sentinel` duplicates its own
+    # transform, and sr.det.inaccuracy_type's `reject_if_in_excluded_zone` asks about
+    # HTML/description blocks that a `/locality/inaccuracy_type` read never touches.
+    assert "sentinel_drop:-1" in by_id["sr.det.zip"].transform
+    assert by_id["sr.det.inaccuracy_type"].surface == "api_json"
 
 
 # ------------------------------------------------------------------ the projection SQL
