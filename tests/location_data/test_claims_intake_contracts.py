@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from location_data import contracts
-from location_data.claims_intake import READERS, SOURCES
+from location_data.claims_intake import LEGACY_COLUMNS, READERS, SOURCES
 from location_data.contracts import (
     CLAIM_TYPES,
     EXTRACTION_METHODS,
@@ -160,30 +160,72 @@ def test_the_class_b_legacy_columns_are_capped_and_flagged():
         assert entry.default_licence_class == "portal", entry.entry_id
         assert entry.default_blur_evidence == "none", entry.entry_id
         assert entry.locator["claim_confidence"] == "medium", entry.entry_id
-        assert entry.locator["write_path_unknown"] is True, entry.entry_id
         assert entry.precision_map["prior"]["match_confidence"] == "medium", entry.entry_id
+        # §6.6 rule 3 is about whether the WRITER can be named, and a provenance guard is
+        # how it gets named: an unguarded legacy column cannot say who wrote it, a guarded
+        # one admits only the writer it names. So the two flags are each other's inverse,
+        # and an entry that guards AND claims the write path is unknown is incoherent.
+        assert entry.locator["write_path_unknown"] is (
+            entry.locator.get("require_column_equals") is None), entry.entry_id
 
 
-def test_the_three_bumped_contracts_added_entries_and_kept_their_v1_ones():
-    """02 §2.1.8: entries are immutable per `contract_version`, so closing the 2026-08-11
-    coverage gap is a VERSION BUMP that appends. The v1 ids must all still be there — an
+def test_the_street_entries_are_guarded_onto_the_class_b_provenance_only():
+    """06 §6.1.3 classes `listings.street` per WRITER, not per column: `parser` is class B
+    (portal-derived text), while `resolver` (a RÚIAN address-point inference) and NULL (the
+    unattributable legacy writes) are class D — quarantine, never a claim. The split is the
+    entry's own predicate, so a portal that needs a different one is a version bump and
+    never a branch in the extractor."""
+    guarded = {e.entry_id: e for c in ALL.values() for e in c.entries
+               if e.locator.get("require_column_equals")}
+    assert set(guarded) == {"cr.det.legacy_street", "rm.det.legacy_street"}
+    for entry_id, entry in guarded.items():
+        assert entry.locator["legacy_source_column"] == "listings.street", entry_id
+        assert entry.locator["require_column_equals"] == {
+            "listings.street_source": "parser"}, entry_id
+        assert entry.claim_type == "street_name", entry_id
+        assert entry.extraction_method == "legacy_column", entry_id
+        assert entry.default_licence_class == "portal", entry_id
+
+
+def test_every_legacy_column_a_contract_names_is_one_the_intake_scan_selects():
+    """The columns are read positionally off the batch queries, and a name the scan does
+    not select is refused at extraction time — so a contract naming one would take a whole
+    run down. Both spellings count: the column a legacy entry READS and the column its
+    guard TESTS."""
+    named = {
+        str(e.locator["legacy_source_column"])
+        for c in ALL.values() for e in c.entries if e.reader == "legacy_text_column"
+    } | {
+        str(column)
+        for c in ALL.values() for e in c.entries
+        for column in (e.locator.get("require_column_equals") or {})
+    }
+    assert named <= set(LEGACY_COLUMNS), sorted(named - set(LEGACY_COLUMNS))
+    assert "listings.street_source" in LEGACY_COLUMNS
+
+
+def test_the_bumped_contracts_appended_entries_and_kept_the_earlier_ones():
+    """02 §2.1.8: entries are immutable per `contract_version`, so closing a measured
+    coverage gap is a VERSION BUMP that appends. Every earlier id must still be there — an
     entry that disappeared would orphan every claim already stamped with it."""
     assert {s: c.version for s, c in ALL.items()} == {
-        "remax": 2, "ceskereality": 2, "realitymix": 2,
+        "remax": 2, "ceskereality": 3, "realitymix": 3,
         "sreality": 1, "bezrealitky": 1, "bazos": 1, "idnes": 1, "mmreality": 1,
         "maxima": 1,
     }
-    for source, new_ids, v1_ids in (
+    for source, new_ids, earlier_ids in (
         ("remax", {"rx.det.legacy_display_address", "rx.det.legacy_locality"},
          {"rx.det.raw_address_conflict", "rx.det.legacy_pin"}),
-        ("ceskereality", {"cr.det.legacy_locality"},
-         {"cr.det.locality_text", "cr.det.legacy_pin", "cr.det.coords_stamp"}),
-        ("realitymix", {"rm.det.legacy_locality"},
-         {"rm.det.locality_text", "rm.det.legacy_pin", "rm.det.coords_block"}),
+        ("ceskereality", {"cr.det.legacy_street"},
+         {"cr.det.locality_text", "cr.det.legacy_pin", "cr.det.coords_stamp",
+          "cr.det.legacy_locality"}),
+        ("realitymix", {"rm.det.legacy_street"},
+         {"rm.det.locality_text", "rm.det.legacy_pin", "rm.det.coords_block",
+          "rm.det.legacy_locality"}),
     ):
         ids = {e.entry_id for e in ALL[source].entries}
         assert new_ids <= ids, source
-        assert v1_ids <= ids, source
+        assert earlier_ids <= ids, source
 
 
 def test_coordinate_entries_carry_a_cap_and_a_licence_class():
@@ -255,6 +297,35 @@ def test_a_non_enum_confidence_is_rejected_on_both_of_its_spellings():
     with pytest.raises(ContractError, match="locator.claim_confidence"):
         _entry(locator={"reader": "scalar", "json_pointer": "/x",
                         "claim_confidence": "very-high"})
+
+
+def test_a_malformed_provenance_guard_is_rejected():
+    """The guard decides whether a class-D value becomes a claim, so every way of writing
+    it wrong fails in CI: on a non-legacy method (where nothing would ever read it), with a
+    column spelled differently from `legacy_source_column` (the extractor looks both up in
+    one dict, so an unqualified name would just never match), and with a non-scalar
+    right-hand side (one equality against a provenance stamp, not a predicate language)."""
+    legacy = {
+        "locator_kind": "legacy_column",
+        "extraction_method": "legacy_column",
+        "page_kind": "none",
+    }
+    with pytest.raises(ContractError, match="require_column_equals"):
+        _entry(locator={"reader": "scalar", "json_pointer": "/x",
+                        "require_column_equals": {"listings.street_source": "parser"}})
+    with pytest.raises(ContractError, match="non-empty"):
+        _entry(**legacy, locator={"reader": "legacy_text_column",
+                                  "legacy_source_column": "listings.street",
+                                  "require_column_equals": {}})
+    with pytest.raises(ContractError, match="listings.<column>"):
+        _entry(**legacy, locator={"reader": "legacy_text_column",
+                                  "legacy_source_column": "listings.street",
+                                  "require_column_equals": {"street_source": "parser"}})
+    with pytest.raises(ContractError, match="scalar"):
+        _entry(**legacy, locator={"reader": "legacy_text_column",
+                                  "legacy_source_column": "listings.street",
+                                  "require_column_equals": {
+                                      "listings.street_source": ["parser", "resolver"]}})
 
 
 def test_a_wrong_prefix_is_rejected():

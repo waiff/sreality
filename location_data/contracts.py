@@ -255,6 +255,33 @@ def parse_entry(raw: dict[str, Any], *, source: str, index: int) -> ContractEntr
             f"{where}: a legacy_column entry must name its column in "
             f"locator.legacy_source_column (01 §4.2 loc_claim_legacy)")
 
+    # 06 §6.1.3 classes some legacy columns per WRITER: `listings.street` is class B where
+    # `street_source='parser'` and class D (quarantine, never a claim) otherwise. The split
+    # is contract data — one equality against a provenance stamp — so the shape is
+    # validated here rather than discovered as "this entry silently claims nothing".
+    guard = locator.get("require_column_equals")
+    if guard is not None:
+        if method != "legacy_column":
+            raise ContractError(
+                f"{where}: locator.require_column_equals guards a legacy COLUMN read and "
+                f"is only legal on extraction_method='legacy_column' (06 §6.1.3)")
+        if not isinstance(guard, dict) or not guard:
+            raise ContractError(
+                f"{where}: locator.require_column_equals must be a non-empty "
+                f"{{column: value}} mapping (06 §6.1.3)")
+        for column, expected in guard.items():
+            if not str(column).startswith("listings."):
+                raise ContractError(
+                    f"{where}: locator.require_column_equals names '{column}'; a guard "
+                    f"column is spelled exactly like locator.legacy_source_column "
+                    f"('listings.<column>'), because the extractor looks both up in the "
+                    f"same per-row dict")
+            if expected is None or isinstance(expected, (dict, list)):
+                raise ContractError(
+                    f"{where}: locator.require_column_equals['{column}'] must be a "
+                    f"scalar — the guard is one equality against a provenance stamp, not "
+                    f"a predicate language")
+
     reader = locator.get("reader")
     if reader and surface not in W1_SUBSTRATE_SURFACES:
         raise ContractError(

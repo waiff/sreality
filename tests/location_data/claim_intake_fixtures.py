@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from location_data import contracts
-from location_data.claims_intake import Entry, ListingRow
+from location_data.claims_intake import LEGACY_COLUMNS, Entry, ListingRow
 
 OBSERVED_AT = datetime(2026, 8, 10, 6, 30, tzinfo=UTC)
 
@@ -59,9 +59,16 @@ def listing(
     lon: float | None = None,
     in_mapy_inventory: bool = False,
     locality: str | None = None,
+    street: str | None = None,
+    street_source: str | None = None,
 ) -> ListingRow:
-    """`locality` is the class-B `listings.locality` column (06 §6.1.3), which the batch
-    query selects alongside `raw_json` — NOT a payload key."""
+    """`locality` / `street` / `street_source` are the class-B `listings` columns of
+    06 §6.1.3 that the batch query selects alongside `raw_json` — NOT payload keys.
+
+    Every one of `LEGACY_COLUMNS` is always populated, exactly as `_row_from_record`
+    populates it, and zipped `strict` for the same reason: a column added to the scan but
+    not here would leave the fixtures testing a row shape production never produces.
+    """
     return ListingRow(
         listing_id=listing_id,
         source=source,
@@ -71,7 +78,8 @@ def listing(
         lon=lon,
         observed_at=OBSERVED_AT,
         in_mapy_inventory=in_mapy_inventory,
-        legacy_columns={"listings.locality": locality},
+        legacy_columns=dict(zip(
+            LEGACY_COLUMNS, (locality, street, street_source), strict=True)),
     )
 
 
@@ -359,4 +367,24 @@ REALITYMIX_NULL_LOCALITY: dict[str, Any] = {
     "locality_text": None,
     "coords": {"source": "geocode", "confidence": "medium",
                "matched_type": "regional.street"},
+}
+
+
+# --------------------------------- the residual zero-claim keyset measured on 2026-08-13
+#
+# What v2 could NOT reach: `raw_json.locality_text` present and NULL AND `listings.locality`
+# NULL too (0 of the 957 ceskereality rows in this cohort have one), so `cr.det.legacy_locality`
+# yields nothing either. The slim dict has no street key at any depth — these seven keys are
+# the whole payload — so `listings.street` is the only W1-readable signal left, and it is
+# readable only where `street_source` says the parser wrote it (06 §6.1.3). Keyset of
+# ceskereality 3822640, whose stored street is `Svatoplukova`: ASCII-folded at source, like
+# 93% of this portal's streets.
+CESKEREALITY_STREET_ONLY: dict[str, Any] = {
+    "id": "3822640",
+    "title": "Prodej bytu 3+1 74 m²",
+    "locality_text": None,
+    "broker": {"name": "REALITNÍ KANCELÁŘ"},
+    "coords": {"source": "geocode", "confidence": "medium"},
+    "image_urls": [],
+    "params": {},
 }

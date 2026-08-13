@@ -22,6 +22,7 @@ from location_data.claims_intake import (
     _LISTINGS_INCREMENTAL_SQL,
     _RESUME_SQL,
     _WATERMARK_SQL,
+    LEGACY_COLUMNS,
     MAX_BATCH_SIZE,
     MIN_BATCH_SIZE,
     Absence,
@@ -211,16 +212,33 @@ def test_batch_queries_are_keyset_and_bounded():
 def test_the_batch_queries_select_the_legacy_columns_the_readers_consume():
     """06 §6.1.3's class-B columns are a second substrate beside `raw_json`, so they ride
     on the SAME keyset query — one extra SELECT item, never a per-row lookup. The record
-    unpack is positional, so a column added to one query and not to `_row_from_record` (or
-    to only one of the two queries) has to fail here rather than mid-run."""
-    for sql in (_LISTINGS_FULL_SQL, _LISTINGS_INCREMENTAL_SQL):
-        assert "l.locality" in " ".join(sql.split())
+    unpack is positional, so a column added to one query and not to `LEGACY_COLUMNS` (or to
+    only one of the two queries) has to fail here rather than mid-run.
 
-    row = _row_from_record((7, "remax", "445781", {"id": "445781"},
-                            datetime(2026, 8, 11, 6, 0, tzinfo=UTC), None, None,
-                            False, "Praha 3 - Žižkov"))
-    assert row.legacy_columns == {"listings.locality": "Praha 3 - Žižkov"}
+    `listings.street_source` is selected even though nothing reads it as a value: it is the
+    guard column that decides whether `listings.street` is class B or class D, and a guard
+    whose column the scan never fetched is a refusal (`_legacy_column`), not a claim.
+    """
+    for sql in (_LISTINGS_FULL_SQL, _LISTINGS_INCREMENTAL_SQL):
+        one = " ".join(sql.split())
+        for column in LEGACY_COLUMNS:
+            assert f"l.{column.removeprefix('listings.')}" in one, column
+
+    row = _row_from_record((7, "ceskereality", "3822640", {"id": "3822640"},
+                            datetime(2026, 8, 13, 6, 0, tzinfo=UTC), None, None,
+                            False, None, "Svatoplukova", "parser"))
+    assert row.legacy_columns == {
+        "listings.locality": None,
+        "listings.street": "Svatoplukova",
+        "listings.street_source": "parser",
+    }
     assert row.lat is None and row.in_mapy_inventory is False
+
+    # A record whose legacy tail has drifted from LEGACY_COLUMNS shifts every value one
+    # position; `zip(strict=True)` is what turns that into a crash on the first row.
+    with pytest.raises(ValueError):
+        _row_from_record((7, "ceskereality", "3822640", {}, None, None, None, False,
+                          None, "Svatoplukova"))
 
 
 def test_the_claim_write_carries_the_class_b_confidence_as_a_typed_enum():

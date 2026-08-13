@@ -12,6 +12,10 @@ WHAT THIS LANE IS
   * The substrate is `listings.raw_json` PLUS the class-B legacy columns of 06 §6.1.3 —
     `listings.geom` (ladder-gated) and `listings.locality` (the only surviving copy of the
     locality string wherever the slim-dict payload carries the key with a NULL value).
+    §6.1.3 classes some of those columns per WRITER rather than per column, so a contract
+    entry may guard its read on a provenance stamp (`locator.require_column_equals`):
+    `listings.street` is class B where `street_source='parser'` and class D — quarantine,
+    never a claim — where it is `'resolver'` or NULL.
   * Contract-driven: every claim is stamped with the `portal_contract_entries` row that
     produced it, and the extractor executes exactly those entries whose `locator` names a
     `reader` from the registry below. Entries declared for W2 surfaces (html_selector,
@@ -65,13 +69,27 @@ LOG = logging.getLogger("location_data.claims_intake")
 # Bumped whenever the extraction SEMANTICS change. It rides in every claim's batch row and
 # in `location_claim_observations.extractor_version`; the per-claim `extractor_version` is
 # the contract's own `contract:<portal>@<version>` (02 §2.1.8).
-INTAKE_VERSION = "claims_intake@2"
+INTAKE_VERSION = "claims_intake@3"
 LANE = "location_claims_intake"
 WAVE = "W1"
 
 SOURCES = (
     "sreality", "bezrealitky", "bazos", "idnes", "mmreality", "remax", "ceskereality",
     "realitymix", "maxima",
+)
+
+# The class-B legacy columns (06 §6.1.3), in the ORDER the two batch queries select them.
+# ONE list, because four things have to agree: the SELECT items of both queries, the
+# positional unpack in `_row_from_record`, and the `locator.legacy_source_column` /
+# `locator.require_column_equals` keys a contract entry is allowed to name. Adding a column
+# is one SELECT item + one line here + a contract entry — never a new reader.
+#
+# `listings.street_source` is here as a GUARD column: nothing reads it as a value, and it
+# is the reason `listings.street` can be read at all (06 §6.1.3 admits that column only for
+# `street_source='parser'`). `listings.geom` is NOT here — it has its own reader, because
+# the licence ladder gates it.
+LEGACY_COLUMNS: tuple[str, ...] = (
+    "listings.locality", "listings.street", "listings.street_source",
 )
 
 MIN_BATCH_SIZE = 10_000
@@ -266,10 +284,10 @@ class ListingRow:
     lon: float | None
     observed_at: datetime
     in_mapy_inventory: bool
-    # The class-B legacy columns (06 §6.1.3), keyed by the SAME string a contract entry
-    # puts in `locator.legacy_source_column` ("listings.locality"), so adding a column is
-    # a contract entry + one SELECT item and never a new reader. `listings.geom` is NOT
-    # here: it has its own reader because the licence ladder gates it.
+    # `LEGACY_COLUMNS` -> value, keyed by the SAME string a contract entry puts in
+    # `locator.legacy_source_column` / `locator.require_column_equals`. Always ALL of
+    # them: a key that is absent is a scan/contract mismatch and is refused, not read as
+    # NULL (`_legacy_column`).
     legacy_columns: dict[str, Any] = field(default_factory=dict)
 
 
@@ -653,6 +671,48 @@ def _read_scalar(entry: Entry, row: ListingRow) -> list[Claim]:
     return [_base(entry, row, value_text=value, value_num=number)]
 
 
+def _legacy_column(entry: Entry, row: ListingRow, column: str) -> Any:
+    """One legacy column's value for this row, refusing a column the scan never selected.
+
+    `.get()` would be wrong here and silently so: a contract naming a column that is not in
+    `LEGACY_COLUMNS` would read as NULL on every row forever — no claim, no absence, no
+    error, and a coverage gap whose cause is invisible. That is a projection/scan mismatch,
+    i.e. a deploy error, so it is refused exactly like an unknown reader is.
+    """
+    if column not in row.legacy_columns:
+        raise IntakeRefused(
+            f"{entry.source}:{entry.entry_id} names legacy column '{column}', which the "
+            f"batch query does not select (LEGACY_COLUMNS = "
+            f"{', '.join(LEGACY_COLUMNS)})")
+    return row.legacy_columns[column]
+
+
+def legacy_guard_passes(entry: Entry, row: ListingRow) -> bool:
+    """`locator.require_column_equals` — a legacy column admitted for ONE writer only.
+
+    06 §6.1.3 does not class `listings.street` as a column, it classes it per writer:
+    class B where `street_source='parser'` (portal-derived text, capped at `medium` with
+    mandatory gazetteer revalidation), class D where it is `'resolver'` (a RÚIAN
+    address-point inference — ~11 of ~21 text-checkable ones are wrong) or NULL (the
+    unattributable legacy-write cohort; two live backfill scripts write the column and
+    stamp nothing). A class-D value is quarantine and is never read by the resolver, so it
+    must never become a claim in the first place.
+
+    The predicate is contract DATA — `{column: required_value}`, keyed exactly like
+    `legacy_columns` — so a portal that needs a different split is a version bump and never
+    a branch in this module. It is one equality against a provenance stamp, deliberately:
+    a NULL stamp equals nothing, which is the refusal §6.1.3 asks for.
+    """
+    required = entry.locator.get("require_column_equals")
+    if not required:
+        return True
+    for column, expected in dict(required).items():
+        actual = _legacy_column(entry, row, str(column))
+        if actual is None or str(actual) != str(expected):
+            return False
+    return True
+
+
 @reader("legacy_text_column")
 def _read_legacy_text_column(entry: Entry, row: ListingRow) -> list[Claim]:
     """A class-B `listings` TEXT column, migrated as a claim (06 §6.1.1, §6.1.3).
@@ -669,10 +729,19 @@ def _read_legacy_text_column(entry: Entry, row: ListingRow) -> list[Claim]:
     `legacy_write_path_unknown` is the entry's own declaration (§6.6 rule 3): these columns
     have no provenance stamp, and on realitymix the geocode backfill synthesised some of
     them ('Hranicka, Prerov' where the payload's own `locality_text` is null), so a claim
-    that cannot name its writer says so rather than passing as portal-published.
+    that cannot name its writer says so rather than passing as portal-published. A column
+    that DOES carry a stamp is guarded on it instead (`legacy_guard_passes`), and then the
+    writer is named rather than unknown.
+
+    A blocked guard produces nothing — no claim AND no absence. W1 records exactly the two
+    negatives of 06 §6.1.5, and a class-D value is not "tried and found nothing": the
+    portal stated no such thing, our own resolver did, and §6.1.5 puts that in quarantine,
+    not in the claims layer.
     """
+    if not legacy_guard_passes(entry, row):
+        return []
     column = str(entry.locator["legacy_source_column"])
-    value = apply_transforms(_text(row.legacy_columns.get(column)), entry.transform)
+    value = apply_transforms(_text(_legacy_column(entry, row, column)), entry.transform)
     if value is None:
         return []
     return [_base(entry, row, value_text=value,
@@ -1107,7 +1176,7 @@ _RESUME_SQL = """
 _LISTINGS_FULL_SQL = """
     SELECT l.id, l.source, l.source_id_native, l.raw_json, l.last_seen_at,
            ST_Y(l.geom::geometry), ST_X(l.geom::geometry),
-           (a.listing_id IS NOT NULL), l.locality
+           (a.listing_id IS NOT NULL), l.locality, l.street, l.street_source
     FROM listings l
     LEFT JOIN mapy_affected a ON a.listing_id = l.id
     WHERE l.id > %(after_id)s
@@ -1119,7 +1188,7 @@ _LISTINGS_FULL_SQL = """
 _LISTINGS_INCREMENTAL_SQL = """
     SELECT l.id, l.source, l.source_id_native, l.raw_json, l.last_seen_at,
            ST_Y(l.geom::geometry), ST_X(l.geom::geometry),
-           (a.listing_id IS NOT NULL), l.locality
+           (a.listing_id IS NOT NULL), l.locality, l.street, l.street_source
     FROM listings l
     LEFT JOIN mapy_affected a ON a.listing_id = l.id
     WHERE l.last_seen_at >= %(watermark)s
@@ -1380,8 +1449,11 @@ def load_entries(conn: psycopg.Connection) -> dict[str, list[Entry]]:
 
 
 def _row_from_record(record: tuple[Any, ...]) -> ListingRow:
+    # The legacy columns are unpacked as a TAIL and zipped `strict`, so a column added to
+    # the two batch queries but not to `LEGACY_COLUMNS` (or the reverse) raises here on the
+    # first row instead of shifting every value one position to the left.
     (listing_id, source, native, raw_json, last_seen_at, lat, lon, in_inventory,
-     locality) = record
+     *legacy) = record
     return ListingRow(
         listing_id=int(listing_id),
         source=source,
@@ -1393,7 +1465,7 @@ def _row_from_record(record: tuple[Any, ...]) -> ListingRow:
         # observation time — the listing's last sighting — never the migration date.
         observed_at=last_seen_at,
         in_mapy_inventory=bool(in_inventory),
-        legacy_columns={"listings.locality": locality})
+        legacy_columns=dict(zip(LEGACY_COLUMNS, legacy, strict=True)))
 
 
 def dedupe_absence_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
