@@ -131,3 +131,13 @@ jobs:
         env:
           TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
         run: pytest tests/test_tenant_isolation_live.py -q
+
+      # The W2a-0 churn counters are an INSTRUMENT whose numbers decide a
+      # tens-of-GB storage question, and their whole behaviour lives in one
+      # ON CONFLICT clause. PREPARE proves it compiles; only executing it proves
+      # the arithmetic (first fetch = 1/0, identical refetch = +1/+0, changed
+      # refetch = +1/+1, replayed observation = +0/+0, version bump = new cohort).
+      - name: Payload-churn counter arithmetic (executed, not just PREPAREd)
+        env:
+          TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+        run: pytest tests/test_payload_churn_live.py -q

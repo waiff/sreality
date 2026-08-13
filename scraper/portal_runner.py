@@ -22,8 +22,9 @@ from __future__ import annotations
 
 import logging
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from scraper import db
@@ -61,6 +62,14 @@ class DrainItem:
     # Threaded into each portal's write_details so listings.discovery_seq can be
     # stamped independent of fetch/claim/write order.
     discovery_seq: int | None = None
+    # W2a-0 churn instrument (migration 402): the identity of this FETCH, minted
+    # once when the item is created and carried through every replay of the
+    # flush. _flush_drain_batch retries the whole write op on a transient pooler
+    # drop and the connection is autocommit, so without a token that survives the
+    # replay the churn upsert — a non-idempotent counter bump — would count the
+    # same fetch twice while its hashes stayed put, biasing the measured change
+    # rate LOW exactly when the drain is flaky.
+    observation_id: str = field(default_factory=lambda: uuid.uuid4().hex)
 
 
 class Portal(Protocol):
