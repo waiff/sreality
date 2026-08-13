@@ -38,6 +38,11 @@ LOCATION_BATCH_WORKFLOWS = (
     "location_claims_intake.yml",
     "location_mapy_inventory.yml",
     "location_resolve.yml",
+    # W2a-3. Heavy in TIME rather than in rows — the probe holds one portal for ~10
+    # minutes per 200 listings and the readout aggregates the whole instrument — but the
+    # rails are the same ones, and a probe overlapping a claims intake would put the
+    # scrape's egress and a corpus-wide sweep on the instance at once.
+    "location_payload_churn.yml",
 )
 OUTER_GROUP = "location-batch"
 

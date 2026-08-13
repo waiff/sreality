@@ -2816,6 +2816,7 @@ def record_payload_churn(
     content_type: str,
     observation: str,
     fetched_at: datetime | None = None,
+    normalizer_version: str | None = None,
 ) -> None:
     """Bump this artefact's raw-vs-normalised churn counters. Stores NO body.
 
@@ -2827,6 +2828,11 @@ def record_payload_churn(
     `observation` identifies the FETCH, not the call: replaying it is a no-op
     (migration 402's WHERE guard), which is what makes this safe to run inside
     the drain's run_resilient-retried batch write.
+
+    `normalizer_version` overrides the cohort this fetch is counted in. The live
+    ingest never passes one; the confirmation probe passes
+    `payload_norm.probe_normalizer_version()` so its minutes-apart cadence lands
+    in its own cohort instead of contaminating the passive counters.
 
     PRECONDITION: an autocommit connection (scraper.db.connect). The statement is
     self-contained, so a caller already inside `with conn.transaction():` gets it
@@ -2845,7 +2851,7 @@ def record_payload_churn(
         volatile=DEFAULT_VOLATILE_PROFILES.get(source, VolatileProfile()),
     )
     params = (
-        source, source_id_native, page_kind, NORMALIZER_VERSION,
+        source, source_id_native, page_kind, normalizer_version or NORMALIZER_VERSION,
         fetched_at, fetched_at,
         result.raw_sha256, result.norm_sha256,
         result.byte_size, result.norm_byte_size, observation,

@@ -1,0 +1,145 @@
+name: "Jobs: Payload churn readout + refetch probe (location W2a)"
+
+# The read side of the W2a shadow-hash churn instrument (migration 402), and the
+# 200 x 3 confirmation probe that backs it. `report` prints the per-portal,
+# per-page-kind change rates, body sizes and the projected GB per refetch cycle
+# and per month — the artefact the W2a storage gate is signed from. `probe` runs
+# 02-portal-contracts.md section 2.3.2's protocol: 200 listings x 3 fetches per
+# portal, minutes apart, so the raw-vs-normalised gap is measured against a
+# listing that provably did not change.
+#
+# DISPATCH-ONLY, no schedule. The report is read-only. The probe writes churn
+# rows and nothing else — never a payload row, never portal_raw_pages, never a
+# listing — into its OWN normalizer cohort (`payload_norm@N+probe`), so its
+# cadence of minutes can never contaminate the passive measurement's cadence of
+# hours.
+#
+# 200 x 3 at the default 1 req/s is ~10 minutes per portal, so a nine-portal
+# sweep does NOT fit one job: dispatch it per portal (or a few at a time), and
+# prefer a window where that portal's own index walk / detail drain is quiet.
+# The run stops itself cleanly at `max_seconds`; the job timeout is the backstop.
+#
+# Required secrets: SUPABASE_DB_URL, plus SCRAPER_PROXY_URL for the two proxied
+# portals (ceskereality, mmreality) — without it the probe skips them rather
+# than spending 600 requests on a WAF 403.
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "what to run"
+        required: true
+        default: report
+        type: choice
+        options:
+          - report
+          - probe
+          - probe_then_report
+      source:
+        description: "probe only — comma-separated portals, tried in order (blank = all nine SHUFFLED; more than one job's budget, so repeat the dispatch to cover the fleet)"
+        required: false
+        default: ""
+        type: string
+      listings:
+        description: "probe only — listings sampled per portal (blank = 200)"
+        required: false
+        default: ""
+        type: string
+      rounds:
+        description: "probe only — fetches per listing (blank = 3)"
+        required: false
+        default: ""
+        type: string
+      rate_per_s:
+        description: "probe only — requests per second (blank = 1.0; the portal's own limit wins when politer)"
+        required: false
+        default: ""
+        type: string
+      max_seconds:
+        description: "probe only — wall-clock budget, stops between fetches (blank = 2700)"
+        required: false
+        default: ""
+        type: string
+      dry_run:
+        description: "probe only — no network and no writes"
+        required: false
+        default: false
+        type: boolean
+      json_output:
+        description: "emit JSON instead of the tables"
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  # OUTER, cross-lane: shared with the registry load, the claim intake, the Mapy
+  # inventory and the resolve drain so at most ONE heavy location lane runs at a
+  # time (2026-08-10 incident — four concurrent lanes against the shared
+  # production instance). See location_registry_load.yml for the full note.
+  group: location-batch
+  cancel-in-progress: false
+
+jobs:
+  churn:
+    runs-on: ubuntu-latest
+    concurrency:
+      # INNER, per-lane: two probes would double every portal's request rate and
+      # fight over the same location_jobs lease row. Never cancel in flight — a
+      # cancelled probe spends its requests and then strands the lease until its
+      # TTL expires, locking the lane out of a re-dispatch for an hour. (Unequal
+      # round counts are NOT a reason: the readout's denominator is per key,
+      # sum(fetches) - keys, which is exact under any tail.)
+      group: location-payload-churn
+      cancel-in-progress: false
+    timeout-minutes: 55
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: pip install -e .
+
+      - name: Run the refetch probe
+        if: inputs.mode == 'probe' || inputs.mode == 'probe_then_report'
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          SCRAPER_PROXY_URL: ${{ secrets.SCRAPER_PROXY_URL }}
+          SOURCE: ${{ inputs.source }}
+          LISTINGS: ${{ inputs.listings }}
+          ROUNDS: ${{ inputs.rounds }}
+          RATE_PER_S: ${{ inputs.rate_per_s }}
+          MAX_SECONDS: ${{ inputs.max_seconds }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          JSON_OUTPUT: ${{ inputs.json_output }}
+        # A bash ARRAY, not a string: an unquoted "$ARGS" word-splits, so the
+        # natural typing `bazos, idnes` (with the space) would reach argparse as
+        # `--source bazos,` plus a stray positional `idnes` and waste the dispatch.
+        run: |
+          ARGS=()
+          if [ -n "$SOURCE" ]; then ARGS+=(--source "$SOURCE"); fi
+          if [ -n "$LISTINGS" ]; then ARGS+=(--listings "$LISTINGS"); fi
+          if [ -n "$ROUNDS" ]; then ARGS+=(--rounds "$ROUNDS"); fi
+          if [ -n "$RATE_PER_S" ]; then ARGS+=(--rate-per-s "$RATE_PER_S"); fi
+          if [ -n "$MAX_SECONDS" ]; then ARGS+=(--max-seconds "$MAX_SECONDS"); fi
+          if [ "$DRY_RUN" = "true" ]; then ARGS+=(--dry-run); fi
+          if [ "$JSON_OUTPUT" = "true" ]; then ARGS+=(--json); fi
+          echo "python -m scripts.location_payload_refetch_probe ${ARGS[*]}"
+          python -m scripts.location_payload_refetch_probe "${ARGS[@]}"
+
+      - name: Read out the churn instrument
+        if: inputs.mode == 'report' || inputs.mode == 'probe_then_report'
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          JSON_OUTPUT: ${{ inputs.json_output }}
+        run: |
+          ARGS=()
+          if [ "$JSON_OUTPUT" = "true" ]; then ARGS+=(--json); fi
+          echo "python -m scripts.location_payload_churn_report ${ARGS[*]}"
+          python -m scripts.location_payload_churn_report "${ARGS[@]}"

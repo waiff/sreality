@@ -34,6 +34,23 @@ from selectolax.parser import HTMLParser
 
 NORMALIZER_VERSION = "payload_norm@1"
 
+# The confirmation probe (02 section 2.3.2's 200 x 3 protocol,
+# scripts/location_payload_refetch_probe.py) hashes with THIS normaliser but on a
+# cadence of minutes, against the passive instrument's ~6 hours. Writing both into
+# one counter row would wreck the passive readout twice over: the probe's three
+# near-identical fetches would drag the measured change rate down, and its seconds
+# would collapse the observed refetch interval ((last_seen_at - first_seen_at) /
+# (fetches - 1)) that the storage projection scales by. `normalizer_version` is
+# already the PK's cohort discriminator (migration 402), so the probe simply lands
+# in its own cohort — same normaliser, stated, plus its provenance.
+PROBE_NORMALIZER_SUFFIX = "+probe"
+
+
+def probe_normalizer_version(version: str = NORMALIZER_VERSION) -> str:
+    """The cohort key the confirmation probe writes under."""
+    return f"{version}{PROBE_NORMALIZER_SUFFIX}"
+
+
 # ASCII-only class on purpose: it must apply byte-wise to a body that failed to
 # decode as UTF-8 (the degraded path) without inventing an encoding for it.
 _WS_RE = re.compile(rb"[ \t\r\n\f\v]+")
