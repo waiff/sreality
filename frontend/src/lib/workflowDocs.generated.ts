@@ -2756,6 +2756,135 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/location_mapy_inventory.yml"
   },
   {
+    "filename": "location_payload_backfill.yml",
+    "name": "Jobs: Payload archive backfill + round-trip verify (location W2a)",
+    "description": "Migrates the legacy `portal_raw_pages` archive (445,191 rows / 14 GB, latest-wins, one body per page) into the content-addressed `portal_raw_payloads` store, and verifies the result byte-for-byte on a random 1,000-row sample. `backfill` copies rows in budgeted, resumable batches; `verify` is 06 W2a gate (a) — the report an operator signs before the W2 sweep reads anything through the new store.",
+    "portal": null,
+    "manual": true,
+    "schedules": [],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "mode",
+        "description": "what to run",
+        "required": true,
+        "type": "choice",
+        "default": "verify",
+        "options": [
+          "backfill",
+          "verify",
+          "backfill_then_verify"
+        ]
+      },
+      {
+        "name": "source",
+        "description": "one portal only (blank = every source in the archive)",
+        "required": false,
+        "type": "choice",
+        "default": "",
+        "options": [
+          "",
+          "sreality",
+          "bezrealitky",
+          "bazos",
+          "idnes",
+          "mmreality",
+          "remax",
+          "ceskereality",
+          "realitymix",
+          "maxima"
+        ]
+      },
+      {
+        "name": "max_seconds",
+        "description": "backfill only — wall-clock budget, stops between batches (blank = 2700)",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "batch_size",
+        "description": "backfill only — source rows per batch (25-1000; blank = 200)",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "limit",
+        "description": "backfill only — stop after this many source rows (blank = no limit)",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "start_after_id",
+        "description": "backfill only — operator anchor; the run neither resumes from nor becomes a resumable cursor (blank = 0)",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "sample_size",
+        "description": "verify only — rows in the round-trip sample (blank = 1000)",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "seed",
+        "description": "verify only — reproduce an earlier sample (blank = random)",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "dry_run",
+        "description": "backfill only — read and encode; write nothing",
+        "required": false,
+        "type": "boolean",
+        "default": "false",
+        "options": null
+      },
+      {
+        "name": "force",
+        "description": "backfill only — re-walk ground already migrated under a DIFFERENT normaliser, accepting a permanent second pinned row per page",
+        "required": false,
+        "type": "boolean",
+        "default": "false",
+        "options": null
+      },
+      {
+        "name": "json_output",
+        "description": "verify only — emit JSON instead of the table",
+        "required": false,
+        "type": "boolean",
+        "default": "false",
+        "options": null
+      }
+    ],
+    "secrets": [
+      "R2_ACCESS_KEY_ID",
+      "R2_ACCOUNT_ID",
+      "R2_BUCKET_NAME",
+      "R2_SECRET_ACCESS_KEY",
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "location-batch",
+    "cancelInProgress": false,
+    "timeoutMinutes": 55,
+    "permissions": "contents: read",
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/location_payload_backfill.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/location_payload_backfill.yml"
+  },
+  {
     "filename": "location_payload_churn.yml",
     "name": "Jobs: Payload churn readout + refetch probe (location W2a)",
     "description": "The read side of the W2a shadow-hash churn instrument (migration 402), and the 200 x 3 confirmation probe that backs it. `report` prints the per-portal, per-page-kind change rates, body sizes and the projected GB per refetch cycle and per month — the artefact the W2a storage gate is signed from. `probe` runs 02-portal-contracts.md section 2.3.2's protocol: 200 listings x 3 fetches per portal, minutes apart, so the raw-vs-normalised gap is measured against a listing that provably did not change.",

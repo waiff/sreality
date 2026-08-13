@@ -1,0 +1,182 @@
+name: "Jobs: Payload archive backfill + round-trip verify (location W2a)"
+
+# Migrates the legacy `portal_raw_pages` archive (445,191 rows / 14 GB, latest-wins, one
+# body per page) into the content-addressed `portal_raw_payloads` store, and verifies the
+# result byte-for-byte on a random 1,000-row sample. `backfill` copies rows in budgeted,
+# resumable batches; `verify` is 06 W2a gate (a) — the report an operator signs before the
+# W2 sweep reads anything through the new store.
+#
+# DISPATCH-ONLY, no schedule, deliberately. This is a one-shot migration whose storage cost
+# is the very thing the W2a gate is about: it waits on the operator's `volatile_paths`
+# decision (O3) and a signed storage projection against the measured change rate (O4). A
+# cron here would spend that budget before the decision that authorises it.
+#
+# READ-ONLY against its source. Nothing in this lane deletes, truncates or drops
+# `portal_raw_pages` — it holds the only surviving copy of several portals' location signal
+# for listings that are now delisted, and `tests/test_portal_raw_pages_guard.py` is the CI
+# gate that keeps it that way.
+#
+# A run that hits `max_seconds` stamps `outcome='stopped'` on its `location_claim_batches`
+# row, never 'ok', and the next dispatch resumes from that row's keyset cursor. 'ok' means
+# one thing: the scan ran off the end of the table. So covering the full archive is simply
+# repeated dispatches until one reports `reached_end`.
+#
+# Required secret: SUPABASE_DB_URL. R2_* is optional and only read by `verify`, to fetch a
+# body that spilled to the bucket.
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "what to run"
+        required: true
+        default: verify
+        type: choice
+        options:
+          - backfill
+          - verify
+          - backfill_then_verify
+      source:
+        description: "one portal only (blank = every source in the archive)"
+        required: false
+        default: ""
+        type: choice
+        options:
+          - ""
+          - sreality
+          - bezrealitky
+          - bazos
+          - idnes
+          - mmreality
+          - remax
+          - ceskereality
+          - realitymix
+          - maxima
+      max_seconds:
+        description: "backfill only — wall-clock budget, stops between batches (blank = 2700)"
+        required: false
+        default: ""
+        type: string
+      batch_size:
+        description: "backfill only — source rows per batch (25-1000; blank = 200)"
+        required: false
+        default: ""
+        type: string
+      limit:
+        description: "backfill only — stop after this many source rows (blank = no limit)"
+        required: false
+        default: ""
+        type: string
+      start_after_id:
+        description: "backfill only — operator anchor; the run neither resumes from nor becomes a resumable cursor (blank = 0)"
+        required: false
+        default: ""
+        type: string
+      sample_size:
+        description: "verify only — rows in the round-trip sample (blank = 1000)"
+        required: false
+        default: ""
+        type: string
+      seed:
+        description: "verify only — reproduce an earlier sample (blank = random)"
+        required: false
+        default: ""
+        type: string
+      dry_run:
+        description: "backfill only — read and encode; write nothing"
+        required: false
+        default: false
+        type: boolean
+      force:
+        description: "backfill only — re-walk ground already migrated under a DIFFERENT normaliser, accepting a permanent second pinned row per page"
+        required: false
+        default: false
+        type: boolean
+      json_output:
+        description: "verify only — emit JSON instead of the table"
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  # OUTER, cross-lane: shared with the registry load, the claim intake, the Mapy inventory,
+  # the resolve drain and the churn probe so at most ONE heavy location lane runs at a time
+  # (2026-08-10 incident — four concurrent lanes against the shared production instance).
+  # See location_registry_load.yml for the full note. This lane belongs in it on rows AND
+  # on bytes: 445k detoasted bodies is the largest single read the program performs.
+  group: location-batch
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    concurrency:
+      # INNER, per-lane: two backfills would walk the same keyset and each re-read the
+      # other's slice. Never cancel in flight — a cancelled batch rolls back whole, but the
+      # `location_jobs` lease of a cancelled run strands until its TTL expires and locks
+      # the lane out of a re-dispatch for an hour.
+      group: location-payload-backfill
+      cancel-in-progress: false
+    timeout-minutes: 55
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: pip install -e .
+
+      - name: Backfill portal_raw_pages into portal_raw_payloads
+        if: inputs.mode == 'backfill' || inputs.mode == 'backfill_then_verify'
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          SOURCE: ${{ inputs.source }}
+          MAX_SECONDS: ${{ inputs.max_seconds }}
+          BATCH_SIZE: ${{ inputs.batch_size }}
+          LIMIT: ${{ inputs.limit }}
+          START_AFTER_ID: ${{ inputs.start_after_id }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          FORCE: ${{ inputs.force }}
+        # A bash ARRAY, not a string: an unquoted "$ARGS" word-splits, and a value that
+        # arrives with a stray space would reach argparse as a separate positional.
+        run: |
+          ARGS=()
+          if [ -n "$SOURCE" ]; then ARGS+=(--source "$SOURCE"); fi
+          if [ -n "$BATCH_SIZE" ]; then ARGS+=(--batch-size "$BATCH_SIZE"); fi
+          if [ -n "$LIMIT" ]; then ARGS+=(--limit "$LIMIT"); fi
+          if [ -n "$START_AFTER_ID" ]; then ARGS+=(--start-after-id "$START_AFTER_ID"); fi
+          if [ "$DRY_RUN" = "true" ]; then ARGS+=(--dry-run); fi
+          if [ "$FORCE" = "true" ]; then ARGS+=(--force); fi
+          # Default the budget under the job ceiling so the run stops cleanly BETWEEN
+          # batches and stamps a resumable `stopped` row, rather than being killed
+          # mid-batch by the runner and leaving its batch row `running`.
+          ARGS+=(--max-seconds "${MAX_SECONDS:-2700}")
+          echo "python -m location_data.payload_backfill ${ARGS[*]}"
+          python -m location_data.payload_backfill "${ARGS[@]}"
+
+      - name: Verify the round trip byte-for-byte
+        if: inputs.mode == 'verify' || inputs.mode == 'backfill_then_verify'
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+          SOURCE: ${{ inputs.source }}
+          SAMPLE_SIZE: ${{ inputs.sample_size }}
+          SEED: ${{ inputs.seed }}
+          JSON_OUTPUT: ${{ inputs.json_output }}
+        run: |
+          ARGS=()
+          if [ -n "$SOURCE" ]; then ARGS+=(--source "$SOURCE"); fi
+          if [ -n "$SAMPLE_SIZE" ]; then ARGS+=(--size "$SAMPLE_SIZE"); fi
+          if [ -n "$SEED" ]; then ARGS+=(--seed "$SEED"); fi
+          if [ "$JSON_OUTPUT" = "true" ]; then ARGS+=(--json); fi
+          echo "python -m scripts.location_payload_roundtrip_verify ${ARGS[*]}"
+          python -m scripts.location_payload_roundtrip_verify "${ARGS[@]}"

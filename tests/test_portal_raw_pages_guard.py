@@ -27,6 +27,13 @@ REPO = Path(__file__).resolve().parents[1]
 
 _SCAN_DIRS = (
     "migrations", "scraper", "toolkit", "api", "scripts", ".github/workflows",
+    # W2a put the highest-risk code in the repo in `location_data/`: the backfill reads
+    # this table, and the payload store's retention writes DELETEs against a table whose
+    # name differs from this one by four characters. A package that both reads the
+    # protected table and deletes from its near-namesake is the last place the guard
+    # should have been blind. (`tests/` stays out — this guard's own test and the
+    # backfill's carry the forbidden spellings as fixtures.)
+    "location_data",
 )
 _SCAN_SUFFIXES = {".sql", ".py", ".yml", ".yaml"}
 
