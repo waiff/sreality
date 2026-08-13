@@ -943,7 +943,7 @@ def test_the_sweep_loads_active_suppressions_and_passes_them_both_ways(
     auto, queued, suppressed = rb._cross_source_merge(conn, ["sreality", "idnes"],
                                                       run_id=5)
     assert seen["decide"] == seen["apply"] == {(1, 2)}
-    # the run's suppressed_merges is edge-level suppressions PLUS whole components
+    # the run's suppressed_pairs is edge-level suppressions PLUS whole components
     # the backstop dropped — a rail that only counted one of the two would report a
     # silent zero on exactly the transitive case it exists for
     assert (auto, queued, suppressed) == (0, 0, 2)
