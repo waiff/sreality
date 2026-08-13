@@ -27,7 +27,7 @@ from typing import Any
 import pytest
 
 from location_data import claims_intake
-from location_data.claims_intake import run
+from location_data.claims_intake import LEGACY_COLUMNS, run
 from tests.location_data.claim_intake_fixtures import (
     SREALITY_POST_CUTOVER,
     entries_for,
@@ -43,9 +43,9 @@ class _Listing:
 
     def record(self) -> tuple[Any, ...]:
         # The batch queries' column order, verbatim: identity, payload, sighting, the two
-        # geom ordinates, inventory membership, then the class-B legacy columns.
+        # geom ordinates, inventory membership, then all of `LEGACY_COLUMNS`.
         return (self.id, "sreality", f"n{self.id}", dict(SREALITY_POST_CUTOVER),
-                self.last_seen_at, None, None, False, None)
+                self.last_seen_at, None, None, False, *((None,) * len(LEGACY_COLUMNS)))
 
 
 class _Cursor:

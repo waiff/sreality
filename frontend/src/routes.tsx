@@ -31,6 +31,7 @@ const Datasets = lazy(() => import('./pages/Datasets'));
 const Outreach = lazy(() => import('./pages/Outreach'));
 const OutreachDetail = lazy(() => import('./pages/OutreachDetail'));
 const BrokerReview = lazy(() => import('./pages/BrokerReview'));
+const LocationQuality = lazy(() => import('./pages/LocationQuality'));
 const NewDedupDashboard = lazy(() => import('./pages/NewDedupDashboard'));
 const NewDedupSettings = lazy(() => import('./pages/NewDedupSettings'));
 const NewDedupLabeling = lazy(() => import('./pages/NewDedupLabeling'));
@@ -98,6 +99,7 @@ export const routes: RouteObject[] = [
       { path: 'watchdog/:id/edit', element: <WatchdogEdit />, handle: { title: 'Edit watchdog' } },
       { path: 'notifications', element: <Notifications />, handle: { title: 'Notifications' } },
       { path: 'clip-audit', element: <AdminPage><ClipAudit /></AdminPage>, handle: { title: 'CLIP Audit' } },
+      { path: 'location-quality', element: <AdminPage><LocationQuality /></AdminPage>, handle: { title: 'Location quality' } },
       { path: 'settings', element: <AdminPage><Settings /></AdminPage>, handle: { title: 'Settings' } },
       { path: 'new-dedup', element: <AdminPage><NewDedupDashboard /></AdminPage>, handle: { title: 'NEW DEDUP' } },
       { path: 'new-dedup/settings', element: <AdminPage><NewDedupSettings /></AdminPage>, handle: { title: 'NEW DEDUP · Settings' } },

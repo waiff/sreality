@@ -2624,6 +2624,68 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/location_claims_intake.yml"
   },
   {
+    "filename": "location_labelled_sample.yml",
+    "name": "Jobs: location labelled-sample draw (06 6.4.0)",
+    "description": "DISPATCH-ONLY. Draws the frozen random labelled sample for one portal (migration 399): n >= 100 active listings, uniform random, snapshotting the OLD system's serving values at draw time. The sample MUST be drawn BEFORE that portal's extraction sweep / refetch wave (06 6.4.0: \"drawn before the sweep, randomly\"), and is then hand-labelled by the operator; contract acceptance is precision on this sample, not yield.",
+    "portal": null,
+    "manual": true,
+    "schedules": [],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "source",
+        "description": "portal to draw for (e.g. bezrealitky)",
+        "required": true,
+        "type": "string",
+        "default": null,
+        "options": null
+      },
+      {
+        "name": "n",
+        "description": "sample size (>= 100)",
+        "required": false,
+        "type": "string",
+        "default": "120",
+        "options": null
+      },
+      {
+        "name": "seed",
+        "description": "setseed() value in (-1, 1); blank = the script default",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "write",
+        "description": "actually draw (false = dry-run count)",
+        "required": false,
+        "type": "boolean",
+        "default": "false",
+        "options": null
+      },
+      {
+        "name": "replace",
+        "description": "retire the current sample and draw a new one",
+        "required": false,
+        "type": "boolean",
+        "default": "false",
+        "options": null
+      }
+    ],
+    "secrets": [
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "location-labelled-sample",
+    "cancelInProgress": false,
+    "timeoutMinutes": 10,
+    "permissions": "contents: read",
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/location_labelled_sample.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/location_labelled_sample.yml"
+  },
+  {
     "filename": "location_mapy_inventory.yml",
     "name": "Jobs: Mapy affected-set inventory (location W1 / R2)",
     "description": "DISPATCH-ONLY evidence job for the Mapy.cz licensing remediation. Materialises the five-arm affected set of the location design (04-connectors-ops.md C7.2 R2) into the immutable tables of migration 385: per-listing arm evidence, the geocode_cache identity ledger, and the property closure. It records IDENTITY and REASON CODES only — never a coordinate, matched_type or confidence, which would be the same storage violation the remediation exists to end.",

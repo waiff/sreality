@@ -14,7 +14,7 @@ is the tie-breaker). This track records sequencing + shipped state only.
 | --- | --- | --- |
 | W0 "stop the bleeding" | 15 interim fixes + 2 measurements against the CURRENT system | 🟡 in progress (2026-08-10) |
 | W1 registry + claim spine (shadow) | full RÚIAN mirror, claims, resolutions, projection | ✅ shipped 2026-08-12 (migrations 380–389 applied; shadow-only, no consumer reads it) |
-| W1v bezrealitky vertical slice | one portal end-to-end + location-quality dashboard | ⚪ next — gated on the per-portal frozen labelled samples (operator) |
+| W1v bezrealitky vertical slice | one portal end-to-end + location-quality dashboard | 🟡 in progress (2026-08-13) — spine + API landing; labelling stays operator work |
 | W2a payload archive rewrite | append-on-change `portal_raw_payloads` | ⚪ not started (byte-churn measurement is the gate) |
 | W2–W6 | HTML re-mine, history backfill, refetch cohorts, LLM lane, serving flip | ⚪ not started |
 
@@ -99,14 +99,25 @@ run on `listings.geom` and the geo-derived admin columns. The consumer flip is W
   Křovák→WGS84 check **0.03 m** on the pinned PROJ pipeline), **20,034** polygonal units each
   carrying three geometries (authoritative + subdivided pip + render), gazetteer **217,515** names.
   Boundary packs resume through per-layer done-sets; monthly baseline cron + the boundaries lane.
-- **Contracts** — 9 portal YAMLs projected, **v2** for remax / ceskereality / realitymix; intake
-  runs hourly-incremental with byte-bounded chunked writes.
+- **Contracts** — 9 portal YAMLs projected, **v2** for remax and **v3** for ceskereality /
+  realitymix; intake runs hourly-incremental with byte-bounded chunked writes.
 - **Refetch cohort** — **38,612** sreality rows (legacy-shape or 80 KB-truncated payloads) parked
   in `location_enrichment_state(lane='sreality_detail_refetch')`. **W4 work.**
 
-**Gate outcomes: final numbers in the W1 report.** The coverage, precision-distribution and
-replay gates were measured against the live corpus during the sweep; this track carries the
-sequencing, not the measurements.
+**Gate outcomes (final, measured 2026-08-13, all PASS):**
+
+| Gate | Requirement | Measured |
+| --- | --- | --- |
+| Registry + sign trap | national CSV, 19 cols; golden-point round trip | 3,020,222 points; kód ADM 21690278 at **0.03 m** (pinned PROJ pipeline) |
+| Claim coverage | ≥99 % of active listings ≥1 claim | **99.18 %** (382,901+/386,065; 4.91 M claims) |
+| Licence (blocking) | 0 ephemeral claims; 0 coordinate claims on the inventory | **0 / 0** (inventory: 57,204 listings, terminal) |
+| D3 axes | ≥98 % sreality post-cutover; 100 % mmreality | **100 %** (94,113/94,113) / **100 %** (10,731/10,731) |
+| Deterministic replay | byte-identical on unchanged inputs | **PASS** — 1,000-listing production sample, before/after hash identical, 0 new resolutions; + hermetic CI test |
+| PIP latency (Q7) | p95 < 5 ms | containing 0.24 ms / nearest-within 2.95 ms |
+
+Corpus state at gate time: 725,164 resolutions (zero failed listings), 3,903 contradiction
+detections, epoch 2 current, subsystem ≈16 GB (observations carry ~7 GB of one-time
+re-scan bloat — a same-day observation dedup guard is queued follow-up work).
 
 ### Decisions worth carrying forward
 
@@ -138,6 +149,18 @@ sequencing, not the measurements.
   and v1 only read the banned `/address`) and `rx./cr./rm..det.legacy_locality` (a new
   `legacy_text_column` reader over `listings.locality`, capped at `claim_confidence='medium'` and
   flagged `legacy_write_path_unknown` **from the contract**).
+- **v3 guards a legacy column on its PROVENANCE, not on NOT NULL** (2026-08-13). v2 left the gate
+  at 98.94% (4,109 zero-claim ACTIVE rows), and on ceskereality's 3,280 the payload
+  `locality_text` *and* `listings.locality` are both NULL — `listings.street` is the last
+  W1-readable signal. 06 §6.1.3 classes that column per **writer**, so `cr./rm..det.legacy_street`
+  read it through a generic `locator.require_column_equals: {listings.street_source: parser}`:
+  the class-B parser arm is admitted, the class-D `resolver` (RÚIAN inference) and NULL (legacy
+  writes) arms are refused before they can become claims. The guard is contract DATA, not a portal
+  branch, and it is the reason those two entries declare `write_path_unknown: false` — a guard
+  that names the writer answers §6.6 rule 3. Measured recovery: **+957** ceskereality rows →
+  **99.18%**, clearing the ≥99% gate; realitymix contributes **0** (all 243 of its street-bearing
+  zero-claim rows are `street_source IS NULL`) and gains ~10k street claims on already-covered
+  rows instead. A `street IS NOT NULL` guard would have bought those 243 by admitting class D.
 - **Throughput was round trips, not indexes.** The drain went 3 s/listing → the current rate in
   two rounds, and round 2 measured the floor: a GitHub-runner↔Frankfurt round trip prices at
   **~75 ms** while the same registry questions cost **0.02–0.5 ms** server-side, so the rate was
@@ -174,7 +197,29 @@ sequencing, not the measurements.
 ### Open, carried forward
 
 - **The per-portal frozen labelled samples (n ≥ 100/portal) are the gate on W1v's value** — they
-  decide whether each contract resolves or stays in shadow. Operator work, not yet started.
+  decide whether each contract resolves or stays in shadow. The MACHINERY ships in W1v
+  (migration 399 tables + `scripts/location_draw_labelled_sample` +
+  `location_labelled_sample.yml` + the labelling surface on the Location quality page);
+  the 2–4 h of hand-labelling per portal stays operator work.
+
+## W1v — in progress (bezrealitky vertical slice)
+
+PR-1 (spine + API): migration 399 (frozen labelled samples, 06 §6.4.0: membership frozen
+at draw, legacy serving values snapshotted at draw time, one is_current sample per source),
+migration 400 (operator survivorship rows in policy v1 — rank 50, `may_overwrite_non_null`;
+without them an operator claim wins the pin but silently loses every FIELD),
+`location_data/operator_corrections.py` (the operator claim producer: append-only claim +
+UNCONDITIONAL `dirty_locations` enqueue — the time-free fingerprint means a restated
+correction inserts nothing, so an `ins`-gated enqueue would be a dead button — then a
+synchronous single-listing resolve, 05 §5.5.5 read-your-writes), and the admin-gated
+`/location/*` API (quality panels from the projection ONLY, W1v gate measurement,
+listing inspector, sample labelling CRUD + precision scoring vs both systems).
+
+Sequencing (order is load-bearing): draw + freeze the bezrealitky sample FIRST (06 §6.4.0
+"drawn before the sweep"), then the one-off refetch of ~5.2k active rows whose `raw_json`
+predates the widened GraphQL query (queue insert at `priority = -1`, drained by the
+realtime worker at production politeness; the hourly intake + */15 resolve drain then
+converge with no further orders). Gate measured live at `/location/quality/w1v-gate`.
 - **Operator items:** **A1** (ČÚZK helpdesk) — letter drafted, awaiting send. **A5** (filter
   semantics default) — still undecided, and it is a serving-layer decision W6 needs. **A2**
   (quarterly licence review) standing. **A4** (Supabase plan/tier) no longer blocks: W1 is applied
