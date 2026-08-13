@@ -106,7 +106,7 @@ def test_no_bridges_is_noop():
     assert d.review_pairs == []
 
 
-# --- the suppression rail (migration 399) -------------------------------------
+# --- the suppression rail (migration 401) -------------------------------------
 
 
 def test_a_suppressed_pair_reaches_neither_auto_merge_nor_review():

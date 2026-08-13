@@ -335,7 +335,7 @@ SELECT p.broker_identity_id, p.source, p.kind, p.value
 FROM personal p JOIN multi m ON m.kind = p.kind AND m.value = p.value
 """
 
-# The operator's standing NO (migration 399). One indexed read per sweep: the merge
+# The operator's standing NO (migration 401). One indexed read per sweep: the merge
 # step already runs ~8.4 min against a 20-min lock-stale window, so the rail is a
 # single set load, never a per-candidate lookup.
 _SUPPRESSED_PAIRS_SQL = """

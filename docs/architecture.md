@@ -989,7 +989,7 @@ disabled** pending the operator's D5 validation). Everything else queues as a
 deliberately widens what one run fuses (two capped groups chain through a broker holding an identity
 in each).
 
-**The rail (migration 399).** The sweep re-derives its whole candidate set every night from
+**The rail (migration 401).** The sweep re-derives its whole candidate set every night from
 `broker_identity_contacts` and consulted no decision record, so an unmerge came straight back and a
 dismissed pair auto-merged the moment its evidence strengthened (a second bridge value, converging
 names, or its source being enabled later). `broker_merge_suppressions` now records the operator's NO

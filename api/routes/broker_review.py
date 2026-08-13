@@ -3,7 +3,7 @@
 Mounted under `/broker-review/*` (own prefix so it never collides with the
 `/brokers/{broker_id}` read routes), admin-gated via `require_admin` — mutating
 operator actions (merge / dismiss / unmerge) plus the standing-NO ledger those
-actions write (`/suppressions`, migration 399, listable and liftable). Thin HTTP
+actions write (`/suppressions`, migration 401, listable and liftable). Thin HTTP
 layer over `api.broker_review`. Reversible: every merge logs to broker_merge_events.
 
 `require_admin` returns the verified JWT claims; every mutating route binds them and
@@ -125,7 +125,7 @@ def list_suppressions(
     conn: Any = Depends(deps.get_db_conn),
     _: dict = Depends(deps.require_admin),
 ) -> dict[str, Any]:
-    """The standing-NO ledger (migration 399), active rows first."""
+    """The standing-NO ledger (migration 401), active rows first."""
     return review.list_suppressions(conn, limit=limit, offset=offset,
                                     include_lifted=include_lifted)
 

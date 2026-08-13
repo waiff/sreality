@@ -1,4 +1,4 @@
-"""The unmerge/dismiss suppression rail (migration 399) — hermetic, no DB.
+"""The unmerge/dismiss suppression rail (migration 401) — hermetic, no DB.
 
 The gap these cover (2026-08-12 brokers E2E review, decision D5): the nightly
 sweep re-derives its whole cross-source candidate set from broker_identity_contacts
@@ -479,7 +479,7 @@ def test_the_origin_literals_match_the_migration_check_constraint() -> None:
     module = pathlib.Path(review.__file__).read_text()
     written = set(re.findall(r'origin="(\w+)"', module))
     migration = (pathlib.Path(__file__).resolve().parents[2]
-                 / "migrations/399_broker_merge_suppressions.sql").read_text()
+                 / "migrations/401_broker_merge_suppressions.sql").read_text()
     allowed = set(re.search(r"CHECK \(origin IN \(([^)]*)\)\)", migration)[1]
                   .replace("'", "").replace(" ", "").split(","))
     assert written and written <= allowed, (written, allowed)

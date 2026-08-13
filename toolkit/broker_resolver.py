@@ -20,7 +20,7 @@ corroborated edges only, with a size cap, so one recycled phone number cannot
 transitively fuse a chain of distinct people.
 
 Operator decisions are durable: `suppressed_pairs` carries the identity pairs an
-unmerge or a dismissal already rejected (broker_merge_suppressions, migration 399).
+unmerge or a dismissal already rejected (broker_merge_suppressions, migration 401).
 Without it the sweep re-derives the same bridges nightly and re-applies a merge the
 operator undid.
 """

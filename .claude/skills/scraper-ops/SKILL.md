@@ -328,7 +328,7 @@ never a properties scan) and `broker_resolution_freshness` (**three** axes over
 `app_settings.broker_resolution_last_complete`, `broker_resolution_runs.ended_at` and
 `dirty_broker_listings` — the 2026-08-12
 E2E review found the daily broker sweep truncating on its budget every day while exiting 0)
-and `broker_merge_suppression` (migration 399): active `broker_merge_suppressions` rows whose two
+and `broker_merge_suppression` (migration 401): active `broker_merge_suppressions` rows whose two
 identities share one broker — the invariant the suppression rail exists to hold. `fail` on the
 first violation, no warn tier. An operator NO (unmerge / dismissing a `contact_bridge_review`
 candidate) writes a suppression row keyed on the durable identity pair; the sweep loads the active

@@ -15,7 +15,7 @@ inline (reusing the resolver's rollup SQL); the leaderboard matview catches up o
 the next daily sweep, but a merged loser drops off the leaderboard immediately
 (brokers_public is active-only). Writes live here in api/, not toolkit (rule #5).
 
-Negative decisions are durable too (migration 399). Unmerging a group, and
+Negative decisions are durable too (migration 401). Unmerging a group, and
 dismissing a contact-bridge candidate, write broker_merge_suppressions rows — the
 nightly sweep re-derives its whole candidate set from the contact table and would
 otherwise re-apply the very merge the operator just undid. An explicit operator

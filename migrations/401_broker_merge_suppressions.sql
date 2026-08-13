@@ -1,4 +1,4 @@
--- 399: the operator's NO on a cross-source broker auto-merge, made durable.
+-- 401: the operator's NO on a cross-source broker auto-merge, made durable.
 --
 -- The gap (2026-08-12 brokers E2E review, decision D5). The nightly sweep's
 -- cross-source step (scripts/resolve_brokers.py::_cross_source_merge) re-derives
@@ -38,7 +38,7 @@
 -- Additive only, but NOT independent of the code: the branch that adds this file also
 -- ships the reader (scripts/resolve_brokers.py loads the active pairs on every sweep,
 -- api/broker_review.py writes them, _finalize stamps suppressed_pairs on the run row).
--- So 399 must be applied BEFORE that branch merges — the ship stage does it, and a
+-- So 401 must be applied BEFORE that branch merges — the ship stage does it, and a
 -- merge-first order would break the very next nightly sweep on a missing relation.
 
 CREATE TABLE broker_merge_suppressions (

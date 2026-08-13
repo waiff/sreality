@@ -77,7 +77,7 @@ it (`api/`). They do not apply to the scraper.
    permits; these ten paths then need a separately-elevated route. For now we ship with one
    role and discipline.
    **Broker merge-review writes are durable decisions, not just status flips** (`api/broker_review.py`,
-   migration 399). The nightly sweep re-derives every cross-source bridge from scratch, so an unmerge
+   migration 401). The nightly sweep re-derives every cross-source bridge from scratch, so an unmerge
    used to be re-applied the same night. `unmerge_group` now derives, inside its own transaction and
    BEFORE the re-point, every cross-owner + cross-source identity pair it pulled apart and records it
    in `broker_merge_suppressions`. Both derivations read a **cohort**, never a remembered id: the

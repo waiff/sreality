@@ -833,7 +833,7 @@ def test_apply_merges_skips_a_group_already_on_one_broker() -> None:
     assert rb._apply_merges(conn, []) == (0, 0)
 
 
-# --- the apply-time suppression backstop (migration 399) ----------------------
+# --- the apply-time suppression backstop (migration 401) ----------------------
 #
 # NOTE: _ResilientConn enforces no CHECK / FK / UNIQUE constraint (see
 # [[adversarial-review-fake-conn-db-constraints]]), so these tests assert the PLAN
