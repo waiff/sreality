@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<!-- Modelled on contracts/portals/remax.yaml. The live-verified counterpart is
+     tests/fixtures/portal_html/remax_detail.html (a real archived page, where
+     the carousel decoy and the subject header both appear); this one adds the
+     two zones that page's markup does not carry — `.broker, .office` and
+     `footer` — so the register's own selectors are exercised in both directions.
+     [mine-remax finding 5]: the broker block is the SOLE source of PSČ on all 12
+     mined pages. [mine-syn §1c]: the first `data-address` in the document is a
+     neighbour card's, and it reached listings.street on 2 rows. -->
+<html lang="cs">
+<head><title>Prodej bytu 3+kk, Pod Slovany, Úvaly | RE/MAX</title></head>
+<body>
+
+<div class="pd-header">
+  <h1>Prodej bytu 3+kk 74 m²</h1>
+  <h2 class="pd-header__address">ulice Pod Slovany, Úvaly</h2>
+  <div class="pd-header__location">Úvaly, okres Praha-východ</div>
+</div>
+
+<div id="printMap" class="smap-defaults" data-gps="50°04'26.1&quot;N,14°43'41.5&quot;E"></div>
+<div id="listingMap" class="smap-defaults" data-gps="50°04'26.1&quot;N,14°43'41.5&quot;E"></div>
+
+<div class="area-listings">
+  <div class="area-listings__item" data-address="Oleška, okres Praha-východ" data-gps="49°59'01.5&quot;N,14°54'28.4&quot;E">
+    <a href="/reality/1/">Dům Oleška</a>
+  </div>
+  <div class="area-listings__item" data-address="Havlíčkova, Stará Boleslav, okres Praha-východ" data-gps="50°11'25.0&quot;N,14°41'55.2&quot;E">
+    <a href="/reality/2/">Byt Havlíčkova</a>
+  </div>
+</div>
+
+<div class="broker">
+  RE/MAX Diamond, Samcova 1177/1, Praha 1 - Nové Město, 110 00, Česká republika
+</div>
+
+<footer>
+  RE/MAX Europe: Austria Belgium Bulgaria Croatia Czechia Denmark Estonia Spain
+</footer>
+
+</body>
+</html>

@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<!-- Modelled on contracts/portals/idnes.yaml. The point of this fixture is the
+     SECOND zone shape: `script[data-maptiler-json]` is excluded only at
+     `/geojson/features[isSimilar=true]`, so the script node itself must SURVIVE
+     scoping — it carries id.det.subject_feature, the first-party replacement for
+     the 6,314-row unstamped coordinate cohort [live-B §1.4.1]. The 20 neighbour
+     addresses per page are [live-B §1.2]; the verbatim disclaimer is
+     [mine-syn §4.0 fix #9] and is the portal's own blur declaration. -->
+<html lang="cs">
+<head><title>Prodej domu 210 m², Tanvald - Šumburk nad Desnou | reality.iDNES.cz</title></head>
+<body>
+
+<nav class="m-main">
+  <a href="/reality/">Reality</a>
+  <a href="/reality/zahranicni/">Zahraniční nemovitosti</a>
+</nav>
+
+<div class="b-detail__info">Na Balkáně, Tanvald - Šumburk nad Desnou, okres Jablonec nad Nisou</div>
+
+<p class="b-detail__disclaimer">Nemovitost nemá přesnou adresu, nachází se ve vyznačené oblasti.</p>
+
+<script type="application/json" data-maptiler-json>
+{
+  "mtMapOptions": {"zoom": 14},
+  "infoText": "Nemovitost nemá přesnou adresu, nachází se ve vyznačené oblasti.",
+  "geojson": {
+    "type": "FeatureCollection",
+    "features": [
+      {"type": "Feature",
+       "geometry": {"type": "Point", "coordinates": [15.31331632, 50.74437214]},
+       "properties": {"id": "6a71888887e5da33ca081ad8",
+                      "address": "Na Balkáně, Tanvald - Šumburk nad Desnou, okres Jablonec nad Nisou",
+                      "isSimilar": false}},
+      {"type": "Feature",
+       "geometry": {"type": "Point", "coordinates": [15.31840000, 50.75120000]},
+       "properties": {"id": "68badb8de7b021a4470fb87d",
+                      "address": "Krkonošská 512, Desná - Desná I, okres Jablonec nad Nisou",
+                      "isSimilar": true}}
+    ]
+  }
+}
+</script>
+
+<div class="b-similar">
+  <h3>Podobné nabídky</h3>
+  <ul>
+    <li><a href="/detail/prodej/dum/68badb8d/">Dům, Krkonošská 512, Desná</a></li>
+    <li><a href="/detail/prodej/dum/68badb8e/">Dům, Údolní 44, Jablonec nad Nisou</a></li>
+  </ul>
+</div>
+
+<div class="broker">
+  M&amp;M Reality Holding a.s., Krakovská 1675/2, 110 00 Praha 1
+</div>
+
+</body>
+</html>

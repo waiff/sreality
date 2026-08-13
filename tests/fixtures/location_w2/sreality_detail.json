@@ -1,0 +1,28 @@
+{
+  "name": "Prodej bytu 3+kk 74 m²",
+  "locality": {
+    "street": "Vinohradská",
+    "street_id": 51242,
+    "house_number": "1420/33",
+    "city": "Praha",
+    "citypart": "Vinohrady",
+    "district": "Praha 2",
+    "zip": "120 00",
+    "gps_lat": 50.0776,
+    "gps_lon": 14.4394,
+    "entity_type": "address",
+    "inaccuracy_type": "address"
+  },
+  "labels_extended": [
+    {"name": "Park Riegrovy sady", "value": "220 m"},
+    {"name": "Náměstí Míru", "value": "450 m"}
+  ],
+  "premise": {
+    "name": "RE/MAX Alfa",
+    "address": "Korunní 810/104, 101 00 Praha 10 - Vinohrady",
+    "gps_lat": 50.0755,
+    "gps_lon": 14.4661,
+    "phone": "+420 000 000 000",
+    "company": {"name": "ALFA reality s.r.o.", "ico": "00000000"}
+  }
+}

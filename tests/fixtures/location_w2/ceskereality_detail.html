@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<!-- Modelled on contracts/portals/ceskereality.yaml. Subject nodes are the
+     contract's W2 locators (cr.det.title_line, cr.det.perex, cr.det.data_city,
+     cr.det.breadcrumb, cr.map.coordinate); the decoys are that file's
+     exclusion_zones. The operator footer is [mine-ceskereality]: on 12 of 12
+     pages the ONLY PSČ and the only street+house-number pair on the page is
+     ČESKÝ INTERNET s.r.o.'s own. Note the accented street in <title> — the
+     column is stored ASCII-folded, and this page is where the accent survives. -->
+<html lang="cs">
+<head>
+  <title>Prodej bytu 3+1 75 m2, ulice Nádražní, České Budějovice | ČeskéReality.cz</title>
+  <meta property="og:title" content="Prodej bytu 3+1 75 m2, ulice Nádražní, 370 01 České Budějovice">
+  <script type="application/ld+json">
+  {"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[
+    {"@type":"ListItem","position":1,"name":"Jihočeský kraj"},
+    {"@type":"ListItem","position":2,"name":"České Budějovice"}]}
+  </script>
+  <script type="application/ld+json">
+  {"@context":"https://schema.org","@type":"individualProduct","name":"Byt 3+1",
+   "offers":{"@type":"Offer","areaServed":{"address":"České Budějovice"},
+             "offeredby":{"@type":"Organization","name":"REALITY ČB s.r.o.",
+                          "address":"Lannova 1234/5, 370 21 České Budějovice"}}}
+  </script>
+</head>
+<body>
+
+<nav>
+  <a href="/">Úvod</a>
+  <a href="/zahranicni-nemovitosti/">Zahraniční nemovitosti</a>
+</nav>
+
+<select name="regionId">
+  <option>Jihočeský kraj</option>
+  <option>Zahraničí</option>
+</select>
+
+<h1 class="i-estate__header-title">Prodej bytu 3+1 75 m2</h1>
+<span class="s-estate-detail-intro__perex">Nabízíme byt v ulici Nádražní, České Budějovice 6.</span>
+<input id="driving_calculator_from" data-city="České Budějovice" type="hidden">
+<div id="mapCanvas" data-markers='{"data":[{"nid":3790435,"lat":48.9745,"lng":14.4744,"zoom":17}]}'></div>
+
+<div class="similar">
+  <h3>Podobné nemovitosti</h3>
+  <ul>
+    <li><a href="/detail/3790111/">Byt 2+kk, Rudolfovská, České Budějovice</a></li>
+    <li><a href="/detail/3790112/">Byt 3+1, Puklicova, České Budějovice</a></li>
+    <li><a href="/detail/3790113/">Byt 1+1, Žižkova tř., Tábor</a></li>
+  </ul>
+</div>
+
+<footer>
+  ČESKÝ INTERNET s.r.o. Kostelní 942/46 370 04 České Budějovice<br>
+  Partneři: SOFT-PC s.r.o., Nová 118, 373 41 Hluboká nad Vltavou
+</footer>
+
+</body>
+</html>
