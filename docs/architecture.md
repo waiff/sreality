@@ -65,10 +65,13 @@ batch collides instead of duplicating; retention (version cap + pins) runs in th
 transaction. It is gated per portal by `PortalLimits.payload_dual_write` (baked default
 **False**, overridable via `app_settings.scraper_limits_global` / `portals.operational_limits`
 — no migration), cached ~60 s per source, and every failure warns rather than touching the
-scrape. `page_kind='index'` writes pass a SECOND gate on top of it, `PortalLimits.
-payload_index_archive` (W2a-6, same precedence, also baked **False**): index pages re-order on
-every walk and sreality walks them 24×/day, so they are the highest-churn artefact in the system
-(02 §2.3.2 P2) and may not sign off with a portal's detail bodies. It only ever narrows what
+scrape. **Every `page_kind` except `detail`** passes a SECOND gate on top of it,
+`PortalLimits.payload_index_archive` (W2a-6, same precedence, also baked **False**). The split is
+by GRAIN: a `detail` body is one listing fetched when that listing is enqueued, while index, map,
+gazetteer, snapshot and archive bodies are whole-SURFACE artefacts refetched on the walk cadence
+(sreality's index 24×/day; ceskereality's `/mapa/` and bezrealitky's `Region.boundaryGeoJson`
+already declare `archive: true`), which is the churn 02 §2.3.2 P2 gates — so a gate naming only
+`'index'` would have let map and gazetteer bodies archive on every walk. It only ever narrows what
 `payload_dual_write` allows. **OFF everywhere until the operator signs off the churn measurement
 + storage projection** (02 §2.3.2's gate; the numbers come from
 `scripts/location_payload_churn_report.py`). All three index archivers are additionally **gated

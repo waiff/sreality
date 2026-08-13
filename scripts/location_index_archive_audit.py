@@ -6,16 +6,20 @@ yes/no once a call site can exist and still not fire:
   * **CONTRACT** — `page_kind: index` claim entries, plus whether `fetch.surfaces`
     declares an index surface and with `archive: true` or `false`. A declaration
     with no code behind it is a gap; `archive: false` is a decision, not a gap.
-  * **CODE** — `wired` / `gated` / `absent`, three states and not two. `gated` =
-    the call site EXISTS but sits behind the client-side freshness skip
-    (`db.fresh_index_page_keys`), which `return`s before `upsert_portal_raw_page`
-    and so also suppresses the W2a-2 payload dual-write for a page that genuinely
-    changed inside the 22 h window. `gated` is owed a code fix and `absent` is
-    owed a build; collapsing them into "not wired" hides which.
-  * **DATA** — `portal_raw_pages` index rows and the `portal_raw_payloads` rows
-    they would become. Judged on FRESHNESS, never `count(*) > 0`: index archiving
-    was switched off in early June 2026, so a portal can hold thousands of index
-    rows and archive nothing today.
+  * **CODE** — `wired` / `gated` / `absent`, three states and not two, decided by
+    the archive call's REACHABILITY past the client-side freshness skip
+    (`db.fresh_index_page_keys`) rather than by the token appearing in the file.
+    `gated` = the skip wraps the call or returns before it, so it also suppresses
+    the W2a-2 dual-write for a page that genuinely changed inside the 22 h window.
+    `gated` is owed a code fix and `absent` a build; collapsing them into "not
+    wired" hides which. Reachability is what lets the eventual P2 fix be seen:
+    hoisting the append above the guard reads `wired` with the guard still there.
+  * **DATA** — `portal_raw_pages` index rows AND the `portal_raw_payloads` rows
+    they should be becoming. Judged on FRESHNESS, never `count(*) > 0`: index
+    archiving was switched off in early June 2026, so a portal can hold thousands
+    of index rows and archive nothing today. Staging fresh while payloads went
+    stale is a STALLED archive — `append_payload_if_enabled` swallows its own
+    failures, so this is the only place that failure is visible.
 
 Scope and safety:
 
@@ -63,13 +67,25 @@ STATE_WIRED = "wired"
 STATE_GATED = "gated"
 STATE_ABSENT = "absent"
 
-# The call the classifier looks for, and the token that says a found call site is
-# gated. Module-scoped on purpose: ceskereality loads the skip set in
-# `walk_category` and passes it down into `_walk_slice`, so an enclosing-function
-# check would call that call site `wired`. Module scope errs toward `gated`, which
-# is the direction that reports a gap that isn't there rather than hiding one.
-ARCHIVE_CALL = "upsert_portal_raw_page"
+# BOTH archive call shapes. `upsert_portal_raw_page` stages a body and appends via
+# the chokepoint; `append_payload_if_enabled` is the direct form the two portals
+# that stage no body already use for their detail bodies (sreality's estate JSON,
+# bezrealitky's advert), and the form a bezrealitky index archiver would have to
+# take — its GraphQL index response has no HTML to stage. Looking for only the
+# first would call a genuinely wired portal `absent`.
+ARCHIVE_CALLS = frozenset({"upsert_portal_raw_page", "append_payload_if_enabled"})
+
+# The helper that builds the skip set, and the substring that names a variable
+# carrying one (`fresh`, `fresh_keys`, `fresh_index_page_keys`) — ceskereality
+# loads the set in `walk_category` and passes it into `_walk_slice`, so the name
+# is what travels, not the call.
 FRESHNESS_SKIP_TOKEN = "fresh_index_page_keys"
+FRESHNESS_NAME_HINT = "fresh"
+
+# Statements that abandon the current artefact. An `if <freshness>: <one of these>`
+# BEFORE the archive call suppresses it exactly as wrapping the call in the
+# inverse test does, so both shapes have to count as the same gate.
+_SKIP_STATEMENTS = (ast.Return, ast.Continue, ast.Break)
 
 # An index row older than this says the archiver is not running, whatever count(*)
 # says. Two refresh windows: one missed walk is jitter, two is a dead archiver.
@@ -81,6 +97,7 @@ VERDICT_NO_CALL_SITE = "NO — contract wants index claims, no call site exists"
 VERDICT_DECLARED_UNBUILT = "NO — fetch config declares archive: true, no call site exists"
 VERDICT_NOT_ASKED = "n/a — no index contract entry and no declared index surface"
 VERDICT_DECLARED_OFF = "n/a — fetch config declares archive: false (intentional)"
+VERDICT_STALLED = "NO — the archive has STALLED: staging is fresh, payload rows are not"
 
 DRIFT = "DRIFT: registry says {declared}, the module reads {observed}"
 STALE = "STALE: newest index row is {hours:.0f} h old (> {limit:.0f} h)"
@@ -88,6 +105,14 @@ NO_ROWS = "NO ROWS: portal_raw_pages holds no index page for this portal"
 UNEXPECTED_ROWS = (
     "UNEXPECTED: index rows are still landing with no call site found — "
     "a writer this audit does not know about"
+)
+PAYLOAD_STALLED = (
+    "STALLED: portal_raw_payloads gained no index row in {hours:.0f} h (> {limit:.0f} h) "
+    "while portal_raw_pages kept landing them — the append is failing silently"
+)
+PAYLOAD_UNVERIFIED = (
+    "UNVERIFIED: no index payload row yet — expected while payload_index_archive "
+    "is off, and the reason this row's verdict is a projection"
 )
 
 
@@ -122,10 +147,10 @@ INDEX_ARCHIVERS: dict[str, CallSite] = {
         module="main.py",
         state=STATE_GATED,
         call_site="scraper/main.py:1359 (_index_page_archiver.archive)",
-        gate="main.py:1356 `if key in fresh: return` — db.fresh_index_page_keys("
-             "hours=INDEX_ARCHIVE_REFRESH_HOURS), before the upsert",
+        gate="main.py:1356 `if key in fresh:` returning on the next line — the set is "
+             "db.fresh_index_page_keys(hours=INDEX_ARCHIVE_REFRESH_HOURS), read before the upsert",
         intentional_skips=(
-            "probe_category (main.py:907) fetches index pages via fetch_index_page and "
+            "main.py:907 `def probe_category(` fetches index pages via fetch_index_page and "
             "never attaches the on_page archiver — discovery only, by design",
         ),
     ),
@@ -133,7 +158,7 @@ INDEX_ARCHIVERS: dict[str, CallSite] = {
         module="remax_main.py",
         state=STATE_GATED,
         call_site="scraper/remax_main.py:183 (_walk_agenda)",
-        gate="remax_main.py:181 `if archive_ok and key not in fresh` — "
+        gate="remax_main.py:181 `if archive_ok and key not in fresh:` — the set is "
              "db.fresh_index_page_keys(hours=INDEX_ARCHIVE_REFRESH_HOURS)",
         intentional_skips=(
             "remax_main.py:144 `archive_ok = conn is not None and not self._max_pages` — "
@@ -147,6 +172,13 @@ INDEX_ARCHIVERS: dict[str, CallSite] = {
         call_site="scraper/ceskereality_main.py:196 (_walk_slice)",
         gate="ceskereality_main.py:194 `if fresh_keys is None or key not in fresh_keys` — "
              "the skip set is loaded in walk_category and passed down",
+        intentional_skips=(
+            "ceskereality_main.py:177 `if conn is not None and archive_week is not None:` — "
+            "a dry run has no connection to stage into and no week to key by",
+            "ceskereality_main.py:375 `client.fetch_search(url)` in probe_category fetches "
+            "index pages off the /nejnovejsi/ sort slug and never archives — discovery only, "
+            "by design, exactly as sreality's probe is",
+        ),
     ),
     "bazos": CallSite(module="bazos_main.py", state=STATE_ABSENT),
     "bezrealitky": CallSite(module="bezrealitky_main.py", state=STATE_ABSENT),
@@ -157,39 +189,130 @@ INDEX_ARCHIVERS: dict[str, CallSite] = {
 }
 
 
-def has_index_archive_call(tree: ast.AST) -> bool:
-    """Does this module call `upsert_portal_raw_page` with `page_kind='index'`?
+@dataclass(frozen=True)
+class ArchiveCall:
+    """One `page_kind='index'` archive call found in a module."""
+
+    call: str
+    lineno: int
+    freshness_guarded: bool
+
+
+def _called_name(node: ast.Call) -> str | None:
+    func = node.func
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    return getattr(func, "id", None)
+
+
+def _is_index_archive_call(node: ast.AST) -> bool:
+    """An archive call whose `page_kind` keyword is the literal 'index'.
 
     * AST, not a regex: each call site spans five lines, so a proximity match on
-      the two tokens would also fire on a detail call above an unrelated 'index'.
+      the tokens would also fire on a detail call above an unrelated 'index'.
     """
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        func = node.func
-        name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
-        if name != ARCHIVE_CALL:
-            continue
-        for keyword in node.keywords:
-            if (
-                keyword.arg == "page_kind"
-                and isinstance(keyword.value, ast.Constant)
-                and keyword.value.value == INDEX
-            ):
+    if not isinstance(node, ast.Call) or _called_name(node) not in ARCHIVE_CALLS:
+        return False
+    return any(
+        kw.arg == "page_kind"
+        and isinstance(kw.value, ast.Constant)
+        and kw.value.value == INDEX
+        for kw in node.keywords
+    )
+
+
+def _parent_map(tree: ast.AST) -> dict[ast.AST, ast.AST]:
+    return {
+        child: parent
+        for parent in ast.walk(tree)
+        for child in ast.iter_child_nodes(parent)
+    }
+
+
+def _references_freshness(node: ast.AST) -> bool:
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Name) and FRESHNESS_NAME_HINT in sub.id.lower():
+            return True
+        if isinstance(sub, ast.Attribute) and FRESHNESS_NAME_HINT in sub.attr.lower():
+            return True
+    return False
+
+
+def _skips(node: ast.If) -> bool:
+    return any(isinstance(sub, _SKIP_STATEMENTS) for sub in ast.walk(node))
+
+
+def _enclosing_blocks(
+    node: ast.AST, parents: dict[ast.AST, ast.AST],
+) -> list[tuple[list[ast.stmt], int]]:
+    """Each statement list this node sits in, innermost first, with its index."""
+    blocks: list[tuple[list[ast.stmt], int]] = []
+    current = node
+    while current in parents:
+        parent = parents[current]
+        for field in ("body", "orelse", "finalbody"):
+            block = getattr(parent, field, None)
+            if isinstance(block, list) and any(stmt is current for stmt in block):
+                blocks.append((block, [id(s) for s in block].index(id(current))))
+                break
+        current = parent
+    return blocks
+
+
+def _freshness_guarded(call: ast.AST, parents: dict[ast.AST, ast.AST]) -> bool:
+    """Can the freshness skip stop control reaching this call?
+
+    * WRAPPED — the call sits in the body of an `if` testing the skip set
+      (remax's `if archive_ok and key not in fresh`, ceskereality's `_walk_slice`);
+    * PRECEDED — an `if <freshness>: return` runs before it in a block the call is
+      nested in (sreality's `_index_page_archiver`).
+
+    Position, not presence: hoisting the append ABOVE the guard — the shape the P2
+    fix is expected to take — leaves the token in the file and satisfies neither
+    clause, so this reads `wired` and the fix is observable. A whole-module
+    substring test could never report anything but `gated` again.
+    """
+    current = call
+    while current in parents:
+        parent = parents[current]
+        if isinstance(parent, ast.If) and _references_freshness(parent.test):
+            in_branch = any(stmt is current for stmt in (*parent.body, *parent.orelse))
+            if in_branch:
+                return True
+        current = parent
+    for block, index in _enclosing_blocks(call, parents):
+        for prior in block[:index]:
+            if isinstance(prior, ast.If) and _references_freshness(prior.test) and _skips(prior):
                 return True
     return False
 
 
-def classify_module_source(source: str) -> str:
-    """Derive a module's CODE state from its own text — the drift check's other half.
+def find_index_archive_calls(source: str) -> list[ArchiveCall]:
+    """Every index-archiving call in a module, each with its reachability."""
+    tree = ast.parse(source)
+    parents = _parent_map(tree)
+    return [
+        ArchiveCall(
+            call=_called_name(node) or "?",
+            lineno=node.lineno,
+            freshness_guarded=_freshness_guarded(node, parents),
+        )
+        for node in ast.walk(tree)
+        if _is_index_archive_call(node)
+    ]
 
-    * no index call site at all → `absent` (nothing to gate);
-    * a call site in a module that consults the freshness skip set → `gated`;
-    * a call site with no skip set in sight → `wired`.
+
+def classify_module_source(source: str) -> str:
+    """Derive a module's CODE state from its own syntax tree.
+
+    * no index call site at all → `absent`;
+    * at least one call the freshness skip cannot stop → `wired`;
+    * calls, but every one of them behind the skip → `gated`.
     """
-    if not has_index_archive_call(ast.parse(source)):
+    calls = find_index_archive_calls(source)
+    if not calls:
         return STATE_ABSENT
-    return STATE_GATED if FRESHNESS_SKIP_TOKEN in source else STATE_WIRED
+    return STATE_GATED if all(c.freshness_guarded for c in calls) else STATE_WIRED
 
 
 def classify_module(path: Path) -> str:
@@ -283,6 +406,42 @@ class PortalAudit:
         return age is not None and age <= STALE_AFTER_HOURS
 
     @property
+    def payload_age_hours(self) -> float | None:
+        if self.payloads is None or self.payloads.newest is None:
+            return None
+        return (self.now - self.payloads.newest).total_seconds() / 3600.0
+
+    @property
+    def payload_stalled(self) -> bool:
+        """Staging is landing rows and the ARCHIVE has stopped — the silent failure.
+
+        * `append_payload_if_enabled` swallows every exception by design (warn and
+          return), so a broken archive looks exactly like a healthy scrape from
+          `portal_raw_pages` alone. This is the only signal that separates them,
+          and it needs rows to have landed once: never having archived is the
+          expected state while the gate is off, not a stall.
+        """
+        if self.payloads is None or not self.payloads.payloads:
+            return False
+        if not self.accumulating:
+            return False
+        age = self.payload_age_hours
+        return age is None or age > STALE_AFTER_HOURS
+
+    @property
+    def payload_note(self) -> str | None:
+        """What the payload archive says that the staging table cannot."""
+        if self.payloads is None or self.state == STATE_ABSENT:
+            return None
+        if self.payload_stalled:
+            return PAYLOAD_STALLED.format(
+                hours=self.payload_age_hours or 0.0, limit=STALE_AFTER_HOURS,
+            )
+        if not self.payloads.payloads:
+            return PAYLOAD_UNVERIFIED
+        return None
+
+    @property
     def contract_note(self) -> str | None:
         """The contract disagreeing with ITSELF about the index surface.
 
@@ -317,7 +476,15 @@ class PortalAudit:
 
     @property
     def verdict(self) -> str:
-        """Would `portal_raw_payloads` index rows accumulate once the flag is on?"""
+        """Would `portal_raw_payloads` index rows accumulate once the flag is on?
+
+        * a stall outranks the code axis: whatever the call site looks like, rows
+          that stopped landing while pages kept staging is the answer to the
+          question, and reading PARTIAL over the top of it would be a healthy
+          verdict on a broken archive.
+        """
+        if self.payload_stalled:
+            return VERDICT_STALLED
         if self.state == STATE_WIRED:
             return VERDICT_YES
         if self.state == STATE_GATED:
@@ -332,8 +499,13 @@ class PortalAudit:
 
 
 # Key columns only. `portal_raw_pages.html` is the 14 GB TOASTed column the W2-0
-# denominator's own rule forbids touching — count(*) and the two timestamps are
-# served from portal_raw_pages_key and detoast nothing.
+# denominator's own rule forbids touching, so nothing here detoasts. It is NOT an
+# index-only scan though: `fetched_at` appears in no index on the table
+# (portal_raw_pages_key is (source, source_id_native, page_kind)), so the min/max
+# force a heap scan and the statement timeout is the only bound on it. That is
+# acceptable for an audit run by hand; it would not be for anything routine, and a
+# partial index on (source, fetched_at) where page_kind = 'index' is the fix if
+# this ever gets a schedule.
 _STAGING_INDEX_SQL = """
     SELECT source,
            count(*)        AS pages,
@@ -399,14 +571,25 @@ def audit(
     """Every portal with a contract, across all three axes.
 
     * `conn=None` skips the DATA axis so the contract/code half runs with no
-      database — the half that answers "is this even built".
+      database — the half that answers "is this even built";
+    * a DB read that fails or times out degrades to that same half rather than
+      taking the run down. `_STAGING_INDEX_SQL` is a heap scan bounded only by the
+      statement timeout, and the two axes that need no database must not be
+      collateral when it trips.
     """
     stamp = now or datetime.datetime.now(datetime.UTC)
-    staging = read_staging(conn, statement_timeout_s=statement_timeout_s) if conn else {}
-    payloads = read_payloads(conn, statement_timeout_s=statement_timeout_s) if conn else {}
+    staging: dict[str, StagingRows] = {}
+    payloads: dict[str, PayloadRows] = {}
+    have_data = False
     if conn is not None:
-        LOG.info("INDEX-AUDIT staging sources=%d payload sources=%d",
-                 len(staging), len(payloads))
+        try:
+            staging = read_staging(conn, statement_timeout_s=statement_timeout_s)
+            payloads = read_payloads(conn, statement_timeout_s=statement_timeout_s)
+            have_data = True
+            LOG.info("INDEX-AUDIT staging sources=%d payload sources=%d",
+                     len(staging), len(payloads))
+        except Exception as exc:  # noqa: BLE001 - the offline axes must survive it
+            LOG.warning("INDEX-AUDIT data axis unavailable, reporting without it: %s", exc)
 
     audits: list[PortalAudit] = []
     for contract in sorted(contracts.load_all(), key=lambda c: c.source):
@@ -424,8 +607,10 @@ def audit(
             contract=contract_facts(contract),
             site=site,
             observed_state=observed,
-            staging=staging.get(contract.source, StagingRows(0, None, None)) if conn else None,
-            payloads=payloads.get(contract.source, PayloadRows(0, 0, None)) if conn else None,
+            staging=staging.get(contract.source, StagingRows(0, None, None))
+            if have_data else None,
+            payloads=payloads.get(contract.source, PayloadRows(0, 0, None))
+            if have_data else None,
             now=stamp,
         ))
     return audits
@@ -449,14 +634,18 @@ def _yesno(value: bool | None) -> str:
 def _header() -> list[str]:
     return [
         "INDEX ARCHIVE COVERAGE — W2a gate (c), 02 §2.3.2 P2",
-        f"  CODE states: {STATE_WIRED} = the call site always runs on a full walk;",
-        f"    {STATE_GATED} = the call site exists but the freshness skip "
-        f"({FRESHNESS_SKIP_TOKEN}) can return",
-        "    before it, dropping a body that changed inside the window (PR #1060's KNOWN GAP);",
-        f"    {STATE_ABSENT} = no {ARCHIVE_CALL}(page_kind='{INDEX}') call site in the module",
+        f"  CODE states: {STATE_WIRED} = every call site is reachable past the freshness skip;",
+        f"    {STATE_GATED} = a call site exists but {FRESHNESS_SKIP_TOKEN} either wraps it or",
+        "    returns before it, dropping a body that changed inside the window (#1060's KNOWN GAP);",
+        f"    {STATE_ABSENT} = no call to {' / '.join(sorted(ARCHIVE_CALLS))}"
+        f"(page_kind='{INDEX}')",
+        "  the state is REACHABILITY, not the presence of a token: hoisting the append above",
+        "    the guard reads wired with the guard still in the file, so the P2 fix is observable",
         f"  a staging row older than {STALE_AFTER_HOURS:.0f} h "
         f"(2 x INDEX_ARCHIVE_REFRESH_HOURS = {db.INDEX_ARCHIVE_REFRESH_HOURS:g} h) is not",
         "    accumulation — index archiving was switched off in early June 2026, so old rows persist",
+        "  payload rows are read too: staging fresh while portal_raw_payloads went stale is a",
+        "    STALLED archive (the append swallows its own failures), and outranks the code axis",
         "  the CODE state is re-derived from each module at run time; a registry that",
         "    disagrees with its module is marked DRIFT rather than believed",
     ]
@@ -488,7 +677,9 @@ def _render_markers(audits: Sequence[PortalAudit]) -> list[str]:
     """Everything that needs a sentence rather than a column."""
     lines: list[str] = []
     for a in audits:
-        notes = [note for note in (a.drift, a.contract_note, a.data_note) if note]
+        notes = [
+            note for note in (a.drift, a.contract_note, a.data_note, a.payload_note) if note
+        ]
         if not notes:
             continue
         lines.append(f"  {a.source}: " + "; ".join(notes))
@@ -577,6 +768,9 @@ def audit_json(a: PortalAudit) -> dict[str, Any]:
             "payload_rows": a.payloads.payloads if a.payloads else None,
             "payload_artefacts": a.payloads.artefacts if a.payloads else None,
             "payload_newest": _iso(a.payloads.newest) if a.payloads else None,
+            "payload_age_hours": a.payload_age_hours,
+            "payload_stalled": a.payload_stalled,
+            "payload_note": a.payload_note,
             "note": a.data_note,
         },
         "verdict": a.verdict,

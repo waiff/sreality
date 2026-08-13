@@ -2759,14 +2759,23 @@ _FLAG_CACHE: dict[str, tuple[float, bool]] = {}
 
 # Same TTL, keyed by SOURCE: the W2a-2 dual-write is a per-portal limit
 # (PortalLimits.payload_dual_write), not one global flag, because enabling the
-# archive is a per-portal storage decision. Both payload limits are cached
-# together because they come from ONE load_portal_config read — splitting them
-# into two cache entries would double a read that sits on a per-page path.
-_LIMIT_CACHE: dict[str, tuple[float, tuple[bool, bool]]] = {}
+# archive is a per-portal storage decision. The whole resolved PortalLimits is
+# cached because both payload limits come from ONE load_portal_config read —
+# caching them separately would double a read that sits on a per-page path, and
+# caching them as a bare pair would make the two booleans swappable at the
+# unpack site with nothing to catch it.
+_LIMIT_CACHE: dict[str, tuple[float, Any]] = {}
 
-# The page_kind whose archive writes need the second gate (W2a-6). A literal
-# rather than a set: `location_page_kind` has seven labels, and every one of the
-# other six is a detail-grain body that the dual-write limit alone governs.
+# `detail` is the ONLY page_kind the dual-write limit governs on its own, and the
+# set is spelled that way round on purpose. The invariant is about GRAIN, not
+# about the word "index": a detail body is one listing fetched when that listing
+# is enqueued, while every other `location_page_kind` label — index, map,
+# gazetteer, snapshot, archive, none — is a whole-SURFACE artefact refetched on a
+# walk cadence, so its churn is the storage question `payload_index_archive`
+# exists to gate. Two of those are already live and declare `archive: true`
+# (ceskereality's map, bezrealitky's gazetteer); an allowlist naming only 'index'
+# would have let both archive on every walk with the second gate off.
+DETAIL_PAGE_KIND = "detail"
 INDEX_PAGE_KIND = "index"
 
 
@@ -2933,8 +2942,8 @@ def record_payload_churn_if_enabled(
 
 def _payload_limits(
     conn: psycopg.Connection, source: str, *, ttl: float = _FLAG_CACHE_TTL,
-) -> tuple[bool, bool]:
-    """This portal's two payload-archive limits, `(dual_write, index_archive)`.
+) -> Any:
+    """This portal's resolved `PortalLimits`, cached for the payload gates.
 
     Resolved through the standard limit precedence (baked default < global
     `app_settings.scraper_limits_global` < `portals.operational_limits`), so
@@ -2942,10 +2951,10 @@ def _payload_limits(
     precedent. Cached per source for the same reason the shadow-hash flag is:
     the read is two SELECTs and this sits on a per-page path.
 
-    A failed read is cached as OFF/OFF for the same TTL. Off is the safe
-    direction (the archive is an addition, never a dependency of the scrape), and
-    caching the failure is what keeps an unreadable registry row from re-asking
-    twice per fetched page for the rest of a walk.
+    A failed read is cached as the BAKED defaults (every gate off) for the same
+    TTL. Off is the safe direction (the archive is an addition, never a
+    dependency of the scrape), and caching the failure is what keeps an
+    unreadable registry row from re-asking twice per fetched page for a walk.
     """
     now = time.monotonic()
     cached = _LIMIT_CACHE.get(source)
@@ -2956,21 +2965,21 @@ def _payload_limits(
     # connection). It would under-protect only an autocommit connection read from
     # inside an explicit `with conn.transaction():` — no such caller exists.
     # Deferred import: scraper.portal must stay free to import scraper.db.
-    from scraper.portal import load_portal_config
+    from scraper.portal import PortalLimits, load_portal_config
 
-    value = (False, False)
+    value = PortalLimits()
     try:
         if getattr(conn, "autocommit", True):
-            limits = load_portal_config(conn, source).limits
+            value = load_portal_config(conn, source).limits
         else:
             # A caller already inside a transaction gets the read wrapped in a
             # savepoint: a gate this optional must never poison the ingest
             # transaction it is riding in.
             with conn.transaction():
-                limits = load_portal_config(conn, source).limits
-        value = (bool(limits.payload_dual_write), bool(limits.payload_index_archive))
+                value = load_portal_config(conn, source).limits
     except Exception as exc:  # noqa: BLE001 - the gate must not kill ingest
         LOG.warning("payload archive limit read failed source=%s: %s", source, exc)
+        value = PortalLimits()
     _LIMIT_CACHE[source] = (now + ttl, value)
     return value
 
@@ -2980,17 +2989,19 @@ def _payload_archive_enabled(
 ) -> bool:
     """May this body be appended to the payload archive?
 
-    Two gates in series for an index page, one for everything else (W2a-6). The
-    index gate is an AND on top of `payload_dual_write`, never an OR: index
-    bodies are the highest-churn artefact in the system (they re-order on every
-    walk, and sreality walks them 24x/day), so a portal whose detail churn signs
-    off cheaply may still have index churn that does not — but "the archive is
+    One gate for a detail body, two in series for every other page_kind (W2a-6).
+    The second gate is an AND on top of `payload_dual_write`, never an OR:
+    surface-grain bodies re-order on every walk and are refetched on the walk
+    cadence (sreality's index 24x/day), so a portal whose per-listing churn signs
+    off cheaply may still have surface churn that does not — but "the archive is
     off for this portal" has to stay one switch that means it.
     """
-    dual_write, index_archive = _payload_limits(conn, source, ttl=ttl)
-    if not dual_write:
+    limits = _payload_limits(conn, source, ttl=ttl)
+    if not limits.payload_dual_write:
         return False
-    return index_archive if page_kind == INDEX_PAGE_KIND else True
+    if page_kind == DETAIL_PAGE_KIND:
+        return True
+    return bool(limits.payload_index_archive)
 
 
 def append_payload_if_enabled(
@@ -3005,8 +3016,10 @@ def append_payload_if_enabled(
 ) -> None:
     """Limit-gated, never-raising dual-write into the payload archive (W2a-2).
 
-    An index-kind body passes `payload_index_archive` as well as
-    `payload_dual_write` (W2a-6); every other page_kind passes the one gate.
+    A `detail` body passes `payload_dual_write` alone; EVERY other page_kind —
+    index, map, gazetteer, snapshot, archive, none — passes `payload_index_archive`
+    as well (W2a-6), because all of them are surface-grain artefacts refetched on
+    a walk cadence rather than one listing's body.
 
     `portal_raw_pages` is latest-wins, so the body a claim's evidence span
     points into is gone the moment the page is refetched;
@@ -3090,8 +3103,13 @@ def upsert_portal_raw_page(
     replayed on a transient pooler drop.
 
     W2a-2's payload dual-write hangs off the END of this function, so ONE edit
-    covers every HTML detail writer and every index archiver with no per-portal
-    branch (rule #21). It is deliberately NOT gated on the staging row: a
+    covers every HTML writer that stages through here — the seven detail writers
+    and the three index archivers — with no per-portal branch (rule #21). It does
+    NOT cover the two portals that stage no body (sreality's estate JSON,
+    bezrealitky's advert), which call `append_payload_if_enabled` directly, nor
+    does it decide the gate: W2a-6 gives every non-`detail` page_kind a second
+    limit, resolved inside that function. It is deliberately NOT gated on the
+    staging row: a
     `refresh_after_hours` skip means portal_raw_pages already holds a body young
     enough, which says nothing about whether the CONTENT moved — and an
     append-on-change archive that drops a genuinely changed body is the one

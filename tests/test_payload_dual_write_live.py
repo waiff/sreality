@@ -221,3 +221,33 @@ def test_the_index_gate_alone_holds_an_index_body_back(conn: psycopg.Connection)
             (_SOURCE, key),
         )
         assert cur.fetchone()[0] == 1
+
+
+def test_a_map_body_is_held_back_by_the_index_gate_and_is_a_legal_page_kind(
+    conn: psycopg.Connection,
+) -> None:
+    # ceskereality's /mapa/ surface is SURFACE grain and declares `archive: true`,
+    # so W2a-6 puts it behind the second gate too. It can only reach the archive
+    # through the direct call: portal_raw_pages CHECKs page_kind in
+    # ('index','detail') (migration 099), so a map body has no staging row at all
+    # — and 'map' still has to satisfy the location_page_kind enum, which is the
+    # half only real SQL can answer.
+    key = f"live-map-{uuid.uuid4().hex}"
+    _set_dual_write(conn, True, index_archive=False)
+
+    db.append_payload_if_enabled(
+        conn, source=_SOURCE, source_id_native=key, page_kind="map",
+        body=b'{"markers": []}', content_type="application/json",
+    )
+    assert _payloads(conn, key) == []
+
+    _set_dual_write(conn, True, index_archive=True)
+    db.clear_app_settings_flag_cache()
+    db.append_payload_if_enabled(
+        conn, source=_SOURCE, source_id_native=key, page_kind="map",
+        body=b'{"markers": []}', content_type="application/json",
+    )
+
+    rows = _payloads(conn, key)
+    assert len(rows) == 1
+    assert rows[0]["page_kind"] == "map"

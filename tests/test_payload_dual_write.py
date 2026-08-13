@@ -676,3 +676,86 @@ def test_the_index_gate_off_never_touches_the_body() -> None:
     )
 
     assert calls == []
+
+
+def test_the_detail_gate_off_never_touches_the_body() -> None:
+    # The twin of the index case, and NOT redundant with it: with only the index
+    # kind covered, reordering the two gate checks so the body thunk is evaluated
+    # between them passes every other test in this file while making every detail
+    # HTML body encode on a walk with the archive off.
+    conn = _FakeConn()
+    calls: list[int] = []
+
+    db.append_payload_if_enabled(
+        conn, source="idnes", source_id_native="k", page_kind="detail",
+        body=lambda: calls.append(1) or b"<html></html>",
+    )
+
+    assert calls == []
+
+
+def test_a_map_body_needs_the_second_gate_too(appended: list[dict[str, Any]]) -> None:
+    # ceskereality's /mapa/ surface declares `archive: true` in its contract and is
+    # SURFACE grain, not listing grain — 500 markers per request, refetched on the
+    # walk cadence. An allowlist naming only 'index' would archive it on every walk
+    # with the second gate deliberately off.
+    conn = _FakeConn("ceskereality")
+
+    db.append_payload_if_enabled(
+        conn, source="ceskereality", source_id_native="mapa/byt/prodej",
+        page_kind="map", body=b'{"markers": []}',
+    )
+
+    assert appended == []
+
+
+def test_a_gazetteer_body_needs_the_second_gate_too(
+    appended: list[dict[str, Any]],
+) -> None:
+    # bezrealitky's Region.boundaryGeoJson gazetteer, same reasoning.
+    conn = _FakeConn("bezrealitky")
+
+    db.append_payload_if_enabled(
+        conn, source="bezrealitky", source_id_native="region/praha",
+        page_kind="gazetteer", body=b'{"type": "FeatureCollection"}',
+    )
+
+    assert appended == []
+
+
+def test_every_non_detail_page_kind_passes_the_second_gate(
+    appended: list[dict[str, Any]],
+) -> None:
+    # The invariant is about GRAIN: `detail` is one listing's body, every other
+    # location_page_kind label is a whole-surface artefact on a walk cadence.
+    kinds = ("index", "map", "gazetteer", "snapshot", "archive", "none")
+    conn = _FakeConn("sreality")
+    for kind in kinds:
+        db.append_payload_if_enabled(
+            conn, source="sreality", source_id_native=f"k/{kind}",
+            page_kind=kind, body=b"{}",
+        )
+    assert appended == []
+
+    # The limit is cached per SOURCE, so the second registry only takes effect
+    # once the first one's entry is dropped.
+    db.clear_app_settings_flag_cache()
+    conn = _FakeConn("sreality", index_on=("sreality",))
+    for kind in kinds:
+        db.append_payload_if_enabled(
+            conn, source="sreality", source_id_native=f"k/{kind}",
+            page_kind=kind, body=b"{}",
+        )
+    assert [c["page_kind"] for c in appended] == list(kinds)
+
+
+def test_only_detail_rides_the_dual_write_limit_alone(
+    appended: list[dict[str, Any]],
+) -> None:
+    conn = _FakeConn("sreality")
+
+    db.append_payload_if_enabled(
+        conn, source="sreality", source_id_native="k", page_kind="detail", body=b"{}",
+    )
+
+    assert [c["page_kind"] for c in appended] == ["detail"]

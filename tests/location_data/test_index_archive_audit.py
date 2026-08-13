@@ -72,6 +72,42 @@ def drain(conn, items):
         )
 """
 
+# The shape P2 is expected to land in: the freshness skip SURVIVES as the
+# write-cost guard on the staging upsert, and the payload append is hoisted above
+# it so a body that changed inside the window is still archived.
+_P2_FIXED_CALL_SITE = """
+import scraper.db as db
+
+
+def archive(conn, offset, url, html):
+    key = f"{offset}/2026w33"
+    db.append_payload_if_enabled(
+        conn, source="x", source_id_native=key, page_kind="index",
+        body=lambda: html.encode("utf-8"), content_type="text/html",
+    )
+    fresh = db.fresh_index_page_keys(conn, "x", hours=22.0)
+    if key in fresh:
+        return
+    db.upsert_portal_raw_page(
+        conn, source="x", source_id_native=key, source_url=url,
+        page_kind="index", html=html, http_status=200,
+    )
+"""
+
+# A portal that stages no body at all (bezrealitky's GraphQL index response has
+# no HTML), so it can only reach the archive through the direct call.
+_DIRECT_APPEND_CALL_SITE = """
+import scraper.db as db
+
+
+def walk(conn, pages):
+    for offset, body in pages:
+        db.append_payload_if_enabled(
+            conn, source="x", source_id_native=str(offset), page_kind="index",
+            body=body, content_type="application/json",
+        )
+"""
+
 
 def _facts(
     *, entries: int = 0, declares: bool = False, archive: bool | None = None,
@@ -133,29 +169,83 @@ def test_the_three_states_are_three_distinct_verdicts() -> None:
     assert verdicts[aud.STATE_ABSENT] == aud.VERDICT_NO_CALL_SITE
 
 
+def _drop_freshness_guards(source: str) -> str:
+    """Splice out every `if <freshness>:` guard, keeping the code it guarded.
+
+    * models what un-gating a call site does to the tree, so the mutation is
+      structural rather than a rename the classifier is not reading anyway.
+    """
+
+    class _Drop(ast.NodeTransformer):
+        def visit_If(self, node: ast.If) -> Any:
+            self.generic_visit(node)
+            if not aud._references_freshness(node.test):
+                return node
+            return [s for s in node.body if not isinstance(s, aud._SKIP_STATEMENTS)]
+
+    return ast.unparse(ast.fix_missing_locations(_Drop().visit(ast.parse(source))))
+
+
 def test_each_real_gated_module_flips_state_when_its_gate_is_mutated_away() -> None:
     """Mutation test on the REAL modules, not a synthetic snippet: both edges of
     `gated` have to move, or the classification is a constant dressed as a check.
 
-    * delete the freshness skip and the module must read `wired`;
-    * delete the index call site and it must read `absent`.
+    * splice out the freshness guard and the module must read `wired`;
+    * remove the index call site and it must read `absent`.
     """
     for source, site in sorted(aud.INDEX_ARCHIVERS.items()):
         if site.state != aud.STATE_GATED:
             continue
         real = site.module_path.read_text(encoding="utf-8")
         assert aud.classify_module_source(real) == aud.STATE_GATED, source
-        ungated = real.replace(aud.FRESHNESS_SKIP_TOKEN, "some_other_helper")
+        ungated = _drop_freshness_guards(real)
         assert aud.classify_module_source(ungated) == aud.STATE_WIRED, source
         uncalled = real.replace('page_kind="index"', 'page_kind="detail"')
         assert aud.classify_module_source(uncalled) == aud.STATE_ABSENT, source
 
 
+def test_the_expected_p2_fix_reads_as_wired_with_the_guard_still_present() -> None:
+    """The audit's reason for existing: it has to be able to observe the fix land.
+
+    * the likely P2 shape keeps `fresh_index_page_keys` as the write-cost guard on
+      the staging upsert and hoists the payload append above it, so the token
+      stays in the file. A substring test would report `gated` forever — and would
+      then override a correctly-updated registry and flag it as DRIFT.
+    """
+    assert aud.classify_module_source(_P2_FIXED_CALL_SITE) == aud.STATE_WIRED
+    # Both calls are still there — the STAGING upsert stays behind the guard (that
+    # is the write-cost saving the skip exists for) and only the ARCHIVE moves
+    # ahead of it. The state follows the unguarded one.
+    calls = {c.call: c.freshness_guarded for c in aud.find_index_archive_calls(_P2_FIXED_CALL_SITE)}
+    assert calls == {"append_payload_if_enabled": False, "upsert_portal_raw_page": True}
+    assert aud.FRESHNESS_SKIP_TOKEN in _P2_FIXED_CALL_SITE
+
+
+def test_the_direct_append_call_shape_is_recognised() -> None:
+    # sreality's and bezrealitky's DETAIL archiving already takes this shape (they
+    # stage no body), and a bezrealitky index archiver would have to — its GraphQL
+    # index response has no HTML to stage. Looking only for the staging upsert
+    # would call a genuinely wired portal `absent`.
+    assert aud.classify_module_source(_DIRECT_APPEND_CALL_SITE) == aud.STATE_WIRED
+    assert [c.call for c in aud.find_index_archive_calls(_DIRECT_APPEND_CALL_SITE)] == [
+        "append_payload_if_enabled",
+    ]
+
+
 def test_a_detail_call_site_does_not_make_a_portal_look_wired() -> None:
     # Seven portals archive detail pages through the same function; matching on
     # the call name alone would report every one of them as an index archiver.
-    assert aud.has_index_archive_call(ast.parse(_DETAIL_ONLY)) is False
-    assert aud.has_index_archive_call(ast.parse(_INDEX_CALL_SITE)) is True
+    assert aud.find_index_archive_calls(_DETAIL_ONLY) == []
+    assert len(aud.find_index_archive_calls(_INDEX_CALL_SITE)) == 1
+
+
+def test_one_unguarded_call_beside_a_guarded_one_is_wired() -> None:
+    # "Every call site is suppressed" is the claim `gated` makes; a single path
+    # that always archives falsifies it.
+    mixed = _GATED_CALL_SITE + _DIRECT_APPEND_CALL_SITE.split("import scraper.db as db")[1]
+    guarded = [c.freshness_guarded for c in aud.find_index_archive_calls(mixed)]
+    assert sorted(guarded) == [False, True]
+    assert aud.classify_module_source(mixed) == aud.STATE_WIRED
 
 
 def test_an_index_call_site_is_found_through_the_db_module_alias() -> None:
@@ -207,6 +297,54 @@ def test_every_gated_call_site_names_its_gate_and_its_known_gap_comment() -> Non
         assert site.call_site, source
         module = site.module_path.read_text(encoding="utf-8")
         assert "KNOWN GAP" in module, source
+
+
+_LINE_REF = re.compile(r"(\w+\.py):(\d+)")
+
+
+def test_the_registry_call_site_line_is_one_the_parser_actually_found() -> None:
+    # The strongest available check on a hardcoded line number: the parser knows
+    # exactly which lines hold an index archive call, so the prose has to name one.
+    for source, site in sorted(aud.INDEX_ARCHIVERS.items()):
+        if site.state == aud.STATE_ABSENT:
+            continue
+        found = {
+            c.lineno
+            for c in aud.find_index_archive_calls(
+                site.module_path.read_text(encoding="utf-8"),
+            )
+        }
+        refs = _LINE_REF.findall(site.call_site or "")
+        assert len(refs) == 1, f"{source}: call_site must cite exactly one line"
+        module, lineno = refs[0]
+        assert module == site.module, source
+        assert int(lineno) in found, f"{source}: cites {lineno}, calls are at {sorted(found)}"
+
+
+def test_every_line_the_registry_quotes_still_reads_that_way() -> None:
+    """A file:line in prose rots the moment anything above it moves, and rots
+    silently — the operator follows it to whatever happens to sit there now.
+
+    * every `gate` / `intentional_skip` must back its `<module>.py:<n>` with a
+      backticked fragment, and that fragment must still be at that line.
+    """
+    checked = 0
+    for source, site in sorted(aud.INDEX_ARCHIVERS.items()):
+        for text in (site.gate, *site.intentional_skips):
+            if not text:
+                continue
+            refs, frags = _LINE_REF.findall(text), re.findall(r"`([^`]+)`", text)
+            assert refs, f"{source}: {text!r} quotes code but cites no line"
+            assert frags, f"{source}: {text!r} cites a line but quotes no code to check"
+            module, lineno = refs[0]
+            lines = (aud.SCRAPER_DIR / module).read_text(encoding="utf-8").splitlines()
+            assert 0 < int(lineno) <= len(lines), f"{source}: {module}:{lineno} is past EOF"
+            line = lines[int(lineno) - 1].strip()
+            assert any(frag.strip() in line for frag in frags), (
+                f"{source}: {module}:{lineno} is {line!r}, not any of {frags}"
+            )
+            checked += 1
+    assert checked >= 6, "every gated portal should have a gate and its skips checked"
 
 
 def test_an_absent_portal_claims_no_call_site_or_gate() -> None:
@@ -380,6 +518,75 @@ def test_an_absent_portal_with_no_rows_needs_no_data_marker() -> None:
     # noise on six of nine portals.
     audit = _portal(observed=aud.STATE_ABSENT, staging=aud.StagingRows(0, None, None))
     assert audit.data_note is None
+
+
+def test_a_stalled_archive_beats_a_healthy_looking_code_axis() -> None:
+    # append_payload_if_enabled swallows every exception by design, so a broken
+    # archive looks like a healthy scrape from portal_raw_pages alone. Staging
+    # fresh + payloads gone stale is the ONLY signal separating them, and it has
+    # to outrank PARTIAL or the audit reports a healthy verdict on a dead archive.
+    audit = _portal(
+        observed=aud.STATE_GATED,
+        staging=aud.StagingRows(
+            pages=900, oldest=_NOW - datetime.timedelta(days=30),
+            newest=_NOW - datetime.timedelta(hours=2),
+        ),
+        payloads=aud.PayloadRows(
+            payloads=400, artefacts=100, newest=_NOW - datetime.timedelta(days=9),
+        ),
+    )
+    assert audit.payload_stalled is True
+    assert audit.verdict == aud.VERDICT_STALLED
+    assert "STALLED" in (audit.payload_note or "")
+
+
+def test_an_archive_that_never_ran_is_unverified_not_stalled() -> None:
+    # payload_index_archive is off on every portal today, so zero payload rows is
+    # the EXPECTED state. Calling that a stall would fire on all three gated
+    # portals and train the reader to ignore the marker that matters.
+    audit = _portal(
+        observed=aud.STATE_GATED,
+        staging=aud.StagingRows(
+            pages=900, oldest=_NOW - datetime.timedelta(days=30),
+            newest=_NOW - datetime.timedelta(hours=2),
+        ),
+        payloads=aud.PayloadRows(payloads=0, artefacts=0, newest=None),
+    )
+    assert audit.payload_stalled is False
+    assert audit.verdict == aud.VERDICT_PARTIAL
+    assert audit.payload_note == aud.PAYLOAD_UNVERIFIED
+
+
+def test_payloads_keeping_pace_with_staging_raise_no_marker() -> None:
+    audit = _portal(
+        observed=aud.STATE_GATED,
+        staging=aud.StagingRows(
+            pages=900, oldest=_NOW - datetime.timedelta(days=30),
+            newest=_NOW - datetime.timedelta(hours=2),
+        ),
+        payloads=aud.PayloadRows(
+            payloads=400, artefacts=100, newest=_NOW - datetime.timedelta(hours=3),
+        ),
+    )
+    assert audit.payload_stalled is False
+    assert audit.payload_note is None
+    assert audit.verdict == aud.VERDICT_PARTIAL
+
+
+def test_stale_payloads_beside_stale_staging_are_not_a_stall() -> None:
+    # Nothing is being scraped either, so the archive is not what is broken.
+    audit = _portal(
+        observed=aud.STATE_GATED,
+        staging=aud.StagingRows(
+            pages=900, oldest=_NOW - datetime.timedelta(days=120),
+            newest=_NOW - datetime.timedelta(days=70),
+        ),
+        payloads=aud.PayloadRows(
+            payloads=400, artefacts=100, newest=_NOW - datetime.timedelta(days=70),
+        ),
+    )
+    assert audit.payload_stalled is False
+    assert audit.verdict == aud.VERDICT_PARTIAL
 
 
 def test_the_data_axis_is_absent_not_zero_when_the_db_is_skipped() -> None:
