@@ -15,7 +15,7 @@ is the tie-breaker). This track records sequencing + shipped state only.
 | W0 "stop the bleeding" | 15 interim fixes + 2 measurements against the CURRENT system | 🟡 in progress (2026-08-10) |
 | W1 registry + claim spine (shadow) | full RÚIAN mirror, claims, resolutions, projection | ✅ shipped 2026-08-12 (migrations 380–389 applied; shadow-only, no consumer reads it) |
 | W1v bezrealitky vertical slice | one portal end-to-end + location-quality dashboard | ✅ shipped 2026-08-13 (every layer exercised in prod; gate answered — portal-inventory-capped, not pipeline-capped) |
-| W2a payload archive rewrite | append-on-change `portal_raw_payloads` | ⚪ not started (byte-churn measurement is the gate) |
+| W2a payload archive rewrite | append-on-change `portal_raw_payloads` | 🟡 in progress (2026-08-13) — instrument live and measuring; store + writer landed, dual-write NOT enabled (churn sign-off is the gate) |
 | W2–W6 | HTML re-mine, history backfill, refetch cohorts, LLM lane, serving flip | ⚪ not started |
 
 ## W0 — done
@@ -303,6 +303,62 @@ it is a W2/W6 decision, and the contradiction ledger is meanwhile doing exactly 
   older pending entry, so while the backfill driver dispatched back-to-back runs a tick displaced
   the driver's own next dispatch while adding nothing to a queue it was draining from the same
   front.
+
+## W2a / W2 — in progress (2026-08-13)
+
+Seven PRs across two rounds, every one adversarially reviewed and the findings fixed and
+re-verified by probe before merge (the reviews found 1 BLOCKER + 2 MAJOR on the payload
+store, 2 BLOCKER + 3 MAJOR on the scoper, 4 MAJOR on the churn report, 2 MAJOR on shadow —
+all closed, several proven against a throwaway PostgreSQL 18 built from `.deb` files).
+
+- **W2a-0 the churn instrument** (#1047, migration **402 applied**): `portal_payload_churn`,
+  one counter row per `(source, source_id_native, page_kind, normalizer_version)`, no body
+  ever stored. `location_data/payload_norm.py` normalises a body (volatile paths stripped,
+  key order + whitespace canonicalised) so a page that did not really change stops looking
+  changed. Behind `app_settings.location_payload_shadow_hash`, **flipped ON 2026-08-13 18:00Z**.
+  Counters are replay-safe (a per-fetch token gates the `DO UPDATE`, so a retried drain batch
+  bumps nothing) and `normalizer_version` is in the PK, so a profile change starts a clean
+  cohort instead of blending into the old one.
+- **W2a-1 the payload store** (#1051, migration **403 applied**): additive ALTER completing
+  `portal_raw_payloads` (382 already created it — W2a is not a CREATE TABLE wave) +
+  `location_data/payloads.py`. Content-addressed on the NORMALISED hash; P4 retention runs in
+  the same bounded transaction as the append. **No caller anywhere** — the library is inert
+  until W2a-2 wires it in, which is gated on the churn sign-off.
+- **W2a-3 the churn readout** (#1052): `scripts/location_payload_churn_report.py` (the artefact
+  the storage gate is signed from) + the 200×3 confirmation probe, dispatch-only in the
+  `location-batch` group.
+- **W2-3 the exclusion-zone scoper** (#1053): D7's security boundary — strips every declared
+  exclusion zone before any extraction selector runs. **Hard precondition for every per-portal
+  contract PR**; without it the deterministic re-miner re-imports at 445k-page scale exactly the
+  contamination the LLM validator exists to reject.
+- **W2-4 the contract shadow mechanism** (#1050, migration **404 applied**): `portal_contracts.shadow`,
+  a contract whose claims are mined and stored but excluded from `location_claims_live`, with
+  `location_claims_shadow` as the scoring surface so the un-shadow gate is decidable, and an
+  un-shadow that enqueues `dirty_locations` so promotion actually re-resolves.
+- **W2-1 / W2-0** (#1045, #1048): per-reader substrate legality (a contract entry can no longer
+  declare a transform or guard its reader will never consult) and the archive denominator every
+  W2 gate is a share of.
+
+### First churn numbers (2026-08-13, ~4h of live traffic — early, not the sign-off)
+
+| source | repeat fetches | changed after normalisation | normalisation removing false churn? |
+| --- | --- | --- | --- |
+| sreality | 8,689 | **0.1 %** | yes — 30 raw changes → 8 normalised |
+| bezrealitky | 616 | 0.2 % | n/a (closed GraphQL field list) |
+| maxima | 20 | 5 % | — |
+| realitymix | 547 | **66 %** | **no — raw == norm exactly** |
+| idnes | 514 | **100 %** | **no — raw == norm exactly** |
+| ceskereality | 153 | **100 %** | **no — raw == norm exactly** |
+
+The volume portal is stable and the mechanism demonstrably works where a profile fits. The
+open item is three HTML portals whose measurement-phase volatile profiles strip nothing that
+actually moves — a profile-improvement pass (diff genuinely-unchanged page pairs per portal)
+before W2a-3b writes the measured `volatile_paths` into the contracts. remax and bazos had no
+repeat fetches yet.
+
+**Not enabled, deliberately:** `payload_dual_write` and `payload_index_archive` are OFF, the
+445k-row backfill has not run, and no per-portal W2 contract exists yet. Those wait on the
+operator's O3/O4 sign-off of `volatile_paths` + the storage projection.
 
 ## Standing decisions
 
