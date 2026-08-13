@@ -1,0 +1,78 @@
+name: "Jobs: location labelled-sample draw (06 6.4.0)"
+
+# DISPATCH-ONLY. Draws the frozen random labelled sample for one portal
+# (migration 399): n >= 100 active listings, uniform random, snapshotting the
+# OLD system's serving values at draw time. The sample MUST be drawn BEFORE
+# that portal's extraction sweep / refetch wave (06 6.4.0: "drawn before the
+# sweep, randomly"), and is then hand-labelled by the operator; contract
+# acceptance is precision on this sample, not yield.
+#
+# One current sample per source. A re-draw needs replace=true, which retires
+# (never deletes) the previous sample — an explicit operator decision.
+#
+# NOT in the `location-batch` concurrency group on purpose: the draw is a
+# sub-second statement, and the group holds ONE pending slot — queueing this
+# behind an hour-long intake run (or displacing one) would be all cost, no
+# safety. It writes only the two sample tables.
+#
+# Required secret: SUPABASE_DB_URL.
+
+on:
+  workflow_dispatch:
+    inputs:
+      source:
+        description: "portal to draw for (e.g. bezrealitky)"
+        required: true
+        type: string
+      n:
+        description: "sample size (>= 100)"
+        required: false
+        default: "120"
+        type: string
+      seed:
+        description: "setseed() value in (-1, 1); blank = the script default"
+        required: false
+        default: ""
+        type: string
+      write:
+        description: "actually draw (false = dry-run count)"
+        required: false
+        default: false
+        type: boolean
+      replace:
+        description: "retire the current sample and draw a new one"
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: location-labelled-sample
+  cancel-in-progress: false
+
+jobs:
+  draw:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: pip install -e .
+
+      - name: Draw the sample
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: |
+          ARGS="--source '${{ inputs.source }}' --n ${{ inputs.n }}"
+          if [ -n "${{ inputs.seed }}" ]; then ARGS="$ARGS --seed ${{ inputs.seed }}"; fi
+          if [ "${{ inputs.write }}" = "true" ]; then ARGS="$ARGS --write"; fi
+          if [ "${{ inputs.replace }}" = "true" ]; then ARGS="$ARGS --replace"; fi
+          eval python -m scripts.location_draw_labelled_sample $ARGS
