@@ -43,6 +43,10 @@ LOCATION_BATCH_WORKFLOWS = (
     # rails are the same ones, and a probe overlapping a claims intake would put the
     # scrape's egress and a corpus-wide sweep on the instance at once.
     "location_payload_churn.yml",
+    # W2a-4. The heaviest single read the program performs — 445,191 detoasted bodies out
+    # of a 14 GB table and back in gzipped — so it queues behind the other lanes rather
+    # than putting that IO on the instance alongside a registry COPY.
+    "location_payload_backfill.yml",
 )
 OUTER_GROUP = "location-batch"
 

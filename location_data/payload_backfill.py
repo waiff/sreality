@@ -1,0 +1,524 @@
+"""Migrate the legacy `portal_raw_pages` archive into the W2a payload store (06 §6.4).
+
+`portal_raw_pages` is latest-wins: `UNIQUE (source, source_id_native, page_kind)`, one row
+per page, ~445k rows / 14 GB, and nothing has ever been pruned from it (its oldest row per
+source is that portal's onboarding date). So each row is **exactly one body** — 06 §6.4
+says so in as many words — and this lane is a straight historical 1:1 copy, not the
+content-addressed merge `payloads.append_payload` performs across many versions of one
+page. That is why it writes through its own batched INSERT rather than calling the writer:
+there is no prior version to collide with, no version to evict, and 445,191 single-row
+transactions with a re-pin and a cap each would be the wrong shape entirely.
+
+Each migrated row lands as its listing's FIRST and LATEST body at once — `version_seq = 1`,
+`pinned = true`, `first_observed_at = last_observed_at = fetched_at = the page's own
+fetched_at` (06 Rule 1: a backfilled body keeps the time it was really fetched and must
+never read as having appeared on migration day).
+
+WHAT THIS LANE MAY DO TO ITS SOURCE: read it. Nothing else, ever. `portal_raw_pages` holds
+the only surviving copy of several portals' best location signal for listings that are now
+delisted — portals do not serve a delisted page again — which is why
+`tests/test_portal_raw_pages_guard.py` is a CI gate rather than a convention. A DELETE here
+would be permanent data loss, and the fact that the target table's name merely *resembles*
+the source's is the sharpest reason to keep the two straight.
+
+Resumability follows the claim intake verbatim (migration 387), because the failure it
+closes is the same one: a budgeted run must not be able to claim ground it never covered.
+The lane keeps its position on a `location_claim_batches` row and `outcome='ok'` means ONE
+thing — the keyset ran off the end of the table. A `--max-seconds` stop stamps `'stopped'`,
+which is the only state a later run resumes from, and only from a run of the same
+`scan_mode` that was not anchored at an operator-chosen `--start-after-id`.
+
+DISPATCH-GATED. Building this is not running it: the 445k-row migration waits on the
+operator's `volatile_paths` decision and a signed storage projection (BUILD-PLAN §6 item 2,
+O3/O4). The workflow is `workflow_dispatch`-only with no `schedule` for exactly that reason.
+"""
+
+from __future__ import annotations
+
+import argparse
+import gzip
+import json
+import logging
+import os
+import sys
+import time
+from typing import Any
+
+import psycopg
+
+from location_data import loader_db, payloads
+from location_data.payload_norm import (
+    DEFAULT_VOLATILE_PROFILES,
+    NORMALIZER_VERSION,
+    VolatileProfile,
+    normalise,
+    sniff_content_type,
+)
+from location_data.resolver import lease
+from scraper import db
+
+LOG = logging.getLogger("location_data.payload_backfill")
+
+BACKFILL_VERSION = "payload_backfill@1"
+LANE = "location_payload_backfill"
+WAVE = "W2a"
+
+# A bare `portal_raw_pages.id` keyset, which is what migration 387 calls 'full'. The
+# `scan_mode` is stored so a cursor can never be resumed by a scan that means something
+# different by it; this lane only has the one mode, and stamping it keeps the guard honest
+# if a second one is ever added.
+SCAN_MODE = "full"
+
+JOB_NAME = "location_payload_backfill"
+CONCURRENCY_GROUP = "location-payload"
+
+# A one-shot migration has no cadence, but `location_jobs.cadence` is NOT NULL and
+# `location_jobs_stale` (migration 384) alerts on `now() - last_success_at > 3 x cadence`.
+# A short interval here would page the operator forever about a lane that is finished by
+# design; a year is the honest spelling of "not on a schedule".
+CADENCE = "365 days"
+LEASE_TTL_S = 3600
+
+STATEMENT_TIMEOUT_ENV = "LOCATION_PAYLOAD_BACKFILL_TIMEOUT_S"
+# Per BATCH, not per run, and deliberately not `0`. `loader_db`'s session GUC of
+# `statement_timeout = 0` is right for a genuine bulk phase (a COPY, an index build); this
+# is a batched incremental migration, where an unbounded statement is how a lane wedges for
+# two hours without emitting a line (the 2026-08-10 boundary pack). 300 s is roughly 10x
+# the observed cost of reading and inserting a default batch of large TOASTed bodies, so it
+# only fires when something is genuinely wrong.
+DEFAULT_STATEMENT_TIMEOUT_S = 300
+_FAILURE_STAMP_TIMEOUT_S = 30
+
+# Bodies here are whole pages (bazos 41 KB ... mmreality 245 KB), so a batch is sized in
+# megabytes rather than rows: 200 x 245 KB is a ~49 MB worst-case round trip, which is a
+# comfortable statement and a comfortable resident set. The claim intake's 20,000-row
+# batches read a JSONB column two orders of magnitude smaller.
+MIN_BATCH_SIZE = 25
+MAX_BATCH_SIZE = 1_000
+DEFAULT_BATCH_SIZE = 200
+
+# `portal_raw_pages.page_kind` is free text under `check (page_kind in ('index','detail'))`
+# (migration 099); `portal_raw_payloads.page_kind` is the `location_page_kind` ENUM, whose
+# labels are ('index','detail','map','gazetteer','snapshot','archive','none') (migration
+# 380). The two names that exist on the source side happen to coincide with enum labels,
+# but the mapping is written out rather than assumed: the source is a CHECK constraint that
+# a later migration can widen without the enum gaining a matching label, and an unmapped
+# value must be visible as a skipped row rather than an `InvalidTextRepresentation` that
+# kills a 445k-row migration mid-flight.
+PAGE_KIND_MAP = {"index": "index", "detail": "detail"}
+
+_RELATIONS = ("portal_raw_pages", "portal_raw_payloads", "location_claim_batches")
+
+_REGCLASS_SQL = "SELECT to_regclass(%(name)s)"
+
+# `source` alone is an index-served prefix of `portal_raw_pages_key`
+# UNIQUE (source, source_id_native, page_kind), so this costs one index probe.
+_SOURCE_PRESENT_SQL = """
+SELECT 1 FROM portal_raw_pages WHERE source = %(source)s LIMIT 1
+"""
+
+# `convert_to(html, 'UTF8')` rather than handing psycopg the `text` and encoding it in
+# Python: the archived artefact must be the bytes Postgres actually holds, and the
+# round-trip verifier reads its side of the comparison through this identical expression —
+# so "byte-for-byte" is symmetric by construction rather than by two matching assumptions
+# about client encoding.
+#
+# No `parsed_at` / `parse_error` filter: an unparsed or failed page is still a page, and
+# for a delisted listing it is the only copy of its location signal that will ever exist.
+_SOURCE_ROWS_SQL = """
+SELECT id, source, source_id_native, page_kind, convert_to(html, 'UTF8'),
+       http_status, fetched_at
+  FROM portal_raw_pages
+ WHERE id > %(after_id)s
+   AND (%(source)s::text IS NULL OR source = %(source)s)
+ ORDER BY id
+ LIMIT %(batch_size)s
+"""
+
+# One statement per batch, arrays in and ids out.
+#
+# `version_seq = 1` and `pinned = true` are literals because the source table is
+# latest-wins: the row being copied is the only body that page has, so it is simultaneously
+# the first version and the latest one, and both P4 edge-pins apply to it. (Should a group
+# ever already carry a live-path body — only possible if `payload_dual_write` is enabled
+# BEFORE this lane runs, the reverse of the sequenced order — the two rows tie at
+# version_seq 1 and `payloads._REPIN_SQL` pins both as first and latest. Over-pinned, never
+# under-pinned: the cap can still never evict real history.)
+#
+# `content_encoding = 'gzip'` unconditionally, where the live writer's `encode_body` leaves
+# bodies under 4 KB verbatim. These are whole pages, not fragments, so the branch would
+# almost never be taken — and one encoding across all 445,191 rows makes the storage
+# projection the operator signs a single number instead of a mixture. `decode_body`
+# round-trips either way.
+#
+# ON CONFLICT DO NOTHING, never DO UPDATE: a re-run after a crash between the INSERT and
+# the cursor stamp must be a no-op, and if a live-path row already holds this exact
+# normalised content then that row is the better record (it may carry a snapshot_id and a
+# contract_version this lane has neither of). Rows inserted come back through RETURNING, so
+# `inserted` is a count of real work rather than of rows offered.
+_INSERT_SQL = """
+INSERT INTO portal_raw_payloads
+    (source, source_id_native, listing_id, page_kind, payload_sha256, body_sha256,
+     content_type, content_encoding, body, byte_size, http_status, contract_version,
+     normalizer_version, snapshot_id, pinned, version_seq,
+     first_observed_at, last_observed_at, fetched_at)
+SELECT r.source, r.source_id_native, NULL::bigint, r.page_kind::location_page_kind,
+       r.payload_sha256, r.body_sha256, r.content_type, 'gzip'::text, r.body, r.byte_size,
+       r.http_status, NULL::integer, %(normalizer_version)s::text, NULL::bigint, true, 1,
+       r.fetched_at, r.fetched_at, r.fetched_at
+  FROM unnest(%(source)s::text[], %(source_id_native)s::text[], %(page_kind)s::text[],
+              %(payload_sha256)s::bytea[], %(body_sha256)s::bytea[],
+              %(content_type)s::text[], %(body)s::bytea[], %(byte_size)s::integer[],
+              %(http_status)s::integer[], %(fetched_at)s::timestamptz[])
+    AS r(source, source_id_native, page_kind, payload_sha256, body_sha256, content_type,
+         body, byte_size, http_status, fetched_at)
+ON CONFLICT (source, source_id_native, page_kind, payload_sha256) DO NOTHING
+RETURNING id
+"""
+
+_BATCH_INSERT_SQL = """
+INSERT INTO location_claim_batches
+    (lane, source, extractor_version, wave, job_run_id, outcome, note, scan_mode, resumable)
+VALUES (%(lane)s, %(source)s, %(extractor_version)s, %(wave)s, %(job_run_id)s, 'running',
+        %(note)s, %(scan_mode)s, %(resumable)s)
+RETURNING id
+"""
+
+_BATCH_FINISH_SQL = """
+UPDATE location_claim_batches
+   SET finished_at = now(), outcome = %(outcome)s, row_count = %(row_count)s,
+       cursor_after_id = %(cursor_after_id)s,
+       note = concat_ws(' | ', note, %(note)s::text)
+ WHERE id = %(batch_id)s
+"""
+
+# The newest TERMINAL row of this (lane, source, scan_mode) among the resumable ones.
+# `outcome` comes back rather than being filtered on, so that "the migration finished" and
+# "the migration has never run" cannot look identical to the caller: only 'stopped' is
+# resumed from, 'ok' means the scan reached the end of the table, and 'failed' means the
+# cursor on that row certifies nothing.
+_RESUME_SQL = """
+SELECT outcome, cursor_after_id
+  FROM location_claim_batches
+ WHERE lane = %(lane)s
+   AND source IS NOT DISTINCT FROM %(source)s
+   AND scan_mode = %(scan_mode)s
+   AND resumable
+   AND outcome IN ('ok', 'stopped', 'failed')
+ ORDER BY started_at DESC, id DESC
+ LIMIT 1
+"""
+
+
+class BackfillRefused(RuntimeError):
+    """A precondition failed; no batch row was opened and nothing was written."""
+
+
+def encode_for_archive(body: bytes, *, source: str) -> dict[str, Any]:
+    """The per-row derivation: content type, both hashes, and the stored bytes.
+
+    Pure — no DB, no network, no clock — so the whole value of a migrated row can be
+    asserted from a fixture body alone.
+    """
+    content_type = sniff_content_type(body)
+    profile = DEFAULT_VOLATILE_PROFILES.get(source, VolatileProfile())
+    norm = normalise(body, content_type=content_type, volatile=profile)
+    return {
+        "content_type": content_type,
+        "payload_sha256": norm.norm_sha256,
+        "body_sha256": norm.raw_sha256,
+        "byte_size": norm.byte_size,
+        "stored": gzip.compress(body, mtime=0),
+    }
+
+
+def missing_relations(conn: psycopg.Connection) -> list[str]:
+    missing: list[str] = []
+    with conn.cursor() as cur:
+        for name in _RELATIONS:
+            cur.execute(_REGCLASS_SQL, {"name": name})
+            row = cur.fetchone()
+            if row is None or row[0] is None:
+                missing.append(name)
+    return missing
+
+
+def _resume_point(
+    conn: psycopg.Connection, *, source: str | None, statement_timeout: int
+) -> int | None:
+    """The id to pick up after, or None to start at the beginning of the table."""
+    with loader_db.bounded(conn, statement_timeout) as cur:
+        cur.execute(_RESUME_SQL, {"lane": LANE, "source": source, "scan_mode": SCAN_MODE})
+        row = cur.fetchone()
+    if not row:
+        return None
+    outcome, cursor_after_id = row
+    if outcome != "stopped" or cursor_after_id is None:
+        return None
+    return int(cursor_after_id)
+
+
+def run(
+    conn: psycopg.Connection,
+    *,
+    source: str | None,
+    batch_size: int,
+    max_seconds: float | None,
+    limit: int | None,
+    start_after_id: int,
+    statement_timeout: int,
+    dry_run: bool,
+    note: str | None,
+) -> dict[str, Any]:
+    missing = missing_relations(conn)
+    if missing:
+        raise BackfillRefused(
+            f"location schema not applied; missing {', '.join(missing)} "
+            f"(migrations 380-387 and 403)")
+    if source is not None:
+        with loader_db.bounded(conn, statement_timeout) as cur:
+            cur.execute(_SOURCE_PRESENT_SQL, {"source": source})
+            if cur.fetchone() is None:
+                raise BackfillRefused(
+                    f"portal_raw_pages holds no rows for source={source!r} — a typo would "
+                    f"otherwise stamp an immediate 'ok' over an untouched portal")
+
+    # An operator-anchored run does not certify that everything below its anchor was
+    # migrated, so it neither resumes from a stored cursor nor becomes one (the same guard
+    # the claim intake and `mapy_inventory_runs.resumable` carry).
+    anchored = start_after_id > 0
+    after_id = start_after_id
+    resumed = False
+    if not anchored:
+        resume_id = _resume_point(conn, source=source, statement_timeout=statement_timeout)
+        if resume_id is not None:
+            after_id, resumed = resume_id, True
+            LOG.info("BACKFILL resuming a budget-stopped scan for source=%s from id>%d",
+                     source or "*", after_id)
+
+    batch_id: int | None = None
+    if not dry_run:
+        with loader_db.bounded(conn, statement_timeout) as cur:
+            cur.execute(_BATCH_INSERT_SQL, {
+                "lane": LANE, "source": source, "extractor_version": BACKFILL_VERSION,
+                "wave": WAVE, "job_run_id": os.environ.get("GITHUB_RUN_ID"), "note": note,
+                "scan_mode": SCAN_MODE, "resumable": not anchored,
+            })
+            batch_id = int(cur.fetchone()[0])
+    LOG.info("BACKFILL start source=%s batch_size=%d after_id=%d resumed=%s batch_id=%s "
+             "dry_run=%s", source or "*", batch_size, after_id, resumed, batch_id, dry_run)
+
+    r2_threshold = loader_db.env_positive_int(
+        payloads.R2_THRESHOLD_ENV, payloads.DEFAULT_R2_THRESHOLD_BYTES)
+    started = time.monotonic()
+    stats: dict[str, Any] = {
+        "pages": 0, "inserted": 0, "skipped_existing": 0, "unmapped_page_kind": 0,
+        "oversized": 0, "bytes_read": 0, "bytes_stored": 0,
+        "stopped_early": False, "reached_end": False,
+        "resumed_from_id": after_id, "resumed": resumed,
+    }
+    unmapped_kinds: set[str] = set()
+    try:
+        while True:
+            if limit is not None and stats["pages"] >= limit:
+                LOG.info("BACKFILL stopping: --limit reached")
+                stats["stopped_early"] = True
+                break
+            if max_seconds is not None and time.monotonic() - started > max_seconds:
+                LOG.info("BACKFILL stopping: --max-seconds reached")
+                stats["stopped_early"] = True
+                break
+            size = batch_size if limit is None else min(batch_size, limit - stats["pages"])
+
+            with loader_db.bounded(conn, statement_timeout) as cur:
+                cur.execute(_SOURCE_ROWS_SQL, {
+                    "after_id": after_id, "source": source, "batch_size": size})
+                records = cur.fetchall()
+            if not records:
+                # The ONLY way this migration earns outcome='ok'. A budget, a limit or an
+                # exception all leave rows behind the cursor, and a lane that claimed 'ok'
+                # over them would look finished while a slice of the archive had never
+                # been copied at all.
+                stats["reached_end"] = True
+                break
+
+            # The cursor advances over EVERY row read, including ones this lane declines
+            # to migrate: an unmappable page_kind is a permanent property of that row, and
+            # leaving the cursor behind it would wedge the migration on the same row
+            # forever.
+            batch_after_id = int(records[-1][0])
+            columns = _columns(records, r2_threshold=r2_threshold, stats=stats,
+                               unmapped_kinds=unmapped_kinds)
+
+            if columns and not dry_run:
+                with loader_db.bounded(conn, statement_timeout) as cur:
+                    cur.execute(_INSERT_SQL,
+                                {**columns, "normalizer_version": NORMALIZER_VERSION})
+                    inserted = len(cur.fetchall())
+                stats["inserted"] += inserted
+                stats["skipped_existing"] += len(columns["source"]) - inserted
+
+            after_id = batch_after_id
+            stats["pages"] += len(records)
+            LOG.info("BACKFILL progress pages=%d inserted=%d existing=%d unmapped=%d "
+                     "mb_read=%.1f mb_stored=%.1f through_id=%d",
+                     stats["pages"], stats["inserted"], stats["skipped_existing"],
+                     stats["unmapped_page_kind"], stats["bytes_read"] / 1e6,
+                     stats["bytes_stored"] / 1e6, after_id)
+    except Exception as exc:
+        if batch_id is not None:
+            # Guarded on the FAILURE path too, and on a short ceiling: whatever broke the
+            # run may be the same pressure that would hang this stamp, and a bookkeeping
+            # write that wedges replaces the exception the operator needs with silence.
+            try:
+                with loader_db.bounded(conn, _FAILURE_STAMP_TIMEOUT_S) as cur:
+                    cur.execute(_BATCH_FINISH_SQL, {
+                        "batch_id": batch_id, "outcome": "failed",
+                        "row_count": stats["inserted"], "cursor_after_id": after_id,
+                        "note": f"{type(exc).__name__}: {exc}"[:500],
+                    })
+            except Exception:  # noqa: BLE001 - never mask the exception being reported
+                LOG.exception("BACKFILL could not stamp batch %s as failed", batch_id)
+            # A 'failed' row is deliberately not resumable — its cursor stopped wherever
+            # the exception found it and certifies nothing about the rows behind it — so
+            # the next plain dispatch restarts at the beginning of the table. That is safe
+            # (ON CONFLICT DO NOTHING makes the re-walk a no-op) but on a 14 GB source it
+            # is not cheap, and the operator should be told the one flag that skips it.
+            LOG.error("BACKFILL failed at id=%d after %d pages; a plain re-dispatch "
+                      "restarts from the beginning. To pick up here instead, dispatch "
+                      "with start_after_id=%d (an anchored run, so it writes no resumable "
+                      "cursor of its own).", after_id, stats["pages"], after_id)
+        raise
+
+    outcome = "ok" if stats["reached_end"] else "stopped"
+    stats["outcome"] = outcome
+    stats["cursor_after_id"] = after_id
+    stats["batch_id"] = batch_id
+    if unmapped_kinds:
+        LOG.warning("BACKFILL skipped %d row(s) whose page_kind is not a location_page_kind "
+                    "label: %s — widen PAGE_KIND_MAP",
+                    stats["unmapped_page_kind"], ", ".join(sorted(unmapped_kinds)))
+    if batch_id is not None:
+        with loader_db.bounded(conn, statement_timeout) as cur:
+            cur.execute(_BATCH_FINISH_SQL, {
+                "batch_id": batch_id,
+                "outcome": outcome,
+                "row_count": stats["inserted"],
+                "cursor_after_id": after_id,
+                "note": f"pages={stats['pages']} inserted={stats['inserted']} "
+                        f"existing={stats['skipped_existing']} "
+                        f"unmapped_page_kind={stats['unmapped_page_kind']} "
+                        f"oversized={stats['oversized']} "
+                        f"reached_end={stats['reached_end']} through_id={after_id}",
+            })
+    return stats
+
+
+def _columns(
+    records: list[tuple[Any, ...]],
+    *,
+    r2_threshold: int,
+    stats: dict[str, Any],
+    unmapped_kinds: set[str],
+) -> dict[str, list[Any]]:
+    """Column-major arrays for `_INSERT_SQL`, one entry per migratable row."""
+    out: dict[str, list[Any]] = {
+        "source": [], "source_id_native": [], "page_kind": [], "payload_sha256": [],
+        "body_sha256": [], "content_type": [], "body": [], "byte_size": [],
+        "http_status": [], "fetched_at": [],
+    }
+    for _id, source, source_id_native, page_kind, body, http_status, fetched_at in records:
+        kind = PAGE_KIND_MAP.get(page_kind)
+        if kind is None:
+            unmapped_kinds.add(str(page_kind))
+            stats["unmapped_page_kind"] += 1
+            continue
+        raw = bytes(body)
+        derived = encode_for_archive(raw, source=source)
+        stored = derived["stored"]
+        if len(stored) > r2_threshold:
+            # Inline anyway. A spill would need a per-row R2 upload inside the batch
+            # transaction, and at the shipped 256 KB threshold a page would have to gzip
+            # larger than every observed portal body by an order of magnitude to get here.
+            # `prp_body_present` is satisfied either way; the count makes it visible.
+            stats["oversized"] += 1
+        out["source"].append(source)
+        out["source_id_native"].append(source_id_native)
+        out["page_kind"].append(kind)
+        out["payload_sha256"].append(derived["payload_sha256"])
+        out["body_sha256"].append(derived["body_sha256"])
+        out["content_type"].append(derived["content_type"])
+        out["body"].append(stored)
+        out["byte_size"].append(derived["byte_size"])
+        out["http_status"].append(http_status)
+        out["fetched_at"].append(fetched_at)
+        stats["bytes_read"] += derived["byte_size"]
+        stats["bytes_stored"] += len(stored)
+    return out if out["source"] else {}
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Backfill portal_raw_pages into "
+                                                 "portal_raw_payloads (W2a, 06 §6.4).")
+    parser.add_argument("--source", default=None,
+                        help="one portal only (default: every source in the archive)")
+    parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
+    parser.add_argument("--limit", type=int, default=None,
+                        help="stop after this many source rows (a budget, so it stamps "
+                             "'stopped' and the next run resumes)")
+    parser.add_argument("--max-seconds", type=float, default=None)
+    parser.add_argument("--start-after-id", type=int, default=0,
+                        help="operator anchor; the run neither resumes from nor becomes a "
+                             "resumable cursor")
+    parser.add_argument(
+        "--statement-timeout", type=int,
+        default=loader_db.env_timeout_s(STATEMENT_TIMEOUT_ENV, DEFAULT_STATEMENT_TIMEOUT_S))
+    parser.add_argument("--dry-run", action="store_true",
+                        help="read and encode; write no payload row and no batch row")
+    parser.add_argument("--note", default=None)
+    parser.add_argument("--verbose", action="store_true")
+    args = parser.parse_args(argv)
+
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s")
+
+    if not os.environ.get("SUPABASE_DB_URL"):
+        print("ERROR: SUPABASE_DB_URL is not set.", file=sys.stderr)
+        return 2
+    batch_size = max(MIN_BATCH_SIZE, min(MAX_BATCH_SIZE, args.batch_size))
+
+    kwargs: dict[str, Any] = {
+        "source": args.source, "batch_size": batch_size, "max_seconds": args.max_seconds,
+        "limit": args.limit, "start_after_id": args.start_after_id,
+        "statement_timeout": args.statement_timeout, "dry_run": args.dry_run,
+        "note": args.note,
+    }
+    with db.connect() as conn:
+        try:
+            if args.dry_run:
+                # NO LEASE on a dry run: it writes nothing, so there is nothing to
+                # serialise against — and releasing the lease as 'ok' would stamp
+                # `location_jobs.last_success_at` and let the staleness monitor read a
+                # migration that copied no rows as a healthy one.
+                LOG.info("BACKFILL dry run: not taking the %s lease", JOB_NAME)
+                stats = run(conn, **kwargs)
+            else:
+                with lease.held(
+                    conn, JOB_NAME, cadence=CADENCE,
+                    concurrency_group=CONCURRENCY_GROUP, ttl_seconds=LEASE_TTL_S,
+                ) as acquired:
+                    if not acquired:
+                        LOG.info("BACKFILL skipped: another run holds the %s lease",
+                                 JOB_NAME)
+                        return 0
+                    stats = run(conn, **kwargs)
+        except BackfillRefused as exc:
+            print(f"REFUSED: {exc}", file=sys.stderr)
+            return 2
+    LOG.info("BACKFILL done %s", json.dumps(stats, default=str, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(main())
