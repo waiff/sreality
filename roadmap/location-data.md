@@ -335,6 +335,16 @@ all closed, several proven against a throwaway PostgreSQL 18 built from `.deb` f
   a contract whose claims are mined and stored but excluded from `location_claims_live`, with
   `location_claims_shadow` as the scoring surface so the un-shadow gate is decidable, and an
   un-shadow that enqueues `dirty_locations` so promotion actually re-resolves.
+- **W2-5 the fixture-diff gate** (no migration): `tests/location_data/test_contract_fixture_diff.py`
+  + a golden claim set per portal under `tests/fixtures/location_w2/golden/<portal>@<version>.json`.
+  Runs each contract's named `regressions:` listings through the real extractor on every push and
+  fails with a claim-level diff — extractor id, field, old value → new value — when a contract or a
+  fixture body changes what is claimed; a reviewed change is accepted by re-blessing the golden.
+  **Permanent CI, not a wave gate** (02 §2.1.8.3), and with `location_claim_retractions` (mig 382)
+  it completes 02 §2.7 item 0(b), the pair that must stand before the first contract writes a
+  production claim. **Hard precondition for W2-6…W2-12.** Coverage today is the subset of pinned
+  listings that have a frozen body in-repo; each gap is written into the golden as
+  `listings_without_a_fixture_body`, so coverage arriving with a portal PR is itself a reviewed diff.
 - **W2-1 / W2-0** (#1045, #1048): per-reader substrate legality (a contract entry can no longer
   declare a transform or guard its reader will never consult) and the archive denominator every
   W2 gate is a share of.
