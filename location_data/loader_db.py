@@ -66,18 +66,29 @@ def env_timeout_s(name: str, default: int) -> int:
     input must not take a lane down, and 0 ("no timeout") is exactly the state this whole
     mechanism exists to stop, so it is never reachable from an env var.
     """
+    return env_positive_int(name, default)
+
+
+def env_positive_int(name: str, default: int) -> int:
+    """A positive-integer knob, overridable per environment.
+
+    Shared with the non-timeout budgets (chunk sizes, version caps) because the
+    discipline is the same one: a typo or a non-positive value is the default, not a
+    crash — and for every knob that reaches this helper, 0 means "no bound at all",
+    which is exactly the state each of them exists to stop.
+    """
     raw = os.environ.get(name)
     if raw is None:
         return default
     try:
-        seconds = int(raw)
+        value = int(raw)
     except ValueError:
-        LOG.warning("LOADER %s=%r is not an integer; using %ds", name, raw, default)
+        LOG.warning("LOADER %s=%r is not an integer; using %d", name, raw, default)
         return default
-    if seconds <= 0:
-        LOG.warning("LOADER %s=%r is not positive; using %ds", name, raw, default)
+    if value <= 0:
+        LOG.warning("LOADER %s=%r is not positive; using %d", name, raw, default)
         return default
-    return seconds
+    return value
 
 
 @contextlib.contextmanager

@@ -224,22 +224,11 @@ def cz_bbox() -> tuple[float, float, float, float]:
 def env_positive_int(name: str, default: int) -> int:
     """A positive-integer knob, overridable per environment.
 
-    Same discipline as `loader_db.env_timeout_s`: a typo or a non-positive value is the
-    default, not a crash — and for these two knobs 0 would mean "no bound at all", which is
-    exactly the state they exist to stop.
+    Re-exported from `loader_db`, which owns the budget helpers every location lane
+    shares: a typo or a non-positive value is the default, not a crash — and for these
+    knobs 0 would mean "no bound at all", which is exactly the state they exist to stop.
     """
-    raw = os.environ.get(name)
-    if raw is None:
-        return default
-    try:
-        value = int(raw)
-    except ValueError:
-        LOG.warning("INTAKE %s=%r is not an integer; using %d", name, raw, default)
-        return default
-    if value <= 0:
-        LOG.warning("INTAKE %s=%r is not positive; using %d", name, raw, default)
-        return default
-    return value
+    return loader_db.env_positive_int(name, default)
 
 
 class IntakeRefused(RuntimeError):
