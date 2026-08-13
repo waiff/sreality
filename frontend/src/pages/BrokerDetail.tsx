@@ -2,19 +2,16 @@ import { useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import {
-  contactState,
   fetchBrokerDossier,
   fetchBrokerListings,
-  prettyPhone,
   type BrokerListing,
-  type BrokerPublic,
   type BrokerRegionShare,
   type BrokerMembership,
-  type ContactState,
 } from '../lib/brokers';
 import { fmtCount, fmtCzk, fmtArea, fmtRelative } from '../lib/format';
 import { portalShort } from '../lib/portals';
 import { PickButton } from '../components/controls';
+import BrokerContactCard from '@/components/BrokerContactCard';
 import { listingRowPath } from '@/lib/listingUrl';
 import { categoryMainLabel, categoryTypeLabel, listingKindLabel } from '@/lib/enums';
 import { usePageTitle } from '@/lib/pageTitle';
@@ -97,7 +94,7 @@ export default function BrokerDetail() {
                 )}
               </div>
             </div>
-            <ContactCard broker={b} />
+            <BrokerContactCard broker={b} />
           </header>
 
           {/* Stats strip */}
@@ -131,82 +128,6 @@ export default function BrokerDetail() {
           />
         </>
       )}
-    </div>
-  );
-}
-
-function ContactCard({ broker }: { broker: BrokerPublic }) {
-  return (
-    <div className="border border-[var(--color-rule)] rounded-[var(--radius-md)] bg-[var(--color-paper-3)] px-4 py-3 min-w-[15rem]">
-      <p className="text-[0.6rem] tracking-[0.16em] uppercase text-[var(--color-ink-3)]">
-        Kontakt pro oslovení
-      </p>
-      <div className="mt-2 space-y-1.5">
-        <ContactRow
-          kind="tel"
-          state={contactState(broker.primary_phone, broker.has_phone)}
-          format={prettyPhone}
-        />
-        <ContactRow
-          kind="mailto"
-          state={contactState(broker.primary_email, broker.has_email)}
-          format={(v) => v}
-        />
-      </div>
-    </div>
-  );
-}
-
-const CONTACT_LABEL: Record<'tel' | 'mailto', string> = {
-  tel: 'telefon',
-  mailto: 'e-mail',
-};
-
-function ContactRow({
-  kind,
-  state,
-  format,
-}: {
-  kind: 'tel' | 'mailto';
-  state: ContactState;
-  format: (v: string) => string;
-}) {
-  const [copied, setCopied] = useState(false);
-  if (state.state !== 'value') {
-    // "masked" means a contact IS on file but this session may not see it —
-    // rendering it as the empty dash would claim the broker has none.
-    const masked = state.state === 'masked';
-    return (
-      <p
-        className="text-sm text-[var(--color-ink-4)] font-[family-name:var(--font-mono)]"
-        title={masked ? 'Kontakt je viditelný jen pro administrátory.' : undefined}
-      >
-        {CONTACT_LABEL[kind]} {masked ? '· kontakt na vyžádání' : '—'}
-      </p>
-    );
-  }
-  const { value } = state;
-  const copy = () => {
-    navigator.clipboard?.writeText(value).then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1200);
-    });
-  };
-  return (
-    <div className="flex items-center justify-between gap-3">
-      <a
-        href={`${kind}:${value}`}
-        className="text-sm font-[family-name:var(--font-mono)] text-[var(--color-copper-2)] hover:underline underline-offset-2 truncate"
-      >
-        {format(value)}
-      </a>
-      <button
-        type="button"
-        onClick={copy}
-        className="shrink-0 text-[0.6rem] tracking-[0.1em] uppercase text-[var(--color-ink-3)] hover:text-[var(--color-ink)] transition-colors"
-      >
-        {copied ? 'zkopírováno' : 'kopírovat'}
-      </button>
     </div>
   );
 }

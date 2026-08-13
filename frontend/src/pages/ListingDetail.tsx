@@ -22,7 +22,8 @@ import {
   fetchImagesByListing,
   type PropertyMf,
 } from '@/lib/queries';
-import { fetchListingBroker } from '@/lib/brokers';
+import { fetchBrokersByIds, fetchListingBroker } from '@/lib/brokers';
+import BrokerContactCard from '@/components/BrokerContactCard';
 import {
   ApiError,
   verifyListingFreshness,
@@ -405,7 +406,6 @@ export default function ListingDetail() {
           <div className="flex flex-wrap items-center gap-2">
             <PortalLinksRow listing={listing} sources={sources} />
             <LatestActiveLink listing={listing} sources={sources} />
-            <BrokerChip listingId={listing.id} />
           </div>
         }
         mapFooter={<ExploreAreaButton listing={listing} images={images} />}
@@ -424,6 +424,7 @@ export default function ListingDetail() {
           </Suspense>
         }
       />
+      <BrokerVizitka listingId={listing.id} />
       <Hairline />
       <Suspense fallback={null}>
         <ManualEstimatesBlock sreality_id={listing.sreality_id} />
@@ -534,41 +535,102 @@ function LatestActiveLink({
   );
 }
 
-/* The resolved broker behind this listing → its broker-intelligence detail.
-   Renders nothing for listings whose broker isn't resolved yet — but a FAILED read
-   is not that answer. fetchListingBroker returns null only for the two 404 bodies
-   that mean "nothing is attributed here" and rethrows everything else (an expired
-   session, a drifted VITE_API_BASE_URL, a 5xx), so a bare `if (!b) return null`
-   asserted "no broker" for every outage. That is how the PostgREST revocation hid
-   here from 2026-07-12 to 2026-08-12; every other repointed broker surface now
-   says so out loud. Gated on `!q.data` too, so a failed background refetch never
-   replaces a good chip with an error. */
-function BrokerChip({ listingId }: { listingId: number }) {
+/* -------------------------------------------------------------------------- */
+/* Broker vizitka (who is selling this, and how to reach them)                 */
+/* -------------------------------------------------------------------------- */
+
+/* The resolved broker behind this listing: identity + firm + the two channels to
+   reach them, one Hairline-separated block under the header (D7). It replaces the
+   header link-chip — two contact rows are heavier than the portal chips they sat
+   next to, and a second copy of the name up there would also double the error
+   line below.
+
+   THREE fetch outcomes, kept apart. Renders nothing for a listing whose broker
+   isn't resolved yet — but a FAILED read is not that answer. fetchListingBroker
+   returns null only for the two 404 bodies that mean "nothing is attributed here"
+   and rethrows everything else (an expired session, a drifted VITE_API_BASE_URL, a
+   5xx), so a bare `if (!b) return null` asserted "no broker" for every outage. That
+   is how the PostgREST revocation hid here from 2026-07-12 to 2026-08-12; every
+   other repointed broker surface now says so out loud. Gated on `!q.data` too, so a
+   failed background refetch never replaces a good card with an error.
+
+   The leading <Hairline /> lives INSIDE the component (unlike the sibling blocks,
+   which get one from the page): most listings have no attributed broker, and a
+   page-level rule would then stack two hairlines on nothing. */
+function BrokerVizitka({ listingId }: { listingId: number }) {
   const q = useQuery({
     queryKey: ['listing-broker', listingId],
     queryFn: () => fetchListingBroker(listingId),
     staleTime: 60_000,
   });
-  const b = q.data;
+  const b = q.data ?? null;
+  // Contact lives on the broker row, not on the attribution row — /brokers/by-listing
+  // answers identity only. So chain the batch route by broker_id (the pairing
+  // lib/brokers documents, same one the pipeline board hydrates cards with); the
+  // key is the broker, not this listing, so every surface shares one cache entry.
+  const brokerId = b?.broker_id ?? null;
+  const contactQ = useQuery({
+    queryKey: ['broker-contact', brokerId],
+    queryFn: async () => {
+      const id = brokerId as number;
+      return (await fetchBrokersByIds([id])).get(id) ?? null;
+    },
+    enabled: brokerId != null,
+    staleTime: 60_000,
+  });
+
   if (q.isError && !b)
     return (
-      <span className="inline-flex items-center gap-1.5 rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-3)] px-3 py-1.5 text-[0.8rem] text-[var(--color-brick)]">
-        Makléře se nepodařilo načíst
-      </span>
+      <BrokerSection>
+        <p className="mt-3 text-sm text-[var(--color-brick)]">
+          Makléře se nepodařilo načíst
+        </p>
+      </BrokerSection>
     );
   if (!b) return null;
+
+  const contact = contactQ.data ?? null;
   return (
-    <Link
-      to={`/brokers/${b.broker_id}`}
-      title={`Zobrazit makléře${b.broker_firm_label ? ` · ${b.broker_firm_label}` : ''}`}
-      className="inline-flex items-center gap-1.5 rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-3)] px-3 py-1.5 text-[0.8rem] text-[var(--color-ink-2)] hover:border-[var(--color-copper)] hover:text-[var(--color-copper-2)] transition-colors"
-    >
-      <span className="text-[var(--color-ink-3)]">Makléř:</span>
-      <span className="font-medium truncate max-w-[12rem]">
-        {b.broker_display_name ?? 'detail'}
-      </span>
-      <OutArrow />
-    </Link>
+    <BrokerSection>
+      <div className="mt-3 flex flex-wrap items-start justify-between gap-4">
+        <div className="min-w-0">
+          <Link
+            to={`/brokers/${b.broker_id}`}
+            className="inline-flex items-center gap-1.5 text-[1.05rem] leading-tight text-[var(--color-ink)] hover:text-[var(--color-copper-2)] transition-colors"
+          >
+            <span className="truncate">{b.broker_display_name ?? 'Neznámý makléř'}</span>
+            <OutArrow />
+          </Link>
+          <p className="mt-1 text-sm text-[var(--color-ink-3)]">
+            {b.broker_firm_label ?? 'nezávislý / neznámá kancelář'}
+          </p>
+        </div>
+        {/* A failed (or still-running) contact read is not "this broker has no
+            phone" — the same distinction contactState draws per field, one level
+            up: only a broker row we actually hold may claim an empty channel. */}
+        {contact ? (
+          <BrokerContactCard broker={contact} />
+        ) : contactQ.isLoading ? (
+          <p className="text-sm text-[var(--color-ink-3)]">Načítám kontakt…</p>
+        ) : (
+          <p className="text-sm text-[var(--color-brick)]">
+            Kontakt se nepodařilo načíst
+          </p>
+        )}
+      </div>
+    </BrokerSection>
+  );
+}
+
+function BrokerSection({ children }: { children: React.ReactNode }) {
+  return (
+    <>
+      <Hairline />
+      <div>
+        <SectionLabel>Makléř</SectionLabel>
+        {children}
+      </div>
+    </>
   );
 }
 

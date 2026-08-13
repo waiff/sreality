@@ -155,7 +155,13 @@ vi.mock('@/lib/queries', async (importOriginal) => {
     fetchImagesByListing: vi.fn(async () => []),
   };
 });
-vi.mock('@/lib/brokers', () => ({ fetchListingBroker: vi.fn(async () => null) }));
+/* Only the two network wrappers are stubbed — contactState/prettyPhone stay REAL,
+   because the vizitka's whole point is the three states they encode. */
+vi.mock('@/lib/brokers', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/brokers')>()),
+  fetchListingBroker: vi.fn(async () => null),
+  fetchBrokersByIds: vi.fn(async () => new Map()),
+}));
 vi.mock('@/components/NewEstimationModal', () => ({
   useNewEstimationModal: () => ({ open: vi.fn() }),
 }));
@@ -250,11 +256,38 @@ describe('<ListingDetail> resolver chain', () => {
   });
 });
 
-describe('<BrokerChip>', () => {
+/* -------------------------------------------------------------------------- */
+/* Broker vizitka (C2) — the header chip's tri-state fetch behaviour, plus the */
+/* per-field 3-state contact rendering the chip never had                     */
+/* -------------------------------------------------------------------------- */
+
+const ATTRIBUTION: brokers.ListingBroker = {
+  sreality_id: -11876,
+  listing_id: 105053,
+  broker_id: 7,
+  broker_display_name: 'Jan Novák',
+  broker_firm_label: 'RE/MAX Alfa',
+};
+
+// The /brokers batch row. Which contact half arrives (primary_* vs has_*) is a
+// property of the CALLER — admin vs not — so each test picks one.
+function brokerRow(contact: Partial<brokers.BrokerPublic>): brokers.BrokerPublic {
+  return {
+    broker_id: 7,
+    display_name: 'Jan Novák',
+    firm_name: 'RE/MAX Alfa',
+    ...contact,
+  } as brokers.BrokerPublic;
+}
+
+describe('<BrokerVizitka>', () => {
   beforeEach(() => {
     vi.mocked(queries.fetchListingBySreality).mockReset();
     vi.mocked(queries.fetchListingBySreality).mockResolvedValue(RESOLVER_LISTING);
     vi.mocked(brokers.fetchListingBroker).mockReset();
+    vi.mocked(brokers.fetchListingBroker).mockResolvedValue(ATTRIBUTION);
+    vi.mocked(brokers.fetchBrokersByIds).mockReset();
+    vi.mocked(brokers.fetchBrokersByIds).mockResolvedValue(new Map());
   });
 
   function renderListing() {
@@ -270,28 +303,89 @@ describe('<BrokerChip>', () => {
     );
   }
 
+  function withContact(contact: Partial<brokers.BrokerPublic>) {
+    vi.mocked(brokers.fetchBrokersByIds).mockResolvedValue(
+      new Map([[7, brokerRow(contact)]]),
+    );
+  }
+
+  it('shows the real contact for an admin session, keyed on the attributed broker', async () => {
+    withContact({ primary_phone: '420777123456', primary_email: 'jan@remax.cz' });
+
+    renderListing();
+
+    expect(await screen.findByText('+420 777 123 456')).toBeInTheDocument();
+    expect(screen.getByText('jan@remax.cz')).toBeInTheDocument();
+    expect(screen.getByText('Jan Novák')).toBeInTheDocument();
+    expect(screen.getByText('RE/MAX Alfa')).toBeInTheDocument();
+    // Identity comes from /brokers/by-listing, contact from the /brokers batch —
+    // the by-listing route carries no contact fields to render.
+    expect(brokers.fetchListingBroker).toHaveBeenCalledWith(105053);
+    expect(brokers.fetchBrokersByIds).toHaveBeenCalledWith([7]);
+  });
+
+  /* A non-admin gets has_* instead of the values; an em-dash there would claim
+     the broker is unreachable. Same three states as /brokers/:id, same copy. */
+  it('says a masked contact is on file rather than showing the empty dash', async () => {
+    withContact({ has_phone: true, has_email: true });
+
+    renderListing();
+
+    expect(
+      await screen.findByText(/telefon · kontakt na vyžádání/),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/e-mail · kontakt na vyžádání/)).toBeInTheDocument();
+  });
+
+  it('keeps the plain dash when the broker genuinely has no contact', async () => {
+    withContact({ has_phone: false, has_email: false });
+
+    renderListing();
+
+    expect(await screen.findByText(/telefon —/)).toBeInTheDocument();
+    expect(screen.getByText(/e-mail —/)).toBeInTheDocument();
+    expect(screen.queryByText(/na vyžádání/)).not.toBeInTheDocument();
+  });
+
+  it('renders nothing at all for a genuinely unattributed listing', async () => {
+    vi.mocked(brokers.fetchListingBroker).mockResolvedValue(null);
+
+    renderListing();
+
+    await waitFor(() => expect(brokers.fetchListingBroker).toHaveBeenCalled());
+    expect(screen.queryByText('Makléř')).toBeNull();
+    expect(screen.queryByText('Makléře se nepodařilo načíst')).toBeNull();
+    // No attribution, no broker_id — the contact call must not fire at all.
+    expect(brokers.fetchBrokersByIds).not.toHaveBeenCalled();
+  });
+
   /* fetchListingBroker returns null ONLY for the two 404 bodies that mean "nothing
      is attributed here"; every other error rethrows. Rendering both as an absent
-     chip asserted "no broker" for every outage — the dark state that hid the
+     card asserted "no broker" for every outage — the dark state that hid the
      PostgREST revocation on this surface for a month. */
-  it('says so when the read fails instead of looking like an unattributed listing', async () => {
+  it('says so when the attribution read fails instead of looking unattributed', async () => {
     vi.mocked(brokers.fetchListingBroker).mockRejectedValue(
       new api.ApiError('Invalid token', 401, null),
     );
 
     renderListing();
 
-    await waitFor(() =>
-      expect(screen.getByText('Makléře se nepodařilo načíst')).toBeTruthy(),
-    );
+    expect(
+      await screen.findByText('Makléře se nepodařilo načíst'),
+    ).toBeInTheDocument();
   });
 
-  it('still renders nothing for a genuinely unattributed listing', async () => {
-    vi.mocked(brokers.fetchListingBroker).mockResolvedValue(null);
+  /* The same distinction one level up: a failed contact read must not render as
+     a broker with no reachable channel. The identity still shows. */
+  it('separates a failed contact read from a broker with no contact', async () => {
+    vi.mocked(brokers.fetchBrokersByIds).mockRejectedValue(new Error('HTTP 500'));
 
     renderListing();
 
-    await waitFor(() => expect(brokers.fetchListingBroker).toHaveBeenCalled());
-    expect(screen.queryByText('Makléře se nepodařilo načíst')).toBeNull();
+    expect(
+      await screen.findByText('Kontakt se nepodařilo načíst'),
+    ).toBeInTheDocument();
+    expect(screen.getByText('Jan Novák')).toBeInTheDocument();
+    expect(screen.queryByText(/telefon —/)).not.toBeInTheDocument();
   });
 });
