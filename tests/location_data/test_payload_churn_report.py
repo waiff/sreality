@@ -47,6 +47,7 @@ def _surface(
     page_kind: str = "detail",
     normalizer_version: str = NORMALIZER_VERSION,
     keys: int = 1_000,
+    artefacts: int | None = None,
     keys_repeated: int | None = None,
     fetches: int = 3_000,
     raw_changes: int = 0,
@@ -57,12 +58,14 @@ def _surface(
     median_norm_bytes: float | None = 39_000.0,
     mean_interval_s: float | None = 6 * 3_600.0,
     median_interval_s: float | None = 6 * 3_600.0,
+    window_end: datetime.datetime = _NOW,
 ) -> rep.Surface:
     return rep.Surface(rep.SurfaceRow(
         source=source,
         page_kind=page_kind,
         normalizer_version=normalizer_version,
         keys=keys,
+        artefacts=keys if artefacts is None else artefacts,
         keys_repeated=keys if keys_repeated is None else keys_repeated,
         fetches=fetches,
         raw_changes=raw_changes,
@@ -74,7 +77,7 @@ def _surface(
         mean_interval_s=mean_interval_s,
         median_interval_s=median_interval_s,
         window_start=_NOW - datetime.timedelta(days=7),
-        window_end=_NOW,
+        window_end=window_end,
     ))
 
 
@@ -135,18 +138,20 @@ def test_every_column_the_readout_reads_exists_in_migration_402() -> None:
         if line.strip() and not line.strip().startswith(("primary key", "--"))
     }
     read = {
-        "source", "page_kind", "normalizer_version", "fetches", "raw_changes",
-        "norm_changes", "last_byte_size", "last_norm_byte_size", "first_seen_at",
-        "last_seen_at",
+        "source", "source_id_native", "page_kind", "normalizer_version", "fetches",
+        "raw_changes", "norm_changes", "last_byte_size", "last_norm_byte_size",
+        "first_seen_at", "last_seen_at",
     }
     assert read <= declared, sorted(read - declared)
     for column in read:
         assert re.search(rf"\b{column}\b", rep._CHURN_SURFACE_SQL), column
-    # The four the aggregate deliberately does not read: per-key identity and the
-    # forensic hashes, which say nothing once the counters have been summed. A NEW
-    # column lands here and has to be claimed either way rather than ignored.
+    # The three the aggregate deliberately does not read: the forensic hashes and the
+    # idempotency token, which say nothing once the counters have been summed.
+    # (`source_id_native` IS read — only to strip the index archivers' week suffix and
+    # count distinct artefacts.) A NEW column lands here and has to be claimed either
+    # way rather than ignored.
     assert declared - read == {
-        "source_id_native", "last_raw_sha256", "last_norm_sha256", "last_observation",
+        "last_raw_sha256", "last_norm_sha256", "last_observation",
     }
 
 
@@ -225,14 +230,45 @@ def test_the_projection_uses_the_raw_body_size_not_the_normalised_one() -> None:
     assert surface.gb_per_cycle() == pytest.approx(0.1)
 
 
-def test_sreality_is_projected_at_the_hourly_cadence() -> None:
+def test_srealitys_declared_cadence_is_its_index_walk_and_is_not_the_detail_projection() -> None:
+    """The bug this pins: CYCLES_PER_DAY['sreality'] is the HOURLY INDEX WALK, but a
+    detail body is refetched only when the index enqueues it (rule 19). Projecting a
+    detail surface at 24/day when the instrument watched each listing refetched every
+    three days overstates the signed total by ~72x."""
     assert rep.CYCLES_PER_DAY["sreality"] == 24.0
     surface = _surface(
         source="sreality", keys=100_000, fetches=200_000, norm_changes=100_000,
-        mean_raw_bytes=50_000.0,
+        mean_raw_bytes=50_000.0, mean_interval_s=3 * 86_400.0,   # refetched every 3 days
     )
     assert surface.gb_per_cycle() == pytest.approx(5.0)
-    assert surface.gb_per_month() == pytest.approx(5.0 * 24 * 30)
+    assert surface.observed_cycles_per_day == pytest.approx(1 / 3)
+    assert surface.projection_cycles_per_day == pytest.approx(1 / 3)
+    assert surface.cadence_basis == "observed"
+    assert surface.gb_per_month() == pytest.approx(5.0 * (1 / 3) * 30)
+    assert surface.gb_per_month_declared() == pytest.approx(5.0 * 24 * 30)
+    assert surface.gb_per_month() != pytest.approx(surface.gb_per_month_declared())
+    # ... and the 72x gap is named on the row, not left for the reader to spot.
+    assert "CADENCE 72x" in surface.cadence_note
+    assert "CADENCE 72x" in "\n".join(rep._render_projection([surface]))
+
+
+def test_the_declared_cadence_is_the_fallback_when_nothing_was_refetched_yet() -> None:
+    surface = _surface(
+        source="bazos", keys=1_000, fetches=3_000, norm_changes=1_000,
+        mean_raw_bytes=100_000.0, mean_interval_s=None,
+    )
+    assert surface.observed_cycles_per_day is None
+    assert surface.projection_cycles_per_day == 4.0
+    assert surface.cadence_basis == "declared"
+    assert surface.gb_per_month() == pytest.approx(surface.gb_per_month_declared())
+    assert surface.cadence_note == rep.CADENCE_DECLARED_ONLY
+
+
+def test_a_cadence_that_agrees_with_the_declared_one_is_not_marked() -> None:
+    # bazos declares 4 cycles/day and the instrument saw a 6 h interval: same number.
+    surface = _surface(source="bazos", mean_interval_s=6 * 3_600.0)
+    assert surface.observed_cycles_per_day == pytest.approx(4.0)
+    assert surface.cadence_note == ""
 
 
 def test_the_cadence_constant_covers_every_portal_the_instrument_measures() -> None:
@@ -242,13 +278,30 @@ def test_the_cadence_constant_covers_every_portal_the_instrument_measures() -> N
     assert set(rep.CYCLES_PER_DAY) == set(DEFAULT_VOLATILE_PROFILES)
 
 
-def test_an_unknown_source_is_marked_rather_than_projected_at_a_guess() -> None:
+def test_an_unknown_source_is_projected_from_what_was_observed_and_marked() -> None:
     surface = _surface(source="newportal", keys=1_000, fetches=2_000, norm_changes=500)
     assert surface.cycles_per_day is None
     assert surface.gb_per_cycle() is not None, "a per-cycle number needs no cadence"
-    assert surface.gb_per_month() is None
+    assert surface.gb_per_month() == pytest.approx(
+        (surface.gb_per_cycle() or 0.0) * 4.0 * rep.DAYS_PER_MONTH
+    )
+    assert surface.cadence_basis == "observed"
     rendered = "\n".join(rep._render_projection([surface]))
     assert rep.UNKNOWN_CADENCE in rendered
+
+
+def test_a_surface_with_neither_cadence_is_not_projected_at_a_guess() -> None:
+    surface = _surface(
+        source="newportal", keys=1_000, fetches=2_000, norm_changes=500,
+        mean_interval_s=None,
+    )
+    assert surface.projection_cycles_per_day is None
+    assert surface.cadence_basis is None
+    assert surface.gb_per_cycle() is not None
+    assert surface.gb_per_month() is None
+    lines = "\n".join(rep._render_projection([surface]))
+    assert rep.NO_CADENCE in lines
+    assert "over 0 projectable surface(s)" in lines
 
 
 def test_the_observed_cadence_is_reported_beside_the_declared_one() -> None:
@@ -260,6 +313,37 @@ def test_the_observed_cadence_is_reported_beside_the_declared_one() -> None:
     assert faster.gb_per_month_observed() == pytest.approx(
         (faster.gb_per_cycle() or 0.0) * 8.0 * rep.DAYS_PER_MONTH
     )
+    assert faster.gb_per_month() == pytest.approx(faster.gb_per_month_observed())
+
+
+# --------------------------------------------- 3b. week-stamped index artefacts
+
+
+def test_an_index_surfaces_per_cycle_base_is_positions_not_position_weeks() -> None:
+    """The three index archivers week-stamp their churn key (…/{offset}/{week}), so the
+    row count grows one multiple per ISO week the instrument stays on while a walk still
+    touches each position once. Projecting from rows would inflate the index surface —
+    the exact surface P2 (index archiving) is gated on — linearly with the window."""
+    surface = _surface(
+        source="sreality", page_kind="index", keys=200, artefacts=100,
+        keys_repeated=200, fetches=5_000, norm_changes=2_500,
+        mean_raw_bytes=500_000.0, mean_interval_s=3_600.0,
+    )
+    rate = surface.norm_change_rate or 0.0
+    assert surface.artefacts == 100
+    assert rate == pytest.approx(2_500 / 4_800)
+    assert surface.gb_per_cycle() == pytest.approx(100 * rate * 500_000 / 1e9)
+    # The pre-fix number, stated so the regression is unmistakable.
+    assert surface.gb_per_cycle() != pytest.approx(200 * rate * 500_000 / 1e9)
+
+
+def test_a_detail_surfaces_artefacts_are_just_its_keys() -> None:
+    surface = _surface(keys=1_000, artefacts=1_000)
+    assert surface.artefacts == surface.row.keys
+    # ... and an older readout (or a fake) with no artefact count degrades to keys
+    # rather than projecting zero bytes.
+    legacy = _surface(keys=1_000, artefacts=0)
+    assert legacy.artefacts == 1_000
 
 
 def test_the_inventory_scaled_projection_uses_the_portals_live_row_count() -> None:
@@ -370,6 +454,79 @@ def test_the_probe_cohort_never_enters_the_signed_projection() -> None:
     assert rep._render_inventory_scaled([probe], {"bazos": 50_000}) == []
 
 
+def test_the_probe_run_never_widens_the_reported_measurement_window() -> None:
+    """A probe dispatched today would otherwise stretch (or shift) the window the passive
+    rates — and so the signed projection — were measured over."""
+    passive = _surface(window_end=_NOW - datetime.timedelta(days=30))
+    probe = _surface(normalizer_version=probe_normalizer_version(), window_end=_NOW)
+    lines = rep._render_window([passive, probe])
+    assert len(lines) == 3, lines            # blank line + one window per section
+    assert "PASSIVE MEASUREMENT" in lines[1]
+    assert "CONFIRMATION PROBE" in lines[2]
+    assert rep._stamp(_NOW) not in lines[1]
+    assert rep._stamp(_NOW) in lines[2]
+
+
+def test_the_distribution_table_keeps_the_probe_rows_in_their_own_section() -> None:
+    passive = _surface()
+    probe = _surface(normalizer_version=probe_normalizer_version(), mean_interval_s=300.0)
+    lines = rep._render_medians([passive, probe])
+    headings = [line for line in lines if line.startswith("DISTRIBUTION")]
+    assert len(headings) == 2
+    assert "PASSIVE MEASUREMENT" in headings[0]
+    assert "CONFIRMATION PROBE" in headings[1]
+
+
+def test_a_normaliser_rollouts_two_cohorts_are_not_both_added_to_the_total() -> None:
+    """`normalizer_version` exists to split a rolling profile change into clean
+    before/after cohorts, so two rows on one (source, page_kind) is the DESIGNED steady
+    state mid-rollout — and summing both would silently double the signed number while
+    each row stayed individually correct."""
+    old = _surface(
+        normalizer_version="payload_norm@1", keys=1_000, fetches=3_000,
+        norm_changes=1_000, mean_raw_bytes=100_000.0,
+        window_end=_NOW - datetime.timedelta(days=2),
+    )
+    new = _surface(
+        normalizer_version="payload_norm@2", keys=1_000, fetches=3_000,
+        norm_changes=1_000, mean_raw_bytes=100_000.0, window_end=_NOW,
+    )
+    newest, superseded = rep.newest_cohorts([old, new])
+    assert newest == [new]
+    assert superseded == [old]
+
+    one_cohort = float(new.gb_per_month() or 0.0)
+    lines = "\n".join(rep._render_totals([old, new]))
+    assert "over 1 projectable surface(s)" in lines
+    assert f"{one_cohort:,.2f}" in lines
+    assert f"{2 * one_cohort:,.2f}" not in lines
+    assert "superseded cohort" in lines
+    assert "payload_norm@1" in lines
+
+
+def test_the_inventory_scaled_total_also_counts_one_cohort_per_surface() -> None:
+    old = _surface(normalizer_version="payload_norm@1", keys=1_000, fetches=2_000,
+                   norm_changes=1_000, mean_raw_bytes=100_000.0,
+                   window_end=_NOW - datetime.timedelta(days=2))
+    new = _surface(normalizer_version="payload_norm@2", keys=1_000, fetches=2_000,
+                   norm_changes=1_000, mean_raw_bytes=100_000.0, window_end=_NOW)
+    lines = rep._render_inventory_scaled([old, new], {"bazos": 50_000})
+    total_line = next(line for line in lines if line.startswith("TOTAL"))
+    assert "over 1 surface(s)" in total_line
+    assert "1 superseded cohort(s) excluded" in total_line
+    assert f"{float(new.gb_per_month(50_000) or 0.0):,.2f}" in total_line
+
+
+def test_the_probe_cohort_never_supersedes_the_passive_one_it_confirms() -> None:
+    passive = _surface(window_end=_NOW - datetime.timedelta(days=2))
+    probe = _surface(normalizer_version=probe_normalizer_version(), window_end=_NOW)
+    newest, superseded = rep.newest_cohorts([passive, probe])
+    assert sorted(s.row.normalizer_version for s in newest) == sorted(
+        [NORMALIZER_VERSION, probe_normalizer_version()]
+    )
+    assert superseded == []
+
+
 def test_a_surface_is_keyed_by_source_page_kind_and_normalizer_version() -> None:
     grouped = re.search(r"GROUP BY 1, 2, 3", rep._CHURN_SURFACE_SQL)
     assert grouped, "the aggregate must not collapse the three cohort columns"
@@ -381,14 +538,83 @@ def test_a_surface_is_keyed_by_source_page_kind_and_normalizer_version() -> None
 # --------------------------------------------------------------------- 6. plumbing
 
 
+def _projected_items() -> list[tuple[str, str]]:
+    """The OUTER SELECT's (expression, alias) pairs, in projection order.
+
+    The outer list is everything between the last `SELECT` before `FROM per_key` and that
+    `FROM` — the CTE's own SELECT and its aliases are on the other side of the split.
+    """
+    outer = rep._CHURN_SURFACE_SQL.rsplit("FROM per_key", 1)[0].rsplit("SELECT", 1)[1]
+    items: list[tuple[str, str]] = []
+    depth = 0
+    current = ""
+    for char in outer:
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+        if char == "," and depth == 0:
+            items.append(_split_alias(current))
+            current = ""
+            continue
+        current += char
+    items.append(_split_alias(current))
+    return items
+
+
+def _split_alias(item: str) -> tuple[str, str]:
+    expression, _, alias = item.rpartition(" AS ")
+    return " ".join(expression.split()), alias.strip()
+
+
 def test_the_row_reader_matches_the_statements_projection_order() -> None:
+    """The reader is POSITIONAL, so the SELECT's column order is a contract with it.
+
+    Asserting on the aliases alone would not be enough: swapping two same-typed
+    expressions under unchanged aliases (sum(raw_changes) <-> sum(norm_changes)) inverts
+    the raw-vs-normalised gap — the entire output of this instrument, and the thing
+    volatile_paths is decided from — while leaving valid SQL that PREPAREs and a passing
+    positional test. So the EXPRESSION is pinned to its alias too.
+    """
+    expected = [
+        ("source", "source"),
+        ("page_kind", "page_kind"),
+        ("normalizer_version", "normalizer_version"),
+        ("count(*)", "keys"),
+        ("count(DISTINCT artefact_key)", "artefacts"),
+        ("count(*) FILTER (WHERE fetches > 1)", "keys_repeated"),
+        ("coalesce(sum(fetches), 0)", "fetches"),
+        ("coalesce(sum(raw_changes), 0)", "raw_changes"),
+        ("coalesce(sum(norm_changes), 0)", "norm_changes"),
+        ("avg(last_byte_size::double precision)", "mean_raw_bytes"),
+        ("percentile_cont(0.5) WITHIN GROUP ( ORDER BY last_byte_size::double precision)",
+         "median_raw_bytes"),
+        ("avg(last_norm_byte_size::double precision)", "mean_norm_bytes"),
+        ("percentile_cont(0.5) WITHIN GROUP ( ORDER BY last_norm_byte_size::double"
+         " precision)", "median_norm_bytes"),
+        ("avg(refetch_interval_s)", "mean_interval_s"),
+        ("percentile_cont(0.5) WITHIN GROUP ( ORDER BY refetch_interval_s)",
+         "median_interval_s"),
+        ("min(first_seen_at)", "window_start"),
+        ("max(last_seen_at)", "window_end"),
+    ]
+    assert _projected_items() == expected
+    # ... and the reader unpacks exactly those aliases, in exactly that order.
+    assert [alias for _expr, alias in expected] == list(
+        rep.SurfaceRow.__dataclass_fields__
+    )
+
+
+def test_the_row_reader_places_every_value_in_its_declared_field() -> None:
     row = (
-        "bazos", "detail", NORMALIZER_VERSION, 10, 8, 30, 12, 3,
+        "bazos", "detail", NORMALIZER_VERSION, 10, 9, 8, 30, 12, 3,
         70_000.0, 68_000.0, 40_000.0, 39_000.0, 21_600.0, 21_600.0, _NOW, _NOW,
     )
+    assert len(row) == len(rep.SurfaceRow.__dataclass_fields__)
     surface = rep.surface_from_row(row)
     assert surface.row.source == "bazos"
     assert surface.row.keys == 10
+    assert surface.row.artefacts == 9
     assert surface.row.keys_repeated == 8
     assert surface.row.fetches == 30
     assert surface.row.raw_changes == 12
@@ -405,6 +631,26 @@ def test_the_assumption_block_states_every_constant_a_projection_rests_on() -> N
     assert f"month = {rep.DAYS_PER_MONTH:g} days" in block
     assert "UPPER BOUND" in block
     assert "fetches - keys" in block
+
+
+def test_the_assumption_block_names_the_cadence_the_projection_actually_uses() -> None:
+    """The declared constants are the INDEX-WALK schedule, and reading a GB/month figure
+    without knowing which cadence produced it is how a 72x error gets signed."""
+    block = "\n".join(rep._assumptions())
+    assert "OBSERVED refetch cadence" in block
+    assert "INDEX-WALK schedule" in block
+    assert "rule 19" in block
+    assert "ARTEFACTS" in block and "/{week}" in block
+    assert "newest" in block
+
+
+def test_the_json_assumptions_name_the_declared_cadence_for_what_it_is() -> None:
+    payload = rep.to_json(rep.Measurement(surfaces=[], active_inventory={}))
+    assumptions = payload["assumptions"]
+    assert "declared_cycles_per_day_is_the_index_walk" in assumptions
+    assert "cycles_per_day" not in assumptions, "the bare name read as the projection's"
+    assert assumptions["projection_cadence"].startswith("observed")
+    assert assumptions["index_keys_are_week_stamped"] is True
 
 
 def test_the_json_payload_is_serialisable_and_carries_the_corrected_denominator() -> None:

@@ -27,9 +27,11 @@ Three rails, none of them optional:
     cohort, so a cadence of minutes can never contaminate the passive readout the storage
     gate is signed from.
   * **Round-major, sequential, paced.** All keys in round 1, then all keys in round 2:
-    one listing is never hammered back-to-back, the spacing between a key's own fetches
-    is the length of a round, and a run that hits its wall-clock budget mid-round still
-    leaves every key with the same whole number of rounds behind it.
+    one listing is never hammered back-to-back, and the spacing between a key's own
+    fetches is the length of a round. A budget stop lands wherever the clock ran out —
+    between two fetches, so no key is left mid-fetch, but the keys already visited in
+    that round do carry one more fetch than the rest. The readout is exact under that:
+    its denominator is `sum(fetches) - keys`, computed per key, never rounds x keys.
 
 Usage:
   python -m scripts.location_payload_refetch_probe --source bazos
@@ -44,6 +46,7 @@ import importlib
 import json
 import logging
 import os
+import random
 import sys
 import time
 import uuid
@@ -83,9 +86,11 @@ DEFAULT_ROUNDS = 3
 PROBE_RATE_PER_S = 1.0
 
 # 200 x 3 at 1 req/s is ~10 min per portal, so the nine-portal sweep does not fit one
-# job. The budget stops the run cleanly between fetches (never mid-round for a key that
-# has already been counted) and the workflow's 55-minute ceiling stays a backstop, not
-# the mechanism.
+# job. The budget stops the run cleanly BETWEEN fetches — never mid-fetch, and never
+# starting a request whose pacing would carry it past the deadline — and the workflow's
+# 55-minute ceiling stays a backstop, not the mechanism. It does NOT stop on a round
+# boundary: an interrupted round leaves its earlier keys one fetch ahead of its later
+# ones, which the readout handles exactly (per-key denominator, see probe_rounds).
 DEFAULT_MAX_SECONDS = 2_700
 
 PAGE_KIND = "detail"
@@ -115,6 +120,11 @@ PROBE_CLIENTS: dict[str, tuple[str, str]] = {
 # db.upsert_portal_raw_page, which sniffs — so the probe sniffs for them too, and the
 # two paths hash the same projection of the same bytes.
 JSON_CONTENT_TYPE = "application/json"
+
+# Its own generator, so seeding `random` elsewhere cannot make a blank dispatch
+# deterministic again (which is the whole failure mode this exists to avoid), and so a
+# test can hand in a seeded one.
+_ORDER_RNG = random.Random()
 
 KIND_OK = "ok"
 KIND_GONE = "gone"
@@ -226,6 +236,12 @@ def probe_rounds(
 
     `record` returns whether the row was written, so a write failure is counted without
     being able to abort the pass that is already paid for in requests.
+
+    The budget returns from inside the per-key loop, so a stopped run leaves UNEQUAL
+    round counts across the sample (`rounds_completed` reports only whole rounds). That
+    is fine and deliberate: the readout's denominator is `sum(fetches) - keys`, summed
+    over per-key counters, which is exact whatever the shape of the tail — whereas
+    finishing the round would mean spending requests the operator's budget said stop at.
     """
     counts = ProbeCounts(keys=len(keys))
     live = list(keys)
@@ -476,11 +492,20 @@ def run(
     return results
 
 
-def parse_sources(raw: str) -> list[str]:
-    """Comma-separated portals, or every portal the instrument covers."""
+def parse_sources(raw: str, *, rng: random.Random = _ORDER_RNG) -> list[str]:
+    """Comma-separated portals in the order given, or every portal in a SHUFFLED order.
+
+    A blank dispatch asks for all nine, which is ~90 minutes of paced fetching against a
+    45-minute budget — it will always truncate. Walking `PROBE_CLIENTS` in insertion order
+    would then spend every repeat of that dispatch on the same first three portals and
+    never reach the last three, however many times it is run; shuffling makes repeated
+    blank dispatches cover the fleet. An explicit list is left in the operator's order.
+    """
     names = [name.strip() for name in raw.split(",") if name.strip()]
     if not names:
-        return list(PROBE_CLIENTS)
+        shuffled = list(PROBE_CLIENTS)
+        rng.shuffle(shuffled)
+        return shuffled
     unknown = [name for name in names if name not in PROBE_CLIENTS]
     if unknown:
         raise ValueError(f"unknown source(s): {', '.join(unknown)}")
@@ -490,7 +515,8 @@ def parse_sources(raw: str) -> list[str]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="200 x 3 payload refetch probe")
     parser.add_argument("--source", default="",
-                        help="comma-separated portals; blank = all nine.")
+                        help="comma-separated portals, tried in the order given; blank = "
+                             "all nine in a shuffled order (more than one job's budget).")
     parser.add_argument("--listings", type=int, default=DEFAULT_LISTINGS)
     parser.add_argument("--rounds", type=int, default=DEFAULT_ROUNDS)
     parser.add_argument("--rate-per-s", type=float, default=PROBE_RATE_PER_S)
@@ -519,6 +545,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.rate_per_s <= 0:
         print("ERROR: --rate-per-s must be positive.", file=sys.stderr)
         return 2
+    LOG.info("PROBE sweep order: %s", ", ".join(sources))
 
     kwargs: dict[str, Any] = {
         "listings": args.listings,
@@ -538,14 +565,22 @@ def main(argv: list[str] | None = None) -> int:
         return _report(results, as_json=args.json)
 
     with db.connect() as conn:
-        with lease.held(
-            conn, JOB_NAME, cadence=CADENCE, concurrency_group=CONCURRENCY_GROUP,
-            ttl_seconds=LEASE_TTL_S,
-        ) as acquired:
-            if not acquired:
-                LOG.info("PROBE skipped: another run holds the %s lease", JOB_NAME)
-                return 0
+        if args.dry_run:
+            # NO LEASE on a dry run. It issues no request, so there is nothing to
+            # serialise against — and taking the lane's lease would release it as `ok`
+            # and stamp location_jobs.last_success_at, so the location_jobs_stale
+            # monitor (migration 384) would read a lane that fetched nothing as healthy.
+            LOG.info("PROBE dry run: not taking the %s lease", JOB_NAME)
             results = run(conn, sources, **kwargs)
+        else:
+            with lease.held(
+                conn, JOB_NAME, cadence=CADENCE, concurrency_group=CONCURRENCY_GROUP,
+                ttl_seconds=LEASE_TTL_S,
+            ) as acquired:
+                if not acquired:
+                    LOG.info("PROBE skipped: another run holds the %s lease", JOB_NAME)
+                    return 0
+                results = run(conn, sources, **kwargs)
     return _report(results, as_json=args.json)
 
 

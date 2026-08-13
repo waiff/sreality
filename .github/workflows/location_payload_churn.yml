@@ -36,7 +36,7 @@ on:
           - probe
           - probe_then_report
       source:
-        description: "probe only — comma-separated portals (blank = all nine, which will not fit one job)"
+        description: "probe only — comma-separated portals, tried in order (blank = all nine SHUFFLED; more than one job's budget, so repeat the dispatch to cover the fleet)"
         required: false
         default: ""
         type: string
@@ -85,8 +85,10 @@ jobs:
     concurrency:
       # INNER, per-lane: two probes would double every portal's request rate and
       # fight over the same location_jobs lease row. Never cancel in flight — a
-      # cancelled probe leaves its keys with unequal round counts, which is the
-      # one shape the readout cannot correct for.
+      # cancelled probe spends its requests and then strands the lease until its
+      # TTL expires, locking the lane out of a re-dispatch for an hour. (Unequal
+      # round counts are NOT a reason: the readout's denominator is per key,
+      # sum(fetches) - keys, which is exact under any tail.)
       group: location-payload-churn
       cancel-in-progress: false
     timeout-minutes: 55
@@ -116,17 +118,20 @@ jobs:
           MAX_SECONDS: ${{ inputs.max_seconds }}
           DRY_RUN: ${{ inputs.dry_run }}
           JSON_OUTPUT: ${{ inputs.json_output }}
+        # A bash ARRAY, not a string: an unquoted "$ARGS" word-splits, so the
+        # natural typing `bazos, idnes` (with the space) would reach argparse as
+        # `--source bazos,` plus a stray positional `idnes` and waste the dispatch.
         run: |
-          ARGS=""
-          if [ -n "$SOURCE" ]; then ARGS="$ARGS --source $SOURCE"; fi
-          if [ -n "$LISTINGS" ]; then ARGS="$ARGS --listings $LISTINGS"; fi
-          if [ -n "$ROUNDS" ]; then ARGS="$ARGS --rounds $ROUNDS"; fi
-          if [ -n "$RATE_PER_S" ]; then ARGS="$ARGS --rate-per-s $RATE_PER_S"; fi
-          if [ -n "$MAX_SECONDS" ]; then ARGS="$ARGS --max-seconds $MAX_SECONDS"; fi
-          if [ "$DRY_RUN" = "true" ]; then ARGS="$ARGS --dry-run"; fi
-          if [ "$JSON_OUTPUT" = "true" ]; then ARGS="$ARGS --json"; fi
-          echo "python -m scripts.location_payload_refetch_probe $ARGS"
-          python -m scripts.location_payload_refetch_probe $ARGS
+          ARGS=()
+          if [ -n "$SOURCE" ]; then ARGS+=(--source "$SOURCE"); fi
+          if [ -n "$LISTINGS" ]; then ARGS+=(--listings "$LISTINGS"); fi
+          if [ -n "$ROUNDS" ]; then ARGS+=(--rounds "$ROUNDS"); fi
+          if [ -n "$RATE_PER_S" ]; then ARGS+=(--rate-per-s "$RATE_PER_S"); fi
+          if [ -n "$MAX_SECONDS" ]; then ARGS+=(--max-seconds "$MAX_SECONDS"); fi
+          if [ "$DRY_RUN" = "true" ]; then ARGS+=(--dry-run); fi
+          if [ "$JSON_OUTPUT" = "true" ]; then ARGS+=(--json); fi
+          echo "python -m scripts.location_payload_refetch_probe ${ARGS[*]}"
+          python -m scripts.location_payload_refetch_probe "${ARGS[@]}"
 
       - name: Read out the churn instrument
         if: inputs.mode == 'report' || inputs.mode == 'probe_then_report'
@@ -134,7 +139,7 @@ jobs:
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
           JSON_OUTPUT: ${{ inputs.json_output }}
         run: |
-          ARGS=""
-          if [ "$JSON_OUTPUT" = "true" ]; then ARGS="$ARGS --json"; fi
-          echo "python -m scripts.location_payload_churn_report $ARGS"
-          python -m scripts.location_payload_churn_report $ARGS
+          ARGS=()
+          if [ "$JSON_OUTPUT" = "true" ]; then ARGS+=(--json); fi
+          echo "python -m scripts.location_payload_churn_report ${ARGS[*]}"
+          python -m scripts.location_payload_churn_report "${ARGS[@]}"

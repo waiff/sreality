@@ -19,7 +19,9 @@ pinned is its POLITENESS and its BLAST RADIUS, both without a socket:
 from __future__ import annotations
 
 import ast
+import contextlib
 import json
+import random
 import re
 from pathlib import Path
 from typing import Any
@@ -448,9 +450,47 @@ def test_the_lane_takes_a_lease_row_and_never_an_advisory_lock() -> None:
     assert probe.JOB_NAME == "location_payload_refetch_probe"
 
 
+def test_a_dry_run_takes_no_lease_so_it_cannot_stamp_the_lane_healthy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`lease.held` releases as 'ok' and stamps location_jobs.last_success_at, so a dry
+    run that took the lease would make the location_jobs_stale monitor (migration 384)
+    read a lane that fetched nothing as healthy — and `--dry-run` promises no writes."""
+    taken: list[str] = []
+
+    @contextlib.contextmanager
+    def _held(conn: Any, job_name: str, **kwargs: Any) -> Any:
+        taken.append(job_name)
+        yield True
+
+    monkeypatch.setenv("SUPABASE_DB_URL", "postgresql://unused/db")
+    monkeypatch.setattr(probe.lease, "held", _held)
+    monkeypatch.setattr(probe.db, "connect", lambda: contextlib.nullcontext(_FakeConn()))
+    monkeypatch.setattr(probe, "run", lambda conn, sources, **kwargs: {})
+
+    assert probe.main(["--dry-run", "--source", "bazos"]) == 0
+    assert taken == []
+    # ... and a real run still does take it.
+    assert probe.main(["--source", "bazos"]) == 0
+    assert taken == [probe.JOB_NAME]
+
+
 def test_the_sample_read_is_bounded_by_a_transaction_local_timeout() -> None:
     assert "loader_db.bounded(conn, statement_timeout_s)" in _SOURCE
     assert probe.DEFAULT_STATEMENT_TIMEOUT_S > 0
+
+
+def test_the_workflow_passes_its_inputs_as_a_bash_array_not_a_split_string() -> None:
+    """`--source "bazos, idnes"` (a space after the comma, the natural typing) would
+    word-split out of an unquoted "$ARGS" into `--source bazos,` plus a stray positional
+    `idnes`, and argparse would reject the whole dispatch."""
+    text = _WORKFLOW.read_text(encoding="utf-8")
+    assert "ARGS=()" in text
+    assert 'ARGS+=(--source "$SOURCE")' in text
+    assert 'python -m scripts.location_payload_refetch_probe "${ARGS[@]}"' in text
+    assert 'python -m scripts.location_payload_churn_report "${ARGS[@]}"' in text
+    assert 'ARGS=""' not in text
+    assert not re.search(r"python -m scripts\.\S+ \$ARGS", text)
 
 
 def test_the_workflow_is_dispatch_only_and_cannot_fire_itself() -> None:
@@ -482,9 +522,27 @@ def test_the_default_budget_finishes_inside_the_jobs_ceiling() -> None:
 
 def test_an_unknown_source_is_rejected_before_a_single_request() -> None:
     assert probe.parse_sources("bazos,idnes") == ["bazos", "idnes"]
-    assert probe.parse_sources("") == list(probe.PROBE_CLIENTS)
+    assert sorted(probe.parse_sources("")) == sorted(probe.PROBE_CLIENTS)
     with pytest.raises(ValueError):
         probe.parse_sources("bazos,nosuchportal")
+
+
+def test_a_blank_dispatch_shuffles_so_repeats_do_not_burn_on_the_same_portals() -> None:
+    """A blank dispatch asks for nine portals — ~90 min of paced fetching against a
+    45-minute budget, so it ALWAYS truncates. In insertion order the last three portals
+    would then never be reached, however many times the operator repeats the dispatch."""
+    orders = {tuple(probe.parse_sources("")) for _ in range(40)}
+    assert len(orders) > 1, "a blank dispatch must not always walk the same order"
+    firsts = {order[0] for order in orders}
+    assert len(firsts) > 1
+    # Deterministic under an injected generator, so nothing here is flaky by design.
+    seeded = probe.parse_sources("", rng=random.Random(7))
+    assert seeded == probe.parse_sources("", rng=random.Random(7))
+    assert sorted(seeded) == sorted(probe.PROBE_CLIENTS)
+
+
+def test_an_explicit_source_list_keeps_the_operators_order() -> None:
+    assert probe.parse_sources("remax,bazos,idnes") == ["remax", "bazos", "idnes"]
 
 
 # ---------------------------------------------------------------------- fakes

@@ -2780,7 +2780,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
       },
       {
         "name": "source",
-        "description": "probe only — comma-separated portals (blank = all nine, which will not fit one job)",
+        "description": "probe only — comma-separated portals, tried in order (blank = all nine SHUFFLED; more than one job's budget, so repeat the dispatch to cover the fleet)",
         "required": false,
         "type": "string",
         "default": "",
