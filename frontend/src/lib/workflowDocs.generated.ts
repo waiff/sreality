@@ -2789,7 +2789,12 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "description": "The steady-state resolution lane of the location subsystem (design 03 §3.14.1). Without it a newly scraped listing gets claims and never gets a resolution — no row in listing_location_current, invisible to Browse, map, watchdog and dedup.",
     "portal": null,
     "manual": true,
-    "schedules": [],
+    "schedules": [
+      {
+        "cron": "*/15 * * * *",
+        "human": "Every 15 minutes"
+      }
+    ],
     "onPush": false,
     "onPullRequest": false,
     "paths": null,

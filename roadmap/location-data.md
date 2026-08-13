@@ -13,8 +13,8 @@ is the tie-breaker). This track records sequencing + shipped state only.
 | Wave | Scope | Status |
 | --- | --- | --- |
 | W0 "stop the bleeding" | 15 interim fixes + 2 measurements against the CURRENT system | 🟡 in progress (2026-08-10) |
-| W1 registry + claim spine (shadow) | full RÚIAN mirror, claims, resolutions, projection | 🟡 in progress — schema landed, loaders/writers next (apply still gated on the sizing pilot + A4) |
-| W1v bezrealitky vertical slice | one portal end-to-end + location-quality dashboard | ⚪ not started |
+| W1 registry + claim spine (shadow) | full RÚIAN mirror, claims, resolutions, projection | ✅ shipped 2026-08-12 (migrations 380–389 applied; shadow-only, no consumer reads it) |
+| W1v bezrealitky vertical slice | one portal end-to-end + location-quality dashboard | ⚪ next — gated on the per-portal frozen labelled samples (operator) |
 | W2a payload archive rewrite | append-on-change `portal_raw_payloads` | ⚪ not started (byte-churn measurement is the gate) |
 | W2–W6 | HTML re-mine, history backfill, refetch cohorts, LLM lane, serving flip | ⚪ not started |
 
@@ -71,269 +71,127 @@ is the tie-breaker). This track records sequencing + shipped state only.
   (Supabase plan/tier price — blocks W1 sizing), A5 (filter semantics default) —
   surfaced 2026-08-10 with written defaults.
 
-## W1 — in progress
+## W1 — shipped (registry + claim spine, shadow-only)
 
-- **PR-A the W1 schema** (migrations 380–384): every location enum + config seed
-  (380), the RÚIAN mirror (381), the claim spine + portal contracts (382),
-  resolutions + policy (383), the two serving projections + collision/ledger/ops
-  tables (384). Purely additive, backend-only (RLS on + explicit anon/authenticated
-  REVOKEs on every table, sequence and function), nothing reads or writes them yet.
-  `tests/location_data/test_location_schema_contracts.py` is the offline gate for
-  01 §A.2 (enum vocabularies, the forbidden `pin_collision_class IS NULL` form, no
-  ordinal enum comparison in a CHECK/index predicate/generated column, NOT NULL
-  axes on both projections, the three-artifact licence guard, `collision_epoch_id`
-  in the resolution identity, dispositions keyed on `dedupe_key`). Its corpus is
-  every location migration from 380 onward, not a frozen 380–384 list, so the
-  next migration is held to the same rules. §A.2 #2 is implemented here **only
-  for enum casts inside migrations**; the full source-tree literal scan lands
-  with the resolver PR, which is the first code to hold such literals.
-- h3-pg is NOT available on this instance: the stated fallback ships — the rounded
-  4-dp `location_geo_cell_key` with a MANDATORY 3×3 neighbourhood expansion at
-  query time. `h3_r10` stays a nullable additive upgrade slot.
-- **NOT YET APPLIED to production.** The migrations ship as files first; applying
-  them ahead of the merge is what produced the earlier prod/git drift. Apply after
-  merge, then verify.
-- Uncalibrated by design and flagged in the seeds themselves: `threshold_n`
-  (01 OQ3) and every R95 radius (01 OQ4, seeded as `geometric_bound`/`declared`,
-  never `r95_empirical`). Calibration writes a new `policy_version`. The invented
-  500/750/1000 m blur band is `geometric_bound` + `derivation='constant'`; only
-  the portals that genuinely publish a shape (maxima `Circle.radius`, sreality
-  `locality.geometry` bbox) get `derivation='declared_shape'` rows with
-  `r95_m` NULL — one row can never be both (01 §3.3.1).
-- **Erratum to the design corpus:** 00 §1.5 says the `uncertainty_radius_m` +
-  `radius_semantics` pair is NOT NULL "on the claim, the resolution, the
-  candidate and both projections". 01 §4.2 owns the DDL and wins: at claim grain
-  there is only a nullable `declared_radius_m` (a claim records what the portal
-  declared, and most declare nothing). The NOT NULL pair is real on the
-  resolution, the candidate and both projections. Recorded in migration 382 at
-  the column itself.
-- **PR-B RÚIAN loaders** (`location_data/`, writing migration 381's mirror tables):
-  the `KrovakPositive` value object with ONE audited WGS84 conversion on an
-  explicitly-chosen 1 m PROJ pipeline (the 6 m one is never used); streaming CSV
-  download/parse of both products (`strukt_ADR` + `OB_ADR`, all 19 columns, sha256 +
-  etag + last-modified per artefact); the baseline load (staging → blocking assertions
-  → pointer swap) writing one `registry_version` per load event; the boundary pack
-  loader with three geometries per unit; the gazetteer rebuild; and
-  `location_registry_load.yml` (dispatch `full|boundaries|deltas` + monthly cron,
-  concurrency group `location-registry`). The VFR daily-delta lane ships as
-  chain-verification only and **fails loudly** — see open question below.
-- **Boundary loader resilience** (fix, 2026-08-10): the first live `mode=boundaries` run
-  died 45 min into OBCE_P when its single session-pooler connection was dropped (SSL EOF at
-  obec 576069) and then reported "the connection is closed" from the discrepancy INSERT it
-  tried to write on that same dead handle. The per-unit loop now reconnects and retries a
-  unit once (budget `MAX_RECONNECTS=20` per run, then a loud abort), skips units whose
-  geometries are already committed for the current `registry_version` (one done-set query
-  per layer, so a re-dispatch always moves forward), and writes failure-path bookkeeping on
-  its own short-lived connection. ~477 obce from the failed run were durable and are
-  skipped on resume; the pack still needs a re-dispatch to completion.
-- Open: the daily VFR delta lane cannot apply deltas until the `ST_ZZSZ` element schema
-  and the `TypPrvkuKod` vocabulary are pinned down; until then freshness is the monthly
-  baseline (the design's own free degradation path).
-- **R2 Mapy affected-set inventory** (migration 385 + `scripts/location_mapy_inventory.py`
-  + dispatch-only `location_mapy_inventory.yml`), a W1 INPUT shipped ahead of the spine:
-  the five-arm set A materialised into
-  immutable evidence tables (`mapy_affected` / `_cache` / `_props`) — identity and reason
-  codes only, never a coordinate (06 §6.1.5 class-E carve-out). Arm 1 is a deliberate
-  superset: bazos `coords.source` ∈ {street, locality} counts as Mapy-derived per 06
-  §6.1.2 row 5. Arm 3 matches `listings.geom` against the ~1.3k cached coordinates on a
-  1e-5° cell grid with 3×3 expansion (no h3 on this instance). Still to run: dispatch it
-  to completion before the first claim is written.
+Landed 2026-08-10 → 2026-08-12 as five feature PRs plus seven fixes. **Migrations 380–389,
+all applied to production.** Everything is **shadow-only**: nothing outside `location_data/`
+reads a claim, a resolution or a projection — Browse, the map, the watchdog and dedup still
+run on `listings.geom` and the geo-derived admin columns. The consumer flip is W6.
 
-### PR-D — portal contracts as data + the claims-intake extractor
+| PR | Scope | Migrations |
+| --- | --- | --- |
+| #1009 | PR-A the W1 schema — every location enum + config seed, the RÚIAN mirror, the claim spine + portal contracts, resolutions + policy, the two serving projections + collision/ledger/ops tables. Additive, backend-only (RLS on + explicit `anon`/`authenticated` REVOKEs on every table, sequence and function) | 380–384 |
+| #1008 | The five-arm **R2 Mapy affected-set inventory** — a W1 *input*, shipped ahead of the spine: set A materialised into immutable evidence tables carrying identity and reason codes, never a coordinate (06 §6.1.5 class-E carve-out) | 385 |
+| #1010 | PR-B **RÚIAN loaders** — the `KrovakPositive` value object with ONE audited WGS84 conversion on an explicitly chosen 1 m PROJ pipeline, streaming CSV of both products (sha256 + etag + last-modified per artefact), baseline load (staging → blocking assertions → pointer swap) stamping one `registry_version`, boundary packs, gazetteer rebuild, `location_registry_load.yml` | — |
+| #1012 | PR-D **portal contracts as data** (9 YAML → `portal_contracts`/`_entries`, git stays the store of record) + the batched **claims-intake extractor** over `listings.raw_json` for all nine sources + its hourly cron | 386 `location_claim_fingerprint()`, 387 intake resume cursor |
+| #1013 | PR-E **the resolver** — S1–S9 as a pure function (no clock, no network, no randomness; AST-enforced), both projection builders, the collision-epoch producer, the `dirty_locations` drain, S9 reconciler v1 | 388 (review remediation) |
+| #1014–#1019, #1023 | Fixes — contract-projection Jsonb bind; boundary-loader reconnect/resume; drain throughput rounds 1 and 2; batch-lane hardening; contracts v2 coverage repair; byte-bounded claim writes | 389 (three registry indexes) |
 
-Shipped (shadow-only; nothing reads these tables yet):
+**Live state** (production, 2026-08-12):
 
-- `contracts/portals/<portal>.yaml` × 9 — the declarative contracts of 02 §2.1/§2.2, with
-  the permanent extractor-id prefixes (`sr. bzr. bzs. id. mm. rx. cr. rm. mx.`), the §2.4
-  caps/priors and the §2.5 exclusion-zone register. The full contract is declared,
-  including the W2 html/map/slug surfaces; only entries naming a `locator.reader` are
-  executable by W1.
-- `location_data/contracts.py` — YAML → `portal_contracts` + `portal_contract_entries`
-  deploy-time projection, idempotent per `contract_version`, refusing a changed body under
-  a loaded version, plus the §2.1.8 retraction path. Git stays the store of record.
-- `location_data/claims_intake.py` — the batched extractor over `listings.raw_json` for all
-  nine sources: keyset pagination, 10–30k batches, watermark-incremental and re-runnable
-  full mode, one `location_claim_batches` row per run, `dirty_locations` enqueued inside
-  the claim-insert statement.
-- **Migration 386** `location_claim_fingerprint()` — 01 §4.2.1's tuple as ONE named
-  IMMUTABLE function, so W2's re-mine, W3's snapshot backfill and the LLM lane reuse the
-  definition instead of re-transcribing it. `claim_fingerprint` carries a UNIQUE index on
-  an append-only table: a second transcription would not conflict, it would insert.
-- **Migration 387** the resume cursor on `location_claim_batches` (`scan_mode`,
-  `cursor_after_id/ts`, `coverage_since`, `resumable`, outcome `'stopped'`). `'ok'` now
-  means exactly "the scan ran out of rows"; a budget-stopped run stamps `'stopped'`, which
-  the watermark query cannot see. Before this a 30k-row budgeted run over a 650k-row table
-  moved the incremental floor past 620k rows it never opened — permanently for the ~270k
-  delisted ones, whose `last_seen_at` will never move again.
-- `.github/workflows/location_claims_intake.yml` — dispatch + hourly incremental cron on
-  its own `location-claims` concurrency group; every run re-projects the contracts first.
+- **Claims** — 4.03 M+ over 655 k listings; **zero** `ephemeral_display_only` rows persisted
+  and **zero** `claim_type='coordinate'` rows on the 57,204-listing Mapy inventory. The licence
+  ladder is holding structurally, not by convention.
+- **Resolutions** — 645 k+ with their candidates; the full corpus swept with **zero failed
+  listings**. Both projections (`listing_location_current`, `property_location_current`) are
+  built from them and the contradiction ledger is active.
+- **RÚIAN mirror** — registry version `ruian:2026-07-31`: **3,020,222** address points (golden-point
+  Křovák→WGS84 check **0.03 m** on the pinned PROJ pipeline), **20,034** polygonal units each
+  carrying three geometries (authoritative + subdivided pip + render), gazetteer **217,515** names.
+  Boundary packs resume through per-layer done-sets; monthly baseline cron + the boundaries lane.
+- **Contracts** — 9 portal YAMLs projected, **v2** for remax / ceskereality / realitymix; intake
+  runs hourly-incremental with byte-bounded chunked writes.
+- **Refetch cohort** — **38,612** sreality rows (legacy-shape or 80 KB-truncated payloads) parked
+  in `location_enrichment_state(lane='sreality_detail_refetch')`. **W4 work.**
 
-Decisions worth carrying forward:
+**Gate outcomes: final numbers in the W1 report.** The coverage, precision-distribution and
+replay gates were measured against the live corpus during the sweep; this track carries the
+sequencing, not the measurements.
 
-- **The licence ladder is stronger than `carry_forward`.** W1's blocking gate is
-  `claims JOIN <R2 inventory> WHERE claim_type='coordinate'` = 0, so presence in
-  `mapy_affected` vetoes a coordinate on **every** substrate, including the three portals
-  whose pin is first-party payload. The lane refuses to start unless that inventory is
-  TERMINAL AND COMPLETE — a `resumable` run at `status='completed'` in the current
-  `restart_epoch`, not merely `count(*) > 0`. A half-built inventory is worse than none:
-  every listing past its high-water mark reads as *absent*, which is precisely the verdict
-  that admits a Mapy-derived `carry_forward` coordinate as first-party.
-- **`claim_fingerprint` is computed in SQL**, from the same `location_value_norm()` the
-  column uses. PostgreSQL's `unaccent` is a dictionary (ß→ss, ø→o, đ→d …) and a Python NFKD
-  mirror drifts on exactly the foreign-address cohort — drift there means the unique index
-  stops deduping, silently, in an append-only table. A diagnostic mirror + a parity battery
-  keep the divergence documented.
+### Decisions worth carrying forward
+
+- **The licence ladder is stronger than `carry_forward`.** The blocking gate is
+  `claims JOIN <R2 inventory> WHERE claim_type='coordinate'` = 0, so presence in `mapy_affected`
+  vetoes a coordinate on **every** substrate, including the three portals whose pin is
+  first-party payload. The lane refuses to start unless that inventory is TERMINAL **and**
+  COMPLETE (a `resumable` run at `status='completed'` in the current `restart_epoch`, not merely
+  `count(*) > 0`) — a half-built inventory is worse than none, because every listing past its
+  high-water mark reads as *absent*, which is exactly the verdict that admits a Mapy-derived
+  coordinate as first-party.
+- **`claim_fingerprint` is computed in SQL**, from the same `location_value_norm()` the column
+  uses, wrapped as migration 386's IMMUTABLE `location_claim_fingerprint()` so W2's re-mine, W3's
+  snapshot backfill and the LLM lane reuse the definition instead of re-transcribing it.
+  PostgreSQL's `unaccent` is a dictionary (ß→ss, ø→o, đ→d …) and a Python NFKD mirror drifts on
+  exactly the foreign-address cohort — drift there means the unique index stops deduping,
+  silently, in an append-only table. A diagnostic mirror + a parity battery keep it documented.
+- **Legacy entries never burn a permanent extractor id.** 02 §2.2.3's ids are fixed on the W2
+  *HTML* parses; the raw_json / `listings.geom` mirrors of the same facts ship as
+  `bzs.det.legacy_psc` / `bzs.det.legacy_link_pin` / `id.det.legacy_pin`, so the two provenances
+  stay distinguishable in `location_claims.extractor_id` when W2 lands.
+- **Withheld coordinates and unreadable payloads are recorded, never silent** — a class-E row gets
+  a `location_claim_absences` row; sreality's legacy-shape / truncated rows are routed to the
+  refetch lane above.
+- **Contracts v2 was a coverage repair, not an edit** (2026-08-11). W1's gate is "≥99% of ACTIVE
+  listings carry ≥1 claim"; production measured 97.66% with realitymix, ceskereality and remax
+  owning 8,720 of the ~9,000 zero-claim rows. Entries are immutable (02 §2.1.8), so the fix was
+  three **version bumps**: `rx.det.legacy_display_address` (W0's 0d moved remax's subject header
+  and v1 only read the banned `/address`) and `rx./cr./rm..det.legacy_locality` (a new
+  `legacy_text_column` reader over `listings.locality`, capped at `claim_confidence='medium'` and
+  flagged `legacy_write_path_unknown` **from the contract**).
+- **Throughput was round trips, not indexes.** The drain went 3 s/listing → the current rate in
+  two rounds, and round 2 measured the floor: a GitHub-runner↔Frankfurt round trip prices at
+  **~75 ms** while the same registry questions cost **0.02–0.5 ms** server-side, so the rate was
+  `1 / (75 ms × trips)` and nothing else. The fixes were all I/O-layer, the pure core untouched
+  and replay still bit-for-bit: the session pooler (`connect_session`, with a logged fallback),
+  run-memoized registry + collision views, per-slice prefetch and warming, `executemany` writers,
+  and slice-batched writes (~10 statements per 250-listing slice, optimistic under one savepoint
+  with the per-listing SAVEPOINT path as the retry). Two genuine plan faults were fixed as query
+  *shapes*, not indexes — `cast_obce_for_point` 2,944 → 0.15 ms/point and `nearest_obec_within`
+  6,752 → 2.95 ms/point (`ST_DWithin(geom::geography, …)` cannot use the geometry GiST index).
+  From Actions the drain now runs at **~5–17 listings/s and is network-RTT-bound**; the remaining
+  order of magnitude is a placement on the always-on Railway worker (~1–2 ms RTT to the DB),
+  where every one of these fixes compounds. Per-query-KIND counters mean each run names its own
+  offenders (`BATCH n=… rate=…/s`, `BATCH queries …`, `DRAIN cache misses …`).
+- **h3-pg is NOT available on this instance** — the stated fallback shipped: the rounded 4-dp
+  `location_geo_cell_key` with a MANDATORY 3×3 neighbourhood expansion at query time. `h3_r10`
+  stays a nullable additive upgrade slot.
+- **Uncalibrated by design, and flagged in the seeds themselves:** `threshold_n` (01 OQ3) and
+  every R95 radius (01 OQ4, seeded `geometric_bound`/`declared`, never `r95_empirical`).
+  Calibration writes a new `policy_version`. Only portals that genuinely publish a shape (maxima
+  `Circle.radius`, sreality `locality.geometry` bbox) get `derivation='declared_shape'` rows with
+  `r95_m` NULL — one row can never be both (01 §3.3.1). A `declared_shape` row with no declared
+  shape **degrades** to the `'*'` row and then to the admin geometric bound; it never raises
+  (with the v1 seed it raised, and every sreality portal-pin listing resolving at `obec` /
+  `cast_obce_or_quarter` / `street` got no resolution at all — migration 388).
+- **Erratum to the design corpus:** 00 §1.5 says the `uncertainty_radius_m` + `radius_semantics`
+  pair is NOT NULL "on the claim, the resolution, the candidate and both projections". 01 §4.2
+  owns the DDL and wins: at claim grain there is only a nullable `declared_radius_m` (a claim
+  records what the portal declared, and most declare nothing). The NOT NULL pair is real on the
+  resolution, the candidate and both projections. Recorded in migration 382 at the column itself.
 - **W1 runs no evidence-bearing method.** `regex_text` / `llm_text` entries are declared but
   unexecuted until W2a's content-addressed payload store makes a span re-verifiable.
-- Withheld coordinates and unreadable payloads are recorded, never silent: a class-E row
-  gets a `location_claim_absences` row, and sreality's legacy-shape / 80 KB-truncated rows
-  are routed to `location_enrichment_state(lane='sreality_detail_refetch')`.
 
-- **Legacy entries never burn a permanent extractor id.** 02 §2.2.3 fixes
-  `bzs.det.psc` / `bzs.det.link_pin` on the W2 *HTML* parses; the raw_json/`listings.geom`
-  mirrors of the same facts ship as `bzs.det.legacy_psc` / `bzs.det.legacy_link_pin` (the
-  pattern `id.det.legacy_pin` set on idnes), so the two provenances stay distinguishable
-  in `location_claims.extractor_id` when W2 lands.
+### Open, carried forward
 
-**Coverage repair, contracts v2 (2026-08-11).** W1's gate is "≥99% of ACTIVE listings carry
-≥1 claim"; production measured **97.66%**, with realitymix (3,539), ceskereality (3,418) and
-remax (1,763) owning 8,720 of the ~9,000 zero-claim rows. Three contract **version bumps**
-(entries are immutable — 02 §2.1.8), no v1 entry edited:
-
-- `rx.det.legacy_display_address` — W0 0d moved remax's subject header into
-  `raw_json.display_address` (carousel value → `carousel_address`), and v1 only read the
-  banned `/address`, so every re-drained row went from one conflict signal to nothing. The
-  banned key stays `subject_scoped=false`.
-- `rx./cr./rm..det.legacy_locality` — 06 §6.1.3 class B via a new `legacy_text_column`
-  reader: `listings.locality` rides on the same keyset batch query as `raw_json`, capped at
-  `claim_confidence='medium'` and flagged `legacy_write_path_unknown` **from the contract**.
-  It reaches the rows whose payload carries `locality_text` PRESENT and NULL (a keyset
-  sample cannot tell those apart) — ceskereality's silent-parse cohort and realitymix's
-  backfill-synthesised one, where the deviation from `rm.det.locality_text`'s class-D note
-  is recorded in the entry itself rather than hidden.
-
-Expected: ~99.9% coverage after the next projection + intake re-run (both post-merge).
-
-Open: the per-portal frozen labelled samples of §6.4.0, which gate whether each contract
-resolves or stays in shadow. Closed in this round: the fingerprint is now migration 386's
-`location_claim_fingerprint()`, and `location_data` is in `tests/sql_corpus.RUNTIME_DIRS`
-(so the offline placeholder guard and the CI PREPARE sweep both cover the package).
-
-### PR-E — the resolver, the projections and the collision epoch
-
-`location_data/resolver/` — S1–S9 as a **pure function** plus the three jobs that feed it.
-
-- **S1–S7 pure core** (`normalize`/`country`/`candidates`/`position`/`admin`/`precision`/
-  `survivorship`, orchestrated by `core.resolve`): no wall clock (`as_of = max(observed_at)`),
-  no network, no randomness — enforced by an AST scan, not by review. The candidate ladder
-  R0–R8 runs against a `RegistryView` PROTOCOL, so the whole core is runnable with no
-  database and the byte-identical replay gate is a normal pytest test.
-- **Five version inputs in the identity**, `collision_epoch_id` included, with a canonical
-  serialization + content hash stamped on the row.
-- **S8 builders** for both projections, with the canonical class-aware `geo_blockable` /
-  `renderable_as_point` and a parity test against migration 384's IMMUTABLE SQL functions;
-  property grain is a reconciliation over children with mandatory disagreement columns —
-  a precise child can never lose to a centroid child.
-- **Collision-epoch producer** (`collision` + `epoch_job`): rounded 4-dp cells with the
-  mandatory 3×3 expansion (h3-pg unavailable), the six-value classification, and
-  bucket-change-only re-enqueue.
-- **`dirty_locations` drain** (`drain`): `FOR UPDATE SKIP LOCKED` slices, one transaction
-  per batch with a per-listing savepoint, lease-row CAS on `location_jobs`, judged by
-  oldest-row age. `.github/workflows/location_resolve.yml` (drain | epoch | full-resolve,
-  concurrency group `location-resolve`). The `*/15` cron is **removed for the duration of
-  the W1 backfill** — the outer `location-batch` group holds one pending slot, so a tick
-  superseded the backfill driver's own next dispatch while adding nothing to a 630 k queue.
-  It returns at steady state, or when the always-on worker lane takes the cadence over.
-- **Drain throughput** (follow-up): the first production drain did **~3 s per listing** —
-  ~28 h for the 34 k queue, ~23 days for the corpus — because the cost is pooler ROUND TRIPS
-  (~35 statements per listing), not work. Four I/O-layer fixes, none of which touch the pure
-  core (replay stays bit-for-bit, tested): the drain takes the **session pooler**
-  (`connect_session`, so the recurring statements are server-side prepared once, with a
-  logged fallback), the registry + collision views are **memoized for the run** (both mirrors
-  are immutable at a pinned version), the four per-listing reads are **prefetched per slice**
-  (`location_disputed` excepted — it is a read-your-writes read of the contradictions the run
-  just wrote), and the per-candidate/detection/disposition writers use `executemany`. A warm
-  listing now costs ~11 statements instead of ~35. Defaults: slice 50 → 250, dispatch budget
-  600 s → 2400 s (cron keeps 600 s), workflow timeout 30 → 60 min. Every batch logs its own
-  `BATCH n=… rate=…/s` + phase split, so the next production run measures itself. No
-  `--workers`: `_rebuild_property` is a cross-listing write two workers would race.
-- **Batch-lane hardening** (follow-up, after the 2026-08-10 incident): the four heavy
-  location lanes share the outer `location-batch` concurrency group; the boundary loader's
-  per-unit transaction, the drain's between-batch statements and the intake's failure stamp
-  all arm a bounded `SET LOCAL statement_timeout`; and the drain's two worst registry
-  lookups were query-shape faults, not missing indexes — `address_points_by_number` and
-  `cast_obce_extent_m` addressed `obec_kod` / `cast_obce_kod`, neither of which is indexed,
-  while `ruian_ap_obec_hn` / `ruian_ap_cast_obce` sit on the `*_unit_id` twins (21,494 ms →
-  424 buffers, and 5,059 ms → 167 buffers, measured live). `containing_obec`'s
-  `purpose IN ('pip','authoritative')` defeated the partial pip GiST index; two branches
-  under one LIMIT restore it. Migration **389** adds the three indexes no rewrite can
-  replace (gazetteer name equality, PSC→obec covering, street name equality) — **filed, not
-  yet applied**: two build over 3.02 M rows and want a quiet instance.
-- **Drain throughput, round 2** (follow-up): round 1 left the drain at **0.8 listings/s**
-  (production run 31480587021: 2,750 in 3,366 s), and round 2 measured WHY. The run spent
-  225 ms per listing on three statements with no server-side work at all — SAVEPOINT,
-  RELEASE SAVEPOINT, one DELETE by primary key — which prices a GitHub-runner↔Frankfurt
-  round trip at **~75 ms**, while the same registry questions cost **0.02-0.5 ms**
-  server-side. The rate was `1 / (75 ms x ~16 trips per listing)` and nothing else, so no
-  index could have helped and none was added (no migration 390). Three I/O-layer fixes, the
-  pure core untouched and replay still bit-for-bit: **slice-batched writes** (compute split
-  from write; resolutions/candidates/contradictions/dispositions/projections/property
-  rebuilds become ~10 statements per 250-listing slice instead of ~7 per listing, optimistic
-  under ONE savepoint with the per-listing SAVEPOINT path as the retry), **per-slice warming**
-  of the five coordinate-keyed registry questions (that key is unique per listing by
-  construction — which is what the 62 % cache plateau actually was, not a too-narrow key),
-  and `admin_units_by_name` **keyed on the name alone** with the level narrowing moved into
-  Python (one name asked four ways was four round trips for one immutable answer). Two
-  genuine plan faults surfaced on the way and were fixed as query shapes:
-  `cast_obce_for_point` **2,944 → 0.15 ms/point** (an unbounded KNN walk of all 3.02 M
-  address points, plus a seq scan + Materialize of all 18,627 unit rows per call) and
-  `nearest_obec_within` **6,752 → 2.95 ms/point** (`ST_DWithin(geom::geography, …)` cannot
-  use the geometry GiST index, so every call cast all 127 k boundary rows — the state
-  polygon included — to geography). Both now carry an `&&` bbox the index takes as an Index
-  Cond. Per-query-KIND counters replace round 1's single aggregate, so the next run names
-  its own offenders (`BATCH queries …`, `DRAIN cache misses …`).
-- **S9 reconciler v1**: the cheap structural rules of 03 §3.11.1 into the append-only
-  ledger, keyed on the version-free `dedupe_key`; auto-close only when the predicate stops
-  firing AND the inputs changed — the inputs compared against the resolution the current
-  projection was built from, and scoped to the rules the run actually EVALUATED (a rule
-  whose guard never ran did not stop firing; it was not asked).
-
-Review remediation, same PR (migration **388**, additive):
-
-- **A `declared_shape` policy row with no declared shape DEGRADES, it never raises.** With
-  the shipped v1 seed every sreality portal-pin listing resolving at `obec` /
-  `cast_obce_or_quarter` / `street` hit `UncertaintyPolicyError` in S4 and got no resolution
-  at all. The lookup now falls through to the `'*'` row and then to the admin geometric
-  bound. Regression tests read the seed out of migration 383, not out of the fixture — the
-  fixture has no per-source rows, which is why nothing caught it.
-- **Admissibility is evaluated ONCE**, in `core.resolve`, and handed to S3 and S4 as well as
-  S7. A `subject_scoped=false` carousel claim used to rank a candidate, carry the admin
-  chain and then flow back out through the preserve-if-null registry fill. It is still
-  stored and still opens `street_from_excluded_block_vs_served`.
-- **The pin is chosen by declared quality, then by claim id** — not "lowest id wins". Every
-  losing coordinate is persisted as a candidate with `distance_to_pin_m` and its own
-  rejection reason, and a blurred sibling no longer blurs the pin it lost to.
-- **Typed slots are unwrapped by claim TYPE**, so a combined `487/40` reaching
-  `house_number_cp` no longer lands in the column verbatim (03 §3.3.2).
-- **`--sources` can no longer mint an epoch** (it forces a dry-run): the minted epoch becomes
-  THE epoch for every portal, so a subset epoch silently drops the unselected sources'
-  evidence. Both epoch reads now join `listings` and filter `is_active`.
-- `declared_precision_vs_assigned` is tested against the rung S6 was HANDED (comparing the
-  post-cap rung could never fire); the `>= threshold` reading of 03 §3.8.4 is now the same
-  in the epoch classifier, the S6 cap and S9; the queue slice orders by
-  `(enqueued_at, listing_id)`; the survivorship sort key uses the canonical UTC convention
-  rather than `datetime.timestamp()` on a naive value.
-- **Migration 388**: `listing_location_current.position_quality_class` +
-  `collision_epoch_id` (03 §3.10's two change requests — the builder computed both and the
-  writer popped them), and the five `location_field_policy` v1 rows S7 arbitrates but the
-  383 seed never had (`evidencni`, `postal_town`, `development_name`,
-  `cadastral_territory_name`, `parcel_number`, all structurally unwinnable without one).
-  S7's own `blocked` set now travels on the resolution and is logged by the drain.
-
-Open against the schema: `location_uncertainty_policy` has no seed row for a pin capped to
-an admin rung, which the lookup resolves to the unit's own area bound. (The earlier `pip`
-item is closed — migration 381 admits the purpose; the resolver prefers `'pip'` rows and
-degrades to `'authoritative'` until the boundary loader populates them.)
+- **The per-portal frozen labelled samples (n ≥ 100/portal) are the gate on W1v's value** — they
+  decide whether each contract resolves or stays in shadow. Operator work, not yet started.
+- **Operator items:** **A1** (ČÚZK helpdesk) — letter drafted, awaiting send. **A5** (filter
+  semantics default) — still undecided, and it is a serving-layer decision W6 needs. **A2**
+  (quarterly licence review) standing. **A4** (Supabase plan/tier) no longer blocks: W1 is applied
+  and living inside the current instance.
+- **Q11 `stavebni_objekt`** — open. **Q17** ceskereality's `exact` map-endpoint flag is still the
+  one true W0 signal gap (new endpoint, deferred per the plan's implementation order).
+- The **VFR daily-delta lane** ships as chain-verification only and fails loudly: it cannot apply
+  deltas until the `ST_ZZSZ` element schema and the `TypPrvkuKod` vocabulary are pinned down.
+  Until then freshness is the monthly baseline — the design's own free degradation path.
+- `location_uncertainty_policy` has no seed row for a pin capped to an admin rung; the lookup
+  resolves it to the unit's own area bound. (The earlier `pip` item is closed — migration 381
+  admits the purpose; the resolver prefers `'pip'` rows and degrades to `'authoritative'`.)
+- The `*/15` **resolve cron is restored** now that the backfill is done. It was removed for the
+  duration: the outer `location-batch` group holds ONE pending slot and GitHub supersedes the
+  older pending entry, so while the backfill driver dispatched back-to-back runs a tick displaced
+  the driver's own next dispatch while adding nothing to a queue it was draining from the same
+  front.
 
 ## Standing decisions
 
