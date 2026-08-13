@@ -655,6 +655,52 @@ def test_dispositions_key_on_dedupe_key():
     ), "location_contradictions must keep its version-tuple UNIQUE"
 
 
+def _last_view_body(sql: str, name: str) -> str:
+    """The definition a replay leaves standing: the corpus is every location migration
+    concatenated, so the LAST `create [or replace] view <name>` wins."""
+    body = sql[sql.rindex(f"view {name} as"):]
+    return body[:body.index(";")]
+
+
+def test_the_contract_header_carries_the_shadow_gate():
+    """06 section 6.4.0(2): a contract that cannot meet its frozen-sample precision floors
+    ships in SHADOW — claims written, excluded from resolution. The flag is header state
+    (migration 404), and `location_claims_live` — the one relation 03 reads (A.2 check 9) —
+    is where it is enforced, so no resolver read can forget to ask."""
+    sql = _clean()
+    assert re.search(
+        r"alter table portal_contracts\s+add column (if not exists )?shadow\s+"
+        r"boolean not null default false", sql), (
+        "portal_contracts.shadow must be a NOT NULL DEFAULT false header column")
+    view = _last_view_body(sql, "location_claims_live")
+    assert "pc.shadow" in view, (
+        "location_claims_live must exclude shadowed contracts; enforcing shadow anywhere "
+        "else leaves every future resolver read to remember it")
+    # The retraction predicate composes with the shadow one rather than being replaced by
+    # it — reached through the relation that states it once, not restated per consumer.
+    assert "location_claims_unretracted" in view, (
+        "the shadow predicate must COMPOSE with the retraction predicate, not replace it")
+    assert "location_claim_retractions" in _last_view_body(
+        sql, "location_claims_unretracted")
+
+
+def test_the_shadowed_claims_stay_readable_for_scoring():
+    """A contract is un-shadowed only once its frozen labelled sample clears the floors
+    (06 section 6.4.0(2)), so a shadowed contract that nothing can read is a one-way door.
+    `location_claims_shadow` is the exact complement of the live view's shadow predicate:
+    same source relation, same join, opposite quantifier."""
+    sql = _clean()
+    live = _last_view_body(sql, "location_claims_live")
+    shadow = _last_view_body(sql, "location_claims_shadow")
+    for body in (live, shadow):
+        assert "from location_claims_unretracted" in body
+        assert "pce.id = u.contract_entry_id and pc.shadow" in body
+    assert "where not exists" in live
+    assert "not exists" not in shadow, (
+        "location_claims_shadow must be the complement (EXISTS), or a claim can fall "
+        "through both relations and be invisible to the resolver AND the scorer")
+
+
 def _revoked_roles(sql: str, head: str) -> set[str] | None:
     """Roles named by the REVOKE whose head matches `head`, or None if there is
     no such REVOKE. A REVOKE that names the wrong roles is worse than none: it

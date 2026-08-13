@@ -1078,9 +1078,27 @@ baseline — the VFR daily-delta lane ships as chain-verification only and fails
 **Portal contracts are data; git stays the store of record.** `contracts/portals/<portal>.yaml` × 9
 declares every extractor (permanent id, surface, licence class, caps, priors, exclusion zones) and
 `location_data/contracts.py` projects them into `portal_contracts`/`portal_contract_entries`,
-idempotent per `contract_version`, refusing a changed body under a loaded version. **Entries are
-immutable** — a fix is a version bump, never an edit, so a claim's `extractor_id` always names the
-rule that produced it. Hence no per-portal branch in the intake: a new signal is a YAML entry, not code.
+idempotent per `contract_version`, refusing a changed body under a loaded version. An unknown
+top-level YAML key is a refusal, not a shrug — every key in this format fails OPEN when misspelled.
+**Entries are immutable** — a fix is a version bump, never an edit, so a claim's `extractor_id` always
+names the rule that produced it. Hence no per-portal branch in the intake: a new signal is a YAML
+entry, not code.
+
+The header carries **two mutable columns and no more**: `is_active` (which version the extractor runs)
+and `shadow` (whether what it mined is admissible to the resolver yet, migration 404). **Shadow is the
+W2 gate**: a contract that cannot meet its frozen-sample precision floors merges dark — claims mined,
+stored and auditable, but excluded from `location_claims_live` — so a failing gate has somewhere to
+land that is not "revert the branch". Three relations, one predicate each: `location_claims_unretracted`
+states the retraction predicate once, and `location_claims_live` (resolver) and `location_claims_shadow`
+(scorer) partition it. The scorecard reads the shadow relation
+(`toolkit/location_labels.score_shadow_claims`, `/location/sample/{source}/score-shadow`) — without a
+read path the un-shadow gate would be unsatisfiable. Flipping the flag (`--shadow` / `--unshadow`)
+**enqueues the contract's listings into `dirty_locations`** in the same transaction: the view flips
+instantly but `listing_location_current` is rebuilt only by the drain, and neither the intake (new
+claims only) nor the daily sweep (version-tuple predicate) would ever re-queue them. The enqueue is
+unconditional, like the operator-correction lane, so a re-run after a failed drain is never a dead
+button. `shadow` is excluded from `contract_sha256` — it is operational state, so editing it in git is
+not a `contract_version` bump (and a bump would re-shadow the contract, discarding the passed sample).
 
 **Ops rules the incidents wrote.** All four heavy lanes — registry load, claim intake, Mapy inventory,
 resolve — share the OUTER `location-batch` concurrency group so **at most one runs at a time** (each

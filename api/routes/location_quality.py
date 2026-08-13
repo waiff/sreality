@@ -122,6 +122,15 @@ def score_sample(source: str, conn: Any = Depends(deps.get_db_conn)) -> dict[str
     return location_labels.score_sample(conn, _check_source(source))
 
 
+@router.get("/sample/{source}/score-shadow")
+def score_shadow(source: str, conn: Any = Depends(deps.get_db_conn)) -> dict[str, Any]:
+    """The same frozen sample scored against a SHADOWED contract's own claims (W2,
+    migration 404). `/score` measures what is served; a shadowed contract is excluded
+    from serving by construction, so this is the only surface that can decide whether
+    it may be un-shadowed."""
+    return location_labels.score_shadow_claims(conn, _check_source(source))
+
+
 class CorrectionIn(BaseModel):
     listing_id: int
     claim_type: str
