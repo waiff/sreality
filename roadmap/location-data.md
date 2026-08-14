@@ -338,6 +338,36 @@ all closed, several proven against a throwaway PostgreSQL 18 built from `.deb` f
 - **W2a-3b measured volatile profiles**: `scripts/location_payload_diff_probe.py` +
   evidence-derived profiles for idnes / ceskereality / realitymix, `payload_norm@2`. Table
   and residue below.
+- **W2a-4 the backfill + round-trip verifier** (#1059): `location_data/payload_backfill.py`
+  (keyset-resumable, 445,191 `portal_raw_pages` rows → `portal_raw_payloads`, never dispatched)
+  + `scripts/location_payload_roundtrip_verify.py` (1,000-row byte-for-byte compare, 06 W2a
+  gate (a)). Review found and fixed three real gaps before merge: `sample_ids()` silently
+  under-sampled by up to 97 % on a source-scoped draw (now an exact uniform id-space sample
+  with a loud shortfall report); the success-path finalize stamp ran unguarded and could strand
+  a batch row at `'running'` forever; re-dispatching after a `NORMALIZER_VERSION` bump would
+  have created permanent, un-prunable duplicate rows (now refuses without `--force`). Dispatch-
+  only workflow, never triggered.
+- **W2a-5 the P4 pruner** (#1063): version-cap re-assertion plus a genuinely new time-based
+  hot-window eviction (`LOCATION_PAYLOAD_HOT_WINDOW_DAYS`, placeholder pending operator
+  sign-off — 02 leaves the window undefined), scoped exclusively to `portal_raw_payloads`.
+  Ships with a live weekly cron (Sun 04:00), but the `location_jobs` row is seeded
+  `enabled=false` **before** any lease attempt — `lease.held()`'s own upsert defaults
+  `enabled=true`, and review caught that assumption before it shipped as a pruner that would
+  have self-enabled behind a live cron. The disabled path is proven inert by a
+  recording-connection test asserting the exact statement list (a seed and a flag read, no
+  `portal_raw_payloads` touch, no `DELETE`).
+- **W2a-6 the index-coverage audit** (#1062): `scripts/location_index_archive_audit.py` +
+  a second flag, `payload_index_archive` (baked default False), so index writes can be
+  enabled separately from detail. Reports three axes per portal — what the contract declares,
+  what the code actually does, what `portal_raw_pages`/`portal_raw_payloads` show — and found
+  real drift: bezrealitky declares `archive: true` with no call site; ceskereality mines an
+  index claim off a fetch surface its own contract never declares. Confirms live what the
+  "First before/after" table below quantifies: sreality/remax/ceskereality's index archivers
+  are `gated`, not wired — the freshness pre-filter suppresses the archive on any key still
+  inside its refresh window, silently, which is why the index-surface numbers below have never
+  been measured against a working archive. Also closed a real hole in the flag split itself:
+  `map`/`gazetteer` page kinds (already declared `archive: true` by two live contracts) would
+  have archived on `payload_dual_write` alone, bypassing the second gate entirely.
 - **W2-3 the exclusion-zone scoper** (#1053): D7's security boundary — strips every declared
   exclusion zone before any extraction selector runs. **Hard precondition for every per-portal
   contract PR**; without it the deterministic re-miner re-imports at 445k-page scale exactly the
@@ -495,8 +525,9 @@ SHA; the names in `04e1db9a`). A history rewrite of `main` or a GitHub Support p
 only true removals; neither is engineering's call.
 
 **Not enabled, deliberately:** `payload_dual_write` and `payload_index_archive` are OFF, the
-445k-row backfill has not run, and no per-portal W2 contract exists yet. Those wait on the
-operator's O3/O4 sign-off of `volatile_paths` + the storage projection.
+445k-row backfill has not run, the P4 pruner lane ships with `location_jobs.enabled=false`,
+and no per-portal W2 contract exists yet. Those wait on the operator's O3/O4 sign-off of
+`volatile_paths` + the storage projection.
 
 ## Standing decisions
 
