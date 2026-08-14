@@ -15,7 +15,7 @@ is the tie-breaker). This track records sequencing + shipped state only.
 | W0 "stop the bleeding" | 15 interim fixes + 2 measurements against the CURRENT system | 🟡 in progress (2026-08-10) |
 | W1 registry + claim spine (shadow) | full RÚIAN mirror, claims, resolutions, projection | ✅ shipped 2026-08-12 (migrations 380–389 applied; shadow-only, no consumer reads it) |
 | W1v bezrealitky vertical slice | one portal end-to-end + location-quality dashboard | ✅ shipped 2026-08-13 (every layer exercised in prod; gate answered — portal-inventory-capped, not pipeline-capped) |
-| W2a payload archive rewrite | append-on-change `portal_raw_payloads` | 🟡 in progress (2026-08-14) — instrument live, measured profiles for 5 portals (`payload_norm@3`); dual-write NOT enabled, awaiting the operator's churn + storage sign-off |
+| W2a payload archive rewrite | append-on-change `portal_raw_payloads` | 🟡 in progress (2026-08-14) — instrument live, measured DETAIL profiles for 5 portals (`payload_norm@3`); INDEX surfaces unprofiled and ~100 %; both write flags OFF, awaiting the operator's churn + storage sign-off |
 | W2–W6 | HTML re-mine, history backfill, refetch cohorts, LLM lane, serving flip | ⚪ not started |
 
 ## W0 — done
@@ -424,24 +424,48 @@ default. Without it the probe measures **zero** on a portal production measures 
 
 ### First before/after (2026-08-14, early)
 
-| source | `@1` (guessed) | `@2`/`@3` (measured) | repeats under the new cohort |
-| --- | --- | --- | --- |
-| ceskereality | **100 %** | **~23 %** | 57 |
-| bezrealitky *(control)* | 0.0 % | 0.0 % | 246 |
-| idnes / realitymix / remax / mmreality / sreality | 100 / 67.7 / 100 / 100 / 4.5 % | **not yet measurable** | 0 |
+**ALWAYS SPLIT BY `page_kind`.** An earlier revision of this section quoted sreality at
+"4.5 %", which is the aggregate of a detail surface at **0.04 %** and an index surface at
+**97.7 %** — arithmetically correct, analytically worthless, and describing neither. Caught
+by the sibling W2a session re-deriving it from `portal_payload_churn` rather than trusting
+the summary. Every figure below is per `(source, page_kind, normalizer_version)`, which is
+the grain the PK already uses.
 
-**Read this honestly:** one portal has moved and the control is unregressed; everything else
-is blank because a change rate needs the SAME page fetched twice under the SAME
-`normalizer_version`, and two bumps in one morning (`@2`, then `@3`) each started a clean
-cohort. The detail drain only refetches on an index-signalled change, so repeats accrue
-slowly on the 6 h portals.
+**Detail surfaces** — what `payload_dual_write` would archive:
+
+| source | `@1` (guessed) | measured | repeats under the new cohort |
+| --- | --- | --- | --- |
+| sreality | 0.04 % | **0.00 %** (`@2`) | 218 |
+| bezrealitky *(control)* | 0.02 % | 0.00 % | 287 |
+| ceskereality | **100 %** | **~22 %** | 67 |
+| maxima | 17.1 % | (1 repeat, not readable) | 1 |
+| idnes / realitymix / remax / mmreality | 100 / 67.7 / 100 / 100 % | **not yet measurable** | 0 |
+
+**Index surfaces** — what `payload_index_archive` would archive, and **none is profiled**:
+
+| source | `@1` | note |
+| --- | --- | --- |
+| sreality | **97.7 %** | 3,621 / 3,705 repeats |
+| ceskereality | **100 %** | 694 / 694 |
+| remax | **100 %** | 385 / 385 |
+
+Only those three portals archive index pages at all. Their keys are **week-stamped**
+(migration 402's header says so), so the surface accrues new rows forever *and* churns at
+~100 %. **`payload_dual_write` and `payload_index_archive` therefore deserve OPPOSITE
+recommendations on current evidence**, and the two flags exist separately for exactly this
+reason. Nobody has yet diffed an index page to find out what moves on it.
+
+**Read the detail table honestly:** one portal has moved, the control is unregressed, and
+sreality's detail surface holds at zero. The rest is blank because a change rate needs the
+SAME page fetched twice under the SAME `normalizer_version`, and two bumps in one morning
+(`@2`, then `@3`) each started a clean cohort. The detail drain only refetches on an
+index-signalled change, so repeats accrue slowly on the 6 h portals.
 
 **Consequence, and the standing instruction that follows: STOP BUMPING `NORMALIZER_VERSION`.**
 Every further profile change restarts the measurement the storage sign-off depends on. Leave
 `@3` undisturbed until each portal has a few hundred repeats. Resist fixing portals that
 newly surface at 100 % — record the number and move on; the profiles only need to be good
-enough that the projection is meaningful, and sreality (which dominates the volume) was
-already at 4.5 % before any of this work.
+enough that the projection is meaningful.
 
 ### PII incident (2026-08-13/14) — three axes, each found only after the previous was fixed
 
