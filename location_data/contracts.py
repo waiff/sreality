@@ -627,10 +627,47 @@ def contract_body_hash(body: bytes) -> bytes:
     return hashlib.sha256(governed).digest()
 
 
+# An unindented line ends the block for `_PERSISTENCE_BLOCK`, and a comment at column 0
+# is unindented — so a note written flush-left inside `persistence:` would silently
+# re-govern everything below it. The next selector edit would then move the hash,
+# `project()` would refuse it, and the refusal says `persistence:` is excluded and
+# therefore cannot be what moved it. That sentence would be false in exactly this state,
+# and the operator following it bumps `contract_version` — spending the 2.6 GB of
+# duplicated `location_claims` this exclusion exists to save. Refuse the shape instead;
+# an indented comment is the normal one and still travels with the block.
+_COL0_COMMENT = re.compile(rb"^#")
+_TOP_LEVEL_KEY = re.compile(rb"^[A-Za-z_]")
+
+
+def _refuse_unindented_comment_in_persistence(path: Path, body: bytes) -> None:
+    """`_PERSISTENCE_BLOCK` ends at the first unindented line, and a comment at column 0
+    is unindented — so a note written flush-left inside `persistence:` truncates the
+    exclusion and silently re-governs everything below it. The next selector edit then
+    moves `contract_sha256`, `project()` refuses it, and the refusal says `persistence:`
+    is excluded and so cannot be what moved it. That sentence is false in exactly this
+    state, and an operator following it bumps `contract_version` — spending the 2.6 GB of
+    duplicated `location_claims` this exclusion exists to save. Refuse the shape; an
+    indented comment is the normal one and travels with the block."""
+    lines = body.split(b"\n")
+    for i, line in enumerate(lines):
+        if not re.match(rb"^persistence[ \t]*:", line):
+            continue
+        for follower in lines[i + 1:]:
+            if _COL0_COMMENT.match(follower):
+                raise ContractError(
+                    f"{path}: a comment at column 0 inside `persistence:` ends the block, "
+                    f"so everything after it silently re-enters contract_sha256 — and the "
+                    f"refusal you would then get claims `persistence:` cannot be what "
+                    f"moved the hash. Indent it to keep it inside the block.")
+            if _TOP_LEVEL_KEY.match(follower):
+                break
+
+
 def parse_contract(path: Path) -> PortalContract:
     import yaml  # dev/CI-only dependency; see the module docstring.
 
     body = path.read_bytes()
+    _refuse_unindented_comment_in_persistence(path, body)
     doc = yaml.safe_load(body.decode("utf-8"))
     if not isinstance(doc, dict):
         raise ContractError(f"{path}: not a YAML mapping")

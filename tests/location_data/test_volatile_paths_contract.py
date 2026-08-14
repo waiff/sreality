@@ -377,3 +377,36 @@ def test_every_contract_on_disk_parses_and_declares_a_profile() -> None:
         assert contract.volatile_profiles, contract.source
         for page_kind, profile in contract.volatile_profiles.items():
             assert registry.profile(contract.source, page_kind) == profile
+
+
+def test_a_column_zero_comment_inside_persistence_is_refused(tmp_path: Path) -> None:
+    """The block filter ends at the first unindented line, and a flush-left comment is
+    unindented — so a note written there re-governs everything below it. The next
+    selector edit would move contract_sha256, project() would refuse it, and the refusal
+    says `persistence:` cannot be what moved the hash. That is false in this one state,
+    and following it costs the 2.6 GB of duplicated claims the exclusion exists to save.
+
+    Both directions, because a guard that only rejects proves nothing: an INDENTED
+    comment is the ordinary case, must still be accepted, and must still leave the
+    governed hash alone."""
+    good = (CONTRACT_DIR / "idnes.yaml").read_bytes()
+
+    flush_left = good.replace(b"persistence:", b"persistence:\n# note", 1)
+    with pytest.raises(contracts.ContractError, match="column 0 inside `persistence:`"):
+        contracts._refuse_unindented_comment_in_persistence(Path("idnes.yaml"), flush_left)
+
+    indented = good.replace(b"persistence:", b"persistence:\n  # note", 1)
+    contracts._refuse_unindented_comment_in_persistence(Path("idnes.yaml"), indented)
+    assert contracts.contract_body_hash(indented) == contracts.contract_body_hash(good)
+
+    # A comment at column 0 AFTER the block has always been fine — it is governed, like
+    # every other extraction byte, which is the correct outcome and not what this refuses.
+    after = good.replace(b"\nextractions:", b"\n# governed note\nextractions:", 1)
+    contracts._refuse_unindented_comment_in_persistence(Path("idnes.yaml"), after)
+
+
+def test_every_shipped_contract_passes_the_column_zero_guard() -> None:
+    """The guard is only worth having if the fleet already satisfies it — otherwise it
+    lands as a failing gate rather than a standing one."""
+    for path in sorted(CONTRACT_DIR.glob("*.yaml")):
+        contracts._refuse_unindented_comment_in_persistence(path, path.read_bytes())
