@@ -15,7 +15,7 @@ is the tie-breaker). This track records sequencing + shipped state only.
 | W0 "stop the bleeding" | 15 interim fixes + 2 measurements against the CURRENT system | 🟡 in progress (2026-08-10) |
 | W1 registry + claim spine (shadow) | full RÚIAN mirror, claims, resolutions, projection | ✅ shipped 2026-08-12 (migrations 380–389 applied; shadow-only, no consumer reads it) |
 | W1v bezrealitky vertical slice | one portal end-to-end + location-quality dashboard | ✅ shipped 2026-08-13 (every layer exercised in prod; gate answered — portal-inventory-capped, not pipeline-capped) |
-| W2a payload archive rewrite | append-on-change `portal_raw_payloads` | 🟡 in progress (2026-08-14) — instrument live, measured DETAIL profiles for 5 portals (`payload_norm@3`); profiles keyed by (source, page_kind), INDEX surfaces on the generic base with a `+base` cohort and still unprofiled; storage bounded BY CONSTRUCTION (bodies in R2, cap 2 + a 7-day per-listing floor); both write flags OFF, awaiting the operator's churn + storage sign-off |
+| W2a payload archive rewrite | append-on-change `portal_raw_payloads` | 🟡 hardened + measured (2026-08-14) — migrations 405–408 applied; bodies to R2, storage bounded by construction (cap 2 + 7-day floor), profiles per (source, page_kind) and now in the contracts; detail churn 0.1–2.4 % on 6 of 8 portals (idnes still 98.9 %, index surfaces unprofiled ~100 %); both write flags OFF, awaiting the operator's enable decisions |
 | W2–W6 | HTML re-mine, history backfill, refetch cohorts, LLM lane, serving flip | ⚪ not started |
 
 ## W0 — done
@@ -813,6 +813,65 @@ no body was evicted by lowering the cap), the
 445k-row backfill has not run, the P4 pruner lane ships with `location_jobs.enabled=false`,
 and no per-portal W2 contract exists yet. Those wait on the operator's O3/O4 sign-off of
 `volatile_paths` + the storage projection.
+
+### W2a hardening — CLOSED (2026-08-14, migrations 405–408 all applied)
+
+Five PRs taken before enabling any write, because every one of them gets harder once the
+archive holds rows. `portal_raw_payloads` is still **0 rows** and both write flags are still
+**OFF** — none of this touched production data.
+
+| PR | What it changed | Why it had to precede the first write |
+| --- | --- | --- |
+| #1070 (mig 405) | Volatile profiles keyed by **(source, page_kind)**, not by portal | Every measured profile was derived by diffing DETAIL pages and was being applied to INDEX bodies too — a different document (a list of *other people's* listings). Measured before fixing: on today's templates the mis-application is inert by coincidence, but `portal_raw_pages` holds 7,659 index rows across FIVE portals that W2a-4 would have migrated under a detail projection, baking a permanent wrong content address. |
+| #1071 (mig 406) | **Bodies to R2**; Postgres holds the metadata row. Retention cap 20 → **2**, plus a **7-day per-listing floor** | The archive does not fit in Postgres at ANY cap: one body per listing over the cohort it converges on is ~19 GB against ~4 GB of subsystem allowance. Operator decided R2 after being shown the tradeoff against Postgres-only and a hot-window hybrid; the hybrid was rejected because its eviction predicate cannot be written — "processed" is undefinable when the archive exists to be re-mined by extractors not yet authored. |
+| #1072 (migs 407+408) | `volatile_paths` moved into the **portal contracts**, per page_kind, validated at load; **`persistence:` excluded from `contract_sha256`** | One concept had two homes. And the header hash governed the whole file, so editing ARCHIVE config bumped the version governing CLAIM identity — re-inserting 5,135,469 claims / **2,625 MB** of an append-only table, once per tweak. Proven closed end-to-end against a replayed DB: a persistence edit now re-inserts **0** claims; the negative control (a version bump) still re-inserts. |
+
+Also closed in-wave: the cohort stamp can no longer name an instrument that was not applied
+(`append_payload` refuses a caller profile without its label); a malformed or `:contains()`
+selector is refused at contract load rather than silently collapsing a body to the raw-bytes
+fallback (selectolax **segfaults** on `:contains()` — exit 139, uncatchable); and a comment at
+column 0 inside `persistence:` is refused, because it would end the exclusion block early and
+the resulting refusal message would misdirect an operator into spending exactly the 2.6 GB.
+
+**Storage, re-derived from live data (the artefact the sign-off rests on):**
+
+| | at cap 2 |
+| --- | --- |
+| R2 (bodies) | ~28.6 GB ≈ **$0.43/month** |
+| Postgres (metadata rows, 713 B/row measured) | **~1.5 GB** of ~4 GB allowance |
+| Largest cap that still fits | **7** |
+
+### The churn numbers, per (source, page_kind) — first substantial reading under `payload_norm@3`
+
+| source | detail, `@1` (guessed) | detail, `@3` (measured) | repeats |
+| --- | --- | --- | --- |
+| sreality | 0.04 % | **0.2 %** | 63,494 |
+| bezrealitky *(control)* | 0.02 % | **0.1 %** | 3,596 |
+| remax | 100 % | **0.9 %** | 226 |
+| mmreality | 100 % | **2.4 %** | 592 |
+| realitymix | 67.7 % | **12.4 %** | 6,108 |
+| ceskereality | 100 % | **16.2 %** | 2,305 |
+| maxima | 17.1 % | 24.7 % | 89 |
+| **idnes** | 100 % | **98.9 %** | 5,456 |
+
+**The profiles worked, except on idnes.** remax and mmreality went from every-fetch to
+essentially never; ceskereality and realitymix fell by 5x. idnes did not move: the measured
+profile named its Nette contact form (captcha counter, hash, question) and the similar-offers
+rail, and something else on that page is still moving. **Recorded, not chased** — the wave's
+goal was a trustworthy number, and this is one.
+
+**Index surfaces remain ~100 % and unprofiled** (sreality 99.4 %, ceskereality 100 %, remax
+100 %). Nobody has diffed an index page yet. `payload_index_archive` is a separate flag from
+`payload_dual_write` for exactly this reason, and on current evidence they deserve opposite
+answers.
+
+**Why idnes at 99 % no longer threatens the storage projection:** the cap and the 7-day floor
+bound a listing at 2 bodies whatever its churn rate, so a failed profile is now a cost
+optimisation rather than a storage risk. That is the whole point of bounding by construction
+rather than by filter quality.
+
+**Three decisions remain the operator's:** enable `payload_dual_write`; enable
+`payload_index_archive` (the evidence says not yet); run the 445k-row backfill.
 
 ## Standing decisions
 
