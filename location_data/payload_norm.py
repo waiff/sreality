@@ -32,7 +32,13 @@ from typing import Any
 
 from selectolax.parser import HTMLParser
 
-NORMALIZER_VERSION = "payload_norm@1"
+# @2 (W2a-3b): the idnes / ceskereality / realitymix profiles stopped being guesses.
+# Bumping is not bookkeeping — `normalizer_version` is part of portal_payload_churn's
+# primary key (migration 402) precisely so a profile change opens a CLEAN cohort. Left
+# at @1, the 100%-change rows measured under the old guesses would average together
+# with the new ones and the storage projection would be signed off a blend of two
+# different instruments.
+NORMALIZER_VERSION = "payload_norm@2"
 
 # The confirmation probe (02 section 2.3.2's 200 x 3 protocol,
 # scripts/location_payload_refetch_probe.py) hashes with THIS normaliser but on a
@@ -67,6 +73,65 @@ _WILDCARD = "-"
 # token, matched as prefix + suffix; a literal `*` in a portal's key is
 # unreachable, which is the same trade RFC 6901 already makes for `-`.
 _KEY_GLOB = "*"
+
+# selectolax's CSS engine SEGFAULTS on some pseudo-classes it does not implement,
+# and only against a real document: `span.i-info__title:contains("Datum")` exits
+# 139 deterministically on a live ceskereality detail page (selectolax 0.4.10) while
+# returning a clean empty match on a three-node one. A segfault is not an exception
+# — `normalise`'s "never raises" contract cannot catch it and the scrape process
+# dies with it — so pseudo-classes are ALLOWLISTED rather than denylisted. Only
+# these five are verified against a full-size page; anything else makes its selector
+# a no-op, which under-strips (the safe direction) instead of crashing.
+# This matters because W2a's next step sources these selectors from
+# portal_contract_entries.persistence.volatile_paths — i.e. from outside this file.
+_PSEUDO_RE = re.compile(r"::?([A-Za-z-]+)")
+_SAFE_PSEUDO: frozenset[str] = frozenset({
+    "not", "has", "first-child", "last-child", "nth-child",
+})
+# A pseudo-class colon never appears inside an attribute-value bracket, but a
+# portal's own href/src VALUE can carry one (`a[href^="mailto:info"]`,
+# `a[href*="tel:"]`) — matched literally, `:info`/`:tel` reads as an unlisted
+# pseudo-class and the whole selector goes unsafe -> silent no-op -> the exact
+# under-strip direction this module's docstring calls out as the dangerous one.
+# Masking `[...]` spans before scanning removes that false positive.
+_BRACKETED_RE = re.compile(r"\[[^\]]*\]")
+# The same false positive, one level down: a CSS-ESCAPED colon is part of a class
+# NAME, not a pseudo-class. Tailwind's responsive variants are written that way
+# (`.md\:flex`, `div.lg\:hidden`) and selectolax matches them fine, so reading
+# the `\:` as a pseudo-class would silently drop a legitimate selector — and
+# realitymix, whose measured volatile node is already a Tailwind utility stack,
+# is the portal most likely to need one next.
+_ESCAPED_RE = re.compile(r"\\.", re.DOTALL)
+
+
+def selector_is_safe(selector: str) -> bool:
+    """Whether this selector's pseudo-classes are ones selectolax survives.
+
+    Syntax-only, and deliberately so: it is the guard against the segfault that
+    `normalise` cannot catch. A selector that is merely MALFORMED still passes
+    here and is no-opped by `_normalise_html`'s per-selector except; use
+    `selector_is_usable` where a reject can be logged.
+    """
+    scanned = _ESCAPED_RE.sub("", _BRACKETED_RE.sub("", selector))
+    return all(name in _SAFE_PSEUDO for name in _PSEUDO_RE.findall(scanned))
+
+
+def selector_is_usable(selector: str) -> bool:
+    """Safe AND parseable by selectolax — the gate for contract-load validation.
+
+    `normalise` is silent by contract, so a typo in a portal's volatile_paths
+    ('div..a', an empty string from YAML) can only ever no-op there. Callers that
+    LOAD those selectors (W2a's next step reads them from
+    portal_contract_entries.persistence.volatile_paths) can call this at load
+    time, where refusing loudly is allowed.
+    """
+    if not selector_is_safe(selector):
+        return False
+    try:
+        HTMLParser(b"<html></html>").css(selector)
+    except Exception:
+        return False
+    return True
 
 
 @dataclass(frozen=True)
@@ -158,14 +223,32 @@ def _normalise_html(
 ) -> bytes | None:
     try:
         tree = HTMLParser(body)
-        for selector in selectors:
-            for node in tree.css(selector):
-                # A match nested inside an already-decomposed match is freed
-                # memory; skipping it is cheaper than ordering the matches.
-                try:
-                    node.decompose()
-                except Exception:
-                    continue
+    except Exception:
+        return None
+    for selector in selectors:
+        if not selector_is_safe(selector):
+            continue
+        # PER-SELECTOR, not around the loop: `.css()` RAISES on a malformed
+        # selector ('div..a', '', 'div[name="x'), and a profile is about to be
+        # sourced from portal_contract_entries.persistence.volatile_paths rather
+        # than from this file. Caught one level up, one typo would drop the whole
+        # body to the raw-bytes fallback — that portal's measured change rate
+        # jumps to ~100% and the storage projection is signed off a corrupt
+        # number, silently, because `normalise` never raises. Skipping just the
+        # bad selector under-strips by exactly one rule instead, the same
+        # degradation an unsafe selector already gets.
+        try:
+            nodes = tree.css(selector)
+        except Exception:
+            continue
+        for node in nodes:
+            # A match nested inside an already-decomposed match is freed
+            # memory; skipping it is cheaper than ordering the matches.
+            try:
+                node.decompose()
+            except Exception:
+                continue
+    try:
         root = tree.root
         if attributes and root is not None:
             for node in root.traverse(include_text=False):
@@ -302,6 +385,62 @@ _HTML_ATTRS: tuple[str, ...] = (
     "data-requestid",
 )
 
+# --- measured (W2a-3b), not guessed ---
+#
+# scripts/location_payload_diff_probe.py fetched the same live detail page three
+# times ~10s apart on 5 listings per portal and structurally diffed the results.
+# Nothing about a listing can change in ten seconds, so everything below was SEEN
+# to move. Selectors are the narrowest form that covers the observed node — an
+# over-broad one would delete real content and make two different listings hash
+# alike, which is far worse than a change rate that is a few points too high.
+
+# iDNES: 3/3 fetches differed on 5/5 listings. All of it is the Nette contact form
+# ("Napište makléři") re-arming its anti-spam material per response, plus the
+# recommendation rail.
+#   input[name=tshee]     15237420345 -> 15237420357  (a per-response counter)
+#   input[name=schpeckc]  62da6c7c... -> c26841cc...   (32-hex captcha answer hash)
+#   #schpeckIn            "3 ➕ 6" -> "1 ➕ 1"          (the captcha question)
+#   .grid-similar-offers  a whole different set of "Podobné nabídky" cards
+# The form's `_token_` was already covered by _FORM_TOKENS' input[name*="_token"];
+# these four are what it missed. The similar-offers rail holds OTHER listings'
+# titles, prices, streets and thumbnails — never this listing's, so its rotation
+# is pure archive churn (and mis-attributed location text if it stayed).
+_IDNES_VOLATILE: tuple[str, ...] = (
+    'input[name="tshee"]',
+    'input[name="schpeckc"]',
+    "#schpeckIn",
+    "div.grid-similar-offers",
+    ".advertisement",  # stehuju.cz / vyklizim.cz partner slots (fixture-verified)
+)
+
+# ceskereality: 3/3 fetches differed on 5/5 listings, and on 4 of the 5 the ONLY
+# thing that differed was one hidden token in the "nahlásit chybu" modal —
+#   input#bug-report-token  8659c.5BgBggKSAVY6... -> e25206d84de2b24c8.cM7EOua...
+# It is `name="token"`, not `_token`, which is exactly why _FORM_TOKENS'
+# input[name*="_token"] never caught it; the id is pinned rather than widening that
+# shared rule to every portal on one portal's evidence.
+# The 5th listing additionally rotated `section.s-estates-slide` ("Podobné
+# nemovitosti"). That section is a sibling of the gallery, not part of it: the
+# listing's own photos live under .s-estate-detail-intro__slider and are untouched,
+# and the Google-Maps <iframe> carrying q=50.7277,15.5971 is untouched too.
+_CESKEREALITY_VOLATILE: tuple[str, ...] = (
+    "input#bug-report-token",
+    "section.s-estates-slide",
+)
+
+# realitymix: 3/3 fetches differed on 5/5 listings, and across all 15 fetches the
+# ONE thing that ever differed was a small badge pinned to the footer, cycling
+# "0.85" / "0.84" / "101.85" — a per-response backend/version stamp. Nothing else
+# moved at all: no ad slot, no token, no carousel.
+# Those three values at their observed frequencies predict a 1 - sum(p^2) = 63%
+# chance that any two consecutive fetches disagree, against the 66% this portal
+# actually measured in production. The badge is the whole 66%.
+# Scoped under the single <footer> because the Tailwind utility classes it is
+# built from carry no meaning on their own.
+_REALITYMIX_VOLATILE: tuple[str, ...] = (
+    "footer div.absolute.bottom-2.right-2",
+)
+
 DEFAULT_VOLATILE_PROFILES: dict[str, VolatileProfile] = {
     # api_json. The pointers are the JSON form of scraper.hashing's already-proven
     # volatile key set (view counters, re-promotion dates, session/recommendation
@@ -353,10 +492,9 @@ DEFAULT_VOLATILE_PROFILES: dict[str, VolatileProfile] = {
         css_selectors=_HTML_BASE + ("div.inzeratyview",),
         strip_attributes=_HTML_ATTRS,
     ),
-    # html_selector. `.advertisement` blocks are the stehuju.cz / vyklizim.cz
-    # partner slots, verified in the idnes detail fixture.
+    # html_selector. Measured: see _IDNES_VOLATILE.
     "idnes": VolatileProfile(
-        css_selectors=_HTML_BASE + (".advertisement",),
+        css_selectors=_HTML_BASE + _IDNES_VOLATILE,
         strip_attributes=_HTML_ATTRS,
     ),
     # embedded_json inside HTML — the inline <script> payload must survive, so
@@ -371,14 +509,16 @@ DEFAULT_VOLATILE_PROFILES: dict[str, VolatileProfile] = {
         css_selectors=_HTML_BASE,
         strip_attributes=_HTML_ATTRS,
     ),
+    # html_selector, proxied. Measured: see _CESKEREALITY_VOLATILE.
     "ceskereality": VolatileProfile(
-        css_selectors=_HTML_BASE,
+        css_selectors=_HTML_BASE + _CESKEREALITY_VOLATILE,
         strip_attributes=_HTML_ATTRS,
     ),
-    # html_selector. Build-hashed asset filenames (`267f89b9.js`) re-roll on every
-    # deploy; the preload/prefetch links that carry them are stripped by _PAGE_CHROME.
+    # html_selector. Measured: see _REALITYMIX_VOLATILE. Build-hashed asset
+    # filenames (`267f89b9.js`) re-roll on every deploy; the preload/prefetch links
+    # that carry them are stripped by _PAGE_CHROME.
     "realitymix": VolatileProfile(
-        css_selectors=_HTML_BASE,
+        css_selectors=_HTML_BASE + _REALITYMIX_VOLATILE,
         strip_attributes=_HTML_ATTRS,
     ),
     "maxima": VolatileProfile(

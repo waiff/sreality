@@ -335,6 +335,9 @@ all closed, several proven against a throwaway PostgreSQL 18 built from `.deb` f
 - **W2a-3 the churn readout** (#1052): `scripts/location_payload_churn_report.py` (the artefact
   the storage gate is signed from) + the 200×3 confirmation probe, dispatch-only in the
   `location-batch` group.
+- **W2a-3b measured volatile profiles**: `scripts/location_payload_diff_probe.py` +
+  evidence-derived profiles for idnes / ceskereality / realitymix, `payload_norm@2`. Table
+  and residue below.
 - **W2-3 the exclusion-zone scoper** (#1053): D7's security boundary — strips every declared
   exclusion zone before any extraction selector runs. **Hard precondition for every per-portal
   contract PR**; without it the deterministic re-miner re-imports at 445k-page scale exactly the
@@ -369,10 +372,41 @@ all closed, several proven against a throwaway PostgreSQL 18 built from `.deb` f
 | ceskereality | 153 | **100 %** | **no — raw == norm exactly** |
 
 The volume portal is stable and the mechanism demonstrably works where a profile fits. The
-open item is three HTML portals whose measurement-phase volatile profiles strip nothing that
-actually moves — a profile-improvement pass (diff genuinely-unchanged page pairs per portal)
-before W2a-3b writes the measured `volatile_paths` into the contracts. remax and bazos had no
-repeat fetches yet.
+open item was three HTML portals whose measurement-phase volatile profiles stripped nothing
+that actually moves — **closed by W2a-3b below**. remax and bazos had no repeat fetches yet.
+
+### W2a-3b measured volatile profiles (2026-08-13)
+
+`scripts/location_payload_diff_probe.py` refetches one live detail page 2-3× seconds apart
+and structurally diffs the results into the three shapes a `VolatileProfile` can express
+(CSS selector / attribute name / JSON pointer). Nothing about a listing can change in ten
+seconds, so everything it reports is volatile by construction. 5 listings × 3 fetches per
+portal; sreality ran as the control and reported **zero** divergences (its 15 bodies were
+byte-identical), which is what makes the other three readings trustworthy.
+
+| source | what actually moved | measured profile |
+| --- | --- | --- |
+| idnes | Nette contact-form anti-spam, 5/5 listings: `input[name=tshee]` counter, `input[name=schpeckc]` captcha hash, `#schpeckIn` question ("3 ➕ 6" → "1 ➕ 1"); plus the `.grid-similar-offers` rail (other listings) | those four + the pre-existing `.advertisement` |
+| ceskereality | `input#bug-report-token` on **4 of 5 listings the only difference at all**; the 5th also rotated `section.s-estates-slide` | both |
+| realitymix | ONE footer badge cycling `0.85 / 0.84 / 101.85` (a per-response backend stamp) — nothing else moved in 15 fetches | `footer div.absolute.bottom-2.right-2` |
+
+realitymix's three values at their observed frequencies predict a 63% chance any two
+consecutive fetches disagree, against the **66%** measured in production: that badge is the
+whole number. `NORMALIZER_VERSION` → `payload_norm@2`, so the new cohort cannot blend with
+rows measured under the guesses (migration 402 has it in the PK for exactly this).
+
+**Known residue, deliberately not stripped:** ceskereality renders "Datum vložení" as a
+RELATIVE time on fresh listings ("před 22 minutami" → "před 23 minutami"), and that row is
+identified only by its label text — no CSS selector reaches it. The portal switches the field
+to an absolute date at ~2 weeks, so it touches fresh inventory only, and under-stripping
+over-states churn (the safe direction).
+
+**Hazard found:** selectolax **segfaults** (exit 139, reproducible, 0.4.10) on
+`:contains()` against a full-size page while returning cleanly on a small one. A segfault is
+not catchable, so `normalise`'s "never raises" contract would not survive one — pseudo-classes
+are now allowlisted (`selector_is_safe`) before any selector reaches the CSS engine. This
+binds W2a's next step, which sources selectors from `portal_contract_entries.persistence.volatile_paths`,
+i.e. from outside the reviewed module.
 
 **Not enabled, deliberately:** `payload_dual_write` is OFF on every portal (and its
 index-only sibling `payload_index_archive` is not built yet — W2a-6), the
