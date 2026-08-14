@@ -26,7 +26,7 @@
 # remax publishes no locality key at all, so the column is the only copy).
 
 portal: remax
-contract_version: 3
+contract_version: 2
 extractor_runtime: ">=1.0"
 identity_ladder: [structured_address, portal_precise_coord]
 

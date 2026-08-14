@@ -34,11 +34,16 @@ _MODULE = Path(payload_backfill.__file__)
 
 
 def _detail_cohort(source: str) -> str:
-    """The label a DECLARED surface writes: the engine plus the contract version whose
-    `persistence.volatile_paths` supplied the profile (W2a-3b). Built from the registry's
-    version rather than by asking the resolver, so the assertion still says something."""
-    return (f"{NORMALIZER_VERSION}{payload_norm.CONTRACT_PROFILE_SUFFIX}"
-            f"{payload_norm.contract_profiles().versions[source]}")
+    """The label a DECLARED surface writes: the engine plus a DIGEST of the volatile
+    profile this portal's contract declares for the surface (W2a-3e) — not its
+    contract_version, which moves for extraction reasons that leave the projection alone.
+    Built from the registry's profile rather than by asking the resolver, so the assertion
+    still says something."""
+    profile = payload_norm.contract_profiles().profile(
+        source, payload_norm.PAGE_KIND_DETAIL)
+    assert profile is not None, source
+    return (f"{NORMALIZER_VERSION}{payload_norm.PROFILE_DIGEST_SUFFIX}"
+            f"{payload_norm.profile_digest(profile)[:payload_norm.PROFILE_DIGEST_CHARS]}")
 
 class _Page:
     def __init__(

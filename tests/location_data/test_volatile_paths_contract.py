@@ -25,8 +25,6 @@ Three properties, in the order the risk runs:
 
 from __future__ import annotations
 
-import hashlib
-import json
 from pathlib import Path
 
 import pytest
@@ -36,14 +34,16 @@ from location_data.payload_norm import (
     BASE_PROFILE,
     BASE_PROFILE_SUFFIX,
     CONTRACT_DIR,
-    CONTRACT_PROFILE_SUFFIX,
     NORMALIZER_VERSION,
     PAGE_KIND_DETAIL,
+    PROFILE_DIGEST_CHARS,
+    PROFILE_DIGEST_SUFFIX,
     ProfileError,
     VolatileProfile,
     contract_profiles,
     load_contract_profiles,
     parse_volatile_paths,
+    profile_digest,
     resolve_normalisation,
     selector_is_usable,
     volatile_profile,
@@ -55,21 +55,12 @@ _FLEET = frozenset({
 })
 
 
-def _profile_digest(profile: VolatileProfile) -> str:
-    blob = json.dumps(
-        [list(profile.json_pointers), list(profile.css_selectors),
-         list(profile.strip_attributes)],
-        ensure_ascii=False, sort_keys=True, separators=(",", ":"),
-    )
-    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
-
-
 # Computed from `MEASURED_VOLATILE_PROFILES` as it stood on origin/main BEFORE the
 # relocation — i.e. from the code the contracts replace. Regenerating one of these to
 # make the suite pass is never the fix: it would silently move a permanent content
 # address and make every churn number measured so far incomparable. A deliberate
-# profile change re-measures, bumps the portal's `contract_version` (which opens a
-# clean cohort by itself) and updates the digest in the same reviewed diff.
+# profile change re-measures, opens a clean cohort by moving the digest (the label IS
+# these first 8 hex, W2a-3e) and updates the pin in the same reviewed diff.
 _RETIRED_TABLE_DIGESTS: dict[str, str] = {
     "bazos": "1bde1c8579b5c7beaf7deaf3565d7403ccafdc39c47892b85b424746787d47cc",
     "bezrealitky": "5ae1625b488b3935122d8dd627fe575b388a5aa360378fa4407aad08baaed1e2",
@@ -91,7 +82,7 @@ def test_the_contract_resolves_the_profile_the_python_table_used_to_hold(
 ) -> None:
     """A RELOCATION, not a re-measurement. Every rule that shipped in the retired table
     resolves out of the contract byte for byte, in the same order, under the same base."""
-    assert _profile_digest(volatile_profile(source, PAGE_KIND_DETAIL)) == (
+    assert profile_digest(volatile_profile(source, PAGE_KIND_DETAIL)) == (
         _RETIRED_TABLE_DIGESTS[source])
 
 
@@ -203,32 +194,78 @@ def test_a_flat_list_is_named_as_the_collapse_it_is() -> None:
 
 # ------------------------------------------------------- 3. the label cannot lie
 
-def test_the_label_names_the_engine_and_the_contract_version(tmp_path: Path) -> None:
-    """Two independent things move a normalised byte — this module's algorithm and the
-    portal's declaration — so a label naming only one lets the other re-address the
-    archive with no cohort break. Proved by moving the CONTRACT version alone: same
-    engine, same selectors, a different cohort."""
+def _profile_of(source: str, directory: Path) -> VolatileProfile | None:
+    return load_contract_profiles(directory).profile(source, PAGE_KIND_DETAIL)
+
+
+def _cohort(profile: VolatileProfile) -> str:
+    return (f"{NORMALIZER_VERSION}{PROFILE_DIGEST_SUFFIX}"
+            f"{profile_digest(profile)[:PROFILE_DIGEST_CHARS]}")
+
+
+@pytest.mark.parametrize("source", sorted(_RETIRED_TABLE_DIGESTS))
+def test_the_label_is_the_digest_of_the_profile_that_was_applied(source: str) -> None:
+    """The cohort key IS the pin above: the label's 8 hex are the first 8 of the digest
+    computed under the retired table. So the same fixture that proves the projection did
+    not move also proves the cohort naming it did not move, and neither can drift alone."""
+    resolved = resolve_normalisation(source, PAGE_KIND_DETAIL)
+
+    assert resolved.normalizer_version == (
+        f"{NORMALIZER_VERSION}{PROFILE_DIGEST_SUFFIX}"
+        f"{_RETIRED_TABLE_DIGESTS[source][:PROFILE_DIGEST_CHARS]}")
+    assert resolved.profile is not BASE_PROFILE
+    assert not resolved.normalizer_version.endswith(BASE_PROFILE_SUFFIX)
+
+
+def test_an_extraction_only_contract_version_bump_leaves_the_cohort_alone(
+    tmp_path: Path,
+) -> None:
+    """THE reason the label is a digest and not `contract_version`. A locator fix bumps
+    the version — ceskereality and realitymix each took two such bumps in the fortnight
+    before this shipped — while `persistence.volatile_paths` does not move a byte. Keyed
+    on the version, every one of those would land in portal_payload_churn's PK (mig 402),
+    orphan that surface's accumulated counters and restart the readout at fetches=1, for
+    a projection that is identical. The storage sign-off rests on those counters."""
     body = (CONTRACT_DIR / "idnes.yaml").read_text(encoding="utf-8")
     version = contract_profiles().versions["idnes"]
-    assert resolve_normalisation("idnes", PAGE_KIND_DETAIL).normalizer_version == (
-        f"{NORMALIZER_VERSION}{CONTRACT_PROFILE_SUFFIX}{version}")
-
     (tmp_path / "idnes.yaml").write_text(
         body.replace(f"contract_version: {version}",
                      f"contract_version: {version + 1}", 1),
         encoding="utf-8")
+
     bumped = load_contract_profiles(tmp_path)
+    shipped = volatile_profile("idnes", PAGE_KIND_DETAIL)
 
     assert bumped.versions["idnes"] == version + 1
-    # The profile is untouched by the bump — only the cohort it is counted in moves.
-    assert bumped.profile("idnes", PAGE_KIND_DETAIL) == volatile_profile(
-        "idnes", PAGE_KIND_DETAIL)
+    assert bumped.profile("idnes", PAGE_KIND_DETAIL) == shipped
+    assert _cohort(bumped.profile("idnes", PAGE_KIND_DETAIL)) == _cohort(shipped)
+    assert _cohort(shipped) == resolve_normalisation(
+        "idnes", PAGE_KIND_DETAIL).normalizer_version
+
+
+def test_an_edit_to_the_declaration_opens_a_clean_cohort(tmp_path: Path) -> None:
+    """The other direction, and the one that must never be missed: the rules moved, so
+    every body normalised after it is a DIFFERENT projection under a permanent content
+    address, and it has to be counted apart from what came before — with no version bump
+    anywhere, since `persistence` is not what `contract_version` governs."""
+    body = (CONTRACT_DIR / "idnes.yaml").read_text(encoding="utf-8")
+    edited = body.replace('- ".advertisement"', '- ".advertisement"\n        - "aside.ad"', 1)
+    assert edited != body
+    (tmp_path / "idnes.yaml").write_text(edited, encoding="utf-8")
+
+    changed = _profile_of("idnes", tmp_path)
+    shipped = volatile_profile("idnes", PAGE_KIND_DETAIL)
+
+    assert load_contract_profiles(tmp_path).versions["idnes"] == (
+        contract_profiles().versions["idnes"])
+    assert changed != shipped
+    assert _cohort(changed) != _cohort(shipped)
 
 
 def test_the_projection_carries_the_declaration_into_the_db_row() -> None:
     """`portal_contracts.fetch_config` is where an operator reads this in psql. It is
-    projected VERBATIM (contract_sha256 is taken over those same bytes), and the parsed
-    form the runtime applies comes from exactly those bytes."""
+    projected VERBATIM, and the parsed form the runtime applies comes from exactly those
+    bytes — from the FILE, never from this projection."""
     contract = contracts.parse_contract(CONTRACT_DIR / "idnes.yaml")
 
     declared = contract.fetch_config["persistence"]["volatile_paths"]
@@ -236,6 +273,97 @@ def test_the_projection_carries_the_declaration_into_the_db_row() -> None:
     assert declared[PAGE_KIND_DETAIL]["base"] == "html"
     assert contract.volatile_profiles[PAGE_KIND_DETAIL] == volatile_profile(
         "idnes", PAGE_KIND_DETAIL)
+
+
+# ------------------------------------- 4. the hash covers extraction, and only that
+
+def test_persistence_is_outside_contract_sha256(tmp_path: Path) -> None:
+    """`contract_sha256` is the immutability gate on the ENTRIES, and a mismatch demands a
+    `contract_version` bump — which re-stamps `extractor_version` and `contract_entry_id`
+    and so RE-INSERTS every claim the next incremental scan re-walks (5.1M rows / 2.6 GB
+    in August 2026). Archive configuration must not be able to spend that, so an edit
+    inside `persistence:` is not a hash change; an edit anywhere else still is."""
+    path = CONTRACT_DIR / "idnes.yaml"
+    body = path.read_bytes()
+    shipped = contracts.contract_body_hash(body)
+
+    edited = body.replace(b'- ".advertisement"', b'- ".advertisement"\n        - "aside.ad"', 1)
+    assert edited != body
+    assert contracts.contract_body_hash(edited) == shipped
+
+    # …and the profile the runtime resolves DID move, so "not hashed" is not "not read".
+    (tmp_path / "idnes.yaml").write_bytes(edited)
+    assert _profile_of("idnes", tmp_path) != volatile_profile("idnes", PAGE_KIND_DETAIL)
+
+    # An extraction byte is still governed, or the gate would be decorative.
+    entry_edit = body.replace(b"id.det.legacy_pin", b"id.det.legacy_pin_2", 1)
+    assert entry_edit != body
+    assert contracts.contract_body_hash(entry_edit) != shipped
+
+
+def test_the_persistence_block_ends_where_the_next_top_level_key_begins() -> None:
+    """The exclusion is a BLOCK, not a line: it must swallow `volatile_paths`, the nested
+    narrative comments and `version_cap`, and stop dead at the next unindented key. Proved
+    by hashing a file whose persistence block is replaced wholesale — same hash — and one
+    whose NEXT top-level block is edited by a single character — different hash."""
+    body = (CONTRACT_DIR / "maxima.yaml").read_bytes()
+    head, _, tail = body.partition(b"\npersistence:\n")
+    assert tail, "maxima.yaml no longer has a top-level persistence block"
+    rest = tail.partition(b"\nexclusion_zones:")[2]
+
+    swapped = head + b"\npersistence:\n  volatile_paths: {}\n\nexclusion_zones:" + rest
+    assert contracts.contract_body_hash(swapped) == contracts.contract_body_hash(body)
+
+    moved = body.replace(b"exclusion_zones:", b"exclusion_zones: ", 1)
+    assert contracts.contract_body_hash(moved) != contracts.contract_body_hash(body)
+
+
+def test_two_files_naming_one_portal_are_refused_by_both_loaders(tmp_path: Path) -> None:
+    """Neither loader may resolve a portal key by key across files: the version would come
+    from one file and each profile from whichever file declared that page_kind last, so a
+    row could carry provenance from a contract that never supplied the rules it was
+    normalised under. `portal_contracts` has `unique (source, version)`, so the duplicate
+    is not reachable today — it is refused because it is a permanent content address."""
+    body = (CONTRACT_DIR / "idnes.yaml").read_text(encoding="utf-8")
+    (tmp_path / "idnes.yaml").write_text(body, encoding="utf-8")
+    (tmp_path / "zz_idnes_shadow.yaml").write_text(
+        body.replace("contract_version: 1", "contract_version: 99", 1), encoding="utf-8")
+
+    with pytest.raises(ProfileError, match="already declared by"):
+        load_contract_profiles(tmp_path)
+    with pytest.raises(contracts.ContractError, match="already declared by"):
+        contracts.load_all(tmp_path)
+
+
+def test_the_runtime_loader_checks_the_page_kind_enum_too(tmp_path: Path) -> None:
+    """The two loaders must agree about what a page_kind is. A typo'd key passes YAML,
+    declares a surface that does not exist, and leaves the surface it was MEANT for on the
+    base profile — honestly labelled `+base`, and silent about the dead declaration."""
+    body = (CONTRACT_DIR / "idnes.yaml").read_text(encoding="utf-8")
+    (tmp_path / "idnes.yaml").write_text(
+        body.replace("    detail:\n", "    detial:\n", 1), encoding="utf-8")
+
+    with pytest.raises(ProfileError, match="not a location_page_kind label"):
+        load_contract_profiles(tmp_path)
+    with pytest.raises(contracts.ContractError, match="not a location_page_kind label"):
+        contracts.parse_contract(tmp_path / "idnes.yaml")
+
+
+def test_the_contract_directory_is_read_at_call_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`CONTRACT_DIR` bound as a default argument would be read once at import, and a test
+    that redirected the module attribute would go on loading the shipped contracts while
+    reporting that it had not."""
+    (tmp_path / "idnes.yaml").write_text(
+        "portal: idnes\ncontract_version: 7\npersistence:\n  volatile_paths: {}\n",
+        encoding="utf-8")
+    monkeypatch.setattr("location_data.payload_norm.CONTRACT_DIR", tmp_path)
+
+    registry = load_contract_profiles()
+
+    assert registry.versions == {"idnes": 7}
+    assert registry.profiles == {}
 
 
 def test_every_contract_on_disk_parses_and_declares_a_profile() -> None:

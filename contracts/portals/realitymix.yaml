@@ -31,7 +31,7 @@
 # realitymix rows carry a parser street that reaches no claim on any surface today.
 
 portal: realitymix
-contract_version: 4
+contract_version: 3
 extractor_runtime: ">=1.0"
 identity_ladder: [structured_address, portal_precise_coord, text_geocode]
 

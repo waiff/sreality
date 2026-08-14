@@ -14,7 +14,7 @@
 # re-fetch is required (02 §2.3.3: `api_json` -> no).
 
 portal: sreality
-contract_version: 2
+contract_version: 1
 extractor_runtime: ">=1.0"
 identity_ladder: [structured_address, portal_precise_coord, text_geocode]
 

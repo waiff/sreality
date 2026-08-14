@@ -24,9 +24,9 @@ in this module divides by `fetches`.
 **Cohorts are (source, page_kind, normalizer_version), never just source.** Detail and
 index bodies churn for entirely different reasons (an index page re-orders on every
 walk); `normalizer_version` splits a rolling profile change into clean before/after
-cohorts (migration 402) — it names the ENGINE and the CONTRACT VERSION that supplied
-the volatile paths (`payload_norm@3+contract@2`), or `…+base` where the contract
-declares none for that surface — and the confirmation probe writes into its own
+cohorts (migration 402) — it names the ENGINE and a DIGEST of the volatile profile that
+produced the projection (`payload_norm@3+profile@4574b9ef`), or `…+base` where the
+contract declares none for that surface — and the confirmation probe writes into its own
 `…+probe` cohort so its three-fetches-in-ten-minutes cadence can never blend into the
 passive measurement's ~6-hourly one. Because a profile rollout is DESIGNED to leave two
 cohorts on one `(source, page_kind)`, the fleet totals sum the NEWEST cohort per surface
@@ -81,9 +81,12 @@ import psycopg
 from location_data import loader_db
 from location_data.payload_norm import (
     BASE_PROFILE_SUFFIX,
-    CONTRACT_PROFILE_SUFFIX,
     NORMALIZER_VERSION,
     PROBE_NORMALIZER_SUFFIX,
+    PROFILE_DIGEST_CHARS,
+    PROFILE_DIGEST_SUFFIX,
+    contract_profiles,
+    profile_digest,
 )
 from scraper import db
 
@@ -552,9 +555,11 @@ def _assumptions() -> list[str]:
         f"  cohorts ending {BASE_PROFILE_SUFFIX!r} were hashed with the GENERIC base"
         " profile — no volatile paths are DECLARED for that (source, page_kind),"
         " so their rate is an upper bound on a surface, not a verdict on a profile",
-        f"  {CONTRACT_PROFILE_SUFFIX!r}<N> names the CONTRACT VERSION whose"
-        " persistence.volatile_paths produced the projection; a contract bump opens a"
-        " clean cohort rather than relabelling accumulated counters (migration 402)",
+        f"  {PROFILE_DIGEST_SUFFIX!r}<8 hex> DIGESTS the volatile profile that produced"
+        " the projection, so the cohort breaks iff the projection moves — an"
+        " extraction-only contract_version bump keeps these counters, and an edit to"
+        " persistence.volatile_paths opens a clean cohort rather than relabelling them"
+        " (migration 402); `contracts --check` maps a digest back to its contract",
         "  totals sum ONE cohort per (source, page_kind) — the newest; a rollout's older",
         "  cohort is named below the total instead of added to it",
     ]
@@ -831,6 +836,21 @@ def _iso(value: datetime.datetime | None) -> str | None:
     return None if value is None else value.astimezone(datetime.UTC).isoformat()
 
 
+def _profile_digests() -> dict[str, dict[str, str]]:
+    """`{source: {page_kind: <8 hex>}}` for the contracts in THIS image — the map from a
+    cohort label back to the declaration it names. Empty (never fatal) if the contracts
+    cannot be read: a readout of counters already written must not depend on them."""
+    try:
+        registry = contract_profiles()
+    except Exception:  # noqa: BLE001 - a report is not a place to fail on a side fact
+        return {}
+    digests: dict[str, dict[str, str]] = {}
+    for (source, page_kind), profile in sorted(registry.profiles.items()):
+        digests.setdefault(source, {})[page_kind] = (
+            profile_digest(profile)[:PROFILE_DIGEST_CHARS])
+    return digests
+
+
 def to_json(measurement: Measurement) -> dict[str, Any]:
     _newest, superseded = newest_cohorts(measurement.surfaces)
     return {
@@ -838,6 +858,11 @@ def to_json(measurement: Measurement) -> dict[str, Any]:
         "normalizer_version": NORMALIZER_VERSION,
         "probe_cohort_suffix": PROBE_NORMALIZER_SUFFIX,
         "base_profile_cohort_suffix": BASE_PROFILE_SUFFIX,
+        "profile_cohort_suffix": PROFILE_DIGEST_SUFFIX,
+        # The digest a cohort label carries is a content address, not a name: this is
+        # how a readout is traced back to the contract that declares it TODAY (the
+        # contract may have been bumped since for reasons the digest correctly ignores).
+        "profile_digests_on_disk": _profile_digests(),
         "assumptions": {
             "bytes_per_gb": BYTES_PER_GB,
             "days_per_month": DAYS_PER_MONTH,

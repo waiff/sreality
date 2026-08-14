@@ -861,8 +861,9 @@ def append_payload(
     a hash taken over the wrong projection into every span that ever points at it.
     A surface no contract declares gets `payload_norm.BASE_PROFILE` and stamps
     `normalizer_version` with the `+base` suffix; a declared one stamps
-    `+contract@<version>`, so which instrument produced a row's content address is
-    readable off the row.
+    `+profile@<digest>` — a digest of the rules themselves, not the `contract_version`
+    carrying them — so which instrument produced a row's content address is readable
+    off the row, and an extraction-only bump does not pretend one moved.
 
     `normalizer_version` OVERRIDES the cohort stamp, and an explicit `volatile`
     REQUIRES one — the pair is refused otherwise. `normalizer_version` is a permanent

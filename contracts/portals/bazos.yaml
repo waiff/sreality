@@ -15,7 +15,7 @@
 # [db-raw §3.4]. The street/quarter/country entries below are the W2 HTML wave.
 
 portal: bazos
-contract_version: 2
+contract_version: 1
 extractor_runtime: ">=1.0"
 identity_ladder: [text_geocode]
 

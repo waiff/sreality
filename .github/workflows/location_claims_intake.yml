@@ -98,8 +98,10 @@ jobs:
           cache: pip
           cache-dependency-path: pyproject.toml
 
-      # The [dev] extra is what carries PyYAML, which only the deploy-time contract
-      # projection needs; the extractor itself reads the DB projection.
+      # PyYAML is a core dependency (W2a-3e): the scrape reads each contract's
+      # `persistence.volatile_paths` out of git at fetch time, so it is no longer a
+      # deploy-time-only need. The [dev] extra stays for the projection's own tooling;
+      # the extractor itself reads the DB projection.
       - name: Install
         run: pip install -e ".[dev]"
 

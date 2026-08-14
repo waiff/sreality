@@ -22,6 +22,15 @@ rules. The measurement narrative for each one (which fetch differed, on how many
 listings, and why the selector is the narrowest form that covers it) moved with
 the values and is the comment block above each contract's `persistence:` key.
 
+LIVING IN THE CONTRACT IS NOT THE SAME AS SHARING ITS VERSION. `persistence:` is
+excluded from `contract_sha256` (`contracts.contract_body_hash`) and its profiles
+are identified here by their own digest, because `contract_version` governs the
+EXTRACTION entries — it is what `extractor_version` and `contract_entry_id` name,
+and re-versioning those re-inserts the whole claims corpus (five million rows).
+Archive configuration must not be able to spend that, and an extraction fix must
+not be able to reset this instrument. One artefact, two identities, each covering
+exactly what it governs.
+
 WHY GIT AND NOT THE DB PROJECTION. 02 section 2.1.8 makes git the store of record
 and `portal_contracts`/`portal_contract_entries` a deploy-time projection of it,
 and `contracts.py` still projects `persistence` there for review in psql. But
@@ -77,9 +86,10 @@ from selectolax.parser import HTMLParser
 CONTRACT_DIR = Path(__file__).resolve().parent.parent / "contracts" / "portals"
 
 # THE ENGINE's version — the algorithm in this file, not any portal's rules. Those
-# now live in the contracts and are versioned by `contract_version`, so the two axes
-# that can move a normalised byte are versioned separately and both are named in the
-# cohort label (see `resolve_normalisation`).
+# now live in the contracts and are identified by a digest of the declaration itself
+# (`PROFILE_DIGEST_SUFFIX`), so the two axes that can move a normalised byte are
+# versioned separately and both are named in the cohort label (see
+# `resolve_normalisation`).
 #
 # NOT bumped by the move to contracts: the projections are byte-identical (proved
 # fixture by fixture in tests/location_data/test_payload_norm_by_page_kind.py's pinned
@@ -124,23 +134,56 @@ def probe_normalizer_version(version: str = NORMALIZER_VERSION) -> str:
 BASE_PROFILE_SUFFIX = "+base"
 
 # The other half of that pair: the contract DID declare a profile for this surface,
-# and this names the contract version it came from. Only the version — the portal is
-# already a column of both tables that carry this label (portal_payload_churn's PK,
-# portal_raw_payloads), and a second copy of a key is a thing that can disagree with
-# the first.
+# and this names WHICH DECLARATION — as a digest of the resolved profile, not as the
+# `contract_version` that happened to carry it.
 #
 # It is not the bare `payload_norm@N` and must never be: the values are no longer
 # this module's, so a row stamped `payload_norm@3` would name an instrument (a table
 # in this file) that no longer exists — migration 405 already reserved a
 # non-`payload_norm@N` form for exactly this. Both axes are named because both can
-# move a byte: the engine (@3) and the profile (@N of the contract).
-CONTRACT_PROFILE_SUFFIX = "+contract@"
+# move a byte: the engine (@3) and the profile (its digest).
+#
+# WHY THE DIGEST AND NOT `contract_version`. A contract version moves for reasons that
+# have nothing to do with normalisation — a locator fix, a new extraction entry, a
+# closed coverage gap; ceskereality and realitymix each took two such bumps in the
+# fortnight before this shipped. Keyed on the version, every one of those would land
+# in portal_payload_churn's PK (migration 402), orphan that surface's accumulated
+# counters and restart the readout at `fetches=1` — while the projection those counters
+# measure had not moved a byte. That is exactly the waste NORMALIZER_VERSION's own
+# comment above refuses on the engine axis ("bumping an engine whose output did not
+# move would discard the detail evidence accumulating under it for nothing"); this is
+# the same refusal on the profile axis. Digesting the profile makes the cohort break
+# IFF the projection actually moves, in either direction: an edit to volatile_paths
+# with no version bump still opens a clean cohort, which the version could not see.
+#
+# The portal is NOT in the label — `source` is already a column of both tables that
+# carry it (portal_payload_churn's PK, portal_raw_payloads), and a second copy of a key
+# is a thing that can disagree with the first. Two portals that declare the same rules
+# therefore share a digest, which is honest: it is one instrument, and their rows are
+# still told apart by `source`.
+PROFILE_DIGEST_SUFFIX = "+profile@"
 
-# `location_page_kind`'s labels (migration 380) are ('index','detail','map',
-# 'gazetteer','snapshot','archive','none'). Only `detail` has ever been diffed, so
-# it is the only one spelled here; scraper.db keeps its own copy of the same two
-# string values because payload_norm must stay importable without pulling the
-# scraper in (tests/location_data/test_payload_norm.py pins the pair together).
+# 8 hex = 32 bits over a space of a few dozen profiles that will ever exist (nine
+# portals x the handful of surfaces anyone diffs), so a collision — two DIFFERENT
+# profiles labelled alike, which would silently blend two cohorts — is ~1e-8 territory
+# and the label stays short enough to read in a psql row. The full digest is what the
+# fixture gate pins (tests/location_data/test_volatile_paths_contract.py).
+PROFILE_DIGEST_CHARS = 8
+
+# `location_page_kind`'s labels (migration 380). They live HERE, not in
+# `location_data.contracts`, because both loaders of a `volatile_paths` mapping have to
+# check a declared key against them and this module is the one that must stay importable
+# without the contract lane (the churn hook defers its import so a flag-off scrape never
+# pays for location_data). `contracts.PAGE_KINDS` is this same object — one enum, two
+# names, no chance of the CI gate and the runtime disagreeing about what a page_kind is.
+PAGE_KINDS = frozenset({
+    "index", "detail", "map", "gazetteer", "snapshot", "archive", "none",
+})
+
+# Only `detail` has ever been diffed, so it is the only one spelled out; scraper.db
+# keeps its own copy of the same two string values because payload_norm must stay
+# importable without pulling the scraper in (tests/location_data/test_payload_norm.py
+# pins the pair together).
 PAGE_KIND_DETAIL = "detail"
 
 # ASCII-only class on purpose: it must apply byte-wise to a body that failed to
@@ -227,6 +270,27 @@ class VolatileProfile:
     json_pointers: tuple[str, ...] = ()
     css_selectors: tuple[str, ...] = ()
     strip_attributes: tuple[str, ...] = ()
+
+
+def profile_digest(profile: VolatileProfile) -> str:
+    """A content address for the PROJECTION this profile produces — the cohort key.
+
+    Over the RESOLVED profile (the declared rules concatenated onto their base), because
+    that is what `normalise` is handed: two declarations that resolve to the same rules
+    are the same instrument and belong in one cohort, and a base that moved under an
+    unchanged declaration is a different instrument and does not.
+
+    ORDER IS PART OF IT even though it cannot change the output bytes (every rule is
+    applied). A reordered profile is a reviewed diff on the artefact, and a digest that
+    ignored it would report "unchanged" about a file that changed — the digest is a
+    provenance statement about a declaration, not only about its effect.
+    """
+    blob = json.dumps(
+        [list(profile.json_pointers), list(profile.css_selectors),
+         list(profile.strip_attributes)],
+        ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    )
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -599,7 +663,7 @@ def parse_profile_block(block: Any, *, where: str) -> VolatileProfile:
 
 
 def parse_volatile_paths(
-    declared: Any, *, where: str, page_kinds: frozenset[str] | None = None,
+    declared: Any, *, where: str, page_kinds: frozenset[str] | None = PAGE_KINDS,
 ) -> dict[str, VolatileProfile]:
     """`persistence.volatile_paths` -> {page_kind: profile}.
 
@@ -610,11 +674,13 @@ def parse_volatile_paths(
     a population it was never taken from (fixed in Python by #1070; this is the same
     fix in the contract that now owns the values).
 
-    `page_kinds` is the caller's enum (migration 380's `location_page_kind`, spelled
-    in `contracts.PAGE_KINDS`). It is passed in rather than duplicated here because
-    this module must stay importable without the contract lane — but a typo'd
-    page_kind is exactly the silent failure this validation exists for, so the
-    contract gate always supplies it.
+    `page_kinds` is migration 380's `location_page_kind` enum, defaulted to this
+    module's `PAGE_KINDS` (which `contracts.PAGE_KINDS` re-exports, so the CI gate and
+    the runtime cannot disagree). It defaults rather than being required because a
+    typo'd page_kind is exactly the silent failure this validation exists for: the
+    surface it was meant for keeps the base profile, the label stays honestly `+base`,
+    and nothing anywhere reports that the declaration is dead. `None` disables the
+    check, for a caller validating a mapping whose key space is not that enum.
     """
     if declared is None:
         return {}
@@ -642,9 +708,10 @@ def parse_volatile_paths(
 class ContractProfiles:
     """Every portal's declared volatile profiles, as ONE immutable registry.
 
-    `versions` is what the cohort label names, so the two are read from the same
-    parse of the same file — a registry that knew a profile but not the version that
-    declared it could stamp a content address with the wrong provenance.
+    `versions` is NOT the cohort key — the profile's own digest is (see
+    `PROFILE_DIGEST_SUFFIX`) — but it is read from the same parse of the same file, so
+    a reader who has a digest can be told which contract version currently declares it
+    (`scripts/location_payload_churn_report.py` prints that map).
     """
 
     versions: dict[str, int]
@@ -654,7 +721,7 @@ class ContractProfiles:
         return self.profiles.get((source, page_kind))
 
 
-def load_contract_profiles(directory: Path = CONTRACT_DIR) -> ContractProfiles:
+def load_contract_profiles(directory: Path | None = None) -> ContractProfiles:
     """Read `persistence.volatile_paths` out of every portal contract on disk.
 
     Reads only `portal`, `contract_version` and `persistence` — NOT the extraction
@@ -666,17 +733,23 @@ def load_contract_profiles(directory: Path = CONTRACT_DIR) -> ContractProfiles:
     BUILD defect (the image ships `contracts/` beside the code), and the degradation
     it would otherwise cause is invisible: every portal silently falls to the base
     profile, and a base-profile change rate looks like a measurement.
+
+    `directory` defaults at CALL time, not at import: bound as a default argument it
+    reads `CONTRACT_DIR` once, and a test that monkeypatches the module attribute would
+    silently keep loading the shipped contracts.
     """
     import yaml  # ships with the runtime image for exactly this read.
 
-    paths = sorted(Path(directory).glob("*.yaml"))
+    root = Path(directory if directory is not None else CONTRACT_DIR)
+    paths = sorted(root.glob("*.yaml"))
     if not paths:
         raise ProfileError(
-            f"no portal contracts under {directory} — the volatile profiles live "
+            f"no portal contracts under {root} — the volatile profiles live "
             f"there (02 section 2.1.8: git is the store of record), so without them "
             f"nothing can be normalised under the projection it will be labelled with")
 
     versions: dict[str, int] = {}
+    declared_by: dict[str, Path] = {}
     profiles: dict[tuple[str, str], VolatileProfile] = {}
     for path in paths:
         try:
@@ -686,19 +759,32 @@ def load_contract_profiles(directory: Path = CONTRACT_DIR) -> ContractProfiles:
         if not isinstance(doc, dict) or "portal" not in doc:
             raise ProfileError(f"{path}: not a portal contract")
         source = str(doc["portal"])
-        # Strict: the version is half the cohort label, so a contract that cannot
-        # state one would stamp every body it governs `+contract@0` — a provenance
-        # naming nothing, on a permanent content address.
+        # ONE file per portal. Two files naming one portal would be resolved key by
+        # key in filename order — the version from the last file, each profile from
+        # the last file that declared THAT page_kind — so a row could be stamped with
+        # provenance from a contract that never supplied the rules it was normalised
+        # under. That is the "a row claims an instrument it did not use" failure this
+        # whole lane is built to prevent, and it is cheaper to refuse than to define.
+        if source in declared_by:
+            raise ProfileError(
+                f"{path}: portal '{source}' is already declared by "
+                f"{declared_by[source].name} — one contract file per portal, or the "
+                f"registry pairs one file's rules with another file's provenance")
+        declared_by[source] = path
+        # Strict: a contract that cannot state its version is malformed, and the
+        # registry is what tells an operator which contract version currently declares
+        # the profile a cohort's digest names.
         try:
             version = int(doc["contract_version"])
         except (KeyError, TypeError, ValueError) as exc:
             raise ProfileError(
-                f"{path}: contract_version must be an integer — it names the cohort "
-                f"every body this contract normalises is counted in") from exc
+                f"{path}: contract_version must be an integer — it is how a churn "
+                f"cohort's profile digest is traced back to a reviewed artefact") from exc
         versions[source] = version
         declared = (doc.get("persistence") or {}).get("volatile_paths")
         for page_kind, profile in parse_volatile_paths(
             declared, where=f"{path.name}:persistence.volatile_paths",
+            page_kinds=PAGE_KINDS,
         ).items():
             profiles[(source, page_kind)] = profile
     return ContractProfiles(versions=versions, profiles=profiles)
@@ -753,16 +839,20 @@ def resolve_normalisation(
     `scraper.db.record_payload_churn` (the live instrument), `payloads.append_payload`
     (the archive's content address) and `payload_backfill.encode_for_archive` (the
     445k-row migration) all come through here, so the two can never be resolved from
-    two different surfaces — or, now, from two different contract versions.
+    two different surfaces — or from two different declarations.
 
     The label, and why it is not the bare `payload_norm@N` any more:
 
-      `payload_norm@3+contract@2`  the contract declared a profile for this surface.
+      `payload_norm@3+profile@4574b9ef`
+                                   the contract declared a profile for this surface.
                                    Two axes move the output bytes and both are named:
                                    the ENGINE (this module's algorithm) and the
-                                   PROFILE (that portal's contract version). The
-                                   portal is NOT repeated into the label — `source` is
-                                   already a column of both tables that carry it
+                                   PROFILE — as a digest of the rules themselves, so
+                                   the cohort breaks IFF the projection moves, never
+                                   because the file around the declaration was edited
+                                   (see `PROFILE_DIGEST_SUFFIX`). The portal is NOT
+                                   repeated into the label — `source` is already a
+                                   column of both tables that carry it
                                    (portal_payload_churn's PK, portal_raw_payloads),
                                    and a second copy is a thing that can disagree.
       `payload_norm@3+base`        the contract declares nothing for this surface, so
@@ -791,8 +881,10 @@ def resolve_normalisation(
     profile = registry.profile(source, page_kind)
     if profile is None:
         return Resolution(BASE_PROFILE, f"{base}{BASE_PROFILE_SUFFIX}")
-    # Indexed, not `.get`: a profile and its version are recorded together by
-    # `load_contract_profiles`, so a missing version means the registry is malformed
-    # and the label would be a guess.
+    # Digested from the profile ITSELF, so the label is a function of the one thing
+    # that decides the bytes — nothing about the file it was declared in, nothing
+    # about the registry's bookkeeping, can reach it.
     return Resolution(
-        profile, f"{base}{CONTRACT_PROFILE_SUFFIX}{registry.versions[source]}")
+        profile,
+        f"{base}{PROFILE_DIGEST_SUFFIX}"
+        f"{profile_digest(profile)[:PROFILE_DIGEST_CHARS]}")

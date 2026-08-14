@@ -217,7 +217,8 @@ def test_reprojecting_an_unchanged_contract_never_re_shadows_it(tmp_path: Path):
     `shadow` is written on the header INSERT only, so re-projecting the same bytes — which
     every deploy does — cannot quietly put a passed contract back in the dark."""
     contract = _rewritten("maxima", tmp_path, shadow=True)
-    conn = _FakeConn(existing_sha=contract.sha256.hex())
+    conn = _FakeConn(existing_sha=contract.sha256.hex(),
+                     fetch_config=contract.fetch_config)
     contracts.project(conn, contract, git_ref="deadbeef")
     assert not [s for s, _ in conn.executed if "shadow" in s.lower()]
 
@@ -234,26 +235,55 @@ def test_the_shadow_key_is_outside_contract_sha256(tmp_path: Path):
     assert _rewritten("maxima", tmp_path, shadow=False).sha256 == on.sha256
 
 
-def test_a_file_with_no_shadow_key_hashes_to_its_plain_file_digest():
-    """The filter is subtractive, so every already-projected contract keeps the hash it was
-    projected under — otherwise the next `--load` would refuse all nine at once."""
+def test_the_hash_is_the_file_minus_the_two_blocks_that_are_not_extraction():
+    """The shadow filter alone was subtractive, so every projected contract kept the hash
+    it was projected under. Excluding `persistence:` too (mig 408) is NOT — every one of
+    the nine moved, which is why 408 restates them; this pins the arithmetic so the
+    migration's literals can be re-derived from the repo."""
     import hashlib
 
     for path in sorted(contracts.CONTRACT_DIR.glob("*.yaml")):
         body = path.read_bytes()
         assert b"\nshadow:" not in b"\n" + body, path.name
-        assert contracts.contract_body_hash(body) == hashlib.sha256(body).digest(), path.name
+        assert b"\npersistence:" in b"\n" + body, path.name
+        assert contracts.contract_body_hash(body) != hashlib.sha256(body).digest(), (
+            path.name)
+        assert contracts.contract_body_hash(body) == hashlib.sha256(
+            _governed_by_hand(body)).digest(), path.name
 
 
-def test_an_indented_shadow_key_is_still_hashed(tmp_path: Path):
-    """The filter is anchored to column 0 because only a top-level key is the flag. A
-    `shadow:` nested inside an extraction is ordinary contract content and must keep
-    changing the hash."""
-    path = tmp_path / "nested.yaml"
+def _governed_by_hand(body: bytes) -> bytes:
+    """The exclusion rule spelled out line by line, independently of the module's regex:
+    drop a top-level `shadow:` line, and drop a top-level `persistence:` line together
+    with every indented or blank line under it."""
+    kept: list[bytes] = []
+    in_block = False
+    for line in body.splitlines(keepends=True):
+        if in_block:
+            if not line.strip() or line[:1] in (b" ", b"\t"):
+                continue
+            in_block = False
+        if line.startswith(b"persistence:"):
+            in_block = True
+            continue
+        if line.startswith(b"shadow:"):
+            continue
+        kept.append(line)
+    return b"".join(kept)
+
+
+def test_an_indented_shadow_or_persistence_key_is_still_hashed(tmp_path: Path):
+    """Both filters are anchored to column 0, because only a top-level key is the flag /
+    the archive block. Either word nested inside an extraction or a fetch block is ordinary
+    contract content and must keep changing the hash."""
     base = "portal: maxima\ncontract_version: 1\nextractions: []\n"
     a = contracts.contract_body_hash(base.encode())
-    b = contracts.contract_body_hash((base + "fetch:\n  shadow: true\n").encode())
-    assert a != b
+    assert contracts.contract_body_hash((base + "fetch:\n  shadow: true\n").encode()) != a
+    assert contracts.contract_body_hash(
+        (base + "fetch:\n  persistence: keep\n").encode()) != a
+    # …and the top-level block IS excluded, in the same file shape.
+    assert contracts.contract_body_hash(
+        (base + "persistence:\n  version_cap: 20\n").encode()) == a
 
 
 def test_a_typod_top_level_key_is_refused_rather_than_ignored(tmp_path: Path):
@@ -440,7 +470,10 @@ class _FakeCursor:
         if "RETURNING was.id, was.shadow" in self._sql:
             return None if self._conn.shadow_was is None else (7, self._conn.shadow_was)
         if "FROM portal_contracts WHERE source" in self._sql:
-            return (7, self._conn.existing_sha, False) if self._conn.existing_sha else None
+            # (id, sha256 hex, is_active, fetch_config) — the stored fetch_config is
+            # echoed back as the contract's own, so no persistence refresh fires here.
+            return ((7, self._conn.existing_sha, False, self._conn.fetch_config)
+                    if self._conn.existing_sha else None)
         return (7,)
 
     def fetchall(self) -> list[tuple[Any, ...]]:
@@ -465,9 +498,11 @@ class _FakeConn:
 
     ENQUEUED = 4
 
-    def __init__(self, existing_sha: str, shadow_was: bool | None = None) -> None:
+    def __init__(self, existing_sha: str, shadow_was: bool | None = None,
+                 fetch_config: object = None) -> None:
         self.existing_sha = existing_sha
         self.shadow_was = shadow_was
+        self.fetch_config = fetch_config
         self.executed: list[tuple[str, object]] = []
         self.transactions = 0
 

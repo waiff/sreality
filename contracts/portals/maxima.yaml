@@ -19,7 +19,7 @@
 # locality_text, image_urls}: coords.source is `page` on 29 of a 31-row window.
 
 portal: maxima
-contract_version: 2
+contract_version: 1
 extractor_runtime: ">=1.0"
 identity_ladder: [portal_precise_coord, text_geocode]
 

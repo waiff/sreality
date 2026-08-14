@@ -2853,11 +2853,11 @@ def record_payload_churn(
     the drain's run_resilient-retried batch write.
 
     `normalizer_version` overrides the cohort this fetch is counted in. The live
-    ingest never passes one — it takes `payload_norm.normalizer_version_for(source,
-    page_kind)`, which is the bare version on a surface with a measured profile and
-    carries `+base` on one without. The confirmation probe passes
-    `payload_norm.probe_normalizer_version()` so its minutes-apart cadence lands
-    in its own cohort instead of contaminating the passive counters.
+    ingest never passes one — it takes the resolver's answer for this surface, which
+    is `payload_norm@N+profile@<digest>` where the portal's contract declares a
+    volatile profile and `payload_norm@N+base` where it does not. The confirmation
+    probe passes `payload_norm.probe_normalizer_version()` so its minutes-apart
+    cadence lands in its own cohort instead of contaminating the passive counters.
 
     PRECONDITION: an autocommit connection (scraper.db.connect). The statement is
     self-contained, so a caller already inside `with conn.transaction():` gets it
@@ -3089,8 +3089,14 @@ def append_payload_if_enabled(
             body=payload,
             content_type=content_type,
             http_status=http_status,
-            # No contract governs a live-ingest body yet; W2's per-portal
-            # contracts are what stamp a version on a mined payload.
+            # `contract_version` NULL is honest here: it is the version of the
+            # EXTRACTION contract a mined payload was claimed under, and nothing has
+            # mined this body — W2's claim intake is what stamps it. The portal's
+            # contract does decide how this body normalises (its
+            # `persistence.volatile_paths`), and `normalizer_version` says so with a
+            # digest of the profile applied; that is a different axis on purpose,
+            # which is why the archive can be reconfigured without re-versioning any
+            # claim (migration 408).
             contract_version=None,
             observed_at=datetime.now(timezone.utc),
         )

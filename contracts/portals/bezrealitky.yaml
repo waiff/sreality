@@ -18,7 +18,7 @@
 # any severity, 12/12 agreement on obec, PSČ and lat/lng [mine-syn §4.1].
 
 portal: bezrealitky
-contract_version: 2
+contract_version: 1
 extractor_runtime: ">=1.0"
 identity_ladder: [address_point_id, structured_address, portal_precise_coord]
 pin_collision_semantics: legitimate_multiunit

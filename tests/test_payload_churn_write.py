@@ -615,11 +615,12 @@ def test_the_profile_and_the_cohort_are_resolved_by_source_AND_page_kind() -> No
     # params: (source, native, page_kind, normalizer_version, ..., raw, norm, ...)
     from location_data import payload_norm
 
-    bazos_contract = payload_norm.contract_profiles().versions["bazos"]
+    declared = payload_norm.contract_profiles().profile("bazos", "detail")
+    digest = payload_norm.profile_digest(declared)[:payload_norm.PROFILE_DIGEST_CHARS]
     assert detail[2] == "detail" and index[2] == "index"
-    # The declared surface names the contract version its profile came from; the
-    # undeclared one names the normaliser's own base and nothing else (W2a-3b).
-    assert detail[3] == f"payload_norm@3+contract@{bazos_contract}"
+    # The declared surface names a digest of the profile its contract declares; the
+    # undeclared one names the normaliser's own base and nothing else (W2a-3e).
+    assert detail[3] == f"payload_norm@3+profile@{digest}"
     assert index[3] == "payload_norm@3+base"
     assert detail[6] == index[6], "the RAW hash is the bytes as fetched, surface-blind"
     assert detail[7] != index[7], "the NORMALISED hash must follow the surface's profile"

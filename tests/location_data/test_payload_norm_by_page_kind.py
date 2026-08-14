@@ -38,17 +38,29 @@ from location_data.payload_norm import (
     _HTML_BASE,
     BASE_PROFILE,
     BASE_PROFILE_SUFFIX,
-    CONTRACT_PROFILE_SUFFIX,
     NORMALIZER_VERSION,
     PAGE_KIND_DETAIL,
+    PROFILE_DIGEST_CHARS,
+    PROFILE_DIGEST_SUFFIX,
     Resolution,
     VolatileProfile,
     contract_profiles,
     normalise,
     normalizer_version_for,
+    profile_digest,
     resolve_normalisation,
     volatile_profile,
 )
+
+
+def _cohort(source: str, page_kind: str = PAGE_KIND_DETAIL) -> str:
+    """The label a declared surface must carry: the engine plus a digest of the profile
+    the contract declares for it. Recomputed from the registry, never from the resolver
+    under test."""
+    profile = contract_profiles().profile(source, page_kind)
+    assert profile is not None, (source, page_kind)
+    return (f"{NORMALIZER_VERSION}{PROFILE_DIGEST_SUFFIX}"
+            f"{profile_digest(profile)[:PROFILE_DIGEST_CHARS]}")
 
 _FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"
 _HTML = "text/html; charset=utf-8"
@@ -297,26 +309,27 @@ def test_a_per_listing_detail_node_repeats_once_per_card_on_an_index() -> None:
 def test_the_cohort_label_names_both_axes_that_can_move_a_byte() -> None:
     """`normalizer_version` is in portal_payload_churn's PK. Two independent things
     can move a normalised byte — the ENGINE (this module's algorithm) and the PROFILE
-    (a portal's contract) — so both are named, or one of them could move a permanent
-    content address with no cohort break to show for it.
+    (what the portal's contract declares) — so both are named, or one of them could move
+    a permanent content address with no cohort break to show for it. The profile half is
+    a DIGEST of the rules, never the contract_version carrying them: a version moves for
+    extraction reasons, and orphaning a surface's counters for a locator fix is exactly
+    the waste NORMALIZER_VERSION refuses on the engine axis.
 
     A surface no contract declares is a different instrument again: the generic base,
     which belongs to the normaliser and is identical under every contract version. So
     it keeps `+base` across the move to contracts, and the index cohorts accumulating
     today are not thrown away by it."""
     registry = contract_profiles()
-    for source, version in registry.versions.items():
-        assert normalizer_version_for(source, PAGE_KIND_DETAIL) == (
-            f"{NORMALIZER_VERSION}{CONTRACT_PROFILE_SUFFIX}{version}")
+    for source in registry.versions:
+        assert normalizer_version_for(source, PAGE_KIND_DETAIL) == _cohort(source)
         assert normalizer_version_for(source, _INDEX) == (
             NORMALIZER_VERSION + BASE_PROFILE_SUFFIX)
 
     # A declaration that exists but is EMPTY is a measurement ("nothing here churns"),
     # not a fallback — bezrealitky's null detail profile must not be relabelled base.
     assert volatile_profile("bezrealitky", PAGE_KIND_DETAIL).css_selectors == ()
-    assert normalizer_version_for("bezrealitky", PAGE_KIND_DETAIL) == (
-        f"{NORMALIZER_VERSION}{CONTRACT_PROFILE_SUFFIX}"
-        f"{registry.versions['bezrealitky']}")
+    assert normalizer_version_for("bezrealitky", PAGE_KIND_DETAIL) == _cohort(
+        "bezrealitky")
 
     assert normalizer_version_for("unknown-portal", PAGE_KIND_DETAIL) == (
         NORMALIZER_VERSION + BASE_PROFILE_SUFFIX)
@@ -346,17 +359,18 @@ def test_the_profile_and_its_cohort_label_are_resolved_from_one_surface() -> Non
     assert bezrealitky.profile == VolatileProfile()
     assert bezrealitky.profile is not BASE_PROFILE
     assert bezrealitky.normalizer_version.startswith(
-        NORMALIZER_VERSION + CONTRACT_PROFILE_SUFFIX)
+        NORMALIZER_VERSION + PROFILE_DIGEST_SUFFIX)
 
 
 def test_a_normaliser_bump_carries_through_the_pair_together() -> None:
     """`version=` reaches the label without touching the profile — the cohort moves,
     the projection does not, which is what a bump means."""
-    idnes_version = contract_profiles().versions["idnes"]
+    digest = profile_digest(
+        contract_profiles().profile("idnes", PAGE_KIND_DETAIL))[:PROFILE_DIGEST_CHARS]
     bumped = resolve_normalisation("idnes", PAGE_KIND_DETAIL, "payload_norm@99")
 
     assert bumped.normalizer_version == (
-        f"payload_norm@99{CONTRACT_PROFILE_SUFFIX}{idnes_version}")
+        f"payload_norm@99{PROFILE_DIGEST_SUFFIX}{digest}")
     assert bumped.profile == volatile_profile("idnes", PAGE_KIND_DETAIL)
     assert resolve_normalisation("idnes", _INDEX, "payload_norm@99") == Resolution(
         profile=BASE_PROFILE,

@@ -128,11 +128,13 @@ def test_a_normaliser_bump_opens_a_clean_cohort(
     # fetch under it (the hash moved because the normaliser moved).
     from location_data import payload_norm
 
-    # The label names the ENGINE and the contract version that supplied the profile
-    # (W2a-3e), so a bump of either opens a clean cohort. This bumps the engine; the
-    # contract half is pinned in tests/location_data/test_volatile_paths_contract.py.
-    contract = payload_norm.CONTRACT_PROFILE_SUFFIX + str(
-        payload_norm.contract_profiles().versions["sreality"])
+    # The label names the ENGINE and a digest of the volatile profile that produced the
+    # projection (W2a-3e), so a move in either opens a clean cohort. This bumps the
+    # engine; the profile half is pinned in
+    # tests/location_data/test_volatile_paths_contract.py.
+    profile = payload_norm.contract_profiles().profile("sreality", "detail")
+    contract = (payload_norm.PROFILE_DIGEST_SUFFIX
+                + payload_norm.profile_digest(profile)[:payload_norm.PROFILE_DIGEST_CHARS])
     shipped = payload_norm.NORMALIZER_VERSION + contract
     key = f"live-{uuid.uuid4().hex}"
     _record(conn, key, b'{"price": 1}', "obs-1")

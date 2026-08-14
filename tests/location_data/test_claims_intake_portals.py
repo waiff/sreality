@@ -424,7 +424,7 @@ def test_a_parser_street_is_the_last_signal_the_silent_parse_cohort_has():
     # do — so this entry declares the write path known (§6.6 rule 3).
     assert claim.legacy_write_path_unknown is False
     assert claim.history_completeness == "locality_text_only"
-    assert claim.extractor_version == "contract:ceskereality@4"
+    assert claim.extractor_version == "contract:ceskereality@3"
 
 
 def test_a_resolver_or_unattributed_street_is_never_a_claim():
@@ -502,11 +502,11 @@ def test_every_claim_writes_blur_evidence_and_history_completeness_explicitly():
         "sreality": "full", "bezrealitky": "payload_only", "mmreality": "payload_only",
     }
     # The portals whose contract was bumped to close a measured coverage gap — remax once
-    # (2026-08-11), ceskereality and realitymix twice (the street column, 2026-08-13) —
-    # plus the one fleet-wide bump every portal took when `persistence.volatile_paths`
-    # moved into the contracts (W2a-3b): entries are immutable per version, and that
-    # bump appended none (the golden claim sets are identical either side of it).
-    expected_version = {"remax": 3, "ceskereality": 4, "realitymix": 4}
+    # (2026-08-11), ceskereality and realitymix twice (the street column, 2026-08-13);
+    # every other portal is still on its original version. Moving the volatile profiles
+    # into these files (W2a-3e) bumped none of them: `persistence` is outside
+    # `contract_sha256` (mig 408), so archive configuration cannot re-stamp a claim.
+    expected_version = {"remax": 2, "ceskereality": 3, "realitymix": 3}
     for source, payload, lat, lon in cases:
         result = extract_listing(listing(source, payload, lat=lat, lon=lon),
                                  entries_for(source))
@@ -522,5 +522,5 @@ def test_every_claim_writes_blur_evidence_and_history_completeness_explicitly():
             assert claim.history_completeness == expected_history.get(
                 source, "locality_text_only")
             assert claim.extractor_version == (
-                f"contract:{source}@{expected_version.get(source, 2)}")
+                f"contract:{source}@{expected_version.get(source, 1)}")
             assert claim.first_observed_at == result.claims[0].first_observed_at

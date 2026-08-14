@@ -14,7 +14,7 @@
 # rule.
 
 portal: mmreality
-contract_version: 2
+contract_version: 1
 extractor_runtime: ">=1.0"
 identity_ladder: [obec_code, structured_address, portal_precise_coord]
 

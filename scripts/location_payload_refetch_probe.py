@@ -26,7 +26,7 @@ Three rails, none of them optional:
     `db.record_payload_churn`, under the probe suffix COMPOSED ONTO the surface's own
     cohort label — its own cohort, so a cadence of minutes can never contaminate the
     passive readout the storage gate is signed from, while still naming the profile it
-    actually applied (`payload_norm@3+contract@2+probe`).
+    actually applied (`payload_norm@3+profile@4574b9ef+probe`).
   * **Round-major, sequential, paced.** All keys in round 1, then all keys in round 2:
     one listing is never hammered back-to-back, and the spacing between a key's own
     fetches is the length of a round. A budget stop lands wherever the clock ran out —

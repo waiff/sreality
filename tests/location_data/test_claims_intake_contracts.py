@@ -363,15 +363,16 @@ def test_the_bumped_contracts_appended_entries_and_kept_the_earlier_ones():
     """02 §2.1.8: entries are immutable per `contract_version`, so closing a measured
     coverage gap is a VERSION BUMP that appends. Every earlier id must still be there — an
     entry that disappeared would orphan every claim already stamped with it."""
-    # W2a-3b bumped all nine at once, deliberately: `persistence.volatile_paths` moved
-    # into the contracts and entries are immutable per version, so the fleet takes one
-    # bump instead of nine staggered ones. It appended no entry and changed no locator —
-    # tests/fixtures/location_w2/golden/<portal>@<old>.json and @<new>.json are identical
-    # claim for claim.
+    # Untouched by W2a-3e, which is the point of that change: moving every portal's
+    # `persistence.volatile_paths` into these files bumped nothing, because
+    # `contract_sha256` no longer covers `persistence` (mig 408). A version bump here
+    # re-stamps extractor_version and contract_entry_id on every claim the next
+    # incremental scan re-walks, and archive configuration must not be able to spend
+    # that. What versions these ARE is the record of extraction changes only.
     assert {s: c.version for s, c in ALL.items()} == {
-        "remax": 3, "ceskereality": 4, "realitymix": 4,
-        "sreality": 2, "bezrealitky": 2, "bazos": 2, "idnes": 2, "mmreality": 2,
-        "maxima": 2,
+        "remax": 2, "ceskereality": 3, "realitymix": 3,
+        "sreality": 1, "bezrealitky": 1, "bazos": 1, "idnes": 1, "mmreality": 1,
+        "maxima": 1,
     }
     for source, new_ids, earlier_ids in (
         ("remax", {"rx.det.legacy_display_address", "rx.det.legacy_locality"},
@@ -415,12 +416,18 @@ def test_exclusion_zones_name_every_portals_decoy():
     assert "area-listings__item" in str(ALL["remax"].exclusion_zones)
 
 
-def test_contract_sha256_is_taken_from_the_bytes_on_disk():
+def test_contract_sha256_is_taken_from_the_governed_bytes_on_disk():
+    """The bytes on disk minus the two blocks that are not extraction (mig 404, 408) —
+    so the hash covers exactly what a bump of `contract_version` would re-stamp."""
     contract = ALL["maxima"]
     assert contract.path is not None
     import hashlib
-    assert contract.sha256 == hashlib.sha256(contract.path.read_bytes()).digest()
-    assert contracts.extractor_version(contract) == "contract:maxima@2"
+    body = contract.path.read_bytes()
+    assert contract.sha256 == contracts.contract_body_hash(body)
+    assert contract.sha256 != hashlib.sha256(body).digest(), (
+        "maxima declares persistence.volatile_paths, so the governed hash must differ "
+        "from a whole-file hash — otherwise this test proves nothing")
+    assert contracts.extractor_version(contract) == "contract:maxima@1"
 
 
 # ------------------------------------------------------------------ format validation
@@ -640,11 +647,38 @@ def test_projection_is_idempotent_per_version_and_refuses_a_changed_body():
         contracts.project(conn, contract, git_ref="deadbeef")
 
 
+def test_a_persistence_edit_refreshes_the_row_instead_of_demanding_a_version_bump():
+    """`persistence` is outside `contract_sha256` (mig 408) precisely so an archive-config
+    edit is not a version bump — the bump would re-stamp every claim. The psql-readable
+    copy in `fetch_config` therefore has to be brought forward by the next load, or it
+    would freeze at whatever the version first shipped while the scrape applied the file.
+    Nothing else in `fetch_config` can ride along: the rest IS hashed, so on this path it
+    is byte-identical by construction."""
+    contract = ALL["maxima"]
+    import copy
+
+    stale = copy.deepcopy(contract.fetch_config)
+    stale["persistence"] = {"volatile_paths": {}, "version_cap": 20}
+    conn = _FakeConn(existing_sha=contract.sha256.hex(), fetch_config=stale)
+
+    contracts.project(conn, contract, git_ref="deadbeef")
+
+    refreshed = [p for s, p in conn.executed if "SET fetch_config" in s]
+    assert len(refreshed) == 1 and refreshed[0]["id"] == 7
+
+    # …and an unchanged projection writes nothing at all.
+    quiet = _FakeConn(existing_sha=contract.sha256.hex(),
+                      fetch_config=contract.fetch_config)
+    contracts.project(quiet, contract, git_ref="deadbeef")
+    assert not [s for s, _ in quiet.executed if "SET fetch_config" in s]
+
+
 def test_projection_stands_the_incumbent_down_before_activating():
     """The partial unique index allows exactly one active header per source, so the order
     of the two UPDATEs is load-bearing."""
     contract = ALL["maxima"]
-    conn = _FakeConn(existing_sha=contract.sha256.hex())
+    conn = _FakeConn(existing_sha=contract.sha256.hex(),
+                     fetch_config=contract.fetch_config)
     contracts.project(conn, contract, git_ref="deadbeef")
     statements = [s for s, _ in conn.executed if "portal_contracts SET is_active" in s]
     assert "is_active = false" in statements[0]
@@ -680,7 +714,8 @@ class _FakeCursor:
     def fetchone(self):
         sql = " ".join(self._sql.split())
         if "FROM portal_contracts WHERE source" in sql or "encode(contract_sha256" in sql:
-            return (7, self._conn.existing_sha, False) if self._conn.existing_sha else None
+            return ((7, self._conn.existing_sha, False, self._conn.fetch_config)
+                    if self._conn.existing_sha else None)
         return (7,)
 
     def fetchall(self):
@@ -691,8 +726,9 @@ class _FakeConn:
     """Enough psycopg surface to assert on statement ORDER. It cannot catch a CHECK or a
     UNIQUE violation — those belong to the migration's own tests."""
 
-    def __init__(self, existing_sha: str):
+    def __init__(self, existing_sha: str, fetch_config: object = None):
         self.existing_sha = existing_sha
+        self.fetch_config = fetch_config
         self.executed: list[tuple[str, object]] = []
 
     def cursor(self):

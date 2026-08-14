@@ -19,7 +19,7 @@
 # 14.12853 carries 58 rows that are a LEGITIMATE development cluster.
 
 portal: idnes
-contract_version: 2
+contract_version: 1
 extractor_runtime: ">=1.0"
 identity_ladder: [portal_precise_coord, text_geocode]
 
