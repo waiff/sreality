@@ -28,7 +28,6 @@ import psycopg
 import pytest
 
 from location_data import payload_prune, payloads
-from location_data.payload_norm import VolatileProfile
 from location_data.resolver import lease
 
 _DB_URL = os.environ.get("TEST_DATABASE_URL")
@@ -321,11 +320,13 @@ def _append(
     ran under a different one, or because the pin set has moved since.
     """
     kwargs.setdefault("version_cap", 10_000)
+    # No explicit profile: retention is what this lane tests, so it takes the same
+    # (source, page_kind) resolution the live path takes. Inert on these bodies either
+    # way — every measured detail profile here is CSS-only and the bodies are JSON.
     return payloads.append_payload(
         conn, source=source, source_id_native=native, page_kind="detail",
         listing_id=None, body=body, content_type=_JSON, http_status=200,
-        contract_version=1, observed_at=datetime.now(timezone.utc),
-        volatile=VolatileProfile(), **kwargs)
+        contract_version=1, observed_at=datetime.now(timezone.utc), **kwargs)
 
 
 def _versions(conn: psycopg.Connection, native: str) -> list[int]:

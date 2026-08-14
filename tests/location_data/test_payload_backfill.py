@@ -177,7 +177,7 @@ class _Conn:
                 "fetched_at": params["fetched_at"][i],
                 "first_observed_at": params["fetched_at"][i],
                 "last_observed_at": params["fetched_at"][i],
-                "normalizer_version": params["normalizer_version"],
+                "normalizer_version": params["normalizer_version"][i],
                 "version_seq": 1, "pinned": True,
                 "listing_id": None, "contract_version": None, "snapshot_id": None,
             }
@@ -257,7 +257,8 @@ def test_the_identity_hash_is_the_normalised_one_so_volatile_bytes_do_not_split_
     a = b'{"a": 1, "b": 2}'
     b = b'{"b":2,\n   "a":1}'
 
-    da, dbb = encode_for_archive(a, source="bazos"), encode_for_archive(b, source="bazos")
+    da = encode_for_archive(a, source="bazos", page_kind="detail")
+    dbb = encode_for_archive(b, source="bazos", page_kind="detail")
 
     assert da["payload_sha256"] == dbb["payload_sha256"]
     assert da["body_sha256"] != dbb["body_sha256"]
@@ -271,7 +272,7 @@ def test_the_encoder_is_the_live_writers_so_the_two_paths_cannot_drift() -> None
     both through `decode_body`, so it could never see the difference."""
     body = b"<html>" + b"x" * 9000 + b"</html>"
 
-    derived = encode_for_archive(body, source="bazos")
+    derived = encode_for_archive(body, source="bazos", page_kind="detail")
 
     assert (derived["stored"], derived["content_encoding"]) == payloads.encode_body(
         body, gzip_min_bytes=0)
@@ -293,9 +294,12 @@ def test_a_zero_length_body_is_labelled_identity_not_an_empty_gzip_member() -> N
 
 def test_the_content_type_is_sniffed_because_portal_raw_pages_never_recorded_one() -> None:
     """Seven HTML portals and two JSON archivers all wrote into a column called `html`."""
-    assert encode_for_archive(b"<html></html>", source="bazos")["content_type"] == "text/html"
-    assert encode_for_archive(b'{"x":1}', source="sreality")["content_type"] == (
-        "application/json")
+    assert encode_for_archive(
+        b"<html></html>", source="bazos", page_kind="detail",
+    )["content_type"] == "text/html"
+    assert encode_for_archive(
+        b'{"x":1}', source="sreality", page_kind="detail",
+    )["content_type"] == "application/json"
 
 
 def test_a_dry_run_opens_no_batch_row_and_writes_no_payload() -> None:
@@ -614,3 +618,29 @@ def test_the_raw_pages_guard_regex_does_not_false_positive_on_portal_raw_payload
         "DROP TABLE IF EXISTS portal_raw_pages",
     ):
         assert _FORBIDDEN.search(forbidden), forbidden
+
+
+def test_an_index_body_is_migrated_under_the_base_profile_and_its_own_cohort() -> None:
+    """portal_raw_pages holds 7,659 `page_kind='index'` rows across FIVE portals — four
+    of which never had an index profile measured — and this lane is the only writer that
+    carries them. `payload_sha256` is the content ADDRESS, so normalising an index body
+    under a portal's detail profile would bake a hash taken over the wrong projection
+    into every span that ever points at it. One batch mixes both surfaces, so the stamp
+    has to be per ROW."""
+    card = (b'<div class="inzerat"><h2>Byt</h2>'
+            b'<div class="inzeratyview">Videlo: 9 lidi</div></div>')
+    body = b"<html><body>" + card * 3 + b"</body></html>"
+    conn = _Conn([
+        _Page(1, page_kind="detail", body=body),
+        _Page(2, page_kind="index", body=body),
+    ])
+
+    _run(conn)
+
+    detail, index = conn.payloads[0], conn.payloads[1]
+    assert (detail["page_kind"], index["page_kind"]) == ("detail", "index")
+    assert detail["normalizer_version"] == NORMALIZER_VERSION
+    assert index["normalizer_version"] == f"{NORMALIZER_VERSION}+base"
+    # Same bytes, two surfaces: identical raw hash, different content address.
+    assert detail["body_sha256"] == index["body_sha256"]
+    assert detail["payload_sha256"] != index["payload_sha256"]

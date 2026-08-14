@@ -15,7 +15,7 @@ is the tie-breaker). This track records sequencing + shipped state only.
 | W0 "stop the bleeding" | 15 interim fixes + 2 measurements against the CURRENT system | 🟡 in progress (2026-08-10) |
 | W1 registry + claim spine (shadow) | full RÚIAN mirror, claims, resolutions, projection | ✅ shipped 2026-08-12 (migrations 380–389 applied; shadow-only, no consumer reads it) |
 | W1v bezrealitky vertical slice | one portal end-to-end + location-quality dashboard | ✅ shipped 2026-08-13 (every layer exercised in prod; gate answered — portal-inventory-capped, not pipeline-capped) |
-| W2a payload archive rewrite | append-on-change `portal_raw_payloads` | 🟡 in progress (2026-08-14) — instrument live, measured DETAIL profiles for 5 portals (`payload_norm@3`); INDEX surfaces unprofiled and ~100 %; both write flags OFF, awaiting the operator's churn + storage sign-off |
+| W2a payload archive rewrite | append-on-change `portal_raw_payloads` | 🟡 in progress (2026-08-14) — instrument live, measured DETAIL profiles for 5 portals (`payload_norm@3`); profiles now keyed by (source, page_kind), INDEX surfaces on the generic base + a `+base` cohort and still unprofiled; both write flags OFF, awaiting the operator's churn + storage sign-off |
 | W2–W6 | HTML re-mine, history backfill, refetch cohorts, LLM lane, serving flip | ⚪ not started |
 
 ## W0 — done
@@ -510,6 +510,76 @@ Only those three portals archive index pages at all. Their keys are **week-stamp
 ~100 %. **`payload_dual_write` and `payload_index_archive` therefore deserve OPPOSITE
 recommendations on current evidence**, and the two flags exist separately for exactly this
 reason. Nobody has yet diffed an index page to find out what moves on it.
+
+### W2a-3d — profiles are keyed by (source, page_kind), not by portal (2026-08-14, migration 405)
+
+The line above — "none is profiled" — was **not what the code did**. Every profile was
+selected by `source` alone and therefore also applied to index bodies, so those ~100 %
+index figures were measured through detail-page rules that nobody had ever pointed at an
+index page. Fixed before either write flag goes on, which is the cheap moment: nothing is
+archived yet (`portal_raw_payloads` = 0 rows, the backfill has never run), so no content
+address has to be rewritten.
+
+**Measured first, on live pages, because "harmful" and "merely useless" are different
+verdicts.** The prior was that a detail selector describing *other listings* (idnes's
+`div.grid-similar-offers`, ceskereality's `section.s-estates-slide`) would strip an index
+page's whole content and make different pages hash alike. On today's templates it does not:
+
+| surface | what the detail profile did to a live index body |
+| --- | --- |
+| sreality index (JSON, 2.5 MB) | 26 pointers, **0 bytes removed** — they address an estate document; an index page is a list of them |
+| remax index | 21 selectors, **2 matched** (`noscript`, `style`), 173 B of 209 KB |
+| ceskereality index | 22 selectors, **5 matched**, ~1.5 KB of 180 KB — shared chrome plus `input#bug-report-token`; `section.s-estates-slide` matched **0 nodes** on 5 bodies (2 www + 3 region-host slices) |
+| **bazos index** | **`div.inzeratyview` matched 21 nodes** — one per listing card |
+
+Two different index pages still hashed apart in every case, so **change detection was not
+broken**. But bazos shows the mechanism is live, and `portal_raw_pages` holds index rows for
+**five** portals, not three — idnes 4,152, bazos 1,497, remax 770, ceskereality 697,
+sreality 505, maxima 38 (7,659 total, historical: index archiving was removed in June 2026
+and re-enabled for three portals in W0-0n). All of them are input to the W2a-4 backfill,
+which normalises through the same resolver and writes `payload_sha256` — a **permanent**
+content address. So the fix is structural rather than cosmetic: correctness here was
+coincidence, one measured selector wide.
+
+**The shape.** `MEASURED_VOLATILE_PROFILES` is now `source -> page_kind -> profile` (the
+absence of an `index` key on every line is the point), resolved only through
+`resolve_normalisation(source, page_kind)` — one function shared by the churn instrument,
+the archive writer and the backfill, returning the profile **and** the cohort label as one
+`Resolution`. The pair is inseparable on purpose: review found `append_payload` normalising
+under an explicitly-passed `volatile=` profile while stamping `normalizer_version` from the
+profile TABLE, i.e. from whether an entry exists rather than from what was applied. Latent
+today (no production caller passes `volatile`, the store is empty, both flags OFF) and
+load-bearing from W2a-3b, which passes contract-sourced selectors in exactly that shape —
+`normalizer_version` is permanent and its only job is to explain a `payload_sha256`, so a
+row hashed under a real measured profile would have asserted "only the generic base was
+stripped" with nothing downstream able to detect it. An explicit profile now **requires**
+the label that names it (refused otherwise, before any statement runs); overriding the label
+alone stays allowed, which is `record_payload_churn`'s existing probe shape.
+An unmeasured surface gets `BASE_PROFILE`: the shared
+`_HTML_BASE` + `_HTML_ATTRS` and **nothing measured**. Why the base rather than no
+stripping: on a measured surface over-stripping is self-correcting (the residue diff shows
+it); on an unmeasured one it is not — a profile that eats the listing grid reports **0 %**,
+which reads as the best possible result. The base carries only portal-agnostic, content-free
+rules, and it is inert on JSON by construction (no pointers), so the sreality/bezrealitky
+JSON surfaces do not move at all.
+
+**`NORMALIZER_VERSION` stays `payload_norm@3`** — detail normalisation is byte-identical
+across all **26** committed detail fixtures on 8 portals, pinned as digests computed under
+the old code, with the pin's COVERAGE asserted from the fixture tree rather than a hand-kept
+list (`tests/location_data/test_payload_norm_by_page_kind.py`). Instead the cohort label
+is resolved per surface: `normalizer_version_for(source, page_kind)` appends **`+base`**
+where no profile was measured. A global bump would have discarded ~24,600 detail fetches
+across 9 portals to fix an at-most-one-phantom-change artefact on ceskereality's 694 index
+keys — the standing "STOP BUMPING" instruction, honoured with the per-surface answer it was
+asking for. The suffix maintains itself: measure an index profile and that surface leaves
+the `+base` cohort on its own.
+
+**Still not done, deliberately:** no index-surface profile is written here. Diffing index
+pages is its own finding. **And the same collapse is waiting one layer down:**
+`persistence.volatile_paths` in the contract YAML is a single flat list on the contract
+HEADER while `fetch:` beneath it is already a per-`page_kind` list — so W2a's next step,
+which sources selectors from `portal_contract_entries.persistence.volatile_paths`, will
+re-introduce exactly this defect unless that key gains the surface axis first.
 
 **Read the detail table honestly:** one portal has moved, the control is unregressed, and
 sreality's detail surface holds at zero. The rest is blank because a change rate needs the

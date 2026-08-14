@@ -16,8 +16,9 @@ import json
 from pathlib import Path
 
 from location_data.payload_norm import (
-    DEFAULT_VOLATILE_PROFILES,
+    MEASURED_VOLATILE_PROFILES,
     NORMALIZER_VERSION,
+    PAGE_KIND_DETAIL,
     VolatileProfile,
     normalise,
     selector_is_safe,
@@ -201,14 +202,32 @@ def test_content_type_sniffing() -> None:
     assert sniff_content_type(b"") == "application/octet-stream"
 
 
+def _detail_profiles() -> dict[str, VolatileProfile]:
+    """Every portal's DETAIL profile — the only surface any of them was measured on."""
+    return {
+        source: surfaces[PAGE_KIND_DETAIL]
+        for source, surfaces in MEASURED_VOLATILE_PROFILES.items()
+    }
+
+
 def test_every_portal_has_a_profile_and_the_version_is_stamped() -> None:
     sources = {
         "sreality", "bazos", "bezrealitky", "idnes", "mmreality",
         "remax", "ceskereality", "realitymix", "maxima",
     }
 
-    assert sources == set(DEFAULT_VOLATILE_PROFILES)
+    assert sources == set(MEASURED_VOLATILE_PROFILES)
     assert NORMALIZER_VERSION.startswith("payload_norm@")
+
+
+def test_only_the_detail_surface_has_ever_been_measured() -> None:
+    """The profiles come from diffing DETAIL pages (W2a-3b/3c). Adding an entry for
+    another page_kind is a real measurement, not a copy of this one — this pins that
+    no such entry appeared without the evidence, and that no portal's detail entry
+    was dropped (a missing one silently falls back to BASE_PROFILE)."""
+    assert {
+        kind for surfaces in MEASURED_VOLATILE_PROFILES.values() for kind in surfaces
+    } == {PAGE_KIND_DETAIL}
 
 
 def test_default_profiles_apply_cleanly_to_their_portal_body_kind() -> None:
@@ -223,7 +242,7 @@ def test_default_profiles_apply_cleanly_to_their_portal_body_kind() -> None:
     )
     json_body = json.dumps({"price": 1, "stats": {"v": 2}}).encode("utf-8")
 
-    for source, profile in DEFAULT_VOLATILE_PROFILES.items():
+    for source, profile in _detail_profiles().items():
         if not profile.css_selectors:
             result = normalise(json_body, content_type=_JSON, volatile=profile)
             assert b'"price":1' in result.norm_bytes, source
@@ -236,10 +255,10 @@ def test_default_profiles_apply_cleanly_to_their_portal_body_kind() -> None:
         assert b"noscript" not in result.norm_bytes, source
 
     idnes = normalise(
-        html, content_type=_HTML, volatile=DEFAULT_VOLATILE_PROFILES["idnes"],
+        html, content_type=_HTML, volatile=MEASURED_VOLATILE_PROFILES["idnes"][PAGE_KIND_DETAIL],
     )
     bazos = normalise(
-        html, content_type=_HTML, volatile=DEFAULT_VOLATILE_PROFILES["bazos"],
+        html, content_type=_HTML, volatile=MEASURED_VOLATILE_PROFILES["bazos"][PAGE_KIND_DETAIL],
     )
     assert b"advertisement" not in idnes.norm_bytes
     assert b"inzeratyview" not in bazos.norm_bytes
@@ -251,7 +270,7 @@ def test_sreality_profile_strips_the_hashing_module_volatile_keys() -> None:
     which is the direction that corrupts the P2 storage decision."""
     from scraper import hashing
 
-    pointers = set(DEFAULT_VOLATILE_PROFILES["sreality"].json_pointers)
+    pointers = set(MEASURED_VOLATILE_PROFILES["sreality"][PAGE_KIND_DETAIL].json_pointers)
     # `rusReply` is the legacy camelCase alias of `rus_reply`, only ever present
     # in pre-v1 archived raw_json; the live API never emits it.
     expected = (
@@ -287,7 +306,7 @@ def test_key_glob_strips_the_whole_attachment_url_family() -> None:
         "sdn_keep_me": "not an attachment",
         "name": "Byt 3+1",
     }).encode("utf-8")
-    profile = DEFAULT_VOLATILE_PROFILES["sreality"]
+    profile = MEASURED_VOLATILE_PROFILES["sreality"][PAGE_KIND_DETAIL]
 
     a = normalise(body, content_type=_JSON, volatile=profile)
     b = normalise(other, content_type=_JSON, volatile=profile)
@@ -440,7 +459,7 @@ def test_every_shipped_selector_is_usable_not_merely_safe() -> None:
     reality). `usable` is the strict superset: safe AND parseable."""
     unusable = [
         (source, selector)
-        for source, profile in DEFAULT_VOLATILE_PROFILES.items()
+        for source, profile in _detail_profiles().items()
         for selector in profile.css_selectors
         if not selector_is_usable(selector)
     ]
@@ -460,7 +479,9 @@ def test_idnes_measured_profile_strips_the_diff_probe_findings() -> None:
         b'</body></html>'
     )
 
-    result = normalise(html, content_type=_HTML, volatile=DEFAULT_VOLATILE_PROFILES["idnes"])
+    result = normalise(
+        html, content_type=_HTML, volatile=_detail_profiles()["idnes"],
+    )
 
     assert b"15237420345" not in result.norm_bytes
     assert b"62da6c7c" not in result.norm_bytes
@@ -479,7 +500,7 @@ def test_ceskereality_measured_profile_strips_the_diff_probe_findings() -> None:
     )
 
     result = normalise(
-        html, content_type=_HTML, volatile=DEFAULT_VOLATILE_PROFILES["ceskereality"],
+        html, content_type=_HTML, volatile=_detail_profiles()["ceskereality"],
     )
 
     assert b"5BgBggKSAVY6" not in result.norm_bytes
@@ -497,7 +518,7 @@ def test_realitymix_measured_profile_strips_the_diff_probe_findings() -> None:
     )
 
     result = normalise(
-        html, content_type=_HTML, volatile=DEFAULT_VOLATILE_PROFILES["realitymix"],
+        html, content_type=_HTML, volatile=_detail_profiles()["realitymix"],
     )
 
     assert b"0.85" not in result.norm_bytes

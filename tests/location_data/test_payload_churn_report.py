@@ -29,7 +29,8 @@ from typing import Any
 import pytest
 
 from location_data.payload_norm import (
-    DEFAULT_VOLATILE_PROFILES, NORMALIZER_VERSION, probe_normalizer_version,
+    MEASURED_VOLATILE_PROFILES, NORMALIZER_VERSION, PAGE_KIND_DETAIL,
+    probe_normalizer_version,
 )
 from scripts import location_payload_churn_report as rep
 from tests.sql_corpus import first_keyword
@@ -275,7 +276,7 @@ def test_the_cadence_constant_covers_every_portal_the_instrument_measures() -> N
     # The nine volatile profiles are the fleet; a portal with no cadence constant gets a
     # loud marker rather than a wrong number, but it should not be missing in the first
     # place.
-    assert set(rep.CYCLES_PER_DAY) == set(DEFAULT_VOLATILE_PROFILES)
+    assert set(rep.CYCLES_PER_DAY) == set(MEASURED_VOLATILE_PROFILES)
 
 
 def test_an_unknown_source_is_projected_from_what_was_observed_and_marked() -> None:
