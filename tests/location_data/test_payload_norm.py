@@ -504,8 +504,11 @@ def test_realitymix_measured_profile_strips_the_diff_probe_findings() -> None:
     assert b"keep me" in result.norm_bytes
 
 
-def test_normalizer_version_is_2_and_the_probe_cohort_follows_it() -> None:
+def test_normalizer_version_is_3_and_the_probe_cohort_follows_it() -> None:
+    """@3 = the W2a-3c mmreality/remax profiles. `normalizer_version` is in
+    portal_payload_churn's PK (migration 402), so this bump is what keeps the rows
+    measured under the old profiles from averaging into the new cohort."""
     from location_data.payload_norm import probe_normalizer_version
 
-    assert NORMALIZER_VERSION == "payload_norm@2"
-    assert probe_normalizer_version() == "payload_norm@2+probe"
+    assert NORMALIZER_VERSION == "payload_norm@3"
+    assert probe_normalizer_version() == "payload_norm@3+probe"

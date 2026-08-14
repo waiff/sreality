@@ -31,6 +31,18 @@ Rails, same three as the 200x3 confirmation probe next door:
     database; bodies land on disk so `--replay` can re-diff them offline while a
     profile is iterated, with no further traffic.
 
+TIME IS NOT THE ONLY AXIS — `--fresh-session-per-round` (W2a-3c). remax answers
+three fetches seconds apart with BYTE-IDENTICAL bodies and still measured 100%
+normalised change in production. The difference is the HTTP session: a Symfony
+CSRF token is minted per session, so it is a constant inside one `requests.Session`
+and re-rolls for the next one. The live drain is a fresh process per run, hours
+apart, so every production refetch is a cross-session one — and a probe that keeps
+one session measures a strictly weaker thing than the instrument it is explaining.
+The flag builds a NEW client per round (sharing the rate limiter, so politeness and
+the 429/403 penalty do not reset with the session) and is the default for that
+reason. `--no-fresh-session-per-round` isolates the other half when a portal's
+churn needs splitting into per-response and per-session parts.
+
 Usage:
   python -m scripts.location_payload_diff_probe --source idnes --out-dir /tmp/w2a3b
   python -m scripts.location_payload_diff_probe --replay /tmp/w2a3b/idnes
@@ -45,7 +57,7 @@ import logging
 import re
 import sys
 from collections import Counter, defaultdict
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -90,16 +102,23 @@ _PATH_TAIL = 4
 
 # Discovery: which index scope to pull sample detail refs from. One page per
 # portal, the largest category, so the probe costs one extra request per source.
+# The kwargs are that portal's OWN `fetch_index` signature, which is why mmreality
+# (one mixed index, `page`) and remax (one mixed search, `sale=1` = prodej) look
+# nothing like the three category-split portals.
 _DISCOVERY_SCOPE: dict[str, dict[str, Any]] = {
     "idnes": {"sale_type": "prodej", "category": "byty"},
     "realitymix": {"sale_type": "prodej", "category": "byty"},
     "ceskereality": {"sale_type": "prodej", "category": "byty"},
+    "mmreality": {},
+    "remax": {"sale": 1},
 }
 
 _INDEX_PARSERS: dict[str, str] = {
     "idnes": "scraper.idnes_parser",
     "realitymix": "scraper.realitymix_parser",
     "ceskereality": "scraper.ceskereality_parser",
+    "mmreality": "scraper.mmreality_parser",
+    "remax": "scraper.remax_parser",
 }
 
 
@@ -394,8 +413,29 @@ def discover_refs(source: str, client: Any, limit: int) -> list[SampleKey]:
     ]
 
 
+def session_factory(
+    source: str, rate: float, *, fresh_per_round: bool,
+) -> Callable[[int], Any]:
+    """A client per round, or one client for all of them.
+
+    The RateLimiter is deliberately SHARED across the fresh clients: it carries the
+    pacing and the adaptive 429/403 penalty, and re-creating it per round would hand
+    a portal that just throttled us a clean slate three times in a row. Only the
+    HTTP session (cookies, and therefore any session-minted CSRF token) is new.
+    """
+    limiter = RateLimiter(rate)
+    first = build_client(source, limiter)
+
+    def factory(round_index: int) -> Any:
+        if round_index == 0 or not fresh_per_round:
+            return first
+        return build_client(source, limiter)
+
+    return factory
+
+
 def fetch_rounds(
-    source: str, client: Any, keys: Sequence[SampleKey], *,
+    source: str, client_for_round: Callable[[int], Any], keys: Sequence[SampleKey], *,
     fetches: int, pacer: Pacer,
 ) -> dict[str, KeyResult]:
     """Round-major passes: all keys, then all keys again. Never back-to-back.
@@ -408,6 +448,7 @@ def fetch_rounds(
     live = list(keys)
     for round_index in range(fetches):
         gone: set[str] = set()
+        client = client_for_round(round_index)
         for key in live:
             pacer.wait()
             result = fetch_body(source, client, key)
@@ -427,6 +468,7 @@ def fetch_rounds(
 
 def probe_source(
     source: str, *, listings: int, fetches: int, spacing_s: float, out_dir: Path | None,
+    fresh_session: bool = True,
 ) -> dict[str, KeyResult]:
     config = default_config(source)
     configured = config.limits.detail_rate
@@ -434,18 +476,19 @@ def probe_source(
     # only has to be polite: take the politer of the portal's configured rate and
     # this lane's 1/s ceiling.
     rate = min(1.0, configured) if configured and configured > 0 else 1.0
-    client = build_client(source, RateLimiter(rate))
-    keys = discover_refs(source, client, listings)
+    client_for_round = session_factory(source, rate, fresh_per_round=fresh_session)
+    keys = discover_refs(source, client_for_round(0), listings)
     if not keys:
         LOG.warning("DIFF no index items discovered for source=%s", source)
         return {}
-    LOG.info("DIFF start source=%s keys=%d fetches=%d rate=%.2f/s",
-             source, len(keys), fetches, rate)
+    LOG.info("DIFF start source=%s keys=%d fetches=%d rate=%.2f/s fresh_session=%s",
+             source, len(keys), fetches, rate, fresh_session)
     # A round of N keys at `rate` already spaces a key's own fetches by N/rate;
     # the floor only matters for a very small sample.
     per_request = max(1.0 / rate, spacing_s / max(len(keys), 1))
     results = fetch_rounds(
-        source, client, keys, fetches=fetches, pacer=Pacer(min_interval_s=per_request),
+        source, client_for_round, keys, fetches=fetches,
+        pacer=Pacer(min_interval_s=per_request),
     )
     if out_dir is not None:
         save_bodies(out_dir / source, results)
@@ -534,6 +577,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--spacing-s", type=float, default=DEFAULT_SPACING_S)
     parser.add_argument("--out-dir", default="")
     parser.add_argument("--top", type=int, default=40)
+    parser.add_argument(
+        "--fresh-session-per-round", dest="fresh_session",
+        action=argparse.BooleanOptionalAction, default=True,
+        help="new HTTP session per round (default): what the live drain does, and "
+             "the only way to see session-minted CSRF material move",
+    )
     args = parser.parse_args(argv)
 
     logging.basicConfig(
@@ -564,6 +613,7 @@ def main(argv: list[str] | None = None) -> int:
             results = probe_source(
                 source, listings=args.listings, fetches=args.fetches,
                 spacing_s=args.spacing_s, out_dir=out_dir,
+                fresh_session=args.fresh_session,
             )
         except Exception as exc:  # noqa: BLE001 - one portal must not end the sweep
             LOG.error("DIFF source=%s failed: %s", source, exc)

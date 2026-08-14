@@ -12,8 +12,11 @@ pass chase the wrong selector, silently.
 from __future__ import annotations
 
 import json
+from unittest import mock
 
 from location_data.payload_norm import VolatileProfile, normalise
+from scripts import location_payload_diff_probe as diff_probe
+from scripts.location_payload_refetch_probe import Fetched
 from scripts.location_payload_diff_probe import (
     Divergence,
     KeyResult,
@@ -242,3 +245,66 @@ def test_normalise_agrees_with_profile_residue_on_a_measured_profile() -> None:
     normed = [normalise(x, content_type=_HTML, volatile=DEFAULT_VOLATILE_PROFILES["idnes"])
               for x in (a, b)]
     assert normed[0].norm_sha256 == normed[1].norm_sha256
+
+
+# --- the session axis (W2a-3c) ---
+
+
+def test_session_factory_hands_out_a_new_client_per_round_by_default() -> None:
+    """The finding this flag exists for: remax answers three fetches eight seconds
+    apart with byte-identical bodies and still measured 100% in production, because
+    its CSRF material is minted per HTTP SESSION. A probe that reuses one session
+    measures a strictly weaker thing than the instrument it is explaining."""
+    built: list[object] = []
+
+    def fake_build(source: str, limiter: object) -> object:
+        client = object()
+        built.append((client, limiter))
+        return client
+
+    with mock.patch.object(diff_probe, "build_client", fake_build):
+        factory = diff_probe.session_factory("remax", 1.0, fresh_per_round=True)
+        clients = [factory(i) for i in range(3)]
+
+    assert len(set(map(id, clients))) == 3
+    # ...but ONE limiter across all of them: it carries the pacing and the adaptive
+    # 429/403 penalty, and a fresh one per round would hand a portal that just
+    # throttled us a clean slate three times over.
+    assert len({id(limiter) for _client, limiter in built}) == 1
+
+
+def test_session_factory_reuses_one_client_when_the_axis_is_switched_off() -> None:
+    with mock.patch.object(diff_probe, "build_client", lambda s, limiter: object()):
+        factory = diff_probe.session_factory("remax", 1.0, fresh_per_round=False)
+
+        assert factory(0) is factory(1) is factory(2)
+
+
+def test_fetch_rounds_asks_for_a_client_once_per_round_not_once_per_key() -> None:
+    """A new session per KEY would be neither what production does nor polite."""
+    rounds: list[int] = []
+    keys = [
+        diff_probe.SampleKey(source="remax", native_id="1", detail_ref="/a"),
+        diff_probe.SampleKey(source="remax", native_id="2", detail_ref="/b"),
+    ]
+
+    def client_for_round(index: int) -> str:
+        rounds.append(index)
+        return f"client{index}"
+
+    used: list[str] = []
+
+    def fake_fetch(source: str, client: str, key: object) -> object:
+        used.append(client)
+        return Fetched(kind=diff_probe.KIND_OK, body=b"<html/>", content_type=_HTML)
+
+    pacer = diff_probe.Pacer(min_interval_s=0.0, monotonic=lambda: 0.0,
+                             sleep=lambda _s: None)
+    with mock.patch.object(diff_probe, "fetch_body", fake_fetch):
+        results = diff_probe.fetch_rounds(
+            "remax", client_for_round, keys, fetches=3, pacer=pacer,
+        )
+
+    assert rounds == [0, 1, 2]
+    assert used == ["client0"] * 2 + ["client1"] * 2 + ["client2"] * 2
+    assert all(len(r.bodies) == 3 for r in results.values())
