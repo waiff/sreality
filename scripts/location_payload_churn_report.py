@@ -24,7 +24,9 @@ in this module divides by `fetches`.
 **Cohorts are (source, page_kind, normalizer_version), never just source.** Detail and
 index bodies churn for entirely different reasons (an index page re-orders on every
 walk); `normalizer_version` splits a rolling profile change into clean before/after
-cohorts (migration 402), and the confirmation probe writes into its own
+cohorts (migration 402) — it names the ENGINE and a DIGEST of the volatile profile that
+produced the projection (`payload_norm@3+profile@4574b9ef`), or `…+base` where the
+contract declares none for that surface — and the confirmation probe writes into its own
 `…+probe` cohort so its three-fetches-in-ten-minutes cadence can never blend into the
 passive measurement's ~6-hourly one. Because a profile rollout is DESIGNED to leave two
 cohorts on one `(source, page_kind)`, the fleet totals sum the NEWEST cohort per surface
@@ -81,6 +83,10 @@ from location_data.payload_norm import (
     BASE_PROFILE_SUFFIX,
     NORMALIZER_VERSION,
     PROBE_NORMALIZER_SUFFIX,
+    PROFILE_DIGEST_CHARS,
+    PROFILE_DIGEST_SUFFIX,
+    contract_profiles,
+    profile_digest,
 )
 from scraper import db
 
@@ -547,8 +553,13 @@ def _assumptions() -> list[str]:
         f"  normalizer = {NORMALIZER_VERSION}; cohorts ending {PROBE_NORMALIZER_SUFFIX!r} are"
         " the confirmation probe, reported apart",
         f"  cohorts ending {BASE_PROFILE_SUFFIX!r} were hashed with the GENERIC base"
-        " profile — no volatile paths have been measured for that (source, page_kind),"
+        " profile — no volatile paths are DECLARED for that (source, page_kind),"
         " so their rate is an upper bound on a surface, not a verdict on a profile",
+        f"  {PROFILE_DIGEST_SUFFIX!r}<8 hex> DIGESTS the volatile profile that produced"
+        " the projection, so the cohort breaks iff the projection moves — an"
+        " extraction-only contract_version bump keeps these counters, and an edit to"
+        " persistence.volatile_paths opens a clean cohort rather than relabelling them"
+        " (migration 402); `contracts --check` maps a digest back to its contract",
         "  totals sum ONE cohort per (source, page_kind) — the newest; a rollout's older",
         "  cohort is named below the total instead of added to it",
     ]
@@ -586,14 +597,14 @@ def _render_measurement(surfaces: Sequence[Surface]) -> list[str]:
         lines.append(title)
         lines.extend(notes)
         lines.append(
-            f"{'source':<14}{'page_kind':<10}{'cohort':<22}{'rows':>9}{'artefacts':>11}"
+            f"{'source':<14}{'page_kind':<10}{'cohort':<33}{'rows':>9}{'artefacts':>11}"
             f"{'repeat':>9}{'raw':>8}{'norm':>8}{'raw KB':>10}{'norm KB':>10}"
             f"{'interval h':>12}"
         )
         for surface in section:
             row = surface.row
             lines.append(
-                f"{row.source:<14}{row.page_kind:<10}{row.normalizer_version:<22}"
+                f"{row.source:<14}{row.page_kind:<10}{row.normalizer_version:<33}"
                 f"{_num(row.keys):>9}{_num(surface.artefacts):>11}"
                 f"{_num(surface.repeat_fetches):>9}"
                 f"{_pct(surface.raw_change_rate):>8}{_pct(surface.norm_change_rate):>8}"
@@ -611,7 +622,7 @@ def _render_medians(surfaces: Sequence[Surface]) -> list[str]:
     """
     lines: list[str] = []
     header = (
-        f"{'source':<14}{'page_kind':<10}{'cohort':<22}{'raw mean':>10}{'raw med':>10}"
+        f"{'source':<14}{'page_kind':<10}{'cohort':<33}{'raw mean':>10}{'raw med':>10}"
         f"{'norm mean':>11}{'norm med':>10}{'int mean h':>12}{'int med h':>11}"
     )
     for title, _notes, section in _sections(surfaces):
@@ -626,7 +637,7 @@ def _render_medians(surfaces: Sequence[Surface]) -> list[str]:
         for surface in section:
             row = surface.row
             lines.append(
-                f"{row.source:<14}{row.page_kind:<10}{row.normalizer_version:<22}"
+                f"{row.source:<14}{row.page_kind:<10}{row.normalizer_version:<33}"
                 f"{_kb(row.mean_raw_bytes):>10}{_kb(row.median_raw_bytes):>10}"
                 f"{_kb(row.mean_norm_bytes):>11}{_kb(row.median_norm_bytes):>10}"
                 f"{_hours(row.mean_interval_s):>12}{_hours(row.median_interval_s):>11}"
@@ -644,14 +655,14 @@ def _render_projection(surfaces: Sequence[Surface]) -> list[str]:
         "PROJECTION over the ARTEFACTS MEASURED (not the portal's inventory — next table)",
         "  GB/month is at the OBSERVED cadence wherever there is one; 'cyc/day' is the",
         "  declared index-walk schedule, shown only so a divergence is visible",
-        f"{'source':<14}{'page_kind':<10}{'cohort':<22}{'base':>10}{'cyc/day':>9}"
+        f"{'source':<14}{'page_kind':<10}{'cohort':<33}{'base':>10}{'cyc/day':>9}"
         f"{'obs/day':>9}{'GB/cycle':>10}{'GB/month':>10}{'raw GB/mo':>11}  marker",
     ]
     for surface in passive:
         row = surface.row
         marker = " ".join(part for part in (surface.insufficient, surface.cadence_note) if part)
         lines.append(
-            f"{row.source:<14}{row.page_kind:<10}{row.normalizer_version:<22}"
+            f"{row.source:<14}{row.page_kind:<10}{row.normalizer_version:<33}"
             f"{_num(surface.artefacts):>10}"
             f"{(f'{surface.cycles_per_day:g}' if surface.cycles_per_day else '—'):>9}"
             f"{(f'{surface.observed_cycles_per_day:.2f}' if surface.observed_cycles_per_day else '—'):>9}"
@@ -706,7 +717,7 @@ def _render_inventory_scaled(
         "PROJECTION scaled to the ACTIVE INVENTORY (detail surfaces only)",
         "  assumes every active listing churns like the measured sample; index surfaces",
         "  have no inventory analogue and are absent here, not zero",
-        f"{'source':<14}{'cohort':<22}{'active':>10}{'measured':>10}{'GB/cycle':>10}"
+        f"{'source':<14}{'cohort':<33}{'active':>10}{'measured':>10}{'GB/cycle':>10}"
         f"{'GB/month':>10}{'raw GB/mo':>11}  marker",
     ]
     total = 0.0
@@ -723,7 +734,7 @@ def _render_inventory_scaled(
             ) if part
         )
         lines.append(
-            f"{surface.row.source:<14}{surface.row.normalizer_version:<22}"
+            f"{surface.row.source:<14}{surface.row.normalizer_version:<33}"
             f"{_num(active):>10}{_num(surface.artefacts):>10}"
             f"{_gb(surface.gb_per_cycle(active)):>10}{_gb(month):>10}"
             f"{_gb(surface.gb_per_month_raw(active)):>11}  {marker}"
@@ -825,6 +836,21 @@ def _iso(value: datetime.datetime | None) -> str | None:
     return None if value is None else value.astimezone(datetime.UTC).isoformat()
 
 
+def _profile_digests() -> dict[str, dict[str, str]]:
+    """`{source: {page_kind: <8 hex>}}` for the contracts in THIS image — the map from a
+    cohort label back to the declaration it names. Empty (never fatal) if the contracts
+    cannot be read: a readout of counters already written must not depend on them."""
+    try:
+        registry = contract_profiles()
+    except Exception:  # noqa: BLE001 - a report is not a place to fail on a side fact
+        return {}
+    digests: dict[str, dict[str, str]] = {}
+    for (source, page_kind), profile in sorted(registry.profiles.items()):
+        digests.setdefault(source, {})[page_kind] = (
+            profile_digest(profile)[:PROFILE_DIGEST_CHARS])
+    return digests
+
+
 def to_json(measurement: Measurement) -> dict[str, Any]:
     _newest, superseded = newest_cohorts(measurement.surfaces)
     return {
@@ -832,6 +858,11 @@ def to_json(measurement: Measurement) -> dict[str, Any]:
         "normalizer_version": NORMALIZER_VERSION,
         "probe_cohort_suffix": PROBE_NORMALIZER_SUFFIX,
         "base_profile_cohort_suffix": BASE_PROFILE_SUFFIX,
+        "profile_cohort_suffix": PROFILE_DIGEST_SUFFIX,
+        # The digest a cohort label carries is a content address, not a name: this is
+        # how a readout is traced back to the contract that declares it TODAY (the
+        # contract may have been bumped since for reasons the digest correctly ignores).
+        "profile_digests_on_disk": _profile_digests(),
         "assumptions": {
             "bytes_per_gb": BYTES_PER_GB,
             "days_per_month": DAYS_PER_MONTH,

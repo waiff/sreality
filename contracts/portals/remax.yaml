@@ -49,7 +49,34 @@ fetch:
         fetches those cards — carry-through costs zero extra requests [live-B §3.5.2]."
 
 persistence:
-  volatile_paths: [/image_urls, /price_text]
+  # What this portal's body carries that changes without the listing changing —
+  # PER page_kind, because a detail page is one property and an index page is a
+  # LIST of them, and every rule below came from diffing DETAIL pages (02 §2.3.2
+  # P1; W2a-3b/3c measured them, W2a-3d fixed the keying). `base:` names the
+  # portal-agnostic floor `location_data.payload_norm` applies underneath —
+  # `html` = third-party analytics loaders matched by src, page chrome, CSRF
+  # material, per-response attributes; `none` = no floor. A page_kind ABSENT here
+  # is not declared: it is normalised with that floor alone and counted in its own
+  # `+base` cohort, which is the honest state for every surface but `detail`.
+  # Declaring an index profile takes an index diff, which nobody has run.
+  volatile_paths:
+    detail:
+      base: html
+      css_selectors:
+        # W2a-3c: byte-identical WITHIN a session (3 fetches 8s apart, 5/5 listings)
+        # and 5/5 different ACROSS sessions — its churn is minted per HTTP SESSION,
+        # and the live drain is a fresh process every run. Three things move, all
+        # Symfony CSRF tokens; two are already covered as DOM nodes by the floor
+        # (dalten_web_listing_contact_form__token, mortgage_contact_form__token).
+        # The third is the one that made this portal measure 100%, and it is a shape
+        # no CSS selector can reach: the share widget's Bootstrap popover carries an
+        # ENTIRE ESCAPED <form> inside its `data-content` ATTRIBUTE, with a `_token`
+        # input of its own. It is a STRING, not a node, so input[name*="_token"]
+        # cannot see it however wide that rule is widened. Stripping the two popover
+        # buttons is the narrowest expressible form; both are chrome (a
+        # Facebook/Twitter share pair and a mail-to-a-friend form) and the listing
+        # URL they interpolate survives in the canonical link and og:url.
+        - "div.pd-share__buttons button[data-content]"
   version_cap: 20
 
 exclusion_zones:

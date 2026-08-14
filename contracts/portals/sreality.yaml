@@ -38,11 +38,62 @@ fetch:
       robots_note: "same JSON API as the detail surface"
 
 persistence:
+  # What this portal's body carries that changes without the listing changing —
+  # PER page_kind, because a detail page is one property and an index page is a
+  # LIST of them, and every rule below came from diffing DETAIL pages (02 §2.3.2
+  # P1; W2a-3b/3c measured them, W2a-3d fixed the keying). `base:` names the
+  # portal-agnostic floor `location_data.payload_norm` applies underneath —
+  # `html` = third-party analytics loaders matched by src, page chrome, CSRF
+  # material, per-response attributes; `none` = no floor. A page_kind ABSENT here
+  # is not declared: it is normalised with that floor alone and counted in its own
+  # `+base` cohort, which is the honest state for every surface but `detail`.
+  # Declaring an index profile takes an index diff, which nobody has run.
   volatile_paths:
-    - /stats
-    - /_embedded
-    - /advert_images
-    - /panorama_data
+    detail:
+      # base: none — the body is the v1 estate JSON. The `html` floor is inert on a
+      # JSON surface by construction (only json_pointers are read), so stating `none`
+      # says what happens rather than relying on that.
+      base: none
+      json_pointers:
+        # The JSON form of scraper.hashing's already-proven volatile key set — view
+        # counters, re-promotion dates, session/recommendation blocks, the firmy.cz
+        # review counters — plus the re-signed sdn.cz media URLs, which that module
+        # documents as "re-signs wholesale … same image id, different path" and which
+        # are the single largest source of sreality byte churn.
+        #
+        # One member of that set is deliberately absent: hashing.py also drops the
+        # `items` entry NAMED "Aktualizace", a value predicate no JSON pointer can
+        # express. It is a timestamp item, so it inflates the measured rate slightly —
+        # the safe direction (over-, not under-stating churn).
+        - /stats
+        - /params/stats   # legacy camelCase raw_json puts the view counter here
+        - /edited
+        - /labels
+        - /labels_extended
+        - /is_topped
+        - /is_topped_today
+        - /logged_in
+        - /note
+        - /rus
+        - /rus_reply
+        - /user/image
+        - /premise/logo
+        - /premise/review_count
+        - /premise/review_score
+        - /premise/premise_paid_firmy
+        - /premise/company/sos_custom_advert_card  # flips false<->true portal-side
+        - /advert_images/-/url
+        - /advert_images/-/kind
+        - /advert_images/-/width
+        - /advert_images/-/height
+        - /videos/-/url
+        - /items/-/topped
+        # hashing.py's _ATTACHMENT_URL_PREFIX/_SUFFIX rule as a key glob: the
+        # energy-certificate PDFs re-sign the way the image URLs do, and enumerating
+        # today's members would miss tomorrow's.
+        - /sdn_*_attachment_url
+        - /_embedded/favourite
+        - /_embedded/note
   version_cap: 20
 
 payload_schema_detector:

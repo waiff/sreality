@@ -54,7 +54,25 @@ fetch:
       cadence: "on registry re-baseline; NEVER per listing"
 
 persistence:
-  volatile_paths: [/image_urls, /mainImage, /publicImages]
+  # What this portal's body carries that changes without the listing changing —
+  # PER page_kind, because a detail page is one property and an index page is a
+  # LIST of them, and every rule below came from diffing DETAIL pages (02 §2.3.2
+  # P1; W2a-3b/3c measured them, W2a-3d fixed the keying). `base:` names the
+  # portal-agnostic floor `location_data.payload_norm` applies underneath —
+  # `html` = third-party analytics loaders matched by src, page chrome, CSRF
+  # material, per-response attributes; `none` = no floor. A page_kind ABSENT here
+  # is not declared: it is normalised with that floor alone and counted in its own
+  # `+base` cohort, which is the honest state for every surface but `detail`.
+  # Declaring an index profile takes an index diff, which nobody has run.
+  volatile_paths:
+    detail:
+      # base: none — the body is a GraphQL response carrying exactly the closed
+      # field list `_DETAIL_QUERY` asks for: no ads, no tokens, no counters, and no
+      # HTML chrome for the `html` floor to strip. Declared and EMPTY is a
+      # measurement ("nothing here churns"), not an absence — it keeps this
+      # surface's own cohort instead of the `+base` one, and the readout is what
+      # will show whether the image URLs re-sign.
+      base: none
   version_cap: 20
 
 exclusion_zones:

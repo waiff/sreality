@@ -38,16 +38,29 @@ from location_data.payload_norm import (
     _HTML_BASE,
     BASE_PROFILE,
     BASE_PROFILE_SUFFIX,
-    MEASURED_VOLATILE_PROFILES,
     NORMALIZER_VERSION,
     PAGE_KIND_DETAIL,
+    PROFILE_DIGEST_CHARS,
+    PROFILE_DIGEST_SUFFIX,
     Resolution,
     VolatileProfile,
+    contract_profiles,
     normalise,
     normalizer_version_for,
+    profile_digest,
     resolve_normalisation,
     volatile_profile,
 )
+
+
+def _cohort(source: str, page_kind: str = PAGE_KIND_DETAIL) -> str:
+    """The label a declared surface must carry: the engine plus a digest of the profile
+    the contract declares for it. Recomputed from the registry, never from the resolver
+    under test."""
+    profile = contract_profiles().profile(source, page_kind)
+    assert profile is not None, (source, page_kind)
+    return (f"{NORMALIZER_VERSION}{PROFILE_DIGEST_SUFFIX}"
+            f"{profile_digest(profile)[:PROFILE_DIGEST_CHARS]}")
 
 _FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"
 _HTML = "text/html; charset=utf-8"
@@ -173,7 +186,7 @@ def test_detail_normalisation_is_byte_identical_to_payload_norm_3(
 
 def test_an_unmeasured_surface_gets_the_generic_base_not_the_portals_detail_rules() -> None:
     """A (source, page_kind) nobody has diffed — and an unknown portal entirely."""
-    for source in MEASURED_VOLATILE_PROFILES:
+    for source in contract_profiles().versions:
         for page_kind in (_INDEX, "map", "gazetteer", "snapshot", "archive", "none"):
             assert volatile_profile(source, page_kind) is BASE_PROFILE, (source, page_kind)
     assert volatile_profile("a-portal-onboarded-next-week", PAGE_KIND_DETAIL) is BASE_PROFILE
@@ -192,7 +205,7 @@ def test_the_base_profile_is_only_the_portal_agnostic_shared_rules() -> None:
 def test_no_measured_detail_selector_can_reach_an_index_body() -> None:
     """The property, over every portal: what an index body is normalised with is a
     subset of the shared base, with no portal-specific rule in it."""
-    for source in MEASURED_VOLATILE_PROFILES:
+    for source in contract_profiles().versions:
         index_rules = set(volatile_profile(source, _INDEX).css_selectors)
         detail_only = set(
             volatile_profile(source, PAGE_KIND_DETAIL).css_selectors
@@ -293,20 +306,30 @@ def test_a_per_listing_detail_node_repeats_once_per_card_on_an_index() -> None:
     assert b"Byt 2" in on_index.norm_bytes
 
 
-def test_the_base_cohort_is_named_so_two_instruments_never_average_together() -> None:
-    """`normalizer_version` is in portal_payload_churn's PK. A surface hashed with the
-    generic base is a different instrument from one hashed with a measured profile, so
-    it gets its own cohort — and every portal's DETAIL cohort keeps the bare version,
-    which is what stops this change from discarding the evidence accumulating there."""
-    for source in MEASURED_VOLATILE_PROFILES:
-        assert normalizer_version_for(source, PAGE_KIND_DETAIL) == NORMALIZER_VERSION
+def test_the_cohort_label_names_both_axes_that_can_move_a_byte() -> None:
+    """`normalizer_version` is in portal_payload_churn's PK. Two independent things
+    can move a normalised byte — the ENGINE (this module's algorithm) and the PROFILE
+    (what the portal's contract declares) — so both are named, or one of them could move
+    a permanent content address with no cohort break to show for it. The profile half is
+    a DIGEST of the rules, never the contract_version carrying them: a version moves for
+    extraction reasons, and orphaning a surface's counters for a locator fix is exactly
+    the waste NORMALIZER_VERSION refuses on the engine axis.
+
+    A surface no contract declares is a different instrument again: the generic base,
+    which belongs to the normaliser and is identical under every contract version. So
+    it keeps `+base` across the move to contracts, and the index cohorts accumulating
+    today are not thrown away by it."""
+    registry = contract_profiles()
+    for source in registry.versions:
+        assert normalizer_version_for(source, PAGE_KIND_DETAIL) == _cohort(source)
         assert normalizer_version_for(source, _INDEX) == (
             NORMALIZER_VERSION + BASE_PROFILE_SUFFIX)
 
-    # An entry that exists but is EMPTY is a measurement ("nothing here churns"), not a
-    # fallback — bezrealitky's null detail profile must not be relabelled as base.
-    assert MEASURED_VOLATILE_PROFILES["bezrealitky"][PAGE_KIND_DETAIL].css_selectors == ()
-    assert normalizer_version_for("bezrealitky", PAGE_KIND_DETAIL) == NORMALIZER_VERSION
+    # A declaration that exists but is EMPTY is a measurement ("nothing here churns"),
+    # not a fallback — bezrealitky's null detail profile must not be relabelled base.
+    assert volatile_profile("bezrealitky", PAGE_KIND_DETAIL).css_selectors == ()
+    assert normalizer_version_for("bezrealitky", PAGE_KIND_DETAIL) == _cohort(
+        "bezrealitky")
 
     assert normalizer_version_for("unknown-portal", PAGE_KIND_DETAIL) == (
         NORMALIZER_VERSION + BASE_PROFILE_SUFFIX)
@@ -317,11 +340,11 @@ def test_the_profile_and_its_cohort_label_are_resolved_from_one_surface() -> Non
     the one applied. Asking the two questions separately is what let a row normalised
     under a caller's profile be stamped from the profile TABLE — a permanent content
     address explained by an instrument that never touched it."""
-    for source in (*MEASURED_VOLATILE_PROFILES, "a-portal-onboarded-next-week"):
+    for source in (*contract_profiles().versions, "a-portal-onboarded-next-week"):
         for page_kind in (PAGE_KIND_DETAIL, _INDEX, "map", "gazetteer"):
             resolved = resolve_normalisation(source, page_kind)
 
-            assert resolved.profile is volatile_profile(source, page_kind)
+            assert resolved.profile == volatile_profile(source, page_kind)
             assert resolved.normalizer_version == normalizer_version_for(
                 source, page_kind)
             # The one question that separates the two instruments: the label says
@@ -335,16 +358,20 @@ def test_the_profile_and_its_cohort_label_are_resolved_from_one_surface() -> Non
     bezrealitky = resolve_normalisation("bezrealitky", PAGE_KIND_DETAIL)
     assert bezrealitky.profile == VolatileProfile()
     assert bezrealitky.profile is not BASE_PROFILE
-    assert bezrealitky.normalizer_version == NORMALIZER_VERSION
+    assert bezrealitky.normalizer_version.startswith(
+        NORMALIZER_VERSION + PROFILE_DIGEST_SUFFIX)
 
 
 def test_a_normaliser_bump_carries_through_the_pair_together() -> None:
     """`version=` reaches the label without touching the profile — the cohort moves,
     the projection does not, which is what a bump means."""
+    digest = profile_digest(
+        contract_profiles().profile("idnes", PAGE_KIND_DETAIL))[:PROFILE_DIGEST_CHARS]
     bumped = resolve_normalisation("idnes", PAGE_KIND_DETAIL, "payload_norm@99")
 
-    assert bumped.normalizer_version == "payload_norm@99"
-    assert bumped.profile is volatile_profile("idnes", PAGE_KIND_DETAIL)
+    assert bumped.normalizer_version == (
+        f"payload_norm@99{PROFILE_DIGEST_SUFFIX}{digest}")
+    assert bumped.profile == volatile_profile("idnes", PAGE_KIND_DETAIL)
     assert resolve_normalisation("idnes", _INDEX, "payload_norm@99") == Resolution(
         profile=BASE_PROFILE,
         normalizer_version="payload_norm@99" + BASE_PROFILE_SUFFIX,

@@ -23,9 +23,10 @@ Three rails, none of them optional:
     be a second, impolite front door to nine portals.
   * **It writes churn rows and nothing else.** No `portal_raw_pages` row, no payload row,
     no listing write. The only statement it runs besides its own sample read is
-    `db.record_payload_churn`, under `payload_norm.probe_normalizer_version()` — its own
-    cohort, so a cadence of minutes can never contaminate the passive readout the storage
-    gate is signed from.
+    `db.record_payload_churn`, under the probe suffix COMPOSED ONTO the surface's own
+    cohort label — its own cohort, so a cadence of minutes can never contaminate the
+    passive readout the storage gate is signed from, while still naming the profile it
+    actually applied (`payload_norm@3+profile@4574b9ef+probe`).
   * **Round-major, sequential, paced.** All keys in round 1, then all keys in round 2:
     one listing is never hammered back-to-back, and the spacing between a key's own
     fetches is the length of a round. A budget stop lands wherever the clock ran out —
@@ -57,7 +58,11 @@ from typing import Any
 import psycopg
 
 from location_data import loader_db
-from location_data.payload_norm import probe_normalizer_version, sniff_content_type
+from location_data.payload_norm import (
+    normalizer_version_for,
+    probe_normalizer_version,
+    sniff_content_type,
+)
 from location_data.resolver import lease
 from scraper import db
 from scraper.portal import PortalConfig, default_config, load_portal_config
@@ -448,7 +453,11 @@ def probe_source(
             return True
     else:
         client = build_client(source, limiter)
-        cohort = probe_normalizer_version()
+        # COMPOSED, not the bare version: `record_payload_churn` resolves the profile
+        # from (source, page_kind) itself, so a hard-coded `payload_norm@N+probe` would
+        # stamp a cohort naming an instrument other than the one applied the moment the
+        # profile stopped being this module's to name (W2a-3b moved it to the contracts).
+        cohort = probe_normalizer_version(normalizer_version_for(source, PAGE_KIND))
 
         def fetch(key: SampleKey) -> Fetched:
             return fetch_body(source, client, key)

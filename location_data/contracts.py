@@ -10,18 +10,24 @@ Two tables, one header + its immutable entries (migration 382):
   portal_contract_entries (contract_id, entry_id, surface, page_kind, locator, claim_type,
                            extraction_method, …)
 
-`is_active` lives on the HEADER (the partial unique index is per source), and it and
-`shadow` (migration 404) are the only mutable columns: a change to any entry is a new
-`contract_version`, never an edit. Projecting a contract whose bytes changed under an
-already-loaded version is refused — that is the whole point of `contract_sha256`. Both
-mutable columns are operational state, not extraction: `is_active` says which version the
-extractor runs, `shadow` says whether what it mined is admissible to the resolver yet.
+`is_active` lives on the HEADER (the partial unique index is per source). A change to any
+ENTRY is a new `contract_version`, never an edit, and projecting a contract whose governed
+bytes changed under an already-loaded version is refused — that is the whole point of
+`contract_sha256`. Three header columns are mutable, none of them extraction: `is_active`
+says which version the extractor runs, `shadow` (migration 404) says whether what it mined
+is admissible to the resolver yet, and `fetch_config` carries the two blocks the hash does
+not govern (`contract_body_hash`), so its `persistence` copy tracks git rather than
+freezing at whatever version first shipped it.
 
-PyYAML is a DEV/CI dependency (pyproject `[dev]`, already present for
-scripts/generate_workflow_docs.py) and is imported lazily: this module is a deploy-time
-lane, exactly like the workflow-docs codegen. The claims extractor
-(`location_data.claims_intake`) reads the DB projection and never parses YAML, so the
-scraper/API runtime images stay untouched.
+This module is the deploy-time/CI lane and imports PyYAML lazily. The claims extractor
+(`location_data.claims_intake`) reads the DB projection and never parses YAML.
+
+ONE KEY IS READ FROM GIT AT RUNTIME, not from the projection: `persistence.volatile_paths`
+(W2a-3b). `location_data.payload_norm` parses it out of these same files with the same
+parser this module validates them with, because `payload_sha256` is a PERMANENT content
+address and the projection producing it must be a function of the deployed artefact alone
+— never of whether the contract-load job had run yet. That is why `contracts/` is COPYed
+into the image and PyYAML is a runtime dependency. Everything else here stays deploy-time.
 
 CLI:
     python -m location_data.contracts --check                     # validate only, no DB
@@ -51,6 +57,7 @@ from typing import Any
 
 import psycopg
 
+from location_data import payload_norm
 from scraper import db
 
 LOG = logging.getLogger("location_data.contracts")
@@ -79,7 +86,12 @@ CLAIM_SURFACES = frozenset({
     "jsonld", "url_slug", "description", "archived_html", "legacy_column", "registry",
     "operator_input",
 })
-PAGE_KINDS = frozenset({"index", "detail", "map", "gazetteer", "snapshot", "archive", "none"})
+# Defined in `payload_norm` and re-exported here, not copied: both this gate and the
+# runtime profile loader validate a declared `volatile_paths` page_kind against it, and
+# payload_norm is the one that must stay importable without this lane. Two copies could
+# disagree, and the way they would show it is a contract that passes CI and silently
+# resolves to the base profile in production.
+PAGE_KINDS = payload_norm.PAGE_KINDS
 EXTRACTION_METHODS = frozenset({
     "portal_structured_field", "portal_declared_quality", "html_selector_parse",
     "url_slug_parse", "breadcrumb_parse", "jsonld_parse", "map_widget_parse", "regex_text",
@@ -315,6 +327,13 @@ class PortalContract:
     # UPDATE on the header, not a contract_version bump.
     shadow: bool = False
     entries: list[ContractEntry] = field(default_factory=list)
+    # `persistence.volatile_paths`, parsed: {page_kind: profile}. 02 §2.3.2 P1 —
+    # `payload_sha256` addresses a NORMALISED body, and this is what normalises it, so
+    # a change to it moves a PERMANENT content address. It is modelled here rather than
+    # left inside the `fetch_config` blob so the CI `--check` gate refuses a bad
+    # selector (see `payload_norm.parse_profile_block`) instead of projecting it and
+    # letting the silent normaliser no-op it in production.
+    volatile_profiles: dict[str, payload_norm.VolatileProfile] = field(default_factory=dict)
     path: Path | None = None
 
 
@@ -565,26 +584,90 @@ _TOP_LEVEL_KEYS = frozenset({
     "payload_schema_detector", "pin_collision_semantics",
 })
 
-# `shadow` is operational state, not extraction (migration 404), so it is excluded from
-# `contract_sha256`. Hashing it makes the flag a version-bumping change in git while the
-# migration calls it "an operational UPDATE, not a contract_version bump": deleting the
-# now-obsolete `shadow: true` line after a sample passes would make `project()` refuse the
-# contract with "bump contract_version" — and bumping it would RE-SHADOW the contract and
-# discard the passed sample. A top-level key is never indented, so this anchored line
-# filter cannot reach a nested `shadow:` inside an extraction, and a file without the key
-# hashes to exactly what it hashed to before (asserted over all nine shipped contracts).
+# A HASH COVERS WHAT IT GOVERNS. `contract_sha256` governs the EXTRACTION half of this
+# file — it is the immutability gate on `portal_contract_entries`, and `contract_version`,
+# the thing a mismatch demands you bump, is what `extractor_version` and every claim's
+# `contract_entry_id` name. Two top-level keys are not extraction and are therefore not
+# hashed:
+#
+# `shadow` is operational state (migration 404). Hashing it makes the flag a
+# version-bumping change in git while the migration calls it "an operational UPDATE, not a
+# contract_version bump": deleting the now-obsolete `shadow: true` line after a sample
+# passes would make `project()` refuse the contract with "bump contract_version" — and
+# bumping it would RE-SHADOW the contract and discard the passed sample.
+#
+# `persistence` is ARCHIVE configuration (W2a-3e): `volatile_paths` decides the projection
+# `payload_sha256` is taken over, and `version_cap` is retention. Neither reaches a claim.
+# Hashed, they made an archive edit re-version the extractor, and re-versioning the
+# extractor re-inserts the claims corpus: `location_claim_fingerprint` (migration 386)
+# takes `extractor_version` and `contract_entry_id`, and its UNIQUE index (migration 382)
+# is what dedupes an incremental re-walk. In August 2026 that was 5.1M rows / 2.6 GB of
+# `location_claims`, duplicated for a selector edit, in a subsystem with ~4 GB of
+# allowance left — and once per future tweak. The profiles keep their own identity
+# instead: `payload_norm.profile_digest`, which moves iff the projection moves.
+#
+# A top-level key is never indented, so these anchored filters cannot reach a nested
+# `shadow:`/`persistence:` inside an extraction. The block filter takes the key's line
+# plus every line under it that is indented or blank, which is exactly YAML's own block
+# extent — the narrative comments live inside the block and travel with it.
+#
+# CHANGING WHAT IS EXCLUDED RE-DIALECTS EVERY STORED HASH. Rows projected under the old
+# definition no longer match, and `project()` refuses them by design. Migration 408 is
+# that one-time restatement for the nine contracts live when `persistence` was excluded;
+# a further exclusion needs the same treatment.
 _SHADOW_LINE = re.compile(rb"^shadow[ \t]*:.*(?:\r?\n|$)", re.MULTILINE)
+_PERSISTENCE_BLOCK = re.compile(
+    rb"^persistence[ \t]*:.*(?:\r?\n|$)(?:(?:[ \t][^\n]*)?(?:\r?\n|$))*", re.MULTILINE)
 
 
 def contract_body_hash(body: bytes) -> bytes:
-    """The bytes `contract_sha256` is taken over: the file, minus its `shadow:` line."""
-    return hashlib.sha256(_SHADOW_LINE.sub(b"", body)).digest()
+    """The bytes `contract_sha256` is taken over: the file, minus the two blocks that are
+    not extraction — its `shadow:` line and its `persistence:` block."""
+    governed = _PERSISTENCE_BLOCK.sub(b"", _SHADOW_LINE.sub(b"", body))
+    return hashlib.sha256(governed).digest()
+
+
+# An unindented line ends the block for `_PERSISTENCE_BLOCK`, and a comment at column 0
+# is unindented — so a note written flush-left inside `persistence:` would silently
+# re-govern everything below it. The next selector edit would then move the hash,
+# `project()` would refuse it, and the refusal says `persistence:` is excluded and
+# therefore cannot be what moved it. That sentence would be false in exactly this state,
+# and the operator following it bumps `contract_version` — spending the 2.6 GB of
+# duplicated `location_claims` this exclusion exists to save. Refuse the shape instead;
+# an indented comment is the normal one and still travels with the block.
+_COL0_COMMENT = re.compile(rb"^#")
+_TOP_LEVEL_KEY = re.compile(rb"^[A-Za-z_]")
+
+
+def _refuse_unindented_comment_in_persistence(path: Path, body: bytes) -> None:
+    """`_PERSISTENCE_BLOCK` ends at the first unindented line, and a comment at column 0
+    is unindented — so a note written flush-left inside `persistence:` truncates the
+    exclusion and silently re-governs everything below it. The next selector edit then
+    moves `contract_sha256`, `project()` refuses it, and the refusal says `persistence:`
+    is excluded and so cannot be what moved it. That sentence is false in exactly this
+    state, and an operator following it bumps `contract_version` — spending the 2.6 GB of
+    duplicated `location_claims` this exclusion exists to save. Refuse the shape; an
+    indented comment is the normal one and travels with the block."""
+    lines = body.split(b"\n")
+    for i, line in enumerate(lines):
+        if not re.match(rb"^persistence[ \t]*:", line):
+            continue
+        for follower in lines[i + 1:]:
+            if _COL0_COMMENT.match(follower):
+                raise ContractError(
+                    f"{path}: a comment at column 0 inside `persistence:` ends the block, "
+                    f"so everything after it silently re-enters contract_sha256 — and the "
+                    f"refusal you would then get claims `persistence:` cannot be what "
+                    f"moved the hash. Indent it to keep it inside the block.")
+            if _TOP_LEVEL_KEY.match(follower):
+                break
 
 
 def parse_contract(path: Path) -> PortalContract:
     import yaml  # dev/CI-only dependency; see the module docstring.
 
     body = path.read_bytes()
+    _refuse_unindented_comment_in_persistence(path, body)
     doc = yaml.safe_load(body.decode("utf-8"))
     if not isinstance(doc, dict):
         raise ContractError(f"{path}: not a YAML mapping")
@@ -600,6 +683,24 @@ def parse_contract(path: Path) -> PortalContract:
     version = int(_require(doc, "contract_version", str(path)))
     if version < 1:
         raise ContractError(f"{path}: contract_version must be >= 1")
+
+    persistence = dict(doc.get("persistence") or {})
+    # The load-time gate a selector out of YAML needs, run HERE because this is the
+    # last place refusing is allowed: `payload_norm.normalise` is silent by contract
+    # (a malformed selector raises inside selectolax and `:contains()` SEGFAULTS it —
+    # exit 139, uncatchable), so a typo that reaches it does not fail, it quietly
+    # stops stripping and the portal's measured change rate moves for no reason
+    # anybody can see. The test suite parses every contract through here, so a typo
+    # fails `test.yml` on the push that introduces it; `--check` is the same gate on
+    # demand, and `--load` runs it again at deploy time.
+    try:
+        volatile_profiles = payload_norm.parse_volatile_paths(
+            persistence.get("volatile_paths"),
+            where=f"{path.name}:persistence.volatile_paths",
+            page_kinds=PAGE_KINDS,
+        )
+    except payload_norm.ProfileError as exc:
+        raise ContractError(str(exc)) from exc
 
     entries = [
         parse_entry(raw, source=source, index=i)
@@ -617,20 +718,29 @@ def parse_contract(path: Path) -> PortalContract:
         # The file's `contract_sha256` field is documentation only — a file cannot carry
         # its own hash. The projection hashes the bytes on disk, which is what makes the
         # git artefact and the DB row provably identical (02 §2.1.8 mechanism 1) — minus
-        # the one line that is operational state rather than extraction (`_SHADOW_LINE`).
+        # the two blocks that are not extraction (`contract_body_hash`).
         sha256=contract_body_hash(body),
         identity_ladder=[str(x) for x in (doc.get("identity_ladder") or [])],
         exclusion_zones=list(doc.get("exclusion_zones") or []),
         precision_priors=dict(doc.get("precision_priors") or {}),
         fetch_config={
             "fetch": doc.get("fetch") or {},
-            "persistence": doc.get("persistence") or {},
+            # Projected VERBATIM, as the file writes it: the DB pair is a projection of
+            # the git artefact (02 §2.1.8), so a normalised-on-the-way-in copy would be a
+            # second dialect of the same fact. What the runtime applies is
+            # `volatile_profiles`, parsed from exactly these bytes by exactly this parser
+            # — never from this projection, which exists to be read in psql.
+            # `contract_sha256` does NOT cover this block (`contract_body_hash`), so the
+            # projection is refreshed in place by `project()` rather than being pinned to
+            # the version that first carried it.
+            "persistence": persistence,
             "precision_caps": doc.get("precision_caps") or {},
             "regressions": doc.get("regressions") or [],
             "extractor_runtime": doc.get("extractor_runtime"),
         },
         shadow=bool(doc.get("shadow", False)),
         entries=entries,
+        volatile_profiles=volatile_profiles,
         path=path,
     )
 
@@ -639,7 +749,21 @@ def load_all(directory: Path = CONTRACT_DIR) -> list[PortalContract]:
     paths = sorted(directory.glob("*.yaml"))
     if not paths:
         raise ContractError(f"no contract files under {directory}")
-    return [parse_contract(p) for p in paths]
+    contracts = [parse_contract(p) for p in paths]
+    # ONE file per portal. `portal_contracts` has `unique (source, version)`, so two files
+    # naming one portal at different versions would BOTH project and the last one to
+    # activate would win silently; at the same version the second would be refused for a
+    # hash mismatch and read as an unexplained drift. Downstream of this parse the same
+    # duplicate makes `payload_norm.load_contract_profiles` pair one file's rules with
+    # another file's provenance (it refuses too, for that reason).
+    seen: dict[str, Path] = {}
+    for contract in contracts:
+        if contract.source in seen and contract.path is not None:
+            raise ContractError(
+                f"{contract.path}: portal '{contract.source}' is already declared by "
+                f"{seen[contract.source].name} — one contract file per portal")
+        seen[contract.source] = contract.path if contract.path is not None else directory
+    return contracts
 
 
 def extractor_version(contract: PortalContract | str, version: int | None = None) -> str:
@@ -652,9 +776,19 @@ def extractor_version(contract: PortalContract | str, version: int | None = None
 # ------------------------------------------------------------------ projection
 
 _HEADER_SELECT_SQL = """
-    SELECT id, encode(contract_sha256, 'hex'), is_active
+    SELECT id, encode(contract_sha256, 'hex'), is_active, fetch_config
     FROM portal_contracts
     WHERE source = %(source)s AND version = %(version)s
+"""
+
+# The one column `project()` may rewrite on an already-loaded version, and only because
+# `contract_sha256` no longer covers `persistence` (`contract_body_hash`): an edit there
+# is deliberately not a version bump, so without this the psql-readable copy of a portal's
+# `volatile_paths` would silently freeze at whatever the version first shipped with while
+# the scrape applied the file. Everything else in `fetch_config` IS hashed, so on this
+# path it is byte-identical by construction and the write cannot smuggle it.
+_FETCH_CONFIG_UPDATE_SQL = """
+    UPDATE portal_contracts SET fetch_config = %(fetch_config)s WHERE id = %(id)s
 """
 
 _HEADER_INSERT_SQL = """
@@ -767,8 +901,12 @@ def project(
 ) -> tuple[int, int]:
     """Idempotent per (source, contract_version). Returns (contract_id, entries_inserted).
 
-    Re-running with the same bytes is a no-op; re-running with DIFFERENT bytes under the
-    same version raises — entries are immutable and a change is a new version (02 §2.1.8).
+    Re-running with the same bytes is a no-op; re-running with different GOVERNED bytes
+    under the same version raises — entries are immutable and a change is a new version
+    (02 §2.1.8). Bytes outside the hash (`contract_body_hash`: `shadow:`, `persistence:`)
+    are the exception by design: a `persistence` edit is not a version bump, so the row's
+    `fetch_config` is refreshed in place to keep the psql-readable projection equal to the
+    file the scrape is actually applying.
 
     `contract.shadow` is an INITIAL value, written only on the header INSERT: an operator
     who un-shadowed a version after its sample passed must not have that decision reverted
@@ -796,13 +934,25 @@ def project(
                 })
                 contract_id = int(cur.fetchone()[0])
             else:
-                contract_id, stored_sha, _is_active = int(row[0]), row[1], row[2]
+                contract_id, stored_sha, _is_active, stored_config = (
+                    int(row[0]), row[1], row[2], row[3])
                 if stored_sha != sha_hex:
                     raise ContractError(
                         f"{contract.source}@{contract.version} is already loaded with a "
                         f"different sha256 ({stored_sha} on record, {sha_hex} on disk). "
                         f"Contract entries are immutable: bump contract_version "
-                        f"(02 §2.1.8).")
+                        f"(02 §2.1.8). NOTE: `persistence:` and `shadow:` are excluded "
+                        f"from this hash (W2a-3e), so an edit to either is NOT what "
+                        f"moved it — but a row projected before that exclusion holds a "
+                        f"hash over the whole file and needs migration 408's one-time "
+                        f"restatement.")
+                if stored_config != contract.fetch_config:
+                    cur.execute(_FETCH_CONFIG_UPDATE_SQL, {
+                        "id": contract_id,
+                        "fetch_config": psycopg.types.json.Jsonb(contract.fetch_config),
+                    })
+                    LOG.info("CONTRACT persistence refreshed %s@%d id=%d",
+                             contract.source, contract.version, contract_id)
 
             cur.execute(_ENTRY_IDS_SQL, {"id": contract_id})
             known = {r[0] for r in cur.fetchall()}
@@ -925,9 +1075,19 @@ def _parse_target(target: str) -> tuple[str, int]:
 
 
 def _summarise(contracts: Iterable[PortalContract]) -> str:
+    # `sha256` is printed because it is no longer `sha256sum <file>` — it is taken over
+    # the governed bytes only (`contract_body_hash`) — so this log line is where an
+    # operator reconciling a `project()` refusal, or writing a restatement migration,
+    # reads the value the code will actually compare.
     return json.dumps(
         {c.source: {"version": c.version, "entries": len(c.entries),
                     "w1_readers": sum(1 for e in c.entries if e.reader),
+                    "volatile_surfaces": sorted(c.volatile_profiles),
+                    "profile_digests": {
+                        page_kind: payload_norm.profile_digest(profile)[
+                            :payload_norm.PROFILE_DIGEST_CHARS]
+                        for page_kind, profile in sorted(c.volatile_profiles.items())},
+                    "sha256": c.sha256.hex(),
                     "shadow": c.shadow}
          for c in contracts},
         ensure_ascii=False, sort_keys=True)

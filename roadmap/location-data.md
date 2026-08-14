@@ -337,7 +337,10 @@ all closed, several proven against a throwaway PostgreSQL 18 built from `.deb` f
   `location-batch` group.
 - **W2a-3b measured volatile profiles**: `scripts/location_payload_diff_probe.py` +
   evidence-derived profiles for idnes / ceskereality / realitymix, `payload_norm@2`. Table
-  and residue below.
+  and residue below. Keyed by `(source, page_kind)` in W2a-3d (mig 405), then **moved into
+  `contracts/portals/*.yaml` → `persistence.volatile_paths` in W2a-3e (migs 407+408)**, which
+  retired the Python table and relabelled the detail cohorts
+  `payload_norm@3+profile@<digest>`.
 - **W2a-4 the backfill + round-trip verifier** (#1059): `location_data/payload_backfill.py`
   (keyset-resumable, 445,191 `portal_raw_pages` rows → `portal_raw_payloads`, never dispatched)
   + `scripts/location_payload_roundtrip_verify.py` (1,000-row byte-for-byte compare, 06 W2a
@@ -575,11 +578,75 @@ asking for. The suffix maintains itself: measure an index profile and that surfa
 the `+base` cohort on its own.
 
 **Still not done, deliberately:** no index-surface profile is written here. Diffing index
-pages is its own finding. **And the same collapse is waiting one layer down:**
-`persistence.volatile_paths` in the contract YAML is a single flat list on the contract
-HEADER while `fetch:` beneath it is already a per-`page_kind` list — so W2a's next step,
-which sources selectors from `portal_contract_entries.persistence.volatile_paths`, will
-re-introduce exactly this defect unless that key gains the surface axis first.
+pages is its own finding. **And the same collapse was waiting one layer down** —
+`persistence.volatile_paths` was a single flat list on the contract HEADER while `fetch:`
+beneath it was already per-`page_kind` — **closed by W2a-3e below**, which gave the contract
+key the surface axis before moving the values into it.
+
+### W2a-3e — the profiles move into the contracts (2026-08-14, migrations 407+408)
+
+`MEASURED_VOLATILE_PROFILES` is **retired**. Each portal's rules are now
+`persistence.volatile_paths.<page_kind>` in `contracts/portals/<portal>.yaml`, so a change
+to what a portal strips is a reviewed, versioned, retractable diff like every other
+extraction rule instead of a Python edit — which was the point of 02 §2.3.2 / 06 W2a-3b and
+what migration 405's own comment already anticipated.
+
+**Per page_kind, and the leaf is explicit.** `volatile_paths` is a mapping
+`page_kind -> {base, json_pointers, css_selectors, strip_attributes}`; a flat list is
+refused by name. `base:` (`html` | `none`) names the portal-agnostic floor `payload_norm`
+applies underneath and is stated per surface with no default, so no body acquires a floor by
+accident. Only `detail` is declared anywhere — an index profile still needs an index diff.
+
+**Read from git, not from the DB projection.** `contracts.py` still projects `persistence`
+into `portal_contracts.fetch_config` (verbatim, and refreshed in place by each load) for
+review in psql, but the scrape parses the same key out of the same files, which ship in the
+image (`COPY contracts/`, PyYAML promoted to a runtime dependency). `payload_sha256` is a
+PERMANENT content address that every evidence span inherits, so the projection producing it
+has to be a function of the deployed artefact alone; read from the DB it would also be a
+function of whether the contract-load job had run yet — two runners hashing one body two
+ways at the same moment.
+
+**Validated where refusing is allowed.** `payload_norm.parse_profile_block` runs
+`selector_is_usable` on every selector at contract-parse time and at load time — a
+`:contains()` SEGFAULTS selectolax (exit 139, uncatchable) and a typo raises inside `.css()`,
+and `normalise` is silent by contract, so a bad rule that got that far would not fail, it
+would quietly stop stripping. Every contract on disk is parsed by the test suite, so a typo
+fails `test.yml` on the push that introduces it.
+
+**Nothing was re-measured.** All nine profiles resolve byte-identical to the retired table
+(pinned per portal as digests computed under the old code) and all 26 committed detail
+fixtures normalise to their existing pinned hashes. `NORMALIZER_VERSION` stays `payload_norm@3`.
+
+**And nothing was re-versioned — `contract_sha256` now covers what it governs** (migration
+408, from the adversarial review of #1072). The hash was taken over the whole file, so
+editing archive configuration forced a `contract_version` bump; a bump re-stamps
+`extractor_version` and `contract_entry_id`, both of which feed `location_claim_fingerprint`
+(mig 386) and its UNIQUE index — so the next incremental scan would have **re-inserted the
+claims corpus**: 5,135,469 rows / 2,625 MB on 2026-08-14, append-only, in a subsystem with
+~4 GB of allowance left, and once more per future selector edit. `persistence:` is therefore
+excluded from the hash (the precedent `shadow:` set in mig 404), the nine bumps this wave
+proposed were dropped, and 408 restates the nine stored hashes into the new dialect. The
+`fetch_config` projection is refreshed in place by each load so the psql copy still tracks
+git. **Apply 408 in the same window as the merge**: in between, the intake's contract-load
+step fails loudly (naming the migration) and that hour's scan is skipped — the keyset
+watermark resumes, nothing is half-written.
+
+**The cohort label stops naming a table that no longer exists — and stops borrowing the
+contract's version.** Two independent things can move a normalised byte — the engine and the
+portal's declaration — so both are named: `payload_norm@3+profile@<8 hex of
+payload_norm.profile_digest>` where a contract declares the surface, and the unchanged
+`payload_norm@3+base` where it does not (the base belongs to the normaliser and is identical
+under every contract version, so the index cohorts accumulating today are NOT thrown away).
+The digest, not `contract_version`, because a version moves for extraction reasons —
+ceskereality and realitymix each took two such bumps in the fortnight before this shipped —
+and keyed on the version, every one of those would have orphaned that surface's counters in
+`portal_payload_churn`'s PK and restarted the readout at `fetches=1` for a projection that
+never moved. That is the same waste `payload_norm` refuses on the engine axis by not bumping
+`NORMALIZER_VERSION` for output that did not move. Each portal's detail surface opens one
+clean cohort **once**, which is 402's discipline rather than an exception to it — the
+instrument's identity changed even though its output did not — and by construction it is the
+last such break that is not a real profile change. The probe suffix composes onto that label
+instead of hard-coding the bare version.
 
 **Read the detail table honestly:** one portal has moved, the control is unregressed, and
 sreality's detail surface holds at zero. The rest is blank because a change rate needs the

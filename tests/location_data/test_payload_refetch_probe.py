@@ -30,7 +30,7 @@ import pytest
 import yaml
 
 from location_data.payload_norm import (
-    MEASURED_VOLATILE_PROFILES,
+    contract_profiles,
     PAGE_KIND_DETAIL,
     probe_normalizer_version,
 )
@@ -293,13 +293,15 @@ def test_the_probe_does_not_ride_the_passive_flag() -> None:
 
 
 def test_every_portal_the_instrument_measures_has_a_probe_client() -> None:
-    assert set(probe.PROBE_CLIENTS) == set(MEASURED_VOLATILE_PROFILES)
+    assert set(probe.PROBE_CLIENTS) == set(contract_profiles().versions)
     # ...and it probes the SURFACE those profiles were measured on. Profiles are
     # keyed by (source, page_kind), so a probe pointed at another page_kind would
     # be reporting the residue of a profile the live path there does not apply.
     assert probe.PAGE_KIND == PAGE_KIND_DETAIL
+    declared = contract_profiles().profiles
     assert all(
-        PAGE_KIND_DETAIL in surfaces for surfaces in MEASURED_VOLATILE_PROFILES.values()
+        (source, PAGE_KIND_DETAIL) in declared
+        for source in contract_profiles().versions
     )
 
 

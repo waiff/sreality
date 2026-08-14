@@ -22,6 +22,12 @@ COPY scripts/ ./scripts/
 # scraper/db.py also lazy-imports payload_norm here for the W2a-0 churn
 # instrument, which the realtime worker's detail drain runs from this image.
 COPY location_data/ ./location_data/
+# contracts/ is READ AT RUNTIME by location_data/payload_norm.py: a portal's
+# `persistence.volatile_paths` decides the projection `payload_sha256` addresses, and
+# that address is permanent. Sourcing it from the deployed artefact rather than from the
+# DB projection is what stops two runners hashing one body two ways depending on whether
+# the contract-load job had run yet. Everything else in a contract stays deploy-time.
+COPY contracts/ ./contracts/
 # data/ carries runtime-read files (clip_taxonomy.json for the dedup engine's CLIP
 # settings, condition rubrics/markers). load_taxonomy() reads data/clip_taxonomy.json
 # from the image root, so the realtime-worker dedup lane FileNotFoundError'd without it.
