@@ -461,15 +461,34 @@ by the sibling W2a session re-deriving it from `portal_payload_churn` rather tha
 the summary. Every figure below is per `(source, page_kind, normalizer_version)`, which is
 the grain the PK already uses.
 
-**Detail surfaces** — what `payload_dual_write` would archive:
+**Detail surfaces** — what `payload_dual_write` would archive. Updated same day, later, once
+more of the 6 h portals had accrued real repeats — **read this table, not the one two commits
+back**, it is superseded:
 
 | source | `@1` (guessed) | measured | repeats under the new cohort |
 | --- | --- | --- | --- |
-| sreality | 0.04 % | **0.00 %** (`@2`) | 218 |
-| bezrealitky *(control)* | 0.02 % | 0.00 % | 287 |
-| ceskereality | **100 %** | **~22 %** | 67 |
-| maxima | 17.1 % | (1 repeat, not readable) | 1 |
-| idnes / realitymix / remax / mmreality | 100 / 67.7 / 100 / 100 % | **not yet measurable** | 0 |
+| sreality | 0.04 % | **0.00–1.00 %** (`@2` 0.00 %/218, `@3` 1.00 %/200, 2 changes) | 218 / 200 |
+| bezrealitky *(control)* | 0.02 % | **0.00 %** | 697 (`@3`) |
+| ceskereality | **100 %** | **16–24 %, declining as the sample grows** (`@2` 24.32 %/37, `@3` 16.11 %/180) | 37 / 180 |
+| maxima | 17.1 % | **0.00 %** — thin but clean | 15 (`@3`) |
+| realitymix | 67.7 % | **0.00 %** — the footer-badge fix holds | 398 (`@3`) |
+| idnes | 100 % | **100 % — unchanged, see below** | 239 (`@3`) |
+| remax / mmreality | 100 / 100 % | **zero fetches recorded at all under `@2`/`@3`** — not merely zero repeats; the realtime worker hasn't hit either portal since the version bump | 0 |
+
+**idnes regression: the `@2` profile from W2a-3b never actually held.** `@2` closed with 0
+repeats (untested), so the 100 % baseline never got re-checked against real traffic until `@3`
+(same idnes `VolatileProfile`, untouched by the mmreality/remax bump) finally accrued 239. It
+reads 100 % again, and `raw_changes` == `norm_changes` **exactly**, at every normalizer version
+including `@1` (6,514/6,514) and `@3` (239/239) — the strip is removing nothing that actually
+matters in production, even though the 5-listing/3-fetch diff-probe that derived it found
+only the Nette anti-spam fields and the similar-offers rail. The likely cause is the same blind
+spot `@3` found and fixed on remax: the probe ran with one persistent session across its three
+fetches (`--fresh-session-per-round` only became the default afterward, in #1064), so idnes may
+have session- or time-scoped volatility the probe structurally could not see. Contrast:
+ceskereality and realitymix both show `raw_changes > norm_changes` (realitymix 289 → 0 at `@3`),
+proving the normalizer mechanism itself works — idnes specifically isn't benefiting from its own
+profile. **Not chased further per scope** — recorded here so the storage projection counts
+idnes's detail surface at its true ~100 %, not the earlier "fixed" figure.
 
 **Index surfaces** — what `payload_index_archive` would archive, and **none is profiled**:
 
