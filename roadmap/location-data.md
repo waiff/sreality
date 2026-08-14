@@ -461,15 +461,41 @@ by the sibling W2a session re-deriving it from `portal_payload_churn` rather tha
 the summary. Every figure below is per `(source, page_kind, normalizer_version)`, which is
 the grain the PK already uses.
 
-**Detail surfaces** — what `payload_dual_write` would archive:
+**Detail surfaces — second reading (2026-08-14, later the same day)** — what
+`payload_dual_write` would archive. More of the 6 h portals had accrued real repeats by
+the time of this reading; treat the numbers below as current as of this section's own
+timestamp, not frozen — `portal_payload_churn` is a live, growing table and every cell
+here will keep drifting until each portal has a few hundred stable repeats:
 
-| source | `@1` (guessed) | measured | repeats under the new cohort |
+| source | `@1` (guessed) | measured | repeats |
 | --- | --- | --- | --- |
-| sreality | 0.04 % | **0.00 %** (`@2`) | 218 |
-| bezrealitky *(control)* | 0.02 % | 0.00 % | 287 |
-| ceskereality | **100 %** | **~22 %** | 67 |
-| maxima | 17.1 % | (1 repeat, not readable) | 1 |
-| idnes / realitymix / remax / mmreality | 100 / 67.7 / 100 / 100 % | **not yet measurable** | 0 |
+| sreality | 0.04 % | **0.50 %** (2 changes / 400 repeats, `@3`) | 400 |
+| bezrealitky *(control)* | 0.02 % | **0.00 %** | 861 (`@3`) |
+| ceskereality | **100 %** | **17.84 %** (38/213, `@3`) — moved from 24.32 %/37 at `@2`; **not a trend**, each `@N` is its own clean cohort and the two readings shouldn't be read as declining | 213 (`@3`) |
+| maxima | 17.1 % | **0.00 %** — but from **one listing** repeated 18 times, not portal-level coverage | 18 (`@3`, 1 key) |
+| realitymix | 67.7 % | **0.00 %** (0/473) — the footer-badge fix holds, now on a solid sample | 473 (`@3`) |
+| idnes | 100 % | **100 %** (285/285) — unchanged, see below | 285 (`@3`) |
+| remax | 100 % | **not yet measurable** — 6 fetches total across `@2`+`@3`, still 0 repeats (no listing refetched twice yet) | 0 |
+| mmreality | 100 % | **zero fetches recorded at all** under `@2` or `@3` | 0 |
+
+**idnes: the W2a-3b fix was never actually validated live — a measurement gap, not a
+regression.** Nothing that used to work stopped working: `@2` closed with 0 repeats
+(untested), so the 100 % baseline never got re-checked against real traffic until `@3`
+(same idnes `VolatileProfile`, untouched by the mmreality/remax bump) finally accrued
+285. It reads 100 % again, and `raw_changes` == `norm_changes` **exactly**, at every
+normalizer version measured so far — `@1` 6,514/6,514, `@3` 285/285 — the strip is removing
+nothing that actually matters in production, even though the 5-listing/3-fetch diff-probe
+that derived it found only the Nette anti-spam fields and the similar-offers rail. One
+plausible cause: the same session-scoped blind spot `@3` uncovered on remax (the diff-probe
+ran with one persistent session across its three fetches until `--fresh-session-per-round`
+became the default in #1064, *after* idnes was measured) — but that's a hypothesis, not a
+confirmed cause, and worth noting remax's own fix is itself still unverified in production
+(0 repeats above). Contrast: ceskereality and realitymix both show `raw_changes >
+norm_changes` (realitymix 323 → 0 at `@3`), which is evidence the normalizer mechanism
+itself works — idnes specifically isn't benefiting from its own profile, not that the
+instrument is broken. **Not chased further per scope** — recorded here so the storage
+projection counts idnes's detail surface at its true ~100 %, not the earlier "fixed" figure
+from #1066.
 
 **Index surfaces** — what `payload_index_archive` would archive, and **none is profiled**:
 
