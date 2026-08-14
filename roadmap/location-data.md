@@ -15,7 +15,7 @@ is the tie-breaker). This track records sequencing + shipped state only.
 | W0 "stop the bleeding" | 15 interim fixes + 2 measurements against the CURRENT system | 🟡 in progress (2026-08-10) |
 | W1 registry + claim spine (shadow) | full RÚIAN mirror, claims, resolutions, projection | ✅ shipped 2026-08-12 (migrations 380–389 applied; shadow-only, no consumer reads it) |
 | W1v bezrealitky vertical slice | one portal end-to-end + location-quality dashboard | ✅ shipped 2026-08-13 (every layer exercised in prod; gate answered — portal-inventory-capped, not pipeline-capped) |
-| W2a payload archive rewrite | append-on-change `portal_raw_payloads` | 🟡 in progress (2026-08-13) — instrument live and measuring; store + writer landed, dual-write NOT enabled (churn sign-off is the gate) |
+| W2a payload archive rewrite | append-on-change `portal_raw_payloads` | 🟡 in progress (2026-08-14) — instrument live, measured profiles for 5 portals (`payload_norm@3`); dual-write NOT enabled, awaiting the operator's churn + storage sign-off |
 | W2–W6 | HTML re-mine, history backfill, refetch cohorts, LLM lane, serving flip | ⚪ not started |
 
 ## W0 — done
@@ -408,8 +408,69 @@ are now allowlisted (`selector_is_safe`) before any selector reaches the CSS eng
 binds W2a's next step, which sources selectors from `portal_contract_entries.persistence.volatile_paths`,
 i.e. from outside the reviewed module.
 
-**Not enabled, deliberately:** `payload_dual_write` is OFF on every portal (and its
-index-only sibling `payload_index_archive` is not built yet — W2a-6), the
+### W2a-3c — mmreality + remax (2026-08-14, `payload_norm@3`)
+
+The fuller baseline revealed the problem was broader than the three portals W2a-3b fixed:
+**mmreality and remax were also at 100 %**, invisible earlier only because neither had
+accumulated a repeat fetch yet. Same method, same tooling:
+
+| source | what actually moved | profile |
+| --- | --- | --- |
+| mmreality | Cloudflare **email obfuscation** — the edge re-encodes the same `mailto:` as the address XOR'd with a fresh leading byte on every response (`data-cfemail`, `/cdn-cgi/l/email-protection#`). A 100 % rate produced by re-encoding a constant. | `a[href^="/cdn-cgi/l/email-protection"]`, `span.__cf_email__` |
+| remax | **byte-identical within an HTTP session**, 5/5 different across sessions. Symfony CSRF material minted per session, and the live drain is a fresh process per run, so every production refetch is cross-session. One token sits in a `data-content` **attribute** carrying an escaped `<form>` — a string, not a node, that no CSS selector can ever reach. | `div.pd-share__buttons button[data-content]` |
+
+That last one forced a tooling change: `--fresh-session-per-round` is now the probe's
+default. Without it the probe measures **zero** on a portal production measures at 100 %.
+
+### First before/after (2026-08-14, early)
+
+| source | `@1` (guessed) | `@2`/`@3` (measured) | repeats under the new cohort |
+| --- | --- | --- | --- |
+| ceskereality | **100 %** | **~23 %** | 57 |
+| bezrealitky *(control)* | 0.0 % | 0.0 % | 246 |
+| idnes / realitymix / remax / mmreality / sreality | 100 / 67.7 / 100 / 100 / 4.5 % | **not yet measurable** | 0 |
+
+**Read this honestly:** one portal has moved and the control is unregressed; everything else
+is blank because a change rate needs the SAME page fetched twice under the SAME
+`normalizer_version`, and two bumps in one morning (`@2`, then `@3`) each started a clean
+cohort. The detail drain only refetches on an index-signalled change, so repeats accrue
+slowly on the 6 h portals.
+
+**Consequence, and the standing instruction that follows: STOP BUMPING `NORMALIZER_VERSION`.**
+Every further profile change restarts the measurement the storage sign-off depends on. Leave
+`@3` undisturbed until each portal has a few hundred repeats. Resist fixing portals that
+newly surface at 100 % — record the number and move on; the profiles only need to be good
+enough that the projection is meaningful, and sreality (which dominates the volume) was
+already at 4.5 % before any of this work.
+
+### PII incident (2026-08-13/14) — three axes, each found only after the previous was fixed
+
+Fixture capture publishes real people's data to a **public** repo, and this went wrong twice:
+
+1. **Phones + emails** (#1056): 9 live pages committed with four brokers' mobile numbers and
+   three work emails. Caught by review before merge. The tip was scrubbed — but the raw pages
+   were still fetchable in the branch's **history**, so the branch was squashed to one clean
+   commit and force-pushed (operator-approved). **Trap worth remembering: rebasing a branch
+   whose history holds the bad commit REPLAYS it as a new commit** — rebuild from the tree
+   (`git commit-tree <tree> -p origin/main`) instead.
+2. **Obfuscated emails** (#1064): Cloudflare's XOR payload publishes an address while matching
+   no plaintext rule. The scrub now re-encodes the PLACEHOLDER under the page's own key, so the
+   fixture still demonstrates its churn instead of becoming a tautology.
+3. **Names** (#1064 → fixed in #1065): two mortgage advisers' real names reached `main`. Their
+   emails HAD been scrubbed, so every assertion passed and CI was green. `--scrub-contacts`
+   takes names as a hand-supplied `--name` list; the listing agent's was passed, the
+   `mortgageAdviser` block on the same page was not. **A missed input, not a code defect** —
+   and it merged because the merge went ahead before the adversarial review completed.
+
+Mitigations now standing: the contact-scoped `--scrub-contacts` mode, plus three CI gates —
+contact details, the obfuscated-email hex, and person-bearing JSON keys
+(`test_no_committed_fixture_carries_a_real_persons_name`, verified to FAIL on a restored real
+name rather than merely pass) — and the rule in `.claude/skills/scraper-ops/SKILL.md`.
+**Open, operator's decision:** the raw values remain in history (#1056's pre-rewrite blobs by
+SHA; the names in `04e1db9a`). A history rewrite of `main` or a GitHub Support purge are the
+only true removals; neither is engineering's call.
+
+**Not enabled, deliberately:** `payload_dual_write` and `payload_index_archive` are OFF, the
 445k-row backfill has not run, and no per-portal W2 contract exists yet. Those wait on the
 operator's O3/O4 sign-off of `volatile_paths` + the storage projection.
 
