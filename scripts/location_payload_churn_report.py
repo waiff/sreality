@@ -77,7 +77,11 @@ from typing import Any
 import psycopg
 
 from location_data import loader_db
-from location_data.payload_norm import NORMALIZER_VERSION, PROBE_NORMALIZER_SUFFIX
+from location_data.payload_norm import (
+    BASE_PROFILE_SUFFIX,
+    NORMALIZER_VERSION,
+    PROBE_NORMALIZER_SUFFIX,
+)
 from scraper import db
 
 LOG = logging.getLogger("location_payload_churn_report")
@@ -542,6 +546,9 @@ def _assumptions() -> list[str]:
         f"  < {MIN_KEYS_REPEATED} repeated keys prints INSUFFICIENT instead of a projection",
         f"  normalizer = {NORMALIZER_VERSION}; cohorts ending {PROBE_NORMALIZER_SUFFIX!r} are"
         " the confirmation probe, reported apart",
+        f"  cohorts ending {BASE_PROFILE_SUFFIX!r} were hashed with the GENERIC base"
+        " profile — no volatile paths have been measured for that (source, page_kind),"
+        " so their rate is an upper bound on a surface, not a verdict on a profile",
         "  totals sum ONE cohort per (source, page_kind) — the newest; a rollout's older",
         "  cohort is named below the total instead of added to it",
     ]
@@ -824,6 +831,7 @@ def to_json(measurement: Measurement) -> dict[str, Any]:
         "measured_at": datetime.datetime.now(datetime.UTC).isoformat(),
         "normalizer_version": NORMALIZER_VERSION,
         "probe_cohort_suffix": PROBE_NORMALIZER_SUFFIX,
+        "base_profile_cohort_suffix": BASE_PROFILE_SUFFIX,
         "assumptions": {
             "bytes_per_gb": BYTES_PER_GB,
             "days_per_month": DAYS_PER_MONTH,

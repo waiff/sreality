@@ -2853,7 +2853,9 @@ def record_payload_churn(
     the drain's run_resilient-retried batch write.
 
     `normalizer_version` overrides the cohort this fetch is counted in. The live
-    ingest never passes one; the confirmation probe passes
+    ingest never passes one — it takes `payload_norm.normalizer_version_for(source,
+    page_kind)`, which is the bare version on a surface with a measured profile and
+    carries `+base` on one without. The confirmation probe passes
     `payload_norm.probe_normalizer_version()` so its minutes-apart cadence lands
     in its own cohort instead of contaminating the passive counters.
 
@@ -2865,16 +2867,22 @@ def record_payload_churn(
     # Deferred: location_data is not on the scraper's import path (and not in the
     # API image before this wave), so the flag-off scrape never pays for it.
     from location_data.payload_norm import (
-        DEFAULT_VOLATILE_PROFILES, NORMALIZER_VERSION, VolatileProfile, normalise,
+        normalise, normalizer_version_for, volatile_profile,
     )
 
+    # By (source, page_kind), never by source alone: every shipped profile was
+    # derived by diffing DETAIL pages, and an index page is a LIST of properties,
+    # not a property. `volatile_profile` falls back to the generic base for a
+    # surface nobody has diffed, and `normalizer_version_for` puts that fallback in
+    # its own cohort so the two instruments never average together.
     result = normalise(
         body,
         content_type=content_type,
-        volatile=DEFAULT_VOLATILE_PROFILES.get(source, VolatileProfile()),
+        volatile=volatile_profile(source, page_kind),
     )
     params = (
-        source, source_id_native, page_kind, normalizer_version or NORMALIZER_VERSION,
+        source, source_id_native, page_kind,
+        normalizer_version or normalizer_version_for(source, page_kind),
         fetched_at, fetched_at,
         result.raw_sha256, result.norm_sha256,
         result.byte_size, result.norm_byte_size, observation,

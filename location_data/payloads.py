@@ -50,10 +50,10 @@ import psycopg
 
 from location_data import loader_db
 from location_data.payload_norm import (
-    DEFAULT_VOLATILE_PROFILES,
-    NORMALIZER_VERSION,
     VolatileProfile,
     normalise,
+    normalizer_version_for,
+    volatile_profile,
 )
 
 LOG = logging.getLogger("location_data.payloads")
@@ -468,8 +468,14 @@ def append_payload(
     on the other side of the join. None is the honest value for a fetch with no
     snapshot yet; a later anchored fetch of the same body fills it in.
 
-    `volatile` None resolves the measurement-phase profile for `source`; W2a-3b
-    replaces those with the contract's declared `persistence.volatile_paths`.
+    `volatile` None resolves the measurement-phase profile for this (source,
+    page_kind) SURFACE — never for the source alone: `payload_sha256` is the
+    archive's identity, so a detail profile mis-applied to an index body would bake
+    a hash taken over the wrong projection into every span that ever points at it.
+    A surface with no measured profile gets `payload_norm.BASE_PROFILE` and stamps
+    `normalizer_version` with the `+base` suffix, so which instrument produced a row's
+    content address is readable off the row. W2a-3b replaces those with the contract's
+    declared `persistence.volatile_paths`.
 
     Retention (re-pin + cap) runs only when a row was actually appended: an unchanged
     refetch cannot have changed the group's membership, and paying two extra
@@ -479,8 +485,7 @@ def append_payload(
     """
     if not content_type:
         raise PayloadError("content_type is required — it decides how the body normalises")
-    profile = volatile if volatile is not None else DEFAULT_VOLATILE_PROFILES.get(
-        source, VolatileProfile())
+    profile = volatile if volatile is not None else volatile_profile(source, page_kind)
     norm = normalise(body, content_type=content_type, volatile=profile)
 
     stored, encoding = encode_body(body)
@@ -520,7 +525,7 @@ def append_payload(
         "byte_size": norm.byte_size,
         "http_status": http_status,
         "contract_version": contract_version,
-        "normalizer_version": NORMALIZER_VERSION,
+        "normalizer_version": normalizer_version_for(source, page_kind),
         "snapshot_id": snapshot_id,
         "observed_at": observed_at,
     }

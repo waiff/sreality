@@ -584,3 +584,37 @@ def test_churn_upsert_sql_is_a_plain_literal_with_the_counter_arithmetic() -> No
         "IS DISTINCT FROM EXCLUDED.last_observation"
     ) in sql
     assert sql.count("%s") == 11
+
+
+def _churn_params(page_kind: str, html: str) -> tuple[Any, ...]:
+    """The bound params of the one churn upsert a single archived page produces."""
+    conn = _FakeConn(flag=True)
+    db.upsert_portal_raw_page(
+        conn, source="bazos", source_id_native="k", source_url="u",
+        page_kind=page_kind, html=html, http_status=200,
+    )
+    return _churn_statements(conn)[0][1]
+
+
+def test_the_profile_and_the_cohort_are_resolved_by_source_AND_page_kind() -> None:
+    """The instrument's whole output is a hash and the cohort it is counted in, and
+    both are a function of the SURFACE. bazos's measured `div.inzeratyview` is the
+    per-listing view counter: one node on a detail page, one per CARD on an index page
+    (21 on a live one), so applying the detail profile to an index body strips content
+    that was never diffed. Same bytes here, two page_kinds, and the two must differ in
+    both the normalised hash and the cohort — or nothing downstream can tell them apart.
+    """
+    body = (
+        '<html><body><div class="inzerat"><h2>Byt 3+1</h2>'
+        '<div class="inzeratyview">Vidělo: 7 lidí</div></div></body></html>'
+    )
+
+    detail = _churn_params("detail", body)
+    index = _churn_params("index", body)
+
+    # params: (source, native, page_kind, normalizer_version, ..., raw, norm, ...)
+    assert detail[2] == "detail" and index[2] == "index"
+    assert detail[3] == "payload_norm@3"
+    assert index[3] == "payload_norm@3+base"
+    assert detail[6] == index[6], "the RAW hash is the bytes as fetched, surface-blind"
+    assert detail[7] != index[7], "the NORMALISED hash must follow the surface's profile"

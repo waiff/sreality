@@ -29,7 +29,11 @@ from typing import Any
 import pytest
 import yaml
 
-from location_data.payload_norm import DEFAULT_VOLATILE_PROFILES, probe_normalizer_version
+from location_data.payload_norm import (
+    MEASURED_VOLATILE_PROFILES,
+    PAGE_KIND_DETAIL,
+    probe_normalizer_version,
+)
 from scraper.portal import default_config
 from scraper.portal_base import ListingGoneError
 from scripts import location_payload_refetch_probe as probe
@@ -289,7 +293,14 @@ def test_the_probe_does_not_ride_the_passive_flag() -> None:
 
 
 def test_every_portal_the_instrument_measures_has_a_probe_client() -> None:
-    assert set(probe.PROBE_CLIENTS) == set(DEFAULT_VOLATILE_PROFILES)
+    assert set(probe.PROBE_CLIENTS) == set(MEASURED_VOLATILE_PROFILES)
+    # ...and it probes the SURFACE those profiles were measured on. Profiles are
+    # keyed by (source, page_kind), so a probe pointed at another page_kind would
+    # be reporting the residue of a profile the live path there does not apply.
+    assert probe.PAGE_KIND == PAGE_KIND_DETAIL
+    assert all(
+        PAGE_KIND_DETAIL in surfaces for surfaces in MEASURED_VOLATILE_PROFILES.values()
+    )
 
 
 def test_the_module_never_opens_its_own_http_connection() -> None:

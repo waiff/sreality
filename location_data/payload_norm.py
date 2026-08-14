@@ -12,7 +12,7 @@ same bytes always hash the same way on any runner, and it NEVER raises: a body
 the instrument cannot parse degrades to a raw-bytes fallback rather than killing
 the scrape it is measuring.
 
-DEFAULT_VOLATILE_PROFILES is a MEASUREMENT-PHASE artefact, not a contract. The
+MEASURED_VOLATILE_PROFILES is a MEASUREMENT-PHASE artefact, not a contract. The
 profiles that ship in portal_contract_entries.persistence.volatile_paths are
 chosen FROM this measurement; these are the best guesses that make the first
 readout informative. They are deliberately biased towards stripping: an
@@ -20,6 +20,30 @@ over-stripped profile understates raw-vs-norm separation (it makes the
 normaliser look better than it is, and the next readout catches it), while an
 under-stripped one silently inflates the change rate that the P2 storage
 projection depends on.
+
+A PROFILE BELONGS TO A (source, page_kind) PAIR, NOT TO A PORTAL. A detail page
+is one property; an index page is a LIST of properties fetched on a walk cadence.
+They are different documents that happen to share a hostname, and every profile
+below was derived by diffing DETAIL pages (W2a-3b/3c). Applying one to an index
+body is applying a measurement to a population it was never taken from — which is
+why `volatile_profile` is keyed by the pair and why an unmeasured surface falls
+back to `BASE_PROFILE` rather than borrowing the portal's detail rules.
+
+The asymmetry that decides that fallback: on a MEASURED surface, over-stripping is
+self-correcting — the residue diff shows what the profile ate, and the next readout
+catches it. On an UNMEASURED surface it is not. A selector that deletes the whole
+listing grid off an index page reports a 0% change rate, and 0% reads as the best
+possible result; nothing downstream can tell "nothing changed" from "we deleted
+everything and every page now hashes alike". So the shipped bias towards stripping
+holds only where a diff was actually run, and `BASE_PROFILE` carries only what is
+portal-agnostic and content-free by construction (third-party analytics loaders
+matched by src, page chrome, CSRF material, per-response attributes).
+
+STILL OPEN, AND NOT THIS MODULE'S TO FIX: `persistence.volatile_paths` in the
+contract YAML is a single flat list on the contract HEADER, while `fetch:` beneath
+it is already a per-`page_kind` list. When W2a's next step sources selectors from
+`portal_contract_entries.persistence.volatile_paths` it will re-introduce exactly
+the collapse this module just removed unless that key gains the surface axis too.
 """
 
 from __future__ import annotations
@@ -58,6 +82,27 @@ def probe_normalizer_version(version: str = NORMALIZER_VERSION) -> str:
     """The cohort key the confirmation probe writes under."""
     return f"{version}{PROBE_NORMALIZER_SUFFIX}"
 
+
+# A surface with no measured profile is hashed by a DIFFERENT instrument than one
+# with a measured profile — the shared base, not that portal's diffed rules — and
+# `normalizer_version` is what a reader of portal_payload_churn has to tell them
+# apart with. Migration 402's own header states the failure this avoids: relabelling
+# a cohort in place "would blend @1-era counters into the @2 readout and register one
+# phantom change per key on its first @2 fetch (the hash moved because the normaliser
+# moved)". Suffixing is what keeps a DETAIL cohort (`payload_norm@3`) intact across a
+# change that only moves an unmeasured surface's bytes.
+#
+# It also maintains itself: the day someone measures an index profile and adds the
+# entry, that surface stops being `+base` and opens its own clean cohort with no
+# human remembering to bump anything.
+BASE_PROFILE_SUFFIX = "+base"
+
+# `location_page_kind`'s labels (migration 380) are ('index','detail','map',
+# 'gazetteer','snapshot','archive','none'). Only `detail` has ever been diffed, so
+# it is the only one spelled here; scraper.db keeps its own copy of the same two
+# string values because payload_norm must stay importable without pulling the
+# scraper in (tests/location_data/test_payload_norm.py pins the pair together).
+PAGE_KIND_DETAIL = "detail"
 
 # ASCII-only class on purpose: it must apply byte-wise to a body that failed to
 # decode as UTF-8 (the degraded path) without inventing an encoding for it.
@@ -494,7 +539,63 @@ _REMAX_VOLATILE: tuple[str, ...] = (
     "div.pd-share__buttons button[data-content]",
 )
 
-DEFAULT_VOLATILE_PROFILES: dict[str, VolatileProfile] = {
+# The fallback for a (source, page_kind) nobody has diffed. Every member is
+# portal-agnostic AND content-free by construction — third-party analytics loaders
+# matched by src, page chrome, CSRF material — so it cannot delete a listing, an
+# address or a map widget off a surface it was never measured against. Verified on
+# live index bodies while this keying was being fixed: on remax it matches the page's
+# one <noscript> and one <style> (173 B of 209 KB), on ceskereality two <noscript>,
+# one <style> and ten preload/modulepreload links (~1.3 KB of 180 KB).
+#
+# It is inert on a JSON surface by construction: `_normalise_json` reads only
+# `json_pointers`, and this profile has none. sreality's index and bezrealitky's
+# gazetteer therefore normalise byte-for-byte as they did under the old keying.
+BASE_PROFILE = VolatileProfile(
+    css_selectors=_HTML_BASE,
+    strip_attributes=_HTML_ATTRS,
+)
+
+
+def volatile_profile(source: str, page_kind: str) -> VolatileProfile:
+    """The profile measured for this SURFACE, or the generic base.
+
+    The single resolution point: `scraper.db.record_payload_churn` (the live
+    instrument), `payloads.append_payload` (the archive's content address) and
+    `payload_backfill.encode_for_archive` (the 445k-row migration) all read the
+    profile through here, so there is one answer to "what was stripped" rather
+    than three call sites agreeing by coincidence.
+    """
+    return MEASURED_VOLATILE_PROFILES.get(source, {}).get(page_kind, BASE_PROFILE)
+
+
+def normalizer_version_for(
+    source: str, page_kind: str, version: str | None = None,
+) -> str:
+    """The cohort this (source, page_kind) fetch is counted under.
+
+    `+base` (see BASE_PROFILE_SUFFIX) exactly when `volatile_profile` fell back —
+    an entry that IS present but empty (bezrealitky's deliberately null detail
+    profile) is a measurement and keeps the bare version. Composes with the probe
+    suffix if a probe ever covers an unmeasured surface:
+    `probe_normalizer_version(normalizer_version_for(src, kind))`.
+
+    `version=None` rather than a `NORMALIZER_VERSION` DEFAULT ARGUMENT: a default is
+    bound once at import, so a bump monkeypatched onto the module (the cohort-
+    separation test in tests/test_payload_churn_live.py, which is how the "a
+    normaliser bump opens a clean cohort" property is proved against real SQL) would
+    be read here as the old value and the test would pass while measuring nothing.
+    """
+    base = version if version is not None else NORMALIZER_VERSION
+    if page_kind in MEASURED_VOLATILE_PROFILES.get(source, {}):
+        return base
+    return f"{base}{BASE_PROFILE_SUFFIX}"
+
+
+# source -> page_kind -> profile. The inner mapping is what stops a detail
+# measurement from being read as a portal-wide fact; the absence of an `index` key
+# on every line below is deliberate and load-bearing (diffing index pages is its own
+# deferred finding, and guessing one here would be the mis-application again).
+MEASURED_VOLATILE_PROFILES: dict[str, dict[str, VolatileProfile]] = {
     # api_json. The pointers are the JSON form of scraper.hashing's already-proven
     # volatile key set (view counters, re-promotion dates, session/recommendation
     # blocks, the firmy.cz review counters) plus the re-signed sdn.cz media URLs,
@@ -504,7 +605,7 @@ DEFAULT_VOLATILE_PROFILES: dict[str, VolatileProfile] = {
     # `items` entry NAMED "Aktualizace", a value predicate a JSON pointer cannot
     # express. It is a timestamp item, so it inflates the measured rate slightly
     # — the safe direction (over-, not under-stating churn).
-    "sreality": VolatileProfile(json_pointers=(
+    "sreality": {PAGE_KIND_DETAIL: VolatileProfile(json_pointers=(
         "/stats",
         "/params/stats",  # legacy camelCase raw_json puts the view counter here
         "/edited",
@@ -534,48 +635,48 @@ DEFAULT_VOLATILE_PROFILES: dict[str, VolatileProfile] = {
         "/sdn_*_attachment_url",
         "/_embedded/favourite",
         "/_embedded/note",
-    )),
+    ))},
     # graphql. The body is exactly the closed field list _DETAIL_QUERY asks for —
     # no ads, no tokens, no counters — so the null profile is the honest starting
     # guess and the readout will show whether the image URLs re-sign.
-    "bezrealitky": VolatileProfile(),
+    "bezrealitky": {PAGE_KIND_DETAIL: VolatileProfile()},
     # html_selector. `div.inzeratyview` is the per-listing view counter the index
     # parser already reads ("Vidělo: N lidí"); it increments on every visit.
-    "bazos": VolatileProfile(
+    "bazos": {PAGE_KIND_DETAIL: VolatileProfile(
         css_selectors=_HTML_BASE + ("div.inzeratyview",),
         strip_attributes=_HTML_ATTRS,
-    ),
+    )},
     # html_selector. Measured: see _IDNES_VOLATILE.
-    "idnes": VolatileProfile(
+    "idnes": {PAGE_KIND_DETAIL: VolatileProfile(
         css_selectors=_HTML_BASE + _IDNES_VOLATILE,
         strip_attributes=_HTML_ATTRS,
-    ),
+    )},
     # embedded_json inside HTML — the inline <script> payload must survive, so the
     # shared set stays src-scoped. Measured: see _MMREALITY_VOLATILE.
-    "mmreality": VolatileProfile(
+    "mmreality": {PAGE_KIND_DETAIL: VolatileProfile(
         css_selectors=_HTML_BASE + _MMREALITY_VOLATILE,
         strip_attributes=_HTML_ATTRS,
-    ),
+    )},
     # html_selector. Symfony `[_token]` hidden inputs on three separate contact
     # forms, verified in the remax detail fixture. Measured: see _REMAX_VOLATILE.
-    "remax": VolatileProfile(
+    "remax": {PAGE_KIND_DETAIL: VolatileProfile(
         css_selectors=_HTML_BASE + _REMAX_VOLATILE,
         strip_attributes=_HTML_ATTRS,
-    ),
+    )},
     # html_selector, proxied. Measured: see _CESKEREALITY_VOLATILE.
-    "ceskereality": VolatileProfile(
+    "ceskereality": {PAGE_KIND_DETAIL: VolatileProfile(
         css_selectors=_HTML_BASE + _CESKEREALITY_VOLATILE,
         strip_attributes=_HTML_ATTRS,
-    ),
+    )},
     # html_selector. Measured: see _REALITYMIX_VOLATILE. Build-hashed asset
     # filenames (`267f89b9.js`) re-roll on every deploy; the preload/prefetch links
     # that carry them are stripped by _PAGE_CHROME.
-    "realitymix": VolatileProfile(
+    "realitymix": {PAGE_KIND_DETAIL: VolatileProfile(
         css_selectors=_HTML_BASE + _REALITYMIX_VOLATILE,
         strip_attributes=_HTML_ATTRS,
-    ),
-    "maxima": VolatileProfile(
+    )},
+    "maxima": {PAGE_KIND_DETAIL: VolatileProfile(
         css_selectors=_HTML_BASE,
         strip_attributes=_HTML_ATTRS,
-    ),
+    )},
 }

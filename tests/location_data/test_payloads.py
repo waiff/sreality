@@ -677,3 +677,36 @@ def test_a_gzip_body_written_by_the_writer_is_readable_without_the_writer(
 
     row = _rows(conn, native)[0]
     assert gzip.decompress(bytes(row["body"])) == body
+
+
+@requires_db
+def test_the_profile_and_the_cohort_follow_the_surface_not_the_portal(
+    conn: psycopg.Connection,
+) -> None:
+    """`volatile=None` resolves by (source, page_kind). Every shipped profile was
+    measured by diffing DETAIL pages, so an index body must NOT be addressed through
+    one: `payload_sha256` is this store's identity, and a hash taken over the wrong
+    projection is permanent — every evidence span into that body inherits it.
+    Same bytes, two surfaces, two rows, and the row says which instrument made it."""
+    native = _key()
+    body = (b'<html><body><h1>Byt 3+1</h1>'
+            b'<div class="grid-similar-offers">other listings</div></body></html>')
+
+    detail = payloads.append_payload(
+        conn, source="idnes", source_id_native=native, page_kind="detail",
+        listing_id=None, body=body, content_type=_HTML, http_status=200,
+        contract_version=None, observed_at=datetime.now(timezone.utc), volatile=None,
+    )
+    index = payloads.append_payload(
+        conn, source="idnes", source_id_native=native, page_kind="index",
+        listing_id=None, body=body, content_type=_HTML, http_status=200,
+        contract_version=None, observed_at=datetime.now(timezone.utc), volatile=None,
+    )
+
+    assert detail.body_sha256 == index.body_sha256
+    assert detail.payload_sha256 != index.payload_sha256
+    cohorts = {r["page_kind"]: r["normalizer_version"] for r in _rows(conn, native)}
+    assert cohorts == {
+        "detail": NORMALIZER_VERSION,
+        "index": f"{NORMALIZER_VERSION}+base",
+    }

@@ -50,7 +50,8 @@ from pathlib import Path
 import pytest
 
 from location_data.payload_norm import (
-    DEFAULT_VOLATILE_PROFILES,
+    MEASURED_VOLATILE_PROFILES,
+    PAGE_KIND_DETAIL,
     VolatileProfile,
     normalise,
     selector_is_safe,
@@ -76,7 +77,8 @@ def _body(name: str) -> bytes:
 
 def _norm(name: str, source: str) -> bytes:
     return normalise(
-        _body(name), content_type=_HTML, volatile=DEFAULT_VOLATILE_PROFILES[source],
+        _body(name), content_type=_HTML,
+        volatile=MEASURED_VOLATILE_PROFILES[source][PAGE_KIND_DETAIL],
     ).norm_sha256
 
 
@@ -105,7 +107,7 @@ def test_the_listing_itself_survives_normalisation(source: str) -> None:
     assertions and be useless. Anchor on what W2 extracts: the listing's own text."""
     normalised = normalise(
         _body(f"{source}_a1"), content_type=_HTML,
-        volatile=DEFAULT_VOLATILE_PROFILES[source],
+        volatile=MEASURED_VOLATILE_PROFILES[source][PAGE_KIND_DETAIL],
     ).norm_bytes
 
     assert b"Prodej" in normalised or b"prodej" in normalised
@@ -115,7 +117,7 @@ def test_the_listing_itself_survives_normalisation(source: str) -> None:
 def test_idnes_strips_the_contact_form_antispam_and_the_similar_offers_rail() -> None:
     normalised = normalise(
         _body("idnes_a1"), content_type=_HTML,
-        volatile=DEFAULT_VOLATILE_PROFILES["idnes"],
+        volatile=MEASURED_VOLATILE_PROFILES["idnes"][PAGE_KIND_DETAIL],
     ).norm_bytes
 
     # The observed values, and the ELEMENTS that carried them. The bare word
@@ -137,7 +139,7 @@ def test_idnes_strips_the_contact_form_antispam_and_the_similar_offers_rail() ->
 def test_ceskereality_strips_the_bug_report_token_and_keeps_the_map() -> None:
     normalised = normalise(
         _body("ceskereality_a1"), content_type=_HTML,
-        volatile=DEFAULT_VOLATILE_PROFILES["ceskereality"],
+        volatile=MEASURED_VOLATILE_PROFILES["ceskereality"][PAGE_KIND_DETAIL],
     ).norm_bytes
 
     assert b"bug-report-token" not in normalised
@@ -151,7 +153,7 @@ def test_ceskereality_strips_the_bug_report_token_and_keeps_the_map() -> None:
 def test_realitymix_strips_the_footer_stamp_and_keeps_the_gps_attributes() -> None:
     normalised = normalise(
         _body("realitymix_a1"), content_type=_HTML,
-        volatile=DEFAULT_VOLATILE_PROFILES["realitymix"],
+        volatile=MEASURED_VOLATILE_PROFILES["realitymix"][PAGE_KIND_DETAIL],
     ).norm_bytes
 
     assert b"data-gps-lat" in normalised
@@ -167,7 +169,7 @@ def test_mmreality_strips_the_cloudflare_email_payload_and_keeps_the_coordinates
     that holds the listing's own latitude/longitude must not."""
     normalised = normalise(
         _body("mmreality_a1"), content_type=_HTML,
-        volatile=DEFAULT_VOLATILE_PROFILES["mmreality"],
+        volatile=MEASURED_VOLATILE_PROFILES["mmreality"][PAGE_KIND_DETAIL],
     ).norm_bytes
 
     for gone in (b"__cf_email__", b"data-cfemail", b"email-protection"):
@@ -187,7 +189,7 @@ def test_remax_strips_the_share_popover_and_keeps_the_forms_map_and_canonical() 
     node strip, not a wider input[name] rule. Everything around it stays."""
     normalised = normalise(
         _body("remax_a1"), content_type=_HTML,
-        volatile=DEFAULT_VOLATILE_PROFILES["remax"],
+        volatile=MEASURED_VOLATILE_PROFILES["remax"][PAGE_KIND_DETAIL],
     ).norm_bytes
 
     # The escaped <form> lived in `data-content`; no popover payload may survive.
@@ -244,7 +246,7 @@ def test_ceskereality_relative_insertion_date_is_the_known_residue() -> None:
             '</div></dl></body></html>'
         ).encode("utf-8")
 
-    profile = DEFAULT_VOLATILE_PROFILES["ceskereality"]
+    profile = MEASURED_VOLATILE_PROFILES["ceskereality"][PAGE_KIND_DETAIL]
     minutes = normalise(page("před 22 minutami"), content_type=_HTML, volatile=profile)
     later = normalise(page("před 23 minutami"), content_type=_HTML, volatile=profile)
     absolute = normalise(page("10. března 2026"), content_type=_HTML, volatile=profile)
@@ -277,7 +279,7 @@ def test_a_malformed_selector_does_not_degrade_a_real_body_to_raw() -> None:
     three-node document the raw fallback and the normalised form are nearly the
     same bytes, so only a real page shows what one typo used to cost — the whole
     body, and with it that portal's measured change rate."""
-    profile = DEFAULT_VOLATILE_PROFILES["ceskereality"]
+    profile = MEASURED_VOLATILE_PROFILES["ceskereality"][PAGE_KIND_DETAIL]
     with_typo = VolatileProfile(
         css_selectors=profile.css_selectors + ("div..a", ""),
         strip_attributes=profile.strip_attributes,

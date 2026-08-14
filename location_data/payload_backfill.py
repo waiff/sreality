@@ -47,11 +47,11 @@ import psycopg
 
 from location_data import loader_db, payloads
 from location_data.payload_norm import (
-    DEFAULT_VOLATILE_PROFILES,
     NORMALIZER_VERSION,
-    VolatileProfile,
     normalise,
+    normalizer_version_for,
     sniff_content_type,
+    volatile_profile,
 )
 from location_data.resolver import lease
 from scraper import db
@@ -68,6 +68,12 @@ WAVE = "W2a"
 # until it reports `reached_end`. Stamping the pair on the batch row is what lets a later
 # run see that the ground in front of it was migrated under a different normaliser and
 # refuse to duplicate it (see `_prior_progress`).
+#
+# The BATCH stamp stays the module version, unqualified, while each ROW carries
+# `normalizer_version_for(source, page_kind)`: one scan covers every surface in
+# portal_raw_pages, so "which normaliser did this batch run under" has no per-surface
+# answer, and the per-surface answer belongs on the rows — where the content address it
+# explains actually lives.
 EXTRACTOR_VERSION = f"{BACKFILL_VERSION}+{NORMALIZER_VERSION}"
 
 # A bare `portal_raw_pages.id` keyset, which is what migration 387 calls 'full'. The
@@ -179,15 +185,15 @@ INSERT INTO portal_raw_payloads
      first_observed_at, last_observed_at, fetched_at)
 SELECT r.source, r.source_id_native, NULL::bigint, r.page_kind::location_page_kind,
        r.payload_sha256, r.body_sha256, r.content_type, r.content_encoding, r.body,
-       r.byte_size, r.http_status, NULL::integer, %(normalizer_version)s::text,
+       r.byte_size, r.http_status, NULL::integer, r.normalizer_version,
        NULL::bigint, true, 1, r.fetched_at, r.fetched_at, r.fetched_at
   FROM unnest(%(source)s::text[], %(source_id_native)s::text[], %(page_kind)s::text[],
               %(payload_sha256)s::bytea[], %(body_sha256)s::bytea[],
               %(content_type)s::text[], %(content_encoding)s::text[], %(body)s::bytea[],
               %(byte_size)s::integer[], %(http_status)s::integer[],
-              %(fetched_at)s::timestamptz[])
+              %(fetched_at)s::timestamptz[], %(normalizer_version)s::text[])
     AS r(source, source_id_native, page_kind, payload_sha256, body_sha256, content_type,
-         content_encoding, body, byte_size, http_status, fetched_at)
+         content_encoding, body, byte_size, http_status, fetched_at, normalizer_version)
 ON CONFLICT (source, source_id_native, page_kind, payload_sha256) DO NOTHING
 RETURNING id
 """
@@ -246,11 +252,18 @@ class BackfillRefused(RuntimeError):
     """A precondition failed; no batch row was opened and nothing was written."""
 
 
-def encode_for_archive(body: bytes, *, source: str) -> dict[str, Any]:
-    """The per-row derivation: content type, both hashes, and the stored bytes.
+def encode_for_archive(body: bytes, *, source: str, page_kind: str) -> dict[str, Any]:
+    """The per-row derivation: content type, both hashes, the stored bytes, the cohort.
 
     Pure — no DB, no network, no clock — so the whole value of a migrated row can be
     asserted from a fixture body alone.
+
+    `page_kind` is not decoration. This lane is the ONLY writer that carries index
+    bodies (portal_raw_pages holds 7,659 of them across five portals, four of which
+    never had an index profile measured), and `payload_sha256` is the archive's
+    identity — so normalising an index body under a portal's DETAIL profile would
+    write a permanent content address taken over the wrong projection. The profile
+    and the cohort stamp both come from the (source, page_kind) pair.
 
     The compression goes through `payloads.encode_body`, the live writer's own encoder,
     rather than a second `gzip.compress` call here. The two produce identical bytes today;
@@ -261,8 +274,9 @@ def encode_for_archive(body: bytes, *, source: str) -> dict[str, Any]:
     it would be invisible to it, because the verifier decodes both through `decode_body`.
     """
     content_type = sniff_content_type(body)
-    profile = DEFAULT_VOLATILE_PROFILES.get(source, VolatileProfile())
-    norm = normalise(body, content_type=content_type, volatile=profile)
+    norm = normalise(
+        body, content_type=content_type, volatile=volatile_profile(source, page_kind),
+    )
     # gzip_min_bytes=0: a legacy page is a whole document, so the writer's 4 KB "leave it
     # verbatim" branch is dead weight here — but it stays honest for the degenerate
     # zero-length body, which comes back 'identity' rather than as an empty gzip member.
@@ -274,6 +288,7 @@ def encode_for_archive(body: bytes, *, source: str) -> dict[str, Any]:
         "byte_size": norm.byte_size,
         "stored": stored,
         "content_encoding": encoding,
+        "normalizer_version": normalizer_version_for(source, page_kind),
     }
 
 
@@ -434,9 +449,11 @@ def run(
                                unmapped_kinds=unmapped_kinds)
 
             if columns and not dry_run:
+                # `normalizer_version` rides in `columns`, per row: one batch mixes
+                # detail and index bodies, and only the detail ones were normalised
+                # under a measured profile.
                 with loader_db.bounded(conn, statement_timeout) as cur:
-                    cur.execute(_INSERT_SQL,
-                                {**columns, "normalizer_version": NORMALIZER_VERSION})
+                    cur.execute(_INSERT_SQL, columns)
                     inserted = len(cur.fetchall())
                 stats["inserted"] += inserted
                 stats["skipped_existing"] += len(columns["source"]) - inserted
@@ -513,7 +530,7 @@ def _columns(
     out: dict[str, list[Any]] = {
         "source": [], "source_id_native": [], "page_kind": [], "payload_sha256": [],
         "body_sha256": [], "content_type": [], "content_encoding": [], "body": [],
-        "byte_size": [], "http_status": [], "fetched_at": [],
+        "byte_size": [], "http_status": [], "fetched_at": [], "normalizer_version": [],
     }
     for _id, source, source_id_native, page_kind, body, http_status, fetched_at in records:
         kind = PAGE_KIND_MAP.get(page_kind)
@@ -522,7 +539,9 @@ def _columns(
             stats["unmapped_page_kind"] += 1
             continue
         raw = bytes(body)
-        derived = encode_for_archive(raw, source=source)
+        # The MAPPED kind, not the source column's raw text: it is the value the row
+        # lands under, so the profile and the cohort must be resolved from the same one.
+        derived = encode_for_archive(raw, source=source, page_kind=kind)
         stored = derived["stored"]
         if len(stored) > r2_threshold:
             # Inline anyway. A spill would need a per-row R2 upload inside the batch
@@ -541,6 +560,7 @@ def _columns(
         out["byte_size"].append(derived["byte_size"])
         out["http_status"].append(http_status)
         out["fetched_at"].append(fetched_at)
+        out["normalizer_version"].append(derived["normalizer_version"])
         stats["bytes_read"] += derived["byte_size"]
         stats["bytes_stored"] += len(stored)
     return out if out["source"] else {}

@@ -65,10 +65,11 @@ from typing import Any
 from selectolax.parser import HTMLParser
 
 from location_data.payload_norm import (
-    DEFAULT_VOLATILE_PROFILES,
+    PAGE_KIND_DETAIL,
     VolatileProfile,
     normalise,
     sniff_content_type,
+    volatile_profile,
 )
 from scraper.portal import default_config
 from scraper.rate_limit import RateLimiter
@@ -519,7 +520,11 @@ def load_bodies(directory: Path) -> dict[str, KeyResult]:
 
 
 def report(source: str, results: dict[str, KeyResult], *, top: int) -> None:
-    profile = DEFAULT_VOLATILE_PROFILES.get(source, VolatileProfile())
+    # This probe only ever fetches DETAIL pages (`_fetch_key` -> the client's
+    # fetch_detail / get_detail), so the surface is pinned rather than parameterised:
+    # the residue it prints must be the residue of the profile the live detail path
+    # actually applies.
+    profile = volatile_profile(source, PAGE_KIND_DETAIL)
     usable = {k: v for k, v in results.items() if v.usable}
     print(f"\n{'=' * 78}\n{source}: {len(usable)}/{len(results)} keys with >=2 fetches")
     for record in results.values():

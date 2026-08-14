@@ -232,17 +232,18 @@ def test_normalise_agrees_with_profile_residue_on_a_measured_profile() -> None:
     """Cross-check against the shipped module: a profile that DEFAULT_VOLATILE_
     PROFILES ships for idnes should leave profile_residue with nothing to say
     on the exact snippet the profile was written to cover."""
-    from location_data.payload_norm import DEFAULT_VOLATILE_PROFILES
+    from location_data.payload_norm import PAGE_KIND_DETAIL, volatile_profile
 
     a = b'<html><body><h1>Byt</h1><input name="tshee" value="1"></body></html>'
     b = b'<html><body><h1>Byt</h1><input name="tshee" value="2"></body></html>'
     result = KeyResult(key="1", bodies=[a, b], content_type=_HTML)
 
-    covered, residue = profile_residue(result, DEFAULT_VOLATILE_PROFILES["idnes"])
+    idnes = volatile_profile("idnes", PAGE_KIND_DETAIL)
+    covered, residue = profile_residue(result, idnes)
 
     assert covered is True, residue
     # cross-check: normalise() directly agrees with the residue check
-    normed = [normalise(x, content_type=_HTML, volatile=DEFAULT_VOLATILE_PROFILES["idnes"])
+    normed = [normalise(x, content_type=_HTML, volatile=idnes)
               for x in (a, b)]
     assert normed[0].norm_sha256 == normed[1].norm_sha256
 
