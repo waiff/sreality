@@ -15,16 +15,19 @@ dependencies = [
   # corroborator (scraper/image_phash.py). Pillow-only — no numpy/scipy.
   # Pre-approved in docs/design/multi-portal-dedup.md.
   "Pillow>=10",
+  # Runtime since W2a-3b: location_data/payload_norm.py reads each portal
+  # contract's `persistence.volatile_paths` out of contracts/portals/*.yaml. That
+  # declaration decides the projection `payload_sha256` addresses, and the address
+  # is permanent — so it has to come from the deployed artefact, not from a DB
+  # projection that may or may not have been refreshed yet. Already a dev/CI
+  # dependency (workflow-docs codegen, the contract gate); this promotes it.
+  "pyyaml>=6.0",
 ]
 
 [project.optional-dependencies]
 dev = [
   "pytest>=8.0",
   "httpx>=0.27",
-  # Parse .github/workflows/*.yml for the Settings "GitHub Actions" docs
-  # codegen (scripts/generate_workflow_docs.py). Dev/CI-only — never
-  # imported by the scraper or API at runtime.
-  "pyyaml>=6.0",
 ]
 api = [
   "fastapi>=0.115",

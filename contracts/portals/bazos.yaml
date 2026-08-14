@@ -15,7 +15,7 @@
 # [db-raw §3.4]. The street/quarter/country entries below are the W2 HTML wave.
 
 portal: bazos
-contract_version: 1
+contract_version: 2
 extractor_runtime: ">=1.0"
 identity_ladder: [text_geocode]
 
@@ -41,7 +41,25 @@ fetch:
       robots_note: "category-only URLs; no hlokalita/humkreis"
 
 persistence:
-  volatile_paths: [/views, /image_urls]
+  # What this portal's body carries that changes without the listing changing —
+  # PER page_kind, because a detail page is one property and an index page is a
+  # LIST of them, and every rule below came from diffing DETAIL pages (02 §2.3.2
+  # P1; W2a-3b/3c measured them, W2a-3d fixed the keying). `base:` names the
+  # portal-agnostic floor `location_data.payload_norm` applies underneath —
+  # `html` = third-party analytics loaders matched by src, page chrome, CSRF
+  # material, per-response attributes; `none` = no floor. A page_kind ABSENT here
+  # is not declared: it is normalised with that floor alone and counted in its own
+  # `+base` cohort, which is the honest state for every surface but `detail`.
+  # Declaring an index profile takes an index diff, which nobody has run.
+  volatile_paths:
+    detail:
+      base: html
+      css_selectors:
+        # The per-listing view counter the index parser already reads ("Vidělo: N
+        # lidí"); it increments on every visit. Scoped to detail and nowhere else:
+        # on an INDEX page it matches once per CARD (21 nodes on a live page), so
+        # applied there it would eat one node out of every listing in the grid.
+        - "div.inzeratyview"
   version_cap: 20
 
 exclusion_zones:

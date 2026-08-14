@@ -16,14 +16,15 @@ import json
 from pathlib import Path
 
 from location_data.payload_norm import (
-    MEASURED_VOLATILE_PROFILES,
     NORMALIZER_VERSION,
     PAGE_KIND_DETAIL,
     VolatileProfile,
+    contract_profiles,
     normalise,
     selector_is_safe,
     selector_is_usable,
     sniff_content_type,
+    volatile_profile,
 )
 
 _JSON = "application/json"
@@ -203,10 +204,10 @@ def test_content_type_sniffing() -> None:
 
 
 def _detail_profiles() -> dict[str, VolatileProfile]:
-    """Every portal's DETAIL profile — the only surface any of them was measured on."""
+    """Every portal's DETAIL profile — the only surface any contract declares."""
     return {
-        source: surfaces[PAGE_KIND_DETAIL]
-        for source, surfaces in MEASURED_VOLATILE_PROFILES.items()
+        source: volatile_profile(source, PAGE_KIND_DETAIL)
+        for source in contract_profiles().versions
     }
 
 
@@ -216,17 +217,17 @@ def test_every_portal_has_a_profile_and_the_version_is_stamped() -> None:
         "remax", "ceskereality", "realitymix", "maxima",
     }
 
-    assert sources == set(MEASURED_VOLATILE_PROFILES)
+    assert sources == set(contract_profiles().versions)
     assert NORMALIZER_VERSION.startswith("payload_norm@")
 
 
-def test_only_the_detail_surface_has_ever_been_measured() -> None:
-    """The profiles come from diffing DETAIL pages (W2a-3b/3c). Adding an entry for
+def test_only_the_detail_surface_has_ever_been_declared() -> None:
+    """The profiles come from diffing DETAIL pages (W2a-3b/3c). Declaring one for
     another page_kind is a real measurement, not a copy of this one — this pins that
-    no such entry appeared without the evidence, and that no portal's detail entry
-    was dropped (a missing one silently falls back to BASE_PROFILE)."""
+    no such declaration appeared without the evidence, and that no portal's detail
+    declaration was dropped (a missing one silently falls back to BASE_PROFILE)."""
     assert {
-        kind for surfaces in MEASURED_VOLATILE_PROFILES.values() for kind in surfaces
+        page_kind for _source, page_kind in contract_profiles().profiles
     } == {PAGE_KIND_DETAIL}
 
 
@@ -255,10 +256,10 @@ def test_default_profiles_apply_cleanly_to_their_portal_body_kind() -> None:
         assert b"noscript" not in result.norm_bytes, source
 
     idnes = normalise(
-        html, content_type=_HTML, volatile=MEASURED_VOLATILE_PROFILES["idnes"][PAGE_KIND_DETAIL],
+        html, content_type=_HTML, volatile=volatile_profile("idnes", PAGE_KIND_DETAIL),
     )
     bazos = normalise(
-        html, content_type=_HTML, volatile=MEASURED_VOLATILE_PROFILES["bazos"][PAGE_KIND_DETAIL],
+        html, content_type=_HTML, volatile=volatile_profile("bazos", PAGE_KIND_DETAIL),
     )
     assert b"advertisement" not in idnes.norm_bytes
     assert b"inzeratyview" not in bazos.norm_bytes
@@ -270,7 +271,7 @@ def test_sreality_profile_strips_the_hashing_module_volatile_keys() -> None:
     which is the direction that corrupts the P2 storage decision."""
     from scraper import hashing
 
-    pointers = set(MEASURED_VOLATILE_PROFILES["sreality"][PAGE_KIND_DETAIL].json_pointers)
+    pointers = set(volatile_profile("sreality", PAGE_KIND_DETAIL).json_pointers)
     # `rusReply` is the legacy camelCase alias of `rus_reply`, only ever present
     # in pre-v1 archived raw_json; the live API never emits it.
     expected = (
@@ -306,7 +307,7 @@ def test_key_glob_strips_the_whole_attachment_url_family() -> None:
         "sdn_keep_me": "not an attachment",
         "name": "Byt 3+1",
     }).encode("utf-8")
-    profile = MEASURED_VOLATILE_PROFILES["sreality"][PAGE_KIND_DETAIL]
+    profile = volatile_profile("sreality", PAGE_KIND_DETAIL)
 
     a = normalise(body, content_type=_JSON, volatile=profile)
     b = normalise(other, content_type=_JSON, volatile=profile)
@@ -329,8 +330,15 @@ def test_key_glob_only_matches_both_ends() -> None:
 
 
 def test_normaliser_is_pure() -> None:
-    """No DB, no network, no clock — the module must be safe to call inside a
-    drain batch and must produce the same hash on any runner."""
+    """No DB, no network, no clock, no randomness — the module must be safe to call
+    inside a drain batch and must produce the same hash on any runner.
+
+    `pathlib`/`yaml` are the contract read (W2a-3b) and do not weaken that: a file
+    that ships inside the deployed artefact is deterministic for that artefact,
+    which is the whole reason the profile is read from git rather than from the DB
+    projection. The banned list is the half that matters, and it is asserted
+    explicitly rather than left to the allowlist's silence: an import added there
+    without a thought would otherwise only have to squeeze past a `<=`."""
     module = Path(__file__).resolve().parents[2] / "location_data" / "payload_norm.py"
     tree = ast.parse(module.read_text(encoding="utf-8"))
 
@@ -342,8 +350,16 @@ def test_normaliser_is_pure() -> None:
             imported.add(node.module.split(".")[0])
 
     assert imported <= {
-        "__future__", "hashlib", "json", "re", "dataclasses", "typing", "selectolax",
+        "__future__", "hashlib", "json", "re", "dataclasses", "functools", "pathlib",
+        "typing", "selectolax", "yaml",
     }, sorted(imported)
+    # No clock, no randomness, no DB, no HTTP — and no `location_data.contracts`,
+    # which imports scraper.db: the contract gate depends on THIS module, never the
+    # other way round.
+    assert imported.isdisjoint({
+        "datetime", "time", "random", "uuid", "psycopg", "requests", "urllib",
+        "socket", "os", "scraper", "location_data",
+    }), sorted(imported)
 
 
 # --- @2 (W2a-3b): selector_is_safe + the measured idnes/ceskereality/realitymix profiles ---

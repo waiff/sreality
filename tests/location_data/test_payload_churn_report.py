@@ -29,7 +29,7 @@ from typing import Any
 import pytest
 
 from location_data.payload_norm import (
-    MEASURED_VOLATILE_PROFILES, NORMALIZER_VERSION, PAGE_KIND_DETAIL,
+    NORMALIZER_VERSION, PAGE_KIND_DETAIL, contract_profiles,
     probe_normalizer_version,
 )
 from scripts import location_payload_churn_report as rep
@@ -273,10 +273,11 @@ def test_a_cadence_that_agrees_with_the_declared_one_is_not_marked() -> None:
 
 
 def test_the_cadence_constant_covers_every_portal_the_instrument_measures() -> None:
-    # The nine volatile profiles are the fleet; a portal with no cadence constant gets a
+    # The nine portal CONTRACTS are the fleet; a portal with no cadence constant gets a
     # loud marker rather than a wrong number, but it should not be missing in the first
-    # place.
-    assert set(rep.CYCLES_PER_DAY) == set(MEASURED_VOLATILE_PROFILES)
+    # place. Keyed off the contracts now that they own the volatile profiles, so
+    # onboarding a portal cannot leave the readout silently short of one.
+    assert set(rep.CYCLES_PER_DAY) == set(contract_profiles().versions)
 
 
 def test_an_unknown_source_is_projected_from_what_was_observed_and_marked() -> None:

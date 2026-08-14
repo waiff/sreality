@@ -19,7 +19,7 @@
 # 14.12853 carries 58 rows that are a LEGITIMATE development cluster.
 
 portal: idnes
-contract_version: 1
+contract_version: 2
 extractor_runtime: ">=1.0"
 identity_ladder: [portal_precise_coord, text_geocode]
 
@@ -35,7 +35,37 @@ fetch:
       robots_note: "Public detail page; no login, no evasion."
 
 persistence:
-  volatile_paths: [/image_urls, /price_text]
+  # What this portal's body carries that changes without the listing changing —
+  # PER page_kind, because a detail page is one property and an index page is a
+  # LIST of them, and every rule below came from diffing DETAIL pages (02 §2.3.2
+  # P1; W2a-3b/3c measured them, W2a-3d fixed the keying). `base:` names the
+  # portal-agnostic floor `location_data.payload_norm` applies underneath —
+  # `html` = third-party analytics loaders matched by src, page chrome, CSRF
+  # material, per-response attributes; `none` = no floor. A page_kind ABSENT here
+  # is not declared: it is normalised with that floor alone and counted in its own
+  # `+base` cohort, which is the honest state for every surface but `detail`.
+  # Declaring an index profile takes an index diff, which nobody has run.
+  volatile_paths:
+    detail:
+      base: html
+      css_selectors:
+        # W2a-3b: 3/3 fetches differed on 5/5 listings. All of it is the Nette
+        # contact form ("Napište makléři") re-arming its anti-spam material per
+        # response, plus the recommendation rail:
+        #   input[name=tshee]     15237420345 -> 15237420357  (per-response counter)
+        #   input[name=schpeckc]  62da6c7c… -> c26841cc…      (32-hex captcha hash)
+        #   #schpeckIn            "3 ➕ 6" -> "1 ➕ 1"          (the captcha question)
+        # The form's `_token_` was already covered by the floor's
+        # input[name*="_token"]; these are what it missed.
+        - 'input[name="tshee"]'
+        - 'input[name="schpeckc"]'
+        - "#schpeckIn"
+        # "Podobné nabídky" holds OTHER listings' titles, prices, streets and
+        # thumbnails — never this listing's — so its rotation is pure archive churn
+        # (and mis-attributed location text if it stayed).
+        - "div.grid-similar-offers"
+        # stehuju.cz / vyklizim.cz partner slots (fixture-verified).
+        - ".advertisement"
   version_cap: 20
 
 exclusion_zones:

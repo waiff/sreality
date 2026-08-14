@@ -264,6 +264,13 @@ class _RecordingConn:
         return _RecordingCur(self)
 
 
+def _detail_cohort(source: str) -> str:
+    """The label a DECLARED surface writes: the engine plus the contract version whose
+    `persistence.volatile_paths` supplied the profile (W2a-3b). Built from the registry's
+    version rather than by asking the resolver, so the assertion still says something."""
+    return (f"{NORMALIZER_VERSION}{payload_norm.CONTRACT_PROFILE_SUFFIX}"
+            f"{payload_norm.contract_profiles().versions[source]}")
+
 def _append_params(**kwargs: Any) -> dict[str, Any]:
     """The params bound into the append INSERT for one call."""
     conn = _RecordingConn()
@@ -287,7 +294,7 @@ def _append_params(**kwargs: Any) -> dict[str, Any]:
 
 
 def test_the_stamp_follows_the_surface_when_the_writer_resolves_the_profile() -> None:
-    assert _append_params()["normalizer_version"] == NORMALIZER_VERSION
+    assert _append_params()["normalizer_version"] == _detail_cohort("idnes")
     assert _append_params(page_kind="index")["normalizer_version"] == (
         f"{NORMALIZER_VERSION}{payload_norm.BASE_PROFILE_SUFFIX}")
 
@@ -462,7 +469,7 @@ def test_a_changed_body_appends_a_second_row(conn: psycopg.Connection) -> None:
     rows = _rows(conn, native)
     assert [r["version_seq"] for r in rows] == [1, 2]
     assert rows[0]["payload_sha256"] != rows[1]["payload_sha256"]
-    assert all(r["normalizer_version"] == NORMALIZER_VERSION for r in rows)
+    assert all(r["normalizer_version"] == _detail_cohort("idnes") for r in rows)
 
 
 @requires_db
@@ -947,7 +954,7 @@ def test_the_profile_and_the_cohort_follow_the_surface_not_the_portal(
     assert detail.payload_sha256 != index.payload_sha256
     cohorts = {r["page_kind"]: r["normalizer_version"] for r in _rows(conn, native)}
     assert cohorts == {
-        "detail": NORMALIZER_VERSION,
+        "detail": _detail_cohort("idnes"),
         "index": f"{NORMALIZER_VERSION}+base",
     }
 
@@ -976,7 +983,7 @@ def test_the_stamp_names_the_profile_that_was_actually_applied(
 
     assert shipped.payload_sha256 != caller.payload_sha256, (
         "the two profiles must disagree, or this proves nothing")
-    assert _rows(conn, measured)[0]["normalizer_version"] == NORMALIZER_VERSION
+    assert _rows(conn, measured)[0]["normalizer_version"] == _detail_cohort("idnes")
     assert _rows(conn, constructed)[0]["normalizer_version"] == "contract@7"
 # --------------------------------------------------- the per-listing time floor
 

@@ -17,11 +17,15 @@ already-loaded version is refused — that is the whole point of `contract_sha25
 mutable columns are operational state, not extraction: `is_active` says which version the
 extractor runs, `shadow` says whether what it mined is admissible to the resolver yet.
 
-PyYAML is a DEV/CI dependency (pyproject `[dev]`, already present for
-scripts/generate_workflow_docs.py) and is imported lazily: this module is a deploy-time
-lane, exactly like the workflow-docs codegen. The claims extractor
-(`location_data.claims_intake`) reads the DB projection and never parses YAML, so the
-scraper/API runtime images stay untouched.
+This module is the deploy-time/CI lane and imports PyYAML lazily. The claims extractor
+(`location_data.claims_intake`) reads the DB projection and never parses YAML.
+
+ONE KEY IS READ FROM GIT AT RUNTIME, not from the projection: `persistence.volatile_paths`
+(W2a-3b). `location_data.payload_norm` parses it out of these same files with the same
+parser this module validates them with, because `payload_sha256` is a PERMANENT content
+address and the projection producing it must be a function of the deployed artefact alone
+— never of whether the contract-load job had run yet. That is why `contracts/` is COPYed
+into the image and PyYAML is a runtime dependency. Everything else here stays deploy-time.
 
 CLI:
     python -m location_data.contracts --check                     # validate only, no DB
@@ -51,6 +55,7 @@ from typing import Any
 
 import psycopg
 
+from location_data import payload_norm
 from scraper import db
 
 LOG = logging.getLogger("location_data.contracts")
@@ -315,6 +320,13 @@ class PortalContract:
     # UPDATE on the header, not a contract_version bump.
     shadow: bool = False
     entries: list[ContractEntry] = field(default_factory=list)
+    # `persistence.volatile_paths`, parsed: {page_kind: profile}. 02 §2.3.2 P1 —
+    # `payload_sha256` addresses a NORMALISED body, and this is what normalises it, so
+    # a change to it moves a PERMANENT content address. It is modelled here rather than
+    # left inside the `fetch_config` blob so the CI `--check` gate refuses a bad
+    # selector (see `payload_norm.parse_profile_block`) instead of projecting it and
+    # letting the silent normaliser no-op it in production.
+    volatile_profiles: dict[str, payload_norm.VolatileProfile] = field(default_factory=dict)
     path: Path | None = None
 
 
@@ -601,6 +613,24 @@ def parse_contract(path: Path) -> PortalContract:
     if version < 1:
         raise ContractError(f"{path}: contract_version must be >= 1")
 
+    persistence = dict(doc.get("persistence") or {})
+    # The load-time gate a selector out of YAML needs, run HERE because this is the
+    # last place refusing is allowed: `payload_norm.normalise` is silent by contract
+    # (a malformed selector raises inside selectolax and `:contains()` SEGFAULTS it —
+    # exit 139, uncatchable), so a typo that reaches it does not fail, it quietly
+    # stops stripping and the portal's measured change rate moves for no reason
+    # anybody can see. The test suite parses every contract through here, so a typo
+    # fails `test.yml` on the push that introduces it; `--check` is the same gate on
+    # demand, and `--load` runs it again at deploy time.
+    try:
+        volatile_profiles = payload_norm.parse_volatile_paths(
+            persistence.get("volatile_paths"),
+            where=f"{path.name}:persistence.volatile_paths",
+            page_kinds=PAGE_KINDS,
+        )
+    except payload_norm.ProfileError as exc:
+        raise ContractError(str(exc)) from exc
+
     entries = [
         parse_entry(raw, source=source, index=i)
         for i, raw in enumerate(_require(doc, "extractions", str(path)))
@@ -624,13 +654,19 @@ def parse_contract(path: Path) -> PortalContract:
         precision_priors=dict(doc.get("precision_priors") or {}),
         fetch_config={
             "fetch": doc.get("fetch") or {},
-            "persistence": doc.get("persistence") or {},
+            # Projected VERBATIM, as the file writes it: the DB pair is a projection of
+            # the git artefact (02 §2.1.8) and `contract_sha256` is taken over those
+            # bytes, so a normalised-on-the-way-in copy would be a second dialect of the
+            # same fact. What the runtime applies is `volatile_profiles`, parsed from
+            # exactly these bytes by exactly this parser.
+            "persistence": persistence,
             "precision_caps": doc.get("precision_caps") or {},
             "regressions": doc.get("regressions") or [],
             "extractor_runtime": doc.get("extractor_runtime"),
         },
         shadow=bool(doc.get("shadow", False)),
         entries=entries,
+        volatile_profiles=volatile_profiles,
         path=path,
     )
 
@@ -928,6 +964,7 @@ def _summarise(contracts: Iterable[PortalContract]) -> str:
     return json.dumps(
         {c.source: {"version": c.version, "entries": len(c.entries),
                     "w1_readers": sum(1 for e in c.entries if e.reader),
+                    "volatile_surfaces": sorted(c.volatile_profiles),
                     "shadow": c.shadow}
          for c in contracts},
         ensure_ascii=False, sort_keys=True)

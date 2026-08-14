@@ -855,26 +855,24 @@ def append_payload(
     on the other side of the join. None is the honest value for a fetch with no
     snapshot yet; a later anchored fetch of the same body fills it in.
 
-    `volatile` None resolves the measurement-phase profile for this (source,
-    page_kind) SURFACE — never for the source alone: `payload_sha256` is the
+    `volatile` None resolves the profile this portal's CONTRACT declares for this
+    (source, page_kind) SURFACE — never for the source alone: `payload_sha256` is the
     archive's identity, so a detail profile mis-applied to an index body would bake
     a hash taken over the wrong projection into every span that ever points at it.
-    A surface with no measured profile gets `payload_norm.BASE_PROFILE` and stamps
-    `normalizer_version` with the `+base` suffix, so which instrument produced a row's
-    content address is readable off the row. W2a-3b replaces those with the contract's
-    declared `persistence.volatile_paths`.
+    A surface no contract declares gets `payload_norm.BASE_PROFILE` and stamps
+    `normalizer_version` with the `+base` suffix; a declared one stamps
+    `+contract@<version>`, so which instrument produced a row's content address is
+    readable off the row.
 
     `normalizer_version` OVERRIDES the cohort stamp, and an explicit `volatile`
     REQUIRES one — the pair is refused otherwise. `normalizer_version` is a permanent
     column whose whole job is to say which projection produced this row's content
-    address; derived from the profile TABLE while the body was normalised under a
-    caller-supplied profile, it would assert "only the generic base was stripped"
-    about a row hashed under something else, and no reader could tell. W2a-3b is
-    exactly that caller (contract-sourced selectors are a different instrument from
-    `payload_norm@3` and must open their own cohort — migration 402), so the
-    requirement is the forcing function, not a formality. Overriding the stamp ALONE
-    is allowed and is `record_payload_churn`'s established shape: same profile, a
-    caller-stated cohort.
+    address; derived from the resolver while the body was normalised under a
+    caller-supplied profile, it would assert "this contract version's declaration
+    was applied" about a row hashed under something else, and no reader could tell.
+    The requirement is what makes a caller profile SAFE to offer at all. Overriding
+    the stamp ALONE is allowed and is `record_payload_churn`'s established shape:
+    same profile, a caller-stated cohort (the confirmation probe's `+probe`).
 
     `min_append_interval_days` is the per-listing time floor (0 disables it, None reads
     `LOCATION_PAYLOAD_MIN_APPEND_INTERVAL_DAYS`). A body refused by it is DISCARDED, not

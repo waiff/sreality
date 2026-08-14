@@ -363,10 +363,15 @@ def test_the_bumped_contracts_appended_entries_and_kept_the_earlier_ones():
     """02 §2.1.8: entries are immutable per `contract_version`, so closing a measured
     coverage gap is a VERSION BUMP that appends. Every earlier id must still be there — an
     entry that disappeared would orphan every claim already stamped with it."""
+    # W2a-3b bumped all nine at once, deliberately: `persistence.volatile_paths` moved
+    # into the contracts and entries are immutable per version, so the fleet takes one
+    # bump instead of nine staggered ones. It appended no entry and changed no locator —
+    # tests/fixtures/location_w2/golden/<portal>@<old>.json and @<new>.json are identical
+    # claim for claim.
     assert {s: c.version for s, c in ALL.items()} == {
-        "remax": 2, "ceskereality": 3, "realitymix": 3,
-        "sreality": 1, "bezrealitky": 1, "bazos": 1, "idnes": 1, "mmreality": 1,
-        "maxima": 1,
+        "remax": 3, "ceskereality": 4, "realitymix": 4,
+        "sreality": 2, "bezrealitky": 2, "bazos": 2, "idnes": 2, "mmreality": 2,
+        "maxima": 2,
     }
     for source, new_ids, earlier_ids in (
         ("remax", {"rx.det.legacy_display_address", "rx.det.legacy_locality"},
@@ -415,7 +420,7 @@ def test_contract_sha256_is_taken_from_the_bytes_on_disk():
     assert contract.path is not None
     import hashlib
     assert contract.sha256 == hashlib.sha256(contract.path.read_bytes()).digest()
-    assert contracts.extractor_version(contract) == "contract:maxima@1"
+    assert contracts.extractor_version(contract) == "contract:maxima@2"
 
 
 # ------------------------------------------------------------------ format validation

@@ -26,11 +26,19 @@ import pytest
 
 from location_data import payload_backfill, payloads
 from location_data.payload_backfill import PAGE_KIND_MAP, encode_for_archive, run
+from location_data import payload_norm
 from location_data.payload_norm import NORMALIZER_VERSION
 
 BASE_TS = datetime(2026, 8, 1, 12, 0, tzinfo=UTC)
 _MODULE = Path(payload_backfill.__file__)
 
+
+def _detail_cohort(source: str) -> str:
+    """The label a DECLARED surface writes: the engine plus the contract version whose
+    `persistence.volatile_paths` supplied the profile (W2a-3b). Built from the registry's
+    version rather than by asking the resolver, so the assertion still says something."""
+    return (f"{NORMALIZER_VERSION}{payload_norm.CONTRACT_PROFILE_SUFFIX}"
+            f"{payload_norm.contract_profiles().versions[source]}")
 
 class _Page:
     def __init__(
@@ -220,7 +228,7 @@ def test_every_page_is_migrated_exactly_once_with_the_values_06_requires() -> No
     assert (row["version_seq"], row["pinned"]) == (1, True)
     assert row["content_encoding"] == "gzip"
     assert row["http_status"] == 200
-    assert row["normalizer_version"] == NORMALIZER_VERSION
+    assert row["normalizer_version"] == _detail_cohort("bazos")
     assert row["byte_size"] == len(page.body)
     assert gzip.decompress(row["body"]) == page.body
     assert row["body_sha256"] == hashlib.sha256(page.body).digest()
@@ -641,7 +649,7 @@ def test_an_index_body_is_migrated_under_the_base_profile_and_its_own_cohort() -
 
     detail, index = conn.payloads[0], conn.payloads[1]
     assert (detail["page_kind"], index["page_kind"]) == ("detail", "index")
-    assert detail["normalizer_version"] == NORMALIZER_VERSION
+    assert detail["normalizer_version"] == _detail_cohort("bazos")
     assert index["normalizer_version"] == f"{NORMALIZER_VERSION}+base"
     # Same bytes, two surfaces: identical raw hash, different content address.
     assert detail["body_sha256"] == index["body_sha256"]

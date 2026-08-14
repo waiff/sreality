@@ -12,38 +12,52 @@ same bytes always hash the same way on any runner, and it NEVER raises: a body
 the instrument cannot parse degrades to a raw-bytes fallback rather than killing
 the scrape it is measuring.
 
-MEASURED_VOLATILE_PROFILES is a MEASUREMENT-PHASE artefact, not a contract. The
-profiles that ship in portal_contract_entries.persistence.volatile_paths are
-chosen FROM this measurement; these are the best guesses that make the first
-readout informative. They are deliberately biased towards stripping: an
-over-stripped profile understates raw-vs-norm separation (it makes the
-normaliser look better than it is, and the next readout catches it), while an
-under-stripped one silently inflates the change rate that the P2 storage
-projection depends on.
+THE PROFILES LIVE IN THE PORTAL CONTRACTS (W2a-3b), NOT IN THIS FILE.
+`contracts/portals/<portal>.yaml` -> `persistence.volatile_paths.<page_kind>` is
+their single home, so a change to what a portal strips is a reviewed diff on a
+versioned, retractable artefact like every other extraction rule — not a Python
+edit that ships with whatever else was in the branch. This module owns the
+ALGORITHM and the portal-agnostic floor (`BASE_PROFILE`); it owns no portal's
+rules. The measurement narrative for each one (which fetch differed, on how many
+listings, and why the selector is the narrowest form that covers it) moved with
+the values and is the comment block above each contract's `persistence:` key.
+
+WHY GIT AND NOT THE DB PROJECTION. 02 section 2.1.8 makes git the store of record
+and `portal_contracts`/`portal_contract_entries` a deploy-time projection of it,
+and `contracts.py` still projects `persistence` there for review in psql. But
+`payload_sha256` is a PERMANENT content address that every evidence span inherits,
+so the projection that produces it must be a function of the deployed artefact
+ALONE. Read from the DB, it would additionally be a function of whether the
+contract-load job had run yet — two runners hashing one body two ways, at the same
+moment, recoverable only through the label. The contract files ship in the same
+image as this code (Dockerfile `COPY contracts/`), so there is no such window.
 
 A PROFILE BELONGS TO A (source, page_kind) PAIR, NOT TO A PORTAL. A detail page
 is one property; an index page is a LIST of properties fetched on a walk cadence.
 They are different documents that happen to share a hostname, and every profile
-below was derived by diffing DETAIL pages (W2a-3b/3c). Applying one to an index
-body is applying a measurement to a population it was never taken from — which is
-why `volatile_profile` is keyed by the pair and why an unmeasured surface falls
-back to `BASE_PROFILE` rather than borrowing the portal's detail rules.
+the fleet ships was derived by diffing DETAIL pages (W2a-3b/3c). Applying one to
+an index body is applying a measurement to a population it was never taken from —
+which is why the contract key carries the surface axis, and why a surface no
+contract declares falls back to `BASE_PROFILE` rather than borrowing the portal's
+detail rules.
 
 The asymmetry that decides that fallback: on a MEASURED surface, over-stripping is
 self-correcting — the residue diff shows what the profile ate, and the next readout
 catches it. On an UNMEASURED surface it is not. A selector that deletes the whole
 listing grid off an index page reports a 0% change rate, and 0% reads as the best
 possible result; nothing downstream can tell "nothing changed" from "we deleted
-everything and every page now hashes alike". So the shipped bias towards stripping
-holds only where a diff was actually run, and `BASE_PROFILE` carries only what is
+everything and every page now hashes alike". So the bias towards stripping holds
+only where a diff was actually run, and `BASE_PROFILE` carries only what is
 portal-agnostic and content-free by construction (third-party analytics loaders
 matched by src, page chrome, CSRF material, per-response attributes).
 
-STILL OPEN, AND NOT THIS MODULE'S TO FIX: `persistence.volatile_paths` in the
-contract YAML is a single flat list on the contract HEADER, while `fetch:` beneath
-it is already a per-`page_kind` list. When W2a's next step sources selectors from
-`portal_contract_entries.persistence.volatile_paths` it will re-introduce exactly
-the collapse this module just removed unless that key gains the surface axis too.
+A SELECTOR NOW REACHES THE CSS ENGINE FROM YAML, so it is validated where refusing
+is allowed — `contracts.py`'s parse and this module's own loader — never at normalise
+time, which is silent by contract. `selector_is_usable` is that gate: `normalise` can
+only ever no-op a malformed selector, and a no-op selector does not fail, it quietly
+stops stripping and reports the residue as churn.
+Every contract is parsed by the test suite (`contracts.load_all`), so a typo fails
+`test.yml` on the push that introduces it, before the deploy-time `--load` ever sees it.
 """
 
 from __future__ import annotations
@@ -52,18 +66,30 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass
+from functools import lru_cache
+from pathlib import Path
 from typing import Any
 
 from selectolax.parser import HTMLParser
 
-# @3 (W2a-3c): mmreality and remax joined them — both had measured 100% once the churn
-# baseline finally accumulated repeat fetches for them.
+# The contracts are the profiles' home, and they ship beside this code rather than
+# being fetched from anywhere — see the module docstring.
+CONTRACT_DIR = Path(__file__).resolve().parent.parent / "contracts" / "portals"
+
+# THE ENGINE's version — the algorithm in this file, not any portal's rules. Those
+# now live in the contracts and are versioned by `contract_version`, so the two axes
+# that can move a normalised byte are versioned separately and both are named in the
+# cohort label (see `resolve_normalisation`).
+#
+# NOT bumped by the move to contracts: the projections are byte-identical (proved
+# fixture by fixture in tests/location_data/test_payload_norm_by_page_kind.py's pinned
+# digests, which were computed under the code this replaces), and bumping an engine
+# whose output did not move would discard the detail evidence accumulating under it
+# for nothing.
+#
+# @3 (W2a-3c): mmreality and remax joined the measured set — both had measured 100%
+# once the churn baseline finally accumulated repeat fetches for them.
 # @2 (W2a-3b): the idnes / ceskereality / realitymix profiles stopped being guesses.
-# Bumping is not bookkeeping — `normalizer_version` is part of portal_payload_churn's
-# primary key (migration 402) precisely so a profile change opens a CLEAN cohort. Left
-# at @2, the 100%-change rows measured under the old guesses would average together
-# with the new ones and the storage projection would be signed off a blend of two
-# different instruments.
 NORMALIZER_VERSION = "payload_norm@3"
 
 # The confirmation probe (02 section 2.3.2's 200 x 3 protocol,
@@ -83,19 +109,32 @@ def probe_normalizer_version(version: str = NORMALIZER_VERSION) -> str:
     return f"{version}{PROBE_NORMALIZER_SUFFIX}"
 
 
-# A surface with no measured profile is hashed by a DIFFERENT instrument than one
-# with a measured profile — the shared base, not that portal's diffed rules — and
-# `normalizer_version` is what a reader of portal_payload_churn has to tell them
-# apart with. Migration 402's own header states the failure this avoids: relabelling
-# a cohort in place "would blend @1-era counters into the @2 readout and register one
-# phantom change per key on its first @2 fetch (the hash moved because the normaliser
-# moved)". Suffixing is what keeps a DETAIL cohort (`payload_norm@3`) intact across a
-# change that only moves an unmeasured surface's bytes.
+# A surface no contract declares is hashed by a DIFFERENT instrument than one that
+# does — the shared base, not that portal's diffed rules — and `normalizer_version`
+# is what a reader of portal_payload_churn has to tell them apart with. Migration
+# 402's own header states the failure this avoids: relabelling a cohort in place
+# "would blend @1-era counters into the @2 readout and register one phantom change
+# per key on its first @2 fetch (the hash moved because the normaliser moved)".
 #
-# It also maintains itself: the day someone measures an index profile and adds the
-# entry, that surface stops being `+base` and opens its own clean cohort with no
-# human remembering to bump anything.
+# It maintains itself: the day an index profile is measured and declared, that
+# surface stops being `+base` and opens its own clean cohort with no human
+# remembering to bump anything. And it is contract-INDEPENDENT — the base is this
+# module's own floor, byte-identical under every contract version — so the index
+# cohorts accumulating today survive the move to contracts untouched.
 BASE_PROFILE_SUFFIX = "+base"
+
+# The other half of that pair: the contract DID declare a profile for this surface,
+# and this names the contract version it came from. Only the version — the portal is
+# already a column of both tables that carry this label (portal_payload_churn's PK,
+# portal_raw_payloads), and a second copy of a key is a thing that can disagree with
+# the first.
+#
+# It is not the bare `payload_norm@N` and must never be: the values are no longer
+# this module's, so a row stamped `payload_norm@3` would name an instrument (a table
+# in this file) that no longer exists — migration 405 already reserved a
+# non-`payload_norm@N` form for exactly this. Both axes are named because both can
+# move a byte: the engine (@3) and the profile (@N of the contract).
+CONTRACT_PROFILE_SUFFIX = "+contract@"
 
 # `location_page_kind`'s labels (migration 380) are ('index','detail','map',
 # 'gazetteer','snapshot','archive','none'). Only `detail` has ever been diffed, so
@@ -129,8 +168,8 @@ _KEY_GLOB = "*"
 # dies with it — so pseudo-classes are ALLOWLISTED rather than denylisted. Only
 # these five are verified against a full-size page; anything else makes its selector
 # a no-op, which under-strips (the safe direction) instead of crashing.
-# This matters because W2a's next step sources these selectors from
-# portal_contract_entries.persistence.volatile_paths — i.e. from outside this file.
+# This matters because these selectors are sourced from the contracts'
+# persistence.volatile_paths — i.e. from outside this file, as YAML.
 _PSEUDO_RE = re.compile(r"::?([A-Za-z-]+)")
 _SAFE_PSEUDO: frozenset[str] = frozenset({
     "not", "has", "first-child", "last-child", "nth-child",
@@ -167,10 +206,10 @@ def selector_is_usable(selector: str) -> bool:
     """Safe AND parseable by selectolax — the gate for contract-load validation.
 
     `normalise` is silent by contract, so a typo in a portal's volatile_paths
-    ('div..a', an empty string from YAML) can only ever no-op there. Callers that
-    LOAD those selectors (W2a's next step reads them from
-    portal_contract_entries.persistence.volatile_paths) can call this at load
-    time, where refusing loudly is allowed.
+    ('div..a', an empty string from YAML) can only ever no-op there. The two
+    places that LOAD those selectors — `parse_profile_block` here and
+    `contracts.parse_contract`'s gate, which runs it on every CI `--check` —
+    call this instead, where refusing loudly is allowed.
     """
     if not selector_is_safe(selector):
         return False
@@ -276,9 +315,10 @@ def _normalise_html(
         if not selector_is_safe(selector):
             continue
         # PER-SELECTOR, not around the loop: `.css()` RAISES on a malformed
-        # selector ('div..a', '', 'div[name="x'), and a profile is about to be
-        # sourced from portal_contract_entries.persistence.volatile_paths rather
-        # than from this file. Caught one level up, one typo would drop the whole
+        # selector ('div..a', '', 'div[name="x'), and a profile is sourced from a
+        # contract's persistence.volatile_paths rather than from this file. The
+        # contract gate refuses those at load time; this is the second rail, for a
+        # body that reaches here anyway. Caught one level up, one typo would drop the whole
         # body to the raw-bytes fallback — that portal's measured change rate
         # jumps to ~100% and the storage projection is signed off a corrupt
         # number, silently, because `normalise` never raises. Skipping just the
@@ -377,7 +417,13 @@ def _index(node: list[Any], token: str) -> int | None:
     return value if value < len(node) else None
 
 
-# --- measurement-phase volatile profiles (see the module docstring) ---
+# --- the portal-agnostic floor a contract's `base:` selects (see the docstring) ---
+#
+# THIS is what stays in Python, and deliberately: it is not a portal fact. Every
+# member is generic web plumbing that carries no listing content on ANY portal or
+# surface, so it needs no per-portal measurement, no review and no retraction —
+# which is exactly what makes the contract the right home for everything else and
+# the wrong home for this.
 
 # Third-party ad / analytics loaders, matched by src so the portals' OWN inline
 # <script> blocks survive: mmreality's whole payload is an embedded JSON script
@@ -432,163 +478,255 @@ _HTML_ATTRS: tuple[str, ...] = (
     "data-requestid",
 )
 
-# --- measured (W2a-3b), not guessed ---
-#
-# scripts/location_payload_diff_probe.py fetched the same live detail page three
-# times ~10s apart on 5 listings per portal and structurally diffed the results.
-# Nothing about a listing can change in ten seconds, so everything below was SEEN
-# to move. Selectors are the narrowest form that covers the observed node — an
-# over-broad one would delete real content and make two different listings hash
-# alike, which is far worse than a change rate that is a few points too high.
-
-# iDNES: 3/3 fetches differed on 5/5 listings. All of it is the Nette contact form
-# ("Napište makléři") re-arming its anti-spam material per response, plus the
-# recommendation rail.
-#   input[name=tshee]     15237420345 -> 15237420357  (a per-response counter)
-#   input[name=schpeckc]  62da6c7c... -> c26841cc...   (32-hex captcha answer hash)
-#   #schpeckIn            "3 ➕ 6" -> "1 ➕ 1"          (the captcha question)
-#   .grid-similar-offers  a whole different set of "Podobné nabídky" cards
-# The form's `_token_` was already covered by _FORM_TOKENS' input[name*="_token"];
-# these four are what it missed. The similar-offers rail holds OTHER listings'
-# titles, prices, streets and thumbnails — never this listing's, so its rotation
-# is pure archive churn (and mis-attributed location text if it stayed).
-_IDNES_VOLATILE: tuple[str, ...] = (
-    'input[name="tshee"]',
-    'input[name="schpeckc"]',
-    "#schpeckIn",
-    "div.grid-similar-offers",
-    ".advertisement",  # stehuju.cz / vyklizim.cz partner slots (fixture-verified)
-)
-
-# ceskereality: 3/3 fetches differed on 5/5 listings, and on 4 of the 5 the ONLY
-# thing that differed was one hidden token in the "nahlásit chybu" modal —
-#   input#bug-report-token  8659c.5BgBggKSAVY6... -> e25206d84de2b24c8.cM7EOua...
-# It is `name="token"`, not `_token`, which is exactly why _FORM_TOKENS'
-# input[name*="_token"] never caught it; the id is pinned rather than widening that
-# shared rule to every portal on one portal's evidence.
-# The 5th listing additionally rotated `section.s-estates-slide` ("Podobné
-# nemovitosti"). That section is a sibling of the gallery, not part of it: the
-# listing's own photos live under .s-estate-detail-intro__slider and are untouched,
-# and the Google-Maps <iframe> carrying q=50.7277,15.5971 is untouched too.
-_CESKEREALITY_VOLATILE: tuple[str, ...] = (
-    "input#bug-report-token",
-    "section.s-estates-slide",
-)
-
-# realitymix: 3/3 fetches differed on 5/5 listings, and across all 15 fetches the
-# ONE thing that ever differed was a small badge pinned to the footer, cycling
-# "0.85" / "0.84" / "101.85" — a per-response backend/version stamp. Nothing else
-# moved at all: no ad slot, no token, no carousel.
-# Those three values at their observed frequencies predict a 1 - sum(p^2) = 63%
-# chance that any two consecutive fetches disagree, against the 66% this portal
-# actually measured in production. The badge is the whole 66%.
-# Scoped under the single <footer> because the Tailwind utility classes it is
-# built from carry no meaning on their own.
-_REALITYMIX_VOLATILE: tuple[str, ...] = (
-    "footer div.absolute.bottom-2.right-2",
-)
-
-# --- measured (W2a-3c) ---
-#
-# Same probe, one axis wider. remax answers three fetches EIGHT SECONDS apart with
-# byte-identical bodies and still measured 100% in production: its churn is minted
-# per HTTP SESSION, not per response, and the live drain is a fresh process every
-# run. `--fresh-session-per-round` (now the probe's default) is what made it visible;
-# both portals below were measured that way, 5 listings x 3 rounds.
-
-# mmreality: 3/3 fetches differed on 5/5 listings, and every byte of it is
-# CLOUDFLARE EMAIL OBFUSCATION. The edge rewrites each mailto: on the way out into
-#   <a href="/cdn-cgi/l/email-protection#325b5c545d725f5f4057535e5b464b1c5148">
-#   <span class="__cf_email__" data-cfemail="325b5c545d72...">[email protected]</span>
-# where the payload is the address XOR'd with a ONE-BYTE KEY THAT IS RANDOM PER
-# RESPONSE — the leading octet. Both samples above decode to the same
-# `info@mmreality.cz` under their own keys (0x32, 0x98); the ciphertext shares not one
-# byte with itself between two fetches. That is a 100% change rate generated by a
-# feature whose entire output is a re-encoding of a constant, which is the purest
-# possible case of "churn carrying zero information".
-# Only 2 anchors and 1 span per page, all inside section.rds-footer-contacts (the
-# corporate switchboard address, not the agent's). The anchor is stripped whole
-# because the ciphertext lives in its href FRAGMENT and no attribute-level rule can
-# reach a fragment; the span is listed separately so an obfuscated address rendered
-# outside such an anchor is covered too.
-# Also seen, and already covered: input#contact__token on the agent contact form
-# (`name="contact[_token]"`, so _FORM_TOKENS catches it) — a per-SESSION Symfony
-# token, invisible until the fresh-session axis existed.
-_MMREALITY_VOLATILE: tuple[str, ...] = (
-    'a[href^="/cdn-cgi/l/email-protection"]',
-    "span.__cf_email__",
-)
-
-# remax: byte-identical WITHIN a session (3 fetches, 8s apart, 5/5 listings), and
-# 5/5 different across sessions. Three things move between sessions, all of them
-# Symfony CSRF tokens, and two were already covered as DOM nodes:
-#   input#dalten_web_listing_contact_form__token  aTyaPqHx... -> qQPbSWpB...
-#   input#mortgage_contact_form__token            QZeUG3B7... -> LxR9SieY...
-# The third is the one that made the portal measure 100%, and it is a shape no CSS
-# selector can ever reach: the share widget's Bootstrap popover carries an ENTIRE
-# ESCAPED <form> inside its `data-content` ATTRIBUTE, and that form has a `_token`
-# input of its own —
-#   button[data-content]  "...name='dalten_web_send_listing_form[_token]'
-#                           value='Ayv0ioqxsf55sr66ldIruP6c0hRwiR_pu4vN4CS3Pn0'..."
-# It is a STRING, not a node, so `input[name*="_token"]` cannot see it however wide
-# the rule is widened. Stripping the two popover buttons is the narrowest expressible
-# form (VolatileProfile has no "this attribute on that selector"); both are chrome —
-# a Facebook/Twitter share pair and a mail-to-a-friend form — and the listing's URL
-# they interpolate survives in the canonical link and og:url.
-_REMAX_VOLATILE: tuple[str, ...] = (
-    "div.pd-share__buttons button[data-content]",
-)
-
-# The fallback for a (source, page_kind) nobody has diffed. Every member is
-# portal-agnostic AND content-free by construction — third-party analytics loaders
-# matched by src, page chrome, CSRF material — so it cannot delete a listing, an
-# address or a map widget off a surface it was never measured against. Verified on
-# live index bodies while this keying was being fixed: on remax it matches the page's
-# one <noscript> and one <style> (173 B of 209 KB), on ceskereality two <noscript>,
-# one <style> and ten preload/modulepreload links (~1.3 KB of 180 KB).
+# The floor for a (source, page_kind) no contract declares, and the one a contract
+# block asks for with `base: html`. Every member is portal-agnostic AND content-free
+# by construction, so it cannot delete a listing, an address or a map widget off a
+# surface it was never measured against. Verified on live index bodies: on remax it
+# matches the page's one <noscript> and one <style> (173 B of 209 KB), on
+# ceskereality two <noscript>, one <style> and ten preload/modulepreload links
+# (~1.3 KB of 180 KB).
 #
 # It is inert on a JSON surface by construction: `_normalise_json` reads only
 # `json_pointers`, and this profile has none. sreality's index and bezrealitky's
-# gazetteer therefore normalise byte-for-byte as they did under the old keying.
+# gazetteer therefore normalise byte-for-byte under it.
 BASE_PROFILE = VolatileProfile(
     css_selectors=_HTML_BASE,
     strip_attributes=_HTML_ATTRS,
 )
 
+# `base: none` — no floor at all. The honest choice on a JSON surface, where the
+# HTML floor would be inert anyway (sreality) or where the body is a closed field
+# list with no chrome in it to strip (bezrealitky's GraphQL response).
+_NO_BASE = VolatileProfile()
+
+BASE_PROFILES: dict[str, VolatileProfile] = {"html": BASE_PROFILE, "none": _NO_BASE}
+
+
+# --- the contract's declaration, parsed (02 section 2.3.2 P1) -----------------
+
+class ProfileError(RuntimeError):
+    """A contract's `persistence.volatile_paths` cannot be turned into a profile.
+
+    Raised where refusing is allowed — contract parse, contract projection, and the
+    first resolution in a process — never inside `normalise`, which is silent by
+    contract and can only ever no-op a bad rule.
+    """
+
+
+# One page_kind block's keys. Unknown key is a REFUSAL for the same reason
+# `contracts._TOP_LEVEL_KEYS` is: `css_selector:` misspelt once declares a profile
+# that strips nothing, and a profile that strips nothing reports a change rate that
+# is simply wrong rather than absent.
+_PROFILE_BLOCK_KEYS = frozenset({
+    "base", "json_pointers", "css_selectors", "strip_attributes",
+})
+
+
+def _string_list(block: dict[str, Any], key: str, where: str) -> tuple[str, ...]:
+    value = block.get(key) or []
+    if isinstance(value, str) or not isinstance(value, (list, tuple)):
+        raise ProfileError(f"{where}: {key} must be a list of strings")
+    out: list[str] = []
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            raise ProfileError(f"{where}: {key} carries a non-string or empty entry")
+        out.append(item)
+    return tuple(out)
+
+
+def parse_profile_block(block: Any, *, where: str) -> VolatileProfile:
+    """One page_kind's declared block -> the profile `normalise` will be handed.
+
+    EVERY rule is checked here, at contract-load time, because this is the last
+    place a bad one can be refused: `normalise` skips an unusable selector silently
+    (it must — `.css()` raises on a typo and `:contains()` SEGFAULTS the parser), so
+    a mistake that reaches it does not fail, it QUIETLY STOPS STRIPPING. That reads
+    downstream as a higher change rate on a real portal, i.e. as a measurement.
+    """
+    if not isinstance(block, dict):
+        raise ProfileError(
+            f"{where}: a page_kind's volatile paths are a mapping with a 'base' and "
+            f"optional json_pointers / css_selectors / strip_attributes lists")
+    unknown = sorted(set(block) - _PROFILE_BLOCK_KEYS)
+    if unknown:
+        raise ProfileError(
+            f"{where}: unknown key(s) {', '.join(unknown)}; known keys are "
+            + ", ".join(sorted(_PROFILE_BLOCK_KEYS)))
+
+    base_name = block.get("base")
+    if base_name not in BASE_PROFILES:
+        raise ProfileError(
+            f"{where}: base={base_name!r} must be one of "
+            f"{', '.join(sorted(BASE_PROFILES))} — the floor is stated per surface "
+            f"rather than defaulted, so no body ever acquires one by accident")
+    base = BASE_PROFILES[str(base_name)]
+
+    pointers = _string_list(block, "json_pointers", where)
+    for pointer in pointers:
+        # `_pointer_tokens` returns () for anything not rooted at '/', which deletes
+        # nothing at all — the silent no-op again, one layer down from the selectors.
+        if not pointer.startswith("/"):
+            raise ProfileError(
+                f"{where}: json_pointer {pointer!r} must start with '/' (RFC 6901); "
+                f"anything else addresses nothing and would strip nothing")
+
+    selectors = _string_list(block, "css_selectors", where)
+    for selector in selectors:
+        if not selector_is_usable(selector):
+            raise ProfileError(
+                f"{where}: css_selector {selector!r} is not usable — either it names a "
+                f"pseudo-class selectolax does not implement (`:contains()` SEGFAULTS "
+                f"the parser: exit 139, uncatchable) or it does not parse. `normalise` "
+                f"would skip it in silence and under-strip this surface")
+
+    attributes = _string_list(block, "strip_attributes", where)
+    for name in attributes:
+        if name != name.strip() or " " in name:
+            raise ProfileError(
+                f"{where}: strip_attribute {name!r} is an attribute NAME, matched "
+                f"exactly against node.attributes — whitespace can never match one")
+
+    # Concatenated base-first, which is the order the measured table shipped
+    # (`_HTML_BASE + _IDNES_VOLATILE`). Order is irrelevant to the output bytes —
+    # every rule is applied — but keeping it makes the projected profile compare
+    # equal to the one it replaces, so "this move changed nothing" is a tuple
+    # equality rather than an argument.
+    return VolatileProfile(
+        json_pointers=base.json_pointers + pointers,
+        css_selectors=base.css_selectors + selectors,
+        strip_attributes=base.strip_attributes + attributes,
+    )
+
+
+def parse_volatile_paths(
+    declared: Any, *, where: str, page_kinds: frozenset[str] | None = None,
+) -> dict[str, VolatileProfile]:
+    """`persistence.volatile_paths` -> {page_kind: profile}.
+
+    KEYED BY page_kind, never flat. A detail page is one property; an index page is a
+    LIST of properties fetched on a walk cadence. They are different documents that
+    happen to share a hostname, and every profile the fleet ships was derived by
+    diffing DETAIL pages — so a flat list is a detail measurement silently applied to
+    a population it was never taken from (fixed in Python by #1070; this is the same
+    fix in the contract that now owns the values).
+
+    `page_kinds` is the caller's enum (migration 380's `location_page_kind`, spelled
+    in `contracts.PAGE_KINDS`). It is passed in rather than duplicated here because
+    this module must stay importable without the contract lane — but a typo'd
+    page_kind is exactly the silent failure this validation exists for, so the
+    contract gate always supplies it.
+    """
+    if declared is None:
+        return {}
+    if isinstance(declared, list):
+        raise ProfileError(
+            f"{where}: volatile_paths is a MAPPING of page_kind -> profile, not a flat "
+            f"list. A flat list applies a detail measurement to index bodies, which "
+            f"are lists of other people's listings (W2a-3d)")
+    if not isinstance(declared, dict):
+        raise ProfileError(f"{where}: volatile_paths must be a mapping of page_kind -> profile")
+
+    profiles: dict[str, VolatileProfile] = {}
+    for page_kind, block in declared.items():
+        kind = str(page_kind)
+        if page_kinds is not None and kind not in page_kinds:
+            raise ProfileError(
+                f"{where}: volatile_paths names page_kind '{kind}', which is not a "
+                f"location_page_kind label ({', '.join(sorted(page_kinds))}); the "
+                f"surface it was meant for would silently get the base profile")
+        profiles[kind] = parse_profile_block(block, where=f"{where}.{kind}")
+    return profiles
+
+
+@dataclass(frozen=True, slots=True)
+class ContractProfiles:
+    """Every portal's declared volatile profiles, as ONE immutable registry.
+
+    `versions` is what the cohort label names, so the two are read from the same
+    parse of the same file — a registry that knew a profile but not the version that
+    declared it could stamp a content address with the wrong provenance.
+    """
+
+    versions: dict[str, int]
+    profiles: dict[tuple[str, str], VolatileProfile]
+
+    def profile(self, source: str, page_kind: str) -> VolatileProfile | None:
+        return self.profiles.get((source, page_kind))
+
+
+def load_contract_profiles(directory: Path = CONTRACT_DIR) -> ContractProfiles:
+    """Read `persistence.volatile_paths` out of every portal contract on disk.
+
+    Reads only `portal`, `contract_version` and `persistence` — NOT the extraction
+    entries. The full contract gate (`location_data.contracts`) validates those, and
+    it validates these through the very same parser; this narrow read is what keeps
+    an unrelated entry problem from taking the normaliser down with it.
+
+    RAISES rather than degrading. An empty or unreadable contract directory is a
+    BUILD defect (the image ships `contracts/` beside the code), and the degradation
+    it would otherwise cause is invisible: every portal silently falls to the base
+    profile, and a base-profile change rate looks like a measurement.
+    """
+    import yaml  # ships with the runtime image for exactly this read.
+
+    paths = sorted(Path(directory).glob("*.yaml"))
+    if not paths:
+        raise ProfileError(
+            f"no portal contracts under {directory} — the volatile profiles live "
+            f"there (02 section 2.1.8: git is the store of record), so without them "
+            f"nothing can be normalised under the projection it will be labelled with")
+
+    versions: dict[str, int] = {}
+    profiles: dict[tuple[str, str], VolatileProfile] = {}
+    for path in paths:
+        try:
+            doc = yaml.safe_load(path.read_bytes().decode("utf-8"))
+        except Exception as exc:  # noqa: BLE001 - re-raised as this module's error
+            raise ProfileError(f"{path}: unreadable contract ({exc})") from exc
+        if not isinstance(doc, dict) or "portal" not in doc:
+            raise ProfileError(f"{path}: not a portal contract")
+        source = str(doc["portal"])
+        # Strict: the version is half the cohort label, so a contract that cannot
+        # state one would stamp every body it governs `+contract@0` — a provenance
+        # naming nothing, on a permanent content address.
+        try:
+            version = int(doc["contract_version"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ProfileError(
+                f"{path}: contract_version must be an integer — it names the cohort "
+                f"every body this contract normalises is counted in") from exc
+        versions[source] = version
+        declared = (doc.get("persistence") or {}).get("volatile_paths")
+        for page_kind, profile in parse_volatile_paths(
+            declared, where=f"{path.name}:persistence.volatile_paths",
+        ).items():
+            profiles[(source, page_kind)] = profile
+    return ContractProfiles(versions=versions, profiles=profiles)
+
+
+@lru_cache(maxsize=1)
+def contract_profiles() -> ContractProfiles:
+    """The loaded registry, once per process.
+
+    Memoised because `resolve_normalisation` sits on the per-page path of both the
+    churn instrument and the archive. Cached on SUCCESS only — `lru_cache` does not
+    memoise an exception — so a transient read failure retries rather than pinning
+    the fleet to a degraded answer. Tests that swap the contract directory call
+    `contract_profiles.cache_clear()`.
+    """
+    return load_contract_profiles()
+
 
 def volatile_profile(source: str, page_kind: str) -> VolatileProfile:
-    """The profile measured for this SURFACE, or the generic base.
-
-    The single answer to "what was stripped": `scraper.db.record_payload_churn`
-    (the live instrument), `payloads.append_payload` (the archive's content
-    address) and `payload_backfill.encode_for_archive` (the 445k-row migration)
-    all resolve through here rather than three call sites agreeing by coincidence
-    — via `resolve_normalisation`, which pairs this with the label that names it.
-    """
-    return MEASURED_VOLATILE_PROFILES.get(source, {}).get(page_kind, BASE_PROFILE)
+    """The profile this SURFACE's contract declares, or the generic base."""
+    return resolve_normalisation(source, page_kind).profile
 
 
 def normalizer_version_for(
     source: str, page_kind: str, version: str | None = None,
 ) -> str:
-    """The cohort this (source, page_kind) fetch is counted under.
-
-    `+base` (see BASE_PROFILE_SUFFIX) exactly when `volatile_profile` fell back —
-    an entry that IS present but empty (bezrealitky's deliberately null detail
-    profile) is a measurement and keeps the bare version. Composes with the probe
-    suffix if a probe ever covers an unmeasured surface:
-    `probe_normalizer_version(normalizer_version_for(src, kind))`.
-
-    `version=None` rather than a `NORMALIZER_VERSION` DEFAULT ARGUMENT: a default is
-    bound once at import, so a bump monkeypatched onto the module (the cohort-
-    separation test in tests/test_payload_churn_live.py, which is how the "a
-    normaliser bump opens a clean cohort" property is proved against real SQL) would
-    be read here as the old value and the test would pass while measuring nothing.
-    """
-    base = version if version is not None else NORMALIZER_VERSION
-    if page_kind in MEASURED_VOLATILE_PROFILES.get(source, {}):
-        return base
-    return f"{base}{BASE_PROFILE_SUFFIX}"
+    """The cohort this (source, page_kind) fetch is counted under."""
+    return resolve_normalisation(source, page_kind, version).normalizer_version
 
 
 @dataclass(frozen=True, slots=True)
@@ -610,106 +748,51 @@ class Resolution:
 def resolve_normalisation(
     source: str, page_kind: str, version: str | None = None,
 ) -> Resolution:
-    """Profile AND cohort label for one surface, from one (source, page_kind).
+    """Profile AND cohort label for one surface. THE single resolution point.
 
-    Every production write path takes both through here rather than calling
-    `volatile_profile` and `normalizer_version_for` side by side, so the pair can
-    never be resolved from two different surfaces. The two remain public for the
-    readers that genuinely want one of them (the churn report's cohort labelling,
-    the diff probe's residue).
+    `scraper.db.record_payload_churn` (the live instrument), `payloads.append_payload`
+    (the archive's content address) and `payload_backfill.encode_for_archive` (the
+    445k-row migration) all come through here, so the two can never be resolved from
+    two different surfaces — or, now, from two different contract versions.
+
+    The label, and why it is not the bare `payload_norm@N` any more:
+
+      `payload_norm@3+contract@2`  the contract declared a profile for this surface.
+                                   Two axes move the output bytes and both are named:
+                                   the ENGINE (this module's algorithm) and the
+                                   PROFILE (that portal's contract version). The
+                                   portal is NOT repeated into the label — `source` is
+                                   already a column of both tables that carry it
+                                   (portal_payload_churn's PK, portal_raw_payloads),
+                                   and a second copy is a thing that can disagree.
+      `payload_norm@3+base`        the contract declares nothing for this surface, so
+                                   BASE_PROFILE was applied. Unchanged by the move to
+                                   contracts, and honestly so: the base is a property
+                                   of this module, identical under every contract
+                                   version, so the index cohorts accumulating today
+                                   keep accumulating across it.
+
+    `version=None` rather than a `NORMALIZER_VERSION` DEFAULT ARGUMENT: a default is
+    bound once at import, so a bump monkeypatched onto the module (the cohort-
+    separation test in tests/test_payload_churn_live.py, which is how the "a
+    normaliser bump opens a clean cohort" property is proved against real SQL) would
+    be read here as the old value and the test would pass while measuring nothing.
+
+    RAISES `ProfileError` if the contracts cannot be read at all. Both live callers
+    are inside never-raising wrappers (`record_payload_churn_if_enabled`,
+    `append_payload_if_enabled`), so the instrument and the archive go quiet and warn
+    while the scrape is untouched; the backfill is a script and should die. That is
+    the whole degradation contract, and it is a refusal rather than a fallback
+    because the alternative — quietly normalising under the base and stamping
+    `+base` — writes a PERMANENT content address under a projection nobody chose.
     """
+    registry = contract_profiles()
+    base = version if version is not None else NORMALIZER_VERSION
+    profile = registry.profile(source, page_kind)
+    if profile is None:
+        return Resolution(BASE_PROFILE, f"{base}{BASE_PROFILE_SUFFIX}")
+    # Indexed, not `.get`: a profile and its version are recorded together by
+    # `load_contract_profiles`, so a missing version means the registry is malformed
+    # and the label would be a guess.
     return Resolution(
-        profile=volatile_profile(source, page_kind),
-        normalizer_version=normalizer_version_for(source, page_kind, version),
-    )
-
-
-# source -> page_kind -> profile. The inner mapping is what stops a detail
-# measurement from being read as a portal-wide fact; the absence of an `index` key
-# on every line below is deliberate and load-bearing (diffing index pages is its own
-# deferred finding, and guessing one here would be the mis-application again).
-MEASURED_VOLATILE_PROFILES: dict[str, dict[str, VolatileProfile]] = {
-    # api_json. The pointers are the JSON form of scraper.hashing's already-proven
-    # volatile key set (view counters, re-promotion dates, session/recommendation
-    # blocks, the firmy.cz review counters) plus the re-signed sdn.cz media URLs,
-    # which that module documents as "re-signs wholesale ... same image id,
-    # different path" — the single largest source of sreality byte churn.
-    # One member of that set is deliberately absent: hashing.py also drops the
-    # `items` entry NAMED "Aktualizace", a value predicate a JSON pointer cannot
-    # express. It is a timestamp item, so it inflates the measured rate slightly
-    # — the safe direction (over-, not under-stating churn).
-    "sreality": {PAGE_KIND_DETAIL: VolatileProfile(json_pointers=(
-        "/stats",
-        "/params/stats",  # legacy camelCase raw_json puts the view counter here
-        "/edited",
-        "/labels",
-        "/labels_extended",
-        "/is_topped",
-        "/is_topped_today",
-        "/logged_in",
-        "/note",
-        "/rus",
-        "/rus_reply",
-        "/user/image",
-        "/premise/logo",
-        "/premise/review_count",
-        "/premise/review_score",
-        "/premise/premise_paid_firmy",
-        "/premise/company/sos_custom_advert_card",  # flips false<->true portal-side
-        "/advert_images/-/url",
-        "/advert_images/-/kind",
-        "/advert_images/-/width",
-        "/advert_images/-/height",
-        "/videos/-/url",
-        "/items/-/topped",
-        # hashing.py's _ATTACHMENT_URL_PREFIX/_SUFFIX rule, as a key glob: the
-        # energy-certificate PDFs re-sign the same way the image URLs do, and
-        # enumerating today's members would miss tomorrow's.
-        "/sdn_*_attachment_url",
-        "/_embedded/favourite",
-        "/_embedded/note",
-    ))},
-    # graphql. The body is exactly the closed field list _DETAIL_QUERY asks for —
-    # no ads, no tokens, no counters — so the null profile is the honest starting
-    # guess and the readout will show whether the image URLs re-sign.
-    "bezrealitky": {PAGE_KIND_DETAIL: VolatileProfile()},
-    # html_selector. `div.inzeratyview` is the per-listing view counter the index
-    # parser already reads ("Vidělo: N lidí"); it increments on every visit.
-    "bazos": {PAGE_KIND_DETAIL: VolatileProfile(
-        css_selectors=_HTML_BASE + ("div.inzeratyview",),
-        strip_attributes=_HTML_ATTRS,
-    )},
-    # html_selector. Measured: see _IDNES_VOLATILE.
-    "idnes": {PAGE_KIND_DETAIL: VolatileProfile(
-        css_selectors=_HTML_BASE + _IDNES_VOLATILE,
-        strip_attributes=_HTML_ATTRS,
-    )},
-    # embedded_json inside HTML — the inline <script> payload must survive, so the
-    # shared set stays src-scoped. Measured: see _MMREALITY_VOLATILE.
-    "mmreality": {PAGE_KIND_DETAIL: VolatileProfile(
-        css_selectors=_HTML_BASE + _MMREALITY_VOLATILE,
-        strip_attributes=_HTML_ATTRS,
-    )},
-    # html_selector. Symfony `[_token]` hidden inputs on three separate contact
-    # forms, verified in the remax detail fixture. Measured: see _REMAX_VOLATILE.
-    "remax": {PAGE_KIND_DETAIL: VolatileProfile(
-        css_selectors=_HTML_BASE + _REMAX_VOLATILE,
-        strip_attributes=_HTML_ATTRS,
-    )},
-    # html_selector, proxied. Measured: see _CESKEREALITY_VOLATILE.
-    "ceskereality": {PAGE_KIND_DETAIL: VolatileProfile(
-        css_selectors=_HTML_BASE + _CESKEREALITY_VOLATILE,
-        strip_attributes=_HTML_ATTRS,
-    )},
-    # html_selector. Measured: see _REALITYMIX_VOLATILE. Build-hashed asset
-    # filenames (`267f89b9.js`) re-roll on every deploy; the preload/prefetch links
-    # that carry them are stripped by _PAGE_CHROME.
-    "realitymix": {PAGE_KIND_DETAIL: VolatileProfile(
-        css_selectors=_HTML_BASE + _REALITYMIX_VOLATILE,
-        strip_attributes=_HTML_ATTRS,
-    )},
-    "maxima": {PAGE_KIND_DETAIL: VolatileProfile(
-        css_selectors=_HTML_BASE,
-        strip_attributes=_HTML_ATTRS,
-    )},
-}
+        profile, f"{base}{CONTRACT_PROFILE_SUFFIX}{registry.versions[source]}")
