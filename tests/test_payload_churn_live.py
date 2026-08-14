@@ -128,7 +128,12 @@ def test_a_normaliser_bump_opens_a_clean_cohort(
     # fetch under it (the hash moved because the normaliser moved).
     from location_data import payload_norm
 
-    shipped = payload_norm.NORMALIZER_VERSION
+    # The label names the ENGINE and the contract version that supplied the profile
+    # (W2a-3e), so a bump of either opens a clean cohort. This bumps the engine; the
+    # contract half is pinned in tests/location_data/test_volatile_paths_contract.py.
+    contract = payload_norm.CONTRACT_PROFILE_SUFFIX + str(
+        payload_norm.contract_profiles().versions["sreality"])
+    shipped = payload_norm.NORMALIZER_VERSION + contract
     key = f"live-{uuid.uuid4().hex}"
     _record(conn, key, b'{"price": 1}', "obs-1")
     _record(conn, key, b'{"price": 2}', "obs-2")
@@ -144,7 +149,7 @@ def test_a_normaliser_bump_opens_a_clean_cohort(
         )
         cohorts = {r[0]: tuple(r[1:]) for r in cur.fetchall()}
 
-    assert cohorts == {shipped: (2, 1, 1), "payload_norm@test": (1, 0, 0)}
+    assert cohorts == {shipped: (2, 1, 1), "payload_norm@test" + contract: (1, 0, 0)}
 
 
 def test_the_hook_writes_through_the_flag(conn: psycopg.Connection) -> None:
