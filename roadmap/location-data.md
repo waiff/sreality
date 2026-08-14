@@ -15,7 +15,7 @@ is the tie-breaker). This track records sequencing + shipped state only.
 | W0 "stop the bleeding" | 15 interim fixes + 2 measurements against the CURRENT system | 🟡 in progress (2026-08-10) |
 | W1 registry + claim spine (shadow) | full RÚIAN mirror, claims, resolutions, projection | ✅ shipped 2026-08-12 (migrations 380–389 applied; shadow-only, no consumer reads it) |
 | W1v bezrealitky vertical slice | one portal end-to-end + location-quality dashboard | ✅ shipped 2026-08-13 (every layer exercised in prod; gate answered — portal-inventory-capped, not pipeline-capped) |
-| W2a payload archive rewrite | append-on-change `portal_raw_payloads` | 🟡 in progress (2026-08-14) — instrument live, measured DETAIL profiles for 5 portals (`payload_norm@3`); profiles now keyed by (source, page_kind), INDEX surfaces on the generic base + a `+base` cohort and still unprofiled; both write flags OFF, awaiting the operator's churn + storage sign-off |
+| W2a payload archive rewrite | append-on-change `portal_raw_payloads` | 🟡 in progress (2026-08-14) — instrument live, measured DETAIL profiles for 5 portals (`payload_norm@3`); profiles keyed by (source, page_kind), INDEX surfaces on the generic base with a `+base` cohort and still unprofiled; storage bounded BY CONSTRUCTION (bodies in R2, cap 2 + a 7-day per-listing floor); both write flags OFF, awaiting the operator's churn + storage sign-off |
 | W2–W6 | HTML re-mine, history backfill, refetch cohorts, LLM lane, serving flip | ⚪ not started |
 
 ## W0 — done
@@ -593,6 +593,73 @@ Every further profile change restarts the measurement the storage sign-off depen
 newly surface at 100 % — record the number and move on; the profiles only need to be good
 enough that the projection is meaningful.
 
+### W2a-7 bounded storage — the cap's arithmetic, and a time floor (2026-08-14)
+
+**The affordability question was being answered by filter quality, and it should never have
+been.** Good `volatile_paths` meant a listing kept ~1 body; a portal redesign that defeated
+them meant it raced to the retention cap. Since the profiles are hand-written per portal and
+rot silently, that is an indefinite treadmill — and it was hiding the real number, because
+**the cap sets the CEILING and churn only sets how fast it is reached.**
+
+The arithmetic, re-derived from production (`portal_raw_pages` 463,256 real bodies +
+`portal_payload_churn` @3 + `listings`), gzipped through `payloads.encode_body` itself.
+Cross-check: applying these per-portal figures to W0's exported corpus predicts 17,227 B/page
+against the **17,184 B/page actually measured** (7.69 GB gz / 447,510 pages) — 0.3 % apart.
+
+| cap | bodies/listing | active corpus (387,935) | every listing ever (671,986) |
+| --- | --- | --- | --- |
+| 1 | 2 | 12.2 GB | 19.1 GB |
+| **2 (new default)** | **3** | **18.3 GB** | **28.7 GB** |
+| 3 | 4 | 24.4 GB | 38.2 GB |
+| 5 | 6 | 36.6 GB | 57.4 GB |
+| 20 (as shipped) | 21 | **128.1 GB** | **200.7 GB** |
+
+Worst case is **cap + 1** bodies, not cap: the first version is pinned OUTSIDE the cap. One
+body for every active listing is **6.10 GB**, so every unit of cap costs another 6.10 GB
+against a subsystem budgeted at 18-20 GB *in total*. The inherited default of 20 permitted
+~7x the whole budget.
+
+- **Default cap 20 → 2** ("first, previous, current"). The intermediate versions given up are
+  the least evidentially valuable ones there are: a body a claim references is pinned by the
+  claim FK regardless of the cap, so anything that produced a location fact is already exempt;
+  what the cap governs is bodies no claim points at, which by construction produced no fact.
+- **New: a per-listing time floor** (`LOCATION_PAYLOAD_MIN_APPEND_INTERVAL_DAYS`, default 7) —
+  at most one new body per `(source, source_id_native, page_kind)` per window, enforced as a
+  predicate INSIDE the append statement. **This is the structural fix**: it decouples storage
+  from filter quality entirely, so total profile failure costs one body per listing per week
+  rather than one per fetch. It never suppresses a group's first body and never suppresses an
+  unchanged refetch (that collides and writes no row). No "important change" bypass, on
+  purpose — any such predicate is the same per-portal judgement that rots on a redesign.
+  Nothing that PERSISTS is lost: the next fetch past the window archives the page whole. Only
+  content that appears *and* disappears inside one window is missed, which is the transient
+  noise the profiles are hand-written to drop anyway.
+- **Why both.** The cap bounds the STOCK, the floor bounds the FLOW, and the flow is what a
+  100 %-churn portal actually costs: idnes at ~4 fetches/day would write 8.9 GB/day of
+  INSERT-then-DELETE against a 4.4 GB standing archive — dead tuples, WAL and autovacuum an
+  order of magnitude larger than the data kept. Under the floor, 0.32 GB/day (**28x**), and
+  the bodies retained span weeks instead of hours. On the (still OFF) index surfaces the floor
+  matters more than the cap: week-stamped keys at ~100 % churn project **~140 GB/year** at cap
+  20, ~20 GB/year at cap 2, and **~6.7 GB/year with the floor at either cap** — so index
+  archiving no longer waits on profiling nobody has done.
+- **Observable, not magic**: `PayloadRef.suppressed` plus process counters
+  (appended / unchanged / floor_suppressed / evicted rows + bytes) rolled into one log line
+  every 200 decisions. A floor that suppresses everything and a portal that stopped changing
+  produce the same empty archive diff; these counters are the only thing that separates them.
+- **No migration.** Both guard arms are exact index probes on relations 382 already ships —
+  the dedupe arm on the identity UNIQUE, the window arm on `prp_native (source,
+  source_id_native, page_kind, first_observed_at DESC)`. Adding an index here would be the
+  dead index 403's header refuses. `NORMALIZER_VERSION` is untouched (normalisation output is
+  unchanged), so the `@3` measurement cohort keeps accumulating.
+- `location_data/payload_budget.py` freezes the measurements with their provenance and
+  `tests/location_data/test_payload_budget.py` **fails CI if the default cap's ceiling leaves
+  the budget** — the number cannot drift from the arithmetic that chose it.
+  `scripts/location_payload_storage_ceiling.py` re-derives it live and prints the drift.
+- **Still open, and now quantified**: even cap 1 costs 12.2 GB, because first + latest are
+  both pinned. No cap fits the archive into what is left of the subsystem's budget — the
+  levers that would are the R2 spill threshold (P4.3, currently 256 KB so nothing spills) and
+  per-portal caps in `persistence.version_cap`. Neither is built; both are now decisions with
+  a number attached rather than assumptions.
+
 ### PII incident (2026-08-13/14) — three axes, each found only after the previous was fixed
 
 Fixture capture publishes real people's data to a **public** repo, and this went wrong twice:
@@ -620,7 +687,9 @@ name rather than merely pass) — and the rule in `.claude/skills/scraper-ops/SK
 SHA; the names in `04e1db9a`). A history rewrite of `main` or a GitHub Support purge are the
 only true removals; neither is engineering's call.
 
-**Not enabled, deliberately:** `payload_dual_write` and `payload_index_archive` are OFF, the
+**Not enabled, deliberately:** `payload_dual_write` and `payload_index_archive` are OFF (which
+is exactly why W2a-7's retention change was free to make — nothing has been archived yet, so
+no body was evicted by lowering the cap), the
 445k-row backfill has not run, the P4 pruner lane ships with `location_jobs.enabled=false`,
 and no per-portal W2 contract exists yet. Those wait on the operator's O3/O4 sign-off of
 `volatile_paths` + the storage projection.

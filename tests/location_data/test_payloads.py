@@ -144,7 +144,7 @@ def test_every_executed_statement_is_discoverable_by_the_sql_corpus() -> None:
     }
 
     assert literals == {
-        "_APPEND_SQL", "_REPIN_SQL", "_PRUNE_SQL", "_ORPHANED_KEYS_SQL",
+        "_APPEND_SQL", "_LATEST_SQL", "_REPIN_SQL", "_PRUNE_SQL", "_ORPHANED_KEYS_SQL",
     }
 
 
@@ -346,6 +346,13 @@ def _append(
     # would be a row claiming a measurement that never happened.
     if volatile is not None:
         kwargs.setdefault("normalizer_version", _CONSTRUCTED_COHORT)
+    # THE TIME FLOOR IS OFF BY DEFAULT HERE, and only here. Every test above and below
+    # is about the collision/pin/cap semantics, which need several bodies in one group
+    # in one wall-clock second — under the shipped 7-day floor those appends would be
+    # suppressed and the tests would be measuring the floor instead of what they name.
+    # The floor's own behaviour is tested explicitly further down, where it is passed in
+    # rather than defaulted, so neither axis can hide a regression in the other.
+    kwargs.setdefault("min_append_interval_days", 0)
     return payloads.append_payload(
         conn,
         source="idnes",
@@ -900,5 +907,208 @@ def test_the_stamp_names_the_profile_that_was_actually_applied(
         "the two profiles must disagree, or this proves nothing")
     assert _rows(conn, measured)[0]["normalizer_version"] == NORMALIZER_VERSION
     assert _rows(conn, constructed)[0]["normalizer_version"] == "contract@7"
+# --------------------------------------------------- the per-listing time floor
+
+def test_the_floor_window_is_pure_and_zero_disables_it() -> None:
+    """`append_floor_cutoff` is the whole time arithmetic, kept out of SQL so it is
+    testable without a database — and so `days=0` is provably an exact no-op rather
+    than an off-by-one that suppresses a same-instant body."""
+    at = datetime(2026, 8, 14, 12, 0, tzinfo=timezone.utc)
+
+    assert payloads.append_floor_cutoff(at, 7) == at - timedelta(days=7)
+    # The guard's window is (cutoff, observed_at]; at 0 days that is empty, so no
+    # existing row can ever fall inside it.
+    assert payloads.append_floor_cutoff(at, 0) == at
 
 
+def test_the_floor_interval_env_accepts_zero_unlike_every_other_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """0 is a real setting here ("no floor"), not the unbounded state
+    `loader_db.env_positive_int` refuses — storage stays bounded by the cap, which
+    cannot be zeroed. A negative value is still a typo and takes the default."""
+    monkeypatch.setenv(payloads.MIN_APPEND_INTERVAL_ENV, "0")
+    assert payloads.env_non_negative_int(payloads.MIN_APPEND_INTERVAL_ENV, 7) == 0
+
+    monkeypatch.setenv(payloads.MIN_APPEND_INTERVAL_ENV, "-3")
+    assert payloads.env_non_negative_int(payloads.MIN_APPEND_INTERVAL_ENV, 7) == 7
+
+    monkeypatch.setenv(payloads.MIN_APPEND_INTERVAL_ENV, "not-a-number")
+    assert payloads.env_non_negative_int(payloads.MIN_APPEND_INTERVAL_ENV, 7) == 7
+
+
+def test_the_shipped_defaults_are_the_ones_the_budget_was_signed_for() -> None:
+    """A cap of 20 permits a 128 GB archive against a subsystem budgeted at 20 GB
+    total (location_data/payload_budget.py). If either default moves, the ceiling
+    the operator signed moves with it — so pin both here as well as in the budget
+    test, where the arithmetic itself lives."""
+    assert payloads.DEFAULT_VERSION_CAP == 2
+    assert payloads.DEFAULT_MIN_APPEND_INTERVAL_DAYS == 7
+
+
+@requires_db
+def test_the_floor_never_suppresses_a_listings_first_body(
+    conn: psycopg.Connection,
+) -> None:
+    """The one exemption that must hold unconditionally: an empty group satisfies
+    neither EXISTS arm, so the guard admits the body. Without this the archive would
+    never start for any listing."""
+    native = _key()
+
+    ref = _append(conn, native, b'{"v": 1}', min_append_interval_days=7)
+
+    assert (ref.inserted, ref.suppressed) == (True, False)
+    assert [r["version_seq"] for r in _rows(conn, native)] == [1]
+
+
+@requires_db
+def test_a_second_body_inside_the_window_is_suppressed(conn: psycopg.Connection) -> None:
+    """The bound that makes storage independent of filter quality: a changed body
+    that would otherwise append is refused because one was appended 2 days ago."""
+    native = _key()
+    day0 = datetime(2026, 6, 1, tzinfo=timezone.utc)
+
+    first = _append(conn, native, b'{"v": 1}', observed_at=day0,
+                    min_append_interval_days=7)
+    second = _append(conn, native, b'{"v": 2}', observed_at=day0 + timedelta(days=2),
+                     min_append_interval_days=7)
+
+    assert second.suppressed is True and second.inserted is False
+    rows = _rows(conn, native)
+    assert len(rows) == 1
+    assert bytes(rows[0]["payload_sha256"]) == bytes(first.payload_sha256)
+    # The ref describes the body the archive HOLDS, not the one just discarded —
+    # a caller told otherwise would believe a body is archived that is not.
+    assert second.id == first.id
+    assert second.payload_sha256 == first.payload_sha256
+    assert second.byte_size == first.byte_size
+
+
+@requires_db
+def test_a_body_past_the_window_is_appended(conn: psycopg.Connection) -> None:
+    """The floor delays, it does not drop: the next fetch past the window archives
+    the page as it stands then, so a change that persists is always captured."""
+    native = _key()
+    day0 = datetime(2026, 6, 1, tzinfo=timezone.utc)
+
+    _append(conn, native, b'{"v": 1}', observed_at=day0, min_append_interval_days=7)
+    _append(conn, native, b'{"v": 2}', observed_at=day0 + timedelta(days=2),
+            min_append_interval_days=7)
+    later = _append(conn, native, b'{"v": 3}', observed_at=day0 + timedelta(days=8),
+                    min_append_interval_days=7)
+
+    assert later.suppressed is False and later.inserted is True
+    assert [r["version_seq"] for r in _rows(conn, native)] == [1, 2]
+
+
+@requires_db
+def test_an_unchanged_refetch_inside_the_window_still_bumps_last_observed_at(
+    conn: psycopg.Connection,
+) -> None:
+    """The floor bounds BODIES, not knowledge. An identical refetch writes no row
+    whatever the floor says, so suppressing it would cost nothing but the signal
+    that this content is still being served — which is what `last_observed_at`
+    feeds and what the hot-window pruner reads."""
+    native = _key()
+    day0 = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    later = day0 + timedelta(days=1)
+
+    _append(conn, native, b'{"v": 1}', observed_at=day0, min_append_interval_days=7)
+    again = _append(conn, native, b'{"v": 1}', observed_at=later,
+                    min_append_interval_days=7)
+
+    assert (again.inserted, again.suppressed) == (False, False)
+    rows = _rows(conn, native)
+    assert len(rows) == 1
+    assert rows[0]["last_observed_at"] == later
+
+
+@requires_db
+def test_the_floor_rate_limits_against_the_bodys_own_era_not_the_newest_row(
+    conn: psycopg.Connection,
+) -> None:
+    """Out-of-order arrivals are the W2a-4 backfill's whole shape: bodies carry the
+    time they were really fetched (06 Rule 1). The window is the N days BEFORE this
+    observation, so a June body is rate-limited against June neighbours and not
+    against an August body the live path already wrote."""
+    native = _key()
+    august = datetime(2026, 8, 1, tzinfo=timezone.utc)
+    june = datetime(2026, 6, 1, tzinfo=timezone.utc)
+
+    _append(conn, native, b'{"v": "live"}', observed_at=august,
+            min_append_interval_days=7)
+    backfilled = _append(conn, native, b'{"v": "archived"}', observed_at=june,
+                         min_append_interval_days=7)
+
+    assert backfilled.suppressed is False and backfilled.inserted is True
+    assert len(_rows(conn, native)) == 2
+
+
+@requires_db
+def test_the_floor_and_the_cap_compose_the_floor_first(conn: psycopg.Connection) -> None:
+    """The pair is the deliverable: the floor bounds the FLOW (one body per window)
+    and the cap bounds the STOCK (cap + the pinned first). Twelve weekly fetches of a
+    page that changes every time settle at the cap, and the bodies retained span
+    weeks of history rather than the last few hours of it."""
+    native = _key()
+    day0 = datetime(2026, 6, 1, tzinfo=timezone.utc)
+
+    for week in range(12):
+        # Two fetches a week, both changed: the second of each pair is inside the
+        # window and must never reach the store.
+        for offset in (0, 3):
+            _append(conn, native, f'{{"w": {week}, "o": {offset}}}'.encode(),
+                    observed_at=day0 + timedelta(days=7 * week + offset),
+                    min_append_interval_days=7, version_cap=2)
+
+    rows = _rows(conn, native)
+    # 12 admitted bodies, capped to (cap=2) + the pinned first.
+    assert [r["version_seq"] for r in rows] == [1, 11, 12]
+    assert rows[0]["pinned"] is True and rows[-1]["pinned"] is True
+    span = rows[-1]["first_observed_at"] - rows[0]["first_observed_at"]
+    assert span >= timedelta(days=70)
+
+
+@requires_db
+def test_the_counters_separate_a_suppressed_write_from_a_quiet_portal(
+    conn: psycopg.Connection,
+) -> None:
+    """A floor that suppresses everything and a portal that stopped changing produce
+    the same empty archive diff. These three counters are the only thing that tells
+    them apart, which is why they are counted rather than sampled."""
+    native = _key()
+    day0 = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    payloads.reset_archive_stats()
+    try:
+        _append(conn, native, b'{"v": 1}', observed_at=day0, min_append_interval_days=7)
+        _append(conn, native, b'{"v": 1}', observed_at=day0 + timedelta(hours=1),
+                min_append_interval_days=7)
+        _append(conn, native, b'{"v": 2}', observed_at=day0 + timedelta(days=1),
+                min_append_interval_days=7)
+
+        stats = payloads.archive_stats()
+        assert (stats.appended, stats.unchanged, stats.suppressed) == (1, 1, 1)
+        assert stats.decisions == 3
+        assert stats.as_dict()["suppressed"] == 1
+    finally:
+        payloads.reset_archive_stats()
+
+
+@requires_db
+def test_an_eviction_is_counted_in_bytes_as_well_as_rows(
+    conn: psycopg.Connection,
+) -> None:
+    """`evicted_bytes` is what came BACK, and it is the figure a storage sign-off is
+    read from — rows alone cannot distinguish a reclaimed 2 KB body from a 250 KB
+    one."""
+    native = _key()
+    payloads.reset_archive_stats()
+    try:
+        for i in range(4):
+            _append(conn, native, f'{{"v": {i}}}'.encode(), version_cap=1)
+
+        stats = payloads.archive_stats()
+        assert stats.evicted_rows >= 1
+        assert stats.evicted_bytes > 0
+    finally:
+        payloads.reset_archive_stats()

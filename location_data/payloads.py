@@ -6,7 +6,7 @@ span points into "the page" and stops being verifiable the moment that page is
 re-fetched, and `01 §4.2`'s `loc_claim_evidence_payload` CHECK is unsatisfiable in
 practice. This module is the only sanctioned way to put a body in it.
 
-Three properties define the write, and each one is load-bearing:
+Four properties define the write, and each one is load-bearing:
 
   * **Identity is the NORMALISED hash.** `payload_sha256` is taken over the body with
     the source's volatile paths stripped and key order / whitespace canonicalised
@@ -26,6 +26,15 @@ Three properties define the write, and each one is load-bearing:
     unsuccessful fetches behind successful ones so a portal outage evicts itself
     rather than the listing's real history. Growth is bounded by row count rather
     than by operator diligence.
+  * **A per-listing TIME FLOOR bounds the flow, as the cap bounds the stock.** At most
+    one new body per `(source, source_id_native, page_kind)` per
+    `LOCATION_PAYLOAD_MIN_APPEND_INTERVAL_DAYS`, enforced as a predicate INSIDE the
+    append statement. Without it, affordability depends on how good each portal's
+    hand-written `volatile_paths` profile is, and a redesign that defeats one costs a
+    body per fetch until the cap catches it — an indefinite maintenance treadmill.
+    With it, that same total filter failure costs one body per listing per week. The
+    floor never suppresses a group's FIRST body and never suppresses an unchanged
+    refetch (that collides and writes no row anyway); see `append_floor_cutoff`.
 
 NOT WIRED. Nothing in the scrape calls this yet — W2a-2 adds the dual-write at
 `scraper.db.upsert_portal_raw_page` behind its own flag, and enabling it is gated on
@@ -40,10 +49,11 @@ from __future__ import annotations
 
 import gzip
 import logging
+import os
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, NamedTuple, Protocol
 
 import psycopg
@@ -64,8 +74,53 @@ WRITE_TIMEOUT_ENV = "LOCATION_PAYLOAD_WRITE_TIMEOUT_S"
 DEFAULT_WRITE_TIMEOUT_S = 60
 
 # `persistence.version_cap` (02 §2.3.2 P4) until W2a-3b puts it in the contracts.
+#
+# THE CAP IS THE CEILING; the churn rate only sets how fast the ceiling is reached. So
+# this number, not the quality of any volatile profile, is what the archive's worst case
+# costs — and `location_data.payload_budget` derives that cost from live production
+# measurements: one body per active listing is 6.10 GB, so every unit of cap is another
+# 6.10 GB against a subsystem budgeted at 18-20 GB in total.
+#
+# 2, not the 20 this shipped with. 20 was inherited from the design document and never
+# chosen against a number; it permits a 128 GB archive on today's corpus, ~7x the whole
+# subsystem's budget. At 2 the worst case is "first, previous, current" — three bodies
+# per listing, 18.3 GB — and the intermediate versions given up are the ones with the
+# least evidentiary value there are: a body a claim references is PINNED by the claim FK
+# regardless of the cap (`_REPIN_SQL`), so any body that produced a location fact is
+# already exempt. What the cap governs is only bodies no claim points at, which by
+# construction produced no fact — a re-mine hedge, at 6.10 GB per unit of hedge.
+#
+# `tests/location_data/test_payload_budget.py` fails if this default's ceiling leaves the
+# declared budget, so the number cannot drift away from the arithmetic that chose it.
 VERSION_CAP_ENV = "LOCATION_PAYLOAD_VERSION_CAP"
-DEFAULT_VERSION_CAP = 20
+DEFAULT_VERSION_CAP = 2
+
+# THE FLOW BOUND, and the structural half of this pair: at most one new body per
+# (source, source_id_native, page_kind) per N days, whatever changed.
+#
+# The cap alone bounds the archive's SIZE but not its WRITE RATE, and the two costs are
+# different. idnes's detail surface measures 100 % normalised churn (285/285 repeats at
+# payload_norm@3) at ~4 fetches/day: uncapped in time, that is 110,023 listings x 4 bodies
+# x 20 KB = 8.9 GB/day of INSERT-then-DELETE against a standing archive of 4.4 GB — dead
+# tuples, WAL and autovacuum load an order of magnitude larger than the data retained.
+# Under a 7-day floor the same surface writes 0.32 GB/day, 28x less, and the three bodies
+# the cap keeps span three weeks of history instead of eighteen hours of it.
+#
+# 7 days is chosen against what the archive is FOR rather than against a churn rate — it
+# has to be, because the whole point is to stop depending on churn rates. A body is
+# evidence substrate: something to re-verify a claim's span against and to re-mine later.
+# Both uses want page ERAS, not fetches, and no portal's location facts turn over weekly.
+#
+# 0 disables the floor (the cap still bounds storage); negative is refused.
+MIN_APPEND_INTERVAL_ENV = "LOCATION_PAYLOAD_MIN_APPEND_INTERVAL_DAYS"
+DEFAULT_MIN_APPEND_INTERVAL_DAYS = 7
+
+# How often the process-local counters below are rolled up into one log line. Per-event
+# logging is not an option on the surface that needs watching most: a suppression happens
+# on nearly every fetch of a 100 %-churn portal, so one line each would double the drain's
+# log volume to say "nothing was written" thousands of times.
+STATS_EVERY_ENV = "LOCATION_PAYLOAD_STATS_EVERY"
+DEFAULT_STATS_EVERY = 200
 
 # Below this, gzip's ~20-byte header and the CPU cost outweigh the saving, and TOAST
 # already compresses inline bytea anyway. Above it the portals' bodies (41-245 KB of
@@ -101,6 +156,123 @@ class PayloadError(RuntimeError):
     """The body could not be archived; the caller decides whether that is fatal."""
 
 
+def env_non_negative_int(name: str, default: int) -> int:
+    """A budget whose ZERO is meaningful, unlike every other knob in this program.
+
+    `loader_db.env_positive_int` deliberately refuses 0 because for the budgets it
+    serves — chunk sizes, timeouts, the version cap — zero is the unbounded state each
+    of them exists to stop. The append interval is the one budget where 0 is a real
+    setting rather than a typo: it means "no time floor", and storage stays bounded by
+    the cap, which cannot itself be zeroed. A negative value IS a typo and takes the
+    default, with a warning, exactly as the shared helper would.
+    """
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        LOG.warning("PAYLOAD %s=%r is not an integer; using %d", name, raw, default)
+        return default
+    if value < 0:
+        LOG.warning("PAYLOAD %s=%r is negative; using %d", name, raw, default)
+        return default
+    return value
+
+
+def append_floor_cutoff(observed_at: datetime, days: int) -> datetime:
+    """The instant after which an existing body blocks a new one. Pure, hence testable.
+
+    The window is `(cutoff, observed_at]` — bodies created in the N days BEFORE this
+    observation, never bodies created after it. That asymmetry is what keeps the floor
+    correct for out-of-order arrivals: W2a-4-era bodies carry the time they were really
+    fetched (06 Rule 1), so a June body must be rate-limited against its own June
+    neighbours and not against a body the live path wrote in August. Bounding both ends
+    is also what makes `days=0` an exact no-op rather than an off-by-one: the window
+    collapses to `(observed_at, observed_at]`, which is empty.
+    """
+    return observed_at - timedelta(days=days)
+
+
+@dataclass(slots=True)
+class ArchiveStats:
+    """What the write path decided, process-local — the floor and the cap made visible.
+
+    A retention policy nobody can see the effect of is magic, and these two are easy to
+    misread from the outside: a floor that suppresses everything and a portal that
+    genuinely stopped changing produce the same (empty) archive diff. `suppressed`
+    against `appended` separates them.
+
+    Counted, not sampled, because the counting is five integer bumps per fetch; only the
+    LOG LINE is rate-limited (`STATS_EVERY_ENV`).
+    """
+
+    appended: int = 0
+    unchanged: int = 0
+    suppressed: int = 0
+    evicted_rows: int = 0
+    evicted_bytes: int = 0
+
+    @property
+    def decisions(self) -> int:
+        return self.appended + self.unchanged + self.suppressed
+
+    def as_dict(self) -> dict[str, int]:
+        return {
+            "appended": self.appended, "unchanged": self.unchanged,
+            "suppressed": self.suppressed, "evicted_rows": self.evicted_rows,
+            "evicted_bytes": self.evicted_bytes, "decisions": self.decisions,
+        }
+
+
+_STATS = ArchiveStats()
+
+
+def archive_stats() -> ArchiveStats:
+    """The live counters. Callers must not mutate them; `reset_archive_stats` does."""
+    return _STATS
+
+
+def reset_archive_stats() -> None:
+    """Zero the counters (a test, or a long-lived worker starting a fresh window)."""
+    global _STATS
+    _STATS = ArchiveStats()
+
+
+def log_archive_stats() -> None:
+    """Emit the rollup unconditionally — for a lane that wants it at its own boundary."""
+    LOG.info(
+        "PAYLOAD stats appended=%d unchanged=%d floor_suppressed=%d evicted_rows=%d "
+        "evicted_bytes=%d", _STATS.appended, _STATS.unchanged, _STATS.suppressed,
+        _STATS.evicted_rows, _STATS.evicted_bytes,
+    )
+
+
+def _record_decision(
+    *, inserted: bool, suppressed: bool, evicted_rows: int, evicted_bytes: int,
+) -> None:
+    """Count one write decision and roll the counters up every `STATS_EVERY` of them.
+
+    Emitting from HERE rather than from a lane's end-of-run hook is deliberate: the
+    archive is written from the index walk, seven detail drains, two bespoke call sites
+    and the always-on worker, and the worker never reaches an end of run at all. A
+    counter that only reports at process exit would be silent on exactly the lane that
+    runs the most fetches.
+    """
+    if suppressed:
+        _STATS.suppressed += 1
+    elif inserted:
+        _STATS.appended += 1
+    else:
+        _STATS.unchanged += 1
+    _STATS.evicted_rows += evicted_rows
+    _STATS.evicted_bytes += evicted_bytes
+
+    every = loader_db.env_positive_int(STATS_EVERY_ENV, DEFAULT_STATS_EVERY)
+    if _STATS.decisions % every == 0:
+        log_archive_stats()
+
+
 class EvictedBody(NamedTuple):
     """One row a retention statement removed, and what it was holding.
 
@@ -134,15 +306,21 @@ class ObjectStore(Protocol):
 class PayloadRef:
     """What the caller needs to know about the row that is now stored.
 
-    Every field describes the ROW, not the fetch: on a collision (`inserted` False)
-    the stored body is the one an earlier fetch wrote, so `body_sha256`,
-    `content_encoding`, `byte_size` and `body_r2_key` come back from the row. A
-    caller that trusted the just-fetched values would GET an R2 object that was
-    never uploaded.
+    EVERY FIELD DESCRIBES THE ROW, NOT THE FETCH. On a collision (`inserted` False)
+    the stored body is the one an earlier fetch wrote; under the time floor
+    (`suppressed` True) the stored body is a DIFFERENT body entirely, and the one just
+    fetched was discarded. So `payload_sha256` too comes back from the row — a caller
+    that read the fetched hash off this object would be told a body is archived that
+    is not, and a caller that trusted the fetched `body_r2_key` would GET an R2 object
+    that was never uploaded.
 
     `stored_bytes` is None exactly when that cannot be answered from the row: a
     spilled body this call did not write, whose object size Postgres does not carry
     and which is not worth an R2 round trip on the unchanged path.
+
+    `inserted` and `suppressed` are the three outcomes, not two booleans' worth of
+    state: appended (True/False), collided with an identical body (False/False),
+    refused by the floor (False/True).
     """
 
     id: int
@@ -156,6 +334,7 @@ class PayloadRef:
     body_r2_key: str | None
     evicted_ids: tuple[int, ...]
     evicted_r2_keys: tuple[str, ...]
+    suppressed: bool = False
 
 
 def r2_key(source: str, body_sha256: bytes) -> str:
@@ -211,6 +390,31 @@ def decode_body(stored: bytes, content_encoding: str) -> bytes:
 # gains one the moment an anchored fetch of the SAME body arrives, and an anchored row
 # is never re-anchored by a later unanchored sighting.
 #
+# THE TIME FLOOR IS THE `WHERE` ON THIS STATEMENT, which is why the VALUES list became a
+# SELECT — a VALUES list cannot carry a predicate. Zero rows returned means the floor
+# refused the body; that is the ONLY way this statement returns nothing, since an
+# ON CONFLICT DO UPDATE always yields its row.
+#
+# Two arms, in this order:
+#   * `EXISTS(same payload_sha256)` — an unchanged refetch is ALWAYS admitted, floor or
+#     no floor. It writes no row (it collides into the DO UPDATE) so it cannot cost
+#     storage, and suppressing it would throw away the `last_observed_at` bump that is
+#     the entire signal "this content is still being served". The floor exists to bound
+#     bodies, not to stop the archive from knowing what it already holds.
+#   * `NOT EXISTS(a body created inside the window)` — the rate limit itself, and the
+#     reason it is expressed as a predicate here rather than as a read-then-write in
+#     Python: the check and the insert share one statement and one snapshot.
+# NO MIGRATION IS NEEDED FOR EITHER ARM. The dedupe arm is an exact probe of 382's
+# identity UNIQUE (source, source_id_native, page_kind, payload_sha256); the window arm
+# is an exact match for 382's `prp_native` — (source, source_id_native, page_kind,
+# first_observed_at DESC), three equality columns and a range on the fourth — which is
+# the index that already exists precisely because the store is read per group and by
+# observation time. Adding one for this would be the dead index 403's header refuses.
+#
+# The floor CANNOT suppress a group's first body: an empty group satisfies neither
+# EXISTS, so `NOT EXISTS` is true and the append proceeds. That is a property of the
+# predicate rather than a special case in the code, which is what keeps it true.
+#
 # The RETURNING list is the stored row, not the fetch: see PayloadRef.
 _APPEND_SQL = """
 INSERT INTO portal_raw_payloads
@@ -218,18 +422,33 @@ INSERT INTO portal_raw_payloads
      content_type, content_encoding, body, body_r2_key, byte_size, http_status,
      contract_version, normalizer_version, snapshot_id, pinned, version_seq,
      first_observed_at, last_observed_at, fetched_at)
-VALUES
-    (%(source)s, %(source_id_native)s, %(listing_id)s,
-     %(page_kind)s::location_page_kind, %(payload_sha256)s, %(body_sha256)s,
-     %(content_type)s, %(content_encoding)s, %(body)s, %(body_r2_key)s,
-     %(byte_size)s, %(http_status)s, %(contract_version)s,
-     %(normalizer_version)s, %(snapshot_id)s, true,
-     (SELECT coalesce(max(prior.version_seq), 0) + 1
-        FROM portal_raw_payloads prior
-       WHERE prior.source = %(source)s
-         AND prior.source_id_native = %(source_id_native)s
-         AND prior.page_kind = %(page_kind)s::location_page_kind),
-     %(observed_at)s, %(observed_at)s, %(observed_at)s)
+SELECT
+    %(source)s::text, %(source_id_native)s::text, %(listing_id)s::bigint,
+    %(page_kind)s::location_page_kind, %(payload_sha256)s::bytea,
+    %(body_sha256)s::bytea, %(content_type)s::text, %(content_encoding)s::text,
+    %(body)s::bytea, %(body_r2_key)s::text, %(byte_size)s::integer,
+    %(http_status)s::integer, %(contract_version)s::integer,
+    %(normalizer_version)s::text, %(snapshot_id)s::bigint, true,
+    (SELECT coalesce(max(prior.version_seq), 0) + 1
+       FROM portal_raw_payloads prior
+      WHERE prior.source = %(source)s
+        AND prior.source_id_native = %(source_id_native)s
+        AND prior.page_kind = %(page_kind)s::location_page_kind),
+    %(observed_at)s::timestamptz, %(observed_at)s::timestamptz,
+    %(observed_at)s::timestamptz
+ WHERE EXISTS (
+           SELECT 1 FROM portal_raw_payloads same
+            WHERE same.source = %(source)s
+              AND same.source_id_native = %(source_id_native)s
+              AND same.page_kind = %(page_kind)s::location_page_kind
+              AND same.payload_sha256 = %(payload_sha256)s)
+    OR NOT EXISTS (
+           SELECT 1 FROM portal_raw_payloads recent
+            WHERE recent.source = %(source)s
+              AND recent.source_id_native = %(source_id_native)s
+              AND recent.page_kind = %(page_kind)s::location_page_kind
+              AND recent.first_observed_at > %(floor_cutoff)s::timestamptz
+              AND recent.first_observed_at <= %(observed_at)s::timestamptz)
 ON CONFLICT (source, source_id_native, page_kind, payload_sha256) DO UPDATE
    SET last_observed_at  = greatest(EXCLUDED.last_observed_at,
                                     portal_raw_payloads.last_observed_at),
@@ -239,8 +458,31 @@ ON CONFLICT (source, source_id_native, page_kind, payload_sha256) DO UPDATE
                                  portal_raw_payloads.fetched_at),
        snapshot_id       = coalesce(portal_raw_payloads.snapshot_id,
                                     EXCLUDED.snapshot_id)
-RETURNING id, version_seq, (xmax = 0) AS inserted, body_sha256, byte_size,
-          content_encoding, body_r2_key, octet_length(body) AS inline_bytes
+RETURNING id, version_seq, (xmax = 0) AS inserted, payload_sha256, body_sha256,
+          byte_size, content_encoding, body_r2_key,
+          octet_length(body) AS inline_bytes
+"""
+
+# What the archive holds for this group when the floor refused the fetched body — the
+# same column list, in the same order, as `_APPEND_SQL`'s RETURNING, so both paths build
+# one PayloadRef through one code path. `inserted` is a literal false rather than a
+# computed one: nothing was written.
+#
+# `NULLS LAST` and the `id` tiebreaker for the same reason `_PRUNE_SQL` carries them —
+# DESC sorts NULLs first in Postgres, so a version_seq-less row (W2a-4 substrate) would
+# otherwise masquerade as the newest. Ordering by version_seq rather than by
+# `prp_native`'s first_observed_at means a sort, over a group the cap bounds to a
+# handful of rows; ranking by anything but the version the cap ranks by would be the
+# more expensive mistake.
+_LATEST_SQL = """
+SELECT id, version_seq, false AS inserted, payload_sha256, body_sha256, byte_size,
+       content_encoding, body_r2_key, octet_length(body) AS inline_bytes
+  FROM portal_raw_payloads
+ WHERE source = %(source)s
+   AND source_id_native = %(source_id_native)s
+   AND page_kind = %(page_kind)s::location_page_kind
+ ORDER BY version_seq DESC NULLS LAST, id DESC
+ LIMIT 1
 """
 
 # P4's pin predicate, recomputed AUTHORITATIVELY over the whole group rather than
@@ -453,6 +695,7 @@ def append_payload(
     volatile: VolatileProfile | None = None,
     normalizer_version: str | None = None,
     version_cap: int | None = None,
+    min_append_interval_days: int | None = None,
     store: ObjectStore | None = None,
     statement_timeout_s: int | None = None,
 ) -> PayloadRef:
@@ -489,6 +732,25 @@ def append_payload(
     is allowed and is `record_payload_churn`'s established shape: same profile, a
     caller-stated cohort.
 
+    `min_append_interval_days` is the per-listing time floor (0 disables it, None reads
+    `LOCATION_PAYLOAD_MIN_APPEND_INTERVAL_DAYS`). A body refused by it is DISCARDED, not
+    queued: the returned ref describes the body the archive actually holds and carries
+    `suppressed=True`. Nothing is lost that persists — a page that changed and stayed
+    changed is captured whole at the first fetch past the window, because the archive
+    stores the page as it is then, not a diff. Only content that appears AND disappears
+    inside one window is missed, which is the definition of the transient noise the
+    volatile profiles are hand-written to drop anyway.
+
+    There is deliberately NO "but this change was important" bypass. Any such predicate
+    would be a per-portal content judgement — the same hand-written rule that silently
+    rots on a redesign, which is exactly what the floor exists to stop depending on. The
+    two exemptions it does have are structural, not editorial: a group's first body is
+    never suppressed, and an unchanged refetch is never suppressed (it writes no row).
+    Where a fact needs its own timestamp, the platform already records it at row grain
+    for free — `listing_snapshots` on every content change, `location_claims` on every
+    distinct mined value — and a claim PINS the body it was mined from. This archive is
+    the substrate those point at, not the change log.
+
     Retention (re-pin + cap) runs only when a row was actually appended: an unchanged
     refetch cannot have changed the group's membership, and paying two extra
     statements per fetch on the common path is exactly the cost this store exists to
@@ -512,6 +774,9 @@ def append_payload(
     stored, encoding = encode_body(body)
     cap = version_cap if version_cap is not None else loader_db.env_positive_int(
         VERSION_CAP_ENV, DEFAULT_VERSION_CAP)
+    floor_days = (min_append_interval_days if min_append_interval_days is not None
+                  else env_non_negative_int(
+                      MIN_APPEND_INTERVAL_ENV, DEFAULT_MIN_APPEND_INTERVAL_DAYS))
     timeout_s = statement_timeout_s if statement_timeout_s is not None else (
         loader_db.env_timeout_s(WRITE_TIMEOUT_ENV, DEFAULT_WRITE_TIMEOUT_S))
 
@@ -549,6 +814,7 @@ def append_payload(
         "normalizer_version": cohort,
         "snapshot_id": snapshot_id,
         "observed_at": observed_at,
+        "floor_cutoff": append_floor_cutoff(observed_at, floor_days),
     }
     group = {
         "source": source,
@@ -559,16 +825,36 @@ def append_payload(
     with loader_db.bounded(conn, timeout_s) as cur:
         cur.execute(_APPEND_SQL, params)
         row = cur.fetchone()
-        if row is None:  # pragma: no cover - RETURNING always yields on upsert
-            raise PayloadError(f"payload append returned no row for {source}/{source_id_native}")
-        payload_id, version_seq, inserted = int(row[0]), int(row[1]), bool(row[2])
-        # The row as stored. On a collision this is what an EARLIER fetch wrote, and
-        # it is what the caller must be told about — `inline_bytes` is NULL only when
-        # that body lives in R2, the one question the row cannot answer and the
-        # unchanged path must not pay an R2 HEAD to learn.
-        row_body_sha256, row_byte_size = bytes(row[3]), int(row[4])
-        row_encoding, row_key = str(row[5]), row[6]
-        row_stored_bytes = None if row[7] is None else int(row[7])
+        suppressed = row is None
+        if suppressed:
+            # The floor refused it — the only way the append yields nothing. Report the
+            # body the archive DOES hold: the caller asked "what is stored for this
+            # listing", and answering with the discarded fetch would name a body that
+            # is not there. One indexed read, on a path that just avoided an INSERT, a
+            # re-pin and a prune.
+            cur.execute(_LATEST_SQL, group)
+            row = cur.fetchone()
+            if row is None:
+                # Only reachable if the group was emptied between the two statements —
+                # the floor cannot fire on an empty group. Raising loses this one body
+                # (the dual-write chokepoint warns and moves on); silently inventing a
+                # ref would be worse.
+                raise PayloadError(
+                    f"payload floor suppressed {source}/{source_id_native} but the "
+                    f"group holds no body")
+        payload_id, inserted = int(row[0]), bool(row[2])
+        # NULL version_seq is W2a-4 substrate only (the append always computes one), and
+        # 0 is the honest reading of "this body carries no version number".
+        version_seq = 0 if row[1] is None else int(row[1])
+        # The row as stored. On a collision this is what an EARLIER fetch wrote; under
+        # the floor it is a DIFFERENT body altogether, which is why payload_sha256 is
+        # read from the row too — `inline_bytes` is NULL only when that body lives in
+        # R2, the one question the row cannot answer and the unchanged path must not
+        # pay an R2 HEAD to learn.
+        row_payload_sha256, row_body_sha256 = bytes(row[3]), bytes(row[4])
+        row_byte_size = int(row[5])
+        row_encoding, row_key = str(row[6]), row[7]
+        row_stored_bytes = None if row[8] is None else int(row[8])
 
         # INSIDE the transaction and only for a genuinely new body: an upload that
         # fails must roll the row back, because a committed row whose body_r2_key
@@ -581,12 +867,19 @@ def append_payload(
 
         evicted_ids: tuple[int, ...] = ()
         evicted_keys: tuple[str, ...] = ()
+        evicted_bytes = 0
         if inserted:
             repin_group(cur, **group)
             evicted = prune_group(cur, **group, version_cap=cap)
-            evicted_ids = tuple(row.id for row in evicted)
+            evicted_ids = tuple(e.id for e in evicted)
+            evicted_bytes = sum(
+                e.stored_bytes for e in evicted if e.stored_bytes is not None)
             evicted_keys = orphaned_r2_keys(
-                cur, [row.r2_key for row in evicted if row.r2_key])
+                cur, [e.r2_key for e in evicted if e.r2_key])
+
+    _record_decision(
+        inserted=inserted, suppressed=suppressed,
+        evicted_rows=len(evicted_ids), evicted_bytes=evicted_bytes)
 
     if evicted_ids:
         # The orphaned R2 objects are handed to W2a-5's pruner, which owns "report
@@ -599,11 +892,12 @@ def append_payload(
 
     return PayloadRef(
         id=payload_id,
-        payload_sha256=norm.norm_sha256,
-        # The four below come from the ROW, which on the insert path is what this
-        # call wrote and on a collision is what an EARLIER fetch wrote — the encode
-        # pass above was discarded, so reporting it would advertise an R2 object that
-        # was never uploaded and a byte_size the store does not have.
+        # The five below come from the ROW, which on the insert path is what this
+        # call wrote, on a collision is what an EARLIER fetch wrote, and under the
+        # floor is a body this fetch is not — the encode pass above was discarded, so
+        # reporting it would advertise an R2 object that was never uploaded, a
+        # byte_size the store does not have, and a content address it cannot resolve.
+        payload_sha256=row_payload_sha256,
         body_sha256=row_body_sha256,
         version_seq=version_seq,
         inserted=inserted,
@@ -613,4 +907,5 @@ def append_payload(
         body_r2_key=row_key,
         evicted_ids=evicted_ids,
         evicted_r2_keys=evicted_keys,
+        suppressed=suppressed,
     )

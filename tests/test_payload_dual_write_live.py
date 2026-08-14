@@ -122,6 +122,20 @@ def _payloads(conn: psycopg.Connection, key: str) -> list[dict[str, Any]]:
         return [dict(zip(cols, r)) for r in cur.fetchall()]
 
 
+def _stored_body(conn: psycopg.Connection, key: str) -> str:
+    """The archived body itself, decoded through the writer's own encoder pair."""
+    from location_data import payloads
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT body, content_encoding FROM portal_raw_payloads "
+            " WHERE source = %s AND source_id_native = %s ORDER BY version_seq LIMIT 1",
+            (_SOURCE, key),
+        )
+        body, encoding = cur.fetchone()
+    return payloads.decode_body(bytes(body), str(encoding)).decode("utf-8")
+
+
 def test_gate_off_writes_the_staging_row_and_no_payload(
     conn: psycopg.Connection,
 ) -> None:
@@ -178,7 +192,15 @@ def test_a_replayed_batch_appends_no_second_version(conn: psycopg.Connection) ->
     assert rows[0]["last_observed_at"] >= rows[0]["first_observed_at"]
 
 
-def test_a_changed_body_appends_a_version(conn: psycopg.Connection) -> None:
+def test_a_changed_body_appends_a_version(
+    conn: psycopg.Connection, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The time floor is switched OFF for this one, because two fetches one
+    # millisecond apart is not a scenario the floor is meant to admit — under the
+    # shipped 7 days the second body is suppressed, which the test below asserts on
+    # purpose. What THIS test is for is the parameters the chokepoint passes: that a
+    # genuinely new body satisfies the store's enum, CHECK and UNIQUE constraints.
+    monkeypatch.setenv("LOCATION_PAYLOAD_MIN_APPEND_INTERVAL_DAYS", "0")
     key = f"live-{uuid.uuid4().hex}"
     _set_dual_write(conn, True)
 
@@ -186,6 +208,25 @@ def test_a_changed_body_appends_a_version(conn: psycopg.Connection) -> None:
     _archive(conn, key, _PAGE.replace("Dlouhá 1", "Dlouhá 2"))
 
     assert [r["version_seq"] for r in _payloads(conn, key)] == [1, 2]
+
+
+def test_the_time_floor_reaches_live_ingest_with_its_shipped_default(
+    conn: psycopg.Connection,
+) -> None:
+    """The floor is only a storage bound if the SCRAPE path is subject to it, and the
+    chokepoint passes no interval of its own — it inherits the default. Nothing else
+    proves there is no plumbing gap between `payloads.append_payload`'s default and
+    what live ingest actually gets, and the whole storage projection rests on it."""
+    key = f"live-{uuid.uuid4().hex}"
+    _set_dual_write(conn, True)
+
+    _archive(conn, key, _PAGE)
+    _archive(conn, key, _PAGE.replace("Dlouhá 1", "Dlouhá 2"))
+
+    assert [r["version_seq"] for r in _payloads(conn, key)] == [1]
+    # The FIRST body is the one kept — the floor discards the fetch, it does not
+    # replace the stored body with it.
+    assert "Dlouhá 1" in _stored_body(conn, key)
 
 
 def test_an_index_page_archives_under_its_own_page_kind(
