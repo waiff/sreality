@@ -323,6 +323,10 @@ def _append(
     # No explicit profile: retention is what this lane tests, so it takes the same
     # (source, page_kind) resolution the live path takes. Inert on these bodies either
     # way — every measured detail profile here is CSS-only and the bodies are JSON.
+    # And the time floor off with it, for the same reason: this lane's whole subject is
+    # a group DEEPER than the policy allows, which the shipped 7-day floor would stop
+    # these appends from ever building inside one test.
+    kwargs.setdefault("min_append_interval_days", 0)
     return payloads.append_payload(
         conn, source=source, source_id_native=native, page_kind="detail",
         listing_id=None, body=body, content_type=_JSON, http_status=200,

@@ -56,6 +56,45 @@ class _Cur:
         return []
 
 
+# W2a-7's third gate is not a flag: the chokepoint refuses a (source, page_kind)
+# whose page weight is not in `payload_budget.PORTAL_STORAGE`, so archiving a surface
+# cannot silently invalidate the storage ceiling the operator signed. The frozen corpus
+# carries only `detail`, and this module is about the WIRING of the other surfaces — so
+# it declares them measured for the duration, and asserts the refusal itself in
+# `test_an_unmeasured_surface_is_refused_by_the_chokepoint` below.
+@pytest.fixture(autouse=True)
+def _every_surface_measured(monkeypatch: pytest.MonkeyPatch) -> None:
+    from location_data import payload_budget
+
+    monkeypatch.setattr(payload_budget, "PORTAL_STORAGE", (
+        *payload_budget.PORTAL_STORAGE,
+        *(payload_budget.PortalStorage(p.source, kind, 8_000, 1_000, 1_000, "test")
+          for p in payload_budget.PORTAL_STORAGE
+          for kind in ("index", "map", "gazetteer", "snapshot", "archive", "none")),
+    ))
+
+
+def test_an_unmeasured_surface_is_refused_by_the_chokepoint(
+    appended: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both flags on, page weight unknown, body dropped. Archiving a surface nobody
+    has costed would not break anything visibly — it would make the ceiling wrong by
+    an unknown amount, and index surfaces are precisely the unprofiled, week-stamped,
+    ~100 %-churn ones. Refusing here is what forces the measurement first."""
+    from location_data import payload_budget
+
+    monkeypatch.setattr(payload_budget, "PORTAL_STORAGE", tuple(
+        p for p in payload_budget.PORTAL_STORAGE if p.page_kind == "detail"))
+    conn = _FakeConn("sreality", index_on=("sreality",))
+
+    db.upsert_portal_raw_page(
+        conn, source="sreality", source_id_native="k", page_kind="index",
+        source_url="u", html='{"_embedded": {}}', http_status=200,
+    )
+
+    assert appended == []
+
+
 class _FakeConn:
     autocommit = True
 

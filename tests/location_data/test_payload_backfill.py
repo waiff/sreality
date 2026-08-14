@@ -172,7 +172,9 @@ class _Conn:
                 "content_type": params["content_type"][i],
                 "content_encoding": params["content_encoding"][i],
                 "body": params["body"][i],
+                "body_r2_key": params["body_r2_key"][i],
                 "byte_size": params["byte_size"][i],
+                "stored_byte_size": params["stored_byte_size"][i],
                 "http_status": params["http_status"][i],
                 "fetched_at": params["fetched_at"][i],
                 "first_observed_at": params["fetched_at"][i],
@@ -644,3 +646,117 @@ def test_an_index_body_is_migrated_under_the_base_profile_and_its_own_cohort() -
     # Same bytes, two surfaces: identical raw hash, different content address.
     assert detail["body_sha256"] == index["body_sha256"]
     assert detail["payload_sha256"] != index["payload_sha256"]
+
+# ------------------------------------------------- R2 as the bodies' home (W2a-7)
+
+
+class _FakeStore:
+    def __init__(self, fail: bool = False) -> None:
+        self.objects: dict[str, bytes] = {}
+        self.fail = fail
+
+    def upload_bytes(self, key: str, data: bytes, content_type: str = "") -> None:
+        if self.fail:
+            raise RuntimeError("R2 is down")
+        self.objects[key] = data
+
+
+def _incompressible(n: int = 20_000) -> bytes:
+    """A body that is still large AFTER gzip — the placement decision is made on the
+    compressed size, so `b"x" * 200_000` would stay inline and prove nothing."""
+    import os
+    return b"<html>" + os.urandom(n).hex().encode() + b"</html>"
+
+
+def test_a_migrated_body_goes_to_the_bucket_like_a_live_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """This lane is the single largest write the archive ever takes (447k pages,
+    7.7 GB gzipped). If it wrote inline while the live path spilled, the whole legacy
+    corpus would land in Postgres and the footprint the operator signed would be wrong
+    by roughly the size of the archive. So placement goes through the live writer's own
+    `plan_placement`, and the row carries the key rather than the bytes."""
+    body = _incompressible()
+    conn = _Conn([_Page(1, body=body)])
+    store = _FakeStore()
+    monkeypatch.setattr(payloads, "open_store", lambda: store)
+
+    stats = _run(conn)
+
+    assert stats["spilled"] == 1 and stats["uploaded"] == 1
+    row = conn.payloads[0]
+    assert row["body"] is None
+    assert row["body_r2_key"] == payloads.r2_key("bazos", hashlib.sha256(body).digest())
+    assert gzip.decompress(store.objects[row["body_r2_key"]]) == body
+    # 405's column: the only place a spilled body's size exists once `body` is NULL.
+    assert row["stored_byte_size"] == len(store.objects[row["body_r2_key"]])
+    assert row["byte_size"] == len(body)
+
+
+def test_a_small_body_still_rides_inline_and_needs_no_upload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The threshold is Postgres's own TOAST boundary, so what Postgres stores for free
+    stays where it is — an object per 200-byte page would be all overhead."""
+    conn = _Conn([_Page(1)])
+    store = _FakeStore()
+    monkeypatch.setattr(payloads, "open_store", lambda: store)
+
+    stats = _run(conn)
+
+    assert (stats["spilled"], stats["uploaded"]) == (0, 0)
+    assert store.objects == {}
+    assert conn.payloads[0]["body_r2_key"] is None
+    assert gzip.decompress(conn.payloads[0]["body"]) == conn.pages[0].body
+
+
+def test_the_migration_refuses_rather_than_writing_the_corpus_inline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bulk lane's safe degradation is to STOP. Silently inlining 7.7 GB because an
+    env var was missing is exactly the outcome the storage arithmetic rules out, and
+    unlike the live path there is no per-fetch warning anyone would read."""
+    conn = _Conn([_Page(1, body=_incompressible())])
+    monkeypatch.setattr(payloads, "open_store", lambda: None)
+
+    with pytest.raises(payload_backfill.BackfillRefused, match="R2 is not configured"):
+        _run(conn)
+
+    assert conn.payloads == []
+
+
+def test_a_failed_upload_leaves_no_row_pointing_at_a_missing_object(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Uploads run BEFORE the batch INSERT here — the opposite of the live writer, and
+    deliberately so: `_INSERT_SQL` covers a whole batch, and interleaving a PUT per row
+    would hold that transaction open across hundreds of round trips. Uploading first
+    inverts the risk into the harmless direction (an object nothing references, which a
+    re-run adopts because the key is the hash of its bytes)."""
+    conn = _Conn([_Page(1, body=_incompressible())])
+    monkeypatch.setattr(payloads, "open_store", lambda: _FakeStore(fail=True))
+
+    with pytest.raises(RuntimeError, match="R2 is down"):
+        _run(conn)
+
+    assert conn.payloads == []
+
+
+def test_a_dry_run_uploads_nothing_but_still_checks_the_bucket_is_there(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--dry-run suppresses the UPLOAD, not the check. A rehearsal exists to catch what
+    would break the real run, and "R2 was never configured" is top of that list — but it
+    must leave no objects behind, or the rehearsal has written to production storage."""
+    conn = _Conn([_Page(1, body=_incompressible())])
+    store = _FakeStore()
+    monkeypatch.setattr(payloads, "open_store", lambda: store)
+
+    stats = _run(conn, dry_run=True)
+
+    assert stats["spilled"] == 1 and stats["uploaded"] == 0
+    assert store.objects == {} and conn.payloads == []
+
+    monkeypatch.setattr(payloads, "open_store", lambda: None)
+    with pytest.raises(payload_backfill.BackfillRefused):
+        _run(_Conn([_Page(1, body=_incompressible())]), dry_run=True)

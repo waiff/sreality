@@ -171,9 +171,12 @@ HAVING count(*) > 1
 # age-based removal of a referenced body would raise ForeignKeyViolation and roll the whole
 # group's transaction back. The re-pin ahead of it is what makes that unreachable.
 #
-# `octet_length(body)` is NULL for a body that spilled to the bucket, which is honest: the
-# bytes reclaimed IN POSTGRES are the ones this statement frees, and the object's size is a
-# question only R2 can answer.
+# `stored_byte_size` (migration 406) BEFORE `octet_length(body)`, in that order, because
+# since W2a-7 the body is in the bucket by default and the inline column is NULL on
+# essentially every row. Reading only the inline length used to be defensible ("the bytes
+# reclaimed IN POSTGRES are the ones this statement frees"); with R2 as the bodies' home it
+# would report every sweep as freeing zero, on the single figure this lane exists to
+# produce. The coalesce keeps a pre-406 row answering with what it does have.
 _HOT_WINDOW_SQL = """
 DELETE FROM portal_raw_payloads p
  WHERE p.source = %(source)s
@@ -181,7 +184,8 @@ DELETE FROM portal_raw_payloads p
    AND p.page_kind = %(page_kind)s::location_page_kind
    AND NOT p.pinned
    AND p.last_observed_at < %(cutoff)s
-RETURNING p.id, p.body_r2_key, p.byte_size, octet_length(p.body)
+RETURNING p.id, p.body_r2_key, p.byte_size,
+          coalesce(p.stored_byte_size, octet_length(p.body))
 """
 
 _BATCH_INSERT_SQL = """
@@ -301,9 +305,10 @@ def prune_one_group(
     return {
         "capped": len(capped),
         "cold": len(cold),
-        # `byte_size` is the body as fetched; `stored_bytes` is what Postgres was holding
-        # after compression. Reporting both is the difference between "how much archive was
-        # dropped" and "how much disk came back".
+        # `byte_size` is the body as fetched; `stored_bytes` is the encoded size, which
+        # since W2a-7 is R2 bytes rather than Postgres bytes for all but the smallest
+        # bodies. Reporting both is the difference between "how much archive was dropped"
+        # and "how much storage came back".
         "bytes_uncompressed": sum(row.byte_size for row in evicted),
         "bytes_freed": sum(
             row.stored_bytes for row in evicted if row.stored_bytes is not None),

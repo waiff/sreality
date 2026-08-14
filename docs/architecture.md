@@ -62,7 +62,23 @@ each in `scraper/main.py` (`_record_detail_fetch`: the unwrapped, untrimmed esta
 design 02 §2.3.2 P3), the two portals that stage no body. That store is content-addressed on
 the NORMALISED body, so a refetch that changed nothing appends nothing and a replayed drain
 batch collides instead of duplicating; retention (version cap + pins) runs in the append's own
-transaction. It is gated per portal by `PortalLimits.payload_dual_write` (baked default
+transaction. **The BODY lives in R2 and Postgres holds the metadata row** (identity, both
+hashes, sizes, version, pin state, the content-addressed key): W2a-7 measured one body per
+listing-ever at 9.56 GB against a ~4 GB Postgres allowance — the location subsystem's 20 GB
+envelope less the ~16 GB the RÚIAN mirror and claim spine already occupy — so no retention
+setting made a database-resident archive fit, while a metadata row is 713 B and object storage
+is ~1/100th the price. Everything above Postgres's own TOAST threshold
+(`LOCATION_PAYLOAD_R2_THRESHOLD_BYTES`, 2 KB) spills. This is not a latency trade: nothing on a
+user-facing path reads a body — the readers (W2 re-mine, backfills, the round-trip verifier)
+are all batch — and Postgres-resident bodies would tax the shared buffer cache this platform
+has been burned by twice. A hot-window hybrid was rejected because "processed" is undefinable
+when the archive exists to be re-mined by extractors not yet written. An UNCONFIGURED bucket
+REFUSES the payload write rather than falling back inline (which would rebuild the
+database-resident archive invisibly); the refusal is caught by `append_payload_if_enabled`, so
+the walk and the drain are unaffected, and the upload runs inside the write transaction so a
+failed PUT rolls the row back. A surface whose page weight is not in
+`location_data.payload_budget.PORTAL_STORAGE` is refused outright — archiving an uncosted
+surface would silently invalidate the storage ceiling the operator signed. It is gated per portal by `PortalLimits.payload_dual_write` (baked default
 **False**, overridable via `app_settings.scraper_limits_global` / `portals.operational_limits`
 — no migration), cached ~60 s per source, and every failure warns rather than touching the
 scrape. **Every `page_kind` except `detail`** passes a SECOND gate on top of it,
