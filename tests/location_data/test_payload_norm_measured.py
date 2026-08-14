@@ -1,12 +1,18 @@
-"""W2a-3b: the idnes / ceskereality / realitymix profiles, against real refetches.
+"""The measured volatile profiles, against real refetches (W2a-3b, W2a-3c).
 
 Every fixture here is a body `scripts/location_payload_diff_probe.py` actually
-fetched from the live portal on 2026-08-13: `*_a1` and `*_a2` are the SAME detail
-page seconds apart, `*_b1` is a different listing on the same portal. (`<style>`
-and `<svg>` were dropped to halve the weight — presentation-only, and `<style>` is
-already in the profile's strip set, so neither can carry a hash relation; the trim
-was verified to leave every assertion below unchanged. Inline `<script>` is kept:
-ceskereality and realitymix carry map configuration there.)
+fetched from the live portal — idnes / ceskereality / realitymix on 2026-08-13,
+mmreality / remax on 2026-08-14: `*_a1` and `*_a2` are the SAME detail page seconds
+apart, `*_b1` is a different listing on the same portal. (`<style>` and `<svg>` were
+dropped to halve the weight — presentation-only, and `<style>` is already in the
+profile's strip set, so neither can carry a hash relation; the trim was verified to
+leave every assertion below unchanged. Inline `<script>` is kept: ceskereality and
+realitymix carry map configuration there, and mmreality's whole payload is one.)
+
+The mmreality and remax pairs were fetched across SEPARATE HTTP SESSIONS, because
+remax's churn does not exist within one: three fetches eight seconds apart are
+byte-identical, and the tokens only re-roll for the next session. The live drain is
+a fresh process per run, so cross-session is what production measures.
 
 TWO edits to those bytes, both deliberate. The trim above, and a contact scrub:
 this repo is PUBLIC, so the brokers' phone numbers, e-mail addresses and names
@@ -17,6 +23,15 @@ rewritten the coordinates and photo ids these fixtures exist to protect; it is
 deterministic and was applied identically to a1/a2/b1, so all three hash relations
 below hold exactly as they did on the untouched bodies.
 `test_no_committed_fixture_carries_contact_details` keeps it that way.
+
+mmreality needed two shapes that scrub did not previously reach, both added with
+it: a phone under an embedded-JSON key (`&quot;phone&quot;:&quot;731404040&quot;` —
+no `+420`, no grouping, no tel: href, so every seed rule walked past it), and
+Cloudflare's obfuscated e-mail payload, which is reversible with a two-line XOR and
+would have published the address as plainly as the text would. The Cloudflare
+payloads are re-encoded rather than blanked, under the page's OWN key — which is
+why a1 and a2 still carry different ciphertexts of the same placeholder, and why
+this fixture pair still demonstrates the churn it was fetched to demonstrate.
 
 Two assertions per portal, and the second is the one that matters:
 
@@ -44,8 +59,9 @@ from location_data.payload_norm import (
 _FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "location_w2a_refetch"
 _HTML = "text/html; charset=utf-8"
 
-# The three portals whose profiles W2a-3b replaced with measured ones.
-_MEASURED = ("idnes", "ceskereality", "realitymix")
+# Every portal whose profile is measured rather than guessed: W2a-3b's three, plus
+# W2a-3c's two. New entries get the three parametrised assertions for free.
+_MEASURED = ("idnes", "ceskereality", "realitymix", "mmreality", "remax")
 
 
 def _body(name: str) -> bytes:
@@ -139,6 +155,68 @@ def test_realitymix_strips_the_footer_stamp_and_keeps_the_gps_attributes() -> No
     assert b"<footer" in normalised
 
 
+def test_mmreality_strips_the_cloudflare_email_payload_and_keeps_the_coordinates() -> None:
+    """mmreality's whole measured churn is Cloudflare re-obfuscating one constant
+    address under a fresh random key per response. Both carriers go; the Vue prop
+    that holds the listing's own latitude/longitude must not."""
+    normalised = normalise(
+        _body("mmreality_a1"), content_type=_HTML,
+        volatile=DEFAULT_VOLATILE_PROFILES["mmreality"],
+    ).norm_bytes
+
+    for gone in (b"__cf_email__", b"data-cfemail", b"email-protection"):
+        assert gone not in normalised
+    # The embedded JSON is the location signal W2 mines here — mmreality has no
+    # data-gps attributes, its coordinates live in the Vue prop.
+    assert b"latitude" in normalised and b"longitude" in normalised
+    assert b"49.500513957" in normalised
+    # Only the two obfuscated anchors go, not the sections that hold them: the
+    # agent contact form and the footer are both structure the parser reads.
+    assert b"rds-agent-contact-form" in normalised
+    assert b"rds-footer-contacts" in normalised
+
+
+def test_remax_strips_the_share_popover_and_keeps_the_forms_map_and_canonical() -> None:
+    """The remax token that mattered is INSIDE an attribute value, so the fix is a
+    node strip, not a wider input[name] rule. Everything around it stays."""
+    normalised = normalise(
+        _body("remax_a1"), content_type=_HTML,
+        volatile=DEFAULT_VOLATILE_PROFILES["remax"],
+    ).norm_bytes
+
+    # The escaped <form> lived in `data-content`; no popover payload may survive.
+    assert b"data-content" not in normalised
+    assert b"dalten_web_send_listing_form" not in normalised
+    # ...but only the two buttons go. Their container, the real contact forms and
+    # the listing's own geography all stay.
+    assert b"pd-share__buttons" in normalised
+    assert b"listing-detail-contact-form" in normalised
+    assert b"data-gps" in normalised
+    assert b"rel=\"canonical\"" in normalised
+
+
+def test_remax_is_stable_within_a_session_which_is_why_the_pair_is_cross_session() -> None:
+    """The methodology assertion, and the reason these two fixtures exist at all.
+
+    A same-session refetch of a remax page is byte-identical — three fetches eight
+    seconds apart, 5/5 listings — so a probe that reuses one HTTP session measures
+    ZERO churn on a portal production measured at 100%. What re-rolls is minted per
+    session, and the live drain is a fresh process every run. This pins the two
+    tokens whose values differ between the committed a1 and a2, so a future reader
+    cannot mistake this pair for a seconds-apart one.
+    """
+    a1 = _body("remax_a1").decode("utf-8")
+    a2 = _body("remax_a2").decode("utf-8")
+
+    tokens = re.compile(r"name='dalten_web_send_listing_form\[_token\]' value='([^']+)'")
+    assert tokens.search(a1) and tokens.search(a2)
+    assert tokens.findall(a1) != tokens.findall(a2)
+
+    dom_tokens = re.compile(r'name="mortgage_contact_form\[_token\]" value="([^"]+)"')
+    assert dom_tokens.search(a1) and dom_tokens.search(a2)
+    assert dom_tokens.findall(a1) != dom_tokens.findall(a2)
+
+
 def test_ceskereality_relative_insertion_date_is_the_known_residue() -> None:
     """A "Datum vložení" of "před 22 minutami" re-renders every minute, and no CSS
     selector can pick that row out (it is identified by its LABEL TEXT, and
@@ -227,11 +305,49 @@ def test_no_committed_fixture_carries_contact_details() -> None:
                 f"{path.name}: {href}"
             )
         # Digits presented AS a phone number: inside a tel: href, a schema.org
-        # "telephone", or a reveal-on-click attribute. A bare 9-digit run
+        # "telephone", a reveal-on-click attribute, or under an embedded-JSON key
+        # that says phone (mmreality's Vue prop spells it
+        # `&quot;phone&quot;:&quot;731404040&quot;` — no +420, no grouping, no
+        # tel: href, so nothing above would have caught it). A bare 9-digit run
         # elsewhere is a coordinate or an id and must stay (the normaliser is
         # measured on those bytes).
         contexts = re.findall(
             r'(?:tel:|"telephone"\s*:\s*"|-on-click=")([^"\']{0,30})', text,
+        ) + re.findall(
+            r'(?:&quot;|\\?")(?:phone_number|mobile_phone|phone|mobile)'
+            r'(?:&quot;|\\?")\s*:\s*(?:&quot;|\\?")([^"&\\]{0,25})',
+            text,
         )
         for context in contexts:
             assert not phone_like.search(context), f"{path.name}: {context}"
+
+
+def test_no_committed_fixture_carries_an_obfuscated_email() -> None:
+    """Cloudflare's e-mail obfuscation is NOT anonymisation: `data-cfemail` and the
+    /cdn-cgi/l/email-protection# fragment are the address XOR'd with their own
+    leading byte, so the two lines below recover it. Committing one would publish a
+    real address while passing every plaintext check in the test above.
+
+    The scrub re-encodes the PLACEHOLDER under each payload's own key, so this
+    decodes to `agent@example.cz` while the per-response keys — mmreality's entire
+    measured churn — still differ between a1 and a2. That is asserted here too, so
+    a future 'fix' that blanked the payloads would fail loudly rather than quietly
+    turn the fixture pair into a tautology.
+    """
+    payload_re = re.compile(
+        r'(?:data-cfemail="|/cdn-cgi/l/email-protection#)([0-9a-fA-F]{4,})'
+    )
+
+    def decode(payload: str) -> str:
+        raw = bytes.fromhex(payload)
+        return "".join(chr(byte ^ raw[0]) for byte in raw[1:])
+
+    seen_keys: dict[str, set[str]] = {}
+    for path in sorted(_FIXTURES.glob("*.html")):
+        payloads = payload_re.findall(path.read_text(encoding="utf-8"))
+        for payload in payloads:
+            assert decode(payload) == "agent@example.cz", f"{path.name}: {payload}"
+        seen_keys[path.name] = {p[:2].lower() for p in payloads}
+
+    assert seen_keys["mmreality_a1.html"], "the obfuscated-email fixture lost its payloads"
+    assert seen_keys["mmreality_a1.html"].isdisjoint(seen_keys["mmreality_a2.html"])

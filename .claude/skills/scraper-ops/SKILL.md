@@ -51,10 +51,21 @@ kept for its **bytes** rather than its visible text (the payload-normaliser set,
 mask never sees, and Tailwind custom properties. Use the contact-scoped mode instead:
 `python scripts/fetch_and_anonymize_fixtures.py --scrub-contacts <files> --name "<agent name>"`.
 It seeds phones only from markup that says "phone" (`tel:`, schema.org `telephone`, a rendered
-`+420` group, a whole-text-node number, reveal-on-click attributes), replaces e-mails, and takes
-each hand-supplied name in plain, JSON-escaped **and** slugged form (the profile-URL slug is the
-one that gets forgotten). Same placeholders, so a fixture set stays consistent either way; it is
-idempotent, so re-running it on a committed fixture proves the fixture is clean.
+`+420` group, a whole-text-node number, reveal-on-click attributes, **and a JSON `phone`/`mobile`
+key** — plain, entity- or backslash-escaped, which is how a portal whose payload is an embedded
+JSON prop spells it: mmreality's agent number arrives as `&quot;phone&quot;:&quot;731404040&quot;`
+with no `+420`, no grouping and no `tel:` href). It replaces e-mails, **re-encodes Cloudflare's
+obfuscated e-mail payloads** (`data-cfemail`, `/cdn-cgi/l/email-protection#…` — an XOR against
+their own leading byte, so a committed one publishes the address while matching no plaintext
+rule; the placeholder is re-encoded under the page's OWN key, which preserves the per-response
+key that is itself measured churn on Cloudflare-fronted portals), and takes each hand-supplied
+name in plain, JSON-escaped **and** slugged form (the profile-URL slug is the one that gets
+forgotten). Pass `--name` once per name, **longest first** — replacing "Radomír Kočí" before
+"Bc. Radomír Kočí, DiS." leaves the longer form half-rewritten.
+Same placeholders, so a fixture set stays consistent either way; it is idempotent, so re-running
+it on a committed fixture proves the fixture is clean. Two tests in
+`tests/location_data/test_payload_norm_measured.py` fail if a committed fixture carries contact
+details in plaintext **or** in Cloudflare's hex.
 
 **The nine SCRAPER portal parsers are a separate fixture set** in `tests/fixtures/portal_html/`
 (`tests/scraper/test_portal_media_fixtures.py`), distinct from the LLM `source_parsers` set

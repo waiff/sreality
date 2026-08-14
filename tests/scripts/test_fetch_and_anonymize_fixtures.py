@@ -7,6 +7,7 @@ the fetch/write orchestration is exercised through the workflow.
 from __future__ import annotations
 
 import importlib.util
+import re
 import sys
 from pathlib import Path
 
@@ -144,3 +145,62 @@ def test_scrub_contacts_only_seeds_from_phone_context():
     assert faaf.phone_seeds('<span data-x="123456789">50.069672777778</span>') == set()
     assert faaf.phone_seeds('<a href="tel:123456789">x</a>') == {"123456789"}
     assert faaf.phone_seeds('{"telephone":"+420 123 456 789"}') == {"123456789"}
+
+
+# --- the two shapes mmreality added (W2a-3c) ---
+
+
+@pytest.mark.parametrize("markup", [
+    '{"phone":"731404040"}',                              # plain embedded JSON
+    'data-page="&quot;phone&quot;:&quot;731404040&quot;"',  # JSON inside an attribute
+    '{"mobile":"731404040"}',
+    '{\\"phone\\":\\"731404040\\"}',                      # inside a JS string literal
+])
+def test_phone_seeds_reads_a_json_phone_key(markup):
+    """mmreality's whole detail payload is a Vue prop, so its agent numbers carry no
+    +420, no digit grouping and no tel: href — every other seed rule walks past."""
+    assert faaf.phone_seeds(markup) == {"731404040"}
+
+
+def test_phone_seeds_does_not_read_a_json_key_that_merely_ends_in_phone():
+    """`"telephone"` has its own rule; `"headphones"` is not a contact at all. The
+    opening quote is what keeps the alternation from matching mid-word."""
+    assert faaf.phone_seeds('{"headphones":"123456789"}') == set()
+    assert faaf.phone_seeds('{"phone_id":"123456789"}') == set()
+
+
+def _cfemail(address: str, key: int) -> str:
+    return f"{key:02x}" + "".join(f"{ord(c) ^ key:02x}" for c in address)
+
+
+def test_scrub_contacts_rewrites_cloudflare_obfuscated_emails():
+    """Cloudflare's obfuscation is an XOR, not anonymisation — a committed payload
+    publishes the address. Re-encoding under the SAME key keeps the shape (and the
+    per-response key that is mmreality's measured churn) while losing the address."""
+    page = (
+        f'<a href="/cdn-cgi/l/email-protection#{_cfemail("broker@realitka.cz", 0x32)}">'
+        f'<span class="__cf_email__" data-cfemail="{_cfemail("broker@realitka.cz", 0x9a)}">'
+        "[email protected]</span></a>"
+    )
+
+    out = faaf.anonymize_contacts(page)
+
+    payloads = re.findall(
+        r'(?:data-cfemail="|/cdn-cgi/l/email-protection#)([0-9a-f]+)', out)
+    assert len(payloads) == 2
+    for payload in payloads:
+        raw = bytes.fromhex(payload)
+        assert "".join(chr(b ^ raw[0]) for b in raw[1:]) == faaf.EMAIL_PLACEHOLDER
+    # The keys are the portal's, not ours: they must survive so that two fetches of
+    # one page still differ, which is exactly what the mmreality fixture proves.
+    assert {p[:2] for p in payloads} == {"32", "9a"}
+    assert faaf.anonymize_contacts(out) == out  # still idempotent
+
+
+def test_scrub_contacts_leaves_a_hex_run_that_is_not_a_cfemail_payload():
+    page = '<div data-hash="deadbeefcafe">x</div><span>0123456789abcdef</span>'
+
+    out = faaf.anonymize_contacts(page)
+
+    assert "deadbeefcafe" in out
+    assert "0123456789abcdef" in out

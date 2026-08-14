@@ -139,13 +139,53 @@ _BANNER_MARK = "ANONYMIZED FIXTURE"
 # the non-breaking and narrow spaces an editor shows as an ordinary space.
 _SEP = r"[\s\-]?"
 _GROUP9 = rf"\d{{3}}{_SEP}\d{{3}}{_SEP}\d{{3}}"
+# A quote as an embedded-JSON payload can spell it: bare, HTML-entity-escaped
+# (a JSON blob living inside an HTML attribute) or backslash-escaped (inside a JS
+# string literal).
+_JSON_Q = r'(?:&quot;|\\"|")'
 _PHONE_SEED_RES: tuple[re.Pattern[str], ...] = (
     re.compile(r"tel:([+\d\s()\-]{9,20})"),
     re.compile(r'"telephone"\s*:\s*"([^"]{9,25})"'),
     re.compile(rf"(\+\s?420{_SEP}{_GROUP9})"),
     re.compile(rf">\s*(\+?(?:420{_SEP})?{_GROUP9})\s*<"),
     re.compile(rf'data-hidden-content-on-click="([^"]*{_GROUP9}[^"]*)"'),
+    # A phone under a JSON KEY that says phone, with no `+420`, no digit grouping
+    # and no tel: href to give it away — so every rule above walks straight past it.
+    # mmreality is the case that found this: its whole detail payload is a Vue prop
+    # inside an HTML attribute, and the agent block arrives as
+    # `&quot;phone&quot;:&quot;731404040&quot;`. Longest alternative first, so
+    # `phone_number` is not matched as `phone` + a failed closing quote.
+    re.compile(
+        rf"{_JSON_Q}(?:phone_number|mobile_phone|phone|mobile){_JSON_Q}\s*:\s*"
+        rf"{_JSON_Q}([^\"&\\]{{9,25}}){_JSON_Q}"
+    ),
 )
+
+# Cloudflare's "Email Address Obfuscation" rewrites every mailto: on the way out
+# into a hex payload — the address XOR'd with a RANDOM LEADING KEY BYTE — carried in
+# `data-cfemail` and in the /cdn-cgi/l/email-protection# href fragment. Three lines
+# of Python reverse it, so a committed fixture carrying one publishes the address as
+# surely as the plain text would, while matching no email or phone rule above.
+# Re-encoding the PLACEHOLDER under the page's own key preserves the shape exactly —
+# including the per-response key that is mmreality's entire measured churn — so the
+# fixture still proves what it was fetched to prove.
+_CFEMAIL_RE = re.compile(
+    r'(data-cfemail="|/cdn-cgi/l/email-protection#)([0-9a-fA-F]{4,})'
+)
+
+
+def _cf_encode(plaintext: str, key: int) -> str:
+    return f"{key:02x}" + "".join(f"{ord(c) ^ key:02x}" for c in plaintext)
+
+
+def _scrub_cf_emails(html: str) -> str:
+    def replace(match: re.Match[str]) -> str:
+        payload = match.group(2)
+        if len(payload) % 2:
+            return match.group(0)
+        return match.group(1) + _cf_encode(EMAIL_PLACEHOLDER, int(payload[:2], 16))
+
+    return _CFEMAIL_RE.sub(replace, html)
 
 
 def phone_seeds(html: str) -> set[str]:
@@ -198,13 +238,19 @@ def _replace_name(html: str, name: str) -> str:
 def anonymize_contacts(html: str, *, names: Sequence[str] = ()) -> str:
     """Scrub contact PII only, leaving every other byte of the page intact.
 
-    Idempotent: the placeholders carry no phone digits and no name, so a second
-    pass is a no-op (which lets a committed fixture be re-verified in CI).
+    Covers the four shapes a Czech portal spells a contact in: rendered text, a
+    tel:/mailto: href, an embedded-JSON field (plain, entity- or backslash-escaped),
+    and a Cloudflare-obfuscated hex payload.
+
+    Idempotent: the placeholders carry no phone digits and no name, and re-encoding
+    the placeholder under a key it already carries returns the same bytes — so a
+    second pass is a no-op, which is what lets a committed fixture be re-verified.
     """
     out = html
     for name in names:
         out = _replace_name(out, name)
     out = _EMAIL_RE.sub(EMAIL_PLACEHOLDER, out)
+    out = _scrub_cf_emails(out)
     for digits in sorted(phone_seeds(out)):
         out = _phone_pattern(digits).sub(PHONE_PLACEHOLDER, out)
     if _BANNER_MARK not in out[:len(CONTACT_BANNER) + 200]:
