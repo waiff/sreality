@@ -1,4 +1,4 @@
--- 405_location_w2a_payload_stored_size.sql
+-- 406_location_w2a_payload_stored_size.sql
 --
 -- Location-data program, Wave W2a: one column, so that "bytes reclaimed" survives
 -- bodies moving out of Postgres.

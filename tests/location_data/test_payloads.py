@@ -232,12 +232,20 @@ class _RecordingCur:
 
     def fetchone(self) -> tuple[Any, ...] | None:
         sql, params = self._conn.executed[-1]
-        if not sql.startswith("INSERT INTO portal_raw_payloads"):
+        # The append is a CTE since the time floor added its fallback arm:
+        # `WITH ins AS (INSERT INTO portal_raw_payloads ...)`. Match on the
+        # target rather than the leading keyword, or the fake silently answers
+        # None and every caller sees the "returned no row" assertion instead.
+        if "INSERT INTO portal_raw_payloads" not in sql:
             return None
         body = params["body"]
-        return (1, 1, True, params["body_sha256"], params["byte_size"],
-                params["content_encoding"], params["body_r2_key"],
-                None if body is None else len(body))
+        # Mirrors _APPEND_SQL's RETURNING list exactly: id, version_seq, inserted,
+        # payload_sha256, body_sha256, byte_size, content_encoding, body_r2_key,
+        # stored_bytes, suppressed. The last two arrived with the time floor; a fake
+        # that is short by a column fails as an IndexError deep inside the writer.
+        return (1, 1, True, params["payload_sha256"], params["body_sha256"],
+                params["byte_size"], params["content_encoding"], params["body_r2_key"],
+                None if body is None else len(body), False)
 
     def fetchall(self) -> list[tuple[Any, ...]]:
         return []
@@ -274,7 +282,7 @@ def _append_params(**kwargs: Any) -> dict[str, Any]:
     )
     return next(
         params for sql, params in conn.executed
-        if sql.startswith("INSERT INTO portal_raw_payloads")
+        if "INSERT INTO portal_raw_payloads" in sql
     )
 
 

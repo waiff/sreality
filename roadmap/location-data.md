@@ -626,7 +626,7 @@ hashes, sizes, version, pin state, the content-addressed key. Two ledgers, two c
 | 10 | 11 | 7.39 M | 5.48 GB | 104.9 GB | $1.57 | no |
 | 20 (as shipped) | 21 | 14.1 M | 10.45 GB | 200.4 GB | $3.01 | no |
 
-A metadata row measures **713 B** (200k rows loaded into the applied 382+403+405 shape,
+A metadata row measures **713 B** (200k rows loaded into the applied 382+403+406 shape,
 `pg_relation_size` per relation) against ~20 KB for the same row carrying its body — 29x. The
 Postgres footprint is now row overhead, not body weight, so it moves with the corpus and the
 cap rather than with how heavy a portal's HTML is.

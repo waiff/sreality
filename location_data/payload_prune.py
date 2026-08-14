@@ -171,12 +171,12 @@ HAVING count(*) > 1
 # age-based removal of a referenced body would raise ForeignKeyViolation and roll the whole
 # group's transaction back. The re-pin ahead of it is what makes that unreachable.
 #
-# `stored_byte_size` (migration 405) BEFORE `octet_length(body)`, in that order, because
+# `stored_byte_size` (migration 406) BEFORE `octet_length(body)`, in that order, because
 # since W2a-7 the body is in the bucket by default and the inline column is NULL on
 # essentially every row. Reading only the inline length used to be defensible ("the bytes
 # reclaimed IN POSTGRES are the ones this statement frees"); with R2 as the bodies' home it
 # would report every sweep as freeing zero, on the single figure this lane exists to
-# produce. The coalesce keeps a pre-405 row answering with what it does have.
+# produce. The coalesce keeps a pre-406 row answering with what it does have.
 _HOT_WINDOW_SQL = """
 DELETE FROM portal_raw_payloads p
  WHERE p.source = %(source)s

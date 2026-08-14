@@ -327,8 +327,8 @@ class EvictedBody(NamedTuple):
     """One row a retention statement removed, and what it was holding.
 
     * `byte_size` is the body as fetched; `stored_bytes` is the ENCODED size, wherever
-      the bytes lived — `stored_byte_size` (migration 405) for a spilled body, and
-      `octet_length(body)` for an inline one or a row written before 405.
+      the bytes lived — `stored_byte_size` (migration 406) for a spilled body, and
+      `octet_length(body)` for an inline one or a row written before 406.
     * Both retention statements RETURN this column order — the cap here and the hot
       window in `payload_prune` — so the two paths report one set of figures. The cap
       used to return only (id, key), which silently left every capped row out of the
@@ -374,8 +374,8 @@ class PayloadRef:
     that was never uploaded.
 
     `stored_bytes` is the ENCODED size wherever the bytes live — `stored_byte_size`
-    (migration 405) for a spilled body, `octet_length(body)` for an inline one. None
-    only for a row written before 405 whose body was already in the bucket.
+    (migration 406) for a spilled body, `octet_length(body)` for an inline one. None
+    only for a row written before 406 whose body was already in the bucket.
 
     `body_r2_key` set means Postgres holds no bytes for this payload; read them with
     `decode_body(store.download_bytes(ref.body_r2_key), ref.content_encoding)`.
@@ -1005,7 +1005,7 @@ def append_payload(
         version_seq = 0 if row[1] is None else int(row[1])
         # The row as stored. On a collision this is what an EARLIER fetch wrote; under
         # the floor it is a DIFFERENT body altogether, which is why payload_sha256 is
-        # read from the row too. `stored_bytes` is NULL only for a pre-405 spilled row,
+        # read from the row too. `stored_bytes` is NULL only for a pre-406 spilled row,
         # which carried neither the column nor an inline body to measure.
         row_payload_sha256, row_body_sha256 = bytes(row[3]), bytes(row[4])
         row_byte_size = int(row[5])
@@ -1068,7 +1068,7 @@ def append_payload(
         version_seq=version_seq,
         inserted=inserted,
         byte_size=row_byte_size,
-        # Always the ROW's figure now that 405 records it: on the insert path the row
+        # Always the ROW's figure now that 406 records it: on the insert path the row
         # carries the size this call just wrote, so reading it back is not a second
         # source of truth but the same one, and it stops being None for a spilled body.
         stored_bytes=row_stored_bytes,
