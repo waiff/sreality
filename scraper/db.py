@@ -2997,19 +2997,39 @@ def _payload_archive_enabled(
 ) -> bool:
     """May this body be appended to the payload archive?
 
-    One gate for a detail body, two in series for every other page_kind (W2a-6).
+    One gate for a detail body, two in series for every other page_kind (W2a-6),
+    and a third that is not a flag at all: the surface has to have been WEIGHED.
     The second gate is an AND on top of `payload_dual_write`, never an OR:
     surface-grain bodies re-order on every walk and are refetched on the walk
     cadence (sreality's index 24x/day), so a portal whose per-listing churn signs
     off cheaply may still have surface churn that does not — but "the archive is
     off for this portal" has to stay one switch that means it.
+
+    The third gate closes a hole the flags cannot: `location_data.payload_budget`
+    is the frozen corpus the storage ceiling is computed from, and it carries only
+    the surfaces someone has measured (today, every portal's `detail`). Archiving
+    an unmeasured surface would not break anything visibly — it would make the
+    number the operator signed silently wrong, which is worse. So an unmeasured
+    (source, page_kind) is refused here, which is also what forces whoever turns
+    on `payload_index_archive` to profile the index surface first instead of
+    discovering its cost on the storage bill.
     """
     limits = _payload_limits(conn, source, ttl=ttl)
     if not limits.payload_dual_write:
         return False
-    if page_kind == DETAIL_PAGE_KIND:
-        return True
-    return bool(limits.payload_index_archive)
+    if page_kind != DETAIL_PAGE_KIND and not limits.payload_index_archive:
+        return False
+    from location_data import payload_budget
+
+    if not payload_budget.is_measured(source, page_kind):
+        LOG.warning(
+            "payload archive refuses unmeasured surface source=%s page_kind=%s — add it "
+            "to location_data/payload_budget.PORTAL_STORAGE (re-derive with "
+            "scripts/location_payload_storage_ceiling.py) before archiving it",
+            source, page_kind,
+        )
+        return False
+    return True
 
 
 def append_payload_if_enabled(

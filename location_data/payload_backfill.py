@@ -41,6 +41,7 @@ import logging
 import os
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import psycopg
@@ -115,6 +116,12 @@ MIN_BATCH_SIZE = 25
 MAX_BATCH_SIZE = 1_000
 DEFAULT_BATCH_SIZE = 200
 
+# Concurrent R2 PUTs per batch. The whole corpus is ~445k objects and a round trip to
+# Frankfurt is tens of milliseconds, so serial uploads would make the network, not the
+# database, this migration's clock: six hours of pure latency. 16 keeps a default batch
+# of 200 under a couple of seconds without out-running `R2Client`'s connection pool.
+UPLOAD_WORKERS = 16
+
 # `portal_raw_pages.page_kind` is free text under `check (page_kind in ('index','detail'))`
 # (migration 099); `portal_raw_payloads.page_kind` is the `location_page_kind` ENUM, whose
 # labels are ('index','detail','map','gazetteer','snapshot','archive','none') (migration
@@ -179,20 +186,23 @@ SELECT id, source, source_id_native, page_kind, convert_to(html, 'UTF8'),
 _INSERT_SQL = """
 INSERT INTO portal_raw_payloads
     (source, source_id_native, listing_id, page_kind, payload_sha256, body_sha256,
-     content_type, content_encoding, body, byte_size, http_status, contract_version,
-     normalizer_version, snapshot_id, pinned, version_seq,
+     content_type, content_encoding, body, body_r2_key, byte_size, stored_byte_size,
+     http_status, contract_version, normalizer_version, snapshot_id, pinned, version_seq,
      first_observed_at, last_observed_at, fetched_at)
 SELECT r.source, r.source_id_native, NULL::bigint, r.page_kind::location_page_kind,
        r.payload_sha256, r.body_sha256, r.content_type, r.content_encoding, r.body,
-       r.byte_size, r.http_status, NULL::integer, r.normalizer_version,
+       r.body_r2_key, r.byte_size, r.stored_byte_size,
+       r.http_status, NULL::integer, r.normalizer_version,
        NULL::bigint, true, 1, r.fetched_at, r.fetched_at, r.fetched_at
   FROM unnest(%(source)s::text[], %(source_id_native)s::text[], %(page_kind)s::text[],
               %(payload_sha256)s::bytea[], %(body_sha256)s::bytea[],
               %(content_type)s::text[], %(content_encoding)s::text[], %(body)s::bytea[],
-              %(byte_size)s::integer[], %(http_status)s::integer[],
+              %(body_r2_key)s::text[], %(byte_size)s::integer[],
+              %(stored_byte_size)s::integer[], %(http_status)s::integer[],
               %(fetched_at)s::timestamptz[], %(normalizer_version)s::text[])
     AS r(source, source_id_native, page_kind, payload_sha256, body_sha256, content_type,
-         content_encoding, body, byte_size, http_status, fetched_at, normalizer_version)
+         content_encoding, body, body_r2_key, byte_size, stored_byte_size, http_status,
+         fetched_at, normalizer_version)
 ON CONFLICT (source, source_id_native, page_kind, payload_sha256) DO NOTHING
 RETURNING id
 """
@@ -404,12 +414,14 @@ def run(
     LOG.info("BACKFILL start source=%s batch_size=%d after_id=%d resumed=%s batch_id=%s "
              "dry_run=%s", source or "*", batch_size, after_id, resumed, batch_id, dry_run)
 
-    r2_threshold = loader_db.env_positive_int(
-        payloads.R2_THRESHOLD_ENV, payloads.DEFAULT_R2_THRESHOLD_BYTES)
+    # Resolved even in --dry-run, and deliberately: a rehearsal whose whole job is to
+    # catch what would break the real run must catch a missing bucket too. It is the
+    # UPLOAD that --dry-run suppresses, not the check.
+    store = payloads.open_store()
     started = time.monotonic()
     stats: dict[str, Any] = {
         "pages": 0, "inserted": 0, "skipped_existing": 0, "unmapped_page_kind": 0,
-        "oversized": 0, "bytes_read": 0, "bytes_stored": 0,
+        "spilled": 0, "uploaded": 0, "bytes_read": 0, "bytes_stored": 0,
         "stopped_early": False, "reached_end": False,
         "resumed_from_id": after_id, "resumed": resumed,
     }
@@ -443,7 +455,7 @@ def run(
             # leaving the cursor behind it would wedge the migration on the same row
             # forever.
             batch_after_id = int(records[-1][0])
-            columns = _columns(records, r2_threshold=r2_threshold, stats=stats,
+            columns = _columns(records, store=store, dry_run=dry_run, stats=stats,
                                unmapped_kinds=unmapped_kinds)
 
             if columns and not dry_run:
@@ -484,7 +496,7 @@ def run(
                     "note": f"pages={stats['pages']} inserted={stats['inserted']} "
                             f"existing={stats['skipped_existing']} "
                             f"unmapped_page_kind={stats['unmapped_page_kind']} "
-                            f"oversized={stats['oversized']} "
+                            f"spilled={stats['spilled']} uploaded={stats['uploaded']} "
                             f"reached_end={stats['reached_end']} through_id={after_id}",
                 })
     except Exception as exc:
@@ -520,16 +532,36 @@ def run(
 def _columns(
     records: list[tuple[Any, ...]],
     *,
-    r2_threshold: int,
+    store: payloads.ObjectStore | None,
+    dry_run: bool,
     stats: dict[str, Any],
     unmapped_kinds: set[str],
 ) -> dict[str, list[Any]]:
-    """Column-major arrays for `_INSERT_SQL`, one entry per migratable row."""
+    """Column-major arrays for `_INSERT_SQL`, one entry per migratable row.
+
+    Placement goes through `payloads.plan_placement`, the live writer's own decision, so
+    the legacy corpus lands where new bodies land. It has to: this lane is the single
+    largest write the archive will ever take (447 k pages, 7.7 GB gzipped), and a
+    backfill that wrote inline while the live path spilled would put the whole legacy
+    corpus in Postgres and make the footprint the operator signed wrong by roughly the
+    size of the archive.
+
+    Uploads happen HERE, before the INSERT, and OUTSIDE the batch transaction — the
+    opposite ordering from `payloads.append_payload`, for a reason that is specific to a
+    bulk lane. There, ordering the upload after the insert is what keeps a committed row
+    from pointing at a missing object; here `_INSERT_SQL` is `ON CONFLICT DO NOTHING`
+    over a whole batch, so an interleaved per-row upload would mean holding a
+    several-hundred-row transaction open across as many network round trips. Uploading
+    first inverts the risk into the harmless direction: an object nothing references,
+    which the next run adopts because the key is the hash of its bytes.
+    """
     out: dict[str, list[Any]] = {
         "source": [], "source_id_native": [], "page_kind": [], "payload_sha256": [],
         "body_sha256": [], "content_type": [], "content_encoding": [], "body": [],
-        "byte_size": [], "http_status": [], "fetched_at": [], "normalizer_version": [],
+        "body_r2_key": [], "byte_size": [], "stored_byte_size": [], "http_status": [],
+        "fetched_at": [], "normalizer_version": [],
     }
+    pending: dict[str, bytes] = {}
     for _id, source, source_id_native, page_kind, body, http_status, fetched_at in records:
         kind = PAGE_KIND_MAP.get(page_kind)
         if kind is None:
@@ -540,28 +572,60 @@ def _columns(
         # The MAPPED kind, not the source column's raw text: it is the value the row
         # lands under, so the profile and the cohort must be resolved from the same one.
         derived = encode_for_archive(raw, source=source, page_kind=kind)
-        stored = derived["stored"]
-        if len(stored) > r2_threshold:
-            # Inline anyway. A spill would need a per-row R2 upload inside the batch
-            # transaction, and at the shipped 256 KB threshold a page would have to gzip
-            # larger than every observed portal body by an order of magnitude to get here.
-            # `prp_body_present` is satisfied either way; the count makes it visible.
-            stats["oversized"] += 1
+        # gzip_min_bytes=0 for the same reason `encode_for_archive` uses it: a legacy
+        # page is a whole document, so the writer's "leave it verbatim" branch is dead
+        # weight, and the degenerate zero-length body still reports 'identity'.
+        placement = payloads.plan_placement(
+            source, raw, derived["body_sha256"], gzip_min_bytes=0)
+        if placement.spills:
+            # Deduped within the batch: two listings served byte-identical pages (a
+            # portal's "listing removed" interstitial) share one content address.
+            pending[placement.r2_key or ""] = placement.stored
+            stats["spilled"] += 1
         out["source"].append(source)
         out["source_id_native"].append(source_id_native)
         out["page_kind"].append(kind)
         out["payload_sha256"].append(derived["payload_sha256"])
         out["body_sha256"].append(derived["body_sha256"])
         out["content_type"].append(derived["content_type"])
-        out["content_encoding"].append(derived["content_encoding"])
-        out["body"].append(stored)
+        out["content_encoding"].append(placement.content_encoding)
+        out["body"].append(None if placement.spills else placement.stored)
+        out["body_r2_key"].append(placement.r2_key)
         out["byte_size"].append(derived["byte_size"])
+        out["stored_byte_size"].append(len(placement.stored))
         out["http_status"].append(http_status)
         out["fetched_at"].append(fetched_at)
         out["normalizer_version"].append(derived["normalizer_version"])
         stats["bytes_read"] += derived["byte_size"]
-        stats["bytes_stored"] += len(stored)
+        stats["bytes_stored"] += len(placement.stored)
+    if pending:
+        if store is None:
+            raise BackfillRefused(
+                f"{len(pending)} of this batch's bodies exceed the R2 threshold and R2 "
+                f"is not configured; set R2_ACCOUNT_ID / R2_ACCESS_KEY_ID / "
+                f"R2_SECRET_ACCESS_KEY / R2_BUCKET_NAME before migrating the legacy "
+                f"archive")
+        if not dry_run:
+            _upload_all(store, pending)
+            stats["uploaded"] += len(pending)
     return out if out["source"] else {}
+
+
+def _upload_all(store: payloads.ObjectStore, objects: dict[str, bytes]) -> None:
+    """PUT a batch's spilled bodies, concurrently, raising on the first failure.
+
+    Serial uploads would set this lane's pace: 447 k objects at a ~50 ms round trip is
+    six hours of pure latency for ~8 GB of payload. The pool is sized like the image
+    lane's (which is where `R2Client`'s connection-pool default comes from), and any
+    exception propagates so the batch is not inserted — the run stamps 'stopped' and the
+    resumable cursor replays it, re-uploading objects that are already there as the same
+    key with the same bytes.
+    """
+    with ThreadPoolExecutor(max_workers=UPLOAD_WORKERS) as pool:
+        futures = [pool.submit(store.upload_bytes, key, data, "application/gzip")
+                   for key, data in objects.items()]
+        for future in futures:
+            future.result()
 
 
 def main(argv: list[str] | None = None) -> int:

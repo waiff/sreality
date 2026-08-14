@@ -7,10 +7,21 @@ against production and prints the drift, so the frozen table can be re-blessed o
 evidence rather than trusted indefinitely. Run it before signing a cap change, after a
 portal is onboarded, and after any redesign that moves a portal's page weight.
 
-Three measurements, and the middle one is the one nobody had done:
+It prints TWO ceilings, because the archive spends two currencies: Postgres metadata
+ROWS against `payload_budget.ARCHIVE_ALLOWANCE_GB` — what is LEFT of the subsystem's
+20 GB envelope once the RÚIAN mirror and the claim spine are counted, not the whole of
+it — and R2 BYTES against a price list. Only the first is a budget, and the `fits`
+column reports it; the second is a bill of cents. Both are quoted over the `ever`
+cohort, since rule 3 delists but never deletes and a pinned first/latest body outlives
+the listing's activity.
+
+Four measurements, and the middle two are the ones nobody had done:
 
   * **corpus** — active listings and listings-ever per source. The cap multiplies THIS,
     which is why the ceiling is tens of GB for a number that looks like "20".
+  * **bytes per metadata row** — `pg_total_relation_size` over the live archive once it
+    holds enough rows to mean anything, against the figure `POSTGRES_ROW_LAYOUT` froze
+    from a 200k-row replay. This is what the gate multiplies now that bodies are in R2.
   * **bytes per stored body** — sampled real bodies out of `portal_raw_pages`, gzipped
     through `payloads.encode_body`, the writer's own encoder. Not `octet_length` (that
     is the body before compression, ~4x too big) and not `pg_column_size` (that is
@@ -60,6 +71,10 @@ DEFAULT_SAMPLE = 25
 # Drift past this and the frozen table is stale rather than merely rounded.
 DRIFT_WARN_PCT = 15.0
 
+# Below this the archive is too empty for pg_total_relation_size to say anything about a
+# row: the answer is mostly page headers and half-filled index leaves.
+_ROW_SAMPLE_MIN = 10_000
+
 _CORPUS_SQL = """
 SELECT source,
        count(*) FILTER (WHERE is_active) AS active,
@@ -93,6 +108,17 @@ SELECT convert_to(html, 'UTF8') AS body
    AND page_kind = %(page_kind)s
  ORDER BY id DESC
  LIMIT %(limit)s
+"""
+
+# What a metadata ROW costs, once the archive holds any. `pg_total_relation_size` is heap
+# + every index + TOAST, which is exactly the ledger `payload_budget.POSTGRES_ROW_LAYOUT`
+# freezes; below `_ROW_SAMPLE_MIN` rows the answer is dominated by empty pages and the
+# frozen figure is the better one.
+_ROW_BYTES_SQL = """
+SELECT count(*) AS rows,
+       pg_total_relation_size('portal_raw_payloads') AS total_bytes,
+       count(*) FILTER (WHERE body_r2_key IS NOT NULL) AS spilled
+  FROM portal_raw_payloads
 """
 
 # Sizes and rates for the surfaces that stage no page at all, and the churn context for
@@ -209,34 +235,70 @@ def measure(
     return surfaces, corpus
 
 
+def measure_row_bytes(
+    conn: psycopg.Connection, *, statement_timeout: int,
+) -> tuple[int, int, int] | None:
+    """(rows, spilled rows, bytes per row) from the live archive, or None while it is
+    too small to answer.
+
+    This is the figure `payload_budget.POSTGRES_ROW_LAYOUT` freezes from a 200k-row
+    replay, and it is the one the gate multiplies — so once production holds real rows
+    it should be re-blessed from here rather than trusted indefinitely.
+    """
+    with loader_db.bounded(conn, statement_timeout) as cur:
+        cur.execute(_ROW_BYTES_SQL)
+        rows, total_bytes, spilled = cur.fetchone()
+    if int(rows) < _ROW_SAMPLE_MIN:
+        return None
+    return int(rows), int(spilled), round(int(total_bytes) / int(rows))
+
+
 def ceiling_rows(
     surfaces: list[SurfaceMeasurement], corpus: dict[str, tuple[int, int]],
-    caps: tuple[int, ...],
+    caps: tuple[int, ...], *, row_bytes: int,
 ) -> list[dict[str, Any]]:
-    """Ceiling vs cap over the DETAIL surface — the one `payload_dual_write` archives.
+    """Ceiling vs cap over the DETAIL surface, in BOTH footprints.
+
+    Two columns, not one, because the archive spends two currencies: Postgres ROWS
+    against `payload_budget.ARCHIVE_ALLOWANCE_GB` (what is left of the subsystem's
+    envelope, not the whole of it), and R2 BYTES against a price list. Only the first is
+    a budget; the second is a bill, and `fits` reports the first.
+
+    The `ever` cohort is what the gate reads and what is marked, because rule 3 delists
+    but never deletes and a pinned first/latest body outlives the listing's activity.
 
     Index surfaces are excluded and reported separately: they are gated behind their own
     flag, their groups are index POSITIONS rather than listings, and their keys are
     week-stamped, so multiplying them by a listing count would be nonsense.
     """
     detail = {s.source: s for s in surfaces if s.page_kind == "detail"}
-    one_body_active = sum(
-        detail[src].stored_bytes_per_body * counts[0]
-        for src, counts in corpus.items() if src in detail)
-    one_body_ever = sum(
-        detail[src].stored_bytes_per_body * counts[1]
-        for src, counts in corpus.items() if src in detail)
-    return [
-        {
+    threshold = payload_budget.INLINE_THRESHOLD_BYTES
+
+    def _sum(idx: int, only_inline: bool) -> int:
+        return sum(detail[src].stored_bytes_per_body * counts[idx]
+                   for src, counts in corpus.items()
+                   if src in detail
+                   and (detail[src].stored_bytes_per_body <= threshold) == only_inline)
+
+    groups_ever = sum(c[1] for src, c in corpus.items() if src in detail)
+    out: list[dict[str, Any]] = []
+    for cap in caps:
+        bodies = payload_budget.bodies_per_group(cap)
+        inline = bodies * _sum(1, True)
+        postgres_gb = (bodies * groups_ever * row_bytes + inline) / payload_budget.BYTES_PER_GB
+        r2_gb = bodies * _sum(1, False) / payload_budget.BYTES_PER_GB
+        out.append({
             "cap": cap,
-            "bodies_per_group": payload_budget.bodies_per_group(cap),
-            "active_gb": round(payload_budget.bodies_per_group(cap) * one_body_active
-                               / payload_budget.BYTES_PER_GB, 1),
-            "ever_gb": round(payload_budget.bodies_per_group(cap) * one_body_ever
-                             / payload_budget.BYTES_PER_GB, 1),
-        }
-        for cap in caps
-    ]
+            "bodies_per_group": bodies,
+            "rows": bodies * groups_ever,
+            "active_bodies_gb": round(bodies * (_sum(0, True) + _sum(0, False))
+                                      / payload_budget.BYTES_PER_GB, 1),
+            "postgres_gb": round(postgres_gb, 2),
+            "r2_gb": round(r2_gb, 1),
+            "r2_usd_month": round(r2_gb * payload_budget.R2_USD_PER_GB_MONTH, 2),
+            "fits_allowance": postgres_gb <= payload_budget.ARCHIVE_ALLOWANCE_GB,
+        })
+    return out
 
 
 def frozen_drift(surfaces: list[SurfaceMeasurement]) -> list[dict[str, Any]]:
@@ -260,7 +322,7 @@ def frozen_drift(surfaces: list[SurfaceMeasurement]) -> list[dict[str, Any]]:
 
 def render(
     surfaces: list[SurfaceMeasurement], corpus: dict[str, tuple[int, int]],
-    caps: tuple[int, ...],
+    caps: tuple[int, ...], *, row_bytes: int, row_measured: tuple[int, int, int] | None,
 ) -> list[str]:
     out = [
         f"PAYLOAD ARCHIVE STORAGE CEILING  (decimal GB; normalizer {NORMALIZER_VERSION})",
@@ -282,16 +344,36 @@ def render(
         "",
         f"  corpus the cap multiplies: {active:,} active listings, {ever:,} ever",
         "",
-        f"  {'cap':>4s} {'bodies':>7s} {'active GB':>10s} {'ever GB':>9s}",
+        f"  ever-cohort ceiling at {row_bytes:,} B/metadata-row "
+        f"({'live' if row_measured else 'frozen'}):",
+        "",
+        f"  {'cap':>4s} {'bodies':>7s} {'rows':>12s} {'PG GB':>8s} {'R2 GB':>8s} "
+        f"{'$/month':>8s}  fits",
     ]
-    for row in ceiling_rows(surfaces, corpus, caps):
+    for row in ceiling_rows(surfaces, corpus, caps, row_bytes=row_bytes):
         marker = "  <- default" if row["cap"] == payloads.DEFAULT_VERSION_CAP else ""
-        out.append(f"  {row['cap']:4d} {row['bodies_per_group']:7d} "
-                   f"{row['active_gb']:10.1f} {row['ever_gb']:9.1f}{marker}")
+        fits = "yes" if row["fits_allowance"] else "NO"
+        out.append(f"  {row['cap']:4d} {row['bodies_per_group']:7d} {row['rows']:12,d} "
+                   f"{row['postgres_gb']:8.2f} {row['r2_gb']:8.1f} "
+                   f"{row['r2_usd_month']:8.2f}  {fits:4s}{marker}")
 
-    out += ["", f"  subsystem budget: {payload_budget.SUBSYSTEM_BUDGET_GB:.0f} GB total "
-                f"(06 sizing envelope, shared with the RUIAN mirror and the claim spine)",
-            "", "  drift against the frozen table "
+    out += ["", f"  subsystem budget: {payload_budget.SUBSYSTEM_BUDGET_GB:.0f} GB total, "
+                f"~{payload_budget.SUBSYSTEM_SPENT_GB:.0f} GB already spent (RUIAN mirror "
+                f"+ claim spine) =",
+            f"  archive allowance: {payload_budget.ARCHIVE_ALLOWANCE_GB:.1f} GB of "
+            f"POSTGRES. R2 bytes are a bill, not a budget "
+            f"(${payload_budget.R2_USD_PER_GB_MONTH:.3f}/GB/month).",
+            f"  deepest cap that still fits: "
+            f"{payload_budget.largest_affordable_cap('ever')}",]
+    if row_measured:
+        rows, spilled, per_row = row_measured
+        frozen = payload_budget.postgres_row_bytes()
+        drift = 100.0 * (per_row - frozen) / frozen
+        out += ["", f"  live metadata row: {per_row:,} B over {rows:,} rows "
+                    f"({spilled:,} spilled) vs {frozen:,} B frozen ({drift:+.1f}%)"]
+        if abs(drift) > DRIFT_WARN_PCT:
+            out.append("    -> re-bless POSTGRES_ROW_LAYOUT: the row footprint drifted")
+    out += ["", "  drift against the frozen table "
                 f"(location_data/payload_budget.py, measured {payload_budget.MEASURED_AT}):"]
     drifts = frozen_drift(surfaces)
     for row in drifts:
@@ -327,6 +409,11 @@ def main(argv: list[str] | None = None) -> int:
     with db.connect() as conn:
         surfaces, corpus = measure(
             conn, sample=max(1, args.sample), statement_timeout=args.statement_timeout)
+        # Live if the archive holds enough rows to answer, frozen otherwise — the
+        # archive is empty until the dual-write flags are turned on, and an average
+        # taken over a handful of rows is mostly empty page headers.
+        row_measured = measure_row_bytes(conn, statement_timeout=args.statement_timeout)
+    row_bytes = row_measured[2] if row_measured else payload_budget.postgres_row_bytes()
 
     if args.json:
         print(json.dumps({
@@ -340,11 +427,16 @@ def main(argv: list[str] | None = None) -> int:
                  "change_rate": s.change_rate}
                 for s in surfaces],
             "corpus": {src: {"active": c[0], "ever": c[1]} for src, c in corpus.items()},
-            "ceiling": ceiling_rows(surfaces, corpus, caps),
+            "ceiling": ceiling_rows(surfaces, corpus, caps, row_bytes=row_bytes),
+            "postgres_row_bytes": row_bytes,
+            "postgres_row_bytes_source": "live" if row_measured else "frozen",
+            "archive_allowance_gb": payload_budget.ARCHIVE_ALLOWANCE_GB,
+            "largest_affordable_cap": payload_budget.largest_affordable_cap("ever"),
             "frozen_drift": frozen_drift(surfaces),
         }, indent=2, sort_keys=True))
     else:
-        print("\n".join(render(surfaces, corpus, caps)))
+        print("\n".join(render(surfaces, corpus, caps, row_bytes=row_bytes,
+                               row_measured=row_measured)))
     return 0
 
 

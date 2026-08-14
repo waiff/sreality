@@ -101,18 +101,77 @@ def test_decode_rejects_an_encoding_it_does_not_know() -> None:
         payloads.decode_body(b"", "brotli")
 
 
-def test_an_unconfigured_r2_is_not_an_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Unlike a registry vintage, a body that cannot spill loses nothing by staying in
-    # Postgres — so an unconfigured bucket must never fail an append.
+def test_an_unconfigured_r2_reports_itself_rather_than_raising(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from scraper import image_storage
 
     for var in image_storage.R2_ENV_VARS:
         monkeypatch.delenv(var, raising=False)
     payloads.reset_store_cache()
     try:
-        assert payloads._open_store() is None
+        assert payloads.open_store() is None
     finally:
         payloads.reset_store_cache()
+
+
+def test_the_r2_default_puts_every_portals_body_in_the_bucket() -> None:
+    """The threshold is the whole storage decision, so it is asserted against the
+    corpus rather than left as a number in a comment: at 2 KB every portal's mean
+    body spills except bezrealitky's JSON, which is what `payload_budget`'s
+    Postgres-vs-R2 split models."""
+    from location_data import payload_budget
+
+    assert payloads.DEFAULT_R2_THRESHOLD_BYTES == payload_budget.INLINE_THRESHOLD_BYTES
+    spilling = [p.source for p in payload_budget.PORTAL_STORAGE
+                if p.stored_bytes_per_body > payloads.DEFAULT_R2_THRESHOLD_BYTES]
+
+    assert set(spilling) == {p.source for p in payload_budget.PORTAL_STORAGE} - {"bezrealitky"}
+
+
+def test_a_body_that_needs_the_bucket_refuses_rather_than_falling_back_inline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """THE DEGRADATION CONTRACT. Silently keeping the body in Postgres would rebuild
+    the database-resident archive the budget gate exists to refuse — one missing env
+    var and ~29x the projected footprint, invisibly. Refusing fails this one payload
+    write; `scraper.db.append_payload_if_enabled` catches it, warns, and the walk and
+    the drain carry on."""
+    from scraper import image_storage
+
+    for var in image_storage.R2_ENV_VARS:
+        monkeypatch.delenv(var, raising=False)
+    payloads.reset_store_cache()
+    try:
+        with pytest.raises(payloads.PayloadError, match="R2 is not configured"):
+            payloads.append_payload(
+                object(),  # never reached: the refusal precedes every statement
+                source="idnes", source_id_native="x", page_kind="detail",
+                # Incompressible, so the gzipped form genuinely clears the
+                # 2 KB threshold — b"big" * 20_000 would not, which is the point of
+                # deciding placement AFTER compression.
+                listing_id=None, body=b"<html>" + os.urandom(20_000).hex().encode(),
+                content_type="text/html", http_status=200, contract_version=None,
+                observed_at=datetime.now(timezone.utc),
+            )
+    finally:
+        payloads.reset_store_cache()
+
+
+def test_a_small_body_still_archives_with_no_r2_at_all(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The refusal is scoped to bodies that actually need the bucket — an inline one
+    is unaffected, so a fresh deploy with no R2 vars is not a hard stop on the whole
+    archive."""
+    from scraper import image_storage
+
+    for var in image_storage.R2_ENV_VARS:
+        monkeypatch.delenv(var, raising=False)
+    placement = payloads.plan_placement("idnes", b"{}", b"\x00" * 32)
+
+    assert placement.spills is False
+    assert placement.r2_key is None
 
 
 def test_the_only_delete_target_in_the_module_is_the_payload_store() -> None:
@@ -144,7 +203,8 @@ def test_every_executed_statement_is_discoverable_by_the_sql_corpus() -> None:
     }
 
     assert literals == {
-        "_APPEND_SQL", "_LATEST_SQL", "_REPIN_SQL", "_PRUNE_SQL", "_ORPHANED_KEYS_SQL",
+        "_APPEND_SQL", "_GROUP_LOCK_SQL", "_REPIN_SQL", "_PRUNE_SQL",
+        "_ORPHANED_KEYS_SQL",
     }
 
 
@@ -295,19 +355,18 @@ def test_an_explicit_profile_without_its_cohort_is_refused_before_any_write(
 
 
 class _FakeStore:
-    """Records what would have gone to R2. `object_size` None == not present."""
+    """Records what would have gone to R2, and how many times."""
 
-    def __init__(self) -> None:
+    def __init__(self, fail: bool = False) -> None:
         self.objects: dict[str, bytes] = {}
-        self.head_calls = 0
+        self.uploads = 0
+        self.fail = fail
 
     def upload_bytes(self, key: str, data: bytes, content_type: str = "") -> None:
+        self.uploads += 1
+        if self.fail:
+            raise RuntimeError("R2 is down")
         self.objects[key] = data
-
-    def object_size(self, key: str) -> int | None:
-        self.head_calls += 1
-        obj = self.objects.get(key)
-        return None if obj is None else len(obj)
 
 
 @pytest.fixture()
@@ -752,7 +811,11 @@ def test_a_spilled_body_is_uploaded_once_however_often_it_is_refetched(
     _append(conn, native, body, content_type=_HTML, store=store)
 
     assert len(store.objects) == 1
-    assert store.head_calls == 1
+    # The collision short-circuits before the upload, so the two refetches are
+    # DB-only: no PUT, and no HEAD either (the HEAD that used to guard the PUT was
+    # removed — it doubled the network time held inside the write transaction to
+    # save re-writing ~20 KB under a key that is the hash of those same bytes).
+    assert store.uploads == 1
 
 
 @requires_db
@@ -1112,3 +1175,119 @@ def test_an_eviction_is_counted_in_bytes_as_well_as_rows(
         assert stats.evicted_bytes > 0
     finally:
         payloads.reset_archive_stats()
+
+
+# ------------------------------------------- R2 as the bodies' home (W2a-7)
+
+
+@requires_db
+def test_a_spilled_row_records_the_size_of_the_object_it_points_at(
+    conn: psycopg.Connection, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`octet_length(body)` is NULL once the bytes are in the bucket, which made
+    "bytes reclaimed" a permanent zero the moment spilling became the default — on the
+    one figure the storage sign-off is read from. Migration 405's column is where that
+    size now lives, and it is the ROW that answers, not an R2 HEAD."""
+    native = _key()
+    body = b"<html>" + os.urandom(20_000).hex().encode() + b"</html>"
+    monkeypatch.setenv(payloads.R2_THRESHOLD_ENV, "2048")
+    store = _FakeStore()
+
+    ref = _append(conn, native, body, content_type=_HTML, store=store)
+
+    row = _rows(conn, native)[0]
+    assert row["body"] is None and row["body_r2_key"] is not None
+    assert ref.stored_bytes == len(store.objects[ref.body_r2_key])
+    assert ref.byte_size == len(body) > ref.stored_bytes
+
+
+@requires_db
+def test_evicting_a_spilled_body_still_reports_the_bytes_it_freed(
+    conn: psycopg.Connection, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The counter the pruner's report and the archive stats are both read from. With
+    bodies in R2 this is the whole of it — there are no inline bytes left to count."""
+    native = _key()
+    monkeypatch.setenv(payloads.R2_THRESHOLD_ENV, "2048")
+    store = _FakeStore()
+    payloads.reset_archive_stats()
+
+    for i in range(4):
+        _append(conn, native, f"<html>{i}".encode() + os.urandom(20_000).hex().encode(),
+                content_type=_HTML, store=store, version_cap=1)
+
+    assert payloads.archive_stats().evicted_rows > 0
+    assert payloads.archive_stats().evicted_bytes > 10_000
+
+
+@requires_db
+def test_a_failed_upload_commits_no_row_pointing_at_a_missing_object(
+    conn: psycopg.Connection, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """THE ORDERING GUARANTEE. The upload runs inside `loader_db.bounded`'s
+    transaction, so an R2 outage rolls the metadata row back rather than committing a
+    `body_r2_key` that resolves to nothing — a span into a body that does not exist is
+    exactly the unverifiability this store exists to end. (The reverse orphan, an
+    object nothing references, is harmless: the key is the hash of its bytes.)"""
+    native = _key()
+    body = b"<html>" + os.urandom(20_000).hex().encode() + b"</html>"
+    monkeypatch.setenv(payloads.R2_THRESHOLD_ENV, "2048")
+
+    with pytest.raises(RuntimeError, match="R2 is down"):
+        _append(conn, native, body, content_type=_HTML, store=_FakeStore(fail=True))
+
+    assert _rows(conn, native) == []
+
+
+@requires_db
+def test_two_writers_on_one_key_cannot_both_pass_the_floor(
+    conn: psycopg.Connection,
+) -> None:
+    """The floor's check and its insert share one STATEMENT, but under READ COMMITTED
+    they do not share a snapshot with a concurrent session: both could find the window
+    empty and both insert. The transaction-scoped advisory lock on the group is what
+    makes the check-and-insert atomic across sessions — and it serialises the re-pin and
+    the prune with it, which is a deadlock class rather than a rounding error.
+
+    Held from a second session rather than raced from a thread, so the test fails in
+    BOTH directions: without the lock the append returns immediately."""
+    native = _key()
+    _append(conn, native, b'{"v": 0}')
+
+    other = psycopg.connect(_DB_URL, autocommit=False)
+    try:
+        with other.cursor() as cur:
+            cur.execute(payloads._GROUP_LOCK_SQL, {
+                "source": "idnes", "source_id_native": native, "page_kind": "detail"})
+        with pytest.raises(psycopg.Error):
+            _append(conn, native, b'{"v": 1}', statement_timeout_s=1)
+    finally:
+        other.rollback()
+        other.close()
+
+    # And once the other session lets go, the same append goes through — the lock is a
+    # queue, not a refusal.
+    assert _append(conn, native, b'{"v": 1}').inserted is True
+
+
+@requires_db
+def test_the_floor_reports_the_stored_body_from_the_append_statement_itself(
+    conn: psycopg.Connection,
+) -> None:
+    """The floor refuses on nearly every fetch of a high-churn portal, so the path it
+    takes is the hot one. It used to issue a SECOND statement to find out what the
+    archive actually holds; `_APPEND_SQL`'s fallback arm returns that in the same
+    statement — and the SQL-corpus test above pins the module's statement set, so the
+    round trip cannot come back unnoticed. What is asserted here is the semantics that
+    made the extra statement necessary: the ref describes the STORED body, never the
+    discarded fetch."""
+    native = _key()
+    first = _append(conn, native, b'{"v": 0}', min_append_interval_days=7)
+    payloads.reset_archive_stats()
+
+    refused = _append(conn, native, b'{"v": 1}', min_append_interval_days=7)
+
+    assert refused.suppressed is True and refused.inserted is False
+    assert (refused.id, refused.payload_sha256) == (first.id, first.payload_sha256)
+    assert payloads.archive_stats().suppressed == 1
+    assert len(_rows(conn, native)) == 1

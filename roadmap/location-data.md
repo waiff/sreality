@@ -606,23 +606,61 @@ The arithmetic, re-derived from production (`portal_raw_pages` 463,256 real bodi
 Cross-check: applying these per-portal figures to W0's exported corpus predicts 17,227 B/page
 against the **17,184 B/page actually measured** (7.69 GB gz / 447,510 pages) — 0.3 % apart.
 
-| cap | bodies/listing | active corpus (387,935) | every listing ever (671,986) |
-| --- | --- | --- | --- |
-| 1 | 2 | 12.2 GB | 19.1 GB |
-| **2 (new default)** | **3** | **18.3 GB** | **28.7 GB** |
-| 3 | 4 | 24.4 GB | 38.2 GB |
-| 5 | 6 | 36.6 GB | 57.4 GB |
-| 20 (as shipped) | 21 | **128.1 GB** | **200.7 GB** |
-
 Worst case is **cap + 1** bodies, not cap: the first version is pinned OUTSIDE the cap. One
-body for every active listing is **6.10 GB**, so every unit of cap costs another 6.10 GB
-against a subsystem budgeted at 18-20 GB *in total*. The inherited default of 20 permitted
-~7x the whole budget.
+body for every listing *ever* is **9.56 GB** — and the subsystem's 20 GB envelope already has
+**~16 GB spent** (RÚIAN mirror, claim spine, projections), so the archive's real allowance is
+**~4 GB**. Against that honest pair of numbers there is **no cap at which bodies fit in
+Postgres**: even cap 1 is 19.1 GB. The inherited default of 20 was 200 GB.
 
-- **Default cap 20 → 2** ("first, previous, current"). The intermediate versions given up are
-  the least evidentially valuable ones there are: a body a claim references is pinned by the
-  claim FK regardless of the cap, so anything that produced a location fact is already exempt;
-  what the cap governs is bodies no claim points at, which by construction produced no fact.
+**So the bodies do not go in Postgres.** `payload_dual_write` now spills every body larger
+than Postgres's own TOAST threshold (2 KB) to R2 and keeps the metadata row — identity, both
+hashes, sizes, version, pin state, the content-addressed key. Two ledgers, two currencies:
+
+| cap | bodies/group | rows (ever) | Postgres | R2 | R2 $/month | fits ~4 GB |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | 2 | 1.34 M | 1.00 GB | 19.1 GB | $0.29 | yes |
+| **2 (default)** | **3** | **2.02 M** | **1.49 GB** | **28.6 GB** | **$0.43** | **yes** |
+| 3 | 4 | 2.69 M | 1.99 GB | 38.2 GB | $0.57 | yes |
+| 5 | 6 | 4.03 M | 2.99 GB | 57.2 GB | $0.86 | yes |
+| 7 | 8 | 5.38 M | 3.97 GB | 76.3 GB | $1.14 | yes (last) |
+| 10 | 11 | 7.39 M | 5.48 GB | 104.9 GB | $1.57 | no |
+| 20 (as shipped) | 21 | 14.1 M | 10.45 GB | 200.4 GB | $3.01 | no |
+
+A metadata row measures **713 B** (200k rows loaded into the applied 382+403+405 shape,
+`pg_relation_size` per relation) against ~20 KB for the same row carrying its body — 29x. The
+Postgres footprint is now row overhead, not body weight, so it moves with the corpus and the
+cap rather than with how heavy a portal's HTML is.
+
+**Why R2 and not a hot window in Postgres.** Nothing on a latency-critical path ever reads a
+body — the readers are the W2 re-mine, one-off backfills and the round-trip verifier, all
+batch — so this trades batch wall-clock, not user-facing latency, and a full 445k-page sweep
+parallelises to roughly ten minutes at 32-64 concurrent GETs. Postgres-resident bodies would
+tax the whole instance's shared buffer cache, which this platform has been burned by twice
+(the Browse timeout saga; the 2026-08-10 multi-lane incident). A hot-window hybrid was
+rejected because its eviction predicate cannot be written: "processed" is undefinable when the
+archive's purpose is re-mining with extractors not yet authored. If a batch job later proves
+slow the remedy is a per-run local disk cache in the worker, **not** a second DB-resident tier.
+
+**Degradation is a refusal, not a fallback.** An unconfigured store used to mean "keep the
+body inline", which would now silently rebuild the database-resident archive one missing env
+var at a time. A body that needs the bucket and has none raises; every scraper reaches the
+writer through `append_payload_if_enabled`, which warns and returns, so the walk and the drain
+are untouched. On a fresh deploy and in CI the branch is unreachable rather than tolerated —
+`payload_dual_write` is OFF per portal, so nothing calls the writer at all. The upload runs
+INSIDE the write transaction, so a failed PUT rolls the metadata row back; the reverse orphan
+is harmless because the key is the hash of the bytes.
+
+- **Default cap 20 → 2** ("first, previous, current"), and it survives the R2 re-derivation
+  for a *different* reason than it was first chosen for. A unit of cap used to cost 6.1 GB of
+  Postgres — a third of the subsystem's envelope per slot — which made the cap a budget
+  instrument. It now costs 0.5 GB of metadata rows and ~$0.14/month of object storage, and the
+  archive fits **up to cap 7**. So the number is chosen on evidentiary grounds: a body a claim
+  references is pinned by the claim FK regardless of the cap, so anything that produced a
+  location fact is already exempt; the cap governs only bodies no claim points at, which by
+  construction produced no fact — and under the 7-day floor cap 2 is already ~three weeks of
+  page eras. Cheap storage is a reason not to panic about depth; it is not a reader. **The
+  headroom is the deliverable**: `payload_budget.largest_affordable_cap()` publishes it, so a
+  future re-mine that wants deeper history raises one constant and CI says whether it fits.
 - **New: a per-listing time floor** (`LOCATION_PAYLOAD_MIN_APPEND_INTERVAL_DAYS`, default 7) —
   at most one new body per `(source, source_id_native, page_kind)` per window, enforced as a
   predicate INSIDE the append statement. **This is the structural fix**: it decouples storage
@@ -645,7 +683,15 @@ against a subsystem budgeted at 18-20 GB *in total*. The inherited default of 20
   (appended / unchanged / floor_suppressed / evicted rows + bytes) rolled into one log line
   every 200 decisions. A floor that suppresses everything and a portal that stopped changing
   produce the same empty archive diff; these counters are the only thing that separates them.
-- **No migration.** Both guard arms are exact index probes on relations 382 already ships —
+- **Concurrency**: the floor's check and its insert share one statement but not one snapshot
+  with a concurrent writer on the same key, so both could find the window empty and both
+  insert — and two overlapping re-pins and prunes on one group are a deadlock class rather
+  than a rounding error. A transaction-scoped advisory lock on `(source, native, page_kind)`
+  closes both; xact-scoped, so it is safe behind the transaction-mode pooler.
+- **One statement, two outcomes.** The suppressed path used to issue a second read to report
+  what the archive actually holds — on the path that runs on nearly every fetch of a
+  high-churn portal. That is now `_APPEND_SQL`'s fallback arm.
+- **No migration for the floor or the cap.** Both guard arms are exact index probes on relations 382 already ships —
   the dedupe arm on the identity UNIQUE, the window arm on `prp_native (source,
   source_id_native, page_kind, first_observed_at DESC)`. Adding an index here would be the
   dead index 403's header refuses. `NORMALIZER_VERSION` is untouched (normalisation output is
@@ -654,11 +700,18 @@ against a subsystem budgeted at 18-20 GB *in total*. The inherited default of 20
   `tests/location_data/test_payload_budget.py` **fails CI if the default cap's ceiling leaves
   the budget** — the number cannot drift from the arithmetic that chose it.
   `scripts/location_payload_storage_ceiling.py` re-derives it live and prints the drift.
-- **Still open, and now quantified**: even cap 1 costs 12.2 GB, because first + latest are
-  both pinned. No cap fits the archive into what is left of the subsystem's budget — the
-  levers that would are the R2 spill threshold (P4.3, currently 256 KB so nothing spills) and
-  per-portal caps in `persistence.version_cap`. Neither is built; both are now decisions with
-  a number attached rather than assumptions.
+- **A surface nobody has costed cannot be archived.** The frozen corpus carries every
+  portal's `detail` and nothing else, because nothing else has been weighed — index surfaces
+  are week-stamped, ~100 % churn and unprofiled. `append_payload_if_enabled` now refuses an
+  unmeasured `(source, page_kind)` outright, so turning `payload_index_archive` on cannot
+  silently invalidate the ceiling the operator signed; it forces the measurement first.
+- **Migration 405** adds `stored_byte_size`. Both retention statements reported what they
+  freed as `octet_length(body)`, which is NULL once the body is in the bucket — every eviction
+  would have reported zero bytes reclaimed, on the one figure the storage sign-off is read
+  from. `byte_size` cannot stand in: it is the decoded length, ~5x larger.
+- **Still open**: per-portal caps in `persistence.version_cap` (idnes + ceskereality +
+  mmreality are 62 % of the R2 bill) and the index surfaces' own profiling. Both are now
+  decisions with a number attached rather than assumptions.
 
 ### PII incident (2026-08-13/14) — three axes, each found only after the previous was fixed
 

@@ -127,7 +127,27 @@ the operator's churn + storage sign-off** (design 02 §2.3.2's gate; read out wi
   gates. ceskereality's map and bezrealitky's gazetteer already declare `archive: true`, so a gate
   naming only `'index'` would have let both archive on every walk. It can only narrow what
   dual-write allows, never widen it: with `payload_dual_write` off this flag does nothing. Same
-  precedence, also no migration.
+  precedence, also no migration. **It is not sufficient on its own**: see the next gate.
+- **A measured page weight** (W2a-7) — the *third gate, and not an operator switch*. The
+  chokepoint refuses any `(source, page_kind)` missing from
+  `location_data.payload_budget.PORTAL_STORAGE`, which today carries every portal's `detail` and
+  nothing else. Archiving an uncosted surface would silently invalidate the storage ceiling the
+  operator signed, and the index surfaces are exactly the week-stamped, ~100 %-churn, unprofiled
+  ones — so **turning `payload_index_archive` on does nothing until that surface's page weight is
+  measured** and added to the frozen corpus (`python -m scripts.location_payload_storage_ceiling`
+  re-derives it). The refusal logs `payload archive refuses unmeasured surface source=… page_kind=…`.
+
+**R2 is where the bodies live, not an optimisation.** Everything whose compressed form exceeds
+`LOCATION_PAYLOAD_R2_THRESHOLD_BYTES` (2 KB, Postgres's own TOAST boundary) goes to the bucket
+and the row keeps only `body_r2_key`; on today's corpus that is every portal but bezrealitky. So
+**`payload_dual_write` needs the R2 env vars** (`R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`,
+`R2_SECRET_ACCESS_KEY`, `R2_BUCKET_NAME`) — the same four the image lane uses. Without them every
+append that needs the bucket warns `payload archive needs R2 for …` and archives nothing, which
+is deliberate: the old fallback (keep the body inline) would have rebuilt a database-resident
+archive that the storage arithmetic says cannot fit. Small bodies still archive normally. Knobs:
+`LOCATION_PAYLOAD_VERSION_CAP` (2), `LOCATION_PAYLOAD_MIN_APPEND_INTERVAL_DAYS` (7, the
+per-listing time floor; 0 disables), `LOCATION_PAYLOAD_R2_THRESHOLD_BYTES` (2048),
+`LOCATION_PAYLOAD_STATS_EVERY` (200).
 
 ```sql
 update portals set operational_limits =                       -- one portal

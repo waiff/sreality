@@ -43,6 +43,27 @@ def conn() -> Iterator[psycopg.Connection]:
         yield c
 
 
+@pytest.fixture()
+def measured_surface(monkeypatch: pytest.MonkeyPatch):
+    """Register a (source, page_kind) in the frozen storage corpus for one test.
+
+    W2a-7 added a THIRD gate to the chokepoint that is not a flag: a surface whose
+    page weight nobody has measured is refused, because archiving it would make the
+    ceiling the operator signed silently wrong. The frozen corpus carries only
+    `detail` today, so a test about index/map PLUMBING has to say that the surface
+    was costed — which is the point, and is asserted directly in
+    `test_an_unmeasured_surface_is_refused_even_with_both_gates_on`.
+    """
+    from location_data import payload_budget
+
+    def _register(source: str, page_kind: str) -> None:
+        monkeypatch.setattr(payload_budget, "PORTAL_STORAGE", (
+            *payload_budget.PORTAL_STORAGE,
+            payload_budget.PortalStorage(source, page_kind, 8_000, 1_000, 1_000, "test"),
+        ))
+    return _register
+
+
 def _set_dual_write(
     conn: psycopg.Connection, enabled: bool, *, index_archive: bool = False,
 ) -> None:
@@ -230,12 +251,14 @@ def test_the_time_floor_reaches_live_ingest_with_its_shipped_default(
 
 
 def test_an_index_page_archives_under_its_own_page_kind(
-    conn: psycopg.Connection,
+    conn: psycopg.Connection, measured_surface,
 ) -> None:
     # The index archivers ride the same chokepoint; 'index' has to be a legal
     # location_page_kind label, which only real SQL can answer. Needs BOTH gates
-    # since W2a-6 — an index body passes payload_index_archive as well.
+    # since W2a-6 — an index body passes payload_index_archive as well — plus a
+    # measured page weight since W2a-7.
     key = f"live-{uuid.uuid4().hex}/0/2026w33"
+    measured_surface(_SOURCE, "index")
     _set_dual_write(conn, True, index_archive=True)
 
     _archive(conn, key, '{"_embedded": {"estates": []}}', page_kind="index")
@@ -265,7 +288,7 @@ def test_the_index_gate_alone_holds_an_index_body_back(conn: psycopg.Connection)
 
 
 def test_a_map_body_is_held_back_by_the_index_gate_and_is_a_legal_page_kind(
-    conn: psycopg.Connection,
+    conn: psycopg.Connection, measured_surface,
 ) -> None:
     # ceskereality's /mapa/ surface is SURFACE grain and declares `archive: true`,
     # so W2a-6 puts it behind the second gate too. It can only reach the archive
@@ -274,6 +297,7 @@ def test_a_map_body_is_held_back_by_the_index_gate_and_is_a_legal_page_kind(
     # — and 'map' still has to satisfy the location_page_kind enum, which is the
     # half only real SQL can answer.
     key = f"live-map-{uuid.uuid4().hex}"
+    measured_surface(_SOURCE, "map")
     _set_dual_write(conn, True, index_archive=False)
 
     db.append_payload_if_enabled(
@@ -292,3 +316,22 @@ def test_a_map_body_is_held_back_by_the_index_gate_and_is_a_legal_page_kind(
     rows = _payloads(conn, key)
     assert len(rows) == 1
     assert rows[0]["page_kind"] == "map"
+
+
+def test_an_unmeasured_surface_is_refused_even_with_both_gates_on(
+    conn: psycopg.Connection,
+) -> None:
+    """THE THIRD GATE, and the one that is not an operator switch. The frozen
+    storage corpus (`location_data.payload_budget.PORTAL_STORAGE`) carries every
+    portal's `detail` surface and nothing else, because nothing else has been
+    weighed — index surfaces are week-stamped, ~100 % churn and unprofiled. Letting
+    one through would not break anything visibly; it would make the ceiling the
+    operator signed wrong by an unknown amount, which is worse. So it is refused
+    here, which is also what forces whoever turns `payload_index_archive` on to
+    profile the surface first."""
+    key = f"live-unmeasured-{uuid.uuid4().hex}/0/2026w33"
+    _set_dual_write(conn, True, index_archive=True)
+
+    _archive(conn, key, '{"_embedded": {"estates": []}}', page_kind="index")
+
+    assert _payloads(conn, key) == []
