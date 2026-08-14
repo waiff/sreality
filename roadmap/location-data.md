@@ -478,9 +478,10 @@ here will keep drifting until each portal has a few hundred stable repeats:
 | remax | 100 % | **not yet measurable** — 6 fetches total across `@2`+`@3`, still 0 repeats (no listing refetched twice yet) | 0 |
 | mmreality | 100 % | **zero fetches recorded at all** under `@2` or `@3` | 0 |
 
-**idnes regression: the `@2` profile from W2a-3b never actually held.** `@2` closed with 0
-repeats (untested), so the 100 % baseline never got re-checked against real traffic until
-`@3` (same idnes `VolatileProfile`, untouched by the mmreality/remax bump) finally accrued
+**idnes: the W2a-3b fix was never actually validated live — a measurement gap, not a
+regression.** Nothing that used to work stopped working: `@2` closed with 0 repeats
+(untested), so the 100 % baseline never got re-checked against real traffic until `@3`
+(same idnes `VolatileProfile`, untouched by the mmreality/remax bump) finally accrued
 285. It reads 100 % again, and `raw_changes` == `norm_changes` **exactly**, at every
 normalizer version measured so far — `@1` 6,514/6,514, `@3` 285/285 — the strip is removing
 nothing that actually matters in production, even though the 5-listing/3-fetch diff-probe
