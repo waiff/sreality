@@ -57,6 +57,12 @@ from location_data.payload_norm import (
 )
 
 _FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "location_w2a_refetch"
+
+# What --scrub-contacts substitutes for a real person, in the spellings a page can
+# carry it in (plain, and JSON-escaped as the embedded Vue/JSON props do).
+_PLACEHOLDER_NAMES = frozenset(
+    {"Jan Novák", "Jan Nov\\u00e1k", "Jan Novak", "agent@example.cz"}
+)
 _HTML = "text/html; charset=utf-8"
 
 # Every portal whose profile is measured rather than guessed: W2a-3b's three, plus
@@ -320,6 +326,43 @@ def test_no_committed_fixture_carries_contact_details() -> None:
         )
         for context in contexts:
             assert not phone_like.search(context), f"{path.name}: {context}"
+
+
+def test_no_committed_fixture_carries_a_real_persons_name() -> None:
+    """The gate the phone/e-mail checks did not cover, added after it failed in
+    production: PR #1064 merged with two mortgage advisers' real names still in the
+    mmreality fixtures (`&quot;mortgageAdviser&quot;:{...&quot;name&quot;:&quot;Franti\\u0161ek
+    Jaro\\u0161&quot;}`). Their e-mails HAD been scrubbed, so every assertion above
+    passed, and `--scrub-contacts` takes names as a hand-supplied list — the listing
+    agent's name was passed and the adviser's, in a sibling block on the same page,
+    was not.
+
+    A name cannot be recognised by shape the way a phone or an address can. What IS
+    checkable is that every person-bearing JSON key carries the house placeholder,
+    which is exactly the shape that got through: the omission is a missed INPUT, and
+    this asserts on the output instead."""
+    person_keys = re.compile(
+        r"(?:&quot;|\\?\")(?:mortgageAdviser|adviser|advisor|agent|broker|realtor|"
+        r"seller|contact|owner|user)(?:&quot;|\\?\")\s*:\s*\{([^{}]{0,400})",
+        re.IGNORECASE,
+    )
+    # Lazy up to the closing quote so a \uXXXX escape is captured whole: the
+    # placeholder itself renders as `Jan Novák` in these embedded props, and a
+    # class that excluded the backslash would truncate it to "Jan Nov" and fail on
+    # a correctly-scrubbed file.
+    name_value = re.compile(
+        r"(?:&quot;|\\?\")name(?:&quot;|\\?\")\s*:\s*(?:&quot;|\\?\")(.{2,60}?)(?:&quot;|\\?\")"
+    )
+
+    for path in sorted(_FIXTURES.glob("*.html")):
+        text = path.read_text(encoding="utf-8")
+        for block in person_keys.findall(text):
+            for name in name_value.findall(block):
+                assert name in _PLACEHOLDER_NAMES, (
+                    f"{path.name}: person-bearing block carries {name!r}, which is "
+                    f"not a placeholder — re-run --scrub-contacts with --name "
+                    f"{name!r} (see this test's docstring)"
+                )
 
 
 def test_no_committed_fixture_carries_an_obfuscated_email() -> None:
