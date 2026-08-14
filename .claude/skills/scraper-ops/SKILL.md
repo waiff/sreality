@@ -101,85 +101,65 @@ so that is a deliberate choice. Hashed fields are written with a targeted single
 never by replaying a whole `ScrapedListing`, which would rewrite every other column from a
 possibly-stale stored page and could regress a price the portal has since changed.
 
-## The three location-data gates riding the ingest path
+## The location-data gates riding the ingest path
 
-All three are OFF by default, cached ~60 s per process (so a flip reaches the always-on worker
-within a minute, a cron run instantly), and wrapped so any failure warns and returns — an
-instrument or an archive must never break the scrape it rides in. **None may be enabled before
-the operator's churn + storage sign-off** (design 02 §2.3.2's gate; read out with
-`python -m scripts.location_payload_churn_report`).
+All are OFF by default, cached ~60 s per process (a flip reaches the always-on worker within a minute, a
+cron run instantly), and wrapped so any failure warns and returns — an instrument or an archive must never
+break the scrape it rides in. **None may be enabled before the operator's churn + storage sign-off**
+(02 §2.3.2's gate; `python -m scripts.location_payload_churn_report`).
 
 - **`app_settings.location_payload_shadow_hash`** (W2a-0) — the *instrument*. Counts fetches and
-  raw-vs-normalised changes into `portal_payload_churn`, one row per
-  `(source, source_id_native, page_kind, normalizer_version)`, **no body ever stored**.
-- **`PortalLimits.payload_dual_write`** (W2a-2) — the *archive*, and the OUTER gate every body
-  passes. Appends every body `upsert_portal_raw_page` stages (the 7 HTML detail writers and the 3
-  index archivers), plus sreality's estate JSON and bezrealitky's advert-with-query from their own
-  `append_payload_if_enabled` call sites, into `portal_raw_payloads`. A per-portal **operational
-  limit**, not an app_settings flag (enabling it is a per-portal storage decision), so it needs no
-  migration. On its own it only lets `page_kind='detail'` through — see the next gate.
-- **`PortalLimits.payload_index_archive`** (W2a-6) — the *surface-grain second gate*, ANDed on top
-  of `payload_dual_write` for **every `page_kind` except `detail`**: index, map, gazetteer,
-  snapshot, archive, none. The split is about GRAIN, not about the word "index" — a `detail` body
-  is one listing fetched when that listing is enqueued, while all the others are whole-surface
-  artefacts refetched on the walk cadence (sreality's index 24×/day, ceskereality's `/mapa/` at
-  500 markers a request, bezrealitky's `Region.boundaryGeoJson`), which is the churn 02 §2.3.2 P2
-  gates. ceskereality's map and bezrealitky's gazetteer already declare `archive: true`, so a gate
-  naming only `'index'` would have let both archive on every walk. It can only narrow what
-  dual-write allows, never widen it: with `payload_dual_write` off this flag does nothing. Same
-  precedence, also no migration. **It is not sufficient on its own**: see the next gate.
-- **A measured page weight** (W2a-7) — the *third gate, and not an operator switch*. The
-  chokepoint refuses any `(source, page_kind)` missing from
-  `location_data.payload_budget.PORTAL_STORAGE`, which today carries every portal's `detail` and
-  nothing else. Archiving an uncosted surface would silently invalidate the storage ceiling the
-  operator signed, and the index surfaces are exactly the week-stamped, ~100 %-churn, unprofiled
-  ones — so **turning `payload_index_archive` on does nothing until that surface's page weight is
-  measured** and added to the frozen corpus (`python -m scripts.location_payload_storage_ceiling`
-  re-derives it). The refusal logs `payload archive refuses unmeasured surface source=… page_kind=…`.
+  raw-vs-normalised changes into `portal_payload_churn`, one row per `(source, source_id_native,
+  page_kind, normalizer_version)`, **no body ever stored**.
+- **`PortalLimits.payload_dual_write`** (W2a-2) — the *archive*, and the OUTER gate every body passes:
+  everything `upsert_portal_raw_page` stages (7 HTML detail writers + 3 index archivers) plus sreality's
+  estate JSON and bezrealitky's advert-with-query from their own `append_payload_if_enabled` call sites. A
+  per-portal **operational limit**, not an app_settings flag, so no migration. Alone: only `detail`.
+- **`PortalLimits.payload_index_archive`** (W2a-6) — the *surface-grain second gate*, ANDed on top for
+  **every `page_kind` except `detail`**. The split is about GRAIN, not the word "index": ceskereality's map
+  and bezrealitky's gazetteer declare `archive: true`, so a gate naming only `'index'` would have let both
+  archive every walk. It only narrows dual-write, never widens it.
+- **A measured page weight** (W2a-7) — the *third gate, not an operator switch*. The chokepoint refuses any
+  `(source, page_kind)` missing from `location_data.payload_budget.PORTAL_STORAGE` (today: every portal's
+  `detail`), since archiving an uncosted surface silently invalidates the signed ceiling.
+  **`payload_index_archive` does nothing until that surface is measured** in —
+  `python -m scripts.location_payload_storage_ceiling` re-derives it; logs `payload archive refuses
+  unmeasured surface source=… page_kind=…`.
 
-**R2 is where the bodies live, not an optimisation.** Everything whose compressed form exceeds
-`LOCATION_PAYLOAD_R2_THRESHOLD_BYTES` (2 KB, Postgres's own TOAST boundary) goes to the bucket
-and the row keeps only `body_r2_key`; on today's corpus that is every portal but bezrealitky. So
-**`payload_dual_write` needs the R2 env vars** (`R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`,
-`R2_SECRET_ACCESS_KEY`, `R2_BUCKET_NAME`) — the same four the image lane uses. Without them every
-append that needs the bucket warns `payload archive needs R2 for …` and archives nothing, which
-is deliberate: the old fallback (keep the body inline) would have rebuilt a database-resident
-archive that the storage arithmetic says cannot fit. Small bodies still archive normally. Knobs:
-`LOCATION_PAYLOAD_VERSION_CAP` (2), `LOCATION_PAYLOAD_MIN_APPEND_INTERVAL_DAYS` (7, the
-per-listing time floor; 0 disables), `LOCATION_PAYLOAD_R2_THRESHOLD_BYTES` (2048),
-`LOCATION_PAYLOAD_STATS_EVERY` (200).
+**Bodies live in R2, so `payload_dual_write` needs the R2 env vars** (the image lane's four). Anything over
+`LOCATION_PAYLOAD_R2_THRESHOLD_BYTES` (2048, Postgres's TOAST boundary) once compressed spills, and the row
+keeps only `body_r2_key` — today every portal but bezrealitky. Without the vars such an append warns
+`payload archive needs R2 for …` and archives nothing, deliberately: the old inline fallback rebuilds an
+archive the arithmetic rules out (`docs/architecture.md` carries the ceiling). Small bodies still archive.
+Knobs: `LOCATION_PAYLOAD_VERSION_CAP` (2), `LOCATION_PAYLOAD_MIN_APPEND_INTERVAL_DAYS` (7, per-listing time
+floor; 0 disables), `LOCATION_PAYLOAD_STATS_EVERY` (200).
 
 ```sql
-update portals set operational_limits =                       -- one portal
-  coalesce(operational_limits, '{}'::jsonb) || '{"payload_dual_write": true}'::jsonb
- where source = 'idnes';
-update portals set operational_limits =                       -- + its index pages
-  coalesce(operational_limits, '{}'::jsonb) || '{"payload_index_archive": true}'::jsonb
- where source = 'sreality';
+-- one portal; swap the key for "payload_index_archive" to add its non-detail surfaces
+update portals set operational_limits = coalesce(operational_limits, '{}'::jsonb)
+  || '{"payload_dual_write": true}'::jsonb where source = 'idnes';
 insert into app_settings (key, value) values                  -- or the global underlay
   ('scraper_limits_global', '{"payload_dual_write": true}'::jsonb)
   on conflict (key) do update set value = app_settings.value || excluded.value;
 ```
 
-Verify with `select source, page_kind, count(*), max(version_seq) from portal_raw_payloads
-group by 1,2;` — the store is append-on-CHANGE, so an unchanged refetch must add no row.
-Failures read `payload archive append failed source=… key=…` / `payload archive limit read
-failed source=…` in the walk or drain log and are never fatal. **Because they are never fatal, a
-broken archive looks exactly like a healthy scrape** — `portal_raw_pages` keeps filling while
-`portal_raw_payloads` silently stops. The audit below is what catches that (it calls it STALLED).
+Verify with `select source, page_kind, count(*), max(version_seq) from portal_raw_payloads group by 1,2;`
+— append-on-CHANGE, so an unchanged refetch must add no row. Failures read `payload archive append failed
+source=… key=…` / `payload archive limit read failed source=…` in the walk or drain log and are never fatal
+— so **a broken archive looks like a healthy scrape**: `portal_raw_pages` keeps filling while
+`portal_raw_payloads` silently stops. The audit below catches that (it calls it STALLED).
 
 **Before flipping `payload_index_archive`, run
 `python -m scripts.location_index_archive_audit`** (`--skip-db` for the code/contract half
 alone, which also degrades to that half on its own if the DB read times out). It reports each
-portal on three axes — what the contract asks, whether the code has an archive call site that is
-`wired`/`gated`/`absent`, and whether staging AND payload rows are actually accumulating. Today all
-three call sites (sreality, remax, ceskereality) are **gated**: their client-side freshness skip
-wraps or returns before the archive call, so enabling the flag archives an index body at most once
-per `INDEX_ARCHIVE_REFRESH_HOURS` (22 h) per page position and drops every intra-window change.
-That is a KNOWN GAP with a comment at each call site, and reworking the skip is an open P2 design
-question — the audit measures it, it does not fix it. The classification is by **reachability**,
-so when P2 does hoist the append above the guard the audit will read `wired` and the fix is
-confirmable; it is not keyed on the guard merely being present in the file.
+portal on three axes — what the contract asks, whether the code's archive call site is
+`wired`/`gated`/`absent`, and whether staging AND payload rows are accumulating. Today all three
+call sites (sreality, remax, ceskereality) are **gated**: their client-side freshness skip returns
+before the archive call, so enabling the flag archives an index body at most once per
+`INDEX_ARCHIVE_REFRESH_HOURS` (22 h) per page position and drops every intra-window change. A
+KNOWN GAP, commented at each call site; reworking the skip is an open P2 question — the audit
+measures it, it does not fix it. Classification is by **reachability**, not by the guard merely
+being present, so when P2 hoists the append above the guard the audit reads `wired`.
 
 ## How to manually trigger the scrapers
 
