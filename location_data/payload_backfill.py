@@ -49,9 +49,8 @@ from location_data import loader_db, payloads
 from location_data.payload_norm import (
     NORMALIZER_VERSION,
     normalise,
-    normalizer_version_for,
+    resolve_normalisation,
     sniff_content_type,
-    volatile_profile,
 )
 from location_data.resolver import lease
 from scraper import db
@@ -274,9 +273,8 @@ def encode_for_archive(body: bytes, *, source: str, page_kind: str) -> dict[str,
     it would be invisible to it, because the verifier decodes both through `decode_body`.
     """
     content_type = sniff_content_type(body)
-    norm = normalise(
-        body, content_type=content_type, volatile=volatile_profile(source, page_kind),
-    )
+    resolved = resolve_normalisation(source, page_kind)
+    norm = normalise(body, content_type=content_type, volatile=resolved.profile)
     # gzip_min_bytes=0: a legacy page is a whole document, so the writer's 4 KB "leave it
     # verbatim" branch is dead weight here — but it stays honest for the degenerate
     # zero-length body, which comes back 'identity' rather than as an empty gzip member.
@@ -288,7 +286,7 @@ def encode_for_archive(body: bytes, *, source: str, page_kind: str) -> dict[str,
         "byte_size": norm.byte_size,
         "stored": stored,
         "content_encoding": encoding,
-        "normalizer_version": normalizer_version_for(source, page_kind),
+        "normalizer_version": resolved.normalizer_version,
     }
 
 

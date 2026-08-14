@@ -41,8 +41,11 @@ from location_data.payload_norm import (
     MEASURED_VOLATILE_PROFILES,
     NORMALIZER_VERSION,
     PAGE_KIND_DETAIL,
+    Resolution,
+    VolatileProfile,
     normalise,
     normalizer_version_for,
+    resolve_normalisation,
     volatile_profile,
 )
 
@@ -102,7 +105,51 @@ _DETAIL_DIGESTS: dict[tuple[str, str], str] = {
         "f47783e1002f8be7c07d7436053e669d72ebcfb968e019fc4b70bd4938b3a493",
     ("remax", "location_w2a_refetch/remax_b1.html"):
         "8bf84d0958d755f407703477209ab1589ec98fbf50fd250a49a673311098102a",
+    # The parser suite's own detail captures — different pages, and older, than the
+    # W2 set above. They are committed detail bodies too, so they belong in the pin:
+    # what it protects is the claim "detail output did not move", and a fixture left
+    # out of it is a page the claim was never checked against.
+    ("idnes", "portal_html/idnes_detail.html"):
+        "6952b4899e1ecc7e3ddbcaa22fcf43ffb71f92a8096758fea0d94a6b359dc965",
+    ("realitymix", "portal_html/realitymix_detail.html"):
+        "7d67a39a587f1582b400a2537c9b093f80d4bbeda170f01f438e4c7521dbe224",
+    ("remax", "portal_html/remax_detail.html"):
+        "d1557becec21011c9253421cbf4be0172f0f2d85fe2d20bdd09f7c96a7e51c8b",
 }
+
+
+# Where a committed DETAIL body can live, and how its portal is read off the name:
+# `<portal>_detail.<ext>` for the parser/W2 captures, `<portal>_<round>.html` for the
+# refetch rounds (every body in that directory is a detail refetch, by construction).
+_DETAIL_FIXTURE_GLOBS: tuple[tuple[str, str], ...] = (
+    ("location_w2", "*_detail.*"),
+    ("portal_html", "*_detail.*"),
+    ("location_w2a_refetch", "*.html"),
+)
+
+
+def _committed_detail_fixtures() -> set[tuple[str, str]]:
+    found: set[tuple[str, str]] = set()
+    for directory, pattern in _DETAIL_FIXTURE_GLOBS:
+        matched = sorted((_FIXTURES / directory).glob(pattern))
+        # A renamed or moved directory must FAIL, not quietly shrink the corpus to
+        # nothing — an empty glob is indistinguishable from "all pinned" downstream.
+        assert matched, f"no detail fixtures under {directory}/{pattern}"
+        found.update(
+            (path.name.split("_")[0], f"{directory}/{path.name}") for path in matched
+        )
+    return found
+
+
+def test_every_committed_detail_fixture_is_pinned() -> None:
+    """The pin protects the claim "detail output did not move", so a detail fixture
+    left out of it is a page that claim was never checked against.
+
+    Discovered rather than listed, because a hand-maintained list cannot report what
+    is missing from it: `tests/fixtures/portal_html/`'s three detail captures were
+    absent from the pin exactly that way. Adding a fixture without a digest now fails
+    here instead of silently narrowing what the pin covers."""
+    assert _committed_detail_fixtures() == set(_DETAIL_DIGESTS)
 
 
 @pytest.mark.parametrize(("source", "relpath"), sorted(_DETAIL_DIGESTS))
@@ -173,11 +220,17 @@ def test_the_json_surfaces_normalise_identically_because_the_base_has_no_pointer
     assert with_detail.norm_sha256 == with_base.norm_sha256
 
 
-def _index_page(cards: str, *, wrapper: str) -> bytes:
-    """An index body: a page whose content IS a list of other people's listings."""
+def _index_page(cards: str, *, tag: str = "main", attrs: str = "") -> bytes:
+    """An index body: a page whose content IS a list of other people's listings.
+
+    `tag`/`attrs` are separate so the CLOSING tag stays well-formed — a closing tag
+    carrying attributes is invalid HTML, and a test that reasons about what a parser
+    does should not hand it something a parser only tolerates by accident.
+    """
+    open_tag = f"<{tag} {attrs}>" if attrs else f"<{tag}>"
     return (
         "<html><head><style>p{}</style></head><body>"
-        f"<{wrapper}>{cards}</{wrapper}>"
+        f"{open_tag}{cards}</{tag}>"
         "</body></html>"
     ).encode("utf-8")
 
@@ -195,12 +248,9 @@ def test_a_detail_similar_offers_selector_would_collapse_an_index_page() -> None
     index bodies (two www, three region-host slices) that selector matched 0 nodes. The
     point is that nothing in the old keying made that a property rather than luck.
     """
-    page_a = _index_page(
-        "<article>Korunní 1, Praha 2</article>", wrapper='section class="s-estates-slide"',
-    )
-    page_b = _index_page(
-        "<article>Veveří 9, Brno</article>", wrapper='section class="s-estates-slide"',
-    )
+    slide = {"tag": "section", "attrs": 'class="s-estates-slide"'}
+    page_a = _index_page("<article>Korunní 1, Praha 2</article>", **slide)
+    page_b = _index_page("<article>Veveří 9, Brno</article>", **slide)
 
     detail_profile = volatile_profile("ceskereality", PAGE_KIND_DETAIL)
     collapsed = {
@@ -229,7 +279,7 @@ def test_a_per_listing_detail_node_repeats_once_per_card_on_an_index() -> None:
         f'<div class="inzeratyview">Vidělo: {i} lidí</div></div>'
         for i in range(1, 4)
     )
-    body = _index_page(cards, wrapper="main")
+    body = _index_page(cards)
 
     on_detail = normalise(
         body, content_type=_HTML, volatile=volatile_profile("bazos", PAGE_KIND_DETAIL),
@@ -260,6 +310,45 @@ def test_the_base_cohort_is_named_so_two_instruments_never_average_together() ->
 
     assert normalizer_version_for("unknown-portal", PAGE_KIND_DETAIL) == (
         NORMALIZER_VERSION + BASE_PROFILE_SUFFIX)
+
+
+def test_the_profile_and_its_cohort_label_are_resolved_from_one_surface() -> None:
+    """The pair is one answer, so the stamp can never describe a profile that was not
+    the one applied. Asking the two questions separately is what let a row normalised
+    under a caller's profile be stamped from the profile TABLE — a permanent content
+    address explained by an instrument that never touched it."""
+    for source in (*MEASURED_VOLATILE_PROFILES, "a-portal-onboarded-next-week"):
+        for page_kind in (PAGE_KIND_DETAIL, _INDEX, "map", "gazetteer"):
+            resolved = resolve_normalisation(source, page_kind)
+
+            assert resolved.profile is volatile_profile(source, page_kind)
+            assert resolved.normalizer_version == normalizer_version_for(
+                source, page_kind)
+            # The one question that separates the two instruments: the label says
+            # `+base` exactly when the profile IS the fallback.
+            assert (resolved.profile is BASE_PROFILE) == (
+                resolved.normalizer_version.endswith(BASE_PROFILE_SUFFIX)
+            ), (source, page_kind)
+
+    # Empty is not missing: bezrealitky's detail profile is a MEASUREMENT that found
+    # nothing to strip, so it is not the fallback and keeps the bare version.
+    bezrealitky = resolve_normalisation("bezrealitky", PAGE_KIND_DETAIL)
+    assert bezrealitky.profile == VolatileProfile()
+    assert bezrealitky.profile is not BASE_PROFILE
+    assert bezrealitky.normalizer_version == NORMALIZER_VERSION
+
+
+def test_a_normaliser_bump_carries_through_the_pair_together() -> None:
+    """`version=` reaches the label without touching the profile — the cohort moves,
+    the projection does not, which is what a bump means."""
+    bumped = resolve_normalisation("idnes", PAGE_KIND_DETAIL, "payload_norm@99")
+
+    assert bumped.normalizer_version == "payload_norm@99"
+    assert bumped.profile is volatile_profile("idnes", PAGE_KIND_DETAIL)
+    assert resolve_normalisation("idnes", _INDEX, "payload_norm@99") == Resolution(
+        profile=BASE_PROFILE,
+        normalizer_version="payload_norm@99" + BASE_PROFILE_SUFFIX,
+    )
 
 
 def test_the_page_kind_label_agrees_across_the_scraper_boundary() -> None:

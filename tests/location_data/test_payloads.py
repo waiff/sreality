@@ -28,8 +28,13 @@ from typing import Any
 import psycopg
 import pytest
 
-from location_data import payloads
-from location_data.payload_norm import NORMALIZER_VERSION, VolatileProfile
+from location_data import payload_norm, payloads
+from location_data.payload_norm import (
+    NORMALIZER_VERSION,
+    PROBE_NORMALIZER_SUFFIX,
+    VolatileProfile,
+    probe_normalizer_version,
+)
 
 _DB_URL = os.environ.get("TEST_DATABASE_URL")
 
@@ -143,6 +148,149 @@ def test_every_executed_statement_is_discoverable_by_the_sql_corpus() -> None:
     }
 
 
+# --- the cohort stamp cannot disagree with the profile that was applied ---
+#
+# Offline, on a recording connection, because the property is about the PARAMETERS the
+# writer binds — and because the DB half of this file runs only in the advisory
+# migrations lane, while this runs in the required one.
+
+
+class _RecordingCur:
+    """Captures executed SQL + bound params and echoes the INSERT's own values back."""
+
+    def __init__(self, conn: "_RecordingConn") -> None:
+        self._conn = conn
+
+    def __enter__(self) -> "_RecordingCur":
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        return None
+
+    def execute(self, sql: str, params: Any = None) -> None:
+        self._conn.executed.append((" ".join(sql.split()), params))
+
+    def fetchone(self) -> tuple[Any, ...] | None:
+        sql, params = self._conn.executed[-1]
+        if not sql.startswith("INSERT INTO portal_raw_payloads"):
+            return None
+        body = params["body"]
+        return (1, 1, True, params["body_sha256"], params["byte_size"],
+                params["content_encoding"], params["body_r2_key"],
+                None if body is None else len(body))
+
+    def fetchall(self) -> list[tuple[Any, ...]]:
+        return []
+
+
+class _RecordingConn:
+    autocommit = True
+
+    def __init__(self) -> None:
+        self.executed: list[tuple[str, Any]] = []
+
+    def transaction(self) -> Any:
+        return _RecordingCur(self)
+
+    def cursor(self) -> _RecordingCur:
+        return _RecordingCur(self)
+
+
+def _append_params(**kwargs: Any) -> dict[str, Any]:
+    """The params bound into the append INSERT for one call."""
+    conn = _RecordingConn()
+    payloads.append_payload(
+        conn,  # type: ignore[arg-type]
+        source=kwargs.pop("source", "idnes"),
+        source_id_native="k",
+        page_kind=kwargs.pop("page_kind", "detail"),
+        listing_id=None,
+        body=kwargs.pop("body", b"<html><body><h1>Byt</h1></body></html>"),
+        content_type=kwargs.pop("content_type", _HTML),
+        http_status=200,
+        contract_version=None,
+        observed_at=datetime.now(timezone.utc),
+        **kwargs,
+    )
+    return next(
+        params for sql, params in conn.executed
+        if sql.startswith("INSERT INTO portal_raw_payloads")
+    )
+
+
+def test_the_stamp_follows_the_surface_when_the_writer_resolves_the_profile() -> None:
+    assert _append_params()["normalizer_version"] == NORMALIZER_VERSION
+    assert _append_params(page_kind="index")["normalizer_version"] == (
+        f"{NORMALIZER_VERSION}{payload_norm.BASE_PROFILE_SUFFIX}")
+
+
+def test_the_stamp_names_the_caller_supplied_profile_not_the_profile_table() -> None:
+    """The MAJOR. `volatile=` decides the hash; `normalizer_version` is the permanent
+    column that explains it. Derived from the profile TABLE — from whether an entry
+    EXISTS for this surface rather than from what was actually applied — the stamp
+    asserts "only the generic base was stripped" about a row normalised under a real
+    measured profile, and no later reader can detect it: `portal_raw_pages` is
+    latest-wins, so the body it describes is gone on the next refetch.
+
+    Latent today (no production caller passes `volatile`, the table is empty, both
+    flags OFF) and load-bearing from W2a-3b, which passes contract-sourced selectors
+    in exactly this shape."""
+    body = b'<html><body><h1>Byt</h1><address>Dlouha 1</address></body></html>'
+    # Strips a node the shipped idnes DETAIL profile keeps, so the two instruments
+    # genuinely produce different content addresses for the same bytes.
+    profile = VolatileProfile(css_selectors=("address",))
+
+    params = _append_params(
+        body=body, volatile=profile, normalizer_version="contract@7")
+
+    assert params["normalizer_version"] == "contract@7"
+    # ... and the address it explains really is the one that profile produces.
+    assert params["payload_sha256"] == payload_norm.normalise(
+        body, content_type=_HTML, volatile=profile).norm_sha256
+    assert params["payload_sha256"] != payload_norm.normalise(
+        body, content_type=_HTML,
+        volatile=payload_norm.volatile_profile("idnes", "detail"),
+    ).norm_sha256
+
+
+def test_overriding_the_cohort_alone_leaves_the_projection_untouched() -> None:
+    """`record_payload_churn`'s established shape — the confirmation probe files its
+    own cadence in its own cohort while hashing with the SAME profile. Overriding the
+    label alone can never make the stamp lie about the projection."""
+    probed = _append_params(normalizer_version=probe_normalizer_version())
+    plain = _append_params()
+
+    assert probed["normalizer_version"] == (
+        f"{NORMALIZER_VERSION}{PROBE_NORMALIZER_SUFFIX}")
+    assert probed["payload_sha256"] == plain["payload_sha256"]
+
+
+@pytest.mark.parametrize("unnamed", [None, ""])
+def test_an_explicit_profile_without_its_cohort_is_refused_before_any_write(
+    unnamed: str | None,
+) -> None:
+    """A projection nobody can name must not reach a permanent content address.
+
+    The empty string is refused alongside None because an `or`-style fallback would
+    otherwise quietly restore the resolver's stamp and re-open exactly this gap. The
+    refusal precedes every statement, so there is no row left to explain."""
+    conn = _RecordingConn()
+    kwargs: dict[str, Any] = {} if unnamed is None else {"normalizer_version": unnamed}
+
+    with pytest.raises(payloads.PayloadError, match="normalizer_version"):
+        payloads.append_payload(
+            conn,  # type: ignore[arg-type]
+            source="idnes", source_id_native="k", page_kind="detail",
+            listing_id=None, body=b"<html></html>", content_type=_HTML,
+            http_status=200, contract_version=None,
+            observed_at=datetime.now(timezone.utc),
+            volatile=VolatileProfile(css_selectors=("div",)),
+            **kwargs,
+        )
+
+    assert conn.executed == []
+
+
 # ------------------------------------------------------------------------ live
 
 
@@ -172,6 +320,12 @@ def _key() -> str:
     return f"live-{uuid.uuid4().hex}"
 
 
+# The cohort the tests below that construct a bespoke projection write under. It is
+# not `NORMALIZER_VERSION`: those bodies are NOT hashed by the shipped instrument,
+# and saying they were is exactly the disagreement `append_payload` now refuses.
+_CONSTRUCTED_COHORT = f"{NORMALIZER_VERSION}+constructed"
+
+
 def _append(
     conn: psycopg.Connection,
     native: str,
@@ -184,6 +338,14 @@ def _append(
     volatile: VolatileProfile | None = None,
     **kwargs: Any,
 ) -> payloads.PayloadRef:
+    # No profile by default — the (source, page_kind) resolver answers both the
+    # projection and its label, which is what the live path does. A test that DOES
+    # construct one names its cohort, because `append_payload` refuses the pair
+    # otherwise: `normalizer_version` is the only record of which instrument produced
+    # a permanent `payload_sha256`, so a constructed profile stamped `payload_norm@3`
+    # would be a row claiming a measurement that never happened.
+    if volatile is not None:
+        kwargs.setdefault("normalizer_version", _CONSTRUCTED_COHORT)
     return payloads.append_payload(
         conn,
         source="idnes",
@@ -195,7 +357,7 @@ def _append(
         http_status=http_status,
         contract_version=1,
         observed_at=observed_at or datetime.now(timezone.utc),
-        volatile=volatile if volatile is not None else VolatileProfile(),
+        volatile=volatile,
         **kwargs,
     )
 
@@ -710,3 +872,33 @@ def test_the_profile_and_the_cohort_follow_the_surface_not_the_portal(
         "detail": NORMALIZER_VERSION,
         "index": f"{NORMALIZER_VERSION}+base",
     }
+
+
+@requires_db
+def test_the_stamp_names_the_profile_that_was_actually_applied(
+    conn: psycopg.Connection,
+) -> None:
+    """The MAJOR, end to end: a caller-supplied profile must reach the row's
+    `normalizer_version`, not the profile table's answer for that surface.
+
+    The projection here deletes a node the shipped idnes DETAIL profile keeps, so the
+    two instruments produce DIFFERENT content addresses for the same bytes. Under the
+    old shape both rows would have been stamped `payload_norm@3` — one of them a lie
+    that no later reader could detect, since the body it describes is gone from
+    `portal_raw_pages` the moment the page is refetched."""
+    measured, constructed = _key(), _key()
+    body = (b'<html><body><h1>Byt 3+1</h1>'
+            b'<address>Dlouha 1, Praha</address></body></html>')
+    # Not in `_IDNES_VOLATILE`: the shipped detail profile keeps this node.
+    profile = VolatileProfile(css_selectors=("address",))
+
+    shipped = _append(conn, measured, body, content_type=_HTML)
+    caller = _append(conn, constructed, body, content_type=_HTML, volatile=profile,
+                     normalizer_version="contract@7")
+
+    assert shipped.payload_sha256 != caller.payload_sha256, (
+        "the two profiles must disagree, or this proves nothing")
+    assert _rows(conn, measured)[0]["normalizer_version"] == NORMALIZER_VERSION
+    assert _rows(conn, constructed)[0]["normalizer_version"] == "contract@7"
+
+

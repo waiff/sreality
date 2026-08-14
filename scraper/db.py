@@ -2866,23 +2866,23 @@ def record_payload_churn(
     """
     # Deferred: location_data is not on the scraper's import path (and not in the
     # API image before this wave), so the flag-off scrape never pays for it.
-    from location_data.payload_norm import (
-        normalise, normalizer_version_for, volatile_profile,
-    )
+    from location_data.payload_norm import normalise, resolve_normalisation
 
     # By (source, page_kind), never by source alone: every shipped profile was
     # derived by diffing DETAIL pages, and an index page is a LIST of properties,
-    # not a property. `volatile_profile` falls back to the generic base for a
-    # surface nobody has diffed, and `normalizer_version_for` puts that fallback in
-    # its own cohort so the two instruments never average together.
+    # not a property. The resolution falls back to the generic base for a surface
+    # nobody has diffed and stamps that fallback into its own cohort, so the two
+    # instruments never average together — profile and cohort as ONE answer, so a
+    # counter can never be filed under a normaliser that was not the one applied.
+    resolved = resolve_normalisation(source, page_kind)
     result = normalise(
         body,
         content_type=content_type,
-        volatile=volatile_profile(source, page_kind),
+        volatile=resolved.profile,
     )
     params = (
         source, source_id_native, page_kind,
-        normalizer_version or normalizer_version_for(source, page_kind),
+        normalizer_version or resolved.normalizer_version,
         fetched_at, fetched_at,
         result.raw_sha256, result.norm_sha256,
         result.byte_size, result.norm_byte_size, observation,

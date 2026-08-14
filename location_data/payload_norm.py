@@ -559,11 +559,11 @@ BASE_PROFILE = VolatileProfile(
 def volatile_profile(source: str, page_kind: str) -> VolatileProfile:
     """The profile measured for this SURFACE, or the generic base.
 
-    The single resolution point: `scraper.db.record_payload_churn` (the live
-    instrument), `payloads.append_payload` (the archive's content address) and
-    `payload_backfill.encode_for_archive` (the 445k-row migration) all read the
-    profile through here, so there is one answer to "what was stripped" rather
-    than three call sites agreeing by coincidence.
+    The single answer to "what was stripped": `scraper.db.record_payload_churn`
+    (the live instrument), `payloads.append_payload` (the archive's content
+    address) and `payload_backfill.encode_for_archive` (the 445k-row migration)
+    all resolve through here rather than three call sites agreeing by coincidence
+    — via `resolve_normalisation`, which pairs this with the label that names it.
     """
     return MEASURED_VOLATILE_PROFILES.get(source, {}).get(page_kind, BASE_PROFILE)
 
@@ -589,6 +589,39 @@ def normalizer_version_for(
     if page_kind in MEASURED_VOLATILE_PROFILES.get(source, {}):
         return base
     return f"{base}{BASE_PROFILE_SUFFIX}"
+
+
+@dataclass(frozen=True, slots=True)
+class Resolution:
+    """What a surface is normalised under, and the label that names it — as ONE value.
+
+    The two are answers to the same question, and asking them separately is what
+    lets them disagree: a caller that takes the profile from one call and the stamp
+    from another can write a `normalizer_version` naming an instrument that was not
+    the one applied. `payload_sha256` is permanent and `normalizer_version` is the
+    only thing that explains which projection produced it, so a disagreement is not
+    a cosmetic label bug — it is a content address nobody can account for.
+    """
+
+    profile: VolatileProfile
+    normalizer_version: str
+
+
+def resolve_normalisation(
+    source: str, page_kind: str, version: str | None = None,
+) -> Resolution:
+    """Profile AND cohort label for one surface, from one (source, page_kind).
+
+    Every production write path takes both through here rather than calling
+    `volatile_profile` and `normalizer_version_for` side by side, so the pair can
+    never be resolved from two different surfaces. The two remain public for the
+    readers that genuinely want one of them (the churn report's cohort labelling,
+    the diff probe's residue).
+    """
+    return Resolution(
+        profile=volatile_profile(source, page_kind),
+        normalizer_version=normalizer_version_for(source, page_kind, version),
+    )
 
 
 # source -> page_kind -> profile. The inner mapping is what stops a detail

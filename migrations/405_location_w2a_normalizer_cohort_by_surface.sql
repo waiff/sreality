@@ -66,14 +66,19 @@ comment on column portal_payload_churn.normalizer_version is
 ------------------------------------------------------------------
 
 comment on column portal_raw_payloads.normalizer_version is
-  'The normaliser that produced this row''s payload_sha256: '
-  'location_data.payload_norm.normalizer_version_for(source, page_kind) at write '
-  'time. payload_sha256 is the content ADDRESS, so a profile change moves it for '
+  'The normaliser that ACTUALLY produced this row''s payload_sha256 - by construction, '
+  'not by convention: location_data.payloads.append_payload takes the profile and this '
+  'label as one value (payload_norm.resolve_normalisation(source, page_kind)), and a '
+  'caller supplying its own volatile profile MUST supply the label naming it or the '
+  'append is refused. So this column can never describe an instrument other than the '
+  'one applied. payload_sha256 is the content ADDRESS, so a profile change moves it for '
   'unchanged content and appends one row per artefact - this column is what makes '
   'that cohort identifiable afterwards rather than indistinguishable from real '
   'churn. A ''+base'' suffix means no profile has been measured for this row''s '
   'SURFACE and only the generic base was stripped, which is the honest state for '
-  'every page_kind except detail (see 405''s header).';
+  'every page_kind except detail (see 405''s header). A value matching no '
+  'payload_norm@N form at all is a caller-declared projection - from W2a-3b on, the '
+  'contract''s own persistence.volatile_paths rather than this module''s table.';
 
 ------------------------------------------------------------------
 -- No relation, column or grant changed above; re-asserting the posture both

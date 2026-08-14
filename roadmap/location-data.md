@@ -543,8 +543,19 @@ coincidence, one measured selector wide.
 
 **The shape.** `MEASURED_VOLATILE_PROFILES` is now `source -> page_kind -> profile` (the
 absence of an `index` key on every line is the point), resolved only through
-`volatile_profile(source, page_kind)` — one function shared by the churn instrument, the
-archive writer and the backfill. An unmeasured surface gets `BASE_PROFILE`: the shared
+`resolve_normalisation(source, page_kind)` — one function shared by the churn instrument,
+the archive writer and the backfill, returning the profile **and** the cohort label as one
+`Resolution`. The pair is inseparable on purpose: review found `append_payload` normalising
+under an explicitly-passed `volatile=` profile while stamping `normalizer_version` from the
+profile TABLE, i.e. from whether an entry exists rather than from what was applied. Latent
+today (no production caller passes `volatile`, the store is empty, both flags OFF) and
+load-bearing from W2a-3b, which passes contract-sourced selectors in exactly that shape —
+`normalizer_version` is permanent and its only job is to explain a `payload_sha256`, so a
+row hashed under a real measured profile would have asserted "only the generic base was
+stripped" with nothing downstream able to detect it. An explicit profile now **requires**
+the label that names it (refused otherwise, before any statement runs); overriding the label
+alone stays allowed, which is `record_payload_churn`'s existing probe shape.
+An unmeasured surface gets `BASE_PROFILE`: the shared
 `_HTML_BASE` + `_HTML_ATTRS` and **nothing measured**. Why the base rather than no
 stripping: on a measured surface over-stripping is self-correcting (the residue diff shows
 it); on an unmeasured one it is not — a profile that eats the listing grid reports **0 %**,
@@ -553,8 +564,9 @@ rules, and it is inert on JSON by construction (no pointers), so the sreality/be
 JSON surfaces do not move at all.
 
 **`NORMALIZER_VERSION` stays `payload_norm@3`** — detail normalisation is byte-identical
-across all 23 committed detail fixtures on 8 portals, pinned as digests computed under the
-old code (`tests/location_data/test_payload_norm_by_page_kind.py`). Instead the cohort label
+across all **26** committed detail fixtures on 8 portals, pinned as digests computed under
+the old code, with the pin's COVERAGE asserted from the fixture tree rather than a hand-kept
+list (`tests/location_data/test_payload_norm_by_page_kind.py`). Instead the cohort label
 is resolved per surface: `normalizer_version_for(source, page_kind)` appends **`+base`**
 where no profile was measured. A global bump would have discarded ~24,600 detail fetches
 across 9 portals to fix an at-most-one-phantom-change artefact on ceskereality's 694 index
