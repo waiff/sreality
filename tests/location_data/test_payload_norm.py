@@ -20,6 +20,8 @@ from location_data.payload_norm import (
     NORMALIZER_VERSION,
     VolatileProfile,
     normalise,
+    selector_is_safe,
+    selector_is_usable,
     sniff_content_type,
 )
 
@@ -323,3 +325,187 @@ def test_normaliser_is_pure() -> None:
     assert imported <= {
         "__future__", "hashlib", "json", "re", "dataclasses", "typing", "selectolax",
     }, sorted(imported)
+
+
+# --- @2 (W2a-3b): selector_is_safe + the measured idnes/ceskereality/realitymix profiles ---
+
+
+def test_selector_is_safe_allows_the_verified_pseudo_classes() -> None:
+    assert selector_is_safe(".advertisement")
+    assert selector_is_safe("input[name=\"tshee\"]")
+    assert selector_is_safe("footer div.absolute.bottom-2.right-2")
+    assert selector_is_safe("span.i-info__title:not(.x)")
+    assert selector_is_safe("li:first-child")
+    assert selector_is_safe("li:nth-child(2)")
+
+
+def test_selector_is_safe_rejects_unimplemented_pseudo_classes() -> None:
+    # The exact selector that segfaults selectolax 0.4.10 against a real
+    # document (see the module-level comment above _PSEUDO_RE).
+    assert not selector_is_safe('span.i-info__title:contains("Datum")')
+    assert not selector_is_safe("p::before")
+
+
+def test_selector_is_safe_ignores_colons_that_are_not_pseudo_classes() -> None:
+    """A pseudo-class colon never appears inside `[...]`, and an ESCAPED colon is
+    part of a class name. A portal's own href/src value carries the first
+    (`mailto:`, `tel:`); Tailwind's responsive variants carry the second
+    (`.md\\:flex`) — and realitymix, the portal whose measured volatile node is
+    already a Tailwind utility stack, is the likeliest source of one. Literal
+    string scanning misreads either as an unlisted pseudo-class and silently
+    no-ops the whole selector — under-stripping, the direction the module's
+    docstring calls out as dangerous."""
+    assert selector_is_safe('a[href^="mailto:info"]')
+    assert selector_is_safe('a[href*="tel:"]')
+    assert selector_is_safe('script[src*="imedia.cz"]')
+    assert selector_is_safe('a[href^="tel:"]:not(.keep)')
+    assert selector_is_safe(r".md\:flex")
+    assert selector_is_safe(r"footer div.lg\:hidden.bottom-2")
+
+    # A real pseudo-class outside the brackets is still caught, escaped or not.
+    assert not selector_is_safe('div[data-x="a:b"]:contains("y")')
+    assert not selector_is_safe(r".md\:flex:contains(\:)")
+
+
+def test_an_unsafe_selector_in_a_profile_is_a_no_op_not_a_crash() -> None:
+    """Regression for the selectolax segfault: an unimplemented pseudo-class
+    reaching `.css()` kills the process, not raises — so `normalise` must
+    never hand one to selectolax. Mixing a safe and an unsafe selector in one
+    profile proves the rest of the profile (selectors AND attributes) still
+    runs while the unsafe one is skipped."""
+    html = (
+        b'<html><body><h1  nonce="n">Byt   3+1</h1>'
+        b'<div class="advertisement">ad</div>'
+        b'<span class="i-info__title">Datum: 1.1.</span>'
+        b'</body></html>'
+    )
+    profile = VolatileProfile(
+        css_selectors=(".advertisement", 'span.i-info__title:contains("Datum")'),
+        strip_attributes=("nonce",),
+    )
+
+    result = normalise(html, content_type=_HTML, volatile=profile)
+
+    assert b"advertisement" not in result.norm_bytes
+    assert b"Datum" in result.norm_bytes  # the unsafe selector never ran
+    assert b"Byt 3+1" in result.norm_bytes
+    assert b"nonce" not in result.norm_bytes
+
+
+def test_a_malformed_selector_costs_only_itself_not_the_whole_body() -> None:
+    """`selector_is_safe` screens pseudo-classes, not syntax: a typo'd selector
+    passes it and RAISES inside `.css()`. Caught around the loop, that one typo
+    would drop the entire body to the raw-bytes fallback — the portal's change
+    rate jumps to ~100% and the storage projection is signed off a corrupt
+    number, silently, since `normalise` never raises. It has to cost exactly one
+    rule, so the good selectors in the same profile still strip."""
+    html = (
+        b'<html><body><h1>Byt</h1>'
+        b'<div class="advertisement">ad</div></body></html>'
+    )
+    good = VolatileProfile(css_selectors=(".advertisement",))
+    with_typo = VolatileProfile(
+        css_selectors=("div..a", "", 'div[name="x', ">>", ".advertisement"),
+    )
+
+    clean = normalise(html, content_type=_HTML, volatile=good)
+    typo = normalise(html, content_type=_HTML, volatile=with_typo)
+
+    assert typo.norm_sha256 == clean.norm_sha256
+    assert b"advertisement" not in typo.norm_bytes
+    # ...and specifically NOT the raw fallback, which keeps the stripped node.
+    assert typo.norm_sha256 != normalise(
+        html, content_type=_HTML, volatile=_NONE,
+    ).norm_sha256
+
+
+def test_selector_is_usable_rejects_what_normalise_can_only_no_op() -> None:
+    """The load-time gate: `normalise` is silent by contract, so a typo in a
+    portal's volatile_paths can only ever no-op there. Callers that read those
+    selectors out of the contract can refuse them loudly instead."""
+    for malformed in ("div..a", "", 'div[name="x', "svg|circle", ">>"):
+        assert selector_is_safe(malformed), malformed  # syntax is not its job
+        assert not selector_is_usable(malformed), malformed
+
+    assert not selector_is_usable('span.i-info__title:contains("Datum")')
+    for good in ('input[name="tshee"]', "footer div.absolute.bottom-2.right-2",
+                 "div.a:not(.b)", r".md\:flex"):
+        assert selector_is_usable(good), good
+
+
+def test_every_shipped_selector_is_usable_not_merely_safe() -> None:
+    """If a future profile edit adds a selector the allowlist rejects — or one
+    that is merely misspelt — it should fail loudly here rather than silently
+    under-stripping in production (the churn readout would look better than
+    reality). `usable` is the strict superset: safe AND parseable."""
+    unusable = [
+        (source, selector)
+        for source, profile in DEFAULT_VOLATILE_PROFILES.items()
+        for selector in profile.css_selectors
+        if not selector_is_usable(selector)
+    ]
+    assert unusable == []
+
+
+def test_idnes_measured_profile_strips_the_diff_probe_findings() -> None:
+    """scripts/location_payload_diff_probe.py found these four moving on 5/5
+    live listings across all 3 fetches; _FORM_TOKENS' input[name*="_token"]
+    never covered them (schpeckc/tshee are not named "_token")."""
+    html = (
+        b'<html><body><h1>Byt 2+1</h1>'
+        b'<form><input name="tshee" value="15237420345">'
+        b'<input name="schpeckc" value="62da6c7c">'
+        b'<span id="schpeckIn">3 \xe2\x9e\x95 6</span></form>'
+        b'<div class="grid-similar-offers">other listings here</div>'
+        b'</body></html>'
+    )
+
+    result = normalise(html, content_type=_HTML, volatile=DEFAULT_VOLATILE_PROFILES["idnes"])
+
+    assert b"15237420345" not in result.norm_bytes
+    assert b"62da6c7c" not in result.norm_bytes
+    assert b"schpeckIn" not in result.norm_bytes
+    assert b"grid-similar-offers" not in result.norm_bytes
+    assert b"Byt 2+1" in result.norm_bytes
+
+
+def test_ceskereality_measured_profile_strips_the_diff_probe_findings() -> None:
+    html = (
+        b'<html><body><h1>Byt 2+1</h1>'
+        b'<input id="bug-report-token" value="8659c.5BgBggKSAVY6">'
+        b'<section class="s-estates-slide">similar listings</section>'
+        b'<div class="s-estate-detail-intro__slider">the subject gallery</div>'
+        b'</body></html>'
+    )
+
+    result = normalise(
+        html, content_type=_HTML, volatile=DEFAULT_VOLATILE_PROFILES["ceskereality"],
+    )
+
+    assert b"5BgBggKSAVY6" not in result.norm_bytes
+    assert b"s-estates-slide" not in result.norm_bytes
+    # the subject's own gallery is a sibling, not a match, and must survive
+    assert b"the subject gallery" in result.norm_bytes
+
+
+def test_realitymix_measured_profile_strips_the_diff_probe_findings() -> None:
+    html = (
+        b'<html><body><h1>Byt 2+1</h1>'
+        b'<footer><div class="absolute bottom-2 right-2">0.85</div>'
+        b'<div class="other-footer-content">keep me</div></footer>'
+        b'</body></html>'
+    )
+
+    result = normalise(
+        html, content_type=_HTML, volatile=DEFAULT_VOLATILE_PROFILES["realitymix"],
+    )
+
+    assert b"0.85" not in result.norm_bytes
+    assert b"keep me" in result.norm_bytes
+
+
+def test_normalizer_version_is_2_and_the_probe_cohort_follows_it() -> None:
+    from location_data.payload_norm import probe_normalizer_version
+
+    assert NORMALIZER_VERSION == "payload_norm@2"
+    assert probe_normalizer_version() == "payload_norm@2+probe"

@@ -43,6 +43,19 @@ that the phone regex (any 9 consecutive digits) rewrote realitymix photo ids to
 `nab_+420 XXX XXX XXX.jpg` and the street regex rewrote idnes CDN shard paths `/thumbs/1/6/e/`
 to `/thumbs/XXX/YY/e/`, silently corrupting the only data a media test can assert on.
 
+**Never commit an unscrubbed portal page — this repo is PUBLIC.** A live detail page carries the
+broker's mobile, work e-mail and name, and merging one publishes them permanently. For a fixture
+kept for its **bytes** rather than its visible text (the payload-normaliser set,
+`tests/fixtures/location_w2a_refetch/`), the blanket sweep above is the wrong tool — masking
+*every* 9-digit run rewrites `data-gps-lat="50.069672777778"`, JSON-escaped photo ids the URL
+mask never sees, and Tailwind custom properties. Use the contact-scoped mode instead:
+`python scripts/fetch_and_anonymize_fixtures.py --scrub-contacts <files> --name "<agent name>"`.
+It seeds phones only from markup that says "phone" (`tel:`, schema.org `telephone`, a rendered
+`+420` group, a whole-text-node number, reveal-on-click attributes), replaces e-mails, and takes
+each hand-supplied name in plain, JSON-escaped **and** slugged form (the profile-URL slug is the
+one that gets forgotten). Same placeholders, so a fixture set stays consistent either way; it is
+idempotent, so re-running it on a committed fixture proves the fixture is clean.
+
 **The nine SCRAPER portal parsers are a separate fixture set** in `tests/fixtures/portal_html/`
 (`tests/scraper/test_portal_media_fixtures.py`), distinct from the LLM `source_parsers` set
 above. They exist because a hand-authored fixture can only assert back the strings the test

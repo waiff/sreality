@@ -31,6 +31,16 @@ but not agent/seller names (too varied for a safe regex). Bazos index
 and detail pages embed real seller names in `odeslatakci('rating',…)`
 onclicks and the "Jméno" field; hand-scrub those in the committed
 fixture if present.
+
+Second mode — scrub an ALREADY-SAVED fixture, contact fields only:
+
+    python scripts/fetch_and_anonymize_fixtures.py \\
+        --scrub-contacts tests/fixtures/<set>/*.html \\
+        --name "<agent name as the page renders it>"
+
+Use it for whole-page fixtures kept for their BYTES rather than for
+their visible text — anonymize()'s blanket 9-digit sweep would rewrite
+coordinates and photo ids there. See anonymize_contacts() below.
 """
 
 from __future__ import annotations
@@ -39,8 +49,9 @@ import argparse
 import logging
 import re
 import sys
+import unicodedata
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Sequence
 
 import requests
 
@@ -97,6 +108,124 @@ def anonymize(html: str) -> str:
     return ANON_BANNER + out
 
 
+# --- contact-scoped scrub, for fixtures anonymize() would corrupt ---
+#
+# anonymize() masks http(s) URLs and then sweeps EVERY 9-digit run. That is right
+# for the LLM-parser fixtures, whose value is the visible listing text. It is
+# wrong for a whole-page fixture kept for its BYTES (the location_w2a_refetch
+# payload-normaliser set): on those pages the same 9-digit shape is a coordinate
+# (`data-gps-lat="50.069672777778"`), a photo id inside JSON-escaped markup that
+# the URL mask never sees (`\/foto\/32813\/75\/758874998f5b...`), or a Tailwind
+# custom property (`--size:0.17813245890041`). Masking those destroys exactly the
+# location signal such a fixture exists to prove survives normalisation.
+#
+# So this variant takes phone SEEDS from markup that says "phone" — a tel: href,
+# schema.org "telephone", a rendered +420 group, a bare group that is a whole text
+# node, a reveal-on-click data attribute — and then rewrites every rendering of
+# those numbers. Emails and hand-supplied agent names go unconditionally. Same
+# placeholders as anonymize(), so a fixture set stays consistent either way.
+PHONE_PLACEHOLDER = "+420 XXX XXX XXX"
+EMAIL_PLACEHOLDER = "agent@example.cz"
+NAME_PLACEHOLDER = "Jan Novák"
+
+CONTACT_BANNER = (
+    "<!-- ANONYMIZED FIXTURE — phones, emails and agent names replaced with "
+    "placeholders (scripts/fetch_and_anonymize_fixtures.py --scrub-contacts). "
+    "Every other byte is the portal's. -->\n"
+)
+_BANNER_MARK = "ANONYMIZED FIXTURE"
+
+# `\s` covers every separator a portal renders between digit groups, including
+# the non-breaking and narrow spaces an editor shows as an ordinary space.
+_SEP = r"[\s\-]?"
+_GROUP9 = rf"\d{{3}}{_SEP}\d{{3}}{_SEP}\d{{3}}"
+_PHONE_SEED_RES: tuple[re.Pattern[str], ...] = (
+    re.compile(r"tel:([+\d\s()\-]{9,20})"),
+    re.compile(r'"telephone"\s*:\s*"([^"]{9,25})"'),
+    re.compile(rf"(\+\s?420{_SEP}{_GROUP9})"),
+    re.compile(rf">\s*(\+?(?:420{_SEP})?{_GROUP9})\s*<"),
+    re.compile(rf'data-hidden-content-on-click="([^"]*{_GROUP9}[^"]*)"'),
+)
+
+
+def phone_seeds(html: str) -> set[str]:
+    """The 9-digit national numbers this page presents AS phone numbers."""
+    seeds: set[str] = set()
+    for pattern in _PHONE_SEED_RES:
+        for match in pattern.finditer(html):
+            digits = re.sub(r"\D", "", match.group(1))
+            for prefix in ("00420", "420"):
+                if len(digits) > 9 and digits.startswith(prefix):
+                    digits = digits[len(prefix):]
+                    break
+            if len(digits) == 9:
+                seeds.add(digits)
+    return seeds
+
+
+def _phone_pattern(digits: str) -> re.Pattern[str]:
+    grouped = _SEP.join((digits[:3], digits[3:6], digits[6:]))
+    # The lookarounds keep the seed from matching a longer digit run it happens to
+    # sit inside (a timestamp, an id), which would leave a half-rewritten number.
+    return re.compile(rf"(?<![\d/])(?:\+\s?420{_SEP}|00420{_SEP})?{grouped}(?!\d)")
+
+
+def _json_escaped(text: str) -> str:
+    return "".join(c if c.isascii() else f"\\u{ord(c):04x}" for c in text)
+
+
+def _slugified(text: str) -> str:
+    folded = "".join(
+        c for c in unicodedata.normalize("NFD", text) if not unicodedata.combining(c)
+    )
+    return re.sub(r"[^a-z0-9]+", "-", folded.lower()).strip("-")
+
+
+def _replace_name(html: str, name: str) -> str:
+    # A name is not only rendered text: portals also carry it JSON-escaped inside
+    # schema.org blocks (`Jan Nov\\u00e1k`) and slugged into a broker-profile URL
+    # (`/makler/detail/jan-novak/`), and leaving either behind would undo the scrub.
+    for variant, replacement in (
+        (name, NAME_PLACEHOLDER),
+        (_json_escaped(name), _json_escaped(NAME_PLACEHOLDER)),
+        (_slugified(name), _slugified(NAME_PLACEHOLDER)),
+    ):
+        if variant:
+            html = html.replace(variant, replacement)
+    return html
+
+
+def anonymize_contacts(html: str, *, names: Sequence[str] = ()) -> str:
+    """Scrub contact PII only, leaving every other byte of the page intact.
+
+    Idempotent: the placeholders carry no phone digits and no name, so a second
+    pass is a no-op (which lets a committed fixture be re-verified in CI).
+    """
+    out = html
+    for name in names:
+        out = _replace_name(out, name)
+    out = _EMAIL_RE.sub(EMAIL_PLACEHOLDER, out)
+    for digits in sorted(phone_seeds(out)):
+        out = _phone_pattern(digits).sub(PHONE_PLACEHOLDER, out)
+    if _BANNER_MARK not in out[:len(CONTACT_BANNER) + 200]:
+        out = CONTACT_BANNER + out
+    return out
+
+
+def scrub_contacts_in_place(paths: Sequence[Path], names: Sequence[str]) -> int:
+    for path in paths:
+        original = path.read_text(encoding="utf-8")
+        scrubbed = anonymize_contacts(original, names=names)
+        if scrubbed != original:
+            path.write_text(scrubbed, encoding="utf-8")
+        LOG.info(
+            "%s: %s (%d -> %d chars)",
+            path, "scrubbed" if scrubbed != original else "already clean",
+            len(original), len(scrubbed),
+        )
+    return 0
+
+
 def fetch(url: str, *, timeout_s: float = 30.0) -> str:
     LOG.info("fetching %s", url)
     r = requests.get(url, headers=HEADERS, timeout=timeout_s)
@@ -143,15 +272,30 @@ def _process(
 
 def main(argv: Iterable[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--output-dir", required=True, type=Path)
+    p.add_argument("--output-dir", type=Path)
     p.add_argument("--bezrealitky", default=None)
     p.add_argument("--idnes", default=None)
     p.add_argument("--remax", default=None)
     p.add_argument("--bazos-index", default=None)
     p.add_argument("--bazos-detail", default=None)
+    p.add_argument(
+        "--scrub-contacts", nargs="+", type=Path, default=None, metavar="FIXTURE",
+        help="rewrite these already-saved fixtures in place, contact fields only "
+             "(no fetch); idempotent, so re-running proves a fixture is clean",
+    )
+    p.add_argument(
+        "--name", action="append", default=[], metavar="NAME",
+        help="an agent name to replace with the placeholder, in plain, "
+             "JSON-escaped and slugged form (repeatable; applies to every file)",
+    )
     args = p.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
+
+    if args.scrub_contacts:
+        return scrub_contacts_in_place(args.scrub_contacts, args.name)
+    if args.output_dir is None:
+        p.error("--output-dir is required unless --scrub-contacts is given")
 
     errors: list[str] = []
     _process(
