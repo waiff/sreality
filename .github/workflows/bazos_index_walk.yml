@@ -79,6 +79,13 @@ jobs:
       - name: Run bazos index walk
         env:
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          # W2a payload archive: bodies live in R2, so a page-fetching lane needs the
+          # bucket to archive one. Absent, the append warns and archives NOTHING while
+          # the scrape stays green. Inert until payload_dual_write is enabled.
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
           # inputs.* are empty on a scheduled run → walk EVERY scope in the
           # portal registry; a dispatch can narrow to one scope / region.
           SALE_TYPE: ${{ inputs.sale_type }}

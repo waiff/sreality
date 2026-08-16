@@ -131,6 +131,12 @@ break the scrape it rides in. **None may be enabled before the operator's churn 
 keeps only `body_r2_key` — today every portal but bezrealitky. Without the vars such an append warns
 `payload archive needs R2 for …` and archives nothing, deliberately: the old inline fallback rebuilds an
 archive the arithmetic rules out (`docs/architecture.md` carries the ceiling). Small bodies still archive.
+**All fourteen page-fetching lanes now carry the four secrets**, and `tests/test_scrape_lane_r2_env.py`
+is the gate that keeps it true for a tenth portal — derived from `contracts/portals/`, not a hand list.
+It exists because the lanes did NOT have them when the flag was first declared ready: a lane missing R2
+archives nothing while scraping perfectly, so the fleet reads green and the archive stays empty.
+Railway's realtime-worker drain is env configured in the Railway dashboard, NOT in this repo — check it
+there before trusting fleet-wide coverage.
 Knobs: `LOCATION_PAYLOAD_VERSION_CAP` (2), `LOCATION_PAYLOAD_MIN_APPEND_INTERVAL_DAYS` (7, per-listing time
 floor; 0 disables), `LOCATION_PAYLOAD_STATS_EVERY` (200).
 
