@@ -869,6 +869,10 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "secrets": [
       "MAPY2_CZ_API_KEY",
       "MAPY_CZ_API_KEY",
+      "R2_ACCESS_KEY_ID",
+      "R2_ACCOUNT_ID",
+      "R2_BUCKET_NAME",
+      "R2_SECRET_ACCESS_KEY",
       "SUPABASE_DB_URL"
     ],
     "concurrencyGroup": "bazos-detail-drain",
@@ -949,6 +953,10 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
       }
     ],
     "secrets": [
+      "R2_ACCESS_KEY_ID",
+      "R2_ACCOUNT_ID",
+      "R2_BUCKET_NAME",
+      "R2_SECRET_ACCESS_KEY",
       "SUPABASE_DB_URL"
     ],
     "concurrencyGroup": "bazos-index-walk",
@@ -1064,6 +1072,10 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "secrets": [
       "MAPY2_CZ_API_KEY",
       "MAPY_CZ_API_KEY",
+      "R2_ACCESS_KEY_ID",
+      "R2_ACCOUNT_ID",
+      "R2_BUCKET_NAME",
+      "R2_SECRET_ACCESS_KEY",
       "SCRAPER_PROXY_URL",
       "SUPABASE_DB_URL"
     ],
@@ -1116,6 +1128,10 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
       }
     ],
     "secrets": [
+      "R2_ACCESS_KEY_ID",
+      "R2_ACCOUNT_ID",
+      "R2_BUCKET_NAME",
+      "R2_SECRET_ACCESS_KEY",
       "SCRAPER_PROXY_URL",
       "SUPABASE_DB_URL"
     ],
@@ -1578,6 +1594,10 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
       }
     ],
     "secrets": [
+      "R2_ACCESS_KEY_ID",
+      "R2_ACCOUNT_ID",
+      "R2_BUCKET_NAME",
+      "R2_SECRET_ACCESS_KEY",
       "SUPABASE_DB_SESSION_URL",
       "SUPABASE_DB_URL"
     ],
@@ -2135,6 +2155,10 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "secrets": [
       "MAPY2_CZ_API_KEY",
       "MAPY_CZ_API_KEY",
+      "R2_ACCESS_KEY_ID",
+      "R2_ACCOUNT_ID",
+      "R2_BUCKET_NAME",
+      "R2_SECRET_ACCESS_KEY",
       "SCRAPE_CHAIN_TOKEN",
       "SUPABASE_DB_URL"
     ],
@@ -2179,6 +2203,10 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
       }
     ],
     "secrets": [
+      "R2_ACCESS_KEY_ID",
+      "R2_ACCOUNT_ID",
+      "R2_BUCKET_NAME",
+      "R2_SECRET_ACCESS_KEY",
       "SUPABASE_DB_URL"
     ],
     "concurrencyGroup": "idnes-index-walk",
@@ -2325,6 +2353,10 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
       }
     ],
     "secrets": [
+      "R2_ACCESS_KEY_ID",
+      "R2_ACCOUNT_ID",
+      "R2_BUCKET_NAME",
+      "R2_SECRET_ACCESS_KEY",
       "SUPABASE_DB_URL"
     ],
     "concurrencyGroup": "sreality-index-walk",
@@ -3436,6 +3468,10 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "secrets": [
       "MAPY2_CZ_API_KEY",
       "MAPY_CZ_API_KEY",
+      "R2_ACCESS_KEY_ID",
+      "R2_ACCOUNT_ID",
+      "R2_BUCKET_NAME",
+      "R2_SECRET_ACCESS_KEY",
       "SCRAPE_CHAIN_TOKEN",
       "SUPABASE_DB_URL"
     ],
@@ -3480,6 +3516,10 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
       }
     ],
     "secrets": [
+      "R2_ACCESS_KEY_ID",
+      "R2_ACCOUNT_ID",
+      "R2_BUCKET_NAME",
+      "R2_SECRET_ACCESS_KEY",
       "SUPABASE_DB_URL"
     ],
     "concurrencyGroup": "realitymix-index-walk",
@@ -4206,6 +4246,10 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
       }
     ],
     "secrets": [
+      "R2_ACCESS_KEY_ID",
+      "R2_ACCOUNT_ID",
+      "R2_BUCKET_NAME",
+      "R2_SECRET_ACCESS_KEY",
       "SUPABASE_DB_URL"
     ],
     "concurrencyGroup": "bezrealitky-scrape",
@@ -4267,6 +4311,10 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "secrets": [
       "MAPY2_CZ_API_KEY",
       "MAPY_CZ_API_KEY",
+      "R2_ACCESS_KEY_ID",
+      "R2_ACCOUNT_ID",
+      "R2_BUCKET_NAME",
+      "R2_SECRET_ACCESS_KEY",
       "SUPABASE_DB_URL"
     ],
     "concurrencyGroup": "maxima-scrape",
@@ -4336,6 +4384,10 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "secrets": [
       "MAPY2_CZ_API_KEY",
       "MAPY_CZ_API_KEY",
+      "R2_ACCESS_KEY_ID",
+      "R2_ACCOUNT_ID",
+      "R2_BUCKET_NAME",
+      "R2_SECRET_ACCESS_KEY",
       "SCRAPER_PROXY_URL",
       "SUPABASE_DB_URL"
     ],
@@ -4484,6 +4536,10 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "secrets": [
       "MAPY2_CZ_API_KEY",
       "MAPY_CZ_API_KEY",
+      "R2_ACCESS_KEY_ID",
+      "R2_ACCOUNT_ID",
+      "R2_BUCKET_NAME",
+      "R2_SECRET_ACCESS_KEY",
       "SUPABASE_DB_URL"
     ],
     "concurrencyGroup": "remax-scrape",

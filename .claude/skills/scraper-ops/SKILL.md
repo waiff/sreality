@@ -126,17 +126,11 @@ break the scrape it rides in. **None may be enabled before the operator's churn 
   `python -m scripts.location_payload_storage_ceiling` re-derives it; logs `payload archive refuses
   unmeasured surface source=… page_kind=…`.
 
-**Bodies live in R2, so `payload_dual_write` needs the R2 env vars** (the image lane's four). Anything over
-`LOCATION_PAYLOAD_R2_THRESHOLD_BYTES` (2048, Postgres's TOAST boundary) once compressed spills, and the row
-keeps only `body_r2_key` — today every portal but bezrealitky. Without the vars such an append warns
-`payload archive needs R2 for …` and archives nothing, deliberately: the old inline fallback rebuilds an
-archive the arithmetic rules out (`docs/architecture.md` carries the ceiling). Small bodies still archive.
-**All fourteen page-fetching lanes now carry the four secrets**, and `tests/test_scrape_lane_r2_env.py`
-is the gate that keeps it true for a tenth portal — derived from `contracts/portals/`, not a hand list.
-It exists because the lanes did NOT have them when the flag was first declared ready: a lane missing R2
-archives nothing while scraping perfectly, so the fleet reads green and the archive stays empty.
-Railway's realtime-worker drain is env configured in the Railway dashboard, NOT in this repo — check it
-there before trusting fleet-wide coverage.
+**Bodies live in R2, so `payload_dual_write` needs the R2 env vars** (the image lane's four) — on all 14
+page-fetching lanes since #1074, held by `tests/test_scrape_lane_r2_env.py`; MISSING when the flag was first
+called ready, and INVISIBLE: the append warns `payload archive needs R2 for …` and archives nothing while the
+scrape stays green. Railway's worker: own dashboard. Over `LOCATION_PAYLOAD_R2_THRESHOLD_BYTES` (2048, TOAST)
+compressed spills to `body_r2_key` — every portal but bezrealitky, whose small bodies archive inline.
 Knobs: `LOCATION_PAYLOAD_VERSION_CAP` (2), `LOCATION_PAYLOAD_MIN_APPEND_INTERVAL_DAYS` (7, per-listing time
 floor; 0 disables), `LOCATION_PAYLOAD_STATS_EVERY` (200).
 
