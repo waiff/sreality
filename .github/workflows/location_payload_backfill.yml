@@ -21,8 +21,11 @@ name: "Jobs: Payload archive backfill + round-trip verify (location W2a)"
 # one thing: the scan ran off the end of the table. So covering the full archive is simply
 # repeated dispatches until one reports `reached_end`.
 #
-# Required secret: SUPABASE_DB_URL. R2_* is optional and only read by `verify`, to fetch a
-# body that spilled to the bucket.
+# Required secrets: SUPABASE_DB_URL and the four R2_*. R2 is where the bodies GO — both
+# steps need it, `backfill` to write each migrated body and `verify` to read one back.
+# (It was documented here as verify-only while bodies were still inline in Postgres; the
+# W2a rewrite moved them to R2 and this lane kept the old env until the first dispatch
+# refused at id=0.)
 
 on:
   workflow_dispatch:
@@ -136,6 +139,14 @@ jobs:
         if: inputs.mode == 'backfill' || inputs.mode == 'backfill_then_verify'
         env:
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          # The bodies' DESTINATION, not an optional extra: this step writes every
+          # migrated body to R2 and stores only the key. Without these it refuses at
+          # id=0 and migrates nothing (exit 2), which is how it failed on the first
+          # real dispatch — the step was written when bodies were still inline.
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
           SOURCE: ${{ inputs.source }}
           MAX_SECONDS: ${{ inputs.max_seconds }}
           BATCH_SIZE: ${{ inputs.batch_size }}

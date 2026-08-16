@@ -100,3 +100,42 @@ def test_r2_secret_names_match_the_client() -> None:
     source = (ROOT / "scraper" / "image_storage.py").read_text()
     for var in R2_VARS:
         assert f'_required("{var}")' in source, f"{var} is not read by R2Client.from_env"
+
+
+# --- the same defect, one layer out -------------------------------------------------
+#
+# The scrape lanes reach R2 indirectly, through `scraper.db` -> `payloads.append_payload`.
+# The batch lanes reach it DIRECTLY: `location_data.payload_backfill` calls
+# `payloads.open_store()` itself, and it shipped with a verify-only env block written when
+# bodies were still inline in Postgres. Its first real dispatch refused at id=0 and
+# migrated nothing. Same class of bug, different lane, so the gate has to be stated over
+# the property that actually matters — "this module opens the object store" — rather than
+# over the one set of lanes that happened to be wrong first.
+
+
+def _direct_store_openers() -> frozenset[str]:
+    """Modules whose own source calls `open_store()` — dotted, `python -m` form."""
+    found: set[str] = set()
+    for base in ("location_data", "scripts", "scraper"):
+        for path in sorted((ROOT / base).rglob("*.py")):
+            text = path.read_text()
+            if re.search(r"(?<!def )\bopen_store\(\)", text):
+                found.add(f"{base}.{path.stem}")
+    assert found, "no open_store() call sites found — the derivation is broken"
+    return frozenset(found)
+
+
+@pytest.mark.parametrize("module", sorted(_direct_store_openers()))
+def test_lane_running_an_r2_module_carries_the_credentials(module: str) -> None:
+    """Any workflow step running a module that opens the object store needs the bucket.
+
+    Silent on modules no workflow runs via `python -m` — a library like
+    `location_data.archive` is reached through its importer's lane, which this cannot see.
+    """
+    for path, doc, ctx in _steps_running(module):
+        visible = _visible_env(doc, ctx["job"], ctx["step"])
+        missing = [v for v in R2_VARS if v not in visible]
+        assert not missing, (
+            f"{path.name} runs {module}, which opens the R2 object store, without "
+            f"{', '.join(missing)}. The step will refuse and do nothing."
+        )
