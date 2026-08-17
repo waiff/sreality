@@ -908,12 +908,24 @@ what actually moves on an INDEX page — nobody has diffed one, which is why the
 stays off. That is a prerequisite for enabling `payload_index_archive` later, not for
 anything W2a shipped, and it does not block W2: the re-mine lane reads detail bodies.
 
-## W3 — build started (history backfill from `listing_snapshots`)
+## W3 — lane built, never dispatched (history backfill from `listing_snapshots`)
 
 Built in a separate git worktree off `origin/main` (never on the main checkout's branch), on a
 DIFFERENT substrate from W2/W2a (`listing_snapshots.raw_json`, not archived HTML), so it does not
 wait on that in-progress work — coordinated with the session building W2a/W2 to avoid touching the
 same files without visibility into each other's changes.
+
+**Rebased onto current main 2026-08-17** (PR #1057, originally cut 2026-08-13 at `1cf383c9`). Main
+had moved 25+ commits, including W2-2 (#1079), which independently landed ONE of this PR's six
+additive `claims_intake.py` changes — `write_result(..., extractor_version=...)` — in a converged
+form. The other five (the `snapshot_id` field on `Claim`/`Absence` and its plumbing through
+`_CLAIM_WRITE_SQL` / `_ABSENCE_WRITE_SQL` / the `resighted`+`obs` CTEs / `dedupe_absence_rows`, plus
+the two `extract_listing` flags) were untouched by it and applied as union merges alongside W2's
+evidence columns — the two sets are additive to the same statements and do not overlap
+semantically. `claims_remine.py` itself rebased with zero conflicts. Three assertions in W2's
+`test_claims_remine_archive.py` were written as `"snapshot_id" not in row` when no lane wrote the
+column; they now assert `row["snapshot_id"] is None`, which is the same guarantee stated against the
+value rather than the key, and strictly stronger.
 
 **What shipped, in one PR:**
 
@@ -991,6 +1003,15 @@ with the operator — this is a shared instance that four concurrent location la
 knocked over once (2026-08-10 incident, below). A follow-up PR can add an `incremental` schedule
 (mirroring W1 intake's hourly cron) once the initial full pass has completed.
 
+**A SECOND gate now applies, and it is not the operator's: `location-batch` is currently
+saturated.** As of 2026-08-17 the W2a payload backfill is mid-flight (≈61 % of 445k pages, ~4
+dispatches left, each holding the group ~45 min) while hourly intake and the `*/15` resolve drain
+compete for the same single pending slot. This lane joins that same outer group by design, so
+dispatching it now would either queue behind the payload backfill or displace a tick of it — the
+exact contention W1's own backfill hit when its `*/15` resolve cron had to be removed for the
+duration. **Wait for the payload backfill to finish before the first W3 dispatch**, then treat W3's
+own run the same way W1's was: budgeted dispatches into idle gaps, not back-to-back.
+
 **Open for the next session / operator sign-off:**
 
 - Dispatch the initial `mode=full` backfill (budgeted `--max-seconds`, resumable if it stops).
@@ -1017,6 +1038,11 @@ first and is already tested): **W3 keeps `location_data/claims_remine.py` / `LAN
 `REMINE_VERSION = "claims_remine_archive@1"`, workflow `location_claims_remine_archive.yml`, group
 `location-remine-archive` — so a future reader hits this note instead of rediscovering the
 collision by watching a resume cursor jump between two substrates.
+**RESOLVED AND HONOURED — W2-2 shipped as #1079 using exactly the disambiguated spellings**
+(`location_data/claims_remine_archive.py`, `LANE = "location_claims_remine_archive"`), verified
+against main 2026-08-17. The two lanes now key `location_claim_batches` on distinct `lane` strings
+and cannot read each other's resume cursors. The note stays as the record of WHY the archive lane
+carries the longer name — deleting it would invite the next reader to "simplify" it back.
 
 ## Standing decisions
 
