@@ -143,10 +143,17 @@ def test_the_archive_reader_registry_is_separate_from_w1s():
     assert not set(ARCHIVE_READERS) & set(claims_intake.READERS)
 
 
-def test_no_portal_declares_an_archived_reader_yet_so_the_lane_is_inert():
-    """The W2-2 acceptance condition, asserted rather than assumed. When a per-portal PR
-    lands a reader this test is the one that must be updated deliberately."""
-    assert ARCHIVE_READERS == {}
+def test_the_registered_archive_readers_are_the_declared_generic_set():
+    """W2-2 asserted `ARCHIVE_READERS == {}` — the lane was inert because nothing could read.
+    W2-6 lands the first readers, so that assertion is retired here DELIBERATELY (it was left
+    as the tripwire for exactly this moment) and replaced by the two properties that still
+    have to hold.
+
+    First: the set is closed. These readers are portal-AGNOSTIC — a selector, an attribute, a
+    DMS attribute — and every portal-specific fact belongs in contract data. A new name
+    appearing here is how "one portal needed something special" becomes a branch in shared
+    code (rule 21), so adding one is a reviewed act, not an import side effect."""
+    assert set(ARCHIVE_READERS) == {"html_text", "html_attr", "html_point_dms"}
 
 
 # ------------------------------------------------------------------ evidence discipline

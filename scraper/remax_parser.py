@@ -288,7 +288,13 @@ def type_of(title: str | None) -> str | None:
     return None
 
 
-def _parse_dms_pair(text: str | None) -> tuple[float | None, float | None]:
+def parse_dms_pair(text: str | None) -> tuple[float | None, float | None]:
+    """A `data-gps` DMS pair as (lat, lon), or (None, None) if it is unusable.
+
+    Public because location-data's archived-HTML re-mine lane reads the same attribute out
+    of the same pages (W2-6) and a second implementation of this would drift from the live
+    scraper's silently — including the CZ-bbox refusal below, which is a correctness rail
+    and not a formatting detail."""
     if not text:
         return None, None
     matches = _DMS_RE.findall(unescape(text))
@@ -636,7 +642,7 @@ def parse_detail(
     lat = lon = None
     gps_match = _GPS_ATTR_RE.search(html)
     if gps_match is not None:
-        lat, lon = _parse_dms_pair(gps_match.group(1))
+        lat, lon = parse_dms_pair(gps_match.group(1))
 
     locality, district = _h1_locality(title)
     # W0 item 0d: the subject's own location line. "ulice <Street>, <Town>" when

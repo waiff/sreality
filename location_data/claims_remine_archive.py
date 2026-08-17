@@ -121,8 +121,11 @@ from location_data.claims_intake import (
     _BATCH_INSERT_SQL,
     _RESUME_SQL,
     _WATERMARK_SQL,
+    _base,
+    _text,
     MAX_CLAIM_VALUE_BYTES_ENV,
     DEFAULT_MAX_CLAIM_VALUE_BYTES,
+    apply_transforms,
     assert_inventory_ready,
     claim_value_bytes,
     coordinate_verdict,
@@ -135,6 +138,7 @@ from location_data.claims_intake import (
 from location_data.html_scope import ScopeRegister, ScopedDocument, scope_html
 from location_data.resolver import lease
 from scraper import db
+from scraper.remax_parser import parse_dms_pair
 
 LOG = logging.getLogger("location_data.claims_remine_archive")
 
@@ -248,8 +252,10 @@ class ArchiveRead:
 ArchiveReaderFn = Callable[
     [Entry, ListingRow, ArchivedPayload, ScopedDocument], list[ArchiveRead]]
 
-# EMPTY until W2-6…W2-12. See the module docstring: this is what makes the lane inert, and
-# it is deliberately a second registry rather than an extension of `claims_intake.READERS`.
+# Populated from W2-6 onward. Deliberately a second registry rather than an extension of
+# `claims_intake.READERS`: W1's readers take `(entry, row)` and read `raw_json`, these take a
+# scoped DOM, and a name present in one but not the other must be a refusal rather than a
+# silent no-op. The lane is inert whenever this is empty (see the module docstring).
 ARCHIVE_READERS: dict[str, ArchiveReaderFn] = {}
 
 
@@ -258,6 +264,124 @@ def archive_reader(name: str) -> Callable[[ArchiveReaderFn], ArchiveReaderFn]:
         ARCHIVE_READERS[name] = fn
         return fn
     return register
+
+
+def _entry_css(entry: Entry) -> str:
+    """The CSS selector a DOM entry must declare.
+
+    Refused rather than defaulted: an entry that reaches a DOM reader without a selector is
+    a contract/projection mismatch, and the alternative — treating it as "match nothing" —
+    is a coverage hole that produces no claim, no absence and no error."""
+    css = entry.locator.get("css")
+    if not css or not isinstance(css, str):
+        raise IntakeRefused(
+            f"{entry.source}:{entry.entry_id} uses a DOM reader but declares no "
+            f"`locator.css` (got {css!r})")
+    return css
+
+
+def _evidenced(
+    entry: Entry, row: ListingRow, document: ScopedDocument, *,
+    value: str, fragment: str, **overrides: Any,
+) -> Claim:
+    """A DOM claim carrying migration 382's evidence set.
+
+    `subject_scoped` comes from the CONTRACT (`subject_scope.subject_scoped`), never from
+    the reader: whether a node is the subject's own is a per-portal fact the entry declares
+    and the scoper enforces, and a reader that decided it for itself would be re-litigating
+    D7 once per portal. `find_span` is entity- and whitespace-tolerant and returns None
+    rather than guessing — a span pointing at the wrong occurrence of a common street name
+    still satisfies the CHECK's substring test, which makes it worse than no span."""
+    span = document.find_span(value, fragment=fragment)
+    return _base(
+        entry, row,
+        value_text=value,
+        evidence_quote=value,
+        span_start=span[0] if span else None,
+        span_end=span[1] if span else None,
+        subject_scoped=bool(entry.subject_scope.get("subject_scoped", True)),
+        **overrides,
+    )
+
+
+@archive_reader("html_text")
+def _read_html_text(
+    entry: Entry, row: ListingRow, payload: ArchivedPayload, document: ScopedDocument,
+) -> list[ArchiveRead]:
+    """Text of the FIRST node matching the entry's selector, as one evidenced claim.
+
+    First-match, not all-matches, and that is the whole point on this substrate: remax's
+    contamination class is a page where the subject's address and a neighbour's are both
+    present in the DOM, so "every match" would re-import exactly what the exclusion zones
+    exist to strip. A portal that genuinely needs every match declares a different reader
+    rather than widening this one.
+
+    The node is read from the SCOPED document, so an excluded zone cannot match here even
+    if a contract's selector would otherwise reach into one."""
+    node = document.css_first(_entry_css(entry))
+    if node is None:
+        return []
+    value = apply_transforms(_text(node.text()), entry.transform)
+    if value is None:
+        return []
+    return [ArchiveRead(_evidenced(entry, row, document, value=value, fragment=node.html or ""))]
+
+
+@archive_reader("html_attr")
+def _read_html_attr(
+    entry: Entry, row: ListingRow, payload: ArchivedPayload, document: ScopedDocument,
+) -> list[ArchiveRead]:
+    """One ATTRIBUTE of the first matching node — the carrier for markup that puts the fact
+    in an attribute rather than in text (remax's `data-display-address`, and every index
+    card that stamps its address on the element)."""
+    attribute = entry.locator.get("attribute")
+    if not attribute or not isinstance(attribute, str):
+        raise IntakeRefused(
+            f"{entry.source}:{entry.entry_id} uses `html_attr` but declares no "
+            f"`locator.attribute` (got {attribute!r})")
+    node = document.css_first(_entry_css(entry))
+    if node is None:
+        return []
+    value = apply_transforms(_text(node.attributes.get(attribute)), entry.transform)
+    if value is None:
+        return []
+    return [ArchiveRead(_evidenced(entry, row, document, value=value, fragment=node.html or ""))]
+
+
+@archive_reader("html_point_dms")
+def _read_html_point_dms(
+    entry: Entry, row: ListingRow, payload: ArchivedPayload, document: ScopedDocument,
+) -> list[ArchiveRead]:
+    """A coordinate from a DMS attribute (remax stamps `data-gps="50°04'26.1"N,14°43'41.5"E"`).
+
+    Parsing is `scraper.remax_parser.parse_dms_pair` — the SAME function the live scraper
+    has used since the portal was onboarded, including its CZ-bbox refusal, rather than a
+    second implementation that would drift from it silently.
+
+    `position_branch` is contract DATA (`locator.position_branch`), so which branch of the
+    portal's map produced a pin is declared once per entry and the LADDER stamps the licence
+    class from it (C6). A reader that inferred the branch would be deciding a licence
+    question per portal, which is exactly what `_licensed_coordinate` refuses."""
+    branch = entry.locator.get("position_branch")
+    if branch not in POSITION_BRANCHES:
+        raise IntakeRefused(
+            f"{entry.source}:{entry.entry_id} declares position_branch={branch!r}; a DOM "
+            f"coordinate entry must name one of {sorted(POSITION_BRANCHES)} (C6)")
+    attribute = str(entry.locator.get("attribute") or "data-gps")
+    node = document.css_first(_entry_css(entry))
+    if node is None:
+        return []
+    raw = _text(node.attributes.get(attribute))
+    if raw is None:
+        return []
+    lat, lon = parse_dms_pair(raw)
+    if lat is None or lon is None:
+        return []
+    claim = _evidenced(
+        entry, row, document, value=raw, fragment=node.html or "",
+        value_geom_wkt=f"POINT({lon} {lat})",
+    )
+    return [ArchiveRead(claim, position_branch=str(branch))]
 
 
 # ------------------------------------------------------------------ extraction
