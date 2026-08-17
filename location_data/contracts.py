@@ -165,6 +165,14 @@ _LEGACY_SURFACE = frozenset({"legacy_column"})
 _STRUCTURED = frozenset({"portal_structured_field"})
 _LEGACY_METHOD = frozenset({"legacy_column"})
 _DECLARED_QUALITY = frozenset({"portal_declared_quality"})
+# W2-6: the DOM readers of `claims_remine_archive`. `html_selector` is the surface a
+# contract DECLARES; `archived_html` is what the claim is STAMPED with when the archived
+# lane runs it (C9, a runtime mapping — the entry ids stay the ones 02 §2.2 fixed). Both are
+# admitted so one entry can be executed against a live parse and an archived body without
+# minting a second id for the same act.
+_DOM_SURFACES = frozenset({"html_selector", "archived_html", "map_config"})
+_DOM_METHOD = frozenset({"html_selector_parse"})
+_MAP_METHOD = frozenset({"map_widget_parse"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -229,6 +237,23 @@ READER_CONTRACTS: dict[str, ReaderContract] = {
     "coords_stamp_quality": ReaderContract(
         substrates=_LEGACY_SURFACE, methods=_LEGACY_METHOD,
         stamps_legacy_column="raw_json.coords"),
+    # --- W2-6: DOM readers. `css` is required on all three, so a selector-less entry fails
+    # CI rather than matching nothing forever in production.
+    "html_text": ReaderContract(
+        substrates=_DOM_SURFACES, methods=_DOM_METHOD,
+        locator_keys=frozenset({"css"}),
+        consults_transforms=True),
+    "html_attr": ReaderContract(
+        substrates=_DOM_SURFACES, methods=_DOM_METHOD,
+        locator_keys=frozenset({"css", "attr"}),
+        consults_transforms=True),
+    # `position_branch` is a REQUIRED locator key, not an optional hint: it decides the
+    # coordinate's licence class (C6) and the archived ladder refuses a read without one, so
+    # an entry omitting it would fail per-row at runtime instead of once at projection time.
+    "html_point_dms": ReaderContract(
+        substrates=_DOM_SURFACES, methods=_DOM_METHOD | _MAP_METHOD,
+        locator_keys=frozenset({"css", "attr", "position_branch"}),
+        consults_guards=True),
     "geom_column": ReaderContract(
         substrates=_LEGACY_SURFACE, methods=_LEGACY_METHOD,
         consults_guards=True, stamps_legacy_column="listings.geom"),

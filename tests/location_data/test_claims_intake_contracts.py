@@ -16,6 +16,7 @@ import pytest
 
 from location_data import claims_intake, contracts
 from location_data.claims_intake import GUARDS, LEGACY_COLUMNS, READERS, SOURCES, TRANSFORMS
+from location_data.claims_remine_archive import ARCHIVE_READERS
 from location_data.contracts import (
     CLAIM_TYPES,
     EXTRACTION_METHODS,
@@ -125,7 +126,9 @@ def test_every_reader_named_in_a_contract_exists_in_the_registry():
     for contract in ALL.values():
         for entry in contract.entries:
             if entry.reader:
-                assert entry.reader in READERS, entry.entry_id
+                # Either registry: W1 payload readers or the archived lane's DOM readers.
+                # `_check_executable` already refuses a name in neither.
+                assert entry.reader in set(READERS) | set(ARCHIVE_READERS), entry.entry_id
 
 
 def test_every_executable_entry_matches_its_readers_contract():
@@ -157,16 +160,34 @@ def test_reader_substrates_stay_in_sync_with_the_runtime_registry():
     the extractor — so a reader added to `claims_intake` without a record (or one left
     behind after a reader is deleted) is caught HERE, by the one test that imports both.
     Otherwise the projection would reject every entry naming the new reader."""
-    assert set(READER_CONTRACTS) == set(READERS)
+    # The name-only mirror W1 uses to SKIP a DOM entry must equal the real archive registry.
+    # If a reader is added to `ARCHIVE_READERS` and not to `ARCHIVE_ONLY_READERS`, the hourly
+    # W1 intake stops skipping it and starts REFUSING it — taking that portal's intake down
+    # the moment a contract naming it loads. That is a production outage reachable by adding
+    # one function, so it is pinned here rather than left to review.
+    assert claims_intake.ARCHIVE_ONLY_READERS == set(ARCHIVE_READERS)
+    # TWO runtime registries since W2-6: W1's payload readers and the archived lane's DOM
+    # readers. They are deliberately separate objects (a name in one must not silently
+    # resolve in the other), but `READER_CONTRACTS` is the single deploy-time record for
+    # both — an entry naming a DOM reader is projected by the same validator.
+    assert set(READER_CONTRACTS) == set(READERS) | set(ARCHIVE_READERS)
+    assert not set(READERS) & set(ARCHIVE_READERS)
     assert READER_SUBSTRATES == {n: s.substrates for n, s in READER_CONTRACTS.items()}
     surfaces = {s for legal in READER_SUBSTRATES.values() for s in legal}
     assert surfaces <= contracts.CLAIM_SURFACES
-    # No reader may be declared on a W2 surface until W2 gives it one — the property the
-    # fleet-wide gate used to assert directly.
-    assert surfaces == {"api_json", "graphql", "embedded_json", "legacy_column"}
+    # W2-6 opened the DOM surfaces. This assertion was written as "no reader may be declared
+    # on a W2 surface until W2 gives it one" and is updated here deliberately — it stays an
+    # exact set so a fourth surface cannot arrive unreviewed.
+    assert surfaces == {
+        "api_json", "graphql", "embedded_json", "legacy_column",
+        "html_selector", "archived_html", "map_config",
+    }
     methods = {m for spec in READER_CONTRACTS.values() for m in spec.methods}
     assert methods <= EXTRACTION_METHODS
-    assert methods == {"portal_structured_field", "portal_declared_quality", "legacy_column"}
+    assert methods == {
+        "portal_structured_field", "portal_declared_quality", "legacy_column",
+        "html_selector_parse", "map_widget_parse",
+    }
 
 
 def test_the_reader_contracts_state_exactly_what_the_reader_bodies_do():
@@ -220,16 +241,22 @@ def test_the_executable_and_inert_split_is_exactly_what_w1_ran():
         "maxima": (3, 7),
         "mmreality": (11, 4),
         "realitymix": (5, 8),
-        "remax": (4, 9),
+        "remax": (6, 7),
         "sreality": (23, 6),
     }
-    assert sum(e for e, _ in split.values()) == 69
-    assert sum(i for _, i in split.values()) == 70
+    assert sum(e for e, _ in split.values()) == 71
+    assert sum(i for _, i in split.values()) == 68
+    # The number that actually matters to the hourly lane: entries W1 itself executes.
+    w1_executable = sum(1 for c in ALL.values() for e in c.entries
+                        if e.reader and e.reader not in claims_intake.ARCHIVE_ONLY_READERS)
+    assert w1_executable == 69
     # The same 69 entries seen down the other axis, so a swap could not preserve both.
     per_reader = Counter(e.reader for c in ALL.values() for e in c.entries if e.reader)
     assert per_reader == Counter({
         "scalar": 36, "namespaced_id": 9, "geom_column": 6, "coords_stamp_quality": 5,
         "legacy_text_column": 5, "point_pair": 3, "declared_quality": 2,
+        # W2-6: remax@3's two activated DOM entries.
+        "html_text": 1, "html_point_dms": 1,
         "bbox_envelope": 1, "conflict_signal": 1, "declared_bool_quality": 1,
     })
 
@@ -370,13 +397,18 @@ def test_the_bumped_contracts_appended_entries_and_kept_the_earlier_ones():
     # incremental scan re-walks, and archive configuration must not be able to spend
     # that. What versions these ARE is the record of extraction changes only.
     assert {s: c.version for s, c in ALL.items()} == {
-        "remax": 2, "ceskereality": 3, "realitymix": 3,
+        "remax": 3, "ceskereality": 3, "realitymix": 3,
         "sreality": 1, "bezrealitky": 1, "bazos": 1, "idnes": 1, "mmreality": 1,
         "maxima": 1,
     }
     for source, new_ids, earlier_ids in (
-        ("remax", {"rx.det.legacy_display_address", "rx.det.legacy_locality"},
-         {"rx.det.raw_address_conflict", "rx.det.legacy_pin"}),
+        # remax@3 (W2-6) appends NO id: it activates two ids v1 already declared, by adding
+        # a reader. That is still a bump — 02 §2.1.8 makes a behaviour change a new version,
+        # and "appends nothing" is the honest shape of an activation.
+        ("remax", set(),
+         {"rx.det.raw_address_conflict", "rx.det.legacy_pin",
+          "rx.det.legacy_display_address", "rx.det.legacy_locality",
+          "rx.det.header_address", "rx.det.gps"}),
         ("ceskereality", {"cr.det.legacy_street"},
          {"cr.det.locality_text", "cr.det.legacy_pin", "cr.det.coords_stamp",
           "cr.det.legacy_locality"}),
@@ -521,8 +553,11 @@ def test_a_reader_outside_its_registered_substrates_is_rejected():
 
 
 def test_a_reader_that_does_not_exist_is_rejected():
+    # `html_text` used to be the example here BECAUSE it did not exist; W2-6 registered it,
+    # so the example moves to a name no wave has claimed rather than the test quietly
+    # becoming a check that a real reader is accepted.
     with pytest.raises(ContractError, match="not a registered reader"):
-        _entry(locator={"reader": "html_text", "json_pointer": "/x"})
+        _entry(locator={"reader": "no_such_reader", "json_pointer": "/x"})
 
 
 def test_an_executable_entry_may_not_name_an_unimplemented_transform_or_guard():

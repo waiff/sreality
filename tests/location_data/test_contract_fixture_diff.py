@@ -20,7 +20,8 @@ from __future__ import annotations
 import json
 import re
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +38,12 @@ from location_data.claims_intake import (
     extract_listing,
     value_norm_mirror,
 )
+from location_data.claims_remine_archive import (
+    ARCHIVE_READERS,
+    ArchivedPayload,
+    stamp_archive_claim,
+)
+from location_data.html_scope import ScopeRegister, scope_html
 from tests.location_data import claim_intake_fixtures as fx
 
 _ROOT = Path(__file__).resolve().parents[2]
@@ -45,6 +52,11 @@ _GOLDEN_DIR = _W2 / "golden"
 _BODY_DIR = _W2 / "regressions"
 
 BLESS_COMMAND = "python -m tests.location_data.test_contract_fixture_diff --bless"
+
+# The archived arm's fixed clock. `stamp_archive_claim` copies the payload's
+# `first_observed_at` onto every claim (06 §6.6 rule 1), so a real timestamp here would put
+# wall-clock into the golden and make it re-bless itself on every run.
+_ARCHIVE_CLOCK = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
 
 # --------------------------------------------------------- the pinned regression register
@@ -240,6 +252,67 @@ def score(source: str, listing_id: str, body: Body) -> dict[str, Any]:
             **project_result(result)}
 
 
+# ------------------------------------------------- the ARCHIVED arm of the same gate
+#
+# W1's `extract_listing` reads `listings.raw_json` and SKIPS every DOM reader
+# (`ARCHIVE_ONLY_READERS`), so without this the golden could not see a single entry a W2
+# portal PR activates: remax@3 turned two entries on and the claim-level diff came out
+# EMPTY. A gate that shows "nothing changed" for the one change a PR makes is worse than
+# no gate, because it reads as a positive result.
+#
+# So the archived lane runs here too, over the portal's pinned HTML body, and its claims
+# land in the golden under `archived_claims`. The evidence span is projected as a LENGTH,
+# not an offset pair: offsets move whenever a fixture is re-captured, which would make
+# every re-capture look like an extraction change, while a length that stops matching its
+# quote is a real defect.
+def archived_html_for(source: str) -> Path | None:
+    path = _W2 / f"{source}_detail.html"
+    return path if path.exists() else None
+
+
+def project_archived(read: Any) -> dict[str, Any]:
+    claim = read.claim
+    return {
+        "extractor_id": claim.extractor_id,
+        "claim_type": claim.claim_type,
+        "value_text": claim.value_text,
+        "value_geom_wkt": claim.value_geom_wkt,
+        "surface": claim.surface,
+        "page_kind": claim.page_kind,
+        "licence_class": claim.licence_class,
+        "blur_evidence": claim.blur_evidence,
+        "subject_scoped": claim.subject_scoped,
+        "position_branch": read.position_branch,
+        "evidence_quote": claim.evidence_quote,
+        "evidence_span_len": (
+            None if claim.span_start is None or claim.span_end is None
+            else claim.span_end - claim.span_start),
+    }
+
+
+def score_archived(contract: contracts.PortalContract) -> list[dict[str, Any]]:
+    """Every executable DOM entry of this contract, run over the pinned detail body."""
+    path = archived_html_for(contract.source)
+    entries = [e for e in fx.entries_for(contract.source)
+               if e.reader in ARCHIVE_READERS and e.page_kind == "detail"]
+    if path is None or not entries:
+        return []
+    register = ScopeRegister.from_zones(contract.source, contract.exclusion_zones)
+    document = scope_html(path.read_bytes(), register=register)
+    payload = ArchivedPayload(
+        id=1, source=contract.source, source_id_native="fixture", page_kind="detail",
+        payload_sha256="0" * 64, first_observed_at=_ARCHIVE_CLOCK,
+        body=path.read_bytes())
+    row = fx.listing(contract.source, {}, native="fixture")
+    out: list[dict[str, Any]] = []
+    for entry in sorted(entries, key=lambda e: e.entry_id):
+        for read in ARCHIVE_READERS[entry.reader](entry, row, payload, document):
+            stamped = stamp_archive_claim(read.claim, payload,
+                                          scope_version=document.scope_version)
+            out.append(project_archived(replace(read, claim=stamped)))
+    return out
+
+
 def build_golden(contract: contracts.PortalContract) -> dict[str, Any]:
     declared = contract_regression_ids(contract)
     bodies = bodies_for(contract.source)
@@ -252,6 +325,7 @@ def build_golden(contract: contracts.PortalContract) -> dict[str, Any]:
         "regression_listing_ids": declared,
         "listings_without_a_fixture_body": [i for i in declared if i not in bodies],
         "fixtures": scored,
+        "archived_claims": score_archived(contract),
     }
 
 
@@ -361,6 +435,15 @@ def diff_golden(golden: dict[str, Any], actual: dict[str, Any]) -> list[str]:
         if golden.get(field) != actual.get(field):
             lines.append(f"  {field}: {_short(golden.get(field))} -> "
                          f"{_short(actual.get(field))}")
+
+    # The ARCHIVED arm. Compared explicitly and by the SAME `_diff_section` machinery, so
+    # a DOM entry that changes what it claims prints a claim-level diff exactly like a
+    # payload entry does. Without this the key would sit in the golden and never be read —
+    # which is what it did when first added, and a gate nobody compares is decoration.
+    lines += _diff_section("archived claim",
+                           golden.get("archived_claims", []),
+                           actual.get("archived_claims", []),
+                           "extractor_id", "claim_type")
 
     old = {_fixture_key(f): f for f in golden.get("fixtures", [])}
     new = {_fixture_key(f): f for f in actual.get("fixtures", [])}

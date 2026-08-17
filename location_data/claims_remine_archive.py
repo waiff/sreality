@@ -282,7 +282,7 @@ def _entry_css(entry: Entry) -> str:
 
 def _evidenced(
     entry: Entry, row: ListingRow, document: ScopedDocument, *,
-    value: str, fragment: str, **overrides: Any,
+    value: str, within: Any, **overrides: Any,
 ) -> Claim:
     """A DOM claim carrying migration 382's evidence set.
 
@@ -292,7 +292,7 @@ def _evidenced(
     D7 once per portal. `find_span` is entity- and whitespace-tolerant and returns None
     rather than guessing — a span pointing at the wrong occurrence of a common street name
     still satisfies the CHECK's substring test, which makes it worse than no span."""
-    span = document.find_span(value, fragment=fragment)
+    span = document.find_span(value, within=within)
     return _base(
         entry, row,
         value_text=value,
@@ -324,7 +324,7 @@ def _read_html_text(
     value = apply_transforms(_text(node.text()), entry.transform)
     if value is None:
         return []
-    return [ArchiveRead(_evidenced(entry, row, document, value=value, fragment=node.html or ""))]
+    return [ArchiveRead(_evidenced(entry, row, document, value=value, within=node))]
 
 
 @archive_reader("html_attr")
@@ -334,18 +334,18 @@ def _read_html_attr(
     """One ATTRIBUTE of the first matching node — the carrier for markup that puts the fact
     in an attribute rather than in text (remax's `data-display-address`, and every index
     card that stamps its address on the element)."""
-    attribute = entry.locator.get("attribute")
+    attribute = entry.locator.get("attr")
     if not attribute or not isinstance(attribute, str):
         raise IntakeRefused(
             f"{entry.source}:{entry.entry_id} uses `html_attr` but declares no "
-            f"`locator.attribute` (got {attribute!r})")
+            f"`locator.attr` (got {attribute!r})")
     node = document.css_first(_entry_css(entry))
     if node is None:
         return []
     value = apply_transforms(_text(node.attributes.get(attribute)), entry.transform)
     if value is None:
         return []
-    return [ArchiveRead(_evidenced(entry, row, document, value=value, fragment=node.html or ""))]
+    return [ArchiveRead(_evidenced(entry, row, document, value=value, within=node))]
 
 
 @archive_reader("html_point_dms")
@@ -367,7 +367,7 @@ def _read_html_point_dms(
         raise IntakeRefused(
             f"{entry.source}:{entry.entry_id} declares position_branch={branch!r}; a DOM "
             f"coordinate entry must name one of {sorted(POSITION_BRANCHES)} (C6)")
-    attribute = str(entry.locator.get("attribute") or "data-gps")
+    attribute = str(entry.locator.get("attr") or "data-gps")
     node = document.css_first(_entry_css(entry))
     if node is None:
         return []
@@ -378,7 +378,7 @@ def _read_html_point_dms(
     if lat is None or lon is None:
         return []
     claim = _evidenced(
-        entry, row, document, value=raw, fragment=node.html or "",
+        entry, row, document, value=raw, within=node,
         value_geom_wkt=f"POINT({lon} {lat})",
     )
     return [ArchiveRead(claim, position_branch=str(branch))]
