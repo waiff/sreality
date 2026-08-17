@@ -15,7 +15,7 @@ is the tie-breaker). This track records sequencing + shipped state only.
 | W0 "stop the bleeding" | 15 interim fixes + 2 measurements against the CURRENT system | 🟡 in progress (2026-08-10) |
 | W1 registry + claim spine (shadow) | full RÚIAN mirror, claims, resolutions, projection | ✅ shipped 2026-08-12 (migrations 380–389 applied; shadow-only, no consumer reads it) |
 | W1v bezrealitky vertical slice | one portal end-to-end + location-quality dashboard | ✅ shipped 2026-08-13 (every layer exercised in prod; gate answered — portal-inventory-capped, not pipeline-capped) |
-| W2a payload archive rewrite | append-on-change `portal_raw_payloads` | 🟡 hardened + measured (2026-08-14) — migrations 405–408 applied; bodies to R2, storage bounded by construction (cap 2 + 7-day floor), profiles per (source, page_kind) and now in the contracts; detail churn 0.1–2.4 % on 6 of 8 portals (idnes still 98.9 %, index surfaces unprofiled ~100 %). **Operator decided 2026-08-16: dual-write ON, index archiving NOT YET** (index keys are week-stamped, so the cap bounds detail but not index; ~100 % churn on a surface nobody has diffed). #1074 first wired the R2 secrets into all 14 page-fetching lanes — nine of ten had none, so enabling the flag would have archived nothing while every scrape stayed green; #1075 the same for the backfill lane's own write step. **Backfill PROVEN 2026-08-16** (run 31970354928) **and RUNNING since**: the first 2,000 pages came back round-trip byte-identical (**0 mismatch / 0 unreadable**), and as of **2026-08-17 17:08 UTC, 270,000 of ~445,191 pages (≈61 %)** have migrated across six budgeted dispatches — 266,012 inserted, **0 unmapped**, 21.1 GB read → 4.8 GB stored (**4.4x**), cursor `after_id=1,483,282`. A run stops on its wall-clock budget stamping `outcome='stopped'`, never mid-row, and the next resumes from that row's keyset cursor; `'ok'` means only that the scan ran off the end. The verifier samples the whole source corpus, so it reports `missing` for everything not yet migrated and passes only after completion. Remaining ≈4 dispatches at the measured ~980 pages/min (the earlier ~570/min estimate was low). Each run holds `location-batch` for ~45 min and that group is saturated (intake times out hourly, resolve re-queues every 15 min), so dispatches are serialised into the idle gaps rather than run back-to-back. **Follow-up, not mid-run:** the uploader logs `urllib3` "Connection pool is full, discarding connection" continuously against R2 — correctness is unaffected (boto3 retries) but throughput is being left on the table; raise `max_pool_connections` in the botocore config. **`payload_dual_write` flipped ON globally 2026-08-17 12:29 UTC** — all nine portals, no per-portal overrides, 8 of 9 confirmed cycling fresh rows (mmreality's cron had not run since the flip). `payload_index_archive` remains **OFF** |
+| W2a payload archive rewrite | append-on-change `portal_raw_payloads` | 🟡 hardened + measured (2026-08-14) — migrations 405–408 applied; bodies to R2, storage bounded by construction (cap 2 + 7-day floor), profiles per (source, page_kind) and now in the contracts; detail churn 0.1–2.4 % on 6 of 8 portals (idnes still 98.9 %, index surfaces unprofiled ~100 %). **Operator decided 2026-08-16: dual-write ON, index archiving NOT YET** (index keys are week-stamped, so the cap bounds detail but not index; ~100 % churn on a surface nobody has diffed). #1074 first wired the R2 secrets into all 14 page-fetching lanes — nine of ten had none, so enabling the flag would have archived nothing while every scrape stayed green; #1075 the same for the backfill lane's own write step. **Backfill PROVEN 2026-08-16** (run 31970354928) **and RUNNING since**: the first 2,000 pages came back round-trip byte-identical (**0 mismatch / 0 unreadable**), and as of **2026-08-17 17:08 UTC, 270,000 of ~445,191 pages (≈61 %)** have migrated across six budgeted dispatches — 266,012 inserted, **0 unmapped**, 21.1 GB read → 4.8 GB stored, cursor `after_id=1,483,282`. **The compression ratio fell from the proving run's 7.5x to 4.4x** once the sample stopped being the first 2,000 rows — projecting the measured ratio over the full archive puts the backfill's one-time R2 footprint at **≈7.9 GB** (well inside the ~28.6 GB steady-state R2 projection the storage sign-off used; the ~4 GB figure elsewhere in this file is the POSTGRES metadata allowance, a different budget). The denominator is not static: `portal_raw_pages` is still live-written, so new rows land above the cursor and "~445,191" is the inventory count, not a finish line. A run stops on its wall-clock budget stamping `outcome='stopped'`, never mid-row, and the next resumes from that row's keyset cursor; `'ok'` means only that the scan ran off the end. The verifier samples the whole source corpus, so it reports `missing` for everything not yet migrated and passes only after completion. Remaining ≈4 dispatches at the measured ~980 pages/min (the earlier ~570/min estimate was low). Each run holds `location-batch` for ~45 min and that group is saturated (intake times out hourly, resolve re-queues every 15 min), so dispatches are serialised into the idle gaps rather than run back-to-back. **Follow-up, not mid-run:** the uploader logs `urllib3` "Connection pool is full, discarding connection" continuously against R2 — correctness is unaffected (boto3 retries) but throughput is being left on the table; raise `max_pool_connections` in the botocore config. **`payload_dual_write` flipped ON globally 2026-08-17 12:29 UTC** — all nine portals, no per-portal overrides; *reported by the session that performed the flip, which also reported 8 of 9 portals confirmed writing fresh rows (mmreality's cron had not cycled since). Not independently re-queried here — verify against `app_settings` / `portals.operational_limits` before relying on it.* `payload_index_archive` remains **OFF** |
 | W2 HTML re-mine | claims from archived `portal_raw_payloads` bodies | 🟡 **infrastructure shipped, lane deliberately inert** (2026-08-17) — W2-0/W2-1 (#1048/#1045), W2-3 the exclusion-zone scoper (#1053), W2-4 the contract shadow mechanism (#1050, mig 404), W2-5 the permanent fixture-diff gate (#1058) and W2-2 the evidence-bearing claims + archived-HTML re-mine lane (#1079) are all merged. The lane mines **nothing**: `ARCHIVE_READERS` is empty and a run with no reader returns *before* it opens a batch row, because a batch stamped `'ok'` would move the incremental watermark over a corpus it never opened. **W2-6…W2-12, the per-portal contracts that would give it a reader, are unstarted and unowned** — that is the whole remaining scope of W2 |
 | W3–W6 | history backfill, refetch cohorts, LLM lane, serving flip | ⚪ not started (W3 is built but unmerged — PR #1057, open) |
 
@@ -536,9 +536,10 @@ reason. Nobody has yet diffed an index page to find out what moves on it.
 The line above — "none is profiled" — was **not what the code did**. Every profile was
 selected by `source` alone and therefore also applied to index bodies, so those ~100 %
 index figures were measured through detail-page rules that nobody had ever pointed at an
-index page. Fixed before either write flag goes on, which is the cheap moment: nothing is
-archived yet (`portal_raw_payloads` = 0 rows, the backfill has never run), so no content
-address has to be rewritten.
+index page. Fixed before either write flag went on, which was the cheap moment: **at that
+time** nothing was archived (`portal_raw_payloads` 0 rows, the backfill not yet run), so no
+content address had to be rewritten. (Both are now true in the other direction — dual-write
+is ON and the archive is filling; see "Those three decisions — answered" below.)
 
 **Measured first, on live pages, because "harmful" and "merely useless" are different
 verdicts.** The prior was that a detail selector describing *other listings* (idnes's
@@ -824,18 +825,21 @@ name rather than merely pass) — and the rule in `.claude/skills/scraper-ops/SK
 SHA; the names in `04e1db9a`). A history rewrite of `main` or a GitHub Support purge are the
 only true removals; neither is engineering's call.
 
-**Not enabled, deliberately:** `payload_dual_write` and `payload_index_archive` are OFF (which
-is exactly why W2a-7's retention change was free to make — nothing has been archived yet, so
-no body was evicted by lowering the cap), the
-445k-row backfill has not run, the P4 pruner lane ships with `location_jobs.enabled=false`,
-and no per-portal W2 contract exists yet. Those wait on the operator's O3/O4 sign-off of
-`volatile_paths` + the storage projection.
+**Not enabled, deliberately — state as of 2026-08-14, since superseded:** `payload_dual_write`
+and `payload_index_archive` were both OFF (which is exactly why W2a-7's retention change was
+free to make — nothing had been archived, so no body was evicted by lowering the cap), the
+445k-row backfill had not run, the P4 pruner lane shipped with `location_jobs.enabled=false`,
+and no per-portal W2 contract existed. Those waited on the operator's O3/O4 sign-off of
+`volatile_paths` + the storage projection. **O3/O4 were answered 2026-08-16/17** — dual-write
+is ON and the backfill is running; see "Those three decisions — answered" below. The pruner
+and the per-portal contracts are still as described.
 
 ### W2a hardening — CLOSED (2026-08-14, migrations 405–408 all applied)
 
 Five PRs taken before enabling any write, because every one of them gets harder once the
-archive holds rows. `portal_raw_payloads` is still **0 rows** and both write flags are still
-**OFF** — none of this touched production data.
+archive holds rows. **When they landed** `portal_raw_payloads` was **0 rows** and both write
+flags were **OFF** — none of this touched production data, which was the entire point of
+sequencing them first. (Both have since changed: dual-write ON 2026-08-17, archive filling.)
 
 | PR | What it changed | Why it had to precede the first write |
 | --- | --- | --- |
@@ -894,7 +898,7 @@ measurement phase is closed:
 
 | Decision | Answer | State |
 | --- | --- | --- |
-| enable `payload_dual_write` | **YES** — decided 2026-08-16 | **ON globally 2026-08-17 12:29 UTC**, all nine portals, no per-portal overrides; 8 of 9 confirmed writing fresh rows the same day |
+| enable `payload_dual_write` | **YES** — decided 2026-08-16 | **ON globally 2026-08-17 12:29 UTC**, all nine portals, no per-portal overrides (as reported by the session that flipped it — re-query `app_settings` to confirm) |
 | enable `payload_index_archive` | **NOT YET** — the evidence said opposite answers for the two flags, and the flags exist separately for exactly that reason | **OFF.** Index keys are week-stamped, so the cap-2 bound holds detail but not index, and the surface still churns ~100 % un-diffed |
 | run the 445k-row backfill | **YES** | **In progress** — ≈61 % at 2026-08-17 17:08 UTC, resumable, 0 unmapped; see the wave-status table |
 
