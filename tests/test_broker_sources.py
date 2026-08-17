@@ -29,10 +29,17 @@ statements it may explain:
      `test_null_column_deltas_only_add_columns` proves token by token.
   3. ceskereality's 420-normalisation moved from the INSERT + GROUP BY into the
      chunk CTE. Same value, same grouping key.
+
+Portals onboarded AFTER the refactor (mmreality, D3) have no pre-registry SQL, so
+the transcript cannot speak for them: they are held to the properties every
+statement must have — source-pinned, {sel}-bounded, no unfilled slot — plus their
+own config's promises, and are counted separately so a new row can never move
+what the five migrated portals emit.
 """
 
 from __future__ import annotations
 
+import dataclasses
 import difflib
 import os
 import re
@@ -44,12 +51,14 @@ from toolkit.broker_sources import (
     BROKER_FINGERPRINT_KEYS,
     BROKER_SOURCE_NAMES,
     BROKER_SOURCES,
+    BrokerSource,
     attribution_statements,
 )
 
 SEL = "l.id = ANY(%(ids)s)"
 
-# The statement kinds each source issues, in execution order.
+# The statement kinds each source issues, in execution order. The five below are
+# the MIGRATED portals — the ones the frozen transcript can speak for.
 _FAMILIES: dict[str, tuple[str, ...]] = {
     "sreality": ("identity", "email", "phone", "link"),
     "idnes": ("identity", "email", "phone", "link"),
@@ -57,6 +66,16 @@ _FAMILIES: dict[str, tuple[str, ...]] = {
     "realitymix": ("identity", "link"),
     "remax": ("identity", "email", "link"),
 }
+
+# Sources onboarded AFTER the registry, which by construction have no
+# pre-registry SQL to be compared against. They are held to the properties every
+# statement must have (source-pinned, {sel}-bounded, no unfilled slot) plus their
+# own config's promises, not to a transcript that never existed.
+_POST_REGISTRY_FAMILIES: dict[str, tuple[str, ...]] = {
+    # D3: write_contacts=False, so identity + link and NO contact upserts.
+    "mmreality": ("identity", "link"),
+}
+_ALL_FAMILIES = {**_FAMILIES, **_POST_REGISTRY_FAMILIES}
 
 # Which of the three documented deviations explains each non-identical statement.
 _DELTA_INLINED_CTE = {("sreality", "email"), ("sreality", "phone")}
@@ -77,7 +96,7 @@ def _rendered(source: str) -> list[str]:
 
 
 def _one(source: str, kind: str) -> str:
-    return _rendered(source)[_FAMILIES[source].index(kind)]
+    return _rendered(source)[_ALL_FAMILIES[source].index(kind)]
 
 
 def _expected(source: str, kind: str) -> str:
@@ -100,10 +119,17 @@ def test_rendered_sql_matches_the_frozen_snapshot(source: str, kind: str) -> Non
 def test_the_generated_statements_are_exactly_the_pre_registry_families() -> None:
     """Same statements, same order, no extras — a dropped contact upsert loses a
     whole portal's bridging silently, and a statement issued for a source that
-    never had one would write contacts nobody verified."""
-    for source, kinds in _FAMILIES.items():
+    never had one would write contacts nobody verified.
+
+    The corpus is the 16 migrated statements PLUS whatever the post-registry rows
+    generate, counted separately: a portal onboarded after the refactor must not
+    be able to change what the five migrated ones emit."""
+    for source, kinds in _ALL_FAMILIES.items():
         assert len(_rendered(source)) == len(kinds), source
-    assert len(attribution_statements()) == len(PRE_REGISTRY_SQL) == 16
+    migrated = sum(len(_FAMILIES[s]) for s in _FAMILIES)
+    assert migrated == len(PRE_REGISTRY_SQL) == 16
+    post = sum(len(_POST_REGISTRY_FAMILIES[s]) for s in _POST_REGISTRY_FAMILIES)
+    assert len(attribution_statements()) == migrated + post == 18
 
 
 def test_the_set_of_statements_that_deviate_is_frozen() -> None:
@@ -167,7 +193,7 @@ def test_ceskereality_normalises_the_phone_inside_the_chunk() -> None:
     assert moved.replace(at_insert, "c.phone") == _one("ceskereality", "phone")
 
 
-@pytest.mark.parametrize("source", sorted(_FAMILIES))
+@pytest.mark.parametrize("source", sorted(_ALL_FAMILIES))
 def test_every_statement_is_pinned_to_its_own_source(source: str) -> None:
     """_attribute runs EVERY source's SQL over the same id chunk, so a statement
     that lost its source literal would attribute another portal's listings to this
@@ -190,20 +216,82 @@ def test_every_statement_carries_exactly_one_sel_slot() -> None:
 
 
 def test_registry_order_drives_the_full_sweep_source_scan() -> None:
+    """Append-only: the tuple IS the sweep's `source = ANY(...)` scan and its
+    per-chunk execution order, so a reorder silently changes both."""
     assert BROKER_SOURCE_NAMES == (
-        "sreality", "idnes", "ceskereality", "realitymix", "remax")
+        "sreality", "idnes", "ceskereality", "realitymix", "remax", "mmreality")
 
 
 def test_fingerprint_keys_reproduce_the_pre_registry_allowlist() -> None:
     """The dirty-queue allowlist that makes a broker-only page change re-enqueue.
     Losing a key silently stops re-attribution for that portal; deriving it can
-    only reorder the tuple, never change the set."""
+    only reorder the tuple, never change the set.
+
+    D3 added exactly one member, "id" — mmreality's own broker key. Widening the
+    allowlist is safe in one direction only, and this is that direction: the
+    fingerprint is read off `raw["broker"]` for EVERY attributed source, so a new
+    key can only make more blocks compare unequal (an extra re-attribution), never
+    fewer. The next assertion is what makes that concrete: no other portal writes a
+    bare "id" into its block, so for them the added slot is a constant None."""
     assert set(BROKER_FINGERPRINT_KEYS) == {
-        "account_oid", "broker_id", "name", "email", "phone",
+        "account_oid", "broker_id", "id", "name", "email", "phone",
         "agency_name", "agency_slug", "agency_id"}
     registered = {k for c in BROKER_SOURCES if c.block == "broker"
                   for k in c.fingerprint_keys()}
     assert set(BROKER_FINGERPRINT_KEYS) == registered
+    owners = {c.source for c in BROKER_SOURCES
+              if c.block == "broker" and "id" in c.fingerprint_keys()}
+    assert owners == {"mmreality"}
+
+
+def test_mmreality_writes_an_identity_email_but_no_contact_rows() -> None:
+    """D3's configuration argument, asserted in the generated SQL.
+
+    Every mmreality broker publishes the same role address and the same
+    switchboard (12 distinct broker ids, one email, one number, measured live), so
+    write_contacts=False keeps ~1,021 identical rows out of
+    broker_identity_contacts — rows the freq==1 bridge guard would discard anyway.
+    What it must NOT do is take the identity email with them: that column is the
+    join to the mmreality.cz firm. Dropping email_key would suppress the contacts
+    too and lose the firm linkage, which is why this is a flag and not an absent
+    key — the knowingly accepted cost being a role address on every mmreality
+    identity (and so on brokers.primary_email)."""
+    (cfg,) = [c for c in BROKER_SOURCES if c.source == "mmreality"]
+    assert cfg.write_contacts is False
+    assert cfg.email_key == "email"
+
+    statements = cfg.statements()
+    assert len(statements) == 2
+    assert "broker_identity_contacts" not in " ".join(statements)
+    identity = _one("mmreality", "identity")
+    assert "INSERT INTO broker_identities" in identity
+    assert "lower(nullif(l.raw_json->'broker'->>'email', '')) AS email" in identity
+
+
+def test_flipping_only_write_contacts_restores_mmrealitys_two_contact_upserts() -> None:
+    """The suppressed half must not rot. phone_key/phone_prefix_420 generate no SQL
+    while the flag is off, so nothing would notice if they were wrong — this renders
+    the same row with the flag flipped and checks the contact pair comes back with
+    mmreality's bare-9-digit numbers normalised to 420."""
+    (cfg,) = [c for c in BROKER_SOURCES if c.source == "mmreality"]
+    flipped = dataclasses.replace(cfg, write_contacts=True)
+
+    statements = [_norm(s.format(sel=SEL)) for s in flipped.statements()]
+
+    assert len(statements) == 4
+    assert "INSERT INTO broker_identity_contacts" in statements[1]
+    assert "'email', c.email" in statements[1]
+    assert "'phone', c.phone" in statements[2]
+    assert ("CASE WHEN length(regexp_replace(l.raw_json->'broker'->>'phone', "
+            "'[^0-9]', '', 'g')) = 9 THEN '420' ||") in statements[2]
+
+
+def test_write_contacts_is_opt_out_so_a_forgotten_flag_still_writes_contacts() -> None:
+    """The default has to be the safe one: a portal onboarded without thinking
+    about the flag keeps the pre-D3 behaviour."""
+    assert BrokerSource(source="x", block="broker", id_key="i",
+                        name_key="n").write_contacts is True
+    assert {c.source for c in BROKER_SOURCES if not c.write_contacts} == {"mmreality"}
 
 
 def test_scraper_db_derives_both_registries_from_this_module() -> None:

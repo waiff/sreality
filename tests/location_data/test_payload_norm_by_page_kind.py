@@ -124,6 +124,8 @@ _DETAIL_DIGESTS: dict[tuple[str, str], str] = {
     # out of it is a page the claim was never checked against.
     ("idnes", "portal_html/idnes_detail.html"):
         "6952b4899e1ecc7e3ddbcaa22fcf43ffb71f92a8096758fea0d94a6b359dc965",
+    ("mmreality", "portal_html/mmreality_detail.html"):
+        "2f97d89cbf626c931839708a9eea195052bfcd30c1faedce1c1a8ead202d473c",
     ("realitymix", "portal_html/realitymix_detail.html"):
         "7d67a39a587f1582b400a2537c9b093f80d4bbeda170f01f438e4c7521dbe224",
     ("remax", "portal_html/remax_detail.html"):
