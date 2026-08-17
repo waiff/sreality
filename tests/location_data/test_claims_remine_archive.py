@@ -472,12 +472,14 @@ def test_archived_absences_dedupe_on_the_key_the_unique_index_actually_carries()
 
 # ------------------------------------------------------- end to end through extract_payload
 
-def _with_reader(fn: Any, entries: list[Entry], **kwargs: Any) -> Any:
+def _with_reader(fn: Any, entries: list[Entry], *, max_value_bytes: int | None = None,
+                 **kwargs: Any) -> Any:
     original = dict(ARCHIVE_READERS)
     ARCHIVE_READERS["fake_html"] = fn
     try:
         return extract_payload(payload(), listing_row(**kwargs), entries,
-                               register=EMPTY_REGISTER)
+                               register=EMPTY_REGISTER,
+                               max_value_bytes=max_value_bytes)
     finally:
         ARCHIVE_READERS.clear()
         ARCHIVE_READERS.update(original)
@@ -704,21 +706,46 @@ class _Cursor:
         return self._result
 
 
-class _Conn:
-    """An in-memory `portal_raw_payloads` + `location_claim_batches` pair, keyset
-    arithmetic and all — the same shape `test_claims_intake_resume` uses, because the
-    invariant under test is the same one: every body seen exactly once across a chain of
-    budgeted runs."""
+class _Payload:
+    """One archived row, shaped like production: `listing_id` is NULL, because neither
+    writer sets it (`scraper.db.append_payload_if_enabled` passes None,
+    `payload_backfill._INSERT_SQL` selects NULL::bigint)."""
 
-    def __init__(self, count: int) -> None:
-        self.payloads = [
-            (i, "remax", f"n{i}", "detail", "ab" * 32,
-             FETCHED_AT + timedelta(minutes=i), 1000 + i, False)
-            for i in range(1, count + 1)
+    def __init__(self, id: int, source: str, native: str, page_kind: str = "detail",
+                 first_observed_at: datetime | None = None, http_status: int | None = 200,
+                 listing_id: int | None = None) -> None:
+        self.id = id
+        self.source = source
+        self.native = native
+        self.page_kind = page_kind
+        self.first_observed_at = first_observed_at or FETCHED_AT + timedelta(minutes=id)
+        self.http_status = http_status
+        self.listing_id = listing_id
+
+
+class _Conn:
+    """An in-memory `portal_raw_payloads` + `listings` + `location_claim_batches` set,
+    keyset arithmetic and all — the same shape `test_claims_intake_resume` uses, because
+    the invariant under test is the same one: every body seen exactly once across a chain
+    of budgeted runs.
+
+    The scan is EVALUATED, not canned: `_scan` reads the join clause, the `http_status`
+    filter and the latest-per-key anti-join out of the SQL it is handed and applies them to
+    these rows. A fake that answered every `FROM portal_raw_payloads` with a fixed list
+    would pass whatever the join said — which is exactly how a join on the never-populated
+    `listing_id` column reached review."""
+
+    def __init__(self, count: int, payloads: list[_Payload] | None = None) -> None:
+        self.payload_rows = payloads if payloads is not None else [
+            _Payload(i, "remax", f"n{i}") for i in range(1, count + 1)
         ]
+        # `listings` really does hold these: (source, source_id_native) is UNIQUE on it
+        # (`listings_source_native_uidx`, migration 091), so the join is 1:1.
+        self.listings = {(p.source, p.native): 1000 + p.id for p in self.payload_rows}
         self.batches: list[dict[str, Any]] = []
         self.seen: list[int] = []
         self.now = OBSERVED_AT
+        self.exclusion_sources = ["remax"]
 
     def cursor(self) -> _Cursor:
         return _Cursor(self)
@@ -731,7 +758,7 @@ class _Conn:
         if "set_config" in sql:
             return
         if "FROM portal_contracts WHERE is_active" in sql:
-            cur._result = [("remax", [])]
+            cur._result = [(src, []) for src in self.exclusion_sources]
             return
         if "FROM portal_contracts WHERE source" in sql:
             cur._result = [(1, 2)]
@@ -787,15 +814,47 @@ class _Conn:
         raise AssertionError(f"unhandled SQL: {sql[:120]}")
 
     def _scan(self, sql: str, params: dict[str, Any]) -> list[tuple[Any, ...]]:
-        rows = sorted(self.payloads, key=lambda r: r[0])
-        if "p.first_observed_at >= %(watermark)s" in sql:
-            rows = sorted(self.payloads, key=lambda r: (r[5], r[0]))
-            rows = [r for r in rows
-                    if r[5] >= params["watermark"]
-                    and (r[5], r[0]) > (params["after_ts"], params["after_id"])]
+        rows = list(self.payload_rows)
+
+        # THE JOIN, evaluated. Joining on `p.listing_id` drops everything, because nothing
+        # populates that column — which is the whole point of reading it off the SQL.
+        if "l.id = p.listing_id" in sql:
+            joined = [(r, r.listing_id) for r in rows if r.listing_id is not None]
+        elif ("l.source = p.source AND l.source_id_native = p.source_id_native") in sql:
+            joined = [(r, self.listings.get((r.source, r.native))) for r in rows]
+            joined = [(r, lid) for r, lid in joined if lid is not None]
         else:
-            rows = [r for r in rows if r[0] > params["after_id"]]
-        return rows[:params["batch_size"]]
+            raise AssertionError("the scan must join listings on a key someone populates")
+
+        if "p.source = %(source)s" in sql:
+            joined = [(r, lid) for r, lid in joined if r.source == params["source"]]
+        if "p.http_status IS NULL OR p.http_status BETWEEN 200 AND 299" in sql:
+            joined = [(r, lid) for r, lid in joined
+                      if r.http_status is None or 200 <= r.http_status <= 299]
+
+        # The latest-per-key anti-join, over the SAME filtered set the SQL restricts it to.
+        ok = {id(r) for r, _ in joined}
+        latest = [
+            (r, lid) for r, lid in joined
+            if not any(n.source == r.source and n.native == r.native
+                       and n.page_kind == r.page_kind and id(n) in ok
+                       and (n.first_observed_at, n.id) > (r.first_observed_at, r.id)
+                       for n in self.payload_rows)
+        ]
+
+        if "p.first_observed_at >= %(watermark)s" in sql:
+            latest.sort(key=lambda t: (t[0].first_observed_at, t[0].id))
+            latest = [(r, lid) for r, lid in latest
+                      if r.first_observed_at >= params["watermark"]
+                      and (r.first_observed_at, r.id) > (params["after_ts"],
+                                                         params["after_id"])]
+        else:
+            latest.sort(key=lambda t: t[0].id)
+            latest = [(r, lid) for r, lid in latest if r.id > params["after_id"]]
+
+        return [(r.id, r.source, r.native, r.page_kind, "ab" * 32, r.first_observed_at,
+                 lid, False)
+                for r, lid in latest[:params["batch_size"]]]
 
 
 @pytest.fixture
@@ -970,3 +1029,172 @@ def test_the_lane_does_not_need_r2_to_establish_that_it_is_inert(monkeypatch):
     monkeypatch.setattr(payloads, "open_store", lambda: opened.append(1))
     assert _run(_Conn(5))["outcome"] == "inert"
     assert opened == []
+
+
+# --------------------------------------------------- what the scan actually selects
+
+def test_the_scan_joins_listings_on_the_key_the_writers_actually_populate(_wired):
+    """`portal_raw_payloads.listing_id` is nullable and NOTHING sets it: the live writer
+    (`scraper.db.append_payload_if_enabled`) passes `listing_id=None` and the backfill
+    (`payload_backfill._INSERT_SQL`) selects `NULL::bigint` for all 445k migrated pages.
+    An inner join on it matches zero rows over the entire archive — and this lane would not
+    have raised: the first batch comes back empty, `reached_end` trips, the batch stamps
+    'ok', and the watermark claims coverage of a corpus never opened."""
+    for sql in (claims_remine_archive._PAYLOAD_SCAN_FULL_SQL,
+                claims_remine_archive._PAYLOAD_SCAN_INCREMENTAL_SQL):
+        assert "l.id = p.listing_id" not in sql
+        assert "l.source = p.source AND l.source_id_native = p.source_id_native" in sql
+
+    # And end to end: every fixture payload has listing_id NULL, as production does.
+    conn = _Conn(5)
+    assert all(p.listing_id is None for p in conn.payload_rows)
+    stats = _run(conn)
+    assert stats["outcome"] == "ok"
+    assert conn.seen == [1, 2, 3, 4, 5], "a join on listing_id would make this empty"
+    assert stats["payloads"] == 5
+
+
+def test_a_body_the_portal_served_as_an_error_is_never_mined(_wired):
+    """`payloads._PRUNE_SQL` ranks `http_status IS NULL OR BETWEEN 200 AND 299` first —
+    migration 403 cites idnes' 503 interstitial. A newer error body must not shadow the 200
+    underneath it, and a key whose only bodies are errors is out of scope rather than mined
+    for claims an interstitial cannot carry."""
+    conn = _Conn(0, payloads=[
+        # One key, a good body then a later 503: the 200 must win.
+        _Payload(1, "remax", "shadowed", http_status=200),
+        _Payload(2, "remax", "shadowed", http_status=503),
+        # One key that is nothing but an error page: skipped entirely.
+        _Payload(3, "remax", "only-errors", http_status=404),
+        # A pre-403 row with no status recorded is treated as servable, as the cap does.
+        _Payload(4, "remax", "unstamped", http_status=None),
+    ])
+    stats = _run(conn)
+    assert stats["outcome"] == "ok"
+    assert conn.seen == [1, 4]
+
+
+def test_only_the_latest_good_body_per_key_is_mined(_wired):
+    conn = _Conn(0, payloads=[
+        _Payload(1, "remax", "k"), _Payload(2, "remax", "k"), _Payload(3, "remax", "k"),
+    ])
+    _run(conn)
+    assert conn.seen == [3]
+
+
+# ------------------------------------------------- per-source coverage, per-source batch
+
+def _entries_with_readers_on(*readable: str) -> dict[str, list[Entry]]:
+    """Every source has an ACTIVE contract (the preflight demands it); only `readable` name
+    a reader this lane implements."""
+    return {
+        src: [archive_entry(source=src,
+                            reader="fake_html" if src in readable else "point_pair")]
+        for src in claims_intake.SOURCES
+    }
+
+
+def test_each_readable_source_gets_its_own_batch_and_its_own_watermark(monkeypatch):
+    """`location_claim_batches` resume/watermark is keyed on `(lane, source, scan_mode)`.
+    One pass over every portal under a NULL source would stamp 'ok' as a claim of coverage
+    over all nine — so the NEXT portal's first reader would start behind a watermark
+    covering bodies nothing ever mined."""
+    monkeypatch.setattr(claims_remine_archive, "missing_relations", lambda conn: [])
+    monkeypatch.setattr(claims_remine_archive, "assert_inventory_ready", lambda conn: 2201)
+    monkeypatch.setattr(claims_remine_archive, "load_entries",
+                        lambda conn: _entries_with_readers_on("remax", "idnes"))
+    monkeypatch.setitem(
+        ARCHIVE_READERS, "fake_html",
+        lambda entry, row, payload, document: [ArchiveRead(_base(entry, row, value_text="K"))])
+
+    conn = _Conn(0, payloads=[
+        _Payload(1, "remax", "r1"), _Payload(2, "idnes", "i1"),
+        _Payload(3, "maxima", "m1"),
+    ])
+    conn.exclusion_sources = ["remax", "idnes", "maxima"]
+    stats = _run(conn, source=None)
+
+    assert stats["readable_sources"] == ["idnes", "remax"]
+    assert sorted(b["source"] for b in conn.batches) == ["idnes", "remax"]
+    assert all(b["source"] is not None for b in conn.batches), \
+        "a NULL-source batch is a coverage claim over every portal"
+    assert set(stats["per_source"]) == {"idnes", "remax"}
+    assert stats["payloads"] == 2, "maxima has no reader, so its body is never scanned"
+    assert sorted(conn.seen) == [1, 2]
+    assert stats["outcome"] == "ok"
+
+
+def test_the_aggregate_is_only_ok_when_every_readable_source_reached_its_end(monkeypatch):
+    """A source the budget never reached has not been covered, and 'ok' is what the next
+    run's watermark reads."""
+    monkeypatch.setattr(claims_remine_archive, "missing_relations", lambda conn: [])
+    monkeypatch.setattr(claims_remine_archive, "assert_inventory_ready", lambda conn: 2201)
+    monkeypatch.setattr(claims_remine_archive, "load_entries",
+                        lambda conn: _entries_with_readers_on("remax", "idnes"))
+    monkeypatch.setitem(ARCHIVE_READERS, "fake_html",
+                        lambda entry, row, payload, document: [])
+    conn = _Conn(0, payloads=[_Payload(1, "remax", "r1"), _Payload(2, "idnes", "i1")])
+    conn.exclusion_sources = ["remax", "idnes"]
+
+    # The limit is spent on the first source, so the second never opens a batch at all.
+    stats = _run(conn, source=None, limit=1)
+    assert stats["outcome"] == "stopped"
+    assert set(stats["per_source"]) == {"idnes"}
+    assert [b["source"] for b in conn.batches] == ["idnes"]
+
+
+def test_an_operator_anchor_across_several_readable_sources_is_refused(monkeypatch):
+    """`--start-after-id` anchors ONE source's keyset; silently applying it to each in turn
+    would skip a different, arbitrary prefix of every other portal."""
+    monkeypatch.setattr(claims_remine_archive, "missing_relations", lambda conn: [])
+    monkeypatch.setattr(claims_remine_archive, "assert_inventory_ready", lambda conn: 2201)
+    monkeypatch.setattr(claims_remine_archive, "load_entries",
+                        lambda conn: _entries_with_readers_on("remax", "idnes"))
+    monkeypatch.setitem(ARCHIVE_READERS, "fake_html",
+                        lambda entry, row, payload, document: [])
+    conn = _Conn(0, payloads=[_Payload(1, "remax", "r1"), _Payload(2, "idnes", "i1")])
+    conn.exclusion_sources = ["remax", "idnes"]
+    with pytest.raises(IntakeRefused, match="start-after-id"):
+        _run(conn, source=None, start_after_id=5)
+    assert conn.batches == [], "the refusal must precede the batch row"
+
+
+# ------------------------------------------------------------------ the value-size bound
+
+def test_an_oversized_archived_value_is_refused_and_recorded_never_dropped():
+    """W1's cap exists because a reader that stores its node verbatim inherits whatever the
+    substrate hands it — and an HTML reader over a whole page is exactly that producer."""
+    entry = archive_entry()
+    result = _with_reader(
+        lambda entry, row, payload, document: [
+            ArchiveRead(_base(entry, row, value_text="x" * 4096))],
+        [entry], max_value_bytes=1024)
+    assert result.claims == []
+    assert result.oversized == 1
+    assert len(result.absences) == 1
+    absence = result.absences[0]
+    assert absence.surface == "archived_html" and absence.reason == "not_attempted"
+    assert "cap 1024" in absence.detail
+    assert "refetch" in absence.detail, "an archived body is immutable; say what fixes it"
+    # No refetch-cohort row: re-reading a content-addressed body yields the same bytes
+    # forever, so enrolling it would be a permanently-failing attempt counter.
+    assert result.enrichment == []
+
+
+def test_the_evidence_quote_counts_toward_the_bound():
+    """It rides in the SAME jsonb array as the value columns (`Claim.to_row()`), it is NULL
+    on every W1 claim so `claim_value_bytes` never had to count it, and on this substrate it
+    is a span of a 41-245 KB HTML body — the one field most likely to blow the bound."""
+    claim = raw_claim(evidence_quote="q" * 500, span_start=0, span_end=500,
+                      payload_sha256="ab" * 32)
+    assert claims_intake.claim_value_bytes(claim) < 500
+    assert claims_remine_archive.archived_claim_value_bytes(claim) >= 500
+    assert (claims_remine_archive.archived_claim_value_bytes(claim)
+            == claims_intake.claim_value_bytes(claim) + 500)
+
+
+def test_a_value_inside_the_cap_is_kept():
+    result = _with_reader(
+        lambda entry, row, payload, document: [
+            ArchiveRead(_base(entry, row, value_text="Krymská"))],
+        [archive_entry()], max_value_bytes=1024)
+    assert len(result.claims) == 1 and result.oversized == 0

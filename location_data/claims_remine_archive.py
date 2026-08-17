@@ -121,8 +121,12 @@ from location_data.claims_intake import (
     _BATCH_INSERT_SQL,
     _RESUME_SQL,
     _WATERMARK_SQL,
+    MAX_CLAIM_VALUE_BYTES_ENV,
+    DEFAULT_MAX_CLAIM_VALUE_BYTES,
     assert_inventory_ready,
+    claim_value_bytes,
     coordinate_verdict,
+    env_positive_int,
     guarded,
     load_entries,
     missing_relations,
@@ -384,15 +388,62 @@ def _licensed_coordinate(
     return replace(claim, licence_class=verdict.licence_class), verdict.reason
 
 
+def archived_claim_value_bytes(claim: Claim) -> int:
+    """`claim_value_bytes` PLUS the evidence quote, and the quote counts on purpose.
+
+    W1's cap exists so one claim array cannot exceed Postgres's 256 MB jsonb limit, and
+    `claim_value_bytes` measures the value columns because on W1's substrate they are the
+    only unbounded ones. `evidence_quote` rides in the SAME `jsonb_to_recordset` array
+    (`Claim.to_row()`), it is NULL on every W1 claim, and on this substrate it is a span of
+    an HTML body 41-245 KB long — so leaving it out would exempt the one field most likely
+    to blow the bound from the bound written to stop it."""
+    total = claim_value_bytes(claim)
+    if claim.evidence_quote is not None:
+        total += len(claim.evidence_quote.encode("utf-8"))
+    return total
+
+
+def _refuse_oversized_archived(
+    row: ListingRow, claim: Claim, *, max_value_bytes: int,
+) -> Absence | None:
+    """The cap, applied to one archived claim. None means keep it.
+
+    An absence and NO refetch-cohort row, which is where this parts company with W1's
+    `_refuse_oversized`. That one enrols the listing in `{source}_detail_refetch` because a
+    truncated `raw_json` really can be repaired by fetching the page again. An archived body
+    is immutable and content-addressed: re-reading it yields the same oversized value
+    forever, so a refetch row would be a permanently-failing attempt counter. What fixes
+    this is a narrower locator or a transform in the contract — a reviewed change, not a
+    retry — and the absence is the durable record that says so (03 §3.2: a dropped claim and
+    a claim never produced must not be indistinguishable)."""
+    size = archived_claim_value_bytes(claim)
+    if size <= max_value_bytes:
+        return None
+    detail = (f"{claim.claim_type} value from {claim.extractor_id} is {size} bytes "
+              f"(cap {max_value_bytes}) on the archived body; refused — an archived body is "
+              f"immutable, so this needs a narrower locator, not a refetch")
+    LOG.warning("REMINE-ARCHIVE oversized value refused listing_id=%d source=%s "
+                "claim_type=%s extractor_id=%s bytes=%d cap=%d",
+                row.listing_id, row.source, claim.claim_type, claim.extractor_id,
+                size, max_value_bytes)
+    return Absence(
+        listing_id=row.listing_id, surface=ARCHIVE_SURFACE, field_=claim.claim_type,
+        reason="not_attempted", extraction_method=claim.extraction_method, detail=detail)
+
+
 def extract_payload(
     payload: ArchivedPayload,
     row: ListingRow,
     entries: list[Entry],
     *,
     register: ScopeRegister,
+    max_value_bytes: int | None = None,
 ) -> IntakeResult:
     """Everything this lane knows about one archived body. Pure — no DB, no clock, no
     network."""
+    if max_value_bytes is None:
+        max_value_bytes = env_positive_int(MAX_CLAIM_VALUE_BYTES_ENV,
+                                           DEFAULT_MAX_CLAIM_VALUE_BYTES)
     result = IntakeResult()
     applicable = archive_entries(entries, payload.page_kind)
     if not applicable or payload.body is None:
@@ -432,6 +483,12 @@ def extract_payload(
                     continue
             assert_stampable(claim)
             assert_evidence_complete(claim)
+            refused = _refuse_oversized_archived(
+                row, claim, max_value_bytes=max_value_bytes)
+            if refused is not None:
+                result.absences.append(refused)
+                result.oversized += 1
+                continue
             result.claims.append(claim)
     return result
 
@@ -442,7 +499,25 @@ def extract_payload(
 # establishes that migration 382 is applied, and 382 is the migration that CREATES it, so a
 # second check could never fail on its own.
 #
-# "Latest body per (source, source_id_native, page_kind)" is expressed as an anti-join on
+# THE JOIN IS ON THE PORTAL'S OWN KEY, NOT ON `listing_id`. That column is nullable and
+# nothing populates it: `scraper.db.append_payload_if_enabled` passes `listing_id=None`
+# ("inventing a listing_id here would mean an extra lookup per page") and
+# `payload_backfill._INSERT_SQL` selects `NULL::bigint` for all 445k migrated pages. An
+# inner join on it therefore matches ZERO rows over the whole archive — and this lane would
+# not have raised: the first batch would come back empty, `reached_end` would trip, the
+# batch would stamp 'ok' and the watermark would claim coverage of a corpus never opened.
+# `(source, source_id_native)` is what both writers populate, is the store's own uniqueness
+# key, and is UNIQUE on `listings` too (`listings_source_native_uidx`, migration 091), so
+# the join stays 1:1.
+#
+# ONLY OK BODIES ARE MINED, matching `payloads._PRUNE_SQL`'s own ranking (which sorts
+# `http_status IS NULL OR BETWEEN 200 AND 299` first — migration 403 cites idnes' 503
+# interstitial as the real case). Filtering rather than merely re-ranking is the stronger
+# form: a group whose only bodies are error pages is honestly out of scope instead of being
+# mined for claims an interstitial cannot carry. The anti-join carries the same predicate,
+# so a newer 503 can never veto the 200 underneath it.
+#
+# "Latest body per (source, source_id_native, page_kind)" is then an anti-join on
 # `(first_observed_at, id)` rather than on `version_seq`: 403 added that counter with no
 # backfill, so every body written before it is NULL there and a `>` comparison against NULL
 # would silently rank the older row as the latest. `first_observed_at` is NOT NULL from 382,
@@ -461,15 +536,17 @@ _PAYLOAD_SCAN_FULL_SQL = """
            encode(p.payload_sha256, 'hex'), p.first_observed_at,
            l.id, (a.listing_id IS NOT NULL) AS in_mapy_inventory
     FROM portal_raw_payloads p
-    JOIN listings l ON l.id = p.listing_id
+    JOIN listings l ON l.source = p.source AND l.source_id_native = p.source_id_native
     LEFT JOIN mapy_affected a ON a.listing_id = l.id
     WHERE p.id > %(after_id)s
-      AND (%(source)s::text IS NULL OR p.source = %(source)s)
+      AND p.source = %(source)s
+      AND (p.http_status IS NULL OR p.http_status BETWEEN 200 AND 299)
       AND NOT EXISTS (
           SELECT 1 FROM portal_raw_payloads n
           WHERE n.source = p.source
             AND n.source_id_native = p.source_id_native
             AND n.page_kind = p.page_kind
+            AND (n.http_status IS NULL OR n.http_status BETWEEN 200 AND 299)
             AND (n.first_observed_at, n.id) > (p.first_observed_at, p.id))
     ORDER BY p.id
     LIMIT %(batch_size)s
@@ -483,16 +560,18 @@ _PAYLOAD_SCAN_INCREMENTAL_SQL = """
            encode(p.payload_sha256, 'hex'), p.first_observed_at,
            l.id, (a.listing_id IS NOT NULL) AS in_mapy_inventory
     FROM portal_raw_payloads p
-    JOIN listings l ON l.id = p.listing_id
+    JOIN listings l ON l.source = p.source AND l.source_id_native = p.source_id_native
     LEFT JOIN mapy_affected a ON a.listing_id = l.id
     WHERE p.first_observed_at >= %(watermark)s
       AND (p.first_observed_at, p.id) > (%(after_ts)s, %(after_id)s)
-      AND (%(source)s::text IS NULL OR p.source = %(source)s)
+      AND p.source = %(source)s
+      AND (p.http_status IS NULL OR p.http_status BETWEEN 200 AND 299)
       AND NOT EXISTS (
           SELECT 1 FROM portal_raw_payloads n
           WHERE n.source = p.source
             AND n.source_id_native = p.source_id_native
             AND n.page_kind = p.page_kind
+            AND (n.http_status IS NULL OR n.http_status BETWEEN 200 AND 299)
             AND (n.first_observed_at, n.id) > (p.first_observed_at, p.id))
     ORDER BY p.first_observed_at, p.id
     LIMIT %(batch_size)s
@@ -637,6 +716,15 @@ def run(
     note: str | None,
     store: BodyStore | None = None,
 ) -> dict[str, Any]:
+    """Preflight, then ONE BATCH PER READABLE SOURCE, sharing one budget.
+
+    Per-source and not one pass over everything, because `location_claim_batches`'
+    resume/watermark is keyed on `(lane, source, scan_mode)` and a batch stamped 'ok' under
+    a NULL source is a claim of coverage over all nine portals. Readers arrive one portal at
+    a time (W2-6…W2-12), so a single-reader run under a NULL key would stamp a watermark the
+    NEXT portal's first run then starts behind — mining nothing and reporting success. One
+    batch per source means each portal's coverage is its own fact.
+    """
     missing = missing_relations(conn)
     if missing:
         raise IntakeRefused(
@@ -667,7 +755,13 @@ def run(
                  "ARCHIVE_READERS (sources=%s). No batch opened.", ",".join(wanted))
         return {"outcome": "inert", "mode": mode, "payloads": 0, "claims": 0,
                 "claims_inserted": 0, "observations": 0, "absences": 0, "batch_id": None,
-                "readable_sources": []}
+                "readable_sources": [], "per_source": {}}
+
+    if start_after_id > 0 and len(readable) > 1:
+        raise IntakeRefused(
+            f"--start-after-id anchors ONE source's keyset and {len(readable)} are readable "
+            f"({', '.join(readable)}); pass --source too so the anchor names the scan it "
+            f"belongs to")
 
     registers = load_registers(conn)
     # Opened only past the inert return: a lane with no reader has no body to fetch, so it
@@ -675,12 +769,81 @@ def run(
     if store is None:
         store = payloads.open_store()
 
+    LOG.info("REMINE-ARCHIVE start mode=%s batch=%d inventory_rows=%d readable=%s",
+             mode, batch_size, inventory_rows, ",".join(readable))
+
+    # ONE budget across the sources, not one each: `--max-seconds` is the workflow's wall
+    # clock and `--limit` is the operator's bound on a trial run. A per-source copy of
+    # either would multiply the run by the number of portals with a reader.
+    deadline = None if max_seconds is None else time.monotonic() + max_seconds
+    remaining = limit
+
+    totals: dict[str, Any] = {
+        "payloads": 0, "claims": 0, "claims_inserted": 0, "observations": 0,
+        "enqueued": 0, "absences": 0, "bodies_from_r2": 0, "oversized_values": 0,
+    }
+    per_source: dict[str, dict[str, Any]] = {}
+    for scan_source in readable:
+        if remaining is not None and remaining <= 0:
+            break
+        if deadline is not None and time.monotonic() > deadline:
+            break
+        stats = _run_source(
+            conn, source=scan_source, mode=mode, batch_size=batch_size, deadline=deadline,
+            limit=remaining, start_after_id=start_after_id, overlap_hours=overlap_hours,
+            statement_timeout=statement_timeout, dry_run=dry_run, note=note, store=store,
+            entries=entries_by_source[scan_source], register=registers.get(scan_source))
+        per_source[scan_source] = stats
+        for key in totals:
+            totals[key] += stats[key]
+        if remaining is not None:
+            remaining -= stats["payloads"]
+
+    result: dict[str, Any] = dict(totals)
+    # 'ok' only when every readable source reached the end of its own scan. A source the
+    # budget never reached has not been covered, and the aggregate must not say otherwise.
+    result["reached_end"] = (
+        len(per_source) == len(readable)
+        and all(s["reached_end"] for s in per_source.values()))
+    result["stopped_early"] = (
+        len(per_source) < len(readable)
+        or any(s["stopped_early"] for s in per_source.values()))
+    result["outcome"] = "ok" if result["reached_end"] else "stopped"
+    result["mode"] = mode
+    result["readable_sources"] = readable
+    result["per_source"] = per_source
+    result["batch_ids"] = [s["batch_id"] for s in per_source.values()]
+    if len(readable) == 1:
+        only = per_source.get(readable[0], {})
+        result["batch_id"] = only.get("batch_id")
+        result["resumed_from_id"] = only.get("resumed_from_id")
+        result["cursor_after_id"] = only.get("cursor_after_id")
+    return result
+
+
+def _run_source(
+    conn: psycopg.Connection,
+    *,
+    source: str,
+    mode: str,
+    batch_size: int,
+    deadline: float | None,
+    limit: int | None,
+    start_after_id: int,
+    overlap_hours: int,
+    statement_timeout: int,
+    dry_run: bool,
+    note: str | None,
+    store: BodyStore | None,
+    entries: list[Entry],
+    register: ScopeRegister | None,
+) -> dict[str, Any]:
+    """One source's batch, from its own resume point to its own watermark."""
     contract_id: int | None = None
-    if source:
-        with guarded(conn, statement_timeout) as cur:
-            cur.execute(_ACTIVE_CONTRACT_SQL, {"source": source})
-            row = cur.fetchone()
-            contract_id = int(row[0]) if row else None
+    with guarded(conn, statement_timeout) as cur:
+        cur.execute(_ACTIVE_CONTRACT_SQL, {"source": source})
+        row = cur.fetchone()
+        contract_id = int(row[0]) if row else None
 
     watermark: datetime | None = None
     if mode == "incremental":
@@ -690,7 +853,7 @@ def run(
         watermark = row[0] - timedelta(hours=overlap_hours) if row and row[0] else None
         if watermark is None:
             LOG.info("REMINE-ARCHIVE no prior successful batch for source=%s; "
-                     "incremental degrades to a full pass", source or "*")
+                     "incremental degrades to a full pass", source)
             mode = "full"
 
     anchored = start_after_id > 0
@@ -704,7 +867,7 @@ def run(
             if mode == "incremental" and resumed_from["after_ts"] is not None:
                 after_ts = resumed_from["after_ts"]
             LOG.info("REMINE-ARCHIVE resuming a budget-stopped %s scan for source=%s from "
-                     "after_id=%d after_ts=%s", mode, source or "*", after_id,
+                     "after_id=%d after_ts=%s", mode, source, after_id,
                      resumed_from["after_ts"])
 
     batch_id: int | None = None
@@ -718,24 +881,20 @@ def run(
                 "coverage_since": (resumed_from or {}).get("coverage_since"),
             })
             batch_id = int(cur.fetchone()[0])
-    LOG.info("REMINE-ARCHIVE start mode=%s source=%s batch=%d inventory_rows=%d "
-             "readable=%s batch_id=%s", mode, source or "*", batch_size, inventory_rows,
-             ",".join(readable), batch_id)
 
-    started = time.monotonic()
     stats: dict[str, Any] = {
         "payloads": 0, "claims": 0, "claims_inserted": 0, "observations": 0,
         "enqueued": 0, "absences": 0, "bodies_from_r2": 0, "oversized_values": 0,
         "stopped_early": False, "reached_end": False, "resumed_from_id": after_id,
-        "readable_sources": readable,
+        "source": source,
     }
     try:
         while True:
             if limit is not None and stats["payloads"] >= limit:
                 stats["stopped_early"] = True
                 break
-            if max_seconds is not None and time.monotonic() - started > max_seconds:
-                LOG.info("REMINE-ARCHIVE stopping: --max-seconds reached")
+            if deadline is not None and time.monotonic() > deadline:
+                LOG.info("REMINE-ARCHIVE stopping %s: --max-seconds reached", source)
                 stats["stopped_early"] = True
                 break
             size = batch_size if limit is None else min(batch_size, limit - stats["payloads"])
@@ -757,23 +916,19 @@ def run(
                 scanned = [_row_from_payload_record(record) for record in records]
                 wanted_bodies = [
                     payload.id for payload, _ in scanned
-                    if archive_entries(entries_by_source.get(payload.source, []),
-                                       payload.page_kind)
+                    if archive_entries(entries, payload.page_kind)
                 ]
                 bodies, from_r2 = load_bodies(cur, wanted_bodies, store=store)
                 stats["bodies_from_r2"] += from_r2
 
                 result = IntakeResult()
-                for payload, row in scanned:
-                    entries = entries_by_source.get(payload.source)
-                    register = registers.get(payload.source)
-                    if not entries or register is None:
-                        continue
-                    body = bodies.get(payload.id)
-                    if body is None:
-                        continue
-                    result.extend(extract_payload(
-                        replace(payload, body=body), row, entries, register=register))
+                if register is not None:
+                    for payload, row in scanned:
+                        body = bodies.get(payload.id)
+                        if body is None:
+                            continue
+                        result.extend(extract_payload(
+                            replace(payload, body=body), row, entries, register=register))
 
                 after_id = int(records[-1][0])
                 if mode == "incremental":
@@ -788,11 +943,11 @@ def run(
                     stats["claims_inserted"] += inserted
                     stats["observations"] += observed
                     stats["enqueued"] += enqueued
-            LOG.info("REMINE-ARCHIVE progress payloads=%d claims=%d inserted=%d observed=%d "
-                     "absences=%d from_r2=%d through_id=%d",
-                     stats["payloads"], stats["claims"], stats["claims_inserted"],
-                     stats["observations"], stats["absences"], stats["bodies_from_r2"],
-                     after_id)
+            LOG.info("REMINE-ARCHIVE progress source=%s payloads=%d claims=%d inserted=%d "
+                     "observed=%d absences=%d oversized=%d from_r2=%d through_id=%d",
+                     source, stats["payloads"], stats["claims"], stats["claims_inserted"],
+                     stats["observations"], stats["absences"], stats["oversized_values"],
+                     stats["bodies_from_r2"], after_id)
     except Exception as exc:
         if batch_id is not None:
             try:
