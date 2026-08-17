@@ -273,18 +273,10 @@ def test_remax_broker_profile_link_is_absolute():
     assert 'href="/reality/re-max' not in html
 
 
-def test_remax_is_wired_end_to_end_for_broker_attribution():
-    """Three registries had to agree or nothing was ever attributed: the ingest
-    enqueue allow-list, the resolver's source list, and the per-source SQL in
-    _attribute(). They are now ONE config row (toolkit.broker_sources) that all
-    three derive from — this asserts the derivation actually reaches all three."""
+def _resolve_brokers_module():
+    """scripts/ is not a package, so the sweep is loaded by path."""
     import importlib.util
     import sys
-
-    from scraper.db import BROKER_ATTRIBUTED_SOURCES
-    from toolkit.broker_sources import BROKER_SOURCES
-
-    assert "remax" in BROKER_ATTRIBUTED_SOURCES
 
     spec = importlib.util.spec_from_file_location(
         "resolve_brokers", Path(__file__).resolve().parents[2] / "scripts" / "resolve_brokers.py"
@@ -293,9 +285,136 @@ def test_remax_is_wired_end_to_end_for_broker_attribution():
     module = importlib.util.module_from_spec(spec)
     sys.modules["resolve_brokers"] = module
     spec.loader.exec_module(module)
+    return module
+
+
+def test_remax_is_wired_end_to_end_for_broker_attribution():
+    """Three registries had to agree or nothing was ever attributed: the ingest
+    enqueue allow-list, the resolver's source list, and the per-source SQL in
+    _attribute(). They are now ONE config row (toolkit.broker_sources) that all
+    three derive from — this asserts the derivation actually reaches all three."""
+    from scraper.db import BROKER_ATTRIBUTED_SOURCES
+    from toolkit.broker_sources import BROKER_SOURCES
+
+    assert "remax" in BROKER_ATTRIBUTED_SOURCES
+
+    module = _resolve_brokers_module()
 
     assert "remax" in module._BROKER_SOURCES
     # identity upsert + email contact + listing link — remax publishes no phone.
     (remax,) = [c for c in BROKER_SOURCES if c.source == "remax"]
     assert len(remax.statements()) == 3
     assert sum("l.source = 'remax'" in s for s in module._ATTRIBUTION_SQL) == 3
+
+
+# --------------------------------------------------------------------------- mmreality
+
+
+_MMREALITY_URL = "https://www.mmreality.cz/nemovitosti/951845/"
+
+
+def _mmreality_listing():
+    from scraper.mmreality_parser import parse_detail
+
+    return parse_detail(_fixture("mmreality_detail.html"), source_url=_MMREALITY_URL)
+
+
+def test_mmreality_broker_block_resolves_every_key_the_registry_reads():
+    """The defect that held D3 back, retired.
+
+    mmreality's config was written against a hand-typed dict in a test and never
+    against a page: had the guessed key names been wrong, all ~10,653 mmreality
+    listings would have attributed to nothing, forever, with no error and CI green
+    — a hand-authored fixture can only assert back the strings the test planted.
+
+    So the keys come from the registry ROW rather than string literals, and the
+    subject is a real captured page: this is `raw_json->'broker'->>'id'/->>'name'/
+    ->>'email'` resolving, spelled the way the attribution SQL spells it, with no
+    second copy of the key names to drift from the first."""
+    from toolkit.broker_sources import BROKER_SOURCES
+
+    (cfg,) = [c for c in BROKER_SOURCES if c.source == "mmreality"]
+    listing = _mmreality_listing()
+
+    assert listing.source_id_native == "951845"
+    block = listing.raw[cfg.block]
+    assert isinstance(block, dict), "the whole estate object is stored verbatim"
+    for key in (cfg.id_key, cfg.name_key, cfg.email_key):
+        # ->> renders text and the SQL nullif()s '', so a present-but-blank value
+        # attributes exactly as a missing key would: emptiness is the failure.
+        assert str(block.get(key, "")).strip(), key
+    # The one portal whose broker id arrives as a JSON NUMBER (every other stores a
+    # string). ->> renders it '4927', which is what source_broker_id_native holds
+    # and what _broker_fingerprint str()s — so the number costs nothing, but it is
+    # the kind of shape difference a dict fixture would have hidden.
+    assert isinstance(block[cfg.id_key], int)
+    assert str(block[cfg.id_key]) == "4927"
+
+
+def test_mmreality_publishes_one_shared_switchboard_not_a_broker_contact():
+    """Why the registry row carries write_contacts=False.
+
+    Measured live across 12 listings: 12 distinct broker ids, ONE email, ONE phone,
+    phone == mobile. This page pins the shape of that — a role local-part on the
+    portal's own domain, the SAME address on the page's other staff block
+    (mortgageAdviser, a different person entirely), and phone and mobile carrying
+    one value. Contact rows off this would be ~1,021 copies of one number that the
+    freq==1 bridge guard discards anyway.
+
+    The number itself is the fixture scrubber's placeholder — identical inputs
+    scrub identically, so the equality survives while the digits do not."""
+    listing = _mmreality_listing()
+
+    broker = listing.raw["broker"]
+    assert broker["email"] == "info@mmreality.cz"
+    assert broker["email"].split("@")[0] in {"info", "office", "kontakt"}
+    assert broker["phone"] == broker["mobile"]
+    assert listing.raw["mortgageAdviser"]["email"] == broker["email"]
+    assert listing.raw["mortgageAdviser"]["id"] != broker["id"]
+
+
+def test_mmreality_fixture_carries_no_person_shaped_data():
+    """The committed page's broker is a real named agent, so re-capturing it without
+    a scrub publishes them. Every person-shaped field is a placeholder, not deleted
+    — the round-trip above has to run against a POPULATED block.
+
+    Phones go through the repo's own seed detector rather than a digit regex: this
+    page's photo hashes contain 9-digit runs (`...e734690301eb16...`), which is the
+    same false positive that made --scrub-contacts exist."""
+    from scripts.fetch_and_anonymize_fixtures import phone_seeds
+
+    html = _fixture("mmreality_detail.html")
+    broker = _mmreality_listing().raw["broker"]
+
+    assert "ANONYMIZED FIXTURE" in html
+    assert phone_seeds(html) == set(), "a real number reached the repo"
+    assert broker["name"] == "Jan Novák"
+    assert broker["phone"] == "+420 XXX XXX XXX"
+    # Not covered by the name scrub: the site handle is not the slugified name, and
+    # it also spells the /makler/<slug>/ profile URL.
+    assert broker["slug"] == "jnovak"
+    assert "/makler/jnovak/" in html
+    assert set(broker["squareAvatar"]["avatar"].rsplit("/", 3)[1:]) == {
+        "00", "00000000000000000000000000000000.jpg"}
+
+
+def test_mmreality_is_wired_end_to_end_for_broker_attribution():
+    """The same three-registry check remax gets (D3's part C): ingest enqueue,
+    the sweep's source scan, and the per-source SQL — all derived from the one
+    config row, so a landed row is a portal that actually attributes."""
+    from scraper.db import BROKER_ATTRIBUTED_SOURCES, _BROKER_FINGERPRINT_KEYS
+    from toolkit.broker_sources import BROKER_SOURCES
+
+    assert "mmreality" in BROKER_ATTRIBUTED_SOURCES
+
+    module = _resolve_brokers_module()
+
+    assert "mmreality" in module._BROKER_SOURCES
+    # identity upsert + listing link only: write_contacts=False, so no contact rows.
+    (mmreality,) = [c for c in BROKER_SOURCES if c.source == "mmreality"]
+    assert len(mmreality.statements()) == 2
+    assert sum("l.source = 'mmreality'" in s for s in module._ATTRIBUTION_SQL) == 2
+    # ...and the ingest side can SEE a broker-only change on this portal: the
+    # fingerprint allowlist has to carry mmreality's own key, or a broker swap on a
+    # page whose content hash is unchanged never re-enqueues.
+    assert mmreality.id_key in _BROKER_FINGERPRINT_KEYS

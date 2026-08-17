@@ -12,8 +12,9 @@ source-agnostic. Four statement SHAPES cover every portal —
 
 and what actually differs between portals is a handful of JSON keys plus three
 quirks (phone shape, phone normalisation, chunk materialisation). Onboarding a
-portal is therefore ONE row here, not four hand-copied statements; the five
-sources below carried ~330 lines of near-identical SQL between them.
+portal is therefore ONE row here, not four hand-copied statements; the first five
+sources below carried ~330 lines of near-identical SQL between them. mmreality,
+the sixth, was onboarded as a config row and never as SQL — the registry's point.
 
 Read by `scripts.resolve_brokers` (which executes the statements) and by
 `scraper.db` (which sources enqueue into `dirty_broker_listings`, and which
@@ -146,6 +147,13 @@ class BrokerSource:
     phone_prefix_420: bool = False
     rating_key: str | None = None
     review_count_key: str | None = None
+    # False = identity + link only, no `broker_identity_contacts` rows. For a portal
+    # whose every broker publishes the SAME switchboard, those rows are N copies of
+    # one value that the bridge's freq==1 guard discards anyway. It suppresses the
+    # CONTACTS, never `broker_identities.email` — that column is what carries the
+    # identity to its firm, and dropping email_key to get the same effect would take
+    # the firm linkage with it.
+    write_contacts: bool = True
     # Bound the listings scan by {sel} BEFORE the join to broker_identities, or a
     # cold planner inverts the join and detoasts far more raw_json than the chunk,
     # blowing the statement timeout. sreality predates the fix and keeps the
@@ -174,10 +182,10 @@ class BrokerSource:
             reviews_expr=(f"nullif(l.raw_json->'{self.block}'->>'{self.review_count_key}', '')::int"
                           if self.review_count_key else "NULL::int"),
             **common)]
-        if self.email_key:
+        if self.email_key and self.write_contacts:
             out.append(_CONTACT_EMAIL_TEMPLATE.format(
                 cte_mode=cte_mode, email_key=self.email_key, **common))
-        if self.phone_key or self.phone_array_key:
+        if self.write_contacts and (self.phone_key or self.phone_array_key):
             out.append(_CONTACT_PHONE_TEMPLATE.format(
                 cte_mode=cte_mode, **common, **self._phone_parts()))
         out.append(_LINK_TEMPLATE.format(**common))
@@ -238,6 +246,26 @@ BROKER_SOURCES: tuple[BrokerSource, ...] = (
     BrokerSource(
         source="remax", block="broker", id_key="broker_id", name_key="name",
         email_key="email", firm_keys=("agency_slug",),
+    ),
+    # ATTRIBUTION-ONLY (D3). Every mmreality broker publishes the SAME contacts: one
+    # role address (info@mmreality.cz) and one switchboard, phone == mobile — 12
+    # distinct broker ids, one email, one number, over 12 live listings. So
+    # write_contacts=False, and the ~1,021 identical contact rows it would otherwise
+    # mint (which the freq==1 bridge guard discards anyway) are never written; that
+    # also makes this portal structurally incapable of cross-source auto-merge.
+    # KNOWN TRADE, reviewed and accepted 2026-08-12: the identity email is NOT
+    # suppressed with them, so every mmreality broker carries the role address as
+    # broker_identities.email (and brokers.primary_email). That is deliberate — the
+    # role domain is what joins these identities to the existing mmreality.cz
+    # franchise firm, and it enlarges a pattern ~2,150 active brokers already show
+    # rather than introducing one. phone_key/phone_prefix_420 write nothing while
+    # write_contacts is False; they carry the shape (mmreality stores bare 9 digits)
+    # for the day contacts are enabled, and put "phone" in this portal's dirty-queue
+    # fingerprint so a broker swap re-enqueues.
+    BrokerSource(
+        source="mmreality", block="broker", id_key="id", name_key="name",
+        email_key="email", phone_key="phone", phone_prefix_420=True,
+        write_contacts=False,
     ),
 )
 
