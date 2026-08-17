@@ -1044,6 +1044,86 @@ against main 2026-08-17. The two lanes now key `location_claim_batches` on disti
 and cannot read each other's resume cursors. The note stays as the record of WHY the archive lane
 carries the longer name — deleting it would invite the next reader to "simplify" it back.
 
+## W2 after the reader layer: what the first activation attempt taught (2026-08-17)
+
+The archived-HTML reader layer shipped (#1081). **No portal contract is activated yet, and the
+remax attempt was reverted TWICE for two different real reasons** — both worth carrying, because
+they are properties of the activation itself and will recur for every portal.
+
+**Attempt 1 — `shadow: true` would have darkened LIVE claims.** Shadow is HEADER-grain: projecting
+a version DEACTIVATES the previous one and W1 loads `WHERE is_active`, so shadowing remax@3 would
+have taken remax's four already-live W1 entries dark too — a certain, immediate regression lasting
+until someone un-shadowed, with the frozen sample not even drawn.
+
+**Attempt 2 — an unshadowed bump buys NOTHING and costs a corpus re-insert.**
+`location_claim_fingerprint` (migration 386) hashes **both** `extractor_version` and
+`contract_entry_id`, and a version bump changes both. So the next hourly scans re-insert every
+remax claim as a new row in an append-only table — the exact waste migration 408 was written to
+prevent, and which the contracts test still warns about verbatim. And the gain today is **zero
+claim values**: the two activated entries are DOM entries, W1 skips them, and the archive lane has
+no workflow. Paying an unrecoverable re-insert for nothing.
+
+**Therefore: a portal activation must be bundled with W2-13**, the wave that gives the archive lane
+a workflow. That is the first moment the re-insert buys something, and — via the rail below — the
+moment shadow becomes both necessary and correct. Activating earlier is strictly worse on both axes.
+
+### Two rails found the hard way, both now permanent
+
+- **The shadow decision is now decidable rather than dogma.** The build plan says "each ships in
+  shadow"; the header-grain problem above means that is wrong while nothing can run a DOM entry, and
+  right the moment something can. `test_a_dom_contract_must_be_shadowed_once_a_lane_can_run_it`
+  encodes exactly that: it scans for anything that could put `claims_remine_archive` on a runner and,
+  the moment one exists, requires every contract with an executable DOM entry to be shadowed. The
+  scan is deliberately wider than `.github/workflows/*.yml` — `.yaml`, `scripts/`, and shell
+  wrappers all count, because a `*.yml`-only glob would walk past a workflow that calls a wrapper —
+  and it accepts false positives over false negatives, since the cost of the former is one
+  `shadow: true` line and the cost of the latter is unreviewed claims serving live.
+  `test_the_dispatcher_scan_sees_a_lane_however_it_is_spelled` is the rail's own negative control,
+  against a synthetic tree: WITHOUT it the guard never executes its assertion in CI (there is no
+  dispatcher today, so it returns early) and would be a rail nobody has ever watched fire. It also
+  pins that W3's `claims_remine` — a different lane on a different substrate — must NOT trip it.
+- **A DOM reader in a W1 contract would have taken the hourly intake down.** `extract_listing`
+  refuses an unknown reader, and DOM readers live in a separate registry, so loading any W2 contract
+  would have thrown `IntakeRefused` for that whole portal, hourly. W1 now SKIPS an archive-only
+  reader; a name in NEITHER registry stays a hard refusal; `ARCHIVE_ONLY_READERS` is pinned equal to
+  `ARCHIVE_READERS` by test.
+
+### The finding that reshapes the wave
+
+Six agents verified every declared-but-inert DETAIL entry of the remaining six portals against its
+pinned fixture. **Zero of them can be activated with the three generic DOM readers**, and the reason
+is structural rather than marginal: those readers (a CSS selector, an attribute, a DMS attribute)
+fit remax's markup and essentially nothing else.
+
+| portal | candidates | why none activates |
+| --- | --- | --- |
+| ceskereality | 4 | `cr.det.data_city` is the closest call and works on the fixture (`data-city="České Budějovice"`), but the entry's OWN note documents the live shape as `"Praha (okres Praha)"` — obec + parenthesised okres in one string, the remax `"Úvaly, okres Praha-východ"` defect exactly, and the fixture does not cover it. The other three need a regex tail-parse or sit on `og_meta`/`regex_text`. |
+| realitymix | 1 | `rm.det.gps` carries **separate decimal attributes** (`data-gps-lat="49.73561"`, `data-gps-lon="13.39051"`) — not a DMS string. `html_point_dms` cannot read it. *(Independently re-verified with selectolax.)* |
+| idnes | — | `id.det.subject_feature` is a MapTiler JSON blob needing `properties.id == <listing id>` selection. |
+| bazos | — | `bzs.det.blur_hint` is `portal_declared_quality`, not a DOM text read. |
+| mmreality | 4 | An **`embedded_json` portal** (a Vue `:property` prop). DOM readers are confined to DOM surfaces, and three candidates declare no `css` at all. |
+| maxima | 7 | Four are `map_config` — coordinates inside a JS string needing regex → js-string decode → JSON → pointer → OpenLayers geometry. `mx.det.locality` reads `"Brno, Brno-střed, Veveří"` (obec + obvod + quarter) typed as `mestsky_obvod_name`; `mx.det.title` includes the agency's own branding. *(Both re-verified with selectolax.)* |
+
+**So the remaining scope of W2 is READER work, not YAML work.** In rough value order: a JSON-pointer
+archive reader over an embedded blob (unlocks idnes, mmreality, and maxima's map config), an
+attribute-PAIR coordinate reader (unlocks realitymix immediately — its entry is already the one
+`ARCHIVED_COORDINATE_RULES` names), a regex reader emitting an evidence span over the **capture
+group** (unlocks ceskereality's title and mmreality's `originalTitle` street, called "the single
+highest-yield fix for this portal"), and splitting transforms for the combined administrative
+strings. Only then do the contracts become one-line activations.
+
+**The sequencing that follows from all of the above**, and it is now well determined: build the
+missing readers → build W2-13's sweep lane and workflow → THEN activate all seven portal contracts,
+shadowed, in one wave. That order pays the claims re-insert exactly once, at the only moment it buys
+anything, and it puts the shadow flag on at precisely the moment the rail starts demanding it.
+Activating any portal before W2-13 is strictly worse on both counts, which is why remax@3 was
+written, reviewed, and then deliberately not merged — twice.
+
+**Two fixture gaps worth knowing before trusting a future activation:** ceskereality's fixture is a
+České Budějovice page, so the documented `"Praha (okres Praha)"` shape is untested; and mmreality's
+carries exactly ONE `:property` blob, so the zone that strips non-subject blobs — which that
+contract calls its principal hazard — is entirely unexercised.
+
 ## Standing decisions
 
 - **The four heavy location lanes share ONE outer concurrency group, `location-batch`**
