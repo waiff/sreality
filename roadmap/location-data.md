@@ -949,9 +949,78 @@ The smoke measured the blast radius of that fix: it fires on **every one of the 
 snapshots**, i.e. on what looks like the whole early corpus rather than a rare cohort. It was found
 by a peer session's review of #1057 and would otherwise have shipped silently.
 
+### First production WRITE, 2026-08-17 — a pre-stated prediction, falsified
+
+Run 32081432670 (`dry_run=false`, `max_seconds=600`, `batch_size=10000`), resumed from id 0
+because a dry run writes no batch row and therefore leaves no cursor:
+
+| counter | value |
+| --- | ---: |
+| snapshots | 130,000 |
+| claims | 170,569 |
+| **claims_inserted** | **33,064 (19.4 %)** |
+| observations | 134,741 |
+| absences | 127,559 |
+| dirty enqueues | 32,961 |
+| oversized | 0 |
+| outcome / cursor | `stopped` / 130,000 (resumable) |
+
+Throughput ~213 snapshots/s with writes, against ~300/s dry.
+
+**The prediction, stated in advance and wrong.** Before dispatch it was written down that claims
+would be *mostly genuine inserts rather than dedupes*, on the reasoning that W1 mined current-state
+`listings.raw_json`, so an old snapshot's locality string is a different value → different
+fingerprint → a new claim. A falsifier was committed to at the same time: *if `claims_inserted`
+comes back far below `claims`, that assumption is wrong.* It came back at 19.4 %. The assumption
+was wrong.
+
+**The actual mechanism, and the measurement that distinguishes it from the rival explanation.**
+`listing_snapshots` appends on **any** content change — a price edit mints a snapshot whose
+locality is byte-identical to the previous twenty. So one listing contributes many snapshots, the
+first minting a claim and the rest re-sighting it. That is *within-W3* dedup, not the
+*cross-substrate* dedup the prediction reasoned about. A rival hypothesis was on the table (that
+these listings simply never changed locality, making the cohort narrower than "all pre-cutover" and
+weakening extrapolation). The per-batch insert rate discriminates them:
+
+**69 % → 60 % → 45 % → 34 % → 18 % → 12 % → 8 % → 4 % → 2 %**
+
+A cohort property would hold roughly flat across batches — it is a fact about *which* listings are
+scanned. Monotonic decay is a fact about *how far into the scan* you are: later snapshots
+increasingly belong to listings already claimed. The rival hypothesis predicts flat and is refuted.
+This is the difference between an explanation that fits and a measurement that decides.
+
+**The legacy→post-cutover boundary is visible and sits at snapshot id ≈ 120,000–130,000.** Batch 13
+jumps to 5.06 claims/snapshot while absences fall to 0.76/snapshot. Solving each independently for
+the post-cutover fraction (claims = 1 + 20x, absences = 1 − x) gives **x = 0.203 from claims and
+x = 0.244 from absences** — two unrelated counters agreeing, which is what makes the cohort model
+credible rather than merely consistent.
+
+### Supersession is structural, and it happened here
+
+A follow-up diagnostic run (32082367045) was dispatched into a gap that closed between the check
+and the dispatch: the hourly intake cron took the slot first, leaving the run `pending`. A routine
+`*/15` resolve tick was created at **23:55:53Z** and the pending run was cancelled at **23:55:54Z**.
+Zero log lines — it never started, wrote nothing, and left no stranded `outcome='running'` row.
+
+**The operational rule, which is W3's to carry:** a point-in-time idle check followed by a dispatch
+has a race in the gap that no amount of care closes; only
+*dispatch-then-verify-`in_progress`-within-N-seconds* detects the loss. Disarming automation is not
+enough either — **looking is not holding**. Any future W3 dispatch should verify it reached
+`in_progress` and re-dispatch if it did not.
+
+**The structural argument is NOT recorded here on purpose.** This incident is the third direction of
+the same `location-batch` oversubscription finding (intake displaced by backfills at 57.5 %
+cancellation; a backfill displaced by intake; a backfill displaced by a resolve tick that had
+nothing to do). That case rests on all three instances together and belongs with the cancellation
+measurement in the W2a/group write-up, not duplicated in a wave section — see the `location-batch`
+entry under Standing decisions and the W2a wrap-up.
+
 ### Volume: watch observations, not claims
 
-~300 snapshots/s holds only while the scan is in the 1-claim legacy cohort. Post-cutover ids carry
+**Measured, not projected, as of cursor 130,000:** 134,741 observations from 130,000 snapshots
+(~1.04/snapshot) and 33,064 new claims. Naively that is ~1.6 M observations for the full 1.57 M —
+but that figure is a **floor, not an estimate**, because it was measured almost entirely inside the
+1-claim legacy cohort. ~300 snapshots/s holds only while the scan is in the 1-claim legacy cohort. Post-cutover ids carry
 ~21 claims each, and the great majority will dedupe on the time-free `claim_fingerprint` against
 what W1 already wrote from `listings.raw_json` — so `claims_inserted` should stay modest while
 **`location_claim_observations` grows hard**, and 01 §4.3 already names it the highest-cardinality
