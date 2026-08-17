@@ -56,7 +56,7 @@ from location_data.claims_remine_archive import (
     run,
     stamp_archive_claim,
 )
-from location_data.html_scope import ScopeRegister
+from location_data.html_scope import ScopeRegister, scope_html
 
 _ROOT = Path(__file__).resolve().parent.parent.parent
 _MIGRATION_382 = (_ROOT / "migrations" / "382_location_w1_claims.sql").read_text("utf-8")
@@ -143,10 +143,17 @@ def test_the_archive_reader_registry_is_separate_from_w1s():
     assert not set(ARCHIVE_READERS) & set(claims_intake.READERS)
 
 
-def test_no_portal_declares_an_archived_reader_yet_so_the_lane_is_inert():
-    """The W2-2 acceptance condition, asserted rather than assumed. When a per-portal PR
-    lands a reader this test is the one that must be updated deliberately."""
-    assert ARCHIVE_READERS == {}
+def test_the_registered_archive_readers_are_the_declared_generic_set():
+    """W2-2 asserted `ARCHIVE_READERS == {}` — the lane was inert because nothing could read.
+    W2-6 lands the first readers, so that assertion is retired here DELIBERATELY (it was left
+    as the tripwire for exactly this moment) and replaced by the two properties that still
+    have to hold.
+
+    First: the set is closed. These readers are portal-AGNOSTIC — a selector, an attribute, a
+    DMS attribute — and every portal-specific fact belongs in contract data. A new name
+    appearing here is how "one portal needed something special" becomes a branch in shared
+    code (rule 21), so adding one is a reviewed act, not an import side effect."""
+    assert set(ARCHIVE_READERS) == {"html_text", "html_attr", "html_point_dms"}
 
 
 # ------------------------------------------------------------------ evidence discipline
@@ -1198,3 +1205,86 @@ def test_a_value_inside_the_cap_is_kept():
             ArchiveRead(_base(entry, row, value_text="Krymská"))],
         [archive_entry()], max_value_bytes=1024)
     assert len(result.claims) == 1 and result.oversized == 0
+
+
+# --------------------------------------- the DOM readers, against the real remax fixture
+
+_REMAX_HTML = _ROOT / "tests" / "fixtures" / "location_w2" / "remax_detail.html"
+
+
+def remax_document():
+    """The pinned remax detail page, scoped by remax's OWN exclusion zones.
+
+    That page is the contamination case in one artefact: the subject is on Pod Slovany in
+    Úvaly, and below it sit `.area-listings__item` neighbour cards for Oleška and Stará
+    Boleslav, each carrying its own `data-address` and `data-gps`. Reading the first
+    `data-address` in the document is how a neighbour's street reached `listings.street` on
+    live rows (W0 item 0d) — the failure these readers exist not to reproduce.
+    """
+    from location_data import contracts
+    contract = {c.source: c for c in contracts.load_all()}["remax"]
+    register = ScopeRegister.from_zones("remax", contract.exclusion_zones)
+    return scope_html(_REMAX_HTML.read_bytes(), register=register)
+
+
+def dom_entry(reader: str, **locator: Any) -> Entry:
+    entry = archive_entry(entry_id=f"rx.det.{reader}", reader=reader)
+    return replace(entry, locator={"reader": reader, **locator})
+
+
+def test_html_text_reads_the_subject_header_and_not_a_neighbour_card():
+    document = remax_document()
+    entry = dom_entry("html_text", css="h2.pd-header__address")
+    reads = ARCHIVE_READERS["html_text"](entry, listing_row(), payload(), document)
+
+    assert [r.claim.value_text for r in reads] == ["ulice Pod Slovany, Úvaly"]
+    body = _REMAX_HTML.read_text(encoding="utf-8", errors="replace")
+    assert "Oleška" in body and "Stará Boleslav" in body   # the decoys are really there
+    assert "Oleška" not in reads[0].claim.value_text
+
+
+def test_html_point_dms_reads_the_subject_map_and_converts_the_pair():
+    document = remax_document()
+    entry = dom_entry("html_point_dms", css="#printMap[data-gps], #listingMap[data-gps]",
+                      attr="data-gps", position_branch=POSITION_BRANCH_PORTAL_PIN)
+    reads = ARCHIVE_READERS["html_point_dms"](entry, listing_row(), payload(), document)
+
+    # 50°04'26.1"N,14°43'41.5"E — the SUBJECT's pin. The neighbour card's
+    # 49°59'01.5"N,14°54'28.4"E is a different place entirely.
+    assert len(reads) == 1
+    assert reads[0].claim.value_geom_wkt == "POINT(14.728194444444444 50.07391666666667)"
+    assert reads[0].position_branch == POSITION_BRANCH_PORTAL_PIN
+
+
+def test_a_dom_read_carries_an_evidence_quote_and_a_span_that_contains_it():
+    document = remax_document()
+    entry = dom_entry("html_text", css="h2.pd-header__address")
+    claim = ARCHIVE_READERS["html_text"](entry, listing_row(), payload(), document)[0].claim
+
+    assert claim.evidence_quote == "ulice Pod Slovany, Úvaly"
+    assert claim.span_start is not None and claim.span_end > claim.span_start
+    # 382's `loc_claim_text_evidence` is a SUBSTRING check against the scoped body, so the
+    # span has to land on bytes that really carry the quote.
+    assert "Pod Slovany" in document.html[claim.span_start:claim.span_end]
+
+
+def test_a_selector_matching_nothing_yields_no_claim_rather_than_an_empty_one():
+    document = remax_document()
+    entry = dom_entry("html_text", css="div.no-such-node")
+    assert ARCHIVE_READERS["html_text"](entry, listing_row(), payload(), document) == []
+
+
+def test_a_dom_entry_without_a_selector_is_refused_and_names_itself():
+    document = remax_document()
+    entry = dom_entry("html_text")
+    with pytest.raises(IntakeRefused, match="locator.css"):
+        ARCHIVE_READERS["html_text"](entry, listing_row(), payload(), document)
+
+
+def test_a_coordinate_read_without_a_position_branch_is_refused():
+    """C6: which branch of the map produced a pin IS its licence class, so a coordinate read
+    that does not state one is refused rather than silently defaulted to first-party."""
+    document = remax_document()
+    entry = dom_entry("html_point_dms", css="#printMap[data-gps]", attr="data-gps")
+    with pytest.raises(IntakeRefused, match="position_branch"):
+        ARCHIVE_READERS["html_point_dms"](entry, listing_row(), payload(), document)

@@ -238,6 +238,19 @@ class ArchivedCoordinateRule:
     geocoded_licence_class: str | None = None
 
 
+# The DOM readers implemented by `claims_remine_archive`, as NAMES only (W2-6).
+#
+# It lives here, in the module the archive lane imports, rather than the reverse: importing
+# `claims_remine_archive` from this module would be circular, and this lane is the hourly
+# one — it must not grow a dependency on a lane that needs R2 credentials to import cleanly.
+#
+# What it is FOR: a contract entry naming one of these is not a W1 entry. W1 must skip it,
+# because `listings.raw_json` carries no DOM for it to read — while a name in NEITHER
+# registry stays a hard refusal, since that is a real deploy error. `test_lane_identifiers`
+# and the contracts test assert this set equals `ARCHIVE_READERS` exactly, so a reader added
+# there without a line here fails CI rather than taking the hourly intake down for a portal.
+ARCHIVE_ONLY_READERS = frozenset({"html_text", "html_attr", "html_point_dms"})
+
 ARCHIVED_COORDINATE_RULES: dict[str, ArchivedCoordinateRule] = {
     # `#printMap[data-gps], #listingMap[data-gps]`, scoped by element id — never "the first
     # data-gps in the document", which is the neighbour carousel [live-B §3.5.1].
@@ -1170,7 +1183,14 @@ def extract_listing(
     for entry in entries:
         name = entry.reader
         if not name:
-            continue  # declared for a W2 surface; inert here.
+            continue  # declared for a later wave, no reader at all; inert here.
+        if name in ARCHIVE_ONLY_READERS:
+            # A DOM reader belonging to `claims_remine_archive`. Skipped, not refused: this
+            # lane's substrate is `listings.raw_json`, which carries no DOM, so there is
+            # nothing here for it to read. Refusing would take the HOURLY W1 intake down for
+            # the whole portal the moment a W2 contract version loads — which is exactly
+            # what happened the first time remax@3 met this loop.
+            continue
         fn = READERS.get(name)
         if fn is None:
             raise IntakeRefused(
