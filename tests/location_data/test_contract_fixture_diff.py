@@ -41,6 +41,7 @@ from location_data.claims_intake import (
 from location_data.claims_remine_archive import (
     ARCHIVE_READERS,
     ArchivedPayload,
+    _licensed_coordinate,
     stamp_archive_claim,
 )
 from location_data.html_scope import ScopeRegister, scope_html
@@ -309,6 +310,17 @@ def score_archived(contract: contracts.PortalContract) -> list[dict[str, Any]]:
         for read in ARCHIVE_READERS[entry.reader](entry, row, payload, document):
             stamped = stamp_archive_claim(read.claim, payload,
                                           scope_version=document.scope_version)
+            # The C6 licence ladder, applied exactly as the real lane applies it. Without
+            # this the gate would show a green claim for a coordinate the lane REFUSES —
+            # an entry id absent from ARCHIVED_COORDINATE_RULES, or one vetoed by the Mapy
+            # inventory — which is a false safety signal on the licence rail specifically,
+            # the one place a wrong answer is a legal problem rather than a data problem.
+            if stamped.claim_type == "coordinate":
+                stamped, reason = _licensed_coordinate(
+                    stamped, row, entry, read.position_branch)
+                if stamped is None:
+                    out.append({"extractor_id": entry.entry_id, "refused": reason})
+                    continue
             out.append(project_archived(replace(read, claim=stamped)))
     return out
 

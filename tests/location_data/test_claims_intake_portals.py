@@ -506,7 +506,7 @@ def test_every_claim_writes_blur_evidence_and_history_completeness_explicitly():
     # every other portal is still on its original version. Moving the volatile profiles
     # into these files (W2a-3e) bumped none of them: `persistence` is outside
     # `contract_sha256` (mig 408), so archive configuration cannot re-stamp a claim.
-    expected_version = {"remax": 3, "ceskereality": 3, "realitymix": 3}
+    expected_version = {"remax": 2, "ceskereality": 3, "realitymix": 3}
     for source, payload, lat, lon in cases:
         result = extract_listing(listing(source, payload, lat=lat, lon=lon),
                                  entries_for(source))

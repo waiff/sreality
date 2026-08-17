@@ -18,30 +18,6 @@
 # ledger, which 06 §6.1.4 job 2 seeds from exactly this cohort on day one.
 
 #
-# VERSION 3 (2026-08-17, W2-6) — the FIRST contract to make an archived-HTML entry
-# executable. Two entries gain a `reader` and therefore start producing claims when the
-# re-mine lane runs: `rx.det.header_address` (the subject's own header, `html_text`) and
-# `rx.det.gps` (the detail map's DMS attribute, `html_point_dms`). No entry id changes and
-# no v1/v2 entry is edited — a reader is added, which is a behaviour change and therefore a
-# bump (02 §2.1.8).
-#
-# FIVE entries stay declared-but-inert ON PURPOSE, each for a stated reason, because
-# activating a selector nobody verified is how a wrong claim enters an append-only table:
-#   * rx.det.breadcrumbs   — `.breadcrumb a` matches NOTHING on the pinned fixture. The
-#                            selector is unverified against a real page, not merely unused.
-#   * rx.det.location_line — `.pd-header__location` reads "Úvaly, okres Praha-východ": one
-#                            string carrying obec AND okres. Its declared claim_type is
-#                            `cast_obce_name`, so activating it as-is would assert that the
-#                            whole string is a cast obce name, which is false. It needs a
-#                            splitting transform that does not exist yet.
-#   * rx.det.h1_tail       — needs a tail-parse the generic readers do not perform.
-#   * rx.det.params_umisteni — needs a keyed table lookup, likewise.
-#   * rx.idx.* (2)         — an INDEX body is a LIST of listings, so "the first match" is
-#                            the first CARD, which is a different property. Index entries
-#                            need per-card subject scoping, a mechanism this wave does not
-#                            build. This is the same class of error as the banned
-#                            raw_json.address and must not be reintroduced by the back door.
-#
 # VERSION 2 (2026-08-11) — two W1 entries, no edit to any v1 entry (entries are immutable
 # per contract_version; a change is a bump, 02 §2.1.8). Measured cause: 1,763 ACTIVE remax
 # listings carried NO claim of any kind. Both fixes are named in the entries themselves —
@@ -50,15 +26,7 @@
 # remax publishes no locality key at all, so the column is the only copy).
 
 portal: remax
-contract_version: 3
-# SHIPS IN SHADOW (migration 404): v3's claims are mined and stored but excluded from
-# `location_claims_live`, so nothing this contract produces can reach the resolver until the
-# operator un-shadows it on their own review of the frozen sample. It is declared here and
-# not left to default because the default is `false` — i.e. LIVE — and this is the first
-# contract version whose entries actually execute against archived HTML. It is excluded from
-# `contract_sha256` on purpose, so removing this line after the sample passes is not a
-# version bump; un-shadowing is `python -m location_data.contracts --unshadow remax@3`.
-shadow: true
+contract_version: 2
 extractor_runtime: ">=1.0"
 identity_ladder: [structured_address, portal_precise_coord]
 
@@ -246,50 +214,30 @@ extractions:
     locator_kind: html_selector
     extraction_method: html_selector_parse
     page_kind: detail
-    locator: {reader: html_text, css: "h2.pd-header__address", text: true}
+    locator: {css: "h2.pd-header__address", text: true}
     claim_type: address_line_verbatim
     licence_class: portal
     blur_evidence: none
-    subject_scope: {kind: subject_header, subject_scoped: true}
+    subject_scope: {kind: subject_header}
     required: always
-    notes: >
-      THE SUBJECT'S OWN address, and the replacement for the banned raw_json.address
-      [live-B §3.2]. EXECUTABLE from v3: `reader: html_text` takes the FIRST match, which is
-      safe here and only here — the selector is the subject's own header (one node on the
-      pinned fixture) while the contamination class this whole contract is built around
-      lives in `.area-listings__item[data-address]`, which the exclusion zone strips before
-      any selector runs. `subject_scoped: true` is stated rather than defaulted: it is what
-      makes this admissible to survivorship, and it is exactly what
-      `rx.det.raw_address_conflict` is not.
+    notes: "THE SUBJECT'S OWN address, never read today [live-B §3.2]. It is the
+      replacement for the banned raw_json.address."
 
   - id: rx.det.gps
     locator_kind: html_selector
     extraction_method: html_selector_parse
     page_kind: detail
-    locator: {reader: html_point_dms, css: "#printMap[data-gps], #listingMap[data-gps]",
-              attr: "data-gps", position_branch: portal_pin}
+    locator: {css: "#printMap[data-gps], #listingMap[data-gps]", attr: "data-gps"}
     claim_type: coordinate
     licence_class: portal
     blur_evidence: none
     precision_cap: {granularity_max: address_point, position_source_max: portal_pin}
     prior: {position_source: portal_pin, match_confidence: low}
+    transform: [dms_to_decimal]
     guards: [reject_outside_cz_bbox]
     required: when_present
-    notes: >
-      Scoped by element ID, never "first data-gps in the document" [live-B §3.5.1] — the
-      first unscoped `data-gps` belongs to a neighbour card in a DIFFERENT town. Both ids
-      carry the SAME subject coordinate on the pinned fixture, so first-match is safe.
-      Seconds may render as 60 (13°51'60"E) and the arithmetic absorbs it.
-      EXECUTABLE from v3, with two deliberate changes from the v2 declaration:
-      `transform: [dms_to_decimal]` is DROPPED because the reader performs the conversion
-      intrinsically (`scraper.remax_parser.parse_dms_pair`, the live scraper's own parser) —
-      `dms_to_decimal` is not in IMPLEMENTED_TRANSFORMS and an executable entry may not name
-      a normaliser that would silently not run. `position_branch: portal_pin` is now
-      REQUIRED locator data: it is what the C6 ladder stamps the licence class from, and a
-      coordinate read that omits it is refused rather than defaulted to first-party.
-      `reject_outside_cz_bbox` is genuinely evaluated — it is the same CZ envelope
-      `parse_dms_pair` applies, which is why listing 442804 (physically in Poland) cannot
-      enter as a CZ coordinate through this entry.
+    notes: "Scoped by element ID, never 'first data-gps in the document' [live-B §3.5.1].
+      Seconds may render as 60 (13°51'60\"E) and the arithmetic absorbs it."
 
   - id: rx.idx.display_address
     locator_kind: html_selector

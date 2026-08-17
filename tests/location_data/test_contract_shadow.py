@@ -193,14 +193,10 @@ def test_the_scorer_is_the_one_reader_of_the_shadow_relation():
 # ------------------------------------------------------------------ the projection
 
 def test_every_shipped_contract_is_unshadowed():
-    """W2-4 shipped the mechanism with zero policy. W2-6 is the first PR to USE it: remax@3
-    makes archived-HTML entries executable, so it ships dark and everything else stays live.
-
-    Pinned per portal rather than as "at least one is shadowed" — a portal silently going
-    live is the failure this whole mechanism exists to prevent, and a W2 portal PR that
-    forgets `shadow: true` must red here."""
+    """W2-4 ships the mechanism and zero policy: no contract on disk is shadowed yet, so
+    this PR cannot change what any live extractor produces."""
     assert {c.source: c.shadow for c in contracts.load_all()} == {
-        s: (s == "remax") for s in contracts.EXTRACTOR_PREFIXES}
+        s: False for s in contracts.EXTRACTOR_PREFIXES}
 
 
 def test_a_yaml_without_the_key_projects_as_live(tmp_path: Path):
@@ -248,10 +244,7 @@ def test_the_hash_is_the_file_minus_the_two_blocks_that_are_not_extraction():
 
     for path in sorted(contracts.CONTRACT_DIR.glob("*.yaml")):
         body = path.read_bytes()
-        # A `shadow:` line is now PRESENT on remax (W2-6) and absent elsewhere. Either way
-        # it must be outside the governed bytes, which the equality below proves against an
-        # independent line-by-line filter — a stronger check than the old blanket assertion
-        # that no file had the key at all (that one could never exercise the shadow arm).
+        assert b"\nshadow:" not in b"\n" + body, path.name
         assert b"\npersistence:" in b"\n" + body, path.name
         assert contracts.contract_body_hash(body) != hashlib.sha256(body).digest(), (
             path.name)

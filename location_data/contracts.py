@@ -250,10 +250,15 @@ READER_CONTRACTS: dict[str, ReaderContract] = {
     # `position_branch` is a REQUIRED locator key, not an optional hint: it decides the
     # coordinate's licence class (C6) and the archived ladder refuses a read without one, so
     # an entry omitting it would fail per-row at runtime instead of once at projection time.
+    # `consults_guards` is FALSE, deliberately. The reader applies the CZ envelope
+    # intrinsically (`parse_dms_pair` returns (None, None) outside it) and never calls
+    # `guard_admits`, so recording True would let an entry declare `guards: [...]` the
+    # runtime silently never evaluates — the exact defect class that made `dms_to_decimal`
+    # inadmissible on this same entry. A guard this reader must genuinely honour has to be
+    # implemented in the reader body first, and this flag flipped with it.
     "html_point_dms": ReaderContract(
         substrates=_DOM_SURFACES, methods=_DOM_METHOD | _MAP_METHOD,
-        locator_keys=frozenset({"css", "attr", "position_branch"}),
-        consults_guards=True),
+        locator_keys=frozenset({"css", "attr", "position_branch"})),
     "geom_column": ReaderContract(
         substrates=_LEGACY_SURFACE, methods=_LEGACY_METHOD,
         consults_guards=True, stamps_legacy_column="listings.geom"),
