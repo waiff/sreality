@@ -17,7 +17,8 @@ is the tie-breaker). This track records sequencing + shipped state only.
 | W1v bezrealitky vertical slice | one portal end-to-end + location-quality dashboard | ✅ shipped 2026-08-13 (every layer exercised in prod; gate answered — portal-inventory-capped, not pipeline-capped) |
 | W2a payload archive rewrite | append-on-change `portal_raw_payloads` | 🟡 hardened + measured (2026-08-14) — migrations 405–408 applied; bodies to R2, storage bounded by construction (cap 2 + 7-day floor), profiles per (source, page_kind) and now in the contracts; detail churn 0.1–2.4 % on 6 of 8 portals (idnes still 98.9 %, index surfaces unprofiled ~100 %). **Operator decided 2026-08-16: dual-write ON, index archiving NOT YET** (index keys are week-stamped, so the cap bounds detail but not index; ~100 % churn on a surface nobody has diffed). #1074 first wired the R2 secrets into all 14 page-fetching lanes — nine of ten had none, so enabling the flag would have archived nothing while every scrape stayed green; #1075 the same for the backfill lane's own write step. **Backfill PROVEN 2026-08-16** (run 31970354928) **and RUNNING since**: the first 2,000 pages came back round-trip byte-identical (**0 mismatch / 0 unreadable**), and as of **2026-08-17 17:08 UTC, 270,000 of ~445,191 pages (≈61 %)** have migrated across six budgeted dispatches — 266,012 inserted, **0 unmapped**, 21.1 GB read → 4.8 GB stored, cursor `after_id=1,483,282`. **The compression ratio fell from the proving run's 7.5x to 4.4x** once the sample stopped being the first 2,000 rows — projecting the measured ratio over the full archive puts the backfill's one-time R2 footprint at **≈7.9 GB** (well inside the ~28.6 GB steady-state R2 projection the storage sign-off used; the ~4 GB figure elsewhere in this file is the POSTGRES metadata allowance, a different budget). The denominator is not static: `portal_raw_pages` is still live-written, so new rows land above the cursor and "~445,191" is the inventory count, not a finish line. A run stops on its wall-clock budget stamping `outcome='stopped'`, never mid-row, and the next resumes from that row's keyset cursor; `'ok'` means only that the scan ran off the end. The verifier samples the whole source corpus, so it reports `missing` for everything not yet migrated and passes only after completion. Remaining ≈4 dispatches at the measured ~980 pages/min (the earlier ~570/min estimate was low). Each run holds `location-batch` for ~45 min and that group is saturated (intake times out hourly, resolve re-queues every 15 min), so dispatches are serialised into the idle gaps rather than run back-to-back. **Follow-up, not mid-run:** the uploader logs `urllib3` "Connection pool is full, discarding connection" continuously against R2 — correctness is unaffected (boto3 retries) but throughput is being left on the table; raise `max_pool_connections` in the botocore config. **`payload_dual_write` flipped ON globally 2026-08-17 12:29 UTC** — all nine portals, no per-portal overrides; *reported by the session that performed the flip, which also reported 8 of 9 portals confirmed writing fresh rows (mmreality's cron had not cycled since). Not independently re-queried here — verify against `app_settings` / `portals.operational_limits` before relying on it.* `payload_index_archive` remains **OFF** |
 | W2 HTML re-mine | claims from archived `portal_raw_payloads` bodies | 🟡 **infrastructure shipped, lane deliberately inert** (2026-08-17) — W2-0/W2-1 (#1048/#1045), W2-3 the exclusion-zone scoper (#1053), W2-4 the contract shadow mechanism (#1050, mig 404), W2-5 the permanent fixture-diff gate (#1058) and W2-2 the evidence-bearing claims + archived-HTML re-mine lane (#1079) are all merged. The lane mines **nothing**: `ARCHIVE_READERS` is empty and a run with no reader returns *before* it opens a batch row, because a batch stamped `'ok'` would move the incremental watermark over a corpus it never opened. **W2-6…W2-12, the per-portal contracts that would give it a reader, are unstarted and unowned** — that is the whole remaining scope of W2 |
-| W3–W6 | history backfill, refetch cohorts, LLM lane, serving flip | ⚪ not started (W3 is built but unmerged — PR #1057, open) |
+| W3 history backfill | claims from `listing_snapshots.raw_json` (1,574,313 rows) | 🟡 lane built + rebased onto current main (PR #1057) — **never dispatched**; the 1.57M-row run needs operator go-ahead AND an idle `location-batch` (see W3 section) |
+| W4–W6 | refetch cohorts, LLM lane, serving flip | ⚪ not started |
 
 ## W0 — done
 
@@ -906,6 +907,142 @@ measurement phase is closed:
 what actually moves on an INDEX page — nobody has diffed one, which is why the second flag
 stays off. That is a prerequisite for enabling `payload_index_archive` later, not for
 anything W2a shipped, and it does not block W2: the re-mine lane reads detail bodies.
+
+## W3 — lane built, never dispatched (history backfill from `listing_snapshots`)
+
+Built in a separate git worktree off `origin/main` (never on the main checkout's branch), on a
+DIFFERENT substrate from W2/W2a (`listing_snapshots.raw_json`, not archived HTML), so it does not
+wait on that in-progress work — coordinated with the session building W2a/W2 to avoid touching the
+same files without visibility into each other's changes.
+
+**Rebased onto current main 2026-08-17** (PR #1057, originally cut 2026-08-13 at `1cf383c9`). Main
+had moved 25+ commits, including W2-2 (#1079), which independently landed ONE of this PR's six
+additive `claims_intake.py` changes — `write_result(..., extractor_version=...)` — in a converged
+form. The other five (the `snapshot_id` field on `Claim`/`Absence` and its plumbing through
+`_CLAIM_WRITE_SQL` / `_ABSENCE_WRITE_SQL` / the `resighted`+`obs` CTEs / `dedupe_absence_rows`, plus
+the two `extract_listing` flags) were untouched by it and applied as union merges alongside W2's
+evidence columns — the two sets are additive to the same statements and do not overlap
+semantically. `claims_remine.py` itself rebased with zero conflicts. Three assertions in W2's
+`test_claims_remine_archive.py` were written as `"snapshot_id" not in row` when no lane wrote the
+column; they now assert `row["snapshot_id"] is None`, which is the same guarantee stated against the
+value rather than the key, and strictly stronger.
+
+**What shipped, in one PR:**
+
+- **`location_data/claims_remine.py`** — reuses W1's (`location_data.claims_intake`) readers,
+  `Entry`/`ListingRow`/`Claim`/`Absence` shapes, licence ladder (`coordinate_verdict`) and
+  batch/write SQL wholesale rather than re-deriving them: a snapshot's `raw_json` is a verbatim
+  historical copy of the SAME payload shape `listings.raw_json` holds today, so the SAME
+  contract-entry readers apply unchanged. The module's own job is the snapshot scan/keyset over
+  `listing_snapshots` instead of `listings`, which claim types are admissible from that substrate
+  per source, and the snapshot-anchor / observation-time plumbing.
+- **Small additive changes to `location_data/claims_intake.py`** so the two lanes share one write
+  path: `Claim.snapshot_id` / `Absence.snapshot_id` (both `None` by default — W1 unaffected),
+  `_CLAIM_WRITE_SQL` / `_ABSENCE_WRITE_SQL` and the `resighted`/`obs` observation CTE now carry
+  `snapshot_id` through to `location_claims` / `location_claim_absences` /
+  `location_claim_observations`, `dedupe_absence_rows`'s in-batch key includes it (a W3 batch
+  routinely holds several snapshots of ONE listing, unlike W1), `write_result()` takes an
+  `extractor_version` parameter (default unchanged) so a re-mined absence is never misattributed to
+  the W1 lane, and `extract_listing()` gains `route_legacy_shape_to_refetch` (default `True`,
+  unchanged for W1) so a historical legacy-shape snapshot — an accurate fact about the past, not a
+  gap a live refetch could close — never enrolls in the refetch cohort, while the truncation
+  ABSENCE itself still gets recorded (03 §3.2 rule 4: every attempt is recorded, including
+  negatives). **No new migration** — every construct this needed (`snapshot_anchor`, `snapshot_id`,
+  `history_completeness`) was already on the schema per 06 §6.6.6; only the write path had to learn
+  to populate them.
+- **Coordinate-history scoping, resolved against ground truth, not just the design table's
+  hedge.** 06 §6.2.2 hedges mmreality's coordinate with "but only where those fields participated
+  in the hash" — flagged uncertainty in the design corpus. `scraper/scraped_listing.py`'s
+  `_HASH_FIELDS` (the ONE allowlist all eight non-sreality portals share, confirmed live in both
+  `bezrealitky_parser.py` and `mmreality_parser.py`) excludes `lat`/`lon`/`street`/`house_number`/
+  `zip` for ALL eight — so a coordinate-only change never appends a snapshot for any of them,
+  mmreality and bezrealitky included, and a snapshot's mere existence is not evidence a coordinate
+  was checked. Worse for the six `geom_column`-substrate portals (bazos/idnes/ceskereality/
+  realitymix/maxima/remax): `listing_snapshots` carries no `geom`/`lat`/`lon` column at all
+  (migration 001 + 320), and 06 §6.1.3 states their raw_json never carried the coordinate VALUE to
+  begin with, only the provenance method — no historical value to read, full stop. **Only sreality
+  gets `claim_type='coordinate'` claims from this lane.** Every OTHER claim type the contract
+  yields for the eight (obec_code, cast_obce_name, precision_declaration, locality/district text,
+  ...) is still mined; only the coordinate type is filtered out of the entries handed to the
+  reader loop. `history_completeness` is `'full'` for sreality and `'locality_text_only'` for the
+  other eight uniformly, matching 06 §6.4's W3 gate verbatim — deliberately NOT
+  `claims_intake.HISTORY_COMPLETENESS`'s richer `payload_only` split for mmreality/bezrealitky,
+  which answers a different question (W1's "is the CURRENT payload present", not W3's "does a
+  snapshot's existence mean this field was checked").
+- **Batching discipline matches §6.7's W3 risk note** (a prior single-transaction backfill
+  deadlocked against live ingest writers — `repo-known-issues.md` #25): bounded batches with
+  per-batch commit (`guarded()`, reused from `claims_intake`, 5 s lock timeout), keyset pagination
+  over `listing_snapshots.id` (full mode) or `(scraped_at, id)` (incremental), a resumable cursor
+  stamped on `location_claim_batches` (lane `location_claims_remine`, wave `W3`) exactly like W1's
+  `outcome='stopped'` vs `'ok'` split, and an attempt row for every candidate including negatives
+  (a licence-refused or truncated snapshot still writes an absence row, snapshot-scoped).
+- **Lease-row CAS + concurrency group.** `.github/workflows/location_claims_remine.yml` joins the
+  outer `location-batch` GH concurrency group (shared with registry load / claim intake / Mapy
+  inventory / resolve — the 2026-08-10 incident's guard) plus its own inner `location-remine`
+  group, AND takes a `location_jobs` lease-row CAS (`location_data.resolver.lease`, job name
+  `location_claims_remine`) — never an advisory lock, since the transaction-mode pooler would
+  strand one. The lease is a second, orthogonal guard that also catches a manual local invocation
+  racing the scheduled workflow, which a GH-only concurrency group cannot.
+- **`workflowDocs.generated.ts` regenerated** (`python scripts/generate_workflow_docs.py`) so the
+  new workflow's docs stay in sync (CI gate).
+- **Tests** (`tests/location_data/test_claims_remine.py`, 27 cases) cover: coordinate-entry
+  scoping per source, snapshot anchoring (`snapshot_anchor='snapshot'` + the right `snapshot_id` on
+  every claim AND absence), `history_completeness` per the W3 mapping, the refetch-cohort
+  suppression (with the truncation absence still recorded), and — the gate's own language made
+  concrete — that a genuinely changed coordinate across two snapshots produces two Claim objects
+  with different values while a repeated one produces the same value (the corpus-level "one claim
+  row per distinct value, an observation row per re-sighting" guarantee itself is a SQL/DB-level
+  fact exercised by `test_claims_intake_fingerprint.py`'s sibling coverage, not re-derived here).
+  Full existing suite re-run clean after every additive `claims_intake.py` change (3,901 passed,
+  74 skipped, 0 failures).
+
+**Deliberately NOT done in this PR — dispatch is a separate, operator-gated step.** The workflow
+is `workflow_dispatch`-only, no `schedule:` trigger, so merging cannot start the backfill on its
+own. Per standing instruction: before dispatching the ~1.57M-row backfill against production, check
+with the operator — this is a shared instance that four concurrent location lanes have already
+knocked over once (2026-08-10 incident, below). A follow-up PR can add an `incremental` schedule
+(mirroring W1 intake's hourly cron) once the initial full pass has completed.
+
+**A SECOND gate now applies, and it is not the operator's: `location-batch` is currently
+saturated.** As of 2026-08-17 the W2a payload backfill is mid-flight (≈61 % of 445k pages, ~4
+dispatches left, each holding the group ~45 min) while hourly intake and the `*/15` resolve drain
+compete for the same single pending slot. This lane joins that same outer group by design, so
+dispatching it now would either queue behind the payload backfill or displace a tick of it — the
+exact contention W1's own backfill hit when its `*/15` resolve cron had to be removed for the
+duration. **Wait for the payload backfill to finish before the first W3 dispatch**, then treat W3's
+own run the same way W1's was: budgeted dispatches into idle gaps, not back-to-back.
+
+**Open for the next session / operator sign-off:**
+
+- Dispatch the initial `mode=full` backfill (budgeted `--max-seconds`, resumable if it stops).
+- After it completes: verify the W3 gate (06 §6.4) — a per-listing sreality coordinate/precision
+  time series with VISIBLE oscillation, the 8-portal `locality_text_only` stamp holding, zero
+  coordinate claims from the R2 Mapy inventory on ANY substrate including historical.
+- Decide whether to add the `incremental` cron once the full pass is done.
+
+**Erratum to the design corpus, discovered coordinating with the concurrent W2/W2a session
+(2026-08-13): the module name `location_data/claims_remine.py` is independently assigned to TWO
+different waves.** This section's module re-mines `listing_snapshots` (history, this wave); the
+W2-2 plan (`~/location-data-architecture-2026-08-10/BUILD-PLAN-w2a-w2.md`, "Evidence-bearing
+claims + the re-mine lane") independently assigns the SAME file path, `LANE =
+"location_claims_remine"` and `REMINE_VERSION = "claims_remine@1"` to a module re-mining
+`portal_raw_payloads` (archived HTML, W2) — same naming convention, baked into two design-corpus
+sections for two different substrates. Not cosmetic: `location_claim_batches`'s resume/watermark
+queries key on `(lane, source, scan_mode)` only, so two waves sharing one `lane` string would read
+and corrupt each other's resume cursors the moment both ran for real. Resolution (this wave ships
+first and is already tested): **W3 keeps `location_data/claims_remine.py` / `LANE =
+"location_claims_remine"` / `REMINE_VERSION = "claims_remine@1"` / workflow
+`location_claims_remine.yml` / concurrency group `location-remine`, exactly as shipped here.** W2-2
+(and W2-13's eventual dispatch workflow) must use a disambiguated name instead —
+`location_data/claims_remine_archive.py`, `LANE = "location_claims_remine_archive"`,
+`REMINE_VERSION = "claims_remine_archive@1"`, workflow `location_claims_remine_archive.yml`, group
+`location-remine-archive` — so a future reader hits this note instead of rediscovering the
+collision by watching a resume cursor jump between two substrates.
+**RESOLVED AND HONOURED — W2-2 shipped as #1079 using exactly the disambiguated spellings**
+(`location_data/claims_remine_archive.py`, `LANE = "location_claims_remine_archive"`), verified
+against main 2026-08-17. The two lanes now key `location_claim_batches` on distinct `lane` strings
+and cannot read each other's resume cursors. The note stays as the record of WHY the archive lane
+carries the longer name — deleting it would invite the next reader to "simplify" it back.
 
 ## Standing decisions
 

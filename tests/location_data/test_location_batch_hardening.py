@@ -51,6 +51,10 @@ LOCATION_BATCH_WORKFLOWS = (
     # arrive unannounced: a weekly sweep of the whole payload archive landing on top of a
     # monthly registry baseline is exactly the overlap the outer group exists to prevent.
     "location_payload_prune.yml",
+    # W3. A one-pass backfill over 1,574,313 `listing_snapshots` rows sharing the SAME
+    # instance a claims intake or a registry load hits — exactly the corpus-wide-sweep
+    # collision the outer group exists to serialize away.
+    "location_claims_remine.yml",
 )
 OUTER_GROUP = "location-batch"
 

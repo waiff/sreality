@@ -287,7 +287,7 @@ def test_every_claim_is_stamped_archived_html_with_the_pages_own_page_kind():
                                   scope_version="html_scope@1:remax:beef")
     assert stamped.surface == ARCHIVE_SURFACE == "archived_html"
     assert stamped.page_kind == "index", "C10: a body does not change what kind of page it is"
-    assert "snapshot_id" not in stamped.to_row()
+    assert stamped.to_row()["snapshot_id"] is None
     assert stamped.snapshot_anchor == ARCHIVE_ANCHOR == "unanchored_latest_fetch"
     assert stamped.first_observed_at == FETCHED_AT
     assert stamped.payload_id == 9001
@@ -312,9 +312,12 @@ def test_the_archive_page_kind_enum_member_stays_unused():
 def test_the_anchor_is_the_only_one_the_check_allows_beside_a_null_snapshot():
     """`loc_claim_anchor`: snapshot_anchor='snapshot' <-> snapshot_id IS NOT NULL.
 
-    Nothing in this repo writes `snapshot_id` yet — no `Claim` field, no INSERT column —
-    so migration 382's nullable column defaults NULL on every row this lane produces, and
-    the anchor it stamps is the only one that pairs with that."""
+    W3 (`location_data.claims_remine`) is the one lane that writes a real `snapshot_id`,
+    so the shared `Claim` and `_CLAIM_WRITE_SQL` both carry the column. THIS lane's
+    substrate is a latest-wins archived body with no snapshot to anchor to, so it leaves
+    the column NULL — which is exactly the side of the CHECK its `unanchored_latest_fetch`
+    anchor pairs with. Asserting the NULL is stronger than asserting the column's absence
+    was: it pins the value that actually reaches the constraint."""
     anchor_check = re.search(r"constraint loc_claim_anchor check \((.*?)\)\);",
                              _MIGRATION_382, re.S)
     assert anchor_check
@@ -323,8 +326,11 @@ def test_the_anchor_is_the_only_one_the_check_allows_beside_a_null_snapshot():
         "the column must be nullable for the write to legally omit it"
     stamped = stamp_archive_claim(raw_claim(), payload(), scope_version="v")
     assert stamped.snapshot_anchor != "snapshot"
-    assert "snapshot_id" not in stamped.to_row()
-    assert "snapshot_id" not in claims_intake._CLAIM_WRITE_SQL
+    assert stamped.to_row()["snapshot_id"] is None
+    # The shared writer carries the column (W3 fills it); this lane's contribution to the
+    # pairing is that it never stamps the 'snapshot' anchor, so its NULL is always legal.
+    assert "snapshot_id" in claims_intake._CLAIM_WRITE_SQL
+    assert ARCHIVE_ANCHOR != "snapshot"
 
 
 # ------------------------------------------------------------------ the licence ladder
@@ -440,9 +446,12 @@ def test_an_archived_absence_carries_the_archived_surface_and_the_minus_one_sent
     for absence in absences:
         assert absence.surface == ARCHIVE_SURFACE
         row = absence.to_row("claims_remine_archive@1")
-        assert "snapshot_id" not in row
+        # NULL, not absent: W3 gave `Absence` a real `snapshot_id` and the shared write
+        # SQL now SELECTs it instead of a hardcoded NULL. This lane leaves it None, so
+        # coalesce(NULL, -1) still lands the same sentinel.
+        assert row["snapshot_id"] is None
         assert "snapshot_id, surface" in claims_intake._ABSENCE_WRITE_SQL, \
-            "the writer names the column and inserts NULL, so snapshot_key lands on -1"
+            "the writer names the column; this lane passes NULL, so snapshot_key lands on -1"
         assert row["surface"] == "archived_html"
         assert row["extractor_version"] == "claims_remine_archive@1"
 

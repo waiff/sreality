@@ -402,12 +402,20 @@ class Claim:
     # down at the constraint, once, in production, on whoever builds the lane.
     model: str | None = None
     prompt_version: str | None = None
+    # NULL on every W1 claim (the substrate is latest-wins `listings.raw_json`, which has
+    # no snapshot to anchor to). W3 (`location_data.claims_remine`) is the first writer
+    # that sets this: a claim mined from `listing_snapshots` carries its row's id here and
+    # `snapshot_anchor='snapshot'` (01 §4.2's `loc_claim_anchor` CHECK pairs the two — see
+    # 00 §3.3). Present here, not on a W3-only subclass, so `location_claims_intake` and
+    # `location_claims_remine` share one `Claim` shape, one `to_row()`, and one writer.
+    snapshot_id: int | None = None
 
     def to_row(self) -> dict[str, Any]:
         row = {
             "listing_id": self.listing_id,
             "source": self.source,
             "source_id_native": self.source_id_native,
+            "snapshot_id": self.snapshot_id,
             "snapshot_anchor": self.snapshot_anchor,
             "first_observed_at": self.first_observed_at.isoformat(),
             "claim_type": self.claim_type,
@@ -458,10 +466,17 @@ class Absence:
     reason: str
     extraction_method: str
     detail: str
+    # NULL for W1 (no snapshot). W3 sets it: migration 382's absence key is
+    # `(listing_id, snapshot_key, surface, field, extractor_version)` with
+    # `snapshot_key = coalesce(snapshot_id, -1)` PRECISELY so a withheld coordinate at
+    # snapshot N and the same withholding at snapshot N+5 are two rows, not one collapsed
+    # by the unique index.
+    snapshot_id: int | None = None
 
     def to_row(self, extractor_version: str) -> dict[str, Any]:
         return {
             "listing_id": self.listing_id,
+            "snapshot_id": self.snapshot_id,
             "surface": self.surface,
             "field": self.field_,
             "reason": self.reason,
@@ -1172,8 +1187,30 @@ def _refuse_oversized(
 
 def extract_listing(
     row: ListingRow, entries: list[Entry], *, max_value_bytes: int | None = None,
+    route_legacy_shape_to_refetch: bool = True,
+    record_legacy_shape_absence: bool = False,
 ) -> IntakeResult:
-    """Everything this lane knows about one listing. Pure — no DB, no clock, no network."""
+    """Everything this lane knows about one listing. Pure — no DB, no clock, no network.
+
+    `route_legacy_shape_to_refetch` gates the sreality-legacy-shape tail below. It defaults
+    True (unchanged W1 behaviour: a CURRENT listing whose payload is legacy-shape or
+    truncated is genuinely worth a live detail refetch). `location_data.claims_remine`
+    (W3) passes False: a SNAPSHOT's payload is whatever sreality's API actually returned at
+    that historical instant — legacy-shape there is an accurate historical fact, not a gap
+    a refetch could ever close, and routing it into `location_enrichment_state` would flood
+    the real refetch cohort with attempts against rows that were never wrong, only old.
+
+    `record_legacy_shape_absence` defaults False, preserving W1's exact shipped/gated
+    behaviour: the sreality D3-coverage gate (06 §6.4 W1) explicitly scopes the legacy-shape
+    cohort OUT ("gated in W4"), and W1 already surfaces it via the refetch-cohort
+    enrollment above, so adding an absence there too would be new, ungated surface on an
+    already-measured gate. `claims_remine` (W3) passes True: with the refetch routing
+    disabled (the flag above), a `shape == 'legacy'` snapshot would otherwise produce
+    NEITHER a coordinate claim (`_read_point_pair`'s own shape guard) NOR an absence — a
+    silent hole indistinguishable from "not yet re-mined", which is exactly the honesty
+    failure 03 §3.2 rule 4 exists to prevent. `shape == 'absent'` (truncated) already
+    always gets one, independent of this flag.
+    """
     if max_value_bytes is None:
         max_value_bytes = env_positive_int(MAX_CLAIM_VALUE_BYTES_ENV,
                                            DEFAULT_MAX_CLAIM_VALUE_BYTES)
@@ -1238,21 +1275,32 @@ def extract_listing(
         if shape != "post_cutover":
             # 06 §6.2.1 caveat: a legacy-shape row can never yield
             # zip/housenumber/entity_type/inaccuracy_type and a truncated one lost the
-            # locality object outright. Both route to the refetch cohort (02 P6) instead of
-            # silently producing nothing.
-            result.enrichment.append(EnrichmentTask(
-                listing_id=row.listing_id,
-                method="portal_structured_field",
-                lane="sreality_detail_refetch",
-                outcome="skipped" if shape == "legacy" else "error",
-                input_hash=payload_hash(row.raw_json),
-                error=None if shape == "legacy"
-                else "locality object absent from raw_json (payload truncation)"))
+            # locality object outright. `route_legacy_shape_to_refetch` gates ONLY the
+            # refetch-cohort enrollment (meaningless for a snapshot — there is nothing left
+            # to refetch, the payload IS what sreality returned back then); the truncation
+            # absence stays unconditional either way, because it is a negative ASSERTION
+            # about this specific payload (03 §3.2 rule 4: every attempt is recorded,
+            # including negatives), not a request for future work.
+            if route_legacy_shape_to_refetch:
+                result.enrichment.append(EnrichmentTask(
+                    listing_id=row.listing_id,
+                    method="portal_structured_field",
+                    lane="sreality_detail_refetch",
+                    outcome="skipped" if shape == "legacy" else "error",
+                    input_hash=payload_hash(row.raw_json),
+                    error=None if shape == "legacy"
+                    else "locality object absent from raw_json (payload truncation)"))
             if shape == "absent":
                 result.absences.append(Absence(
                     listing_id=row.listing_id, surface="api_json", field_="coordinate",
                     reason="not_attempted", extraction_method="portal_structured_field",
                     detail="sreality locality object absent (payload truncation)"))
+            elif shape == "legacy" and record_legacy_shape_absence:
+                result.absences.append(Absence(
+                    listing_id=row.listing_id, surface="api_json", field_="coordinate",
+                    reason="not_attempted", extraction_method="portal_structured_field",
+                    detail="sreality pre-cutover legacy payload shape carries no "
+                           "gps_lat/gps_lon at the post-cutover locator (06 §6.2.1)"))
     return result
 
 
@@ -1427,7 +1475,7 @@ _CLAIM_WRITE_SQL = f"""
     WITH input AS (
         SELECT * FROM jsonb_to_recordset(%(rows)s::jsonb) AS x(
             listing_id bigint, source text, source_id_native text,
-            snapshot_anchor text, first_observed_at timestamptz,
+            snapshot_id bigint, snapshot_anchor text, first_observed_at timestamptz,
             claim_type text, surface text, page_kind text, extraction_method text,
             extractor_id text, extractor_version text, contract_entry_id bigint,
             value_text text, value_num numeric, value_geom_wkt text, value_shape_wkt text,
@@ -1454,17 +1502,17 @@ _CLAIM_WRITE_SQL = f"""
         SELECT DISTINCT ON (claim_fingerprint) * FROM fingerprinted ORDER BY claim_fingerprint
     ), ins AS (
         INSERT INTO location_claims (
-            listing_id, source, source_id_native, snapshot_anchor, first_observed_at,
-            claim_type, surface, page_kind, extraction_method, extractor_id,
-            extractor_version, contract_entry_id, batch_id, value_text, value_norm,
-            value_num, value_geom, value_shape, value_jsonb, distance_m, travel_mode,
-            target_text, declared_precision_label, declared_confidence, declared_radius_m,
-            claim_confidence, blur_evidence, licence_class, legacy_source_column,
-            legacy_write_path_unknown, history_completeness, subject_scoped, payload_id,
-            payload_sha256, evidence_quote, span_start, span_end, payload_scope_version,
-            model, prompt_version, claim_fingerprint)
-        SELECT d.listing_id, d.source, d.source_id_native, d.snapshot_anchor,
-               d.first_observed_at, d.claim_type::location_claim_type,
+            listing_id, source, source_id_native, snapshot_id, snapshot_anchor,
+            first_observed_at, claim_type, surface, page_kind, extraction_method,
+            extractor_id, extractor_version, contract_entry_id, batch_id, value_text,
+            value_norm, value_num, value_geom, value_shape, value_jsonb, distance_m,
+            travel_mode, target_text, declared_precision_label, declared_confidence,
+            declared_radius_m, claim_confidence, blur_evidence, licence_class,
+            legacy_source_column, legacy_write_path_unknown, history_completeness,
+            subject_scoped, payload_id, payload_sha256, evidence_quote, span_start,
+            span_end, payload_scope_version, model, prompt_version, claim_fingerprint)
+        SELECT d.listing_id, d.source, d.source_id_native, d.snapshot_id,
+               d.snapshot_anchor, d.first_observed_at, d.claim_type::location_claim_type,
                d.surface::location_claim_surface, d.page_kind::location_page_kind,
                d.extraction_method::location_extraction_method, d.extractor_id,
                d.extractor_version, d.contract_entry_id, %(batch_id)s, d.value_text,
@@ -1489,17 +1537,21 @@ _CLAIM_WRITE_SQL = f"""
         -- body it was FIRST mined from, so without this the observation series could not
         -- name which archived body re-observed it — and 06 §6.6 Rule 2's "replayable,
         -- because that non-null payload_sha256 addresses an immutable body" would hold
-        -- for the claim and not for its re-sightings.
-        SELECT c.id, d.first_observed_at, d.payload_sha256, d.span_start, d.span_end,
-               d.extractor_version
+        -- for the claim and not for its re-sightings. `snapshot_id` rides along for the
+        -- exact counterpart reason on W3's substrate: a re-sighting of an already-known
+        -- value still names WHICH snapshot re-observed it (lco_snapshot, migration 382).
+        -- Both are NULL for a W1 re-sighting, exactly as before.
+        SELECT c.id, d.first_observed_at, d.snapshot_id, d.payload_sha256, d.span_start,
+               d.span_end, d.extractor_version
         FROM deduped d
         JOIN location_claims c ON c.claim_fingerprint = d.claim_fingerprint
     ), obs AS (
         INSERT INTO location_claim_observations
-            (claim_id, observed_at, payload_sha256, span_start, span_end,
+            (claim_id, observed_at, snapshot_id, payload_sha256, span_start, span_end,
              extractor_version)
-        SELECT r.id, r.first_observed_at, decode(r.payload_sha256, 'hex'),
-               r.span_start, r.span_end, r.extractor_version
+        SELECT r.id, r.first_observed_at, r.snapshot_id,
+               decode(r.payload_sha256, 'hex'), r.span_start, r.span_end,
+               r.extractor_version
         FROM resighted r
         WHERE NOT EXISTS (
             SELECT 1 FROM location_claim_observations o
@@ -1515,9 +1567,11 @@ _CLAIM_WRITE_SQL = f"""
            (SELECT count(*) FROM enqueued)
 """
 
-# snapshot_id is always NULL in this lane (the substrate is latest-wins `listings.raw_json`,
-# 00 §3.3), so the generated `snapshot_key` is always -1 — and it is named explicitly in the
-# conflict target because that is the column migration 382's unique key actually carries.
+# snapshot_id is NULL in the W1 lane (the substrate is latest-wins `listings.raw_json`,
+# 00 §3.3), so its generated `snapshot_key` is -1. W3 (`location_data.claims_remine`) sets
+# it, so the SAME (listing, surface, field) withheld at two different snapshots is two
+# rows, not one collapsed by the unique index — it is named explicitly in the conflict
+# target because that is the column migration 382's unique key actually carries.
 #
 # ON CONFLICT, not NOT EXISTS, and the difference is a whole aborted run. A statement's
 # snapshot cannot see rows the SAME statement is inserting, so a NOT EXISTS anti-join
@@ -1532,12 +1586,12 @@ _ABSENCE_WRITE_SQL = """
     INSERT INTO location_claim_absences
         (listing_id, snapshot_id, surface, field, reason, extraction_method,
          extractor_version, surfaces_seen)
-    SELECT i.listing_id, NULL, i.surface::location_claim_surface,
+    SELECT i.listing_id, i.snapshot_id, i.surface::location_claim_surface,
            i.field::location_claim_type, i.reason,
            i.extraction_method::location_extraction_method, i.extractor_version,
            '{}'::location_claim_surface[]
     FROM jsonb_to_recordset(%(rows)s::jsonb) AS i(
-        listing_id bigint, surface text, field text, reason text,
+        listing_id bigint, snapshot_id bigint, surface text, field text, reason text,
         extraction_method text, extractor_version text)
     ON CONFLICT (listing_id, snapshot_key, surface, field, extractor_version)
     DO NOTHING
@@ -1682,17 +1736,22 @@ def dedupe_absence_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Collapse absence rows onto migration 382's unique key, first-writer-wins.
 
     `location_claim_absences` is UNIQUE on (listing_id, snapshot_key, surface, field,
-    extractor_version) and `snapshot_key` is constant at -1 in this lane, so two absences
-    for one listing on the same surface+field are the same row. They are produced: a
-    sreality listing that is in `mapy_affected` AND lost its `locality` object to the
-    80 KB truncation emits the withheld-coordinate absence and the missing-locality
-    absence, both `(api_json, coordinate)`. `reason` is intentionally NOT in the key —
-    the first assertion made about a (listing, surface, field) is the one kept, and
-    keeping both was never possible."""
+    extractor_version); `snapshot_id` is part of the key here (constant at NULL in this
+    lane, so `snapshot_key` is constant at -1) because W3 (`location_data.claims_remine`)
+    passes a real one and a batch there routinely holds several snapshots of ONE listing —
+    without it in the key, this Python-level pre-DB collapse would silently drop distinct
+    per-snapshot absence rows the unique index would have kept. Two absences for one
+    listing+snapshot on the same surface+field are still the same row: a sreality listing
+    that is in `mapy_affected` AND lost its `locality` object to the 80 KB truncation emits
+    the withheld-coordinate absence and the missing-locality absence, both
+    `(api_json, coordinate)`. `reason` is intentionally NOT in the key — the first
+    assertion made about a (listing, snapshot, surface, field) is the one kept, and keeping
+    both was never possible."""
     seen: set[tuple[Any, ...]] = set()
     out: list[dict[str, Any]] = []
     for row in rows:
-        key = (row["listing_id"], row["surface"], row["field"], row["extractor_version"])
+        key = (row["listing_id"], row.get("snapshot_id"), row["surface"], row["field"],
+               row["extractor_version"])
         if key in seen:
             continue
         seen.add(key)
@@ -1776,7 +1835,8 @@ def write_result(
     sharing this writer passes its own, because `location_claim_absences` is UNIQUE on
     (listing_id, snapshot_key, surface, field, extractor_version) and an absence attributed
     to the lane that never looked at the substrate is both a misattribution and a key
-    collision waiting for the first lane whose surface overlaps W1's.
+    collision waiting for the first lane whose surface overlaps W1's. Both other lanes do:
+    `claims_remine_archive` (W2) and `claims_remine` (W3).
     """
     max_rows = env_positive_int(WRITE_CHUNK_ROWS_ENV, DEFAULT_WRITE_CHUNK_ROWS)
     max_bytes = env_positive_int(WRITE_CHUNK_BYTES_ENV, DEFAULT_WRITE_CHUNK_BYTES)
