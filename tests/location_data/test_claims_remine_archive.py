@@ -25,7 +25,7 @@ from typing import Any
 
 import pytest
 
-from location_data import claims_intake, claims_remine, claims_remine_archive
+from location_data import claims_intake, claims_remine_archive
 from location_data.claims_intake import (
     ARCHIVED_COORDINATE_RULES,
     DEFAULT_WRITE_CHUNK_BYTES,
@@ -45,7 +45,10 @@ from location_data.claims_remine_archive import (
     ARCHIVE_HISTORY_COMPLETENESS,
     ARCHIVE_READERS,
     ARCHIVE_SURFACE,
+    POSITION_BRANCH_PORTAL_GEOCODED,
+    POSITION_BRANCH_PORTAL_PIN,
     ArchivedPayload,
+    ArchiveRead,
     archive_entries,
     assert_evidence_complete,
     assert_stampable,
@@ -119,11 +122,14 @@ def test_this_lane_never_shares_an_identifier_with_the_snapshot_re_mine_lane():
     re-mines `listing_snapshots`, this one re-mines archived bodies, and both design
     documents independently named their module `claims_remine` with
     LANE='location_claims_remine'. One shared lane string is not a crash — it is two
-    cursors silently overwriting each other's coverage."""
-    assert claims_remine_archive.LANE != claims_remine.LANE
-    assert claims_remine_archive.REMINE_VERSION != claims_remine.REMINE_VERSION
-    assert claims_remine_archive.JOB_NAME != claims_remine.JOB_NAME
-    assert claims_remine_archive.CONCURRENCY_GROUP != claims_remine.CONCURRENCY_GROUP
+    cursors silently overwriting each other's coverage. This lane therefore takes the
+    `_archive` spellings and leaves the short ones free for whenever W3 lands;
+    `tests/location_data/test_lane_identifiers.py` is the fleet-wide gate."""
+    for value in (claims_remine_archive.LANE, claims_remine_archive.JOB_NAME,
+                  claims_remine_archive.REMINE_VERSION,
+                  claims_remine_archive.CONCURRENCY_GROUP):
+        assert value not in ("location_claims_remine", "claims_remine@1",
+                             "location-remine")
     assert claims_remine_archive.LANE == "location_claims_remine_archive"
     assert claims_remine_archive.REMINE_VERSION == "claims_remine_archive@1"
     assert claims_remine_archive.WAVE == "W2"
@@ -186,6 +192,45 @@ def test_a_regex_text_claim_with_no_evidence_at_all_is_refused_before_the_write(
 def test_an_llm_text_claim_is_held_to_the_same_rule():
     with pytest.raises(IntakeRefused):
         assert_evidence_complete(raw_claim(archive_entry(extraction_method="llm_text")))
+
+
+def _llm_claim(**overrides: Any) -> Claim:
+    kwargs: dict[str, Any] = {
+        "evidence_quote": "Krymská", "span_start": 10, "span_end": 17,
+        "payload_scope_version": "html_scope@1:remax:deadbeefdeadbeef",
+        "payload_sha256": "ab" * 32, "subject_scoped": True,
+        "model": "claude-x", "prompt_version": "loc_mine@1",
+    }
+    kwargs.update(overrides)
+    return raw_claim(archive_entry(extraction_method="llm_text"), **kwargs)
+
+
+def test_an_llm_text_claim_must_name_the_model_that_made_it():
+    """`loc_claim_llm_model` is the SECOND CHECK an evidence-bearing claim faces, and it
+    binds `llm_text` alone. Before this, `Claim` could spell an `llm_text` claim that
+    satisfied every Python guard and then violated the constraint — taking the whole batch
+    with it, once, in production, on whoever built the LLM lane."""
+    required = _evidence_columns_in_check("loc_claim_llm_model")
+    assert required == {"model", "prompt_version"}
+
+    assert_evidence_complete(_llm_claim())
+    for column in sorted(required):
+        with pytest.raises(IntakeRefused, match=column):
+            assert_evidence_complete(_llm_claim(**{column: None}))
+
+
+def test_a_regex_text_claim_needs_no_model():
+    """The CHECK names `llm_text` and nothing else: a deterministic regex has no model to
+    attribute, and demanding one would make the archived readers unbuildable."""
+    assert_evidence_complete(raw_claim(
+        archive_entry(extraction_method="regex_text"),
+        evidence_quote="Krymská", span_start=10, span_end=17,
+        payload_scope_version="v", payload_sha256="ab" * 32, subject_scoped=True))
+
+
+def test_the_model_columns_reach_the_insert():
+    for column in ("model", "prompt_version"):
+        assert f"d.{column}" in claims_intake._CLAIM_WRITE_SQL, column
 
 
 def test_a_degenerate_span_is_refused():
@@ -441,7 +486,7 @@ def _with_reader(fn: Any, entries: list[Entry], **kwargs: Any) -> Any:
 def test_a_readers_claim_comes_out_fully_archived_stamped():
     entry = archive_entry()
     result = _with_reader(
-        lambda entry, row, payload, document: [_base(entry, row, value_text="Krymská")],
+        lambda entry, row, payload, document: [ArchiveRead(_base(entry, row, value_text="Krymská"))],
         [entry])
     assert len(result.claims) == 1
     claim = result.claims[0]
@@ -459,7 +504,7 @@ def test_an_evidence_bearing_reader_that_forgets_its_span_takes_the_run_down():
     entry = archive_entry(extraction_method="regex_text")
     with pytest.raises(IntakeRefused, match="loc_claim_text_evidence|payload_scope_version"):
         _with_reader(
-            lambda entry, row, payload, document: [_base(entry, row, value_text="Krymská")],
+            lambda entry, row, payload, document: [ArchiveRead(_base(entry, row, value_text="Krymská"))],
             [entry])
 
 
@@ -467,7 +512,7 @@ def test_an_entry_declared_for_another_page_kind_never_runs():
     """A detail-page selector run over an index body is how a neighbour's address becomes
     the subject's."""
     result = _with_reader(
-        lambda entry, row, payload, document: [_base(entry, row, value_text="Krymská")],
+        lambda entry, row, payload, document: [ArchiveRead(_base(entry, row, value_text="Krymská"))],
         [archive_entry(page_kind="index")])
     assert result.claims == []
 
@@ -476,7 +521,8 @@ def test_a_coordinate_from_a_listing_in_the_mapy_inventory_becomes_an_absence():
     entry = archive_entry(entry_id="rx.det.gps", claim_type="coordinate")
     result = _with_reader(
         lambda entry, row, payload, document: [
-            _base(entry, row, value_geom_wkt="POINT(14.45 50.08)")],
+            ArchiveRead(_base(entry, row, value_geom_wkt="POINT(14.45 50.08)"),
+                        position_branch=POSITION_BRANCH_PORTAL_PIN)],
         [entry], in_mapy_inventory=True)
     assert result.claims == []
     assert [(a.field_, a.surface, a.reason) for a in result.absences] == [
@@ -484,23 +530,61 @@ def test_a_coordinate_from_a_listing_in_the_mapy_inventory_becomes_an_absence():
     assert result.absences[0].detail == "listing_in_mapy_affected_inventory"
 
 
-def test_the_ladder_stamps_the_licence_class_not_the_reader():
-    """A reader that declared `portal` on realitymix's Nominatim branch is overruled: C6 is
-    decided once, in the table, not once per portal reader."""
+def _realitymix_coordinate(branch: str | None, licence_class: str = "portal"):
     entry = archive_entry(entry_id="rm.det.gps", source="realitymix",
                           claim_type="coordinate")
     original = dict(ARCHIVE_READERS)
     ARCHIVE_READERS["fake_html"] = lambda entry, row, payload, document: [
-        _base(entry, row, value_geom_wkt="POINT(18.0 49.7)", licence_class="odbl")]
+        ArchiveRead(_base(entry, row, value_geom_wkt="POINT(18.0 49.7)",
+                          licence_class=licence_class),
+                    position_branch=branch)]
     try:
-        result = extract_payload(
+        return extract_payload(
             payload(source="realitymix"),
             listing_row(source="realitymix"), [entry],
             register=ScopeRegister.from_zones("realitymix", ()))
     finally:
         ARCHIVE_READERS.clear()
         ARCHIVE_READERS.update(original)
+
+
+def test_the_ladder_stamps_the_licence_class_and_the_reader_cannot_overrule_it():
+    """C6 is decided once, in `ARCHIVED_COORDINATE_RULES`, not once per portal reader.
+
+    This is the exact shape the old inference got wrong: the reader left `'portal'` on the
+    claim (the contract entry's default — what a reader that says nothing produces) while
+    declaring it read the Nominatim branch. The branch decides, so the position is filed
+    `'odbl'`."""
+    result = _realitymix_coordinate(POSITION_BRANCH_PORTAL_GEOCODED, licence_class="portal")
     assert [c.licence_class for c in result.claims] == ["odbl"]
+
+
+def test_the_pin_branch_is_first_party_even_if_the_reader_stamped_odbl():
+    """And symmetrically: a reader cannot licence-launder in the other direction either."""
+    result = _realitymix_coordinate(POSITION_BRANCH_PORTAL_PIN, licence_class="odbl")
+    assert [c.licence_class for c in result.claims] == ["portal"]
+
+
+@pytest.mark.parametrize("branch", [None, "portal_pin_blurred", ""])
+def test_a_coordinate_read_that_does_not_declare_its_branch_is_refused(branch):
+    """The failure this closes: a Nominatim-fallback reader that simply forgets to say so
+    would inherit the entry's `licence_class: portal` default and file a republished OSM
+    position as first-party, with nothing anywhere to catch it. A required argument cannot
+    be forgotten quietly — and the refusal names the entry."""
+    with pytest.raises(IntakeRefused, match="position_branch") as excinfo:
+        _realitymix_coordinate(branch)
+    assert "rm.det.gps" in str(excinfo.value)
+
+
+def test_a_branch_declared_on_a_non_coordinate_read_is_refused():
+    """It is a fact about a POSITION's licence lineage; on a street name it is noise, and
+    noise in a required field is how the field stops being read."""
+    with pytest.raises(IntakeRefused, match="position_branch"):
+        _with_reader(
+            lambda entry, row, payload, document: [
+                ArchiveRead(_base(entry, row, value_text="Krymská"),
+                            position_branch=POSITION_BRANCH_PORTAL_PIN)],
+            [archive_entry()])
 
 
 # ------------------------------------------------------------------ write-path lockstep
@@ -724,7 +808,7 @@ def _wired(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(claims_remine_archive, "load_entries", lambda conn: {"remax": [entry]})
     monkeypatch.setitem(
         ARCHIVE_READERS, "fake_html",
-        lambda entry, row, payload, document: [_base(entry, row, value_text="Krymská")])
+        lambda entry, row, payload, document: [ArchiveRead(_base(entry, row, value_text="Krymská"))])
 
 
 def _run(conn: _Conn, **kwargs: Any) -> dict[str, Any]:
