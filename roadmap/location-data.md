@@ -1132,6 +1132,28 @@ contract calls its principal hazard — is entirely unexercised.
   the shared 75 GB production instance, dropped backends across the fleet (SSL EOF, one
   AdminShutdown), degraded the live Browse rebuild to multi-minute DataFileReads, and
   wedged two lanes with no error at all. A new heavy location lane joins the group.
+  **The group is now demonstrably oversubscribed, measured 2026-08-17/18:** across the last 40
+  `location_claims_intake.yml` runs, **23 cancelled / 16 success / 1 failure — 57.5 % cancelled**.
+  The cancellations map onto backfill activity rather than any defect in intake: six consecutive
+  intake cancellations 11:53→15:53Z sit exactly under the six payload-backfill runs
+  12:30→16:22Z, intake was almost all green 06:02→10:59Z before the backfill began, and it
+  cancelled again under each later backfill window. **It is LAG, NOT LOSS** — intake is
+  incremental with a resume cursor, so a cancelled tick re-covers its ground on the next
+  successful one; the claim layer falls behind, it does not go wrong. State it that way, because
+  "57 % of runs cancelled" reads as an incident and the honest version is milder. **Open:**
+  re-measure once the payload backfill and W3's history backfill both reach `reached_end`; if the
+  rate does not return to the pre-backfill baseline, the group needs a real cadence fix (staggered
+  crons, or intake yielding to a running backfill) rather than another note.
+  **A cancelled run leaves a `location_claim_batches` row at `outcome='running'` and nothing
+  reaps it — this is inert, by construction, and must not be "fixed" casually.** Both consumers
+  exclude it: `_WATERMARK_SQL` filters `outcome = 'ok'` and `_RESUME_SQL` filters
+  `outcome IN ('ok','stopped','failed')`, so a stray can neither move the incremental floor nor
+  be resumed from, and the intake workflow's own comment already states this is intended. It bites
+  in exactly one place: **anything treating `outcome='running'` as "a lane is running right now"
+  will report one phantom in-flight run per cancellation, forever** (~23 today, growing). Document
+  that before building a health panel on the column; do not add a reaper while nothing reads it.
+  Note this is a DIFFERENT shape from the payload-backfill finalize defect an adversarial review
+  caught in #1059, where the stranded batch WAS read by consumers.
 - **No batch statement runs without a ceiling.** `statement_timeout = 0` is for genuine
   bulk phases (COPY, index build, whole-table rebuild) and nothing else; per-unit and
   per-batch work arms `SET LOCAL statement_timeout` inside its own transaction, so a wedge
