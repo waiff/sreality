@@ -78,8 +78,11 @@ A READER STATES WHAT IT READ; IT DOES NOT STAMP WHAT THAT MEANS
 CLI:
     python -m location_data.claims_remine_archive --mode full --max-seconds 2400
     python -m location_data.claims_remine_archive --mode incremental --source remax
-Required: SUPABASE_DB_URL. Requires migrations 380-389 + 403 (same as W1 plus the W2a
-archive) and an ACTIVE portal contract per source. No new migration ships with this module.
+Required: SUPABASE_DB_URL, plus the R2_* env vars — W2a made the bucket the bodies' home
+(the spill threshold is Postgres's own ~2 KB TOAST boundary, migrations 403/406), so a
+run with a reader and no store is refused rather than left to mine the handful of
+database-resident rows. Requires migrations 380-389 + 403-408 and an ACTIVE portal
+contract per source. No new migration ships with this module.
 """
 
 from __future__ import annotations
@@ -93,7 +96,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, Protocol
 
 import psycopg
 
@@ -197,6 +200,15 @@ STATEMENT_TIMEOUT_ENV = "LOCATION_REMINE_ARCHIVE_TIMEOUT_S"
 DEFAULT_STATEMENT_TIMEOUT_S = 600
 _FAILURE_STAMP_TIMEOUT_S = 30
 DEFAULT_OVERLAP_HOURS = 3
+
+
+class BodyStore(Protocol):
+    """The one R2 operation this lane needs — a GET, where `payloads.ObjectStore` is the
+    writer's PUT-only half. Declared here rather than widened onto that protocol so the
+    archive writer's fakes are not forced to grow a method they never call.
+    `scraper.image_storage.R2Client` satisfies both."""
+
+    def download_bytes(self, key: str) -> bytes: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -440,9 +452,10 @@ def extract_payload(
 #
 # The scan projects NO body and NO `listings.raw_json`. The body is fetched separately and
 # only for the rows an entry actually applies to (`_PAYLOAD_BODIES_SQL`), because the whole
-# archive is 14 GB of TOASTed text and a scan that detoasts it to discover it has no reader
-# is the exact failure W2-0's denominator query was written to avoid. `raw_json` is W1's
-# substrate and this lane never reads it, so a `ListingRow` here carries `{}`.
+# archive is ~14 GB and a scan that materialises it to discover it has no reader is the
+# exact failure W2-0's denominator query was written to avoid — a cost that only went up
+# when W2a moved the bytes to R2, since detoasting a row became a round trip to a bucket.
+# `raw_json` is W1's substrate and this lane never reads it, so a `ListingRow` carries `{}`.
 _PAYLOAD_SCAN_FULL_SQL = """
     SELECT p.id, p.source, p.source_id_native, p.page_kind::text,
            encode(p.payload_sha256, 'hex'), p.first_observed_at,
@@ -541,33 +554,44 @@ def load_registers(conn: psycopg.Connection) -> dict[str, ScopeRegister]:
 
 
 def load_bodies(
-    cur: psycopg.Cursor, payload_ids: list[int],
+    cur: psycopg.Cursor, payload_ids: list[int], *, store: BodyStore | None,
 ) -> tuple[dict[int, bytes], int]:
-    """The bodies for one batch's applicable rows, decoded. Returns (bodies, spilled).
+    """The bodies for one batch's applicable rows, decoded. Returns (bodies, from_r2).
 
     Takes the batch's OWN cursor rather than opening a transaction of its own: the whole
     batch is one all-or-nothing transaction, and a nested `guarded()` here would only add a
     savepoint around a read.
 
-    A body that lives in R2 (`body IS NULL AND body_r2_key IS NOT NULL`) is COUNTED and
-    skipped, never silently treated as absent: `payloads.ObjectStore` is an upload-only
-    protocol today, so there is no GET to call. At the shipped 256 KB spill threshold no
-    portal's page spills at all (migration 403), so the counter is expected to stay zero —
-    and if it does not, the first per-portal PR that needs those pages will see the number
-    rather than a quietly short corpus."""
+    R2 IS WHERE THE BODIES LIVE, not an exceptional path. The threshold shipped at 256 KB,
+    where nothing spilled and the archive was database-resident; it is 2 KB now
+    (`payloads.DEFAULT_R2_THRESHOLD_BYTES`, migration 406's header) — Postgres's own TOAST
+    boundary — so `body IS NULL AND body_r2_key IS NOT NULL` holds on essentially every
+    row. A version of this that counted those and moved on would mine an empty corpus and
+    report success. `store` is therefore required whenever a row is spilled, and a spilled
+    row with no store is an error, not a skipped page."""
     if not payload_ids:
         return {}, 0
     bodies: dict[int, bytes] = {}
-    spilled = 0
+    from_r2 = 0
     cur.execute(_PAYLOAD_BODIES_SQL, {"ids": payload_ids})
     for payload_id, body, body_r2_key, content_encoding in cur.fetchall():
-        if body is None:
-            if body_r2_key:
-                spilled += 1
+        encoding = content_encoding or "identity"
+        if body is not None:
+            bodies[int(payload_id)] = payloads.decode_body(bytes(body), encoding)
             continue
+        if not body_r2_key:
+            # `prp_body_present` (382) forbids this: exactly one of the two is always set.
+            continue
+        if store is None:
+            raise IntakeRefused(
+                f"payload {payload_id} holds its body in R2 (body_r2_key={body_r2_key}) and "
+                f"no object store is configured; set the R2_* env vars — mining the "
+                f"database-resident rows alone would report coverage over a corpus that is "
+                f"almost entirely in the bucket")
         bodies[int(payload_id)] = payloads.decode_body(
-            bytes(body), content_encoding or "identity")
-    return bodies, spilled
+            store.download_bytes(body_r2_key), encoding)
+        from_r2 += 1
+    return bodies, from_r2
 
 
 def _resume_point(
@@ -611,6 +635,7 @@ def run(
     statement_timeout: int,
     dry_run: bool,
     note: str | None,
+    store: BodyStore | None = None,
 ) -> dict[str, Any]:
     missing = missing_relations(conn)
     if missing:
@@ -645,6 +670,10 @@ def run(
                 "readable_sources": []}
 
     registers = load_registers(conn)
+    # Opened only past the inert return: a lane with no reader has no body to fetch, so it
+    # must not require R2 credentials to establish that it has nothing to do.
+    if store is None:
+        store = payloads.open_store()
 
     contract_id: int | None = None
     if source:
@@ -696,7 +725,7 @@ def run(
     started = time.monotonic()
     stats: dict[str, Any] = {
         "payloads": 0, "claims": 0, "claims_inserted": 0, "observations": 0,
-        "enqueued": 0, "absences": 0, "spilled_bodies": 0, "oversized_values": 0,
+        "enqueued": 0, "absences": 0, "bodies_from_r2": 0, "oversized_values": 0,
         "stopped_early": False, "reached_end": False, "resumed_from_id": after_id,
         "readable_sources": readable,
     }
@@ -731,8 +760,8 @@ def run(
                     if archive_entries(entries_by_source.get(payload.source, []),
                                        payload.page_kind)
                 ]
-                bodies, spilled = load_bodies(cur, wanted_bodies)
-                stats["spilled_bodies"] += spilled
+                bodies, from_r2 = load_bodies(cur, wanted_bodies, store=store)
+                stats["bodies_from_r2"] += from_r2
 
                 result = IntakeResult()
                 for payload, row in scanned:
@@ -760,9 +789,9 @@ def run(
                     stats["observations"] += observed
                     stats["enqueued"] += enqueued
             LOG.info("REMINE-ARCHIVE progress payloads=%d claims=%d inserted=%d observed=%d "
-                     "absences=%d spilled=%d through_id=%d",
+                     "absences=%d from_r2=%d through_id=%d",
                      stats["payloads"], stats["claims"], stats["claims_inserted"],
-                     stats["observations"], stats["absences"], stats["spilled_bodies"],
+                     stats["observations"], stats["absences"], stats["bodies_from_r2"],
                      after_id)
     except Exception as exc:
         if batch_id is not None:
@@ -791,7 +820,7 @@ def run(
                 "note": f"payloads={stats['payloads']} "
                         f"stopped_early={stats['stopped_early']} "
                         f"reached_end={stats['reached_end']} through_id={after_id} "
-                        f"spilled_bodies={stats['spilled_bodies']}",
+                        f"bodies_from_r2={stats['bodies_from_r2']}",
             })
     stats["batch_id"] = batch_id
     stats["mode"] = mode

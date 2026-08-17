@@ -25,7 +25,7 @@ from typing import Any
 
 import pytest
 
-from location_data import claims_intake, claims_remine_archive
+from location_data import claims_intake, claims_remine_archive, payloads
 from location_data.claims_intake import (
     ARCHIVED_COORDINATE_RULES,
     DEFAULT_WRITE_CHUNK_BYTES,
@@ -905,3 +905,68 @@ def test_the_scan_reads_the_latest_body_per_key_and_never_projects_one(_wired):
         # `version_seq` was added with no backfill (403), so NULL there would rank an
         # older row as the latest; `last_observed_at` moves on an unchanged refetch.
         assert "version_seq" not in sql and "last_observed_at" not in sql
+
+
+# ------------------------------------------------------------------ where the bodies live
+
+class _FakeStore:
+    def __init__(self, objects: dict[str, bytes]) -> None:
+        self.objects = objects
+        self.gets: list[str] = []
+
+    def download_bytes(self, key: str) -> bytes:
+        self.gets.append(key)
+        return self.objects[key]
+
+
+class _BodyCursor:
+    """Just enough cursor to answer `_PAYLOAD_BODIES_SQL` with a canned row set."""
+
+    def __init__(self, rows: list[tuple[Any, ...]]) -> None:
+        self.rows = rows
+
+    def execute(self, sql: str, params: dict[str, Any] | None = None) -> None:
+        assert sql is claims_remine_archive._PAYLOAD_BODIES_SQL
+
+    def fetchall(self) -> list[tuple[Any, ...]]:
+        return self.rows
+
+
+def test_a_body_that_lives_in_r2_is_fetched_and_decoded_not_counted_and_skipped():
+    """W2a made the bucket the bodies' HOME: the R2 threshold is Postgres's own ~2 KB TOAST
+    boundary now, not the 256 KB it shipped at, so `body IS NULL AND body_r2_key IS NOT
+    NULL` holds on essentially every row. A lane that skipped those would mine an empty
+    corpus and stamp its batch 'ok'."""
+    gzipped, encoding = payloads.encode_body(BODY * 200)
+    assert encoding == "gzip"
+    store = _FakeStore({"payloads/remax/ab/abcd.gz": gzipped})
+    cursor = _BodyCursor([
+        (1, BODY, None, "identity"),
+        (2, None, "payloads/remax/ab/abcd.gz", "gzip"),
+    ])
+    bodies, from_r2 = claims_remine_archive.load_bodies(cursor, [1, 2], store=store)
+    assert bodies == {1: BODY, 2: BODY * 200}
+    assert from_r2 == 1
+    assert store.gets == ["payloads/remax/ab/abcd.gz"]
+
+
+def test_a_spilled_body_with_no_object_store_takes_the_run_down():
+    """The 2026-08 lesson twice over (#1074/#1075): a lane whose credentials are absent must
+    fail, not quietly cover a fraction of its corpus and report success."""
+    cursor = _BodyCursor([(2, None, "payloads/remax/ab/abcd.gz", "gzip")])
+    with pytest.raises(IntakeRefused, match="R2"):
+        claims_remine_archive.load_bodies(cursor, [2], store=None)
+
+
+def test_the_lane_does_not_need_r2_to_establish_that_it_is_inert(monkeypatch):
+    """The store is opened PAST the inert return. A lane with no reader has no body to
+    fetch, so requiring credentials to discover it has nothing to do would make the
+    no-op case the one that pages someone."""
+    opened = []
+    monkeypatch.setattr(claims_remine_archive, "missing_relations", lambda conn: [])
+    monkeypatch.setattr(claims_remine_archive, "assert_inventory_ready", lambda conn: 2201)
+    monkeypatch.setattr(claims_remine_archive, "load_entries",
+                        lambda conn: {"remax": [archive_entry(reader="point_pair")]})
+    monkeypatch.setattr(payloads, "open_store", lambda: opened.append(1))
+    assert _run(_Conn(5))["outcome"] == "inert"
+    assert opened == []
