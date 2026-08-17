@@ -305,14 +305,29 @@ def _value_of(claim: Claim, norm: NormalizedClaim | None) -> object:
 
 
 def _independently_agreed(scored, value: object) -> bool:
-    """Two claims agree independently when they come from different producers — a different
-    source or a different extraction method. Two runs of the same extractor are one voice."""
-    voices = {
-        (claim.source, claim.extraction_method)
+    """Two claims agree independently when they come from different SOURCES. One portal is
+    one voice, however many ways we read it.
+
+    This used to count `(source, extraction_method)` pairs, and that was safe only while a
+    portal could be read exactly one way. It stopped being safe the moment a second
+    substrate opened: `claim_fingerprint` (01 §4.2.1) hashes `surface`, so the SAME fact
+    mined from a portal's `raw_json` (W1) and re-mined from its archived body (W2,
+    `location_data.claims_remine_archive`) is two distinct fingerprints, two rows, and both
+    survive into `location_claims_live`. Under the old rule, `html_selector_parse` over the
+    archived page "independently corroborated" `portal_structured_field` over the JSON —
+    one portal agreeing with itself, admitted as the D7 guard's second voice, which is
+    exactly the guard's failure mode. Same page, same publisher, same mistake if it is one.
+
+    Counting distinct sources is strictly stronger, and it is the only axis under which the
+    two claims are genuinely independent evidence. (The narrower reading also costs
+    nothing real: the guard fires only for `requires_independent_agreement` fields, where
+    the point is precisely that ONE portal's assertion is not enough — 03 §3.9.)"""
+    sources = {
+        claim.source
         for _, claim, _, norm in scored
         if not _differs(_value_of(claim, norm), value)
     }
-    return len(voices) >= 2
+    return len(sources) >= 2
 
 
 def _differs(a: object, b: object) -> bool:

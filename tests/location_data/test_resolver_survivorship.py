@@ -90,6 +90,77 @@ def test_llm_text_requires_independent_agreement_even_to_fill_a_null():
     assert winner is not None and winner.value == "Slunečná"
 
 
+def _policy_with_a_text_mined_rung():
+    """`location_field_policy` is DATA, and this is the row W2 adds.
+
+    The shipped v1 seed ranks `llm_text` last (900) and has no `regex_text` row at all, so
+    today nothing can corroborate an `llm_text` winner without outranking it. W2's
+    archived-HTML readers ARE `regex_text` (`location_data.claims_remine_archive`), and the
+    rung they need sits below `llm_text` — which is the configuration where the two
+    agreement rules give different answers. Fixing the rule before that row exists is the
+    whole point of doing it in W2-2 rather than after the first sweep."""
+    return mm.FIELD_POLICY + (
+        survivorship.FieldPolicyRow(
+            policy_version="v1", field="street_name", source_pattern="portal:*",
+            method_pattern="regex_text", rank=950, min_confidence=None,
+            may_fill_null=True, may_overwrite_non_null=False,
+            requires_independent_agreement=True),
+    )
+
+
+def _evaluate_under_w2_policy(claims):
+    return survivorship.evaluate_field(
+        "street_name", claims, normalize.normalize_all(claims),
+        _policy_with_a_text_mined_rung(), _ctx())
+
+
+def test_one_portal_read_two_ways_is_one_voice_not_independent_agreement():
+    """The C7 finding, and the reason it had to be fixed BEFORE the archived-HTML lane's
+    first sweep rather than after.
+
+    `claim_fingerprint` (01 §4.2.1) hashes `surface`, so the SAME fact mined from a
+    portal's `raw_json` (W1) and re-mined from its archived body (W2,
+    `location_data.claims_remine_archive`) is two distinct fingerprints, two rows, and both
+    survive into `location_claims_live`. Counting `(source, extraction_method)` pairs — the
+    old rule — read that as one portal independently corroborating itself, which is exactly
+    the guard's failure mode: same publisher, same page, same mistake if it is one."""
+    same_portal_two_substrates = [
+        mm.claim(1, "street_name", value_text="Slunečná", source="remax",
+                 surface="description", extraction_method="llm_text",
+                 claim_confidence="high"),
+        mm.claim(2, "street_name", value_text="Slunečná", source="remax",
+                 surface="archived_html", extraction_method="regex_text"),
+    ]
+    winner, signals = _evaluate_under_w2_policy(same_portal_two_substrates)
+    assert winner is None
+    assert [s.rule for s in signals] == ["claim_lacks_independent_agreement"]
+
+    # The same two claims, one of them from a DIFFERENT portal: genuinely two voices.
+    two_portals = [
+        same_portal_two_substrates[0],
+        mm.claim(2, "street_name", value_text="Slunečná", source="idnes",
+                 surface="archived_html", extraction_method="regex_text"),
+    ]
+    winner, _ = _evaluate_under_w2_policy(two_portals)
+    assert winner is not None and winner.value == "Slunečná"
+
+
+def test_agreement_counts_sources_not_extraction_methods():
+    """Three ways of reading one portal were three of the old rule's voices. They are one."""
+    claims = [
+        mm.claim(1, "street_name", value_text="Slunečná", source="remax",
+                 surface="description", extraction_method="llm_text",
+                 claim_confidence="high"),
+        mm.claim(2, "street_name", value_text="Slunečná", source="remax",
+                 surface="archived_html", extraction_method="regex_text"),
+        mm.claim(3, "street_name", value_text="Slunečná", source="remax",
+                 surface="api_json", extraction_method="regex_text"),
+    ]
+    winner, signals = _evaluate_under_w2_policy(claims)
+    assert winner is None
+    assert [s.rule for s in signals] == ["claim_lacks_independent_agreement"]
+
+
 def test_llm_text_never_overwrites_a_non_null_value_it_opens_a_contradiction():
     claims = [
         mm.claim(1, "street_name", value_text="Slunečná", extraction_method="llm_text",

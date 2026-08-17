@@ -392,6 +392,22 @@ all closed, several proven against a throwaway PostgreSQL 18 built from `.deb` f
 - **W2-1 / W2-0** (#1045, #1048): per-reader substrate legality (a contract entry can no longer
   declare a transform or guard its reader will never consult) and the archive denominator every
   W2 gate is a share of.
+- **W2-2 evidence-bearing claims + the archived-HTML re-mine lane** (no migration — 382 already
+  carries every evidence column and CHECK): `Claim` gains the D7 evidence set (`payload_id`,
+  `payload_sha256`, `evidence_quote`, `span_start`, `span_end`, `payload_scope_version`) plus
+  `model`/`prompt_version`, carried through `to_row()`, `_CLAIM_WRITE_SQL` and on into
+  `location_claim_observations`; `claim_fingerprint` stays time- AND evidence-free.
+  `location_data/claims_remine_archive.py` scans the latest body per
+  `(source, source_id_native, page_kind)`, reads it out of R2 or the row, and stamps
+  `surface='archived_html'` (C9), the page's own `page_kind` (C10),
+  `snapshot_anchor='unanchored_latest_fetch'` (C4), plus the archived arm of the coordinate
+  ladder (`ARCHIVED_COORDINATE_RULES`, one detail-map entry per portal; the `mapy_affected` veto
+  above the substrate branch; realitymix's Nominatim fallback is `'odbl'`). Evidence is refused in
+  Python, never by the CHECK. Also: C7 now counts distinct **sources**, so one portal read two
+  ways is one voice, and `tests/location_data/test_lane_identifiers.py` makes every `LANE` /
+  `JOB_NAME` / `CONCURRENCY_GROUP` / version constant globally unique. **Inert on merge,
+  structurally** — `ARCHIVE_READERS` is empty and a run with no reader returns before it opens a
+  batch row, because a batch stamped `'ok'` moves the incremental watermark.
 
 ### First churn numbers (2026-08-13, ~4h of live traffic — early, not the sign-off)
 
