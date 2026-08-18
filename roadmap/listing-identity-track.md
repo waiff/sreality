@@ -131,13 +131,29 @@ before its subject was scraped attaches later. `ListingPublic.sreality_id` is no
 `number | null`, which flushed out 6 latent sites.
 
 Deliberately NOT done, with evidence rather than assumption:
-- **`property_estimates_public`** still joins the legacy id. Measured at merge time: **0
-  rows missed**. It carries real regression risk on the Browse rebuilds with timeout
-  history, so it belongs with the Browse cutover below, not with a listing-page fix.
-- **The Browse estimate chip** stays sreality-keyed *end to end* — `cardIds`, the
-  estimate map, the pending-poll set and `createEstimation({sreality_id})` alike.
-  Re-keying only its read would give a read path that finds estimates its write path
-  cannot create. It got the account predicate here and nothing more.
+- **`property_estimates_public`** — ✅ **shipped 2026-08-18, migration 412.** The deferral
+  premise ("real regression risk on the Browse rebuilds with timeout history") was
+  **refuted by measurement**, not argued away: swapping arm 1's join key trades one unique
+  index scan for another at identical cost (`listings_sreality_id_uidx` → `listings_pkey`,
+  0.42..2.64 both), giving +0.01% total cost and an identical plan shape on
+  `browse_stats_properties`. Arm 2 — the seq scan on unindexed `listings.source_url`, ~96%
+  of the query's cost — is untouched, so most of the runtime is identical by construction.
+  Set-diff old vs new across the whole table: 72 rows / 60 properties both ways,
+  `only_new=0`, `only_old=0`. Arm 2's gate flipped with arm 1's so the arms stay a disjoint
+  partition (they feed a `count(*)`; overlap would double-count `run_count`).
+- **The Browse estimate chip** stays sreality-keyed *end to end* — `cardIds`, the estimate
+  map, the pending-poll set and `createEstimation({sreality_id})` alike. Re-examined
+  2026-08-18: the deferral stands, but for a sharper reason than "patchwork read". Browse
+  cannot reach the existing non-sreality create path (`POST /estimations {url}` →
+  `_match_listing_by_url`, what the extension uses) because the Browse card row carries no
+  `source_url` — `CARD_COLS` does not select it — and constructing a URL client-side would
+  fall silently into the LLM parse on any mismatch. Enabling it needs a NEW API capability:
+  `CreateEstimationIn.listing_id`, a surrogate twin of `_match_listing_by_id`, and a `lid:`
+  arm in the idempotency key. **That is a feature, not a cutover.** Re-keying only the read
+  in the meantime would change no behaviour at all (the affordance is gated on
+  `sreality_id != null`) while risking a silent mis-key across six stateful sites that
+  TypeScript cannot check, since both ids are `number` — and there is no
+  `BrowseExperience.test.tsx`. Ship read + write together, with a component test.
 - **No CHECK constraint** pairing the two ids: it holds for every existing row but would
   500 future submits, since the insert's COALESCE legitimately leaves the surrogate NULL
   for an unscraped sreality subject.

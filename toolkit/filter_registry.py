@@ -1440,14 +1440,15 @@ def _build_registry() -> dict[str, FilterDef]:
         FilterDef(
             id="with_estimates",
             type=FilterType.BOOL,
-            pg_column=None,  # prefilter via property_estimates_public (mig 173)
+            pg_column=None,  # prefilter via property_estimates_public (mig 173, re-keyed 412)
             default=False,
             description=(
                 "When true, restrict to properties with at least one "
-                "successful estimation run (any child listing's sreality_id "
-                "appears in estimation_runs.input_sreality_id with "
-                "status='success'). BROWSE-only: estimates are "
-                "operator-triggered, so watching for them makes no sense."
+                "successful estimation run — any child listing that is the "
+                "subject of an estimation_runs row with status='success', "
+                "matched on the surrogate input_listing_id. BROWSE-only: "
+                "estimates are operator-triggered, so watching for them makes "
+                "no sense."
             ),
             category=CATEGORY_CURATION,
             ui_control=UiControl.BOOLEAN,

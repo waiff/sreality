@@ -420,12 +420,19 @@ def seeded_estimate_rows(
 ) -> "Iterator[dict[str, int]]":
     """One successful estimation_run per account (A, B) plus one on the shared SYSTEM
     account, each on its own property via a seeded sreality listing, so
-    property_estimates_public has rows to scope. Seeded as svc (owner, RLS-exempt)."""
+    property_estimates_public has rows to scope. Seeded as svc (owner, RLS-exempt).
+
+    A fourth seed ("nonsreality") is a bezrealitky listing with sreality_id NULL and a run
+    carrying ONLY the surrogate input_listing_id — the shape migration 412 exists for.
+    Under migration 341's legacy-keyed view it matched neither arm and was invisible; it is
+    the only seed that distinguishes the two view definitions."""
     a_acc, b_acc = tenants["a_acc"], tenants["b_acc"]
     system = uuid.UUID("00000000-0000-0000-0000-000000000000")
     base = 900_000_000 + int(uuid.uuid4().int % 50_000_000)
     plan = {"a": (a_acc, base + 1), "b": (b_acc, base + 2), "system": (system, base + 3)}
     props: dict[str, int] = {}
+    run_ids: list[int] = []
+    listing_ids: list[int] = []
     with svc.cursor() as cur:
         for key, (acc, srid) in plan.items():
             cur.execute("INSERT INTO properties DEFAULT VALUES RETURNING id")
@@ -434,23 +441,49 @@ def seeded_estimate_rows(
             # and source_id_native NOT NULL (listings_source_id_native_present).
             cur.execute(
                 "INSERT INTO listings (sreality_id, source, source_id_native, raw_json, "
-                "property_id) VALUES (%s, 'sreality', %s, '{}'::jsonb, %s)",
+                "property_id) VALUES (%s, 'sreality', %s, '{}'::jsonb, %s) RETURNING id",
                 (srid, f"iso-est-{srid}", props[key]),
             )
+            lid = cur.fetchone()[0]
+            listing_ids.append(lid)
+            # Stamp BOTH ids, exactly as the live insert path does (its COALESCE resolves
+            # the surrogate from the sreality_id). Seeding only the legacy id would make
+            # these rows invisible to the surrogate-keyed view (migration 412).
             cur.execute(
                 "INSERT INTO estimation_runs (account_id, source, mode, status, "
-                "input_spec, input_sreality_id) "
-                "VALUES (%s, 'api', 'deterministic', 'success', '{}'::jsonb, %s)",
-                (acc, srid),
+                "input_spec, input_sreality_id, input_listing_id) "
+                "VALUES (%s, 'api', 'deterministic', 'success', '{}'::jsonb, %s, %s) "
+                "RETURNING id",
+                (acc, srid, lid),
             )
+            run_ids.append(cur.fetchone()[0])
+
+        # The migration-412 shape: no sreality_id anywhere, surrogate only.
+        cur.execute("INSERT INTO properties DEFAULT VALUES RETURNING id")
+        props["nonsreality"] = cur.fetchone()[0]
+        cur.execute(
+            "INSERT INTO listings (sreality_id, source, source_id_native, raw_json, "
+            "property_id) VALUES (NULL, 'bezrealitky', %s, '{}'::jsonb, %s) RETURNING id",
+            (f"iso-est-bzr-{base}", props["nonsreality"]),
+        )
+        nonsreality_lid = cur.fetchone()[0]
+        listing_ids.append(nonsreality_lid)
+        cur.execute(
+            "INSERT INTO estimation_runs (account_id, source, mode, status, "
+            "input_spec, input_sreality_id, input_listing_id) "
+            "VALUES (%s, 'api', 'deterministic', 'success', '{}'::jsonb, NULL, %s) "
+            "RETURNING id",
+            (system, nonsreality_lid),
+        )
+        run_ids.append(cur.fetchone()[0])
     try:
         yield props
     finally:
-        srids = [srid for _, srid in plan.values()]
+        # Delete by surrogate id, not sreality_id: the non-sreality seed has none.
         with svc.cursor() as cur:
-            cur.execute("DELETE FROM estimation_runs WHERE input_sreality_id = ANY(%s)", (srids,))
-            cur.execute("DELETE FROM listing_snapshots WHERE sreality_id = ANY(%s)", (srids,))
-            cur.execute("DELETE FROM listings WHERE sreality_id = ANY(%s)", (srids,))
+            cur.execute("DELETE FROM estimation_runs WHERE id = ANY(%s)", (run_ids,))
+            cur.execute("DELETE FROM listing_snapshots WHERE listing_id = ANY(%s)", (listing_ids,))
+            cur.execute("DELETE FROM listings WHERE id = ANY(%s)", (listing_ids,))
             cur.execute("DELETE FROM properties WHERE id = ANY(%s)", (list(props.values()),))
 
 
@@ -464,7 +497,9 @@ def test_estimates_view_scopes_per_account(
     activity. The SYSTEM arm is load-bearing: without it every current run becomes
     invisible and Browse's "with estimates" filter empties -- the migration-316
     regression this whole batch started from."""
-    pa, pb, ps = (seeded_estimate_rows[k] for k in ("a", "b", "system"))
+    pa, pb, ps, pn = (
+        seeded_estimate_rows[k] for k in ("a", "b", "system", "nonsreality")
+    )
 
     def visible(sub: uuid.UUID) -> set[int]:
         with _scoped(sub) as conn:
@@ -472,7 +507,7 @@ def test_estimates_view_scopes_per_account(
                 cur.execute(
                     "SELECT property_id FROM property_estimates_public "
                     "WHERE property_id = ANY(%s)",
-                    ([pa, pb, ps],),
+                    ([pa, pb, ps, pn],),
                 )
                 return {r[0] for r in cur.fetchall()}
 
@@ -483,6 +518,34 @@ def test_estimates_view_scopes_per_account(
     assert pb in seen_b, "tenant B cannot see their OWN estimate"
     assert pa not in seen_b, "tenant B sees tenant A's private estimate (cross-tenant leak)"
     assert ps in seen_b, "tenant B cannot see a shared SYSTEM-account estimate"
+
+
+def test_estimates_view_sees_a_non_sreality_subject(
+    tenants: dict[str, uuid.UUID], seeded_estimate_rows: dict[str, int],
+) -> None:
+    """Migration 412: the view keys on the surrogate input_listing_id, so an estimate whose
+    subject is a non-sreality listing (sreality_id NULL — migration 311's sign check makes a
+    positive one impossible off sreality) is visible.
+
+    This is the ONLY assertion that distinguishes migration 341's view from 412's: RED on
+    the legacy join (the run matched neither arm — arm 1 needed a sreality_id, arm 2 needs a
+    source_url match this seed does not have), GREEN on the surrogate join. Every future
+    non-sreality estimate has this shape, so without it Browse's "with estimates" filter
+    would silently never show one."""
+    pn = seeded_estimate_rows["nonsreality"]
+    for who in ("a_user", "b_user"):
+        with _scoped(tenants[who]) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT run_count FROM property_estimates_public WHERE property_id = %s",
+                    (pn,),
+                )
+                row = cur.fetchone()
+        assert row is not None, (
+            f"{who} cannot see a SYSTEM estimate on a non-sreality subject — the view is "
+            "still keyed on the legacy sreality_id"
+        )
+        assert row[0] == 1, f"{who} saw run_count={row[0]}, expected exactly 1 (arm overlap?)"
 
 
 @pytest.fixture(scope="module")

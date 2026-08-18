@@ -2108,7 +2108,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "type": "bool",
       "pg_column": null,
       "default": false,
-      "description": "When true, restrict to properties with at least one successful estimation run (any child listing's sreality_id appears in estimation_runs.input_sreality_id with status='success'). BROWSE-only: estimates are operator-triggered, so watching for them makes no sense.",
+      "description": "When true, restrict to properties with at least one successful estimation run — any child listing that is the subject of an estimation_runs row with status='success', matched on the surrogate input_listing_id. BROWSE-only: estimates are operator-triggered, so watching for them makes no sense.",
       "category": "Curation",
       "ui_control": "boolean",
       "agendas": [
