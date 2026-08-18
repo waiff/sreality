@@ -1,4 +1,10 @@
--- 410_estimation_subject_identity_fk.sql
+-- 411_estimation_subject_identity_fk.sql
+--
+-- LEDGER NOTE: applied to production while this branch was still numbered 410
+-- (supabase_migrations records it as `410_estimation_subject_identity_fk`,
+-- 2026-08-18 07:51 UTC). 410_broker_leaderboard_firm_filter landed on main 20
+-- minutes earlier, so this file renumbered to 411. The DDL below is unchanged
+-- and already applied + VALIDATEd; only the file's number moved.
 -- Estimation subject identity: the surrogate listings.id is the ONLY handle a read
 -- path may key on. This migration adds the referential guarantee behind it.
 --

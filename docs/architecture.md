@@ -520,6 +520,30 @@ renumber.** Navigate by area:
     200 with `status='failed'` and `error_message` set. Re-runs INSERT a new row with
     `parent_run_id` set; the original is immutable. Legal `source` values today: `'ui'`,
     `'api'`, `'clickup'` (CHECK constraint, not enum — adding more is a single ALTER).
+
+    **What immutability covers.** The RESULT: the estimate, the trace, the cost, the
+    comparables frozen at run time. Two things on the row are deliberately mutable and
+    always have been. (a) The operator's yield `scenario` (`PATCH /estimations/{id}/scenario`)
+    — a what-if overlay, not a computed output. (b) Subject IDENTITY. Since the surrogate
+    cutover (migration 411, PR #1095) every read path that answers "what estimates exist for
+    this listing" keys on `estimation_runs.input_listing_id` — `listings.id` — and on nothing
+    else. The legacy `input_sreality_id` is NULL for every post-Gate-2 non-sreality subject
+    (migration 311's sign check), so keying on it silently dropped those subjects; and an
+    empty id set once collapsed the predicate entirely, returning the whole table.
+
+    An estimation submitted for a URL the scraper has not reached yet legitimately lands with
+    `input_listing_id` NULL — the insert's `COALESCE` subquery finds no listing — so it
+    belongs to no listing page until the listing appears. `_bind_pending_estimation_listing_ids`
+    (in `scripts/recompute_property_stats.py`, on the property-maintenance tick that already
+    attaches stragglers) stamps it exactly once. That is identity RESOLUTION, not result
+    mutation: it only ever fills a NULL (the `IS NULL` guard is repeated in the UPDATE's own
+    WHERE, so it is one-way and idempotent), it matches only the unique `sreality_id`, and it
+    refuses fuzzy or multi-match URL recovery — a wrong attribution silently credits a paid
+    estimate to the wrong flat, which is worse than leaving it unattached.
+
+    This is also why there is NO `CHECK (input_sreality_id IS NULL OR input_listing_id IS NOT
+    NULL)`. It holds for every row written so far, but it would reject exactly the
+    not-yet-scraped case above and turn a working degraded path into a 500 on submit.
 13. **`building_runs` is the parent grouping for the paste-a-building workflow.** One row
     per pasted house listing (typically `category_main='dum'`). Children are normal
     `estimation_runs` rows linked back via `building_run_id` (FK, `ON DELETE SET NULL` so

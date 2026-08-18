@@ -111,7 +111,7 @@ Run as ONE committed track; valueless half-done. Phases and their gates are spec
 - **Phase H / R5** — optional cleanup, deferrable indefinitely. Existing `sreality_id`
   values are NEVER dropped or NULLed — frozen, valid, unique, permanently resolvable.
 
-## Estimation subject identity (✅ shipped 2026-08-18, PR #1095, migration 410)
+## Estimation subject identity (✅ shipped 2026-08-18, PR #1095, migration 411)
 
 The listing page's estimation ledger was showing runs from other properties. Not the
 wrong runs — **all** of them: `GET /estimations` filtered on the legacy
@@ -125,7 +125,7 @@ while on the RLS-bypassing service-role connection, so responses mixed accounts.
 Shipped: `listing_ids` filtering `input_listing_id` with no legacy fallback arm and
 fail-closed 400s; `deps.account_scope` (either the static token → SYSTEM, or a JWT →
 that account + SYSTEM, mirroring the migration-291 policy); `account_ids` as a required
-kwarg on both read helpers; migration 410's FK behind the surrogate; and late binding in
+kwarg on both read helpers; migration 411's FK behind the surrogate; and late binding in
 the property-maintenance pass (one-way, single-match, no URL arm) so a run submitted
 before its subject was scraped attaches later. `ListingPublic.sreality_id` is now typed
 `number | null`, which flushed out 6 latent sites.
