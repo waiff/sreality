@@ -651,10 +651,12 @@ def _cross_source_merge(conn: Any, auto_merge_sources: list[str],
     # before them could propose a broker that no longer survives.
     proposed = _queue_review_pairs(conn, decision.review_pairs, identities,
                                    bridge_values, run_id)
-    LOG.info("RESOLVE merge review pairs decided=%d proposed=%d suppressed_edges=%d "
-             "suppressed_components=%d active_suppressions=%d",
-             len(decision.review_pairs), proposed, len(decision.suppressed), dropped,
-             len(blocked))
+    dismissed = _dismiss_name_conflicts(conn, decision.dismiss_pairs, identities,
+                                        bridge_values, run_id)
+    LOG.info("RESOLVE merge review pairs decided=%d proposed=%d name_conflict_dismissed=%d "
+             "suppressed_edges=%d suppressed_components=%d active_suppressions=%d",
+             len(decision.review_pairs), proposed, dismissed, len(decision.suppressed),
+             dropped, len(blocked))
     return auto, len(decision.review_pairs), len(decision.suppressed) + dropped
 
 
@@ -739,6 +741,67 @@ def _broker_components(groups: list[list[int]],
     return sorted((sorted(c) for c in comps.values() if len(c) > 1))
 
 
+def _bridge_pair_rows(conn: Any, pairs: list[tuple[int, int]],
+                      identities: dict[int, R.Identity],
+                      bridge_values: dict[tuple[int, int], set[str]],
+                      run_id: int) -> dict[str, tuple[int, int, str]]:
+    """group_key -> (lo_broker, hi_broker, evidence) for bridged identity pairs.
+
+    Shared by the review and the auto-dismiss writers so both describe a pair the
+    same way and collide on the same key: a pair the operator is already looking at
+    is the SAME row the dismiss pass retires, not a second one beside it.
+    """
+    broker_of = _broker_of(conn, sorted({i for pair in pairs for i in pair}))
+    rows: dict[str, tuple[int, int, str]] = {}
+    for a, b in pairs:
+        left, right = broker_of.get(a), broker_of.get(b)
+        if left is None or right is None or left == right:
+            continue
+        shared = sorted(bridge_values.get((a, b) if a < b else (b, a), ()))
+        if not shared:
+            continue
+        lo, hi = (left, right) if left < right else (right, left)
+        ia, ib = identities.get(a), identities.get(b)
+        rows[f"contactbridge:{lo}:{hi}"] = (lo, hi, json.dumps({
+            "identity_ids": [a, b],
+            "sources": [ia.source if ia else None, ib.source if ib else None],
+            "names": [ia.name if ia else None, ib.name if ib else None],
+            "bridges": shared,
+            "run_id": run_id,
+        }, ensure_ascii=False))
+    return rows
+
+
+def _dismiss_name_conflicts(conn: Any, pairs: list[tuple[int, int]],
+                            identities: dict[int, R.Identity],
+                            bridge_values: dict[tuple[int, int], set[str]],
+                            run_id: int) -> int:
+    """Retire bridged pairs whose names conflict outright — without suppressing them.
+
+    Deliberately NOT routed through the operator dismiss path: that writes
+    broker_merge_suppressions, a standing NO meant to record a HUMAN judgement. A
+    machine verdict off a name comparison should not be able to permanently
+    foreclose a merge, so this only stamps the candidate row. The row itself is what
+    stops re-proposal (the upserts' status='proposed' guard), and every row is
+    recoverable in bulk by its resolved_by stamp if the name rules are ever wrong.
+    """
+    if not pairs:
+        return 0
+    rows = _bridge_pair_rows(conn, pairs, identities, bridge_values, run_id)
+    if not rows:
+        return 0
+    keys = sorted(rows)
+    with conn.cursor() as cur:
+        cur.execute(_DISMISS_PAIR_UPSERT_SQL, {
+            "gk": keys,
+            "lo": [rows[k][0] for k in keys],
+            "hi": [rows[k][1] for k in keys],
+            "ev": [rows[k][2] for k in keys],
+            "by": _AUTO_DISMISS_ACTOR,
+        })
+    return len(keys)
+
+
 def _queue_review_pairs(conn: Any, pairs: list[tuple[int, int]],
                         identities: dict[int, R.Identity],
                         bridge_values: dict[tuple[int, int], set[str]],
@@ -760,24 +823,7 @@ def _queue_review_pairs(conn: Any, pairs: list[tuple[int, int]],
     judges the same fact the engine did."""
     if not pairs:
         return 0
-    broker_of = _broker_of(conn, sorted({i for pair in pairs for i in pair}))
-    rows: dict[str, tuple[int, int, str]] = {}
-    for a, b in pairs:
-        left, right = broker_of.get(a), broker_of.get(b)
-        if left is None or right is None or left == right:
-            continue
-        shared = sorted(bridge_values.get((a, b) if a < b else (b, a), ()))
-        if not shared:
-            continue
-        lo, hi = (left, right) if left < right else (right, left)
-        ia, ib = identities.get(a), identities.get(b)
-        rows[f"contactbridge:{lo}:{hi}"] = (lo, hi, json.dumps({
-            "identity_ids": [a, b],
-            "sources": [ia.source if ia else None, ib.source if ib else None],
-            "names": [ia.name if ia else None, ib.name if ib else None],
-            "bridges": shared,
-            "run_id": run_id,
-        }, ensure_ascii=False))
+    rows = _bridge_pair_rows(conn, pairs, identities, bridge_values, run_id)
     if not rows:
         return 0
     keys = sorted(rows)
@@ -985,6 +1031,27 @@ FROM unnest(%(gk)s::text[], %(lo)s::bigint[], %(hi)s::bigint[], %(ev)s::text[])
      AS d(gk, lo, hi, ev)
 ON CONFLICT (group_key) DO UPDATE SET
   broker_ids = EXCLUDED.broker_ids, evidence = EXCLUDED.evidence
+  WHERE broker_merge_candidates.status = 'proposed'
+"""
+
+
+# Stamped into resolved_by so an auto-dismissal is always distinguishable from an
+# operator's, and so the whole cohort can be reopened with one UPDATE.
+_AUTO_DISMISS_ACTOR = "auto:name_conflict"
+
+# Same key + same status='proposed' guard as the review upsert, so this both stops
+# proposing a name-conflicting pair AND retires the ones already sitting in the
+# queue. A row an operator already resolved is never touched.
+_DISMISS_PAIR_UPSERT_SQL = """
+INSERT INTO broker_merge_candidates (
+  group_key, broker_ids, reason, evidence, status, resolved_at, resolved_by)
+SELECT d.gk, ARRAY[d.lo, d.hi], 'contact_bridge_review', d.ev::jsonb,
+       'dismissed', now(), %(by)s
+FROM unnest(%(gk)s::text[], %(lo)s::bigint[], %(hi)s::bigint[], %(ev)s::text[])
+     AS d(gk, lo, hi, ev)
+ON CONFLICT (group_key) DO UPDATE SET
+  broker_ids = EXCLUDED.broker_ids, evidence = EXCLUDED.evidence,
+  status = 'dismissed', resolved_at = now(), resolved_by = EXCLUDED.resolved_by
   WHERE broker_merge_candidates.status = 'proposed'
 """
 

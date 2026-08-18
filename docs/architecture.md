@@ -1046,11 +1046,33 @@ renumber.** Navigate by area:
 Unlike property merges (rule #15, operator-only), broker identities DO auto-merge. The nightly
 sweep (`scripts/resolve_brokers.py::_cross_source_merge`, cron 04:35 UTC) bridges two per-source
 `broker_identities` on a contact that is personal on BOTH sides (frequency 1 within each source),
-and `toolkit/broker_resolver.decide_merges` auto-merges a pair only with corroboration — ≥2 distinct
-bridge values, or 1 plus a matching name — and only when BOTH sources are in
-`app_settings.broker_auto_merge_sources` (`["sreality","idnes"]`; **remax and ceskereality stay
-disabled** pending the operator's D5 validation). Everything else queues as a
-`contact_bridge_review` candidate. 7,689 auto-merges are live; components cap at
+and `toolkit/broker_resolver.decide_merges` then decides on the NAME (2026-08-18; operator rule).
+The name is the deciding axis, not a tiebreaker:
+
+| `name_relation(a, b)` | outcome with ≥1 bridge |
+| --- | --- |
+| `same` (titles/diacritics folded) | **auto-merge** (both sources auto-merge-enabled) |
+| `different` (no shared identity token) | **auto-dismiss** — never queued |
+| `unknown` (partial overlap, initial, missing) | operator review |
+
+Contact count alone no longer authorises a merge. The previous bar took ≥2 distinct bridge values as
+sufficient *regardless of name*, which merged demonstrably different people whenever one broker's
+mobile appeared on a colleague's card (`Ondřej Kadlec` + `Monika Kadlecová`, bridged on one phone).
+Auto-merge still additionally requires BOTH sources in `app_settings.broker_auto_merge_sources`
+(`["sreality","idnes"]`; **remax and ceskereality stay disabled** pending the operator's D5
+validation).
+
+Auto-dismissal stamps the candidate row `status='dismissed', resolved_by='auto:name_conflict'` and
+deliberately does **NOT** route through `api.broker_review.dismiss_candidate`: that writes
+`broker_merge_suppressions`, a standing NO meant to record a HUMAN judgement. A machine verdict off a
+name comparison must not permanently foreclose a merge — the candidate row alone stops re-proposal
+(the upserts' `status='proposed'` guard), and the cohort is reopenable with one UPDATE keyed on
+`resolved_by`. `name_relation` returns `different` only when both names are present and share no
+identity-bearing token at all; titles (`Bc.`, `Ing.`, `Ph.D.`, …) and bare initials fold away first,
+so `Jan Novák` ≡ `Ing. Jan Novák` merges while `J. Novák` vs `Jan Novák` stays a question.
+
+The 7,689 live auto-merges predate this rule and were decided under the old bar — those with
+conflicting names are NOT retroactively undone (see the audit query in the PR). Components cap at
 `MAX_AUTO_MERGE_COMPONENT` (6) identities and `_apply_merges` then merges at BROKER grain, which
 deliberately widens what one run fuses (two capped groups chain through a broker holding an identity
 in each).
