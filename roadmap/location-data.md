@@ -1004,8 +1004,10 @@ backfill walks. So the denominator grows underneath the scan and any "N % done" 
 is wrong in an optimistic direction and gets more wrong with time.
 
 The sibling W2a payload backfill demonstrated this the hard way on the same night: it reported
-"90.2 %, one window from done" against its own 445,191-row inventory count, then **migrated 451,200
-pages — 6,009 past the supposed total — with `reached_end` still false.** Same shape, same cause, a
+"90.2 %, one window from done" against its own 445,191-row inventory count, then ran to completion
+at **472,429 pages — 27,238 past the supposed total, 6.1 % larger than the number both sessions were
+computing percentages against.** At the moment "90 % complete" was being quoted, the undercount alone
+exceeded the entire remaining tail. Same shape, same cause, a
 caveat that had been stated once and then quietly ignored for four hours of progress reports.
 
 **The only completion signal is `outcome='ok'` / `reached_end=true`**, which this lane's module and
@@ -1324,8 +1326,8 @@ contract calls its principal hazard — is entirely unexercised.
   **A FOURTH failure joined the family later that night, and it is the one that generalises
   furthest: *stating a caveat is not applying it*.** Both sessions wrote down that their scan's
   denominator was a point-in-time inventory rather than a finish line — and then quoted
-  percentages against it for four hours. Measured proof: the payload backfill passed **451,200
-  pages against a "445,191-row" archive** with `reached_end` still false, while W3 was quoting
+  percentages against it for four hours. Measured proof: the payload backfill finished at **472,429
+  pages against a "445,191-row" archive — 27,238 over, 6.1 %**, while W3 was quoting
   "8.3 % of 1,574,313" against a `listing_snapshots` count eight days stale. **Both source tables
   are live-written while the scan walks them**, so for any resumable scan here `reached_end=true` /
   `outcome='ok'` is the ONLY completion signal, remaining work is unknown without a live
