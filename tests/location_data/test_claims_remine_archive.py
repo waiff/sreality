@@ -153,7 +153,9 @@ def test_the_registered_archive_readers_are_the_declared_generic_set():
     DMS attribute — and every portal-specific fact belongs in contract data. A new name
     appearing here is how "one portal needed something special" becomes a branch in shared
     code (rule 21), so adding one is a reviewed act, not an import side effect."""
-    assert set(ARCHIVE_READERS) == {"html_text", "html_attr", "html_point_dms"}
+    assert set(ARCHIVE_READERS) == {
+        "html_text", "html_attr", "html_point_dms", "html_point_attrs",
+    }
 
 
 # ------------------------------------------------------------------ evidence discipline
@@ -1297,3 +1299,112 @@ def test_a_coordinate_read_without_a_position_branch_is_refused():
     entry = dom_entry("html_point_dms", css="#printMap[data-gps]", attr="data-gps")
     with pytest.raises(IntakeRefused, match="position_branch"):
         ARCHIVE_READERS["html_point_dms"](entry, listing_row(), payload(), document)
+
+
+# ------------------------------- html_point_attrs, against the real realitymix fixture
+
+_REALITYMIX_HTML = _ROOT / "tests" / "fixtures" / "location_w2" / "realitymix_detail.html"
+
+
+def realitymix_document():
+    """The pinned realitymix detail page, scoped by its own exclusion zones."""
+    from location_data import contracts
+    contract = {c.source: c for c in contracts.load_all()}["realitymix"]
+    register = ScopeRegister.from_zones("realitymix", contract.exclusion_zones)
+    return scope_html(_REALITYMIX_HTML.read_bytes(), register=register)
+
+
+def latlon_entry(**locator: Any) -> Entry:
+    base = {
+        "reader": "html_point_attrs",
+        "css": "div#print-map",
+        "attr": ["data-gps-lat", "data-gps-lon"],
+        "position_branch": POSITION_BRANCH_PORTAL_PIN,
+    }
+    base.update(locator)
+    entry = archive_entry(entry_id="rm.det.gps", source="realitymix",
+                          reader="html_point_attrs", claim_type="coordinate")
+    return replace(entry, locator=base, guards=("reject_outside_cz_bbox",))
+
+
+def test_html_point_attrs_reads_a_split_decimal_pair():
+    """realitymix publishes `data-gps-lat` / `data-gps-lon` as SEPARATE decimal attributes,
+    which is why `html_point_dms` cannot read it — that reader parses one DMS string. This
+    is the case the W2-7 portal verification found."""
+    reads = ARCHIVE_READERS["html_point_attrs"](
+        latlon_entry(), listing_row(source="realitymix"), payload(source="realitymix"),
+        realitymix_document())
+
+    assert len(reads) == 1
+    # WKT is POINT(lon lat) — the axis order is the one thing a coordinate reader must not
+    # get backwards, and 49.7N/13.4E is Plzeň while 13.4N/49.7E is the Indian Ocean.
+    assert reads[0].claim.value_geom_wkt == "POINT(13.39051 49.73561)"
+    assert reads[0].position_branch == POSITION_BRANCH_PORTAL_PIN
+
+
+def test_the_cz_bbox_guard_is_actually_EVALUATED_not_merely_declared():
+    """`html_point_attrs` declares `consults_guards=True` and must therefore CALL
+    `guard_admits` — the misdeclaration an adversarial review caught on `html_point_dms`,
+    which declared True while never calling it. A decimal pair gets no bbox check for free
+    (unlike the DMS path, where `parse_dms_pair` applies the envelope itself), so this is
+    the reader where the guard is load-bearing rather than incidental."""
+    html = _REALITYMIX_HTML.read_text(encoding="utf-8", errors="replace")
+    paris = html.replace('data-gps-lat="49.73561"', 'data-gps-lat="48.8566"').replace(
+        'data-gps-lon="13.39051"', 'data-gps-lon="2.3522"')
+    from location_data import contracts
+    contract = {c.source: c for c in contracts.load_all()}["realitymix"]
+    register = ScopeRegister.from_zones("realitymix", contract.exclusion_zones)
+    document = scope_html(paris.encode("utf-8"), register=register)
+
+    reads = ARCHIVE_READERS["html_point_attrs"](
+        latlon_entry(), listing_row(source="realitymix"), payload(source="realitymix"),
+        document)
+    assert reads == []          # outside the CZ envelope -> refused by the guard
+
+    # And with the guard NOT declared, the same point is admitted — which proves the
+    # emptiness above came from the guard rather than from the parse failing.
+    ungurded = replace(latlon_entry(), guards=())
+    assert len(ARCHIVE_READERS["html_point_attrs"](
+        ungurded, listing_row(source="realitymix"), payload(source="realitymix"),
+        document)) == 1
+
+
+def test_the_evidence_quote_is_locatable_in_the_body():
+    """A coordinate assembled from two attributes has a readable value ("lat,lon") that
+    appears NOWHERE in the HTML, so quoting it would produce an unlocatable span — a claim
+    asserting evidence it cannot point at. The quote is therefore the node's own
+    serialisation, which does contain both attributes."""
+    document = realitymix_document()
+    claim = ARCHIVE_READERS["html_point_attrs"](
+        latlon_entry(), listing_row(source="realitymix"), payload(source="realitymix"),
+        document)[0].claim
+
+    assert claim.value_text == "49.73561,13.39051"          # readable
+    assert claim.span_start is not None and claim.span_end > claim.span_start
+    span = document.html[claim.span_start:claim.span_end]
+    assert "49.73561" in span and "13.39051" in span        # 382's substring check holds
+
+
+def test_a_malformed_attr_pair_is_refused_rather_than_guessed():
+    """The [lat, lon] ORDER is contract data because nothing in the markup states it.
+    Silently accepting one name, or three, is how a coordinate lands in the wrong
+    hemisphere."""
+    document = realitymix_document()
+    for bad in (["data-gps-lat"], ["a", "b", "c"], "data-gps-lat", []):
+        with pytest.raises(IntakeRefused, match="ordered \\[lat_attr, lon_attr\\] pair"):
+            ARCHIVE_READERS["html_point_attrs"](
+                latlon_entry(attr=bad), listing_row(source="realitymix"),
+                payload(source="realitymix"), document)
+
+
+def test_a_non_numeric_attribute_yields_no_claim_and_no_exception():
+    """The portal changing shape under us must not abort a batch of thousands."""
+    html = _REALITYMIX_HTML.read_text(encoding="utf-8", errors="replace").replace(
+        'data-gps-lat="49.73561"', 'data-gps-lat="nope"')
+    from location_data import contracts
+    contract = {c.source: c for c in contracts.load_all()}["realitymix"]
+    register = ScopeRegister.from_zones("realitymix", contract.exclusion_zones)
+    document = scope_html(html.encode("utf-8"), register=register)
+    assert ARCHIVE_READERS["html_point_attrs"](
+        latlon_entry(), listing_row(source="realitymix"), payload(source="realitymix"),
+        document) == []

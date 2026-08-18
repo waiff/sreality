@@ -125,11 +125,13 @@ from location_data.claims_intake import (
     _text,
     MAX_CLAIM_VALUE_BYTES_ENV,
     DEFAULT_MAX_CLAIM_VALUE_BYTES,
+    GUARD_CZ_BBOX,
     apply_transforms,
     assert_inventory_ready,
     claim_value_bytes,
     coordinate_verdict,
     env_positive_int,
+    guard_admits,
     guarded,
     load_entries,
     missing_relations,
@@ -282,7 +284,7 @@ def _entry_css(entry: Entry) -> str:
 
 def _evidenced(
     entry: Entry, row: ListingRow, document: ScopedDocument, *,
-    value: str, within: Any, **overrides: Any,
+    value: str, within: Any, quote: str | None = None, **overrides: Any,
 ) -> Claim:
     """A DOM claim carrying migration 382's evidence set.
 
@@ -291,12 +293,20 @@ def _evidenced(
     and the scoper enforces, and a reader that decided it for itself would be re-litigating
     D7 once per portal. `find_span` is entity- and whitespace-tolerant and returns None
     rather than guessing — a span pointing at the wrong occurrence of a common street name
-    still satisfies the CHECK's substring test, which makes it worse than no span."""
-    span = document.find_span(value, within=within)
+    still satisfies the CHECK's substring test, which makes it worse than no span.
+
+    `quote` exists because for some readers the VALUE is not a substring of the body. A
+    coordinate assembled from two separate attributes has a readable value ("lat,lon") that
+    appears nowhere in the HTML, so quoting it produces an unlocatable span — a claim
+    asserting evidence it cannot point at. Those readers pass the node's own serialisation,
+    which does contain both attributes and is genuinely findable. Default stays
+    `quote = value`, which is correct wherever the value was lifted verbatim."""
+    quote = value if quote is None else quote
+    span = document.find_span(quote, within=within)
     return _base(
         entry, row,
         value_text=value,
-        evidence_quote=value,
+        evidence_quote=quote,
         span_start=span[0] if span else None,
         span_end=span[1] if span else None,
         subject_scoped=bool(entry.subject_scope.get("subject_scoped", True)),
@@ -362,11 +372,7 @@ def _read_html_point_dms(
     portal's map produced a pin is declared once per entry and the LADDER stamps the licence
     class from it (C6). A reader that inferred the branch would be deciding a licence
     question per portal, which is exactly what `_licensed_coordinate` refuses."""
-    branch = entry.locator.get("position_branch")
-    if branch not in POSITION_BRANCHES:
-        raise IntakeRefused(
-            f"{entry.source}:{entry.entry_id} declares position_branch={branch!r}; a DOM "
-            f"coordinate entry must name one of {sorted(POSITION_BRANCHES)} (C6)")
+    branch = _coordinate_branch(entry)
     attribute = str(entry.locator.get("attr") or "data-gps")
     node = document.css_first(_entry_css(entry))
     if node is None:
@@ -382,6 +388,75 @@ def _read_html_point_dms(
         value_geom_wkt=f"POINT({lon} {lat})",
     )
     return [ArchiveRead(claim, position_branch=str(branch))]
+
+
+def _coordinate_branch(entry: Entry) -> str:
+    """The C6 branch a coordinate entry declares, refused rather than defaulted.
+
+    Shared by both coordinate readers so the refusal wording and the enum check cannot
+    drift apart — which they already had one chance to, since `html_point_dms` grew this
+    check inline first."""
+    branch = entry.locator.get("position_branch")
+    if branch not in POSITION_BRANCHES:
+        raise IntakeRefused(
+            f"{entry.source}:{entry.entry_id} declares position_branch={branch!r}; a DOM "
+            f"coordinate entry must name one of {sorted(POSITION_BRANCHES)} (C6)")
+    return str(branch)
+
+
+@archive_reader("html_point_attrs")
+def _read_html_point_attrs(
+    entry: Entry, row: ListingRow, payload: ArchivedPayload, document: ScopedDocument,
+) -> list[ArchiveRead]:
+    """A coordinate from a PAIR of decimal attributes on one node.
+
+    realitymix publishes `<div id="print-map" data-gps-lat="49.73561" data-gps-lon="13.39051">`
+    — two separate decimal attributes, not the single DMS string remax uses, which is why
+    `html_point_dms` cannot read it and why this exists (W2-7 verification, 2026-08-18).
+
+    `locator.attr` is an ORDERED PAIR `[lat_attr, lon_attr]`, not a single name. The order
+    is contract data because nothing in the markup states it: `data-gps-lat`/`data-gps-lon`
+    happen to be self-describing, but a portal publishing `data-x`/`data-y` would not be,
+    and silently guessing which is latitude is how a coordinate lands in the wrong
+    hemisphere. A malformed pair is refused, never reordered.
+
+    **The CZ-bbox guard is genuinely evaluated here**, and that is the difference from
+    `html_point_dms`. That reader gets the envelope for free inside `parse_dms_pair` and
+    therefore declares `consults_guards=False` — a review caught it declaring True while
+    never calling `guard_admits`, which would have admitted a guard the runtime ignored.
+    A decimal attribute pair goes through no such helper, so the check has to be explicit,
+    and the reader calls it rather than the contract merely naming it."""
+    branch = _coordinate_branch(entry)
+    names = entry.locator.get("attr")
+    if not isinstance(names, (list, tuple)) or len(names) != 2 or not all(names):
+        raise IntakeRefused(
+            f"{entry.source}:{entry.entry_id} uses `html_point_attrs` but declares "
+            f"`locator.attr`={names!r}; it must be an ordered [lat_attr, lon_attr] pair")
+    node = document.css_first(_entry_css(entry))
+    if node is None:
+        return []
+    raw_lat = _text(node.attributes.get(str(names[0])))
+    raw_lon = _text(node.attributes.get(str(names[1])))
+    if raw_lat is None or raw_lon is None:
+        return []
+    try:
+        lat, lon = float(raw_lat), float(raw_lon)
+    except ValueError:
+        # A non-numeric attribute is the portal changing shape under us. No claim, and no
+        # exception either: one malformed page must not abort a batch of thousands.
+        return []
+    if not guard_admits(entry, GUARD_CZ_BBOX, (lat, lon)):
+        return []
+    claim = _evidenced(
+        entry, row, document, value=f"{raw_lat},{raw_lon}", within=node,
+        # The node's own serialisation, NOT the value: "lat,lon" is assembled by this
+        # reader and appears nowhere in the HTML, so quoting it would leave a claim
+        # asserting evidence it cannot point at. The opening tag carries both attributes
+        # and is genuinely findable in the scoped body.
+        quote=node.html or f"{raw_lat},{raw_lon}",
+        value_geom_wkt=f"POINT({lon} {lat})",
+    )
+    return [ArchiveRead(claim, position_branch=branch)]
 
 
 # ------------------------------------------------------------------ extraction

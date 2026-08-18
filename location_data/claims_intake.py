@@ -249,7 +249,9 @@ class ArchivedCoordinateRule:
 # registry stays a hard refusal, since that is a real deploy error. `test_lane_identifiers`
 # and the contracts test assert this set equals `ARCHIVE_READERS` exactly, so a reader added
 # there without a line here fails CI rather than taking the hourly intake down for a portal.
-ARCHIVE_ONLY_READERS = frozenset({"html_text", "html_attr", "html_point_dms"})
+ARCHIVE_ONLY_READERS = frozenset({
+    "html_text", "html_attr", "html_point_dms", "html_point_attrs",
+})
 
 ARCHIVED_COORDINATE_RULES: dict[str, ArchivedCoordinateRule] = {
     # `#printMap[data-gps], #listingMap[data-gps]`, scoped by element id — never "the first
