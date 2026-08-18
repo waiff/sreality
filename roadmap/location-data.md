@@ -17,7 +17,7 @@ is the tie-breaker). This track records sequencing + shipped state only.
 | W1v bezrealitky vertical slice | one portal end-to-end + location-quality dashboard | ✅ shipped 2026-08-13 (every layer exercised in prod; gate answered — portal-inventory-capped, not pipeline-capped) |
 | W2a payload archive rewrite | append-on-change `portal_raw_payloads` | 🟡 **backfill COMPLETE; gate (a) blocked on a verifier fix, not on the data** (2026-08-18) — migrations 405–408 applied; bodies to R2, storage bounded by construction (cap 2 + 7-day floor). **`payload_dual_write` ON globally since 2026-08-17 12:29 UTC, verified on all nine portals** (fresh rows per portal, mmreality last; corpus-wide evidence: the backfill's 12,044 `skipped_existing` are pages the live dual-write path archived before the scan reached them). `payload_index_archive` remains **OFF** (operator decision 2026-08-16: index keys are week-stamped so the cap bounds detail but not index; ~100 % churn on a surface nobody has diffed). #1074/#1075 wired the R2 secrets that made the flag real. **Backfill terminal 2026-08-18 01:59 UTC** — `reached_end=true`, `outcome='ok'`, 11 budgeted dispatches across two driver sessions: **472,429 pages scanned, 460,385 inserted, 12,044 skipped (dual-write overlap), 0 unmapped**, 39.68 GB read → **8.53 GB stored (4.65x)**, final cursor 5,617,479, batch 274. **The 445,191 inventory count is superseded — do not compute a percentage against it**: the archive grew 6.1 % while the scan walked it; `reached_end` is the only completion signal. Compression settled at 4.65x (the proving run's 7.5x and the mid-run ≈7.9 GB projection were both optimistic); one-time footprint 8.53 GB, still well inside the ~28.6 GB steady-state R2 projection (the ~4 GB figure elsewhere in this file is the POSTGRES metadata allowance, a different budget). **Gate (a) verify over the complete corpus (run 32090281321): FAIL, 31/1000 mismatch — diagnosed as a comparator artifact, not damage.** 0 missing / 0 unreadable (every sampled page was found in R2 and decoded cleanly). Every checkable failure (25/25 from the run log) had its `portal_raw_pages` source refetched **5–13 h AFTER the payload was stored** (idnes 18 / realitymix 5 / ceskereality 1 / mmreality 1 — exactly the live-drain portals, in proportion to measured churn; the no-drain portals produced zero), and the writer's **7-day append floor refuses by design to chase the refetch**, so the live source legitimately diverges from the stored copy for up to 7 days. The verifier's own `hash_matches` compares the writer-time hash against the LIVE source hash — it measures drift, not fidelity — and R2 keys are content-addressed on `body_sha256`, so key⇒content at write time. **As written, gate (a) cannot pass while any portal is being scraped — structurally unsignable — and that is the finding, not "31 bad pages".** Follow-ups (recorded, unstarted): (1) verifier compares like-for-like (`prp.fetched_at = payload.fetched_at`) or classifies source-refetched-after-store-with-floor-active as its own `stale-source` category instead of `mismatch`; (2) verifier should re-hash the downloaded R2 object against `body_sha256` — content-addressing proves key⇒content at write time but nothing re-checks the object after write; (3) raise `max_pool_connections` in the uploader's botocore config (urllib3 "pool is full" warnings across all 11 runs — throughput left on the table, correctness unaffected). `location-batch` saturation during the run is recorded as structure in #1084/#1086/#1087. **Gate (a), once fixed and green, licenses the STORAGE decision only** — nothing reads the archive until W2-13 gives the re-mine lane a workflow (#1082) |
 | W2 HTML re-mine | claims from archived `portal_raw_payloads` bodies | 🟡 **infrastructure shipped, lane deliberately inert** (2026-08-17) — W2-0/W2-1 (#1048/#1045), W2-3 the exclusion-zone scoper (#1053), W2-4 the contract shadow mechanism (#1050, mig 404), W2-5 the permanent fixture-diff gate (#1058) and W2-2 the evidence-bearing claims + archived-HTML re-mine lane (#1079) are all merged. The lane still mines **nothing**, but the reason moved: `ARCHIVE_READERS` now holds four generic DOM readers (#1081 `html_text`/`html_attr`/`html_point_dms`, #1090 `html_point_attrs`) and **no contract entry names one**, so a run finds no executable entry and returns *before* it opens a batch row — a batch stamped `'ok'` would move the incremental watermark over a corpus it never opened. **W2-6…W2-12 is READER work, not YAML work** (see the verification table below): six portals need a JSON-pointer reader, a regex reader with capture-group spans, and splitting transforms before their contracts become one-line activations, and no contract may activate before W2-13 anyway (#1082) |
-| W3 history backfill | claims from `listing_snapshots.raw_json` (1,574,313 rows) | 🟡 merged (#1057) + **first production contact 2026-08-17**: a `dry_run` smoke walked 90,000 snapshots clean at ~300/s, writing nothing. Operator has cleared dispatch; real runs are interleaving with the W2a payload backfill on the shared `location-batch` slot (see W3 section) |
+| W3 history backfill | claims from `listing_snapshots.raw_json` | 🟡 **running, cursor 1,040,013, `reached_end=false`** (2026-08-18) — ~44,950 historical location claims + ~7.04 M observations recovered over three windows. **BLOCKED**: `location-batch` is saturated by its own crons (hourly intake at ~75 % duty cycle + `*/15` resolve ticks that supersede anything pending), so a 45-min window cannot win a slot; six dispatches cancelled while pending. Needs the operator unblock — see W3 section |
 | W4–W6 | refetch cohorts, LLM lane, serving flip | ⚪ not started |
 
 ## W0 — done
@@ -994,6 +994,48 @@ jumps to 5.06 claims/snapshot while absences fall to 0.76/snapshot. Solving each
 the post-cutover fraction (claims = 1 + 20x, absences = 1 − x) gives **x = 0.203 from claims and
 x = 0.244 from absences** — two unrelated counters agreeing, which is what makes the cohort model
 credible rather than merely consistent.
+
+### W3 progress, and where it is BLOCKED (2026-08-18)
+
+Four windows dispatched after the first write run; three completed, the rest cancelled while
+pending. **Cursor 1,040,013, `reached_end=false`, all work committed and resumable.**
+
+| window | snapshots | claims | inserted | observations | cursor |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 1 | 130,000 | 170,569 | 33,064 (19.4 %) | 134,741 | 130,000 |
+| 2 | 470,000 | 4,331,091 | 9,282 (0.21 %) | 4,309,552 | 600,011 |
+| 3 | 440,000 | 2,612,223 | 2,608 (0.10 %) | 2,599,685 | 1,040,013 |
+
+**~44,950 historical location claims recovered** — values that differ from what those listings
+serve today, i.e. the location changes that existed nowhere before this wave — plus **~7.04 M
+observations** dating when each value was seen. The insert-rate decay is the §"falsified
+prediction" mechanism going asymptotic: nearly every snapshot restates an unchanged location, so it
+becomes an observation, and the small insert residue IS the history.
+
+**BLOCKED: `location-batch` is saturated by its own crons and a 45-minute window cannot win a
+slot.** Six dispatches were cancelled while pending. The mechanism, measured:
+
+- The hourly **claims-intake** holds the group for a 2700 s budget — e.g. `32101486996` in_progress
+  05:04:38→05:53+, with the next intake `32103795929` starting 05:57:47 before the previous had
+  cleared. That is a ~75 % duty cycle on its own.
+- The **`*/15` resolve tick** arrives four times an hour and, per GitHub's group semantics,
+  **supersedes whatever is pending**. Observed repeatedly: `32103183492` sat pending 05:31:02→05:51:30
+  and was killed by the 05:51:29 tick; `32105198517` sat 06:01:44→06:20:48 and was killed by 06:20:47.
+- Therefore **while a long holder occupies the group, every pending entry is doomed — only the last
+  arrival before the holder releases ever runs.** A cadenced tick that has nothing to do reliably
+  beats a backfill window that does, because it arrives later.
+
+This is the §Standing-decisions oversubscription finding as a hard stop rather than an argument: it
+is no longer costing lag, it is costing progress. **The unblock is an operator action**, and W1's own
+backfill already set the precedent — its `*/15` resolve cron was removed for the duration of the
+sweep. Either of the two documented fixes (stagger the crons; or let a running backfill outrank an
+empty tick) also resolves it.
+
+**Do not "fix" this by retrying.** A retry dispatches a *new* run into the same group, which
+supersedes your own previous pending entry and sends you to the back of the queue — four W3 runs
+were lost that way before the mechanism was understood. Under contention: dispatch **once**, then
+wait. A pending run is queued, not wedged, and the two are indistinguishable from outside — which is
+the same *snapshot-treated-as-current-state* failure as everything else in this file.
 
 ### The denominator is not a finish line — `reached_end` is
 
