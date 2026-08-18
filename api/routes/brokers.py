@@ -56,13 +56,24 @@ def get_leaderboard(
     category_type: str | None = None,
     metric: str = "active_property_count",
     limit: int = Query(default=100, ge=1, le=2000),
+    firm_ids: list[int] = Query(default=[]),
     conn: Any = Depends(deps.get_db_conn),
     claims: dict = Depends(deps.verify_jwt),
 ) -> dict[str, Any]:
     return _policy(brokers.leaderboard(
         conn, region_ids=region_ids, okres_ids=okres_ids, obec_ids=obec_ids,
         category_main=category_main, category_type=category_type,
-        metric=metric, limit=limit), claims)
+        metric=metric, limit=limit, firm_ids=firm_ids), claims)
+
+
+@router.get("/firm-options")
+def get_firm_options(
+    q: str | None = Query(default=None),
+    limit: int = Query(default=20, ge=1, le=100),
+    conn: Any = Depends(deps.get_db_conn),
+    claims: dict = Depends(deps.verify_jwt),
+) -> dict[str, Any]:
+    return _policy(brokers.firm_options(conn, q=q, limit=limit), claims)
 
 
 @router.get("/search")

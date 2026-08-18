@@ -51,12 +51,24 @@ def test_leaderboard_passes_params(client, monkeypatch):
     monkeypatch.setattr(broker_routes.brokers, "leaderboard", fake)
 
     res = client.get("/brokers/leaderboard",
-                     params={"region_ids": [27, 116], "metric": "listing_count", "limit": 5})
+                     params={"region_ids": [27, 116], "metric": "listing_count", "limit": 5,
+                             "firm_ids": [8]})
     assert res.status_code == 200
     assert captured["region_ids"] == [27, 116]
     assert captured["metric"] == "listing_count"
     assert captured["limit"] == 5
+    assert captured["firm_ids"] == [8]
     assert res.json()["data"] == [{"broker_id": 1}]  # no contact column, no flags
+
+
+def test_leaderboard_defaults_firm_ids_to_empty(client, monkeypatch):
+    captured = {}
+    def fake(conn, **kw):
+        captured.update(kw)
+        return {"data": [], "metadata": {}}
+    monkeypatch.setattr(broker_routes.brokers, "leaderboard", fake)
+    client.get("/brokers/leaderboard")
+    assert captured["firm_ids"] == []
 
 
 def test_leaderboard_masks_contacts_for_a_plain_user(client, monkeypatch):
@@ -267,6 +279,25 @@ def test_geo_options_rejects_a_level_it_cannot_answer(client):
                       params={"geo_level": "obec"}).status_code == 422
 
 
+def test_firm_options(client, monkeypatch):
+    captured = {}
+    monkeypatch.setattr(broker_routes.brokers, "firm_options",
+                        lambda conn, *, q=None, limit=20: captured.update(q=q, limit=limit)
+                        or {"data": [{"firm_id": 3, "canonical_domain": "mmreality.cz",
+                                      "display_name": None, "broker_count": 1021}],
+                            "metadata": {}})
+    res = client.get("/brokers/firm-options", params={"q": "mmreality", "limit": 5})
+    assert res.status_code == 200
+    assert captured == {"q": "mmreality", "limit": 5}
+    assert res.json()["data"][0]["canonical_domain"] == "mmreality.cz"
+
+
+def test_firm_options_defaults_to_no_query(client, monkeypatch):
+    monkeypatch.setattr(broker_routes.brokers, "firm_options",
+                        lambda conn, *, q=None, limit=20: {"data": [], "metadata": {}})
+    assert client.get("/brokers/firm-options").status_code == 200
+
+
 def test_contacts_is_admin_only(client, monkeypatch):
     monkeypatch.setattr(broker_routes.brokers, "broker_contacts",
                         lambda conn, bid: {"data": [{"kind": "email", "value": "a@b.cz"}],
@@ -293,6 +324,7 @@ _NON_ADMIN_CALLS = [
     ("GET", "/brokers/leaderboard", "/brokers/leaderboard", None),
     ("GET", "/brokers/search", "/brokers/search?q=a", None),
     ("GET", "/brokers/geo-options", "/brokers/geo-options", None),
+    ("GET", "/brokers/firm-options", "/brokers/firm-options", None),
     ("GET", "/brokers/by-listing", "/brokers/by-listing?listing_id=1", None),
     ("GET", "/brokers/by-listing/{sreality_id}", "/brokers/by-listing/1", None),
     ("POST", "/brokers/by-listings", "/brokers/by-listings", {"listing_ids": [1]}),
@@ -300,7 +332,7 @@ _NON_ADMIN_CALLS = [
     ("GET", "/brokers/{broker_id}/listings", "/brokers/1/listings", None),
 ]
 
-_TOOLKIT_READS = ("brokers_by_ids", "leaderboard", "search", "geo_options",
+_TOOLKIT_READS = ("brokers_by_ids", "leaderboard", "search", "geo_options", "firm_options",
                   "listing_broker", "listing_brokers", "get_broker", "broker_listings")
 
 

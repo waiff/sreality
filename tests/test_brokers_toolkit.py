@@ -42,6 +42,22 @@ class _Conn:
         return self.cur
 
 
+def test_leaderboard_threads_firm_ids_into_the_rpc_call() -> None:
+    conn = _Conn([{"broker_id": 1}])
+    brokers.leaderboard(conn, firm_ids=[5, 9])
+    sql, params = conn.cur.seen[0]
+    assert "broker_leaderboard(%s, %s, %s, %s, %s, %s, %s, %s)" in sql
+    assert params == (None, None, None, None, None, "active_property_count", 100, [5, 9])
+
+
+def test_leaderboard_omits_firm_ids_when_not_given() -> None:
+    conn = _Conn([{"broker_id": 1}])
+    out = brokers.leaderboard(conn)
+    _, params = conn.cur.seen[0]
+    assert params[-1] is None
+    assert out["metadata"]["filters_used"]["firm_ids"] == []
+
+
 def test_listing_broker_prefers_the_surrogate_id() -> None:
     conn = _Conn([{"broker_id": 4, "listing_id": 88}])
     out = brokers.listing_broker(conn, 123, listing_id=88)
@@ -90,6 +106,44 @@ def test_geo_options_without_a_level_returns_every_level() -> None:
     out = brokers.geo_options(conn)
     assert conn.cur.seen[0][1] == (None, None)
     assert out["metadata"]["filters_used"]["geo_level"] is None
+
+
+def test_firm_options_with_no_query_browses_the_top_firms_by_broker_count() -> None:
+    """Ranked on broker_count, not a listing/property count — those aren't
+    CZ-scoped on `firms` the way migration 396 scoped `brokers`, so a single
+    foreign syndication account would otherwise head this list too. The empty
+    term short-circuits the WHERE via `%s = ''`, one query either way."""
+    conn = _Conn([{"firm_id": 1, "canonical_domain": "re-max.cz"}])
+    out = brokers.firm_options(conn)
+    sql, params = conn.cur.seen[0]
+    assert "ORDER BY broker_count DESC NULLS LAST, canonical_domain" in sql
+    assert params == ("", "%%", "%%", 20)
+    assert out["metadata"]["filters_used"]["query"] == ""
+
+
+def test_firm_options_searches_display_name_or_domain() -> None:
+    """mmreality.cz is a franchise domain, excluded from _FIRM_DISPLAY_NAMES, so
+    display_name is NULL and only canonical_domain carries the searchable text —
+    the predicate must check both columns or the company's own name finds nothing."""
+    conn = _Conn([])
+    brokers.firm_options(conn, q="mmreality")
+    sql, params = conn.cur.seen[0]
+    assert "coalesce(display_name, '') ILIKE %s OR canonical_domain ILIKE %s" in sql
+    assert params == ("mmreality", "%mmreality%", "%mmreality%", 20)
+
+
+def test_firm_options_escapes_like_metacharacters() -> None:
+    conn = _Conn([])
+    brokers.firm_options(conn, q="100%")
+    _, params = conn.cur.seen[0]
+    assert params == ("100%", "%100\\%%", "%100\\%%", 20)
+
+
+def test_firm_options_clamps_limit() -> None:
+    conn = _Conn([])
+    brokers.firm_options(conn, limit=500)
+    _, params = conn.cur.seen[0]
+    assert params[-1] == 100
 
 
 def test_search_ranks_on_the_cz_scoped_count() -> None:

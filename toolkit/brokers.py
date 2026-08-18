@@ -153,27 +153,55 @@ def _mask(value: Any) -> Any:
 def leaderboard(conn: Any, *, region_ids: list[int] | None = None,
                 okres_ids: list[int] | None = None, obec_ids: list[int] | None = None,
                 category_main: str | None = None, category_type: str | None = None,
-                metric: str = "active_property_count", limit: int = 100) -> dict[str, Any]:
-    """Top brokers by a chosen metric, optionally scoped to admin regions + category.
+                metric: str = "active_property_count", limit: int = 100,
+                firm_ids: list[int] | None = None) -> dict[str, Any]:
+    """Top brokers by a chosen metric, optionally scoped to admin regions +
+    category + one or more companies (firm_ids, migration 410).
 
     Thin wrapper over the broker_leaderboard RPC (the same one Browse calls), so the
-    agent and Browse never disagree on the ranking. Empty id arrays = national.
+    agent and Browse never disagree on the ranking. Empty id arrays = national /
+    every company.
     """
     if metric not in _VALID_METRICS:
         metric = "active_property_count"
     limit = max(1, min(int(limit), 2000))
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
-            "SELECT * FROM broker_leaderboard(%s, %s, %s, %s, %s, %s, %s)",
+            "SELECT * FROM broker_leaderboard(%s, %s, %s, %s, %s, %s, %s, %s)",
             (region_ids or None, okres_ids or None, obec_ids or None,
-             category_main, category_type, metric, limit))
+             category_main, category_type, metric, limit, firm_ids or None))
         rows = cur.fetchall()
     return _envelope(
         "broker_leaderboard", rows,
         {"region_ids": region_ids or [], "okres_ids": okres_ids or [],
          "obec_ids": obec_ids or [], "category_main": category_main,
-         "category_type": category_type, "metric": metric, "limit": limit},
+         "category_type": category_type, "metric": metric, "limit": limit,
+         "firm_ids": firm_ids or []},
         len(rows), None)
+
+
+def firm_options(conn: Any, *, q: str | None = None, limit: int = 20) -> dict[str, Any]:
+    """Companies matching `q` (name or domain), busiest first; an empty query
+    browses the top firms instead of returning nothing."""
+    term = (q or "").strip()
+    limit = max(1, min(int(limit), 100))
+    like = f"%{_like_escape(term)}%"
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT firm_id, canonical_domain, display_name, is_franchise, broker_count "
+            "FROM firms_public "
+            # display_name is NULL for every franchise domain and any domain
+            # under the resolver's 60% modal-label share (migration 190's
+            # _FIRM_DISPLAY_NAMES) — canonical_domain must match too, or
+            # "mmreality" would find nothing.
+            "WHERE (%s = '' OR coalesce(display_name, '') ILIKE %s OR canonical_domain ILIKE %s) "
+            # broker_count, not a listing/property count: firms never got the
+            # migration 396 CZ-scope split, so ranking on inventory size would
+            # resurface the foreign-syndication distortion that migration fixed.
+            "ORDER BY broker_count DESC NULLS LAST, canonical_domain LIMIT %s",
+            (term, like, like, limit))
+        rows = cur.fetchall()
+    return _envelope("broker_firm_options", rows, {"query": term, "limit": limit}, len(rows), None)
 
 
 def search(conn: Any, query: str, *, limit: int = 12,
