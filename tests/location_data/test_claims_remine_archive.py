@@ -1307,7 +1307,12 @@ _REALITYMIX_HTML = _ROOT / "tests" / "fixtures" / "location_w2" / "realitymix_de
 
 
 def realitymix_document():
-    """The pinned realitymix detail page, scoped by its own exclusion zones."""
+    """The pinned realitymix detail page, scoped by its own exclusion zones.
+
+    The fixture is MODELLED on the contract rather than captured live (its own header says
+    so); the attribute names are corroborated by `rm.det.legacy_pin`'s notes and the
+    portal-verification sweep, which is what makes it usable evidence for the reader's
+    shape rather than for the portal's current markup."""
     from location_data import contracts
     contract = {c.source: c for c in contracts.load_all()}["realitymix"]
     register = ScopeRegister.from_zones("realitymix", contract.exclusion_zones)
@@ -1363,9 +1368,9 @@ def test_the_cz_bbox_guard_is_actually_EVALUATED_not_merely_declared():
 
     # And with the guard NOT declared, the same point is admitted — which proves the
     # emptiness above came from the guard rather than from the parse failing.
-    ungurded = replace(latlon_entry(), guards=())
+    unguarded = replace(latlon_entry(), guards=())
     assert len(ARCHIVE_READERS["html_point_attrs"](
-        ungurded, listing_row(source="realitymix"), payload(source="realitymix"),
+        unguarded, listing_row(source="realitymix"), payload(source="realitymix"),
         document)) == 1
 
 
@@ -1408,3 +1413,26 @@ def test_a_non_numeric_attribute_yields_no_claim_and_no_exception():
     assert ARCHIVE_READERS["html_point_attrs"](
         latlon_entry(), listing_row(source="realitymix"), payload(source="realitymix"),
         document) == []
+
+
+def test_a_non_finite_coordinate_is_refused_even_with_no_guard_declared():
+    """`float()` returns nan/inf happily, and `POINT(nan nan)` reaching ST_GeomFromText
+    either stores a non-finite geometry in an append-only table or aborts the whole batch
+    INSERT around it. Finiteness is therefore STRUCTURAL here, not contract-declared: the
+    CZ envelope is policy an entry may legitimately omit (a portal could publish foreign
+    coordinates), but a NaN is never a coordinate.
+
+    Asserted with `guards=()` precisely so it cannot pass by accident via the bbox check —
+    this is the path an entry that forgot the guard would take."""
+    from location_data import contracts
+    contract = {c.source: c for c in contracts.load_all()}["realitymix"]
+    register = ScopeRegister.from_zones("realitymix", contract.exclusion_zones)
+    base = _REALITYMIX_HTML.read_text(encoding="utf-8", errors="replace")
+
+    for bad in ("nan", "inf", "-inf"):
+        html = base.replace('data-gps-lat="49.73561"', f'data-gps-lat="{bad}"')
+        document = scope_html(html.encode("utf-8"), register=register)
+        entry = replace(latlon_entry(), guards=())        # no guard declared at all
+        assert ARCHIVE_READERS["html_point_attrs"](
+            entry, listing_row(source="realitymix"), payload(source="realitymix"),
+            document) == [], bad

@@ -94,6 +94,7 @@ import os
 import sys
 import time
 from collections.abc import Callable
+from math import isfinite
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from typing import Any, Protocol
@@ -131,6 +132,7 @@ from location_data.claims_intake import (
     claim_value_bytes,
     coordinate_verdict,
     env_positive_int,
+    point_wkt,
     guard_admits,
     guarded,
     load_entries,
@@ -385,7 +387,7 @@ def _read_html_point_dms(
         return []
     claim = _evidenced(
         entry, row, document, value=raw, within=node,
-        value_geom_wkt=f"POINT({lon} {lat})",
+        value_geom_wkt=point_wkt(lat, lon),
     )
     return [ArchiveRead(claim, position_branch=str(branch))]
 
@@ -445,6 +447,15 @@ def _read_html_point_attrs(
         # A non-numeric attribute is the portal changing shape under us. No claim, and no
         # exception either: one malformed page must not abort a batch of thousands.
         return []
+    # STRUCTURAL, not contract-optional: `float()` happily returns nan/inf, and a
+    # `POINT(nan nan)` reaching `ST_GeomFromText` either stores a non-finite geometry in an
+    # append-only table or aborts the whole batch INSERT around it. The CZ envelope below
+    # is contract-declared policy — a portal may legitimately publish foreign coordinates —
+    # but finiteness is not policy, and it must not depend on an entry remembering to name
+    # a guard. `html_point_dms` gets this for free inside `parse_dms_pair`; this path has
+    # no such helper, so it is asserted here.
+    if not (isfinite(lat) and isfinite(lon)):
+        return []
     if not guard_admits(entry, GUARD_CZ_BBOX, (lat, lon)):
         return []
     claim = _evidenced(
@@ -454,7 +465,7 @@ def _read_html_point_attrs(
         # asserting evidence it cannot point at. The opening tag carries both attributes
         # and is genuinely findable in the scoped body.
         quote=node.html or f"{raw_lat},{raw_lon}",
-        value_geom_wkt=f"POINT({lon} {lat})",
+        value_geom_wkt=point_wkt(lat, lon),
     )
     return [ArchiveRead(claim, position_branch=branch)]
 

@@ -236,7 +236,15 @@ def test_the_archive_reader_contracts_state_exactly_what_those_bodies_do():
 
     Kept as a SEPARATE test rather than folded into the one above because the two registries
     are deliberately separate objects and a single test asserting over both would go green
-    if one of them vanished."""
+    if one of them vanished.
+
+    NARROWER than the W1 gate, deliberately and disclosed rather than implied: it checks the
+    two `consults_*` flags but NOT `locator_keys`, because the DOM readers address their
+    locator through `.get()` plus an explicit refusal (`_entry_css`, the attr-pair check)
+    rather than the unguarded `entry.locator["key"]` indexing `_indexed_locator_keys` looks
+    for. Asserting equality there would compare a set against an empty one. Closing it
+    properly needs the scan to recognise the refusal helpers; until then this is a known
+    half, not an assumed whole."""
     bodies = _reader_bodies(_ARCHIVE_AST, "archive_reader")
     assert set(bodies) == set(ARCHIVE_READERS)
     for name, fn in bodies.items():
