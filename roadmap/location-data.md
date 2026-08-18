@@ -17,7 +17,7 @@ is the tie-breaker). This track records sequencing + shipped state only.
 | W1v bezrealitky vertical slice | one portal end-to-end + location-quality dashboard | ✅ shipped 2026-08-13 (every layer exercised in prod; gate answered — portal-inventory-capped, not pipeline-capped) |
 | W2a payload archive rewrite | append-on-change `portal_raw_payloads` | 🟡 hardened + measured (2026-08-14) — migrations 405–408 applied; bodies to R2, storage bounded by construction (cap 2 + 7-day floor), profiles per (source, page_kind) and now in the contracts; detail churn 0.1–2.4 % on 6 of 8 portals (idnes still 98.9 %, index surfaces unprofiled ~100 %). **Operator decided 2026-08-16: dual-write ON, index archiving NOT YET** (index keys are week-stamped, so the cap bounds detail but not index; ~100 % churn on a surface nobody has diffed). #1074 first wired the R2 secrets into all 14 page-fetching lanes — nine of ten had none, so enabling the flag would have archived nothing while every scrape stayed green; #1075 the same for the backfill lane's own write step. **Backfill PROVEN 2026-08-16** (run 31970354928) **and RUNNING since**: the first 2,000 pages came back round-trip byte-identical (**0 mismatch / 0 unreadable**), and as of **2026-08-17 17:08 UTC, 270,000 of ~445,191 pages (≈61 %)** have migrated across six budgeted dispatches — 266,012 inserted, **0 unmapped**, 21.1 GB read → 4.8 GB stored, cursor `after_id=1,483,282`. **The compression ratio fell from the proving run's 7.5x to 4.4x** once the sample stopped being the first 2,000 rows — projecting the measured ratio over the full archive puts the backfill's one-time R2 footprint at **≈7.9 GB** (well inside the ~28.6 GB steady-state R2 projection the storage sign-off used; the ~4 GB figure elsewhere in this file is the POSTGRES metadata allowance, a different budget). The denominator is not static: `portal_raw_pages` is still live-written, so new rows land above the cursor and "~445,191" is the inventory count, not a finish line. A run stops on its wall-clock budget stamping `outcome='stopped'`, never mid-row, and the next resumes from that row's keyset cursor; `'ok'` means only that the scan ran off the end. The verifier samples the whole source corpus, so it reports `missing` for everything not yet migrated and passes only after completion. Remaining ≈4 dispatches at the measured ~980 pages/min (the earlier ~570/min estimate was low). Each run holds `location-batch` for ~45 min and that group is saturated (intake times out hourly, resolve re-queues every 15 min), so dispatches are serialised into the idle gaps rather than run back-to-back. **Follow-up, not mid-run:** the uploader logs `urllib3` "Connection pool is full, discarding connection" continuously against R2 — correctness is unaffected (boto3 retries) but throughput is being left on the table; raise `max_pool_connections` in the botocore config. **`payload_dual_write` flipped ON globally 2026-08-17 12:29 UTC** — all nine portals, no per-portal overrides; *reported by the session that performed the flip, which also reported 8 of 9 portals confirmed writing fresh rows (mmreality's cron had not cycled since). Not independently re-queried here — verify against `app_settings` / `portals.operational_limits` before relying on it.* `payload_index_archive` remains **OFF** |
 | W2 HTML re-mine | claims from archived `portal_raw_payloads` bodies | 🟡 **infrastructure shipped, lane deliberately inert** (2026-08-17) — W2-0/W2-1 (#1048/#1045), W2-3 the exclusion-zone scoper (#1053), W2-4 the contract shadow mechanism (#1050, mig 404), W2-5 the permanent fixture-diff gate (#1058) and W2-2 the evidence-bearing claims + archived-HTML re-mine lane (#1079) are all merged. The lane mines **nothing**: `ARCHIVE_READERS` is empty and a run with no reader returns *before* it opens a batch row, because a batch stamped `'ok'` would move the incremental watermark over a corpus it never opened. **W2-6…W2-12, the per-portal contracts that would give it a reader, are unstarted and unowned** — that is the whole remaining scope of W2 |
-| W3 history backfill | claims from `listing_snapshots.raw_json` (1,574,313 rows) | 🟡 lane built + rebased onto current main (PR #1057) — **never dispatched**; the 1.57M-row run needs operator go-ahead AND an idle `location-batch` (see W3 section) |
+| W3 history backfill | claims from `listing_snapshots.raw_json` (1,574,313 rows) | 🟡 merged (#1057) + **first production contact 2026-08-17**: a `dry_run` smoke walked 90,000 snapshots clean at ~300/s, writing nothing. Operator has cleared dispatch; real runs are interleaving with the W2a payload backfill on the shared `location-batch` slot (see W3 section) |
 | W4–W6 | refetch cohorts, LLM lane, serving flip | ⚪ not started |
 
 ## W0 — done
@@ -908,7 +908,146 @@ what actually moves on an INDEX page — nobody has diffed one, which is why the
 stays off. That is a prerequisite for enabling `payload_index_archive` later, not for
 anything W2a shipped, and it does not block W2: the re-mine lane reads detail bodies.
 
-## W3 — lane built, never dispatched (history backfill from `listing_snapshots`)
+## W3 — merged, first production contact made (history backfill from `listing_snapshots`)
+
+### First contact, 2026-08-17 — and what a green tick did not tell us
+
+The lane's first-ever production run was a `dry_run=true` smoke (Actions 32077606722, `mode=full`,
+`max_seconds=300`, `batch_size=10000`, writes nothing). It walked **90,000 snapshots at ~300/s**,
+stamped `outcome='stopped'` on its budget with `cursor_after_id=90000` for a clean resume, and
+exited green. It validated DB connect, the blocking Mapy-inventory precondition
+(`inventory_rows=57204`, terminal AND complete in the current restart epoch — the lane refuses
+outright otherwise), the contract projection load, the keyset scan and extraction across all nine
+portals' contracts.
+
+**It also reported exactly 1 claim and exactly 1 absence per snapshot, uniformly, across all
+90,000 — and that is indistinguishable from a broken classifier.** Genuine extraction produces a
+variable count per row. The run was investigated rather than accepted, by probing the classifier
+against the committed fixtures: legacy-shape sreality yields exactly 1 claim
+(`sr.det.legacy_locality_value` → `address_line_verbatim`) plus 1 coordinate absence, while
+post-cutover yields 21 claims and 0 absences. So snapshot ids 1–90,000 are *entirely* pre-cutover
+legacy-shape sreality — the oldest rows in the table, all predating the June-2026 payload change.
+Uniform cohort, not a defect.
+
+**The rule this is recorded for: a green exit says the code ran, never that it did the right
+thing.** The distance between "clean first contact" and "silent defect shipped" here was one probe
+run against a passing signal, and nothing in CI, the exit code or the log line would have closed
+it.
+
+### The legacy-shape absence is not an edge case — it covers the entire early corpus
+
+W3 deliberately disables the refetch-cohort enrollment W1 uses to surface legacy-shape rows
+(`route_legacy_shape_to_refetch=False` — a snapshot cannot be refetched, so enrolling one would
+flood the live cohort with rows that were never wrong, only old). That left a hole:
+`_read_point_pair` refuses a pre-cutover payload outright (no `gps_lat`/`gps_lon` at the
+post-cutover locator), so such a snapshot produced **neither a coordinate claim nor any record that
+a coordinate had been sought** — silently indistinguishable, forever, from "not yet re-mined", in an
+append-only table. `record_legacy_shape_absence=True` (default False, so W1's already-measured D3
+gate is untouched) closes it with an explicit `not_attempted` absence per snapshot.
+
+The smoke measured the blast radius of that fix: it fires on **every one of the first 90,000
+snapshots**, i.e. on what looks like the whole early corpus rather than a rare cohort. It was found
+by a peer session's review of #1057 and would otherwise have shipped silently.
+
+### First production WRITE, 2026-08-17 — a pre-stated prediction, falsified
+
+Run 32081432670 (`dry_run=false`, `max_seconds=600`, `batch_size=10000`), resumed from id 0
+because a dry run writes no batch row and therefore leaves no cursor:
+
+| counter | value |
+| --- | ---: |
+| snapshots | 130,000 |
+| claims | 170,569 |
+| **claims_inserted** | **33,064 (19.4 %)** |
+| observations | 134,741 |
+| absences | 127,559 |
+| dirty enqueues | 32,961 |
+| oversized | 0 |
+| outcome / cursor | `stopped` / 130,000 (resumable) |
+
+Throughput ~213 snapshots/s with writes, against ~300/s dry.
+
+**The prediction, stated in advance and wrong.** Before dispatch it was written down that claims
+would be *mostly genuine inserts rather than dedupes*, on the reasoning that W1 mined current-state
+`listings.raw_json`, so an old snapshot's locality string is a different value → different
+fingerprint → a new claim. A falsifier was committed to at the same time: *if `claims_inserted`
+comes back far below `claims`, that assumption is wrong.* It came back at 19.4 %. The assumption
+was wrong.
+
+**The actual mechanism, and the measurement that distinguishes it from the rival explanation.**
+`listing_snapshots` appends on **any** content change — a price edit mints a snapshot whose
+locality is byte-identical to the previous twenty. So one listing contributes many snapshots, the
+first minting a claim and the rest re-sighting it. That is *within-W3* dedup, not the
+*cross-substrate* dedup the prediction reasoned about. A rival hypothesis was on the table (that
+these listings simply never changed locality, making the cohort narrower than "all pre-cutover" and
+weakening extrapolation). The per-batch insert rate discriminates them:
+
+**69 % → 60 % → 45 % → 34 % → 18 % → 12 % → 8 % → 4 % → 2 %**
+
+A cohort property would hold roughly flat across batches — it is a fact about *which* listings are
+scanned. Monotonic decay is a fact about *how far into the scan* you are: later snapshots
+increasingly belong to listings already claimed. The rival hypothesis predicts flat and is refuted.
+This is the difference between an explanation that fits and a measurement that decides.
+
+**The legacy→post-cutover boundary is visible and sits at snapshot id ≈ 120,000–130,000.** Batch 13
+jumps to 5.06 claims/snapshot while absences fall to 0.76/snapshot. Solving each independently for
+the post-cutover fraction (claims = 1 + 20x, absences = 1 − x) gives **x = 0.203 from claims and
+x = 0.244 from absences** — two unrelated counters agreeing, which is what makes the cohort model
+credible rather than merely consistent.
+
+### The denominator is not a finish line — `reached_end` is
+
+**No percentage-complete figure for this wave should be quoted, including from this document.**
+`1,574,313` is a point-in-time reading taken 2026-08-10 during the recon, and `listing_snapshots`
+is **live-written** — the scrapers append a row on every content change, continuously, while the
+backfill walks. So the denominator grows underneath the scan and any "N % done" computed against it
+is wrong in an optimistic direction and gets more wrong with time.
+
+The sibling W2a payload backfill demonstrated this the hard way on the same night: it reported
+"90.2 %, one window from done" against its own 445,191-row inventory count, then **migrated 451,200
+pages — 6,009 past the supposed total — with `reached_end` still false.** Same shape, same cause, a
+caveat that had been stated once and then quietly ignored for four hours of progress reports.
+
+**The only completion signal is `outcome='ok'` / `reached_end=true`**, which this lane's module and
+workflow header already define correctly: `'ok'` means the scan ran out of rows, never that it ran
+out of budget. Report that. Reporting remaining work requires a live `count(*)`/`max(id)` against
+`listing_snapshots`, which no session had access to on the night this was written.
+
+### Supersession is structural, and it happened here
+
+A follow-up diagnostic run (32082367045) was dispatched into a gap that closed between the check
+and the dispatch: the hourly intake cron took the slot first, leaving the run `pending`. A routine
+`*/15` resolve tick was created at **23:55:53Z** and the pending run was cancelled at **23:55:54Z**.
+Zero log lines — it never started, wrote nothing, and left no stranded `outcome='running'` row.
+
+**The operational rule, which is W3's to carry:** a point-in-time idle check followed by a dispatch
+has a race in the gap that no amount of care closes; only
+*dispatch-then-verify-`in_progress`-within-N-seconds* detects the loss. Disarming automation is not
+enough either — **looking is not holding**. Any future W3 dispatch should verify it reached
+`in_progress` and re-dispatch if it did not.
+
+**The structural argument is NOT recorded here on purpose.** This incident is the third direction of
+the same `location-batch` oversubscription finding (intake displaced by backfills at 57.5 %
+cancellation; a backfill displaced by intake; a backfill displaced by a resolve tick that had
+nothing to do). That case rests on all three instances together and belongs with the cancellation
+measurement in the W2a/group write-up, not duplicated in a wave section — see the `location-batch`
+entry under Standing decisions and the W2a wrap-up.
+
+### Volume: watch observations, not claims
+
+**Measured, not projected, as of cursor 130,000:** 134,741 observations from 130,000 snapshots
+(~1.04/snapshot) and 33,064 new claims. Naively that is ~1.6 M observations for a ~1.57 M-row
+table — but that figure is a **floor, not an estimate**, on two counts: it was measured almost
+entirely inside the 1-claim legacy cohort, and **the denominator itself is stale and growing**
+(see below). ~300 snapshots/s holds only while the scan is in the 1-claim legacy cohort. Post-cutover ids carry
+~21 claims each, and the great majority will dedupe on the time-free `claim_fingerprint` against
+what W1 already wrote from `listings.raw_json` — so `claims_inserted` should stay modest while
+**`location_claim_observations` grows hard**, and 01 §4.3 already names it the highest-cardinality
+table in the design. That counter, not the claim count, is the one to watch as the scan advances,
+and it must not be conflated with W2a's separate storage budgets (the archive's own ~7.9 GB R2
+footprint and the ~4 GB Postgres metadata allowance are different ledgers).
+
+### How the lane is being run
 
 Built in a separate git worktree off `origin/main` (never on the main checkout's branch), on a
 DIFFERENT substrate from W2/W2a (`listing_snapshots.raw_json`, not archived HTML), so it does not
