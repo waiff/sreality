@@ -115,29 +115,36 @@ export default function Brokers() {
 
       <NameSearch onPick={(id) => navigate(`/brokers/${id}`)} />
 
-      {/* Filter ledger header */}
-      <div className="mt-5 border border-[var(--color-rule)] rounded-[var(--radius-md)] bg-[var(--color-paper-2)] px-4 py-3.5 flex flex-wrap items-end gap-x-6 gap-y-3">
-        <Field label="Lokalita" className="min-w-[16rem] flex-1">
-          <LocationTypeahead
-            value={districts}
-            onChange={(next) => setDistricts(next ?? [])}
-          />
-        </Field>
-        <Field label="Firma" className="min-w-[16rem] flex-1">
-          <CompanyFilter value={firmIds} onChange={setFirmIds} />
-        </Field>
-        <Field label="Typ">
-          <Segmented options={CATEGORY_OPTIONS} value={categoryMain} onChange={setCategoryMain} />
-        </Field>
-        <Field label="Nabídka">
-          <Segmented options={OFFER_OPTIONS} value={categoryType} onChange={setCategoryType} />
-        </Field>
-        <Field label="Řadit dle">
-          <Segmented options={METRIC_OPTIONS} value={metric} onChange={setMetric} />
-        </Field>
-        <Field label="Počet">
-          <Segmented options={LIMIT_OPTIONS} value={limit} onChange={setLimit} />
-        </Field>
+      {/* Filter ledger header. Firma sits on its own row, full width: it can
+          run to dozens of pills wrapping across several lines, and sharing a
+          row with the single-line controls made THEIR flex-wrap basis follow
+          Firma's unwrapped content width instead of their own. */}
+      <div className="mt-5 border border-[var(--color-rule)] rounded-[var(--radius-md)] bg-[var(--color-paper-2)] px-4 py-3.5">
+        <div className="flex flex-wrap items-end gap-x-6 gap-y-3">
+          <Field label="Lokalita" className="min-w-[16rem] flex-1">
+            <LocationTypeahead
+              value={districts}
+              onChange={(next) => setDistricts(next ?? [])}
+            />
+          </Field>
+          <Field label="Typ">
+            <Segmented options={CATEGORY_OPTIONS} value={categoryMain} onChange={setCategoryMain} />
+          </Field>
+          <Field label="Nabídka">
+            <Segmented options={OFFER_OPTIONS} value={categoryType} onChange={setCategoryType} />
+          </Field>
+          <Field label="Řadit dle">
+            <Segmented options={METRIC_OPTIONS} value={metric} onChange={setMetric} />
+          </Field>
+          <Field label="Počet">
+            <Segmented options={LIMIT_OPTIONS} value={limit} onChange={setLimit} />
+          </Field>
+        </div>
+        <div className="mt-3.5 pt-3.5 border-t border-[var(--color-rule-soft)]">
+          <Field label="Firma">
+            <CompanyFilter value={firmIds} onChange={setFirmIds} />
+          </Field>
+        </div>
       </div>
 
       {/* The ledger */}
