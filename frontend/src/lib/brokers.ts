@@ -62,7 +62,12 @@ export interface BrokerLeaderRow extends BrokerContactFields {
  * same fallback the leaderboard row already uses for firm_name ?? firm_domain. */
 export interface BrokerFirmOption {
   firm_id: number;
-  canonical_domain: string;
+  // NULL on the `firms` table means "independent / free-provider broker"
+  // (migration 185) — not reachable via the resolver's current writer (it
+  // only creates a firm row from a non-free email domain), but the schema
+  // allows it, so display_name and canonical_domain can in principle both
+  // be absent.
+  canonical_domain: string | null;
   display_name: string | null;
   is_franchise: boolean;
   broker_count: number;

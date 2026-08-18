@@ -165,14 +165,21 @@ export default function Brokers() {
   );
 }
 
-function NameSearch({ onPick }: { onPick: (brokerId: number) => void }) {
+// Shared by NameSearch and CompanyFilter — both debounce a free-text query
+// the same way, only the dropdown/pick behavior after it differs.
+function useDebouncedTerm(delayMs = 200): [string, string, (next: string) => void] {
   const [q, setQ] = useState('');
   const [debounced, setDebounced] = useState('');
-  const [open, setOpen] = useState(false);
   useEffect(() => {
-    const t = setTimeout(() => setDebounced(q.trim()), 200);
+    const t = setTimeout(() => setDebounced(q.trim()), delayMs);
     return () => clearTimeout(t);
-  }, [q]);
+  }, [q, delayMs]);
+  return [q, debounced, setQ];
+}
+
+function NameSearch({ onPick }: { onPick: (brokerId: number) => void }) {
+  const [q, debounced, setQ] = useDebouncedTerm();
+  const [open, setOpen] = useState(false);
 
   const resultsQ = useQuery({
     queryKey: ['broker-name-search', debounced],
@@ -252,7 +259,7 @@ interface FirmChip {
 // and any domain under the resolver's 60% modal-label share — the same fallback
 // the leaderboard row itself uses for firm_name ?? firm_domain.
 function firmLabel(f: BrokerFirmOption): string {
-  return f.display_name ?? f.canonical_domain;
+  return f.display_name ?? f.canonical_domain ?? 'neznámá firma';
 }
 
 // Sibling to NameSearch, same debounced-search-then-pick shape, but multi-select
@@ -266,13 +273,8 @@ function CompanyFilter({
   value: FirmChip[];
   onChange: (next: FirmChip[]) => void;
 }) {
-  const [q, setQ] = useState('');
-  const [debounced, setDebounced] = useState('');
+  const [q, debounced, setQ] = useDebouncedTerm();
   const [open, setOpen] = useState(false);
-  useEffect(() => {
-    const t = setTimeout(() => setDebounced(q.trim()), 200);
-    return () => clearTimeout(t);
-  }, [q]);
 
   const resultsQ = useQuery({
     queryKey: ['broker-firm-options', debounced],
@@ -284,9 +286,10 @@ function CompanyFilter({
   const results = (resultsQ.data ?? []).filter((f) => !selected.has(f.firm_id));
 
   const add = (f: BrokerFirmOption) => {
+    // debounced catches up to '' within 200ms on its own; results is already
+    // filtered by `selected` in the meantime, so there's no stale-match flash.
     onChange([...value, { firmId: f.firm_id, label: firmLabel(f) }]);
     setQ('');
-    setDebounced('');
   };
   const remove = (firmId: number) => onChange(value.filter((f) => f.firmId !== firmId));
 

@@ -181,38 +181,25 @@ def leaderboard(conn: Any, *, region_ids: list[int] | None = None,
 
 
 def firm_options(conn: Any, *, q: str | None = None, limit: int = 20) -> dict[str, Any]:
-    """Companies matching `q` (display name or domain), busiest first; an
-    empty/absent query browses the top firms by broker headcount instead of
-    returning nothing, so the picker is useful before the operator types.
-
-    Ranked on broker_count, not a listing/property count: those aren't CZ-scoped
-    on `firms` (only `brokers` got the migration 396 split), so a single foreign
-    syndication account would otherwise head this list the same way it used to
-    head the leaderboard before that migration. `display_name` is NULL for every
-    franchise domain and any domain under the resolver's 60% modal-label share
-    (see migration 190's _FIRM_DISPLAY_NAMES), so the match and the label both
-    fall back to canonical_domain — searching "mmreality" must find mmreality.cz.
-    Firm identifiers are not PII (this module's own _mask rule), so this reads
-    firms_public directly — dark to anon/authenticated like every other broker
-    surface, answerable here only via the service-role connection.
-    """
+    """Companies matching `q` (name or domain), busiest first; an empty query
+    browses the top firms instead of returning nothing."""
     term = (q or "").strip()
     limit = max(1, min(int(limit), 100))
+    like = f"%{_like_escape(term)}%"
     with conn.cursor(row_factory=dict_row) as cur:
-        if term:
-            like = f"%{_like_escape(term)}%"
-            cur.execute(
-                "SELECT firm_id, canonical_domain, display_name, is_franchise, broker_count "
-                "FROM firms_public "
-                "WHERE coalesce(display_name, '') ILIKE %s OR canonical_domain ILIKE %s "
-                "ORDER BY broker_count DESC NULLS LAST, canonical_domain LIMIT %s",
-                (like, like, limit))
-        else:
-            cur.execute(
-                "SELECT firm_id, canonical_domain, display_name, is_franchise, broker_count "
-                "FROM firms_public "
-                "ORDER BY broker_count DESC NULLS LAST, canonical_domain LIMIT %s",
-                (limit,))
+        cur.execute(
+            "SELECT firm_id, canonical_domain, display_name, is_franchise, broker_count "
+            "FROM firms_public "
+            # display_name is NULL for every franchise domain and any domain
+            # under the resolver's 60% modal-label share (migration 190's
+            # _FIRM_DISPLAY_NAMES) — canonical_domain must match too, or
+            # "mmreality" would find nothing.
+            "WHERE (%s = '' OR coalesce(display_name, '') ILIKE %s OR canonical_domain ILIKE %s) "
+            # broker_count, not a listing/property count: firms never got the
+            # migration 396 CZ-scope split, so ranking on inventory size would
+            # resurface the foreign-syndication distortion that migration fixed.
+            "ORDER BY broker_count DESC NULLS LAST, canonical_domain LIMIT %s",
+            (term, like, like, limit))
         rows = cur.fetchall()
     return _envelope("broker_firm_options", rows, {"query": term, "limit": limit}, len(rows), None)
 

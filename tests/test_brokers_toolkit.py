@@ -111,13 +111,13 @@ def test_geo_options_without_a_level_returns_every_level() -> None:
 def test_firm_options_with_no_query_browses_the_top_firms_by_broker_count() -> None:
     """Ranked on broker_count, not a listing/property count — those aren't
     CZ-scoped on `firms` the way migration 396 scoped `brokers`, so a single
-    foreign syndication account would otherwise head this list too."""
+    foreign syndication account would otherwise head this list too. The empty
+    term short-circuits the WHERE via `%s = ''`, one query either way."""
     conn = _Conn([{"firm_id": 1, "canonical_domain": "re-max.cz"}])
     out = brokers.firm_options(conn)
     sql, params = conn.cur.seen[0]
-    assert "WHERE" not in sql
     assert "ORDER BY broker_count DESC NULLS LAST, canonical_domain" in sql
-    assert params == (20,)
+    assert params == ("", "%%", "%%", 20)
     assert out["metadata"]["filters_used"]["query"] == ""
 
 
@@ -129,14 +129,14 @@ def test_firm_options_searches_display_name_or_domain() -> None:
     brokers.firm_options(conn, q="mmreality")
     sql, params = conn.cur.seen[0]
     assert "coalesce(display_name, '') ILIKE %s OR canonical_domain ILIKE %s" in sql
-    assert params == ("%mmreality%", "%mmreality%", 20)
+    assert params == ("mmreality", "%mmreality%", "%mmreality%", 20)
 
 
 def test_firm_options_escapes_like_metacharacters() -> None:
     conn = _Conn([])
     brokers.firm_options(conn, q="100%")
     _, params = conn.cur.seen[0]
-    assert params == ("%100\\%%", "%100\\%%", 20)
+    assert params == ("100%", "%100\\%%", "%100\\%%", 20)
 
 
 def test_firm_options_clamps_limit() -> None:
