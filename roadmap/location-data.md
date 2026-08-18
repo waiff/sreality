@@ -1300,7 +1300,11 @@ contract calls its principal hazard — is entirely unexercised.
   **Told in wall-clock, which is the unit an operator feels:** at midnight, with two production
   backfills parked on clean resumable cursors and ~43k pages left to finish W2a, the group spent
   its time serving an 8-minute incremental intake and a resolve tick that displaced nothing.
-  Neither backfill moved.
+  Neither backfill moved. **Measured, not rhetorical: that backfill window then waited 54 minutes
+  for its slot** — driver armed 23:56Z, dispatched 00:50:37Z — behind the hourly intake burning
+  its full 55-minute budget with the resolve tick queued behind it. One 45-minute unit of work
+  cost nearly two hours wall-clock, and the delay was pure queueing rather than any lane doing
+  more work.
   **Two operator options when this is fixed properly**, both cheap: stagger the crons so intake and
   resolve cannot collide with a long-running lane, or give a running backfill precedence — a
   `*/15` tick with an empty queue should yield to a 45-minute job, not cancel it.
@@ -1317,6 +1321,30 @@ contract calls its principal hazard — is entirely unexercised.
   explained it. Defending the queue position would have finished the backfill ~40 minutes sooner
   and produced no knowledge. Sequence a contended shared queue by which run is *riskier or more
   informative*, not by who is furthest along.
+  **A FOURTH failure joined the family later that night, and it is the one that generalises
+  furthest: *stating a caveat is not applying it*.** Both sessions wrote down that their scan's
+  denominator was a point-in-time inventory rather than a finish line — and then quoted
+  percentages against it for four hours. Measured proof: the payload backfill passed **451,200
+  pages against a "445,191-row" archive** with `reached_end` still false, while W3 was quoting
+  "8.3 % of 1,574,313" against a `listing_snapshots` count eight days stale. **Both source tables
+  are live-written while the scan walks them**, so for any resumable scan here `reached_end=true` /
+  `outcome='ok'` is the ONLY completion signal, remaining work is unknown without a live
+  `count(*)`/`max(id)`, and a percentage-complete should not be quoted at all. The sharpest
+  instance was subtler than the arithmetic: one session corrected its OUTBOUND reports and left its
+  own task list carrying the stale figure — **knowing something and not propagating it everywhere
+  it lives**, which is the version that actually bites, because the corrected copy makes you
+  believe you have handled it.
+  **All four are one failure — *something true was known and then not acted on*** — which is a more
+  useful thing to look for than four rules to remember.
+  **AND THIS IS THE ARGUMENT FOR CROSS-SESSION REVIEW, not merely for the rules.** Three of the
+  four were caught by the OTHER session rather than the one that made the error, and the
+  denominators are the decisive case: **neither session could have caught its own, because in both
+  cases the error was invisible from inside the reasoning that produced it.** Each had written the
+  caveat, believed it, and could re-read its own paragraph without seeing the contradiction sitting
+  in the next sentence. A session reviewing its own work is the weakest link in the arrangement —
+  not through carelessness, but structurally, because the blind spot and the reasoning share an
+  author. Run concurrent sessions where they can see and challenge each other's *numbers*, not just
+  hand off artefacts; the review is the deliverable as much as the work is.
   **A cancelled run leaves a `location_claim_batches` row at `outcome='running'` and nothing
   reaps it — this is inert, by construction, and must not be "fixed" casually.** Both consumers
   exclude it: `_WATERMARK_SQL` filters `outcome = 'ok'` and `_RESUME_SQL` filters
