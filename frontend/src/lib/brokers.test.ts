@@ -102,10 +102,11 @@ describe('auth mode', () => {
       metric: 'active_property_count',
     });
     await b.searchBrokersByName('novak');
+    await b.searchBrokerFirms('mmreality');
     await b.fetchBrokersByIds([1]);
     await b.fetchListingBrokersByIds([1]);
     await b.fetchBrokerListings(7);
-    expect(calls).toHaveLength(6);
+    expect(calls).toHaveLength(7);
     for (const c of calls) expect(authHeader(c)).toBe('Bearer USER-JWT');
   });
 });
@@ -122,6 +123,7 @@ describe('fetchBrokerLeaderboard', () => {
       categoryType: 'prodej',
       metric: 'listing_count',
       limit: 50,
+      firmIds: [8, 41],
     });
     const url = new URL(calls[0].url);
     expect(url.pathname).toBe('/brokers/leaderboard');
@@ -130,6 +132,17 @@ describe('fetchBrokerLeaderboard', () => {
     expect(url.searchParams.getAll('obec_ids')).toEqual(['554782']);
     expect(url.searchParams.get('metric')).toBe('listing_count');
     expect(url.searchParams.get('limit')).toBe('50');
+    expect(url.searchParams.getAll('firm_ids')).toEqual(['8', '41']);
+  });
+
+  it('omits firm_ids when no company filter is set', async () => {
+    const calls = stubFetch(() => ({ body: { data: [] } }));
+    const { fetchBrokerLeaderboard } = await loadBrokers();
+    await fetchBrokerLeaderboard({
+      regionIds: [], okresIds: [], obecIds: [],
+      categoryMain: null, categoryType: null, metric: 'listing_count',
+    });
+    expect(new URL(calls[0].url).searchParams.getAll('firm_ids')).toEqual([]);
   });
 
   it('keeps the masked flags on the returned rows', async () => {
@@ -166,6 +179,38 @@ describe('searchBrokersByName', () => {
     const { searchBrokersByName } = await loadBrokers();
     await searchBrokersByName('  novak  ');
     expect(new URL(calls[0].url).searchParams.get('q')).toBe('novak');
+  });
+});
+
+describe('searchBrokerFirms', () => {
+  it('omits q rather than short-circuiting on an empty query, unlike broker name search', async () => {
+    // Companies are browsable before typing (top firms by broker_count), so an
+    // empty query is a real request, not a no-op the way it is for broker names.
+    const calls = stubFetch(() => ({ body: { data: [] } }));
+    const { searchBrokerFirms } = await loadBrokers();
+    await searchBrokerFirms('  ');
+    expect(calls).toHaveLength(1);
+    expect(new URL(calls[0].url).searchParams.has('q')).toBe(false);
+  });
+
+  it('sends the trimmed term', async () => {
+    const calls = stubFetch(() => ({ body: { data: [] } }));
+    const { searchBrokerFirms } = await loadBrokers();
+    await searchBrokerFirms('  mmreality  ');
+    expect(new URL(calls[0].url).searchParams.get('q')).toBe('mmreality');
+  });
+
+  it('returns the firm options from the envelope', async () => {
+    stubFetch(() => ({
+      body: {
+        data: [{ firm_id: 3, canonical_domain: 'mmreality.cz', display_name: null,
+                 is_franchise: true, broker_count: 1021 }],
+      },
+    }));
+    const { searchBrokerFirms } = await loadBrokers();
+    const rows = await searchBrokerFirms('mmreality');
+    expect(rows).toEqual([{ firm_id: 3, canonical_domain: 'mmreality.cz', display_name: null,
+                            is_franchise: true, broker_count: 1021 }]);
   });
 });
 

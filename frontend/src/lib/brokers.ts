@@ -46,12 +46,26 @@ export interface BrokerContactFields {
 export interface BrokerLeaderRow extends BrokerContactFields {
   broker_id: number;
   display_name: string | null;
+  firm_id: number | null;
   firm_name: string | null;
   firm_domain: string | null;
   listing_count: number;
   property_count: number;
   active_listing_count: number;
   active_property_count: number;
+}
+
+/* One row of GET /brokers/firm-options — a company, not a broker. display_name
+ * is NULL for every franchise domain (mmreality.cz, re-max.cz, ...) and any
+ * domain under the resolver's 60% modal-label share, so canonical_domain is the
+ * only field guaranteed present; render/search display_name ?? canonical_domain,
+ * same fallback the leaderboard row already uses for firm_name ?? firm_domain. */
+export interface BrokerFirmOption {
+  firm_id: number;
+  canonical_domain: string;
+  display_name: string | null;
+  is_franchise: boolean;
+  broker_count: number;
 }
 
 export interface BrokerPublic extends BrokerContactFields {
@@ -148,6 +162,7 @@ export interface LeaderboardParams {
   categoryType: string | null;
   metric: LeaderMetric;
   limit?: number;
+  firmIds?: number[];
 }
 
 export interface ListingBroker {
@@ -251,6 +266,7 @@ export async function fetchBrokerLeaderboard(
       category_type: p.categoryType,
       metric: p.metric,
       limit: p.limit ?? 100,
+      firm_ids: p.firmIds ?? [],
     },
     undefined,
     JWT,
@@ -268,6 +284,22 @@ export async function searchBrokersByName(
   const r = await apiGet<Envelope<BrokerPublic[]>>(
     '/brokers/search',
     { q: term, limit },
+    undefined,
+    JWT,
+  );
+  return r.data ?? [];
+}
+
+// Unlike searchBrokersByName, an empty/short query is a valid request here —
+// the picker browses the top companies by broker headcount before the operator
+// types anything, so no client-side minimum-length short-circuit.
+export async function searchBrokerFirms(
+  q: string,
+  limit = 20,
+): Promise<BrokerFirmOption[]> {
+  const r = await apiGet<Envelope<BrokerFirmOption[]>>(
+    '/brokers/firm-options',
+    { q: q.trim() || undefined, limit },
     undefined,
     JWT,
   );

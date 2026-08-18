@@ -5,7 +5,7 @@
  */
 
 import { describe, expect, it, vi, beforeEach } from 'vitest';
-import { render, waitFor } from '@testing-library/react';
+import { fireEvent, render, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter } from 'react-router-dom';
 
@@ -25,6 +25,7 @@ vi.mock('@/lib/auth', async (importOriginal) => ({
 vi.mock('@/lib/brokers', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/brokers')>()),
   fetchBrokerLeaderboard: vi.fn(),
+  searchBrokerFirms: vi.fn(),
 }));
 vi.mock('@/lib/supabase', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/supabase')>()),
@@ -54,6 +55,7 @@ function renderPage() {
 
 beforeEach(() => {
   vi.mocked(brokers.fetchBrokerLeaderboard).mockResolvedValue([]);
+  vi.mocked(brokers.searchBrokerFirms).mockResolvedValue([]);
   vi.mocked(api.listBrokerMergeCandidates).mockResolvedValue({
     data: [],
     count: 0,
@@ -74,5 +76,38 @@ describe('<Brokers> merge-candidates badge', () => {
     const { findByText } = renderPage();
     await waitFor(() => expect(api.listBrokerMergeCandidates).toHaveBeenCalledWith(1));
     expect(await findByText(/Sloučit duplicity \(3\)/)).toBeInTheDocument();
+  });
+});
+
+describe('<Brokers> company filter', () => {
+  it('re-queries the leaderboard with firmIds once a company is picked, and drops it on remove', async () => {
+    asUser(false);
+    // mmreality.cz is a franchise domain with a NULL display_name (migration
+    // 190's _FIRM_DISPLAY_NAMES excludes franchises) — the picker must fall
+    // back to canonical_domain for both the option label and the chip.
+    vi.mocked(brokers.searchBrokerFirms).mockResolvedValue([
+      { firm_id: 3, canonical_domain: 'mmreality.cz', display_name: null,
+        is_franchise: true, broker_count: 1021 },
+    ]);
+    const { getByPlaceholderText, findByText, getByLabelText, queryByLabelText } = renderPage();
+    await waitFor(() => expect(brokers.fetchBrokerLeaderboard).toHaveBeenCalled());
+
+    const input = getByPlaceholderText('Hledat firmu…');
+    fireEvent.focus(input);
+    fireEvent.change(input, { target: { value: 'mmr' } });
+    fireEvent.click(await findByText('mmreality.cz'));
+
+    await waitFor(() =>
+      expect(brokers.fetchBrokerLeaderboard).toHaveBeenLastCalledWith(
+        expect.objectContaining({ firmIds: [3] }),
+      ),
+    );
+
+    // Back to firmIds: [] is the SAME query key as the initial mount, so
+    // react-query serves it from cache — assert the chip itself is gone
+    // rather than a fresh fetchBrokerLeaderboard call, which caching
+    // correctly skips.
+    fireEvent.click(getByLabelText('Odebrat mmreality.cz'));
+    await waitFor(() => expect(queryByLabelText('Odebrat mmreality.cz')).not.toBeInTheDocument());
   });
 });
