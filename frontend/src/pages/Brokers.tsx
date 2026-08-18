@@ -46,14 +46,13 @@ const LIMIT_OPTIONS: ReadonlyArray<{ value: number; label: string }> = [
 export default function Brokers() {
   const navigate = useNavigate();
   const [districts, setDistricts] = useState<DistrictChip[]>([]);
-  const [firms, setFirms] = useState<FirmChip[]>([]);
+  const [firmIds, setFirmIds] = useState<number[]>([]);
   const [categoryMain, setCategoryMain] = useState<string | null>('byt');
   const [categoryType, setCategoryType] = useState<string | null>('prodej');
   const [metric, setMetric] = useState<LeaderMetric>('active_property_count');
   const [limit, setLimit] = useState<number>(100);
 
   const geo = useMemo(() => chipsToGeoArrays(districts), [districts]);
-  const firmIds = useMemo(() => firms.map((f) => f.firmId), [firms]);
 
   // reason_counts is the whole queue; `count` is only the page, so the badge used
   // to pin at its own 100-row limit (and paid for 100 enriched rows to show one
@@ -125,7 +124,7 @@ export default function Brokers() {
           />
         </Field>
         <Field label="Firma" className="min-w-[16rem] flex-1">
-          <CompanyFilter value={firms} onChange={setFirms} />
+          <CompanyFilter value={firmIds} onChange={setFirmIds} />
         </Field>
         <Field label="Typ">
           <Segmented options={CATEGORY_OPTIONS} value={categoryMain} onChange={setCategoryMain} />
@@ -150,7 +149,7 @@ export default function Brokers() {
             {(boardQ.error as Error).message}
           </p>
         ) : rows.length === 0 ? (
-          <Empty placeLabel={placeLabel} hasFirmFilter={firms.length > 0} />
+          <Empty placeLabel={placeLabel} hasFirmFilter={firmIds.length > 0} />
         ) : (
           <Ledger
             rows={rows}
@@ -250,11 +249,6 @@ function NameSearch({ onPick }: { onPick: (brokerId: number) => void }) {
   );
 }
 
-interface FirmChip {
-  firmId: number;
-  label: string;
-}
-
 // display_name is NULL for every franchise domain (mmreality.cz, re-max.cz, ...)
 // and any domain under the resolver's 60% modal-label share — the same fallback
 // the leaderboard row itself uses for firm_name ?? firm_domain.
@@ -262,99 +256,47 @@ function firmLabel(f: BrokerFirmOption): string {
   return f.display_name ?? f.canonical_domain ?? 'neznámá firma';
 }
 
-// Sibling to NameSearch, same debounced-search-then-pick shape, but multi-select
-// (chips) rather than pick-and-navigate, and the query fires on an EMPTY term too
-// (searchBrokerFirms browses the top companies by broker_count) — a 2-char floor
-// would hide that browsing state, so this gates on `open`, not on term length.
+// The busiest companies as toggleable pills, same PickButton language as Typ/
+// Nabídka but multi-select — searchBrokerFirms('') is the same "browse top
+// firms by broker_count" path the old dropdown's empty state used, just as
+// the whole picker now instead of a step before typing.
 function CompanyFilter({
   value,
   onChange,
 }: {
-  value: FirmChip[];
-  onChange: (next: FirmChip[]) => void;
+  value: number[];
+  onChange: (next: number[]) => void;
 }) {
-  const [q, debounced, setQ] = useDebouncedTerm();
-  const [open, setOpen] = useState(false);
-
-  const resultsQ = useQuery({
-    queryKey: ['broker-firm-options', debounced],
-    queryFn: () => searchBrokerFirms(debounced),
-    enabled: open,
+  const optionsQ = useQuery({
+    queryKey: ['broker-firm-options', ''],
+    queryFn: () => searchBrokerFirms('', 24),
     staleTime: 60_000,
   });
-  const selected = new Set(value.map((f) => f.firmId));
-  const results = (resultsQ.data ?? []).filter((f) => !selected.has(f.firm_id));
+  const options = optionsQ.data ?? [];
+  const selected = new Set(value);
 
-  const add = (f: BrokerFirmOption) => {
-    // debounced catches up to '' within 200ms on its own; results is already
-    // filtered by `selected` in the meantime, so there's no stale-match flash.
-    onChange([...value, { firmId: f.firm_id, label: firmLabel(f) }]);
-    setQ('');
+  const toggle = (firmId: number) => {
+    if (selected.has(firmId)) onChange(value.filter((id) => id !== firmId));
+    else onChange([...value, firmId]);
   };
-  const remove = (firmId: number) => onChange(value.filter((f) => f.firmId !== firmId));
+
+  if (optionsQ.isLoading) {
+    return <p className="text-sm text-[var(--color-ink-3)]">Načítám firmy…</p>;
+  }
+  if (optionsQ.isError) {
+    return <p className="text-sm text-[var(--color-brick)]">Firmy se nepodařilo načíst.</p>;
+  }
 
   return (
-    <div className="relative">
-      {value.length > 0 && (
-        <ul className="mb-1.5 flex flex-wrap gap-1.5">
-          {value.map((f) => (
-            <li key={f.firmId}>
-              <button
-                type="button"
-                onClick={() => remove(f.firmId)}
-                aria-label={`Odebrat ${f.label}`}
-                className="group inline-flex items-center gap-1.5 px-2 py-1 text-xs rounded-[var(--radius-sm)] border border-[var(--color-copper)] bg-[var(--color-copper-soft)] text-[var(--color-copper)] hover:bg-[var(--color-copper)] hover:text-[var(--color-paper)] transition-colors"
-              >
-                <span className="max-w-[10rem] truncate">{f.label}</span>
-                <span aria-hidden className="opacity-60 group-hover:opacity-100">×</span>
-              </button>
-            </li>
-          ))}
-        </ul>
-      )}
-      <input
-        value={q}
-        onChange={(e) => {
-          setQ(e.target.value);
-          setOpen(true);
-        }}
-        onFocus={() => setOpen(true)}
-        onBlur={() => setTimeout(() => setOpen(false), 150)}
-        placeholder="Hledat firmu…"
-        className="w-full text-sm border border-[var(--color-rule)] rounded-[var(--radius-sm)] bg-[var(--color-paper-3)] px-3 py-2 text-[var(--color-ink)] placeholder:text-[var(--color-ink-4)] focus:outline-none focus:ring-2 focus:ring-[var(--color-focus)]"
-      />
-      {open && (
-        <div className="absolute z-20 mt-1 w-full border border-[var(--color-rule)] rounded-[var(--radius-md)] bg-[var(--color-paper-3)] shadow-sm max-h-64 overflow-y-auto">
-          {resultsQ.isLoading ? (
-            <p className="px-3 py-2 text-sm text-[var(--color-ink-3)]">Hledám…</p>
-          ) : resultsQ.isError ? (
-            <p className="px-3 py-2 text-sm text-[var(--color-brick)]">
-              Hledání selhalo: {(resultsQ.error as Error).message}
-            </p>
-          ) : results.length === 0 ? (
-            <p className="px-3 py-2 text-sm text-[var(--color-ink-4)]">
-              {debounced ? 'Nic nenalezeno.' : 'Žádné další firmy.'}
-            </p>
-          ) : (
-            results.map((f) => (
-              <button
-                key={f.firm_id}
-                type="button"
-                onMouseDown={(e) => e.preventDefault()}
-                onClick={() => add(f)}
-                className="w-full text-left px-3 py-2 flex items-center justify-between gap-3 border-b border-[var(--color-rule-soft)] last:border-0 hover:bg-[var(--color-copper-soft)]"
-              >
-                <span className="min-w-0 truncate text-sm text-[var(--color-ink)]">
-                  {firmLabel(f)}
-                </span>
-                <span className="shrink-0 text-xs font-[family-name:var(--font-mono)] tabular-nums text-[var(--color-ink-3)]">
-                  {fmtCount(f.broker_count)}
-                </span>
-              </button>
-            ))
-          )}
-        </div>
-      )}
+    <div className="flex flex-wrap gap-1">
+      {options.map((f) => (
+        <PickButton key={f.firm_id} on={selected.has(f.firm_id)} onClick={() => toggle(f.firm_id)}>
+          {firmLabel(f)}{' '}
+          <span className="font-[family-name:var(--font-mono)] tabular-nums opacity-70">
+            ({fmtCount(f.broker_count)})
+          </span>
+        </PickButton>
+      ))}
     </div>
   );
 }

@@ -80,23 +80,46 @@ describe('<Brokers> merge-candidates badge', () => {
 });
 
 describe('<Brokers> company filter', () => {
-  it('re-queries the leaderboard with firmIds once a company is picked, and drops it on remove', async () => {
+  it('renders the top companies as toggleable buttons, filters the leaderboard by firmIds, and untoggling clears it', async () => {
     asUser(false);
     // mmreality.cz is a franchise domain with a NULL display_name (migration
-    // 190's _FIRM_DISPLAY_NAMES excludes franchises) — the picker must fall
-    // back to canonical_domain for both the option label and the chip.
+    // 190's _FIRM_DISPLAY_NAMES excludes franchises), so the button must fall
+    // back to canonical_domain. Two options confirm toggling one leaves the
+    // other's state alone. broker_count stays under 1000 so the expected
+    // button text doesn't depend on cs-CZ's thousands-separator character.
     vi.mocked(brokers.searchBrokerFirms).mockResolvedValue([
       { firm_id: 3, canonical_domain: 'mmreality.cz', display_name: null,
-        is_franchise: true, broker_count: 1021 },
+        is_franchise: true, broker_count: 42 },
+      { firm_id: 7, canonical_domain: 're-max.cz', display_name: null,
+        is_franchise: true, broker_count: 30 },
     ]);
-    const { getByPlaceholderText, findByText, getByLabelText, queryByLabelText } = renderPage();
+    const { getAllByRole } = renderPage();
     await waitFor(() => expect(brokers.fetchBrokerLeaderboard).toHaveBeenCalled());
 
-    const input = getByPlaceholderText('Hledat firmu…');
-    fireEvent.focus(input);
-    fireEvent.change(input, { target: { value: 'mmr' } });
-    fireEvent.click(await findByText('mmreality.cz'));
+    // Selected by plain textContent, not the accessible-name matcher: the
+    // label and the "(count)" span are separate DOM nodes, and dom-testing-
+    // library's name computation collapses them in a way a role/name query
+    // doesn't reliably match, even though the rendered text is unambiguous.
+    // Retried via waitFor — Typ/Nabídka's static buttons exist from the
+    // first render, so a one-shot query resolves before the async company
+    // buttons (behind searchBrokerFirms) have rendered at all.
+    let mmreality: HTMLElement | undefined;
+    let remax: HTMLElement | undefined;
+    await waitFor(() => {
+      const buttons = getAllByRole('button');
+      mmreality = buttons.find((b) => b.textContent?.includes('mmreality.cz'));
+      remax = buttons.find((b) => b.textContent?.includes('re-max.cz'));
+      expect(mmreality).toBeDefined();
+      expect(remax).toBeDefined();
+    });
+    if (!mmreality || !remax) throw new Error('company buttons not found');
+    expect(mmreality.textContent).toContain('42');
+    expect(remax.textContent).toContain('30');
+    expect(mmreality).toHaveAttribute('aria-pressed', 'false');
 
+    fireEvent.click(mmreality);
+    expect(mmreality).toHaveAttribute('aria-pressed', 'true');
+    expect(remax).toHaveAttribute('aria-pressed', 'false');
     await waitFor(() =>
       expect(brokers.fetchBrokerLeaderboard).toHaveBeenLastCalledWith(
         expect.objectContaining({ firmIds: [3] }),
@@ -104,10 +127,10 @@ describe('<Brokers> company filter', () => {
     );
 
     // Back to firmIds: [] is the SAME query key as the initial mount, so
-    // react-query serves it from cache — assert the chip itself is gone
-    // rather than a fresh fetchBrokerLeaderboard call, which caching
+    // react-query serves it from cache — assert the button's own toggled
+    // state rather than a fresh fetchBrokerLeaderboard call, which caching
     // correctly skips.
-    fireEvent.click(getByLabelText('Odebrat mmreality.cz'));
-    await waitFor(() => expect(queryByLabelText('Odebrat mmreality.cz')).not.toBeInTheDocument());
+    fireEvent.click(mmreality);
+    expect(mmreality).toHaveAttribute('aria-pressed', 'false');
   });
 });
