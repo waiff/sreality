@@ -221,6 +221,63 @@ def verify_jwt(authorization: str | None = Header(default=None)) -> dict:
         raise HTTPException(status_code=401, detail="Invalid token") from exc
 
 
+def account_scope(
+    authorization: str | None = Header(default=None),
+    conn: Any = Depends(get_db_conn),
+) -> list[str]:
+    """Read scope for routes that must serve BOTH a logged-in browser session and a
+    non-browser static-token caller (the future MCP / ClickUp / script integrations)
+    over the one Authorization header the transport gives us.
+
+    Returns the account ids the caller may read, ALWAYS including SYSTEM — mirroring
+    the estimation_runs_tenant_read policy (migration 291) rather than inventing a
+    second definition of tenancy. A verified JWT adds its own account; the static
+    token is NOT an identity (it ships inside the SPA bundle, in a public repo), so
+    it stays SYSTEM-only.
+
+    Fails CLOSED at every branch: a missing header, an unconfigured gate, and an
+    expired or unparseable JWT all raise. No branch degrades silently to a wider or
+    narrower row set, and verify_jwt's HTTPException is never swallowed.
+
+    Why not require_token + tenant_conn: `listings` and `parsed_url_cache` are
+    RLS-enabled-with-zero-policies, so the /estimations list query (which LEFT JOINs
+    both for locality_display) returns NULL for every row on a tenant connection —
+    silently, no error. The service-role connection plus an explicit predicate is the
+    only shape that scopes without blanking data.
+    """
+    expected = os.environ.get("API_TOKEN")
+    # Gate-configuration contract mirrors require_token EXACTLY, so swapping that
+    # dependency for this one changes no status code: unset API_TOKEN is a 503
+    # (never a silent open door), with the documented local-dev opt-out pinned to
+    # SYSTEM so it can never widen scope to another account's rows.
+    if not expected:
+        if os.environ.get("API_AUTH_OPTIONAL") == "1":
+            return [SYSTEM_ACCOUNT_ID]
+        raise HTTPException(
+            status_code=503,
+            detail="API auth is not configured (set API_TOKEN, or API_AUTH_OPTIONAL=1 for local dev)",
+        )
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Invalid or missing token")
+    if hmac.compare_digest(
+        authorization.encode("utf-8", "ignore"), f"Bearer {expected}".encode("utf-8")
+    ):
+        return [SYSTEM_ACCOUNT_ID]
+    # Not the shared secret, so it must be a real Supabase JWT. Require the JWS
+    # shape before calling verify_jwt: otherwise a merely WRONG static token would
+    # surface as verify_jwt's 503 ("auth is not configured") on a deployment with
+    # no Supabase auth env, masking a bad credential as a server fault.
+    if authorization[len("Bearer "):].count(".") != 2:
+        raise HTTPException(status_code=401, detail="Invalid or missing token")
+    claims = verify_jwt(authorization)
+    from api import tenant_pool  # lazy: tenant_pool imports this module
+
+    account_id = tenant_pool.resolve_account_id(conn, claims)
+    if account_id is None:
+        return [SYSTEM_ACCOUNT_ID]
+    return [str(account_id), SYSTEM_ACCOUNT_ID]
+
+
 def require_admin(claims: dict = Depends(verify_jwt)) -> dict:
     """Gate admin-only routes on the is_admin claim (stamped onto the JWT's
     app_metadata from the admins table). Requires a real Supabase JWT — see

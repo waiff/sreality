@@ -44,6 +44,16 @@ describe('apiGet query params', () => {
     expect(new URL(urls[0]).search).toBe('?limit=5');
   });
 
+  it('drops an empty-string value instead of emitting a meaningless param', async () => {
+    /* THE REGRESSION. `[null].join(',')` is '' in JS, which used to be sent as
+     * `?listing_ids=`. The API read the empty value as "no filter" and answered
+     * with the entire estimation_runs table. An empty string is not a filter. */
+    const { urls } = captureFetch();
+    const { apiGet } = await loadApi();
+    await apiGet('/estimations', { listing_ids: '', limit: 5 }, undefined, true);
+    expect(new URL(urls[0]).search).toBe('?limit=5');
+  });
+
   it('still sets a scalar once', async () => {
     const { urls } = captureFetch();
     const { apiGet } = await loadApi();
@@ -69,5 +79,30 @@ describe('apiGet auth mode', () => {
     const { apiGet } = await loadApi();
     await apiGet('/brokers/leaderboard', { limit: 5 });
     expect(headers[0].Authorization).toBe('Bearer STATIC-BUNDLE-TOKEN');
+  });
+});
+
+describe('estimation subject identity', () => {
+  it('fetches property-grain runs by SURROGATE listing ids, not sreality ids', async () => {
+    /* listings.sreality_id is NULL for every non-sreality listing (migration
+     * 311's sign check), so keying this fetch on it silently dropped those
+     * subjects — and an all-null id array collapsed to an unfiltered request. */
+    const { urls } = captureFetch();
+    const { fetchEstimationsForListings } = await import('./queries');
+    await fetchEstimationsForListings([501, 502]);
+    const search = new URL(urls[0]).search;
+    expect(search).toContain('listing_ids=501%2C502');
+    expect(search).not.toContain('sreality_ids');
+  });
+
+  it('sends the caller JWT so account scoping resolves the operator, not SYSTEM', async () => {
+    vi.spyOn(supabase.auth, 'getSession').mockResolvedValue({
+      data: { session: { access_token: 'USER-JWT' } },
+      error: null,
+    } as unknown as Awaited<ReturnType<typeof supabase.auth.getSession>>);
+    const { headers } = captureFetch();
+    const { fetchEstimationsForListings } = await import('./queries');
+    await fetchEstimationsForListings([501]);
+    expect(headers[0].Authorization).toBe('Bearer USER-JWT');
   });
 });

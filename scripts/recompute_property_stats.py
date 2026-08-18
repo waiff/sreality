@@ -595,6 +595,55 @@ def _attach_stragglers(conn: Any, *, skip_native_backfill: bool = False) -> int:
     return inserted
 
 
+def _bind_pending_estimation_listing_ids(conn: Any, *, limit: int = 5000) -> int:
+    """Late-binding identity resolution for estimation_runs. Returns rows stamped.
+
+    An estimation submitted for a sreality URL the scraper has not reached yet
+    lands input_sreality_id NOT NULL + input_listing_id NULL (the insert's COALESCE
+    subquery finds no listing). Every estimation read path now keys solely on the
+    surrogate input_listing_id, so such a run belongs to no listing page until this
+    stamps it. This is the same "a listing just became visible" tick that attaches
+    stragglers, which is exactly the event that makes the NULL resolvable.
+
+    Lives here, not in api/estimation_runs.py, on purpose: property_maintenance.yml
+    installs base extras only (`pip install -e .`, no [api]), so importing that
+    fastapi-dependent module would ImportError the whole cron.
+
+    Rule 12 (runs are immutable) is respected — this resolves IDENTITY, never a
+    result. It only ever fills a NULL: the `input_listing_id IS NULL` guard is
+    repeated in the UPDATE's own WHERE, not just the CTE, so the stamp is one-way
+    and idempotent under concurrency and can never overwrite an already-bound run.
+
+    Deliberately NOT fuzzy. listings_sreality_id_uidx makes the subquery provably
+    single-valued, so a multi-match cannot be represented on this arm; a run that
+    stays ambiguous keeps its NULL rather than being attributed by an arbitrary
+    tie-break, and there is no input_url arm. A wrong attribution silently credits
+    a paid estimate to the wrong flat — strictly worse than staying unattached
+    (the principle the street extractor already follows).
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "WITH cand AS ("
+            "  SELECT er.id AS run_id,"
+            "         (SELECT l.id FROM listings l"
+            "           WHERE l.sreality_id = er.input_sreality_id) AS listing_id"
+            "    FROM estimation_runs er"
+            "   WHERE er.input_listing_id IS NULL"
+            "     AND er.input_sreality_id IS NOT NULL"
+            "   ORDER BY er.id"
+            "   LIMIT %(limit)s"
+            ") "
+            "UPDATE estimation_runs er "
+            "   SET input_listing_id = cand.listing_id "
+            "  FROM cand "
+            " WHERE er.id = cand.run_id "
+            "   AND cand.listing_id IS NOT NULL "
+            "   AND er.input_listing_id IS NULL",
+            {"limit": int(limit)},
+        )
+        return cur.rowcount or 0
+
+
 def _drain_dirty(
     conn: Any, batch_size: int, cutoff: Any,
     renew: Any = None,
@@ -830,17 +879,24 @@ def run_incremental_pass(conn: Any, batch_size: int = 2000) -> dict[str, Any]:
     """
     holder = _new_holder("incremental")
     if not _try_lease(conn, holder, _LEASE_TTL):
-        return {"skipped": True, "attached": 0, "recomputed": 0}
+        return {
+            "skipped": True, "attached": 0,
+            "estimations_bound": 0, "recomputed": 0,
+        }
     try:
         with conn.cursor() as cur:
             cur.execute("SELECT now()")
             cutoff = cur.fetchone()[0]
         attached = _attach_stragglers(conn, skip_native_backfill=True)
+        bound = _bind_pending_estimation_listing_ids(conn)
         recomputed = _drain_dirty(
             conn, batch_size, cutoff,
             renew=lambda: _renew_lease(conn, holder),
         )
-        return {"skipped": False, "attached": attached, "recomputed": recomputed}
+        return {
+            "skipped": False, "attached": attached,
+            "estimations_bound": bound, "recomputed": recomputed,
+        }
     finally:
         _release_lease(conn, holder)
 
