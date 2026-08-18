@@ -17,7 +17,7 @@ is the tie-breaker). This track records sequencing + shipped state only.
 | W1v bezrealitky vertical slice | one portal end-to-end + location-quality dashboard | ✅ shipped 2026-08-13 (every layer exercised in prod; gate answered — portal-inventory-capped, not pipeline-capped) |
 | W2a payload archive rewrite | append-on-change `portal_raw_payloads` | 🟡 hardened + measured (2026-08-14) — migrations 405–408 applied; bodies to R2, storage bounded by construction (cap 2 + 7-day floor), profiles per (source, page_kind) and now in the contracts; detail churn 0.1–2.4 % on 6 of 8 portals (idnes still 98.9 %, index surfaces unprofiled ~100 %). **Operator decided 2026-08-16: dual-write ON, index archiving NOT YET** (index keys are week-stamped, so the cap bounds detail but not index; ~100 % churn on a surface nobody has diffed). #1074 first wired the R2 secrets into all 14 page-fetching lanes — nine of ten had none, so enabling the flag would have archived nothing while every scrape stayed green; #1075 the same for the backfill lane's own write step. **Backfill PROVEN 2026-08-16** (run 31970354928) **and RUNNING since**: the first 2,000 pages came back round-trip byte-identical (**0 mismatch / 0 unreadable**), and as of **2026-08-17 17:08 UTC, 270,000 of ~445,191 pages (≈61 %)** have migrated across six budgeted dispatches — 266,012 inserted, **0 unmapped**, 21.1 GB read → 4.8 GB stored, cursor `after_id=1,483,282`. **The compression ratio fell from the proving run's 7.5x to 4.4x** once the sample stopped being the first 2,000 rows — projecting the measured ratio over the full archive puts the backfill's one-time R2 footprint at **≈7.9 GB** (well inside the ~28.6 GB steady-state R2 projection the storage sign-off used; the ~4 GB figure elsewhere in this file is the POSTGRES metadata allowance, a different budget). The denominator is not static: `portal_raw_pages` is still live-written, so new rows land above the cursor and "~445,191" is the inventory count, not a finish line. A run stops on its wall-clock budget stamping `outcome='stopped'`, never mid-row, and the next resumes from that row's keyset cursor; `'ok'` means only that the scan ran off the end. The verifier samples the whole source corpus, so it reports `missing` for everything not yet migrated and passes only after completion. Remaining ≈4 dispatches at the measured ~980 pages/min (the earlier ~570/min estimate was low). Each run holds `location-batch` for ~45 min and that group is saturated (intake times out hourly, resolve re-queues every 15 min), so dispatches are serialised into the idle gaps rather than run back-to-back. **Follow-up, not mid-run:** the uploader logs `urllib3` "Connection pool is full, discarding connection" continuously against R2 — correctness is unaffected (boto3 retries) but throughput is being left on the table; raise `max_pool_connections` in the botocore config. **`payload_dual_write` flipped ON globally 2026-08-17 12:29 UTC** — all nine portals, no per-portal overrides; *reported by the session that performed the flip, which also reported 8 of 9 portals confirmed writing fresh rows (mmreality's cron had not cycled since). Not independently re-queried here — verify against `app_settings` / `portals.operational_limits` before relying on it.* `payload_index_archive` remains **OFF** |
 | W2 HTML re-mine | claims from archived `portal_raw_payloads` bodies | 🟡 **infrastructure shipped, lane deliberately inert** (2026-08-17) — W2-0/W2-1 (#1048/#1045), W2-3 the exclusion-zone scoper (#1053), W2-4 the contract shadow mechanism (#1050, mig 404), W2-5 the permanent fixture-diff gate (#1058) and W2-2 the evidence-bearing claims + archived-HTML re-mine lane (#1079) are all merged. The lane still mines **nothing**, but the reason moved: `ARCHIVE_READERS` now holds four generic DOM readers (#1081 `html_text`/`html_attr`/`html_point_dms`, #1090 `html_point_attrs`) and **no contract entry names one**, so a run finds no executable entry and returns *before* it opens a batch row — a batch stamped `'ok'` would move the incremental watermark over a corpus it never opened. **W2-6…W2-12 is READER work, not YAML work** (see the verification table below): six portals need a JSON-pointer reader, a regex reader with capture-group spans, and splitting transforms before their contracts become one-line activations, and no contract may activate before W2-13 anyway (#1082) |
-| W3 history backfill | claims from `listing_snapshots.raw_json` (1,574,313 rows) | 🟡 merged (#1057) + **first production contact 2026-08-17**: a `dry_run` smoke walked 90,000 snapshots clean at ~300/s, writing nothing. Operator has cleared dispatch; real runs are interleaving with the W2a payload backfill on the shared `location-batch` slot (see W3 section) |
+| W3 history backfill | claims from `listing_snapshots.raw_json` | 🟡 **running, cursor 1,040,013, `reached_end=false`** (2026-08-18) — ~44,950 historical location claims + ~7.04 M observations recovered over three windows. **BLOCKED**: `location-batch` is saturated by its own crons (hourly intake at ~75 % duty cycle + `*/15` resolve ticks that supersede anything pending), so a 45-min window cannot win a slot; six dispatches cancelled while pending. Needs the operator unblock — see W3 section |
 | W4–W6 | refetch cohorts, LLM lane, serving flip | ⚪ not started |
 
 ## W0 — done
@@ -994,6 +994,48 @@ jumps to 5.06 claims/snapshot while absences fall to 0.76/snapshot. Solving each
 the post-cutover fraction (claims = 1 + 20x, absences = 1 − x) gives **x = 0.203 from claims and
 x = 0.244 from absences** — two unrelated counters agreeing, which is what makes the cohort model
 credible rather than merely consistent.
+
+### W3 progress, and where it is BLOCKED (2026-08-18)
+
+Four windows dispatched after the first write run; three completed, the rest cancelled while
+pending. **Cursor 1,040,013, `reached_end=false`, all work committed and resumable.**
+
+| window | snapshots | claims | inserted | observations | cursor |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 1 | 130,000 | 170,569 | 33,064 (19.4 %) | 134,741 | 130,000 |
+| 2 | 470,000 | 4,331,091 | 9,282 (0.21 %) | 4,309,552 | 600,011 |
+| 3 | 440,000 | 2,612,223 | 2,608 (0.10 %) | 2,599,685 | 1,040,013 |
+
+**~44,950 historical location claims recovered** — values that differ from what those listings
+serve today, i.e. the location changes that existed nowhere before this wave — plus **~7.04 M
+observations** dating when each value was seen. The insert-rate decay is the §"falsified
+prediction" mechanism going asymptotic: nearly every snapshot restates an unchanged location, so it
+becomes an observation, and the small insert residue IS the history.
+
+**BLOCKED: `location-batch` is saturated by its own crons and a 45-minute window cannot win a
+slot.** Six dispatches were cancelled while pending. The mechanism, measured:
+
+- The hourly **claims-intake** holds the group for a 2700 s budget — e.g. `32101486996` in_progress
+  05:04:38→05:53+, with the next intake `32103795929` starting 05:57:47 before the previous had
+  cleared. That is a ~75 % duty cycle on its own.
+- The **`*/15` resolve tick** arrives four times an hour and, per GitHub's group semantics,
+  **supersedes whatever is pending**. Observed repeatedly: `32103183492` sat pending 05:31:02→05:51:30
+  and was killed by the 05:51:29 tick; `32105198517` sat 06:01:44→06:20:48 and was killed by 06:20:47.
+- Therefore **while a long holder occupies the group, every pending entry is doomed — only the last
+  arrival before the holder releases ever runs.** A cadenced tick that has nothing to do reliably
+  beats a backfill window that does, because it arrives later.
+
+This is the §Standing-decisions oversubscription finding as a hard stop rather than an argument: it
+is no longer costing lag, it is costing progress. **The unblock is an operator action**, and W1's own
+backfill already set the precedent — its `*/15` resolve cron was removed for the duration of the
+sweep. Either of the two documented fixes (stagger the crons; or let a running backfill outrank an
+empty tick) also resolves it.
+
+**Do not "fix" this by retrying.** A retry dispatches a *new* run into the same group, which
+supersedes your own previous pending entry and sends you to the back of the queue — four W3 runs
+were lost that way before the mechanism was understood. Under contention: dispatch **once**, then
+wait. A pending run is queued, not wedged, and the two are indistinguishable from outside — which is
+the same *snapshot-treated-as-current-state* failure as everything else in this file.
 
 ### The denominator is not a finish line — `reached_end` is
 
