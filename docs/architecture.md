@@ -525,11 +525,23 @@ renumber.** Navigate by area:
     comparables frozen at run time. Two things on the row are deliberately mutable and
     always have been. (a) The operator's yield `scenario` (`PATCH /estimations/{id}/scenario`)
     — a what-if overlay, not a computed output. (b) Subject IDENTITY. Since the surrogate
-    cutover (migration 411, PR #1095) every read path that answers "what estimates exist for
-    this listing" keys on `estimation_runs.input_listing_id` — `listings.id` — and on nothing
-    else. The legacy `input_sreality_id` is NULL for every post-Gate-2 non-sreality subject
-    (migration 311's sign check), so keying on it silently dropped those subjects; and an
-    empty id set once collapsed the predicate entirely, returning the whole table.
+    cutover (migration 411, PR #1095, completed for `property_estimates_public` by migration
+    412) every read path that answers "what estimates exist for this listing" keys on
+    `estimation_runs.input_listing_id` — `listings.id` — and on nothing else. The legacy
+    `input_sreality_id` is NULL for every post-Gate-2 non-sreality subject (migration 311's
+    sign check), so keying on it silently dropped those subjects; and an empty id set once
+    collapsed the predicate entirely, returning the whole table.
+
+    One surface still uses the legacy id as a KEY SPACE, and it is not a defect:
+    `latest_rent_estimations_by_listing` returns a map keyed by `sreality_id` for Browse's
+    on-card estimate chip. Its JOIN already prefers the surrogate; only the map's keys are
+    legacy, and the chip is sreality-only end to end — the affordance is gated on
+    `sreality_id != null` and `createEstimation` submits a `sreality_id`, so no estimate can
+    exist for a card the legacy key space would mis-answer. Re-keying the read alone would
+    change no behaviour while risking a silent mis-key across six stateful call sites that
+    the compiler cannot check (both ids are `number`). Browse gains non-sreality estimates
+    only when `POST /estimations` accepts a `listing_id` — read and write together, in one
+    PR, with a component test.
 
     An estimation submitted for a URL the scraper has not reached yet legitimately lands with
     `input_listing_id` NULL — the insert's `COALESCE` subquery finds no listing — so it
