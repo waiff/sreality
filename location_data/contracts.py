@@ -259,6 +259,17 @@ READER_CONTRACTS: dict[str, ReaderContract] = {
     "html_point_dms": ReaderContract(
         substrates=_DOM_SURFACES, methods=_DOM_METHOD | _MAP_METHOD,
         locator_keys=frozenset({"css", "attr", "position_branch"})),
+    # A coordinate from an ordered [lat_attr, lon_attr] pair of DECIMAL attributes
+    # (realitymix's `div#print-map[data-gps-lat][data-gps-lon]`). `consults_guards` is TRUE
+    # here and FALSE on `html_point_dms`, and the difference is real rather than an
+    # oversight: the DMS reader gets the CZ envelope for free inside `parse_dms_pair`, while
+    # a decimal pair passes through no such helper, so this reader calls `guard_admits`
+    # itself. Declaring True without calling it is the defect a review caught on the DMS
+    # entry — a rail the contract names and the runtime ignores.
+    "html_point_attrs": ReaderContract(
+        substrates=_DOM_SURFACES, methods=_DOM_METHOD | _MAP_METHOD,
+        locator_keys=frozenset({"css", "attr", "position_branch"}),
+        consults_guards=True),
     "geom_column": ReaderContract(
         substrates=_LEGACY_SURFACE, methods=_LEGACY_METHOD,
         consults_guards=True, stamps_legacy_column="listings.geom"),
