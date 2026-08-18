@@ -926,6 +926,7 @@ def list_estimations(
             "present-but-empty or unparseable is a 400, never 'no filter'."
         ),
     ),
+    sreality_ids: str | None = Query(default=None, include_in_schema=False),
     source_kind: Literal[
         "sreality", "bezrealitky", "idnes_reality", "remax", "unsupported"
     ] | None = None,
@@ -935,6 +936,20 @@ def list_estimations(
     conn: Any = Depends(deps.get_db_conn),
     account_ids: list[str] = Depends(deps.account_scope),
 ) -> dict[str, Any]:
+    # `sreality_ids` was retired by the surrogate-id cutover. It is DECLARED only
+    # so it can be REJECTED: FastAPI silently drops undeclared query params, so
+    # leaving it out would make a stale SPA bundle's ?sreality_ids=… mean "no
+    # listing filter" — the same fail-open this endpoint was fixed for, just
+    # relocated from "empty parse" to "retired name". Railway deploys on merge and
+    # an already-open tab keeps its cached chunk, so that request shape is live.
+    if sreality_ids is not None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "sreality_ids is no longer accepted; use listing_ids "
+                "(CSV of listings.id surrogates). Reload the page."
+            ),
+        )
     ids: list[int] | None = None
     if listing_ids is not None:
         ids = []

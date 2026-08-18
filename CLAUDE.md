@@ -171,7 +171,11 @@ incident history: `docs/architecture.md` § Architectural rules.
     028) — written by `find_comparables_along_axis`; one row per (relation, member way); tram/subway/bus; 30-day TTL.
 12. **`estimation_runs` is the single source of truth for every estimation** (UI / API / ClickUp / agent).
     Sync mode INSERTs once with a terminal `status`; failed runs still persist a row (HTTP 200 +
-    `status='failed'`); re-runs INSERT with `parent_run_id`; originals are immutable. Sources: `ui`/`api`/`clickup`.
+    `status='failed'`); re-runs INSERT with `parent_run_id`; the RESULT of a run is immutable.
+    Immutability covers what was computed (estimate, trace, cost, comparables) — NOT the operator's
+    yield `scenario` and NOT subject IDENTITY: `input_listing_id` is the one handle every read path
+    keys on, and a run submitted before its subject listing was scraped is stamped once, later, by
+    the property-maintenance pass (one-way, single-match only). Sources: `ui`/`api`/`clickup`.
 13. **`building_runs` is the paste-a-building parent.** Children are `estimation_runs` linked via
     `building_run_id` + `building_unit_id`; the unit list is operator-curated JSONB. Status:
     `pending → extracting → awaiting_input → estimating → success|failed`; `awaiting_input` is the

@@ -1008,6 +1008,39 @@ def test_list_listing_ids_fails_closed_when_supplied_but_empty(client, monkeypat
     assert called == {}, "the query must never run for an empty id set"
 
 
+def test_list_rejects_the_retired_sreality_ids_param(client, monkeypatch):
+    """FastAPI silently DROPS undeclared query params, so simply renaming the
+    parameter would have moved the fail-open rather than closed it: a stale SPA
+    bundle (Railway deploys on merge; an open tab keeps its cached chunk) sends
+    ?sreality_ids=<csv> and would have received an unfiltered page, rendering
+    another property's valuation as this listing's. It is declared purely to be
+    rejected."""
+    called: dict[str, Any] = {}
+    monkeypatch.setattr(
+        api_main, "list_estimation_runs",
+        lambda conn, **kw: called.update(kw) or {
+            "data": [], "total": 0, "limit": 50, "offset": 0,
+        },
+    )
+    res = client.get("/estimations?sreality_ids=11,22&limit=100")
+    assert res.status_code == 400
+    assert "listing_ids" in res.json()["detail"]
+    assert called == {}, "the query must never run for the retired param"
+
+
+def test_list_helper_emits_predicate_even_for_an_empty_id_list():
+    """Defense in depth below the route: an EMPTY list must still produce
+    `= ANY('{}')` (matching nothing), never a dropped predicate. Truthiness is
+    exactly how the original fail-open was spelled."""
+    conn = _FakeConn(results=[[], (0,)])
+    er.list_estimation_runs(
+        conn, listing_ids=[], limit=5, account_ids=[SYSTEM_ACCOUNT],
+    )
+    list_sql, list_params = conn.executions[0]
+    assert "er.input_listing_id = ANY(%(listing_ids)s)" in list_sql
+    assert list_params["listing_ids"] == []
+
+
 def test_list_listing_ids_rejects_garbage_instead_of_dropping_it(client, monkeypatch):
     """A non-integer id used to be silently skipped, so `listing_ids=x` narrowed
     to nothing and then failed open. Unparseable input is a 400."""

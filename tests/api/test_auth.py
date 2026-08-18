@@ -502,10 +502,14 @@ def test_account_scope_never_returns_an_empty_scope(monkeypatch):
         assert deps.account_scope(authorization=f"Bearer {tok}", conn=object())
 
 
-def test_account_scope_wrong_credential_is_401_not_503(monkeypatch):
-    """A merely WRONG static token must not surface as verify_jwt's 503
-    ('auth is not configured') on a deployment with no Supabase auth env — that
-    would report a bad credential as a server fault."""
+def test_account_scope_non_jwt_wrong_token_is_401_not_503(monkeypatch):
+    """A wrong token that is not even JWS-shaped must not surface as verify_jwt's
+    503 ('auth is not configured') on a deployment with no Supabase auth env —
+    that would report a bad credential as a server fault.
+
+    Scope note: a JWT-SHAPED credential still reaches verify_jwt, so with no
+    Supabase env configured it correctly yields 503 — at that point the auth
+    backend genuinely is unconfigured. Production always sets SUPABASE_URL."""
     monkeypatch.setenv("API_TOKEN", "secret-token-xyz")
     monkeypatch.delenv("SUPABASE_URL", raising=False)
     monkeypatch.delenv("SUPABASE_JWT_SECRET", raising=False)

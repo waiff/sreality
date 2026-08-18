@@ -111,7 +111,7 @@ it (`api/`). They do not apply to the scraper.
    `/outreach/*`, `/broker-review/*`,
    `/skill-refinements/*`, `/location-audit/*`, and dataset-write/dispatch routes on
    price-stats use `require_admin` (JWT-gated, see below) instead of plain `require_token`;
-   `/pipeline/*`, `/collections` (GET), `/estimations` create/read/scenario, notes,
+   `/pipeline/*`, `/collections` (GET), `/estimations` create/detail/scenario, notes,
    `/listings/lookup`, and `/brokers/*` use `verify_jwt`/`tenant_conn` for per-account
    identity without the admin claim; every other route is still `require_token`-only (a
    shared secret, no identity — `POST /collections`, tags, buildings, manual estimates,
@@ -203,8 +203,19 @@ it (`api/`). They do not apply to the scraper.
 
 ## Identity, login, and admin gating (Phase 1, `api/dependencies.py`)
 
-Three auth primitives now coexist in `api/dependencies.py`:
+Four auth primitives now coexist in `api/dependencies.py`:
 - `require_token` — the original bearer-token gate (rule #8's baseline), unchanged.
+- `account_scope` — an EITHER gate that also returns a READ SCOPE, for routes that must serve
+  both a browser session and a non-browser caller over the one `Authorization` header: the
+  static token resolves to `[SYSTEM]` (it ships in the SPA bundle, so it is not an identity),
+  a verified JWT to `[that account, SYSTEM]` — mirroring the `estimation_runs_tenant_read`
+  policy (migration 291) rather than defining tenancy a second time. Its unset/wrong-credential
+  contract matches `require_token` exactly (503 / 401). Used by `GET /estimations` and
+  `GET /estimations/latest-by-listing`, which stay on the SERVICE-ROLE connection on purpose:
+  their query LEFT JOINs `listings` + `parsed_url_cache`, both RLS-on-with-zero-policies, so a
+  tenant connection would silently NULL `locality_display` on every row. Callers pass the
+  resulting `account_ids` to the read helpers, where it is a REQUIRED kwarg with no default —
+  omitting it is a `TypeError`, never a silent unscoped read.
 - `verify_jwt` — verifies a Supabase user JWT and returns its claims. Preferred path:
   asymmetric JWKS (`SUPABASE_URL` → `/auth/v1/.well-known/jwks.json`, ES256/RS256, cached
   via `PyJWKClient`, no shared secret). Falls back to a shared HS256 secret

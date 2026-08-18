@@ -1297,7 +1297,10 @@ def list_estimation_runs(
     if sreality_id is not None:
         where.append("er.input_sreality_id = %(sreality_id)s")
         params["sreality_id"] = sreality_id
-    if listing_ids:
+    if listing_ids is not None:
+        # `is not None`, never truthiness: an EMPTY list must still emit the
+        # predicate (matching nothing) rather than silently dropping it. The
+        # truthiness spelling is exactly how the fail-open shipped.
         # Property-grain fetch keyed ONLY on the surrogate listings.id: every run
         # on any of the property's child listings (the Listing Detail estimations
         # section). The legacy input_sreality_id is NULL for every post-Gate-2
