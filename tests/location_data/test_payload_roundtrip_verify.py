@@ -231,8 +231,10 @@ def test_store_side_damage_fails_even_when_the_source_moved() -> None:
     its writer hashed. A body that no longer hashes to its own `body_sha256` is damage,
     and a refetch happening afterwards must not launder it into stale-source."""
     old, new = b"<html>as archived</html>", b"<html>as refetched</html>"
+    # Same length as `old` on purpose: rot that also changed the length is caught by the
+    # byte_size check; this test isolates the re-hash.
     row = _archived(old, fetched_at=BASE_TS - timedelta(hours=6),
-                    body=gzip.compress(b"<html>rotted</html>", mtime=0))
+                    body=gzip.compress(b"<html>as damaged!</html>", mtime=0))
     conn = _Conn({1: new}, {1: row})
 
     report = verifier.verify(conn, size=10)
@@ -251,13 +253,61 @@ def test_an_r2_object_that_rotted_after_write_is_caught_by_the_rehash() -> None:
     row = _archived(old, fetched_at=BASE_TS - timedelta(hours=6),
                     body=None, body_r2_key=key)
     conn = _Conn({1: new}, {1: row})
-    store = _FakeR2({key: gzip.compress(b"<html>rotted in the bucket</html>", mtime=0)})
+    # Same length as `old`: isolates the re-hash from the byte_size check.
+    store = _FakeR2({key: gzip.compress(b"<html>as damaged!</html>", mtime=0)})
 
     report = verifier.verify(conn, size=10, store=store)
 
     assert report.passed is False
     assert (report.stale_source, report.mismatch) == (0, 1)
     assert "store-side damage" in report.failures[0].detail
+
+
+def test_a_null_body_sha256_on_a_round_tripping_body_is_ok_not_convicted() -> None:
+    """Migration 403 adds `body_sha256` without NOT NULL, so a NULL is reachable by
+    schema. On a body that round-trips byte-for-byte the gate's own claim is proven —
+    'no oracle exists' must not be read as 'the oracle disagrees'."""
+    raw = b"<html>page</html>"
+    conn = _Conn({1: raw}, {1: _archived(raw, body_sha256=None)})
+
+    report = verifier.verify(conn, size=10)
+
+    assert report.passed is True
+    assert (report.ok, report.mismatch, report.unverifiable) == (1, 0, 0)
+
+
+def test_a_null_body_sha256_on_a_diverged_body_is_unverifiable_and_fails() -> None:
+    """Without the write-time hash there is no way to tell store-side damage from benign
+    drift — and a sign-off gate fails closed on what it cannot judge, even when the
+    source moved and the drift story is available."""
+    old, new = b"<html>as archived</html>", b"<html>as refetched</html>"
+    conn = _Conn({1: new},
+                 {1: _archived(old, body_sha256=None,
+                               fetched_at=BASE_TS - timedelta(hours=6))})
+
+    report = verifier.verify(conn, size=10)
+
+    assert report.passed is False
+    assert (report.stale_source, report.mismatch, report.unverifiable) == (0, 0, 1)
+    assert report.failures[0].status == "unverifiable"
+    assert "no body_sha256" in report.failures[0].detail
+    assert report.as_dict()["unverifiable"] == 1
+
+
+def test_byte_size_is_checked_on_stale_source_rows_too() -> None:
+    """`byte_size` labels the STORED body, so `len(decoded)` is the operand and the check
+    runs before the divergence branch — otherwise it would be skipped on exactly the
+    churning rows where the store does the most work."""
+    old, new = b"<html>as archived</html>", b"<html>as refetched</html>"
+    conn = _Conn({1: new},
+                 {1: _archived(old, byte_size=len(old) + 5,
+                               fetched_at=BASE_TS - timedelta(hours=6))})
+
+    report = verifier.verify(conn, size=10)
+
+    assert report.passed is False
+    assert (report.stale_source, report.mismatch) == (0, 1)
+    assert "decodes to" in report.failures[0].detail
 
 
 def test_a_round_tripping_body_with_a_wrong_body_sha256_label_fails() -> None:
