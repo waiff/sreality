@@ -11,9 +11,12 @@
 -- the sreality-shaped column, so 100% of future non-sreality runs would be missed.
 --
 -- Change is exactly two join/gate keys. The UNION shape, the column list, all three
--- account arms, security_invoker=false (329), the `authenticated` SELECT grant (319) and
--- the anon revoke (331) are preserved verbatim -- CREATE OR REPLACE VIEW keeps reloptions
--- and grants, so none are re-issued.
+-- account arms, owner-rights (329), the `authenticated` SELECT grant (319) and the anon
+-- revoke (331) are preserved -- CREATE OR REPLACE VIEW keeps grants and reloptions, so
+-- none are re-issued. NB owner-rights here is the ABSENCE of the option: pg_class.reloptions
+-- is NULL (verified), i.e. security_invoker was never explicitly set. The guard below reads
+-- it through coalesce(..., 'false') for exactly that reason -- what must never happen is
+-- security_invoker=true (migration 329's incident), not a particular stored value.
 --
 --   arm 1 gate  er.input_sreality_id is not null  ->  er.input_listing_id is not null
 --   arm 1 join  l.sreality_id = er.input_sreality_id  ->  l.id = er.input_listing_id
@@ -29,10 +32,15 @@
 -- indexes on a 685k-row listings table. The straight swap keeps a unique index scan
 -- (listings_sreality_id_uidx -> listings_pkey, same cost), verified by EXPLAIN below.
 --
--- Handoff is gap-free for a new non-sreality run: created with input_url and a NULL
--- input_listing_id it matches arm 2; once the late-binding resolver in
--- scripts/recompute_property_stats.py stamps input_listing_id it moves to arm 1. Never
--- both, never neither.
+-- Arm handoff for a new non-sreality run: created with input_url and a NULL
+-- input_listing_id it matches arm 2 (if its URL equals the listing's source_url exactly);
+-- once the late-binding resolver in scripts/recompute_property_stats.py stamps
+-- input_listing_id it moves to arm 1. The gates are complementary on ONE column, so a run
+-- can never satisfy both -- run_count cannot double-count. It CAN satisfy neither, and that
+-- is unchanged from migration 341: arm 2 is exact string equality on source_url with no
+-- canonicalisation, so a run whose URL carried query params matches nothing until the
+-- resolver binds it. 4 successful runs sit in that gap today (verified), and the same 4 sat
+-- in it under migration 341 -- this migration neither creates nor closes it.
 
 begin;
 

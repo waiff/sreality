@@ -526,8 +526,11 @@ renumber.** Navigate by area:
     always have been. (a) The operator's yield `scenario` (`PATCH /estimations/{id}/scenario`)
     — a what-if overlay, not a computed output. (b) Subject IDENTITY. Since the surrogate
     cutover (migration 411, PR #1095, completed for `property_estimates_public` by migration
-    412) every read path that answers "what estimates exist for this listing" keys on
-    `estimation_runs.input_listing_id` — `listings.id` — and on nothing else. The legacy
+    412) every read path that answers "what estimates exist for this listing" FILTERS on
+    `estimation_runs.input_listing_id` — `listings.id` — and on nothing else. (Display-side
+    JOINs are a separate matter: `_LIST_FROM` still carries a guarded legacy arm to resolve a
+    locality label for a run whose surrogate is not yet bound. That arm decides what a row
+    shows, never which rows come back.) The legacy
     `input_sreality_id` is NULL for every post-Gate-2 non-sreality subject (migration 311's
     sign check), so keying on it silently dropped those subjects; and an empty id set once
     collapsed the predicate entirely, returning the whole table.
