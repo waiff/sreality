@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from location_data import claims_intake, contracts
+from location_data import claims_intake, claims_remine_archive, contracts
 from location_data.claims_intake import GUARDS, LEGACY_COLUMNS, READERS, SOURCES, TRANSFORMS
 from location_data.claims_remine_archive import ARCHIVE_READERS
 from location_data.contracts import (
@@ -56,17 +56,27 @@ def _entry(**overrides):
 # ------------------------------------------------------------ the reader bodies, as data
 
 _INTAKE_AST = ast.parse(Path(claims_intake.__file__).read_text(encoding="utf-8"))
+# The ARCHIVE lane's readers live in their own module behind `@archive_reader`, so the
+# `_INTAKE_AST` scan below cannot see them. W2-6 registered three DOM readers in
+# READER_CONTRACTS that no body-vs-contract check introspected at all — an adversarial
+# review caught `html_point_dms` declaring `consults_guards=True` while never calling
+# `guard_admits`, i.e. exactly the misdeclaration this file's gate exists to make
+# impossible, surviving because the gate could not see the reader.
+_ARCHIVE_AST = ast.parse(
+    Path(claims_remine_archive.__file__).read_text(encoding="utf-8"))
 
 
-def _reader_bodies() -> dict[str, ast.FunctionDef]:
-    """Every `@reader("name")`-decorated function in the extractor, keyed by its name."""
+def _reader_bodies(
+    tree: ast.Module = _INTAKE_AST, decorator: str = "reader",
+) -> dict[str, ast.FunctionDef]:
+    """Every `@<decorator>("name")`-decorated function in `tree`, keyed by its name."""
     bodies: dict[str, ast.FunctionDef] = {}
-    for node in _INTAKE_AST.body:
+    for node in tree.body:
         if not isinstance(node, ast.FunctionDef):
             continue
         for dec in node.decorator_list:
             if (isinstance(dec, ast.Call) and isinstance(dec.func, ast.Name)
-                    and dec.func.id == "reader" and dec.args
+                    and dec.func.id == decorator and dec.args
                     and isinstance(dec.args[0], ast.Constant)):
                 bodies[str(dec.args[0].value)] = node
     return bodies
@@ -210,6 +220,43 @@ def test_the_reader_contracts_state_exactly_what_the_reader_bodies_do():
     # such helper: the two entry points are called from reader bodies and nowhere else.
     reader_names = {fn.name for fn in bodies.values()} | {"apply_transforms", "guard_admits"}
     for node in _INTAKE_AST.body:
+        if isinstance(node, ast.FunctionDef) and node.name not in reader_names:
+            assert not ({"apply_transforms", "guard_admits"} & _called_names(node)), node.name
+
+
+def test_the_archive_reader_contracts_state_exactly_what_those_bodies_do():
+    """The same body-vs-contract gate, extended to the ARCHIVE lane's DOM readers.
+
+    W2-6 put three readers into `READER_CONTRACTS` that the scan above cannot reach: they
+    are decorated `@archive_reader` and live in `claims_remine_archive`, while
+    `_reader_bodies()` reads `@reader` out of `claims_intake`. The consequence was not
+    hypothetical — `html_point_dms` shipped declaring `consults_guards=True` while never
+    calling `guard_admits`, which would have let any entry naming it declare a guard the
+    runtime silently ignored. Review caught it; this makes review unnecessary.
+
+    Kept as a SEPARATE test rather than folded into the one above because the two registries
+    are deliberately separate objects and a single test asserting over both would go green
+    if one of them vanished.
+
+    NARROWER than the W1 gate, deliberately and disclosed rather than implied: it checks the
+    two `consults_*` flags but NOT `locator_keys`, because the DOM readers address their
+    locator through `.get()` plus an explicit refusal (`_entry_css`, the attr-pair check)
+    rather than the unguarded `entry.locator["key"]` indexing `_indexed_locator_keys` looks
+    for. Asserting equality there would compare a set against an empty one. Closing it
+    properly needs the scan to recognise the refusal helpers; until then this is a known
+    half, not an assumed whole."""
+    bodies = _reader_bodies(_ARCHIVE_AST, "archive_reader")
+    assert set(bodies) == set(ARCHIVE_READERS)
+    for name, fn in bodies.items():
+        spec = READER_CONTRACTS[name]
+        calls = _called_names(fn)
+        assert spec.consults_transforms == ("apply_transforms" in calls), name
+        assert spec.consults_guards == ("guard_admits" in calls), name
+    # The same no-helper rule as the W1 scan, for the same reason: a helper evaluating
+    # guards on a reader's behalf would let the table lie. `_evidenced` and `_entry_css` are
+    # shared, and neither may touch the two entry points.
+    reader_names = {fn.name for fn in bodies.values()} | {"apply_transforms", "guard_admits"}
+    for node in _ARCHIVE_AST.body:
         if isinstance(node, ast.FunctionDef) and node.name not in reader_names:
             assert not ({"apply_transforms", "guard_admits"} & _called_names(node)), node.name
 

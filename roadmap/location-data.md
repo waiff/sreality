@@ -16,7 +16,7 @@ is the tie-breaker). This track records sequencing + shipped state only.
 | W1 registry + claim spine (shadow) | full RÚIAN mirror, claims, resolutions, projection | ✅ shipped 2026-08-12 (migrations 380–389 applied; shadow-only, no consumer reads it) |
 | W1v bezrealitky vertical slice | one portal end-to-end + location-quality dashboard | ✅ shipped 2026-08-13 (every layer exercised in prod; gate answered — portal-inventory-capped, not pipeline-capped) |
 | W2a payload archive rewrite | append-on-change `portal_raw_payloads` | 🟡 **backfill COMPLETE; gate (a) blocked on a verifier fix, not on the data** (2026-08-18) — migrations 405–408 applied; bodies to R2, storage bounded by construction (cap 2 + 7-day floor). **`payload_dual_write` ON globally since 2026-08-17 12:29 UTC, verified on all nine portals** (fresh rows per portal, mmreality last; corpus-wide evidence: the backfill's 12,044 `skipped_existing` are pages the live dual-write path archived before the scan reached them). `payload_index_archive` remains **OFF** (operator decision 2026-08-16: index keys are week-stamped so the cap bounds detail but not index; ~100 % churn on a surface nobody has diffed). #1074/#1075 wired the R2 secrets that made the flag real. **Backfill terminal 2026-08-18 01:59 UTC** — `reached_end=true`, `outcome='ok'`, 11 budgeted dispatches across two driver sessions: **472,429 pages scanned, 460,385 inserted, 12,044 skipped (dual-write overlap), 0 unmapped**, 39.68 GB read → **8.53 GB stored (4.65x)**, final cursor 5,617,479, batch 274. **The 445,191 inventory count is superseded — do not compute a percentage against it**: the archive grew 6.1 % while the scan walked it; `reached_end` is the only completion signal. Compression settled at 4.65x (the proving run's 7.5x and the mid-run ≈7.9 GB projection were both optimistic); one-time footprint 8.53 GB, still well inside the ~28.6 GB steady-state R2 projection (the ~4 GB figure elsewhere in this file is the POSTGRES metadata allowance, a different budget). **Gate (a) verify over the complete corpus (run 32090281321): FAIL, 31/1000 mismatch — diagnosed as a comparator artifact, not damage.** 0 missing / 0 unreadable (every sampled page was found in R2 and decoded cleanly). Every checkable failure (25/25 from the run log) had its `portal_raw_pages` source refetched **5–13 h AFTER the payload was stored** (idnes 18 / realitymix 5 / ceskereality 1 / mmreality 1 — exactly the live-drain portals, in proportion to measured churn; the no-drain portals produced zero), and the writer's **7-day append floor refuses by design to chase the refetch**, so the live source legitimately diverges from the stored copy for up to 7 days. The verifier's own `hash_matches` compares the writer-time hash against the LIVE source hash — it measures drift, not fidelity — and R2 keys are content-addressed on `body_sha256`, so key⇒content at write time. **As written, gate (a) cannot pass while any portal is being scraped — structurally unsignable — and that is the finding, not "31 bad pages".** Follow-ups (recorded, unstarted): (1) verifier compares like-for-like (`prp.fetched_at = payload.fetched_at`) or classifies source-refetched-after-store-with-floor-active as its own `stale-source` category instead of `mismatch`; (2) verifier should re-hash the downloaded R2 object against `body_sha256` — content-addressing proves key⇒content at write time but nothing re-checks the object after write; (3) raise `max_pool_connections` in the uploader's botocore config (urllib3 "pool is full" warnings across all 11 runs — throughput left on the table, correctness unaffected). `location-batch` saturation during the run is recorded as structure in #1084/#1086/#1087. **Gate (a), once fixed and green, licenses the STORAGE decision only** — nothing reads the archive until W2-13 gives the re-mine lane a workflow (#1082) |
-| W2 HTML re-mine | claims from archived `portal_raw_payloads` bodies | 🟡 **infrastructure shipped, lane deliberately inert** (2026-08-17) — W2-0/W2-1 (#1048/#1045), W2-3 the exclusion-zone scoper (#1053), W2-4 the contract shadow mechanism (#1050, mig 404), W2-5 the permanent fixture-diff gate (#1058) and W2-2 the evidence-bearing claims + archived-HTML re-mine lane (#1079) are all merged. The lane mines **nothing**: `ARCHIVE_READERS` is empty and a run with no reader returns *before* it opens a batch row, because a batch stamped `'ok'` would move the incremental watermark over a corpus it never opened. **W2-6…W2-12, the per-portal contracts that would give it a reader, are unstarted and unowned** — that is the whole remaining scope of W2 |
+| W2 HTML re-mine | claims from archived `portal_raw_payloads` bodies | 🟡 **infrastructure shipped, lane deliberately inert** (2026-08-17) — W2-0/W2-1 (#1048/#1045), W2-3 the exclusion-zone scoper (#1053), W2-4 the contract shadow mechanism (#1050, mig 404), W2-5 the permanent fixture-diff gate (#1058) and W2-2 the evidence-bearing claims + archived-HTML re-mine lane (#1079) are all merged. The lane still mines **nothing**, but the reason moved: `ARCHIVE_READERS` now holds four generic DOM readers (#1081 `html_text`/`html_attr`/`html_point_dms`, #1090 `html_point_attrs`) and **no contract entry names one**, so a run finds no executable entry and returns *before* it opens a batch row — a batch stamped `'ok'` would move the incremental watermark over a corpus it never opened. **W2-6…W2-12 is READER work, not YAML work** (see the verification table below): six portals need a JSON-pointer reader, a regex reader with capture-group spans, and splitting transforms before their contracts become one-line activations, and no contract may activate before W2-13 anyway (#1082) |
 | W3 history backfill | claims from `listing_snapshots.raw_json` (1,574,313 rows) | 🟡 merged (#1057) + **first production contact 2026-08-17**: a `dry_run` smoke walked 90,000 snapshots clean at ~300/s, writing nothing. Operator has cleared dispatch; real runs are interleaving with the W2a payload backfill on the shared `location-batch` slot (see W3 section) |
 | W4–W6 | refetch cohorts, LLM lane, serving flip | ⚪ not started |
 
@@ -408,7 +408,7 @@ all closed, several proven against a throwaway PostgreSQL 18 built from `.deb` f
   Python, never by the CHECK. Also: C7 now counts distinct **sources**, so one portal read two
   ways is one voice, and `tests/location_data/test_lane_identifiers.py` makes every `LANE` /
   `JOB_NAME` / `CONCURRENCY_GROUP` / version constant globally unique. **Inert on merge,
-  structurally** — `ARCHIVE_READERS` is empty and a run with no reader returns before it opens a
+  structurally** — no contract entry names an archive reader, so a run returns before it opens a
   batch row, because a batch stamped `'ok'` moves the incremental watermark.
 
 ### First churn numbers (2026-08-13, ~4h of live traffic — early, not the sign-off)
@@ -1338,6 +1338,28 @@ contract calls its principal hazard — is entirely unexercised.
   believe you have handled it.
   **All four are one failure — *something true was known and then not acted on*** — which is a more
   useful thing to look for than four rules to remember.
+  **AND THE DEEPER FRAME, which arrived last and covers more than the rules do: A SNAPSHOT
+  TREATED AS CURRENT STATE.** Five findings that night, reached independently by three sessions
+  across three different substrates, are one bug wearing five costumes:
+  1. the archive "inventory" of 445,191 quoted as a denominator while the table grew to 472,429;
+  2. gate (a)'s verifier comparing archived bytes against a `portal_raw_pages` row the scrapers
+     had since overwritten — which is why it FAILS on exactly the high-churn portals and passes
+     on sreality, and why it is unsignable while any portal is being scraped;
+  3. a session acting for 40 minutes on a peer's *declaration* that a dispatcher was armed,
+     after that peer had retired it and told only the other session;
+  4. the ~23 stranded `outcome='running'` batch rows, which a future health panel would read as
+     "a lane is running right now";
+  5. W3's `listing_snapshots` denominator, eight days stale and growing while its own scan walked it.
+  **The operational form: a message and the world drift apart exactly like a stored payload and
+  its live source. Never act on a stored copy — a count, a peer's last message, a status column,
+  a cached body — as if it were the world. Re-read the world.** The three sessions' agreement on
+  this is worth less than it looks (shared mental model, correlated error); what makes it solid is
+  that each instance was found by a session other than the one that made it.
+  **This paragraph exists on `main` for the reason it describes.** It was written first into one
+  session's private memory and pairwise chat messages — i.e. into exactly the point-to-point
+  substrate the rule above forbids — and would have died with that session. A peer noticed it was
+  not in the repo and said so. Put the synthesis where every future reader looks, not where the
+  authors can see it.
   **AND THIS IS THE ARGUMENT FOR CROSS-SESSION REVIEW, not merely for the rules.** Three of the
   four were caught by the OTHER session rather than the one that made the error, and the
   denominators are the decisive case: **neither session could have caught its own, because in both
