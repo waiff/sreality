@@ -1338,6 +1338,28 @@ contract calls its principal hazard — is entirely unexercised.
   believe you have handled it.
   **All four are one failure — *something true was known and then not acted on*** — which is a more
   useful thing to look for than four rules to remember.
+  **AND THE DEEPER FRAME, which arrived last and covers more than the rules do: A SNAPSHOT
+  TREATED AS CURRENT STATE.** Five findings that night, reached independently by three sessions
+  across three different substrates, are one bug wearing five costumes:
+  1. the archive "inventory" of 445,191 quoted as a denominator while the table grew to 472,429;
+  2. gate (a)'s verifier comparing archived bytes against a `portal_raw_pages` row the scrapers
+     had since overwritten — which is why it FAILS on exactly the high-churn portals and passes
+     on sreality, and why it is unsignable while any portal is being scraped;
+  3. a session acting for 40 minutes on a peer's *declaration* that a dispatcher was armed,
+     after that peer had retired it and told only the other session;
+  4. the ~23 stranded `outcome='running'` batch rows, which a future health panel would read as
+     "a lane is running right now";
+  5. W3's `listing_snapshots` denominator, eight days stale and growing while its own scan walked it.
+  **The operational form: a message and the world drift apart exactly like a stored payload and
+  its live source. Never act on a stored copy — a count, a peer's last message, a status column,
+  a cached body — as if it were the world. Re-read the world.** The three sessions' agreement on
+  this is worth less than it looks (shared mental model, correlated error); what makes it solid is
+  that each instance was found by a session other than the one that made it.
+  **This paragraph exists on `main` for the reason it describes.** It was written first into one
+  session's private memory and pairwise chat messages — i.e. into exactly the point-to-point
+  substrate the rule above forbids — and would have died with that session. A peer noticed it was
+  not in the repo and said so. Put the synthesis where every future reader looks, not where the
+  authors can see it.
   **AND THIS IS THE ARGUMENT FOR CROSS-SESSION REVIEW, not merely for the rules.** Three of the
   four were caught by the OTHER session rather than the one that made the error, and the
   denominators are the decisive case: **neither session could have caught its own, because in both
