@@ -995,6 +995,24 @@ the post-cutover fraction (claims = 1 + 20x, absences = 1 − x) gives **x = 0.2
 x = 0.244 from absences** — two unrelated counters agreeing, which is what makes the cohort model
 credible rather than merely consistent.
 
+### The denominator is not a finish line — `reached_end` is
+
+**No percentage-complete figure for this wave should be quoted, including from this document.**
+`1,574,313` is a point-in-time reading taken 2026-08-10 during the recon, and `listing_snapshots`
+is **live-written** — the scrapers append a row on every content change, continuously, while the
+backfill walks. So the denominator grows underneath the scan and any "N % done" computed against it
+is wrong in an optimistic direction and gets more wrong with time.
+
+The sibling W2a payload backfill demonstrated this the hard way on the same night: it reported
+"90.2 %, one window from done" against its own 445,191-row inventory count, then **migrated 451,200
+pages — 6,009 past the supposed total — with `reached_end` still false.** Same shape, same cause, a
+caveat that had been stated once and then quietly ignored for four hours of progress reports.
+
+**The only completion signal is `outcome='ok'` / `reached_end=true`**, which this lane's module and
+workflow header already define correctly: `'ok'` means the scan ran out of rows, never that it ran
+out of budget. Report that. Reporting remaining work requires a live `count(*)`/`max(id)` against
+`listing_snapshots`, which no session had access to on the night this was written.
+
 ### Supersession is structural, and it happened here
 
 A follow-up diagnostic run (32082367045) was dispatched into a gap that closed between the check
@@ -1018,9 +1036,10 @@ entry under Standing decisions and the W2a wrap-up.
 ### Volume: watch observations, not claims
 
 **Measured, not projected, as of cursor 130,000:** 134,741 observations from 130,000 snapshots
-(~1.04/snapshot) and 33,064 new claims. Naively that is ~1.6 M observations for the full 1.57 M —
-but that figure is a **floor, not an estimate**, because it was measured almost entirely inside the
-1-claim legacy cohort. ~300 snapshots/s holds only while the scan is in the 1-claim legacy cohort. Post-cutover ids carry
+(~1.04/snapshot) and 33,064 new claims. Naively that is ~1.6 M observations for a ~1.57 M-row
+table — but that figure is a **floor, not an estimate**, on two counts: it was measured almost
+entirely inside the 1-claim legacy cohort, and **the denominator itself is stale and growing**
+(see below). ~300 snapshots/s holds only while the scan is in the 1-claim legacy cohort. Post-cutover ids carry
 ~21 claims each, and the great majority will dedupe on the time-free `claim_fingerprint` against
 what W1 already wrote from `listings.raw_json` — so `claims_inserted` should stay modest while
 **`location_claim_observations` grows hard**, and 01 §4.3 already names it the highest-cardinality
