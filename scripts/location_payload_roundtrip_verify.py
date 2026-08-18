@@ -368,7 +368,9 @@ def _compare(
     # `byte_size` labels the STORED body (its decoded length, migration 403), so
     # `len(decoded)` is the operand in every case — and the check runs before the
     # divergence branch, or it would be skipped on exactly the churning rows where the
-    # store does the most work.
+    # store does the most work. `byte_size` is nullable and a NULL skips this check:
+    # a missing LABEL check, not a missing fidelity check — the body_sha256 oracle
+    # below covers content.
     if byte_size is not None and int(byte_size) != len(decoded):
         report.mismatch += 1
         return verdict("mismatch",
