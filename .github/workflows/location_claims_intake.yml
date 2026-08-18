@@ -65,10 +65,20 @@ on:
         required: false
         default: false
         type: boolean
-  schedule:
-    # Hourly, incremental. sreality's index walk is hourly, so this keeps the claim layer
-    # at most one cycle behind the payloads it mines.
-    - cron: "35 * * * *"
+  # PAUSED 2026-08-18 so the W3 history backfill can finish its residual (~534k of the
+  # newest snapshots). This lane holds `location-batch` for ~45 min of every hour, and
+  # `location-batch` allows exactly one pending run — so every W3 dispatch was superseded
+  # before it acquired a runner (six consecutive cancellations, measured). W1's backfill
+  # set the same precedent by removing the */15 resolve cron for its sweep.
+  #
+  # RESTORE by un-commenting the cron below once `claims_remine` reports reached_end=true
+  # (`gh run list --workflow=location_claims_remine.yml`). Nothing is lost while paused:
+  # the lane is incremental off a watermark, so the first run back mines the whole gap.
+  #
+  # schedule:
+  #   # Hourly, incremental. sreality's index walk is hourly, so this keeps the claim layer
+  #   # at most one cycle behind the payloads it mines.
+  #   - cron: "35 * * * *"
 
 concurrency:
   # OUTER, cross-lane: shared with the registry load, the Mapy inventory and the resolve

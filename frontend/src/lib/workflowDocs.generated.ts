@@ -2580,12 +2580,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "description": "Deterministic extraction of location claims from `listings.raw_json`, all nine sources (design 06-migration-backfill.md §6.2.1). No model, no network, no re-fetch: it reads the payloads the scraper already persists and writes `location_claims` (+ observations, absences, refetch cohort) with the §6.1.2 licence ladder applied at the INPUT.",
     "portal": null,
     "manual": true,
-    "schedules": [
-      {
-        "cron": "35 * * * *",
-        "human": "Every hour at :35"
-      }
-    ],
+    "schedules": [],
     "onPush": false,
     "onPullRequest": false,
     "paths": null,
