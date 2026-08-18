@@ -1144,6 +1144,40 @@ contract calls its principal hazard — is entirely unexercised.
   re-measure once the payload backfill and W3's history backfill both reach `reached_end`; if the
   rate does not return to the pre-backfill baseline, the group needs a real cadence fix (staggered
   crons, or intake yielding to a running backfill) rather than another note.
+  **THE CASE IS STRUCTURAL, NOT "THE GROUP IS BUSY" — demonstrated in three directions in one
+  evening (2026-08-17/18):**
+  1. **intake displaced by backfills** — the 40-run measurement above;
+  2. **a backfill displaced by intake** — a W3 history-backfill dispatch at 23:53Z lost the slot to
+     the hourly intake cron by seconds and sat `pending`;
+  3. **a backfill displaced by a resolve tick that had nothing to do** — `location_resolve.yml`'s
+     `*/15` cron created run 32082491932 at **23:55:53Z**; the queued W3 run 32082367045 was
+     cancelled at **23:55:54Z**. One second. Zero `REMINE` log lines, so it never started, wrote
+     nothing, and left no stranded batch row.
+  Instance 3 is the one that makes this structural rather than a capacity complaint: **a routine
+  tick with no work to do destroyed a queued production run purely by arriving.** No lane is
+  privileged, no discipline on either side would have prevented it, and no amount of politeness
+  between operators fixes it — GitHub supersedes the older pending entry and that is the whole
+  mechanism. A statistic argues the group is busy; this sequence argues its shape is wrong.
+  **Told in wall-clock, which is the unit an operator feels:** at midnight, with two production
+  backfills parked on clean resumable cursors and ~43k pages left to finish W2a, the group spent
+  its time serving an 8-minute incremental intake and a resolve tick that displaced nothing.
+  Neither backfill moved.
+  **Two operator options when this is fixed properly**, both cheap: stagger the crons so intake and
+  resolve cannot collide with a long-running lane, or give a running backfill precedence — a
+  `*/15` tick with an empty queue should yield to a 45-minute job, not cancel it.
+  **The coordination discipline that made this survivable is worth carrying, because it is
+  transferable and cost nothing:** two sessions sharing the group hand-negotiated slots all
+  evening, and the rules that actually worked were (a) *intending to wait is not holding* — disarm
+  the automation that dispatches on your behalf, since a dispatch loop will break your word without
+  you noticing; (b) *looking is not holding either* — a point-in-time idle check followed by a
+  dispatch has a race in the gap, so the robust form is dispatch-then-verify-`in_progress`-within-N
+  -seconds, which detects the loss rather than pretending to prevent it; and (c) key a hold on
+  OBSERVABLE STATE (watch the other run) rather than on a promise either party must remember.
+  **And yielding the slot paid for itself, measurably**: two windows given up to the W3 lane bought
+  a validated first production write path and a falsified prediction with the decay curve that
+  explained it. Defending the queue position would have finished the backfill ~40 minutes sooner
+  and produced no knowledge. Sequence a contended shared queue by which run is *riskier or more
+  informative*, not by who is furthest along.
   **A cancelled run leaves a `location_claim_batches` row at `outcome='running'` and nothing
   reaps it — this is inert, by construction, and must not be "fixed" casually.** Both consumers
   exclude it: `_WATERMARK_SQL` filters `outcome = 'ok'` and `_RESUME_SQL` filters
