@@ -52,7 +52,10 @@ export default function CurationBlock({
   listing_id,
 }: {
   property_id: number;
-  sreality_id: number;
+  // NULL for a post-Gate-2 non-sreality listing. Curation is PROPERTY-grain
+  // (rule 18) so this block keeps working either way; the note-provenance API
+  // already COALESCEs the surrogate when the legacy id is absent.
+  sreality_id: number | null;
   // The viewed listing's SURROGATE id — always present, unlike sreality_id
   // (NULL for a post-Gate-2 listing). Passed through to NotesRow so a note's
   // provenance survives even when the legacy id is unavailable.
@@ -503,7 +506,9 @@ function NotesRow({
   listing_id,
 }: {
   property_id: number;
-  sreality_id: number;
+  // NULL for a non-sreality listing; createPropertyNote already omits the field
+  // when absent and the server COALESCEs provenance from listing_id.
+  sreality_id: number | null;
   listing_id: number;
 }) {
   const qc = useQueryClient();
@@ -518,7 +523,7 @@ function NotesRow({
 
   const create = useMutation({
     mutationFn: (text: string) =>
-      createPropertyNote(property_id, text, sreality_id, listing_id),
+      createPropertyNote(property_id, text, sreality_id ?? undefined, listing_id),
     onSuccess: () => {
       setBody('');
       setError(null);

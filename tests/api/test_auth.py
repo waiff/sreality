@@ -425,3 +425,109 @@ def test_jwt_routes_accept_real_jwt(client, monkeypatch):
     for method, path, body in _jwt_gated_calls():
         res = _call(client, method, path, body, headers=headers)
         assert res.status_code == 200, f"{path} should pass with a real JWT"
+
+
+# ----------------------------------------------------------------------
+# deps.account_scope — the EITHER gate behind the account-scoped estimation
+# reads (GET /estimations, GET /estimations/latest-by-listing).
+#
+# These routes must serve a logged-in browser session AND a non-browser
+# static-token caller (the Chrome extension today via JWT; MCP / ClickUp
+# tomorrow) over the single Authorization header the transport gives us.
+# Scope is asserted on the RESOLVED ACCOUNT LIST, not on row counts: a
+# mis-wire yields a shrunken-but-plausible page that no human would notice.
+# ----------------------------------------------------------------------
+
+_ACCT = "e93e2b77-56f1-4a56-903b-204e4f0e4e90"
+
+
+def test_account_scope_static_token_is_system_only(monkeypatch):
+    """The static token is NOT an identity — it ships inside the SPA bundle in a
+    public repo — so it may never widen scope beyond the shared SYSTEM cohort."""
+    monkeypatch.setenv("API_TOKEN", "secret-token-xyz")
+    assert deps.account_scope(
+        authorization="Bearer secret-token-xyz", conn=object(),
+    ) == [deps.SYSTEM_ACCOUNT_ID]
+
+
+def test_account_scope_jwt_adds_own_account_and_keeps_system(monkeypatch):
+    """SYSTEM stays in scope alongside the caller's account, mirroring the
+    estimation_runs_tenant_read policy (migration 291). Dropping it would hide
+    the operator's own watchdog-produced runs, which carry the SYSTEM default."""
+    monkeypatch.setenv("API_TOKEN", "secret-token-xyz")
+    monkeypatch.delenv("SUPABASE_URL", raising=False)
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", _JWT_SECRET)
+    monkeypatch.setattr(
+        tenant_pool, "resolve_account_id", lambda conn, claims: _ACCT,
+    )
+    tok = jwt.encode(
+        {"aud": "authenticated", "sub": "11111111-1111-1111-1111-111111111111"},
+        _JWT_SECRET, algorithm="HS256",
+    )
+    assert deps.account_scope(
+        authorization=f"Bearer {tok}", conn=object(),
+    ) == [_ACCT, deps.SYSTEM_ACCOUNT_ID]
+
+
+def test_account_scope_unresolvable_jwt_falls_back_to_system_only(monkeypatch):
+    monkeypatch.setenv("API_TOKEN", "secret-token-xyz")
+    monkeypatch.delenv("SUPABASE_URL", raising=False)
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", _JWT_SECRET)
+    monkeypatch.setattr(
+        tenant_pool, "resolve_account_id", lambda conn, claims: None,
+    )
+    tok = jwt.encode(
+        {"aud": "authenticated", "sub": "11111111-1111-1111-1111-111111111111"},
+        _JWT_SECRET, algorithm="HS256",
+    )
+    assert deps.account_scope(
+        authorization=f"Bearer {tok}", conn=object(),
+    ) == [deps.SYSTEM_ACCOUNT_ID]
+
+
+def test_account_scope_never_returns_an_empty_scope(monkeypatch):
+    """An empty list would reach `ANY('{}')` and match nothing — a silent blank
+    page. Every branch must return at least SYSTEM or raise."""
+    monkeypatch.setenv("API_TOKEN", "secret-token-xyz")
+    monkeypatch.delenv("SUPABASE_URL", raising=False)
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", _JWT_SECRET)
+    for resolved in (None, _ACCT):
+        monkeypatch.setattr(
+            tenant_pool, "resolve_account_id", lambda conn, claims, r=resolved: r,
+        )
+        tok = jwt.encode(
+            {"aud": "authenticated", "sub": "11111111-1111-1111-1111-111111111111"},
+            _JWT_SECRET, algorithm="HS256",
+        )
+        assert deps.account_scope(authorization=f"Bearer {tok}", conn=object())
+
+
+def test_account_scope_non_jwt_wrong_token_is_401_not_503(monkeypatch):
+    """A wrong token that is not even JWS-shaped must not surface as verify_jwt's
+    503 ('auth is not configured') on a deployment with no Supabase auth env —
+    that would report a bad credential as a server fault.
+
+    Scope note: a JWT-SHAPED credential still reaches verify_jwt, so with no
+    Supabase env configured it correctly yields 503 — at that point the auth
+    backend genuinely is unconfigured. Production always sets SUPABASE_URL."""
+    monkeypatch.setenv("API_TOKEN", "secret-token-xyz")
+    monkeypatch.delenv("SUPABASE_URL", raising=False)
+    monkeypatch.delenv("SUPABASE_JWT_SECRET", raising=False)
+    with pytest.raises(fastapi.HTTPException) as exc:
+        deps.account_scope(authorization="Bearer wrong-token", conn=object())
+    assert exc.value.status_code == 401
+
+
+def test_account_scope_fails_closed_when_gate_unconfigured(monkeypatch):
+    monkeypatch.delenv("API_TOKEN", raising=False)
+    monkeypatch.delenv("API_AUTH_OPTIONAL", raising=False)
+    with pytest.raises(fastapi.HTTPException) as exc:
+        deps.account_scope(authorization="Bearer anything", conn=object())
+    assert exc.value.status_code == 503
+
+
+def test_account_scope_missing_header_is_401(monkeypatch):
+    monkeypatch.setenv("API_TOKEN", "secret-token-xyz")
+    with pytest.raises(fastapi.HTTPException) as exc:
+        deps.account_scope(authorization=None, conn=object())
+    assert exc.value.status_code == 401

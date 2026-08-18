@@ -1436,7 +1436,9 @@ export const fetchListingsByIds = async (
   if (error) throw error;
   const out = new Map<number, ListingPublic>();
   for (const row of (data ?? []) as unknown as ListingPublic[]) {
-    out.set(row.sreality_id, row);
+    // Non-null by construction: the select above filters on sreality_id, so a
+    // NULL-sreality row cannot be in `data`.
+    out.set(row.sreality_id!, row);
   }
   return out;
 };
@@ -2106,7 +2108,7 @@ export const fetchEstimationsList = (params: EstimationListParams) =>
  * rows carry the full run projection (minus source_html), so the section
  * renders the selected run without a second per-run request. */
 export const fetchEstimationsForListings = (ids: ReadonlyArray<number>) =>
-  listEstimations({ sreality_ids: ids.join(','), limit: 100 });
+  listEstimations({ listing_ids: ids.join(','), limit: 100 });
 export const submitEstimation = (input: CreateEstimationIn) =>
   createEstimation(input);
 

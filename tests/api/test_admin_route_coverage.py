@@ -80,6 +80,12 @@ def _bucket(route: APIRoute) -> str:
         return "tenant"
     if deps.require_token in calls:
         return "token"
+    # account_scope is an EITHER gate: it accepts the static token OR a real
+    # Supabase JWT on the one Authorization header, and resolves the caller's
+    # read scope. It is strictly stronger than require_token (same secret, same
+    # timing-safe compare, plus an account predicate), so it buckets with it.
+    if deps.account_scope in calls:
+        return "token"
     return "public"
 
 

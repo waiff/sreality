@@ -110,3 +110,41 @@ Run as ONE committed track; valueless half-done. Phases and their gates are spec
 - **GATE 2** — stop drawing `synthetic_listing_id_seq` (the true point of no return).
 - **Phase H / R5** — optional cleanup, deferrable indefinitely. Existing `sreality_id`
   values are NEVER dropped or NULLed — frozen, valid, unique, permanently resolvable.
+
+## Estimation subject identity (✅ shipped 2026-08-18, PR #1095, migration 411)
+
+The listing page's estimation ledger was showing runs from other properties. Not the
+wrong runs — **all** of them: `GET /estimations` filtered on the legacy
+`input_sreality_id`, and `ids[:50] or None` turned an empty parsed id set into "no
+filter", paging the entire table. The empty set was routine — a property whose children
+are all non-sreality has no `sreality_id` to send (migration 311's sign check), the SPA
+fell back to `[listing.sreality_id]` = `[null]`, and `[null].join(',')` is `''` in JS.
+**73,437 properties (13.1%)** hit that path. The route also carried no account predicate
+while on the RLS-bypassing service-role connection, so responses mixed accounts.
+
+Shipped: `listing_ids` filtering `input_listing_id` with no legacy fallback arm and
+fail-closed 400s; `deps.account_scope` (either the static token → SYSTEM, or a JWT →
+that account + SYSTEM, mirroring the migration-291 policy); `account_ids` as a required
+kwarg on both read helpers; migration 411's FK behind the surrogate; and late binding in
+the property-maintenance pass (one-way, single-match, no URL arm) so a run submitted
+before its subject was scraped attaches later. `ListingPublic.sreality_id` is now typed
+`number | null`, which flushed out 6 latent sites.
+
+Deliberately NOT done, with evidence rather than assumption:
+- **`property_estimates_public`** still joins the legacy id. Measured at merge time: **0
+  rows missed**. It carries real regression risk on the Browse rebuilds with timeout
+  history, so it belongs with the Browse cutover below, not with a listing-page fix.
+- **The Browse estimate chip** stays sreality-keyed *end to end* — `cardIds`, the
+  estimate map, the pending-poll set and `createEstimation({sreality_id})` alike.
+  Re-keying only its read would give a read path that finds estimates its write path
+  cannot create. It got the account predicate here and nothing more.
+- **No CHECK constraint** pairing the two ids: it holds for every existing row but would
+  500 future submits, since the insert's COALESCE legitimately leaves the surrogate NULL
+  for an unscraped sreality subject.
+
+Still open (small follow-up PR): the late-binding window never evicts permanently
+unbindable rows (latent above ~5k such runs); the daily full sweep does not call the
+binder, only the incremental pass does; migration 359 declares a partial index while the
+live one is not partial (the safe direction — the binder needs `IS NULL` scans).
+Separately, `api/outreach.py` carries the identical `or None` idiom on `region_ids`,
+where an explicitly empty region list targets the whole country.

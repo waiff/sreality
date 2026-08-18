@@ -776,14 +776,17 @@ def get_estimation_preview(
 
 @app.get("/estimations/latest-by-listing")
 def get_latest_estimations_by_listing(
-    sreality_ids: str = Query(..., description="CSV of listing ids"),
+    sreality_ids: str = Query(..., description="CSV of sreality ids"),
     conn: Any = Depends(deps.get_db_conn),
-    _: None = Depends(deps.require_token),
+    account_ids: list[str] = Depends(deps.account_scope),
 ) -> dict[str, Any]:
     """Latest rent estimate per listing id, for the Browse cards' estimate chip.
 
     Declared before `/estimations/{run_id}` so the literal path isn't captured
     by the int run-id route.
+
+    Still sreality-keyed — see latest_rent_estimations_by_listing's docstring for
+    why re-keying only this read would be patchwork.
     """
     ids: list[int] = []
     for part in sreality_ids.split(","):
@@ -794,7 +797,11 @@ def get_latest_estimations_by_listing(
             ids.append(int(part))
         except ValueError:
             continue
-    return {"estimates": latest_rent_estimations_by_listing(conn, ids[:200])}
+    return {
+        "estimates": latest_rent_estimations_by_listing(
+            conn, ids[:200], account_ids=account_ids,
+        )
+    }
 
 
 @app.get("/estimations/{run_id}")
@@ -912,9 +919,14 @@ def list_estimations(
     source: str | None = None,
     status: Literal["pending", "running", "success", "failed"] | None = None,
     sreality_id: int | None = None,
-    sreality_ids: str | None = Query(
-        default=None, description="CSV of listing ids (property-grain fetch)",
+    listing_ids: str | None = Query(
+        default=None,
+        description=(
+            "CSV of listings.id surrogates (property-grain fetch). Fails CLOSED: "
+            "present-but-empty or unparseable is a 400, never 'no filter'."
+        ),
     ),
+    sreality_ids: str | None = Query(default=None, include_in_schema=False),
     source_kind: Literal[
         "sreality", "bezrealitky", "idnes_reality", "remax", "unsupported"
     ] | None = None,
@@ -922,29 +934,58 @@ def list_estimations(
     offset: int = Query(default=0, ge=0),
     cursor: str | None = Query(default=None, description="Keyset cursor (next_cursor)"),
     conn: Any = Depends(deps.get_db_conn),
-    _: None = Depends(deps.require_token),
+    account_ids: list[str] = Depends(deps.account_scope),
 ) -> dict[str, Any]:
-    ids: list[int] = []
-    if sreality_ids:
-        for part in sreality_ids.split(","):
+    # `sreality_ids` was retired by the surrogate-id cutover. It is DECLARED only
+    # so it can be REJECTED: FastAPI silently drops undeclared query params, so
+    # leaving it out would make a stale SPA bundle's ?sreality_ids=… mean "no
+    # listing filter" — the same fail-open this endpoint was fixed for, just
+    # relocated from "empty parse" to "retired name". Railway deploys on merge and
+    # an already-open tab keeps its cached chunk, so that request shape is live.
+    if sreality_ids is not None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "sreality_ids is no longer accepted; use listing_ids "
+                "(CSV of listings.id surrogates). Reload the page."
+            ),
+        )
+    ids: list[int] | None = None
+    if listing_ids is not None:
+        ids = []
+        for part in listing_ids.split(","):
             part = part.strip()
             if not part:
                 continue
             try:
                 ids.append(int(part))
             except ValueError:
-                continue
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"listing_ids: not an integer: {part!r}",
+                ) from None
+        # THE FAIL-OPEN FIX. This was `ids[:50] or None`: an empty list is falsy in
+        # Python, so "the caller asked for these listings and the set was empty"
+        # became "the caller asked for no filter", and the endpoint paged the whole
+        # table. Supplied-but-empty is now a loud 400; only an ABSENT parameter
+        # means "no listing filter".
+        if not ids:
+            raise HTTPException(
+                status_code=400, detail="listing_ids: no listing id given",
+            )
+        ids = ids[:50]
     try:
         return list_estimation_runs(
             conn,
             source=source,
             status=status,
             sreality_id=sreality_id,
-            sreality_ids=ids[:50] or None,
+            listing_ids=ids,
             source_kind=source_kind,
             limit=limit,
             offset=offset,
             cursor=cursor,
+            account_ids=account_ids,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

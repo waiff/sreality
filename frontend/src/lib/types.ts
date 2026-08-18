@@ -45,7 +45,11 @@ export interface ListingPublic {
   /* Surrogate PK (migration 312/334) — the stable identifier the R2 resolver-chain
    * cutover keys child loaders on instead of sreality_id where it's available. */
   id: number;
-  sreality_id: number;
+  /* NULLABLE, and typed honestly: migration 311's sign check makes a positive
+   * sreality_id impossible off sreality, and post-Gate-2 non-sreality rows carry
+   * NULL. Typing this non-null is what let `[listing.sreality_id]` compile into
+   * an array holding one null. Key on `id` above. */
+  sreality_id: number | null;
   first_seen_at: string;
   last_seen_at: string;
   is_active: boolean;
@@ -760,10 +764,12 @@ export interface EstimationListParams {
   source?: EstimationSource;
   status?: EstimationStatus;
   sreality_id?: number;
-  /* CSV of listing ids — the property-grain fetch the Listing Detail
-   * estimations section uses (every run on any of the property's
-   * child listings). */
-  sreality_ids?: string;
+  /* CSV of listings.id surrogates — the property-grain fetch the Listing
+   * Detail estimations section uses (every run on any of the property's child
+   * listings). Fails CLOSED server-side: supplied-but-empty is a 400, never
+   * "no filter". Never send the legacy sreality_id here — it is NULL for every
+   * non-sreality listing. */
+  listing_ids?: string;
   source_kind?: SourceKind;
   limit?: number;
   offset?: number;

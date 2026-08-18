@@ -208,13 +208,6 @@ export default function ListingDetail() {
     staleTime: 60_000,
   });
 
-  // childIds = the property's children's sreality_ids, for the (sreality-keyed)
-  // EstimationsBlock lookup. Post-Gate-2 a non-sreality child has none, so these
-  // are null-filtered — that block simply won't find runs for a null-sreality
-  // child (a separate, sreality-keyed cutover).
-  const childIds = (sourcesQ.data?.sources ?? [])
-    .map((s) => s.sreality_id)
-    .filter((x): x is number => x != null);
 
   // Cross-source price history: snapshots across every child of the property,
   // falling back to just this listing for singletons / until sources load. Keyed
@@ -242,8 +235,10 @@ export default function ListingDetail() {
   // the already-loaded listing.
   const checksQ = useQuery<ListingFreshnessCheckPublic[], Error>({
     queryKey: ['freshness', listingQ.data?.sreality_id],
-    queryFn: () => fetchFreshnessChecksByListing(listingQ.data!.sreality_id),
-    enabled: !!listingQ.data,
+    queryFn: () => fetchFreshnessChecksByListing(listingQ.data!.sreality_id!),
+    // sreality-keyed forever: a non-sreality listing has no freshness checks,
+    // so don't fire the query with a null key.
+    enabled: listingQ.data?.sreality_id != null,
     staleTime: 60_000,
   });
 
@@ -416,7 +411,7 @@ export default function ListingDetail() {
           <Suspense fallback={null}>
             <EstimationsBlock
               listing={listing}
-              listingIds={childIds.length > 0 ? childIds : [listing.sreality_id]}
+              listingIds={snapshotListingIds}
               propertyMf={propertyMfQ.data ?? null}
               priceDivergence={priceDivergence}
               prefill={newEstimationPrefill}
@@ -427,7 +422,12 @@ export default function ListingDetail() {
       <BrokerVizitka listingId={listing.id} />
       <Hairline />
       <Suspense fallback={null}>
-        <ManualEstimatesBlock sreality_id={listing.sreality_id} />
+        {/* Manual estimates + freshness checks are stored against the legacy
+            sreality_id, so both are empty by construction for a non-sreality
+            listing. Curation below is property-grain and stays rendered. */}
+        {listing.sreality_id != null && (
+          <ManualEstimatesBlock sreality_id={listing.sreality_id} />
+        )}
       </Suspense>
       <Hairline />
       <Suspense fallback={null}>
@@ -447,7 +447,9 @@ export default function ListingDetail() {
         statusEvents={statusEvents}
       />
       <Hairline />
-      <FreshnessBlock sreality_id={listing.sreality_id} checks={checks} />
+      {listing.sreality_id != null && (
+        <FreshnessBlock sreality_id={listing.sreality_id} checks={checks} />
+      )}
     </Page>
   );
 }

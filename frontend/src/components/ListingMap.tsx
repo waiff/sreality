@@ -146,7 +146,9 @@ export interface AnchorPoint {
   lat: number;
   lng: number;
   is_active: boolean;
-  sreality_id: number;
+  /* NULL for a post-Gate-2 non-sreality listing (migration 311's sign check).
+     Carried for provenance only — no consumer reads it. */
+  sreality_id: number | null;
 }
 
 /* Phase QUAL — one city's GeoJSON feature properties. The geometry is

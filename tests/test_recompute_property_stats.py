@@ -364,7 +364,10 @@ def test_run_incremental_pass_skips_when_lease_held():
 
     conn = _FakeConn(script=_lock_script(acquired=False))
     stats = run_incremental_pass(conn, batch_size=500)
-    assert stats == {"skipped": True, "attached": 0, "recomputed": 0}
+    assert stats == {
+        "skipped": True, "attached": 0,
+        "estimations_bound": 0, "recomputed": 0,
+    }
     # NOTHING ran: no attach, no recompute — and no release either
     # (we never held the lease; clearing it would release someone else's).
     sqls = _sqls(conn)
@@ -746,3 +749,42 @@ def test_workflow_timeout_covers_the_budget_ceiling() -> None:
     default_budget = float(
         triggers["workflow_dispatch"]["inputs"]["max_seconds"]["default"])
     assert default_budget <= rps._MAX_BUDGET_SECONDS
+
+
+# --- late-binding estimation identity resolution ------------------------------
+
+
+def test_incremental_pass_binds_pending_estimation_listing_ids():
+    """The pass stamps input_listing_id on runs created before their subject
+    listing was scraped. Every estimation read path now keys solely on that
+    surrogate, so an unbound run belongs to no listing page until this runs."""
+    from scripts.recompute_property_stats import run_incremental_pass
+
+    conn = _FakeConn(script=_lock_script(acquired=True))
+    stats = run_incremental_pass(conn, batch_size=500)
+    assert stats["skipped"] is False
+    assert "estimations_bound" in stats
+    found = _find(conn, "UPDATE estimation_runs")
+    assert found is not None, "late-binding UPDATE did not run"
+    sql = found[0]
+    assert "SET input_listing_id = cand.listing_id" in sql
+    # One-way and idempotent: the IS NULL guard is repeated in the UPDATE's own
+    # WHERE, not only in the CTE, so a bound run can never be re-pointed.
+    assert sql.count("er.input_listing_id IS NULL") >= 2
+    # Never stamps a NULL over a NULL.
+    assert "cand.listing_id IS NOT NULL" in sql
+
+
+def test_late_binding_is_not_fuzzy():
+    """A wrong attribution silently credits a paid estimate to the wrong flat,
+    which is strictly worse than leaving it unattached. The resolver matches the
+    unique sreality_id only — no URL arm, no normalisation, no ILIKE, and no
+    ORDER BY ... LIMIT 1 'pick the best' tie-break."""
+    import scripts.recompute_property_stats as rps
+
+    conn = _FakeConn(script=_lock_script(acquired=True))
+    rps.run_incremental_pass(conn, batch_size=500)
+    sql = _find(conn, "UPDATE estimation_runs")[0]
+    assert "l.sreality_id = er.input_sreality_id" in sql
+    for banned in ("ILIKE", "input_url", "similarity(", "lower("):
+        assert banned not in sql, f"late binding must not use {banned}"

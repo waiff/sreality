@@ -23,6 +23,8 @@ from api import tenant_pool
 from scraper import source_dispatcher as sd
 from scraper import url_parser as scraper_url_parser
 
+SYSTEM_ACCOUNT = deps.SYSTEM_ACCOUNT_ID
+
 
 @pytest.fixture()
 def client(monkeypatch):
@@ -966,7 +968,7 @@ def test_list_passes_filters_and_pagination(client, monkeypatch):
     assert captured["offset"] == 20
 
 
-def test_list_sreality_ids_csv_parsed(client, monkeypatch):
+def test_list_listing_ids_csv_parsed(client, monkeypatch):
     captured: dict[str, Any] = {}
 
     def fake_list(conn, **kw):
@@ -976,13 +978,79 @@ def test_list_sreality_ids_csv_parsed(client, monkeypatch):
 
     monkeypatch.setattr(api_main, "list_estimation_runs", fake_list)
 
-    res = client.get("/estimations?sreality_ids=11,%2022,x,33,")
+    res = client.get("/estimations?listing_ids=11,%2022,33")
     assert res.status_code == 200
-    assert captured["sreality_ids"] == [11, 22, 33]
+    assert captured["listing_ids"] == [11, 22, 33]
 
+    # ABSENT means "no listing filter" — the only case that may omit the predicate.
     res = client.get("/estimations")
     assert res.status_code == 200
-    assert captured["sreality_ids"] is None
+    assert captured["listing_ids"] is None
+
+
+def test_list_listing_ids_fails_closed_when_supplied_but_empty(client, monkeypatch):
+    """The regression this endpoint shipped with: `ids[:50] or None` turned an
+    empty parse into "no filter" and paged the WHOLE table. Supplied-but-empty
+    must be a loud 400, never a silent unfiltered read. `[null].join(',')` in the
+    SPA produced exactly this request."""
+    called: dict[str, Any] = {}
+    monkeypatch.setattr(
+        api_main, "list_estimation_runs",
+        lambda conn, **kw: called.update(kw) or {
+            "data": [], "total": 0, "limit": 50, "offset": 0,
+        },
+    )
+
+    for qs in ("listing_ids=", "listing_ids=,", "listing_ids=%20,%20"):
+        res = client.get(f"/estimations?{qs}")
+        assert res.status_code == 400, qs
+        assert "listing_ids" in res.json()["detail"]
+    assert called == {}, "the query must never run for an empty id set"
+
+
+def test_list_rejects_the_retired_sreality_ids_param(client, monkeypatch):
+    """FastAPI silently DROPS undeclared query params, so simply renaming the
+    parameter would have moved the fail-open rather than closed it: a stale SPA
+    bundle (Railway deploys on merge; an open tab keeps its cached chunk) sends
+    ?sreality_ids=<csv> and would have received an unfiltered page, rendering
+    another property's valuation as this listing's. It is declared purely to be
+    rejected."""
+    called: dict[str, Any] = {}
+    monkeypatch.setattr(
+        api_main, "list_estimation_runs",
+        lambda conn, **kw: called.update(kw) or {
+            "data": [], "total": 0, "limit": 50, "offset": 0,
+        },
+    )
+    res = client.get("/estimations?sreality_ids=11,22&limit=100")
+    assert res.status_code == 400
+    assert "listing_ids" in res.json()["detail"]
+    assert called == {}, "the query must never run for the retired param"
+
+
+def test_list_helper_emits_predicate_even_for_an_empty_id_list():
+    """Defense in depth below the route: an EMPTY list must still produce
+    `= ANY('{}')` (matching nothing), never a dropped predicate. Truthiness is
+    exactly how the original fail-open was spelled."""
+    conn = _FakeConn(results=[[], (0,)])
+    er.list_estimation_runs(
+        conn, listing_ids=[], limit=5, account_ids=[SYSTEM_ACCOUNT],
+    )
+    list_sql, list_params = conn.executions[0]
+    assert "er.input_listing_id = ANY(%(listing_ids)s)" in list_sql
+    assert list_params["listing_ids"] == []
+
+
+def test_list_listing_ids_rejects_garbage_instead_of_dropping_it(client, monkeypatch):
+    """A non-integer id used to be silently skipped, so `listing_ids=x` narrowed
+    to nothing and then failed open. Unparseable input is a 400."""
+    monkeypatch.setattr(
+        api_main, "list_estimation_runs",
+        lambda conn, **kw: {"data": [], "total": 0, "limit": 50, "offset": 0},
+    )
+    res = client.get("/estimations?listing_ids=11,x,33")
+    assert res.status_code == 400
+    assert "listing_ids" in res.json()["detail"]
 
 
 def test_list_default_limit_50_offset_0(client, monkeypatch):
@@ -1051,8 +1119,12 @@ class _FakeConn:
 
 
 def test_list_no_filters_builds_naked_sql():
+    """No FILTERS requested still carries the account predicate — scoping is not
+    a filter the caller can decline. Only the optional predicates are absent."""
     conn = _FakeConn(results=[[], (0,)])
-    res = er.list_estimation_runs(conn, limit=20, offset=5)
+    res = er.list_estimation_runs(
+        conn, limit=20, offset=5, account_ids=[SYSTEM_ACCOUNT],
+    )
     assert res == {
         "data": [], "total": 0, "limit": 20, "offset": 5, "next_cursor": None,
     }
@@ -1070,15 +1142,54 @@ def test_list_no_filters_builds_naked_sql():
     assert "LIMIT %(limit)s OFFSET %(offset)s" in list_sql
     assert "cost_usd_total" in list_sql
     assert "FROM llm_calls WHERE estimation_run_id = er.id" in list_sql
-    assert list_params == {"limit": 20, "offset": 5}
-    assert count_params == {}
+    assert list_params == {
+        "limit": 20, "offset": 5, "account_ids": [SYSTEM_ACCOUNT],
+    }
+    assert count_params == {"account_ids": [SYSTEM_ACCOUNT]}
+
+
+def test_account_predicate_lands_in_both_list_and_count_sql():
+    """The scope must ride `filter_sql`, which feeds the count(*) too. A predicate
+    added only to the page query would leak the true CROSS-ACCOUNT total while
+    showing a scoped page."""
+    conn = _FakeConn(results=[[], (0,)])
+    er.list_estimation_runs(conn, limit=5, account_ids=["acct-a", SYSTEM_ACCOUNT])
+    list_sql, list_params = conn.executions[0]
+    count_sql, count_params = conn.executions[1]
+    pred = "er.account_id = ANY(%(account_ids)s::uuid[])"
+    assert pred in list_sql
+    assert pred in count_sql
+    assert list_params["account_ids"] == ["acct-a", SYSTEM_ACCOUNT]
+    assert count_params["account_ids"] == ["acct-a", SYSTEM_ACCOUNT]
+
+
+def test_list_rejects_empty_account_scope():
+    """An empty scope must never mean "everything" — the defect class this whole
+    change exists to delete."""
+    conn = _FakeConn(results=[[], (0,)])
+    with pytest.raises(ValueError):
+        er.list_estimation_runs(conn, limit=5, account_ids=[])
+    assert conn.executions == []
+
+
+def test_list_listing_ids_predicate_keys_on_surrogate_only():
+    """No legacy fallback arm: input_sreality_id is NULL for every post-Gate-2
+    non-sreality subject, so an OR arm on it can only re-admit the wrong rows."""
+    conn = _FakeConn(results=[[], (0,)])
+    er.list_estimation_runs(
+        conn, listing_ids=[501, 502], account_ids=[SYSTEM_ACCOUNT],
+    )
+    list_sql, list_params = conn.executions[0]
+    assert "er.input_listing_id = ANY(%(listing_ids)s)" in list_sql
+    assert "er.input_sreality_id = ANY(" not in list_sql
+    assert list_params["listing_ids"] == [501, 502]
 
 
 def test_list_with_filters_builds_where_clause():
     conn = _FakeConn(results=[[], (3,)])
     er.list_estimation_runs(
         conn, source="ui", status="success",
-        sreality_id=12345, limit=50, offset=0,
+        sreality_id=12345, limit=50, offset=0, account_ids=[SYSTEM_ACCOUNT],
     )
     list_sql, list_params = conn.executions[0]
     assert "er.source = %(source)s" in list_sql
@@ -1091,7 +1202,7 @@ def test_list_with_filters_builds_where_clause():
 
 def test_list_filters_by_source_kind():
     conn = _FakeConn(results=[[], (0,)])
-    er.list_estimation_runs(conn, source_kind="bezrealitky")
+    er.list_estimation_runs(conn, source_kind="bezrealitky", account_ids=[SYSTEM_ACCOUNT])
     list_sql, list_params = conn.executions[0]
     assert "er.source_kind = %(source_kind)s" in list_sql
     assert list_params["source_kind"] == "bezrealitky"
@@ -1104,7 +1215,7 @@ def test_list_join_prefers_input_listing_id():
     input_listing_id correctly resolves). The sreality_id branch stays as the
     fallback for rows written before input_listing_id was stamped (#914)."""
     conn = _FakeConn(results=[[], (0,)])
-    er.list_estimation_runs(conn, limit=1)
+    er.list_estimation_runs(conn, limit=1, account_ids=[SYSTEM_ACCOUNT])
     list_sql, _ = conn.executions[0]
     assert "l.id = er.input_listing_id" in list_sql
     assert (
@@ -1674,8 +1785,9 @@ def test_post_with_sreality_id_and_url_returns_422(client):
 def test_latest_by_listing_route_parses_csv(client, monkeypatch):
     captured: dict[str, Any] = {}
 
-    def fake(conn, ids):
+    def fake(conn, ids, *, account_ids):
         captured["ids"] = list(ids)
+        captured["account_ids"] = list(account_ids)
         return {
             1: {
                 "sreality_id": 1, "run_id": 7, "status": "success",
@@ -1690,6 +1802,9 @@ def test_latest_by_listing_route_parses_csv(client, monkeypatch):
     assert res.status_code == 200
     body = res.json()
     assert captured["ids"] == [1, 2, 3]
+    # The Browse chip read is account-scoped too; the static test token is not
+    # an identity, so it resolves to the SYSTEM cohort.
+    assert captured["account_ids"] == [SYSTEM_ACCOUNT]
     # JSON object keys are strings
     assert body["estimates"]["1"]["gross_yield_pct"] == 4.2
     assert body["estimates"]["1"]["run_id"] == 7
@@ -1706,7 +1821,9 @@ def test_latest_by_listing_route_parses_csv(client, monkeypatch):
 
 def test_latest_rent_estimations_by_listing_query_prefers_listing_id():
     conn = _FakeConn(results=[[]])
-    er.latest_rent_estimations_by_listing(conn, [12345])
+    er.latest_rent_estimations_by_listing(
+        conn, [12345], account_ids=[SYSTEM_ACCOUNT],
+    )
     sql, params = conn.executions[0]
     assert "er.input_listing_id = l.id" in sql
     assert (
@@ -1716,6 +1833,10 @@ def test_latest_rent_estimations_by_listing_query_prefers_listing_id():
     assert "FROM listings l" in sql
     assert "JOIN estimation_runs er" in sql
     assert params["ids"] == [12345]
+    # The chip is account-scoped BEFORE DISTINCT ON picks, so it can never
+    # select a hidden row and then blank it.
+    assert "er.account_id = ANY(%(account_ids)s::uuid[])" in sql
+    assert params["account_ids"] == [SYSTEM_ACCOUNT]
 
 
 def test_latest_rent_estimations_by_listing_maps_row_to_dict():
@@ -1725,7 +1846,9 @@ def test_latest_rent_estimations_by_listing_maps_row_to_dict():
             datetime(2026, 7, 23, 10, 0, tzinfo=timezone.utc),
         ),
     ]])
-    out = er.latest_rent_estimations_by_listing(conn, [12345])
+    out = er.latest_rent_estimations_by_listing(
+        conn, [12345], account_ids=[SYSTEM_ACCOUNT],
+    )
     assert out == {
         12345: {
             "sreality_id": 12345,
@@ -1741,7 +1864,9 @@ def test_latest_rent_estimations_by_listing_maps_row_to_dict():
 
 def test_latest_rent_estimations_by_listing_empty_ids_skips_query():
     conn = _FakeConn()
-    assert er.latest_rent_estimations_by_listing(conn, []) == {}
+    assert er.latest_rent_estimations_by_listing(
+        conn, [], account_ids=[SYSTEM_ACCOUNT],
+    ) == {}
     assert conn.executions == []
 
 

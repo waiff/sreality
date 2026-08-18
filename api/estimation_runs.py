@@ -1255,11 +1255,12 @@ def list_estimation_runs(
     source: str | None = None,
     status: str | None = None,
     sreality_id: int | None = None,
-    sreality_ids: list[int] | None = None,
+    listing_ids: list[int] | None = None,
     source_kind: str | None = None,
     limit: int = 50,
     offset: int = 0,
     cursor: str | None = None,
+    account_ids: list[str],
 ) -> dict[str, Any]:
     """Newest-first list, KEYSET-paginated on (created_at, id) DESC.
 
@@ -1267,9 +1268,26 @@ def list_estimation_runs(
     next page. `offset` remains for any legacy caller (used only when no
     cursor is given). `total` is computed once — on the first page — and is
     null on cursor'd pages (it doesn't change as you scroll).
+
+    `account_ids` is REQUIRED and has no default on purpose: a caller that
+    forgets it raises TypeError at the call site rather than silently reading
+    across every account (this endpoint had no account predicate at all until
+    the subject-identity cutover, and ran on the RLS-bypassing service-role
+    connection).
     """
     where: list[str] = []
     params: dict[str, Any] = {}
+    if not account_ids:
+        raise ValueError("account_ids must be a non-empty read scope")
+    # Mirrors the estimation_runs_tenant_read policy (migration 291) instead of
+    # restating tenancy: the caller's account(s) OR SYSTEM, which owns every
+    # pre-multi-tenancy run and every watchdog-produced run (api/notifications.py
+    # writes no account_id, so migration 291's DEFAULT applies). The policy's
+    # third arm (account_id IS NULL AND is_platform_admin()) is deliberately not
+    # reproduced — NULL is reachable only via `on delete set null`, and there is
+    # no is_platform_admin() equivalent on this connection.
+    where.append("er.account_id = ANY(%(account_ids)s::uuid[])")
+    params["account_ids"] = list(account_ids)
     if source is not None:
         where.append("er.source = %(source)s")
         params["source"] = source
@@ -1279,11 +1297,22 @@ def list_estimation_runs(
     if sreality_id is not None:
         where.append("er.input_sreality_id = %(sreality_id)s")
         params["sreality_id"] = sreality_id
-    if sreality_ids:
-        # Property-grain fetch: every run on any of the property's child
-        # listings (the Listing Detail estimations section).
-        where.append("er.input_sreality_id = ANY(%(sreality_ids)s)")
-        params["sreality_ids"] = sreality_ids
+    if listing_ids is not None:
+        # `is not None`, never truthiness: an EMPTY list must still emit the
+        # predicate (matching nothing) rather than silently dropping it. The
+        # truthiness spelling is exactly how the fail-open shipped.
+        # Property-grain fetch keyed ONLY on the surrogate listings.id: every run
+        # on any of the property's child listings (the Listing Detail estimations
+        # section). The legacy input_sreality_id is NULL for every post-Gate-2
+        # non-sreality subject — migration 311's sign check makes a positive
+        # sreality_id impossible off sreality — so keying on it silently dropped
+        # those subjects, and an empty id set collapsed to "no filter at all".
+        # A run whose input_listing_id is still NULL belongs to no known listing
+        # and correctly appears under none; the late-binding resolver
+        # (scripts/recompute_property_stats._bind_pending_estimation_listing_ids)
+        # stamps it once its listing is scraped.
+        where.append("er.input_listing_id = ANY(%(listing_ids)s)")
+        params["listing_ids"] = listing_ids
     if source_kind is not None:
         where.append("er.source_kind = %(source_kind)s")
         params["source_kind"] = source_kind
@@ -1553,7 +1582,7 @@ def _match_listing_by_id(
 
 
 def latest_rent_estimations_by_listing(
-    conn: "psycopg.Connection", sreality_ids: list[int],
+    conn: "psycopg.Connection", sreality_ids: list[int], *, account_ids: list[str],
 ) -> dict[int, dict[str, Any]]:
     """Latest RENT estimation_runs row per listing id (any status), for the
     Browse cards' on-card estimate chip. Returns {sreality_id: {...}}; ids with
@@ -1564,9 +1593,23 @@ def latest_rent_estimations_by_listing(
     `input_sreality_id` only for rows written before that column was
     stamped (#914) — a run's input_sreality_id staying unmatched while its
     input_listing_id correctly resolves would otherwise silently drop it
-    from a sreality-keyed caller's result."""
+    from a sreality-keyed caller's result.
+
+    STILL SREALITY-KEYED ON PURPOSE. Browse's estimate chip is sreality-keyed
+    end to end — the cards' id list, the estimate-state map, the pending-poll
+    set, and `createEstimation({sreality_id})` itself. Re-keying only this read
+    would produce a read path that can find estimates the Browse write path can
+    never create for the same card. Making Browse able to estimate a
+    non-sreality listing is its own cutover; until then a NULL-sreality card
+    correctly shows no chip.
+
+    `account_ids` is REQUIRED and has no default: same reasoning as
+    list_estimation_runs — this ran unscoped on the service-role connection.
+    """
     if not sreality_ids:
         return {}
+    if not account_ids:
+        raise ValueError("account_ids must be a non-empty read scope")
     ids = [int(x) for x in sreality_ids]
     with conn.cursor() as cur:
         cur.execute(
@@ -1578,8 +1621,11 @@ def latest_rent_estimations_by_listing(
             "  ON er.input_listing_id = l.id "
             "  OR (er.input_listing_id IS NULL AND er.input_sreality_id = l.sreality_id) "
             "WHERE l.sreality_id = ANY(%(ids)s) AND er.estimate_kind = 'rent' "
+            # Scoped before DISTINCT ON picks, so the chip shows the newest run
+            # the caller may actually see — never a hidden row blanked after the fact.
+            "  AND er.account_id = ANY(%(account_ids)s::uuid[]) "
             "ORDER BY l.sreality_id, er.created_at DESC",
-            {"ids": ids},
+            {"ids": ids, "account_ids": list(account_ids)},
         )
         rows = cur.fetchall()
     out: dict[int, dict[str, Any]] = {}

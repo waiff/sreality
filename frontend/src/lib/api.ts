@@ -161,7 +161,10 @@ async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
   const url = new URL(BASE_URL + path);
   if (query) {
     for (const [k, v] of Object.entries(query)) {
-      if (v == null) continue;
+      /* Drop nullish AND empty-string values. An empty string is not a filter —
+       * sending `?listing_ids=` once meant "no filter" server-side and paged the
+       * whole table. No surface may emit a meaningless parameter. */
+      if (v == null || v === '') continue;
       if (Array.isArray(v)) {
         for (const item of v as readonly QueryScalar[]) {
           if (item != null) url.searchParams.append(k, String(item));
@@ -332,6 +335,9 @@ export const listEstimations = (
 ): Promise<EstimationListResponse> =>
   request<EstimationListResponse>('/estimations', {
     query: params as Record<string, QueryValue>,
+    /* Account-scoped read (deps.account_scope): the static token is not an
+     * identity, so it would narrow the operator to SYSTEM-owned runs only. */
+    jwt: true,
   });
 
 /* GET /estimations/latest-by-listing — latest rent estimate per listing id,
@@ -345,7 +351,7 @@ export const latestEstimationsByListing = (
     ? Promise.resolve({})
     : request<{ estimates: Record<number, ListingEstimate> }>(
         '/estimations/latest-by-listing',
-        { query: { sreality_ids: ids.join(',') }, signal },
+        { query: { sreality_ids: ids.join(',') }, signal, jwt: true },
       ).then((r) => r.estimates);
 
 /* POST /listings/summaries — batch wrapper around the

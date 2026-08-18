@@ -51,8 +51,11 @@ export default function EstimationsBlock({
   prefill,
 }: {
   listing: ListingPublic;
-  /* Every child listing of the property (falls back to just this listing
-   * until property sources load) — runs are fetched property-grain. */
+  /* Every child listing of the property as SURROGATE listings.id values (falls
+   * back to just this listing until property sources load) — runs are fetched
+   * property-grain. Never sreality_id: that is NULL for every non-sreality
+   * listing, and an array holding one null used to serialize to an empty query
+   * param, which the API read as "no filter" and answered with the whole table. */
   listingIds: number[];
   /* The PROPERTY-grain MF (golden record, migration 257). Preferred over the
    * subject advert's per-listing mf_* so every portal's advert of one flat
@@ -76,7 +79,10 @@ export default function EstimationsBlock({
   const runsQ = useQuery<EstimationListResponse, Error>({
     queryKey: estimationKeys.byListing(ids),
     queryFn: () => fetchEstimationsForListings(ids),
-    enabled: ids.length > 0,
+    /* Number.isFinite screens null/undefined/NaN: a non-empty array of junk
+     * ids must never reach the wire, where it would serialize to an empty
+     * value rather than a filter. */
+    enabled: ids.length > 0 && ids.every((n) => Number.isFinite(n)),
     staleTime: 15_000,
     refetchInterval: (q) => {
       const rows = q.state.data?.data ?? [];
