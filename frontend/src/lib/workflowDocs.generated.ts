@@ -2580,7 +2580,12 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "description": "Deterministic extraction of location claims from `listings.raw_json`, all nine sources (design 06-migration-backfill.md §6.2.1). No model, no network, no re-fetch: it reads the payloads the scraper already persists and writes `location_claims` (+ observations, absences, refetch cohort) with the §6.1.2 licence ladder applied at the INPUT.",
     "portal": null,
     "manual": true,
-    "schedules": [],
+    "schedules": [
+      {
+        "cron": "35 * * * *",
+        "human": "Every hour at :35"
+      }
+    ],
     "onPush": false,
     "onPullRequest": false,
     "paths": null,
@@ -3324,7 +3329,12 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "description": "The steady-state resolution lane of the location subsystem (design 03 §3.14.1). Without it a newly scraped listing gets claims and never gets a resolution — no row in listing_location_current, invisible to Browse, map, watchdog and dedup.",
     "portal": null,
     "manual": true,
-    "schedules": [],
+    "schedules": [
+      {
+        "cron": "*/15 * * * *",
+        "human": "Every 15 minutes"
+      }
+    ],
     "onPush": false,
     "onPullRequest": false,
     "paths": null,
