@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type CSSProperties } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   getNewDedupLabelingOverview,
@@ -22,11 +22,13 @@ import { pushToast } from '@/lib/toast';
 import Tabs from '@/components/Tabs';
 import ImageTagBadge from '@/components/ImageTagBadge';
 import ImageLightbox from '@/components/ImageLightbox';
+import ImageSizeToggle from '@/components/ImageSizeToggle';
 import Spinner from '@/components/Spinner';
 import TaxonomyManageModal from '@/components/TaxonomyManageModal';
 import LabelCombobox, { type LabelOption } from '@/components/LabelCombobox';
 import { Chevron, useCollapsed } from '@/components/settings/SectionChrome';
 import { CATEGORY_MAIN_TABS } from '@/lib/categoryMainTabs';
+import { usePersistedFlag } from '@/lib/persistedFlag';
 import type { ImagePublic } from '@/lib/types';
 
 const OVERVIEW_KEY = ['new-dedup', 'labeling', 'overview'];
@@ -45,6 +47,21 @@ const STATUS_TABS: ReadonlyArray<{ key: TabKey; label: string }> = [
 ];
 
 type ProposalsPage = { data: NewDedupLabelProposal[] };
+
+/* Photo size for the review grid, remembered per browser. Its OWN key, not
+ * Browse's: the two grids show different things at different densities, and
+ * resizing tiles here must never reshape the listing cards there. */
+const IMAGE_LARGE_KEY = 'sreality.newDedupLabeling.imageLarge';
+
+/* The two --tile-min values a review tile can be. "large" is exactly double
+ * "small" — the same rule Browse's cards follow (CARD_IMAGE_MIN) — so the
+ * shared small/large switch means the same thing on both pages. "small" is
+ * today's density: against this page's own max-w-5xl a 14rem track floor
+ * flows to the same four columns the fixed md:grid-cols-4 gave, and it
+ * degrades to 3/2/1 on narrower windows instead of cramming four in. The
+ * tile's aspect-[4/3] frame is untouched, so doubling the width doubles the
+ * photo; the fixed-rem buttons and tag picker below it do not change. */
+const TILE_MIN = { sm: '14rem', lg: '28rem' } as const;
 
 /* One key shape for everything the page holds per TILE — the staged tag edit,
  * the in-flight action, the lightbox position. It is label_proposals' own PK:
@@ -66,6 +83,7 @@ export default function NewDedupLabeling() {
   const [manageOpen, setManageOpen] = useState(false);
   const [tab, setTab] = useState<TabKey>('pending');
   const [showOriginal, setShowOriginal] = useState(false);
+  const imageLarge = usePersistedFlag(IMAGE_LARGE_KEY, false);
   const [selected, setSelected] = useState<ReadonlySet<number>>(new Set());
   // confirmMut/dismissMut below are ONE shared mutation instance for the
   // whole grid — TanStack Query's observer only ever reflects the MOST
@@ -607,13 +625,22 @@ export default function NewDedupLabeling() {
       <section className="mt-8">
         <div className="flex items-center justify-between flex-wrap gap-3">
           <Tabs tabs={STATUS_TABS} active={tab} onChange={setTab} />
-          <div className="flex items-center gap-1">
-            <ToggleButton active={!showOriginal} onClick={() => setShowOriginal(false)}>
-              New tag
-            </ToggleButton>
-            <ToggleButton active={showOriginal} onClick={() => setShowOriginal(true)}>
-              Original tag
-            </ToggleButton>
+          <div className="flex items-center gap-2 flex-wrap">
+            <div className="flex items-center gap-1">
+              <ToggleButton active={!showOriginal} onClick={() => setShowOriginal(false)}>
+                New tag
+              </ToggleButton>
+              <ToggleButton active={showOriginal} onClick={() => setShowOriginal(true)}>
+                Original tag
+              </ToggleButton>
+            </div>
+            <ImageSizeToggle
+              large={imageLarge.value}
+              onChange={imageLarge.set}
+              label="Review grid image size"
+              smallTitle="Smaller photos, more per screen"
+              largeTitle="Bigger photos — judge a tag without opening it"
+            />
           </div>
         </div>
 
@@ -698,7 +725,10 @@ export default function NewDedupLabeling() {
           </p>
         )}
 
-        <div className="mt-4 grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
+        <div
+          className="mt-4 grid gap-3 grid-cols-[repeat(auto-fill,minmax(min(var(--tile-min),100%),1fr))]"
+          style={{ '--tile-min': imageLarge.value ? TILE_MIN.lg : TILE_MIN.sm } as CSSProperties}
+        >
           {proposals.map((p) => (
             <ProposalTile
               key={`${p.image_id}:${p.model}`}

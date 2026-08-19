@@ -318,6 +318,42 @@ describe('<NewDedupLabeling>', () => {
     await waitFor(() => expect(screen.getByText('kuchyně')).toBeInTheDocument());
   });
 
+  it('resizes the review grid from the shared small/large switch, and remembers the choice', async () => {
+    const { container, unmount } = renderPage();
+    await screen.findByRole('button', { name: 'Open photo 101' });
+    const grid = () => container.querySelector('[style*="--tile-min"]') as HTMLElement;
+
+    // jsdom does no layout, so the assertable contract is the one custom
+    // property the grid's track floor is defined by — the same single
+    // definition point Browse's cards use (CARD_IMAGE_MIN / --card-min).
+    expect(grid().style.getPropertyValue('--tile-min')).toBe('14rem');
+
+    fireEvent.click(screen.getByRole('button', { name: /Large/ }));
+    await waitFor(() => expect(grid().style.getPropertyValue('--tile-min')).toBe('28rem'));
+
+    // A workspace preference, not part of the view — it survives a reload
+    // rather than resetting every time the page is opened.
+    unmount();
+    const second = renderPage();
+    await screen.findByRole('button', { name: 'Open photo 101' });
+    expect(
+      (second.container.querySelector('[style*="--tile-min"]') as HTMLElement).style.getPropertyValue(
+        '--tile-min',
+      ),
+    ).toBe('28rem');
+  });
+
+  it('keeps the image-size choice out of Browse\'s own preference', async () => {
+    renderPage();
+    await screen.findByRole('button', { name: 'Open photo 101' });
+    fireEvent.click(screen.getByRole('button', { name: /Large/ }));
+    await waitFor(() =>
+      expect(localStorage.getItem('sreality.newDedupLabeling.imageLarge')).toBe('1'),
+    );
+    // Sizing tiles here must never reshape the listing cards on Browse.
+    expect(localStorage.getItem('sreality.browse.cardImageLarge')).toBeNull();
+  });
+
   it('enlarges a tile in the shared lightbox, badged with the tag the tile itself shows', async () => {
     renderPage();
     fireEvent.click(await screen.findByRole('button', { name: 'Open photo 101' }));

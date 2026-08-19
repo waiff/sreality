@@ -1,13 +1,16 @@
 import { useCallback, useRef, useState } from 'react';
 
+import { usePersistedFlag, type PersistedFlag } from '@/lib/persistedFlag';
+
 /* Persisted layout preferences for the Browse page. The three columns are the
  * filter sidebar (column 1) and, on the Listings/map tab, the cards list
  * (column 2) and the map (column 3). The operator can drag the two dividers
  * between them, and collapse the map away entirely; we remember the result
  * per-browser in localStorage so the layout survives a reload. The card
  * image size (small/large) is the same kind of per-browser display
- * preference — not a column, but sharing the boolean-flag machinery below —
- * so it lives here too rather than starting a second persistence module.
+ * preference — not a column — so Browse's key for it lives here too; the
+ * boolean-flag machinery itself is `@/lib/persistedFlag`, shared with the
+ * surfaces outside Browse that keep the same kind of preference.
  *
  * These are workspace preferences, NOT part of the shareable view (the URL).
  * A `/browse?…` link carries the cohort + overlays; the recipient still sees
@@ -56,24 +59,6 @@ function readNumber(key: string, fallback: number, min: number, max: number): nu
 function writeNumber(key: string, value: number): void {
   try {
     localStorage.setItem(key, String(value));
-  } catch {
-    /* ignore */
-  }
-}
-
-export function readFlag(key: string, fallback: boolean): boolean {
-  try {
-    const raw = localStorage.getItem(key);
-    if (raw != null) return raw === '1';
-  } catch {
-    /* localStorage may be unavailable (SSR, private mode lockdown) — fall through */
-  }
-  return fallback;
-}
-
-function writeFlag(key: string, value: boolean): void {
-  try {
-    localStorage.setItem(key, value ? '1' : '0');
   } catch {
     /* ignore */
   }
@@ -129,33 +114,10 @@ export const useSidebarWidth = (): PersistedWidth =>
 export const useMapSplitFraction = (): PersistedWidth =>
   usePersistedWidth(MAP_SPLIT_KEY, MAP_SPLIT_DEFAULT, MAP_SPLIT_MIN, MAP_SPLIT_MAX);
 
-export interface PersistedFlag {
-  value: boolean;
-  /* Set + commit to localStorage in one step (a toggle has no drag, so
-   * unlike PersistedWidth there's no separate live-update / persist split). */
-  set: (v: boolean) => void;
-  toggle: () => void;
-}
-
-function usePersistedFlag(key: string, fallback: boolean): PersistedFlag {
-  const [value, setValue] = useState<boolean>(() => readFlag(key, fallback));
-  const set = useCallback(
-    (v: boolean) => {
-      setValue(v);
-      writeFlag(key, v);
-    },
-    [key],
-  );
-  const toggle = useCallback(() => {
-    /* Functional update so the callback never closes over a stale value. */
-    setValue((prev) => {
-      const next = !prev;
-      writeFlag(key, next);
-      return next;
-    });
-  }, [key]);
-  return { value, set, toggle };
-}
+/* Re-exported so the existing `@/lib/browseLayout` entry point keeps working
+ * for Browse's own consumers; the machinery itself now lives in
+ * `@/lib/persistedFlag`, shared with the surfaces outside Browse. */
+export { readFlag, type PersistedFlag } from '@/lib/persistedFlag';
 
 /* Whether the operator has folded the map panel away on the Listings tab,
  * giving the cards the full width. Default false (the map shows). */
