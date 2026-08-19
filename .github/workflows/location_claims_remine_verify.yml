@@ -1,0 +1,75 @@
+name: "Jobs: Location history gate check (W3)"
+
+# Read-only. Checks the four arms of the W3 gate against the claims the history backfill
+# actually wrote, and fails the run when any arm fails.
+#
+# Three arms are properties of the extractor and are already held by unit tests. The
+# fourth — a sreality per-listing precision/coordinate time series exists and oscillation
+# is visible in it — is a property of the CORPUS, so no test can show it and only the
+# written claims can. That arm is why this lane exists.
+#
+# Deliberately NOT in the `location-batch` group. That group serialises the heavy lanes
+# against the shared production instance, and it is oversubscribed by its own crons; a
+# read-only aggregate is not a heavy lane, and queueing the audit behind the lane it
+# audits would make it unrunnable. It arms its own statement timeout instead.
+#
+# Shadow-only: nothing here is read by Browse, the API or the extension. Required secret:
+# SUPABASE_DB_URL.
+
+on:
+  workflow_dispatch:
+    inputs:
+      source:
+        description: "portal whose time series is checked"
+        required: false
+        default: sreality
+        type: choice
+        options:
+          - sreality
+          - bezrealitky
+          - bazos
+          - idnes
+          - mmreality
+          - remax
+          - ceskereality
+          - realitymix
+          - maxima
+      sample_listings:
+        description: "how many per-listing series to print for eyeballing (0 = none)"
+        required: false
+        default: "5"
+        type: string
+
+concurrency:
+  # Own group, per the note above: this is a read-only audit, not a heavy lane.
+  group: location-verify
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: pip install -e ".[dev]"
+
+      - name: Check the W3 gate
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          SOURCE: ${{ inputs.source }}
+          SAMPLE_LISTINGS: ${{ inputs.sample_listings }}
+        run: |
+          ARGS="--source ${SOURCE:-sreality}"
+          if [ -n "$SAMPLE_LISTINGS" ]; then ARGS="$ARGS --sample-listings $SAMPLE_LISTINGS"; fi
+          echo "python -m location_data.claims_remine_verify $ARGS"
+          python -m location_data.claims_remine_verify $ARGS
