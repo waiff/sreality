@@ -119,6 +119,29 @@ Session handoff points marked ⛳ (good places to end a session; update the ledg
 
 ## Progress ledger (update every session, newest first)
 
+- 2026-08-19 — **Labeling page: the small/large photo switch, shared with Browse** (operator
+  request: "the same switch as we have on the browse page"). Taken literally — the control was
+  private to `BrowseExperience.tsx`, so it moved to `components/ImageSizeToggle.tsx` and both pages
+  now render the SAME component rather than a copy that can drift.
+  - **Same mechanism, not just the same buttons.** Both grids express the choice as one
+    `--*-min` custom property on the grid wrapper, flowed by `auto-fill minmax(min(var(…),100%),1fr)`,
+    with the large value **exactly double** the small one. On the review grid that is
+    `TILE_MIN` 14rem → 28rem: 14rem reproduces today's density (against the page's own
+    `max-w-5xl` it flows to the same four columns the fixed `md:grid-cols-4` gave) and degrades
+    to 3/2/1 on narrower windows instead of cramming four in; 28rem is two big tiles. The
+    `aspect-[4/3]` frame is untouched, so the photo doubles while the fixed-rem buttons and tag
+    picker below it do not.
+  - **Its own persisted key** (`sreality.newDedupLabeling.imageLarge`), NOT Browse's — resizing
+    tiles here must never reshape the listing cards there. Pinned by a test that asserts Browse's
+    key stays untouched. The boolean-preference machinery moved out of `browseLayout.ts` (a
+    Browse-specific module) into `lib/persistedFlag.ts`; `browseLayout` re-exports `readFlag` so
+    its existing entry point and tests are unchanged.
+  - Tests: first `ImageSizeToggle.test.tsx` (3 — pressed state, sets-a-value-not-toggles, the
+    a11y group label each surface passes) plus 2 on the page (the grid's track floor changes and
+    the choice survives a remount; Browse's key stays clean). Both page tests verified to go red
+    when the flag is de-persisted or the grid ignores it.
+  - Suites: `vitest run` 617 passed (59 files), `tsc --noEmit` clean, `eslint` clean (7 pre-existing
+    warnings elsewhere, none in the touched files).
 - 2026-08-10 — **Labeling page: click a tile to enlarge it** (operator request, pointing at
   /clip-audit as the model). Reuses the SHARED `ImageLightbox` — the one full-screen photo modal
   behind listing detail's gallery and /clip-audit — rather than a second one-off, so keyboard nav,
