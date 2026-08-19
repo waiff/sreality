@@ -54,14 +54,28 @@ DEFAULT_SAMPLE_LISTINGS = 5
 # snapshot hash excluded lat/lon, so their snapshots carry no coordinate to mine).
 SERIES_CLAIM_TYPES = ("coordinate", "precision_declaration")
 
-# Every claim this lane wrote, and nothing else. `snapshot_anchor` alone would be too
-# wide if another wave ever anchors to snapshots; the extractor version pins it to W3.
-# The pattern is BOUND rather than inlined: a literal wildcard in executed SQL is the
-# one thing psycopg's parameter interpolation reliably trips over.
-_VERSION_LIKE = f"{REMINE_VERSION.split('@')[0]}@%"
+# Every claim this lane INSERTED, and nothing else. The anchor is the whole
+# discriminator: `claims_intake._base` stamps 'unanchored_latest_fetch' (or
+# 'unanchored_legacy' off a legacy column) and only `remine_snapshot` re-stamps to
+# 'snapshot', so no other lane can produce this row.
+#
+# Not `extractor_version`: that column carries the CONTRACT's version
+# (`contract:{source}@{version}`) on a claim. REMINE_VERSION rides the batch row and the
+# absence rows, never the claim — so filtering claims by it matches nothing at all.
 _W3_CLAIMS = """
-      c.extractor_version LIKE %(version_like)s
-  AND c.snapshot_anchor = 'snapshot'
+      c.snapshot_anchor = 'snapshot'
+"""
+
+# The time series is scoped on the OBSERVATION, not on the claim's anchor, and the
+# difference is not cosmetic. The fingerprint is time-free, so when a historical value
+# equals one W1 already claimed from the live row, W3 does not insert — it appends an
+# observation to W1's existing claim, which keeps its 'unanchored_latest_fetch' anchor.
+# Scoping the series by the claim anchor would drop exactly those listings: the ones
+# whose history returns to the value they hold today, which is oscillation at its most
+# literal. `snapshot_id IS NOT NULL` is W3-specific in the other direction — the W1
+# intake reads live rows and the W2 archive lane leaves it NULL by construction.
+_W3_OBSERVATIONS = """
+      o.snapshot_id IS NOT NULL
 """
 
 _COVERAGE_SQL = f"""
@@ -102,7 +116,7 @@ _SERIES_SQL = f"""
         SELECT c.listing_id, o.claim_id, o.observed_at, o.seq
         FROM location_claims c
         JOIN location_claim_observations o ON o.claim_id = c.id
-        WHERE {_W3_CLAIMS}
+        WHERE {_W3_OBSERVATIONS}
           AND c.source = %(source)s
           AND c.claim_type = %(claim_type)s
     ),
@@ -140,7 +154,7 @@ _SAMPLE_SQL = f"""
                coalesce(ST_AsText(c.value_geom), c.value_norm, c.value_text) AS value
         FROM location_claims c
         JOIN location_claim_observations o ON o.claim_id = c.id
-        WHERE {_W3_CLAIMS}
+        WHERE {_W3_OBSERVATIONS}
           AND c.source = %(source)s
           AND c.claim_type = %(claim_type)s
     ),
@@ -169,7 +183,7 @@ _BATCHES_SQL = """
 
 
 def _rows(cur: psycopg.Cursor, sql: str, params: dict[str, Any] | None = None) -> list[dict]:
-    cur.execute(sql, {"version_like": _VERSION_LIKE, **(params or {})})
+    cur.execute(sql, params)
     cols = [d.name for d in cur.description or []]
     return [dict(zip(cols, r)) for r in cur.fetchall()]
 

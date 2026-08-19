@@ -6,12 +6,19 @@ that decides PASS from FAIL, because a verifier that cannot fail is not a gate.
 
 from __future__ import annotations
 
-import pytest
+import inspect
 
+from location_data import claims_intake
 from location_data.claims_remine import COORDINATE_HISTORY_SOURCES, W3_HISTORY_COMPLETENESS
 from location_data.claims_remine_verify import (
     SERIES_CLAIM_TYPES,
-    _VERSION_LIKE,
+    _COMPLETENESS_SQL,
+    _COVERAGE_SQL,
+    _LICENCE_SQL,
+    _SAMPLE_SQL,
+    _SERIES_SQL,
+    _W3_CLAIMS,
+    _W3_OBSERVATIONS,
     check_completeness,
     check_licence,
     check_series,
@@ -133,14 +140,37 @@ def test_series_sums_across_claim_types():
     assert result["listings_with_a_series"] == 15
 
 
-def test_the_version_pattern_matches_the_lane_and_not_its_neighbours():
-    """`claims_remine_archive@1` is a DIFFERENT lane sharing the name's prefix."""
-    import re
+def test_claims_are_scoped_by_the_anchor_and_never_by_extractor_version():
+    """A claim's `extractor_version` is the CONTRACT's, not the lane's.
 
-    rx = re.compile("^" + _VERSION_LIKE.replace("%", ".*") + "$")
-    assert rx.match("claims_remine@1")
-    assert rx.match("claims_remine@2")
-    assert not rx.match("claims_intake@1")
+    REMINE_VERSION rides the batch row and the absence rows; filtering claims by it
+    matches nothing, which is exactly how the first production run of this verifier
+    refused with "no snapshot-anchored claims" against a fully mined corpus.
+    """
+    assert "snapshot_anchor = 'snapshot'" in _W3_CLAIMS
+    assert "extractor_version" not in _W3_CLAIMS
+    for sql in (_COVERAGE_SQL, _COMPLETENESS_SQL, _LICENCE_SQL):
+        assert "extractor_version" not in sql
+
+
+def test_the_series_is_scoped_on_the_observation_not_on_the_claim_anchor():
+    """The series must survive a historical value that equals the one W1 already claimed.
+
+    That claim keeps its 'unanchored_latest_fetch' anchor and receives a W3 observation,
+    so anchoring the series on the CLAIM would drop precisely the listings whose history
+    returns to today's value — oscillation at its most literal.
+    """
+    assert "o.snapshot_id IS NOT NULL" in _W3_OBSERVATIONS
+    for sql in (_SERIES_SQL, _SAMPLE_SQL):
+        assert "o.snapshot_id IS NOT NULL" in sql
+        assert "snapshot_anchor" not in sql
+
+
+def test_only_remine_stamps_the_snapshot_anchor():
+    """The discriminator holds only while the intake never writes 'snapshot'."""
+    src = inspect.getsource(claims_intake._base)
+    assert "unanchored_latest_fetch" in src
+    assert "'snapshot'" not in src
 
 
 def test_series_claim_types_are_the_two_that_carry_geometry_and_precision():
