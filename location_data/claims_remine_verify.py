@@ -107,13 +107,22 @@ _LICENCE_SQL = f"""
 
 # Oscillation, defined on the observation series rather than on claim counts. The claim
 # fingerprint is time-free, so one claim row IS one distinct value and its observations
-# are the times that value was seen. Compress the per-listing series into runs of a
-# constant value: `changes` is how many times the value moved, and `returns` counts a
-# value that starts more than one run — a value that came back after being replaced,
-# which is oscillation proper rather than a one-time correction.
+# are the times that value was seen. Compress the series into runs of a constant value:
+# `changes` is how many times the value moved, and `returns` counts a value that starts
+# more than one run — a value that came back after being replaced, which is oscillation
+# proper rather than a one-time correction.
+#
+# The series is per (listing, CONTRACT ENTRY), not per listing. A claim_type can be
+# emitted by more than one entry — sreality declares two for `precision_declaration` and
+# one for `coordinate` — and those entries write distinct claims sharing one
+# `observed_at`. Partitioning by listing alone interleaves them, so the run compression
+# reads A,B,A,B,... and calls every step a change. That is not a small distortion: it
+# reported 165,706 of 165,708 sreality listings as oscillating, an artifact of the
+# ordering rather than a fact about the corpus. Roll up to the listing with max() at the
+# end, so a listing counts as moved when ANY of its entry-series moved.
 _SERIES_SQL = f"""
     WITH obs AS (
-        SELECT c.listing_id, o.claim_id, o.observed_at, o.seq
+        SELECT c.listing_id, c.contract_entry_id, o.claim_id, o.observed_at, o.seq
         FROM location_claims c
         JOIN location_claim_observations o ON o.claim_id = c.id
         WHERE {_W3_OBSERVATIONS}
@@ -121,21 +130,26 @@ _SERIES_SQL = f"""
           AND c.claim_type = %(claim_type)s
     ),
     ordered AS (
-        SELECT listing_id, claim_id,
-               lag(claim_id) OVER (PARTITION BY listing_id ORDER BY observed_at, seq)
-                 AS prev_claim
+        SELECT listing_id, contract_entry_id, claim_id,
+               lag(claim_id) OVER (PARTITION BY listing_id, contract_entry_id
+                                   ORDER BY observed_at, seq) AS prev_claim
         FROM obs
     ),
     run_starts AS (
-        SELECT listing_id, claim_id
+        SELECT listing_id, contract_entry_id, claim_id
         FROM ordered
         WHERE prev_claim IS NULL OR prev_claim <> claim_id
     ),
-    per_listing AS (
-        SELECT listing_id,
+    per_series AS (
+        SELECT listing_id, contract_entry_id,
                count(*) - 1 AS changes,
                count(*) - count(DISTINCT claim_id) AS returns
         FROM run_starts
+        GROUP BY listing_id, contract_entry_id
+    ),
+    per_listing AS (
+        SELECT listing_id, max(changes) AS changes, max(returns) AS returns
+        FROM per_series
         GROUP BY listing_id
     )
     SELECT count(*) AS listings,
@@ -150,7 +164,7 @@ _SERIES_SQL = f"""
 # counted. Ordered by how much the value moved, because a flat series proves nothing.
 _SAMPLE_SQL = f"""
     WITH obs AS (
-        SELECT c.listing_id, o.claim_id, o.observed_at, o.seq,
+        SELECT c.listing_id, c.contract_entry_id, o.claim_id, o.observed_at, o.seq,
                coalesce(ST_AsText(c.value_geom), c.value_norm, c.value_text) AS value
         FROM location_claims c
         JOIN location_claim_observations o ON o.claim_id = c.id
@@ -159,17 +173,18 @@ _SAMPLE_SQL = f"""
           AND c.claim_type = %(claim_type)s
     ),
     picked AS (
-        SELECT listing_id
+        SELECT listing_id, contract_entry_id
         FROM obs
-        GROUP BY listing_id
+        GROUP BY listing_id, contract_entry_id
         HAVING count(DISTINCT claim_id) >= 2
         ORDER BY count(DISTINCT claim_id) DESC, listing_id
         LIMIT %(limit)s
     )
-    SELECT o.listing_id, o.observed_at, o.claim_id, o.value
+    SELECT o.listing_id, o.contract_entry_id, o.observed_at, o.claim_id, o.value
     FROM obs o
     JOIN picked p ON p.listing_id = o.listing_id
-    ORDER BY o.listing_id, o.observed_at, o.seq
+                 AND p.contract_entry_id IS NOT DISTINCT FROM o.contract_entry_id
+    ORDER BY o.listing_id, o.contract_entry_id, o.observed_at, o.seq
 """
 
 _BATCHES_SQL = """
