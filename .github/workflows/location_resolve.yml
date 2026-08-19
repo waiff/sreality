@@ -63,18 +63,32 @@ on:
         required: false
         default: false
         type: boolean
-  schedule:
-    # Steady state: every 15 minutes, `mode=drain` on the cron budget (the env block below
-    # falls back to 600 s / batch 250 when a run carries no dispatch inputs). The queue is a
-    # few hundred newly scraped listings per tick; judge it by oldest-row AGE, not length.
-    #
-    # This cron was REMOVED for the duration of the W1 backfill and restored when the corpus
-    # sweep finished. The reason it had to go, in case a future backfill needs the same move:
-    # the outer `location-batch` group holds ONE pending slot, GitHub supersedes the older
-    # pending entry, and while a driver dispatches back-to-back 55-minute runs the entry a
-    # tick displaces is the driver's own next dispatch. A `*/15` tick added nothing to a
-    # 630 k queue it was draining from the same front — it only took the slot.
-    - cron: "*/15 * * * *"
+  # PAUSED 2026-08-18 — the future backfill the note below anticipated is here. W3's history
+  # backfill has the newest ~534k snapshots left and could not hold a slot: six consecutive
+  # dispatches were superseded while pending, each by a `*/15` tick. Pausing the claim intake
+  # alone (#1100) was not enough — measured over eleven ticks today, a resolve run occupies
+  # the group 11-27 minutes on a 15-minute cadence, so this lane oversubscribes `location-batch`
+  # by itself (only ~1 tick in 3 completes; the rest supersede each other).
+  #
+  # Nothing is lost while paused: the drain works a queue from the front, so the first run
+  # back picks up exactly where this one stopped, with a longer queue and no gap.
+  #
+  # RESTORE by un-commenting the cron once `claims_remine` reports reached_end=true
+  # (`gh run list --workflow=location_claims_remine.yml`), together with the intake cron in
+  # location_claims_intake.yml — both were paused for the same window.
+  #
+  # schedule:
+  #   # Steady state: every 15 minutes, `mode=drain` on the cron budget (the env block below
+  #   # falls back to 600 s / batch 250 when a run carries no dispatch inputs). The queue is a
+  #   # few hundred newly scraped listings per tick; judge it by oldest-row AGE, not length.
+  #   #
+  #   # This cron was REMOVED for the duration of the W1 backfill and restored when the corpus
+  #   # sweep finished. The reason it had to go, in case a future backfill needs the same move:
+  #   # the outer `location-batch` group holds ONE pending slot, GitHub supersedes the older
+  #   # pending entry, and while a driver dispatches back-to-back 55-minute runs the entry a
+  #   # tick displaces is the driver's own next dispatch. A `*/15` tick added nothing to a
+  #   # 630 k queue it was draining from the same front — it only took the slot.
+  #   - cron: "*/15 * * * *"
 
 concurrency:
   # OUTER, cross-lane: shared with the registry load, the claim intake and the Mapy
