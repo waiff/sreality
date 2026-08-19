@@ -2732,6 +2732,54 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/location_claims_remine.yml"
   },
   {
+    "filename": "location_claims_remine_verify.yml",
+    "name": "Jobs: Location history gate check (W3)",
+    "description": "Read-only. Checks the four arms of the W3 gate against the claims the history backfill actually wrote, and fails the run when any arm fails.",
+    "portal": null,
+    "manual": true,
+    "schedules": [],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "source",
+        "description": "portal whose time series is checked",
+        "required": false,
+        "type": "choice",
+        "default": "sreality",
+        "options": [
+          "sreality",
+          "bezrealitky",
+          "bazos",
+          "idnes",
+          "mmreality",
+          "remax",
+          "ceskereality",
+          "realitymix",
+          "maxima"
+        ]
+      },
+      {
+        "name": "sample_listings",
+        "description": "how many per-listing series to print for eyeballing (0 = none)",
+        "required": false,
+        "type": "string",
+        "default": "5",
+        "options": null
+      }
+    ],
+    "secrets": [
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "location-verify",
+    "cancelInProgress": false,
+    "timeoutMinutes": 15,
+    "permissions": "contents: read",
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/location_claims_remine_verify.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/location_claims_remine_verify.yml"
+  },
+  {
     "filename": "location_labelled_sample.yml",
     "name": "Jobs: location labelled-sample draw (06 6.4.0)",
     "description": "DISPATCH-ONLY. Draws the frozen random labelled sample for one portal (migration 399): n >= 100 active listings, uniform random, snapshotting the OLD system's serving values at draw time. The sample MUST be drawn BEFORE that portal's extraction sweep / refetch wave (06 6.4.0: \"drawn before the sweep, randomly\"), and is then hand-labelled by the operator; contract acceptance is precision on this sample, not yield.",
