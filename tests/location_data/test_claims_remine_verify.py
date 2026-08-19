@@ -7,6 +7,7 @@ that decides PASS from FAIL, because a verifier that cannot fail is not a gate.
 from __future__ import annotations
 
 import inspect
+import pathlib
 
 from location_data import claims_intake
 from location_data.claims_remine import COORDINATE_HISTORY_SOURCES, W3_HISTORY_COMPLETENESS
@@ -164,6 +165,36 @@ def test_the_series_is_scoped_on_the_observation_not_on_the_claim_anchor():
     for sql in (_SERIES_SQL, _SAMPLE_SQL):
         assert "o.snapshot_id IS NOT NULL" in sql
         assert "snapshot_anchor" not in sql
+
+
+def test_the_series_is_partitioned_by_contract_entry_not_only_by_listing():
+    """Two entries can emit one claim_type, writing distinct claims at one observed_at.
+
+    sreality declares two entries for BOTH series claim types.
+    Partitioning by listing alone interleaves them, so the run compression reads
+    A,B,A,B,... and calls every step a change — which is how the first passing run
+    reported 165,706 of 165,708 listings as oscillating. An artifact of the ordering,
+    not a fact about the corpus.
+    """
+    for sql in (_SERIES_SQL, _SAMPLE_SQL):
+        assert "contract_entry_id" in sql
+    assert "PARTITION BY listing_id, contract_entry_id" in _SERIES_SQL
+    assert "GROUP BY listing_id, contract_entry_id" in _SERIES_SQL
+
+
+def test_sreality_declares_several_entries_per_series_claim_type():
+    """The premise of the partition fix, pinned against the contract itself.
+
+    BOTH series claim types are multi-entry — the coordinate one too, which the first
+    reading of this contract missed because it grepped only around the precision lines.
+    The low coordinate change-rate in the first passing run was therefore luck (the two
+    coordinate entries rarely fire on one snapshot), not immunity from the artifact.
+    """
+    contract = (
+        pathlib.Path(__file__).resolve().parents[2] / "contracts/portals/sreality.yaml"
+    ).read_text()
+    for claim_type in SERIES_CLAIM_TYPES:
+        assert contract.count(f"claim_type: {claim_type}") > 1, claim_type
 
 
 def test_only_remine_stamps_the_snapshot_anchor():
