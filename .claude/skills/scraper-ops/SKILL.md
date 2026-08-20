@@ -424,15 +424,15 @@ An explicit operator merge LIFTS the suppressions it *brings together* (never de
 pair already co-located — that would erase evidence of a bypass); `POST
 /broker-review/suppressions/{id}/lift` is the manual counterpart and `GET
 /broker-review/suppressions` the ledger. Per-sweep counts land in
-`broker_resolution_runs.suppressed_pairs` (pairs, not merges: the rail blocks before grading) and the
-`RESOLVE full merge done … suppressed=N` log line.
+`broker_resolution_runs.suppressed_pairs` (pairs, not merges: the rail blocks before grading) and
+the `RESOLVE full merge done … suppressed=N` line. Kill switch: `broker_auto_merge_enabled`=false.
 Note the broker sweep axis measures a rotation **lap**, not one run: attribution routinely
 spends its whole `--max-seconds` budget, so `resolve_brokers` carries cumulative coverage in
 `app_settings.broker_sweep_cursor` (`last_id` / `lap_swept` / `lap_started_at`) and stamps
 completion when the lap closes; with no lap closed yet the check ages the OPEN lap, so a
 rotation that never gets round reds instead of parking on the missing-stamp warn.
 The third axis exists because that lap stamp is written right after attribution, ~17-25 min
-BEFORE the tail (cross-source merge, the three rollups, the matview, candidates,
+BEFORE the tail (the auto-merge step, the three rollups, the matview, candidates,
 `_finalize`'s dirty-clear), so a sweep whose tail dies still leaves a minutes-old stamp while
 the leaderboard and rollups silently stop: `broker_finished_{warn,fail}_hours` (30/60) age the
 last full run that actually reached `ended_at`, tighter than the lap's deliberately wide 52/84

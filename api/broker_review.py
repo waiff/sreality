@@ -1,12 +1,11 @@
 """Broker merge-review (Phase 5) — the operator queue + reversible merge/unmerge.
 
-The auto-merge engine only unifies brokers sharing a PERSONAL contact. Corporate /
-developer accounts behind role inboxes + a switchboard have no personal bridge and
-are left apart (name-alone is never auto-merged). This module surfaces those
-"same name + same firm" groups (proposed by the resolver into
-broker_merge_candidates) and lets the operator merge or dismiss them. The sweep's
-cross-source step feeds the same table under reason='contact_bridge_review' — pairs
-that DO share a contact but failed the corroboration guard — so callers segment the
+The auto-merge engine is name-gated and portal-agnostic: it unifies identities whose
+names match AND that either share a discriminating contact (one belonging to a single
+name corpus-wide) or share a firm for a name found at no other firm. Everything it
+cannot prove lands here. `reason='name_firm'` is the same-name-same-firm group whose
+name also exists elsewhere; `reason='contact_bridge_review'` is a same-name pair at
+DIFFERENT firms sharing a contact that belongs to several names. Callers segment the
 queue by `reason` rather than reading one mixed page.
 
 Merges are reversible: every re-pointed identity is logged to broker_merge_events
@@ -17,7 +16,7 @@ the next daily sweep, but a merged loser drops off the leaderboard immediately
 
 Negative decisions are durable too (migration 401). Unmerging a group, and
 dismissing a contact-bridge candidate, write broker_merge_suppressions rows — the
-nightly sweep re-derives its whole candidate set from the contact table and would
+nightly sweep re-derives its whole candidate set from the corpus and would
 otherwise re-apply the very merge the operator just undid. An explicit operator
 merge LIFTS every suppression it covers: the rail gates the auto path only.
 """
@@ -183,18 +182,19 @@ def dismiss_candidate(conn: Any, candidate_id: int, *, resolved_by: str | None =
     """Dismiss a proposal, and for a contact-bridge one also record it as a standing
     NO. Dismissal alone only stops the review row being re-PROPOSED; the auto-merge
     path never consulted it, so the same pair still auto-merged the moment its
-    evidence crossed the corroboration bar (a second bridge value, converging display
-    names, or its source being added to broker_auto_merge_sources).
+    evidence strengthened (the shared contact losing its other names, or the two
+    display names converging on one key).
 
     Only reason='contact_bridge_review' carries identity evidence. A name_firm
-    candidate is a different mechanism (same name + firm, no bridge at all) with no
-    identity ids to key on — it is dismissed and nothing more.
+    candidate is a different mechanism (same name + firm, no shared contact needed)
+    with no identity ids to key on — it is dismissed and nothing more.
 
     The suppression spans the candidate's two BROKERS, not just the identity pair in
     `evidence`: the group key is `contactbridge:{lo}:{hi}` and _queue_review_pairs
     last-write-wins the evidence, so several identity pairs resolving to the same two
-    brokers are ONE card and dismissing it must reject all of them — otherwise the
-    sibling pairs auto-merge the two brokers together anyway. `evidence.identity_ids`
+    brokers are ONE card and dismissing it must reject all of them (same-portal pairs
+    included since 2026-08-20) — otherwise the sibling pairs auto-merge the two
+    brokers together anyway. `evidence.identity_ids`
     stays what it always was: provenance for which pair produced the card.
 
     A pair whose two identities already sit under one broker is skipped (that is what
@@ -220,7 +220,7 @@ def dismiss_candidate(conn: Any, candidate_id: int, *, resolved_by: str | None =
                 cur.execute(_BROKER_COHORT_SQL, {"brokers": brokers})
                 owner, meta = _cohort(cur.fetchall())
             written = _write_suppressions(
-                conn, suppression_pairs(owner, {i: m[0] for i, m in meta.items()}), meta,
+                conn, suppression_pairs(owner), meta,
                 origin="dismiss", candidate_id=candidate_id, created_by=resolved_by)
     return {"id": row["id"], "status": row["status"], "suppressions_written": written}
 
@@ -325,7 +325,7 @@ def unmerge_group(conn: Any, merge_group_id: str, *, undone_by: str | None = Non
         cur.execute(_CURRENT_COHORT_SQL, {"restored": sorted(restored)})
         owner, meta = _cohort(cur.fetchall())
         owner.update({i: prev for i, prev in restored.items() if i in meta})
-        pairs = suppression_pairs(owner, {i: m[0] for i, m in meta.items()})
+        pairs = suppression_pairs(owner)
         written = _write_suppressions(
             conn, pairs, meta, origin="unmerge",
             merge_group_id=merge_group_id, created_by=undone_by)
@@ -333,10 +333,10 @@ def unmerge_group(conn: Any, merge_group_id: str, *, undone_by: str | None = Non
         if restored and not pairs:
             # A silent no-op here is the rail failing open: the merge comes back on
             # the next sweep and the operator is never told why. (Legitimately empty
-            # when every separated pair is same-source — such a pair can never
-            # auto-merge back, so there is nothing to suppress.)
-            note = ("no cross-owner, cross-source identity pair was derived — no "
-                    "suppression recorded for this unmerge")
+            # only when nothing was actually separated — every restored identity
+            # landed back under the broker it already shares with the others.)
+            note = ("no cross-owner identity pair was derived — no suppression "
+                    "recorded for this unmerge")
             LOG.warning("UNMERGE %s restored %d identities but derived 0 suppressions: %s",
                         merge_group_id, len(restored), note)
         cur.execute(
@@ -356,20 +356,23 @@ def unmerge_group(conn: Any, merge_group_id: str, *, undone_by: str | None = Non
             "suppression_note": note}
 
 
-def suppression_pairs(owner: dict[int, int],
-                      source_of: dict[int, str | None]) -> list[tuple[int, int]]:
-    """Cross-owner, cross-SOURCE identity pairs an operator separation must block.
+def suppression_pairs(owner: dict[int, int]) -> list[tuple[int, int]]:
+    """Cross-owner identity pairs an operator separation must block.
 
     Pure so the ownership algebra is testable on its own: `owner` maps every
     identity involved to the broker that holds it AFTER the separation (a restored
     identity -> its prev_broker_id, one still on the survivor -> the survivor).
-    Only pairs that ended up under different brokers are a decision, and only
-    cross-source pairs can ever auto-merge (decide_merges refuses a same-source
-    bridge outright), so a same-source pair would be a suppression that can never
-    fire. Keys come out normalized lo<hi, matching Bridge.pair()."""
+    Only pairs that ended up under different brokers are a decision.
+
+    SAME-SOURCE PAIRS COUNT (2026-08-20). They used to be dropped because the engine
+    refused a within-source merge outright, so such a row could never fire — that
+    policy is repealed and the biggest duplicate fans are same-portal, so dropping
+    them now would mean an unmerged within-portal group comes straight back on the
+    next sweep with nothing on record. Keys come out normalized lo<hi, the same
+    shape decide_merges reads suppressed_pairs in."""
     ids = sorted(owner)
     return [(a, b) for i, a in enumerate(ids) for b in ids[i + 1:]
-            if owner[a] != owner[b] and source_of.get(a) != source_of.get(b)]
+            if owner[a] != owner[b]]
 
 
 def _cohort(rows: list[Any]) -> tuple[dict[int, int], dict[int, tuple[str, str, str | None]]]:

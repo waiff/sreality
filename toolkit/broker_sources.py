@@ -149,7 +149,8 @@ class BrokerSource:
     review_count_key: str | None = None
     # False = identity + link only, no `broker_identity_contacts` rows. For a portal
     # whose every broker publishes the SAME switchboard, those rows are N copies of
-    # one value that the bridge's freq==1 guard discards anyway. It suppresses the
+    # one value carried by N different names — non-discriminating by the merge
+    # engine's test, so storing them buys no merge evidence. It suppresses the
     # CONTACTS, never `broker_identities.email` — that column is what carries the
     # identity to its firm, and dropping email_key to get the same effect would take
     # the firm linkage with it.
@@ -251,8 +252,12 @@ BROKER_SOURCES: tuple[BrokerSource, ...] = (
     # role address (info@mmreality.cz) and one switchboard, phone == mobile — 12
     # distinct broker ids, one email, one number, over 12 live listings. So
     # write_contacts=False, and the ~1,021 identical contact rows it would otherwise
-    # mint (which the freq==1 bridge guard discards anyway) are never written; that
-    # also makes this portal structurally incapable of cross-source auto-merge.
+    # mint are never written: one value under many names is non-discriminating, so
+    # it can carry no auto-merge either way. The portal is not cut off from merging,
+    # though — every identity sits at the mmreality.cz firm through the role domain,
+    # so the firm-rarity path (broker_resolver path B) can still reunite same-named
+    # duplicates without a single contact row, unless that domain is marked
+    # is_franchise, which path B refuses outright.
     # KNOWN TRADE, reviewed and accepted 2026-08-12: the identity email is NOT
     # suppressed with them, so every mmreality broker carries the role address as
     # broker_identities.email (and brokers.primary_email). That is deliberate — the

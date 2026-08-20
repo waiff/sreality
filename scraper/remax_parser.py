@@ -532,9 +532,12 @@ def _broker(tree: HTMLParser) -> dict[str, Any] | None:
     cross-source bridge. Phone is deliberately NOT collected (operator: `broker_phone` is
     an intentional zero on all nine portals).
 
-    Known limit: ~0.3% of agents hold two ids after an office move (both carrying the same
-    email). Identities are never merged within a source, so those split permanently. That
-    is the accepted cost of a rename-proof numeric key over a mutable profile slug.
+    ~0.3% of agents hold two ids after an office move (both carrying the same email) —
+    the accepted cost of a rename-proof numeric key over a mutable profile slug. Those
+    used to split permanently under the never-merge-within-a-source policy; since
+    2026-08-20 the name-gated engine reunites them on that shared e-mail whenever it is
+    discriminating (toolkit/broker_resolver.py, path A), so the duplicate ids remain but
+    the duplicate BROKERS do not.
     """
     block = tree.css_first("div.pd-sidebar__agent-info")
     if block is None:

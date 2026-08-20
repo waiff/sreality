@@ -125,26 +125,22 @@ def _suppression_params(conn: _Conn) -> Any:
 
 def test_suppression_pairs_only_spans_different_owners() -> None:
     """Identities that stayed together are not a decision; only the separation is."""
-    owner = {1: 10, 2: 10, 3: 20}
-    sources = {1: "sreality", 2: "idnes", 3: "remax"}
-    assert review.suppression_pairs(owner, sources) == [(1, 3), (2, 3)]
+    assert review.suppression_pairs({1: 10, 2: 10, 3: 20}) == [(1, 3), (2, 3)]
 
 
-def test_suppression_pairs_skips_same_source_pairs() -> None:
-    """decide_merges refuses a same-source bridge outright ('within a source the
-    portal-native id is authoritative'), so a same-source suppression could never
-    fire — it would just be a row nothing reads."""
-    owner = {1: 10, 2: 20}
-    assert review.suppression_pairs(owner, {1: "sreality", 2: "sreality"}) == []
-    assert review.suppression_pairs(owner, {1: "sreality", 2: "idnes"}) == [(1, 2)]
+def test_suppression_pairs_now_cover_same_source_pairs_too() -> None:
+    """They used to be dropped: the engine refused a within-source merge, so such a
+    row could never fire. That policy is repealed (2026-08-20) and the biggest
+    duplicate fans are same-portal — dropping them now would mean an unmerged
+    within-portal group comes straight back on the next sweep."""
+    assert review.suppression_pairs({1: 10, 2: 20}) == [(1, 2)]
 
 
 def test_suppression_pairs_are_normalized_lo_before_hi() -> None:
-    """The sweep looks the pair up as Bridge.pair() spells it, and the partial
-    UNIQUE index is on (identity_lo, identity_hi) — an unnormalized row would be
-    both un-matchable and duplicable."""
-    owner = {9: 10, 4: 20}
-    pairs = review.suppression_pairs(owner, {9: "sreality", 4: "idnes"})
+    """The sweep looks the pair up the way decide_merges normalises one, and the
+    partial UNIQUE index is on (identity_lo, identity_hi) — an unnormalized row
+    would be both un-matchable and duplicable."""
+    pairs = review.suppression_pairs({9: 10, 4: 20})
     assert pairs == [(4, 9)]
     assert all(lo < hi for lo, hi in pairs)
 
@@ -233,13 +229,16 @@ def test_unmerge_reads_the_cohort_from_where_the_identities_are_now() -> None:
     assert anchored[1] == {"restored": [2]}
 
 
-def test_unmerge_skips_same_source_pairs() -> None:
-    """Two sreality identities separated by an unmerge can never auto-merge back
-    (the resolver refuses same-source bridges), so no row is written for them."""
+def test_unmerge_records_a_same_portal_separation() -> None:
+    """The regression the portal-agnostic engine creates: two sreality identities
+    the operator just pulled apart CAN auto-merge back tonight, so the NO has to be
+    on record. This used to write nothing at all."""
     conn = _Conn(group_row=(10, [20]), events=[(2, 20)], owner_now={1: 10, 2: 10},
                  meta={1: ("sreality", "s-1", "A"), 2: ("sreality", "s-2", "B")})
-    review.unmerge_group(conn, "g", undone_by="op@example.com")
-    assert _suppression_params(conn) is None
+    out = review.unmerge_group(conn, "g", undone_by="op@example.com")
+    params = _suppression_params(conn)
+    assert list(zip(params["lo"], params["hi"])) == [(1, 2)]
+    assert out["suppressions_written"] == 1 and out["suppression_note"] is None
 
 
 def test_an_unmerge_that_derives_nothing_says_so(caplog: Any) -> None:
@@ -247,12 +246,14 @@ def test_an_unmerge_that_derives_nothing_says_so(caplog: Any) -> None:
     and the operator is otherwise never told. Both the log and the response carry it."""
     import logging
 
-    conn = _Conn(group_row=(10, [20]), events=[(2, 20)], owner_now={1: 10, 2: 10},
-                 meta={1: ("sreality", "s-1", "A"), 2: ("sreality", "s-2", "B")})
+    # the restored identity lands back on the broker it already shares with the
+    # other one, so nothing was actually separated
+    conn = _Conn(group_row=(10, [20]), events=[(2, 10)], owner_now={1: 10, 2: 10},
+                 meta={1: ("sreality", "s-1", "A"), 2: ("idnes", "i-2", "B")})
     with caplog.at_level(logging.WARNING, logger="broker_review"):
         out = review.unmerge_group(conn, "g", undone_by="op@example.com")
     assert out["suppressions_written"] == 0
-    assert "no cross-owner, cross-source identity pair" in out["suppression_note"]
+    assert "no cross-owner identity pair" in out["suppression_note"]
     assert "derived 0 suppressions" in caplog.text
 
 

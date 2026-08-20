@@ -18,21 +18,33 @@ const PAGE_SIZE = 100;
 // The two generators write to one table at very different volumes, so the queue is
 // only navigable segmented: an unfiltered page ordered by group size then recency
 // lets a sweep's contact-bridge regeneration bury the whole name_firm backlog.
+//
+// Both blurbs describe the live engine (toolkit/broker_resolver.py, 2026-08-20):
+// name-gated, portal-agnostic, two evidence paths. Keep them in step with it — the
+// operator judges these cards against what the automat says it can and cannot do.
 const REASONS = [
   {
     key: 'name_firm',
-    tab: 'Stejné jméno a firma',
+    tab: 'Stejné jméno a firma',
     blurb:
-      'Záznamy se stejným jménem a firmou, které automat nesloučil (nemají ' +
-      'společný osobní kontakt — typicky firemní účty za přepojovacím číslem).',
+      'Záznamy se stejným jménem u stejné firmy, které automat nesloučil — ' +
+      'nejčastěji proto, že totéž jméno se objevuje i u jiných firem ' +
+      '(běžná jména, obecné popisky typu „Zákaznická linka“). Patří sem ale ' +
+      'i záznamy u franšízové značky (jedna doména, mnoho nezávislých ' +
+      'poboček), dvojice, kde má každá strana vlastní osobní kontakt — tedy ' +
+      'spíš dva různí lidé téhož jména —, skupiny příliš velké na ' +
+      'automatické sloučení a dvojice, které jste už dřív odmítli.',
   },
   {
     key: 'contact_bridge_review',
     tab: 'Sdílený kontakt',
     blurb:
-      'Záznamy z různých portálů, které sdílejí telefon nebo e-mail, ale ' +
-      'automat je nesloučil (jediný nepotvrzený kontakt, nesouhlasící jméno, nebo ' +
-      'portál bez automatického slučování). Zkontrolujte uvedený kontakt.',
+      'Nejčastěji záznamy se stejným jménem u různých firem, které sdílejí ' +
+      'telefon nebo e-mail patřící i dalším jménům (recepce, přepojovací ' +
+      'číslo) — takový kontakt sám o sobě nic nedokazuje. Chodí sem ale ' +
+      'i dvojice z příliš velké skupiny nebo ze skupiny, které se dotklo ' +
+      'dřívější odmítnutí; tam může být sdílený kontakt naopak průkazný. ' +
+      'Zkontrolujte uvedený kontakt.',
   },
 ] as const;
 
@@ -61,7 +73,13 @@ export default function BrokerReview() {
         <p className="text-xs tracking-[0.18em] uppercase text-[var(--color-ink-3)]">broker intelligence</p>
         <h1 className="mt-1 text-2xl font-[family-name:var(--font-display)]">Sloučit duplicity</h1>
         <p className="mt-1 text-sm text-[var(--color-ink-3)] max-w-2xl">
-          {active.blurb} Zkontrolujte a&nbsp;slučte ručně. Sloučení je vratné.
+          Automat slučuje jen záznamy se shodným jménem — buď přes kontakt, který
+          patří jedinému jménu, nebo přes společnou firmu u&nbsp;jména, které se
+          neobjevuje u&nbsp;žádné jiné firmy. Tady zůstává to, co nedokázal
+          prokázat: sdílený kontakt patřící více jménům, běžné jméno
+          u&nbsp;několika firem, nezvykle velká skupina, nebo naopak dvojice,
+          kde má každá strana vlastní osobní kontakt. {active.blurb}{' '}
+          Zkontrolujte a&nbsp;slučte ručně. Sloučení je vratné.
         </p>
       </header>
 

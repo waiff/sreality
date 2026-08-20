@@ -77,13 +77,14 @@ it (`api/`). They do not apply to the scraper.
    permits; these ten paths then need a separately-elevated route. For now we ship with one
    role and discipline.
    **Broker merge-review writes are durable decisions, not just status flips** (`api/broker_review.py`,
-   migration 401). The nightly sweep re-derives every cross-source bridge from scratch, so an unmerge
-   used to be re-applied the same night. `unmerge_group` now derives, inside its own transaction and
-   BEFORE the re-point, every cross-owner + cross-source identity pair it pulled apart and records it
-   in `broker_merge_suppressions`. Both derivations read a **cohort**, never a remembered id: the
+   migration 401). The nightly sweep re-derives every merge from scratch — name-gated and
+   portal-agnostic since 2026-08-20 — so an unmerge used to be re-applied the same night.
+   `unmerge_group` derives, inside its own transaction and BEFORE the re-point, every cross-owner
+   identity pair it pulled apart (SAME-PORTAL PAIRS INCLUDED: within-source merging is allowed now,
+   and the biggest duplicate fans are same-portal) and records it in `broker_merge_suppressions`. Both derivations read a **cohort**, never a remembered id: the
    unmerge anchors on where the restored identities live NOW (the survivor on the event rows may itself
    have been merged away since — that read returns nothing and the unmerge silently writes zero rows),
-   and a dismissal anchors on the candidate's BROKER pair, suppressing every cross-source pair between
+   and a dismissal anchors on the candidate's BROKER pair, suppressing every cross-owner pair between
    them (the card is keyed `contactbridge:{lo}:{hi}` and the evidence is last-write-wins, so sibling
    identity pairs would otherwise stay live). Pairs already under one broker are skipped — an active
    suppression over co-located identities is an instant `verify_pipeline` violation. A `name_firm`

@@ -15,7 +15,7 @@ that runs OFF the scrape hot path. Three modes:
     Anything the queue misses is reconciled by the daily full sweep below.
   * full (default, daily reconcile): re-attribute EVERY broker-bearing listing
     (batched by id), recompute all rollups, rebuild memberships + firm counts, run
-    the cross-source merge step, REFRESH the leaderboard matview, clear the queue.
+    the auto-merge step, REFRESH the leaderboard matview, clear the queue.
     The self-healing backstop. Attribution resumes from `broker_sweep_cursor` and
     rotates, so a run truncated by --max-seconds advances through the corpus instead
     of re-walking the same head; only a walk that covered EVERY id in one run clears
@@ -38,10 +38,12 @@ resolved to a Czech obec, so the two idnes syndication feeds advertising ~26k
 Spanish/Croatian properties stay fully attributed but stop heading the leaderboard.
 Nothing is filtered out of the corpus — `_DOMESTIC` is a rollup predicate.
 
-Identity keystone: cross-source merges only via contacts personal on BOTH sides
-(frequency==1 each source), corroborated (toolkit.broker_resolver). With only
-sreality live, the merge step finds no cross-source bridges and is a no-op — it is
-built + unit-tested now so the second portal activates it without new code.
+Identity keystone (toolkit.broker_resolver, rewritten 2026-08-20): merges are
+NAME-GATED and portal-agnostic — two identities unify when their name keys match
+and either they share a DISCRIMINATING contact (one whose carriers corpus-wide all
+carry that one name) or they share a firm whose name appears at no other firm.
+Within-portal duplicates merge like any other pair. `broker_auto_merge_enabled`
+(app_settings, absent = on) is the kill switch for the whole step.
 
 Required env: SUPABASE_DB_URL.
 """
@@ -69,7 +71,11 @@ _T = TypeVar("_T")
 
 _FREE_KEY = "broker_free_email_domains"
 _FRANCHISE_KEY = "broker_franchise_domains"
-_AUTO_MERGE_KEY = "broker_auto_merge_sources"
+# The kill switch for the whole auto-merge step. ABSENT MEANS ON: the engine is the
+# designed behaviour, and a row that has to exist for it to run is a row someone
+# deletes. Only an explicit `false` stops it (the old per-source allowlist
+# `broker_auto_merge_sources` is gone — the engine is portal-agnostic).
+_AUTO_MERGE_ENABLED_KEY = "broker_auto_merge_enabled"
 
 # Sources whose listings carry a broker block, and the SQL that attributes them —
 # both derived from the ONE registry (toolkit.broker_sources), which scraper.db
@@ -318,21 +324,39 @@ WHERE r.rk = 1 AND r.n::numeric / r.total >= 0.60
   AND f.display_name IS DISTINCT FROM r.name
 """
 
-_BRIDGE_CANDIDATES = """
-WITH freq AS (
-  SELECT source, kind, value, count(DISTINCT broker_identity_id) AS n
-  FROM broker_identity_contacts GROUP BY source, kind, value
-),
-personal AS (
-  SELECT c.broker_identity_id, c.source, c.kind, c.value
-  FROM broker_identity_contacts c
-  JOIN freq f ON f.source = c.source AND f.kind = c.kind AND f.value = c.value AND f.n = 1
-),
-multi AS (
-  SELECT kind, value FROM personal GROUP BY kind, value HAVING count(DISTINCT source) >= 2
-)
-SELECT p.broker_identity_id, p.source, p.kind, p.value
-FROM personal p JOIN multi m ON m.kind = p.kind AND m.value = p.value
+# The auto-merge engine's two inputs, both deliberately UNFILTERED. Its maps are
+# corpus-wide statements — which names a contact belongs to, how many firms a name
+# appears at — so pre-filtering the rows silently changes the verdict instead of
+# just shrinking the work. The old frequency/personal/multi-source CTEs are gone
+# with the guard they served (a duplicated broker's own e-mail read as shared).
+#
+# firm_id: the firm behind the IDENTITY's own e-mail domain — deliberately not
+# coalesced with brokers.primary_firm_id. That column is not curated: _BROKER_ROLLUP
+# derives it DISTINCT ON (broker_id) ORDER BY last_seen_at, i.e. the firm of the
+# broker's most recent listing. Fed to path B it made the rarity test self-weakening
+# (merge two identities of one name at two firms and next sweep both report one
+# firm, so the name's spread drops to 1 and a third, unrelated record of that name
+# gets a free B-edge) and non-deterministic day to day. franchise carries
+# firms.is_franchise, which marks a domain that is one brand over many independent
+# offices (re-max.cz, century21.cz) — a shared firm there is not a shared employer.
+# primary_firm_id rides along for ONE purpose: decide_merges' double-card check,
+# which must compare exactly what _CANDIDATE_BROKERS groups on. mergeable=false for
+# an identity whose broker is already merged away — it still counts as evidence
+# about a contact's owner, but never gets an edge (its broker is not a merge target).
+_MERGE_IDENTITIES_SQL = """
+SELECT bi.id, bi.source, bi.display_name,
+       fi.firm_id AS firm_id,
+       (b.status IS DISTINCT FROM 'merged_away') AS mergeable,
+       coalesce(f.is_franchise, false) AS franchise,
+       b.primary_firm_id
+FROM broker_identities bi
+LEFT JOIN brokers b ON b.id = bi.broker_id
+LEFT JOIN firm_identities fi ON fi.id = bi.firm_identity_id
+LEFT JOIN firms f ON f.id = fi.firm_id
+"""
+
+_MERGE_CONTACTS_SQL = """
+SELECT broker_identity_id, kind, value FROM broker_identity_contacts
 """
 
 # The operator's standing NO (migration 401). One indexed read per sweep: the merge
@@ -418,22 +442,34 @@ ON CONFLICT (key) DO UPDATE
 # queue forever, because the generators only ever touch keys they re-propose.
 _RETIRE_DEAD_CANDIDATES_SQL = """
 UPDATE broker_merge_candidates c
-   SET status = 'merged', resolved_at = now(), resolved_by = 'resolve_brokers'
+   SET status = 'merged', resolved_at = now(), resolved_by = %(by)s
  WHERE c.status = 'proposed'
    AND (SELECT count(*) FROM brokers b
          WHERE b.id = ANY(c.broker_ids) AND b.status = 'active') < 2
 """
 
+# Who retired a dead card: the auto-merge step's own hygiene pass vs the sweep's
+# end-of-run backstop. Same statement, distinguishable in the ledger.
+_SWEEP_RETIRE_ACTOR = "resolve_brokers"
+_AUTO_MERGE_RETIRE_ACTOR = "auto:sweep"
 
-def _settings(conn: Any) -> tuple[list[str], list[str], list[str]]:
+# broker_merge_events.reason when a component carries no recorded evidence path —
+# only reachable from a caller that passes no group_reasons (the column is free
+# text, and inventing 'contact_name' there would claim evidence that never existed).
+_MERGE_REASON_FALLBACK = "auto_merge"
+
+
+def _settings(conn: Any) -> tuple[list[str], list[str], bool]:
+    """Free/franchise domain lists plus the auto-merge kill switch (absent = ON)."""
     with conn.cursor() as cur:
         cur.execute("SELECT key, value FROM app_settings WHERE key = ANY(%s)",
-                    ([_FREE_KEY, _FRANCHISE_KEY, _AUTO_MERGE_KEY],))
+                    ([_FREE_KEY, _FRANCHISE_KEY, _AUTO_MERGE_ENABLED_KEY],))
         rows = {k: v for k, v in cur.fetchall()}
     free = [str(d).lower() for d in (rows.get(_FREE_KEY) or [])]
     franchise = [str(d).lower() for d in (rows.get(_FRANCHISE_KEY) or [])]
-    auto = [str(s).lower() for s in (rows.get(_AUTO_MERGE_KEY) or [])]
-    return free, franchise, auto
+    raw = rows.get(_AUTO_MERGE_ENABLED_KEY, True)
+    enabled = not (raw is False or (isinstance(raw, str) and raw.strip().lower() == "false"))
+    return free, franchise, enabled
 
 
 # Pooler-safe mutual exclusion (migration 192). A session pg_advisory_lock is
@@ -443,7 +479,7 @@ def _settings(conn: Any) -> tuple[list[str], list[str], list[str]]:
 # 10 -> 20 minutes. The TTL must exceed the longest gap between two heartbeats,
 # and the beat is the first statement of each RETRIED attempt (see _resilient_step),
 # so the real bound is ONE attempt plus run_resilient's backoff. The worst measured
-# single attempt is the cross-source merge at 8.4 min (2026-08-09 full sweep,
+# single attempt is the auto-merge step at 8.4 min (2026-08-09 full sweep,
 # 06:24:33 -> 06:32:56) — 84% of the old 10-min window, i.e. one slow day from a
 # live holder being declared stale and its lock stolen mid-sweep. 20 min leaves
 # ~2.4x margin over that attempt and still sits far under the 110-min job timeout,
@@ -591,73 +627,103 @@ def _suppressed_pairs(conn: Any) -> set[tuple[int, int]]:
         return {(int(lo), int(hi)) for lo, hi in cur.fetchall()}
 
 
-def _cross_source_merge(conn: Any, auto_merge_sources: list[str],
-                        run_id: int) -> tuple[int, int, int]:
-    """Form corroborated cross-source broker groups and apply reversible merges.
-
-    No-op while only one source is attributed (no cross-source bridges). Everything
-    the conservative guard refuses to auto-merge is persisted for operator review
-    (_queue_review_pairs); the second returned count is the pairs DECIDED, which is
-    what broker_resolution_runs.queued_for_review has always meant. The third is
-    what the operator's standing NO blocked this run — suppressed edges plus whole
-    components the apply-time backstop dropped.
-    """
-    # Cross-source bridges need >=2 sources; with one source the freq scan is
-    # guaranteed empty, so skip it entirely (the Phase-1 reality — avoids a costly
-    # full-contacts scan). When it does run, lift the statement timeout: it is a
-    # once-daily full-table analytical read.
+def _retire_dead_candidates(conn: Any, actor: str) -> int:
+    """Close proposals that can no longer be acted on (fewer than 2 active brokers)."""
     with conn.cursor() as cur:
-        cur.execute("SELECT count(DISTINCT source) FROM broker_identities")
-        if int(cur.fetchone()[0]) < 2:
-            return 0, 0, 0
+        cur.execute(_RETIRE_DEAD_CANDIDATES_SQL, {"by": actor})
+        return cur.rowcount or 0
+
+
+def _shared_contacts(contacts: list[R.Contact], pairs: list[tuple[int, int]],
+                     ) -> dict[tuple[int, int], set[str]]:
+    """pair -> the 'kind:value' strings both identities carry (the card's evidence).
+
+    Built only for the pairs actually being written: an all-pairs index over a
+    corpus-wide contact table is quadratic in the carriers of every role inbox.
+    """
+    wanted = {i for pair in pairs for i in pair}
+    if not wanted:
+        return {}
+    by_identity: dict[int, set[str]] = {}
+    for c in contacts:
+        if c.identity_id in wanted:
+            by_identity.setdefault(c.identity_id, set()).add(f"{c.kind}:{c.value}")
+    out: dict[tuple[int, int], set[str]] = {}
+    for a, b in pairs:
+        shared = by_identity.get(a, set()) & by_identity.get(b, set())
+        if shared:
+            out[(a, b) if a < b else (b, a)] = shared
+    return out
+
+
+def _auto_merge(conn: Any, run_id: int) -> tuple[int, int, int]:
+    """Form name-gated broker groups and apply reversible merges (portal-agnostic).
+
+    Loads the whole identity + contact corpus (both maps the rule consults are
+    corpus-wide, so neither read may be pre-filtered), decides in
+    toolkit.broker_resolver, applies at BROKER grain and persists everything the
+    rule could not prove for operator review (_queue_review_pairs). The second
+    returned count is the pairs DECIDED, which is what
+    broker_resolution_runs.queued_for_review has always meant. The third is what the
+    apply-time rails refused this run — suppressed edges, whole components the
+    standing-NO backstop dropped, and components too large to fuse.
+    """
+    # One full-table read of each input, once per daily sweep: lift the pooler's
+    # app-query statement timeout, which is the wrong guardrail for it.
     with conn.transaction(), conn.cursor() as cur:
         cur.execute("SET LOCAL statement_timeout = 0")
-        cur.execute(_BRIDGE_CANDIDATES)
-        rows = cur.fetchall()
-    if not rows:
+        cur.execute(_MERGE_IDENTITIES_SQL)
+        identity_rows = cur.fetchall()
+        cur.execute(_MERGE_CONTACTS_SQL)
+        contact_rows = cur.fetchall()
+    if not identity_rows:
         return 0, 0, 0
 
-    by_value: dict[tuple[str, str], list[tuple[int, str]]] = {}
-    identities: dict[int, R.Identity] = {}
-    for ident_id, source, kind, value in rows:
-        by_value.setdefault((kind, value), []).append((int(ident_id), source))
-        identities.setdefault(int(ident_id), R.Identity(int(ident_id), source))
-    # Names for corroboration.
-    with conn.cursor() as cur:
-        cur.execute("SELECT id, display_name FROM broker_identities WHERE id = ANY(%s)",
-                    (list(identities),))
-        for iid, name in cur.fetchall():
-            identities[int(iid)] = R.Identity(int(iid), identities[int(iid)].source, name)
-
-    bridges: list[R.Bridge] = []
-    for (kind, value), members in by_value.items():
-        for i in range(len(members)):
-            for j in range(i + 1, len(members)):
-                a, b = members[i], members[j]
-                if a[1] != b[1]:
-                    bridges.append(R.Bridge(a[0], b[0], kind, value))
-
-    bridge_values: dict[tuple[int, int], set[str]] = {}
-    for bridge in bridges:
-        bridge_values.setdefault(bridge.pair(), set()).add(f"{bridge.kind}:{bridge.value}")
+    identities: dict[int, R.Identity] = {
+        int(iid): R.Identity(int(iid), source, name, _as_int(firm_id), bool(mergeable),
+                             bool(franchise), _as_int(primary_firm_id))
+        for iid, source, name, firm_id, mergeable, franchise, primary_firm_id
+        in identity_rows
+    }
+    contacts = [R.Contact(int(iid), kind, value) for iid, kind, value in contact_rows
+                if int(iid) in identities]
 
     blocked = _suppressed_pairs(conn)
-    decision = R.decide_merges(list(identities.values()), bridges, auto_merge_sources,
+    decision = R.decide_merges(list(identities.values()), contacts,
                                suppressed_pairs=blocked)
-    auto, dropped = _apply_merges(conn, decision.auto_merge_groups,
-                                  suppressed_pairs=blocked,
-                                  group_bridges=decision.group_bridges)
+    auto, dropped, oversized = _apply_merges(conn, decision.auto_merge_groups,
+                                             suppressed_pairs=blocked,
+                                             group_bridges=decision.group_bridges,
+                                             group_reasons=decision.group_reasons)
+    # An auto-merged group leaves its old review card sitting at 'proposed' with
+    # only one surviving broker behind it — the UI renders it thin and the merge
+    # button can only ever answer 409. Retire those the moment the merges land,
+    # BEFORE this run proposes anything new.
+    retired = _retire_dead_candidates(conn, _AUTO_MERGE_RETIRE_ACTOR)
     # AFTER the merges: they re-point broker_identities.broker_id, so a pair read
     # before them could propose a broker that no longer survives.
+    shared = _shared_contacts(contacts, decision.review_pairs + decision.dismiss_pairs)
     proposed = _queue_review_pairs(conn, decision.review_pairs, identities,
-                                   bridge_values, run_id)
+                                   shared, run_id)
     dismissed = _dismiss_name_conflicts(conn, decision.dismiss_pairs, identities,
-                                        bridge_values, run_id)
+                                        shared, run_id)
+    reasons = [decision.group_reasons.get(tuple(g), "") for g in decision.auto_merge_groups]
+    LOG.info("RESOLVE auto-merge groups=%d (contact=%d, firm=%d, mixed=%d) identities=%d "
+             "queued=%d suppressed=%d",
+             len(decision.auto_merge_groups),
+             sum(1 for r in reasons if r == R.REASON_CONTACT_NAME),
+             sum(1 for r in reasons if r == R.REASON_NAME_FIRM),
+             sum(1 for r in reasons if "+" in r),
+             sum(len(g) for g in decision.auto_merge_groups),
+             len(decision.review_pairs),
+             # the same total the run row records; the next line breaks it down
+             len(decision.suppressed) + dropped + oversized)
     LOG.info("RESOLVE merge review pairs decided=%d proposed=%d name_conflict_dismissed=%d "
-             "suppressed_edges=%d suppressed_components=%d active_suppressions=%d",
+             "suppressed_edges=%d suppressed_components=%d oversized_components=%d "
+             "active_suppressions=%d stale_cards_retired=%d",
              len(decision.review_pairs), proposed, dismissed, len(decision.suppressed),
-             dropped, len(blocked))
-    return auto, len(decision.review_pairs), len(decision.suppressed) + dropped
+             dropped, oversized, len(blocked), retired)
+    return auto, len(decision.review_pairs), len(decision.suppressed) + dropped + oversized
 
 
 def _broker_of(conn: Any, identity_ids: list[int]) -> dict[int, int]:
@@ -690,8 +756,8 @@ def _broker_components(groups: list[list[int]],
 
     decide_merges' components are disjoint over IDENTITIES, not over brokers: an
     already-merged broker holds several identities, and contacts are never deleted,
-    so a bridge between two of its own identities can lapse (a freq demotion, a
-    display_name change) and leave them in two different components. Left as-is
+    so an edge between two of its own identities can lapse (a contact that stops
+    discriminating, a display_name change) and leave them in two components. Left as-is
     that broker would be retired into two survivors in one run — `losers` is keyed
     on the retired id, so the ledger logged both while the brokers UPDATE kept
     whichever came last. Merging at broker grain makes the collision unrepresentable
@@ -700,10 +766,12 @@ def _broker_components(groups: list[list[int]],
     This deliberately widens what ONE run can fuse: decide_merges caps a group at
     MAX_AUTO_MERGE_COMPONENT identities, and two capped groups chained through a
     shared broker now apply as one merge instead of colliding. The fusing edge is a
-    merge already recorded (that broker holds both identities), not a new bridge, so
-    the union is implied rather than invented — but nothing bounds the chain, so
-    every multi-group component is logged for the operator rather than passing as an
-    ordinary pair merge."""
+    merge already recorded (that broker holds both identities), not new evidence, so
+    the union is implied rather than invented. Two groups chained this way are also
+    the one place where DIFFERENTLY-named groups meet — name_key transitivity makes
+    that unreachable inside decide_merges, not here — so every multi-group component
+    is logged for the operator, and _apply_merges refuses any component wider than
+    the same cap rather than letting the chain run unbounded."""
     parent: dict[int, int] = {}
 
     def find(b: int) -> int:
@@ -743,13 +811,14 @@ def _broker_components(groups: list[list[int]],
 
 def _bridge_pair_rows(conn: Any, pairs: list[tuple[int, int]],
                       identities: dict[int, R.Identity],
-                      bridge_values: dict[tuple[int, int], set[str]],
+                      shared_contacts: dict[tuple[int, int], set[str]],
                       run_id: int) -> dict[str, tuple[int, int, str]]:
-    """group_key -> (lo_broker, hi_broker, evidence) for bridged identity pairs.
+    """group_key -> (lo_broker, hi_broker, evidence) for identity pairs sharing a contact.
 
     Shared by the review and the auto-dismiss writers so both describe a pair the
     same way and collide on the same key: a pair the operator is already looking at
-    is the SAME row the dismiss pass retires, not a second one beside it.
+    is the SAME row the dismiss pass retires, not a second one beside it. The
+    evidence's `bridges` key is the card's contact list — the SPA reads that name.
     """
     broker_of = _broker_of(conn, sorted({i for pair in pairs for i in pair}))
     rows: dict[str, tuple[int, int, str]] = {}
@@ -757,7 +826,7 @@ def _bridge_pair_rows(conn: Any, pairs: list[tuple[int, int]],
         left, right = broker_of.get(a), broker_of.get(b)
         if left is None or right is None or left == right:
             continue
-        shared = sorted(bridge_values.get((a, b) if a < b else (b, a), ()))
+        shared = sorted(shared_contacts.get((a, b) if a < b else (b, a), ()))
         if not shared:
             continue
         lo, hi = (left, right) if left < right else (right, left)
@@ -774,9 +843,13 @@ def _bridge_pair_rows(conn: Any, pairs: list[tuple[int, int]],
 
 def _dismiss_name_conflicts(conn: Any, pairs: list[tuple[int, int]],
                             identities: dict[int, R.Identity],
-                            bridge_values: dict[tuple[int, int], set[str]],
+                            shared_contacts: dict[tuple[int, int], set[str]],
                             run_id: int) -> int:
-    """Retire bridged pairs whose names conflict outright — without suppressing them.
+    """Retire pairs whose names conflict outright — without suppressing them.
+
+    The name-gated engine never proposes a cross-name pair, so it hands this
+    nothing; the writer stays wired as the retirement path for the cards the old
+    corroboration guard queued before the name gate existed (PR #1096).
 
     Deliberately NOT routed through the operator dismiss path: that writes
     broker_merge_suppressions, a standing NO meant to record a HUMAN judgement. A
@@ -787,7 +860,7 @@ def _dismiss_name_conflicts(conn: Any, pairs: list[tuple[int, int]],
     """
     if not pairs:
         return 0
-    rows = _bridge_pair_rows(conn, pairs, identities, bridge_values, run_id)
+    rows = _bridge_pair_rows(conn, pairs, identities, shared_contacts, run_id)
     if not rows:
         return 0
     keys = sorted(rows)
@@ -804,26 +877,29 @@ def _dismiss_name_conflicts(conn: Any, pairs: list[tuple[int, int]],
 
 def _queue_review_pairs(conn: Any, pairs: list[tuple[int, int]],
                         identities: dict[int, R.Identity],
-                        bridge_values: dict[tuple[int, int], set[str]],
+                        shared_contacts: dict[tuple[int, int], set[str]],
                         run_id: int) -> int:
     """Persist decide_merges' review pairs as operator-reviewable merge candidates.
 
     They were computed and dropped on the floor every sweep (9,377/day at the
-    2026-08-12 review), so the only output of the deliberately conservative
-    auto-merge guard never reached the operator. Keyed on the BROKER pair, not the
-    identity pair: the operator merges brokers, so two identity pairs resolving to
-    the same two brokers are one proposal, and the key stays stable across sweeps.
+    2026-08-12 review), so the only output of the conservative half of the engine
+    never reached the operator. Keyed on the BROKER pair, not the identity pair: the
+    operator merges brokers, so two identity pairs resolving to the same two brokers
+    are one proposal, and the key stays stable across sweeps.
 
-    Only pairs that share an ACTUAL contact are proposed. decide_merges also
-    downgrades an oversized component by expanding it pairwise, which is n(n-1)/2
-    rows describing a chain the guard already called untrustworthy — a one-click
-    merge of two agents connected only through a shared switchboard several hops
-    away is exactly what it refused. The component's real edges survive that filter,
-    so nothing actionable is lost; the evidence carries the bridge so the operator
-    judges the same fact the engine did."""
+    Only pairs that share an ACTUAL contact are proposed — a one-click merge of two
+    agents connected only through a shared switchboard several hops away is exactly
+    what the cap exists to stop. That filter is not a size rail, though: it thins a
+    component chained from SEVERAL values, and drops nothing at all from the pool it
+    was written for, where one switchboard is on every member and therefore on every
+    transitive pair (464 records -> 107,416 rows, all of them shared-contact pairs).
+    The size rail is decide_merges itself, which hands an over-cap component its real
+    EDGES instead of its closure; this writer sees n-1 rows, not n(n-1)/2. The
+    evidence carries the shared contact so the operator judges the same fact the
+    engine did."""
     if not pairs:
         return 0
-    rows = _bridge_pair_rows(conn, pairs, identities, bridge_values, run_id)
+    rows = _bridge_pair_rows(conn, pairs, identities, shared_contacts, run_id)
     if not rows:
         return 0
     keys = sorted(rows)
@@ -847,9 +923,27 @@ def _blocked_component(identities_in: set[int], owner: dict[int, int],
     return None
 
 
+def _component_reason(spanning: AbstractSet[int], groups: list[list[int]],
+                      group_reasons: dict[tuple[int, ...], str] | None) -> str:
+    """broker_merge_events.reason for a component: the union of its groups' paths.
+
+    A component usually spans exactly one auto-merge group and takes its reason
+    verbatim ('contact_name' | 'name_firm' | 'contact_name+name_firm'). When
+    _broker_components chains several groups through a shared broker, the honest
+    answer is every path that contributed, so the parts are unioned rather than
+    one being picked."""
+    parts: set[str] = set()
+    for gi in spanning:
+        for part in ((group_reasons or {}).get(tuple(groups[gi])) or "").split("+"):
+            if part:
+                parts.add(part)
+    return "+".join(p for p in R.REASON_ORDER if p in parts) or _MERGE_REASON_FALLBACK
+
+
 def _apply_merges(conn: Any, groups: list[list[int]], *,
                   suppressed_pairs: AbstractSet[tuple[int, int]] | None = None,
                   group_bridges: dict[tuple[int, ...], tuple[str, str]] | None = None,
+                  group_reasons: dict[tuple[int, ...], str] | None = None,
                   ) -> tuple[int, int]:
     """Unify each BROKER component onto one survivor broker, set-based.
 
@@ -865,7 +959,8 @@ def _apply_merges(conn: Any, groups: list[list[int]], *,
     rollups (_BROKER_ROLLUP only touches status='active'), hide them from the
     dossier, and let the next sweep elect the merged_away broker as a survivor.
     Idempotent — a component already on one broker is skipped, so a re-run after a
-    partial apply converges. Reversible via broker_merge_events.
+    partial apply converges. Reversible via broker_merge_events, whose `reason`
+    records WHICH evidence path formed the group (_component_reason).
 
     `suppressed_pairs` is the apply-time BACKSTOP for the rail decide_merges cannot
     fully enforce: it removes the suppressed EDGE, but _broker_components then fuses
@@ -878,13 +973,20 @@ def _apply_merges(conn: Any, groups: list[list[int]], *,
     with a fresh read inside this write transaction: an operator NO landing mid-sweep
     must not be applied over.
 
-    Returns (brokers retired, components dropped by the backstop)."""
+    The component cap applies HERE too, at broker grain: decide_merges bounds one
+    group at R.MAX_AUTO_MERGE_COMPONENT identities, but _broker_components chains
+    groups through a shared broker and nothing in the pure layer bounds that chain —
+    the layer that re-introduces the fusion is the layer that has to bound it.
+    A wider component is skipped whole and counted, not merged and warned about.
+
+    Returns (brokers retired, components dropped by the backstop, components skipped
+    for exceeding the cap)."""
     if not groups:
-        return 0, 0
+        return 0, 0, 0
     broker_of = _broker_of(conn, sorted({iid for g in groups for iid in g}))
     components = _broker_components(groups, broker_of)
     if not components:
-        return 0, 0
+        return 0, 0, 0
     held = _identities_of(conn, sorted({b for c in components for b in c}))
     owner = {iid: bid for bid, iids in held.items() for iid in iids}
     # broker -> the auto-merge groups that touch it, built ONCE. The per-component
@@ -901,10 +1003,12 @@ def _apply_merges(conn: Any, groups: list[list[int]], *,
     survivors: list[int] = []
     retired: list[int] = []
     idents: list[int] = []
+    reasons: list[str] = []
     kinds: list[str | None] = []
     values: list[str | None] = []
     losers: dict[int, int] = {}
     dropped = 0
+    oversized = 0
     with conn.transaction(), conn.cursor() as cur:
         cur.execute("SET LOCAL statement_timeout = 0")
         cur.execute(_SUPPRESSED_PAIRS_SQL)
@@ -917,6 +1021,14 @@ def _apply_merges(conn: Any, groups: list[list[int]], *,
                 by_identity.setdefault(hi, set()).add(lo)
 
         for component in components:
+            if len(component) > R.MAX_AUTO_MERGE_COMPONENT:
+                oversized += 1
+                LOG.warning(
+                    "RESOLVE merge component SKIPPED as oversized: %d brokers exceeds "
+                    "the cap of %d; chained through brokers holding identities in "
+                    "several groups, so no single group vouches for it: %s",
+                    len(component), R.MAX_AUTO_MERGE_COMPONENT, component)
+                continue
             in_component = set(component)
             identities_in = {iid for b in component for iid in held.get(b, ())}
             blocked = (_blocked_component(identities_in, owner, by_identity)
@@ -936,6 +1048,7 @@ def _apply_merges(conn: Any, groups: list[list[int]], *,
             bridge = ((group_bridges or {}).get(tuple(groups[next(iter(spanning))]))
                       if len(spanning) == 1 else None)
             bridged = set(groups[next(iter(spanning))]) if bridge else set()
+            reason = _component_reason(spanning, groups, group_reasons)
             survivor, *rest = component
             gid = str(uuid.uuid4())
             for loser in rest:
@@ -945,21 +1058,22 @@ def _apply_merges(conn: Any, groups: list[list[int]], *,
                     survivors.append(survivor)
                     retired.append(loser)
                     idents.append(iid)
+                    reasons.append(reason)
                     stamped = bridge if iid in bridged else None
                     kinds.append(stamped[0] if stamped else None)
                     values.append(stamped[1] if stamped else None)
         if not losers:
-            return 0, dropped
+            return 0, dropped, oversized
 
         cur.execute(
             "INSERT INTO broker_merge_events (merge_group_id, survivor_broker_id, "
             "retired_broker_id, identity_id, prev_broker_id, reason, source, "
             "bridge_kind, bridge_value) "
-            "SELECT g, s, r, i, r, 'contact_bridge', 'auto', k, v "
+            "SELECT g, s, r, i, r, n, 'auto', k, v "
             "FROM unnest(%(g)s::uuid[], %(s)s::bigint[], %(r)s::bigint[], %(i)s::bigint[], "
-            "%(k)s::text[], %(v)s::text[]) AS d(g, s, r, i, k, v)",
+            "%(n)s::text[], %(k)s::text[], %(v)s::text[]) AS d(g, s, r, i, n, k, v)",
             {"g": gids, "s": survivors, "r": retired, "i": idents,
-             "k": kinds, "v": values},
+             "n": reasons, "k": kinds, "v": values},
         )
         cur.execute(
             "UPDATE broker_identities bi SET broker_id = d.s "
@@ -971,7 +1085,7 @@ def _apply_merges(conn: Any, groups: list[list[int]], *,
             "FROM unnest(%(l)s::bigint[], %(s)s::bigint[]) AS d(l, s) WHERE b.id = d.l",
             {"l": list(losers), "s": list(losers.values())},
         )
-    return len(losers), dropped
+    return len(losers), dropped, oversized
 
 
 def _affected(conn: Any, listing_ids: list[int]) -> list[int]:
@@ -1158,7 +1272,7 @@ def _record_sweep_progress(conn: Any, *, last_id: int, lap_swept: int,
     """Advance the rotation cursor and, when the lap closed, stamp completion.
 
     Written right after attribution rather than in _finalize: the 17-25 min tail
-    (cross-source merge, rollups, matview, candidates) fails often enough that
+    (auto-merge, rollups, matview, candidates) fails often enough that
     leaving the cursor behind it threw away a whole run's rotation advance and
     re-walked the same window the next day — the exact starvation the cursor
     exists to remove. Both statements are idempotent upserts that depend on
@@ -1235,7 +1349,7 @@ def _resilient_step(
     return step, lambda: state["conn"]
 
 
-def _run_full(conn: Any, free: list[str], franchise: list[str], auto: list[str],
+def _run_full(conn: Any, free: list[str], franchise: list[str], auto_merge: bool,
               batch_size: int, deadline: float | None, holder: str = "", *,
               reconnect: Callable[[], Any]) -> tuple[dict[str, int], Any]:
     """Run the daily reconcile. Returns (stats, live_conn) — the connection may be a
@@ -1332,8 +1446,9 @@ def _run_full(conn: Any, free: list[str], franchise: list[str], auto: list[str],
     LOG.info("RESOLVE full attribution+firms done elapsed=%.1fs", time.monotonic() - t0)
 
     # Merge BEFORE the rollups so dsc / listing_count / membership reflect the unified
-    # broker groupings (a merge re-points broker_identities.broker_id). _cross_source_merge
-    # no-ops with one source and is gated per-source by broker_auto_merge_sources.
+    # broker groupings (a merge re-points broker_identities.broker_id). The step is
+    # portal-agnostic and runs unless app_settings.broker_auto_merge_enabled is an
+    # explicit false (the kill switch — absent means on).
     # Replay-safe: _apply_merges skips a component already on one broker, so a retry
     # after a committed apply converges (the only residue is an UNDERCOUNTED
     # auto_merges on the retried attempt — bookkeeping, not data).
@@ -1345,10 +1460,15 @@ def _run_full(conn: Any, free: list[str], franchise: list[str], auto: list[str],
     # min of tail on top of a ~53-min prefix — past the 110-min backstop. Two keeps
     # the useful replay (a pooler drop, a passing lock wait) and bounds the tail at
     # ~50 min. Same reasoning, same number as recompute's _BATCH_RESILIENT_ATTEMPTS.
-    auto_merges, queued, suppressed = step(lambda c: _cross_source_merge(c, auto, run_id),
-                                           "resolve.merge", attempts=2)
-    LOG.info("RESOLVE full merge done auto=%d queued=%d suppressed=%d elapsed=%.1fs",
-             auto_merges, queued, suppressed, time.monotonic() - t0)
+    if auto_merge:
+        auto_merges, queued, suppressed = step(lambda c: _auto_merge(c, run_id),
+                                               "resolve.merge", attempts=2)
+        LOG.info("RESOLVE full merge done auto=%d queued=%d suppressed=%d elapsed=%.1fs",
+                 auto_merges, queued, suppressed, time.monotonic() - t0)
+    else:
+        auto_merges = queued = suppressed = 0
+        LOG.warning("RESOLVE full merge SKIPPED: app_settings.%s is false",
+                    _AUTO_MERGE_ENABLED_KEY)
 
     # Identity rollup: ONE global timeout-lifted statement, like the firm rollup
     # below. broker_identities.id is NOT a dense serial — every full-sweep upsert
@@ -1417,7 +1537,7 @@ def _run_full(conn: Any, free: list[str], franchise: list[str], auto: list[str],
                     else _CLEAR_DIRTY_SWEPT_WRAPPED_SQL,
                     {"cutoff": cutoff, "lo": first_swept, "hi": last_swept},
                 )
-            cur.execute(_RETIRE_DEAD_CANDIDATES_SQL)
+            cur.execute(_RETIRE_DEAD_CANDIDATES_SQL, {"by": _SWEEP_RETIRE_ACTOR})
             cur.execute(
                 "UPDATE broker_resolution_runs SET ended_at = now(), brokers_recomputed = "
                 "(SELECT count(*) FROM brokers WHERE status='active'), identities_upserted = "
@@ -1528,13 +1648,13 @@ def main() -> int:
     # This connection is held for the whole 60-90 minute sweep, so a pooler idle
     # reaper or a Supabase restart used to kill the run outright.
     with db.connect(db_url) as conn:
-        free, franchise, auto = _settings(conn)
+        free, franchise, auto_merge = _settings(conn)
         if args.dry_run:
             with conn.cursor() as cur:
                 cur.execute("SELECT count(*) FROM dirty_broker_listings")
                 dirty = int(cur.fetchone()[0])
-            LOG.info("RESOLVE dry-run mode=%s free=%d franchise=%d dirty=%d; exit",
-                     mode, len(free), len(franchise), dirty)
+            LOG.info("RESOLVE dry-run mode=%s free=%d franchise=%d auto_merge=%s dirty=%d; exit",
+                     mode, len(free), len(franchise), auto_merge, dirty)
             return 0
 
         # Pooler-safe mutual exclusion (migration 192). The incremental yields when the
@@ -1558,7 +1678,7 @@ def main() -> int:
                 LOG.info("RESOLVE incremental done attributed=%d brokers=%d elapsed=%.1fs",
                          res["attributed"], res["brokers"], time.monotonic() - started)
             else:
-                res, conn = _run_full(conn, free, franchise, auto, args.batch_size,
+                res, conn = _run_full(conn, free, franchise, auto_merge, args.batch_size,
                                       deadline, holder, reconnect=reconnect)
                 LOG.info("RESOLVE full done attached=%d auto_merges=%d queued=%d "
                          "suppressed=%d elapsed=%.1fs",
