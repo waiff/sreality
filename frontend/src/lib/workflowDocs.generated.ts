@@ -3234,6 +3234,71 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/location_payload_prune.yml"
   },
   {
+    "filename": "location_refetch_cohort.yml",
+    "name": "Jobs: location refetch cohort (W4)",
+    "description": "DISPATCH-ONLY. Drives `location_enrichment_state`, the refetch cohort W1's intake has been filling since 2026-08-12 (sreality rows whose payload is legacy-shape or 80 KB truncated). Two phases, and `mode` decides how far it goes:",
+    "portal": null,
+    "manual": true,
+    "schedules": [],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "mode",
+        "description": "reconcile (retire finished rows only) | dispatch (also enqueue refetches)",
+        "required": false,
+        "type": "choice",
+        "default": "reconcile",
+        "options": [
+          "reconcile",
+          "dispatch"
+        ]
+      },
+      {
+        "name": "limit",
+        "description": "max rows to enqueue in dispatch mode",
+        "required": false,
+        "type": "string",
+        "default": "5000",
+        "options": null
+      },
+      {
+        "name": "batch_size",
+        "description": "reconcile scan batch",
+        "required": false,
+        "type": "string",
+        "default": "500",
+        "options": null
+      },
+      {
+        "name": "max_seconds",
+        "description": "budget for the reconcile scan (blank = no budget)",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "dry_run",
+        "description": "classify and count, write nothing",
+        "required": false,
+        "type": "boolean",
+        "default": "false",
+        "options": null
+      }
+    ],
+    "secrets": [
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "location-refetch-cohort",
+    "cancelInProgress": false,
+    "timeoutMinutes": 60,
+    "permissions": "contents: read",
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/location_refetch_cohort.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/location_refetch_cohort.yml"
+  },
+  {
     "filename": "location_registry_load.yml",
     "name": "Location: RÚIAN registry load",
     "description": "The registry-group jobs of the location subsystem (design 04 §4.4.2):",

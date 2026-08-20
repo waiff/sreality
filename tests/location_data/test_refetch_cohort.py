@@ -7,14 +7,20 @@ schedule actually advances, and that the truncation cohort is never mistaken for
 
 from __future__ import annotations
 
-import pytest
+from pathlib import Path
 
+import pytest
+import yaml
+
+from location_data import refetch_cohort
 from location_data.claims_intake import sreality_payload_shape
 from location_data.refetch_cohort import (
     _MARK_DISPATCHED_SQL,
     _MARK_PLACED_SQL,
     _MARK_RETIRED_SQL,
     COHORT_LANE,
+    CONCURRENCY_GROUP,
+    JOB_NAME,
     MAX_ATTEMPTS,
     REFETCH_PRIORITY,
     CohortRow,
@@ -233,3 +239,47 @@ def test_every_write_is_lane_scoped(sql: str):
 def test_a_placed_row_is_never_also_given_up():
     assert "given_up" not in _MARK_PLACED_SQL
     assert "given_up = true" in _MARK_RETIRED_SQL
+
+
+# ---------------------------------------------------------------- the dispatch lane
+
+_WORKFLOW = (Path(__file__).resolve().parents[2]
+             / ".github" / "workflows" / "location_refetch_cohort.yml")
+
+
+def _workflow() -> dict:
+    return yaml.safe_load(_WORKFLOW.read_text(encoding="utf-8"))
+
+
+def test_the_lane_cannot_start_a_refetch_on_a_schedule():
+    """Dispatch-only. A `schedule:` here would start enqueuing refetches against nine
+    portals' egress the moment it merged, with no operator in the loop."""
+    triggers = _workflow()[True] if True in _workflow() else _workflow()["on"]
+    assert set(triggers) == {"workflow_dispatch"}
+
+
+def test_the_lane_defaults_to_the_phase_that_writes_no_queue_rows():
+    """`reconcile` retires finished rows and enqueues nothing. It is the correct first run:
+    the cohort has never been cleaned, so its size says nothing about the work left."""
+    inputs = _workflow()[True]["workflow_dispatch"]["inputs"] if True in _workflow() \
+        else _workflow()["on"]["workflow_dispatch"]["inputs"]
+    assert inputs["mode"]["default"] == "reconcile"
+    assert set(inputs["mode"]["options"]) == {"reconcile", "dispatch"}
+
+
+def test_the_lane_stays_out_of_the_oversubscribed_batch_group():
+    """`location-batch` serialises heavy corpus-wide DB sweeps and is measurably
+    oversubscribed (#1084). This lane's scarce resource is portal egress, which the drain
+    it enqueues into already governs — joining would buy queueing, not safety."""
+    assert _workflow()["concurrency"]["group"] == CONCURRENCY_GROUP
+    assert _workflow()["concurrency"]["group"] != "location-batch"
+    assert _workflow()["concurrency"]["cancel-in-progress"] is False
+
+
+def test_the_lane_holds_both_halves_of_its_lease():
+    """A GitHub concurrency group cannot see a manual local invocation; the lease-row CAS
+    can. Advisory locks are refused here — the transaction-mode pooler strands one."""
+    assert JOB_NAME and CONCURRENCY_GROUP
+    source = Path(refetch_cohort.__file__).read_text(encoding="utf-8")
+    assert "lease.held(" in source
+    assert "pg_advisory" not in source.lower()
