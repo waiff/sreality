@@ -1059,48 +1059,78 @@ renumber.** Navigate by area:
 ## Broker identity merges — auto-merge and the suppression rail
 
 Unlike property merges (rule #15, operator-only), broker identities DO auto-merge. The nightly
-sweep (`scripts/resolve_brokers.py::_cross_source_merge`, cron 04:35 UTC) bridges two per-source
-`broker_identities` on a contact that is personal on BOTH sides (frequency 1 within each source),
-and `toolkit/broker_resolver.decide_merges` then decides on the NAME (2026-08-18; operator rule).
-The name is the deciding axis, not a tiebreaker:
+sweep (`scripts/resolve_brokers.py::_auto_merge`, cron 04:35 UTC) hands the WHOLE identity +
+contact corpus to `toolkit.broker_resolver.decide_merges`, which since 2026-08-20 is
+**portal-agnostic and name-gated** — one rule, no per-portal exceptions:
 
-| `name_relation(a, b)` | outcome with ≥1 bridge |
-| --- | --- |
-| `same` (titles/diacritics folded) | **auto-merge** (both sources auto-merge-enabled) |
-| `different` (no shared identity token) | **auto-dismiss** — never queued |
-| `unknown` (partial overlap, initial, missing) | operator review |
+> MERGE two identities when their **names match** AND (**A** they share a *discriminating* contact
+> OR **B** they share a firm and that name appears at only ONE firm corpus-wide).
 
-Contact count alone no longer authorises a merge. The previous bar took ≥2 distinct bridge values as
-sufficient *regardless of name*, which merged demonstrably different people whenever one broker's
-mobile appeared on a colleague's card (`Ondřej Kadlec` + `Monika Kadlecová`, bridged on one phone).
-Auto-merge still additionally requires BOTH sources in `app_settings.broker_auto_merge_sources`
-(`["sreality","idnes"]`; **remax and ceskereality stay disabled** pending the operator's D5
-validation).
+- **Names match** = `name_key` equality: diacritics folded, token order ignored, Czech academic
+  titles stripped (`Bc. Ondřej Kadlec` ≡ `Kadlec Ondřej`; a title-only string keys to NULL, which
+  matches nothing). No name, no edge — ever.
+- **Discriminating contact** = a `(kind, value)` whose carriers ACROSS THE WHOLE CORPUS — every
+  source, every identity, including identities of already merged-away brokers — all carry that one
+  name. It replaced the frequency==1 "personal contact" guard, which duplication defeated: six
+  copies of one agent made his own personal e-mail look shared (n=6), so the guard discarded the
+  one fact that proved they were one person. Under the discrimination test duplication REINFORCES
+  the signal; role inboxes (`info@…` under 353 names) and switchboards still fail it — by carrying
+  many NAMES, not many rows.
+- **Path B** substitutes market-wide name rarity for contact evidence: a name confined to a single
+  firm is very unlikely to be two people, which is what merges the role-inbox-only shape (a fan of
+  records at one firm reachable only at the switchboard). Common names (`Jan Novák`, present at
+  dozens of firms) and generic role labels (`Zákaznická linka`) fail it automatically.
+- The paths are OR'd, and the firm-spread test guards **B only** — it is B's substitute for contact
+  evidence, not an extra bar on A. A shared discriminating contact merges a common-named pair even
+  if that name exists at fifty firms.
 
-Auto-dismissal stamps the candidate row `status='dismissed', resolved_by='auto:name_conflict'` and
-deliberately does **NOT** route through `api.broker_review.dismiss_candidate`: that writes
-`broker_merge_suppressions`, a standing NO meant to record a HUMAN judgement. A machine verdict off a
-name comparison must not permanently foreclose a merge — the candidate row alone stops re-proposal
-(the upserts' `status='proposed'` guard), and the cohort is reopenable with one UPDATE keyed on
-`resolved_by`. `name_relation` returns `different` only when both names are present and share no
-identity-bearing token at all; titles (`Bc.`, `Ing.`, `Ph.D.`, …) and bare initials fold away first,
-so `Jan Novák` ≡ `Ing. Jan Novák` merges while `J. Novák` vs `Jan Novák` stays a question.
+**Within-portal merging is allowed** (repealed 2026-08-20 — it was policy, never schema:
+`broker_identities` only requires `UNIQUE(source, source_broker_id_native)`, and the biggest
+duplicate fans are same-portal). Gone with it: the `broker_auto_merge_sources` allowlist, the
+≥2-distinct-sources requirement, the ≥2-bridge corroboration bar and the per-source frequency
+guard. `app_settings.broker_auto_merge_enabled` is the one switch left — **absent means ON**, an
+explicit `false` skips the step with a log line (no migration; the engine change needed none).
+Merges stay reversible via `broker_merge_events`, whose `reason` now records the evidence path
+(`contact_name` | `name_firm` | `contact_name+name_firm`) and whose `bridge_kind`/`bridge_value`
+are stamped only for a group formed by ONE contact edge carrying ONE value.
+
+What the rule cannot prove goes to the operator, not the bin. A same-name pair at DIFFERENT firms
+sharing a non-discriminating contact becomes a `contact_bridge_review` card; the same-firm shape is
+already the `name_firm` tab, so it is deliberately not carded twice. A cross-name pair produces
+nothing at all — the engine never proposes one, so there is no question to ask. #1096's
+auto-dismissal (`status='dismissed', resolved_by='auto:name_conflict'`, deliberately NOT routed
+through `api.broker_review.dismiss_candidate`, which writes `broker_merge_suppressions` — a
+standing NO meant to record a HUMAN judgement) stays wired as the retirement path for the cards the
+old corroboration guard queued before the name gate existed. And a proposal whose brokers no longer
+both survive is retired the moment the merges land (`resolved_by='auto:sweep'`) rather than
+lingering as a card that can only ever answer 409.
+
+Components cap at `MAX_AUTO_MERGE_COMPONENT`, raised 6 → **20**: every edge is name-gated and
+`name_key` equality is transitive, so a component is single-named BY CONSTRUCTION and the
+cross-name chain fusion the old cap guarded against (one recycled phone chaining distinct people)
+is structurally impossible. What the cap stops now is a role-account mega-pool — one switchboard
+under one generic label, a live example carrying 464 records — while clearing the largest observed
+genuine duplicate fan (7). An oversized component is downgraded WHOLE: every internal pair goes to
+review, none of it merges — except past `MAX_REVIEW_EXPANSION` (500 identities), where the queue
+gets the component's real EDGES instead of its n(n-1)/2 transitive pairs; that is an OOM rail on the
+pairwise expansion, not a policy, and nothing observed comes near it. `_apply_merges` then merges at
+BROKER grain, which deliberately widens what one run fuses (two capped groups chain through a broker
+holding an identity in each).
 
 The 7,689 live auto-merges predate this rule and were decided under the old bar — those with
-conflicting names are NOT retroactively undone (see the audit query in the PR). Components cap at
-`MAX_AUTO_MERGE_COMPONENT` (6) identities and `_apply_merges` then merges at BROKER grain, which
-deliberately widens what one run fuses (two capped groups chain through a broker holding an identity
-in each).
+conflicting names are NOT retroactively undone.
 
 **The rail (migration 401).** The sweep re-derives its whole candidate set every night from
 `broker_identity_contacts` and consulted no decision record, so an unmerge came straight back and a
-dismissed pair auto-merged the moment its evidence strengthened (a second bridge value, converging
-names, or its source being enabled later). `broker_merge_suppressions` now records the operator's NO
-keyed on the **identity** pair — durable (`broker_identities.id` is never deleted), unlike a broker
+dismissed pair auto-merged the moment its evidence strengthened (the shared contact losing its
+other names, or two display names converging on one key). `broker_merge_suppressions` records the
+operator's NO keyed on the **identity** pair — durable (`broker_identities.id` is never deleted), unlike a broker
 pair, which stops describing the same cohort after any later merge. Written by `unmerge_group` (every
-cross-owner, cross-source pair it pulled apart) and by dismissing a `contact_bridge_review` candidate;
+cross-owner pair it pulled apart — same-portal pairs now included, since those merge too) and by
+dismissing a `contact_bridge_review` candidate;
 read once per sweep and enforced twice — in `decide_merges` (a suppressed pair reaches neither
-auto-merge nor review, the oversized-component downgrade included) and as an apply-time backstop that
+auto-merge nor review, and a suppression anywhere INSIDE a component downgrades that whole component
+to review, the oversized-component expansion included) and as an apply-time backstop that
 drops any component which would newly co-locate a suppressed pair, catching the transitive chain the
 pure layer cannot see. The backstop re-reads the active set inside its own write transaction, because
 the merge step runs ~8.4 min and an operator NO landing inside that window must still bind.
@@ -1122,9 +1152,9 @@ lifting an already-co-located pair would silently clear the evidence of a bypass
 a decision. `GET /broker-review/suppressions` (active first) and `POST
 /broker-review/suppressions/{id}/lift` make the ledger readable and clearable through the product.
 `verify_pipeline`'s `broker_merge_suppression` check — in the hourly emailing lane, O(1) — fails on
-any active suppression whose identities share a broker. This exists BEFORE remax is enabled because
-remax contacts are email-only and ceskereality's phone-only, so one bridge plus a name match is the
-entire case for those merges.
+any active suppression whose identities share a broker. It matters MORE now that no portal
+allowlist gates the engine: remax contacts are email-only and ceskereality's phone-only, so one
+shared contact plus a name match is the entire case for those merges.
 
 ## Location data (W1) — the greenfield location SSOT
 

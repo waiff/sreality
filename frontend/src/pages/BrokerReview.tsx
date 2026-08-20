@@ -18,21 +18,27 @@ const PAGE_SIZE = 100;
 // The two generators write to one table at very different volumes, so the queue is
 // only navigable segmented: an unfiltered page ordered by group size then recency
 // lets a sweep's contact-bridge regeneration bury the whole name_firm backlog.
+//
+// Both blurbs describe the live engine (toolkit/broker_resolver.py, 2026-08-20):
+// name-gated, portal-agnostic, two evidence paths. Keep them in step with it — the
+// operator judges these cards against what the automat says it can and cannot do.
 const REASONS = [
   {
     key: 'name_firm',
-    tab: 'Stejné jméno a firma',
+    tab: 'Stejné jméno a firma',
     blurb:
-      'Záznamy se stejným jménem a firmou, které automat nesloučil (nemají ' +
-      'společný osobní kontakt — typicky firemní účty za přepojovacím číslem).',
+      'Záznamy se stejným jménem u stejné firmy, které automat nesloučil, ' +
+      'protože totéž jméno se objevuje i u jiných firem — typicky běžná ' +
+      'jména a firemní účty za přepojovacím číslem.',
   },
   {
     key: 'contact_bridge_review',
     tab: 'Sdílený kontakt',
     blurb:
-      'Záznamy z různých portálů, které sdílejí telefon nebo e-mail, ale ' +
-      'automat je nesloučil (jediný nepotvrzený kontakt, nesouhlasící jméno, nebo ' +
-      'portál bez automatického slučování). Zkontrolujte uvedený kontakt.',
+      'Záznamy se stejným jménem u různých firem, které sdílejí telefon ' +
+      'nebo e-mail, jenže ten kontakt patří i dalším jménům (recepce, ' +
+      'přepojovací číslo), takže sám o sobě nic nedokazuje. Zkontrolujte ' +
+      'uvedený kontakt.',
   },
 ] as const;
 
@@ -61,7 +67,12 @@ export default function BrokerReview() {
         <p className="text-xs tracking-[0.18em] uppercase text-[var(--color-ink-3)]">broker intelligence</p>
         <h1 className="mt-1 text-2xl font-[family-name:var(--font-display)]">Sloučit duplicity</h1>
         <p className="mt-1 text-sm text-[var(--color-ink-3)] max-w-2xl">
-          {active.blurb} Zkontrolujte a&nbsp;slučte ručně. Sloučení je vratné.
+          Automat slučuje jen záznamy se shodným jménem — buď přes kontakt, který
+          patří jedinému jménu, nebo přes společnou firmu u&nbsp;jména, které se
+          nikde jinde neobjevuje. Tady zůstává to, co nedokázal prokázat: sdílený
+          kontakt patřící více jménům, běžné jméno u&nbsp;několika firem, nebo
+          nezvykle velká skupina. {active.blurb} Zkontrolujte a&nbsp;slučte ručně.
+          Sloučení je vratné.
         </p>
       </header>
 

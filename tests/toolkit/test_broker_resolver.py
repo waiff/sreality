@@ -1,8 +1,26 @@
-"""Unit tests for the pure cross-source broker identity-resolution rules."""
+"""Unit tests for the pure, portal-agnostic broker identity-resolution rules.
+
+The rule under test (2026-08-20): merge two identities when their NAMES MATCH and
+either (A) they share a discriminating contact — one whose carriers corpus-wide all
+carry that single name — or (B) they share a firm and that name appears at only one
+firm corpus-wide. Portals are not a factor in any direction.
+"""
 
 from __future__ import annotations
 
 from toolkit import broker_resolver as R
+
+
+def _ident(i: int, source: str = "sreality", name: str | None = None, *,
+           firm: int | None = None, mergeable: bool = True) -> R.Identity:
+    return R.Identity(i, source, name, firm, mergeable)
+
+
+def _contacts(kind: str, value: str, *identity_ids: int) -> list[R.Contact]:
+    return [R.Contact(i, kind, value) for i in identity_ids]
+
+
+# --- normalisation helpers (unchanged by the rewrite) ---------------------------
 
 
 def test_normalize_email():
@@ -36,329 +54,322 @@ def test_is_free_provider():
     assert R.is_free_provider(None, free) is False
 
 
-def test_name_key_order_and_diacritics_insensitive():
-    assert R.name_key("Jan Novák") == R.name_key("novak jan")
+# --- the name gate ---------------------------------------------------------------
+
+
+def test_name_key_is_order_and_diacritics_insensitive():
+    assert R.name_key("Jan Novák") == R.name_key("novak jan") == "jan novak"
     assert R.names_match("Jan Novák", "Novák Jan") is True
     assert R.names_match("Jan Novák", "Petr Svoboda") is False
-    assert R.names_match(None, None) is False  # unknown names never corroborate
+    assert R.names_match(None, None) is False  # no name never matches, not even itself
 
 
-def _ids(*specs):
-    return [R.Identity(i, s, n) for (i, s, n) in specs]
+def test_academic_titles_are_stripped_from_the_key():
+    """A degree is not identity: the same human is 'Ondřej Kadlec' on one portal and
+    'Bc. Ondřej Kadlec' on another, and a strict-equality gate that keeps the title
+    is a merge silently not made."""
+    assert R.name_key("Bc. Ondřej Kadlec") == R.name_key("Ondřej Kadlec")
+    assert R.name_key("Ing. arch. Jiří Harák") == R.name_key("Harák Jiří")
+    assert R.name_key("Mgr. Petra Malá, Ph.D.") == R.name_key("Petra Mala")
+    assert R.names_match("Bc. Ondřej Kadlec", "KADLEC ONDREJ") is True
 
 
-def test_two_independent_bridges_auto_merge():
-    ids = _ids((1, "sreality", "Jan Novak"), (2, "idnes", "Jan Novak"))
-    bridges = [R.Bridge(1, 2, "email", "jan@x.cz"), R.Bridge(1, 2, "phone", "420600111222")]
-    d = R.decide_merges(ids, bridges, ["sreality", "idnes"])
+def test_a_title_only_string_has_no_identity_content():
+    assert R.name_key("Ing.") is None
+    assert R.name_key("Ing. Mgr.") is None
+    assert R.names_match("Ing.", "Ing.") is False
+
+
+def test_name_relation_still_grades_the_three_way_comparison():
+    """Kept for the auto-dismissal path (#1096); 'different' stays hard to reach."""
+    assert R.name_relation("Jan Novák", "Ing. Jan Novák") == "same"
+    assert R.name_relation("Bc. Ondřej Kadlec", "Bc. Monika Kadlecová") == "different"
+    assert R.name_relation("J. Novák", "Jan Novák") == "unknown"
+    assert R.name_relation("Jan Novák", None) == "unknown"
+    assert R.name_relation("Ing.", "Jan Novák") == "unknown"
+
+
+# --- path A: a discriminating contact --------------------------------------------
+
+
+def test_mizjuk_six_same_source_duplicates_merge_on_one_personal_email():
+    """The case the old engine could not touch, for two independent reasons: the six
+    records are all sreality (never-merge-within-a-source) and duplication itself
+    made his own e-mail look shared (frequency 6, not 1). Under the discrimination
+    test the duplication REINFORCES the evidence — every carrier is the same name."""
+    ids = [_ident(i, "sreality", "Alexandr Mizjuk") for i in range(1, 7)]
+    contacts = _contacts("email", "a.mizjuk@byty.cz", 1, 2, 3, 4, 5, 6)
+    d = R.decide_merges(ids, contacts)
+    assert d.auto_merge_groups == [[1, 2, 3, 4, 5, 6]]
+    assert d.group_reasons == {(1, 2, 3, 4, 5, 6): R.REASON_CONTACT_NAME}
+    assert d.review_pairs == []
+
+
+def test_kaderkova_two_portals_one_phone_no_allowlist_left():
+    """Cross-portal is now just another pair — no source ever has to be enabled."""
+    ids = [_ident(1, "sreality", "Jana Kaderková"),
+           _ident(2, "ceskereality", "Kaderková Jana")]
+    d = R.decide_merges(ids, _contacts("phone", "420602111222", 1, 2))
     assert d.auto_merge_groups == [[1, 2]]
-    assert d.review_pairs == []
+    assert d.group_reasons[(1, 2)] == R.REASON_CONTACT_NAME
 
 
-def test_single_bridge_plus_name_match_auto_merges():
-    ids = _ids((1, "sreality", "Jan Novak"), (2, "idnes", "Novak Jan"))
-    d = R.decide_merges(ids, [R.Bridge(1, 2, "phone", "420600111222")], ["sreality", "idnes"])
+def test_kadlec_and_kadlecova_share_a_phone_and_nothing_happens():
+    """Two names on one number: the number discriminates nothing, so there is no
+    edge — and no review card either, because a cross-name pair is not a question."""
+    ids = [_ident(1, "ceskereality", "Bc. Ondřej Kadlec"),
+           _ident(2, "sreality", "Bc. Monika Kadlecová")]
+    d = R.decide_merges(ids, _contacts("phone", "420774614199", 1, 2))
+    assert d.auto_merge_groups == [] and d.review_pairs == [] and d.dismiss_pairs == []
+
+
+def test_a_role_inbox_carried_by_many_names_discriminates_nothing():
+    """353 names behind info@… — the shape the frequency guard existed for, still
+    excluded, now because it carries many NAMES rather than many rows."""
+    ids = [_ident(i, "sreality", f"Osoba {i}", firm=10) for i in range(1, 354)]
+    d = R.decide_merges(ids, _contacts("email", "info@velkark.cz", *range(1, 354)))
+    assert d.auto_merge_groups == []
+    assert d.review_pairs == []  # different names -> nothing to ask
+
+
+def test_a_common_name_still_merges_on_a_discriminating_contact():
+    """Path A never consults firm spread: the shared contact IS the evidence."""
+    ids = [_ident(i, "sreality", "Jan Novák", firm=10 * i) for i in range(1, 6)]
+    d = R.decide_merges(ids, _contacts("phone", "420603111222", 1, 2))
     assert d.auto_merge_groups == [[1, 2]]
 
 
-def test_single_bridge_name_mismatch_is_dismissed_not_queued():
-    # A recycled/ported phone shared by two DIFFERENT people: must NOT auto-merge.
-    # Since 2026-08-18 it is not queued either — two names with nothing in common is
-    # a verdict, not a question (it used to land in review_pairs).
-    ids = _ids((1, "sreality", "Jan Novak"), (2, "idnes", "Petr Svoboda"))
-    d = R.decide_merges(ids, [R.Bridge(1, 2, "phone", "420600111222")], ["sreality", "idnes"])
+def test_an_unnamed_carrier_does_not_break_discrimination():
+    ids = [_ident(1, "sreality", "Eva Dvořáková"),
+           _ident(2, "idnes", "Dvořáková Eva"),
+           _ident(3, "bazos", None)]
+    d = R.decide_merges(ids, _contacts("email", "eva@dvorakova.cz", 1, 2, 3))
+    assert d.auto_merge_groups == [[1, 2]]   # the unnamed carrier abstains...
+    assert 3 not in {i for g in d.auto_merge_groups for i in g}  # ...and never merges
+
+
+def test_a_differently_named_carrier_kills_the_contact():
+    ids = [_ident(1, "sreality", "Eva Dvořáková"),
+           _ident(2, "idnes", "Dvořáková Eva"),
+           _ident(3, "bazos", "Petr Svoboda")]
+    d = R.decide_merges(ids, _contacts("email", "eva@dvorakova.cz", 1, 2, 3))
+    assert d.auto_merge_groups == []
+
+
+def test_a_merged_away_identity_is_evidence_but_never_a_member():
+    """mergeable=False identities count for both corpus-wide maps (their name is a
+    fact about who a contact belongs to) and take no edges of their own."""
+    poisoned = R.decide_merges(
+        [_ident(1, "sreality", "Eva Dvořáková"), _ident(2, "idnes", "Dvořáková Eva"),
+         _ident(3, "bazos", "Petr Svoboda", mergeable=False)],
+        _contacts("email", "eva@dvorakova.cz", 1, 2, 3))
+    assert poisoned.auto_merge_groups == []
+
+    same_name = R.decide_merges(
+        [_ident(1, "sreality", "Eva Dvořáková"), _ident(2, "idnes", "Dvořáková Eva"),
+         _ident(3, "bazos", "Eva Dvořáková", mergeable=False)],
+        _contacts("email", "eva@dvorakova.cz", 1, 2, 3))
+    assert same_name.auto_merge_groups == [[1, 2]]
+
+
+# --- path B: a name that exists at exactly one firm -------------------------------
+
+
+def test_harak_six_records_at_one_firm_merge_without_a_personal_contact():
+    """The role-inbox-only shape: every record is reachable only at the firm inbox
+    and the switchboard (both carried by many names, so both discriminate nothing),
+    but the name exists at no other firm — so the firm IS the evidence."""
+    ids = [_ident(i, "sreality", "Ing. arch. Jiří Harák", firm=10) for i in range(1, 7)]
+    ids += [_ident(20 + i, "sreality", f"Kolega {i}", firm=10) for i in range(1, 4)]
+    everyone = [i.id for i in ids]
+    contacts = (_contacts("email", "info@harakreality.cz", *everyone)
+                + _contacts("phone", "420800100200", *everyone))
+    d = R.decide_merges(ids, contacts)
+    assert d.auto_merge_groups == [[1, 2, 3, 4, 5, 6]]
+    assert d.group_reasons == {(1, 2, 3, 4, 5, 6): R.REASON_NAME_FIRM}
+    assert d.group_bridges == {}          # no contact can be named as the reason
+
+
+def test_a_name_at_two_firms_never_merges_on_the_firm_alone():
+    """'Jan Novák' twice at one firm plus once elsewhere: the name proves nothing,
+    and the same-name-same-firm pair is the name_firm candidate tab's job."""
+    ids = [_ident(1, "sreality", "Jan Novák", firm=10),
+           _ident(2, "idnes", "Novák Jan", firm=10),
+           _ident(3, "bazos", "Jan Novák", firm=20)]
+    d = R.decide_merges(ids, [])
+    assert d.auto_merge_groups == []
+    assert [1, 2] not in d.auto_merge_groups
+    assert d.review_pairs == []
+
+
+def test_a_firmless_identity_takes_no_firm_edge():
+    ids = [_ident(1, "sreality", "Jiří Harák", firm=10),
+           _ident(2, "idnes", "Harák Jiří", firm=None)]
+    assert R.decide_merges(ids, []).auto_merge_groups == []
+
+
+def test_a_mixed_component_records_both_evidence_paths():
+    ids = [_ident(1, "sreality", "Jiří Harák", firm=10),
+           _ident(2, "idnes", "Harák Jiří", firm=10),
+           _ident(3, "bazos", "Jiří Harák", firm=10)]
+    # 1+2+3 chain on the firm; 1 and 3 additionally share a discriminating mobile.
+    d = R.decide_merges(ids, _contacts("phone", "420605111222", 1, 3))
+    assert d.auto_merge_groups == [[1, 2, 3]]
+    assert d.group_reasons[(1, 2, 3)] == f"{R.REASON_CONTACT_NAME}+{R.REASON_NAME_FIRM}"
+
+
+# --- what the operator is asked ---------------------------------------------------
+
+
+def test_a_shared_non_discriminating_contact_across_firms_is_a_review_pair():
+    ids = [_ident(1, "sreality", "Jan Novák", firm=10),
+           _ident(2, "idnes", "Novák Jan", firm=20),
+           _ident(3, "bazos", "Petr Svoboda", firm=30)]
+    d = R.decide_merges(ids, _contacts("email", "info@sdilena.cz", 1, 2, 3))
+    assert d.auto_merge_groups == []
+    assert d.review_pairs == [(1, 2)]     # same name, two firms, ambiguous contact
+    assert (1, 3) not in d.review_pairs   # cross-name pairs are never asked about
+
+
+def test_the_same_pair_inside_one_firm_is_left_to_the_name_firm_tab():
+    """Two cards for one question is worse than none: the name_firm generator
+    already proposes same-name-same-firm groups."""
+    ids = [_ident(1, "sreality", "Eva Malá", firm=40),
+           _ident(2, "idnes", "Malá Eva", firm=40),
+           _ident(3, "bazos", "Eva Malá", firm=50),      # name at 2 firms -> no B-merge
+           _ident(4, "remax", "Petr Svoboda", firm=40)]
+    d = R.decide_merges(ids, _contacts("email", "info@firma40.cz", 1, 2, 4))
     assert d.auto_merge_groups == []
     assert d.review_pairs == []
-    assert d.dismiss_pairs == [(1, 2)]
 
 
-def test_same_source_pair_never_bridges():
-    ids = _ids((1, "sreality", "Jan Novak"), (2, "sreality", "Jan Novak"))
-    d = R.decide_merges(ids, [R.Bridge(1, 2, "email", "jan@x.cz"), R.Bridge(1, 2, "phone", "420600111222")],
-                        ["sreality", "idnes"])
+def test_an_oversized_component_is_downgraded_whole():
+    """21 records of one generic label chained by one switchboard: discriminating by
+    the letter of the test, not one human. Nothing merges; every pair is queued."""
+    ids = [_ident(i, "sreality", "Zákaznická linka") for i in range(1, 22)]
+    d = R.decide_merges(ids, _contacts("phone", "420800123456", *range(1, 22)))
     assert d.auto_merge_groups == []
-    assert d.review_pairs == []
+    assert len(d.review_pairs) == 21 * 20 // 2
+    assert (1, 21) in d.review_pairs
 
 
-def test_disabled_source_queues_even_with_two_bridges():
-    ids = _ids((1, "sreality", "Jan Novak"), (2, "idnes", "Jan Novak"))
-    bridges = [R.Bridge(1, 2, "email", "jan@x.cz"), R.Bridge(1, 2, "phone", "420600111222")]
-    d = R.decide_merges(ids, bridges, ["sreality"])  # idnes not enabled
+def test_a_pool_too_large_to_expand_is_queued_as_its_real_edges():
+    """The OOM rail. A downgraded component is expanded pairwise, which is n(n-1)/2
+    — fine for the 464-record pool the cap was sized against, ruinous an order of
+    magnitude up (a 5,000-record label would be 12.5M pairs, more rows than the
+    whole corpus). Past MAX_REVIEW_EXPANSION the component is queued as the edges
+    that actually formed it: still genuine same-name shared-contact pairs, just
+    n-1 of them."""
+    n = R.MAX_REVIEW_EXPANSION + 1
+    ids = [_ident(i, "sreality", "Zákaznická linka") for i in range(1, n + 1)]
+    d = R.decide_merges(ids, _contacts("phone", "420800123456", *range(1, n + 1)))
     assert d.auto_merge_groups == []
-    assert d.review_pairs == [(1, 2)]
+    assert len(d.review_pairs) == n - 1          # the chain, not the clique
+    assert all(a == 1 for a, _ in d.review_pairs)
+    # ...and one identity below the ceiling still expands in full
+    smaller = [_ident(i, "sreality", "Zákaznická linka")
+               for i in range(1, R.MAX_REVIEW_EXPANSION + 1)]
+    full = R.decide_merges(
+        smaller, _contacts("phone", "420800123456",
+                           *range(1, R.MAX_REVIEW_EXPANSION + 1)))
+    expected = R.MAX_REVIEW_EXPANSION * (R.MAX_REVIEW_EXPANSION - 1) // 2
+    assert len(full.review_pairs) == expected
 
 
-def test_oversized_component_downgraded_to_review():
-    # A chain of 7 corroborated cross-source identities exceeds the auto-merge cap;
-    # the whole component must be queued, not silently fused.
-    sources = ["sreality", "idnes", "bazos", "remax", "bezrealitky", "maxima", "mmreality"]
-    ids = _ids(*[(i + 1, sources[i], "Jan Novak") for i in range(7)])
-    bridges = []
-    for i in range(6):
-        bridges.append(R.Bridge(i + 1, i + 2, "email", f"e{i}@x.cz"))
-        bridges.append(R.Bridge(i + 1, i + 2, "phone", f"42060000{i:04d}"))
-    d = R.decide_merges(ids, bridges, sources)
-    assert d.auto_merge_groups == []
-    assert len(d.review_pairs) > 0
+def test_the_cap_is_twenty_and_a_fan_that_size_still_merges():
+    assert R.MAX_AUTO_MERGE_COMPONENT == 20
+    ids = [_ident(i, "sreality", "Alexandr Mizjuk") for i in range(1, 21)]
+    d = R.decide_merges(ids, _contacts("email", "a.mizjuk@byty.cz", *range(1, 21)))
+    assert d.auto_merge_groups == [list(range(1, 21))]
 
 
-def test_no_bridges_is_noop():
-    ids = _ids((1, "sreality", "Jan Novak"), (2, "idnes", "Jan Novak"))
-    d = R.decide_merges(ids, [], ["sreality", "idnes"])
-    assert d.auto_merge_groups == []
-    assert d.review_pairs == []
-
-
-# --- the suppression rail (migration 401) -------------------------------------
+# --- the suppression rail (migration 401) ----------------------------------------
 
 
 def test_a_suppressed_pair_reaches_neither_auto_merge_nor_review():
-    """The gap D5 closes: the sweep re-derives every bridge from scratch, so an
-    unmerged pair came back the next night. It must not fall through to REVIEW
-    either — re-proposing a pair the operator already rejected asks them the same
-    question every sweep, which is the same failure wearing a queue row."""
-    ids = _ids((1, "sreality", "Jan Novak"), (2, "idnes", "Jan Novak"))
-    bridges = [R.Bridge(1, 2, "email", "jan@x.cz"), R.Bridge(1, 2, "phone", "420600111222")]
-    d = R.decide_merges(ids, bridges, ["sreality", "idnes"], suppressed_pairs={(1, 2)})
-    assert d.auto_merge_groups == []
-    assert d.review_pairs == []
+    ids = [_ident(1, "sreality", "Jan Novák"), _ident(2, "idnes", "Novák Jan")]
+    contacts = _contacts("phone", "420600111222", 1, 2)
+    assert R.decide_merges(ids, contacts).auto_merge_groups == [[1, 2]]   # the control
+    d = R.decide_merges(ids, contacts, suppressed_pairs={(1, 2)})
+    assert d.auto_merge_groups == [] and d.review_pairs == []
     assert d.suppressed == [(1, 2)]
 
 
-def test_the_same_evidence_still_auto_merges_when_not_suppressed():
-    """The control: suppression is the ONLY difference between these two runs."""
-    ids = _ids((1, "sreality", "Jan Novak"), (2, "idnes", "Jan Novak"))
-    bridges = [R.Bridge(1, 2, "email", "jan@x.cz"), R.Bridge(1, 2, "phone", "420600111222")]
-    d = R.decide_merges(ids, bridges, ["sreality", "idnes"], suppressed_pairs=set())
-    assert d.auto_merge_groups == [[1, 2]] and d.suppressed == []
+def test_a_suppression_downgrades_the_whole_component_it_sits_inside():
+    """The transitive case: 1-2 and 2-3 are the only edges, so dropping the
+    suppressed (1, 3) edge removes nothing — union-find would still land all three
+    on one broker. The component becomes review pairs instead, minus the pair the
+    operator already answered."""
+    ids = [_ident(i, "sreality", "Jan Novák") for i in (1, 2, 3)]
+    contacts = (_contacts("email", "jan@a.cz", 1, 2)
+                + _contacts("email", "jan@b.cz", 2, 3))
+    assert R.decide_merges(ids, contacts).auto_merge_groups == [[1, 2, 3]]
+    d = R.decide_merges(ids, contacts, suppressed_pairs={(1, 3)})
+    assert d.auto_merge_groups == []
+    assert d.review_pairs == [(1, 2), (2, 3)]
+    assert d.suppressed == [(1, 3)]
+    assert len(d.review_pairs) + len(d.suppressed) == 3  # counted once, not twice
 
 
 def test_suppressing_one_pair_leaves_the_others_alone():
-    ids = _ids((1, "sreality", "Jan Novak"), (2, "idnes", "Jan Novak"),
-               (3, "sreality", "Petr Svoboda"), (4, "idnes", "Petr Svoboda"))
-    bridges = [R.Bridge(1, 2, "phone", "420600111222"),
-               R.Bridge(3, 4, "phone", "420600333444")]
-    d = R.decide_merges(ids, bridges, ["sreality", "idnes"], suppressed_pairs={(1, 2)})
+    ids = [_ident(1, "sreality", "Jan Novák"), _ident(2, "idnes", "Novák Jan"),
+           _ident(3, "sreality", "Petr Svoboda"), _ident(4, "idnes", "Svoboda Petr")]
+    contacts = (_contacts("phone", "420600111222", 1, 2)
+                + _contacts("phone", "420600333444", 3, 4))
+    d = R.decide_merges(ids, contacts, suppressed_pairs={(1, 2)})
     assert d.auto_merge_groups == [[3, 4]]
     assert d.suppressed == [(1, 2)]
 
 
-def test_the_pair_key_is_normalized_like_bridge_pair():
-    """Bridges arrive in whichever order the contact scan emitted them; the
-    suppression set is stored lo<hi, so a hi-first bridge must still be caught."""
-    ids = _ids((7, "sreality", "Jan Novak"), (3, "idnes", "Jan Novak"))
-    d = R.decide_merges(ids, [R.Bridge(7, 3, "phone", "420600111222")],
-                        ["sreality", "idnes"], suppressed_pairs={(3, 7)})
-    assert d.auto_merge_groups == [] and d.suppressed == [(3, 7)]
-
-
-def test_single_rung_email_only_pair_remax_shaped():
-    """remax identities carry an email and NEVER a phone (toolkit/broker_sources.py
-    — deliberate, RE/MAX pages publish no broker phone), so one email plus a name
-    match is the entire case for a merge. That single-rung class is what D5 gates:
-    it auto-merges the moment remax is enabled, and the rail must be able to stop
-    it before that switch is flipped."""
-    ids = _ids((1, "sreality", "Jan Novak"), (2, "remax", "Novak Jan"))
-    bridges = [R.Bridge(1, 2, "email", "jan.novak@re-max.cz")]
-    assert R.decide_merges(ids, bridges, ["sreality", "remax"]).auto_merge_groups == [[1, 2]]
-    d = R.decide_merges(ids, bridges, ["sreality", "remax"], suppressed_pairs={(1, 2)})
-    assert d.auto_merge_groups == [] and d.review_pairs == [] and d.suppressed == [(1, 2)]
-
-
-def test_single_rung_phone_only_pair_ceskereality_shaped():
-    """The mirror image: ceskereality publishes a phone and no broker email."""
-    ids = _ids((1, "sreality", "Jan Novak"), (2, "ceskereality", "Novak Jan"))
-    bridges = [R.Bridge(1, 2, "phone", "420600111222")]
-    assert R.decide_merges(ids, bridges,
-                           ["sreality", "ceskereality"]).auto_merge_groups == [[1, 2]]
-    d = R.decide_merges(ids, bridges, ["sreality", "ceskereality"],
-                        suppressed_pairs={(1, 2)})
-    assert d.auto_merge_groups == [] and d.review_pairs == [] and d.suppressed == [(1, 2)]
-
-
-def test_two_emails_no_longer_merge_without_a_name_match():
-    """An email-only source does NOT imply exactly one rung: broker_identity_contacts
-    is unique per (identity, kind, value), so two identities can share TWO distinct
-    personal emails with no name agreement at all.
-    (Migration 397's header overclaims here — do not encode 'email-only == one
-    rung' as an invariant.)
-
-    Until 2026-08-18 that cleared the >=2-values bar and auto-merged. It no longer
-    does: contact count alone never authorises a merge. 'J. Novak' still is not a
-    conflict, so this goes to the operator rather than the bin."""
-    ids = _ids((1, "sreality", "Jan Novak"), (2, "remax", "J. Novak"))
-    bridges = [R.Bridge(1, 2, "email", "jan.novak@re-max.cz"),
-               R.Bridge(1, 2, "email", "j.novak@re-max.cz")]
-    assert R.names_match("Jan Novak", "J. Novak") is False
-    d0 = R.decide_merges(ids, bridges, ["sreality", "remax"])
-    assert d0.auto_merge_groups == [] and d0.review_pairs == [(1, 2)]
-    d = R.decide_merges(ids, bridges, ["sreality", "remax"], suppressed_pairs={(1, 2)})
+def test_a_suppressed_firm_edge_is_blocked_too():
+    """The rail is evidence-blind: it rejects the PAIR, whichever path proposed it."""
+    ids = [_ident(1, "sreality", "Jiří Harák", firm=10),
+           _ident(2, "idnes", "Harák Jiří", firm=10)]
+    assert R.decide_merges(ids, []).auto_merge_groups == [[1, 2]]
+    d = R.decide_merges(ids, [], suppressed_pairs={(1, 2)})
     assert d.auto_merge_groups == [] and d.suppressed == [(1, 2)]
 
 
-def test_suppression_defaults_to_off_for_every_existing_caller():
-    ids = _ids((1, "sreality", "Jan Novak"), (2, "idnes", "Jan Novak"))
-    bridges = [R.Bridge(1, 2, "email", "jan@x.cz"), R.Bridge(1, 2, "phone", "420600111222")]
-    d = R.decide_merges(ids, bridges, ["sreality", "idnes"])
+def test_suppression_defaults_to_off_for_every_caller():
+    ids = [_ident(1, "sreality", "Jan Novák"), _ident(2, "idnes", "Novák Jan")]
+    d = R.decide_merges(ids, _contacts("email", "jan@x.cz", 1, 2))
     assert d.auto_merge_groups == [[1, 2]] and d.suppressed == []
 
 
-def test_group_bridges_names_the_single_edge_that_merged_a_pair():
-    """broker_merge_events.bridge_kind/bridge_value are NULL on all 7,689 live rows.
-    The dominant shape — one pair, one contact — can carry its evidence forward,
-    which is what the future remax validation (the D5 gate) has to audit."""
-    ids = _ids((1, "sreality", "Jan Novak"), (2, "remax", "Novak Jan"))
-    d = R.decide_merges(ids, [R.Bridge(1, 2, "email", "jan@re-max.cz")],
-                        ["sreality", "remax"])
+# --- what a merge records ---------------------------------------------------------
+
+
+def test_group_bridges_names_the_single_contact_that_merged_a_pair():
+    """broker_merge_events.bridge_kind/bridge_value: the dominant shape (one pair,
+    one contact) carries its evidence forward."""
+    ids = [_ident(1, "sreality", "Jan Novák"), _ident(2, "remax", "Novák Jan")]
+    d = R.decide_merges(ids, _contacts("email", "jan@re-max.cz", 1, 2))
     assert d.group_bridges == {(1, 2): ("email", "jan@re-max.cz")}
 
 
 def test_group_bridges_stays_empty_when_the_evidence_is_ambiguous():
-    """Two values on one edge, or a multi-edge component: no single contact is THE
-    reason, so nothing is stamped rather than picking one arbitrarily."""
-    ids = _ids((1, "sreality", "Jan Novak"), (2, "idnes", "Jan Novak"))
-    two_values = [R.Bridge(1, 2, "email", "jan@x.cz"), R.Bridge(1, 2, "phone", "420600111222")]
-    assert R.decide_merges(ids, two_values, ["sreality", "idnes"]).group_bridges == {}
+    ids = [_ident(1, "sreality", "Jan Novák"), _ident(2, "idnes", "Novák Jan")]
+    two_values = (_contacts("email", "jan@x.cz", 1, 2)
+                  + _contacts("phone", "420600111222", 1, 2))
+    assert R.decide_merges(ids, two_values).group_bridges == {}
 
-    chain = _ids((1, "sreality", "Jan Novak"), (2, "idnes", "Jan Novak"),
-                 (3, "bazos", "Jan Novak"))
-    edges = [R.Bridge(1, 2, "phone", "420600111222"), R.Bridge(2, 3, "phone", "420600333444")]
-    d = R.decide_merges(chain, edges, ["sreality", "idnes", "bazos"])
+    chain = [_ident(i, "sreality", "Jan Novák") for i in (1, 2, 3)]
+    edges = (_contacts("phone", "420600111222", 1, 2)
+             + _contacts("phone", "420600333444", 2, 3))
+    d = R.decide_merges(chain, edges)
     assert d.auto_merge_groups == [[1, 2, 3]] and d.group_bridges == {}
 
 
-def test_a_suppressed_pair_never_reaches_review_through_an_oversized_component():
-    """decide_merges downgrades a component over MAX_AUTO_MERGE_COMPONENT by
-    expanding it pairwise — a path that never passes through the per-pair edge loop
-    where the rail was enforced. An unmerge-origin suppression therefore came back as
-    a BRAND-NEW review card every sweep (no prior candidate row blocks it: the
-    status='proposed' guard only stops re-proposing a row that already exists), and
-    was counted in queued_for_review and suppressed at the same time."""
-    sources = ["sreality", "idnes"]
-    ids = _ids(*((i, sources[i % 2], f"Person {i}") for i in range(1, 8)))
-    bridges = []
-    for a in range(1, 7):  # a 7-identity chain: one over the cap
-        bridges += [R.Bridge(a, a + 1, "email", f"e{a}@x.cz"),
-                    R.Bridge(a, a + 1, "phone", f"42060011122{a}")]
-    plain = R.decide_merges(ids, bridges, sources)
-    assert plain.auto_merge_groups == [] and len(plain.review_pairs) == 21
-
-    # (1, 4) is cross-source and shares no bridge — it exists only as a transitive
-    # pair of the downgraded component
-    d = R.decide_merges(ids, bridges, sources, suppressed_pairs={(1, 4)})
-    assert (1, 4) not in d.review_pairs
-    assert d.suppressed == [(1, 4)]
-    assert len(d.review_pairs) == 20
-    assert len(d.review_pairs) + len(d.suppressed) == 21   # counted once, not twice
-
-
-def test_a_suppressed_edge_is_not_re_queued_for_review_either():
-    """The direct case, same guarantee: the pair the operator rejected is on record,
-    so asking again — as an auto-merge or as a review card — is the same failure."""
-    ids = _ids((1, "sreality", "Jan Novak"), (2, "idnes", "Jan Novak"))
-    d = R.decide_merges(ids, [R.Bridge(1, 2, "email", "jan@x.cz")], ["sreality"],
-                        suppressed_pairs={(1, 2)})
-    # both_enabled is False here, so without the rail this pair lands in review
-    assert d.review_pairs == [] and d.suppressed == [(1, 2)]
-
-
-def test_removing_an_edge_does_not_stop_the_group_forming_around_it():
-    """The responsibility split, pinned: the pure layer only removes the suppressed
-    EDGE. With A-C and C-B corroborated, union-find still emits [A, B, C] — A and B
-    land on one broker with no suppressed edge anywhere in the input. That is why the
-    apply-time backstop exists, and why it is not redundant with this filter."""
-    ids = _ids((1, "sreality", "Jan Novak"), (2, "idnes", "Jan Novak"),
-               (3, "bazos", "Jan Novak"))
-    bridges = [R.Bridge(1, 2, "email", "a@x.cz"), R.Bridge(1, 2, "phone", "420600111222"),
-               R.Bridge(1, 3, "email", "b@x.cz"), R.Bridge(1, 3, "phone", "420600333444"),
-               R.Bridge(3, 2, "email", "c@x.cz"), R.Bridge(3, 2, "phone", "420600555666")]
-    d = R.decide_merges(ids, bridges, ["sreality", "idnes", "bazos"],
-                        suppressed_pairs={(1, 2)})
-    assert d.auto_merge_groups == [[1, 2, 3]]      # emitted DESPITE the suppression
-    assert d.suppressed == [(1, 2)] and d.review_pairs == []
-
-
-# --- Name is the deciding axis (2026-08-18) --------------------------------------
-#
-# The bar used to auto-merge on >=2 shared contacts REGARDLESS of name, and to queue
-# a name-conflicting single bridge for review. Both were wrong: a colleague's mobile
-# on your card is not evidence you are the same person, and "Ondřej Kadlec" vs
-# "Monika Kadlecová" is not a question worth an operator's time.
-
-
-def test_titles_and_diacritics_do_not_break_a_name_match():
-    assert R.name_relation("Jan Novák", "Ing. Jan Novák") == "same"
-    assert R.name_relation("Bc. Ondřej Kadlec", "ONDREJ KADLEC") == "same"
-    assert R.name_relation("Mgr. Petra Malá, Ph.D.", "Petra Mala") == "same"
-
-
-def test_a_genuine_name_conflict_is_different():
-    # The live pair from the review queue: bridged by one phone, plainly two people.
-    assert R.name_relation("Bc. Ondřej Kadlec", "Bc. Monika Kadlecová") == "different"
-
-
-def test_partial_overlap_is_unknown_never_dismissed():
-    """An initial or an extra token must reach the operator, not the bin: a dismissal
-    is what stops the pair ever being proposed again."""
-    assert R.name_relation("J. Novák", "Jan Novák") == "unknown"
-    assert R.name_relation("Jan Novák", "Jan Novák ml.") == "unknown"
-    assert R.name_relation("Jan Novák", None) == "unknown"
-    assert R.name_relation("Ing.", "Jan Novák") == "unknown"  # titles-only -> no tokens
-
-
-def _ident(i: int, source: str, name: str | None) -> R.Identity:
-    return R.Identity(i, source, name)
-
-
-def test_matching_names_plus_one_bridge_auto_merges():
-    d = R.decide_merges(
-        [_ident(1, "sreality", "Jan Novák"), _ident(2, "idnes", "Ing. Jan Novák")],
-        [R.Bridge(1, 2, "phone", "420731404040")],
-        ["sreality", "idnes"],
-    )
-    assert d.auto_merge_groups == [[1, 2]]
-    assert d.review_pairs == [] and d.dismiss_pairs == []
-
-
-def test_conflicting_names_are_dismissed_never_merged_or_queued():
-    d = R.decide_merges(
-        [_ident(1, "ceskereality", "Bc. Ondřej Kadlec"),
-         _ident(2, "sreality", "Bc. Monika Kadlecová")],
-        [R.Bridge(1, 2, "phone", "420774614199")],
-        ["ceskereality", "sreality"],
-    )
-    assert d.dismiss_pairs == [(1, 2)]
-    assert d.auto_merge_groups == [] and d.review_pairs == []
-
-
-def test_two_shared_contacts_no_longer_override_a_name_conflict():
-    """The regression this change exists to stop."""
-    d = R.decide_merges(
-        [_ident(1, "sreality", "Ondřej Kadlec"), _ident(2, "idnes", "Monika Kadlecová")],
-        [R.Bridge(1, 2, "phone", "420774614199"), R.Bridge(1, 2, "email", "a@b.cz")],
-        ["sreality", "idnes"],
-    )
+def test_nothing_at_all_is_a_no_op():
+    d = R.decide_merges([], [])
+    assert d.auto_merge_groups == [] and d.review_pairs == [] and d.suppressed == []
+    d = R.decide_merges([_ident(1, "sreality", "Jan Novák")], [])
     assert d.auto_merge_groups == []
-    assert d.dismiss_pairs == [(1, 2)]
 
 
-def test_an_unknown_name_stays_a_review_pair_even_with_two_bridges():
-    d = R.decide_merges(
-        [_ident(1, "sreality", "J. Novák"), _ident(2, "idnes", "Jan Novák")],
-        [R.Bridge(1, 2, "phone", "420731404040"), R.Bridge(1, 2, "email", "a@b.cz")],
-        ["sreality", "idnes"],
-    )
+def test_contacts_for_unknown_identities_are_ignored():
+    """The two reads are separate statements; a contact row for an identity the
+    identity read did not return must not crash the sweep."""
+    d = R.decide_merges([_ident(1, "sreality", "Jan Novák")],
+                        _contacts("email", "jan@x.cz", 1, 999))
     assert d.auto_merge_groups == []
-    assert d.review_pairs == [(1, 2)] and d.dismiss_pairs == []
-
-
-def test_a_suppressed_pair_is_never_reclassified_as_dismissed():
-    """An operator's standing NO outranks the name rules in both directions."""
-    d = R.decide_merges(
-        [_ident(1, "sreality", "Ondřej Kadlec"), _ident(2, "idnes", "Monika Kadlecová")],
-        [R.Bridge(1, 2, "phone", "420774614199")],
-        ["sreality", "idnes"],
-        suppressed_pairs={(1, 2)},
-    )
-    assert d.suppressed == [(1, 2)]
-    assert d.dismiss_pairs == [] and d.review_pairs == []
