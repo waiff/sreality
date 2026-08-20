@@ -18,7 +18,8 @@ is the tie-breaker). This track records sequencing + shipped state only.
 | W2a payload archive rewrite | append-on-change `portal_raw_payloads` | 🟡 **backfill COMPLETE; gate (a) blocked on a verifier fix, not on the data** (2026-08-18) — migrations 405–408 applied; bodies to R2, storage bounded by construction (cap 2 + 7-day floor). **`payload_dual_write` ON globally since 2026-08-17 12:29 UTC, verified on all nine portals** (fresh rows per portal, mmreality last; corpus-wide evidence: the backfill's 12,044 `skipped_existing` are pages the live dual-write path archived before the scan reached them). `payload_index_archive` remains **OFF** (operator decision 2026-08-16: index keys are week-stamped so the cap bounds detail but not index; ~100 % churn on a surface nobody has diffed). #1074/#1075 wired the R2 secrets that made the flag real. **Backfill terminal 2026-08-18 01:59 UTC** — `reached_end=true`, `outcome='ok'`, 11 budgeted dispatches across two driver sessions: **472,429 pages scanned, 460,385 inserted, 12,044 skipped (dual-write overlap), 0 unmapped**, 39.68 GB read → **8.53 GB stored (4.65x)**, final cursor 5,617,479, batch 274. **The 445,191 inventory count is superseded — do not compute a percentage against it**: the archive grew 6.1 % while the scan walked it; `reached_end` is the only completion signal. Compression settled at 4.65x (the proving run's 7.5x and the mid-run ≈7.9 GB projection were both optimistic); one-time footprint 8.53 GB, still well inside the ~28.6 GB steady-state R2 projection (the ~4 GB figure elsewhere in this file is the POSTGRES metadata allowance, a different budget). **Gate (a) verify over the complete corpus (run 32090281321): FAIL, 31/1000 mismatch — diagnosed as a comparator artifact, not damage.** 0 missing / 0 unreadable (every sampled page was found in R2 and decoded cleanly). Every checkable failure (25/25 from the run log) had its `portal_raw_pages` source refetched **5–13 h AFTER the payload was stored** (idnes 18 / realitymix 5 / ceskereality 1 / mmreality 1 — exactly the live-drain portals, in proportion to measured churn; the no-drain portals produced zero), and the writer's **7-day append floor refuses by design to chase the refetch**, so the live source legitimately diverges from the stored copy for up to 7 days. The verifier's own `hash_matches` compares the writer-time hash against the LIVE source hash — it measures drift, not fidelity — and R2 keys are content-addressed on `body_sha256`, so key⇒content at write time. **As written, gate (a) cannot pass while any portal is being scraped — structurally unsignable — and that is the finding, not "31 bad pages".** Follow-ups (recorded, unstarted): (1) verifier compares like-for-like (`prp.fetched_at = payload.fetched_at`) or classifies source-refetched-after-store-with-floor-active as its own `stale-source` category instead of `mismatch`; (2) verifier should re-hash the downloaded R2 object against `body_sha256` — content-addressing proves key⇒content at write time but nothing re-checks the object after write; (3) raise `max_pool_connections` in the uploader's botocore config (urllib3 "pool is full" warnings across all 11 runs — throughput left on the table, correctness unaffected). `location-batch` saturation during the run is recorded as structure in #1084/#1086/#1087. **Gate (a), once fixed and green, licenses the STORAGE decision only** — nothing reads the archive until W2-13 gives the re-mine lane a workflow (#1082) |
 | W2 HTML re-mine | claims from archived `portal_raw_payloads` bodies | 🟡 **infrastructure shipped, lane deliberately inert** (2026-08-17) — W2-0/W2-1 (#1048/#1045), W2-3 the exclusion-zone scoper (#1053), W2-4 the contract shadow mechanism (#1050, mig 404), W2-5 the permanent fixture-diff gate (#1058) and W2-2 the evidence-bearing claims + archived-HTML re-mine lane (#1079) are all merged. The lane still mines **nothing**, but the reason moved: `ARCHIVE_READERS` now holds four generic DOM readers (#1081 `html_text`/`html_attr`/`html_point_dms`, #1090 `html_point_attrs`) and **no contract entry names one**, so a run finds no executable entry and returns *before* it opens a batch row — a batch stamped `'ok'` would move the incremental watermark over a corpus it never opened. **W2-6…W2-12 is READER work, not YAML work** (see the verification table below): six portals need a JSON-pointer reader, a regex reader with capture-group spans, and splitting transforms before their contracts become one-line activations, and no contract may activate before W2-13 anyway (#1082) |
 | W3 history backfill | claims from `listing_snapshots.raw_json` | ✅ **shipped 2026-08-19 — scan complete (`reached_end=true`) and all four gate arms PASS** (verify run 32223331085). **1,634,096 snapshots mined over five windows → 92,312 historical location claims + ~10.85 M observations**, terminal batch 289 / cursor 1,634,096. Note the terminal denominator against the 1,574,313 the wave opened with: `listing_snapshots` grew ~60 k rows while the scan walked it, so **`reached_end` is the only completion signal** — the same lesson W2a's backfill recorded (#1088). Unblocking it needed BOTH `location-batch` crons paused (#1100 intake, #1101 resolve), because resolve oversubscribes the group by itself — measured over eleven ticks, a run occupies it 11–27 min on a 15-min cadence, so ~1 tick in 3 completed and the rest superseded each other; both restored (#1105) the moment the scan finished. Gate arm 4 (the corpus arm) needed a lane that did not exist: `claims_remine_verify` + its own read-only workflow (#1102), then two corrections — scoping by anchor/observation rather than `extractor_version` (#1104), and **partitioning the series by contract entry (#1106), without which the gate PASSED on an artifact** (165,706 of 165,708 listings "oscillating"; the real figure is 324). See the W3 section for the measured oscillation and what it says about the program's churn premise |
-| W4–W6 | refetch cohorts, LLM lane, serving flip | ⚪ not started |
+| W4 targeted refetch cohorts | sreality legacy-shape + truncated refetch, bezrealitky remainder | 🟡 **build started (2026-08-18)** — the consumer for the cohort W1 has been filling since 2026-08-12 (#1083) + its dispatch lane. **Nothing dispatched**; substrate-disjoint from W2/W3 and outside `location-batch`. See the W4 section |
+| W5–W6 | LLM lane, serving flip | ⚪ not started |
 
 ## W0 — done
 
@@ -1394,6 +1395,87 @@ written, reviewed, and then deliberately not merged — twice.
 České Budějovice page, so the documented `"Praha (okres Praha)"` shape is untested; and mmreality's
 carries exactly ONE `:property` blob, so the zone that strips non-subject blobs — which that
 contract calls its principal hazard — is entirely unexercised.
+
+## W4 — build started (targeted refetch cohorts)
+
+Substrate-disjoint from W2 and W3 on purpose, which is why it could start while both were
+still running: W2 mines archived HTML for the seven HTML portals, W3 mined
+`listing_snapshots.raw_json`, and W4 re-fetches live pages for sreality + bezrealitky —
+neither of which is in the archive substrate at all. W3 additionally *declines* to feed the
+cohort (`route_legacy_shape_to_refetch=False`: a historical snapshot is an accurate fact
+about the past, not a gap a live refetch could close), so what W4 finds in
+`location_enrichment_state` is exactly what W1's live intake put there.
+
+**Sequenced first, because it is a one-way door:** sreality's frozen labelled sample was
+drawn **before** any refetch — sample 2, 120 members, seed `0.20260813`, drawn from 101,200
+active rows, 0 labelled. Migration 399 snapshots the OLD system's serving values at draw
+time precisely because the refetch that follows rewrites `listings.street`; drawing after
+would have destroyed the "how good was the old pipeline" baseline permanently. bezrealitky's
+120-row sample was already frozen in W1v. The draw is portal-uniform (`where source = %s and
+is_active order by random()`), so it scores CONTRACT precision — W4's own gate is coverage
+SQL and needs no labelling.
+
+**#1083 — the consumer migration 384 designed and nobody built.** `location_enrichment_state`
+had a producer since W1 (intake enrolls a sreality row whose payload is legacy-shape or 80 KB
+truncated; 38,612 rows parked) and no consumer, while 384 shipped the scheduling columns AND
+the partial index `les_due (lane, next_eligible_at) where not given_up` — keyed exactly the
+way a work-claiming driver reads it. Two defects fell out of that gap, both closed by
+`location_data/refetch_cohort.py`:
+
+- **The cohort was a HIGH-WATER MARK.** Nothing DELETEs from the table and a task is emitted
+  only while `sreality_payload_shape() != 'post_cutover'`, so a successful refetch merely
+  stopped the producer and left the row stale forever. A "legacy share" computed from it can
+  only grow — **W4 could not have passed its own `< 2 %` gate by succeeding.** `reconcile()`
+  retires placed / delisted / exhausted rows and makes it current-state.
+- **Every row was permanently DUE.** `_ENRICHMENT_WRITE_SQL`'s DO UPDATE is gated
+  `WHERE input_hash IS DISTINCT FROM EXCLUDED.input_hash`, so re-seeing an unchanged legacy
+  payload no-ops entirely and `next_eligible_at` stays frozen at its first-sight
+  `now() + 6 hours`. A driver reading `les_due` would re-claim the whole cohort every pass.
+  `mark_dispatched()` is the only thing that advances it.
+
+Retirement is `next_eligible_at = NULL`, **never `given_up`** — 384 gives that column the
+"stopped trying" meaning it carries in `listing_fetch_failures`, and a row that succeeded did
+not give up. NULL also survives the producer: a payload that regresses to legacy shape changes
+the hash, re-arms the schedule and pulls the row back in on its own. The shape test calls W1's
+own `sreality_payload_shape` rather than a SQL mirror — the classifier returns `absent` from
+TWO arms and tests post-cutover BEFORE legacy, and `jsonb_typeof(raw_json->'locality') <>
+'object'` is NULL-blind on a missing key, i.e. blind to exactly the truncation cohort. Only
+`raw_json->'locality'` is projected, never the whole payload.
+
+**The dispatch lane** (this PR) is `workflow_dispatch`-only with `mode` defaulting to
+`reconcile` — the phase that retires finished rows and enqueues nothing, which is the correct
+first run against a cohort that has never been cleaned. `dispatch` mode enqueues the still-
+pending rows through the ordinary `listing_detail_queue` at `priority = -1` (06 §6.4: "route
+through the existing bounded drain rather than a bespoke crawler"), strictly behind real-time
+discovery. It takes a `location_jobs` lease-row CAS (`location_refetch_cohort`) as a second
+guard the GitHub group cannot provide, and it is deliberately **outside `location-batch`**:
+that group serialises heavy corpus-wide DB sweeps and is measurably oversubscribed (#1084),
+while this lane's scarce resource is portal egress, already governed by the drain it enqueues
+into. No migration, and the lane can fetch nothing itself.
+
+**Naming, for the next module:** the cohort constant is `COHORT_LANE`, not `LANE`. That name
+is reserved for `location_claim_batches.lane` — the resume-cursor identity
+`test_lane_identifiers.py` polices after the W3 erratum — and this module stamps no batch row.
+The gate caught it; the fix was renaming, not inventing an extractor version for a lane that
+versions nothing.
+
+**Open, in order:**
+
+- Dispatch `mode=reconcile` once. Until it runs, the 38,612 says nothing about work remaining.
+- **The gate denominator, and it is NOT the cohort table.** W4's gate is "legacy-shape share of
+  active rows < 2 %, from the W0-recorded baseline". The cohort spans ALL sreality rows
+  (`_LISTINGS_FULL_SQL` has no `is_active` filter, deliberately) while W0's 8.4 % was
+  active-only, and a listing delisted before the June-2026 cutover keeps its pre-cutover shape
+  forever — so the two numbers are consistent, not contradictory. The gate wants a direct shape
+  scan over active sreality rows, mirroring the classifier as one exhaustive `CASE` (post-cutover
+  tested first, `IS DISTINCT FROM 'object'`, `ELSE 'absent'`) so the percentages self-check to 100.
+  Sub-cohorts separate directly: `last_outcome='skipped'` is legacy-shape, `='error'` is truncated.
+- W4(b) bezrealitky remainder (`ruianId` ≥ 95 % of active) and W4(c) truncated payloads.
+- The P6 standing `payload_schema_detector` check, scoped to sreality + bezrealitky —
+  `ceskereality.yaml` carries one too and belongs to W2's per-portal work.
+- **R4 (Mapy purge) stays carved out and operator-gated.** It is the program's only destructive
+  surface and the only part touching live serving; 06 §6.4's coexistence promise ("nothing in the
+  ingest write path changes") covers W1–W3 and pointedly excludes W4.
 
 ## Standing decisions
 

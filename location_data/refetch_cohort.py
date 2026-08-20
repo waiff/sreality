@@ -42,6 +42,7 @@ from typing import Any
 import psycopg
 
 from location_data.claims_intake import guarded, sreality_payload_shape
+from location_data.resolver import lease
 from scraper import db
 
 LOG = logging.getLogger("location_data.refetch_cohort")
@@ -52,6 +53,12 @@ LOG = logging.getLogger("location_data.refetch_cohort")
 # resume cursor; its lane is `location_enrichment_state.lane`, a different column and a
 # different namespace, shared on purpose with the producer that fills it.
 COHORT_LANE = "sreality_detail_refetch"
+
+# The lease-row CAS, never an advisory lock — the transaction-mode pooler strands one. It
+# is a second, orthogonal guard to the workflow's concurrency group: it also catches a
+# manual local invocation racing the dispatched run, which a GitHub-only group cannot see.
+JOB_NAME = "location_refetch_cohort"
+CONCURRENCY_GROUP = "location-refetch-cohort"
 
 # Strictly behind real-time discovery. The claim order is (priority DESC, enqueued_at ASC),
 # so a negative priority means the cohort drains only out of genuine slack.
@@ -308,9 +315,14 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     with db.connect() as conn:
-        stats = run(conn, lane=args.lane, limit=args.limit, batch_size=args.batch_size,
-                    max_seconds=args.max_seconds, reconcile_only=args.reconcile_only,
-                    dry_run=args.dry_run)
+        with lease.held(conn, JOB_NAME, cadence="6 hours",
+                        concurrency_group=CONCURRENCY_GROUP) as owned:
+            if not owned:
+                LOG.info("REFETCH skipped: another run holds the %s lease", JOB_NAME)
+                return 0
+            stats = run(conn, lane=args.lane, limit=args.limit, batch_size=args.batch_size,
+                        max_seconds=args.max_seconds, reconcile_only=args.reconcile_only,
+                        dry_run=args.dry_run)
     LOG.info("REFETCH done %s", json.dumps(stats, default=str, sort_keys=True))
     return 0
 
