@@ -1076,10 +1076,23 @@ contact corpus to `toolkit.broker_resolver.decide_merges`, which since 2026-08-2
   one fact that proved they were one person. Under the discrimination test duplication REINFORCES
   the signal; role inboxes (`info@…` under 353 names) and switchboards still fail it — by carrying
   many NAMES, not many rows.
-- **Path B** substitutes market-wide name rarity for contact evidence: a name confined to a single
-  firm is very unlikely to be two people, which is what merges the role-inbox-only shape (a fan of
-  records at one firm reachable only at the switchboard). Common names (`Jan Novák`, present at
-  dozens of firms) and generic role labels (`Zákaznická linka`) fail it automatically.
+- **Path B** substitutes market-wide name rarity for contact evidence: a name that appears at no
+  OTHER firm is very unlikely to be two people, which is what merges the role-inbox-only shape (a
+  fan of records at one firm reachable only at the switchboard). Common names (`Jan Novák`, present
+  at dozens of firms) and generic role labels (`Zákaznická linka`) fail it automatically. Three
+  guards keep the rarity claim honest, because it is narrower than "the name appears nowhere else":
+  the firm is the **identity's own** (`firm_identities.firm_id`, its e-mail domain) and never
+  `brokers.primary_firm_id` — that column is a recency rollup, and feeding it to B made the test
+  self-weakening (a merge collapsed the very two-firm spread that had refused the third record) and
+  non-deterministic night to night; an identity with no firm abstains from the spread rather than
+  voting, so the firmless independent-broker cohort neither helps nor blocks it; a **franchise**
+  firm (`firms.is_franchise` — `re-max.cz` is one brand over ~95 independent offices) is refused
+  outright, since two same-named agents there are not colleagues; and a (name, firm) cohort whose
+  members carry **disconfirming** contacts — each a discriminating one of the same kind, no value
+  in common — is refused whole. That last one is what catches a display name that IS the firm's
+  name ("PREXIMA nemovitosti s.r.o." on five agents, each with a personal mailbox): unique to its
+  firm by construction, so rarity alone can never see it. All three refusals land in the `name_firm`
+  operator tab, which exists for exactly that cohort.
 - The paths are OR'd, and the firm-spread test guards **B only** — it is B's substitute for contact
   evidence, not an extra bar on A. A shared discriminating contact merges a common-named pair even
   if that name exists at fifty firms.
@@ -1106,16 +1119,22 @@ both survive is retired the moment the merges land (`resolved_by='auto:sweep'`) 
 lingering as a card that can only ever answer 409.
 
 Components cap at `MAX_AUTO_MERGE_COMPONENT`, raised 6 → **20**: every edge is name-gated and
-`name_key` equality is transitive, so a component is single-named BY CONSTRUCTION and the
-cross-name chain fusion the old cap guarded against (one recycled phone chaining distinct people)
-is structurally impossible. What the cap stops now is a role-account mega-pool — one switchboard
-under one generic label, a live example carrying 464 records — while clearing the largest observed
-genuine duplicate fan (7). An oversized component is downgraded WHOLE: every internal pair goes to
-review, none of it merges — except past `MAX_REVIEW_EXPANSION` (500 identities), where the queue
-gets the component's real EDGES instead of its n(n-1)/2 transitive pairs; that is an OOM rail on the
-pairwise expansion, not a policy, and nothing observed comes near it. `_apply_merges` then merges at
-BROKER grain, which deliberately widens what one run fuses (two capped groups chain through a broker
-holding an identity in each).
+`name_key` equality is transitive, so a component of the pure layer is single-named BY CONSTRUCTION
+and the cross-name chain fusion the old cap guarded against (one recycled phone chaining distinct
+people) cannot form there. What the cap stops is a role-account mega-pool — one switchboard under
+one generic label, a live example carrying 464 records — while clearing the largest observed genuine
+duplicate fan (7). An over-cap component is downgraded WHOLE, and queued as its real **edges**
+(n-1 same-name shared-contact pairs) rather than its n(n-1)/2 transitive closure: expanding that
+464-record pool pairwise was 107,416 cards a night, and the review writer's "must share an actual
+contact" filter thins none of them, because the one switchboard that chained the pool is on every
+pair. A suppression anywhere inside a component downgrades the component the same way, and the
+component is computed over EVERY edge including the suppressed one — dropping the edge first let a
+suppression that landed on a chain's hub strand the detached identity in neither queue, with the
+outcome turning on which id sorted first. `_apply_merges` then merges at BROKER grain, which
+deliberately widens what one run fuses (two capped groups chain through a broker holding an identity
+in each — the one place differently-named groups can meet, since `name_key` transitivity rules it
+out inside `decide_merges`); that chain is bounded by the SAME cap at broker grain, and a wider
+component is skipped whole and counted rather than merged with only a warning.
 
 The 7,689 live auto-merges predate this rule and were decided under the old bar — those with
 conflicting names are NOT retroactively undone.

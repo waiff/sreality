@@ -29,11 +29,24 @@ duplication REINFORCES the signal instead of destroying it, and role inboxes
 they did before — by carrying many names, not by carrying many rows.
 
 **Firm rarity** (path B) substitutes market-wide name rarity for contact evidence:
-a name confined to a single firm corpus-wide is very unlikely to be two people, so
-two records of it at that firm are one person even with no contact in common (the
+a name that appears at no OTHER firm is very unlikely to be two people, so two
+records of it at that firm are one person even with no contact in common (the
 role-inbox-only shape: everyone reachable at the same switchboard). Common names
 (`Jan Novák`, present at dozens of firms) and generic role labels (`Zákaznická
 linka`) fail it automatically and stay in manual review.
+
+The claim it rests on is narrower than "the name appears nowhere else", and three
+guards keep it honest. The firm is the identity's OWN (its e-mail domain), so a
+merge cannot collapse the very spread that proved a name spans two firms; an
+identity that publishes no firm abstains from the spread rather than voting, so
+independent brokers with no firm at all neither help nor block it. A FRANCHISE
+firm is refused outright: `re-max.cz` is one brand over ~95 independent offices,
+so two agents of one name there are not colleagues and their shared firm_id proves
+nothing. And a cohort whose members carry disconfirming contacts — each a
+discriminating one of the same kind, no value in common — is refused whole: that
+is positive evidence of different people, and it is what a firm-branded display
+name ("PREXIMA nemovitosti s.r.o." on five agents) otherwise walks straight past,
+since a label that IS the firm's name is unique to that firm by construction.
 
 The paths are OR'd, and the firm-spread test guards B ONLY — it is B's substitute
 for contact evidence, not an extra bar on A. A shared discriminating contact merges
@@ -56,24 +69,25 @@ import unicodedata
 from collections.abc import Iterable, Sequence, Set as AbstractSet
 from dataclasses import dataclass, field
 
-# Every edge is name-gated and name_key equality is transitive, so a component is
-# single-named BY CONSTRUCTION — the cross-name chain fusion the old cap of 6
-# guarded against (one recycled phone number chaining distinct people) is now
-# structurally impossible. What the cap still guards is a role-account mega-pool:
-# one switchboard or one role inbox under a single generic label (a live example
-# carries 464 records), which is discriminating by the letter of the test and is
-# not one human. 20 clears the largest observed genuine duplicate fan (7) with
-# margin while stopping a hundred-record pool from fusing in one night.
+# Every edge is name-gated and name_key equality is transitive, so a component of
+# THIS layer is single-named by construction — the cross-name chain fusion the old
+# cap of 6 guarded against (one recycled phone number chaining distinct people)
+# cannot form here. (The apply layer can still chain two differently-named groups
+# through a broker that already holds an identity in each; that is a merge already
+# recorded, and `scripts.resolve_brokers._apply_merges` bounds it by this same
+# number.) What the cap guards here is a role-account mega-pool: one switchboard or
+# one role inbox under a single generic label (a live example carries 464 records),
+# which is discriminating by the letter of the test and is not one human. 20 clears
+# the largest observed genuine duplicate fan (7) with margin while stopping a
+# hundred-record pool from fusing in one night.
+#
+# It doubles as the review-expansion ceiling. A downgraded component is expanded
+# pairwise, which is n(n-1)/2 — 107,416 cards for that 464-record pool, every
+# sweep, all of them sharing the one switchboard that chained it (so no downstream
+# filter thins them). Past the cap the component is queued as its real EDGES
+# instead: n-1 genuine same-name shared-contact pairs the operator can still judge,
+# and never a one-click merge of two agents joined only several hops away.
 MAX_AUTO_MERGE_COMPONENT = 20
-
-# A downgraded component is expanded pairwise for review, which is n(n-1)/2 — 107k
-# pairs for the 464-record pool above, and quadratically worse for anything larger.
-# This is the OOM rail, not a policy: past this size the pairwise expansion alone
-# would outweigh the whole corpus, so the component is queued as its real EDGES
-# (n-1 genuine shared-contact pairs the operator can still judge) instead of as
-# every transitive pair. Sized well above the largest pool ever observed so the
-# prescribed behaviour is what actually runs.
-MAX_REVIEW_EXPANSION = 500
 
 # broker_merge_events.reason for an auto-merge, by the evidence that formed it.
 # Free text in the schema (no CHECK) — these three strings are the convention.
@@ -94,6 +108,17 @@ class Identity:
     `mergeable=False` marks an identity whose broker is already merged away: it
     still COUNTS for the discrimination and name→firms maps (its name is evidence
     about who a contact belongs to) but never gets an edge of its own.
+
+    `firm_id` is the identity's OWN firm (the one behind its e-mail domain), never
+    a broker-level rollup: path B measures how many firms a name appears at, and a
+    rollup collapses every identity of an already-merged broker onto one firm, so
+    the very merge that proved a name spans two firms would erase that evidence on
+    the next sweep. `franchise` marks a firm that is one brand over many
+    independent offices (`firms.is_franchise`) — a shared firm_id there is not a
+    shared employer, so path B does not run on it. `primary_firm_id` is the
+    broker-level rollup and is used for ONE thing: not double-carding a pair the
+    `name_firm` candidate generator (which groups on exactly that column) already
+    proposes.
     """
 
     id: int
@@ -101,6 +126,8 @@ class Identity:
     name: str | None = None
     firm_id: int | None = None
     mergeable: bool = True
+    franchise: bool = False
+    primary_firm_id: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -275,6 +302,27 @@ def _pairs(members: Sequence[int]) -> list[tuple[int, int]]:
             for i in range(len(members)) for j in range(i + 1, len(members))]
 
 
+def _contradicted(members: Sequence[int],
+                  discriminating: dict[int, dict[str, set[str]]]) -> bool:
+    """True when these identities carry disconfirming contact evidence.
+
+    Path B merges on the ABSENCE of contradicting evidence, and absence is what a
+    missing contact looks like too. Two identities that each hold a discriminating
+    contact of the same kind, with no value in common, are positive evidence of two
+    different people — the shape of a generic display name that IS the firm's name
+    (five agents at one agency all published as "PREXIMA nemovitosti s.r.o.", each
+    with a personal mailbox: unique to its firm by construction, so the rarity test
+    can never catch it). The whole (name, firm) cohort is refused rather than the
+    offending pair, so the answer does not depend on chain order; it lands in the
+    `name_firm` candidate tab, which exists for exactly this cohort.
+    """
+    by_kind: dict[str, list[set[str]]] = {}
+    for member in members:
+        for kind, values in discriminating.get(member, {}).items():
+            by_kind.setdefault(kind, []).append(values)
+    return any(len(sets) > 1 and not set.intersection(*sets) for sets in by_kind.values())
+
+
 def decide_merges(
     identities: Sequence[Identity],
     contacts: Sequence[Contact],
@@ -313,10 +361,13 @@ def decide_merges(
     #    value that actually carry its one name. n-1 edges instead of n(n-1)/2 —
     #    union-find produces the same component from either.
     a_edges: dict[tuple[int, int], set[str]] = {}
+    discriminating: dict[int, dict[str, set[str]]] = {}
     for value, holders in carriers.items():
         names = names_at.get(value) or set()
         if len(names) != 1:
             continue
+        for holder in holders:
+            discriminating.setdefault(holder, {}).setdefault(value[0], set()).add(value[1])
         only = next(iter(names))
         members = sorted(i for i in holders if keys[i] == only and by_id[i].mergeable)
         for other in members[1:]:
@@ -325,7 +376,11 @@ def decide_merges(
     # 3. B-edges: a name that exists at exactly one firm corpus-wide, chained
     #    across the mergeable identities sitting at that firm under that name. The
     #    firm spread counts EVERY identity — a duplicate of the same person at a
-    #    second firm is exactly the ambiguity this path must refuse.
+    #    second firm is exactly the ambiguity this path must refuse. Two firms the
+    #    spread deliberately refuses to argue from: a FRANCHISE firm is one brand
+    #    over many independent offices, so a shared firm_id there is not a shared
+    #    employer at all, and an identity with no firm of its own abstains rather
+    #    than voting (it has no firm evidence either way).
     firms_of_name: dict[str, set[int]] = {}
     for ident in identities:
         key = keys[ident.id]
@@ -334,7 +389,7 @@ def decide_merges(
     at_firm: dict[tuple[str, int], list[int]] = {}
     for ident in identities:
         key = keys[ident.id]
-        if not key or ident.firm_id is None or not ident.mergeable:
+        if not key or ident.firm_id is None or not ident.mergeable or ident.franchise:
             continue
         if len(firms_of_name.get(key, ())) != 1:
             continue
@@ -342,20 +397,28 @@ def decide_merges(
     b_edges: set[tuple[int, int]] = set()
     for members_at in at_firm.values():
         members = sorted(set(members_at))
+        if len(members) < 2 or _contradicted(members, discriminating):
+            continue
         for other in members[1:]:
             b_edges.add((members[0], other))
 
-    # 4. The operator's standing NO removes the edge itself.
+    # 4. The operator's standing NO removes the edge from the MERGE — but the pair
+    #    stays in the component (step 5), because removing it outright would strand
+    #    whichever identity the suppression happened to detach from the chain's hub:
+    #    suppressing (1, 2) of a 1-2/1-3 chain merged 1 with 3 and left 2 neither
+    #    merged nor reviewed, while suppressing (2, 3) of the same corpus downgraded
+    #    all three. The only difference was which id sorted first.
+    all_edges = sorted(set(a_edges) | b_edges)
     edges: list[tuple[int, int]] = []
-    for edge in sorted(set(a_edges) | b_edges):
+    for edge in all_edges:
         if edge in blocked:
             decision.suppressed.append(edge)
             continue
         edges.append(edge)
 
-    # 5. Components over the surviving edges.
+    # 5. Components over EVERY edge (see step 4); only the surviving ones merge.
     blocked_nodes = {n for pair in blocked for n in pair}
-    components = _union_find({n for e in edges for n in e}, edges)
+    components = _union_find({n for e in all_edges for n in e}, all_edges)
     root_of = {n: root for root, members in components.items() for n in members}
     edges_by_root: dict[int, list[tuple[int, int]]] = {}
     for edge in edges:
@@ -374,7 +437,7 @@ def decide_merges(
             lo in inside and hi in inside for lo, hi in blocked)
         if touched or len(group) > MAX_AUTO_MERGE_COMPONENT:
             decision.review_pairs.extend(
-                _pairs(group) if len(group) <= MAX_REVIEW_EXPANSION
+                _pairs(group) if len(group) <= MAX_AUTO_MERGE_COMPONENT
                 else edges_by_root.get(root, []))
             continue
         decision.auto_merge_groups.append(group)
@@ -411,7 +474,12 @@ def decide_merges(
                 same_name.setdefault(key, []).append(i)
         for cohort in same_name.values():
             for a, b in _pairs(cohort):
-                firm_a, firm_b = by_id[a].firm_id, by_id[b].firm_id
+                # The name_firm generator groups on brokers.primary_firm_id and
+                # INNER JOINs firms, so it cards a pair only when BOTH sides carry
+                # that column. Comparing anything else here (the identity's own
+                # firm, say) drops the pair from this queue without it appearing in
+                # the other one — invisible in both.
+                firm_a, firm_b = by_id[a].primary_firm_id, by_id[b].primary_firm_id
                 if firm_a is not None and firm_a == firm_b:
                     continue
                 if a in merged_root and merged_root[a] == merged_root.get(b):

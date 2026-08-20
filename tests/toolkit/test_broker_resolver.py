@@ -11,9 +11,18 @@ from __future__ import annotations
 from toolkit import broker_resolver as R
 
 
+_SAME_FIRM = -1   # sentinel: "the broker rollup agrees with the identity's own firm"
+
+
 def _ident(i: int, source: str = "sreality", name: str | None = None, *,
-           firm: int | None = None, mergeable: bool = True) -> R.Identity:
-    return R.Identity(i, source, name, firm, mergeable)
+           firm: int | None = None, mergeable: bool = True, franchise: bool = False,
+           primary_firm: int | None = _SAME_FIRM) -> R.Identity:
+    """`firm` is the identity's OWN firm; `primary_firm` is its broker's rollup,
+    which only the double-card check reads (it is what the name_firm card generator
+    groups on). Defaults to the identity's own firm where a test does not care;
+    pass None for a broker whose rollup has not landed."""
+    return R.Identity(i, source, name, firm, mergeable, franchise,
+                      firm if primary_firm == _SAME_FIRM else primary_firm)
 
 
 def _contacts(kind: str, value: str, *identity_ids: int) -> list[R.Contact]:
@@ -208,6 +217,54 @@ def test_a_firmless_identity_takes_no_firm_edge():
     assert R.decide_merges(ids, []).auto_merge_groups == []
 
 
+def test_a_franchise_firm_is_not_a_shared_employer():
+    """`re-max.cz` is ONE firm row over ~95 independent offices (firms.is_franchise,
+    and every RE/MAX identity lands on it through the role domain). Two agents of one
+    name there are not colleagues, so the shared firm_id proves nothing and path B
+    must not fire — even though the name, confined to that one domain, passes the
+    rarity test by construction."""
+    ids = [_ident(1, "remax", "Jan Dvořák", firm=42, franchise=True),
+           _ident(2, "remax", "Dvořák Jan", firm=42, franchise=True)]
+    assert R.decide_merges(ids, []).auto_merge_groups == []
+    # ...and path A is untouched: a discriminating contact still merges them
+    d = R.decide_merges(ids, _contacts("email", "jan.dvorak@re-max.cz", 1, 2))
+    assert d.auto_merge_groups == [[1, 2]]
+    assert d.group_reasons == {(1, 2): R.REASON_CONTACT_NAME}
+
+
+def test_disconfirming_contacts_refuse_the_firm_path():
+    """A display name that IS the firm's name is unique to that firm BY
+    CONSTRUCTION, so the rarity test can never catch it — five agents published as
+    "PREXIMA nemovitosti s.r.o." would fuse into one broker, collapsing five
+    leaderboard rows and five primary_emails. Their personal mailboxes are the
+    evidence the rule was missing: each discriminating, none shared, which is
+    positive evidence of five different people rather than the mere ABSENCE of a
+    shared contact that path B otherwise reads as agreement."""
+    ids = [_ident(i, "idnes", "PREXIMA nemovitosti s.r.o.", firm=7) for i in range(1, 6)]
+    contacts = [R.Contact(i, "email", f"agent{i}@prexima.cz") for i in range(1, 6)]
+    d = R.decide_merges(ids, contacts)
+    assert d.auto_merge_groups == []
+    assert d.review_pairs == []           # the name_firm tab already cards this cohort
+
+
+def test_one_personal_contact_in_a_cohort_does_not_refuse_it():
+    """The guard needs two SIDES to contradict each other. One record of the fan
+    carrying a personal e-mail while the rest carry only the role inbox is not
+    evidence of two people — it is the ordinary shape of a duplicate fan, and
+    refusing it would take Harák with it."""
+    ids = [_ident(i, "sreality", "Jiří Harák", firm=10) for i in range(1, 5)]
+    ids += [_ident(20 + i, "sreality", f"Kolega {i}", firm=10) for i in range(1, 4)]
+    everyone = [i.id for i in ids]
+    contacts = (_contacts("email", "info@harakreality.cz", *everyone)
+                + _contacts("email", "jiri.harak@harakreality.cz", 3))
+    d = R.decide_merges(ids, contacts)
+    assert d.auto_merge_groups == [[1, 2, 3, 4]]
+    # two identities carrying the SAME discriminating contact agree, too
+    ids = [_ident(i, "sreality", "Jiří Harák", firm=10) for i in range(1, 4)]
+    d = R.decide_merges(ids, _contacts("phone", "420605111222", 1, 2))
+    assert d.auto_merge_groups == [[1, 2, 3]]
+
+
 def test_a_mixed_component_records_both_evidence_paths():
     ids = [_ident(1, "sreality", "Jiří Harák", firm=10),
            _ident(2, "idnes", "Harák Jiří", firm=10),
@@ -243,37 +300,54 @@ def test_the_same_pair_inside_one_firm_is_left_to_the_name_firm_tab():
     assert d.review_pairs == []
 
 
-def test_an_oversized_component_is_downgraded_whole():
+def test_a_pair_the_name_firm_tab_cannot_see_is_queued_after_all():
+    """...but only when that tab really would card it. The generator groups on
+    brokers.primary_firm_id and INNER JOINs firms, so a broker whose rollup has not
+    landed yet (routine: _link_listings_firm runs on a time budget) is absent from
+    it. Skipping the review pair on the identity's own firm instead would drop the
+    pair out of BOTH queues — visible nowhere, forever."""
+    ids = [_ident(1, "sreality", "Eva Malá", firm=40, primary_firm=None),
+           _ident(2, "idnes", "Malá Eva", firm=40, primary_firm=None),
+           _ident(3, "bazos", "Eva Malá", firm=50),      # name at 2 firms -> no B-merge
+           _ident(4, "remax", "Petr Svoboda", firm=40)]
+    d = R.decide_merges(ids, _contacts("email", "info@firma40.cz", 1, 2, 4))
+    assert d.auto_merge_groups == []
+    assert d.review_pairs == [(1, 2)]
+
+
+def test_an_oversized_component_is_queued_as_its_real_edges_not_its_closure():
     """21 records of one generic label chained by one switchboard: discriminating by
-    the letter of the test, not one human. Nothing merges; every pair is queued."""
+    the letter of the test, not one human. Nothing merges — and the operator gets the
+    n-1 pairs that actually formed the chain, never its n(n-1)/2 transitive closure.
+
+    The closure is not a theoretical cost: the live 464-record pool the cap was sized
+    against expanded to 107,416 cards, every sweep, and the review writer's "must
+    share an actual contact" filter thins none of them, because the one switchboard
+    that chained the pool sits on every transitive pair too."""
     ids = [_ident(i, "sreality", "Zákaznická linka") for i in range(1, 22)]
     d = R.decide_merges(ids, _contacts("phone", "420800123456", *range(1, 22)))
     assert d.auto_merge_groups == []
-    assert len(d.review_pairs) == 21 * 20 // 2
-    assert (1, 21) in d.review_pairs
-
-
-def test_a_pool_too_large_to_expand_is_queued_as_its_real_edges():
-    """The OOM rail. A downgraded component is expanded pairwise, which is n(n-1)/2
-    — fine for the 464-record pool the cap was sized against, ruinous an order of
-    magnitude up (a 5,000-record label would be 12.5M pairs, more rows than the
-    whole corpus). Past MAX_REVIEW_EXPANSION the component is queued as the edges
-    that actually formed it: still genuine same-name shared-contact pairs, just
-    n-1 of them."""
-    n = R.MAX_REVIEW_EXPANSION + 1
-    ids = [_ident(i, "sreality", "Zákaznická linka") for i in range(1, n + 1)]
-    d = R.decide_merges(ids, _contacts("phone", "420800123456", *range(1, n + 1)))
-    assert d.auto_merge_groups == []
-    assert len(d.review_pairs) == n - 1          # the chain, not the clique
+    assert len(d.review_pairs) == 20             # the chain, not the clique
     assert all(a == 1 for a, _ in d.review_pairs)
-    # ...and one identity below the ceiling still expands in full
-    smaller = [_ident(i, "sreality", "Zákaznická linka")
-               for i in range(1, R.MAX_REVIEW_EXPANSION + 1)]
-    full = R.decide_merges(
-        smaller, _contacts("phone", "420800123456",
-                           *range(1, R.MAX_REVIEW_EXPANSION + 1)))
-    expected = R.MAX_REVIEW_EXPANSION * (R.MAX_REVIEW_EXPANSION - 1) // 2
-    assert len(full.review_pairs) == expected
+    assert (2, 3) not in d.review_pairs          # a transitive pair, never proposed
+
+    # ...and the 464-record shape stays linear rather than six figures
+    big = [_ident(i, "sreality", "Zákaznická linka") for i in range(1, 465)]
+    pool = R.decide_merges(big, _contacts("phone", "420800123456", *range(1, 465)))
+    assert len(pool.review_pairs) == 463
+
+
+def test_a_component_downgraded_by_a_suppression_still_expands_pairwise():
+    """The edges-only rail is the CAP's, not the suppression's: a component small
+    enough to merge is small enough to expand, and its pairs are the questions the
+    operator's own NO reopened."""
+    ids = [_ident(i, "sreality", "Jan Novák") for i in (1, 2, 3, 4)]
+    contacts = (_contacts("email", "jan@a.cz", 1, 2, 3)
+                + _contacts("email", "jan@b.cz", 3, 4))
+    d = R.decide_merges(ids, contacts, suppressed_pairs={(1, 2)})
+    assert d.auto_merge_groups == []
+    assert d.review_pairs == [(1, 3), (1, 4), (2, 3), (2, 4), (3, 4)]
+    assert d.suppressed == [(1, 2)]
 
 
 def test_the_cap_is_twenty_and_a_fan_that_size_still_merges():
@@ -309,6 +383,31 @@ def test_a_suppression_downgrades_the_whole_component_it_sits_inside():
     assert d.review_pairs == [(1, 2), (2, 3)]
     assert d.suppressed == [(1, 3)]
     assert len(d.review_pairs) + len(d.suppressed) == 3  # counted once, not twice
+
+
+def test_a_suppression_on_the_chains_hub_downgrades_instead_of_stranding():
+    """Same corpus, same evidence, two different suppressed pairs: the verdict must
+    not turn on which id happened to sort first and become the chain's hub.
+
+    It did. Dropping the suppressed EDGE removed identity 2 from the component
+    entirely when the suppression landed on the hub edge (1, 2), so 1 and 3 merged
+    and 2 was neither merged with 3 — on exactly the evidence that merged (1, 3) and
+    with no operator NO against it — nor queued anywhere. Suppressing (2, 3) on the
+    identical corpus downgraded all three. The component is now formed over every
+    edge, suppressed ones included, so both spellings answer the same."""
+    ids = [_ident(i, "sreality", "Eva Malá") for i in (1, 2, 3)]
+    contacts = _contacts("email", "eva.mala@byty.cz", 1, 2, 3)
+    assert R.decide_merges(ids, contacts).auto_merge_groups == [[1, 2, 3]]
+
+    hub = R.decide_merges(ids, contacts, suppressed_pairs={(1, 2)})
+    assert hub.auto_merge_groups == []
+    assert hub.review_pairs == [(1, 3), (2, 3)]
+    assert hub.suppressed == [(1, 2)]
+
+    spoke = R.decide_merges(ids, contacts, suppressed_pairs={(2, 3)})
+    assert spoke.auto_merge_groups == []
+    assert spoke.review_pairs == [(1, 2), (1, 3)]
+    assert spoke.suppressed == [(2, 3)]
 
 
 def test_suppressing_one_pair_leaves_the_others_alone():

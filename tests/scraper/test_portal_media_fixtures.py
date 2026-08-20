@@ -358,8 +358,9 @@ def test_mmreality_publishes_one_shared_switchboard_not_a_broker_contact():
     phone == mobile. This page pins the shape of that — a role local-part on the
     portal's own domain, the SAME address on the page's other staff block
     (mortgageAdviser, a different person entirely), and phone and mobile carrying
-    one value. Contact rows off this would be ~1,021 copies of one number that the
-    freq==1 bridge guard discards anyway.
+    one value. Contact rows off this would be ~1,021 copies of one number carried
+    by ~1,021 different names — non-discriminating, so worth nothing to the merge
+    engine.
 
     The number itself is the fixture scrubber's placeholder — identical inputs
     scrub identically, so the equality survives while the digits do not."""

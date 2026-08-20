@@ -330,17 +330,29 @@ WHERE r.rk = 1 AND r.n::numeric / r.total >= 0.60
 # just shrinking the work. The old frequency/personal/multi-source CTEs are gone
 # with the guard they served (a duplicated broker's own e-mail read as shared).
 #
-# firm_id: the broker's curated primary firm when it has one, else the firm behind
-# the identity's own e-mail domain. mergeable=false for an identity whose broker is
-# already merged away — it still counts as evidence about a contact's owner, but it
-# never gets an edge (its broker is not a merge target).
+# firm_id: the firm behind the IDENTITY's own e-mail domain — deliberately not
+# coalesced with brokers.primary_firm_id. That column is not curated: _BROKER_ROLLUP
+# derives it DISTINCT ON (broker_id) ORDER BY last_seen_at, i.e. the firm of the
+# broker's most recent listing. Fed to path B it made the rarity test self-weakening
+# (merge two identities of one name at two firms and next sweep both report one
+# firm, so the name's spread drops to 1 and a third, unrelated record of that name
+# gets a free B-edge) and non-deterministic day to day. franchise carries
+# firms.is_franchise, which marks a domain that is one brand over many independent
+# offices (re-max.cz, century21.cz) — a shared firm there is not a shared employer.
+# primary_firm_id rides along for ONE purpose: decide_merges' double-card check,
+# which must compare exactly what _CANDIDATE_BROKERS groups on. mergeable=false for
+# an identity whose broker is already merged away — it still counts as evidence
+# about a contact's owner, but never gets an edge (its broker is not a merge target).
 _MERGE_IDENTITIES_SQL = """
 SELECT bi.id, bi.source, bi.display_name,
-       coalesce(b.primary_firm_id, fi.firm_id) AS firm_id,
-       (b.status IS DISTINCT FROM 'merged_away') AS mergeable
+       fi.firm_id AS firm_id,
+       (b.status IS DISTINCT FROM 'merged_away') AS mergeable,
+       coalesce(f.is_franchise, false) AS franchise,
+       b.primary_firm_id
 FROM broker_identities bi
 LEFT JOIN brokers b ON b.id = bi.broker_id
 LEFT JOIN firm_identities fi ON fi.id = bi.firm_identity_id
+LEFT JOIN firms f ON f.id = fi.firm_id
 """
 
 _MERGE_CONTACTS_SQL = """
@@ -652,9 +664,9 @@ def _auto_merge(conn: Any, run_id: int) -> tuple[int, int, int]:
     toolkit.broker_resolver, applies at BROKER grain and persists everything the
     rule could not prove for operator review (_queue_review_pairs). The second
     returned count is the pairs DECIDED, which is what
-    broker_resolution_runs.queued_for_review has always meant. The third is what
-    the operator's standing NO blocked this run — suppressed edges plus whole
-    components the apply-time backstop dropped.
+    broker_resolution_runs.queued_for_review has always meant. The third is what the
+    apply-time rails refused this run — suppressed edges, whole components the
+    standing-NO backstop dropped, and components too large to fuse.
     """
     # One full-table read of each input, once per daily sweep: lift the pooler's
     # app-query statement timeout, which is the wrong guardrail for it.
@@ -668,8 +680,10 @@ def _auto_merge(conn: Any, run_id: int) -> tuple[int, int, int]:
         return 0, 0, 0
 
     identities: dict[int, R.Identity] = {
-        int(iid): R.Identity(int(iid), source, name, _as_int(firm_id), bool(mergeable))
-        for iid, source, name, firm_id, mergeable in identity_rows
+        int(iid): R.Identity(int(iid), source, name, _as_int(firm_id), bool(mergeable),
+                             bool(franchise), _as_int(primary_firm_id))
+        for iid, source, name, firm_id, mergeable, franchise, primary_firm_id
+        in identity_rows
     }
     contacts = [R.Contact(int(iid), kind, value) for iid, kind, value in contact_rows
                 if int(iid) in identities]
@@ -677,10 +691,10 @@ def _auto_merge(conn: Any, run_id: int) -> tuple[int, int, int]:
     blocked = _suppressed_pairs(conn)
     decision = R.decide_merges(list(identities.values()), contacts,
                                suppressed_pairs=blocked)
-    auto, dropped = _apply_merges(conn, decision.auto_merge_groups,
-                                  suppressed_pairs=blocked,
-                                  group_bridges=decision.group_bridges,
-                                  group_reasons=decision.group_reasons)
+    auto, dropped, oversized = _apply_merges(conn, decision.auto_merge_groups,
+                                             suppressed_pairs=blocked,
+                                             group_bridges=decision.group_bridges,
+                                             group_reasons=decision.group_reasons)
     # An auto-merged group leaves its old review card sitting at 'proposed' with
     # only one surviving broker behind it — the UI renders it thin and the merge
     # button can only ever answer 409. Retire those the moment the merges land,
@@ -701,13 +715,15 @@ def _auto_merge(conn: Any, run_id: int) -> tuple[int, int, int]:
              sum(1 for r in reasons if r == R.REASON_NAME_FIRM),
              sum(1 for r in reasons if "+" in r),
              sum(len(g) for g in decision.auto_merge_groups),
-             len(decision.review_pairs), len(decision.suppressed) + dropped)
+             len(decision.review_pairs),
+             # the same total the run row records; the next line breaks it down
+             len(decision.suppressed) + dropped + oversized)
     LOG.info("RESOLVE merge review pairs decided=%d proposed=%d name_conflict_dismissed=%d "
-             "suppressed_edges=%d suppressed_components=%d active_suppressions=%d "
-             "stale_cards_retired=%d",
+             "suppressed_edges=%d suppressed_components=%d oversized_components=%d "
+             "active_suppressions=%d stale_cards_retired=%d",
              len(decision.review_pairs), proposed, dismissed, len(decision.suppressed),
-             dropped, len(blocked), retired)
-    return auto, len(decision.review_pairs), len(decision.suppressed) + dropped
+             dropped, oversized, len(blocked), retired)
+    return auto, len(decision.review_pairs), len(decision.suppressed) + dropped + oversized
 
 
 def _broker_of(conn: Any, identity_ids: list[int]) -> dict[int, int]:
@@ -751,9 +767,11 @@ def _broker_components(groups: list[list[int]],
     MAX_AUTO_MERGE_COMPONENT identities, and two capped groups chained through a
     shared broker now apply as one merge instead of colliding. The fusing edge is a
     merge already recorded (that broker holds both identities), not new evidence, so
-    the union is implied rather than invented — but nothing bounds the chain, so
-    every multi-group component is logged for the operator rather than passing as an
-    ordinary pair merge."""
+    the union is implied rather than invented. Two groups chained this way are also
+    the one place where DIFFERENTLY-named groups meet — name_key transitivity makes
+    that unreachable inside decide_merges, not here — so every multi-group component
+    is logged for the operator, and _apply_merges refuses any component wider than
+    the same cap rather than letting the chain run unbounded."""
     parent: dict[int, int] = {}
 
     def find(b: int) -> int:
@@ -869,13 +887,16 @@ def _queue_review_pairs(conn: Any, pairs: list[tuple[int, int]],
     operator merges brokers, so two identity pairs resolving to the same two brokers
     are one proposal, and the key stays stable across sweeps.
 
-    Only pairs that share an ACTUAL contact are proposed. decide_merges also
-    downgrades an oversized component by expanding it pairwise, which is n(n-1)/2
-    rows describing a role-account pool it already refused to trust — a one-click
-    merge of two agents connected only through a shared switchboard several hops
-    away is exactly what the cap exists to stop. The component's real edges survive
-    that filter, so nothing actionable is lost; the evidence carries the shared
-    contact so the operator judges the same fact the engine did."""
+    Only pairs that share an ACTUAL contact are proposed — a one-click merge of two
+    agents connected only through a shared switchboard several hops away is exactly
+    what the cap exists to stop. That filter is not a size rail, though: it thins a
+    component chained from SEVERAL values, and drops nothing at all from the pool it
+    was written for, where one switchboard is on every member and therefore on every
+    transitive pair (464 records -> 107,416 rows, all of them shared-contact pairs).
+    The size rail is decide_merges itself, which hands an over-cap component its real
+    EDGES instead of its closure; this writer sees n-1 rows, not n(n-1)/2. The
+    evidence carries the shared contact so the operator judges the same fact the
+    engine did."""
     if not pairs:
         return 0
     rows = _bridge_pair_rows(conn, pairs, identities, shared_contacts, run_id)
@@ -952,13 +973,20 @@ def _apply_merges(conn: Any, groups: list[list[int]], *,
     with a fresh read inside this write transaction: an operator NO landing mid-sweep
     must not be applied over.
 
-    Returns (brokers retired, components dropped by the backstop)."""
+    The component cap applies HERE too, at broker grain: decide_merges bounds one
+    group at R.MAX_AUTO_MERGE_COMPONENT identities, but _broker_components chains
+    groups through a shared broker and nothing in the pure layer bounds that chain —
+    the layer that re-introduces the fusion is the layer that has to bound it.
+    A wider component is skipped whole and counted, not merged and warned about.
+
+    Returns (brokers retired, components dropped by the backstop, components skipped
+    for exceeding the cap)."""
     if not groups:
-        return 0, 0
+        return 0, 0, 0
     broker_of = _broker_of(conn, sorted({iid for g in groups for iid in g}))
     components = _broker_components(groups, broker_of)
     if not components:
-        return 0, 0
+        return 0, 0, 0
     held = _identities_of(conn, sorted({b for c in components for b in c}))
     owner = {iid: bid for bid, iids in held.items() for iid in iids}
     # broker -> the auto-merge groups that touch it, built ONCE. The per-component
@@ -980,6 +1008,7 @@ def _apply_merges(conn: Any, groups: list[list[int]], *,
     values: list[str | None] = []
     losers: dict[int, int] = {}
     dropped = 0
+    oversized = 0
     with conn.transaction(), conn.cursor() as cur:
         cur.execute("SET LOCAL statement_timeout = 0")
         cur.execute(_SUPPRESSED_PAIRS_SQL)
@@ -992,6 +1021,14 @@ def _apply_merges(conn: Any, groups: list[list[int]], *,
                 by_identity.setdefault(hi, set()).add(lo)
 
         for component in components:
+            if len(component) > R.MAX_AUTO_MERGE_COMPONENT:
+                oversized += 1
+                LOG.warning(
+                    "RESOLVE merge component SKIPPED as oversized: %d brokers exceeds "
+                    "the cap of %d; chained through brokers holding identities in "
+                    "several groups, so no single group vouches for it: %s",
+                    len(component), R.MAX_AUTO_MERGE_COMPONENT, component)
+                continue
             in_component = set(component)
             identities_in = {iid for b in component for iid in held.get(b, ())}
             blocked = (_blocked_component(identities_in, owner, by_identity)
@@ -1026,7 +1063,7 @@ def _apply_merges(conn: Any, groups: list[list[int]], *,
                     kinds.append(stamped[0] if stamped else None)
                     values.append(stamped[1] if stamped else None)
         if not losers:
-            return 0, dropped
+            return 0, dropped, oversized
 
         cur.execute(
             "INSERT INTO broker_merge_events (merge_group_id, survivor_broker_id, "
@@ -1048,7 +1085,7 @@ def _apply_merges(conn: Any, groups: list[list[int]], *,
             "FROM unnest(%(l)s::bigint[], %(s)s::bigint[]) AS d(l, s) WHERE b.id = d.l",
             {"l": list(losers), "s": list(losers.values())},
         )
-    return len(losers), dropped
+    return len(losers), dropped, oversized
 
 
 def _affected(conn: Any, listing_ids: list[int]) -> list[int]:

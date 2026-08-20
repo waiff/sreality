@@ -250,7 +250,8 @@ def test_mmreality_writes_an_identity_email_but_no_contact_rows() -> None:
     Every mmreality broker publishes the same role address and the same
     switchboard (12 distinct broker ids, one email, one number, measured live), so
     write_contacts=False keeps ~1,021 identical rows out of
-    broker_identity_contacts — rows the freq==1 bridge guard would discard anyway.
+    broker_identity_contacts — one value carried by many names is
+    non-discriminating, so those rows buy the merge engine nothing.
     What it must NOT do is take the identity email with them: that column is the
     join to the mmreality.cz firm. Dropping email_key would suppress the contacts
     too and lose the firm linkage, which is why this is a flag and not an absent

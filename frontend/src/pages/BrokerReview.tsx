@@ -27,18 +27,24 @@ const REASONS = [
     key: 'name_firm',
     tab: 'Stejné jméno a firma',
     blurb:
-      'Záznamy se stejným jménem u stejné firmy, které automat nesloučil, ' +
-      'protože totéž jméno se objevuje i u jiných firem — typicky běžná ' +
-      'jména a firemní účty za přepojovacím číslem.',
+      'Záznamy se stejným jménem u stejné firmy, které automat nesloučil — ' +
+      'nejčastěji proto, že totéž jméno se objevuje i u jiných firem ' +
+      '(běžná jména, obecné popisky typu „Zákaznická linka“). Patří sem ale ' +
+      'i záznamy u franšízové značky (jedna doména, mnoho nezávislých ' +
+      'poboček), dvojice, kde má každá strana vlastní osobní kontakt — tedy ' +
+      'spíš dva různí lidé téhož jména —, skupiny příliš velké na ' +
+      'automatické sloučení a dvojice, které jste už dřív odmítli.',
   },
   {
     key: 'contact_bridge_review',
     tab: 'Sdílený kontakt',
     blurb:
-      'Záznamy se stejným jménem u různých firem, které sdílejí telefon ' +
-      'nebo e-mail, jenže ten kontakt patří i dalším jménům (recepce, ' +
-      'přepojovací číslo), takže sám o sobě nic nedokazuje. Zkontrolujte ' +
-      'uvedený kontakt.',
+      'Nejčastěji záznamy se stejným jménem u různých firem, které sdílejí ' +
+      'telefon nebo e-mail patřící i dalším jménům (recepce, přepojovací ' +
+      'číslo) — takový kontakt sám o sobě nic nedokazuje. Chodí sem ale ' +
+      'i dvojice z příliš velké skupiny nebo ze skupiny, které se dotklo ' +
+      'dřívější odmítnutí; tam může být sdílený kontakt naopak průkazný. ' +
+      'Zkontrolujte uvedený kontakt.',
   },
 ] as const;
 
@@ -69,10 +75,11 @@ export default function BrokerReview() {
         <p className="mt-1 text-sm text-[var(--color-ink-3)] max-w-2xl">
           Automat slučuje jen záznamy se shodným jménem — buď přes kontakt, který
           patří jedinému jménu, nebo přes společnou firmu u&nbsp;jména, které se
-          nikde jinde neobjevuje. Tady zůstává to, co nedokázal prokázat: sdílený
-          kontakt patřící více jménům, běžné jméno u&nbsp;několika firem, nebo
-          nezvykle velká skupina. {active.blurb} Zkontrolujte a&nbsp;slučte ručně.
-          Sloučení je vratné.
+          neobjevuje u&nbsp;žádné jiné firmy. Tady zůstává to, co nedokázal
+          prokázat: sdílený kontakt patřící více jménům, běžné jméno
+          u&nbsp;několika firem, nezvykle velká skupina, nebo naopak dvojice,
+          kde má každá strana vlastní osobní kontakt. {active.blurb}{' '}
+          Zkontrolujte a&nbsp;slučte ručně. Sloučení je vratné.
         </p>
       </header>
 

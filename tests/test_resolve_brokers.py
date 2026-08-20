@@ -754,7 +754,7 @@ def test_a_broker_is_retired_into_exactly_one_survivor_per_run() -> None:
     conn = _ResilientConn("merge")
     # broker 30 holds identities 1 and 2; component A = {1, 5}, component B = {2, 6}
     conn.broker_of = {1: 30, 5: 10, 2: 30, 6: 20}
-    assert rb._apply_merges(conn, [[1, 5], [2, 6]]) == (2, 0)
+    assert rb._apply_merges(conn, [[1, 5], [2, 6]]) == (2, 0, 0)
 
     plan = _merge_plan(conn)
     # one survivor for the whole broker component, and 30 is retired ONCE
@@ -778,7 +778,7 @@ def test_a_retired_broker_keeps_no_identities() -> None:
     conn = _ResilientConn("merge")
     # broker 40 holds identities 2 and 3; only 2 is bridged to broker 10's identity 1
     conn.broker_of = {1: 10, 2: 40, 3: 40}
-    assert rb._apply_merges(conn, [[1, 2]]) == (1, 0)
+    assert rb._apply_merges(conn, [[1, 2]]) == (1, 0, 0)
 
     plan = _merge_plan(conn)
     assert plan["retired"] == {40: 10}
@@ -826,15 +826,73 @@ def test_a_component_chaining_two_groups_is_logged(caplog: Any) -> None:
     assert caplog.text == ""
 
 
+def caplog_at_warning() -> Any:
+    """`with caplog_at_warning() as log:` -> log() is the captured resolve_brokers text."""
+    import contextlib
+    import logging
+
+    @contextlib.contextmanager
+    def _cm() -> Any:
+        records: list[logging.LogRecord] = []
+
+        class _H(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                records.append(record)
+
+        logger = logging.getLogger("resolve_brokers")
+        handler = _H()
+        logger.addHandler(handler)
+        previous, logger.level = logger.level, logging.WARNING
+        try:
+            yield lambda: "\n".join(r.getMessage() for r in records)
+        finally:
+            logger.removeHandler(handler)
+            logger.level = previous
+
+    return _cm()
+
+
+def test_a_chain_wider_than_the_cap_is_skipped_whole_and_counted() -> None:
+    """The cap has to hold at BROKER grain too. decide_merges bounds one group at 20
+    identities on the strength of name_key transitivity — but _broker_components
+    unions groups through any broker holding an identity in two of them, and two
+    distinct groups necessarily carry DIFFERENT names. That is the very cross-name
+    fusion the cap was raised on the assumption it could not happen, and nothing in
+    the pure layer bounds it: the layer that re-introduces it is the layer that has
+    to refuse it, with a counter rather than a warning nobody reads."""
+    import logging
+
+    import scripts.resolve_brokers as rb
+
+    # 21 groups, each sharing a broker with the next: one component of 22 brokers
+    groups = [[2 * k - 1, 2 * k] for k in range(1, 22)]
+    conn = _ResilientConn("merge")
+    conn.broker_of = {}
+    for k in range(1, 22):
+        conn.broker_of[2 * k - 1] = k
+        conn.broker_of[2 * k] = k + 1
+
+    with caplog_at_warning() as log:
+        assert rb._apply_merges(conn, groups) == (0, 0, 1)
+    assert "SKIPPED as oversized: 22 brokers exceeds the cap of 20" in log()
+    assert not any("broker_merge_events" in q for q in conn.executed)
+
+    # ...and a chain that stays inside the cap still applies as one merge
+    inside = [[1, 2], [3, 4]]
+    conn = _ResilientConn("merge")
+    conn.broker_of = {1: 10, 2: 20, 3: 20, 4: 30}
+    assert rb._apply_merges(conn, inside) == (2, 0, 0)
+
+
 def test_apply_merges_skips_a_group_already_on_one_broker() -> None:
     """Idempotence: a re-run after a committed apply must write nothing."""
     import scripts.resolve_brokers as rb
 
     conn = _ResilientConn("merge")
     conn.broker_of = {1: 10, 2: 10}
-    assert rb._apply_merges(conn, [[1, 2]]) == (0, 0)
+    assert rb._apply_merges(conn, [[1, 2]]) == (0, 0, 0)
     assert not any("broker_merge_events" in s for s in conn.executed)
-    assert rb._apply_merges(conn, []) == (0, 0)
+    assert rb._apply_merges(conn, []) == (0, 0, 0)
 
 
 # --- the apply-time suppression backstop (migration 401) ----------------------
@@ -863,7 +921,7 @@ def test_a_component_that_would_reunite_a_suppressed_pair_is_dropped_whole(
     conn.broker_of = {1: 10, 2: 20, 3: 30}
     with caplog.at_level(logging.WARNING, logger="resolve_brokers"):
         assert rb._apply_merges(conn, [[1, 3], [2, 3]],
-                                suppressed_pairs={(1, 2)}) == (0, 1)
+                                suppressed_pairs={(1, 2)}) == (0, 1, 0)
     assert not any("broker_merge_events" in s for s in conn.executed)
     assert "identities 1/2 are an active broker_merge_suppressions pair" in caplog.text
 
@@ -877,7 +935,7 @@ def test_the_group_the_pure_layer_still_emits_is_dropped_here() -> None:
 
     conn = _ResilientConn("merge")
     conn.broker_of = {1: 10, 2: 20, 3: 30}
-    assert rb._apply_merges(conn, [[1, 2, 3]], suppressed_pairs={(1, 2)}) == (0, 1)
+    assert rb._apply_merges(conn, [[1, 2, 3]], suppressed_pairs={(1, 2)}) == (0, 1, 0)
     assert not any("broker_merge_events" in s for s in conn.executed)
 
 
@@ -890,7 +948,7 @@ def test_an_already_co_located_suppressed_pair_does_not_block_the_merge() -> Non
     conn = _ResilientConn("merge")
     # identities 1 and 2 are BOTH on broker 10 already; 3 is on broker 20
     conn.broker_of = {1: 10, 2: 10, 3: 20}
-    assert rb._apply_merges(conn, [[1, 3]], suppressed_pairs={(1, 2)}) == (1, 0)
+    assert rb._apply_merges(conn, [[1, 3]], suppressed_pairs={(1, 2)}) == (1, 0, 0)
     plan = _merge_plan(conn)
     assert plan["retired"] == {20: 10}
 
@@ -901,9 +959,9 @@ def test_an_unrelated_component_still_applies_alongside_a_dropped_one() -> None:
 
     conn = _ResilientConn("merge")
     conn.broker_of = {1: 10, 2: 20, 3: 30, 4: 40, 5: 50}
-    merged, dropped = rb._apply_merges(conn, [[1, 3], [2, 3], [4, 5]],
-                                       suppressed_pairs={(1, 2)})
-    assert (merged, dropped) == (1, 1)
+    merged, dropped, oversized = rb._apply_merges(conn, [[1, 3], [2, 3], [4, 5]],
+                                                 suppressed_pairs={(1, 2)})
+    assert (merged, dropped, oversized) == (1, 1, 0)
     assert _merge_plan(conn)["retired"] == {50: 40}
 
 
@@ -914,8 +972,8 @@ def test_no_suppressions_is_the_unchanged_hot_path() -> None:
 
     conn = _ResilientConn("merge")
     conn.broker_of = {1: 10, 2: 20}
-    assert rb._apply_merges(conn, [[1, 2]], suppressed_pairs=set()) == (1, 0)
-    assert rb._apply_merges(_fresh_merge_conn({1: 10, 2: 20}), [[1, 2]]) == (1, 0)
+    assert rb._apply_merges(conn, [[1, 2]], suppressed_pairs=set()) == (1, 0, 0)
+    assert rb._apply_merges(_fresh_merge_conn({1: 10, 2: 20}), [[1, 2]]) == (1, 0, 0)
 
 
 def _fresh_merge_conn(broker_of: dict[int, int]) -> _ResilientConn:
@@ -937,13 +995,13 @@ def test_the_sweep_loads_active_suppressions_and_passes_them_both_ways(
                         lambda i, c, **kw: seen.update(decide=kw["suppressed_pairs"])
                         or rb.R.MergeDecision([[1, 2]], [], [(1, 2)]))
     monkeypatch.setattr(rb, "_apply_merges",
-                        lambda c, g, **kw: seen.update(apply=kw["suppressed_pairs"]) or (0, 1))
+                        lambda c, g, **kw: seen.update(apply=kw["suppressed_pairs"]) or (0, 1, 0))
     monkeypatch.setattr(rb, "_queue_review_pairs", lambda c, p, i, bv, r: 0)
     monkeypatch.setattr(rb, "_suppressed_pairs", lambda c: {(1, 2)})
 
     conn = _ResilientConn("merge")
-    conn.identity_rows = [(1, "sreality", "Jan Novak", 10, True),
-                          (2, "idnes", "Novak Jan", 10, True)]
+    conn.identity_rows = [(1, "sreality", "Jan Novak", 10, True, False, 10),
+                          (2, "idnes", "Novak Jan", 10, True, False, 10)]
     conn.contact_rows = [(1, "email", "a@x.cz"), (2, "email", "a@x.cz")]
     auto, queued, suppressed = rb._auto_merge(conn, run_id=5)
     assert seen["decide"] == seen["apply"] == {(1, 2)}
@@ -986,7 +1044,7 @@ def test_a_suppression_written_mid_sweep_still_blocks_the_apply() -> None:
     conn = _ResilientConn("merge")
     conn.broker_of = {1: 10, 2: 20}
     conn.suppression_rows = [(1, 2)]        # landed after the sweep's own load
-    assert rb._apply_merges(conn, [[1, 2]], suppressed_pairs=set()) == (0, 1)
+    assert rb._apply_merges(conn, [[1, 2]], suppressed_pairs=set()) == (0, 1, 0)
     assert not any("broker_merge_events" in s for s in conn.executed)
     # ...and the read happens in the same transaction as the writes it guards
     order = [s for s in conn.executed]
@@ -1023,7 +1081,7 @@ def test_only_the_bridged_identities_carry_the_stamp() -> None:
     # broker 20 holds identity 2 (bridged to 1) AND identity 3 (carried along)
     conn.broker_of = {1: 10, 2: 20, 3: 20}
     assert rb._apply_merges(conn, [[1, 2]],
-                            group_bridges={(1, 2): ("email", "jan@x.cz")}) == (1, 0)
+                            group_bridges={(1, 2): ("email", "jan@x.cz")}) == (1, 0, 0)
     events = _params(conn, "INSERT INTO broker_merge_events")
     stamped = dict(zip(events["i"], events["k"]))
     assert stamped == {2: "email", 3: None}
@@ -1038,9 +1096,9 @@ def test_the_bridge_lookup_does_not_rescan_the_group_list_per_component() -> Non
     conn = _ResilientConn("merge")
     groups = [[i, i + 1] for i in range(1, 4000, 2)]
     conn.broker_of = {i: i for g in groups for i in g}
-    merged, dropped = rb._apply_merges(
+    merged, dropped, oversized = rb._apply_merges(
         conn, groups, group_bridges={(1, 2): ("email", "jan@x.cz")})
-    assert (merged, dropped) == (len(groups), 0)
+    assert (merged, dropped, oversized) == (len(groups), 0, 0)
     events = _params(conn, "INSERT INTO broker_merge_events")
     # exactly the one group with a bridge is stamped, out of 2,000
     assert [k for k in events["k"] if k] == ["email"]
@@ -1055,12 +1113,12 @@ def test_an_unambiguous_auto_merge_records_the_contact_that_caused_it() -> None:
     conn = _ResilientConn("merge")
     conn.broker_of = {1: 10, 2: 20}
     assert rb._apply_merges(conn, [[1, 2]],
-                            group_bridges={(1, 2): ("email", "jan@re-max.cz")}) == (1, 0)
+                            group_bridges={(1, 2): ("email", "jan@re-max.cz")}) == (1, 0, 0)
     events = _params(conn, "INSERT INTO broker_merge_events")
     assert events["k"] == ["email"] and events["v"] == ["jan@re-max.cz"]
 
     plain = _fresh_merge_conn({1: 10, 2: 20})
-    assert rb._apply_merges(plain, [[1, 2]]) == (1, 0)
+    assert rb._apply_merges(plain, [[1, 2]]) == (1, 0, 0)
     assert _params(plain, "INSERT INTO broker_merge_events")["k"] == [None]
 
 
@@ -1180,7 +1238,7 @@ def test_auto_merge_queues_review_pairs_after_applying_merges(
     monkeypatch.setattr(rb.R, "decide_merges",
                         lambda i, c, **kw: rb.R.MergeDecision([[1, 2]], [(1, 2)]))
     monkeypatch.setattr(rb, "_apply_merges",
-                        lambda c, g, **kw: calls.append("apply") or (1, 0))
+                        lambda c, g, **kw: calls.append("apply") or (1, 0, 0))
     monkeypatch.setattr(rb, "_retire_dead_candidates",
                         lambda c, by: calls.append(f"retire:{by}") or 0)
     monkeypatch.setattr(rb, "_queue_review_pairs",
@@ -1188,8 +1246,8 @@ def test_auto_merge_queues_review_pairs_after_applying_merges(
                         or seen.update(bridges=bv) or len(p))
 
     conn = _ResilientConn("merge")
-    conn.identity_rows = [(1, "sreality", "Jan Novak", 10, True),
-                          (2, "idnes", "Novak Jan", 10, True)]
+    conn.identity_rows = [(1, "sreality", "Jan Novak", 10, True, False, 10),
+                          (2, "idnes", "Novak Jan", 10, True, False, 10)]
     conn.contact_rows = [(1, "email", "a@x.cz"), (2, "email", "a@x.cz")]
     auto, queued, suppressed = rb._auto_merge(conn, run_id=5)
 
@@ -1320,7 +1378,15 @@ def test_the_engine_reads_the_whole_corpus_unfiltered() -> None:
 
     identities = " ".join(rb._MERGE_IDENTITIES_SQL.split())
     assert "WHERE" not in identities.upper()
-    assert "coalesce(b.primary_firm_id, fi.firm_id)" in identities
+    # the identity's OWN firm, never the broker's recency rollup: primary_firm_id in
+    # the spread map made path B self-weakening (its own merges erased the two-firm
+    # spread that had refused a third record) and non-deterministic night to night
+    assert "fi.firm_id AS firm_id" in identities
+    assert "coalesce(b.primary_firm_id, fi.firm_id)" not in identities
+    # ...and it rides along anyway, for the one comparison that must match what the
+    # name_firm card generator groups on
+    assert "b.primary_firm_id" in identities
+    assert "coalesce(f.is_franchise, false) AS franchise" in identities
     assert "b.status IS DISTINCT FROM 'merged_away'" in identities
     contacts = " ".join(rb._MERGE_CONTACTS_SQL.split())
     assert contacts == "SELECT broker_identity_id, kind, value FROM broker_identity_contacts"
@@ -1339,13 +1405,14 @@ def test_identity_rows_carry_firm_and_mergeability_into_the_rule(
                         or rb.R.MergeDecision())
 
     conn = _ResilientConn("merge")
-    conn.identity_rows = [(1, "sreality", "Jan Novak", 10, True),
-                          (2, "idnes", "Novak Jan", None, False)]
+    conn.identity_rows = [(1, "sreality", "Jan Novak", 10, True, False, 10),
+                          (2, "idnes", "Novak Jan", None, False, False, None)]
     conn.contact_rows = [(1, "email", "a@x.cz"), (999, "email", "orphan@x.cz")]
     assert rb._auto_merge(conn, run_id=1) == (0, 0, 0)
 
-    assert seen["ids"] == [rb.R.Identity(1, "sreality", "Jan Novak", 10, True),
-                           rb.R.Identity(2, "idnes", "Novak Jan", None, False)]
+    assert seen["ids"] == [
+        rb.R.Identity(1, "sreality", "Jan Novak", 10, True, False, 10),
+        rb.R.Identity(2, "idnes", "Novak Jan", None, False, False, None)]
     # a contact row whose identity the other statement did not return is dropped,
     # not crashed on: the two reads are separate statements over a live corpus
     assert seen["contacts"] == [rb.R.Contact(1, "email", "a@x.cz")]
