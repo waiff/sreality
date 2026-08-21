@@ -79,7 +79,7 @@ const OVERVIEW: NewDedupLabelingOverview = {
   labels: [
     {
       id: 1, label: 'interier - kuchyne', family: 'interier', active: true,
-      created_at: '2026-08-01T00:00:00Z', confirmed_count: 12, pending_count: 3,
+      created_at: '2026-08-01T00:00:00Z', confirmed_count: 12, gate_count: 12, pending_count: 3,
       dismissed_count: 1, border_case_count: 0,
     },
   ],
@@ -140,11 +140,11 @@ describe('<NewDedupLabeling>', () => {
         sample_size: 42,
         labels: [
           { id: 1, label: 'interier - kuchyne', family: 'interier', active: true,
-            created_at: 't', confirmed_count: 12, pending_count: 3, dismissed_count: 1, border_case_count: 0 },
+            created_at: 't', confirmed_count: 12, gate_count: 12, pending_count: 3, dismissed_count: 1, border_case_count: 0 },
           { id: 2, label: 'exterier - fasada', family: null, active: true,
-            created_at: 't', confirmed_count: 54, pending_count: 0, dismissed_count: 0, border_case_count: 0 },
+            created_at: 't', confirmed_count: 54, gate_count: 54, pending_count: 0, dismissed_count: 0, border_case_count: 0 },
           { id: 3, label: 'garaz', family: null, active: true,
-            created_at: 't', confirmed_count: 4, pending_count: 0, dismissed_count: 0, border_case_count: 0 },
+            created_at: 't', confirmed_count: 4, gate_count: 4, pending_count: 0, dismissed_count: 0, border_case_count: 0 },
         ],
       },
     });
@@ -166,7 +166,7 @@ describe('<NewDedupLabeling>', () => {
     vi.mocked(api.addNewDedupTaxonomyLabel).mockResolvedValue({
       data: {
         id: 2, label: 'exterier - fasada', family: null, active: true, created_at: 't',
-        confirmed_count: 0, pending_count: 0, dismissed_count: 0, border_case_count: 0,
+        confirmed_count: 0, gate_count: 0, pending_count: 0, dismissed_count: 0, border_case_count: 0,
       },
     });
     renderPage();
@@ -220,7 +220,7 @@ describe('<NewDedupLabeling>', () => {
         ...OVERVIEW.labels,
         {
           id: 2, label: 'koupelna', family: null, active: true,
-          created_at: '2026-08-01T00:00:00Z', confirmed_count: 0, pending_count: 0,
+          created_at: '2026-08-01T00:00:00Z', confirmed_count: 0, gate_count: 0, pending_count: 0,
           dismissed_count: 0, border_case_count: 0,
         },
       ],
@@ -461,20 +461,48 @@ describe('<NewDedupLabeling>', () => {
     expect(screen.queryByPlaceholderText('tag…')).not.toBeInTheDocument();
   });
 
-  it('shows how much of a tag\'s Gate 1 coverage is uncertain', async () => {
+  it('measures Gate 1 on the unparked images, not the whole training set', async () => {
     vi.mocked(api.getNewDedupLabelingOverview).mockResolvedValue({
       data: {
         sample_size: 42,
         labels: [{
-          ...OVERVIEW.labels[0], confirmed_count: 150, border_case_count: 40,
+          ...OVERVIEW.labels[0],
+          confirmed_count: 150, gate_count: 110, border_case_count: 40,
         }],
       },
     });
     renderPage();
-    // 150 hits the gate, but 40 of those images nobody could classify — the
-    // bar alone would read as clean coverage.
-    expect(await screen.findByText('· 40 border')).toBeInTheDocument();
-    expect(screen.getByText('150')).toBeInTheDocument();
+    // 150 images carry the tag, but 40 are parked as border cases: the tag is
+    // at 110 of Gate 1's 150, NOT at target. Showing 150 here would call it
+    // done on images nobody could classify.
+    expect(await screen.findByText('110')).toBeInTheDocument();
+    expect(screen.queryByText('150')).not.toBeInTheDocument();
+    expect(screen.getByText('· 40 parked')).toBeInTheDocument();
+  });
+
+  it('narrows the coverage ceiling by the gate count, not the raw total', async () => {
+    vi.mocked(api.getNewDedupLabelingOverview).mockResolvedValue({
+      data: {
+        sample_size: 42,
+        labels: [
+          { ...OVERVIEW.labels[0], id: 1, label: 'mostly parked',
+            confirmed_count: 200, gate_count: 20, border_case_count: 180 },
+          { ...OVERVIEW.labels[0], id: 2, label: 'genuinely covered',
+            confirmed_count: 200, gate_count: 200, border_case_count: 0 },
+        ],
+      },
+    });
+    renderPage();
+    await screen.findByRole('button', { name: 'genuinely covered' });
+    // "which tags are still short" has to mean short of the GATE — a tag whose
+    // 200 images are 180 border cases still needs work.
+    fireEvent.change(screen.getByLabelText('Max training images per tag'), {
+      target: { value: '50' },
+    });
+    await waitFor(() =>
+      expect(screen.queryByRole('button', { name: 'genuinely covered' })).not.toBeInTheDocument(),
+    );
+    expect(screen.getByRole('button', { name: 'mostly parked' })).toBeInTheDocument();
   });
 
   it('confirms a single proposal and drops that tile from Pending WITHOUT refetching the grid', async () => {
@@ -747,9 +775,9 @@ describe('<NewDedupLabeling>', () => {
         sample_size: 42,
         labels: [
           { id: 1, label: 'interier - kuchyne', family: null, active: true,
-            created_at: 't', confirmed_count: 12, pending_count: 0, dismissed_count: 0, border_case_count: 0 },
+            created_at: 't', confirmed_count: 12, gate_count: 12, pending_count: 0, dismissed_count: 0, border_case_count: 0 },
           { id: 2, label: 'exterier - fasada', family: null, active: true,
-            created_at: 't', confirmed_count: 200, pending_count: 0, dismissed_count: 0, border_case_count: 0 },
+            created_at: 't', confirmed_count: 200, gate_count: 200, pending_count: 0, dismissed_count: 0, border_case_count: 0 },
         ],
       },
     });
@@ -779,7 +807,7 @@ describe('<NewDedupLabeling>', () => {
         sample_size: 42,
         labels: [
           { id: 2, label: 'exterier - fasada', family: null, active: true,
-            created_at: 't', confirmed_count: 200, pending_count: 0, dismissed_count: 0, border_case_count: 0 },
+            created_at: 't', confirmed_count: 200, gate_count: 200, pending_count: 0, dismissed_count: 0, border_case_count: 0 },
         ],
       },
     });
@@ -802,9 +830,9 @@ describe('<NewDedupLabeling>', () => {
         sample_size: 42,
         labels: [
           { id: 1, label: 'interier - kuchyne', family: null, active: true,
-            created_at: 't', confirmed_count: 12, pending_count: 0, dismissed_count: 0, border_case_count: 0 },
+            created_at: 't', confirmed_count: 12, gate_count: 12, pending_count: 0, dismissed_count: 0, border_case_count: 0 },
           { id: 2, label: 'exterier - fasada', family: null, active: true,
-            created_at: 't', confirmed_count: 200, pending_count: 0, dismissed_count: 0, border_case_count: 0 },
+            created_at: 't', confirmed_count: 200, gate_count: 200, pending_count: 0, dismissed_count: 0, border_case_count: 0 },
         ],
       },
     });

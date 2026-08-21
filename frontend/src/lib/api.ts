@@ -721,13 +721,19 @@ export interface NewDedupTaxonomyLabel {
   family: string | null;
   active: boolean;
   created_at: string;
+  /* Every training row under this label — the inventory number (what a taxonomy
+   * REMOVE deletes). It is `gate_count + border_case_count`. */
   confirmed_count: number;
+  /* What GATE 1 counts: training rows NOT flagged as border cases. An image
+   * nobody could classify is not evidence a tag is learnable, so it doesn't move
+   * the tag toward its target — clearing the flag makes it count again, with no
+   * relabelling. Every coverage surface (bar, ≤N ceiling, picker counts) reads
+   * THIS, never confirmed_count. */
+  gate_count: number;
+  /* The parked remainder, excluded from gate_count. */
+  border_case_count: number;
   pending_count: number;
   dismissed_count: number;
-  /* How many of `confirmed_count` are ALSO flagged border cases — a subset of
-   * it, not an addition. Gate 1 counts training rows and a border case is one,
-   * so this is what says whether a tag's coverage is actually clean. */
-  border_case_count: number;
 }
 export interface NewDedupLabelingOverview {
   sample_size: number;

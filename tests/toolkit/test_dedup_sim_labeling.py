@@ -131,7 +131,7 @@ class _Cur:
                 )
                 rows.append((
                     t["id"], t["label"], t["family"], t["active"], t["created_at"],
-                    confirmed, pending, dismissed, border,
+                    confirmed, confirmed - border, border, pending, dismissed,
                 ))
             self._rows = rows
 
@@ -439,31 +439,51 @@ def test_taxonomy_overview_shape(conn: _FakeConn) -> None:
     assert row_a["confirmed_count"] == 1
     assert row_a["pending_count"] == 1
     assert row_a["dismissed_count"] == 1
+    assert row_a["gate_count"] == 1
     assert row_a["border_case_count"] == 0
     row_b = next(r for r in overview["labels"] if r["label"] == "b")
     assert row_b["confirmed_count"] == 0
 
 
-def test_taxonomy_overview_counts_border_cases_inside_the_confirmed_total(
+def test_taxonomy_overview_keeps_border_cases_out_of_the_gate_count(
     conn: _FakeConn,
 ) -> None:
-    """Gate 1 counts training rows, and a border case IS a training row — so the
-    two numbers overlap by construction. The overview reports the uncertain
-    slice separately rather than netting it out: whether those images train,
-    validate, or get dropped is a W3 decision, not this query's to make."""
+    """A border case does not count toward Gate 1 (operator decision): an image
+    nobody could classify is not evidence a tag is learnable. It stays a
+    training row — `confirmed_count`, the inventory number a taxonomy REMOVE
+    would delete, still includes it — but the gate reads `gate_count`."""
     dsl.add_taxonomy_label(conn, label="a")
     for image_id in (1, 2, 3):
         conn.training_examples[image_id] = {
             "image_id": image_id, "label": "a", "created_by": "x",
         }
     conn.border_cases.add(2)
-    # Flagged but never trained: it belongs to no label, so it lands in neither
-    # count.
+    # Flagged but never trained: it belongs to no label, so it lands in no count.
     conn.border_cases.add(99)
 
     row = next(r for r in dsl.taxonomy_overview(conn)["labels"] if r["label"] == "a")
     assert row["confirmed_count"] == 3
+    assert row["gate_count"] == 2
     assert row["border_case_count"] == 1
+    assert row["gate_count"] + row["border_case_count"] == row["confirmed_count"]
+
+
+def test_clearing_a_border_case_returns_the_image_to_the_gate_count(
+    conn: _FakeConn,
+) -> None:
+    """"…unless removed from the border case group": the exclusion is a JOIN, not
+    a stamp on the training row, so unflagging restores the count with no
+    relabelling."""
+    dsl.add_taxonomy_label(conn, label="a")
+    conn.training_examples[1] = {"image_id": 1, "label": "a", "created_by": "x"}
+    conn.border_cases.add(1)
+    row = next(r for r in dsl.taxonomy_overview(conn)["labels"] if r["label"] == "a")
+    assert row["gate_count"] == 0
+
+    conn.border_cases.discard(1)
+    row = next(r for r in dsl.taxonomy_overview(conn)["labels"] if r["label"] == "a")
+    assert row["gate_count"] == 1
+    assert row["border_case_count"] == 0
 
 
 # --- sample ---------------------------------------------------------------
