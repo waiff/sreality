@@ -12,13 +12,13 @@ import NoteFlagControl from '@/components/NoteFlagControl';
 import TrainControl from '@/components/TrainControl';
 import LabelCombobox, { type LabelOption } from '@/components/LabelCombobox';
 import { useInfiniteList } from '@/lib/useInfiniteList';
+import { useBorderCases, type BorderCaseStore } from '@/lib/useBorderCases';
 import {
   fetchClipAuditProperties,
   fetchPropertySourcesByPropertyIds,
   fetchImagesByListingIds,
   fetchImageAnnotationsByImageIds,
   fetchTrainingExamplesForImageIds,
-  fetchBorderCasesByImageIds,
   fetchTrainingLabelCounts,
   fetchTrainingExamplesByLabel,
   fetchImagesByImageIds,
@@ -478,11 +478,7 @@ function TrainingLabelBrowser({
     for (const e of examplesQ.data ?? []) m.set(e.image_id, e);
     return m;
   }, [examplesQ.data]);
-  const borderCasesQ = useQuery({
-    queryKey: ['clip-audit', 'border-cases', imageIds],
-    queryFn: () => fetchBorderCasesByImageIds(imageIds),
-    enabled: imageIds.length > 0,
-  });
+  const borderCases = useBorderCases(imageIds);
 
   const [selected, setSelected] = useState<ReadonlySet<number>>(new Set());
   const [nextLabel, setNextLabel] = useState('');
@@ -632,7 +628,7 @@ function TrainingLabelBrowser({
                 onToggle={() => toggle(img.id)}
                 onOpen={() => setLightboxAt(i)}
                 example={examplesByImageId.get(img.id)}
-                borderCase={borderCasesQ.data?.has(img.id) ?? false}
+                borderCases={borderCases}
                 labelOptions={labelOptions}
                 onChanged={handleTrainingChanged}
               />
@@ -664,7 +660,7 @@ function TrainingImageCell({
   onToggle,
   onOpen,
   example,
-  borderCase,
+  borderCases,
   labelOptions,
   onChanged,
 }: {
@@ -673,7 +669,7 @@ function TrainingImageCell({
   onToggle: () => void;
   onOpen: () => void;
   example: TrainingExample | undefined;
-  borderCase: boolean;
+  borderCases: BorderCaseStore;
   labelOptions: LabelOption[];
   onChanged: () => void;
 }) {
@@ -713,7 +709,7 @@ function TrainingImageCell({
       <TrainControl
         image={image}
         example={example}
-        borderCase={borderCase}
+        borderCases={borderCases}
         labelOptions={labelOptions}
         queryKeyPrefix="clip-audit"
         onChanged={onChanged}
@@ -846,11 +842,12 @@ function PropertyPageGroup({
     enabled: imageIds.length > 0 && mode === 'tagging',
   });
 
-  const borderCasesQ = useQuery({
-    queryKey: ['clip-audit', 'border-cases', imageIds],
-    queryFn: () => fetchBorderCasesByImageIds(imageIds),
-    enabled: imageIds.length > 0 && mode === 'tagging',
-  });
+  // Render mode has no training controls, so nothing reads the flags there.
+  const borderCaseIds = useMemo(
+    () => (mode === 'tagging' ? imageIds : []),
+    [mode, imageIds],
+  );
+  const borderCases = useBorderCases(borderCaseIds);
 
   // Until sources+images have loaded for this group, completeness can't be
   // determined yet — hold off rendering rather than flash an incomplete result.
@@ -869,7 +866,7 @@ function PropertyPageGroup({
           imagesBySreality={imagesMap ?? new Map()}
           annotations={annotationsQ.data ?? new Map()}
           training={trainingQ.data ?? new Map()}
-          borderCases={borderCasesQ.data ?? new Set()}
+          borderCases={borderCases}
           labelOptions={labelOptions}
           mode={mode}
           tagFilter={tagFilter}
@@ -899,7 +896,7 @@ function PropertyCard({
   imagesBySreality: Map<number, ImagePublic[]>;
   annotations: Map<number, ImageAnnotation>;
   training: Map<number, TrainingExample>;
-  borderCases: Set<number>;
+  borderCases: BorderCaseStore;
   labelOptions: LabelOption[];
   mode: Mode;
   tagFilter: string;
@@ -974,7 +971,7 @@ function ListingColumn({
   images: ImagePublic[];
   annotations: Map<number, ImageAnnotation>;
   training: Map<number, TrainingExample>;
-  borderCases: Set<number>;
+  borderCases: BorderCaseStore;
   labelOptions: LabelOption[];
   mode: Mode;
   tagFilter: string;
@@ -1019,7 +1016,7 @@ function ListingColumn({
               mode={mode}
               annotation={annotations.get(img.id)}
               example={training.get(img.id)}
-              borderCase={borderCases.has(img.id)}
+              borderCases={borderCases}
               labelOptions={labelOptions}
               onOpen={() => setLightboxAt(i)}
             />
@@ -1042,7 +1039,7 @@ function ImageCell({
   mode,
   annotation,
   example,
-  borderCase,
+  borderCases,
   labelOptions,
   onOpen,
 }: {
@@ -1050,7 +1047,7 @@ function ImageCell({
   mode: Mode;
   annotation: ImageAnnotation | undefined;
   example: TrainingExample | undefined;
-  borderCase: boolean;
+  borderCases: BorderCaseStore;
   labelOptions: LabelOption[];
   onOpen: () => void;
 }) {
@@ -1117,7 +1114,7 @@ function ImageCell({
         <TrainControl
           image={image}
           example={example}
-          borderCase={borderCase}
+          borderCases={borderCases}
           labelOptions={labelOptions}
           queryKeyPrefix="clip-audit"
         />

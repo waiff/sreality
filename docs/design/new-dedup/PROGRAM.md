@@ -119,6 +119,44 @@ Session handoff points marked ⛳ (good places to end a session; update the ledg
 
 ## Progress ledger (update every session, newest first)
 
+- 2026-08-21 — **Labeling page: the "Border case" flag** (operator request, pointing at
+  /clip-audit as the model). The flag itself is not new — `image_border_cases` (migration 310) and
+  `/labeling/border-case` have existed since /clip-audit; the review grid that is meant to REPLACE
+  that page simply had no way to reach them, so "unclear even to a human" had nowhere to go except
+  a wrong tag or a Dismiss that means something else.
+  - **Shared, not copied.** The read, the write and the stability policy moved into one hook,
+    `lib/useBorderCases.ts`, with `components/BorderCaseButton.tsx` as the (purely presentational)
+    control; /clip-audit's `TrainControl` now renders that same button instead of owning its own
+    mutations, and its two hand-rolled `border-cases` queries are gone. That is the same lesson
+    TrainControl itself records — a second labeling surface holding a byte-for-byte copy is how
+    these two drifted apart before.
+  - **Grid stability is the hook's job, not each page's.** Ids ACCUMULATE and only never-seen ones
+    are ever requested, so a review — which changes the visible id list — can't blank every flag in
+    the grid the way an id-list-keyed query would (PR #994's lesson, now enforced in one place).
+    Toggles patch the store; nothing invalidates. Writes are optimistic and roll back from
+    `onSettled`, never `onError`, so main.tsx's global "the write failed" toast still fires —
+    rule #22's cache policy, same idiom as `pipelineCache`.
+  - **Independent of the verdict, deliberately.** A border case is not a third review outcome: the
+    tile keeps its Confirm/Dismiss buttons and its place in the grid, and the flag is offered on
+    DISMISSED tiles too (which get no tag picker) — "I rejected the model's tag" and "I can't tell
+    what it should be" are two different facts and the schema keeps them apart. Nothing
+    auto-dismisses; if the operator wants both, that is two clicks.
+  - **The data-quality consequence, made visible.** Gate 1 counts `image_training_examples` rows
+    and a border case IS one, so flagging alone would have let a tag reach "150 confirmed" on
+    images nobody could classify. `taxonomy_overview` now also returns `border_case_count` (the
+    uncertain slice of that same total, one added LEFT JOIN — **no migration**), rendered as a
+    brick "· N border" beside the bar. Deliberately NOT netted out of `confirmed_count`: whether
+    those images train, validate, or get dropped is a W3 decision, and silently redefining the
+    gate metric mid-program is not this query's call.
+  - Tests: `useBorderCases.test.tsx` (5), `BorderCaseButton.test.tsx` (4), 4 more on the page,
+    `TrainControl.test.tsx` rewritten around the split, plus a backend case pinning the
+    confirmed/border overlap. Every behavioral guard was verified to go red under a mutation that
+    removes it — which is how a sixth test was caught as vacuous (it "pinned" a monotonic-merge
+    guard against a late read that the query key already makes unreachable) and deleted along with
+    the wrong rationale in the comment.
+  - Suites: `pytest -q` 4493 passed / 112 skipped, `vitest run` 631 passed (61 files),
+    `tsc --noEmit` clean, `vite build` clean, `eslint` clean on every touched file.
+
 - 2026-08-19 — **Labeling page: the small/large photo switch, shared with Browse** (operator
   request: "the same switch as we have on the browse page"). Taken literally — the control was
   private to `BrowseExperience.tsx`, so it moved to `components/ImageSizeToggle.tsx` and both pages

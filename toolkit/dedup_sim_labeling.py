@@ -44,12 +44,21 @@ def _clean_label(label: str) -> str:
 
 # --- taxonomy -----------------------------------------------------------
 
+# `border_case_count` is the slice of a label's CONFIRMED coverage that the
+# operator also flagged unclear-even-to-a-human (migration 310) — it is a subset
+# of confirmed_count, never added to it. Gate 1 counts training rows, and a
+# border case is a training row like any other, so without this readout a tag
+# can reach its target on images nobody could actually classify. Kept as its own
+# number rather than netted out of confirmed_count: whether those images train,
+# validate, or get dropped is a decision for W3, not something this query should
+# silently make.
 _OVERVIEW_SQL = """
     SELECT
       t.id, t.label, t.family, t.active, t.created_at,
       COALESCE(te.confirmed_count, 0) AS confirmed_count,
       COALESCE(p.pending_count, 0) AS pending_count,
-      COALESCE(p.dismissed_count, 0) AS dismissed_count
+      COALESCE(p.dismissed_count, 0) AS dismissed_count,
+      COALESCE(b.border_case_count, 0) AS border_case_count
     FROM dedup_sim.taxonomy_labels t
     LEFT JOIN (
       SELECT label, count(*) AS confirmed_count
@@ -63,14 +72,21 @@ _OVERVIEW_SQL = """
       FROM dedup_sim.label_proposals
       GROUP BY label
     ) p ON p.label = t.label
+    LEFT JOIN (
+      SELECT te2.label, count(*) AS border_case_count
+      FROM image_training_examples te2
+      JOIN image_border_cases bc ON bc.image_id = te2.image_id
+      GROUP BY te2.label
+    ) b ON b.label = t.label
     ORDER BY t.label
 """
 
 
 def taxonomy_overview(conn: psycopg.Connection) -> dict[str, Any]:
-    """Every taxonomy label with its confirmed/pending/dismissed counts, plus
-    the current sample size — the single GET the Labeling page's coverage
-    strip renders from (mirrors ClipAudit's TrainingSetSummary)."""
+    """Every taxonomy label with its confirmed/pending/dismissed counts, how many
+    of the confirmed ones are border cases, plus the current sample size — the
+    single GET the Labeling page's coverage strip renders from (mirrors
+    ClipAudit's TrainingSetSummary)."""
     with conn.cursor() as cur:
         cur.execute("SELECT count(*) FROM dedup_sim.labeling_sample")
         sample_size = cur.fetchone()[0]
@@ -80,7 +96,7 @@ def taxonomy_overview(conn: psycopg.Connection) -> dict[str, Any]:
         {
             "id": r[0], "label": r[1], "family": r[2], "active": r[3],
             "created_at": r[4], "confirmed_count": r[5], "pending_count": r[6],
-            "dismissed_count": r[7],
+            "dismissed_count": r[7], "border_case_count": r[8],
         }
         for r in rows
     ]

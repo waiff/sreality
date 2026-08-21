@@ -125,9 +125,13 @@ class _Cur:
                     1 for p in c.proposals.values()
                     if p["label"] == t["label"] and p["status"] == "dismissed"
                 )
+                border = sum(
+                    1 for te in c.training_examples.values()
+                    if te["label"] == t["label"] and te["image_id"] in c.border_cases
+                )
                 rows.append((
                     t["id"], t["label"], t["family"], t["active"], t["created_at"],
-                    confirmed, pending, dismissed,
+                    confirmed, pending, dismissed, border,
                 ))
             self._rows = rows
 
@@ -306,6 +310,10 @@ class _FakeConn:
         self.proposals: dict[tuple[int, str], dict[str, Any]] = {}
         self.sample: dict[int, dict[str, Any]] = {}
         self.images: set[int] = set()
+        # image_border_cases (migration 310) — the operator's "unclear even to a
+        # human" flag. Written elsewhere (api/labeling.py); the overview only
+        # reads it, to say how much of a label's coverage is uncertain.
+        self.border_cases: set[int] = set()
         self.image_category: dict[int, str] = {}
         self.executed: list[tuple[str, Any]] = []
 
@@ -431,8 +439,31 @@ def test_taxonomy_overview_shape(conn: _FakeConn) -> None:
     assert row_a["confirmed_count"] == 1
     assert row_a["pending_count"] == 1
     assert row_a["dismissed_count"] == 1
+    assert row_a["border_case_count"] == 0
     row_b = next(r for r in overview["labels"] if r["label"] == "b")
     assert row_b["confirmed_count"] == 0
+
+
+def test_taxonomy_overview_counts_border_cases_inside_the_confirmed_total(
+    conn: _FakeConn,
+) -> None:
+    """Gate 1 counts training rows, and a border case IS a training row — so the
+    two numbers overlap by construction. The overview reports the uncertain
+    slice separately rather than netting it out: whether those images train,
+    validate, or get dropped is a W3 decision, not this query's to make."""
+    dsl.add_taxonomy_label(conn, label="a")
+    for image_id in (1, 2, 3):
+        conn.training_examples[image_id] = {
+            "image_id": image_id, "label": "a", "created_by": "x",
+        }
+    conn.border_cases.add(2)
+    # Flagged but never trained: it belongs to no label, so it lands in neither
+    # count.
+    conn.border_cases.add(99)
+
+    row = next(r for r in dsl.taxonomy_overview(conn)["labels"] if r["label"] == "a")
+    assert row["confirmed_count"] == 3
+    assert row["border_case_count"] == 1
 
 
 # --- sample ---------------------------------------------------------------

@@ -1,15 +1,15 @@
 import { useEffect, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 
+import BorderCaseButton from '@/components/BorderCaseButton';
 import LabelCombobox, { type LabelOption } from '@/components/LabelCombobox';
 import {
   setTrainingExample,
   deleteTrainingExample,
-  setBorderCase,
-  deleteBorderCase,
   type TrainingExample,
 } from '@/lib/api';
 import type { ImagePublic } from '@/lib/types';
+import type { BorderCaseStore } from '@/lib/useBorderCases';
 
 /* The linear-probe training-set "Train" CTA, used by /clip-audit (it was extracted
  * when a second labeling surface carried a byte-for-byte copy of this state/mutation
@@ -21,20 +21,20 @@ import type { ImagePublic } from '@/lib/types';
  *
  * "Border case" (to Train's right) is a separate, independent flag — not a label
  * itself: even a human isn't confident how to classify this image, and it may or may
- * not also carry a best-guess training label. A one-click toggle (unlike Train, it
- * has no value of its own to edit), so it needs no combobox and no separate
- * remove-link — clicking it again just unflags. */
+ * not also carry a best-guess training label. It lives in the shared
+ * `BorderCaseButton` + `useBorderCases`, which the NEW DEDUP Labeling grid renders
+ * too, so the two surfaces stay one behavior. */
 export default function TrainControl({
   image,
   example,
-  borderCase,
+  borderCases,
   labelOptions,
   queryKeyPrefix,
   onChanged,
 }: {
   image: ImagePublic;
   example: TrainingExample | undefined;
-  borderCase: boolean;
+  borderCases: BorderCaseStore;
   labelOptions: ReadonlyArray<LabelOption>;
   queryKeyPrefix: string;
   // Fires after a Train/untrain write lands, in addition to the invalidation
@@ -74,16 +74,6 @@ export default function TrainControl({
     onSuccess: invalidate,
   });
 
-  const flagBorderCase = useMutation({
-    mutationFn: () => setBorderCase(image.id),
-    onSuccess: () => qc.invalidateQueries({ queryKey: [queryKeyPrefix, 'border-cases'] }),
-  });
-  const unflagBorderCase = useMutation({
-    mutationFn: () => deleteBorderCase(image.id),
-    onSuccess: () => qc.invalidateQueries({ queryKey: [queryKeyPrefix, 'border-cases'] }),
-  });
-  const borderCasePending = flagBorderCase.isPending || unflagBorderCase.isPending;
-
   return (
     <div className="flex flex-col gap-1">
       <div className="flex flex-wrap items-center gap-1.5">
@@ -104,24 +94,7 @@ export default function TrainControl({
         >
           {train.isPending ? '…' : trained ? '✓ Train' : 'Train'}
         </button>
-        <button
-          type="button"
-          onClick={() => (borderCase ? unflagBorderCase.mutate() : flagBorderCase.mutate())}
-          disabled={borderCasePending}
-          title={
-            borderCase
-              ? 'Sporný případ — klikni pro odebrání'
-              : 'Nejasné i pro člověka — přidat do sporných případů'
-          }
-          className={[
-            'shrink-0 px-2 py-1 text-[0.72rem] rounded-[var(--radius-xs)] border transition-colors disabled:opacity-50',
-            borderCase
-              ? 'border-[var(--color-brick)] bg-[var(--color-brick-soft)] text-[var(--color-brick)]'
-              : 'border-[var(--color-brick)] text-[var(--color-brick)] hover:bg-[var(--color-brick-soft)]',
-          ].join(' ')}
-        >
-          {borderCasePending ? '…' : borderCase ? '✓ Border case' : 'Border case'}
-        </button>
+        <BorderCaseButton imageId={image.id} store={borderCases} />
       </div>
       {trained && (
         <button
