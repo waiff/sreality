@@ -5,9 +5,13 @@ read paths reachable through /buildings/{id}/attachments/* and the
 read_floor_plan toolkit function.
 
 Bucket key prefix `custom-attachments/building/{building_run_id}/{uuid}.{ext}`.
-Distinct from the scraper's `{sreality_id}/{seq:04d}.jpg` keys so a
-listing's images and a building_run's operator uploads never collide
-on prefix-listing operations.
+Distinct from every scraper listing-photo shape — the current
+`img/{listing_id}/{images.id}.jpg` plus the two legacy `{id}/{seq:04d}.jpg`
+ones — so the two families never collide on prefix-listing operations. That
+separation is also the security boundary: `_KEY_RE` in api/routes/images.py
+whitelists ONLY the listing-photo shapes, which is what keeps these operator
+uploads out of the unauthenticated GET /images/{key} redirect. Read both
+before widening either.
 
 Unlike the scraper image-download phase (which silently no-ops when
 R2 is not configured), upload here HARD-FAILS with HTTP 503 — silent

@@ -37,18 +37,21 @@ def is_configured() -> bool:
     return all(os.environ.get(v) for v in R2_ENV_VARS)
 
 
-def image_key(listing_id: int, sequence: int | None) -> str:
-    """Bucket key for one image. Sequence padded to 4 digits for stable sort.
+def image_key(listing_id: int, image_id: int) -> str:
+    """Bucket key for one image — unique per ROW by construction.
 
-    Keyed on the SURROGATE listings.id (R2). Post-Gate-2 a non-sreality listing
-    has sreality_id NULL, and the old key would render the literal string
-    "None/0001.jpg" — every such image colliding on ONE prefix and overwriting
-    the previous one. Only NEWLY stored images take this scheme; already-stored
-    images keep whatever `images.storage_path` recorded (nothing recomputes a
-    key for an existing image), so the bucket simply holds both schemes.
+    Both earlier schemes keyed the prefix on a value that is not unique across
+    rows and drew it from ONE numeric namespace: `{sreality_id}/{seq:04d}` (pre
+    Gate-2) then `{listings.id}/{seq:04d}`. So a NEW listing whose surrogate id
+    happened to equal an OLDER listing's sreality_id minted the SAME key, and the
+    second upload silently overwrote the first — leaving the older row serving
+    another listing's photo while still carrying the pHash of the bytes it lost
+    (16 objects / 32 rows; repaired by migration 371). `images.id` is the primary
+    key and the `img/` namespace cannot collide with a bare-numeric prefix, so
+    neither half of that can recur. Only NEWLY stored images take this scheme —
+    nothing recomputes a key for an existing row, so the bucket holds all three.
     """
-    seq = sequence if sequence is not None else 0
-    return f"{listing_id}/{seq:04d}.jpg"
+    return f"img/{listing_id}/{image_id}.jpg"
 
 
 # sreality's v1 rebuild serves bare image URLs; the CDN 401s a bare URL and

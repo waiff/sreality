@@ -8,8 +8,9 @@ straight to the browser without proxying them through us.
 
 Unauthenticated (like /health) — listing photos are public data and an <img>
 tag can't send a bearer header. The key is constrained to the listing-image
-shape `-?<id>/<seq>.jpg` so this can never presign the operator-private
-`custom-attachments/` building uploads that share the bucket.
+shapes (`img/<listing_id>/<image_id>.jpg` and the legacy `-?<id>/<seq>.jpg`) so
+this can never presign the operator-private `custom-attachments/` building
+uploads that share the bucket.
 """
 
 from __future__ import annotations
@@ -23,8 +24,13 @@ from scraper import image_storage
 
 router = APIRouter(prefix="/images", tags=["images"])
 
-# `{native_id}/{seq:04d}.jpg`; native_id is negative for non-sreality portals.
-_KEY_RE = re.compile(r"^-?\d+/\d{4}\.jpg$")
+# Both listing-image shapes: the current `img/{listing_id}/{image_id}.jpg` and the
+# two legacy `{native_id}/{seq:04d}.jpg` ones (native_id is negative for non-sreality
+# portals). Anchored and enumerated — never a general prefix — so this still cannot
+# presign the operator-private `custom-attachments/` uploads sharing the bucket.
+# `[0-9]` not `\d` (which is unicode-aware, so `\d` would admit non-ASCII digits into
+# a security predicate) and `\Z` not `$` (which also matches before a trailing newline).
+_KEY_RE = re.compile(r"^(?:-?[0-9]+/[0-9]{4}|img/[0-9]+/[0-9]+)\.jpg\Z")
 
 # Presign lifetime (R2/SigV4 max is 7 days). The 302 is cached only briefly on purpose:
 # a long cache means a serve-path change (e.g. an R2 credential rotation) leaves browsers
