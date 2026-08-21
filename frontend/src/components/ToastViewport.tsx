@@ -24,6 +24,15 @@ export default function ToastViewport() {
           className={`flex items-start gap-3 p-3 rounded-[var(--radius-sm)] border text-sm shadow-sm ${TONE[t.kind]}`}
         >
           <span className="flex-1 break-words">{t.message}</span>
+          {t.action && (
+            <button
+              type="button"
+              onClick={t.action.onClick}
+              className="shrink-0 underline underline-offset-2 hover:opacity-80"
+            >
+              {t.action.label}
+            </button>
+          )}
           <button
             type="button"
             onClick={() => dismissToast(t.id)}
