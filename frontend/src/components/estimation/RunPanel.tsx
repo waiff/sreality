@@ -13,7 +13,8 @@
  * remount would show the previous run's edits. (A background refetch of
  * the SAME run deliberately does not reset them — that would wipe the
  * operator's in-progress edits.) */
-import { Suspense, lazy, useEffect, useMemo, useRef, useState } from 'react';
+import { Suspense, useEffect, useMemo, useRef, useState } from 'react';
+import { lazyChunk } from '@/lib/lazyChunk';
 import { Link, useLocation } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
@@ -68,10 +69,10 @@ import type {
   Trace,
 } from '@/lib/types';
 
-const ComparablesMap = lazy(
+const ComparablesMap = lazyChunk(
   () => import('@/components/estimation/ComparablesMap'),
 );
-const ComparableModal = lazy(
+const ComparableModal = lazyChunk(
   () => import('@/components/estimation/ComparableModal'),
 );
 

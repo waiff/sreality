@@ -1,4 +1,4 @@
-import { Suspense, lazy, useLayoutEffect, useMemo, useState } from 'react';
+import { Suspense, useLayoutEffect, useMemo, useState } from 'react';
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
 import {
   useNewEstimationModal,
@@ -58,17 +58,18 @@ import ErrorBoundary from '@/components/ErrorBoundary';
 import { ListingOverview } from '@/components/listing-detail/ListingOverview';
 import PipelineToggle from '@/components/listing-detail/PipelineToggle';
 import { listingCanonicalPath, listingRowPath } from '@/lib/listingUrl';
+import { lazyChunk } from '@/lib/lazyChunk';
 
-const PriceLineChart = lazy(
+const PriceLineChart = lazyChunk(
   () => import('@/components/listing-detail/PriceLineChart'),
 );
-const CurationBlock = lazy(
+const CurationBlock = lazyChunk(
   () => import('@/components/listing-detail/CurationBlock'),
 );
-const ManualEstimatesBlock = lazy(
+const ManualEstimatesBlock = lazyChunk(
   () => import('@/components/listing-detail/ManualEstimatesBlock'),
 );
-const EstimationsBlock = lazy(
+const EstimationsBlock = lazyChunk(
   () => import('@/components/listing-detail/EstimationsBlock'),
 );
 

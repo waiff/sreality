@@ -9,19 +9,6 @@ import { pushToast } from './lib/toast';
 import { applyTheme, readStoredTheme } from './lib/theme';
 import './styles/globals.css';
 
-const CHUNK_RELOAD_FLAG = 'sreality:chunkReloadAttempted';
-
-window.addEventListener('vite:preloadError', (event) => {
-  if (sessionStorage.getItem(CHUNK_RELOAD_FLAG) === '1') return;
-  sessionStorage.setItem(CHUNK_RELOAD_FLAG, '1');
-  event.preventDefault();
-  window.location.reload();
-});
-
-window.addEventListener('load', () => {
-  sessionStorage.removeItem(CHUNK_RELOAD_FLAG);
-});
-
 applyTheme(readStoredTheme());
 
 /* App-wide mutation-failure surfacing: any mutation that does NOT define its
