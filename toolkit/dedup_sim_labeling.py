@@ -44,26 +44,40 @@ def _clean_label(label: str) -> str:
 
 # --- taxonomy -----------------------------------------------------------
 
-# `border_case_count` is the slice of a label's CONFIRMED coverage that the
-# operator also flagged unclear-even-to-a-human (migration 310) — it is a subset
-# of confirmed_count, never added to it. Gate 1 counts training rows, and a
-# border case is a training row like any other, so without this readout a tag
-# can reach its target on images nobody could actually classify. Kept as its own
-# number rather than netted out of confirmed_count: whether those images train,
-# validate, or get dropped is a decision for W3, not something this query should
-# silently make.
+# A label's training rows split into the two that mean different things
+# (operator decision, 2026-08-21):
+#
+#   gate_count        rows Gate 1 counts — training examples NOT flagged as
+#                     border cases. An image nobody could classify is not
+#                     evidence a tag is learnable, so it does not move a tag
+#                     toward its target; clearing the flag makes it count again,
+#                     with no relabelling needed (this is a JOIN, not a stamp).
+#   border_case_count rows parked by that flag (migration 310) — excluded from
+#                     gate_count, never added to it.
+#   confirmed_count   every training row under the label, the two above summed.
+#                     Still the honest inventory number: it is what a taxonomy
+#                     REMOVE deletes, and what "N confirmed" means outside the
+#                     gate question.
+#
+# gate_count is computed here rather than subtracted in the client so the gate's
+# predicate has exactly one definition for every consumer of this data.
 _OVERVIEW_SQL = """
     SELECT
       t.id, t.label, t.family, t.active, t.created_at,
       COALESCE(te.confirmed_count, 0) AS confirmed_count,
+      COALESCE(te.gate_count, 0) AS gate_count,
+      COALESCE(te.border_case_count, 0) AS border_case_count,
       COALESCE(p.pending_count, 0) AS pending_count,
-      COALESCE(p.dismissed_count, 0) AS dismissed_count,
-      COALESCE(b.border_case_count, 0) AS border_case_count
+      COALESCE(p.dismissed_count, 0) AS dismissed_count
     FROM dedup_sim.taxonomy_labels t
     LEFT JOIN (
-      SELECT label, count(*) AS confirmed_count
-      FROM image_training_examples
-      GROUP BY label
+      SELECT te2.label,
+        count(*) AS confirmed_count,
+        count(*) FILTER (WHERE bc.image_id IS NULL) AS gate_count,
+        count(*) FILTER (WHERE bc.image_id IS NOT NULL) AS border_case_count
+      FROM image_training_examples te2
+      LEFT JOIN image_border_cases bc ON bc.image_id = te2.image_id
+      GROUP BY te2.label
     ) te ON te.label = t.label
     LEFT JOIN (
       SELECT label,
@@ -72,21 +86,15 @@ _OVERVIEW_SQL = """
       FROM dedup_sim.label_proposals
       GROUP BY label
     ) p ON p.label = t.label
-    LEFT JOIN (
-      SELECT te2.label, count(*) AS border_case_count
-      FROM image_training_examples te2
-      JOIN image_border_cases bc ON bc.image_id = te2.image_id
-      GROUP BY te2.label
-    ) b ON b.label = t.label
     ORDER BY t.label
 """
 
 
 def taxonomy_overview(conn: psycopg.Connection) -> dict[str, Any]:
-    """Every taxonomy label with its confirmed/pending/dismissed counts, how many
-    of the confirmed ones are border cases, plus the current sample size — the
-    single GET the Labeling page's coverage strip renders from (mirrors
-    ClipAudit's TrainingSetSummary)."""
+    """Every taxonomy label with its training-row counts (total, the Gate-1
+    countable slice, and the border-cased remainder) plus its pending/dismissed
+    proposals and the current sample size — the single GET the Labeling page's
+    coverage strip renders from (mirrors ClipAudit's TrainingSetSummary)."""
     with conn.cursor() as cur:
         cur.execute("SELECT count(*) FROM dedup_sim.labeling_sample")
         sample_size = cur.fetchone()[0]
@@ -95,8 +103,9 @@ def taxonomy_overview(conn: psycopg.Connection) -> dict[str, Any]:
     labels = [
         {
             "id": r[0], "label": r[1], "family": r[2], "active": r[3],
-            "created_at": r[4], "confirmed_count": r[5], "pending_count": r[6],
-            "dismissed_count": r[7], "border_case_count": r[8],
+            "created_at": r[4], "confirmed_count": r[5], "gate_count": r[6],
+            "border_case_count": r[7], "pending_count": r[8],
+            "dismissed_count": r[9],
         }
         for r in rows
     ]

@@ -56,8 +56,9 @@ W1 (shared prerequisites + labeling program):
       per-tile tag picker to correct a wrong suggestion (#993), and review ergonomics (#994):
       collapsible chart, tag + coverage filters, an All tab, and a grid that holds its order
       instead of refetching on every confirm. A "Border case" flag on every tile (#1113) closes the
-      last gap against /clip-audit — shared with that page through `lib/useBorderCases` — and the
-      coverage chart now shows how much of each tag's Gate-1 total is flagged uncertain.
+      last gap against /clip-audit — shared with that page through `lib/useBorderCases`. Gate 1
+      counts only UNPARKED images (operator decision, 2026-08-21): a border case stops counting
+      until its flag is cleared, and the coverage chart shows the parked remainder beside the bar.
       Secondary-CLIP scoring (`scraper/label_proposal_tagger.py` +
       `scripts/label_proposal_backfill.py`, dispatch-only GH Actions workflow) is separate infra
       from the DINOv2/RunPod embeddings path below — a stronger CLIP checkpoint, CPU, no RunPod

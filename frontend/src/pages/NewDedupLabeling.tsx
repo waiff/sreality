@@ -275,7 +275,7 @@ export default function NewDedupLabeling() {
   const labelOptions: LabelOption[] = useMemo(
     () =>
       allLabels
-        .map((l) => ({ value: l.label, label: l.label, count: l.confirmed_count }))
+        .map((l) => ({ value: l.label, label: l.label, count: l.gate_count }))
         .sort((a, b) => a.label.localeCompare(b.label, 'cs')),
     [allLabels],
   );
@@ -288,7 +288,7 @@ export default function NewDedupLabeling() {
     () =>
       maxTrainedNum == null
         ? allLabels
-        : allLabels.filter((l) => l.confirmed_count <= maxTrainedNum),
+        : allLabels.filter((l) => l.gate_count <= maxTrainedNum),
     [allLabels, maxTrainedNum],
   );
   const filterOptions = useMemo(
@@ -541,7 +541,8 @@ export default function NewDedupLabeling() {
         for images in the sample below; confirming a proposal writes it into the real training
         set, dismissing it doesn't. "Border case" is neither verdict — it parks a photo that is
         unclear even to a human, independently of whatever tag it carries. Gate 1 needs{' '}
-        {gate1Target} confirmed images per active tag.
+        {gate1Target} images per active tag, counting only the ones that are NOT parked: a border
+        case starts counting again the moment its flag is cleared.
       </p>
 
       {overviewQ.error && <ErrorBanner message={(overviewQ.error as Error).message} />}
@@ -673,7 +674,7 @@ export default function NewDedupLabeling() {
             )}
             {filterOptions.map((l) => (
               <option key={l.id} value={l.label}>
-                {l.label} ({l.confirmed_count})
+                {l.label} ({l.gate_count})
               </option>
             ))}
           </select>
@@ -876,12 +877,12 @@ function TaxonomyBarChart({
 }) {
   const [open, toggle] = useCollapsed('new-dedup-labeling-taxonomy', true);
   const sorted = useMemo(
-    () => [...labels].sort((a, b) => b.confirmed_count - a.confirmed_count),
+    () => [...labels].sort((a, b) => b.gate_count - a.gate_count),
     [labels],
   );
   // Bars scale to whichever is bigger — the Gate 1 target or the current
   // leader — so the target tick is always on-chart, not off the right edge.
-  const domainMax = Math.max(gate1Target, ...sorted.map((l) => l.confirmed_count), 1);
+  const domainMax = Math.max(gate1Target, ...sorted.map((l) => l.gate_count), 1);
   const gatePct = Math.min(100, (gate1Target / domainMax) * 100);
   const filtered = labels.length !== totalLabels;
 
@@ -903,7 +904,7 @@ function TaxonomyBarChart({
         <div className="flex shrink-0 items-center gap-2">
           <label
             className="flex items-center gap-1.5 text-xs text-[var(--color-ink-3)]"
-            title="Show only tags that have at most this many confirmed training images — the ones still short of Gate 1. Also narrows the tag filter below."
+            title="Show only tags that have at most this many Gate-1 images (border cases excluded) — the ones still short. Also narrows the tag filter below."
           >
             ≤
             <input
@@ -942,12 +943,12 @@ function TaxonomyBarChart({
           {sorted.length > 0 && (
             <>
               <p className="text-[0.7rem] text-[var(--color-ink-4)]">
-                Bars are confirmed training images, scaled to Gate 1's target of {gate1Target}{' '}
-                (marked ▏below).
+                Bars are training images that count toward Gate 1 — border cases excluded —
+                scaled to its target of {gate1Target} (marked ▏below).
               </p>
               <div className="mt-3 space-y-2">
                 {sorted.map((l) => {
-                  const pct = Math.min(100, (l.confirmed_count / domainMax) * 100);
+                  const pct = Math.min(100, (l.gate_count / domainMax) * 100);
                   const active = activeLabel === l.label;
                   return (
                     <div key={l.id}>
@@ -968,17 +969,17 @@ function TaxonomyBarChart({
                             · {l.pending_count}/{proposalTarget} pending
                           </span>
                         )}
-                        {/* Border cases are counted INSIDE the bar, because they
-                          * are training rows and Gate 1 counts training rows.
-                          * Flagging the share here is what keeps "150 confirmed"
-                          * from quietly meaning "150 confirmed, 40 of which
-                          * nobody could classify". */}
+                        {/* Border cases sit OUTSIDE the bar — they don't count
+                          * toward Gate 1 until the flag is cleared. Shown anyway
+                          * because a tag can be sitting on a pile of parked
+                          * images, which is a signal about the TAG (too vague to
+                          * label against), not just about those photos. */}
                         {l.border_case_count > 0 && (
                           <span
                             className="shrink-0 text-[0.68rem] text-[var(--color-brick)]"
-                            title={`${l.border_case_count} of this tag's ${l.confirmed_count} training images are flagged border cases — included in the bar, not extra`}
+                            title={`${l.border_case_count} more image${l.border_case_count === 1 ? ' is' : 's are'} labelled ${l.label} but parked as border cases — not counted toward Gate 1 until the flag is cleared (${l.confirmed_count} labelled in total)`}
                           >
-                            · {l.border_case_count} border
+                            · {l.border_case_count} parked
                           </span>
                         )}
                       </div>
@@ -1004,7 +1005,7 @@ function TaxonomyBarChart({
                           />
                         </div>
                         <span className="w-8 shrink-0 text-right font-mono text-[0.7rem] tabular-nums text-[var(--color-ink-3)]">
-                          {l.confirmed_count}
+                          {l.gate_count}
                         </span>
                       </div>
                     </div>

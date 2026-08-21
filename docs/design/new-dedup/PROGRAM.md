@@ -37,6 +37,7 @@ until the whole stack is approved end-to-end. Other rules:
 | Vision | GPT-5-mini, manual batches only; qwen pluggable later |
 | Taxonomy v1 | The operator-curated `image_training_examples` label set (49 labels: `interier -*`, `exterier -*`, `podklad -*`, standalone garáž/technické zařízení/other); "katastr" ≙ `podklad - katastrální mapa`; tag-family defaults reconfirmed at training-set finalization |
 | Exact attrs (L1) | Ships inactive; calibrated only after full stack has produced a sample (Wave 7) |
+| Gate 1 counting (2026-08-21) | **Border cases do not count toward Gate 1** — an image nobody could classify is not evidence a tag is learnable. The exclusion is a JOIN on `image_border_cases`, not a stamp on the training row, so clearing the flag makes the image count again with no relabelling. `gate_count` (unparked) is what every coverage surface reads; `confirmed_count` stays the raw inventory total |
 
 ## Simulation architecture (Q15-confirmed)
 
@@ -118,6 +119,30 @@ Session handoff points marked ⛳ (good places to end a session; update the ledg
 - CLAUDE.md "psql" guidance inoperable in cloud-only mode — fix text in W0 docs pass.
 
 ## Progress ledger (update every session, newest first)
+
+- 2026-08-21 (part 2) — **Gate 1 stops counting border cases** (operator decision, reversing the
+  call recorded in part 1 below — which had deliberately left `confirmed_count` alone rather than
+  redefine the gate metric unilaterally). Operator's rule, verbatim: *"border case does not count
+  toward gate 1 unless removed from border case group."*
+  - **`taxonomy_overview` now returns three numbers instead of one**, from a single subquery
+    (`count(*) FILTER (WHERE bc.image_id IS NULL)` over a LEFT JOIN — still **no migration**):
+    `gate_count` (what Gate 1 measures), `border_case_count` (parked), and `confirmed_count`
+    (their sum, the raw inventory). The gate predicate is computed in SQL, not subtracted in the
+    client, so it has exactly one definition for every future consumer — W3's trainer included.
+  - **"Unless removed from the group" is free**, because the exclusion is a JOIN and not a column
+    on the training row: clearing the flag restores the count immediately, with no relabelling and
+    no backfill. Pinned by its own test.
+  - **Every coverage surface moved to `gate_count`** — the bar and its value, the sort, the
+    domain max, the `≤ N imgs` ceiling, and the tag-picker counts. `confirmed_count` survives in
+    exactly the two places that mean "rows that exist", not "progress": the manage modal's
+    "N confirmed · M pending" line and its remove-confirmation ("N training examples go with it"),
+    which is literally what the DELETE takes.
+  - The chart's border annotation flipped meaning with the number and now reads `· N parked`,
+    outside the bar rather than inside it. It stays visible on purpose: a tag sitting on a pile of
+    parked images is a signal about the TAG (too vague to label against), not just those photos.
+  - Tests: 2 new backend cases (the split; unflagging restores the count) and 2 new page cases
+    (the bar reads the gate number; the ceiling narrows by it), both page ones verified to go red
+    when the surface is pointed back at `confirmed_count`.
 
 - 2026-08-21 — **Labeling page: the "Border case" flag** (operator request, pointing at
   /clip-audit as the model). The flag itself is not new — `image_border_cases` (migration 310) and
