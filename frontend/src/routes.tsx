@@ -1,4 +1,5 @@
-import { Suspense, lazy, type ReactNode } from 'react';
+import { Suspense, type ReactNode } from 'react';
+import { lazyChunk } from '@/lib/lazyChunk';
 import { Navigate, type RouteObject } from 'react-router-dom';
 import Shell from './components/Shell';
 import { RequireAdmin, RequireAuth } from './components/guards';
@@ -22,22 +23,22 @@ import Notifications from './pages/Notifications';
 
 // Admin-only pages are code-split out of the default bundle — a non-admin
 // session never downloads them.
-const Health = lazy(() => import('./pages/Health'));
-const Costs = lazy(() => import('./pages/Costs'));
-const ClipAudit = lazy(() => import('./pages/ClipAudit'));
-const Scrapers = lazy(() => import('./pages/Scrapers'));
-const Settings = lazy(() => import('./pages/Settings'));
-const Datasets = lazy(() => import('./pages/Datasets'));
-const Outreach = lazy(() => import('./pages/Outreach'));
-const OutreachDetail = lazy(() => import('./pages/OutreachDetail'));
-const BrokerReview = lazy(() => import('./pages/BrokerReview'));
-const LocationQuality = lazy(() => import('./pages/LocationQuality'));
-const NewDedupDashboard = lazy(() => import('./pages/NewDedupDashboard'));
-const NewDedupSettings = lazy(() => import('./pages/NewDedupSettings'));
-const NewDedupLabeling = lazy(() => import('./pages/NewDedupLabeling'));
+const Health = lazyChunk(() => import('./pages/Health'));
+const Costs = lazyChunk(() => import('./pages/Costs'));
+const ClipAudit = lazyChunk(() => import('./pages/ClipAudit'));
+const Scrapers = lazyChunk(() => import('./pages/Scrapers'));
+const Settings = lazyChunk(() => import('./pages/Settings'));
+const Datasets = lazyChunk(() => import('./pages/Datasets'));
+const Outreach = lazyChunk(() => import('./pages/Outreach'));
+const OutreachDetail = lazyChunk(() => import('./pages/OutreachDetail'));
+const BrokerReview = lazyChunk(() => import('./pages/BrokerReview'));
+const LocationQuality = lazyChunk(() => import('./pages/LocationQuality'));
+const NewDedupDashboard = lazyChunk(() => import('./pages/NewDedupDashboard'));
+const NewDedupSettings = lazyChunk(() => import('./pages/NewDedupSettings'));
+const NewDedupLabeling = lazyChunk(() => import('./pages/NewDedupLabeling'));
 // TODO(estimation-5 Part C1): remove DevConfidencePreview + its route
 // once design is approved and the indicator is in real use.
-const DevConfidencePreview = lazy(() => import('./pages/DevConfidencePreview'));
+const DevConfidencePreview = lazyChunk(() => import('./pages/DevConfidencePreview'));
 
 function AdminPage({ children }: { children: ReactNode }) {
   return (

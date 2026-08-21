@@ -5,7 +5,8 @@
  * subject with the SAME structure (one surface, not two). Driven by a
  * ListingPublic row; the estimation page passes the subject's resolved
  * listings row. */
-import { Suspense, lazy, useLayoutEffect, useRef, useState } from 'react';
+import { Suspense, useLayoutEffect, useRef, useState } from 'react';
+import { lazyChunk } from '@/lib/lazyChunk';
 import { fmtCzk, fmtArea, fmtPricePerM2, fmtAbsolute } from '@/lib/format';
 import type { ImagePublic, ListingPublic } from '@/lib/types';
 import { listingKindParts } from '@/lib/enums';
@@ -17,8 +18,8 @@ import {
   AmenityChips,
 } from '@/lib/listingFacts';
 
-const DetailMap = lazy(() => import('@/components/listing-detail/DetailMap'));
-const Gallery = lazy(() => import('@/components/listing-detail/Gallery'));
+const DetailMap = lazyChunk(() => import('@/components/listing-detail/DetailMap'));
+const Gallery = lazyChunk(() => import('@/components/listing-detail/Gallery'));
 
 export function ListingOverview({
   listing,

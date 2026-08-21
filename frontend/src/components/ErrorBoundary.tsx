@@ -1,4 +1,5 @@
 import { Component, type ErrorInfo, type ReactNode } from 'react';
+import { UserFacingError } from '@/lib/errors';
 
 interface Props {
   children: ReactNode;
@@ -43,19 +44,31 @@ export default class ErrorBoundary extends Component<Props, State> {
 }
 
 function DefaultFallback({ error }: { error: Error }) {
+  /* An anticipated failure carries copy written for a person (lib/errors.ts):
+   * show that, and keep the technical text available but out of the way. A
+   * plain Error has no such copy, so it keeps the generic crash wording. */
+  const userFacing = error instanceof UserFacingError ? error : null;
+  /* For an anticipated error the headline IS its message, so repeating it under
+   * "Technical details" says nothing. The useful text there is what actually
+   * failed underneath — the cause. */
+  const cause = userFacing?.cause;
+  const technical =
+    cause instanceof Error ? `${cause.name}: ${cause.message}` : error.message;
   return (
     <div className="px-6 py-12 max-w-3xl mx-auto">
       <p className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)]">
-        Something broke
+        {userFacing ? 'Heads up' : 'Something broke'}
       </p>
       <h1
         className="mt-2 text-2xl"
         style={{ fontFamily: 'var(--font-display)', fontWeight: 600 }}
       >
-        This page hit an error
+        {userFacing ? userFacing.userMessage : 'This page hit an error'}
       </h1>
       <p className="mt-3 text-sm text-[var(--color-ink-3)]">
-        The rest of the app is fine — reload to try again, or use the back button.
+        {userFacing
+          ? userFacing.recovery
+          : 'Reload to try again, or use the back button.'}
       </p>
       <button
         type="button"
@@ -64,9 +77,17 @@ function DefaultFallback({ error }: { error: Error }) {
       >
         Reload
       </button>
-      <pre className="mt-5 overflow-x-auto whitespace-pre-wrap rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] p-3 text-[0.72rem] text-[var(--color-brick)]">
-        {error.message}
-      </pre>
+      {/* Kept, but folded away: the raw message is for reporting a bug, not for
+        * reading. Leaving it in the open is how a TypeError ended up presented
+        * to the operator as if it were the headline. */}
+      <details className="mt-5">
+        <summary className="cursor-pointer text-[0.72rem] text-[var(--color-ink-3)]">
+          Technical details
+        </summary>
+        <pre className="mt-2 overflow-x-auto whitespace-pre-wrap rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] p-3 text-[0.72rem] text-[var(--color-brick)]">
+          {technical}
+        </pre>
+      </details>
     </div>
   );
 }

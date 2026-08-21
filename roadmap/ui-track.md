@@ -272,6 +272,30 @@ End-to-end browser flow over the U1b backend.
 - Adopted by the listing price chart, Health scrape trend, Costs, and the
   dedup pipeline timeline.
 
+### Deploy-staleness resilience: the lazyChunk chokepoint (done)
+
+- **The defect.** Clicking a pipeline card through to Listing Detail could
+  flash a full-page "This page hit an error" screen showing
+  `TypeError: Cannot read properties of undefined (reading 'default')`, then
+  load correctly. Cause was the app's own recovery code: `main.tsx` listened
+  for `vite:preloadError` and called `event.preventDefault()`, which is Vite's
+  "I handled it" signal — the failed `import()` then RESOLVED to `undefined`
+  and React's `lazy` initializer dereferenced `.default` on it. The reload the
+  handler scheduled always worked; it just let React paint a crash first.
+- **The fix.** `frontend/src/lib/lazyChunk.ts` is now the single code-splitting
+  entry point (all 23 sites; an ESLint rule bans bare `lazy(` elsewhere). A
+  failed chunk load returns a never-settling promise so React holds the Suspense
+  fallback while the page reloads — no error can paint. Rails: a 60s rate limit
+  (not the old one-shot flag, which its own `load` listener cleared), offline
+  treated separately from staleness, storage failures favouring recovery.
+- **Why it happens at all:** a deploy rotates every hashed chunk name (measured:
+  30 of 30 on a one-character change) and Caddy hard-404s the old ones, so any
+  tab open across a deploy hits it. Normal for a hashed-asset SPA; only the
+  handling was wrong.
+- `UserFacingError` (`frontend/src/lib/errors.ts`) + an `ErrorBoundary` branch
+  so anticipated failures show plain-language copy and keep the raw text folded
+  under "Technical details".
+
 ### Phase U-Nav: Unified browse → detail navigation (next)
 
 Today the top nav exposes `Listing` and (historically) `Estimate` as

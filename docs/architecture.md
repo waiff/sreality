@@ -272,6 +272,33 @@ rules. Identify which one a task belongs to before you start.
   `pgrst.db_max_rows = 50000` (= `MAP_CAP`) on the `authenticator` role, after the
   unversioned dashboard value shipped two silent-truncation bugs at 1,000 and was then
   lifted out-of-band; keep the dashboard "Max Rows" field agreeing with the migration.
+- **All code-splitting goes through `frontend/src/lib/lazyChunk.ts`**, never React's bare
+  `lazy` (ESLint bans it outside that file — the SPA's second such chokepoint after
+  `fetchAllRows`). Every deploy rotates every hashed chunk filename (measured: 30 of 30
+  on a one-character source change, because each lazy chunk hard-references the entry
+  chunk and Rollup's hash cascade reaches all of them), and `Caddyfile`'s
+  `handle_path /assets/*` has no SPA fallback, so any tab open across a deploy hard-404s
+  the next chunk it loads. That is normal for a hashed-asset SPA; what was NOT normal was
+  the old recovery path. `main.tsx` used to listen for `vite:preloadError` and call
+  `event.preventDefault()` — Vite's "I handled it" signal, after which its helper
+  (`baseModule().catch(handlePreloadError)`) makes the `import()` RESOLVE to `undefined`.
+  React's `lazy` initializer then read `.default` off `undefined` and threw a TypeError
+  into the route boundary: a full-page crash screen held in front of the reload that
+  handler had itself scheduled (the 2026-08-19 pipeline→listing incident). A window-level
+  listener structurally cannot do better — it holds no reference to the pending import,
+  so it cannot keep React suspended. `lazyChunk` owns the failure where the import lives:
+  a rejected load returns a **never-settling promise** so React holds the `Suspense`
+  fallback with nothing to dereference, then reloads. Rails: a 60-second sessionStorage
+  rate limit (not a one-shot flag — the old one was cleared by a `load` listener on the
+  very reload it triggered, so it bounded nothing across documents), `navigator.onLine`
+  treated as its own case (reloading an offline tab replaces a working app with the
+  browser's offline page), and every storage access wrapped so a throwing
+  `sessionStorage` degrades to "allow the reload" rather than to "no recovery".
+- **`UserFacingError` (`frontend/src/lib/errors.ts`) marks the errors a person should
+  read.** `ErrorBoundary` renders its `userMessage` + `recovery` as the headline and
+  folds the technical text (the `cause`, when there is one) under a collapsed "Technical
+  details". Everything else keeps the generic crash wording. Raw diagnostic strings in
+  front of the operator are how a TypeError came to read like data corruption.
 - **No write path from the browser.** Any UI action that needs a write goes through the
   bearer-token-gated FastAPI service, not direct Postgres. The toolkit's write-allowed
   exceptions (see Toolkit rule #5) are reachable only via the API.

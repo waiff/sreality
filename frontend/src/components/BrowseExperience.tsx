@@ -10,7 +10,6 @@
  * surfaces can never drift. */
 import {
   Suspense,
-  lazy,
   useCallback,
   useEffect,
   useMemo,
@@ -18,6 +17,7 @@ import {
   useState,
   type CSSProperties,
 } from 'react';
+import { lazyChunk } from '@/lib/lazyChunk';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import Tabs, { type Tab } from '@/components/Tabs';
 import ResizeHandle from '@/components/ResizeHandle';
@@ -98,7 +98,7 @@ import { useInfiniteList } from '@/lib/useInfiniteList';
 import type { KeysetCursor } from '@/lib/keyset';
 import type { BrowseViewState, TabKey } from '@/lib/browseState';
 
-const ListingMap = lazy(() => import('@/components/ListingMap'));
+const ListingMap = lazyChunk(() => import('@/components/ListingMap'));
 
 export interface BrowseFeatures {
   /* Saved-filter preset bar — page only. */
