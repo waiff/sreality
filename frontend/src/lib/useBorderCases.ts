@@ -110,7 +110,7 @@ export function useBorderCases(imageIds: ReadonlyArray<number>): BorderCaseStore
   /* ONE mutation instance for the whole grid: its observer only ever reflects
    * the most recent call, so per-image in-flight state is tracked here instead
    * (the same reason the Labeling page keeps its own pendingRowKeys). */
-  const write = useMutation<unknown, Error, Toggle, Rollback>({
+  const { mutate } = useMutation<unknown, Error, Toggle, Rollback>({
     mutationFn: ({ imageId, next }: Toggle) =>
       next ? setBorderCase(imageId) : deleteBorderCase(imageId),
     onMutate: ({ imageId, next }) => {
@@ -127,9 +127,11 @@ export function useBorderCases(imageIds: ReadonlyArray<number>): BorderCaseStore
   const toggle = useCallback(
     (imageId: number) => {
       if (pending.has(imageId)) return;
-      write.mutate({ imageId, next: !resolved.flagged.has(imageId) });
+      mutate({ imageId, next: !resolved.flagged.has(imageId) });
     },
-    [pending, resolved.flagged, write],
+    // `mutate` is referentially stable in React Query v5, so this callback (and
+    // the store object below it) only changes when the state a tile renders does.
+    [mutate, pending, resolved.flagged],
   );
 
   return useMemo(
