@@ -1,4 +1,4 @@
-/* Collections + tags + notes for a single PROPERTY. Wired into ListingDetail.
+/* Tags + notes for a single PROPERTY. Wired into ListingDetail.
  *
  * Curation is property-grain (migration 202): a tag / collection membership /
  * note describes the real-world property, so this block operates on the
@@ -8,14 +8,13 @@
  * is NULL for a post-Gate-2 listing (migration 323).
  *
  * Reads come from two places by design:
- *   - The "which collections / tags exist" indices use the bearer-gated
- *     FastAPI service so listing_count + ordering live in one place.
+ *   - The "which tags exist" index uses the bearer-gated FastAPI service so
+ *     listing_count + ordering live in one place.
  *   - The "does THIS property belong to X" reverse-index reads pull from the
  *     *_public Supabase views via the anon key. Writes always go through the API.
  */
 
 import { useMemo, useRef, useState, useEffect } from 'react';
-import { Link } from 'react-router-dom';
 import {
   useMutation,
   useQuery,
@@ -23,25 +22,18 @@ import {
 } from '@tanstack/react-query';
 import {
   ApiError,
-  addPropertiesToCollection,
   attachTag,
   createPropertyNote,
   createTag,
   deletePropertyNote,
   detachTag,
-  listCollections,
   listPropertyNotes,
   listTags,
-  removePropertyFromCollection,
   updatePropertyNote,
 } from '@/lib/api';
-import {
-  curationKeys,
-  fetchPropertyCollectionIds,
-  fetchPropertyTagIds,
-} from '@/lib/queries';
+import { curationKeys, fetchPropertyTagIds } from '@/lib/queries';
 import { fmtAbsolute, fmtRelative } from '@/lib/format';
-import type { Collection, Note, Tag, TagColor } from '@/lib/types';
+import type { Note, Tag, TagColor } from '@/lib/types';
 import TagColorPicker from '@/components/TagColorPicker';
 import TagEditPopover from '@/components/curation/TagEditPopover';
 import { PencilIcon, TrashIcon } from '@/components/icons';
@@ -63,11 +55,13 @@ export default function CurationBlock({
 }) {
   return (
     <div className="space-y-7">
-      {/* The pipeline bookmark moved to the listing-detail header action bar
-          (PipelineToggle) — a deal-stage verb belongs at the top, next to
-          "New estimation", not buried below the estimates. This block keeps
-          the secondary curation: collections, tags, notes. */}
-      <CollectionsRow property_id={property_id} />
+      {/* The pipeline bookmark and the save-to-collection control both live in
+          the listing-detail header action bar (PipelineToggle /
+          CollectionSaveButton) — filing and deal-stage verbs belong at the top
+          next to "New estimation", not buried below the estimates, and the
+          header control is the SAME component the Browse cards use, so
+          membership can't drift between surfaces. This block keeps the
+          per-property annotations: tags and notes. */}
       <TagsRow property_id={property_id} />
       <NotesRow property_id={property_id} sreality_id={sreality_id} listing_id={listing_id} />
     </div>
@@ -79,139 +73,6 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
     <p className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)] font-medium">
       {children}
     </p>
-  );
-}
-
-/* -------------------------------------------------------------------------- */
-/* Collections                                                                */
-/* -------------------------------------------------------------------------- */
-
-function CollectionsRow({ property_id }: { property_id: number }) {
-  const qc = useQueryClient();
-
-  const allQ = useQuery({
-    queryKey: curationKeys.collections,
-    queryFn: listCollections,
-    staleTime: 30_000,
-  });
-
-  const membershipQ = useQuery({
-    queryKey: curationKeys.propertyCollections(property_id),
-    queryFn: () => fetchPropertyCollectionIds(property_id),
-    staleTime: 30_000,
-  });
-
-  const memberIds = useMemo(
-    () => new Set(membershipQ.data ?? []),
-    [membershipQ.data],
-  );
-
-  const collections = allQ.data?.data ?? [];
-
-  const add = useMutation({
-    mutationFn: (collection_id: number) =>
-      addPropertiesToCollection(collection_id, [property_id]),
-    onSuccess: (_, collection_id) => {
-      qc.invalidateQueries({
-        queryKey: curationKeys.propertyCollections(property_id),
-      });
-      qc.invalidateQueries({ queryKey: curationKeys.collections });
-      qc.invalidateQueries({ queryKey: curationKeys.collection(collection_id) });
-    },
-  });
-
-  const remove = useMutation({
-    mutationFn: (collection_id: number) =>
-      removePropertyFromCollection(collection_id, property_id),
-    onSuccess: (_, collection_id) => {
-      qc.invalidateQueries({
-        queryKey: curationKeys.propertyCollections(property_id),
-      });
-      qc.invalidateQueries({ queryKey: curationKeys.collections });
-      qc.invalidateQueries({ queryKey: curationKeys.collection(collection_id) });
-    },
-  });
-
-  return (
-    <div>
-      <div className="flex items-baseline justify-between">
-        <SectionLabel>Collections</SectionLabel>
-        <Link
-          to="/collections"
-          className="text-[0.7rem] tracking-wide text-[var(--color-ink-3)] hover:text-[var(--color-copper)] transition-colors"
-        >
-          Manage →
-        </Link>
-      </div>
-
-      {allQ.isLoading ? (
-        <p className="mt-3 text-sm text-[var(--color-ink-3)]">Loading…</p>
-      ) : allQ.error ? (
-        <p className="mt-3 text-sm text-[var(--color-brick)]">
-          Failed to load collections: {(allQ.error as Error).message}
-        </p>
-      ) : collections.length === 0 ? (
-        <p className="mt-3 text-sm text-[var(--color-ink-3)]">
-          No collections yet.{' '}
-          <Link
-            to="/collections"
-            className="text-[var(--color-copper)] hover:underline"
-          >
-            Start one
-          </Link>
-          .
-        </p>
-      ) : (
-        <ul className="mt-3 flex flex-wrap gap-1.5">
-          {collections.map((c) => (
-            <li key={c.id}>
-              <CollectionToggle
-                c={c}
-                member={memberIds.has(c.id)}
-                pending={add.isPending || remove.isPending}
-                onAdd={() => add.mutate(c.id)}
-                onRemove={() => remove.mutate(c.id)}
-              />
-            </li>
-          ))}
-        </ul>
-      )}
-    </div>
-  );
-}
-
-function CollectionToggle({
-  c,
-  member,
-  pending,
-  onAdd,
-  onRemove,
-}: {
-  c: Collection;
-  member: boolean;
-  pending: boolean;
-  onAdd: () => void;
-  onRemove: () => void;
-}) {
-  const cls = member
-    ? 'bg-[var(--color-copper-soft)] text-[var(--color-copper)] border-[var(--color-copper)]/40'
-    : 'bg-[var(--color-paper-2)] text-[var(--color-ink-3)] border-[var(--color-rule)] hover:text-[var(--color-ink-2)] hover:border-[var(--color-rule-strong)]';
-  return (
-    <button
-      type="button"
-      onClick={member ? onRemove : onAdd}
-      disabled={pending}
-      aria-pressed={member}
-      className={[
-        'inline-flex items-center gap-1.5 px-2.5 py-1 text-[0.78rem] rounded-[var(--radius-sm)] border transition-colors disabled:opacity-60',
-        cls,
-      ].join(' ')}
-    >
-      <span aria-hidden className="text-[0.65rem] leading-none">
-        {member ? '✓' : '+'}
-      </span>
-      <span className="truncate max-w-[14rem]">{c.name}</span>
-    </button>
   );
 }
 

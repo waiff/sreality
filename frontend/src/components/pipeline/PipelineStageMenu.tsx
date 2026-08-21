@@ -19,13 +19,14 @@
  * terminal stage: closing a deal into "Passed / Bought / Lost" keeps the record.
  */
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 
 import AnchoredPopover from '@/components/AnchoredPopover';
 import { fetchPipelineStages, pipelineKeys } from '@/lib/queries';
 import { stageAccent, stageBadge } from '@/lib/pipelineStage';
 import { usePipelineCard } from '@/lib/usePipelineCard';
+import { useMenuKeyboard } from '@/lib/useMenuKeyboard';
 import type { PipelineStage } from '@/lib/types';
 
 export interface PipelineStageMenuProps {
@@ -57,37 +58,15 @@ export default function PipelineStageMenu({
   const [confirming, setConfirming] = useState(false);
   const listRef = useRef<HTMLDivElement>(null);
 
-  /* Open on the current stage, the WAI-ARIA menu default for a radio group —
-   * the operator's next move is almost always one step from where they are. */
-  useEffect(() => {
-    if (confirming || stages.length === 0) return;
-    const el = listRef.current?.querySelector<HTMLElement>('[aria-checked="true"]');
-    (el ?? listRef.current?.querySelector<HTMLElement>('[role^="menuitem"]'))?.focus();
-  }, [confirming, stages.length]);
-
-  /* Roving focus across the menu items (Up/Down/Home/End), so the menu is
-   * operable without a mouse once it is open. */
-  const onKeyDown = (e: React.KeyboardEvent) => {
-    const keys = ['ArrowDown', 'ArrowUp', 'Home', 'End'];
-    if (!keys.includes(e.key)) return;
-    const items = [
-      ...(listRef.current?.querySelectorAll<HTMLElement>(
-        '[role^="menuitem"]:not([disabled])',
-      ) ?? []),
-    ];
-    if (items.length === 0) return;
-    e.preventDefault();
-    const at = items.indexOf(document.activeElement as HTMLElement);
-    const next =
-      e.key === 'Home'
-        ? 0
-        : e.key === 'End'
-          ? items.length - 1
-          : e.key === 'ArrowDown'
-            ? (at + 1) % items.length
-            : (at - 1 + items.length) % items.length;
-    items[next]?.focus();
-  };
+  /* Open on the current stage and rove from there — shared with the collection
+   * picker, the other menu these same controls open. The confirm step focuses
+   * its own button (autoFocus below), so focusing the list is suppressed there. */
+  const onKeyDown = useMenuKeyboard(listRef, {
+    /* Not before the stages load either: the only `menuitem` on screen then is
+     * "Odebrat z pipeline", and the menu must never open focused on that. */
+    active: !confirming && stages.length > 0,
+    deps: [stages.length],
+  });
 
   const moveTo = (stage: PipelineStage) => {
     if (stage.id === stageId || pending) return;
