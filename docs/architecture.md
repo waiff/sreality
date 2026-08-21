@@ -306,6 +306,18 @@ rules. Identify which one a task belongs to before you start.
   fallback answers an unmatched path with `index.html` and HTTP 200, so a wrong path
   returns HTML rather than a 404. `filterRegistry.generated.ts` deliberately stays a
   module — it is consumed synchronously at import time by the filter/query core.
+- **Version skew is offered, never imposed** (`frontend/src/lib/buildSkew.ts` +
+  `useBuildSkew`, mounted once in `Shell`). On tab focus, throttled to once per five
+  minutes, the app compares its own entry-script URL — read straight out of the DOM, since
+  Vite rewrites `<script src="/src/main.tsx">` to the hashed `/assets/index-<hash>.js`, so
+  build identity needs no `define:` block, no Dockerfile ARG and no version.json that could
+  drift — against the one a freshly fetched `index.html` names. A difference means a newer
+  build is deployed, and the app shows a sticky toast with a Reload button. It never
+  navigates on the user's behalf: an involuntary reload costs unsaved filter state or a
+  half-typed note, and the failure it would pre-empt (a chunk 404) is already handled
+  invisibly by `lazyChunk`. Every uncertainty — failed probe, non-OK response, unhashed dev
+  entry — reads as "no news", because a false positive here is a toast telling the operator
+  to reload a tab that is already current.
 - **`UserFacingError` (`frontend/src/lib/errors.ts`) marks the errors a person should
   read.** `ErrorBoundary` renders its `userMessage` + `recovery` as the headline and
   folds the technical text (the `cause`, when there is one) under a collapsed "Technical

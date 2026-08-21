@@ -11,6 +11,7 @@ import ToastViewport from './ToastViewport';
 import ErrorBoundary from './ErrorBoundary';
 import AccountMenu from './AccountMenu';
 import { APP_NAME } from '@/lib/brand';
+import { useBuildSkew } from '@/lib/useBuildSkew';
 
 type NavItem = { to: string; label: string; disabled?: boolean; title?: string; admin?: boolean; agenda?: string };
 
@@ -74,6 +75,8 @@ export function activeNavTo(pathname: string, tos: ReadonlyArray<string>): strin
 
 export default function Shell() {
   const location = useLocation();
+  /* Offer a reload when a newer build is deployed — see lib/buildSkew.ts. */
+  useBuildSkew();
   return (
     <NewEstimationProvider>
       <ExploreAreaProvider>

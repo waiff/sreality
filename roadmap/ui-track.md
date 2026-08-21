@@ -316,6 +316,23 @@ End-to-end browser flow over the U1b backend.
   only in the dashboard, where nothing in Git or CI would notice them being
   widened or lost.
 
+### Version-skew nudge (done)
+
+- On tab focus (throttled to 5 min) the app compares its own entry-script hash
+  with the one a fresh `index.html` names; a mismatch shows a sticky toast with
+  a Reload button. Build identity comes from the DOM, so there is no build-time
+  version plumbing to keep in sync. `pushToast` gained an optional `action`.
+- Deliberately an OFFER: `lazyChunk` already makes a stale chunk harmless, so
+  there is no case for reloading someone's tab out from under them.
+- Every uncertainty reads as "no news" — a false positive is a toast telling the
+  operator to reload a tab that is already current.
+- **Not built, deliberately:** Vercel-style skew protection (publishing each
+  build's assets to a durable archive so old chunk URLs outlive their deploy).
+  It is the real structural fix and it was designed in full, but for a
+  single-operator SPA the waves above remove the user-visible harm at a fraction
+  of the operational surface. Revisit if `limen:chunkEvents` shows this is still
+  happening often.
+
 ### Phase U-Nav: Unified browse → detail navigation (next)
 
 Today the top nav exposes `Listing` and (historically) `Estimate` as

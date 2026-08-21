@@ -10,10 +10,19 @@ import { useSyncExternalStore } from 'react';
 
 export type ToastKind = 'ok' | 'err' | 'info';
 
+/* An optional button on the toast, for the rare message whose whole point is
+ * an offer the user can accept ("a new version is available — Reload"). Not a
+ * general affordance: a toast that needs more than one action is a dialog. */
+export interface ToastAction {
+  label: string;
+  onClick: () => void;
+}
+
 export interface Toast {
   id: number;
   kind: ToastKind;
   message: string;
+  action?: ToastAction;
 }
 
 const DEFAULT_TTL_MS = 6000;
@@ -29,10 +38,13 @@ function emit(): void {
 export function pushToast(
   kind: ToastKind,
   message: string,
+  /* 0 keeps the toast until dismissed — required for an action toast, which the
+   * user must be able to reach. */
   ttlMs: number = DEFAULT_TTL_MS,
+  action?: ToastAction,
 ): number {
   const id = nextId++;
-  toasts = [...toasts, { id, kind, message }];
+  toasts = [...toasts, { id, kind, message, action }];
   emit();
   if (ttlMs > 0) {
     setTimeout(() => dismissToast(id), ttlMs);
