@@ -40,12 +40,18 @@ vi.mock('@/lib/api', async (importOriginal) => {
     bulkDismissNewDedupProposals: vi.fn(),
     listNewDedupSettings: vi.fn(),
     setTrainingExample: vi.fn(),
+    setBorderCase: vi.fn(),
+    deleteBorderCase: vi.fn(),
   };
 });
 
 vi.mock('@/lib/queries', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/lib/queries')>();
-  return { ...actual, fetchImagesByImageIds: vi.fn() };
+  return {
+    ...actual,
+    fetchImagesByImageIds: vi.fn(),
+    fetchBorderCasesByImageIds: vi.fn(),
+  };
 });
 
 const SETTINGS: NewDedupSetting[] = [
@@ -74,7 +80,7 @@ const OVERVIEW: NewDedupLabelingOverview = {
     {
       id: 1, label: 'interier - kuchyne', family: 'interier', active: true,
       created_at: '2026-08-01T00:00:00Z', confirmed_count: 12, pending_count: 3,
-      dismissed_count: 1,
+      dismissed_count: 1, border_case_count: 0,
     },
   ],
 };
@@ -121,6 +127,11 @@ describe('<NewDedupLabeling>', () => {
     vi.mocked(queries.fetchImagesByImageIds).mockResolvedValue(
       new Map([[101, IMAGE]]),
     );
+    vi.mocked(queries.fetchBorderCasesByImageIds).mockResolvedValue(new Set());
+    vi.mocked(api.setBorderCase).mockResolvedValue({
+      data: { image_id: 101, created_at: '2026-08-21T00:00:00Z' },
+    });
+    vi.mocked(api.deleteBorderCase).mockResolvedValue({ data: { deleted: true } });
   });
 
   it('renders the taxonomy bar chart sorted by confirmed count, most first', async () => {
@@ -129,11 +140,11 @@ describe('<NewDedupLabeling>', () => {
         sample_size: 42,
         labels: [
           { id: 1, label: 'interier - kuchyne', family: 'interier', active: true,
-            created_at: 't', confirmed_count: 12, pending_count: 3, dismissed_count: 1 },
+            created_at: 't', confirmed_count: 12, pending_count: 3, dismissed_count: 1, border_case_count: 0 },
           { id: 2, label: 'exterier - fasada', family: null, active: true,
-            created_at: 't', confirmed_count: 54, pending_count: 0, dismissed_count: 0 },
+            created_at: 't', confirmed_count: 54, pending_count: 0, dismissed_count: 0, border_case_count: 0 },
           { id: 3, label: 'garaz', family: null, active: true,
-            created_at: 't', confirmed_count: 4, pending_count: 0, dismissed_count: 0 },
+            created_at: 't', confirmed_count: 4, pending_count: 0, dismissed_count: 0, border_case_count: 0 },
         ],
       },
     });
@@ -155,7 +166,7 @@ describe('<NewDedupLabeling>', () => {
     vi.mocked(api.addNewDedupTaxonomyLabel).mockResolvedValue({
       data: {
         id: 2, label: 'exterier - fasada', family: null, active: true, created_at: 't',
-        confirmed_count: 0, pending_count: 0, dismissed_count: 0,
+        confirmed_count: 0, pending_count: 0, dismissed_count: 0, border_case_count: 0,
       },
     });
     renderPage();
@@ -210,7 +221,7 @@ describe('<NewDedupLabeling>', () => {
         {
           id: 2, label: 'koupelna', family: null, active: true,
           created_at: '2026-08-01T00:00:00Z', confirmed_count: 0, pending_count: 0,
-          dismissed_count: 0,
+          dismissed_count: 0, border_case_count: 0,
         },
       ],
     };
@@ -411,6 +422,59 @@ describe('<NewDedupLabeling>', () => {
     const dialog = await screen.findByRole('dialog');
     expect(within(dialog).getByText('1 / 1')).toBeInTheDocument();
     expect(within(dialog).getByText('exterier - fasada')).toBeInTheDocument();
+  });
+
+  it('parks a tile as a border case without reviewing it or refetching the grid', async () => {
+    renderPage();
+    await screen.findByText('Confirm');
+    const callsBefore = vi.mocked(api.listNewDedupProposals).mock.calls.length;
+
+    fireEvent.click(screen.getByRole('button', { name: 'Border case' }));
+    await waitFor(() => expect(api.setBorderCase).toHaveBeenCalledWith(101));
+
+    // A border case is not a verdict: the proposal is still pending, so the
+    // tile keeps its Confirm/Dismiss buttons and its place in the grid — and
+    // nothing refetched.
+    expect(await screen.findByRole('button', { name: '✓ Border case' })).toBeInTheDocument();
+    expect(screen.getByText('Confirm')).toBeInTheDocument();
+    expect(api.confirmNewDedupProposal).not.toHaveBeenCalled();
+    expect(api.dismissNewDedupProposal).not.toHaveBeenCalled();
+    expect(vi.mocked(api.listNewDedupProposals).mock.calls.length).toBe(callsBefore);
+  });
+
+  it('clears a flag the server already had, from the same button', async () => {
+    vi.mocked(queries.fetchBorderCasesByImageIds).mockResolvedValue(new Set([101]));
+    renderPage();
+    fireEvent.click(await screen.findByRole('button', { name: '✓ Border case' }));
+    await waitFor(() => expect(api.deleteBorderCase).toHaveBeenCalledWith(101));
+    expect(api.setBorderCase).not.toHaveBeenCalled();
+  });
+
+  it('offers the flag on a dismissed tile too, which has no tag picker', async () => {
+    vi.mocked(api.listNewDedupProposals).mockResolvedValue({
+      data: [{ ...PROPOSALS[0], status: 'dismissed', reviewed_by: 'operator' }],
+    });
+    renderPage();
+    // "I rejected the model's tag AND I can't tell what it should be" is two
+    // facts, so the flag has to survive where the picker doesn't.
+    expect(await screen.findByRole('button', { name: 'Border case' })).toBeInTheDocument();
+    expect(screen.queryByPlaceholderText('tag…')).not.toBeInTheDocument();
+  });
+
+  it('shows how much of a tag\'s Gate 1 coverage is uncertain', async () => {
+    vi.mocked(api.getNewDedupLabelingOverview).mockResolvedValue({
+      data: {
+        sample_size: 42,
+        labels: [{
+          ...OVERVIEW.labels[0], confirmed_count: 150, border_case_count: 40,
+        }],
+      },
+    });
+    renderPage();
+    // 150 hits the gate, but 40 of those images nobody could classify — the
+    // bar alone would read as clean coverage.
+    expect(await screen.findByText('· 40 border')).toBeInTheDocument();
+    expect(screen.getByText('150')).toBeInTheDocument();
   });
 
   it('confirms a single proposal and drops that tile from Pending WITHOUT refetching the grid', async () => {
@@ -683,9 +747,9 @@ describe('<NewDedupLabeling>', () => {
         sample_size: 42,
         labels: [
           { id: 1, label: 'interier - kuchyne', family: null, active: true,
-            created_at: 't', confirmed_count: 12, pending_count: 0, dismissed_count: 0 },
+            created_at: 't', confirmed_count: 12, pending_count: 0, dismissed_count: 0, border_case_count: 0 },
           { id: 2, label: 'exterier - fasada', family: null, active: true,
-            created_at: 't', confirmed_count: 200, pending_count: 0, dismissed_count: 0 },
+            created_at: 't', confirmed_count: 200, pending_count: 0, dismissed_count: 0, border_case_count: 0 },
         ],
       },
     });
@@ -715,7 +779,7 @@ describe('<NewDedupLabeling>', () => {
         sample_size: 42,
         labels: [
           { id: 2, label: 'exterier - fasada', family: null, active: true,
-            created_at: 't', confirmed_count: 200, pending_count: 0, dismissed_count: 0 },
+            created_at: 't', confirmed_count: 200, pending_count: 0, dismissed_count: 0, border_case_count: 0 },
         ],
       },
     });
@@ -738,9 +802,9 @@ describe('<NewDedupLabeling>', () => {
         sample_size: 42,
         labels: [
           { id: 1, label: 'interier - kuchyne', family: null, active: true,
-            created_at: 't', confirmed_count: 12, pending_count: 0, dismissed_count: 0 },
+            created_at: 't', confirmed_count: 12, pending_count: 0, dismissed_count: 0, border_case_count: 0 },
           { id: 2, label: 'exterier - fasada', family: null, active: true,
-            created_at: 't', confirmed_count: 200, pending_count: 0, dismissed_count: 0 },
+            created_at: 't', confirmed_count: 200, pending_count: 0, dismissed_count: 0, border_case_count: 0 },
         ],
       },
     });

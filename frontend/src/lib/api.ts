@@ -724,6 +724,10 @@ export interface NewDedupTaxonomyLabel {
   confirmed_count: number;
   pending_count: number;
   dismissed_count: number;
+  /* How many of `confirmed_count` are ALSO flagged border cases — a subset of
+   * it, not an addition. Gate 1 counts training rows and a border case is one,
+   * so this is what says whether a tag's coverage is actually clean. */
+  border_case_count: number;
 }
 export interface NewDedupLabelingOverview {
   sample_size: number;

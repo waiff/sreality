@@ -55,7 +55,9 @@ W1 (shared prerequisites + labeling program):
       proposal review (single + batch confirm/dismiss) with a new-vs-original tag toggle, a
       per-tile tag picker to correct a wrong suggestion (#993), and review ergonomics (#994):
       collapsible chart, tag + coverage filters, an All tab, and a grid that holds its order
-      instead of refetching on every confirm.
+      instead of refetching on every confirm. A "Border case" flag on every tile (#TBD) closes the
+      last gap against /clip-audit — shared with that page through `lib/useBorderCases` — and the
+      coverage chart now shows how much of each tag's Gate-1 total is flagged uncertain.
       Secondary-CLIP scoring (`scraper/label_proposal_tagger.py` +
       `scripts/label_proposal_backfill.py`, dispatch-only GH Actions workflow) is separate infra
       from the DINOv2/RunPod embeddings path below — a stronger CLIP checkpoint, CPU, no RunPod

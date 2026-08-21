@@ -22,6 +22,7 @@ import { pushToast } from '@/lib/toast';
 import Tabs from '@/components/Tabs';
 import ImageTagBadge from '@/components/ImageTagBadge';
 import ImageLightbox from '@/components/ImageLightbox';
+import BorderCaseButton from '@/components/BorderCaseButton';
 import ImageSizeToggle from '@/components/ImageSizeToggle';
 import Spinner from '@/components/Spinner';
 import TaxonomyManageModal from '@/components/TaxonomyManageModal';
@@ -29,6 +30,7 @@ import LabelCombobox, { type LabelOption } from '@/components/LabelCombobox';
 import { Chevron, useCollapsed } from '@/components/settings/SectionChrome';
 import { CATEGORY_MAIN_TABS } from '@/lib/categoryMainTabs';
 import { usePersistedFlag } from '@/lib/persistedFlag';
+import { useBorderCases, type BorderCaseStore } from '@/lib/useBorderCases';
 import type { ImagePublic } from '@/lib/types';
 
 const OVERVIEW_KEY = ['new-dedup', 'labeling', 'overview'];
@@ -141,6 +143,12 @@ export default function NewDedupLabeling() {
       return grew ? next : prev;
     });
   }, [imagesQ.data]);
+
+  /* "Border case" is image-grain and independent of the review verdict, so it
+   * lives outside the proposal row: two tiles for the same photo (two models)
+   * share one flag and flip together, and toggling it patches the store rather
+   * than the grid — no tile moves. */
+  const borderCases = useBorderCases(imageIds);
 
   /* The review grid doubles as a gallery: clicking a tile enlarges it in the
    * SHARED ImageLightbox (the same modal /clip-audit and listing detail open)
@@ -531,7 +539,9 @@ export default function NewDedupLabeling() {
       <p className="mt-3 text-sm text-[var(--color-ink-2)] leading-relaxed max-w-2xl">
         Build the Taxonomy v1 training set: a secondary, stronger CLIP encoder proposes tags
         for images in the sample below; confirming a proposal writes it into the real training
-        set, dismissing it doesn't. Gate 1 needs {gate1Target} confirmed images per active tag.
+        set, dismissing it doesn't. "Border case" is neither verdict — it parks a photo that is
+        unclear even to a human, independently of whatever tag it carries. Gate 1 needs{' '}
+        {gate1Target} confirmed images per active tag.
       </p>
 
       {overviewQ.error && <ErrorBanner message={(overviewQ.error as Error).message} />}
@@ -741,6 +751,7 @@ export default function NewDedupLabeling() {
               selected={selected.has(p.image_id)}
               onToggleSelect={() => toggle(p.image_id)}
               labelOptions={labelOptions}
+              borderCases={borderCases}
               draft={draftFor(p)}
               onDraftChange={(label) => setDraft(p, label)}
               corrected={isCorrected(p)}
@@ -957,6 +968,19 @@ function TaxonomyBarChart({
                             · {l.pending_count}/{proposalTarget} pending
                           </span>
                         )}
+                        {/* Border cases are counted INSIDE the bar, because they
+                          * are training rows and Gate 1 counts training rows.
+                          * Flagging the share here is what keeps "150 confirmed"
+                          * from quietly meaning "150 confirmed, 40 of which
+                          * nobody could classify". */}
+                        {l.border_case_count > 0 && (
+                          <span
+                            className="shrink-0 text-[0.68rem] text-[var(--color-brick)]"
+                            title={`${l.border_case_count} of this tag's ${l.confirmed_count} training images are flagged border cases — included in the bar, not extra`}
+                          >
+                            · {l.border_case_count} border
+                          </span>
+                        )}
                       </div>
                       <div className="mt-1 flex items-center gap-2">
                         <div className="relative h-3.5 flex-1 rounded-[var(--radius-xs)] bg-[var(--color-rule-soft)] overflow-hidden">
@@ -1003,6 +1027,7 @@ function ProposalTile({
   selected,
   onToggleSelect,
   labelOptions,
+  borderCases,
   draft,
   onDraftChange,
   corrected,
@@ -1020,6 +1045,7 @@ function ProposalTile({
   selected: boolean;
   onToggleSelect: () => void;
   labelOptions: LabelOption[];
+  borderCases: BorderCaseStore;
   /** The tag the operator intends for this image — seeded from the
    * suggestion, owned by the page (see the `drafts` map there). */
   draft: string;
@@ -1153,18 +1179,24 @@ function ProposalTile({
       {/* Picker sits BELOW the action row on purpose: its dropdown is
         * absolutely positioned and opens downward, so above the buttons it
         * would paint over them and swallow the first click aimed at Confirm.
-        * A dismissed proposal isn't in the training set, so it has no label
-        * to correct and gets no picker at all. */}
-      {!isDismissed && (
-        <div className="px-2 pb-2">
-          <LabelCombobox
-            value={draft}
-            onChange={onDraftChange}
-            options={labelOptions}
-            placeholder="tag…"
-          />
-        </div>
-      )}
+        * A dismissed proposal isn't in the training set, so it has no label to
+        * correct and gets no picker at all — but it can still be a border case,
+        * so the row itself always renders. "Border case" sits BESIDE the picker
+        * (the arrangement /clip-audit uses) rather than under it, for the same
+        * dropdown reason. */}
+      <div className="px-2 pb-2 flex items-center gap-1.5">
+        {!isDismissed && (
+          <div className="min-w-0 flex-1">
+            <LabelCombobox
+              value={draft}
+              onChange={onDraftChange}
+              options={labelOptions}
+              placeholder="tag…"
+            />
+          </div>
+        )}
+        <BorderCaseButton imageId={proposal.image_id} store={borderCases} />
+      </div>
     </div>
   );
 }
