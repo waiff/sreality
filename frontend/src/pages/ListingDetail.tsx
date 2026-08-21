@@ -55,6 +55,7 @@ import {
 import { timeLabelFull } from '@/lib/chartAxis';
 import { portalShort, srealityListingUrl } from '@/lib/portals';
 import ErrorBoundary from '@/components/ErrorBoundary';
+import Skeleton from '@/components/Skeleton';
 import { ListingOverview } from '@/components/listing-detail/ListingOverview';
 import PipelineToggle from '@/components/listing-detail/PipelineToggle';
 import { listingCanonicalPath, listingRowPath } from '@/lib/listingUrl';
@@ -409,7 +410,7 @@ export default function ListingDetail() {
           /* The estimation chapter: MF reference + our runs, side by side —
              in the prime slot after the description (the map moved into the
              header). Renders nothing for listings with no estimable data. */
-          <Suspense fallback={null}>
+          <Suspense fallback={<Skeleton height={180} />}>
             <EstimationsBlock
               listing={listing}
               listingIds={snapshotListingIds}
@@ -422,7 +423,7 @@ export default function ListingDetail() {
       />
       <BrokerVizitka listingId={listing.id} />
       <Hairline />
-      <Suspense fallback={null}>
+      <Suspense fallback={<Skeleton height={120} />}>
         {/* Manual estimates + freshness checks are stored against the legacy
             sreality_id, so both are empty by construction for a non-sreality
             listing. Curation below is property-grain and stays rendered. */}
@@ -431,7 +432,7 @@ export default function ListingDetail() {
         )}
       </Suspense>
       <Hairline />
-      <Suspense fallback={null}>
+      <Suspense fallback={<Skeleton height={140} />}>
         {sourcesQ.data?.property_id != null && (
           <CurationBlock
             property_id={sourcesQ.data.property_id}

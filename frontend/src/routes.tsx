@@ -2,6 +2,7 @@ import { Suspense, type ReactNode } from 'react';
 import { lazyChunk } from '@/lib/lazyChunk';
 import { Navigate, type RouteObject } from 'react-router-dom';
 import Shell from './components/Shell';
+import Skeleton from './components/Skeleton';
 import { RequireAdmin, RequireAuth } from './components/guards';
 import Login from './pages/Login';
 import ForgotPassword from './pages/ForgotPassword';
@@ -43,7 +44,12 @@ const DevConfidencePreview = lazyChunk(() => import('./pages/DevConfidencePrevie
 function AdminPage({ children }: { children: ReactNode }) {
   return (
     <RequireAdmin>
-      <Suspense fallback={null}>{children}</Suspense>
+      {/* An admin page IS the whole route body — `null` would render a blank
+        * page while its chunk loads, and a stale chunk holds this fallback for
+        * the length of the recovery reload. */}
+      <Suspense fallback={<Skeleton height={320} className="mx-6 my-8" />}>
+        {children}
+      </Suspense>
     </RequireAdmin>
   );
 }

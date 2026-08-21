@@ -8,6 +8,7 @@ import { isSupabaseConfigured } from '@/lib/supabase';
 import { NewEstimationProvider } from './NewEstimationModal';
 import { ExploreAreaProvider } from './ExploreAreaModal';
 import ToastViewport from './ToastViewport';
+import ErrorBoundary from './ErrorBoundary';
 import AccountMenu from './AccountMenu';
 import { APP_NAME } from '@/lib/brand';
 
@@ -72,13 +73,20 @@ export function activeNavTo(pathname: string, tos: ReadonlyArray<string>): strin
 }
 
 export default function Shell() {
+  const location = useLocation();
   return (
     <NewEstimationProvider>
       <ExploreAreaProvider>
         <div className="min-h-dvh flex flex-col bg-[var(--color-paper)] text-[var(--color-ink)]">
           <TopBar />
+          {/* Keyed on pathname so a crashed page recovers on the next nav.
+            * Scoped to the route body on purpose: a page crash must not take
+            * the nav, the footer or the toast surface with it — the fallback
+            * says "use the back button", which needs the nav to still exist. */}
           <main className="flex-1">
-            <Outlet />
+            <ErrorBoundary key={location.pathname} label="route">
+              <Outlet />
+            </ErrorBoundary>
           </main>
           <Footer />
         </div>
