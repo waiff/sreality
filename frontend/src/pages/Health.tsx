@@ -63,7 +63,7 @@ import {
 import { fmtCount, fmtRelative, fmtAbsolute } from '@/lib/format';
 import { numericDomain, timeAxisSpec, timeLabelFull, valueAxisSpec } from '@/lib/chartAxis';
 import { portalShort } from '@/lib/portals';
-import { WORKFLOW_DOCS } from '@/lib/workflowDocs.generated';
+import { useWorkflowDocs } from '@/lib/workflowDocs';
 import { listingPath } from '@/lib/listingUrl';
 
 const STALE_HOURS_WARN = 36;
@@ -611,9 +611,20 @@ function ParserFacetDetail({ parser }: { parser: PortalHealth }) {
 }
 
 function PortalSchedule({ source }: { source: string | null }) {
-  const docs = WORKFLOW_DOCS
+  const docsQ = useWorkflowDocs();
+  const docs = (docsQ.data ?? [])
     .filter((w) => w.portal === source && w.schedules.length > 0)
     .sort((a, b) => a.name.localeCompare(b.name));
+  if (docsQ.isLoading) {
+    return <p className="text-sm text-[var(--color-ink-4)]">Loading…</p>;
+  }
+  if (docsQ.isError) {
+    return (
+      <p className="text-sm text-[var(--color-ink-4)]">
+        Schedule unavailable — {docsQ.error.message}
+      </p>
+    );
+  }
   if (docs.length === 0) {
     return (
       <p className="text-sm text-[var(--color-ink-4)]">

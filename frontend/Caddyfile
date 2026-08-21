@@ -18,7 +18,14 @@
 	# serve directly without SPA fallback.
 	handle_path /assets/* {
 		root * /srv/assets
-		header Cache-Control "public, max-age=31536000, immutable"
+		# The immutable header must ride on a REAL FILE only. A tab that
+		# outlived a deploy asks for a chunk filename this container no longer
+		# has; stamping that 404 with max-age=31536000 (which is what an
+		# unmatched `header` directive did) tells the browser to remember the
+		# miss for a year, turning a recoverable staleness event into a
+		# permanent one for that URL.
+		@exists file
+		header @exists Cache-Control "public, max-age=31536000, immutable"
 		file_server
 	}
 
@@ -32,5 +39,12 @@
 
 		try_files {path} /index.html
 		file_server
+	}
+
+	# No error response is ever cacheable. Without this a 404 has no
+	# Cache-Control at all and is heuristically cacheable by the browser.
+	handle_errors {
+		header Cache-Control "no-store"
+		respond "{err.status_code} {err.status_text}" {err.status_code}
 	}
 }

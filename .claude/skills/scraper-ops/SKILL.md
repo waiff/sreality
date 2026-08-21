@@ -265,8 +265,8 @@ frontend map to keep in sync**. Tag only the actual ingest workflows (index walk
 combined fallback); shared, source-agnostic jobs (`images.yml`, `condition_scores.yml`,
 `recompute_property_stats.yml`, `clip_tag.yml`, …) stay **untagged** (`portal: null`) and
 appear in the full Settings → Workflows list rather than any single portal's schedule. As with any
-workflow edit, regenerate `frontend/src/lib/workflowDocs.generated.ts` in the same commit
-(`python scripts/generate_workflow_docs.py`; CI's `--check` guards drift).
+workflow edit, regenerate `frontend/public/workflow-docs.json` in the same commit (a FETCHED asset,
+not a bundled module — see `docs/architecture.md`); CI's `--check` guards drift.
 
 **The split (architectural rule #19).** The cheap "which ads still exist" check is decoupled
 from the slow "download each ad" write:

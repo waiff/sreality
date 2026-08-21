@@ -294,6 +294,18 @@ rules. Identify which one a task belongs to before you start.
   treated as its own case (reloading an offline tab replaces a working app with the
   browser's offline page), and every storage access wrapped so a throwing
   `sessionStorage` degrades to "allow the reload" rather than to "no recovery".
+- **Generated data the SPA only displays is FETCHED, not bundled.**
+  `scripts/generate_workflow_docs.py` emits `frontend/public/workflow-docs.json` (~180 KB)
+  and the two admin pages that render it read it through `frontend/src/lib/workflowDocs.ts`.
+  It used to be a `.ts` module under `src/lib/`, which put every workflow-YAML edit — a
+  pure-backend concern — inside the SPA's module graph, rotating every chunk hash and
+  breaking every open tab. Measured after the move: a workflow-docs change rotates 0 of 35
+  chunks (it was ~30 of 30). Any future generated blob with the same shape (large, changed
+  by backend work, read by one or two pages) belongs in `public/` for the same reason.
+  Note the reader MUST check the response content type, not just `res.ok`: Caddy's SPA
+  fallback answers an unmatched path with `index.html` and HTTP 200, so a wrong path
+  returns HTML rather than a 404. `filterRegistry.generated.ts` deliberately stays a
+  module — it is consumed synchronously at import time by the filter/query core.
 - **`UserFacingError` (`frontend/src/lib/errors.ts`) marks the errors a person should
   read.** `ErrorBoundary` renders its `userMessage` + `recovery` as the headline and
   folds the technical text (the `cause`, when there is one) under a collapsed "Technical
