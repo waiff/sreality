@@ -34,10 +34,10 @@ WORKFLOWS = ROOT / ".github" / "workflows"
 
 
 def _docs() -> list[dict[str, Any]]:
-    text = MOD.generate()
-    marker = "export const WORKFLOW_DOCS: WorkflowDoc[] = "
-    body = text[text.index(marker) + len(marker):].rstrip().rstrip(";")
-    return json.loads(body)
+    """The generator emits a JSON asset the SPA fetches (not a TS module it
+    imports) — see the script's docstring for why."""
+    payload = json.loads(MOD.generate())
+    return payload["workflows"]
 
 
 def test_one_doc_per_workflow_file() -> None:

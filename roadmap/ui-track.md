@@ -296,6 +296,26 @@ End-to-end browser flow over the U1b backend.
   so anticipated failures show plain-language copy and keep the raw text folded
   under "Technical details".
 
+### Deploy hygiene: stop breaking open tabs (done)
+
+- **A page crash no longer takes the nav.** The boundary moved from App level
+  (above `Shell`) into `Shell` around the route body; App keeps a still-keyed
+  last-resort net for what renders outside it (TopBar, Footer, ToastViewport,
+  the Explore-area modal). `Suspense fallback={null}` replaced by a reserved-height
+  `Skeleton` where the fallback occupies a visible page region.
+- **Workflow docs left the SPA module graph.** `scripts/generate_workflow_docs.py`
+  now emits `frontend/public/workflow-docs.json`, fetched by Settings + Health.
+  It was a 180 KB `.ts` module that changed on every cron edit, so backend-only
+  commits rebuilt the SPA and rotated every chunk hash. Measured after: a
+  workflow-docs change rotates **0 of 35** chunks (was ~30 of 30).
+- **Caddy no longer caches its own 404s for a year.** The `immutable` header on
+  `/assets/*` was applied to misses too, so a stale chunk URL could be
+  negatively cached for a year. Now scoped to a matched file, with a
+  `handle_errors` block stamping `no-store`. Verified against a real Caddy 2.8.4.
+- **Railway watch patterns recorded in `frontend/railway.json`** — they existed
+  only in the dashboard, where nothing in Git or CI would notice them being
+  widened or lost.
+
 ### Phase U-Nav: Unified browse → detail navigation (next)
 
 Today the top nav exposes `Listing` and (historically) `Estimate` as

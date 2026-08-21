@@ -54,7 +54,7 @@ import { fmtAbsolute } from '@/lib/format';
 import { useTheme, type ThemeMode } from '@/lib/theme';
 import { PickButton, Switch } from '@/components/controls';
 import TiersSection from '@/components/TiersSection';
-import { WORKFLOW_DOCS, type WorkflowDoc } from '@/lib/workflowDocs.generated';
+import { useWorkflowDocs, type WorkflowDoc } from '@/lib/workflowDocs';
 import {
   CollapsibleSection,
   Chevron,
@@ -1130,7 +1130,18 @@ function triggerLabels(doc: WorkflowDoc): string[] {
 }
 
 function WorkflowsSection({ infoExpanded }: { infoExpanded: boolean }) {
-  const sorted = [...WORKFLOW_DOCS].sort((a, b) => a.name.localeCompare(b.name));
+  const docsQ = useWorkflowDocs();
+  const sorted = [...(docsQ.data ?? [])].sort((a, b) => a.name.localeCompare(b.name));
+  if (docsQ.isLoading) {
+    return <p className="text-sm text-[var(--color-ink-3)]">Loading workflows…</p>;
+  }
+  if (docsQ.isError) {
+    return (
+      <p className="text-sm text-[var(--color-brick)]">
+        Could not load the workflow list — {docsQ.error.message}
+      </p>
+    );
+  }
   return (
     <div className="space-y-2">
       {sorted.map((doc) => (
