@@ -337,8 +337,10 @@ def test_heartbeat_runs_once_per_attempt_not_once_per_phase(monkeypatch: Any) ->
                         reconnect=lambda: fresh)
 
     # the dropped attempt beat before it ran, and it was that attempt's LAST
-    # statement (nothing of the phase itself landed)
-    assert first.executed[-1].startswith(_BEAT)
+    # statement (nothing of the phase itself landed). Attribution's timeout lift
+    # is not phase data — SET LOCAL rolls back with the aborted transaction.
+    landed = [s for s in first.executed if "statement_timeout" not in s]
+    assert landed[-1].startswith(_BEAT)
     # ...and the replay beat AGAIN, first thing, on the FRESH connection
     assert fresh.executed[0].startswith(_BEAT)
     beats = [i for i, s in enumerate(fresh.executed) if s.startswith(_BEAT)]
@@ -1300,9 +1302,16 @@ class _AttributeCur:
 class _AttributeConn:
     def __init__(self) -> None:
         self.cur = _AttributeCur()
+        self.txns = 0
 
     def cursor(self) -> _AttributeCur:
         return self.cur
+
+    def transaction(self):  # type: ignore[no-untyped-def]
+        import contextlib
+
+        self.txns += 1
+        return contextlib.nullcontext()
 
 
 def test_attribute_runs_every_registered_statement_once_per_chunk() -> None:
@@ -1316,13 +1325,29 @@ def test_attribute_runs_every_registered_statement_once_per_chunk() -> None:
     conn = _AttributeConn()
     _attribute(conn, "l.id = ANY(%(ids)s)", {"ids": [7, 8]})
 
-    assert len(conn.cur.executed) == len(attribution_statements())
-    assert all(p == {"ids": [7, 8]} for _, p in conn.cur.executed)
+    attributions = [(s, p) for s, p in conn.cur.executed
+                    if "statement_timeout" not in s]
+    assert len(attributions) == len(attribution_statements())
+    assert all(p == {"ids": [7, 8]} for _, p in attributions)
     # Every statement is bound to the chunk — none scans the whole corpus.
-    assert all("%(ids)s" in s for s, _ in conn.cur.executed)
-    assert all("{sel}" not in s for s, _ in conn.cur.executed)
+    assert all("%(ids)s" in s for s, _ in attributions)
+    assert all("{sel}" not in s for s, _ in attributions)
     for source in _BROKER_SOURCES:
-        assert any(f"l.source = '{source}'" in s for s, _ in conn.cur.executed)
+        assert any(f"l.source = '{source}'" in s for s, _ in attributions)
+
+
+def test_attribute_lifts_the_statement_timeout_inside_a_transaction() -> None:
+    """A chunk crossing the pooler's 2-min app guardrail aborted the whole sweep
+    (2026-08-23). Every other full-corpus phase lifts it; attribution did not.
+    SET LOCAL is a no-op outside a transaction (scraper.db.connect is autocommit),
+    so the transaction is load-bearing, not decoration."""
+    from scripts.resolve_brokers import _attribute
+
+    conn = _AttributeConn()
+    _attribute(conn, "l.id = ANY(%(ids)s)", {"ids": [7]})
+
+    assert conn.txns == 1
+    assert conn.cur.executed[0][0] == "SET LOCAL statement_timeout = 0"
 
 
 def test_the_sweep_id_scan_covers_every_registered_source() -> None:
