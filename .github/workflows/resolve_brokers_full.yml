@@ -29,7 +29,7 @@ on:
       max_seconds:
         description: Wall-clock budget for the attribution scan; finalize cleanly before timeout
         required: false
-        default: "3000"
+        default: "1500"
         type: string
 
 # Per-workflow group (NOT shared with the incremental) so the */10 incremental can
@@ -78,7 +78,7 @@ jobs:
         run: pip install -e ".[api]"
       - name: Resolve brokers (full sweep)
         run: |
-          ARGS="--max-seconds ${{ inputs.max_seconds || '3000' }}"
+          ARGS="--max-seconds ${{ inputs.max_seconds || '1500' }}"
           if [ "${{ inputs.mode }}" = "backfill" ]; then ARGS="$ARGS --backfill"; fi
           echo "python -m scripts.resolve_brokers $ARGS"
           python -m scripts.resolve_brokers $ARGS

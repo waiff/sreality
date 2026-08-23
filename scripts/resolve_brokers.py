@@ -592,8 +592,15 @@ def _attribute(conn: Any, sel: str, params: dict[str, Any]) -> None:
     Source selection is a literal inside each statement, so a single-portal chunk
     still issues all of them; the ones that match nothing are bounded by the same
     {sel} id list and cost ~nothing. That is what lets the sweep be ONE ascending
-    id rotation over every portal rather than a cursor per source."""
-    with conn.cursor() as cur:
+    id rotation over every portal rather than a cursor per source.
+
+    Statement timeout lifted per chunk, exactly as every other full-corpus phase of
+    this sweep does: the pooler's 2-min guardrail is an app-query bound, wrong for a
+    serialized once-daily reconcile, and one chunk crossing it aborted the whole run
+    (2026-08-23, QueryCanceled after both attempts). The chunk loop's --max-seconds
+    check still bounds the phase between chunks; the job timeout is the backstop."""
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute("SET LOCAL statement_timeout = 0")
         for sql in _ATTRIBUTION_SQL:
             cur.execute(sql.format(sel=sel), params)
 
