@@ -4030,7 +4030,7 @@
           "description": "Wall-clock budget for the attribution scan; finalize cleanly before timeout",
           "required": false,
           "type": "string",
-          "default": "3000",
+          "default": "1500",
           "options": null
         }
       ],
