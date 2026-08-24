@@ -110,7 +110,12 @@ Four corollaries, because the evidence did not support one rule for everything:
   grid instead of N. `EXPLAIN (ANALYZE, BUFFERS)`: `city_index_values_public` (this
   wave's largest table, 6,798 rows) costs 230 buffers for the added `count(*)`, on top of
   ~230 for the existing select — paid once per session (`staleTime: Infinity`) against a
-  read that used to cost 7 sequential round trips.
+  read that used to cost 7 sequential round trips. **Measured live: /browse 27→22,
+  /pipeline 23→19** — most of the drop is the exact-count terminator saving one request
+  on every exhaustive read whose whole result already fit on page 1 (curated cities,
+  index definitions, pipeline members, pipeline board, collection membership, …), not
+  just the two gates. /collections, /watchdog, /notifications, /brokers unchanged (this
+  wave didn't touch them).
 - ⬜ **W9a** — listing-detail chain, client half (gate sources on the resolved id, carry the
   id through navigation, fix the dead snapshot key).
 - ⬜ **W10a** — broker leaderboard: covering index + aggregate-before-join (~6,980 → ~500
@@ -136,14 +141,14 @@ Four corollaries, because the evidence did not support one rule for everything:
 Per-route app data requests (PostgREST + Railway only; basemap tiles, assets and image
 bytes excluded) and settle time, measured by `npm run smoke-check:prod`:
 
-| Route | W0 | post-W2a | Notes |
-| --- | --- | --- | --- |
-| /browse | 31 | **27** | was 9.1 s *and an HTTP 500* pre-W-1a; now 3.7 s |
-| /pipeline | 27 | **23** | time-to-first-card 1,427 → 951 ms (W1); W2b targets ~15 |
-| /collections | 9 | **5** | was 6-of-9 duplicated bootstrap |
-| /watchdog | 10 | **6** | reference feed — shape was already correct |
-| /notifications | 9 | **5** | server work is ~15 ms; the rest is transport |
-| /brokers | 11 | **7** | leaderboard is server-bound, see W10a |
+| Route | W0 | post-W2a | post-W2b | Notes |
+| --- | --- | --- | --- | --- |
+| /browse | 31 | 27 | **22** | was 9.1 s *and an HTTP 500* pre-W-1a; now 4.9 s |
+| /pipeline | 27 | 23 | **19** | time-to-first-card 1,427 → 951 ms (W1); rest is fetchAllRows exact-count terminators, not gating |
+| /collections | 9 | **5** | 5 | was 6-of-9 duplicated bootstrap; W2b didn't touch this route |
+| /watchdog | 10 | **6** | 6 | reference feed — shape was already correct |
+| /notifications | 9 | **5** | 5 | server work is ~15 ms; the rest is transport |
+| /brokers | 11 | **7** | 7 | leaderboard is server-bound, see W10a |
 
 Server-side block counts to beat (constraint 6):
 
