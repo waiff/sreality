@@ -120,7 +120,11 @@ Four corollaries, because the evidence did not support one rule for everything:
   and gates on `resolvedListingId ?? listingQ.data?.id` instead of waiting on the full
   listing row — on the canonical route (the id already known via seeded `Link` state or
   `natKeyQ`) it fires in parallel with `listingQ` instead of after it, cutting a level off
-  the waterfall; the legacy route (no id until the listing loads) is unchanged. Both of
+  the waterfall. The legacy route is unchanged only when it is entered COLD (a typed or
+  bookmarked URL, where no id is known until the listing loads); reached via an in-app
+  `Link` that seeds `state.listingId` — which is exactly what the estimations run-links
+  do — it takes the fast path too, so "the legacy route is unchanged" is true of the URL
+  form, not of every arrival at it. Both of
   `ListingDetail`'s own internal redirects (property→canonical, legacy→canonical) now seed
   `state.listingId` with the id they just resolved — `fetchPropertyReprNaturalKey` widened
   to also select `properties_public.listing_id` (already-live column, migration 343) for
@@ -177,7 +181,7 @@ Four corollaries, because the evidence did not support one rule for everything:
   shapes once with `staleTime: Infinity`, keyed on the dataset id only — never on
   `from`/`to`. New tests cover the join (including a missing-shape row skipped rather
   than crashing the map, matching the existing malformed-geometry guard).
-- ✅ **W3** — one pipeline cache: collapsed `pipelineKeys.card(property_id)` into
+- ✅ **W3** (partial, deliberately) — collapsed `pipelineKeys.card(property_id)` into
   `pipelineKeys.members`. The per-property `card` cache was a separate `fetchPropertyPipeline`
   read that duplicated exactly what `members` already held for that property (their columns
   had already drifted out of sync once — a property badged "9" on a Browse card and "5" in
@@ -186,8 +190,10 @@ Four corollaries, because the evidence did not support one rule for everything:
   funnel already reads — one fewer network round trip on every listing-detail page load, and
   the two-reads-drift bug class can't recur since there's only one read left. `pipelineCache.ts`
   (the rule #22 chokepoint) shrank from patching/snapshotting THREE caches per write to TWO
-  (`members` + `board`, which stays separate — it carries display fields `members` doesn't:
-  price, photo, place). `revalidatePipeline` dropped its now-unused `property_id` parameter.
+  (`members` + `board`, which stays separate — it carries the STRUCTURAL fields `members`
+  doesn't: price, place, area, is_active; **not** the photo or the broker, which are
+  decorations in the `['hydration', …]` namespace and must never return to the board row).
+  `revalidatePipeline` dropped its now-unused `property_id` parameter.
   `PipelineCard` type and `fetchPropertyPipeline` deleted (zero remaining callers). Client-only
   — no query-shape change, no `EXPLAIN` evidence applicable.
 - ✅ **W4** — cover substrate: `listing_cover_public` (migration 416). The board's cover-photo
@@ -263,6 +269,90 @@ Server-side block counts to beat (constraint 6):
 | board images (44 cards) | 3,995 → **788**; 901 CLIP laterals → **44** | 44 rows / 44 probes | done — W4 |
 | `llm_cost_daily_public` | seq scan, 231,189 rows discarded for 93 out | index | W10c |
 | `pipeline_checks_public` | 6,120 rows scanned for 15 | bounded | W10d |
+
+## Post-sprint audit — 2026-08-24
+
+W2b…W5 were reviewed after the fact (5 parallel reviewers, 8 adversarial verifications, one
+triage pass). **Verdict: sound, build on it.** Two adversarial passes escalated seven findings
+and downgraded five; W10a was *proven* equivalent to migration 410 across seven parameter
+shapes (zero row or value mismatches), W2b's exact-count arithmetic is correct at every
+boundary, W3 lost exactly one field (`stage_key`, zero readers app-wide) and closed a latent
+rollback hole, W9a's seed is consistent on all four URL forms, and both new views match their
+migrations byte-for-byte with tenancy verified live. **Exactly one shipped behaviour
+regression**, now fixed. Everything else was guardrail and record-keeping debt.
+
+Fixed in the audit PR:
+
+- **W10b's fail-silent choropleth** (the one regression). Numbers and polygons became separate
+  reads, `growthChoropleth` drops any row whose shape is missing, and `main.tsx` wires
+  `onError` on the `MutationCache` only — so a failed shapes read painted a blank map beside a
+  fully correct table with nothing saying why. Pre-W10b the polygons rode in the numbers
+  response, so a populated table implied a populated map. Both consumers now surface it.
+- **The shapes RPC was recomputed in full per page.** PostgREST wraps an RPC in LIMIT/OFFSET,
+  so `price_stat_growth_shapes(14)` re-ran its whole body for each of 5 pages: measured
+  **1.4 s / 10,199 buffers per page**, re-aggregating all 180,506 observation rows every time —
+  and since W2b the last four fire in parallel, i.e. four concurrent 1.4 s statements against
+  an 8 s `statement_timeout`. `fetchGrowthShapes` now reads the already-materialized
+  `price_stat_choropleth_public` (verified identical obec set on all 12 datasets: 43/43,
+  831/831, 3,296/3,296, 4,044/4,044, 0/0), keeping the RPC as the fallback for a dataset whose
+  run has not written its choropleth yet. These are the `EXPLAIN` block counts constraint 6
+  required of W10b and did not get — and they are exactly where the cost had moved.
+- **`pipeline_board_public` registered in `_TENANT_VIEWS` — and the registration immediately
+  failed CI, on a real defect.** Isolation itself is correct (verified live: smoke-admin sees
+  its 4 cards, smoke-nonadmin 0), but the replayed schema returned *permission denied for
+  function publication_gate_enabled*. `pipeline_board_public` is the first
+  `security_invoker` view to nest `properties_public`: that inner view is definer, so its
+  table reads run as its owner, but its WHERE calls `publication_gate_enabled()` and through
+  an invoker view that call is checked against the INVOKER. Migration 273 granted EXECUTE to
+  `anon, authenticated`; **migration 299 PART E revoked it and nothing ever re-granted it** —
+  so production only works because it still carries the pre-299 grant, i.e. prod has drifted
+  from the chain and the drift is the only reason the board loads. A restore, a preview
+  branch, or any environment built from migrations would serve every operator a 500 on
+  /pipeline. Migration 418 re-grants it to `authenticated` only (`anon` stays dark). Safe:
+  299's own comment scopes PART E to functions that could "trigger a full
+  browse_list/matview rebuild [DoS] … or run the tenant seeders/backfill", and
+  `publication_gate_enabled()` is a `stable`, argument-less, one-row boolean read — it was
+  collateral in that sweep. **This is the strongest argument in the whole audit for the
+  registry rule: the test found in one CI run what live inspection could not see at all.**
+- **Four false claims corrected.** `pipelineCache.ts` and this ledger both said the board cache
+  carries the *photo* — it deliberately does not, and re-adding it is the exact coupling W1
+  removed; W3's title claimed "one pipeline cache" when only `card`→`members` collapsed; W9a's
+  "the legacy route is unchanged" is true of the URL form but not of an in-app `Link` that
+  seeds the id (which the estimations run-links do). Also `docs/architecture.md` still
+  documented the deleted `PipelineCard` type and described the board as a two-read client join.
+- **The route ratchets W2a earned were never actually applied** — that PR shipped only its
+  comment (an editing script aborted before writing, and the commit message was trusted over
+  the diff), leaving `/collections`, `/watchdog`, `/notifications` and `/brokers` at ~3× slack.
+
+Accepted deviations — **stop tracking these as debt**:
+
+- **W5 joining `properties_public` rather than base `properties`.** The plan was wrong, not the
+  implementation: `properties` carries no `source_id_native` / `sreality_id` / `listing_id` /
+  `price_czk` — `properties_public` sources them from `listings`, which is RLS-on with zero
+  policies, so an invoker-mode view over the base table would have broken the canonical
+  `/listing/{source}/{native}` link on every card. Only the migration header's rationale was
+  wrong (it argues RLS and never mentions the publication gate).
+- **W5's planned `property_pipeline` covering index** — 48 rows live, max 44 per account.
+- **W3 not collapsing `board` into `members`** — they carry genuinely different payloads, and
+  merging them is what would tempt someone to re-couple a decoration to the structural read.
+- **W2b's `count: 'exact'` on the 18 table-backed relations** — measured 20–320 ms each.
+
+Still open, filed rather than fixed here:
+
+- **`listings_with_city_quality` cannot complete under the 8 s `statement_timeout`** — 11–13 s
+  measured on the count-free (pre-W2b) statement shape: a seq scan of 579,049 `browse_list`
+  rows with a subplan executed 281,129 times, so cost is per-row and selectivity does not help.
+  Adding any city-index or near-city rule in Browse gives an error toast, not a cohort. **Not
+  this sprint's doing** (W2b's count adds ~0.5 s and no second scan — PostgREST materializes
+  `pgrst_source` once) and no saved preset uses those controls. The fix belongs to the RPC:
+  precompute the rule match, as migration 142 already did for the population/proximity half.
+- **Reads fail silently app-wide** — `main.tsx` has no `QueryCache.onError`. The W10b fix
+  surfaces the two shapes consumers; a general policy needs its own PR (a blanket toast would
+  double-surface on the several pages that already render their own error state).
+- `is_active: r.is_active ?? true` should become a projected tombstone defaulting to `false`;
+  `broker_leaderboard` wants `, s.broker_id` in its ORDER BY (pre-existing, display-only, but
+  518 brokers tie at the "Vše" option); `listing_cover_public`'s CLIP lateral is unread by its
+  only consumer; `pipelineCache` and `PIPELINE_BOARD_COLS` are both untested chokepoints.
 
 ## Parked, with re-entry triggers
 

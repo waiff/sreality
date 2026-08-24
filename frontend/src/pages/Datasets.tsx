@@ -576,7 +576,22 @@ export default function Datasets() {
             ) : loc.active && filteredRows.length === 0 ? (
               <NoLocationMatch onClear={() => setDistricts([])} />
             ) : (
-              <DatasetMap rows={filteredRows} shapes={shapesQ.data ?? []} metric={metric} chartOnHover={chartOnHover} hoverData={hoverData} />
+              <>
+                {/* A failed shapes read must not read as "no municipalities
+                    have data". The numbers and the polygons are separate reads
+                    (W10b), and growthChoropleth drops any row whose shape is
+                    missing — so without this the table below renders a full
+                    correct dataset next to a blank map and nothing says why.
+                    Reads fail silently app-wide: main.tsx wires onError on the
+                    MutationCache only, so no query surfaces its own failure. */}
+                {shapesQ.isError && (
+                  <p className="mb-2 rounded-[var(--radius-sm)] border border-[var(--color-brick)]/30 bg-[var(--color-brick-soft)] px-3 py-2 text-sm text-[var(--color-brick)]">
+                    Mapu se nepodařilo načíst (tvary obcí). Čísla v tabulce jsou
+                    v pořádku — chybí jen podklad mapy.
+                  </p>
+                )}
+                <DatasetMap rows={filteredRows} shapes={shapesQ.data ?? []} metric={metric} chartOnHover={chartOnHover} hoverData={hoverData} />
+              </>
             )}
           </div>
 

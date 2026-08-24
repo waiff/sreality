@@ -254,6 +254,17 @@ three tests in its `.test.ts`, and the same rule governs the portal-mirror lane
 relation question, not this one. When reading a slow `browse_list` plan, check the operator
 before anything else: a `Sort` node above the index scan is this defect's signature.
 
+**`listing_cover_public` is fast ONLY when filtered by `listing_id`.** It reduces `images`
+to one cover per listing with `DISTINCT ON (listing_id)` and then joins the CLIP-tag lateral
+to that already-reduced set (migration 416) — 44 rows / ~788 buffers for a 44-id board, versus
+901 rows / 901 lateral probes / 3,995 buffers reading `images_public` the old way. But the
+`DISTINCT ON` key is `listing_id` while the view also projects `id` and `sreality_id`: a
+predicate on either of those is evaluated ABOVE the `Unique` node, so the whole 10.4M-row
+scan runs first and the query returns `57014` under `authenticated`'s 8 s `statement_timeout`.
+Filter this view by `listing_id`, always. Its sreality-keyed sibling
+(`fetchImagesByListingIds` in `frontend/src/lib/queries.ts`) exists for the frozen-comparable
+id space and is NOT interchangeable — worth knowing before W7a collapses the image loaders.
+
 **Never hand-retype `rebuild_browse_list()`/`rebuild_properties_map_mv()`.** Both blue-green
 DROP+CREATE their object every tick, including the `GRANT SELECT ... TO authenticated` (never
 `anon` — migration 299 deliberately narrowed this) and, for `browse_list`, the district/price

@@ -108,6 +108,15 @@ const BUDGET_FIRST_CARD_MS = Number(process.env.SMOKE_BUDGET_FIRST_CARD_MS || 12
  *                    time-to-first-card measured 412ms live (was in the
  *                    1,000-1,700ms range across W1-W10a), since the second
  *                    request no longer serializes behind the first.
+ *   2026-08-24 fix — /collections 16->10, /watchdog 18->12, /notifications
+ *                    16->10, /brokers 18->12. These four never actually got
+ *                    the ceilings W2a earned them: that ratchet PR (#1127)
+ *                    shipped only its comment, because the script editing this
+ *                    block aborted on a later assertion before writing the
+ *                    file, and the commit message was trusted instead of the
+ *                    diff. They sat at ~3x slack (measured /collections 5
+ *                    against a ceiling of 16), so a doubling could have
+ *                    regressed unseen. Corrected to what is measured today.
  * Still ahead: W6 deletes a broker call from every card surface; W9b appends
  * columns to listings_public for the listing-detail chain.
  *
@@ -116,10 +125,10 @@ const BUDGET_FIRST_CARD_MS = Number(process.env.SMOKE_BUDGET_FIRST_CARD_MS || 12
 const ROUTE_BUDGETS = [
   { path: '/browse',        baseline: '22 req / 4.9s', maxRequests: 27, maxMs: 20000 },
   { path: '/pipeline',      baseline: '18 req / 1.2s', maxRequests: 23, maxMs: 15000 },
-  { path: '/collections',   baseline: '9 req / 0.8s',  maxRequests: 16, maxMs: 12000 },
-  { path: '/watchdog',      baseline: '10 req / 0.9s', maxRequests: 18, maxMs: 12000 },
-  { path: '/notifications', baseline: '9 req / 0.9s',  maxRequests: 16, maxMs: 12000 },
-  { path: '/brokers',       baseline: '11 req / 1.7s', maxRequests: 18, maxMs: 20000 },
+  { path: '/collections',   baseline: '5 req / 0.9s',  maxRequests: 10, maxMs: 12000 },
+  { path: '/watchdog',      baseline: '6 req / 1.3s',  maxRequests: 12, maxMs: 12000 },
+  { path: '/notifications', baseline: '5 req / 1.0s',  maxRequests: 10, maxMs: 12000 },
+  { path: '/brokers',       baseline: '7 req / 1.6s',  maxRequests: 12, maxMs: 20000 },
 ];
 
 /* An "app data request" is a read of OUR data: PostgREST on the Supabase host

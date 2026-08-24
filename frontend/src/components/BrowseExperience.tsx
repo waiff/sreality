@@ -368,6 +368,20 @@ export default function BrowseExperience({
     staleTime: Infinity,
     gcTime: Infinity,
   });
+  /* The growth overlay draws only obce whose polygon arrived (growthChoropleth
+   * drops the rest), so a failed shapes read paints an EMPTY overlay that is
+   * indistinguishable from "no obec qualifies" — while the operator is
+   * actively looking at a growth filter. Reads fail silently app-wide
+   * (main.tsx wires onError on the MutationCache only, never the QueryCache),
+   * so say it here. Toast rather than inline: the overlay is a transient map
+   * layer, not a section of the page. */
+  const psShapesFailed = psShapesQuery.isError;
+  useEffect(() => {
+    if (psShapesFailed) {
+      pushToast('err', 'Podklad mapy růstu se nepodařilo načíst — vrstva zůstane prázdná.');
+    }
+  }, [psShapesFailed]);
+
   const psSeriesQuery = useQuery({
     queryKey: priceStatsKeys.obecSeries(psGrowthDatasetId ?? -1, growthFrom, growthTo),
     queryFn: () => fetchSeries(psGrowthDatasetId as number, growthFrom, growthTo),
