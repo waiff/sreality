@@ -1,9 +1,10 @@
 name: "CI: frontend build"
 
 # Builds the frontend/ Vite SPA on every push or pull request that touches
-# frontend code, to catch build/type errors before deploy. Type-checks,
-# builds the production bundle, and reports gzipped chunk sizes (warning if
-# the initial JS chunk exceeds the 500 kB budget). Does not deploy.
+# frontend code, to catch build/type errors before deploy. Type-checks, lints
+# for Rules of Hooks, builds the production bundle, reports every chunk's
+# gzipped size, and enforces a blocking first-visit JS budget that also fails
+# if maplibre or recharts return to the pre-lazy-import path. Does not deploy.
 
 on:
   push:
@@ -39,17 +40,19 @@ jobs:
         env:
           VITE_SUPABASE_URL: https://example.supabase.co
           VITE_SUPABASE_ANON_KEY: ci-build-only
-      - name: Bundle size budget
+      - name: All chunk sizes (informational)
         run: |
           du -sh dist
-          # Initial chunk = what loads before any lazy import. Lazy chunks
-          # (maplibre, recharts) only count when their route is opened.
-          initial=$(gzip -c dist/assets/index-*.js | wc -c)
-          echo "Initial JS chunk gzipped: $initial bytes"
           for f in dist/assets/*.js; do
             sz=$(gzip -c "$f" | wc -c)
             printf '  %-50s %10s bytes gzip\n' "$(basename "$f")" "$sz"
           done
-          if [ "$initial" -gt 512000 ]; then
-            echo "::warning::Initial JS chunk exceeds 500 kB gzipped budget ($initial bytes)"
-          fi
+      # BLOCKING. The previous budget summed `index-*.js` alone and called it "what loads
+      # before any lazy import", noting maplibre/recharts "only count when their route is
+      # opened" — which was false: both were modulepreloaded on every route, so it read
+      # ~239 kB and stayed green while a first visit cost ~608 kB. This measures the entry
+      # PLUS every preload PLUS their static imports, and fails if either heavy library is
+      # back on that path (matched by content, not filename — Rollup renames auto-split
+      # chunks). See frontend/scripts/bundle-budget.mjs.
+      - name: First-visit JS budget
+        run: node scripts/bundle-budget.mjs

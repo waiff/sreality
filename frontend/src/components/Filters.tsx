@@ -1,3 +1,5 @@
+import { Suspense } from 'react';
+import { lazyChunk } from '@/lib/lazyChunk';
 import {
   type CenterRadius,
   type ListingFilters,
@@ -16,12 +18,19 @@ import { FilterForm } from '@/components/FilterForm';
 import CityIndexRulesPicker from '@/components/CityIndexRulesPicker';
 import MarketGrowthFilter from '@/components/MarketGrowthFilter';
 import {
-  LocationControl,
   LocationTypeahead,
   MultiselectChips,
   TagPicker,
   PipelineScopePicker,
 } from '@/components/filter-controls';
+/* Lazy: this is the only control here that draws a map, it renders only in
+ * `center_radius` mode, and it carries maplibre-gl (~800 kB). Loading it with the
+ * sidebar made every Browse first-visit pay for a map engine most sessions never open. */
+const LocationControl = lazyChunk(() =>
+  import('@/components/filter-controls/LocationControl').then((m) => ({
+    default: m.LocationControl,
+  })),
+);
 import { SUBTYPE_LABELS_BY_MAIN } from '@/lib/enums';
 
 interface SidebarProps {
@@ -712,15 +721,26 @@ function LocationModeSection({
       </div>
       {mode === 'center_radius' ? (
         <div className="mt-3">
-          <LocationControl
-            value={centerRadius}
-            onChange={onCenterRadiusChange}
-            hint={
-              'The cohort filters to listings inside the dashed circle. ' +
-              'Click the small map to set the centre or drag the marker. ' +
-              'The full-page map still shows the circle for context.'
+          {/* Reserve the control's own height so switching to centre+radius doesn't
+            * jump the sidebar while the map chunk arrives. */}
+          <Suspense
+            fallback={
+              <div
+                className="h-[13.5rem] rounded-[var(--radius-sm)] bg-[var(--color-inset)]"
+                aria-busy="true"
+              />
             }
-          />
+          >
+            <LocationControl
+              value={centerRadius}
+              onChange={onCenterRadiusChange}
+              hint={
+                'The cohort filters to listings inside the dashed circle. ' +
+                'Click the small map to set the centre or drag the marker. ' +
+                'The full-page map still shows the circle for context.'
+              }
+            />
+          </Suspense>
         </div>
       ) : (
         <p className="mt-2 text-[0.7rem] text-[var(--color-ink-4)]">

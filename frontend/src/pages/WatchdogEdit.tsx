@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react';
+import { Suspense, useEffect, useState } from 'react';
+import { lazyChunk } from '@/lib/lazyChunk';
 import { Link, Navigate, useNavigate, useParams } from 'react-router-dom';
 import {
   useMutation,
@@ -20,10 +21,17 @@ import { FilterForm } from '@/components/FilterForm';
 import CityIndexRulesPicker from '@/components/CityIndexRulesPicker';
 import { DeliveryChannelsPicker } from '@/components/DeliveryChannelsPicker';
 import {
-  LocationControl,
   LocationTypeahead,
   type CenterRadius,
 } from '@/components/filter-controls';
+/* Lazy for the same reason as in Filters: this control carries maplibre-gl, and
+ * /watchdog/:id is a statically-routed page, so a plain import put the map engine in
+ * the entry chunk that every route pays for. */
+const LocationControl = lazyChunk(() =>
+  import('@/components/filter-controls/LocationControl').then((m) => ({
+    default: m.LocationControl,
+  })),
+);
 
 export default function WatchdogEdit() {
   const { id } = useParams<{ id?: string }>();
@@ -119,6 +127,14 @@ export default function WatchdogEdit() {
 
         <Section title="Spatial centre">
           <Row label="Centre + radius">
+            <Suspense
+              fallback={
+                <div
+                  className="h-[13.5rem] rounded-[var(--radius-sm)] bg-[var(--color-inset)]"
+                  aria-busy="true"
+                />
+              }
+            >
             <LocationControl
               value={
                 spec.lat != null && spec.lng != null && spec.radius_m != null
@@ -140,6 +156,7 @@ export default function WatchdogEdit() {
                 'to drop the spatial filter entirely.'
               }
             />
+            </Suspense>
           </Row>
         </Section>
 
