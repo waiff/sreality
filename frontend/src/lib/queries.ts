@@ -1,12 +1,10 @@
 import { supabase } from './supabase';
 import { fetchAllRows } from './fetchAllRows';
-import { imageSrc } from './imageUrl';
 import {
   composePipelineCards,
   PIPELINE_BOARD_COLS,
   type PipelineBoardRow,
 } from './pipelineBoardModel';
-import { type TaggedImageUrl } from './imageTags';
 import type { ListingBroker } from './brokers';
 import type { LlmCostDailyRow, LlmCostHourlyRow } from './llmCosts';
 import {
@@ -999,10 +997,6 @@ export interface CardRow {
    * which <PriceDelta> renders as nothing rather than as "unchanged". */
   total_price_change_pct: number | null;
   price_change_count: number | null;
-  /* Per-image render data (url + CLIP tag + confidence) in source-sequence
-   * order. Empty when the listing has no photos yet. The card uses index 0 by
-   * default and the carousel chevrons step through the remaining entries. */
-  images: TaggedImageUrl[];
 }
 
 export interface CardsResult {
@@ -1031,35 +1025,23 @@ export const fetchListingsForCards = async (
   ) as unknown as typeof scoped;
   const { data, error } = await keyed.limit(CARD_PAGE_SIZE);
   if (error) throw error;
-  const baseRows = (data ?? []) as unknown as Omit<CardRow, 'images'>[];
+  const baseRows = (data ?? []) as unknown as CardRow[];
   const nextCursor = nextCursorFrom(
     baseRows as unknown as Record<string, unknown>[],
     s,
     tiebreak,
   );
-  if (baseRows.length === 0) return { rows: [], nextCursor };
-  /* Hydrate the card photos keyed on the surrogate `listing_id`, NOT sreality_id
-   * — a post-Gate-2 non-sreality card has a NULL sreality_id, so a sreality-keyed
-   * batch would drop its images entirely. perId is a client-side retention cap;
-   * 50 comfortably covers any listing (typical max ~25) so the carousel never
-   * silently truncates. URLs only — bytes are lazy-loaded by <img loading="lazy">. */
-  const images = await fetchImagesForListingIds(
-    baseRows.map((r) => r.listing_id),
-    50,
-  );
-  const rows: CardRow[] = baseRows.map((r) => {
-    const imgs = images.get(r.listing_id) ?? [];
-    return {
-      ...r,
-      images: imgs.map((im) => ({
-        url: imageSrc(im),
-        tag: im.clip_fine_tag,
-        confidence: im.clip_confidence,
-        renderScore: im.clip_render_score,
-      })),
-    };
-  });
-  return { rows, nextCursor };
+  /* W7a: the card photos USED to be awaited right here, before this function
+   * would return a single row — so no card painted until every card's carousel
+   * had landed. Measured live on 24 real ids, that await is 178 image rows, 178
+   * correlated CLIP-tag lookups, 750 buffers and ~131 ms of server work, all of
+   * it on the paint path. It is not wasteful work: the carousel renders those
+   * rows, which is precisely why the fix is to move it off the paint path rather
+   * than to shrink it to one cover. Photos now arrive through the shared
+   * hydration layer (lib/hydration/useListingPhotos), keyed on the same
+   * surrogate listing_id, non-blocking, in its own cache namespace — and this
+   * read is one relation again. */
+  return { rows: baseRows, nextCursor };
 };
 
 
@@ -1793,18 +1775,19 @@ export const fetchTrainingLabelCounts = async (): Promise<TrainingLabelCount[]> 
 };
 
 /* Keyed on listing_id, not sreality_id (R2 Phase C resolver-chain cutover;
- * migration 335 exposes it on images_public). */
+ * migration 335 exposes it on images_public).
+ *
+ * W7a: this is now a one-id call into fetchImagesForListingIds rather than a
+ * fourth hand-rolled copy of the same select + double order-by. The two differed
+ * only in `.eq` vs `.in` and in the uncapped result — so `perId: Infinity`,
+ * which the retention loop reads as "keep them all". The listing gallery must
+ * stay uncapped: it renders every photo, and a cap here would silently truncate
+ * the lightbox. */
 export const fetchImagesByListing = async (
   listing_id: number,
 ): Promise<ImagePublic[]> => {
-  const { data, error } = await supabase
-    .from('images_public')
-    .select(IMAGE_PUBLIC_COLS)
-    .eq('listing_id', listing_id)
-    .order('sequence', { ascending: true, nullsFirst: false })
-    .order('id', { ascending: true });
-  if (error) throw error;
-  return (data ?? []) as unknown as ImagePublic[];
+  const byListing = await fetchImagesForListingIds([listing_id], Infinity);
+  return byListing.get(listing_id) ?? [];
 };
 
 /* -------------------------------------------------------------------------- */

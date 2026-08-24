@@ -1093,8 +1093,12 @@ renumber.** Navigate by area:
     `POST/DELETE /pipeline/cards` (bookmark/remove) + `PATCH /pipeline/cards/{id}` (move) routes —
     no extension-specific write path, no second secret. The `/pipeline` kanban board reads
     `property_pipeline_public` + `pipeline_stages_public` hydrated against `properties_public`
-    (street + `mf_gross_yield_pct` from the view; one thumbnail per card via the shared
-    `fetchImagesByListingIds` + `imageSrc()` Browse helpers; the **canonical broker** per card via
+    (street + `mf_gross_yield_pct` from the view; one thumbnail per card via `listing_cover_public`
+    (migration 416, W4) through the shared `lib/hydration` layer's `useListingCovers` — a
+    server-side `DISTINCT ON`, deliberately a different QUERY from the multi-image
+    `useListingPhotos` that Browse cards and the estimation comparables share (W7a): asking the
+    multi-image read for one photo per card is the fetch-everything-then-discard W4 measured at
+    901 rows / 3,995 buffers for 44 cards; the **canonical broker** per card via
     ONE batched read — `fetchListingBrokersByIds` (`POST /brokers/by-listings`), NOT the raw
     drift-prone `properties_public.broker_*` — the name links to `/brokers/{id}`, contact in a
     native-title hover. **Migration 419 (hydration sprint W6)** put `primary_email` /

@@ -16,11 +16,16 @@
 import { Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { lazyChunk } from '@/lib/lazyChunk';
 import { Link, useLocation } from 'react-router-dom';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import {
+  keepPreviousData,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from '@tanstack/react-query';
+import { idsKey, useListingPhotos } from '@/lib/hydration';
 import {
   estimationKeys,
   fetchImagesByListingIds,
-  fetchImagesForListingIds,
   fetchListingsByIds,
   fetchListingsForListingIds,
 } from '@/lib/queries';
@@ -987,17 +992,63 @@ async function fetchComparableListings(
   return new Map([...byLid, ...bySid]);
 }
 
-async function fetchComparableImages(
+/* Six per comparable: the modal's thumbnail strip shows six, and the map hover
+ * preview steps through the same set. A client-side retention cap on the same
+ * server read, and part of the hydration cache key — see lib/hydration/keys. */
+const COMPARABLE_PHOTOS_PER_ID = 6;
+
+/* The comparables' photos, on the SHARED hydration layer (W7a) for the modern
+ * id-space, with the frozen one quarantined beside it.
+ *
+ * Two queries, and in practice never two REQUESTS: within a single run's
+ * comparables_used blob the set is homogeneous — all surrogate (post-#879/#892)
+ * or all legacy — so one of the two id arrays is always empty, and both fetchers
+ * short-circuit an empty list without touching the network. That is what makes
+ * splitting them free, and it is the same invariant comparableId() already
+ * relies on.
+ *
+ * The surrogate arm gains what the hand-rolled key never had: `idsKey`
+ * normalisation, so re-sorting the comparables table is a cache HIT rather than
+ * a whole new key (the old key was `cids.join(',')` — order-dependent and not
+ * de-duplicated), plus keepPreviousData and the one shared decoration staleTime.
+ * The legacy arm keeps fetchImagesByListingIds: flipping a sreality_id into an
+ * `IN listing_id` is a silent half-swap, the id spaces overlap and it would
+ * match a DIFFERENT listing. Merging the two maps is safe for the same reason
+ * they cannot be swapped — the spaces are disjoint, and both halves are keyed by
+ * comparableId(). */
+function useComparableImages(
   comps: ComparableUsed[],
-  perId: number,
-): Promise<Map<number, ImagePublic[]>> {
-  const lids = comps.filter((c) => c.listing_id != null).map((c) => c.listing_id!);
-  const sids = comps.filter((c) => c.listing_id == null).map((c) => c.sreality_id!);
-  const [byLid, bySid] = await Promise.all([
-    fetchImagesForListingIds(lids, perId),
-    fetchImagesByListingIds(sids, perId),
-  ]);
-  return new Map([...byLid, ...bySid]);
+): { images: Map<number, ImagePublic[]>; isPending: boolean } {
+  const lids = useMemo(
+    () => comps.filter((c) => c.listing_id != null).map((c) => c.listing_id!),
+    [comps],
+  );
+  const sids = useMemo(
+    () => comps.filter((c) => c.listing_id == null).map((c) => c.sreality_id!),
+    [comps],
+  );
+
+  const { photos: byLid, isPending: lidPending } = useListingPhotos(
+    lids,
+    COMPARABLE_PHOTOS_PER_ID,
+  );
+
+  const legacyQ = useQuery<Map<number, ImagePublic[]>, Error>({
+    queryKey: ['estimation-comparables', 'images-legacy', idsKey(sids)],
+    queryFn: () => fetchImagesByListingIds(sids, COMPARABLE_PHOTOS_PER_ID),
+    enabled: sids.length > 0,
+    placeholderData: keepPreviousData,
+    staleTime: 5 * 60_000,
+  });
+
+  const images = useMemo(
+    () => new Map<number, ImagePublic[]>([...byLid, ...(legacyQ.data ?? [])]),
+    [byLid, legacyQ.data],
+  );
+  return {
+    images,
+    isPending: lidPending || (sids.length > 0 && legacyQ.data === undefined),
+  };
 }
 
 function ComparablesSection({ run }: { run: EstimationRun }) {
@@ -1026,12 +1077,7 @@ function ComparablesSection({ run }: { run: EstimationRun }) {
     staleTime: 60_000,
   });
 
-  const imagesQ = useQuery<Map<number, ImagePublic[]>, Error>({
-    queryKey: ['estimation-comparables', 'images', cids.join(',')],
-    queryFn: () => fetchComparableImages(comps, 6),
-    enabled: comps.length > 0,
-    staleTime: 5 * 60_000,
-  });
+  const { images: comparableImages } = useComparableImages(comps);
 
   const summariesQ = useQuery<Map<number, ListingSummaryBatchRow>, Error>({
     queryKey: [
@@ -1094,7 +1140,7 @@ function ComparablesSection({ run }: { run: EstimationRun }) {
   const subjectLat = run.input_spec?.lat ?? null;
   const subjectLng = run.input_spec?.lng ?? null;
   const listings = listingsQ.data ?? new Map<number, ListingPublic>();
-  const images = imagesQ.data ?? new Map<number, ImagePublic[]>();
+  const images = comparableImages;
   const summaries = summariesQ.data ?? new Map<number, ListingSummaryBatchRow>();
 
   const activeComp = activeId != null ? comps.find((c) => comparableId(c) === activeId) : undefined;

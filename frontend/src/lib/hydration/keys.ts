@@ -31,4 +31,12 @@ export const hydrationKeys = {
     [HYDRATION_NAMESPACE, 'covers', idsKey(ids)] as const,
   brokers: (ids: readonly number[]) =>
     [HYDRATION_NAMESPACE, 'brokers', idsKey(ids)] as const,
+  /* Several photos per listing — the Browse card carousel and the comparables
+   * modal, as distinct from `covers` (the board's ONE thumbnail, W4). `perId` is
+   * part of the key on purpose: it is a client-side retention cap applied to the
+   * SAME server read, so a cohort capped at 6 and the same cohort capped at 50
+   * hold different data and must not collide. Leaving it out would let whichever
+   * surface asked first silently truncate the other's carousel. */
+  photos: (ids: readonly number[], perId: number) =>
+    [HYDRATION_NAMESPACE, 'photos', idsKey(ids), perId] as const,
 };
