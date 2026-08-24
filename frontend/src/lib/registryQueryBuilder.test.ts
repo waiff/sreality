@@ -164,6 +164,52 @@ describe('auto-dispatch', () => {
     expect(ins).toContainEqual({ op: 'in', col: 'category_main', value: ['byt', 'dum'] });
   });
 
+  /* A one-element list MUST emit eq, never in. `in` is SQL `= ANY($1)`, whose
+   * ScalarArrayOp disqualifies the browse index from satisfying the ORDER BY:
+   * the planner then scans the whole cohort and top-N sorts it (measured on
+   * the default view: 105,011 rows / ~15,900 buffers, and past the 8 s
+   * statement_timeout when cold -> HTTP 500 on the flagship surface) instead
+   * of an early-stopping ordered index scan (24 rows / 5 buffers / 0.2 ms).
+   * These three tests are that defect's permanent rail. */
+  it('emits eq (not in) for a single-value string_list', () => {
+    const r = new _Recorder();
+    applyRegistryFilters(r, {
+      ...DEFAULT_FILTERS,
+      categoryMain: ['byt'],
+      dispositions: ['3+kk'],
+    });
+    expect(r.calls).toContainEqual({ op: 'eq', col: 'category_main', value: 'byt' });
+    expect(r.calls).toContainEqual({ op: 'eq', col: 'disposition', value: '3+kk' });
+    expect(r.calls.filter((c) => c.op === 'in')).toEqual([]);
+  });
+
+  it('emits eq for EVERY single-value string_list the registry can dispatch', () => {
+    const singles = FILTER_REGISTRY.filters.filter(
+      (f) =>
+        f.type === 'string_list' &&
+        f.pg_column != null &&
+        f.agendas.includes('browse') &&
+        !HAND_CODED_BROWSE_FILTERS.has(f.id) &&
+        REGISTRY_KEY_MAP[f.id as keyof typeof REGISTRY_KEY_MAP] !== undefined,
+    );
+    expect(singles.length).toBeGreaterThan(0);
+    for (const f of singles) {
+      const key = REGISTRY_KEY_MAP[f.id as keyof typeof REGISTRY_KEY_MAP];
+      const r = new _Recorder();
+      applyRegistryFilters(r, { ...DEFAULT_FILTERS, [key]: ['solo'] });
+      const emitted = r.calls.find((c) => c.col === f.pg_column);
+      expect(emitted, `${f.id} -> ${f.pg_column}`).toEqual({
+        op: 'eq', col: f.pg_column, value: 'solo',
+      });
+    }
+  });
+
+  it('the DEFAULT browse cohort emits no ScalarArrayOp at all', () => {
+    const r = new _Recorder();
+    applyRegistryFilters(r, { ...DEFAULT_FILTERS });
+    expect(r.calls.filter((c) => c.op === 'in')).toEqual([]);
+  });
+
   it('skips null-valued filters (no spurious clauses)', () => {
     const r = new _Recorder();
     applyRegistryFilters(r, {

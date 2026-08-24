@@ -1215,12 +1215,16 @@ function MapErrorOverlay({ error }: { error: Error }) {
 }
 
 function ErrorBanner({ error, onRetry }: { error: Error; onRetry?: () => void }) {
-  /* A statement-timeout means the list query didn't finish under the anon 3s
-   * budget. This is a transient/performance failure (often cold cache on this
-   * instance), NOT necessarily a too-broad cohort — so the copy offers a retry
-   * rather than telling the operator to narrow a cohort that may already be
-   * small. The read-path fixes (migrations 250-254, 275 + the keyset index fix)
-   * make it rare; the banner keeps the failure honest and actionable. */
+  /* A statement-timeout means the list query didn't finish under the caller's
+   * budget (8s for `authenticated`). Cohort breadth is NOT the usual cause and
+   * the copy must not imply it is — the last occurrence was a query-shape
+   * defect: a single-value filter emitted as `in.()`, which cost the ordered
+   * index and made the planner scan the whole band (fixed in
+   * registryQueryBuilder.ts; see the comment there). Retrying that could never
+   * have helped, so the copy no longer promises it is "usually transient" —
+   * it states what happened, offers the retry for the genuinely transient
+   * case (a cold band right after a read-model rebuild), and says plainly that
+   * a repeat is a defect worth reporting rather than an operator error. */
   const isTimeout = /statement timeout|57014/i.test(error.message);
   return (
     <div className="mt-4 p-3 rounded-[var(--radius-sm)] border border-[var(--color-brick)]/30 bg-[var(--color-brick-soft)] text-sm text-[var(--color-brick)] flex items-center justify-between gap-3">
@@ -1228,7 +1232,8 @@ function ErrorBanner({ error, onRetry }: { error: Error; onRetry?: () => void })
         {isTimeout ? (
           <>
             <strong className="font-medium">The list took too long to load.</strong>{' '}
-            This is usually transient — try again, or narrow the filters if it persists.
+            The database cut the query off. Try again — if it keeps happening on
+            the same view, that's a bug worth reporting, not a filter to narrow.
           </>
         ) : (
           <>

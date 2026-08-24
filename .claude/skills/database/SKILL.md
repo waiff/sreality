@@ -239,6 +239,21 @@ rule #15; the predicate itself comes out in the NEW DEDUP teardown migration.) T
 pg_cron runs on-the-minute where GH Actions cron was measured ~2× jittered (see
 `gh-actions-cron-throttle-fleet` if you need the numbers).
 
+**A single-value filter must reach `browse_list` as `=`, never as `= ANY`.** The serving
+index is `(category_main, category_type, first_seen_at DESC, property_id DESC)` and Browse's
+default sort is exactly its trailing pair — but a ScalarArrayOp ANYWHERE in the equality
+prefix disqualifies the index from satisfying the `ORDER BY`, so the planner drops the
+early-stopping ordered scan and reads the whole band into a top-N heapsort. Live on the
+DEFAULT cohort (byt+pronájem, 105k rows, `LIMIT 24`): `= ANY('{byt}')` → 15,877 buffers /
+4,452 ms (11–17 s when the band is cold, i.e. right after a rebuild — past `authenticated`'s
+8 s `statement_timeout`, which is how the flagship surface came to answer HTTP 500 on its own
+front page); `= 'byt'` → **6 buffers / 0.174 ms**, no Sort node. The client side is fixed in
+`frontend/src/lib/registryQueryBuilder.ts` (a length-1 `string_list` emits `.eq()`), pinned by
+three tests in its `.test.ts`, and the same rule governs the portal-mirror lane
+(`source` → `listing_feed_public`). Genuine multi-selects still sort — that is a server-side
+relation question, not this one. When reading a slow `browse_list` plan, check the operator
+before anything else: a `Sort` node above the index scan is this defect's signature.
+
 **Never hand-retype `rebuild_browse_list()`/`rebuild_properties_map_mv()`.** Both blue-green
 DROP+CREATE their object every tick, including the `GRANT SELECT ... TO authenticated` (never
 `anon` — migration 299 deliberately narrowed this) and, for `browse_list`, the district/price
