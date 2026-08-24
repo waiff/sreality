@@ -68,7 +68,7 @@ def store(monkeypatch):
         count = sum(1 for (_, tt) in state["tag_links"] if tt == tid)
         return {**t, "listing_count": count}
 
-    def fake_create_collection(conn, body):
+    def fake_create_collection(conn, body, account_id=None):
         for c in state["collections"].values():
             if c["name"].lower() == body.name.lower():
                 from fastapi import HTTPException
@@ -170,7 +170,7 @@ def store(monkeypatch):
         rows.sort(key=lambda r: r["name"].lower())
         return {"data": rows}
 
-    def fake_create_tag(conn, body):
+    def fake_create_tag(conn, body, account_id=None):
         for t in state["tags"].values():
             if t["name"].lower() == body.name.lower():
                 from fastapi import HTTPException
@@ -584,6 +584,39 @@ def test_create_collection_helper_inserts_and_returns():
     assert out["monitoring_enabled"] is False
     assert out["is_system"] is False
     assert "INSERT INTO collections" in conn.executions[0][0]
+
+
+# --- account stamping (W-1c) ----------------------------------------------
+#
+# `collections` and `tags` are top-level: no parent trigger fills account_id
+# (unlike collection_properties / property_tags, mig 292) and no DEFAULT. On
+# the tenant connection an unstamped INSERT fails the WITH CHECK closed, so
+# the column has to be in the statement AND carry the caller's account — a
+# regression here is silent (rows land unreachable, or worse, unscoped).
+
+def test_create_collection_stamps_account_id():
+    from api import schemas as s
+    conn = _FakeConn(results=[
+        (1, "x", None, "2026-05-10T00:00:00+00:00", "2026-05-10T00:00:00+00:00",
+         False, [], False),
+    ])
+    curation.create_collection(
+        conn, s.CreateCollectionIn(name="x"), account_id="acct-1",
+    )
+    sql, params = conn.executions[0]
+    assert "account_id" in sql
+    assert "acct-1" in params
+
+
+def test_create_tag_stamps_account_id():
+    from api import schemas as s
+    conn = _FakeConn(results=[(1, "t", "sage", "2026-05-10T00:00:00+00:00")])
+    curation.create_tag(
+        conn, s.CreateTagIn(name="t", color="sage"), account_id="acct-1",
+    )
+    sql, params = conn.executions[0]
+    assert "account_id" in sql
+    assert "acct-1" in params
 
 
 def test_delete_system_collection_is_refused_409():

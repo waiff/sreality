@@ -114,7 +114,9 @@ def client(monkeypatch):
     # test_curation.py. Stub each handler to a constant successful dict.
     monkeypatch.setattr(
         api_curation, "create_collection",
-        lambda conn, body: {"id": 1, "name": body.name, "listing_count": 0},
+        lambda conn, body, account_id=None: {
+            "id": 1, "name": body.name, "listing_count": 0,
+        },
     )
     monkeypatch.setattr(
         api_curation, "list_collections",
@@ -156,7 +158,7 @@ def client(monkeypatch):
     )
     monkeypatch.setattr(
         api_curation, "create_tag",
-        lambda conn, body: {
+        lambda conn, body, account_id=None: {
             "id": 1, "name": body.name, "color": body.color, "listing_count": 0,
         },
     )
@@ -258,16 +260,6 @@ def _gated_calls(client) -> list:
         ("GET", "/maps/suggest?query=foo", None),
         ("POST", "/maps/resolve", _RESOLVE_BODY),
         ("GET", "/estimations/preview?url=https://www.sreality.cz/detail/x/2836292428", None),
-        ("POST",   "/collections", _CREATE_COLLECTION_BODY),
-        ("GET",    "/collections/1", None),
-        ("PATCH",  "/collections/1", _PATCH_COLLECTION_BODY),
-        ("DELETE", "/collections/1", None),
-        ("GET",    "/tags", None),
-        ("POST",   "/tags", _CREATE_TAG_BODY),
-        ("PATCH",  "/tags/1", _PATCH_TAG_BODY),
-        ("DELETE", "/tags/1", None),
-        ("POST",   "/properties/1/tags", _ATTACH_TAG_BODY),
-        ("DELETE", "/properties/1/tags/1", None),
     ]
 
 
@@ -276,7 +268,14 @@ def _jwt_gated_calls() -> list:
     when auth is unconfigured, unlike require_token's open-when-unset
     behavior. The Wave 1 W1-1 batch (/estimations create/read/scenario,
     /collections list + /properties writes, /properties/{id}/notes) moved
-    here from _gated_calls in lockstep with api/main.py."""
+    here from _gated_calls in lockstep with api/main.py.
+
+    The curation stragglers — collection CRUD and every /tags route — followed
+    in the hydration sprint's W-1c: on the service-role pair they were
+    RLS-exempt behind a token that ships in the public SPA bundle, so any
+    holder could read or delete another account's curation. api/curation.py's
+    header states the rule; this list is its test-side twin. Nothing in it may
+    move back to _gated_calls."""
     return [
         ("GET",    "/pipeline/stages", None),
         ("POST",   "/pipeline/cards", _PIPELINE_CARD_BODY),
@@ -290,6 +289,16 @@ def _jwt_gated_calls() -> list:
         ("DELETE", "/collections/1/properties/2", None),
         ("GET",    "/properties/1/notes", None),
         ("POST",   "/properties/1/notes", _CREATE_NOTE_BODY),
+        ("POST",   "/collections", _CREATE_COLLECTION_BODY),
+        ("GET",    "/collections/1", None),
+        ("PATCH",  "/collections/1", _PATCH_COLLECTION_BODY),
+        ("DELETE", "/collections/1", None),
+        ("GET",    "/tags", None),
+        ("POST",   "/tags", _CREATE_TAG_BODY),
+        ("PATCH",  "/tags/1", _PATCH_TAG_BODY),
+        ("DELETE", "/tags/1", None),
+        ("POST",   "/properties/1/tags", _ATTACH_TAG_BODY),
+        ("DELETE", "/properties/1/tags/1", None),
     ]
 
 
