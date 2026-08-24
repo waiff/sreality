@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { useQuery } from '@tanstack/react-query';
+import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import { listBrokerMergeCandidates } from '../lib/api';
 import { useAuth } from '@/lib/auth';
 import { isSupabaseConfigured } from '@/lib/supabase';
@@ -85,6 +85,11 @@ export default function Brokers() {
     queryFn: () =>
       fetchBrokerLeaderboard({ ...geo, categoryMain, categoryType, metric, limit, firmIds }),
     staleTime: 60_000,
+    // Every filter control (region, type, metric, firm) changes this query's
+    // key. Without this, each click blanked the whole ledger back to
+    // "Načítám žebříček…" and re-painted from scratch instead of updating in
+    // place — keep showing the last result while the new one loads.
+    placeholderData: keepPreviousData,
   });
 
   const rows = boardQ.data ?? [];
@@ -147,7 +152,10 @@ export default function Brokers() {
         </div>
       </div>
 
-      {/* The ledger */}
+      {/* The ledger. boardQ keeps the previous page's rows visible while a
+          filter change loads the next one (placeholderData: keepPreviousData
+          above) — isFetching (not isLoading) is the "still updating" signal
+          once there's something on screen to update. */}
       <div className="mt-5">
         {boardQ.isLoading ? (
           <p className="mt-10 text-sm text-[var(--color-ink-3)]">Načítám žebříček…</p>
@@ -158,13 +166,18 @@ export default function Brokers() {
         ) : rows.length === 0 ? (
           <Empty placeLabel={placeLabel} hasFirmFilter={firmIds.length > 0} />
         ) : (
-          <Ledger
-            rows={rows}
-            metric={metric}
-            placeLabel={placeLabel}
-            capped={rows.length >= limit}
-            onOpen={(id) => navigate(`/brokers/${id}`)}
-          />
+          <>
+            {boardQ.isFetching && (
+              <p className="mb-2 text-xs text-[var(--color-ink-3)]">Aktualizuji…</p>
+            )}
+            <Ledger
+              rows={rows}
+              metric={metric}
+              placeLabel={placeLabel}
+              capped={rows.length >= limit}
+              onOpen={(id) => navigate(`/brokers/${id}`)}
+            />
+          </>
         )}
       </div>
     </div>
