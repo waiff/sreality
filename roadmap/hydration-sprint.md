@@ -177,7 +177,19 @@ Four corollaries, because the evidence did not support one rule for everything:
   shapes once with `staleTime: Infinity`, keyed on the dataset id only — never on
   `from`/`to`. New tests cover the join (including a missing-shape row skipped rather
   than crashing the map, matching the existing malformed-geometry guard).
-- ⬜ **W3** — one pipeline cache (collapse `pipelineKeys.{board,members,card}`).
+- ✅ **W3** — one pipeline cache: collapsed `pipelineKeys.card(property_id)` into
+  `pipelineKeys.members`. The per-property `card` cache was a separate `fetchPropertyPipeline`
+  read that duplicated exactly what `members` already held for that property (their columns
+  had already drifted out of sync once — a property badged "9" on a Browse card and "5" in
+  its own listing-detail header before a prior fix re-synced them by hand). `PipelineToggle`
+  (the listing-detail control) now reads the same shared `members` query every Browse/Table
+  funnel already reads — one fewer network round trip on every listing-detail page load, and
+  the two-reads-drift bug class can't recur since there's only one read left. `pipelineCache.ts`
+  (the rule #22 chokepoint) shrank from patching/snapshotting THREE caches per write to TWO
+  (`members` + `board`, which stays separate — it carries display fields `members` doesn't:
+  price, photo, place). `revalidatePipeline` dropped its now-unused `property_id` parameter.
+  `PipelineCard` type and `fetchPropertyPipeline` deleted (zero remaining callers). Client-only
+  — no query-shape change, no `EXPLAIN` evidence applicable.
 - ⬜ **W4** — cover substrate: covering index + `listing_cover_public`.
 - ⬜ **W5** — `pipeline_board_public` cohort view. **← stop point 1**
 - ⬜ **W6** — one broker call (contacts onto the API-only view; delete the second call from

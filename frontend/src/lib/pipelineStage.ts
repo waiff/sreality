@@ -11,8 +11,8 @@
 import type { PipelineStage, TagColor } from './types';
 
 /* The minimum a caller needs to paint a stage: colour for the accent, code +
- * id for the badge. Satisfied structurally by PipelineStage, PipelineCard
- * (via its stage_* fields, remapped by the caller) and the members map. */
+ * id for the badge. Satisfied structurally by PipelineStage and
+ * PipelineMembership (via its stage_* fields, remapped by the caller). */
 export interface StageLook {
   id: number;
   color: TagColor | null;
