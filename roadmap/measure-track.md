@@ -48,7 +48,7 @@ every stored watchdog spec and saved preset, and breaking archived-run display (
 | W1 | Truth at the source: shared `derive_headline_area` across all 9 parsers, shared per-area price rail, per-basis floors | T3 | 423 | ⬜ |
 | W2 | Heal stored damage: mmreality area + unit-price masquerade backfills | T3 | — | ⬜ |
 | W3 | Property-grain coherence: numerator and denominator from the same child | T1+T3 | 424 | ⬜ |
-| W4 | **Keystone** — `measure_price_per_m2` + `measure_price_per_m2_basis` in SQL; 6 relations repointed | T1+T2 | 425 | ⬜ |
+| W4 | **Keystone** — `measure_price_per_m2` + `measure_price_per_m2_basis` in SQL; 6 relations repointed | T1+T2 | 425 | ✅ |
 | W5 | Python + API call sites onto the named measure (`toolkit/measures.py`) | T1+T2 | 426 | ⬜ |
 | W6 | Frontend: one formatter, basis on every surface, the map Kč/m² toggle | T1+T2 | — | ⬜ |
 | W7 | Chrome extension: read the server's measure, name the month | T2 | — | ⬜ |
@@ -56,6 +56,32 @@ every stored watchdog spec and saved preset, and breaking archived-run display (
 | W9 | Plausibility gate: per-source drift detection the null-checks are blind to | T3 | 427 | ⬜ |
 
 Ordering: W1 ∥ W3 → W2; W3 → W4; W4 → {W5, W6, W9}; W5 → W7; everything → W8.
+
+### W4 as built — three deviations every later wave must inherit
+
+- **The capital `category_type` is an enumerated allowlist, not "everything that is not
+  `pronajem`".** Live `category_type` has FOUR values, not the two the charter assumed:
+  `drazba` (auction) and `podil` (co-ownership share) carry 10,595 active properties
+  between them. Both are capital transactions and resolve to `sale_capital_czk_m2`;
+  anything outside `('prodej','drazba','podil')` — including a NULL `category_type` —
+  resolves to NULL basis and NULL measure, a visible gap rather than a silent guess.
+  W5's `toolkit/measures.py` and W6's `frontend/src/lib/measure.ts` must use the same
+  four-value vocabulary, not a two-value one.
+- **Basis resolution is rent-first.** `pozemek` + `pronajem` (1,845 active properties) is a
+  MONTHLY figure and is labelled `rent_monthly_czk_m2`; only a capital land listing gets
+  `land_capital_czk_m2`. Resolving `category_main` first would put a rent under a capital
+  label — the exact confusion this program exists to end.
+- **`browse_stats(...)` was NOT dropped.** Dropping is destructive and this sprint carried
+  no operator sign-off for a destructive step, so 425 records the intent reversibly with
+  `COMMENT ON FUNCTION` (superseded, unreferenced, do not resurrect). **Follow-up needing
+  operator approval:** `drop function public.browse_stats(<083 signature>)` plus a pg_dump.
+
+Migration 425 also repaired pre-existing prod/repo drift discovered while fetching the live
+bodies: `properties.all_sources` / `active_sources` (text[]) existed on production and were
+projected by the live `browse_projection`, with no migration file on any branch that reached
+`main` (migration 375's header flagged and deliberately deferred it). `CREATE OR REPLACE
+VIEW` cannot drop a column, so re-emitting the view was impossible until they were
+reconciled; 425 adds both idempotently. Nothing reads or writes them.
 
 ## Next after this program
 
