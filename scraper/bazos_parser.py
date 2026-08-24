@@ -27,8 +27,10 @@ from typing import Any, Callable
 
 from selectolax.parser import HTMLParser, Node
 
+from scraper.area import derive_headline_area
 from scraper.floor import floor_from_text
 from scraper.geocoding import GeocodeResult, GeocodingError
+from scraper.price_text import is_per_area_price
 from scraper.published import bazos_posted_date
 from scraper.scraped_listing import ScrapedListing
 from scraper.street import clean_street
@@ -193,6 +195,10 @@ def _parse_price(text: str | None, category_type: str | None) -> tuple[int | Non
         return None, unit
     m = _PRICE_DIGITS_RE.search(text)
     if not m:
+        return None, unit
+    # A per-m² figure must NEVER be stored as the absolute price — it reads as a
+    # total in every downstream consumer (Kč/m² stats, comparables, Browse sort).
+    if is_per_area_price(text[m.end():]):
         return None, unit
     digits = re.sub(r"\D", "", m.group(0))
     return (int(digits) if digits else None), unit
@@ -655,6 +661,12 @@ def parse_detail(
 
     posted_text = _text(tree.css_first("span.velikost10"))
 
+    # bazos has no structured area field at all — only the free-text scrape, so
+    # the resolver's untyped fallback arm is the whole story here.
+    area_m2, area_basis = derive_headline_area(
+        category_main=category_main, fallback=_parse_area(haystack),
+    )
+
     raw = {
         "id": source_id,
         "title": title,
@@ -676,7 +688,8 @@ def parse_detail(
         subtype=subtype,
         price_czk=price_czk,
         price_unit=price_unit,
-        area_m2=_parse_area(haystack),
+        area_m2=area_m2,
+        area_basis=area_basis,
         disposition=_parse_disposition(haystack),
         floor=floor,
         total_floors=total_floors,

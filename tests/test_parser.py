@@ -99,7 +99,21 @@ def test_price_unit_monthly():
 
 
 def test_area(sample):
-    assert parse_listing(sample)["area_m2"] == 85.0
+    row = parse_listing(sample)
+    assert row["area_m2"] == 85.0
+    # sreality's only interior measure is `usable_area`, so the stamp is fixed.
+    assert row["area_basis"] == "usable"
+
+
+def test_area_zero_is_a_placeholder_not_a_measure(sample):
+    # sreality's v1 feed renders an absent interior measure as `usable_area: 0`
+    # rather than omitting the key. The old code stored that 0.0; the shared
+    # resolver treats it as the form placeholder it is. No live row carries
+    # area_m2 = 0 today, and sreality's content hash is over raw_json (not the
+    # parsed row), so this churns nothing — but the semantics are pinned here.
+    row = parse_listing({**sample, "usable_area": 0})
+    assert row["area_m2"] is None
+    assert row["area_basis"] is None
 
 
 def test_disposition(sample):

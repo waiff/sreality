@@ -170,6 +170,7 @@ def test_parse_detail_full():
     assert listing.price_czk == 6_999_000
     assert listing.price_unit == "za nemovitost"
     assert listing.area_m2 == 41.0
+    assert listing.area_basis == "usable"
     assert listing.usable_area == 41.0
     assert listing.disposition == "1+1"
     assert listing.lat == 50.06975
@@ -335,3 +336,37 @@ def test_title_street_and_okres(monkeypatch):
     bare = "Prodej stavební parcely, 1 715 m², Žihle, okres Plzeň-sever - ČESKÉREALITY.cz"
     assert _TITLE_STREET_RE.search(bare) is None
     assert _TITLE_OKRES_RE.search(bare).group(1).strip() == "okres Plzeň-sever"
+
+
+# Two DIFFERENT labelled measures on one page: the discriminating case for the
+# portal-label -> typed-slot mapping. Without it, swapping the kwargs in
+# parse_detail's derive_headline_area call is a silent wrong value under a
+# confident wrong label, and the whole suite stays green.
+
+def test_uzitna_beats_bare_plocha_and_says_so():
+    cell = '<div class="i-info"><span class="i-info__title">{}</span>' \
+           '<span class="i-info__value"> {} </span></div>'
+    html = DETAIL_HTML.replace(
+        cell.format("Plocha užitná", "41 m²"),
+        cell.format("Plocha užitná", "41 m²") + cell.format("Plocha", "58 m²"),
+    )
+    listing = parse_detail(
+        html, source_url=_DETAIL_URL, category_main="byt", category_type="prodej",
+    )
+    assert (listing.area_m2, listing.area_basis) == (41.0, "usable")
+
+
+def test_bare_plocha_alone_is_a_total_not_an_uzitna():
+    # The pre-collapse the resolver exists to prevent: ceskereality's usable_area
+    # column has always folded "Plocha užitná" / "Plocha" into ONE string, so a page
+    # carrying only the bare "Plocha" used to reach area_m2 stamped as an interior
+    # užitná. Separate slots, separate labels.
+    cell = '<div class="i-info"><span class="i-info__title">{}</span>' \
+           '<span class="i-info__value"> {} </span></div>'
+    html = DETAIL_HTML.replace(
+        cell.format("Plocha užitná", "41 m²"), cell.format("Plocha", "58 m²"),
+    )
+    listing = parse_detail(
+        html, source_url=_DETAIL_URL, category_main="byt", category_type="prodej",
+    )
+    assert (listing.area_m2, listing.area_basis) == (58.0, "total")

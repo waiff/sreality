@@ -610,3 +610,52 @@ def test_touch_listings_by_id_keys_on_surrogate_not_sreality_id():
     assert bulk is not None
     assert "listings.id = u.id" in bulk[0]
     assert "listings.sreality_id" not in bulk[0]
+
+
+# --- the area_basis stamp actually reaches the DB on BOTH write paths ---------
+#
+# The parsers are the only place the basis is decided, and both write paths build
+# their SQL from LISTING_COLUMNS at import time — so a column dropped from that
+# tuple, or a row shape that never carries the key, is a silent NULL in every
+# consumer while every parser test stays green. These two pin the wiring.
+
+
+def test_write_detail_batch_carries_area_basis_into_listings_and_not_the_snapshot():
+    conn = _FakeConn([
+        (lambda s: "INSERT INTO listings (" in s, [(True,)]),
+        (lambda s: "INSERT INTO listing_snapshots" in s, [(0,)]),
+        (lambda s: "DELETE FROM listing_fetch_failures" in s, []),
+    ])
+    result = SimpleNamespace(
+        row={"sreality_id": 7, "price_czk": 3_190_000, "area_m2": 70.0,
+             "area_basis": "usable"},
+        raw={"id": 7}, content_hash="h7", images=[], discovery_seq=None,
+    )
+    db.write_detail_batch(conn, [result])
+
+    upsert = _find(conn.executed, "INSERT INTO listings (")
+    assert "area_basis" in upsert[0]
+    assert upsert[1][0].obj[0]["area_basis"] == "usable"
+    assert upsert[1][0].obj[0]["area_m2"] == 70.0
+    # The snapshot is price history, not provenance: area_basis is out of every
+    # content hash precisely so stamping it appends no snapshot (rule 2).
+    snap = _find(conn.executed, "INSERT INTO listing_snapshots")
+    assert "area_basis" not in snap[0]
+
+
+def test_upsert_listing_carries_area_basis():
+    conn = _FakeConn([
+        (lambda s: "INSERT INTO listings (" in s, [(True, 42)]),
+        (lambda s: "SELECT content_hash FROM listing_snapshots" in s, []),
+        (lambda s: "INSERT INTO listing_snapshots" in s, []),
+    ])
+    db.upsert_listing(
+        conn,
+        {"sreality_id": 7, "price_czk": 3_190_000, "area_m2": 70.0,
+         "area_basis": "usable"},
+        {"id": 7},
+        "h7",
+    )
+    upsert = _find(conn.executed, "INSERT INTO listings (")
+    assert "area_basis" in upsert[0]
+    assert upsert[1]["area_basis"] == "usable"

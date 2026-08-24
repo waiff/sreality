@@ -193,6 +193,7 @@ def test_parse_detail_full():
     assert listing.price_czk == 9_790_000
     assert listing.price_unit == "za nemovitost"
     assert listing.area_m2 == 69.0
+    assert listing.area_basis == "usable"
     assert listing.usable_area == 69.0
     assert listing.disposition == "3+1"
     assert listing.lat == 50.130427866
@@ -382,6 +383,18 @@ def test_parse_detail_land_total_price_and_spaced_area():
     assert listing.estate_area == 1074.0
 
 
+def test_land_headline_area_is_stamped_plot():
+    # Option A: a parcel's area stays in area_m2 (NULLing it would be deletion on
+    # the portals that write no estate_area) — only the basis label says so.
+    listing = parse_detail(
+        LAND_DETAIL_HTML,
+        source_url="https://reality.idnes.cz/detail/prodej/pozemek/bzenec/6a18deadbeefdeadbeef0020/",
+        category_main="pozemek", category_type="prodej",
+    )
+    assert listing.area_m2 == 1074.0
+    assert listing.area_basis == "plot"
+
+
 def test_parse_detail_del_only_price_falls_back_to_current():
     # No <strong>: the flattened element's FIRST price run used to be the
     # struck <del> original; the fallback now strips <del> first.
@@ -461,3 +474,20 @@ def test_parse_detail_full_fixture_price_row_stays_clean():
         DETAIL_HTML, source_url=_DETAIL_URL, category_main="byt", category_type="prodej",
     )
     assert "hypoték" not in (listing.raw["price_text"] or "")
+
+
+# Two DIFFERENT labelled measures on one page: the discriminating case for the
+# portal-label -> typed-slot mapping. Without it, swapping the kwargs in
+# parse_detail's derive_headline_area call is a silent wrong value under a
+# confident wrong label, and the whole suite stays green.
+
+def test_uzitna_beats_podlahova_and_says_so():
+    html = DETAIL_HTML.replace(
+        "<dt>Užitná plocha</dt><dd>69 m<sup>2</sup></dd>",
+        "<dt>Užitná plocha</dt><dd>69 m<sup>2</sup></dd>"
+        "<dt>Podlahová plocha</dt><dd>75 m<sup>2</sup></dd>",
+    )
+    listing = parse_detail(
+        html, source_url=_DETAIL_URL, category_main="byt", category_type="prodej",
+    )
+    assert (listing.area_m2, listing.area_basis) == (69.0, "usable")

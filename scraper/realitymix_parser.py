@@ -36,6 +36,8 @@ from unicodedata import combining, normalize
 from selectolax.parser import HTMLParser, Node
 
 from scraper import street
+from scraper.area import derive_headline_area
+from scraper.price_text import is_per_area_price
 from scraper.scraped_listing import ScrapedListing
 
 # realitymix family/offer URL segments -> our canonical labels (mirrors
@@ -196,6 +198,10 @@ def _parse_price(text: str | None, category_type: str | None) -> tuple[int | Non
         return None, unit
     m = _PRICE_RUN_RE.search(text)
     if not m:
+        return None, unit
+    # A per-m² figure must NEVER be stored as the absolute price — it reads as a
+    # total in every downstream consumer (Kč/m² stats, comparables, Browse sort).
+    if is_per_area_price(text[m.end():]):
         return None, unit
     digits = re.sub(r"\D", "", m.group(0))
     if not digits:
@@ -568,14 +574,16 @@ def parse_detail(html: str, *, source_url: str) -> ScrapedListing:
     # geocode them (the ~28% no-#print-map case) and so they have a display label.
     locality = full_address or obec or _fallback_locality(source_url, street_name)
 
-    area_m2 = _parse_area(
-        params.get("celková podlahová plocha")
-        or params.get("užitná plocha")
-        or params.get("podlahová plocha")
-        or params.get("plocha")
-        or title
-    )
     usable_area = _parse_area(params.get("užitná plocha"))
+    area_m2, area_basis = derive_headline_area(
+        category_main=category_main,
+        usable=usable_area,
+        floor=_parse_area(
+            params.get("celková podlahová plocha") or params.get("podlahová plocha")
+        ),
+        total=_parse_area(params.get("plocha")),
+        fallback=_parse_area(title),
+    )
     estate_area = _parse_area(
         params.get("plocha parcely")
         or params.get("plocha pozemku")
@@ -609,6 +617,7 @@ def parse_detail(html: str, *, source_url: str) -> ScrapedListing:
         price_czk=price_czk,
         price_unit=price_unit,
         area_m2=area_m2,
+        area_basis=area_basis,
         usable_area=usable_area,
         disposition=_parse_disposition(params.get("dispozice bytu") or params.get("dispozice"))
         or _parse_disposition(title),

@@ -419,3 +419,23 @@ def test_mmreality_is_wired_end_to_end_for_broker_attribution():
     # fingerprint allowlist has to carry mmreality's own key, or a broker swap on a
     # page whose content hash is unchanged never re-enqueues.
     assert mmreality.id_key in _BROKER_FINGERPRINT_KEYS
+
+
+def test_mmreality_real_house_page_does_not_call_its_plot_an_interior_area():
+    """The captured page is a `dum` with `totalArea: 1164` and NO `usableArea` —
+    the shape 13 of 3,601 active mmreality houses have, and the one the hermetic
+    fixtures cannot show (they set both keys). mmreality's `totalArea` on a house
+    is the PARCEL (median 905 m2 against 149-163 on every other portal), so it
+    must not become the headline under an interior basis: `area_m2` goes NULL and
+    the number lands in `estate_area`, a column mmreality had never filled."""
+    from scraper.mmreality_parser import parse_detail
+
+    html = (_FIXTURES / "mmreality_detail.html").read_text(encoding="utf-8")
+    listing = parse_detail(
+        html, source_url="https://www.mmreality.cz/nemovitosti/944446/"
+    )
+    assert listing.category_main == "dum"
+    assert listing.usable_area is None
+    assert listing.area_m2 is None
+    assert listing.area_basis is None
+    assert listing.estate_area == 1164.0

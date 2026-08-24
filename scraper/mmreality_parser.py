@@ -29,6 +29,7 @@ from unicodedata import combining, normalize
 
 from selectolax.parser import HTMLParser, Node
 
+from scraper.area import derive_headline_area
 from scraper.scraped_listing import ScrapedListing
 from scraper.street import clean_street, street_from_locality
 
@@ -410,6 +411,7 @@ def parse_detail(html: str, *, source_url: str) -> ScrapedListing:
     source_id = str(obj.get("id") or listing_id or "")
 
     category_type = _category_type(obj)
+    category_main = _category_main(obj)
     price_unit = "za mesic" if category_type == "pronajem" else "za nemovitost"
     price_czk = _to_int(obj.get("price"))
     if price_czk == 0:
@@ -431,6 +433,19 @@ def parse_detail(html: str, *, source_url: str) -> ScrapedListing:
         else None
     )
 
+    # For a HOUSE mmreality's `totalArea` is the PLOT (median 905 m2 against
+    # 149-163 on every other portal), so it is not offered to the resolver as a
+    # `total` at all: a house with no `usableArea` (13 of 3,601 active) must land
+    # NULL rather than a parcel stamped 'total'. It is not thrown away either —
+    # it is routed to estate_area below, the column mmreality has never filled.
+    is_house = category_main == "dum"
+    total_area = _to_float(obj.get("totalArea"))
+    area_m2, area_basis = derive_headline_area(
+        category_main=category_main,
+        usable=_to_float(obj.get("usableArea")),
+        total=None if is_house else total_area,
+    )
+
     image_urls = _image_urls(obj)
     raw = dict(obj)
     raw["image_urls"] = image_urls
@@ -440,11 +455,12 @@ def parse_detail(html: str, *, source_url: str) -> ScrapedListing:
         source=SOURCE,
         source_id_native=source_id,
         source_url=source_url,
-        category_main=_category_main(obj),
+        category_main=category_main,
         category_type=category_type,
         price_czk=price_czk,
         price_unit=price_unit,
-        area_m2=_to_float(obj.get("totalArea")) or _to_float(obj.get("usableArea")),
+        area_m2=area_m2,
+        area_basis=area_basis,
         usable_area=_to_float(obj.get("usableArea")),
         disposition=_disposition((obj.get("type") or {}).get("name"), obj.get("title")),
         locality=locality,
@@ -471,7 +487,11 @@ def parse_detail(html: str, *, source_url: str) -> ScrapedListing:
         garage=_has_any(accessories, "garaz"),
         has_parking=(True if parking_lots else _has_any(accessories, "parkov", "garaz")),
         parking_lots=parking_lots,
-        estate_area=_to_float(obj.get("landArea")) or _to_float(obj.get("plotArea")),
+        estate_area=(
+            _to_float(obj.get("landArea"))
+            or _to_float(obj.get("plotArea"))
+            or (total_area if is_house else None)
+        ),
         garden_area=_to_float(obj.get("gardenArea")),
         description=obj.get("description") or None,
         raw=raw,

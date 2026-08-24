@@ -58,3 +58,20 @@ def test_published_at_is_not_hashed():
     b = replace(a, published_at=date(2026, 7, 2))
     c = replace(a, published_at=date(2026, 7, 3))
     assert a.content_hash() == b.content_hash() == c.content_hash()
+
+
+def test_area_basis_lands_in_to_row_and_in_the_column_list():
+    from scraper import db
+
+    row = _listing(area_m2=70.0, area_basis="usable").to_row(-5)
+    assert row["area_basis"] == "usable"
+    assert "area_basis" in db.LISTING_COLUMNS
+
+
+def test_area_basis_is_not_hashed():
+    # It is a PROVENANCE observation of a value that does not change, so stamping
+    # it (now, or by a later backfill) must not append a snapshot row — rule 2.
+    assert "area_basis" not in _HASH_FIELDS
+    a = _listing(area_m2=70.0, area_basis=None)
+    b = replace(a, area_basis="usable")
+    assert a.content_hash() == b.content_hash()

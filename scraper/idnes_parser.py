@@ -23,8 +23,10 @@ from unicodedata import combining, normalize
 
 from selectolax.parser import HTMLParser, Node
 
+from scraper.area import derive_headline_area
 from scraper.broker_idnes import parse_idnes_broker
 from scraper.geocoding import GeocodeResult, GeocodingError
+from scraper.price_text import is_per_area_price
 from scraper.scraped_listing import ScrapedListing
 from scraper.street import street_from_locality
 
@@ -149,13 +151,6 @@ _DETAIL_PATH_RE = re.compile(r"/detail/([^/?#]+)/([^/?#]+)/")
 # zero-width spaces (the Czech "9 790 000" thousands format idnes renders with
 # &nbsp;/&zwj; between groups). Stops at the first non-space, non-digit char.
 _PRICE_RUN_RE = re.compile(r"\d[\d\s\u00a0\u200b\u200c\u200d\u2060]*")
-# A unit-price marker directly after the amount ("18 500 Kč/m²", "Kč za m²",
-# "Kč/m²/rok"). A per-m² figure must NEVER be stored as the absolute price —
-# today idnes shows per-m² only in a grey note span the parser doesn't read
-# (verified on 5,773 staged pozemek pages), so this is a drift rail for the day
-# a page's main price element becomes unit-priced. Deliberately does NOT match
-# "Kč/měsíc" (the m needs ²/2 right after).
-_PRICE_PER_M2_RE = re.compile(r"^\s*Kč\s*(?:/\s*|za\s+)m(?:²|2)(?!\w)", re.IGNORECASE)
 _PRICE_MAX = 2_147_483_647  # listings.price_czk is a Postgres integer
 # Column maxes for the numeric area fields. A parsed area larger than its column
 # can hold (a million-m\u00b2 title-number garble, a developer-project "1234567 m\u00b2"
@@ -266,7 +261,11 @@ def _parse_price(text: str | None, category_type: str | None) -> tuple[int | Non
     m = _PRICE_RUN_RE.search(text)
     if not m:
         return None, unit
-    if _PRICE_PER_M2_RE.match(text[m.end():]):
+    # A per-m² figure must NEVER be stored as the absolute price — today idnes
+    # shows per-m² only in a grey note span the parser doesn't read (verified on
+    # 5,773 staged pozemek pages), so this is a drift rail for the day a page's
+    # main price element becomes unit-priced.
+    if is_per_area_price(text[m.end():]):
         return None, unit
     digits = re.sub(r"\D", "", m.group(0))
     if not digits:
@@ -572,12 +571,21 @@ def parse_detail(
     locality = _text(tree.css_first(".b-detail__info"))
     lat, lon, coord_provenance = _resolve_coords(html, locality, geocoder)
 
+    # The three labels reach the shared resolver as SEPARATE typed measures —
+    # collapsing them first is exactly what destroys the basis. `area_text` stays
+    # the collapsed value the usable_area column has always carried.
     area_text = (
         _text(params.get("užitná plocha"))
         or _text(params.get("podlahová plocha"))
         or _text(params.get("plocha"))
     )
-    area_m2 = _clamp(_parse_area(area_text) or _parse_area(title), _AREA_M2_MAX)
+    area_m2, area_basis = derive_headline_area(
+        category_main=category_main,
+        usable=_clamp(_parse_area(_text(params.get("užitná plocha"))), _AREA_M2_MAX),
+        floor=_clamp(_parse_area(_text(params.get("podlahová plocha"))), _AREA_M2_MAX),
+        total=_clamp(_parse_area(_text(params.get("plocha"))), _AREA_M2_MAX),
+        fallback=_clamp(_parse_area(title), _AREA_M2_MAX),
+    )
 
     # Amenities: each row is a check icon OR free text (size / orientation /
     # parking kind), so everything goes through _truthy_field. idnes has no
@@ -626,6 +634,7 @@ def parse_detail(
         price_czk=price_czk,
         price_unit=price_unit,
         area_m2=area_m2,
+        area_basis=area_basis,
         usable_area=_clamp(_parse_area(area_text), _AREA_LARGE_MAX),
         disposition=_parse_disposition(title) or _parse_disposition(_text(params.get("dispozice"))),
         locality=locality,

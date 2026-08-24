@@ -271,6 +271,7 @@ def test_parse_detail_full():
     assert listing.price_czk == 9_962_000        # clean data-advert-price integer
     assert listing.price_unit == "za nemovitost"
     assert listing.area_m2 == 45.0
+    assert listing.area_basis == "usable"
     assert listing.disposition == "2+kk"
     # data-gps DMS -> decimal, CZ-bbox-guarded — the SUBJECT's #pd-map pair,
     # never the carousel card's (first-occurrence rule holds for gps only).
@@ -373,3 +374,19 @@ def test_detail_price_is_none_when_the_portal_withholds_it():
     assert _detail_price("Cena na vyžádání v kanceláři", "prodej")[0] is None
     assert _detail_price(None, "prodej")[0] is None
     assert _detail_price("bez CZK ale bez cisla", "prodej")[0] is None
+
+
+# Two DIFFERENT labelled measures on one page: the discriminating case for the
+# portal-label -> typed-slot mapping. Without it, swapping the kwargs in
+# parse_detail's derive_headline_area call is a silent wrong value under a
+# confident wrong label, and the whole suite stays green.
+
+def test_uzitna_beats_celkova_and_says_so():
+    row = '<div class="pd-detail-info__row"><div class="pd-detail-info__label">{}</div>' \
+          '<div class="pd-detail-info__value">{}</div></div>'
+    html = DETAIL_HTML.replace(
+        row.format("Užitná plocha:", "45 m²"),
+        row.format("Užitná plocha:", "45 m²") + row.format("Celková plocha:", "96 m²"),
+    )
+    listing = parse_detail(html, source_url=_DETAIL_URL)
+    assert (listing.area_m2, listing.area_basis) == (45.0, "usable")

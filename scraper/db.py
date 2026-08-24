@@ -66,6 +66,9 @@ LISTING_COLUMNS: tuple[str, ...] = (
     "price_czk",
     "price_unit",
     "area_m2",
+    # Which physical area area_m2 holds (migration 423). A provenance stamp, not
+    # a value — out of every content hash, so backfilling it churns no snapshot.
+    "area_basis",
     "disposition",
     "locality",
     "district",
@@ -119,6 +122,7 @@ _LISTING_COLUMN_PGTYPE: dict[str, str] = {
     "price_czk": "integer",
     "price_unit": "text",
     "area_m2": "numeric",
+    "area_basis": "text",
     "disposition": "text",
     "locality": "text",
     "district": "text",
