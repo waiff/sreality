@@ -801,9 +801,11 @@ export default function BrowseExperience({
                   : ({ '--map-w': `${mapSplit.value * 100}%` } as CSSProperties)
               }
             >
+              {/* Photos ONLY. The card grid renders no cover thumbnail and no
+                  broker line, so it must not fetch either — see CardDecorations. */}
               <CardHydrationProvider
                 listingIds={cardListingIds}
-                photosPerId={CARD_PHOTOS_PER_CARD}
+                renders={{ photos: CARD_PHOTOS_PER_CARD }}
               >
               <ListingCards
                 rows={cards.isLoading ? null : cards.rows}

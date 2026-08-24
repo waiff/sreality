@@ -59,30 +59,56 @@ const Ctx = createContext<CardHydration>(EMPTY);
 
 export const useCardHydration = (): CardHydration => useContext(Ctx);
 
+/* What a surface actually renders. EVERY decoration is opt-in, and that is the
+ * north star written as a prop signature: "every surface pays only for what it
+ * renders". Mounting the shared provider must never sign a surface up for a read
+ * it has no use for.
+ *
+ * This was learned the expensive way. W7a's first cut made only `photos` opt-in
+ * and left covers + brokers always-on, reasoning about the direction the board
+ * cared about and not the one Browse did — so Browse mounted the provider and
+ * silently began fetching a cover per card and a broker per card that nothing on
+ * the page displays. Caught on the live post-deploy smoke run: /browse 22 -> 24
+ * requests, the two extra being `listing_cover_public` and
+ * `POST /brokers/by-listings`. Asymmetric defaults are how that happens; there
+ * are none now. */
+export interface CardDecorations {
+  /* One thumbnail per card, via listing_cover_public's server-side DISTINCT ON. */
+  covers?: boolean;
+  /* The canonical broker line + its contact pair. */
+  brokers?: boolean;
+  /* Several photos per card for a carousel — the value is the client-side
+   * retention cap (perId), which is part of the cache key. Omitted = off. */
+  photos?: number;
+}
+
 /* Fetches the decorations for one cohort of listing ids and serves them to
  * every card beneath it. The ids are the caller's business: the board passes
  * the representative listing id of every card currently on it.
  *
- * `photosPerId` is opt-in and defaults to OFF. The two card surfaces want
- * genuinely different things from the image lane — the board renders one 48px
- * thumbnail per card (covers, W4's server-side DISTINCT ON), Browse renders a
- * carousel — and mounting the shared provider must not sign a surface up for a
- * read it does not render. Pass a number to turn the carousel read on; omit it
- * and no photo query is ever issued. */
+ * An unwanted decoration is switched off by handing its hook an EMPTY id list,
+ * which its existing `ids.length > 0` gate already turns into "no query" — no
+ * second enabled flag to keep in step, and `isPending` correctly reads false
+ * rather than "forever loading". */
 export function CardHydrationProvider({
   listingIds,
-  photosPerId = null,
+  renders,
   children,
 }: {
   listingIds: readonly number[];
-  photosPerId?: number | null;
+  renders: CardDecorations;
   children: ReactNode;
 }) {
-  const { covers, isPending: coversPending } = useListingCovers(listingIds);
-  const { brokers, isPending: brokersPending } = useListingBrokers(listingIds);
+  const wanted = (on: boolean | undefined) => (on ? listingIds : NO_IDS);
+  const { covers, isPending: coversPending } = useListingCovers(
+    wanted(renders.covers),
+  );
+  const { brokers, isPending: brokersPending } = useListingBrokers(
+    wanted(renders.brokers),
+  );
   const { photos, isPending: photosPending } = useListingPhotos(
     listingIds,
-    photosPerId,
+    renders.photos ?? null,
   );
 
   const value = useMemo<CardHydration>(
@@ -126,3 +152,6 @@ export function makeHydration(
 }
 
 const EMPTY_PHOTOS_MAP: PhotosByListingId = new Map();
+/* A stable identity, so switching a decoration off doesn't hand its hook a fresh
+ * array every render and re-run its memo. */
+const NO_IDS: readonly number[] = [];

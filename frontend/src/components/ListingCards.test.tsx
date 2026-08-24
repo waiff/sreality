@@ -23,6 +23,7 @@ import { MemoryRouter } from 'react-router-dom';
 
 import ListingCards from './ListingCards';
 import { CardHydrationProvider } from '@/lib/hydration';
+import * as brokers from '@/lib/brokers';
 import * as queries from '@/lib/queries';
 import type { CardRow } from '@/lib/queries';
 import type { ImagePublic } from '@/lib/types';
@@ -85,7 +86,7 @@ function renderGrid() {
   return render(
     <QueryClientProvider client={qc}>
       <MemoryRouter>
-        <CardHydrationProvider listingIds={[111]} photosPerId={50}>
+        <CardHydrationProvider listingIds={[111]} renders={{ photos: 50 }}>
           <ListingCards
             rows={[ROW]}
             total={1}
@@ -181,5 +182,22 @@ describe('<ListingCards> photo hydration', () => {
     expect(await screen.findByText(/Sadová/)).toBeInTheDocument();
     expect(queries.fetchImagesForListingIds).toHaveBeenCalledTimes(1);
     expect(queries.fetchImagesForListingIds).toHaveBeenCalledWith([111], 50);
+  });
+
+  /* The north star as a test: every surface pays only for what it RENDERS.
+     Browse cards show no cover thumbnail and no broker line, so mounting the
+     shared provider must not fetch either.
+
+     This is a REGRESSION TEST for a defect that reached production. W7a's first
+     cut made only `photos` opt-in and left covers and brokers always-on, so
+     Browse began quietly fetching a cover per card and a broker per card that
+     nothing on the page displays — caught on the live post-deploy smoke run,
+     /browse 22 -> 24 requests. Asymmetric defaults are how that happens. */
+  it('fetches ONLY what the grid renders — no covers, no brokers', async () => {
+    renderGrid();
+
+    expect(await screen.findByText(/Sadová/)).toBeInTheDocument();
+    expect(queries.fetchListingCovers).not.toHaveBeenCalled();
+    expect(brokers.fetchListingBrokersByIds).not.toHaveBeenCalled();
   });
 });
