@@ -1,0 +1,134 @@
+# Hydration sprint — one way to load a surface
+
+Opened 2026-08-24 after the /pipeline board was reported as "terribly long to load" with
+44 cards. Two investigations (a board autopsy, then an app-wide audit of 11 production
+routes / 31 surfaces, both adversarially verified) turned that complaint into a doctrine
+and a wave plan. This file is the sprint's ledger.
+
+## North star
+
+> **Every surface pays only for what it renders: one read whose server-side cost is
+> proportional to the rows on screen, issued as early as the URL allows, and never blocked
+> by a decoration — and every claim about it is sized in blocks touched, not in warm
+> milliseconds.**
+
+Four corollaries, because the evidence did not support one rule for everything:
+
+- **A — card surfaces** (/pipeline, Browse cards, listing detail, comparables, ClipAudit):
+  one cohort read for the surface's *structure*, then one shared, id-keyed, non-blocking
+  enrichment layer that streams decorations in behind it. No card surface is ever gated on
+  a decoration.
+- **B — API-fed tables and feeds** (/brokers, /estimations, /notifications, /watchdog,
+  /collections): the request graph is already right. Never add a Railway round trip, only
+  delete them — every call pays a ~270–410 ms floor before any work (unpooled per-request
+  psycopg, one uvicorn worker, no plan reuse). Cut *blocks touched per rendered row*
+  instead, and never blank a rendered table while re-reading.
+- **C — dashboards and reference reads** (/health, /costs, /datasets, city-quality
+  overlays): one read per panel is already true. Bound history to what renders, precompute
+  what changes daily, gate reads on whether the thing is displayed, page in parallel, and
+  never poll faster than the data can change.
+- **D — the substrate rule** (binds all three): cold is the default state. Size every fix
+  in `EXPLAIN (ANALYZE, BUFFERS)` block counts in the PR body; warm wall-clock is not
+  evidence — the same query measured 65 ms, 199 ms, 1.1 s, 3.6 s and 23.3 s in one week.
+  Never measure a client wave while a maintenance job is over budget.
+
+## Standing constraints
+
+1. Enrichment cache keys never share a prefix with `['pipeline']` or the Browse keys —
+   test-enforced. Get this wrong and every card drag refetches every decoration.
+2. `security_invoker` is re-asserted in every migration touching a tenant view, backed by
+   the view registry. It has silently reverted once before.
+3. No browser-readable relation gains an email/phone-shaped column, in any shape,
+   including a `has_*` boolean — and no widening of an existing view is written against a
+   historical migration's viewdef. Always pull the live one first.
+4. `pipelineCache` stays the one cache-policy chokepoint (rule #22). W3 makes it smaller;
+   nothing else touches it.
+5. Every PR carries its `docs/architecture.md` / skill / roadmap edit.
+6. Every performance PR carries its `EXPLAIN (ANALYZE, BUFFERS)` block count.
+7. No new Railway API round trip on any surface. API changes are deletions only.
+8. No client wave is measured while a pg_cron maintenance job is over budget.
+
+## Waves
+
+### Lane 0 — hotfixes (done)
+
+- ✅ **W-1c** — collection + tag CRUD onto the tenant pool (#1119). Ten routes were on the
+  service-role connection behind the static bundle token with no account predicate; any
+  token holder could read or delete another account's curation (live: 5 collections across
+  5 accounts). `create_collection`/`create_tag` now stamp `account_id` explicitly — those
+  two tables are top-level, so unlike their child tables no trigger fills it.
+- ✅ **W-1a** — single-value list filters emit `eq`, not `in` (#1120). A ScalarArrayOp in
+  the index's equality prefix cost `browse_list` its ordered scan: **15,877 buffers /
+  4,452 ms → 6 buffers / 0.174 ms**; cold it exceeded the 8 s statement_timeout and Browse's
+  default view answered HTTP 500. Verified live post-deploy: `op=eq`, HTTP 200, 94 ms warm.
+  Same line fixed the portal-mirror lane. Three tests pin it.
+- ✅ **W-1b** — `browse-list-rebuild` cadence `*/5` → `*/15` (mig 413, #1121). 201 runs at
+  min 87 s / avg 270 s on a 300 s schedule = ~83 % duty cycle, 40 killed at the 600 s
+  timeout. Mitigation only; root cause is I/O saturation (1 GB shared_buffers / 136 GB DB,
+  every sampled backend waiting on `IO/DataFileRead`). Still open, in order: (a) why the
+  same rebuild costs 10 s on a quiet day, (b) incremental rebuild off `dirty_properties`
+  instead of a full CTAS, (c) instance sizing (operator's cost call).
+
+### Lane 1 — the sprint
+
+- ✅ **W0** — verification rail + baselines (this file). Smoke account seeded with 4
+  pipeline cards (it owned none, so five of the board's six hops never ran in any automated
+  check); `smoke-check.mjs` gained a /pipeline step (paints a card, time-to-first-card
+  budget, priced card, columns) and a per-route budget sweep over six routes asserting **no
+  5xx**, a request-count ceiling and a settle time. The 5xx assertion is the sharp one —
+  Browse answered 500 for weeks with nothing noticing.
+- ⬜ **W1** — pipeline progressive hydration (`lib/hydration/`, frontend only). The felt fix.
+- ⬜ **W2a** — bootstrap dedup: agendas → one query keyed on `user.id`; `queryClient.clear()`
+  on sign-out; gate the unread-count badge. Removes 6 requests from **every** route.
+- ⬜ **W2b** — `fetchAllRows` exact-count termination + parallel pages; visibility-gate
+  Browse's city-quality and per-card collection reads.
+- ⬜ **W9a** — listing-detail chain, client half (gate sources on the resolved id, carry the
+  id through navigation, fix the dead snapshot key).
+- ⬜ **W10a** — broker leaderboard: covering index + aggregate-before-join (~6,980 → ~500
+  blocks) + `keepPreviousData`; its two eager side-loads ride along.
+- ⬜ **W10b** — datasets: split the window-invariant polygon payload from the numbers.
+- ⬜ **W3** — one pipeline cache (collapse `pipelineKeys.{board,members,card}`).
+- ⬜ **W4** — cover substrate: covering index + `listing_cover_public`.
+- ⬜ **W5** — `pipeline_board_public` cohort view. **← stop point 1**
+- ⬜ **W6** — one broker call (contacts onto the API-only view; delete the second call from
+  the board *and* listing detail).
+- ⬜ **W9b** — append `source_id_native` + `property_id` to `listings_public`, written
+  against the LIVE viewdef (mig 398 replaced it to close a PII hole).
+- ⬜ **W7a** — Browse + comparables onto the shared layer; four image loaders → one.
+  **← stop point 2**
+- ⬜ **W7b** — media delivery (the hourly presign re-mint kills the browser cache key).
+- ⬜ **W10c** — /costs date-expression index. ⬜ **W10d** — /health bounds. ⬜ **W10e** —
+  /estimations OR-join (EXPLAIN first — that one is code-derived, not measured).
+- ⬜ **W8** — bundle: maplibre out of the filter-controls barrel, recharts unpinned from
+  React. Last: first-visit and post-deploy only.
+
+## Baselines — 2026-08-24, post-W-1a/W-1b, production
+
+Per-route app data requests (PostgREST + Railway only; basemap tiles, assets and image
+bytes excluded) and settle time, measured by `npm run smoke-check:prod`:
+
+| Route | Requests | Settle | Notes |
+| --- | --- | --- | --- |
+| /browse | 31 | 2.8 s | was 9.1 s with an HTTP 500 pre-W-1a |
+| /pipeline | 27 | 1.7 s | 4 seeded cards; W1+W2a+W2b target ~12 |
+| /collections | 9 | 0.8 s | 6 of the 9 are the duplicated bootstrap |
+| /watchdog | 10 | 0.9 s | reference feed — shape already correct |
+| /notifications | 9 | 0.9 s | server work is ~15 ms; the rest is transport |
+| /brokers | 11 | 1.7 s | leaderboard is server-bound, see W10a |
+
+Server-side block counts to beat (constraint 6):
+
+| Read | Blocks | Target | Wave |
+| --- | --- | --- | --- |
+| `browse_list` default cohort | 15,877 → **6** | done | W-1a |
+| broker leaderboard | ~6,980 for 100 rows | ~500 | W10a |
+| board images (44 cards) | 830 rows + 830 CLIP laterals | 44 rows / 44 probes | W4 |
+| `llm_cost_daily_public` | seq scan, 231,189 rows discarded for 93 out | index | W10c |
+| `pipeline_checks_public` | 6,120 rows scanned for 15 | bounded | W10d |
+
+## Parked, with re-entry triggers
+
+Multi-category cohort ordering (revisit if a preset drops its district filter) · Browse map
+payload 16.8 MB · instance sizing (after W-1b root-cause and W10a) · React Query persistence
+· /notifications 100-row cap · repr-flip semantics (own PR, see W4) · connection pool +
+gzip middleware · the unexplained client-side count abort on Browse.
