@@ -33,7 +33,7 @@ vi.mock('@/lib/queries', async (importOriginal) => {
     ...actual,
     fetchPipelineStages: vi.fn(),
     fetchPipelineBoard: vi.fn(),
-    fetchImagesForListingIds: vi.fn(),
+    fetchListingCovers: vi.fn(),
   };
 });
 
@@ -211,7 +211,7 @@ describe('<Pipeline> board', () => {
       stage_key: 'offer',
     });
     vi.mocked(api.removePipelineCard).mockResolvedValue({ removed: true });
-    vi.mocked(queries.fetchImagesForListingIds).mockResolvedValue(new Map());
+    vi.mocked(queries.fetchListingCovers).mockResolvedValue(new Map());
     vi.mocked(brokersApi.fetchListingBrokersByIds).mockResolvedValue(
       new Map([[111, LISTING_BROKER]]),
     );
@@ -249,8 +249,8 @@ describe('<Pipeline> board', () => {
      split this was six serialized round trips and a "Načítání…" string — a
      single slow broker call blanked the entire kanban. */
   it('paints cards while cover and broker reads are still in flight', async () => {
-    vi.mocked(queries.fetchImagesForListingIds).mockReturnValue(
-      new Promise(() => {}) as ReturnType<typeof queries.fetchImagesForListingIds>,
+    vi.mocked(queries.fetchListingCovers).mockReturnValue(
+      new Promise(() => {}) as ReturnType<typeof queries.fetchListingCovers>,
     );
     vi.mocked(brokersApi.fetchListingBrokersByIds).mockReturnValue(
       new Promise(() => {}) as ReturnType<typeof brokersApi.fetchListingBrokersByIds>,
