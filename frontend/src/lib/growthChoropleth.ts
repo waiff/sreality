@@ -102,13 +102,25 @@ export interface GrowthFeatureProps {
 }
 export type GrowthFC = GeoJSON.FeatureCollection<GeoJSON.Polygon | GeoJSON.MultiPolygon, GrowthFeatureProps>;
 
-export function growthToFeatureCollection(rows: PriceStatGrowthRow[]): GrowthFC {
+/* shapesByObec is the window-invariant half (fetchGrowthShapes, W10b) — kept
+ * as a separate argument rather than merged onto PriceStatGrowthRow so the
+ * two stay fetchable (and cacheable) on independent lifetimes: shapes once
+ * per dataset, rows on every window change. An obec present in `rows` but
+ * missing from `shapesByObec` (shouldn't happen — the shapes RPC covers every
+ * obec ever observed for the dataset, ignoring the window) is skipped rather
+ * than crashing the map. */
+export function growthToFeatureCollection(
+  rows: PriceStatGrowthRow[],
+  shapesByObec: ReadonlyMap<number, string>,
+): GrowthFC {
   return {
     type: 'FeatureCollection',
     features: rows.flatMap((p) => {
+      const raw = shapesByObec.get(p.obec_id);
+      if (raw == null) return [];
       let geometry: GeoJSON.Geometry;
       try {
-        geometry = JSON.parse(p.geojson) as GeoJSON.Geometry;
+        geometry = JSON.parse(raw) as GeoJSON.Geometry;
       } catch {
         return [];
       }

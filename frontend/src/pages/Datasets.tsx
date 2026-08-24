@@ -8,6 +8,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   fetchDatasets,
   fetchGrowth,
+  fetchGrowthShapes,
   fetchLatestRun,
   fetchNoData,
   fetchObecTree,
@@ -16,6 +17,7 @@ import {
   type NoDataObec,
   type PriceStatDataset,
   type PriceStatGrowthRow,
+  type PriceStatGrowthShape,
   type PriceStatRun,
 } from '@/lib/priceStats';
 import {
@@ -176,6 +178,16 @@ export default function Datasets() {
     staleTime: 60_000,
   });
   const rows = growthQ.data ?? [];
+
+  // Window-invariant polygons (W10b) — keyed on the dataset alone, so
+  // dragging from/to never re-fetches them.
+  const shapesQ = useQuery<PriceStatGrowthShape[], Error>({
+    queryKey: priceStatsKeys.growthShapes(activeId ?? -1),
+    queryFn: () => fetchGrowthShapes(activeId as number),
+    enabled: activeId != null,
+    staleTime: Infinity,
+    gcTime: Infinity,
+  });
 
   // Municipalities the scraper checked and found insufficient data for — shown
   // as greyed n/a rows + counted in the infopanel completeness breakdown.
@@ -564,7 +576,7 @@ export default function Datasets() {
             ) : loc.active && filteredRows.length === 0 ? (
               <NoLocationMatch onClear={() => setDistricts([])} />
             ) : (
-              <DatasetMap rows={filteredRows} metric={metric} chartOnHover={chartOnHover} hoverData={hoverData} />
+              <DatasetMap rows={filteredRows} shapes={shapesQ.data ?? []} metric={metric} chartOnHover={chartOnHover} hoverData={hoverData} />
             )}
           </div>
 

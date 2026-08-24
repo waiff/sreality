@@ -5,7 +5,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import maplibregl, { type GeoJSONSource } from 'maplibre-gl';
 import { createMap } from '@/lib/basemap';
-import type { PriceStatGrowthRow } from '@/lib/priceStats';
+import type { PriceStatGrowthRow, PriceStatGrowthShape } from '@/lib/priceStats';
 import {
   GROWTH_METRICS,
   GROWTH_METRIC_ORDER,
@@ -25,12 +25,17 @@ const layerId = (m: GrowthMetric) => `obce-${m}`;
 
 interface Props {
   rows: PriceStatGrowthRow[];
+  shapes: PriceStatGrowthShape[];
   metric: GrowthMetric;
   chartOnHover?: boolean;
   hoverData?: HoverData | null;
 }
 
-export default function DatasetMap({ rows, metric, chartOnHover = false, hoverData = null }: Props) {
+export default function DatasetMap({ rows, shapes, metric, chartOnHover = false, hoverData = null }: Props) {
+  const shapesByObec = useMemo(
+    () => new Map(shapes.map((s) => [s.obec_id, s.geojson])),
+    [shapes],
+  );
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
   const [ready, setReady] = useState(false);
@@ -130,8 +135,10 @@ export default function DatasetMap({ rows, metric, chartOnHover = false, hoverDa
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !ready) return;
-    (map.getSource('obce') as GeoJSONSource | undefined)?.setData(growthToFeatureCollection(rows));
-  }, [rows, ready]);
+    (map.getSource('obce') as GeoJSONSource | undefined)?.setData(
+      growthToFeatureCollection(rows, shapesByObec),
+    );
+  }, [rows, shapesByObec, ready]);
 
   useEffect(() => {
     const map = mapRef.current;
