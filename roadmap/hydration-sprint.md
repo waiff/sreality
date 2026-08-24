@@ -274,8 +274,50 @@ Four corollaries, because the evidence did not support one rule for everything:
   the actual `by-listings` shape (values → flags for a non-admin, values for an admin, and
   `has_email=false` surviving as a real "unreachable" answer), and a frontend test pinning
   that identity and contact arrive on one row.
-- ⬜ **W9b** — append `source_id_native` + `property_id` to `listings_public`, written
-  against the LIVE viewdef (mig 398 replaced it to close a PII hole).
+- ✅ **W9b** — `listings_public` gains `source_id_native` + `property_id` (migration 420) —
+  the listing-detail chain's SERVER half, to W9a's client half. Two facts about the row the
+  page was already holding were reachable only through a second relation, and the shape of
+  that detour is the finding: `property_sources_public` is **a thin view over `listings`
+  itself** (`where property_id is not null`), so `fetchPropertySources`' opening hop —
+  `select property_id from property_sources_public where id = <this listing>` — re-read the
+  very heap tuple `listings_public` had just returned, one PostgREST round trip later, to
+  learn one of its own columns. Measured live: that hop is **7 execution buffers (+672
+  planning)**, and the widened detail read is **7 buffers** — the same 7, the same tuple.
+  The win is deliberately NOT blocks: it is one fewer request and one fewer waterfall level,
+  which is corollary B's whole point (a 7-block statement and a 700-block statement cost
+  nearly the same from Prague). On the legacy route — a bookmarked/shared `/listing/{id}`,
+  a map popup's raw `<a href>`, the extension — the chain was `listing → sources → {MF,
+  status events, pipeline funnel, canonicalization}`; all four now start one level earlier,
+  off `listingQ` directly, with the sources read running alongside for the multi-portal list
+  rather than in front of them. `source_id_native` also retires a genuinely fragile line: the
+  legacy→canonical redirect used to find THIS listing's native id by scanning the sibling
+  source list for `s.id === listing.id`, with a comment explaining that matching on
+  `sreality_id` instead would make `null === null` pick the first null-sreality sibling. It
+  reads its own column now. **The fast path is an ARGUMENT, never a gate** —
+  `fetchPropertySources(id, knownPropertyId?)` takes it only when a NUMBER arrives, and the
+  canonical route (where W9a made this fire in parallel with the listing read) passes nothing
+  and resolves as before; gating it would have traded one hop for a whole waterfall level,
+  undoing W9a. A NULL `property_id` means "ask", not "there is none": that is the ~5-min
+  pre-attach window (rule #19), which is exactly the window `property_sources_public` cannot
+  answer for either. **No PII** — this is the browser-readable view, so constraint 3 governs:
+  `source_id_native` is the portal's own public advert id, already printed in every canonical
+  URL the SPA links to, and `property_id` is an internal grouping surrogate. Written against
+  the LIVE `pg_get_viewdef`, with 398's `null::text as broker_email/broker_phone` projections
+  carried forward **verbatim** — they cannot be dropped (`CREATE OR REPLACE VIEW` can't remove
+  a column and matviews depend on this view), and `_NULLED_CONTACT_COLUMNS` re-derives that
+  exemption from the deparsed body every run precisely so a careless replace that restores the
+  source expression fails instead of being waved through. Verified live: ACL unchanged
+  (`authenticated` SELECT, `anon` dark), the two columns appended after `id` so no consumer's
+  order moves, **zero** rows where `broker_email`/`broker_phone` is non-NULL, and **0
+  mismatches on 20,000 rows** between the view, the base table and `property_sources_public`
+  — plus **0 listings pointing at a non-active (`merged_away`) property** across the whole
+  table, so the two paths cannot disagree about which side of a merge won. New rails: a
+  read-budget test on `fetchPropertySources` (one relation read when the id is known, two when
+  it isn't, two for a NULL, one when nothing resolves) and two `ListingDetail` cases — the
+  legacy URL canonicalizing with the sources read hanging forever, and the pre-attach fallback.
+  Observed in passing, **not** introduced here and left alone: the legacy route has always
+  re-fetched the listing once after canonicalizing (the key carries the route form), and W9b
+  makes that happen sooner rather than more often.
 - ⬜ **W7a** — Browse + comparables onto the shared layer; four image loaders → one.
   **← stop point 2**
 - ⬜ **W7b** — media delivery (the hourly presign re-mint kills the browser cache key).
