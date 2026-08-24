@@ -33,6 +33,16 @@ const REASONS = [
       'automatické sloučení a dvojice, které jste už dřív odmítli.',
   },
   {
+    key: 'name_cross_firm',
+    tab: 'Stejné jméno, dvě firmy',
+    blurb:
+      'Stejné jméno působí u\u00a0dvou různých firem. Automat mezi firmami ' +
+      'neslučuje — může jít o\u00a0dva různé lidi stejného jména, nebo ' +
+      'o\u00a0jednoho makléře, který změnil firmu či pracuje pro obě. ' +
+      'Karta ukazuje období aktivity u\u00a0každé firmy: pokud se nepřekrývají, ' +
+      'jde nejspíš o\u00a0přestup jedné osoby.',
+  },
+  {
     key: 'contact_bridge_review',
     tab: 'Sdílený kontakt',
     blurb:
@@ -164,18 +174,22 @@ function CandidateCard({ c }: { c: BrokerMergeCandidate }) {
   // name + firm, a contact bridge is two names plus the contact that linked them —
   // and without that contact the operator cannot judge the pair at all.
   const bridges = c.evidence.bridges ?? [];
+  const crossFirms: string[] = c.evidence.firms ?? [];
   const title = bridges.length
     ? (c.evidence.names ?? []).map((n) => n || '—').join(' · ')
     : (c.evidence.name ?? '—');
   const subtitle = bridges.length
     ? `${bridges.join(', ')} · ${(c.evidence.sources ?? []).filter(Boolean).join(' + ')}`
-    : (c.evidence.firm_name ?? c.evidence.firm_domain ?? '—');
+    : crossFirms.length
+      ? crossFirms.join(' + ')
+      : (c.evidence.firm_name ?? c.evidence.firm_domain ?? '—');
 
   return (
     <div className="border border-[var(--color-rule)] rounded-[var(--radius-md)] bg-[var(--color-paper-2)]">
       <div className="border-b border-[var(--color-rule-soft)] px-4 py-2.5">
         <span className="text-sm text-[var(--color-ink)]">{title}</span>
         <span className="text-xs text-[var(--color-ink-3)]"> · {subtitle} · {c.broker_ids.length} záznamy</span>
+        <HoldLine evidence={c.evidence} />
       </div>
 
       <ul className="divide-y divide-[var(--color-rule-soft)]">
@@ -203,6 +217,47 @@ function CandidateCard({ c }: { c: BrokerMergeCandidate }) {
       </div>
     </div>
   );
+}
+
+// Why the engine did NOT merge this card — one subdued line under the header.
+// Codes come from the sweep (`evidence.hold`); cards written before the hold
+// annotation shipped simply render nothing.
+function HoldLine({ evidence }: { evidence: BrokerMergeCandidate['evidence'] }) {
+  const hold = evidence.hold;
+  if (!hold?.code) return null;
+  let text: string;
+  switch (hold.code) {
+    case 'multi_firm': {
+      const firms: string[] = hold.firms ?? evidence.firms ?? [];
+      text = `Nesloučeno automaticky: jméno působí u\u00a0více firem${
+        firms.length ? ` (${firms.join(' + ')})` : ''}.`;
+      const t = evidence.tenure;
+      if (t && typeof t.overlap === 'boolean') {
+        text += t.overlap
+          ? ' Působení se časově překrývá — spíš dva různí lidé.'
+          : ' Působení se časově nepřekrývá — spíš přestup jedné osoby.';
+      }
+      break;
+    }
+    case 'contradicted':
+      text = `Nesloučeno automaticky: záznamy mají odlišné osobní kontakty${
+        hold.values?.length ? ` (${hold.values.join(', ')})` : ''}.`;
+      break;
+    case 'oversized':
+      text = `Nesloučeno automaticky: skupina je příliš velká na automatické sloučení${
+        hold.identities ? ` (${hold.identities} záznamů)` : ''}.`;
+      break;
+    case 'suppressed':
+      text = 'Nesloučeno automaticky: dvojici jste dříve odmítli (platí trvalé NE).';
+      break;
+    case 'firm_evidence_gap':
+      text = 'Nesloučeno automaticky: části záznamů chybí údaj o\u00a0firmě, ' +
+        'takže automat nemohl potvrdit společnou firmu.';
+      break;
+    default:
+      text = 'Nesloučeno automaticky.';
+  }
+  return <p className="mt-1 text-xs text-[var(--color-ink-3)] italic">{text}</p>;
 }
 
 function BrokerRow({ b, checked, onToggle }: {

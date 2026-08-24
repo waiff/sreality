@@ -364,6 +364,12 @@ _SUPPRESSED_PAIRS_SQL = """
 SELECT identity_lo, identity_hi FROM broker_merge_suppressions WHERE lifted_at IS NULL
 """
 
+# firm_id -> canonical_domain, for rendering pair_holds' multi_firm detail on the
+# review cards. One small read per merge step (~4k rows).
+_FIRM_DOMAINS_SQL = """
+SELECT id, canonical_domain FROM firms WHERE canonical_domain IS NOT NULL
+"""
+
 # Claim/delete by listing_id: it is this queue's PRIMARY KEY since the R2 Phase D
 # swap, and the only column guaranteed non-NULL post-Gate-2 — a NULL sreality_id
 # would make the claim return NULL and the DELETE match nothing, silently stopping
@@ -709,7 +715,7 @@ def _auto_merge(conn: Any, run_id: int) -> tuple[int, int, int]:
     # before them could propose a broker that no longer survives.
     shared = _shared_contacts(contacts, decision.review_pairs + decision.dismiss_pairs)
     proposed = _queue_review_pairs(conn, decision.review_pairs, identities,
-                                   shared, run_id)
+                                   shared, run_id, pair_holds=decision.pair_holds)
     dismissed = _dismiss_name_conflicts(conn, decision.dismiss_pairs, identities,
                                         shared, run_id)
     reasons = [decision.group_reasons.get(tuple(g), "") for g in decision.auto_merge_groups]
@@ -817,7 +823,10 @@ def _broker_components(groups: list[list[int]],
 def _bridge_pair_rows(conn: Any, pairs: list[tuple[int, int]],
                       identities: dict[int, R.Identity],
                       shared_contacts: dict[tuple[int, int], set[str]],
-                      run_id: int) -> dict[str, tuple[int, int, str]]:
+                      run_id: int,
+                      pair_holds: dict[tuple[int, int], tuple[str, list]] | None = None,
+                      firm_domains: dict[int, str] | None = None,
+                      ) -> dict[str, tuple[int, int, str]]:
     """group_key -> (lo_broker, hi_broker, evidence) for identity pairs sharing a contact.
 
     Shared by the review and the auto-dismiss writers so both describe a pair the
@@ -836,13 +845,24 @@ def _bridge_pair_rows(conn: Any, pairs: list[tuple[int, int]],
             continue
         lo, hi = (left, right) if left < right else (right, left)
         ia, ib = identities.get(a), identities.get(b)
-        rows[f"contactbridge:{lo}:{hi}"] = (lo, hi, json.dumps({
+        ev: dict[str, Any] = {
             "identity_ids": [a, b],
             "sources": [ia.source if ia else None, ib.source if ib else None],
             "names": [ia.name if ia else None, ib.name if ib else None],
             "bridges": shared,
             "run_id": run_id,
-        }, ensure_ascii=False))
+        }
+        held = (pair_holds or {}).get((a, b) if a < b else (b, a))
+        if held is not None:
+            code, detail = held
+            hold: dict[str, Any] = {"code": code}
+            if code == "multi_firm":
+                hold["firms"] = sorted(
+                    (firm_domains or {}).get(f, f"#{f}") for f in detail)
+            elif code == "contradicted" and detail:
+                hold["values"] = detail
+            ev["hold"] = hold
+        rows[f"contactbridge:{lo}:{hi}"] = (lo, hi, json.dumps(ev, ensure_ascii=False))
     return rows
 
 
@@ -883,7 +903,9 @@ def _dismiss_name_conflicts(conn: Any, pairs: list[tuple[int, int]],
 def _queue_review_pairs(conn: Any, pairs: list[tuple[int, int]],
                         identities: dict[int, R.Identity],
                         shared_contacts: dict[tuple[int, int], set[str]],
-                        run_id: int) -> int:
+                        run_id: int,
+                        pair_holds: dict[tuple[int, int], tuple[str, list]] | None = None,
+                        ) -> int:
     """Persist decide_merges' review pairs as operator-reviewable merge candidates.
 
     They were computed and dropped on the floor every sweep (9,377/day at the
@@ -904,7 +926,11 @@ def _queue_review_pairs(conn: Any, pairs: list[tuple[int, int]],
     engine did."""
     if not pairs:
         return 0
-    rows = _bridge_pair_rows(conn, pairs, identities, shared_contacts, run_id)
+    with conn.cursor() as cur:
+        cur.execute(_FIRM_DOMAINS_SQL)
+        firm_domains = {int(i): d for i, d in cur.fetchall()}
+    rows = _bridge_pair_rows(conn, pairs, identities, shared_contacts, run_id,
+                             pair_holds=pair_holds, firm_domains=firm_domains)
     if not rows:
         return 0
     keys = sorted(rows)
@@ -1175,6 +1201,36 @@ ON CONFLICT (group_key) DO UPDATE SET
 """
 
 
+# Identity-grain scan behind BOTH candidate producers: the cross-firm cards need
+# each identity's OWN firm + tenure, and the name_firm hold annotation needs the
+# identity inventory per broker. One corpus scan, reused for both.
+_CANDIDATE_IDENTITIES = """
+SELECT b.id, bi.id, bi.display_name, fi.firm_id, f.canonical_domain,
+       bi.first_seen_at, bi.last_seen_at
+FROM brokers b
+JOIN broker_identities bi ON bi.broker_id = b.id
+LEFT JOIN firm_identities fi ON fi.id = bi.firm_identity_id
+LEFT JOIN firms f ON f.id = fi.firm_id
+WHERE b.status = 'active' AND bi.display_name IS NOT NULL
+"""
+
+# Contacts of the brokers sitting on proposed cards (a few hundred rows), for the
+# contradiction detail in a card's hold line.
+_CANDIDATE_CONTACTS = """
+SELECT bi.broker_id, bi.id, c.kind, c.value
+FROM broker_identity_contacts c
+JOIN broker_identities bi ON bi.id = c.broker_identity_id
+WHERE bi.broker_id = ANY(%(brokers)s)
+"""
+
+_CROSSFIRM_UPSERT = """
+INSERT INTO broker_merge_candidates (group_key, broker_ids, reason, evidence)
+VALUES (%(gk)s, %(ids)s, 'name_cross_firm', %(ev)s)
+ON CONFLICT (group_key) DO UPDATE SET
+  broker_ids = EXCLUDED.broker_ids, evidence = EXCLUDED.evidence
+  WHERE broker_merge_candidates.status = 'proposed'
+"""
+
 # A PROPOSED card whose group_key this sweep did not regenerate is stale — its
 # key was minted under an older name_key (a pre-title-strip card sat next to its
 # successor as a duplicate: namefirm:916:'havranek ing martin' vs '... martin')
@@ -1184,18 +1240,69 @@ ON CONFLICT (group_key) DO UPDATE SET
 # forever via the status='proposed' upsert guard).
 _STALE_PROPOSED_DELETE = """
 DELETE FROM broker_merge_candidates
-WHERE reason = 'name_firm' AND status = 'proposed'
+WHERE reason IN ('name_firm', 'name_cross_firm') AND status = 'proposed'
   AND NOT (group_key = ANY(%(gks)s::text[]))
 """
 
 
+_HOLD_VALUE_CAP = 6  # values listed on a contradicted card's hold line
+
+
+def _personal_values(rows: list[tuple[int, str, str]]) -> dict[int, set[str]]:
+    """identity -> its PERSONAL contact values, mirroring the engine's veto input:
+    role-localpart emails are desk addresses, and a phone on an identity whose
+    every email is such an address is the desk's line."""
+    emails: dict[int, list[str]] = {}
+    for iid, kind, value in rows:
+        if kind == "email":
+            emails.setdefault(iid, []).append(value)
+    out: dict[int, set[str]] = {}
+    for iid, kind, value in rows:
+        if kind == "email" and R._role_email(value):
+            continue
+        mails = emails.get(iid)
+        if kind == "phone" and mails and all(R._role_email(m) for m in mails):
+            continue
+        out.setdefault(iid, set()).add(value)
+    return out
+
+
+def _name_firm_hold(idents: list[int], own_firms: set[int | None],
+                    contact_rows: list[tuple[int, str, str]],
+                    suppressed: set[tuple[int, int]]) -> dict[str, Any]:
+    """WHY the engine left this same-name same-firm group unmerged — shown on the
+    card. Post-F there are exactly four possibilities, checked in precedence
+    order; 'contradicted' is the elimination case, and its detail is the personal
+    values the records disagree on (what the veto actually read)."""
+    inside = set(idents)
+    if any(lo in inside and hi in inside for lo, hi in suppressed):
+        return {"code": "suppressed"}
+    if len(idents) > R.MAX_AUTO_MERGE_COMPONENT:
+        return {"code": "oversized", "identities": len(idents)}
+    if None in own_firms or len({f for f in own_firms if f is not None}) != 1:
+        return {"code": "firm_evidence_gap"}
+    personal = _personal_values(contact_rows)
+    values = sorted({v for iid in idents for v in personal.get(iid, ())})
+    return {"code": "contradicted", "values": values[:_HOLD_VALUE_CAP]}
+
+
 def _generate_merge_candidates(conn: Any) -> int:
-    """Propose Phase-5 review groups: active brokers that share a normalized name AND
-    a firm but are separate ids (the corporate/role-inbox case the auto-merge guard
-    deliberately leaves apart). Idempotent — group_key keeps regeneration from
-    reviving a merged/dismissed group; a merged group's losers go inactive and the
-    group shrinks below 2, so it never re-proposes. Stale PROPOSED cards (a key no
-    longer generated) are deleted at the end of the same pass."""
+    """Propose the operator's review cards, annotated with WHY each was not
+    auto-merged (`evidence.hold`), and delete stale PROPOSED cards whose key this
+    pass no longer generates.
+
+    Two producers share one identity-grain corpus scan:
+    - `name_firm` (gk `namefirm:{firm}:{nk}`): active brokers sharing a normalized
+      name AND a primary firm. Post-F these survive only when suppressed,
+      oversized, missing identity-firm evidence, or contradicted — the hold says
+      which, so the card explains itself.
+    - `name_cross_firm` (gk `crossfirm:{nk}`): a name whose identities span
+      EXACTLY two firms — the population every automatic path refuses by design
+      (rarity fails, F never crosses a firm) and that previously appeared in no
+      queue at all unless the two sides shared a contact. The evidence carries
+      both domains and each side's activity window, because temporally DISJOINT
+      tenures are the mover's signature and concurrent ones the namesake's — the
+      exact fact the operator needs for the click."""
     from collections import defaultdict
     from psycopg.types.json import Jsonb
     groups: dict[tuple[str, int], list[int]] = defaultdict(list)
@@ -1209,19 +1316,76 @@ def _generate_merge_candidates(conn: Any) -> int:
             key = (nk, int(firm_id))
             groups[key].append(int(bid))
             meta[key] = (name, domain, firm_name)
+
+    # One identity-grain scan feeds the cross-firm producer AND the name_firm
+    # hold annotation (identity inventory + own firms per broker).
+    ident_rows: list[tuple[int, int, str, int | None, str | None, Any, Any]] = []
+    with conn.cursor() as cur:
+        cur.execute(_CANDIDATE_IDENTITIES)
+        ident_rows = [(int(b), int(i), nm, _as_int(f), dom, fs, ls)
+                      for b, i, nm, f, dom, fs, ls in cur.fetchall()]
+    by_broker: dict[int, list[tuple[int, int | None]]] = {}
+    span: dict[str, dict[str, Any]] = {}
+    for bid, iid, name, firm, dom, first, last in ident_rows:
+        by_broker.setdefault(bid, []).append((iid, firm))
+        nk = R.name_key(name)
+        if not nk:
+            continue
+        entry = span.setdefault(nk, {"doms": {}, "brokers": set(), "name": name})
+        entry["brokers"].add(bid)
+        entry["name"] = name
+        if dom is not None:
+            rng = entry["doms"].setdefault(dom, [first, last])
+            rng[0] = min(rng[0], first)
+            rng[1] = max(rng[1], last)
+
+    proposed_groups = [((nk, fid), ids) for (nk, fid), ids in groups.items()
+                       if len(ids) >= 2]
+    cross = [(nk, e) for nk, e in span.items()
+             if len(e["doms"]) == 2 and 2 <= len(e["brokers"]) <= 6]
+    hold_brokers = sorted({b for _, ids in proposed_groups for b in ids})
+    contact_rows: dict[int, list[tuple[int, str, str]]] = {}
+    if hold_brokers:
+        with conn.cursor() as cur:
+            cur.execute(_CANDIDATE_CONTACTS, {"brokers": hold_brokers})
+            for bid, iid, kind, value in cur.fetchall():
+                contact_rows.setdefault(int(bid), []).append((int(iid), kind, value))
+    suppressed = _suppressed_pairs(conn) if proposed_groups else set()
+
     proposed = 0
     gks: list[str] = []
     with conn.cursor() as cur:
-        for (nk, firm_id), ids in groups.items():
-            if len(ids) < 2:
-                continue
+        for (nk, firm_id), ids in proposed_groups:
             name, domain, firm_name = meta[(nk, firm_id)]
+            idents = [iid for b in ids for iid, _ in by_broker.get(b, ())]
+            own = {f for b in ids for _, f in by_broker.get(b, ())}
+            rows = [r for b in ids for r in contact_rows.get(b, ())]
             gk = f"namefirm:{firm_id}:{nk}"
             cur.execute(_CANDIDATE_UPSERT, {
                 "gk": gk,
                 "ids": sorted(ids),
                 "ev": Jsonb({"name": name, "firm_domain": domain,
-                             "firm_name": firm_name, "broker_count": len(ids)}),
+                             "firm_name": firm_name, "broker_count": len(ids),
+                             "hold": _name_firm_hold(idents, own, rows, suppressed)}),
+            })
+            gks.append(gk)
+            proposed += 1
+        for nk, entry in cross:
+            doms = sorted(entry["doms"])
+            a, b = entry["doms"][doms[0]], entry["doms"][doms[1]]
+            overlap = a[0] <= b[1] and b[0] <= a[1]
+            gk = f"crossfirm:{nk}"
+            cur.execute(_CROSSFIRM_UPSERT, {
+                "gk": gk,
+                "ids": sorted(entry["brokers"]),
+                "ev": Jsonb({"name": entry["name"], "firms": doms,
+                             "broker_count": len(entry["brokers"]),
+                             "hold": {"code": "multi_firm", "firms": doms},
+                             "tenure": {
+                                 "overlap": overlap,
+                                 doms[0]: [str(a[0].date()), str(a[1].date())],
+                                 doms[1]: [str(b[0].date()), str(b[1].date())],
+                             }}),
             })
             gks.append(gk)
             proposed += 1
@@ -1231,7 +1395,7 @@ def _generate_merge_candidates(conn: Any) -> int:
             # card is stale", and deleting the whole queue on it would be silent.
             cur.execute(_STALE_PROPOSED_DELETE, {"gks": gks})
             if cur.rowcount:
-                LOG.info("RESOLVE candidates: deleted %d stale proposed name_firm cards",
+                LOG.info("RESOLVE candidates: deleted %d stale proposed cards",
                          cur.rowcount)
     return proposed
 
