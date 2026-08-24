@@ -964,7 +964,7 @@ def _create_singleton_property(
                 -- One child, so price and area trivially come from one row:
                 -- stamp the per-m2 basis now rather than leave it NULL until the
                 -- next maintenance pass (migration 424).
-                price_per_m2_basis(price_czk, area_m2, id)
+                price_per_m2_source_id(price_czk, area_m2, id)
             FROM listings WHERE id = %s
             RETURNING id
             """,
@@ -995,7 +995,7 @@ def _cheap_property_rollup(conn: psycopg.Connection, listing_id: int) -> None:
                 current_price_czk   = CASE WHEN agg.cnt = 1 THEN l.price_czk      ELSE p.current_price_czk END,
                 area_m2             = CASE WHEN agg.cnt = 1 THEN l.area_m2         ELSE p.area_m2 END,
                 price_per_m2_source_listing_id = CASE WHEN agg.cnt = 1
-                    THEN price_per_m2_basis(l.price_czk, l.area_m2, l.id)
+                    THEN price_per_m2_source_id(l.price_czk, l.area_m2, l.id)
                     ELSE p.price_per_m2_source_listing_id END,
                 district            = CASE WHEN agg.cnt = 1 THEN l.district        ELSE p.district END,
                 locality            = CASE WHEN agg.cnt = 1 THEN l.locality        ELSE p.locality END,

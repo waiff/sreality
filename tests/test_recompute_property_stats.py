@@ -880,7 +880,7 @@ def test_the_basis_stamp_names_the_row_the_price_came_from():
 
     setc = _set_clause(_RECOMPUTE_BATCH_SQL)
     assert (
-        "price_per_m2_basis(r.price_czk, r.area_m2, r.listing_ref_id)"
+        "price_per_m2_source_id(r.price_czk, r.area_m2, r.listing_ref_id)"
         in " ".join(setc.split())
     )
 
@@ -900,7 +900,7 @@ def test_every_singleton_creation_path_stamps_the_basis():
     insert-time singleton, the cheap singleton rollup, the unmerge split). A
     singleton's price and area are trivially one row's, so each stamps the basis
     rather than leaving it NULL until the next maintenance pass — and each calls
-    the shared price_per_m2_basis() instead of restating its validity bound."""
+    the shared price_per_m2_source_id() instead of restating its validity bound."""
     import inspect
 
     from scraper import db
@@ -915,4 +915,4 @@ def test_every_singleton_creation_path_stamps_the_basis():
     }
     for name, sql in sources.items():
         assert "price_per_m2_source_listing_id" in sql, f"{name} drops the stamp"
-        assert "price_per_m2_basis(" in sql, f"{name} restates the validity bound"
+        assert "price_per_m2_source_id(" in sql, f"{name} restates the validity bound"

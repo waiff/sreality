@@ -1,4 +1,4 @@
--- 424_property_per_m2_measure_basis.sql
+-- 424_property_per_m2_source_listing.sql
 -- W3 of the per-m2 measure program: ONE property-grain measure with a coherent
 -- numerator and denominator, and a stamp naming the row both came from.
 --
@@ -62,7 +62,7 @@ COMMENT ON COLUMN properties.price_per_m2_source_listing_id IS
 -- insert-time singleton, the unmerge split). Copying the validity predicate into
 -- each is how four definitions of one measure start; this is the single one they
 -- all call. Single-statement IMMUTABLE SQL, so the planner inlines it.
-CREATE OR REPLACE FUNCTION public.price_per_m2_basis(
+CREATE OR REPLACE FUNCTION public.price_per_m2_source_id(
     p_price_czk numeric,
     p_area_m2 numeric,
     p_listing_id bigint
@@ -80,13 +80,13 @@ AS $$
     END
 $$;
 
-COMMENT ON FUNCTION public.price_per_m2_basis(numeric, numeric, bigint) IS
+COMMENT ON FUNCTION public.price_per_m2_source_id(numeric, numeric, bigint) IS
     'Returns p_listing_id when that one row can back a per-m2 measure (a price, '
     'and a strictly positive area), else NULL. The validity bound of the '
     'per-m2 measure, in one place, for every writer of '
     'properties.price_per_m2_source_listing_id.';
 
-GRANT EXECUTE ON FUNCTION public.price_per_m2_basis(numeric, numeric, bigint)
+GRANT EXECUTE ON FUNCTION public.price_per_m2_source_id(numeric, numeric, bigint)
     TO anon, authenticated, service_role;
 
 -- 3. Record what the trust order now also governs ----------------------------

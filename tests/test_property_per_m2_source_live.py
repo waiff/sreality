@@ -254,7 +254,7 @@ def test_priced_child_without_an_area_leaves_the_measure_unlabelled(cur):
 
 
 def test_zero_area_is_not_a_valid_basis(cur):
-    """The measure's validity bound lives in price_per_m2_basis, not in callers."""
+    """The measure's validity bound lives in price_per_m2_source_id, not in callers."""
     pid = _new_property(cur)
     _add_child(cur, pid, source="sreality", price=5_000_000, area=0.0)
     _recompute(cur, pid)

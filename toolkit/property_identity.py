@@ -242,7 +242,7 @@ _SPLIT_INSERT_ONE_SQL = """
         l.building_condition_level, l.apartment_condition_level,
         l.is_active, l.first_seen_at, l.last_seen_at, l.first_seen_at, 1, 1,
         -- One child: price and area come from one row by construction (mig 424).
-        price_per_m2_basis(l.price_czk, l.area_m2, l.id)
+        price_per_m2_source_id(l.price_czk, l.area_m2, l.id)
     FROM listings l
     WHERE l.id = %(lid)s
     RETURNING id
