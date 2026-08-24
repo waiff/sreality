@@ -117,14 +117,26 @@ const BUDGET_FIRST_CARD_MS = Number(process.env.SMOKE_BUDGET_FIRST_CARD_MS || 12
  *                    diff. They sat at ~3x slack (measured /collections 5
  *                    against a ceiling of 16), so a doubling could have
  *                    regressed unseen. Corrected to what is measured today.
- * Still ahead: W6 deletes a broker call from every card surface; W9b appends
- * columns to listings_public for the listing-detail chain.
+ *   2026-08-24 W6  — /pipeline 18->17. Migration 419 put primary_email /
+ *                    primary_phone on listing_broker_public, so the board's
+ *                    broker decoration reads identity AND contact in ONE call
+ *                    instead of chaining GET /brokers?ids= behind
+ *                    POST /brokers/by-listings for a contact pair the first
+ *                    read's join had already touched (the second read was 207
+ *                    execution + 436 planning buffers of pure duplication, plus
+ *                    a second Railway floor, serialized because its broker_ids
+ *                    came out of the first response). Listing detail lost the
+ *                    same second call — not visible here, this sweep has no
+ *                    /listing route. Measured live post-deploy: 17 req / 0.9s,
+ *                    time-to-first-card 368ms.
+ * Still ahead: W9b appends columns to listings_public for the listing-detail
+ * chain; W7a moves Browse + comparables onto the shared hydration layer.
  *
  * Counting rule: only PostgREST + Railway API calls (see isAppDataRequest).
  * Routes are the operator's daily path plus the two that hid defects. */
 const ROUTE_BUDGETS = [
   { path: '/browse',        baseline: '22 req / 4.9s', maxRequests: 27, maxMs: 20000 },
-  { path: '/pipeline',      baseline: '18 req / 1.2s', maxRequests: 23, maxMs: 15000 },
+  { path: '/pipeline',      baseline: '17 req / 0.9s', maxRequests: 22, maxMs: 15000 },
   { path: '/collections',   baseline: '5 req / 0.9s',  maxRequests: 10, maxMs: 12000 },
   { path: '/watchdog',      baseline: '6 req / 1.3s',  maxRequests: 12, maxMs: 12000 },
   { path: '/notifications', baseline: '5 req / 1.0s',  maxRequests: 10, maxMs: 12000 },
