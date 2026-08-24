@@ -1165,36 +1165,35 @@ contact corpus to `toolkit.broker_resolver.decide_merges`, which since 2026-08-2
   one fact that proved they were one person. Under the discrimination test duplication REINFORCES
   the signal; role inboxes (`info@…` under 353 names) and switchboards still fail it — by carrying
   many NAMES, not many rows.
-- **Path B** merges a same-name cohort at one firm on either of two qualifications. **Rarity**: a
-  name that appears at no OTHER firm is very unlikely to be two people, which is what merges the
-  role-inbox-only shape (a fan of records at one firm reachable only at the switchboard).
-  **Indistinguishability**: a cohort whose members all carry the identical non-empty contact set
-  differs in no attribute the platform holds, so it is one subject however common the label —
-  seven "Zákaznická linka" records on one office inbox + line are one account, even though 15+
-  other agencies run a customer line under the same label (those never fuse: B only operates
-  inside one firm). Guards that keep both claims honest: the firm is the **identity's own**
-  (`firm_identities.firm_id`, its e-mail domain) and never `brokers.primary_firm_id` — that column
-  is a recency rollup, and feeding it to B made the test self-weakening (a merge collapsed the
-  very two-firm spread that had refused the third record) and non-deterministic night to night; an
-  identity with no firm abstains from the spread rather than voting, so the firmless
-  independent-broker cohort neither helps nor blocks it; and a (name, firm) cohort whose members
-  carry **disconfirming** contacts — each a discriminating one of the same kind, no value in
-  common — is refused whole. The contradiction veto is what catches a display name that IS the
-  firm's name ("PREXIMA nemovitosti s.r.o." on five agents, each with a personal mailbox: unique
-  to its firm by construction, so rarity alone can never see it) and what separates two same-named
-  agents at two offices of a **franchise** brand (`firms.is_franchise` — `re-max.cz` is one firm
-  row over ~95 independent offices): their personal contacts disagree. B deliberately does NOT
-  consult `is_franchise` — an earlier revision refused franchise firms outright, which parked 92%
-  of the name_firm review queue (1,481 of 1,615 cards, 2026-08-24) behind firm-display metadata,
-  while a franchise cohort with no distinguishing evidence at all is precisely the case a reviewer
-  cannot judge better than the engine. Refusals land in the `name_firm` operator tab, which exists
-  for exactly those cohorts.
-- **Path C** (shared contact + rarity) covers the pair B structurally cannot reach: an identity
-  with no firm evidence at all (ceskereality publishes no e-mail → no firm) next to a firm-anchored
-  record of the same rare name, joined by an office line. A shared value — even a
-  non-discriminating one — proves the two records answer at the same desk, and market-wide name
-  rarity does the rest exactly as in B. Discriminating values are A's domain (skipped in C); the
-  contradiction veto and the component cap apply unchanged.
+- **Path R (name rarity)** is the presumption flip the operator directed on 2026-08-24: a
+  same-name cohort is ONE PERSON unless the contacts disagree, provided the name is rare — it
+  appears at no more than one firm in the whole corpus. No co-location evidence is required at
+  all. Two earlier revisions each demanded some: requiring a shared firm row structurally
+  orphaned every ceskereality record (no e-mail → no firm, so the identity abstained from the
+  firm path forever), and requiring a shared contact value still missed pairs whose ledgers held
+  only different desk lines, plus records with no contacts at all (realitymix is identity-only).
+  Rarity is the entire warrant — a name confined to one firm and absent from the rest of a
+  nine-portal market is overwhelmingly one person — and the contradiction veto is the brake.
+  Common names (`Jan Novák`, at dozens of firms) fail rarity and merge only on path A. Guards:
+  the firm spread is measured over the **identity's own** firm (`firm_identities.firm_id`, its
+  e-mail domain), never `brokers.primary_firm_id` (a recency rollup that made the test
+  self-weakening and non-deterministic); an identity with no firm abstains from the spread; the
+  rule does not consult `firms.is_franchise` (a flag exclusion once parked 92% of the name_firm
+  queue — 1,481 of 1,615 cards — behind firm-display metadata; the veto separates franchise
+  offices by their disagreeing personal contacts instead).
+- **Path D (indistinguishable records)** handles the common-label residue: a same-name cohort at
+  ONE firm whose members all carry the identical non-empty contact set differs in no attribute
+  the platform holds, so it is one account however common the label — seven "Zákaznická linka"
+  records on one office inbox + line are one account, even though 15+ other agencies run a
+  customer line under the same label (those never fuse: D only operates inside one firm). A
+  cohort whose sets differ at all stays in manual review.
+- **The contradiction veto** refuses a cohort whose members carry **disconfirming** contacts —
+  each a discriminating one of the same kind, no value in common. It is what catches a display
+  name that IS the firm's name ("PREXIMA nemovitosti s.r.o." on five agents, each with a personal
+  mailbox: unique to its firm by construction, so rarity alone can never see it) and what
+  separates two same-named agents at two offices of a franchise brand (`re-max.cz` is one firm
+  row over ~95 independent offices): their personal contacts disagree. Refusals land in the
+  `name_firm` operator tab.
 - **The contradiction veto reads only PERSONAL contacts** (`ROLE_EMAIL_LOCALPARTS` in
   `toolkit/broker_resolver.py`): an e-mail whose local part is a department word (`info@`,
   `prodej@`, `garaze@`, …) identifies a desk, and a phone published by an identity whose every

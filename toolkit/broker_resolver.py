@@ -13,12 +13,11 @@ The whole rule:
     MERGE two identities when their NAMES MATCH
       AND ( A: they share a DISCRIMINATING contact
             OR
-            B: they share a firm AND ( that name appears at only ONE firm
-               corpus-wide OR every record carries the IDENTICAL non-empty
-               contact set )
+            R: the name appears at no more than one firm corpus-wide
+               (and no personal contacts disagree)
             OR
-            C: they share ANY contact value — even a non-discriminating one —
-               AND that name appears at no more than one firm corpus-wide )
+            D: they share a firm AND every record carries the IDENTICAL
+               non-empty contact set )
 
 **Names match** is `name_key` equality — diacritics folded, token order ignored,
 academic titles stripped (`Bc. Ondřej Kadlec` ≡ `Kadlec Ondřej`). No name, no edge.
@@ -33,26 +32,26 @@ duplication REINFORCES the signal instead of destroying it, and role inboxes
 (`info@…` under 353 different names) and switchboard numbers fail it exactly as
 they did before — by carrying many names, not by carrying many rows.
 
-**Firm rarity** (path B) substitutes market-wide name rarity for contact evidence:
-a name that appears at no OTHER firm is very unlikely to be two people, so two
-records of it at that firm are one person even with no contact in common (the
-role-inbox-only shape: everyone reachable at the same switchboard). Common names
-(`Jan Novák`, present at dozens of firms) fail the rarity test — but a cohort whose
-records are INDISTINGUISHABLE qualifies anyway: when every member carries the
-exact same non-empty contact set, the records differ in no attribute we hold, and
-name commonness is beside the point (seven "Zákaznická linka" rows at one agency,
-all on the same office inbox and line, are one account no matter how many OTHER
-agencies run a customer line of the same label). Generic role labels at DIFFERENT
-firms still never fuse — B only ever operates inside one firm — and a cohort whose
-contact sets differ at all stays in manual review.
+**Name rarity** (path R) is the presumption flip the operator directed
+(2026-08-24): a same-name cohort is ONE PERSON unless the contacts disagree —
+provided the name is rare, meaning it appears at no more than one firm in the
+whole corpus. No co-location evidence is required at all: not a shared firm row
+(earlier revisions demanded one, which structurally orphaned every ceskereality
+record — that portal publishes no e-mail, so its identities never join a firm),
+not a shared contact value (a later revision demanded that instead, which still
+missed pairs whose ledgers held only different desk lines, and records with no
+contacts at all). Rarity is the entire warrant: a name confined to one firm and
+absent from the rest of a nine-portal market is overwhelmingly one person, and
+the contradiction veto below catches the remainder. Common names (`Jan Novák`,
+present at dozens of firms) fail rarity and merge only on path A evidence.
 
-**Shared contact + rarity** (path C) covers the pair B cannot reach: a record with
-no firm evidence at all (ceskereality publishes no e-mail, so its identities never
-join a firm) sitting next to a firm-anchored record of the same rare name, joined
-by an office line. The shared value proves the two records answer at the same
-desk — co-location evidence at least as strong as a shared firm row — and market
-rarity does the rest, exactly as in B. A value that is discriminating is A's
-domain and is skipped here; C exists for the office-line shape.
+**Indistinguishable records** (path D) handle the common-label residue: a cohort
+at ONE firm whose members all carry the exact same non-empty contact set differs
+in no attribute we hold, so it is one account however common the label (seven
+"Zákaznická linka" rows at one agency, all on the same office inbox and line —
+while 15+ other agencies run a same-named customer line; those never fuse, D only
+operates inside one firm). A cohort whose contact sets differ at all stays in
+manual review.
 
 **Contradiction reads only PERSONAL contacts.** An e-mail whose local part is a
 department word (`info@`, `prodej@`, `pronajmy@`, `garaze@`, …
@@ -82,14 +81,14 @@ not a shared employer): two same-named agents at two offices surface as differen
 personal contacts and refuse, while a cohort with NO distinguishing evidence at
 all — role inboxes only, the name absent from the rest of the market — merges,
 because nothing we hold or could ever hold tells its records apart and the error,
-if real, is same-name same-brand attribution: mild and reversible. B no longer
-consults `is_franchise` (an earlier revision refused franchise firms outright,
+if real, is same-name same-brand attribution: mild and reversible. The rule does
+not consult `is_franchise` (an earlier revision refused franchise firms outright,
 which silently parked 92% of the name_firm review queue — 1,481 of 1,615 cards on
 2026-08-24 — behind a flag meant for firm display).
 
-The paths are OR'd, and the firm-spread test guards B ONLY — it is B's substitute
-for contact evidence, not an extra bar on A. A shared discriminating contact merges
-a common-named pair even if that name exists at fifty firms.
+The paths are OR'd, and the rarity test guards R ONLY — it is R's warrant, not an
+extra bar on A. A shared discriminating contact merges a common-named pair even if
+that name exists at fifty firms.
 
 Everything the rule cannot prove stays with the operator: a same-name pair sharing
 a NON-discriminating contact at two different firms becomes a review pair (the
@@ -132,10 +131,12 @@ MAX_AUTO_MERGE_COMPONENT = 20
 # Free text in the schema (no CHECK) — these three strings are the convention.
 REASON_CONTACT_NAME = "contact_name"
 REASON_NAME_FIRM = "name_firm"
-REASON_CONTACT_RARITY = "contact_rarity"
+REASON_NAME_RARITY = "name_rarity"
 # Canonical order for a combined reason, so 'contact_name+name_firm' is the ONE
 # spelling in the ledger (the orchestrator joins the same way for a chained merge).
-REASON_ORDER = (REASON_CONTACT_NAME, REASON_NAME_FIRM, REASON_CONTACT_RARITY)
+# ('contact_rarity' existed for one unreleased revision and never reached the
+# ledger — no sweep ran between its merge and this replacement.)
+REASON_ORDER = (REASON_CONTACT_NAME, REASON_NAME_FIRM, REASON_NAME_RARITY)
 
 # E-mail local parts that name a desk, not a person. Consulted ONLY by the
 # contradiction veto (never by the A/C bridges — a single-name department mailbox
@@ -447,42 +448,35 @@ def decide_merges(
         for other in members[1:]:
             a_edges.setdefault((members[0], other), set()).add(f"{value[0]}:{value[1]}")
 
-    # 2b. C-edges: a shared value of ANY strength + market-wide name rarity. The
-    #     pair B cannot reach — one side has no firm evidence at all (a portal
-    #     that publishes no e-mail never joins a firm) — but the two records
-    #     answer at the same desk, and the name exists at no other firm. A
-    #     discriminating value is A's domain (skipped here); the cap in step 5
-    #     still bounds any office-line pool this chains.
-    c_edges: dict[tuple[int, int], set[str]] = {}
-    for value, holders in carriers.items():
-        if len(names_at.get(value) or ()) < 2:
-            continue  # discriminating or unnamed -> A's domain / no evidence
-        buckets: dict[str, list[int]] = {}
-        for i in holders:
-            key = keys[i]
-            if key and by_id[i].mergeable:
-                buckets.setdefault(key, []).append(i)
-        for key, members_at in buckets.items():
-            members = sorted(set(members_at))
-            if len(members) < 2 or len(firms_of_name.get(key, ())) > 1:
-                continue
-            if _contradicted(members, discriminating):
-                continue
-            for other in members[1:]:
-                c_edges.setdefault((members[0], other), set()).add(f"{value[0]}:{value[1]}")
+    # 2b. R-edges: name rarity alone — the presumption flip. Every mergeable
+    #     identity of a rare name chains, firm or no firm, shared value or none:
+    #     the warrant is the name's confinement to (at most) one firm in a
+    #     nine-portal corpus, and the contradiction veto is the brake. No
+    #     co-location evidence is consulted — demanding a shared firm row
+    #     orphaned every ceskereality record (no e-mail -> no firm), demanding a
+    #     shared value missed different-desk-line pairs and contactless records.
+    r_edges: set[tuple[int, int]] = set()
+    by_key: dict[str, list[int]] = {}
+    for ident in identities:
+        key = keys[ident.id]
+        if key and ident.mergeable:
+            by_key.setdefault(key, []).append(ident.id)
+    for key, members_at in by_key.items():
+        if len(firms_of_name.get(key, ())) > 1:
+            continue
+        members = sorted(set(members_at))
+        if len(members) < 2 or _contradicted(members, discriminating):
+            continue
+        for other in members[1:]:
+            r_edges.add((members[0], other))
 
-    # 3. B-edges: a same-name cohort at one firm, chained when the cohort
-    #    qualifies by RARITY (the name exists at exactly one firm corpus-wide —
-    #    the spread counts EVERY identity, since a duplicate of the same person at
-    #    a second firm is exactly the ambiguity rarity must refuse) OR by being
-    #    INDISTINGUISHABLE (every member carries the identical non-empty contact
-    #    set: records that differ in no attribute we hold are one subject, however
-    #    common the label — the "Zákaznická linka" shape). An identity with no firm
-    #    of its own abstains rather than voting (it has no firm evidence either
-    #    way). A franchise firm is NOT excluded: the contradiction veto below is
-    #    what actually separates two same-named agents at two offices (their
-    #    personal contacts disagree), and a cohort with no distinguishing evidence
-    #    at all has nothing a reviewer could judge by either.
+    # 3. D-edges: indistinguishable records — a same-name cohort at ONE firm
+    #    whose members all carry the identical non-empty contact set. Rarity is
+    #    not consulted (that is R's job): D exists for the common-label residue,
+    #    where every record differs in no attribute we hold (the "Zákaznická
+    #    linka" shape — a customer line of the same name at 15+ other agencies
+    #    never fuses, because D only operates inside one firm). A cohort whose
+    #    sets differ at all stays in manual review.
     fingerprint: dict[int, set[str]] = {}
     for c in contacts:
         if c.identity_id in by_id:
@@ -493,18 +487,16 @@ def decide_merges(
         if not key or ident.firm_id is None or not ident.mergeable:
             continue
         at_firm.setdefault((key, ident.firm_id), []).append(ident.id)
-    b_edges: set[tuple[int, int]] = set()
+    d_edges: set[tuple[int, int]] = set()
     for (key, _firm), members_at in at_firm.items():
         members = sorted(set(members_at))
         if len(members) < 2 or _contradicted(members, discriminating):
             continue
-        rare = len(firms_of_name.get(key, ())) == 1
         sets = {frozenset(fingerprint.get(m, ())) for m in members}
-        identical = len(sets) == 1 and bool(next(iter(sets)))
-        if not (rare or identical):
+        if len(sets) != 1 or not next(iter(sets)):
             continue
         for other in members[1:]:
-            b_edges.add((members[0], other))
+            d_edges.add((members[0], other))
 
     # 4. The operator's standing NO removes the edge from the MERGE — but the pair
     #    stays in the component (step 5), because removing it outright would strand
@@ -512,7 +504,7 @@ def decide_merges(
     #    suppressing (1, 2) of a 1-2/1-3 chain merged 1 with 3 and left 2 neither
     #    merged nor reviewed, while suppressing (2, 3) of the same corpus downgraded
     #    all three. The only difference was which id sorted first.
-    all_edges = sorted(set(a_edges) | b_edges | set(c_edges))
+    all_edges = sorted(set(a_edges) | d_edges | r_edges)
     edges: list[tuple[int, int]] = []
     for edge in all_edges:
         if edge in blocked:
@@ -550,8 +542,8 @@ def decide_merges(
         inner = edges_by_root.get(root, [])
         present = {
             REASON_CONTACT_NAME: any(e in a_edges for e in inner),
-            REASON_NAME_FIRM: any(e in b_edges for e in inner),
-            REASON_CONTACT_RARITY: any(e in c_edges for e in inner),
+            REASON_NAME_FIRM: any(e in d_edges for e in inner),
+            REASON_NAME_RARITY: any(e in r_edges for e in inner),
         }
         reason = "+".join(r for r in REASON_ORDER if present[r])
         decision.group_reasons[tuple(group)] = reason
@@ -561,7 +553,7 @@ def decide_merges(
         #    unstamped rather than guessing which contact was decisive; a group
         #    formed by firm rarity alone has no contact to name.
         if len(inner) == 1:
-            stamped = a_edges.get(inner[0], set()) | c_edges.get(inner[0], set())
+            stamped = a_edges.get(inner[0], set())
             if len(stamped) == 1:
                 kind, _, value = next(iter(stamped)).partition(":")
                 decision.group_bridges[tuple(group)] = (kind, value)
