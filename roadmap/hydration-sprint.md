@@ -548,7 +548,43 @@ Four corollaries, because the evidence did not support one rule for everything:
   replaced — each in a transaction that always rolls back, plus a gate-is-open guard so none of
   it can pass vacuously. One more pins the *mechanism*: a revert to `distinct on` would stay
   perfectly **correct** while silently full-scanning again, which correctness tests cannot catch.
-- ⬜ **W10e** — /estimations OR-join (EXPLAIN first — that one is code-derived, not measured).
+- ✅ **W10e** — /estimations OR-join: **measured, and it is a non-issue. No change shipped.**
+  This entry is the deliverable. The target was flagged "code-derived, not measured", and
+  measuring it is what retired it — the instruction to EXPLAIN first existed precisely so a
+  plausible-looking OR wouldn't get optimised on the strength of how it reads.
+  **First correction: the OR is not on /estimations.** That page's list read
+  (`list_estimation_runs`) has no OR at all — it keys on `er.input_listing_id = ANY(...)`,
+  keyset-paginated, and counts only on the first page. The only OR-across-join-paths in
+  `api/estimation_runs.py` is in `latest_rent_estimations_by_listing`, which feeds **Browse's
+  on-card estimate chip**: `ON er.input_listing_id = l.id OR (er.input_listing_id IS NULL AND
+  er.input_sreality_id = l.sreality_id)`.
+  **The planner does not degrade on it.** `EXPLAIN (ANALYZE, BUFFERS)` on the real 24-card
+  shape, run twice — once on ids with no estimations, once on ids that all have one, because a
+  conclusion drawn only from an empty result proves nothing. Both give the same plan: a Nested
+  Loop over the 24 listings with a **BitmapOr that index-scans EACH arm separately**
+  (`estimation_runs_input_listing_id_idx` and `estimation_runs_input_sreality_id_idx`) — not
+  the seq-scan fallback an unindexable OR would force. Matching path: **188 blocks for 24
+  rendered rows** (~8 per row), 35 rows through the join, `Rows Removed by Filter: 0`, 12.6 ms.
+  Non-matching: 147 blocks, 0 rows. And the dominant term is not the join — it is the
+  `listings` lookup (97 of 188 blocks); the 24 OR probes together cost 80.
+  **The scale makes it moot regardless**: `estimation_runs` is **100 rows / 264 kB**, smaller
+  than one Browse card's photo. W10a's lesson that "a single OR forces a BitmapOr, which always
+  visits the heap regardless of indexing" is still true here — it visited 32 heap blocks — but
+  that lesson bit on 88,762 region-grain rows, and it does not transfer to a 100-row table.
+  **The second arm is provably dead today and is still correct to keep.** Zero rows have
+  `input_listing_id IS NULL AND input_sreality_id IS NOT NULL`, so that branch currently matches
+  nothing and could be deleted for a small planning saving. It should not be: the code comment
+  documents it as the fallback for rows written before `input_listing_id` was stamped (#914),
+  and NULL-`input_listing_id` rows are the late-binding case the resolver stamps once the
+  listing is scraped. Deleting a documented safety net to buy nothing measurable, on the
+  strength of "0 rows *today*", is the kind of change this sprint's audit exists to catch.
+  **Filed, not fixed** — one real oddity surfaced: **planning costs more blocks than execution**
+  (1,069 vs 188). `estimation_runs` carries **17 indexes** and `listings` is large, so the
+  planner reads a lot of catalog for a query that then touches almost nothing. Every planning
+  buffer was a `hit` (cached, not I/O) and it is per-statement rather than per-row, so it is not
+  this wave's problem — but on a surface governed by corollary B, where the Railway floor already
+  dominates, it is worth knowing that the cheapest reads are now planning-bound. An index audit
+  on `estimation_runs` is its own wave if anyone wants it.
 - ⬜ **W8** — bundle: maplibre out of the filter-controls barrel, recharts unpinned from
   React. Last: first-visit and post-deploy only.
 
@@ -585,6 +621,7 @@ Server-side block counts to beat (constraint 6):
 | `llm_cost_daily_public` | 9,711 shared + 5,839 temp → **10,851 shared + 0 temp** | index — hit, but the win is the sort, not the blocks | done — W10c |
 | `llm_cost_hourly_public` | 9,941 → **8** (293,491 rows discarded for 12 out → 60 read) | proportional | done — W10c (same page, same defect) |
 | `pipeline_checks_public` | 6,234 rows scanned for 15 → **15 for 15**; 3,351 → **93** blocks | bounded — by KEY, not by time | done — W10d |
+| Browse chip OR-join (`latest_rent_estimations_by_listing`) | **188** blocks for 24 rendered rows, BitmapOr index-scans both arms, `Rows Removed by Filter: 0` | none — measured a non-issue, nothing shipped | done — W10e |
 
 ## Post-sprint audit — 2026-08-24
 
