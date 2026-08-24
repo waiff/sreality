@@ -103,10 +103,9 @@ describe('auth mode', () => {
     });
     await b.searchBrokersByName('novak');
     await b.searchBrokerFirms('mmreality');
-    await b.fetchBrokersByIds([1]);
     await b.fetchListingBrokersByIds([1]);
     await b.fetchBrokerListings(7);
-    expect(calls).toHaveLength(7);
+    expect(calls).toHaveLength(6);
     for (const c of calls) expect(authHeader(c)).toBe('Bearer USER-JWT');
   });
 });
@@ -269,11 +268,10 @@ describe('batched hydration', () => {
     expect(map.get(11)?.broker_id).toBe(2);
   });
 
-  it('short-circuits both batch reads on an empty id list', async () => {
+  it('short-circuits the batch read on an empty id list', async () => {
     const calls = stubFetch(() => ({ body: { data: [] } }));
-    const { fetchListingBrokersByIds, fetchBrokersByIds } = await loadBrokers();
+    const { fetchListingBrokersByIds } = await loadBrokers();
     expect((await fetchListingBrokersByIds([])).size).toBe(0);
-    expect((await fetchBrokersByIds([])).size).toBe(0);
     expect(calls).toHaveLength(0);
   });
 
@@ -294,29 +292,34 @@ describe('batched hydration', () => {
     expect(bodies.flat()).toEqual(ids);
   });
 
-  it('chunks the GET id list and merges every page into one map', async () => {
-    const calls = stubFetch((url) => ({
+  /* W6: the contact pair rides on the attribution row (migration 419), so the
+     whole broker line — name, firm, both channels — comes out of THIS one call.
+     The deleted GET twin is what used to carry primary_email / primary_phone; if a
+     later change drops them from the POST projection, this is what says so. */
+  it('carries the contact pair on the same row as the identity', async () => {
+    const calls = stubFetch(() => ({
       body: {
-        data: new URL(url).searchParams
-          .getAll('ids')
-          .map((id) => ({ broker_id: Number(id) })),
+        data: [
+          {
+            listing_id: 10,
+            broker_id: 1,
+            sreality_id: null,
+            broker_display_name: 'Jan Novák',
+            broker_firm_label: 'RE/MAX',
+            primary_email: 'jan@remax.cz',
+            primary_phone: '+420777123456',
+          },
+        ],
       },
     }));
-    const { fetchBrokersByIds } = await loadBrokers();
-    const ids = Array.from({ length: 450 }, (_, i) => i + 1);
-    const map = await fetchBrokersByIds(ids);
-    expect(calls.length).toBeGreaterThan(1);
-    expect(map.size).toBe(450);
-    expect(map.get(1)).toBeDefined();
-    expect(map.get(450)).toBeDefined();
-  });
-
-  it('sends broker ids as repeated `ids` params', async () => {
-    const calls = stubFetch(() => ({ body: { data: [{ broker_id: 3 }] } }));
-    const { fetchBrokersByIds } = await loadBrokers();
-    const map = await fetchBrokersByIds([3, 4]);
-    expect(new URL(calls[0].url).searchParams.getAll('ids')).toEqual(['3', '4']);
-    expect(map.get(3)).toBeDefined();
+    const { fetchListingBrokersByIds } = await loadBrokers();
+    const map = await fetchListingBrokersByIds([10]);
+    expect(calls).toHaveLength(1);
+    expect(map.get(10)).toMatchObject({
+      broker_display_name: 'Jan Novák',
+      primary_email: 'jan@remax.cz',
+      primary_phone: '+420777123456',
+    });
   });
 
   /* A genuinely empty batch (none of the requested ids matched, e.g. filtered by
@@ -324,18 +327,20 @@ describe('batched hydration', () => {
      throw. Distinguishes this from the malformed-response case right below. */
   it('resolves an empty map for a successful empty batch', async () => {
     stubFetch(() => ({ body: { data: [] } }));
-    const { fetchBrokersByIds } = await loadBrokers();
-    await expect(fetchBrokersByIds([3])).resolves.toEqual(new Map());
+    const { fetchListingBrokersByIds } = await loadBrokers();
+    await expect(fetchListingBrokersByIds([3])).resolves.toEqual(new Map());
   });
 
   /* An SPA-fallback HTML page (or a proxy page) answers 200 with no envelope.
-     Silently returning an empty map here reads, one layer up, as "the contact
-     read succeeded and found nothing" — indistinguishable from the case above —
-     when what actually happened is the read never reached the API at all. */
+     Silently returning an empty map here reads, one layer up, as "the broker read
+     succeeded and found nothing" — indistinguishable from the case above — when
+     what actually happened is the read never reached the API at all. The guard
+     moved here from the deleted fetchBrokersByIds; with one read left it now
+     covers the ENTIRE broker line rather than half of it. */
   it('throws on a 200 that carries no envelope', async () => {
     stubFetch(() => ({ body: '<!doctype html><title>app</title>' }));
-    const { fetchBrokersByIds } = await loadBrokers();
-    await expect(fetchBrokersByIds([3])).rejects.toThrow(/malformed/);
+    const { fetchListingBrokersByIds } = await loadBrokers();
+    await expect(fetchListingBrokersByIds([3])).rejects.toThrow(/malformed/);
   });
 });
 

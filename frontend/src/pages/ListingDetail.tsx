@@ -22,7 +22,7 @@ import {
   fetchImagesByListing,
   type PropertyMf,
 } from '@/lib/queries';
-import { fetchBrokersByIds, fetchListingBroker } from '@/lib/brokers';
+import { fetchListingBroker } from '@/lib/brokers';
 import BrokerContactCard from '@/components/BrokerContactCard';
 import {
   ApiError,
@@ -591,23 +591,14 @@ function BrokerVizitka({ listingId }: { listingId: number }) {
     queryFn: () => fetchListingBroker(listingId),
     staleTime: 60_000,
   });
+  // W6: contact now rides on the attribution row itself (migration 419 put
+  // primary_email / primary_phone on listing_broker_public), so the chained
+  // ['broker-contact', brokerId] read by broker_id is gone. It was serialized
+  // behind this one — it could not name its broker_id until this response landed —
+  // which is why the vizitka used to paint its name, then reflow when the card
+  // arrived. One read, one paint, and the "contact failed but identity didn't"
+  // split state no longer exists to render.
   const b = q.data ?? null;
-  // Contact lives on the broker row, not on the attribution row — /brokers/by-listing
-  // answers identity only. So chain the batch route by broker_id (the pairing
-  // lib/brokers documents, same one the pipeline board hydrates cards with). Keying
-  // on the broker rather than the listing means two listings from the same broker
-  // share one cache entry here — the pipeline board hydrates its own copy under a
-  // separate key, so this is not yet a cross-surface cache.
-  const brokerId = b?.broker_id ?? null;
-  const contactQ = useQuery({
-    queryKey: ['broker-contact', brokerId],
-    queryFn: async () => {
-      const id = brokerId as number;
-      return (await fetchBrokersByIds([id])).get(id) ?? null;
-    },
-    enabled: brokerId != null,
-    staleTime: 60_000,
-  });
 
   if (q.isError && !b)
     return (
@@ -619,7 +610,6 @@ function BrokerVizitka({ listingId }: { listingId: number }) {
     );
   if (!b) return null;
 
-  const contact = contactQ.data ?? null;
   return (
     <BrokerSection>
       <div className="mt-3 flex flex-wrap items-start justify-between gap-4">
@@ -636,30 +626,14 @@ function BrokerVizitka({ listingId }: { listingId: number }) {
             {b.broker_firm_label ?? 'nezávislý / neznámá kancelář'}
           </p>
         </div>
-        {/* A failed (or still-running) contact read is not "this broker has no
-            phone" — the same distinction contactState draws per field, one level
-            up: only a broker row we actually hold may claim an empty channel. A
-            SUCCESSFUL read that just doesn't include this broker (filtered out,
-            merged away mid-request) is a third case again — it must not render as
-            the error line either, or a legitimate empty result reads as an outage. */}
-        {contact ? (
-          <BrokerContactCard broker={contact} />
-        ) : (
-          // Same min-w as the card below it — the chained contact fetch resolves
-          // after first paint, and an unreserved-width placeholder made everything
-          // below the vizitka jump sideways/down when the card finally landed.
-          <div className="min-w-[15rem] px-4 py-3">
-            {contactQ.isLoading ? (
-              <p className="text-sm text-[var(--color-ink-3)]">Načítám kontakt…</p>
-            ) : contactQ.isError ? (
-              <p className="text-sm text-[var(--color-brick)]">
-                Kontakt se nepodařilo načíst
-              </p>
-            ) : (
-              <p className="text-sm text-[var(--color-ink-3)]">Kontakt není k dispozici</p>
-            )}
-          </div>
-        )}
+        {/* Unconditional now, and that is the point: the contact is part of the
+            row we are already holding, so "we have a broker but not his contact"
+            has stopped being a reachable state. The card still draws the three
+            per-field cases itself (value / masked / none) — only a row we hold may
+            claim an empty channel, and contactState keeps "admin-only" apart from
+            "unreachable". `b` satisfies BrokerContactFields, which is all the card
+            has ever consumed. */}
+        <BrokerContactCard broker={b} />
       </div>
     </BrokerSection>
   );

@@ -11,7 +11,7 @@
 import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import { useMemo } from 'react';
 
-import { fetchBrokersByIds, fetchListingBrokersByIds } from '@/lib/brokers';
+import { fetchListingBrokersByIds } from '@/lib/brokers';
 import { imageSrc } from '@/lib/imageUrl';
 import { fetchListingCovers, pipelineCardBroker } from '@/lib/queries';
 import type { PipelineCardBroker } from '@/lib/types';
@@ -59,12 +59,16 @@ export function useListingCovers(listingIds: readonly number[]): {
   };
 }
 
-/* The canonical broker per listing, plus its contact fields for the hover box.
+/* The canonical broker per listing, contact fields included — ONE round trip.
  *
- * Still two round trips (listing -> broker, then broker -> contact): the
- * contact columns are not on `listing_broker_public`, and adding them is W6's
- * one-migration job, which then deletes the second call here and on the listing
- * page at once. Both are off the paint path now, so the cost is invisible.
+ * W6 (migration 419) put primary_email / primary_phone on listing_broker_public,
+ * the view /brokers/by-listings already reads, so the chained /brokers?ids= call
+ * that used to follow it is gone. It never bought anything: the contact pair sits
+ * on the same `brokers` row this view already joins, so the second statement
+ * re-read heap pages the first had in hand (measured: 207 execution + 436
+ * planning buffers, all duplicate) and paid a second Railway round trip's
+ * ~270-410 ms floor to do it — serialized, because its broker_ids came out of the
+ * first response.
  *
  * No `.catch(() => new Map())` swallow. The old inline version had to muffle
  * errors because a broker failure would have taken the whole board's queryFn
@@ -84,12 +88,9 @@ export function useListingBrokers(listingIds: readonly number[]): {
     queryKey: hydrationKeys.brokers(ids),
     queryFn: async () => {
       const listingBrokers = await fetchListingBrokersByIds(ids);
-      const contacts = await fetchBrokersByIds([
-        ...new Set([...listingBrokers.values()].map((b) => b.broker_id)),
-      ]);
       const out = new Map<number, PipelineCardBroker>();
       for (const [listingId, lb] of listingBrokers) {
-        const projected = pipelineCardBroker(lb, contacts.get(lb.broker_id));
+        const projected = pipelineCardBroker(lb);
         if (projected) out.set(listingId, projected);
       }
       return out as BrokerByListingId;

@@ -187,6 +187,57 @@ def test_by_listings_rejects_an_unbounded_batch(client):
     assert res.status_code == 422
 
 
+_ATTRIBUTION_WITH_CONTACT = {
+    "listing_id": 7, "broker_id": 1, "sreality_id": None,
+    "broker_display_name": "RK Alfa", "broker_firm_label": "RE/MAX",
+    "primary_email": "a@b.cz", "primary_phone": "+420 111 222 333",
+}
+
+
+def test_by_listings_masks_the_contact_columns_migration_419_added(client, monkeypatch):
+    """W6 widened listing_broker_public with primary_email / primary_phone so the
+    SPA stops chaining a second /brokers?ids= call for them.
+
+    The mask keys on the column NAME, not a fixed list, precisely so a widened view
+    is covered the day it lands — but "the mechanism generalises" is a claim, and
+    this is the surface where being wrong hands every logged-in user the broker
+    directory's contact PII. Assert it on the actual widened row shape.
+    """
+    monkeypatch.setattr(broker_routes.brokers, "listing_brokers",
+                        lambda conn, ids: {"data": [dict(_ATTRIBUTION_WITH_CONTACT)],
+                                           "metadata": {}})
+    body = client.post("/brokers/by-listings", json={"listing_ids": [7]}).json()
+    row = body["data"][0]
+    assert row == {"listing_id": 7, "broker_id": 1, "sreality_id": None,
+                   "broker_display_name": "RK Alfa", "broker_firm_label": "RE/MAX",
+                   "has_email": True, "has_phone": True}
+    assert body["metadata"]["pii_masked"] is True
+
+
+def test_by_listings_gives_an_admin_the_values(admin_client, monkeypatch):
+    monkeypatch.setattr(broker_routes.brokers, "listing_brokers",
+                        lambda conn, ids: {"data": [dict(_ATTRIBUTION_WITH_CONTACT)],
+                                           "metadata": {}})
+    row = admin_client.post("/brokers/by-listings", json={"listing_ids": [7]}).json()["data"][0]
+    assert row["primary_email"] == "a@b.cz"
+    assert row["primary_phone"] == "+420 111 222 333"
+
+
+def test_by_listing_flags_a_broker_with_neither_channel(client, monkeypatch):
+    """has_email=False is a real answer ("this broker is unreachable"), not the
+    absence of one — the vizitka draws an em-dash from it, and since W6 that is the
+    only way an empty channel can be rendered at all."""
+    monkeypatch.setattr(
+        broker_routes.brokers, "listing_broker",
+        lambda conn, sid=None, *, listing_id=None: {
+            "data": {**_ATTRIBUTION_WITH_CONTACT,
+                     "primary_email": None, "primary_phone": None},
+            "metadata": {}})
+    row = client.get("/brokers/by-listing", params={"listing_id": 7}).json()["data"]
+    assert row["has_email"] is False and row["has_phone"] is False
+    assert "primary_email" not in row
+
+
 def test_brokers_by_ids_repeated_query_params(client, monkeypatch):
     captured = {}
     monkeypatch.setattr(broker_routes.brokers, "brokers_by_ids",
