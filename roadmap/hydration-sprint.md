@@ -401,14 +401,23 @@ Four corollaries, because the evidence did not support one rule for everything:
 Per-route app data requests (PostgREST + Railway only; basemap tiles, assets and image
 bytes excluded) and settle time, measured by `npm run smoke-check:prod`:
 
-| Route | W0 | post-W2a | post-W2b | post-W5 | post-W6 | Notes |
-| --- | --- | --- | --- | --- | --- | --- |
-| /browse | 31 | 27 | 22 | 22 | 22 | was 9.1 s *and an HTTP 500* pre-W-1a; now 2.9 s |
-| /pipeline | 27 | 23 | 19 | 18 | **17** | time-to-first-card 1,427 → 951 ms (W1) → 412 ms (W5, killed the board's 2nd request's serialization) → **368 ms** (W6) |
-| /collections | 9 | 5 | 5 | 5 | 5 | was 6-of-9 duplicated bootstrap |
-| /watchdog | 10 | 6 | 6 | 6 | 6 | reference feed — shape was already correct |
-| /notifications | 9 | 5 | 5 | 5 | 5 | server work is ~15 ms; the rest is transport |
-| /brokers | 11 | 7 | 7 | 7 | 7 | leaderboard is server-bound, see W10a |
+| Route | W0 | post-W2a | post-W2b | post-W5 | post-W6 | post-W7a | Notes |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| /browse | 31 | 27 | 22 | 22 | 22 | 22 | was 9.1 s *and an HTTP 500* pre-W-1a. W7a earned **no** ratchet here and that is the honest result: the photo read moved off the paint path, it did not disappear — one request became one request. The win is that cards no longer wait for it. |
+| /pipeline | 27 | 23 | 19 | 18 | **17** | 17 | time-to-first-card 1,427 → 951 ms (W1) → 412 ms (W5, killed the board's 2nd request's serialization) → **368 ms** (W6) |
+| /collections | 9 | 5 | 5 | 5 | 5 | 5 | was 6-of-9 duplicated bootstrap |
+| /watchdog | 10 | 6 | 6 | 6 | 6 | 6 | reference feed — shape was already correct |
+| /notifications | 9 | 5 | 5 | 5 | 5 | 5 | server work is ~15 ms; the rest is transport |
+| /brokers | 11 | 7 | 7 | 7 | 7 | 7 | leaderboard is server-bound, see W10a |
+
+**Request count is not the only ratchet, and W7a is where that shows.** Two of the three waves in
+this batch moved a number on this table; W7a moved none and is still the biggest structural change
+of the three. What it earned instead is a *behavioural* rail — the smoke check now asserts Browse
+cards hydrate a multi-photo carousel — because the failure mode this wave introduces is not "one
+more request", it is "the grid renders perfectly and every photo is silently gone". A route budget
+would never have seen that; it caught the covers/brokers leak within minutes of deploy. Settle
+times are deliberately NOT ratcheted: /browse measured 2.2 s, 3.0 s, 5.3 s and 6.1 s across four
+runs of the same build this afternoon, which is corollary D's whole point.
 
 Server-side block counts to beat (constraint 6):
 
