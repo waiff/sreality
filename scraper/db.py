@@ -26,7 +26,6 @@ import psycopg
 from psycopg.types.json import Jsonb, set_json_dumps
 
 from scraper import media
-from scraper.area import LAND_CATEGORIES
 from scraper.scraped_listing import ScrapedListing
 from scraper.street import street_name_key
 from toolkit.broker_sources import BROKER_FINGERPRINT_KEYS, BROKER_SOURCE_NAMES
@@ -241,65 +240,6 @@ def sane_price_czk(price: int | None) -> int | None:
         LOG.warning("PRICE dropped placeholder value=%s (< %s)", price, MIN_PRICE_CZK)
         return None
     return price
-
-
-# Business-plausibility floors — a SIBLING of sane_price_czk, not a fold-in: that
-# one's contract is pure column-range clamping (and it carries the import-time
-# assert over _NUMERIC_ABS_MAX). These are the write-boundary rail behind the
-# parsers' per-area refusal (scraper.price_text): the unit-price masquerade is
-# ONGOING, not historical — ceskereality / realitymix / bazos have stored ~310 m2
-# commercial units at a price_czk of 136 / 176 / 379 Kc, the Kc/m2 figure scraped
-# as if it were the total. No floor on land (a small parcel really does sell for
-# tens of thousands) and none on `drazba` (an auction's opening bid is deliberately
-# low); an area under 5 m2 is a parse artifact, not a unit.
-SALE_MIN_PRICE_CZK = 100_000
-RENT_MIN_PRICE_CZK = 1_000
-MIN_AREA_M2 = 5.0
-
-
-def plausible_price_czk(
-    price: int | None,
-    *,
-    category_type: str | None = None,
-    category_main: str | None = None,
-) -> int | None:
-    """Drop a price too small to be a TOTAL (or a monthly rent) for this agenda."""
-    if price is None:
-        return None
-    if category_type == "prodej" and category_main not in LAND_CATEGORIES:
-        floor = SALE_MIN_PRICE_CZK
-    elif category_type == "pronajem":
-        floor = RENT_MIN_PRICE_CZK
-    else:
-        return price
-    if price < floor:
-        LOG.warning(
-            "PRICE dropped implausible value=%s (< %s for %s/%s)",
-            price, floor, category_type, category_main,
-        )
-        return None
-    return price
-
-
-def plausible_area_m2(area: float | None) -> float | None:
-    """Drop a headline area too small to be a real unit or parcel."""
-    if area is None:
-        return None
-    if area < MIN_AREA_M2:
-        LOG.warning("AREA dropped implausible value=%s (< %s m2)", area, MIN_AREA_M2)
-        return None
-    return area
-
-
-def plausible_listing_row(obj: dict[str, Any]) -> None:
-    """Apply both plausibility floors to a listings row, in place. Runs at every
-    write boundary AFTER the column-range clamps, so it sees the stored value."""
-    obj["price_czk"] = plausible_price_czk(
-        obj.get("price_czk"),
-        category_type=obj.get("category_type"),
-        category_main=obj.get("category_main"),
-    )
-    obj["area_m2"] = plausible_area_m2(obj.get("area_m2"))
 
 
 # A foreign listing's synthetic ids (sreality assigns Spain/Bali/etc. localities
@@ -683,7 +623,6 @@ def upsert_listing(
         params[col] = row.get(col)
     params["price_czk"] = sane_price_czk(params["price_czk"])
     sane_listing_numerics(params)
-    plausible_listing_row(params)
     _set_street_name_key(params)
 
     with conn.transaction(), conn.cursor() as cur:
@@ -2459,10 +2398,6 @@ def write_detail_batch(
         obj: dict[str, Any] = {c: row.get(c) for c in LISTING_COLUMNS}
         obj["price_czk"] = price_czk
         sane_listing_numerics(obj)
-        plausible_listing_row(obj)
-        # The snapshot must carry the SAME value the listings row got, or the
-        # price history would disagree with current state on a dropped price.
-        price_czk = obj["price_czk"]
         _set_street_name_key(obj)
         obj["sreality_id"] = sid
         obj["lon"] = row.get("lon")

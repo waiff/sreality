@@ -213,6 +213,9 @@ def test_parse_detail_full():
     assert listing.price_czk == 5_499_000
     assert listing.price_unit == "za nemovitost"
     assert listing.area_m2 == 65.0
+    # bazos has no structured area field at all — the headline is the free-text
+    # scrape, and the stamp says exactly that.
+    assert listing.area_basis == "unknown"
     assert listing.disposition == "2+kk"
     assert listing.lat == 49.863882
     assert listing.lon == 16.333580

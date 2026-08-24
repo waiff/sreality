@@ -219,9 +219,25 @@ def test_house_headline_area_is_the_interior_not_the_plot():
     assert listing.area_m2 == 130.0
     assert listing.area_basis == "usable"
     assert listing.usable_area == 130.0
-    # The plot is NOT smuggled into estate_area either: mmreality states a real
-    # plot in landArea/plotArea, and totalArea is not that field.
-    assert listing.estate_area is None
+    # And the plot is RELOCATED, not discarded: mmreality states no landArea /
+    # plotArea on any observed page and its estate_area column is empty on all
+    # 3,601 active houses, so totalArea is the only parcel figure there is.
+    assert listing.estate_area == 905.0
+
+
+def test_house_without_an_interior_measure_is_null_not_a_plot():
+    # 13 of 3,601 active mmreality houses carry no usableArea. Handing totalArea
+    # to the generic `total` slot would stamp a PARCEL as an interior 'total' —
+    # a confident wrong label is worse than the missing value it replaces, so the
+    # headline goes NULL and the number lands in estate_area instead.
+    house = {**HOUSE, "id": "944448", "usableArea": None}
+    listing = parse_detail(
+        _detail_html(house), source_url="https://www.mmreality.cz/nemovitosti/944448/"
+    )
+    assert listing.category_main == "dum"
+    assert listing.area_m2 is None
+    assert listing.area_basis is None
+    assert listing.estate_area == 905.0
 
 
 def test_land_headline_area_is_still_the_plot():

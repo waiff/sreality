@@ -334,6 +334,9 @@ _DETAIL_PRICE_UNITS: tuple[tuple[str, str], ...] = (
     ("za mesic", "za mesic"),
     ("za nemovitost", "za nemovitost"),
 )
+# The per-area marker BEFORE the amount. Anchoring can't see it and the digit
+# scrape would fold its "2" into the number, so it gets its own narrow test.
+_PER_AREA_PREFIX_RE = re.compile(r"(?:za|/)\s*m\s*2|za\s*metr")
 
 
 def _detail_price(text: str | None, category_type: str | None) -> tuple[int | None, str | None]:
@@ -353,9 +356,14 @@ def _detail_price(text: str | None, category_type: str | None) -> tuple[int | No
     head, sep, tail = low.partition("czk")
     if not sep:
         return None, default_unit
-    # per-area pricing has no representation in price_czk; the unit always
-    # FOLLOWS the amount in this cell, so the shared anchored test applies.
-    if is_per_area_price(low[len(head):]):
+    # per-area pricing has no representation in price_czk. The unit normally
+    # FOLLOWS the amount, so the shared anchored test applies to the tail; the
+    # prefix shape (`Cena za m2: 7 759 CZK`) has to be caught separately, because
+    # the digit scrape below would otherwise take the "2" out of "m2" into the
+    # number and store a FABRICATED 27759 — strictly worse than the NULL the
+    # deleted `_PER_AREA_MARKERS` used to produce, and there is no write-boundary
+    # backstop behind this.
+    if is_per_area_price(low[len(head):]) or _PER_AREA_PREFIX_RE.search(head):
         return None, default_unit
     digits = re.sub(r"\D", "", head)
     if not digits:

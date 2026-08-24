@@ -169,6 +169,7 @@ def test_parse_detail_full():
     assert listing.price_czk == 18_878_000
     assert listing.price_unit == "za nemovitost"
     assert listing.area_m2 == 114.0
+    assert listing.area_basis == "floor"
     assert listing.disposition == "4+kk"
     assert listing.lat == 50.135296277954296
     assert listing.lon == 14.3808766436688
@@ -251,3 +252,19 @@ def test_parse_detail_price_on_request_is_none():
     assert listing.price_unit == "za mesic"
     assert listing.price_czk is None
     assert listing.area_m2 == 48.0
+
+
+# Two DIFFERENT labelled measures on one page: the discriminating case for the
+# portal-label -> typed-slot mapping. Without it, swapping the kwargs in
+# parse_detail's derive_headline_area call is a silent wrong value under a
+# confident wrong label, and the whole suite stays green.
+
+def test_uzitna_beats_podlahova_and_says_so():
+    html = DETAIL_HTML.replace(
+        '<tr class="border-bottom"><th class="slider_label align-middle">plocha podlahová</th>',
+        '<tr><th class="slider_label">plocha užitná</th>'
+        '<td class="text-right slider_value">96&nbsp;m<sup>2</sup></td></tr>'
+        '<tr class="border-bottom"><th class="slider_label align-middle">plocha podlahová</th>',
+    )
+    listing = parse_detail(html, source_url=_DETAIL_URL)
+    assert (listing.area_m2, listing.area_basis) == (96.0, "usable")

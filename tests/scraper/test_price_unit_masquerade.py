@@ -8,20 +8,22 @@ strictly worse than the missing value it replaces.
 
 The masquerade is ONGOING, not historical: ceskereality, realitymix and bazos
 carry ~310 m² commercial units whose stored price_czk has a median of 136 / 176 /
-379 Kč, with rows first seen the day this was written. Two rails, both here:
+379 Kč, with rows first seen the day this was written. All three are TEXT-price
+portals, so the rail is the shared parse-time refusal
+(`scraper.price_text.is_per_area_price`) — this is the ONLY rail, which is why
+every portal's own cell shape has to reach it here.
 
-  1. the six text-price portals refuse the cell at parse time
-     (`scraper.price_text.is_per_area_price`);
-  2. the three JSON portals take a numeric price with no unit text to inspect,
-     so their rail is the write boundary (`scraper.db.plausible_price_czk`),
-     which also backs up rail 1 for a page shape no parser has seen yet.
+A second rail was tried at the write boundary (a per-agenda price floor) and
+withdrawn: measured against production it would have NULLed 3,025 active rows,
+2,501 of them `pronajem`/`komercni`, after the content hash — so the deletion
+would append no snapshot (rule 8) and each row would then read as "price
+changed" on every index walk forever. See the W1 review notes.
 """
 
 from __future__ import annotations
 
 import pytest
 
-from scraper import db
 from scraper.bazos_parser import _parse_price as bazos_price
 from scraper.ceskereality_parser import _parse_price as ceskereality_price
 from scraper.idnes_parser import _parse_price as idnes_price
@@ -52,6 +54,15 @@ PER_AREA_CELLS = [
     "7\xa0759\n\t\tCZK/ za m2",
 ]
 
+# The unit BEFORE the amount. The anchored test cannot see it, and remax's digit
+# scrape would fold the "2" out of "m2" into the number (7 759 -> 27759), so a
+# fabricated total is what a missing guard produces here — not a missing value.
+PER_AREA_PREFIX_CELLS = [
+    "Cena za m2: 7 759 Kč",
+    "Cena/m2 3 500 Kč",
+    "Cena za metr: 45 000 Kč",
+]
+
 # The two negatives are the point of the anchoring: a monthly rent is not a unit
 # price, and a total with a per-m² NOTE beside it is still a total.
 TOTAL_CELLS = [
@@ -61,20 +72,32 @@ TOTAL_CELLS = [
 ]
 
 
+def _for(parse, cell: str) -> str:
+    # remax reads the amount only from the part before "CZK"; its cell never
+    # carries a bare "Kč", so a Kč-spelled cell would bail before the rail and
+    # the parametrization would prove nothing for that portal.
+    return cell.replace("Kč", "CZK", 1) if parse is remax_price else cell
+
+
 @pytest.mark.parametrize("parse", TEXT_PRICE_PARSERS)
 @pytest.mark.parametrize("cell", PER_AREA_CELLS)
 def test_per_area_cell_yields_null(parse, cell: str) -> None:
-    assert parse(cell, "prodej")[0] is None
+    assert parse(_for(parse, cell), "prodej")[0] is None
+
+
+@pytest.mark.parametrize("cell", PER_AREA_PREFIX_CELLS)
+def test_remax_per_area_prefix_cell_yields_null(cell: str) -> None:
+    # remax only: its spec-table cell is the one that renders a LABEL before the
+    # amount, and it reads its digits from everything ahead of "CZK". The other
+    # five parse a bare amount (an index card's `data-price` or a lone price
+    # element), where a leading unit label is not an observed shape.
+    assert remax_price(_for(remax_price, cell), "prodej")[0] is None
 
 
 @pytest.mark.parametrize("parse", TEXT_PRICE_PARSERS)
 @pytest.mark.parametrize("cell,expected", TOTAL_CELLS)
 def test_total_cell_survives(parse, cell: str, expected: int) -> None:
-    # remax reads the amount only from the part before "CZK"; its cell never
-    # carries a bare "Kč", so give each parser its own currency spelling.
-    if parse is remax_price:
-        cell = cell.replace("Kč", "CZK", 1)
-    assert parse(cell, "prodej")[0] == expected
+    assert parse(_for(parse, cell), "prodej")[0] == expected
 
 
 @pytest.mark.parametrize("cell", PER_AREA_CELLS)
@@ -83,69 +106,3 @@ def test_the_unit_is_never_mistaken_for_an_agenda(cell: str) -> None:
     # and must never be pressed into service as an area unit (migration 423).
     assert idnes_price(cell, "pronajem")[1] == "za mesic"
     assert idnes_price(cell, "prodej")[1] == "za nemovitost"
-
-
-# ---- rail 2: the JSON portals, and the backstop for everyone -----------------
-
-# (source, the per-m2 price a contaminated row actually stored, category_main)
-JSON_PRICE_PORTALS = [
-    pytest.param("sreality", 136, "komercni", id="sreality"),
-    pytest.param("bezrealitky", 176, "komercni", id="bezrealitky"),
-    pytest.param("mmreality", 379, "komercni", id="mmreality"),
-]
-
-
-@pytest.mark.parametrize("source,unit_price,category_main", JSON_PRICE_PORTALS)
-def test_write_boundary_floors_a_unit_price(
-    source: str, unit_price: int, category_main: str
-) -> None:
-    assert db.plausible_price_czk(
-        unit_price, category_type="prodej", category_main=category_main
-    ) is None
-    assert db.plausible_price_czk(
-        unit_price, category_type="pronajem", category_main=category_main
-    ) is None
-
-
-def test_write_boundary_keeps_real_prices() -> None:
-    assert db.plausible_price_czk(
-        3_190_000, category_type="prodej", category_main="byt"
-    ) == 3_190_000
-    assert db.plausible_price_czk(
-        14_160, category_type="pronajem", category_main="byt"
-    ) == 14_160
-
-
-def test_land_has_no_sale_floor() -> None:
-    # A small parcel really does sell for tens of thousands; a floor there would
-    # delete real prices to catch a masquerade land pages don't have.
-    assert db.plausible_price_czk(
-        45_000, category_type="prodej", category_main="pozemek"
-    ) == 45_000
-
-
-def test_no_category_means_no_floor() -> None:
-    # The queue's index-price path has no category to reason about; it must stay
-    # pure column-range clamping there.
-    assert db.plausible_price_czk(136) == 136
-    assert db.plausible_price_czk(None) is None
-
-
-def test_area_floor_drops_parse_artifacts() -> None:
-    assert db.plausible_area_m2(1.0) is None
-    assert db.plausible_area_m2(4.9) is None
-    assert db.plausible_area_m2(5.0) == 5.0
-    assert db.plausible_area_m2(310.0) == 310.0
-    assert db.plausible_area_m2(None) is None
-
-
-def test_plausibility_runs_on_a_whole_row() -> None:
-    row = {
-        "price_czk": 136,
-        "area_m2": 310.0,
-        "category_type": "prodej",
-        "category_main": "komercni",
-    }
-    db.plausible_listing_row(row)
-    assert row["price_czk"] is None
-    assert row["area_m2"] == 310.0

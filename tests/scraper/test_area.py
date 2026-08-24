@@ -1,6 +1,6 @@
 """The one headline-area precedence, shared by all nine portals."""
 
-from scraper.area import AREA_BASES, derive_headline_area
+from scraper.area import AREA_BASES, MIN_AREA_M2, derive_headline_area
 
 
 def test_usable_wins_when_present():
@@ -70,6 +70,29 @@ def test_commercial_keeps_interior_area():
 
 def test_unknown_category_takes_the_dwelling_path():
     assert derive_headline_area(category_main=None, usable=70.0) == (70.0, "usable")
+
+
+def test_a_sub_metre_measure_is_declined_on_a_dwelling():
+    # 527 active byt/dum/komercni rows store an area_m2 under 5 m2 — a title-number
+    # garble or a per-m2 note read as the area, never a unit. The bound lives in the
+    # resolver, not at the write boundary, so the refusal reaches the content hash.
+    assert derive_headline_area(category_main="byt", usable=3.0) == (None, None)
+    assert derive_headline_area(category_main="dum", usable=1.0, total=180.0) == (
+        180.0,
+        "total",
+    )
+    assert derive_headline_area(category_main="komercni", total=MIN_AREA_M2) == (
+        MIN_AREA_M2,
+        "total",
+    )
+
+
+def test_the_bound_does_not_reach_small_units_or_land():
+    # A 3 m2 cellar or a 2 m2 parking bay is `ostatni` and is REAL; so are the 202
+    # active parcels under 5 m2. Bounding those would be deletion, not validation.
+    assert derive_headline_area(category_main="ostatni", usable=3.0) == (3.0, "usable")
+    assert derive_headline_area(category_main="pozemek", total=4.0) == (4.0, "plot")
+    assert derive_headline_area(category_main=None, fallback=2.0) == (2.0, "unknown")
 
 
 def test_every_emitted_basis_is_in_the_declared_vocabulary():

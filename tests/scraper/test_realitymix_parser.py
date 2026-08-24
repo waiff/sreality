@@ -185,6 +185,7 @@ def test_parse_detail_byt_full():
     assert listing.price_czk == 5_290_000
     assert listing.price_unit == "za nemovitost"
     assert listing.area_m2 == 66.0
+    assert listing.area_basis == "floor"
     assert listing.disposition == "2+1"
     assert listing.lat == 49.989288333333
     assert listing.lon == 14.604206388889
@@ -216,6 +217,7 @@ def test_parse_detail_dum_area_estate_and_garage():
     assert listing.category_main == "dum"
     assert listing.category_type == "prodej"
     assert listing.area_m2 == 214.0           # "Užitná plocha" when no flat-area row
+    assert listing.area_basis == "usable"
     assert listing.usable_area == 214.0
     assert listing.estate_area == 3028.0      # "Plocha parcely"
     assert listing.building_type == "smisena"
@@ -351,3 +353,21 @@ def test_content_hash_and_to_row_bridge_to_ingest():
     assert row["area_m2"] == 66.0
     assert row["lat"] == 49.989288333333
     assert row["street"] == "Luční"
+
+
+# Two DIFFERENT labelled measures on one page: the discriminating case for the
+# portal-label -> typed-slot mapping. Without it, swapping the kwargs in
+# parse_detail's derive_headline_area call is a silent wrong value under a
+# confident wrong label, and the whole suite stays green.
+
+def test_uzitna_beats_celkova_podlahova_and_says_so():
+    # The value MOVES here: the old or-chain put "Celková podlahová plocha" first,
+    # so this page stored 66 as the headline. It is now the interior 62, labelled.
+    item = '<li class="detail-information__data-item"><span>{}:</span><span>{} m²</span></li>'
+    html = BYT_HTML.replace(
+        item.format("Celková podlahová plocha", "66"),
+        item.format("Užitná plocha", "62") + item.format("Celková podlahová plocha", "66"),
+    )
+    listing = parse_detail(html, source_url=_BYT_URL)
+    assert (listing.area_m2, listing.area_basis) == (62.0, "usable")
+    assert listing.usable_area == 62.0

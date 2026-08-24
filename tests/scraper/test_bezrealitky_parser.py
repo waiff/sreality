@@ -74,6 +74,7 @@ def test_core_mapping():
     assert listing.price_czk == 3290000
     assert listing.price_unit == "celkem"
     assert listing.area_m2 == 83
+    assert listing.area_basis == "usable"
     assert listing.usable_area == 83
     assert listing.disposition == "5+kk"
     assert listing.lat == pytest.approx(49.91198895)

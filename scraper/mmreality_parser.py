@@ -434,12 +434,16 @@ def parse_detail(html: str, *, source_url: str) -> ScrapedListing:
     )
 
     # For a HOUSE mmreality's `totalArea` is the PLOT (median 905 m2 against
-    # 145-161 on every other portal), so the interior `usableArea` leads; the
-    # shared resolver still hands land the plot-shaped measure first.
+    # 149-163 on every other portal), so it is not offered to the resolver as a
+    # `total` at all: a house with no `usableArea` (13 of 3,601 active) must land
+    # NULL rather than a parcel stamped 'total'. It is not thrown away either —
+    # it is routed to estate_area below, the column mmreality has never filled.
+    is_house = category_main == "dum"
+    total_area = _to_float(obj.get("totalArea"))
     area_m2, area_basis = derive_headline_area(
         category_main=category_main,
         usable=_to_float(obj.get("usableArea")),
-        total=_to_float(obj.get("totalArea")),
+        total=None if is_house else total_area,
     )
 
     image_urls = _image_urls(obj)
@@ -483,7 +487,11 @@ def parse_detail(html: str, *, source_url: str) -> ScrapedListing:
         garage=_has_any(accessories, "garaz"),
         has_parking=(True if parking_lots else _has_any(accessories, "parkov", "garaz")),
         parking_lots=parking_lots,
-        estate_area=_to_float(obj.get("landArea")) or _to_float(obj.get("plotArea")),
+        estate_area=(
+            _to_float(obj.get("landArea"))
+            or _to_float(obj.get("plotArea"))
+            or (total_area if is_house else None)
+        ),
         garden_area=_to_float(obj.get("gardenArea")),
         description=obj.get("description") or None,
         raw=raw,
