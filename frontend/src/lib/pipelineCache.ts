@@ -1,13 +1,17 @@
 /* What a deal-pipeline write does to the client caches — one definition, used
  * by every surface that writes a card (rule #22).
  *
- * Three caches hold "where is this property in the pipeline", each in its own
- * shape: `members` (the map every funnel on Browse renders from), `card(id)`
- * (the listing header's single card), and `board` (the kanban array). A write
- * changes the same fact in all three, and each surface used to patch only the
- * one it could see: the board's drag invalidated `board` alone, so after moving
- * a card on the kanban every Browse funnel kept painting the OLD stage badge
- * until the members query went stale on its own.
+ * Two caches hold "where is this property in the pipeline": `members` (the map
+ * every funnel — Browse cards/table AND the listing-detail toggle, since W3 —
+ * renders from) and `board` (the kanban array, which also carries display
+ * fields `members` doesn't: price, photo, place). A write changes the same
+ * fact in both, and each surface used to patch only the one it could see: the
+ * board's drag invalidated `board` alone, so after moving a card on the
+ * kanban every Browse funnel kept painting the OLD stage badge until the
+ * members query went stale on its own. (A THIRD cache, one entry per property
+ * for the listing-detail toggle alone, existed until W3 — it was pure
+ * duplication of what `members` already held for that property, and the two
+ * had already drifted out of sync once on which columns they selected.)
  *
  * Each patcher returns a rollback closure instead of taking an `onError`
  * handler, because React Query's global MutationCache.onError (main.tsx) — the
@@ -23,7 +27,7 @@ import type { QueryClient } from '@tanstack/react-query';
 
 import { pipelineKeys, type PipelineMembers } from '@/lib/queries';
 import { invalidateBrowseQueries } from '@/lib/browseInvalidation';
-import type { PipelineBoardCard, PipelineCard, PipelineStage } from '@/lib/types';
+import type { PipelineBoardCard, PipelineStage } from '@/lib/types';
 
 export type PipelineRollback = () => void;
 
@@ -33,23 +37,20 @@ export type PipelineRollback = () => void;
  * keeps every mutation's context one type. */
 export const NO_ROLLBACK: PipelineRollback = () => {};
 
-/* Snapshot the three caches and hand back the restore. */
-function snapshot(qc: QueryClient, property_id: number): PipelineRollback {
+/* Snapshot the two caches and hand back the restore. */
+function snapshot(qc: QueryClient): PipelineRollback {
   const members = qc.getQueryData<PipelineMembers>(pipelineKeys.members);
-  const card = qc.getQueryData<PipelineCard | null>(pipelineKeys.card(property_id));
   const board = qc.getQueryData<PipelineBoardCard[]>(pipelineKeys.board);
   return () => {
     qc.setQueryData(pipelineKeys.members, members);
-    qc.setQueryData(pipelineKeys.card(property_id), card);
     qc.setQueryData(pipelineKeys.board, board);
   };
 }
 
 /* In-flight reads would otherwise land after the patch and undo it. */
-async function quiesce(qc: QueryClient, property_id: number): Promise<void> {
+async function quiesce(qc: QueryClient): Promise<void> {
   await Promise.all([
     qc.cancelQueries({ queryKey: pipelineKeys.members }),
-    qc.cancelQueries({ queryKey: pipelineKeys.card(property_id) }),
     qc.cancelQueries({ queryKey: pipelineKeys.board }),
   ]);
 }
@@ -66,8 +67,8 @@ export async function placeCard(
   property_id: number,
   stage: PipelineStage,
 ): Promise<PipelineRollback> {
-  await quiesce(qc, property_id);
-  const rollback = snapshot(qc, property_id);
+  await quiesce(qc);
+  const rollback = snapshot(qc);
 
   qc.setQueryData<PipelineMembers>(pipelineKeys.members, (prev) => {
     if (!prev) return prev;
@@ -83,16 +84,6 @@ export async function placeCard(
     });
     return next;
   });
-  qc.setQueryData<PipelineCard | null>(pipelineKeys.card(property_id), {
-    property_id,
-    stage_id: stage.id,
-    stage_key: stage.key,
-    stage_label: stage.label,
-    stage_color: stage.color,
-    stage_code: stage.code ?? null,
-    stage_position: stage.position,
-    is_terminal: stage.is_terminal,
-  });
   qc.setQueryData<PipelineBoardCard[]>(pipelineKeys.board, (prev) =>
     prev?.map((c) => (c.property_id === property_id ? { ...c, stage_id: stage.id } : c)),
   );
@@ -105,8 +96,8 @@ export async function dropCard(
   qc: QueryClient,
   property_id: number,
 ): Promise<PipelineRollback> {
-  await quiesce(qc, property_id);
-  const rollback = snapshot(qc, property_id);
+  await quiesce(qc);
+  const rollback = snapshot(qc);
 
   qc.setQueryData<PipelineMembers>(pipelineKeys.members, (prev) => {
     if (!prev) return prev;
@@ -114,7 +105,6 @@ export async function dropCard(
     next.delete(property_id);
     return next;
   });
-  qc.setQueryData<PipelineCard | null>(pipelineKeys.card(property_id), null);
   qc.setQueryData<PipelineBoardCard[]>(pipelineKeys.board, (prev) =>
     prev?.filter((c) => c.property_id !== property_id),
   );
@@ -131,10 +121,8 @@ export async function dropCard(
  * map + every loaded card page + count + stats on a funnel click is pure waste. */
 export function revalidatePipeline(
   qc: QueryClient,
-  property_id: number,
   { cohortScoped = false }: { cohortScoped?: boolean } = {},
 ): void {
-  qc.invalidateQueries({ queryKey: pipelineKeys.card(property_id) });
   qc.invalidateQueries({ queryKey: pipelineKeys.members });
   qc.invalidateQueries({ queryKey: pipelineKeys.board });
   if (cohortScoped) invalidateBrowseQueries(qc);

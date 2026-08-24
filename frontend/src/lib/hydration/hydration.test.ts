@@ -38,7 +38,6 @@ describe('hydration key namespace', () => {
       pipelineKeys.board,      // revalidatePipeline, after every card write
       pipelineKeys.members,
       pipelineKeys.stages,
-      pipelineKeys.card(42),
     ];
     for (const key of decorationKeys) {
       for (const sweep of sweeps) {

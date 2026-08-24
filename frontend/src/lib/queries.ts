@@ -2087,7 +2087,6 @@ import type {
   EstimationListParams,
   ParseResult,
   PipelineBoardCard,
-  PipelineCard,
   PipelineStage,
   TagColor,
 } from './types';
@@ -2249,9 +2248,16 @@ export const curationKeys = {
 
 /* Deal pipeline (migration 205). The "is this property bookmarked + at which   */
 /* stage" read pulls from property_pipeline_public via the anon key; writes go   */
-/* through the FastAPI service. Single-valued — at most one card per property.   */
+/* through the FastAPI service. Single-valued — at most one card per property.
+ *
+ * W3 collapsed the per-property `card(id)` key into `members` — a single
+ * property's card is just `members.get(id)`. The two used to be separate
+ * reads (fetchPropertyPipeline + fetchPipelineMembers) that once drifted
+ * out of sync on which columns they selected (a property badged "9" on a
+ * card and "5" in its own header) — one shared query now backs every
+ * surface that needs a property's pipeline state, so that class of bug
+ * can't recur. */
 export const pipelineKeys = {
-  card: (property_id: number) => ['pipeline', 'card', property_id] as const,
   board: ['pipeline', 'board'] as const,
   stages: ['pipeline', 'stages'] as const,
   members: ['pipeline', 'members'] as const,
@@ -2297,24 +2303,6 @@ export const fetchPipelineMembers = async (): Promise<PipelineMembers> => {
     expectMax: 100_000,
   });
   return new Map(rows.map((r) => [r.property_id, r]));
-};
-
-export const fetchPropertyPipeline = async (
-  property_id: number,
-): Promise<PipelineCard | null> => {
-  const { data, error } = await supabase
-    .from('property_pipeline_public')
-    /* stage_code (migration 377) is what the funnel badges — without it this
-     * surface silently fell back to the stage's ordinal while Browse, which
-     * reads the members map, showed the operator's code: the same property
-     * badged "9" on a card and "5" in its own header. */
-    .select(
-      'property_id, stage_id, stage_key, stage_label, stage_color, stage_code, is_terminal, stage_position',
-    )
-    .eq('property_id', property_id)
-    .maybeSingle();
-  if (error) throw error;
-  return (data as PipelineCard | null) ?? null;
 };
 
 export const fetchPipelineStages = async (): Promise<PipelineStage[]> => {

@@ -17,16 +17,19 @@
 
 import { useCallback, useRef, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { fetchPipelineStages, fetchPropertyPipeline, pipelineKeys } from '@/lib/queries';
+import { fetchPipelineMembers, fetchPipelineStages, pipelineKeys } from '@/lib/queries';
 import PipelineMark from '@/components/PipelineMark';
 import PipelineStageMenu from '@/components/pipeline/PipelineStageMenu';
 import { stageAccent, stageBadge } from '@/lib/pipelineStage';
 import { usePipelineCard } from '@/lib/usePipelineCard';
 
 export default function PipelineToggle({ property_id }: { property_id: number }) {
-  const cardQ = useQuery({
-    queryKey: pipelineKeys.card(property_id),
-    queryFn: () => fetchPropertyPipeline(property_id),
+  // W3: the shared members map (also what every Browse/Table funnel reads),
+  // not a separate per-property fetch — one query answers "is this property
+  // in the pipeline, at which stage" for every surface.
+  const membersQ = useQuery({
+    queryKey: pipelineKeys.members,
+    queryFn: fetchPipelineMembers,
     staleTime: 30_000,
   });
   const stagesQ = useQuery({
@@ -34,7 +37,7 @@ export default function PipelineToggle({ property_id }: { property_id: number })
     queryFn: fetchPipelineStages,
     staleTime: 60_000,
   });
-  const card = cardQ.data ?? null;
+  const card = membersQ.data?.get(property_id) ?? null;
   const stages = stagesQ.data ?? [];
   const inPipeline = card != null;
 
@@ -46,7 +49,7 @@ export default function PipelineToggle({ property_id }: { property_id: number })
   const [menuOpen, setMenuOpen] = useState(false);
   const closeMenu = useCallback(() => setMenuOpen(false), []);
 
-  if (cardQ.isLoading) {
+  if (membersQ.isLoading) {
     return (
       <span
         className="inline-flex h-[1.9rem] w-32 animate-pulse rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)]"

@@ -460,9 +460,9 @@ function Board({
       const stage = cachedStage(qc, stageId);
       return stage ? placeCard(qc, propertyId, stage) : NO_ROLLBACK;
     },
-    onSettled: (_d, err, { propertyId }, rollback) => {
+    onSettled: (_d, err, _vars, rollback) => {
       if (err) rollback?.();
-      revalidatePipeline(qc, propertyId);
+      revalidatePipeline(qc);
     },
   });
 
@@ -470,9 +470,9 @@ function Board({
   const remove = useMutation({
     mutationFn: (propertyId: number) => removePipelineCard(propertyId),
     onMutate: (propertyId) => dropCard(qc, propertyId),
-    onSettled: (_d, err, propertyId, rollback) => {
+    onSettled: (_d, err, _propertyId, rollback) => {
       if (err) rollback?.();
-      revalidatePipeline(qc, propertyId);
+      revalidatePipeline(qc);
     },
   });
 

@@ -894,21 +894,6 @@ export interface Note {
   updated_at: string | null;
 }
 
-/* Deal pipeline (migration 205). A property is in the pipeline iff it has a
- * card; "bookmarked / interested" is the entry stage. Read from
- * property_pipeline_public; single-valued (one card per property). */
-export interface PipelineCard {
-  property_id: number;
-  stage_id: number;
-  stage_key: string;
-  stage_label: string;
-  stage_color: TagColor | null;
-  is_terminal: boolean;
-  stage_position: number;
-  /* Short operator-owned badge (migration 377). NULL = render the stage's
-   * ordinal instead (lib/pipelineStage.ts:stageBadge). */
-  stage_code: string | null;
-}
 
 /* The kanban columns (pipeline_stages_public, operator-curated). */
 export interface PipelineStage {

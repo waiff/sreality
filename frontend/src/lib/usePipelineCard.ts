@@ -49,7 +49,7 @@ export function usePipelineCard(
     rollback: PipelineRollback | undefined,
   ) => {
     if (error) rollback?.();
-    revalidatePipeline(qc, property_id, { cohortScoped });
+    revalidatePipeline(qc, { cohortScoped });
   };
 
   const add = useMutation({
