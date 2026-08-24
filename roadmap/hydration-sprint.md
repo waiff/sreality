@@ -585,8 +585,54 @@ Four corollaries, because the evidence did not support one rule for everything:
   this wave's problem — but on a surface governed by corollary B, where the Railway floor already
   dominates, it is worth knowing that the cheapest reads are now planning-bound. An index audit
   on `estimation_runs` is its own wave if anyone wants it.
-- ⬜ **W8** — bundle: maplibre out of the filter-controls barrel, recharts unpinned from
-  React. Last: first-visit and post-deploy only.
+- ✅ **W8** — bundle: **first-visit JS more than halves, 607.6 → 282.9 kB gzip (−53%)**.
+  Both halves of the ledger's one-line prescription were literally right, and the second one
+  was the load-bearing half.
+  **maplibre out of the filter-controls barrel.** `filter-controls/index.ts` re-exported
+  `LocationControl`, which statically imports `maplibre-gl` (801 kB raw). A barrel is a
+  static edge, so `import { MultiselectChips } from '@/components/filter-controls'` dragged
+  the whole map engine along — and `FilterForm.tsx` does exactly that while **never rendering
+  a map**. The barrel now exports only the `CenterRadius` *type* (erased at build time, free),
+  and the two sites that genuinely draw the control — Browse's sidebar, where it renders only
+  in `center_radius` mode, and `/watchdog/:id` — load it through `lazyChunk`. Both reserve the
+  control's height so arriving doesn't jump the layout.
+  **recharts unpinned from React — and this is the finding.** All three chart consumers
+  (`PriceLineChart`, `Health`, `Costs`) were ALREADY lazy, one of them carrying the comment
+  "Lazy-loaded so recharts stays out of the detail-page entry chunk". It wasn't. The cause was
+  `manualChunks: { recharts: ['recharts'] }`: the object form claims a listed module **and
+  every dependency nothing else has claimed**, and recharts was react/react-dom/scheduler's
+  only *statically* reachable importer — so **React got folded into the chunk named
+  `recharts`**. Proof, straight out of `dist/`: the entry read
+  `import{r as m,a as Tr,R as Dg,b as ce}from"./recharts-DdjNNwFT.js"`, **31 of the built
+  chunks** imported that same file, `react-dom` and `scheduler` strings were inside it, and the
+  maplibre chunk opened with `import{c,g}from"./recharts-*.js"`. No amount of lazy-importing a
+  chart could ever have helped: recharts was on every route's critical path *because React was
+  inside it*. An attempt to fix it by adding `react: ['react','react-dom']` to the same map
+  produced a **921-byte** react chunk — the object form matched only an ESM shim while the real
+  CJS body stayed put — which is what made removing the map, rather than extending it, the
+  answer. With every heavy consumer already behind `lazyChunk`, Rollup's automatic splitting
+  gets it exactly right: **the entry ends with ZERO static chunk imports and index.html emits
+  ZERO `modulepreload` links**, while maplibre and recharts each become ONE shared async chunk
+  (verified: the map chunk is imported by all five map components, the chart chunk by all
+  four chart consumers — split, not duplicated).
+  Measured on real `npm run build` output, gzipped, cold first visit:
+  **before** entry 239.1 + recharts 151.0 + maplibre 217.5 = **607.6 kB**;
+  **after** entry alone = **282.9 kB**. The entry itself grew (239.1 → 282.9) because React
+  moved into it — one file got bigger and the total still more than halved, which is why the
+  honest unit here is the first-visit *set*, not any single chunk.
+  **The old budget could not have caught this, in the same shape W7a's could not.** CI summed
+  `index-*.js` alone and called it "what loads before any lazy import", commenting that
+  maplibre and recharts "only count when their route is opened" — a claim that was false the
+  whole time it was written down. It read ~239 kB and stayed green while a first visit cost
+  ~608 kB. `frontend/scripts/bundle-budget.mjs` replaces it: it parses `index.html`, takes the
+  entry **plus every preload plus their transitive static imports**, and fails on a gzip budget
+  — and separately fails if either library is on that path, matched **by content marker, not by
+  filename**, because Rollup names an auto-split chunk after whatever it hoisted (the same
+  maplibre bytes shipped as `maplibre-*.js` and as `basemap-*.js` across the configs tried
+  here, so a filename check would have quietly stopped matching). **Verified it actually
+  fails**: rebuilt against the pre-fix `vite.config.ts` and the rail exited 1. A rail that has
+  never been seen to fail is not a rail.
+  No React or framework version was touched — strictly import and chunk boundaries.
 
 ## Baselines — 2026-08-24, post-W-1a/W-1b, production
 
@@ -610,6 +656,18 @@ more request", it is "the grid renders perfectly and every photo is silently gon
 would never have seen that; it caught the covers/brokers leak within minutes of deploy. Settle
 times are deliberately NOT ratcheted: /browse measured 2.2 s, 3.0 s, 5.3 s and 6.1 s across four
 runs of the same build this afternoon, which is corollary D's whole point.
+
+First-visit JS, gzipped, from real `npm run build` output (W8). This is the *set* a cold
+visit fetches — entry + every `modulepreload` + their static imports — not any one chunk,
+because measuring one file is exactly how the old budget missed 368 kB:
+
+| | Entry | recharts | maplibre | First-visit total |
+| --- | --- | --- | --- | --- |
+| pre-W8 | 239.1 kB | 151.0 kB (preloaded) | 217.5 kB (preloaded) | **607.6 kB** |
+| post-W8 | 282.9 kB | async only | async only | **282.9 kB** (−53%) |
+
+Enforced by `frontend/scripts/bundle-budget.mjs` (blocking, 330 kB), which also fails if
+either library returns to the first-visit path — matched by content, not filename.
 
 Server-side block counts to beat (constraint 6):
 
@@ -710,6 +768,44 @@ Still open, filed rather than fixed here:
   `broker_leaderboard` wants `, s.broker_id` in its ORDER BY (pre-existing, display-only, but
   518 brokers tie at the "Vše" option); `listing_cover_public`'s CLIP lateral is unread by its
   only consumer; `pipelineCache` and `PIPELINE_BOARD_COLS` are both untested chokepoints.
+
+## Lane 1 complete — 2026-08-24
+
+**All seventeen waves are shipped.** W8 closes the sprint that opened on "the /pipeline board
+takes terribly long to load with 44 cards". That board now paints its first card in 368 ms
+(from 1,427 ms) off 17 requests (from 27), and the doctrine that got it there held on every
+surface it was pointed at afterwards.
+
+What the last five waves add up to, and what they say about the method:
+
+- **The prescription was wrong three times out of five, and measuring first is what caught it
+  each time.** W10c's "date-expression index" could not be built at all — `timestamptz::date`
+  is STABLE and Postgres refuses to index it (42P17), so the view had to be zone-pinned first,
+  which turned out to be a latent correctness bug of its own. W10d's "bound the history" would
+  have deleted the retired-check rows the UI deliberately renders; the bound it actually needed
+  was *per key*, and the index it supposedly needed already existed and was already being used.
+  W10e was a non-issue outright. Only W7b and W8 were the fix their one-line description said.
+- **Three of the five shipped no user-visible change and were still worth doing**, and one
+  (W10e) shipped nothing at all. A wave that ends in "measured, it's fine, here's the evidence"
+  is a real outcome; the ledger entry is the deliverable.
+- **Every one of the five was caught out by a test, a rail, or the planner at least once.**
+  W7b's equivalence test caught a wrong SigV4 base class that would have 403'd every photo in
+  the product on deploy. W10d's CI run caught a syntax error in the rail itself. W8's fix was
+  invisible until `dist/` was read directly — the source said "lazy-loaded so recharts stays
+  out of the entry chunk" and had been wrong for as long as it had been written.
+- **The budgets that existed were measuring the wrong thing, twice, in the same shape.** W7a's
+  route-request budget could not see photos vanishing; W8's bundle budget summed one file and
+  called it the first visit while 368 kB arrived beside it. Both were replaced with assertions
+  about *behaviour and the real artifact*, and both replacements were verified to fail before
+  being trusted. **A budget nobody has watched fail is a comment, not a test.**
+
+Where the remaining cost sits, honestly: not in query plans any more. `/costs`' hourly read is
+8 blocks and its admin gate costs ~332; the Browse chip's cheapest reads are planning-bound
+(1,069 planning buffers against 188 of execution). Corollary B's ~270–410 ms Railway floor and
+the instance's I/O saturation — the same statement measured 97 ms and 2,083 ms on identical
+block counts — now dominate everything this sprint can reach from the client. The open items
+below are the honest next frontier, and the biggest of them (`browse-list-rebuild`'s root cause
+and instance sizing) are the operator's call, not a wave.
 
 ## Parked, with re-entry triggers
 

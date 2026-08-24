@@ -2043,7 +2043,7 @@
     {
       "filename": "frontend-build.yml",
       "name": "CI: frontend build",
-      "description": "Builds the frontend/ Vite SPA on every push or pull request that touches frontend code, to catch build/type errors before deploy. Type-checks, builds the production bundle, and reports gzipped chunk sizes (warning if the initial JS chunk exceeds the 500 kB budget). Does not deploy.",
+      "description": "Builds the frontend/ Vite SPA on every push or pull request that touches frontend code, to catch build/type errors before deploy. Type-checks, lints for Rules of Hooks, builds the production bundle, reports every chunk's gzipped size, and enforces a blocking first-visit JS budget that also fails if maplibre or recharts return to the pre-lazy-import path. Does not deploy.",
       "portal": null,
       "manual": false,
       "schedules": [],
