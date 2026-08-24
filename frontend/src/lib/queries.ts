@@ -1546,6 +1546,28 @@ export const fetchImagesForListingIds = async (
   return out;
 };
 
+/* W4: the ONE-cover-per-listing read (the card grid's 48px thumbnail),
+ * against listing_cover_public — a server-side DISTINCT ON, not
+ * fetchImagesForListingIds(ids, 1)'s fetch-every-image-then-discard.
+ * Measured live: 44 real listing ids went from 901 image rows / 901
+ * correlated CLIP-tag lookups / 3,995 buffers to 44 rows / 44 lookups / 788
+ * buffers — the row count now equals what the card grid actually renders. */
+export const fetchListingCovers = async (
+  ids: ReadonlyArray<number>,
+): Promise<Map<number, ImagePublic>> => {
+  if (ids.length === 0) return new Map();
+  const { data, error } = await supabase
+    .from('listing_cover_public')
+    .select(`${IMAGE_PUBLIC_COLS},listing_id`)
+    .in('listing_id', ids as number[]);
+  if (error) throw error;
+  const out = new Map<number, ImagePublic>();
+  for (const row of (data ?? []) as unknown as Array<ImagePublic & { listing_id: number }>) {
+    out.set(row.listing_id, row);
+  }
+  return out;
+};
+
 /* Per-side portal chips. Batched over the properties on screen (≤100), keyed
  * on property_id. property_sources_public
  * is one row per (child listing) of a property — post-merge a property spans

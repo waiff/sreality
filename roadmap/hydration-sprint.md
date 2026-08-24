@@ -190,7 +190,26 @@ Four corollaries, because the evidence did not support one rule for everything:
   price, photo, place). `revalidatePipeline` dropped its now-unused `property_id` parameter.
   `PipelineCard` type and `fetchPropertyPipeline` deleted (zero remaining callers). Client-only
   — no query-shape change, no `EXPLAIN` evidence applicable.
-- ⬜ **W4** — cover substrate: covering index + `listing_cover_public`.
+- ✅ **W4** — cover substrate: `listing_cover_public` (migration 416). The board's cover-photo
+  read asked for one thumbnail per card (`perId: 1`) but `images_public` has no per-listing
+  LIMIT, so PostgREST returned every image row for every listing in scope and the client
+  discarded all but the first — worse, `images_public` LEFT JOINs LATERAL to
+  `image_clip_tags` per row for the tag badge, so the server paid a correlated CLIP-tag
+  lookup for every discarded row too. Measured live (44 real listing ids): 901 image rows,
+  901 CLIP-tag lateral probes, 3,995 buffers, 380ms. `listing_cover_public` computes the ONE
+  cover row per listing FIRST (`distinct on (listing_id)` over the existing
+  `images_listing_id_sequence_key` index — **no new index needed**, it already provides
+  `listing_id, sequence` in presorted order, so Postgres does an Incremental Sort instead of
+  a full one), THEN joins the CLIP lateral only to that already-reduced set. Measured live
+  (same 44 ids, warm, reproduced twice): **44 rows, 44 CLIP-tag probes, 788 buffers, 59ms**
+  — a 5× buffer cut and the lateral-probe count now equals the rendered row count instead
+  of ~20× it, matching the block-count target exactly (`44 rows / 44 probes`). No
+  `security_invoker` (matches `images_public`, its sibling — shared market data, not
+  per-account RLS-scoped); grants mirror `images_public` exactly (`anon` dark,
+  `authenticated` SELECT-only). `useListingCovers` (the shared hydration hook, currently
+  wired into Pipeline; Browse gets it in W7a) now calls the new `fetchListingCovers`
+  instead of `fetchImagesForListingIds(ids, 1)` — the multi-image fetcher stays for its
+  other callers (the card carousel, comparables) which genuinely need more than one photo.
 - ⬜ **W5** — `pipeline_board_public` cohort view. **← stop point 1**
 - ⬜ **W6** — one broker call (contacts onto the API-only view; delete the second call from
   the board *and* listing detail).
@@ -223,8 +242,8 @@ Server-side block counts to beat (constraint 6):
 | Read | Blocks | Target | Wave |
 | --- | --- | --- | --- |
 | `browse_list` default cohort | 15,877 → **6** | done | W-1a |
-| broker leaderboard | ~6,980 for 100 rows | ~500 | W10a |
-| board images (44 cards) | 830 rows + 830 CLIP laterals | 44 rows / 44 probes | W4 |
+| broker leaderboard | 6,776 → **3,108** (warm) | ~500 (close, not hit — floor is a `brokers` seq scan at 55% selectivity) | done — W10a |
+| board images (44 cards) | 3,995 → **788**; 901 CLIP laterals → **44** | 44 rows / 44 probes | done — W4 |
 | `llm_cost_daily_public` | seq scan, 231,189 rows discarded for 93 out | index | W10c |
 | `pipeline_checks_public` | 6,120 rows scanned for 15 | bounded | W10d |
 

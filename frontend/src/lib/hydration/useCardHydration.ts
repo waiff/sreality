@@ -13,7 +13,7 @@ import { useMemo } from 'react';
 
 import { fetchBrokersByIds, fetchListingBrokersByIds } from '@/lib/brokers';
 import { imageSrc } from '@/lib/imageUrl';
-import { fetchImagesForListingIds, pipelineCardBroker } from '@/lib/queries';
+import { fetchListingCovers, pipelineCardBroker } from '@/lib/queries';
 import type { PipelineCardBroker } from '@/lib/types';
 
 import { hydrationKeys } from './keys';
@@ -27,10 +27,10 @@ const DECORATION_STALE_MS = 5 * 60_000;
 export type CoverByListingId = ReadonlyMap<number, string>;
 export type BrokerByListingId = ReadonlyMap<number, PipelineCardBroker>;
 
-/* One cover image per listing. `perId: 1` is the whole point — the board shows
- * a single 48px thumbnail per card, and asking for one row per listing instead
- * of every photo is the difference the cover substrate (W4) then makes
- * structural on the server side. */
+/* One cover image per listing, from listing_cover_public (W4) — a server-side
+ * DISTINCT ON that returns exactly one row per listing instead of every
+ * photo for the client to discard down to one. The board shows a single 48px
+ * thumbnail per card, so the row count now equals what actually renders. */
 export function useListingCovers(listingIds: readonly number[]): {
   covers: CoverByListingId;
   isPending: boolean;
@@ -42,11 +42,10 @@ export function useListingCovers(listingIds: readonly number[]): {
   const q = useQuery({
     queryKey: hydrationKeys.covers(ids),
     queryFn: async () => {
-      const byListing = await fetchImagesForListingIds(ids, 1);
+      const byListing = await fetchListingCovers(ids);
       const out = new Map<number, string>();
-      for (const [listingId, images] of byListing) {
-        const first = images[0];
-        if (first) out.set(listingId, imageSrc(first));
+      for (const [listingId, image] of byListing) {
+        out.set(listingId, imageSrc(image));
       }
       return out as CoverByListingId;
     },
