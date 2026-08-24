@@ -1,8 +1,12 @@
 import { supabase } from './supabase';
 import { fetchAllRows } from './fetchAllRows';
 import { imageSrc } from './imageUrl';
+import {
+  composePipelineCards,
+  PIPELINE_PROPERTY_COLS,
+  type PipelineBoardRow,
+} from './pipelineBoardModel';
 import { type TaggedImageUrl } from './imageTags';
-import { fetchListingBrokersByIds, fetchBrokersByIds } from './brokers';
 import type { BrokerPublic, ListingBroker } from './brokers';
 import type { LlmCostDailyRow, LlmCostHourlyRow } from './llmCosts';
 import {
@@ -2308,9 +2312,20 @@ export const fetchPipelineStages = async (): Promise<PipelineStage[]> => {
   return (data ?? []) as PipelineStage[];
 };
 
-/* The kanban payload: every card joined to its property's display fields. Two
- * anon reads (property_pipeline_public + properties_public) joined client-side
- * by property_id — the same batched-hydration pattern Browse uses. */
+/* The kanban's STRUCTURAL read: which property sits in which stage, plus the
+ * display fields the board can filter and sort on. Two PostgREST reads
+ * (property_pipeline_public + properties_public) joined client-side by
+ * property_id — the same batched-hydration pattern Browse uses.
+ *
+ * Decorations are deliberately NOT here. This function used to await, in one
+ * promise, the cover images and two broker calls as well: six serialized
+ * cross-origin round trips before the board could paint a single column, the
+ * last of which existed only to fill a hover tooltip. They now load through
+ * lib/hydration as independent non-blocking queries keyed on listing_id, so
+ * the board paints as soon as this resolves and the thumbnails and broker
+ * lines arrive behind it. Anything added to a card from here on is a
+ * decoration until proven structural: if the board cannot filter, sort or
+ * place a card without it, it does not belong in this queryFn. */
 export const fetchPipelineBoard = async (): Promise<PipelineBoardCard[]> => {
   /* board_position is the MANUAL order and stays the default sort, but it is
    * not unique — it is assigned max+1 within the entry stage at bookmark time
@@ -2318,13 +2333,7 @@ export const fetchPipelineBoard = async (): Promise<PipelineBoardCard[]> => {
    * a stage. property_id is the deterministic tiebreak; without it equal
    * positions reshuffle between refetches. Any explicit sort re-sorts
    * client-side (lib/pipelineSort) and tiebreaks the same way. */
-  const rows = await fetchAllRows<{
-    property_id: number;
-    stage_id: number;
-    board_position: number;
-    entered_stage_at: string;
-    added_at: string;
-  }>({
+  const rows = await fetchAllRows<PipelineBoardRow>({
     relation: 'property_pipeline_public',
     build: () =>
       supabase
@@ -2339,97 +2348,14 @@ export const fetchPipelineBoard = async (): Promise<PipelineBoardCard[]> => {
   const ids = rows.map((r) => r.property_id);
   const { data: props, error: pErr } = await supabase
     .from('properties_public')
-    .select(
-      'property_id, sreality_id, source, source_id_native, listing_id, category_main, street, district, disposition, subtype, area_m2, price_czk, mf_gross_yield_pct, total_price_change_pct, price_change_count, obec_id, okres_id, region_id, place_search_text, obec, locality, okres, region, is_active',
-    )
+    .select(PIPELINE_PROPERTY_COLS)
     .in('property_id', ids);
   if (pErr) throw pErr;
-  const byId = new Map(
-    ((props ?? []) as Array<Record<string, unknown>>).map((p) => [
-      p.property_id as number,
-      p,
-    ]),
+
+  return composePipelineCards(
+    rows,
+    (props ?? []) as unknown as Array<Record<string, unknown>>,
   );
-
-  // One thumbnail per card, keyed on the representative listing's SURROGATE
-  // `listing_id` (properties_public.listing_id, migration 343), not
-  // sreality_id — a post-Gate-2 non-sreality representative has a NULL
-  // sreality_id and would silently lose its thumbnail. Browse cards already
-  // made this switch (fetchImagesForListingIds); the board follows suit.
-  const listingIds = rows
-    .map((r) => byId.get(r.property_id)?.listing_id as number | null | undefined)
-    .filter((x): x is number => x != null);
-  const imagesById = await fetchImagesForListingIds(listingIds, 1);
-
-  // Canonical broker per card (name + firm + contact for the hover box), two
-  // batched reads (listing→broker, then broker→contact) — no N+1, keyed on the
-  // same surrogate listing_id for the same NULL-safety reason as the images
-  // above. Both now go through the identity-gated /brokers API, which answers a
-  // logged-in caller with HTTP 200 and either full or has_email/has_phone-masked
-  // rows. So there is no longer an "expected" failure to swallow: the old
-  // SQLSTATE-42501 branch (PostgREST refusing the A6-revoked views) can't happen
-  // and every error here is a real fault. Still isolated from the board — broker
-  // data is an enrichment and must not fail stages/cards/images (the 2026-07-20
-  // incident) — but now always logged, never silently expected.
-  const listingBrokers = await fetchListingBrokersByIds(listingIds).catch(
-    (err): Map<number, ListingBroker> => {
-      console.error('fetchPipelineBoard: POST /brokers/by-listings failed', err);
-      return new Map();
-    },
-  );
-  // No size check: fetchBrokersByIds short-circuits on an empty array without a
-  // round-trip, so the guard would only duplicate it (keep the two coupled).
-  const brokerContacts = await fetchBrokersByIds([
-    ...new Set([...listingBrokers.values()].map((b) => b.broker_id)),
-  ]).catch((err): Map<number, BrokerPublic> => {
-    console.error('fetchPipelineBoard: GET /brokers failed', err);
-    return new Map();
-  });
-
-  return rows.map((r) => {
-    const p = byId.get(r.property_id);
-    const sid = (p?.sreality_id as number | null) ?? null;
-    const lid = (p?.listing_id as number | null) ?? null;
-    const firstImage = lid != null ? imagesById.get(lid)?.[0] : undefined;
-    const lb = lid != null ? listingBrokers.get(lid) : undefined;
-    const contact = lb ? brokerContacts.get(lb.broker_id) : undefined;
-    return {
-      property_id: r.property_id,
-      stage_id: r.stage_id,
-      board_position: r.board_position,
-      entered_stage_at: r.entered_stage_at,
-      added_at: r.added_at,
-      sreality_id: sid,
-      source: (p?.source as string | null) ?? null,
-      source_id_native: (p?.source_id_native as string | null) ?? null,
-      listing_id: lid,
-      category_main: (p?.category_main as string | null) ?? null,
-      street: (p?.street as string | null) ?? null,
-      district: (p?.district as string | null) ?? null,
-      disposition: (p?.disposition as string | null) ?? null,
-      subtype: (p?.subtype as string | null) ?? null,
-      area_m2: (p?.area_m2 as number | null) ?? null,
-      price_czk: (p?.price_czk as number | null) ?? null,
-      mf_gross_yield_pct: (p?.mf_gross_yield_pct as number | null) ?? null,
-      // numeric arrives from PostgREST as a string on some paths — coerce once,
-      // here, so no consumer has to guess (the llm_cost_daily reader does the same).
-      total_price_change_pct:
-        p?.total_price_change_pct == null ? null : Number(p.total_price_change_pct),
-      price_change_count:
-        p?.price_change_count == null ? null : Number(p.price_change_count),
-      obec_id: (p?.obec_id as number | null) ?? null,
-      okres_id: (p?.okres_id as number | null) ?? null,
-      region_id: (p?.region_id as number | null) ?? null,
-      place_search_text: (p?.place_search_text as string | null) ?? null,
-      obec: (p?.obec as string | null) ?? null,
-      locality: (p?.locality as string | null) ?? null,
-      okres: (p?.okres as string | null) ?? null,
-      region: (p?.region as string | null) ?? null,
-      is_active: (p?.is_active as boolean | null) ?? true,
-      image_url: firstImage ? imageSrc(firstImage) : null,
-      broker: pipelineCardBroker(lb, contact),
-    };
-  });
 };
 
 /* Project the two batched broker reads onto one card's broker block.

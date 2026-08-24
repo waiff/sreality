@@ -1002,8 +1002,12 @@ export interface PipelineBoardCard {
   /* properties.is_active rollup (bool_or over child listings, rule #15/#20) —
    * the same property-grain liveness signal Browse filters on. */
   is_active: boolean;
-  image_url: string | null;
-  broker: PipelineCardBroker | null;
+  /* No image_url and no broker here on purpose. Both are DECORATIONS: they are
+   * fetched by lib/hydration keyed on `listing_id` and reach the card through
+   * CardHydrationProvider, so nothing on the board's critical path waits for
+   * them. Putting either back on this interface would re-couple the board's
+   * structural read to a thumbnail — the exact shape that made the board take
+   * six serialized round trips to paint. */
 }
 
 /* GET /collections/{id} embeds a slimmer property projection than

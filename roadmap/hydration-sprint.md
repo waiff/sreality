@@ -77,7 +77,16 @@ Four corollaries, because the evidence did not support one rule for everything:
   budget, priced card, columns) and a per-route budget sweep over six routes asserting **no
   5xx**, a request-count ceiling and a settle time. The 5xx assertion is the sharp one —
   Browse answered 500 for weeks with nothing noticing.
-- ⬜ **W1** — pipeline progressive hydration (`lib/hydration/`, frontend only). The felt fix.
+- ✅ **W1** — pipeline progressive hydration (`lib/hydration/`, frontend only, no migration).
+  `fetchPipelineBoard` went from six serialized cross-origin round trips to two reads; covers
+  and broker lines became independent queries in a `['hydration', …]` namespace, delivered to
+  cards by context (CardFace renders twice — in-column and in the drag overlay — so props
+  would drift). A stages-driven column skeleton replaced the bare "Načítání…", the header
+  count shows `—` rather than a confident 0 while unknown, and the broker line reserves its
+  height. Enrichment isolation is now structural, so the hand-written `.catch` swallow is
+  gone; `pipelineCache` is untouched. Rails: key-namespace disjointness, a render test with
+  both decorations hanging forever, and a read-budget test pinning the queryFn at two
+  relations.
 - ⬜ **W2a** — bootstrap dedup: agendas → one query keyed on `user.id`; `queryClient.clear()`
   on sign-out; gate the unread-count badge. Removes 6 requests from **every** route.
 - ⬜ **W2b** — `fetchAllRows` exact-count termination + parallel pages; visibility-gate

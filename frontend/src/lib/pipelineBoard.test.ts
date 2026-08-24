@@ -1,27 +1,34 @@
-/* fetchPipelineBoard's broker-enrichment isolation.
+/* fetchPipelineBoard's read budget.
  *
- * Lives in its own file because it needs `./supabase` and `./brokers` mocked,
- * and queries.test.ts's other cases are pure functions that must keep running
- * against the real modules.
+ * This file used to pin broker-enrichment ISOLATION: the two /brokers reads ran
+ * inside the board's queryFn, so a failure there could take the whole board
+ * down (the 2026-07-20 incident), and the fix was a hand-written `.catch`
+ * swallow that the tests then held in place.
  *
- * What is pinned: the two /brokers reads are an ENRICHMENT. A failure there must
- * degrade the broker block of a card and nothing else — stages, cards, images
- * and the board itself still render (the 2026-07-20 incident, where a broker
- * read took the whole board down). The 2026-08-12 repoint removed the
- * `brokerMaskExpected` branch that swallowed PostgREST's 42501 silently, so the
- * second half matters just as much: every failure is now logged, because a
- * board that shows "no broker" forever with no console signal is how the dark
- * state went unnoticed for a month in the first place.
+ * The hydration sprint removed the reason for that test rather than the test's
+ * subject: brokers and cover images are no longer part of this queryFn at all.
+ * They are independent queries in lib/hydration, so isolation is now structural
+ * — a failed broker read cannot touch the board because it is not on the
+ * board's promise — and the swallow is gone with it (a failure is a real error
+ * again, visible to React Query and the global toast, instead of being
+ * converted into "this listing has no broker" forever).
+ *
+ * So what is pinned here is the property that replaced it, and the one that
+ * actually regressed: the board's structural read costs TWO relation reads and
+ * touches NO enrichment source. Six serialized cross-origin round trips before
+ * a single column could paint is what this file exists to prevent coming back.
  */
 
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const h = vi.hoisted(() => ({
   tables: {} as Record<string, Array<Record<string, unknown>>>,
+  reads: [] as string[],
 }));
 
 vi.mock('./supabase', () => {
   const builder = (relation: string) => {
+    h.reads.push(relation);
     const rows = () => h.tables[relation] ?? [];
     const b: Record<string, unknown> = {
       select: () => b,
@@ -39,6 +46,7 @@ vi.mock('./supabase', () => {
   return { supabase: { from: (relation: string) => builder(relation) } };
 });
 
+/* Mocked so that ANY call is a test failure, not a network attempt. */
 vi.mock('./brokers', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./brokers')>()),
   fetchListingBrokersByIds: vi.fn(),
@@ -49,6 +57,8 @@ import * as brokers from './brokers';
 import { fetchPipelineBoard } from './queries';
 
 beforeEach(() => {
+  h.reads = [];
+  vi.clearAllMocks();
   h.tables.property_pipeline_public = [
     {
       property_id: 42,
@@ -59,71 +69,65 @@ beforeEach(() => {
     },
   ];
   h.tables.properties_public = [
-    { property_id: 42, listing_id: 111, sreality_id: 111, street: 'Sadová', is_active: true },
+    {
+      property_id: 42,
+      sreality_id: 900,
+      listing_id: 7,
+      source: 'sreality',
+      source_id_native: '900',
+      category_main: 'byt',
+      price_czk: 5_000_000,
+      area_m2: 62,
+      is_active: true,
+      obec: 'Brno',
+      total_price_change_pct: '-3.5',
+      price_change_count: '2',
+    },
   ];
   h.tables.images_public = [];
-  vi.mocked(brokers.fetchListingBrokersByIds).mockResolvedValue(
-    new Map([
-      [
-        111,
-        {
-          sreality_id: 111,
-          listing_id: 111,
-          broker_id: 7,
-          broker_display_name: 'Jan Novák',
-          broker_firm_label: 'RE/MAX',
-        },
-      ],
-    ]),
-  );
-  vi.mocked(brokers.fetchBrokersByIds).mockResolvedValue(new Map());
-  vi.spyOn(console, 'error').mockImplementation(() => {});
 });
 
-afterEach(() => {
-  vi.restoreAllMocks();
-});
-
-describe('fetchPipelineBoard broker enrichment', () => {
-  it('hydrates the card broker when both reads succeed', async () => {
-    vi.mocked(brokers.fetchBrokersByIds).mockResolvedValue(
-      new Map([[7, { broker_id: 7, has_email: true } as brokers.BrokerPublic]]),
-    );
-    const board = await fetchPipelineBoard();
-    expect(board).toHaveLength(1);
-    expect(board[0].broker).toMatchObject({
-      broker_id: 7,
-      display_name: 'Jan Novák',
-      email: null,
-      has_email: true,
-      has_phone: false,
-    });
+describe('fetchPipelineBoard read budget', () => {
+  it('reads exactly two relations: pipeline rows, then properties', async () => {
+    await fetchPipelineBoard();
+    /* fetchAllRows pays one extra terminating page (it stops only on an empty
+       page) — W2b makes that exact-count-driven. Deduplicate to relations so
+       this test pins the SHAPE (which sources are touched, in what order) and
+       not the pagination detail W2b will change. */
+    expect([...new Set(h.reads)]).toEqual([
+      'property_pipeline_public',
+      'properties_public',
+    ]);
   });
 
-  /* The 42501 that used to be "expected" can no longer happen (the API answers
-     200 + masked columns), so a permission-shaped error is now an ordinary
-     fault: still isolated, but no longer silent. */
-  it('keeps the board and logs when the listing→broker read fails', async () => {
-    vi.mocked(brokers.fetchListingBrokersByIds).mockRejectedValue(
-      Object.assign(new Error('permission denied'), { code: '42501' }),
-    );
-    const board = await fetchPipelineBoard();
-    expect(board).toHaveLength(1);
-    expect(board[0].street).toBe('Sadová');
-    expect(board[0].broker).toBeNull();
-    expect(console.error).toHaveBeenCalled();
+  it('never reads images or brokers — those are decorations', async () => {
+    await fetchPipelineBoard();
+    expect(h.reads).not.toContain('images_public');
+    expect(brokers.fetchListingBrokersByIds).not.toHaveBeenCalled();
+    expect(brokers.fetchBrokersByIds).not.toHaveBeenCalled();
   });
 
-  it('keeps the board and logs when the broker→contact read fails', async () => {
-    vi.mocked(brokers.fetchBrokersByIds).mockRejectedValue(new Error('HTTP 500'));
+  it('projects the structural fields a card renders and sorts on', async () => {
     const board = await fetchPipelineBoard();
     expect(board).toHaveLength(1);
-    // The name still comes from the first read; only the contact is missing.
-    expect(board[0].broker).toMatchObject({
-      display_name: 'Jan Novák',
-      has_email: false,
-      has_phone: false,
+    expect(board[0]).toMatchObject({
+      property_id: 42,
+      stage_id: 1,
+      listing_id: 7,
+      source: 'sreality',
+      price_czk: 5_000_000,
+      obec: 'Brno',
+      is_active: true,
     });
-    expect(console.error).toHaveBeenCalled();
+    // numerics arrive from PostgREST as strings on some paths — coerced once.
+    expect(board[0].total_price_change_pct).toBe(-3.5);
+    expect(board[0].price_change_count).toBe(2);
+  });
+
+  it('short-circuits with no property read when the pipeline is empty', async () => {
+    h.tables.property_pipeline_public = [];
+    const board = await fetchPipelineBoard();
+    expect(board).toEqual([]);
+    expect(h.reads).not.toContain('properties_public');
   });
 });

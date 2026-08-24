@@ -16,6 +16,7 @@ import Pipeline, { planMove } from './Pipeline';
 import type { PipelineBoardCard, PipelineStage } from '@/lib/types';
 import * as api from '@/lib/api';
 import * as queries from '@/lib/queries';
+import * as brokersApi from '@/lib/brokers';
 
 vi.mock('@/lib/api', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/lib/api')>();
@@ -32,6 +33,22 @@ vi.mock('@/lib/queries', async (importOriginal) => {
     ...actual,
     fetchPipelineStages: vi.fn(),
     fetchPipelineBoard: vi.fn(),
+    fetchImagesForListingIds: vi.fn(),
+  };
+});
+
+/* Decorations (cover photo, broker line) no longer come off the board query —
+ * they load through lib/hydration keyed on listing_id. Mocking the two batch
+ * readers rather than the hooks means these tests drive the REAL provider,
+ * hooks, key namespace and projection, so what they pin is the path that
+ * actually runs in the browser. `pipelineCardBroker` is deliberately left
+ * unmocked: the masking projection is part of what the broker test asserts. */
+vi.mock('@/lib/brokers', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/lib/brokers')>();
+  return {
+    ...actual,
+    fetchListingBrokersByIds: vi.fn(),
+    fetchBrokersByIds: vi.fn(),
   };
 });
 
@@ -65,18 +82,30 @@ const CARDS: PipelineBoardCard[] = [
     okres: 'Praha',
     region: 'Hlavní město Praha',
     is_active: true,
-    image_url: null,
-    broker: {
-      broker_id: 7,
-      display_name: 'Jan Novák',
-      firm_label: 'RE/MAX',
-      email: 'jan@remax.cz',
-      phone: '+420 777 123 456',
-      has_email: true,
-      has_phone: true,
-    },
   },
 ];
+
+/* The decoration fixtures, keyed on listing_id like the real layer. */
+const LISTING_BROKER = {
+  sreality_id: 111,
+  listing_id: 111,
+  broker_id: 7,
+  broker_display_name: 'Jan Novák',
+  broker_firm_label: 'RE/MAX',
+};
+const brokerContact = (masked: boolean) => ({
+  broker_id: 7,
+  display_name: 'Jan Novák',
+  firm_id: null, firm_domain: null, firm_name: 'RE/MAX', firm_is_franchise: null,
+  source_count: 1, distinct_source_count: 1, listing_count: 1, property_count: 1,
+  active_listing_count: 1, active_property_count: 1,
+  first_seen_at: null, last_seen_at: null,
+  cz_listing_count: 1, cz_property_count: 1,
+  cz_active_listing_count: 1, cz_active_property_count: 1,
+  ...(masked
+    ? { has_email: true, has_phone: true }
+    : { primary_email: 'jan@remax.cz', primary_phone: '420777123456' }),
+});
 
 // A second card of a different property type, for the type-filter test.
 const CARD_DUM: PipelineBoardCard = {
@@ -108,8 +137,6 @@ const CARD_DUM: PipelineBoardCard = {
   okres: 'Brno-město',
   region: 'Jihomoravský kraj',
   is_active: true,
-  image_url: null,
-  broker: null,
 };
 
 // A delisted property, for the active/inactive status-filter test.
@@ -184,6 +211,13 @@ describe('<Pipeline> board', () => {
       stage_key: 'offer',
     });
     vi.mocked(api.removePipelineCard).mockResolvedValue({ removed: true });
+    vi.mocked(queries.fetchImagesForListingIds).mockResolvedValue(new Map());
+    vi.mocked(brokersApi.fetchListingBrokersByIds).mockResolvedValue(
+      new Map([[111, LISTING_BROKER]]),
+    );
+    vi.mocked(brokersApi.fetchBrokersByIds).mockResolvedValue(
+      new Map([[7, brokerContact(false)]]),
+    );
   });
 
   it('renders draggable cards with a drag handle + enriched content', async () => {
@@ -198,8 +232,11 @@ describe('<Pipeline> board', () => {
     // Enriched card content: street + MF yield + broker name linking to the broker page.
     expect(screen.getByText('Sadová, Praha')).toBeInTheDocument();
     expect(screen.getByText(/MF\s*4,3\s*%/)).toBeInTheDocument();
-    const broker = screen.getByText('Jan Novák');
-    expect(broker).toBeInTheDocument();
+    /* The broker line is a DECORATION now: the card paints without it and it
+       arrives on its own query, so this is findBy (async) rather than getBy.
+       That asymmetry is the feature — the assertions above it all passed
+       before this resolves. */
+    const broker = await screen.findByText('Jan Novák');
     expect(broker.closest('a')).toHaveAttribute('href', '/brokers/7');
     expect(broker.closest('a')).toHaveAttribute(
       'title',
@@ -207,24 +244,38 @@ describe('<Pipeline> board', () => {
     );
   });
 
+  /* The point of the split, pinned: with BOTH decoration reads hanging
+     forever, the board is still fully rendered and interactive. Before the
+     split this was six serialized round trips and a "Načítání…" string — a
+     single slow broker call blanked the entire kanban. */
+  it('paints cards while cover and broker reads are still in flight', async () => {
+    vi.mocked(queries.fetchImagesForListingIds).mockReturnValue(
+      new Promise(() => {}) as ReturnType<typeof queries.fetchImagesForListingIds>,
+    );
+    vi.mocked(brokersApi.fetchListingBrokersByIds).mockReturnValue(
+      new Promise(() => {}) as ReturnType<typeof brokersApi.fetchListingBrokersByIds>,
+    );
+    renderBoard();
+
+    // Structure: columns, the card, its price, place and drag handle.
+    expect(
+      await screen.findByLabelText('Přetáhnout kartu do jiné fáze'),
+    ).toBeInTheDocument();
+    expect(screen.getByText('Zájem')).toBeInTheDocument();
+    expect(screen.getByText('Sadová, Praha')).toBeInTheDocument();
+    expect(screen.getByText(/MF\s*4,3\s*%/)).toBeInTheDocument();
+    // Decoration: absent, and no loading string stands in for the board.
+    expect(screen.queryByText('Jan Novák')).not.toBeInTheDocument();
+    expect(screen.queryByText('Načítání…')).not.toBeInTheDocument();
+  });
+
   /* The non-admin shape: the API sends has_email/has_phone INSTEAD of the
      values. The card must keep the broker and say the contact is admin-only —
      dropping it renders identically to a broker with no contact at all. */
   it('marks a masked contact as admin-only instead of omitting it', async () => {
-    vi.mocked(queries.fetchPipelineBoard).mockResolvedValue([
-      {
-        ...CARDS[0],
-        broker: {
-          broker_id: 7,
-          display_name: 'Jan Novák',
-          firm_label: 'RE/MAX',
-          email: null,
-          phone: null,
-          has_email: true,
-          has_phone: true,
-        },
-      },
-    ]);
+    vi.mocked(brokersApi.fetchBrokersByIds).mockResolvedValue(
+      new Map([[7, brokerContact(true)]]),
+    );
     renderBoard();
     const broker = await screen.findByText('Jan Novák');
     expect(broker.closest('a')).toHaveAttribute(
