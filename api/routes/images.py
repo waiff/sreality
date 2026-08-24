@@ -14,6 +14,7 @@ shape `-?<id>/<seq>.jpg` so this can never presign the operator-private
 
 from __future__ import annotations
 
+import os
 import re
 
 from fastapi import APIRouter, HTTPException
@@ -35,7 +36,26 @@ _KEY_RE = re.compile(r"^-?\d+/\d{4}\.jpg$")
 _PRESIGN_TTL = 604800
 _REDIRECT_MAX_AGE = 3600  # 1 hour
 
+# The redirect above re-mints hourly BY DESIGN, but SigV4 signs with the wall clock, so
+# each re-mint used to hand back a different URL for the same bytes. The browser's HTTP
+# cache keys on the full URL, so the object's own `Cache-Control: public, max-age=2592000`
+# never applied twice: every photo re-downloaded once an hour, forever. Signing as at the
+# start of the current UTC day makes the target byte-identical all day, so the hourly
+# re-mint costs one header-sized 302 and zero image bytes — while the 1-hour redirect cache,
+# and with it the credential-rotation self-heal above, is untouched. Must stay well under
+# _PRESIGN_TTL: the last URL minted in a bucket still has TTL - anchor left to live
+# (6 days here). Set IMAGE_PRESIGN_ANCHOR_SECONDS=0 to fall back to per-request signing.
+_PRESIGN_ANCHOR_DEFAULT = 86400  # 1 day
+
 _client: image_storage.R2Client | None = None
+
+
+def _anchor_seconds() -> int:
+    """Read per request so the kill switch takes effect without a redeploy."""
+    raw = os.environ.get("IMAGE_PRESIGN_ANCHOR_SECONDS")
+    if raw is None or not raw.strip().lstrip("-").isdigit():
+        return _PRESIGN_ANCHOR_DEFAULT
+    return min(int(raw), _PRESIGN_TTL // 2)
 
 
 def _r2() -> image_storage.R2Client | None:
@@ -52,7 +72,9 @@ def get_image(key: str) -> RedirectResponse:
     client = _r2()
     if client is None:
         raise HTTPException(status_code=503, detail="Image storage not configured")
-    url = client.presigned_get(key, expires_in=_PRESIGN_TTL)
+    url = client.presigned_get(
+        key, expires_in=_PRESIGN_TTL, anchor_seconds=_anchor_seconds()
+    )
     return RedirectResponse(
         url,
         status_code=302,

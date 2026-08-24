@@ -1151,14 +1151,27 @@ def get_building_attachment_raw(
     _: None = Depends(deps.require_token),
 ) -> Response:
     """Bearer-gated thumbnail proxy. The frontend uses this to render
-    attachment previews without exposing R2 credentials."""
+    attachment previews without exposing R2 credentials.
+
+    Cached hard because an attachment is immutable: its bucket key carries a per-upload
+    uuid, so editing one means a new row at a new key and a delete removes the row
+    outright — this id can never answer with different bytes. Without a Cache-Control
+    every `AttachmentCard` mount re-pulled the whole file (up to 25 MB) through Railway,
+    which pulls it from R2 first, so the operator paid a double hop per preview. `private`,
+    never `public`: these are operator-only uploads behind a bearer token and must not be
+    stored by a shared cache.
+    """
     row = attachments_module.fetch_attachment(conn, attachment_id)
     if row is None or row["building_run_id"] != building_id:
         raise HTTPException(status_code=404, detail="attachment not found")
     data, mime, _filename = attachments_module.download_attachment_bytes(
         conn, attachment_id,
     )
-    return Response(content=data, media_type=mime)
+    return Response(
+        content=data,
+        media_type=mime,
+        headers={"Cache-Control": "private, max-age=86400, immutable"},
+    )
 
 
 @app.post("/estimate_yield")
