@@ -1186,8 +1186,13 @@ export const setFilterVisibility = (
  * collections does property X belong to` go through the *_public Supabase
  * views (see lib/queries.ts) — there is no per-property GET on the API for
  * those. Notes are read via the API only. Everything else (list-by-domain,
- * create, update, delete, attach, detach) goes through the bearer-gated
- * FastAPI endpoints wrapped below.
+ * create, update, delete, attach, detach) goes through the FastAPI endpoints
+ * wrapped below.
+ *
+ * EVERY wrapper here passes `jwt: true`. The routes run on the tenant pool
+ * (verify_jwt + RLS-scoped connection), which rejects the static API_TOKEN
+ * outright — it is not an identity, it ships inside this bundle. Dropping the
+ * flag does not degrade to "unscoped but working"; it 401s.
  */
 
 /* Collections */
@@ -1196,7 +1201,7 @@ export const listCollections = (): Promise<{ data: Collection[]; total: number }
   request<{ data: Collection[]; total: number }>('/collections', { jwt: true });
 
 export const getCollection = (id: number): Promise<CollectionWithProperties> =>
-  request<CollectionWithProperties>(`/collections/${id}`);
+  request<CollectionWithProperties>(`/collections/${id}`, { jwt: true });
 
 export const createCollection = (input: {
   name: string;
@@ -1204,7 +1209,7 @@ export const createCollection = (input: {
   monitoring_enabled?: boolean;
   notify_channels?: string[];
 }): Promise<Collection> =>
-  request<Collection>('/collections', { method: 'POST', json: input });
+  request<Collection>('/collections', { method: 'POST', json: input, jwt: true });
 
 export const updateCollection = (
   id: number,
@@ -1215,10 +1220,14 @@ export const updateCollection = (
     notify_channels?: string[];
   },
 ): Promise<Collection> =>
-  request<Collection>(`/collections/${id}`, { method: 'PATCH', json: input });
+  request<Collection>(`/collections/${id}`, {
+    method: 'PATCH',
+    json: input,
+    jwt: true,
+  });
 
 export const deleteCollection = (id: number): Promise<{ deleted: true }> =>
-  request<{ deleted: true }>(`/collections/${id}`, { method: 'DELETE' });
+  request<{ deleted: true }>(`/collections/${id}`, { method: 'DELETE', jwt: true });
 
 export const addPropertiesToCollection = (
   id: number,
@@ -1242,19 +1251,19 @@ export const removePropertyFromCollection = (
 /* Tags */
 
 export const listTags = (): Promise<{ data: Tag[] }> =>
-  request<{ data: Tag[] }>('/tags');
+  request<{ data: Tag[] }>('/tags', { jwt: true });
 
 export const createTag = (input: { name: string; color: TagColor }): Promise<Tag> =>
-  request<Tag>('/tags', { method: 'POST', json: input });
+  request<Tag>('/tags', { method: 'POST', json: input, jwt: true });
 
 export const updateTag = (
   id: number,
   patch: { name?: string | null; color?: TagColor | null },
 ): Promise<Tag> =>
-  request<Tag>(`/tags/${id}`, { method: 'PATCH', json: patch });
+  request<Tag>(`/tags/${id}`, { method: 'PATCH', json: patch, jwt: true });
 
 export const deleteTag = (id: number): Promise<{ deleted: true }> =>
-  request<{ deleted: true }>(`/tags/${id}`, { method: 'DELETE' });
+  request<{ deleted: true }>(`/tags/${id}`, { method: 'DELETE', jwt: true });
 
 export const attachTag = (
   property_id: number,
@@ -1263,6 +1272,7 @@ export const attachTag = (
   request<{ attached: boolean }>(`/properties/${property_id}/tags`, {
     method: 'POST',
     json: { tag_id },
+    jwt: true,
   });
 
 export const detachTag = (
@@ -1271,7 +1281,7 @@ export const detachTag = (
 ): Promise<{ detached: boolean }> =>
   request<{ detached: boolean }>(
     `/properties/${property_id}/tags/${tag_id}`,
-    { method: 'DELETE' },
+    { method: 'DELETE', jwt: true },
   );
 
 /* Notes (per-property journal) */

@@ -4,12 +4,19 @@ CRUD over the property-grain curation tables (migration 202): collection
 membership, tags and notes are keyed on `property_id` so operator curation
 describes the real-world property and is dedup-stable (it follows the property
 across merge/unmerge/split via toolkit.operator_state). Each handler is a plain
-function returning a dict; the FastAPI routes in api/main.py wrap them with either
-Depends(get_db_conn) + Depends(require_token) (service-role, unscoped) or, for the
-extension-touched routes (Wave 1 W1-1), tenant_pool.tenant_conn (RLS-scoped by the
-caller's verified JWT) — reads then need no account_id in code, RLS filters them;
-top-level INSERTs with no account-owned parent to derive it from (create_note) take
-an explicit account_id.
+function returning a dict; EVERY FastAPI route in api/main.py that wraps them now
+uses tenant_pool.tenant_conn + Depends(verify_jwt) (RLS-scoped by the caller's
+verified JWT) — reads then need no account_id in code, RLS filters them; top-level
+INSERTs with no account-owned parent to derive it from (create_collection,
+create_tag, create_note) take an explicit account_id.
+
+The stragglers still on Depends(get_db_conn) + Depends(require_token) — collection
+CRUD and every /tags route — were moved here in one pass: that pair is service-role
+(RLS off) behind a static token that ships inside the public SPA bundle, and the
+statements below carry no account predicate of their own, so any holder of the
+token could read or delete another account's curation. Nothing in this module may
+go back to the service-role pair; a new route joins the tenant path or it does not
+ship.
 
 Pattern mirrors api/estimation_runs.py:
   - one transaction per write,
@@ -49,10 +56,17 @@ _COLLECTION_FULL_PROJECTION = (
 
 def create_collection(
     conn: "psycopg.Connection", body: s.CreateCollectionIn,
+    account_id: str | None = None,
 ) -> dict[str, Any]:
+    # account_id: `collections` is a top-level table with no owning parent to
+    # derive it from — unlike collection_properties, whose BEFORE trigger
+    # (mig 292) copies it off the parent collection — and it carries no
+    # DEFAULT, so a tenant_conn INSERT that leaves it NULL fails the table's
+    # WITH CHECK closed. Same shape as create_note.
     sql = (
-        "INSERT INTO collections (name, description, monitoring_enabled, notify_channels) "
-        "VALUES (%s, %s, %s, %s) "
+        "INSERT INTO collections "
+        "  (name, description, monitoring_enabled, notify_channels, account_id) "
+        "VALUES (%s, %s, %s, %s, %s) "
         "RETURNING id, name, description, created_at, updated_at, "
         "          monitoring_enabled, notify_channels, is_system"
     )
@@ -61,7 +75,7 @@ def create_collection(
             cur.execute(
                 sql,
                 (body.name, body.description,
-                 body.monitoring_enabled, body.notify_channels),
+                 body.monitoring_enabled, body.notify_channels, account_id),
             )
             row = cur.fetchone()
     except psycopg.errors.UniqueViolation:
@@ -391,14 +405,18 @@ def list_tags(conn: "psycopg.Connection") -> dict[str, Any]:
 
 def create_tag(
     conn: "psycopg.Connection", body: s.CreateTagIn,
+    account_id: str | None = None,
 ) -> dict[str, Any]:
+    # account_id: same top-level case as create_collection — property_tags
+    # inherits it from the parent tag via trigger, `tags` itself has nothing
+    # to inherit from and no DEFAULT.
     sql = (
-        "INSERT INTO tags (name, color) VALUES (%s, %s) "
+        "INSERT INTO tags (name, color, account_id) VALUES (%s, %s, %s) "
         "RETURNING id, name, color, created_at"
     )
     try:
         with conn.transaction(), conn.cursor() as cur:
-            cur.execute(sql, (body.name, body.color))
+            cur.execute(sql, (body.name, body.color, account_id))
             row = cur.fetchone()
     except psycopg.errors.UniqueViolation:
         raise HTTPException(409, "tag name already exists")

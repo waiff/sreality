@@ -845,6 +845,23 @@ renumber.** Navigate by area:
     lazily via `GET /properties/{id}/notes` on open. Tags are the one curation surface the
     extension does not yet expose.
     Same no-hard-delete spirit as the rest of the data model.
+    **Every curation route runs on the tenant pool (`tenant_conn` + `verify_jwt`), with no
+    exceptions** (hydration sprint W-1c). Until then the collection CRUD (`POST /collections`,
+    `GET`/`PATCH`/`DELETE /collections/{id}`) and every `/tags` route were still on the
+    `get_db_conn` + `require_token` pair the rest of the module had already left: that pair is
+    service-role (RLS off) behind the static `API_TOKEN` that ships inside the public SPA bundle,
+    and `api/curation.py`'s statements carry no account predicate of their own — they lean
+    entirely on RLS — so any holder of the token could read, rename or delete another account's
+    collections and tags (live data at the time: five collections across five distinct accounts).
+    Two consequences worth keeping in mind when touching this module: (a) `collections` and `tags`
+    are top-level tables with no owning parent, so unlike `collection_properties` /
+    `property_tags` (whose BEFORE triggers copy `account_id` off the parent, migration 292) their
+    INSERTs must stamp `account_id` explicitly or fail the WITH CHECK closed — `create_collection`
+    / `create_tag` / `create_note` all take it as a parameter, resolved route-side by
+    `tenant_pool.resolve_account_id`; and (b) the frontend wrappers for these routes must pass
+    `jwt: true` (`frontend/src/lib/api.ts`), because `verify_jwt` no longer accepts the static
+    token as a synthetic identity. `tests/api/test_auth.py::_jwt_gated_calls` is the test-side
+    twin of this rule — a route moving back to `_gated_calls` is the regression to catch.
 19. **The sreality scrape is split by cadence (Phase 2): a fast index-walk feeds an async
     batched detail-drain through `listing_detail_queue` (migration 105).** `index_walk.yml`
     (`scraper.main --index-only`, `run_type='index'`) walks the full index, `touch_listings` +

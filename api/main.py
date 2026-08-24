@@ -1251,10 +1251,11 @@ def post_estimate_yield(
 @app.post("/collections")
 def post_create_collection(
     body: s.CreateCollectionIn,
-    conn: Any = Depends(deps.get_db_conn),
-    _: None = Depends(deps.require_token),
+    conn: Any = Depends(tenant_pool.tenant_conn),
+    claims: dict = Depends(deps.verify_jwt),
 ) -> dict[str, Any]:
-    return curation.create_collection(conn, body)
+    account_id = tenant_pool.resolve_account_id(conn, claims) or deps.SYSTEM_ACCOUNT_ID
+    return curation.create_collection(conn, body, account_id=str(account_id))
 
 
 @app.get("/collections")
@@ -1268,8 +1269,8 @@ def get_list_collections(
 @app.get("/collections/{collection_id}")
 def get_collection(
     collection_id: int,
-    conn: Any = Depends(deps.get_db_conn),
-    _: None = Depends(deps.require_token),
+    conn: Any = Depends(tenant_pool.tenant_conn),
+    claims: dict = Depends(deps.verify_jwt),
 ) -> dict[str, Any]:
     return curation.get_collection(conn, collection_id)
 
@@ -1278,8 +1279,8 @@ def get_collection(
 def patch_collection(
     collection_id: int,
     body: s.UpdateCollectionIn,
-    conn: Any = Depends(deps.get_db_conn),
-    _: None = Depends(deps.require_token),
+    conn: Any = Depends(tenant_pool.tenant_conn),
+    claims: dict = Depends(deps.verify_jwt),
 ) -> dict[str, Any]:
     return curation.update_collection(conn, collection_id, body)
 
@@ -1287,8 +1288,8 @@ def patch_collection(
 @app.delete("/collections/{collection_id}")
 def delete_collection(
     collection_id: int,
-    conn: Any = Depends(deps.get_db_conn),
-    _: None = Depends(deps.require_token),
+    conn: Any = Depends(tenant_pool.tenant_conn),
+    claims: dict = Depends(deps.verify_jwt),
 ) -> dict[str, Any]:
     return curation.delete_collection(conn, collection_id)
 
@@ -1436,8 +1437,8 @@ def delete_property_note(
 
 @app.get("/tags")
 def get_tags(
-    conn: Any = Depends(deps.get_db_conn),
-    _: None = Depends(deps.require_token),
+    conn: Any = Depends(tenant_pool.tenant_conn),
+    claims: dict = Depends(deps.verify_jwt),
 ) -> dict[str, Any]:
     return curation.list_tags(conn)
 
@@ -1445,18 +1446,19 @@ def get_tags(
 @app.post("/tags")
 def post_tag(
     body: s.CreateTagIn,
-    conn: Any = Depends(deps.get_db_conn),
-    _: None = Depends(deps.require_token),
+    conn: Any = Depends(tenant_pool.tenant_conn),
+    claims: dict = Depends(deps.verify_jwt),
 ) -> dict[str, Any]:
-    return curation.create_tag(conn, body)
+    account_id = tenant_pool.resolve_account_id(conn, claims) or deps.SYSTEM_ACCOUNT_ID
+    return curation.create_tag(conn, body, account_id=str(account_id))
 
 
 @app.patch("/tags/{tag_id}")
 def patch_tag(
     tag_id: int,
     body: s.UpdateTagIn,
-    conn: Any = Depends(deps.get_db_conn),
-    _: None = Depends(deps.require_token),
+    conn: Any = Depends(tenant_pool.tenant_conn),
+    claims: dict = Depends(deps.verify_jwt),
 ) -> dict[str, Any]:
     return curation.update_tag(conn, tag_id, body)
 
@@ -1464,8 +1466,8 @@ def patch_tag(
 @app.delete("/tags/{tag_id}")
 def delete_tag(
     tag_id: int,
-    conn: Any = Depends(deps.get_db_conn),
-    _: None = Depends(deps.require_token),
+    conn: Any = Depends(tenant_pool.tenant_conn),
+    claims: dict = Depends(deps.verify_jwt),
 ) -> dict[str, Any]:
     return curation.delete_tag(conn, tag_id)
 
@@ -1474,8 +1476,8 @@ def delete_tag(
 def post_attach_tag(
     property_id: int,
     body: s.AttachTagIn,
-    conn: Any = Depends(deps.get_db_conn),
-    _: None = Depends(deps.require_token),
+    conn: Any = Depends(tenant_pool.tenant_conn),
+    claims: dict = Depends(deps.verify_jwt),
 ) -> dict[str, Any]:
     return curation.attach_tag(conn, property_id, body)
 
@@ -1484,8 +1486,8 @@ def post_attach_tag(
 def delete_property_tag(
     property_id: int,
     tag_id: int,
-    conn: Any = Depends(deps.get_db_conn),
-    _: None = Depends(deps.require_token),
+    conn: Any = Depends(tenant_pool.tenant_conn),
+    claims: dict = Depends(deps.verify_jwt),
 ) -> dict[str, Any]:
     return curation.detach_tag(conn, property_id, tag_id)
 
