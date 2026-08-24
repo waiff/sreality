@@ -132,6 +132,16 @@ jobs:
           TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
         run: pytest tests/test_tenant_isolation_live.py -q
 
+      # The /costs rollups are only indexable because their bucket expressions name a
+      # zone explicitly — a bare `called_at::date` is STABLE, and Postgres refuses to
+      # index it (42P17). Revert either view and the index stops matching silently: the
+      # plan falls back to the seq scan that discarded 231,189 rows for 93, with nothing
+      # else failing. Only the replayed schema can see that the two still agree.
+      - name: /costs rollups stay indexable (migration 421)
+        env:
+          TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+        run: pytest tests/test_llm_cost_rollup_indexable.py -q
+
       # The W2a-0 churn counters are an INSTRUMENT whose numbers decide a
       # tens-of-GB storage question, and their whole behaviour lives in one
       # ON CONFLICT clause. PREPARE proves it compiles; only executing it proves
