@@ -1181,12 +1181,15 @@ contact corpus to `toolkit.broker_resolver.decide_merges`, which since 2026-08-2
   rule does not consult `firms.is_franchise` (a flag exclusion once parked 92% of the name_firm
   queue — 1,481 of 1,615 cards — behind firm-display metadata; the veto separates franchise
   offices by their disagreeing personal contacts instead).
-- **Path D (indistinguishable records)** handles the common-label residue: a same-name cohort at
-  ONE firm whose members all carry the identical non-empty contact set differs in no attribute
-  the platform holds, so it is one account however common the label — seven "Zákaznická linka"
-  records on one office inbox + line are one account, even though 15+ other agencies run a
-  customer line under the same label (those never fuse: D only operates inside one firm). A
-  cohort whose sets differ at all stays in manual review.
+- **Path F (shared firm)** drops the rarity requirement inside a firm: a same-name cohort at one
+  firm is one person unless personal contacts disagree, however many other firms carry the name.
+  Rarity guards the cross-firm question — is the record at ANOTHER firm the same human? — but a
+  within-firm cohort never asks it; holding six "Václav Kučera" records at one agency hostage to
+  a namesake elsewhere answered nothing a reviewer could judge either (2026-08-24: the entire
+  post-rarity `name_firm` residue was this shape). F never crosses a firm boundary, so common
+  labels at different firms still never fuse; the veto still refuses disagreeing personal
+  contacts. Accepted residual: two same-named colleagues at one agency reachable only through
+  office contacts pool into one broker — same-name, same-firm, mild, reversible.
 - **The contradiction veto** refuses a cohort whose members carry **disconfirming** contacts —
   each a discriminating one of the same kind, no value in common. It is what catches a display
   name that IS the firm's name ("PREXIMA nemovitosti s.r.o." on five agents, each with a personal
