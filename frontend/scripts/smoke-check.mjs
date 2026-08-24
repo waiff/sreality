@@ -233,6 +233,33 @@ if (process.env.SMOKE_CHECK_CHROMIUM_PATH) {
       `photo counter: ${counterText}`,
     );
 
+    /* --- listing photos actually DECODE (W7b) -------------------------- *
+     * The counter above is drawn from the photo ROWS, so it reads "1 / 7"
+     * just as happily when all seven <img>s are 403ing. W7b changes how the
+     * /images redirect signs its R2 target, and a wrong signature fails
+     * exactly there: perfect markup, correct counts, every photo broken.
+     * naturalWidth is the only probe that distinguishes them — it is > 0
+     * only once the browser has decoded real bytes. */
+    let decoded = 0;
+    let sampled = 0;
+    try {
+      await page.locator('img[src*="/images/"]').first().waitFor({
+        state: 'visible', timeout: 20000,
+      });
+      const shots = await page.locator('img[src*="/images/"]').all();
+      for (const img of shots.slice(0, 5)) {
+        sampled += 1;
+        if (await img.evaluate((el) => el.complete && el.naturalWidth > 0)) decoded += 1;
+      }
+    } catch {
+      /* leave decoded at 0 — reported below, not thrown */
+    }
+    step(
+      'listing photos load from R2 (presigned redirect resolves)',
+      sampled > 0 && decoded === sampled,
+      `${decoded}/${sampled} sampled <img> decoded`,
+    );
+
     await mergeModeBtn.click();
     step('clicked "Merge mode" (local state only, no network call)', true);
 

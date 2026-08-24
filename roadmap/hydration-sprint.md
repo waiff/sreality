@@ -390,7 +390,67 @@ Four corollaries, because the evidence did not support one rule for everything:
   the wave that could leave the grid rendering perfectly with every photo silently gone, and every
   existing Browse assertion would still have passed.
   **← stop point 2 — pausing here for review before W7b onward.**
-- ⬜ **W7b** — media delivery (the hourly presign re-mint kills the browser cache key).
+- ✅ **W7b** — media delivery: a stable cache key for bytes we already sent. **No migration,
+  no query change** — so constraint 6's currency doesn't apply here and the honest substitute
+  is bytes on the wire, measured against production. The premise held exactly. `GET /images/{key}`
+  is already the right shape (a stable proxy URL 302-ing to a presigned R2 GET, so the private
+  bucket streams straight to the browser), and the redirect is deliberately cached for only an
+  hour so an R2 credential rotation self-heals instead of stranding browsers on a dead signed
+  URL for days. But SigV4 signs off the **wall clock**: probing production twice, two seconds
+  apart, returned `X-Amz-Date=…T192941Z` and `…T192943Z` with different signatures — **the target
+  changes on literally every request**. The browser's HTTP cache keys on the whole URL, query
+  string included, so the hourly re-mint made every already-downloaded photo unaddressable. And
+  the bytes are eminently cacheable: R2 answers `Cache-Control: public, max-age=2592000` with a
+  strong ETag on a **300 KB** JPEG. A 30-day cache directive that could never apply twice, across
+  **10,228,162** stored images.
+  The fix pins the signing timestamp to the start of the current UTC day, so one key presigns to
+  a byte-identical string all day. **The 1-hour redirect cache is untouched** — that was the whole
+  design constraint: the re-mint still happens hourly (rotation still self-heals within the hour),
+  it just now returns the same string, so the hourly cost is one header-sized 302 and **zero image
+  bytes** instead of a full re-download. A 24× reduction in re-mint boundaries, and the anchor is
+  the *only* thing changed about the signature.
+  **Anchoring is signed through botocore's own auth class, not reimplemented** — a four-line
+  subclass overriding `_modify_request_before_signing` to overwrite `request.context['timestamp']`
+  before `super()` reads it. `add_auth` stamps "now" into that context and then *every* downstream
+  consumer (the `X-Amz-Date` param, the credential scope, the string-to-sign, the derived signing
+  key) reads it back out, so overwriting it in that one place pins all four consistently with zero
+  crypto of our own. The rail that makes this safe is an **equivalence test**: freeze botocore's
+  clock to the anchor instant, ask boto3 for an ordinary presigned URL, and assert the anchored
+  signer returns that byte-identical string. **It immediately failed on a real defect** — the first
+  cut subclassed the generic `SigV4QueryAuth`, but boto3 resolves `s3v4-query` → `S3SigV4QueryAuth`,
+  which signs the constant `UNSIGNED-PAYLOAD` instead of a body hash and skips path normalisation.
+  Every field of the URL matched and *only the signature was wrong*: 253 identical leading
+  characters, then a different hash. That defect is invisible to any test that checks URL shape,
+  invisible to a local run without credentials, and would have 403'd **every photo in the product**
+  on deploy. Signing against the reference implementation rather than against a schema is what
+  caught it.
+  **Bounded and reversible.** The anchor must stay well under the 7-day presign TTL — a URL minted
+  in the bucket's last second was signed at its *start*, so it carries `TTL − anchor` of remaining
+  life (6 days here); let the two meet and the last request of every bucket gets an already-expired
+  URL. A test pins that invariant, and the route caps any override at `TTL / 2`.
+  `IMAGE_PRESIGN_ANCHOR_SECONDS` is read **per request**, so `0` reverts to per-request signing
+  from the Railway dashboard with no redeploy — the kill switch for the one thing that cannot be
+  proven locally (that R2 honours a backdated signature). It is a well-founded assumption rather
+  than a guess: a presigned URL signed 12 hours ago and one minted now with a 12-hour-old
+  `X-Amz-Date` are the same artefact to the server, which is exactly what the existing 7-day
+  `X-Amz-Expires` already presumes, and the 15-minute skew rule governs *header*-based SigV4, not
+  query presigning. Verified end-to-end against production after deploy regardless.
+  **The building-attachment half was a different bug with the same shape.**
+  `GET /buildings/{id}/attachments/{aid}/raw` doesn't presign at all — it is a bearer-gated byte
+  proxy (an `<img>` can't send a bearer header, so `AttachmentCard` `fetch`es it into a blob URL)
+  — and it sent **no `Cache-Control` whatsoever**, outside React Query, in a bare `useEffect`. So
+  every mount re-pulled the entire file, up to the 25 MB cap, over *two* hops: R2 → Railway →
+  browser. The bytes are immutable by construction (the bucket key carries a per-upload uuid, an
+  edit is a new row at a new key, a delete removes the row), so they take
+  `private, max-age=86400, immutable` — **`private`, never `public`**: operator-only uploads behind
+  a bearer token must not be stored by a shared cache. A test pins that the directive is cacheable,
+  that it is never `public`, and that caching didn't widen what the route will serve (a foreign
+  building id still 404s).
+  **No ratchet earned, and that is the correct result** — the sweep counts app-data requests and
+  explicitly excludes image bytes, so this wave moves no number on that table by construction; no
+  swept route renders a building attachment either. Its evidence is bytes, and its rail is the
+  behavioural check that photos still *load* (a wave that breaks image signing renders a perfect
+  grid full of broken images, and every request-count assertion would still pass).
 - ⬜ **W10c** — /costs date-expression index. ⬜ **W10d** — /health bounds. ⬜ **W10e** —
   /estimations OR-join (EXPLAIN first — that one is code-derived, not measured).
 - ⬜ **W8** — bundle: maplibre out of the filter-controls barrel, recharts unpinned from

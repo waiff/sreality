@@ -358,6 +358,15 @@ Image storage (Cloudflare R2, S3-compatible):
   them, every listing photo 503s and the UI looks imageless even though the DB reports the
   bytes "stored" — the API logs a boot WARNING and `GET /health` reports
   `image_storage: "unconfigured"` in that case.
+- `IMAGE_PRESIGN_ANCHOR_SECONDS` (optional, API service, default `86400`) — the width of the
+  bucket `GET /images/{key}` pins its SigV4 signing time to, so the same key presigns to a
+  byte-identical URL all day. The browser's HTTP cache keys on the whole URL including the
+  signature; without this the hourly redirect re-mint handed back a fresh signature and
+  every photo re-downloaded hourly despite R2's own 30-day `max-age`. Read per request, so
+  it takes effect without a redeploy: set it to `0` to fall back to per-request signing
+  (the kill switch if R2 ever rejects a backdated signature). Values are capped at half the
+  7-day presign TTL — the last URL minted in a bucket was signed at the bucket's *start*,
+  so anchor and TTL meeting would serve an already-expired URL.
 
 LLM + maps (FastAPI service + scoring jobs):
 - `ANTHROPIC_API_KEY` — required for the URL parser, summarize/vision tools, condition

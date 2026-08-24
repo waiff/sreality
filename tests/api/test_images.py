@@ -19,14 +19,25 @@ from scraper import image_storage
 
 
 class _FakeR2:
-    def presigned_get(self, key: str, expires_in: int = 0) -> str:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, int, int]] = []
+
+    def presigned_get(
+        self, key: str, expires_in: int = 0, anchor_seconds: int = 0
+    ) -> str:
+        self.calls.append((key, expires_in, anchor_seconds))
         return f"https://example.r2.cloudflarestorage.com/bucket/{key}?sig=abc"
 
 
 @pytest.fixture()
-def client(monkeypatch):
+def fake_r2():
+    return _FakeR2()
+
+
+@pytest.fixture()
+def client(monkeypatch, fake_r2):
     monkeypatch.setattr(image_storage, "is_configured", lambda: True)
-    monkeypatch.setattr(image_storage.R2Client, "from_env", classmethod(lambda cls, **_kw: _FakeR2()))
+    monkeypatch.setattr(image_storage.R2Client, "from_env", classmethod(lambda cls, **_kw: fake_r2))
     images_route._client = None  # reset the module-level lazy singleton
     yield TestClient(api_main.app)
     images_route._client = None
@@ -64,6 +75,37 @@ def test_public_even_when_token_set(client, monkeypatch):
 def test_non_image_keys_rejected(client, key):
     res = client.get(f"/images/{key}", follow_redirects=False)
     assert res.status_code == 404
+
+
+def test_presign_is_anchored_by_default(client, fake_r2):
+    """The redirect target has to be stable across the hourly re-mint, or the browser
+    re-downloads every photo it already holds."""
+    client.get("/images/2872083276/0001.jpg", follow_redirects=False)
+    _key, expires_in, anchor = fake_r2.calls[-1]
+    assert anchor == images_route._PRESIGN_ANCHOR_DEFAULT
+    assert expires_in == images_route._PRESIGN_TTL
+    # The redirect itself must NOT be cached longer just because the target is stable —
+    # that short TTL is what makes a credential rotation self-heal within the hour.
+    assert images_route._REDIRECT_MAX_AGE == 3600
+
+
+def test_anchor_kill_switch_reverts_to_per_request_signing(client, fake_r2, monkeypatch):
+    monkeypatch.setenv("IMAGE_PRESIGN_ANCHOR_SECONDS", "0")
+    client.get("/images/2872083276/0001.jpg", follow_redirects=False)
+    assert fake_r2.calls[-1][2] == 0
+
+
+def test_anchor_override_is_capped_below_the_presign_ttl(client, fake_r2, monkeypatch):
+    """An anchor at or past the TTL would hand out already-expired URLs."""
+    monkeypatch.setenv("IMAGE_PRESIGN_ANCHOR_SECONDS", "9999999")
+    client.get("/images/2872083276/0001.jpg", follow_redirects=False)
+    assert fake_r2.calls[-1][2] == images_route._PRESIGN_TTL // 2
+
+
+def test_garbage_anchor_override_falls_back_to_the_default(client, fake_r2, monkeypatch):
+    monkeypatch.setenv("IMAGE_PRESIGN_ANCHOR_SECONDS", "not-a-number")
+    client.get("/images/2872083276/0001.jpg", follow_redirects=False)
+    assert fake_r2.calls[-1][2] == images_route._PRESIGN_ANCHOR_DEFAULT
 
 
 def test_unconfigured_storage_returns_503(client, monkeypatch):

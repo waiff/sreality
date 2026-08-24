@@ -6,15 +6,69 @@ methods. Without R2_* env vars the image-download phase is a no-op.
 
 from __future__ import annotations
 
+import datetime
 import logging
 import os
+import time
 from typing import Any
+from urllib.parse import quote
 
 import requests
 
 from scraper import media
 
 LOG = logging.getLogger(__name__)
+
+# SigV4's `X-Amz-Date` wire format.
+_SIGV4_TIMESTAMP = "%Y%m%dT%H%M%SZ"
+
+_ANCHORED_AUTH_CLS: Any = None
+
+
+def presign_anchor_stamp(anchor_seconds: int, now: float | None = None) -> str:
+    """`X-Amz-Date` for the start of the bucket of width `anchor_seconds` containing `now`."""
+    epoch = int(now if now is not None else time.time())
+    start = epoch - (epoch % anchor_seconds)
+    return datetime.datetime.fromtimestamp(start, datetime.timezone.utc).strftime(
+        _SIGV4_TIMESTAMP
+    )
+
+
+def _anchored_auth_cls() -> Any:
+    """Built on first use so importing this module still costs no botocore (see R2Client)."""
+    global _ANCHORED_AUTH_CLS
+    if _ANCHORED_AUTH_CLS is None:
+        from botocore.auth import S3SigV4QueryAuth
+
+        class _AnchoredSigV4QueryAuth(S3SigV4QueryAuth):  # type: ignore[misc]
+            """SigV4 query signer with the signing time pinned instead of read off the clock.
+
+            `add_auth` stamps `request.context['timestamp']` with "now" and then calls
+            `_modify_request_before_signing`; every consumer downstream of that — the
+            `X-Amz-Date` param, the credential scope, the string-to-sign and the derived
+            signing key — reads it back out of the context. Overwriting it here, before
+            `super()` builds the auth params, therefore pins all four consistently without
+            reimplementing any of botocore's signing.
+
+            The base class is the S3 one (`s3v4-query`, what boto3 itself resolves for a
+            presigned `get_object`) and not the generic `SigV4QueryAuth`: S3 signs the
+            constant `UNSIGNED-PAYLOAD` rather than a body hash and skips path
+            normalisation. With the generic base every field of the URL matches and only
+            the signature is wrong — i.e. it fails at R2, not here.
+            """
+
+            def __init__(
+                self, credentials: Any, region_name: str, expires: int, timestamp: str
+            ) -> None:
+                super().__init__(credentials, "s3", region_name, expires=expires)
+                self._pinned_timestamp = timestamp
+
+            def _modify_request_before_signing(self, request: Any) -> None:
+                request.context["timestamp"] = self._pinned_timestamp
+                super()._modify_request_before_signing(request)
+
+        _ANCHORED_AUTH_CLS = _AnchoredSigV4QueryAuth
+    return _ANCHORED_AUTH_CLS
 
 
 class NotAnImageError(Exception):
@@ -121,6 +175,10 @@ class R2Client:
         from botocore.config import Config as BotoConfig
 
         self.bucket = bucket
+        # Kept for the anchored presign below, which signs through botocore's auth
+        # classes directly rather than through the client's private request signer.
+        self._access_key_id = access_key_id
+        self._secret_access_key = secret_access_key
         # Pool sized to the download worker count — the default of 10 caused
         # constant "Connection pool is full, discarding connection" churn
         # under the 32-worker image phase.
@@ -181,14 +239,41 @@ class R2Client:
                 return None
             raise
 
-    def presigned_get(self, key: str, expires_in: int = 604800) -> str:
+    def presigned_get(
+        self, key: str, expires_in: int = 604800, anchor_seconds: int = 0
+    ) -> str:
         """Time-limited GET URL for one object, so a private bucket can still
-        serve image bytes straight to the browser (no proxying through us)."""
-        return self._client.generate_presigned_url(
-            "get_object",
-            Params={"Bucket": self.bucket, "Key": key},
-            ExpiresIn=expires_in,
+        serve image bytes straight to the browser (no proxying through us).
+
+        `anchor_seconds` > 0 signs as at the START of the current bucket of that width
+        instead of at "now", so every re-mint inside one bucket returns a byte-identical
+        string. The browser's HTTP cache keys on the whole URL including the signature,
+        so a fresh signature per request makes already-downloaded bytes unaddressable and
+        re-downloads them; a stable one lets the object's own `max-age` do its job. The
+        URL still expires `expires_in` after the anchor, so the anchor must stay well
+        below it — the remainder is how long the last URL of a bucket keeps working.
+        """
+        if anchor_seconds <= 0:
+            return self._client.generate_presigned_url(
+                "get_object",
+                Params={"Bucket": self.bucket, "Key": key},
+                ExpiresIn=expires_in,
+            )
+
+        from botocore.awsrequest import AWSRequest
+        from botocore.credentials import Credentials
+
+        request = AWSRequest(
+            method="GET",
+            url=f"{self._client.meta.endpoint_url}/{self.bucket}/{quote(key, safe='/~')}",
         )
+        _anchored_auth_cls()(
+            Credentials(self._access_key_id, self._secret_access_key),
+            self._client.meta.region_name,
+            expires_in,
+            presign_anchor_stamp(anchor_seconds),
+        ).add_auth(request)
+        return request.url
 
 
 def _required(name: str) -> str:
