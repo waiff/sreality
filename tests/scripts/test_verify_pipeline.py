@@ -213,7 +213,11 @@ def test_broker_resolution_catches_the_rotation_that_stopped_advancing() -> None
     assert status == "fail"
     assert any("last complete broker sweep" in o for o in offenders)
     # ...and the two axes are independent: a frozen incremental drain alone reds.
-    status, offenders = _status_for_broker_resolution(2.0, 5.0, DEFAULT_THRESHOLDS)
+    # Derived from the threshold, not hardcoded: the dirty lines move whenever
+    # resolve_brokers_full.yml's backstop does (they are asserted against it above),
+    # and a literal sentinel silently decays into a warn when they do.
+    status, offenders = _status_for_broker_resolution(
+        2.0, DEFAULT_THRESHOLDS["broker_dirty_fail_hours"] + 1.0, DEFAULT_THRESHOLDS)
     assert status == "fail"
     assert any("broker dirty-queue" in o for o in offenders)
 
