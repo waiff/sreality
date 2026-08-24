@@ -36,7 +36,7 @@ import BrowseStatsView from '@/components/BrowseStats';
 import RowGrainNotice from '@/components/RowGrainNotice';
 import type { AnchorPoint, MapFlyToCommand } from '@/components/ListingMap';
 import type { MapySuggestion } from '@/lib/maps';
-import { fetchDatasets, fetchGrowth, fetchSeries, priceStatsKeys } from '@/lib/priceStats';
+import { fetchDatasets, fetchGrowth, fetchGrowthShapes, fetchSeries, priceStatsKeys } from '@/lib/priceStats';
 import { buildHoverData, type GrowthMetric } from '@/lib/growthChoropleth';
 import {
   summarise,
@@ -358,6 +358,15 @@ export default function BrowseExperience({
     queryFn: () => fetchGrowth(psGrowthDatasetId as number, growthFrom, growthTo),
     enabled: mapVisible && showGrowth && psGrowthDatasetId != null,
     staleTime: 60_000,
+  });
+  // Window-invariant polygons (W10b) — keyed on the dataset alone (not
+  // growthFrom/growthTo), so dragging the window never re-fetches them.
+  const psShapesQuery = useQuery({
+    queryKey: priceStatsKeys.growthShapes(psGrowthDatasetId ?? -1),
+    queryFn: () => fetchGrowthShapes(psGrowthDatasetId as number),
+    enabled: mapVisible && showGrowth && psGrowthDatasetId != null,
+    staleTime: Infinity,
+    gcTime: Infinity,
   });
   const psSeriesQuery = useQuery({
     queryKey: priceStatsKeys.obecSeries(psGrowthDatasetId ?? -1, growthFrom, growthTo),
@@ -830,6 +839,7 @@ export default function BrowseExperience({
                     onRentVkChange={(vk) => view.setOverlay({ rentVk: vk })}
                     onToggleShowKraje={(next) => view.setOverlay({ showKraje: next })}
                     growthRows={psGrowthQuery.data ?? []}
+                    growthShapes={psShapesQuery.data ?? []}
                     growthDatasets={psDatasetsQuery.data ?? []}
                     showGrowth={showGrowth}
                     growthDatasetId={psGrowthDatasetId}

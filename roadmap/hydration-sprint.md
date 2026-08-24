@@ -158,7 +158,25 @@ Four corollaries, because the evidence did not support one rule for everything:
   filter change. The page's other two queries (`reviewQ`, the merge-candidates badge count;
   `optionsQ`, the firm picker) have static keys that never change on filter interaction, so
   they're unaffected by this specific bug — left as-is.
-- ⬜ **W10b** — datasets: split the window-invariant polygon payload from the numbers.
+- ✅ **W10b** — datasets: split the window-invariant polygon payload from the numbers
+  (migration 415). `price_stat_growth()` computed `st_asgeojson()` for every obec on
+  every call — including every operator drag of the `[from,to]` window — even though a
+  municipality's boundary polygon never changes. Measured live on the largest dataset
+  (4,044 obce): **5.86 MB of GeoJSON re-sent on every window change**, matching the
+  parked memory note exactly. Split into `price_stat_growth_shapes(dataset_id)`
+  (geometry only, keyed on dataset_id alone — obec universe = every obec that has EVER
+  had an observation for the dataset, ignoring the window, since a shape has to cover
+  any window the operator might pick) and the unchanged `price_stat_growth()` numbers
+  with `geojson` dropped (the join to `admin_boundaries_public` becomes an `exists`
+  check — same obec filter, zero geometry computed). `DROP FUNCTION` + `CREATE
+  FUNCTION` (return columns changed, not `CREATE OR REPLACE`-compatible) with explicit
+  re-grants matching the live ACL exactly (`authenticated` only, `anon` dark — this
+  project's default privileges auto-GRANT on a fresh function). `growthToFeatureCollection`
+  now takes the numbers rows and a separate `shapesByObec` map, joined by `obec_id`
+  client-side; both call sites (`DatasetMap`, `ListingMap`/Browse's growth overlay) fetch
+  shapes once with `staleTime: Infinity`, keyed on the dataset id only — never on
+  `from`/`to`. New tests cover the join (including a missing-shape row skipped rather
+  than crashing the map, matching the existing malformed-geometry guard).
 - ⬜ **W3** — one pipeline cache (collapse `pipelineKeys.{board,members,card}`).
 - ⬜ **W4** — cover substrate: covering index + `listing_cover_public`.
 - ⬜ **W5** — `pipeline_board_public` cohort view. **← stop point 1**

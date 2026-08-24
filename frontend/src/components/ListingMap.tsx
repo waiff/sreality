@@ -14,7 +14,7 @@ import { groupForPicker, indexLabel, pinnedFirst } from '@/lib/cityIndexes';
 import { legendGradient, mapRampStops, normalizeIndexValue } from '@/lib/cityIndexScale';
 import { fmtCzk, fmtArea, fmtRelative, fmtAbsolute } from '@/lib/format';
 import { listingKindLabel } from '@/lib/enums';
-import type { PriceStatDataset, PriceStatGrowthRow } from '@/lib/priceStats';
+import type { PriceStatDataset, PriceStatGrowthRow, PriceStatGrowthShape } from '@/lib/priceStats';
 import {
   GROWTH_METRICS,
   GROWTH_METRIC_ORDER,
@@ -419,6 +419,9 @@ interface Props {
    * RPC), the dataset list for the picker, and the active metric. Fill sits
    * BELOW the listing markers + city pins. Mirrors the rent-map overlay. */
   growthRows?: PriceStatGrowthRow[];
+  /* Window-invariant polygons (W10b) — fetched once per dataset and cached
+   * forever by the caller, joined to growthRows by obec_id here. */
+  growthShapes?: PriceStatGrowthShape[];
   growthDatasets?: PriceStatDataset[];
   showGrowth?: boolean;
   growthDatasetId?: number | null;
@@ -468,6 +471,7 @@ export default function ListingMap({
   onRentVkChange,
   onToggleShowKraje,
   growthRows,
+  growthShapes,
   growthDatasets,
   showGrowth = false,
   growthDatasetId = null,
@@ -496,6 +500,11 @@ export default function ListingMap({
   const psgMetricByObec = useMemo(
     () => buildMetricByObec(growthRows ?? [], growthMetric),
     [growthRows, growthMetric],
+  );
+  // Window-invariant polygons (W10b) — cached by the caller, joined here.
+  const psgShapesByObec = useMemo(
+    () => new Map((growthShapes ?? []).map((s) => [s.obec_id, s.geojson])),
+    [growthShapes],
   );
   /* City-overlay min-value threshold. When set, cities whose selected
    * color-by-index reading is below it render grey ("off"). Purely a map
@@ -1210,7 +1219,9 @@ export default function ListingMap({
     const src = map.getSource('ps-growth') as GeoJSONSource | undefined;
     if (!src) return;
     const data = growthRows ?? [];
-    if (showGrowth && data.length > 0) src.setData(growthToFeatureCollection(data));
+    if (showGrowth && data.length > 0) {
+      src.setData(growthToFeatureCollection(data, psgShapesByObec));
+    }
     const on = showGrowth && data.length > 0;
     for (const gm of GROWTH_METRIC_ORDER) {
       if (map.getLayer(psgLayerId(gm))) {
@@ -1223,7 +1234,7 @@ export default function ListingMap({
     if (map.getLayer('ps-growth-line')) {
       map.setLayoutProperty('ps-growth-line', 'visibility', on ? 'visible' : 'none');
     }
-  }, [growthRows, showGrowth, growthMetric, ready]);
+  }, [growthRows, psgShapesByObec, showGrowth, growthMetric, ready]);
 
   /* Phase QUAL — push the filtered city set into the `cities` source
    * whenever the operator changes the city-quality filter, the color-

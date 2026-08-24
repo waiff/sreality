@@ -97,6 +97,7 @@ export const priceStatsKeys = {
   choropleth: (id: number) => ['price_stat_choropleth', id] as const,
   growth: (id: number, from: string | null, to: string | null) =>
     ['price_stat_growth', id, from, to] as const,
+  growthShapes: (id: number) => ['price_stat_growth_shapes', id] as const,
   obecTree: ['price_stat_obce_tree'] as const,
   noData: (id: number) => ['price_stat_no_data', id] as const,
   noDataCount: (id: number) => ['price_stat_no_data_count', id] as const,
@@ -157,11 +158,16 @@ export const fetchChoropleth = async (
 
 /* Live per-obec growth for any [from,to] window via the price_stat_growth RPC
  * (computed from observations server-side; no re-scrape). Drives the revamped
- * Datasets page + the Browse overlay. from/to are 'YYYY-MM' or null (open). */
+ * Datasets page + the Browse overlay. from/to are 'YYYY-MM' or null (open).
+ *
+ * geojson is NOT here (W10b) — a municipality's boundary polygon doesn't
+ * change when the operator drags the date window, so serving it from this
+ * window-keyed RPC meant re-sending it (measured: 5.86 MB for the largest
+ * dataset, 4,044 obce) on every window change. See fetchGrowthShapes below,
+ * fetched once per dataset and cached forever. */
 export interface PriceStatGrowthRow {
   obec_id: number;
   locality_name: string;
-  geojson: string;
   sale_latest_price: number | null;
   sale_cagr_pct: number | null;
   sale_min_active: number | null;
@@ -185,6 +191,28 @@ export const fetchGrowth = async (
   if (error) throw error;
   return (data ?? []) as PriceStatGrowthRow[];
 };
+
+/* The window-invariant half of the growth choropleth: one polygon per obec
+ * that has ever had an observation in this dataset, keyed on dataset_id
+ * alone. Fetched once and cached forever (staleTime: Infinity in the
+ * consuming useQuery) — every window change re-fetches fetchGrowth's numbers
+ * only and re-joins them to this already-cached shape set client-side. */
+export interface PriceStatGrowthShape {
+  obec_id: number;
+  geojson: string;
+}
+
+export const fetchGrowthShapes = async (
+  datasetId: number,
+): Promise<PriceStatGrowthShape[]> =>
+  await fetchAllRows<PriceStatGrowthShape>({
+    relation: 'price_stat_growth_shapes',
+    build: () =>
+      supabase.rpc('price_stat_growth_shapes', { p_dataset_id: datasetId }, { count: 'exact' }),
+    orderBy: [{ column: 'obec_id' }],
+    key: ['obec_id'],
+    expectMax: 100_000,
+  });
 
 /* Per-obec monthly sale + rent price for the map hover-chart
  * (price_stat_series RPC). The frontend derives the metric's variable. */
