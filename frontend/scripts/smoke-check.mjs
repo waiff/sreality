@@ -91,14 +91,23 @@ const BUDGET_FIRST_CARD_MS = Number(process.env.SMOKE_BUDGET_FIRST_CARD_MS || 12
  *                    and changes ORDER, not count — the board paints after 2
  *                    reads instead of waiting on all 6 (time-to-first-card
  *                    1,427ms -> 951ms measured live).
- * Still ahead: W2b gates Browse's 8-page city-index walk and its per-card
- * collection read; W6 deletes a broker call from every card surface.
+ *   2026-08-24 W2b — /browse 27->22, /pipeline 23->19. Every fetchAllRows call
+ *                    site now requests count:'exact', so any exhaustive read
+ *                    whose whole result fits on page 1 (most of them: curated
+ *                    cities, index definitions, pipeline members, pipeline
+ *                    board, collection membership, …) skips the old
+ *                    terminating empty-page probe outright — that is most of
+ *                    the drop, spread across many small reads rather than one
+ *                    big one. /collections, /watchdog, /notifications,
+ *                    /brokers are unchanged — this wave didn't touch them.
+ * Still ahead: W9a fixes the listing-detail chain's client half; W6 deletes a
+ * broker call from every card surface.
  *
  * Counting rule: only PostgREST + Railway API calls (see isAppDataRequest).
  * Routes are the operator's daily path plus the two that hid defects. */
 const ROUTE_BUDGETS = [
-  { path: '/browse',        baseline: '31 req / 2.8s', maxRequests: 40, maxMs: 20000 },
-  { path: '/pipeline',      baseline: '27 req / 1.7s', maxRequests: 34, maxMs: 15000 },
+  { path: '/browse',        baseline: '22 req / 4.9s', maxRequests: 27, maxMs: 20000 },
+  { path: '/pipeline',      baseline: '19 req / 1.6s', maxRequests: 24, maxMs: 15000 },
   { path: '/collections',   baseline: '9 req / 0.8s',  maxRequests: 16, maxMs: 12000 },
   { path: '/watchdog',      baseline: '10 req / 0.9s', maxRequests: 18, maxMs: 12000 },
   { path: '/notifications', baseline: '9 req / 0.9s',  maxRequests: 16, maxMs: 12000 },
