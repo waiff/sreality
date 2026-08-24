@@ -203,6 +203,32 @@ if (process.env.SMOKE_CHECK_CHROMIUM_PATH) {
     await mergeModeBtn.waitFor({ state: 'visible', timeout: 15000 });
     step('Browse renders + "Merge mode" button visible', true);
 
+    /* --- Browse cards keep their carousels (W7a) ----------------------- *
+     * Card photos moved OFF the cards read into the shared hydration layer,
+     * which is exactly the change that could leave the grid rendering
+     * perfectly with every photo silently gone — the paint-path assertions
+     * above would all still pass. The photo counter is the honest probe: the
+     * carousel only draws "n / total" when it holds MORE THAN ONE image, so
+     * seeing it proves both that photos arrived and that the grid did not
+     * quietly regress to one-cover-per-card. Waited for rather than read
+     * immediately, because non-blocking is the point — the cards are on
+     * screen before this is. */
+    const photoCounter = page.locator('span', { hasText: /^\d+ \/ \d+$/ }).first();
+    let carouselOk = false;
+    let counterText = 'none';
+    try {
+      await photoCounter.waitFor({ state: 'visible', timeout: 20000 });
+      counterText = (await photoCounter.innerText()).trim();
+      carouselOk = /^\d+ \/ [2-9]\d*$/.test(counterText);
+    } catch {
+      /* leave carouselOk false — reported below, not thrown */
+    }
+    step(
+      'Browse cards hydrate a multi-photo carousel',
+      carouselOk,
+      `photo counter: ${counterText}`,
+    );
+
     await mergeModeBtn.click();
     step('clicked "Merge mode" (local state only, no network call)', true);
 

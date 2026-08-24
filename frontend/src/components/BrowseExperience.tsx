@@ -95,6 +95,14 @@ import {
   type TableRow,
 } from '@/lib/queries';
 import { useInfiniteList } from '@/lib/useInfiniteList';
+import { CardHydrationProvider } from '@/lib/hydration';
+
+/* Client-side retention cap for a card's carousel — the same 50 the inline read
+ * used before W7a moved it into the shared hydration layer. images_public has no
+ * per-listing LIMIT, so this caps what is KEPT, not what is fetched; 50 sits
+ * comfortably above any real listing (typical max ~25) so no carousel is
+ * truncated. It is part of the cache key, so changing it is a new cohort. */
+const CARD_PHOTOS_PER_CARD = 50;
 import type { KeysetCursor } from '@/lib/keyset';
 import type { BrowseViewState, TabKey } from '@/lib/browseState';
 
@@ -406,6 +414,23 @@ export default function BrowseExperience({
     enabled: tab === 'map',
     gcTime: 10 * 60_000,
   });
+
+  /* W7a: the visible card cohort, for the shared hydration layer. Photos used to
+   * be awaited INSIDE the cards queryFn, so no card painted until every card's
+   * carousel had landed (measured live on 24 ids: 178 image rows, 178 correlated
+   * CLIP-tag lookups, 750 buffers, ~131 ms — all of it on the paint path). Cards
+   * now paint from browse_list alone and the carousels stream in behind them.
+   *
+   * `listing_id` is the key, never sreality_id: a post-Gate-2 non-sreality card
+   * carries a NULL sreality_id and would silently lose its photos. perId 50 is
+   * the same client-side retention cap the inline read used — comfortably above
+   * any real listing (typical max ~25), so no carousel is truncated. This wave
+   * is the non-blocking split; it is emphatically NOT a move to cover-only, and
+   * a card must keep every photo it had. */
+  const cardListingIds = useMemo(
+    () => cards.rows.map((r) => r.listing_id),
+    [cards.rows],
+  );
 
   /* The ONE canonical cohort total — consumed by the header, the tab badge,
    * the cards/table "of N" labels, and (as the denominator of its mappable
@@ -776,6 +801,10 @@ export default function BrowseExperience({
                   : ({ '--map-w': `${mapSplit.value * 100}%` } as CSSProperties)
               }
             >
+              <CardHydrationProvider
+                listingIds={cardListingIds}
+                photosPerId={CARD_PHOTOS_PER_CARD}
+              >
               <ListingCards
                 rows={cards.isLoading ? null : cards.rows}
                 total={cohortTotal}
@@ -804,6 +833,7 @@ export default function BrowseExperience({
                 estimatingIds={estimatingIds}
                 onEstimate={(srealityId) => estimateMut.mutate(srealityId)}
               />
+              </CardHydrationProvider>
               {!mapCollapsed.value && (
                 <>
               <ResizeHandle

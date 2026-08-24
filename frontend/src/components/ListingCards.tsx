@@ -1,4 +1,11 @@
-import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type ReactNode,
+} from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import ImageCarousel from '@/components/ImageCarousel';
@@ -7,6 +14,7 @@ import Spinner from '@/components/Spinner';
 import PipelineFunnelButton from '@/components/PipelineFunnelButton';
 import PriceDelta from '@/components/PriceDelta';
 import { useScrollRestoration } from '@/lib/useScrollRestoration';
+import { taggedImageUrls, useCardHydration } from '@/lib/hydration';
 import {
   curationKeys,
   fetchPropertyCollectionMemberSet,
@@ -535,6 +543,16 @@ function Card({
     ? `Neaktivní${days ? ` · bylo na trhu ${days}` : ''} (${fmtShortDate(r.first_seen_at)} – ${fmtShortDate(r.last_seen_at)})`
     : `Aktivní${days ? ` · na trhu ${days}` : ''} (od ${fmtShortDate(r.first_seen_at)})`;
 
+  /* W7a: photos come from the shared hydration layer, not off `r`. They used to
+     be awaited inside the cards read, so the whole grid waited on 24 cards'
+     carousels before one card could paint; now the card paints from browse_list
+     alone and its photos arrive behind it. Projected once per card from the raw
+     rows the layer holds (the comparables surface consumes those same rows
+     un-projected), memoized on the array identity — the cohort map is stable
+     across renders, so this recomputes only when this listing's photos change. */
+  const photos = useCardHydration().photosFor(r.listing_id);
+  const images = useMemo(() => taggedImageUrls(photos), [photos]);
+
   const wrapperClass = [
     'group block rounded-[var(--radius-sm)] border overflow-hidden',
     'transition-[border-color,background-color,opacity] duration-150',
@@ -548,7 +566,7 @@ function Card({
   // component — keeps ImageCarousel's internal state across re-renders.
   const body = (
     <>
-      <ImageCarousel images={r.images} imgClassName={imageFilter} hoverZoom fadeChevrons>
+      <ImageCarousel images={images} imgClassName={imageFilter} hoverZoom fadeChevrons>
         {mergeMode && (
           <div className="absolute top-1 left-1 z-10">
             <span

@@ -318,8 +318,65 @@ Four corollaries, because the evidence did not support one rule for everything:
   Observed in passing, **not** introduced here and left alone: the legacy route has always
   re-fetched the listing once after canonicalizing (the key carries the route form), and W9b
   makes that happen sooner rather than more often.
-- ⬜ **W7a** — Browse + comparables onto the shared layer; four image loaders → one.
-  **← stop point 2**
+- ✅ **W7a** — Browse + comparables onto the shared layer. **Frontend only, no migration.**
+  Browse's card photos were fetched INSIDE `fetchListingsForCards`' queryFn — `CardRow` carried
+  an `images` array, and the function awaited every card's photos before returning a single row,
+  so **not one card painted until all 24 carousels had landed**. Measured live on 24 real
+  `browse_list` ids: **178 image rows, 178 correlated CLIP-tag lateral probes, 750 buffers,
+  ~131 ms**, all of it on the paint path. Unlike W4's board read, **none of that work is
+  wasteful** — the carousel renders those rows — which is exactly why the fix is to move it OFF
+  the paint path rather than shrink it to a cover. Cards now paint from `browse_list` alone and
+  photos arrive through `lib/hydration`'s new `useListingPhotos`. The grid does not reflow when
+  they land: `ImageCarousel` always owns its `aspect-[5/4]` box, so the frame is drawn at the
+  card's first paint and the photo fills it in place.
+  **The subtlety that nearly shipped a regression: Browse is an INFINITE list.** `rows`
+  accumulates every page loaded so far, so a single cumulative cohort key would change on every
+  append and drag all the earlier pages' photos back over the wire — **O(n²)** rows read across
+  n pages (~900 re-read at page 5 to learn about the 178 that are new), quietly replacing a
+  blocking-but-linear read with a non-blocking quadratic one. `useListingPhotos` therefore issues
+  **one query per page-sized bucket in ARRIVAL order** (`useQueries` + `combine`): appending page
+  2 adds exactly one bucket and leaves bucket 1's cache entry untouched, so cost is O(n) again —
+  the same rows the old per-page read fetched, minus the blocking. Arrival order, not sorted, is
+  load-bearing: sorting the cohort before slicing would reshuffle every boundary on each append
+  and defeat the whole thing (Browse's default sort is newest-first, so page 2's ids are typically
+  *lower* than page 1's — the worst case). `combine` keeps the merged map referentially stable;
+  merging outside it would mint a new Map, a new context value and a re-projection in every card
+  on every unrelated render. `isPending` reports only the FIRST bucket, so a page still loading
+  can't make cards already on screen claim their photos are in flight.
+  **`perId` is in the cache key** — it is a client-side retention cap on the *same* server read
+  (`images_public` has no per-listing LIMIT), so Browse's 50 and the comparables' 6 are different
+  payloads over one cohort; leaving it out would let whichever surface asked first serve the other
+  a silently truncated carousel. **`photosPerId` on the provider is opt-in and defaults to OFF**:
+  the Pipeline board renders one cover and must not start pulling whole carousels merely because
+  it mounts the shared provider.
+  Comparables joined the layer for the modern id-space, with the frozen one quarantined beside it:
+  two queries but **never two requests** — within one run's `comparables_used` the set is
+  homogeneous (all surrogate post-#879/#892, or all legacy), so one id array is always empty and
+  both fetchers short-circuit without touching the network. The surrogate arm gains what its
+  hand-rolled key never had — `idsKey` normalisation (the old key was `cids.join(',')`:
+  order-dependent and un-deduplicated, so re-sorting the comparables table was a fresh key rather
+  than a cache hit), plus `keepPreviousData` and the one shared decoration `staleTime`.
+  **Loader count, honestly: four hand-rolled `images_public` selects → two, not one.**
+  `fetchImagesByListing` (listing detail) collapsed into `fetchImagesForListingIds` — it differed
+  only in `.eq` vs `.in` and in being uncapped, so it is now a one-id call at `perId: Infinity`
+  (uncapped is required: the gallery renders every photo and a cap would truncate the lightbox).
+  The other two **must not** merge and the reasons are different: `listing_cover_public` is a
+  different QUERY (server-side `DISTINCT ON`), and asking the multi-image read for `perId: 1` is
+  precisely the 901-rows-for-44-cards pattern W4 deleted; `fetchImagesByListingIds` is keyed on
+  `sreality_id` for callers whose upstream read model carries no surrogate id (/clip-audit's
+  property feed, frozen pre-#879 runs), and flipping it is a silent half-swap — the id spaces
+  overlap, so a `sreality_id` fed into an `IN listing_id` matches a DIFFERENT listing. Moving
+  those needs a backend change to their payloads, not a rename. That reasoning is now written into
+  `lib/hydration/index.ts` so the next reader doesn't re-litigate it.
+  New rails: the first Browse-card tests in the repo (there were none) — the grid painting with
+  the photo read hanging forever, **the carousel keeping all 7 of a listing's photos rather than
+  collapsing to a cover** (the ledger's explicit warning for this wave), the genuinely-no-photos
+  case kept distinct from the pending one, and one cohort read keyed on the surrogate id; five
+  `photoBuckets` cases pinning append-stability and arrival order; three more key-disjointness
+  cases. The production smoke check gained a **Browse multi-photo-carousel assertion** — this is
+  the wave that could leave the grid rendering perfectly with every photo silently gone, and every
+  existing Browse assertion would still have passed.
+  **← stop point 2 — pausing here for review before W7b onward.**
 - ⬜ **W7b** — media delivery (the hourly presign re-mint kills the browser cache key).
 - ⬜ **W10c** — /costs date-expression index. ⬜ **W10d** — /health bounds. ⬜ **W10e** —
   /estimations OR-join (EXPLAIN first — that one is code-derived, not measured).
@@ -429,6 +486,10 @@ Still open, filed rather than fixed here:
 - **Reads fail silently app-wide** — `main.tsx` has no `QueryCache.onError`. The W10b fix
   surfaces the two shapes consumers; a general policy needs its own PR (a blanket toast would
   double-surface on the several pages that already render their own error state).
+- **The sweep has no `/listing/{id}` route**, so W9b's win (a request and a waterfall level off
+  every listing-detail load) is unguarded by the ratchet — it earned no number on any swept route
+  because no swept route renders it. Adding a listing step means clicking through from Browse
+  rather than hard-coding a URL that goes inactive; worth its own small PR.
 - `is_active: r.is_active ?? true` should become a projected tombstone defaulting to `false`;
   `broker_leaderboard` wants `, s.broker_id` in its ORDER BY (pre-existing, display-only, but
   518 brokers tie at the "Vše" option); `listing_cover_public`'s CLIP lateral is unread by its
