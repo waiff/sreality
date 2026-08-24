@@ -297,9 +297,23 @@ Fixed in the audit PR:
   831/831, 3,296/3,296, 4,044/4,044, 0/0), keeping the RPC as the fallback for a dataset whose
   run has not written its choropleth yet. These are the `EXPLAIN` block counts constraint 6
   required of W10b and did not get — and they are exactly where the cost had moved.
-- **`pipeline_board_public` registered in `_TENANT_VIEWS`.** Isolation was verified correct
-  live (smoke-admin sees its 4 cards, smoke-nonadmin 0) but no backend test covered it. It
-  matters ahead of W6/W7a, which widen this view.
+- **`pipeline_board_public` registered in `_TENANT_VIEWS` — and the registration immediately
+  failed CI, on a real defect.** Isolation itself is correct (verified live: smoke-admin sees
+  its 4 cards, smoke-nonadmin 0), but the replayed schema returned *permission denied for
+  function publication_gate_enabled*. `pipeline_board_public` is the first
+  `security_invoker` view to nest `properties_public`: that inner view is definer, so its
+  table reads run as its owner, but its WHERE calls `publication_gate_enabled()` and through
+  an invoker view that call is checked against the INVOKER. Migration 273 granted EXECUTE to
+  `anon, authenticated`; **migration 299 PART E revoked it and nothing ever re-granted it** —
+  so production only works because it still carries the pre-299 grant, i.e. prod has drifted
+  from the chain and the drift is the only reason the board loads. A restore, a preview
+  branch, or any environment built from migrations would serve every operator a 500 on
+  /pipeline. Migration 418 re-grants it to `authenticated` only (`anon` stays dark). Safe:
+  299's own comment scopes PART E to functions that could "trigger a full
+  browse_list/matview rebuild [DoS] … or run the tenant seeders/backfill", and
+  `publication_gate_enabled()` is a `stable`, argument-less, one-row boolean read — it was
+  collateral in that sweep. **This is the strongest argument in the whole audit for the
+  registry rule: the test found in one CI run what live inspection could not see at all.**
 - **Four false claims corrected.** `pipelineCache.ts` and this ledger both said the board cache
   carries the *photo* — it deliberately does not, and re-adding it is the exact coupling W1
   removed; W3's title claimed "one pipeline cache" when only `card`→`members` collapsed; W9a's

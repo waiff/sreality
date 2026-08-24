@@ -1,0 +1,35 @@
+-- 418: re-grant EXECUTE on publication_gate_enabled() to `authenticated`.
+--
+-- WHY THIS IS NEEDED. `pipeline_board_public` (migration 417) is the first
+-- `security_invoker = true` view in the codebase that nests `properties_public`.
+-- properties_public is a definer view, so its own table reads run as its owner
+-- — but its WHERE calls `publication_gate_enabled()`, and reached through an
+-- invoker view that call is checked against the INVOKER. `authenticated` has no
+-- EXECUTE, so every read of the kanban's cohort view fails closed with
+-- "permission denied for function publication_gate_enabled".
+--
+-- HOW IT WAS FOUND. Registering pipeline_board_public in
+-- tests/test_tenant_isolation_live.py::_TENANT_VIEWS — which migration 417
+-- should have done and did not — failed CI's migration replay on the first run.
+-- Production does NOT fail today, because production still carries the grant
+-- migration 273 issued and migration 299 later revoked: prod has drifted from
+-- the chain, and the drift is the only reason the board works there. A restore,
+-- a preview branch, or any environment built from migrations would serve every
+-- operator a 500 on /pipeline. This migration makes the chain match the
+-- behaviour production already has, rather than changing production.
+--
+-- WHY IT IS SAFE. Migration 299 PART E stripped EXECUTE from both browser roles
+-- for a list of genuinely dangerous SECURITY DEFINER functions — its own comment
+-- names the risks: "a logged-in user must not trigger a full
+-- browse_list/matview rebuild [DoS], refresh health matviews [DoS], emit a
+-- definer alert-write, or run the tenant seeders/backfill".
+-- `publication_gate_enabled()` is none of those. It is `stable`, takes no
+-- arguments, writes nothing, and returns one boolean read from a single
+-- app_settings row (migration 273). It was collateral in a sweep aimed at the
+-- rebuild/refresh/seed family, not a considered decision about this function.
+--
+-- SCOPE. `authenticated` only. `anon` stays revoked — it holds no SELECT on
+-- properties_public or pipeline_board_public, so it has no path that needs the
+-- call, and this is deliberately tighter than migration 273's original grant
+-- (which gave it to both roles).
+grant execute on function publication_gate_enabled() to authenticated;
