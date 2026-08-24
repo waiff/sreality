@@ -368,6 +368,19 @@ Four corollaries, because the evidence did not support one rule for everything:
   overlap, so a `sreality_id` fed into an `IN listing_id` matches a DIFFERENT listing. Moving
   those needs a backend change to their payloads, not a rename. That reasoning is now written into
   `lib/hydration/index.ts` so the next reader doesn't re-litigate it.
+  **One defect reached production and was caught by this wave's own new smoke assertion,
+  fixed immediately after (#1144).** The first cut made only `photos` opt-in and left covers and
+  brokers always-on — reasoning about the direction the board cared about, not the one Browse did
+  — so Browse mounted the provider and silently began fetching a cover per card and a broker per
+  card that **nothing on the page displays**: /browse **22 → 24 requests**, the two extra being
+  `listing_cover_public` and `POST /brokers/by-listings`, found by listing the live request URLs
+  rather than guessing at the delta. Asymmetric defaults are how that happens. Every decoration is
+  now opt-in through one `renders={{ … }}` prop that makes each surface declare what it draws —
+  the north star written as a prop signature — switched off by handing the hook an EMPTY id list,
+  so its existing `ids.length > 0` gate does the work and there is no second flag to keep in step.
+  A test pins it. The same run also failed this wave's new carousel assertion on a **16**-photo
+  card: the check used `/[2-9]\d*$/` for "more than one photo" and 16 starts with a 1 — the app
+  was right and the probe was wrong, now parsed as a number.
   New rails: the first Browse-card tests in the repo (there were none) — the grid painting with
   the photo read hanging forever, **the carousel keeping all 7 of a listing's photos rather than
   collapsing to a cover** (the ledger's explicit warning for this wave), the genuinely-no-photos

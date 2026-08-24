@@ -219,7 +219,11 @@ if (process.env.SMOKE_CHECK_CHROMIUM_PATH) {
     try {
       await photoCounter.waitFor({ state: 'visible', timeout: 20000 });
       counterText = (await photoCounter.innerText()).trim();
-      carouselOk = /^\d+ \/ [2-9]\d*$/.test(counterText);
+      /* "n / total" with total > 1. Matched by PARSING the total, not by a
+       * digit-class pattern: the first cut of this used /[2-9]\d*$/ and failed a
+       * perfectly good 16-photo carousel live, because 16 starts with a 1. */
+      const total = Number(/^\d+ \/ (\d+)$/.exec(counterText)?.[1] ?? 0);
+      carouselOk = total > 1;
     } catch {
       /* leave carouselOk false — reported below, not thrown */
     }

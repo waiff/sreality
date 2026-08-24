@@ -348,7 +348,13 @@ export default function Pipeline() {
           pipeline" na detailu inzerátu.
         </p>
       ) : (
-        <CardHydrationProvider listingIds={visibleListingIds}>
+        <CardHydrationProvider
+          listingIds={visibleListingIds}
+          /* The board's card face: one 48px thumbnail and a broker line. No
+             carousel — asking the multi-image read for one photo per card is
+             exactly what W4's listing_cover_public replaced. */
+          renders={{ covers: true, brokers: true }}
+        >
           <Board
             stages={stages}
             cards={filteredCards}
