@@ -34,6 +34,8 @@ from unicodedata import combining, normalize
 
 from selectolax.parser import HTMLParser, Node
 
+from scraper.area import derive_headline_area
+from scraper.price_text import is_per_area_price
 from scraper.scraped_listing import ScrapedListing
 from scraper.street import street_from_locality
 
@@ -326,13 +328,8 @@ def _parse_price(text: str | None, category_type: str | None) -> tuple[int | Non
     return (value if value <= _PRICE_MAX else None), unit
 
 
-# The detail spec-table cell renders "{amount} CZK/ {unit}" with three observed units.
-# `listings.price_czk` is a TOTAL (or a monthly rent) everywhere in this schema —
-# production carries only `za nemovitost` / `za mesic` / `celkem` / `měsíc`, none per-area
-# — so a per-m² cell MUST yield NULL. A unit price written into price_czk reads as a total
-# in every downstream consumer (Kč/m² stats, estimation comparables, Browse sort,
-# price-drop watchdogs), which is strictly worse than the missing value it replaces.
-_PER_AREA_MARKERS: tuple[str, ...] = ("za m2", "za m 2", "/m2", "za metr")
+# The detail spec-table cell renders "{amount} CZK/ {unit}" with three observed units;
+# the third is per-area, and a per-m² cell MUST yield NULL (see scraper.price_text).
 _DETAIL_PRICE_UNITS: tuple[tuple[str, str], ...] = (
     ("za mesic", "za mesic"),
     ("za nemovitost", "za nemovitost"),
@@ -353,10 +350,12 @@ def _detail_price(text: str | None, category_type: str | None) -> tuple[int | No
     low = _norm_key(text)
     if any(k in low for k in ("na vyzadani", "info o cene", "cena v rk", "dohodou", "neuvedena")):
         return None, default_unit
-    if any(marker in low for marker in _PER_AREA_MARKERS):
-        return None, default_unit  # per-area pricing has no representation in price_czk
     head, sep, tail = low.partition("czk")
     if not sep:
+        return None, default_unit
+    # per-area pricing has no representation in price_czk; the unit always
+    # FOLLOWS the amount in this cell, so the shared anchored test applies.
+    if is_per_area_price(low[len(head):]):
         return None, default_unit
     digits = re.sub(r"\D", "", head)
     if not digits:
@@ -685,7 +684,12 @@ def parse_detail(
 
     usable_text = params.get("uzitna plocha")
     total_text = params.get("celkova plocha") or params.get("plocha")
-    area_m2 = _parse_area(usable_text) or _parse_area(total_text) or _parse_area(title)
+    area_m2, area_basis = derive_headline_area(
+        category_main=category_main,
+        usable=_parse_area(usable_text),
+        total=_parse_area(total_text),
+        fallback=_parse_area(title),
+    )
 
     image_urls = _detail_images(html, source_id)
 
@@ -714,6 +718,7 @@ def parse_detail(
         price_czk=price_czk,
         price_unit=price_unit,
         area_m2=area_m2,
+        area_basis=area_basis,
         usable_area=_parse_area(usable_text),
         disposition=_parse_disposition(params.get("dispozice")) or _parse_disposition(title),
         locality=locality,

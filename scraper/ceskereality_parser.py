@@ -33,6 +33,8 @@ from unicodedata import combining, normalize
 from selectolax.parser import HTMLParser, Node
 
 from scraper import street
+from scraper.area import derive_headline_area
+from scraper.price_text import is_per_area_price
 from scraper.published import czech_date
 from scraper.scraped_listing import ScrapedListing
 
@@ -184,6 +186,10 @@ def _parse_price(text: str | None, category_type: str | None) -> tuple[int | Non
     # otherwise concatenate into a giant number that overflows price_czk.
     m = _PRICE_RUN_RE.search(text)
     if not m:
+        return None, unit
+    # A per-m² figure must NEVER be stored as the absolute price — it reads as a
+    # total in every downstream consumer (Kč/m² stats, comparables, Browse sort).
+    if is_per_area_price(text[m.end():]):
         return None, unit
     digits = re.sub(r"\D", "", m.group(0))
     if not digits:
@@ -533,9 +539,16 @@ def parse_detail(
         title_street=title_street,
     )
 
+    # `area_text` keeps the collapsed value the usable_area column has always
+    # carried; the headline goes through the shared resolver on SEPARATE measures.
     area_text = params.get("plocha užitná") or params.get("užitná plocha") or params.get("plocha")
     usable_area = _parse_area(area_text)
-    area_m2 = usable_area or _parse_area(title)
+    area_m2, area_basis = derive_headline_area(
+        category_main=category_main,
+        usable=_parse_area(params.get("plocha užitná") or params.get("užitná plocha")),
+        total=_parse_area(params.get("plocha")),
+        fallback=_parse_area(title),
+    )
 
     description = unescape(ld.get("description") or "") or _text(
         tree.css_first("div.popisdetail")
@@ -573,6 +586,7 @@ def parse_detail(
         price_czk=price_czk,
         price_unit=price_unit,
         area_m2=area_m2,
+        area_basis=area_basis,
         usable_area=usable_area,
         disposition=_parse_disposition(title) or _parse_disposition(params.get("dispozice")),
         locality=locality,

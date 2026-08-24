@@ -67,12 +67,15 @@ RECORD_LISTING_TOOL: dict[str, Any] = {
         "additionalProperties": False,
         "properties": {
             "area_m2": _field(["number", "null"],
-                "Useful area in m² (užitná plocha preferred over celková)."),
+                "Interior area in m²: užitná plocha first, then podlahová, then "
+                "celková. For a pozemek (land) report the PLOT area here instead. "
+                "Never a garden/parcel area for a building."),
             "disposition": _field(["string", "null"],
                 "Czech disposition: 1+kk, 1+1, 2+kk, ..., 6+1."),
             "price_czk": _field(["integer", "null"],
-                "Headline price in CZK. Strip thousands separators. "
-                "Null if not stated or not in CZK."),
+                "Headline TOTAL price (or monthly rent) in CZK. Strip thousands "
+                "separators. Null if not stated, not in CZK, or if the page quotes "
+                "only a per-m² unit price — a unit price is never this field."),
             "price_unit": _field(["string", "null"],
                 "'měsíc' for monthly rent; 'celkem' for total/sale."),
             "locality": _field(["string", "null"],

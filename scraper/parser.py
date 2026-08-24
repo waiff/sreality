@@ -15,6 +15,7 @@ import re
 from typing import Any
 from unicodedata import combining, normalize
 
+from scraper.area import derive_headline_area
 from scraper.published import iso_date
 from scraper.street import street_from_locality
 
@@ -206,13 +207,22 @@ def parse_listing(raw: dict[str, Any]) -> dict[str, Any]:
     lat = _coord(loc.get("gps_lat"))
     lon = _coord(loc.get("gps_lon"))
 
+    category_main = CATEGORY_MAIN.get(_cb_value(raw.get("category_main_cb")))
+    # sreality's only interior measure is `usable_area`; the headline value is
+    # unchanged, the shared resolver just stamps which physical area it is.
+    area_m2, area_basis = derive_headline_area(
+        category_main=category_main,
+        usable=_numeric_or_none(raw.get("usable_area")),
+    )
+
     return {
         "sreality_id": sreality_id,
-        "category_main": CATEGORY_MAIN.get(_cb_value(raw.get("category_main_cb"))),
+        "category_main": category_main,
         "category_type": CATEGORY_TYPE.get(_cb_value(raw.get("category_type_cb"))),
         "price_czk": _price_czk(raw),
         "price_unit": _price_unit(raw),
-        "area_m2": _numeric_or_none(raw.get("usable_area")),
+        "area_m2": area_m2,
+        "area_basis": area_basis,
         "disposition": _disposition(raw),
         "locality": _locality_value(loc),
         "district": _district(loc),

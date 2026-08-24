@@ -382,6 +382,18 @@ def test_parse_detail_land_total_price_and_spaced_area():
     assert listing.estate_area == 1074.0
 
 
+def test_land_headline_area_is_stamped_plot():
+    # Option A: a parcel's area stays in area_m2 (NULLing it would be deletion on
+    # the portals that write no estate_area) — only the basis label says so.
+    listing = parse_detail(
+        LAND_DETAIL_HTML,
+        source_url="https://reality.idnes.cz/detail/prodej/pozemek/bzenec/6a18deadbeefdeadbeef0020/",
+        category_main="pozemek", category_type="prodej",
+    )
+    assert listing.area_m2 == 1074.0
+    assert listing.area_basis == "plot"
+
+
 def test_parse_detail_del_only_price_falls_back_to_current():
     # No <strong>: the flattened element's FIRST price run used to be the
     # struck <del> original; the fallback now strips <del> first.

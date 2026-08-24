@@ -169,6 +169,7 @@ def test_parse_detail_full_mapping():
     assert listing.price_unit == "za nemovitost"
     assert listing.area_m2 == 54.0
     assert listing.usable_area == 54.0
+    assert listing.area_basis == "usable"
     assert listing.disposition == "2+1"
     assert listing.locality == "Na Blatech, Pacov"
     assert listing.street == "Na Blatech"
@@ -192,6 +193,53 @@ def test_parse_detail_full_mapping():
         "https://cdn.mmreality.cz/xlarge/offer/f1/95/a.jpg",
         "https://cdn.mmreality.cz/medium/offer/76/c1/b.jpg",
     ]
+
+
+# A HOUSE, where mmreality's totalArea is the PLOT and usableArea the interior.
+# The byt fixture above sets both keys to "54", so it passes under either
+# precedence and proves nothing; this one is the discriminating case: across 3,311
+# active mmreality houses the stored area_m2 had a median of 905 m2 against 145-161
+# on every other portal, and a median Kc/m2 of 5,699 against ~46,000.
+HOUSE = {
+    **ESTATE,
+    "id": "944446",
+    "title": "Prodej, Dům rodinný, 130 m², Pacov",
+    "group": {"id": "12", "name": "Dům"},
+    "type": {"id": "60", "name": "Dům 5+1"},
+    "totalArea": "905",
+    "usableArea": "130",
+}
+
+
+def test_house_headline_area_is_the_interior_not_the_plot():
+    url = "https://www.mmreality.cz/nemovitosti/944446/"
+    listing = parse_detail(_detail_html(HOUSE), source_url=url)
+
+    assert listing.category_main == "dum"
+    assert listing.area_m2 == 130.0
+    assert listing.area_basis == "usable"
+    assert listing.usable_area == 130.0
+    # The plot is NOT smuggled into estate_area either: mmreality states a real
+    # plot in landArea/plotArea, and totalArea is not that field.
+    assert listing.estate_area is None
+
+
+def test_land_headline_area_is_still_the_plot():
+    # Option A: for a pozemek the headline IS the parcel, and its value is
+    # untouched — only the basis label changes.
+    land = {
+        **ESTATE,
+        "id": "944447",
+        "group": {"id": "13", "name": "Pozemek"},
+        "totalArea": "905",
+        "usableArea": None,
+    }
+    listing = parse_detail(
+        _detail_html(land), source_url="https://www.mmreality.cz/nemovitosti/944447/"
+    )
+    assert listing.category_main == "pozemek"
+    assert listing.area_m2 == 905.0
+    assert listing.area_basis == "plot"
 
 
 def test_parse_detail_rent_price_unit():

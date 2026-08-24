@@ -44,6 +44,7 @@ _HASH_FIELDS: tuple[str, ...] = (
 # scraper.db.LISTING_COLUMNS — sreality-only locality ids are left NULL).
 _LISTING_FIELDS: tuple[str, ...] = (
     "category_main", "category_type", "price_czk", "price_unit", "area_m2",
+    "area_basis",
     "disposition", "locality", "district", "street", "house_number", "zip",
     "floor", "total_floors",
     "has_balcony", "has_parking", "has_lift", "building_type", "condition",
@@ -63,6 +64,11 @@ class ScrapedListing:
     price_czk: int | None = None
     price_unit: str | None = None
     area_m2: float | None = None
+    # Which physical area `area_m2` holds ('usable'|'floor'|'total'|'plot'|
+    # 'unknown'), stamped by scraper.area.derive_headline_area. A PROVENANCE
+    # observation, never a value change — deliberately OUT of _HASH_FIELDS so
+    # stamping it churns no snapshot (rule 2).
+    area_basis: str | None = None
     disposition: str | None = None
     locality: str | None = None
     district: str | None = None
