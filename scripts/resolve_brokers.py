@@ -1175,12 +1175,27 @@ ON CONFLICT (group_key) DO UPDATE SET
 """
 
 
+# A PROPOSED card whose group_key this sweep did not regenerate is stale — its
+# key was minted under an older name_key (a pre-title-strip card sat next to its
+# successor as a duplicate: namefirm:916:'havranek ing martin' vs '... martin')
+# or its brokers moved firms. Only untouched machine proposals are deleted;
+# merged/dismissed rows are the operator's ledger and a regenerated key re-inserts
+# cleanly if the group becomes real again (a DISMISS here would block that
+# forever via the status='proposed' upsert guard).
+_STALE_PROPOSED_DELETE = """
+DELETE FROM broker_merge_candidates
+WHERE reason = 'name_firm' AND status = 'proposed'
+  AND NOT (group_key = ANY(%(gks)s::text[]))
+"""
+
+
 def _generate_merge_candidates(conn: Any) -> int:
     """Propose Phase-5 review groups: active brokers that share a normalized name AND
     a firm but are separate ids (the corporate/role-inbox case the auto-merge guard
     deliberately leaves apart). Idempotent — group_key keeps regeneration from
     reviving a merged/dismissed group; a merged group's losers go inactive and the
-    group shrinks below 2, so it never re-proposes."""
+    group shrinks below 2, so it never re-proposes. Stale PROPOSED cards (a key no
+    longer generated) are deleted at the end of the same pass."""
     from collections import defaultdict
     from psycopg.types.json import Jsonb
     groups: dict[tuple[str, int], list[int]] = defaultdict(list)
@@ -1195,18 +1210,29 @@ def _generate_merge_candidates(conn: Any) -> int:
             groups[key].append(int(bid))
             meta[key] = (name, domain, firm_name)
     proposed = 0
+    gks: list[str] = []
     with conn.cursor() as cur:
         for (nk, firm_id), ids in groups.items():
             if len(ids) < 2:
                 continue
             name, domain, firm_name = meta[(nk, firm_id)]
+            gk = f"namefirm:{firm_id}:{nk}"
             cur.execute(_CANDIDATE_UPSERT, {
-                "gk": f"namefirm:{firm_id}:{nk}",
+                "gk": gk,
                 "ids": sorted(ids),
                 "ev": Jsonb({"name": name, "firm_domain": domain,
                              "firm_name": firm_name, "broker_count": len(ids)}),
             })
+            gks.append(gk)
             proposed += 1
+        if gks:
+            # Guarded on a non-empty key list: an empty generation pass says the
+            # corpus read failed upstream far more plausibly than "every proposed
+            # card is stale", and deleting the whole queue on it would be silent.
+            cur.execute(_STALE_PROPOSED_DELETE, {"gks": gks})
+            if cur.rowcount:
+                LOG.info("RESOLVE candidates: deleted %d stale proposed name_firm cards",
+                         cur.rowcount)
     return proposed
 
 

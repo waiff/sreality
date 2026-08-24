@@ -1189,6 +1189,22 @@ contact corpus to `toolkit.broker_resolver.decide_merges`, which since 2026-08-2
   while a franchise cohort with no distinguishing evidence at all is precisely the case a reviewer
   cannot judge better than the engine. Refusals land in the `name_firm` operator tab, which exists
   for exactly those cohorts.
+- **Path C** (shared contact + rarity) covers the pair B structurally cannot reach: an identity
+  with no firm evidence at all (ceskereality publishes no e-mail → no firm) next to a firm-anchored
+  record of the same rare name, joined by an office line. A shared value — even a
+  non-discriminating one — proves the two records answer at the same desk, and market-wide name
+  rarity does the rest exactly as in B. Discriminating values are A's domain (skipped in C); the
+  contradiction veto and the component cap apply unchanged.
+- **The contradiction veto reads only PERSONAL contacts** (`ROLE_EMAIL_LOCALPARTS` in
+  `toolkit/broker_resolver.py`): an e-mail whose local part is a department word (`info@`,
+  `prodej@`, `garaze@`, …) identifies a desk, and a phone published by an identity whose every
+  e-mail is such an address is presumed the desk's line — one broker running five department
+  mailboxes on his own domain is otherwise indistinguishable from five colleagues. Phone-only
+  identities keep their phones in the veto, and a department mailbox still works as an A bridge
+  (it can prove sameness, never difference).
+- The candidate generator deletes **stale PROPOSED `name_firm` cards** (a `group_key` the sweep no
+  longer generates — e.g. keys minted before `name_key` stripped titles, which left duplicate
+  cards for one cohort); merged/dismissed rows are operator ledger and are never touched.
 - The paths are OR'd, and the firm-spread test guards **B only** — it is B's substitute for contact
   evidence, not an extra bar on A. A shared discriminating contact merges a common-named pair even
   if that name exists at fifty firms.

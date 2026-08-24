@@ -39,12 +39,13 @@ const REASONS = [
     key: 'contact_bridge_review',
     tab: 'Sdílený kontakt',
     blurb:
-      'Nejčastěji záznamy se stejným jménem u různých firem, které sdílejí ' +
-      'telefon nebo e-mail patřící i dalším jménům (recepce, přepojovací ' +
-      'číslo) — takový kontakt sám o sobě nic nedokazuje. Chodí sem ale ' +
-      'i dvojice z příliš velké skupiny nebo ze skupiny, které se dotklo ' +
-      'dřívější odmítnutí; tam může být sdílený kontakt naopak průkazný. ' +
-      'Zkontrolujte uvedený kontakt.',
+      'Záznamy se stejným jménem, které sdílejí telefon nebo e-mail ' +
+      'patřící i dalším jménům (recepce, přepojovací číslo) — a jméno se ' +
+      'přitom objevuje u více firem, takže sdílená linka sama o sobě ' +
+      'nerozhodne (u jména jediné firmy automat takovou dvojici slučuje ' +
+      'sám). Chodí sem i dvojice z příliš velké skupiny nebo ze skupiny, ' +
+      'které se dotklo dřívější odmítnutí; tam může být sdílený kontakt ' +
+      'naopak průkazný. Zkontrolujte uvedený kontakt.',
   },
 ] as const;
 
