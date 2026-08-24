@@ -62,7 +62,16 @@ jobs:
     # the DB lock and idempotent, so extra wall-clock has no downside; raise
     # timeout-minutes together with --max-seconds or the tail's retry budget, never
     # one alone.
-    timeout-minutes: 110
+    #
+    # 2026-08-24: raised 110 -> 180, the other half of the 3000s -> 1500s budget cut.
+    # Measured reality overtook the estimate above: the only full sweep to COMPLETE
+    # since 2026-08-19 (run 1457) took 106 min, of which the unbudgeted rollup tail
+    # alone was 67 — four minutes of headroom, so the very next nightly was cancelled
+    # again even carrying the budget cut. Every run 08-20..08-24 has ended_at IS NULL.
+    # The job is serialized by the DB lock and idempotent, so extra wall-clock costs
+    # nothing; a cancelled reconcile costs the run bookkeeping, the end-of-sweep
+    # candidate proposal and the matview refresh.
+    timeout-minutes: 180
     permissions:
       contents: read
     env:
