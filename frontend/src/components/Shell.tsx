@@ -102,11 +102,22 @@ export default function Shell() {
 function TopBar() {
   const { isAdmin, agendas } = useAuth();
   const location = useLocation();
+  /* The badge polls a Railway route that costs ~300 ms of unpooled connection
+   * setup for ~15 ms of server work, on every page load and then every 30 s.
+   * Two changes: it only runs when the Notifications nav item is actually
+   * visible to this session (the agenda gate below already decides that, and
+   * polling a count for a hidden entry is pure cost), and the cadence backs off
+   * to 60 s — an unread badge is not a real-time surface, and the matcher that
+   * feeds it does not run faster than that either. */
+  const notificationsVisible =
+    isAdmin || !isSupabaseConfigured() || agendas === null ||
+    agendas['notifications'] === true;
   const unreadQ = useQuery({
     queryKey: notificationKeys.unreadCount,
     queryFn: () => getNotificationUnreadCount(),
-    staleTime: 30_000,
-    refetchInterval: 30_000,
+    enabled: notificationsVisible,
+    staleTime: 60_000,
+    refetchInterval: 60_000,
   });
   const unread = unreadQ.data?.unread_count ?? 0;
   // Unconfigured local dev has no session (so no is_admin claim) — show the
