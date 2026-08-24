@@ -15,13 +15,13 @@ _SAME_FIRM = -1   # sentinel: "the broker rollup agrees with the identity's own 
 
 
 def _ident(i: int, source: str = "sreality", name: str | None = None, *,
-           firm: int | None = None, mergeable: bool = True, franchise: bool = False,
+           firm: int | None = None, mergeable: bool = True,
            primary_firm: int | None = _SAME_FIRM) -> R.Identity:
     """`firm` is the identity's OWN firm; `primary_firm` is its broker's rollup,
     which only the double-card check reads (it is what the name_firm card generator
     groups on). Defaults to the identity's own firm where a test does not care;
     pass None for a broker whose rollup has not landed."""
-    return R.Identity(i, source, name, firm, mergeable, franchise,
+    return R.Identity(i, source, name, firm, mergeable,
                       firm if primary_firm == _SAME_FIRM else primary_firm)
 
 
@@ -217,19 +217,69 @@ def test_a_firmless_identity_takes_no_firm_edge():
     assert R.decide_merges(ids, []).auto_merge_groups == []
 
 
-def test_a_franchise_firm_is_not_a_shared_employer():
-    """`re-max.cz` is ONE firm row over ~95 independent offices (firms.is_franchise,
-    and every RE/MAX identity lands on it through the role domain). Two agents of one
-    name there are not colleagues, so the shared firm_id proves nothing and path B
-    must not fire — even though the name, confined to that one domain, passes the
-    rarity test by construction."""
-    ids = [_ident(1, "remax", "Jan Dvořák", firm=42, franchise=True),
-           _ident(2, "remax", "Dvořák Jan", firm=42, franchise=True)]
-    assert R.decide_merges(ids, []).auto_merge_groups == []
-    # ...and path A is untouched: a discriminating contact still merges them
+def test_a_franchise_pair_is_separated_by_contradiction_not_a_flag():
+    """`re-max.cz` is ONE firm row over ~95 independent offices, so two same-named
+    agents there may not be colleagues — but what tells them apart is their
+    CONTACTS, not `firms.is_franchise`. An earlier revision refused franchise firms
+    outright, which parked 92% of the name_firm queue (1,481/1,615 cards) behind a
+    display flag; B now runs and the contradiction veto does the separating."""
+    # Two Dvořáks at two RE/MAX offices, each with their own personal mailbox:
+    # disconfirming discriminating contacts of one kind → refused whole.
+    ids = [_ident(1, "remax", "Jan Dvořák", firm=42),
+           _ident(2, "remax", "Dvořák Jan", firm=42)]
+    contacts = [R.Contact(1, "email", "jan.dvorak@re-max.cz"),
+                R.Contact(2, "email", "dvorak.jan2@re-max.cz")]
+    assert R.decide_merges(ids, contacts).auto_merge_groups == []
+    # The same pair with NO distinguishing evidence at all (role contacts only,
+    # name at one firm market-wide) merges: nothing we hold tells them apart, and
+    # neither could a reviewer. The Harák/M&M shape.
+    d = R.decide_merges(ids, [])
+    assert d.auto_merge_groups == [[1, 2]]
+    assert d.group_reasons == {(1, 2): R.REASON_NAME_FIRM}
+    # ...and path A is untouched: a shared discriminating contact still merges
+    # (B agrees via rarity now, so the ledger records both evidence paths).
     d = R.decide_merges(ids, _contacts("email", "jan.dvorak@re-max.cz", 1, 2))
     assert d.auto_merge_groups == [[1, 2]]
-    assert d.group_reasons == {(1, 2): R.REASON_CONTACT_NAME}
+    assert d.group_reasons == {(1, 2): "contact_name+name_firm"}
+
+
+def test_identical_contact_sets_qualify_b_despite_a_common_name():
+    """Seven "Zákaznická linka" records at one agency, all on the same office
+    inbox + line: the label exists at 15+ OTHER firms, so rarity refuses — but the
+    records differ in no attribute we hold, so they are one account however common
+    the label. Contact-identical (non-empty) qualifies the cohort."""
+    ids = [_ident(i, "sreality" if i % 2 else "idnes", "Zákaznická linka", firm=7)
+           for i in range(1, 8)]
+    # ...the same label at ANOTHER firm keeps the name common market-wide, and a
+    # real broker on the office inbox keeps the contacts non-discriminating (the
+    # live shape: 20+ names carry that inbox, so path A has nothing here).
+    ids.append(_ident(99, "idnes", "Zákaznická linka", firm=8))
+    ids.append(_ident(100, "idnes", "Filip Müller", firm=7))
+    contacts = []
+    for i in list(range(1, 8)) + [100]:
+        contacts += [R.Contact(i, "email", "info@euroreality.info"),
+                     R.Contact(i, "phone", "420793987434")]
+    contacts += [R.Contact(99, "email", "info@gebas-reality.cz")]
+    d = R.decide_merges(ids, contacts)
+    assert d.auto_merge_groups == [[1, 2, 3, 4, 5, 6, 7]]
+    assert d.group_reasons == {tuple(range(1, 8)): R.REASON_NAME_FIRM}
+    # The other firm's record is untouched — B never crosses a firm boundary.
+    assert not any(99 in g for g in d.auto_merge_groups)
+
+
+def test_differing_or_empty_contact_sets_do_not_qualify_a_common_name():
+    """The identical-fingerprint clause is exact-set equality on NON-EMPTY sets: a
+    cohort where one record carries an extra phone stays in review (the
+    mbreinvestice shape), and empty-vs-empty proves nothing — a common name with
+    no contacts anywhere must still fail B."""
+    ids = [_ident(1, "sreality", "Zákaznická linka", firm=7),
+           _ident(2, "idnes", "Zákaznická linka", firm=7),
+           _ident(9, "idnes", "Zákaznická linka", firm=8),
+           _ident(10, "idnes", "Pavel Novotný", firm=7)]
+    contacts = [R.Contact(1, "email", "info@mbre.cz"), R.Contact(1, "phone", "420605005222"),
+                R.Contact(2, "email", "info@mbre.cz"), R.Contact(10, "email", "info@mbre.cz")]
+    assert R.decide_merges(ids, contacts).auto_merge_groups == []
+    assert R.decide_merges(ids, []).auto_merge_groups == []
 
 
 def test_disconfirming_contacts_refuse_the_firm_path():
@@ -295,7 +345,11 @@ def test_the_same_pair_inside_one_firm_is_left_to_the_name_firm_tab():
            _ident(2, "idnes", "Malá Eva", firm=40),
            _ident(3, "bazos", "Eva Malá", firm=50),      # name at 2 firms -> no B-merge
            _ident(4, "remax", "Petr Svoboda", firm=40)]
-    d = R.decide_merges(ids, _contacts("email", "info@firma40.cz", 1, 2, 4))
+    # An extra phone on one record keeps the pair's contact sets DIFFERENT —
+    # contact-identical same-firm records now auto-merge instead of carding.
+    contacts = _contacts("email", "info@firma40.cz", 1, 2, 4) + [
+        R.Contact(1, "phone", "420111222333")]
+    d = R.decide_merges(ids, contacts)
     assert d.auto_merge_groups == []
     assert d.review_pairs == []
 
@@ -310,7 +364,9 @@ def test_a_pair_the_name_firm_tab_cannot_see_is_queued_after_all():
            _ident(2, "idnes", "Malá Eva", firm=40, primary_firm=None),
            _ident(3, "bazos", "Eva Malá", firm=50),      # name at 2 firms -> no B-merge
            _ident(4, "remax", "Petr Svoboda", firm=40)]
-    d = R.decide_merges(ids, _contacts("email", "info@firma40.cz", 1, 2, 4))
+    contacts = _contacts("email", "info@firma40.cz", 1, 2, 4) + [
+        R.Contact(1, "phone", "420111222333")]
+    d = R.decide_merges(ids, contacts)
     assert d.auto_merge_groups == []
     assert d.review_pairs == [(1, 2)]
 

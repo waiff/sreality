@@ -13,7 +13,9 @@ The whole rule:
     MERGE two identities when their NAMES MATCH
       AND ( A: they share a DISCRIMINATING contact
             OR
-            B: they share a firm AND that name appears at only ONE firm corpus-wide )
+            B: they share a firm AND ( that name appears at only ONE firm
+               corpus-wide OR every record carries the IDENTICAL non-empty
+               contact set ) )
 
 **Names match** is `name_key` equality — diacritics folded, token order ignored,
 academic titles stripped (`Bc. Ondřej Kadlec` ≡ `Kadlec Ondřej`). No name, no edge.
@@ -32,21 +34,35 @@ they did before — by carrying many names, not by carrying many rows.
 a name that appears at no OTHER firm is very unlikely to be two people, so two
 records of it at that firm are one person even with no contact in common (the
 role-inbox-only shape: everyone reachable at the same switchboard). Common names
-(`Jan Novák`, present at dozens of firms) and generic role labels (`Zákaznická
-linka`) fail it automatically and stay in manual review.
+(`Jan Novák`, present at dozens of firms) fail the rarity test — but a cohort whose
+records are INDISTINGUISHABLE qualifies anyway: when every member carries the
+exact same non-empty contact set, the records differ in no attribute we hold, and
+name commonness is beside the point (seven "Zákaznická linka" rows at one agency,
+all on the same office inbox and line, are one account no matter how many OTHER
+agencies run a customer line of the same label). Generic role labels at DIFFERENT
+firms still never fuse — B only ever operates inside one firm — and a cohort whose
+contact sets differ at all stays in manual review.
 
 The claim it rests on is narrower than "the name appears nowhere else", and three
 guards keep it honest. The firm is the identity's OWN (its e-mail domain), so a
 merge cannot collapse the very spread that proved a name spans two firms; an
 identity that publishes no firm abstains from the spread rather than voting, so
-independent brokers with no firm at all neither help nor block it. A FRANCHISE
-firm is refused outright: `re-max.cz` is one brand over ~95 independent offices,
-so two agents of one name there are not colleagues and their shared firm_id proves
-nothing. And a cohort whose members carry disconfirming contacts — each a
+independent brokers with no firm at all neither help nor block it. And a cohort
+whose members carry disconfirming contacts — each a
 discriminating one of the same kind, no value in common — is refused whole: that
 is positive evidence of different people, and it is what a firm-branded display
 name ("PREXIMA nemovitosti s.r.o." on five agents) otherwise walks straight past,
 since a label that IS the firm's name is unique to that firm by construction.
+The same contradiction veto is what guards a FRANCHISE firm (`firms.is_franchise`:
+`re-max.cz` is one brand over ~95 independent offices, so a shared firm_id there is
+not a shared employer): two same-named agents at two offices surface as different
+personal contacts and refuse, while a cohort with NO distinguishing evidence at
+all — role inboxes only, the name absent from the rest of the market — merges,
+because nothing we hold or could ever hold tells its records apart and the error,
+if real, is same-name same-brand attribution: mild and reversible. B no longer
+consults `is_franchise` (an earlier revision refused franchise firms outright,
+which silently parked 92% of the name_firm review queue — 1,481 of 1,615 cards on
+2026-08-24 — behind a flag meant for firm display).
 
 The paths are OR'd, and the firm-spread test guards B ONLY — it is B's substitute
 for contact evidence, not an extra bar on A. A shared discriminating contact merges
@@ -113,12 +129,9 @@ class Identity:
     a broker-level rollup: path B measures how many firms a name appears at, and a
     rollup collapses every identity of an already-merged broker onto one firm, so
     the very merge that proved a name spans two firms would erase that evidence on
-    the next sweep. `franchise` marks a firm that is one brand over many
-    independent offices (`firms.is_franchise`) — a shared firm_id there is not a
-    shared employer, so path B does not run on it. `primary_firm_id` is the
-    broker-level rollup and is used for ONE thing: not double-carding a pair the
-    `name_firm` candidate generator (which groups on exactly that column) already
-    proposes.
+    the next sweep. `primary_firm_id` is the broker-level rollup and is used for
+    ONE thing: not double-carding a pair the `name_firm` candidate generator
+    (which groups on exactly that column) already proposes.
     """
 
     id: int
@@ -126,7 +139,6 @@ class Identity:
     name: str | None = None
     firm_id: int | None = None
     mergeable: bool = True
-    franchise: bool = False
     primary_firm_id: int | None = None
 
 
@@ -373,31 +385,42 @@ def decide_merges(
         for other in members[1:]:
             a_edges.setdefault((members[0], other), set()).add(f"{value[0]}:{value[1]}")
 
-    # 3. B-edges: a name that exists at exactly one firm corpus-wide, chained
-    #    across the mergeable identities sitting at that firm under that name. The
-    #    firm spread counts EVERY identity — a duplicate of the same person at a
-    #    second firm is exactly the ambiguity this path must refuse. Two firms the
-    #    spread deliberately refuses to argue from: a FRANCHISE firm is one brand
-    #    over many independent offices, so a shared firm_id there is not a shared
-    #    employer at all, and an identity with no firm of its own abstains rather
-    #    than voting (it has no firm evidence either way).
+    # 3. B-edges: a same-name cohort at one firm, chained when the cohort
+    #    qualifies by RARITY (the name exists at exactly one firm corpus-wide —
+    #    the spread counts EVERY identity, since a duplicate of the same person at
+    #    a second firm is exactly the ambiguity rarity must refuse) OR by being
+    #    INDISTINGUISHABLE (every member carries the identical non-empty contact
+    #    set: records that differ in no attribute we hold are one subject, however
+    #    common the label — the "Zákaznická linka" shape). An identity with no firm
+    #    of its own abstains rather than voting (it has no firm evidence either
+    #    way). A franchise firm is NOT excluded: the contradiction veto below is
+    #    what actually separates two same-named agents at two offices (their
+    #    personal contacts disagree), and a cohort with no distinguishing evidence
+    #    at all has nothing a reviewer could judge by either.
     firms_of_name: dict[str, set[int]] = {}
     for ident in identities:
         key = keys[ident.id]
         if key and ident.firm_id is not None:
             firms_of_name.setdefault(key, set()).add(ident.firm_id)
+    fingerprint: dict[int, set[str]] = {}
+    for c in contacts:
+        if c.identity_id in by_id:
+            fingerprint.setdefault(c.identity_id, set()).add(f"{c.kind}:{c.value}")
     at_firm: dict[tuple[str, int], list[int]] = {}
     for ident in identities:
         key = keys[ident.id]
-        if not key or ident.firm_id is None or not ident.mergeable or ident.franchise:
-            continue
-        if len(firms_of_name.get(key, ())) != 1:
+        if not key or ident.firm_id is None or not ident.mergeable:
             continue
         at_firm.setdefault((key, ident.firm_id), []).append(ident.id)
     b_edges: set[tuple[int, int]] = set()
-    for members_at in at_firm.values():
+    for (key, _firm), members_at in at_firm.items():
         members = sorted(set(members_at))
         if len(members) < 2 or _contradicted(members, discriminating):
+            continue
+        rare = len(firms_of_name.get(key, ())) == 1
+        sets = {frozenset(fingerprint.get(m, ())) for m in members}
+        identical = len(sets) == 1 and bool(next(iter(sets)))
+        if not (rare or identical):
             continue
         for other in members[1:]:
             b_edges.add((members[0], other))

@@ -1002,8 +1002,8 @@ def test_the_sweep_loads_active_suppressions_and_passes_them_both_ways(
     monkeypatch.setattr(rb, "_suppressed_pairs", lambda c: {(1, 2)})
 
     conn = _ResilientConn("merge")
-    conn.identity_rows = [(1, "sreality", "Jan Novak", 10, True, False, 10),
-                          (2, "idnes", "Novak Jan", 10, True, False, 10)]
+    conn.identity_rows = [(1, "sreality", "Jan Novak", 10, True, 10),
+                          (2, "idnes", "Novak Jan", 10, True, 10)]
     conn.contact_rows = [(1, "email", "a@x.cz"), (2, "email", "a@x.cz")]
     auto, queued, suppressed = rb._auto_merge(conn, run_id=5)
     assert seen["decide"] == seen["apply"] == {(1, 2)}
@@ -1248,8 +1248,8 @@ def test_auto_merge_queues_review_pairs_after_applying_merges(
                         or seen.update(bridges=bv) or len(p))
 
     conn = _ResilientConn("merge")
-    conn.identity_rows = [(1, "sreality", "Jan Novak", 10, True, False, 10),
-                          (2, "idnes", "Novak Jan", 10, True, False, 10)]
+    conn.identity_rows = [(1, "sreality", "Jan Novak", 10, True, 10),
+                          (2, "idnes", "Novak Jan", 10, True, 10)]
     conn.contact_rows = [(1, "email", "a@x.cz"), (2, "email", "a@x.cz")]
     auto, queued, suppressed = rb._auto_merge(conn, run_id=5)
 
@@ -1411,7 +1411,10 @@ def test_the_engine_reads_the_whole_corpus_unfiltered() -> None:
     # ...and it rides along anyway, for the one comparison that must match what the
     # name_firm card generator groups on
     assert "b.primary_firm_id" in identities
-    assert "coalesce(f.is_franchise, false) AS franchise" in identities
+    # is_franchise is deliberately NOT read: path B's franchise safety is the
+    # contradiction veto, not a flag exclusion (a flag gate parked 92% of the
+    # name_firm queue behind firm-display metadata)
+    assert "is_franchise" not in identities
     assert "b.status IS DISTINCT FROM 'merged_away'" in identities
     contacts = " ".join(rb._MERGE_CONTACTS_SQL.split())
     assert contacts == "SELECT broker_identity_id, kind, value FROM broker_identity_contacts"
@@ -1430,14 +1433,14 @@ def test_identity_rows_carry_firm_and_mergeability_into_the_rule(
                         or rb.R.MergeDecision())
 
     conn = _ResilientConn("merge")
-    conn.identity_rows = [(1, "sreality", "Jan Novak", 10, True, False, 10),
-                          (2, "idnes", "Novak Jan", None, False, False, None)]
+    conn.identity_rows = [(1, "sreality", "Jan Novak", 10, True, 10),
+                          (2, "idnes", "Novak Jan", None, False, None)]
     conn.contact_rows = [(1, "email", "a@x.cz"), (999, "email", "orphan@x.cz")]
     assert rb._auto_merge(conn, run_id=1) == (0, 0, 0)
 
     assert seen["ids"] == [
-        rb.R.Identity(1, "sreality", "Jan Novak", 10, True, False, 10),
-        rb.R.Identity(2, "idnes", "Novak Jan", None, False, False, None)]
+        rb.R.Identity(1, "sreality", "Jan Novak", 10, True, 10),
+        rb.R.Identity(2, "idnes", "Novak Jan", None, False, None)]
     # a contact row whose identity the other statement did not return is dropped,
     # not crashed on: the two reads are separate statements over a live corpus
     assert seen["contacts"] == [rb.R.Contact(1, "email", "a@x.cz")]
