@@ -87,8 +87,12 @@ Four corollaries, because the evidence did not support one rule for everything:
   gone; `pipelineCache` is untouched. Rails: key-namespace disjointness, a render test with
   both decorations hanging forever, and a read-budget test pinning the queryFn at two
   relations.
-- ⬜ **W2a** — bootstrap dedup: agendas → one query keyed on `user.id`; `queryClient.clear()`
-  on sign-out; gate the unread-count badge. Removes 6 requests from **every** route.
+- ✅ **W2a** — bootstrap dedup: agendas → one query keyed on `user.id` (it keyed on the
+  session *object*, and Supabase hands out a fresh one per auth event, so the pair ran 3×
+  per app start outside React Query); `queryClient.clear()` on identity change (RLS-scoped
+  rows from the previous account survived up to gcTime); unread badge gated on its own nav
+  entry at 60 s. **Measured live: −4 requests on every route** — /collections 9→5,
+  /watchdog 10→6, /notifications 9→5, /brokers 11→7, /browse 31→27, /pipeline 27→23.
 - ⬜ **W2b** — `fetchAllRows` exact-count termination + parallel pages; visibility-gate
   Browse's city-quality and per-card collection reads.
 - ⬜ **W9a** — listing-detail chain, client half (gate sources on the resolved id, carry the
@@ -116,14 +120,14 @@ Four corollaries, because the evidence did not support one rule for everything:
 Per-route app data requests (PostgREST + Railway only; basemap tiles, assets and image
 bytes excluded) and settle time, measured by `npm run smoke-check:prod`:
 
-| Route | Requests | Settle | Notes |
+| Route | W0 | post-W2a | Notes |
 | --- | --- | --- | --- |
-| /browse | 31 | 2.8 s | was 9.1 s with an HTTP 500 pre-W-1a |
-| /pipeline | 27 | 1.7 s | 4 seeded cards; W1+W2a+W2b target ~12 |
-| /collections | 9 | 0.8 s | 6 of the 9 are the duplicated bootstrap |
-| /watchdog | 10 | 0.9 s | reference feed — shape already correct |
-| /notifications | 9 | 0.9 s | server work is ~15 ms; the rest is transport |
-| /brokers | 11 | 1.7 s | leaderboard is server-bound, see W10a |
+| /browse | 31 | **27** | was 9.1 s *and an HTTP 500* pre-W-1a; now 3.7 s |
+| /pipeline | 27 | **23** | time-to-first-card 1,427 → 951 ms (W1); W2b targets ~15 |
+| /collections | 9 | **5** | was 6-of-9 duplicated bootstrap |
+| /watchdog | 10 | **6** | reference feed — shape was already correct |
+| /notifications | 9 | **5** | server work is ~15 ms; the rest is transport |
+| /brokers | 11 | **7** | leaderboard is server-bound, see W10a |
 
 Server-side block counts to beat (constraint 6):
 

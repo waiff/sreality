@@ -80,13 +80,19 @@ const BUDGET_FIRST_CARD_MS = Number(process.env.SMOKE_BUDGET_FIRST_CARD_MS || 12
  *
  * These are RATCHETS, not targets. Every wave that removes requests lowers the
  * number it earned, in its own PR, with the new measurement quoted here. The
- * sprint's own arrows:
- *   /pipeline 27 -> ~12  (W1 splits the enrichment out of the blocking chain,
- *                         W2a kills 6 duplicated bootstrap reads, W2b gates
- *                         the city-quality paging)
- *   /browse   31 -> ~20  (W2a's 6, plus W2b gating the 8-page city-index walk)
- * Six of every route's requests are the entitlements x3 + plans x3 bootstrap
- * (auth.tsx re-runs per auth event) — W2a deletes those app-wide at once.
+ * ratchet history:
+ *   2026-08-24 W0  — first measurement, post-W-1a/W-1b, smoke cards seeded.
+ *   2026-08-24 W2a — every route dropped 4. The entitlements x3 + plans x3
+ *                    bootstrap collapsed to one of each (auth.tsx keys on
+ *                    user.id now, not the session object) and the unread badge
+ *                    is gated on its own nav entry: /collections 9->5,
+ *                    /watchdog 10->6, /notifications 9->5, /brokers 11->7,
+ *                    /browse 31->27, /pipeline 27->23. W1 shipped in between
+ *                    and changes ORDER, not count — the board paints after 2
+ *                    reads instead of waiting on all 6 (time-to-first-card
+ *                    1,427ms -> 951ms measured live).
+ * Still ahead: W2b gates Browse's 8-page city-index walk and its per-card
+ * collection read; W6 deletes a broker call from every card surface.
  *
  * Counting rule: only PostgREST + Railway API calls (see isAppDataRequest).
  * Routes are the operator's daily path plus the two that hid defects. */
