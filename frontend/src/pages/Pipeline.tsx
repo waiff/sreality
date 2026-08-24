@@ -32,6 +32,7 @@ import {
   placeCard,
   revalidatePipeline,
 } from '@/lib/pipelineCache';
+import { CardHydrationProvider } from '@/lib/hydration';
 import { LocationTypeahead } from '@/components/filter-controls/LocationTypeahead';
 import { type ListingStatus } from '@/lib/filters';
 import { FILTER_REGISTRY } from '@/lib/filterRegistry.generated';
@@ -144,6 +145,18 @@ export default function Pipeline() {
     return result;
   }, [boardQ.data, types, districts, status]);
 
+  /* The decoration cohort: the representative listing of every card ON the
+   * board (not just the filtered view — filtering is client-side and instant,
+   * so hydrating the full board once keeps a filter toggle free instead of
+   * re-keying the enrichment query on every chip click). */
+  const visibleListingIds = useMemo(
+    () =>
+      (boardQ.data ?? [])
+        .map((c) => c.listing_id)
+        .filter((id): id is number => id != null),
+    [boardQ.data],
+  );
+
   /* Curated-city indexes for the card strip. Cached forever and keyed shared
    * with the Browse map, so this is free once either surface has loaded them;
    * `enabled` only once there is a board to decorate. */
@@ -180,9 +193,15 @@ export default function Pipeline() {
         </div>
         <div className="flex items-center gap-4">
           <p className="text-[0.75rem] tracking-wide text-[var(--color-ink-3)] font-mono tabular-nums">
-            {filtersActive
-              ? `${filteredCards.length} z ${cards.length}`
-              : cards.length}{' '}
+            {/* An em dash while the count is genuinely unknown. Rendering 0
+                during the load states "your pipeline is empty", which is a
+                claim, not a placeholder — and it was briefly true on every
+                visit before the board resolved. */}
+            {boardQ.data === undefined
+              ? '—'
+              : filtersActive
+                ? `${filteredCards.length} z ${cards.length}`
+                : cards.length}{' '}
             nemovitostí
           </p>
           <button
@@ -312,25 +331,72 @@ export default function Pipeline() {
         </div>
       )}
 
-      {stagesQ.isLoading || boardQ.isLoading ? (
-        <p className="mt-8 text-sm text-[var(--color-ink-3)]">Načítání…</p>
-      ) : stagesQ.error || boardQ.error ? (
+      {stagesQ.error || boardQ.error ? (
         <p className="mt-8 text-sm text-[var(--color-brick)]">
           Nepodařilo se načíst pipeline.
         </p>
+      ) : boardQ.isLoading ? (
+        /* The stages arrive in their own (cached, often already-warm) query, so
+           the columns can be drawn — labelled, coloured, in order — while the
+           cards are still in flight. That is the whole shape of this page, and
+           it lands ~0.35s before the cards do; a bare "Načítání…" threw that
+           away and made an interactive board look like a blank screen. */
+        <BoardSkeleton stages={stages} />
       ) : cards.length === 0 ? (
         <p className="mt-8 text-sm text-[var(--color-ink-3)]">
           Zatím prázdné. Přidejte nemovitost do pipeline tlačítkem „Přidat do
           pipeline" na detailu inzerátu.
         </p>
       ) : (
-        <Board
-          stages={stages}
-          cards={filteredCards}
-          byStage={byStage}
-          cityQuality={cityQuality}
-        />
+        <CardHydrationProvider listingIds={visibleListingIds}>
+          <Board
+            stages={stages}
+            cards={filteredCards}
+            byStage={byStage}
+            cityQuality={cityQuality}
+          />
+        </CardHydrationProvider>
       )}
+    </div>
+  );
+}
+
+/* The board's shape, drawn from the stage list alone.
+ *
+ * Not a generic shimmer: it is the real column layout with the real labels and
+ * colours, so the transition to the loaded board is the cards appearing inside
+ * columns that were already there — no reflow, no jump. Falls back to three
+ * neutral columns on the rare path where even the stages are cold, which keeps
+ * the page from collapsing to a single line of text. */
+function BoardSkeleton({ stages }: { stages: PipelineStage[] }) {
+  const columns: Array<PipelineStage | null> =
+    stages.length > 0 ? stages : [null, null, null];
+  return (
+    <div className="mt-6 flex gap-4 overflow-x-auto pb-4" aria-busy="true">
+      {columns.map((s, i) => (
+        <div key={s?.id ?? `skeleton-${i}`} className="w-72 shrink-0">
+          <div
+            className="flex items-baseline justify-between px-1 pb-2 border-b-2"
+            style={{ borderColor: s ? stageColor(s) : 'var(--color-rule)' }}
+          >
+            <span
+              className="text-[0.72rem] tracking-[0.14em] uppercase font-medium"
+              style={{ color: s ? stageColor(s) : 'var(--color-ink-4)' }}
+            >
+              {s?.label ?? ' '}
+            </span>
+          </div>
+          <ul className="mt-3 min-h-24 space-y-2 p-1">
+            {[0, 1].map((n) => (
+              <li
+                key={n}
+                className="h-[4.5rem] rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] opacity-60"
+              />
+            ))}
+          </ul>
+        </div>
+      ))}
+      <span className="sr-only">Načítání pipeline…</span>
     </div>
   );
 }
@@ -460,9 +526,17 @@ function StageManager({ stages }: { stages: PipelineStage[] }) {
   const [err, setErr] = useState<string | null>(null);
   const [newLabel, setNewLabel] = useState('');
 
+  /* Narrowed from a wholesale `['pipeline']` sweep to the two caches a stage
+   * edit can actually change: the stage list itself, and the board (whose
+   * columns and badges render from it). The old prefix also swept
+   * `card(id)` and `members` — and, had the decoration keys been nested under
+   * it, every thumbnail and broker line on the board as well. They are not
+   * (lib/hydration owns its own namespace, pinned by hydration.test.ts), but
+   * the sweep was still wider than the fact that changed. */
   const invalidate = () => {
     setErr(null);
-    void qc.invalidateQueries({ queryKey: ['pipeline'] });
+    void qc.invalidateQueries({ queryKey: pipelineKeys.stages });
+    void qc.invalidateQueries({ queryKey: pipelineKeys.board });
   };
   const onError = (e: unknown) =>
     setErr(e instanceof Error ? e.message : 'Akce selhala.');

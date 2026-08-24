@@ -36,8 +36,6 @@ const card = (over: Partial<PipelineBoardCard> = {}): PipelineBoardCard => ({
   okres: null,
   region: null,
   is_active: true,
-  image_url: null,
-  broker: null,
   ...over,
 });
 

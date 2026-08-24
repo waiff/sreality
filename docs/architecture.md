@@ -1023,6 +1023,27 @@ renumber.** Navigate by area:
     revalidate in `onSettled` — deliberately NOT `onError`, because the global `MutationCache.onError`
     (`main.tsx`) stays silent for any mutation that defines its own, which is why a failed board drag
     used to snap back with no explanation.
+    **The board's read is STRUCTURAL ONLY; decorations load through `lib/hydration`** (hydration
+    sprint W1). `fetchPipelineBoard` used to await six serialized cross-origin round trips inside one
+    promise — pipeline rows, a guaranteed-empty pagination tail, properties, every image of every
+    card (830 rows to render 44 thumbnails, each row paying a per-image CLIP lateral), then two
+    `/brokers` calls, the last of which existed only to fill a hover tooltip — and `Pipeline.tsx`
+    rendered a bare "Načítání…" until all of it settled. It now reads pipeline rows + properties and
+    returns; the cover photo and the broker line are independent React Query reads keyed on the
+    surrogate `listing_id`, delivered to cards through `CardHydrationProvider`. Three rules hold this
+    in place. (1) **Decoration keys live in their own top-level `['hydration', …]` namespace** — never
+    under `['pipeline']` — because `revalidatePipeline` invalidates `['pipeline','board']` after every
+    card write and the stage editor sweeps `['pipeline']` wholesale, so a nested decoration key would
+    refetch every thumbnail and broker on the board on every drag, making the split slower than the
+    chain it replaced (`lib/hydration/hydration.test.ts` pins the disjointness). (2) **Decorations
+    reach `CardFace` by context, not props**, because it renders twice — in-column and inside the
+    `DragOverlay` — and props would let those two mount points drift. (3) **Enrichment isolation is
+    now structural**: a failed broker read cannot affect the board because it is not on the board's
+    promise, so the old hand-written `.catch(() => new Map())` swallow is gone and a failure is a
+    real, visible error again instead of a permanent silent "no broker". `pipelineCache` is untouched
+    by all of this — it only ever needed `property_id` plus a mutable `stage_id` on the board array.
+    The rule going forward: if the board cannot filter, sort or place a card without a field, it is a
+    decoration and does not belong in that queryFn.
     **The badge is `pipeline_stages.code` (migration 377), not an ordinal and never a parse of
     the label.** The live board numbers its stages inside the display text ("1. For Review" …
     "9. Passed", "9. Bought", "9. Lost"), so the number is operator data: three stages

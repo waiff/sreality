@@ -23,6 +23,7 @@ import { TrashIcon } from '@/components/icons';
 import PriceDelta from '@/components/PriceDelta';
 import CityIndexStrip from '@/components/CityIndexStrip';
 import type { CityQualityByObec } from '@/lib/useCityQuality';
+import { useCardHydration } from '@/lib/hydration';
 import type { PipelineBoardCard, PipelineCardBroker } from '@/lib/types';
 
 export const CARD_PREFIX = 'card:';
@@ -66,6 +67,14 @@ export function CardFace({
   card: PipelineBoardCard;
   cityQuality?: CityQualityByObec;
 }) {
+  /* Decorations come from context, not from `card` — see lib/hydration. The
+   * board's structural read no longer carries them, and CardFace renders both
+   * in-column and inside the drag overlay, so context is what keeps those two
+   * mount points from drifting apart. */
+  const { coverFor, brokerFor, brokersPending } = useCardHydration();
+  const cover = coverFor(card.listing_id);
+  const broker = brokerFor(card.listing_id);
+
   const inactive = !card.is_active;
   const priceColor = inactive ? 'text-[var(--color-ink-2)]' : 'text-[var(--color-ink)]';
   /* placePrimary names the TOWN, not the okres — the shared resolver every
@@ -90,7 +99,7 @@ export function CardFace({
   return (
     <div>
       <div className="flex gap-2.5">
-        <CardThumb url={card.image_url} inactive={inactive} />
+        <CardThumb url={cover} inactive={inactive} />
         <div className="min-w-0 flex-1">
           {/* Price and its movement are one typographic unit — the delta sits on
               the price's own baseline rather than reading as a separate badge. */}
@@ -134,20 +143,26 @@ export function CardFace({
               </span>
             )}
           </div>
-          {card.broker && (
+          {/* The broker line streams in behind the card. Its height is
+              reserved while the read is in flight so the column does not
+              reflow when it lands; once resolved, a card with no attributed
+              broker collapses the space rather than holding an empty row. */}
+          {broker ? (
             <p className="mt-0.5 truncate text-[0.7rem] text-[var(--color-ink-3)]">
               <Link
-                to={`/brokers/${card.broker.broker_id}`}
-                title={brokerHoverTitle(card.broker)}
+                to={`/brokers/${broker.broker_id}`}
+                title={brokerHoverTitle(broker)}
                 className="hover:text-[var(--color-copper)] hover:underline underline-offset-2"
               >
-                {card.broker.display_name ?? 'Makléř'}
+                {broker.display_name ?? 'Makléř'}
               </Link>
-              {card.broker.firm_label && (
-                <span className="text-[var(--color-ink-4)]"> · {card.broker.firm_label}</span>
+              {broker.firm_label && (
+                <span className="text-[var(--color-ink-4)]"> · {broker.firm_label}</span>
               )}
             </p>
-          )}
+          ) : brokersPending ? (
+            <p className="mt-0.5 h-[0.95rem]" aria-hidden />
+          ) : null}
         </div>
       </div>
       {/* Full card width, below the photo column — the strip is about the
