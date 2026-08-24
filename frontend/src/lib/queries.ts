@@ -7,7 +7,7 @@ import {
   type PipelineBoardRow,
 } from './pipelineBoardModel';
 import { type TaggedImageUrl } from './imageTags';
-import type { BrokerPublic, ListingBroker } from './brokers';
+import type { ListingBroker } from './brokers';
 import type { LlmCostDailyRow, LlmCostHourlyRow } from './llmCosts';
 import {
   type CenterRadius,
@@ -2380,7 +2380,13 @@ export const fetchPipelineBoard = async (): Promise<PipelineBoardCard[]> => {
   return composePipelineCards(rows);
 };
 
-/* Project the two batched broker reads onto one card's broker block.
+/* Project ONE batched broker read onto a card's broker block (W6).
+ *
+ * There used to be a second argument — the contact row from a chained
+ * /brokers?ids= call. Migration 419 put primary_email / primary_phone on
+ * listing_broker_public, so identity and contact arrive together and the second
+ * round trip is gone; a card can no longer be in the split state where it knows
+ * the broker's name but not whether he is reachable.
  *
  * `has_email`/`has_phone` arrive INSTEAD of the values for a non-admin caller and
  * are absent for an admin — so derive the flag from whichever the API sent, and
@@ -2389,17 +2395,16 @@ export const fetchPipelineBoard = async (): Promise<PipelineBoardCard[]> => {
  * read) stays null. */
 export const pipelineCardBroker = (
   lb: ListingBroker | undefined,
-  contact: BrokerPublic | undefined,
 ): PipelineCardBroker | null =>
   lb
     ? {
         broker_id: lb.broker_id,
         display_name: lb.broker_display_name,
         firm_label: lb.broker_firm_label,
-        email: contact?.primary_email ?? null,
-        phone: contact?.primary_phone ?? null,
-        has_email: contact?.has_email ?? Boolean(contact?.primary_email),
-        has_phone: contact?.has_phone ?? Boolean(contact?.primary_phone),
+        email: lb.primary_email ?? null,
+        phone: lb.primary_phone ?? null,
+        has_email: lb.has_email ?? Boolean(lb.primary_email),
+        has_phone: lb.has_phone ?? Boolean(lb.primary_phone),
       }
     : null;
 

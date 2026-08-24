@@ -152,12 +152,13 @@ vi.mock('@/lib/queries', async (importOriginal) => {
     fetchImagesByListing: vi.fn(async () => []),
   };
 });
-/* Only the two network wrappers are stubbed — contactState/prettyPhone stay REAL,
-   because the vizitka's whole point is the three states they encode. */
+/* Only the network wrapper is stubbed — contactState/prettyPhone stay REAL,
+   because the vizitka's whole point is the three states they encode. Since W6
+   there is one wrapper to stub, not two: the contact arrives on the attribution
+   row itself (migration 419). */
 vi.mock('@/lib/brokers', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/brokers')>()),
   fetchListingBroker: vi.fn(async () => null),
-  fetchBrokersByIds: vi.fn(async () => new Map()),
 }));
 vi.mock('@/components/NewEstimationModal', () => ({
   useNewEstimationModal: () => ({ open: vi.fn() }),
@@ -280,33 +281,28 @@ describe('<ListingDetail> resolver chain', () => {
 /* per-field 3-state contact rendering the chip never had                     */
 /* -------------------------------------------------------------------------- */
 
-const ATTRIBUTION: brokers.ListingBroker = {
+/* One row now: /brokers/by-listing carries identity AND contact (migration 419).
+   Which contact half arrives (primary_* vs has_*) is still a property of the
+   CALLER — admin vs not — so each test picks one. broker_id (7) and listing_id
+   (105053) are deliberately different values; that difference is what pins the
+   link below to the BROKER dossier rather than a listing-id-shaped route. */
+const attribution = (
+  contact: Partial<brokers.BrokerContactFields> = {},
+): brokers.ListingBroker => ({
   sreality_id: -11876,
   listing_id: 105053,
   broker_id: 7,
   broker_display_name: 'Jan Novák',
   broker_firm_label: 'RE/MAX Alfa',
-};
-
-// The /brokers batch row. Which contact half arrives (primary_* vs has_*) is a
-// property of the CALLER — admin vs not — so each test picks one.
-function brokerRow(contact: Partial<brokers.BrokerPublic>): brokers.BrokerPublic {
-  return {
-    broker_id: 7,
-    display_name: 'Jan Novák',
-    firm_name: 'RE/MAX Alfa',
-    ...contact,
-  } as brokers.BrokerPublic;
-}
+  ...contact,
+});
 
 describe('<BrokerVizitka>', () => {
   beforeEach(() => {
     vi.mocked(queries.fetchListingBySreality).mockReset();
     vi.mocked(queries.fetchListingBySreality).mockResolvedValue(RESOLVER_LISTING);
     vi.mocked(brokers.fetchListingBroker).mockReset();
-    vi.mocked(brokers.fetchListingBroker).mockResolvedValue(ATTRIBUTION);
-    vi.mocked(brokers.fetchBrokersByIds).mockReset();
-    vi.mocked(brokers.fetchBrokersByIds).mockResolvedValue(new Map());
+    vi.mocked(brokers.fetchListingBroker).mockResolvedValue(attribution());
   });
 
   function renderListing() {
@@ -322,10 +318,8 @@ describe('<BrokerVizitka>', () => {
     );
   }
 
-  function withContact(contact: Partial<brokers.BrokerPublic>) {
-    vi.mocked(brokers.fetchBrokersByIds).mockResolvedValue(
-      new Map([[7, brokerRow(contact)]]),
-    );
+  function withContact(contact: Partial<brokers.BrokerContactFields>) {
+    vi.mocked(brokers.fetchListingBroker).mockResolvedValue(attribution(contact));
   }
 
   it('shows the real contact for an admin session, keyed on the attributed broker', async () => {
@@ -337,10 +331,10 @@ describe('<BrokerVizitka>', () => {
     expect(screen.getByText('jan@remax.cz')).toBeInTheDocument();
     expect(screen.getByText('Jan Novák')).toBeInTheDocument();
     expect(screen.getByText('RE/MAX Alfa')).toBeInTheDocument();
-    // Identity comes from /brokers/by-listing, contact from the /brokers batch —
-    // the by-listing route carries no contact fields to render.
+    // W6: identity AND contact come from /brokers/by-listing. One call is the
+    // assertion — a second broker read reappearing here is the regression.
     expect(brokers.fetchListingBroker).toHaveBeenCalledWith(105053);
-    expect(brokers.fetchBrokersByIds).toHaveBeenCalledWith([7]);
+    expect(brokers.fetchListingBroker).toHaveBeenCalledTimes(1);
     // ATTRIBUTION deliberately gives broker_id (7) and listing_id (105053)
     // different values — pins the link to the BROKER dossier, not a
     // listing-id-shaped route that would 404 on every click.
@@ -350,24 +344,21 @@ describe('<BrokerVizitka>', () => {
     );
   });
 
-  it('shows a loading placeholder while the contact read is in flight, never the error line', async () => {
-    vi.mocked(brokers.fetchBrokersByIds).mockReturnValue(new Promise(() => {}));
+  /* W6 deleted the two states that only existed because contact arrived on a
+     SECOND, later request: "Načítám kontakt…" (identity painted, contact still in
+     flight) and "Kontakt není k dispozici" (that read succeeded but held no row
+     for this broker). Neither is reachable now — holding the broker row IS
+     holding the answer — so the card paints complete in one pass. This pins the
+     absence: if a chained contact read ever comes back, so will the reflow. */
+  it('paints the contact in the same pass as the identity, with no interim state', async () => {
+    withContact({ primary_phone: '420777123456', primary_email: 'jan@remax.cz' });
 
     renderListing();
 
     expect(await screen.findByText('Jan Novák')).toBeInTheDocument();
-    expect(screen.getByText('Načítám kontakt…')).toBeInTheDocument();
-    expect(screen.queryByText('Kontakt se nepodařilo načíst')).toBeNull();
-  });
-
-  /* The beforeEach default: fetchBrokersByIds resolves (succeeds) with an empty
-     Map — the broker just isn't in this batch (filtered by status, merged away
-     mid-request). A SUCCESSFUL empty result must not read as a failed one. */
-  it('shows a neutral message, not the error line, when the contact batch succeeds with no row for this broker', async () => {
-    renderListing();
-
-    expect(await screen.findByText('Jan Novák')).toBeInTheDocument();
-    expect(screen.getByText('Kontakt není k dispozici')).toBeInTheDocument();
+    expect(screen.getByText('+420 777 123 456')).toBeInTheDocument();
+    expect(screen.queryByText('Načítám kontakt…')).toBeNull();
+    expect(screen.queryByText('Kontakt není k dispozici')).toBeNull();
     expect(screen.queryByText('Kontakt se nepodařilo načíst')).toBeNull();
   });
 
@@ -402,8 +393,6 @@ describe('<BrokerVizitka>', () => {
     await waitFor(() => expect(brokers.fetchListingBroker).toHaveBeenCalled());
     expect(screen.queryByText('Makléř')).toBeNull();
     expect(screen.queryByText('Makléře se nepodařilo načíst')).toBeNull();
-    // No attribution, no broker_id — the contact call must not fire at all.
-    expect(brokers.fetchBrokersByIds).not.toHaveBeenCalled();
   });
 
   /* fetchListingBroker returns null ONLY for the two 404 bodies that mean "nothing
@@ -422,17 +411,20 @@ describe('<BrokerVizitka>', () => {
     ).toBeInTheDocument();
   });
 
-  /* The same distinction one level up: a failed contact read must not render as
-     a broker with no reachable channel. The identity still shows. */
-  it('separates a failed contact read from a broker with no contact', async () => {
-    vi.mocked(brokers.fetchBrokersByIds).mockRejectedValue(new Error('HTTP 500'));
+  /* The distinction that used to need its own read: a broker we could not fetch
+     must never render as a broker with no reachable channel. With one read there
+     is no half-loaded card left to get this wrong — a failure takes the whole
+     block to the error line, and an em-dash is only ever drawn from a row we
+     actually hold. */
+  it('never draws an empty channel for a broker it failed to read', async () => {
+    vi.mocked(brokers.fetchListingBroker).mockRejectedValue(new Error('HTTP 500'));
 
     renderListing();
 
     expect(
-      await screen.findByText('Kontakt se nepodařilo načíst'),
+      await screen.findByText('Makléře se nepodařilo načíst'),
     ).toBeInTheDocument();
-    expect(screen.getByText('Jan Novák')).toBeInTheDocument();
     expect(screen.queryByText(/telefon —/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/e-mail —/)).not.toBeInTheDocument();
   });
 });

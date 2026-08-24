@@ -170,7 +170,14 @@ export interface LeaderboardParams {
   firmIds?: number[];
 }
 
-export interface ListingBroker {
+/* The attributed broker for one listing, contact included (migration 419).
+ *
+ * The contact pair arrives on THIS row now, not from a chained /brokers?ids=
+ * lookup: listing_broker_public already joined the same `brokers` row the second
+ * call re-read, so the identity and the contact were always one tuple apart.
+ * Which half of BrokerContactFields is populated is still the caller's property,
+ * not the row's — an admin gets primary_*, everyone else gets has_*. */
+export interface ListingBroker extends BrokerContactFields {
   // NULL for a post-Gate-2 (non-sreality) listing. listing_id (migration 343)
   // is the surrogate that's always present — key lookups on it, not this.
   sreality_id: number | null;
@@ -237,12 +244,12 @@ const ANSWERED_404 = /broker not found|listing has no attributed broker/;
 const isAnsweredNotFound = (err: unknown): boolean =>
   err instanceof ApiError && err.status === 404 && ANSWERED_404.test(err.message);
 
-/* Both batch routes bound their input at toolkit.brokers.MAX_BATCH (1000) and
- * answer a 422 rather than a truncated 200 beyond it, so one oversized call
- * would lose EVERY row instead of the overflow. Chunk below the cap; the GET
- * slice is smaller because 1000 repeated `ids=` params is an ~8 KB URL. */
+/* The batch route bounds its input at toolkit.brokers.MAX_BATCH (1000) and
+ * answers a 422 rather than a truncated 200 beyond it, so one oversized call
+ * would lose EVERY row instead of the overflow. Chunk below the cap. (The GET
+ * twin's smaller 200-id slice went with fetchBrokersByIds in W6 — a URL-length
+ * bound only a repeated `ids=` querystring ever needed.) */
 const POST_ID_BATCH = 1000;
-const GET_ID_BATCH = 200;
 
 function chunk<T>(xs: ReadonlyArray<T>, size: number): T[][] {
   const out: T[][] = [];
@@ -334,7 +341,9 @@ export async function fetchListingBroker(
 
 // Batched canonical-broker lookup for many listings at once (the pipeline board
 // hydrates N cards in one round-trip — no N+1). Keyed on the surrogate
-// `listing_id`, same NULL-safety reason as fetchListingBroker above.
+// `listing_id`, same NULL-safety reason as fetchListingBroker above. Since W6
+// (migration 419) the row carries the contact pair too, so this is the ONLY read
+// behind a card's whole broker line.
 export async function fetchListingBrokersByIds(
   listingIds: ReadonlyArray<number>,
 ): Promise<Map<number, ListingBroker>> {
@@ -346,33 +355,27 @@ export async function fetchListingBrokersByIds(
       undefined,
       JWT,
     );
-    for (const row of r.data ?? []) out.set(row.listing_id, row);
+    // Inherited from the deleted fetchBrokersByIds twin, and now load-bearing here
+    // instead: a 200 with no envelope is an SPA-fallback HTML page or a proxy page,
+    // not an empty result. `r.data ?? []` would turn that outage into "not one card
+    // on this board has a broker" — the exact silent dark state this module was
+    // repointed to end. A genuine `data: []` is a different case and still returns
+    // an empty map.
+    if (!r?.data) throw new ApiError('malformed /brokers response', 0, r);
+    for (const row of r.data) out.set(row.listing_id, row);
   }
   return out;
 }
 
-// Batched canonical-broker lookup by broker_id (primary contact + firm) — pairs
-// with fetchListingBrokersByIds to fill a card's hover contact box.
-export async function fetchBrokersByIds(
-  brokerIds: ReadonlyArray<number>,
-): Promise<Map<number, BrokerPublic>> {
-  const out = new Map<number, BrokerPublic>();
-  for (const slice of chunk(brokerIds, GET_ID_BATCH)) {
-    const r = await apiGet<Envelope<BrokerPublic[]>>(
-      '/brokers',
-      { ids: slice },
-      undefined,
-      JWT,
-    );
-    // A 200 with no envelope is a malformed response (SPA-fallback HTML, a proxy
-    // page) — same guard as fetchBrokerDossier, so a caller can't mistake an
-    // outage for a successful empty batch. A genuinely empty `data: []` (none of
-    // the requested ids matched) is not this case and still returns cleanly.
-    if (!r?.data) throw new ApiError('malformed /brokers response', 0, r);
-    for (const row of r.data) out.set(row.broker_id, row);
-  }
-  return out;
-}
+/* `fetchBrokersByIds` (GET /brokers?ids=) is DELETED — W6, migration 419.
+ *
+ * It existed for exactly one job: chase the broker_ids that fetchListingBrokersByIds
+ * had just returned and fetch their contact pair. Now listing_broker_public carries
+ * primary_email / primary_phone itself, so both former callers — the pipeline board's
+ * hydration hook and the listing page's vizitka — read the contact off the row they
+ * already have. Re-adding a by-broker_id contact fetcher would recreate the
+ * serialized second round trip this wave removed; the route itself stays for
+ * non-SPA consumers (the agent, ClickUp). */
 
 export async function fetchBrokerDossier(
   brokerId: number,

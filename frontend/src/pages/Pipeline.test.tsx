@@ -48,7 +48,6 @@ vi.mock('@/lib/brokers', async (importOriginal) => {
   return {
     ...actual,
     fetchListingBrokersByIds: vi.fn(),
-    fetchBrokersByIds: vi.fn(),
   };
 });
 
@@ -86,22 +85,15 @@ const CARDS: PipelineBoardCard[] = [
 ];
 
 /* The decoration fixtures, keyed on listing_id like the real layer. */
-const LISTING_BROKER = {
+/* W6: identity AND contact are one row now (migration 419), so there is no second
+   fixture to pair with this one — `masked` picks which half of the contact pair the
+   API sent, which is a property of the CALLER, not of the row. */
+const listingBroker = (masked: boolean) => ({
   sreality_id: 111,
   listing_id: 111,
   broker_id: 7,
   broker_display_name: 'Jan Novák',
   broker_firm_label: 'RE/MAX',
-};
-const brokerContact = (masked: boolean) => ({
-  broker_id: 7,
-  display_name: 'Jan Novák',
-  firm_id: null, firm_domain: null, firm_name: 'RE/MAX', firm_is_franchise: null,
-  source_count: 1, distinct_source_count: 1, listing_count: 1, property_count: 1,
-  active_listing_count: 1, active_property_count: 1,
-  first_seen_at: null, last_seen_at: null,
-  cz_listing_count: 1, cz_property_count: 1,
-  cz_active_listing_count: 1, cz_active_property_count: 1,
   ...(masked
     ? { has_email: true, has_phone: true }
     : { primary_email: 'jan@remax.cz', primary_phone: '420777123456' }),
@@ -213,10 +205,7 @@ describe('<Pipeline> board', () => {
     vi.mocked(api.removePipelineCard).mockResolvedValue({ removed: true });
     vi.mocked(queries.fetchListingCovers).mockResolvedValue(new Map());
     vi.mocked(brokersApi.fetchListingBrokersByIds).mockResolvedValue(
-      new Map([[111, LISTING_BROKER]]),
-    );
-    vi.mocked(brokersApi.fetchBrokersByIds).mockResolvedValue(
-      new Map([[7, brokerContact(false)]]),
+      new Map([[111, listingBroker(false)]]),
     );
   });
 
@@ -273,8 +262,8 @@ describe('<Pipeline> board', () => {
      values. The card must keep the broker and say the contact is admin-only —
      dropping it renders identically to a broker with no contact at all. */
   it('marks a masked contact as admin-only instead of omitting it', async () => {
-    vi.mocked(brokersApi.fetchBrokersByIds).mockResolvedValue(
-      new Map([[7, brokerContact(true)]]),
+    vi.mocked(brokersApi.fetchListingBrokersByIds).mockResolvedValue(
+      new Map([[111, listingBroker(true)]]),
     );
     renderBoard();
     const broker = await screen.findByText('Jan Novák');

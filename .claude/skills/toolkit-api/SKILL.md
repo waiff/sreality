@@ -145,9 +145,16 @@ it (`api/`). They do not apply to the scraper.
    (`frontend/src/lib/brokers.ts`, every call `jwt: true`); it previously read the
    underlying views straight off PostgREST and had been dark since migration 299 revoked
    them. Migration 395 revoked the last one A6 missed (`firms_public`, default-ACL drift).
-   Because the cap is a 422 on the WHOLE batch, `fetchListingBrokersByIds` /
-   `fetchBrokersByIds` chunk client-side (supabase-js `.in()` had no such cap, so an
-   oversized board would otherwise lose every card's broker, not just the overflow); and
+   Because the cap is a 422 on the WHOLE batch, `fetchListingBrokersByIds` chunks
+   client-side (supabase-js `.in()` had no such cap, so an oversized board would otherwise
+   lose every card's broker, not just the overflow). Its `fetchBrokersByIds` twin is
+   **deleted** (hydration sprint W6): migration 419 put `primary_email`/`primary_phone` on
+   `listing_broker_public`, so `POST /brokers/by-listings` answers identity AND contact in
+   one row and the SPA no longer chains a second, serialized `GET /brokers?ids=` to fetch
+   what the first read's join had already touched. `apply_pii_policy` covers the two new
+   columns automatically — it masks on the column NAME, which is exactly why widening a view
+   behind these routes needs no route change. `GET /brokers?ids=` itself stays, for the agent
+   and other non-SPA consumers; and
    the client treats 404 as an answer only when the body carries this module's own
    `broker not found` / `listing has no attributed broker` detail — any other 404 (edge,
    stale base URL, renamed route) must surface as an error, not as "no broker".

@@ -165,13 +165,25 @@ SYSTEM_ACCOUNT_ID = "00000000-0000-0000-0000-000000000000"
 _JWKS_CLIENT: Any = None
 
 
+# PyJWT's default JWKS cache lifespan is 300 s, so once every five minutes the
+# NEXT identity-gated request pays a blocking outbound HTTPS fetch to Supabase's
+# JWKS endpoint before it may even look at the token — on one uvicorn worker that
+# stalls the whole process, on top of the ~270-410 ms floor every Railway call
+# already pays. Rotation stays safe at an hour: PyJWKClient.get_signing_key falls
+# through to get_signing_keys(refresh=True) whenever the token's `kid` is absent
+# from the cached set, so a newly rotated key is fetched on its first use rather
+# than waited for. The lifespan is the staleness ceiling for keys we no longer
+# need, not the latency of adopting a new one.
+_JWKS_CACHE_SECONDS = 3600
+
+
 def _jwks_client(jwks_url: str) -> Any:
     """Cached PyJWKClient — fetches + caches the project's public signing keys
     (no per-request network call). Instantiated once per process."""
     global _JWKS_CLIENT
     if _JWKS_CLIENT is None:
         import jwt
-        _JWKS_CLIENT = jwt.PyJWKClient(jwks_url)
+        _JWKS_CLIENT = jwt.PyJWKClient(jwks_url, lifespan=_JWKS_CACHE_SECONDS)
     return _JWKS_CLIENT
 
 

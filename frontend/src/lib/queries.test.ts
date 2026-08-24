@@ -28,7 +28,7 @@ import {
   type BrowsePrefilters,
   type DistrictMatchRow,
 } from './queries';
-import type { BrokerPublic, ListingBroker } from './brokers';
+import type { ListingBroker } from './brokers';
 import type { DistrictChip } from './filters';
 
 describe('priceNullTolerantOr', () => {
@@ -434,26 +434,29 @@ describe('portal-mirror mode selection', () => {
  * board used to swallow a PostgREST 42501 as an EXPECTED masked state and show no
  * broker at all; the API instead answers 200 with contact columns replaced by
  * has_email / has_phone. The card must therefore be able to say "a contact exists,
- * you just can't see it" — which only works if the flags survive the projection. */
+ * you just can't see it" — which only works if the flags survive the projection.
+ *
+ * W6 collapsed the pair to ONE read: migration 419 put primary_email /
+ * primary_phone on listing_broker_public, so the projection now takes a single
+ * row. The masked/unmasked distinction is unchanged — it was never a property of
+ * WHICH read the columns came from, only of the caller's identity. */
 describe('pipelineCardBroker', () => {
-  const lb: ListingBroker = {
+  const row = (over: Partial<ListingBroker> = {}): ListingBroker => ({
     sreality_id: null,
     listing_id: 10,
     broker_id: 7,
     broker_display_name: 'Jan Novák',
     broker_firm_label: 'RE/MAX',
-  };
-  const contact = (over: Partial<BrokerPublic>): BrokerPublic =>
-    ({ broker_id: 7, ...over }) as BrokerPublic;
+    ...over,
+  });
 
   it('is null when the listing has no resolved broker', () => {
-    expect(pipelineCardBroker(undefined, undefined)).toBeNull();
-    expect(pipelineCardBroker(undefined, contact({ primary_email: 'a@b.cz' }))).toBeNull();
+    expect(pipelineCardBroker(undefined)).toBeNull();
   });
 
   it('keeps an admin session real values and derives both flags from them', () => {
     expect(
-      pipelineCardBroker(lb, contact({ primary_email: 'jan@remax.cz', primary_phone: null })),
+      pipelineCardBroker(row({ primary_email: 'jan@remax.cz', primary_phone: null })),
     ).toEqual({
       broker_id: 7,
       display_name: 'Jan Novák',
@@ -466,15 +469,20 @@ describe('pipelineCardBroker', () => {
   });
 
   it('carries a non-admin masked row through as flags with no values', () => {
-    const b = pipelineCardBroker(lb, contact({ has_email: true, has_phone: false }));
+    const b = pipelineCardBroker(row({ has_email: true, has_phone: false }));
     expect(b).toMatchObject({ email: null, phone: null, has_email: true, has_phone: false });
   });
 
-  /* A failed broker read degrades the CARD, never the board — but "no contact"
-     must not be claimed for a broker we simply failed to hydrate. */
-  it('reports no contact when the contact read produced nothing', () => {
-    expect(pipelineCardBroker(lb, undefined)).toMatchObject({
+  /* A broker with neither channel on file is a real answer, not a failure — and
+     it is now reachable only in that one way. Before W6 an absent contact ALSO
+     meant "the second read produced nothing", so the card could not tell an
+     unreachable broker from an un-hydrated one; with the contact on the identity
+     row, holding the row means holding the answer. */
+  it('reports no contact for a broker with neither channel on file', () => {
+    expect(pipelineCardBroker(row())).toMatchObject({
       display_name: 'Jan Novák',
+      email: null,
+      phone: null,
       has_email: false,
       has_phone: false,
     });

@@ -51,7 +51,6 @@ vi.mock('./supabase', () => {
 vi.mock('./brokers', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./brokers')>()),
   fetchListingBrokersByIds: vi.fn(),
-  fetchBrokersByIds: vi.fn(),
 }));
 
 import * as brokers from './brokers';
@@ -97,7 +96,6 @@ describe('fetchPipelineBoard read budget', () => {
     await fetchPipelineBoard();
     expect(h.reads).not.toContain('images_public');
     expect(brokers.fetchListingBrokersByIds).not.toHaveBeenCalled();
-    expect(brokers.fetchBrokersByIds).not.toHaveBeenCalled();
   });
 
   it('projects the structural fields a card renders and sorts on', async () => {

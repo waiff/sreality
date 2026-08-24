@@ -1095,9 +1095,20 @@ renumber.** Navigate by area:
     `property_pipeline_public` + `pipeline_stages_public` hydrated against `properties_public`
     (street + `mf_gross_yield_pct` from the view; one thumbnail per card via the shared
     `fetchImagesByListingIds` + `imageSrc()` Browse helpers; the **canonical broker** per card via
-    two batched reads — `fetchListingBrokersByIds` (`POST /brokers/by-listings`) + `fetchBrokersByIds`
-    (`GET /brokers?ids=`), NOT the raw drift-prone `properties_public.broker_*` — the name links
-    to `/brokers/{id}`, contact in a native-title hover. **Migration 398 settles that for good:**
+    ONE batched read — `fetchListingBrokersByIds` (`POST /brokers/by-listings`), NOT the raw
+    drift-prone `properties_public.broker_*` — the name links to `/brokers/{id}`, contact in a
+    native-title hover. **Migration 419 (hydration sprint W6)** put `primary_email` /
+    `primary_phone` on `listing_broker_public`, so the chained `fetchBrokersByIds`
+    (`GET /brokers?ids=`) that used to follow it is deleted from the SPA — on the board and on
+    listing detail alike. It was pure duplication: the contact pair sits on the same `brokers`
+    row that view already joins (and already filters to `status='active'`), so the second
+    statement re-read heap pages the first had in hand (measured on the 48 live board ids: 518
+    buffers for step 1, then 207 execution + 436 planning buffers for step 2) and paid a second
+    Railway round trip's ~270–410 ms floor to do it, serialized behind the first because its
+    `broker_id`s came out of that response. The route itself stays for non-SPA consumers.
+    Widening it is not a PII widening: `listing_broker_public` is API-only under A6 (below) and
+    `toolkit.brokers.apply_pii_policy` masks on the column NAME, so both columns are swapped for
+    `has_email` / `has_phone` for every non-admin caller with no route change. **Migration 398 settles that for good:**
     `listings_public`/`properties_public` still carry `broker_email`/`broker_phone` as columns
     (so PostgREST answers `?select=` with nulls instead of a 400, and the five matviews depending
     on `listings_public` survive) but project them as `null::text` — they were owner-rights views
@@ -1109,13 +1120,15 @@ renumber.** Navigate by area:
     every card degraded to "no broker shown". `frontend/src/lib/brokers.ts` is now repointed wholesale
     onto the identity-gated API (every call `jwt: true`; the routes reject the static bundle token),
     so a logged-in caller gets HTTP 200 with either the values or `has_email`/`has_phone` — there is
-    no longer an *expected* failure, and the 42501 special case is gone. The two reads stay isolated
+    no longer an *expected* failure, and the 42501 special case is gone. The read stays isolated
     from the board (broker data is an enrichment; a failure must not take stages/cards/images down)
     but every failure is now `console.error`'d, never silently expected (pinned by
     `frontend/src/lib/pipelineBoard.test.ts`). A masked card keeps its broker name + firm and its
-    hover box says the contact is admin-only rather than omitting it. Both helpers chunk their id
-    list below the routes' `MAX_BATCH` (1000) cap, which is a 422 on the whole batch — unchunked,
-    a board past that size would lose EVERY card's broker rather than the overflow.
+    hover box says the contact is admin-only rather than omitting it. The helper chunks its id
+    list below the route's `MAX_BATCH` (1000) cap, which is a 422 on the whole batch — unchunked,
+    a board past that size would lose EVERY card's broker rather than the overflow — and rejects a
+    200 that carries no envelope (an SPA-fallback HTML page), a guard inherited from the deleted
+    `fetchBrokersByIds` twin and now covering the entire broker line rather than half of it.
     The board offers basic **property-type
     filtering** — multi-select `category_main` chips (Byty / Domy / Komerční / …) whose labels come
     from the SAME generated filter registry as Browse's TYPE tabs (`FILTER_REGISTRY`, never a parallel

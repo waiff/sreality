@@ -234,8 +234,46 @@ Four corollaries, because the evidence did not support one rule for everything:
   join to a one-array projection (the Map-based join it used to do is now the view's job);
   `pipelineBoard.test.ts` rewritten to pin ONE relation read instead of two. **← stop point
   1 — pausing here for review before W6 onward.**
-- ⬜ **W6** — one broker call (contacts onto the API-only view; delete the second call from
-  the board *and* listing detail).
+- ✅ **W6** — one broker call (migration 419). The board's broker decoration and the listing
+  page's vizitka each spent TWO serialized Railway round trips on one broker line:
+  `POST /brokers/by-listings` (identity, off `listing_broker_public`) and then
+  `GET /brokers?ids=` (contact, off `brokers_public`) — the second unable to name its
+  `broker_id`s until the first had answered. The contact pair was never anywhere else: it
+  lives on `brokers`, the row `listing_broker_public` already joins and already filters to
+  `status='active'`. `EXPLAIN (ANALYZE, BUFFERS)` on the 48 real board listing ids: step 1
+  **518 buffers** (331 hit / 187 read, 35 rows); step 2 **207 execution + 436 planning
+  buffers** — of which 108 are the same `brokers_pkey` scan step 1 had just done and 99 the
+  same `firms_pkey` lookups. The widened view re-measured at **520 buffers, same plan, same
+  node shape** (±2 is page-cache noise), so the second read was 100% duplicate work plus a
+  second ~270–410 ms Railway floor. **Not a PII widening**: `listing_broker_public` is
+  API-only under Amendment A6 — live ACL `postgres + service_role`, no `anon`, no
+  `authenticated`, registered in BOTH `_BROKER_A6_SURFACES` and `_BROKER_PII_RELATIONS` — and
+  `apply_pii_policy` masks on the column NAME, so both columns become `has_email`/`has_phone`
+  for a non-admin the day they land, with no route change; the migration re-asserts the revoke
+  explicitly rather than trusting `CREATE OR REPLACE` to preserve the ACL (`firms_public`
+  reached production browser-readable by inheriting the default ACL at CREATE, invisible to
+  299's grant-statement sweep until 395). Verified live: ACL unchanged, `anon`/`authenticated`
+  `has_table_privilege` both false, and **0 value mismatches against `brokers_public` across
+  all 524,613 rows**. Frontend: `pipelineCardBroker` takes one argument, `useListingBrokers`
+  makes one call, `BrokerVizitka` lost its chained `['broker-contact', brokerId]` query
+  entirely — with it went the "Načítám kontakt…" placeholder and the post-paint reflow it
+  reserved width for, plus two states that only existed because contact arrived later
+  ("contact read failed but identity didn't", "that read succeeded but held no row for this
+  broker"). Holding the broker row now IS holding the answer. `fetchBrokersByIds` deleted
+  (zero remaining callers, W3's precedent) — but its **malformed-envelope guard was moved, not
+  dropped**, onto `fetchListingBrokersByIds`: with one read left, a 200 carrying an
+  SPA-fallback HTML page would otherwise read as "not one card on this board has a broker",
+  the exact dark state this module was repointed to end. Ride-along, in the same file the
+  remaining call authenticates through: **`PyJWKClient(lifespan=3600)`** (`api/dependencies.py`
+  — it was PyJWT's 300 s default, so once every five minutes the next identity-gated request
+  paid a blocking outbound JWKS fetch on a single uvicorn worker before it could even look at
+  the token). Rotation stays safe because `get_signing_key` falls through to
+  `get_signing_keys(refresh=True)` on an unknown `kid` — verified in the installed PyJWT
+  2.10.1 source, not assumed — so the lifespan bounds staleness of keys we no longer need,
+  never the latency of adopting a new one. New rails: the widened row's masking asserted on
+  the actual `by-listings` shape (values → flags for a non-admin, values for an admin, and
+  `has_email=false` surviving as a real "unreachable" answer), and a frontend test pinning
+  that identity and contact arrive on one row.
 - ⬜ **W9b** — append `source_id_native` + `property_id` to `listings_public`, written
   against the LIVE viewdef (mig 398 replaced it to close a PII hole).
 - ⬜ **W7a** — Browse + comparables onto the shared layer; four image loaders → one.
