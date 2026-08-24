@@ -289,14 +289,14 @@ Four corollaries, because the evidence did not support one rule for everything:
 Per-route app data requests (PostgREST + Railway only; basemap tiles, assets and image
 bytes excluded) and settle time, measured by `npm run smoke-check:prod`:
 
-| Route | W0 | post-W2a | post-W2b | post-W5 | Notes |
-| --- | --- | --- | --- | --- | --- |
-| /browse | 31 | 27 | 22 | 22 | was 9.1 s *and an HTTP 500* pre-W-1a; now 4.9 s |
-| /pipeline | 27 | 23 | 19 | **18** | time-to-first-card 1,427 → 951 ms (W1) → **412ms** (W5, killed the board's 2nd request's serialization) |
-| /collections | 9 | 5 | 5 | 5 | was 6-of-9 duplicated bootstrap |
-| /watchdog | 10 | 6 | 6 | 6 | reference feed — shape was already correct |
-| /notifications | 9 | 5 | 5 | 5 | server work is ~15 ms; the rest is transport |
-| /brokers | 11 | 7 | 7 | 7 | leaderboard is server-bound, see W10a |
+| Route | W0 | post-W2a | post-W2b | post-W5 | post-W6 | Notes |
+| --- | --- | --- | --- | --- | --- | --- |
+| /browse | 31 | 27 | 22 | 22 | 22 | was 9.1 s *and an HTTP 500* pre-W-1a; now 2.9 s |
+| /pipeline | 27 | 23 | 19 | 18 | **17** | time-to-first-card 1,427 → 951 ms (W1) → 412 ms (W5, killed the board's 2nd request's serialization) → **368 ms** (W6) |
+| /collections | 9 | 5 | 5 | 5 | 5 | was 6-of-9 duplicated bootstrap |
+| /watchdog | 10 | 6 | 6 | 6 | 6 | reference feed — shape was already correct |
+| /notifications | 9 | 5 | 5 | 5 | 5 | server work is ~15 ms; the rest is transport |
+| /brokers | 11 | 7 | 7 | 7 | 7 | leaderboard is server-bound, see W10a |
 
 Server-side block counts to beat (constraint 6):
 
