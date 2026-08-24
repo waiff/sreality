@@ -525,7 +525,8 @@ async function resolveTagPrefilter(
    * see its header for the cap-drift history). */
   const rows = await fetchAllRows<{ property_id: number }>({
     relation: 'properties_with_tags',
-    build: () => supabase.rpc('properties_with_tags', { tag_ids: f.tags }),
+    build: () =>
+      supabase.rpc('properties_with_tags', { tag_ids: f.tags }, { count: 'exact' }),
     orderBy: [{ column: 'property_id' }],
     key: ['property_id'],
     expectMax: 100_000,
@@ -562,14 +563,18 @@ async function resolveCityQualityPrefilter(
   const rows = await fetchAllRows<{ listing_id: number }>({
     relation: 'listings_with_city_quality',
     build: () =>
-      supabase.rpc('listings_with_city_quality', {
-        p_index_rules: f.cityIndexRules.length === 0 ? null : f.cityIndexRules,
-        /* pop bounds moved to the home_obec_pop column filter (migration 142);
-         * never sent through this RPC anymore. */
-        p_pop_min: null,
-        p_pop_max: null,
-        p_proximity: f.nearCityProximity,
-      }),
+      supabase.rpc(
+        'listings_with_city_quality',
+        {
+          p_index_rules: f.cityIndexRules.length === 0 ? null : f.cityIndexRules,
+          /* pop bounds moved to the home_obec_pop column filter (migration 142);
+           * never sent through this RPC anymore. */
+          p_pop_min: null,
+          p_pop_max: null,
+          p_proximity: f.nearCityProximity,
+        },
+        { count: 'exact' },
+      ),
     /* The RPC returns the surrogate `listing_id` (migration 351); the row type
      * pins that so a stray `r.sreality_id` can't silently reintroduce the
      * id-space half-swap. Applied downstream via `.in('listing_id', ids)`. */
@@ -627,7 +632,8 @@ async function resolveEstimatesPrefilter(
   if (!f.withEstimates) return null;
   const rows = await fetchAllRows<{ property_id: number }>({
     relation: 'property_estimates_public',
-    build: () => supabase.from('property_estimates_public').select('property_id'),
+    build: () =>
+      supabase.from('property_estimates_public').select('property_id', { count: 'exact' }),
     orderBy: [{ column: 'property_id' }],
     key: ['property_id'],
     expectMax: 100_000,
@@ -1715,7 +1721,9 @@ export const fetchTrainingLabelCounts = async (): Promise<TrainingLabelCount[]> 
   const rows = await fetchAllRows<{ image_id: number; label: string }>({
     relation: 'image_training_examples_public',
     build: () =>
-      supabase.from('image_training_examples_public').select('image_id,label'),
+      supabase
+        .from('image_training_examples_public')
+        .select('image_id,label', { count: 'exact' }),
     orderBy: [{ column: 'image_id' }],
     key: ['image_id'],
     expectMax: 250_000,
@@ -1939,7 +1947,7 @@ export const fetchCuratedCities = async (): Promise<CuratedCity[]> => {
    * (see the same-name-obce price-stats fix), hence the city_id tiebreak. */
   return await fetchAllRows<CuratedCity>({
     relation: 'curated_cities_public',
-    build: () => supabase.from('curated_cities_public').select('*'),
+    build: () => supabase.from('curated_cities_public').select('*', { count: 'exact' }),
     orderBy: [{ column: 'name' }, { column: 'city_id' }],
     key: ['city_id'],
     expectMax: 25_000,
@@ -1951,7 +1959,8 @@ export const fetchCityIndexDefinitions = async (): Promise<CityIndexDefinition[]
    * applied by the consumers — the fetch orders by the unique name for paging. */
   return await fetchAllRows<CityIndexDefinition>({
     relation: 'city_index_definitions_public',
-    build: () => supabase.from('city_index_definitions_public').select('*'),
+    build: () =>
+      supabase.from('city_index_definitions_public').select('*', { count: 'exact' }),
     orderBy: [{ column: 'index_name' }],
     key: ['index_name'],
     expectMax: 25_000,
@@ -1966,7 +1975,9 @@ export const fetchCityIndexValues = async (): Promise<CityIndexValue[]> => {
   return await fetchAllRows<CityIndexValue>({
     relation: 'city_index_values_public',
     build: () =>
-      supabase.from('city_index_values_public').select('city_id,index_name,value'),
+      supabase
+        .from('city_index_values_public')
+        .select('city_id,index_name,value', { count: 'exact' }),
     orderBy: [{ column: 'city_id' }, { column: 'index_name' }],
     key: ['city_id', 'index_name'],
     expectMax: 100_000,
@@ -1987,7 +1998,9 @@ export const fetchCuratedCityPolygons = async (): Promise<CityPolygon[]> => {
   return await fetchAllRows<CityPolygon>({
     relation: 'curated_city_polygons_public',
     build: () =>
-      supabase.from('curated_city_polygons_public').select('city_id,geojson'),
+      supabase
+        .from('curated_city_polygons_public')
+        .select('city_id,geojson', { count: 'exact' }),
     orderBy: [{ column: 'city_id' }],
     key: ['city_id'],
     expectMax: 25_000,
@@ -2028,7 +2041,8 @@ export const fetchRentMapChoropleth = async (): Promise<RentMapPolygon[]> => {
    * only happens when the operator first enables the layer. */
   return await fetchAllRows<RentMapPolygon>({
     relation: 'rent_map_choropleth_public',
-    build: () => supabase.from('rent_map_choropleth_public').select('*'),
+    build: () =>
+      supabase.from('rent_map_choropleth_public').select('*', { count: 'exact' }),
     orderBy: [{ column: 'ruian_code' }],
     key: ['ruian_code'],
     expectMax: 100_000,
@@ -2039,7 +2053,7 @@ export const fetchRentMapKraje = async (): Promise<RentMapKraj[]> => {
   /* 14 kraje — fixed by geography. */
   return await fetchAllRows<RentMapKraj>({
     relation: 'rent_map_kraje_public',
-    build: () => supabase.from('rent_map_kraje_public').select('*'),
+    build: () => supabase.from('rent_map_kraje_public').select('*', { count: 'exact' }),
     orderBy: [{ column: 'ruian_code' }],
     key: ['ruian_code'],
     expectMax: 1_000,
@@ -2181,7 +2195,9 @@ export const fetchPropertyCollectionMemberSet = async (): Promise<
   const rows = await fetchAllRows<{ property_id: number; collection_id: number }>({
     relation: 'collection_properties_public',
     build: () =>
-      supabase.from('collection_properties_public').select('property_id, collection_id'),
+      supabase
+        .from('collection_properties_public')
+        .select('property_id, collection_id', { count: 'exact' }),
     orderBy: [{ column: 'property_id' }, { column: 'collection_id' }],
     key: ['property_id', 'collection_id'],
     expectMax: 100_000,
@@ -2273,6 +2289,7 @@ export const fetchPipelineMembers = async (): Promise<PipelineMembers> => {
         .from('property_pipeline_public')
         .select(
           'property_id, stage_id, stage_label, stage_color, stage_code, stage_position, is_terminal',
+          { count: 'exact' },
         ),
     orderBy: [{ column: 'property_id' }],
     key: ['property_id'],
@@ -2338,7 +2355,10 @@ export const fetchPipelineBoard = async (): Promise<PipelineBoardCard[]> => {
     build: () =>
       supabase
         .from('property_pipeline_public')
-        .select('property_id, stage_id, board_position, entered_stage_at, added_at'),
+        .select(
+          'property_id, stage_id, board_position, entered_stage_at, added_at',
+          { count: 'exact' },
+        ),
     orderBy: [{ column: 'board_position' }, { column: 'property_id' }],
     key: ['property_id'],
     expectMax: 100_000,

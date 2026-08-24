@@ -127,7 +127,7 @@ export const fetchCityMetrics = async (
     build: () =>
       supabase
         .from('price_stat_city_metrics_public')
-        .select('*')
+        .select('*', { count: 'exact' })
         .eq('dataset_id', datasetId),
     orderBy: [
       { column: 'locality_name' },
@@ -147,7 +147,7 @@ export const fetchChoropleth = async (
     build: () =>
       supabase
         .from('price_stat_choropleth_public')
-        .select('*')
+        .select('*', { count: 'exact' })
         .eq('dataset_id', datasetId),
     orderBy: [{ column: 'obec_id' }],
     key: ['obec_id'],
@@ -229,7 +229,7 @@ export const fetchObecTree = async (): Promise<ObecNode[]> => {
     build: () =>
       supabase
         .from('price_stat_obce_picker_public')
-        .select('id,level,name,parent_id,population,sreality_id'),
+        .select('id,level,name,parent_id,population,sreality_id', { count: 'exact' }),
     orderBy: [{ column: 'name' }, { column: 'id' }],
     key: ['id'],
     expectMax: 100_000,
@@ -250,7 +250,7 @@ export const fetchNoData = async (datasetId: number): Promise<NoDataObec[]> => {
     build: () =>
       supabase
         .from('price_stat_no_data_public')
-        .select('obec_id,locality_name')
+        .select('obec_id,locality_name', { count: 'exact' })
         .eq('dataset_id', datasetId),
     orderBy: [{ column: 'obec_id' }],
     key: ['obec_id'],
@@ -282,6 +282,7 @@ export const fetchCitySeries = async (
         .from('price_stat_observations_public')
         .select(
           'category_type_cb,year,month,price,active_count,new_count,deleted_count',
+          { count: 'exact' },
         )
         .eq('dataset_id', datasetId)
         .eq('entity_type', entityType)

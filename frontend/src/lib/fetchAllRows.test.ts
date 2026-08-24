@@ -28,7 +28,7 @@ const makeRows = (n: number): Row[] =>
 /* A server: rows live here; each build() hands out a fresh single-use builder
  * that records the orders applied and serves range() windows off the CURRENT
  * array (so tests can mutate it between pages), clamped like db-max-rows. */
-function fakeServer(rows: Row[], { clamp = Infinity } = {}) {
+function fakeServer(rows: Row[], { clamp = Infinity, exactCount = false } = {}) {
   const orderCalls: OrderSpec[][] = [];
   const rangeCalls: Array<[number, number]> = [];
   const build = (): PageBuilder<Row> => {
@@ -43,7 +43,11 @@ function fakeServer(rows: Row[], { clamp = Infinity } = {}) {
         rangeCalls.push([from, to]);
         const asked = to - from + 1;
         const data = rows.slice(from, from + Math.min(asked, clamp));
-        return Promise.resolve({ data, error: null });
+        return Promise.resolve({
+          data,
+          error: null,
+          ...(exactCount ? { count: rows.length } : {}),
+        });
       },
     };
     return builder;
@@ -132,5 +136,50 @@ describe('fetchAllRows', () => {
     await expect(
       fetchAllRows<Row>({ ...opts, build, expectMax: 100 }),
     ).rejects.toEqual({ message: 'boom' });
+  });
+
+  describe('exact-count fast path (W2b)', () => {
+    it('terminates on page 1 without a probing empty page when count says that is everything', async () => {
+      const srv = fakeServer(makeRows(5), { exactCount: true });
+      const out = await fetchAllRows<Row>({ ...opts, build: srv.build, expectMax: 10_000 });
+      expect(out).toHaveLength(5);
+      expect(srv.rangeCalls).toEqual([[0, 999]]); // no terminating empty page
+    });
+
+    it('skips the terminator on an exact page multiple too, once count confirms it', async () => {
+      const srv = fakeServer(makeRows(2000), { exactCount: true });
+      const out = await fetchAllRows<Row>({ ...opts, build: srv.build, expectMax: 10_000 });
+      expect(out).toHaveLength(2000);
+      // 2 full pages, no 3rd empty-page probe — the count-less test above
+      // (same 2000-row set) needs 3 calls; this is the saving.
+      expect(srv.rangeCalls).toHaveLength(2);
+    });
+
+    it('fetches pages 2..N together once page 1 comes back full and count is known', async () => {
+      const srv = fakeServer(makeRows(2500), { exactCount: true });
+      const out = await fetchAllRows<Row>({ ...opts, build: srv.build, expectMax: 10_000 });
+      expect(out).toHaveLength(2500);
+      expect(out[0].id).toBe(1);
+      expect(out[2499].id).toBe(2500);
+      expect(srv.rangeCalls).toEqual([[0, 999], [1000, 1999], [2000, 2999]]);
+    });
+
+    it('throws the overflow error from count alone, before firing any further page', async () => {
+      const srv = fakeServer(makeRows(3000), { exactCount: true });
+      await expect(
+        fetchAllRows<Row>({ ...opts, build: srv.build, expectMax: 2500 }),
+      ).rejects.toBeInstanceOf(FetchAllOverflowError);
+      expect(srv.rangeCalls).toHaveLength(1); // never asked for page 2..N
+    });
+
+    it('falls back to the sequential walk when count is known but a clamp shortens page 1 (cap-drift stays safe)', async () => {
+      // db-max-rows=700 vs pageSize=1000, but count is still exact (2400) —
+      // count-based page math would ask for [1000,1999] etc and silently miss
+      // rows a clamp is holding back. Must NOT trust it here.
+      const srv = fakeServer(makeRows(2400), { clamp: 700, exactCount: true });
+      const out = await fetchAllRows<Row>({ ...opts, build: srv.build, expectMax: 10_000 });
+      expect(out).toHaveLength(2400);
+      expect(out.map((r) => r.id)).toEqual(makeRows(2400).map((r) => r.id));
+    });
   });
 });

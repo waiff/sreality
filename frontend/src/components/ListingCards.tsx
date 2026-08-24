@@ -151,6 +151,17 @@ export default function ListingCards({
   const showSkeleton = isLoading && rows == null;
   const isEmpty = !showSkeleton && !isError && rows != null && rows.length === 0;
 
+  /* One shared read for every card's collection-save glyph state (React Query
+   * would dedupe N per-card subscriptions to the same network call anyway,
+   * but hoisting it here makes the gate — and the "one read" contract —
+   * explicit: nothing to show a membership for until there are rows). */
+  const collectionMembersQ = useQuery({
+    queryKey: curationKeys.propertyCollectionMembers,
+    queryFn: fetchPropertyCollectionMemberSet,
+    enabled: rows != null && rows.length > 0,
+    staleTime: 30_000,
+  });
+
   /* The card column is an independently-scrolling fixed-height element
    * (overflow-y-auto below); the infinite sentinel observes it as its root
    * and scroll restoration saves/restores its scrollTop. */
@@ -225,6 +236,7 @@ export default function ListingCards({
                     estimating={r.sreality_id != null && estimatingIds.has(r.sreality_id)}
                     onEstimate={onEstimate}
                     pipelineScoped={pipelineScoped}
+                    collectionMembers={collectionMembersQ.data}
                   />
                 </li>
               ))}
@@ -249,7 +261,15 @@ export default function ListingCards({
  * opens a popover of collections with checkmarks (monitored ones first, marked
  * with a bell). Orthogonal to the pipeline: collections are m2m groupings,
  * monitoring opts a collection into change alerts. Stops the card Link. */
-function CollectionSaveButton({ property_id }: { property_id: number }) {
+function CollectionSaveButton({
+  property_id,
+  collectionMembers,
+}: {
+  property_id: number;
+  /* Owned by ListingCards — one shared read for the whole grid, gated on
+   * there being any rows to show it for. */
+  collectionMembers: Map<number, number[]> | undefined;
+}) {
   const qc = useQueryClient();
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -269,15 +289,7 @@ function CollectionSaveButton({ property_id }: { property_id: number }) {
     staleTime: 30_000,
     enabled: open,
   });
-  // One shared read across ALL cards (React Query dedupes the key), mirroring
-  // the pipeline funnel's members query — avoids one anon query per card.
-  const membersQ = useQuery({
-    queryKey: curationKeys.propertyCollectionMembers,
-    queryFn: fetchPropertyCollectionMemberSet,
-    staleTime: 30_000,
-  });
-
-  const memberIds = new Set(membersQ.data?.get(property_id) ?? []);
+  const memberIds = new Set(collectionMembers?.get(property_id) ?? []);
   const inAny = memberIds.size > 0;
 
   const invalidate = () => {
@@ -446,6 +458,7 @@ function Card({
   estimating,
   onEstimate,
   pipelineScoped,
+  collectionMembers,
 }: {
   r: CardRow;
   hovered: boolean;
@@ -465,6 +478,7 @@ function Card({
   /* The cohort is currently scoped to the deal pipeline, so a bookmark write
    * changes which cards match — see usePipelineCard's cohortScoped. */
   pipelineScoped: boolean;
+  collectionMembers: Map<number, number[]> | undefined;
 }) {
   /* Callback ref so the one ref serves both wrappers (Link → anchor,
    * merge-mode → div). */
@@ -559,7 +573,7 @@ function Card({
               property_id={r.property_id}
               cohortScoped={pipelineScoped}
             />
-            <CollectionSaveButton property_id={r.property_id} />
+            <CollectionSaveButton property_id={r.property_id} collectionMembers={collectionMembers} />
           </div>
         )}
         {/* Metadata margin: two file-tab badges down the right edge of

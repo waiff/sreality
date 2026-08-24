@@ -294,21 +294,26 @@ export default function BrowseExperience({
     enabled: mapVisible,
   });
 
+  /* All three feed cityOverlay below, which only the map (ListingMap) reads —
+   * same gate as the sibling cityPolygons/rentMap queries just below. */
   const citiesQuery = useQuery<CuratedCity[], Error>({
     queryKey: cityQualityKeys.cities,
     queryFn: fetchCuratedCities,
+    enabled: mapVisible,
     staleTime: Infinity,
     gcTime: Infinity,
   });
   const cityDefsQuery = useQuery<CityIndexDefinition[], Error>({
     queryKey: cityQualityKeys.definitions,
     queryFn: fetchCityIndexDefinitions,
+    enabled: mapVisible,
     staleTime: Infinity,
     gcTime: Infinity,
   });
   const cityValuesQuery = useQuery<CityIndexValue[], Error>({
     queryKey: cityQualityKeys.values,
     queryFn: fetchCityIndexValues,
+    enabled: mapVisible,
     staleTime: Infinity,
     gcTime: Infinity,
   });
