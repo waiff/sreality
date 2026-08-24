@@ -29,11 +29,11 @@ const REASONS = [
     blurb:
       'Záznamy se stejným jménem u stejné firmy, které automat nesloučil — ' +
       'nejčastěji proto, že totéž jméno se objevuje i u jiných firem ' +
-      '(běžná jména, obecné popisky typu „Zákaznická linka“). Patří sem ale ' +
-      'i záznamy u franšízové značky (jedna doména, mnoho nezávislých ' +
-      'poboček), dvojice, kde má každá strana vlastní osobní kontakt — tedy ' +
-      'spíš dva různí lidé téhož jména —, skupiny příliš velké na ' +
-      'automatické sloučení a dvojice, které jste už dřív odmítli.',
+      '(běžná jména, obecné popisky typu „Zákaznická linka“) a záznamy ' +
+      'se zároveň liší v kontaktech. Patří sem i dvojice, kde má každá ' +
+      'strana vlastní osobní kontakt — tedy spíš dva různí lidé téhož ' +
+      'jména —, skupiny příliš velké na automatické sloučení a dvojice, ' +
+      'které jste už dřív odmítli.',
   },
   {
     key: 'contact_bridge_review',

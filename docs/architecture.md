@@ -1127,23 +1127,30 @@ contact corpus to `toolkit.broker_resolver.decide_merges`, which since 2026-08-2
   one fact that proved they were one person. Under the discrimination test duplication REINFORCES
   the signal; role inboxes (`info@…` under 353 names) and switchboards still fail it — by carrying
   many NAMES, not many rows.
-- **Path B** substitutes market-wide name rarity for contact evidence: a name that appears at no
-  OTHER firm is very unlikely to be two people, which is what merges the role-inbox-only shape (a
-  fan of records at one firm reachable only at the switchboard). Common names (`Jan Novák`, present
-  at dozens of firms) and generic role labels (`Zákaznická linka`) fail it automatically. Three
-  guards keep the rarity claim honest, because it is narrower than "the name appears nowhere else":
-  the firm is the **identity's own** (`firm_identities.firm_id`, its e-mail domain) and never
-  `brokers.primary_firm_id` — that column is a recency rollup, and feeding it to B made the test
-  self-weakening (a merge collapsed the very two-firm spread that had refused the third record) and
-  non-deterministic night to night; an identity with no firm abstains from the spread rather than
-  voting, so the firmless independent-broker cohort neither helps nor blocks it; a **franchise**
-  firm (`firms.is_franchise` — `re-max.cz` is one brand over ~95 independent offices) is refused
-  outright, since two same-named agents there are not colleagues; and a (name, firm) cohort whose
-  members carry **disconfirming** contacts — each a discriminating one of the same kind, no value
-  in common — is refused whole. That last one is what catches a display name that IS the firm's
-  name ("PREXIMA nemovitosti s.r.o." on five agents, each with a personal mailbox): unique to its
-  firm by construction, so rarity alone can never see it. All three refusals land in the `name_firm`
-  operator tab, which exists for exactly that cohort.
+- **Path B** merges a same-name cohort at one firm on either of two qualifications. **Rarity**: a
+  name that appears at no OTHER firm is very unlikely to be two people, which is what merges the
+  role-inbox-only shape (a fan of records at one firm reachable only at the switchboard).
+  **Indistinguishability**: a cohort whose members all carry the identical non-empty contact set
+  differs in no attribute the platform holds, so it is one subject however common the label —
+  seven "Zákaznická linka" records on one office inbox + line are one account, even though 15+
+  other agencies run a customer line under the same label (those never fuse: B only operates
+  inside one firm). Guards that keep both claims honest: the firm is the **identity's own**
+  (`firm_identities.firm_id`, its e-mail domain) and never `brokers.primary_firm_id` — that column
+  is a recency rollup, and feeding it to B made the test self-weakening (a merge collapsed the
+  very two-firm spread that had refused the third record) and non-deterministic night to night; an
+  identity with no firm abstains from the spread rather than voting, so the firmless
+  independent-broker cohort neither helps nor blocks it; and a (name, firm) cohort whose members
+  carry **disconfirming** contacts — each a discriminating one of the same kind, no value in
+  common — is refused whole. The contradiction veto is what catches a display name that IS the
+  firm's name ("PREXIMA nemovitosti s.r.o." on five agents, each with a personal mailbox: unique
+  to its firm by construction, so rarity alone can never see it) and what separates two same-named
+  agents at two offices of a **franchise** brand (`firms.is_franchise` — `re-max.cz` is one firm
+  row over ~95 independent offices): their personal contacts disagree. B deliberately does NOT
+  consult `is_franchise` — an earlier revision refused franchise firms outright, which parked 92%
+  of the name_firm review queue (1,481 of 1,615 cards, 2026-08-24) behind firm-display metadata,
+  while a franchise cohort with no distinguishing evidence at all is precisely the case a reviewer
+  cannot judge better than the engine. Refusals land in the `name_firm` operator tab, which exists
+  for exactly those cohorts.
 - The paths are OR'd, and the firm-spread test guards **B only** — it is B's substitute for contact
   evidence, not an extra bar on A. A shared discriminating contact merges a common-named pair even
   if that name exists at fifty firms.

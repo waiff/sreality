@@ -336,9 +336,9 @@ WHERE r.rk = 1 AND r.n::numeric / r.total >= 0.60
 # broker's most recent listing. Fed to path B it made the rarity test self-weakening
 # (merge two identities of one name at two firms and next sweep both report one
 # firm, so the name's spread drops to 1 and a third, unrelated record of that name
-# gets a free B-edge) and non-deterministic day to day. franchise carries
-# firms.is_franchise, which marks a domain that is one brand over many independent
-# offices (re-max.cz, century21.cz) — a shared firm there is not a shared employer.
+# gets a free B-edge) and non-deterministic day to day. is_franchise is NOT read:
+# path B's franchise safety lives in the contradiction veto (two same-named agents
+# at two offices carry disagreeing personal contacts), not in a flag exclusion.
 # primary_firm_id rides along for ONE purpose: decide_merges' double-card check,
 # which must compare exactly what _CANDIDATE_BROKERS groups on. mergeable=false for
 # an identity whose broker is already merged away — it still counts as evidence
@@ -347,12 +347,10 @@ _MERGE_IDENTITIES_SQL = """
 SELECT bi.id, bi.source, bi.display_name,
        fi.firm_id AS firm_id,
        (b.status IS DISTINCT FROM 'merged_away') AS mergeable,
-       coalesce(f.is_franchise, false) AS franchise,
        b.primary_firm_id
 FROM broker_identities bi
 LEFT JOIN brokers b ON b.id = bi.broker_id
 LEFT JOIN firm_identities fi ON fi.id = bi.firm_identity_id
-LEFT JOIN firms f ON f.id = fi.firm_id
 """
 
 _MERGE_CONTACTS_SQL = """
@@ -688,8 +686,8 @@ def _auto_merge(conn: Any, run_id: int) -> tuple[int, int, int]:
 
     identities: dict[int, R.Identity] = {
         int(iid): R.Identity(int(iid), source, name, _as_int(firm_id), bool(mergeable),
-                             bool(franchise), _as_int(primary_firm_id))
-        for iid, source, name, firm_id, mergeable, franchise, primary_firm_id
+                             _as_int(primary_firm_id))
+        for iid, source, name, firm_id, mergeable, primary_firm_id
         in identity_rows
     }
     contacts = [R.Contact(int(iid), kind, value) for iid, kind, value in contact_rows
