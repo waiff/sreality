@@ -1016,10 +1016,14 @@ renumber.** Navigate by area:
     popovers (`absolute` inside their own container) would be clipped to the photo and every click
     inside one would navigate. Fixed coordinates off the anchor rect, flip up when the panel would
     overflow the viewport, reposition on scroll, close when the anchor scrolls out of sight.
-    **Every pipeline write shares one cache policy** (`lib/pipelineCache`): three caches hold "where
-    is this property" in three shapes — `members` (Browse funnels), `card(id)` (listing header),
-    `board` (kanban) — and each surface used to patch only the one it could see, so a kanban drag
-    left every Browse funnel badging the pre-drag stage. Optimistic patch in `onMutate`, rollback +
+    **Every pipeline write shares one cache policy** (`lib/pipelineCache`): TWO caches hold "where
+    is this property" — `members` (the account's whole card set, keyed by `property_id`; read by
+    the Browse funnels, the table rows, the listing header and the pipeline scope alike) and
+    `board` (the kanban's own ordered array) — and each surface used to patch only the one it
+    could see, so a kanban drag left every Browse funnel badging the pre-drag stage. It was three
+    until W3: a per-property `card(id)` cache duplicated a single row of `members`, so every
+    write had a third shape to patch and every listing header paid its own read; collapsing it
+    into `members` made the chokepoint smaller, which is the only sanctioned direction for it. Optimistic patch in `onMutate`, rollback +
     revalidate in `onSettled` — deliberately NOT `onError`, because the global `MutationCache.onError`
     (`main.tsx`) stays silent for any mutation that defines its own, which is why a failed board drag
     used to snap back with no explanation.
@@ -1028,9 +1032,13 @@ renumber.** Navigate by area:
     promise — pipeline rows, a guaranteed-empty pagination tail, properties, every image of every
     card (830 rows to render 44 thumbnails, each row paying a per-image CLIP lateral), then two
     `/brokers` calls, the last of which existed only to fill a hover tooltip — and `Pipeline.tsx`
-    rendered a bare "Načítání…" until all of it settled. It now reads pipeline rows + properties and
-    returns; the cover photo and the broker line are independent React Query reads keyed on the
-    surrogate `listing_id`, delivered to cards through `CardHydrationProvider`. Three rules hold this
+    rendered a bare "Načítání…" until all of it settled. It now reads ONE relation and returns —
+    `pipeline_board_public` (migration 417, `security_invoker = true`) joins the account's
+    pipeline rows to their properties server-side, so even the two structural reads W1 left
+    behind became one; the cover photo and the broker line are independent React Query reads
+    keyed on the surrogate `listing_id`, delivered to cards through `CardHydrationProvider`, and
+    the cover comes from `listing_cover_public` (migration 416), which reduces to one row per
+    listing BEFORE the CLIP-tag lateral instead of after. Three rules hold this
     in place. (1) **Decoration keys live in their own top-level `['hydration', …]` namespace** — never
     under `['pipeline']` — because `revalidatePipeline` invalidates `['pipeline','board']` after every
     card write and the stage editor sweeps `['pipeline']` wholesale, so a nested decoration key would
@@ -1127,8 +1135,10 @@ renumber.** Navigate by area:
     (a native `<select>` + remove `✕` in a soft-tinted pill, vanilla TS). All three surfaces
     (kanban drag, listing-detail select, extension select) call the SAME `movePipelineCard` PATCH
     (stamps `entered_stage_at`, logs the `moved` event) with the same optimistic-update shape — one
-    audited write, never a second-grade path. `PipelineCard` (`property_pipeline_public`) exposes
-    `stage_id` for the select's value.
+    audited write, never a second-grade path. The stage a surface renders comes from the shared
+    `members` map (`PipelineMembership`); the per-property `PipelineCard` type and its
+    `card(id)` query were deleted in W3 — every surface now selects its row out of the one
+    account-wide read instead of issuing its own.
     **Stages are operator-curated from the board's "Spravovat fáze" panel** (`POST
     /pipeline/stages` create — the `key` slug is derived server-side from the label; `PATCH
     /pipeline/stages/{id}` rename/recolor/retag/crown-entry; `POST /pipeline/stages/reorder`

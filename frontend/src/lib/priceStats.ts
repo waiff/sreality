@@ -204,8 +204,38 @@ export interface PriceStatGrowthShape {
 
 export const fetchGrowthShapes = async (
   datasetId: number,
-): Promise<PriceStatGrowthShape[]> =>
-  await fetchAllRows<PriceStatGrowthShape>({
+): Promise<PriceStatGrowthShape[]> => {
+  /* Prefer the already-materialized polygons. `price_stat_choropleth` is
+   * written by the dataset run and holds the identical obec set — verified
+   * live across all 12 datasets (43/43, 831/831, 3,296/3,296, 4,044/4,044,
+   * and 0/0 for the ones with no run yet) — so this is a substitution, not an
+   * approximation.
+   *
+   * WHY it matters: `price_stat_growth_shapes` is an RPC, and fetchAllRows
+   * pages it. PostgREST appends LIMIT/OFFSET around the function call, so the
+   * whole body re-runs for EVERY page — measured 1.4s and 10,199 buffers per
+   * page on dataset 14, re-aggregating all 180,506 observation rows each time,
+   * five times per load (and since W2b the last four fire in parallel, so
+   * that is four concurrent 1.4s statements against an 8s statement_timeout).
+   * The table read is a plain indexed scan of the same rows.
+   *
+   * The RPC stays as the fallback: a dataset whose run has not written its
+   * choropleth yet must still draw, and the RPC derives the shapes from
+   * observations directly. */
+  const materialized = await fetchAllRows<PriceStatGrowthShape>({
+    relation: 'price_stat_choropleth_public',
+    build: () =>
+      supabase
+        .from('price_stat_choropleth_public')
+        .select('obec_id, geojson', { count: 'exact' })
+        .eq('dataset_id', datasetId),
+    orderBy: [{ column: 'obec_id' }],
+    key: ['obec_id'],
+    expectMax: 100_000,
+  });
+  if (materialized.length > 0) return materialized;
+
+  return await fetchAllRows<PriceStatGrowthShape>({
     relation: 'price_stat_growth_shapes',
     build: () =>
       supabase.rpc('price_stat_growth_shapes', { p_dataset_id: datasetId }, { count: 'exact' }),
@@ -213,6 +243,7 @@ export const fetchGrowthShapes = async (
     key: ['obec_id'],
     expectMax: 100_000,
   });
+};
 
 /* Per-obec monthly sale + rent price for the map hover-chart
  * (price_stat_series RPC). The frontend derives the metric's variable. */

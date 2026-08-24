@@ -1552,6 +1552,12 @@ export const fetchImagesForListingIds = async (
  * Measured live: 44 real listing ids went from 901 image rows / 901
  * correlated CLIP-tag lookups / 3,995 buffers to 44 rows / 44 lookups / 788
  * buffers — the row count now equals what the card grid actually renders. */
+/* NOTE for the W7a loader collapse: `listing_cover_public` is fast only when
+ * the predicate is on `listing_id`. Its DISTINCT ON key is listing_id, but it
+ * also projects `id` and `sreality_id` — a qual on either of those is applied
+ * ABOVE the Unique node, so the full 10.4M-row images scan runs first and the
+ * request dies on the 8s statement_timeout. Repointing a sreality-keyed loader
+ * at this view is therefore not a drop-in. */
 export const fetchListingCovers = async (
   ids: ReadonlyArray<number>,
 ): Promise<Map<number, ImagePublic>> => {

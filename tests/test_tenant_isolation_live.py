@@ -46,6 +46,11 @@ pytestmark = pytest.mark.skipif(
 _TENANT_VIEWS: list[str] = [
     "collection_properties_public",
     "collections_public",
+    # The kanban's cohort view (migration 417). It is invoker-mode over
+    # property_pipeline_public, so its scoping is inherited rather than its
+    # own -- which is exactly why it belongs here: inherited scoping is the
+    # kind that breaks silently when an inner view is later re-created.
+    "pipeline_board_public",
     "pipeline_stages_public",
     "property_notes_public",
     "property_pipeline_public",
@@ -724,6 +729,11 @@ def seeded_tenant_rows(
         )
         cleanup.insert(0, ("DELETE FROM property_pipeline WHERE property_id = %s", (prop_pipe,)))
         where["property_pipeline_public"] = ("property_id = %s", (prop_pipe,))
+        # Same seeded card, read through the joined board view. The LEFT JOIN
+        # to properties_public means the property columns come back NULL for
+        # this bare fixture row -- the row itself is still returned, which is
+        # what the scoping assertion is about.
+        where["pipeline_board_public"] = ("property_id = %s", (prop_pipe,))
     try:
         yield where
     finally:

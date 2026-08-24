@@ -3,8 +3,13 @@
  *
  * Two caches hold "where is this property in the pipeline": `members` (the map
  * every funnel — Browse cards/table AND the listing-detail toggle, since W3 —
- * renders from) and `board` (the kanban array, which also carries display
- * fields `members` doesn't: price, photo, place). A write changes the same
+ * renders from) and `board` (the kanban array, which also carries the
+ * STRUCTURAL display fields `members` doesn't: price, place, area, is_active).
+ * NOT the photo, and not the broker: those are decorations, they live in the
+ * ['hydration', …] namespace keyed on listing_id, and putting either back on
+ * the board row is precisely the coupling W1 shipped to remove (see
+ * types.ts's PipelineBoardCard, which carries the standing warning). A write
+ * changes the same
  * fact in both, and each surface used to patch only the one it could see: the
  * board's drag invalidated `board` alone, so after moving a card on the
  * kanban every Browse funnel kept painting the OLD stage badge until the
