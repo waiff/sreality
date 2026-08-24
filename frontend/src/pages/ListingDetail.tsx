@@ -125,7 +125,10 @@ export default function ListingDetail() {
     legacyId == null && !natSourceParam && propertyParam && /^\d+$/.test(propertyParam)
       ? Number(propertyParam)
       : null;
-  const reprQ = useQuery<{ source: string; source_id_native: string } | null, Error>({
+  const reprQ = useQuery<
+    { source: string; source_id_native: string; listing_id: number | null } | null,
+    Error
+  >({
     queryKey: ['property-repr', propertyId],
     queryFn: () => fetchPropertyReprNaturalKey(propertyId as number),
     enabled: propertyId != null,
@@ -135,7 +138,16 @@ export default function ListingDetail() {
     if (reprQ.data != null) {
       navigate(
         listingCanonicalPath(reprQ.data.source, reprQ.data.source_id_native),
-        { replace: true },
+        {
+          replace: true,
+          // Already resolved the repr's surrogate id right here — seed it so
+          // the canonical route skips natKeyQ instead of re-resolving the
+          // same natural key it's about to land on.
+          state:
+            reprQ.data.listing_id != null
+              ? { listingId: reprQ.data.listing_id }
+              : undefined,
+        },
       );
     }
   }, [reprQ.data, navigate]);
@@ -154,10 +166,16 @@ export default function ListingDetail() {
     staleTime: 60_000,
   });
 
+  // On the canonical route the surrogate id is already known before listingQ
+  // resolves (seeded via Link state, or via natKeyQ) — fire this alongside
+  // listingQ instead of waiting for the full listing row, cutting a level off
+  // the waterfall. The legacy route has no id until listingQ returns it, so
+  // this falls back to that once it lands.
+  const sourcesId = resolvedListingId ?? listingQ.data?.id ?? null;
   const sourcesQ = useQuery<{ property_id: number | null; sources: PropertySource[] }, Error>({
-    queryKey: ['property-sources', listingQ.data?.id],
-    queryFn: () => fetchPropertySources(listingQ.data!.id),
-    enabled: !!listingQ.data,
+    queryKey: ['property-sources', sourcesId],
+    queryFn: () => fetchPropertySources(sourcesId as number),
+    enabled: sourcesId != null,
     staleTime: 60_000,
   });
 
@@ -179,7 +197,13 @@ export default function ListingDetail() {
       listingCanonicalPath(listingQ.data.source, canonicalNative) +
         location.search +
         location.hash,
-      { replace: true },
+      {
+        replace: true,
+        // listingQ already resolved this row's surrogate id — seed it so the
+        // canonical route doesn't re-resolve the natural key it was just
+        // canonicalized FROM.
+        state: { listingId: listingQ.data.id },
+      },
     );
   }, [
     legacyId,
@@ -1005,12 +1029,15 @@ export function FreshnessBlock({
     mutationFn: () => verifyListingFreshness(sreality_id),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['freshness', sreality_id] });
-      qc.invalidateQueries({ queryKey: ['snapshots', sreality_id] });
-      // Bare prefix, not ['listing', sreality_id]: listingQ's real key is
-      // ['listing', legacyId, natKeyId] (R2 Phase C resolver-chain cutover) —
-      // this component only knows the loaded row's sreality_id, which no longer
-      // matches either route-param slot for a natural-key-resolved listing.
+      // Bare prefixes, not ['listing', sreality_id] / ['snapshots', sreality_id]:
+      // listingQ's real key is ['listing', legacyId, resolvedListingId] (R2 Phase
+      // C resolver-chain cutover) and snapshotsQ's is ['snapshots',
+      // snapshotListingIds] (an ARRAY of surrogate ids, cross-source) — this
+      // component only knows the loaded row's sreality_id, which matches neither
+      // shape, so an exact-tuple guess here silently never invalidates either
+      // query (caught by W9a: freshness verification wasn't refreshing the chart).
       qc.invalidateQueries({ queryKey: ['listing'] });
+      qc.invalidateQueries({ queryKey: ['snapshots'] });
     },
   });
 

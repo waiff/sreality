@@ -1302,19 +1302,20 @@ export const fetchListingIdByNaturalKey = async (
  * the repr child (migration 343). */
 export const fetchPropertyReprNaturalKey = async (
   property_id: number,
-): Promise<{ source: string; source_id_native: string } | null> => {
+): Promise<{ source: string; source_id_native: string; listing_id: number | null } | null> => {
   const { data, error } = await supabase
     .from('properties_public')
-    .select('source, source_id_native')
+    .select('source, source_id_native, listing_id')
     .eq('property_id', property_id)
     .maybeSingle();
   if (error) throw error;
   const row = data as unknown as {
     source: string | null;
     source_id_native: string | null;
+    listing_id: number | null;
   } | null;
   return row?.source != null && row.source_id_native != null
-    ? { source: row.source, source_id_native: row.source_id_native }
+    ? { source: row.source, source_id_native: row.source_id_native, listing_id: row.listing_id }
     : null;
 };
 
