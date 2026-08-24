@@ -47,6 +47,11 @@ TEXT_PRICE_PARSERS = [
 # turn into 77592 by swallowing the "2" out of "m2".
 PER_AREA_CELLS = [
     "18 500 Kč/m²",
+    # realitymix's real cell, which W1 shipped without matching: it BRACKETS the
+    # marker (`45 Kč / (za m²)`), and an anchor that cannot open a bracket walks
+    # straight past 1,147 confirmed per-m² rows. Measured 2026-08-24.
+    "45 Kč / (za m 2 )",
+    "850 Kč /(za m2)",
     "18 500 Kč / m²",
     "2 500 Kč za m²",
     "1 200 Kč/m²/rok",

@@ -23,11 +23,14 @@ import unicodedata
 # Matched against NFKD-folded text, so `Kč`->`Kc`, `m²`->`m2`, `měsíc`->`mesic`
 # and the alternatives stay small. `_G` is the thin / no-break / zero-width gap
 # the Czech portals sprinkle between amount, currency and unit. Currency and
-# separator are optional because the portals spell the same cell four ways:
-# `Kč/m²`, `Kč za m²`, `CZK/ za m2`, and a bare `/m²`.
+# separator are optional because the portals spell the same cell five ways:
+# `Kč/m²`, `Kč za m²`, `CZK/ za m2`, a bare `/m²`, and realitymix's bracketed
+# `45 Kč / (za m²)` — the bracket is why the marker must be allowed to open one.
+# It stays anchored regardless: `4 990 000 Kč (4 008 Kč/m²)` is a total with a
+# per-m² NOTE, and the `m2` right after the optional bracket is what refuses it.
 _G = r"[\s\u200b-\u200d\u2060]"
 _PER_AREA_RE = re.compile(
-    rf"^{_G}*(?:kc|czk)?{_G}*(?:/{_G}*)?(?:za{_G}+)?(?:m{_G}*2(?!\w)|metr)",
+    rf"^{_G}*(?:kc|czk)?{_G}*(?:/{_G}*)?(?:[(\[]{_G}*)?(?:za{_G}+)?(?:m{_G}*2(?!\w)|metr)",
     re.IGNORECASE,
 )
 
