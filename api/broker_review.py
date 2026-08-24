@@ -185,9 +185,14 @@ def dismiss_candidate(conn: Any, candidate_id: int, *, resolved_by: str | None =
     evidence strengthened (the shared contact losing its other names, or the two
     display names converging on one key).
 
-    Only reason='contact_bridge_review' carries identity evidence. A name_firm
-    candidate is a different mechanism (same name + firm, no shared contact needed)
-    with no identity ids to key on — it is dismissed and nothing more.
+    Only reason='contact_bridge_review' carries identity evidence; a
+    name_cross_firm card is broker-pair-shaped the same way (two brokers the
+    operator judged as different people), so its dismissal writes the same
+    standing NO — otherwise the pair would auto-merge the moment its evidence
+    strengthens (a shared contact appearing, or the namesake's other firm
+    disappearing from the corpus and the name turning rare). A name_firm
+    candidate is a different mechanism (same name + firm, no shared contact
+    needed) with no pair to key on — it is dismissed and nothing more.
 
     The suppression spans the candidate's two BROKERS, not just the identity pair in
     `evidence`: the group key is `contactbridge:{lo}:{hi}` and _queue_review_pairs
@@ -211,9 +216,11 @@ def dismiss_candidate(conn: Any, candidate_id: int, *, resolved_by: str | None =
             row = cur.fetchone()
         if row is None:
             return None
+        reason = row.get("reason")
         pair = (_evidence_pair(row.get("evidence"))
-                if row.get("reason") == "contact_bridge_review" else None)
-        brokers = _candidate_brokers(row.get("broker_ids")) if pair is not None else []
+                if reason == "contact_bridge_review" else None)
+        suppressing = pair is not None or reason == "name_cross_firm"
+        brokers = _candidate_brokers(row.get("broker_ids")) if suppressing else []
         written = 0
         if brokers:
             with conn.cursor() as cur:

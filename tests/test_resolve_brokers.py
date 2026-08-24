@@ -998,7 +998,7 @@ def test_the_sweep_loads_active_suppressions_and_passes_them_both_ways(
                         or rb.R.MergeDecision([[1, 2]], [], [(1, 2)]))
     monkeypatch.setattr(rb, "_apply_merges",
                         lambda c, g, **kw: seen.update(apply=kw["suppressed_pairs"]) or (0, 1, 0))
-    monkeypatch.setattr(rb, "_queue_review_pairs", lambda c, p, i, bv, r: 0)
+    monkeypatch.setattr(rb, "_queue_review_pairs", lambda c, p, i, bv, r, **kw: 0)
     monkeypatch.setattr(rb, "_suppressed_pairs", lambda c: {(1, 2)})
 
     conn = _ResilientConn("merge")
@@ -1244,7 +1244,7 @@ def test_auto_merge_queues_review_pairs_after_applying_merges(
     monkeypatch.setattr(rb, "_retire_dead_candidates",
                         lambda c, by: calls.append(f"retire:{by}") or 0)
     monkeypatch.setattr(rb, "_queue_review_pairs",
-                        lambda c, p, i, bv, r: calls.append("queue")
+                        lambda c, p, i, bv, r, **kw: calls.append("queue")
                         or seen.update(bridges=bv) or len(p))
 
     conn = _ResilientConn("merge")
@@ -1284,13 +1284,20 @@ def test_sweep_retires_proposals_whose_brokers_no_longer_survive(
 
 
 class _CandidateCur:
-    """Fake cursor for _generate_merge_candidates: serves the broker read, records
-    every write, and reports a rowcount for the stale-card DELETE."""
+    """Fake cursor for _generate_merge_candidates: dispatches each read by its
+    SQL, records every write, and reports a rowcount for the stale-card DELETE."""
 
-    def __init__(self, broker_rows: list[tuple[Any, ...]]) -> None:
-        self.broker_rows = broker_rows
+    def __init__(self, broker_rows, identity_rows=None, contact_rows=None,
+                 suppression_rows=None):
+        self.responses = [
+            ("FROM brokers b JOIN firms f", broker_rows),
+            ("FROM broker_identity_contacts", contact_rows or []),
+            ("FROM broker_merge_suppressions", suppression_rows or []),
+            ("JOIN broker_identities bi ON bi.broker_id = b.id", identity_rows or []),
+        ]
         self.executed: list[tuple[str, Any]] = []
         self.rowcount = 3
+        self._pending: list[tuple[Any, ...]] = []
 
     def __enter__(self) -> "_CandidateCur":
         return self
@@ -1299,42 +1306,110 @@ class _CandidateCur:
         return None
 
     def execute(self, sql: str, params: Any = None) -> None:
-        self.executed.append((" ".join(sql.split()), params))
+        flat = " ".join(sql.split())
+        self.executed.append((flat, params))
+        self._pending = next(
+            (rows for needle, rows in self.responses if needle in flat), [])
 
     def fetchall(self) -> list[tuple[Any, ...]]:
-        return self.broker_rows
+        return self._pending
 
 
 class _CandidateConn:
-    def __init__(self, broker_rows: list[tuple[Any, ...]]) -> None:
-        self.cur = _CandidateCur(broker_rows)
+    def __init__(self, broker_rows, **kw):
+        self.cur = _CandidateCur(broker_rows, **kw)
 
     def cursor(self) -> _CandidateCur:
         return self.cur
 
 
 def test_candidate_generation_deletes_stale_proposed_cards() -> None:
-    """A proposed name_firm card whose group_key this sweep no longer generates is
-    deleted — the live duplicate: a pre-title-strip key ('havranek ing martin')
-    sitting next to its successor ('havranek martin') as a second card for the
-    same five brokers, un-retirable because its brokers stay active. Only the keys
-    generated THIS pass survive; the delete is skipped entirely when generation
-    produced nothing (an empty corpus read must not wipe the queue)."""
+    """A proposed card whose group_key this sweep no longer generates is deleted —
+    the live duplicate: a pre-title-strip key ('havranek ing martin') sitting next
+    to its successor as a second card for the same brokers. Only keys generated
+    THIS pass survive, across BOTH producers; the delete is skipped entirely when
+    generation produced nothing (an empty corpus read must not wipe the queue)."""
+    import datetime as dt
+
     import scripts.resolve_brokers as rb
 
+    t0 = dt.datetime(2026, 1, 1)
     rows = [(1, "Ing. Martin Havránek", 916, "martin-havranek.cz", "HEUREKA"),
             (2, "MARTIN Havránek", 916, "martin-havranek.cz", "HEUREKA")]
-    conn = _CandidateConn(rows)
+    idents = [(1, 11, "Ing. Martin Havránek", 916, "martin-havranek.cz", t0, t0),
+              (2, 12, "MARTIN Havránek", 916, "martin-havranek.cz", t0, t0)]
+    conn = _CandidateConn(rows, identity_rows=idents)
     assert rb._generate_merge_candidates(conn) == 1
     deletes = [(q, p) for q, p in conn.cur.executed if q.startswith("DELETE FROM broker_merge_candidates")]
     assert len(deletes) == 1
     assert deletes[0][1] == {"gks": ["namefirm:916:havranek martin"]}
-    assert "status = 'proposed'" in deletes[0][0] and "reason = 'name_firm'" in deletes[0][0]
+    assert "'name_firm', 'name_cross_firm'" in deletes[0][0]
 
     # No groups generated -> no delete at all.
-    empty = _CandidateConn([(1, "Solo Broker", 1, None, None)])
+    empty = _CandidateConn([(1, "Solo Broker", 1, None, None)],
+                           identity_rows=[(1, 11, "Solo Broker", 1, "solo.cz", t0, t0)])
     assert rb._generate_merge_candidates(empty) == 0
     assert not any(q.startswith("DELETE") for q, _ in empty.cur.executed)
+
+
+def test_cross_firm_producer_cards_a_two_firm_name_with_tenure() -> None:
+    """The tier-1 producer: a name whose identities span exactly two firms gets ONE
+    card carrying both domains and each side's activity window — disjoint tenures
+    are the mover's signature, concurrent ones the namesake's. A name at one firm
+    or at three produces nothing here."""
+    import datetime as dt
+    import json
+
+    import scripts.resolve_brokers as rb
+
+    a0, a1 = dt.datetime(2025, 1, 1), dt.datetime(2025, 6, 30)
+    b0, b1 = dt.datetime(2025, 9, 1), dt.datetime(2026, 2, 1)
+    idents = [
+        (10, 101, "Václav Kučera", 5, "mmreality.cz", a0, a1),
+        (10, 102, "Kučera Václav", 5, "mmreality.cz", a0, a1),
+        (20, 201, "Václav Kučera", 9, "re-max.cz", b0, b1),
+        (30, 301, "Petr Trojfirma", 1, "a.cz", a0, a1),
+        (30, 302, "Petr Trojfirma", 2, "b.cz", a0, a1),
+        (30, 303, "Petr Trojfirma", 3, "c.cz", a0, a1),
+    ]
+    conn = _CandidateConn([], identity_rows=idents)
+    assert rb._generate_merge_candidates(conn) == 1
+    ups = [(q, p) for q, p in conn.cur.executed
+           if q.startswith("INSERT") and "name_cross_firm" in q]
+    assert len(ups) == 1
+    params = ups[0][1]
+    assert params["gk"] == "crossfirm:kucera vaclav"
+    assert params["ids"] == [10, 20]
+    ev = params["ev"].obj if hasattr(params["ev"], "obj") else json.loads(params["ev"])
+    assert ev["firms"] == ["mmreality.cz", "re-max.cz"]
+    assert ev["hold"] == {"code": "multi_firm", "firms": ["mmreality.cz", "re-max.cz"]}
+    assert ev["tenure"]["overlap"] is False
+    assert ev["tenure"]["mmreality.cz"] == ["2025-01-01", "2025-06-30"]
+
+
+def test_name_firm_cards_carry_a_hold_reason() -> None:
+    """Every name_firm card explains itself: a cohort with disagreeing personal
+    mailboxes is 'contradicted' and lists the values the veto read; role-only
+    contacts never appear in that list."""
+    import datetime as dt
+    import json
+
+    import scripts.resolve_brokers as rb
+
+    t0 = dt.datetime(2026, 1, 1)
+    rows = [(1, "Eva Malá", 40, "firma40.cz", "Firma 40"),
+            (2, "Malá Eva", 40, "firma40.cz", "Firma 40")]
+    idents = [(1, 11, "Eva Malá", 40, "firma40.cz", t0, t0),
+              (2, 12, "Malá Eva", 40, "firma40.cz", t0, t0)]
+    contacts = [(1, 11, "email", "info@firma40.cz"),
+                (1, 11, "email", "eva.m@seznam.cz"),
+                (2, 12, "email", "eva.mala@atlas.cz")]
+    conn = _CandidateConn(rows, identity_rows=idents, contact_rows=contacts)
+    assert rb._generate_merge_candidates(conn) == 1
+    ups = [(q, p) for q, p in conn.cur.executed if "'name_firm'" in q and p]
+    ev = ups[0][1]["ev"].obj if hasattr(ups[0][1]["ev"], "obj") else json.loads(ups[0][1]["ev"])
+    assert ev["hold"]["code"] == "contradicted"
+    assert ev["hold"]["values"] == ["eva.m@seznam.cz", "eva.mala@atlas.cz"]
 
 
 class _AttributeCur:

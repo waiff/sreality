@@ -341,6 +341,8 @@ def test_rarity_refuses_a_name_seen_at_two_firms():
     d = R.decide_merges(ids, _contacts("phone", "420296399006", 1, 2, 3))
     assert d.auto_merge_groups == []
     assert (1, 2) in d.review_pairs
+    # ...and the card can say WHY: the name spans two firms.
+    assert d.pair_holds[(1, 2)] == ("multi_firm", [10, 99])
 
 
 def test_rarity_cohort_with_disagreeing_personal_mobiles_is_refused():
@@ -356,6 +358,9 @@ def test_rarity_cohort_with_disagreeing_personal_mobiles_is_refused():
                    R.Contact(2, "phone", "420601000002")])
     d = R.decide_merges(ids, contacts)
     assert d.auto_merge_groups == []
+    # ...and the hold names the disagreeing personal values the veto read.
+    assert d.pair_holds[(1, 2)] == (
+        "contradicted", ["420601000001", "420601000002"])
 
 
 def test_department_mailboxes_do_not_contradict_their_owner():

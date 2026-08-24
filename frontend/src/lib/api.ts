@@ -1971,6 +1971,16 @@ export interface BrokerMergeCandidate {
     names?: (string | null)[];
     sources?: (string | null)[];
     bridges?: string[];
+    // reason='name_cross_firm' carries the two firms + per-firm activity windows
+    firms?: string[];
+    tenure?: { overlap?: boolean } & Record<string, [string, string] | boolean | undefined>;
+    // why the engine did NOT auto-merge this card (all reasons since 2026-08-24)
+    hold?: {
+      code: string;
+      firms?: string[];
+      values?: string[];
+      identities?: number;
+    };
   };
   status: string;
   created_at: string | null;

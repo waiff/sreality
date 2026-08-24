@@ -214,6 +214,11 @@ class MergeDecision:
     # group tuple -> which evidence path formed it: 'contact_name' | 'name_firm' |
     # 'contact_name+name_firm'. Stamped into broker_merge_events.reason.
     group_reasons: dict[tuple[int, ...], str] = field(default_factory=dict)
+    # review pair -> WHY the engine held it, for the operator's card. code is one
+    # of 'multi_firm' (detail: sorted firm ids the name spans), 'contradicted'
+    # (detail: the disagreeing personal values), 'oversized', 'suppressed'
+    # (detail: empty). Every review_pairs entry gets one.
+    pair_holds: dict[tuple[int, int], tuple[str, list]] = field(default_factory=dict)
 
 
 def normalize_email(raw: str | None) -> str | None:
@@ -531,9 +536,12 @@ def decide_merges(
         touched = bool(inside & blocked_nodes) and any(
             lo in inside and hi in inside for lo, hi in blocked)
         if touched or len(group) > MAX_AUTO_MERGE_COMPONENT:
-            decision.review_pairs.extend(
-                _pairs(group) if len(group) <= MAX_AUTO_MERGE_COMPONENT
-                else edges_by_root.get(root, []))
+            downgraded = (_pairs(group) if len(group) <= MAX_AUTO_MERGE_COMPONENT
+                          else edges_by_root.get(root, []))
+            code = "suppressed" if touched else "oversized"
+            for pair in downgraded:
+                decision.pair_holds.setdefault(pair, (code, []))
+            decision.review_pairs.extend(downgraded)
             continue
         decision.auto_merge_groups.append(group)
         for member in group:
@@ -582,7 +590,24 @@ def decide_merges(
                     continue
                 if a in merged_root and merged_root[a] == merged_root.get(b):
                     continue  # already unified this run — nothing left to ask
-                decision.review_pairs.append((a, b))
+                pair = (a, b)
+                # Why is this pair here and not merged? With F and R in place
+                # there are exactly two possibilities for a same-name pair: the
+                # name spans several firms (rarity refused, and the two sit at
+                # different firms so F never saw them together), or it does not —
+                # in which case R would have chained them unless the cohort is
+                # CONTRADICTED. Stamp the reason so the card can show it.
+                key = keys[a]
+                spread = firms_of_name.get(key or "", set())
+                if len(spread) > 1:
+                    decision.pair_holds.setdefault(
+                        pair, ("multi_firm", sorted(spread)))
+                else:
+                    vals = sorted(
+                        v for m in (a, b)
+                        for kvs in discriminating.get(m, {}).values() for v in kvs)
+                    decision.pair_holds.setdefault(pair, ("contradicted", vals))
+                decision.review_pairs.append(pair)
 
     # Stable, de-duplicated review + suppression output. The blocked filter runs
     # HERE too, not only on the edge loop: the downgrades above expand a component

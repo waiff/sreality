@@ -1227,9 +1227,22 @@ contact corpus to `toolkit.broker_resolver.decide_merges`, which since 2026-08-2
   mailboxes on his own domain is otherwise indistinguishable from five colleagues. Phone-only
   identities keep their phones in the veto, and a department mailbox still works as an A bridge
   (it can prove sameness, never difference).
-- The candidate generator deletes **stale PROPOSED `name_firm` cards** (a `group_key` the sweep no
-  longer generates — e.g. keys minted before `name_key` stripped titles, which left duplicate
-  cards for one cohort); merged/dismissed rows are operator ledger and are never touched.
+- **Every review card explains why it was not auto-merged** (`evidence.hold`, rendered as one
+  line under the card header): `multi_firm` (the firms the name spans), `contradicted` (the
+  disagreeing personal values the veto read), `oversized`, `suppressed`, `firm_evidence_gap`.
+  Pair cards get the hold from the engine itself (`MergeDecision.pair_holds`); `name_firm` cards
+  from the generator by elimination — post-F those four codes are the only ways a group survives.
+- **`name_cross_firm` cards** (gk `crossfirm:{nk}`, third review tab) surface the one population
+  every automatic path refuses by design: a name whose identities span EXACTLY two firms (rarity
+  fails, F never crosses a firm) — previously visible in no queue at all unless the two sides
+  shared a contact. The evidence carries both domains and each side's activity window; disjoint
+  tenures are the mover's signature, concurrent ones the namesake's — the fact the operator's
+  one-click decision actually turns on. Dismissing one writes the same standing suppression a
+  contact-bridge dismissal does (the operator judged the broker pair, and the pair must not
+  auto-merge later when its evidence strengthens).
+- The candidate generator deletes **stale PROPOSED cards of both its reasons** (a `group_key` the
+  sweep no longer generates — e.g. keys minted before `name_key` stripped titles, which left
+  duplicate cards for one cohort); merged/dismissed rows are operator ledger and are never touched.
 - The paths are OR'd, and the firm-spread test guards **B only** — it is B's substitute for contact
   evidence, not an extra bar on A. A shared discriminating contact merges a common-named pair even
   if that name exists at fifty firms.

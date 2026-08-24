@@ -369,6 +369,19 @@ def test_a_candidate_without_a_readable_broker_pair_writes_nothing() -> None:
         assert _suppression_params(conn) is None
 
 
+def test_dismissing_a_cross_firm_candidate_records_the_no() -> None:
+    """A name_cross_firm card is broker-pair-shaped exactly like a contact bridge —
+    the operator judged the two brokers as different people — so its dismissal
+    writes the same standing NO, keyed on the broker pair (no identity_ids in the
+    evidence; the cohort read supplies the identities)."""
+    conn = _dismiss_conn("name_cross_firm", {"firms": ["mmreality.cz", "re-max.cz"]})
+    out = review.dismiss_candidate(conn, 7, resolved_by="op@example.com")
+    assert out == {"id": 7, "status": "dismissed", "suppressions_written": 1}
+    params = _suppression_params(conn)
+    assert params["lo"] == [1] and params["hi"] == [2]
+    assert params["origin"] == "dismiss" and params["candidate"] == 7
+
+
 def test_dismissing_a_name_firm_candidate_writes_no_suppression() -> None:
     """A different mechanism: same name + firm, no contact bridge at all. The gate is
     the REASON, not merely the absence of identity ids — a name_firm proposal whose
