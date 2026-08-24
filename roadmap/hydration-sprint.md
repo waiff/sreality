@@ -507,8 +507,48 @@ Four corollaries, because the evidence did not support one rule for everything:
   Filed too: the daily read is still 62,362 rows aggregated to 93, so the only thing that makes
   it truly proportional is precompute (corollary C), which needs a story for *today's* partial
   bucket that a cost dashboard cannot show stale.
-- ⬜ **W10d** — /health bounds. ⬜ **W10e** — /estimations OR-join (EXPLAIN first — that one
-  is code-derived, not measured).
+- ✅ **W10d** — /health: read 15 rows by reading 15 rows (migration 422). **The bound this
+  target wanted turned out not to be a time window, and checking that first is the whole
+  point.** `pipeline_checks_public` is a latest-row-per-`check_key` read — 15 keys out of a
+  6,234-row append-only results table — and "bound the history" was the obvious reading. The
+  UI does not ask for one: `fetchPipelineChecks` sends no filter at all, and
+  `pipelineChecks.ts` deliberately humanizes keys from **retired** checks ("Historical rows
+  from retired checks … fall through to the humanizer"), so a date window would have silently
+  deleted exactly the rows that comment exists to preserve. The real bound is "one row per
+  key" — which the view always meant; it was just computed the expensive way.
+  **The index was already there, already used, and that is the finding.**
+  `(check_key, run_at DESC)` exists and the plan was already an Index Scan + Unique with no
+  sort — so unlike W10c there was no index left to add. DISTINCT ON still has to *walk* every
+  index entry to find each group's boundary, and Postgres 17 has no B-tree skip scan, so the
+  planner cannot do better with that SQL: it read all **6,234** entries and fetched all 6,234
+  heap tuples (the `details` jsonb makes them wide) to emit 15 rows. Replaced with the classic
+  **loose index scan** — a recursive CTE hops key-to-key through the index (16 descents: 15
+  keys plus the terminator), then one LATERAL `limit 1` per key takes that key's newest row.
+  `EXPLAIN (ANALYZE, BUFFERS)` live on the exact statement the page issues: **3,351 → 93
+  blocks (~36×)**, 6,234 rows read → **15**, 5,023 ms → 47 ms. The shape matters more than the
+  ratio: the old read got monotonically more expensive with **every check run ever recorded**,
+  and the new one is pinned to the number of keys.
+  **Semantics preserved exactly, including the tie-break — deliberately.** DISTINCT ON with
+  `order by check_key, run_at desc` breaks a `(check_key, run_at)` tie arbitrarily, and so
+  does `order by run_at desc limit 1`. Adding `, id desc` would make it deterministic, and it
+  was measured (96 → 117 blocks, an Incremental Sort appears) — but that is a behaviour change
+  smuggled into a performance migration, and live there are **0 tied pairs**, so it would buy
+  nothing today. Filed as its own change if wanted. Equivalence verified live both before and
+  after applying: 15 rows each way, set-compared across every column including the `details`
+  jsonb, **0 rows in either direction**.
+  Scope was checked rather than assumed — swept every view behind /health for the same
+  `distinct on` pathology and `pipeline_checks_public` is the **only** one, so unlike W10c's
+  hourly twin there is no sibling to fix. Unchanged: SECURITY DEFINER + `is_platform_admin()`
+  as a One-Time Filter above the CTE (a non-admin never executes it); ACL verified byte-identical
+  after the migration (`authenticated` SELECT, **`anon` dark**), `reloptions` still NULL.
+  Rails: the rewrite is subtle in ways a shape assertion cannot see, so the test **executes the
+  view** against the replayed schema — latest-per-key, the terminator NULL never leaking, every
+  key represented exactly once, an empty table yielding no rows rather than an error, the
+  single-key tightest loop, and an EXCEPT-both-ways equivalence against the `distinct on` it
+  replaced — each in a transaction that always rolls back, plus a gate-is-open guard so none of
+  it can pass vacuously. One more pins the *mechanism*: a revert to `distinct on` would stay
+  perfectly **correct** while silently full-scanning again, which correctness tests cannot catch.
+- ⬜ **W10e** — /estimations OR-join (EXPLAIN first — that one is code-derived, not measured).
 - ⬜ **W8** — bundle: maplibre out of the filter-controls barrel, recharts unpinned from
   React. Last: first-visit and post-deploy only.
 
@@ -544,7 +584,7 @@ Server-side block counts to beat (constraint 6):
 | board images (44 cards) | 3,995 → **788**; 901 CLIP laterals → **44** | 44 rows / 44 probes | done — W4 |
 | `llm_cost_daily_public` | 9,711 shared + 5,839 temp → **10,851 shared + 0 temp** | index — hit, but the win is the sort, not the blocks | done — W10c |
 | `llm_cost_hourly_public` | 9,941 → **8** (293,491 rows discarded for 12 out → 60 read) | proportional | done — W10c (same page, same defect) |
-| `pipeline_checks_public` | 6,120 rows scanned for 15 | bounded | W10d |
+| `pipeline_checks_public` | 6,234 rows scanned for 15 → **15 for 15**; 3,351 → **93** blocks | bounded — by KEY, not by time | done — W10d |
 
 ## Post-sprint audit — 2026-08-24
 
