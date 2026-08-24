@@ -451,8 +451,64 @@ Four corollaries, because the evidence did not support one rule for everything:
   swept route renders a building attachment either. Its evidence is bytes, and its rail is the
   behavioural check that photos still *load* (a wave that breaks image signing renders a perfect
   grid full of broken images, and every request-count assertion would still pass).
-- ⬜ **W10c** — /costs date-expression index. ⬜ **W10d** — /health bounds. ⬜ **W10e** —
-  /estimations OR-join (EXPLAIN first — that one is code-derived, not measured).
+- ✅ **W10c** — /costs: the date-expression index that could not be built (migration 421).
+  **The wave's premise was right and its prescription was impossible**, which is the finding.
+  `llm_cost_daily_public` buckets on `l.called_at::date`, and casting a *timestamptz* to a date
+  depends on the session TimeZone — so the expression is only STABLE, and Postgres flatly
+  refuses to index it: `42P17: functions in index expression must be marked IMMUTABLE`
+  (probed live, not recalled). There was no index to add until the expression itself was
+  pinned to an explicit zone. Doing that is a **latent correctness fix in its own right**:
+  which day a call was attributed to silently depended on whatever TimeZone the *reading*
+  session carried, so the same row could land in different buckets for different readers.
+  Verified a no-op on live data before relying on it — `(called_at)::date` vs
+  `(called_at at time zone 'UTC')::date` disagree on **0 of 293,551 rows**, and the rollup
+  returns an identical **93 groups / 62,362 calls / 53,842 errors / $20.7555** either way.
+  **The hourly twin was the worse offender and was in scope because it is the same page.**
+  `/costs` renders both; fixing only the daily half would have left the seq scan in place.
+  `llm_cost_hourly_public` buckets on `date_trunc('hour', called_at)` — same STABLE problem —
+  and at the 49-hour window the chart actually asks for it discarded **293,491 rows to return
+  12**, i.e. it read the entire table for a two-day chart. Its rewrite has one extra
+  constraint: `bucket` must stay `timestamptz`, because the SPA parses it with `new Date(…)`
+  and a bare `timestamp` would be read as browser-local and shift the whole chart — so it
+  truncates in UTC and labels the result UTC, keeping both the type and every value identical.
+  `EXPLAIN (ANALYZE, BUFFERS)` live, at the windows the page really requests (35 days / 49
+  hours), **blocks including temp, since the sort spilled to disk**:
+  **daily 9,711 shared + 5,839 temp (23 MB external merge) → 10,851 shared + 0 temp**;
+  **hourly 9,941 → 8 blocks (~1,240×)**, 60 rows read for 12 out. The hourly is now
+  proportional to what renders, which is the north star stated literally. The daily is the
+  honest, modest one — 35 days is ~21% of the table, so no index can make a fifth of a heap
+  cheap; **shared blocks actually go UP** (9,711 → 10,851) and the win is that the external
+  merge sort is *gone entirely* (the index delivers GROUP BY order, so GroupAggregate consumes
+  the scan directly), taking 5,839 temp blocks and a 23 MB disk spill with it — net 15,550 →
+  10,851 with no disk traffic. Wall clock moved 1.65 s → 0.10 s, but the same statement also
+  measured **11.5 s** on one baseline run this session: corollary D, exactly, which is why
+  the claim above is in blocks.
+  **Deliberately NOT a covering index.** The obvious `include (cost_usd, input_tokens, …)`
+  variant was built and measured: **worse** (11,529 blocks vs 10,851) and **13× larger**
+  (29 MB vs 2.2 MB). An Index Only Scan is unreachable here — the planner does not match this
+  expression index for index-only (confirmed by re-measuring with the `error` aggregate
+  removed, and again after a `VACUUM ANALYZE` that took the table from 59.2% all-visible to
+  fresh: still a plain Index Scan, identical 11,529 blocks) — and on an append-only table the
+  newest heap pages, which are exactly the ones a recency query reads, are the least likely to
+  be all-visible anyway. Paying for an INCLUDE that can never be used is pure write
+  amplification. The lean index costs **2.2 MB** and does all the work; btree deduplication
+  does the rest (`called_for`/`provider`/`model` have 10/4/9 distinct values).
+  Both views stay **SECURITY DEFINER** — `reloptions` NULL, gated by `is_platform_admin()` in
+  the outer WHERE. These are admin-only reporting views over a shared table, **not**
+  per-account RLS views, so constraint 2's `security_invoker` would be wrong here rather than
+  safer, and they are registered as `_ADMIN_ONLY_RELATIONS`, not `_TENANT_VIEWS`. Verified
+  live after the migration: ACL byte-identical to before
+  (`authenticated=rDxtm`, `service_role` full, **`anon` absent**), `has_table_privilege` false
+  for `anon` and true for `authenticated`, `reloptions` still NULL. `create or replace view`
+  preserves the ACL; the migration re-asserts it explicitly anyway, W6's precedent.
+  **Left standing, measured in passing:** with the hourly aggregate down to 8 blocks, the
+  `is_platform_admin()` gate itself is now the dominant cost of that read (~332 blocks at the
+  Result node). Filed, not fixed — it is one `stable` call and chasing it is a different wave.
+  Filed too: the daily read is still 62,362 rows aggregated to 93, so the only thing that makes
+  it truly proportional is precompute (corollary C), which needs a story for *today's* partial
+  bucket that a cost dashboard cannot show stale.
+- ⬜ **W10d** — /health bounds. ⬜ **W10e** — /estimations OR-join (EXPLAIN first — that one
+  is code-derived, not measured).
 - ⬜ **W8** — bundle: maplibre out of the filter-controls barrel, recharts unpinned from
   React. Last: first-visit and post-deploy only.
 
@@ -486,7 +542,8 @@ Server-side block counts to beat (constraint 6):
 | `browse_list` default cohort | 15,877 → **6** | done | W-1a |
 | broker leaderboard | 6,776 → **3,108** (warm) | ~500 (close, not hit — floor is a `brokers` seq scan at 55% selectivity) | done — W10a |
 | board images (44 cards) | 3,995 → **788**; 901 CLIP laterals → **44** | 44 rows / 44 probes | done — W4 |
-| `llm_cost_daily_public` | seq scan, 231,189 rows discarded for 93 out | index | W10c |
+| `llm_cost_daily_public` | 9,711 shared + 5,839 temp → **10,851 shared + 0 temp** | index — hit, but the win is the sort, not the blocks | done — W10c |
+| `llm_cost_hourly_public` | 9,941 → **8** (293,491 rows discarded for 12 out → 60 read) | proportional | done — W10c (same page, same defect) |
 | `pipeline_checks_public` | 6,120 rows scanned for 15 | bounded | W10d |
 
 ## Post-sprint audit — 2026-08-24
