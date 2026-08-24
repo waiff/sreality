@@ -107,16 +107,13 @@ describe('<FreshnessBlock> verify button', () => {
       ).toBeInTheDocument(),
     );
 
-    for (const key of [
-      ['freshness', 123],
-      ['snapshots', 123],
-    ]) {
-      expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: key });
-    }
-    // listingQ's real key is ['listing', legacyId, natKeyId] (R2 Phase C
-    // resolver-chain cutover) — FreshnessBlock only knows sreality_id, so it
-    // invalidates the bare 'listing' prefix instead of guessing the shape.
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['freshness', 123] });
+    // listingQ's real key is ['listing', legacyId, resolvedListingId] and
+    // snapshotsQ's is ['snapshots', snapshotListingIds] (an array of surrogate
+    // ids) — FreshnessBlock only knows sreality_id, which matches neither
+    // shape, so both invalidate their bare prefix instead of guessing it.
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['listing'] });
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['snapshots'] });
   });
 
   it('surfaces a "gone" outcome', async () => {
@@ -253,6 +250,28 @@ describe('<ListingDetail> resolver chain', () => {
     );
     expect(queries.fetchImagesByListing).toHaveBeenCalledWith(105053);
     expect(queries.fetchFreshnessChecksByListing).toHaveBeenCalledWith(-11876);
+  });
+
+  it('W9a: fires property-sources off the resolved id, not the loaded listing — parallel with the listing fetch, not after it', async () => {
+    vi.mocked(queries.fetchListingIdByNaturalKey).mockResolvedValue(105053);
+    // fetchListingById deliberately never resolves in this test — if
+    // property-sources still waited on listingQ.data, it would never fire.
+    vi.mocked(queries.fetchListingById).mockReturnValue(new Promise(() => {}));
+
+    renderAt('/listing/idnes/6a147cfde222cf687509e018');
+
+    await waitFor(() =>
+      expect(queries.fetchListingIdByNaturalKey).toHaveBeenCalledWith(
+        'idnes',
+        '6a147cfde222cf687509e018',
+      ),
+    );
+    await waitFor(() =>
+      expect(queries.fetchPropertySources).toHaveBeenCalledWith(105053),
+    );
+    // The listing fetch was issued (id known) but is still pending — proving
+    // property-sources didn't wait for it to settle.
+    expect(queries.fetchListingById).toHaveBeenCalledWith(105053);
   });
 });
 

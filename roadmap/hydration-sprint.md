@@ -116,8 +116,22 @@ Four corollaries, because the evidence did not support one rule for everything:
   index definitions, pipeline members, pipeline board, collection membership, …), not
   just the two gates. /collections, /watchdog, /notifications, /brokers unchanged (this
   wave didn't touch them).
-- ⬜ **W9a** — listing-detail chain, client half (gate sources on the resolved id, carry the
-  id through navigation, fix the dead snapshot key).
+- ✅ **W9a** — listing-detail chain, client half. `sourcesQ` (`property-sources`) now keys
+  and gates on `resolvedListingId ?? listingQ.data?.id` instead of waiting on the full
+  listing row — on the canonical route (the id already known via seeded `Link` state or
+  `natKeyQ`) it fires in parallel with `listingQ` instead of after it, cutting a level off
+  the waterfall; the legacy route (no id until the listing loads) is unchanged. Both of
+  `ListingDetail`'s own internal redirects (property→canonical, legacy→canonical) now seed
+  `state.listingId` with the id they just resolved — `fetchPropertyReprNaturalKey` widened
+  to also select `properties_public.listing_id` (already-live column, migration 343) for
+  the first — so landing on the canonical URL never re-runs `natKeyQ` to re-resolve the
+  natural key it was just redirected FROM/TO. `FreshnessBlock`'s post-verify invalidation
+  had a dead `['snapshots', sreality_id]` call: the real key is `['snapshots',
+  snapshotListingIds]` (an array of cross-source surrogate ids), so verifying freshness
+  never actually refreshed the price chart; now a bare `['snapshots']` prefix, matching the
+  same fix already applied one line below for `['listing']`. New test proves the parallel
+  fetch directly (property-sources fires while `fetchListingById` is still an unresolved
+  promise). No query-shape changes — client-only, no `EXPLAIN` evidence applicable.
 - ⬜ **W10a** — broker leaderboard: covering index + aggregate-before-join (~6,980 → ~500
   blocks) + `keepPreviousData`; its two eager side-loads ride along.
 - ⬜ **W10b** — datasets: split the window-invariant polygon payload from the numbers.
