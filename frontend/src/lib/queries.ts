@@ -1226,8 +1226,13 @@ export const fetchBrowseStats = async (
   return data as BrowseStats;
 };
 
+/* `source_id_native` + `property_id` are migration 420 (W9b): the listing's own
+ * identity, which used to be reachable only through property_sources_public — a
+ * thin view over `listings` itself, so that read re-fetched THIS row's heap tuple
+ * one round trip later to learn two of its own columns. They cost nothing here
+ * (measured: the detail read is 7 buffers with them, and was 7 without). */
 const DETAIL_COLS =
-  'id,sreality_id,first_seen_at,last_seen_at,is_active,source,tom_days,' +
+  'id,sreality_id,first_seen_at,last_seen_at,is_active,source,source_id_native,property_id,tom_days,' +
   'category_main,category_type,price_czk,price_unit,' +
   'area_m2,disposition,subtype,locality,district,obec,okres,street,locality_district_id,locality_region_id,' +
   'lat,lng,floor,total_floors,has_balcony,has_parking,has_lift,' +
@@ -1361,17 +1366,38 @@ export const fetchSnapshotsByListing = async (
  * child listing's surrogate id via property_sources_public, not just the
  * representative), then return all of that property's per-portal observations.
  * Keyed on id, not sreality_id (R2 Phase C resolver-chain cutover) — property_
- * sources_public.id is the same listings.id migration 334 exposed. */
+ * sources_public.id is the same listings.id migration 334 exposed.
+ *
+ * `knownPropertyId` (W9b) skips the resolve hop. That hop asks
+ * property_sources_public — a thin view over `listings` filtered to
+ * `property_id is not null` — for one column of the SAME row listings_public has
+ * already returned, so a caller holding the listing row already knows the answer.
+ * Verified live: property_id and source_id_native agree between the two paths on
+ * every row the view exposes (0 mismatches), and no listing points at a
+ * non-active property, so they cannot disagree about which side of a merge won.
+ *
+ * Only a NUMBER takes the fast path. NULL/undefined means "ask" — a NULL
+ * property_id is the ~5-min pre-attach window after a scrape, rare enough that
+ * paying the hop beats reasoning about how stale the caller's row might be. Note
+ * the caller must NOT gate the whole query on having a property_id: on the
+ * canonical route this read fires in PARALLEL with the listing read (W9a), and
+ * making it wait would trade one hop back for a whole waterfall level. */
 export const fetchPropertySources = async (
   id: number,
+  knownPropertyId?: number | null,
 ): Promise<{ property_id: number | null; sources: PropertySource[] }> => {
-  const { data: row, error: e1 } = await supabase
-    .from('property_sources_public')
-    .select('property_id')
-    .eq('id', id)
-    .maybeSingle();
-  if (e1) throw e1;
-  const property_id = (row as { property_id: number } | null)?.property_id ?? null;
+  let property_id: number | null = null;
+  if (typeof knownPropertyId === 'number') {
+    property_id = knownPropertyId;
+  } else {
+    const { data: row, error: e1 } = await supabase
+      .from('property_sources_public')
+      .select('property_id')
+      .eq('id', id)
+      .maybeSingle();
+    if (e1) throw e1;
+    property_id = (row as { property_id: number } | null)?.property_id ?? null;
+  }
   if (property_id == null) return { property_id: null, sources: [] };
   const { data, error } = await supabase
     .from('property_sources_public')

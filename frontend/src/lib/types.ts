@@ -55,6 +55,17 @@ export interface ListingPublic {
   is_active: boolean;
   /* Migration 091 — source portal (sreality, bazos, idnes, …). */
   source: string;
+  /* Migration 420 (W9b). The portal's own advert id — the second half of the
+   * canonical /listing/{source}/{source_id_native} route. On the row itself now,
+   * so canonicalizing a legacy URL no longer waits on the multi-portal source
+   * list to find this listing's own native id in it. */
+  source_id_native: string | null;
+  /* Migration 420 (W9b). The `properties` parent (rule #15) this listing hangs
+   * off — NULL only inside the ~5-min pre-attach window after a scrape, which is
+   * exactly the window property_sources_public also cannot answer for (it filters
+   * `property_id is not null`). Every property-grain read on the page keys on it:
+   * MF, the status-event log, the pipeline funnel. */
+  property_id: number | null;
   category_main: string | null;
   category_type: string | null;
   price_czk: number | null;

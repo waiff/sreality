@@ -174,6 +174,9 @@ const RESOLVER_LISTING = {
   last_seen_at: '2026-01-02T00:00:00Z',
   is_active: true,
   source: 'idnes',
+  // W9b (migration 420): the listing's own identity, on the listing row.
+  source_id_native: '6a147cfde222cf687509e018',
+  property_id: 774,
   category_main: 'byt',
   category_type: 'prodej',
   price_czk: 5_000_000,
@@ -210,20 +213,31 @@ describe('<ListingDetail> resolver chain', () => {
 
   it('legacy /listing/{sreality_id} fetches by sreality_id in ONE round trip, never resolves a natural key', async () => {
     vi.mocked(queries.fetchListingBySreality).mockResolvedValue(RESOLVER_LISTING);
+    // The page canonicalizes itself once the listing lands (see the W9b case
+    // below), and the canonical route it lands on is id-keyed.
+    vi.mocked(queries.fetchListingById).mockResolvedValue(RESOLVER_LISTING);
 
     renderAt('/listing/-11876');
 
     await waitFor(() =>
       expect(queries.fetchListingBySreality).toHaveBeenCalledWith(-11876),
     );
+    // The point of the legacy route: the URL IS the sreality_id, so it is never
+    // worth a natural-key resolve. (fetchListingById is a different claim — the
+    // canonical URL this redirects to is id-keyed by construction.)
     expect(queries.fetchListingIdByNaturalKey).not.toHaveBeenCalled();
-    expect(queries.fetchListingById).not.toHaveBeenCalled();
 
     // Once loaded, the surrogate id (not sreality_id) keys the child loaders;
     // freshness stays sreality_id-keyed (listing_freshness_checks has no
     // listing_id column at all).
+    //
+    // W9b: on the legacy route this read cannot start until the listing lands,
+    // so the listing's own property_id is ALWAYS in hand by then — it is handed
+    // over, and fetchPropertySources skips the resolve hop that would otherwise
+    // re-read this same row from property_sources_public to learn one column of
+    // it. The second argument is the assertion.
     await waitFor(() =>
-      expect(queries.fetchPropertySources).toHaveBeenCalledWith(105053),
+      expect(queries.fetchPropertySources).toHaveBeenCalledWith(105053, 774),
     );
     expect(queries.fetchImagesByListing).toHaveBeenCalledWith(105053);
     expect(queries.fetchFreshnessChecksByListing).toHaveBeenCalledWith(-11876);
@@ -246,8 +260,12 @@ describe('<ListingDetail> resolver chain', () => {
     );
     expect(queries.fetchListingBySreality).not.toHaveBeenCalled();
 
+    // W9b's known-property_id fast path deliberately does NOT reach here: on the
+    // canonical route this read fires alongside the listing (W9a), so there is
+    // no listing row to take a property_id from yet and it resolves one itself.
+    // Gating it on the listing would trade one hop for a whole waterfall level.
     await waitFor(() =>
-      expect(queries.fetchPropertySources).toHaveBeenCalledWith(105053),
+      expect(queries.fetchPropertySources).toHaveBeenCalledWith(105053, undefined),
     );
     expect(queries.fetchImagesByListing).toHaveBeenCalledWith(105053);
     expect(queries.fetchFreshnessChecksByListing).toHaveBeenCalledWith(-11876);
@@ -267,12 +285,63 @@ describe('<ListingDetail> resolver chain', () => {
         '6a147cfde222cf687509e018',
       ),
     );
+    // W9b must not have quietly undone this: the known-property_id fast path is
+    // an ARGUMENT, never a gate. Here the listing never resolves, so the second
+    // argument is `undefined` and the read does its own resolve hop — exactly as
+    // before — rather than waiting for a property_id that will never arrive.
     await waitFor(() =>
-      expect(queries.fetchPropertySources).toHaveBeenCalledWith(105053),
+      expect(queries.fetchPropertySources).toHaveBeenCalledWith(105053, undefined),
     );
     // The listing fetch was issued (id known) but is still pending — proving
     // property-sources didn't wait for it to settle.
     expect(queries.fetchListingById).toHaveBeenCalledWith(105053);
+  });
+
+  /* W9b: the legacy URL canonicalizes off the LISTING ROW alone.
+     source_id_native is on listings_public now (migration 420), so the synthetic
+     negative id leaves the URL bar as soon as the listing lands. Before, the
+     redirect searched the sibling source list for the row matching this
+     listing's surrogate id — i.e. it waited on the whole multi-portal read to
+     learn one string belonging to the row it was already holding.
+     property-sources is made to hang forever here: if the redirect still needed
+     it, the URL would never change. */
+  it('W9b: canonicalizes the legacy URL from the listing row, without the sources read', async () => {
+    vi.mocked(queries.fetchListingBySreality).mockResolvedValue(RESOLVER_LISTING);
+    vi.mocked(queries.fetchListingById).mockResolvedValue(RESOLVER_LISTING);
+    vi.mocked(queries.fetchPropertySources).mockReturnValue(
+      new Promise(() => {}) as ReturnType<typeof queries.fetchPropertySources>,
+    );
+
+    renderAt('/listing/-11876');
+
+    // Landing on the canonical route is what proves it: that route is keyed on
+    // the surrogate id, and only the redirect (seeding state.listingId) gets us
+    // there without a natural-key resolve.
+    await waitFor(() =>
+      expect(queries.fetchListingById).toHaveBeenCalledWith(105053),
+    );
+    expect(queries.fetchListingIdByNaturalKey).not.toHaveBeenCalled();
+  });
+
+  /* The pre-attach window (rule #19: a freshly scraped row lands property_id
+     NULL) is the one case the fast path must NOT claim to know the answer for —
+     property_sources_public filters `property_id is not null`, so a NULL is
+     "ask", not "there is none". */
+  it('W9b: falls back to resolving when the listing has no property_id yet', async () => {
+    vi.mocked(queries.fetchListingBySreality).mockResolvedValue({
+      ...RESOLVER_LISTING,
+      property_id: null,
+    } as unknown as ListingPublic);
+    vi.mocked(queries.fetchListingById).mockResolvedValue({
+      ...RESOLVER_LISTING,
+      property_id: null,
+    } as unknown as ListingPublic);
+
+    renderAt('/listing/-11876');
+
+    await waitFor(() =>
+      expect(queries.fetchPropertySources).toHaveBeenCalledWith(105053, null),
+    );
   });
 });
 
@@ -301,6 +370,12 @@ describe('<BrokerVizitka>', () => {
   beforeEach(() => {
     vi.mocked(queries.fetchListingBySreality).mockReset();
     vi.mocked(queries.fetchListingBySreality).mockResolvedValue(RESOLVER_LISTING);
+    // Since W9b the legacy URL canonicalizes off the listing row alone, so this
+    // page redirects to /listing/{source}/{native} the moment the listing lands
+    // — as it does in production. The id-keyed loader has to answer there, or
+    // these tests would be asserting against an unmounted page.
+    vi.mocked(queries.fetchListingById).mockReset();
+    vi.mocked(queries.fetchListingById).mockResolvedValue(RESOLVER_LISTING);
     vi.mocked(brokers.fetchListingBroker).mockReset();
     vi.mocked(brokers.fetchListingBroker).mockResolvedValue(attribution());
   });
@@ -312,6 +387,10 @@ describe('<BrokerVizitka>', () => {
         <MemoryRouter initialEntries={['/listing/-11876']}>
           <Routes>
             <Route path="listing/:sreality_id" element={<ListingDetail />} />
+            <Route
+              path="listing/:source/:nativeId"
+              element={<ListingDetail />}
+            />
           </Routes>
         </MemoryRouter>
       </QueryClientProvider>,

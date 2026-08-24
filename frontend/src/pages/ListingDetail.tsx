@@ -174,23 +174,33 @@ export default function ListingDetail() {
   const sourcesId = resolvedListingId ?? listingQ.data?.id ?? null;
   const sourcesQ = useQuery<{ property_id: number | null; sources: PropertySource[] }, Error>({
     queryKey: ['property-sources', sourcesId],
-    queryFn: () => fetchPropertySources(sourcesId as number),
+    // W9b: hand over the property_id when the listing row is already in hand, so
+    // the resolve hop is skipped. It is NOT in the queryKey and the query is NOT
+    // gated on it — on the canonical route this fires alongside listingQ (W9a)
+    // and must not start waiting for it; there it simply resolves the id itself,
+    // exactly as before. On the legacy route the id only exists AFTER listingQ
+    // lands, so by the time this is enabled the answer is always known and the
+    // hop always dies. That is the route this wave is for.
+    queryFn: () =>
+      fetchPropertySources(sourcesId as number, listingQ.data?.property_id),
     enabled: sourcesId != null,
     staleTime: 60_000,
   });
 
   // Canonicalize the legacy numeric route to /listing/{source}/{native} once the
-  // listing + its sources load, so the negative synthetic id disappears from the
-  // URL bar. Query string + hash are preserved (?run= / #anchor deep links). Only
-  // from the legacy route, and only when the natural key is known — a NULL one
-  // (a pre-migration-314 straggler) simply stays on the still-valid legacy URL.
-  // Match THIS listing's source row by the surrogate id (never null, never
-  // overlaps), not sreality_id — `null === null` would wrongly match the first
-  // null-sreality sibling. (Only reached from the legacy route, where sreality_id
-  // is present, but the surrogate match is correct regardless.)
-  const canonicalNative = (sourcesQ.data?.sources ?? []).find(
-    (s) => s.id === listingQ.data?.id,
-  )?.source_id_native;
+  // listing loads, so the negative synthetic id disappears from the URL bar.
+  // Query string + hash are preserved (?run= / #anchor deep links). Only from the
+  // legacy route, and only when the natural key is known — a NULL one (a
+  // pre-migration-314 straggler) simply stays on the still-valid legacy URL.
+  //
+  // W9b: straight off the listing row (migration 420). This used to search the
+  // SIBLING source list for the row matching this listing's surrogate id — i.e.
+  // it waited on the whole multi-portal read to learn one string belonging to the
+  // row it was already holding, keeping the synthetic id in the URL bar a full
+  // round trip longer. Reading it directly also retires the matching subtlety
+  // that made the old form fragile: it had to match on `s.id`, never sreality_id,
+  // because `null === null` would wrongly pick the first null-sreality sibling.
+  const canonicalNative = listingQ.data?.source_id_native ?? null;
   useLayoutEffect(() => {
     if (legacyId == null || !listingQ.data || !canonicalNative) return;
     navigate(
@@ -217,7 +227,16 @@ export default function ListingDetail() {
   // PROPERTY-grain MF (the golden record): the one figure for the real-world
   // property, so the header shows the same MF whichever portal's advert opened
   // it — not the subject listing's possibly-under-stated per-advert parse.
-  const propPid = sourcesQ.data?.property_id ?? null;
+  //
+  // W9b: the listing row carries property_id itself (migration 420), so every
+  // property-grain read below — MF, the status-event log the price chart's
+  // inactive-period gaps are built from, and the pipeline funnel — starts as soon
+  // as the LISTING lands instead of queueing behind the sources read. On the
+  // legacy route that is a whole waterfall level (listing -> sources -> MF became
+  // listing -> MF, with sources running alongside). sourcesQ stays the fallback
+  // for the pre-attach window, where the listing's own property_id is still NULL
+  // but a merge may since have attached one.
+  const propPid = listingQ.data?.property_id ?? sourcesQ.data?.property_id ?? null;
   const propertyMfQ = useQuery<PropertyMf | null, Error>({
     queryKey: ['property-mf', propPid],
     queryFn: () => fetchPropertyMf(propPid as number),
@@ -406,12 +425,11 @@ export default function ListingDetail() {
         <Crumb />
         {/* The two page-level deal verbs, grouped top-right: track this deal in
             the pipeline (the ★, same contract as the Browse-card bookmark) and
-            run a new estimation. The pipeline toggle needs the property_id,
-            which resolves from the sources query. */}
+            run a new estimation. The pipeline toggle needs the property_id —
+            which since W9b comes off the listing row itself, so the funnel
+            appears with the header rather than a round trip after it. */}
         <div className="flex items-center gap-2">
-          {sourcesQ.data?.property_id != null && (
-            <PipelineToggle property_id={sourcesQ.data.property_id} />
-          )}
+          {propPid != null && <PipelineToggle property_id={propPid} />}
           <NewEstimationButton prefill={newEstimationPrefill} />
         </div>
       </div>
@@ -457,9 +475,9 @@ export default function ListingDetail() {
       </Suspense>
       <Hairline />
       <Suspense fallback={<Skeleton height={140} />}>
-        {sourcesQ.data?.property_id != null && (
+        {propPid != null && (
           <CurationBlock
-            property_id={sourcesQ.data.property_id}
+            property_id={propPid}
             sreality_id={listing.sreality_id}
             listing_id={listing.id}
           />
