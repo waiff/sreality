@@ -788,3 +788,131 @@ def test_late_binding_is_not_fuzzy():
     assert "l.sreality_id = er.input_sreality_id" in sql
     for banned in ("ILIKE", "input_url", "similarity(", "lower("):
         assert banned not in sql, f"late binding must not use {banned}"
+
+
+# --- one measure, one row (migration 424) -------------------------------------
+
+
+def _set_clause(sql: str) -> str:
+    """The recompute UPDATE's SET list, up to its FROM."""
+    return sql.split("UPDATE properties p SET", 1)[1].split("FROM child_agg", 1)[0]
+
+
+def _rhs(set_clause: str, column: str) -> str:
+    """The (single-line) expression assigned to `column`."""
+    import re
+
+    m = re.search(rf"^\s*{re.escape(column)}\s*=\s*(.+?),?$", set_clause, re.M)
+    assert m, f"{column} is not assigned in the SET list"
+    return m[1].strip().rstrip(",")
+
+
+def test_the_denominator_is_read_from_the_same_row_as_the_numerator():
+    """properties.current_price_czk is the representative child's price, so
+    properties.area_m2 — what every per-m2 consumer divides it by — must be that
+    same child's area. Independent rollups made a merged property's ratio divide
+    one portal's price by another portal's area."""
+    from scripts.recompute_property_stats import _RECOMPUTE_BATCH_SQL
+
+    setc = _set_clause(_RECOMPUTE_BATCH_SQL)
+    assert _rhs(setc, "current_price_czk").startswith("r.")
+    assert _rhs(setc, "area_m2").startswith("coalesce(r.area_m2"), (
+        "the area must lead with the representative child; the group-best area "
+        "is a fallback, not the definition"
+    )
+
+
+def test_the_denominator_never_goes_back_through_the_golden_record():
+    """The golden-record CTE picks each field's best value from whichever child
+    happens to have one. area_m2 must not go back through it — that is exactly
+    how the denominator split away from the numerator."""
+    from scripts.recompute_property_stats import _RECOMPUTE_BATCH_SQL
+
+    assert "g.area_m2" not in _RECOMPUTE_BATCH_SQL, (
+        "g.area_m2 re-introduces a field-by-field pick of the per-m2 denominator"
+    )
+
+
+def test_usable_area_is_left_on_its_own_golden_record_pick():
+    """usable_area is NOT the per-m2 denominator, and it is a live Browse +
+    Watchdog filter column (browse_list.usable_area -> usable_area_min/max_filter,
+    the matcher's min/max_usable_area). Binding it to the representative child
+    would NULL it for every property whose repr carries an area but no
+    usable_area, silently narrowing saved filters. W3 changes the denominator,
+    not this."""
+    from scripts.recompute_property_stats import _RECOMPUTE_BATCH_SQL
+
+    setc = _set_clause(_RECOMPUTE_BATCH_SQL)
+    assert _rhs(setc, "usable_area") == "g.usable_area"
+
+
+def test_best_area_is_left_joined_so_an_area_less_property_still_updates():
+    """No child reports an area -> best_area has no row for that property. An
+    inner join would drop it out of the UPDATE entirely, silently freezing
+    is_active and every other rolled-up column."""
+    import re
+
+    from scripts.recompute_property_stats import _RECOMPUTE_BATCH_SQL
+
+    assert "LEFT JOIN best_area" in _RECOMPUTE_BATCH_SQL
+    assert not re.search(r"(?<!LEFT )JOIN best_area", _RECOMPUTE_BATCH_SQL)
+
+
+def test_the_area_fallback_is_the_pre_change_pick_verbatim():
+    """The fallback exists so no property loses an area it already had. It must
+    stay restricted to children that carry an area and ordered by trust alone —
+    widening it to usable-area-carrying rows makes the best row's area NULL and
+    drops the property out of every area filter."""
+    from scripts.recompute_property_stats import _RECOMPUTE_BATCH_SQL
+
+    body = " ".join(
+        _RECOMPUTE_BATCH_SQL.split("best_area AS (", 1)[1].split("),", 1)[0].split()
+    )
+    assert "WHERE k.area_m2 IS NOT NULL" in body
+    assert "ORDER BY k.property_id, k.src_rank," in body
+
+
+def test_the_basis_stamp_names_the_row_the_price_came_from():
+    """price_per_m2_source_listing_id must be built from the representative
+    child's own price + area, so a non-NULL stamp always means one row backed
+    both halves of the measure."""
+    from scripts.recompute_property_stats import _RECOMPUTE_BATCH_SQL
+
+    setc = _set_clause(_RECOMPUTE_BATCH_SQL)
+    assert (
+        "price_per_m2_source_id(r.price_czk, r.area_m2, r.listing_ref_id)"
+        in " ".join(setc.split())
+    )
+
+
+def test_every_recompute_variant_writes_the_stamp():
+    """The one/scoped variants are derived from the batch SQL by narrowing the
+    batch CTE; if that ever becomes a copy, they must not lose the measure."""
+    import scripts.recompute_property_stats as rps
+
+    for sql in (rps._RECOMPUTE_BATCH_SQL, rps._RECOMPUTE_ONE_SQL,
+                rps._RECOMPUTE_SCOPED_SQL):
+        assert "price_per_m2_source_listing_id" in sql
+
+
+def test_every_singleton_creation_path_stamps_the_basis():
+    """Four writers create a property from ONE listing (straggler attach,
+    insert-time singleton, the cheap singleton rollup, the unmerge split). A
+    singleton's price and area are trivially one row's, so each stamps the basis
+    rather than leaving it NULL until the next maintenance pass — and each calls
+    the shared price_per_m2_source_id() instead of restating its validity bound."""
+    import inspect
+
+    from scraper import db
+    from scripts.recompute_property_stats import _ATTACH_INSERT_SQL
+    from toolkit.property_identity import _SPLIT_INSERT_ONE_SQL
+
+    sources = {
+        "attach": _ATTACH_INSERT_SQL,
+        "split": _SPLIT_INSERT_ONE_SQL,
+        "singleton": inspect.getsource(db._create_singleton_property),
+        "cheap_rollup": inspect.getsource(db._cheap_property_rollup),
+    }
+    for name, sql in sources.items():
+        assert "price_per_m2_source_listing_id" in sql, f"{name} drops the stamp"
+        assert "price_per_m2_source_id(" in sql, f"{name} restates the validity bound"
