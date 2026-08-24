@@ -40,6 +40,22 @@
  *   (surfacing through the app's global query/mutation error toasts) instead of
  *   returning "some". Pick values that mean "something is structurally wrong",
  *   not "slightly more than today".
+ *
+ * EXACT-COUNT FAST PATH (W2b). When the builder requests `count: 'exact'`
+ * (PostgREST's `Prefer: count=exact`), page 1's response carries the TRUE row
+ * total regardless of any cap. Two things follow, both keyed off whether page
+ * 1 came back FULL (`rows.length === pageSize`, i.e. nothing clamped it):
+ *   - short first page (`rows.length < pageSize`): either the count IS that
+ *     length (done — return now, no terminator needed) or the server clamped
+ *     below `pageSize` (the cap-drift case) and count-based page math would
+ *     be wrong for the SAME reason a `pageSize + 1` probe is wrong — a lower
+ *     cap invalidates any assumption about how many rows a future full-size
+ *     window returns. That case (and any call site not requesting a count at
+ *     all) falls through to the sequential empty-page walk unchanged.
+ *   - full first page with count known: every further page uses the same
+ *     request shape that just proved uncapped, so pages 2..ceil(count /
+ *     pageSize) are correct issued together — one wave, not a chain — with no
+ *     terminating request, because the exact total already says when to stop.
  */
 
 export class FetchAllOverflowError extends Error {
@@ -65,7 +81,13 @@ export interface PageBuilder<Row> {
   range(
     from: number,
     to: number,
-  ): PromiseLike<{ data: Row[] | null; error: { message: string } | null }>;
+  ): PromiseLike<{
+    data: Row[] | null;
+    error: { message: string } | null;
+    /* Present only when the builder requested `count: 'exact'`; drives the
+     * fast path above. Absent (or null) callers get the plain sequential walk. */
+    count?: number | null;
+  }>;
 }
 
 export interface FetchAllOptions<Row> {
@@ -104,18 +126,16 @@ export async function fetchAllRows<Row extends object>({
 
   const out: Row[] = [];
   const seen = new Set<string>();
-  let offset = 0;
 
-  for (;;) {
+  const orderedBuild = (): PageBuilder<Row> => {
     let page = build();
     for (const o of orderBy) {
       page = page.order(o.column, { ascending: o.ascending ?? true });
     }
-    const { data, error } = await page.range(offset, offset + pageSize - 1);
-    if (error) throw error;
-    const rows = data ?? [];
-    if (rows.length === 0) return out;
+    return page;
+  };
 
+  const absorb = (rows: readonly Row[]): void => {
     for (const row of rows) {
       const id = JSON.stringify(key.map((k) => (row as Record<string, unknown>)[k]));
       if (seen.has(id)) continue;
@@ -123,6 +143,57 @@ export async function fetchAllRows<Row extends object>({
       out.push(row);
     }
     if (out.length > expectMax) throw new FetchAllOverflowError(relation, expectMax);
+  };
+
+  const first = await orderedBuild().range(0, pageSize - 1);
+  if (first.error) throw first.error;
+  const firstRows = first.data ?? [];
+  if (firstRows.length === 0) return out;
+
+  const count = first.count ?? null;
+  if (count != null && count > expectMax) {
+    throw new FetchAllOverflowError(relation, expectMax);
+  }
+  absorb(firstRows);
+
+  if (count != null) {
+    if (firstRows.length === count) {
+      /* Exact-count termination: page 1 already holds everything, so the
+       * terminating empty-page request the fallback below would otherwise
+       * spend is skipped entirely. */
+      return out;
+    }
+    if (firstRows.length === pageSize) {
+      /* Page 1 came back full — nothing clamped it — so every remaining
+       * full-size window is safe to request up front, together. */
+      const totalPages = Math.ceil(count / pageSize);
+      const rest = await Promise.all(
+        Array.from({ length: totalPages - 1 }, (_, i) => i + 1).map((i) =>
+          orderedBuild().range(i * pageSize, (i + 1) * pageSize - 1),
+        ),
+      );
+      for (const page of rest) {
+        if (page.error) throw page.error;
+        absorb(page.data ?? []);
+      }
+      return out;
+    }
+    /* Short first page but count says there's more: db-max-rows clamped
+     * below pageSize (the cap-drift case). Count-based page math would be
+     * wrong here for the same reason a pageSize+1 probe would be — a lower
+     * cap invalidates any assumption about a future window's size. Fall
+     * through to the sequential walk, which is correct under any cap. */
+  }
+
+  /* Sequential empty-page walk — the fallback for a builder that didn't
+   * request an exact count, or a count that came back below db-max-rows. */
+  let offset = firstRows.length;
+  for (;;) {
+    const { data, error } = await orderedBuild().range(offset, offset + pageSize - 1);
+    if (error) throw error;
+    const rows = data ?? [];
+    if (rows.length === 0) return out;
+    absorb(rows);
     /* Advance by what the SERVER sent, not what we asked for — under a cap
      * smaller than pageSize this is what keeps the walk gap-free. */
     offset += rows.length;

@@ -93,8 +93,24 @@ Four corollaries, because the evidence did not support one rule for everything:
   rows from the previous account survived up to gcTime); unread badge gated on its own nav
   entry at 60 s. **Measured live: −4 requests on every route** — /collections 9→5,
   /watchdog 10→6, /notifications 9→5, /brokers 11→7, /browse 31→27, /pipeline 27→23.
-- ⬜ **W2b** — `fetchAllRows` exact-count termination + parallel pages; visibility-gate
-  Browse's city-quality and per-card collection reads.
+- ✅ **W2b** — `fetchAllRows` exact-count termination + parallel pages; visibility-gate
+  Browse's city-quality and per-card collection reads. All 18 call sites now request
+  `count: 'exact'`; page 1 alone terminates the walk when the count says that's
+  everything (no more terminating empty-page probe), and a full page 1 with more to
+  come fires every remaining page in parallel instead of one request at a time. A short
+  page 1 despite a larger count (db-max-rows clamped below `pageSize`) still falls
+  through to the old sequential walk unchanged — trusting count-based page math there
+  would reproduce the cap-drift bug this helper exists to prevent, the same reason a
+  `pageSize + 1` probe was rejected as the mechanism. Browse's three city-quality
+  queries (`citiesQuery`/`cityDefsQuery`/`cityValuesQuery`) gained `enabled: mapVisible`,
+  matching the sibling `cityPolygons`/`rentMap` queries already gated in the same block —
+  they feed only the map overlay. The per-card collection-membership read moved out of
+  `CollectionSaveButton` (one `useQuery` per rendered card) up to `ListingCards`, gated
+  on `rows.length > 0`, and is threaded down as a prop — one subscription for the whole
+  grid instead of N. `EXPLAIN (ANALYZE, BUFFERS)`: `city_index_values_public` (this
+  wave's largest table, 6,798 rows) costs 230 buffers for the added `count(*)`, on top of
+  ~230 for the existing select — paid once per session (`staleTime: Infinity`) against a
+  read that used to cost 7 sequential round trips.
 - ⬜ **W9a** — listing-detail chain, client half (gate sources on the resolved id, carry the
   id through navigation, fix the dead snapshot key).
 - ⬜ **W10a** — broker leaderboard: covering index + aggregate-before-join (~6,980 → ~500
