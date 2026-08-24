@@ -93,17 +93,24 @@ def _add_child(
 
 
 def _skew_property_ids_past(cur: Any, listing_id: int) -> None:
-    """Burn properties.id values until the next one is above `listing_id`.
+    """Jump the properties.id sequence past `listing_id`.
 
     listings.id and properties.id are independent sequences, so in a fresh CI
-    database they collide — and then `l.id` and `l.property_id` are the SAME
-    number and a stamp assertion cannot tell the two apart. That is exactly the
-    confusion migration 424's column comment warns about, so the tests below make
-    the two ranges disjoint before asserting on them."""
-    while True:
-        cur.execute("SELECT nextval(pg_get_serial_sequence('properties', 'id'))")
-        if int(cur.fetchone()[0]) > listing_id:
-            return
+    database a stamp assertion could not tell `l.id` and `l.property_id` apart.
+    That is exactly the confusion migration 424's column comment warns about, so
+    the tests below make the two ranges disjoint before asserting on them.
+
+    Jumped with setval, never walked with nextval: listings_id_seq STARTs AT
+    10,000,000 (migration 312) while properties.id starts at 1, so a one-at-a-time
+    loop is ten million round-trips — it hung CI for 15 minutes without tripping
+    statement_timeout, because every individual statement was fast. greatest()
+    keeps it monotonic so this can never drag the sequence back onto live ids."""
+    cur.execute("SELECT pg_get_serial_sequence('properties', 'id')")
+    seq = cur.fetchone()[0]
+    cur.execute(
+        "SELECT setval(%s::regclass, greatest(nextval(%s::regclass), %s), true)",
+        (seq, seq, listing_id + 1),
+    )
 
 
 def _stamp_of_child(cur: Any, listing_id: int) -> Any:
