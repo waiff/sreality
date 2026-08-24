@@ -15,6 +15,8 @@ Two phases, both idempotent:
      first/last_seen_at  = min/max across children
      repr_listing_id     = the active, most-recently-seen child
      category/area/...    + current_price_czk mirror that representative child
+     price_per_m2_source_listing_id = that child again, when it carries BOTH a
+                               price and a positive area (the per-m2 basis)
      price_drop_count     \\
      price_rise_count      \\  consecutive-step deltas computed WITHIN EACH
      max_price_drop_pct     }  CHILD's own snapshot series, then summed across
@@ -23,6 +25,17 @@ Two phases, both idempotent:
                                child's series only
      last_change_at      = max(children snapshots.scraped_at) -- "recently changed"
      stats_computed_at   = now()
+
+   ONE MEASURE, ONE ROW (migration 424). `current_price_czk` is the
+   representative child's price, so `area_m2` — the denominator every per-m2
+   consumer divides it by — must be that same child's area, with the golden
+   record only as a fallback. Rolling the two up independently (area in trust
+   order over all children, price from the representative) meant a merged
+   property's per-m2 divided one portal's price by another portal's area, and
+   source_trust_rank ranks mmreality above five portals — which is how a
+   listing-grain area defect escaped its own row. `usable_area` rides on the
+   same child for the same reason. `price_per_m2_source_listing_id` records
+   which listing backed the pair, and is NULL when no single child does.
 
    PRICE SERIES GRAIN (changed 2026-08; migration 173 introduced these columns).
    The window PARTITIONs by listing, NOT by property. Interleaving every child's
@@ -112,7 +125,7 @@ _ATTACH_INSERT_SQL = """
         locality_district_id, locality_region_id, source, energy_rating,
         building_condition_level, apartment_condition_level,
         is_active, first_seen_at, last_seen_at, last_change_at,
-        source_count, distinct_site_count
+        source_count, distinct_site_count, price_per_m2_source_listing_id
     )
     SELECT
         l.sreality_id, l.id, l.category_main, l.category_type, l.disposition,
@@ -123,7 +136,9 @@ _ATTACH_INSERT_SQL = """
         l.ku_id, l.obec_id, l.okres_id, l.region_id, l.obec, l.okres, l.region,
         l.locality_district_id, l.locality_region_id, l.source, l.energy_rating,
         l.building_condition_level, l.apartment_condition_level,
-        l.is_active, l.first_seen_at, l.last_seen_at, l.first_seen_at, 1, 1
+        l.is_active, l.first_seen_at, l.last_seen_at, l.first_seen_at, 1, 1,
+        -- One child: price and area come from one row by construction (mig 424).
+        price_per_m2_basis(l.price_czk, l.area_m2, l.id)
     FROM listings l
     WHERE l.property_id IS NULL
 """
@@ -180,12 +195,6 @@ _RECOMPUTE_BATCH_SQL = """
         bool_or(k.terrace)      AS terrace,
         bool_or(k.garage)       AS garage,
         bool_or(k.cellar)       AS cellar,
-        (array_agg(k.area_m2 ORDER BY k.src_rank, k.is_active DESC,
-            k.last_seen_at DESC NULLS LAST, k.sreality_id DESC)
-            FILTER (WHERE k.area_m2 IS NOT NULL))[1]      AS area_m2,
-        (array_agg(k.usable_area ORDER BY k.src_rank, k.is_active DESC,
-            k.last_seen_at DESC NULLS LAST, k.sreality_id DESC)
-            FILTER (WHERE k.usable_area IS NOT NULL))[1]  AS usable_area,
         (array_agg(k.estate_area ORDER BY k.src_rank, k.is_active DESC,
             k.last_seen_at DESC NULLS LAST, k.sreality_id DESC)
             FILTER (WHERE k.estate_area IS NOT NULL))[1]  AS estate_area,
@@ -213,6 +222,24 @@ _RECOMPUTE_BATCH_SQL = """
       FROM kids k
       GROUP BY k.property_id
     ),
+    -- ONE dimensional child (migration 424). area_m2 and usable_area describe the
+    -- same physical thing from one listing's point of view, so they are picked
+    -- TOGETHER, from one row, instead of field-by-field in trust order -- which
+    -- let a property quote one portal's floor area next to another portal's
+    -- usable area. Prefers a child that actually carries area_m2 (the per-m2
+    -- denominator) before falling back on the trust order, mirroring best_geo's
+    -- shape. This CTE is only the FALLBACK: the UPDATE below takes both fields
+    -- from the representative child whenever it has an area, so the denominator
+    -- belongs to the same listing as the price. LEFT-JOINed -> no row at all when
+    -- no child reports any area.
+    best_dims AS (
+      SELECT DISTINCT ON (k.property_id)
+        k.property_id AS pid, k.area_m2, k.usable_area
+      FROM kids k
+      WHERE k.area_m2 IS NOT NULL OR k.usable_area IS NOT NULL
+      ORDER BY k.property_id, (k.area_m2 IS NOT NULL) DESC, k.src_rank,
+               k.is_active DESC, k.last_seen_at DESC NULLS LAST, k.sreality_id DESC
+    ),
     -- Geom + admin territory (incl. the MF rent-map join key ku_id) from the best
     -- CZ-located child: a child WITH a Czech territory (obec_id NOT NULL) wins over
     -- a foreign/uncoded one, then by source trust + recency. Keeps geom and every
@@ -233,13 +260,15 @@ _RECOMPUTE_BATCH_SQL = """
       SELECT DISTINCT ON (l.property_id)
         l.property_id AS pid, l.sreality_id, l.id AS listing_ref_id,
         l.category_main, l.category_type,
-        l.disposition, l.price_czk,
+        l.disposition, l.price_czk, l.area_m2, l.usable_area,
         l.category_sub_cb, l.subtype,
         l.building_condition_level, l.apartment_condition_level, l.source
       FROM listings l
       JOIN batch b ON b.id = l.property_id
       -- Representative row = the property's DISPLAY listing (drives price,
-      -- disposition, category). Active-first so a live listing represents
+      -- AREA, disposition, category -- price and area together, migration 424:
+      -- the per-m2 denominator has to belong to the row the numerator came
+      -- from). Active-first so a live listing represents
       -- current state (never a delisted sibling's stale price), then the shared
       -- trust order (migration 311) as the tiebreak among equally-active
       -- siblings — replacing the old bare sreality_id DESC, whose sign made the
@@ -364,10 +393,14 @@ _RECOMPUTE_BATCH_SQL = """
       category_main       = r.category_main,
       category_type       = r.category_type,
       disposition         = r.disposition,
-      area_m2             = g.area_m2,
+      area_m2             = coalesce(r.area_m2, bd.area_m2),
       district            = bg.district,
       geom                = bg.geom,
       current_price_czk   = r.price_czk,
+      -- Numerator and denominator, then the row both came from -- NULL unless
+      -- ONE child supplies a price and a positive area (migration 424).
+      price_per_m2_source_listing_id =
+          price_per_m2_basis(r.price_czk, r.area_m2, r.listing_ref_id),
       locality            = bg.locality,
       street              = bs.street,
       has_balcony         = g.has_balcony,
@@ -383,7 +416,8 @@ _RECOMPUTE_BATCH_SQL = """
       category_sub_cb     = r.category_sub_cb,
       subtype             = r.subtype,
       estate_area         = g.estate_area,
-      usable_area         = g.usable_area,
+      usable_area         = CASE WHEN r.area_m2 IS NOT NULL
+                                 THEN r.usable_area ELSE bd.usable_area END,
       garden_area         = g.garden_area,
       parking_lots        = g.parking_lots,
       ku_id                     = bg.ku_id,
@@ -416,6 +450,7 @@ _RECOMPUTE_BATCH_SQL = """
     JOIN repr r ON r.pid = ca.pid
     JOIN golden g ON g.pid = ca.pid
     JOIN best_geo bg ON bg.pid = ca.pid
+    LEFT JOIN best_dims bd ON bd.pid = ca.pid
     LEFT JOIN best_street bs ON bs.pid = ca.pid
     LEFT JOIN price_hist ph ON ph.pid = ca.pid
     LEFT JOIN repr_span rs ON rs.pid = ca.pid

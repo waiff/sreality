@@ -949,7 +949,7 @@ def _create_singleton_property(
                 locality_district_id, locality_region_id, source, energy_rating,
                 building_condition_level, apartment_condition_level,
                 is_active, first_seen_at, last_seen_at,
-                source_count, distinct_site_count
+                source_count, distinct_site_count, price_per_m2_source_listing_id
             )
             SELECT
                 sreality_id, id, category_main, category_type, disposition,
@@ -960,7 +960,11 @@ def _create_singleton_property(
                 ku_id, obec_id, okres_id, region_id, obec, okres, region,
                 locality_district_id, locality_region_id, source, energy_rating,
                 building_condition_level, apartment_condition_level,
-                is_active, first_seen_at, last_seen_at, 1, 1
+                is_active, first_seen_at, last_seen_at, 1, 1,
+                -- One child, so price and area trivially come from one row:
+                -- stamp the per-m2 basis now rather than leave it NULL until the
+                -- next maintenance pass (migration 424).
+                price_per_m2_basis(price_czk, area_m2, id)
             FROM listings WHERE id = %s
             RETURNING id
             """,
@@ -990,6 +994,9 @@ def _cheap_property_rollup(conn: psycopg.Connection, listing_id: int) -> None:
                 is_active           = agg.active,
                 current_price_czk   = CASE WHEN agg.cnt = 1 THEN l.price_czk      ELSE p.current_price_czk END,
                 area_m2             = CASE WHEN agg.cnt = 1 THEN l.area_m2         ELSE p.area_m2 END,
+                price_per_m2_source_listing_id = CASE WHEN agg.cnt = 1
+                    THEN price_per_m2_basis(l.price_czk, l.area_m2, l.id)
+                    ELSE p.price_per_m2_source_listing_id END,
                 district            = CASE WHEN agg.cnt = 1 THEN l.district        ELSE p.district END,
                 locality            = CASE WHEN agg.cnt = 1 THEN l.locality        ELSE p.locality END,
                 disposition         = CASE WHEN agg.cnt = 1 THEN l.disposition     ELSE p.disposition END,
