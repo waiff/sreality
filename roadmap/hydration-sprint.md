@@ -210,7 +210,24 @@ Four corollaries, because the evidence did not support one rule for everything:
   wired into Pipeline; Browse gets it in W7a) now calls the new `fetchListingCovers`
   instead of `fetchImagesForListingIds(ids, 1)` — the multi-image fetcher stays for its
   other callers (the card carousel, comparables) which genuinely need more than one photo.
-- ⬜ **W5** — `pipeline_board_public` cohort view. **← stop point 1**
+- ✅ **W5** — `pipeline_board_public` cohort view (migration 417). The board's structural read
+  was two sequential PostgREST round trips joined client-side (`property_pipeline_public`,
+  then `properties_public.in('property_id', ids)` — the second unable to start until the
+  first's ids landed). `pipeline_board_public` does the join server-side (LEFT JOIN on
+  `property_id`), so `fetchPipelineBoard` is now one `fetchAllRows` call instead of two
+  sequential requests. `security_invoker = true` — **required**, `property_pipeline` is
+  account-scoped RLS same as its sibling `property_pipeline_public`, so a plain view here
+  would have silently reopened the tenant boundary that table's RLS exists to enforce (the
+  standing constraint 2 rail was live for exactly this). `properties_public` stays a plain
+  inner view unchanged — `properties` carries a permissive `FOR SELECT TO authenticated`
+  policy, not per-account, so nesting it inside an invoker-mode outer view is correct as-is.
+  Grants mirror `property_pipeline_public` exactly (`anon` dark, `authenticated`
+  SELECT-only). Verified live: row counts match between the new view and the old two-view
+  composition exactly (48 = 48); a 5-row spot check of `property_id`/`stage_id`/`street`/
+  `price_czk` matches field-for-field. `composePipelineCards` simplified from a two-array
+  join to a one-array projection (the Map-based join it used to do is now the view's job);
+  `pipelineBoard.test.ts` rewritten to pin ONE relation read instead of two. **← stop point
+  1 — pausing here for review before W6 onward.**
 - ⬜ **W6** — one broker call (contacts onto the API-only view; delete the second call from
   the board *and* listing detail).
 - ⬜ **W9b** — append `source_id_native` + `property_id` to `listings_public`, written

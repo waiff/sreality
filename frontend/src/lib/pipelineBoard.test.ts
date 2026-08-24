@@ -13,10 +13,11 @@
  * again, visible to React Query and the global toast, instead of being
  * converted into "this listing has no broker" forever).
  *
- * So what is pinned here is the property that replaced it, and the one that
- * actually regressed: the board's structural read costs TWO relation reads and
- * touches NO enrichment source. Six serialized cross-origin round trips before
- * a single column could paint is what this file exists to prevent coming back.
+ * W5 moved the pipeline/property join server-side (pipeline_board_public,
+ * migration 417), so what is pinned here now is ONE relation read touching NO
+ * enrichment source — down from the two-relation client-side join W1/W2b left
+ * in place, itself down from six serialized cross-origin round trips before a
+ * single column could paint.
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -59,18 +60,13 @@ import { fetchPipelineBoard } from './queries';
 beforeEach(() => {
   h.reads = [];
   vi.clearAllMocks();
-  h.tables.property_pipeline_public = [
+  h.tables.pipeline_board_public = [
     {
       property_id: 42,
       stage_id: 1,
       board_position: 0,
       entered_stage_at: '2026-06-01T00:00:00Z',
       added_at: '2026-05-20T00:00:00Z',
-    },
-  ];
-  h.tables.properties_public = [
-    {
-      property_id: 42,
       sreality_id: 900,
       listing_id: 7,
       source: 'sreality',
@@ -88,16 +84,13 @@ beforeEach(() => {
 });
 
 describe('fetchPipelineBoard read budget', () => {
-  it('reads exactly two relations: pipeline rows, then properties', async () => {
+  it('reads exactly one relation: pipeline_board_public', async () => {
     await fetchPipelineBoard();
     /* fetchAllRows pays one extra terminating page (it stops only on an empty
-       page) — W2b makes that exact-count-driven. Deduplicate to relations so
-       this test pins the SHAPE (which sources are touched, in what order) and
-       not the pagination detail W2b will change. */
-    expect([...new Set(h.reads)]).toEqual([
-      'property_pipeline_public',
-      'properties_public',
-    ]);
+       page) unless the count-exact fast path applies — deduplicate to
+       relations so this test pins the SHAPE (which sources are touched) and
+       not the pagination detail. */
+    expect([...new Set(h.reads)]).toEqual(['pipeline_board_public']);
   });
 
   it('never reads images or brokers — those are decorations', async () => {
@@ -124,10 +117,9 @@ describe('fetchPipelineBoard read budget', () => {
     expect(board[0].price_change_count).toBe(2);
   });
 
-  it('short-circuits with no property read when the pipeline is empty', async () => {
-    h.tables.property_pipeline_public = [];
+  it('returns an empty board when the pipeline is empty', async () => {
+    h.tables.pipeline_board_public = [];
     const board = await fetchPipelineBoard();
     expect(board).toEqual([]);
-    expect(h.reads).not.toContain('properties_public');
   });
 });

@@ -3,7 +3,7 @@ import { fetchAllRows } from './fetchAllRows';
 import { imageSrc } from './imageUrl';
 import {
   composePipelineCards,
-  PIPELINE_PROPERTY_COLS,
+  PIPELINE_BOARD_COLS,
   type PipelineBoardRow,
 } from './pipelineBoardModel';
 import { type TaggedImageUrl } from './imageTags';
@@ -2341,9 +2341,11 @@ export const fetchPipelineStages = async (): Promise<PipelineStage[]> => {
 };
 
 /* The kanban's STRUCTURAL read: which property sits in which stage, plus the
- * display fields the board can filter and sort on. Two PostgREST reads
- * (property_pipeline_public + properties_public) joined client-side by
- * property_id — the same batched-hydration pattern Browse uses.
+ * display fields the board can filter and sort on. ONE PostgREST read
+ * (pipeline_board_public, migration 417, W5) — the pipeline/property join
+ * that used to be two sequential round trips composed client-side now
+ * happens server-side, so the second request never has to wait on the
+ * first's ids.
  *
  * Decorations are deliberately NOT here. This function used to await, in one
  * promise, the cover images and two broker calls as well: six serialized
@@ -2362,31 +2364,14 @@ export const fetchPipelineBoard = async (): Promise<PipelineBoardCard[]> => {
    * positions reshuffle between refetches. Any explicit sort re-sorts
    * client-side (lib/pipelineSort) and tiebreaks the same way. */
   const rows = await fetchAllRows<PipelineBoardRow>({
-    relation: 'property_pipeline_public',
+    relation: 'pipeline_board_public',
     build: () =>
-      supabase
-        .from('property_pipeline_public')
-        .select(
-          'property_id, stage_id, board_position, entered_stage_at, added_at',
-          { count: 'exact' },
-        ),
+      supabase.from('pipeline_board_public').select(PIPELINE_BOARD_COLS, { count: 'exact' }),
     orderBy: [{ column: 'board_position' }, { column: 'property_id' }],
     key: ['property_id'],
     expectMax: 100_000,
   });
-  if (rows.length === 0) return [];
-
-  const ids = rows.map((r) => r.property_id);
-  const { data: props, error: pErr } = await supabase
-    .from('properties_public')
-    .select(PIPELINE_PROPERTY_COLS)
-    .in('property_id', ids);
-  if (pErr) throw pErr;
-
-  return composePipelineCards(
-    rows,
-    (props ?? []) as unknown as Array<Record<string, unknown>>,
-  );
+  return composePipelineCards(rows);
 };
 
 /* Project the two batched broker reads onto one card's broker block.
