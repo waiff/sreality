@@ -103,11 +103,12 @@ DEFAULT_THRESHOLDS: dict[str, float] = {
     # The full sweep holds broker_resolution_lock for its whole run — every */10
     # incremental skips cleanly meanwhile — and clears dirty_broker_listings only at
     # finalize, so oldest-dirt ages 1:1 with the sweep and can legitimately reach
-    # that same 1.9h backstop. Warn above it or a healthy long sweep turns the axis
-    # amber; the extra headroom covers the post-sweep catch-up drain (the
+    # that same 3h backstop (raised from 1.9h with resolve_brokers_full.yml's
+    # timeout-minutes 110 -> 180). Warn above it or a healthy long sweep turns the
+    # axis amber; the extra headroom covers the post-sweep catch-up drain (the
     # incremental claims --batch-size 5000 per */10 tick = 30k/h).
-    "broker_dirty_warn_hours": 3,
-    "broker_dirty_fail_hours": 4,
+    "broker_dirty_warn_hours": 4,
+    "broker_dirty_fail_hours": 5,
     # The suppression rail is a binary invariant, not a gradient: one active
     # suppression whose two identities sit under the same broker means a NO the
     # operator recorded was bypassed. No warn tier — there is no "slightly merged".
