@@ -132,8 +132,32 @@ Four corollaries, because the evidence did not support one rule for everything:
   same fix already applied one line below for `['listing']`. New test proves the parallel
   fetch directly (property-sources fires while `fetchListingById` is still an unresolved
   promise). No query-shape changes — client-only, no `EXPLAIN` evidence applicable.
-- ⬜ **W10a** — broker leaderboard: covering index + aggregate-before-join (~6,980 → ~500
-  blocks) + `keepPreviousData`; its two eager side-loads ride along.
+- ✅ **W10a** — broker leaderboard (migration 414). The default (unfiltered) call joined
+  ALL 88,762 region-grain `broker_region_type_stats` rows to `brokers`/`firms` BEFORE
+  aggregating, then grouped ~89k joined rows down to ~22,666 brokers. Three fixes: (1)
+  aggregate `broker_region_type_stats` down to one row per broker inside the CTE first,
+  join the much smaller summed set to `brokers_public`/`firms` after; (2) a covering index
+  on `(geo_level, geo_id) include (broker_id, category_main, category_type, listing_count,
+  property_count, active_listing_count, active_property_count)`; (3) split the geo
+  predicate's 4-way OR into a `union all` of two mutually exclusive branches — a single OR
+  forces a BitmapOr, which always visits the heap regardless of indexing, so the covering
+  index only paid for itself once the by-far-most-common (unfiltered) call became a plain
+  single-condition scan. `EXPLAIN (ANALYZE, BUFFERS)`, warm: **6,776 → 3,108 buffers
+  (2.2×), 1,690ms → 127ms (13×)**; the aggregation step alone went from a 4,278-buffer
+  Bitmap Heap Scan to a 1,038-buffer Index Only Scan with `Heap Fetches: 0`. Verified live:
+  top-5 brokers' summed counts match a direct reference query exactly; the explicit-filter
+  branch (`union all`'s second arm) still returns correct rows. Remaining cost is a `Seq
+  Scan on brokers` (1,776 buffers) filtering `status='active'` over all ~42k rows — a
+  ~55%-selective filter, where Postgres correctly prefers a seq scan over an index scan, so
+  this is close to the floor for the current schema; short of the original ~500-block
+  estimate, still a large, honestly-measured win. Frontend: `boardQ` (the leaderboard
+  query) gained `placeholderData: keepPreviousData` — every filter control changes its key,
+  and without this each click blanked the ledger back to "Načítám žebříček…" instead of
+  updating in place; a subtle "Aktualizuji…" hint covers the `isFetching`-without-`isLoading`
+  window. New test proves the previous rows stay on screen (not the loading text) across a
+  filter change. The page's other two queries (`reviewQ`, the merge-candidates badge count;
+  `optionsQ`, the firm picker) have static keys that never change on filter interaction, so
+  they're unaffected by this specific bug — left as-is.
 - ⬜ **W10b** — datasets: split the window-invariant polygon payload from the numbers.
 - ⬜ **W3** — one pipeline cache (collapse `pipelineKeys.{board,members,card}`).
 - ⬜ **W4** — cover substrate: covering index + `listing_cover_public`.

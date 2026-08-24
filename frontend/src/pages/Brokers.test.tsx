@@ -5,7 +5,7 @@
  */
 
 import { describe, expect, it, vi, beforeEach } from 'vitest';
-import { fireEvent, render, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter } from 'react-router-dom';
 
@@ -13,6 +13,7 @@ import Brokers from './Brokers';
 import * as api from '@/lib/api';
 import * as auth from '@/lib/auth';
 import * as brokers from '@/lib/brokers';
+import type { BrokerLeaderRow } from '@/lib/brokers';
 
 vi.mock('@/lib/api', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/api')>()),
@@ -76,6 +77,49 @@ describe('<Brokers> merge-candidates badge', () => {
     const { findByText } = renderPage();
     await waitFor(() => expect(api.listBrokerMergeCandidates).toHaveBeenCalledWith(1));
     expect(await findByText(/Sloučit duplicity \(3\)/)).toBeInTheDocument();
+  });
+});
+
+function leaderRow(broker_id: number, display_name: string): BrokerLeaderRow {
+  return {
+    broker_id, display_name,
+    firm_id: null, firm_name: null, firm_domain: null,
+    listing_count: 1, property_count: 1, active_listing_count: 1, active_property_count: 1,
+  };
+}
+
+describe('<Brokers> W10a: keepPreviousData', () => {
+  it('keeps the previous ledger on screen (not the loading text) while a filter change refetches', async () => {
+    asUser(false);
+    vi.mocked(brokers.fetchBrokerLeaderboard).mockResolvedValueOnce([
+      leaderRow(1, 'První Makléř'),
+    ]);
+    let resolveSecond: (rows: BrokerLeaderRow[]) => void = () => {};
+    const second = new Promise<BrokerLeaderRow[]>((resolve) => { resolveSecond = resolve; });
+    vi.mocked(brokers.fetchBrokerLeaderboard).mockReturnValueOnce(second);
+
+    renderPage();
+    expect(await screen.findByText('První Makléř')).toBeInTheDocument();
+
+    // "Typ" defaults to Byty (categoryMain: 'byt') — switch to Domy, which
+    // changes boardQ's key and fires the second (still-pending) fetch.
+    fireEvent.click(screen.getByRole('button', { name: 'Domy' }));
+    await waitFor(() =>
+      expect(brokers.fetchBrokerLeaderboard).toHaveBeenLastCalledWith(
+        expect.objectContaining({ categoryMain: 'dum' }),
+      ),
+    );
+
+    // The old row is STILL rendered — never blanked to "Načítám žebříček…" —
+    // and the subtle "updating" hint is showing instead.
+    expect(screen.getByText('První Makléř')).toBeInTheDocument();
+    expect(screen.queryByText('Načítám žebříček…')).not.toBeInTheDocument();
+    expect(screen.getByText('Aktualizuji…')).toBeInTheDocument();
+
+    resolveSecond([leaderRow(2, 'Druhý Makléř')]);
+    await waitFor(() => expect(screen.getByText('Druhý Makléř')).toBeInTheDocument());
+    expect(screen.queryByText('První Makléř')).not.toBeInTheDocument();
+    expect(screen.queryByText('Aktualizuji…')).not.toBeInTheDocument();
   });
 });
 
