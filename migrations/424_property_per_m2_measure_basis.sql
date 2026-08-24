@@ -16,6 +16,15 @@
 -- branch in shared code by another name (CLAUDE.md rule 21). The parser is fixed
 -- at the parser; the measure is fixed here, at the grain.
 --
+-- SCOPE: this wave WRITES the label. Nothing reads it yet -- the column is not
+-- projected onto properties_public or browse_list and no API route selects it,
+-- so properties_public.price_per_m2 still renders a cross-row ratio unchanged.
+-- Gating a surface on the stamp (projecting it onto the read model, then
+-- suppressing or footnoting an unlabelled per-m2 in Browse, the listing header,
+-- the extension and the watchdog price_per_m2 filter) is the following wave.
+-- Writing the label first is what makes that wave possible: the stamp has to be
+-- complete and verified before any surface can act on it.
+--
 -- Fully additive, catalog-only, no backfill: the column is populated by
 -- scripts/recompute_property_stats.py (incremental */5 for dirty properties, the
 -- daily full sweep for everything else) and by the three singleton-creation
@@ -41,9 +50,12 @@ COMMENT ON COLUMN properties.price_per_m2_source_listing_id IS
     'measure -- i.e. the numerator and the denominator came from ONE row. NULL '
     'means no single child supplies a valid pair (no price, no area, a '
     'zero/negative area, or the representative child carries a price but no '
-    'area so area_m2 fell back to a sibling): the per-m2 is then unlabelled and '
-    'a surface must not present it as this listing''s figure. Written by '
-    'scripts/recompute_property_stats.py and the singleton-creation paths.';
+    'area so area_m2 fell back to a sibling): the per-m2 is then a cross-row '
+    'ratio that describes no single listing. Written by '
+    'scripts/recompute_property_stats.py and the singleton-creation paths. '
+    'WRITE-ONLY as of migration 424 -- no view, API route or surface reads it '
+    'yet; the wave that projects it onto the read model and gates the display '
+    'on it is separate.';
 
 -- 2. ONE definition of "is there a valid per-m2 basis here" ------------------
 -- Four writers stamp this column (the recompute, the straggler attach, the

@@ -822,28 +822,54 @@ def test_the_denominator_is_read_from_the_same_row_as_the_numerator():
     )
 
 
-def test_no_independent_trust_order_pick_of_the_dimensional_pair():
+def test_the_denominator_never_goes_back_through_the_golden_record():
     """The golden-record CTE picks each field's best value from whichever child
-    happens to have one. area_m2 and usable_area must not go back through it:
-    that is exactly how the pair split across two listings."""
+    happens to have one. area_m2 must not go back through it — that is exactly
+    how the denominator split away from the numerator."""
     from scripts.recompute_property_stats import _RECOMPUTE_BATCH_SQL
 
-    for banned in ("g.area_m2", "g.usable_area"):
-        assert banned not in _RECOMPUTE_BATCH_SQL, (
-            f"{banned} re-introduces a field-by-field area pick"
-        )
+    assert "g.area_m2" not in _RECOMPUTE_BATCH_SQL, (
+        "g.area_m2 re-introduces a field-by-field pick of the per-m2 denominator"
+    )
 
 
-def test_best_dims_is_left_joined_so_an_area_less_property_still_updates():
-    """No child reports an area -> best_dims has no row for that property. An
+def test_usable_area_is_left_on_its_own_golden_record_pick():
+    """usable_area is NOT the per-m2 denominator, and it is a live Browse +
+    Watchdog filter column (browse_list.usable_area -> usable_area_min/max_filter,
+    the matcher's min/max_usable_area). Binding it to the representative child
+    would NULL it for every property whose repr carries an area but no
+    usable_area, silently narrowing saved filters. W3 changes the denominator,
+    not this."""
+    from scripts.recompute_property_stats import _RECOMPUTE_BATCH_SQL
+
+    setc = _set_clause(_RECOMPUTE_BATCH_SQL)
+    assert _rhs(setc, "usable_area") == "g.usable_area"
+
+
+def test_best_area_is_left_joined_so_an_area_less_property_still_updates():
+    """No child reports an area -> best_area has no row for that property. An
     inner join would drop it out of the UPDATE entirely, silently freezing
     is_active and every other rolled-up column."""
     import re
 
     from scripts.recompute_property_stats import _RECOMPUTE_BATCH_SQL
 
-    assert "LEFT JOIN best_dims" in _RECOMPUTE_BATCH_SQL
-    assert not re.search(r"(?<!LEFT )JOIN best_dims", _RECOMPUTE_BATCH_SQL)
+    assert "LEFT JOIN best_area" in _RECOMPUTE_BATCH_SQL
+    assert not re.search(r"(?<!LEFT )JOIN best_area", _RECOMPUTE_BATCH_SQL)
+
+
+def test_the_area_fallback_is_the_pre_change_pick_verbatim():
+    """The fallback exists so no property loses an area it already had. It must
+    stay restricted to children that carry an area and ordered by trust alone —
+    widening it to usable-area-carrying rows makes the best row's area NULL and
+    drops the property out of every area filter."""
+    from scripts.recompute_property_stats import _RECOMPUTE_BATCH_SQL
+
+    body = " ".join(
+        _RECOMPUTE_BATCH_SQL.split("best_area AS (", 1)[1].split("),", 1)[0].split()
+    )
+    assert "WHERE k.area_m2 IS NOT NULL" in body
+    assert "ORDER BY k.property_id, k.src_rank," in body
 
 
 def test_the_basis_stamp_names_the_row_the_price_came_from():
