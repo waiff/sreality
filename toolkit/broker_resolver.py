@@ -15,7 +15,10 @@ The whole rule:
             OR
             B: they share a firm AND ( that name appears at only ONE firm
                corpus-wide OR every record carries the IDENTICAL non-empty
-               contact set ) )
+               contact set )
+            OR
+            C: they share ANY contact value — even a non-discriminating one —
+               AND that name appears at no more than one firm corpus-wide )
 
 **Names match** is `name_key` equality — diacritics folded, token order ignored,
 academic titles stripped (`Bc. Ondřej Kadlec` ≡ `Kadlec Ondřej`). No name, no edge.
@@ -42,6 +45,26 @@ all on the same office inbox and line, are one account no matter how many OTHER
 agencies run a customer line of the same label). Generic role labels at DIFFERENT
 firms still never fuse — B only ever operates inside one firm — and a cohort whose
 contact sets differ at all stays in manual review.
+
+**Shared contact + rarity** (path C) covers the pair B cannot reach: a record with
+no firm evidence at all (ceskereality publishes no e-mail, so its identities never
+join a firm) sitting next to a firm-anchored record of the same rare name, joined
+by an office line. The shared value proves the two records answer at the same
+desk — co-location evidence at least as strong as a shared firm row — and market
+rarity does the rest, exactly as in B. A value that is discriminating is A's
+domain and is skipped here; C exists for the office-line shape.
+
+**Contradiction reads only PERSONAL contacts.** An e-mail whose local part is a
+department word (`info@`, `prodej@`, `pronajmy@`, `garaze@`, …
+`ROLE_EMAIL_LOCALPARTS`) identifies a desk, not a person — one broker running
+five department mailboxes on his own domain is otherwise indistinguishable from
+five colleagues (the veto misread exactly that, five single-name mailboxes at one
+firm, as five people). A phone published by an identity whose EVERY e-mail is
+such a department address is presumed the desk's line and is excluded too; an
+identity with no e-mail at all keeps its phones in the veto (a phone-only portal
+must still be able to refuse two same-named people with their own mobiles). The
+asymmetry is deliberate: a department mailbox can still PROVE sameness (a
+single-name mailbox is a valid A bridge) — it just can never prove difference.
 
 The claim it rests on is narrower than "the name appears nowhere else", and three
 guards keep it honest. The firm is the identity's OWN (its e-mail domain), so a
@@ -109,9 +132,25 @@ MAX_AUTO_MERGE_COMPONENT = 20
 # Free text in the schema (no CHECK) — these three strings are the convention.
 REASON_CONTACT_NAME = "contact_name"
 REASON_NAME_FIRM = "name_firm"
+REASON_CONTACT_RARITY = "contact_rarity"
 # Canonical order for a combined reason, so 'contact_name+name_firm' is the ONE
 # spelling in the ledger (the orchestrator joins the same way for a chained merge).
-REASON_ORDER = (REASON_CONTACT_NAME, REASON_NAME_FIRM)
+REASON_ORDER = (REASON_CONTACT_NAME, REASON_NAME_FIRM, REASON_CONTACT_RARITY)
+
+# E-mail local parts that name a desk, not a person. Consulted ONLY by the
+# contradiction veto (never by the A/C bridges — a single-name department mailbox
+# still proves sameness); extend when a new department word shows up in review.
+ROLE_EMAIL_LOCALPARTS = frozenset({
+    "info", "kontakt", "kancelar", "office", "recepce", "sekretariat",
+    "reality", "rk", "makler", "makleri", "obchod", "podpora", "servis",
+    "prodej", "prodeje", "pronajem", "pronajmy", "najem", "najmy",
+    "byty", "domy", "pozemky", "garaze", "komerce", "komercni",
+    "zakaznicka", "linka", "zakaznickalinka",
+})
+
+
+def _role_email(value: str) -> bool:
+    return value.partition("@")[0] in ROLE_EMAIL_LOCALPARTS
 
 
 # slots: the sweep instantiates one per identity and per contact row over the whole
@@ -360,6 +399,7 @@ def decide_merges(
     #    nothing), a differently-named one — merged away or not — kills it.
     carriers: dict[tuple[str, str], set[int]] = {}
     names_at: dict[tuple[str, str], set[str]] = {}
+    emails_of: dict[int, list[str]] = {}
     for c in contacts:
         if c.identity_id not in by_id:
             continue
@@ -368,6 +408,17 @@ def decide_merges(
         seen = names_at.setdefault(value, set())
         if keys[c.identity_id]:
             seen.add(keys[c.identity_id])
+        if c.kind == "email":
+            emails_of.setdefault(c.identity_id, []).append(c.value)
+
+    # The name -> firms spread, built before any edge: paths B and C both consult
+    # it, and it is a corpus-wide statement (every identity votes, merged away or
+    # not; an identity with no firm abstains).
+    firms_of_name: dict[str, set[int]] = {}
+    for ident in identities:
+        key = keys[ident.id]
+        if key and ident.firm_id is not None:
+            firms_of_name.setdefault(key, set()).add(ident.firm_id)
 
     # 2. A-edges: chain (not clique) the mergeable carriers of a discriminating
     #    value that actually carry its one name. n-1 edges instead of n(n-1)/2 —
@@ -378,12 +429,47 @@ def decide_merges(
         names = names_at.get(value) or set()
         if len(names) != 1:
             continue
+        # The contradiction map holds PERSONAL discriminating contacts only: a
+        # department mailbox (role local part) names a desk, and a phone whose
+        # identity publishes nothing but department mailboxes is presumed the
+        # desk's line — one broker's five department addresses must not read as
+        # five people. The A bridge below still uses the value regardless: a
+        # single-name mailbox proves sameness, it just cannot prove difference.
         for holder in holders:
+            if value[0] == "email" and _role_email(value[1]):
+                continue
+            mails = emails_of.get(holder)
+            if value[0] == "phone" and mails and all(_role_email(m) for m in mails):
+                continue
             discriminating.setdefault(holder, {}).setdefault(value[0], set()).add(value[1])
         only = next(iter(names))
         members = sorted(i for i in holders if keys[i] == only and by_id[i].mergeable)
         for other in members[1:]:
             a_edges.setdefault((members[0], other), set()).add(f"{value[0]}:{value[1]}")
+
+    # 2b. C-edges: a shared value of ANY strength + market-wide name rarity. The
+    #     pair B cannot reach — one side has no firm evidence at all (a portal
+    #     that publishes no e-mail never joins a firm) — but the two records
+    #     answer at the same desk, and the name exists at no other firm. A
+    #     discriminating value is A's domain (skipped here); the cap in step 5
+    #     still bounds any office-line pool this chains.
+    c_edges: dict[tuple[int, int], set[str]] = {}
+    for value, holders in carriers.items():
+        if len(names_at.get(value) or ()) < 2:
+            continue  # discriminating or unnamed -> A's domain / no evidence
+        buckets: dict[str, list[int]] = {}
+        for i in holders:
+            key = keys[i]
+            if key and by_id[i].mergeable:
+                buckets.setdefault(key, []).append(i)
+        for key, members_at in buckets.items():
+            members = sorted(set(members_at))
+            if len(members) < 2 or len(firms_of_name.get(key, ())) > 1:
+                continue
+            if _contradicted(members, discriminating):
+                continue
+            for other in members[1:]:
+                c_edges.setdefault((members[0], other), set()).add(f"{value[0]}:{value[1]}")
 
     # 3. B-edges: a same-name cohort at one firm, chained when the cohort
     #    qualifies by RARITY (the name exists at exactly one firm corpus-wide —
@@ -397,11 +483,6 @@ def decide_merges(
     #    what actually separates two same-named agents at two offices (their
     #    personal contacts disagree), and a cohort with no distinguishing evidence
     #    at all has nothing a reviewer could judge by either.
-    firms_of_name: dict[str, set[int]] = {}
-    for ident in identities:
-        key = keys[ident.id]
-        if key and ident.firm_id is not None:
-            firms_of_name.setdefault(key, set()).add(ident.firm_id)
     fingerprint: dict[int, set[str]] = {}
     for c in contacts:
         if c.identity_id in by_id:
@@ -431,7 +512,7 @@ def decide_merges(
     #    suppressing (1, 2) of a 1-2/1-3 chain merged 1 with 3 and left 2 neither
     #    merged nor reviewed, while suppressing (2, 3) of the same corpus downgraded
     #    all three. The only difference was which id sorted first.
-    all_edges = sorted(set(a_edges) | b_edges)
+    all_edges = sorted(set(a_edges) | b_edges | set(c_edges))
     edges: list[tuple[int, int]] = []
     for edge in all_edges:
         if edge in blocked:
@@ -470,6 +551,7 @@ def decide_merges(
         present = {
             REASON_CONTACT_NAME: any(e in a_edges for e in inner),
             REASON_NAME_FIRM: any(e in b_edges for e in inner),
+            REASON_CONTACT_RARITY: any(e in c_edges for e in inner),
         }
         reason = "+".join(r for r in REASON_ORDER if present[r])
         decision.group_reasons[tuple(group)] = reason
@@ -478,9 +560,11 @@ def decide_merges(
         #    Anything ambiguous (several edges, or one edge with two values) stays
         #    unstamped rather than guessing which contact was decisive; a group
         #    formed by firm rarity alone has no contact to name.
-        if len(inner) == 1 and inner[0] in a_edges and len(a_edges[inner[0]]) == 1:
-            kind, _, value = next(iter(a_edges[inner[0]])).partition(":")
-            decision.group_bridges[tuple(group)] = (kind, value)
+        if len(inner) == 1:
+            stamped = a_edges.get(inner[0], set()) | c_edges.get(inner[0], set())
+            if len(stamped) == 1:
+                kind, _, value = next(iter(stamped)).partition(":")
+                decision.group_bridges[tuple(group)] = (kind, value)
 
     # 7. The residue the operator gets asked about: same name, a contact in common,
     #    but that contact belongs to more than one name. Only across FIRMS — a

@@ -157,12 +157,18 @@ def test_an_unnamed_carrier_does_not_break_discrimination():
     assert 3 not in {i for g in d.auto_merge_groups for i in g}  # ...and never merges
 
 
-def test_a_differently_named_carrier_kills_the_contact():
+def test_a_differently_named_carrier_demotes_the_contact_to_c():
+    """A second name on the value kills it as an A bridge (it identifies nobody),
+    but the same-name pair still shares it — and with the name at no other firm,
+    path C merges the pair on shared-desk + rarity. The differently-named carrier
+    itself never joins (names gate every path)."""
     ids = [_ident(1, "sreality", "Eva Dvořáková"),
            _ident(2, "idnes", "Dvořáková Eva"),
            _ident(3, "bazos", "Petr Svoboda")]
     d = R.decide_merges(ids, _contacts("email", "eva@dvorakova.cz", 1, 2, 3))
-    assert d.auto_merge_groups == []
+    assert d.auto_merge_groups == [[1, 2]]
+    assert d.group_reasons == {(1, 2): R.REASON_CONTACT_RARITY}
+    assert not any(3 in g for g in d.auto_merge_groups)
 
 
 def test_a_merged_away_identity_is_evidence_but_never_a_member():
@@ -172,7 +178,10 @@ def test_a_merged_away_identity_is_evidence_but_never_a_member():
         [_ident(1, "sreality", "Eva Dvořáková"), _ident(2, "idnes", "Dvořáková Eva"),
          _ident(3, "bazos", "Petr Svoboda", mergeable=False)],
         _contacts("email", "eva@dvorakova.cz", 1, 2, 3))
-    assert poisoned.auto_merge_groups == []
+    # The merged-away Petr still poisons the value as an A bridge; the pair now
+    # merges via C instead (shared desk + rarity), so the map's evidence shows.
+    assert poisoned.auto_merge_groups == [[1, 2]]
+    assert poisoned.group_reasons == {(1, 2): R.REASON_CONTACT_RARITY}
 
     same_name = R.decide_merges(
         [_ident(1, "sreality", "Eva Dvořáková"), _ident(2, "idnes", "Dvořáková Eva"),
@@ -195,7 +204,9 @@ def test_harak_six_records_at_one_firm_merge_without_a_personal_contact():
                 + _contacts("phone", "420800100200", *everyone))
     d = R.decide_merges(ids, contacts)
     assert d.auto_merge_groups == [[1, 2, 3, 4, 5, 6]]
-    assert d.group_reasons == {(1, 2, 3, 4, 5, 6): R.REASON_NAME_FIRM}
+    # The shared inbox now also counts as C co-location evidence, so the ledger
+    # records both paths; the firm remains the load-bearing claim.
+    assert d.group_reasons == {(1, 2, 3, 4, 5, 6): "name_firm+contact_rarity"}
     assert d.group_bridges == {}          # no contact can be named as the reason
 
 
@@ -280,6 +291,81 @@ def test_differing_or_empty_contact_sets_do_not_qualify_a_common_name():
                 R.Contact(2, "email", "info@mbre.cz"), R.Contact(10, "email", "info@mbre.cz")]
     assert R.decide_merges(ids, contacts).auto_merge_groups == []
     assert R.decide_merges(ids, []).auto_merge_groups == []
+
+
+def test_c_office_line_reaches_the_firmless_record():
+    """The Jantač shape: a ceskereality identity has no e-mail, hence no firm, so
+    path B can never see it — but it answers on the same office line as the
+    firm-anchored record of the same (order-flipped) name, and the name exists at
+    no other firm. Shared desk + rarity merges the pair; the colleague on the same
+    line stays out (names gate every path)."""
+    ids = [_ident(1, "sreality", "Jantač Tomáš", firm=10),
+           _ident(2, "ceskereality", "Tomáš Jantač", firm=None),
+           _ident(3, "sreality", "Kateřina Hodková", firm=10)]
+    contacts = _contacts("phone", "420296399006", 1, 2, 3)
+    d = R.decide_merges(ids, contacts)
+    assert d.auto_merge_groups == [[1, 2]]
+    assert d.group_reasons == {(1, 2): R.REASON_CONTACT_RARITY}
+    assert d.group_bridges == {(1, 2): ("phone", "420296399006")}
+
+
+def test_c_refuses_a_name_seen_at_two_firms():
+    """Rarity is C's whole warrant: the same shared line proves only proximity,
+    and a name that exists at two firms may be two people. The pair stays a
+    review card (step 7), never a merge."""
+    ids = [_ident(1, "sreality", "Jantač Tomáš", firm=10),
+           _ident(2, "ceskereality", "Tomáš Jantač", firm=None),
+           _ident(3, "sreality", "Kateřina Hodková", firm=10),
+           _ident(4, "idnes", "Tomáš Jantač", firm=99)]
+    d = R.decide_merges(ids, _contacts("phone", "420296399006", 1, 2, 3))
+    assert d.auto_merge_groups == []
+    assert (1, 2) in d.review_pairs
+
+
+def test_c_cohort_with_disagreeing_personal_mobiles_is_refused():
+    """Two rare-named records on one office line, each with its OWN personal
+    mobile: the contradiction veto reads the mobiles (no e-mails, so the phone
+    waiver does not apply) and refuses — same-desk evidence never outranks
+    positive evidence of two people."""
+    ids = [_ident(1, "sreality", "Jantač Tomáš", firm=10),
+           _ident(2, "ceskereality", "Tomáš Jantač", firm=None),
+           _ident(3, "sreality", "Kateřina Hodková", firm=10)]
+    contacts = (_contacts("phone", "420296399006", 1, 2, 3)
+                + [R.Contact(1, "phone", "420601000001"),
+                   R.Contact(2, "phone", "420601000002")])
+    d = R.decide_merges(ids, contacts)
+    assert d.auto_merge_groups == []
+
+
+def test_department_mailboxes_do_not_contradict_their_owner():
+    """The Havránek shape: one broker, five department mailboxes on his own
+    domain, each with its own desk line — every value single-name, so each record
+    carries its "own" discriminating e-mail + phone and the veto read five desks
+    as five people. Role local parts are excluded from the contradiction map (and
+    the phones alongside them), so firm rarity merges the cohort; the department
+    mailboxes still work as A bridges within each desk."""
+    depts = ["info", "prodej", "pronajmy", "garaze", "reality"]
+    ids, contacts = [], []
+    for n, dept in enumerate(depts, start=1):
+        ids += [_ident(2 * n - 1, "sreality", "Ing. Martin Havránek", firm=916),
+                _ident(2 * n, "idnes", "MARTIN Havránek", firm=916)]
+        contacts += _contacts("email", f"{dept}@martin-havranek.cz", 2 * n - 1, 2 * n)
+        contacts += _contacts("phone", f"42060300000{n}", 2 * n - 1, 2 * n)
+    d = R.decide_merges(ids, contacts)
+    assert d.auto_merge_groups == [sorted(i.id for i in ids)]
+    reason = d.group_reasons[tuple(sorted(i.id for i in ids))]
+    assert R.REASON_NAME_FIRM in reason
+
+
+def test_a_personal_email_pair_still_contradicts_at_a_rare_name_firm():
+    """The franchise/Dvořák guard survives the role-local-part waiver: personal
+    local parts stay in the contradiction map, so two same-named agents with
+    their own mailboxes at one (rare-name) firm still refuse."""
+    ids = [_ident(1, "remax", "Jan Dvořák", firm=42),
+           _ident(2, "remax", "Dvořák Jan", firm=42)]
+    contacts = [R.Contact(1, "email", "jan.dvorak@re-max.cz"),
+                R.Contact(2, "email", "dvorak.jan2@re-max.cz")]
+    assert R.decide_merges(ids, contacts).auto_merge_groups == []
 
 
 def test_disconfirming_contacts_refuse_the_firm_path():

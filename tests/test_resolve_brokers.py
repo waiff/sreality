@@ -1283,6 +1283,60 @@ def test_sweep_retires_proposals_whose_brokers_no_longer_survive(
 # --- C1: registry-driven attribution + CZ-scoped rollups ----------------------
 
 
+class _CandidateCur:
+    """Fake cursor for _generate_merge_candidates: serves the broker read, records
+    every write, and reports a rowcount for the stale-card DELETE."""
+
+    def __init__(self, broker_rows: list[tuple[Any, ...]]) -> None:
+        self.broker_rows = broker_rows
+        self.executed: list[tuple[str, Any]] = []
+        self.rowcount = 3
+
+    def __enter__(self) -> "_CandidateCur":
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        return None
+
+    def execute(self, sql: str, params: Any = None) -> None:
+        self.executed.append((" ".join(sql.split()), params))
+
+    def fetchall(self) -> list[tuple[Any, ...]]:
+        return self.broker_rows
+
+
+class _CandidateConn:
+    def __init__(self, broker_rows: list[tuple[Any, ...]]) -> None:
+        self.cur = _CandidateCur(broker_rows)
+
+    def cursor(self) -> _CandidateCur:
+        return self.cur
+
+
+def test_candidate_generation_deletes_stale_proposed_cards() -> None:
+    """A proposed name_firm card whose group_key this sweep no longer generates is
+    deleted — the live duplicate: a pre-title-strip key ('havranek ing martin')
+    sitting next to its successor ('havranek martin') as a second card for the
+    same five brokers, un-retirable because its brokers stay active. Only the keys
+    generated THIS pass survive; the delete is skipped entirely when generation
+    produced nothing (an empty corpus read must not wipe the queue)."""
+    import scripts.resolve_brokers as rb
+
+    rows = [(1, "Ing. Martin Havránek", 916, "martin-havranek.cz", "HEUREKA"),
+            (2, "MARTIN Havránek", 916, "martin-havranek.cz", "HEUREKA")]
+    conn = _CandidateConn(rows)
+    assert rb._generate_merge_candidates(conn) == 1
+    deletes = [(q, p) for q, p in conn.cur.executed if q.startswith("DELETE FROM broker_merge_candidates")]
+    assert len(deletes) == 1
+    assert deletes[0][1] == {"gks": ["namefirm:916:havranek martin"]}
+    assert "status = 'proposed'" in deletes[0][0] and "reason = 'name_firm'" in deletes[0][0]
+
+    # No groups generated -> no delete at all.
+    empty = _CandidateConn([(1, "Solo Broker", 1, None, None)])
+    assert rb._generate_merge_candidates(empty) == 0
+    assert not any(q.startswith("DELETE") for q, _ in empty.cur.executed)
+
+
 class _AttributeCur:
     """Records every statement `_attribute` issues over one chunk."""
 
