@@ -144,7 +144,31 @@ export const applyRegistryFilters = <T>(q: T, f: ListingFilters): T => {
     switch (filter.type) {
       case 'string_list': {
         if (!Array.isArray(value) || value.length === 0) break;
-        r = r.in(filter.pg_column, value);
+        /* A one-element list is an equality and MUST be emitted as one.
+         *
+         * `.in()` becomes SQL `col = ANY($1)`, and a ScalarArrayOp anywhere in
+         * the equality prefix of a btree index disqualifies that index from
+         * satisfying the query's ORDER BY — the planner can no longer stream
+         * rows in index order, so it reads the WHOLE band and top-N sorts it.
+         * `.eq()` becomes `col = $1`, the prefix stays usable, and the scan
+         * stops at LIMIT rows.
+         *
+         * Measured on prod (browse_list, byt+pronájem, the DEFAULT cohort,
+         * ORDER BY first_seen_at DESC, property_id DESC, LIMIT 24):
+         *   in.(byt) -> Limit -> Sort -> Index Scan, 105,011 rows, ~15,900
+         *               buffers, 0.7-1.4 s warm and 11-17 s cold
+         *   eq.byt   -> Limit -> Index Scan, no Sort, 24 rows, 5 buffers, 0.2 ms
+         * Cold it crossed `authenticated`'s 8 s statement_timeout, so the
+         * flagship surface answered HTTP 500 (SQLSTATE 57014) on its own
+         * default view. Same defect, same fix, on the portal-mirror lane
+         * (`portals` -> `source`, listing_feed_public).
+         *
+         * A genuine multi-select still emits `.in()` and still sorts — that is
+         * a server-side relation question, tracked separately; this only makes
+         * the single-value case pay single-value cost. */
+        r = value.length === 1
+          ? r.eq(filter.pg_column, value[0])
+          : r.in(filter.pg_column, value);
         break;
       }
       case 'int':

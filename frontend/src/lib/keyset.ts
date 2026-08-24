@@ -125,9 +125,19 @@ export function applyKeyset<T extends KeysetBuilder>(
 ): T {
   const asc = sort.direction === 'asc';
   /* NULLS placement must match the serving `(col, id)` btree, or the planner
-   * can't use it and falls back to a full-cohort Bitmap Heap Scan + top-N sort
-   * (measured: ~33k scattered heap pages for byt+pronájem, 8.9s cold — over the
-   * anon 3s budget — vs ~230 buffers / index-scan when it matches).
+   * can't use it and falls back to a full-cohort Bitmap Heap Scan + top-N sort.
+   *
+   * CORRECTION (hydration sprint W-1a): the "~33k scattered heap pages for
+   * byt+pronájem, 8.9s cold" that this comment used to cite as proof of the
+   * NULLS-placement effect was in fact a DIFFERENT defect measured through the
+   * same symptom — the cohort's `category_main` was emitted as `in.(byt)`, and
+   * that ScalarArrayOp in the index's equality prefix disqualified the index
+   * from the ORDER BY no matter what this function emitted. It was fixed in
+   * registryQueryBuilder.ts (single-value list -> eq). The misattribution is
+   * why the real defect survived in the same PR that added the index, so it is
+   * corrected here rather than deleted. The NULLS-placement rule below is
+   * independently correct and still required — it just was never what that
+   * measurement showed.
    *
    * The keyset indexes are ASC `(col, id)` btrees (NULLS LAST, the ASC default).
    * Scanning one BACKWARD yields `col DESC NULLS FIRST, id DESC`; FORWARD yields
