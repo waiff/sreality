@@ -34,7 +34,15 @@ def cur():
     asserts against."""
     import psycopg
 
-    conn = psycopg.connect(_DB_URL)  # autocommit off: everything below is one transaction
+    # Bounded from the start: this fixture inserts into `properties` / `listings`,
+    # which the rest of the CI job also touches, so a lock wait here would hang the
+    # runner until the job timeout rather than reporting anything. A blocked
+    # statement now fails in seconds with the blocking query named.
+    conn = psycopg.connect(  # autocommit off: everything below is one transaction
+        _DB_URL,
+        options="-c statement_timeout=20000 -c lock_timeout=5000"
+        " -c idle_in_transaction_session_timeout=30000",
+    )
     try:
         with conn.cursor() as c:
             yield c
