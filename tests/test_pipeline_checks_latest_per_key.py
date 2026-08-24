@@ -124,20 +124,17 @@ def test_matches_the_distinct_on_it_replaced(cur):
     """Equivalence with the old body, asserted rather than trusted."""
     cur.execute("delete from pipeline_check_results")
     cur.execute(_SEED)
+    # Each operand lives in its own CTE: an ORDER BY cannot sit directly in front of an
+    # EXCEPT, and the DISTINCT ON needs one to mean anything.
     cur.execute(
-        "select count(*) from ("
-        "  (select check_key, run_at, status, value, details, created_at"
-        "     from pipeline_checks_public"
-        "   except"
-        "   select distinct on (check_key) check_key, run_at, status, value, details, created_at"
-        "     from pipeline_check_results order by check_key, run_at desc)"
-        "  union all"
-        "  (select distinct on (check_key) check_key, run_at, status, value, details, created_at"
-        "     from pipeline_check_results order by check_key, run_at desc"
-        "   except"
-        "   select check_key, run_at, status, value, details, created_at"
-        "     from pipeline_checks_public)"
-        ") d"
+        "with ref as ("
+        "  select distinct on (check_key) check_key, run_at, status, value, details, created_at"
+        "    from pipeline_check_results order by check_key, run_at desc"
+        "), live as ("
+        "  select check_key, run_at, status, value, details, created_at"
+        "    from pipeline_checks_public"
+        ") select (select count(*) from (select * from ref except select * from live) a)"
+        "       + (select count(*) from (select * from live except select * from ref) b)"
     )
     assert cur.fetchone()[0] == 0
 
