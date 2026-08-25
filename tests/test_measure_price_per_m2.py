@@ -487,3 +487,52 @@ def test_properties_public_keyset_paging_still_uses_an_index(cur):
     assert "Index" in plan, plan
     # The measure must appear EXPANDED in the sort key, not as a call.
     assert "measure_price_per_m2(" not in plan, plan
+
+
+def test_coverage_arm_counts_rows_whose_area_is_NULL(cur):
+    """W9's coverage arm exists for exactly one cohort — rows with NO area at all —
+    and three-valued logic is how you lose it.
+
+    `floor_eligible` is `price_czk IS NOT NULL AND area_m2 > 0 AND ...`. With
+    `area_m2` NULL the comparison is NULL, the conjunction is NULL, and `NOT NULL`
+    is NULL — which `count(*) FILTER (WHERE NOT floor_eligible)` silently drops.
+    The negated spelling therefore reports ~0 gap on a cell whose measure is 100%
+    undefined: measured against production it read 0.484 where the truth was 1.000
+    and hid all 27 174 sreality land rows the arm was written to surface. PREPARE
+    type-checks it, the Python unit tests feed the view's OUTPUT and never evaluate
+    it, and every other axis skips these rows — so this is the only gate that can
+    see the difference. Assert the identity, which holds whatever else is in the
+    cell: gap share x n_active == n_active - n_floor_eligible, to within the numeric
+    division's rounding (the share is a quotient, so multiplying it back lands a
+    sliver off an integer; the defect this catches is off by a WHOLE ROW or more)."""
+    if not _one(cur, "SELECT is_platform_admin()", ()):
+        pytest.skip("measure_plausibility_by_source is admin-gated for this role")
+
+    cell = ("pozemek", "prodej")
+    cur.execute("INSERT INTO properties DEFAULT VALUES RETURNING id")
+    pid = int(cur.fetchone()[0])
+    cur.execute(
+        "INSERT INTO listings (sreality_id, source, source_id_native, raw_json, "
+        "category_main, category_type, price_czk, area_m2, district, is_active, "
+        "published_at, property_id) "
+        "VALUES (%s, 'sreality', %s, '{}'::jsonb, %s, %s, 3000000, NULL, %s, "
+        "true, now(), %s)",
+        (next(_SREALITY_IDS), f"w9-{uuid.uuid4()}", *cell, f"w9-{uuid.uuid4()}", pid),
+    )
+
+    cur.execute(
+        "SELECT n_active, n_floor_eligible, measure_input_gap_share, n_area_valued "
+        "  FROM measure_plausibility_by_source "
+        " WHERE source = 'sreality' AND category_main = %s AND category_type = %s",
+        cell,
+    )
+    row = cur.fetchone()
+    assert row is not None, "the seeded NULL-area row produced no cell at all"
+    n_active, n_eligible, gap_share, n_area_valued = row
+    assert gap_share is not None, "land under a capital type has a decidable basis"
+    assert abs(gap_share * n_active - (n_active - n_eligible)) < Decimal("0.5"), (
+        f"coverage arm dropped NULL-area rows: {gap_share} x {n_active} != "
+        f"{n_active} - {n_eligible} (the `NOT floor_eligible` spelling)"
+    )
+    assert gap_share > 0, "a row with no area at all must count as an input gap"
+    assert n_area_valued < n_active, "n_area_valued must be the median's support"

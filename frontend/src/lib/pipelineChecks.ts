@@ -19,6 +19,20 @@ const CHECK_LABELS: Record<string, string> = {
   dual_write_parity: 'Dual-write parity',
   property_maintenance: 'Property maintenance',
   broker_resolution_freshness: 'Broker resolution',
+  ppm2_median_shift: 'Kč/m² median shift',
+  ppm2_basis_floor_share: 'Kč/m² price floor',
+  area_vs_usable_divergence: 'Area vs usable area',
+  ppm2_measure_coverage: 'Kč/m² coverage',
+};
+
+/* The four per-m² plausibility checks emit a share or a ratio, and the number is
+ * meaningless without its unit — "20.03" reads as a count. Every older check's value
+ * is a bare count/rate whose meaning lives in its own message, so they stay bare. */
+const CHECK_VALUE_UNIT: Record<string, string> = {
+  ppm2_median_shift: '\u00d7',
+  ppm2_basis_floor_share: '%',
+  area_vs_usable_divergence: '%',
+  ppm2_measure_coverage: '%',
 };
 
 export function pipelineCheckLabel(key: string): string {
@@ -31,9 +45,10 @@ export function pipelineCheckLabel(key: string): string {
 /* Every surviving check's `value` is a ratio / percentage / count / minutes whose
  * unit lives in the check itself, so we show the bare number (integers compact,
  * decimals to 2 dp). */
-export function pipelineCheckValueLabel(value: number | null): string {
+export function pipelineCheckValueLabel(value: number | null, checkKey?: string): string {
   if (value == null) return '—';
-  return Number.isInteger(value) ? fmtCount(value) : value.toFixed(2);
+  const shown = Number.isInteger(value) ? fmtCount(value) : value.toFixed(2);
+  return shown + (checkKey ? (CHECK_VALUE_UNIT[checkKey] ?? '') : '');
 }
 
 /* Anything the DB didn't stamp warn/fail is treated as ok, so an unknown future

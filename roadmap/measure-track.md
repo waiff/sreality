@@ -53,7 +53,7 @@ every stored watchdog spec and saved preset, and breaking archived-run display (
 | W6 | Frontend: one formatter, basis on every surface, the map Kč/m² toggle | T1+T2 | — | ⬜ |
 | W7 | Chrome extension: read the server's measure, name the month | T2 | — | ⬜ |
 | W8 | **The permanent rail** — required-arg signatures + census CI gate + `FilterDef.basis` | T1 | — | ⬜ |
-| W9 | Plausibility gate: per-source drift detection the null-checks are blind to | T3 | 427 | ⬜ |
+| W9 | Plausibility gate: per-source drift detection the null-checks are blind to | T3 | 427 | ✅ |
 
 Ordering: W1 ∥ W3 → W2; W3 → W4; W4 → {W5, W6, W9}; W5 → W7; everything → W8.
 
@@ -111,6 +111,36 @@ only (i.e. on the replay) it drops `properties_map_mv` and `browse_projection` f
 statement becomes a plain create at the right shape. On production the guard is inert.
 Nothing reads or writes the two columns.
 
+### W9 as built — what the operator will see, and what it says about the data
+
+Migration 427 adds `measure_plausibility_by_source` (per source × category_main × category_type,
+active listings: the medians, the share the basis floor NULLs, the share where `area_m2` diverges
+from `usable_area` by >10%, and the coverage denominators) and `scripts/verify_pipeline.py` gains
+four checks over it — `ppm2_median_shift`, `ppm2_basis_floor_share`, `area_vs_usable_divergence`,
+`ppm2_measure_coverage` — on the 6-hourly lane,
+sharing one read per run. They exist because `data_quality_by_source` tests 29 fields for
+`IS NOT NULL` only, and both defects this program fixed produce 100% non-NULL values.
+
+Measured against production the day before W2's backfill, both checks indict the real defect and
+stay silent on the healthy portals in the same cell: `area_vs_usable_divergence` reads **99.7%** on
+mmreality dum/prodej (`area_m2` 905.0 vs `usable_area` 130.0 on 3 588 rows) against **0.0%** on
+every other portal, and `ppm2_basis_floor_share` reads **20.0% / 19.0% / 15.7% / 11.3% / 6.7%** on
+ceskereality, realitymix ×2, remax and bazos against **0.5%** on idnes and sreality. So **/health
+shows two red tiles from the moment this deploys**, and that is the correct reading — they go green
+when W1's parser rail and W2's backfill have worked through the stock, which is exactly the signal
+the operator has never had. The five deviations from the charter's plan (why the divergence test
+is not `IS DISTINCT FROM`, why the floor share is a level and not a jump, why there is no
+cross-portal peer arm, why a fourth coverage check was needed, why each median is gated on its own
+support) are recorded in the design doc's W9 section and migration 427's header.
+
+**A third tile is AMBER on day one, and it is also correct.** `ppm2_measure_coverage` reports that
+sreality's four `pozemek` cells (20 484 + 5 825 + 459 + 406 active rows) and bezrealitky's
+(1 643) have no per-m² measure at all: land plot size lives in `estate_area`, which
+`measure_price_per_m2` does not read, so `area_m2` is NULL on 27 174 of 27 174 sreality land rows.
+That is a **standing, sanctioned gap** (the charter's "a visible gap, never a guess"), not a
+regression — which is why the stock arm can only amber, while the same share among a week's new
+arrivals fails. Teaching the measure to read `estate_area` for `pozemek` is the obvious follow-up
+and is deliberately NOT part of W9: this wave makes the hole visible, it does not fill it.
 ### W5 as built — what changed, and three deviations
 
 `toolkit/measures.py` is the Python face of the measure: `per_m2_sql(alias)` /

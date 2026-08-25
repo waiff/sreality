@@ -264,10 +264,89 @@ Offline Python, no DB, no new dependency, runs on every push via the existing `p
 
 ### W9 — The plausibility gate
 **Scope test: T3. Migration 427.** After W4. **Parallel with W6/W7.**
-**Files:** `scripts/verify_pipeline.py` `_CHECKS` gains three keys — `ppm2_median_shift` (per source × category_main × category_type, fail on an order-of-magnitude week-over-week median move), `ppm2_basis_floor_share` (fail when the share NULLed by the basis floor jumps), `area_vs_usable_divergence` (the direct mmreality detector: `area_m2 IS DISTINCT FROM usable_area` on a source where they should agree).
+**Files:** `scripts/verify_pipeline.py` `_CHECKS` gains three keys (four as built) — `ppm2_median_shift` (per source × category_main × category_type, fail on an order-of-magnitude week-over-week median move), `ppm2_basis_floor_share` (fail when the share NULLed by the basis floor jumps), `area_vs_usable_divergence` (the direct mmreality detector: `area_m2 IS DISTINCT FROM usable_area` on a source where they should agree).
 **Migration 427:** `create view measure_plausibility_by_source` — per (source, category_main, category_type): median `area_m2`, median `measure_price_per_m2`, share failing the basis floor, share where area diverges from usable.
 **Why here and not the other health system:** `data_quality_by_source` (`318:43`) tests 29 fields for `IS NOT NULL` only — both live bugs produce 100% non-NULL values, so every health surface is structurally blind to them. And **do not** re-emit `scraper_health_checks_mv` to add a tile: its ~14 checks are hardcoded `jsonb_build_object` literals inside a ~300-line pg_cron-refreshed matview (`354:151-450`). `pipeline_check_results` (`274:27`, written from Python, exposed at `422:49`) is the zero-DDL home and it pages the operator through the existing alert path.
 **Proves it correct:** unit tests over the check functions with synthetic rows; a manual run against prod recording the pre-W1 and post-W2 medians in the PR body.
+
+**SHIPPED. Three corrections to the plan above, all forced by measuring production before
+building (all figures live 2026-08-25, pre-W2-backfill; migration 427's header carries the
+full tables).**
+
+1. **`area_m2 IS DISTINCT FROM usable_area` is not the mmreality detector — twice over.**
+   `usable_area` is NULL on 10 409 of 10 409 bazos dum/prodej rows, and `IS DISTINCT FROM`
+   is TRUE against NULL, so the literal predicate scores a portal that simply does not
+   publish the field at 100% divergent. It is also exact: realitymix byt diverges on 21.9%
+   of its pairs at a *median relative difference of 9.6%* — a balcony convention, not a
+   different quantity. Shipped: only rows carrying BOTH areas are counted (`n_area_pairs`;
+   no pairs ⇒ NULL, never 0 and never 100), and only above a 10% relative band. That
+   separates mmreality dum/prodej — **99.7% divergent, median relative difference 85.0%,
+   `area_m2` 905.0 against `usable_area` 130.0 on the same 3 588 rows** — from every other
+   portal's dum/prodej at **0.0%**. `pozemek` is skipped in the check: under Option A
+   `area_m2` IS the plot for land, so divergence there is the correct answer.
+
+2. **The floor share had to be an absolute LEVEL, not a "jump".** The unit-price masquerade
+   never jumped — it has been standing for the life of the four portals carrying it, so a
+   week-over-week detector is blind to it by construction. The level indicts it precisely:
+   **ceskereality komercni/pronajem 20.0% (1 133 of 5 656), realitymix 19.0%, realitymix
+   pozemek/pronajem 15.7%, remax 11.3%, bazos 6.7% — against idnes 0.5% and sreality 0.5%
+   in the same cell**, which is exactly the split between the portals with and without a
+   per-area price guard (charter rows 54/55). Fail 10%, warn 5%. **This check is RED on the
+   day it deploys and that is correct**; it goes green when W2's backfill runs.
+
+3. **A cross-portal "peer" arm is not viable and was not built.** Measured across every cell
+   with ≥200 rows and ≥3 peers, a cell's median against its peers': realitymix ostatni/prodej
+   **19.4x** on area (a junk-drawer category), idnes pozemek/prodej **8.5x** on Kč/m² (rural
+   plot mix, 455 vs 3 849), mmreality dum/prodej **8.1x** (the bug). The defect does not
+   separate from the mix at any threshold. `ppm2_median_shift` therefore compares a cell only
+   against ITSELF a week ago, reading the baseline from its own `pipeline_check_results.details`
+   row 6-14 days back (no new table). It **cannot** catch a defect older than its baseline —
+   that is what corrections 1 and 2 are for — but it fires at 3.0x on a new basis flip, and it
+   will fire on the W2 heal (**6.96x** on area, **7.45x** on the measure). Sized against the
+   noisiest weekly move measurable today: 1.47x on area / 1.90x on Kč/m² across 21 new-arrival
+   cohorts, a strictly noisier series than the stock medians it compares.
+
+**Also shipped:** both share checks carry a trailing-7-day arm beside the stock arm and alarm
+on the worse (mmreality is **100.0% divergent over the 113 pairs first seen in the last week** —
+a regression is ~100% of what arrived since it shipped but only churn-fraction of the stock, so
+without the fresh arm detection latency is weeks); the checks share ONE read of the view
+per run (12 s sequential scan, cleared per run); an empty read is `warn`, never `ok`, so the
+`is_platform_admin()` gate failing for the job's role cannot look like a clean bill of health;
+and they run on the **6-hourly** `verify_pipeline.yml` lane only, not the hourly acute lane.
+
+**4. A fourth check, `ppm2_measure_coverage`, and the fail-open rail behind it (review).**
+Corrections 1-3 all measure a RATIO OVER ROWS THAT HAVE THE INPUTS, which makes all three blind
+in the same direction: a cell with nothing to measure scores no arm, and a skipped arm is
+indistinguishable from a clean one. Blank the measurable content of the real 100 production cells
+— the per-m² measure 100% dead platform-wide, which is what a later vocabulary or category
+migration would cause — and the three checks as first written returned `ok` with *"Per-m² medians
+stable week-over-week (worst move 1.00x across 64 cells)"*. Nothing had been compared; `worst`
+simply never left its initial value, and `len(snapshot)` counted cells over the row floor rather
+than cells compared. This is live production state today, not a hypothetical: **sreality publishes
+27 174 active `pozemek` rows with `area_m2` NULL on 27 174 of them** (the plot size is in
+`estate_area`, which the measure does not read), so four cells covering ~7% of the active corpus
+produce no measure at all and all three axes called them healthy. `data_quality_by_source` cannot
+see it either — it groups by (source, field) with no category grain, so sreality's `area_m2`
+reads 71.7% populated, mild patchiness rather than a category at zero. Shipped: the view publishes
+the DENOMINATORS (`n_area_valued`, `n_ppm2_valued`, `n_active_7d`, `measure_input_gap_share`
++`_7d`); `ppm2_measure_coverage` alarms on them (stock arm warn-only at 0.95 — the five live dark
+cells are 0.995-1.000, the next cell down is 0.894 — and the 7-day arm **fails** at 0.90, where
+the worst live scored value is 0.358, because that share among this week's arrivals is a
+regression in flight); rows the floor rejected are excluded from it, so one defect is never billed
+to two tiles; and every check now returns the number of arms it actually scored and reports
+`warn` with `value` null rather than `ok` when that number is zero. This is also the anti-silencing
+rail: had mmreality's parser regressed to writing NULL instead of the plot area, `n_area_pairs`
+would have fallen to 0 and today's 99.7% divergence FAIL would have flipped to a green skip.
+
+**5. `ppm2_median_shift` gates each median on ITS OWN support, in both weeks (review).** It first
+gated on `n_active`, while the statistic it compares is a median over only the rows carrying the
+value. Live, **64 cells clear `n_active >= 200` but only 58 clear it on area support and 56 on
+Kč/m² support** — and `bezrealitky/pozemek/prodej` is 1 643 active rows with **nine** areas, whose
+Kč/m² spread across those nine is 17.6x (1 002.94 to 17 644.67). Two ordinary delistings move that
+median past the 3.0x fail with no parser change and no backfill, and because `emit_transition_alerts`
+fires on every re-entry into `fail`, an oscillating thin cell rings the bell again each time. The
+snapshot now carries `n_area` / `n_ppm2` beside each median and both weeks are gated on them.
+
 
 ### Ordering and parallelism
 
