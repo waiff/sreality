@@ -335,7 +335,8 @@ fail CI rather than merely be absent today. Three interlocking parts, none suffi
   both value arms are closed-vocabulary spelling filters (`price_czk / sqm` passes), a division
   routed through a helper has no operator to walk out from, and the SQL half is a census of
   `migrations/` **on disk, not of the database** — dynamic DDL inside plpgsql and the
-  `property_sources_mv` drift are unregisterable and unseen.
+  un-numbered drift are unregisterable and unseen (`property_sources_mv` was the
+  standing example until migration 432 dropped it).
 - **(c) `FilterDef.basis`** beside the existing `unit` (27 uses, previously **zero** test
   coverage), set to `depends_on_category` on `min/max_price_per_m2`, serialised into
   `/admin/filter-schema` and `filterRegistry.generated.ts`. Three new tests:
