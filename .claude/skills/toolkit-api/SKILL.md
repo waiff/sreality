@@ -222,10 +222,17 @@ it (`api/`). They do not apply to the scraper.
     beside it, in `data` and in `filters_used`; a tool handed caller-supplied rows degrades to
     `'unknown'` rather than defaulting to sale. `require_scalable_basis` gates any
     multiplication of a per-m² percentile by an area (`estimate_yield._scale`), raising
-    `MeasureBasisError` → 422. The five statements assembled by in-function concatenation
-    (comparables, velocity, the transit corridor, neighborhoods, the watchdog matcher) are
-    INVISIBLE to `tests/sql_corpus.discover()`; `tests/test_measure_sql_prepare.py` is their
-    PREPARE gate and must gain a line when a sixth appears.
+    `MeasureBasisError` → 422, and it is enforced on BOTH paths: `estimate_yield._scale` for
+    deterministic runs, `api/agent._require_cohort_scalable_into_rent` for agent runs (the
+    model does its own multiplication there, so the gate sits where its number lands). Six
+    per-m² statements are invisible to `tests/sql_corpus.discover()`, for TWO different
+    reasons: five are assembled by in-function concatenation into a local (comparables,
+    velocity, the transit corridor, neighborhoods, the watchdog matcher), and
+    `api/portal_lookup._MARKET_SQL` is a module-level constant the sweep DOES discover but
+    then skips as a `.format()` template (`_is_format_template` matches its `{values}` slot).
+    A `*_SQL` constant is therefore NOT evidence of coverage — one unquoted `{slot}` and the
+    sweep walks past. `tests/test_measure_sql_prepare.py` is the gate for all six and must
+    gain a line when a seventh appears.
 
 ## Identity, login, and admin gating (Phase 1, `api/dependencies.py`)
 

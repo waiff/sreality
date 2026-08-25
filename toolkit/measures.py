@@ -67,8 +67,10 @@ PPM2_BASES: tuple[str, ...] = (
 BASIS_MIXED = "mixed"
 BASIS_UNKNOWN = "unknown"
 
-# The key a basis-bearing row dict carries it under, everywhere.
+# The key a basis-bearing row dict carries it under, everywhere, and the key
+# the number itself rides under beside it.
 PPM2_BASIS_KEY = "price_per_m2_basis"
+PPM2_VALUE_KEY = "price_per_m2"
 
 # The category vocabulary the basis resolves from. category_type has FOUR live
 # values; prodej / drazba / podil are all CAPITAL and share one basis. The
@@ -141,13 +143,46 @@ def ppm2_basis(
 ) -> str | None:
     """Mirror of `measure_price_per_m2_basis`, same rent-first resolution order.
 
-    For rows that never came from Postgres (a filter spec, an agent payload).
+    ROW-LEVEL ONLY. Both arguments are one row's concrete values, where NULL
+    means "this row has no category", exactly as it does to the SQL. Never pass
+    a FILTER SPEC here: there `None` means UNCONSTRAINED, and the two readings
+    disagree on the capital arm — a spec that pins no `category_main` admits
+    both plots and floor-area rows, which this function would collapse into a
+    confident `sale_capital_czk_m2`. `spec_ppm2_basis` is that reading.
     Returns None when the basis is undecidable — including for a NULL
     category_type, which rule 22 makes a normal, meaningful state.
     """
     if category_type == RENT_CATEGORY_TYPE:
         return RENT_MONTHLY_CZK_M2
     if category_type in CAPITAL_CATEGORY_TYPES:
+        if category_main == LAND_CATEGORY_MAIN:
+            return LAND_CAPITAL_CZK_M2
+        return SALE_CAPITAL_CZK_M2
+    return None
+
+
+def spec_ppm2_basis(
+    category_main: str | None, category_type: str | None
+) -> str | None:
+    """The basis a FILTER SPEC pins, or None when the spec leaves it open.
+
+    Same vocabulary, different reading of None: here it means "no constraint".
+    The rent arm is unchanged — rent-first resolution never consults
+    `category_main`, so an unpinned category on `pronajem` is still exactly one
+    basis. The capital arm is where the two readings part: without a pinned
+    `category_main` the cohort admits `pozemek` (Kč/m² of PLOT) alongside
+    byt / dum / komercni (Kč/m² of FLOOR), and those are two units, not one.
+    Undecidable is the honest answer, and the north star's answer: a visible
+    gap, never a guess.
+
+    Prefer `cohort_basis` over the returned ROWS wherever they are in hand —
+    a spec describes what was asked for, the rows describe what came back.
+    """
+    if category_type == RENT_CATEGORY_TYPE:
+        return RENT_MONTHLY_CZK_M2
+    if category_type in CAPITAL_CATEGORY_TYPES:
+        if category_main is None:
+            return None
         if category_main == LAND_CATEGORY_MAIN:
             return LAND_CAPITAL_CZK_M2
         return SALE_CAPITAL_CZK_M2
@@ -165,6 +200,18 @@ def unit_label(basis: str | None) -> str | None:
 
 
 # --- cohort-level resolution ---------------------------------------------
+
+
+def measure_backed(
+    rows: Iterable[Mapping[str, Any]],
+) -> list[Mapping[str, Any]]:
+    """The subset of `rows` that actually carries a per-m² number.
+
+    The set `cohort_basis` must be handed: a row the measure withheld a number
+    from (NULL price, NULL area, sub-floor price, undecidable basis) backs no
+    figure in the envelope, so its category must not colour the envelope's unit.
+    """
+    return [r for r in rows if r.get(PPM2_VALUE_KEY) is not None]
 
 
 def cohort_basis(rows: Iterable[Mapping[str, Any]]) -> str:

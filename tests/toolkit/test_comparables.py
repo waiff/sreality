@@ -263,6 +263,88 @@ def test_filters_used_basis_is_none_for_an_unpinned_cohort():
     assert used["price_per_m2_basis"] is None
 
 
+def test_filters_used_row_less_capital_spec_without_a_category_is_undecidable():
+    """A SPEC's None means UNCONSTRAINED, not "this row has no category".
+
+    `category_main=None, category_type='prodej'` admits pozemek (Kč/m² of PLOT)
+    beside byt (Kč/m² of FLOOR). Answering `sale_capital_czk_m2` here is the
+    blanket unit for a mixed cohort this program exists to end.
+    """
+    used = _filters_used(
+        TargetSpec(lat=50.0, lng=14.0),
+        ComparableFilters(category_main=None, category_type="prodej"),
+    )
+    assert used["price_per_m2_basis"] is None
+
+
+def test_filters_used_reads_the_basis_off_the_rows_when_it_has_them():
+    """The pins say what was asked for; the rows say what came back."""
+    listings = [
+        {"price_per_m2": 90_000.0, "price_per_m2_basis": "sale_capital_czk_m2"},
+        {"price_per_m2": 95_000.0, "price_per_m2_basis": "sale_capital_czk_m2"},
+    ]
+    used = _filters_used(
+        TargetSpec(lat=50.0, lng=14.0),
+        ComparableFilters(category_main=None, category_type="prodej"),
+        listings,
+    )
+    assert used["price_per_m2_basis"] == "sale_capital_czk_m2"
+
+
+def test_filters_used_says_mixed_when_the_rows_disagree():
+    """The exact field the wave introduced to prevent a blanket unit."""
+    listings = [
+        {"price_per_m2": 90_000.0, "price_per_m2_basis": "sale_capital_czk_m2"},
+        {"price_per_m2": 2_400.0, "price_per_m2_basis": "land_capital_czk_m2"},
+    ]
+    used = _filters_used(
+        TargetSpec(lat=50.0, lng=14.0),
+        ComparableFilters(category_main=None, category_type="prodej"),
+        listings,
+    )
+    assert used["price_per_m2_basis"] == "mixed"
+
+
+def test_filters_used_ignores_rows_the_measure_withheld_a_number_from():
+    """A row with no per-m² number backs no figure, so it colours no unit."""
+    listings = [
+        {"price_per_m2": 90_000.0, "price_per_m2_basis": "sale_capital_czk_m2"},
+        {"price_per_m2": None, "price_per_m2_basis": "land_capital_czk_m2"},
+    ]
+    used = _filters_used(
+        TargetSpec(lat=50.0, lng=14.0), ComparableFilters(), listings,
+    )
+    assert used["price_per_m2_basis"] == "sale_capital_czk_m2"
+
+
+def test_find_comparables_labels_the_envelope_from_the_returned_rows():
+    cur = _FakeCursor(
+        [
+            _row(1, price_per_m2_basis="sale_capital_czk_m2"),
+            _row(2, price_per_m2_basis="land_capital_czk_m2"),
+        ],
+        _RESULT_COLS,
+    )
+    res = find_comparables(
+        _FakeConn(cur),  # type: ignore[arg-type]
+        TargetSpec(lat=50.0, lng=14.0),
+        # Pins that would resolve to one confident basis off the SPEC alone.
+        ComparableFilters(category_main=None, category_type="prodej"),
+    )
+    assert res["metadata"]["filters_used"]["price_per_m2_basis"] == "mixed"
+
+
+def test_find_comparables_on_an_empty_cohort_claims_no_unit():
+    cur = _FakeCursor([], _RESULT_COLS)
+    res = find_comparables(
+        _FakeConn(cur),  # type: ignore[arg-type]
+        TargetSpec(lat=50.0, lng=14.0),
+        ComparableFilters(category_main="byt", category_type="prodej"),
+    )
+    assert res["metadata"]["result_count"] == 0
+    assert res["metadata"]["filters_used"]["price_per_m2_basis"] == "unknown"
+
+
 def test_locality_district_id_filter():
     sql, params = build_query(
         TargetSpec(lat=50.0, lng=14.0),
@@ -572,6 +654,9 @@ class _FakeCursor:
         return None
 
 
+_UNSET = object()
+
+
 class _FakeConn:
     def __init__(self, cur: _FakeCursor) -> None:
         self._cur = cur
@@ -580,8 +665,12 @@ class _FakeConn:
         return self._cur
 
 
+# Mirrors build_query's projection: the measure and its LABEL, always together.
+# A fixture that drops the label is a cohort nothing downstream can name a unit
+# for, which is a different test from the one most of these are writing.
 _RESULT_COLS = [
     "listing_id", "sreality_id", "price_czk", "area_m2", "price_per_m2",
+    "price_per_m2_basis",
     "disposition", "district",
     "locality_district_id", "locality_region_id",
     "floor", "total_floors",
@@ -601,6 +690,8 @@ def _row(
     latest_snapshot_id: int = 100,
     last_freshness_check_at: Any = None,
     listing_id: int | None = None,
+    price_per_m2: Any = _UNSET,
+    price_per_m2_basis: str | None = "rent_monthly_czk_m2",
 ):
     from datetime import datetime, timezone
     return (
@@ -609,7 +700,8 @@ def _row(
         # loudly instead of passing by coincidence.
         listing_id if listing_id is not None else sreality_id + 900_000,
         sreality_id, price_czk, area_m2,
-        float(price_czk) / area_m2,
+        (float(price_czk) / area_m2) if price_per_m2 is _UNSET else price_per_m2,
+        price_per_m2_basis,
         "2+kk", "Praha 1",
         42, 8, 5, 6,
         "cihla", "novostavba", "B",
@@ -888,6 +980,39 @@ def test_relaxed_custom_ladder_overrides_default_order():
     assert actions == [None, "disposition_any", "drop_condition"]
     assert res["metadata"]["relaxations_applied"] == 2
     assert res["metadata"]["result_count"] == 6
+
+
+def test_relaxed_trace_labels_each_step_with_the_rows_that_step_returned():
+    """The trace goes verbatim into the agent's prompt.
+
+    A relaxation rung that widens a single-basis cohort into two must say so at
+    the step that did it — one snapshot per step, each labelled by its own rows,
+    not all of them by the pins that never changed.
+    """
+    batches = [
+        [_row(1, price_per_m2_basis="sale_capital_czk_m2")],
+        [
+            _row(1, price_per_m2_basis="sale_capital_czk_m2"),
+            _row(2, price_per_m2_basis="land_capital_czk_m2"),
+            _row(3, price_per_m2_basis="land_capital_czk_m2"),
+        ],
+    ]
+    conn = _QueuedFakeConn(batches)
+    res = find_comparables_relaxed(
+        conn,  # type: ignore[arg-type]
+        TargetSpec(lat=50.0, lng=14.0),
+        ComparableFilters(category_main=None, category_type="prodej"),
+        min_results=3,
+        relaxation_ladder=["radius_x2"],
+    )
+    trace = res["data"]["relaxation_trace"]
+    assert [t["action"] for t in trace] == [None, "radius_x2"]
+    assert trace[0]["filters_snapshot"]["price_per_m2_basis"] == (
+        "sale_capital_czk_m2"
+    )
+    assert trace[1]["filters_snapshot"]["price_per_m2_basis"] == "mixed"
+    # The envelope's own label describes the cohort actually returned.
+    assert res["metadata"]["filters_used"]["price_per_m2_basis"] == "mixed"
 
 
 def test_relaxed_envelope_carries_cohort_freshness_stats():

@@ -106,7 +106,10 @@ def find_comparables_along_axis(
     metadata: dict[str, Any] = {
         "tool": "find_comparables_along_axis",
         "filters_used": {
-            **_filters_used(target, filters),
+            # The rows, not the pins: a corridor cohort merges into the agent's
+            # cohort and feeds the same distribution tools, so its envelope must
+            # answer `mixed` where they would.
+            **_filters_used(target, filters, listings),
             "transport_types":  transport_types,
             "anchor_radius_m":  anchor_radius_m,
             "corridor_m":       corridor_m,

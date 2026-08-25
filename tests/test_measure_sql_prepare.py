@@ -1,18 +1,29 @@
-"""PREPARE the five per-m² statements the automatic SQL corpus cannot reach.
+"""PREPARE the six per-m² statements the automatic SQL corpus cannot reach.
 
-THE GAP THIS CLOSES, verified rather than assumed: `tests/sql_corpus.discover()`
-finds 760 items, and ZERO of them contain the per-m² expression.
-`toolkit/comparables.py` contributes 0 items, `toolkit/neighborhoods.py` 0, and
-`toolkit/transit_axis.py`'s 4 items are its cache statements, not the corridor
-CTE. All five statements are assembled by in-function concatenation into a local
-variable, which the AST layer cannot evaluate and the import-resolve layer never
-sees (it reads module-level `*_SQL` constants only).
+THE GAP THIS CLOSES, verified rather than assumed. Five of the six are assembled
+by in-function concatenation into a local variable, which the AST layer cannot
+evaluate and the import-resolve layer never sees (it reads module-level `*_SQL`
+constants only): `toolkit/comparables.py` contributes 0 corpus items,
+`toolkit/neighborhoods.py` 0, and `toolkit/transit_axis.py`'s 4 items are its
+cache statements, not the corridor CTE.
 
-So W5's five call sites — the exact statements that moved onto
+The SIXTH, `api/portal_lookup._MARKET_SQL`, fails the gate a different way and
+is the reason this docstring names the mechanism rather than the file shape: it
+IS a module-level constant and the sweep DOES discover it, but
+`tests/test_sql_schema_prepare._is_format_template` then skips it, because its
+`WITH req(source, source_id) AS (VALUES {values})` slot leaves it unrunnable as
+written. Discovered and skipped is indistinguishable from covered unless you
+look, so it is rendered here and PREPAREd like the rest. A `*_SQL` constant is
+NOT evidence of coverage — an unquoted `{slot}` anywhere in it means the sweep
+walks past.
+
+So W5's six call sites — the exact statements that moved onto
 `measure_price_per_m2` — were covered by NOTHING. `l.price_per_m2` against the
 `listings` TABLE (which has no such column) is a 42703 that no fake connection
 can raise and no offline assertion can see, and it would have reached production
-green. A plan that leans on automatic coverage leans on nothing.
+green — for `_MARKET_SQL`, 500ing `POST /listings/lookup`, the Chrome
+extension's only market-data route. A plan that leans on automatic coverage
+leans on nothing.
 
 Each build_* function below is pure, so this file reaches them directly and asks
 Postgres to PREPARE the result: a full parse, name-resolve and type-check against
@@ -90,6 +101,16 @@ def _statements() -> list[tuple[str, str]]:
         "SELECT l.property_id FROM properties_public l WHERE "
         + " AND ".join(where),
     ))
+
+    # The extension's market panel. Rendered with a one-row VALUES list, cast
+    # exactly as api/portal_lookup.py binds it, so the LEFT JOIN's
+    # `l.source = req.source` type-resolves the way it does in production.
+    from api.portal_lookup import _MARKET_SQL
+
+    out.append((
+        "portal_lookup._MARKET_SQL",
+        _MARKET_SQL.format(values="(%s::text, %s::text)"),
+    ))
     return out
 
 
@@ -108,7 +129,7 @@ def test_every_per_m2_statement_prepares_against_the_schema(_conn):
     import psycopg
 
     statements = _statements()
-    assert len(statements) == 5, "a per-m² call site lost its PREPARE coverage"
+    assert len(statements) == 6, "a per-m² call site lost its PREPARE coverage"
 
     failures: list[str] = []
     indeterminate: list[str] = []

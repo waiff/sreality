@@ -49,7 +49,13 @@ from toolkit import (
 )
 from toolkit import filter_registry
 from toolkit.comparables import ComparableFilters, TargetSpec
-from toolkit.measures import ppm2_basis, unit_label
+from toolkit.measures import (
+    cohort_basis,
+    measure_backed,
+    require_scalable_basis,
+    spec_ppm2_basis,
+    unit_label,
+)
 
 if TYPE_CHECKING:
     import psycopg
@@ -476,6 +482,15 @@ def _build_tool_registry() -> dict[str, _ToolDef]:
             description=(
                 "Submit the final estimate and END THE RUN. Call exactly once. "
                 "After this tool returns, the agent loop exits immediately.\n\n"
+                "`estimated_monthly_rent_czk` is a MONTHLY RENT, so the cohort "
+                "you built it from must be on the monthly rent basis "
+                "(rent_monthly_czk_m2). A cohort that is 'mixed', 'unknown', or "
+                "on a CAPITAL basis (sale_capital_czk_m2 / land_capital_czk_m2 "
+                "— purchase prices) cannot be scaled into a rent: multiplying "
+                "its Kč/m² by the area gives a purchase price, not a rent, and "
+                "the run is REFUSED server-side rather than recorded. If a "
+                "relaxation widened the cohort onto category_type='prodej', "
+                "narrow it back to 'pronajem' before recording.\n\n"
                 "You do NOT need to retype sreality_ids. The harness already "
                 "knows which listings find_comparables_relaxed returned and "
                 "treats every one as INCLUDED by default. If you want to set "
@@ -1523,6 +1538,40 @@ def _format_tool_result(name: str, result: dict[str, Any]) -> str:
 
 # --- finalisation ---------------------------------------------------------
 
+# What the agent's terminator is allowed to call its product. `record_estimate`
+# has exactly one headline field, `estimated_monthly_rent_czk`, so an agent run
+# always names a MONTHLY RENT — independent of the request's `estimate_kind`,
+# which only steers the deterministic path and the reference-rent lookup.
+_AGENT_ESTIMATE_KIND = "rent"
+
+
+def _require_cohort_scalable_into_rent(state: _LoopState) -> None:
+    """Refuse to record a rent the cohort's per-m² basis cannot support.
+
+    The deterministic path is gated inside `estimate_yield._scale`, which the
+    agent never calls: here the MODEL does the multiplication and reports the
+    product through `record_estimate`. Without this, an agent that widened a
+    thin rental cohort onto `category_type='prodej'` (it may — category_type is
+    in `_FCR_OVERRIDE_FIELDS`) reads a purchase Kč/m², multiplies by the area,
+    and the run lands `status='success'` with a monthly rent that is really a
+    sale price. Same refusal, same exception, at the point the agent's number
+    actually lands.
+
+    Gated on the SERVER-DERIVED cohort at terminator time — the same rows
+    `_finalise` default-includes into `comparables_used` — not on whatever the
+    model said. A cohort with no measure-backed row is not gated: no per-m²
+    number was ever produced for it, so there is none to mislabel, and failing
+    there would turn "no comparables" into an error (the same carve-out
+    `_scale` makes for an empty distribution).
+    """
+    backing = measure_backed(state.last_cohort)
+    if not backing:
+        return
+    require_scalable_basis(
+        cohort_basis(backing), estimate_kind=_AGENT_ESTIMATE_KIND,
+    )
+
+
 def _finalise(
     state: _LoopState,
     *,
@@ -1551,6 +1600,8 @@ def _finalise(
                 "skill": skill.name,
             },
         )
+
+    _require_cohort_scalable_into_rent(state)
 
     call = state.final_call
     estimate = _round_to_100(call.get("estimated_monthly_rent_czk"))
@@ -1729,7 +1780,12 @@ def _initial_user_message(
     subject_condition: dict[str, Any] | None = None,
 ) -> str:
     cond = subject_condition or {}
-    _basis = ppm2_basis(filters.category_main, filters.category_type)
+    # The SPEC reading, not the row mirror: this message is written before any
+    # tool has run, so there are no rows to read. An unpinned `category_main` on
+    # a capital deal admits plots beside flats, i.e. two units — spec_ppm2_basis
+    # answers None there rather than stamping the whole run `sale_capital_czk_m2`
+    # while analyze_distribution later reports `mixed` off the same rows.
+    _basis = spec_ppm2_basis(filters.category_main, filters.category_type)
     payload = {
         "target": {
             "lat": target.lat,

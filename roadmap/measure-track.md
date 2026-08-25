@@ -117,7 +117,8 @@ Nothing reads or writes the two columns.
 `per_m2_basis_sql(alias)` (both alias-required, so a unit-blind call cannot be written), the
 four-token vocabulary plus `mixed` / `unknown`, the per-basis PRICE floors, the three Czech
 unit strings, `ppm2_basis()` (a mirror of the SQL label for rows that never touched Postgres),
-`cohort_basis()` and `require_scalable_basis()`. Nine consumers moved onto it. The five
+`spec_ppm2_basis()` (the same vocabulary read off a FILTER SPEC, where `None` means
+UNCONSTRAINED), `cohort_basis()` and `require_scalable_basis()`. Nine consumers moved onto it. The five
 estimation-path statements W4 deferred (`comparables.py` ×3, `transit_axis.py`,
 `neighborhoods.py`) now call `measure_price_per_m2(...)`, which **changes estimation output**:
 a comparable below its basis floor loses its per-m² figure and drops out of the cohort's
@@ -161,6 +162,54 @@ a `'mixed'` cohort outright (no LLM call, no cache write). Migration 426 adds
 `estimation_cohort_entries.price_per_m2_basis` (nullable; historical rows stay NULL =
 "basis unknown, pre-426", never backfilled — rules 8 and 12) and supersedes migration 104's
 region-annotator prompt, guarded on `updated_by = 'seed'` (verified still `seed` on production).
+
+### W5 review pass — five corrections
+
+- **A cohort's unit is read off its ROWS, never off its filter pins.** `_filters_used` fed the
+  filter spec to `ppm2_basis()`, a per-ROW mirror where `None` means "this row has no
+  category" — but to a spec it means UNCONSTRAINED. `category_main=null, category_type='prodej'`
+  is a legal request, and it stamped the whole envelope `sale_capital_czk_m2` while the cohort
+  really held plots (Kč/m² of PLOT) beside flats (Kč/m² of FLOOR): the exact blanket unit this
+  program exists to end, in the field the wave added to prevent it. `find_comparables` /
+  `find_comparables_relaxed` now label the envelope AND every relaxation-trace snapshot with
+  `cohort_basis()` over the rows that step returned, so a rung that widens into two bases says
+  `mixed` at the rung that did it. The row-less path (the agent's opening message, written
+  before any tool runs) uses `spec_ppm2_basis()`, which answers None rather than guess.
+- **Agent mode is gated too.** `require_scalable_basis` lived only in `estimate_yield._scale`,
+  which the agent never calls — and the SPA's default rent path IS agent mode. There the model
+  does the multiplication and reports it through `record_estimate`, so an agent that widened a
+  thin rental cohort onto `prodej` (`category_type` is in `_FCR_OVERRIDE_FIELDS`) could land
+  `status='success'` with a purchase Kč/m² × area rendered as a monthly rent.
+  `agent._require_cohort_scalable_into_rent` runs the same check on the server-derived cohort
+  at terminator time, before `_finalise` persists anything; the run fails with the reason
+  instead. A cohort with no measure-backed row is not gated — nothing produced a per-m² number
+  there, so there is none to mislabel (the carve-out `_scale` already makes for an empty
+  distribution). **This is a server-side gate, so it holds regardless of the two drifted
+  `skills` rows below** — the prose fix was unreachable, the code one is not.
+- **There is a SIXTH per-m² statement.** `api/portal_lookup._MARKET_SQL` gained three measure
+  expressions and `l.area_basis`, and no gate could reach it: `sql_corpus.discover()` DOES find
+  it, then `_is_format_template` skips it over its `{values}` slot, while
+  `tests/test_measure_sql_prepare.py` hard-asserted the set was exactly five. A typo there is a
+  42703 that ships green and 500s `POST /listings/lookup` — the Chrome extension's only
+  market-data route. It is now the sixth entry, and the SKILL.md rule says a `*_SQL` constant is
+  not evidence of coverage.
+- **The client half of the basis handoff landed here, not in W6.** `_build_payload` now declares
+  the unit UNKNOWN when no basis is supplied, so shipping the server half alone would have
+  stripped the correct `Kč/m²` from every single-basis annotation for the whole W5→W6 window.
+  `BrowseExperience` passes `BrowseStats.ppm2_basis` — the basis `browse_stats_properties`
+  already resolves from the cohort's own rows (migration 425), not a second derivation off the
+  filters — through `fetchRegionDispositionAnnotations`, and it is part of the React Query key.
+  **Consequence, now rather than at W6: a mixed cohort's Stats annotations disappear** —
+  verified on production, the DEFAULT Browse cohort reads `mixed` (rule 22), a `deal=prodej`
+  one reads `sale_capital_czk_m2`. So the server's `metadata.notes` is now RENDERED in the
+  annotations' place ("cohort mixes sale and rental listings…"): the paragraphs vanishing with
+  no explanation would read as a bug rather than as the refusal it is.
+- **Three behaviour changes shipped with no test.** The `'mixed'` refusal, the measure-gated
+  neighborhoods cohort, and the `_tool_summary` key fixes could each be reverted with the suite
+  still green. Each is now pinned (and each pin was mutation-checked against its own revert),
+  alongside a new `tests/toolkit/test_measures.py` covering the full
+  (category_main × category_type) matrix against migration 425's CASE, the `cohort_basis` /
+  `require_scalable_basis` edges, and the floors read out of the migration file itself.
 
 **Operator action still outstanding — the two live `skills` rows.** The charter asked for a
 `PUT /admin/skills/{name}` alongside the SKILL.md edits. Both live rows have DRIFTED from their

@@ -29,7 +29,13 @@ from toolkit.filter_registry import (
     OWNERSHIP_CANONICAL,
     UNKNOWN_FILTER_VALUE,
 )
-from toolkit.measures import per_m2_basis_sql, per_m2_sql, ppm2_basis
+from toolkit.measures import (
+    cohort_basis,
+    measure_backed,
+    per_m2_basis_sql,
+    per_m2_sql,
+    spec_ppm2_basis,
+)
 
 if TYPE_CHECKING:
     import psycopg
@@ -688,7 +694,31 @@ def build_query(
     return sql, params
 
 
-def _filters_used(target: TargetSpec, filters: ComparableFilters) -> dict[str, Any]:
+def _cohort_ppm2_basis(
+    filters: ComparableFilters,
+    listings: list[dict[str, Any]] | None,
+) -> str | None:
+    """The basis every per-m² number in this envelope is in.
+
+    Read off the ROWS whenever they exist, never off the pins: a filter spec
+    says what was asked for, and an unpinned `category_main` on a capital deal
+    admits plots (Kč/m² of PLOT) beside flats (Kč/m² of FLOOR). Labelling that
+    cohort from the spec is exactly the "one blanket unit for a mixed cohort"
+    this program exists to end — `cohort_basis` answers `mixed` there, and
+    `mixed` is a state every consumer already knows how to render as a gap.
+    Only the row-less caller (a spec echoed before any query ran) falls back to
+    `spec_ppm2_basis`, which returns None rather than guess.
+    """
+    if listings is None:
+        return spec_ppm2_basis(filters.category_main, filters.category_type)
+    return cohort_basis(measure_backed(listings))
+
+
+def _filters_used(
+    target: TargetSpec,
+    filters: ComparableFilters,
+    listings: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     return {
         "target": {
             "lat": target.lat,
@@ -726,12 +756,10 @@ def _filters_used(target: TargetSpec, filters: ComparableFilters) -> dict[str, A
         "min_price_per_m2": filters.min_price_per_m2,
         "max_price_per_m2": filters.max_price_per_m2,
         # The unit the two bounds above are IN, and the unit every per-m² number
-        # in this envelope is in -- resolved from the cohort's own category pins.
-        # None when the filters do not pin one (rule 22 makes that reachable in
-        # one click); a consumer that reads None must render the gap, not a unit.
-        "price_per_m2_basis": ppm2_basis(
-            filters.category_main, filters.category_type
-        ),
+        # in this envelope is in -- resolved from the ROWS that came back (see
+        # _cohort_ppm2_basis). `mixed`, `unknown` and None all mean the same
+        # thing to a consumer: render the gap, never a unit.
+        "price_per_m2_basis": _cohort_ppm2_basis(filters, listings),
         "min_mf_gross_yield_pct": filters.min_mf_gross_yield_pct,
         "max_mf_gross_yield_pct": filters.max_mf_gross_yield_pct,
         "category_main": filters.category_main,
@@ -781,7 +809,7 @@ def find_comparables(
         "data": {"listings": listings},
         "metadata": {
             "tool": "find_comparables",
-            "filters_used": _filters_used(target, filters),
+            "filters_used": _filters_used(target, filters, listings),
             "result_count": len(listings),
             "queried_at": _now_iso(),
             "data_freshness": _max_last_seen(listings),
@@ -918,7 +946,12 @@ def find_comparables_relaxed(
     trace.append({
         "step": 0,
         "action": None,
-        "filters_snapshot": _filters_used(target, current),
+        # Each snapshot is labelled by the rows THAT step returned: the trace is
+        # fed verbatim into the agent's prompt, so a step that widened into two
+        # bases must say so at the step that did it.
+        "filters_snapshot": _filters_used(
+            target, current, last_result["data"]["listings"],
+        ),
         "result_count": last_result["metadata"]["result_count"],
     })
 
@@ -931,7 +964,9 @@ def find_comparables_relaxed(
             trace.append({
                 "step": relaxations_applied,
                 "action": action,
-                "filters_snapshot": _filters_used(target, current),
+                "filters_snapshot": _filters_used(
+                    target, current, last_result["data"]["listings"],
+                ),
                 "result_count": last_result["metadata"]["result_count"],
             })
             if last_result["metadata"]["result_count"] >= min_results:
@@ -946,7 +981,7 @@ def find_comparables_relaxed(
         },
         "metadata": {
             "tool": "find_comparables_relaxed",
-            "filters_used": _filters_used(target, current),
+            "filters_used": _filters_used(target, current, listings),
             "result_count": len(listings),
             "queried_at": _now_iso(),
             "data_freshness": _max_last_seen(listings),

@@ -16,9 +16,18 @@ The caller also supplies `ppm2_basis`, the unit those numbers are in
 one click away, since the default Browse cohort is sale + rent — is REFUSED
 outright: its box plot stacks monthly rents on top of purchase prices, so there
 is no factual sentence to write about it and no unit to name. No LLM call, no
-cache write, an explicit note instead. The basis needs no place in the cache key:
-`region_key` already carries the category and deal filters the basis resolves
-from, so two different bases can never collide on one hash.
+cache write, an explicit note instead.
+
+The basis is NOT in the cache key, and the residual is named rather than denied:
+the SPA sends the basis `browse_stats_properties` resolved from the cohort's own
+rows, so one `region_key` can in principle see it change within a day (a cohort
+that was single-basis at 09:00 gains one rental row and reads `mixed` at 16:00),
+and the second caller would get the first caller's text under its own unit. Two
+things keep that narrow — the day-scoped key means the window is one day, and a
+cohort crossing a basis boundary intraday needs a genuinely new kind of listing
+in the region. Folding the basis into the hash costs one extra miss per basis
+per region per day and closes the class outright; it is the fix if this is ever
+seen in the wild.
 
 Cache lives in `region_disposition_annotations`, keyed on
 (region_hash, day): a region's annotations are generated once per calendar

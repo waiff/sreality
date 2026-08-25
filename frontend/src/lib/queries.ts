@@ -1093,6 +1093,13 @@ export interface BrowseStats {
   new_30d: number;
   price: { p25: number; p50: number; p75: number } | null;
   ppm2:  { p25: number; p50: number; p75: number } | null;
+  /* The unit every Kč/m² number above and in `dispositions[].ppm2_box` is in
+   * (migration 425): one of `sale_capital_czk_m2` / `rent_monthly_czk_m2` /
+   * `land_capital_czk_m2`, the literal `'mixed'` when the cohort spans two of
+   * them — which rule 22 makes the DEFAULT cohort, sale + rent — or null when
+   * no row resolved one. Server-derived from the rows themselves, never from
+   * the filter pins, so it can never disagree with the numbers it labels. */
+  ppm2_basis: string | null;
   dispositions: ReadonlyArray<BrowseStatsDispositionRow>;
   price_band_velocity: ReadonlyArray<PriceBandVelocityRow>;
 }
