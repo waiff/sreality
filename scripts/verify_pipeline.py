@@ -562,7 +562,7 @@ order by total desc
 
 _LLM_CREDIT_SQL = """
 select count(*) from llm_calls
-where called_at > now() - interval '24 hours' and error ilike %s
+where called_at > now() - interval '24 hours' and (error ilike %s or error ilike %s)
 """
 
 # Liveness: is the provider failing RIGHT NOW? Compares the newest failure vs the newest
@@ -572,19 +572,24 @@ _LLM_LIVENESS_SQL = """
 select
   max(called_at) filter (where error is not null) as last_err_at,
   max(called_at) filter (where error is null) as last_ok_at,
-  max(called_at) filter (where error ilike %s) as last_credit_err_at,
+  max(called_at) filter (where error ilike %s or error ilike %s) as last_credit_err_at,
   now() - interval '90 minutes' as min_live_at
 from llm_calls
 where called_at > now() - interval '24 hours'
 """
 
+# Two providers, two wordings for the same outage: OpenAI's 429 says "You have no credits
+# remaining"; Anthropic's says "credit balance". 2026-08-25: the OpenAI wording went
+# unmatched since 08-15, so health stayed green through a real 10-day outage.
+_CREDIT_ERROR_PATTERNS = ("%credit balance%", "%no credits remaining%")
+
 
 def check_llm_errors(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]:
     rows = _fetchall(conn, _LLM_ERRORS_SQL)
-    credit_row = _fetchone(conn, _LLM_CREDIT_SQL, ("%credit balance%",))
+    credit_row = _fetchone(conn, _LLM_CREDIT_SQL, _CREDIT_ERROR_PATTERNS)
     credit_errors = int(credit_row[0]) if credit_row and credit_row[0] is not None else 0
 
-    live = _fetchone(conn, _LLM_LIVENESS_SQL, ("%credit balance%",))
+    live = _fetchone(conn, _LLM_LIVENESS_SQL, _CREDIT_ERROR_PATTERNS)
     last_err_at, last_ok_at, last_credit_err_at, min_live_at = (
         (live[0], live[1], live[2], live[3]) if live else (None, None, None, None)
     )
