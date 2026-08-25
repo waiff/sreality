@@ -399,9 +399,35 @@ a rule.
    produces. Registering a *reachable* re-derivation as inert debt is the one thing this census
    must not do. **`migrations/428_revoke_browse_stats_execute.sql`** revokes that grant — a
    privilege change, additive and autonomous under the database gate, no pg_dump, and a single
-   `grant` reverses it. **NOT YET APPLIED: the operator applies it via the Supabase MCP.** The
-   `drop` itself is still destructive and still needs approval; the debt entry now says both
-   things. Delete the registry entry when the function goes and the census will REQUIRE it gone.
+   `grant` reverses it. **APPLIED 2026-08-25**, and verified: `browse_stats` now reads
+   `anon=false, authenticated=false, service_role=true`, while the superseding
+   `browse_stats_properties` keeps `authenticated=true`. The perimeter hole is closed
+   independently of the drop.
+
+   **The drop is `migrations/433_drop_browse_stats.sql`, written and awaiting sign-off.** Two
+   findings fix its spelling. First, the census matches a registered site to a scanned one by
+   **exact string equality on the `(path, arm)` tuple** — no line numbers, no name lookup — and
+   for a SQL object the path is `migrations/{file}::{kind}:{name}`, which encodes *which
+   migration currently holds the effective create*. Second, `_SQL_DROP`'s kind alternation is
+   exactly `(materialized view|view|function|table)` and its name group is `[A-Za-z_][\w.]*`
+   with no quote handling. So a `drop routine`, a double-quoted identifier, or a 428-style
+   `do $$ … execute format(…) … $$` dynamic loop would each leave 083's create in the effective
+   set: **the function would be gone while the census stayed green on a registration for an
+   object that no longer exists** — the precise failure the rail exists to prevent. Hence a
+   plain, statement-level drop, its 46-argument signature verified against the catalog with
+   `to_regprocedure()` before merge (it resolves to oid 226845, the live function).
+
+   The two edits are **strictly coupled**, proven in both directions: drop present + registry
+   entry present → census RED (a registration with no scanned site); drop absent + entry absent
+   → census RED (11 unregistered division hits); both → GREEN.
+
+   **The restore path is proven, not assumed.** `pg_dump` is not installed in the agent
+   environment, so instead of a byte-copy the canonical source was verified byte-identical:
+   `migrations/083_browse_stats_price_per_m2.sql`'s dollar-quoted body is md5
+   `42640f07a847723694ad6705468269d9` over 14,441 characters, and production's
+   `pg_proc.prosrc` is the same md5 over the same length. Postgres stores a function body
+   verbatim, so re-running 083 reproduces the definition exactly. That is a stronger guarantee
+   than a dump, since it also proves the repo has not drifted from production here.
 
 ## Next after this program
 
