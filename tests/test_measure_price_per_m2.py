@@ -283,6 +283,10 @@ def test_basis_resolves_from_the_category_pair(
         cur, price=5_000_000, area=50.0,
         category_main=category_main, category_type=category_type,
     )
+    # pipeline_board_public is a LEFT JOIN off property_pipeline_public: with no
+    # card the property has no row there at all, so _one() returns None and the
+    # set picks up a phantom disagreement that is really an empty result.
+    _put_on_the_board(cur, pid)
     assert set(_bases(cur, pid, lid).values()) == {expected_basis}
 
 
@@ -292,6 +296,7 @@ def test_an_unknown_category_type_yields_no_measure_and_no_label(cur):
     pid, lid, _district = _seed(
         cur, price=5_000_000, area=50.0, category_type="zcela-novy-typ"
     )
+    _put_on_the_board(cur, pid)
     assert set(_every_surface(cur, pid, lid).values()) == {None}
     assert set(_bases(cur, pid, lid).values()) == {None}
 
@@ -317,6 +322,7 @@ def test_per_basis_validity_floors(cur, category_main, category_type, price, sur
         cur, price=price, area=50.0,
         category_main=category_main, category_type=category_type,
     )
+    _put_on_the_board(cur, pid)  # see the note in the basis test above
     values = _every_surface(cur, pid, lid)
     if survives:
         assert None not in values.values(), values
