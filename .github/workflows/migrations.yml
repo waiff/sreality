@@ -124,6 +124,10 @@ jobs:
                        'property_sources_mv'::regclass;"
           echo ">>> rollback executed and all three objects resolve; re-dropping so the"
           echo ">>> rest of the lane sees the post-teardown schema"
+          # 432's CTAS is deliberately not `if not exists` (a parser in the location
+          # schema-contract rail reads `if` as the table name, and migrations run once).
+          # This replay is the one context that applies it twice, so clear the artifact.
+          psql -v ON_ERROR_STOP=1 -c "drop table if exists dedup_funnel_resolutions_archive;"
           psql -v ON_ERROR_STOP=1 -f migrations/432_new_dedup_teardown.sql
 
       - name: Sanity check (key relations exist + queryable)
